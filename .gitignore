@@ -2,3 +2,6 @@
 # `v3/` is a git worktree of that branch, kept checked out because the design documents cite
 # v3 source paths as behavioural evidence. It must not be tracked by the v4 branch.
 v3/
+
+# macOS
+.DS_Store
