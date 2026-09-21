@@ -1,0 +1,78 @@
+# AGENTS.md — working in the Ez-SDR repository
+
+Read this before touching anything. Current state and the next step: [handoff.md](handoff.md).
+
+## 1. What this repository is
+
+Ez-SDR is an SDR experiment runtime. Two unrelated lines live in one repository:
+
+| Branch | Content | Status |
+|---|---|---|
+| `main` | **v4** — clean-sheet Rust rewrite. Design documents only so far; no code. | active development |
+| `master` | **v3** — D + C++ UHD bridge + Python client. Tags `v2.11`, `v3.0.0`–`v3.0.28`. | maintenance; still the GitHub default branch |
+
+Rules that follow from this layout:
+
+- Never graft, rebase or merge `master` and `main` into each other (not even `merge -s ours`). v4 shares no code with v3; the histories are unrelated on purpose.
+- v4 work happens on `main` only. Do not commit to `master` from a v4 session unless the user explicitly asks for a v3 change.
+- `v3/` in the working tree is a **git worktree** of `master`, listed in `.gitignore`. Never `git add v3/`. Never delete it: the design documents cite 20 `v3/...` paths as behavioural evidence (check command in handoff.md §1).
+- `master` stays the default branch until v4 is usable. Flipping it is the user's call and has a Docker `:latest` prerequisite (handoff.md §5).
+
+## 2. Where the design truth lives
+
+- **The Vision is the single design source.** Index: [Ez-SDR_v4_ARCHITECTURE_VISION.md](Ez-SDR_v4_ARCHITECTURE_VISION.md). Body: [design/vision/](design/vision/), 11 part files, sections **§1–§68**. `cat design/vision/*.md` reproduces the whole text.
+- **§N is the citation unit and is stable.** Never renumber, merge or delete a section. If content moves out, leave the section as a summary plus a link. [design/v4-vision-audit.md](design/v4-vision-audit.md) (Findings 1–34) and [design/v4-vision-rereview.md](design/v4-vision-rereview.md) (R1–R22) cite `§N` and `CMA §N`.
+- [design/archive/Ez-SDR_v4_core_module_architecture.md](design/archive/Ez-SDR_v4_core_module_architecture.md) is retired and frozen. Do not edit or revive it; it exists only to keep `CMA §N` citations resolvable.
+- When you edit the Vision: keep each part's header and footer navigation, and add a row to the revision history table in the index. Shapes in `{ ... }` blocks are illustrative, not schemas.
+- Normative schemas (Stream Contract, time model, Session, BindingProfile, PrepareReport, Manifest) belong in `design/*.md` specs, to be written in Phase 1 (re-review R13). Do not grow the Vision with more normative text.
+- Reading order for implementers: index "How to read" → Part 01 → §65 (42 invariants) → audit §13 (minimal Kernel) and §14.1 (P0 checklist) → §58 (acceptance tests).
+
+## 3. Design constraints that shape every type (settled; do not relitigate)
+
+Full list: Vision §65, 42 invariants. The ones that bite first when writing code:
+
+- **Kernel stays small.** Three tiers: Kernel (frozen at v4.0), Vocabulary (versioned, additive), Extensions (namespaced, unstable). A new experiment type adds a Vocabulary crate, never a Kernel concept. Nothing on the §6 list (UHD API, CUDA, wasmtime, RFNoC graph construction, IEEE 802.11 algorithms, placement optimiser, metrics framework, ...) appears in Kernel crates. §5, §6.
+- **"Kernel" means only the Core tier.** The discrete-event simulator is the **Simulation Engine** (`sim-engine`), never a kernel. §5, §15.
+- **Time is integer ticks at a rational rate; every timestamp names its ClockDomain.** Never floating-point seconds. A sample-rate change starts a new SampleClock. §15, §23, §27.
+- **The Stream Contract is normative.** SampleBlocks are immutable-after-publish, refcounted handles tagged with a MemoryDomain; gaps are flags plus time jumps, never filled; validity is per channel; TX is a sequence of bursts with `START_OF_BURST` / `END_OF_BURST`, a time jump inside a burst is `TX_DISCONTINUITY`, never zero padding. §23.
+- **Mock enforces the hardware envelope.** A Mock that accepts what an X310 would reject is a bug. TimingEnvelope and PerformanceEnvelope are checked at `validate()` and at runtime, on Mock and hardware alike. §13, §34, §59.
+- **Intent and binding are separate.** ExperimentSpec = intent, with per-direction resource requests (`rx` / `tx`). BindingProfile = bindings + placements + environment (channel model, fault schedule, RF safety envelope). Placement and environment never appear in the Spec. §8, §10, §20.
+- **Everything is a Run.** `connect()` opens a Session = Run with an implicit Spec and a typed action log; every Action is admitted on the control path before dispatch. §3, §50, §52.
+- **Compile before RUN; the real-time path never parses Spec/JSON.** No structural graph mutation during RUN; parameters change only through declared update classes. §10, §27.
+- **Modules talk only through Kernel contracts** (Resources, Ports, Events, Actions, Capabilities, DataContracts); no Module depends on another concrete Module. Coherence is declared by the owning Provider, never inferred across Providers. §7, §25.
+- **Kernel public types are schema-first, versioned, language-neutral.** Old documents are migrated or refused, never silently reinterpreted. §9, §65 #39.
+- **Core validates, it does not optimise.** No automatic placement, graph fusion or transfer planning. §10, §20, §31, §63.
+
+## 4. Order of work
+
+Vision §67: Phase 1 Kernel semantic model → Phase 2 Radio Model + Simulation Engine + MockRadio → Phase 3 SimulationChannel + deterministic Runs → … → Phase 7 UHD → Phase 8 Mock ↔ X310 parity.
+
+- **No UHD before Core + Mock works** (§59). The parity test measures the hardware envelope and fails if the Mock profile is looser than the measurement.
+- **Definition of done for Phases 1–6 is Vision §58** (16 acceptance tests). Tie every milestone to the tests it satisfies.
+- §60's crate layout is directional. Do not create crates to mirror the diagram; logical boundaries matter, crate count does not.
+- Most tests must run without hardware (§61).
+
+## 5. v3 is evidence, not a template
+
+- Use `v3/` for behavioural requirements, compatibility expectations and historical lessons only (§1). Do not port its structure, message format or command identifiers (§61: behaviour compatibility, not wire compatibility).
+- The four v3 behaviours worth regression tests (§61): continuous repeat across the waveform wrap; capture at a requested TimePoint / sample index (replaces `alignSize`); timed TX/RX start at device time (`onTime`); multi-device 10 MHz + PPS aligned start with the PPS source armed first.
+- Cite v3 as `v3/<path>` so the citations stay checkable.
+
+## 6. How the user wants design work done
+
+- **Adversarial, evidence-driven, minimal-core.** Verify claims against the repo and primary sources (UHD docs, source, papers). Mark what you could not verify as inference (the audit uses VERIFIED / INFERRED). "This should NOT be in Core" is a valid and welcome conclusion. Scope creep is a defect equal to a missing feature.
+- Review-only tasks change no design documents unless asked.
+- Lead with one recommendation plus the rejected alternatives, not a menu.
+- Language: the Vision is English; the audit and re-review are Japanese with English technical terms. Either is fine for new documents; keep `§N` citations either way.
+
+## 7. Git habits
+
+- Stop exactly where asked: `git add` is not a commit, and a commit is not a push. The user usually commits themselves.
+- Commit subjects in Conventional Commits style (`chore:`, `docs:`, `feat:`); the body records the decision, not the diff.
+- `.DS_Store` is ignored; keep the tree free of OS and editor junk.
+
+## 8. Subagent model selection
+
+- Research/investigation subagents (codebase exploration, document/web research): launch on **Sonnet 5 max**.
+- Every other subagent use: launch on **Opus 5 max**.
+- Never launch **Fable** as a subagent, for any purpose.
