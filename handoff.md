@@ -47,7 +47,7 @@ Vision §67 の Phase 1．詳細設計を [plan/phase1/](plan/phase1/) に書い
 | [02-stream-contract.md](plan/phase1/02-stream-contract.md) | SC-1..32（副番含め48） | **Gate A：敵対的レビュー3巡完了，ユーザ確認待ち** |
 | [03-spec-and-binding.md](plan/phase1/03-spec-and-binding.md) | SB-1..49（副番含め54） | **Gate B：敵対的レビュー2巡完了，ユーザ確認待ち** |
 | [04-run-and-session.md](plan/phase1/04-run-and-session.md) | RS-1..52（副番含め57） | **Gate B：敵対的レビュー2巡完了，ユーザ確認待ち** |
-| 05-module-api.md | MA-n | 未着手（Gate C） |
+| [05-module-api.md](plan/phase1/05-module-api.md) | MA-1..46 | **Gate C：敵対的レビュー1巡完了，ユーザ確認待ち** |
 
 決定済みの前提（2026-09-21）：草稿は `plan/phase1/`，受理後に spec 01–05 を `design/` へ移す（00 は plan/ に残す）；本文は英語；3 ゲート（A = 01+02，B = 03+04，C = 05+00）；Phase 1 は spec 受理後に Cargo workspace + 単一 crate `ezsdr-kernel` + tests + `schemas/` まで実装する．
 
@@ -55,7 +55,9 @@ Gate A は敵対的レビュー3巡（31件・16件・13件）を経て通過．
 
 レビュー中に v3 引用の事実確認も走らせ，1件が未裏付けと判明（`v3.0.21.md` に `CONSTANTS`/`!COMPUTE` の動機は書かれていない．Vision §9 の読み）．該当箇所は「証拠ではなく Vision の読み」と明記．副産物として，`v3.0.20.md` の1行目が `# EzSDR v3.0.17` であることが判明し，audit Finding 6 が出典を誤った理由が説明できた．
 
-5文書で212ルール，欠番と未解決参照なし，撤回3件（SB-28, SB-32, RS-37 — OV-1 に従い番号は保持）．
+Gate C は1巡（8件）．P0 は1件で，`PrepareContext` に Action の送信口が無く，Reactor が `TxBurst` を発行する手段が API に存在しなかった．Vision §19 の反応型モデルと §58 #9 が実装不能だった．`ActionSubmitter` を足し，MA-6 の handle 集合と MA-46 の凍結集合にも入れた（v4.0 後に足すと Kernel major になるため）．
+
+6文書で259ルール，欠番と未解決参照なし，撤回5件（SB-28, SB-32, RS-37, MA-4, MA-43 — OV-1 に従い番号は保持）．型名はすべて定義済み．
 
 Phase 1 の完了条件は 00-overview.md §13．R13（Vision の規範部分を要約 + リンクに戻す）は **spec 受理後に別途ユーザ承認を得てから**実施する（手順は 00-overview.md §12）．
 

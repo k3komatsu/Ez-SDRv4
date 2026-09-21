@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft for owner review. Governance rules `OV-n` become binding when this document is accepted. |
+| Status | All five specs drafted; 01–04 have been through adversarial review and 05 is at Gate C. Governance rules `OV-n` become binding when this document is accepted. |
 | Phase | Vision §67 Phase 1. Predecessor: Phase 0 (audit + re-review, complete). Successor: Phase 2 (Radio Model + Simulation Engine + MockRadio). |
 | Scope | The five normative specs listed below, the decisions that cut across them, and the single Kernel crate that implements them. |
 | Not in scope | MockRadio, the Simulation Engine, SimulationChannel, the Radio Model vocabulary, the Python client, UHD. Anything on the Vision §6 list. |
@@ -149,7 +149,7 @@ Ez-SDRv4/
 
 Is generating the schema still "schema-first" in the Vision's sense? Vision §10's rule is that nothing is *defined only as a Rust type and re-described by hand* elsewhere. Nothing here is re-described by hand: the schema is generated, committed, reviewed and is the artefact every other language reads. The governance in OV-10 to OV-12 is what makes the committed schema, and not the Rust source, the arbiter.
 
-**Documents** (schema, and a `version` field where the Vision requires one): `ExperimentSpec`, `BindingProfile`, `ExecutionPlan` summary, `PrepareReport`, `CoerceReport`, `Manifest`, `Event`, `Action` (including `TxBurst`), action-log entry, `Lease`, `Policy` table, `ExecutionClass`, `Fidelity`, `ModuleDescriptor`, `VocabularyDescriptor`, `ProviderInstance` and `Resource`, `ExecutorDescriptor`, `SinkDescriptor`, `LinkDescriptor`, `AuthorityDescriptor`, `ComponentDescriptor`, `IslandDecl`, the three fragment types, `ModuleError`, `StopReason`, `ArtifactRef`, `ContentHash`, `DataContract`, `DataLinkDecl`, `ContinuityMap`, `Gap`, `BurstRecord`, `SampleClockRecord`, and `ClockDomain` / `TimePoint` / `Duration` / `ClockRelation` / the deadline types as shared definitions.
+**Documents** (schema, and a `version` field where the Vision requires one): `ExperimentSpec`, `BindingProfile`, `ExecutionPlan` summary, `PrepareReport`, `CoerceReport`, `Manifest`, `Event`, `Action` (including `TxBurst`), action-log entry, `Lease`, `Policy` table, `ExecutionClass`, `Fidelity`, `ModuleDescriptor`, `VocabularyDescriptor`, `ProviderInstance` and `Resource`, `ExecutorDescriptor`, `SinkDescriptor`, `LinkDescriptor`, `AuthorityDescriptor`, `ComponentDescriptor`, `IslandDecl`, the `Fragment` type, `ModuleError`, `StopReason`, `ArtifactRef`, `ContentHash`, `DataContract`, `DataLinkDecl`, `ContinuityMap`, `Gap`, `BurstRecord`, `SampleClockRecord`, and `ClockDomain` / `TimePoint` / `Duration` / `ClockRelation` / the deadline types as shared definitions.
 
 **In-process only, no schema by design**: `SampleBlock`, `BufferRef`, memory pools and their handles (the `MemoryDomainId` *is* a document type), link handles, `EventSink`, `ActionReceiver`, every trait object, `TimeAuthority`.
 
@@ -211,18 +211,19 @@ Versions are the ones verified present in the local registry; MSRV values are ea
 | # | Item | Spec | Code | Tests |
 |---|---|---|---|---|
 | 1 | Three tiers and the freeze unit | 00 §5, 05 MA-1…4 | one crate, the allow-list | `kernel_surface` |
-| 2 | TimePoint representation, epoch, TimeAuthority, step-driven simulation | 01 TM-*, 05 MA-15/20/29/30 | `time`, `module_api::Authority` | `time_model`, `module_api` stepping (the Engine itself is Phase 2) |
-| 3 | Stream Contract | 02 SC-* | `stream`, `contract` | `stream_contract` |
-| 4 | TimingEnvelope, coercion, late policy, fidelity vector | 03 SB-*, 02 SC-27, 05 MA-11/12/42 | `binding`, `plan`, `module_api` | `spec_binding`, `module_api` (envelope *contents* are Phase 2) |
-| 5 | Session and Lease | 04 RS-* | `session`, `run` | `run_session` |
-| 6 | Composite resource tree, provider-declared coherence, arm-order DAG | 03 SB-*, 05 MA-10/16 | `binding`, `plan` | `spec_binding` (the coherence basis is Vocabulary, Phase 2) |
-| 7 | BindingProfile = bindings + placements + environment | 03 SB-*, 05 MA-38/41 | `binding` | `spec_binding`, `module_api` |
-| 8 | Generic matcher and PrepareReport | 03 SB-*, 05 MA-11/12/34 | `binding` | `spec_binding`, `module_api` |
+| 2 | TimePoint representation, epoch, TimeAuthority, step-driven simulation | 01 TM-1…TM-21, 05 MA-15/20/29/30 | `time`, `module_api::Authority` | `time_model`, `module_api` stepping (the Engine itself is Phase 2) |
+| 3 | Stream Contract | 02 SC-1…SC-32 | `stream`, `contract` | `stream_contract` |
+| 4 | TimingEnvelope, coercion, late policy, fidelity vector | 03 SB-44…SB-46, 02 SC-27, 05 MA-11/12/42 | `binding`, `plan`, `module_api` | `spec_binding`, `module_api` (envelope *contents* are Phase 2) |
+| 5 | Session and Lease | 04 RS-12…RS-25 | `session`, `run` | `run_session` |
+| 6 | Composite resource tree, provider-declared coherence, arm-order DAG | 03 SB-33…SB-36, SB-39, 05 MA-10/16 | `binding`, `plan` | `spec_binding` (the coherence basis is Vocabulary, Phase 2) |
+| 7 | BindingProfile = bindings + placements + environment | 03 SB-21…SB-28, 05 MA-38/41 | `binding` | `spec_binding`, `module_api` |
+| 8 | Generic matcher and PrepareReport | 03 SB-5…SB-8, SB-41, 05 MA-11/12/34 | `binding` | `spec_binding`, `module_api` |
 | 9 | DataContract registry and Port | 02 SC-1…5, 05 MA-36 | `contract` | `stream_contract` |
-| 10 | Schema-first and versioning | 00 §6, 03 SB-* | `schema`, all documents | `schema_freeze`, `spec_binding` |
+| 10 | Schema-first and versioning | 00 §6, 03 SB-47…SB-49 | `schema`, all documents | `schema_freeze`, `spec_binding` |
 | 11 | Descriptor versus ABI, cycle rule, two deadline kinds | 05 MA-19…22/36/37, 01 TM-15 | `module_api`, `time` | `module_api` |
-| 12 | Event counters, EVENTS_DROPPED, closed Policy | 04 RS-* | `event`, `policy` | `run_session` |
-| 13 | Manifest envelope, namespaced sections, hashes | 04 RS-*, 00 §7 | `manifest`, `hash` | `run_session`, hash vectors |
+| 12 | Event counters, EVENTS_DROPPED, closed Policy | 04 RS-26…RS-37, RS-48…RS-52 | `event`, `policy` | `run_session` |
+| 13 | Manifest envelope, namespaced sections, hashes | 04 RS-38…RS-47, 00 §7 | `manifest`, `hash` | `run_session`, hash vectors |
+| — | *Not an audit item: the Kernel Action set.* Audit §13 pairs it with events on one line and §14.1 gives it no row, which is how it reached Gate B with no owner | 04 RS-48…RS-52 | `event` | `run_session` |
 | 14 | RFNoC repositioned | 05 MA-21/46 | — (no executor kind for it) | `kernel_surface` term ban |
 | 15 | The three axes | 05 MA-1/2 | `module_api` | `module_api` |
 
@@ -266,9 +267,9 @@ Open questions the owner must settle at a gate:
 
 | # | Question | Recommendation |
 |---|---|---|
-| 1 | The fidelity vector has no value for a Hardware Run; Vision §14's sets stop at `hardware_quirk`. | Add `real` to every aspect's value set (spec 05). The alternative, omitting the vector on Hardware Runs, contradicts §14's "every Run". |
-| 2 | The Kernel Action set (§5, §19) has no RX stream command, so a fixed Spec cannot say "start RX at time T" as an Action. | Express it as `Provider::start(at)` plus a recorder parameter, and do not add a Kernel Action. Confirm this reading, or accept an Action-set addition. |
-| 3 | Vision §32 says the Simulation Engine step-drives every Island; the plan puts the stepping loop in the Kernel coordinator with the Authority deciding *when*. | Confirm that reading (the Engine decides the next wake-up, the Kernel calls `step` in a fixed order so determinism does not depend on registration order). |
+| 1 | The fidelity vector has no value for a Hardware Run; Vision §14's sets stop at `hardware_quirk`. | Add `real` to every aspect's value set. Applied in spec 05 as MA-42; the alternative, omitting the vector on Hardware Runs, contradicts §14's "every Run". Confirm or reverse. |
+| 2 | The Kernel Action set (§5, §19) has no RX stream command, so a fixed Spec cannot say "start RX at time T" as an Action. | Express it as `Provider::start(at)` plus a recorder parameter, and do not add a Kernel Action. Spec 04's RS-48 fixes the set at seven members on that reading. Confirm, or accept an eighth member. |
+| 3 | Vision §32 says the Simulation Engine step-drives every Island; the plan puts the stepping loop in the Kernel coordinator with the Authority deciding *when*. | Confirm that reading. Applied in spec 05 as MA-30: the Engine decides the instants through `next_wakeup`, and the Kernel calls `step` in a fixed role-and-id order, so determinism does not depend on the order a runtime assembled its Modules. |
 | 4 | A recording TestExecutor is a fifth double beyond "test-double Provider and in-memory link". | Allow it: twenty lines, and without it the stepping loop has no test until Phase 2. |
 | 5 | `schemars` pinned in `Cargo.lock`, not by an exact `=` requirement. | Accept: an exact requirement in a published library cannot unify with a downstream `^1.3`, and the lock plus `schema_freeze` already give reproducibility. Upgrades are deliberate changes that regenerate the schemas. |
 | 6 | MSRV 1.85 and crate version `4.0.0-alpha.N` until the freeze. | Accept. |
@@ -291,7 +292,7 @@ Open questions the owner must settle at a gate:
 
 1. Six documents accepted across three gates, and every decision-table row has a verdict in §11.
 2. Every normative obligation of every covered Vision section has a rule ID and no coverage table contains a gap, and every rule has an OV-3 disposition: the review reports how many rules are producer, consumer or forward obligations and which phase each names.
-3. `cargo test` passes on the pinned MSRV and on stable, with no `#[ignore]` in the inventory, and the whole compile pipeline runs end to end against the test doubles with no Mock.
+3. `cargo test` passes on the pinned MSRV and on stable, with no `#[ignore]` among the tests the five specs' test tables name, and the whole compile pipeline runs end to end against the test doubles with no Mock.
 4. `schemas/` is committed, `schema_freeze` passes, and `SCHEMA_CHANGELOG.md` has its v1 entry.
 5. `kernel_surface` passes: every public item is on the allow-list with a specific audit §13 token or a `NEW:` justification, its doc comment cites a rule ID, and no token from `tests/banned_tokens.txt` appears outside a comment citing the ban. The review records the `NEW:` count as the Kernel-growth number.
 6. The Kernel crate's **direct** dependencies are exactly the four crates of §8. The resolved tree is larger (`sha2` brings `digest`, `block-buffer`, `crypto-common`, `hybrid-array`, `typenum`; `serde_json` brings `serde_core`, `itoa`, `memchr`, `ryu`; `schemars` brings `dyn-clone` and `ref-cast`), and that is expected.
