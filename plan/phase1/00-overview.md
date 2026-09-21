@@ -31,7 +31,8 @@ plan/phase1/
   01-time-model.md       TM-n   ClockDomain, TimePoint, Duration, the two Deadline kinds, ClockRelation, TimeAuthority, SampleClock
   02-stream-contract.md  SC-n   DataContract, Port, MemoryDomain, BufferRef, SampleBlock, DataLink, BurstTracker, ContinuityMap
   03-spec-and-binding.md SB-n   ExperimentSpec, BindingProfile, Constraint and matcher, compile pipeline, PrepareReport, versioning
-  04-run-and-session.md  RS-n   Run state machine, cleanup, Session action log, Lease, Policy, Event and counters, Manifest, hashing
+  04-run-and-session.md  RS-n   Run state machine, cleanup, Session action log, Lease, Policy, the Kernel
+                                Action set, Event and counters, Manifest, hashing
   05-module-api.md       MA-n   the five role traits, ModuleDescriptor and registry, ComponentDescriptor, Island, ExecutionClass, fidelity
 ```
 
@@ -72,6 +73,9 @@ Collected here so that the R13 pass (§12) can apply them in one edit. Per-spec 
 |---|---|---|
 | §49 writes `ResourceId { node, local }` | X7 writes `ResourceId { node, path }` | A resource is a composite tree (§8): a channel, a GPIO bank or a timekeeper is a sub-resource that must be addressable, and a flat `local` cannot name one. The node qualification §49 asks for is unchanged. Spec 03 fixes the path grammar |
 | §14's fidelity value sets stop at `hardware_quirk` | spec 05 will add `real` | §14 says every Run records the vector, and a Hardware Run has no value to record. Open question 1 |
+| §3's action log names `StartRepeat` and `Capture` as Session actions | spec 04 RS-13a makes them namespaced Vocabulary verbs | `repeat` is a Radio Model capability in audit §13 and a recorder is a Sink; a Kernel that enumerated them would need a new variant for the first peripheral or calibration verb (invariant 30) |
+| §29's list of event kinds reads as a Kernel registry | spec 04 RS-27 keeps the four the Kernel emits and gives the rest to their Vocabulary | audit §13's Kernel line names the envelope, the counters, `EVENTS_DROPPED` and the Policy mechanism, not concrete kinds |
+| §50's envelope lists `random seeds` and an environment capture | spec 04 RS-43 keeps both out of it | the Kernel owns no generator, the environment is already recorded verbatim, and the capture has no Kernel-defined content |
 
 ## 4. Cross-cutting decisions
 

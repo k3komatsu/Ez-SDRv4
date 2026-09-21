@@ -246,7 +246,7 @@ The growth term is the point of TM-14. One second after the measurement it adds 
 | `tm_11_reserved_domains_present` | a fresh registry | `utc` and `host.monotonic` registered, `Root`, 1 GHz | TM-11 |
 | `tm_11_registry_allocates_monotonic_unique` | three allocations | strictly increasing local ids, node `LOCAL` | TM-11 |
 | `tm_13c_sample_clock_new_id_on_rate_change` | declare and register A, then change the rate | A's `ended_at` set, B's id differs, records in order with origins | TM-13c |
-| `tm_13e_tx_origin_fixed_at_prepare` | a transmit stream, with a burst target admitted before any block exists | the grid exists at admission and the origin is the declared arm anchor | TM-13e, SC-23a |
+| `tm_13e_tx_origin_fixed_at_arm` | a transmit stream, with a burst target admitted before any block exists | the grid exists at admission and the origin is the declared arm anchor | TM-13e, SC-23a |
 | `tm_16b_engine_governs_a_drifting_virtual_device` | a Simulation Authority declaring two roots, the second drifting | `now` and `schedule` succeed on the second root; the event order repeats from one seed | TM-16a, TM-16b |
 | `tm_16a1_host_monotonic_driven_only_in_simulation` | a Simulation Authority and a RealtimeEmulation one, each advanced | the first moves `host.monotonic` itself; the second tracks the real clock | TM-16a1 |
 | `tm_16d_wait_until_non_governed` | `wait_until` on a root no Authority declared | `NotGoverned` | TM-16d |
