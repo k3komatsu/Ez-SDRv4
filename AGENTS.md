@@ -71,7 +71,9 @@ Vision §67: Phase 1 Kernel semantic model → Phase 2 Radio Model + Simulation 
 - Commit subjects in Conventional Commits style (`chore:`, `docs:`, `feat:`); the body records the decision, not the diff.
 - `.DS_Store` is ignored; keep the tree free of OS and editor junk.
 
-## 8. Subagent model selection
+## 8. Subagent model selection (Claude only)
+
+Applies only when the agent working in this repo is Claude (Claude Code). Not applicable to Codex or other agents reading this file — they have their own subagent mechanics.
 
 - Research/investigation subagents (codebase exploration, document/web research): launch on **Sonnet 5 max**.
 - Every other subagent use: launch on **Opus 5 max**.
