@@ -75,6 +75,8 @@ Vision §67: Phase 1 Kernel semantic model → Phase 2 Radio Model + Simulation 
 
 Applies only when the agent working in this repo is Claude (Claude Code). Not applicable to Codex or other agents reading this file — they have their own subagent mechanics.
 
-- Research/investigation subagents (codebase exploration, document/web research): launch on **Sonnet 5 max**.
-- Every other subagent use: launch on **Opus 5 max**.
-- Never launch **Fable** as a subagent, for any purpose.
+The split is by what the subagent has to do, not by topic or which tool it uses:
+
+- **Mechanical investigation → Sonnet 5 max.** Grep/find, locating a definition or citation, pulling quotes from `v3/`, UHD docs or the Vision, checking whether a file/section/claim exists, summarizing a document. The output is a fact, not a conclusion — always Sonnet 5 max, no exceptions.
+- **Anything requiring judgment → Opus 5 max.** Design/architecture review, VERIFIED vs INFERRED calls (§6), evaluating whether a claim or design decision is sound, drafting or editing design documents, recommendations, adversarial critique. The output is a conclusion, not just a fact — always Opus 5 max, no exceptions.
+- **Never launch Fable as a subagent, for any purpose, regardless of task.** This is a hard rule, not a default.
