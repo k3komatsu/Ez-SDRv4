@@ -1,2 +1,4 @@
-# v3 is a separate repository (github.com/k3komatsu/Ez-SDR); it is a source of behavioural requirements only and is not tracked here.
+# The v3 line lives on the `master` branch of this same repository (tags v2.11, v3.0.0-v3.0.28).
+# `v3/` is a git worktree of that branch, kept checked out because the design documents cite
+# v3 source paths as behavioural evidence. It must not be tracked by the v4 branch.
 v3/
