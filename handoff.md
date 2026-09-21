@@ -43,11 +43,11 @@ Vision §67 の Phase 1．詳細設計を [plan/phase1/](plan/phase1/) に書い
 
 | spec | rule ID | 状態 |
 |---|---|---|
-| [01-time-model.md](plan/phase1/01-time-model.md) | TM-1..21（副番含め36） | **Gate A：敵対的レビュー3巡完了，ユーザ確認待ち** |
-| [02-stream-contract.md](plan/phase1/02-stream-contract.md) | SC-1..32（副番含め48） | **Gate A：敵対的レビュー3巡完了，ユーザ確認待ち** |
-| [03-spec-and-binding.md](plan/phase1/03-spec-and-binding.md) | SB-1..49（副番含め54） | **Gate B：敵対的レビュー2巡完了，ユーザ確認待ち** |
-| [04-run-and-session.md](plan/phase1/04-run-and-session.md) | RS-1..52（副番含め57） | **Gate B：敵対的レビュー2巡完了，ユーザ確認待ち** |
-| [05-module-api.md](plan/phase1/05-module-api.md) | MA-1..46 | **Gate C：敵対的レビュー1巡完了，ユーザ確認待ち** |
+| [01-time-model.md](plan/phase1/01-time-model.md) | TM-1..21（副番含め36） | Gate A 通過，commit 済み |
+| [02-stream-contract.md](plan/phase1/02-stream-contract.md) | SC-1..32（副番含め48） | Gate A 通過，commit 済み |
+| [03-spec-and-binding.md](plan/phase1/03-spec-and-binding.md) | SB-1..49（副番含め54） | Gate B 通過，commit 済み |
+| [04-run-and-session.md](plan/phase1/04-run-and-session.md) | RS-1..52（副番含め57） | Gate B 通過，commit 済み |
+| [05-module-api.md](plan/phase1/05-module-api.md) | MA-1..46 | Gate C 通過，commit 済み |
 
 決定済みの前提（2026-09-21）：草稿は `plan/phase1/`，受理後に spec 01–05 を `design/` へ移す（00 は plan/ に残す）；本文は英語；3 ゲート（A = 01+02，B = 03+04，C = 05+00）；Phase 1 は spec 受理後に Cargo workspace + 単一 crate `ezsdr-kernel` + tests + `schemas/` まで実装する．
 
@@ -57,7 +57,11 @@ Gate A は敵対的レビュー3巡（31件・16件・13件）を経て通過．
 
 Gate C は1巡（8件）．P0 は1件で，`PrepareContext` に Action の送信口が無く，Reactor が `TxBurst` を発行する手段が API に存在しなかった．Vision §19 の反応型モデルと §58 #9 が実装不能だった．`ActionSubmitter` を足し，MA-6 の handle 集合と MA-46 の凍結集合にも入れた（v4.0 後に足すと Kernel major になるため）．
 
-6文書で259ルール，欠番と未解決参照なし，撤回5件（SB-28, SB-32, RS-37, MA-4, MA-43 — OV-1 に従い番号は保持）．型名はすべて定義済み．
+6文書で259ルール，欠番と未解決参照なし，撤回5件（SB-28, SB-32, RS-37, MA-4, MA-43 — OV-1 に従い番号は保持）．型名はすべて定義済み．仕様段階は終了．
+
+**次は Step 4：Cargo workspace と `ezsdr-kernel` crate の実装**（00-overview.md §3 の表，§5 のレイアウト，§9 のテスト方針）．module 実装順は `id → time → stream/contract → hash → module_api → spec/binding → plan → event/policy → run/session → manifest → schema`．
+
+**未了の宿題が1つある**：00-overview.md §11 の決定ログにユーザ判定が記録されていない（X1–X12 と各 spec の Decisions 表，および未決事項 1–7）．exit criteria の 1 番はこれを要求している．実装中に相違が出たら，Vision ではなく §11 に記録すること．
 
 Phase 1 の完了条件は 00-overview.md §13．R13（Vision の規範部分を要約 + リンクに戻す）は **spec 受理後に別途ユーザ承認を得てから**実施する（手順は 00-overview.md §12）．
 
