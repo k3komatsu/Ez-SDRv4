@@ -35,17 +35,27 @@
 
 ## 3. 実装の状態
 
-**なし**．Rust crate，Python client，スキーマ，wire protocol，いずれも未着手．`Cargo.toml` も存在しない．
+**なし**．Rust crate，Python client，スキーマ，wire protocol，いずれも未着手．`Cargo.toml` も存在しない．実装は Phase 1 の spec が 3 ゲートすべてを通ってから（§4）．
 
-## 4. 次にやること — Phase 1: Kernel semantic model
+## 4. 進行中 — Phase 1: Kernel semantic model
 
-Vision §67 の順序．Phase 1 の入口は次の 3 つ：
+Vision §67 の Phase 1．詳細設計を [plan/phase1/](plan/phase1/) に書いている．計画本体と横断決定は [plan/phase1/00-overview.md](plan/phase1/00-overview.md)．
 
-1. **R13 の切り出し**．Vision に入り込んだ規範部分を `design/` の spec へ移す．対象は索引ヘッダに列挙済み：Stream Contract（§23），time model（§15），Session（§3），BindingProfile（§8），PrepareReport（§11），Manifest（§50）．ファイル名は rereview R13 案のとおり `design/stream-contract.md`, `design/time-model.md`, `design/session-model.md`, `design/binding-profile.md`（PrepareReport / Manifest も同様）．Vision 側の節は消さず「要約 + リンク」に戻す（audit の § 参照を生かすため）．
-2. **Kernel の最小定義**．audit §13「Recommended Minimal Core」の tree が freeze 対象の一覧．audit §14.1 の項目 1–7 が P0．
-3. **完了条件**．Vision §58 の acceptance tests #1–#16（Phase 1–6 で順に満たす）．UHD は Core + Mock が動くまで触らない（§59）．
+| spec | rule ID | 状態 |
+|---|---|---|
+| [01-time-model.md](plan/phase1/01-time-model.md) | TM-1..21（副番含め36） | **Gate A：敵対的レビュー3巡完了，ユーザ確認待ち** |
+| [02-stream-contract.md](plan/phase1/02-stream-contract.md) | SC-1..32（副番含め48） | **Gate A：敵対的レビュー3巡完了，ユーザ確認待ち** |
+| 03-spec-and-binding.md | SB-n | 未着手（Gate B） |
+| 04-run-and-session.md | RS-n | 未着手（Gate B） |
+| 05-module-api.md | MA-n | 未着手（Gate C） |
 
-型を書くときの拘束文は Vision §5（tiers），§15（time），§23（Stream Contract），§13（TimingEnvelope / Mock 強制），§3（Session），§8（composite resource，BindingProfile）．
+決定済みの前提（2026-09-21）：草稿は `plan/phase1/`，受理後に spec 01–05 を `design/` へ移す（00 は plan/ に残す）；本文は英語；3 ゲート（A = 01+02，B = 03+04，C = 05+00）；Phase 1 は spec 受理後に Cargo workspace + 単一 crate `ezsdr-kernel` + tests + `schemas/` まで実装する．
+
+Gate A は Opus サブエージェントによる敵対的レビューを3巡かけた．1巡目31件（P0 4件），2巡目16件（P1 8件），3巡目13件（P1 2件）をすべて処理済み．レビュアの判定は「2件の適用と算法トレースで通過，追加レビュー不要」で，指定された7シナリオ＋自作1件を Python で実行し 8/8 通過した（`ContinuityBuilder` の push/finish）．ルールは105件，欠番と未解決参照なし．
+
+Phase 1 の完了条件は 00-overview.md §13．R13（Vision の規範部分を要約 + リンクに戻す）は **spec 受理後に別途ユーザ承認を得てから**実施する（手順は 00-overview.md §12）．
+
+型を書くときの拘束文は Vision §5（tiers），§15（time），§23（Stream Contract），§13（TimingEnvelope / Mock 強制），§3（Session），§8（composite resource，BindingProfile）．audit §13「Recommended Minimal Core」が freeze 対象の一覧で，§14.1 の項目 1–15 は 00-overview.md §10 の traceability 表に対応付けてある．
 
 ## 5. v3 → v4 切替で残っている作業（人間の判断が要るもの）
 
