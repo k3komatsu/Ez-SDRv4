@@ -1,0 +1,142 @@
+# Ez-SDR v4 — Architecture Vision
+
+> **Status:** Pre-implementation architecture vision / design contract  
+> **Audience:** Ez-SDR developers, Codex/AI coding agents, reviewers, future contributors  
+> **Purpose:** Define what Ez-SDR v4 is trying to become, what its Core must and must not own, and which architectural properties must remain true before implementation begins.  
+> **Non-purpose:** This is not the final Rust API, wire protocol, JSON Schema, WASM ABI, scheduler implementation, or UHD adapter specification.  
+> **Structure:** The Vision is split into eleven part files under `design/vision/`. Section numbers §1–§68 are stable across all parts and are the reference unit used by `design/v4-vision-audit.md` and `design/v4-vision-rereview.md`. This file is the index, the reading guide and the revision history.  
+> **Shapes are illustrative:** the `{ ... }` and tree blocks in the parts show concept shapes, not final schemas. Normative schemas (Stream Contract, time model, Session, BindingProfile, PrepareReport, Manifest) will live in `design/` specifications when Phase 1 begins.
+
+---
+
+## The vision in one sentence
+
+> **Ez-SDR v4 is a typed, deterministic Experiment Runtime for humans and AI agents, built around a small experiment microkernel and replaceable Modules, with software simulation treated as a first-class execution target equal to physical SDR hardware.**
+
+Design principle: **Simple by default, powerful when needed.** Development principle: **Design once, validate in software, promote to hardware.** (§2)
+
+---
+
+## How to read
+
+- New readers: Part 01 (why, the three Core tiers, what must not be in Core), then Part 11 §65 (the 42 invariants), then Part 03 (why simulation is a peer of hardware).
+- Implementers of Phase 1 (Kernel semantic model): Parts 02, 04 and 05 hold the contract-shaping sections — §8 (composite resources, BindingProfile), §10–§11 (compilation, PrepareReport), §15 (time), §19–§23 (descriptors, DataContracts, TxBurst, Stream Contract), §25–§29 (coherence, calibration, mutation, continuity, events). Part 10 lists the acceptance tests (§58).
+- Provider and Executor authors: Parts 06–08.
+- Reviewers: the audit (`design/v4-vision-audit.md`) and re-review (`design/v4-vision-rereview.md`) cite sections as §N; use the section index below to find the file.
+- The whole Vision as one stream: `cat design/vision/*.md`.
+
+---
+
+## Parts
+
+| Part | File | Sections | Themes |
+|---|---|---|---|
+| 01 | [01-purpose-and-core-boundary.md](design/vision/01-purpose-and-core-boundary.md) | §1–§7 | Why v4 exists; One-sentence vision; What Ez-SDR should feel like; Ez-SDR v4 is a microkernel architecture; What belongs in Core: three stability tiers; What must not belong in Core; Model + Provider is the default extension pattern |
+| 02 | [02-spec-binding-and-compilation.md](design/vision/02-spec-binding-and-compilation.md) | §8–§11 | Experiment intent must be separated from implementation binding; ExperimentSpec is declarative intent, not a programming language; ExperimentSpec is compiled before RUN; Core is a transaction coordinator, not the sample scheduler |
+| 03 | [03-simulation-mock-and-time.md](design/vision/03-simulation-mock-and-time.md) | §12–§17 | Mock is a first-class execution target; Software-only execution must work without SDR hardware; Simulation execution classes; Deterministic virtual time; SimulationChannel is separate from MockRadio; Fault injection is a first-class validation tool |
+| 04 | [04-execution-model-and-data-contracts.md](design/vision/04-execution-model-and-data-contracts.md) | §18–§24 | Fixed and reactive experiments are both first-class; Processor and Reactor; Processing execution is replaceable; Data is not always IQ; Dynamic TxBurst is a first-class primitive; Time is first-class and must preserve sample relationships: the Stream Contract; ClockRelation is necessary for heterogeneous experiments |
+| 05 | [05-coherence-calibration-and-runtime-semantics.md](design/vision/05-coherence-calibration-and-runtime-semantics.md) | §25–§30 | Coherent operation is different from mere multi-device operation; Calibration is a first-class research concept; Runtime parameter mutation must have semantics; Stream continuity and data validity are first-class; Observability is structured, typed, and non-blocking; Probe / Tap is important for research instrumentation |
+| 06 | [06-performance-islands-and-radio-backends.md](design/vision/06-performance-islands-and-radio-backends.md) | §31–§36 | Memory placement matters as much as compute placement; Real-time execution should use bounded Execution Islands; Throughput and latency are separate optimization objectives; Performance must be described as an envelope; Radio backend architecture; Device profiles and quirks remain Provider concerns |
+| 07 | [07-peripherals-and-host-io.md](design/vision/07-peripherals-and-host-io.md) | §37–§41 | External laboratory devices are first-class resources; Peripheral timing guarantees must be explicit; USRP GPIO must not create cross-module coupling; Host I/O is distinct from Peripheral I/O; Linux TUN/TAP is an explicit target |
+| 08 | [08-future-workloads-and-targets.md](design/vision/08-future-workloads-and-targets.md) | §42–§49 | WASM is a future Processor/Reactor implementation target; AI is outside the hard real-time loop; AI-generated real-time components; MIMO and coherent systems must be natural, not special cases; IBFD must be a normal supported workload; ISAC must support heterogeneous sensing resources; OTFS and tensor-heavy processing must not require redesign; Distributed execution is a future implementation, but not a forbidden model |
+| 09 | [09-provenance-validation-and-ownership.md](design/vision/09-provenance-validation-and-ownership.md) | §50–§56 | Artifacts, Runs, and provenance are first-class; Artifact formats should interoperate with existing ecosystems; Validation and dry-run are first-class; Resource ownership and cleanup are transactional; Python and ExperimentSpec are complementary; Time-scale separation is a design guide; Reference architecture litmus test: IEEE 802.11-like transceiver |
+| 10 | [10-implementation-path-and-testing.md](design/vision/10-implementation-path-and-testing.md) | §57–§61 | Minimal implementation path; First architecture acceptance tests; UHD is added only after the Core + Mock model works; Suggested logical repository structure; Testing philosophy |
+| 11 | [11-boundaries-invariants-and-roadmap.md](design/vision/11-boundaries-invariants-and-roadmap.md) | §62–§68 | Security and trust boundaries; Explicit non-goals; Features allowed to remain future work; Strong design invariants; Architecture success criteria; Development sequencing; Final perspective |
+
+---
+
+## Section index
+
+| § | Title | Part |
+|---|---|---|
+| 1 | Why v4 exists | [01](design/vision/01-purpose-and-core-boundary.md) |
+| 2 | One-sentence vision | [01](design/vision/01-purpose-and-core-boundary.md) |
+| 3 | What Ez-SDR should feel like | [01](design/vision/01-purpose-and-core-boundary.md) |
+| 4 | Ez-SDR v4 is a microkernel architecture | [01](design/vision/01-purpose-and-core-boundary.md) |
+| 5 | What belongs in Core: three stability tiers | [01](design/vision/01-purpose-and-core-boundary.md) |
+| 6 | What must not belong in Core | [01](design/vision/01-purpose-and-core-boundary.md) |
+| 7 | Model + Provider is the default extension pattern | [01](design/vision/01-purpose-and-core-boundary.md) |
+| 8 | Experiment intent must be separated from implementation binding | [02](design/vision/02-spec-binding-and-compilation.md) |
+| 9 | ExperimentSpec is declarative intent, not a programming language | [02](design/vision/02-spec-binding-and-compilation.md) |
+| 10 | ExperimentSpec is compiled before RUN | [02](design/vision/02-spec-binding-and-compilation.md) |
+| 11 | Core is a transaction coordinator, not the sample scheduler | [02](design/vision/02-spec-binding-and-compilation.md) |
+| 12 | Mock is a first-class execution target | [03](design/vision/03-simulation-mock-and-time.md) |
+| 13 | Software-only execution must work without SDR hardware | [03](design/vision/03-simulation-mock-and-time.md) |
+| 14 | Simulation execution classes | [03](design/vision/03-simulation-mock-and-time.md) |
+| 15 | Deterministic virtual time | [03](design/vision/03-simulation-mock-and-time.md) |
+| 16 | SimulationChannel is separate from MockRadio | [03](design/vision/03-simulation-mock-and-time.md) |
+| 17 | Fault injection is a first-class validation tool | [03](design/vision/03-simulation-mock-and-time.md) |
+| 18 | Fixed and reactive experiments are both first-class | [04](design/vision/04-execution-model-and-data-contracts.md) |
+| 19 | Processor and Reactor | [04](design/vision/04-execution-model-and-data-contracts.md) |
+| 20 | Processing execution is replaceable | [04](design/vision/04-execution-model-and-data-contracts.md) |
+| 21 | Data is not always IQ | [04](design/vision/04-execution-model-and-data-contracts.md) |
+| 22 | Dynamic TxBurst is a first-class primitive | [04](design/vision/04-execution-model-and-data-contracts.md) |
+| 23 | Time is first-class and must preserve sample relationships: the Stream Contract | [04](design/vision/04-execution-model-and-data-contracts.md) |
+| 24 | ClockRelation is necessary for heterogeneous experiments | [04](design/vision/04-execution-model-and-data-contracts.md) |
+| 25 | Coherent operation is different from mere multi-device operation | [05](design/vision/05-coherence-calibration-and-runtime-semantics.md) |
+| 26 | Calibration is a first-class research concept | [05](design/vision/05-coherence-calibration-and-runtime-semantics.md) |
+| 27 | Runtime parameter mutation must have semantics | [05](design/vision/05-coherence-calibration-and-runtime-semantics.md) |
+| 28 | Stream continuity and data validity are first-class | [05](design/vision/05-coherence-calibration-and-runtime-semantics.md) |
+| 29 | Observability is structured, typed, and non-blocking | [05](design/vision/05-coherence-calibration-and-runtime-semantics.md) |
+| 30 | Probe / Tap is important for research instrumentation | [05](design/vision/05-coherence-calibration-and-runtime-semantics.md) |
+| 31 | Memory placement matters as much as compute placement | [06](design/vision/06-performance-islands-and-radio-backends.md) |
+| 32 | Real-time execution should use bounded Execution Islands | [06](design/vision/06-performance-islands-and-radio-backends.md) |
+| 33 | Throughput and latency are separate optimization objectives | [06](design/vision/06-performance-islands-and-radio-backends.md) |
+| 34 | Performance must be described as an envelope | [06](design/vision/06-performance-islands-and-radio-backends.md) |
+| 35 | Radio backend architecture | [06](design/vision/06-performance-islands-and-radio-backends.md) |
+| 36 | Device profiles and quirks remain Provider concerns | [06](design/vision/06-performance-islands-and-radio-backends.md) |
+| 37 | External laboratory devices are first-class resources | [07](design/vision/07-peripherals-and-host-io.md) |
+| 38 | Peripheral timing guarantees must be explicit | [07](design/vision/07-peripherals-and-host-io.md) |
+| 39 | USRP GPIO must not create cross-module coupling | [07](design/vision/07-peripherals-and-host-io.md) |
+| 40 | Host I/O is distinct from Peripheral I/O | [07](design/vision/07-peripherals-and-host-io.md) |
+| 41 | Linux TUN/TAP is an explicit target | [07](design/vision/07-peripherals-and-host-io.md) |
+| 42 | WASM is a future Processor/Reactor implementation target | [08](design/vision/08-future-workloads-and-targets.md) |
+| 43 | AI is outside the hard real-time loop | [08](design/vision/08-future-workloads-and-targets.md) |
+| 44 | AI-generated real-time components | [08](design/vision/08-future-workloads-and-targets.md) |
+| 45 | MIMO and coherent systems must be natural, not special cases | [08](design/vision/08-future-workloads-and-targets.md) |
+| 46 | IBFD must be a normal supported workload | [08](design/vision/08-future-workloads-and-targets.md) |
+| 47 | ISAC must support heterogeneous sensing resources | [08](design/vision/08-future-workloads-and-targets.md) |
+| 48 | OTFS and tensor-heavy processing must not require redesign | [08](design/vision/08-future-workloads-and-targets.md) |
+| 49 | Distributed execution is a future implementation, but not a forbidden model | [08](design/vision/08-future-workloads-and-targets.md) |
+| 50 | Artifacts, Runs, and provenance are first-class | [09](design/vision/09-provenance-validation-and-ownership.md) |
+| 51 | Artifact formats should interoperate with existing ecosystems | [09](design/vision/09-provenance-validation-and-ownership.md) |
+| 52 | Validation and dry-run are first-class | [09](design/vision/09-provenance-validation-and-ownership.md) |
+| 53 | Resource ownership and cleanup are transactional | [09](design/vision/09-provenance-validation-and-ownership.md) |
+| 54 | Python and ExperimentSpec are complementary | [09](design/vision/09-provenance-validation-and-ownership.md) |
+| 55 | Time-scale separation is a design guide | [09](design/vision/09-provenance-validation-and-ownership.md) |
+| 56 | Reference architecture litmus test: IEEE 802.11-like transceiver | [09](design/vision/09-provenance-validation-and-ownership.md) |
+| 57 | Minimal implementation path | [10](design/vision/10-implementation-path-and-testing.md) |
+| 58 | First architecture acceptance tests | [10](design/vision/10-implementation-path-and-testing.md) |
+| 59 | UHD is added only after the Core + Mock model works | [10](design/vision/10-implementation-path-and-testing.md) |
+| 60 | Suggested logical repository structure | [10](design/vision/10-implementation-path-and-testing.md) |
+| 61 | Testing philosophy | [10](design/vision/10-implementation-path-and-testing.md) |
+| 62 | Security and trust boundaries | [11](design/vision/11-boundaries-invariants-and-roadmap.md) |
+| 63 | Explicit non-goals | [11](design/vision/11-boundaries-invariants-and-roadmap.md) |
+| 64 | Features allowed to remain future work | [11](design/vision/11-boundaries-invariants-and-roadmap.md) |
+| 65 | Strong design invariants | [11](design/vision/11-boundaries-invariants-and-roadmap.md) |
+| 66 | Architecture success criteria | [11](design/vision/11-boundaries-invariants-and-roadmap.md) |
+| 67 | Development sequencing | [11](design/vision/11-boundaries-invariants-and-roadmap.md) |
+| 68 | Final perspective | [11](design/vision/11-boundaries-invariants-and-roadmap.md) |
+
+---
+
+## Related documents
+
+- `design/archive/Ez-SDR_v4_core_module_architecture.md` — the former Core / Module Architecture Principles document, **retired 2026-09-21**. Kept only for the `CMA §N` citations in the audit documents; its content is covered by the Vision (section map at the top of the archived file).
+- `design/v4-vision-audit.md` — Phase 0 adversarial architecture audit (Findings 1–34).
+- `design/v4-vision-rereview.md` — re-review of the revised Vision (Findings R1–R22).
+- `v3/` — the previous implementation, a source of behavioural requirements only (§1, §61).
+
+---
+
+## Revision history
+
+| Revision | Summary |
+|---|---|
+| 2026-09-21 | Incorporates the P0 findings (Findings 1–6 and 23) of the Phase 0 architecture audit, `design/v4-vision-audit.md`: stability tiers (§5), Time Authority (§15, §23), the Stream Contract (§23), the Timing Envelope and Mock enforcement (§13, §14, §22), Sessions (§3, §50), composite resources and provider-declared coherence (§8, §25, §39), and the BindingProfile environment (§8, §16, §17). |
+| 2026-09-21, second pass | Incorporates the P1 findings (Findings 7–22; 21 and 23 were already covered by the first pass): generic capability matching (§8), descriptors versus execution ABI, cycle rule and deadline kinds (§19), DataContract registry (§21), schema-first types and Spec builder (§9, §10), PrepareReport (§11), Lease modes and the Policy table (§53), validator-not-optimiser planning (§10, §20, §31), no structural mutation (§27), calibration application and retune phase behaviour (§26), event counters (§29), RF safety envelope (§8, §52), step-driven Executors (§15, §32), Manifest envelope and sections (§50), RFNoC as radio capability (§4, §20, §32, §35, §64), and the Module / role / deployment axes (§7). |
+| 2026-09-21, third pass | Incorporates the P2/P3 findings (Findings 24–34) and the audit's explicit rejections: process boundaries and UHD crash handling (§35, §62), node-qualified identifiers (§49), the one-shot TUN/TAP helper (§41), Probe as a link policy (§30), taint as a convention (§28), explicit format conversion (§21, §34), external sensors by reference (§47), timing classes per instance (§38), clock sources as Peripherals and the Sink / Link module categories (§37, §60), no metrics framework (§29), behavioural rather than wire compatibility with v3 (§61), and the corresponding non-goals and future-work entries (§6, §63, §64). |
+| 2026-09-21, fourth pass | Applies R1, R2 and R21 of `design/v4-vision-rereview.md`: per-direction channel requests (§8), the TX side of the Stream Contract (§22, §23, §29, §58), and placement in the BindingProfile only (§8, §9, §10, §20, §65). |
+| 2026-09-21, fifth pass | Applies R3, R6, R17 and R22 of `design/v4-vision-rereview.md`: Session Actions are admitted on the control path (§3, §52, §58, §65), a sample-rate change starts a new SampleClock (§15, §23, §27), MockRadio also enforces the PerformanceEnvelope (§13, §34, §58), and the discrete-event simulator is named the Simulation Engine so that *Kernel* means only the Core tier (§5, §13–§15, §32, §57–§58, §60, §67). |
+| 2026-09-21, sixth pass | Applies the editorial items R4, R5, R7–R12, R15, R16 and R18 of `design/v4-vision-rereview.md` (pipeline order, determinism scope, profile versioning and parity measurement, the Authority role, Action and time naming, the Spec shape, remaining phrasing, language-neutral shapes, `sdr.sleep`, coercion defaults per Run kind, child-Run leases) and splits the Vision into eleven part files under `design/vision/` (R13, R14). Section numbers are unchanged. |
+| 2026-09-21, seventh pass | Retired `Ez-SDR_v4_core_module_architecture.md` (archived under `design/archive/` with a section map). Its two passages without a Vision counterpart were folded in: the Module communication rule with its Bad / Good example (§7) and the smart-antenna litmus test (§66). |
