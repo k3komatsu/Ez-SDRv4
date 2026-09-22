@@ -350,6 +350,73 @@ partials and one new P0 were fixed in turn; these are what they left behind.
 | D29 | 03 SB-17 | An output reaching a Sink through **one** link is accepted; a longer chain is refused | SB-17 says "a capture whose source has no placed Sink is refused" and does not settle chain depth. One hop covers the Spec shapes Phase 1 can express | |
 | D30 | 02 SC-30c, 03 SB-13 | The `schema` key is skipped at any depth, like `extensions` | D19's fix widened SB-13's false-negative surface: a Spec carrying `{"schema": {"executor": …}}` anywhere now escapes the scan. B3 already accepts that shape of residual risk for `extensions`; this extends it | |
 
+
+### Findings from the second-opinion pass, for the owner's verdict
+
+A fourth pass reviewed §4's X1–X12, §11's open questions 1–7, each spec's Decisions
+table and D1–D30 above — 112 items — against the Vision and §67's phase order. It was
+run by **Fable 5.1**, under the one exception `AGENTS.md` §8 carries for a second
+opinion on a judgment Opus has already made; the code fact each row below rests on was
+re-verified independently of it. Verdicts: 91 confirm, 15 amend, 1 reverse (D27), and 5
+the pass calls **not a decision** — OQ4, D1, D6, D11 and D14 are encoding consequences
+and fixture notes, and need no verdict. D3's and D5's applied spec edits were recomputed
+and stand.
+
+**One defect in five places.** A Spec plus a BindingProfile does not carry everything
+`plan()` needs, so the runtime supplies the remainder at assembly time — through
+`CompileInputs::sink_components`, `CompileInputs::executors` and a `Fragment.content`
+that holds only the binding's selector. None of that is recorded in any document, so
+RS-38's Manifest cannot reproduce the plan it describes, which is the provenance Vision
+§50 asks of it. D17 and D18 above are two of the five; the second opinion changes what
+their rows recommend, so the revision is recorded here rather than by rewriting them
+(OV-1). D31–D33 are new. Phase 2's MockRadio is the first real Provider and meets all
+five.
+
+**D17, revised.** None of the three fixes that row names is right; all three keep the
+category error underneath it. The Vision makes Sink a Module **role** (§7 axis 2, audit
+§13, MA-2, MA-25, MA-30), parallel to Provider and Executor, with its own trait and its
+own rank in the stepping order. RS-12 and SB-25a instead put a Sink into
+`graph.components` as a `ComponentDescriptor` — with `impl`, `requires.executor_kind` and
+`timing`, none of which mean anything for a Sink — and SB-25 then requires it placed in
+an Executor's Island (MA-39). A `Sink` member on `ComponentKind` or a `role` field on
+`ComponentDescriptor` keeps a Sink an Executor-loaded component; `module` on every
+placement is a second source of truth for what the Spec's descriptor already says, which
+SB-25a itself refuses. The recommendation instead: **an output is bound, not placed.**
+`bindings` maps each `outputs[]` id to a Module holding the Sink role (SB-22); `OutputReq`
+carries the source port and the drop-class `policy` and `capacity` of the link that feeds
+it (SC-19, SC-21); `ComponentPlacement.module`, SB-25a and `plan::sink_components` all go
+away, so the Kernel surface nets smaller. It settles D18 with the same mechanism and
+dissolves D29 — the output names the port its link starts from, so there is no chain to
+search — and it gives RS-12's implicit Spec the link its recorder currently lacks, which
+is why a Session's capture records nothing today. One sub-choice the Vision does not
+settle: where a **Session** recorder's source comes from — an optional `Binding.source`
+read only for a Sink binding on a Session profile (one Kernel field), or inferring it
+when the profile has exactly one Provider binding with one stream port (no field, but the
+first multi-device Session in Phase 6 breaks).
+
+**D18, revised.** The fix is not for the runtime to keep supplying the Executor's Module
+id: MA-38 should name a binding. `bindings[placements.islands[].executor]` resolves to a
+Module holding the Executor role (SB-22), and the runtime supplies only the descriptor.
+Otherwise `plan.fragments[].instance` and the Manifest's `modules` rest on assembly-time
+input that no document records.
+
+| # | Where | What the specs leave unsettled | Why it matters | Verdict |
+|---|---|---|---|---|
+| D31 | 05 §4 `Resource`, MA-10; 03 SB-15 | A Spec cannot connect a bound resource's stream to a component | `PortRef.component` may hold a resource ident, but `Resource` declares no Ports, so `validate` has no contract to check against a non-component endpoint and `plan()` refuses the link twice — `check_cycles` sees an unknown node and reports it as an MA-22 cycle, then MA-39 refuses it as "touches an unplaced component". Vision §7's own correct diagram is `PHY Processor → SampleStream → Radio Port` and §21 defines `Port`, so the shape is intended. Phase 2's MockRadio has nowhere to send a block on a Spec Run. The specs need `Resource` to declare its Ports (MA-10), SB-15 to admit a resource endpoint, and a resource endpoint to be a node outside every Island | |
+| D32 | 03 SB-39, SB-44; 05 MA-12, §4 `Requested` | `Provider::prepare` never receives the request the matcher matched | `plan()` writes a Provider fragment's `content` as the binding's selector alone and is not given `validate()`'s result, so neither the matched node nor the Spec's constraints reach any Provider. 05 §4 says `Requested` is "what the matcher offers a Provider's `coerce`; prepare sees the same input", and nothing delivers it, so MA-12 and SB-44 — `prepare` reports the same coercions `coerce` did for the same request — cannot be honoured. The test that proves MA-12 hand-builds the fragment, which hides it. A Provider would have no rate or frequency to configure. SB-39 should take the admission result and define the fragment's content as `{ selector, requested }` | |
+| D33 | 03 §4 `KeyDecl`, SB-2; 05 MA-35; 04 RS-17 | Where a Provider parameter's update class is declared | `KeyDecl` carries `kind`, `coercible` and `coercion_default` and no update class, so RS-17 has nothing to consult for a Provider key and `Admitter`'s class map is supplied by the caller. §27's own examples of runtime mutation — TX gain, antenna beam, MCS — and §3's `sdr.rx.gain = 20` all target a Provider, whose parameters are Vocabulary keys and not `ComponentDescriptor.params`, so the Easy API's first parameter change is refused as undeclared. One optional `update_class` on `KeyDecl` (absent: not changeable during a Run) settles it before the freeze; adding it in Phase 2 is a Kernel document change | |
+
+The same pass raised further items not recorded here, each smaller and
+self-contained: a missing mandatory `version` on the Manifest (Vision §10), a
+non-ASCII object key making `seal()` fail after a Run has already transmitted
+(RS-11), public inner fields on `ChannelMask` and `BlockFlags` turning S1's promised
+minor widening into a major, an `UpdateParameter` that carries no `at`, so RS-19's
+admitted instant is computed and then dropped and `hardware_timed` is
+unimplementable, no way to attach a discontinuity-opened burst's late outcome
+(SC-24a), `ComponentDescriptor::validate` and `check_effective_narrows` with no
+caller, and an `ezsdr.time` section SB-26 declares the Kernel reads and nothing
+reads.
+
 ---
 
 ## 12. What happens at acceptance (procedure only)
