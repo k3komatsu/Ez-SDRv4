@@ -86,8 +86,13 @@ fn ma_06_signature_types_are_documents() {
 
 // ---------------------------------------------------------------- the registry
 
+/// A **Provider-only** descriptor. The shared double declares Authority as well
+/// (MA-1), and MA-31 then requires an Authority factory — which would make every
+/// refusal in `ma_32_registry_refusals` fire on the wrong role.
 fn descriptor() -> ModuleDescriptor {
-    test_provider_descriptor()
+    let mut d = test_provider_descriptor();
+    d.roles = vec![Role::Provider];
+    d
 }
 
 #[test]
@@ -429,10 +434,10 @@ fn ma_14_actions_arrive_only_after_admission() {
         metadata: [(key("test.grid"), Value::Num(40.0))].into_iter().collect(),
     };
     assert!(submitter.submit(rejected).is_err());
+    // The submitter this test *did* submit to is the carrier: the rejected Action did
+    // not reach its queue. (A fresh Provider double's queue stood here too, which
+    // nothing had written to and which therefore asserted nothing.)
     assert!(submitter.delivered.lock().expect("lock").is_empty(), "the queue stays empty");
-
-    let provider = TestProvider::new("radio", 2);
-    assert!(provider.drain_actions().is_empty());
 }
 
 #[test]
@@ -661,7 +666,8 @@ fn ma_25_sink_role_is_read_from_the_binding() {
     reg.register_vocabulary(test_vocabulary()).expect("fresh");
     reg.register(test_sink_descriptor(), Factories { sink: true, ..Factories::default() })
         .expect("registers");
-    reg.register(test_provider_descriptor(), Factories { provider: true, ..Factories::default() })
+    reg.register(test_provider_descriptor(),
+        Factories { provider: true, authority: true, ..Factories::default() },)
         .expect("registers");
 
     let holds_sink = |m: &ezsdr_kernel::id::ModuleId| {

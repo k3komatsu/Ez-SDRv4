@@ -1176,3 +1176,149 @@ fn sc_13_tm_13c_rate_change_is_a_new_domain_not_a_gap() {
         .expect_err("a rate change ends the map");
     assert!(matches!(err, StreamError::DomainChanged { .. }));
 }
+
+#[test]
+fn sc_30b_a_carry_on_a_contiguous_block_is_not_discarded() {
+    // SC-30b's obligation is that the builder "records the dropped block count in the
+    // gap's `link_dropped`", and the rule says in its own words why the counts merge:
+    // a rule that dropped the count would "discard exactly the number it was written
+    // to preserve". Under `DropNewest` the refused block is newer than everything
+    // queued, so the block delivered after the drop is **contiguous** — the consumer
+    // reads a non-empty carry and hands it to a push that opens no gap. That count had
+    // nowhere to go and was dropped, so the next real jump was written as a `LinkDrop`
+    // with `link_dropped: 0`: the link dropped blocks and the map said none.
+    let mut b = builder(1, false);
+    push(&mut b, header(t(0), 100, 1));
+    // Two blocks refused, and the next delivered one is contiguous at 100.
+    b.push(&header(t(100), 100, 1), DropCarry { blocks: 2, ..DropCarry::default() })
+        .expect("a contiguous block is accepted");
+    // A later jump, with one more block refused at that point.
+    b.push(&header(t(400), 100, 1), DropCarry { blocks: 1, ..DropCarry::default() })
+        .expect("accepted");
+    let map = b.finish(DropCarry::default());
+    assert_eq!(map.gaps.len(), 1, "one jump, one gap");
+    assert_eq!(map.gaps[0].cause, GapCause::LinkDrop);
+    assert_eq!(map.gaps[0].link_dropped, 3, "two carried forward plus the one at the jump");
+}
+
+#[test]
+fn sc_30b_a_carry_held_across_a_contiguous_block_reaches_the_trailing_gap() {
+    // Holding the count for "the next Gap" is only half of SC-30b if the stream ends
+    // before there is one. Under `DropNewest` the last drop is followed by a
+    // contiguous block, so a map that ends there had no Gap to record it in and the
+    // count was discarded at `finish` — the same loss the mid-stream fix closed,
+    // moved to the end of the stream.
+    let mut b = builder(1, false);
+    push(&mut b, header(t(0), 100, 1));
+    b.push(&header(t(100), 100, 1), DropCarry { blocks: 2, ..DropCarry::default() })
+        .expect("a contiguous block is accepted");
+    let map = b.finish(DropCarry::default());
+    assert_eq!(map.gaps.len(), 1, "the drop is recorded even with no later jump");
+    assert_eq!(map.gaps[0].cause, GapCause::LinkDrop);
+    assert_eq!(map.gaps[0].len, 0, "SC-30c: zero-extent, no sample is accounted for");
+    assert_eq!(map.gaps[0].link_dropped, 2);
+
+    // And the trailing carry sums with what was held, rather than replacing it.
+    let mut b = builder(1, false);
+    push(&mut b, header(t(0), 100, 1));
+    b.push(&header(t(100), 100, 1), DropCarry { blocks: 2, ..DropCarry::default() })
+        .expect("accepted");
+    let map = b.finish(DropCarry { blocks: 1, ..DropCarry::default() });
+    assert_eq!(map.gaps.len(), 1);
+    assert_eq!(map.gaps[0].link_dropped, 3);
+}
+
+#[test]
+fn sc_30b_a_held_carry_keeps_its_flags_and_lost_count() {
+    // SC-30b gives the carry three jobs: its flags "derive a cause", its `lost`
+    // counts "sum", and its block count reaches `link_dropped`. A contiguous push has
+    // nowhere to put any of them, so holding only the third wrote the next Gap as a
+    // plain `LinkDrop` with no `lost` — which positively attributes a device overflow
+    // to host-side link loss, the failure `DropCarry` and SC-20b exist to prevent.
+    let held = DropCarry {
+        flags: BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED,
+        lost: Some(150),
+        blocks: 1,
+    };
+    // The delivered block is contiguous and correct; the carried `GAP_BEFORE`
+    // describes a block the **link** dropped, so the push is well formed.
+    let mut b = builder(1, false);
+    push(&mut b, header(t(0), 100, 1));
+    b.push(&header(t(100), 100, 1), held).expect("a contiguous block is accepted");
+    let map = b.finish(DropCarry::default());
+    assert_eq!(map.gaps.len(), 1);
+    assert_eq!(map.gaps[0].cause, GapCause::OverflowRestart, "the carried flags derive it");
+    assert_eq!(map.gaps[0].lost, Some(150), "and the carried count is not discarded");
+    assert_eq!(map.gaps[0].link_dropped, 1);
+
+    // Same carry, and a later jump: it reaches that Gap instead of the trailing one.
+    let mut b = builder(1, false);
+    push(&mut b, header(t(0), 100, 1));
+    b.push(&header(t(100), 100, 1), held).expect("accepted");
+    b.push(&header(t(400), 100, 1), DropCarry::default()).expect("accepted");
+    let map = b.finish(DropCarry::default());
+    assert_eq!(map.gaps.len(), 1);
+    assert_eq!(map.gaps[0].cause, GapCause::OverflowRestart);
+    assert_eq!(map.gaps[0].lost, Some(150));
+    assert_eq!(map.gaps[0].link_dropped, 1);
+}
+
+#[test]
+fn sc_31_mixed_requires_that_no_carry_explains_the_shortfall() {
+    // SC-31's `Mixed { stream_lost }` says the stream's own `lost` accounts for part
+    // of the jump and nothing else explains the rest — so it requires that no carry
+    // explains it. The guard and the Gap's own `link_dropped` must therefore count
+    // the same blocks: reading the incoming carry alone while `link_dropped` reports
+    // the carried total produced a Gap claiming nothing explains the shortfall and
+    // reporting a link drop in the same breath.
+    let mut b = builder(1, false);
+    push(&mut b, header(t(0), 100, 1));
+    // One block dropped, and the delivered block is contiguous — so the count is held.
+    b.push(&header(t(100), 100, 1), DropCarry { blocks: 1, ..DropCarry::default() })
+        .expect("accepted");
+    // A jump the stream's own `lost` only partly accounts for, with an empty carry.
+    let mut h = header(t(600), 100, 1);
+    h.flags = h.flags | BlockFlags::GAP_BEFORE;
+    h.lost = Some(150);
+    b.push(&h, DropCarry::default()).expect("accepted");
+    let map = b.finish(DropCarry::default());
+    assert_eq!(map.gaps.len(), 1);
+    assert_eq!(map.gaps[0].link_dropped, 1, "the held block reaches this Gap");
+    assert_eq!(
+        map.gaps[0].cause,
+        GapCause::Stream,
+        "a Gap that reports a link drop cannot also claim nothing explains the shortfall"
+    );
+
+    // And with nothing held, the same shape *is* `Mixed`.
+    let mut b = builder(1, false);
+    push(&mut b, header(t(0), 100, 1));
+    let mut h = header(t(500), 100, 1);
+    h.flags = h.flags | BlockFlags::GAP_BEFORE;
+    h.lost = Some(150);
+    b.push(&h, DropCarry::default()).expect("accepted");
+    let map = b.finish(DropCarry::default());
+    assert_eq!(map.gaps[0].link_dropped, 0);
+    assert_eq!(map.gaps[0].cause, GapCause::Mixed { stream_lost: 150 });
+}
+
+#[test]
+fn sc_30b_a_rejected_push_does_not_destroy_the_held_carry() {
+    // A rejected push returns the **caller's** carry, so the consumer can hand it to
+    // the outgoing builder's `finish` (SC-30c). What it must not do is drop what the
+    // builder is already holding: that is the builder's own state, not the caller's,
+    // and nothing would return it. Seven error paths leave `push`, and the count was
+    // cleared before one of them.
+    let mut b = builder(1, true); // lossless: the path that returns JumpWithoutGapFlag
+    push(&mut b, header(t(0), 100, 1));
+    b.push(&header(t(100), 100, 1), DropCarry { blocks: 2, ..DropCarry::default() })
+        .expect("a contiguous block is accepted");
+    let (err, returned) = b
+        .push(&header(t(500), 100, 1), DropCarry::default())
+        .expect_err("a jump with no GAP_BEFORE on a lossless path is refused");
+    assert!(matches!(err, StreamError::JumpWithoutGapFlag));
+    assert_eq!(returned.blocks, 0, "the caller gets its own carry back, which was empty");
+    let map = b.finish(returned);
+    assert_eq!(map.gaps.len(), 1, "and what the builder held is still the builder's");
+    assert_eq!(map.gaps[0].link_dropped, 2);
+}

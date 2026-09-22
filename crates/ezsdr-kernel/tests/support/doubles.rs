@@ -213,6 +213,8 @@ pub struct TestProvider {
     instance: ProviderInstance,
     /// What the `test.grid` key snaps to; `None` means it does not coerce.
     pub grid: Option<f64>,
+    /// Whether `coerce` reports a coercion of a key the request does not name (SB-44).
+    pub stray_coercion: bool,
     /// Which phase to fail at (MA-44).
     pub fail_at: FailAt,
     /// The recorded call log (MA-44).
@@ -247,11 +249,23 @@ impl TestProvider {
             // a component (MA-10, SB-15). A **line** carries `sc16` while the device
             // root below carries `cf32` under the same port name, so a test can tell
             // whether SB-15 resolved the port on the bound node or on some other.
-            ports: vec![Port {
-                name: "rx".to_owned(),
-                direction: PortDirection::Out,
-                contract: DataContractId::parse("ezsdr.stream.sc16").expect("a valid literal"),
-            }],
+            ports: vec![
+                Port {
+                    name: "rx".to_owned(),
+                    direction: PortDirection::Out,
+                    contract: DataContractId::parse("ezsdr.stream.sc16")
+                        .expect("a valid literal"),
+                },
+                // The TX end of Vision §7's `PHY Processor -> Radio Port`: a link
+                // whose **consumer** is a resource port, which is the case the plan's
+                // `links` resolved to a default contract rather than to this one.
+                Port {
+                    name: "tx".to_owned(),
+                    direction: PortDirection::In,
+                    contract: DataContractId::parse("ezsdr.stream.sc16")
+                        .expect("a valid literal"),
+                },
+            ],
         };
         TestProvider {
             instance: ProviderInstance {
@@ -298,6 +312,7 @@ impl TestProvider {
                 sections: BTreeMap::new(),
             },
             grid: None,
+            stray_coercion: false,
             fail_at: FailAt::Never,
             log: Mutex::new(Vec::new()),
             coerce_calls: AtomicU64::new(0),
@@ -325,6 +340,13 @@ impl TestProvider {
                 .capabilities
                 .insert(key("test.count"), CapabilityValue::One { value: Value::Int(n) });
         }
+        self
+    }
+
+    /// Makes `coerce` report a coercion of `test.flag`, which no fixture requests:
+    /// SB-44's malformed report, from the `validate` side (MA-44, SB-44).
+    pub fn with_stray_coercion(mut self) -> TestProvider {
+        self.stray_coercion = true;
         self
     }
 
@@ -392,6 +414,14 @@ impl Provider for TestProvider {
         self.coerce_calls.fetch_add(1, Ordering::Relaxed);
         *self.last_request.lock().unwrap_or_else(|e| e.into_inner()) = Some(request.clone());
         let mut report = CoerceReport::default();
+        if self.stray_coercion {
+            report.coercions.push(Coercion {
+                key: key("test.flag"),
+                requested: Value::Bool(false),
+                applied: Value::Bool(true),
+                reason: "a key the request does not name".to_owned(),
+            });
+        }
         for (k, c) in &request.constraints {
             let Constraint::Eq { value: v } = c else { continue };
             if let (true, Some(step), Value::Num(x)) = (k.as_str() == "test.grid", self.grid, v) {
@@ -460,7 +490,10 @@ pub fn test_provider_descriptor() -> ModuleDescriptor {
         id: mid("ezsdr.test.provider"),
         version: Version::new(1, 0, 0),
         kernel_api: Version::new(4, 0, 0),
-        roles: vec![Role::Provider],
+        // MA-1: a Module may hold several roles. This double is the Run's Authority in
+        // every fixture that plans, and SB-24 reads the role off the descriptor of the
+        // Module the profile binds, as MA-25 does for a Sink.
+        roles: vec![Role::Provider, Role::Authority],
         vocabularies: vec![ezsdr_kernel::module_api::VocabularyRequirement {
             id: ns("test"),
             req: ezsdr_kernel::module_api::VersionReq(Version::new(1, 0, 0)),
@@ -669,6 +702,16 @@ pub fn recorder_component(contract: DataContractId) -> ComponentDescriptor {
             hash: some_hash("recorder"),
         },
     }
+}
+
+/// A component with one `out` port, for a link whose **consumer** is a resource port
+/// — Vision §7's `PHY Processor -> Radio Port`, the TX direction.
+pub fn source_component(contract: DataContractId) -> ComponentDescriptor {
+    let mut c = recorder_component(contract.clone());
+    c.id = id("source");
+    c.ports = vec![Port { name: "out".to_owned(), direction: PortDirection::Out, contract }];
+    c.implementation.id = "source".to_owned();
+    c
 }
 
 // ---------------------------------------------------------------- the host clock

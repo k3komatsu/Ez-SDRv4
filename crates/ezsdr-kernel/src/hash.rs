@@ -205,6 +205,23 @@ fn write_number(n: &serde_json::Number) -> Result<String, HashError> {
     ecmascript_number(f)
 }
 
+/// Whether an integer and a float are **one value**: whether they canonicalise to
+/// one string, which under OV-15a is the same question as whether they hash the same.
+///
+/// SB-6 and SC-2 both state the criterion as "share one canonical form", with the
+/// parenthetical that this holds while `|v| ≤ 2^53`. The parenthetical is not an iff,
+/// and implementing it instead of the criterion was wrong in both directions:
+/// `Int(10^16)` and `Num(1e16)` write the same `10000000000000000` and were held
+/// unequal, while `Int(2^60)` and `Num(2^60 as f64)` write `1152921504606846976` and
+/// `1152921504606847000` — two hashes — and compared equal under the exact ordering,
+/// so an `Eq` constraint matched a capability the content hash calls a different
+/// value. Asking the canonicaliser is exact in both directions by construction.
+///
+/// Rule: SB-6, SC-2, OV-15, OV-15a.
+pub(crate) fn same_canonical_number(a: i64, b: f64) -> bool {
+    ecmascript_number(b).is_ok_and(|written| written == a.to_string())
+}
+
 /// ECMAScript `Number::toString` as RFC 8785 §3.2.2.3 specifies it: plain decimal
 /// for `1e-7 ≤ |x| < 1e21`, exponential otherwise, `-0` written as `0`.
 fn ecmascript_number(x: f64) -> Result<String, HashError> {

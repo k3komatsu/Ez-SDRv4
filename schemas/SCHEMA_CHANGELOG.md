@@ -32,6 +32,18 @@ stock JCS crate cannot be dropped in later (OV-15, OV-15a).
 as an exact decimal by the canonicaliser; consumers are required to use a 64-bit-safe
 parser (X3).
 
+## v1 — 2026-09-22 — pre-freeze revision, adopted the Fable second-opinion findings
+
+Still **version 1**, for the reason the sections below give.
+
+- `admission_result`, `manifest`: `coercions_preview` becomes a list of
+  `PreviewedCoercion { resource, coercion }` rather than a bare `Coercion` list. A
+  `Coercion` names a key and two values, because a Provider answers about the request
+  it was handed; the Kernel's own preview has to say which Spec resource it was
+  computed for. Keyed on the key alone, `prepare`'s SB-44 check charged one
+  resource's coercion to every other resource constraining that key and refused the
+  ordinary two-channel Spec whenever one channel coerced (finding F1).
+
 ## v1 — 2026-09-22 — pre-freeze revision, adopted review findings (second round)
 
 Still version 1, for the reason the entry below gives.

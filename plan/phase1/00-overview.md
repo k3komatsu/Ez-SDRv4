@@ -611,6 +611,130 @@ this question decides whether it survives Phase 1.
 
 ---
 
+### Findings from the eighth pass (a cross-family second opinion), for the owner's verdict
+
+The eighth pass was a **second opinion by a different model family** on the whole crate,
+under the exception `AGENTS.md` §8 now carries: the first five passes were one family's,
+and the two defect classes they kept producing are the kind a reviewer inherits from the
+author. It found **1 P0, 6 P1 and 10 P2**, every one executed against a scratch copy
+rather than inferred. Nine were verified independently before anything was changed.
+
+The P0 was the **fourth** defect in `collect_prepare`, and it appeared *inside the third
+one's fix*. The sixth pass had moved MA-12's re-match to each resource's own report; the
+seventh had keyed the coercion exclusion on the Kernel's own preview. Neither noticed
+that `coercions_preview` is a flat `Vec<Coercion>` and that a `Coercion` names a key and
+two values and no resource — so no lookup over it can be per-resource. Keyed on the key
+alone, one resource's coercion was charged to every other resource constraining that
+key: two channels asking their own line's grid, one of which coerces, and the one that
+was **satisfied directly** — never passed to `coerce` at all — is refused for not
+applying a value nobody computed for it. That is the ordinary two-channel Spec, which is
+the first thing Phase 2 writes. The structural fix is that the Kernel's own record now
+says which resource it was computed for (`PreviewedCoercion`), which is what
+`RejectedConstraint` beside it already did.
+
+Two P1s were of the "pasted, not replaced" kind, both introduced by the **previous**
+commit: `check_binding_names` carried D44's binding-description block *and* the pointer
+comparison D44 says was removed, plus the SB-22 `sink` check twice. The stale block
+refuses what D44 permits — two Provider objects reporting one `instance().id` under one
+binding description, which is the runtime handing the Kernel a fresh handle per name.
+
+The other three P1s were rules enforced differently from their text. `derive_class` read
+`ezsdr.time.class` through `and_then(as_str)`, so of MA-41's three named refusals —
+absent, non-string, unrecognised — only the third fired, and the two the clause names
+*first* planned as `Simulation`, the class that may claim determinism. `declared_links`
+resolved a link's contract through `graph.components` alone and fell back to
+`ezsdr.control`, so every link whose consumer is a resource port — Vision §7's own `PHY
+Processor → Radio Port` — reached the Manifest and a Link Module's `create` carrying a
+contract the Kernel had already checked as something else. A malformed `ezsdr.arm_order`
+entry was skipped rather than refused, so a misspelled `before` left the PPS source
+armed second: the v3 start-up failure SB-39 exists to prevent, with no diagnostic.
+
+The gate produced **five** more executed evasions, and this time one of them was live in
+the shipped crate rather than a demonstration: `is_testing_gated` matched any `cfg` whose
+tokens *contain* `testing`, so `#[cfg(not(feature = "testing"))]` — the **default** build
+— was skipped whole. The others were `pub use {…}` (a brace group named no root), `pub
+extern crate` (the item fell through the match), `include!` of a non-`.rs` file, and two
+inline modules with same-named items collapsing onto one allow-list key, because the key
+encoded depth rather than the module's name. All five are now caught, verified by
+injection.
+
+**Applied** without a rule question: the P0; both stale blocks; MA-41's three refusals;
+`declared_links` through `source_contract`; `arm_order`'s refusals; `Value`/`Scalar`
+equality and the matcher's `Eq` through the canonicaliser; SB-11's `major`; RS-52 on a
+scheduled `UpdateParameter`; SB-24's Authority role read off the registry as MA-25 reads
+a Sink's; SC-30b's carry held for the next Gap; a coercion of an unrequested key refused
+at `validate` as D42 refused it at `prepare`; the five gate holes; and three tests whose
+assertions were vacuous or were the implementation rather than the rule.
+
+| # | Where | What the specs leave unsettled | Why it matters | Verdict |
+|---|---|---|---|---|
+| D45 | 04 RS-17, 03 SB-30 | Whether `Admitter::admit` is the implementation or a fourth copy of it | RS-17 names two Phase 1 call sites — "`validate()` calls it with a Spec's requested configuration, `prepare()` with the applied one" — and **neither does**; `admit` has no caller in `src/` at all. The three copies of the sequence already differ: `validate` accumulates every coercion violation and `admit` returns on the first, and the update-class step exists only in `admit`. Routing both through it is not mechanical, because `validate` accumulates by SB-38's design and `collect_prepare` runs the prepare-stage checks once over the **merged** configuration, which per-fragment admission would change into an over-refusal | open |
+| D46 | 04 RS-14, RS-51, OV-21 | Whether the Kernel may supply the meaning of a Session verb | `session::compile` hard-codes the value a `capture` verb sets (`Bool(true)`) and `LatePolicy::SendAsapAndFlag` for every Session-compiled `TxBurst`. `CompileRule` carries neither, so two Vocabulary-level decisions live in Core. Either `CompileRule` carries them, or a rule says the Kernel's default is normative | open |
+| D47 | 02 SC-1, 03 SB-15 | Whether a link's port **directions** are checked | `Port.direction` is carried through the whole compile path and never read: a link `a.in → b.in` validates and plans. No rule states the obligation, so this is a rule that should exist rather than a rule unenforced — and a Phase 2 Link Module would be asked to carry it | open |
+| D48 | 04 RS-4, RS-18 | Whether two Run predicates are Phase 1's or Phase 2's | `RunStateMachine::check_running` (RS-18) and `check_structural_mutation` (RS-4) are correct predicates with no caller in `src/` and no `D`-row marking them forward, unlike `Lease::validate` (D20). The dispatch loop that would call them is Phase 2's. Either they get a forward marker, or the rules name a Phase 1 carrier | open |
+| D49 | 03 SB-39 | Whether a malformed `ezsdr.arm_order` entry is an error | Applied as a refusal on the document's own evidence — SB-39 exists because a silently wrong start-up order is the v3 failure — but SB-39's text says only that edges "come from" the section. MA-41 states the clause explicitly for the sections the Kernel reads; SB-39 should carry the same sentence, or the refusal should be withdrawn | amend SB-39, pending the owner |
+| D50 | 03 SB-6, 02 SC-2, OV-15a | The parenthetical that ties equality to 2^53 | Both rules define "one value" as **one canonical form** and then gloss it as "which holds exactly while \|v\| ≤ 2^53". The gloss is not an iff, and implementing it instead of the criterion was wrong in both directions: `Int(10^16)` and `Num(1e16)` write one canonical form and were held unequal, while `Int(2^60)` and `Num(2^60 as f64)` write two and compared equal under the exact ordering — so `Eq` matched a capability the content hash calls a different value. The code now asks the canonicaliser. The gloss should be corrected or dropped, since it is the sentence that produced the bug | amend, pending the owner |
+
+A verification pass over the applied fix set found **2 P0, 1 P1 and 2 P2 — both P0s in
+the fixes themselves**, which is the third time in this crate that applying a verdict
+introduced the defect it was applying.
+
+The first was the RS-52 check above: it resolved a scheduled `UpdateParameter`'s class
+from `graph.components[].params` before the key's `KeyDecl`, and SB-2 says in as many
+words that the `KeyDecl` is "the only place it can be … a Provider's parameters are
+Vocabulary keys and never a `ComponentDescriptor`'s `params`". Since a schedule target
+is a Spec resource by SB-16 — checked five lines below in the same loop — the first
+source consulted was the one the rule excludes. It both admitted a key with no declared
+class, if any component happened to name it, and refused a key that states exactly what
+its Vocabulary declares. The second was SC-30b's carried count: it was drained only at a
+later jump, so a stream whose last drop is followed by a contiguous block and then ends
+lost it at `finish` — the same loss, moved from mid-stream to end-of-stream.
+
+The P1 is pre-existing and was the reason to look: `collect_prepare` did not refuse an
+`AdmissionResult` that is not this Spec's, although `plan` does and although
+`collect_prepare`'s own comment says it is reachable without `plan`. With
+`AdmissionResult::default()` — which `is_admitted()` accepts — every `matched` lookup
+missed and the whole MA-12/SB-44 block, including the P0 fix above, was skipped in
+silence. Guarded now, as SB-39 guards the stage before.
+
+A second verification pass over those five found **1 P1**, again in the fix: SC-30b gives
+the carry three jobs — its flags derive the cause, its `lost` counts sum, its block count
+reaches `link_dropped` — and a contiguous push was holding only the third. The trailing
+Gap the fix had just started emitting therefore attributed a device overflow
+(`RESTARTED`, `lost: 150`) to host-side link loss with the count discarded, which is the
+failure SC-20b exists to prevent. The whole carry is held now. In the same place, the
+`GapFlagWithoutJump` check judged the **merged** flags, so a carried `GAP_BEFORE` refused
+a delivered block that was contiguous and correct; it judges the delivered block's own
+flags, which is what the rule is about.
+
+A third verification pass, narrowed to `continuity.rs` because that rework had been
+reviewed by nobody and contained a **relaxation** made on this author's own reading —
+`GapFlagWithoutJump` now judges the delivered block's own `GAP_BEFORE` rather than the
+merged set — returned **no P0 and no P1**, and confirmed the relaxation against SC-13's
+definition of the flag as a claim about *this* block, `StreamError::GapFlagWithoutJump`'s
+own wording, and spec 02's test table. It found two P2s, both applied: the held carry was
+cleared before one of `push`'s seven error returns, where the other six leave it for
+`finish`; and the `Mixed` guard's change to read the carried block count had no
+discriminating test, since a Gap that reports `link_dropped` cannot also claim that
+nothing explains the shortfall. Five rows were added to spec 02's test table for the new
+`sc_30b_*` and `sc_31_*` tests.
+
+Also applied: a stray coercion is no longer recorded in `coercions_preview` at all, only
+refused — leaving it there kept both harms the refusal exists to prevent; a glob `pub
+use` is refused by the surface gate, because the root check short-circuits at the first
+segment and `pub use crate::internal::*;` therefore named a module of this crate and put
+everything behind it on the surface with no allow-list line; and the gate's three
+predicates gained direct negative tests, since the five evasions had been verified only
+by transient injection.
+
+Four more OV-3 dispositions for exit criterion 2's table, found by reading test bodies:
+`rs_10_abort_during_orderly_escalates` asserts on a fixture it built, because nothing in
+`src/` records the escalation cause; `rs_03_failure_at_each_stage_reaches_cleanup` and
+`rs_11_manifest_for_every_terminal_run` assert on `manifest_fixture(...)`, and RS-11's "a
+Manifest is written" is not Kernel behaviour in Phase 1; `ma_39_island_admission` never
+reaches the within-Island memory-domain branch. Each needs a marker or a carrier, not a
+prefix.
+
 ## 12. What happens at acceptance (procedure only)
 
 1. `git mv plan/phase1/0{1,2,3,4,5}-*.md design/` — accepted normative text lives in `design/` per `AGENTS.md` §2. This file stays in `plan/phase1/`.

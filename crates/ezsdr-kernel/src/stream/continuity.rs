@@ -125,6 +125,18 @@ pub struct ContinuityBuilder {
     pending: Vec<Option<(TimePoint, GapCause)>>,
     /// The previous pushed block's mask; empty before the first push (SC-31d).
     was_valid: super::ChannelMask,
+    /// What a drop-class link refused that no Gap has recorded yet (SC-30b).
+    ///
+    /// Under `DropNewest` the refused block is newer than everything queued, so the
+    /// block that follows the drop is **contiguous** with what came before: the
+    /// consumer reads a non-empty `DropCarry` and hands it to a push that opens no
+    /// gap. SC-30b gives the carry three jobs — its flags derive the cause, its
+    /// `lost` counts sum, its block count reaches `link_dropped` — and a contiguous
+    /// push has nowhere to put any of them, so the whole carry is held for the next
+    /// Gap rather than any part of it being dropped. Holding only the block count
+    /// wrote the next Gap as a plain `LinkDrop` with no `lost`, which positively
+    /// attributes a device overflow to host-side link loss.
+    pending_carry: DropCarry,
     gaps: Vec<Gap>,
     channel_gaps: Vec<ChannelGap>,
 }
@@ -157,8 +169,22 @@ impl ContinuityBuilder {
             valid: vec![Vec::new(); channels as usize],
             pending: vec![None; channels as usize],
             was_valid: super::ChannelMask(0),
+            pending_carry: DropCarry::default(),
             gaps: Vec::new(),
             channel_gaps: Vec::new(),
+        }
+    }
+
+    /// One carry from two, by SC-20b's own rule: flags union, `lost` counts summed
+    /// where present, block counts added (SC-20b, SC-30b).
+    fn merge_carries(a: &DropCarry, b: &DropCarry) -> DropCarry {
+        DropCarry {
+            flags: a.flags | b.flags,
+            lost: match (a.lost, b.lost) {
+                (None, None) => None,
+                (x, y) => Some(x.unwrap_or(0).saturating_add(y.unwrap_or(0))),
+            },
+            blocks: a.blocks.saturating_add(b.blocks),
         }
     }
 
@@ -194,9 +220,12 @@ impl ContinuityBuilder {
                 carry,
             ));
         }
+        // Anything a previous contiguous push had to hold belongs to the next Gap,
+        // so it is part of the carry this push is judged against (SC-30b).
+        let carried = ContinuityBuilder::merge_carries(&self.pending_carry, &carry);
         // SC-30b: the carry's flags and counts merge into this block's.
-        let flags = h.flags | carry.flags;
-        let lost = match (h.lost, carry.lost) {
+        let flags = h.flags | carried.flags;
+        let lost = match (h.lost, carried.lost) {
             (None, None) => None,
             (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
         };
@@ -215,15 +244,23 @@ impl ContinuityBuilder {
                 std::cmp::Ordering::Less => {
                     return Err((StreamError::TimeOverlap { expected, got: t }, carry));
                 }
-                std::cmp::Ordering::Equal if flags.contains(BlockFlags::GAP_BEFORE) => {
+                // `h.flags`, not the merged set: the claim being checked is the
+                // **delivered block's**. A `GAP_BEFORE` the carry brought describes a
+                // block the link dropped, which is exactly the case where the
+                // delivered block is contiguous and correct, so judging the merged
+                // flags refused a well-formed push.
+                std::cmp::Ordering::Equal if h.flags.contains(BlockFlags::GAP_BEFORE) => {
                     return Err((StreamError::GapFlagWithoutJump, carry));
                 }
-                std::cmp::Ordering::Equal => {}
+                // Contiguous, so there is no Gap to record the carry in; it is held
+                // whole for the next one rather than discarded (SC-30b).
+                std::cmp::Ordering::Equal => self.pending_carry = carried,
                 std::cmp::Ordering::Greater => {
                     let jump = match t.checked_sub(expected) {
                         Ok(d) => d.ticks as u64,
                         Err(e) => return Err((StreamError::Time(e), carry)),
                     };
+                    let dropped = carried.blocks;
                     if !flags.contains(BlockFlags::GAP_BEFORE) {
                         if self.lossless {
                             return Err((StreamError::JumpWithoutGapFlag, carry));
@@ -233,7 +270,7 @@ impl ContinuityBuilder {
                             len: jump,
                             lost: None,
                             cause: GapCause::LinkDrop,
-                            link_dropped: carry.blocks,
+                            link_dropped: dropped,
                         });
                     } else {
                         let cause = if flags.contains(BlockFlags::RESTARTED) {
@@ -243,7 +280,7 @@ impl ContinuityBuilder {
                         } else {
                             match lost {
                                 None => GapCause::Unknown,
-                                Some(n) if n < jump && carry.blocks == 0 && !self.lossless => {
+                                Some(n) if n < jump && carried.blocks == 0 && !self.lossless => {
                                     GapCause::Mixed { stream_lost: n }
                                 }
                                 Some(_) => GapCause::Stream,
@@ -254,9 +291,16 @@ impl ContinuityBuilder {
                             len: jump,
                             lost,
                             cause,
-                            link_dropped: carry.blocks,
+                            link_dropped: dropped,
                         });
                     }
+                    // Cleared only here, where the push has committed to a Gap that
+                    // carries it. Clearing before the `JumpWithoutGapFlag` return
+                    // above destroyed the held carry on that one path, while every
+                    // other rejected push leaves it for `finish` to fold — a
+                    // rejected push returns the **caller's** carry, never the held
+                    // one (SC-30b, SC-30c).
+                    self.pending_carry = DropCarry::default();
                     // SC-31d: a pending break ends where the stream gap begins; the
                     // samples after that belong to the stream's own Gap.
                     self.flush_pending_at(expected);
@@ -337,6 +381,10 @@ impl ContinuityBuilder {
     pub fn finish(mut self, carry: DropCarry) -> ContinuityMap {
         let zero = TimePoint::new(self.domain, 0);
         let end = self.end.unwrap_or(zero);
+        // What a contiguous push had to hold is carried forward, so the trailing Gap
+        // takes it too — a stream whose last drop is followed by a contiguous block
+        // and then ends has no other Gap to record it in.
+        let carry = ContinuityBuilder::merge_carries(&self.pending_carry, &carry);
         if carry.blocks > 0 || !carry.flags.is_empty() || carry.lost.is_some() {
             self.gaps.push(Gap {
                 // SC-30c: **zero-extent**, and `end` does not move, because no

@@ -267,9 +267,7 @@ impl PartialEq for Value {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Num(a), Value::Num(b)) => a == b,
             (Value::Int(a), Value::Num(b)) | (Value::Num(b), Value::Int(a)) => {
-                b.fract() == 0.0
-                    && b.abs() <= 9_007_199_254_740_992.0
-                    && i64::try_from(*b as i128).is_ok_and(|w| w == *a)
+                crate::hash::same_canonical_number(*a, *b)
             }
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,

@@ -106,7 +106,7 @@ const WITHDRAWN: [&str; 6] = ["SB-25a", "SB-28", "SB-32", "RS-37", "MA-4", "MA-4
 /// different files would otherwise collapse and the later one would inherit the
 /// earlier one's allow-list entry and doc comment — which is how a leak walks past
 /// this check (OV-23).
-fn allow_key(path: &Path, frames: &[bool], name: &str) -> String {
+fn allow_key(path: &Path, inline_mods: &[String], name: &str) -> String {
     let module = path
         .strip_prefix(crate_dir().join("src"))
         .unwrap_or(path)
@@ -114,10 +114,11 @@ fn allow_key(path: &Path, frames: &[bool], name: &str) -> String {
         .to_string_lossy()
         .replace(['/', '\\'], "::");
     let module = module.strip_suffix("::mod").unwrap_or(&module).to_owned();
-    // Inline `mod` blocks nest under the file's module. Their names are not tracked
-    // individually; the depth is enough to keep an inline module's items from
-    // colliding with the file's own.
-    let inline = "inline::".repeat(frames.len());
+    // Inline `mod` blocks nest under the file's module **by name**. Keying them by
+    // depth alone collapsed two inline modules of one file that declare a same-named
+    // item onto one key, so the second inherited the first's allow-list entry and the
+    // gate reported one missing item for two.
+    let inline: String = inline_mods.iter().map(|m| format!("{m}::")).collect();
     if module == "lib" {
         format!("{inline}{name}")
     } else {
@@ -125,18 +126,6 @@ fn allow_key(path: &Path, frames: &[bool], name: &str) -> String {
     }
 }
 
-/// Module-level `pub` items, which is what the allow-list governs: a method on a
-/// public type is not a Kernel concept of its own (OV-23b).
-///
-/// "Module level" is tracked by brace depth, not by indentation: an item inside an
-/// inline `mod` — public or private — is module level and is scanned, while an item
-/// inside an `impl`, a `fn` or a `trait` is a member and is not. Scanning only
-/// column-0 lines let an inline `pub mod` hide any number of public items behind one
-/// allow-list line, and let `mod hidden { pub struct X; } pub use hidden::X;` add a
-/// public Kernel item behind none at all.
-///
-/// A `mod` carrying `#[cfg(feature = "testing")]` is skipped whole, which is the one
-/// allow-list line OV-20 and OV-23 give the feature.
 /// Module-level `pub` items, which is what the allow-list governs: a method on a
 /// public type is not a Kernel concept of its own (OV-23b).
 ///
@@ -165,7 +154,7 @@ fn module_level_public_items() -> BTreeMap<String, (PathBuf, String)> {
         let file = syn::parse_file(&text).unwrap_or_else(|e| {
             panic!("OV-23: {} does not parse, so its surface is unknown: {e}", path.display())
         });
-        walk_items(&path, &file.items, 0, &modules, &mut out);
+        walk_items(&path, &file.items, &[], &modules, &mut out);
     }
     out
 }
@@ -191,23 +180,40 @@ fn has_attr(attrs: &[syn::Attribute], name: &str) -> bool {
     attrs.iter().any(|a| a.path().is_ident(name))
 }
 
+/// Whether an item is gated **on** the `testing` feature, which OV-20 and OV-23 give
+/// one allow-list line instead of an entry per item.
+///
+/// The predicate is an exact match on `feature = "testing"`, not a substring search
+/// for `testing`: `#[cfg(not(feature = "testing"))]` contains the word and is the
+/// **default** build, so a substring match skipped items that ship. Anything else
+/// mentioning the feature is scanned normally, which is the safe direction — it is
+/// then required on the allow-list like any other public item.
 fn is_testing_gated(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
         a.path().is_ident("cfg")
-            && matches!(&a.meta, syn::Meta::List(l) if l.tokens.to_string().contains("testing"))
+            && matches!(&a.meta, syn::Meta::List(l)
+                if l.tokens.to_string().replace(' ', "") == "feature=\"testing\"")
     })
 }
 
 fn walk_items(
     path: &Path,
     items: &[syn::Item],
-    depth: usize,
+    inline_mods: &[String],
     modules: &BTreeSet<String>,
     out: &mut BTreeMap<String, (PathBuf, String)>,
 ) {
     for item in items {
         // Expansion-time constructs this parser cannot see into.
         if let syn::Item::Macro(m) = item {
+            // `include!("x.in")` splices a file this scan never opens: `rust_sources`
+            // collects `.rs`, and the macro body it can see is one string literal.
+            assert!(
+                !m.mac.path.is_ident("include"),
+                "OV-23: {} uses `include!`, which splices items from a file this \
+                 scan does not read",
+                path.display()
+            );
             let body = m.mac.tokens.to_string();
             assert!(
                 !body.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == "pub"),
@@ -221,6 +227,17 @@ fn walk_items(
         if matches!(item, syn::Item::ForeignMod(_)) {
             panic!("OV-23: {} declares an extern block, whose surface this scan does not model",
                 path.display());
+        }
+        // `pub extern crate serde_json as x;` puts a whole dependency on the surface
+        // under a name this scan read as no item at all, because `ExternCrate` fell
+        // through to the catch-all arm below.
+        if let syn::Item::ExternCrate(e) = item {
+            assert!(
+                !matches!(e.vis, syn::Visibility::Public(_)),
+                "OV-23: {} re-exports a whole crate with `pub extern crate`",
+                path.display()
+            );
+            continue;
         }
 
         let (attrs, vis, name): (&[syn::Attribute], Option<&syn::Visibility>, Option<String>) =
@@ -245,13 +262,31 @@ fn walk_items(
                 continue;
             }
             // A dependency's type must not reach the surface unlisted.
-            let first = first_use_segment(&u.tree);
+            // A glob names no item the allow-list can hold, and the root check
+            // short-circuits at the first segment — so `pub use crate::internal::*;`
+            // named a module of this crate and put everything behind it on the
+            // surface with no allow-list line at all.
             assert!(
-                matches!(first.as_str(), "crate" | "self" | "super" | "")
-                    || modules.contains(&first),
-                "OV-23: {} re-exports `{first}`, which is not a module of this crate",
+                !has_glob(&u.tree),
+                "OV-23: {} has a glob `pub use`, which puts items on the surface that \
+                 this scan cannot enumerate — re-export them by name",
                 path.display()
             );
+            let mut roots = Vec::new();
+            use_roots(&u.tree, &mut roots);
+            // A brace group has one root per branch and a glob has none it can name.
+            // Returning the empty string for both put them in the accepted set, so
+            // `pub use {serde_json::Value as X};` re-exported a dependency's type past
+            // the check that exists to refuse exactly that.
+            assert!(!roots.is_empty(), "OV-23: {} has a `pub use` with no root", path.display());
+            for first in roots {
+                assert!(
+                    matches!(first.as_str(), "crate" | "self" | "super")
+                        || modules.contains(&first),
+                    "OV-23: {} re-exports `{first}`, which is not a module of this crate",
+                    path.display()
+                );
+            }
             continue;
         }
 
@@ -266,25 +301,46 @@ fn walk_items(
                 path.display()
             );
             if let Some((_, inner)) = &m.content {
-                walk_items(path, inner, depth + 1, modules, out);
+                let mut nested = inline_mods.to_vec();
+                nested.push(m.ident.to_string());
+                walk_items(path, inner, &nested, modules, out);
             }
         }
 
         if matches!(vis, Some(syn::Visibility::Public(_))) {
             if let Some(name) = name {
-                let frames = vec![true; depth];
-                out.insert(allow_key(path, &frames, &name), (path.to_path_buf(), doc_of(attrs)));
+                out.insert(
+                    allow_key(path, inline_mods, &name),
+                    (path.to_path_buf(), doc_of(attrs)),
+                );
             }
         }
     }
 }
 
-fn first_use_segment(tree: &syn::UseTree) -> String {
+/// Whether a `use` tree re-exports with `*` anywhere inside it.
+fn has_glob(tree: &syn::UseTree) -> bool {
     match tree {
-        syn::UseTree::Path(p) => p.ident.to_string(),
-        syn::UseTree::Name(n) => n.ident.to_string(),
-        syn::UseTree::Rename(r) => r.ident.to_string(),
-        syn::UseTree::Glob(_) | syn::UseTree::Group(_) => String::new(),
+        syn::UseTree::Glob(_) => true,
+        syn::UseTree::Path(p) => has_glob(&p.tree),
+        syn::UseTree::Group(g) => g.items.iter().any(has_glob),
+        syn::UseTree::Name(_) | syn::UseTree::Rename(_) => false,
+    }
+}
+
+/// Every first segment a `use` tree names: one per branch of a brace group, and the
+/// unusable `*` for a glob, so neither can pass the module check by naming nothing.
+fn use_roots(tree: &syn::UseTree, out: &mut Vec<String>) {
+    match tree {
+        syn::UseTree::Path(p) => out.push(p.ident.to_string()),
+        syn::UseTree::Name(n) => out.push(n.ident.to_string()),
+        syn::UseTree::Rename(r) => out.push(r.ident.to_string()),
+        syn::UseTree::Glob(_) => {}
+        syn::UseTree::Group(g) => {
+            for t in &g.items {
+                use_roots(t, out);
+            }
+        }
     }
 }
 
@@ -496,4 +552,66 @@ fn ov_23_testing_feature_items_are_excluded_by_one_line() {
     // public surface of the default build really does not carry it.
     let time_mod = std::fs::read_to_string(crate_dir().join("src/time/mod.rs")).expect("readable");
     assert!(time_mod.contains("#[cfg(feature = \"testing\")]\npub use authority::ManualTimeAuthority;"));
+}
+
+/// The gate's own predicates, against the spellings that walked past them.
+///
+/// Five evasions were demonstrated against this file and fixed here; without a
+/// fixture the fixes are only as good as the reading that produced them, and one of
+/// the five was open in the **shipped** crate rather than a demonstration. These pin
+/// the three predicates whose bug was in the predicate itself; `extern crate` and
+/// `include!` are single match arms whose absence the walker's own asserts state.
+///
+/// Rule: OV-23, X11.
+#[test]
+fn ov_23_the_gate_predicates_answer_the_demonstrated_evasions() {
+    let attrs_of = |src: &str| -> Vec<syn::Attribute> {
+        let f: syn::File = syn::parse_str(src).expect("the fixture parses");
+        match f.items.into_iter().next().expect("one item") {
+            syn::Item::Mod(m) => m.attrs,
+            _ => panic!("the fixture declares a mod"),
+        }
+    };
+    // The feature gate OV-20 gives one allow-list line.
+    assert!(is_testing_gated(&attrs_of(r#"#[cfg(feature = "testing")] mod x {}"#)));
+    // And its negation, which is the **default** build: matching any `cfg` whose
+    // tokens contain "testing" skipped items that ship.
+    assert!(!is_testing_gated(&attrs_of(r#"#[cfg(not(feature = "testing"))] mod x {}"#)));
+    assert!(!is_testing_gated(&attrs_of(r#"#[cfg(all(unix, feature = "testing"))] mod x {}"#)));
+    assert!(!is_testing_gated(&attrs_of("mod x {}")));
+
+    let use_tree = |src: &str| -> syn::UseTree {
+        let f: syn::File = syn::parse_str(src).expect("the fixture parses");
+        let syn::Item::Use(u) = f.items.into_iter().next().expect("one item") else {
+            panic!("the fixture declares a use")
+        };
+        u.tree
+    };
+    let roots = |src: &str| -> Vec<String> {
+        let mut out = Vec::new();
+        use_roots(&use_tree(src), &mut out);
+        out
+    };
+    assert_eq!(roots("pub use crate::spec::Value;"), ["crate"]);
+    // A brace group has one root per branch. Returning the empty string for the group
+    // put it in the accepted set, so a dependency's type re-exported inside braces
+    // walked past the check written to refuse exactly that.
+    assert_eq!(roots("pub use {serde_json::Value as X, crate::spec::Key};"), ["serde_json", "crate"]);
+    assert_eq!(roots("pub use crate::{spec::Key, id::Ident};"), ["crate"]);
+    // A glob is refused wherever it sits: the root check short-circuits at the first
+    // segment, so `pub use crate::internal::*;` named a module of this crate and put
+    // every item behind it on the surface with no allow-list line at all.
+    assert!(has_glob(&use_tree("pub use crate::internal::*;")));
+    assert!(has_glob(&use_tree("pub use crate::{spec::Key, id::*};")));
+    assert!(!has_glob(&use_tree("pub use crate::{spec::Key, id::Ident};")));
+
+    // Two inline modules of one file that declare a same-named item are two items.
+    // Keying on depth collapsed them onto one key, so the second inherited the
+    // first's allow-list entry and the gate reported one missing item for two.
+    let f = std::path::Path::new("src/x.rs");
+    assert_ne!(
+        allow_key(f, &["m1".to_owned()], "Dup"),
+        allow_key(f, &["m2".to_owned()], "Dup")
+    );
+    assert_ne!(allow_key(f, &[], "Dup"), allow_key(f, &["m1".to_owned()], "Dup"));
 }

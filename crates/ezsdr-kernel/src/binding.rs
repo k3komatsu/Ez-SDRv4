@@ -161,6 +161,17 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
             found: format!("{:?}", b.kind()),
         })
     };
+    // `Eq` and set membership ask whether two values are **one value**, which SB-6
+    // defines as one canonical form and OV-15a ties to one content hash. Ordering is a
+    // different relation: it compares magnitudes exactly, and above 2^53 an integer and
+    // a float of the same magnitude have two canonical forms and two hashes, so
+    // `cmp == Equal` matched a capability the Manifest records as a different value.
+    // The kind check still runs through `cmp`, because a capability declared in the
+    // wrong kind is malformed rather than merely unequal.
+    let same = |a: &Value, b: &Value| -> Result<bool, SpecError> {
+        cmp(a, b)?;
+        Ok(a == b)
+    };
     let within = |v: &Value, lo: Option<&Value>, hi: Option<&Value>| -> Result<bool, SpecError> {
         if let Some(lo) = lo {
             if cmp(v, lo)? == Less {
@@ -177,14 +188,14 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
     Ok(match (c, cap) {
         (Constraint::Present, _) => true,
 
-        (Constraint::Eq { value: v }, CapabilityValue::One { value: x }) => cmp(v, x)? == Equal,
+        (Constraint::Eq { value: v }, CapabilityValue::One { value: x }) => same(v, x)?,
         (Constraint::Eq { value: v }, CapabilityValue::Range { min, max }) => {
             within(v, Some(min), Some(max))?
         }
         (Constraint::Eq { value: v }, CapabilityValue::AnyOf { values: xs }) => {
             let mut hit = false;
             for x in xs {
-                hit |= cmp(v, x)? == Equal;
+                hit |= same(v, x)?;
             }
             hit
         }
@@ -216,7 +227,7 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
         (Constraint::Set { values: s }, CapabilityValue::One { value: x }) => {
             let mut hit = false;
             for v in s {
-                hit |= cmp(v, x)? == Equal;
+                hit |= same(v, x)?;
             }
             hit
         }
@@ -231,7 +242,7 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
             let mut hit = false;
             for v in s {
                 for x in xs {
-                    hit |= cmp(v, x)? == Equal;
+                    hit |= same(v, x)?;
                 }
             }
             hit
@@ -388,6 +399,26 @@ impl AdmissionCheckRegistry {
     }
 }
 
+/// A coercion the Kernel previewed by calling one Provider's `coerce`, together with
+/// the Spec resource whose request produced it.
+///
+/// A `Coercion` names a key and two values and nothing else, because a Provider
+/// answers about the request it was handed. The Kernel's own record has to say more:
+/// two resources may constrain one key on two different devices, and one of them
+/// coercing says nothing about the other. Keyed on the key alone, `prepare`'s SB-44
+/// check charged one resource's coercion to every resource naming that key and
+/// refused a value `coerce` was never asked about — so the resource name is part of
+/// the record, as it already is in [`RejectedConstraint`].
+///
+/// Rule: SB-7, SB-38, SB-44.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PreviewedCoercion {
+    /// The Spec resource whose `requires` map was coerced (SB-44).
+    pub resource: Ident,
+    /// What that resource's Provider said it would change (SB-7).
+    pub coercion: Coercion,
+}
+
 /// What `validate(spec, binding, registry)` returns. It touches no hardware.
 ///
 /// Rule: SB-38.
@@ -404,7 +435,7 @@ pub struct AdmissionResult {
     pub violations: Vec<Violation>,
     /// What the Providers said they would change (SB-7, SB-44).
     #[serde(default)]
-    pub coercions_preview: Vec<Coercion>,
+    pub coercions_preview: Vec<PreviewedCoercion>,
     /// Non-fatal notes (SB-38).
     #[serde(default)]
     pub warnings: Vec<Warning>,

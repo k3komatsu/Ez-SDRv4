@@ -535,8 +535,26 @@ pub fn validate(
     // SB-34: node -> the resource name that bound it, so a collision can name both.
     let mut taken: BTreeMap<ResourceId, Ident> = BTreeMap::new();
 
-    // Semantic validation (SB-2, SB-15, SB-17, SB-18, SB-25a).
+    // Semantic validation (SB-2, SB-11, SB-15, SB-17, SB-18, SB-25a).
     spec.check_key_prefixes()?;
+    // SB-11: `requirements.vocabularies` lists the Vocabulary **majors** this Spec's
+    // keys belong to. Nothing read `major`, so a Spec declaring `test 2` ran against
+    // the registered `test 1.0.0` and SB-11's list was a field with no reader — the
+    // same shape D40 withdrew `constraints_hit` for.
+    for req in &spec.requirements.vocabularies {
+        let v = inputs.registry.vocabulary(&req.id).ok_or_else(|| SpecError::Structural {
+            reason: format!("SB-11: Vocabulary {} is not registered", req.id),
+        })?;
+        if v.version.major != req.major {
+            return Err(SpecError::Structural {
+                reason: format!(
+                    "SB-11: this Spec's keys belong to {} major {}, and the \
+                     registered Vocabulary is {}",
+                    req.id, req.major, v.version
+                ),
+            });
+        }
+    }
     for kind in spec.policies.failure.keys() {
         inputs.kinds.require(kind).map_err(|_| SpecError::Structural {
             reason: format!("SB-18: event kind {kind} is not registered"),
@@ -555,6 +573,39 @@ pub fn validate(
                     entry.at.clock
                 ),
             });
+        }
+        // RS-52: "`UpdateParameter.class` is the parameter's declared update class",
+        // and "an Action whose class was not declared is rejected at admission". For a
+        // Spec the admission stage is `validate`, and nothing compared the two: a
+        // schedule entry could state `hardware_timed` for a key that declares no class
+        // at all, and the Action reached `arm` with a class nobody declared.
+        if let crate::event::ActionTemplate::UpdateParameter { key, class, .. } = &entry.action {
+            // The class comes from the key's `KeyDecl` and from nowhere else. SB-2:
+            // "This is where a **Provider** parameter's class is declared, and the
+            // only place it can be … whose parameters are Vocabulary keys and never a
+            // `ComponentDescriptor`'s `params`." A schedule entry's target is a Spec
+            // resource or `sink/<output id>` by SB-16, checked just below, so it is
+            // never a component: consulting `graph.components` first let an unrelated
+            // component's parameter list supply a class for a Provider key that
+            // declares none, and shadow the declared class of one that does.
+            let declared = inputs.registry.key_decl(key).ok().and_then(|d| d.update_class);
+            match declared {
+                None => {
+                    return Err(SpecError::Structural {
+                        reason: format!(
+                            "RS-52: schedule entry updates {key}, which declares no update class"
+                        ),
+                    });
+                }
+                Some(d) if d != *class => {
+                    return Err(SpecError::Structural {
+                        reason: format!(
+                            "RS-52: schedule entry states {class:?} for {key}, which declares {d:?}"
+                        ),
+                    });
+                }
+                Some(_) => {}
+            }
         }
         // SB-16: a Spec's target is **Spec-relative** — its first segment names a Spec
         // resource, or the target is `sink/<output id>` — so that one Spec runs on Mock
@@ -654,13 +705,14 @@ pub fn validate(
     // SB-45, SB-46: a previewed coercion under `reject` fails the stage here rather
     // than at `prepare`. A dry run that reported a coercion it knows will be
     // rejected would not be a dry run (Vision §52).
-    for c in out.coercions_preview.clone() {
+    for previewed in out.coercions_preview.clone() {
+        let c = &previewed.coercion;
         let policy = coercion_policy(
             spec.policies.coercion.get(&c.key).copied(),
             inputs.is_session,
             inputs.registry.key_decl(&c.key).ok(),
         );
-        match apply_coercion(policy, &c) {
+        match apply_coercion(policy, c) {
             Ok(None) => {}
             Ok(Some(w)) => out.warnings.push(w),
             Err(_) => out.violations.push(crate::binding::Violation {
@@ -838,7 +890,33 @@ fn match_constraints(
             reason: "SB-7: the Provider could not coerce it".to_owned(),
         });
     }
-    out.coercions_preview.extend(report.coercions);
+    // SB-44: a `Coercion` for a key the request does not name is a malformed report at
+    // this stage for the same reason D42 made it one at `prepare` — nothing was
+    // requested, so nothing was coerced. D42 guarded `prepare` only, and the same
+    // report reaching `validate` entered `coercions_preview` unchecked: the SB-45/46
+    // policy loop then fired that key's default for a key nobody asked about, and the
+    // Manifest recorded a substitution of a value nobody requested.
+    let (strays, previewed): (Vec<_>, Vec<_>) =
+        report.coercions.into_iter().partition(|c| !req.requires.contains_key(&c.key));
+    for stray in &strays {
+        out.violations.push(crate::binding::Violation {
+            check: crate::spec::Namespace::parse("ezsdr.coercion").expect("a valid literal"),
+            key: Some(stray.key.clone()),
+            requested: Some(stray.requested.clone()),
+            reason: format!(
+                "SB-44: {name}'s Provider reports a coercion of {}, which its request does \
+                 not name",
+                stray.key
+            ),
+        });
+    }
+    // A stray is refused above and **not recorded**: `coercions_preview` reaches the
+    // Manifest through `AdmissionResult` (SB-38), and leaving it there both recorded a
+    // substitution of a value nobody requested and fired that key's own policy default
+    // — the two harms the refusal exists to prevent.
+    out.coercions_preview.extend(previewed.into_iter().map(|coercion| {
+        crate::binding::PreviewedCoercion { resource: name.clone(), coercion }
+    }));
     out.warnings.extend(report.warnings);
     Ok(())
 }
@@ -966,12 +1044,6 @@ fn check_binding_names(
         }
     }
 
-    // SB-3: a `ResourceId` is `{ node, path }` with `node == LOCAL` for all of v4.0,
-    // so it carries no instance qualification and two bound instances declaring one
-    // node path are one address — for the matcher's `taken` set, for `arm_after`
-    // resolution and for `Event.source` attribution alike. Refused here, where the
-    // diagnostic can name the real cause; the matcher would otherwise report two
-    // resources colliding on one node when they asked for two devices.
     // SB-3: a `ResourceId` carries no instance qualification, so two bound instances
     // declaring one node path are one address — for the matcher's `taken` set, for
     // `arm_after` resolution and for `Event.source` attribution alike. Identity is the
@@ -1006,72 +1078,6 @@ fn check_binding_names(
             }
             continue; // one instance bound twice is SB-34's case, not this
         }
-        for node in instance.tree.walk() {
-            if let Some(first) = paths.insert(node.id.clone(), name) {
-                if first != name {
-                    return Err(SpecError::Structural {
-                        reason: format!(
-                            "SB-3: the instances bound to {first} and {name} both declare node \
-                             {}, and a ResourceId carries no instance qualification",
-                            node.id
-                        ),
-                    });
-                }
-            }
-        }
-    }
-
-    // SB-22 reserves the first path segment `sink` for a bound Sink's address, so a
-    // Provider may not declare a node under it. Without this the `sink/` prefix only
-    // narrowed the collision from "any output id" to "a Provider that names a node
-    // `sink`" — `ResourceId::parse("sink/rec")` is a legal Provider node path.
-    for (name, provider) in inputs.providers {
-        if let Some(clash) = provider
-            .instance()
-            .tree
-            .walk()
-            .into_iter()
-            .find(|n| n.id.segments().next() == Some("sink"))
-        {
-            return Err(SpecError::Structural {
-                reason: format!(
-                    "SB-22: instance bound to {name} declares node {}, and the first path \
-                     segment `sink` is reserved for a bound Sink's address",
-                    clash.id
-                ),
-            });
-        }
-    }
-
-    // SB-3: a `ResourceId` is `{ node, path }` with `node == LOCAL` for all of v4.0,
-    // so it carries no instance qualification and two bound instances declaring one
-    // node path are one address — for the matcher's `taken` set, for `arm_after`
-    // resolution and for `Event.source` attribution alike. Refused here, where the
-    // diagnostic can name the real cause; the matcher would otherwise report two
-    // resources colliding on one node when they asked for two devices.
-    // Distinctness is by the instance *object*, not by its declared id: two different
-    // instances declaring one id is exactly the case this refuses, so deduplicating by
-    // id would skip it. One instance bound by two resources is SB-34's case and shares
-    // one reference here.
-    // Distinctness is by the instance *object*: two different instances declaring one
-    // id is exactly what this refuses, so deduplicating by id would skip it, and one
-    // instance bound by two resources shares one reference here. `CompileInputs` holds
-    // instance identity only as a reference, so the address is the only discriminator
-    // available — and it is not a sound one in two cases, which is why the size guard
-    // is here: a zero-sized Provider has no address of its own (every `Box` over one is
-    // the same dangling address), and a field's address can equal its container's. Both
-    // would make two instances look like one; the guard closes the first and the second
-    // needs an instance identity the Kernel does not have until the Phase 2 coordinator
-    // supplies one.
-    let mut seen: BTreeSet<*const ()> = BTreeSet::new();
-    let mut paths: BTreeMap<ResourceId, &Ident> = BTreeMap::new();
-    for (name, provider) in inputs.providers {
-        let addr = (*provider) as *const dyn Provider as *const ();
-        let distinguishable = std::mem::size_of_val(*provider) > 0;
-        if distinguishable && !seen.insert(addr) {
-            continue;
-        }
-        let instance = provider.instance();
         for node in instance.tree.walk() {
             if let Some(first) = paths.insert(node.id.clone(), name) {
                 if first != name {
@@ -1455,13 +1461,30 @@ pub fn plan(
         .map_err(|e| SpecError::Structural { reason: e.to_string() })?;
 
     // Explicit ordering edges from `ezsdr.arm_order` (SB-26, SB-39).
-    if let Some(items) = profile.section("ezsdr.arm_order").and_then(|s| s.as_array()) {
+    //
+    // A malformed entry is refused, not skipped. SB-39 exists because `v3.0.20`
+    // records that with a shared PPS the device that sources it must be started
+    // first or start-up fails, and its answer is that the order is a property of the
+    // plan. An entry whose `before`/`after` is missing or misspelled contributed no
+    // edge and left the fragments in name order, so `zsource`/`asink` armed the PPS
+    // source second — the exact v3 failure — with no diagnostic anywhere. This
+    // follows MA-41's clause for the sections the Kernel reads: ignoring a
+    // misspelling turns it into agreement.
+    if let Some(section) = profile.section("ezsdr.arm_order") {
+        let items = section.as_array().ok_or_else(|| SpecError::Structural {
+            reason: "SB-39: ezsdr.arm_order is present and is not an array".to_owned(),
+        })?;
         for item in items {
             let (Some(b), Some(a)) = (
                 item.get("before").and_then(|v| v.as_str()),
                 item.get("after").and_then(|v| v.as_str()),
             ) else {
-                continue;
+                return Err(SpecError::Structural {
+                    reason: format!(
+                        "SB-39: ezsdr.arm_order entry {item} does not name both `before` and \
+                         `after` as strings"
+                    ),
+                });
             };
             edges.push((Ident::parse(b)?, Ident::parse(a)?));
         }
@@ -1471,12 +1494,35 @@ pub fn plan(
     let order = arm_order(&names, &edges)?;
     fragments.sort_by_key(|f| order.iter().position(|n| *n == f.id).unwrap_or(usize::MAX));
 
-    let links = declared_links(spec, inputs);
+    let links = declared_links(spec, inputs, &admission.matched)?;
     Ok(ExecutionPlan { fragments, links, deps: edges, authority, class, transfer_costs })
 }
 
 /// `authority` names the binding whose Provider plays the Authority role and may be
 /// omitted when exactly one candidate exists (SB-24, MA-29).
+/// Whether the binding's Module declares the Authority role (SB-24, MA-29).
+fn declares_authority(
+    name: &Ident,
+    profile: &BindingProfile,
+    inputs: &CompileInputs<'_>,
+) -> Result<(), SpecError> {
+    let binding = profile.bindings.get(name).ok_or_else(|| SpecError::Structural {
+        reason: format!("SB-24: `authority` names {name}, which is not a binding"),
+    })?;
+    if inputs
+        .registry
+        .modules()
+        .any(|m| m.id == binding.module && m.roles.contains(&Role::Authority))
+    {
+        return Ok(());
+    }
+    Err(SpecError::WrongBindingRole {
+        name: name.clone(),
+        expected: "Authority".to_owned(),
+        module: binding.module.to_string(),
+    })
+}
+
 fn pick_authority(
     profile: &BindingProfile,
     inputs: &CompileInputs<'_>,
@@ -1492,9 +1538,19 @@ fn pick_authority(
                 reason: format!("SB-24: binding {named} declares no AuthorityDescriptor"),
             });
         }
+        declares_authority(named, profile, inputs)?;
         return Ok(named.clone());
     }
-    let mut candidates: Vec<&Ident> = inputs.authorities.keys().collect();
+    // SB-24 names "the binding whose Provider plays the Authority role (MA-29)". Only
+    // the runtime-supplied descriptor map was consulted, so assembly-time input
+    // decided a role the registry declares — the category D18 settled the other way
+    // for Providers, Sinks and Executors, which `check_binding_names` reads off the
+    // registry.
+    let mut candidates: Vec<&Ident> = inputs
+        .authorities
+        .keys()
+        .filter(|n| declares_authority(n, profile, inputs).is_ok())
+        .collect();
     candidates.sort();
     match candidates.as_slice() {
         [only] => Ok((*only).clone()),
@@ -1542,7 +1598,23 @@ fn derive_class(profile: &BindingProfile, pacing: Pacing) -> Result<ExecutionCla
     // so a profile could declare `simulation` on a Hardware Run and be believed by
     // every reader of its own text while the Manifest recorded something else.
     if let Some(section) = profile.section("ezsdr.time") {
-        if let Some(declared) = section.get("class").and_then(|v| v.as_str()) {
+        // MA-41 in full: "an absent, non-string or unrecognised `class` is refused
+        // rather than ignored". Reading it through `and_then(as_str)` refused the
+        // unrecognised *value* alone, so the two cases the clause names first —
+        // `{ "clas": "hardware" }` and `{ "class": 3 }` — planned as `Simulation`,
+        // which is the class that may claim determinism (RS-42). That is the whole
+        // failure the clause was written against: a misspelling turning into
+        // agreement.
+        let declared = section
+            .get("class")
+            .ok_or_else(|| SpecError::Structural {
+                reason: "MA-41: ezsdr.time is present and declares no `class`".to_owned(),
+            })?
+            .as_str()
+            .ok_or_else(|| SpecError::Structural {
+                reason: "MA-41: ezsdr.time.class is not a string".to_owned(),
+            })?;
+        {
             let matches_derived = match derived {
                 ExecutionClass::Simulation => declared == "simulation",
                 ExecutionClass::RealtimeEmulation => declared == "realtime_emulation",
@@ -1611,30 +1683,45 @@ fn output_links(
         .collect()
 }
 
-fn declared_links(spec: &ExperimentSpec, inputs: &CompileInputs<'_>) -> Vec<DataLinkDecl> {
+/// The plan's `links`. The contract is resolved the way `validate` resolved it for
+/// SC-3 — through [`source_contract`], which reads a resource endpoint's port off the
+/// **bound node** — and not off `graph.components` alone. Resolving components only
+/// and defaulting to `ezsdr.control` gave every link whose consumer is a resource
+/// port, which is Vision §7's own `PHY → Radio Port` example, a contract the Kernel
+/// had already checked as something else: the plan reaches the Manifest (RS-38) and is
+/// what a Link Module's `create` receives (MA-27), so the default was a wrong answer
+/// rather than a missing one.
+///
+/// Rule: SB-39, SB-15, SC-3, MA-27.
+fn declared_links(
+    spec: &ExperimentSpec,
+    inputs: &CompileInputs<'_>,
+    matched: &BTreeMap<Ident, ResourceId>,
+) -> Result<Vec<DataLinkDecl>, SpecError> {
     spec.graph
         .links
         .iter()
         .enumerate()
         .map(|(i, l)| {
-            let contract = Ident::parse(&l.to.component)
-                .ok()
-                .and_then(|c| spec.graph.components.get(&c))
-                .and_then(|c| c.ports.iter().find(|p| p.name == l.to.port))
-                .map(|p| p.contract.clone())
-                .unwrap_or_else(|| {
-                    crate::contract::DataContractId::parse("ezsdr.control")
-                        .expect("a valid literal")
-                });
-            let _ = inputs;
-            DataLinkDecl {
+            // `validate` refused the link if either end was unresolvable (SB-15), so a
+            // `None` here means `plan` ran on an admission that is not this Spec's.
+            let contract = source_contract(&l.to, spec, inputs, matched).ok_or_else(|| {
+                SpecError::Structural {
+                    reason: format!(
+                        "SB-15: link {i}'s consumer {}.{} names no port of a component or of \
+                         a bound node",
+                        l.to.component, l.to.port
+                    ),
+                }
+            })?;
+            Ok(DataLinkDecl {
                 id: DataLinkId::local(i as u32),
                 from: l.from.clone(),
                 to: l.to.clone(),
                 contract,
                 policy: l.policy,
                 capacity: l.capacity,
-            }
+            })
         })
         .collect()
 }
@@ -1684,6 +1771,22 @@ pub fn collect_prepare(
     // rejected admission and drop every `validate` violation on the floor.
     if !admission.is_admitted() {
         return Err(PrepareError::Violations(admission.violations.clone()));
+    }
+    // And "admitted" is only "nothing was rejected", which `AdmissionResult::default()`
+    // satisfies — the hole SB-39 guards one stage earlier, in a function whose own
+    // comment says it does not require `plan`'s output. Without this, every
+    // `matched.get(name)` below misses, so MA-12's narrowing check, SB-44's preview
+    // comparison and the constraint re-match are all skipped in silence and a report
+    // may apply any value at all.
+    if let Some(missing) = spec.resources.keys().find(|n| !admission.matched.contains_key(*n)) {
+        return Err(PrepareError::Violations(vec![crate::binding::Violation {
+            check: crate::spec::Namespace::parse("ezsdr.effective").expect("a valid literal"),
+            key: None,
+            requested: None,
+            reason: format!(
+                "SB-30: this `AdmissionResult` is not this Spec's: {missing} has no matched node"
+            ),
+        }]));
     }
     let mut ok = Vec::with_capacity(reports.len());
     for (index, r) in reports.into_iter().enumerate() {
@@ -1800,7 +1903,20 @@ pub fn collect_prepare(
             // — into `effective` and the Manifest, while the Manifest recorded the
             // substitution as a legitimate coercion. What is checked instead is
             // SB-44's own obligation: the value applied is the one `coerce` returned.
-            if let Some(preview) = admission.coercions_preview.iter().find(|c| c.key == *key) {
+            //
+            // Scoped to **this resource**. A key alone does not identify a preview:
+            // two resources may constrain one key on two devices, and `coerce` is
+            // called per bound node (SB-7). Matching on the key alone charged `a`'s
+            // coercion to `b`, so `b` — satisfied directly, never passed to `coerce` —
+            // was refused for not applying a value nobody computed for it. That is the
+            // ordinary two-channel Spec whenever one channel coerces.
+            if let Some(preview) = admission
+                .coercions_preview
+                .iter()
+                .filter(|p| p.resource == *name)
+                .map(|p| &p.coercion)
+                .find(|c| c.key == *key)
+            {
                 if let Some(applied) = report.effective.get(key) {
                     if *applied != preview.applied {
                         violations.push(crate::binding::Violation {

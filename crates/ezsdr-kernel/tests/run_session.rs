@@ -44,7 +44,8 @@ fn t(ticks: i64) -> TimePoint {
 fn registry() -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();
     reg.register_vocabulary(test_vocabulary()).expect("fresh");
-    reg.register(test_provider_descriptor(), Factories { provider: true, ..Factories::default() })
+    reg.register(test_provider_descriptor(),
+        Factories { provider: true, authority: true, ..Factories::default() },)
         .expect("registers");
     reg.register(test_sink_descriptor(), Factories { sink: true, ..Factories::default() })
         .expect("registers");
@@ -285,10 +286,10 @@ fn rs_23_detached_expires() {
     assert!(!lease.expired(&clock));
     clock.advance(1);
     assert!(lease.expired(&clock));
-    assert_eq!(
-        Termination::Stopped { cause: StopCause::LeaseExpiry },
-        Termination::Stopped { cause: StopCause::LeaseExpiry }
-    );
+    // OV-3: RS-23's second half — that expiry terminates the Run with
+    // `StopCause::LeaseExpiry` — has no Kernel carrier in Phase 1: nothing maps an
+    // expired Lease to a `Termination`. The assertion that stood here compared one
+    // literal with itself and so recorded the gap as coverage.
 }
 
 #[test]
@@ -994,9 +995,10 @@ fn rs_16_rejected_action_not_dispatched() {
         .expect_err("outside the limit");
     assert_eq!(violations[0].check, ns("test.limits"));
 
-    // The Provider's action queue stays empty: nothing was dispatched.
-    let provider = TestProvider::new("radio", 2);
-    assert!(provider.drain_actions().is_empty());
+    // OV-3: "not dispatched" is asserted by the rejection itself — `admit` returns
+    // `Err`, so there is no admitted Action to dispatch. Draining a Provider double
+    // that this test never submitted to asserted nothing; the dispatch step is Phase
+    // 2's, and RS-16's Phase 1 carrier is the refusal plus the log entry below.
 
     let mut log = SessionLog::new();
     log.append(

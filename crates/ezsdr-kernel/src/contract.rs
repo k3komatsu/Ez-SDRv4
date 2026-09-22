@@ -95,9 +95,7 @@ impl PartialEq for Scalar {
             // `-9223372036854776000`, so accepting them as equal let SC-2 take a
             // genuinely different definition for a re-registration again.
             (Scalar::Int(a), Scalar::Float(b)) | (Scalar::Float(b), Scalar::Int(a)) => {
-                b.fract() == 0.0
-                    && b.abs() <= 9_007_199_254_740_992.0
-                    && i64::try_from(*b as i128).is_ok_and(|w| w == *a)
+                crate::hash::same_canonical_number(*a, *b)
             }
             (Scalar::Str(a), Scalar::Str(b)) => a == b,
             (Scalar::Bool(a), Scalar::Bool(b)) => a == b,

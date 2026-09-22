@@ -13,7 +13,7 @@
           "default": [],
           "description": "What the Providers said they would change (SB-7, SB-44).",
           "items": {
-            "$ref": "#/$defs/Coercion"
+            "$ref": "#/$defs/PreviewedCoercion"
           },
           "type": "array"
         },
@@ -1602,6 +1602,24 @@
           "type": "array"
         }
       },
+      "type": "object"
+    },
+    "PreviewedCoercion": {
+      "description": "A coercion the Kernel previewed by calling one Provider's `coerce`, together with\nthe Spec resource whose request produced it.\n\nA `Coercion` names a key and two values and nothing else, because a Provider\nanswers about the request it was handed. The Kernel's own record has to say more:\ntwo resources may constrain one key on two different devices, and one of them\ncoercing says nothing about the other. Keyed on the key alone, `prepare`'s SB-44\ncheck charged one resource's coercion to every resource naming that key and\nrefused a value `coerce` was never asked about — so the resource name is part of\nthe record, as it already is in [`RejectedConstraint`].\n\nRule: SB-7, SB-38, SB-44.",
+      "properties": {
+        "coercion": {
+          "$ref": "#/$defs/Coercion",
+          "description": "What that resource's Provider said it would change (SB-7)."
+        },
+        "resource": {
+          "$ref": "#/$defs/Ident",
+          "description": "The Spec resource whose `requires` map was coerced (SB-44)."
+        }
+      },
+      "required": [
+        "resource",
+        "coercion"
+      ],
       "type": "object"
     },
     "ProfileRef": {

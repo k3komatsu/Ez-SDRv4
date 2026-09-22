@@ -166,6 +166,7 @@ binding::AdmissionCheckRegistry = environment
 binding::CheckStage = NEW: SB-30's three points, so a coercion cannot move a value past a limit unchecked.
 binding::Violation = NEW: SB-29's refusal from a Vocabulary's own check.
 binding::AdmissionResult = NEW: SB-38's dry-run result: matched, rejected, violations, coercion preview.
+binding::PreviewedCoercion = NEW: SB-44's coercion preview with the resource it was computed for; a key alone charged one resource's coercion to another.
 
 # --- lifecycle and the plan (audit §13 `lifecycle`) --------------------------
 plan::ExecutionPlan = ExecutionPlan

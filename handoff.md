@@ -79,14 +79,26 @@ Vision §67 の Phase 1．詳細設計は [plan/phase1/](plan/phase1/)．計画�
 | 7 | 独立レビュー（前2巡が見ていない領域） | P0 1・P1 7・P2 12 | 全件修正．**P0 はまた `collect_prepare`** — 再マッチを全 key に適用し，coercion を構造的に必ず拒否．SB-46 の `accept`/`warn` が到達不能だった |
 | 8 | 2点集中（coercion 除外と surface gate） | P0 1・P1 2・P2 9 | 全件修正．P0 は除外を Provider 自己申告の `coercions` で判定していた件（key を並べれば MA-12 を自己免除でき，Manifest が適用値と違う値を記録した） |
 | 9 | 8巡目の修正の検証 | **P0 ゼロ**・P1 2・P2 9 | `collect_prepare` から4巡ぶりに指摘なし．P1 2件はどちらも私の書いた箇所（ZST Provider でのポインタ判定，gate の残穴5通り）で修正済み |
+| 10 | crate 全体の second opinion（Fable 5.1，AGENTS.md §8 の例外．全件を scratch copy で実行済み） | P0 1・P1 6・P2 10 | 適用済み．**P0 はまた `collect_prepare`，しかも7巡目の修正の中**（下記）．P1 のうち2件は直前コミット `13c4070` が古いブロックを置換せず追加していた件 |
+| 13 | `continuity.rs` に絞った検証（12巡目の作り直しが未レビューだったため） | **P0 ゼロ・P1 ゼロ**・P2 2 | 修正済み．差分 fuzz で lossless 経路は HEAD とビット同一，Gap の `link_dropped` と `lost` の総和が投入分と一致することを確認．**ここで収束** |
+| 12 | 11巡目の修正の検証（新たな拒否を2つ足したため） | P1 1・P2 1 | 修正済み．P1 はまた11巡目の修正自身 — SC-30b の carry は flags・lost・blocks の3つを運ぶのに，繰り越しが blocks しか持っていなかった |
+| 11 | 10巡目の修正の検証（Opus，大規模修正のため必須の再レビュー） | P0 2・P1 1・P2 2 | 全件修正．**P0 2件はどちらも10巡目の修正自身**：RS-52 が component の `params` を先に見ていた（SB-2 が「the only place it can be … never a `ComponentDescriptor`'s `params`」と明記）と，SC-30b の繰り越しが `finish` で抜けていた．P1 は既存で，`collect_prepare` が他 Spec の `AdmissionResult` を拒否していなかった件 |
 
 このクレートが繰り返し出した欠陥型は2つある．
 
 **「正しい関数を誰も呼んでいない」** — 9巡で計7件（`admit_islands`・`check_cycles`・`check_sink_links`・`CheckStage::Prepare`・SB-46 の coercion policy・`ComponentDescriptor::validate`・`check_effective_narrows`，加えて `Value::check_nesting` の ASCII 規則）．対策として，各ルールの本文に**呼び出し場所を明記**した（SB-30 は3点すべて，SB-41 は MA-12 の2義務，MA-37 は `validate()`，MA-41 は比較箇所）．レビュー側の提言：「`src/` 内に呼び出し元のない predicate を grep する」を exit review の手順に入れること — 3巡で6件を出している．
 
-**「ルールを初めて生かすと，そのルールが意図しないものを拒否する」** — P0 4件のうち3件がこれで，3件とも `collect_prepare` の中，しかも別方向（merge を resource 別に解釈／coercion を構造的に拒否／Provider の自己申告で免除）．いまは prepare 段のチェックの入力が parse 済み文書か Kernel が validate で計算した値だけになっている．
+**「ルールを初めて生かすと，そのルールが意図しないものを拒否する」** — P0 5件のうち4件がこれで，4件とも `collect_prepare` の中，しかも毎回別方向（merge を resource 別に解釈／coercion を構造的に拒否／Provider の自己申告で免除／coercion preview を key だけで引く）．
+
+4件目は**7巡目の修正そのものの中**にあった．除外を Kernel 自身の `coercions_preview` に向けたところまでは正しかったが，`Coercion` は `{key, requested, applied, reason}` でリソースを持たない — つまり **そのVecをkeyで引く限り per-resource にはなり得ない**．同じ key を別デバイスで制約する2チャネル Spec で，片方が coerce されると，直接満たされた（`coerce` を呼ばれてすらいない）もう片方が「`coerce` が返した値を適用していない」として拒否された．3巡連続で同じ関数の同じ構造を別角度から踏んでいる以上，次に `collect_prepare` を触るときは**まずデータが判定に必要な情報を持っているかを確認する**こと．Kernel 自身の記録は `PreviewedCoercion { resource, coercion }` になり，隣の `RejectedConstraint` と同じ形になった．
+
+**「判定を適用する作業そのものが欠陥を入れる」** — 11巡目の P0 2件が10巡目の修正自身の中にあり，同種は7→8巡目，5→6巡目にもあった（計3回）．**修正を書いたら，その修正が参照する条文をもう一度読むこと**：RS-52 の件は SB-2 に「and the only place it can be」と書いてあり，読めば component を見に行く発想が出ない．
+
+**「置換せず追加してしまう」** — 10巡目の P1 2件．`13c4070` は D44 の binding-description ブロックを**追加**したが，D44 が「削除した」と書いたポインタ比較ブロックはファイルに残ったままで，両方が走っていた（SB-22 の `sink` チェックも二重）．古いブロックは D44 が許す形（1つの description に対し2つのオブジェクトが同じ `instance().id` を報告する）を拒否する．**判定を適用したあとは，置換対象が消えたことを grep で確認すること．**
 
 `kernel_surface` は5巡で5組の回避を実演された．いずれも「**接頭辞照合は綴りであり，綴りは改行で割れる**」という同じ形だったので，接頭辞照合を全廃した：宣言は行と次行に跨る**トークン列**として読み，lex できない構文は**トークンとして拒否**し，その上に「スキャン自身が frame 均衡で終わったこと」を assert する（brace クラスを綴りでなく原因で閉じる）．**実演された11通りすべてを scratch copy で捕獲確認．**この gate が macro 経由で隠していた public item が2件あった（`id.rs` の4つの id 型と `schema::document_schemas`）ので，X11 の「allow-list が review checklist である」は事実として偽だった．
+
+その後 `syn::parse_file` による parser に置き換え（D34–D44 の採用，`13c4070`）たが，10巡目がさらに**5通り**を実演した．うち1つは**出荷されるクレートで現に穴が開いていた**：`is_testing_gated` が `cfg` のトークン列に `testing` が*含まれるか*で判定していたため，`#[cfg(not(feature = "testing"))]`（＝デフォルトビルド）の public item を gate が丸ごとスキップしていた．他は `pub use {…}`（brace group が root を名乗らない），`pub extern crate`（match の catch-all に落ちる），非 `.rs` ファイルの `include!`，同名 item を持つ inline module 2つが1つの allow key に潰れる（key が名前でなく深さを符号化していた）．**5通りすべて注入して捕獲を確認済み．**
 
 exit criteria（§13）の達成状況：
 
@@ -94,7 +106,7 @@ exit criteria（§13）の達成状況：
 |---|---|---|
 | 1 | 6文書の受理と §11 の全 verdict | **verdict は全件記録済み**（X1–X12，各 spec の Decisions 表，未決事項1–7，findings D1–D33）．残るのは6文書の受理そのもの（§12） |
 | 2 | 全 rule に ID と OV-3 disposition | 未（exit review の作業） |
-| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が double で端から端まで動く | **達成**（1.85.0 / stable ともに 293 passed，`#[ignore]` なし）．degenerate ではない：resource endpoint を含む graph が validate → plan を通り（`sb_15_a_bound_resource_port_is_a_link_endpoint`），Provider fragment は matched request を運び（`sb_39_a_provider_fragment_carries_the_matched_request`），Session は bound Sink を output として持つ（`rs_12_a_session_compiles_through_the_whole_pipeline`），coercion は accept/warn/reject の3分岐が到達可能（`sb_46_an_accepted_coercion_survives_prepare`） |
+| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が double で端から端まで動く | **達成**（1.85.0 / stable ともに 311 passed，`#[ignore]` なし）．degenerate ではない：resource endpoint を含む graph が validate → plan を通り（`sb_15_a_bound_resource_port_is_a_link_endpoint`），Provider fragment は matched request を運び（`sb_39_a_provider_fragment_carries_the_matched_request`），Session は bound Sink を output として持つ（`rs_12_a_session_compiles_through_the_whole_pipeline`），coercion は accept/warn/reject の3分岐が到達可能（`sb_46_an_accepted_coercion_survives_prepare`） |
 | 4 | `schemas/` commit，`schema_freeze` 通過，`SCHEMA_CHANGELOG.md` の v1 entry | **達成** |
 | 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．件数は `cargo test --test kernel_surface -- --nocapture` が `OV-23b: Kernel growth = N NEW: items of M public items` で出す |
 | 6 | 直接依存が §8 の4 crate ちょうど | **達成** |
