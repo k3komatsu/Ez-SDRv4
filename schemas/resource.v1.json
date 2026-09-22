@@ -67,6 +67,10 @@
         }
       ]
     },
+    "DataContractId": {
+      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SC-2.",
+      "type": "string"
+    },
     "Namespace": {
       "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
       "type": "string"
@@ -76,6 +80,44 @@
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
+    },
+    "Port": {
+      "description": "A name, a direction and a contract id, and nothing more. Per-port parameters\nthe Kernel does not interpret — a tensor shape, a maximum PDU length — live in\nthe `ComponentDescriptor`'s parameters (MA-36), not here.\n\nRule: SC-1.",
+      "properties": {
+        "contract": {
+          "$ref": "#/$defs/DataContractId",
+          "description": "The contract carried (SC-1)."
+        },
+        "direction": {
+          "$ref": "#/$defs/PortDirection",
+          "description": "Whether the component consumes or produces here (SC-1)."
+        },
+        "name": {
+          "description": "Port name, unique within its component (MA-37).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "direction",
+        "contract"
+      ],
+      "type": "object"
+    },
+    "PortDirection": {
+      "description": "Which way samples flow through a [`Port`] (SC-1).",
+      "oneOf": [
+        {
+          "const": "in",
+          "description": "The component consumes blocks here.",
+          "type": "string"
+        },
+        {
+          "const": "out",
+          "description": "The component produces blocks here.",
+          "type": "string"
+        }
+      ]
     },
     "ResourceId": {
       "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the\nreceive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
@@ -159,6 +201,19 @@
     "kind": {
       "$ref": "#/$defs/Namespace",
       "description": "What kind of node it is; a Spec resource's `kind` must match (SB-34)."
+    },
+    "ports": {
+      "default": [],
+      "description": "The Ports this node carries, for a node that is a stream endpoint. A Spec\nlinks a component to a bound resource through one of these, which is how\nVision §7's `PHY Processor -> SampleStream -> Radio Port` is expressible;\nwithout them `PortRef.component` could name a resource but no contract\ncould be checked against it (MA-10, SB-15, SC-1, SC-3).",
+      "items": {
+        "$ref": "#/$defs/Port"
+      },
+      "type": "array"
+    },
+    "shareable": {
+      "default": false,
+      "description": "Whether more than one Spec resource may bind to this node. Default `false`:\na channel or a stream is exclusive, while Vision §8's GPIO banks \"may share\nthe timekeeper\" of §39, so which is which is the Provider's declaration and\nnever the Kernel's knowledge (MA-10, SB-34, OV-21).",
+      "type": "boolean"
     }
   },
   "required": [

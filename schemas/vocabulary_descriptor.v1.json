@@ -176,6 +176,18 @@
         "kind": {
           "$ref": "#/$defs/ValueKind",
           "description": "The shape its value takes (SB-2)."
+        },
+        "update_class": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpdateClass"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The update class this key may be changed under during a Run; absent means it\nis not changeable during a Run. This is where a **Provider** parameter's\nclass is declared: §27's own examples of runtime mutation — TX gain, antenna\nbeam, MCS — and Vision §3's `sdr.rx.gain = 20` all target a Provider, whose\nparameters are Vocabulary keys and not `ComponentDescriptor.params`, so\nwithout this RS-17 has nothing to consult for them (SB-2, RS-17, MA-35)."
         }
       },
       "required": [

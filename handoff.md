@@ -83,7 +83,7 @@ exit criteria（§13）の達成状況：
 |---|---|---|
 | 1 | 6文書の受理と §11 の全 verdict | **verdict は全件記録済み**（X1–X12，各 spec の Decisions 表，未決事項1–7，findings D1–D33）．残るのは6文書の受理そのもの（§12） |
 | 2 | 全 rule に ID と OV-3 disposition | 未（exit review の作業） |
-| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が double で端から端まで動く | 1.85.0 / stable ともに 261 passed，`#[ignore]` なし．ただし pipeline が端から端まで動くのは **degenerate な形**に限る：resource endpoint のない graph，output なし，どの Provider も読めない `Fragment.content`（D31・D32）．second opinion はこの2件を criterion 3 の成立条件と位置づけている |
+| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が double で端から端まで動く | **達成**（1.85.0 / stable ともに 269 passed，`#[ignore]` なし）．degenerate ではない：resource endpoint を含む graph が validate → plan を通り（`sb_15_a_bound_resource_port_is_a_link_endpoint`），Provider fragment は matched request を運び（`sb_39_a_provider_fragment_carries_the_matched_request`），Session は bound Sink を output として持つ（`rs_12_a_session_compiles_through_the_whole_pipeline`） |
 | 4 | `schemas/` commit，`schema_freeze` 通過，`SCHEMA_CHANGELOG.md` の v1 entry | **達成** |
 | 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．件数は `cargo test --test kernel_surface -- --nocapture` が `OV-23b: Kernel growth = N NEW: items of M public items` で出す |
 | 6 | 直接依存が §8 の4 crate ちょうど | **達成** |
@@ -97,9 +97,18 @@ D1, D6, D11, D14）は encoding の帰結と fixture note で，裁定を要し�
 
 | bin | 内容 | 状態 |
 |---|---|---|
-| (i) prose / コードのみ，rule text を変えない | D15・D24・S1・B4・OQ4 | **適用済み**（2026-09-22）．D8 と D25 は片方が (ii) なので，コードが spec より先に行かないよう (ii) と同時に回す |
-| (ii) rule text を変えるが freeze 前で自己完結 | OQ2・R10・D16・D22・D23・D25・D26・D27・D8・D32・D33，および D17 + D18 + D31 + D29 のクラスタ | 未．ユーザの着手判断待ち |
+| (i) prose / コードのみ，rule text を変えない | D15・D24・S1・B4・OQ4 | **適用済み**（2026-09-22） |
+| (ii) rule text を変えるが freeze 前で自己完結 | OQ2・R10・D8・D16・D22・D23・D25・D26・D27・D32・D33，および D17 + D18 + D31 + D29 のクラスタ | **適用済み**（2026-09-22） |
 | (iii) 待ち | confirm が含意する Vision 編集（OV-6 のため §12 手続き），および Phase 2 の値を要する2件（resource port の producer 側 memory domain，port contract と format coercion の関係） | 未（§12 / Phase 2） |
+
+bin (ii) で構造が変わった点（spec 03/04/05 と crate，schema 7件を再生成）：
+
+- **Sink は bind するもので place するものになった**（D17）．`outputs[]` が `feed: SinkFeed { port, policy, capacity }` を持ち，`bindings` が resource 名・output id・Island の executor 名を1つの namespace で束ねる（SB-22）．`Binding.provider` → `module`，`ComponentPlacement.module` は削除，**SB-25a は撤回**（OV-1 に従い番号は保持）．`plan::sink_components` と `session::check_placement_modules` も削除で，Kernel surface は純減．bound Sink は `ResourceId { node: LOCAL, path: <output id> }` で addressable．
+- **Executor Module は文書が指す**（D18）．`bindings[island.executor]` から解決し，runtime は descriptor だけ渡す．
+- **Resource が `ports` を宣言する**（D31）．resource endpoint は Island の外側の node として扱い，MA-39 は placement を要求しない．
+- **`plan()` が `AdmissionResult` を取る**（D32）．Provider fragment の `content` は `{ selector, requested }`．
+- **`Resource.shareable`**（D27，既定 false）．排他 node の二重 bind は `NodeAlreadyBound` で両者を名指しして拒否．
+- **`UpdateParameter.at`**（OQ2，全 class で optional）．`KeyDecl.update_class`（D33）．Manifest の `version`（R10）．`Scalar` は untagged（D23）．`BurstTracker::set_late`（D8）．`ChannelMask`/`BlockFlags` の内部フィールドは `pub(crate)`（S1）．
 
 判定の根拠は OV-5（gate 後の不一致は §11 に verdict を記録してから適用する）と OV-12（freeze は
 v4.0 以降．crate は `4.0.0-alpha.1` なので公開面はまだ凍っていない）．よって「normative text を

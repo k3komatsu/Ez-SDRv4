@@ -76,18 +76,32 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
                 kind: ValueKind::Int,
                 coercible: false,
                 coercion_default: CoercionPolicy::Reject,
+                update_class: None,
             },
             KeyDecl {
                 key: key("test.grid"),
                 kind: ValueKind::Num,
                 coercible: true,
                 coercion_default: CoercionPolicy::Reject,
+                update_class: None,
             },
             KeyDecl {
                 key: key("test.flag"),
                 kind: ValueKind::Bool,
                 coercible: false,
                 coercion_default: CoercionPolicy::Warn,
+                update_class: None,
+            },
+            // A Provider parameter that *is* changeable during a Run, which is what
+            // SB-2's `update_class` exists for: the Vocabulary declares the class,
+            // because a Provider's parameters are Vocabulary keys and never a
+            // component's `params` (Vision §27's TX gain; finding D33).
+            KeyDecl {
+                key: key("test.gain"),
+                kind: ValueKind::Num,
+                coercible: false,
+                coercion_default: CoercionPolicy::Reject,
+                update_class: Some(ezsdr_kernel::module_api::UpdateClass::HardwareTimed),
             },
         ],
         event_kinds: vec![EventKindDecl {
@@ -224,6 +238,15 @@ impl TestProvider {
                 .into_iter()
                 .collect(),
             children: Vec::new(),
+            // A line is one physical channel: exclusive, like SB-34's default.
+            shareable: false,
+            // A stream endpoint declares its Ports, so a Spec can link this node to
+            // a component (MA-10, SB-15).
+            ports: vec![Port {
+                name: "rx".to_owned(),
+                direction: PortDirection::Out,
+                contract: DataContractId::parse("ezsdr.iq.cf32").expect("a valid literal"),
+            }],
         };
         TestProvider {
             instance: ProviderInstance {
@@ -254,6 +277,8 @@ impl TestProvider {
                     .into_iter()
                     .collect(),
                     children: vec![line(&root, 0), line(&root, 1)],
+                    shareable: false,
+                    ports: Vec::new(),
                 },
                 fidelity: Fidelity::NONE,
                 driving: Driving { stepped: false },
@@ -267,6 +292,15 @@ impl TestProvider {
             actions: Mutex::new(Vec::new()),
             prepare_disagrees: false,
         }
+    }
+
+    /// Declares both `test.line` sub-resources shareable, so that more than one
+    /// Spec resource may bind to one of them (MA-10, SB-34).
+    pub fn with_shareable_lines(mut self) -> TestProvider {
+        for line in &mut self.instance.tree.children {
+            line.shareable = true;
+        }
+        self
     }
 
     /// Gives the two `test.line` sub-resources different `test.count` values, so
@@ -370,7 +404,10 @@ impl Provider for TestProvider {
         // MA-12: the report's coercions equal what `coerce` returned for the same
         // request, which a Provider honours by replaying it rather than by
         // recomputing something similar.
-        let report = match serde_json::from_value::<Requested>(f.content.clone()) {
+        // SB-39: a Provider fragment's content is `{ selector, requested }`. The
+        // request is what the matcher resolved; a Provider that had only the
+        // selector could not honour MA-12 at all.
+        let report = match serde_json::from_value::<Requested>(f.content["requested"].clone()) {
             Ok(request) => self.coerce(&request)?,
             Err(_) => CoerceReport::default(),
         };
@@ -581,6 +618,19 @@ pub fn test_sink_descriptor() -> ModuleDescriptor {
         vocabularies: Vec::new(),
         deployment: Deployment::InProcess,
         impl_hash: Some(some_hash("ezsdr.test.sink")),
+    }
+}
+
+/// The Module that supplies the Executor instance an Island names (MA-38).
+pub fn test_executor_descriptor() -> ModuleDescriptor {
+    ModuleDescriptor {
+        id: mid("ezsdr.test.executor"),
+        version: Version::new(1, 0, 0),
+        kernel_api: Version::new(4, 0, 0),
+        roles: vec![Role::Executor],
+        vocabularies: Vec::new(),
+        deployment: Deployment::InProcess,
+        impl_hash: Some(some_hash("ezsdr.test.executor")),
     }
 }
 

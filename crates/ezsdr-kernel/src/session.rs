@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use crate::binding::{AdmissionCheckRegistry, BindingProfile, CheckStage, Violation};
 use crate::event::{Action, ActionId, ActionTemplate};
 use crate::hash::ContentHash;
-use crate::id::{ModuleId, ResourceId};
+use crate::id::ResourceId;
 use crate::module_api::{
-    CompileRule, ComponentDescriptor, ModuleRegistry, Role, UpdateClass,
+    CompileRule, ModuleRegistry, Role, UpdateClass,
 };
 use crate::plan::{apply_coercion, coercion_policy};
 use crate::run::RunError;
@@ -194,8 +194,9 @@ pub struct Admitter<'a> {
     pub checks: &'a AdmissionCheckRegistry,
     /// The profile's `environment`, whose sections the checks read (SB-26).
     pub environment: &'a BTreeMap<Namespace, serde_json::Value>,
-    /// The declared update class per parameter; a key with no entry is rejected
-    /// (RS-52).
+    /// The declared update class per component parameter. A key absent here is
+    /// looked up in its Vocabulary's `KeyDecl`, which is where a Provider parameter
+    /// declares its class; a key declared in neither is rejected (RS-52, SB-2).
     pub declared_classes: &'a BTreeMap<Key, UpdateClass>,
     /// The Spec's `policies.coercion` overrides (SB-19).
     pub spec_coercion: &'a BTreeMap<Key, CoercionPolicy>,
@@ -257,7 +258,7 @@ impl Admitter<'_> {
         //    class is rejected here, so an Executor never receives one (RS-17, RS-52).
         if stage == CheckStage::Runtime {
             for key in proposed.keys() {
-                if !self.declared_classes.contains_key(key) {
+                if declared_class(key, self.declared_classes, self.registry).is_none() {
                     return Err(vec![Violation {
                         check: Namespace::parse("ezsdr.update_class").expect("a valid literal"),
                         key: Some(key.clone()),
@@ -315,6 +316,21 @@ pub enum ControlOp {
 /// Run. A `Vocabulary` action compiles as its registering Vocabulary declares. A
 /// verb whose namespace no loaded Vocabulary claims is rejected and logged.
 ///
+/// The update class declared for a key: from the caller's map, which carries a
+/// component's `params`, or else from the key's `KeyDecl` in a registered
+/// Vocabulary, which is where a Provider parameter declares it. `None` means no
+/// declaration exists and RS-17 rejects the change (RS-17, RS-52, SB-2, MA-35).
+fn declared_class(
+    key: &Key,
+    declared: &BTreeMap<Key, UpdateClass>,
+    registry: &ModuleRegistry,
+) -> Option<UpdateClass> {
+    declared
+        .get(key)
+        .copied()
+        .or_else(|| registry.key_decl(key).ok().and_then(|d| d.update_class))
+}
+
 /// `earliest` is the instant an untimed `Vocabulary` action is admitted at: the
 /// applied time is recorded as a coercion of the requested "as soon as possible"
 /// (RS-19).
@@ -324,7 +340,7 @@ pub fn compile(
     action: &SessionAction,
     registry: &ModuleRegistry,
     declared_classes: &BTreeMap<Key, UpdateClass>,
-    placed: &BTreeSet<Ident>,
+    sinks: &BTreeSet<Ident>,
     earliest: TimePoint,
     waveform: Option<crate::manifest::ArtifactRef>,
 ) -> Result<Compiled, Vec<Violation>> {
@@ -339,14 +355,20 @@ pub fn compile(
     let mut out = Compiled::default();
     match action {
         SessionAction::SetParameter { target, key, value } => {
-            let class = *declared_classes.get(key).ok_or_else(|| {
+            let class = declared_class(key, declared_classes, registry).ok_or_else(|| {
                 reject("ezsdr.update_class", format!("RS-17: {key} has no declared update class"))
             })?;
+            // RS-19 / finding OQ2: a bare `SetParameter` carries no time, so the
+            // Action carries none either and the class applies it at its first
+            // permitted instant. No coercion is recorded: nothing was requested to
+            // coerce, unlike the `Vocabulary` path below, whose `at` is a field the
+            // caller left empty.
             out.actions.push(Action::UpdateParameter {
                 target: target.clone(),
                 key: key.clone(),
                 value: value.clone(),
                 class,
+                at: None,
             });
         }
         SessionAction::Vocabulary { ns, verb, target, at, params } => {
@@ -370,22 +392,50 @@ pub fn compile(
             };
             match &decl.compiles_to {
                 CompileRule::UpdateParameter { key, class } => {
-                    // RS-14: "refused when it placed none". A capture has nowhere to
-                    // go unless the profile placed a recorder, and it is rejected
+                    // RS-14: "refused when it bound none". A capture has nowhere to
+                    // go unless the profile bound a recorder, and it is rejected
                     // rather than silently buffered on the host.
-                    if placed.is_empty() {
+                    if sinks.is_empty() {
                         return Err(reject(
                             "ezsdr.placement",
                             format!(
-                                "RS-14: {ns}.{verb} needs a component the profile placed, and it placed none"
+                                "RS-14: {ns}.{verb} needs a recorder the profile bound, and it bound none"
                             ),
                         ));
                     }
+                    // RS-14: the update targets the **Sink**, not the radio. A bound
+                    // Sink is addressed as its output id, because `SinkDescriptor`
+                    // carries no id of its own (SB-22; finding D17).
+                    let recorder = if sinks.len() == 1 {
+                        sinks.iter().next().expect("exactly one").clone()
+                    } else {
+                        let named = Ident::parse(&target.path).ok();
+                        match named.filter(|n| sinks.contains(n)) {
+                            Some(n) => n,
+                            None => {
+                                return Err(reject(
+                                    "ezsdr.placement",
+                                    format!(
+                                        "RS-14: {ns}.{verb} must name one of the {} bound recorders",
+                                        sinks.len()
+                                    ),
+                                ));
+                            }
+                        }
+                    };
+                    let recorder = ResourceId::parse(recorder.as_str()).map_err(|e| {
+                        reject("ezsdr.placement", format!("RS-14: {e}"))
+                    })?;
+                    // RS-14, RS-19: `sink.capture` compiles to a **timed**
+                    // UpdateParameter. `at` is either the instant the caller named
+                    // or `earliest`, recorded above as a coercion; dropping it here
+                    // is what made §61's `capture(n, at:)` lose its time.
                     out.actions.push(Action::UpdateParameter {
-                        target: target.clone(),
+                        target: recorder,
                         key: key.clone(),
                         value: params.get(key).cloned().unwrap_or(Value::Bool(true)),
                         class: *class,
+                        at: Some(AbsoluteDeadline::new(at)),
                     });
                 }
                 CompileRule::TxBurst { repeat } => {
@@ -453,10 +503,20 @@ pub fn implicit_spec(
     profile: &BindingProfile,
     registry: &ModuleRegistry,
     providers: &BTreeMap<Ident, &dyn crate::module_api::Provider>,
-    sink_descriptors: &BTreeMap<ModuleId, ComponentDescriptor>,
+    sinks: &BTreeMap<Ident, &dyn crate::module_api::Sink>,
 ) -> Result<ExperimentSpec, SpecError> {
     let mut spec = ExperimentSpec { version: 1, ..ExperimentSpec::default() };
-    for name in profile.bindings.keys() {
+    for (name, binding) in &profile.bindings {
+        // RS-12: one resource per **Provider** binding. A Sink binding becomes an
+        // output below and an Executor binding names an Island, so neither is a
+        // resource (SB-22).
+        let holds_provider = registry
+            .modules()
+            .find(|m| m.id == binding.module)
+            .is_some_and(|m| m.roles.contains(&Role::Provider));
+        if !holds_provider {
+            continue;
+        }
         // The resource's `kind` is the bound instance's own root kind. Inventing a
         // Kernel kind here would give the matcher (SB-34) nothing to bind to, and
         // would put a Kernel-owned vocabulary word where RS-12 asks only for "one
@@ -474,40 +534,45 @@ pub fn implicit_spec(
             },
         );
     }
-    for (name, placement) in &profile.placements.components {
-        let Some(module) = &placement.module else { continue };
+    // RS-12: one output per Sink binding, taking its `feed` from the binding
+    // (SB-22). A Sink is bound and never placed, so nothing is inserted into
+    // `graph.components` here — and the output carries the link its recorder is fed
+    // by, which the placed-component version had no way to express, so a Session's
+    // capture recorded nothing (findings D17, N6).
+    for (name, binding) in &profile.bindings {
         let is_sink = registry
             .modules()
-            .find(|m| m.id == *module)
+            .find(|m| m.id == binding.module)
             .is_some_and(|m| m.roles.contains(&Role::Sink));
         if !is_sink {
             continue;
         }
-        let descriptor = sink_descriptors.get(module).ok_or_else(|| SpecError::Structural {
-            reason: format!("RS-12: no ComponentDescriptor for Sink module {module}"),
+        let feed = binding.feed.clone().ok_or_else(|| SpecError::Structural {
+            reason: format!(
+                "SB-22: Sink binding {name} carries no `feed`, so RS-12 has no port to record"
+            ),
         })?;
-        spec.graph.components.insert(name.clone(), descriptor.clone());
+        // The output's `kind` is an **artifact** kind, which SB-17 checks against
+        // the Sink's `artifact_kinds`; the implicit Spec takes the first the bound
+        // Sink declares, because a Session states no preference (RS-12, RS-44).
+        let sink = sinks.get(name).ok_or_else(|| SpecError::Structural {
+            reason: format!("SB-22: no Sink instance for binding {name}"),
+        })?;
+        let kind = sink.descriptor().artifact_kinds.first().cloned().ok_or_else(|| {
+            SpecError::Structural {
+                reason: format!("RS-12: Sink binding {name} declares no artifact kind"),
+            }
+        })?;
+        spec.outputs.push(crate::spec::OutputReq {
+            id: name.clone(),
+            kind,
+            feed,
+            params: BTreeMap::new(),
+        });
     }
     Ok(spec)
 }
 
-/// A placement entry that names a `module` for a component the Spec also declares
-/// is refused, since the two would disagree (SB-25a).
-pub fn check_placement_modules(
-    spec: &ExperimentSpec,
-    profile: &BindingProfile,
-) -> Result<(), SpecError> {
-    for (name, placement) in &profile.placements.components {
-        if placement.module.is_some() && spec.graph.components.contains_key(name) {
-            return Err(SpecError::Structural {
-                reason: format!(
-                    "SB-25a: placement of {name} names a module although the Spec declares it"
-                ),
-            });
-        }
-    }
-    Ok(())
-}
 
 /// An Action that a Spec scheduled, resolved at `arm`: the template's `SpecTime`
 /// becomes an `AbsoluteDeadline` in the stream's SampleClock (SB-43, RS-49a).

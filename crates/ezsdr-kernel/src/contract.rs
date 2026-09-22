@@ -52,8 +52,11 @@ impl fmt::Display for DataContractId {
 
 /// An attribute value in a [`DataContract`]. The Kernel stores these and never
 /// interprets them, which is what keeps it from becoming a type system (SC-2).
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+///
+/// Carries no tag (OV-13's carve-out): an attribute value is the scalar an author
+/// wrote, not a two-field object wrapping it.
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
 pub enum Scalar {
     /// A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).
     Int(i64),
@@ -64,6 +67,28 @@ pub enum Scalar {
     Str(String),
     /// A boolean.
     Bool(bool),
+}
+
+/// Numeric equality crosses `Int` and `Float`, because `1` and `1.0` are one value
+/// under SB-6 and share one canonical form and one hash under OV-15a (finding D24).
+/// Without it an attribute an author wrote as `1` would not match the same contract
+/// re-registered from a Rust literal `1.0`, and SC-4's "identical re-registration is
+/// a no-op" would report a conflict.
+///
+/// Rule: SC-2, SB-6, OV-15a.
+impl PartialEq for Scalar {
+    fn eq(&self, other: &Scalar) -> bool {
+        match (self, other) {
+            (Scalar::Int(a), Scalar::Int(b)) => a == b,
+            (Scalar::Float(a), Scalar::Float(b)) => a == b,
+            (Scalar::Int(a), Scalar::Float(b)) | (Scalar::Float(b), Scalar::Int(a)) => {
+                *a as f64 == *b
+            }
+            (Scalar::Str(a), Scalar::Str(b)) => a == b,
+            (Scalar::Bool(a), Scalar::Bool(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 /// A registered data contract: an id, a fixed attribute map, and the set of

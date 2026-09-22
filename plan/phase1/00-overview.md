@@ -145,7 +145,7 @@ Ez-SDRv4/
 - **OV-10** Every document type has a JSON Schema generated from its Rust definition and committed under `schemas/<name>.v<major>.json`. The committed file is the contract: non-Rust consumers read it, and `schema_freeze` fails the build when regeneration does not reproduce it byte for byte.
 - **OV-11** `schemars` is pinned in the committed `Cargo.lock`, not by an exact `=` version requirement, so regeneration is reproducible inside this workspace without blocking downstream crates. Upgrading it is a deliberate change whose schema diff is reviewed and whose `schema_freeze` failure is the gate.
 - **OV-12** After the v4.0 freeze a committed `*.v1.json` is immutable. A change creates `*.v2.json` plus a migration or a refusal (Vision §10). Any schema diff requires an entry in `schemas/SCHEMA_CHANGELOG.md`.
-- **OV-13** Serialisation conventions, so that non-Rust consumers get discriminators: data-carrying enums use an internal tag (`{"kind": "...", ...}`), unit-only enums serialise as `snake_case` strings, and namespaced opaque sections are `serde_json::Value` with `additionalProperties: true`.
+- **OV-13** Serialisation conventions, so that non-Rust consumers get discriminators: data-carrying enums use an internal tag (`{"kind": "...", ...}`), unit-only enums serialise as `snake_case` strings, and namespaced opaque sections are `serde_json::Value` with `additionalProperties: true`. Two enums are carved out and carry no tag, because their values *are* plain JSON: `Value` (SB-4) and `Scalar` (SC-2). A tag on either would make every Spec parameter and every contract attribute a two-field object instead of the scalar, list or map an author wrote. An integer is told from a float by the JSON number's own form, under OV-15.
 
 Is generating the schema still "schema-first" in the Vision's sense? Vision §10's rule is that nothing is *defined only as a Rust type and re-described by hand* elsewhere. Nothing here is re-described by hand: the schema is generated, committed, reviewed and is the artefact every other language reads. The governance in OV-10 to OV-12 is what makes the committed schema, and not the Rust source, the arbiter.
 
@@ -361,6 +361,16 @@ re-verified independently of it. Verdicts: 91 confirm, 15 amend, 1 reverse (D27)
 the pass calls **not a decision** — OQ4, D1, D6, D11 and D14 are encoding consequences
 and fixture notes, and need no verdict. D3's and D5's applied spec edits were recomputed
 and stand.
+
+**Applied 2026-09-22.** Every verdict above is recorded, and the amendments each one
+calls for are applied: the self-contained ones (D15, D24, S1, B4, open question 4) and
+then the rule-text ones (open question 2, R10, D8, D16, D22, D23, D25, D26, D27, D32,
+D33) and this cluster. What is *not* applied is the Vision editing that the confirmed
+verdicts imply, which OV-6 defers to §12 step 3, and two values that need the Radio
+Model: the memory domain a resource port delivers from, and whether a radio stream
+declares one port per sample format or lets `effective` narrow one port's contract at
+`prepare`. SB-25a is **withdrawn** and keeps its number (OV-1). `OutputSource` is gone,
+so D1's verdict now stands for `Constraint` and `CapabilityValue` only.
 
 **One defect in five places.** A Spec plus a BindingProfile does not carry everything
 `plan()` needs, so the runtime supplies the remainder at assembly time — through

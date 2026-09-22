@@ -583,6 +583,13 @@ pub enum Action {
         /// The parameter's declared update class; an undeclared one was rejected at
         /// admission and never arrives (RS-52, RS-17).
         class: UpdateClass,
+        /// The instant at or after which the update takes effect under its class.
+        /// Absent means the first instant the class permits, which is what a bare
+        /// `sdr.rx.gain = 20` asks for (Vision §3). Optional for every class,
+        /// including `hardware_timed`: a class cannot make the field mandatory,
+        /// because `SessionAction::SetParameter` carries no time to put in it
+        /// (RS-49, RS-19, RS-14).
+        at: Option<AbsoluteDeadline>,
     },
     /// A Vocabulary-defined peripheral operation (RS-49).
     PeripheralCommand {
@@ -668,7 +675,9 @@ pub enum ActionTemplate {
         /// The caller's token.
         token: u64,
     },
-    /// [`Action::UpdateParameter`], which carries no time (RS-49a).
+    /// [`Action::UpdateParameter`] without `at`; `arm` substitutes the resolved
+    /// deadline, so a scheduled parameter change takes effect at the instant the
+    /// Spec named (RS-49a).
     UpdateParameter {
         /// Whose parameter.
         target: ResourceId,
@@ -713,7 +722,7 @@ impl ActionTemplate {
             }
             ActionTemplate::SetTimer { target, token } => Action::SetTimer { target, at, token },
             ActionTemplate::UpdateParameter { target, key, value, class } => {
-                Action::UpdateParameter { target, key, value, class }
+                Action::UpdateParameter { target, key, value, class, at: Some(at) }
             }
             ActionTemplate::PeripheralCommand { target, verb, params } => {
                 Action::PeripheralCommand { target, verb, params, at: Some(at) }
@@ -728,6 +737,7 @@ impl ActionTemplate {
             self,
             ActionTemplate::TxBurst { .. }
                 | ActionTemplate::SetTimer { .. }
+                | ActionTemplate::UpdateParameter { .. }
                 | ActionTemplate::PeripheralCommand { .. }
         )
     }

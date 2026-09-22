@@ -185,6 +185,10 @@ pub struct PrepareSection {
 /// Rule: RS-38…RS-47. Vision §50, Finding 19.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Manifest {
+    /// Mandatory document major, as on every other Kernel document; Phase 1 supports
+    /// exactly `{1}` and [`crate::spec::check_version`] is what refuses another
+    /// (RS-38, SB-47, SB-48). Vision §10 requires it of the Manifest by name.
+    pub version: u32,
     /// Identity, class, fidelity and the transition sequence (RS-38).
     pub run: RunSection,
     /// The Spec after migration, with its hashes (RS-38, SB-49).

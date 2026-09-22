@@ -5,79 +5,27 @@
       "type": "string"
     },
     "Scalar": {
-      "description": "An attribute value in a [`DataContract`]. The Kernel stores these and never\ninterprets them, which is what keeps it from becoming a type system (SC-2).",
-      "oneOf": [
+      "anyOf": [
         {
           "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
-          "properties": {
-            "kind": {
-              "const": "int",
-              "type": "string"
-            },
-            "value": {
-              "format": "int64",
-              "type": "integer"
-            }
-          },
-          "required": [
-            "kind",
-            "value"
-          ],
-          "type": "object"
+          "format": "int64",
+          "type": "integer"
         },
         {
           "description": "A 64-bit float, written per RFC 8785's number rule; a non-finite one is\nrefused rather than written as `null` (OV-15).",
-          "properties": {
-            "kind": {
-              "const": "float",
-              "type": "string"
-            },
-            "value": {
-              "format": "double",
-              "type": "number"
-            }
-          },
-          "required": [
-            "kind",
-            "value"
-          ],
-          "type": "object"
+          "format": "double",
+          "type": "number"
         },
         {
           "description": "A string.",
-          "properties": {
-            "kind": {
-              "const": "str",
-              "type": "string"
-            },
-            "value": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "value"
-          ],
-          "type": "object"
+          "type": "string"
         },
         {
           "description": "A boolean.",
-          "properties": {
-            "kind": {
-              "const": "bool",
-              "type": "string"
-            },
-            "value": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "kind",
-            "value"
-          ],
-          "type": "object"
+          "type": "boolean"
         }
-      ]
+      ],
+      "description": "An attribute value in a [`DataContract`]. The Kernel stores these and never\ninterprets them, which is what keeps it from becoming a type system (SC-2).\n\nCarries no tag (OV-13's carve-out): an attribute value is the scalar an author\nwrote, not a two-field object wrapping it."
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

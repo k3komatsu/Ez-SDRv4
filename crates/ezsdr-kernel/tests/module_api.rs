@@ -5,7 +5,7 @@ mod support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use ezsdr_kernel::binding::{BindingProfile, ComponentPlacement, Placements};
+use ezsdr_kernel::binding::{ComponentPlacement, Placements};
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection, PortRef};
 use ezsdr_kernel::event::{Action, EventCollector, EventKind};
 use ezsdr_kernel::id::{ClockDomainId, DataLinkId, IslandId, MemoryDomainId, RunId};
@@ -20,7 +20,7 @@ use ezsdr_kernel::module_api::{
 };
 use ezsdr_kernel::plan::{
     EdgeKind, GraphEdge, IslandContext, PrepareReport, admit_islands, check_cycles,
-    check_effective_narrows, sink_components,
+    check_effective_narrows,
 };
 use ezsdr_kernel::policy::EventKindRegistry;
 use ezsdr_kernel::spec::{
@@ -296,7 +296,12 @@ fn ma_12_prepare_matches_coerce() {
         id: id("radio"),
         instance: mid("ezsdr.test.provider"),
         role: Role::Provider,
-        content: serde_json::to_value(&request).expect("the fragment carries the request"),
+        // The real shape `plan()` emits (SB-39): the selector and the matched
+        // request side by side, not the request alone.
+        content: serde_json::json!({
+            "selector": {},
+            "requested": serde_json::to_value(&request).expect("serialises"),
+        }),
         after: Vec::new(),
     };
     let report = p.prepare(&fragment, h.ctx()).expect("prepares");
@@ -536,7 +541,6 @@ fn placement(domain: u32) -> ComponentPlacement {
     ComponentPlacement {
         island: id("io"),
         memory_domain: MemoryDomainId::local(domain),
-        module: None,
     }
 }
 
@@ -564,6 +568,7 @@ fn ma_39_island_admission() {
         BackPressure::Block,
     )];
     let islands = vec![island(&["a", "b"], "exec")];
+    let no_resources = BTreeSet::new();
     let ctx = IslandContext {
         islands: &islands,
         components: &components,
@@ -571,6 +576,7 @@ fn ma_39_island_admission() {
         executors: &executors,
         links: &links,
         graph_links: &graph_links,
+        resource_endpoints: &no_resources,
     };
     assert!(admit_islands(&ctx).is_ok());
 
@@ -616,6 +622,7 @@ fn ctx_clone<'a>(ctx: &IslandContext<'a>) -> IslandContext<'a> {
         executors: ctx.executors,
         links: ctx.links,
         graph_links: ctx.graph_links,
+        resource_endpoints: ctx.resource_endpoints,
     }
 }
 
@@ -645,7 +652,11 @@ fn ma_22_cycle_rules() {
 }
 
 #[test]
-fn ma_25_sink_role_predicate() {
+fn ma_25_sink_role_is_read_from_the_binding() {
+    // MA-25: the Kernel reads the Sink role from the `ModuleDescriptor` of the
+    // Module the profile **binds** to the output — on a Spec Run and a Session
+    // alike. It used to come from a placement's `module`, which SB-25a left unset
+    // on a Spec Run, so SC-21 was unenforceable on the publication path (D17).
     let mut reg = ModuleRegistry::new();
     reg.register_vocabulary(test_vocabulary()).expect("fresh");
     reg.register(test_sink_descriptor(), Factories { sink: true, ..Factories::default() })
@@ -653,37 +664,23 @@ fn ma_25_sink_role_predicate() {
     reg.register(test_provider_descriptor(), Factories { provider: true, ..Factories::default() })
         .expect("registers");
 
-    let mut profile = BindingProfile { version: 1, ..BindingProfile::default() };
-    profile.placements.components.insert(
-        id("recorder"),
-        ComponentPlacement {
-            island: id("io"),
-            memory_domain: MemoryDomainId::local(0),
-            module: Some(mid("ezsdr.test.sink")),
-        },
-    );
-    profile.placements.components.insert(
-        id("processor"),
-        ComponentPlacement {
-            island: id("io"),
-            memory_domain: MemoryDomainId::local(0),
-            module: Some(mid("ezsdr.test.provider")),
-        },
-    );
-    let sinks: BTreeSet<Ident> = sink_components(&profile, &reg);
-    assert_eq!(sinks, [id("recorder")].into_iter().collect::<BTreeSet<_>>());
+    let holds_sink = |m: &ezsdr_kernel::id::ModuleId| {
+        reg.modules().any(|d| d.id == *m && d.roles.contains(&Role::Sink))
+    };
+    assert!(holds_sink(&mid("ezsdr.test.sink")));
+    assert!(!holds_sink(&mid("ezsdr.test.provider")), "a Provider is not a Sink");
 
-    // A `Block` link into that component is refused (SC-21).
+    // SC-21: a `Block` link into a Sink is refused, and the predicate is now
+    // available on both paths because it reads a binding rather than a placement.
     let decl = DataLinkDecl {
         id: DataLinkId::local(0),
-        from: PortRef { component: "rx".into(), port: "out".into() },
-        to: PortRef { component: "recorder".into(), port: "in".into() },
+        from: PortRef { component: "radio".into(), port: "rx".into() },
+        to: PortRef { component: "capture0".into(), port: "in".into() },
         contract: cf32(),
         policy: BackPressure::Block,
         capacity: 4,
     };
-    let is_sink = sinks.contains(&id("recorder"));
-    assert!(ezsdr_kernel::stream::check_sink_link(&decl, is_sink).is_err());
+    assert!(ezsdr_kernel::stream::check_sink_link(&decl, true).is_err());
     let _ = Placements::default();
 }
 

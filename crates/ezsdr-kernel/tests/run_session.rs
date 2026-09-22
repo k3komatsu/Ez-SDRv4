@@ -6,13 +6,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ezsdr_kernel::binding::{
-    AdmissionCheckRegistry, BindingProfile, CheckStage, ComponentPlacement, Placements,
+    AdmissionCheckRegistry, BindingProfile, CheckStage, Placements,
 };
 use ezsdr_kernel::event::{
     Action, ActionTemplate, CounterRow, Event, EventCollector, EventKind, EventSink, Severity,
 };
 use ezsdr_kernel::hash::ContentHash;
-use ezsdr_kernel::id::{ClockDomainId, MemoryDomainId, ResourceId, RunId};
+use ezsdr_kernel::id::{ClockDomainId, ResourceId, RunId};
 use ezsdr_kernel::manifest::{
     ArtifactRef, BindingSection, ClocksSection, EventsSection, Manifest, PrepareSection, RunKind,
     RunSection, SpecSection, TerminationSection, ingest_input, mark_open_artifacts,
@@ -33,8 +33,7 @@ use ezsdr_kernel::spec::{ExperimentSpec, Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::{BlockFlags, ContinuityBuilder, DropCarry, LatePolicy};
 use ezsdr_kernel::time::{AbsoluteDeadline, TimePoint};
 use support::{
-    FakeHostClock, RecordingCleanup, TestLimitsCheck, TestProvider, TestSink, id, key, mid, ns,
-    recorder_component, rid, some_hash, test_provider_descriptor, test_sink_descriptor,
+    FakeHostClock, RecordingCleanup, TestLimitsCheck, TestProvider, TestSink, id, key, mid, ns, rid, some_hash, test_provider_descriptor, test_sink_descriptor,
     test_vocabulary,
 };
 
@@ -617,7 +616,8 @@ fn session_profile() -> BindingProfile {
         bindings: [(
             id("radio"),
             ezsdr_kernel::binding::Binding {
-                provider: mid("ezsdr.test.provider"),
+                module: mid("ezsdr.test.provider"),
+                feed: None,
                 selector: BTreeMap::new(),
                 profile: None,
             },
@@ -628,21 +628,31 @@ fn session_profile() -> BindingProfile {
         placements: Placements::default(),
         environment: BTreeMap::new(),
     };
-    p.placements.components.insert(
+    // SB-22: a recorder is **bound**, not placed. Its binding carries the `feed`
+    // RS-12 turns into the implicit Spec's output — the port it records and the
+    // drop-class policy and capacity of the link (SC-19, SC-21).
+    p.bindings.insert(
         id("recorder"),
-        ComponentPlacement {
-            island: id("io"),
-            memory_domain: MemoryDomainId::local(0),
-            module: Some(mid("ezsdr.test.sink")),
+        ezsdr_kernel::binding::Binding {
+            module: mid("ezsdr.test.sink"),
+            feed: Some(ezsdr_kernel::spec::SinkFeed {
+                port: ezsdr_kernel::contract::PortRef {
+                    component: "radio".to_owned(),
+                    port: "rx".to_owned(),
+                },
+                policy: ezsdr_kernel::stream::BackPressure::DropOldest,
+                capacity: 4,
+            }),
+            selector: BTreeMap::new(),
+            profile: None,
         },
     );
     p
 }
 
-fn sink_descriptors() -> BTreeMap<ezsdr_kernel::id::ModuleId, ezsdr_kernel::module_api::ComponentDescriptor>
-{
-    let contract = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
-    [(mid("ezsdr.test.sink"), recorder_component(contract))].into_iter().collect()
+/// The bound Sink per output id, which RS-12 reads the artifact kind from.
+fn sinks(s: &TestSink) -> BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> {
+    [(id("recorder"), s as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect()
 }
 
 /// The bound Provider per binding name, which RS-12 reads the root kind from.
@@ -650,9 +660,16 @@ fn bound(p: &TestProvider) -> BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Pro
     [(id("radio"), p as &dyn ezsdr_kernel::module_api::Provider)].into_iter().collect()
 }
 
-/// The components the profile placed, which RS-14 refuses a capture without.
+/// The recorders the profile bound, which RS-14 refuses a capture without.
 fn placed() -> std::collections::BTreeSet<Ident> {
     [id("recorder")].into_iter().collect()
+}
+
+/// A recorder whose contract matches the `rx` port the test tree declares (SC-3).
+fn test_sink() -> TestSink {
+    TestSink::new(
+        ezsdr_kernel::contract::DataContractId::parse("ezsdr.iq.cf32").expect("a valid literal"),
+    )
 }
 
 fn declared_classes() -> BTreeMap<Key, UpdateClass> {
@@ -666,11 +683,15 @@ fn rs_12_session_implicit_spec_hashed() {
     let reg = registry();
     let profile = session_profile();
     let provider = TestProvider::new("radio", 2);
-    let spec = implicit_spec(&profile, &reg, &bound(&provider), &sink_descriptors()).expect("builds");
+    let spec = implicit_spec(&profile, &reg, &bound(&provider), &sinks(&test_sink())).expect("builds");
     assert_eq!(spec.version, 1);
     assert_eq!(spec.resources.len(), 1);
     assert!(spec.resources[&id("radio")].requires.is_empty(), "empty requires");
-    assert!(spec.graph.components.contains_key(&id("recorder")));
+    // RS-12: one resource per Provider binding, one **output** per Sink binding. A
+    // Sink is bound and never a graph component (finding D17).
+    assert!(spec.graph.components.is_empty());
+    assert_eq!(spec.outputs.len(), 1);
+    assert_eq!(spec.outputs[0].id, id("recorder"));
     // Hashed like any other document.
     let hash = ContentHash::of(&spec).expect("hashes");
     assert_eq!(hash, ContentHash::of(&spec).expect("hashes"));
@@ -682,8 +703,11 @@ fn rs_12_bare_connect_then_capture_succeeds() {
     let reg = registry();
     let profile = session_profile();
     let provider = TestProvider::new("radio", 2);
-    let spec = implicit_spec(&profile, &reg, &bound(&provider), &sink_descriptors()).expect("builds");
-    assert!(spec.graph.components.contains_key(&id("recorder")), "the recorder is a placed component");
+    let spec = implicit_spec(&profile, &reg, &bound(&provider), &sinks(&test_sink())).expect("builds");
+    assert_eq!(spec.outputs.len(), 1, "the recorder is a bound Sink, carried as an output");
+    // The output carries the link that feeds it, which is what makes the capture
+    // actually record something (SC-19, finding N6).
+    assert_eq!(spec.outputs[0].feed.port.port, "rx");
 
     let action = SessionAction::Vocabulary {
         ns: ns("test"),
@@ -709,10 +733,16 @@ fn rs_14_capture_compiles_to_update_parameter() {
     };
     let compiled = compile(&action, &reg, &declared_classes(), &placed(), t(0), None).expect("compiles");
     match &compiled.actions[0] {
-        Action::UpdateParameter { target, key: k, class, .. } => {
-            assert_eq!(*target, rid("radio"));
+        Action::UpdateParameter { target, key: k, class, at, .. } => {
+            // RS-14: the update targets the **Sink**, addressed by its output id,
+            // not the radio the action named (finding D17).
+            assert_eq!(*target, rid("recorder"));
             assert_eq!(*k, key("test.capture"));
             assert_eq!(*class, UpdateClass::BlockBoundary);
+            // RS-14, RS-19: a capture compiles to a *timed* UpdateParameter. This
+            // is what Vision §61's `capture(n, at:)` rests on; the instant used to
+            // be computed and then dropped (finding OQ2).
+            assert_eq!(*at, Some(AbsoluteDeadline::new(t(100))));
         }
         other => panic!("expected an UpdateParameter, got {other:?}"),
     }
@@ -722,10 +752,10 @@ fn rs_14_capture_compiles_to_update_parameter() {
 fn rs_14_capture_without_recorder_rejected() {
     let reg = registry();
     let mut profile = session_profile();
-    profile.placements.components.clear();
+    profile.bindings.remove(&id("recorder"));
     let provider = TestProvider::new("radio", 2);
-    let spec = implicit_spec(&profile, &reg, &bound(&provider), &sink_descriptors()).expect("builds");
-    assert!(spec.graph.components.is_empty(), "no recorder was placed");
+    let spec = implicit_spec(&profile, &reg, &bound(&provider), &sinks(&test_sink())).expect("builds");
+    assert!(spec.outputs.is_empty(), "no recorder was bound");
 
     let capture = SessionAction::Vocabulary {
         ns: ns("test"),
@@ -734,12 +764,12 @@ fn rs_14_capture_without_recorder_rejected() {
         at: Some(t(100)),
         params: BTreeMap::new(),
     };
-    // RS-14: refused when the profile placed no recorder, rather than silently
+    // RS-14: refused when the profile bound no recorder, rather than silently
     // buffered on the host.
     let violations = compile(&capture, &reg, &declared_classes(), &Default::default(), t(0), None)
-        .expect_err("no recorder placed");
-    assert!(violations[0].reason.contains("placed none"), "{:?}", violations[0]);
-    // The same verb against a profile that did place one compiles.
+        .expect_err("no recorder bound");
+    assert!(violations[0].reason.contains("bound none"), "{:?}", violations[0]);
+    // The same verb against a profile that did bind one compiles.
     assert!(compile(&capture, &reg, &declared_classes(), &placed(), t(0), None).is_ok());
 }
 
@@ -759,6 +789,52 @@ fn rs_13a_unknown_vocabulary_verb_rejected() {
 }
 
 #[test]
+fn rs_17_provider_parameter_class_comes_from_its_key_decl() {
+    // Vision §3's `sdr.rx.gain = 20` targets a Provider, whose parameters are
+    // Vocabulary keys and never a component's `params`. Before SB-2 carried an
+    // update class there was nowhere for such a key's class to be declared, so the
+    // Easy API's first parameter change was rejected as undeclared (finding D33).
+    let reg = registry();
+    let gain = SessionAction::SetParameter {
+        target: rid("radio"),
+        key: key("test.gain"),
+        value: Value::Num(20.0),
+    };
+    // Nothing in the caller's map: the class comes from the KeyDecl alone.
+    let compiled = compile(&gain, &reg, &BTreeMap::new(), &placed(), t(0), None).expect("compiles");
+    assert!(matches!(
+        &compiled.actions[0],
+        Action::UpdateParameter { class: UpdateClass::HardwareTimed, at: None, .. }
+    ));
+
+    // And the Admitter agrees, so the two paths cannot disagree about one key.
+    let checks = AdmissionCheckRegistry::new();
+    let environment = BTreeMap::new();
+    let classes = BTreeMap::new();
+    let spec_coercion = BTreeMap::new();
+    let admitter = Admitter {
+        checks: &checks,
+        environment: &environment,
+        declared_classes: &classes,
+        spec_coercion: &spec_coercion,
+        registry: &reg,
+        is_session: true,
+    };
+    let proposed: BTreeMap<Key, Value> =
+        [(key("test.gain"), Value::Num(20.0))].into_iter().collect();
+    assert!(admitter.admit(&BTreeMap::new(), &proposed, &[], CheckStage::Runtime).is_ok());
+
+    // A key whose KeyDecl declares no class is still not changeable during a Run,
+    // so the absent value means "not changeable" and not "any class" (RS-17).
+    let flag = SessionAction::SetParameter {
+        target: rid("radio"),
+        key: key("test.flag"),
+        value: Value::Bool(true),
+    };
+    assert!(compile(&flag, &reg, &BTreeMap::new(), &placed(), t(0), None).is_err());
+}
+
+#[test]
 fn rs_19_capture_asap_records_applied_time() {
     let reg = registry();
     let action = SessionAction::Vocabulary {
@@ -772,6 +848,53 @@ fn rs_19_capture_asap_records_applied_time() {
     assert_eq!(compiled.coercions.len(), 1);
     assert_eq!(compiled.coercions[0].requested, Value::Str("asap".to_owned()));
     assert_eq!(compiled.coercions[0].applied, Value::Int(4_242));
+}
+
+#[test]
+fn rs_49_update_parameter_carries_its_instant() {
+    let reg = registry();
+    // The `asap` path: RS-19 resolves `earliest`, records it as a coercion, and the
+    // resolved instant reaches the Action's own `at`.
+    let asap = SessionAction::Vocabulary {
+        ns: ns("test"),
+        verb: id("capture"),
+        target: rid("radio"),
+        at: None,
+        params: BTreeMap::new(),
+    };
+    let compiled =
+        compile(&asap, &reg, &declared_classes(), &placed(), t(4_242), None).expect("compiles");
+    assert!(matches!(
+        &compiled.actions[0],
+        Action::UpdateParameter { at: Some(at), .. } if *at == AbsoluteDeadline::new(t(4_242))
+    ));
+
+    // A bare SetParameter has no time field to leave empty, so it compiles to an
+    // Action with none and records no coercion — and is *not* refused, which a
+    // mandatory `at` would have done to Vision §3's `sdr.rx.gain = 20`.
+    let bare = SessionAction::SetParameter {
+        target: rid("radio"),
+        key: key("test.flag"),
+        value: Value::Bool(true),
+    };
+    let compiled =
+        compile(&bare, &reg, &declared_classes(), &placed(), t(7), None).expect("compiles");
+    assert!(matches!(&compiled.actions[0], Action::UpdateParameter { at: None, .. }));
+    assert!(compiled.coercions.is_empty(), "nothing was requested to coerce");
+
+    // RS-49a: a scheduled parameter change is timed, so `arm` substitutes the
+    // instant the Spec named rather than applying it at `arm`.
+    let template = ActionTemplate::UpdateParameter {
+        target: rid("radio"),
+        key: key("test.flag"),
+        value: Value::Bool(true),
+        class: UpdateClass::BlockBoundary,
+    };
+    assert!(template.is_timed());
+    assert!(matches!(
+        template.resolve(AbsoluteDeadline::new(t(555))),
+        Action::UpdateParameter { at: Some(at), .. } if at == AbsoluteDeadline::new(t(555))
+    ));
 }
 
 #[test]
@@ -978,6 +1101,7 @@ fn rs_48_action_set_is_closed_and_schematised() {
             key: key("test.flag"),
             value: Value::Bool(true),
             class: UpdateClass::BlockBoundary,
+            at: Some(AbsoluteDeadline::new(t(30))),
         },
         Action::PeripheralCommand {
             target: rid("radio"),
@@ -1044,6 +1168,7 @@ fn manifest_fixture(reason: Termination) -> Manifest {
     let spec = ExperimentSpec { version: 1, ..ExperimentSpec::default() };
     let profile = session_profile();
     Manifest {
+        version: 1,
         run: RunSection {
             id: RunId::from_string("local:1:2-0".to_owned()),
             kind: RunKind::Session,
@@ -1160,6 +1285,27 @@ fn rs_38_environment_recorded_verbatim() {
     let mut m = manifest_fixture(Termination::Completed);
     m.binding.body = serde_json::to_value(&profile).expect("serialises");
     assert_eq!(m.binding.body["environment"]["vendor.thing"], section);
+}
+
+#[test]
+fn rs_38_manifest_carries_its_mandatory_version() {
+    // Vision §10 requires a mandatory `version` of the Manifest by name, and the
+    // Manifest is the one document that outlives every Run. Without the field
+    // SB-47's migrate-or-refuse has nothing to read (finding R10 / D-table N3).
+    let mut m = manifest_fixture(Termination::Completed);
+    m.seal().expect("seals");
+    let doc = serde_json::to_value(&m).expect("serialises");
+    assert_eq!(doc["version"], serde_json::json!(1), "the version is in the hashed body");
+    assert_eq!(ezsdr_kernel::spec::check_version(&doc), Ok(1));
+
+    // SB-47: a stored Manifest from a future major is refused by name, never
+    // reinterpreted under version 1's defaults.
+    let mut future = doc.clone();
+    future["version"] = serde_json::json!(2);
+    assert!(matches!(
+        ezsdr_kernel::spec::check_version(&future),
+        Err(ezsdr_kernel::spec::SpecError::UnsupportedVersion { found: 2, .. })
+    ));
 }
 
 #[test]

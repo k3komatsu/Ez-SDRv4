@@ -478,6 +478,19 @@ pub struct Resource {
     /// Its sub-resources (SB-33).
     #[serde(default)]
     pub children: Vec<Resource>,
+    /// The Ports this node carries, for a node that is a stream endpoint. A Spec
+    /// links a component to a bound resource through one of these, which is how
+    /// Vision §7's `PHY Processor -> SampleStream -> Radio Port` is expressible;
+    /// without them `PortRef.component` could name a resource but no contract
+    /// could be checked against it (MA-10, SB-15, SC-1, SC-3).
+    #[serde(default)]
+    pub ports: Vec<crate::contract::Port>,
+    /// Whether more than one Spec resource may bind to this node. Default `false`:
+    /// a channel or a stream is exclusive, while Vision §8's GPIO banks "may share
+    /// the timekeeper" of §39, so which is which is the Provider's declaration and
+    /// never the Kernel's knowledge (MA-10, SB-34, OV-21).
+    #[serde(default)]
+    pub shareable: bool,
 }
 
 impl Resource {

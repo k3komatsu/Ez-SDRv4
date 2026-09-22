@@ -565,7 +565,7 @@
       "type": "object"
     },
     {
-      "description": "[`Action::UpdateParameter`], which carries no time (RS-49a).",
+      "description": "[`Action::UpdateParameter`] without `at`; `arm` substitutes the resolved\ndeadline, so a scheduled parameter change takes effect at the instant the\nSpec named (RS-49a).",
       "properties": {
         "class": {
           "$ref": "#/$defs/UpdateClass",

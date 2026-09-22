@@ -517,6 +517,35 @@ fn sc_29a_late_and_actual_start_reach_the_record() {
 }
 
 #[test]
+fn sc_29a_set_late_carries_a_discontinuity_opened_burst() {
+    // SC-24a requires the late policy to be evaluated for the burst a discontinuity
+    // opened, and that burst carries no START_OF_BURST and so no BurstOpen. Without
+    // `set_late` its `late_by` would be permanently None — the one case SC-24a is
+    // about (finding D8).
+    let mut tr = BurstTracker::new(dom());
+    let late_by = Duration::new(ClockDomainId::HOST_MONOTONIC, 7);
+    tr.on_block(&tx(1000, 100, BlockFlags::START_OF_BURST), open()).expect("start");
+    let step = tr.on_block(&tx(1300, 100, BlockFlags::NONE), None).expect("recovers");
+    assert!(matches!(step, BurstStep::Discontinuity { .. }), "the new burst took no BurstOpen");
+
+    tr.set_late(LateOutcome::SendAsap { late_by });
+    let step = tr.on_block(&tx(1400, 100, BlockFlags::END_OF_BURST), None).expect("ends");
+    let BurstStep::Ended { record } = step else { panic!("expected Ended") };
+    assert_eq!(record.late_by, Some(late_by), "the outcome reached the record");
+    assert_eq!(record.target, t(1300), "and it is the discontinuity-opened burst's record");
+
+    // OnTime clears it rather than recording a zero, so a caller cannot turn an
+    // on-time burst into a late one by reporting the evaluation it made (SC-27).
+    let mut tr = BurstTracker::new(dom());
+    tr.on_block(&tx(1000, 100, BlockFlags::START_OF_BURST), open()).expect("start");
+    tr.on_block(&tx(1300, 100, BlockFlags::NONE), None).expect("recovers");
+    tr.set_late(LateOutcome::OnTime);
+    let step = tr.on_block(&tx(1400, 100, BlockFlags::END_OF_BURST), None).expect("ends");
+    let BurstStep::Ended { record } = step else { panic!("expected Ended") };
+    assert_eq!(record.late_by, None);
+}
+
+#[test]
 fn sc_23a_requested_target_reaches_the_record() {
     // SC-23a: "both times are recorded: the BurstRecord keeps `requested_target`
     // alongside the applied `target`". The admission result travels on the block

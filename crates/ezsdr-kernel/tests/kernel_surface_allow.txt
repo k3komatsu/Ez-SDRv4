@@ -147,7 +147,7 @@ spec::SpecPolicies = ExperimentSpec envelope
 spec::SpecTime = NEW: SB-16's resource-relative offset, because a Spec cannot name a ClockDomainId.
 spec::ScheduleEntry = NEW: SB-16's scheduled ActionTemplate.
 spec::OutputReq = NEW: SB-17's declared artifact, whose source must have a placed Sink.
-spec::OutputSource = NEW: SB-17's port-or-resource source.
+spec::SinkFeed = NEW: SB-17's link into a bound Sink: the source port plus SC-19's mandatory policy and capacity.
 spec::LinkReq = NEW: SB-15's graph link, with the policy and capacity SC-19 makes mandatory.
 spec::SpecError = NEW: the closed refusal set of SB-9 to SB-13 and SB-47.
 spec::Migration = ExperimentSpec envelope
@@ -155,7 +155,6 @@ spec::MigrationRegistry = ExperimentSpec envelope
 spec::check_version = ExperimentSpec envelope
 spec::check_top_level = ExperimentSpec envelope
 spec::check_no_placement = NEW: SB-13's scan for placement and environment fields at any depth.
-session::check_placement_modules = NEW: SB-25a's refusal when a profile names a module for a Spec-declared component.
 
 # --- admission checks (audit §13 `spec/binding`) -----------------------------
 binding::AdmissionCheck = environment
@@ -185,7 +184,6 @@ plan::EdgeKind = NEW: MA-22 needs to tell a stream edge from an Event or Action 
 plan::GraphEdge = NEW: MA-22's edge, with whether it crosses an Island boundary.
 plan::check_effective_narrows = NEW: MA-12's rule that `effective` may narrow and must not widen.
 plan::check_sink_links = NEW: SB-15's application of SC-21 over a plan's links.
-plan::sink_components = NEW: MA-25's resolution of the Sink role through the placement's `module`.
 
 # --- run, ownership and cleanup (audit §13 `lifecycle`, `ownership`) ---------
 run::RunState = Run state machine

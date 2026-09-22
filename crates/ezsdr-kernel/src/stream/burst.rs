@@ -407,6 +407,21 @@ impl BurstTracker {
         });
     }
 
+    /// The late outcome of the open burst, for a burst a **discontinuity** opened.
+    /// Such a burst carries no `START_OF_BURST` and so no [`BurstOpen`], but SC-24a
+    /// still requires the Provider to evaluate SC-27's policy for it; this is the
+    /// second path SC-29a names for that one field (SC-24a, SC-27, SC-29a).
+    pub fn set_late(&mut self, late: LateOutcome) {
+        if let Some(o) = self.open.as_mut() {
+            o.late_by = match late {
+                LateOutcome::SendAsap { late_by }
+                | LateOutcome::Drop { late_by }
+                | LateOutcome::PlanViolation { late_by } => Some(late_by),
+                LateOutcome::OnTime => None,
+            };
+        }
+    }
+
     /// Device feedback on where the burst actually started, when the Provider has
     /// it (SC-28, SC-29a).
     pub fn set_actual_start(&mut self, t: TimePoint) {

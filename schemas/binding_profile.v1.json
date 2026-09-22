@@ -1,8 +1,43 @@
 {
   "$defs": {
+    "BackPressure": {
+      "description": "What a link does when its queue is at capacity. There is no default (SC-19).",
+      "oneOf": [
+        {
+          "const": "block",
+          "description": "Publishing returns [`PublishOutcome::Full`] and nothing is ever dropped.\nThe name is the Vision's; the policy produces back-pressure through a\nrefusal the producer must honour, not through a parked thread (SC-20a).",
+          "type": "string"
+        },
+        {
+          "const": "drop_oldest",
+          "description": "The oldest queued block is evicted (SC-20).",
+          "type": "string"
+        },
+        {
+          "const": "drop_newest",
+          "description": "The new block is refused (SC-20).",
+          "type": "string"
+        }
+      ]
+    },
     "Binding": {
       "description": "Which Provider serves a Spec resource, and how it is selected.\n\nA `selector` is Provider content. Vision §8's simulation example writes\n`instances: 2` under a Mock binding; that is selector content meaning one\nProvider instance emulating two motherboards, exactly as the laboratory\nexample's `addrs: [a, b]` is one instance spanning two. It is not two Provider\ninstances, which SB-35 would then have to reconcile with the single-instance\nrule.\n\nRule: SB-22, SB-23.",
       "properties": {
+        "feed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SinkFeed"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "For a **Sink** binding on a Session profile: the port it records and the\ndrop-class policy and capacity of the link that feeds it. RS-12 makes it the\nimplicit Spec's output. A Spec Run's `outputs[]` already declare their feeds,\nso a binding that carries one there is refused (SB-17, SB-22, RS-12)."
+        },
+        "module": {
+          "$ref": "#/$defs/ModuleId",
+          "description": "The Module bound here: a Provider for a Spec resource, a Sink for an output\nid, an Executor for an Island's `executor` name. Named `module` rather than\n`provider` because all three roles are bound through this one map; Vision\n§8's illustrative YAML still writes `provider`, which 03 §9 records as a\nVision departure for §12 (SB-22, MA-25, MA-38)."
+        },
         "profile": {
           "anyOf": [
             {
@@ -14,10 +49,6 @@
           ],
           "description": "The declared profile, when it has one (SB-22, Vision §33)."
         },
-        "provider": {
-          "$ref": "#/$defs/ModuleId",
-          "description": "The Provider Module (SB-22)."
-        },
         "selector": {
           "additionalProperties": {
             "$ref": "#/$defs/Value"
@@ -28,7 +59,7 @@
         }
       },
       "required": [
-        "provider"
+        "module"
       ],
       "type": "object"
     },
@@ -42,17 +73,6 @@
         "memory_domain": {
           "$ref": "#/$defs/MemoryDomainId",
           "description": "Which memory domain (MA-39)."
-        },
-        "module": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ModuleId"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Which Module supplies the component's `ComponentDescriptor`. A Spec Run\nleaves it unset, because the Spec already carries the descriptor; a Session\nprofile sets it, and that is what lets RS-12 build a Session's implicit\nSpec (SB-25a)."
         }
       },
       "required": [
@@ -227,6 +247,24 @@
       },
       "type": "object"
     },
+    "PortRef": {
+      "description": "Names one port of one component instance (SC-1).",
+      "properties": {
+        "component": {
+          "description": "The component instance identifier (MA-36).",
+          "type": "string"
+        },
+        "port": {
+          "description": "The port name on that component (SC-1).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "port"
+      ],
+      "type": "object"
+    },
     "ProfileRef": {
       "description": "A declared profile, by name and version. Vision §59 bumps a Mock profile's\nversion on measurement.\n\nRule: SB-22, MA-33 (decision B7).",
       "properties": {
@@ -261,6 +299,31 @@
       "required": [
         "sched",
         "priority"
+      ],
+      "type": "object"
+    },
+    "SinkFeed": {
+      "description": "The link that feeds a Sink: the port the samples leave from and the drop-class\npolicy and capacity of the link itself. One shape serves both a Spec `outputs[]`\nentry and a Session profile's Sink binding, because an output *is* the\ndeclaration of that link (SB-17, SB-22, SC-19, SC-21).\n\nRule: SB-17, SB-22.",
+      "properties": {
+        "capacity": {
+          "description": "Queue depth in blocks; mandatory and at least 1 (SC-19).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "policy": {
+          "$ref": "#/$defs/BackPressure",
+          "description": "What happens at capacity. SC-19 forbids a default, and SC-21 restricts a\nlink into a Sink to the drop class, so `Block` is refused here."
+        },
+        "port": {
+          "$ref": "#/$defs/PortRef",
+          "description": "The port the samples leave from: a component's port, or a port a bound\nresource declares (SB-15, MA-10)."
+        }
+      },
+      "required": [
+        "port",
+        "policy",
+        "capacity"
       ],
       "type": "object"
     },

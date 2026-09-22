@@ -25,13 +25,23 @@ use crate::spec::{
 /// Rule: SB-22, SB-23.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Binding {
-    /// The Provider Module (SB-22).
-    pub provider: ModuleId,
+    /// The Module bound here: a Provider for a Spec resource, a Sink for an output
+    /// id, an Executor for an Island's `executor` name. Named `module` rather than
+    /// `provider` because all three roles are bound through this one map; Vision
+    /// §8's illustrative YAML still writes `provider`, which 03 §9 records as a
+    /// Vision departure for §12 (SB-22, MA-25, MA-38).
+    pub module: ModuleId,
     /// Namespaced content the Provider interprets (SB-23).
     #[serde(default)]
     pub selector: BTreeMap<Ident, Value>,
     /// The declared profile, when it has one (SB-22, Vision §33).
     pub profile: Option<ProfileRef>,
+    /// For a **Sink** binding on a Session profile: the port it records and the
+    /// drop-class policy and capacity of the link that feeds it. RS-12 makes it the
+    /// implicit Spec's output. A Spec Run's `outputs[]` already declare their feeds,
+    /// so a binding that carries one there is refused (SB-17, SB-22, RS-12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed: Option<crate::spec::SinkFeed>,
 }
 
 /// Where a component runs (SB-25, SB-25a).
@@ -41,11 +51,6 @@ pub struct ComponentPlacement {
     pub island: Ident,
     /// Which memory domain (MA-39).
     pub memory_domain: MemoryDomainId,
-    /// Which Module supplies the component's `ComponentDescriptor`. A Spec Run
-    /// leaves it unset, because the Spec already carries the descriptor; a Session
-    /// profile sets it, and that is what lets RS-12 build a Session's implicit
-    /// Spec (SB-25a).
-    pub module: Option<ModuleId>,
 }
 
 /// Which Link Module carries a graph link (SB-25).

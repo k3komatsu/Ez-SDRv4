@@ -319,6 +319,14 @@ pub struct KeyDecl {
     pub coercible: bool,
     /// The Vocabulary's default coercion policy for this key (SB-45).
     pub coercion_default: CoercionPolicy,
+    /// The update class this key may be changed under during a Run; absent means it
+    /// is not changeable during a Run. This is where a **Provider** parameter's
+    /// class is declared: §27's own examples of runtime mutation — TX gain, antenna
+    /// beam, MCS — and Vision §3's `sdr.rx.gain = 20` all target a Provider, whose
+    /// parameters are Vocabulary keys and not `ComponentDescriptor.params`, so
+    /// without this RS-17 has nothing to consult for them (SB-2, RS-17, MA-35).
+    #[serde(default)]
+    pub update_class: Option<crate::module_api::UpdateClass>,
 }
 
 /// What to do when a Provider coerces a requested value (SB-45, SB-46).
@@ -432,20 +440,22 @@ pub struct SpecTime {
     pub offset_ticks: i64,
 }
 
-/// Where an output's samples come from (SB-17).
+/// The link that feeds a Sink: the port the samples leave from and the drop-class
+/// policy and capacity of the link itself. One shape serves both a Spec `outputs[]`
+/// entry and a Session profile's Sink binding, because an output *is* the
+/// declaration of that link (SB-17, SB-22, SC-19, SC-21).
+///
+/// Rule: SB-17, SB-22.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum OutputSource {
-    /// A component's port.
-    Port {
-        /// Which port.
-        port: PortRef,
-    },
-    /// A Spec resource.
-    Resource {
-        /// Which resource.
-        resource: Ident,
-    },
+pub struct SinkFeed {
+    /// The port the samples leave from: a component's port, or a port a bound
+    /// resource declares (SB-15, MA-10).
+    pub port: PortRef,
+    /// What happens at capacity. SC-19 forbids a default, and SC-21 restricts a
+    /// link into a Sink to the drop class, so `Block` is refused here.
+    pub policy: crate::stream::BackPressure,
+    /// Queue depth in blocks; mandatory and at least 1 (SC-19).
+    pub capacity: u32,
 }
 
 /// An artifact the Run must produce. A capture whose source has no placed Sink is
@@ -458,8 +468,10 @@ pub struct OutputReq {
     pub id: Ident,
     /// The artifact kind; a Sink Module's namespace.
     pub kind: Namespace,
-    /// Where the samples come from.
-    pub source: OutputSource,
+    /// The link that carries the samples to the bound Sink. The output is the
+    /// declaration of that link, so SC-19's mandatory policy and capacity live
+    /// here rather than in `graph.links` (SB-17).
+    pub feed: SinkFeed,
     /// Sink parameters, uninterpreted by the Kernel.
     #[serde(default)]
     pub params: BTreeMap<Key, Value>,
@@ -632,6 +644,16 @@ pub enum SpecError {
         /// The constraint that could not be met by one instance.
         constraint: String,
     },
+    /// Two Spec resources bound to one node the Provider did not declare shareable
+    /// (SB-34, MA-10).
+    NodeAlreadyBound {
+        /// The node both wanted.
+        node: String,
+        /// The resource that took it.
+        first: Ident,
+        /// The resource that then asked for it.
+        second: Ident,
+    },
     /// The arm-order edges form a cycle (SB-39).
     ArmCycle {
         /// The cycle, as a dotted path.
@@ -668,6 +690,13 @@ impl fmt::Display for SpecError {
                 write!(f, "key {key:?} wanted {expected} and found {found}")
             }
             SpecError::UnboundResource { name } => write!(f, "resource {name} has no binding"),
+            SpecError::NodeAlreadyBound { node, first, second } => {
+                write!(
+                    f,
+                    "SB-34: {second} wants node {node}, which {first} already binds and which \
+                     the Provider does not declare shareable"
+                )
+            }
             SpecError::NoSingleInstance { name, constraint } => {
                 write!(f, "no single instance satisfies {constraint} for {name}")
             }

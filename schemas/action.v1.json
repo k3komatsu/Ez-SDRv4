@@ -743,6 +743,17 @@
     {
       "description": "Change a declared parameter under its declared update class (RS-52, Vision §27).",
       "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AbsoluteDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The instant at or after which the update takes effect under its class.\nAbsent means the first instant the class permits, which is what a bare\n`sdr.rx.gain = 20` asks for (Vision §3). Optional for every class,\nincluding `hardware_timed`: a class cannot make the field mandatory,\nbecause `SessionAction::SetParameter` carries no time to put in it\n(RS-49, RS-19, RS-14)."
+        },
         "class": {
           "$ref": "#/$defs/UpdateClass",
           "description": "The parameter's declared update class; an undeclared one was rejected at\nadmission and never arrives (RS-52, RS-17)."

@@ -2793,6 +2793,12 @@
       "$ref": "#/$defs/TerminationSection",
       "description": "How it ended (RS-3)."
     },
+    "version": {
+      "description": "Mandatory document major, as on every other Kernel document; Phase 1 supports\nexactly `{1}` and [`crate::spec::check_version`] is what refuses another\n(RS-38, SB-47, SB-48). Vision §10 requires it of the Manifest by name.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
     "vocabularies": {
       "additionalProperties": {
         "$ref": "#/$defs/Version"
@@ -2803,6 +2809,7 @@
     }
   },
   "required": [
+    "version",
     "run",
     "spec",
     "binding",

@@ -70,7 +70,7 @@
           "type": "object"
         },
         {
-          "description": "[`Action::UpdateParameter`], which carries no time (RS-49a).",
+          "description": "[`Action::UpdateParameter`] without `at`; `arm` substitutes the resolved\ndeadline, so a scheduled parameter change takes effect at the instant the\nSpec named (RS-49a).",
           "properties": {
             "class": {
               "$ref": "#/$defs/UpdateClass",
@@ -914,6 +914,10 @@
     "OutputReq": {
       "description": "An artifact the Run must produce. A capture whose source has no placed Sink is\nrefused at `validate()`.\n\nRule: SB-17.",
       "properties": {
+        "feed": {
+          "$ref": "#/$defs/SinkFeed",
+          "description": "The link that carries the samples to the bound Sink. The output is the\ndeclaration of that link, so SC-19's mandatory policy and capacity live\nhere rather than in `graph.links` (SB-17)."
+        },
         "id": {
           "$ref": "#/$defs/Ident",
           "description": "The artifact's name inside this document."
@@ -929,59 +933,14 @@
           "default": {},
           "description": "Sink parameters, uninterpreted by the Kernel.",
           "type": "object"
-        },
-        "source": {
-          "$ref": "#/$defs/OutputSource",
-          "description": "Where the samples come from."
         }
       },
       "required": [
         "id",
         "kind",
-        "source"
+        "feed"
       ],
       "type": "object"
-    },
-    "OutputSource": {
-      "description": "Where an output's samples come from (SB-17).",
-      "oneOf": [
-        {
-          "description": "A component's port.",
-          "properties": {
-            "kind": {
-              "const": "port",
-              "type": "string"
-            },
-            "port": {
-              "$ref": "#/$defs/PortRef",
-              "description": "Which port."
-            }
-          },
-          "required": [
-            "kind",
-            "port"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "A Spec resource.",
-          "properties": {
-            "kind": {
-              "const": "resource",
-              "type": "string"
-            },
-            "resource": {
-              "$ref": "#/$defs/Ident",
-              "description": "Which resource."
-            }
-          },
-          "required": [
-            "kind",
-            "resource"
-          ],
-          "type": "object"
-        }
-      ]
     },
     "ParamDecl": {
       "description": "One declared parameter of a component (MA-36).",
@@ -1205,6 +1164,31 @@
       "required": [
         "start",
         "len"
+      ],
+      "type": "object"
+    },
+    "SinkFeed": {
+      "description": "The link that feeds a Sink: the port the samples leave from and the drop-class\npolicy and capacity of the link itself. One shape serves both a Spec `outputs[]`\nentry and a Session profile's Sink binding, because an output *is* the\ndeclaration of that link (SB-17, SB-22, SC-19, SC-21).\n\nRule: SB-17, SB-22.",
+      "properties": {
+        "capacity": {
+          "description": "Queue depth in blocks; mandatory and at least 1 (SC-19).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "policy": {
+          "$ref": "#/$defs/BackPressure",
+          "description": "What happens at capacity. SC-19 forbids a default, and SC-21 restricts a\nlink into a Sink to the drop class, so `Block` is refused here."
+        },
+        "port": {
+          "$ref": "#/$defs/PortRef",
+          "description": "The port the samples leave from: a component's port, or a port a bound\nresource declares (SB-15, MA-10)."
+        }
+      },
+      "required": [
+        "port",
+        "policy",
+        "capacity"
       ],
       "type": "object"
     },
