@@ -233,7 +233,7 @@ RunError         StructuralMutationForbidden | RunNotRunning | LeaseTtlRequired 
 | R7 | Escalation under drop | A per-kind atomic flag on the hot path (RS-36) | Relying on the ring (a dropped `DEVICE_LOST` would never abort) | none |
 | R8 | Event record | Fixed size, pre-resolved indices, 32 bytes inline, larger payloads on the control path (RS-32) | Heap strings on the hot path (allocation); one unbounded channel (it blocks or grows without bound) | `EventRecord` is in-process by `00-overview.md` X8, so raising the inline limit is a recompile, not a schema change |
 | R9 | Counter table | Sized at `prepare` from the plan, plus one fallback row (RS-33) | A hash map on the hot path (allocation and locking); a fallback row per source (unbounded when a Module mislabels its source) | Unforeseen pairs merge into one row, which is reported as such |
-| R10 | Manifest shape | A closed Kernel envelope with namespaced Module sections; one `inputs` list for waveforms and calibration artifacts (RS-38) | Separate lists of the same shape; a free-form Manifest (two Runs would not be comparable) | Sections are opaque; a query across Modules is a Sink's job |
+| R10 | Manifest shape | A closed Kernel envelope with namespaced Module sections and the mandatory `version` Vision §10 requires of it; one `inputs` list for waveforms and calibration artifacts (RS-38) (amended 2026-09-22, 00 §11) | Separate lists of the same shape; a free-form Manifest (two Runs would not be comparable) | Sections are opaque; a query across Modules is a Sink's job |
 
 ## 7. Phase 1 tests
 

@@ -123,11 +123,11 @@ fn sc_10_block_rejects_invalid_shape() {
     assert!(matches!(bad(h), Err(StreamError::InvalidBlock { .. })), "channels 65");
 
     h = header(t(0), 10, 2);
-    h.valid = ChannelMask(0b100);
+    h.valid = ChannelMask::from_bits(0b100);
     assert!(matches!(bad(h), Err(StreamError::InvalidBlock { .. })), "valid bit above channels");
 
     h = header(t(0), 10, 2);
-    h.flags = BlockFlags(0x0100);
+    h.flags = BlockFlags::from_bits(0x0100);
     assert!(matches!(bad(h), Err(StreamError::InvalidBlock { .. })), "reserved flag bit");
 }
 
@@ -166,7 +166,7 @@ fn sc_16_direction_flags_rejected() {
 fn sc_10_block_partial_channels_derived() {
     let buf = host_buffer(2, 10);
     let mut h = header(t(0), 10, 2);
-    h.valid = ChannelMask(0b01);
+    h.valid = ChannelMask::from_bits(0b01);
     let b = SampleBlock::new(h, buf, CF32_BPS).expect("valid");
     assert!(b.header().flags.contains(BlockFlags::PARTIAL_CHANNELS));
 
@@ -209,16 +209,16 @@ fn sc_17_flag_bit_positions_are_fixed_by_the_document() {
     // Decision S17 rejects "an ordering that exists only in the Rust source", and
     // SC-17's purpose — an Executor propagating flags unchanged one-to-one — is a
     // numeric contract.
-    assert_eq!(BlockFlags::GAP_BEFORE, BlockFlags(0x0001));
-    assert_eq!(BlockFlags::SEQ_DISCONTINUITY, BlockFlags(0x0002));
-    assert_eq!(BlockFlags::RESTARTED, BlockFlags(0x0004));
-    assert_eq!(BlockFlags::LATE, BlockFlags(0x0008));
-    assert_eq!(BlockFlags::PARTIAL_CHANNELS, BlockFlags(0x0010));
-    assert_eq!(BlockFlags::START_OF_BURST, BlockFlags(0x0020));
-    assert_eq!(BlockFlags::END_OF_BURST, BlockFlags(0x0040));
-    assert_eq!(BlockFlags::ALIGNMENT, BlockFlags(0x0080));
-    assert_eq!(BlockFlags::RESERVED, BlockFlags(0xFF00), "bits 8-15 are reserved");
-    assert_eq!(BlockFlags::NONE, BlockFlags(0));
+    assert_eq!(BlockFlags::GAP_BEFORE, BlockFlags::from_bits(0x0001));
+    assert_eq!(BlockFlags::SEQ_DISCONTINUITY, BlockFlags::from_bits(0x0002));
+    assert_eq!(BlockFlags::RESTARTED, BlockFlags::from_bits(0x0004));
+    assert_eq!(BlockFlags::LATE, BlockFlags::from_bits(0x0008));
+    assert_eq!(BlockFlags::PARTIAL_CHANNELS, BlockFlags::from_bits(0x0010));
+    assert_eq!(BlockFlags::START_OF_BURST, BlockFlags::from_bits(0x0020));
+    assert_eq!(BlockFlags::END_OF_BURST, BlockFlags::from_bits(0x0040));
+    assert_eq!(BlockFlags::ALIGNMENT, BlockFlags::from_bits(0x0080));
+    assert_eq!(BlockFlags::RESERVED, BlockFlags::from_bits(0xFF00), "bits 8-15 are reserved");
+    assert_eq!(BlockFlags::NONE, BlockFlags::from_bits(0));
 }
 
 #[test]
@@ -791,7 +791,7 @@ fn sc_14_continuity_per_channel_segments() {
     let mut b = builder(2, true);
     push(&mut b, header(t(0), 100, 2));
     let mut h = header(t(100), 100, 2);
-    h.valid = ChannelMask(0b01);
+    h.valid = ChannelMask::from_bits(0b01);
     push(&mut b, h);
     push(&mut b, header(t(200), 100, 2));
     let map = b.finish(DropCarry::default());
@@ -834,7 +834,7 @@ fn sc_31a_channel_gap_carries_a_cause() {
         let mut b = builder(4, true);
         push(&mut b, header(t(0), 100, 4));
         let mut h = header(t(100), 100, 4);
-        h.valid = ChannelMask(0b1011);
+        h.valid = ChannelMask::from_bits(0b1011);
         h.flags = flags;
         push(&mut b, h);
         push(&mut b, header(t(200), 100, 4));
@@ -869,7 +869,7 @@ fn sc_31c_channel_that_never_returns() {
     let mut b = builder(4, true);
     push(&mut b, header(t(0), 100, 4));
     let mut h = header(t(100), 100, 4);
-    h.valid = ChannelMask(0b1011);
+    h.valid = ChannelMask::from_bits(0b1011);
     push(&mut b, h);
     let map = b.finish(DropCarry::default());
     assert_eq!(map.channel_gaps.len(), 1);
@@ -886,7 +886,7 @@ fn sc_31c_channel_lost_at_the_overflow() {
     let mut h = header(t(350), 100, 4);
     h.flags = BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED;
     h.lost = Some(150);
-    h.valid = ChannelMask(0b1011);
+    h.valid = ChannelMask::from_bits(0b1011);
     push(&mut b, h);
     let map = b.finish(DropCarry::default());
     assert_eq!(map.gaps.len(), 1);
@@ -901,7 +901,7 @@ fn sc_31d_break_across_a_stream_gap_is_split() {
     let mut b = builder(4, true);
     push(&mut b, header(t(0), 100, 4));
     let mut h = header(t(100), 100, 4);
-    h.valid = ChannelMask(0b1011);
+    h.valid = ChannelMask::from_bits(0b1011);
     h.flags = BlockFlags::ALIGNMENT;
     push(&mut b, h);
     let mut h = header(t(350), 100, 4);
@@ -922,7 +922,7 @@ fn sc_31d_break_across_a_stream_gap_is_split() {
 fn sc_31a_never_valid_channel_has_no_gap() {
     let mut b = builder(4, true);
     let mut h = header(t(0), 100, 4);
-    h.valid = ChannelMask(0b0111);
+    h.valid = ChannelMask::from_bits(0b0111);
     push(&mut b, h.clone());
     h.first_sample_time = t(100);
     push(&mut b, h);

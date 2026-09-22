@@ -73,6 +73,7 @@ Vision §67 の Phase 1．詳細設計は [plan/phase1/](plan/phase1/)．計画�
 | 1 | spec 01 + 02 + hash | P0 1件，P1 5件，P2 6件 | 全件修正．P0 は非有限 float が `null` と同一ハッシュになる衝突（OV-15a が防ぐために書かれた失敗そのもの） |
 | 2 | spec 03 + 04 + 05 + D3/D5 | P0 3件，P1 12件，P2 9件 | 全件修正．P0 は「Session が一切 compile できない」「matcher が sub-resource を二重予約」「未知 source の `DEVICE_LOST` が abort を黙らせる」 |
 | 3 | 1・2 の修正の検証 | 20/28 clean，5 partial，新規 P0 1件 + P1 3件 + P2 7件 | 全件修正．新規 P0 は `Value::Num` が同じ非有限の穴（1巡目の修正が4つのうち3つしか塞いでいなかった） |
+| 4 | §11 の全判定項目 112件（Fable 5.1，AGENTS.md §8 の second opinion 例外） | confirm 91・amend 15・reverse 1・not-a-decision 5 | 全件をユーザ判定として §11 に採用．表に無い発見14件のうち5件（D31–D33 + D17/D18 の改訂）を §11 に追記 |
 
 レビューの主要な発見は「pipeline の各段が関数としては正しいのに誰も呼んでいない」型の欠陥だった（`admit_islands`・`check_cycles`・`check_sink_links`・`CheckStage::Prepare` が全て未接続）．現在は `plan()` と `collect_prepare()` から呼ばれる．`kernel_surface` は3巡目に2通りの回避を実演されたので，brace 深さで module 階層を追う方式に書き換えた（inline `mod` と private `mod` + `pub use` の両方を検出．回避の再現は scratch copy で確認済み）．
 
@@ -80,24 +81,37 @@ exit criteria（§13）の達成状況：
 
 | # | 条件 | 状態 |
 |---|---|---|
-| 1 | 6文書の受理と §11 の全 verdict | **未**．X1–X12・各 spec の Decisions 表・未決事項1–7 はユーザ判定待ち |
+| 1 | 6文書の受理と §11 の全 verdict | **verdict は全件記録済み**（X1–X12，各 spec の Decisions 表，未決事項1–7，findings D1–D33）．残るのは6文書の受理そのもの（§12） |
 | 2 | 全 rule に ID と OV-3 disposition | 未（exit review の作業） |
-| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が double で端から端まで動く | **達成**（1.85.0 / stable ともに 261 passed）．Session path は `validate` → `plan` まで通る（`rs_12_a_session_compiles_through_the_whole_pipeline`） |
+| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が double で端から端まで動く | 1.85.0 / stable ともに 261 passed，`#[ignore]` なし．ただし pipeline が端から端まで動くのは **degenerate な形**に限る：resource endpoint のない graph，output なし，どの Provider も読めない `Fragment.content`（D31・D32）．second opinion はこの2件を criterion 3 の成立条件と位置づけている |
 | 4 | `schemas/` commit，`schema_freeze` 通過，`SCHEMA_CHANGELOG.md` の v1 entry | **達成** |
 | 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．件数は `cargo test --test kernel_surface -- --nocapture` が `OV-23b: Kernel growth = N NEW: items of M public items` で出す |
 | 6 | 直接依存が §8 の4 crate ちょうど | **達成** |
 | 7 | §12 の移動後に `design/` と `plan/phase1/` の全リンクが解決 | 未（Step 5 の作業） |
 
-**次にユーザがやること**が2つある：
+**§11 の判定は完了した**（2026-09-22，Fable 5.1 の second opinion をユーザ判定として採用）．
+verdict は confirm 91・amend 15・reverse 1・not-a-decision 5．not-a-decision の5件（OQ4,
+D1, D6, D11, D14）は encoding の帰結と fixture note で，裁定を要しない．
 
-1. **§11 の decision log を埋める**（exit criterion 1）．X1–X12，各 spec の Decisions 表，未決事項1–7 の verdict が空のまま．
-2. **findings 30件に verdict を出す**．00-overview.md §11 に3つの表がある：「Findings from Step 4」（D1–D14，実装中に出たもの），「Findings from the Step 4 code review」（D15–D26，レビュー1・2巡で出たもの），「Findings from the verification pass」（D27–D30，3巡目）．spec を黙って直さず記録してある．
+**次にやること**は amend 15件と reverse 1件の適用．second opinion は適用可否を3つに分けている：
 
-   このうち **D3 と D5 だけは spec 本文を修正済み**（ユーザの事前承認による）．3巡目が両方とも spec の記述ミスと確認した：
-   - `01-time-model.md` TM-21 の「2^124」→ Derived domain の公称レート項は capped 項の**積**なので 2^62 に達し，交差積は 2^186．隣の「193 bits」段落と同じ議論で，checked 128-bit が上限である
-   - `04-run-and-session.md` §4 の「four of RS-27」→ five（+ EventKind の文法も同じ行で訂正）．同じ古い数字が 04 §9 と 00-overview.md §3 にもあり，そこでは Vision §29 の解釈も誤っていた（§29 の12個のうち Kernel が残すのは**2個**）
+| bin | 内容 | 状態 |
+|---|---|---|
+| (i) prose / コードのみ，rule text を変えない | D15・D24・S1・B4・OQ4 | **適用済み**（2026-09-22）．D8 と D25 は片方が (ii) なので，コードが spec より先に行かないよう (ii) と同時に回す |
+| (ii) rule text を変えるが freeze 前で自己完結 | OQ2・R10・D16・D22・D23・D25・D26・D27・D8・D32・D33，および D17 + D18 + D31 + D29 のクラスタ | 未．ユーザの着手判断待ち |
+| (iii) 待ち | confirm が含意する Vision 編集（OV-6 のため §12 手続き），および Phase 2 の値を要する2件（resource port の producer 側 memory domain，port contract と format coercion の関係） | 未（§12 / Phase 2） |
 
-   **判断が要る主なもの**：D17（Spec Run では Sink を特定する手段が spec 上存在しない — SC-21 / SB-15 / SB-17 が Spec path で強制できない），D27（SB-34 は node の排他を定めていない），D15（SC-30c の本文と §6 の擬似コードが矛盾）．
+判定の根拠は OV-5（gate 後の不一致は §11 に verdict を記録してから適用する）と OV-12（freeze は
+v4.0 以降．crate は `4.0.0-alpha.1` なので公開面はまだ凍っていない）．よって「normative text を
+変えるから §12 まで待つ」という項目は1つもない．
+
+**(ii) のクラスタ**（D17・D18・D31・D29，D32・D33 も同じ欠陥）は，spec 03/04/05 と
+`binding.rs`・`spec.rs`・`module_api.rs`・`plan.rs`・`session.rs`，新規型 `SinkFeed` 1つ，schema
+再生成3件，既存テスト約12件の修正と新規6–8件 — 概算 400–700 行．second opinion の結論は
+「**Phase 1 の Step 5 より前にやるべき**」：Phase 1 の定義（00 §1「Phase 2 は admission と
+module 境界について何も決めずに MockRadio を書ける」）が admission と module 境界の決定を
+Phase 1 に要求しており，先送りすると audit §14.3 の失敗（Mock の実装が契約になる）を
+v1 schema に消費者がついた状態で再現する．
 
 その後が Step 5（§12 の受理手続き：spec 01–05 を `design/` へ移動，R13 の Vision 編集はユーザの別途承認が要る）．
 

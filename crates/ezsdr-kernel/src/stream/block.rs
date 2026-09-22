@@ -24,14 +24,25 @@ pub enum Direction {
 
 /// Bit `c` set means channel `c` is valid in this block.
 ///
-/// Ceiling: 64 channels per stream, a deliberate limit (decision S1). Widening the
-/// newtype is an in-memory change with no schema impact.
+/// Ceiling: 64 channels per stream, a deliberate limit (decision S1). The inner
+/// field is crate-private so that widening it stays an in-memory change with no
+/// schema impact and no public-API break, which decision S1 promises.
 ///
 /// Rule: SC-14.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-pub struct ChannelMask(pub u64);
+pub struct ChannelMask(pub(crate) u64);
 
 impl ChannelMask {
+    /// The mask whose set bits are those of `bits` (SC-14).
+    pub fn from_bits(bits: u64) -> ChannelMask {
+        ChannelMask(bits)
+    }
+
+    /// The set bits, for a producer writing a wire header (SC-14).
+    pub fn bits(self) -> u64 {
+        self.0
+    }
+
     /// The mask with every channel below `channels` set (SC-14).
     pub fn full(channels: u16) -> ChannelMask {
         if channels >= 64 { ChannelMask(u64::MAX) } else { ChannelMask((1u64 << channels) - 1) }
@@ -51,10 +62,25 @@ impl ChannelMask {
 /// The block flag set. Bit positions are fixed by `02-stream-contract.md` so that
 /// an Executor mapping input blocks to output blocks one-to-one can propagate
 /// flags unchanged by default (SC-17, decision S17).
+///
+/// The inner field is crate-private: the bit positions are public through the
+/// constants, and the width is not, so widening it is not a public-API break
+/// (decision S1).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-pub struct BlockFlags(pub u16);
+pub struct BlockFlags(pub(crate) u16);
 
 impl BlockFlags {
+    /// The flag set whose bits are those of `bits`, for a producer reading a wire
+    /// header (SC-10 rejects a block whose reserved bits are set).
+    pub fn from_bits(bits: u16) -> BlockFlags {
+        BlockFlags(bits)
+    }
+
+    /// The set bits, for a producer writing a wire header (SC-17).
+    pub fn bits(self) -> u16 {
+        self.0
+    }
+
     /// Samples are missing between the previous block's end and this first sample (SC-13).
     pub const GAP_BEFORE: BlockFlags = BlockFlags(0x0001);
     /// The gap is transport sequence loss (SC-13, SC-18).
