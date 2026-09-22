@@ -939,8 +939,8 @@ fn check_graph_links(
         // declares. A resource endpoint is what lets a Spec connect a Provider's
         // stream to the graph at all (MA-10; finding D31).
         let (from, to) = (
-            source_contract(&link.from, spec, inputs, matched),
-            source_contract(&link.to, spec, inputs, matched),
+            endpoint_port(&link.from, spec, inputs, matched),
+            endpoint_port(&link.to, spec, inputs, matched),
         );
         for (r, c) in [(&link.from, &from), (&link.to, &to)] {
             if c.is_none() {
@@ -952,7 +952,26 @@ fn check_graph_links(
                 });
             }
         }
-        if let (Some(from), Some(to)) = (&from, &to) {
+        if let (Some((from_dir, from)), Some((to_dir, to))) = (&from, &to) {
+            // SB-15a, **before** SC-3: a contract check between a producer and a
+            // consumer is well posed only once which is which has been established.
+            // `Port.direction` was carried through the whole compile path and never
+            // read, so `a.in -> b.in` validated and planned and SC-3 was evaluated on
+            // an orientation nothing had checked.
+            for (r, d, want) in [
+                (&link.from, from_dir, crate::contract::PortDirection::Out),
+                (&link.to, to_dir, crate::contract::PortDirection::In),
+            ] {
+                if *d != want {
+                    return Err(SpecError::Structural {
+                        reason: format!(
+                            "SB-15a: link endpoint {}:{} is an {d:?} port and this end of a \
+                             link is {want:?}",
+                            r.component, r.port
+                        ),
+                    });
+                }
+            }
             inputs
                 .contracts
                 .check_link(from, to)
@@ -1176,9 +1195,12 @@ fn check_outputs(
             id: DataLinkId::local(0),
             from: feed.port.clone(),
             to: PortRef { component: output.id.to_string(), port: "in".to_owned() },
-            contract: source_contract(&feed.port, spec, inputs, matched).unwrap_or_else(|| {
-                crate::contract::DataContractId::parse("ezsdr.control").expect("a valid literal")
-            }),
+            contract: endpoint_port(&feed.port, spec, inputs, matched)
+                .map(|(_, c)| c)
+                .unwrap_or_else(|| {
+                    crate::contract::DataContractId::parse("ezsdr.control")
+                        .expect("a valid literal")
+                }),
             policy: feed.policy,
             capacity: feed.capacity,
         };
@@ -1186,14 +1208,25 @@ fn check_outputs(
             .map_err(|e| SpecError::Structural { reason: e.to_string() })?;
 
         // The source port must exist, on a component or on a bound resource.
-        let contract = source_contract(&feed.port, spec, inputs, matched).ok_or_else(|| {
-            SpecError::Structural {
+        let (direction, contract) =
+            endpoint_port(&feed.port, spec, inputs, matched).ok_or_else(|| {
+                SpecError::Structural {
+                    reason: format!(
+                        "SB-17: output {} names source port {}:{}, which does not exist",
+                        output.id, feed.port.component, feed.port.port
+                    ),
+                }
+            })?;
+        // SB-15a: an output's feed leaves an `out` port. A Sink records what a port
+        // produces, so a feed from an `in` port names the wrong end of the stream.
+        if direction != crate::contract::PortDirection::Out {
+            return Err(SpecError::Structural {
                 reason: format!(
-                    "SB-17: output {} names source port {}:{}, which does not exist",
+                    "SB-15a: output {}'s feed names {}:{}, which is an {direction:?} port",
                     output.id, feed.port.component, feed.port.port
                 ),
-            }
-        })?;
+            });
+        }
 
         // SB-22: the output id is bound to a Module holding the Sink role.
         let binding = profile.bindings.get(&output.id).ok_or_else(|| SpecError::Structural {
@@ -1240,15 +1273,21 @@ fn check_outputs(
 
 /// The contract a `PortRef` carries: a component's declared port, or a port a bound
 /// resource declares (SB-15, MA-10).
-fn source_contract(
+/// The direction and contract a link endpoint declares, on a component or on the
+/// **bound node** of a resource (SC-1, SB-15).
+fn endpoint_port(
     r: &PortRef,
     spec: &ExperimentSpec,
     inputs: &CompileInputs<'_>,
     matched: &BTreeMap<Ident, ResourceId>,
-) -> Option<crate::contract::DataContractId> {
+) -> Option<(crate::contract::PortDirection, crate::contract::DataContractId)> {
     let name = Ident::parse(&r.component).ok()?;
     if let Some(c) = spec.graph.components.get(&name) {
-        return c.ports.iter().find(|p| p.name == r.port).map(|p| p.contract.clone());
+        return c
+            .ports
+            .iter()
+            .find(|p| p.name == r.port)
+            .map(|p| (p.direction, p.contract.clone()));
     }
     // SB-15: "a resource port is one the **bound node** declares". Searching the
     // whole instance would accept a port some other sub-resource declares and would
@@ -1265,7 +1304,7 @@ fn source_contract(
         .ports
         .iter()
         .find(|p| p.name == r.port)
-        .map(|p| p.contract.clone())
+        .map(|p| (p.direction, p.contract.clone()))
 }
 
 /// A Provider fragment's content: the binding's selector, plus the request the
@@ -1674,9 +1713,12 @@ fn output_links(
             id: DataLinkId::local(i as u32),
             from: o.feed.port.clone(),
             to: PortRef { component: o.id.to_string(), port: "in".to_owned() },
-            contract: source_contract(&o.feed.port, spec, inputs, matched).unwrap_or_else(|| {
-                crate::contract::DataContractId::parse("ezsdr.control").expect("a valid literal")
-            }),
+            contract: endpoint_port(&o.feed.port, spec, inputs, matched)
+                .map(|(_, c)| c)
+                .unwrap_or_else(|| {
+                    crate::contract::DataContractId::parse("ezsdr.control")
+                        .expect("a valid literal")
+                }),
             policy: o.feed.policy,
             capacity: o.feed.capacity,
         })
@@ -1684,7 +1726,7 @@ fn output_links(
 }
 
 /// The plan's `links`. The contract is resolved the way `validate` resolved it for
-/// SC-3 — through [`source_contract`], which reads a resource endpoint's port off the
+/// SC-3 — through [`endpoint_port`], which reads a resource endpoint's port off the
 /// **bound node** — and not off `graph.components` alone. Resolving components only
 /// and defaulting to `ezsdr.control` gave every link whose consumer is a resource
 /// port, which is Vision §7's own `PHY → Radio Port` example, a contract the Kernel
@@ -1705,7 +1747,7 @@ fn declared_links(
         .map(|(i, l)| {
             // `validate` refused the link if either end was unresolvable (SB-15), so a
             // `None` here means `plan` ran on an admission that is not this Spec's.
-            let contract = source_contract(&l.to, spec, inputs, matched).ok_or_else(|| {
+            let (_, contract) = endpoint_port(&l.to, spec, inputs, matched).ok_or_else(|| {
                 SpecError::Structural {
                     reason: format!(
                         "SB-15: link {i}'s consumer {}.{} names no port of a component or of \

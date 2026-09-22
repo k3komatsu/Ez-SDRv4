@@ -1333,10 +1333,12 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
     let _ = &mut fx;
     let contract = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
     let mut spec = minimal_spec();
-    spec.graph.components.insert(id("proc"), support::recorder_component(contract.clone()));
+    // `proc` produces and `recorder` consumes: SB-15a checks the directions, so the
+    // producer needs an `out` port. Before SB-15a this fixture linked `in` to `in`.
+    spec.graph.components.insert(id("proc"), support::source_component(contract.clone()));
     spec.graph.components.insert(id("recorder"), support::recorder_component(contract));
     spec.graph.links.push(ezsdr_kernel::spec::LinkReq {
-        from: PortRef { component: "proc".into(), port: "in".into() },
+        from: PortRef { component: "proc".into(), port: "out".into() },
         to: PortRef { component: "recorder".into(), port: "in".into() },
         policy: BackPressure::DropOldest,
         capacity: 4,
@@ -2823,37 +2825,53 @@ fn sb_30_prepare_refuses_an_admission_result_from_another_spec() {
 }
 
 #[test]
-fn sb_6_equality_is_one_canonical_form_and_the_matcher_agrees() {
-    // SB-6 and SC-2 both define "one value" as one canonical form, and OV-15a ties
-    // that to one content hash. The parenthetical "which holds while |v| <= 2^53" is
-    // not an iff, and implementing it instead of the criterion was wrong in **both**
-    // directions — so `==` and the matcher's `Eq` disagreed with each other and each
-    // with the hash. The pairs below are exactly the ones that separate the two.
-    let ten16 = 10_000_000_000_000_000_i64; // one canonical form, above 2^53
-    let two60 = 1_152_921_504_606_846_976_i64; // two canonical forms, exact as an f64
+fn sb_6_equality_is_exact_and_the_matcher_agrees() {
+    // SB-6 knows **one** relation for "these are one value": exact numeric
+    // comparison. `Eq`, `Set`, `Range`, `Min`, `Max`, `PartialEq` and SC-2's
+    // "identical re-registration" all decide by it, so none of them can disagree.
+    //
+    // Canonical form is **document** identity, not value identity, and the two
+    // coincide only while |v| <= 2^53 (OV-15a). Above that a float's canonical text
+    // is the shortest decimal that *names the f64*, not the number's exact decimal —
+    // so deciding equality by the form was wrong in both directions, and the second
+    // direction is the dangerous one: it called two different numbers equal.
+    let two60 = 1_152_921_504_606_846_976_i64;
+    let shortest_naming_two60 = 1_152_921_504_606_847_000_i64;
     let cases: &[(i64, f64, bool)] = &[
         (1, 1.0, true),
-        (ten16, 1e16, true),
-        (two60, two60 as f64, false),
+        (10_000_000_000_000_000, 1e16, true),
+        // One number, two canonical forms and two hashes. Still one value.
+        (two60, two60 as f64, true),
+        // One canonical form, two numbers. `ContractRegistry::register` took this for
+        // an identical re-registration and discarded the other definition (SC-2).
+        (shortest_naming_two60, two60 as f64, false),
         (i64::MAX, i64::MAX as f64, false),
         (3, 3.5, false),
     ];
+    let written = |v: &Value| {
+        ezsdr_kernel::hash::canonical_json(&serde_json::to_value(v).expect("serialises"))
+            .expect("finite")
+    };
     for &(i, f, want) in cases {
         let (a, b) = (Value::Int(i), Value::Num(f));
         assert_eq!(a == b, want, "Value {i} vs {f}");
-        // The hash is the criterion, so it decides the expectation rather than
-        // restating it: equal values share a canonical form, unequal ones do not.
-        let written = |v: &Value| {
-            ezsdr_kernel::hash::canonical_json(&serde_json::to_value(v).expect("serialises"))
-                .expect("finite")
-        };
-        assert_eq!(written(&a) == written(&b), want, "canonical form {i} vs {f}");
-        // And the matcher's `Eq`, which is the same question asked of a capability.
         assert_eq!(
-            satisfies(&Constraint::Eq { value: b.clone() }, &CapabilityValue::One { value: a })
+            satisfies(&Constraint::Eq { value: b.clone() }, &CapabilityValue::One { value: a.clone() })
                 .expect("both are numbers"),
             want,
             "Eq {f} against a declared {i}"
+        );
+        // A degenerate `Range` is the same question asked of the ordering, so it must
+        // give the same answer — the split between "equality" and "ordering" is what
+        // let `Eq` and `Range{v,v}` disagree.
+        assert_eq!(
+            satisfies(
+                &Constraint::Range { min: Some(b.clone()), max: Some(b.clone()) },
+                &CapabilityValue::One { value: a.clone() }
+            )
+            .expect("both are numbers"),
+            want,
+            "Range[{f},{f}] against a declared {i}"
         );
         assert_eq!(
             ezsdr_kernel::contract::Scalar::Int(i) == ezsdr_kernel::contract::Scalar::Float(f),
@@ -2861,6 +2879,25 @@ fn sb_6_equality_is_one_canonical_form_and_the_matcher_agrees() {
             "Scalar {i} vs {f}"
         );
     }
+
+    // OV-15a's coincidence, stated as the fact it is rather than as the criterion:
+    // one value has one hash while |v| <= 2^53, and above it may not.
+    assert_eq!(written(&Value::Int(1)), written(&Value::Num(1.0)), "one value, one hash");
+    assert_eq!(
+        written(&Value::Int(10_000_000_000_000_000)),
+        written(&Value::Num(1e16)),
+        "and above 2^53 the forms may still agree"
+    );
+    assert_ne!(
+        written(&Value::Int(two60)),
+        written(&Value::Num(two60 as f64)),
+        "but they need not: one value, two documents"
+    );
+    assert_eq!(
+        written(&Value::Int(shortest_naming_two60)),
+        written(&Value::Num(two60 as f64)),
+        "and one document may name two values, which is why the form is not the criterion"
+    );
 }
 
 #[test]
@@ -2983,6 +3020,99 @@ fn rs_52_a_scheduled_update_states_the_declared_class() {
     assert!(
         matches!(&err, SpecError::Structural { reason }
             if reason.contains("RS-52") && reason.contains("declares no update class")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn sb_15a_link_direction_is_checked() {
+    // SB-15a: a link's `from` names an `out` port and its `to` an `in` port, and the
+    // check runs **before** SC-3, because a producer-to-consumer contract check is
+    // well posed only once which end is which has been established. `Port.direction`
+    // was carried through the whole compile path and never read, so `a.in → b.in`
+    // validated and planned and SC-3 was evaluated on an orientation nothing had
+    // checked (finding D47).
+    let cf32 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
+    let linked = |from: (&str, &str), to: (&str, &str)| {
+        let mut spec = minimal_spec();
+        spec.graph.components.insert(id("src"), support::source_component(cf32.clone()));
+        spec.graph.components.insert(id("dst"), support::recorder_component(cf32.clone()));
+        spec.graph.links.push(ezsdr_kernel::spec::LinkReq {
+            from: PortRef { component: from.0.into(), port: from.1.into() },
+            to: PortRef { component: to.0.into(), port: to.1.into() },
+            policy: BackPressure::DropOldest,
+            capacity: 4,
+        });
+        spec
+    };
+    let mut profile = profile_binding(&["radio"]);
+    for c in ["src", "dst"] {
+        profile.placements.components.insert(
+            id(c),
+            ComponentPlacement { island: id("io"), memory_domain: MemoryDomainId::local(0) },
+        );
+    }
+    profile.placements.islands.push(IslandDecl {
+        id: IslandId::local(0),
+        executor: id("exec"),
+        components: vec![id("src"), id("dst")],
+        affinity: None,
+        rt_policy: None,
+        batch: None,
+    });
+    let fx = Fixture::new();
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+
+    validate(&linked(("src", "out"), ("dst", "in")), &profile, &fx.inputs(&providers))
+        .expect("out -> in is the one orientation a link has");
+
+    for (from, to, why) in [
+        (("dst", "in"), ("dst", "in"), "a consumer cannot produce"),
+        (("src", "out"), ("src", "out"), "a producer cannot consume"),
+    ] {
+        let err = validate(&linked(from, to), &profile, &fx.inputs(&providers))
+            .expect_err(why);
+        assert!(
+            matches!(&err, SpecError::Structural { reason } if reason.contains("SB-15a")),
+            "{why}: {err:?}"
+        );
+    }
+
+    // And on a bound resource's port, which is the endpoint SB-15 added: the double's
+    // line declares `rx` as `out` and `tx` as `in`.
+    let mut spec = minimal_spec();
+    spec.resources.insert(id("line0"), resource("test.line", &[]));
+    spec.graph.components.insert(id("dst"), support::recorder_component(
+        ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.sc16").expect("id"),
+    ));
+    spec.graph.links.push(ezsdr_kernel::spec::LinkReq {
+        from: PortRef { component: "line0".into(), port: "tx".into() },
+        to: PortRef { component: "dst".into(), port: "in".into() },
+        policy: BackPressure::DropOldest,
+        capacity: 4,
+    });
+    let mut profile = profile_binding(&["radio", "line0"]);
+    profile.placements.components.insert(
+        id("dst"),
+        ComponentPlacement { island: id("io"), memory_domain: MemoryDomainId::local(0) },
+    );
+    profile.placements.islands.push(IslandDecl {
+        id: IslandId::local(0),
+        executor: id("exec"),
+        components: vec![id("dst")],
+        affinity: None,
+        rt_policy: None,
+        batch: None,
+    });
+    let providers: BTreeMap<Ident, &dyn Provider> =
+        [(id("radio"), &p as &dyn Provider), (id("line0"), &p as &dyn Provider)]
+            .into_iter()
+            .collect();
+    let err = validate(&spec, &profile, &fx.inputs(&providers))
+        .expect_err("a resource's `tx` is where samples arrive, not where they leave");
+    assert!(
+        matches!(&err, SpecError::Structural { reason } if reason.contains("SB-15a")),
         "{err:?}"
     );
 }

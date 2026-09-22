@@ -118,7 +118,13 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
                     class: UpdateClass::BlockBoundary,
                 },
             },
-            VerbDecl { verb: id("start_repeat"), compiles_to: CompileRule::TxBurst { repeat: true } },
+            VerbDecl {
+                verb: id("start_repeat"),
+                compiles_to: CompileRule::TxBurst {
+                    repeat: true,
+                    late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+                },
+            },
             VerbDecl { verb: id("sweep"), compiles_to: CompileRule::PeripheralCommand },
         ],
         checks: vec![ns("test.limits")],

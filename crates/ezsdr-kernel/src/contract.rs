@@ -95,7 +95,7 @@ impl PartialEq for Scalar {
             // `-9223372036854776000`, so accepting them as equal let SC-2 take a
             // genuinely different definition for a re-registration again.
             (Scalar::Int(a), Scalar::Float(b)) | (Scalar::Float(b), Scalar::Int(a)) => {
-                crate::hash::same_canonical_number(*a, *b)
+                crate::spec::cmp_int_num(*a, *b) == Some(std::cmp::Ordering::Equal)
             }
             (Scalar::Str(a), Scalar::Str(b)) => a == b,
             (Scalar::Bool(a), Scalar::Bool(b)) => a == b,

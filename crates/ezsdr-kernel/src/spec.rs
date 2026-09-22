@@ -267,7 +267,7 @@ impl PartialEq for Value {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Num(a), Value::Num(b)) => a == b,
             (Value::Int(a), Value::Num(b)) | (Value::Num(b), Value::Int(a)) => {
-                crate::hash::same_canonical_number(*a, *b)
+                cmp_int_num(*a, *b) == Some(std::cmp::Ordering::Equal)
             }
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
@@ -280,8 +280,17 @@ impl PartialEq for Value {
 /// Orders an integer against a float without rounding either. A non-finite float is
 /// unordered, which is what `None` means to SB-6.
 ///
+/// This is the **one** relation SB-6 names: `Eq`, `Set`, `Range`, `Min`, `Max` and
+/// SC-2's "identical" all decide by it, and `PartialEq` agrees with it by
+/// construction. Deciding equality by the canonical form instead was wrong in the
+/// direction that matters most: above 2^53 a float's canonical text is the shortest
+/// decimal that *names the `f64`*, not the number's exact decimal, so
+/// `Int(1152921504606847000)` and `Num(2^60)` share one form and are two different
+/// numbers — and `ContractRegistry::register` took one for an identical
+/// re-registration of the other, which is SC-2's own named harm (finding D50).
+///
 /// Rule: SB-6, OV-15.
-fn cmp_int_num(a: i64, b: f64) -> Option<std::cmp::Ordering> {
+pub(crate) fn cmp_int_num(a: i64, b: f64) -> Option<std::cmp::Ordering> {
     if !b.is_finite() {
         return None;
     }

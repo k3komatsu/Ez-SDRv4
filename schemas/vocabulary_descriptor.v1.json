@@ -53,6 +53,10 @@
               "const": "tx_burst",
               "type": "string"
             },
+            "late_policy": {
+              "$ref": "#/$defs/LatePolicy",
+              "description": "What the burst does when its lead is short (SC-27, RS-51). Declared here\nrather than defaulted in `compile`, because which of the two a verb means\nis the Vocabulary's decision and the Kernel learns no Vocabulary word\n(OV-21). A Vocabulary wanting both behaviours declares two verbs."
+            },
             "repeat": {
               "description": "Whether the waveform repeats (SC-26).",
               "type": "boolean"
@@ -60,7 +64,8 @@
           },
           "required": [
             "kind",
-            "repeat"
+            "repeat",
+            "late_policy"
           ],
           "type": "object"
         },
@@ -197,6 +202,26 @@
         "coercion_default"
       ],
       "type": "object"
+    },
+    "LatePolicy": {
+      "description": "What to do about a burst whose lead is short (SC-27, Vision §22).",
+      "oneOf": [
+        {
+          "const": "reject_at_plan",
+          "description": "Legal only for a burst whose target is statically known; `validate()`\nrejects it on a runtime-decided burst (SC-27).",
+          "type": "string"
+        },
+        {
+          "const": "send_asap_and_flag",
+          "description": "Transmit as soon as possible and flag it (SC-27).",
+          "type": "string"
+        },
+        {
+          "const": "drop_and_flag",
+          "description": "Drop the burst and flag it (SC-27).",
+          "type": "string"
+        }
+      ]
     },
     "Namespace": {
       "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",

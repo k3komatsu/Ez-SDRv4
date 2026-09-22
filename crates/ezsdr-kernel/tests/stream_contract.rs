@@ -73,25 +73,34 @@ fn sc_02_scalar_equality_is_exact_across_int_and_float() {
     assert_ne!(Scalar::Int(0), Scalar::Float(f64::NAN));
     assert_ne!(Scalar::Int(0), Scalar::Float(f64::INFINITY));
 
-    // The rule, not a list of cases: two `Scalar`s are equal **iff** they share one
-    // canonical form. `i64::MIN` is the boundary this replaces a case list for —
-    // -2^63 *is* `i64::MIN`, so an exact integer round-trip accepts the pair, while
-    // the canonicaliser writes `-9223372036854775808` and `-9223372036854776000`.
-    let vectors = [
-        (0i64, 0.0f64),
-        (20, 20.0),
-        (20, 20.5),
-        (-1, -1.0),
-        (9_007_199_254_740_992, 9_007_199_254_740_992.0),
-        (9_007_199_254_740_993, 9_007_199_254_740_992.0),
-        (i64::MAX, 9_223_372_036_854_775_808.0),
-        (i64::MIN, -9_223_372_036_854_775_808.0),
+    // The rule, not a list of cases: two `Scalar`s are equal **iff** they are the
+    // same number, compared exactly. Canonical form is *document* identity and is a
+    // different question — `i64::MIN` and -2^63 are one number written two ways
+    // (`-9223372036854775808` and `-9223372036854776000`), and
+    // `1152921504606847000` and 2^60 are two numbers written one way, so deciding
+    // equality by the form accepted a re-registration of a genuinely different
+    // definition, which is the harm above moved from 2^53 to 2^60.
+    let vectors: [(i64, f64, bool); 10] = [
+        (0, 0.0, true),
+        (20, 20.0, true),
+        (20, 20.5, false),
+        (-1, -1.0, true),
+        (9_007_199_254_740_992, 9_007_199_254_740_992.0, true),
+        (9_007_199_254_740_993, 9_007_199_254_740_992.0, false),
+        (i64::MAX, 9_223_372_036_854_775_808.0, false),
+        (i64::MIN, -9_223_372_036_854_775_808.0, true),
+        (1_152_921_504_606_846_976, 1_152_921_504_606_846_976.0, true),
+        (1_152_921_504_606_847_000, 1_152_921_504_606_846_976.0, false),
     ];
-    for (a, b) in vectors {
+    for (a, b, want) in vectors {
         let (si, sf) = (Scalar::Int(a), Scalar::Float(b));
+        assert_eq!(si == sf, want, "Int({a}) vs Float({b})");
+        // OV-15a's coincidence, which holds while |v| <= 2^53 and not above it.
         let one_form = ezsdr_kernel::hash::ContentHash::of(&si).ok()
             == ezsdr_kernel::hash::ContentHash::of(&sf).ok();
-        assert_eq!(si == sf, one_form, "Int({a}) vs Float({b}): equality must mean one hash");
+        if a.unsigned_abs() <= 9_007_199_254_740_992 {
+            assert_eq!(want, one_form, "at or below 2^53 one value is one document");
+        }
     }
 
     // SC-2 through the registry: the two definitions differ, so the second is refused

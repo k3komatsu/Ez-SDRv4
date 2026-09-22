@@ -32,6 +32,16 @@ stock JCS crate cannot be dropped in later (OV-15, OV-15a).
 as an exact decimal by the canonicaliser; consumers are required to use a 64-bit-safe
 parser (X3).
 
+## v1 — 2026-09-22 — pre-freeze revision, adopted the D45–D50 verdicts
+
+Still **version 1**, for the reason the sections below give.
+
+- `vocabulary_descriptor`: `CompileRule::TxBurst` gains a mandatory `late_policy`.
+  Which of SC-27's behaviours a Session verb means is the Vocabulary's decision, and
+  `compile` was supplying `SendAsapAndFlag` for every verb — a Vocabulary meaning
+  living in Core (OV-21). `RejectAtPlan` is refused at registration, because a Session
+  burst's target is resolved at `compile` and never passes that stage (finding D46).
+
 ## v1 — 2026-09-22 — pre-freeze revision, adopted the Fable second-opinion findings
 
 Still **version 1**, for the reason the sections below give.

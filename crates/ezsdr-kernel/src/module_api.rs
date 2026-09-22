@@ -702,6 +702,11 @@ pub enum CompileRule {
     TxBurst {
         /// Whether the waveform repeats (SC-26).
         repeat: bool,
+        /// What the burst does when its lead is short (SC-27, RS-51). Declared here
+        /// rather than defaulted in `compile`, because which of the two a verb means
+        /// is the Vocabulary's decision and the Kernel learns no Vocabulary word
+        /// (OV-21). A Vocabulary wanting both behaviours declares two verbs.
+        late_policy: crate::stream::LatePolicy,
     },
     /// To a `PeripheralCommand` carrying the verb (RS-14).
     PeripheralCommand,
@@ -1162,6 +1167,20 @@ impl ModuleRegistry {
     pub fn register_vocabulary(&mut self, v: VocabularyDescriptor) -> Result<(), ModuleError> {
         if self.vocabularies.contains_key(&v.id) {
             return Err(ModuleError::rejected(format!("MA-32: vocabulary {} is already registered", v.id)));
+        }
+        // RS-14: a Session burst's target is resolved at `compile`, so `RejectAtPlan`
+        // names a stage this Action never passes through and the verb would be
+        // undispatchable (SC-27, RS-51).
+        for verb in &v.verbs {
+            if let CompileRule::TxBurst { late_policy: crate::stream::LatePolicy::RejectAtPlan, .. } =
+                verb.compiles_to
+            {
+                return Err(ModuleError::rejected(format!(
+                    "RS-14: verb {} compiles to a TxBurst with `RejectAtPlan`, which a Session \
+                     burst never reaches",
+                    verb.verb
+                )));
+            }
         }
         self.vocabularies.insert(v.id.clone(), v);
         Ok(())

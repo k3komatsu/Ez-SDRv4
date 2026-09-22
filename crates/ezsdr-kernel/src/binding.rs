@@ -161,16 +161,15 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
             found: format!("{:?}", b.kind()),
         })
     };
-    // `Eq` and set membership ask whether two values are **one value**, which SB-6
-    // defines as one canonical form and OV-15a ties to one content hash. Ordering is a
-    // different relation: it compares magnitudes exactly, and above 2^53 an integer and
-    // a float of the same magnitude have two canonical forms and two hashes, so
-    // `cmp == Equal` matched a capability the Manifest records as a different value.
-    // The kind check still runs through `cmp`, because a capability declared in the
-    // wrong kind is malformed rather than merely unequal.
+    // `Eq` and set membership ask whether two values are **one value**, and SB-6 knows
+    // one relation for that: exact numeric comparison, the `Equal` case of the ordering
+    // below. `PartialEq` decides the same way, so the two never disagree. Deciding it
+    // by the canonical form instead equated two *different* numbers above 2^53, because
+    // a float's canonical text is the shortest decimal that names the `f64` and not the
+    // number's exact decimal (finding D50). The kind check still runs through `cmp`,
+    // because a capability declared in the wrong kind is malformed rather than unequal.
     let same = |a: &Value, b: &Value| -> Result<bool, SpecError> {
-        cmp(a, b)?;
-        Ok(a == b)
+        Ok(cmp(a, b)? == Equal)
     };
     let within = |v: &Value, lo: Option<&Value>, hi: Option<&Value>| -> Result<bool, SpecError> {
         if let Some(lo) = lo {

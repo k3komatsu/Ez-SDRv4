@@ -256,6 +256,7 @@ pub trait Provider: Send {
 | `ma_14_actions_arrive_only_after_admission` | an Action rejected by an admission check | the double's queue stays empty | MA-14, RS-16 |
 | `ma_39_island_admission` | each of the five checks violated in turn | rejected, naming the failed rule | MA-39, MA-40 |
 | `ma_22_cycle_rules` | a `stream.*` cycle; an Event cycle across Islands; an Event cycle inside one Island | rejected, accepted, rejected | MA-22 |
+| `ma_41_an_absent_or_non_string_class_is_refused` | `ezsdr.time` present with `clas`, with `{}`, with `class: 3`; then the section absent | the first three refused, the fourth planned — an absent section is not a declaration to disagree with | MA-41 |
 | `ma_41_execution_class_table` | every row of MA-41 including the rejection | the derived class, or a rejection | MA-41 |
 | `ma_42_fidelity_is_the_weakest` | two Providers declaring `hardware_quirk` and `envelope` | `envelope`; a Hardware Run records `real` where declared | MA-42, RS-41 |
 | `ma_37_descriptor_structural_validation` | a duplicate port name; an unregistered contract; an update class outside the set; a missing `impl.hash` | refused in each case | MA-37 |

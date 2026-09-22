@@ -852,3 +852,48 @@ fn collector() -> EventCollector {
     let policy = kinds.compile(&BTreeMap::new()).expect("compiles");
     EventCollector::new(&[], &policy.table.keys().cloned().collect::<Vec<_>>(), 16, &policy)
 }
+
+#[test]
+fn ma_42_fidelity_is_the_weakest() {
+    use ezsdr_kernel::module_api::{
+        CoercionFidelity, EnvelopeFidelity, Fidelity, RfFidelity, TransportFidelity,
+    };
+    // MA-42: "A Run's value per aspect is the weakest over its bound Providers, in
+    // that aspect's own order" — per aspect, so a Provider that is stronger on one
+    // axis does not lift a Run that is weaker on another.
+    let quirky = Fidelity {
+        timing: EnvelopeFidelity::HardwareQuirk,
+        continuity: EnvelopeFidelity::HardwareQuirk,
+        coercion: CoercionFidelity::Grid,
+        rf: RfFidelity::ImpairmentModel,
+        transport: TransportFidelity::Model,
+    };
+    let enveloped = Fidelity {
+        timing: EnvelopeFidelity::Envelope,
+        continuity: EnvelopeFidelity::Envelope,
+        coercion: CoercionFidelity::Grid,
+        rf: RfFidelity::None,
+        transport: TransportFidelity::Model,
+    };
+    let run = Fidelity::weakest(&[quirky, enveloped]);
+    assert_eq!(run.timing, EnvelopeFidelity::Envelope);
+    assert_eq!(run.continuity, EnvelopeFidelity::Envelope);
+    assert_eq!(run.coercion, CoercionFidelity::Grid, "equal on this axis, so unchanged");
+    assert_eq!(run.rf, RfFidelity::None, "weakest per aspect, not per Provider");
+    assert_eq!(run.transport, TransportFidelity::Model);
+
+    // MA-42's own reason for adding `real` to Vision §14's sets: a Hardware Run has
+    // to have something to record, and a Hardware Run with one best-effort Mock
+    // peripheral records that peripheral's weaker value — `timing: envelope`.
+    let real = Fidelity {
+        timing: EnvelopeFidelity::Real,
+        continuity: EnvelopeFidelity::Real,
+        coercion: CoercionFidelity::Real,
+        rf: RfFidelity::Real,
+        transport: TransportFidelity::Real,
+    };
+    assert_eq!(Fidelity::weakest(&[real]), real, "a Hardware Run records `real` where declared");
+    assert_eq!(Fidelity::weakest(&[real, enveloped]).timing, EnvelopeFidelity::Envelope);
+    // RS-41: a Run with no bound Providers records the all-`none` vector, not `real`.
+    assert_eq!(Fidelity::weakest(&[]), Fidelity::NONE);
+}

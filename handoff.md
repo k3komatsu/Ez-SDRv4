@@ -8,7 +8,7 @@
 | | |
 |---|---|
 | remote | `git@github.com:k3komatsu/Ez-SDR.git` |
-| `main` | v4（この worktree）．commit 3 個: `1dfd39f init` → `92ae363 fold v4 into repo` → `46de04b ignore .DS_Store`．`origin/main` と同期 |
+| `main` | v4（この worktree）．commit 16 個．Phase 0 の設計文書3個のあと，Phase 1 の spec と `ezsdr-kernel` crate（`79334fc`）とレビュー適用が続く．`origin/main` と同期 |
 | `master` | v3（D + C++ UHD bridge + Python client）．tip `4a474e9` = tag `v3.0.28`．**GitHub の default branch のまま** |
 | tags | 35 個（`v2.11`, `v3.0.0`–`v3.0.28`）．すべて v3 系 |
 | 履歴の関係 | **無関係（unrelated）**．graft も merge もしていない．v4 は clean-sheet なので今後も繋がない |
@@ -17,10 +17,10 @@
 
 - `/Users/komatsu/GoogleDrive/github/Ez-SDRv4` = `main` の worktree（メイン）．
 - `…/Ez-SDRv4/v3` = `master` の **git worktree**（入れ子 clone ではない）．`.gitignore` で除外．
-- 設計文書が v3 のパス 20 件を証拠として引用しているので `v3/` は消さない．確認：
+- 設計文書が v3 のパス 21 件を証拠として引用しているので `v3/` は消さない（`design/` と Vision に加えて `plan/phase1/` からも引用がある）．確認：
 
   ```bash
-  grep -rhoE 'v3/[A-Za-z0-9_./-]+' design Ez-SDR_v4_ARCHITECTURE_VISION.md | sort -u | while read p; do test -e "$p" || echo "MISSING $p"; done
+  grep -rhoE 'v3/[A-Za-z0-9_./-]+' design plan Ez-SDR_v4_ARCHITECTURE_VISION.md | sort -u | while read p; do test -e "$p" || echo "MISSING $p"; done
   ```
 
 - `v3/` を消してしまった場合：`git worktree prune && git worktree add v3 master`
@@ -42,9 +42,9 @@ Phase 1 の Kernel crate は **実装済み**（Step 4 完了）．
 | workspace | ルートの `Cargo.toml`（`resolver = "3"`，edition 2024，`rust-version = "1.85"`）．`Cargo.lock` は commit 対象 |
 | crate | `crates/ezsdr-kernel` version `4.0.0-alpha.1`．`#![forbid(unsafe_code)]`，`#![warn(missing_docs)]` |
 | module | `id time contract stream hash module_api spec binding plan event policy run session manifest schema`（00-overview.md §5 のレイアウトどおり） |
-| 直接依存 | `serde` `serde_json` `schemars` `sha2` の4つだけ（exit criterion 6）．解決後のツリーは44 crate |
-| test | 261 件．`run_session`(58) `spec_binding`(52) `stream_contract`(60) `time_model`(50) `module_api`(23) `hashing`(9) `kernel_surface`(8) `schema_freeze`(3) `event_hotpath`(1) `lib`(1) |
-| toolchain | `1.85.0` / `stable (1.98.1)` の両方で 261 passed．`cargo clippy --all-targets` も警告ゼロ |
+| 直接依存 | `serde` `serde_json` `schemars` `sha2` の4つだけ（exit criterion 6）．解決後のツリーは `Cargo.lock` で28 package（crate 自身を含む） |
+| test | 315 件．`spec_binding`(86) `stream_contract`(68) `run_session`(65) `time_model`(48) `module_api`(23) `hashing`(9) `kernel_surface`(9) `schema_freeze`(3) `event_hotpath`(1) `lib`(1) |
+| toolchain | `1.85.0` / `stable (1.98.1)` の両方で 315 passed．`cargo clippy --all-targets` も警告ゼロ |
 | schemas | `schemas/` に45個の JSON Schema 2020-12 + `SCHEMA_CHANGELOG.md`．`schema_freeze` が byte 単位で凍結．再生成は `EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze` |
 | kernel surface | `tests/kernel_surface_allow.txt` が公開 item の allow-list（= レビュー用チェックリスト，`module::name` で key 付け）．`NEW:` 件数が OV-23b の Kernel 成長指標．banned token は `tests/banned_tokens.txt`（識別子内も検出，`OV-23a` を書いた行だけ免除） |
 
@@ -58,11 +58,11 @@ Vision §67 の Phase 1．詳細設計は [plan/phase1/](plan/phase1/)．計画�
 |---|---|---|
 | [01-time-model.md](plan/phase1/01-time-model.md) | TM-1..21（副番含め36） | Gate A 通過，実装済み |
 | [02-stream-contract.md](plan/phase1/02-stream-contract.md) | SC-1..32（副番含め48） | Gate A 通過，実装済み |
-| [03-spec-and-binding.md](plan/phase1/03-spec-and-binding.md) | SB-1..49（副番含め54） | Gate B 通過，実装済み |
+| [03-spec-and-binding.md](plan/phase1/03-spec-and-binding.md) | SB-1..49（副番含め55） | Gate B 通過，実装済み |
 | [04-run-and-session.md](plan/phase1/04-run-and-session.md) | RS-1..52（副番含め57） | Gate B 通過，実装済み |
 | [05-module-api.md](plan/phase1/05-module-api.md) | MA-1..46 | Gate C 通過，実装済み |
 
-6文書で259ルール，欠番と未解決参照なし，撤回5件（SB-28, SB-32, RS-37, MA-4, MA-43 — OV-1 に従い番号は保持）．Gate A は敵対的レビュー3巡（31件・16件・13件），Gate B は2巡（19件・10件），Gate C は1巡（8件）．
+6文書で261ルール（D47 で SB-15a を追加），欠番と未解決参照なし，撤回6件（SB-25a, SB-28, SB-32, RS-37, MA-4, MA-43 — OV-1 に従い番号は保持）．Gate A は敵対的レビュー3巡（31件・16件・13件），Gate B は2巡（19件・10件），Gate C は1巡（8件）．
 
 **Step 4（crate 実装）は完了**．00-overview.md §3 の表の module 順どおりに実装し，各 rule ID を doc comment と test 名から引用している（OV-3）．
 
@@ -82,11 +82,12 @@ Vision §67 の Phase 1．詳細設計は [plan/phase1/](plan/phase1/)．計画�
 | 10 | crate 全体の second opinion（Fable 5.1，AGENTS.md §8 の例外．全件を scratch copy で実行済み） | P0 1・P1 6・P2 10 | 適用済み．**P0 はまた `collect_prepare`，しかも7巡目の修正の中**（下記）．P1 のうち2件は直前コミット `13c4070` が古いブロックを置換せず追加していた件 |
 | 13 | `continuity.rs` に絞った検証（12巡目の作り直しが未レビューだったため） | **P0 ゼロ・P1 ゼロ**・P2 2 | 修正済み．差分 fuzz で lossless 経路は HEAD とビット同一，Gap の `link_dropped` と `lost` の総和が投入分と一致することを確認．**ここで収束** |
 | 12 | 11巡目の修正の検証（新たな拒否を2つ足したため） | P1 1・P2 1 | 修正済み．P1 はまた11巡目の修正自身 — SC-30b の carry は flags・lost・blocks の3つを運ぶのに，繰り越しが blocks しか持っていなかった |
+| 14 | D45–D50 の判断（Fable 5.1，AGENTS.md §8 の second opinion 例外） | 6件 | **全件採用・適用済み**．D50 は判断ではなく**バグの発見**だった：10巡目で入れた canonical-form 基準が `Int(1152921504606847000) == Num(2^60)` を true にしていた（float の canonical 形は「その f64 を名指す最短十進」であって正確な値ではない）．等価性は厳密な数値比較に戻した．新規ルール SB-15a（ポート方向），`CompileRule::TxBurst` に `late_policy`（schema 変更） |
 | 11 | 10巡目の修正の検証（Opus，大規模修正のため必須の再レビュー） | P0 2・P1 1・P2 2 | 全件修正．**P0 2件はどちらも10巡目の修正自身**：RS-52 が component の `params` を先に見ていた（SB-2 が「the only place it can be … never a `ComponentDescriptor`'s `params`」と明記）と，SC-30b の繰り越しが `finish` で抜けていた．P1 は既存で，`collect_prepare` が他 Spec の `AdmissionResult` を拒否していなかった件 |
 
 このクレートが繰り返し出した欠陥型は2つある．
 
-**「正しい関数を誰も呼んでいない」** — 9巡で計7件（`admit_islands`・`check_cycles`・`check_sink_links`・`CheckStage::Prepare`・SB-46 の coercion policy・`ComponentDescriptor::validate`・`check_effective_narrows`，加えて `Value::check_nesting` の ASCII 規則）．対策として，各ルールの本文に**呼び出し場所を明記**した（SB-30 は3点すべて，SB-41 は MA-12 の2義務，MA-37 は `validate()`，MA-41 は比較箇所）．レビュー側の提言：「`src/` 内に呼び出し元のない predicate を grep する」を exit review の手順に入れること — 3巡で6件を出している．
+**「正しい関数を誰も呼んでいない」** — 13巡で計8件（`admit_islands`・`check_cycles`・`check_sink_links`・`CheckStage::Prepare`・SB-46 の coercion policy・`ComponentDescriptor::validate`・`check_effective_narrows`，加えて `Value::check_nesting` の ASCII 規則）．8件目は10巡目の `Admitter::admit` で，これだけ**未適用**：RS-17 が名指しする呼び出し口を作るとルール本文の判断が要るので D45 として記録してある．対策として，各ルールの本文に**呼び出し場所を明記**した（SB-30 は3点すべて，SB-41 は MA-12 の2義務，MA-37 は `validate()`，MA-41 は比較箇所）．レビュー側の提言：「`src/` 内に呼び出し元のない predicate を grep する」を exit review の手順に入れること — 4巡で7件を出している．
 
 **「ルールを初めて生かすと，そのルールが意図しないものを拒否する」** — P0 5件のうち4件がこれで，4件とも `collect_prepare` の中，しかも毎回別方向（merge を resource 別に解釈／coercion を構造的に拒否／Provider の自己申告で免除／coercion preview を key だけで引く）．
 
@@ -105,8 +106,8 @@ exit criteria（§13）の達成状況：
 | # | 条件 | 状態 |
 |---|---|---|
 | 1 | 6文書の受理と §11 の全 verdict | **verdict は全件記録済み**（X1–X12，各 spec の Decisions 表，未決事項1–7，findings D1–D33）．残るのは6文書の受理そのもの（§12） |
-| 2 | 全 rule に ID と OV-3 disposition | 未（exit review の作業） |
-| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が double で端から端まで動く | **達成**（1.85.0 / stable ともに 311 passed，`#[ignore]` なし）．degenerate ではない：resource endpoint を含む graph が validate → plan を通り（`sb_15_a_bound_resource_port_is_a_link_endpoint`），Provider fragment は matched request を運び（`sb_39_a_provider_fragment_carries_the_matched_request`），Session は bound Sink を output として持つ（`rs_12_a_session_compiles_through_the_whole_pipeline`），coercion は accept/warn/reject の3分岐が到達可能（`sb_46_an_accepted_coercion_survives_prepare`） |
+| 2 | 全 rule に ID と OV-3 disposition | 未（exit review の作業）．**規模の実測（2026-09-22）**：`#[test]` 関数315個のうち **78個** はどの spec のテスト表にも載っていない（うち19個は hashing / kernel_surface / schema_freeze で，00-overview がグループとして名指ししている分）．逆向き（表が挙げるのに関数が無い）は**ゼロ**にした |
+| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が double で端から端まで動く | **達成**（1.85.0 / stable ともに 315 passed，`#[ignore]` なし）．degenerate ではない：resource endpoint を含む graph が validate → plan を通り（`sb_15_a_bound_resource_port_is_a_link_endpoint`），Provider fragment は matched request を運び（`sb_39_a_provider_fragment_carries_the_matched_request`），Session は bound Sink を output として持つ（`rs_12_a_session_compiles_through_the_whole_pipeline`），coercion は accept/warn/reject の3分岐が到達可能（`sb_46_an_accepted_coercion_survives_prepare`） |
 | 4 | `schemas/` commit，`schema_freeze` 通過，`SCHEMA_CHANGELOG.md` の v1 entry | **達成** |
 | 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．件数は `cargo test --test kernel_surface -- --nocapture` が `OV-23b: Kernel growth = N NEW: items of M public items` で出す |
 | 6 | 直接依存が §8 の4 crate ちょうど | **達成** |
@@ -126,7 +127,7 @@ D1, D6, D11, D14）は encoding の帰結と fixture note で，裁定を要し�
 
 **§11 の verdict は D1–D44 まで全件記録済み**（D34–D44 と X11 の扱いは 2026-09-22 の Fable 5.1 second opinion を採用）．採用に伴い次を適用した：`Value` の cross-kind 等価・比較を正確化（D34），`to_root` が非整数 tick の schedule を拒否（D35），`BurstStep::Discontinuity.then_ended`（D36），schedule entry の `target` 検査と「Spec target は Spec 相対」の明文化（D37），OV-3 に4つ目の marker と exit criterion 2 を per-rule 表へ（D38/D39），`constraints_hit` 削除（D40，schema 変更），`coerce` は node あたり1回・map 全体で呼ぶ（D41），要求していない key の coercion は malformed report（D42），`SessionLog::append` が不正な Action を拒否（D43），**instance identity は binding description**（D44，ポインタ比較を廃止）．
 
-**X11 は半分だけ反転した．** `cargo public-api` の却下は維持し，`syn` ベースのスキャナの却下を撤回して `kernel_surface` を `syn::parse_file` に載せ替えた．決め手は**このプロジェクトが実際に回すループの中での失敗の形**：手書き lexer は**黙って**失敗し（5巡で11通り，うち2つは出荷中の public item を隠していた），`cargo public-api` は大声で失敗するが `cargo test` の**外**（X12 が管理しない nightly．CI が無い段階では「動かない gate」は「省かれた gate」），`syn` は MSRV toolchain 上の `cargo test` の**中**で大声で失敗する．OV-18 を当てると `syn` は全条項を満たす — 手書きの代替は709行，MSRV 1.71，**新規 transitive crate ゼロ**（`serde_derive`/`schemars_derive` 経由で既に解決済み，`Cargo.lock` の差分は1行）．X11 はこの代替を記録していながら，自分で書いた OV-18 を当てずに却下していた．gate は 709 → 499 行になり，実演された回避15通りすべてを捕獲する（1つは `#![forbid(unsafe_code)]` がより手前で拒否）．
+**X11 は半分だけ反転した．** `cargo public-api` の却下は維持し，`syn` ベースのスキャナの却下を撤回して `kernel_surface` を `syn::parse_file` に載せ替えた．決め手は**このプロジェクトが実際に回すループの中での失敗の形**：手書き lexer は**黙って**失敗し（5巡で11通り，うち2つは出荷中の public item を隠していた），`cargo public-api` は大声で失敗するが `cargo test` の**外**（X12 が管理しない nightly．CI が無い段階では「動かない gate」は「省かれた gate」），`syn` は MSRV toolchain 上の `cargo test` の**中**で大声で失敗する．OV-18 を当てると `syn` は全条項を満たす — 手書きの代替は709行，MSRV 1.71，**新規 transitive crate ゼロ**（`serde_derive`/`schemars_derive` 経由で既に解決済み，`Cargo.lock` の差分は1行）．X11 はこの代替を記録していながら，自分で書いた OV-18 を当てずに却下していた．gate は 709 → 499 行になった．ただし **parser にすれば終わりではなかった**：10巡目が parser 自身に5通りの穴を実演し，うち1つ（`is_testing_gated` が `cfg` のトークン列に `testing` が*含まれるか*で判定していた件）は**出荷ビルドで現に開いていた**．手書き lexer の穴が「綴りの見落とし」だったのに対し，parser の穴は**述語のロジック**で，parser 化では消えない種類だった．現在の gate は617行で，実演された20通りすべてを捕獲する（1つは `#![forbid(unsafe_code)]` がより手前で拒否）．3つの述語には直接の負テストが付いている．
 
 **コードレビューは9巡で収束した**（5–9巡目は crate に対する敵対的レビュー）．9巡目で初めて P0 ゼロ，`collect_prepare` からも4巡ぶりに指摘なし．9巡目の結論は「**crate は収束．gate は収束していないが，それは足し算では収束しない**」で，`kernel_surface` の残る問いはコードではなく**道具の選択**：
 

@@ -473,15 +473,26 @@ pub fn compile(
                     // UpdateParameter. `at` is either the instant the caller named
                     // or `earliest`, recorded above as a coercion; dropping it here
                     // is what made §61's `capture(n, at:)` lose its time.
+                    // The value comes from the action, and the Kernel supplies none.
+                    // A default was a Vocabulary meaning living in Core (OV-21), and
+                    // it was also invisible to RS-20's reproduction of a Run, which
+                    // reads the logged `SessionAction` and would have taken the value
+                    // from the Kernel's version rather than from the log (D46).
+                    let value = params.get(key).cloned().ok_or_else(|| {
+                        reject(
+                            "ezsdr.vocabulary",
+                            format!("RS-14: verb {verb} sets {key} and the action carries no value for it"),
+                        )
+                    })?;
                     out.actions.push(Action::UpdateParameter {
                         target: recorder,
                         key: key.clone(),
-                        value: params.get(key).cloned().unwrap_or(Value::Bool(true)),
+                        value,
                         class: *class,
                         at: Some(AbsoluteDeadline::new(at)),
                     });
                 }
-                CompileRule::TxBurst { repeat } => {
+                CompileRule::TxBurst { repeat, late_policy } => {
                     let waveform = waveform.ok_or_else(|| {
                         reject(
                             "ezsdr.artifact",
@@ -494,7 +505,7 @@ pub fn compile(
                         repeat: *repeat,
                         at: AbsoluteDeadline::new(at),
                         requested_at: None,
-                        late_policy: crate::stream::LatePolicy::SendAsapAndFlag,
+                        late_policy: *late_policy,
                         metadata: params.clone(),
                     });
                 }

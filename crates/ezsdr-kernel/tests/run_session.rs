@@ -767,7 +767,7 @@ fn rs_14_capture_without_recorder_rejected() {
         verb: id("capture"),
         target: rid("radio"),
         at: Some(t(100)),
-        params: BTreeMap::new(),
+        params: [(key("test.capture"), Value::Bool(true))].into_iter().collect(),
     };
     // RS-14: refused when the profile bound no recorder, rather than silently
     // buffered on the host.
@@ -847,7 +847,8 @@ fn rs_19_capture_asap_records_applied_time() {
         verb: id("capture"),
         target: rid("radio"),
         at: None,
-        params: BTreeMap::new(),
+        // RS-14: the value is the action's own; the Kernel supplies no default (D46).
+        params: [(key("test.capture"), Value::Bool(true))].into_iter().collect(),
     };
     let compiled = compile(&action, &reg, &declared_classes(), &placed(), t(4_242), None).expect("compiles");
     assert_eq!(compiled.coercions.len(), 1);
@@ -865,7 +866,7 @@ fn rs_49_update_parameter_carries_its_instant() {
         verb: id("capture"),
         target: rid("radio"),
         at: None,
-        params: BTreeMap::new(),
+        params: [(key("test.capture"), Value::Bool(true))].into_iter().collect(),
     };
     let compiled =
         compile(&asap, &reg, &declared_classes(), &placed(), t(4_242), None).expect("compiles");
@@ -1497,4 +1498,110 @@ fn rs_40_capture_across_a_rate_change() {
     assert_eq!(art.continuity.len(), 2);
     assert_eq!(art.continuity[0].domain, a);
     assert_eq!(art.continuity[1].domain, b);
+}
+
+#[test]
+fn rs_49a_scheduled_action_is_a_template() {
+    // RS-49a: "An Action that a Spec schedules is written as an **ActionTemplate**:
+    // the Action without its time field." A Spec cannot name a `ClockDomainId`,
+    // because domains are allocated at `prepare` (SB-16, TM-13a), and every timed
+    // Action names one through its `AbsoluteDeadline` — so the template carries no
+    // time at all and `arm` substitutes the deadline it resolved from the `SpecTime`.
+    let template = ActionTemplate::TxBurst {
+        target: ResourceId::parse("radio/tx/0").expect("a valid path"),
+        waveform: artifact("wave"),
+        repeat: false,
+        late_policy: LatePolicy::SendAsapAndFlag,
+        metadata: BTreeMap::new(),
+    };
+    // The Spec-side shape: a mandatory `SpecTime`, and no domain anywhere in it.
+    let entry = ezsdr_kernel::spec::ScheduleEntry {
+        at: ezsdr_kernel::spec::SpecTime { clock: Ident::parse("radio").expect("id"), offset_ticks: 0 },
+        action: template.clone(),
+    };
+    let written = serde_json::to_value(&entry).expect("serialises");
+    assert!(
+        !written.to_string().contains("domain"),
+        "a Spec names no ClockDomainId: {written}"
+    );
+    assert_eq!(template.target().map(|r| r.to_string()), Some("local:radio/tx/0".to_owned()));
+
+    // And what `arm` does with it: substitute the resolved deadline, producing the
+    // Action. The deadline is the only thing the template was missing.
+    let at = AbsoluteDeadline::new(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 4_000));
+    match entry.action.resolve(at) {
+        Action::TxBurst { at: resolved, requested_at, repeat, .. } => {
+            assert_eq!(resolved, at, "`arm` substitutes the instant it resolved");
+            assert_eq!(requested_at, None, "a Spec's schedule states the instant; nothing is coerced");
+            assert!(!repeat, "every other field survives the substitution");
+        }
+        other => panic!("a TxBurst template resolves to a TxBurst: {other:?}"),
+    }
+}
+
+#[test]
+fn rs_14_the_kernel_supplies_no_vocabulary_value_or_late_policy() {
+    // RS-14 with OV-21: the Kernel learns no Vocabulary word, and `compile` was
+    // supplying two — the value a `capture` verb sets and the late policy of every
+    // Session-compiled burst. The value is worse than a tier violation: RS-20
+    // reproduces a Run from the logged `SessionAction`, so a value the Kernel
+    // invented is a value the log does not carry (finding D46).
+    let reg = registry();
+    let without = SessionAction::Vocabulary {
+        ns: ns("test"),
+        verb: id("capture"),
+        target: rid("radio"),
+        at: Some(t(100)),
+        params: BTreeMap::new(),
+    };
+    let violations = compile(&without, &reg, &declared_classes(), &placed(), t(0), None)
+        .expect_err("no value, and the Kernel invents none");
+    assert!(
+        violations.iter().any(|v| v.reason.contains("RS-14")
+            && v.reason.contains("carries no value")),
+        "{violations:?}"
+    );
+
+    // The late policy is the Vocabulary's declaration, not a constant in `compile`.
+    let burst = SessionAction::Vocabulary {
+        ns: ns("test"),
+        verb: id("start_repeat"),
+        target: rid("radio"),
+        at: Some(t(100)),
+        params: BTreeMap::new(),
+    };
+    let compiled = compile(
+        &burst,
+        &reg,
+        &declared_classes(),
+        &placed(),
+        t(0),
+        Some(artifact("wave")),
+    )
+    .expect("compiles");
+    match &compiled.actions[0] {
+        Action::TxBurst { late_policy, .. } => {
+            assert_eq!(*late_policy, LatePolicy::SendAsapAndFlag, "what the verb declares");
+        }
+        other => panic!("expected a TxBurst: {other:?}"),
+    }
+
+    // And a Vocabulary declaring `RejectAtPlan` for a Session verb is refused at
+    // registration: a Session burst's target is resolved at `compile`, so the verb
+    // would name a stage the Action never reaches (SC-27, RS-51).
+    let mut v = support::test_vocabulary();
+    v.id = ns("late");
+    v.prefix = ns("late");
+    v.keys.clear();
+    v.event_kinds.clear();
+    v.verbs = vec![ezsdr_kernel::module_api::VerbDecl {
+        verb: id("start_repeat"),
+        compiles_to: ezsdr_kernel::module_api::CompileRule::TxBurst {
+            repeat: true,
+            late_policy: LatePolicy::RejectAtPlan,
+        },
+    }];
+    let mut fresh = ModuleRegistry::new();
+    let err = fresh.register_vocabulary(v).expect_err("RejectAtPlan is unreachable here");
+    assert!(err.message.contains("RS-14"), "{err}");
 }
