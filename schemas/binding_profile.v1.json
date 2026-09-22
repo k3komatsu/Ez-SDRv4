@@ -1,0 +1,383 @@
+{
+  "$defs": {
+    "Binding": {
+      "description": "Which Provider serves a Spec resource, and how it is selected.\n\nA `selector` is Provider content. Vision §8's simulation example writes\n`instances: 2` under a Mock binding; that is selector content meaning one\nProvider instance emulating two motherboards, exactly as the laboratory\nexample's `addrs: [a, b]` is one instance spanning two. It is not two Provider\ninstances, which SB-35 would then have to reconcile with the single-instance\nrule.\n\nRule: SB-22, SB-23.",
+      "properties": {
+        "profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProfileRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The declared profile, when it has one (SB-22, Vision §33)."
+        },
+        "provider": {
+          "$ref": "#/$defs/ModuleId",
+          "description": "The Provider Module (SB-22)."
+        },
+        "selector": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "default": {},
+          "description": "Namespaced content the Provider interprets (SB-23).",
+          "type": "object"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "type": "object"
+    },
+    "ComponentPlacement": {
+      "description": "Where a component runs (SB-25, SB-25a).",
+      "properties": {
+        "island": {
+          "$ref": "#/$defs/Ident",
+          "description": "Which Island (SB-25)."
+        },
+        "memory_domain": {
+          "$ref": "#/$defs/MemoryDomainId",
+          "description": "Which memory domain (MA-39)."
+        },
+        "module": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModuleId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which Module supplies the component's `ComponentDescriptor`. A Spec Run\nleaves it unset, because the Spec already carries the descriptor; a Session\nprofile sets it, and that is what lets RS-12 build a Session's implicit\nSpec (SB-25a)."
+        }
+      },
+      "required": [
+        "island",
+        "memory_domain"
+      ],
+      "type": "object"
+    },
+    "Ident": {
+      "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "IslandDecl": {
+      "description": "An Island declaration: an Executor instance, the components placed on it, and\nits optional affinity, real-time policy and preferred batch. Where it lives and\nthe requirement that every component be placed exactly once are SB-13 and SB-25.\n\nRule: MA-38.",
+      "properties": {
+        "affinity": {
+          "description": "CPU affinity, when declared (MA-38).",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "batch": {
+          "description": "Preferred batch size (MA-38).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "components": {
+          "description": "The components placed on it (MA-38).",
+          "items": {
+            "$ref": "#/$defs/Ident"
+          },
+          "type": "array"
+        },
+        "executor": {
+          "$ref": "#/$defs/Ident",
+          "description": "The Executor instance that runs it (MA-38)."
+        },
+        "id": {
+          "$ref": "#/$defs/IslandId",
+          "description": "The Island (MA-27)."
+        },
+        "rt_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RtPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Real-time scheduling policy, when declared; MA-39 then requires a budget on\nevery component (MA-38)."
+        }
+      },
+      "required": [
+        "id",
+        "executor",
+        "components"
+      ],
+      "type": "object"
+    },
+    "IslandId": {
+      "description": "Identifies a scheduling island (`05-module-api.md` MA-27).\n\nRule: MA-27, X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "LinkPlacement": {
+      "description": "Which Link Module carries a graph link (SB-25).",
+      "properties": {
+        "link": {
+          "$ref": "#/$defs/ModuleId",
+          "description": "The Link Module (MA-27)."
+        },
+        "memory_domain": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryDomainId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The memory domain it carries the blocks in (MA-39)."
+        }
+      },
+      "required": [
+        "link"
+      ],
+      "type": "object"
+    },
+    "MemoryDomainId": {
+      "description": "Identifies a memory domain a [`SampleBlock`](crate::stream::SampleBlock) lives in.\n\nRule: SC-6 (`02-stream-contract.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "ModuleId": {
+      "description": "Names a Module implementation in the registry (`05-module-api.md` MA-19).\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: MA-19.",
+      "type": "string"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Placements": {
+      "description": "The Island declarations, the component assignment and the Link Module for each\ngraph link. Every component of the Spec's graph appears in exactly one Island.\n\nRule: SB-25.",
+      "properties": {
+        "components": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ComponentPlacement"
+          },
+          "default": {},
+          "description": "Component name to placement (SB-25).",
+          "type": "object"
+        },
+        "islands": {
+          "default": [],
+          "description": "The Islands (MA-38).",
+          "items": {
+            "$ref": "#/$defs/IslandDecl"
+          },
+          "type": "array"
+        },
+        "links": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LinkPlacement"
+          },
+          "default": {},
+          "description": "Link key to Link Module (SB-25).",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "ProfileRef": {
+      "description": "A declared profile, by name and version. Vision §59 bumps a Mock profile's\nversion on measurement.\n\nRule: SB-22, MA-33 (decision B7).",
+      "properties": {
+        "name": {
+          "description": "The profile's name.",
+          "type": "string"
+        },
+        "version": {
+          "$ref": "#/$defs/Version",
+          "description": "Its version."
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "RtPolicy": {
+      "description": "A real-time scheduling policy (MA-38).",
+      "properties": {
+        "priority": {
+          "description": "The priority within it.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "sched": {
+          "description": "The scheduler name, uninterpreted by the Kernel.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sched",
+        "priority"
+      ],
+      "type": "object"
+    },
+    "Value": {
+      "anyOf": [
+        {
+          "description": "A boolean.",
+          "type": "boolean"
+        },
+        {
+          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "description": "A string.",
+          "type": "string"
+        },
+        {
+          "description": "A list of scalars; nesting deeper is refused (SB-4).",
+          "items": {
+            "$ref": "#/$defs/Value"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "description": "A map of scalars; nesting deeper is refused (SB-4).",
+          "type": "object"
+        }
+      ],
+      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+    },
+    "Version": {
+      "description": "A release-only version. Module and Vocabulary versions carry a minor and a patch;\ndocuments do not, which is decision B7 of `03-spec-and-binding.md`.\n\nRule: MA-33, decision B7.",
+      "properties": {
+        "major": {
+          "description": "Breaking changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "description": "Additive changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "patch": {
+          "description": "Fixes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "How this requirement is met, at this site, for this run.\n\n`environment` is the only place a channel model, a fault schedule, a virtual-time\nsetting, a clock distribution or a site limit may appear (SB-26).\n\nRule: SB-21…SB-27.",
+  "properties": {
+    "authority": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Ident"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Which binding keeps time; may be omitted when exactly one candidate exists\n(SB-24)."
+    },
+    "bindings": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Binding"
+      },
+      "default": {},
+      "description": "Spec resource name to Binding (SB-22).",
+      "type": "object"
+    },
+    "environment": {
+      "additionalProperties": true,
+      "default": {},
+      "description": "Namespaced opaque content, recorded verbatim in the Manifest (SB-26, SB-27).",
+      "type": "object"
+    },
+    "placements": {
+      "$ref": "#/$defs/Placements",
+      "default": {
+        "components": {},
+        "islands": [],
+        "links": {}
+      },
+      "description": "Islands, components and links (SB-25)."
+    },
+    "version": {
+      "description": "Mandatory positive integer; Phase 1 supports exactly `{1}` (SB-21, SB-47).",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version"
+  ],
+  "title": "BindingProfile",
+  "type": "object"
+}

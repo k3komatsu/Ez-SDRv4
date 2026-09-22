@@ -1,0 +1,411 @@
+{
+  "$defs": {
+    "CoercionPolicy": {
+      "description": "What to do when a Provider coerces a requested value (SB-45, SB-46).",
+      "oneOf": [
+        {
+          "const": "accept",
+          "description": "Apply and record.",
+          "type": "string"
+        },
+        {
+          "const": "warn",
+          "description": "Apply, record and warn.",
+          "type": "string"
+        },
+        {
+          "const": "reject",
+          "description": "Fail the stage with `CoercionRejected`.",
+          "type": "string"
+        }
+      ]
+    },
+    "CompileRule": {
+      "description": "The compilations a Vocabulary may declare for its verbs (RS-14).",
+      "oneOf": [
+        {
+          "description": "To an `UpdateParameter` on the named key, as `sink.capture` does (RS-14).",
+          "properties": {
+            "class": {
+              "$ref": "#/$defs/UpdateClass",
+              "description": "Under which update class (RS-52)."
+            },
+            "key": {
+              "$ref": "#/$defs/Key",
+              "description": "Which parameter to set."
+            },
+            "kind": {
+              "const": "update_parameter",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "key",
+            "class"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "To a `TxBurst`, as `radio.start_repeat` does (RS-14, SC-26).",
+          "properties": {
+            "kind": {
+              "const": "tx_burst",
+              "type": "string"
+            },
+            "repeat": {
+              "description": "Whether the waveform repeats (SC-26).",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "repeat"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "To a `PeripheralCommand` carrying the verb (RS-14).",
+          "properties": {
+            "kind": {
+              "const": "peripheral_command",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "To nothing: the verb is recorded in the log and dispatches no Action (RS-13).",
+          "properties": {
+            "kind": {
+              "const": "none",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EventKind": {
+      "description": "What kind of event this is. Dotted segments; the Kernel owns the five of RS-28\nand every other kind belongs to the Vocabulary or Module that emits it.\n\nRule: RS-27.",
+      "type": "string"
+    },
+    "EventKindDecl": {
+      "description": "What a Vocabulary or the Kernel declares when it registers an event kind.\n\nA kind's default reaction is declared where the kind is registered: putting a\nradio kind's default reaction in the Kernel would be a radio policy decision\ninside a frozen tier.\n\nRule: RS-27, RS-28, RS-32a.",
+      "properties": {
+        "default": {
+          "$ref": "#/$defs/Reaction",
+          "description": "What to do when no Policy entry overrides it (RS-28)."
+        },
+        "hot_layout": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HotLayout"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A fixed hot-path layout, when the kind has one (RS-32a)."
+        },
+        "kind": {
+          "$ref": "#/$defs/EventKind",
+          "description": "The kind (RS-27)."
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity",
+          "description": "How bad it is; RS-29 falls back to this for an unregistered kind (RS-28)."
+        }
+      },
+      "required": [
+        "kind",
+        "default",
+        "severity"
+      ],
+      "type": "object"
+    },
+    "HotLayout": {
+      "description": "A fixed hot-path layout of at most [`HOT_PAYLOAD_BYTES`] bytes together with the\nschema that layout decodes to; the collector decodes it once, off the hot path.\nA kind with no declared layout is control-path only.\n\nRule: RS-32a.",
+      "properties": {
+        "bytes": {
+          "description": "How many of the inline bytes this layout uses (RS-32a).",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "schema": {
+          "description": "The schema the layout decodes to; opaque to the Kernel (RS-32a)."
+        }
+      },
+      "required": [
+        "bytes",
+        "schema"
+      ],
+      "type": "object"
+    },
+    "Ident": {
+      "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "Key": {
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-2, MA-34.",
+      "type": "string"
+    },
+    "KeyDecl": {
+      "description": "What a Vocabulary declares about one key (spec 05, MA-35).\n\nRule: SB-2, SB-7, SB-45.",
+      "properties": {
+        "coercible": {
+          "description": "Whether a constraint the capability does not satisfy directly may be\noffered to the Provider's `coerce` (SB-7).",
+          "type": "boolean"
+        },
+        "coercion_default": {
+          "$ref": "#/$defs/CoercionPolicy",
+          "description": "The Vocabulary's default coercion policy for this key (SB-45)."
+        },
+        "key": {
+          "$ref": "#/$defs/Key",
+          "description": "The key this declares (SB-2)."
+        },
+        "kind": {
+          "$ref": "#/$defs/ValueKind",
+          "description": "The shape its value takes (SB-2)."
+        }
+      },
+      "required": [
+        "key",
+        "kind",
+        "coercible",
+        "coercion_default"
+      ],
+      "type": "object"
+    },
+    "Namespace": {
+      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "Reaction": {
+      "description": "One of exactly four reactions. It is a table: there is no expression language\nand no rules engine, and logic that needs conditions belongs in a Reactor or in\nclient orchestration.\n\nRule: RS-26.",
+      "oneOf": [
+        {
+          "const": "continue",
+          "description": "Carry on.",
+          "type": "string"
+        },
+        {
+          "const": "mark_artifact",
+          "description": "Record the kind and time against every artifact open at that moment (RS-30).",
+          "type": "string"
+        },
+        {
+          "const": "stop",
+          "description": "Stop the Run, orderly (RS-9).",
+          "type": "string"
+        },
+        {
+          "const": "abort",
+          "description": "End the Run immediately (RS-9).",
+          "type": "string"
+        }
+      ]
+    },
+    "Severity": {
+      "description": "How bad an event is; RS-29 derives a default reaction from it (Vision §29).",
+      "oneOf": [
+        {
+          "const": "debug",
+          "description": "Diagnostic detail.",
+          "type": "string"
+        },
+        {
+          "const": "info",
+          "description": "Normal progress.",
+          "type": "string"
+        },
+        {
+          "const": "warning",
+          "description": "Something is off but the Run continues.",
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "description": "Something failed.",
+          "type": "string"
+        },
+        {
+          "const": "fatal",
+          "description": "The Run cannot continue.",
+          "type": "string"
+        }
+      ]
+    },
+    "UpdateClass": {
+      "description": "How a parameter may be changed while a Run is live (Vision §27).\n\nRule: MA-24, RS-52.",
+      "oneOf": [
+        {
+          "const": "cold",
+          "description": "Requires a stop and a re-plan; a sample-rate change is one (TM-13c).",
+          "type": "string"
+        },
+        {
+          "const": "block_boundary",
+          "description": "Applied between blocks.",
+          "type": "string"
+        },
+        {
+          "const": "atomic_realtime",
+          "description": "Applied inside the real-time path without a block boundary.",
+          "type": "string"
+        },
+        {
+          "const": "hardware_timed",
+          "description": "Applied by the device at a declared instant.",
+          "type": "string"
+        }
+      ]
+    },
+    "ValueKind": {
+      "description": "The declared shape of a key's value (SB-2, MA-34).",
+      "oneOf": [
+        {
+          "const": "bool",
+          "description": "[`Value::Bool`].",
+          "type": "string"
+        },
+        {
+          "const": "int",
+          "description": "[`Value::Int`].",
+          "type": "string"
+        },
+        {
+          "const": "num",
+          "description": "[`Value::Num`].",
+          "type": "string"
+        },
+        {
+          "const": "str",
+          "description": "[`Value::Str`].",
+          "type": "string"
+        },
+        {
+          "const": "list",
+          "description": "[`Value::List`].",
+          "type": "string"
+        },
+        {
+          "const": "map",
+          "description": "[`Value::Map`].",
+          "type": "string"
+        }
+      ]
+    },
+    "VerbDecl": {
+      "description": "How a Vocabulary's Session verb compiles to Kernel Actions (RS-13a, RS-14).",
+      "properties": {
+        "compiles_to": {
+          "$ref": "#/$defs/CompileRule",
+          "description": "What it compiles to; the Kernel dispatches on this and interprets nothing\nelse (RS-14)."
+        },
+        "verb": {
+          "$ref": "#/$defs/Ident",
+          "description": "The verb (RS-13a)."
+        }
+      },
+      "required": [
+        "verb",
+        "compiles_to"
+      ],
+      "type": "object"
+    },
+    "Version": {
+      "description": "A release-only version. Module and Vocabulary versions carry a minor and a patch;\ndocuments do not, which is decision B7 of `03-spec-and-binding.md`.\n\nRule: MA-33, decision B7.",
+      "properties": {
+        "major": {
+          "description": "Breaking changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "description": "Additive changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "patch": {
+          "description": "Fixes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What the Kernel is obliged to enforce on a Vocabulary's behalf but never\ninterprets: its key declarations, its event kinds with their defaults, its\nSession verbs and how each compiles, and its admission checks. Each of those\nfour is a place where an earlier draft had put Vocabulary content in the Kernel.\n\nRule: MA-35.",
+  "properties": {
+    "checks": {
+      "default": [],
+      "description": "The environment sections it checks (SB-29).",
+      "items": {
+        "$ref": "#/$defs/Namespace"
+      },
+      "type": "array"
+    },
+    "event_kinds": {
+      "default": [],
+      "description": "Its event kinds with their defaults and severities (RS-27, RS-28).",
+      "items": {
+        "$ref": "#/$defs/EventKindDecl"
+      },
+      "type": "array"
+    },
+    "id": {
+      "$ref": "#/$defs/Namespace",
+      "description": "The Vocabulary (MA-34)."
+    },
+    "keys": {
+      "default": [],
+      "description": "Its key declarations (SB-2).",
+      "items": {
+        "$ref": "#/$defs/KeyDecl"
+      },
+      "type": "array"
+    },
+    "prefix": {
+      "$ref": "#/$defs/Namespace",
+      "description": "The key prefix it owns (MA-34)."
+    },
+    "verbs": {
+      "default": [],
+      "description": "Its Session verbs and how each compiles (RS-13a).",
+      "items": {
+        "$ref": "#/$defs/VerbDecl"
+      },
+      "type": "array"
+    },
+    "version": {
+      "$ref": "#/$defs/Version",
+      "description": "Its version (MA-33)."
+    }
+  },
+  "required": [
+    "id",
+    "version",
+    "prefix"
+  ],
+  "title": "VocabularyDescriptor",
+  "type": "object"
+}

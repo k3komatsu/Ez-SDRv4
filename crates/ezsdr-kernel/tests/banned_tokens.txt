@@ -1,0 +1,26 @@
+# OV-23a: a fixed literal token list, not "any Vision §6 term".
+#
+# Vision §6 also bans "Processor execution ABIs", but `Processor` is a Kernel role
+# in audit §13's module-api line, so a literal scan for §6's phrases would fail the
+# crate on its first run and the check would be disabled within a week.
+#
+# Matching is case-insensitive and on identifier boundaries, so `uncertainty` does
+# not match `taint` and `check_replay_target` does not match `replay`. A line that
+# cites `OV-23a` is exempt: that is the escape hatch OV-23 names, for the places
+# where a banned word is the right word for a different concept.
+uhd
+soapy
+hackrf
+rfnoc
+replay
+cuda
+wasmtime
+dev/net/tun
+tuntap
+af_xdp
+dpdk
+802.11
+otfs
+ibfd
+taint
+prometheus

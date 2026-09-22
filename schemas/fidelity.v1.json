@@ -1,0 +1,122 @@
+{
+  "$defs": {
+    "CoercionFidelity": {
+      "description": "`none < grid < real` (MA-42).",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Not modelled.",
+          "type": "string"
+        },
+        {
+          "const": "grid",
+          "description": "A declared grid is applied.",
+          "type": "string"
+        },
+        {
+          "const": "real",
+          "description": "The real device.",
+          "type": "string"
+        }
+      ]
+    },
+    "EnvelopeFidelity": {
+      "description": "The value set MA-42 gives timing and continuity: `none < envelope <\nhardware_quirk < real`. `real` is added to Vision §14's sets, which stop at\n`hardware_quirk` and leave a Hardware Run with nothing to record although the\nsame section says every Run records the vector.\n\nRule: MA-42.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Not modelled at all; an `ideal` Mock profile declares this (Vision §13).",
+          "type": "string"
+        },
+        {
+          "const": "envelope",
+          "description": "A declared envelope is enforced.",
+          "type": "string"
+        },
+        {
+          "const": "hardware_quirk",
+          "description": "A specific hardware quirk is emulated.",
+          "type": "string"
+        },
+        {
+          "const": "real",
+          "description": "The real device.",
+          "type": "string"
+        }
+      ]
+    },
+    "RfFidelity": {
+      "description": "`none < impairment_model < real` (MA-42).",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Not modelled.",
+          "type": "string"
+        },
+        {
+          "const": "impairment_model",
+          "description": "An impairment model.",
+          "type": "string"
+        },
+        {
+          "const": "real",
+          "description": "The real RF path.",
+          "type": "string"
+        }
+      ]
+    },
+    "TransportFidelity": {
+      "description": "`none < model < real` (MA-42).",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Not modelled.",
+          "type": "string"
+        },
+        {
+          "const": "model",
+          "description": "A transport model.",
+          "type": "string"
+        },
+        {
+          "const": "real",
+          "description": "The real transport.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What a Run's models actually claim, per aspect. A Run's value per aspect is the\n**weakest** over its bound Providers, so a Hardware Run with a best-effort\nMockPeripheral records `timing: envelope`.\n\nRule: MA-42, RS-41. Vision §14.",
+  "properties": {
+    "coercion": {
+      "$ref": "#/$defs/CoercionFidelity",
+      "description": "How faithfully coercion is modelled."
+    },
+    "continuity": {
+      "$ref": "#/$defs/EnvelopeFidelity",
+      "description": "How faithfully continuity and gaps are modelled."
+    },
+    "rf": {
+      "$ref": "#/$defs/RfFidelity",
+      "description": "How faithfully the RF path is modelled."
+    },
+    "timing": {
+      "$ref": "#/$defs/EnvelopeFidelity",
+      "description": "How faithfully timing is modelled."
+    },
+    "transport": {
+      "$ref": "#/$defs/TransportFidelity",
+      "description": "How faithfully transport is modelled."
+    }
+  },
+  "required": [
+    "timing",
+    "continuity",
+    "coercion",
+    "rf",
+    "transport"
+  ],
+  "title": "Fidelity",
+  "type": "object"
+}

@@ -1,0 +1,73 @@
+{
+  "$defs": {
+    "Key": {
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-2, MA-34.",
+      "type": "string"
+    },
+    "Value": {
+      "anyOf": [
+        {
+          "description": "A boolean.",
+          "type": "boolean"
+        },
+        {
+          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "description": "A string.",
+          "type": "string"
+        },
+        {
+          "description": "A list of scalars; nesting deeper is refused (SB-4).",
+          "items": {
+            "$ref": "#/$defs/Value"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "description": "A map of scalars; nesting deeper is refused (SB-4).",
+          "type": "object"
+        }
+      ],
+      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A value the Provider changed, with its reason (SB-44).",
+  "properties": {
+    "applied": {
+      "$ref": "#/$defs/Value",
+      "description": "What the Provider will apply."
+    },
+    "key": {
+      "$ref": "#/$defs/Key",
+      "description": "The key that was coerced."
+    },
+    "reason": {
+      "description": "The Provider's reason, uninterpreted by the Kernel.",
+      "type": "string"
+    },
+    "requested": {
+      "$ref": "#/$defs/Value",
+      "description": "What the document asked for."
+    }
+  },
+  "required": [
+    "key",
+    "requested",
+    "applied",
+    "reason"
+  ],
+  "title": "Coercion",
+  "type": "object"
+}

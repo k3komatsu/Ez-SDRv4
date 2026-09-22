@@ -1,0 +1,88 @@
+{
+  "$defs": {
+    "EventKind": {
+      "description": "What kind of event this is. Dotted segments; the Kernel owns the five of RS-28\nand every other kind belongs to the Vocabulary or Module that emits it.\n\nRule: RS-27.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Why a Run stopped (RS-3, RS-23, RS-26).",
+  "oneOf": [
+    {
+      "description": "The client asked (RS-3).",
+      "properties": {
+        "reason": {
+          "const": "client",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "An `Attached` Lease's client went away (RS-23).",
+      "properties": {
+        "reason": {
+          "const": "client_disconnect",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "A `Detached` Lease's TTL ran out (RS-23).",
+      "properties": {
+        "reason": {
+          "const": "lease_expiry",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "The Policy table reacted to an event (RS-26).",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/EventKind",
+          "description": "Which kind triggered it."
+        },
+        "reason": {
+          "const": "policy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "kind"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Something aborted the Run (RS-9).",
+      "properties": {
+        "cause": {
+          "description": "Why, uninterpreted.",
+          "type": "string"
+        },
+        "reason": {
+          "const": "abort",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "cause"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "StopCause"
+}

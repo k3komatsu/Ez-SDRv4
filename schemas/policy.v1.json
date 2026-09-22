@@ -1,0 +1,83 @@
+{
+  "$defs": {
+    "Reaction": {
+      "description": "One of exactly four reactions. It is a table: there is no expression language\nand no rules engine, and logic that needs conditions belongs in a Reactor or in\nclient orchestration.\n\nRule: RS-26.",
+      "oneOf": [
+        {
+          "const": "continue",
+          "description": "Carry on.",
+          "type": "string"
+        },
+        {
+          "const": "mark_artifact",
+          "description": "Record the kind and time against every artifact open at that moment (RS-30).",
+          "type": "string"
+        },
+        {
+          "const": "stop",
+          "description": "Stop the Run, orderly (RS-9).",
+          "type": "string"
+        },
+        {
+          "const": "abort",
+          "description": "End the Run immediately (RS-9).",
+          "type": "string"
+        }
+      ]
+    },
+    "Severity": {
+      "description": "How bad an event is; RS-29 derives a default reaction from it (Vision §29).",
+      "oneOf": [
+        {
+          "const": "debug",
+          "description": "Diagnostic detail.",
+          "type": "string"
+        },
+        {
+          "const": "info",
+          "description": "Normal progress.",
+          "type": "string"
+        },
+        {
+          "const": "warning",
+          "description": "Something is off but the Run continues.",
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "description": "Something failed.",
+          "type": "string"
+        },
+        {
+          "const": "fatal",
+          "description": "The Run cannot continue.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A compiled reaction table for one Run (RS-26).",
+  "properties": {
+    "severities": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Severity"
+      },
+      "description": "Kind to severity, which RS-29 falls back to (RS-28).",
+      "type": "object"
+    },
+    "table": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Reaction"
+      },
+      "description": "Kind to reaction (RS-26).",
+      "type": "object"
+    }
+  },
+  "required": [
+    "table",
+    "severities"
+  ],
+  "title": "Policy",
+  "type": "object"
+}

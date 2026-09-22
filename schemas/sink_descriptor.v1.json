@@ -1,0 +1,41 @@
+{
+  "$defs": {
+    "DataContractId": {
+      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SC-2.",
+      "type": "string"
+    },
+    "Namespace": {
+      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What a Sink declares (MA-25).",
+  "properties": {
+    "artifact_kinds": {
+      "description": "The artifact kinds it writes (RS-44).",
+      "items": {
+        "$ref": "#/$defs/Namespace"
+      },
+      "type": "array"
+    },
+    "contracts": {
+      "description": "The contracts it consumes (SC-3).",
+      "items": {
+        "$ref": "#/$defs/DataContractId"
+      },
+      "type": "array"
+    },
+    "kind": {
+      "$ref": "#/$defs/Namespace",
+      "description": "The Sink kind (MA-25)."
+    }
+  },
+  "required": [
+    "kind",
+    "contracts",
+    "artifact_kinds"
+  ],
+  "title": "SinkDescriptor",
+  "type": "object"
+}

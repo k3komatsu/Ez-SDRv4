@@ -1,0 +1,193 @@
+{
+  "$defs": {
+    "ClockDomainId": {
+      "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "GapCause": {
+      "description": "What the **stream** lost. A closed, derived set (SC-31, decision S16).\n\nWhat the **link** lost is the separate `link_dropped` count, not a cause, so a\ndevice overflow inside an interval that also lost a block to the link is still\nreported as `OverflowRestart` with its sample count, beside a link-drop count of\none. Collapsing the two into a single cause loses the device's own diagnosis.",
+      "oneOf": [
+        {
+          "description": "`GAP_BEFORE` alone (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "stream",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`RESTARTED`: a stream restart, as a UHD overflow produces (SC-31, OV-23a).",
+          "properties": {
+            "kind": {
+              "const": "overflow_restart",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`SEQ_DISCONTINUITY`: transport sequence loss (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "sequence_error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A per-channel break on a block carrying `ALIGNMENT` (SC-31a).",
+          "properties": {
+            "kind": {
+              "const": "alignment",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A jump with no gap flag on a lossy path (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "link_drop",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`GAP_BEFORE` with `lost` less than the jump on a lossy path and no carry to\nexplain the difference (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "mixed",
+              "type": "string"
+            },
+            "stream_lost": {
+              "description": "What the stream itself reported losing.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "stream_lost"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`GAP_BEFORE` with `lost` absent (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "TimePoint": {
+      "description": "An instant: integer ticks in a named clock domain. Never floating-point seconds.\n\nThere is deliberately no `PartialOrd`: two points of different domains cannot be\ncompared at all, and `a < b` silently answering `false` is the bug class this\nmodel exists to prevent (decision T3).\n\nRule: TM-1, TM-6.",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The domain whose ticks `ticks` counts (TM-1)."
+        },
+        "ticks": {
+          "description": "Tick count relative to the domain's origin; a sample index in a SampleClock (TM-10).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "domain",
+        "ticks"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "An interval of missing samples in the stream (SC-30, Vision §28).",
+  "properties": {
+    "cause": {
+      "$ref": "#/$defs/GapCause",
+      "description": "What the stream lost (SC-31)."
+    },
+    "len": {
+      "description": "Its extent in samples.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "link_dropped": {
+      "description": "How many blocks the link discarded inside the same interval. A block count,\nnot a sample count: the samples the link lost are `len − lost`, and are\nunrecoverable when `lost` is absent. That is a real limit of what a dropped\nheader can tell us, not an omission (SC-20b, SC-31).",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "lost": {
+      "description": "What the stream reported losing, when known (SC-13).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "start": {
+      "$ref": "#/$defs/TimePoint",
+      "description": "Where the missing interval begins."
+    }
+  },
+  "required": [
+    "start",
+    "len",
+    "cause",
+    "link_dropped"
+  ],
+  "title": "Gap",
+  "type": "object"
+}

@@ -1,0 +1,98 @@
+{
+  "$defs": {
+    "BackPressure": {
+      "description": "What a link does when its queue is at capacity. There is no default (SC-19).",
+      "oneOf": [
+        {
+          "const": "block",
+          "description": "Publishing returns [`PublishOutcome::Full`] and nothing is ever dropped.\nThe name is the Vision's; the policy produces back-pressure through a\nrefusal the producer must honour, not through a parked thread (SC-20a).",
+          "type": "string"
+        },
+        {
+          "const": "drop_oldest",
+          "description": "The oldest queued block is evicted (SC-20).",
+          "type": "string"
+        },
+        {
+          "const": "drop_newest",
+          "description": "The new block is refused (SC-20).",
+          "type": "string"
+        }
+      ]
+    },
+    "MemoryDomainId": {
+      "description": "Identifies a memory domain a [`SampleBlock`](crate::stream::SampleBlock) lives in.\n\nRule: SC-6 (`02-stream-contract.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "Namespace": {
+      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What a Link declares. `connects` and `cross_process` are the inputs to the\nmemory-domain reachability check of MA-39; the Kernel never plans a transfer\n(MA-28, SB-40).",
+  "properties": {
+    "connects": {
+      "description": "Memory-domain pairs it joins (MA-39).",
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "$ref": "#/$defs/MemoryDomainId"
+          },
+          {
+            "$ref": "#/$defs/MemoryDomainId"
+          }
+        ],
+        "type": "array"
+      },
+      "type": "array"
+    },
+    "cross_process": {
+      "description": "Whether it crosses a process boundary (MA-28).",
+      "type": "boolean"
+    },
+    "kind": {
+      "$ref": "#/$defs/Namespace",
+      "description": "The Link kind (MA-27)."
+    },
+    "policies": {
+      "description": "The policies it implements (SC-19, MA-28).",
+      "items": {
+        "$ref": "#/$defs/BackPressure"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "kind",
+    "connects",
+    "policies",
+    "cross_process"
+  ],
+  "title": "LinkDescriptor",
+  "type": "object"
+}

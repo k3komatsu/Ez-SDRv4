@@ -1,0 +1,188 @@
+{
+  "$defs": {
+    "ContentHash": {
+      "description": "`sha256:<64 lowercase hex>`. The algorithm is named in the value so a later\nalgorithm is an additive change (OV-14).",
+      "type": "string"
+    },
+    "Deployment": {
+      "description": "How a Module is deployed. `Plugin` names a deployment, never a role, and is\nreserved: Phase 1 refuses it as `Unsupported` (MA-1, MA-32, MA-46).",
+      "oneOf": [
+        {
+          "description": "A Rust trait, compiled in. Rust has no stable ABI, so this is the default\nand out-of-process is the Plugin path (Vision §62).",
+          "properties": {
+            "kind": {
+              "const": "in_process",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Out-of-process, a typed protocol; reserved (MA-32, MA-46).",
+          "properties": {
+            "kind": {
+              "const": "plugin",
+              "type": "string"
+            },
+            "protocol": {
+              "$ref": "#/$defs/Version",
+              "description": "The protocol version."
+            }
+          },
+          "required": [
+            "kind",
+            "protocol"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ModuleId": {
+      "description": "Names a Module implementation in the registry (`05-module-api.md` MA-19).\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: MA-19.",
+      "type": "string"
+    },
+    "Namespace": {
+      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "Role": {
+      "description": "The five roles. There is exactly one trait each and no shared lifecycle\nsupertrait: one trait forced onto radios and executors alike is what audit\nFinding 22 rejects, and Link and Authority have no lifecycle at all.\n\nRule: MA-1, MA-2.",
+      "oneOf": [
+        {
+          "const": "provider",
+          "description": "Implements a Resource Model.",
+          "type": "string"
+        },
+        {
+          "const": "executor",
+          "description": "Implements a processing engine.",
+          "type": "string"
+        },
+        {
+          "const": "sink",
+          "description": "Writes Artifacts.",
+          "type": "string"
+        },
+        {
+          "const": "link",
+          "description": "Implements a DataLink.",
+          "type": "string"
+        },
+        {
+          "const": "authority",
+          "description": "Implements the Time Authority.",
+          "type": "string"
+        }
+      ]
+    },
+    "Version": {
+      "description": "A release-only version. Module and Vocabulary versions carry a minor and a patch;\ndocuments do not, which is decision B7 of `03-spec-and-binding.md`.\n\nRule: MA-33, decision B7.",
+      "properties": {
+        "major": {
+          "description": "Breaking changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "description": "Additive changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "patch": {
+          "description": "Fixes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "type": "object"
+    },
+    "VersionReq": {
+      "$ref": "#/$defs/Version",
+      "description": "A caret requirement over a [`Version`] (MA-33)."
+    },
+    "VocabularyRequirement": {
+      "description": "A Vocabulary a Module declares, with its caret requirement (MA-32).",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Namespace",
+          "description": "The Vocabulary's namespace, which is also its key prefix (MA-34)."
+        },
+        "req": {
+          "$ref": "#/$defs/VersionReq",
+          "description": "What versions satisfy it (MA-33)."
+        }
+      },
+      "required": [
+        "id",
+        "req"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What a Module ships (MA-31).",
+  "properties": {
+    "deployment": {
+      "$ref": "#/$defs/Deployment",
+      "description": "InProcess, or the reserved Plugin (MA-32)."
+    },
+    "id": {
+      "$ref": "#/$defs/ModuleId",
+      "description": "The Module (MA-19)."
+    },
+    "impl_hash": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContentHash"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Its code's content hash, which the Manifest records (RS-45)."
+    },
+    "kernel_api": {
+      "$ref": "#/$defs/Version",
+      "description": "The Kernel API it was built against; a differing major is refused (MA-32)."
+    },
+    "roles": {
+      "description": "The roles it holds; they must match the factories it registers (MA-31).",
+      "items": {
+        "$ref": "#/$defs/Role"
+      },
+      "type": "array"
+    },
+    "version": {
+      "$ref": "#/$defs/Version",
+      "description": "Its version (MA-33)."
+    },
+    "vocabularies": {
+      "default": [],
+      "description": "The Vocabularies it speaks (MA-32, MA-34).",
+      "items": {
+        "$ref": "#/$defs/VocabularyRequirement"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "id",
+    "version",
+    "kernel_api",
+    "roles",
+    "deployment"
+  ],
+  "title": "ModuleDescriptor",
+  "type": "object"
+}

@@ -1,0 +1,364 @@
+{
+  "$defs": {
+    "ClockDomainId": {
+      "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "ComponentImpl": {
+      "description": "How a component's code is identified. The Kernel never inspects `impl` beyond\nits identity (MA-21).",
+      "properties": {
+        "hash": {
+          "$ref": "#/$defs/ContentHash",
+          "description": "Its content hash, which the Manifest records (RS-45, MA-37)."
+        },
+        "id": {
+          "description": "Its identity within that kind (MA-19).",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/Namespace",
+          "description": "The implementation kind; the Executor's `impl_kinds` must list it (MA-39)."
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "hash"
+      ],
+      "type": "object"
+    },
+    "ComponentKind": {
+      "description": "What kind of component this is (MA-36).",
+      "oneOf": [
+        {
+          "const": "processor",
+          "description": "Transforms samples.",
+          "type": "string"
+        },
+        {
+          "const": "reactor",
+          "description": "Reacts to samples by emitting Actions (MA-14a, Vision §19).",
+          "type": "string"
+        }
+      ]
+    },
+    "ComponentRequires": {
+      "description": "What a component requires of its Executor. Requirements only: the placement\nlives in the BindingProfile (MA-36, SB-25, re-review R21).",
+      "properties": {
+        "executor_kind": {
+          "description": "The Executor kind, or `any` (MA-39).",
+          "type": "string"
+        },
+        "memory_bytes": {
+          "description": "Working memory, when it needs a declared amount (MA-36).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "executor_kind"
+      ],
+      "type": "object"
+    },
+    "ComponentTiming": {
+      "description": "A component's timing declaration (MA-36).",
+      "properties": {
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RelativeBudget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The processing budget. A descriptor never carries an `AbsoluteDeadline`:\nthey are distinct types (TM-15) and distinct schema definitions (MA-37)."
+        },
+        "parallelism": {
+          "description": "How many instances may run in parallel (MA-36).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "preferred_batch": {
+          "description": "A hint at the block size the component prefers (MA-36).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stateful": {
+          "description": "Whether it carries state across blocks (MA-36).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stateful"
+      ],
+      "type": "object"
+    },
+    "ContentHash": {
+      "description": "`sha256:<64 lowercase hex>`. The algorithm is named in the value so a later\nalgorithm is an additive change (OV-14).",
+      "type": "string"
+    },
+    "DataContractId": {
+      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SC-2.",
+      "type": "string"
+    },
+    "Duration": {
+      "description": "An elapsed time: integer ticks in a named clock domain (TM-1, TM-4 decision T4).\n\nThe domain tag is what stops 1 000 ticks at 20 Msps being added to a 200 MHz\npoint as a silent factor-of-ten error.",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The domain whose ticks `ticks` counts (TM-7)."
+        },
+        "ticks": {
+          "description": "Tick count; may be negative (TM-7).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "domain",
+        "ticks"
+      ],
+      "type": "object"
+    },
+    "Ident": {
+      "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "Key": {
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-2, MA-34.",
+      "type": "string"
+    },
+    "Namespace": {
+      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ParamDecl": {
+      "description": "One declared parameter of a component (MA-36).",
+      "properties": {
+        "default": {
+          "$ref": "#/$defs/Value",
+          "description": "Its default value (MA-36)."
+        },
+        "key": {
+          "$ref": "#/$defs/Key",
+          "description": "Which parameter (SB-2)."
+        },
+        "schema": {
+          "description": "Its schema, opaque to the Kernel (MA-36)."
+        },
+        "update_class": {
+          "$ref": "#/$defs/UpdateClass",
+          "description": "How it may be changed (MA-24, RS-52)."
+        }
+      },
+      "required": [
+        "key",
+        "schema",
+        "update_class",
+        "default"
+      ],
+      "type": "object"
+    },
+    "Port": {
+      "description": "A name, a direction and a contract id, and nothing more. Per-port parameters\nthe Kernel does not interpret — a tensor shape, a maximum PDU length — live in\nthe `ComponentDescriptor`'s parameters (MA-36), not here.\n\nRule: SC-1.",
+      "properties": {
+        "contract": {
+          "$ref": "#/$defs/DataContractId",
+          "description": "The contract carried (SC-1)."
+        },
+        "direction": {
+          "$ref": "#/$defs/PortDirection",
+          "description": "Whether the component consumes or produces here (SC-1)."
+        },
+        "name": {
+          "description": "Port name, unique within its component (MA-37).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "direction",
+        "contract"
+      ],
+      "type": "object"
+    },
+    "PortDirection": {
+      "description": "Which way samples flow through a [`Port`] (SC-1).",
+      "oneOf": [
+        {
+          "const": "in",
+          "description": "The component consumes blocks here.",
+          "type": "string"
+        },
+        {
+          "const": "out",
+          "description": "The component produces blocks here.",
+          "type": "string"
+        }
+      ]
+    },
+    "RelativeBudget": {
+      "description": "A processing budget measured from a work item's arrival, in `host.monotonic`.\n\nDistinct from [`AbsoluteDeadline`] with no common supertype: the checks that\nconsume them differ (Vision §19, decision T5).\n\nRule: TM-15.",
+      "properties": {
+        "duration": {
+          "$ref": "#/$defs/Duration"
+        }
+      },
+      "required": [
+        "duration"
+      ],
+      "type": "object"
+    },
+    "UpdateClass": {
+      "description": "How a parameter may be changed while a Run is live (Vision §27).\n\nRule: MA-24, RS-52.",
+      "oneOf": [
+        {
+          "const": "cold",
+          "description": "Requires a stop and a re-plan; a sample-rate change is one (TM-13c).",
+          "type": "string"
+        },
+        {
+          "const": "block_boundary",
+          "description": "Applied between blocks.",
+          "type": "string"
+        },
+        {
+          "const": "atomic_realtime",
+          "description": "Applied inside the real-time path without a block boundary.",
+          "type": "string"
+        },
+        {
+          "const": "hardware_timed",
+          "description": "Applied by the device at a declared instant.",
+          "type": "string"
+        }
+      ]
+    },
+    "Value": {
+      "anyOf": [
+        {
+          "description": "A boolean.",
+          "type": "boolean"
+        },
+        {
+          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "description": "A string.",
+          "type": "string"
+        },
+        {
+          "description": "A list of scalars; nesting deeper is refused (SB-4).",
+          "items": {
+            "$ref": "#/$defs/Value"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "description": "A map of scalars; nesting deeper is refused (SB-4).",
+          "type": "object"
+        }
+      ],
+      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What a Processor or Reactor declares about itself (MA-36).",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Ident",
+      "description": "The component's name inside its document (SB-1)."
+    },
+    "impl": {
+      "$ref": "#/$defs/ComponentImpl",
+      "description": "How its code is identified (MA-21)."
+    },
+    "kind": {
+      "$ref": "#/$defs/ComponentKind",
+      "description": "Whether it transforms samples or reacts to them (MA-36)."
+    },
+    "params": {
+      "default": [],
+      "description": "Its declared parameters (MA-24).",
+      "items": {
+        "$ref": "#/$defs/ParamDecl"
+      },
+      "type": "array"
+    },
+    "ports": {
+      "description": "Its ports (SC-1).",
+      "items": {
+        "$ref": "#/$defs/Port"
+      },
+      "type": "array"
+    },
+    "requires": {
+      "$ref": "#/$defs/ComponentRequires",
+      "description": "What it requires of its Executor (MA-36)."
+    },
+    "timing": {
+      "$ref": "#/$defs/ComponentTiming",
+      "default": {
+        "budget": null,
+        "parallelism": null,
+        "preferred_batch": null,
+        "stateful": false
+      },
+      "description": "Its timing declaration (MA-36)."
+    }
+  },
+  "required": [
+    "id",
+    "kind",
+    "ports",
+    "requires",
+    "impl"
+  ],
+  "title": "ComponentDescriptor",
+  "type": "object"
+}

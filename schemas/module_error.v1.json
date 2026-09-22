@@ -1,0 +1,56 @@
+{
+  "$defs": {
+    "ModuleErrorKind": {
+      "description": "The five error kinds a Module may report. A fault crosses the boundary only as a\n[`ModuleError`]: no panic crosses a trait boundary, and a foreign exception is\ntranslated to a status (Vision §35).\n\nRule: MA-9.",
+      "oneOf": [
+        {
+          "const": "rejected",
+          "description": "The request was well formed and refused.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported",
+          "description": "The Module does not implement this at all; `deployment: Plugin` is one (MA-32).",
+          "type": "string"
+        },
+        {
+          "const": "timeout",
+          "description": "The call did not finish inside `PrepareContext.host_budget` (MA-8).",
+          "type": "string"
+        },
+        {
+          "const": "device_lost",
+          "description": "The device is gone; spec 04's Policy maps this to `abort` (MA-9, RS-27).",
+          "type": "string"
+        },
+        {
+          "const": "internal",
+          "description": "Anything else.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "How a fault crosses a Module boundary (MA-9).",
+  "properties": {
+    "detail": {
+      "description": "Structured detail, uninterpreted by the Kernel."
+    },
+    "kind": {
+      "$ref": "#/$defs/ModuleErrorKind",
+      "description": "Which kind (MA-9)."
+    },
+    "message": {
+      "description": "What happened, uninterpreted by the Kernel.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "message",
+    "detail"
+  ],
+  "title": "ModuleError",
+  "type": "object"
+}

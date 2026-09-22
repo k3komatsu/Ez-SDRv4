@@ -1,0 +1,112 @@
+{
+  "$defs": {
+    "BackPressure": {
+      "description": "What a link does when its queue is at capacity. There is no default (SC-19).",
+      "oneOf": [
+        {
+          "const": "block",
+          "description": "Publishing returns [`PublishOutcome::Full`] and nothing is ever dropped.\nThe name is the Vision's; the policy produces back-pressure through a\nrefusal the producer must honour, not through a parked thread (SC-20a).",
+          "type": "string"
+        },
+        {
+          "const": "drop_oldest",
+          "description": "The oldest queued block is evicted (SC-20).",
+          "type": "string"
+        },
+        {
+          "const": "drop_newest",
+          "description": "The new block is refused (SC-20).",
+          "type": "string"
+        }
+      ]
+    },
+    "DataContractId": {
+      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SC-2.",
+      "type": "string"
+    },
+    "DataLinkId": {
+      "description": "Identifies a [`DataLink`](crate::stream::DataLinkDecl) instance.\n\nRule: SC-18 (`02-stream-contract.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "PortRef": {
+      "description": "Names one port of one component instance (SC-1).",
+      "properties": {
+        "component": {
+          "description": "The component instance identifier (MA-36).",
+          "type": "string"
+        },
+        "port": {
+          "description": "The port name on that component (SC-1).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "port"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A declared link: its endpoints, the contract it carries, its policy and its\ncapacity in blocks (SC-19).",
+  "properties": {
+    "capacity": {
+      "description": "Queue depth in blocks, at least 1 (SC-19).",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "contract": {
+      "$ref": "#/$defs/DataContractId",
+      "description": "The contract carried; SC-3 checks it against both ports (SC-19)."
+    },
+    "from": {
+      "$ref": "#/$defs/PortRef",
+      "description": "The producing port (SC-19)."
+    },
+    "id": {
+      "$ref": "#/$defs/DataLinkId",
+      "description": "Node-qualified identity (SC-19, X7)."
+    },
+    "policy": {
+      "$ref": "#/$defs/BackPressure",
+      "description": "What happens at capacity; there is no default (SC-19)."
+    },
+    "to": {
+      "$ref": "#/$defs/PortRef",
+      "description": "The consuming port (SC-19)."
+    }
+  },
+  "required": [
+    "id",
+    "from",
+    "to",
+    "contract",
+    "policy",
+    "capacity"
+  ],
+  "title": "DataLinkDecl",
+  "type": "object"
+}

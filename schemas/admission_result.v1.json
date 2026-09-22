@@ -1,0 +1,365 @@
+{
+  "$defs": {
+    "Coercion": {
+      "description": "A value the Provider changed, with its reason (SB-44).",
+      "properties": {
+        "applied": {
+          "$ref": "#/$defs/Value",
+          "description": "What the Provider will apply."
+        },
+        "key": {
+          "$ref": "#/$defs/Key",
+          "description": "The key that was coerced."
+        },
+        "reason": {
+          "description": "The Provider's reason, uninterpreted by the Kernel.",
+          "type": "string"
+        },
+        "requested": {
+          "$ref": "#/$defs/Value",
+          "description": "What the document asked for."
+        }
+      },
+      "required": [
+        "key",
+        "requested",
+        "applied",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "Constraint": {
+      "description": "What a Spec requires of a key. Its value is a scalar: a constraint over a list\nor a map is refused, because the matcher would then need the Vocabulary's\nsemantics to compare them.\n\nRule: SB-5, decision B1.",
+      "oneOf": [
+        {
+          "description": "Exactly this value.",
+          "properties": {
+            "kind": {
+              "const": "eq",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "The value."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Within these bounds, either of which may be absent.",
+          "properties": {
+            "kind": {
+              "const": "range",
+              "type": "string"
+            },
+            "max": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Value"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Upper bound, inclusive."
+            },
+            "min": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Value"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Lower bound, inclusive."
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Any of these values.",
+          "properties": {
+            "kind": {
+              "const": "set",
+              "type": "string"
+            },
+            "values": {
+              "description": "The permitted values.",
+              "items": {
+                "$ref": "#/$defs/Value"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "At least this value.",
+          "properties": {
+            "kind": {
+              "const": "min",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "The lower bound."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "At most this value.",
+          "properties": {
+            "kind": {
+              "const": "max",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "The upper bound."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The key is declared at all.",
+          "properties": {
+            "kind": {
+              "const": "present",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Ident": {
+      "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "Key": {
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-2, MA-34.",
+      "type": "string"
+    },
+    "Namespace": {
+      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "RejectedConstraint": {
+      "description": "A constraint the bound instance could not satisfy (SB-38).",
+      "properties": {
+        "constraint": {
+          "$ref": "#/$defs/Constraint",
+          "description": "What was asked."
+        },
+        "key": {
+          "$ref": "#/$defs/Key",
+          "description": "The key."
+        },
+        "reason": {
+          "description": "Why it failed, uninterpreted.",
+          "type": "string"
+        },
+        "resource": {
+          "$ref": "#/$defs/Ident",
+          "description": "The Spec resource whose constraint failed."
+        }
+      },
+      "required": [
+        "resource",
+        "key",
+        "constraint",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ResourceId": {
+      "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the\nreceive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        },
+        "path": {
+          "description": "Slash-joined path through the composite resource tree (SB-34).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "path"
+      ],
+      "type": "object"
+    },
+    "Value": {
+      "anyOf": [
+        {
+          "description": "A boolean.",
+          "type": "boolean"
+        },
+        {
+          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "description": "A string.",
+          "type": "string"
+        },
+        {
+          "description": "A list of scalars; nesting deeper is refused (SB-4).",
+          "items": {
+            "$ref": "#/$defs/Value"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "description": "A map of scalars; nesting deeper is refused (SB-4).",
+          "type": "object"
+        }
+      ],
+      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+    },
+    "Violation": {
+      "description": "What an admission check refused (SB-29).",
+      "properties": {
+        "check": {
+          "$ref": "#/$defs/Namespace",
+          "description": "Which check (SB-29)."
+        },
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Key"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which key, when the violation names one."
+        },
+        "reason": {
+          "description": "Why, uninterpreted by the Kernel.",
+          "type": "string"
+        },
+        "requested": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Value"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What was asked."
+        }
+      },
+      "required": [
+        "check",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "Warning": {
+      "description": "A non-fatal note from a stage (SB-38, SB-41).",
+      "properties": {
+        "message": {
+          "description": "What it says; uninterpreted by the Kernel.",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/Namespace",
+          "description": "Where it came from."
+        }
+      },
+      "required": [
+        "source",
+        "message"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What `validate(spec, binding, registry)` returns. It touches no hardware.\n\nRule: SB-38.",
+  "properties": {
+    "coercions_preview": {
+      "default": [],
+      "description": "What the Providers said they would change (SB-7, SB-44).",
+      "items": {
+        "$ref": "#/$defs/Coercion"
+      },
+      "type": "array"
+    },
+    "matched": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ResourceId"
+      },
+      "default": {},
+      "description": "Spec resource name — and `needs` name — to the resolved `ResourceId` (SB-36).",
+      "type": "object"
+    },
+    "rejected": {
+      "default": [],
+      "description": "Constraints the bound instance could not satisfy (SB-38).",
+      "items": {
+        "$ref": "#/$defs/RejectedConstraint"
+      },
+      "type": "array"
+    },
+    "violations": {
+      "default": [],
+      "description": "What the registered checks refused (SB-30).",
+      "items": {
+        "$ref": "#/$defs/Violation"
+      },
+      "type": "array"
+    },
+    "warnings": {
+      "default": [],
+      "description": "Non-fatal notes (SB-38).",
+      "items": {
+        "$ref": "#/$defs/Warning"
+      },
+      "type": "array"
+    }
+  },
+  "title": "AdmissionResult",
+  "type": "object"
+}

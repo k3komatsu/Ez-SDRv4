@@ -1,0 +1,1465 @@
+{
+  "$defs": {
+    "ActionTemplate": {
+      "description": "An Action as a Spec schedules it: the Action without its time field.\n\nA Spec cannot name a `ClockDomainId`, because domains are allocated at `prepare`\n(SB-16, TM-13a), and every timed Action names one through its\n[`AbsoluteDeadline`]. `arm` resolves the entry's `SpecTime` and substitutes it.\nWithout the split, `ExperimentSpec.schedule` could hold no timed Action at all,\nwhich is the one thing it exists for.\n\nRule: RS-49a.",
+      "oneOf": [
+        {
+          "description": "[`Action::TxBurst`] without `at` (RS-49a).",
+          "properties": {
+            "kind": {
+              "const": "tx_burst",
+              "type": "string"
+            },
+            "late_policy": {
+              "$ref": "#/$defs/LatePolicy",
+              "description": "What to do if the lead is short."
+            },
+            "metadata": {
+              "additionalProperties": {
+                "$ref": "#/$defs/Value"
+              },
+              "default": {},
+              "description": "Namespaced content.",
+              "type": "object"
+            },
+            "repeat": {
+              "description": "Whether the waveform repeats.",
+              "type": "boolean"
+            },
+            "target": {
+              "$ref": "#/$defs/ResourceId",
+              "description": "The transmit stream."
+            },
+            "waveform": {
+              "$ref": "#/$defs/ArtifactRef",
+              "description": "The samples, by reference."
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "waveform",
+            "repeat",
+            "late_policy"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "[`Action::SetTimer`] without `at` (RS-49a).",
+          "properties": {
+            "kind": {
+              "const": "set_timer",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/ResourceId",
+              "description": "Whose timer."
+            },
+            "token": {
+              "description": "The caller's token.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "token"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "[`Action::UpdateParameter`], which carries no time (RS-49a).",
+          "properties": {
+            "class": {
+              "$ref": "#/$defs/UpdateClass",
+              "description": "The declared update class."
+            },
+            "key": {
+              "$ref": "#/$defs/Key",
+              "description": "Which parameter."
+            },
+            "kind": {
+              "const": "update_parameter",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/ResourceId",
+              "description": "Whose parameter."
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "Its new value."
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "key",
+            "value",
+            "class"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "[`Action::PeripheralCommand`] without `at` (RS-49a).",
+          "properties": {
+            "kind": {
+              "const": "peripheral_command",
+              "type": "string"
+            },
+            "params": {
+              "additionalProperties": {
+                "$ref": "#/$defs/Value"
+              },
+              "default": {},
+              "description": "Its parameters.",
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/ResourceId",
+              "description": "Whose peripheral."
+            },
+            "verb": {
+              "$ref": "#/$defs/Ident",
+              "description": "The verb."
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "verb"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "[`Action::Stop`], which carries no time (RS-49a).",
+          "properties": {
+            "kind": {
+              "const": "stop",
+              "type": "string"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResourceId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The resource, or the Run when absent."
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ArtifactMark": {
+      "description": "One `mark_artifact` reaction recorded against an artifact (RS-30).",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/EventKind",
+          "description": "Which kind triggered it (RS-30)."
+        },
+        "time": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "When (RS-30)."
+        }
+      },
+      "required": [
+        "kind",
+        "time"
+      ],
+      "type": "object"
+    },
+    "ArtifactRef": {
+      "description": "Large data is always by reference: a locator, a content hash and a size, never\nthe bytes (RS-44, Vision §50, §51).",
+      "properties": {
+        "continuity": {
+          "default": [],
+          "description": "The continuity metadata of SC-30, in SampleClock order. There is more than\none whenever the capture spans a rate change (TM-13c) or a channel-count\nchange (SC-30a): each ends one map and starts the next (RS-40).",
+          "items": {
+            "$ref": "#/$defs/ContinuityMap"
+          },
+          "type": "array"
+        },
+        "hash": {
+          "$ref": "#/$defs/ContentHash",
+          "description": "The hash of its bytes (RS-45)."
+        },
+        "id": {
+          "$ref": "#/$defs/Ident",
+          "description": "The artifact's name inside its Run (SB-17)."
+        },
+        "kind": {
+          "$ref": "#/$defs/Namespace",
+          "description": "Its kind; a Sink Module's namespace (MA-25)."
+        },
+        "marks": {
+          "default": [],
+          "description": "What `mark_artifact` recorded against it (RS-30).",
+          "items": {
+            "$ref": "#/$defs/ArtifactMark"
+          },
+          "type": "array"
+        },
+        "partial": {
+          "description": "True when it was still open at cleanup, or the Run aborted (RS-26, RS-44).",
+          "type": "boolean"
+        },
+        "size_bytes": {
+          "description": "How big it is (RS-44).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uri": {
+          "description": "Where it lives (RS-44).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "uri",
+        "hash",
+        "size_bytes",
+        "partial"
+      ],
+      "type": "object"
+    },
+    "BackPressure": {
+      "description": "What a link does when its queue is at capacity. There is no default (SC-19).",
+      "oneOf": [
+        {
+          "const": "block",
+          "description": "Publishing returns [`PublishOutcome::Full`] and nothing is ever dropped.\nThe name is the Vision's; the policy produces back-pressure through a\nrefusal the producer must honour, not through a parked thread (SC-20a).",
+          "type": "string"
+        },
+        {
+          "const": "drop_oldest",
+          "description": "The oldest queued block is evicted (SC-20).",
+          "type": "string"
+        },
+        {
+          "const": "drop_newest",
+          "description": "The new block is refused (SC-20).",
+          "type": "string"
+        }
+      ]
+    },
+    "ChannelGap": {
+      "description": "A channel that lost validity while the stream continued (SC-31a).\n\nVision §28 requires a capture to describe a multi-channel alignment failure, and\na hole between two segments alone is indistinguishable from a channel that was\nnever enabled over that interval.",
+      "properties": {
+        "cause": {
+          "$ref": "#/$defs/GapCause",
+          "description": "`Alignment` when the block that dropped the channel carried `ALIGNMENT`,\n`Stream` otherwise (SC-31a)."
+        },
+        "channel": {
+          "description": "Which channel (SC-31a).",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "len": {
+          "description": "Its extent in samples (SC-31d).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "Where the break begins (SC-31d)."
+        }
+      },
+      "required": [
+        "channel",
+        "start",
+        "len",
+        "cause"
+      ],
+      "type": "object"
+    },
+    "ClockDomainId": {
+      "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "CoercionPolicy": {
+      "description": "What to do when a Provider coerces a requested value (SB-45, SB-46).",
+      "oneOf": [
+        {
+          "const": "accept",
+          "description": "Apply and record.",
+          "type": "string"
+        },
+        {
+          "const": "warn",
+          "description": "Apply, record and warn.",
+          "type": "string"
+        },
+        {
+          "const": "reject",
+          "description": "Fail the stage with `CoercionRejected`.",
+          "type": "string"
+        }
+      ]
+    },
+    "ComponentDescriptor": {
+      "description": "What a Processor or Reactor declares about itself (MA-36).",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Ident",
+          "description": "The component's name inside its document (SB-1)."
+        },
+        "impl": {
+          "$ref": "#/$defs/ComponentImpl",
+          "description": "How its code is identified (MA-21)."
+        },
+        "kind": {
+          "$ref": "#/$defs/ComponentKind",
+          "description": "Whether it transforms samples or reacts to them (MA-36)."
+        },
+        "params": {
+          "default": [],
+          "description": "Its declared parameters (MA-24).",
+          "items": {
+            "$ref": "#/$defs/ParamDecl"
+          },
+          "type": "array"
+        },
+        "ports": {
+          "description": "Its ports (SC-1).",
+          "items": {
+            "$ref": "#/$defs/Port"
+          },
+          "type": "array"
+        },
+        "requires": {
+          "$ref": "#/$defs/ComponentRequires",
+          "description": "What it requires of its Executor (MA-36)."
+        },
+        "timing": {
+          "$ref": "#/$defs/ComponentTiming",
+          "default": {
+            "budget": null,
+            "parallelism": null,
+            "preferred_batch": null,
+            "stateful": false
+          },
+          "description": "Its timing declaration (MA-36)."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "ports",
+        "requires",
+        "impl"
+      ],
+      "type": "object"
+    },
+    "ComponentImpl": {
+      "description": "How a component's code is identified. The Kernel never inspects `impl` beyond\nits identity (MA-21).",
+      "properties": {
+        "hash": {
+          "$ref": "#/$defs/ContentHash",
+          "description": "Its content hash, which the Manifest records (RS-45, MA-37)."
+        },
+        "id": {
+          "description": "Its identity within that kind (MA-19).",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/Namespace",
+          "description": "The implementation kind; the Executor's `impl_kinds` must list it (MA-39)."
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "hash"
+      ],
+      "type": "object"
+    },
+    "ComponentKind": {
+      "description": "What kind of component this is (MA-36).",
+      "oneOf": [
+        {
+          "const": "processor",
+          "description": "Transforms samples.",
+          "type": "string"
+        },
+        {
+          "const": "reactor",
+          "description": "Reacts to samples by emitting Actions (MA-14a, Vision §19).",
+          "type": "string"
+        }
+      ]
+    },
+    "ComponentRequires": {
+      "description": "What a component requires of its Executor. Requirements only: the placement\nlives in the BindingProfile (MA-36, SB-25, re-review R21).",
+      "properties": {
+        "executor_kind": {
+          "description": "The Executor kind, or `any` (MA-39).",
+          "type": "string"
+        },
+        "memory_bytes": {
+          "description": "Working memory, when it needs a declared amount (MA-36).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "executor_kind"
+      ],
+      "type": "object"
+    },
+    "ComponentTiming": {
+      "description": "A component's timing declaration (MA-36).",
+      "properties": {
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RelativeBudget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The processing budget. A descriptor never carries an `AbsoluteDeadline`:\nthey are distinct types (TM-15) and distinct schema definitions (MA-37)."
+        },
+        "parallelism": {
+          "description": "How many instances may run in parallel (MA-36).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "preferred_batch": {
+          "description": "A hint at the block size the component prefers (MA-36).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stateful": {
+          "description": "Whether it carries state across blocks (MA-36).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stateful"
+      ],
+      "type": "object"
+    },
+    "Constraint": {
+      "description": "What a Spec requires of a key. Its value is a scalar: a constraint over a list\nor a map is refused, because the matcher would then need the Vocabulary's\nsemantics to compare them.\n\nRule: SB-5, decision B1.",
+      "oneOf": [
+        {
+          "description": "Exactly this value.",
+          "properties": {
+            "kind": {
+              "const": "eq",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "The value."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Within these bounds, either of which may be absent.",
+          "properties": {
+            "kind": {
+              "const": "range",
+              "type": "string"
+            },
+            "max": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Value"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Upper bound, inclusive."
+            },
+            "min": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Value"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Lower bound, inclusive."
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Any of these values.",
+          "properties": {
+            "kind": {
+              "const": "set",
+              "type": "string"
+            },
+            "values": {
+              "description": "The permitted values.",
+              "items": {
+                "$ref": "#/$defs/Value"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "At least this value.",
+          "properties": {
+            "kind": {
+              "const": "min",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "The lower bound."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "At most this value.",
+          "properties": {
+            "kind": {
+              "const": "max",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "The upper bound."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The key is declared at all.",
+          "properties": {
+            "kind": {
+              "const": "present",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ContentHash": {
+      "description": "`sha256:<64 lowercase hex>`. The algorithm is named in the value so a later\nalgorithm is an additive change (OV-14).",
+      "type": "string"
+    },
+    "ContinuityMap": {
+      "description": "What a stream carried, per SampleClock. There is one map per SampleClock: a\nblock in another domain ends the map, and the Sink starts a new builder (SC-30).",
+      "properties": {
+        "channel_gaps": {
+          "description": "Per-channel breaks, in order (SC-31a).",
+          "items": {
+            "$ref": "#/$defs/ChannelGap"
+          },
+          "type": "array"
+        },
+        "channels": {
+          "description": "The channel count, constant for the map (SC-30a).",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The SampleClock this map describes (SC-30)."
+        },
+        "end": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "Just past the last sample the map accounts for (SC-30)."
+        },
+        "first": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "First sample the map accounts for (SC-30)."
+        },
+        "gaps": {
+          "description": "Stream gaps, in order (SC-31).",
+          "items": {
+            "$ref": "#/$defs/Gap"
+          },
+          "type": "array"
+        },
+        "valid": {
+          "description": "Per channel, the runs of valid samples (SC-14, SC-30).",
+          "items": {
+            "items": {
+              "$ref": "#/$defs/Segment"
+            },
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "domain",
+        "channels",
+        "valid",
+        "gaps",
+        "channel_gaps",
+        "first",
+        "end"
+      ],
+      "type": "object"
+    },
+    "DataContractId": {
+      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SC-2.",
+      "type": "string"
+    },
+    "Duration": {
+      "description": "An elapsed time: integer ticks in a named clock domain (TM-1, TM-4 decision T4).\n\nThe domain tag is what stops 1 000 ticks at 20 Msps being added to a 200 MHz\npoint as a silent factor-of-ten error.",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The domain whose ticks `ticks` counts (TM-7)."
+        },
+        "ticks": {
+          "description": "Tick count; may be negative (TM-7).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "domain",
+        "ticks"
+      ],
+      "type": "object"
+    },
+    "EventKind": {
+      "description": "What kind of event this is. Dotted segments; the Kernel owns the five of RS-28\nand every other kind belongs to the Vocabulary or Module that emits it.\n\nRule: RS-27.",
+      "type": "string"
+    },
+    "Gap": {
+      "description": "An interval of missing samples in the stream (SC-30, Vision §28).",
+      "properties": {
+        "cause": {
+          "$ref": "#/$defs/GapCause",
+          "description": "What the stream lost (SC-31)."
+        },
+        "len": {
+          "description": "Its extent in samples.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "link_dropped": {
+          "description": "How many blocks the link discarded inside the same interval. A block count,\nnot a sample count: the samples the link lost are `len − lost`, and are\nunrecoverable when `lost` is absent. That is a real limit of what a dropped\nheader can tell us, not an omission (SC-20b, SC-31).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lost": {
+          "description": "What the stream reported losing, when known (SC-13).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "start": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "Where the missing interval begins."
+        }
+      },
+      "required": [
+        "start",
+        "len",
+        "cause",
+        "link_dropped"
+      ],
+      "type": "object"
+    },
+    "GapCause": {
+      "description": "What the **stream** lost. A closed, derived set (SC-31, decision S16).\n\nWhat the **link** lost is the separate `link_dropped` count, not a cause, so a\ndevice overflow inside an interval that also lost a block to the link is still\nreported as `OverflowRestart` with its sample count, beside a link-drop count of\none. Collapsing the two into a single cause loses the device's own diagnosis.",
+      "oneOf": [
+        {
+          "description": "`GAP_BEFORE` alone (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "stream",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`RESTARTED`: a stream restart, as a UHD overflow produces (SC-31, OV-23a).",
+          "properties": {
+            "kind": {
+              "const": "overflow_restart",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`SEQ_DISCONTINUITY`: transport sequence loss (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "sequence_error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A per-channel break on a block carrying `ALIGNMENT` (SC-31a).",
+          "properties": {
+            "kind": {
+              "const": "alignment",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A jump with no gap flag on a lossy path (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "link_drop",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`GAP_BEFORE` with `lost` less than the jump on a lossy path and no carry to\nexplain the difference (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "mixed",
+              "type": "string"
+            },
+            "stream_lost": {
+              "description": "What the stream itself reported losing.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "stream_lost"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`GAP_BEFORE` with `lost` absent (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Ident": {
+      "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "Key": {
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-2, MA-34.",
+      "type": "string"
+    },
+    "LatePolicy": {
+      "description": "What to do about a burst whose lead is short (SC-27, Vision §22).",
+      "oneOf": [
+        {
+          "const": "reject_at_plan",
+          "description": "Legal only for a burst whose target is statically known; `validate()`\nrejects it on a runtime-decided burst (SC-27).",
+          "type": "string"
+        },
+        {
+          "const": "send_asap_and_flag",
+          "description": "Transmit as soon as possible and flag it (SC-27).",
+          "type": "string"
+        },
+        {
+          "const": "drop_and_flag",
+          "description": "Drop the burst and flag it (SC-27).",
+          "type": "string"
+        }
+      ]
+    },
+    "LinkReq": {
+      "description": "A link the Spec's graph declares. Both `policy` and `capacity` are mandatory:\nSC-19 forbids a default, and SC-21's Sink rule is a statement about the policy.\n\nRule: SB-15.",
+      "properties": {
+        "capacity": {
+          "description": "Queue depth in blocks (SC-19).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "from": {
+          "$ref": "#/$defs/PortRef",
+          "description": "The producing port."
+        },
+        "policy": {
+          "$ref": "#/$defs/BackPressure",
+          "description": "What happens at capacity (SC-19)."
+        },
+        "to": {
+          "$ref": "#/$defs/PortRef",
+          "description": "The consuming port."
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "policy",
+        "capacity"
+      ],
+      "type": "object"
+    },
+    "Namespace": {
+      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "OutputReq": {
+      "description": "An artifact the Run must produce. A capture whose source has no placed Sink is\nrefused at `validate()`.\n\nRule: SB-17.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Ident",
+          "description": "The artifact's name inside this document."
+        },
+        "kind": {
+          "$ref": "#/$defs/Namespace",
+          "description": "The artifact kind; a Sink Module's namespace."
+        },
+        "params": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "default": {},
+          "description": "Sink parameters, uninterpreted by the Kernel.",
+          "type": "object"
+        },
+        "source": {
+          "$ref": "#/$defs/OutputSource",
+          "description": "Where the samples come from."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "source"
+      ],
+      "type": "object"
+    },
+    "OutputSource": {
+      "description": "Where an output's samples come from (SB-17).",
+      "oneOf": [
+        {
+          "description": "A component's port.",
+          "properties": {
+            "kind": {
+              "const": "port",
+              "type": "string"
+            },
+            "port": {
+              "$ref": "#/$defs/PortRef",
+              "description": "Which port."
+            }
+          },
+          "required": [
+            "kind",
+            "port"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A Spec resource.",
+          "properties": {
+            "kind": {
+              "const": "resource",
+              "type": "string"
+            },
+            "resource": {
+              "$ref": "#/$defs/Ident",
+              "description": "Which resource."
+            }
+          },
+          "required": [
+            "kind",
+            "resource"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ParamDecl": {
+      "description": "One declared parameter of a component (MA-36).",
+      "properties": {
+        "default": {
+          "$ref": "#/$defs/Value",
+          "description": "Its default value (MA-36)."
+        },
+        "key": {
+          "$ref": "#/$defs/Key",
+          "description": "Which parameter (SB-2)."
+        },
+        "schema": {
+          "description": "Its schema, opaque to the Kernel (MA-36)."
+        },
+        "update_class": {
+          "$ref": "#/$defs/UpdateClass",
+          "description": "How it may be changed (MA-24, RS-52)."
+        }
+      },
+      "required": [
+        "key",
+        "schema",
+        "update_class",
+        "default"
+      ],
+      "type": "object"
+    },
+    "Port": {
+      "description": "A name, a direction and a contract id, and nothing more. Per-port parameters\nthe Kernel does not interpret — a tensor shape, a maximum PDU length — live in\nthe `ComponentDescriptor`'s parameters (MA-36), not here.\n\nRule: SC-1.",
+      "properties": {
+        "contract": {
+          "$ref": "#/$defs/DataContractId",
+          "description": "The contract carried (SC-1)."
+        },
+        "direction": {
+          "$ref": "#/$defs/PortDirection",
+          "description": "Whether the component consumes or produces here (SC-1)."
+        },
+        "name": {
+          "description": "Port name, unique within its component (MA-37).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "direction",
+        "contract"
+      ],
+      "type": "object"
+    },
+    "PortDirection": {
+      "description": "Which way samples flow through a [`Port`] (SC-1).",
+      "oneOf": [
+        {
+          "const": "in",
+          "description": "The component consumes blocks here.",
+          "type": "string"
+        },
+        {
+          "const": "out",
+          "description": "The component produces blocks here.",
+          "type": "string"
+        }
+      ]
+    },
+    "PortRef": {
+      "description": "Names one port of one component instance (SC-1).",
+      "properties": {
+        "component": {
+          "description": "The component instance identifier (MA-36).",
+          "type": "string"
+        },
+        "port": {
+          "description": "The port name on that component (SC-1).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "port"
+      ],
+      "type": "object"
+    },
+    "Reaction": {
+      "description": "One of exactly four reactions. It is a table: there is no expression language\nand no rules engine, and logic that needs conditions belongs in a Reactor or in\nclient orchestration.\n\nRule: RS-26.",
+      "oneOf": [
+        {
+          "const": "continue",
+          "description": "Carry on.",
+          "type": "string"
+        },
+        {
+          "const": "mark_artifact",
+          "description": "Record the kind and time against every artifact open at that moment (RS-30).",
+          "type": "string"
+        },
+        {
+          "const": "stop",
+          "description": "Stop the Run, orderly (RS-9).",
+          "type": "string"
+        },
+        {
+          "const": "abort",
+          "description": "End the Run immediately (RS-9).",
+          "type": "string"
+        }
+      ]
+    },
+    "RelativeBudget": {
+      "description": "A processing budget measured from a work item's arrival, in `host.monotonic`.\n\nDistinct from [`AbsoluteDeadline`] with no common supertype: the checks that\nconsume them differ (Vision §19, decision T5).\n\nRule: TM-15.",
+      "properties": {
+        "duration": {
+          "$ref": "#/$defs/Duration"
+        }
+      },
+      "required": [
+        "duration"
+      ],
+      "type": "object"
+    },
+    "Requirements": {
+      "description": "The Vocabulary majors this Spec's keys belong to. It is the only content of\n`requirements`; per-resource requirements live in `resources[].requires`, which\nis the division that makes SB-2's prefix check possible.\n\nRule: SB-11.",
+      "properties": {
+        "vocabularies": {
+          "default": [],
+          "description": "One entry per Vocabulary the Spec's keys draw on (SB-11).",
+          "items": {
+            "$ref": "#/$defs/VocabularyReq"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ResourceId": {
+      "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the\nreceive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        },
+        "path": {
+          "description": "Slash-joined path through the composite resource tree (SB-34).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "path"
+      ],
+      "type": "object"
+    },
+    "ResourceReq": {
+      "description": "What a Spec requires of one resource, and nothing about how it is met.\n\nDirection-asymmetric requests are expressed as distinct keys under the\nVocabulary's prefix — `radio.rx.channels`, `radio.tx.channels` — not as a single\ncount. The Kernel does not know that `rx` means anything; the flattening is what\nkeeps it generic while still expressing the asymmetry re-review R1 required.\n\nRule: SB-12, decision B2.",
+      "properties": {
+        "extensions": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Namespaced opaque content (SB-20).",
+          "type": "object"
+        },
+        "kind": {
+          "$ref": "#/$defs/Namespace",
+          "description": "The kind of resource wanted (SB-12)."
+        },
+        "needs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SubResourceReq"
+          },
+          "default": {},
+          "description": "Capabilities this resource needs from elsewhere (SB-36).",
+          "type": "object"
+        },
+        "requires": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Constraint"
+          },
+          "default": {},
+          "description": "Per-key constraints (SB-12).",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ScheduleEntry": {
+      "description": "One scheduled Action, held as a template because the Spec cannot name a\n`ClockDomainId` (RS-49a, SB-16).",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/ActionTemplate",
+          "description": "The Action without its time field (RS-49a)."
+        },
+        "at": {
+          "$ref": "#/$defs/SpecTime",
+          "description": "When, relative to the Run's start (SB-16)."
+        }
+      },
+      "required": [
+        "at",
+        "action"
+      ],
+      "type": "object"
+    },
+    "Segment": {
+      "description": "A contiguous run of valid samples on one channel (SC-30).",
+      "properties": {
+        "len": {
+          "description": "Its extent in samples.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "First sample of the run."
+        }
+      },
+      "required": [
+        "start",
+        "len"
+      ],
+      "type": "object"
+    },
+    "SpecGraph": {
+      "description": "The Spec's component graph (SB-15).",
+      "properties": {
+        "components": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ComponentDescriptor"
+          },
+          "default": {},
+          "description": "Components by name (SB-15).",
+          "type": "object"
+        },
+        "links": {
+          "default": [],
+          "description": "Links between their ports (SB-15).",
+          "items": {
+            "$ref": "#/$defs/LinkReq"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "SpecPolicies": {
+      "description": "The Spec's failure and coercion tables (SB-18, SB-19).",
+      "properties": {
+        "coercion": {
+          "additionalProperties": {
+            "$ref": "#/$defs/CoercionPolicy"
+          },
+          "default": {},
+          "description": "Per-key coercion policy; SB-45 gives the resolution order (SB-19).",
+          "type": "object"
+        },
+        "failure": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Reaction"
+          },
+          "default": {},
+          "description": "Registered event kinds mapped to reactions; an unregistered kind is refused\nat `validate()`, so a misspelling is an error rather than a silently\nineffective entry (SB-18).",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "SpecTime": {
+      "description": "A resource name plus an offset from the Run's start, in that resource's stream\nclock. A Spec cannot name a `ClockDomainId`, because domains are allocated at\n`prepare` (TM-13a) and fixed at `arm` for a transmit stream (TM-13e).\n\nRule: SB-16, decision B4.",
+      "properties": {
+        "clock": {
+          "$ref": "#/$defs/Ident",
+          "description": "The Spec resource whose stream clock the offset counts in."
+        },
+        "offset_ticks": {
+          "description": "Ticks from the Run's start.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "clock",
+        "offset_ticks"
+      ],
+      "type": "object"
+    },
+    "SubResourceReq": {
+      "description": "A capability this resource needs from somewhere, possibly another instance (SB-36).",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/Namespace",
+          "description": "The kind of node that can satisfy it."
+        },
+        "requires": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Constraint"
+          },
+          "default": {},
+          "description": "What it must declare.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "TimePoint": {
+      "description": "An instant: integer ticks in a named clock domain. Never floating-point seconds.\n\nThere is deliberately no `PartialOrd`: two points of different domains cannot be\ncompared at all, and `a < b` silently answering `false` is the bug class this\nmodel exists to prevent (decision T3).\n\nRule: TM-1, TM-6.",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The domain whose ticks `ticks` counts (TM-1)."
+        },
+        "ticks": {
+          "description": "Tick count relative to the domain's origin; a sample index in a SampleClock (TM-10).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "domain",
+        "ticks"
+      ],
+      "type": "object"
+    },
+    "UpdateClass": {
+      "description": "How a parameter may be changed while a Run is live (Vision §27).\n\nRule: MA-24, RS-52.",
+      "oneOf": [
+        {
+          "const": "cold",
+          "description": "Requires a stop and a re-plan; a sample-rate change is one (TM-13c).",
+          "type": "string"
+        },
+        {
+          "const": "block_boundary",
+          "description": "Applied between blocks.",
+          "type": "string"
+        },
+        {
+          "const": "atomic_realtime",
+          "description": "Applied inside the real-time path without a block boundary.",
+          "type": "string"
+        },
+        {
+          "const": "hardware_timed",
+          "description": "Applied by the device at a declared instant.",
+          "type": "string"
+        }
+      ]
+    },
+    "Value": {
+      "anyOf": [
+        {
+          "description": "A boolean.",
+          "type": "boolean"
+        },
+        {
+          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "description": "A string.",
+          "type": "string"
+        },
+        {
+          "description": "A list of scalars; nesting deeper is refused (SB-4).",
+          "items": {
+            "$ref": "#/$defs/Value"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "description": "A map of scalars; nesting deeper is refused (SB-4).",
+          "type": "object"
+        }
+      ],
+      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+    },
+    "VocabularyReq": {
+      "description": "One Vocabulary this Spec requires, by namespace and major version (SB-11).",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Namespace",
+          "description": "The Vocabulary's namespace, which is also its key prefix (SB-2)."
+        },
+        "major": {
+          "description": "The major version required (SB-11).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "major"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What an experiment requires: intent, portable, with nothing about placement or\nenvironment in it.\n\nRule: SB-9…SB-20. Vision §8, §9, §10.",
+  "properties": {
+    "extensions": {
+      "additionalProperties": true,
+      "default": {},
+      "description": "Namespaced opaque content, copied into the Manifest and never interpreted (SB-20).",
+      "type": "object"
+    },
+    "graph": {
+      "$ref": "#/$defs/SpecGraph",
+      "default": {
+        "components": {},
+        "links": []
+      },
+      "description": "Components and links (SB-15)."
+    },
+    "outputs": {
+      "default": [],
+      "description": "The artifacts the Run must produce (SB-17).",
+      "items": {
+        "$ref": "#/$defs/OutputReq"
+      },
+      "type": "array"
+    },
+    "policies": {
+      "$ref": "#/$defs/SpecPolicies",
+      "default": {
+        "coercion": {},
+        "failure": {}
+      },
+      "description": "Failure and coercion tables (SB-18, SB-19)."
+    },
+    "requirements": {
+      "$ref": "#/$defs/Requirements",
+      "default": {
+        "vocabularies": []
+      },
+      "description": "The Vocabulary majors the keys belong to (SB-11)."
+    },
+    "resources": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ResourceReq"
+      },
+      "default": {},
+      "description": "Per-resource requirements (SB-12).",
+      "type": "object"
+    },
+    "schedule": {
+      "default": [],
+      "description": "Actions at relative times (SB-16).",
+      "items": {
+        "$ref": "#/$defs/ScheduleEntry"
+      },
+      "type": "array"
+    },
+    "version": {
+      "description": "Mandatory positive integer; Phase 1 supports exactly `{1}` (SB-10, SB-47).",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version"
+  ],
+  "title": "ExperimentSpec",
+  "type": "object"
+}

@@ -1,0 +1,77 @@
+{
+  "$defs": {
+    "Ident": {
+      "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "ModuleId": {
+      "description": "Names a Module implementation in the registry (`05-module-api.md` MA-19).\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: MA-19.",
+      "type": "string"
+    },
+    "Role": {
+      "description": "The five roles. There is exactly one trait each and no shared lifecycle\nsupertrait: one trait forced onto radios and executors alike is what audit\nFinding 22 rejects, and Link and Authority have no lifecycle at all.\n\nRule: MA-1, MA-2.",
+      "oneOf": [
+        {
+          "const": "provider",
+          "description": "Implements a Resource Model.",
+          "type": "string"
+        },
+        {
+          "const": "executor",
+          "description": "Implements a processing engine.",
+          "type": "string"
+        },
+        {
+          "const": "sink",
+          "description": "Writes Artifacts.",
+          "type": "string"
+        },
+        {
+          "const": "link",
+          "description": "Implements a DataLink.",
+          "type": "string"
+        },
+        {
+          "const": "authority",
+          "description": "Implements the Time Authority.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One unit of work handed to one Module at `prepare`, in dependency order (SB-39).",
+  "properties": {
+    "after": {
+      "default": [],
+      "description": "Fragments that must be prepared and armed first (SB-39).",
+      "items": {
+        "$ref": "#/$defs/Ident"
+      },
+      "type": "array"
+    },
+    "content": {
+      "description": "What to do; namespaced content the Kernel does not interpret (SB-39)."
+    },
+    "id": {
+      "$ref": "#/$defs/Ident",
+      "description": "The fragment's name (SB-1)."
+    },
+    "instance": {
+      "$ref": "#/$defs/ModuleId",
+      "description": "Which Module instance performs it (SB-22)."
+    },
+    "role": {
+      "$ref": "#/$defs/Role",
+      "description": "In which role (MA-1)."
+    }
+  },
+  "required": [
+    "id",
+    "instance",
+    "role",
+    "content"
+  ],
+  "title": "Fragment",
+  "type": "object"
+}

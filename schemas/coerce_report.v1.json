@@ -1,0 +1,284 @@
+{
+  "$defs": {
+    "Coercion": {
+      "description": "A value the Provider changed, with its reason (SB-44).",
+      "properties": {
+        "applied": {
+          "$ref": "#/$defs/Value",
+          "description": "What the Provider will apply."
+        },
+        "key": {
+          "$ref": "#/$defs/Key",
+          "description": "The key that was coerced."
+        },
+        "reason": {
+          "description": "The Provider's reason, uninterpreted by the Kernel.",
+          "type": "string"
+        },
+        "requested": {
+          "$ref": "#/$defs/Value",
+          "description": "What the document asked for."
+        }
+      },
+      "required": [
+        "key",
+        "requested",
+        "applied",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "Constraint": {
+      "description": "What a Spec requires of a key. Its value is a scalar: a constraint over a list\nor a map is refused, because the matcher would then need the Vocabulary's\nsemantics to compare them.\n\nRule: SB-5, decision B1.",
+      "oneOf": [
+        {
+          "description": "Exactly this value.",
+          "properties": {
+            "kind": {
+              "const": "eq",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "The value."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Within these bounds, either of which may be absent.",
+          "properties": {
+            "kind": {
+              "const": "range",
+              "type": "string"
+            },
+            "max": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Value"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Upper bound, inclusive."
+            },
+            "min": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Value"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Lower bound, inclusive."
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Any of these values.",
+          "properties": {
+            "kind": {
+              "const": "set",
+              "type": "string"
+            },
+            "values": {
+              "description": "The permitted values.",
+              "items": {
+                "$ref": "#/$defs/Value"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "At least this value.",
+          "properties": {
+            "kind": {
+              "const": "min",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "The lower bound."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "At most this value.",
+          "properties": {
+            "kind": {
+              "const": "max",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "The upper bound."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The key is declared at all.",
+          "properties": {
+            "kind": {
+              "const": "present",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Key": {
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-2, MA-34.",
+      "type": "string"
+    },
+    "Namespace": {
+      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "RejectedRequest": {
+      "description": "A constraint the Provider refused outright (MA-11).",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/Key",
+          "description": "The key."
+        },
+        "reason": {
+          "description": "Why, uninterpreted by the Kernel.",
+          "type": "string"
+        },
+        "requested": {
+          "$ref": "#/$defs/Constraint",
+          "description": "What was asked."
+        }
+      },
+      "required": [
+        "key",
+        "requested",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "Value": {
+      "anyOf": [
+        {
+          "description": "A boolean.",
+          "type": "boolean"
+        },
+        {
+          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "description": "A string.",
+          "type": "string"
+        },
+        {
+          "description": "A list of scalars; nesting deeper is refused (SB-4).",
+          "items": {
+            "$ref": "#/$defs/Value"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "description": "A map of scalars; nesting deeper is refused (SB-4).",
+          "type": "object"
+        }
+      ],
+      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+    },
+    "Warning": {
+      "description": "A non-fatal note from a stage (SB-38, SB-41).",
+      "properties": {
+        "message": {
+          "description": "What it says; uninterpreted by the Kernel.",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/Namespace",
+          "description": "Where it came from."
+        }
+      },
+      "required": [
+        "source",
+        "message"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What `coerce` returns. It is pure, deterministic and requires no hardware, which\nis what makes `validate()` a true dry run (MA-11, Vision §52).",
+  "properties": {
+    "applied": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Value"
+      },
+      "default": {},
+      "description": "What the Provider would apply (SB-44).",
+      "type": "object"
+    },
+    "coercions": {
+      "default": [],
+      "description": "What it would change, and why (SB-44).",
+      "items": {
+        "$ref": "#/$defs/Coercion"
+      },
+      "type": "array"
+    },
+    "rejected": {
+      "default": [],
+      "description": "What it refuses outright (MA-11).",
+      "items": {
+        "$ref": "#/$defs/RejectedRequest"
+      },
+      "type": "array"
+    },
+    "warnings": {
+      "default": [],
+      "description": "Non-fatal notes (SB-38).",
+      "items": {
+        "$ref": "#/$defs/Warning"
+      },
+      "type": "array"
+    }
+  },
+  "title": "CoerceReport",
+  "type": "object"
+}

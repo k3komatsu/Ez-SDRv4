@@ -1,0 +1,2814 @@
+{
+  "$defs": {
+    "ActionId": {
+      "description": "Identifies one dispatched Action inside a Run (RS-15).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "AdmissionResult": {
+      "description": "What `validate(spec, binding, registry)` returns. It touches no hardware.\n\nRule: SB-38.",
+      "properties": {
+        "coercions_preview": {
+          "default": [],
+          "description": "What the Providers said they would change (SB-7, SB-44).",
+          "items": {
+            "$ref": "#/$defs/Coercion"
+          },
+          "type": "array"
+        },
+        "matched": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ResourceId"
+          },
+          "default": {},
+          "description": "Spec resource name — and `needs` name — to the resolved `ResourceId` (SB-36).",
+          "type": "object"
+        },
+        "rejected": {
+          "default": [],
+          "description": "Constraints the bound instance could not satisfy (SB-38).",
+          "items": {
+            "$ref": "#/$defs/RejectedConstraint"
+          },
+          "type": "array"
+        },
+        "violations": {
+          "default": [],
+          "description": "What the registered checks refused (SB-30).",
+          "items": {
+            "$ref": "#/$defs/Violation"
+          },
+          "type": "array"
+        },
+        "warnings": {
+          "default": [],
+          "description": "Non-fatal notes (SB-38).",
+          "items": {
+            "$ref": "#/$defs/Warning"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ArtifactMark": {
+      "description": "One `mark_artifact` reaction recorded against an artifact (RS-30).",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/EventKind",
+          "description": "Which kind triggered it (RS-30)."
+        },
+        "time": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "When (RS-30)."
+        }
+      },
+      "required": [
+        "kind",
+        "time"
+      ],
+      "type": "object"
+    },
+    "ArtifactRef": {
+      "description": "Large data is always by reference: a locator, a content hash and a size, never\nthe bytes (RS-44, Vision §50, §51).",
+      "properties": {
+        "continuity": {
+          "default": [],
+          "description": "The continuity metadata of SC-30, in SampleClock order. There is more than\none whenever the capture spans a rate change (TM-13c) or a channel-count\nchange (SC-30a): each ends one map and starts the next (RS-40).",
+          "items": {
+            "$ref": "#/$defs/ContinuityMap"
+          },
+          "type": "array"
+        },
+        "hash": {
+          "$ref": "#/$defs/ContentHash",
+          "description": "The hash of its bytes (RS-45)."
+        },
+        "id": {
+          "$ref": "#/$defs/Ident",
+          "description": "The artifact's name inside its Run (SB-17)."
+        },
+        "kind": {
+          "$ref": "#/$defs/Namespace",
+          "description": "Its kind; a Sink Module's namespace (MA-25)."
+        },
+        "marks": {
+          "default": [],
+          "description": "What `mark_artifact` recorded against it (RS-30).",
+          "items": {
+            "$ref": "#/$defs/ArtifactMark"
+          },
+          "type": "array"
+        },
+        "partial": {
+          "description": "True when it was still open at cleanup, or the Run aborted (RS-26, RS-44).",
+          "type": "boolean"
+        },
+        "size_bytes": {
+          "description": "How big it is (RS-44).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uri": {
+          "description": "Where it lives (RS-44).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "uri",
+        "hash",
+        "size_bytes",
+        "partial"
+      ],
+      "type": "object"
+    },
+    "BackPressure": {
+      "description": "What a link does when its queue is at capacity. There is no default (SC-19).",
+      "oneOf": [
+        {
+          "const": "block",
+          "description": "Publishing returns [`PublishOutcome::Full`] and nothing is ever dropped.\nThe name is the Vision's; the policy produces back-pressure through a\nrefusal the producer must honour, not through a parked thread (SC-20a).",
+          "type": "string"
+        },
+        {
+          "const": "drop_oldest",
+          "description": "The oldest queued block is evicted (SC-20).",
+          "type": "string"
+        },
+        {
+          "const": "drop_newest",
+          "description": "The new block is refused (SC-20).",
+          "type": "string"
+        }
+      ]
+    },
+    "BindingSection": {
+      "description": "The `binding` section: the BindingProfile body including its `environment`,\nrecorded verbatim (RS-38, SB-27).",
+      "properties": {
+        "body": {
+          "description": "The body, environment included, byte for byte (SB-27, RS-43)."
+        },
+        "hash": {
+          "$ref": "#/$defs/ContentHash",
+          "description": "The hash of the body (RS-45)."
+        }
+      },
+      "required": [
+        "hash",
+        "body"
+      ],
+      "type": "object"
+    },
+    "ChannelGap": {
+      "description": "A channel that lost validity while the stream continued (SC-31a).\n\nVision §28 requires a capture to describe a multi-channel alignment failure, and\na hole between two segments alone is indistinguishable from a channel that was\nnever enabled over that interval.",
+      "properties": {
+        "cause": {
+          "$ref": "#/$defs/GapCause",
+          "description": "`Alignment` when the block that dropped the channel carried `ALIGNMENT`,\n`Stream` otherwise (SC-31a)."
+        },
+        "channel": {
+          "description": "Which channel (SC-31a).",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "len": {
+          "description": "Its extent in samples (SC-31d).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "Where the break begins (SC-31d)."
+        }
+      },
+      "required": [
+        "channel",
+        "start",
+        "len",
+        "cause"
+      ],
+      "type": "object"
+    },
+    "CleanupFailure": {
+      "description": "A cleanup step that failed or timed out. Every step is attempted even when an\nearlier one failed; each failure is recorded and the sequence continues (RS-6).",
+      "properties": {
+        "fragment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Ident"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which fragment, for a per-fragment step (RS-8)."
+        },
+        "reason": {
+          "description": "What happened (RS-6).",
+          "type": "string"
+        },
+        "step": {
+          "$ref": "#/$defs/CleanupStep",
+          "description": "Which step (RS-6)."
+        },
+        "timed_out": {
+          "description": "Whether it was abandoned on its deadline rather than returning an error\n(RS-8a).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "step",
+        "reason",
+        "timed_out"
+      ],
+      "type": "object"
+    },
+    "CleanupMode": {
+      "description": "Whether a stop delivers the declared tail (RS-9).",
+      "oneOf": [
+        {
+          "const": "orderly",
+          "description": "The Provider delivers its declared tail (RS-9).",
+          "type": "string"
+        },
+        {
+          "const": "abort",
+          "description": "It does not (RS-9).",
+          "type": "string"
+        }
+      ]
+    },
+    "CleanupStep": {
+      "description": "The nine ordered steps of RS-6, not the unordered list of Vision §53.",
+      "oneOf": [
+        {
+          "const": "children",
+          "description": "0. Clean up child Runs, each by this same algorithm (RS-6, RS-25).",
+          "type": "string"
+        },
+        {
+          "const": "freeze_dispatch",
+          "description": "1. Freeze dispatch and cancel every pending burst and timer. This precedes\n   stopping TX: a burst still queued when TX stops will reopen it on a\n   device that honours timed commands (RS-7).",
+          "type": "string"
+        },
+        {
+          "const": "stop_tx",
+          "description": "2. Stop TX on every Provider, in reverse dependency order (RS-8).",
+          "type": "string"
+        },
+        {
+          "const": "stop_rx",
+          "description": "3. Stop RX on every Provider, in reverse dependency order (RS-8).",
+          "type": "string"
+        },
+        {
+          "const": "cancel_peripherals",
+          "description": "4. Cancel outstanding Peripheral operations (RS-6).",
+          "type": "string"
+        },
+        {
+          "const": "restore_baseline",
+          "description": "5. Restore baseline state, in reverse dependency order (RS-8).",
+          "type": "string"
+        },
+        {
+          "const": "finalise_artifacts",
+          "description": "6. Finalise artifacts, marking as partial anything still open (RS-6, RS-44).",
+          "type": "string"
+        },
+        {
+          "const": "flush_events",
+          "description": "7. Flush the event path and collect the counters (RS-6, RS-35).",
+          "type": "string"
+        },
+        {
+          "const": "release_and_write_manifest",
+          "description": "8. Release the Lease and write the Manifest (RS-6, RS-11).",
+          "type": "string"
+        }
+      ]
+    },
+    "ClockDomain": {
+      "description": "A registered clock domain. Immutable once registered, except that `ended_at`\nmay be set once (TM-12).",
+      "properties": {
+        "ended_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimePoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When the domain stopped advancing, in root ticks; set once, by a rate change (TM-13c)."
+        },
+        "id": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "Node-qualified identity (TM-11)."
+        },
+        "kind": {
+          "$ref": "#/$defs/ClockDomainKind",
+          "description": "Root or Derived, with its rate or ratio (TM-3)."
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ClockDomainId": {
+      "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "ClockDomainKind": {
+      "description": "A domain is either a timekeeper of its own or an exact division of one (TM-3).\n\nA `Derived` domain names a `Root` directly; there are no chains (decision T2).",
+      "oneOf": [
+        {
+          "description": "A timekeeper: a tick rate and what tick zero means.",
+          "properties": {
+            "epoch": {
+              "$ref": "#/$defs/EpochRef",
+              "description": "What tick zero is anchored to."
+            },
+            "kind": {
+              "const": "root",
+              "type": "string"
+            },
+            "tick_rate": {
+              "$ref": "#/$defs/Rational",
+              "description": "Ticks per second; neither term may exceed [`RATIO_TERM_CAP`] (TM-3)."
+            }
+          },
+          "required": [
+            "kind",
+            "tick_rate",
+            "epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An exact division of a root, such as a SampleClock (TM-10, TM-13a).",
+          "properties": {
+            "kind": {
+              "const": "derived",
+              "type": "string"
+            },
+            "origin": {
+              "description": "This domain's tick zero, expressed in root ticks (decision T2).",
+              "format": "int64",
+              "type": "integer"
+            },
+            "root": {
+              "$ref": "#/$defs/ClockDomainId",
+              "description": "The `Root` this divides; refused if unknown or itself `Derived` (TM-3)."
+            },
+            "root_ticks_per_tick": {
+              "$ref": "#/$defs/Rational",
+              "description": "Root ticks per one tick here; neither term may exceed [`RATIO_TERM_CAP`] (TM-3)."
+            }
+          },
+          "required": [
+            "kind",
+            "root",
+            "root_ticks_per_tick",
+            "origin"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ClockRelation": {
+      "description": "A measured relation between two roots: the only path between domains that are\nnot exactly related, and the record every Run carries from its root to `utc`.\n\n`drift` and `drift_uncertainty` are the only floating-point quantities in the\ntime model, and neither reaches a stored `TimePoint` unrounded (TM-14, X9).\n\nRule: TM-5, TM-14, TM-18. Vision §24, §50.",
+      "properties": {
+        "drift": {
+          "description": "Dimensionless: target seconds per source second, minus 1. Refused when\nnon-finite, because `serde_json` would otherwise write it as `null` and a\nNaN drift would share a Manifest hash with one that was never measured\n(OV-15, X9).",
+          "format": "double",
+          "type": "number"
+        },
+        "drift_uncertainty": {
+          "description": "Dimensionless, non-negative: the one-sided error bound on `drift`. Zero\nclaims the drift is known exactly and is expected to be rare. Refused when\nnon-finite (OV-15, X9).",
+          "format": "double",
+          "type": "number"
+        },
+        "measured_at": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "When the measurement was taken, in the source domain."
+        },
+        "method": {
+          "description": "Namespaced name of the measurement method, for example `dev.pps_poll`.",
+          "type": "string"
+        },
+        "offset": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "The image of `measured_at` in the target domain."
+        },
+        "source": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The domain being converted from."
+        },
+        "target": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The domain being converted to."
+        },
+        "uncertainty": {
+          "$ref": "#/$defs/Duration",
+          "description": "The bound at `measured_at`, in target ticks, before drift error accumulates."
+        },
+        "valid": {
+          "$ref": "#/$defs/Validity",
+          "description": "The window over which the relation may be applied."
+        }
+      },
+      "required": [
+        "source",
+        "target",
+        "measured_at",
+        "offset",
+        "drift",
+        "drift_uncertainty",
+        "uncertainty",
+        "method",
+        "valid"
+      ],
+      "type": "object"
+    },
+    "ClocksSection": {
+      "description": "The `clocks` section (RS-38, TM-13d, TM-18).",
+      "properties": {
+        "domains": {
+          "default": [],
+          "description": "Every registered domain (TM-12).",
+          "items": {
+            "$ref": "#/$defs/ClockDomain"
+          },
+          "type": "array"
+        },
+        "relations": {
+          "default": [],
+          "description": "Every relation, including the Run's root to UTC with its uncertainty (TM-18).",
+          "items": {
+            "$ref": "#/$defs/ClockRelation"
+          },
+          "type": "array"
+        },
+        "sample_clocks": {
+          "default": [],
+          "description": "One record per SampleClock, in order, per stream (TM-13d).",
+          "items": {
+            "$ref": "#/$defs/SampleClockRecord"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Coercion": {
+      "description": "A value the Provider changed, with its reason (SB-44).",
+      "properties": {
+        "applied": {
+          "$ref": "#/$defs/Value",
+          "description": "What the Provider will apply."
+        },
+        "key": {
+          "$ref": "#/$defs/Key",
+          "description": "The key that was coerced."
+        },
+        "reason": {
+          "description": "The Provider's reason, uninterpreted by the Kernel.",
+          "type": "string"
+        },
+        "requested": {
+          "$ref": "#/$defs/Value",
+          "description": "What the document asked for."
+        }
+      },
+      "required": [
+        "key",
+        "requested",
+        "applied",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "CoercionFidelity": {
+      "description": "`none < grid < real` (MA-42).",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Not modelled.",
+          "type": "string"
+        },
+        {
+          "const": "grid",
+          "description": "A declared grid is applied.",
+          "type": "string"
+        },
+        {
+          "const": "real",
+          "description": "The real device.",
+          "type": "string"
+        }
+      ]
+    },
+    "Constraint": {
+      "description": "What a Spec requires of a key. Its value is a scalar: a constraint over a list\nor a map is refused, because the matcher would then need the Vocabulary's\nsemantics to compare them.\n\nRule: SB-5, decision B1.",
+      "oneOf": [
+        {
+          "description": "Exactly this value.",
+          "properties": {
+            "kind": {
+              "const": "eq",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "The value."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Within these bounds, either of which may be absent.",
+          "properties": {
+            "kind": {
+              "const": "range",
+              "type": "string"
+            },
+            "max": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Value"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Upper bound, inclusive."
+            },
+            "min": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Value"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Lower bound, inclusive."
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Any of these values.",
+          "properties": {
+            "kind": {
+              "const": "set",
+              "type": "string"
+            },
+            "values": {
+              "description": "The permitted values.",
+              "items": {
+                "$ref": "#/$defs/Value"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "At least this value.",
+          "properties": {
+            "kind": {
+              "const": "min",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "The lower bound."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "At most this value.",
+          "properties": {
+            "kind": {
+              "const": "max",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "The upper bound."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The key is declared at all.",
+          "properties": {
+            "kind": {
+              "const": "present",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ContentHash": {
+      "description": "`sha256:<64 lowercase hex>`. The algorithm is named in the value so a later\nalgorithm is an additive change (OV-14).",
+      "type": "string"
+    },
+    "ContinuityMap": {
+      "description": "What a stream carried, per SampleClock. There is one map per SampleClock: a\nblock in another domain ends the map, and the Sink starts a new builder (SC-30).",
+      "properties": {
+        "channel_gaps": {
+          "description": "Per-channel breaks, in order (SC-31a).",
+          "items": {
+            "$ref": "#/$defs/ChannelGap"
+          },
+          "type": "array"
+        },
+        "channels": {
+          "description": "The channel count, constant for the map (SC-30a).",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The SampleClock this map describes (SC-30)."
+        },
+        "end": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "Just past the last sample the map accounts for (SC-30)."
+        },
+        "first": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "First sample the map accounts for (SC-30)."
+        },
+        "gaps": {
+          "description": "Stream gaps, in order (SC-31).",
+          "items": {
+            "$ref": "#/$defs/Gap"
+          },
+          "type": "array"
+        },
+        "valid": {
+          "description": "Per channel, the runs of valid samples (SC-14, SC-30).",
+          "items": {
+            "items": {
+              "$ref": "#/$defs/Segment"
+            },
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "domain",
+        "channels",
+        "valid",
+        "gaps",
+        "channel_gaps",
+        "first",
+        "end"
+      ],
+      "type": "object"
+    },
+    "CounterRow": {
+      "description": "One row of the never-dropping counter table (RS-33).",
+      "properties": {
+        "count": {
+          "description": "How many were emitted, whether or not the body survived (RS-33).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/EventKind",
+          "description": "Which kind (RS-33)."
+        },
+        "source": {
+          "$ref": "#/$defs/ResourceId",
+          "description": "Which resource, or the fallback row's placeholder (RS-33)."
+        }
+      },
+      "required": [
+        "source",
+        "kind",
+        "count"
+      ],
+      "type": "object"
+    },
+    "DataContractId": {
+      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SC-2.",
+      "type": "string"
+    },
+    "DataLinkDecl": {
+      "description": "A declared link: its endpoints, the contract it carries, its policy and its\ncapacity in blocks (SC-19).",
+      "properties": {
+        "capacity": {
+          "description": "Queue depth in blocks, at least 1 (SC-19).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "contract": {
+          "$ref": "#/$defs/DataContractId",
+          "description": "The contract carried; SC-3 checks it against both ports (SC-19)."
+        },
+        "from": {
+          "$ref": "#/$defs/PortRef",
+          "description": "The producing port (SC-19)."
+        },
+        "id": {
+          "$ref": "#/$defs/DataLinkId",
+          "description": "Node-qualified identity (SC-19, X7)."
+        },
+        "policy": {
+          "$ref": "#/$defs/BackPressure",
+          "description": "What happens at capacity; there is no default (SC-19)."
+        },
+        "to": {
+          "$ref": "#/$defs/PortRef",
+          "description": "The consuming port (SC-19)."
+        }
+      },
+      "required": [
+        "id",
+        "from",
+        "to",
+        "contract",
+        "policy",
+        "capacity"
+      ],
+      "type": "object"
+    },
+    "DataLinkId": {
+      "description": "Identifies a [`DataLink`](crate::stream::DataLinkDecl) instance.\n\nRule: SC-18 (`02-stream-contract.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "DeclaredCost": {
+      "description": "A number the Link Module declares, not a measurement. The Core reports it and\nnever uses it to choose a placement; Phase 1 neither measures nor optimises.\n\nRule: SB-40. Vision §20, §31, §63.",
+      "properties": {
+        "cost": {
+          "description": "The Link Module's own number, uninterpreted by the Kernel (SB-40).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "link": {
+          "$ref": "#/$defs/DataLinkId",
+          "description": "Which link (SC-19)."
+        }
+      },
+      "required": [
+        "link",
+        "cost"
+      ],
+      "type": "object"
+    },
+    "Duration": {
+      "description": "An elapsed time: integer ticks in a named clock domain (TM-1, TM-4 decision T4).\n\nThe domain tag is what stops 1 000 ticks at 20 Msps being added to a 200 MHz\npoint as a silent factor-of-ten error.",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The domain whose ticks `ticks` counts (TM-7)."
+        },
+        "ticks": {
+          "description": "Tick count; may be negative (TM-7).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "domain",
+        "ticks"
+      ],
+      "type": "object"
+    },
+    "EnvelopeFidelity": {
+      "description": "The value set MA-42 gives timing and continuity: `none < envelope <\nhardware_quirk < real`. `real` is added to Vision §14's sets, which stop at\n`hardware_quirk` and leave a Hardware Run with nothing to record although the\nsame section says every Run records the vector.\n\nRule: MA-42.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Not modelled at all; an `ideal` Mock profile declares this (Vision §13).",
+          "type": "string"
+        },
+        {
+          "const": "envelope",
+          "description": "A declared envelope is enforced.",
+          "type": "string"
+        },
+        {
+          "const": "hardware_quirk",
+          "description": "A specific hardware quirk is emulated.",
+          "type": "string"
+        },
+        {
+          "const": "real",
+          "description": "The real device.",
+          "type": "string"
+        }
+      ]
+    },
+    "EpochRef": {
+      "description": "What a domain's tick zero is anchored to (TM-3).",
+      "oneOf": [
+        {
+          "description": "Tick zero is 1970-01-01T00:00:00Z.",
+          "properties": {
+            "kind": {
+              "const": "utc1970",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Tick zero is whatever set it; the string names the mechanism, for example\n`uhd.set_time_unknown_pps` or `sim.run_start` (Vision §15, §50; OV-23a: a\nnamed example, not a Kernel dependency).",
+          "properties": {
+            "kind": {
+              "const": "arbitrary",
+              "type": "string"
+            },
+            "set_by": {
+              "description": "Namespaced name of whatever established the epoch.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "set_by"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Event": {
+      "description": "The control-path form of an event: a source, a `TimePoint` in a named domain, a\nseverity, a kind and a schema-versioned payload (Vision §29).\n\nRule: RS-31.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/EventKind",
+          "description": "What kind (RS-27)."
+        },
+        "payload": {
+          "description": "The body; its schema belongs to the kind's owner (RS-31)."
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity",
+          "description": "How bad (RS-29)."
+        },
+        "source": {
+          "$ref": "#/$defs/ResourceId",
+          "description": "Which resource it came from (RS-31)."
+        },
+        "time": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "When, in a named domain (TM-1)."
+        }
+      },
+      "required": [
+        "source",
+        "time",
+        "severity",
+        "kind",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "EventKind": {
+      "description": "What kind of event this is. Dotted segments; the Kernel owns the five of RS-28\nand every other kind belongs to the Vocabulary or Module that emits it.\n\nRule: RS-27.",
+      "type": "string"
+    },
+    "EventsSection": {
+      "description": "The `events` section: the complete counter table, including rows whose count is\nzero, and the bodies that were delivered (RS-33, RS-38).",
+      "properties": {
+        "counters": {
+          "default": [],
+          "description": "Every `(source, kind)` row reachable in the plan (RS-33).",
+          "items": {
+            "$ref": "#/$defs/CounterRow"
+          },
+          "type": "array"
+        },
+        "delivered": {
+          "default": [],
+          "description": "The bodies that survived the ring (RS-34).",
+          "items": {
+            "$ref": "#/$defs/Event"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ExecutionClass": {
+      "description": "What kind of Run this is, derived from the environment and cross-checked against\nthe Authority's [`Pacing`]; a class that was merely declared could lie.\n\nRule: MA-41, RS-42. Vision §14.",
+      "oneOf": [
+        {
+          "const": "simulation",
+          "description": "Simulation Engine, free-running, simulated RF path.",
+          "type": "string"
+        },
+        {
+          "const": "realtime_emulation",
+          "description": "Simulation Engine, wall-paced, simulated RF path.",
+          "type": "string"
+        },
+        {
+          "const": "hardware_in_loop",
+          "description": "Device timekeeper, cabled or partly simulated RF path.",
+          "type": "string"
+        },
+        {
+          "const": "hardware",
+          "description": "Device timekeeper, over the air.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExecutionPlan": {
+      "description": "What `plan(spec, binding)` produces (SB-39).",
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/Ident",
+          "description": "Which binding keeps time (SB-24)."
+        },
+        "class": {
+          "$ref": "#/$defs/ExecutionClass",
+          "description": "Derived from the environment and cross-checked against the Authority's\npacing (MA-41, SB-39)."
+        },
+        "deps": {
+          "description": "The dependency edges, `(before, after)` (SB-39).",
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "$ref": "#/$defs/Ident"
+              },
+              {
+                "$ref": "#/$defs/Ident"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "fragments": {
+          "description": "The fragments, already in dependency order (SB-39).",
+          "items": {
+            "$ref": "#/$defs/Fragment"
+          },
+          "type": "array"
+        },
+        "links": {
+          "description": "The DataLink declarations (SC-19).",
+          "items": {
+            "$ref": "#/$defs/DataLinkDecl"
+          },
+          "type": "array"
+        },
+        "transfer_costs": {
+          "default": [],
+          "description": "Declared, never measured (SB-40).",
+          "items": {
+            "$ref": "#/$defs/DeclaredCost"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "fragments",
+        "links",
+        "deps",
+        "authority",
+        "class"
+      ],
+      "type": "object"
+    },
+    "Fidelity": {
+      "description": "What a Run's models actually claim, per aspect. A Run's value per aspect is the\n**weakest** over its bound Providers, so a Hardware Run with a best-effort\nMockPeripheral records `timing: envelope`.\n\nRule: MA-42, RS-41. Vision §14.",
+      "properties": {
+        "coercion": {
+          "$ref": "#/$defs/CoercionFidelity",
+          "description": "How faithfully coercion is modelled."
+        },
+        "continuity": {
+          "$ref": "#/$defs/EnvelopeFidelity",
+          "description": "How faithfully continuity and gaps are modelled."
+        },
+        "rf": {
+          "$ref": "#/$defs/RfFidelity",
+          "description": "How faithfully the RF path is modelled."
+        },
+        "timing": {
+          "$ref": "#/$defs/EnvelopeFidelity",
+          "description": "How faithfully timing is modelled."
+        },
+        "transport": {
+          "$ref": "#/$defs/TransportFidelity",
+          "description": "How faithfully transport is modelled."
+        }
+      },
+      "required": [
+        "timing",
+        "continuity",
+        "coercion",
+        "rf",
+        "transport"
+      ],
+      "type": "object"
+    },
+    "Fragment": {
+      "description": "One unit of work handed to one Module at `prepare`, in dependency order (SB-39).",
+      "properties": {
+        "after": {
+          "default": [],
+          "description": "Fragments that must be prepared and armed first (SB-39).",
+          "items": {
+            "$ref": "#/$defs/Ident"
+          },
+          "type": "array"
+        },
+        "content": {
+          "description": "What to do; namespaced content the Kernel does not interpret (SB-39)."
+        },
+        "id": {
+          "$ref": "#/$defs/Ident",
+          "description": "The fragment's name (SB-1)."
+        },
+        "instance": {
+          "$ref": "#/$defs/ModuleId",
+          "description": "Which Module instance performs it (SB-22)."
+        },
+        "role": {
+          "$ref": "#/$defs/Role",
+          "description": "In which role (MA-1)."
+        }
+      },
+      "required": [
+        "id",
+        "instance",
+        "role",
+        "content"
+      ],
+      "type": "object"
+    },
+    "Gap": {
+      "description": "An interval of missing samples in the stream (SC-30, Vision §28).",
+      "properties": {
+        "cause": {
+          "$ref": "#/$defs/GapCause",
+          "description": "What the stream lost (SC-31)."
+        },
+        "len": {
+          "description": "Its extent in samples.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "link_dropped": {
+          "description": "How many blocks the link discarded inside the same interval. A block count,\nnot a sample count: the samples the link lost are `len − lost`, and are\nunrecoverable when `lost` is absent. That is a real limit of what a dropped\nheader can tell us, not an omission (SC-20b, SC-31).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lost": {
+          "description": "What the stream reported losing, when known (SC-13).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "start": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "Where the missing interval begins."
+        }
+      },
+      "required": [
+        "start",
+        "len",
+        "cause",
+        "link_dropped"
+      ],
+      "type": "object"
+    },
+    "GapCause": {
+      "description": "What the **stream** lost. A closed, derived set (SC-31, decision S16).\n\nWhat the **link** lost is the separate `link_dropped` count, not a cause, so a\ndevice overflow inside an interval that also lost a block to the link is still\nreported as `OverflowRestart` with its sample count, beside a link-drop count of\none. Collapsing the two into a single cause loses the device's own diagnosis.",
+      "oneOf": [
+        {
+          "description": "`GAP_BEFORE` alone (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "stream",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`RESTARTED`: a stream restart, as a UHD overflow produces (SC-31, OV-23a).",
+          "properties": {
+            "kind": {
+              "const": "overflow_restart",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`SEQ_DISCONTINUITY`: transport sequence loss (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "sequence_error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A per-channel break on a block carrying `ALIGNMENT` (SC-31a).",
+          "properties": {
+            "kind": {
+              "const": "alignment",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A jump with no gap flag on a lossy path (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "link_drop",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`GAP_BEFORE` with `lost` less than the jump on a lossy path and no carry to\nexplain the difference (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "mixed",
+              "type": "string"
+            },
+            "stream_lost": {
+              "description": "What the stream itself reported losing.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "stream_lost"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`GAP_BEFORE` with `lost` absent (SC-31).",
+          "properties": {
+            "kind": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Ident": {
+      "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "Key": {
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-2, MA-34.",
+      "type": "string"
+    },
+    "Lease": {
+      "description": "Who holds a Run, and for how long (RS-21…RS-25).",
+      "properties": {
+        "adoptions": {
+          "description": "How many times it has been adopted (RS-24).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expires_at_host": {
+          "description": "When it expires, on the host monotonic clock (RS-22).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "holder": {
+          "description": "Who holds it now, uninterpreted by the Kernel (RS-24).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/LeaseMode",
+          "description": "Attached or Detached (RS-21)."
+        },
+        "released": {
+          "description": "Whether it has been released (RS-6, step 8).",
+          "type": "boolean"
+        },
+        "token": {
+          "description": "Issued at grant for a Detached Lease; only `Adopt { token }` reclaims it\n(RS-24, decision R5).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "adoptions",
+        "released"
+      ],
+      "type": "object"
+    },
+    "LeaseMode": {
+      "description": "Whether a Run survives its client's disconnection (RS-21).",
+      "oneOf": [
+        {
+          "description": "The Run ends when the client disconnects. The default (RS-21, RS-23).",
+          "properties": {
+            "kind": {
+              "const": "attached",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The Run survives the disconnect until the TTL expires (RS-21, RS-23).",
+          "properties": {
+            "kind": {
+              "const": "detached",
+              "type": "string"
+            },
+            "renewable": {
+              "description": "Whether `Renew` is allowed (RS-24).",
+              "type": "boolean"
+            },
+            "ttl_ms": {
+              "description": "How long, on the host monotonic clock (RS-22).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "ttl_ms",
+            "renewable"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LogEntry": {
+      "description": "One entry of the action log (RS-15).",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/SessionAction",
+          "description": "What was asked (RS-13)."
+        },
+        "outcome": {
+          "$ref": "#/$defs/Outcome",
+          "description": "What happened (RS-15)."
+        },
+        "seq": {
+          "description": "Dense: a rejected Action occupies one too, because a log with holes cannot\nbe replayed or audited (RS-15).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "time": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "The Run-time instant at which it arrived (RS-15)."
+        }
+      },
+      "required": [
+        "seq",
+        "time",
+        "action",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "ModuleEntry": {
+      "description": "One Module the Run used (RS-38).",
+      "properties": {
+        "impl_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentHash"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Its code's hash (RS-45)."
+        },
+        "module": {
+          "$ref": "#/$defs/ModuleRef",
+          "description": "Which Module and version (MA-31)."
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProfileRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Its declared profile (Vision §33)."
+        }
+      },
+      "required": [
+        "module"
+      ],
+      "type": "object"
+    },
+    "ModuleId": {
+      "description": "Names a Module implementation in the registry (`05-module-api.md` MA-19).\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: MA-19.",
+      "type": "string"
+    },
+    "ModuleRef": {
+      "description": "A Module by id and version (MA-31).",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ModuleId",
+          "description": "The Module (MA-19)."
+        },
+        "version": {
+          "$ref": "#/$defs/Version",
+          "description": "Its version (MA-33)."
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ],
+      "type": "object"
+    },
+    "Namespace": {
+      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Outcome": {
+      "description": "What `admit()` decided about one Session Action (RS-15, RS-16).",
+      "oneOf": [
+        {
+          "description": "It passed every check and was dispatched (RS-16).",
+          "properties": {
+            "coercions": {
+              "default": [],
+              "description": "What was coerced, including RS-19's \"as soon as possible\" (SB-44).",
+              "items": {
+                "$ref": "#/$defs/Coercion"
+              },
+              "type": "array"
+            },
+            "dispatched": {
+              "default": [],
+              "description": "The Kernel Actions it compiled to (RS-14).",
+              "items": {
+                "$ref": "#/$defs/ActionId"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "admitted",
+              "type": "string"
+            },
+            "warnings": {
+              "default": [],
+              "description": "Non-fatal notes (SB-46).",
+              "items": {
+                "$ref": "#/$defs/Warning"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "It was refused and never reached the real-time path (RS-16).",
+          "properties": {
+            "kind": {
+              "const": "rejected",
+              "type": "string"
+            },
+            "violations": {
+              "description": "Why (SB-29).",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "violations"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PortRef": {
+      "description": "Names one port of one component instance (SC-1).",
+      "properties": {
+        "component": {
+          "description": "The component instance identifier (MA-36).",
+          "type": "string"
+        },
+        "port": {
+          "description": "The port name on that component (SC-1).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "port"
+      ],
+      "type": "object"
+    },
+    "PrepareReport": {
+      "description": "What one fragment's `prepare` returned (SB-41, MA-12).",
+      "properties": {
+        "coercions": {
+          "default": [],
+          "description": "What the Provider changed; these must equal what `coerce` returned for the\nsame request (MA-12, SB-44).",
+          "items": {
+            "$ref": "#/$defs/Coercion"
+          },
+          "type": "array"
+        },
+        "constraints_hit": {
+          "default": [],
+          "description": "Keys whose declared bound the request reached (SB-41).",
+          "items": {
+            "$ref": "#/$defs/Key"
+          },
+          "type": "array"
+        },
+        "effective": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "default": {},
+          "description": "The applied configuration. `effective` may narrow a declared capability and\nmust not widen one (MA-12).",
+          "type": "object"
+        },
+        "fragment": {
+          "$ref": "#/$defs/Ident",
+          "description": "Which fragment (SB-41)."
+        },
+        "warnings": {
+          "default": [],
+          "description": "Non-fatal notes (SB-41).",
+          "items": {
+            "$ref": "#/$defs/Warning"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "fragment"
+      ],
+      "type": "object"
+    },
+    "PrepareSection": {
+      "description": "The `prepare` section (RS-38, SB-41).",
+      "properties": {
+        "merged_effective": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "default": {},
+          "description": "The merged effective configuration (SB-41).",
+          "type": "object"
+        },
+        "reports": {
+          "default": [],
+          "description": "One report per fragment (SB-41).",
+          "items": {
+            "$ref": "#/$defs/PrepareReport"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ProfileRef": {
+      "description": "A declared profile, by name and version. Vision §59 bumps a Mock profile's\nversion on measurement.\n\nRule: SB-22, MA-33 (decision B7).",
+      "properties": {
+        "name": {
+          "description": "The profile's name.",
+          "type": "string"
+        },
+        "version": {
+          "$ref": "#/$defs/Version",
+          "description": "Its version."
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "Rational": {
+      "description": "A positive rational, stored reduced by the greatest common divisor.\n\n`num > 0`, `den > 0`, `gcd(num, den) = 1`, so equality is structural. Every\noperation evaluates with 128-bit intermediates and returns an error rather than\nwrapping, saturating or panicking.\n\nRule: TM-2.",
+      "properties": {
+        "den": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "num": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "num",
+        "den"
+      ],
+      "type": "object"
+    },
+    "RejectedConstraint": {
+      "description": "A constraint the bound instance could not satisfy (SB-38).",
+      "properties": {
+        "constraint": {
+          "$ref": "#/$defs/Constraint",
+          "description": "What was asked."
+        },
+        "key": {
+          "$ref": "#/$defs/Key",
+          "description": "The key."
+        },
+        "reason": {
+          "description": "Why it failed, uninterpreted.",
+          "type": "string"
+        },
+        "resource": {
+          "$ref": "#/$defs/Ident",
+          "description": "The Spec resource whose constraint failed."
+        }
+      },
+      "required": [
+        "resource",
+        "key",
+        "constraint",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ResourceId": {
+      "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the\nreceive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        },
+        "path": {
+          "description": "Slash-joined path through the composite resource tree (SB-34).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "path"
+      ],
+      "type": "object"
+    },
+    "RfFidelity": {
+      "description": "`none < impairment_model < real` (MA-42).",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Not modelled.",
+          "type": "string"
+        },
+        {
+          "const": "impairment_model",
+          "description": "An impairment model.",
+          "type": "string"
+        },
+        {
+          "const": "real",
+          "description": "The real RF path.",
+          "type": "string"
+        }
+      ]
+    },
+    "Role": {
+      "description": "The five roles. There is exactly one trait each and no shared lifecycle\nsupertrait: one trait forced onto radios and executors alike is what audit\nFinding 22 rejects, and Link and Authority have no lifecycle at all.\n\nRule: MA-1, MA-2.",
+      "oneOf": [
+        {
+          "const": "provider",
+          "description": "Implements a Resource Model.",
+          "type": "string"
+        },
+        {
+          "const": "executor",
+          "description": "Implements a processing engine.",
+          "type": "string"
+        },
+        {
+          "const": "sink",
+          "description": "Writes Artifacts.",
+          "type": "string"
+        },
+        {
+          "const": "link",
+          "description": "Implements a DataLink.",
+          "type": "string"
+        },
+        {
+          "const": "authority",
+          "description": "Implements the Time Authority.",
+          "type": "string"
+        }
+      ]
+    },
+    "RunId": {
+      "description": "Identifies one Run, unique per host (`04-run-and-session.md` RS-1, X6).\n\nThe form is `<node>:<pid-hex>:<unix-nanos-hex>-<counter>`. The process id is\nrequired: `node` is fixed at `LOCAL` for all of v4.0 and the counter is\nper-process, so without it two `ezsdr` processes on one host produce identical\nids within one nanosecond. Ceiling: unique per host, not across hosts until\n`NodeId` is real (`00-overview.md` §8).",
+      "type": "string"
+    },
+    "RunKind": {
+      "description": "What kind of Run this is (RS-1, RS-12).",
+      "oneOf": [
+        {
+          "const": "spec",
+          "description": "Driven by an explicit ExperimentSpec.",
+          "type": "string"
+        },
+        {
+          "const": "session",
+          "description": "A Session, whose Spec is implicit and hashed like any other (RS-12).",
+          "type": "string"
+        }
+      ]
+    },
+    "RunSection": {
+      "description": "The `run` section of the envelope (RS-38).",
+      "properties": {
+        "deterministic": {
+          "description": "May be claimed only for the Simulation class with a recorded seed (RS-42).",
+          "type": "boolean"
+        },
+        "execution_class": {
+          "$ref": "#/$defs/ExecutionClass",
+          "description": "Fixed at binding resolution and never changed during the Run (RS-42)."
+        },
+        "fidelity": {
+          "$ref": "#/$defs/Fidelity",
+          "description": "The weakest value per aspect over the bound Providers (RS-41, MA-42)."
+        },
+        "id": {
+          "$ref": "#/$defs/RunId",
+          "description": "Which Run (RS-1)."
+        },
+        "kind": {
+          "$ref": "#/$defs/RunKind",
+          "description": "Spec Run or Session (RS-1, RS-12)."
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The parent Run, for a child (RS-25)."
+        },
+        "transitions": {
+          "description": "Every state transition, with its runtime instant and host UTC time (RS-5).",
+          "items": {
+            "$ref": "#/$defs/TransitionRecord"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "execution_class",
+        "fidelity",
+        "transitions",
+        "deterministic"
+      ],
+      "type": "object"
+    },
+    "RunState": {
+      "description": "The eight states of a Run (RS-2).",
+      "oneOf": [
+        {
+          "description": "Nothing has happened yet.",
+          "properties": {
+            "state": {
+              "const": "created",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`validate()` passed (SB-38).",
+          "properties": {
+            "state": {
+              "const": "validated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`plan()` passed (SB-39).",
+          "properties": {
+            "state": {
+              "const": "planned",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Every fragment prepared (SB-41).",
+          "properties": {
+            "state": {
+              "const": "prepared",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Everything armed (SB-43).",
+          "properties": {
+            "state": {
+              "const": "armed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Live.",
+          "properties": {
+            "state": {
+              "const": "running",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Cleanup is under way (RS-6).",
+          "properties": {
+            "mode": {
+              "$ref": "#/$defs/CleanupMode",
+              "description": "Whether the tail is delivered (RS-9)."
+            },
+            "state": {
+              "const": "stopping",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Cleanup finished; a Manifest was written (RS-11).",
+          "properties": {
+            "state": {
+              "const": "cleaned_up",
+              "type": "string"
+            },
+            "termination": {
+              "$ref": "#/$defs/Termination",
+              "description": "How it ended (RS-3)."
+            }
+          },
+          "required": [
+            "state",
+            "termination"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SampleClockRecord": {
+      "description": "One SampleClock as the Manifest records it, one per clock, in order, per stream (TM-13d).",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The SampleClock domain's id (TM-13a)."
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimePoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The root tick at which the clock stopped, on a rate change (TM-13c)."
+        },
+        "nominal_rate": {
+          "$ref": "#/$defs/Rational",
+          "description": "Samples per second, derived by TM-10."
+        },
+        "origin": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "The root tick of sample zero (TM-13b, TM-13e)."
+        },
+        "root": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The root the clock divides (TM-3)."
+        },
+        "root_ticks_per_tick": {
+          "$ref": "#/$defs/Rational",
+          "description": "Root ticks per sample (TM-13a)."
+        },
+        "stream": {
+          "$ref": "#/$defs/ResourceId",
+          "description": "The stream that owns the clock (TM-13a)."
+        }
+      },
+      "required": [
+        "stream",
+        "domain",
+        "root",
+        "root_ticks_per_tick",
+        "origin",
+        "nominal_rate"
+      ],
+      "type": "object"
+    },
+    "Segment": {
+      "description": "A contiguous run of valid samples on one channel (SC-30).",
+      "properties": {
+        "len": {
+          "description": "Its extent in samples.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "First sample of the run."
+        }
+      },
+      "required": [
+        "start",
+        "len"
+      ],
+      "type": "object"
+    },
+    "SessionAction": {
+      "description": "The Session action envelope: a closed set, and **not** the Kernel Action set.\n\nThe Kernel's Actions are what a Reactor emits into the real-time path, while a\nlease operation or a recorder request is a control-path act with no real-time\nmeaning. Each Session Action compiles to zero or more Kernel Actions, or to a\nLease or Run operation.\n\nOnly the lifecycle verbs are the Kernel's; a domain verb is\n[`SessionAction::Vocabulary`], and the Vocabulary that registers the verb\ndeclares how it compiles. Vision §3's log sketch names `StartRepeat` and\n`Capture` directly; here they are `radio.start_repeat` and `sink.capture`,\nbecause a Kernel that enumerated them would need a new variant for the first\nperipheral sweep or calibration verb.\n\nRule: RS-13, RS-13a, decision R3.",
+      "oneOf": [
+        {
+          "description": "Generic over a namespaced key and value (RS-13a).",
+          "properties": {
+            "key": {
+              "$ref": "#/$defs/Key",
+              "description": "Which parameter (SB-2)."
+            },
+            "kind": {
+              "const": "set_parameter",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/ResourceId",
+              "description": "Whose parameter."
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "Its new value (SB-4)."
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "key",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A domain verb, whose compilation its Vocabulary declares (RS-13a, RS-14).",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TimePoint"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "When. A Kernel field, not a param: SB-4 caps a `Value` at one level of\nnesting and a `TimePoint` is two, so a time could not travel inside\n`params` at all (RS-19)."
+            },
+            "kind": {
+              "const": "vocabulary",
+              "type": "string"
+            },
+            "ns": {
+              "$ref": "#/$defs/Namespace",
+              "description": "The Vocabulary that owns the verb."
+            },
+            "params": {
+              "additionalProperties": {
+                "$ref": "#/$defs/Value"
+              },
+              "default": {},
+              "description": "The verb's parameters (SB-4).",
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/ResourceId",
+              "description": "Whose resource."
+            },
+            "verb": {
+              "$ref": "#/$defs/Ident",
+              "description": "The verb."
+            }
+          },
+          "required": [
+            "kind",
+            "ns",
+            "verb",
+            "target"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "With a target it stops that resource; without one it stops the Run (RS-50).",
+          "properties": {
+            "kind": {
+              "const": "stop",
+              "type": "string"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResourceId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The resource, or the Run when absent."
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Give up the Lease (RS-14).",
+          "properties": {
+            "kind": {
+              "const": "release",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Reclaim a Detached Lease. Adoption by run id alone would let any client\nseize a live transmitter (RS-24).",
+          "properties": {
+            "kind": {
+              "const": "adopt",
+              "type": "string"
+            },
+            "token": {
+              "description": "The token issued at grant.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "token"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Extend a renewable Lease (RS-24).",
+          "properties": {
+            "kind": {
+              "const": "renew",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Create a child Run (RS-14, RS-25).",
+          "properties": {
+            "kind": {
+              "const": "run_child",
+              "type": "string"
+            },
+            "spec_hash": {
+              "$ref": "#/$defs/ContentHash",
+              "description": "The child's Spec, by hash (RS-45)."
+            }
+          },
+          "required": [
+            "kind",
+            "spec_hash"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Severity": {
+      "description": "How bad an event is; RS-29 derives a default reaction from it (Vision §29).",
+      "oneOf": [
+        {
+          "const": "debug",
+          "description": "Diagnostic detail.",
+          "type": "string"
+        },
+        {
+          "const": "info",
+          "description": "Normal progress.",
+          "type": "string"
+        },
+        {
+          "const": "warning",
+          "description": "Something is off but the Run continues.",
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "description": "Something failed.",
+          "type": "string"
+        },
+        {
+          "const": "fatal",
+          "description": "The Run cannot continue.",
+          "type": "string"
+        }
+      ]
+    },
+    "SpecSection": {
+      "description": "The `spec` section: the body after migration, its hash, and — when it was\nmigrated — the original version and hash (RS-38, SB-49).",
+      "properties": {
+        "body": {
+          "description": "The body itself (RS-38)."
+        },
+        "hash": {
+          "$ref": "#/$defs/ContentHash",
+          "description": "The hash of the body after migration (RS-45)."
+        },
+        "original_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentHash"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Its hash before migration (SB-49)."
+        },
+        "original_version": {
+          "description": "The version the document declared before migration (SB-49).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "hash",
+        "body"
+      ],
+      "type": "object"
+    },
+    "Stage": {
+      "description": "Which pipeline stage a Run was in when it failed (RS-3).",
+      "oneOf": [
+        {
+          "const": "validate",
+          "description": "Schema and semantic validation (SB-38).",
+          "type": "string"
+        },
+        {
+          "const": "plan",
+          "description": "Plan construction (SB-39).",
+          "type": "string"
+        },
+        {
+          "const": "prepare",
+          "description": "Fragment preparation (SB-41).",
+          "type": "string"
+        },
+        {
+          "const": "arm",
+          "description": "Arming (SB-43).",
+          "type": "string"
+        },
+        {
+          "const": "run",
+          "description": "Running.",
+          "type": "string"
+        }
+      ]
+    },
+    "StopCause": {
+      "description": "Why a Run stopped (RS-3, RS-23, RS-26).",
+      "oneOf": [
+        {
+          "description": "The client asked (RS-3).",
+          "properties": {
+            "reason": {
+              "const": "client",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An `Attached` Lease's client went away (RS-23).",
+          "properties": {
+            "reason": {
+              "const": "client_disconnect",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A `Detached` Lease's TTL ran out (RS-23).",
+          "properties": {
+            "reason": {
+              "const": "lease_expiry",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The Policy table reacted to an event (RS-26).",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/EventKind",
+              "description": "Which kind triggered it."
+            },
+            "reason": {
+              "const": "policy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Something aborted the Run (RS-9).",
+          "properties": {
+            "cause": {
+              "description": "Why, uninterpreted.",
+              "type": "string"
+            },
+            "reason": {
+              "const": "abort",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "cause"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Termination": {
+      "description": "How a Run ended. There is no `Failed` **state**: a failure is a termination\nreached through `Stopping`, because a Run that failed and was not cleaned up is\na transmitter nobody turned off.\n\nRule: RS-2, RS-3, decision R1.",
+      "oneOf": [
+        {
+          "description": "It ran to completion.",
+          "properties": {
+            "kind": {
+              "const": "completed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "It was stopped (RS-3, RS-23).",
+          "properties": {
+            "cause": {
+              "$ref": "#/$defs/StopCause",
+              "description": "Why."
+            },
+            "kind": {
+              "const": "stopped",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "cause"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A stage failed (RS-3).",
+          "properties": {
+            "kind": {
+              "const": "failed",
+              "type": "string"
+            },
+            "stage": {
+              "$ref": "#/$defs/Stage",
+              "description": "Which one."
+            }
+          },
+          "required": [
+            "kind",
+            "stage"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TerminationSection": {
+      "description": "The `termination` section (RS-3, RS-8a, RS-10).",
+      "properties": {
+        "also": {
+          "default": [],
+          "description": "An abort raised while an orderly stop was in progress is recorded here\nalongside the original cause (RS-10).",
+          "items": {
+            "$ref": "#/$defs/StopCause"
+          },
+          "type": "array"
+        },
+        "at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimePoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When, in Run time (RS-5)."
+        },
+        "cleanup_failures": {
+          "default": [],
+          "description": "Steps that failed or timed out; every step is attempted even when an earlier\none failed (RS-6, RS-8a).",
+          "items": {
+            "$ref": "#/$defs/CleanupFailure"
+          },
+          "type": "array"
+        },
+        "host_utc_nanos": {
+          "description": "When, in UTC nanoseconds (RS-5).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "reason": {
+          "$ref": "#/$defs/Termination",
+          "description": "How it ended (RS-3)."
+        }
+      },
+      "required": [
+        "reason",
+        "host_utc_nanos"
+      ],
+      "type": "object"
+    },
+    "TimePoint": {
+      "description": "An instant: integer ticks in a named clock domain. Never floating-point seconds.\n\nThere is deliberately no `PartialOrd`: two points of different domains cannot be\ncompared at all, and `a < b` silently answering `false` is the bug class this\nmodel exists to prevent (decision T3).\n\nRule: TM-1, TM-6.",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The domain whose ticks `ticks` counts (TM-1)."
+        },
+        "ticks": {
+          "description": "Tick count relative to the domain's origin; a sample index in a SampleClock (TM-10).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "domain",
+        "ticks"
+      ],
+      "type": "object"
+    },
+    "TransitionRecord": {
+      "description": "One recorded transition, with its runtime instant and the host UTC time (RS-5).",
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimePoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When, in Run time; absent before an Authority exists (RS-5)."
+        },
+        "host_utc_nanos": {
+          "description": "When, in UTC nanoseconds (RS-5).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/RunState",
+          "description": "The state entered (RS-2)."
+        }
+      },
+      "required": [
+        "state",
+        "host_utc_nanos"
+      ],
+      "type": "object"
+    },
+    "TransportFidelity": {
+      "description": "`none < model < real` (MA-42).",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Not modelled.",
+          "type": "string"
+        },
+        {
+          "const": "model",
+          "description": "A transport model.",
+          "type": "string"
+        },
+        {
+          "const": "real",
+          "description": "The real transport.",
+          "type": "string"
+        }
+      ]
+    },
+    "Validity": {
+      "description": "The window over which a [`ClockRelation`] may be applied (TM-14).",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "First instant, in the source domain, at which the relation holds."
+        },
+        "to": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimePoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Last instant, in the source domain; absent means the bound grows without limit."
+        }
+      },
+      "required": [
+        "from"
+      ],
+      "type": "object"
+    },
+    "Value": {
+      "anyOf": [
+        {
+          "description": "A boolean.",
+          "type": "boolean"
+        },
+        {
+          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "description": "A string.",
+          "type": "string"
+        },
+        {
+          "description": "A list of scalars; nesting deeper is refused (SB-4).",
+          "items": {
+            "$ref": "#/$defs/Value"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "description": "A map of scalars; nesting deeper is refused (SB-4).",
+          "type": "object"
+        }
+      ],
+      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+    },
+    "Version": {
+      "description": "A release-only version. Module and Vocabulary versions carry a minor and a patch;\ndocuments do not, which is decision B7 of `03-spec-and-binding.md`.\n\nRule: MA-33, decision B7.",
+      "properties": {
+        "major": {
+          "description": "Breaking changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "description": "Additive changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "patch": {
+          "description": "Fixes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "type": "object"
+    },
+    "Violation": {
+      "description": "What an admission check refused (SB-29).",
+      "properties": {
+        "check": {
+          "$ref": "#/$defs/Namespace",
+          "description": "Which check (SB-29)."
+        },
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Key"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which key, when the violation names one."
+        },
+        "reason": {
+          "description": "Why, uninterpreted by the Kernel.",
+          "type": "string"
+        },
+        "requested": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Value"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What was asked."
+        }
+      },
+      "required": [
+        "check",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "Warning": {
+      "description": "A non-fatal note from a stage (SB-38, SB-41).",
+      "properties": {
+        "message": {
+          "description": "What it says; uninterpreted by the Kernel.",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/Namespace",
+          "description": "Where it came from."
+        }
+      },
+      "required": [
+        "source",
+        "message"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A Kernel envelope with namespaced Module sections. The Kernel writes the\nenvelope; each Module writes its own section; no Provider-specific field ever\nrequires a Kernel change.\n\nVision §50 lists \"random seeds\" and an optional environment capture among the\nenvelope's contents; neither is an envelope field here. The Kernel owns no\nrandom number generator, so a seed is something the environment declared, and\nthe environment is already recorded verbatim under `binding.body`; the\nenvironment capture has no Kernel-defined content at all, so it belongs under\n`sections` as `ezsdr.capture` (RS-43).\n\nRule: RS-38…RS-47. Vision §50, Finding 19.",
+  "properties": {
+    "action_log": {
+      "default": [],
+      "description": "The Session action log; absent for a Spec Run (RS-15).",
+      "items": {
+        "$ref": "#/$defs/LogEntry"
+      },
+      "type": "array"
+    },
+    "admission": {
+      "$ref": "#/$defs/AdmissionResult",
+      "default": {
+        "coercions_preview": [],
+        "matched": {},
+        "rejected": [],
+        "violations": [],
+        "warnings": []
+      },
+      "description": "What `validate()` matched, rejected and refused (SB-38)."
+    },
+    "artifacts": {
+      "default": [],
+      "description": "The artifacts it produced (RS-44).",
+      "items": {
+        "$ref": "#/$defs/ArtifactRef"
+      },
+      "type": "array"
+    },
+    "binding": {
+      "$ref": "#/$defs/BindingSection",
+      "description": "The BindingProfile, environment included (RS-38, SB-27)."
+    },
+    "clocks": {
+      "$ref": "#/$defs/ClocksSection",
+      "default": {
+        "domains": [],
+        "relations": [],
+        "sample_clocks": []
+      },
+      "description": "Domains, relations and SampleClock records (TM-13d, TM-18)."
+    },
+    "components": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ContentHash"
+      },
+      "default": {},
+      "description": "Component name to implementation hash (RS-45).",
+      "type": "object"
+    },
+    "events": {
+      "$ref": "#/$defs/EventsSection",
+      "default": {
+        "counters": [],
+        "delivered": []
+      },
+      "description": "Counters and delivered bodies (RS-33)."
+    },
+    "hash": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContentHash"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The Manifest's own hash, computed over the Manifest with this field removed\nand stored beside it, never inside the hashed body. Skipped when absent, so\nthat the hashed text does not carry `\"hash\": null` — a consumer implementing\nRS-46 as written would otherwise compute a different digest (RS-46, OV-17)."
+    },
+    "inputs": {
+      "default": [],
+      "description": "Artifacts the Run consumed, by reference; a client waveform is ingested here\nbefore the Action referencing it is admitted (RS-44a).",
+      "items": {
+        "$ref": "#/$defs/ArtifactRef"
+      },
+      "type": "array"
+    },
+    "lease": {
+      "$ref": "#/$defs/Lease",
+      "description": "How the Run was held (RS-21)."
+    },
+    "modules": {
+      "default": [],
+      "description": "The Modules and Vocabulary versions in use (RS-38).",
+      "items": {
+        "$ref": "#/$defs/ModuleEntry"
+      },
+      "type": "array"
+    },
+    "plan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionPlan"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The plan as bound (RS-38)."
+    },
+    "prepare": {
+      "$ref": "#/$defs/PrepareSection",
+      "default": {
+        "merged_effective": {},
+        "reports": []
+      },
+      "description": "The prepare reports and the merged effective configuration (SB-41)."
+    },
+    "run": {
+      "$ref": "#/$defs/RunSection",
+      "description": "Identity, class, fidelity and the transition sequence (RS-38)."
+    },
+    "sections": {
+      "additionalProperties": true,
+      "default": {},
+      "description": "Namespaced Module sections, including `ezsdr.capture` when the profile asks\n(RS-38, RS-39, RS-43).",
+      "type": "object"
+    },
+    "spec": {
+      "$ref": "#/$defs/SpecSection",
+      "description": "The Spec after migration, with its hashes (RS-38, SB-49)."
+    },
+    "termination": {
+      "$ref": "#/$defs/TerminationSection",
+      "description": "How it ended (RS-3)."
+    },
+    "vocabularies": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Version"
+      },
+      "default": {},
+      "description": "Vocabulary namespace to version (RS-38).",
+      "type": "object"
+    }
+  },
+  "required": [
+    "run",
+    "spec",
+    "binding",
+    "lease",
+    "termination"
+  ],
+  "title": "Manifest",
+  "type": "object"
+}

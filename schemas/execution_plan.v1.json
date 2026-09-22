@@ -1,0 +1,290 @@
+{
+  "$defs": {
+    "BackPressure": {
+      "description": "What a link does when its queue is at capacity. There is no default (SC-19).",
+      "oneOf": [
+        {
+          "const": "block",
+          "description": "Publishing returns [`PublishOutcome::Full`] and nothing is ever dropped.\nThe name is the Vision's; the policy produces back-pressure through a\nrefusal the producer must honour, not through a parked thread (SC-20a).",
+          "type": "string"
+        },
+        {
+          "const": "drop_oldest",
+          "description": "The oldest queued block is evicted (SC-20).",
+          "type": "string"
+        },
+        {
+          "const": "drop_newest",
+          "description": "The new block is refused (SC-20).",
+          "type": "string"
+        }
+      ]
+    },
+    "DataContractId": {
+      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SC-2.",
+      "type": "string"
+    },
+    "DataLinkDecl": {
+      "description": "A declared link: its endpoints, the contract it carries, its policy and its\ncapacity in blocks (SC-19).",
+      "properties": {
+        "capacity": {
+          "description": "Queue depth in blocks, at least 1 (SC-19).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "contract": {
+          "$ref": "#/$defs/DataContractId",
+          "description": "The contract carried; SC-3 checks it against both ports (SC-19)."
+        },
+        "from": {
+          "$ref": "#/$defs/PortRef",
+          "description": "The producing port (SC-19)."
+        },
+        "id": {
+          "$ref": "#/$defs/DataLinkId",
+          "description": "Node-qualified identity (SC-19, X7)."
+        },
+        "policy": {
+          "$ref": "#/$defs/BackPressure",
+          "description": "What happens at capacity; there is no default (SC-19)."
+        },
+        "to": {
+          "$ref": "#/$defs/PortRef",
+          "description": "The consuming port (SC-19)."
+        }
+      },
+      "required": [
+        "id",
+        "from",
+        "to",
+        "contract",
+        "policy",
+        "capacity"
+      ],
+      "type": "object"
+    },
+    "DataLinkId": {
+      "description": "Identifies a [`DataLink`](crate::stream::DataLinkDecl) instance.\n\nRule: SC-18 (`02-stream-contract.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "DeclaredCost": {
+      "description": "A number the Link Module declares, not a measurement. The Core reports it and\nnever uses it to choose a placement; Phase 1 neither measures nor optimises.\n\nRule: SB-40. Vision §20, §31, §63.",
+      "properties": {
+        "cost": {
+          "description": "The Link Module's own number, uninterpreted by the Kernel (SB-40).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "link": {
+          "$ref": "#/$defs/DataLinkId",
+          "description": "Which link (SC-19)."
+        }
+      },
+      "required": [
+        "link",
+        "cost"
+      ],
+      "type": "object"
+    },
+    "ExecutionClass": {
+      "description": "What kind of Run this is, derived from the environment and cross-checked against\nthe Authority's [`Pacing`]; a class that was merely declared could lie.\n\nRule: MA-41, RS-42. Vision §14.",
+      "oneOf": [
+        {
+          "const": "simulation",
+          "description": "Simulation Engine, free-running, simulated RF path.",
+          "type": "string"
+        },
+        {
+          "const": "realtime_emulation",
+          "description": "Simulation Engine, wall-paced, simulated RF path.",
+          "type": "string"
+        },
+        {
+          "const": "hardware_in_loop",
+          "description": "Device timekeeper, cabled or partly simulated RF path.",
+          "type": "string"
+        },
+        {
+          "const": "hardware",
+          "description": "Device timekeeper, over the air.",
+          "type": "string"
+        }
+      ]
+    },
+    "Fragment": {
+      "description": "One unit of work handed to one Module at `prepare`, in dependency order (SB-39).",
+      "properties": {
+        "after": {
+          "default": [],
+          "description": "Fragments that must be prepared and armed first (SB-39).",
+          "items": {
+            "$ref": "#/$defs/Ident"
+          },
+          "type": "array"
+        },
+        "content": {
+          "description": "What to do; namespaced content the Kernel does not interpret (SB-39)."
+        },
+        "id": {
+          "$ref": "#/$defs/Ident",
+          "description": "The fragment's name (SB-1)."
+        },
+        "instance": {
+          "$ref": "#/$defs/ModuleId",
+          "description": "Which Module instance performs it (SB-22)."
+        },
+        "role": {
+          "$ref": "#/$defs/Role",
+          "description": "In which role (MA-1)."
+        }
+      },
+      "required": [
+        "id",
+        "instance",
+        "role",
+        "content"
+      ],
+      "type": "object"
+    },
+    "Ident": {
+      "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "ModuleId": {
+      "description": "Names a Module implementation in the registry (`05-module-api.md` MA-19).\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: MA-19.",
+      "type": "string"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "PortRef": {
+      "description": "Names one port of one component instance (SC-1).",
+      "properties": {
+        "component": {
+          "description": "The component instance identifier (MA-36).",
+          "type": "string"
+        },
+        "port": {
+          "description": "The port name on that component (SC-1).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "port"
+      ],
+      "type": "object"
+    },
+    "Role": {
+      "description": "The five roles. There is exactly one trait each and no shared lifecycle\nsupertrait: one trait forced onto radios and executors alike is what audit\nFinding 22 rejects, and Link and Authority have no lifecycle at all.\n\nRule: MA-1, MA-2.",
+      "oneOf": [
+        {
+          "const": "provider",
+          "description": "Implements a Resource Model.",
+          "type": "string"
+        },
+        {
+          "const": "executor",
+          "description": "Implements a processing engine.",
+          "type": "string"
+        },
+        {
+          "const": "sink",
+          "description": "Writes Artifacts.",
+          "type": "string"
+        },
+        {
+          "const": "link",
+          "description": "Implements a DataLink.",
+          "type": "string"
+        },
+        {
+          "const": "authority",
+          "description": "Implements the Time Authority.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What `plan(spec, binding)` produces (SB-39).",
+  "properties": {
+    "authority": {
+      "$ref": "#/$defs/Ident",
+      "description": "Which binding keeps time (SB-24)."
+    },
+    "class": {
+      "$ref": "#/$defs/ExecutionClass",
+      "description": "Derived from the environment and cross-checked against the Authority's\npacing (MA-41, SB-39)."
+    },
+    "deps": {
+      "description": "The dependency edges, `(before, after)` (SB-39).",
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "$ref": "#/$defs/Ident"
+          },
+          {
+            "$ref": "#/$defs/Ident"
+          }
+        ],
+        "type": "array"
+      },
+      "type": "array"
+    },
+    "fragments": {
+      "description": "The fragments, already in dependency order (SB-39).",
+      "items": {
+        "$ref": "#/$defs/Fragment"
+      },
+      "type": "array"
+    },
+    "links": {
+      "description": "The DataLink declarations (SC-19).",
+      "items": {
+        "$ref": "#/$defs/DataLinkDecl"
+      },
+      "type": "array"
+    },
+    "transfer_costs": {
+      "default": [],
+      "description": "Declared, never measured (SB-40).",
+      "items": {
+        "$ref": "#/$defs/DeclaredCost"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "fragments",
+    "links",
+    "deps",
+    "authority",
+    "class"
+  ],
+  "title": "ExecutionPlan",
+  "type": "object"
+}

@@ -1,0 +1,170 @@
+{
+  "$defs": {
+    "CapabilityValue": {
+      "description": "What a Provider declares it can do for a key (spec 05 `ProviderInstance`).\n\nRule: SB-6.",
+      "oneOf": [
+        {
+          "description": "Exactly this value.",
+          "properties": {
+            "kind": {
+              "const": "one",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "The value."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A continuous range, inclusive.",
+          "properties": {
+            "kind": {
+              "const": "range",
+              "type": "string"
+            },
+            "max": {
+              "$ref": "#/$defs/Value",
+              "description": "Upper bound."
+            },
+            "min": {
+              "$ref": "#/$defs/Value",
+              "description": "Lower bound."
+            }
+          },
+          "required": [
+            "kind",
+            "min",
+            "max"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A discrete set.",
+          "properties": {
+            "kind": {
+              "const": "any_of",
+              "type": "string"
+            },
+            "values": {
+              "description": "The declared values.",
+              "items": {
+                "$ref": "#/$defs/Value"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Namespace": {
+      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ResourceId": {
+      "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the\nreceive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        },
+        "path": {
+          "description": "Slash-joined path through the composite resource tree (SB-34).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "path"
+      ],
+      "type": "object"
+    },
+    "Value": {
+      "anyOf": [
+        {
+          "description": "A boolean.",
+          "type": "boolean"
+        },
+        {
+          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "description": "A string.",
+          "type": "string"
+        },
+        {
+          "description": "A list of scalars; nesting deeper is refused (SB-4).",
+          "items": {
+            "$ref": "#/$defs/Value"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "description": "A map of scalars; nesting deeper is refused (SB-4).",
+          "type": "object"
+        }
+      ],
+      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One node of a Provider's composite resource tree: a device with channels,\nstreams, a timekeeper, GPIO banks and sensors beneath it, each with its own\n`ResourceId` and its own declared capabilities.\n\nRule: MA-10, SB-33.",
+  "properties": {
+    "capabilities": {
+      "additionalProperties": {
+        "$ref": "#/$defs/CapabilityValue"
+      },
+      "default": {},
+      "description": "What it declares it can do (SB-6).",
+      "type": "object"
+    },
+    "children": {
+      "default": [],
+      "description": "Its sub-resources (SB-33).",
+      "items": {
+        "$ref": "#"
+      },
+      "type": "array"
+    },
+    "id": {
+      "$ref": "#/$defs/ResourceId",
+      "description": "This node's address in the tree (SB-3)."
+    },
+    "kind": {
+      "$ref": "#/$defs/Namespace",
+      "description": "What kind of node it is; a Spec resource's `kind` must match (SB-34)."
+    }
+  },
+  "required": [
+    "id",
+    "kind"
+  ],
+  "title": "Resource",
+  "type": "object"
+}

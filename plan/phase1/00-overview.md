@@ -74,7 +74,7 @@ Collected here so that the R13 pass (§12) can apply them in one edit. Per-spec 
 | §49 writes `ResourceId { node, local }` | X7 writes `ResourceId { node, path }` | A resource is a composite tree (§8): a channel, a GPIO bank or a timekeeper is a sub-resource that must be addressable, and a flat `local` cannot name one. The node qualification §49 asks for is unchanged. Spec 03 fixes the path grammar |
 | §14's fidelity value sets stop at `hardware_quirk` | spec 05 will add `real` | §14 says every Run records the vector, and a Hardware Run has no value to record. Open question 1 |
 | §3's action log names `StartRepeat` and `Capture` as Session actions | spec 04 RS-13a makes them namespaced Vocabulary verbs | `repeat` is a Radio Model capability in audit §13 and a recorder is a Sink; a Kernel that enumerated them would need a new variant for the first peripheral or calibration verb (invariant 30) |
-| §29's list of event kinds reads as a Kernel registry | spec 04 RS-27 keeps the four the Kernel emits and gives the rest to their Vocabulary | audit §13's Kernel line names the envelope, the counters, `EVENTS_DROPPED` and the Policy mechanism, not concrete kinds |
+| §29's list of event kinds reads as a Kernel registry | spec 04 RS-27 keeps only the kinds the Kernel emits or owns the policy for — from §29's code block, `PROCESSOR_DEADLINE_MISS` and, under §35's name, `DEVICE_LOST` — and gives the rest to their Vocabulary | audit §13's Kernel line names the envelope, the counters, `EVENTS_DROPPED` and the Policy mechanism, not concrete kinds |
 | §50's envelope lists `random seeds` and an environment capture | spec 04 RS-43 keeps both out of it | the Kernel owns no generator, the environment is already recorded verbatim, and the capture has no Kernel-defined content |
 
 ## 4. Cross-cutting decisions
@@ -274,6 +274,81 @@ Open questions the owner must settle at a gate:
 | 5 | `schemars` pinned in `Cargo.lock`, not by an exact `=` requirement. | Accept: an exact requirement in a published library cannot unify with a downstream `^1.3`, and the lock plus `schema_freeze` already give reproducibility. Upgrades are deliberate changes that regenerate the schemas. |
 | 6 | MSRV 1.85 and crate version `4.0.0-alpha.N` until the freeze. | Accept. |
 | 7 | TM-16a1 settles that the Authority drives `host.monotonic` as virtual time in the Simulation class only, and reads the real clock in the other three. This borders on a Phase 2 question about the Simulation Engine. | Settle it now. It changes no type, but `RelativeBudget`'s meaning depends on it and TM-15 has already fixed that domain, so leaving it open would leave deadline semantics undefined in RealtimeEmulation — the one class that exists to expose real deadlines. |
+
+
+### Findings from Step 4 (the crate), for the owner's verdict
+
+Raised rather than applied: none of these edits the Vision, the audit or the
+re-review (OV-6), and none changes a spec's text. Each is a place where writing the
+code met something the spec did not settle, or settled differently from what serde,
+Rust or the measurement allows. `plan/phase1/` is unchanged apart from this table.
+
+| # | Where | What the implementation had to do | Why | Verdict |
+|---|---|---|---|---|
+| D1 | 03 §4 `Constraint`, `CapabilityValue`; `OutputSource` | Struct variants (`Eq { value }`, `Set { values }`, `One { value }`, `AnyOf { values }`, `Port { port }`, `Resource { resource }`) instead of the newtype variants the shape table writes | OV-13 requires an internal tag for a data-carrying enum, and serde cannot internally tag a newtype variant whose payload is not a map. An encoding consequence, not a semantic one | |
+| D2 | 04 §4 `RunError` | Added `IllegalTransition { from, to }` | The listed error set names no error for RS-2's own rule, so an attempt to skip or reverse a state had nothing to return | |
+| D3 | 04 §4 versus RS-27, RS-28 | Registered **five** Kernel event kinds. **Spec corrected** | §4 says "the Kernel registers the four of RS-27" while RS-27 lists five and RS-28 says "the Kernel's five are". Followed RS-28; §4's count looks stale | |
+| D4 | 04 §4 `EventKind` | Grammar is dotted segments of `[A-Za-z][A-Za-z0-9_]*` | §4 says "a Namespace", whose SB-1 grammar is lowercase, but every kind the spec names is either `EVENTS_DROPPED` or `test.custom`. The implemented grammar admits both | |
+| D5 | 01 TM-21 | Cross-multiplication is checked and may return `Overflow`. **Spec corrected** | The rule's "TM-3's caps bound them at 2^124" holds only when both nominal rates have terms ≤ 2^31; a `Derived` domain's nominal rate can reach 2^62/1 under those same caps. The rule's own "checked 128-bit intermediates" clause covers it, and `tm_21_duration_cmp_overflow_is_error` proves it. Prose only | |
+| D6 | 02 §4 sketch, SC-27 | `LatePolicy::decide` takes a `&ClockRegistry` | SC-27 requires TM-21's cross-multiplication, which needs both domains' nominal rates. The §4 sketch is marked illustrative | |
+| D7 | 02 SC-27 | `LateOutcome.late_by` is reported in `host.monotonic` | SC-27 fixes no domain for it. Chosen as the domain `min_lead` is declared in; the lead is rescaled by TM-9 and floored, so `late_by` errs towards more lateness, never less | |
+| D8 | 02 SC-29a | A `BurstOpen` accompanies exactly the block carrying `START_OF_BURST` | SC-29a puts the three fields "on the block that opens a burst" and its test requires a refusal when absent. A burst opened by a **discontinuity** carries no `START_OF_BURST`, so it takes no `BurstOpen` and its `wraps` is 0 — a ceiling of the error path | |
+| D9 | 00 OV-23, OV-23a | The ban check reads "outside a comment citing the ban" literally, per line, with `OV-23a` as the exemption marker | Seven UHD evidence citations in doc comments carry the marker; four prose uses of `replay` and `taint` were reworded instead, because there the banned word was not the load-bearing one | |
+| D10 | 00 OV-23, OV-23b | Both the allow-list and the rule-ID citation check govern **module-level** public items; a method on a public type is checked by neither | OV-23b's "a type the Kernel has that audit §13 does not name" reads as a type-surface measurement, and a method is not a Kernel concept of its own. "Module level" is tracked by brace depth, so an item inside an inline `mod` — public or private — is scanned and an item inside an `impl` is not | |
+| D11 | 04 RS-32 | `EventCollector::new` locks and releases its ring once at construction | On some platforms `Mutex` boxes its OS primitive at the first lock, so the first `emit` allocated exactly once and RS-32's counting-allocator test failed by one. The allocation now happens at `prepare`, where RS-33 already sizes the table | |
+| D12 | 00 OV-20 | `cargo test` enables the `testing` feature through a self dev-dependency | So that OV-20's `ManualTimeAuthority` is exercised with no flag while staying out of the default shipped surface | |
+| D13 | 00 X12, open question 6 | Eight edition-2024 let-chains rewritten as nested `if let` | Let-chains need 1.88; the declared MSRV is 1.85. The suite now passes on **1.85.0, 1.89.0 and stable (1.98.1)**, so X12 stands unchanged | |
+| D14 | 02 SB-7, OV-21 | The test double declares `test.grid` as `AnyOf`, not a continuous `Range` | SB-7 consults `coerce` only when the declared capability does not satisfy the constraint directly, and a continuous range cannot express "multiples of 20". A fixture note, not a rule change | |
+
+
+### Findings from the Step 4 code review, for the owner's verdict
+
+Two adversarial review passes over the crate (Opus, per AGENTS.md §8) found 3 P0
+defects, 24 P1/P2 defects and a further set of places where a spec did not settle
+something the code had to. The defects are fixed; the spec questions are raised here.
+D3 and D5 were confirmed as spec errors by the second review and **applied** with
+the owner's standing authorisation:
+
+- `01-time-model.md` TM-21: "TM-3's caps bound them at 2^124" replaced. A `Derived`
+  domain's nominal rate is its root's rate divided by `root_ticks_per_tick`, so each
+  term is a product of two capped terms and reaches 2^62 and the cross-product
+  reaches 2^186 — which is what the neighbouring "193 bits" paragraph already said
+  about TM-4. The checked 128-bit arithmetic is the bound, not the caps.
+- `04-run-and-session.md` §4: "the four of RS-27" → "the five of RS-27", and the
+  `EventKind` grammar corrected in the same line (D4). The same stale count appeared
+  in 04 §9 item 9 and in this file's departure table, where it also mis-stated Vision
+  §29: of §29's twelve kinds, RS-27 keeps **two** — `PROCESSOR_DEADLINE_MISS`, and
+  §29's `DEVICE_DISCONNECTED` under §35's name `DEVICE_LOST`. Both corrected.
+
+Everything else below is raised, not applied.
+
+| # | Where | What the implementation had to do | Why | Verdict |
+|---|---|---|---|---|
+| D15 | 02 SC-30c versus §6's `finish` pseudocode | A trailing carry's `Gap` has `len: 0`, whatever `lost` says | SC-30c says "a **zero-extent** `Gap` … the map's `end` does not move, because no sample after the last delivered one is accounted for", while §6 writes `carry.lost or 0` for that length. The two conflict when `lost` is present: the pseudocode's version claims `lost` samples beyond the map's own end, contradicting the rule's own justification. The rule carries the ID, so the code follows the rule. §6's line should change | |
+| D16 | 01 TM-13b's parenthetical | Nothing refuses a block naming an unregistered domain | TM-13b says "*the Kernel checks only that the domain is registered (TM-12)*", but `SampleBlock::new`, `BurstTracker::on_block` and `ContinuityBuilder::push` all take no registry, deliberately. TM-12's block clause is a producer obligation; the parenthetical overstates it | |
+| D17 | 05 MA-25, 03 SB-25a, 05 §4 `ComponentDescriptor` | `plan::sink_components` is always empty on a Spec Run, so a Spec Run that declares an output is refused unless the runtime supplies the set directly through `CompileInputs::sink_components` | MA-25 resolves the Sink role "for a Session … from the placement's `module` field"; SB-25a says a Spec Run leaves that field unset; `ComponentKind` is only `Processor \| Reactor`. Nothing left says which component of a Spec's graph is a Sink, so SC-21's drop-class rule, SB-15's `Block`-into-Sink refusal and SB-17's capture check are unenforceable on the Spec path — the path a publication Run uses. The specs need one of: a `Sink` member on `ComponentKind`, a `role` on `ComponentDescriptor`, or `module` set on every placement | |
+| D18 | 05 MA-38 | `plan()` takes the Executor's Module id from the runtime and refuses when it is absent | MA-38 names an Executor **instance**; no document names the Module that supplies it. The first draft invented `ezsdr.test.executor`, which put a Module name in a frozen Kernel crate and would have made every Manifest record a test double | |
+| D19 | 03 SB-13, decision B3 | The depth scan skips a parameter's `schema` | A parameter's `schema` is opaque Vocabulary content (MA-36). Scanning it refused a component whose parameter object merely *describes* a property called `island`. B3 weighed the false negative (smuggling into `extensions`) and not this false positive | |
+| D20 | 04 RS-21 | `Lease::validate()` exists and is tested, and nothing calls it | RS-21's refusal lives in the constructor, which a Lease read back from a document or built field by field bypasses. Phase 1 has no Run-admission seam to call the predicate from, because the coordinator is Phase 2 | |
+| D21 | 04 RS-12 | A Session resource's `kind` is the bound instance's own root kind | RS-12 says "one resource per binding with empty `requires`" and fixes no `kind`. The first draft invented `ezsdr.session`, which the matcher (SB-34) then could not bind to, so every Session failed `validate`. Taking the kind from the bound instance keeps the Kernel from owning a vocabulary word | |
+| D22 | 03 SB-30 versus SB-38, SB-41 | The `prepare`-stage checks run inside `collect_prepare` | SB-30 says the Kernel runs the checks "at three points", but SB-38 names only `validate` and SB-41 names `prepare` without saying it runs them. Putting the call inside `collect_prepare` is what stops the second point being forgotten; the spec should name the call site | |
+| D23 | 00 OV-13 | `spec::Value` is `#[serde(untagged)]` | OV-13 says data-carrying enums use an internal tag, with no exception. A Spec's values are plain JSON scalars and cannot carry a tag. OV-13 should carve it out explicitly | |
+| D24 | 00 OV-15 versus 04 RS-45 | `Int(20)` and `Num(20.0)` hash identically | ECMAScript `Number::toString(20.0)` is `"20"`, so RS-45's "two Runs with equal hashes are comparable by construction" conflates a `kind: int` and a `kind: num` value. This follows from OV-15 as written, not from a coding error; worth one sentence in OV-15a naming it as accepted | |
+| D25 | 05 MA-13's Rust sketch | `stop` takes a `StopMode { Orderly \| Abort }` | The sketch writes `stop(reason: StopCause)`, but RS-9 says an abort differs from an orderly stop "only in the **mode** passed to each Provider". `StopCause` survives on `Action::Abort` and in MA-46's frozen list. The sketch is what a Plugin author reads | |
+| D26 | 05 MA-37 | Two of the four structural checks were removed | "update classes from the closed set" and "an `impl.hash` present" cannot fail in Rust: `UpdateClass` is a closed enum and `ContentHash` only exists parsed. Both now arrive as a deserialisation refusal at the JSON boundary, which is where a non-Rust producer sends them, and are tested there | |
+
+
+### Findings from the verification pass
+
+A third pass verified the fixes above: 20 of 28 clean, 5 partial, none regressed. The
+partials and one new P0 were fixed in turn; these are what they left behind.
+
+| # | Where | What the implementation had to do | Why | Verdict |
+|---|---|---|---|---|
+| D27 | 03 SB-34 | Two Spec resources prefer **different** nodes of one instance but may share one when that is all there is | SB-34 says two resources "**may** bind to different sub-resources" and never says a node may not be shared. Requiring exclusivity refused a satisfiable binding (two resources both wanting the device root); allowing it freely handed one physical channel to two resources with no diagnostic. The implementation prefers disjoint and shares only as a last resort. SB-34 should say which it means | |
+| D28 | 04 RS-25 | Nothing checks that a child Run has no Lease of its own | RS-25's first half — the parent's expiry ends its children first — is RS-6 step 0 and is tested. The second half has no Kernel seam in Phase 1, because there is no child-Run type until the coordinator exists (Phase 2) | |
+| D29 | 03 SB-17 | An output reaching a Sink through **one** link is accepted; a longer chain is refused | SB-17 says "a capture whose source has no placed Sink is refused" and does not settle chain depth. One hop covers the Spec shapes Phase 1 can express | |
+| D30 | 02 SC-30c, 03 SB-13 | The `schema` key is skipped at any depth, like `extensions` | D19's fix widened SB-13's false-negative surface: a Spec carrying `{"schema": {"executor": …}}` anywhere now escapes the scan. B3 already accepts that shape of residual risk for `extensions`; this extends it | |
 
 ---
 

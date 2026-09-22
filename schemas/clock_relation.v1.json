@@ -1,0 +1,147 @@
+{
+  "$defs": {
+    "ClockDomainId": {
+      "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "Duration": {
+      "description": "An elapsed time: integer ticks in a named clock domain (TM-1, TM-4 decision T4).\n\nThe domain tag is what stops 1 000 ticks at 20 Msps being added to a 200 MHz\npoint as a silent factor-of-ten error.",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The domain whose ticks `ticks` counts (TM-7)."
+        },
+        "ticks": {
+          "description": "Tick count; may be negative (TM-7).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "domain",
+        "ticks"
+      ],
+      "type": "object"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "TimePoint": {
+      "description": "An instant: integer ticks in a named clock domain. Never floating-point seconds.\n\nThere is deliberately no `PartialOrd`: two points of different domains cannot be\ncompared at all, and `a < b` silently answering `false` is the bug class this\nmodel exists to prevent (decision T3).\n\nRule: TM-1, TM-6.",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The domain whose ticks `ticks` counts (TM-1)."
+        },
+        "ticks": {
+          "description": "Tick count relative to the domain's origin; a sample index in a SampleClock (TM-10).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "domain",
+        "ticks"
+      ],
+      "type": "object"
+    },
+    "Validity": {
+      "description": "The window over which a [`ClockRelation`] may be applied (TM-14).",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/TimePoint",
+          "description": "First instant, in the source domain, at which the relation holds."
+        },
+        "to": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimePoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Last instant, in the source domain; absent means the bound grows without limit."
+        }
+      },
+      "required": [
+        "from"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A measured relation between two roots: the only path between domains that are\nnot exactly related, and the record every Run carries from its root to `utc`.\n\n`drift` and `drift_uncertainty` are the only floating-point quantities in the\ntime model, and neither reaches a stored `TimePoint` unrounded (TM-14, X9).\n\nRule: TM-5, TM-14, TM-18. Vision §24, §50.",
+  "properties": {
+    "drift": {
+      "description": "Dimensionless: target seconds per source second, minus 1. Refused when\nnon-finite, because `serde_json` would otherwise write it as `null` and a\nNaN drift would share a Manifest hash with one that was never measured\n(OV-15, X9).",
+      "format": "double",
+      "type": "number"
+    },
+    "drift_uncertainty": {
+      "description": "Dimensionless, non-negative: the one-sided error bound on `drift`. Zero\nclaims the drift is known exactly and is expected to be rare. Refused when\nnon-finite (OV-15, X9).",
+      "format": "double",
+      "type": "number"
+    },
+    "measured_at": {
+      "$ref": "#/$defs/TimePoint",
+      "description": "When the measurement was taken, in the source domain."
+    },
+    "method": {
+      "description": "Namespaced name of the measurement method, for example `dev.pps_poll`.",
+      "type": "string"
+    },
+    "offset": {
+      "$ref": "#/$defs/TimePoint",
+      "description": "The image of `measured_at` in the target domain."
+    },
+    "source": {
+      "$ref": "#/$defs/ClockDomainId",
+      "description": "The domain being converted from."
+    },
+    "target": {
+      "$ref": "#/$defs/ClockDomainId",
+      "description": "The domain being converted to."
+    },
+    "uncertainty": {
+      "$ref": "#/$defs/Duration",
+      "description": "The bound at `measured_at`, in target ticks, before drift error accumulates."
+    },
+    "valid": {
+      "$ref": "#/$defs/Validity",
+      "description": "The window over which the relation may be applied."
+    }
+  },
+  "required": [
+    "source",
+    "target",
+    "measured_at",
+    "offset",
+    "drift",
+    "drift_uncertainty",
+    "uncertainty",
+    "method",
+    "valid"
+  ],
+  "title": "ClockRelation",
+  "type": "object"
+}

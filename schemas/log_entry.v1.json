@@ -1,0 +1,471 @@
+{
+  "$defs": {
+    "ActionId": {
+      "description": "Identifies one dispatched Action inside a Run (RS-15).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ClockDomainId": {
+      "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "Coercion": {
+      "description": "A value the Provider changed, with its reason (SB-44).",
+      "properties": {
+        "applied": {
+          "$ref": "#/$defs/Value",
+          "description": "What the Provider will apply."
+        },
+        "key": {
+          "$ref": "#/$defs/Key",
+          "description": "The key that was coerced."
+        },
+        "reason": {
+          "description": "The Provider's reason, uninterpreted by the Kernel.",
+          "type": "string"
+        },
+        "requested": {
+          "$ref": "#/$defs/Value",
+          "description": "What the document asked for."
+        }
+      },
+      "required": [
+        "key",
+        "requested",
+        "applied",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ContentHash": {
+      "description": "`sha256:<64 lowercase hex>`. The algorithm is named in the value so a later\nalgorithm is an additive change (OV-14).",
+      "type": "string"
+    },
+    "Ident": {
+      "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "Key": {
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-2, MA-34.",
+      "type": "string"
+    },
+    "Namespace": {
+      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Outcome": {
+      "description": "What `admit()` decided about one Session Action (RS-15, RS-16).",
+      "oneOf": [
+        {
+          "description": "It passed every check and was dispatched (RS-16).",
+          "properties": {
+            "coercions": {
+              "default": [],
+              "description": "What was coerced, including RS-19's \"as soon as possible\" (SB-44).",
+              "items": {
+                "$ref": "#/$defs/Coercion"
+              },
+              "type": "array"
+            },
+            "dispatched": {
+              "default": [],
+              "description": "The Kernel Actions it compiled to (RS-14).",
+              "items": {
+                "$ref": "#/$defs/ActionId"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "admitted",
+              "type": "string"
+            },
+            "warnings": {
+              "default": [],
+              "description": "Non-fatal notes (SB-46).",
+              "items": {
+                "$ref": "#/$defs/Warning"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "It was refused and never reached the real-time path (RS-16).",
+          "properties": {
+            "kind": {
+              "const": "rejected",
+              "type": "string"
+            },
+            "violations": {
+              "description": "Why (SB-29).",
+              "items": {
+                "$ref": "#/$defs/Violation"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "violations"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ResourceId": {
+      "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the\nreceive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        },
+        "path": {
+          "description": "Slash-joined path through the composite resource tree (SB-34).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "path"
+      ],
+      "type": "object"
+    },
+    "SessionAction": {
+      "description": "The Session action envelope: a closed set, and **not** the Kernel Action set.\n\nThe Kernel's Actions are what a Reactor emits into the real-time path, while a\nlease operation or a recorder request is a control-path act with no real-time\nmeaning. Each Session Action compiles to zero or more Kernel Actions, or to a\nLease or Run operation.\n\nOnly the lifecycle verbs are the Kernel's; a domain verb is\n[`SessionAction::Vocabulary`], and the Vocabulary that registers the verb\ndeclares how it compiles. Vision §3's log sketch names `StartRepeat` and\n`Capture` directly; here they are `radio.start_repeat` and `sink.capture`,\nbecause a Kernel that enumerated them would need a new variant for the first\nperipheral sweep or calibration verb.\n\nRule: RS-13, RS-13a, decision R3.",
+      "oneOf": [
+        {
+          "description": "Generic over a namespaced key and value (RS-13a).",
+          "properties": {
+            "key": {
+              "$ref": "#/$defs/Key",
+              "description": "Which parameter (SB-2)."
+            },
+            "kind": {
+              "const": "set_parameter",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/ResourceId",
+              "description": "Whose parameter."
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "Its new value (SB-4)."
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "key",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A domain verb, whose compilation its Vocabulary declares (RS-13a, RS-14).",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TimePoint"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "When. A Kernel field, not a param: SB-4 caps a `Value` at one level of\nnesting and a `TimePoint` is two, so a time could not travel inside\n`params` at all (RS-19)."
+            },
+            "kind": {
+              "const": "vocabulary",
+              "type": "string"
+            },
+            "ns": {
+              "$ref": "#/$defs/Namespace",
+              "description": "The Vocabulary that owns the verb."
+            },
+            "params": {
+              "additionalProperties": {
+                "$ref": "#/$defs/Value"
+              },
+              "default": {},
+              "description": "The verb's parameters (SB-4).",
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/ResourceId",
+              "description": "Whose resource."
+            },
+            "verb": {
+              "$ref": "#/$defs/Ident",
+              "description": "The verb."
+            }
+          },
+          "required": [
+            "kind",
+            "ns",
+            "verb",
+            "target"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "With a target it stops that resource; without one it stops the Run (RS-50).",
+          "properties": {
+            "kind": {
+              "const": "stop",
+              "type": "string"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResourceId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The resource, or the Run when absent."
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Give up the Lease (RS-14).",
+          "properties": {
+            "kind": {
+              "const": "release",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Reclaim a Detached Lease. Adoption by run id alone would let any client\nseize a live transmitter (RS-24).",
+          "properties": {
+            "kind": {
+              "const": "adopt",
+              "type": "string"
+            },
+            "token": {
+              "description": "The token issued at grant.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "token"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Extend a renewable Lease (RS-24).",
+          "properties": {
+            "kind": {
+              "const": "renew",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Create a child Run (RS-14, RS-25).",
+          "properties": {
+            "kind": {
+              "const": "run_child",
+              "type": "string"
+            },
+            "spec_hash": {
+              "$ref": "#/$defs/ContentHash",
+              "description": "The child's Spec, by hash (RS-45)."
+            }
+          },
+          "required": [
+            "kind",
+            "spec_hash"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TimePoint": {
+      "description": "An instant: integer ticks in a named clock domain. Never floating-point seconds.\n\nThere is deliberately no `PartialOrd`: two points of different domains cannot be\ncompared at all, and `a < b` silently answering `false` is the bug class this\nmodel exists to prevent (decision T3).\n\nRule: TM-1, TM-6.",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The domain whose ticks `ticks` counts (TM-1)."
+        },
+        "ticks": {
+          "description": "Tick count relative to the domain's origin; a sample index in a SampleClock (TM-10).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "domain",
+        "ticks"
+      ],
+      "type": "object"
+    },
+    "Value": {
+      "anyOf": [
+        {
+          "description": "A boolean.",
+          "type": "boolean"
+        },
+        {
+          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "description": "A string.",
+          "type": "string"
+        },
+        {
+          "description": "A list of scalars; nesting deeper is refused (SB-4).",
+          "items": {
+            "$ref": "#/$defs/Value"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "description": "A map of scalars; nesting deeper is refused (SB-4).",
+          "type": "object"
+        }
+      ],
+      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+    },
+    "Violation": {
+      "description": "What an admission check refused (SB-29).",
+      "properties": {
+        "check": {
+          "$ref": "#/$defs/Namespace",
+          "description": "Which check (SB-29)."
+        },
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Key"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which key, when the violation names one."
+        },
+        "reason": {
+          "description": "Why, uninterpreted by the Kernel.",
+          "type": "string"
+        },
+        "requested": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Value"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What was asked."
+        }
+      },
+      "required": [
+        "check",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "Warning": {
+      "description": "A non-fatal note from a stage (SB-38, SB-41).",
+      "properties": {
+        "message": {
+          "description": "What it says; uninterpreted by the Kernel.",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/Namespace",
+          "description": "Where it came from."
+        }
+      },
+      "required": [
+        "source",
+        "message"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One entry of the action log (RS-15).",
+  "properties": {
+    "action": {
+      "$ref": "#/$defs/SessionAction",
+      "description": "What was asked (RS-13)."
+    },
+    "outcome": {
+      "$ref": "#/$defs/Outcome",
+      "description": "What happened (RS-15)."
+    },
+    "seq": {
+      "description": "Dense: a rejected Action occupies one too, because a log with holes cannot\nbe replayed or audited (RS-15).",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "time": {
+      "$ref": "#/$defs/TimePoint",
+      "description": "The Run-time instant at which it arrived (RS-15)."
+    }
+  },
+  "required": [
+    "seq",
+    "time",
+    "action",
+    "outcome"
+  ],
+  "title": "LogEntry",
+  "type": "object"
+}

@@ -1,0 +1,330 @@
+# OV-23 / OV-23b — the Kernel-does-not-grow allow-list.
+#
+# One line per module-level public item: `name = justification`. The justification
+# is either a **specific token** from audit §13's Kernel tree, or `NEW: <one line>`
+# for a type the Kernel has that audit §13 does not name.
+#
+# The `NEW:` count, not the raw public-item count, is the "Core remains small"
+# measurement (OV-23b). Audit §13's `data` line ends with the catch-all "Stream
+# Contract (normative)", which would otherwise absorb every type spec 02 invents;
+# each of those is written out here instead.
+
+FEATURE:testing = NEW: OV-20 ships ManualTimeAuthority in src/ behind the non-default `testing` feature; every item it gates is excluded by this one line.
+
+# --- crate modules -----------------------------------------------------------
+binding = BindingProfile
+contract = DataContract registry
+event = Event envelope
+hash = content hashes
+id = identity
+manifest = Manifest envelope
+module_api = module-api roles
+plan = ExecutionPlan
+plan::plan = ExecutionPlan
+policy = Policy
+run = Run state machine
+schema = ExperimentSpec envelope
+session = Run state machine
+spec = ExperimentSpec envelope
+stream = Stream Contract
+time = time
+
+# --- identity (audit §13 `identity`) -----------------------------------------
+id::NodeId = NodeId-qualified ids
+id::ResourceId = ResourceId
+id::ResourceIdError = NEW: the refusal reason for SB-34's path grammar, which §13's flat id had no need of.
+id::ModuleId = ModuleId+version
+id::RunId = RunId
+spec::Ident = NEW: SB-1's in-document name; §13 names ids but not the grammar a document's own names obey.
+spec::Namespace = NEW: SB-1's dotted prefix, the unit a Vocabulary or Module owns; §13 assumes it without naming it.
+spec::Key = NEW: SB-2's `<prefix><path>`; §13's matching line says "schema-driven" without naming the key type.
+spec::Value = NEW: SB-4's one-level scalar tree, the only value form a document may carry.
+spec::ValueKind = NEW: the declared shape a KeyDecl fixes, so SB-6's comparisons stay within one kind.
+contract::Scalar = NEW: SC-2's DataContract attribute value; §13's `data` line names the registry, not its attribute type.
+
+# --- time (audit §13 `time`) -------------------------------------------------
+time::rational::Rational = Rational
+time::domain::ClockDomain = ClockDomain
+time::domain::ClockDomainKind = ClockDomain
+time::domain::EpochRef = epoch
+time::domain::ClockRegistry = ClockDomain
+time::domain::RATIO_TERM_CAP = ClockDomain
+time::point::TimePoint = TimePoint
+time::point::Duration = Duration
+time::point::UncertainTimePoint = NEW: TM-14's only result of crossing roots; §13's ClockRelation line names the relation, not the value it yields.
+time::point::RelativeBudget = Deadline{Relative}
+time::point::AbsoluteDeadline = Deadline{Absolute}
+time::relation::ClockRelation = ClockRelation
+time::relation::Validity = validity
+time::point::ExactConversion = NEW: TM-4's precomputed conversion, where §6's 126-bit overflow bound is pinned.
+time::point::Converted = NEW: TM-4's exact-or-inexact result; §13 names no return type for a conversion.
+time::point::Rescaled = NEW: TM-9's nominal duration rescale, which TM-5 deliberately keeps distinct from converting a TimePoint.
+time::TimeError = NEW: the closed failure set that makes TM-2 and TM-8 "nothing wraps, saturates or panics" checkable.
+time::authority::TimeAuthority = TimeAuthority
+time::authority::ScheduleHandle = TimeAuthority
+time::domain::SampleClockRecord = ClockDomain
+time::domain::SampleClockHandle = NEW: TM-13a's id-and-ratio allocated at prepare, before TM-13b or TM-13e fixes the origin.
+
+# --- data / Stream Contract (audit §13 `data`) -------------------------------
+stream::buffer::MemoryDomain = MemoryDomain
+stream::buffer::BufferRef = BufferRef
+stream::buffer::HostMemoryAccess = NEW: SC-8's only route to host bytes, so that invariant 34's "no raw slices" has a mechanism.
+stream::block::SampleBlock = SampleBlock
+stream::block::BlockHeader = SampleBlock
+stream::block::BlockRef = SampleBlock
+stream::block::BlockFlags = flags
+stream::block::ChannelMask = valid mask
+stream::block::Direction = NEW: SC-16's per-block side, without which a receive Provider's stray burst flag is undetectable.
+contract::DataContract = DataContract registry
+contract::DataContractId = DataContract registry
+contract::ContractRegistry = DataContract registry
+contract::Port = Port
+contract::PortDirection = Port
+contract::PortRef = NEW: SC-1's reference to one port of one component instance, which a link declaration needs.
+stream::link::DataLink = DataLink identity
+stream::link::DataLinkDecl = DataLink identity
+stream::link::BackPressure = link policy
+stream::link::PublishOutcome = NEW: SC-20's observable result, which SC-20a requires so that `Full` is not a silent drop.
+stream::link::DropCarry = NEW: SC-20b's attribution of what a drop-class link discarded, so an overflow stays an overflow.
+stream::StreamError = NEW: the closed refusal set of SC-10, SC-12, SC-24 and SC-30.
+stream::link::check_sink_link = NEW: SC-21's predicate, called by the planner so that observation never stalls the real-time path.
+
+# --- transmit bursts (spec 02) -----------------------------------------------
+stream::burst::BurstTracker = NEW: SC-29's single implementation of burst state, so Mock and hardware cannot diverge.
+stream::burst::BurstState = NEW: the tracker's observable state (SC-24).
+stream::burst::BurstStep = NEW: what one transmit block did to SC-24's state machine.
+stream::burst::BurstEnd = NEW: how a burst ended, which SC-28 records.
+stream::burst::BurstOpen = NEW: SC-29a's three fields no block header carries.
+stream::burst::BurstRecord = NEW: SC-28's record of what was transmitted.
+stream::burst::LatePolicy = NEW: spec 02 names it among the nineteen types audit §13 does not name individually; §13 writes only "(+late policy)" on the Action set line.
+stream::burst::LateOutcome = NEW: SC-27's verdict on a burst's lead.
+stream::burst::AdmittedTarget = NEW: SC-23a's applied-and-requested pair, recorded when a target is advanced onto the sample grid.
+stream::burst::admit_burst_target = NEW: SC-23a and SC-23b's conversion of a burst target onto the transmit SampleClock.
+
+# --- continuity (spec 02) ----------------------------------------------------
+stream::continuity::ContinuityMap = NEW: SC-30's derived record of what a stream carried; Vision §50 makes it an envelope field.
+stream::continuity::ContinuityBuilder = NEW: SC-30's derivation, so that no Sink assembles continuity by hand.
+stream::continuity::Gap = NEW: SC-31's interval of missing samples, with the cause the stream itself reported.
+stream::continuity::GapCause = NEW: SC-31's closed derived cause set, which Vision §28 leaves undefined.
+stream::continuity::ChannelGap = NEW: SC-31a's per-channel break with a cause, which Vision §28 requires and §23 cannot express.
+stream::continuity::Segment = NEW: SC-30's run of valid samples on one channel.
+
+# --- matching (audit §13 `matching`) -----------------------------------------
+spec::Constraint = Constraint
+spec::CapabilityValue = Capability matcher
+spec::KeyDecl = schema-driven
+spec::CoercionPolicy = coercion policy
+spec::Coercion = coercions
+spec::Warning = NEW: SB-38's non-fatal note, so a `warn` coercion has somewhere to land.
+spec::RejectedConstraint = NEW: SB-38's record of a constraint the bound instance could not satisfy.
+module_api::RejectedRequest = NEW: MA-11's record of a request the Provider refuses outright.
+binding::satisfies = Capability matcher
+binding::check_constraint_kind = Capability matcher
+plan::coercion_policy = coercion policy
+plan::apply_coercion = coercion policy
+
+# --- resources and binding (audit §13 `resources`, `spec/binding`) -----------
+module_api::Resource = Resource tree
+module_api::ProviderInstance = Resource tree
+binding::Binding = Binding resolution
+binding::BindingProfile = BindingProfile
+binding::Placements = NEW: SB-25's island, component and link assignment, which R21 keeps out of the Spec.
+binding::ComponentPlacement = NEW: SB-25's component-to-island and memory-domain entry.
+binding::LinkPlacement = NEW: SB-25's Link Module per graph link.
+binding::KERNEL_SECTIONS = environment
+binding::BINDING_TOP_LEVEL = BindingProfile
+spec::ExperimentSpec = ExperimentSpec envelope
+spec::SPEC_TOP_LEVEL = ExperimentSpec envelope
+spec::PLACEMENT_FIELDS = NEW: SB-13's field-name scan, which decision B3 makes mechanical rather than schema-trusting.
+spec::ENVIRONMENT_FIELD = NEW: the one field name SB-13 reports as EnvironmentInSpec.
+spec::SUPPORTED_VERSIONS = ExperimentSpec envelope
+spec::Requirements = NEW: SB-11's Vocabulary majors, the only content of `requirements`.
+spec::VocabularyReq = NEW: SB-11's one Vocabulary major a Spec's keys draw on.
+spec::ResourceReq = NEW: SB-12's per-resource requirement, direction asymmetry flattened into keys.
+spec::SubResourceReq = NEW: SB-36's `needs`, a capability a resource wants from elsewhere.
+spec::SpecGraph = ExperimentSpec envelope
+spec::SpecPolicies = ExperimentSpec envelope
+spec::SpecTime = NEW: SB-16's resource-relative offset, because a Spec cannot name a ClockDomainId.
+spec::ScheduleEntry = NEW: SB-16's scheduled ActionTemplate.
+spec::OutputReq = NEW: SB-17's declared artifact, whose source must have a placed Sink.
+spec::OutputSource = NEW: SB-17's port-or-resource source.
+spec::LinkReq = NEW: SB-15's graph link, with the policy and capacity SC-19 makes mandatory.
+spec::SpecError = NEW: the closed refusal set of SB-9 to SB-13 and SB-47.
+spec::Migration = ExperimentSpec envelope
+spec::MigrationRegistry = ExperimentSpec envelope
+spec::check_version = ExperimentSpec envelope
+spec::check_top_level = ExperimentSpec envelope
+spec::check_no_placement = NEW: SB-13's scan for placement and environment fields at any depth.
+session::check_placement_modules = NEW: SB-25a's refusal when a profile names a module for a Spec-declared component.
+
+# --- admission checks (audit §13 `spec/binding`) -----------------------------
+binding::AdmissionCheck = environment
+binding::AdmissionCheckRegistry = environment
+binding::CheckStage = NEW: SB-30's three points, so a coercion cannot move a value past a limit unchecked.
+binding::Violation = NEW: SB-29's refusal from a Vocabulary's own check.
+binding::AdmissionResult = NEW: SB-38's dry-run result: matched, rejected, violations, coercion preview.
+
+# --- lifecycle and the plan (audit §13 `lifecycle`) --------------------------
+plan::ExecutionPlan = ExecutionPlan
+plan::Fragment = fragments
+plan::DeclaredCost = NEW: SB-40's declared transfer cost, which the Core reports and never optimises against.
+plan::PrepareError = NEW: SB-42's transaction failure and SB-30's prepare-stage refusal are two different outcomes, and collect_prepare must be able to report either.
+plan::PrepareReport = PrepareReport
+plan::MergedPrepare = PrepareReport
+plan::arm_order = dependency DAG
+plan::release_order = dependency DAG
+plan::collect_prepare = PrepareReport
+plan::validate = validate
+plan = plan
+plan::plan = plan
+plan::CompileInputs = NEW: what SB-37's pipeline needs beyond the two documents.
+plan::IslandContext = ExecutionIsland admission
+plan::admit_islands = ExecutionIsland admission
+plan::check_cycles = NEW: MA-22's cycle rule, which no §13 line names.
+plan::EdgeKind = NEW: MA-22 needs to tell a stream edge from an Event or Action edge.
+plan::GraphEdge = NEW: MA-22's edge, with whether it crosses an Island boundary.
+plan::check_effective_narrows = NEW: MA-12's rule that `effective` may narrow and must not widen.
+plan::check_sink_links = NEW: SB-15's application of SC-21 over a plan's links.
+plan::sink_components = NEW: MA-25's resolution of the Sink role through the placement's `module`.
+
+# --- run, ownership and cleanup (audit §13 `lifecycle`, `ownership`) ---------
+run::RunState = Run state machine
+run::RunStateMachine = Run state machine
+run::TransitionRecord = Run state machine
+run::Stage = Run state machine
+run::Termination = Run state machine
+run::StopCause = cleanup policy
+run::CleanupMode = cleanup policy
+run::CleanupStep = cleanup policy
+run::CLEANUP_STEPS = cleanup policy
+run::CleanupOps = cleanup policy
+run::CleanupOutcome = cleanup policy
+run::CleanupFailure = NEW: RS-6 and RS-8a record each failed or abandoned step rather than stopping.
+run::DEFAULT_CLEANUP_DEADLINE_MS = NEW: RS-8a's Kernel default where a Provider declares no deadline.
+run::run_cleanup = cleanup policy
+run::Lease = Lease{Attached|Detached}
+run::LeaseMode = Lease{Attached|Detached}
+run::HostClock = NEW: RS-22 runs the TTL on an injectable host clock, because a Lease is a wall-clock fact.
+run::SystemHostClock = NEW: the real clock behind RS-22's injectable one.
+run::RunError = NEW: the closed refusal set of RS-4, RS-18, RS-20, RS-21, RS-24, RS-32 and RS-39.
+
+# --- session (audit §13 `lifecycle`) -----------------------------------------
+session::SessionAction = Run state machine
+session::LogEntry = Run state machine
+session::SessionLog = Run state machine
+session::Outcome = NEW: RS-15's per-entry verdict, without which a log cannot be audited.
+session::Admitter = NEW: RS-17's one admission path, shared by validate, prepare and every Action.
+session::Admitted = NEW: what RS-17 returns when it passes.
+session::Compiled = NEW: RS-14's compilation result: Kernel Actions, or a Lease or Run operation.
+session::ControlOp = NEW: RS-13's control-path acts, which the Kernel Action set deliberately excludes.
+session::compile = Run state machine
+session::implicit_spec = Run state machine
+session::resolve_scheduled = fragments
+
+# --- events and actions (audit §13 `events/actions`) -------------------------
+event::Event = Event envelope
+event::EventKind = kind
+event::Severity = severity
+event::EventRecord = counters
+event::EventCollector = counters
+event::EventHandle = counters
+event::EventSink = Event envelope
+event::CounterRow = counters
+event::DroppedPerKind = EVENTS_DROPPED
+event::HOT_PAYLOAD_BYTES = NEW: RS-32's inline payload limit, an in-process constant with no schema.
+event::HotLayout = NEW: RS-32a's declared hot-path layout and the schema it decodes to.
+policy::EventKindDecl = NEW: RS-28 puts a kind's default reaction where the kind is registered, not in the Kernel.
+policy::EventKindRegistry = NEW: RS-27's registry, so the thirteenth radio kind is not a Kernel change.
+policy::Policy = Policy table
+policy::Reaction = Policy table
+event::Action = Action set
+event::ActionId = NEW: RS-15 records which Kernel Actions an entry dispatched.
+event::ActionTemplate = NEW: RS-49a's Action without its time field, because a Spec cannot name a ClockDomainId.
+module_api::ActionReceiver = NEW: MA-14's inbound handle; MA-46 fixes it so a Plugin host needs no Kernel change.
+module_api::ActionSubmitter = NEW: MA-14a's outbound handle, without which a Reactor has no way to emit an Action.
+
+# --- manifest (audit §13 `spec/binding`) -------------------------------------
+manifest::Manifest = Manifest envelope
+manifest::ArtifactRef = Artifact reference
+manifest::ArtifactMark = NEW: RS-30's record of a `mark_artifact` reaction against an open artifact.
+hash::ContentHash = content hashes
+hash::HashError = NEW: the refusal set of OV-15's canonicaliser.
+hash::canonical_json = content hashes
+hash::serialize_finite_f64 = NEW: OV-15 binds Vocabulary documents too, and a Vocabulary crate with a float field cannot refuse a non-finite one without this guard.
+manifest::RunSection = Manifest envelope
+manifest::RunKind = NEW: RS-12 distinguishes a Session's implicit Spec from a Spec Run in the envelope.
+manifest::SpecSection = Manifest envelope
+manifest::BindingSection = Manifest envelope
+manifest::PrepareSection = Manifest envelope
+manifest::ClocksSection = Manifest envelope
+manifest::EventsSection = Manifest envelope
+manifest::TerminationSection = Manifest envelope
+manifest::ModuleEntry = ModuleId+version
+manifest::mark_open_artifacts = NEW: RS-30's marking of every artifact open at that moment.
+manifest::ingest_input = NEW: RS-44a turns a client's waveform into something hashable before the Action is admitted.
+
+# --- module API (audit §13 `module-api`) -------------------------------------
+module_api::Role = roles
+module_api::Provider = Provider
+module_api::Executor = Executor
+module_api::Sink = Sink
+module_api::Link = Link role
+module_api::Authority = TimeAuthority
+module_api::Deployment = NEW: MA-1's third axis; `Plugin` is reserved so a Plugin protocol later needs no Kernel change.
+module_api::ModuleDescriptor = ModuleId+version
+module_api::ModuleRef = ModuleId+version
+module_api::ProfileRef = NEW: SB-22's declared profile name and version, which Vision §59 bumps on measurement.
+module_api::ModuleRegistry = ModuleId+version
+module_api::VocabularyDescriptor = NEW: MA-35's four things the Kernel enforces on a Vocabulary's behalf without interpreting.
+module_api::VocabularyRequirement = NEW: MA-32's declared Vocabulary with its caret requirement.
+module_api::VerbDecl = NEW: RS-13a's Session verb, declared by the Vocabulary that owns it.
+module_api::CompileRule = NEW: RS-14's declared compilation, which keeps domain verbs out of the Kernel.
+module_api::Factories = NEW: MA-31's check that a Module's roles match the factories it registers.
+module_api::KERNEL_API = ModuleId+version
+module_api::Version = ModuleId+version
+module_api::VersionReq = ModuleId+version
+module_api::ComponentDescriptor = ComponentDescriptor
+module_api::ComponentKind = NEW: MA-36 separates a Processor from a Reactor, which MA-14a's submitter exists for.
+module_api::ComponentImpl = impl hash}
+module_api::ComponentRequires = NEW: MA-36's requirements-only half, with the placement left in the BindingProfile.
+module_api::ComponentTiming = timing
+module_api::ParamDecl = params+class
+module_api::UpdateClass = params+class
+module_api::UPDATE_CLASSES = params+class
+module_api::IslandDecl = ExecutionIsland admission
+module_api::RtPolicy = NEW: MA-38's real-time policy, which MA-39 then requires a budget for.
+module_api::ExecutorDescriptor = Executor
+module_api::SinkDescriptor = Sink
+module_api::LinkDescriptor = Link role
+module_api::AuthorityDescriptor = TimeAuthority
+module_api::Requested = Capability matcher
+module_api::CoerceReport = coercion policy
+module_api::PrepareContext = NEW: MA-6's handle set, which MA-46 freezes so a Plugin host needs no Kernel change.
+module_api::Endpoint = NEW: SC-19's attached link end, handed over at prepare.
+module_api::AttachedPort = NEW: which of a component's ports an Endpoint belongs to.
+module_api::StepOutcome = step(until) requirement
+module_api::SteppedRef = step(until) requirement
+module_api::SteppedInstance = step(until) requirement
+module_api::STEP_ROUND_CAP = NEW: MA-30's cap, so a zero-latency cycle raises STEP_LIVELOCK instead of hanging.
+module_api::step_until_quiescent = step(until) requirement
+module_api::StopMode = cleanup policy
+module_api::ModuleError = NEW: MA-9's only way a fault crosses a Module boundary.
+module_api::ModuleErrorKind = NEW: MA-9's five kinds, one of which spec 04's Policy maps to abort.
+module_api::Driving = NEW: MA-15 marks a Provider the coordinator steps; a hardware Provider never receives a step.
+
+# --- execution class and fidelity (audit §13 `execution class`) --------------
+module_api::ExecutionClass = ExecutionClass
+module_api::Pacing = NEW: MA-41 cross-checks the Authority's pacing, because a declared class could lie.
+module_api::RfPath = NEW: MA-41 derives the class from the environment's RF path.
+module_api::Fidelity = fidelity vector
+module_api::EnvelopeFidelity = fidelity vector
+module_api::CoercionFidelity = fidelity vector
+module_api::RfFidelity = fidelity vector
+module_api::TransportFidelity = fidelity vector
+
+# --- schema generation (00-overview §6) --------------------------------------
+schema::SCHEMA_MAJOR = ExperimentSpec envelope
+schema::generator = ExperimentSpec envelope
+schema::file_name = ExperimentSpec envelope
+schema::render = ExperimentSpec envelope
+contract::standard_contracts = DataContract registry

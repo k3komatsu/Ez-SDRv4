@@ -1,0 +1,71 @@
+{
+  "$defs": {
+    "ClockDomainId": {
+      "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Pacing": {
+      "description": "How a Time Authority paces its primary root; cross-checked against the derived\n[`ExecutionClass`] by MA-41 (MA-29, TM-16a1).",
+      "oneOf": [
+        {
+          "const": "free_running",
+          "description": "Virtual time advances as fast as the model allows: the Simulation class.",
+          "type": "string"
+        },
+        {
+          "const": "wall_paced",
+          "description": "Virtual time is paced against the wall clock: RealtimeEmulation, the class\nthat exists to expose real deadlines (TM-16a1).",
+          "type": "string"
+        },
+        {
+          "const": "device",
+          "description": "A device timekeeper drives the Run: HardwareInLoop or Hardware.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What an Authority declares (MA-29).",
+  "properties": {
+    "governs": {
+      "description": "The domains it advances: a primary root, that root's derived domains,\n`host.monotonic`, and for a simulation Authority every root it simulates\n(TM-16a, MA-29).",
+      "items": {
+        "$ref": "#/$defs/ClockDomainId"
+      },
+      "type": "array"
+    },
+    "pacing": {
+      "$ref": "#/$defs/Pacing",
+      "description": "How it paces its primary root; MA-41 cross-checks it (MA-29)."
+    }
+  },
+  "required": [
+    "governs",
+    "pacing"
+  ],
+  "title": "AuthorityDescriptor",
+  "type": "object"
+}

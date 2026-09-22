@@ -1,0 +1,113 @@
+{
+  "$defs": {
+    "DataContractId": {
+      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SC-2.",
+      "type": "string"
+    },
+    "Scalar": {
+      "description": "An attribute value in a [`DataContract`]. The Kernel stores these and never\ninterprets them, which is what keeps it from becoming a type system (SC-2).",
+      "oneOf": [
+        {
+          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
+          "properties": {
+            "kind": {
+              "const": "int",
+              "type": "string"
+            },
+            "value": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A 64-bit float, written per RFC 8785's number rule; a non-finite one is\nrefused rather than written as `null` (OV-15).",
+          "properties": {
+            "kind": {
+              "const": "float",
+              "type": "string"
+            },
+            "value": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A string.",
+          "properties": {
+            "kind": {
+              "const": "str",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A boolean.",
+          "properties": {
+            "kind": {
+              "const": "bool",
+              "type": "string"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A registered data contract: an id, a fixed attribute map, and the set of\nproducer contracts it accepts without conversion.\n\nRule: SC-2, SC-4.",
+  "properties": {
+    "attributes": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Scalar"
+      },
+      "description": "Attributes fixed at registration, for example `bytes_per_sample` (SC-4).",
+      "type": "object"
+    },
+    "compatible_from": {
+      "description": "Producer contracts this one accepts unconverted; empty at v4.0 (SC-3, SC-8).",
+      "items": {
+        "$ref": "#/$defs/DataContractId"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "id": {
+      "$ref": "#/$defs/DataContractId",
+      "description": "The namespaced id; identity is the id, not the shape (decision S7)."
+    }
+  },
+  "required": [
+    "id",
+    "attributes",
+    "compatible_from"
+  ],
+  "title": "DataContract",
+  "type": "object"
+}

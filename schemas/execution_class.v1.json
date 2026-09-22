@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What kind of Run this is, derived from the environment and cross-checked against\nthe Authority's [`Pacing`]; a class that was merely declared could lie.\n\nRule: MA-41, RS-42. Vision §14.",
+  "oneOf": [
+    {
+      "const": "simulation",
+      "description": "Simulation Engine, free-running, simulated RF path.",
+      "type": "string"
+    },
+    {
+      "const": "realtime_emulation",
+      "description": "Simulation Engine, wall-paced, simulated RF path.",
+      "type": "string"
+    },
+    {
+      "const": "hardware_in_loop",
+      "description": "Device timekeeper, cabled or partly simulated RF path.",
+      "type": "string"
+    },
+    {
+      "const": "hardware",
+      "description": "Device timekeeper, over the air.",
+      "type": "string"
+    }
+  ],
+  "title": "ExecutionClass"
+}

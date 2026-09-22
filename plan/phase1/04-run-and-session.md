@@ -67,7 +67,8 @@ Lease            { mode: Attached | Detached { ttl_ms: u64, renewable: bool },
                    token: optional, holder: optional, expires_at_host: optional, adoptions: u32 }
 
 Severity         debug | info | warning | error | fatal
-EventKind        a Namespace; the Kernel registers the four of RS-27, a Vocabulary the rest
+EventKind        dotted segments of [A-Za-z][A-Za-z0-9_]*; the Kernel registers the five of RS-27,
+                 a Vocabulary the rest, under that owner's namespace
 Reaction         continue | mark_artifact | stop | abort
 Policy           Map<EventKind, Reaction>
 Event            { source: ResourceId, time: TimePoint, severity: Severity,
@@ -318,7 +319,7 @@ Fixtures: the test-double Provider of `00-overview.md` OV-21 with a recording ca
 5. **§29 says event bodies "may be sampled or dropped".** Sampling and dropping are different mechanisms with different guarantees. Phase 1 implements dropping only (RS-34); subsampling, if it is ever wanted, is a Sink's policy.
 6. **§50 lists "random seeds" and an environment capture in the envelope** although the Kernel owns no generator and defines no capture content. RS-43 keeps both out of the envelope: the environment is recorded verbatim already, and the capture is a Module's section.
 8. **Vision §3's action log names `StartRepeat` and `Capture` as if they were Kernel vocabulary.** Both are domain verbs — `repeat` is a Radio Model capability in audit §13 and a recorder is a Sink — so RS-13a makes them namespaced Vocabulary verbs. The Session log and its replay are unchanged; only the Kernel's list of variants shrinks.
-9. **Vision §29's list of event kinds reads as a Kernel registry.** RS-27 keeps four of them in the Kernel, the ones it emits itself, and gives the rest to the Vocabulary that emits them, because §5's three tiers would otherwise make a new radio event kind a Kernel change.
+9. **Vision §29's list of event kinds reads as a Kernel registry.** RS-27 keeps in the Kernel only the kinds it emits itself or owns the policy for — of §29's own list, `PROCESSOR_DEADLINE_MISS` and, under §35's name, `DEVICE_LOST` — and gives the rest to the Vocabulary that emits them, because §5's three tiers would otherwise make a new radio event kind a Kernel change.
 7. **The Kernel Action set of §5 and §19 has no command to start a receive stream**, so a fixed Spec cannot say "start RX at time T" as an Action. It is expressed instead as `Provider::start(at)` plus a recorder parameter (RS-14). Either that reading is accepted, or the Action set gains a member, which would be a Kernel change; this is recorded as an open question in `00-overview.md`.
 
 ## 10. Deferred

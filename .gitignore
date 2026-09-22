@@ -5,3 +5,6 @@ v3/
 
 # macOS
 .DS_Store
+
+# Rust build output (Cargo.lock IS committed, see plan/phase1/00-overview.md OV-11)
+/target/

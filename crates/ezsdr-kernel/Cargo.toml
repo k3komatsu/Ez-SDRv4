@@ -1,0 +1,26 @@
+[package]
+name = "ezsdr-kernel"
+version = "4.0.0-alpha.1"
+description = "Ez-SDR v4 Kernel semantic model (Phase 1)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# 00-overview.md X6 / §8: exactly four direct dependencies. OV-18 governs additions.
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"          # OV-15: never enable `preserve_order`
+schemars = "1.2.2"              # OV-11: pinned in Cargo.lock, not by an `=` requirement
+sha2 = "0.11.0"
+
+# `cargo test` enables `testing` through this self dev-dependency, so OV-20's
+# ManualTimeAuthority is exercised without a flag while staying out of the default
+# shipped surface.
+[dev-dependencies]
+ezsdr-kernel = { path = ".", features = ["testing"] }
+
+[features]
+default = []
+# OV-20: ManualTimeAuthority is normative (TM-17a) and ships in `src/` behind this feature.
+testing = []

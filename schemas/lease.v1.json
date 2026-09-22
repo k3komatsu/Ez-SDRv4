@@ -1,0 +1,95 @@
+{
+  "$defs": {
+    "LeaseMode": {
+      "description": "Whether a Run survives its client's disconnection (RS-21).",
+      "oneOf": [
+        {
+          "description": "The Run ends when the client disconnects. The default (RS-21, RS-23).",
+          "properties": {
+            "kind": {
+              "const": "attached",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The Run survives the disconnect until the TTL expires (RS-21, RS-23).",
+          "properties": {
+            "kind": {
+              "const": "detached",
+              "type": "string"
+            },
+            "renewable": {
+              "description": "Whether `Renew` is allowed (RS-24).",
+              "type": "boolean"
+            },
+            "ttl_ms": {
+              "description": "How long, on the host monotonic clock (RS-22).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "ttl_ms",
+            "renewable"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Who holds a Run, and for how long (RS-21…RS-25).",
+  "properties": {
+    "adoptions": {
+      "description": "How many times it has been adopted (RS-24).",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "expires_at_host": {
+      "description": "When it expires, on the host monotonic clock (RS-22).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "holder": {
+      "description": "Who holds it now, uninterpreted by the Kernel (RS-24).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mode": {
+      "$ref": "#/$defs/LeaseMode",
+      "description": "Attached or Detached (RS-21)."
+    },
+    "released": {
+      "description": "Whether it has been released (RS-6, step 8).",
+      "type": "boolean"
+    },
+    "token": {
+      "description": "Issued at grant for a Detached Lease; only `Adopt { token }` reclaims it\n(RS-24, decision R5).",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "mode",
+    "adoptions",
+    "released"
+  ],
+  "title": "Lease",
+  "type": "object"
+}
