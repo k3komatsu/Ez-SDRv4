@@ -44,7 +44,10 @@ pub struct Binding {
     pub feed: Option<crate::spec::SinkFeed>,
 }
 
-/// Where a component runs (SB-25, SB-25a).
+/// Where a component runs (SB-25).
+// SB-25a, which put the Sink's Module in this struct, is withdrawn: an output is bound
+// rather than placed (D17, D18). Kept out of the doc comment because that text is the
+// schema's `description` and OV-10 freezes it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ComponentPlacement {
     /// Which Island (SB-25).

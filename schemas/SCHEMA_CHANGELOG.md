@@ -32,6 +32,15 @@ stock JCS crate cannot be dropped in later (OV-15, OV-15a).
 as an exact decimal by the canonicaliser; consumers are required to use a 64-bit-safe
 parser (X3).
 
+## v1 — 2026-09-22 — pre-freeze revision, exit-criterion-2 sweep
+
+Still **version 1**, for the reason the sections below give.
+
+- `binding_profile`: `ComponentPlacement`'s `description` no longer cites **SB-25a**,
+  which is withdrawn (OV-1 keeps its number). A description is part of the committed
+  contract a non-Rust consumer reads, so it was pointing them at a rule that states no
+  obligation. No field, type or constraint changed.
+
 ## v1 — 2026-09-22 — pre-freeze revision, adopted the D45–D50 verdicts
 
 Still **version 1**, for the reason the sections below give.

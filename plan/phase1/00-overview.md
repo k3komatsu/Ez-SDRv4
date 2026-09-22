@@ -765,6 +765,48 @@ Manifest is written" is not Kernel behaviour in Phase 1; `ma_39_island_admission
 reaches the within-Island memory-domain branch. Each needs a marker or a carrier, not a
 prefix.
 
+### Findings from the exit-criterion-2 sweep
+
+The per-rule OV-3 table criterion 2 asks for now exists, in
+[`exit-review/`](exit-review/README.md), one file per document: **261 rows for 261
+rules**, each produced by reading a test **body**. Its own summary carries the counts.
+The criterion is **not met** — the table's job was to make that visible, and it does: 15
+rules have no carrier at all and OV-3 itself has no settled disposition.
+
+Three classes of finding came out of it that no review pass had reached.
+
+**Twenty predicates with no caller in `src/` and no test.** The crate's recurring defect
+class (a) stood at seven instances after thirteen review passes; the sweep found thirteen
+more, because a function nothing calls and nothing tests is invisible to a review that
+starts from the tests. `TimePoint::checked_sub_duration`, `AbsoluteDeadline::remaining`
+(01); `DataContractId::as_str`, `BlockFlags::without`, `BlockFlags::bits`,
+`ChannelMask::bits`, `ChannelMask::is_empty`, `DataLink::policy`, `BurstTracker::domain`,
+`BurstTracker::records`, `ContinuityBuilder::is_lossless` (02); `binding::LinkPlacement`
+with `Placements.links`, a type rather than a function (03); `session::resolve_scheduled`,
+`EventCollector::dropped_per_kind` (04); `ModuleRegistry::vocabularies` (05). Verified by
+deleting each from a scratch copy and compiling. `dropped_per_kind`'s own doc comment
+claims "the tests assert RS-35's invariant against them", and no test exists. This is the
+list §12 step 0 was written to produce.
+
+**Nine rules name a checker that does not check them.** `TM-1` names `kernel_surface`,
+which has no float or field-type scan; `SC-31a` names `SampleBlock::new`, which has no
+`ALIGNMENT` logic and no test that constructs a block carrying the flag through it;
+`SB-44` names `sb_07_coercible_key_consults_provider`, which never calls `prepare`;
+`RS-13` names RS-14's tests, which never exercise `Release`/`Adopt`/`Renew`/`RunChild`;
+`RS-46` names `rs_45_hash_equal_for_equal_inputs`, which proves RS-45's property and not
+RS-46's — the real carrier, `rs_46_manifest_hash_is_stored_beside_the_body`, is cited
+nowhere; `MA-44` lists "an event generator" among what the test double provides, and
+`tests/support/doubles.rs` has no `EventSink` use and emits no `Event`. `SB-9a`, `RS-14`
+and `MA-45` are the same shape. A `*Checked:*` annotation has been a claim, not evidence.
+
+**The `GAP` rules split into two shapes**, and the difference decides what to do about
+them. A type exists and nothing reads it — `RS-32a`'s `hot_layout` is `None` everywhere
+with no reader, `SB-49`'s `original_version`/`original_hash` are never set — which is
+what D40 withdrew `constraints_hit` for. Or the subject does not exist yet: nothing
+implements `Link`, so `MA-27` and `MA-28` have nothing to check, and `SC-5`'s
+PerformanceEnvelope is Phase 2's. The second shape wants a `forward` marker, which only
+the owner may add, because the rules as written name Phase 1 behaviour.
+
 ## 12. What happens at acceptance (procedure only)
 
 1. `git mv plan/phase1/0{1,2,3,4,5}-*.md design/` — accepted normative text lives in `design/` per `AGENTS.md` §2. This file stays in `plan/phase1/`.
@@ -779,7 +821,7 @@ prefix.
 ## 13. Exit criteria
 
 1. Six documents accepted across three gates, and every decision-table row has a verdict in §11.
-2. Every normative obligation of every covered Vision section has a rule ID and no coverage table contains a gap, and every rule has an OV-3 disposition **recorded in the per-rule table OV-3 requires** — for an unmarked rule the test whose assertion is that rule's obligation, read from the test body; for a marked rule the marker and the phase or artefact. Counting rule-ID prefixes is not this criterion: a present prefix is neither necessary nor sufficient. Measured 2026-09-22 so the review knows its size: of 315 `#[test]` functions, **78** appear in no spec's test table — 19 of those are the `hashing`, `kernel_surface` and `schema_freeze` files this document names as groups rather than by test. The opposite direction is closed: every test name any spec cites now exists (`ma_42_fidelity_is_the_weakest` and `rs_49a_scheduled_action_is_a_template` were table rows with no function behind them and have been written).
+2. Every normative obligation of every covered Vision section has a rule ID and no coverage table contains a gap, and every rule has an OV-3 disposition **recorded in the per-rule table OV-3 requires** — for an unmarked rule the test whose assertion is that rule's obligation, read from the test body; for a marked rule the marker and the phase or artefact. Counting rule-ID prefixes is not this criterion: a present prefix is neither necessary nor sufficient. The table lives in [`exit-review/`](exit-review/README.md), one file per document. **It is complete — 261 rows for 261 rules, written 2026-09-22** — and the criterion is still **not met**: 15 rules have a `GAP` disposition, meaning nothing carries the obligation, and OV-3 itself has none, because D38's `process` marker was written for OV-4…OV-19 and excludes the rule that defines this table. Each needs a carrier, a marker the owner adds, or a withdrawal. Measured 2026-09-22 so the review knows its size: of 315 `#[test]` functions, **78** appear in no spec's test table — 19 of those are the `hashing`, `kernel_surface` and `schema_freeze` files this document names as groups rather than by test. The opposite direction is closed: every test name any spec cites now exists (`ma_42_fidelity_is_the_weakest` and `rs_49a_scheduled_action_is_a_template` were table rows with no function behind them and have been written).
 3. `cargo test` passes on the pinned MSRV and on stable, with no `#[ignore]` among the tests the five specs' test tables name, and the whole compile pipeline runs end to end against the test doubles with no Mock.
 4. `schemas/` is committed, `schema_freeze` passes, and `SCHEMA_CHANGELOG.md` has its v1 entry.
 5. `kernel_surface` passes: `src/` parses, every public item is on the allow-list with a specific audit §13 token or a `NEW:` justification, its doc comment cites a rule ID, and no token from `tests/banned_tokens.txt` appears outside a comment citing the ban. The review records the `NEW:` count as the Kernel-growth number.

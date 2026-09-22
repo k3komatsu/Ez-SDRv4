@@ -64,7 +64,7 @@
       "type": "object"
     },
     "ComponentPlacement": {
-      "description": "Where a component runs (SB-25, SB-25a).",
+      "description": "Where a component runs (SB-25).",
       "properties": {
         "island": {
           "$ref": "#/$defs/Ident",

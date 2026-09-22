@@ -535,7 +535,7 @@ pub fn validate(
     // SB-34: node -> the resource name that bound it, so a collision can name both.
     let mut taken: BTreeMap<ResourceId, Ident> = BTreeMap::new();
 
-    // Semantic validation (SB-2, SB-11, SB-15, SB-17, SB-18, SB-25a).
+    // Semantic validation (SB-2, SB-11, SB-15, SB-15a, SB-17, SB-18).
     spec.check_key_prefixes()?;
     // SB-11: `requirements.vocabularies` lists the Vocabulary **majors** this Spec's
     // keys belong to. Nothing read `major`, so a Spec declaring `test 2` ran against

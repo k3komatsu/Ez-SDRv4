@@ -87,7 +87,7 @@ Vision §67 の Phase 1．詳細設計は [plan/phase1/](plan/phase1/)．計画�
 
 このクレートが繰り返し出した欠陥型は2つある．
 
-**「正しい関数を誰も呼んでいない」** — 13巡で計8件（`admit_islands`・`check_cycles`・`check_sink_links`・`CheckStage::Prepare`・SB-46 の coercion policy・`ComponentDescriptor::validate`・`check_effective_narrows`，加えて `Value::check_nesting` の ASCII 規則）．8件目は10巡目の `Admitter::admit` で，これだけ**未適用**：RS-17 が名指しする呼び出し口を作るとルール本文の判断が要るので D45 として記録してある．対策として，各ルールの本文に**呼び出し場所を明記**した（SB-30 は3点すべて，SB-41 は MA-12 の2義務，MA-37 は `validate()`，MA-41 は比較箇所）．レビュー側の提言：「`src/` 内に呼び出し元のない predicate を grep する」を exit review の手順に入れること — 4巡で7件を出している．
+**「正しい関数を誰も呼んでいない」** — 13巡で計8件．さらに exit criterion 2 の per-rule 表を作る過程で**13件**が追加され，計**20件**になった（§11「Findings from the exit-criterion-2 sweep」）．テストから出発するレビューには原理的に見えない — 呼び出しもテストも無い関数だから．検出はスクラッチコピーから削除してビルドが通ることで確認している（`admit_islands`・`check_cycles`・`check_sink_links`・`CheckStage::Prepare`・SB-46 の coercion policy・`ComponentDescriptor::validate`・`check_effective_narrows`，加えて `Value::check_nesting` の ASCII 規則）．8件目は10巡目の `Admitter::admit` で，これだけ**未適用**：RS-17 が名指しする呼び出し口を作るとルール本文の判断が要るので D45 として記録してある．対策として，各ルールの本文に**呼び出し場所を明記**した（SB-30 は3点すべて，SB-41 は MA-12 の2義務，MA-37 は `validate()`，MA-41 は比較箇所）．レビュー側の提言：「`src/` 内に呼び出し元のない predicate を grep する」を exit review の手順に入れること — 4巡で7件を出している．
 
 **「ルールを初めて生かすと，そのルールが意図しないものを拒否する」** — P0 5件のうち4件がこれで，4件とも `collect_prepare` の中，しかも毎回別方向（merge を resource 別に解釈／coercion を構造的に拒否／Provider の自己申告で免除／coercion preview を key だけで引く）．
 
@@ -106,7 +106,7 @@ exit criteria（§13）の達成状況：
 | # | 条件 | 状態 |
 |---|---|---|
 | 1 | 6文書の受理と §11 の全 verdict | **verdict は全件記録済み**（X1–X12，各 spec の Decisions 表，未決事項1–7，findings D1–D33）．残るのは6文書の受理そのもの（§12） |
-| 2 | 全 rule に ID と OV-3 disposition | 未（exit review の作業）．**規模の実測（2026-09-22）**：`#[test]` 関数315個のうち **78個** はどの spec のテスト表にも載っていない（うち19個は hashing / kernel_surface / schema_freeze で，00-overview がグループとして名指ししている分）．逆向き（表が挙げるのに関数が無い）は**ゼロ**にした |
+| 2 | 全 rule に ID と OV-3 disposition | **表は完成，条件は未達**（2026-09-22）．[plan/phase1/exit-review/](plan/phase1/exit-review/README.md) に文書ごと1ファイル，**261ルールに261行**．内訳は default 206・process 18・producer 8・forward 6・withdrawn 6・consumer 1・**GAP 15**・OV-3 自身が UNCERTAIN 1．別に39セルが部分カバーの `UNCERTAIN:` 注記付き．**GAP 15件に carrier を付けるか，owner が marker を足すか，撤回するか**が残り．表を作ったこと自体の成果は §11「Findings from the exit-criterion-2 sweep」参照 — 呼び出し元ゼロの述語が7件から**20件**になり，9ルールが「自分を検査していない checker」を名指ししていた．**規模の実測（2026-09-22）**：`#[test]` 関数315個のうち **78個** はどの spec のテスト表にも載っていない（うち19個は hashing / kernel_surface / schema_freeze で，00-overview がグループとして名指ししている分）．逆向き（表が挙げるのに関数が無い）は**ゼロ**にした |
 | 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が double で端から端まで動く | **達成**（1.85.0 / stable ともに 315 passed，`#[ignore]` なし）．degenerate ではない：resource endpoint を含む graph が validate → plan を通り（`sb_15_a_bound_resource_port_is_a_link_endpoint`），Provider fragment は matched request を運び（`sb_39_a_provider_fragment_carries_the_matched_request`），Session は bound Sink を output として持つ（`rs_12_a_session_compiles_through_the_whole_pipeline`），coercion は accept/warn/reject の3分岐が到達可能（`sb_46_an_accepted_coercion_survives_prepare`） |
 | 4 | `schemas/` commit，`schema_freeze` 通過，`SCHEMA_CHANGELOG.md` の v1 entry | **達成** |
 | 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．件数は `cargo test --test kernel_surface -- --nocapture` が `OV-23b: Kernel growth = N NEW: items of M public items` で出す |
