@@ -775,10 +775,14 @@ rules have no carrier at all and OV-3 itself has no settled disposition.
 
 Three classes of finding came out of it that no review pass had reached.
 
-**Twenty predicates with no caller in `src/` and no test.** The crate's recurring defect
-class (a) stood at seven instances after thirteen review passes; the sweep found thirteen
-more, because a function nothing calls and nothing tests is invisible to a review that
-starts from the tests. `TimePoint::checked_sub_duration`, `AbsoluteDeadline::remaining`
+**Fifteen predicates with no caller in `src/` and no test.** The crate's recurring defect
+class (a) had produced seven instances over thirteen review passes, all of them since
+wired; these fifteen are additional and all still dead, because a function nothing calls
+and nothing tests is invisible to a review that starts from the tests. Note what they are
+**not**: thirteen of the fifteen are methods on public types, and the gate governs
+module-level items only — "a method on a public type is not a Kernel concept of its own"
+(OV-23b) — so deleting one shrinks the public API without moving the growth number, and
+only `LinkPlacement` and `resolve_scheduled` are allow-list entries. `TimePoint::checked_sub_duration`, `AbsoluteDeadline::remaining`
 (01); `DataContractId::as_str`, `BlockFlags::without`, `BlockFlags::bits`,
 `ChannelMask::bits`, `ChannelMask::is_empty`, `DataLink::policy`, `BurstTracker::domain`,
 `BurstTracker::records`, `ContinuityBuilder::is_lossless` (02); `binding::LinkPlacement`
@@ -810,6 +814,68 @@ what D40 withdrew `constraints_hit` for. Or the subject does not exist yet: noth
 implements `Link`, so `MA-27` and `MA-28` have nothing to check, and `SC-5`'s
 PerformanceEnvelope is Phase 2's. The second shape wants a `forward` marker, which only
 the owner may add, because the rules as written name Phase 1 behaviour.
+
+### Recommendations for the exit-criterion-2 open items — **pending the owner**
+
+A cross-family second opinion (Fable 5.1, 2026-09-22, under AGENTS.md §8's exception)
+was asked for verdicts on the 14 remaining `GAP` rules, on OV-3's own disposition and on
+the 15 predicates with no caller, **with the implementation procedure from Phase 1
+onwards as the lens**. Nothing below is adopted. `handoff.md` §4 carries the ordered work
+list; this section carries the reasoning, so that adopting a row does not require the
+report again.
+
+It corrected three premises of the question, each verified here afterwards:
+
+1. **Thirteen of the fifteen predicates are not allow-list entries.** The gate governs
+   module-level items only — its own words, "a method on a public type is not a Kernel
+   concept of its own" (OV-23b) — so deleting a method shrinks the public API without
+   moving the growth number. Only `LinkPlacement` and `session::resolve_scheduled` are
+   entries.
+2. **The freeze asymmetry is not uniform.** After v4.0, removing anything is breaking;
+   adding an inherent method is a minor release; adding a **schema field** is a v2 under
+   OV-12; adding a **trait method** breaks every implementor. So an inherent getter with
+   no Phase 2 caller can be deleted freely, while schema fields and trait methods must be
+   decided **now**, either way.
+3. **The count is fifteen, not twenty** — the earlier seven were all wired. The §11 text
+   above and `handoff.md` said twenty and have been corrected.
+
+On the four-shape classification: sound as a first cut, too coarse as a decision
+procedure. `SB-49`'s writer is definable in a dozen lines today, so it is shape A rather
+than B; `MA-8` is a `producer` obligation, not a type nothing reads; `SC-5` and `MA-3`
+bind the **Module author**, so their marker is `producer` and not `forward`; and shape D
+needs no new marker, because each of its four rules already has a mechanical or document
+carrier. "Only one item can be closed without an owner decision" undercounts: `SB-49`,
+`SC-1`, `SC-7`, `MA-16`, `OV-2` and the Kernel halves of `RS-1` and `RS-11` add carriers
+without amending any obligation.
+
+**The heaviest finding is that MA-19 is a defect, not a marker.** `IslandDecl.components`
+carries names only, `PrepareContext` holds no descriptors, and `spec.graph.components`
+never reaches the Executor — so **no Executor can reach a `ComponentImpl` through the
+typed API**, and the rule as written is unimplementable. A forward marker would leave the
+Phase 5 Reactor executor's author to decide how components reach an Executor **on a
+frozen ABI**, which is audit §14.3 verbatim. The recommendation is to add
+`PrepareContext.components` now — one field — and mark only the loading forward.
+
+| # | Item | Recommendation | Why, in one line |
+|---|---|---|---|
+| D51 | `RS-32a` | **withdraw** `HotLayout` and `EventKindDecl.hot_layout` | A JSON Schema is not a byte layout; decoding would make the Kernel read Vocabulary content (OV-21), and deferring lets MockRadio's first layout become the contract (§14.3) |
+| D52 | `SC-6` | **delete** the `MemoryDomain` struct, keep `MemoryDomainId` | The id is the Kernel concept; the kind — host, pinned, GPU, Vision §31's growing list — is Vocabulary content the Kernel is forbidden to read |
+| D53 | `SB-49` | **wire it**: `SpecSection::migrated` as the single writer | The meaning is crisp and the writer is a dozen lines; the first non-`None` value can only occur after the freeze, exactly when re-adding the fields would be a Manifest v2 |
+| D54 | `MA-8` | **`producer` marker**, Phase 2 | `Timeout` is a value a Module returns; the Kernel's half (`host_budget`, RS-8a) exists. Keep the variant: every real Module needs it and adding it later is a `module_error` v2 |
+| D55 | `SC-5` | **`producer` marker**, Phase 2; fix the name collision in the text | The Provider converts and reports the wire format; `ezsdr.stream.sc16` (SC-4) shares the spelling and is a host buffer layout, which the rule does not forbid |
+| D56 | `MA-27` | **split**: trait shape `default` (`ma_05_…`), sequencing `forward` (Phase 2) | D20's precedent; the first `impl Link` is the host-memory link that replaces `tests/support`'s `MemLink` when MockRadio feeds a recorder |
+| D57 | `MA-19` | **wire the ABI now** (`PrepareContext.components`), then `forward`/`producer` | See above: unimplementable as written, and a bare marker hands the decision to Phase 5 on a frozen ABI |
+| D58 | `RS-11` | **split**: assert `run_cleanup` reaches `ReleaseAndWriteManifest` from every stage; the writing is the coordinator's, `forward` | The step exists and is performed through `CleanupOps`; `manifest_fixture` proves `seal` (RS-46), not this rule |
+| D59 | `RS-1` | **split**: the document form is carried by `ov_22_schema_freeze` (TM-1's precedent) plus a `RunId::generate` test; the in-process composite is `forward` | **Open finding:** the "compiled Policy" RS-1 names appears nowhere in the Manifest — the profile's `policies` are recorded verbatim in `binding`, but the resolved table is not. INFERRED an omission against RS-38's intent; the owner should confirm, and if it belongs there it is a schema field |
+| D60 | `MA-3` | **`producer` marker**; a workspace `cargo metadata` test from Phase 2 | The Kernel cannot see crates, and the rule binds Module authors; the test is meaningful at the second Module crate |
+| D61 | `SC-7` | **gate check**: assert `#![forbid(unsafe_code)]` is present | The attribute *is* the construction that makes a `u64` handle underefencable; make its removal a red test rather than marking the rule "true by construction" |
+| D62 | `MA-16` | **gate check**: a `syn` scan refusing any role-trait method whose signature names another role trait | Unchecked structural claims rot — this crate's whole no-caller class is the evidence; closes MA-6's `UNCERTAIN` in the same stroke |
+| D63 | `SC-1` | **`default`**, carrier `ov_22_schema_freeze` | The committed schemas pin `Port` to three fields and `PortRef` to two; TM-1 was resolved on this same carrier |
+| D64 | `OV-2` | **`process` marker**; widen D38's range to "OV-2…OV-19" | Criterion 2's "no coverage table contains a gap" *is* OV-2 applied |
+| D65 | `OV-3` | **`process`**, carrier `exit-review/` plus criterion 2 | Not a decision: D38 wrote "OV-4…OV-19" before OV-2 and OV-3 were themselves dispositioned. One range edit in OV-3's own text |
+| D66 | the 15 predicates | **delete 8, keep 7** (see `handoff.md` §4) | Sharpest: `BurstTracker::records` should go because `records.push` **allocates on the Provider's TX path**, which SC-9 says allocates nothing, and `step` already returns every closed record |
+| D67 | `LinkPlacement` | **wire it now**, with a key grammar | Vision mandates it, the map's key is undefined (`LinkReq` has no id), and `admit_islands` accepts **any** registered Link, ignoring the profile's choice |
+| D68 | `cross_process` | **refuse `true` at registration in v4.0** (X7's pattern) | Still unread after `MA-28`'s test gave `connects` a reader; three lines give it one and a test |
 
 ## 12. What happens at acceptance (procedure only)
 

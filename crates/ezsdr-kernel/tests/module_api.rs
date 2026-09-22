@@ -897,3 +897,75 @@ fn ma_42_fidelity_is_the_weakest() {
     // RS-41: a Run with no bound Providers records the all-`none` vector, not `real`.
     assert_eq!(Fidelity::weakest(&[]), Fidelity::NONE);
 }
+
+#[test]
+fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
+    // MA-39's reachability check, and the only place `LinkDescriptor.connects`
+    // (MA-27, MA-28) is read: two components in **one** Island but in two memory
+    // domains are admitted only when a registered Link joins the pair. Every fixture
+    // that reached this check placed both components in the same domain, so the
+    // branch was unreached — the code existed and nothing ran it (exit-review GAP).
+    let components: BTreeMap<Ident, ComponentDescriptor> =
+        [(id("a"), component("a")), (id("b"), component("b"))].into_iter().collect();
+    // `b` sits in memory domain 1, `a` in 0.
+    let placements: BTreeMap<Ident, ComponentPlacement> =
+        [(id("a"), placement(0)), (id("b"), placement(1))].into_iter().collect();
+    let executors: BTreeMap<Ident, ExecutorDescriptor> = [(
+        id("exec"),
+        ExecutorDescriptor {
+            kind: ns("test.executor"),
+            memory_domains: vec![MemoryDomainId::local(0), MemoryDomainId::local(1)],
+            impl_kinds: vec![ns("test.impl")],
+            capabilities: BTreeMap::new(),
+        },
+    )]
+    .into_iter()
+    .collect();
+    let graph_links = vec![(
+        PortRef { component: "a".into(), port: "out".into() },
+        PortRef { component: "b".into(), port: "in".into() },
+        BackPressure::Block,
+    )];
+    let islands = vec![island(&["a", "b"], "exec")];
+    let no_resources = BTreeSet::new();
+
+    // No registered Link: the pair is unreachable and the Island is refused.
+    let none: Vec<ezsdr_kernel::module_api::LinkDescriptor> = Vec::new();
+    let ctx = IslandContext {
+        islands: &islands,
+        components: &components,
+        placements: &placements,
+        executors: &executors,
+        links: &none,
+        graph_links: &graph_links,
+        resource_endpoints: &no_resources,
+    };
+    let err = admit_islands(&ctx).expect_err("two domains, no Link");
+    assert!(err.message.contains("no registered Link connects them"), "{err}");
+
+    // A Link that joins the pair admits it — and the check is symmetric, so a Link
+    // declaring the reverse direction serves as well.
+    for connects in [
+        vec![(MemoryDomainId::local(0), MemoryDomainId::local(1))],
+        vec![(MemoryDomainId::local(1), MemoryDomainId::local(0))],
+    ] {
+        let joined = vec![ezsdr_kernel::module_api::LinkDescriptor {
+            kind: ns("test.link"),
+            connects,
+            policies: vec![BackPressure::Block],
+            cross_process: false,
+        }];
+        let ctx = IslandContext { links: &joined, ..ctx_clone(&ctx) };
+        admit_islands(&ctx).expect("a registered Link joins the two domains");
+    }
+
+    // A Link that joins some *other* pair does not help.
+    let elsewhere = vec![ezsdr_kernel::module_api::LinkDescriptor {
+        kind: ns("test.link"),
+        connects: vec![(MemoryDomainId::local(1), MemoryDomainId::local(2))],
+        policies: vec![BackPressure::Block],
+        cross_process: false,
+    }];
+    let ctx = IslandContext { links: &elsewhere, ..ctx_clone(&ctx) };
+    assert!(admit_islands(&ctx).is_err(), "a Link joining another pair is not this pair's");
+}
