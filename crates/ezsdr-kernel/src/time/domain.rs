@@ -299,7 +299,10 @@ impl ClockRegistry {
         match self.get(root)?.kind {
             ClockDomainKind::Root { .. } => {}
             ClockDomainKind::Derived { .. } => {
-                return Err(TimeError::Unrelated { a: root, b: root });
+                // `Unrelated { a: root, b: root }` named one domain twice and said
+                // "different roots" of a single domain. A SampleClock hangs off a
+                // Root (TM-13a); naming a Derived one is that, and nothing else.
+                return Err(TimeError::NotARoot { id: root });
             }
         }
         Ok(SampleClockHandle { id: self.allocate_id(), root, root_ticks_per_tick, stream })

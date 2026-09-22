@@ -81,8 +81,23 @@ impl PartialEq for Scalar {
         match (self, other) {
             (Scalar::Int(a), Scalar::Int(b)) => a == b,
             (Scalar::Float(a), Scalar::Float(b)) => a == b,
+            // Compared exactly, never through `as f64`: above 2^53 that cast made
+            // two values with different canonical forms and different hashes
+            // compare equal, so `ContractRegistry::register` took a genuinely
+            // different definition for an idempotent re-registration and discarded
+            // it without a diagnostic (SC-2). It also made equality non-transitive.
+            // Equal iff the two share one canonical form under OV-15. Below 2^53
+            // every integer is uniquely representable as an `f64`, so no shorter
+            // decimal round-trips to it and the integer profile's exact decimal and
+            // `ecmascript_number`'s shortest round-trip agree. At or above it they
+            // diverge: `i64::MIN` and -2^63 are the same number and `try_from`
+            // succeeds, but the canonicaliser writes `-9223372036854775808` and
+            // `-9223372036854776000`, so accepting them as equal let SC-2 take a
+            // genuinely different definition for a re-registration again.
             (Scalar::Int(a), Scalar::Float(b)) | (Scalar::Float(b), Scalar::Int(a)) => {
-                *a as f64 == *b
+                b.fract() == 0.0
+                    && b.abs() <= 9_007_199_254_740_992.0
+                    && i64::try_from(*b as i128).is_ok_and(|w| w == *a)
             }
             (Scalar::Str(a), Scalar::Str(b)) => a == b,
             (Scalar::Bool(a), Scalar::Bool(b)) => a == b,
@@ -188,6 +203,19 @@ impl ContractRegistry {
                 Ok(())
             }
         }
+    }
+
+    /// Every registered id, which MA-37's structural check compares a component's
+    /// port contracts against.
+    ///
+    /// Rule: SC-2, MA-37.
+    pub fn ids(&self) -> Vec<DataContractId> {
+        self.contracts
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// The registered contract, if any (SC-2).

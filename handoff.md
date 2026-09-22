@@ -74,8 +74,19 @@ Vision §67 の Phase 1．詳細設計は [plan/phase1/](plan/phase1/)．計画�
 | 2 | spec 03 + 04 + 05 + D3/D5 | P0 3件，P1 12件，P2 9件 | 全件修正．P0 は「Session が一切 compile できない」「matcher が sub-resource を二重予約」「未知 source の `DEVICE_LOST` が abort を黙らせる」 |
 | 3 | 1・2 の修正の検証 | 20/28 clean，5 partial，新規 P0 1件 + P1 3件 + P2 7件 | 全件修正．新規 P0 は `Value::Num` が同じ非有限の穴（1巡目の修正が4つのうち3つしか塞いでいなかった） |
 | 4 | §11 の全判定項目 112件（Fable 5.1，AGENTS.md §8 の second opinion 例外） | confirm 91・amend 15・reverse 1・not-a-decision 5 | 全件をユーザ判定として §11 に採用．表に無い発見14件のうち5件（D31–D33 + D17/D18 の改訂）を §11 に追記 |
+| 5 | crate 全体（`e8d5caa` の diff 重点） | P0 1・P1 11・P2 12 | 全件修正．P0 は `validate()` が RF envelope 違反を報告しても `plan()` が arm 可能な plan を返していた（`AdmissionResult::into_result` に src 内の呼び出し元ゼロ） |
+| 6 | 5巡目の修正の検証＋修正への攻撃 | P0 1・P1 5・P2 11 | 全件修正．**P0 は5巡目の修正が入れた回帰** — MA-12 の再マッチが `merged.effective` を読み，2チャネル Spec が互いを拒否 |
+| 7 | 独立レビュー（前2巡が見ていない領域） | P0 1・P1 7・P2 12 | 全件修正．**P0 はまた `collect_prepare`** — 再マッチを全 key に適用し，coercion を構造的に必ず拒否．SB-46 の `accept`/`warn` が到達不能だった |
+| 8 | 2点集中（coercion 除外と surface gate） | P0 1・P1 2・P2 9 | 全件修正．P0 は除外を Provider 自己申告の `coercions` で判定していた件（key を並べれば MA-12 を自己免除でき，Manifest が適用値と違う値を記録した） |
+| 9 | 8巡目の修正の検証 | **P0 ゼロ**・P1 2・P2 9 | `collect_prepare` から4巡ぶりに指摘なし．P1 2件はどちらも私の書いた箇所（ZST Provider でのポインタ判定，gate の残穴5通り）で修正済み |
 
-レビューの主要な発見は「pipeline の各段が関数としては正しいのに誰も呼んでいない」型の欠陥だった（`admit_islands`・`check_cycles`・`check_sink_links`・`CheckStage::Prepare` が全て未接続）．現在は `plan()` と `collect_prepare()` から呼ばれる．`kernel_surface` は3巡目に2通りの回避を実演されたので，brace 深さで module 階層を追う方式に書き換えた（inline `mod` と private `mod` + `pub use` の両方を検出．回避の再現は scratch copy で確認済み）．
+このクレートが繰り返し出した欠陥型は2つある．
+
+**「正しい関数を誰も呼んでいない」** — 9巡で計7件（`admit_islands`・`check_cycles`・`check_sink_links`・`CheckStage::Prepare`・SB-46 の coercion policy・`ComponentDescriptor::validate`・`check_effective_narrows`，加えて `Value::check_nesting` の ASCII 規則）．対策として，各ルールの本文に**呼び出し場所を明記**した（SB-30 は3点すべて，SB-41 は MA-12 の2義務，MA-37 は `validate()`，MA-41 は比較箇所）．レビュー側の提言：「`src/` 内に呼び出し元のない predicate を grep する」を exit review の手順に入れること — 3巡で6件を出している．
+
+**「ルールを初めて生かすと，そのルールが意図しないものを拒否する」** — P0 4件のうち3件がこれで，3件とも `collect_prepare` の中，しかも別方向（merge を resource 別に解釈／coercion を構造的に拒否／Provider の自己申告で免除）．いまは prepare 段のチェックの入力が parse 済み文書か Kernel が validate で計算した値だけになっている．
+
+`kernel_surface` は5巡で5組の回避を実演された．いずれも「**接頭辞照合は綴りであり，綴りは改行で割れる**」という同じ形だったので，接頭辞照合を全廃した：宣言は行と次行に跨る**トークン列**として読み，lex できない構文は**トークンとして拒否**し，その上に「スキャン自身が frame 均衡で終わったこと」を assert する（brace クラスを綴りでなく原因で閉じる）．**実演された11通りすべてを scratch copy で捕獲確認．**この gate が macro 経由で隠していた public item が2件あった（`id.rs` の4つの id 型と `schema::document_schemas`）ので，X11 の「allow-list が review checklist である」は事実として偽だった．
 
 exit criteria（§13）の達成状況：
 
@@ -83,7 +94,7 @@ exit criteria（§13）の達成状況：
 |---|---|---|
 | 1 | 6文書の受理と §11 の全 verdict | **verdict は全件記録済み**（X1–X12，各 spec の Decisions 表，未決事項1–7，findings D1–D33）．残るのは6文書の受理そのもの（§12） |
 | 2 | 全 rule に ID と OV-3 disposition | 未（exit review の作業） |
-| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が double で端から端まで動く | **達成**（1.85.0 / stable ともに 269 passed，`#[ignore]` なし）．degenerate ではない：resource endpoint を含む graph が validate → plan を通り（`sb_15_a_bound_resource_port_is_a_link_endpoint`），Provider fragment は matched request を運び（`sb_39_a_provider_fragment_carries_the_matched_request`），Session は bound Sink を output として持つ（`rs_12_a_session_compiles_through_the_whole_pipeline`） |
+| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が double で端から端まで動く | **達成**（1.85.0 / stable ともに 293 passed，`#[ignore]` なし）．degenerate ではない：resource endpoint を含む graph が validate → plan を通り（`sb_15_a_bound_resource_port_is_a_link_endpoint`），Provider fragment は matched request を運び（`sb_39_a_provider_fragment_carries_the_matched_request`），Session は bound Sink を output として持つ（`rs_12_a_session_compiles_through_the_whole_pipeline`），coercion は accept/warn/reject の3分岐が到達可能（`sb_46_an_accepted_coercion_survives_prepare`） |
 | 4 | `schemas/` commit，`schema_freeze` 通過，`SCHEMA_CHANGELOG.md` の v1 entry | **達成** |
 | 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．件数は `cargo test --test kernel_surface -- --nocapture` が `OV-23b: Kernel growth = N NEW: items of M public items` で出す |
 | 6 | 直接依存が §8 の4 crate ちょうど | **達成** |
@@ -100,6 +111,16 @@ D1, D6, D11, D14）は encoding の帰結と fixture note で，裁定を要し�
 | (i) prose / コードのみ，rule text を変えない | D15・D24・S1・B4・OQ4 | **適用済み**（2026-09-22） |
 | (ii) rule text を変えるが freeze 前で自己完結 | OQ2・R10・D8・D16・D22・D23・D25・D26・D27・D32・D33，および D17 + D18 + D31 + D29 のクラスタ | **適用済み**（2026-09-22） |
 | (iii) 待ち | confirm が含意する Vision 編集（OV-6 のため §12 手続き），および Phase 2 の値を要する2件（resource port の producer 側 memory domain，port contract と format coercion の関係） | 未（§12 / Phase 2） |
+
+**§11 の verdict は D1–D44 まで全件記録済み**（D34–D44 と X11 の扱いは 2026-09-22 の Fable 5.1 second opinion を採用）．採用に伴い次を適用した：`Value` の cross-kind 等価・比較を正確化（D34），`to_root` が非整数 tick の schedule を拒否（D35），`BurstStep::Discontinuity.then_ended`（D36），schedule entry の `target` 検査と「Spec target は Spec 相対」の明文化（D37），OV-3 に4つ目の marker と exit criterion 2 を per-rule 表へ（D38/D39），`constraints_hit` 削除（D40，schema 変更），`coerce` は node あたり1回・map 全体で呼ぶ（D41），要求していない key の coercion は malformed report（D42），`SessionLog::append` が不正な Action を拒否（D43），**instance identity は binding description**（D44，ポインタ比較を廃止）．
+
+**X11 は半分だけ反転した．** `cargo public-api` の却下は維持し，`syn` ベースのスキャナの却下を撤回して `kernel_surface` を `syn::parse_file` に載せ替えた．決め手は**このプロジェクトが実際に回すループの中での失敗の形**：手書き lexer は**黙って**失敗し（5巡で11通り，うち2つは出荷中の public item を隠していた），`cargo public-api` は大声で失敗するが `cargo test` の**外**（X12 が管理しない nightly．CI が無い段階では「動かない gate」は「省かれた gate」），`syn` は MSRV toolchain 上の `cargo test` の**中**で大声で失敗する．OV-18 を当てると `syn` は全条項を満たす — 手書きの代替は709行，MSRV 1.71，**新規 transitive crate ゼロ**（`serde_derive`/`schemars_derive` 経由で既に解決済み，`Cargo.lock` の差分は1行）．X11 はこの代替を記録していながら，自分で書いた OV-18 を当てずに却下していた．gate は 709 → 499 行になり，実演された回避15通りすべてを捕獲する（1つは `#![forbid(unsafe_code)]` がより手前で拒否）．
+
+**コードレビューは9巡で収束した**（5–9巡目は crate に対する敵対的レビュー）．9巡目で初めて P0 ゼロ，`collect_prepare` からも4巡ぶりに指摘なし．9巡目の結論は「**crate は収束．gate は収束していないが，それは足し算では収束しない**」で，`kernel_surface` の残る問いはコードではなく**道具の選択**：
+
+> **`cargo public-api` を採るか．** X11 は nightly rustdoc JSON を理由に却下したが，5巡分の回避はその選択の代価．gate は現在，隠せる構文に対して総当たり的に閉じており，自分が mis-lex したら frame 均衡の assert で大声で落ちる．それでも依然としてテストファイル内の行ベーススキャナである．この答えが OV-23 と X11 の一文の去就を決める．
+
+§11 の verdict は D1–D44 まで**全件記録済み**で，未適用の判定は残っていない．
 
 bin (ii) で構造が変わった点（spec 03/04/05 と crate，schema 7件を再生成）：
 

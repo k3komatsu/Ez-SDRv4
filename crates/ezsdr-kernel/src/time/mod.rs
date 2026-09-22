@@ -46,6 +46,11 @@ pub enum TimeError {
         /// The domain that was supplied.
         found: ClockDomainId,
     },
+    /// A `Root` domain was required and a `Derived` one was named (TM-13a).
+    NotARoot {
+        /// The domain named.
+        id: crate::id::ClockDomainId,
+    },
     /// The two domains have different roots, so only a `ClockRelation` connects them (TM-5).
     Unrelated {
         /// One domain.
@@ -103,6 +108,7 @@ impl fmt::Display for TimeError {
             TimeError::DomainMismatch { expected, found } => {
                 write!(f, "time domain mismatch: expected {expected}, found {found}")
             }
+            TimeError::NotARoot { id } => write!(f, "{id} is not a Root domain"),
             TimeError::Unrelated { a, b } => write!(f, "{a} and {b} have different roots"),
             TimeError::Inexact { floor } => write!(f, "conversion is inexact; floor is {floor}"),
             TimeError::Overflow => f.write_str("tick arithmetic overflowed"),

@@ -219,6 +219,9 @@ pub struct TestProvider {
     pub log: Mutex<Vec<String>>,
     /// How many times `coerce` was called (MA-11).
     pub coerce_calls: AtomicU64,
+    /// The last request `coerce` was handed, so a test can assert SB-7's "one call
+    /// with the whole map" rather than only the call count (SB-7, SB-44).
+    pub last_request: Mutex<Option<Requested>>,
     /// The Actions the coordinator dispatched to it (MA-14).
     pub actions: Mutex<Vec<Action>>,
     /// Makes `prepare` report something `coerce` did not, so that MA-12's equality
@@ -241,11 +244,13 @@ impl TestProvider {
             // A line is one physical channel: exclusive, like SB-34's default.
             shareable: false,
             // A stream endpoint declares its Ports, so a Spec can link this node to
-            // a component (MA-10, SB-15).
+            // a component (MA-10, SB-15). A **line** carries `sc16` while the device
+            // root below carries `cf32` under the same port name, so a test can tell
+            // whether SB-15 resolved the port on the bound node or on some other.
             ports: vec![Port {
                 name: "rx".to_owned(),
                 direction: PortDirection::Out,
-                contract: DataContractId::parse("ezsdr.iq.cf32").expect("a valid literal"),
+                contract: DataContractId::parse("ezsdr.stream.sc16").expect("a valid literal"),
             }],
         };
         TestProvider {
@@ -278,7 +283,14 @@ impl TestProvider {
                     .collect(),
                     children: vec![line(&root, 0), line(&root, 1)],
                     shareable: false,
-                    ports: Vec::new(),
+                    // The device-level stream endpoint, which a Session's implicit
+                    // Spec binds because RS-12 takes the instance's root kind.
+                    ports: vec![Port {
+                        name: "rx".to_owned(),
+                        direction: PortDirection::Out,
+                        contract: DataContractId::parse("ezsdr.stream.cf32")
+                            .expect("a valid literal"),
+                    }],
                 },
                 fidelity: Fidelity::NONE,
                 driving: Driving { stepped: false },
@@ -289,6 +301,7 @@ impl TestProvider {
             fail_at: FailAt::Never,
             log: Mutex::new(Vec::new()),
             coerce_calls: AtomicU64::new(0),
+            last_request: Mutex::new(None),
             actions: Mutex::new(Vec::new()),
             prepare_disagrees: false,
         }
@@ -377,6 +390,7 @@ impl Provider for TestProvider {
 
     fn coerce(&self, request: &Requested) -> Result<CoerceReport, ModuleError> {
         self.coerce_calls.fetch_add(1, Ordering::Relaxed);
+        *self.last_request.lock().unwrap_or_else(|e| e.into_inner()) = Some(request.clone());
         let mut report = CoerceReport::default();
         for (k, c) in &request.constraints {
             let Constraint::Eq { value: v } = c else { continue };
@@ -417,7 +431,6 @@ impl Provider for TestProvider {
             effective: report.applied,
             coercions,
             warnings: Vec::<Warning>::new(),
-            constraints_hit: Vec::new(),
         })
     }
 
@@ -503,7 +516,6 @@ impl Executor for TestExecutor {
             effective: BTreeMap::new(),
             coercions: Vec::new(),
             warnings: Vec::new(),
-            constraints_hit: Vec::new(),
         })
     }
 
@@ -577,7 +589,6 @@ impl Sink for TestSink {
             effective: BTreeMap::new(),
             coercions: Vec::new(),
             warnings: Vec::new(),
-            constraints_hit: Vec::new(),
         })
     }
 

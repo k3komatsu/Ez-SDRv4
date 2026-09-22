@@ -52,6 +52,67 @@ fn t(ticks: i64) -> TimePoint {
 // ---------------------------------------------------------------- contracts
 
 #[test]
+fn sc_02_scalar_equality_is_exact_across_int_and_float() {
+    use ezsdr_kernel::contract::{DataContract, DataContractId, Scalar};
+    // OV-15a accepts that `20` and `20.0` are one value with one canonical form and
+    // one hash. It does **not** accept that two values with *different* canonical
+    // forms compare equal: comparing through `as f64` made 2^53+1 equal to 2^53, so
+    // SC-2's "registering a different definition under an existing id fails" took a
+    // genuinely different definition for an idempotent re-registration and discarded
+    // it with no diagnostic. Equality was also not transitive.
+    assert_eq!(Scalar::Int(20), Scalar::Float(20.0), "OV-15a's accepted case");
+    assert_ne!(Scalar::Int(20), Scalar::Float(20.5));
+    assert_ne!(
+        Scalar::Int(9_007_199_254_740_993),
+        Scalar::Float(9_007_199_254_740_992.0),
+        "2^53+1 is not 2^53"
+    );
+    assert_eq!(Scalar::Int(9_007_199_254_740_992), Scalar::Float(9_007_199_254_740_992.0));
+    // Nothing panics at the edges.
+    assert_ne!(Scalar::Int(1), Scalar::Float(1e30));
+    assert_ne!(Scalar::Int(0), Scalar::Float(f64::NAN));
+    assert_ne!(Scalar::Int(0), Scalar::Float(f64::INFINITY));
+
+    // The rule, not a list of cases: two `Scalar`s are equal **iff** they share one
+    // canonical form. `i64::MIN` is the boundary this replaces a case list for —
+    // -2^63 *is* `i64::MIN`, so an exact integer round-trip accepts the pair, while
+    // the canonicaliser writes `-9223372036854775808` and `-9223372036854776000`.
+    let vectors = [
+        (0i64, 0.0f64),
+        (20, 20.0),
+        (20, 20.5),
+        (-1, -1.0),
+        (9_007_199_254_740_992, 9_007_199_254_740_992.0),
+        (9_007_199_254_740_993, 9_007_199_254_740_992.0),
+        (i64::MAX, 9_223_372_036_854_775_808.0),
+        (i64::MIN, -9_223_372_036_854_775_808.0),
+    ];
+    for (a, b) in vectors {
+        let (si, sf) = (Scalar::Int(a), Scalar::Float(b));
+        let one_form = ezsdr_kernel::hash::ContentHash::of(&si).ok()
+            == ezsdr_kernel::hash::ContentHash::of(&sf).ok();
+        assert_eq!(si == sf, one_form, "Int({a}) vs Float({b}): equality must mean one hash");
+    }
+
+    // SC-2 through the registry: the two definitions differ, so the second is refused
+    // rather than silently discarded.
+    let id = DataContractId::parse("test.exact").expect("id");
+    let of = |v: Scalar| DataContract {
+        id: id.clone(),
+        attributes: [("full_scale".to_owned(), v)].into_iter().collect(),
+        compatible_from: Default::default(),
+    };
+    let reg = ezsdr_kernel::contract::ContractRegistry::new();
+    reg.register(of(Scalar::Int(9_007_199_254_740_993))).expect("first");
+    assert!(
+        reg.register(of(Scalar::Float(9_007_199_254_740_992.0))).is_err(),
+        "a different definition under an existing id fails"
+    );
+    // The genuinely identical one is still a no-op.
+    reg.register(of(Scalar::Int(9_007_199_254_740_993))).expect("idempotent");
+}
+
+#[test]
 fn sc_04_standard_contracts_fixture() {
     let reg = ContractRegistry::with_standard_contracts();
     let cf32 = reg.get(&cf32()).expect("cf32 registered");
@@ -405,7 +466,7 @@ fn sc_24_burst_forward_jump_is_discontinuity() {
     let mut tr = BurstTracker::new(dom());
     tr.on_block(&tx(1000, 100, BlockFlags::START_OF_BURST), open()).expect("start");
     let step = tr.on_block(&tx(1300, 100, BlockFlags::NONE), None).expect("recovers");
-    let BurstStep::Discontinuity { expected, got, closed } = step else { panic!("expected a discontinuity") };
+    let BurstStep::Discontinuity { expected, got, closed, .. } = step else { panic!("expected a discontinuity") };
     assert_eq!((expected, got), (t(1100), t(1300)));
     assert_eq!(closed.end, BurstEnd::Discontinuity);
     assert_eq!(closed.samples, 100);
@@ -425,7 +486,7 @@ fn sc_24_burst_sob_inside_burst() {
     let mut tr = BurstTracker::new(dom());
     tr.on_block(&tx(1000, 100, BlockFlags::START_OF_BURST), open()).expect("start");
     let step = tr.on_block(&tx(1100, 100, BlockFlags::START_OF_BURST), open()).expect("recovers");
-    let BurstStep::Discontinuity { expected, got, closed } = step else { panic!("expected a discontinuity") };
+    let BurstStep::Discontinuity { expected, got, closed, .. } = step else { panic!("expected a discontinuity") };
     assert_eq!((expected, got), (t(1100), t(1100)));
     assert_eq!(closed.samples, 100);
     assert!(matches!(tr.state(), BurstState::InBurst { target, .. } if target == t(1100)));
@@ -514,6 +575,35 @@ fn sc_29a_late_and_actual_start_reach_the_record() {
     assert_eq!(record.late_by, Some(late_by));
     assert_eq!(record.actual_start, Some(t(1003)));
     assert_eq!(record.wraps, 1);
+}
+
+#[test]
+fn sc_24_a_discontinuity_that_also_ends_reports_both_records() {
+    // A block whose time jumped **and** which carried END_OF_BURST does two things:
+    // it closes the open burst and opens-and-ends another. The return value used to
+    // name only the first, so a caller tracking state from it believed a burst was
+    // open while `state()` said `Idle` (finding D36).
+    let mut tr = BurstTracker::new(dom());
+    tr.on_block(&tx(1000, 100, BlockFlags::START_OF_BURST), open()).expect("start");
+    let step = tr
+        .on_block(&tx(1300, 100, BlockFlags::END_OF_BURST), None)
+        .expect("jumps and ends");
+    let BurstStep::Discontinuity { expected, got, closed, then_ended } = step else {
+        panic!("expected a discontinuity")
+    };
+    assert_eq!((expected, got), (t(1100), t(1300)));
+    assert_eq!(closed.end, BurstEnd::Discontinuity);
+    let ended = then_ended.expect("the same block ended the burst it opened");
+    assert_eq!(ended.end, BurstEnd::Eob);
+    assert_eq!(ended.target, t(1300));
+    // And the return value agrees with the tracker.
+    assert!(matches!(tr.state(), BurstState::Idle));
+
+    // A plain discontinuity still reports no second record.
+    let mut tr = BurstTracker::new(dom());
+    tr.on_block(&tx(1000, 100, BlockFlags::START_OF_BURST), open()).expect("start");
+    let step = tr.on_block(&tx(1300, 100, BlockFlags::NONE), None).expect("jumps");
+    assert!(matches!(step, BurstStep::Discontinuity { then_ended: None, .. }));
 }
 
 #[test]

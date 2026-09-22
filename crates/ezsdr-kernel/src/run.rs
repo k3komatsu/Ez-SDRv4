@@ -152,10 +152,30 @@ pub enum RunError {
     /// `Adopt` with the wrong token. Adoption by run id alone would let any client
     /// seize a live transmitter (RS-24).
     AdoptRejected,
-    /// The kind is not registered, or is already registered (RS-27, SB-18).
+    /// The kind is not registered (RS-27, SB-18).
     UnknownEventKind {
         /// The kind named.
         kind: String,
+    },
+    /// The kind is already registered, which RS-27 refuses rather than overwriting
+    /// a Vocabulary's declaration with another's (RS-27, SB-18).
+    EventKindAlreadyRegistered {
+        /// The kind named.
+        kind: String,
+    },
+    /// A Module's section carries a key the canonicaliser cannot order, so the
+    /// Manifest could not be written after the Run had already transmitted (RS-39,
+    /// RS-11, SB-9a, OV-15).
+    SectionKeyNotAscii {
+        /// The offending key.
+        key: String,
+    },
+    /// An `EventHandle` names a counter row the table does not have. Its fields are
+    /// public, so a Module can fabricate one; the Kernel returns this rather than
+    /// panicking (RS-32, MA-9).
+    BadEventHandle {
+        /// The row named.
+        row: u32,
     },
     /// A Module wrote under another Module's namespace (RS-39).
     SectionNamespaceForbidden {
@@ -191,6 +211,15 @@ impl fmt::Display for RunError {
             RunError::LeaseNotRenewable => f.write_str("this Lease is not renewable"),
             RunError::AdoptRejected => f.write_str("the adoption token does not match"),
             RunError::UnknownEventKind { kind } => write!(f, "event kind {kind:?} is not registered"),
+            RunError::EventKindAlreadyRegistered { kind } => {
+                write!(f, "event kind {kind:?} is already registered")
+            }
+            RunError::SectionKeyNotAscii { key } => {
+                write!(f, "section key {key:?} is not ASCII, which OV-15 cannot canonicalise")
+            }
+            RunError::BadEventHandle { row } => {
+                write!(f, "event handle names row {row}, which the counter table does not have")
+            }
             RunError::SectionNamespaceForbidden { ns } => {
                 write!(f, "a Module may write only under {ns:?}")
             }
@@ -355,7 +384,11 @@ impl Lease {
             LeaseMode::Attached => Some(StopCause::ClientDisconnect),
             LeaseMode::Detached { ttl_ms, .. } => {
                 self.holder = None;
-                self.expires_at_host = Some(clock.monotonic_millis() + ttl_ms);
+                // `Lease` is a document type (OV-10), so `ttl_ms` is whatever a
+                // profile wrote. An unchecked add panicked in debug and, in release,
+                // wrapped to a small instant so `expired()` was true at once and the
+                // Run was killed immediately — the opposite of a long TTL's intent.
+                self.expires_at_host = Some(clock.monotonic_millis().saturating_add(ttl_ms));
                 None
             }
         }
@@ -388,7 +421,7 @@ impl Lease {
                 // Only an armed Lease has a deadline to push out; renewing an
                 // attached one is a no-op rather than a new expiry (RS-22, RS-24).
                 if self.expires_at_host.is_some() {
-                    self.expires_at_host = Some(clock.monotonic_millis() + ttl_ms);
+                    self.expires_at_host = Some(clock.monotonic_millis().saturating_add(ttl_ms));
                 }
                 Ok(())
             }

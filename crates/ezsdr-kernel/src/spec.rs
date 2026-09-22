@@ -87,7 +87,17 @@ impl Key {
     /// Parses a key; at least two segments, since a bare prefix names no path (SB-2).
     pub fn parse(s: &str) -> Result<Key, SpecError> {
         let segments = s.split('.').count();
-        if segments >= 2 && s.split('.').all(parse_segment) {
+        // An `ext.` key carries a **Module id**, whose grammar (MA-19) is laxer than a
+        // Vocabulary prefix's: it admits `A-Z`, `-` and a leading digit. Holding an
+        // `ext.` key to `Ident`'s grammar made MA-34's escape hatch unusable for every
+        // Module whose id contains a dash or a capital — refused at `parse`, before
+        // any rule could run (SB-2, MA-19, MA-34).
+        let ok = if let Some(rest) = s.strip_prefix("ext.") {
+            rest.split('.').count() >= 2 && rest.split('.').all(crate::id::is_module_segment)
+        } else {
+            segments >= 2 && s.split('.').all(parse_segment)
+        };
+        if ok {
             Ok(Key(s.to_owned()))
         } else {
             Err(SpecError::UnknownKeyPrefix { key: s.to_owned() })
@@ -127,7 +137,7 @@ display_newtype!(Ident, Namespace, Key);
 /// that Vision §9 rejects.
 ///
 /// Rule: SB-4.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Value {
     /// A boolean.
@@ -200,6 +210,18 @@ impl Value {
                 items.iter().try_for_each(|v| v.check_nesting(path))
             }
             Value::Map(items) => {
+                // OV-15's canonicaliser refuses a non-ASCII object key, and a `Value`
+                // reaches the sealed Manifest through paths that pass no `from_json`:
+                // a Session `SetParameter`, an Action's `params` or `metadata`. Left
+                // to hashing time it failed at cleanup step 8, after the Run had
+                // transmitted — a Run with no Manifest, against RS-11.
+                if let Some(bad) = items.keys().find(|k| !k.as_str().is_ascii()) {
+                    return Err(SpecError::KeyShape {
+                        key: format!("{path}.{bad}"),
+                        expected: "an ASCII key, which OV-15 canonicalises".into(),
+                        found: "a non-ASCII key".into(),
+                    });
+                }
                 if !items.values().all(Value::is_scalar) {
                     return Err(SpecError::KeyShape {
                         key: path.to_owned(),
@@ -218,13 +240,69 @@ impl Value {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
             (Value::Num(a), Value::Num(b)) => a.partial_cmp(b),
-            (Value::Int(a), Value::Num(b)) => (*a as f64).partial_cmp(b),
-            (Value::Num(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
+            // Exactly, in 128-bit arithmetic: `as f64` is the cast SC-2 removed from
+            // `Scalar` for the same reason, and SB-6's `Eq`, `Range`, `Min` and `Max`
+            // all pass through here, so a capability match above 2^53 was inexact.
+            (Value::Int(a), Value::Num(b)) => cmp_int_num(*a, *b),
+            (Value::Num(a), Value::Int(b)) => cmp_int_num(*b, *a).map(|o| o.reverse()),
             (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
             (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
             _ => None,
         }
     }
+}
+
+/// Equality crosses `Int` and `Num` exactly, as `Scalar`'s does (SC-2): two values are
+/// equal iff they share one canonical form under OV-15, which holds while the float is
+/// integral and its magnitude is at most 2^53. OV-15 already gives this document family
+/// one notion of "same value" — one canonical form, one hash — so a second notion here
+/// would be a defect and not a choice, and SB-6's comparison would disagree with the
+/// hash for exactly the values the derive got wrong.
+///
+/// Rule: SB-4, SB-6, OV-15, OV-15a.
+impl PartialEq for Value {
+    fn eq(&self, other: &Value) -> bool {
+        match (self, other) {
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Num(a), Value::Num(b)) => a == b,
+            (Value::Int(a), Value::Num(b)) | (Value::Num(b), Value::Int(a)) => {
+                b.fract() == 0.0
+                    && b.abs() <= 9_007_199_254_740_992.0
+                    && i64::try_from(*b as i128).is_ok_and(|w| w == *a)
+            }
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::List(a), Value::List(b)) => a == b,
+            (Value::Map(a), Value::Map(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Orders an integer against a float without rounding either. A non-finite float is
+/// unordered, which is what `None` means to SB-6.
+///
+/// Rule: SB-6, OV-15.
+fn cmp_int_num(a: i64, b: f64) -> Option<std::cmp::Ordering> {
+    if !b.is_finite() {
+        return None;
+    }
+    let floor = b.floor();
+    // `floor` is integral and finite; outside `i64` the comparison is decided by sign.
+    if floor >= 9_223_372_036_854_775_808.0 {
+        return Some(std::cmp::Ordering::Less);
+    }
+    if floor < -9_223_372_036_854_775_808.0 {
+        return Some(std::cmp::Ordering::Greater);
+    }
+    let whole = floor as i64;
+    Some(a.cmp(&whole).then(if b == floor {
+        std::cmp::Ordering::Equal
+    } else {
+        // `b` sits strictly between `whole` and `whole + 1`, so any integer equal to
+        // `whole` is below it.
+        std::cmp::Ordering::Less
+    }))
 }
 
 /// What a Spec requires of a key. Its value is a scalar: a constraint over a list
@@ -644,6 +722,24 @@ pub enum SpecError {
         /// The constraint that could not be met by one instance.
         constraint: String,
     },
+    /// One name appears in more than one of the three sets `bindings` is keyed by:
+    /// resource names, output ids and Island executor names (SB-22).
+    DuplicateBindingName {
+        /// The colliding name.
+        name: Ident,
+        /// Which two sets it is in.
+        sets: String,
+    },
+    /// A binding names a Module that does not hold the role its name requires
+    /// (SB-22, MA-1).
+    WrongBindingRole {
+        /// The bound name.
+        name: Ident,
+        /// The role its name requires.
+        expected: String,
+        /// The Module bound to it.
+        module: String,
+    },
     /// Two Spec resources bound to one node the Provider did not declare shareable
     /// (SB-34, MA-10).
     NodeAlreadyBound {
@@ -690,6 +786,15 @@ impl fmt::Display for SpecError {
                 write!(f, "key {key:?} wanted {expected} and found {found}")
             }
             SpecError::UnboundResource { name } => write!(f, "resource {name} has no binding"),
+            SpecError::DuplicateBindingName { name, sets } => {
+                write!(
+                    f,
+                    "SB-22: {name} is both {sets}; the three sets `bindings` is keyed by form one namespace"
+                )
+            }
+            SpecError::WrongBindingRole { name, expected, module } => {
+                write!(f, "SB-22: {name} needs a Module holding the {expected} role; {module} does not")
+            }
             SpecError::NodeAlreadyBound { node, first, second } => {
                 write!(
                     f,
@@ -711,6 +816,34 @@ impl fmt::Display for SpecError {
 }
 
 impl std::error::Error for SpecError {}
+
+/// Refuses a non-ASCII object key anywhere in a document.
+///
+/// OV-15's canonicaliser refuses one, because RFC 8785 orders keys by their UTF-16
+/// code units and this profile does not implement that ordering. Nothing refused it
+/// at **ingestion**, so a Spec carrying `{"ρ": 1}` in an opaque section validated,
+/// planned, armed and transmitted, and `Manifest::seal()` then failed at cleanup
+/// step 8 — a Run that radiated and produced no Manifest, against RS-11. Refusing it
+/// here is what keeps that impossible.
+///
+/// Rule: OV-15, OV-16, RS-11, SB-9.
+pub(crate) fn check_ascii_keys(doc: &serde_json::Value) -> Result<(), SpecError> {
+    match doc {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                if !k.is_ascii() {
+                    return Err(SpecError::UnknownField {
+                        path: format!("{k}: OV-15 canonicalises only ASCII object keys"),
+                    });
+                }
+                check_ascii_keys(v)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(items) => items.iter().try_for_each(check_ascii_keys),
+        _ => Ok(()),
+    }
+}
 
 /// Checks a document's `version` against [`SUPPORTED_VERSIONS`] (SB-10, SB-47).
 pub fn check_version(doc: &serde_json::Value) -> Result<u32, SpecError> {
@@ -787,6 +920,7 @@ impl ExperimentSpec {
         check_version(doc)?;
         check_top_level(doc, SPEC_TOP_LEVEL)?;
         check_no_placement(doc)?;
+        check_ascii_keys(doc)?;
         let spec: ExperimentSpec = serde_json::from_value(doc.clone())
             .map_err(|e| SpecError::Structural { reason: format!("SB-9: {e}") })?;
         spec.check_shapes()?;

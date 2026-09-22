@@ -36,16 +36,7 @@ fn sources() -> Vec<(PathBuf, String)> {
         .collect()
 }
 
-/// Whether a banned token occurring at `start..end` of `lower` is a token and not
-/// part of a longer word.
-///
-/// `_` is deliberately **not** a boundary character: `uhd_open`, `rfnoc_graph_id`
-/// and `DPDK_QUEUES` are exactly how a Vision §6 concept enters a Rust identifier,
-/// and a scan that treated `_` as part of a word would miss every one of them.
-/// `uncertainty` still does not match `taint` and `ReplayDivergence` still does not
-/// match `replay`, because those collisions are letter-adjacent.
-///
-/// Rule: OV-23a.
+
 fn is_token_at(lower: &str, start: usize, end: usize) -> bool {
     let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric());
     boundary(lower[..start].chars().next_back()) && boundary(lower[end..].chars().next())
@@ -55,13 +46,59 @@ fn is_token_at(lower: &str, start: usize, end: usize) -> bool {
 /// cite at least one (OV-23).
 const RULE_PREFIXES: [&str; 6] = ["OV-", "TM-", "SC-", "SB-", "RS-", "MA-"];
 
+/// Every module name of this crate, taken from `src/` itself so the set cannot go
+/// stale, so that a `pub use` can be told from a re-export of a dependency's type
+/// (OV-23).
+fn crate_modules() -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (path, text) in sources() {
+        // Inline modules too: `mod manual` inside `time/authority.rs` is a module of
+        // this crate even though it is not a file.
+        for line in text.lines().map(str::trim_start) {
+            let decl = line.strip_prefix("pub ").unwrap_or(line);
+            let decl = decl.strip_prefix("pub(crate) ").unwrap_or(decl);
+            if let Some(rest) = decl.strip_prefix("mod ") {
+                let name: String =
+                    rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                if !name.is_empty() {
+                    out.insert(name);
+                }
+            }
+        }
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            if stem != "mod" && stem != "lib" {
+                out.insert(stem.to_owned());
+            }
+        }
+        if let Some(dir) = path.parent().and_then(|d| d.file_name()).and_then(|d| d.to_str()) {
+            if dir != "src" {
+                out.insert(dir.to_owned());
+            }
+        }
+    }
+    out
+}
+
 fn cites_a_rule(doc: &str) -> bool {
     RULE_PREFIXES.iter().any(|p| {
         doc.match_indices(p).any(|(i, _)| {
-            doc[i + p.len()..].chars().next().is_some_and(|c| c.is_ascii_digit())
+            let rest = &doc[i + p.len()..];
+            let number: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if number.is_empty() {
+                return false;
+            }
+            let suffix: String =
+                rest[number.len()..].chars().take_while(|c| c.is_ascii_lowercase()).collect();
+            // A withdrawn rule keeps its number (OV-1) but no longer states an
+            // obligation, so citing one satisfies nothing.
+            !WITHDRAWN.contains(&format!("{p}{number}{suffix}").as_str())
         })
     })
 }
+
+/// The rules withdrawn so far. OV-1 keeps their numbers, and nothing may cite one as
+/// the rule it implements.
+const WITHDRAWN: [&str; 6] = ["SB-25a", "SB-28", "SB-32", "RS-37", "MA-4", "MA-43"];
 
 /// The allow-list key for an item: `<module>::<name>`.
 ///
@@ -100,114 +137,157 @@ fn allow_key(path: &Path, frames: &[bool], name: &str) -> String {
 ///
 /// A `mod` carrying `#[cfg(feature = "testing")]` is skipped whole, which is the one
 /// allow-list line OV-20 and OV-23 give the feature.
+/// Module-level `pub` items, which is what the allow-list governs: a method on a
+/// public type is not a Kernel concept of its own (OV-23b).
+///
+/// The source is **parsed**, not lexed. Five review passes demonstrated eleven ways
+/// past a line-based scan — an unbalanced brace in a comment, a multi-line string, a
+/// raw string, a raw byte string, `union`, a name on the next line, a foreign
+/// `pub use`, an attribute before the item, `pub async`, `pub extern` and a bare
+/// `pub` — and every one was a lexing failure, a spelling the keyword and modifier
+/// lists did not cover. Two of them were hiding public items in the shipped crate.
+/// A parser closes that class by construction, and a file it cannot parse fails this
+/// test, so the gate's failure mode is a red test on the MSRV toolchain and never a
+/// silent pass (OV-23, X11).
+///
+/// What no source parser sees is code produced at **expansion**, and that class is
+/// closed by refusing its mechanisms — a `macro_rules!` body carrying `pub`, an
+/// `extern` block, and a `mod` carrying `#[path]` or `#[cfg_attr]`. Proc-macros are
+/// confined to `serde_derive` and `schemars_derive` by X6 and generate no
+/// module-level items of this crate.
+///
+/// A `mod` carrying `#[cfg(feature = "testing")]` is skipped whole, which is the one
+/// allow-list line OV-20 and OV-23 give the feature.
 fn module_level_public_items() -> BTreeMap<String, (PathBuf, String)> {
     let mut out = BTreeMap::new();
+    let modules = crate_modules();
     for (path, text) in sources() {
-        let lines: Vec<&str> = text.lines().collect();
-        // One frame per open brace: true when it is a `mod` block.
-        let mut frames: Vec<bool> = Vec::new();
-        // Depth at which a `testing`-gated `mod` opened, if we are inside one.
-        let mut testing_at: Option<usize> = None;
-        let mut pending_testing = false;
-        for (i, line) in lines.iter().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("#[cfg(feature = \"testing\")]") {
-                pending_testing = true;
-            }
-            let at_module_level = frames.iter().all(|m| *m);
-            let inside_testing = testing_at.is_some();
+        let file = syn::parse_file(&text).unwrap_or_else(|e| {
+            panic!("OV-23: {} does not parse, so its surface is unknown: {e}", path.display())
+        });
+        walk_items(&path, &file.items, 0, &modules, &mut out);
+    }
+    out
+}
 
-            if at_module_level && !inside_testing {
-                if let Some(rest) = trimmed.strip_prefix("pub ") {
-                    if let Some((keyword, tail)) = rest.split_once(' ') {
-                        if matches!(
-                            keyword,
-                            "fn" | "struct" | "enum" | "trait" | "type" | "const" | "static" | "mod"
-                        ) {
-                            let name: String = tail
-                                .trim_start_matches("mut ")
-                                .chars()
-                                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                                .collect();
-                            if !name.is_empty() {
-                                out.insert(
-                                    allow_key(&path, &frames, &name),
-                                    (path.clone(), doc_above(&lines, i)),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            let opens = line.matches('{').count();
-            let closes = line.matches('}').count();
-            if opens > 0 {
-                // Any visibility: `mod`, `pub mod`, `pub(crate) mod`, `pub(super) mod`.
-                let after_vis = trimmed
-                    .strip_prefix("pub")
-                    .map(|r| r.trim_start_matches(|c| c != ' ').trim_start())
-                    .unwrap_or(trimmed);
-                let is_mod = after_vis.starts_with("mod ");
-                if is_mod && pending_testing && testing_at.is_none() {
-                    testing_at = Some(frames.len());
-                }
-                frames.push(is_mod);
-                // Every further brace on the line opens a non-module block.
-                frames.resize(frames.len() + (opens - 1), false);
-            }
-            for _ in 0..closes {
-                frames.pop();
-                if testing_at.is_some_and(|d| d >= frames.len()) {
-                    testing_at = None;
-                }
-            }
-            if !trimmed.is_empty() && !trimmed.starts_with("#[") && !trimmed.starts_with("///") {
-                pending_testing = false;
-            }
+/// The `#[doc]` text of an item, joined as the old scan's contiguous `///` block was.
+fn doc_of(attrs: &[syn::Attribute]) -> String {
+    let mut out = String::new();
+    for a in attrs {
+        if !a.path().is_ident("doc") {
+            continue;
         }
-        // A `pub use` out of a private module would re-export items the loop above
-        // has already scanned inside that module, so the surface is accounted for;
-        // what must not happen is a `pub use` of something outside `src/`.
-        for line in text.lines().map(str::trim_start).filter(|l| l.starts_with("pub use ")) {
-            assert!(
-                !line.contains("::crate") && !line.starts_with("pub use ::"),
-                "OV-23: {} re-exports from outside the crate: {line}",
-                path.display()
-            );
+        if let syn::Meta::NameValue(nv) = &a.meta {
+            if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value {
+                out.push_str(&s.value());
+                out.push('\n');
+            }
         }
     }
     out
 }
 
-/// The contiguous `///` block above line `i`, skipping attributes, which a derive
-/// may spread over several lines.
-fn doc_above(lines: &[&str], i: usize) -> String {
-    let mut doc = String::new();
-    let mut skipped = 0;
-    let mut j = i;
-    while j > 0 {
-        j -= 1;
-        let above = lines[j].trim_start();
-        if let Some(d) = above.strip_prefix("///") {
-            doc.insert_str(0, d);
-            doc.insert(0, '\n');
+fn has_attr(attrs: &[syn::Attribute], name: &str) -> bool {
+    attrs.iter().any(|a| a.path().is_ident(name))
+}
+
+fn is_testing_gated(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        a.path().is_ident("cfg")
+            && matches!(&a.meta, syn::Meta::List(l) if l.tokens.to_string().contains("testing"))
+    })
+}
+
+fn walk_items(
+    path: &Path,
+    items: &[syn::Item],
+    depth: usize,
+    modules: &BTreeSet<String>,
+    out: &mut BTreeMap<String, (PathBuf, String)>,
+) {
+    for item in items {
+        // Expansion-time constructs this parser cannot see into.
+        if let syn::Item::Macro(m) = item {
+            let body = m.mac.tokens.to_string();
+            assert!(
+                !body.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == "pub"),
+                "OV-23: {} has a macro whose body carries `pub`; a parser does not expand \
+                 macros, so anything public in one is invisible to the allow-list — declare \
+                 it directly",
+                path.display()
+            );
             continue;
         }
-        if !doc.is_empty() {
-            break;
+        if matches!(item, syn::Item::ForeignMod(_)) {
+            panic!("OV-23: {} declares an extern block, whose surface this scan does not model",
+                path.display());
         }
-        skipped += 1;
-        let ends_an_item = above.ends_with(';')
-            || above.starts_with('}')
-            || above.starts_with("pub ")
-            || above.starts_with("impl ");
-        if skipped > 12 || ends_an_item {
-            break;
+
+        let (attrs, vis, name): (&[syn::Attribute], Option<&syn::Visibility>, Option<String>) =
+            match item {
+                syn::Item::Struct(i) => (&i.attrs, Some(&i.vis), Some(i.ident.to_string())),
+                syn::Item::Enum(i) => (&i.attrs, Some(&i.vis), Some(i.ident.to_string())),
+                syn::Item::Union(i) => (&i.attrs, Some(&i.vis), Some(i.ident.to_string())),
+                syn::Item::Trait(i) => (&i.attrs, Some(&i.vis), Some(i.ident.to_string())),
+                syn::Item::Type(i) => (&i.attrs, Some(&i.vis), Some(i.ident.to_string())),
+                syn::Item::Const(i) => (&i.attrs, Some(&i.vis), Some(i.ident.to_string())),
+                syn::Item::Static(i) => (&i.attrs, Some(&i.vis), Some(i.ident.to_string())),
+                syn::Item::Fn(i) => (&i.attrs, Some(&i.vis), Some(i.sig.ident.to_string())),
+                syn::Item::Mod(i) => (&i.attrs, Some(&i.vis), Some(i.ident.to_string())),
+                syn::Item::Use(i) => (&i.attrs, Some(&i.vis), None),
+                _ => (&[], None, None),
+            };
+
+        if let syn::Item::Use(u) = item {
+            // Only a **public** re-export reaches the surface; a private `use` is an
+            // import and says nothing about what the crate exposes.
+            if !matches!(u.vis, syn::Visibility::Public(_)) {
+                continue;
+            }
+            // A dependency's type must not reach the surface unlisted.
+            let first = first_use_segment(&u.tree);
+            assert!(
+                matches!(first.as_str(), "crate" | "self" | "super" | "")
+                    || modules.contains(&first),
+                "OV-23: {} re-exports `{first}`, which is not a module of this crate",
+                path.display()
+            );
+            continue;
+        }
+
+        if let syn::Item::Mod(m) = item {
+            if is_testing_gated(&m.attrs) {
+                continue;
+            }
+            assert!(
+                !has_attr(&m.attrs, "path") && !has_attr(&m.attrs, "cfg_attr"),
+                "OV-23: {} has a `mod` carrying `#[path]` or `#[cfg_attr]`, which can move or \
+                 rewrite the module this scan believes it read",
+                path.display()
+            );
+            if let Some((_, inner)) = &m.content {
+                walk_items(path, inner, depth + 1, modules, out);
+            }
+        }
+
+        if matches!(vis, Some(syn::Visibility::Public(_))) {
+            if let Some(name) = name {
+                let frames = vec![true; depth];
+                out.insert(allow_key(path, &frames, &name), (path.to_path_buf(), doc_of(attrs)));
+            }
         }
     }
-    doc
 }
+
+fn first_use_segment(tree: &syn::UseTree) -> String {
+    match tree {
+        syn::UseTree::Path(p) => p.ident.to_string(),
+        syn::UseTree::Name(n) => n.ident.to_string(),
+        syn::UseTree::Rename(r) => r.ident.to_string(),
+        syn::UseTree::Glob(_) | syn::UseTree::Group(_) => String::new(),
+    }
+}
+
 
 fn allow_list() -> BTreeMap<String, String> {
     let text = std::fs::read_to_string(crate_dir().join("tests/kernel_surface_allow.txt"))

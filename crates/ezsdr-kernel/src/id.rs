@@ -34,60 +34,117 @@ impl fmt::Display for NodeId {
     }
 }
 
-/// Declares a `{node, local}` newtype: an id, its constructor, and its `Display`.
-macro_rules! node_qualified_id {
-    ($(#[$m:meta])* $name:ident, $prefix:literal) => {
-        $(#[$m])*
-        #[derive(
-            Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
-            Serialize, Deserialize, schemars::JsonSchema,
-        )]
-        pub struct $name {
-            /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
-            pub node: NodeId,
-            /// Node-local ordinal, allocated by the owning registry.
-            pub local: u32,
-        }
-
-        impl $name {
-            /// A local id with the given ordinal (X7).
-            pub const fn local(local: u32) -> Self {
-                Self { node: NodeId::LOCAL, local }
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}:{}#{}", self.node, $prefix, self.local)
-            }
-        }
-    };
+/// Identifies a [`ClockDomain`](crate::time::ClockDomain).
+///
+/// Rule: TM-11 (`01-time-model.md`), X7.
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
+    Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub struct ClockDomainId {
+    /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
+    pub node: NodeId,
+    /// Node-local ordinal, allocated by the owning registry.
+    pub local: u32,
 }
 
-node_qualified_id!(
-    /// Identifies a [`ClockDomain`](crate::time::ClockDomain).
-    ///
-    /// Rule: TM-11 (`01-time-model.md`), X7.
-    ClockDomainId, "clk"
-);
-node_qualified_id!(
-    /// Identifies a memory domain a [`SampleBlock`](crate::stream::SampleBlock) lives in.
-    ///
-    /// Rule: SC-6 (`02-stream-contract.md`), X7.
-    MemoryDomainId, "mem"
-);
-node_qualified_id!(
-    /// Identifies a scheduling island (`05-module-api.md` MA-27).
-    ///
-    /// Rule: MA-27, X7.
-    IslandId, "island"
-);
-node_qualified_id!(
-    /// Identifies a [`DataLink`](crate::stream::DataLinkDecl) instance.
-    ///
-    /// Rule: SC-18 (`02-stream-contract.md`), X7.
-    DataLinkId, "link"
-);
+/// Identifies a memory domain a [`SampleBlock`](crate::stream::SampleBlock) lives in.
+///
+/// Rule: SC-6 (`02-stream-contract.md`), X7.
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
+    Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub struct MemoryDomainId {
+    /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
+    pub node: NodeId,
+    /// Node-local ordinal, allocated by the owning registry.
+    pub local: u32,
+}
+
+/// Identifies a scheduling island (`05-module-api.md` MA-27).
+///
+/// Rule: MA-27, X7.
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
+    Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub struct IslandId {
+    /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
+    pub node: NodeId,
+    /// Node-local ordinal, allocated by the owning registry.
+    pub local: u32,
+}
+
+/// Identifies a [`DataLink`](crate::stream::DataLinkDecl) instance.
+///
+/// Rule: SC-18 (`02-stream-contract.md`), X7.
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
+    Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub struct DataLinkId {
+    /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
+    pub node: NodeId,
+    /// Node-local ordinal, allocated by the owning registry.
+    pub local: u32,
+}
+
+// Written out rather than generated: `kernel_surface` does not read macro bodies,
+// so a macro here hid four Kernel document types from the allow-list that is the
+// Kernel's own review checklist. Four copies of one impl pair is the price of a
+// gate that cannot be walked past (OV-23, OV-23b, X11).
+impl ClockDomainId {
+    /// A local id with the given ordinal (X7).
+    pub const fn local(local: u32) -> Self {
+        Self { node: NodeId::LOCAL, local }
+    }
+}
+
+impl fmt::Display for ClockDomainId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:clk#{}", self.node, self.local)
+    }
+}
+
+impl MemoryDomainId {
+    /// A local id with the given ordinal (X7).
+    pub const fn local(local: u32) -> Self {
+        Self { node: NodeId::LOCAL, local }
+    }
+}
+
+impl fmt::Display for MemoryDomainId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:mem#{}", self.node, self.local)
+    }
+}
+
+impl IslandId {
+    /// A local id with the given ordinal (X7).
+    pub const fn local(local: u32) -> Self {
+        Self { node: NodeId::LOCAL, local }
+    }
+}
+
+impl fmt::Display for IslandId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:island#{}", self.node, self.local)
+    }
+}
+
+impl DataLinkId {
+    /// A local id with the given ordinal (X7).
+    pub const fn local(local: u32) -> Self {
+        Self { node: NodeId::LOCAL, local }
+    }
+}
+
+impl fmt::Display for DataLinkId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:link#{}", self.node, self.local)
+    }
+}
 
 impl ClockDomainId {
     /// Reserved: UTC, `Root`, 1 GHz, epoch 1970 (TM-11).
@@ -208,6 +265,14 @@ impl fmt::Display for ResourceId {
 #[serde(transparent)]
 pub struct ModuleId(String);
 
+/// One segment of a `ModuleId`: non-empty and `[A-Za-z0-9_-]`. Shared with `Key`, so
+/// that an `ext.<module-id>.<path>` key is parseable for every Module id MA-19 admits
+/// and not only for the ones that also fit `Ident`'s grammar (MA-19, SB-2, MA-34).
+pub(crate) fn is_module_segment(seg: &str) -> bool {
+    !seg.is_empty()
+        && !seg.chars().any(|c| !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '-'))
+}
+
 impl ModuleId {
     /// Parses a dotted namespaced name; segments are non-empty and `[A-Za-z0-9_-]`.
     ///
@@ -223,6 +288,7 @@ impl ModuleId {
             if let Some(c) = seg.chars().find(|c| !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '-')) {
                 return Err(ResourceIdError::BadCharacter(c));
             }
+            debug_assert!(is_module_segment(seg));
         }
         Ok(ModuleId(name.to_owned()))
     }

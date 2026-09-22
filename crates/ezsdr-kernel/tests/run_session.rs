@@ -668,7 +668,7 @@ fn placed() -> std::collections::BTreeSet<Ident> {
 /// A recorder whose contract matches the `rx` port the test tree declares (SC-3).
 fn test_sink() -> TestSink {
     TestSink::new(
-        ezsdr_kernel::contract::DataContractId::parse("ezsdr.iq.cf32").expect("a valid literal"),
+        ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("a valid literal"),
     )
 }
 
@@ -734,9 +734,13 @@ fn rs_14_capture_compiles_to_update_parameter() {
     let compiled = compile(&action, &reg, &declared_classes(), &placed(), t(0), None).expect("compiles");
     match &compiled.actions[0] {
         Action::UpdateParameter { target, key: k, class, at, .. } => {
-            // RS-14: the update targets the **Sink**, addressed by its output id,
-            // not the radio the action named (finding D17).
-            assert_eq!(*target, rid("recorder"));
+            // RS-14: the update targets the **Sink**, addressed under the reserved
+            // `sink/` prefix, not the radio the action named. The prefix keeps the
+            // address disjoint from a Provider's own tree node ids, which are the
+            // Provider's declaration and could otherwise collide with a binding name
+            // (findings D17, P1-5).
+            assert_eq!(*target, rid("sink/recorder"));
+            assert_ne!(*target, rid("recorder"), "a bare output id is a Provider's namespace");
             assert_eq!(*k, key("test.capture"));
             assert_eq!(*class, UpdateClass::BlockBoundary);
             // RS-14, RS-19: a capture compiles to a *timed* UpdateParameter. This
@@ -926,7 +930,7 @@ fn rs_15_log_sequence_is_dense() {
         } else {
             Outcome::Admitted { coercions: Vec::new(), warnings: Vec::new(), dispatched: Vec::new() }
         };
-        log.append(t(i), SessionAction::Renew, outcome);
+        log.append(t(i), SessionAction::Renew, outcome).expect("well-formed");
     }
     let seqs: Vec<u32> = log.entries().iter().map(|e| e.seq).collect();
     assert_eq!(seqs, vec![0, 1, 2, 3, 4], "a rejected Action occupies a number too");
@@ -1003,7 +1007,8 @@ fn rs_16_rejected_action_not_dispatched() {
             value: Value::Num(40.0),
         },
         Outcome::Rejected { violations },
-    );
+    )
+    .expect("well-formed");
     assert!(matches!(log.entries()[0].outcome, Outcome::Rejected { .. }));
 }
 
@@ -1046,7 +1051,8 @@ fn rs_18_action_before_running_rejected() {
     }
     assert_eq!(run.check_running(), Err(RunError::RunNotRunning));
     let mut log = SessionLog::new();
-    log.append(t(0), SessionAction::Renew, Outcome::Rejected { violations: Vec::new() });
+    log.append(t(0), SessionAction::Renew, Outcome::Rejected { violations: Vec::new() })
+        .expect("a rejected Action is still logged (RS-15)");
     assert_eq!(log.entries().len(), 1, "it is rejected and logged");
     run.move_to(RunState::Running, None, &clock).expect("forward");
     assert!(run.check_running().is_ok());
@@ -1288,6 +1294,99 @@ fn rs_38_environment_recorded_verbatim() {
 }
 
 #[test]
+fn rs_32_a_fabricated_event_handle_does_not_panic_the_kernel() {
+    // `EventHandle`'s fields are public, so a Module can build one. Indexing the
+    // counter table with it directly panicked the Kernel instead of returning an
+    // error — and RS-32's infallible hot path is a promise about the Kernel's own
+    // handles, not about any `u32` a Module writes (MA-9).
+    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
+    let kind = EventKind::parse("test.custom").expect("parses");
+    let c = collector(8, &policy, &[(rid("radio"), kind.clone())]);
+    // Both `u32`s, not one: checking only `row` let the fabricated `kind` into the
+    // ring and moved the panic into the coordinator's `drain`, which indexes `kinds`
+    // with it — away from the Module that caused it.
+    for bad in [
+        ezsdr_kernel::event::EventHandle { row: u32::MAX, kind: 0 },
+        ezsdr_kernel::event::EventHandle { row: 0, kind: u32::MAX },
+    ] {
+        assert!(
+            matches!(
+                c.emit(bad, t(1), Severity::Info, &[]),
+                Err(ezsdr_kernel::run::RunError::BadEventHandle { .. })
+            ),
+            "row {} kind {} must be refused",
+            bad.row,
+            bad.kind
+        );
+    }
+    // A real handle still works, so the guard did not break the hot path, and the
+    // drain the fabricated kind would have panicked in completes.
+    let good = c.resolve(&rid("radio"), &kind);
+    assert!(c.emit(good, t(2), Severity::Info, &[]).is_ok());
+    assert_eq!(c.drain().len(), 1, "one delivered body, and no panic");
+}
+
+#[test]
+fn rs_39_a_module_section_with_a_non_ascii_key_is_refused() {
+    // `sections` is the path RS-39 and RS-43 design for untrusted Module content and
+    // it passes no `from_json`, so OV-15's ASCII key rule was never applied to it:
+    // `seal()` then failed at cleanup step 8, after the Run had transmitted (SB-9a,
+    // RS-11).
+    let mut m = manifest_fixture(Termination::Completed);
+    assert!(matches!(
+        m.write_section(&ns("test"), ns("test.envelope"), serde_json::json!({ "\u{3c1}": 1 })),
+        Err(ezsdr_kernel::run::RunError::SectionKeyNotAscii { .. })
+    ));
+    // An ASCII key is written, and the Manifest still seals.
+    m.write_section(&ns("test"), ns("test.envelope"), serde_json::json!({ "rho": 1 }))
+        .expect("writes");
+    assert!(m.seal().is_ok());
+}
+
+#[test]
+fn rs_13a_a_session_value_with_a_non_ascii_key_is_refused_at_compile() {
+    // A `Value` reaches the sealed Manifest through the action log and an Action's
+    // `params`, neither of which passes a `from_json`, so the check belongs where the
+    // value enters the Kernel (SB-9a, RS-11).
+    let reg = registry();
+    let bad: Value =
+        serde_json::from_value(serde_json::json!({ "\u{3c1}": 1 })).expect("deserialises");
+    let action = SessionAction::SetParameter {
+        target: rid("radio"),
+        key: key("test.flag"),
+        value: bad.clone(),
+    };
+    let violations = compile(&action, &reg, &declared_classes(), &placed(), t(0), None)
+        .expect_err("refused before it can be logged");
+    assert!(violations[0].reason.contains("non-ASCII"), "{:?}", violations[0]);
+
+    // And through a Vocabulary action's params.
+    let vocab = SessionAction::Vocabulary {
+        ns: ns("test"),
+        verb: id("capture"),
+        target: rid("radio"),
+        at: Some(t(1)),
+        params: [(key("test.capture"), bad)].into_iter().collect(),
+    };
+    assert!(compile(&vocab, &reg, &declared_classes(), &placed(), t(0), None).is_err());
+}
+
+#[test]
+fn rs_23_a_huge_lease_ttl_does_not_wrap() {
+    // `Lease` is a document type (OV-10), so `ttl_ms` is whatever a profile wrote.
+    // An unchecked add panicked in debug and, in release, wrapped to a small instant
+    // so `expired()` was true immediately — the Run killed at once by a TTL meant to
+    // keep it alive.
+    let clock = FakeHostClock::new();
+    clock.advance(1_000);
+    let mut lease = Lease::detached(u64::MAX, true, "tok", &clock).expect("a nonzero ttl");
+    assert!(lease.on_disconnect(&clock).is_none());
+    assert!(!lease.expired(&clock), "a saturated deadline is in the far future");
+    clock.advance(u64::MAX / 2);
+    assert!(!lease.expired(&clock), "and it stays there");
+}
+
+#[test]
 fn rs_38_manifest_carries_its_mandatory_version() {
     // Vision §10 requires a mandatory `version` of the Manifest by name, and the
     // Manifest is the one document that outlives every Run. Without the field
@@ -1299,13 +1398,22 @@ fn rs_38_manifest_carries_its_mandatory_version() {
     assert_eq!(ezsdr_kernel::spec::check_version(&doc), Ok(1));
 
     // SB-47: a stored Manifest from a future major is refused by name, never
-    // reinterpreted under version 1's defaults.
+    // reinterpreted under version 1's defaults. The field arrived without this path,
+    // so `from_value` accepted `version: 99` and SB-47 had nothing to act on.
     let mut future = doc.clone();
     future["version"] = serde_json::json!(2);
     assert!(matches!(
         ezsdr_kernel::spec::check_version(&future),
         Err(ezsdr_kernel::spec::SpecError::UnsupportedVersion { found: 2, .. })
     ));
+    assert!(matches!(
+        Manifest::from_json(&future),
+        Err(ezsdr_kernel::spec::SpecError::UnsupportedVersion { found: 2, .. })
+    ));
+    // And the reader exists, so a version-1 Manifest round-trips through it.
+    let back = Manifest::from_json(&doc).expect("a v1 Manifest reads");
+    assert_eq!(back.version, 1);
+    assert_eq!(back.hash, m.hash);
 }
 
 #[test]

@@ -38,25 +38,28 @@ fn schema_of<T: JsonSchema>() -> serde_json::Value {
         .expect("a generated schema is JSON")
 }
 
-macro_rules! documents {
-    ($($name:literal => $t:ty),* $(,)?) => {
-        /// Every document type that has a committed schema, by file stem.
-        ///
-        /// Serialisation conventions, so that non-Rust consumers get discriminators:
-        /// data-carrying enums use an internal tag, unit-only enums serialise as
-        /// `snake_case` strings, and namespaced opaque sections are
-        /// `serde_json::Value` with `additionalProperties: true` (OV-13).
-        ///
-        /// Rule: OV-10, OV-13.
-        pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
-            let mut out = BTreeMap::new();
-            $( out.insert($name, schema_of::<$t>()); )*
-            out
-        }
+/// Inserts one entry per document type. Only the inserts are generated: the function
+/// is declared below, because `kernel_surface` does not read macro bodies and a public
+/// item inside one is invisible to the allow-list that is the Kernel's own review
+/// checklist (OV-23).
+macro_rules! document_inserts {
+    ($out:ident, $($name:literal => $t:ty),* $(,)?) => {
+        $( $out.insert($name, schema_of::<$t>()); )*
     };
 }
 
-documents! {
+/// Every document type that has a committed schema, by file stem.
+///
+/// Serialisation conventions, so that non-Rust consumers get discriminators:
+/// data-carrying enums use an internal tag, unit-only enums serialise as
+/// `snake_case` strings, and namespaced opaque sections are `serde_json::Value`
+/// with `additionalProperties: true` (OV-13).
+///
+/// Rule: OV-10, OV-13.
+pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
+    let mut out = BTreeMap::new();
+    document_inserts! {
+        out,
     // Shared time definitions (TM-19).
     "clock_domain"          => crate::time::ClockDomain,
     "clock_relation"        => crate::time::ClockRelation,
@@ -107,6 +110,8 @@ documents! {
     "artifact_ref"          => crate::manifest::ArtifactRef,
     "content_hash"          => crate::hash::ContentHash,
     "manifest"              => crate::manifest::Manifest,
+    }
+    out
 }
 
 /// The committed form of a schema: pretty-printed JSON with a trailing newline, so

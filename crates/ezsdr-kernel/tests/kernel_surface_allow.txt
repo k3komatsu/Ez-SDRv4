@@ -31,6 +31,10 @@ time = time
 
 # --- identity (audit §13 `identity`) -----------------------------------------
 id::NodeId = NodeId-qualified ids
+id::ClockDomainId = time model: ClockDomain id, node-qualified (X7).
+id::MemoryDomainId = stream contract: MemoryDomain id, node-qualified (X7).
+id::IslandId = module api: Island id, node-qualified (X7).
+id::DataLinkId = stream contract: DataLink id, node-qualified (X7).
 id::ResourceId = ResourceId
 id::ResourceIdError = NEW: the refusal reason for SB-34's path grammar, which §13's flat id had no need of.
 id::ModuleId = ModuleId+version
@@ -324,5 +328,6 @@ module_api::TransportFidelity = fidelity vector
 schema::SCHEMA_MAJOR = ExperimentSpec envelope
 schema::generator = ExperimentSpec envelope
 schema::file_name = ExperimentSpec envelope
+schema::document_schemas = ExperimentSpec envelope
 schema::render = ExperimentSpec envelope
 contract::standard_contracts = DataContract registry

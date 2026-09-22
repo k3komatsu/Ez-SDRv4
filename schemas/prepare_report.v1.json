@@ -107,14 +107,6 @@
       },
       "type": "array"
     },
-    "constraints_hit": {
-      "default": [],
-      "description": "Keys whose declared bound the request reached (SB-41).",
-      "items": {
-        "$ref": "#/$defs/Key"
-      },
-      "type": "array"
-    },
     "effective": {
       "additionalProperties": {
         "$ref": "#/$defs/Value"

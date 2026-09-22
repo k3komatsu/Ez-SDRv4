@@ -122,6 +122,21 @@ pub struct LogEntry {
     pub outcome: Outcome,
 }
 
+impl SessionAction {
+    /// SB-4's nesting and OV-15's ASCII keys, over every `Value` this Action carries.
+    /// A `Value` reaches the sealed Manifest through the action log and through an
+    /// Action's `params`, neither of which passes a `from_json`, so a document that
+    /// fails this is not an Action at all (SB-4, SB-9a, RS-11, RS-15).
+    pub fn check_values(&self) -> Result<(), SpecError> {
+        let carried: Vec<(&Key, &Value)> = match self {
+            SessionAction::SetParameter { key, value, .. } => vec![(key, value)],
+            SessionAction::Vocabulary { params, .. } => params.iter().collect(),
+            _ => Vec::new(),
+        };
+        carried.into_iter().try_for_each(|(k, v)| v.check_nesting(k.as_str()))
+    }
+}
+
 /// Every Action, admitted or not, in order (RS-15).
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct SessionLog {
@@ -134,11 +149,25 @@ impl SessionLog {
         SessionLog::default()
     }
 
-    /// Appends an entry with the next dense sequence number (RS-15).
-    pub fn append(&mut self, time: TimePoint, action: SessionAction, outcome: Outcome) -> u32 {
+    /// Appends an entry with the next dense sequence number, refusing an Action that
+    /// is not a well-formed document (RS-15, SB-4, SB-9a).
+    ///
+    /// RS-15 logs every Action, admitted or not: a **rejected** Action still takes a
+    /// number. One whose value the canonicaliser cannot hash was never an Action —
+    /// and a log it cannot hash breaks RS-11 for the whole Run, which is worse than
+    /// refusing one entry. The check lives here rather than on the compile path
+    /// because this is the door: `compile` returns a `Compiled` and the wiring that
+    /// would log it is Phase 2's.
+    pub fn append(
+        &mut self,
+        time: TimePoint,
+        action: SessionAction,
+        outcome: Outcome,
+    ) -> Result<u32, SpecError> {
+        action.check_values()?;
         let seq = self.entries.len() as u32;
         self.entries.push(LogEntry { seq, time, action, outcome });
-        seq
+        Ok(seq)
     }
 
     /// Every entry, in order (RS-15).
@@ -353,6 +382,13 @@ pub fn compile(
         }]
     };
     let mut out = Compiled::default();
+    // SB-9a: a `Value` reaches the sealed Manifest through the action log and through
+    // an Action's `params`, neither of which passes a `from_json`, so OV-15's ASCII
+    // key rule and SB-4's nesting rule are checked where the value enters. Left to
+    // hashing time, `seal()` failed at cleanup step 8 after the Run had transmitted.
+    if let Err(e) = action.check_values() {
+        return Err(reject("ezsdr.value", e.to_string()));
+    }
     match action {
         SessionAction::SetParameter { target, key, value } => {
             let class = declared_class(key, declared_classes, registry).ok_or_else(|| {
@@ -423,7 +459,14 @@ pub fn compile(
                             }
                         }
                     };
-                    let recorder = ResourceId::parse(recorder.as_str()).map_err(|e| {
+                    // A Provider's tree node ids are the Provider's own declaration
+                    // and are unconstrained relative to binding names, so minting a
+                    // Sink's address from the bare output id let the two namespaces
+                    // overlap: `TestProvider::new("rec", …)` and a Sink bound as
+                    // `rec` produced one `ResourceId` meaning two things, which no
+                    // dispatcher can route and no `Event.source` can attribute. The
+                    // `sink/` prefix keeps them disjoint by construction (SB-22).
+                    let recorder = ResourceId::parse(&format!("sink/{recorder}")).map_err(|e| {
                         reject("ezsdr.placement", format!("RS-14: {e}"))
                     })?;
                     // RS-14, RS-19: `sink.capture` compiles to a **timed**
@@ -485,20 +528,22 @@ pub fn compile(
 // ---------------------------------------------------------------- the implicit Spec
 
 /// Builds a Session's implicit ExperimentSpec from the BindingProfile: one resource
-/// per binding with empty `requires`, and one graph component for every Sink the
-/// profile's `placements` declares, placed as the profile places it.
+/// per **Provider** binding with empty `requires`, and one **output** per **Sink**
+/// binding, taking its artifact kind from the bound Sink's first declared
+/// `artifact_kinds` and its `feed` from the binding.
 ///
-/// The Sink clause is not a convenience: SB-25 requires every component to be
-/// placed, RS-4 forbids adding one while the Run is `Running`, and RS-14 refuses a
-/// capture with no recorder, so an implicit Spec with no components would reject
-/// every capture in Vision §3's own example. Taking the Sinks from the profile
-/// keeps the rule generic, because the Kernel places what the profile declared and
-/// needs no notion of which resources can be captured.
+/// The Sink clause is not a convenience: RS-4 forbids adding a recorder while the
+/// Run is `Running` and RS-14 refuses a capture with no recorder, so an implicit
+/// Spec with no outputs would reject every capture in Vision §3's own example. It is
+/// an output and not a graph component because a Sink is a Module role and not
+/// Executor-loaded code (MA-25), and because only an output carries the link that
+/// feeds it — the placed-component form had no field for that link, so a Session's
+/// capture was connected to nothing.
 ///
-/// `sink_descriptors` supplies the `ComponentDescriptor` each Sink Module declares,
-/// which is what SB-25a's `module` field resolves to.
+/// `sinks` supplies the bound Sink per output id, which the artifact kind is read
+/// from.
 ///
-/// Rule: RS-12, SB-25a.
+/// Rule: RS-12, SB-17, SB-22.
 pub fn implicit_spec(
     profile: &BindingProfile,
     registry: &ModuleRegistry,

@@ -102,7 +102,9 @@ impl EventKindRegistry {
             }
         }
         if self.decls.contains_key(&decl.kind) {
-            return Err(RunError::UnknownEventKind { kind: decl.kind.to_string() });
+            // Not "unknown": RS-27 refuses a *second* declaration so that one
+            // Vocabulary cannot overwrite another's default reaction and severity.
+            return Err(RunError::EventKindAlreadyRegistered { kind: decl.kind.to_string() });
         }
         self.owners.insert(decl.kind.clone(), owner);
         self.decls.insert(decl.kind.clone(), decl);

@@ -458,6 +458,21 @@ impl EventCollector {
             })
             .collect()
     }
+
+    /// Both fields of a handle, checked where one enters. `EventHandle`'s fields are
+    /// public, so a Module can fabricate one, and RS-32's infallible hot path is a
+    /// promise about the **Kernel's** handles. Checking only `row` moved the panic
+    /// out of the offending Module's call and into the coordinator's `drain`, which
+    /// indexes `kinds` with the stored `kind` — away from the code that caused it
+    /// (RS-32, MA-9).
+    fn check_handle(&self, handle: EventHandle) -> Result<&AtomicU64, RunError> {
+        if self.kinds.len() <= handle.kind as usize {
+            return Err(RunError::BadEventHandle { row: handle.row });
+        }
+        self.counts
+            .get(handle.row as usize)
+            .ok_or(RunError::BadEventHandle { row: handle.row })
+    }
 }
 
 impl EventSink for EventCollector {
@@ -493,13 +508,19 @@ impl EventSink for EventCollector {
         }
         // RS-33: counted before the body is queued, so a count is never lost even
         // when the body is.
-        self.counts[handle.row as usize].fetch_add(1, Ordering::Relaxed);
+        // `EventHandle`'s fields are public, so a Module can fabricate one. An
+        // out-of-range row must return an error, not panic the Kernel: RS-32's hot
+        // path is infallible for the *Kernel's* handles only (MA-9).
+        let row = self.check_handle(handle)?;
+        row.fetch_add(1, Ordering::Relaxed);
         // RS-36: the escalation flag is set on the hot path, whatever the ring does.
         self.escalate(handle.kind as usize, severity);
         let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
         if ring.len == ring.slots.len() {
             drop(ring);
-            self.dropped[handle.kind as usize].fetch_add(1, Ordering::Relaxed);
+            if let Some(d) = self.dropped.get(handle.kind as usize) {
+                d.fetch_add(1, Ordering::Relaxed);
+            }
             return Ok(());
         }
         let cap = ring.slots.len();
@@ -515,9 +536,11 @@ impl EventSink for EventCollector {
         Ok(())
     }
 
+
     fn emit_control(&self, event: Event) -> Result<(), RunError> {
         let handle = self.resolve(&event.source, &event.kind);
-        self.counts[handle.row as usize].fetch_add(1, Ordering::Relaxed);
+        let row = self.check_handle(handle)?;
+        row.fetch_add(1, Ordering::Relaxed);
         self.escalate(handle.kind as usize, event.severity);
         self.control.lock().unwrap_or_else(|e| e.into_inner()).push(event);
         Ok(())
@@ -728,6 +751,18 @@ impl ActionTemplate {
                 Action::PeripheralCommand { target, verb, params, at: Some(at) }
             }
             ActionTemplate::Stop { target } => Action::Stop { target },
+        }
+    }
+
+    /// The resource a scheduled Action addresses, which SB-16 requires to name a
+    /// resource or an output the Spec itself declares (RS-49a, SB-16).
+    pub fn target(&self) -> Option<&ResourceId> {
+        match self {
+            ActionTemplate::TxBurst { target, .. }
+            | ActionTemplate::SetTimer { target, .. }
+            | ActionTemplate::UpdateParameter { target, .. }
+            | ActionTemplate::PeripheralCommand { target, .. } => Some(target),
+            ActionTemplate::Stop { target } => target.as_ref(),
         }
     }
 

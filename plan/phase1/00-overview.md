@@ -40,7 +40,7 @@ Every spec carries: header (status, scope, Vision § covered, audit §14.1 items
 
 - **OV-1** A rule ID, once published in an accepted spec, is never reused or renumbered. A withdrawn rule keeps its number and is marked withdrawn, exactly as the Vision's §N numbers are stable.
 - **OV-2** Every normative obligation carries a rule ID. A rule that places obligations on more than one implementer, or in more than one phase, is split into lettered sub-rules (`TM-13a`, `TM-13b`, …), which OV-1 protects like any other ID. A rule whose several clauses are checked by one function and one test stays whole and enumerates them. Text with no rule ID is explanatory and binds nothing.
-- **OV-3** A rule with no disposition marker means "checked by a Kernel item and at least one Phase 1 test", and the exit review verifies that by finding a test row **whose expectation is that rule's own obligation**, not merely one citing its ID. The distinction matters: a producer-side rule such as spec 02's SC-13, an "if and only if" about what the producer knows, is cited by three rows that all test the builder's derivation instead, so an ID-matching check would pass it as covered. Every rule that is **not** in that class carries an explicit marker naming what it is — a **producer obligation**, a **consumer obligation** or a **forward obligation** — and the phase whose test covers it. The default is inverted this way so that the marker is never a judgment call: the first draft said "written in the rule itself where it is not obvious", and the rules whose disposition was least obvious were exactly the ones left unmarked. The exit review reports how many rules carry a marker and which phase each names.
+- **OV-3** A rule with no disposition marker means "checked by a Kernel item and at least one Phase 1 test", and the exit review verifies that by finding a test row **whose expectation is that rule's own obligation**, not merely one citing its ID. The distinction matters: a producer-side rule such as spec 02's SC-13, an "if and only if" about what the producer knows, is cited by three rows that all test the builder's derivation instead, so an ID-matching check would pass it as covered. Every rule that is **not** in that class carries an explicit marker naming what it is — a **producer obligation**, a **consumer obligation**, a **forward obligation** or a **process obligation** — and the phase or artefact whose test covers it. The fourth marker exists because OV-4…OV-19 govern how the documents and the repository are written: their carrier is a document, `Cargo.toml` or the test tree, never a Kernel item, and the first three markers cannot describe them. The default's "a Kernel item" clause binds only where the rule names Kernel behaviour: OV-22, MA-44 and MA-45 are carried by test code, and searching `src/` for them is the wrong search. The default is inverted this way so that the marker is never a judgment call: the first draft said "written in the rule itself where it is not obvious", and the rules whose disposition was least obvious were exactly the ones left unmarked. The exit review produces a **per-rule table**: for an unmarked rule, the test whose assertion is that rule's obligation, **read from the test body**; for a marked rule, the marker and the phase or artefact. The table is the evidence. A rule-ID prefix on a test name is OV-19's navigation convention and is neither necessary nor sufficient here — three review passes each found a correctly prefixed test whose expectation was the implementation rather than the rule.
 - **OV-4** A spec never restates a rule owned by another spec; it cites it. Cross-spec citation is by ID (`see TM-13c`), never by copying the text.
 - **OV-4a** In a rule, "must" and "must not" are the normative verbs. "Should" does not appear inside a rule; a recommendation that is not binding belongs in explanatory text. Each spec repeats this in its header.
 
@@ -93,7 +93,7 @@ These bind all five specs. Each row is open to reversal at a gate; a reversal is
 | X8 | Document versus in-process types | Anything that appears in a Manifest or crosses a frontend or Plugin boundary is a **document**: it has a schema, a version where the Vision requires one, and canonical hashing. Anything carrying samples or a live handle (`SampleBlock`, `BufferRef`, link handles, trait objects) is **in-process only** and has no schema | Schemas for everything (a `SampleBlock` schema invites someone to serialise the real-time path) | §6 lists both sets |
 | X9 | Floating point | The only floats in Kernel-owned document fields are `ClockRelation.drift` and `drift_uncertainty` (measurements; neither reaches a stored `TimePoint` unrounded). Floats also appear in `DataContract.attributes` (for example `full_scale`) and in Vocabulary values inside `requires` and `environment`, so canonical float formatting is required anyway | Integer parts-per-billion for drift (does not remove the need for canonical float formatting, so it saves nothing) | X5's number rule covers both |
 | X10 | Test style | Plain `#[test]`, one integration-test file per spec, test names prefixed with the rule ID they prove (`tm_04_sibling_exact`). Doubles live in `tests/support/` and never in `src/` (§9) | `proptest` in Phase 1 (boundary tables cover the arithmetic; add it only if a time bug escapes them) | §9 lists the doubles |
-| X11 | Kernel-does-not-grow check | A `kernel_surface` test (std only): every public item is on an allow-list naming either a specific audit §13 token or a `NEW:` justification, every public item's doc comment cites a rule ID, and no token from `tests/banned_tokens.txt` appears in `src/` outside a comment citing the ban (OV-23, OV-23a, OV-23b) | `cargo public-api` (nightly rustdoc JSON); a `syn`-based scanner (dependency) | The allow-list *is* the review checklist for "Core remains small" |
+| X11 | Kernel-does-not-grow check | A `kernel_surface` test that parses every `src/**.rs` with `syn` (a dev-dependency under OV-18: zero new transitive crates, MSRV 1.71): every public item is on an allow-list naming either a specific audit §13 token or a `NEW:` justification, every public item's doc comment cites a rule ID, and no token from `tests/banned_tokens.txt` appears in `src/` outside a comment citing the ban (OV-23, OV-23a, OV-23b) | `cargo public-api` (nightly rustdoc JSON: an unstable format on a toolchain X12 does not govern, whose failure mode is a gate that will not run — invisible with no CI); a hand-written lexer (eleven demonstrated evasions over five review passes, two of them hiding public items in the shipped crate — a finite spelling list against the language's whole spelling space) | The allow-list *is* the review checklist for "Core remains small"; the gate's failure mode must be a red test on the MSRV toolchain, never a silent pass |
 | X12 | Toolchain | Edition 2024, `rust-version = "1.85"`. Phase 1 verifies with local `cargo test`; setting up CI is separate work | Edition 2021 (resolver 3 and MSRV-aware resolution come with 2024); building CI inside Phase 1 (scope creep) | MSRV moves only at a Kernel minor and stays ≥ 6 months behind stable |
 
 ---
@@ -178,6 +178,7 @@ Tests use the RFC 8785 number vectors for the floating-point rule (`1e21 → "1e
 | `serde_json` | 1.0.151 | 1.71 | JSON I/O, `Value` for opaque sections | use; never enable `preserve_order` |
 | `schemars` (derive) | `1.2.2` | 1.74 | schema generation | use; pinned in `Cargo.lock`, **not** with an exact `=` requirement, which in a published library cannot unify with a downstream `^1.3` and would block the first Vocabulary crate that needs a schemars fix |
 | `sha2` | 0.11.0 | 1.85 | SHA-256 | use; never hand-write crypto |
+| `syn` (**dev**) | 3.0.6 | 1.71 | the parser `kernel_surface` reads `src/` with (OV-23, X11) | use; OV-18 applied 2026-09-22 — the hand-written alternative was 709 lines and was walked past eleven times over five review passes, and it adds **zero** new transitive crates, since `syn`, `proc-macro2`, `quote` and `unicode-ident` are already resolved through `serde_derive` and `schemars_derive` (verified against `Cargo.lock`). A dev-dependency, so X6's four and exit criterion 6 are untouched |
 | `thiserror` | — | — | error `Display` | no: about five error enums, hand-written `Display` is ~50 lines |
 | `bitflags` | — | — | block flags | no: seven flags, a `BlockFlags(u16)` newtype is ~25 lines |
 | `semver` | — | — | Module versions | no: `Version` plus caret matching is ~30 lines. Pre-release tags are out of scope because **Module and Vocabulary versions in a `ModuleDescriptor` are release-only**; the crate's own `4.0.0-alpha.N` is a Cargo version, not a descriptor version, and an alpha crate declares `4.0.0` in its descriptor |
@@ -198,7 +199,11 @@ Versions are the ones verified present in the local registry; MSRV values are ea
 - **OV-20** Test doubles live in `tests/support/` and are never compiled into `src/`. Phase 1's include a test-double Provider, an in-memory DataLink implementing all three policies, a recording TestExecutor of about twenty lines, and a fake `HostClock`; the set is not closed, and a double is added when a rule has no other way to be proved. The `ManualTimeAuthority` is the exception: spec 01 makes it normative (TM-17a) and Phase 2's Simulation Engine crate will build on it, which a sibling crate's `tests/support/` cannot provide. It therefore ships in `src/` behind a non-default `testing` feature, and OV-23's frozen-surface check excludes feature-gated items through one explicit allow-list line that says so.
 - **OV-21** The test-double Provider uses no radio vocabulary. Its keys are `test.count`, `test.grid` and `test.flag`. If a matcher test needs the word "channel" or "rate", the matcher is not generic and the test has found a defect (audit F7).
 - **OV-22** `schema_freeze` regenerates every document schema with pinned settings and compares it byte for byte with `schemas/`. `EZSDR_UPDATE_SCHEMAS=1` rewrites the files from inside the test; there is no build script and no `xtask`.
-- **OV-23** `kernel_surface` scans `src/**.rs` and fails when: a public item is missing from the allow-list; an allow-list entry names neither a **specific token** from audit §13's Kernel tree nor a `NEW: <one-line justification>`; a public item's doc comment cites no rule ID; or a banned token appears outside a comment that cites the ban. Items behind the `testing` feature are excluded by one allow-list line that names the feature.
+- **OV-23** `kernel_surface` **parses** every file under `src/` with `syn::parse_file` and fails when: a public item is missing from the allow-list; an allow-list entry names neither a **specific token** from audit §13's Kernel tree nor a `NEW: <one-line justification>`; a public item's doc comment cites no rule ID; or a banned token appears outside a comment that cites the ban. Items behind the `testing` feature are excluded by one allow-list line that names the feature. A public item is an item of the crate's module tree — inline `mod` bodies included — whose visibility is `pub`; `pub(crate)`, `pub(super)` and `pub(in …)` are not. A `pub use` whose first path segment is not `crate`, `self`, `super` or a module of this crate fails, so a dependency's type cannot reach the surface unlisted, and a doc comment citing a **withdrawn** rule number does not satisfy the citation check, since a withdrawn rule states no obligation (OV-1).
+
+  Parsing replaces lexing because five review passes demonstrated **eleven** ways past a line-based scan — an unbalanced brace in a comment, a multi-line string, `r"…"`, `br#"…"#`, `union`, a name on the next line, a foreign `pub use`, an attribute before the item, `pub async`, `pub extern` split across lines, and a bare `pub` — and every one was a lexing failure, a spelling the keyword and modifier lists did not cover. Two of them were hiding public items in the shipped crate: four node-qualified id types generated by a macro, and `document_schemas`. A parser closes that class by construction rather than by enumeration, and a file it cannot parse fails the test, so this gate's failure mode is a **red test on the MSRV toolchain** and never a silent pass.
+
+  What no source parser sees is code produced at **expansion**, and that class is closed by refusing its mechanisms — which is a closed list, unlike the language's spellings: a `macro_rules!` body carrying the token `pub`, an `extern` block, and a `mod` carrying `#[path]` or `#[cfg_attr]` are each refused outright. Proc-macros are confined to `serde_derive` and `schemars_derive` by X6 and generate no module-level items of this crate.
 - **OV-23a** The ban is a fixed literal token list kept in `tests/banned_tokens.txt`, not "any Vision §6 term": `uhd`, `soapy`, `hackrf`, `rfnoc`, `replay`, `cuda`, `wasmtime`, `dev/net/tun`, `tuntap`, `af_xdp`, `dpdk`, `802.11`, `otfs`, `ibfd`, `taint`, `prometheus`. Vision §6 also bans "Processor execution ABIs", but `Processor` is a Kernel role in audit §13's module-api line, so a literal scan for §6's phrases would fail the crate on its first run and the check would be disabled within a week.
 - **OV-23b** An allow-list entry marked `NEW:` is a type the Kernel has that audit §13 does not name. The exit review reports the `NEW:` count and each justification; that number, not the raw public-item count, is the "Core remains small" measurement. Audit §13's `data` line ends with "Stream Contract (normative)", which would otherwise absorb every type spec 02 invents.
 
@@ -260,7 +265,7 @@ Filled in at the gates. One row per decision the owner confirmed or reversed, so
 | Language: English | pre-A | confirmed | 2026-09-21 |
 | Three gates: 01+02, 03+04, 05+00 | pre-A | confirmed | 2026-09-21 |
 | Phase 1 includes the crate, not only the specs | pre-A | confirmed | 2026-09-21 |
-| X1–X12 | A/B/C | confirmed (12/12) | Second-opinion pass, 2026-09-22. No exceptions. X5 carries one Phase 6 note, not an amendment: a Python consumer needs a reference canonicaliser, because `repr(1e-7)` is `1e-07` where RFC 8785 wants `1e-7` |
+| X1–X12 | A/B/C | confirmed (12/12), then **X11 reversed in part** | Second-opinion pass, 2026-09-22. No exceptions at the time. **X11 was later reversed in part**: the second-opinion reviewer, asked after five review passes had demonstrated eleven ways past the hand-written scanner, reversed the half of X11 that rejected a `syn`-based scanner and confirmed the half that rejected `cargo public-api`. The deciding reason is the failure mode inside the loop this project runs: the hand lexer fails **silently**, `cargo public-api` fails loudly but **outside** `cargo test` on a nightly toolchain X12 does not govern, and `syn` fails loudly **inside** `cargo test` on the MSRV toolchain. X11 had recorded the `syn` alternative and rejected it as a dependency without applying OV-18, the rule written for that question; applied, `syn` passes every clause — the hand-written alternative is 709 lines, `syn 3.0.6`'s MSRV is 1.71, and it adds **zero** new transitive crates, since `syn`, `proc-macro2`, `quote` and `unicode-ident` are already resolved through `serde_derive` and `schemars_derive`. X6 and exit criterion 6 count `[dependencies]`, which stay at four. X5 carries one Phase 6 note, not an amendment: a Python consumer needs a reference canonicaliser, because `repr(1e-7)` is `1e-07` where RFC 8785 wants `1e-7` |
 | Per-spec decision tables | A/B/C | confirmed, with three amendments | Second-opinion pass, 2026-09-22. 01 T1–T13, 02 S2–S19, 03 B1–B3 and B5–B9, 04 R1–R9 and 05 M1–M12 confirmed as written. Amended: **02 S1**, whose promised widening is a Kernel major until the mask newtypes' inner fields stop being public; **03 B4**, whose ceiling holds only once RS-49 carries `UpdateParameter.at` (open question 2); **04 R10**, whose envelope gains the mandatory `version` Vision §10 requires. The three amended cells are rewritten in their own spec tables; those tables carry no Verdict column, because they become normative text at Step 5 |
 
 Open questions the owner must settle at a gate:
@@ -440,7 +445,7 @@ input that no document records.
 | D32 | 03 SB-39, SB-44; 05 MA-12, §4 `Requested` | `Provider::prepare` never receives the request the matcher matched | `plan()` writes a Provider fragment's `content` as the binding's selector alone and is not given `validate()`'s result, so neither the matched node nor the Spec's constraints reach any Provider. 05 §4 says `Requested` is "what the matcher offers a Provider's `coerce`; prepare sees the same input", and nothing delivers it, so MA-12 and SB-44 — `prepare` reports the same coercions `coerce` did for the same request — cannot be honoured. The test that proves MA-12 hand-builds the fragment, which hides it. A Provider would have no rate or frequency to configure. SB-39 should take the admission result and define the fragment's content as `{ selector, requested }` | amend — as the row says: `plan()` takes the `AdmissionResult`, and a Provider fragment's `content` is `{ selector, requested }` with `requested.resource = matched[name]` |
 | D33 | 03 §4 `KeyDecl`, SB-2; 05 MA-35; 04 RS-17 | Where a Provider parameter's update class is declared | `KeyDecl` carries `kind`, `coercible` and `coercion_default` and no update class, so RS-17 has nothing to consult for a Provider key and `Admitter`'s class map is supplied by the caller. §27's own examples of runtime mutation — TX gain, antenna beam, MCS — and §3's `sdr.rx.gain = 20` all target a Provider, whose parameters are Vocabulary keys and not `ComponentDescriptor.params`, so the Easy API's first parameter change is refused as undeclared. One optional `update_class` on `KeyDecl` (absent: not changeable during a Run) settles it before the freeze; adding it in Phase 2 is a Kernel document change | amend — as the row says: `KeyDecl.update_class` optional (absent: not changeable during a Run), read by `Admitter` beside `ComponentDescriptor.params` |
 
-The same pass raised further items not recorded here, each smaller and
+The same pass raised further items which are **raised and not applied**, each smaller and
 self-contained: a missing mandatory `version` on the Manifest (Vision §10), a
 non-ASCII object key making `seal()` fail after a Run has already transmitted
 (RS-11), public inner fields on `ChannelMask` and `BlockFlags` turning S1's promised
@@ -450,6 +455,159 @@ unimplementable, no way to attach a discontinuity-opened burst's late outcome
 (SC-24a), `ComponentDescriptor::validate` and `check_effective_narrows` with no
 caller, and an `ezsdr.time` section SB-26 declares the Kernel reads and nothing
 reads.
+
+
+### Findings from the fourth code-review pass, for the owner's verdict
+
+A fourth adversarial pass (Opus, per `AGENTS.md` §8) reviewed the crate at `e8d5caa`,
+concentrating on that commit's own diff, and found **1 P0, 11 P1 and 12 P2**. Every
+P0 and P1 was executed against a scratch copy rather than inferred. All of them are
+**applied**, each with a regression test whose expectation is the rule's own
+obligation (OV-3), and three of the P2s are raised below instead.
+
+The pass confirmed the crate's defect class for the fourth time. Five of its findings
+were a rule whose enforcement existed as a correct function nothing called:
+`AdmissionResult::into_result` (the P0 — `validate()` reported an RF-envelope
+violation and `plan()` produced a complete, armable plan from it, so SB-30's first
+point refused nothing), `ComponentDescriptor::validate`, `check_effective_narrows`,
+and the un-read `ezsdr.time` section of SB-26. Each rule now names its call site in
+its own text, which is the only mechanism that has held: SB-30 names all three
+points, SB-41 names MA-12's two obligations, MA-37 names `validate()`, and MA-41
+names the comparison.
+
+Two of its findings were the `e8d5caa` cluster's own: a resource endpoint's port was
+resolved against the **whole** instance tree rather than the bound node, so SC-3
+checked a different node's contract — and the test written for it asserted that
+behaviour, an OV-3 failure; and `Binding.feed` was never refused on a Spec Run, so
+its `Block` policy went unseen. Both are fixed, the test rewritten to discriminate the
+bound node by giving the double's root and its lines the same port name with different
+contracts.
+
+`kernel_surface` had **four** working evasions, all demonstrated: an unbalanced `{`
+in a comment blinded the scan to every later item in the file, `union` was not an item
+keyword, a name on the next line was invisible, and `pub use serde_json::Value as X;`
+put a dependency's type on the surface unlisted. OV-23 now states the closures, and
+all four were reproduced against the fixed gate.
+
+| # | Where | What the specs leave unsettled | Why it matters | Verdict |
+|---|---|---|---|---|
+| D34 | 00 OV-13, OV-15a; 03 SB-6 | Whether `Value` and `Scalar`, the two OV-13 carve-outs, share one equality | `Scalar` now crosses `Int` and `Float` exactly, because SC-2's "identical re-registration" depends on it. `Value` derives `PartialEq` and does not, so `Value::Int(20) != Value::Num(20.0)` while SB-6's comparison calls them equal and OV-15 gives them one hash — three notions of equality for one document family. Nothing on the live path compares two `Value`s with `==`, so there is no Phase 1 consequence; the first replay or Manifest diff that does will find one | amend — `Value` takes `Scalar`'s exact cross-kind equality (one canonical form under OV-15: the float integral, its magnitude at most 2^53, equal to the integer) and `partial_cmp_scalar` compares `Int` with `Num` in 128-bit arithmetic instead of `as f64`, the cast SC-2 already removed. SB-6's `Eq`, `Range`, `Min` and `Max` all pass through it, so a capability match above 2^53 is inexact today. OV-15 already gives the family one notion of "same value"; a second is a defect, not a choice. No schema change |
+| D35 | 01 TM-16c | Whether an Authority may schedule on a domain that ticks finer than its root | `to_root` converts with a floor, so `schedule` and `wait_until` on a `Derived` domain whose `root_ticks_per_tick` has a denominator above 1 queue the callback at a root tick at or **before** the requested instant, and two distinct derived instants can collapse onto one. TM-16c requires the callback at `t`. No Phase 1 fixture builds such a domain and TM-3 permits one, so this is a latent hole rather than a live defect: either TM-16c admits the floor and says so, or TM-13a refuses a non-integral ratio for a domain an Authority governs | amend TM-16c — `to_root` converts with `try_exact`, so `schedule`, `wait_until` and `advance_to` refuse an instant that is not a root tick (`Inexact { floor }`, an existing variant) while `now` keeps the floor: a reading may round, a firing may not, because a callback fired at the floor observes `now()` earlier than `t`. Rejected: admitting the floor (fires early, collapses distinct instants), a ceiling (the same defect mirrored), and TM-13a refusing non-integral ratios (TM-3 admits any capped rational, so a legal rate would fail at `prepare`) |
+| D36 | 02 SC-24, §4 `BurstStep` | How a discontinuity whose opening block also carries `END_OF_BURST` is reported | `on_block` pushes **two** records and returns `Discontinuity { closed }` naming only the first, so a caller tracking state from the return value believes a burst is open while `state()` says `Idle`. The records are right; the return type cannot express "a discontinuity, and then it ended". Either `BurstStep` gains that shape or SC-24 says the caller reads `state()` after a `Discontinuity` | amend — `BurstStep::Discontinuity` gains `then_ended: Option<BurstRecord>`, `Some` when the reopening block also carries `END_OF_BURST`, so a block's return value states every transition it caused and agrees with `state()`. A runtime value, not a document: no schema change. Rejected: sending the caller to `state()` (a return value that may lie is what a normative state machine exists to prevent) and a fourth variant |
+
+
+### Findings from the fifth pass (verification of the fourth), for the owner's verdict
+
+A fifth pass re-ran the fourth's four probes against the fixed tree and then attacked
+the fixes. **Every P0 and P1 of the fourth pass is confirmed fixed.** The fifth found
+**1 P0, 5 P1 and 11 P2**, all of them executed; all are applied.
+
+The P0 was a **regression of the fourth pass's own fix**: MA-12's new re-match read
+`merged.effective`, which SB-41 says in as many words is lossy for a key two fragments
+both name and which the Kernel does not interpret. Two channels each asking their own
+line's declared count refused each other, so the ordinary two-channel Spec — the first
+thing Phase 2 will write — was unrunnable. Fail-closed, and caught only because the
+reviewer was asked to attack the fix rather than re-check the defect. Each resource is
+now judged by its own `PrepareReport`.
+
+Two further findings were a fix that was necessary but not sufficient. `plan()`'s new
+SB-30 guard accepted `AdmissionResult::default()`, because "admitted" means only that
+nothing was rejected — so a stale result planned with no `requested` on any fragment.
+And the `sink/` prefix narrowed the Sink-address collision rather than closing it,
+because `sink/<anything>` is a legal Provider node path; the segment is now reserved.
+The `Scalar` equality fix survived at one value, `i64::MIN`, the boundary the
+hand-written vector table omitted — its test now asserts the **criterion** (equal iff
+`ContentHash::of` agrees) instead of a list of cases.
+
+`kernel_surface` had two evasions left, and one was **already load-bearing in the
+shipped crate**: `src/id.rs` generated `ClockDomainId`, `MemoryDomainId`, `IslandId` and
+`DataLinkId` from a macro, and none of the four Kernel document types was on the
+allow-list or in the OV-23b count. The macro now carries only impls, the four types are
+declared and listed, and the gate refuses a macro that declares a type.
+
+| # | Where | What the specs leave unsettled | Why it matters | Verdict |
+|---|---|---|---|---|
+| D37 | 03 SB-16, SB-43; 04 RS-49a, RS-51; 02 SC-27 | What Phase 1 owes for `spec.schedule`, given that there is no Kernel `arm` | Nothing read `spec.schedule` at all, so a `SpecTime` whose `clock` named no resource passed every stage. `validate()` now refuses that, which is the half a document can be checked against. Three halves remain: SB-43's resolution of a `SpecTime` to an `AbsoluteDeadline` needs the coordinator (Phase 2); RS-51's and SC-27's "`RejectAtPlan` is legal only on a statically known target" has no plan-time check, and in Phase 1 the schedule is the only place a Spec declares a burst, so every scheduled target *is* static and the rule bites only on a Reactor-emitted burst, which Phase 1 cannot express. Marked forward here; the alternative is to say Phase 1 refuses `RejectAtPlan` outside the schedule, which is a rule about a shape that does not exist yet | confirm the forward markings — SB-43's resolution is Phase 2's, and Phase 1 has no shape for a Reactor-emitted burst, so a `RejectAtPlan` rule outside the schedule would be a rule about nothing. **amend** SB-16 and `validate`: an entry whose `action.target()` names nothing the Spec declares is refused too, and SB-16 states the namespace that check needs — **a Spec target is Spec-relative**, its first segment a Spec resource name or `sink/<output id>`, rewritten at `arm` through `admission.matched` as `SpecTime.clock` is. INFERRED from §8's portability and §59/§61; naming Provider node paths instead would make Phase 8 parity depend on the Mock mirroring the X310's node names |
+| D38 | 00 OV-3, OV-19 | Whether the OV-3 disposition review is satisfied by a rule-ID-prefixed test, or by any named carrier | The pass measured the sweep exit criterion 2 asks for: of 259 rule bullets, 6 are withdrawn, 8 forward, 10 producer and 1 consumer obligations, leaving **234** that default to "checked by a Kernel item and at least one Phase 1 test". **69 of those have no test whose name begins with their rule ID**, which is OV-19's convention, and **14 are named nowhere in `src/`** — `OV-4`, `OV-4a`, `OV-5`, `OV-6`, `OV-7`, `OV-8`, `OV-9`, `OV-18`, `OV-19`, `OV-22`, `TM-16b1`, `MA-17`, `MA-44`, `MA-45`. Most of the 69 are covered by a test named for a neighbouring rule and say so in their own text, and the governance rules have no Kernel item by nature. The exit review owes a verdict per rule either way: add OV-19's marker, or name the test that carries the obligation. The four rules of D37 are what the sweep finds when it is done rule by rule rather than by grep | amend OV-3 and exit criterion 2 — the prefix count measures OV-19, not OV-3, and criterion 2 restates only the marker tally, so the 234 unmarked rules have no exit check at all. OV-3 gains a fourth marker, **process obligation**, for OV-4…OV-19, whose carrier is a document or the test tree and never a Kernel item; its default reads "at least one Phase 1 test, driving a Kernel item where the rule names Kernel behaviour", which covers OV-22, MA-44 and MA-45; TM-16b1 cites TM-14's test and MA-17 becomes a Phase 2 producer marker. Criterion 2 becomes a **per-rule carrier table read from test bodies** — the table is the evidence, a rule-ID prefix is not |
+
+
+### Findings from the sixth pass, for the owner's verdict
+
+A sixth pass, by a reviewer given no context from the fifth, re-ran the fifth's probes
+and then attacked the fix set. **Every P0 and P1 of the fifth pass is confirmed
+fixed.** It found **1 P0, 7 P1 and 12 P2**, all executed; all are applied.
+
+The P0 was **the second regression in a row inside `collect_prepare`**, and the same
+kind: MA-12's constraint re-match was applied to every key, and a coercion is by
+definition a key whose applied value does not satisfy the requested constraint — so
+every coercion was refused at `prepare` and SB-46's `accept` and `warn` branches became
+unreachable. Spec 03 §2's own headline evidence, the UHD 19.5 → 20 Msps coercion, was
+unrunnable. SB-46 and MA-12 now state the division: a declared change is SB-46's, an
+undeclared one is MA-12's.
+
+Two process facts are worth recording, because they are why a P0 on the crate's most
+cited behaviour survived two passes and 287 green tests. First, a test helper had been
+half-fixed: its comment said it passed the caller's Spec and the next line still
+substituted `minimal_spec()`, so no caller's constraints were ever re-matched. Second,
+when the coercion refusal first appeared it was **attributed to a neighbouring rule and
+the fixture was moved away from it** — SB-30's second point is *about* a coerced value,
+so removing the coercion from the fixture removed the rule from the test. Both were
+authored while applying the fifth pass's findings.
+
+The gate's third round of evasions — a raw string, a macro emitting a `pub fn`, and
+`pub extern "C" fn` — changed its design rather than its state: it now **refuses the
+construct**. `src/schema.rs` then immediately gave up a second hidden public item,
+`document_schemas`, by the same rule that had exposed the four id types.
+
+| # | Where | What the specs leave unsettled | Why it matters | Verdict |
+|---|---|---|---|---|
+| D39 | 00 OV-3, OV-19; 03 SB-16 | Whether a rule-ID-prefixed test name is evidence of OV-3 compliance | Three review passes each found a test that carried the right rule-ID prefix and asserted the implementation rather than the rule — `sb_15_…`, then `sb_16_…`, then `ov_15_…`, which named the three call sites its rule is about and then called the predicate directly, none of the three being the call site. So D38's count of missing prefixes is a lower bound on the work and not a measure of it: a present prefix is not evidence either. The exit review's per-rule verdict has to read the test, not its name. The sixth pass also proposes one mechanical step for it that has now produced **six** findings across three passes: grep for a predicate with no caller in `src/`. Also: D37 called the schedule's `clock` "the half a document can be checked against", which is wrong — a schedule entry's `action.target` is equally checkable and a dangling one still validates | confirm — carried by D38's criterion-2 rewrite (read the body) and D37's target check. The mechanical step becomes **step 0 of §12**: list every predicate in `src/` with no caller in `src/`; each is wired or its rule re-marked. Six findings across three passes came from it |
+
+
+### Findings from the seventh pass, for the owner's verdict
+
+A seventh pass was given two targets, because the sixth had named exactly two places
+where anything was left: the coercion exclusion the sixth pass's own fix introduced,
+and the surface gate. It found **1 P0, 2 P1 and 9 P2**, all executed; all but the four
+rule questions below are applied. It confirms **all nine of the sixth pass's fixes
+hold.**
+
+The P0 was the **third** defect in `collect_prepare` and the third of the same shape,
+but in the opposite direction from the previous two: the exclusion was keyed on the
+**report's own** `coercions` list, which is Provider-declared, and nothing compared the
+declared `applied` with what reached `effective`. So naming a key in `coercions` was a
+self-issued exemption from MA-12's re-match, and a Provider could run a Spec that asked
+for `Eq(20.0)` at 100 with a Manifest recording the substitution as a legitimate
+coercion — spec 03 §2's v3 failure restored, with the Manifest now stating a value
+other than the one applied. The exclusion is keyed on `admission.coercions_preview`,
+which the Kernel computed itself, and what is checked for such a key instead is SB-44's
+own obligation. After it, every input to the `prepare`-stage checks is either a parsed
+document or a value the Kernel computed at `validate`; no Provider-supplied datum
+decides an admission any more.
+
+The gate's fourth round of evasions produced its **design** rather than another patch.
+Two of the four refusals the sixth pass added had been written as line prefixes and were
+evaded by a line break, so every refusal is now matched as a token; and above them sits
+the check that closes the brace class over its **cause** — the scan asserts that its own
+frame stack ended balanced, since every one of the four brace-class evasions had that
+one signature. All eight evasions the four passes demonstrated are now caught, verified
+against a scratch copy.
+
+| # | Where | What the specs leave unsettled | Why it matters | Verdict |
+|---|---|---|---|---|
+| D40 | 03 SB-41, §4 `PrepareReport` | Whether `constraints_hit` stays | It has **no reader** anywhere — ten construction sites in tests, the field declaration, and nothing that reads it. Its stated meaning, "keys whose declared bound the request reached", is neither a superset nor a subset of "keys that were coerced", so it is not the datum the coercion exclusion needed either. Either a rule names a reader for it or the field goes, which is a pre-freeze schema change (OV-12) | amend — **remove `constraints_hit`.** The prior question is not who reads it but what it means: the Vision's PrepareReport sketch and audit §13 both list the name without semantics, and SB-41's gloss was written by this spec, not taken from them. What a Provider would say with it is `warnings` already, and the Kernel computing "hit the bound" would be Core deciding what is interesting (§63). Pre-freeze schema change plus a changelog line (OV-12), ten test sites, and one line under 03 §9 for the Vision's own sketch |
+| D41 | 03 SB-44, MA-11 | The granularity of "the same request" | `match_constraints` calls `coerce` with a **single-key** `Requested`, once per key, while a fragment carries the resource's whole constraint map and a Provider replays `coerce` over all of it. For a Provider whose keys interact — rate × decimation — the two answers differ legitimately, so SB-44's equality is not literally satisfiable and the Kernel cannot check more than it does now (that the applied value equals the previewed one, per key). Either SB-44 says per-key, or `coerce` is called once with the whole map at `validate` too | amend SB-7 and SB-44 — **one call, whole map.** `validate` calls `coerce` at most once per bound node with the resource's whole `requires` map, after SB-7's fail-fast, and judges each key from `applied`. "The same request" then literally *is* the fragment's `requested`, so MA-11's determinism makes the `collect_prepare` check exact rather than approximate and a rate-times-decimation Provider is no longer refused for being consistent. Rejected: SB-44 saying per-key, which outlaws interacting keys at the Kernel's contract — Phase 2's first real Provider |
+| D42 | 03 SB-46, SB-45 | Whether a coercion on a key the Spec never constrained is meaningful | At `validate` it cannot arise: `coerce` is called only for a constrained, coercible, not-directly-satisfied key. At `prepare` the policy loop applies that key's default to whatever the Provider declares, so a Provider that reports its own applied gain as a coercion fails `prepare` under a `reject` default for a key nobody asked about. Either SB-46 restricts the loop to the Spec's own keys, or it says a Provider may not declare one | amend SB-44 and SB-46 — a `Coercion` whose key is not in the fragment's `requested` map is a **malformed report** and fails the fragment (SB-42): nothing was requested, so nothing was coerced, and a Provider choosing its own default is MA-12's narrowing case, which belongs in `effective` alone. SB-46's loop then runs over requested keys by construction. Rejected: restricting the loop but keeping the record, which still reaches the Manifest through the report |
+| D43 | 04 RS-15, RS-11; 03 SB-9a | What a refused Action's value does to the log | RS-15 logs every Action, admitted or not, and `SessionLog::append` is public and takes the value as given. A value carrying a non-ASCII key therefore makes the log — and the Manifest holding it — unhashable, which is what `compile`'s new check prevents on the compile path but not on a direct `append`. Either RS-15 says the log holds only what passed SB-4's shape check, and a value that failed it is logged by reference or by description, or `append` refuses and RS-15 loses "every Action" | amend RS-15 and `SessionLog::append` — `append` runs the same shape check `compile` runs (SB-4's nesting, OV-15's ASCII keys) and returns `Result`. RS-15's "every Action" survives once RS-15 says what an Action is: a well-formed document. A **rejected** Action still takes a sequence number; an unhashable one never was an Action, and a log the canonicaliser cannot hash breaks RS-11 for the whole Run. The log is the choke point because `append` has no caller in `src/` — the compile path alone protects nothing. Rejected: logging by reference or description, a second representation of one Action |
+
+| D44 | 03 SB-3, SB-22; 05 MA-10 | Where an instance's identity comes from | `CompileInputs` holds it only as a `&dyn Provider`, so the SB-3 path check distinguishes instances by address — the only discriminator available, and unsound in two cases: a **zero-sized** Provider has no address of its own (every `Box` over one is the same dangling address), and a field's address can equal its container's. A size guard closes the first; the second needs an identity the Kernel does not have. Either `ProviderInstance.id` is required to be unique across bound instances and checked, or the Phase 2 coordinator supplies an instance identity and `CompileInputs` carries it | amend SB-3 and `check_binding_names` — **instance identity is the binding description.** Two bindings with equal `(module, selector, profile)` are one instance, per D18's document-not-assembly principle and SB-23's reading of `instances: 2`; the Kernel walks it once and refuses if their Providers report different `instance().id`s. Two descriptions are two instances: distinct ids, disjoint node paths. No pointer is compared and the size guard goes. Rejected: address identity (unsound both ways) and a coordinator-supplied id (assembly-time input again). Consequence: fixture churn, because `profile_binding` gives every binding an empty selector |
+
+The pass also asks the owner one question that is not a rule: **whether `cargo public-api`
+earns its place.** X11 rejected it because it needs nightly rustdoc JSON, and four passes
+of evasions are the cost of that choice. The gate is now total for the constructs that can
+hide a module-level public item, and its own balance check fails loudly if it is ever
+mis-lexed again — but it is still a line-based scanner in a test file, and the answer to
+this question decides whether it survives Phase 1.
 
 ---
 
@@ -467,9 +625,9 @@ reads.
 ## 13. Exit criteria
 
 1. Six documents accepted across three gates, and every decision-table row has a verdict in §11.
-2. Every normative obligation of every covered Vision section has a rule ID and no coverage table contains a gap, and every rule has an OV-3 disposition: the review reports how many rules are producer, consumer or forward obligations and which phase each names.
+2. Every normative obligation of every covered Vision section has a rule ID and no coverage table contains a gap, and every rule has an OV-3 disposition **recorded in the per-rule table OV-3 requires** — for an unmarked rule the test whose assertion is that rule's obligation, read from the test body; for a marked rule the marker and the phase or artefact. Counting rule-ID prefixes is not this criterion: a present prefix is neither necessary nor sufficient.
 3. `cargo test` passes on the pinned MSRV and on stable, with no `#[ignore]` among the tests the five specs' test tables name, and the whole compile pipeline runs end to end against the test doubles with no Mock.
 4. `schemas/` is committed, `schema_freeze` passes, and `SCHEMA_CHANGELOG.md` has its v1 entry.
-5. `kernel_surface` passes: every public item is on the allow-list with a specific audit §13 token or a `NEW:` justification, its doc comment cites a rule ID, and no token from `tests/banned_tokens.txt` appears outside a comment citing the ban. The review records the `NEW:` count as the Kernel-growth number.
-6. The Kernel crate's **direct** dependencies are exactly the four crates of §8. The resolved tree is larger (`sha2` brings `digest`, `block-buffer`, `crypto-common`, `hybrid-array`, `typenum`; `serde_json` brings `serde_core`, `itoa`, `memchr`, `ryu`; `schemars` brings `dyn-clone` and `ref-cast`), and that is expected.
+5. `kernel_surface` passes: `src/` parses, every public item is on the allow-list with a specific audit §13 token or a `NEW:` justification, its doc comment cites a rule ID, and no token from `tests/banned_tokens.txt` appears outside a comment citing the ban. The review records the `NEW:` count as the Kernel-growth number.
+6. The Kernel crate's **direct** dependencies are exactly the four crates of §8. The resolved tree is larger (`sha2` brings `digest`, `block-buffer`, `crypto-common`, `hybrid-array`, `typenum`; `serde_json` brings `serde_core`, `itoa`, `memchr`, `ryu`; `schemars` brings `dyn-clone` and `ref-cast`), and that is expected. The dev-dependencies are the `testing` self-dependency and `syn`, the latter added under OV-18 for OV-23's parser and adding no new transitive crate; a dev-dependency is not a direct dependency of the Kernel and does not enter what a consumer builds.
 7. After the move in §12, every link in `design/` and `plan/phase1/` resolves.

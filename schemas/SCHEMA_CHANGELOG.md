@@ -32,6 +32,14 @@ stock JCS crate cannot be dropped in later (OV-15, OV-15a).
 as an exact decimal by the canonicaliser; consumers are required to use a 64-bit-safe
 parser (X3).
 
+## v1 — 2026-09-22 — pre-freeze revision, adopted review findings (second round)
+
+Still version 1, for the reason the entry below gives.
+
+- `prepare_report`, `manifest`: `PrepareReport` loses `constraints_hit`. No rule consumed
+  it, and neither the Vision's sketch nor audit §13 states what it means; `warnings`
+  carries what a Provider would have said with it (decision D40).
+
 ## v1 — 2026-09-22 — pre-freeze revision, adopted second-opinion findings
 
 Still **version 1**: the Kernel is `4.0.0-alpha.1` and OV-12's immutability begins at

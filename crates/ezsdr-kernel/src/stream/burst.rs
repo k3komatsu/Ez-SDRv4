@@ -229,6 +229,11 @@ pub enum BurstStep {
         got: TimePoint,
         /// The burst that was closed (SC-28).
         closed: BurstRecord,
+        /// The burst this block **opened**, when the same block also carried
+        /// `END_OF_BURST` and so ended it at once. Without it a block that did two
+        /// things reported one, and a caller tracking state from the return value
+        /// believed a burst was open while `state()` said `Idle` (SC-24, SC-28).
+        then_ended: Option<BurstRecord>,
     },
 }
 
@@ -379,11 +384,14 @@ impl BurstTracker {
                 let closed = o.close(BurstEnd::Discontinuity);
                 self.records.push(closed.clone());
                 self.begin(t, end, h.len, open.unwrap_or_default());
-                if eob {
+                let then_ended = if eob {
                     let record = self.open.take().expect("just opened").close(BurstEnd::Eob);
-                    self.records.push(record);
-                }
-                Ok(BurstStep::Discontinuity { expected, got: t, closed })
+                    self.records.push(record.clone());
+                    Some(record)
+                } else {
+                    None
+                };
+                Ok(BurstStep::Discontinuity { expected, got: t, closed, then_ended })
             }
         }
     }

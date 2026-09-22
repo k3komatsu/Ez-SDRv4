@@ -19,6 +19,12 @@ sha2 = "0.11.0"
 # shipped surface.
 [dev-dependencies]
 ezsdr-kernel = { path = ".", features = ["testing"] }
+# OV-18 / X11: the parser `kernel_surface` reads `src/` with. Five review passes
+# demonstrated eleven ways past a hand-written lexer, two of them hiding public items
+# in the shipped crate; a parser closes that class by construction. Adds no new
+# transitive crate — `syn`, `proc-macro2`, `quote` and `unicode-ident` are already
+# resolved through `serde_derive` and `schemars_derive` — and its MSRV is 1.71.
+syn = { version = "3", default-features = false, features = ["full", "parsing"] }
 
 [features]
 default = []

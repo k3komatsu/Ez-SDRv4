@@ -119,6 +119,7 @@ impl BindingProfile {
     pub fn from_json(doc: &serde_json::Value) -> Result<BindingProfile, SpecError> {
         check_version(doc)?;
         check_top_level(doc, BINDING_TOP_LEVEL)?;
+        crate::spec::check_ascii_keys(doc)?;
         serde_json::from_value(doc.clone())
             .map_err(|e| SpecError::Structural { reason: format!("SB-21: {e}") })
     }
@@ -126,6 +127,13 @@ impl BindingProfile {
     /// One `environment` section, or `None`. The Kernel reads the four of
     /// [`KERNEL_SECTIONS`] and nothing else (SB-26).
     pub fn section(&self, ns: &str) -> Option<&serde_json::Value> {
+        // SB-26 fixes the sections the Kernel reads, and this is the only reader, so
+        // the list is enforced here rather than being a constant nothing consults: a
+        // Kernel read of an unlisted section is a Kernel that learned a Vocabulary
+        // word (OV-21).
+        if !KERNEL_SECTIONS.contains(&ns) {
+            return None;
+        }
         Namespace::parse(ns).ok().and_then(|n| self.environment.get(&n))
     }
 }

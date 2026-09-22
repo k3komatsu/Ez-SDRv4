@@ -72,7 +72,12 @@ pub(crate) fn to_root(
     if root == t.domain {
         return Ok((root, t.ticks));
     }
-    Ok((root, registry.conversion(t.domain, root)?.apply(t)?.floor().ticks))
+    // `try_exact`, not a floor: TM-16c requires a callback **at** `t`, and a callback
+    // fired at the floor observes `now()` earlier than `t` — and two distinct derived
+    // instants collapse onto one root tick. A reading may round (`now` still floors);
+    // a firing may not. A caller that wants one converts and rounds itself, rather
+    // than having the Kernel pick a rounding on its behalf (§65 #39).
+    Ok((root, registry.conversion(t.domain, root)?.try_exact(t)?.ticks))
 }
 
 #[cfg(feature = "testing")]

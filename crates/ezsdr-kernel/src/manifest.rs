@@ -285,6 +285,22 @@ pub fn ingest_input(
 }
 
 impl Manifest {
+    /// Reads a stored Manifest, refusing a `version` this build does not support
+    /// rather than interpreting it under version 1's defaults.
+    ///
+    /// The Manifest is the one document that outlives every Run, so without this
+    /// the mandatory `version` RS-38 added was a field with no check: a Manifest
+    /// written by a future major deserialised happily and SB-47's
+    /// migrate-or-refuse had nothing to act on.
+    ///
+    /// Rule: RS-38, SB-47, SB-48.
+    pub fn from_json(doc: &serde_json::Value) -> Result<Manifest, crate::spec::SpecError> {
+        crate::spec::check_version(doc)?;
+        crate::spec::check_ascii_keys(doc)?;
+        serde_json::from_value(doc.clone())
+            .map_err(|e| crate::spec::SpecError::Structural { reason: format!("RS-38: {e}") })
+    }
+
     /// Computes the Manifest's own hash over the body with `hash` removed, and
     /// stores it beside the body (RS-46, OV-17).
     pub fn seal(&mut self) -> Result<ContentHash, HashError> {
@@ -293,10 +309,20 @@ impl Manifest {
         // enforced rather than trusted.
         self.run.deterministic =
             self.run.deterministic && self.run.execution_class.may_claim_determinism();
-        self.hash = None;
-        let hash = ContentHash::of(&self)?;
-        self.hash = Some(hash.clone());
-        Ok(hash)
+        // Computed into a local and stored only on success: clearing the field first
+        // left a previously sealed Manifest with `hash: None` when the re-seal failed,
+        // so a Manifest that had a valid hash lost it (RS-46).
+        let previous = self.hash.take();
+        match ContentHash::of(&self) {
+            Ok(hash) => {
+                self.hash = Some(hash.clone());
+                Ok(hash)
+            }
+            Err(e) => {
+                self.hash = previous;
+                Err(e)
+            }
+        }
     }
 
     /// Records a Module's section, refusing a write outside its own registered
@@ -313,6 +339,13 @@ impl Manifest {
                 ns: owner.to_string(),
             });
         }
+        // `sections` is the path RS-39 and RS-43 design for untrusted Module content
+        // and it passes no `from_json`, so OV-15's ASCII key rule is checked here.
+        // Left to hashing time, `seal()` failed at cleanup step 8 — a Run that had
+        // already transmitted and produced no Manifest, against RS-11 (SB-9a).
+        crate::spec::check_ascii_keys(&content).map_err(|e| {
+            crate::run::RunError::SectionKeyNotAscii { key: e.to_string() }
+        })?;
         self.sections.insert(section, content);
         Ok(())
     }
