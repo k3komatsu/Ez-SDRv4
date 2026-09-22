@@ -1605,3 +1605,52 @@ fn rs_14_the_kernel_supplies_no_vocabulary_value_or_late_policy() {
     let err = fresh.register_vocabulary(v).expect_err("RejectAtPlan is unreachable here");
     assert!(err.message.contains("RS-14"), "{err}");
 }
+
+#[test]
+fn rs_13_every_session_action_compiles_to_its_kernel_form() {
+    // RS-13 names "the compilation table of RS-14 and its tests" as its checker, and
+    // those tests exercised only `SetParameter`, `Vocabulary` and `Stop`. The four
+    // that produce a **control operation** rather than an Action — the half RS-14
+    // states as "`Release`, `Adopt` and `Renew` to Lease operations; `RunChild` to the
+    // creation of a child Run" — had no carrier anywhere in the crate, so the rule's
+    // own annotation named a checker that did not check it (exit-review SPEC-DEFECT).
+    //
+    // Each of these compiles to a control op and to **no** Action: a Lease operation
+    // is the Kernel's own business and nothing is dispatched to a Module for it.
+    let reg = registry();
+    let hash = some_hash("child-spec");
+    let cases: Vec<(SessionAction, ControlOp)> = vec![
+        (SessionAction::Release, ControlOp::Release),
+        (
+            SessionAction::Adopt { token: "tok".to_owned() },
+            ControlOp::Adopt { token: "tok".to_owned() },
+        ),
+        (SessionAction::Renew, ControlOp::Renew),
+        (
+            SessionAction::RunChild { spec_hash: hash.clone() },
+            ControlOp::RunChild { spec_hash: hash },
+        ),
+        (SessionAction::Stop { target: None }, ControlOp::StopRun),
+    ];
+    for (action, want) in cases {
+        let compiled = compile(&action, &reg, &declared_classes(), &placed(), t(0), None)
+            .unwrap_or_else(|v| panic!("{action:?} compiles: {v:?}"));
+        assert_eq!(compiled.control.as_ref(), Some(&want), "{action:?}");
+        assert!(compiled.actions.is_empty(), "{action:?} dispatches no Action");
+        assert!(compiled.coercions.is_empty(), "{action:?} coerces nothing");
+    }
+
+    // And the contrast RS-13 draws: `Stop { target }` addresses a resource, so it is
+    // an Action and not a control op.
+    let compiled = compile(
+        &SessionAction::Stop { target: Some(rid("radio")) },
+        &reg,
+        &declared_classes(),
+        &placed(),
+        t(0),
+        None,
+    )
+    .expect("compiles");
+    assert!(compiled.control.is_none());
+    assert!(matches!(compiled.actions[0], Action::Stop { target: Some(_) }));
+}

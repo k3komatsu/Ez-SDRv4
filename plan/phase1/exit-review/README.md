@@ -74,14 +74,27 @@ Modules and nothing implements `Link`; `SC-5`'s PerformanceEnvelope is Phase 2's
 second shape is a candidate for a `forward` marker rather than a gap, but only the owner
 may add one — the rules as written name Phase 1 behaviour.
 
-### The 8 `SPEC-DEFECT` rules
+### The `SPEC-DEFECT` rules — all resolved 2026-09-22
 
-`SC-31a` · `SB-9a` · `SB-44` · `RS-13` · `RS-14` · `RS-46` · `MA-44` · `MA-45`
+Six rules named a checker, test or artefact as carrying them that did **not** do what was
+claimed: `TM-1`, `SC-31a`, `SB-44`, `RS-13`, `RS-46`, `MA-44`. (`TM-1` was recorded as
+`UNCERTAIN` because `01` was written before this flag existed.) `SB-9a`, `RS-14` and
+`MA-45` appear in a text search for the flag only because their cells discuss it; each
+says in its own words that it is not one.
 
-Each names a checker, test or artefact as carrying it that does **not** do what is
-claimed. `TM-1` is a ninth of the same shape, recorded as `UNCERTAIN` because `01` was
-written before this flag existed: its text names `kernel_surface` as its checker and that
-file has no float or field-type scan at all.
+Five were **wrong citations**, corrected in the rule text: TM-1 named `kernel_surface`,
+which has no field-type scan, where the carrier is `ov_22_schema_freeze` and the seven
+committed time schemas; SC-31a named `SampleBlock::new`, which carries no `ALIGNMENT`
+logic, where the derivation is checked by a test and **setting** the flag is the
+producer's obligation; SB-44 named a test that calls `validate()` only and so cannot
+check that a dry run and a real run agree; RS-46 named `rs_45_hash_equal_for_equal_inputs`,
+which asserts RS-45's property; MA-44 listed "an event generator" the test double does not
+have.
+
+One was a **missing carrier** and got a test: RS-13's four control-op compilations —
+`Release`, `Adopt`, `Renew`, `RunChild` — had no test anywhere, and
+`rs_13_every_session_action_compiles_to_its_kernel_form` now asserts that each produces
+its `ControlOp` and dispatches no Action, while `Stop{target}` is an Action instead.
 
 ### Method note
 

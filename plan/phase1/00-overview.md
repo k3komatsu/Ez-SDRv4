@@ -788,7 +788,12 @@ deleting each from a scratch copy and compiling. `dropped_per_kind`'s own doc co
 claims "the tests assert RS-35's invariant against them", and no test exists. This is the
 list §12 step 0 was written to produce.
 
-**Nine rules name a checker that does not check them.** `TM-1` names `kernel_surface`,
+**Six rules named a checker that does not check them — all resolved 2026-09-22.** Five
+were wrong citations, corrected in the rule text; the sixth, RS-13, had no carrier at all
+and now has `rs_13_every_session_action_compiles_to_its_kernel_form`, which asserts that
+`Release`, `Adopt`, `Renew` and `RunChild` each compile to their `ControlOp` and dispatch
+no Action. The habit the six share is worth keeping in view: a `*Checked:*` annotation had
+been a claim, and nothing checked the claims. What they said before: `TM-1` names `kernel_surface`,
 which has no float or field-type scan; `SC-31a` names `SampleBlock::new`, which has no
 `ALIGNMENT` logic and no test that constructs a block carrying the flag through it;
 `SB-44` names `sb_07_coercible_key_consults_provider`, which never calls `prepare`;
@@ -796,8 +801,7 @@ which has no float or field-type scan; `SC-31a` names `SampleBlock::new`, which 
 `RS-46` names `rs_45_hash_equal_for_equal_inputs`, which proves RS-45's property and not
 RS-46's — the real carrier, `rs_46_manifest_hash_is_stored_beside_the_body`, is cited
 nowhere; `MA-44` lists "an event generator" among what the test double provides, and
-`tests/support/doubles.rs` has no `EventSink` use and emits no `Event`. `SB-9a`, `RS-14`
-and `MA-45` are the same shape. A `*Checked:*` annotation has been a claim, not evidence.
+`tests/support/doubles.rs` has no `EventSink` use and emits no `Event`.
 
 **The `GAP` rules split into two shapes**, and the difference decides what to do about
 them. A type exists and nothing reads it — `RS-32a`'s `hot_layout` is `None` everywhere
