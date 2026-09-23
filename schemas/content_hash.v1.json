@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "`sha256:<64 lowercase hex>`. The algorithm is named in the value so a later\nalgorithm is an additive change (OV-14).",
+  "description": "`sha256:<64 lowercase hex>`, matching `^sha256:[0-9a-f]{64}$`. The algorithm is\nnamed in the value so a later algorithm is an additive change (OV-14, SB-1).",
   "title": "ContentHash",
   "type": "string"
 }

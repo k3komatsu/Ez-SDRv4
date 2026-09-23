@@ -22,7 +22,7 @@
       "type": "object"
     },
     "NodeId": {
-      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
@@ -50,7 +50,7 @@
     },
     "ResourceId": {
       "additionalProperties": false,
-      "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the\nreceive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
+      "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments matching\n`^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+){0,15}$`, at most 256 bytes; `dev0/rx/0` names\nchannel 0 of the receive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-1, SB-3, SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
       "properties": {
         "node": {
           "$ref": "#/$defs/NodeId",

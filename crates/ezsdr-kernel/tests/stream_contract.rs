@@ -18,7 +18,7 @@ use ezsdr_kernel::time::{
     ClockDomain, ClockRegistry, Duration, EpochRef, Rational, TimeError, TimePoint,
 };
 use support::{
-    CF32_BPS, GPU_MEM, MemLink, RetryingProducer, block, cf32, header, host_buffer};
+    CF32_BPS, GPU_MEM, MemLink, RetryingProducer, block, cf32, header, host_buffer, id};
 
 const MCLK: u64 = 200_000_000;
 
@@ -308,9 +308,9 @@ fn sc_19_link_declares_a_policy_and_a_capacity() {
     // There is no default policy, and both fields are mandatory in the type.
     let decl = DataLinkDecl {
         id: DataLinkId::local(1),
-        from: PortRef { component: "a".into(), port: "out".into(),
+        from: PortRef { component: id("a"), port: id("out"),
         },
-        to: PortRef { component: "b".into(), port: "in".into(),
+        to: PortRef { component: id("b"), port: id("in"),
         },
         contract: cf32(),
         policy: BackPressure::DropOldest,
@@ -430,9 +430,9 @@ fn sc_20b_drop_carry_preserves_attribution() {
 fn sc_21_sink_links_must_be_drop_class() {
     let decl = |policy| DataLinkDecl {
         id: DataLinkId::local(3),
-        from: PortRef { component: "rx".into(), port: "out".into(),
+        from: PortRef { component: id("rx"), port: id("out"),
         },
-        to: PortRef { component: "rec".into(), port: "in".into(),
+        to: PortRef { component: id("rec"), port: id("in"),
         },
         contract: cf32(),
         policy,

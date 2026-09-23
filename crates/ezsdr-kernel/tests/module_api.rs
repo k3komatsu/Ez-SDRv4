@@ -584,9 +584,9 @@ fn component(name: &str) -> ComponentDescriptor {
         id: id(name),
         kind: ComponentKind::Processor,
         ports: vec![
-            Port { name: "in".to_owned(), direction: PortDirection::In, contract: cf32(),
+            Port { name: id("in"), direction: PortDirection::In, contract: cf32(),
             },
-            Port { name: "out".to_owned(), direction: PortDirection::Out, contract: cf32(),
+            Port { name: id("out"), direction: PortDirection::Out, contract: cf32(),
             },
         ],
         params: vec![ParamDecl {
@@ -596,7 +596,7 @@ fn component(name: &str) -> ComponentDescriptor {
             default: Value::Bool(false),
         }],
         timing: ComponentTiming::default(),
-        requires: ComponentRequires { executor_kind: "any".to_owned(), memory_bytes: None,
+        requires: ComponentRequires { executor_kind: ns("any"), memory_bytes: None,
         },
         implementation: ComponentImpl {
             kind: ns("test.impl"),
@@ -612,7 +612,7 @@ fn ma_37_descriptor_structural_validation() {
     assert!(component("a").validate(&contracts).is_ok());
 
     let mut dup = component("a");
-    dup.ports[1].name = "in".to_owned();
+    dup.ports[1].name = id("in");
     assert!(dup.validate(&contracts).is_err(), "duplicate port name");
 
     let mut unknown = component("a");
@@ -675,12 +675,12 @@ fn ma_39_island_admission() {
     let link_placements = vec![place(&link_id, ("a", "out"), ("b", "in"))];
     let graph_links = vec![(
         PortRef {
-            component: "a".into(),
-            port: "out".into(),
+            component: id("a"),
+            port: id("out"),
         },
         PortRef {
-            component: "b".into(),
-            port: "in".into(),
+            component: id("b"),
+            port: id("in"),
         },
         BackPressure::Block,
     )];
@@ -723,8 +723,8 @@ fn ma_39_island_admission() {
             .contains("appears more than once"));
     // An output feed needs a placement like a graph link (D75)...
     let feeds = vec![(
-        PortRef { component: "b".into(), port: "out".into() },
-        PortRef { component: "rec".into(), port: "in".into() },
+        PortRef { component: id("b"), port: id("out") },
+        PortRef { component: id("rec"), port: id("in") },
         BackPressure::Block,
     )];
     let bad = IslandContext { feed_links: &feeds, ..ctx_clone(&ctx) };
@@ -740,8 +740,8 @@ fn ma_39_island_admission() {
     // component, fed from the same port — is two data links no placement can tell
     // apart, so admission refuses it rather than letting one placement serve both.
     let colliding = vec![(
-        PortRef { component: "a".into(), port: "out".into() },
-        PortRef { component: "b".into(), port: "in".into() },
+        PortRef { component: id("a"), port: id("out") },
+        PortRef { component: id("b"), port: id("in") },
         BackPressure::Block,
     )];
     let bad = IslandContext { feed_links: &colliding, ..ctx_clone(&ctx) };
@@ -758,7 +758,7 @@ fn ma_39_island_admission() {
 
     // 2. An executor kind the component does not want.
     let mut picky = components.clone();
-    picky.get_mut(&id("a")).expect("present").requires.executor_kind = "test.gpu".to_owned();
+    picky.get_mut(&id("a")).expect("present").requires.executor_kind = ns("test.gpu");
     let bad = IslandContext { components: &picky, ..ctx_clone(&ctx) };
     let err = admit_islands(&bad).expect_err("wrong executor kind");
     assert!(err.message.contains("executor kind"), "{err}");
@@ -815,8 +815,8 @@ fn sink_in(domain: u32) -> SinkDescriptor {
 fn place(link: &ModuleRef, from: (&str, &str), to: (&str, &str)) -> LinkPlacement {
     LinkPlacement {
         link: link.clone(),
-        from: PortRef { component: from.0.into(), port: from.1.into() },
-        to: PortRef { component: to.0.into(), port: to.1.into() },
+        from: PortRef { component: id(from.0), port: id(from.1) },
+        to: PortRef { component: id(to.0), port: id(to.1) },
     }
 }
 
@@ -876,9 +876,9 @@ fn ma_25_sink_role_is_read_from_the_binding() {
     // available on both paths because it reads a binding rather than a placement.
     let decl = DataLinkDecl {
         id: DataLinkId::local(0),
-        from: PortRef { component: "radio".into(), port: "rx".into(),
+        from: PortRef { component: id("radio"), port: id("rx"),
         },
-        to: PortRef { component: "capture0".into(), port: "in".into(),
+        to: PortRef { component: id("capture0"), port: id("in"),
         },
         contract: cf32(),
         policy: BackPressure::Block,
@@ -1131,9 +1131,9 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
     .into_iter()
     .collect();
     let graph_links = vec![(
-        PortRef { component: "a".into(), port: "out".into(),
+        PortRef { component: id("a"), port: id("out"),
         },
-        PortRef { component: "b".into(), port: "in".into(),
+        PortRef { component: id("b"), port: id("in"),
         },
         BackPressure::Block,
     )];
@@ -1250,8 +1250,8 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
     // D81: an output feed is checked the same way, its consumer's domains being the
     // bound Sink's. `b` (domain 1) feeds a Sink that reads only domain 0.
     let feeds = vec![(
-        PortRef { component: "b".into(), port: "out".into() },
-        PortRef { component: "rec".into(), port: "in".into() },
+        PortRef { component: id("b"), port: id("out") },
+        PortRef { component: id("rec"), port: id("in") },
         BackPressure::DropOldest,
     )];
     let with_feed = vec![place(&selected, ("a", "out"), ("b", "in")), place(&selected, ("b", "out"), ("rec", "in"))];
@@ -1281,8 +1281,8 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
     // The Link declares only (0, 1): `a` (domain 0) feeding a Sink reading domain 1
     // is joined in the declared direction, the case above in the reverse one.
     let forward_feeds = vec![(
-        PortRef { component: "a".into(), port: "out".into() },
-        PortRef { component: "rec".into(), port: "in".into() },
+        PortRef { component: id("a"), port: id("out") },
+        PortRef { component: id("rec"), port: id("in") },
         BackPressure::DropOldest,
     )];
     let forward_placed = vec![place(&selected, ("a", "out"), ("b", "in")), place(&selected, ("a", "out"), ("rec", "in"))];

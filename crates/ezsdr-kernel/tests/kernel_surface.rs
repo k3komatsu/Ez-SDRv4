@@ -880,3 +880,175 @@ fn ov_23_the_gate_predicates_answer_the_demonstrated_evasions() {
     );
     assert_ne!(allow_key(f, &[], "Dup"), allow_key(f, &["m1".to_owned()], "Dup"));
 }
+
+/// The `macro_rules!` definitions `src/` may hold, by name. A macro can emit an item
+/// the MA-16 walk never sees, so each one is reviewed and listed here (D100).
+const LISTED_MACROS: [&str; 2] = ["display_newtype", "document_inserts"];
+
+/// Every rename (`use … as`, `extern crate … as`) and every `macro_rules!` outside
+/// [`LISTED_MACROS`] in one parsed file, wherever it sits — a module, a function body,
+/// a `const _` block. The MA-16 walk reads names, so a rename or a macro-emitted type
+/// is invisible to it; refusing the two mechanisms closes that class, as OV-23 refuses
+/// `include!`, where listing what they can spell did not (MA-16, D100).
+fn renames_and_macros(file: &syn::File) -> Vec<String> {
+    struct Find(Vec<String>);
+    impl<'ast> syn::visit::Visit<'ast> for Find {
+        fn visit_use_rename(&mut self, r: &'ast syn::UseRename) {
+            self.0.push(format!("use {} as {}", r.ident, r.rename));
+            syn::visit::visit_use_rename(self, r);
+        }
+        fn visit_item_extern_crate(&mut self, e: &'ast syn::ItemExternCrate) {
+            if let Some((_, rename)) = &e.rename {
+                self.0.push(format!("extern crate {} as {rename}", e.ident));
+            }
+            syn::visit::visit_item_extern_crate(self, e);
+        }
+        fn visit_item_macro(&mut self, m: &'ast syn::ItemMacro) {
+            if m.mac.path.is_ident("macro_rules") {
+                let name = m.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                if !LISTED_MACROS.contains(&name.as_str()) {
+                    self.0.push(format!("macro_rules! {name}"));
+                }
+            }
+            syn::visit::visit_item_macro(self, m);
+        }
+    }
+    let mut find = Find(Vec::new());
+    syn::visit::Visit::visit_file(&mut find, file);
+    find.0
+}
+
+#[test]
+fn ma_16_the_names_the_walk_reads_are_the_names_declared() {
+    for (path, text) in sources() {
+        let file = syn::parse_file(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let found = renames_and_macros(&file);
+        assert!(
+            found.is_empty(),
+            "MA-16: {} holds {found:?}; the peer walk reads names, so a rename or an unlisted \
+             macro is refused rather than followed",
+            path.display()
+        );
+    }
+    // The predicate's own red test: each spelling is caught once, wherever it sits.
+    for (what, source) in [
+        ("a renamed import", "use crate::module_api::Sink as Fragment;"),
+        ("a rename in a brace group", "use crate::module_api::{Provider, Sink as Peer};"),
+        ("a rename inside a fn body", "fn hide() { use crate::module_api::Sink as Peer; }"),
+        ("a renamed extern crate", "extern crate serde as s;"),
+        ("an unlisted macro", "macro_rules! hidden { () => {} }"),
+        ("an unlisted macro inside a fn body", "fn hide() { macro_rules! hidden { () => {} } }"),
+        ("an unlisted macro inside a const block", "const _: () = { macro_rules! hidden { () => {} } };"),
+    ] {
+        let file: syn::File = syn::parse_str(source).expect("the fixture parses");
+        assert_eq!(renames_and_macros(&file).len(), 1, "{what}");
+    }
+    let listed: syn::File =
+        syn::parse_str("macro_rules! display_newtype { () => {} } use std::fmt;").expect("parses");
+    assert!(renames_and_macros(&listed).is_empty(), "a listed macro and a plain import pass");
+}
+
+fn assert_document<T: serde::Serialize + serde::de::DeserializeOwned + schemars::JsonSchema>() {}
+
+/// MA-6's document types that role signatures name, each asserted to be a document at
+/// compile time; the names they are matched by come from the same list.
+macro_rules! ma6_documents {
+    ($($($segment:ident)::+),* $(,)?) => {
+        fn ma6_documents() -> Vec<&'static str> {
+            $( assert_document::<ezsdr_kernel::$($segment)::+>(); )*
+            vec![$( stringify!($($segment)::+).rsplit(':').next().expect("a name").trim() ),*]
+        }
+    };
+}
+ma6_documents! {
+    module_api::ProviderInstance, module_api::Requested, module_api::CoerceReport,
+    module_api::ModuleError, module_api::StopMode, module_api::StepOutcome,
+    module_api::ExecutorDescriptor, module_api::IslandDecl, module_api::SinkDescriptor,
+    module_api::LinkDescriptor, module_api::AuthorityDescriptor, plan::Fragment,
+    plan::PrepareReport, time::TimePoint, manifest::ArtifactRef, stream::DataLinkDecl,
+}
+
+/// MA-6's Kernel handles, and the wrappers it allows over its categories.
+const MA6_HANDLES: [&str; 7] =
+    ["PrepareContext", "EventSink", "ActionReceiver", "ActionSubmitter", "Endpoint", "DataLink", "TimeAuthority"];
+const MA6_WRAPPERS: [&str; 5] = ["Option", "Result", "Vec", "Box", "Arc"];
+
+/// What in one signature MA-6 does not allow: a name outside its categories, a slice, a
+/// bare `fn`, an `impl Trait` or a generic parameter. A closure is `dyn Fn…`, whose name
+/// is outside the list (MA-6, D100).
+fn ma6_violations(sig: &syn::Signature, allowed: &BTreeSet<&str>) -> Vec<String> {
+    struct Check<'a> {
+        allowed: &'a BTreeSet<&'a str>,
+        out: Vec<String>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Check<'_> {
+        fn visit_type(&mut self, t: &'ast syn::Type) {
+            match t {
+                syn::Type::Slice(_) => self.out.push("a slice".to_owned()),
+                syn::Type::FnPtr(_) => self.out.push("a bare fn".to_owned()),
+                syn::Type::ImplTrait(_) => self.out.push("impl Trait".to_owned()),
+                _ => {}
+            }
+            syn::visit::visit_type(self, t);
+        }
+        fn visit_path_segment(&mut self, s: &'ast syn::PathSegment) {
+            let name = s.ident.to_string();
+            if !self.allowed.contains(name.as_str()) {
+                self.out.push(name);
+            }
+            syn::visit::visit_path_segment(self, s);
+        }
+    }
+    let mut check = Check { allowed, out: Vec::new() };
+    for input in &sig.inputs {
+        if let syn::FnArg::Typed(t) = input {
+            syn::visit::Visit::visit_type(&mut check, &t.ty);
+        }
+    }
+    if let syn::ReturnType::Type(_, t) = &sig.output {
+        syn::visit::Visit::visit_type(&mut check, t);
+    }
+    if sig.generics.params.iter().any(|p| !matches!(p, syn::GenericParam::Lifetime(_))) {
+        check.out.push("a generic parameter".to_owned());
+    }
+    check.out
+}
+
+#[test]
+fn ma_06_role_signatures_name_only_documents_and_handles() {
+    let allowed: BTreeSet<&str> =
+        ma6_documents().into_iter().chain(MA6_HANDLES).chain(MA6_WRAPPERS).collect();
+    let source = std::fs::read_to_string(crate_dir().join("src/module_api.rs")).expect("readable");
+    let file = syn::parse_file(&source).expect("module_api.rs parses");
+    let mut checked = 0;
+    for item in &file.items {
+        let syn::Item::Trait(role) = item else { continue };
+        if !ROLE_TRAITS.contains(&role.ident.to_string().as_str()) {
+            continue;
+        }
+        checked += 1;
+        for member in &role.items {
+            if let syn::TraitItem::Fn(method) = member {
+                let bad = ma6_violations(&method.sig, &allowed);
+                assert!(bad.is_empty(), "MA-6: {}::{} names {bad:?}", role.ident, method.sig.ident);
+            }
+        }
+    }
+    assert_eq!(checked, ROLE_TRAITS.len(), "every role trait is found");
+    // The check's own red test, one per thing MA-6 names.
+    for (what, sig) in [
+        ("a raw slice", "fn f(&self, bytes: &[u8])"),
+        ("a closure", "fn f(&self, f: Box<dyn Fn(u32)>)"),
+        ("an iterator", "fn f(&self) -> impl Iterator<Item = TimePoint>"),
+        ("a bare fn", "fn f(&self, f: fn(u32))"),
+        ("a generic parameter", "fn f<T>(&self, x: T)"),
+        ("a type outside the list", "fn f(&self, x: &String)"),
+    ] {
+        let sig: syn::Signature = syn::parse_str(sig).expect("parses");
+        assert!(!ma6_violations(&sig, &allowed).is_empty(), "{what}");
+    }
+    let fine: syn::Signature =
+        syn::parse_str("fn stop(&mut self, mode: StopMode) -> Result<Vec<ArtifactRef>, ModuleError>")
+            .expect("parses");
+    assert!(ma6_violations(&fine, &allowed).is_empty());
+}

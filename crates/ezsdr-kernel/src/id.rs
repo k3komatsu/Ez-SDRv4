@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.
 ///
-/// Rule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.
+/// Rule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct NodeId(pub u32);
@@ -29,6 +29,46 @@ impl<'de> Deserialize<'de> for NodeId {
             )));
         }
         Ok(NodeId(n))
+    }
+}
+
+/// SB-1 at the document boundary (D95): a name type deserialises through its own
+/// `parse`, so a document cannot carry a name a Rust caller could not have built.
+/// `what` names the grammar the refusal reports.
+pub(crate) fn parsed<'de, D, T, E>(
+    d: D,
+    what: &str,
+    parse: impl FnOnce(&str) -> Result<T, E>,
+) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    parse(&s).map_err(|_| serde::de::Error::custom(format!("SB-1: {s:?} is not {what}")))
+}
+
+impl<'de> Deserialize<'de> for ResourceId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // The node is checked by `NodeId`'s own deserialiser (X7), the path by
+        // `ResourceId::parse` (SB-1, D95); the closed field set is SB-9's.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            node: NodeId,
+            path: String,
+        }
+        let raw = Raw::deserialize(d)?;
+        let mut id = ResourceId::parse(&raw.path).map_err(|e| {
+            serde::de::Error::custom(format!("SB-1: resource path {:?}: {e}", raw.path))
+        })?;
+        id.node = raw.node;
+        Ok(id)
+    }
+}
+
+impl<'de> Deserialize<'de> for ModuleId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        parsed(d, "a ModuleId", ModuleId::parse)
     }
 }
 
@@ -175,13 +215,14 @@ impl ClockDomainId {
 
 /// Names a resource, or a sub-resource, inside the composite tree a Provider declares.
 ///
-/// The path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the
-/// receive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the
+/// The path is a non-empty sequence of segments matching
+/// `^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+){0,15}$`, at most 256 bytes; `dev0/rx/0` names
+/// channel 0 of the receive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the
 /// path replaces §49's flat `local` because a channel or a timekeeper must be
 /// addressable (`00-overview.md` "Where these specs depart from the Vision").
 ///
-/// Rule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+/// Rule: SB-1, SB-3, SB-33, SB-34 (`03-spec-and-binding.md`), X7.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceId {
     /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
@@ -274,19 +315,20 @@ impl fmt::Display for ResourceId {
     }
 }
 
-/// Names a Module implementation in the registry (`05-module-api.md` MA-19).
+/// Names a Module implementation in the registry, matching
+/// `^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$`, at most 256 bytes.
 ///
 /// The reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two
 /// vendors' Modules from colliding; the Kernel checks the shape, not the authority.
 ///
-/// Rule: MA-19.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+/// Rule: SB-1, MA-31.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct ModuleId(String);
 
 /// One segment of a `ModuleId`: non-empty and `[A-Za-z0-9_-]`. Shared with `Key`, so
-/// that an `ext.<module-id>.<path>` key is parseable for every Module id MA-19 admits
-/// and not only for the ones that also fit `Ident`'s grammar (MA-19, SB-2, MA-34).
+/// that an `ext.<module-id>.<path>` key is parseable for every Module id SB-1 admits
+/// and not only for the ones that also fit `Ident`'s grammar (SB-1, SB-2, MA-34).
 pub(crate) fn is_module_segment(seg: &str) -> bool {
     !seg.is_empty()
         && !seg.chars().any(|c| !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '-'))
@@ -295,7 +337,7 @@ pub(crate) fn is_module_segment(seg: &str) -> bool {
 impl ModuleId {
     /// Parses a dotted namespaced name; segments are non-empty and `[A-Za-z0-9_-]`.
     ///
-    /// Rule: MA-19.
+    /// Rule: SB-1, MA-31.
     pub fn parse(name: &str) -> Result<ModuleId, ResourceIdError> {
         if name.len() > ResourceId::MAX_PATH_LEN {
             return Err(ResourceIdError::TooLong);
@@ -312,7 +354,7 @@ impl ModuleId {
         Ok(ModuleId(name.to_owned()))
     }
 
-    /// The name as written (MA-19).
+    /// The name as written (MA-31).
     pub fn as_str(&self) -> &str {
         &self.0
     }

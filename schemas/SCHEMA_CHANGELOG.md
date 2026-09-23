@@ -15,6 +15,35 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — 2026-09-23 — pre-freeze revision, adopted D95–D103 (the binding and role model)
+
+Still version 1: v4.0 has not frozen.
+
+- `binding_profile`: **`authority` is required** (D97). The Authority is named and never
+  inferred. **Breaking for existing documents:** a profile without the field no longer
+  parses; add `authority` naming the resource the Authority rides on, or a binding of
+  its own.
+- `authority_descriptor`: adds the required `module: ModuleRef` (D98), compared with the
+  binding it is supplied under, as the Executor, Sink and Link descriptors' already are.
+- `log_entry` and `manifest` (its action log): `RunChild` gains the required
+  `binding_hash` (D103), since a child Run's profile
+  cannot be its parent Session's (RS-25a).
+- `binding_profile`, `component_descriptor`, `data_link_decl`, `execution_plan`,
+  `experiment_spec`, `manifest`, `provider_instance` and `resource`: `Port.name`, `PortRef.component` and
+  `PortRef.port` reference `Ident` instead of a bare string (D95). **Narrows the accepted
+  set:** a port name outside SB-1's grammar parsed before and could never be handed to
+  a Module, whose `PrepareContext.links[].port` is an `Ident`.
+- `component_descriptor` and `experiment_spec`: `ComponentRequires.executor_kind`
+  references `Namespace` instead of a bare string (D95): it is a kind the Kernel reads and
+  compares, and `any` is itself a `Namespace`. **Narrows the accepted set** to SB-1's
+  grammar; a malformed kind other than `any` was refused later by MA-39 anyway.
+- Descriptions of `Key`, `ModuleId`, `EventKind`, `ContentHash`, `DataContractId` and
+  `ResourceId` now state their grammars (D95). Stale `MA-19` citations are corrected:
+  `ModuleId` and `ModuleRef.id` cite SB-1 and MA-31, `NodeId` cites MA-38 for the Island
+  ids it qualifies, and `ComponentImpl.id` cites MA-19b. No `pattern` is added: a grammar may still be loosened, and loosening
+  would then be a v2 of every schema embedding the type (D94's reasoning). The Kernel
+  enforces the grammars at deserialisation instead.
+
 ## v1 — 2026-09-23 — pre-freeze revision, adopted D51–D68
 
 Still version 1: v4.0 has not frozen, so this is a pre-freeze revision of the

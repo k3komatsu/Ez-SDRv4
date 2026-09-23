@@ -21,7 +21,7 @@
       ]
     },
     "DataContractId": {
-      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SC-2.",
+      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SB-1, SC-2.",
       "type": "string"
     },
     "DataLinkId": {
@@ -45,8 +45,12 @@
       ],
       "type": "object"
     },
+    "Ident": {
+      "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
+      "type": "string"
+    },
     "NodeId": {
-      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
@@ -56,12 +60,12 @@
       "description": "Names one port of one component instance (SC-1).",
       "properties": {
         "component": {
-          "description": "The component instance identifier (MA-36).",
-          "type": "string"
+          "$ref": "#/$defs/Ident",
+          "description": "The component, Spec resource or output the port belongs to (SB-15, SB-22a)."
         },
         "port": {
-          "description": "The port name on that component (SC-1).",
-          "type": "string"
+          "$ref": "#/$defs/Ident",
+          "description": "The port name on that component (SC-1)."
         }
       },
       "required": [

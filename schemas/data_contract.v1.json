@@ -1,7 +1,7 @@
 {
   "$defs": {
     "DataContractId": {
-      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SC-2.",
+      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SB-1, SC-2.",
       "type": "string"
     },
     "Scalar": {

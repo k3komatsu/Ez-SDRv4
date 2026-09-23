@@ -265,7 +265,7 @@ impl TestProvider {
             // whether SB-15 resolved the port on the bound node or on some other.
             ports: vec![
                 Port {
-                    name: "rx".to_owned(),
+                    name: id("rx"),
                     direction: PortDirection::Out,
                     contract: DataContractId::parse("ezsdr.stream.sc16")
                         .expect("a valid literal"),
@@ -274,7 +274,7 @@ impl TestProvider {
                 // whose **consumer** is a resource port, which is the case the plan's
                 // `links` resolved to a default contract rather than to this one.
                 Port {
-                    name: "tx".to_owned(),
+                    name: id("tx"),
                     direction: PortDirection::In,
                     contract: DataContractId::parse("ezsdr.stream.sc16")
                         .expect("a valid literal"),
@@ -317,7 +317,7 @@ impl TestProvider {
                     // The device-level stream endpoint, which a Session's implicit
                     // Spec binds because RS-12 takes the instance's root kind.
                     ports: vec![Port {
-                        name: "rx".to_owned(),
+                        name: id("rx"),
                         direction: PortDirection::Out,
                         contract: DataContractId::parse("ezsdr.stream.cf32")
                             .expect("a valid literal"),
@@ -384,6 +384,13 @@ impl TestProvider {
     /// Reports another instance id than its root's (X7, D91).
     pub fn with_instance_id(mut self, id: ResourceId) -> TestProvider {
         self.instance.id = id;
+        self
+    }
+
+    /// Gives line `index` another id, so a test can hand in a tree node no document
+    /// could carry (X7, SB-1, SB-22f).
+    pub fn with_line_id(mut self, index: usize, id: ResourceId) -> TestProvider {
+        self.instance.tree.children[index].id = id;
         self
     }
 
@@ -643,6 +650,12 @@ impl TestSink {
         self
     }
 
+    /// Declares the artifact kinds it writes (MA-25, RS-12).
+    pub fn writing(mut self, kinds: Vec<Namespace>) -> TestSink {
+        self.descriptor.artifact_kinds = kinds;
+        self
+    }
+
     /// A recorder writing one artifact (MA-25).
     pub fn new(contract: DataContractId) -> TestSink {
         TestSink {
@@ -773,7 +786,7 @@ pub fn recorder_component(contract: DataContractId) -> ComponentDescriptor {
         id: id("recorder"),
         kind: ComponentKind::Processor,
         ports: vec![Port {
-            name: "in".to_owned(),
+            name: id("in"),
             direction: PortDirection::In,
             contract,
         }],
@@ -784,7 +797,7 @@ pub fn recorder_component(contract: DataContractId) -> ComponentDescriptor {
             default: Value::Bool(false),
         }],
         timing: ComponentTiming::default(),
-        requires: ComponentRequires { executor_kind: "any".to_owned(), memory_bytes: None,
+        requires: ComponentRequires { executor_kind: ns("any"), memory_bytes: None,
         },
         implementation: ComponentImpl {
             kind: ns("test.impl"),
@@ -799,7 +812,7 @@ pub fn recorder_component(contract: DataContractId) -> ComponentDescriptor {
 pub fn source_component(contract: DataContractId) -> ComponentDescriptor {
     let mut c = recorder_component(contract.clone());
     c.id = id("source");
-    c.ports = vec![Port { name: "out".to_owned(), direction: PortDirection::Out, contract,
+    c.ports = vec![Port { name: id("out"), direction: PortDirection::Out, contract,
     }];
     c.implementation.id = "source".to_owned();
     c

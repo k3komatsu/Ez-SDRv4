@@ -769,8 +769,8 @@ prefix.
 ### Findings from the exit-criterion-2 sweep
 
 The per-rule OV-3 table criterion 2 asks for now exists, in
-[`exit-review/`](exit-review/README.md), one file per document: **267 rows for 267
-rules**. D51–D68 and D69–D94 were adopted on 2026-09-23; no rule is left with a `GAP` or unassigned
+[`exit-review/`](exit-review/README.md), one file per document: **277 rows for 277
+rules**. D51–D68, D69–D94 and D95–D103 were adopted on 2026-09-23; no rule is left with a `GAP` or unassigned
 disposition. Thirty-seven `UNCERTAIN:` assertion cells remain as partial-coverage findings.
 
 Three classes of finding came out of it that no review pass had reached.
@@ -1057,6 +1057,76 @@ review rather than written down. Open at the pause:
    should be stated as "checked by a best-effort gate" or carried another way is open.
 4. The D89 cost to one lab-wide profile shared by several Specs (accepted knowingly).
 
+### Firming up the specification, and D95–D103 — **adopted 2026-09-23**
+
+The pause asked for the binding and role rules to be written down before the next review, so that a review checks code against rules instead of discovering them. They now live in one place: spec 03's SB-22 split into SB-22a…SB-22h, with SB-24 rewritten and tables SB-T1 (names), SB-T2 (the Session derivation), SB-T3 (what each slot requires) and SB-T4 (which stage checks what). SB-1 became a grammar table, SB-T0. Writing them down surfaced six contradictions between earlier decisions that no pass had reached:
+
+- **D82 × D92**: a dedicated Authority's version was checked against nothing, although SB-22 claimed one Module version per bound name.
+- **D85 × D92**: the `authority` name was a fragment id but outside the namespace, so `authority: island_0` failed at `plan()` as a generic duplicate.
+- **D18 × SB-24's inference**: a candidate needed a descriptor the runtime handed in, so assembly-time input chose the Authority.
+- **D89 × RS-13**: a child Run had no profile it could use.
+- **SB-16 × SB-22**: a resource could be named `sink`, which SB-16 reads as a Sink address.
+- **SB-24 × D89's stage**: an `authority` naming an output passed `validate` and failed at `plan()`.
+
+It also found open item 1 wider than recorded. Eight name types, not three, deserialised without their grammar — `ModuleId`, `EventKind`, `DataContractId`, `ContentHash` and `ResourceId.path` besides the three named. Three places stated a grammar the code did not have:
+
+- SB-3's `path: [Ident]`, whose own example segment `0` is not an `Ident`.
+- 05 §4's "`ModuleId` a Namespace", while SB-2 cited a `ModuleId` grammar in MA-19 that MA-19 no longer contains.
+- SB-4's `Map<Ident, Value>`, while the code's keys are strings.
+
+A port name was a `string` in spec 02 and an `Ident` in spec 05's `PrepareContext.links`.
+
+The draft model went through one adversarial check by Opus 5.5 before the owner read it: 1 P0, 6 P1 and 2 P2 findings, all adopted. Three recommendations changed as a result:
+
+- A typestate `Validated` could not be used by a coordinator, because it borrowed the Providers across `prepare(&mut self)`.
+- An allow-list form of MA-16's gate was evaded by aliasing a role trait to an allowed name, and it stopped at document types that `#[serde(skip)]` lets hold a peer.
+- Schema `pattern`s contradicted D94.
+
+The owner adopted every recommendation.
+
+**The four open items.**
+
+1. **SB-1's grammar** — enforced at every document's deserialiser for all eight types, and at `validate()` for a `ResourceId` handed in as a Rust value (D95).
+2. **`plan()` and D89/D91** — `plan()` re-runs `validate()`'s structural and endpoint checks through the same functions, D89 and D91 among them (D99).
+3. **MA-16** — the walk stays; the rename class is closed by refusing its two mechanisms; the rest is a process obligation (D100).
+4. **D89's cost** — confirmed; a child Run names its own profile (D101, D103).
+
+| # | Item | Verdict | Why, and the rejected alternative |
+|---|---|---|---|
+| D95 | SB-1, SB-3, SB-4, SC-1, OV-10, 05 §4 | **SB-1 is a grammar table (SB-T0); every name type the Kernel reads is enforced at the document boundary, and a Rust-built `ResourceId` at `validate()`; schemas state the grammar in the description and carry no `pattern`.** SB-3's path and 05 §4's `ModuleId` take the code's grammars; SB-4's map keys are ASCII strings; port names, both halves of `PortRef` and `ComponentRequires.executor_kind` (a `Namespace`; `any` is one) are typed | Every grammar type was `#[serde(transparent)]` over a string. Loosening is a code change under this split and would be thirty v2 schemas under `pattern`, which is D94's reasoning; D4 and SB-2 each loosened a grammar already. Rejected: the three types §11 named (five holes frozen); `pattern` in the schemas (D94); deserialisers only (a Rust-built tree still produced a Manifest the Kernel's own deserialiser refuses, D91's class). Schema: `PortRef` and `Port` now reference `Ident`, and descriptions changed |
+| D96 | SB-22 | **SB-22 becomes SB-22 and SB-22a…SB-22h with tables SB-T1…SB-T4.** The namespace takes the `authority` name and reserves `sink`; the runtime's inputs are read under slot names only; one function answers "does this Module hold this role" | The rules were scattered across SB-22, SB-24, RS-12, MA-18/25/29/38 and D83–D93, and their combinations were where the P1s came from. Rejected: fixing each contradiction in place (the next one would again be found by review) |
+| D97 | SB-24 | **`authority` is mandatory; nothing is inferred** (schema: `required`) | **Reverses SB-24's "may be omitted when exactly one candidate exists", D88's inference half and D93** (no candidates remain to deduplicate). Inference was where D88, D92 and D93 each found a new case, and assembly-time input decided its candidates. Optional → mandatory cannot be done after the freeze; mandatory → optional, which is adding inference, can. Core validates and does not choose (AGENTS.md §3). Rejected: keeping inference over resources (one line saved in a single-radio profile). Vision §8's two examples owe one `authority:` line each (03 §9 #10) |
+| D98 | SB-22f, MA-29 | **`AuthorityDescriptor.module: ModuleRef`**, compared with the binding whether the Authority rides on a resource or is a slot of its own (schema) | D82 gave Executor, Sink and Link descriptors a `module`; D92 then made the Authority bindable on its own, so SB-22's "one profile hash names one Module version per bound name" was false for the Module that picks the one class that may claim determinism. Rejected: weakening that sentence |
+| D99 | SB-30, SB-39, SB-T4 | **`plan()` re-runs `validate()`'s structural checks, SB-30's first point and its endpoint checks through the same functions**, and takes only matching's output from the `AdmissionResult`, under a guard that also requires every matched node to be one its resource's bound instance declares; `collect_prepare` applies the same guard | Applies the position the third re-review took for the Sink's version ("`plan()`'s signature does not promise `validate` ran") uniformly, where it had been applied to the few checks each review found. `plan()`'s own duplicates (unbound output, Sink version and domains, SC-21's `check_sink_links`) go. Rejected: a typestate `Validated` (it borrows the Providers across `prepare(&mut self)`; with snapshots it works, at the cost of an API and ownership change); a second copy of each rule in `plan()`; `plan()` calling `validate()` (`coerce` twice, and the Manifest's admission and the plan's then agree only by MA-11); a consumer obligation (a violation passes silently) |
+| D100 | MA-6, MA-16 | **The walk and its eleven route tests stay; `src/` may hold no `use … as` and no `macro_rules!` outside the gate's list; MA-16a is a process obligation; MA-6 gets a signature-level check** | **Reverses D72's, D90's and the 20th–24th passes' practice of extending the gate and the rule text with each demonstrated route.** Of the two escapes, renaming is closed by refusing its mechanisms, as OV-23 refuses `include!`; the routes the walk does not follow cannot be closed by a source walk and are named as MA-16a's. Rejected: an allow-list predicate (evaded by renaming to an allowed name, and it would stop at document types a `#[serde(skip)]` field can make hold a peer); more routes; "best-effort" with no mechanism refusal; withdrawing MA-16 |
+| D101 | SB-22d (D89) | **D89 confirmed.** Choosing a Run's bindings from a shared set is outside the Kernel, and the Manifest records the profile that ran | The Vision needs one Spec under many profiles (§8, §58 #1, #14). One profile under many Specs is only §3's child Run, which D103 answers. A refusal loosened later breaks nobody. Rejected: accepting unused bindings as inert (an unchecked version reaches the Manifest, and profile hashes differ by things that did not run); accepting with a warning |
+| D102 | wording | D87's "the profile selects the role" holds except SB-T2's row 3, where the role list selects; "one binding name plays one role" becomes one name, one slot, with the Authority riding as the exception; 03 §4's "three roles" becomes every bound role; D92's reason is restated, since an Authority has no lifecycle to be prepared or armed and its fragment is a record, which D98 now checks; `island_<n>` is defined in SB-22a; MA-6's handle list gains `PrepareContext` and `DataLink`; MA-37's "a `ContentHash` exists only parsed" is true since D95 | Text only |
+| D103 | RS-13, RS-14, RS-25a | **`RunChild { spec_hash, binding_hash }`**; the child's profile agrees with its parent's (RS-25a, forward, Phase 2 coordinator) (schema) | Vision §3 makes `sdr.run(spec)` inside a Session a child Run. The parent's profile cannot serve: its recorder's `feed` is refused on a Spec Run (SB-22g), its unused Providers by D89, and it places no component of the child's graph. Rejected: deriving the child's profile from the parent's (the child could then run no Spec with a graph); leaving `RunChild` for Phase 2 (a new major of the log schema after the freeze) |
+
+**Raised, not applied** (outside this package, for the owner):
+
+- MA-46's list of schemas "fixed now so that a Plugin protocol later needs no Kernel change" predates D25. It names `StopCause`, while `stop` takes a `StopMode` since D25. It also omits `StopMode` and `StepOutcome`, which appear in role signatures and have no schema of their own under `schemas/`. Both are freeze-first.
+- `collect_prepare` still skips a resource whose Provider fragment returned no report (`merged.reports` has no entry for it). That is a silent skip of the same kind as the one D99's guard closes, but it concerns the reports the coordinator hands in, not the admission.
+
+**The conformance review.** One adversarial pass (Opus 5.5) then checked the applied change against the rules as written, not for new rules. It found 1 P0, 4 P1 and 7 P2, all verified and all fixed without a decision, because the written rules already settled them:
+
+- **P0.** SB-2's owner and declaration checks, and SB-6's kind check of a constraint against its `KeyDecl`, ran inside matching. So `plan()`, handed a result from another Spec, admitted an unowned `ext.` key and an undeclared key — the stale-admission case D99 exists to close. They moved into `check_structure`, which `plan()` re-runs. In the same place, `plan()` had been trusting the result's admission-check `violations`, although SB-39 says it takes only matching's output; the checks are pure (SB-31), so `plan()` now re-runs SB-30's first point too.
+- **P1.** Four refusals or reads had no test:
+  - SB-22f on a Provider's tree nodes (the table claimed the X7 test covered it);
+  - SB-22's slot-only reads in `arm_after` and in link endpoints, where `matched` also holds need keys;
+  - the derivation's refusal of a Sink that writes no artifact kind, which SB-22c now names;
+  - `RunChild`'s two hashes, which the test gave one value. Each now has a case, and each was mutation-checked.
+- **P2.** The rest was text:
+  - SB-T4 now lists SB-2's owner and declaration checks and SB-6's kind check as structural, and RS-12's summary follows SB-T2's row order;
+  - MA-6's annotation says the new check supplements the old one;
+  - `executor_kind` is typed `Namespace`, so SB-1's "a name the Kernel reads" holds for it as well (schema);
+  - the remaining stale citations and messages were corrected.
+
+Raised, not applied — outside the written rules:
+
+- A Session action's target, built in Rust, is checked for neither X7 nor SB-1's grammar before it enters the log. `SessionLog::append` runs SB-4's and SB-9a's checks only, so the Manifest can hold an id its own deserialiser refuses — D91's class of defect, on a path SB-1 does not name.
+- SB-39's guard covers resource entries of `matched`, not need entries. `plan()` reads no need entry today.
+
 ## 12. What happens at acceptance (procedure only)
 
 1. `git mv plan/phase1/0{1,2,3,4,5}-*.md design/` — accepted normative text lives in `design/` per `AGENTS.md` §2. This file stays in `plan/phase1/`.
@@ -1071,7 +1141,7 @@ review rather than written down. Open at the pause:
 ## 13. Exit criteria
 
 1. Six documents accepted across three gates, and every decision-table row has a verdict in §11.
-2. Every normative obligation of every covered Vision section has a rule ID and no coverage table contains a gap, and every rule has an OV-3 disposition **recorded in the per-rule table OV-3 requires** — for an unmarked rule the test whose assertion is that rule's obligation, read from the test body; for a marked rule the marker and the phase or artefact. Counting rule-ID prefixes is not this criterion: a present prefix is neither necessary nor sufficient. The table lives in [`exit-review/`](exit-review/README.md), one file per document. **It is complete — 267 rows for 267 current rules, updated 2026-09-23** — with no `GAP` or unassigned disposition. Thirty-seven assertion cells remain marked `UNCERTAIN:` for partial coverage; see the table before accepting the criterion as fully covered. Measured 2026-09-22 so the review knows the earlier test inventory's size: of 315 `#[test]` functions, **78** appeared in no spec's test table — 19 of those are the `hashing`, `kernel_surface` and `schema_freeze` files this document names as groups rather than by test. The opposite direction was closed then: every test name any spec cited resolved to a function.
+2. Every normative obligation of every covered Vision section has a rule ID and no coverage table contains a gap, and every rule has an OV-3 disposition **recorded in the per-rule table OV-3 requires** — for an unmarked rule the test whose assertion is that rule's obligation, read from the test body; for a marked rule the marker and the phase or artefact. Counting rule-ID prefixes is not this criterion: a present prefix is neither necessary nor sufficient. The table lives in [`exit-review/`](exit-review/README.md), one file per document. **It is complete — 277 rows for 277 current rules, updated 2026-09-23 after D95–D103** — with no `GAP` or unassigned disposition. Thirty-seven assertion cells remain marked `UNCERTAIN:` for partial coverage; see the table before accepting the criterion as fully covered. Measured 2026-09-22 so the review knows the earlier test inventory's size: of 315 `#[test]` functions, **78** appeared in no spec's test table — 19 of those are the `hashing`, `kernel_surface` and `schema_freeze` files this document names as groups rather than by test. The opposite direction was closed then: every test name any spec cited resolved to a function.
 3. `cargo test` passes on the pinned MSRV and on stable, with no `#[ignore]` among the tests the five specs' test tables name, and the whole compile pipeline runs end to end against the test doubles with no Mock.
 4. `schemas/` is committed, `schema_freeze` passes, and `SCHEMA_CHANGELOG.md` has its v1 entry.
 5. `kernel_surface` passes: `src/` parses, every public item is on the allow-list with a specific audit §13 token or a `NEW:` justification, its doc comment cites a rule ID, and no token from `tests/banned_tokens.txt` appears outside a comment citing the ban. The review records the `NEW:` count as the Kernel-growth number.

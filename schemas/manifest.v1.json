@@ -682,7 +682,7 @@
       ]
     },
     "ContentHash": {
-      "description": "`sha256:<64 lowercase hex>`. The algorithm is named in the value so a later\nalgorithm is an additive change (OV-14).",
+      "description": "`sha256:<64 lowercase hex>`, matching `^sha256:[0-9a-f]{64}$`. The algorithm is\nnamed in the value so a later algorithm is an additive change (OV-14, SB-1).",
       "type": "string"
     },
     "ContinuityMap": {
@@ -771,7 +771,7 @@
       "type": "object"
     },
     "DataContractId": {
-      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SC-2.",
+      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SB-1, SC-2.",
       "type": "string"
     },
     "DataLinkDecl": {
@@ -974,7 +974,7 @@
       "type": "object"
     },
     "EventKind": {
-      "description": "What kind of event this is. Dotted segments; the Kernel owns the five of RS-28\nand every other kind belongs to the Vocabulary or Module that emits it.\n\nRule: RS-27.",
+      "description": "What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$`;\nthe Kernel owns the five of RS-28 and every other kind belongs to the Vocabulary or\nModule that emits it.\n\nRule: SB-1, RS-27.",
       "type": "string"
     },
     "EventsSection": {
@@ -1313,7 +1313,7 @@
       "type": "string"
     },
     "Key": {
-      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-2, MA-34.",
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
       "type": "string"
     },
     "Lease": {
@@ -1478,7 +1478,7 @@
       "type": "object"
     },
     "ModuleId": {
-      "description": "Names a Module implementation in the registry (`05-module-api.md` MA-19).\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: MA-19.",
+      "description": "Names a Module implementation in the registry, matching\n`^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$`, at most 256 bytes.\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: SB-1, MA-31.",
       "type": "string"
     },
     "ModuleRef": {
@@ -1487,7 +1487,7 @@
       "properties": {
         "id": {
           "$ref": "#/$defs/ModuleId",
-          "description": "The Module (MA-19)."
+          "description": "The Module (SB-1, MA-31)."
         },
         "version": {
           "$ref": "#/$defs/Version",
@@ -1505,7 +1505,7 @@
       "type": "string"
     },
     "NodeId": {
-      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
@@ -1605,12 +1605,12 @@
       "description": "Names one port of one component instance (SC-1).",
       "properties": {
         "component": {
-          "description": "The component instance identifier (MA-36).",
-          "type": "string"
+          "$ref": "#/$defs/Ident",
+          "description": "The component, Spec resource or output the port belongs to (SB-15, SB-22a)."
         },
         "port": {
-          "description": "The port name on that component (SC-1).",
-          "type": "string"
+          "$ref": "#/$defs/Ident",
+          "description": "The port name on that component (SC-1)."
         }
       },
       "required": [
@@ -1795,7 +1795,7 @@
     },
     "ResourceId": {
       "additionalProperties": false,
-      "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the\nreceive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
+      "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments matching\n`^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+){0,15}$`, at most 256 bytes; `dev0/rx/0` names\nchannel 0 of the receive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-1, SB-3, SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
       "properties": {
         "node": {
           "$ref": "#/$defs/NodeId",
@@ -2288,6 +2288,10 @@
           "additionalProperties": false,
           "description": "Create a child Run (RS-14, RS-25).",
           "properties": {
+            "binding_hash": {
+              "$ref": "#/$defs/ContentHash",
+              "description": "The child's own profile, by hash: a Session's cannot serve a Spec Run\n(RS-25a, D103)."
+            },
             "kind": {
               "const": "run_child",
               "type": "string"
@@ -2299,7 +2303,8 @@
           },
           "required": [
             "kind",
-            "spec_hash"
+            "spec_hash",
+            "binding_hash"
           ],
           "type": "object"
         }

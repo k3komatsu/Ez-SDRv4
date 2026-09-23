@@ -386,8 +386,9 @@ pub struct ComponentTiming {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ComponentRequires {
-    /// The Executor kind, or `any` (MA-39).
-    pub executor_kind: String,
+    /// The Executor kind, or `any`, which SB-1's `Namespace` grammar also spells (MA-36,
+    /// MA-39).
+    pub executor_kind: Namespace,
     /// Working memory, when it needs a declared amount (MA-36).
     pub memory_bytes: Option<u64>,
 }
@@ -399,7 +400,7 @@ pub struct ComponentRequires {
 pub struct ComponentImpl {
     /// The implementation kind; the Executor's `impl_kinds` must list it (MA-39).
     pub kind: Namespace,
-    /// Its identity within that kind (MA-19).
+    /// Its identity within that kind (MA-19b).
     pub id: String,
     /// Its content hash, which the Manifest records (RS-45, MA-37).
     pub hash: ContentHash,
@@ -548,7 +549,7 @@ pub struct ProviderInstance {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleRef {
-    /// The Module (MA-19).
+    /// The Module (SB-1, MA-31).
     pub id: ModuleId,
     /// Its version (MA-33).
     pub version: Version,
@@ -685,6 +686,10 @@ pub struct LinkDescriptor {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorityDescriptor {
+    /// The exact Module version this Authority is, which admission compares with its
+    /// binding, so a profile hash names one version of the Module that picks the
+    /// ExecutionClass (SB-22f, D98).
+    pub module: ModuleRef,
     /// The domains it advances: a primary root, that root's derived domains,
     /// `host.monotonic`, and for a simulation Authority every root it simulates
     /// (TM-16a, MA-29).
@@ -697,7 +702,7 @@ pub struct AuthorityDescriptor {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleDescriptor {
-    /// The Module (MA-19).
+    /// The Module (SB-1, MA-31).
     pub id: ModuleId,
     /// Its version (MA-33).
     pub version: Version,

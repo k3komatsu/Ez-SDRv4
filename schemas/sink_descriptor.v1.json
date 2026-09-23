@@ -1,7 +1,7 @@
 {
   "$defs": {
     "DataContractId": {
-      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SC-2.",
+      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SB-1, SC-2.",
       "type": "string"
     },
     "MemoryDomainId": {
@@ -26,7 +26,7 @@
       "type": "object"
     },
     "ModuleId": {
-      "description": "Names a Module implementation in the registry (`05-module-api.md` MA-19).\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: MA-19.",
+      "description": "Names a Module implementation in the registry, matching\n`^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$`, at most 256 bytes.\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: SB-1, MA-31.",
       "type": "string"
     },
     "ModuleRef": {
@@ -35,7 +35,7 @@
       "properties": {
         "id": {
           "$ref": "#/$defs/ModuleId",
-          "description": "The Module (MA-19)."
+          "description": "The Module (SB-1, MA-31)."
         },
         "version": {
           "$ref": "#/$defs/Version",
@@ -53,7 +53,7 @@
       "type": "string"
     },
     "NodeId": {
-      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"

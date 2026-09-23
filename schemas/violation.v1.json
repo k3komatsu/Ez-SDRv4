@@ -1,7 +1,7 @@
 {
   "$defs": {
     "Key": {
-      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-2, MA-34.",
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
       "type": "string"
     },
     "Namespace": {

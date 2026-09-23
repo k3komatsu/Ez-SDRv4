@@ -35,14 +35,21 @@ pub enum Severity {
     Fatal,
 }
 
-/// What kind of event this is. Dotted segments; the Kernel owns the five of RS-28
-/// and every other kind belongs to the Vocabulary or Module that emits it.
+/// What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)*$`;
+/// the Kernel owns the five of RS-28 and every other kind belongs to the Vocabulary or
+/// Module that emits it.
 ///
-/// Rule: RS-27.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+/// Rule: SB-1, RS-27.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema,
 )]
 #[serde(transparent)]
 pub struct EventKind(String);
+
+impl<'de> Deserialize<'de> for EventKind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        crate::id::parsed(d, "an EventKind", EventKind::parse)
+    }
+}
 
 impl EventKind {
     /// The Kernel's own drain reports dropped bodies with this kind (RS-35).

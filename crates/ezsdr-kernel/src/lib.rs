@@ -29,7 +29,7 @@ pub mod contract;
 pub mod event;
 /// Canonical JSON and content hashes (OV-14…OV-17).
 pub mod hash;
-/// Node-qualified identifiers (X7; TM-11, SC-6, SB-3, MA-19, RS-1).
+/// Node-qualified identifiers (X7; TM-11, SC-6, SB-3, MA-38, RS-1).
 pub mod id;
 /// The Manifest envelope and `ArtifactRef` (RS-38…RS-47).
 pub mod manifest;

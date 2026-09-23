@@ -102,7 +102,7 @@
       ]
     },
     "EventKind": {
-      "description": "What kind of event this is. Dotted segments; the Kernel owns the five of RS-28\nand every other kind belongs to the Vocabulary or Module that emits it.\n\nRule: RS-27.",
+      "description": "What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$`;\nthe Kernel owns the five of RS-28 and every other kind belongs to the Vocabulary or\nModule that emits it.\n\nRule: SB-1, RS-27.",
       "type": "string"
     },
     "EventKindDecl": {
@@ -134,7 +134,7 @@
       "type": "string"
     },
     "Key": {
-      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-2, MA-34.",
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
       "type": "string"
     },
     "KeyDecl": {

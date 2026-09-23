@@ -664,7 +664,7 @@ fn session_profile() -> BindingProfile {
         )]
         .into_iter()
         .collect(),
-        authority: None,
+        authority: id("radio"),
         placements: Placements::default(),
         environment: BTreeMap::new(),
     };
@@ -677,8 +677,8 @@ fn session_profile() -> BindingProfile {
             module: mref("ezsdr.test.sink"),
             feed: Some(ezsdr_kernel::spec::SinkFeed {
                 port: ezsdr_kernel::contract::PortRef {
-                    component: "radio".to_owned(),
-                    port: "rx".to_owned(),
+                    component: id("radio"),
+                    port: id("rx"),
                 },
                 policy: ezsdr_kernel::stream::BackPressure::DropOldest,
                 capacity: 4,
@@ -748,7 +748,7 @@ fn rs_12_bare_connect_then_capture_succeeds() {
     assert_eq!(spec.outputs.len(), 1, "the recorder is a bound Sink, carried as an output");
     // The output carries the link that feeds it, which is what makes the capture
     // actually record something (SC-19, finding N6).
-    assert_eq!(spec.outputs[0].feed.port.port, "rx");
+    assert_eq!(spec.outputs[0].feed.port.port.as_str(), "rx");
 
     let action = SessionAction::Vocabulary {
         ns: ns("test"),
@@ -1703,6 +1703,9 @@ fn rs_13_every_session_action_compiles_to_its_kernel_form() {
     // is the Kernel's own business and nothing is dispatched to a Module for it.
     let reg = registry();
     let hash = some_hash("child-spec");
+    // Two different hashes, so the compilation cannot swap the Spec and the profile
+    // (RS-25a, D103).
+    let profile_hash = some_hash("child-profile");
     let cases: Vec<(SessionAction, ControlOp)> = vec![
         (SessionAction::Release {}, ControlOp::Release),
         (
@@ -1713,9 +1716,9 @@ fn rs_13_every_session_action_compiles_to_its_kernel_form() {
         ),
         (SessionAction::Renew {}, ControlOp::Renew),
         (
-            SessionAction::RunChild { spec_hash: hash.clone(),
+            SessionAction::RunChild { spec_hash: hash.clone(), binding_hash: profile_hash.clone(),
             },
-            ControlOp::RunChild { spec_hash: hash },
+            ControlOp::RunChild { spec_hash: hash.clone(), binding_hash: profile_hash },
         ),
         (SessionAction::Stop { target: None }, ControlOp::StopRun),
     ];

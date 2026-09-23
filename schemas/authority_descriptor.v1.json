@@ -21,8 +21,31 @@
       ],
       "type": "object"
     },
+    "ModuleId": {
+      "description": "Names a Module implementation in the registry, matching\n`^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$`, at most 256 bytes.\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: SB-1, MA-31.",
+      "type": "string"
+    },
+    "ModuleRef": {
+      "additionalProperties": false,
+      "description": "A Module by id and version (MA-31).",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ModuleId",
+          "description": "The Module (SB-1, MA-31)."
+        },
+        "version": {
+          "$ref": "#/$defs/Version",
+          "description": "Its version (MA-33)."
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ],
+      "type": "object"
+    },
     "NodeId": {
-      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
@@ -46,6 +69,36 @@
           "type": "string"
         }
       ]
+    },
+    "Version": {
+      "additionalProperties": false,
+      "description": "A release-only version. Module and Vocabulary versions carry a minor and a patch;\ndocuments do not, which is decision B7 of `03-spec-and-binding.md`.\n\nRule: MA-33, decision B7.",
+      "properties": {
+        "major": {
+          "description": "Breaking changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "description": "Additive changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "patch": {
+          "description": "Fixes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -59,12 +112,17 @@
       },
       "type": "array"
     },
+    "module": {
+      "$ref": "#/$defs/ModuleRef",
+      "description": "The exact Module version this Authority is, which admission compares with its\nbinding, so a profile hash names one version of the Module that picks the\nExecutionClass (SB-22f, D98)."
+    },
     "pacing": {
       "$ref": "#/$defs/Pacing",
       "description": "How it paces its primary root; MA-41 cross-checks it (MA-29)."
     }
   },
   "required": [
+    "module",
     "governs",
     "pacing"
   ],

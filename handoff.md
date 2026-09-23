@@ -43,14 +43,14 @@ Phase 1 の Kernel crate は **実装済み**（Step 4 完了）．
 | crate | `crates/ezsdr-kernel` version `4.0.0-alpha.1`．`#![forbid(unsafe_code)]`，`#![warn(missing_docs)]` |
 | module | `id time contract stream hash module_api spec binding plan event policy run session manifest schema`（00-overview.md §5 のレイアウトどおり） |
 | 直接依存 | `serde` `serde_json` `schemars` `sha2` の4つだけ（exit criterion 6）．解決後のツリーは `Cargo.lock` で28 package（crate 自身を含む） |
-| test | 333 件．`spec_binding`(93) `stream_contract`(69) `run_session`(70) `time_model`(48) `module_api`(26) `hashing`(9) `kernel_surface`(12) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
-| toolchain | `1.85.0` / `stable (1.98.1)` の両方で 333 passed（2026-09-23，D92–D94 適用後）．`cargo +stable clippy --all-targets -- -D warnings` も通過 |
+| test | 336 件．`spec_binding`(94) `stream_contract`(69) `run_session`(70) `time_model`(48) `module_api`(26) `hashing`(9) `kernel_surface`(14) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
+| toolchain | `1.85.0` / `stable (1.98.1)` の両方で 336 passed（2026-09-23，D95–D103 適用後）．`cargo +stable clippy --all-targets --all-features -- -D warnings` も通過 |
 | schemas | `schemas/` に45個の JSON Schema 2020-12 + `SCHEMA_CHANGELOG.md`．`schema_freeze` が byte 単位で凍結．再生成は `EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze` |
 | kernel surface | `tests/kernel_surface_allow.txt` が公開 item の allow-list（= レビュー用チェックリスト，`module::name` で key 付け）．`NEW:` 件数が OV-23b の Kernel 成長指標．banned token は `tests/banned_tokens.txt`（識別子内も検出，`OV-23a` を書いた行だけ免除） |
 
 Python client，wire protocol，MockRadio，Simulation Engine は未着手（Phase 2 以降）．
 
-## 4. Phase 1 の状態 — spec 受理待ち
+## 4. Phase 1 の状態 — spec 受理待ち（binding / role の規範を固め直し済み）
 
 Vision §67 の Phase 1．詳細設計は [plan/phase1/](plan/phase1/)．計画本体と横断決定は [plan/phase1/00-overview.md](plan/phase1/00-overview.md)．
 
@@ -59,11 +59,11 @@ Vision §67 の Phase 1．詳細設計は [plan/phase1/](plan/phase1/)．計画�
 | [00-overview.md](plan/phase1/00-overview.md) | OV-1..23b（副番含め27） | criterion 2 の per-rule 表を含め更新済み |
 | [01-time-model.md](plan/phase1/01-time-model.md) | TM-1..21（副番含め31） | Gate A 通過，実装済み |
 | [02-stream-contract.md](plan/phase1/02-stream-contract.md) | SC-1..32（副番含め47） | Gate A 通過，実装済み |
-| [03-spec-and-binding.md](plan/phase1/03-spec-and-binding.md) | SB-1..49（副番含め52） | Gate B 通過，実装済み |
-| [04-run-and-session.md](plan/phase1/04-run-and-session.md) | RS-1..52（副番含め59） | Gate B 通過，実装済み |
-| [05-module-api.md](plan/phase1/05-module-api.md) | MA-1..46（副番含め51） | Gate C 通過，実装済み |
+| [03-spec-and-binding.md](plan/phase1/03-spec-and-binding.md) | SB-1..49（副番含め60） | Gate B 通過，実装済み．SB-22 を SB-22a〜h と表 SB-T0〜T4 に分割（D95・D96） |
+| [04-run-and-session.md](plan/phase1/04-run-and-session.md) | RS-1..52（副番含め60） | Gate B 通過，実装済み．RS-25a を追加（D103） |
+| [05-module-api.md](plan/phase1/05-module-api.md) | MA-1..46（副番含め52） | Gate C 通過，実装済み．MA-16a を追加（D100） |
 
-6文書で267ルール，欠番と未解決参照なし．撤回7件（SB-25a, SB-28, SB-32, RS-32a, RS-37, MA-4, MA-43 — OV-1 に従い番号は保持）．Gate A は敵対的レビュー3巡（31件・16件・13件），Gate B は2巡（19件・10件），Gate C は1巡（8件）．
+6文書で277ルール，欠番と未解決参照なし．撤回7件（SB-25a, SB-28, SB-32, RS-32a, RS-37, MA-4, MA-43 — OV-1 に従い番号は保持）．Gate A は敵対的レビュー3巡（31件・16件・13件），Gate B は2巡（19件・10件），Gate C は1巡（8件）．
 
 **Step 4（crate 実装）は完了**．00-overview.md §3 の表の module 順どおりに実装し，各 rule ID を doc comment と test 名から引用している（OV-3）．
 
@@ -117,11 +117,11 @@ exit criteria（§13）の達成状況（2026-09-23 時点）：
 
 | # | 条件 | 状態 |
 |---|---|---|
-| 1 | 6文書の受理と §11 の全 verdict | **verdict は D1–D94 まで記録・適用済み**．6文書の受理そのものは未実施（§12） |
-| 2 | 全 rule に ID と OV-3 disposition | **267ルールに267行を用意し，GAP と未割当を解消**．内訳は default 215・process 20・producer 13・forward 10・withdrawn 7・consumer 1・分割 marker 1．部分カバーを示す `UNCERTAIN:` は37セル残り，受理レビューで確認する |
-| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が端から端まで動く | **達成**（2026-09-23，1.85.0 / stable 1.98.1 ともに333 passed，`#[ignore]` なし）．end-to-end pipeline ケースも通過 |
-| 4 | `schemas/`，`schema_freeze`，`SCHEMA_CHANGELOG.md` | **達成**．D51–D68 の schema 変更を反映済み |
-| 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．`110 NEW / 282 public items`（2026-09-23） |
+| 1 | 6文書の受理と §11 の全 verdict | **verdict は D1–D103 まで記録・適用済み**．6文書の受理そのものは未実施（§12） |
+| 2 | 全 rule に ID と OV-3 disposition | **277ルールに277行を用意し，GAP と未割当を解消**．内訳は default 223・process 21・producer 13・forward 11・withdrawn 7・consumer 1・分割 marker 1．部分カバーを示す `UNCERTAIN:` は37セル残り，受理レビューで確認する |
+| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が端から端まで動く | **達成**（2026-09-23，1.85.0 / stable 1.98.1 ともに336 passed，`#[ignore]` なし）．end-to-end pipeline ケースも通過 |
+| 4 | `schemas/`，`schema_freeze`，`SCHEMA_CHANGELOG.md` | **達成**．D51–D68 と D95–D103 の schema 変更を反映済み（`pattern` は無し） |
+| 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．`109 NEW / 281 public items`（2026-09-23，`plan::check_sink_links` を D99 で削除） |
 | 6 | 直接依存が §8 の4 crate ちょうど | **達成** |
 | 7 | §12 の移動後に `design/` と `plan/phase1/` の全リンクが解決 | 未（spec 受理後の Step 5） |
 
@@ -172,7 +172,7 @@ v1 schema に消費者がついた状態で再現する．
 
 ### Phase 1 に残っているもの（2026-09-23 時点）
 
-Step 4（crate 実装），D51–D68・D69–D80・D81–D84・D85–D87・D88–D91・D92–D94 の採用は完了．**レビューループは owner の判断で一時停止し，仕様を固める段階に移る**（下記）．次は exit criterion 2 の残る部分カバー注記を受理レビューで確認し，6つの Phase 1 文書を受理すること．
+Step 4（crate 実装），D51–D68・D69–D80・D81–D84・D85–D87・D88–D91・D92–D94 の採用は完了．レビューループは owner の判断で一時停止し，binding と role の規則を先に書き下ろした（D95–D103，下記）．次はその適用への敵対的再レビュー1回，それから exit criterion 2 の部分カバー注記を受理レビューで確認し，6つの Phase 1 文書を受理すること．
 
 #### D51–D68 — 採用・適用済み（2026-09-23）
 
@@ -260,9 +260,30 @@ D88–D91 の適用を Opus 5.5 が再レビューした（P0 ゼロ・P1 3・P2
 
 未追跡の `Cargo (1).lock` と `crates/ezsdr-kernel/Cargo (1).toml` は Google Drive の競合コピー（9/22 の古い版）．削除はユーザ判断．
 
+#### D95–D103 — 仕様の固め直し（2026-09-23，採用・適用済み）
+
+レビューループを止め，binding と role の規則を先に書き下ろした．置き場所は spec 03 の SB-22…SB-22h・SB-24 と表 SB-T0〜T4 の1箇所で，理由と退けた案は [00-overview.md §11](plan/phase1/00-overview.md)「Firming up the specification, and D95–D103」にある．草案は owner に出す前に Opus 5.5 の敵対的チェックを1回通し（P0 1・P1 6），推奨を3つ変えた（typestate → 構造検査の共用，MA-16 の allow-list 化 → 仕組みの禁止，schema `pattern` → 説明文のみ）．owner は推奨を全件採用した．
+
+- **D95** SB-1 を文法表 SB-T0 にした．8つの名前型（`Ident` `Namespace` `Key` `ModuleId` `EventKind` `DataContractId` `ContentHash` `ResourceId.path`）を deserialize 時に `parse` で検査し，Rust 値で渡る `ResourceId` は `validate` で検査する．schema には `pattern` を載せない（D94 と同じ理由）．port 名と `PortRef` の両半分は `Ident`．
+- **D96** 名前空間に authority 名と予約語 `sink` を加えた．runtime の入力は slot 名でしか読まない．役割判定は1関数（`require_role`）にした．
+- **D97** `authority` を必須にした（schema は required）．推論は廃止（SB-24 の省略規定，D88 の推論半分，D93 を覆す）．
+- **D98** `AuthorityDescriptor.module` を追加（schema）．
+- **D99** `plan()` は `validate()` の構造検査と endpoint 検査を同じ関数で再実行する．guard は「matched node を bound instance が宣言している」まで確かめ，`collect_prepare` も同じ guard を使う．場当たりの再検査と `check_sink_links` は削除した．
+- **D100** MA-16 の走査は残した．そのうえで `src/` の `use … as` と一覧外の `macro_rules!` を禁止し，MA-16a（process）を新設した．MA-6 にシグネチャ単位の検査を置いた．
+- **D101** D89 を確認した．**D102** 文言を修正した．**D103** `RunChild` に `binding_hash`（schema）を足し，RS-25a（forward）を置いた．
+
+新しい拒否は1件ずつ scratch copy で無効化し，すべてテストが落ちることを確認した．無効化しても通ったもの4件は，テストを足すか死にコードとして消した．どちらの gate も，`src/` に禁止構文を注入すると落ちる．
+
+適用後に**適合性の敵対的再レビュー**（Opus 5.5，規則を探すのではなく書いた規則とコードの一致を確認）を1回回した．結果は P0 1・P1 4・P2 7．いずれも書いた規則が答えを決めているので，判断を仰がずに直した．
+- P0：SB-2 の owner / `KeyDecl` 検査と SB-6 の kind 検査が matching の中にあった．そのため `plan()` が他の Spec の結果で未登録の `ext.` キーを通していた．これを構造検査へ移した．同じ流れで，SB-30 の第1点も `plan()` で再実行するようにした．
+- P1：テストの無かった4経路（tree node，`arm_after` と need key の読み取り，artifact kind の無い Sink，`RunChild` の2つの hash）にケースを足した．
+- P2：`executor_kind` を `Namespace` に型付け（schema），文言を修正した．
+
+記録だけしたもの：Session action の target が X7 / SB-1 の検査を経ずに log に入る件（D91 と同じ類型．SB-1 の範囲外）．範囲外で見つけて記録だけしたもの：MA-46 の freeze 用 schema 一覧が D25 以前のまま（`StopCause` / `StopMode` / `StepOutcome`），`collect_prepare` が report の無い fragment を黙って飛ばす件．
+
 #### 次にすること
 
-1. **仕様を固める**（上記の未決事項と，binding・role・Authority・名前空間の規則を1箇所に書き下ろす）．D92–D94 の適用は未レビュー．
+1. §11 に raised として残した4件（MA-46 の一覧，`collect_prepare` の report 欠落，Session action target の X7 / SB-1，need key と guard）の扱いを決める．
 2. 37個の `UNCERTAIN:` 注記を受理レビューで確認し，6つの spec を受理する．
 3. 受理後に §12 の Step 5 を進め，spec を `design/` へ移動して全リンクを確認する．Vision の規範文編集は OV-6 / §12 の別途承認を経て行う．
 

@@ -28,15 +28,15 @@ use crate::spec::{
 #[serde(deny_unknown_fields)]
 pub struct Binding {
     /// The Module bound here: a Provider for a Spec resource, a Sink for an output
-    /// id, an Executor for an Island's `executor` name. Named `module` rather than
-    /// `provider` because all three roles are bound through this one map; Vision
+    /// id, an Executor for an Island's `executor` name, and the Authority for the name
+    /// `authority` gives (SB-22b). Named `module` rather than `provider` because every
+    /// role is bound through this one map; Vision
     /// §8's illustrative YAML still writes `provider`, which 03 §9 records as a
     /// Vision departure for §12. It names the exact `{id, version}`, as
     /// `LinkPlacement` does, and every bound instance declares the same `ModuleRef`
-    /// (a Provider's `instance()`, an Executor's or Sink's `descriptor()`), which
-    /// admission compares — a Provider's at `validate`, an Executor's at `plan()`, a
-    /// Sink's at both — so one profile hash cannot run two Module versions (SB-22,
-    /// MA-25, MA-38, D78, D82).
+    /// (a Provider's `instance()`, a Sink's `descriptor()`, an Executor's or the
+    /// Authority's supplied descriptor), which admission compares, so one profile hash
+    /// cannot run two Module versions (SB-22f, D78, D82, D98).
     pub module: ModuleRef,
     /// Namespaced content the Provider interprets (SB-23).
     #[serde(default)]
@@ -44,9 +44,9 @@ pub struct Binding {
     /// The declared profile, when it has one (SB-22, Vision §33).
     pub profile: Option<ProfileRef>,
     /// For a **Sink** binding on a Session profile: the port it records and the
-    /// drop-class policy and capacity of the link that feeds it. RS-12 makes it the
+    /// drop-class policy and capacity of the link that feeds it. SB-22c makes it the
     /// implicit Spec's output. A Spec Run's `outputs[]` already declare their feeds,
-    /// so a binding that carries one there is refused (SB-17, SB-22, RS-12).
+    /// so a binding that carries one there is refused (SB-22g).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feed: Option<crate::spec::SinkFeed>,
 }
@@ -105,18 +105,18 @@ pub struct Placements {
 /// setting, a clock distribution or a site limit may appear (SB-26).
 ///
 /// Rule: SB-21…SB-27.
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BindingProfile {
     /// Mandatory positive integer; Phase 1 supports exactly `{1}` (SB-21, SB-47).
     pub version: u32,
-    /// Binding name to Binding: a Spec resource, an output id or an Island's executor
-    /// name, each playing exactly one role (SB-22, D89).
+    /// Binding name to Binding: exactly one entry per role slot the two documents
+    /// name, and no other (SB-22b, SB-22d, D89).
     #[serde(default)]
     pub bindings: BTreeMap<Ident, Binding>,
-    /// Which binding keeps time; may be omitted when exactly one candidate exists
-    /// (SB-24).
-    pub authority: Option<Ident>,
+    /// Which binding keeps time: a resource the Authority rides on, or a binding of
+    /// its own. Mandatory; nothing is inferred (SB-24, D97).
+    pub authority: Ident,
     /// Islands, components and links (SB-25).
     #[serde(default)]
     pub placements: Placements,

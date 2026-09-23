@@ -18,9 +18,9 @@ One file per document, so the rows stay beside the rules they are about.
 | [00-overview.md](00-overview.md) | `00-overview.md` (`OV-n`) | 27 |
 | [01-time-model.md](01-time-model.md) | `01-time-model.md` (`TM-n`) | 31 |
 | [02-stream-contract.md](02-stream-contract.md) | `02-stream-contract.md` (`SC-n`) | 47 |
-| [03-spec-and-binding.md](03-spec-and-binding.md) | `03-spec-and-binding.md` (`SB-n`) | 52 |
-| [04-run-and-session.md](04-run-and-session.md) | `04-run-and-session.md` (`RS-n`) | 59 |
-| [05-module-api.md](05-module-api.md) | `05-module-api.md` (`MA-n`) | 51 |
+| [03-spec-and-binding.md](03-spec-and-binding.md) | `03-spec-and-binding.md` (`SB-n`) | 60 |
+| [04-run-and-session.md](04-run-and-session.md) | `04-run-and-session.md` (`RS-n`) | 60 |
+| [05-module-api.md](05-module-api.md) | `05-module-api.md` (`MA-n`) | 52 |
 
 ## Row format
 
@@ -38,18 +38,19 @@ One file per document, so the rows stay beside the rules they are about.
 A `GAP` or an `UNCERTAIN` assertion is a finding for the exit review, not a defect to fix
 in passing: the table's job is to make the coverage visible rule by rule.
 
-## Result (2026-09-23, after D69–D94)
+## Result (2026-09-23, after D95–D103)
 
-**267 rows for 267 rules — every rule of all six documents has a disposition.** The six new lettered
-rules split Run/coordinator, Executor/Link and Link-implementation responsibilities by phase
-(D56–D59, D74).
+**277 rows for 277 rules — every rule of all six documents has a disposition.** D96 split SB-22 into
+SB-22 and SB-22a…SB-22h, one test each; D100 added MA-16a (process) and D103 RS-25a (forward).
+The six lettered rules before them split Run/coordinator, Executor/Link and Link-implementation
+responsibilities by phase (D56–D59, D74).
 
 | Disposition | Count |
 |---|---|
-| `default` (a Kernel item plus at least one Phase 1 test) | 215 |
-| `process` (a document, `Cargo.toml` or the test tree) | 20 |
+| `default` (a Kernel item plus at least one Phase 1 test) | 223 |
+| `process` (a document, `Cargo.toml` or the test tree) | 21 |
 | `producer` (the Module author's obligation) | 13 |
-| `forward` (a later phase) | 10 |
+| `forward` (a later phase) | 11 |
 | `withdrawn` (OV-1 keeps the number) | 7 |
 | `consumer` | 1 |
 | `default` derivation + `producer` flag-setting (SC-31a) | 1 |

@@ -18,7 +18,7 @@ use crate::stream::BackPressure;
 /// normalisation, so the canonical form of OV-15 stays byte-comparable.
 ///
 /// Rule: SB-1.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema,
 )]
 #[serde(transparent)]
 pub struct Ident(String);
@@ -27,18 +27,20 @@ pub struct Ident(String);
 /// matching `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`.
 ///
 /// Rule: SB-1.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema,
 )]
 #[serde(transparent)]
 pub struct Namespace(String);
 
-/// A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key.
+/// A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key
+/// matches `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$` and an Extension key
+/// `^ext(\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.
 ///
 /// The Kernel checks the prefix and the value's shape against the [`KeyDecl`] and
 /// never interprets the meaning (audit Finding 7).
 ///
-/// Rule: SB-2, MA-34.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+/// Rule: SB-1, SB-2, MA-34.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema,
 )]
 #[serde(transparent)]
 pub struct Key(String);
@@ -90,11 +92,11 @@ impl Key {
     /// Parses a key; at least two segments, since a bare prefix names no path (SB-2).
     pub fn parse(s: &str) -> Result<Key, SpecError> {
         let segments = s.split('.').count();
-        // An `ext.` key carries a **Module id**, whose grammar (MA-19) is laxer than a
+        // An `ext.` key carries a **Module id**, whose grammar (SB-1's table SB-T0) is laxer than a
         // Vocabulary prefix's: it admits `A-Z`, `-` and a leading digit. Holding an
         // `ext.` key to `Ident`'s grammar made MA-34's escape hatch unusable for every
         // Module whose id contains a dash or a capital — refused at `parse`, before
-        // any rule could run (SB-2, MA-19, MA-34).
+        // any rule could run (SB-1, SB-2, MA-34).
         let ok = if let Some(rest) = s.strip_prefix("ext.") {
             rest.split('.').count() >= 2 && rest.split('.').all(crate::id::is_module_segment)
         } else {
@@ -121,6 +123,26 @@ impl Key {
     /// The `ext.<module-id>` escape prefix (MA-34).
     pub fn is_extension(&self) -> bool {
         self.0.starts_with("ext.")
+    }
+}
+
+// SB-1 at the document boundary (D95): each name type deserialises through its own
+// `parse`, so a document cannot carry a name a Rust caller could not have built.
+impl<'de> Deserialize<'de> for Ident {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        crate::id::parsed(d, "an Ident", Ident::parse)
+    }
+}
+
+impl<'de> Deserialize<'de> for Namespace {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        crate::id::parsed(d, "a Namespace", Namespace::parse)
+    }
+}
+
+impl<'de> Deserialize<'de> for Key {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        crate::id::parsed(d, "a Key", Key::parse)
     }
 }
 
@@ -739,7 +761,7 @@ pub enum SpecError {
         /// What was there.
         found: String,
     },
-    /// A Spec resource has no binding (SB-22).
+    /// A Spec resource has no binding (SB-22d).
     UnboundResource {
         /// The resource name.
         name: Ident,
@@ -752,17 +774,17 @@ pub enum SpecError {
         /// The constraint that could not be met by one instance.
         constraint: String,
     },
-    /// One name appears in more than one of the four sets that share one namespace —
-    /// resource names, graph component names, output ids and Island executor names —
-    /// or an output id appears twice (SB-22, D83).
+    /// Two names of SB-22a's one namespace collide — resource names, graph component
+    /// names, output ids, Island executor names, Island fragment ids and the `authority`
+    /// name — or a name is the reserved `sink` (SB-22a, D83, D96).
     DuplicateBindingName {
         /// The colliding name.
         name: Ident,
         /// Which two sets it is in.
         sets: String,
     },
-    /// A binding names a Module that does not hold the role its name requires
-    /// (SB-22, MA-1).
+    /// A binding names a Module that does not hold the role its slot requires
+    /// (SB-22e, MA-1).
     WrongBindingRole {
         /// The bound name.
         name: Ident,
@@ -821,12 +843,12 @@ impl fmt::Display for SpecError {
             SpecError::DuplicateBindingName { name, sets } => {
                 write!(
                     f,
-                    "SB-22: {name} collides as {sets}; resource names, graph component names, output ids and Island executor names form one namespace"
+                    "SB-22a: {name} collides as {sets}; resource, component, output, Island executor, Island fragment and `authority` names form one namespace"
                 )
             }
             SpecError::WrongBindingRole { name, expected, module,
             } => {
-                write!(f, "SB-22: {name} needs a Module holding the {expected} role; {module} does not")
+                write!(f, "SB-22e: {name} needs a Module holding the {expected} role; {module} does not")
             }
             SpecError::NodeAlreadyBound { node, first, second,
             } => {

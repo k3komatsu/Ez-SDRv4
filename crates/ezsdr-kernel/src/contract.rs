@@ -11,10 +11,16 @@ use crate::stream::StreamError;
 /// A namespaced contract id matching `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`,
 /// for example `ezsdr.stream.cf32`.
 ///
-/// Rule: SC-2.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+/// Rule: SB-1, SC-2.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct DataContractId(String);
+
+impl<'de> Deserialize<'de> for DataContractId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        crate::id::parsed(d, "a DataContractId", DataContractId::parse)
+    }
+}
 
 impl DataContractId {
     /// Parses a namespaced id; at least two dot-separated segments (SC-2).
@@ -148,8 +154,8 @@ pub enum PortDirection {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Port {
-    /// Port name, unique within its component (MA-37).
-    pub name: String,
+    /// Port name, unique within its component (MA-37); an `Ident` (SB-1, SC-1).
+    pub name: crate::spec::Ident,
     /// Whether the component consumes or produces here (SC-1).
     pub direction: PortDirection,
     /// The contract carried (SC-1).
@@ -160,10 +166,10 @@ pub struct Port {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PortRef {
-    /// The component instance identifier (MA-36).
-    pub component: String,
+    /// The component, Spec resource or output the port belongs to (SB-15, SB-22a).
+    pub component: crate::spec::Ident,
     /// The port name on that component (SC-1).
-    pub port: String,
+    pub port: crate::spec::Ident,
 }
 
 /// The registry of data contracts. Registering an identical definition twice is a

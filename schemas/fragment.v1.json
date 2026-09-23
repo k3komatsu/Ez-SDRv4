@@ -5,7 +5,7 @@
       "type": "string"
     },
     "ModuleId": {
-      "description": "Names a Module implementation in the registry (`05-module-api.md` MA-19).\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: MA-19.",
+      "description": "Names a Module implementation in the registry, matching\n`^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$`, at most 256 bytes.\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: SB-1, MA-31.",
       "type": "string"
     },
     "ModuleRef": {
@@ -14,7 +14,7 @@
       "properties": {
         "id": {
           "$ref": "#/$defs/ModuleId",
-          "description": "The Module (MA-19)."
+          "description": "The Module (SB-1, MA-31)."
         },
         "version": {
           "$ref": "#/$defs/Version",

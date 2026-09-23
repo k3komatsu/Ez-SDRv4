@@ -187,7 +187,6 @@ plan::check_cycles = NEW: MA-22's cycle rule, which no §13 line names.
 plan::EdgeKind = NEW: MA-22 needs to tell a stream edge from an Event or Action edge.
 plan::GraphEdge = NEW: MA-22's edge, with whether it crosses an Island boundary.
 plan::check_effective_narrows = NEW: MA-12's rule that `effective` may narrow and must not widen.
-plan::check_sink_links = NEW: SB-15's application of SC-21 over a plan's links.
 
 # --- run, ownership and cleanup (audit §13 `lifecycle`, `ownership`) ---------
 run::RunState = Run state machine

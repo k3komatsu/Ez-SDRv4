@@ -33,11 +33,11 @@
               "type": "null"
             }
           ],
-          "description": "For a **Sink** binding on a Session profile: the port it records and the\ndrop-class policy and capacity of the link that feeds it. RS-12 makes it the\nimplicit Spec's output. A Spec Run's `outputs[]` already declare their feeds,\nso a binding that carries one there is refused (SB-17, SB-22, RS-12)."
+          "description": "For a **Sink** binding on a Session profile: the port it records and the\ndrop-class policy and capacity of the link that feeds it. SB-22c makes it the\nimplicit Spec's output. A Spec Run's `outputs[]` already declare their feeds,\nso a binding that carries one there is refused (SB-22g)."
         },
         "module": {
           "$ref": "#/$defs/ModuleRef",
-          "description": "The Module bound here: a Provider for a Spec resource, a Sink for an output\nid, an Executor for an Island's `executor` name. Named `module` rather than\n`provider` because all three roles are bound through this one map; Vision\n§8's illustrative YAML still writes `provider`, which 03 §9 records as a\nVision departure for §12. It names the exact `{id, version}`, as\n`LinkPlacement` does, and every bound instance declares the same `ModuleRef`\n(a Provider's `instance()`, an Executor's or Sink's `descriptor()`), which\nadmission compares — a Provider's at `validate`, an Executor's at `plan()`, a\nSink's at both — so one profile hash cannot run two Module versions (SB-22,\nMA-25, MA-38, D78, D82)."
+          "description": "The Module bound here: a Provider for a Spec resource, a Sink for an output\nid, an Executor for an Island's `executor` name, and the Authority for the name\n`authority` gives (SB-22b). Named `module` rather than `provider` because every\nrole is bound through this one map; Vision\n§8's illustrative YAML still writes `provider`, which 03 §9 records as a\nVision departure for §12. It names the exact `{id, version}`, as\n`LinkPlacement` does, and every bound instance declares the same `ModuleRef`\n(a Provider's `instance()`, a Sink's `descriptor()`, an Executor's or the\nAuthority's supplied descriptor), which admission compares, so one profile hash\ncannot run two Module versions (SB-22f, D78, D82, D98)."
         },
         "profile": {
           "anyOf": [
@@ -213,7 +213,7 @@
       "type": "object"
     },
     "ModuleId": {
-      "description": "Names a Module implementation in the registry (`05-module-api.md` MA-19).\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: MA-19.",
+      "description": "Names a Module implementation in the registry, matching\n`^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$`, at most 256 bytes.\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: SB-1, MA-31.",
       "type": "string"
     },
     "ModuleRef": {
@@ -222,7 +222,7 @@
       "properties": {
         "id": {
           "$ref": "#/$defs/ModuleId",
-          "description": "The Module (MA-19)."
+          "description": "The Module (SB-1, MA-31)."
         },
         "version": {
           "$ref": "#/$defs/Version",
@@ -236,7 +236,7 @@
       "type": "object"
     },
     "NodeId": {
-      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
@@ -277,12 +277,12 @@
       "description": "Names one port of one component instance (SC-1).",
       "properties": {
         "component": {
-          "description": "The component instance identifier (MA-36).",
-          "type": "string"
+          "$ref": "#/$defs/Ident",
+          "description": "The component, Spec resource or output the port belongs to (SB-15, SB-22a)."
         },
         "port": {
-          "description": "The port name on that component (SC-1).",
-          "type": "string"
+          "$ref": "#/$defs/Ident",
+          "description": "The port name on that component (SC-1)."
         }
       },
       "required": [
@@ -429,22 +429,15 @@
   "description": "How this requirement is met, at this site, for this run.\n\n`environment` is the only place a channel model, a fault schedule, a virtual-time\nsetting, a clock distribution or a site limit may appear (SB-26).\n\nRule: SB-21…SB-27.",
   "properties": {
     "authority": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Ident"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "Which binding keeps time; may be omitted when exactly one candidate exists\n(SB-24)."
+      "$ref": "#/$defs/Ident",
+      "description": "Which binding keeps time: a resource the Authority rides on, or a binding of\nits own. Mandatory; nothing is inferred (SB-24, D97)."
     },
     "bindings": {
       "additionalProperties": {
         "$ref": "#/$defs/Binding"
       },
       "default": {},
-      "description": "Binding name to Binding: a Spec resource, an output id or an Island's executor\nname, each playing exactly one role (SB-22, D89).",
+      "description": "Binding name to Binding: exactly one entry per role slot the two documents\nname, and no other (SB-22b, SB-22d, D89).",
       "type": "object"
     },
     "environment": {
@@ -470,7 +463,8 @@
     }
   },
   "required": [
-    "version"
+    "version",
+    "authority"
   ],
   "title": "BindingProfile",
   "type": "object"

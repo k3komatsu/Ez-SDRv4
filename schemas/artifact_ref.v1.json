@@ -75,7 +75,7 @@
       "type": "object"
     },
     "ContentHash": {
-      "description": "`sha256:<64 lowercase hex>`. The algorithm is named in the value so a later\nalgorithm is an additive change (OV-14).",
+      "description": "`sha256:<64 lowercase hex>`, matching `^sha256:[0-9a-f]{64}$`. The algorithm is\nnamed in the value so a later algorithm is an additive change (OV-14, SB-1).",
       "type": "string"
     },
     "ContinuityMap": {
@@ -138,7 +138,7 @@
       "type": "object"
     },
     "EventKind": {
-      "description": "What kind of event this is. Dotted segments; the Kernel owns the five of RS-28\nand every other kind belongs to the Vocabulary or Module that emits it.\n\nRule: RS-27.",
+      "description": "What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$`;\nthe Kernel owns the five of RS-28 and every other kind belongs to the Vocabulary or\nModule that emits it.\n\nRule: SB-1, RS-27.",
       "type": "string"
     },
     "Gap": {
@@ -302,7 +302,7 @@
       "type": "string"
     },
     "NodeId": {
-      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"

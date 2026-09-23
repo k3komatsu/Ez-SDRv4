@@ -30,7 +30,7 @@
           "description": "Its content hash, which the Manifest records (RS-45, MA-37)."
         },
         "id": {
-          "description": "Its identity within that kind (MA-19).",
+          "description": "Its identity within that kind (MA-19b).",
           "type": "string"
         },
         "kind": {
@@ -65,8 +65,8 @@
       "description": "What a component requires of its Executor. Requirements only: the placement\nlives in the BindingProfile (MA-36, SB-25, re-review R21).",
       "properties": {
         "executor_kind": {
-          "description": "The Executor kind, or `any` (MA-39).",
-          "type": "string"
+          "$ref": "#/$defs/Namespace",
+          "description": "The Executor kind, or `any`, which SB-1's `Namespace` grammar also spells (MA-36,\nMA-39)."
         },
         "memory_bytes": {
           "description": "Working memory, when it needs a declared amount (MA-36).",
@@ -127,11 +127,11 @@
       "type": "object"
     },
     "ContentHash": {
-      "description": "`sha256:<64 lowercase hex>`. The algorithm is named in the value so a later\nalgorithm is an additive change (OV-14).",
+      "description": "`sha256:<64 lowercase hex>`, matching `^sha256:[0-9a-f]{64}$`. The algorithm is\nnamed in the value so a later algorithm is an additive change (OV-14, SB-1).",
       "type": "string"
     },
     "DataContractId": {
-      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SC-2.",
+      "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SB-1, SC-2.",
       "type": "string"
     },
     "Duration": {
@@ -159,7 +159,7 @@
       "type": "string"
     },
     "Key": {
-      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-2, MA-34.",
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
       "type": "string"
     },
     "Namespace": {
@@ -167,7 +167,7 @@
       "type": "string"
     },
     "NodeId": {
-      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
@@ -213,8 +213,8 @@
           "description": "Whether the component consumes or produces here (SC-1)."
         },
         "name": {
-          "description": "Port name, unique within its component (MA-37).",
-          "type": "string"
+          "$ref": "#/$defs/Ident",
+          "description": "Port name, unique within its component (MA-37); an `Ident` (SB-1, SC-1)."
         }
       },
       "required": [

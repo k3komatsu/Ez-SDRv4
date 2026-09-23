@@ -55,12 +55,18 @@ impl fmt::Display for HashError {
 
 impl std::error::Error for HashError {}
 
-/// `sha256:<64 lowercase hex>`. The algorithm is named in the value so a later
-/// algorithm is an additive change (OV-14).
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+/// `sha256:<64 lowercase hex>`, matching `^sha256:[0-9a-f]{64}$`. The algorithm is
+/// named in the value so a later algorithm is an additive change (OV-14, SB-1).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema,
 )]
 #[serde(transparent)]
 pub struct ContentHash(String);
+
+impl<'de> Deserialize<'de> for ContentHash {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        crate::id::parsed(d, "a ContentHash", ContentHash::parse)
+    }
+}
 
 /// The marker [`serialize_finite_f64`] puts in its error so that [`ContentHash::of`]
 /// can report [`HashError::NonFiniteNumber`] rather than a generic failure (OV-15).

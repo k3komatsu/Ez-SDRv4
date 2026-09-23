@@ -82,6 +82,9 @@ pub enum SessionAction {
     RunChild {
         /// The child's Spec, by hash (RS-45).
         spec_hash: ContentHash,
+        /// The child's own profile, by hash: a Session's cannot serve a Spec Run
+        /// (RS-25a, D103).
+        binding_hash: ContentHash,
     },
 }
 
@@ -334,10 +337,12 @@ pub enum ControlOp {
     },
     /// Extend a renewable Lease (RS-24).
     Renew,
-    /// Create a child Run (RS-25).
+    /// Create a child Run (RS-25, RS-25a).
     RunChild {
         /// The child's Spec, by hash.
         spec_hash: ContentHash,
+        /// The child's profile, by hash (RS-25a).
+        binding_hash: ContentHash,
     },
 }
 
@@ -538,8 +543,10 @@ pub fn compile(
             })
         }
         SessionAction::Renew {} => out.control = Some(ControlOp::Renew),
-        SessionAction::RunChild { spec_hash } => {
-            out.control = Some(ControlOp::RunChild { spec_hash: spec_hash.clone(),
+        SessionAction::RunChild { spec_hash, binding_hash } => {
+            out.control = Some(ControlOp::RunChild {
+                spec_hash: spec_hash.clone(),
+                binding_hash: binding_hash.clone(),
             })
         }
     }
@@ -548,11 +555,20 @@ pub fn compile(
 
 // ---------------------------------------------------------------- the implicit Spec
 
-/// Builds a Session's implicit ExperimentSpec from the BindingProfile. The profile
-/// selects each binding's role (D87): a binding with `feed` is one **output**, taking
-/// its artifact kind from the bound Sink's first declared `artifact_kinds` and its
-/// `feed` from the binding; any other binding whose Module holds Provider, and that
-/// no Island names as its executor, is one resource with empty `requires`.
+/// Builds a Session's implicit ExperimentSpec from the BindingProfile, one binding at
+/// a time, by the first row of spec 03's table SB-T2 that applies (SB-22c):
+///
+/// 1. named by an Island's `executor` — its Executor; no Spec entry;
+/// 2. carries `feed` — a Sink: one **output**, taking its artifact kind from the bound
+///    Sink's first declared `artifact_kinds` and its `feed` from the binding;
+/// 3. its Module holds Provider — one resource with empty `requires`, of the bound
+///    instance's root kind;
+/// 4. named by `authority` — the Authority's own slot; no Spec entry;
+/// 5. anything else — no slot, which `validate` refuses (SB-22d).
+///
+/// The derivation refuses a binding only when its row lacks what the row reads, in
+/// the order registered roles, then role, then instance, with SB-22e's or SB-22f's
+/// error; every other refusal is `validate`'s, which runs over the result unchanged.
 ///
 /// The Sink clause is not a convenience: RS-4 forbids adding a recorder while the
 /// Run is `Running` and RS-14 refuses a capture with no recorder, so an implicit
@@ -562,10 +578,7 @@ pub fn compile(
 /// feeds it — the placed-component form had no field for that link, so a Session's
 /// capture was connected to nothing.
 ///
-/// `sinks` supplies the bound Sink per output id, which the artifact kind is read
-/// from.
-///
-/// Rule: RS-12, SB-17, SB-22.
+/// Rule: RS-12, SB-22c.
 pub fn implicit_spec(
     profile: &BindingProfile,
     registry: &ModuleRegistry,
@@ -573,67 +586,21 @@ pub fn implicit_spec(
     sinks: &BTreeMap<Ident, &dyn crate::module_api::Sink>,
 ) -> Result<ExperimentSpec, SpecError> {
     let mut spec = ExperimentSpec { version: 1, ..ExperimentSpec::default() };
-    // SB-22 / D78: a binding pins an exact Module version. One that names no
-    // registered version holds no role, and skipping it below would leave the
-    // Session silently without that resource or output.
-    if let Some((name, binding)) = profile
-        .bindings
-        .iter()
-        .find(|(_, b)| !registry.modules().any(|m| crate::module_api::is_module(m, &b.module)))
-    {
-        return Err(SpecError::Structural {
-            reason: format!(
-                "SB-22: binding {name} names Module {} {}, which is not registered",
-                binding.module.id, binding.module.version
-            ),
-        });
-    }
-    // RS-12 / D87: one binding name plays exactly one role, and in a Session the
-    // profile — not the Module's role list — says which: an Island's `executor` name
-    // is its Executor, a binding with `feed` is a Sink, and any other binding whose
-    // Module holds Provider is a resource. The role list is the permission, checked
-    // again by `validate`; the profile is the selection. Reading the role list alone
-    // made a Provider+Sink Module unbindable under any arrangement (MA-1).
-    let island_executors: std::collections::BTreeSet<&Ident> =
+    let island_executors: BTreeSet<&Ident> =
         profile.placements.islands.iter().map(|i| &i.executor).collect();
+    let missing = |what: &str, name: &Ident| SpecError::Structural {
+        reason: format!("SB-22f: no {what} for binding {name}"),
+    };
     for (name, binding) in &profile.bindings {
+        // Row 1: an Island names it. A `feed` on it is SB-22g's to refuse.
         if island_executors.contains(name) {
-            // An Island names it, so it plays Executor; a `feed` on it would be a
-            // second role and an unread source of truth (SB-22).
-            if binding.feed.is_some() {
-                return Err(SpecError::Structural {
-                    reason: format!(
-                        "SB-22: binding {name} is an Island's executor and carries a `feed`; one binding name plays one role"
-                    ),
-                });
-            }
             continue;
         }
-        let roles = &registry
-            .modules()
-            .find(|m| crate::module_api::is_module(m, &binding.module))
-            .expect("every binding's Module was checked registered above")
-            .roles;
-        if binding.feed.is_some() && !roles.contains(&Role::Sink) {
-            // As for a resource or an executor, a role the Module does not hold is a
-            // role error, reported before any instance is looked up (MA-1, SB-22).
-            return Err(SpecError::WrongBindingRole {
-                name: name.clone(),
-                expected: "Sink".to_owned(),
-                module: format!("{} {}", binding.module.id, binding.module.version),
-            });
-        }
+        // Row 2: a Sink, whose output takes its `feed` from the binding and its
+        // artifact kind from the bound Sink, because a Session states no preference.
         if let Some(feed) = &binding.feed {
-            // One output per Sink binding, taking its `feed` from the binding
-            // (SB-22). A Sink is bound and never placed, so nothing is inserted into
-            // `graph.components` — and the output carries the link its recorder is
-            // fed by (findings D17, N6). Its `kind` is an **artifact** kind, which
-            // SB-17 checks against the Sink's `artifact_kinds`; the implicit Spec
-            // takes the first the bound Sink declares, because a Session states no
-            // preference (RS-12, RS-44).
-            let sink = sinks.get(name).ok_or_else(|| SpecError::Structural {
-                reason: format!("SB-22: no Sink instance for binding {name}"),
-            })?;
+            crate::plan::require_role(registry, name, &binding.module, Role::Sink)?;
+            let sink = sinks.get(name).ok_or_else(|| missing("Sink instance", name))?;
             let kind = sink.descriptor().artifact_kinds.first().cloned().ok_or_else(|| {
                 SpecError::Structural {
                     reason: format!("RS-12: Sink binding {name} declares no artifact kind"),
@@ -645,14 +612,19 @@ pub fn implicit_spec(
                 feed: feed.clone(),
                 params: BTreeMap::new(),
             });
-        } else if roles.contains(&Role::Provider) {
-            // The resource's `kind` is the bound instance's own root kind. Inventing
-            // a Kernel kind here would give the matcher (SB-34) nothing to bind to,
-            // and would put a Kernel-owned vocabulary word where RS-12 asks only for
-            // "one resource per binding with empty `requires`".
-            let provider = providers.get(name).ok_or_else(|| SpecError::Structural {
-                reason: format!("RS-12: no Provider instance for binding {name}"),
-            })?;
+            continue;
+        }
+        // Rows 3 and 4 read the registered roles, which a version nobody registered
+        // does not have: refused as SB-22e refuses it on a Spec Run.
+        let Some(module) = registry.modules().find(|m| crate::module_api::is_module(m, &binding.module)) else {
+            return Err(crate::plan::not_registered(name, &binding.module));
+        };
+        // Row 3: a resource, of the bound instance's own root kind. Inventing a
+        // Kernel kind here would give the matcher (SB-34) nothing to bind to, and
+        // would put a Kernel-owned vocabulary word where RS-12 asks only for "one
+        // resource per binding with empty `requires`" (finding D21).
+        if module.roles.contains(&Role::Provider) {
+            let provider = providers.get(name).ok_or_else(|| missing("Provider instance", name))?;
             spec.resources.insert(
                 name.clone(),
                 ResourceReq {
@@ -663,9 +635,8 @@ pub fn implicit_spec(
                 },
             );
         }
-        // Anything else — a feedless Sink-only binding, an Executor no Island names —
-        // plays no role unless `authority` names it (a dedicated Authority, D92),
-        // which `validate` refuses on both Run kinds (SB-22, D89).
+        // Rows 4 and 5 add nothing: the Authority's own slot comes from `authority`
+        // (SB-22b), and a binding with no slot is `validate`'s to refuse (SB-22d).
     }
     Ok(spec)
 }
