@@ -30,9 +30,8 @@ pub struct Binding {
     /// The Module bound here: a Provider for a Spec resource, a Sink for an output
     /// id, an Executor for an Island's `executor` name, and the Authority for the name
     /// `authority` gives (SB-22b). Named `module` rather than `provider` because every
-    /// role is bound through this one map; Vision
-    /// §8's illustrative YAML still writes `provider`, which 03 §9 records as a
-    /// Vision departure for §12. It names the exact `{id, version}`, as
+    /// role is bound through this one map; the Vision's §8 examples wrote `provider`
+    /// until Step 5 corrected them (03 §9). It names the exact `{id, version}`, as
     /// `LinkPlacement` does, and every bound instance declares the same `ModuleRef`
     /// (a Provider's `instance()`, a Sink's `descriptor()`, an Executor's or the
     /// Authority's supplied descriptor), which admission compares, so one profile hash

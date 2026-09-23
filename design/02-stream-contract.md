@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft for Gate A. Normative for `ezsdr-kernel::stream` and `::contract` once accepted. |
+| Status | Accepted 2026-09-23 (Gate A; Phase 1 Step 5). Normative for `ezsdr-kernel::stream` and `::contract`. |
 | Scope | The DataContract registry and Port; `MemoryDomainId` and BufferRef; SampleBlock, its flags and its construction invariants; DataLink identity and back-pressure policy; the TX burst state machine and late policy; the derivation of ContinuityMap and ValidityMap. |
 | Not in scope | Block pools and real link implementations (Phase 2); the MockRadio device model (Phase 2); TimingEnvelope values, which supply `min_lead` (Radio Model, Phase 2); the SigMF writer; `pdu.*` and `tensor.*` contracts (registered later without changing anything here). |
 | Vision § covered | §21; §22's burst and late-policy parts; §23 in full, including the RX rules 1–8, the TX rules 1–5, the overflow paragraph and the ContinuityMap paragraph; §28; §30's link policy; §31's `MemoryDomainId` identity and BufferRef (domain kinds are Vocabulary content); §34's wire-format note; §46's TX-tap note; §17's fault-equivalence requirement. |

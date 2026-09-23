@@ -11,36 +11,9 @@ Every execution creates a Run, including an interactive Session (§3), whose Man
 
 A Run should record enough information to reproduce or audit the experiment.
 
-The Manifest is a **Kernel envelope with namespaced sections**. The Kernel writes the envelope; each Module writes its own section; an optional environment capture can be switched on per profile. No Provider-specific field ever needs a Kernel change.
+The Manifest is a **Kernel envelope with namespaced Module sections**, written once at the end of every Run that terminates, a failed Run included, and then sealed. The envelope carries a mandatory `version` and records the Run, its ExecutionClass, fidelity vector and state transitions; the Spec (or a Session's implicit Spec) and the BindingProfile, each as hash plus body, with the environment verbatim; the plan with placement as bound, the admission result and the PrepareReports; Module and Vocabulary versions and component implementation hashes; input artifacts such as waveforms and calibration, by reference; the clock domains and SampleClocks with a relation to UTC and its uncertainty; the complete event counters; the Lease, the action log and the termination; and the produced artifacts with their hashes and continuity. Each Module writes only under its own namespace — `uhd.*` for UHD version, FPGA image and serials, `mock.*` for the profile and injected faults — so no Provider-specific field needs a Kernel change. Random seeds and an environment capture are not envelope fields: a seed is part of the environment, which is already recorded, and the capture is the `ezsdr.capture` section written by the Module that produces it. Everything hashable is content-addressed, so two Runs with equal Spec, BindingProfile, component and input hashes are comparable by construction; large data is always by reference; and the Manifest's own hash is stored beside it, never inside the hashed body.
 
-```text
-Manifest
-├── envelope (Kernel)
-│   ├── run id, parent Session, ExecutionClass, fidelity vector
-│   ├── ExperimentSpec  (hash + body; or the implicit Spec of a Session) and the action log
-│   ├── BindingProfile  (hash + body, including its environment part)
-│   ├── ExecutionPlan summary; placement as bound
-│   ├── PrepareReport   (requested vs applied configuration, coercions, warnings)
-│   ├── Module identities and versions; component implementation hashes; waveform hashes
-│   ├── epoch ↔ UTC ClockRelation with uncertainty; clock/time configuration
-│   ├── calibration artifacts used (by reference and hash)
-│   ├── event counters (complete) and sampled RuntimeEvents; EVENTS_DROPPED
-│   ├── continuity / validity metadata of every capture
-│   ├── random seeds
-│   ├── Lease mode and termination reason
-│   └── Artifact references with content hashes
-├── sections (Modules, namespaced)
-│   ├── uhd.*          UHD version, FPGA image, device serials, daughterboards, transport settings
-│   ├── mock.*         profile, envelope, injected faults
-│   ├── peripheral.*   commands issued, events, baseline restore
-│   └── calibration.*  method, uncertainty
-└── environment capture (optional, per profile)
-    └── host.*         CPU / NIC topology, kernel and RT settings, git commit, performance metrics
-```
-
-Everything that can be hashed is content-addressed: two Runs with equal Spec, BindingProfile, component and waveform hashes are comparable by construction.
-
-Large artifacts should normally be returned by reference.
+Normative: [design/04-run-and-session.md](../04-run-and-session.md), rules RS-1, RS-11a, RS-38…RS-47; [design/01-time-model.md](../01-time-model.md), rules TM-13d, TM-18; [design/02-stream-contract.md](../02-stream-contract.md), rules SC-28, SC-30.
 
 ---
 
@@ -91,6 +64,8 @@ Validation may determine:
 - selected fallback strategies,
 - performance risks.
 
+The list is a scope, not a guarantee; what `validate()` returns is stated below.
+
 A failure should happen before RF transmission whenever possible.
 
 ## The RF safety envelope
@@ -105,11 +80,13 @@ rf_envelope
 └── antenna_ports                     allowed port names
 ```
 
-`validate()` and `prepare()` enforce it as a Kernel policy, and the Provider re-checks the *applied* values, so a coercion that lands outside the envelope is rejected as well. Session Actions that change RF parameters pass the same check on the control path before dispatch (§3). **Nothing transmits before `validate()` passes, including this check.** MockRadio runs the same check, so an agent learns the site limits in simulation.
+The Kernel does not interpret the envelope. The Radio Model registers an admission check against its `radio.rf_envelope` section, and the Kernel guarantees that every registered check runs at three points: `validate()` over the requested configuration; `prepare()` over the configuration each Provider applied, so a coercion that lands outside the envelope is refused; and the admission of every Session Action before dispatch (§3), over the effective configuration overlaid with the proposed value. A check is pure and needs no hardware, so `validate()` is a true dry run. **Nothing transmits before `validate()` passes, including this check.** MockRadio runs the same check, so an agent learns the site limits in simulation.
 
 ## What each step returns
 
-`validate(spec, binding)` returns the admission result: matched capabilities, rejected constraints, envelope violations. `plan(spec, binding)` additionally returns the ExecutionPlan summary with placement as bound and the transfer costs it implies. `prepare()` returns the PrepareReport (§11) with the effective configuration. All three are available to Python and to AI agents before any RF energy is emitted.
+`validate()` returns the matched resources, the rejected constraints, the envelope violations, a coercion preview and warnings; `plan()` adds the fragments, links, dependency edges, the Authority, the derived ExecutionClass and the declared transfer costs; `prepare()` returns a PrepareReport per fragment and the merged effective configuration. All three are available to Python and to AI agents before any RF energy is emitted.
+
+Normative: [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-29…SB-31, SB-38, SB-39, SB-41; [design/04-run-and-session.md](../04-run-and-session.md), RS-17.
 
 ---
 
@@ -133,37 +110,19 @@ device disconnect
 runtime abort
 ```
 
-the Runtime must have deterministic policies for:
+the Runtime runs one ordered cleanup, however the Run ends: (0) end child Runs; (1) freeze dispatch and cancel pending bursts and timers; (2) stop TX and (3) then RX, each in reverse dependency order; (4) cancel Peripheral operations; (5) restore baseline state; (6) finalise artifacts, marking open ones partial; (7) flush events and collect counters; (8) release the Lease and write the Manifest. The freeze precedes stopping TX, because a queued timed burst would otherwise reopen it. Every step runs under a deadline and is attempted even when an earlier one failed, so a failed Run's Manifest is always written. A Lease is `Attached` by default and ends the Run when its client disconnects; a `Detached` Lease needs a TTL on the host monotonic clock, and only its adoption token reclaims it; a child Run inherits its parent's Lease. The Policy is a closed table from registered event kinds to `continue`, `mark_artifact`, `stop` or `abort`; each kind's default is declared where the kind is registered — the Kernel's `DEVICE_LOST` aborts, and the Radio Model is to declare `RX_OVERFLOW` continue-and-mark — and a kind with no entry falls back by severity.
 
-- stopping TX,
-- stopping RX,
-- cancelling pending bursts,
-- cancelling peripheral operations where possible,
-- restoring baseline state,
-- marking partial artifacts,
-- recording failure events,
-- releasing leases.
+Normative: [design/04-run-and-session.md](../04-run-and-session.md), rules RS-6…RS-11a, RS-21…RS-25a, RS-26…RS-30.
 
 TX must not continue indefinitely merely because a client disappears.
 
 ## Lease modes
 
-```text
-Lease
-├── Attached                       ends with the Session or client connection; TX stops, resources release
-└── Detached { ttl, renewable }    survives disconnect until the TTL expires; must be explicit
-```
-
 The default is Attached. A student who wants to set up a repeating transmission, disconnect and walk to a spectrum analyser asks for a Detached lease with a TTL; the Manifest records it, a reconnecting client may adopt it, and on TTL expiry the cleanup above runs. An AI agent that crashes leaves an Attached lease, so its TX stops. Both behaviours are correct; the mode makes the choice visible. A child Run created inside a Session inherits the Session's Lease: ending the Session ends its children, and a Detached Session keeps its children until its TTL expires.
 
 ## Policy is a closed table
 
-```text
-Policy
-└── on(kind) -> continue | mark_artifact | stop | abort
-```
-
-A Run's failure policy is a declarative table from event kinds to one of four reactions, plus the cleanup sequence above. It is not a rules engine and has no expression language; conditions that need logic belong in a Reactor or in Python orchestration. Defaults are conservative: an RX overflow continues and marks the artifact; a lost device aborts.
+A Run's failure policy is a declarative table from event kinds to one of four reactions, plus the cleanup sequence above. It is not a rules engine and has no expression language; conditions that need logic belong in a Reactor or in Python orchestration.
 
 ---
 

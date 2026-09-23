@@ -15,22 +15,25 @@ Example:
 
 ```json
 {
+  "version": 1,
+  "requirements": { "vocabularies": [{ "id": "radio", "major": 1 }] },
   "resources": {
     "radio": {
-      "kind": "radio",
+      "kind": "radio.device",
       "requires": {
-        "rx": { "channels": 2, "coherent": true },
-        "tx": { "channels": 2 },
-        "full_duplex": true,
-        "sample_rate_hz": 20000000,
-        "hardware_time": true
+        "radio.rx.channels":    { "kind": "min", "value": 2 },
+        "radio.rx.coherent":    { "kind": "eq",  "value": true },
+        "radio.tx.channels":    { "kind": "min", "value": 2 },
+        "radio.full_duplex":    { "kind": "eq",  "value": true },
+        "radio.sample_rate_hz": { "kind": "eq",  "value": 20000000 },
+        "radio.hardware_time":  { "kind": "eq",  "value": true }
       }
     }
   }
 }
 ```
 
-The keys under `requires` are defined by the Radio Model (Vocabulary), not by the Kernel. The Kernel matcher is generic: it compares constraints with declared capabilities and asks the Provider whether a value can be coerced.
+The keys under `requires` are defined by the Radio Model (Vocabulary), not by the Kernel; the `radio.*` names above stand in for the ones the Radio Model will define. The Kernel matcher is generic: it compares constraints with declared capabilities and asks the Provider whether a value can be coerced.
 
 ## Resources are composite
 
@@ -47,28 +50,29 @@ Provider instance
     └── sensors             temperature, lock status, ...
 ```
 
-Rules:
+A Spec states requirements per resource under Vocabulary-owned keys, one key per direction (`radio.rx.channels`, `radio.tx.channels`, `radio.rx.coherent`): a sensing array needs four coherent RX channels and one TX channel, and a single `channels` count cannot say so. The generic matcher compares them with the declared capabilities of the node the binding chose, asking the Provider's `coerce` only whether a value can be coerced. A Spec resource binds to exactly one Provider instance, and a node to at most one resource unless its Provider declares it shareable, so coherence is declared by the instance that owns the channels and never assembled across instances (§25). A resource's `needs` are resolved by the Kernel to a sub-resource of a bound instance, possibly another one, which is how a peripheral reaches a radio's GPIO bank with no Module dependency (§39). Fragments are armed in dependency order from each instance's `arm_after` and the `ezsdr.arm_order` section, so the device that sources PPS is armed first — a v3 start-up failure mode.
 
-- The ExperimentSpec requests capabilities at the device level and **per direction**: `rx: { channels: 4, coherent: true }, tx: { channels: 1 }`. A sensing array needs four coherent RX channels and one TX channel; a channel sounder may need RX only; coherence may be required for one direction and not the other. A single `channels` count cannot say any of this.
-- A request for coherent channels must map to **one Provider instance that can declare that coherence**, for example the UHD Provider with `addr0,addr1`. If no single instance can, `validate()` fails. The Core never assembles coherence from independent instances (§25).
-- Sub-resources are bound through the Provider instance that owns them. A peripheral that needs a GPIO line binds to a generic GPIO capability, which the Core resolves to a sub-resource of the radio device (§39).
-- ExecutionPlan fragments carry dependency edges. The Core prepares and arms in DAG order: the device that sources PPS before the devices that consume it, which was a v3 start-up failure mode.
+Normative: [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-2, SB-6…SB-8, SB-12, SB-33…SB-36, SB-39.
 
 ## BindingProfile = bindings + placements + environment
 
-A BindingProfile has three parts: `bindings` (which Provider instance satisfies each resource), `placements` (which Executor and MemoryDomain run each processing component of the Spec's graph, §20), and `environment` (what surrounds the experiment). The ExperimentSpec contains none of them: it states requirements, and a Spec that named an Executor could not be promoted to a host without that Executor.
+A BindingProfile is the closed set `version`, `bindings`, `authority`, `placements`, `environment`. One `bindings` map fills every role slot — a resource's Provider, an output's Sink, an Island's Executor — with an exact Module `{ id, version }`; `authority` names the Time Authority and is mandatory; `placements` assigns components, memory domains and Link Modules (§20); and `environment` holds namespaced sections, the only place for a channel model, a fault schedule, a time class, a clock distribution or a site limit. The ExperimentSpec contains none of them: it states requirements, and a Spec that named an Executor could not be promoted to a host without that Executor.
+
+Normative: [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-13, SB-21…SB-27.
 
 ```yaml
 # laboratory
+version: 1
 bindings:
   radio:
-    provider: ezsdr.radio.uhd
+    module: { id: ezsdr.radio.uhd, version: { major: 1, minor: 0, patch: 0 } }
     selector:
       addrs: ["192.168.40.2", "192.168.40.3"]   # one instance, two motherboards
+authority: radio                         # the device timekeeper, riding on the radio binding
 environment:
-  clock_distribution: octoclock          # 10 MHz + PPS to both
-  rf_path: cabled                        # or: ota
-  rf_envelope:                           # enforced by validate()/prepare(), §52
+  ezsdr.rf_path: { path: cabled }        # or: over_the_air
+  radio.clock_distribution: octoclock    # 10 MHz + PPS to both
+  radio.rf_envelope:                     # enforced by validate()/prepare(), §52
     allowed_bands: [{ lo_hz: 2.400e9, hi_hz: 2.4835e9 }]
     max_gain_db: 20
     tx_enabled: [true, true]
@@ -76,18 +80,23 @@ environment:
 
 ```yaml
 # simulation
+version: 1
 bindings:
   radio:
-    provider: ezsdr.radio.mock
-    profile: x310-like
-    instances: 2
+    module: { id: ezsdr.radio.mock, version: { major: 1, minor: 0, patch: 0 } }
+    profile: { name: x310-like, version: { major: 1, minor: 0, patch: 0 } }
+    selector: { instances: 2 }           # selector content: one Mock instance emulating two motherboards
+  sim:
+    module: { id: ezsdr.sim-engine, version: { major: 1, minor: 0, patch: 0 } }
+authority: sim                           # the Simulation Engine is the Time Authority (§15)
 environment:
-  time: { class: simulation }            # discrete-event virtual time (§15)
-  channel:                               # SimulationChannel (§16)
+  ezsdr.time: { class: simulation }      # discrete-event virtual time (§15)
+  ezsdr.rf_path: { path: simulated }
+  sim.channel:                           # SimulationChannel (§16)
     model: awgn
     snr_db: 10
     delay_samples: 37
-  faults:                                # FaultInjector schedule (§17)
+  sim.faults:                            # FaultInjector schedule (§17)
     - at: "2.5s"
       inject: rx_overflow
       target: radio[0].rx
@@ -136,10 +145,10 @@ A conceptual shape is:
 ```text
 ExperimentSpec
 ├── version          mandatory; migrated or refused, never reinterpreted (§10)
-├── requirements
+├── requirements     the Vocabulary majors the Spec is written against; constraints live in each resource's `requires`
 ├── resources        per-direction radio requests, peripherals, endpoints (§8)
 ├── graph            components, links and their requirements; never a placement (§20)
-├── schedule         Actions with AbsoluteDeadlines (§19, §22)
+├── schedule         Action templates at a resource-relative time, resolved to AbsoluteDeadlines at arm (§19, §22)
 ├── outputs          Artifacts to produce, including CalibrationArtifacts (§26)
 ├── policies         the closed Policy table (§53) and the coercion policy (§11)
 └── extensions       namespaced backend-specific requirements
@@ -177,47 +186,9 @@ The pressure to add expressions is real: v3 grew `CONSTANTS` and `!COMPUTE(...)`
 
 The real-time path must never parse or interpret ExperimentSpec.
 
-Conceptually:
+Compilation runs in a fixed order: schema validation, semantic validation, resource resolution, binding resolution, capability matching against the bound instances, plan construction, admission checks, `prepare`, `arm`. Matching follows binding, because the capabilities matched are those of the instance the binding chose. `validate()` reports what it finds; `plan()` runs the same structural and endpoint checks again through the same functions rather than presuming `validate()` ran, and refuses anything not admitted. `prepare` returns a PrepareReport per fragment, and `arm` fixes what only it can: each transmit SampleClock's origin and each scheduled time. Everything after `arm` is the real-time side, which receives an ExecutionPlan and never a Spec.
 
-```text
-ExperimentSpec + BindingProfile
-      │
-      ▼
-Schema validation            (version checked: migrate or refuse, never reinterpret)
-      │
-      ▼
-Semantic validation
-      │
-      ▼
-Resource resolution          (composite resource tree, §8)
-      │
-      ▼
-Binding resolution           (explicit: bindings and placements come from the BindingProfile)
-      │
-      ▼
-Capability matching          (against the bound instances; the Provider answers "coercible?")
-      │
-      ▼
-Plan construction            (fragments + DataLinks + dependency DAG)
-      │
-      ▼
-Admission checks             (contract compatibility, MemoryDomain reachability,
-      │                       envelope constraints, deadline feasibility, RF envelope)
-      ▼
-ExecutionPlan
-      │
-      ▼
-Prepare  → PrepareReport     (effective configuration, coercions, warnings; §11)
-      │
-      ▼
-Arm
-──────────────────────────────────
-          real-time boundary
-──────────────────────────────────
-      │
-      ▼
-Run
-```
+Normative: [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-37…SB-43 (which stage checks what: table SB-T4).
 
 Three principles follow:
 
@@ -229,15 +200,13 @@ Three principles follow:
 
 ## The compiler is a validator, not an optimiser
 
-Placement, MemoryDomains and DataLink choices are stated explicitly in the BindingProfile's `placements` section. The ExperimentSpec states only requirements (`requires: { executor_kind: gpu | any, budget, memory }`); it never names an Executor or a MemoryDomain, because a Spec that did could not be promoted to a host without that Executor (invariants 6, 8, 29). The Core checks that the stated arrangement is feasible and rejects what is not. It never searches for a better arrangement. GNU Radio 4 places components in explicit port domains with explicit conversion blocks, and NVIDIA Aerial's GPU pipeline is laid out by hand; neither runs an optimiser, and Ez-SDR will not either until a concrete experiment proves one necessary (§63).
+Placement, MemoryDomains and DataLink choices are stated explicitly in the BindingProfile's `placements` section. The ExperimentSpec states only requirements (`requires: { executor_kind, memory_bytes }`, with the budget in `timing`); it never names an Executor or a MemoryDomain, because a Spec that did could not be promoted to a host without that Executor (invariants 6, 8, 29). The Core checks that the stated arrangement is feasible and rejects what is not. It never searches for a better arrangement. GNU Radio 4 places components in explicit port domains with explicit conversion blocks, and NVIDIA Aerial's GPU pipeline is laid out by hand; neither runs an optimiser, and Ez-SDR will not either until a concrete experiment proves one necessary (§63).
 
 ## Schema-first and versioned
 
-Every public Kernel type — ExperimentSpec, BindingProfile, Manifest, Event, Action, TxBurst, PrepareReport — has a **language-neutral schema with a version**. The same definition serves the Rust runtime, the Python client, out-of-process Plugins and WASM components; nothing is defined only as a Rust type and re-described by hand elsewhere (v3 had one hand-written binary protocol per controller).
+Every Kernel document type has a JSON Schema generated from its Rust definition and committed; the committed file, not the Rust source, is the contract, and a freeze test fails on any drift. The same schema serves the Rust runtime, the Python client, out-of-process Plugins and WASM components (v3 had one hand-written binary protocol per controller). ExperimentSpec, BindingProfile and Manifest carry a mandatory integer `version`: an unsupported one is refused with a message naming the supported versions and never read under newer defaults, a migration is a registered function from one major to the next, and the Manifest records the original version and hash. v3 accumulated three configuration formats and a chain of converters; v4 states the policy before the first schema exists.
 
-ExperimentSpec, BindingProfile and Manifest carry a mandatory `version`. The Kernel either **migrates** a document from the previous major version or **refuses** it with a message naming the version. It never silently interprets an old document with new defaults. v3 accumulated three configuration formats and a chain of converters; v4 states the policy before the first schema exists.
-
-The concrete serialisation technology is not fixed by this Vision.
+Normative: [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-9, SB-10, SB-21, SB-47…SB-49; schema technology in [plan/phase1/00-overview.md](../../plan/phase1/00-overview.md) X2 and OV-10…OV-17.
 
 ---
 
@@ -245,49 +214,11 @@ The concrete serialisation technology is not fixed by this Vision.
 
 The Core composes Module plan fragments.
 
-```text
-ExperimentSpec
-      ↓
- Core Compiler
-      ↓
-ExecutionPlan
-      │
-      ├── RadioPlanFragment
-      ├── ProcessingPlanFragment
-      ├── HostIOPlanFragment
-      ├── PeripheralPlanFragment
-      └── DataLinkPlanFragments
-```
+The ExecutionPlan is a set of fragments, one per role slot: a Provider fragment per bound resource, one per Island, one per bound output's Sink, and the Authority's when it stands alone; the Kernel builds a Provider fragment's content from the selector and the matched request and reads no other content, so no fragment type names a resource model. Each fragment carries its dependency edges. The Core drives `prepare → arm → start → running → stop → cleanup` as one transaction: `prepare` and `arm` run in dependency order (the device that sources PPS before the devices that consume it), any fragment's failure fails the whole Run, and cleanup runs in reverse order. `prepare` returns one PrepareReport per fragment — effective configuration, coercions, warnings — plus the merged effective configuration that `run.effective()` exposes to Python and Reactors. Each coercion is judged by its key's policy, `accept`, `warn` or `reject`: the Spec's `policies.coercion` first, then `warn` for a Session, then the Vocabulary's declared default, which the Radio Model is to set to `reject` for sample rate and frequency and `warn` for gain, because a publication Run must not silently change its waveform timing.
 
-The Core coordinates:
+Normative: [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-22b, SB-24, SB-39, SB-41, SB-42, SB-44…SB-46 (the fragments: table SB-T1); [design/04-run-and-session.md](../04-run-and-session.md), rules RS-2, RS-3, RS-6; [design/05-module-api.md](../05-module-api.md), MA-7.
 
-```text
-prepare
-   ↓
-arm
-   ↓
-start
-   ↓
-running
-   ↓
-stop
-   ↓
-cleanup
-```
-
-Plan fragments carry dependency edges. The Core executes prepare and arm in dependency order (for example, the device that sources PPS before the devices that consume it) and fails the transaction as a whole if any fragment fails.
-
-`prepare` returns a **PrepareReport** for every fragment:
-
-```text
-PrepareReport
-├── effective        the configuration actually applied
-├── coercions        [{ key, requested, applied, reason }]
-├── warnings
-└── constraints_hit
-```
-
-The Kernel applies the coercion policy — `accept`, `warn` or `reject`, settable per key in the Spec's `policies` — to that report, records it in the Manifest, and exposes it as `run.effective()` to Python and Reactors. Defaults differ by Run kind: a Session warns; a Spec Run rejects coercions of sample rate and frequency and warns on gain, because a publication Run must not silently change its waveform timing. A Spec that asks for 19.5 Msps on a device whose grid gives 20 Msps sees the coercion before RUN, not in a plot afterwards. MockRadio produces the same report from the same coercion rules as the profile it emulates (§13).
+A Spec that asks for 19.5 Msps on a device whose grid gives 20 Msps sees the coercion before RUN, not in a plot afterwards. MockRadio produces the same report from the same coercion rules as the profile it emulates (§13).
 
 It should not repeatedly dispatch every sample block through a generic Core layer.
 

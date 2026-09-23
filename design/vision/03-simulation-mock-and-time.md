@@ -93,30 +93,9 @@ The first MockRadio implementation must enforce the envelope. It is a few timest
 
 Every Run must record what kind of evidence it represents.
 
-At minimum:
+The ExecutionClass is one of Simulation, RealtimeEmulation, HardwareInLoop and Hardware. It is derived at binding resolution from two axes — whether the Time Authority is the Simulation Engine (free-running or wall-paced) or a device timekeeper (§15), and whether the RF path is simulated, cabled or over the air — and cross-checked against any `ezsdr.time` class the environment declares; a simulated Authority on a real RF path is refused. The class never changes during a Run. Determinism is a property of the Simulation class only, and only with a recorded seed: RealtimeEmulation trades it for real deadlines, and HardwareInLoop and Hardware are never deterministic. A single label cannot express "timing is modelled, RF is not", so every Run records a **fidelity vector** over five aspects — timing (lead times, start-up, stop tail, queue depth), continuity (overflow gaps, restarts, sequence errors), coercion (rate, gain and frequency grids), rf (SimulationChannel models, §16) and transport (packetisation, NIC behaviour) — each the weakest value any bound Provider declares, with `real` at the top of every aspect so that a Hardware Run has something to record.
 
-```text
-ExecutionClass
-├── Simulation
-├── RealtimeEmulation
-├── HardwareInLoop
-└── Hardware
-```
-
-An ExecutionClass is defined along two axes: which Time Authority drives the Run (a device timekeeper, or the discrete-event Simulation Engine; §15), and what the RF path is (over-the-air, cabled, or simulated). HardwareInLoop is a device timekeeper with a cabled or partially simulated RF path.
-
-Determinism is a property of the **Simulation** class only. RealtimeEmulation trades it for real deadlines: the Simulation Engine paces the environment models to wall clock while Islands run on threads, so event order is not reproducible and deadline misses are real. HardwareInLoop and Hardware are never deterministic.
-
-A single fidelity label cannot express "timing is modelled, RF is not". Every Run therefore records a **fidelity vector**, one entry per aspect:
-
-```text
-Fidelity vector
-├── timing        none | envelope | hardware_quirk     lead times, start-up, stop tail, queue depth
-├── continuity    none | envelope | hardware_quirk     overflow gaps, restart, sequence errors
-├── coercion      none | grid                          rate / gain / frequency grids
-├── rf            none | impairment_model              SimulationChannel models (§16)
-└── transport     none | model                         packetisation, NIC behaviour
-```
+Normative: [design/05-module-api.md](../05-module-api.md), rules MA-41, MA-42; [design/04-run-and-session.md](../04-run-and-session.md), rules RS-41, RS-42.
 
 Promotion readiness is judged per aspect. A Simulation Run with `rf: none` says nothing about RF behaviour, however many events it passed.
 
@@ -136,7 +115,7 @@ The Core should define abstractions such as:
 ClockDomain
 TimePoint
 Duration
-Deadline
+RelativeBudget / AbsoluteDeadline
 ClockRelation
 ```
 
@@ -160,40 +139,21 @@ Real-time emulation may bind virtual time approximately 1:1 to wall time.
 
 ## Representation
 
-Time is integer ticks, never floating-point seconds:
+Time is integer ticks, never floating-point seconds. A TimePoint is a ClockDomain id plus a signed 64-bit tick count, a Duration names its domain, and every rate is an exact reduced rational. A domain is a Root — one per timekeeper, with an epoch; `utc` and `host.monotonic` are reserved — or a Derived domain naming its root directly, with an exact ratio and an origin. Every stream's **SampleClock** is a Derived domain, so a tick is a sample index. Two domains with one root convert exactly, or report an inexact floor with its remainder; domains with different roots convert only through a ClockRelation, with uncertainty. There is no other path, and TimePoints of different domains do not compare. A sample-rate change is a `cold` update (§27) that ends the SampleClock and allocates a new one, so a consumer detects the change from the block's own domain id. The Manifest records every stream's SampleClock sequence and a relation from the Run's root to UTC with its uncertainty; without it, correlation with cameras, positioners or other hosts (§24, §47) is impossible.
 
-```text
-ClockDomain { id, tick_rate: Rational { num, den }, epoch: EpochRef }
-TimePoint   { domain: ClockDomainId, ticks: signed 64-bit integer }
-Duration    { ticks: signed 64-bit integer, in a named domain }
-```
-
-Each stream has a **SampleClock**: a ClockDomain derived from its device clock by an exact rational (for example 200 MHz / 10). Conversions between domains related by exact rationals are exact. Conversions between unrelated domains go through a `ClockRelation` and yield a value with uncertainty. There is no other path.
-
-A sample-rate change is a `cold` update (§27) that **ends the stream's SampleClock and starts a new ClockDomain** with a new id, related to the device clock by the new rational. Blocks carry their domain id, so a consumer detects the change from the block itself; TimePoints of different SampleClocks are never compared directly. The Manifest records the sequence of SampleClocks of every stream with their start times.
-
-The epoch of a device ClockDomain is arbitrary; it is set at PPS synchronisation. Every Run records the relation `epoch ↔ UTC` with its uncertainty in the Manifest. Without it, correlation with cameras, positioners or other hosts (§24, §47) is impossible.
+Normative: [design/01-time-model.md](../01-time-model.md), rules TM-1…TM-12, TM-13a, TM-13b, TM-13c, TM-13d, TM-13e, TM-18, TM-19.
 
 ## Time Authority
 
-Something must be the authority on "now" and on "wait until". In a hardware Run it is the device timekeeper, related to the host monotonic clock. In a Simulation Run it is the **discrete-event Simulation Engine**, which advances virtual time and delivers every waiting party its wake-up in order: Reactor timers, Processor deadlines, Peripheral latency models, SimulationChannel delays, and client waits.
+Something must be the authority on "now" and on "wait until". One Time Authority per Run answers `now`, `wait_until` and `schedule` for the domains it declares: a primary root, that root's derived domains, `host.monotonic`, and, for the Simulation Engine, every root it simulates. In a Hardware or HIL Run it is the device timekeeper, which publishes a relation to host monotonic. In a Simulation Run it is the **discrete-event Simulation Engine**, which advances virtual time — `host.monotonic` included — and delivers every waiting party its wake-up in order: Reactor timers, Processor deadlines, Peripheral latency models, SimulationChannel delays and client waits. In RealtimeEmulation the same Engine reads the real host clock and paces to it. `schedule` takes a callback at an instant of a governed domain that is at or after `now` and is a tick of that domain's root; callbacks fire in time order, ties in insertion order.
 
-```text
-TimeAuthority
-├── now(domain)              -> TimePoint
-├── wait_until(TimePoint)
-└── schedule(TimePoint, Action)
-
-Hardware / HIL run:     device timekeeper (+ ClockRelation to host monotonic)
-Simulation run:         discrete-event Simulation Engine, runs faster than wall clock
-RealtimeEmulation run:  the same engine, paced to wall clock
-```
+Normative: [design/01-time-model.md](../01-time-model.md), rules TM-16a…TM-17b; [design/05-module-api.md](../05-module-api.md), MA-29.
 
 Three consequences:
 
 - The Simulation Environment (§13) *is* a discrete-event engine, the **Simulation Engine**. MockRadio, SimulationChannel, MockPeripheral and FaultInjector are models scheduled on it. Determinism with a seed follows from delivering events in virtual-time order, not from threads happening to agree.
 - **No client API waits on wall-clock time for something that happens in runtime time.** Python has `run.wait_until(t)` and `run.wait_for(event)`; it does not have a device-time `sleep`. A `time.sleep(0.5)` in a script means nothing in a Run that simulates ten seconds in 0.3 seconds.
-- Executors implement `step(until: TimePoint)`. In the Simulation class the Simulation Engine step-drives every Island on one logical thread (or behind a deterministic barrier) and drop policies are decided in virtual time; RealtimeEmulation, HIL and Hardware run Islands on real threads (§32).
+- Every stepped instance implements `step(until: TimePoint)`. The Kernel coordinator runs the stepping loop in a fixed order on one logical thread, and the Authority decides the instants; RealtimeEmulation, HIL and Hardware run Islands on real threads (§32; [design/05-module-api.md](../05-module-api.md), MA-20, MA-30).
 
 ---
 

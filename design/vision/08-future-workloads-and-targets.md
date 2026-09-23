@@ -256,14 +256,11 @@ The architecture should avoid decisions that make future multi-host execution im
 
 What v4.0 does about it is small and concrete: every identifier that could later cross a host boundary is **node-qualified**.
 
-```text
-ResourceId      { node: NodeId, local }
-ClockDomainId   { node, local }
-MemoryDomainId  { node, local }
-IslandId        { node, local }
-```
+`ClockDomainId`, `MemoryDomainId`, `IslandId` and `DataLinkId` are `{ node, local }`, and `ResourceId` is `{ node, path }`, because a resource is a composite tree whose channels, GPIO banks and timekeeper must each be addressable (§8). In v4.0 `node` is always the local node, and any document or value naming another node is refused.
 
-In v4.0 `node` is always the local node. A future NetworkLink is one more DataLink implementation; a future remote Provider is one more Module. Neither requires a ComputeNode scheduler, and Ez-SDR will not grow one. Cross-site coherence is a ClockRelation with uncertainty: sub-nanosecond distribution such as White Rabbit exists, but it is a physical fact the Core records, not one it manufactures.
+Normative: [plan/phase1/00-overview.md](../../plan/phase1/00-overview.md), X7; [design/01-time-model.md](../01-time-model.md), TM-11; [design/02-stream-contract.md](../02-stream-contract.md), SC-6; [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-1, SB-3.
+
+A future NetworkLink is one more DataLink implementation; a future remote Provider is one more Module. Neither requires a ComputeNode scheduler, and Ez-SDR will not grow one. Cross-site coherence is a ClockRelation with uncertainty: sub-nanosecond distribution such as White Rabbit exists, but it is a physical fact the Core records, not one it manufactures.
 
 ---
 

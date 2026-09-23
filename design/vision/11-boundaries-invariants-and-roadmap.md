@@ -63,7 +63,7 @@ Ez-SDR v4 is not intended to become:
 - a way to place arbitrary user Processors on RFNoC/FPGA,
 - a Probe concept in the Kernel (a Probe is a lossy DataLink plus a Recorder Sink, §30),
 - a `Taint` type in the Kernel (flag propagation is an Executor default and a Processor convention, §28),
-- a metrics framework in the Kernel (counters and sampled events, exported by Sinks, §29),
+- a metrics framework in the Kernel (counters and delivered events, exported by Sinks, §29),
 - a sensor-data platform (external sensor data is referenced, never ingested, §47),
 - a "Distributed" Module category or a ComputeNode scheduler (§49, §60),
 - a Core that assembles a CoherentGroup across Providers (§25).

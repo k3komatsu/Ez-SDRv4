@@ -28,8 +28,8 @@ use crate::time::{AbsoluteDeadline, TimePoint};
 ///
 /// Only the lifecycle verbs are the Kernel's; a domain verb is
 /// [`SessionAction::Vocabulary`], and the Vocabulary that registers the verb
-/// declares how it compiles. Vision §3's log sketch names `StartRepeat` and
-/// `Capture` directly; here they are `radio.start_repeat` and `sink.capture`,
+/// declares how it compiles. The Vision's §3 log sketch named `StartRepeat` and
+/// `Capture` directly before Step 5; here they are `radio.start_repeat` and `sink.capture`,
 /// because a Kernel that enumerated them would need a new variant for the first
 /// peripheral sweep or calibration verb.
 ///

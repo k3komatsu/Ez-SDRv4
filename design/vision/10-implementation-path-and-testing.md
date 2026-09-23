@@ -68,7 +68,7 @@ Before UHD is implemented, the Core + Mock system should prove:
 12. **Block-size independence.** A Processor keeps working when the Mock's block-length jitter option is enabled (§23).
 13. **Sessions leave provenance.** Using only the Easy API produces a Manifest with the action log, waveform hash and effective configuration (§3).
 14. **Environment portability.** Re-running with the same Spec and a BindingProfile that differs only in `environment` (channel model, fault schedule) is possible without editing the Spec (§8).
-15. **TX bursts are closed and contiguous.** An unclosed burst followed by a timed block yields the same `TIME_ERROR` on Mock and hardware; a `repeat` burst does not underflow at the wrap; a time jump inside a burst is a `TX_DISCONTINUITY` event, never zero padding (§23).
+15. **TX bursts are closed and contiguous.** The Stream Contract path never hands a device an unclosed burst followed by a timed block: its burst tracker closes the open burst, reports `TX_DISCONTINUITY` and starts a new one (§23). A Provider that bypasses it gets the same `TIME_ERROR` from Mock's device model as from hardware; a `repeat` burst does not underflow at the wrap; a time jump inside a burst is a `TX_DISCONTINUITY` event, never zero padding (§23).
 16. **Session Actions are admitted.** A runtime frequency change outside the RF envelope, or a rate outside the profile's PerformanceEnvelope, is rejected and logged as rejected, on Mock and hardware alike (§3, §13, §52).
 
 A useful minimal reactive test is:

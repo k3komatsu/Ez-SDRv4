@@ -4,7 +4,7 @@
 unless the Carrier column names a different file. The working tree on `19833ab` with D95–D103 applied, `cargo test -p ezsdr-kernel` clean:
 `module_api.rs` 26/26, `spec_binding.rs` 94/94, `run_session.rs` 70/70, `kernel_surface.rs` 14/14,
 `schema_freeze.rs` 4/4. All test names this document's
-own §7 table cites (`plan/phase1/05-module-api.md`) exist as real `#[test] fn`s at this HEAD, including
+own §7 table cites (`design/05-module-api.md`) exist as real `#[test] fn`s at this HEAD, including
 `ma_42_fidelity_is_the_weakest`, confirming the 2026-09-22 fix landed.
 
 | Rule | Disposition | Carrier | What the carrier asserts |

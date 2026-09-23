@@ -12,11 +12,11 @@
 //! | Prefix | Spec |
 //! |---|---|
 //! | `OV-n` | `plan/phase1/00-overview.md` — governance, crate layout, schemas, hashing |
-//! | `TM-n` | `01-time-model.md` — [`time`] |
-//! | `SC-n` | `02-stream-contract.md` — [`stream`], [`contract`] |
-//! | `SB-n` | `03-spec-and-binding.md` — [`spec`], [`binding`], [`plan`] |
-//! | `RS-n` | `04-run-and-session.md` — [`event`], [`policy`], [`run`], [`session`], [`manifest`] |
-//! | `MA-n` | `05-module-api.md` — [`module_api`] |
+//! | `TM-n` | `design/01-time-model.md` — [`time`] |
+//! | `SC-n` | `design/02-stream-contract.md` — [`stream`], [`contract`] |
+//! | `SB-n` | `design/03-spec-and-binding.md` — [`spec`], [`binding`], [`plan`] |
+//! | `RS-n` | `design/04-run-and-session.md` — [`event`], [`policy`], [`run`], [`session`], [`manifest`] |
+//! | `MA-n` | `design/05-module-api.md` — [`module_api`] |
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

@@ -208,8 +208,8 @@ pub struct PrepareSection {
 /// envelope; each Module writes its own section; no Provider-specific field ever
 /// requires a Kernel change.
 ///
-/// Vision §50 lists "random seeds" and an optional environment capture among the
-/// envelope's contents; neither is an envelope field here. The Kernel owns no
+/// The Vision's §50 listed "random seeds" and an optional environment capture among
+/// the envelope's contents before Step 5; neither is an envelope field here. The Kernel owns no
 /// random number generator, so a seed is something the environment declared, and
 /// the environment is already recorded verbatim under `binding.body`; the
 /// environment capture has no Kernel-defined content at all, so it belongs under

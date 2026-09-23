@@ -55,7 +55,7 @@ hardware_timed
 
 Experiment validation must not pretend that a best-effort USB command is sample-accurate.
 
-The class is a property of a **Provider instance on a specific device**, not of a Provider kind. It is returned as a capability at `prepare` time, and `validate()` uses that declaration. The same "USRP GPIO" provider is `hardware_timed` on an X3x0, whose GPIO bank sits behind the radio's timed command interface, and is not on an X4x0, where only ATR is hardware-controlled. MockPeripheral declares a class too; when it declares `best_effort_control` it emulates a latency distribution rather than acting instantly.
+The class is a property of a **Provider instance on a specific device**, not of a Provider kind. It is known when the instance is created and appears among the instance's declared capabilities, so `validate()` can match it; `prepare` may only narrow it ([design/05-module-api.md](../05-module-api.md), MA-17, MA-12). The same "USRP GPIO" provider is `hardware_timed` on an X3x0, whose GPIO bank sits behind the radio's timed command interface, and is not on an X4x0, where only ATR is hardware-controlled. MockPeripheral declares a class too; when it declares `best_effort_control` it emulates a latency distribution rather than acting instantly.
 
 ---
 

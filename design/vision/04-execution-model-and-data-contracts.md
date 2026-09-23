@@ -85,17 +85,7 @@ Examples:
 - IBFD control logic,
 - smart-antenna controller.
 
-Typical actions may include:
-
-```text
-TxBurst
-SetTimer
-UpdateParameter
-PeripheralCommand
-Emit
-Stop
-Abort
-```
+A Reactor's actions are the closed Kernel Action set — `TxBurst`, `SetTimer`, `UpdateParameter`, `PeripheralCommand`, `Emit`, `Stop`, `Abort` — and adding one is a Kernel major ([design/04-run-and-session.md](../04-run-and-session.md), rules RS-48…RS-52).
 
 The Core defines these concepts.
 
@@ -105,14 +95,7 @@ Concrete execution engines remain Modules.
 
 The Kernel owns the **descriptor** of a component and the **vocabulary** it speaks, not the way it is called:
 
-```text
-ComponentDescriptor
-├── kind            Processor | Reactor
-├── ports           [(name, direction, DataContractId)]         (§21)
-├── params          schema, each with an update class            (§27)
-├── timing          budget, preferred batch, stateful, parallelism
-└── impl            identity / hash of the implementation
-```
+A ComponentDescriptor declares its kind (Processor or Reactor), its ports (§21), its params each with an update class (§27), its timing (budget, preferred batch, statefulness, parallelism), its requirements — never a placement — and the identity and hash of its implementation ([design/05-module-api.md](../05-module-api.md) §4, rules MA-36, MA-37).
 
 The execution ABI — how a native, WASM or GPU component is invoked, how buffers are handed to it — belongs to each Executor (§20). Executors interoperate through DataLinks carrying `SampleBlock`s and through Event/Action queues, never through a shared call signature. This keeps the Kernel out of the block-API business that GNU Radio carries in its core and lets a GPU batch executor and a WASM block executor coexist without a lowest common denominator.
 
@@ -122,12 +105,9 @@ A Reactor that receives a decoded packet and schedules a TxBurst forms a cycle t
 
 ## Two kinds of deadline
 
-```text
-RelativeBudget   { duration }     a Processor's processing time per block, measured from block arrival
-AbsoluteDeadline { time_point }   a TxBurst or PeripheralCommand target in a device ClockDomain
-```
+There are two kinds of deadline, and they are distinct types. A RelativeBudget is a processing time per block, measured from block arrival; it is always in `host.monotonic`, because a static descriptor cannot name a domain created at `prepare`, and a missed one is the Kernel event `PROCESSOR_DEADLINE_MISS`, handled by the Policy table. An AbsoluteDeadline is a TxBurst or PeripheralCommand target in a device ClockDomain — for a TxBurst, the transmit stream's SampleClock — and a missed one follows the burst's late policy (§22). Admission compares budgets with block periods exactly across domains; envelope checks compare absolute deadlines.
 
-They are different types. A missed RelativeBudget is a typed event with a policy; a missed AbsoluteDeadline follows the burst's late policy (§22). Admission checks use budgets; envelope checks use absolute deadlines.
+Normative: [design/01-time-model.md](../01-time-model.md), rules TM-15, TM-21; [design/04-run-and-session.md](../04-run-and-session.md), rules RS-27, RS-49, RS-51; [design/02-stream-contract.md](../02-stream-contract.md), SC-23.
 
 Multi-rate behaviour (a decimator producing fewer samples than it consumes) is the Executor's concern inside an Island; the Kernel only uses declared port rates for validation.
 
@@ -171,17 +151,11 @@ The graph model must not assume every edge carries raw IQ.
 
 Ports do not carry a closed enum of data kinds. A Port names a **DataContract**, and DataContracts live in an **open registry**:
 
-```text
-Port          { name, direction, contract: DataContractId }
-DataContract  { id, attributes, compatibility rules }
+A Port is a name, a direction and a DataContract id, and nothing more. DataContracts live in an open registry under namespaced ids, each with fixed attributes and a declared `compatible_from` set, and the Kernel's only contract check is directional: a link is admissible when the producer's contract equals the consumer's or is in its `compatible_from`. The contracts available at v4.0 belong to the contracts Vocabulary — `ezsdr.stream.cf32` and `ezsdr.stream.sc16`, planar, each with its full-scale convention; `ezsdr.control`; `ezsdr.event.<schema-id>` — and `pdu.*` and `tensor.*` contracts are added later without changing Port. The host-to-device wire format is never a Port contract.
 
-registered at v4.0:      ezsdr.stream.cf32 { full_scale: 1.0 }, ezsdr.stream.sc16, ...
-                         ezsdr.event.<schema-id>, ezsdr.control
-registered later,        ezsdr.pdu.bytes { max_len }, ezsdr.pdu.ethernet
-without changing Port:   ezsdr.tensor.cf32 { shape: [...] }, ezsdr.annotation.timed
-```
+Normative: [design/02-stream-contract.md](../02-stream-contract.md), rules SC-1…SC-5.
 
-The Kernel checks two things only: that connected contracts have the same identity, or that a declared compatibility (an explicit conversion) exists. Tensor shape algebra, PDU framing rules and similar checks belong to the Executor or to a validation plugin of the Vocabulary that defines the contract. The Kernel does not become a type system.
+Tensor shape algebra, PDU framing rules and similar checks belong to the Executor or to a validation plugin of the Vocabulary that defines the contract. The Kernel does not become a type system.
 
 Contracts that must be expressible without changing the Port model:
 
@@ -246,18 +220,7 @@ repeat
 
 A Processor or Reactor must be able to generate a burst dynamically during RUN.
 
-Conceptually:
-
-```text
-TxBurst
-├── data / waveform reference
-├── format
-├── channel(s)
-├── repeat (optional)
-├── target TimePoint       an AbsoluteDeadline in the radio's ClockDomain (§19)
-├── metadata
-└── late_policy            (below)
-```
+A TxBurst is a Kernel Action carrying a waveform by reference, a `repeat` attribute, a target `at`, the originally requested target, a late policy and namespaced metadata; a Radio Model's channel mapping travels in that metadata, not in a Kernel field, and where the sample format is stated is the Radio Model's to decide (Phase 2).
 
 This is essential for:
 
@@ -267,21 +230,13 @@ This is essential for:
 - reactive protocols,
 - closed-loop experiments.
 
-A TxBurst names a target TimePoint in the radio's ClockDomain. Two rules make it portable between Mock and hardware:
+The target is an AbsoluteDeadline in the transmit stream's SampleClock: a target in another exactly related domain is converted, advanced to the next sample instant only when the conversion is inexact, with both times kept, and one in an unrelated domain is refused. Every burst carries a **late policy** — `reject_at_plan`, `send_asap_and_flag` or `drop_and_flag` — decided against the bound Provider's `min_timed_command_lead` (§13), declared in `host.monotonic` and compared exactly; `reject_at_plan` is legal only for a statically known target. When the lead is statically known (scheduled actions), `validate()` is to check it at plan time; no Phase 1 rule does yet, because the TimingEnvelope is opaque until the Radio Model (Phase 2). When it is decided at run time (Reactor responses), the Provider enforces it and emits a typed event of the Radio Model's, while the lateness itself is recorded on the burst's record. `LATE` is a block flag (§23), not the name of this event.
 
-- The target must satisfy the bound Provider's `min_timed_command_lead` (§13). When the lead is statically known (scheduled actions), `validate()` checks it at plan time; when it is decided at run time (Reactor responses), the Provider enforces it and emits a typed event.
-- Every burst carries a **late policy**:
-
-```text
-LatePolicy
-├── reject_at_plan          fail validation if the lead cannot be met
-├── send_asap_and_flag      transmit at the earliest possible time, emit LATE, flag the burst
-└── drop_and_flag           do not transmit, emit LATE
-```
+Normative: [design/04-run-and-session.md](../04-run-and-session.md), rules RS-49, RS-51; [design/02-stream-contract.md](../02-stream-contract.md), rules SC-23, SC-23a, SC-23b, SC-26…SC-29a; [design/05-module-api.md](../05-module-api.md), MA-14.
 
 MockRadio applies the same policy with the same envelope, so a Reactor that is too slow for the hardware fails in simulation.
 
-A TxBurst is **one burst** of the TX stream (§23): its blocks carry `START_OF_BURST` on the first and `END_OF_BURST` on the last, and `repeat` is an attribute of the burst, not a stream of re-sent blocks.
+A TxBurst is **one burst** of the TX stream (§23), and `repeat` is an attribute of the burst, not a stream of re-sent blocks.
 
 ---
 
@@ -307,50 +262,42 @@ A packet detected at sample offset `k` must retain a precise relationship to dev
 
 Every Radio, Processing, Host-I/O and Simulation contract exchanges sample data as `SampleBlock`s. The contract is normative: it says what a producer guarantees and what it is forbidden to do. v3 had no such contract; its UHD bridge discarded the receive error code and the receive timestamp, so overflows produced silently gapped, untimed arrays.
 
-```text
-SampleBlock
-├── first_sample_time   TimePoint in the stream's SampleClock
-├── len                 samples per channel in this block
-├── channels            N aligned channels (one stream, one timestamp)
-├── valid               per-channel validity (mask or range list)
-├── flags               GAP_BEFORE { lost: optional count }
-│                       SEQ_DISCONTINUITY
-│                       RESTARTED
-│                       LATE
-│                       PARTIAL_CHANNELS
-│                       START_OF_BURST / END_OF_BURST   (TX side, below)
-├── contract            DataContract id (sample format, full-scale convention)
-└── buffer              BufferRef { memory_domain, handle, len }
-```
+A SampleBlock is an immutable, reference-counted header plus a buffer handle. The header holds the first sample's TimePoint in the stream's SampleClock, a length, a channel count, a per-channel validity mask, a direction, fixed-position flags — `GAP_BEFORE` with an optional lost count, `SEQ_DISCONTINUITY`, `RESTARTED`, `LATE`, `PARTIAL_CHANNELS`, `ALIGNMENT`, `START_OF_BURST`, `END_OF_BURST` — and the DataContract id; the block's constructor refuses an inconsistent header. The handle is a BufferRef naming a memory domain, whose kinds (host, pinned, GPU, …) are Vocabulary content: the Kernel compares domain identities and never dereferences a handle.
 
-Rules for producers and consumers:
+Normative: [design/02-stream-contract.md](../02-stream-contract.md), rules SC-6…SC-18 (blocks), SC-19…SC-22 (links), SC-23…SC-29a (transmit), SC-30…SC-32 (derivation).
 
-1. **Time is monotonic within a stream** (within one SampleClock; a sample-rate change starts a new SampleClock, §15). A gap is represented by a time jump plus `GAP_BEFORE`; the number of lost samples is given when known. **Gaps are never filled**, not with zeros, not with repeated data.
-2. **Validity is per channel.** A multi-channel alignment failure or a partial loss marks the affected channels, not the whole block.
-3. **Block length is not guaranteed.** Hardware delivers packet-sized blocks (about 2000 samples at 10 GbE with `sc16`); a Mock may deliver any length and *should* offer a length-jitter option so that Processors that assume a fixed block size fail in simulation.
-4. **The full-scale convention is part of the DataContract.** For `cf32`, ±1.0 is ADC/DAC full scale; MockRadio clips at the same level.
-5. **Blocks are immutable after publish, reference-counted, and allocated from the producing island's pool.** Fan-out (a Probe, a second consumer) shares the reference; it never copies. The real-time path performs no allocation.
-6. **Buffers are handles tagged with a MemoryDomain** (host, pinned host, GPU, WASM linear memory, device memory). No Module contract takes or returns raw host slices; an Executor that needs host memory asks the DataLink for it.
-7. **TX blocks carry the target TimePoint of their first sample, also in continuous mode.** The Provider enforces the lead (§13, §22). A tap on the TX edge therefore yields a timed reference for digital self-interference cancellation (§46) without any special API.
-8. **Every DataLink declares a back-pressure policy**: `block`, `drop_oldest` or `drop_newest`. Links feeding Probes and recorders are always drop-class, so observation can never stall the real-time path (§30).
+The numbered rules below are cited by number; each is now stated by the rules it names.
 
-An overflow on UHD hardware returns zero samples, distinguishes buffer overrun from host-side sequence error, and restarts a continuous stream about 50 ms later. Under this contract it appears as one block boundary with `GAP_BEFORE`, `RESTARTED` and a time jump of the restart gap, identically from a UHD Provider and from a MockRadio fault injection.
+| Rule | Headline | Normative |
+|---|---|---|
+| RX 1 | Time is monotonic within one SampleClock; a gap is a time jump plus `GAP_BEFORE`, never filled | SC-12, SC-13 |
+| RX 2 | Validity is per channel and constant within a block | SC-14, SC-31a |
+| RX 3 | Block length is not guaranteed | SC-15 |
+| RX 4 | The full-scale convention is a contract attribute | SC-4 |
+| RX 5 | Immutable, reference-counted, pool-allocated; fan-out shares the reference; no allocation on the real-time path | SC-9, SC-11, SC-22 |
+| RX 6 | Buffers are handles tagged with a memory domain; no raw host slices | SC-6…SC-8 |
+| RX 7 | Transmit blocks carry their first sample's target time, in continuous mode too | SC-23 |
+| RX 8 | Every link declares a policy and a capacity; `block` is back-pressure by refusal, not a parked thread; Sink links are drop-class | SC-19…SC-21 |
 
-The artifact-level `ContinuityMap` (§28) is derived from these flags; it is never assembled by hand. For SigMF export, gaps become capture segments with `core:sample_start` and `core:global_index`, and per-channel validity is carried in an `ezsdr` extension namespace, since no existing SigMF extension covers validity.
+A Mock may deliver any block length and should offer a length-jitter option, so that a Processor assuming a fixed block size fails in simulation, and MockRadio clips at the contract's full scale (Phase 2 Mock obligations).
+
+An overflow on UHD hardware returns zero samples, distinguishes buffer overrun from host-side sequence error, and restarts a continuous stream about 50 ms later; under this contract it appears as one block boundary with `GAP_BEFORE`, `RESTARTED` and the restart gap as its time jump, identically from a UHD Provider and from a MockRadio fault injection (SC-18).
+
+The artifact-level `ContinuityMap` (§28) and a SigMF export are derived from these headers and never assembled by hand (SC-30…SC-32).
 
 ## The TX side
 
 A TX stream is a **sequence of bursts**. A burst is a run of blocks whose times are contiguous in the stream's SampleClock; the first block carries `START_OF_BURST`, the last carries `END_OF_BURST`. UHD requires exactly this: every start of burst needs a time specification (the device resets its CORDICs on it), and a burst must be closed with an end-of-burst flag, otherwise the next timed packet is a `TIME_ERROR`.
 
-Rules:
+| Rule | Headline | Normative |
+|---|---|---|
+| TX 1 | Time is contiguous within a burst; a jump closes the burst, is reported as `TX_DISCONTINUITY` and opens a new one, never padded | SC-24, SC-24a |
+| TX 2 | A TxBurst is one burst | SC-23, SC-24 |
+| TX 3 | Continuous TX is one burst; an underflow is `TX_UNDERFLOW`, and no samples are fabricated | SC-25 |
+| TX 4 | `repeat` is a burst attribute, contiguous across the wrap | SC-26 |
+| TX 5 | What was transmitted is recorded | SC-28, SC-29, SC-29a |
 
-1. **Within a burst, time is contiguous.** A block whose time does not follow the previous block's end, without an intervening `END_OF_BURST`, is a `TX_DISCONTINUITY`: the Provider closes the burst, emits the typed event, and treats the block as the start of a new burst under that burst's late policy (§22). It never pads the gap with zeros.
-2. **A TxBurst (§22) is one burst.** Its target TimePoint is the time of its first block; its blocks arrive with `START_OF_BURST` on the first and `END_OF_BURST` on the last. A dynamically generated response is one or more bursts, never a "gap in a continuous stream".
-3. **Continuous TX is one long burst** that ends with the Run's stop or an explicit `END_OF_BURST`. Underflow (the host did not deliver the next block in time) is a typed `TX_UNDERFLOW` event carrying the time at which it occurred; the Provider does not fabricate samples, and what the hardware radiated during the gap (silence or a device-specific hold) is recorded in the Provider's Manifest section.
-4. **`repeat` is a burst attribute**, not a stream of re-sent blocks. A burst marked `repeat` is transmitted cyclically until stopped; the Provider implements it with a host loop or with device memory (Replay), and the capability carries the implementation's constraints (maximum length, word alignment; §20, §35). A host-loop implementation must not underflow at the wrap, which is a v3 behavioural compatibility test (§61).
-5. **What was transmitted is recorded.** For every burst the Manifest records the target time, the actual start time where the Provider can know it (burst acknowledgement), and any `LATE`, `TX_UNDERFLOW` or `TX_DISCONTINUITY` events. A tap on the TX edge (§46) sees blocks with these flags and times.
-
-MockRadio applies the same rules: on an `x310-like` profile an unclosed burst followed by a timed block is a `TIME_ERROR`, exactly as on the hardware.
+The Kernel's burst tracker never lets a device see an unclosed burst followed by a timed block; MockRadio's device model still raises `TIME_ERROR` for a Provider that bypasses it, exactly as the hardware does.
 
 ---
 
@@ -370,19 +317,9 @@ distributed host clocks
 virtual simulation clock
 ```
 
-The system should be able to represent relationships such as:
+A ClockRelation records a measured relation from a source clock to a target clock: `measured_at` in the source, `offset` as that instant's image in the target, a `drift` with a bound on the drift's own error, an uncertainty valid at `measured_at`, a namespaced measurement method, and a validity interval. Converting through it yields a nominal time plus an uncertainty that grows with the time elapsed since `measured_at`, because drift is itself a measurement. The Kernel never chains relations: a caller that needs source → A → target measures or composes that relation explicitly.
 
-```text
-ClockRelation
-├── source clock
-├── target clock
-├── offset
-├── drift
-├── uncertainty
-├── measurement method
-├── measured_at
-└── validity interval
-```
+Normative: [design/01-time-model.md](../01-time-model.md), rules TM-5, TM-14, TM-18 (the shape: §4, `ClockRelation`).
 
 This is important for:
 

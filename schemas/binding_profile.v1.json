@@ -37,7 +37,7 @@
         },
         "module": {
           "$ref": "#/$defs/ModuleRef",
-          "description": "The Module bound here: a Provider for a Spec resource, a Sink for an output\nid, an Executor for an Island's `executor` name, and the Authority for the name\n`authority` gives (SB-22b). Named `module` rather than `provider` because every\nrole is bound through this one map; Vision\n§8's illustrative YAML still writes `provider`, which 03 §9 records as a\nVision departure for §12. It names the exact `{id, version}`, as\n`LinkPlacement` does, and every bound instance declares the same `ModuleRef`\n(a Provider's `instance()`, a Sink's `descriptor()`, an Executor's or the\nAuthority's supplied descriptor), which admission compares, so one profile hash\ncannot run two Module versions (SB-22f, D78, D82, D98)."
+          "description": "The Module bound here: a Provider for a Spec resource, a Sink for an output\nid, an Executor for an Island's `executor` name, and the Authority for the name\n`authority` gives (SB-22b). Named `module` rather than `provider` because every\nrole is bound through this one map; the Vision's §8 examples wrote `provider`\nuntil Step 5 corrected them (03 §9). It names the exact `{id, version}`, as\n`LinkPlacement` does, and every bound instance declares the same `ModuleRef`\n(a Provider's `instance()`, a Sink's `descriptor()`, an Executor's or the\nAuthority's supplied descriptor), which admission compares, so one profile hash\ncannot run two Module versions (SB-22f, D78, D82, D98)."
         },
         "profile": {
           "anyOf": [

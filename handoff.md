@@ -27,10 +27,10 @@
 
 ## 2. 設計文書の状態 — Phase 0 完了
 
-- 単一の設計ソース = **Vision**：索引 [Ez-SDR_v4_ARCHITECTURE_VISION.md](Ez-SDR_v4_ARCHITECTURE_VISION.md) + [design/vision/](design/vision/) の 11 part（§1–§68，番号は不変）．
+- 単一の設計ソース = **Vision**：索引 [Ez-SDR_v4_ARCHITECTURE_VISION.md](Ez-SDR_v4_ARCHITECTURE_VISION.md) + [design/vision/](design/vision) の 11 part（§1–§68，番号は不変）．
 - [design/v4-vision-audit.md](design/v4-vision-audit.md)（Findings 1–34，判定 READY WITH REQUIRED CHANGES）→ 全項目を Vision に反映済み．
 - [design/v4-vision-rereview.md](design/v4-vision-rereview.md)（Findings R1–R22，判定 READY）→ 全項目反映済み．R13「規範部分の spec 化」だけは 11 ファイル分割で暫定対応し，**本対応は Phase 1 の作業**として繰り延べ．
-- 旧 CMA は退役．[design/archive/](design/archive/) に保管（audit / rereview の `CMA §N` 引用のためだけに残す）．編集しない．
+- 旧 CMA は退役．[design/archive/](design/archive) に保管（audit / rereview の `CMA §N` 引用のためだけに残す）．編集しない．
 - Vision の改訂履歴は索引ファイル末尾の表（7 pass，すべて 2026-09-21）．
 
 ## 3. 実装の状態
@@ -52,16 +52,16 @@ Python client，wire protocol，MockRadio，Simulation Engine は未着手（Pha
 
 ## 4. Phase 1 の状態 — spec 受理待ち（binding / role の規範を固め直し済み）
 
-Vision §67 の Phase 1．詳細設計は [plan/phase1/](plan/phase1/)．計画本体と横断決定は [plan/phase1/00-overview.md](plan/phase1/00-overview.md)．
+Vision §67 の Phase 1．**受理済み**（2026-09-23，Step 5 完了）．5つの spec は `design/0N-*.md` に移り，横断決定・OV 規則・決定ログは [plan/phase1/00-overview.md](plan/phase1/00-overview.md) に残る．
 
 | spec | rule ID | 状態 |
 |---|---|---|
 | [00-overview.md](plan/phase1/00-overview.md) | OV-1..23b（副番含め27） | criterion 2 の per-rule 表を含め更新済み |
-| [01-time-model.md](plan/phase1/01-time-model.md) | TM-1..21（副番含め31） | Gate A 通過，実装済み |
-| [02-stream-contract.md](plan/phase1/02-stream-contract.md) | SC-1..32（副番含め47） | Gate A 通過，実装済み |
-| [03-spec-and-binding.md](plan/phase1/03-spec-and-binding.md) | SB-1..49（副番含め60） | Gate B 通過，実装済み．SB-22 を SB-22a〜h と表 SB-T0〜T4 に分割（D95・D96） |
-| [04-run-and-session.md](plan/phase1/04-run-and-session.md) | RS-1..52（副番含め60） | Gate B 通過，実装済み．RS-25a を追加（D103） |
-| [05-module-api.md](plan/phase1/05-module-api.md) | MA-1..46（副番含め52） | Gate C 通過，実装済み．MA-16a を追加（D100） |
+| [01-time-model.md](design/01-time-model.md) | TM-1..21（副番含め31） | 受理済み，実装済み |
+| [02-stream-contract.md](design/02-stream-contract.md) | SC-1..32（副番含め47） | 受理済み，実装済み |
+| [03-spec-and-binding.md](design/03-spec-and-binding.md) | SB-1..49（副番含め60） | 受理済み，実装済み．SB-22 を SB-22a〜h と表 SB-T0〜T4 に分割（D95・D96） |
+| [04-run-and-session.md](design/04-run-and-session.md) | RS-1..52（副番含め60） | 受理済み，実装済み．RS-25a を追加（D103） |
+| [05-module-api.md](design/05-module-api.md) | MA-1..46（副番含め52） | 受理済み，実装済み．MA-16a を追加（D100） |
 
 6文書で277ルール，欠番と未解決参照なし．撤回7件（SB-25a, SB-28, SB-32, RS-32a, RS-37, MA-4, MA-43 — OV-1 に従い番号は保持）．Gate A は敵対的レビュー3巡（31件・16件・13件），Gate B は2巡（19件・10件），Gate C は1巡（8件）．
 
@@ -117,13 +117,13 @@ exit criteria（§13）の達成状況（2026-09-23 時点）：
 
 | # | 条件 | 状態 |
 |---|---|---|
-| 1 | 6文書の受理と §11 の全 verdict | **verdict は D1–D108 まで記録・適用済み**．6文書の受理そのものは未実施（§12） |
+| 1 | 6文書の受理と §11 の全 verdict | **達成**．verdict は D1–D109．6文書を受理し，spec を `design/` へ移した（D109） |
 | 2 | 全 rule に ID と OV-3 disposition | **277ルールに277行を用意し，GAP と未割当を解消**．内訳は default 207・process 22・producer 13・forward 11・withdrawn 7・consumer 1・分割 16（default+forward 12，default+producer 3，forward+producer 1）．`UNCERTAIN:` は D108 でゼロ **（達成）** |
 | 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が端から端まで動く | **達成**（2026-09-23，1.85.0 / stable 1.98.1 ともに345 passed，`#[ignore]` なし）．end-to-end pipeline ケースも通過 |
 | 4 | `schemas/`，`schema_freeze`，`SCHEMA_CHANGELOG.md` | **達成**．D51–D68・D95–D103・D104 の schema 変更を反映済み（`pattern` は無し） |
 | 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．`109 NEW / 281 public items`（2026-09-23，`plan::check_sink_links` を D99 で削除） |
 | 6 | 直接依存が §8 の4 crate ちょうど | **達成** |
-| 7 | §12 の移動後に `design/` と `plan/phase1/` の全リンクが解決 | 未（spec 受理後の Step 5） |
+| 7 | §12 の移動後に `design/` と `plan/phase1/` の全リンクが解決 | **達成**（238リンク，切れ0．`v3/` パス21件も全て存在） |
 
 **§11 の判定は完了した**（2026-09-22，Fable 5.1 の second opinion をユーザ判定として採用）．
 verdict は confirm 91・amend 15・reverse 1・not-a-decision 5．not-a-decision の5件（OQ4,
@@ -301,10 +301,16 @@ owner が推奨を全件採用した．規則数は277のまま．理由と退�
 
 新しいテストが担う7経路は，scratch copy で1件ずつ無効化し，それぞれ新しいテストだけが落ちることを確かめた．
 
+#### D109 — Step 5（2026-09-23，owner の委任で推奨を採用・適用済み）
+
+- **R13**：Vision の20の § で，規則が担う部分（型ツリー，規則の列挙，値集合，順序図）だけを `Normative:` 付きの要約に置き換えた．理由，v3 の教訓，例は残した．§23 の RX 1–8 と TX 1–5 は規則番号で32回引用されているので，索引表として残した．§38 は1文だけの変更．§8 の例は committed schema で parse できる形に直した（`module` と version，`authority`，`ProfileRef`，namespace 付き section）．
+- **Vision issues 42件**：30件は R13 で解消，4件は R13 の外を直接修正（§9，§28，§31，§58 #15），9件は Vision を変えない（audit への指摘と Phase 2 送り）．
+- **Phase 1 に規則のない Vision の義務**は prose のまま残し，Phase 2 の宿題として §11 に raised で記録した（TimingEnvelope / PerformanceEnvelope の検査，update class の意味，Mock の義務）．
+- 案は Opus 5.5 が起草し，適用後に別の Opus 5.5 が適合性を1回レビューした（P0 1・P1 5・P2 11，全件修正）．
+
 #### 次にすること
 
-1. 6つの spec を受理する（OV-5：Gate A・B・C ごとに decisions 表，規則，テスト表の順）．
-2. 受理後に §12 の Step 5 を進め，spec を `design/` へ移動して全リンクを確認する．Vision の規範文編集は OV-6 / §12 の別途承認を経て行う．
+Phase 1 は完了．Phase 2（Radio Model + Simulation Engine + MockRadio，Vision §67）の計画に入る．最初に §11 D109 の raised 3件（envelope の検査，update class の意味，Mock の義務）と，forward / producer marker を持つ規則（exit-review の README）を Phase 2 の入力として拾う．
 
 作業ツリーは未コミット．このセッションでは commit / push していない．
 

@@ -2133,7 +2133,7 @@
       "type": "object"
     },
     "SessionAction": {
-      "description": "The Session action envelope: a closed set, and **not** the Kernel Action set.\n\nThe Kernel's Actions are what a Reactor emits into the real-time path, while a\nlease operation or a recorder request is a control-path act with no real-time\nmeaning. Each Session Action compiles to zero or more Kernel Actions, or to a\nLease or Run operation.\n\nOnly the lifecycle verbs are the Kernel's; a domain verb is\n[`SessionAction::Vocabulary`], and the Vocabulary that registers the verb\ndeclares how it compiles. Vision §3's log sketch names `StartRepeat` and\n`Capture` directly; here they are `radio.start_repeat` and `sink.capture`,\nbecause a Kernel that enumerated them would need a new variant for the first\nperipheral sweep or calibration verb.\n\nRule: RS-13, RS-13a, decision R3.",
+      "description": "The Session action envelope: a closed set, and **not** the Kernel Action set.\n\nThe Kernel's Actions are what a Reactor emits into the real-time path, while a\nlease operation or a recorder request is a control-path act with no real-time\nmeaning. Each Session Action compiles to zero or more Kernel Actions, or to a\nLease or Run operation.\n\nOnly the lifecycle verbs are the Kernel's; a domain verb is\n[`SessionAction::Vocabulary`], and the Vocabulary that registers the verb\ndeclares how it compiles. The Vision's §3 log sketch named `StartRepeat` and\n`Capture` directly before Step 5; here they are `radio.start_repeat` and `sink.capture`,\nbecause a Kernel that enumerated them would need a new variant for the first\nperipheral sweep or calibration verb.\n\nRule: RS-13, RS-13a, decision R3.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -2823,7 +2823,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "A Kernel envelope with namespaced Module sections. The Kernel writes the\nenvelope; each Module writes its own section; no Provider-specific field ever\nrequires a Kernel change.\n\nVision §50 lists \"random seeds\" and an optional environment capture among the\nenvelope's contents; neither is an envelope field here. The Kernel owns no\nrandom number generator, so a seed is something the environment declared, and\nthe environment is already recorded verbatim under `binding.body`; the\nenvironment capture has no Kernel-defined content at all, so it belongs under\n`sections` as `ezsdr.capture` (RS-43).\n\nRule: RS-38…RS-47. Vision §50, Finding 19.",
+  "description": "A Kernel envelope with namespaced Module sections. The Kernel writes the\nenvelope; each Module writes its own section; no Provider-specific field ever\nrequires a Kernel change.\n\nThe Vision's §50 listed \"random seeds\" and an optional environment capture among\nthe envelope's contents before Step 5; neither is an envelope field here. The Kernel owns no\nrandom number generator, so a seed is something the environment declared, and\nthe environment is already recorded verbatim under `binding.body`; the\nenvironment capture has no Kernel-defined content at all, so it belongs under\n`sections` as `ezsdr.capture` (RS-43).\n\nRule: RS-38…RS-47. Vision §50, Finding 19.",
   "properties": {
     "action_log": {
       "default": [],

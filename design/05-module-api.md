@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft for Gate C. Normative for `ezsdr-kernel::module_api` once accepted. |
+| Status | Accepted 2026-09-23 (Gate C; Phase 1 Step 5). Normative for `ezsdr-kernel::module_api`. |
 | Scope | The three axes and the five role traits; the rules every role trait obeys; `ModuleDescriptor`, `VocabularyDescriptor` and the registry; `ComponentDescriptor`; the ExecutionIsland declaration and its admission; ExecutionClass and the fidelity vector; the Phase 1 test doubles; what is fixed now so that an out-of-process Plugin later needs no Kernel change. |
 | Not in scope | Radio Model traits and keys (Phase 2); MockRadio and the Simulation Engine (Phase 2); the Peripheral and Endpoint vocabularies (Phase 9); the native, WASM and GPU execution ABIs (Phases 10 and 11); the Plugin wire protocol (Phase 9). |
 | Vision § covered | §4; §5's Module API line; §7 in full; §14; §15's `step`; §19; §20; §32; §35's bridge requirements; §36; §37 and §38; §42's Executor rule; §62. |
@@ -137,7 +137,7 @@ ModuleError       { kind: Rejected | Unsupported | Timeout | DeviceLost | Intern
 - **MA-15** `step(until)` has a default no-op body on `Provider`. A Provider whose `driving.stepped` is true overrides it under MA-20's contract; a hardware Provider never receives a `step`.
 - **MA-16** No role trait reaches another role trait, so the Kernel role API gives a Module no reference to a peer Module instance. *Checked by the `ma_16_role_trait_signatures_do_not_name_peer_roles` `syn` walk, which follows from each role trait the routes its documentation lists and fails on reaching another role trait, with one red route per case in `ma_16_the_gate_sees_a_peer_behind_a_context_field`. A walk over names cannot see through a rename, so `src/` contains no `use … as` and no `macro_rules!` other than the ones the gate lists (`ma_16_the_names_the_walk_reads_are_the_names_declared`): refusing the two mechanisms closes that class, where listing the spellings they produce did not (finding D100).*
 - **MA-16a** A route the walk does not follow — a conversion defined on another type, a free function, a `static`, a blanket impl — is kept out by the allow-list review of `00-overview.md` OV-23 at each gate and at the v4.0 freeze. A route found later is recorded here, and the walk is extended only when such a route appears in `src/`, never for a demonstration: five review passes each demonstrated one, and the rule text had become a list of them. *Process obligation, the gate reviews and the freeze review (finding D100).*
-- **MA-17** An instance-level capability such as a Peripheral's timing class is knowable at instantiation, from the selector and profile, and appears in `instance()`. Vision §38 says the class "is returned as a capability at `prepare` time", but the pipeline matches capabilities before `prepare` (SB-37), so a class first visible at `prepare` could not be matched. `PrepareReport.effective` may narrow it (MA-12), which is what §38's sentence is really about. *Producer obligation, Phase 2 Providers: the first Provider with a Peripheral (MockRadio's, then the Phase 7 UHD Provider) tests that its timing class is present in `instance()` before `prepare`. The Kernel half — matching reads the bound instance's capabilities (SB-37) and `prepare` may only narrow them — is checked under MA-12 (D80).*
+- **MA-17** An instance-level capability such as a Peripheral's timing class is knowable at instantiation, from the selector and profile, and appears in `instance()`. Vision §38 said, before Step 5, that the class "is returned as a capability at `prepare` time", but the pipeline matches capabilities before `prepare` (SB-37), so a class first visible at `prepare` could not be matched. `PrepareReport.effective` may narrow it (MA-12), which is what §38's sentence is really about. *Producer obligation, Phase 2 Providers: the first Provider with a Peripheral (MockRadio's, then the Phase 7 UHD Provider) tests that its timing class is present in `instance()` before `prepare`. The Kernel half — matching reads the bound instance's capabilities (SB-37) and `prepare` may only narrow them — is checked under MA-12 (D80).*
 
 ```rust
 pub trait Provider: Send {
@@ -287,9 +287,9 @@ pub trait Provider: Send {
 | Vision | This spec |
 |---|---|
 | §4 the microkernel picture and the Module registry | §3, MA-31…MA-33 |
-| §5's Module API line; the Kernel stays small | MA-1…MA-4, MA-35 |
+| §5's Module API line; the Kernel stays small | MA-1…MA-3, MA-35 (MA-4 withdrawn; OV-23a carries the ban) |
 | §7 the three axes, the five roles, the communication rule | MA-1…MA-3 |
-| §14 ExecutionClass and the fidelity vector | MA-41…MA-43 |
+| §14 ExecutionClass and the fidelity vector | MA-41, MA-42; spec 04's RS-41, RS-42 |
 | §15 `step(until)`, the Authority role | MA-20, MA-29, MA-30 |
 | §19 descriptor versus ABI, cycles, the deadline kinds | MA-21, MA-22, MA-36, MA-37 |
 | §20 placement validated, the executor-kind requirement | MA-36, MA-38…MA-40 |

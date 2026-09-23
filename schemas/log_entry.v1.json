@@ -163,7 +163,7 @@
       "type": "object"
     },
     "SessionAction": {
-      "description": "The Session action envelope: a closed set, and **not** the Kernel Action set.\n\nThe Kernel's Actions are what a Reactor emits into the real-time path, while a\nlease operation or a recorder request is a control-path act with no real-time\nmeaning. Each Session Action compiles to zero or more Kernel Actions, or to a\nLease or Run operation.\n\nOnly the lifecycle verbs are the Kernel's; a domain verb is\n[`SessionAction::Vocabulary`], and the Vocabulary that registers the verb\ndeclares how it compiles. Vision §3's log sketch names `StartRepeat` and\n`Capture` directly; here they are `radio.start_repeat` and `sink.capture`,\nbecause a Kernel that enumerated them would need a new variant for the first\nperipheral sweep or calibration verb.\n\nRule: RS-13, RS-13a, decision R3.",
+      "description": "The Session action envelope: a closed set, and **not** the Kernel Action set.\n\nThe Kernel's Actions are what a Reactor emits into the real-time path, while a\nlease operation or a recorder request is a control-path act with no real-time\nmeaning. Each Session Action compiles to zero or more Kernel Actions, or to a\nLease or Run operation.\n\nOnly the lifecycle verbs are the Kernel's; a domain verb is\n[`SessionAction::Vocabulary`], and the Vocabulary that registers the verb\ndeclares how it compiles. The Vision's §3 log sketch named `StartRepeat` and\n`Capture` directly before Step 5; here they are `radio.start_repeat` and `sink.capture`,\nbecause a Kernel that enumerated them would need a new variant for the first\nperipheral sweep or calibration verb.\n\nRule: RS-13, RS-13a, decision R3.",
       "oneOf": [
         {
           "additionalProperties": false,

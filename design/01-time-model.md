@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft for Gate A. Normative for `ezsdr-kernel::time` once accepted. |
+| Status | Accepted 2026-09-23 (Gate A; Phase 1 Step 5). Normative for `ezsdr-kernel::time`. |
 | Scope | Kernel time primitives: rational tick rates, clock domains and their registry, TimePoint and Duration, the two deadline kinds, ClockRelation, the TimeAuthority interface, SampleClock lifecycle, and the time records the Manifest carries. |
 | Not in scope | The Simulation Engine (Phase 2); TimingEnvelope field values (Radio Model, Phase 2); how a Provider measures its device clock against the host (Phase 7); conversions from UHD or SoapySDR representations, which are Provider boundary code. |
 | Vision § covered | §15 in full; §19 "Two kinds of deadline"; §24; §27's sample-rate rule; §49 for `ClockDomainId`; §50's epoch ↔ UTC record (shape only); §58 #2 and #3 (interface only); §61's capture-at-sample-index consequence. |

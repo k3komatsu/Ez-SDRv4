@@ -19,7 +19,7 @@ RFNoC / FPGA memory
 Remote / RDMA memory
 ```
 
-The Core should model enough information to validate an explicitly stated placement:
+The kinds above are not a Core list. Core holds a node-qualified `MemoryDomain` identity and compares identities; which kinds exist, and what reaching one costs, is Vocabulary content that Executors, Links and Sinks declare. The Core should model enough information to validate an explicitly stated placement:
 
 ```text
 MemoryDomain
@@ -84,15 +84,9 @@ The exact scheduling algorithm is not fixed by this Vision.
 
 ## Driving model per ExecutionClass
 
-```text
-Simulation           the discrete-event Simulation Engine step-drives every Island: step(until) on one logical
-                     thread or behind a deterministic barrier; drop policies decided in virtual time
-RealtimeEmulation    the same engine paced to wall clock; Islands on real threads
-HardwareInLoop /     Islands on real threads with their declared affinity and RT policy
-Hardware
-```
+An Island is declared in the BindingProfile — an Executor binding, the components placed on it, optional affinity, real-time policy and batch size — and admission checks it without creating, merging or moving one. Every stepped instance implements `step(until)`, which consumes and emits everything at or before `until`, nothing after, and never blocks. The Kernel coordinator owns the loop on one logical thread: the Authority's `next_wakeup` sets the instant, and `step` runs over every stepped instance in a fixed order (Providers, then Executors, then Sinks, each by instance id) until none progresses; the Simulation Engine decides the instants, and the fixed order keeps determinism independent of assembly order. In the Simulation class every stepped Provider, Executor and Sink is stepped, and the Simulation Engine is to decide drop policies in virtual time (Phase 2); in RealtimeEmulation stepped Providers are wall-paced while Executors and Sinks run on threads; in HardwareInLoop and Hardware, Islands run on real threads with their declared affinity and RT policy. Without this, "deterministic runs reproduce with a seed" (§58) is a wish: threads and lossy Probe links make event order a coin toss.
 
-An Executor therefore implements `step(until: TimePoint)` as part of its contract. Without it, "deterministic runs reproduce with a seed" (§58) is a wish: threads and lossy Probe links make event order a coin toss.
+Normative: [design/05-module-api.md](../05-module-api.md), rules MA-20, MA-22, MA-30, MA-38…MA-40.
 
 Within an Island the Executor schedules; between Islands only DataLinks and Event/Action queues exist, and cycles are allowed only through the latter (§19).
 

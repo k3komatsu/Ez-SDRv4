@@ -15,6 +15,14 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — 2026-09-23 — descriptions only, Phase 1 Step 5
+
+Still version 1. No field, type or constraint changed.
+
+- `binding_profile`, `log_entry` and `manifest`: three descriptions quoted Vision text that
+  Step 5 (re-review R13) rewrote — §8's `provider:`, §3's `StartRepeat` and `Capture`, and
+  §50's "random seeds". They now say what the Vision wrote before Step 5.
+
 ## v1 — 2026-09-23 — pre-freeze revision, adopted D104
 
 Still version 1: v4.0 has not frozen. Additive.

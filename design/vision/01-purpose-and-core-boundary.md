@@ -101,27 +101,9 @@ Interactive use is a long-lived context in which the user changes configuration,
 
 > **`connect()` opens a Session. A Session is a Run whose ExperimentSpec is implicit and whose Manifest records an action log.**
 
-```text
-Session (a Run)
-├── implicit ExperimentSpec      resources requested from BindingProfile defaults
-├── action log                   typed Actions with runtime TimePoints
-│     SetParameter { key, value, update_class }
-│     StartRepeat  { waveform_hash }
-│     Capture      { n, at }
-│     Stop; Release (a Lease operation, §53)
-├── effective configuration      requested vs applied, per Action
-├── Artifacts                    every capture result, by reference
-└── Manifest                     implicit spec + action log + effective configs + events
-```
+`connect()` derives the Session's implicit Spec from the BindingProfile, hashes it like any other, compiles it through the whole pipeline and leaves the Run running. Every Easy API call is one entry in a densely numbered action log with its runtime TimePoint (§15) and its outcome, rejected calls included, and nothing bypasses the log. Before anything is dispatched, each Action passes the same check set in the same order that `validate()` applies to a Spec — the registered admission checks, the RF envelope (§52) among them, then the coercion policy (§11) and the parameter's declared update class (§27) — and a rejected Action is logged and never reaches the real-time path (invariant 10). The Kernel's Session verbs are lifecycle verbs only — `SetParameter`, `Stop` with an optional target, `Release`, `Adopt`, `Renew`, `RunChild` — while domain verbs such as repeating a waveform or capturing are namespaced Vocabulary verbs that compile to Kernel Actions as their Vocabulary declares. The TimingEnvelope and PerformanceEnvelope (§13) are to be checked on this path as well; no Phase 1 rule does so yet, because both are opaque until the Radio Model (Phase 2). A Session changes parameters only through declared update classes and never changes structure. `sdr.run(spec)` creates a child Run with its own profile under the Session's Lease; replaying a Session re-applies its admitted entries and refuses a profile with a different hash. The default Lease is attached, so leaving the `with` block stops TX and releases resources; a detached Lease needs a TTL and is recorded in the Manifest (§53).
 
-Rules:
-
-- Every Easy API call is a typed Action appended to the action log with its runtime TimePoint (§15). Nothing bypasses the log.
-- Every Session Action is parsed and **admitted on the control path** before it enters the real-time path as a typed Action: TimingEnvelope and PerformanceEnvelope (§13), the RF safety envelope (§52), the coercion policy (§11) and the parameter's update class (§27) are checked exactly as `validate()` checks a Spec. A rejected Action is logged as rejected and never dispatched. The real-time path sees only admitted, typed Actions (invariant 10).
-- Runtime changes inside a Session are permitted only through declared parameter update classes (§27). A Session never performs structural graph changes.
-- `sdr.run(spec)` inside a Session creates a child Run (the publication path). Both share one lifecycle machinery.
-- Reproducing a Session means replaying its action log against the same BindingProfile.
-- Leaving the `with` block ends the Session under its Lease (§53). The default Lease is *attached*: TX stops and resources are released. A *detached* Lease (TX continues after disconnect) is an explicit choice with a mandatory TTL, recorded in the Manifest.
+Normative: [design/04-run-and-session.md](../04-run-and-session.md), rules RS-4, RS-12…RS-25a; the implicit Spec's derivation in [design/03-spec-and-binding.md](../03-spec-and-binding.md), SB-22c.
 
 `sdr.tx.repeat(x); y = sdr.rx.capture(N)` therefore yields a Manifest containing the waveform hash, the capture's first sample time and validity flags, and the effective RF configuration, with no extra code from the user.
 
@@ -307,19 +289,9 @@ Peripheral Model
     └── Mock Peripheral Provider
 ```
 
-`Module`, `Provider`, and `Plugin` are not three kinds of the same thing. They sit on three orthogonal axes:
+Module, role and deployment are three orthogonal axes. There are exactly five roles — Provider (a Resource Model: Radio, Peripheral, Endpoint, Simulation), Executor (a processing engine), Sink (Artifacts), Link (a DataLink) and Authority (the Time Authority, §15) — with one trait each and no shared lifecycle supertrait. A Module declares its roles in its ModuleDescriptor and may hold several: the UHD Module is a Radio Provider, a GPIO Provider and an Authority (its timekeeper); the `sim-engine` Module is an Authority. Deployment is in-process (compiled in) or Plugin; "Plugin" names a deployment form, not a role. Peripheral Modules are Plugins by default because vendor SDKs run outside the Core process (§62); the Plugin variant is fixed in the schemas now and refused at registration until a Plugin host exists.
 
-```text
-axis 1  unit         Module     a crate or process; the unit of versioning and deployment
-axis 2  role         Provider   implements a Resource Model (Radio, Peripheral, Endpoint, Simulation)
-                     Executor   implements a Processing engine (native, WASM, GPU)
-                     Sink       writes Artifacts (raw IQ, SigMF, HDF5)
-                     Link       implements a DataLink (SPSC ring, shared memory, pinned copy, RDMA)
-                     Authority  implements the Time Authority (a device timekeeper, or the Simulation Engine, §15)
-axis 3  deployment   in-process (Rust trait)  |  Plugin (out-of-process, typed protocol)
-```
-
-One Module may play several roles: the UHD Module is a Radio Provider, a GPIO Provider and an Authority (its timekeeper); the `sim-engine` Module is an Authority. "Plugin" names a deployment form, not a role; Peripheral Modules are Plugins by default because vendor SDKs run outside the Core process (§62). The module-api therefore has one trait per role, not one `Provider` trait forced onto radios and executors alike.
+Normative: [design/05-module-api.md](../05-module-api.md), rules MA-1…MA-3, MA-32, MA-46.
 
 ## Module communication rule
 

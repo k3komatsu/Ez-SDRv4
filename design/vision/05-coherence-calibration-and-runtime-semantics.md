@@ -137,14 +137,9 @@ Examples:
 
 Not all updates are equivalent.
 
-The architecture should allow update classes such as:
+Every parameter that may change during a Run declares one update class from a closed set — `cold`, `block_boundary`, `atomic_realtime`, `hardware_timed` — a component parameter in its ComponentDescriptor (§19) and a Provider parameter in its Vocabulary's key declaration; a key with no class cannot change during a Run. An `UpdateParameter` Action carries its class and an optional instant at or after which it takes effect, and an update through an undeclared class is rejected at admission and never reaches a Module. What each class guarantees in timing is the Executor's and the Provider's to implement; the Kernel checks only that the class was declared.
 
-```text
-cold
-block_boundary
-atomic_realtime
-hardware_timed
-```
+Normative: [design/05-module-api.md](../05-module-api.md) §4 (`UpdateClass`), rules MA-24, MA-36, MA-37; [design/03-spec-and-binding.md](../03-spec-and-binding.md), SB-2; [design/04-run-and-session.md](../04-run-and-session.md), rules RS-4, RS-17, RS-49, RS-52; [design/01-time-model.md](../01-time-model.md), TM-13c.
 
 Where useful, prepared configurations may switch at a barrier or GraphEpoch rather than mutating arbitrary graph state unsafely.
 
@@ -155,9 +150,8 @@ Parameter changes are the only runtime mutation. **The graph structure — its c
 Consequences:
 
 - A component whose behaviour must change at run time (an adaptive-MCS demodulator) is one component with a parameter, not a family of components swapped in and out.
-- Every parameter declares its update class in the ComponentDescriptor (§19); an update through an undeclared class is rejected at plan time.
 - v3's practice of pausing every thread that touches a device before applying a change is the `cold` class, made explicit.
-- A sample-rate change is always `cold`: it ends the stream's SampleClock and starts a new ClockDomain (§15).
+- A sample-rate change is always `cold` (§15).
 
 GraphEpoch is deferred until a concrete experiment needs it; the prohibition is not.
 
@@ -174,7 +168,7 @@ These are derived from the Stream Contract flags (§23), never assembled separat
 ```text
 ContinuityMap   valid ranges and gaps per channel, derived from GAP_BEFORE / RESTARTED / valid masks
 ValidityMap     per-channel validity over the whole artifact
-Gap             { start_time, lost: optional count, cause }
+Gap             { start_time, lost: optional count, cause }   cause from a closed set, derived from the flags
 ```
 
 Propagation of invalidity through Processors ("taint") is a documented convention for Processor authors, not a Kernel type. Executors propagate block flags by default whenever a component maps input blocks to output blocks one-to-one; where the mapping is not one-to-one (an FFT taints its whole output block, a FIR only a tail), the Processor author decides and documents it. There is no `Taint` type in the Kernel.
@@ -207,13 +201,15 @@ TX_DISCONTINUITY
 LATE_COMMAND
 ALIGNMENT_ERROR
 CLOCK_LOST
-DEVICE_DISCONNECTED
+DEVICE_LOST
 PROCESSOR_DEADLINE_MISS
 PERIPHERAL_TIMEOUT
 TUN_QUEUE_DROP
 PLUGIN_FAILURE
 CALIBRATION_INVALID
 ```
+
+Each kind is registered by whoever emits it; only a handful are the Kernel's (below).
 
 The model is:
 
@@ -235,22 +231,15 @@ Event storms and event-queue loss must themselves be observable.
 
 ## Event envelope, counters and storms
 
-```text
-Event
-├── source      ResourceId (node-qualified)
-├── time        TimePoint (a named ClockDomain)
-├── severity
-├── kind        RX_OVERFLOW, TX_UNDERFLOW, LATE_COMMAND, ...
-└── payload     schema-versioned (§10)
-```
+An Event carries a node-qualified source, a TimePoint in a named domain, a severity, a kind and a schema-versioned payload. The hot path emits a fixed-size record with at most 32 bytes inline and allocates nothing. Every `(source, kind)` pair reachable in the plan has a **never-dropping counter**, incremented before the body is queued. Bodies travel through a bounded ring and are dropped, not sampled, when it is full; each drain emits, outside the ring, one `EVENTS_DROPPED { kind, count }` per kind that dropped, so every counter equals the delivered bodies plus the reported drops, and a ten-minute Run with thirty thousand overflows through a queue of four thousand records thirty thousand, not four thousand. A kind whose reaction is `stop` or `abort` also raises an escalation flag that survives a dropped body. The Kernel registers only the kinds it emits or owns the policy for — `EVENTS_DROPPED`, `LINK_BACKPRESSURE`, `PROCESSOR_DEADLINE_MISS`, `DEVICE_LOST`, `STEP_LIVELOCK` — and every other kind is registered by its Vocabulary or Module.
 
-Every `(source, kind)` pair has a **never-dropping counter** (an atomic increment on the hot path). Event bodies travel through a bounded queue and may be sampled or dropped under load. Whenever the queue drops, the collector emits one `EVENTS_DROPPED { kind, count }` meta-event. The Manifest therefore always contains the true counts, plus the sampled events. A ten-minute Run with thirty thousand overflows and a queue of four thousand records thirty thousand, not four thousand.
+Normative: [design/04-run-and-session.md](../04-run-and-session.md), rules RS-27…RS-36.
 
 UHD's own asynchronous message queue is bounded (a thousand entries), and its console prints `O`, `D`, `U` and `L` are documented as "generally harmless". For publication-grade data they are not harmless, and Ez-SDR counts them.
 
 ## No metrics framework in the Kernel
 
-Queue occupancy, deadline-miss rates and overflow counts are counters and sampled events on this same path. The Kernel has no metrics registry; exporting counters to Prometheus, CSV or a dashboard is a Sink Module's job.
+Queue occupancy, deadline-miss rates and overflow counts are counters and delivered events on this same path. The Kernel has no metrics registry; exporting counters to Prometheus, CSV or a dashboard is a Sink Module's job.
 
 ---
 
