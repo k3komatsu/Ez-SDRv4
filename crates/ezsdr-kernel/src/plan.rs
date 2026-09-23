@@ -659,8 +659,7 @@ pub fn validate(
             // SB-36 records the resolution in `matched`, and a need's name is
             // scoped to its resource: SB-36's own example calls one `gpio`, which
             // two peripherals would share. Qualified so that two do not collapse.
-            let key = Ident::parse(&format!("{name}_{need_name}")).unwrap_or_else(|_| name.clone());
-            out.matched.insert(key, resolved.id.clone());
+            out.matched.insert(need_key(name, need_name), resolved.id.clone());
         }
     }
 
@@ -1173,7 +1172,7 @@ fn not_local(what: String) -> SpecError {
 /// unparsed — which would reach a Manifest the Kernel's own deserialiser refuses.
 ///
 /// Rule: X7, SB-1.
-fn check_rid(what: &str, id: &ResourceId) -> Result<(), SpecError> {
+pub(crate) fn check_rid(what: &str, id: &ResourceId) -> Result<(), SpecError> {
     if !id.node.is_local() {
         return Err(not_local(format!("{what} {id}")));
     }
@@ -1291,7 +1290,8 @@ fn check_bindings(
     // always the need's, because `X < X_need` orders the resource's insert second.
     for (name, req) in &spec.resources {
         for need in req.needs.keys() {
-            if let Some(k) = Ident::parse(&format!("{name}_{need}")).ok().filter(|k| spec.resources.contains_key(k)) {
+            let k = need_key(name, need);
+            if spec.resources.contains_key(&k) {
                 return Err(SpecError::DuplicateBindingName {
                     name: k,
                     sets: format!("a resource and {name}'s need {need}"),
@@ -1994,31 +1994,61 @@ fn declared_links(
         .collect()
 }
 
-/// SB-39's guard: an `AdmissionResult` is this Run's only if every Spec resource has a
-/// matched node and that node is one the resource's bound instance declares.
-/// "Admitted" alone is satisfied by an empty result, and a stale one names nodes of an
-/// instance this profile no longer binds (D99).
+/// SB-36's key for a need in `matched`: `<resource>_<need>`.
 ///
-/// Rule: SB-39, SB-30.
+/// Rule: SB-36.
+fn need_key(resource: &Ident, need: &Ident) -> Ident {
+    Ident::parse(&format!("{resource}_{need}")).expect("two Idents joined by `_` are an Ident")
+}
+
+/// SB-39's guard: an `AdmissionResult` is this Run's only if `matched` holds exactly
+/// this Spec's resources and needs, each resource's node is one its bound instance
+/// declares, and each need's node is one an instance bound to a resource of this Spec
+/// declares (SB-36). "Admitted" alone is satisfied by an empty result, and a stale one
+/// names nodes of an instance this profile no longer binds (D99). The Manifest records
+/// the whole `matched` (SB-38), so an entry `plan()` does not read is still checked
+/// (D107).
+///
+/// Rule: SB-39, SB-36, SB-30.
 fn admission_is_this_runs(
     spec: &ExperimentSpec,
     inputs: &CompileInputs<'_>,
     admission: &AdmissionResult,
 ) -> Result<(), String> {
-    for name in spec.resources.keys() {
-        let Some(node) = admission.matched.get(name) else {
-            return Err(format!("this `AdmissionResult` is not this Run's: {name} has no matched node"));
-        };
-        let declared = inputs
+    let declares = |resource: &Ident, node: &ResourceId| {
+        inputs
             .providers
-            .get(name)
-            .is_some_and(|p| p.instance().tree.walk().into_iter().any(|n| n.id == *node));
-        if !declared {
-            return Err(format!(
-                "this `AdmissionResult` is not this Run's: {name}'s matched node {node} is not one \
-                 its bound instance declares"
-            ));
+            .get(resource)
+            .is_some_and(|p| p.instance().tree.walk().into_iter().any(|n| n.id == *node))
+    };
+    let not_this_runs = |why: String| format!("this `AdmissionResult` is not this Run's: {why}");
+    let mut expected = BTreeSet::new();
+    for (name, req) in &spec.resources {
+        let Some(node) = admission.matched.get(name) else {
+            return Err(not_this_runs(format!("{name} has no matched node")));
+        };
+        if !declares(name, node) {
+            return Err(not_this_runs(format!(
+                "{name}'s matched node {node} is not one its bound instance declares"
+            )));
         }
+        expected.insert(name.clone());
+        for need in req.needs.keys() {
+            let key = need_key(name, need);
+            let Some(node) = admission.matched.get(&key) else {
+                return Err(not_this_runs(format!("{name}'s need {need} has no matched node")));
+            };
+            if !spec.resources.keys().any(|r| declares(r, node)) {
+                return Err(not_this_runs(format!(
+                    "{name}'s need {need} names node {node}, which no instance bound to this \
+                     Spec's resources declares"
+                )));
+            }
+            expected.insert(key);
+        }
+    }
+    if let Some(extra) = admission.matched.keys().find(|k| !expected.contains(*k)) {
+        return Err(not_this_runs(format!("{extra} is neither a resource nor a need of this Spec")));
     }
     Ok(())
 }
@@ -2167,7 +2197,16 @@ pub fn collect_prepare(
         // merge here interpreted it per resource against data that cannot tell two
         // resources apart, so two channels asking their own line's declared rate
         // refused each other. A Provider fragment's id is the resource name.
+        // SB-41: one report per fragment. A resource with none was not prepared, or its
+        // report names another fragment, and every check below would be skipped for it
+        // in silence (D105).
         let Some(report) = merged.reports.iter().find(|r| r.fragment == *name) else {
+            violations.push(crate::binding::Violation {
+                check: crate::spec::Namespace::parse("ezsdr.effective").expect("a valid literal"),
+                key: None,
+                requested: None,
+                reason: format!("SB-41: no PrepareReport for fragment {name}"),
+            });
             continue;
         };
         for (key, declared) in &node.capabilities {

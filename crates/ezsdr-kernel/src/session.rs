@@ -142,6 +142,31 @@ impl SessionAction {
     }
 }
 
+/// The ids a log entry carries, built in Rust and never parsed: each target is on the
+/// local node with a path of SB-1's grammar, and each time's domain is local (X7). The
+/// log reaches the Manifest, whose deserialiser refuses either (D91's class, D106).
+///
+/// Rule: RS-15, X7, SB-1.
+fn check_ids(time: &TimePoint, action: &SessionAction) -> Result<(), SpecError> {
+    let (target, at) = match action {
+        SessionAction::SetParameter { target, .. } => (Some(target), None),
+        SessionAction::Vocabulary { target, at, .. } => (Some(target), at.as_ref()),
+        SessionAction::Stop { target } => (target.as_ref(), None),
+        _ => (None, None),
+    };
+    if let Some(target) = target {
+        crate::plan::check_rid("the Action's target", target)?;
+    }
+    for t in std::iter::once(time).chain(at) {
+        if !t.domain.node.is_local() {
+            return Err(SpecError::Structural {
+                reason: format!("X7: the entry's time is in {}, which is not on the local node", t.domain.node),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Every Action, admitted or not, in order (RS-15).
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct SessionLog {
@@ -155,7 +180,8 @@ impl SessionLog {
     }
 
     /// Appends an entry with the next dense sequence number, refusing an Action that
-    /// is not a well-formed document (RS-15, SB-4, SB-9a).
+    /// is not a well-formed document (RS-15, SB-4, SB-9a) or that carries an id the
+    /// Manifest's own deserialiser would refuse (X7, SB-1, D106).
     ///
     /// RS-15 logs every Action, admitted or not: a **rejected** Action still takes a
     /// number. One whose value the canonicaliser cannot hash was never an Action —
@@ -170,6 +196,7 @@ impl SessionLog {
         outcome: Outcome,
     ) -> Result<u32, SpecError> {
         action.check_values()?;
+        check_ids(&time, &action)?;
         let seq = self.entries.len() as u32;
         self.entries.push(LogEntry { seq, time, action, outcome,
         });

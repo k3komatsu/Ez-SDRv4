@@ -99,6 +99,8 @@ pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     "execution_class"       => crate::module_api::ExecutionClass,
     "fidelity"              => crate::module_api::Fidelity,
     "module_error"          => crate::module_api::ModuleError,
+    "stop_mode"             => crate::module_api::StopMode,
+    "step_outcome"          => crate::module_api::StepOutcome,
     // Run, Session and Manifest (RS-49, RS-38).
     "action"                => crate::event::Action,
     "action_template"       => crate::event::ActionTemplate,

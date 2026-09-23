@@ -21,7 +21,18 @@ fn ov_22_schema_freeze() {
         std::fs::create_dir_all(&dir).expect("schemas/ is writable");
     }
     let mut stale = Vec::new();
-    for (name, schema) in document_schemas() {
+    let schemas = document_schemas();
+    // And the other way: a committed schema no registered type generates is a frozen
+    // contract for nothing, and removing a registration left its file passing.
+    if !update {
+        for entry in std::fs::read_dir(&dir).expect("schemas/ is readable") {
+            let file = entry.expect("an entry").file_name().to_string_lossy().into_owned();
+            if file.ends_with(".json") && !schemas.keys().any(|n| file_name(n) == file) {
+                stale.push(format!("{file}: no registered document generates it"));
+            }
+        }
+    }
+    for (name, schema) in schemas {
         let path = dir.join(file_name(name));
         let rendered = render(&schema);
         if update {

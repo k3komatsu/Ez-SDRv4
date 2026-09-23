@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Why a Run is stopping, as it reaches a Module (MA-13, RS-9).",
+  "oneOf": [
+    {
+      "const": "orderly",
+      "description": "Deliver the declared tail (RS-9).",
+      "type": "string"
+    },
+    {
+      "const": "abort",
+      "description": "Do not (RS-9).",
+      "type": "string"
+    }
+  ],
+  "title": "StopMode"
+}

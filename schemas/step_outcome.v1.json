@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "What one `step` did. `progressed` is true exactly when the instance consumed an\ninput or produced an output (MA-20).",
+  "properties": {
+    "progressed": {
+      "description": "Whether anything moved (MA-20, MA-30).",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "progressed"
+  ],
+  "title": "StepOutcome",
+  "type": "object"
+}

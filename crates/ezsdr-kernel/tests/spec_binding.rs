@@ -807,6 +807,59 @@ fn sb_36_two_needs_of_the_same_name_do_not_collapse() {
 }
 
 #[test]
+fn sb_39_the_guard_covers_every_matched_entry() {
+    // SB-39's guard over `matched` as a whole, since the Manifest records all of it
+    // (SB-38): each need's entry is present and names a node of an instance this Spec
+    // binds, and no key is neither a resource nor a need (D107).
+    let mut req = resource("test.device", &[]);
+    req.needs.insert(id("line"), SubResourceReq { kind: ns("test.line"), requires: BTreeMap::new() });
+    let spec = spec_with([(id("peripheral"), req)].into_iter().collect());
+    let fx = Fixture::new();
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("peripheral", &p);
+    let profile = profile_binding(&["peripheral"]);
+    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
+    plan(&spec, &profile, &admission, &fx.inputs(&providers), Vec::new()).expect("this Run's");
+    let report = || PrepareReport { fragment: id("peripheral"), effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() };
+    let tampered = |edit: &dyn Fn(&mut BTreeMap<Ident, ezsdr_kernel::id::ResourceId>)| {
+        let mut a = admission.clone();
+        edit(&mut a.matched);
+        a
+    };
+    for (stale, want) in [
+        (tampered(&|m| { m.remove(&id("peripheral_line")); }), "peripheral's need line has no matched node"),
+        (tampered(&|m| { m.insert(id("peripheral_line"), rid("elsewhere/0")); }), "which no instance bound to this Spec's resources declares"),
+        (tampered(&|m| { m.insert(id("spare"), rid("radio/1")); }), "spare is neither a resource nor a need of this Spec"),
+    ] {
+        let reason = refusal(plan(&spec, &profile, &stale, &fx.inputs(&providers), Vec::new()));
+        assert!(reason.contains("SB-39") && reason.contains(want), "{reason}");
+        let err = collect_prepare(vec![Ok(report())], &spec, &profile, &fx.inputs(&providers), &stale).expect_err("refused");
+        let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
+        assert!(v.iter().any(|x| x.reason.contains(want)), "{v:?}");
+    }
+}
+
+#[test]
+fn sb_41_a_resource_with_no_report_is_refused() {
+    // One report per fragment (SB-41). A resource with none — not prepared, or its
+    // report under another fragment's name — had every per-resource check of
+    // `collect_prepare` skipped in silence (D105).
+    let spec = minimal_spec();
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("admitted");
+    let report = |fragment: &str| PrepareReport { fragment: id(fragment), effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() };
+    for reports in [vec![], vec![Ok(report("other"))]] {
+        let err = collect_prepare(reports, &spec, &profile, &fx.inputs(&providers), &admission).expect_err("refused");
+        let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
+        assert!(v.iter().any(|x| x.reason == "SB-41: no PrepareReport for fragment radio"), "{v:?}");
+    }
+    collect_prepare(vec![Ok(report("radio"))], &spec, &profile, &fx.inputs(&providers), &admission).expect("one report, merged");
+}
+
+#[test]
 fn sb_36_needs_resolves_across_instances() {
     let mut req = resource("test.device", &[]);
     req.needs.insert(

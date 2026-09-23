@@ -1035,6 +1035,19 @@ fn ma_06_role_signatures_name_only_documents_and_handles() {
         }
     }
     assert_eq!(checked, ROLE_TRAITS.len(), "every role trait is found");
+    // MA-46: each document a role signature carries has a frozen schema of its own, so
+    // the list cannot again fall behind the signatures (D104).
+    let frozen = ezsdr_kernel::schema::document_schemas();
+    for doc in ma6_documents() {
+        let snake = doc.chars().enumerate().fold(String::new(), |mut s, (i, c)| {
+            if c.is_ascii_uppercase() && i > 0 {
+                s.push('_');
+            }
+            s.push(c.to_ascii_lowercase());
+            s
+        });
+        assert!(frozen.contains_key(snake.as_str()), "MA-46: {doc} has no schema under schemas/");
+    }
     // The check's own red test, one per thing MA-6 names.
     for (what, sig) in [
         ("a raw slice", "fn f(&self, bytes: &[u8])"),

@@ -984,6 +984,37 @@ fn rs_15_log_sequence_is_dense() {
 }
 
 #[test]
+fn rs_15_the_log_refuses_an_id_the_manifest_would_refuse() {
+    // A Session Action is built in Rust and never parsed, and the log reaches the
+    // Manifest, whose deserialiser refuses a non-local node (X7) and a path outside
+    // SB-1's grammar. The log refuses both before the entry takes a number (D106).
+    let far = ResourceId { node: ezsdr_kernel::id::NodeId(1), path: "radio".to_owned() };
+    let unparsed = ResourceId { path: "radio//0".to_owned(), ..rid("radio") };
+    let elsewhere = TimePoint::new(ClockDomainId { node: ezsdr_kernel::id::NodeId(1), local: 0 }, 0);
+    let admitted = || Outcome::Admitted { coercions: Vec::new(), warnings: Vec::new(), dispatched: Vec::new() };
+    let vocab = |target: ResourceId, at| SessionAction::Vocabulary {
+        ns: ns("test"),
+        verb: id("capture"),
+        target,
+        at,
+        params: BTreeMap::new(),
+    };
+    let mut log = SessionLog::new();
+    for (time, action, want) in [
+        (t(0), SessionAction::SetParameter { target: far.clone(), key: key("test.flag"), value: Value::Bool(true) }, "X7"),
+        (t(0), SessionAction::Stop { target: Some(unparsed) }, "SB-1"),
+        (t(0), vocab(far, None), "X7"),
+        (t(0), vocab(rid("radio"), Some(elsewhere)), "X7"),
+        (elsewhere, SessionAction::Renew {}, "X7"),
+    ] {
+        let err = log.append(time, action.clone(), admitted()).expect_err("refused");
+        assert!(err.to_string().contains(want), "{action:?}: {err}");
+    }
+    assert!(log.entries().is_empty(), "a refused entry takes no number");
+    log.append(t(0), vocab(rid("radio"), Some(t(1))), admitted()).expect("a local, parsed target");
+}
+
+#[test]
 fn rs_20_replay_divergence() {
     let log = SessionLog::new();
     let recorded = ContentHash::of_bytes(b"profile-a");

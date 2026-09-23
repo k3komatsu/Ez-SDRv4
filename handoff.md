@@ -43,9 +43,9 @@ Phase 1 の Kernel crate は **実装済み**（Step 4 完了）．
 | crate | `crates/ezsdr-kernel` version `4.0.0-alpha.1`．`#![forbid(unsafe_code)]`，`#![warn(missing_docs)]` |
 | module | `id time contract stream hash module_api spec binding plan event policy run session manifest schema`（00-overview.md §5 のレイアウトどおり） |
 | 直接依存 | `serde` `serde_json` `schemars` `sha2` の4つだけ（exit criterion 6）．解決後のツリーは `Cargo.lock` で28 package（crate 自身を含む） |
-| test | 336 件．`spec_binding`(94) `stream_contract`(69) `run_session`(70) `time_model`(48) `module_api`(26) `hashing`(9) `kernel_surface`(14) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
-| toolchain | `1.85.0` / `stable (1.98.1)` の両方で 336 passed（2026-09-23，D95–D103 適用後）．`cargo +stable clippy --all-targets --all-features -- -D warnings` も通過 |
-| schemas | `schemas/` に45個の JSON Schema 2020-12 + `SCHEMA_CHANGELOG.md`．`schema_freeze` が byte 単位で凍結．再生成は `EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze` |
+| test | 339 件．`spec_binding`(96) `stream_contract`(69) `run_session`(71) `time_model`(48) `module_api`(26) `hashing`(9) `kernel_surface`(14) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
+| toolchain | `1.85.0` / `stable (1.98.1)` の両方で 339 passed（2026-09-23，D104–D107 適用後）．`cargo +stable clippy --all-targets --all-features -- -D warnings` も通過 |
+| schemas | `schemas/` に47個の JSON Schema 2020-12 + `SCHEMA_CHANGELOG.md`．`schema_freeze` が byte 単位で凍結．再生成は `EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze` |
 | kernel surface | `tests/kernel_surface_allow.txt` が公開 item の allow-list（= レビュー用チェックリスト，`module::name` で key 付け）．`NEW:` 件数が OV-23b の Kernel 成長指標．banned token は `tests/banned_tokens.txt`（識別子内も検出，`OV-23a` を書いた行だけ免除） |
 
 Python client，wire protocol，MockRadio，Simulation Engine は未着手（Phase 2 以降）．
@@ -119,8 +119,8 @@ exit criteria（§13）の達成状況（2026-09-23 時点）：
 |---|---|---|
 | 1 | 6文書の受理と §11 の全 verdict | **verdict は D1–D103 まで記録・適用済み**．6文書の受理そのものは未実施（§12） |
 | 2 | 全 rule に ID と OV-3 disposition | **277ルールに277行を用意し，GAP と未割当を解消**．内訳は default 223・process 21・producer 13・forward 11・withdrawn 7・consumer 1・分割 marker 1．部分カバーを示す `UNCERTAIN:` は37セル残り，受理レビューで確認する |
-| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が端から端まで動く | **達成**（2026-09-23，1.85.0 / stable 1.98.1 ともに336 passed，`#[ignore]` なし）．end-to-end pipeline ケースも通過 |
-| 4 | `schemas/`，`schema_freeze`，`SCHEMA_CHANGELOG.md` | **達成**．D51–D68 と D95–D103 の schema 変更を反映済み（`pattern` は無し） |
+| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が端から端まで動く | **達成**（2026-09-23，1.85.0 / stable 1.98.1 ともに339 passed，`#[ignore]` なし）．end-to-end pipeline ケースも通過 |
+| 4 | `schemas/`，`schema_freeze`，`SCHEMA_CHANGELOG.md` | **達成**．D51–D68・D95–D103・D104 の schema 変更を反映済み（`pattern` は無し） |
 | 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．`109 NEW / 281 public items`（2026-09-23，`plan::check_sink_links` を D99 で削除） |
 | 6 | 直接依存が §8 の4 crate ちょうど | **達成** |
 | 7 | §12 の移動後に `design/` と `plan/phase1/` の全リンクが解決 | 未（spec 受理後の Step 5） |
@@ -172,7 +172,7 @@ v1 schema に消費者がついた状態で再現する．
 
 ### Phase 1 に残っているもの（2026-09-23 時点）
 
-Step 4（crate 実装），D51–D68・D69–D80・D81–D84・D85–D87・D88–D91・D92–D94 の採用は完了．レビューループは owner の判断で一時停止し，binding と role の規則を先に書き下ろした（D95–D103，下記）．次はその適用への敵対的再レビュー1回，それから exit criterion 2 の部分カバー注記を受理レビューで確認し，6つの Phase 1 文書を受理すること．
+Step 4（crate 実装），D51–D68・D69–D80・D81–D84・D85–D87・D88–D91・D92–D94 の採用は完了．レビューループは owner の判断で一時停止し，binding と role の規則を先に書き下ろした（D95–D103，下記）．その適用への適合性レビューも済み，残っていた raised 4件も D104–D107 で適用した．次は exit criterion 2 の部分カバー注記を受理レビューで確認し，6つの Phase 1 文書を受理すること．
 
 #### D51–D68 — 採用・適用済み（2026-09-23）
 
@@ -281,11 +281,20 @@ D88–D91 の適用を Opus 5.5 が再レビューした（P0 ゼロ・P1 3・P2
 
 記録だけしたもの：Session action の target が X7 / SB-1 の検査を経ずに log に入る件（D91 と同じ類型．SB-1 の範囲外）．範囲外で見つけて記録だけしたもの：MA-46 の freeze 用 schema 一覧が D25 以前のまま（`StopCause` / `StopMode` / `StepOutcome`），`collect_prepare` が report の無い fragment を黙って飛ばす件．
 
+#### D104–D107 — raised 4件の適用（2026-09-23，採用・適用済み）
+
+owner が4件とも推奨を採用した．規則は増やしていない（277のまま）．理由と退けた案は §11「The four raised items, D104–D107」にある．
+- **D104**：MA-46 の一覧を `StopMode` / `StepOutcome` に直し，両方に schema を足した．role signature が持つ文書型に schema があるかを `ma_06_role_signatures_…` が確かめる．`ov_22_schema_freeze` は登録外の schema ファイルも拒否する（OV-22 の「`schemas/` と照合」を両方向にした）．
+- **D105**：report の無い resource は `collect_prepare` が拒否する（SB-41）．
+- **D106**：`SessionLog::append` は，target の X7 / SB-1 と，entry の時刻および `at` の X7 を検査する（RS-15）．
+- **D107**：SB-39 の guard が `matched` 全体を見る（need の entry と余分な key）．need の key は `need_key` 1か所で作る．
+
+新しい拒否9件は，scratch copy で1件ずつ無効化し，すべてテストが落ちることを確かめた．
+
 #### 次にすること
 
-1. §11 に raised として残した4件（MA-46 の一覧，`collect_prepare` の report 欠落，Session action target の X7 / SB-1，need key と guard）の扱いを決める．
-2. 37個の `UNCERTAIN:` 注記を受理レビューで確認し，6つの spec を受理する．
-3. 受理後に §12 の Step 5 を進め，spec を `design/` へ移動して全リンクを確認する．Vision の規範文編集は OV-6 / §12 の別途承認を経て行う．
+1. 37個の `UNCERTAIN:` 注記を受理レビューで確認し，6つの spec を受理する．
+2. 受理後に §12 の Step 5 を進め，spec を `design/` へ移動して全リンクを確認する．Vision の規範文編集は OV-6 / §12 の別途承認を経て行う．
 
 作業ツリーは未コミット．このセッションでは commit / push していない．
 

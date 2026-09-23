@@ -15,6 +15,14 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — 2026-09-23 — pre-freeze revision, adopted D104
+
+Still version 1: v4.0 has not frozen. Additive.
+
+- New `stop_mode` and `step_outcome`: `Provider::stop` and `Provider::step` carry them,
+  and MA-46 fixes the schema of every document type a role signature carries (D104).
+  `stop_cause` is unchanged; it stays on `Action::Abort`.
+
 ## v1 — 2026-09-23 — pre-freeze revision, adopted D95–D103 (the binding and role model)
 
 Still version 1: v4.0 has not frozen.
