@@ -374,9 +374,9 @@ fn sc_20_link_block_policy_full() {
 #[test]
 fn sc_20_link_drop_oldest() {
     let link = MemLink::new(BackPressure::DropOldest, 2);
-    for i in 0..3 {
-        link.publish(block(header(t(i * 10), 10, 1)));
-    }
+    // The outcome of each publish says what happened, and is never `Full`.
+    let outcomes: Vec<_> = (0..3).map(|i| link.publish(block(header(t(i * 10), 10, 1)))).collect();
+    assert_eq!(outcomes, [PublishOutcome::Accepted, PublishOutcome::Accepted, PublishOutcome::DroppedOldest]);
     assert_eq!(link.receive().expect("queued").first_sample_time(), t(10));
     assert_eq!(link.receive().expect("queued").first_sample_time(), t(20));
     assert_eq!(link.drops(), 1);
@@ -385,9 +385,8 @@ fn sc_20_link_drop_oldest() {
 #[test]
 fn sc_20_link_drop_newest() {
     let link = MemLink::new(BackPressure::DropNewest, 2);
-    for i in 0..3 {
-        link.publish(block(header(t(i * 10), 10, 1)));
-    }
+    let outcomes: Vec<_> = (0..3).map(|i| link.publish(block(header(t(i * 10), 10, 1)))).collect();
+    assert_eq!(outcomes, [PublishOutcome::Accepted, PublishOutcome::Accepted, PublishOutcome::DroppedNewest]);
     assert_eq!(link.receive().expect("queued").first_sample_time(), t(0));
     assert_eq!(link.receive().expect("queued").first_sample_time(), t(10));
     assert_eq!(link.drops(), 1);
@@ -424,6 +423,24 @@ fn sc_20b_drop_carry_preserves_attribution() {
     assert_eq!(carry.blocks, 1);
     assert!(link.take_drop_carry().is_empty(), "the carry is cleared when read");
     assert_eq!(link.drops(), 1, "the drop counter never resets");
+
+    // Two real drops into one carry: the flags are the union, the lost counts the sum.
+    link.receive().expect("the block the first drop kept");
+    let mut first = header(t(300), 10, 1);
+    first.flags = BlockFlags::GAP_BEFORE;
+    first.lost = Some(7);
+    let mut second = header(t(400), 10, 1);
+    // `lost` travels with a gap (SC-13), so the second drop carries one too.
+    second.flags = BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY;
+    second.lost = Some(5);
+    for h in [first, second, header(t(500), 10, 1)] {
+        link.publish(block(h));
+    }
+    let carry = link.take_drop_carry();
+    assert_eq!(carry.flags, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY);
+    assert_eq!(carry.lost, Some(12));
+    assert_eq!(carry.blocks, 2);
+    assert_eq!(link.drops(), 3);
 }
 
 #[test]

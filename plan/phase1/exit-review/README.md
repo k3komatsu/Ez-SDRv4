@@ -38,30 +38,34 @@ One file per document, so the rows stay beside the rules they are about.
 A `GAP` or an `UNCERTAIN` assertion is a finding for the exit review, not a defect to fix
 in passing: the table's job is to make the coverage visible rule by rule.
 
-## Result (2026-09-23, after D95–D103)
+## Result (2026-09-23, after D108)
 
-**277 rows for 277 rules — every rule of all six documents has a disposition.** D96 split SB-22 into
-SB-22 and SB-22a…SB-22h, one test each; D100 added MA-16a (process) and D103 RS-25a (forward).
-The six lettered rules before them split Run/coordinator, Executor/Link and Link-implementation
-responsibilities by phase (D56–D59, D74).
+**277 rows for 277 rules — every rule of all six documents has a disposition, and no
+assertion cell is `UNCERTAIN`.** D96 split SB-22 into SB-22 and SB-22a…SB-22h, one test
+each; D100 added MA-16a (process) and D103 RS-25a (forward). The six lettered rules before
+them split Run/coordinator, Executor/Link and Link-implementation responsibilities by phase
+(D56–D59, D74).
 
 | Disposition | Count |
 |---|---|
-| `default` (a Kernel item plus at least one Phase 1 test) | 223 |
-| `process` (a document, `Cargo.toml` or the test tree) | 21 |
+| `default` (a Kernel item plus at least one Phase 1 test) | 207 |
+| `process` (a document, `Cargo.toml` or the test tree) | 22 |
 | `producer` (the Module author's obligation) | 13 |
 | `forward` (a later phase) | 11 |
 | `withdrawn` (OV-1 keeps the number) | 7 |
 | `consumer` | 1 |
-| `default` derivation + `producer` flag-setting (SC-31a) | 1 |
+| `default` + `forward` (the Phase 1 half tested, a call site in a later phase) | 12 |
+| `default` + `producer` (SC-31a, SB-23, MA-13) | 3 |
+| `forward` + `producer` (MA-24) | 1 |
 | **`GAP`** (nothing carries the obligation) | **0** |
-| `UNCERTAIN` as the disposition itself | 0 |
+| `UNCERTAIN` | **0** |
 
-A further **37 assertion cells** carry an `UNCERTAIN:` note: the rule has a carrier, but
-one or more clauses remain partial or are carried by a test the rule does not cite.
+D108 resolved the 37 `UNCERTAIN:` notes the acceptance review had been left:
 
-**No rule is left without a disposition or carrier.** The 37 `UNCERTAIN:` notes are the remaining
-partial-coverage findings; they are not unassigned rules and remain visible for the acceptance review.
+- **A test was added, or a case added to one**, for OV-1, TM-13a, TM-16c, SC-20, SC-20b, SB-17, SB-20, RS-3, RS-27, MA-2 and MA-38. TM-7's and TM-15's notes were stale: their tests already had the calls they said were missing.
+- **The Phase 1 half is tested and a call site is later's**, marked in the rule text, for TM-13a, SC-20, SB-30, SB-41, RS-5, RS-10, RS-23, RS-25, MA-7, MA-9, MA-26 and MA-29. It is a producer obligation for SB-23 and MA-13, and both kinds for MA-24.
+- **The type is the carrier** for SB-1, SB-12, SC-23 and MA-36. The allow-list is the carrier for OV-20 and SC-22.
+- **The rule text was corrected** for SB-8 and OV-21 (the double's fourth key, `test.gain`, and the matcher scope) and OV-17 (a per-section hash no field stores). The carriers were already named elsewhere for OV-15a, RS-14 and RS-27.
 
 ### Former `GAP` rules — resolved by D51–D68
 

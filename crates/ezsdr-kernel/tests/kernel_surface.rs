@@ -96,6 +96,15 @@ fn cites_a_rule(doc: &str) -> bool {
     })
 }
 
+#[test]
+fn ov_01_citing_a_withdrawn_rule_satisfies_nothing() {
+    // A withdrawn rule keeps its number and states no obligation (OV-1), so a doc
+    // comment citing only one cites no rule, and one citing a live rule beside it does.
+    assert!(!cites_a_rule("Rule: SB-25a."));
+    assert!(!cites_a_rule("Rule: MA-43."));
+    assert!(cites_a_rule("Rule: SB-25a, SB-25."));
+}
+
 /// The rules withdrawn so far. OV-1 keeps their numbers, and nothing may cite one as
 /// the rule it implements.
 const WITHDRAWN: [&str; 7] = ["SB-25a", "SB-28", "SB-32", "RS-32a", "RS-37", "MA-4", "MA-43",
@@ -1027,6 +1036,21 @@ fn ma_06_role_signatures_name_only_documents_and_handles() {
             continue;
         }
         checked += 1;
+        // MA-2: no shared lifecycle supertrait; the only bounds are the auto traits
+        // `Send` (MA-5) and `Sync`.
+        let bounds: Vec<String> = role
+            .supertraits
+            .iter()
+            .map(|b| match b {
+                syn::TypeParamBound::Trait(t) => t.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::"),
+                _ => "a non-trait bound".to_owned(),
+            })
+            .collect();
+        assert!(
+            bounds.iter().all(|b| b == "Send" || b == "Sync"),
+            "MA-2: {} has a supertrait other than Send and Sync: {bounds:?}",
+            role.ident
+        );
         for member in &role.items {
             if let syn::TraitItem::Fn(method) = member {
                 let bad = ma6_violations(&method.sig, &allowed);

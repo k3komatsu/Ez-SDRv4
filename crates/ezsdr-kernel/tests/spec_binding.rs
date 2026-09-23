@@ -2,7 +2,7 @@
 
 mod support;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ezsdr_kernel::binding::{
     AdmissionCheckRegistry, BindingProfile, CheckStage, ComponentPlacement, LinkPlacement,
@@ -1445,6 +1445,52 @@ fn sb_17_capture_without_a_sink_refused() {
         validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)),
         Err(SpecError::Structural { .. })
     ));
+}
+
+#[test]
+fn sb_17_the_sink_must_write_the_kind_and_consume_the_contract() {
+    // MA-25 through SB-17: a bound Sink that serves the output's slot still has to write
+    // the artifact kind the output asks for and consume what its source port carries.
+    let mut spec = minimal_spec();
+    spec.outputs.push(output("rec"));
+    let mut profile = profile_binding(&["radio"]);
+    profile.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let with = |sink: &TestSink| {
+        let mut fx = Fixture::new();
+        fx.sinks = [(id("rec"), sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
+        validate(&spec, &profile, &fx.inputs(&providers)).map(|_| ())
+    };
+    with(&cf32_sink()).expect("a Sink writing test.capture from cf32");
+    let reason = refusal(with(&cf32_sink().writing(vec![ns("test.other")])));
+    assert!(reason.contains("SB-17: output rec wants artifact kind test.capture, which its Sink does not write"), "{reason}");
+    let deaf = TestSink::new(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.other").expect("id"));
+    let reason = refusal(with(&deaf));
+    assert!(reason.contains("which its Sink does not consume"), "{reason}");
+}
+
+#[test]
+fn sb_08_the_test_vocabulary_names_no_radio_word() {
+    // OV-21: the matcher is proven generic by a double whose keys are exactly these.
+    let keys: BTreeSet<String> = support::test_vocabulary().keys.iter().map(|k| k.key.to_string()).collect();
+    let want: BTreeSet<String> = ["test.count", "test.grid", "test.flag", "test.gain"].map(str::to_owned).into();
+    assert_eq!(keys, want);
+}
+
+#[test]
+fn sb_20_extensions_reach_the_manifest_verbatim() {
+    // The Kernel copies `extensions` into the Manifest's `spec` section and reads none
+    // of it: the section's body is the document, and its hash covers the content.
+    let content = serde_json::json!({ "nested": { "a": [1, 2, 3] }, "s": "opaque" });
+    let mut spec = minimal_spec();
+    spec.extensions.insert(ns("vendor.thing"), content.clone());
+    let body = serde_json::to_value(&spec).expect("serialises");
+    let section = ezsdr_kernel::manifest::SpecSection::migrated(body.clone(), &body).expect("hashes");
+    assert_eq!(section.body["extensions"]["vendor.thing"], content);
+    let bare = serde_json::to_value(minimal_spec()).expect("serialises");
+    let without = ezsdr_kernel::manifest::SpecSection::migrated(bare.clone(), &bare).expect("hashes");
+    assert_ne!(section.hash, without.hash, "the hash covers the extension");
 }
 
 #[test]

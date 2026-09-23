@@ -43,8 +43,8 @@ Phase 1 の Kernel crate は **実装済み**（Step 4 完了）．
 | crate | `crates/ezsdr-kernel` version `4.0.0-alpha.1`．`#![forbid(unsafe_code)]`，`#![warn(missing_docs)]` |
 | module | `id time contract stream hash module_api spec binding plan event policy run session manifest schema`（00-overview.md §5 のレイアウトどおり） |
 | 直接依存 | `serde` `serde_json` `schemars` `sha2` の4つだけ（exit criterion 6）．解決後のツリーは `Cargo.lock` で28 package（crate 自身を含む） |
-| test | 339 件．`spec_binding`(96) `stream_contract`(69) `run_session`(71) `time_model`(48) `module_api`(26) `hashing`(9) `kernel_surface`(14) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
-| toolchain | `1.85.0` / `stable (1.98.1)` の両方で 339 passed（2026-09-23，D104–D107 適用後）．`cargo +stable clippy --all-targets --all-features -- -D warnings` も通過 |
+| test | 345 件．`spec_binding`(99) `stream_contract`(69) `run_session`(72) `time_model`(49) `module_api`(26) `hashing`(9) `kernel_surface`(15) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
+| toolchain | `1.85.0` / `stable (1.98.1)` の両方で 345 passed（2026-09-23，D108 適用後）．`cargo +stable clippy --all-targets --all-features -- -D warnings` も通過 |
 | schemas | `schemas/` に47個の JSON Schema 2020-12 + `SCHEMA_CHANGELOG.md`．`schema_freeze` が byte 単位で凍結．再生成は `EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze` |
 | kernel surface | `tests/kernel_surface_allow.txt` が公開 item の allow-list（= レビュー用チェックリスト，`module::name` で key 付け）．`NEW:` 件数が OV-23b の Kernel 成長指標．banned token は `tests/banned_tokens.txt`（識別子内も検出，`OV-23a` を書いた行だけ免除） |
 
@@ -117,9 +117,9 @@ exit criteria（§13）の達成状況（2026-09-23 時点）：
 
 | # | 条件 | 状態 |
 |---|---|---|
-| 1 | 6文書の受理と §11 の全 verdict | **verdict は D1–D103 まで記録・適用済み**．6文書の受理そのものは未実施（§12） |
-| 2 | 全 rule に ID と OV-3 disposition | **277ルールに277行を用意し，GAP と未割当を解消**．内訳は default 223・process 21・producer 13・forward 11・withdrawn 7・consumer 1・分割 marker 1．部分カバーを示す `UNCERTAIN:` は37セル残り，受理レビューで確認する |
-| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が端から端まで動く | **達成**（2026-09-23，1.85.0 / stable 1.98.1 ともに339 passed，`#[ignore]` なし）．end-to-end pipeline ケースも通過 |
+| 1 | 6文書の受理と §11 の全 verdict | **verdict は D1–D108 まで記録・適用済み**．6文書の受理そのものは未実施（§12） |
+| 2 | 全 rule に ID と OV-3 disposition | **277ルールに277行を用意し，GAP と未割当を解消**．内訳は default 207・process 22・producer 13・forward 11・withdrawn 7・consumer 1・分割 16（default+forward 12，default+producer 3，forward+producer 1）．`UNCERTAIN:` は D108 でゼロ **（達成）** |
+| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が端から端まで動く | **達成**（2026-09-23，1.85.0 / stable 1.98.1 ともに345 passed，`#[ignore]` なし）．end-to-end pipeline ケースも通過 |
 | 4 | `schemas/`，`schema_freeze`，`SCHEMA_CHANGELOG.md` | **達成**．D51–D68・D95–D103・D104 の schema 変更を反映済み（`pattern` は無し） |
 | 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．`109 NEW / 281 public items`（2026-09-23，`plan::check_sink_links` を D99 で削除） |
 | 6 | 直接依存が §8 の4 crate ちょうど | **達成** |
@@ -291,9 +291,19 @@ owner が4件とも推奨を採用した．規則は増やしていない（277�
 
 新しい拒否9件は，scratch copy で1件ずつ無効化し，すべてテストが落ちることを確かめた．
 
+#### D108 — `UNCERTAIN:` 37セルの解消（2026-09-23，採用・適用済み）
+
+owner が推奨を全件採用した．規則数は277のまま．理由と退けた案は §11「The 37 `UNCERTAIN:` cells, D108」，行の分類は [exit-review/README.md](plan/phase1/exit-review/README.md) にある．
+- **テストを追加**：OV-1，TM-13a，TM-16c，SC-20，SC-20b，SB-17，SB-20，RS-3，RS-27，MA-2，MA-38（関数6本と既存テストへのケース追加）．TM-7 と TM-15 の注記は古く，テストはすでにあった．
+- **分割 marker**：Phase 1 の半分をテストし，呼び出し箇所を Phase 2 の coordinator か Provider に回す（SC-31a の書き方）．12規則が default+forward，SB-23 と MA-13 が default+producer，MA-24 が forward+producer．
+- **型か allow-list を担い手とする**：SB-1，SB-12，SC-23，MA-36，OV-20，SC-22．
+- **規則文の修正**：SB-8（matcher に範囲を絞った．「Kernel は channel や sample rate を名指さない」は SC-14 と TM-13a に反していた），OV-21/SB-8 の key 一覧に `test.gain` を追加，OV-17 の「section ごとの hash」を削除，MA-26 の「unknown」を `CleanupFailure` に言い換え，OV-1 を process に（OV-3 の範囲を OV-1…OV-19 に）．
+
+新しいテストが担う7経路は，scratch copy で1件ずつ無効化し，それぞれ新しいテストだけが落ちることを確かめた．
+
 #### 次にすること
 
-1. 37個の `UNCERTAIN:` 注記を受理レビューで確認し，6つの spec を受理する．
+1. 6つの spec を受理する（OV-5：Gate A・B・C ごとに decisions 表，規則，テスト表の順）．
 2. 受理後に §12 の Step 5 を進め，spec を `design/` へ移動して全リンクを確認する．Vision の規範文編集は OV-6 / §12 の別途承認を経て行う．
 
 作業ツリーは未コミット．このセッションでは commit / push していない．

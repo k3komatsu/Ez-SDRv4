@@ -486,6 +486,12 @@ fn tm_13a_sample_clock_declared_before_its_origin_exists() {
     assert!(reg.declare_sample_clock(far, root, rat(10, 1)).is_err());
     reg.register_sample_clock(&handle, 1_000_000_003).expect("registered before the first block");
     assert_eq!(reg.nominal_rate(handle.id), Ok(rat(20_000_000, 1)));
+    // A SampleClock hangs off a Root; naming a Derived domain is `NotARoot`.
+    let not_a_root = derived(&reg, root, 10, 1, 0);
+    assert_eq!(
+        reg.declare_sample_clock(stream("dev0/rx/1"), not_a_root, rat(10, 1)).map(|_| ()),
+        Err(TimeError::NotARoot { id: not_a_root })
+    );
 }
 
 #[test]
@@ -722,6 +728,19 @@ fn tm_17b_advance_to_zero_delay_cap() {
     }
     respawn(auth.clone(), root, 10);
     assert_eq!(auth.advance_to(TimePoint::new(root, 20)), Err(TimeError::LimitExceeded));
+}
+
+#[test]
+fn tm_16c_a_derived_instant_between_root_ticks_is_refused() {
+    // A reading may round and a firing may not: two derived ticks per root tick, so an
+    // odd tick lies between root ticks and is `Inexact` for all three entry points.
+    let (reg, root, auth) = sim_authority();
+    let fine = derived(&reg, root, 1, 2, 0);
+    let between = TimePoint::new(fine, 3);
+    assert!(matches!(auth.schedule(between, Box::new(|_| ())), Err(TimeError::Inexact { .. })));
+    assert!(matches!(auth.wait_until(between), Err(TimeError::Inexact { .. })));
+    assert!(matches!(auth.advance_to(between), Err(TimeError::Inexact { .. })));
+    assert!(auth.schedule(TimePoint::new(fine, 4), Box::new(|_| ())).is_ok(), "a root tick is scheduled");
 }
 
 #[test]

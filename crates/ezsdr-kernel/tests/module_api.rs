@@ -756,6 +756,13 @@ fn ma_39_island_admission() {
     let err = admit_islands(&bad).expect_err("placed twice");
     assert!(err.message.contains("exactly once"), "{err}");
 
+    // An Island naming an Executor with no descriptor. `plan()` refuses it earlier
+    // (SB-22f), and a direct caller of `admit_islands` is refused here (MA-38).
+    let orphan = vec![island(&["a", "b"], "nowhere")];
+    let bad = IslandContext { islands: &orphan, ..ctx_clone(&ctx) };
+    let err = admit_islands(&bad).expect_err("an unknown executor");
+    assert!(err.message.contains("names unknown executor nowhere"), "{err}");
+
     // 2. An executor kind the component does not want.
     let mut picky = components.clone();
     picky.get_mut(&id("a")).expect("present").requires.executor_kind = ns("test.gpu");

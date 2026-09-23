@@ -126,6 +126,31 @@ fn rs_03_failure_at_each_stage_reaches_cleanup() {
             RunState::CleanedUp { termination: Termination::Failed { stage: s } } if *s == stage
         ));
     }
+    // A cancellation before `Running` stops orderly with `Stopped{client}`, from every
+    // state it can arrive in.
+    let forward = [RunState::Validated {}, RunState::Planned {}, RunState::Prepared {}, RunState::Armed {}];
+    for reached in 0..=forward.len() {
+        let mut run = RunStateMachine::new(&clock);
+        for s in &forward[..reached] {
+            run.move_to(s.clone(), None, &clock).expect("forward");
+        }
+        run.begin_stopping(CleanupMode::Orderly, None, &clock).expect("a cancellation stops orderly");
+        run.finish(Termination::Stopped { cause: StopCause::Client {} }, None, &clock).expect("cleans up");
+        assert!(matches!(
+            run.state(),
+            RunState::CleanedUp { termination: Termination::Stopped { cause: StopCause::Client {} } }
+        ));
+    }
+}
+
+#[test]
+fn rs_27_a_second_declaration_of_one_kind_is_refused() {
+    // One Vocabulary cannot replace another's default reaction and severity, and the
+    // refusal says what happened rather than "the kind is not registered".
+    let mut k = kinds();
+    let decl = test_vocabulary().event_kinds.into_iter().next().expect("the test Vocabulary declares a kind");
+    let kind = decl.kind.to_string();
+    assert_eq!(k.register(Some(ns("test")), decl), Err(RunError::EventKindAlreadyRegistered { kind }));
 }
 
 #[test]
