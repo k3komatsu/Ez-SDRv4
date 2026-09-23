@@ -1,25 +1,7 @@
 //! Memory domains and buffer references — `02-stream-contract.md` SC-6…SC-9 (Vision §31).
 
-use serde::{Deserialize, Serialize};
-
 use super::BlockRef;
 use crate::id::MemoryDomainId;
-
-/// A memory domain: an id and a namespaced `kind`. The Kernel compares ids and
-/// never interprets kinds, because the Kernel is frozen while Vision §31's list of
-/// kinds will grow (decision S6).
-///
-/// Kinds named at v4.0: `ezsdr.mem.host`, `pinned_host`, `huge_pages`,
-/// `wasm_linear`, `gpu`, `device`, `remote`.
-///
-/// Rule: SC-6.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct MemoryDomain {
-    /// Node-qualified identity (SC-6, X7).
-    pub id: MemoryDomainId,
-    /// Namespaced kind string, uninterpreted by the Kernel (SC-6).
-    pub kind: String,
-}
 
 /// A memory domain, an opaque handle and a length in bytes. The handle is
 /// meaningful only to the owner of that memory domain — the producing pool, or the

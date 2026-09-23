@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::event::{EventKind, HotLayout, Severity};
+use crate::event::{EventKind, Severity};
 use crate::run::RunError;
 use crate::spec::Namespace;
 
@@ -15,6 +15,7 @@ use crate::spec::Namespace;
 ///
 /// Rule: RS-26.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum Reaction {
     /// Carry on.
@@ -33,8 +34,9 @@ pub enum Reaction {
 /// radio kind's default reaction in the Kernel would be a radio policy decision
 /// inside a frozen tier.
 ///
-/// Rule: RS-27, RS-28, RS-32a.
+/// Rule: RS-27, RS-28.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EventKindDecl {
     /// The kind (RS-27).
     pub kind: EventKind,
@@ -42,8 +44,6 @@ pub struct EventKindDecl {
     pub default: Reaction,
     /// How bad it is; RS-29 falls back to this for an unregistered kind (RS-28).
     pub severity: Severity,
-    /// A fixed hot-path layout, when the kind has one (RS-32a).
-    pub hot_layout: Option<HotLayout>,
 }
 
 /// Which kinds exist, who owns them and what each defaults to.
@@ -73,15 +73,19 @@ impl EventKindRegistry {
         let mut reg = EventKindRegistry::new();
         let kind = |s: &str| EventKind::parse(s).expect("a Kernel kind is well formed");
         for (k, default, severity) in [
-            (EventKind::EVENTS_DROPPED, Reaction::MarkArtifact, Severity::Warning),
-            (EventKind::LINK_BACKPRESSURE, Reaction::MarkArtifact, Severity::Warning),
-            (EventKind::PROCESSOR_DEADLINE_MISS, Reaction::MarkArtifact, Severity::Warning),
+            (EventKind::EVENTS_DROPPED, Reaction::MarkArtifact, Severity::Warning,
+            ),
+            (EventKind::LINK_BACKPRESSURE, Reaction::MarkArtifact, Severity::Warning,
+            ),
+            (EventKind::PROCESSOR_DEADLINE_MISS, Reaction::MarkArtifact, Severity::Warning,
+            ),
             (EventKind::DEVICE_LOST, Reaction::Abort, Severity::Fatal),
             (EventKind::STEP_LIVELOCK, Reaction::Abort, Severity::Fatal),
         ] {
             reg.register(
                 None,
-                EventKindDecl { kind: kind(k), default, severity, hot_layout: None },
+                EventKindDecl { kind: kind(k), default, severity,
+                },
             )
             .expect("the Kernel's own kinds do not collide");
         }
@@ -104,7 +108,8 @@ impl EventKindRegistry {
         if self.decls.contains_key(&decl.kind) {
             // Not "unknown": RS-27 refuses a *second* declaration so that one
             // Vocabulary cannot overwrite another's default reaction and severity.
-            return Err(RunError::EventKindAlreadyRegistered { kind: decl.kind.to_string() });
+            return Err(RunError::EventKindAlreadyRegistered { kind: decl.kind.to_string(),
+            });
         }
         self.owners.insert(decl.kind.clone(), owner);
         self.decls.insert(decl.kind.clone(), decl);
@@ -119,7 +124,8 @@ impl EventKindRegistry {
     /// Refuses an unregistered kind, so that a misspelling in `policies.failure` is
     /// an error rather than a silently ineffective entry (SB-18).
     pub fn require(&self, kind: &EventKind) -> Result<&EventKindDecl, RunError> {
-        self.get(kind).ok_or_else(|| RunError::UnknownEventKind { kind: kind.to_string() })
+        self.get(kind).ok_or_else(|| RunError::UnknownEventKind { kind: kind.to_string(),
+        })
     }
 
     /// Every registered kind, in order (RS-33, RS-38).
@@ -131,8 +137,7 @@ impl EventKindRegistry {
     /// kind's declared default (RS-26, RS-28, SB-18).
     pub fn compile(
         &self,
-        overrides: &BTreeMap<EventKind, Reaction>,
-    ) -> Result<Policy, RunError> {
+        overrides: &BTreeMap<EventKind, Reaction>) -> Result<Policy, RunError> {
         for kind in overrides.keys() {
             self.require(kind)?;
         }
@@ -146,6 +151,7 @@ impl EventKindRegistry {
 
 /// A compiled reaction table for one Run (RS-26).
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Policy {
     /// Kind to reaction (RS-26).
     pub table: BTreeMap<EventKind, Reaction>,

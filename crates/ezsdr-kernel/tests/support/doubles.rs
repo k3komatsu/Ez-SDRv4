@@ -4,8 +4,8 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ezsdr_kernel::binding::{AdmissionCheck, CheckStage, Violation};
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection};
@@ -16,7 +16,7 @@ use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
     ActionReceiver, ActionSubmitter, CoerceReport, CompileRule, ComponentDescriptor,
     ComponentImpl, ComponentKind, ComponentRequires, ComponentTiming, Deployment, Driving,
-    Executor, ExecutorDescriptor, Fidelity, IslandDecl, ModuleDescriptor, ModuleError,
+    Executor, ExecutorDescriptor, Fidelity, IslandDecl, LinkDescriptor, ModuleDescriptor, ModuleError,
     ModuleErrorKind, ModuleRef, ParamDecl, PrepareContext, Provider, ProviderInstance, Requested,
     Resource, Role, Sink, SinkDescriptor, StepOutcome, StopMode, UpdateClass, VerbDecl, Version,
     VocabularyDescriptor,
@@ -53,6 +53,11 @@ pub fn rid(s: &str) -> ResourceId {
 /// Parses a [`ModuleId`] from a literal known to be well formed.
 pub fn mid(s: &str) -> ModuleId {
     ModuleId::parse(s).expect("a well-formed ModuleId literal")
+}
+
+/// The exact version every test Module registers, as a binding pins it (SB-22, D78).
+pub fn mref(s: &str) -> ModuleRef {
+    ModuleRef { id: mid(s), version: Version::new(1, 0, 0) }
 }
 
 /// A placeholder content hash for descriptors that need one (MA-37).
@@ -108,7 +113,6 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
             kind: EventKind::parse("test.custom").expect("a valid kind"),
             default: Reaction::Continue,
             severity: ezsdr_kernel::event::Severity::Info,
-            hot_layout: None,
         }],
         verbs: vec![
             VerbDecl {
@@ -125,7 +129,8 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
                     late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
                 },
             },
-            VerbDecl { verb: id("sweep"), compiles_to: CompileRule::PeripheralCommand },
+            VerbDecl { verb: id("sweep"), compiles_to: CompileRule::PeripheralCommand {},
+            },
         ],
         checks: vec![ns("test.limits")],
     }
@@ -149,7 +154,8 @@ impl TestLimitsCheck {
     pub fn new() -> TestLimitsCheck {
         TestLimitsCheck {
             section: ns("test.limits"),
-            stages: vec![CheckStage::Validate, CheckStage::Prepare, CheckStage::Runtime],
+            stages: vec![CheckStage::Validate, CheckStage::Prepare, CheckStage::Runtime,
+            ],
         }
     }
 }
@@ -245,7 +251,9 @@ impl TestProvider {
         let line = |root: &ResourceId, n: u32| Resource {
             id: root.child(&n.to_string()).expect("a valid child path"),
             kind: ns("test.line"),
-            capabilities: [(key("test.count"), CapabilityValue::One { value: Value::Int(count) })]
+            capabilities: [(key("test.count"), CapabilityValue::One { value: Value::Int(count),
+                },
+            )]
                 .into_iter()
                 .collect(),
             children: Vec::new(),
@@ -276,13 +284,16 @@ impl TestProvider {
         TestProvider {
             instance: ProviderInstance {
                 id: root.clone(),
-                module: ModuleRef { id: mid("ezsdr.test.provider"), version: Version::new(1, 0, 0) },
+                module: ModuleRef { id: mid("ezsdr.test.provider"), version: Version::new(1, 0, 0),
+                },
                 profile: None,
                 tree: Resource {
                     id: root.clone(),
                     kind: ns("test.device"),
                     capabilities: [
-                        (key("test.count"), CapabilityValue::One { value: Value::Int(count) }),
+                        (key("test.count"), CapabilityValue::One { value: Value::Int(count),
+                            },
+                        ),
                         // A grid is a discrete set: a declared continuous range
                         // could not express "multiples of 20", so SB-7's coercion
                         // path would never be reached.
@@ -344,7 +355,9 @@ impl TestProvider {
             let n = if i == 0 { first } else { second };
             child
                 .capabilities
-                .insert(key("test.count"), CapabilityValue::One { value: Value::Int(n) });
+                .insert(key("test.count"), CapabilityValue::One { value: Value::Int(n),
+                },
+            );
         }
         self
     }
@@ -365,6 +378,18 @@ impl TestProvider {
     /// Declares a fidelity other than all-`none` (MA-42).
     pub fn with_fidelity(mut self, fidelity: Fidelity) -> TestProvider {
         self.instance.fidelity = fidelity;
+        self
+    }
+
+    /// Reports another instance id than its root's (X7, D91).
+    pub fn with_instance_id(mut self, id: ResourceId) -> TestProvider {
+        self.instance.id = id;
+        self
+    }
+
+    /// Reports itself as another Module version than the one registered (SB-22, D78).
+    pub fn with_module(mut self, module: ModuleRef) -> TestProvider {
+        self.instance.module = module;
         self
     }
 
@@ -429,7 +454,8 @@ impl Provider for TestProvider {
             });
         }
         for (k, c) in &request.constraints {
-            let Constraint::Eq { value: v } = c else { continue };
+            let Constraint::Eq { value: v } = c else { continue;
+            };
             if let (true, Some(step), Value::Num(x)) = (k.as_str() == "test.grid", self.grid, v) {
                 let snapped = (x / step).round() * step;
                 report.applied.insert(k.clone(), Value::Num(snapped));
@@ -448,7 +474,8 @@ impl Provider for TestProvider {
         Ok(report)
     }
 
-    fn prepare(&mut self, f: &Fragment, _ctx: PrepareContext<'_>) -> Result<PrepareReport, ModuleError> {
+    fn prepare(&mut self, f: &Fragment, _ctx: PrepareContext<'_>,
+    ) -> Result<PrepareReport, ModuleError> {
         self.record("prepare");
         self.fail_if(FailAt::Prepare)?;
         // MA-12: the report's coercions equal what `coerce` returned for the same
@@ -504,7 +531,7 @@ pub fn test_provider_descriptor() -> ModuleDescriptor {
             id: ns("test"),
             req: ezsdr_kernel::module_api::VersionReq(Version::new(1, 0, 0)),
         }],
-        deployment: Deployment::InProcess,
+        deployment: Deployment::InProcess {},
         impl_hash: Some(some_hash("ezsdr.test.provider")),
     }
 }
@@ -516,6 +543,8 @@ pub fn test_provider_descriptor() -> ModuleDescriptor {
 /// Phase 2.
 pub struct TestExecutor {
     descriptor: ExecutorDescriptor,
+    /// The per-Island descriptors received at prepare (MA-19).
+    pub prepared_components: Mutex<Vec<BTreeMap<Ident, ComponentDescriptor>>>,
     /// How many `step` calls it has seen, and at which instants (MA-30).
     pub steps: Mutex<Vec<TimePoint>>,
     /// How many further steps report `progressed` (MA-20, MA-30).
@@ -527,11 +556,13 @@ impl TestExecutor {
     pub fn new(domain: MemoryDomainId) -> TestExecutor {
         TestExecutor {
             descriptor: ExecutorDescriptor {
+                module: mref("ezsdr.test.executor"),
                 kind: ns("test.executor"),
                 memory_domains: vec![domain],
                 impl_kinds: vec![ns("test.impl")],
                 capabilities: BTreeMap::new(),
             },
+            prepared_components: Mutex::new(Vec::new()),
             steps: Mutex::new(Vec::new()),
             progress_budget: Mutex::new(0),
         }
@@ -549,7 +580,13 @@ impl Executor for TestExecutor {
         &self.descriptor
     }
 
-    fn prepare(&mut self, island: &IslandDecl, _ctx: PrepareContext<'_>) -> Result<PrepareReport, ModuleError> {
+    fn prepare(&mut self, island: &IslandDecl,
+        ctx: PrepareContext<'_>,
+    ) -> Result<PrepareReport, ModuleError> {
+        self.prepared_components
+            .lock()
+            .expect("lock")
+            .push(ctx.components);
         Ok(PrepareReport {
             fragment: island.executor.clone(),
             effective: BTreeMap::new(),
@@ -594,11 +631,25 @@ pub struct TestSink {
 }
 
 impl TestSink {
+    /// Reports itself as another Module version than the one registered (SB-22, D82).
+    pub fn with_module(mut self, module: ModuleRef) -> TestSink {
+        self.descriptor.module = module;
+        self
+    }
+
+    /// Reads blocks from `domains` only (MA-25, D81).
+    pub fn reading(mut self, domains: Vec<MemoryDomainId>) -> TestSink {
+        self.descriptor.memory_domains = domains;
+        self
+    }
+
     /// A recorder writing one artifact (MA-25).
     pub fn new(contract: DataContractId) -> TestSink {
         TestSink {
             descriptor: SinkDescriptor {
+                module: mref("ezsdr.test.sink"),
                 kind: ns("test.recorder"),
+                memory_domains: vec![MemoryDomainId::local(0)],
                 contracts: vec![contract],
                 artifact_kinds: vec![ns("test.capture")],
             },
@@ -622,7 +673,8 @@ impl Sink for TestSink {
         &self.descriptor
     }
 
-    fn prepare(&mut self, f: &Fragment, _ctx: PrepareContext<'_>) -> Result<PrepareReport, ModuleError> {
+    fn prepare(&mut self, f: &Fragment, _ctx: PrepareContext<'_>,
+    ) -> Result<PrepareReport, ModuleError> {
         Ok(PrepareReport {
             fragment: f.id.clone(),
             effective: BTreeMap::new(),
@@ -657,8 +709,8 @@ impl Sink for TestSink {
     fn cleanup(&mut self) {}
 }
 
-/// The Sink Module's descriptor, whose `Sink` role is what SB-25a's `module` field
-/// resolves to when RS-12 builds a Session's implicit Spec.
+/// The Sink Module's descriptor, whose `Sink` role is what a Sink binding's `module`
+/// resolves to when RS-12 builds a Session's implicit Spec (SB-22).
 pub fn test_sink_descriptor() -> ModuleDescriptor {
     ModuleDescriptor {
         id: mid("ezsdr.test.sink"),
@@ -666,7 +718,7 @@ pub fn test_sink_descriptor() -> ModuleDescriptor {
         kernel_api: Version::new(4, 0, 0),
         roles: vec![Role::Sink],
         vocabularies: Vec::new(),
-        deployment: Deployment::InProcess,
+        deployment: Deployment::InProcess {},
         impl_hash: Some(some_hash("ezsdr.test.sink")),
     }
 }
@@ -679,8 +731,39 @@ pub fn test_executor_descriptor() -> ModuleDescriptor {
         kernel_api: Version::new(4, 0, 0),
         roles: vec![Role::Executor],
         vocabularies: Vec::new(),
-        deployment: Deployment::InProcess,
+        deployment: Deployment::InProcess {},
         impl_hash: Some(some_hash("ezsdr.test.executor")),
+    }
+}
+
+/// The Link Module descriptor used by plan fixtures (MA-28).
+pub fn test_link_module_descriptor() -> ModuleDescriptor {
+    ModuleDescriptor {
+        id: mid("ezsdr.test.link"),
+        version: Version::new(1, 0, 0),
+        kernel_api: Version::new(4, 0, 0),
+        roles: vec![Role::Link],
+        vocabularies: Vec::new(),
+        deployment: Deployment::InProcess {},
+        impl_hash: Some(some_hash("ezsdr.test.link")),
+    }
+}
+
+/// A Link descriptor supporting every Phase 1 back-pressure policy (MA-28).
+pub fn test_link_descriptor() -> LinkDescriptor {
+    LinkDescriptor {
+        module: mref("ezsdr.test.link"),
+        kind: ns("test.link"),
+        connects: vec![
+            (MemoryDomainId::local(0), MemoryDomainId::local(1)),
+            (MemoryDomainId::local(1), MemoryDomainId::local(0)),
+        ],
+        policies: vec![
+            ezsdr_kernel::stream::BackPressure::Block,
+            ezsdr_kernel::stream::BackPressure::DropOldest,
+            ezsdr_kernel::stream::BackPressure::DropNewest,
+        ],
+        cross_process: false,
     }
 }
 
@@ -701,7 +784,8 @@ pub fn recorder_component(contract: DataContractId) -> ComponentDescriptor {
             default: Value::Bool(false),
         }],
         timing: ComponentTiming::default(),
-        requires: ComponentRequires { executor_kind: "any".to_owned(), memory_bytes: None },
+        requires: ComponentRequires { executor_kind: "any".to_owned(), memory_bytes: None,
+        },
         implementation: ComponentImpl {
             kind: ns("test.impl"),
             id: "recorder".to_owned(),
@@ -715,7 +799,8 @@ pub fn recorder_component(contract: DataContractId) -> ComponentDescriptor {
 pub fn source_component(contract: DataContractId) -> ComponentDescriptor {
     let mut c = recorder_component(contract.clone());
     c.id = id("source");
-    c.ports = vec![Port { name: "out".to_owned(), direction: PortDirection::Out, contract }];
+    c.ports = vec![Port { name: "out".to_owned(), direction: PortDirection::Out, contract,
+    }];
     c.implementation.id = "source".to_owned();
     c
 }
@@ -795,7 +880,8 @@ pub struct TestSubmitter {
 impl TestSubmitter {
     /// A submitter admitting everything (MA-14a).
     pub fn new() -> TestSubmitter {
-        TestSubmitter { delivered: Mutex::new(Vec::new()), ceiling: None, next: AtomicU64::new(0) }
+        TestSubmitter { delivered: Mutex::new(Vec::new()), ceiling: None, next: AtomicU64::new(0),
+        }
     }
 
     /// A submitter refusing a `TxBurst` whose `test.limits` metadata exceeds the

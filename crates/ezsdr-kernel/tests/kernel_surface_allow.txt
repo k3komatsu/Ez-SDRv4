@@ -70,7 +70,6 @@ time::domain::SampleClockRecord = ClockDomain
 time::domain::SampleClockHandle = NEW: TM-13a's id-and-ratio allocated at prepare, before TM-13b or TM-13e fixes the origin.
 
 # --- data / Stream Contract (audit §13 `data`) -------------------------------
-stream::buffer::MemoryDomain = MemoryDomain
 stream::buffer::BufferRef = BufferRef
 stream::buffer::HostMemoryAccess = NEW: SC-8's only route to host bytes, so that invariant 34's "no raw slices" has a mechanism.
 stream::block::SampleBlock = SampleBlock
@@ -134,7 +133,7 @@ binding::Binding = Binding resolution
 binding::BindingProfile = BindingProfile
 binding::Placements = NEW: SB-25's island, component and link assignment, which R21 keeps out of the Spec.
 binding::ComponentPlacement = NEW: SB-25's component-to-island and memory-domain entry.
-binding::LinkPlacement = NEW: SB-25's Link Module per graph link.
+binding::LinkPlacement = NEW: SB-25's Link Module per data link, named by its ends.
 binding::KERNEL_SECTIONS = environment
 binding::BINDING_TOP_LEVEL = BindingProfile
 spec::ExperimentSpec = ExperimentSpec envelope
@@ -222,7 +221,6 @@ session::Compiled = NEW: RS-14's compilation result: Kernel Actions, or a Lease 
 session::ControlOp = NEW: RS-13's control-path acts, which the Kernel Action set deliberately excludes.
 session::compile = Run state machine
 session::implicit_spec = Run state machine
-session::resolve_scheduled = fragments
 
 # --- events and actions (audit §13 `events/actions`) -------------------------
 event::Event = Event envelope
@@ -233,9 +231,7 @@ event::EventCollector = counters
 event::EventHandle = counters
 event::EventSink = Event envelope
 event::CounterRow = counters
-event::DroppedPerKind = EVENTS_DROPPED
 event::HOT_PAYLOAD_BYTES = NEW: RS-32's inline payload limit, an in-process constant with no schema.
-event::HotLayout = NEW: RS-32a's declared hot-path layout and the schema it decodes to.
 policy::EventKindDecl = NEW: RS-28 puts a kind's default reaction where the kind is registered, not in the Kernel.
 policy::EventKindRegistry = NEW: RS-27's registry, so the thirteenth radio kind is not a Kernel change.
 policy::Policy = Policy table

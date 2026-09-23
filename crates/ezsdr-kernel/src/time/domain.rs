@@ -17,10 +17,11 @@ pub const RATIO_TERM_CAP: u64 = 1 << 31;
 
 /// What a domain's tick zero is anchored to (TM-3).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EpochRef {
     /// Tick zero is 1970-01-01T00:00:00Z.
-    Utc1970,
+    Utc1970 {},
     /// Tick zero is whatever set it; the string names the mechanism, for example
     /// `uhd.set_time_unknown_pps` or `sim.run_start` (Vision §15, §50; OV-23a: a
     /// named example, not a Kernel dependency).
@@ -34,6 +35,7 @@ pub enum EpochRef {
 ///
 /// A `Derived` domain names a `Root` directly; there are no chains (decision T2).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClockDomainKind {
     /// A timekeeper: a tick rate and what tick zero means.
@@ -57,6 +59,7 @@ pub enum ClockDomainKind {
 /// A registered clock domain. Immutable once registered, except that `ended_at`
 /// may be set once (TM-12).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ClockDomain {
     /// Node-qualified identity (TM-11).
     pub id: ClockDomainId,
@@ -69,7 +72,8 @@ pub struct ClockDomain {
 impl ClockDomain {
     /// A root timekeeper (TM-3).
     pub fn root(id: ClockDomainId, tick_rate: Rational, epoch: EpochRef) -> ClockDomain {
-        ClockDomain { id, kind: ClockDomainKind::Root { tick_rate, epoch }, ended_at: None }
+        ClockDomain { id, kind: ClockDomainKind::Root { tick_rate, epoch }, ended_at: None,
+        }
     }
 
     /// An exact division of a root (TM-3).
@@ -81,7 +85,8 @@ impl ClockDomain {
     ) -> ClockDomain {
         ClockDomain {
             id,
-            kind: ClockDomainKind::Derived { root, root_ticks_per_tick, origin },
+            kind: ClockDomainKind::Derived { root, root_ticks_per_tick, origin,
+            },
             ended_at: None,
         }
     }
@@ -98,15 +103,15 @@ impl ClockDomain {
     fn terms(&self) -> (u64, u64, i64) {
         match &self.kind {
             ClockDomainKind::Root { .. } => (1, 1, 0),
-            ClockDomainKind::Derived { root_ticks_per_tick, origin, .. } => {
-                (root_ticks_per_tick.num(), root_ticks_per_tick.den(), *origin)
-            }
+            ClockDomainKind::Derived { root_ticks_per_tick, origin, .. } => (root_ticks_per_tick.num(), root_ticks_per_tick.den(), *origin,
+            ),
         }
     }
 }
 
 /// One SampleClock as the Manifest records it, one per clock, in order, per stream (TM-13d).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SampleClockRecord {
     /// The stream that owns the clock (TM-13a).
     pub stream: ResourceId,
@@ -166,14 +171,15 @@ impl ClockRegistry {
         let mut domains = BTreeMap::new();
         domains.insert(
             ClockDomainId::UTC,
-            ClockDomain::root(ClockDomainId::UTC, ghz, EpochRef::Utc1970),
+            ClockDomain::root(ClockDomainId::UTC, ghz, EpochRef::Utc1970 {}),
         );
         domains.insert(
             ClockDomainId::HOST_MONOTONIC,
             ClockDomain::root(
                 ClockDomainId::HOST_MONOTONIC,
                 ghz,
-                EpochRef::Arbitrary { set_by: "host.monotonic".to_owned() },
+                EpochRef::Arbitrary { set_by: "host.monotonic".to_owned(),
+                },
             ),
         );
         ClockRegistry {
@@ -238,7 +244,8 @@ impl ClockRegistry {
                     None => return Err(TimeError::UnknownDomain { id: *root }),
                     Some(r) if !matches!(r.kind, ClockDomainKind::Root { .. }) => {
                         // TM-3: a Derived domain names a Root directly; no chains.
-                        return Err(TimeError::Unrelated { a: domain.id, b: *root });
+                        return Err(TimeError::Unrelated { a: domain.id, b: *root,
+                        });
                     }
                     Some(_) => {}
                 }
@@ -270,7 +277,8 @@ impl ClockRegistry {
         let mut inner = self.write();
         let root = inner.domains.get(&id).ok_or(TimeError::UnknownDomain { id })?.root_id();
         if at.domain != root {
-            return Err(TimeError::DomainMismatch { expected: root, found: at.domain });
+            return Err(TimeError::DomainMismatch { expected: root, found: at.domain,
+            });
         }
         let domain = inner.domains.get_mut(&id).ok_or(TimeError::UnknownDomain { id })?;
         if domain.ended_at.is_some() {
@@ -296,6 +304,12 @@ impl ClockRegistry {
         if root_ticks_per_tick.exceeds(RATIO_TERM_CAP) {
             return Err(TimeError::LimitExceeded);
         }
+        // X7 / D91: the record reaches the Manifest's `clocks.sample_clocks`, whose
+        // deserialiser refuses a non-local node; recording one would write a Manifest
+        // the Kernel cannot read back. Refused as `register` refuses a domain.
+        if !stream.node.is_local() {
+            return Err(TimeError::UnknownDomain { id: root });
+        }
         match self.get(root)?.kind {
             ClockDomainKind::Root { .. } => {}
             ClockDomainKind::Derived { .. } => {
@@ -305,7 +319,8 @@ impl ClockRegistry {
                 return Err(TimeError::NotARoot { id: root });
             }
         }
-        Ok(SampleClockHandle { id: self.allocate_id(), root, root_ticks_per_tick, stream })
+        Ok(SampleClockHandle { id: self.allocate_id(), root, root_ticks_per_tick, stream,
+        })
     }
 
     /// Registers a declared SampleClock once its origin is known, and records it for

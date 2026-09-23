@@ -9,6 +9,7 @@
   "description": "Why a Run stopped (RS-3, RS-23, RS-26).",
   "oneOf": [
     {
+      "additionalProperties": false,
       "description": "The client asked (RS-3).",
       "properties": {
         "reason": {
@@ -22,6 +23,7 @@
       "type": "object"
     },
     {
+      "additionalProperties": false,
       "description": "An `Attached` Lease's client went away (RS-23).",
       "properties": {
         "reason": {
@@ -35,6 +37,7 @@
       "type": "object"
     },
     {
+      "additionalProperties": false,
       "description": "A `Detached` Lease's TTL ran out (RS-23).",
       "properties": {
         "reason": {
@@ -48,6 +51,7 @@
       "type": "object"
     },
     {
+      "additionalProperties": false,
       "description": "The Policy table reacted to an event (RS-26).",
       "properties": {
         "kind": {
@@ -66,6 +70,7 @@
       "type": "object"
     },
     {
+      "additionalProperties": false,
       "description": "Something aborted the Run (RS-9).",
       "properties": {
         "cause": {

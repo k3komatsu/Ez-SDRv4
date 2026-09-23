@@ -14,6 +14,7 @@ use crate::time::TimePoint;
 
 /// Whether a stop delivers the declared tail (RS-9).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum CleanupMode {
     /// The Provider delivers its declared tail (RS-9).
@@ -24,6 +25,7 @@ pub enum CleanupMode {
 
 /// Which pipeline stage a Run was in when it failed (RS-3).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
     /// Schema and semantic validation (SB-38).
@@ -40,14 +42,15 @@ pub enum Stage {
 
 /// Why a Run stopped (RS-3, RS-23, RS-26).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum StopCause {
     /// The client asked (RS-3).
-    Client,
+    Client {},
     /// An `Attached` Lease's client went away (RS-23).
-    ClientDisconnect,
+    ClientDisconnect {},
     /// A `Detached` Lease's TTL ran out (RS-23).
-    LeaseExpiry,
+    LeaseExpiry {},
     /// The Policy table reacted to an event (RS-26).
     Policy {
         /// Which kind triggered it.
@@ -66,10 +69,11 @@ pub enum StopCause {
 ///
 /// Rule: RS-2, RS-3, decision R1.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Termination {
     /// It ran to completion.
-    Completed,
+    Completed {},
     /// It was stopped (RS-3, RS-23).
     Stopped {
         /// Why.
@@ -84,20 +88,21 @@ pub enum Termination {
 
 /// The eight states of a Run (RS-2).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RunState {
     /// Nothing has happened yet.
-    Created,
+    Created {},
     /// `validate()` passed (SB-38).
-    Validated,
+    Validated {},
     /// `plan()` passed (SB-39).
-    Planned,
+    Planned {},
     /// Every fragment prepared (SB-41).
-    Prepared,
+    Prepared {},
     /// Everything armed (SB-43).
-    Armed,
+    Armed {},
     /// Live.
-    Running,
+    Running {},
     /// Cleanup is under way (RS-6).
     Stopping {
         /// Whether the tail is delivered (RS-9).
@@ -113,12 +118,12 @@ pub enum RunState {
 impl RunState {
     fn rank(&self) -> u8 {
         match self {
-            RunState::Created => 0,
-            RunState::Validated => 1,
-            RunState::Planned => 2,
-            RunState::Prepared => 3,
-            RunState::Armed => 4,
-            RunState::Running => 5,
+            RunState::Created {} => 0,
+            RunState::Validated {} => 1,
+            RunState::Planned {} => 2,
+            RunState::Prepared {} => 3,
+            RunState::Armed {} => 4,
+            RunState::Running {} => 5,
             RunState::Stopping { .. } => 6,
             RunState::CleanedUp { .. } => 7,
         }
@@ -210,7 +215,9 @@ impl fmt::Display for RunError {
             RunError::LeaseTtlRequired => f.write_str("a Detached Lease needs a TTL"),
             RunError::LeaseNotRenewable => f.write_str("this Lease is not renewable"),
             RunError::AdoptRejected => f.write_str("the adoption token does not match"),
-            RunError::UnknownEventKind { kind } => write!(f, "event kind {kind:?} is not registered"),
+            RunError::UnknownEventKind { kind } => {
+                write!(f, "event kind {kind:?} is not registered")
+            }
             RunError::EventKindAlreadyRegistered { kind } => {
                 write!(f, "event kind {kind:?} is already registered")
             }
@@ -266,7 +273,8 @@ impl Default for SystemHostClock {
 impl SystemHostClock {
     /// A clock anchored at construction (RS-22).
     pub fn new() -> SystemHostClock {
-        SystemHostClock { base: std::time::Instant::now() }
+        SystemHostClock { base: std::time::Instant::now(),
+        }
     }
 }
 
@@ -287,10 +295,11 @@ impl HostClock for SystemHostClock {
 
 /// Whether a Run survives its client's disconnection (RS-21).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LeaseMode {
     /// The Run ends when the client disconnects. The default (RS-21, RS-23).
-    Attached,
+    Attached {},
     /// The Run survives the disconnect until the TTL expires (RS-21, RS-23).
     Detached {
         /// How long, on the host monotonic clock (RS-22).
@@ -302,6 +311,7 @@ pub enum LeaseMode {
 
 /// Who holds a Run, and for how long (RS-21…RS-25).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Lease {
     /// Attached or Detached (RS-21).
     pub mode: LeaseMode,
@@ -328,7 +338,7 @@ impl Lease {
     /// The default: the Run ends when its client disconnects (RS-21).
     pub fn attached() -> Lease {
         Lease {
-            mode: LeaseMode::Attached,
+            mode: LeaseMode::Attached {},
             token: None,
             holder: None,
             expires_at_host: None,
@@ -381,7 +391,7 @@ impl Lease {
     /// Starts the TTL running, as a disconnect does (RS-23).
     pub fn on_disconnect(&mut self, clock: &dyn HostClock) -> Option<StopCause> {
         match self.mode {
-            LeaseMode::Attached => Some(StopCause::ClientDisconnect),
+            LeaseMode::Attached {} => Some(StopCause::ClientDisconnect {}),
             LeaseMode::Detached { ttl_ms, .. } => {
                 self.holder = None;
                 // `Lease` is a document type (OV-10), so `ttl_ms` is whatever a
@@ -417,7 +427,8 @@ impl Lease {
     /// (RS-24).
     pub fn renew(&mut self, clock: &dyn HostClock) -> Result<(), RunError> {
         match self.mode {
-            LeaseMode::Detached { ttl_ms, renewable: true } => {
+            LeaseMode::Detached { ttl_ms, renewable: true,
+            } => {
                 // Only an armed Lease has a deadline to push out; renewing an
                 // attached one is a no-op rather than a new expiry (RS-22, RS-24).
                 if self.expires_at_host.is_some() {
@@ -434,6 +445,7 @@ impl Lease {
 
 /// The nine ordered steps of RS-6, not the unordered list of Vision §53.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum CleanupStep {
     /// 0. Clean up child Runs, each by this same algorithm (RS-6, RS-25).
@@ -482,6 +494,7 @@ impl CleanupStep {
 /// A cleanup step that failed or timed out. Every step is attempted even when an
 /// earlier one failed; each failure is recorded and the sequence continues (RS-6).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CleanupFailure {
     /// Which step (RS-6).
     pub step: CleanupStep,
@@ -523,6 +536,7 @@ pub const DEFAULT_CLEANUP_DEADLINE_MS: u64 = 5_000;
 
 /// What cleanup recorded (RS-6, RS-8a, RS-10).
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CleanupOutcome {
     /// Every step and fragment that failed or timed out (RS-6, RS-8a).
     pub failures: Vec<CleanupFailure>,
@@ -615,6 +629,7 @@ fn perform_with_deadline(
 
 /// One recorded transition, with its runtime instant and the host UTC time (RS-5).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TransitionRecord {
     /// The state entered (RS-2).
     pub state: RunState,
@@ -635,9 +650,9 @@ impl RunStateMachine {
     /// A Run in `Created`, with that transition recorded (RS-2, RS-5).
     pub fn new(clock: &dyn HostClock) -> RunStateMachine {
         RunStateMachine {
-            state: RunState::Created,
+            state: RunState::Created {},
             transitions: vec![TransitionRecord {
-                state: RunState::Created,
+                state: RunState::Created {},
                 at: None,
                 host_utc_nanos: clock.utc_nanos(),
             }],
@@ -662,7 +677,8 @@ impl RunStateMachine {
         clock: &dyn HostClock,
     ) -> Result<(), RunError> {
         if !self.state.can_move_to(&to) {
-            return Err(RunError::IllegalTransition { from: self.state.clone(), to });
+            return Err(RunError::IllegalTransition { from: self.state.clone(), to,
+            });
         }
         self.transitions.push(TransitionRecord {
             state: to.clone(),
@@ -698,7 +714,7 @@ impl RunStateMachine {
 
     /// Refuses a structural change while the Run is `Running` (RS-4).
     pub fn check_structural_mutation(&self) -> Result<(), RunError> {
-        if matches!(self.state, RunState::Running) {
+        if matches!(self.state, RunState::Running {}) {
             return Err(RunError::StructuralMutationForbidden);
         }
         Ok(())
@@ -706,7 +722,7 @@ impl RunStateMachine {
 
     /// Refuses an Action while the Run is not `Running` (RS-18).
     pub fn check_running(&self) -> Result<(), RunError> {
-        if matches!(self.state, RunState::Running) {
+        if matches!(self.state, RunState::Running {}) {
             Ok(())
         } else {
             Err(RunError::RunNotRunning)

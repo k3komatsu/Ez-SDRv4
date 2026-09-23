@@ -5,7 +5,7 @@ mod support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use ezsdr_kernel::binding::{ComponentPlacement, Placements};
+use ezsdr_kernel::binding::{ComponentPlacement, LinkPlacement, Placements};
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection, PortRef};
 use ezsdr_kernel::event::{Action, EventCollector, EventKind};
 use ezsdr_kernel::id::{ClockDomainId, DataLinkId, IslandId, MemoryDomainId, RunId};
@@ -13,8 +13,8 @@ use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
     ActionSubmitter, Authority, ComponentDescriptor, ComponentImpl,
     ComponentKind, ComponentRequires, ComponentTiming, Deployment, Executor, ExecutorDescriptor,
-    Factories, IslandDecl, Link, ModuleDescriptor, ModuleError, ModuleErrorKind, ModuleRegistry,
-    ParamDecl, PrepareContext, Provider, Requested, Role, RtPolicy, Sink, StepOutcome,
+    Factories, IslandDecl, Link, LinkDescriptor, ModuleDescriptor, ModuleError, ModuleErrorKind, ModuleRef, ModuleRegistry,
+    ParamDecl, PrepareContext, Provider, Requested, Role, RtPolicy, Sink, SinkDescriptor, StepOutcome,
     SteppedInstance, SteppedRef, StopMode, UpdateClass, Version, VersionReq,
     step_until_quiescent,
 };
@@ -24,16 +24,15 @@ use ezsdr_kernel::plan::{
 };
 use ezsdr_kernel::policy::EventKindRegistry;
 use ezsdr_kernel::spec::{
-    CapabilityValue, Constraint, Ident, Value,
-};
+    CapabilityValue, Constraint, Ident, Value};
 use ezsdr_kernel::stream::{BackPressure, DataLinkDecl, LatePolicy};
 use ezsdr_kernel::time::{
     AbsoluteDeadline, ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority,
     Rational, RelativeBudget, TimePoint,
 };
 use support::{
-    FailAt, QueueReceiver, TestExecutor, TestProvider, TestSink, TestSubmitter, id, key, mid, ns,
-    rid, some_hash, test_provider_descriptor, test_sink_descriptor,
+    FailAt, QueueReceiver, TestExecutor, TestProvider, TestSink, TestSubmitter, id, key, mid, mref, ns,
+    rid, some_hash, test_link_descriptor, test_link_module_descriptor, test_provider_descriptor, test_sink_descriptor,
     test_vocabulary,
 };
 
@@ -100,7 +99,8 @@ fn ma_32_registry_refusals() {
     // A missing Vocabulary.
     let mut reg = ModuleRegistry::new();
     let err = reg
-        .register(descriptor(), Factories { provider: true, ..Factories::default() })
+        .register(descriptor(), Factories { provider: true, ..Factories::default() },
+        )
         .expect_err("the `test` Vocabulary is not registered");
     assert!(err.message.contains("vocabulary test"), "{err}");
 
@@ -110,7 +110,8 @@ fn ma_32_registry_refusals() {
     v.version = Version::new(2, 0, 0);
     reg.register_vocabulary(v).expect("fresh");
     let err = reg
-        .register(descriptor(), Factories { provider: true, ..Factories::default() })
+        .register(descriptor(), Factories { provider: true, ..Factories::default() },
+        )
         .expect_err("2.0.0 does not satisfy ^1.0.0");
     assert!(err.message.contains("does not satisfy"), "{err}");
 
@@ -120,15 +121,18 @@ fn ma_32_registry_refusals() {
     let mut d = descriptor();
     d.kernel_api = Version::new(5, 0, 0);
     let err = reg
-        .register(d, Factories { provider: true, ..Factories::default() })
+        .register(d, Factories { provider: true, ..Factories::default() },
+        )
         .expect_err("major mismatch");
     assert!(err.message.contains("kernel_api major"), "{err}");
 
     // `deployment: Plugin` is Unsupported in Phase 1.
     let mut d = descriptor();
-    d.deployment = Deployment::Plugin { protocol: Version::new(1, 0, 0) };
+    d.deployment = Deployment::Plugin { protocol: Version::new(1, 0, 0),
+    };
     let err = reg
-        .register(d, Factories { provider: true, ..Factories::default() })
+        .register(d, Factories { provider: true, ..Factories::default() },
+        )
         .expect_err("Plugin is reserved");
     assert_eq!(err.kind, ModuleErrorKind::Unsupported);
 
@@ -138,17 +142,74 @@ fn ma_32_registry_refusals() {
         .expect_err("Provider has no factory");
     assert!(err.message.contains("has no factory"), "{err}");
     let err = reg
-        .register(descriptor(), Factories { provider: true, sink: true, ..Factories::default() })
+        .register(descriptor(), Factories { provider: true, sink: true, ..Factories::default() },
+        )
         .expect_err("the Sink factory has no declared role");
     assert!(err.message.contains("has no declared role"), "{err}");
 
     // A duplicate `(id, version)`.
-    reg.register(descriptor(), Factories { provider: true, ..Factories::default() })
+    reg.register(descriptor(), Factories { provider: true, ..Factories::default() },
+    )
         .expect("first registration");
     let err = reg
-        .register(descriptor(), Factories { provider: true, ..Factories::default() })
+        .register(descriptor(), Factories { provider: true, ..Factories::default() },
+        )
         .expect_err("duplicate");
     assert!(err.message.contains("already registered"), "{err}");
+}
+
+#[test]
+fn ma_28_link_registration_refuses_cross_process_in_v4() {
+    let module = mid("ezsdr.test.link");
+    let module_v1 = ModuleRef { id: module.clone(), version: Version::new(1, 0, 0) };
+    let mut reg = ModuleRegistry::new();
+    assert!(
+        reg.register_link_descriptor(test_link_descriptor())
+            .expect_err("a Link descriptor needs its registered Module")
+            .message
+            .contains("not a registered Link Module")
+    );
+
+    reg.register(
+        test_link_module_descriptor(),
+        Factories {
+            link: true,
+            ..Factories::default()
+        },
+    )
+    .expect("registered Link role");
+    let mut cross_process = test_link_descriptor();
+    cross_process.cross_process = true;
+    assert!(
+    reg.register_link_descriptor(cross_process)
+            .expect_err("cross-process links are unsupported in v4")
+            .message
+            .contains("cross_process links are unsupported")
+    );
+
+    reg.register_link_descriptor(test_link_descriptor())
+        .expect("local Link descriptor registers");
+    assert!(reg.link_descriptor(&module_v1).is_some());
+    assert!(
+        reg.register_link_descriptor(test_link_descriptor())
+            .expect_err("one descriptor per Module version")
+            .message
+            .contains("already has a registered Link descriptor")
+    );
+
+    // Two versions of one Module id retain their own descriptors and policies.
+    let mut v2 = test_link_module_descriptor();
+    v2.version = Version::new(2, 0, 0);
+    reg.register(v2, Factories { link: true, ..Factories::default() })
+        .expect("a different Module version can be registered");
+    let module_v2 = ModuleRef { id: module, version: Version::new(2, 0, 0) };
+    let mut descriptor_v2 = test_link_descriptor();
+    descriptor_v2.module = module_v2.clone();
+    descriptor_v2.policies = vec![BackPressure::DropNewest];
+    reg.register_link_descriptor(descriptor_v2)
+        .expect("the second Module version has its own descriptor");
+    assert!(reg.link_descriptor(&module_v1).unwrap().policies.contains(&BackPressure::Block));
+    assert_eq!(reg.link_descriptor(&module_v2).unwrap().policies, vec![BackPressure::DropNewest]);
 }
 
 #[test]
@@ -196,7 +257,6 @@ fn ma_35_vocabulary_carries_its_own_content() {
         kind: EventKind::parse("vendor.other").expect("parses"),
         default: ezsdr_kernel::policy::Reaction::Continue,
         severity: ezsdr_kernel::event::Severity::Info,
-        hot_layout: None,
     };
     assert!(kinds.register(Some(ns("test")), stray).is_err());
     // 3. Its Session verbs and how each compiles (RS-13a).
@@ -223,6 +283,7 @@ fn prepare_context<'a>(
         actions,
         actions_out: submitter,
         links: Vec::new(),
+        components: BTreeMap::new(),
         host_budget: RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 1_000_000))
             .expect("host.monotonic"),
     }
@@ -243,7 +304,8 @@ impl Harness {
             .register(ClockDomain::root(
                 root,
                 Rational::new(200_000_000, 1).expect("rate"),
-                EpochRef::Arbitrary { set_by: "test".to_owned() },
+                EpochRef::Arbitrary { set_by: "test".to_owned(),
+                },
             ))
             .expect("root");
         let authority = ManualTimeAuthority::new(
@@ -255,8 +317,10 @@ impl Harness {
         .expect("authority");
         let kinds = EventKindRegistry::with_kernel_kinds();
         let policy = kinds.compile(&BTreeMap::new()).expect("compiles");
-        let events = EventCollector::new(&[], &policy.table.keys().cloned().collect::<Vec<_>>(), 16, &policy);
-        Harness { authority, events, actions: QueueReceiver::new(), submitter }
+        let events = EventCollector::new(&[], &policy.table.keys().cloned().collect::<Vec<_>>(), 16, &policy,
+        );
+        Harness { authority, events, actions: QueueReceiver::new(), submitter,
+        }
     }
 
     fn ctx(&self) -> PrepareContext<'_> {
@@ -271,11 +335,38 @@ impl Harness {
 }
 
 #[test]
+fn ma_19_executor_receives_the_descriptors_for_its_island() {
+    let descriptors: BTreeMap<Ident, ComponentDescriptor> =
+        [(id("a"), component("a")), (id("b"), component("b"))]
+            .into_iter()
+            .collect();
+    let island = island(&["a", "b"], "exec");
+    let h = Harness::new(TestSubmitter::new());
+    let mut ctx = h.ctx();
+    ctx.components = descriptors.clone();
+    let mut executor = TestExecutor::new(MemoryDomainId::local(0));
+
+    executor
+        .prepare(&island, ctx)
+        .expect("prepare receives the typed descriptors");
+    assert_eq!(
+        executor
+            .prepared_components
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        &[descriptors]
+    );
+}
+
+#[test]
 fn ma_11_coerce_is_pure() {
     let p = TestProvider::new("radio", 2).with_grid(20.0);
     let request = Requested {
         resource: rid("radio"),
-        constraints: [(key("test.grid"), Constraint::Eq { value: Value::Num(19.5) })]
+        constraints: [(key("test.grid"), Constraint::Eq { value: Value::Num(19.5),
+            },
+        )]
             .into_iter()
             .collect(),
     };
@@ -290,7 +381,9 @@ fn ma_12_prepare_matches_coerce() {
     let mut p = TestProvider::new("radio", 2).with_grid(20.0);
     let request = Requested {
         resource: rid("radio"),
-        constraints: [(key("test.grid"), Constraint::Eq { value: Value::Num(19.5) })]
+        constraints: [(key("test.grid"), Constraint::Eq { value: Value::Num(19.5),
+            },
+        )]
             .into_iter()
             .collect(),
     };
@@ -299,7 +392,7 @@ fn ma_12_prepare_matches_coerce() {
     let h = Harness::new(TestSubmitter::new());
     let fragment = ezsdr_kernel::plan::Fragment {
         id: id("radio"),
-        instance: mid("ezsdr.test.provider"),
+        instance: mref("ezsdr.test.provider"),
         role: Role::Provider,
         // The real shape `plan()` emits (SB-39): the selector and the matched
         // request side by side, not the request alone.
@@ -325,7 +418,9 @@ fn ma_12_prepare_that_disagrees_with_coerce_is_visible() {
     p.prepare_disagrees = true;
     let request = Requested {
         resource: rid("radio"),
-        constraints: [(key("test.grid"), Constraint::Eq { value: Value::Num(19.5) })]
+        constraints: [(key("test.grid"), Constraint::Eq { value: Value::Num(19.5),
+            },
+        )]
             .into_iter()
             .collect(),
     };
@@ -333,7 +428,7 @@ fn ma_12_prepare_that_disagrees_with_coerce_is_visible() {
     let h = Harness::new(TestSubmitter::new());
     let fragment = ezsdr_kernel::plan::Fragment {
         id: id("radio"),
-        instance: mid("ezsdr.test.provider"),
+        instance: mref("ezsdr.test.provider"),
         role: Role::Provider,
         content: serde_json::to_value(&request).expect("serialises"),
         after: Vec::new(),
@@ -344,15 +439,19 @@ fn ma_12_prepare_that_disagrees_with_coerce_is_visible() {
 
 #[test]
 fn ma_12_narrowing_triggers_readmission() {
-    let declared = CapabilityValue::Range { min: Value::Int(1), max: Value::Int(8) };
+    let declared = CapabilityValue::Range { min: Value::Int(1), max: Value::Int(8),
+    };
     // Narrowing is allowed.
-    let narrowed = CapabilityValue::Range { min: Value::Int(2), max: Value::Int(4) };
+    let narrowed = CapabilityValue::Range { min: Value::Int(2), max: Value::Int(4),
+    };
     assert!(check_effective_narrows(&declared, &narrowed).is_ok());
     // Widening is refused.
-    let widened = CapabilityValue::Range { min: Value::Int(1), max: Value::Int(16) };
+    let widened = CapabilityValue::Range { min: Value::Int(1), max: Value::Int(16),
+    };
     assert!(check_effective_narrows(&declared, &widened).is_err());
     // Re-admission over the narrowed `effective` fails the Spec's own constraint.
-    let asked = Constraint::Eq { value: Value::Int(8) };
+    let asked = Constraint::Eq { value: Value::Int(8),
+    };
     assert_eq!(ezsdr_kernel::binding::satisfies(&asked, &declared), Ok(true));
     assert_eq!(ezsdr_kernel::binding::satisfies(&asked, &narrowed), Ok(false));
 }
@@ -364,7 +463,7 @@ fn ma_07_lifecycle_order_and_cleanup() {
         let h = Harness::new(TestSubmitter::new());
         let fragment = ezsdr_kernel::plan::Fragment {
             id: id("radio"),
-            instance: mid("ezsdr.test.provider"),
+            instance: mref("ezsdr.test.provider"),
             role: Role::Provider,
             content: serde_json::Value::Null,
             after: Vec::new(),
@@ -485,8 +584,10 @@ fn component(name: &str) -> ComponentDescriptor {
         id: id(name),
         kind: ComponentKind::Processor,
         ports: vec![
-            Port { name: "in".to_owned(), direction: PortDirection::In, contract: cf32() },
-            Port { name: "out".to_owned(), direction: PortDirection::Out, contract: cf32() },
+            Port { name: "in".to_owned(), direction: PortDirection::In, contract: cf32(),
+            },
+            Port { name: "out".to_owned(), direction: PortDirection::Out, contract: cf32(),
+            },
         ],
         params: vec![ParamDecl {
             key: key("test.flag"),
@@ -495,7 +596,8 @@ fn component(name: &str) -> ComponentDescriptor {
             default: Value::Bool(false),
         }],
         timing: ComponentTiming::default(),
-        requires: ComponentRequires { executor_kind: "any".to_owned(), memory_bytes: None },
+        requires: ComponentRequires { executor_kind: "any".to_owned(), memory_bytes: None,
+        },
         implementation: ComponentImpl {
             kind: ns("test.impl"),
             id: name.to_owned(),
@@ -519,8 +621,7 @@ fn ma_37_descriptor_structural_validation() {
 
     let mut budget = component("a");
     budget.timing.budget = Some(
-        RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 0)).expect("host"),
-    );
+        RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 0)).expect("host"));
     assert!(budget.validate(&contracts).is_err(), "a budget must be finite and positive");
 
     // A descriptor never carries an AbsoluteDeadline: they are distinct types, and
@@ -558,6 +659,7 @@ fn ma_39_island_admission() {
     let executors: BTreeMap<Ident, ExecutorDescriptor> = [(
         id("exec"),
         ExecutorDescriptor {
+            module: mref("ezsdr.test.executor"),
             kind: ns("test.executor"),
             memory_domains: vec![MemoryDomainId::local(0)],
             impl_kinds: vec![ns("test.impl")],
@@ -566,24 +668,87 @@ fn ma_39_island_admission() {
     )]
     .into_iter()
     .collect();
-    let links: Vec<ezsdr_kernel::module_api::LinkDescriptor> = Vec::new();
+    let link_id = ModuleRef { id: mid("ezsdr.test.link"), version: Version::new(1, 0, 0) };
+    let links = [(link_id.clone(), test_link_descriptor())]
+        .into_iter()
+        .collect();
+    let link_placements = vec![place(&link_id, ("a", "out"), ("b", "in"))];
     let graph_links = vec![(
-        PortRef { component: "a".into(), port: "out".into() },
-        PortRef { component: "b".into(), port: "in".into() },
+        PortRef {
+            component: "a".into(),
+            port: "out".into(),
+        },
+        PortRef {
+            component: "b".into(),
+            port: "in".into(),
+        },
         BackPressure::Block,
     )];
     let islands = vec![island(&["a", "b"], "exec")];
     let no_resources = BTreeSet::new();
+    let rec_sink: BTreeMap<Ident, SinkDescriptor> = [(id("rec"), sink_in(0))].into_iter().collect();
     let ctx = IslandContext {
         islands: &islands,
         components: &components,
         placements: &placements,
         executors: &executors,
         links: &links,
+        link_placements: &link_placements,
         graph_links: &graph_links,
+        feed_links: &[],
+        sinks: &rec_sink,
         resource_endpoints: &no_resources,
     };
     assert!(admit_islands(&ctx).is_ok());
+
+    // SB-25 / D76: coverage is exact and by endpoints.
+    let bad = IslandContext { link_placements: &[], ..ctx_clone(&ctx) };
+    assert!(
+        admit_islands(&bad)
+            .expect_err("every graph link needs a placement")
+            .message
+            .contains("data link a.out -> b.in has no link placement")
+    );
+    let stale = vec![place(&link_id, ("a", "out"), ("b", "in")), place(&link_id, ("b", "out"), ("a", "in"))];
+    let bad = IslandContext { link_placements: &stale, ..ctx_clone(&ctx) };
+    assert!(admit_islands(&bad)
+            .expect_err("a placement for no link is refused")
+            .message
+            .contains("b.out -> a.in names no graph link or output feed"));
+    let twice = vec![place(&link_id, ("a", "out"), ("b", "in")), place(&link_id, ("a", "out"), ("b", "in"))];
+    let bad = IslandContext { link_placements: &twice, ..ctx_clone(&ctx) };
+    assert!(admit_islands(&bad)
+            .expect_err("a pair placed twice is ambiguous")
+            .message
+            .contains("appears more than once"));
+    // An output feed needs a placement like a graph link (D75)...
+    let feeds = vec![(
+        PortRef { component: "b".into(), port: "out".into() },
+        PortRef { component: "rec".into(), port: "in".into() },
+        BackPressure::Block,
+    )];
+    let bad = IslandContext { feed_links: &feeds, ..ctx_clone(&ctx) };
+    assert!(admit_islands(&bad)
+            .expect_err("an unplaced feed is refused")
+            .message
+            .contains("data link b.out -> rec.in has no link placement"));
+    // ...and with one it is admitted.
+    let with_feed = vec![place(&link_id, ("a", "out"), ("b", "in")), place(&link_id, ("b", "out"), ("rec", "in"))];
+    admit_islands(&IslandContext { feed_links: &feeds, link_placements: &with_feed, ..ctx_clone(&ctx) })
+        .expect("a placed feed is admitted");
+    // A feed whose ends coincide with a graph link — an output named like a graph
+    // component, fed from the same port — is two data links no placement can tell
+    // apart, so admission refuses it rather than letting one placement serve both.
+    let colliding = vec![(
+        PortRef { component: "a".into(), port: "out".into() },
+        PortRef { component: "b".into(), port: "in".into() },
+        BackPressure::Block,
+    )];
+    let bad = IslandContext { feed_links: &colliding, ..ctx_clone(&ctx) };
+    assert!(admit_islands(&bad)
+            .expect_err("a feed coinciding with a graph link is refused")
+            .message
+            .contains("a.out -> b.in is declared twice"));
 
     // 1. A component placed twice.
     let twice = vec![island(&["a", "b"], "exec"), island(&["a"], "exec")];
@@ -612,7 +777,8 @@ fn ma_39_island_admission() {
 
     // 5. An rt_policy with a component that declares no budget.
     let rt = vec![IslandDecl {
-        rt_policy: Some(RtPolicy { sched: "fifo".to_owned(), priority: 50 }),
+        rt_policy: Some(RtPolicy { sched: "fifo".to_owned(), priority: 50,
+        }),
         ..island(&["a", "b"], "exec")
     }];
     let bad = IslandContext { islands: &rt, ..ctx_clone(&ctx) };
@@ -626,8 +792,31 @@ fn ctx_clone<'a>(ctx: &IslandContext<'a>) -> IslandContext<'a> {
         placements: ctx.placements,
         executors: ctx.executors,
         links: ctx.links,
+        link_placements: ctx.link_placements,
         graph_links: ctx.graph_links,
+        feed_links: ctx.feed_links,
+        sinks: ctx.sinks,
         resource_endpoints: ctx.resource_endpoints,
+    }
+}
+
+/// A bound Sink's descriptor that reads only `domain` (MA-25, D81).
+fn sink_in(domain: u32) -> SinkDescriptor {
+    SinkDescriptor {
+        module: mref("ezsdr.test.sink"),
+        kind: ns("test.recorder"),
+        memory_domains: vec![MemoryDomainId::local(domain)],
+        contracts: Vec::new(),
+        artifact_kinds: Vec::new(),
+    }
+}
+
+/// A placement selecting `link` for the data link `from -> to` (SB-25, D76).
+fn place(link: &ModuleRef, from: (&str, &str), to: (&str, &str)) -> LinkPlacement {
+    LinkPlacement {
+        link: link.clone(),
+        from: PortRef { component: from.0.into(), port: from.1.into() },
+        to: PortRef { component: to.0.into(), port: to.1.into() },
     }
 }
 
@@ -636,22 +825,28 @@ fn ma_22_cycle_rules() {
     let nodes = vec![id("a"), id("b")];
     // A stream.* cycle is rejected.
     let stream = vec![
-        GraphEdge { from: id("a"), to: id("b"), kind: EdgeKind::Stream, crosses_island: false },
-        GraphEdge { from: id("b"), to: id("a"), kind: EdgeKind::Stream, crosses_island: false },
+        GraphEdge { from: id("a"), to: id("b"), kind: EdgeKind::Stream, crosses_island: false,
+        },
+        GraphEdge { from: id("b"), to: id("a"), kind: EdgeKind::Stream, crosses_island: false,
+        },
     ];
     assert!(check_cycles(&nodes, &stream).is_err());
 
     // An Event cycle across Islands is accepted.
     let across = vec![
-        GraphEdge { from: id("a"), to: id("b"), kind: EdgeKind::Stream, crosses_island: true },
-        GraphEdge { from: id("b"), to: id("a"), kind: EdgeKind::Event, crosses_island: true },
+        GraphEdge { from: id("a"), to: id("b"), kind: EdgeKind::Stream, crosses_island: true,
+        },
+        GraphEdge { from: id("b"), to: id("a"), kind: EdgeKind::Event, crosses_island: true,
+        },
     ];
     assert!(check_cycles(&nodes, &across).is_ok());
 
     // An Event cycle inside one Island is rejected.
     let inside = vec![
-        GraphEdge { from: id("a"), to: id("b"), kind: EdgeKind::Stream, crosses_island: false },
-        GraphEdge { from: id("b"), to: id("a"), kind: EdgeKind::Event, crosses_island: false },
+        GraphEdge { from: id("a"), to: id("b"), kind: EdgeKind::Stream, crosses_island: false,
+        },
+        GraphEdge { from: id("b"), to: id("a"), kind: EdgeKind::Event, crosses_island: false,
+        },
     ];
     assert!(check_cycles(&nodes, &inside).is_err());
 }
@@ -664,7 +859,8 @@ fn ma_25_sink_role_is_read_from_the_binding() {
     // on a Spec Run, so SC-21 was unenforceable on the publication path (D17).
     let mut reg = ModuleRegistry::new();
     reg.register_vocabulary(test_vocabulary()).expect("fresh");
-    reg.register(test_sink_descriptor(), Factories { sink: true, ..Factories::default() })
+    reg.register(test_sink_descriptor(), Factories { sink: true, ..Factories::default() },
+    )
         .expect("registers");
     reg.register(test_provider_descriptor(),
         Factories { provider: true, authority: true, ..Factories::default() },)
@@ -680,8 +876,10 @@ fn ma_25_sink_role_is_read_from_the_binding() {
     // available on both paths because it reads a binding rather than a placement.
     let decl = DataLinkDecl {
         id: DataLinkId::local(0),
-        from: PortRef { component: "radio".into(), port: "rx".into() },
-        to: PortRef { component: "capture0".into(), port: "in".into() },
+        from: PortRef { component: "radio".into(), port: "rx".into(),
+        },
+        to: PortRef { component: "capture0".into(), port: "in".into(),
+        },
         contract: cf32(),
         policy: BackPressure::Block,
         capacity: 4,
@@ -728,10 +926,12 @@ impl Provider for StepLogger {
     fn instance(&self) -> &ezsdr_kernel::module_api::ProviderInstance {
         &self.instance
     }
-    fn coerce(&self, _r: &Requested) -> Result<ezsdr_kernel::module_api::CoerceReport, ModuleError> {
+    fn coerce(&self, _r: &Requested,
+    ) -> Result<ezsdr_kernel::module_api::CoerceReport, ModuleError> {
         Ok(Default::default())
     }
-    fn prepare(&mut self, _f: &ezsdr_kernel::plan::Fragment, _c: PrepareContext<'_>) -> Result<PrepareReport, ModuleError> {
+    fn prepare(&mut self, _f: &ezsdr_kernel::plan::Fragment, _c: PrepareContext<'_>,
+    ) -> Result<PrepareReport, ModuleError> {
         unreachable!("the stepping test does not prepare")
     }
     fn arm(&mut self) -> Result<(), ModuleError> {
@@ -753,7 +953,8 @@ impl Executor for StepLogger {
     fn descriptor(&self) -> &ExecutorDescriptor {
         &self.executor
     }
-    fn prepare(&mut self, _i: &IslandDecl, _c: PrepareContext<'_>) -> Result<PrepareReport, ModuleError> {
+    fn prepare(&mut self, _i: &IslandDecl, _c: PrepareContext<'_>,
+    ) -> Result<PrepareReport, ModuleError> {
         unreachable!("the stepping test does not prepare")
     }
     fn arm(&mut self) -> Result<(), ModuleError> {
@@ -775,7 +976,8 @@ impl Sink for StepLogger {
     fn descriptor(&self) -> &ezsdr_kernel::module_api::SinkDescriptor {
         &self.sink
     }
-    fn prepare(&mut self, _f: &ezsdr_kernel::plan::Fragment, _c: PrepareContext<'_>) -> Result<PrepareReport, ModuleError> {
+    fn prepare(&mut self, _f: &ezsdr_kernel::plan::Fragment, _c: PrepareContext<'_>,
+    ) -> Result<PrepareReport, ModuleError> {
         unreachable!("the stepping test does not prepare")
     }
     fn arm(&mut self) -> Result<(), ModuleError> {
@@ -801,9 +1003,12 @@ fn ma_30_stepping_order_and_quiescence() {
     let mut provider = StepLogger::new("c", log.clone(), 0);
     // Registered in reverse role order.
     let mut instances = vec![
-        SteppedInstance { id: id("a"), inner: SteppedRef::Sink(&mut sink) },
-        SteppedInstance { id: id("b"), inner: SteppedRef::Executor(&mut executor) },
-        SteppedInstance { id: id("c"), inner: SteppedRef::Provider(&mut provider) },
+        SteppedInstance { id: id("a"), inner: SteppedRef::Sink(&mut sink),
+        },
+        SteppedInstance { id: id("b"), inner: SteppedRef::Executor(&mut executor),
+        },
+        SteppedInstance { id: id("c"), inner: SteppedRef::Provider(&mut provider),
+        },
     ];
     let until = TimePoint::new(ClockDomainId::HOST_MONOTONIC, 100);
     let events = collector();
@@ -825,8 +1030,10 @@ fn ma_30_stepping_livelock_cap() {
     let mut a = StepLogger::new("a", log.clone(), usize::MAX);
     let mut b = StepLogger::new("b", log.clone(), usize::MAX);
     let mut instances = vec![
-        SteppedInstance { id: id("a"), inner: SteppedRef::Executor(&mut a) },
-        SteppedInstance { id: id("b"), inner: SteppedRef::Executor(&mut b) },
+        SteppedInstance { id: id("a"), inner: SteppedRef::Executor(&mut a),
+        },
+        SteppedInstance { id: id("b"), inner: SteppedRef::Executor(&mut b),
+        },
     ];
     let until = TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0);
     let events = collector();
@@ -850,7 +1057,8 @@ fn ma_30_stepping_livelock_cap() {
 fn collector() -> EventCollector {
     let kinds = EventKindRegistry::with_kernel_kinds();
     let policy = kinds.compile(&BTreeMap::new()).expect("compiles");
-    EventCollector::new(&[], &policy.table.keys().cloned().collect::<Vec<_>>(), 16, &policy)
+    EventCollector::new(&[], &policy.table.keys().cloned().collect::<Vec<_>>(), 16, &policy,
+    )
 }
 
 #[test]
@@ -913,6 +1121,7 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
     let executors: BTreeMap<Ident, ExecutorDescriptor> = [(
         id("exec"),
         ExecutorDescriptor {
+            module: mref("ezsdr.test.executor"),
             kind: ns("test.executor"),
             memory_domains: vec![MemoryDomainId::local(0), MemoryDomainId::local(1)],
             impl_kinds: vec![ns("test.impl")],
@@ -922,26 +1131,42 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
     .into_iter()
     .collect();
     let graph_links = vec![(
-        PortRef { component: "a".into(), port: "out".into() },
-        PortRef { component: "b".into(), port: "in".into() },
+        PortRef { component: "a".into(), port: "out".into(),
+        },
+        PortRef { component: "b".into(), port: "in".into(),
+        },
         BackPressure::Block,
     )];
     let islands = vec![island(&["a", "b"], "exec")];
     let no_resources = BTreeSet::new();
 
-    // No registered Link: the pair is unreachable and the Island is refused.
-    let none: Vec<ezsdr_kernel::module_api::LinkDescriptor> = Vec::new();
+    let selected = ModuleRef { id: mid("ezsdr.test.link"), version: Version::new(1, 0, 0) };
+    let other_version = ModuleRef { id: selected.id.clone(), version: Version::new(2, 0, 0) };
+    let link_placements = vec![place(&selected, ("a", "out"), ("b", "in"))];
+    let descriptor = |connects| LinkDescriptor {
+        module: mref("ezsdr.test.link"),
+        kind: ns("test.link"),
+        connects,
+        policies: vec![BackPressure::Block],
+        cross_process: false,
+    };
+    // No registered Link: the selected Module version is unknown and the Island is refused.
+    let none: BTreeMap<_, LinkDescriptor> = BTreeMap::new();
+    let no_sinks: BTreeMap<Ident, SinkDescriptor> = BTreeMap::new();
     let ctx = IslandContext {
         islands: &islands,
         components: &components,
         placements: &placements,
         executors: &executors,
         links: &none,
+        link_placements: &link_placements,
         graph_links: &graph_links,
+        feed_links: &[],
+        sinks: &no_sinks,
         resource_endpoints: &no_resources,
     };
     let err = admit_islands(&ctx).expect_err("two domains, no Link");
-    assert!(err.message.contains("no registered Link connects them"), "{err}");
+    assert!(err.message.contains("no registered Link descriptor"), "{err}");
 
     // A Link that joins the pair admits it — and the check is symmetric, so a Link
     // declaring the reverse direction serves as well.
@@ -949,23 +1174,123 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
         vec![(MemoryDomainId::local(0), MemoryDomainId::local(1))],
         vec![(MemoryDomainId::local(1), MemoryDomainId::local(0))],
     ] {
-        let joined = vec![ezsdr_kernel::module_api::LinkDescriptor {
-            kind: ns("test.link"),
-            connects,
-            policies: vec![BackPressure::Block],
-            cross_process: false,
-        }];
-        let ctx = IslandContext { links: &joined, ..ctx_clone(&ctx) };
+        let joined = [(selected.clone(), descriptor(connects))]
+            .into_iter()
+            .collect();
+        let ctx = IslandContext {
+            links: &joined,
+            ..ctx_clone(&ctx)
+        };
         admit_islands(&ctx).expect("a registered Link joins the two domains");
     }
 
-    // A Link that joins some *other* pair does not help.
-    let elsewhere = vec![ezsdr_kernel::module_api::LinkDescriptor {
-        kind: ns("test.link"),
-        connects: vec![(MemoryDomainId::local(1), MemoryDomainId::local(2))],
-        policies: vec![BackPressure::Block],
-        cross_process: false,
-    }];
-    let ctx = IslandContext { links: &elsewhere, ..ctx_clone(&ctx) };
-    assert!(admit_islands(&ctx).is_err(), "a Link joining another pair is not this pair's");
+    // Another version of the same Module id joining the pair cannot satisfy this
+    // placement: the profile's selected Module version is the one whose descriptor
+    // must connect it.
+    let elsewhere = [
+        (
+            selected.clone(),
+            descriptor(vec![(MemoryDomainId::local(1), MemoryDomainId::local(2))]),
+        ),
+        (
+            other_version,
+            descriptor(vec![(MemoryDomainId::local(0), MemoryDomainId::local(1))]),
+        ),
+    ]
+    .into_iter()
+    .collect();
+        let ctx = IslandContext { links: &elsewhere, ..ctx_clone(&ctx) };
+    let err = admit_islands(&ctx).expect_err("unselected Link is irrelevant");
+    assert!(
+        err.message
+            .contains("selected Link Module ezsdr.test.link 1.0.0 does not connect"),
+        "{err}"
+    );
+
+    // The selected Link must implement the graph link's policy (SB-25, MA-28): one
+    // that joins the pair but offers only `DropNewest` cannot carry a `Block` link.
+    let joins = vec![(MemoryDomainId::local(0), MemoryDomainId::local(1))];
+    let wrong_policy = [(
+        selected.clone(),
+        LinkDescriptor { policies: vec![BackPressure::DropNewest], ..descriptor(joins.clone()) },
+    )]
+    .into_iter()
+    .collect();
+    let ctx_wrong = IslandContext { links: &wrong_policy, ..ctx_clone(&ctx) };
+    let err = admit_islands(&ctx_wrong).expect_err("Link lacks the link's policy");
+    assert!(err.message.contains("does not implement policy Block"), "{err}");
+
+    // A cross-process Link is refused at admission as well as at registration
+    // (MA-28, D63): a descriptor map built without the registry cannot smuggle one in.
+    let cross = [(selected.clone(), LinkDescriptor { cross_process: true, ..descriptor(joins) })]
+        .into_iter()
+        .collect();
+    let ctx_cross = IslandContext { links: &cross, ..ctx_clone(&ctx) };
+    let err = admit_islands(&ctx_cross).expect_err("cross_process is unsupported in v4.0");
+    assert!(err.message.contains("cross_process capability is unsupported"), "{err}");
+
+    // D77: the same holds when the two ends are in different Islands. Splitting the
+    // pair across two Islands used to skip the `connects` check entirely.
+    let split = vec![
+        island(&["a"], "exec"),
+        IslandDecl { id: IslandId::local(1), ..island(&["b"], "exec") },
+    ];
+    let unjoined = [(selected.clone(), descriptor(vec![(MemoryDomainId::local(1), MemoryDomainId::local(2))]))]
+        .into_iter()
+        .collect();
+    let ctx_split = IslandContext { islands: &split, links: &unjoined, ..ctx_clone(&ctx) };
+    let err = admit_islands(&ctx_split).expect_err("cross-Island link between unjoined domains");
+    assert!(err.message.contains("does not connect them"), "{err}");
+    let joined = [(selected.clone(), descriptor(vec![(MemoryDomainId::local(0), MemoryDomainId::local(1))]))]
+        .into_iter()
+        .collect();
+    admit_islands(&IslandContext { islands: &split, links: &joined, ..ctx_clone(&ctx) })
+        .expect("a Link joining the two domains admits the cross-Island link");
+
+    // D81: an output feed is checked the same way, its consumer's domains being the
+    // bound Sink's. `b` (domain 1) feeds a Sink that reads only domain 0.
+    let feeds = vec![(
+        PortRef { component: "b".into(), port: "out".into() },
+        PortRef { component: "rec".into(), port: "in".into() },
+        BackPressure::DropOldest,
+    )];
+    let with_feed = vec![place(&selected, ("a", "out"), ("b", "in")), place(&selected, ("b", "out"), ("rec", "in"))];
+    let host_sink: BTreeMap<Ident, SinkDescriptor> = [(id("rec"), sink_in(0))].into_iter().collect();
+    let both = |connects| {
+        let mut d = descriptor(connects);
+        d.policies.push(BackPressure::DropOldest);
+        [(selected.clone(), d)].into_iter().collect::<BTreeMap<_, _>>()
+    };
+    let joins_0_1 = both(vec![(MemoryDomainId::local(0), MemoryDomainId::local(1))]);
+    let feed_ctx = |sinks| IslandContext {
+        links: &joins_0_1,
+        link_placements: &with_feed,
+        feed_links: &feeds,
+        sinks,
+        ..ctx_clone(&ctx)
+    };
+    admit_islands(&feed_ctx(&host_sink)).expect("the Link joins domain 1 to the Sink's domain 0");
+    let gpu_sink: BTreeMap<Ident, SinkDescriptor> = [(id("rec"), sink_in(2))].into_iter().collect();
+    let err = admit_islands(&feed_ctx(&gpu_sink))
+        .expect_err("no selected Link joins domain 1 to a Sink reading domain 2");
+    assert!(err.message.contains("output rec's Sink reads"), "{err}");
+    let same: BTreeMap<Ident, SinkDescriptor> = [(id("rec"), sink_in(1))].into_iter().collect();
+    // The selected Link joins 0↔1 only, which does not join domain 1 to a Sink
+    // reading domain 1; what admits the feed is the shared domain itself.
+    admit_islands(&feed_ctx(&same)).expect("a Sink reading the producer's own domain needs no join");
+    // The Link declares only (0, 1): `a` (domain 0) feeding a Sink reading domain 1
+    // is joined in the declared direction, the case above in the reverse one.
+    let forward_feeds = vec![(
+        PortRef { component: "a".into(), port: "out".into() },
+        PortRef { component: "rec".into(), port: "in".into() },
+        BackPressure::DropOldest,
+    )];
+    let forward_placed = vec![place(&selected, ("a", "out"), ("b", "in")), place(&selected, ("a", "out"), ("rec", "in"))];
+    let reads_1: BTreeMap<Ident, SinkDescriptor> = [(id("rec"), sink_in(1))].into_iter().collect();
+    admit_islands(&IslandContext {
+        feed_links: &forward_feeds,
+        link_placements: &forward_placed,
+        ..feed_ctx(&reads_1)
+    })
+    .expect("joined in the Link's declared direction");
 }

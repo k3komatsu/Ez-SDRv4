@@ -1,6 +1,7 @@
 {
   "$defs": {
     "ClockDomainId": {
+      "additionalProperties": false,
       "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
       "properties": {
         "local": {
@@ -21,6 +22,7 @@
       "type": "object"
     },
     "Duration": {
+      "additionalProperties": false,
       "description": "An elapsed time: integer ticks in a named clock domain (TM-1, TM-4 decision T4).\n\nThe domain tag is what stops 1 000 ticks at 20 Msps being added to a 200 MHz\npoint as a silent factor-of-ten error.",
       "properties": {
         "domain": {
@@ -47,6 +49,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "A processing budget measured from a work item's arrival, in `host.monotonic`.\n\nDistinct from [`AbsoluteDeadline`] with no common supertype: the checks that\nconsume them differ (Vision §19, decision T5).\n\nRule: TM-15.",
   "properties": {
     "duration": {

@@ -1,6 +1,7 @@
 {
   "$defs": {
     "ClockDomainId": {
+      "additionalProperties": false,
       "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
       "properties": {
         "local": {
@@ -48,6 +49,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "What an Authority declares (MA-29).",
   "properties": {
     "governs": {

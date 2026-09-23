@@ -6,8 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ezsdr_kernel::binding::{
-    AdmissionCheckRegistry, BindingProfile, CheckStage, Placements,
-};
+    AdmissionCheckRegistry, BindingProfile, CheckStage, Placements};
 use ezsdr_kernel::event::{
     Action, ActionTemplate, CounterRow, Event, EventCollector, EventKind, EventSink, Severity,
 };
@@ -19,7 +18,7 @@ use ezsdr_kernel::manifest::{
 };
 use ezsdr_kernel::module_api::{
     CoercionFidelity, EnvelopeFidelity, ExecutionClass, Factories, Fidelity, ModuleRegistry,
-    RfFidelity, StopMode, TransportFidelity, UpdateClass, Sink,
+    RfFidelity, Sink, StopMode, TransportFidelity, UpdateClass,
 };
 use ezsdr_kernel::policy::{EventKindRegistry, Policy, Reaction};
 use ezsdr_kernel::run::{
@@ -33,7 +32,7 @@ use ezsdr_kernel::spec::{ExperimentSpec, Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::{BlockFlags, ContinuityBuilder, DropCarry, LatePolicy};
 use ezsdr_kernel::time::{AbsoluteDeadline, TimePoint};
 use support::{
-    FakeHostClock, RecordingCleanup, TestLimitsCheck, TestProvider, TestSink, id, key, mid, ns, rid, some_hash, test_provider_descriptor, test_sink_descriptor,
+    FakeHostClock, RecordingCleanup, TestLimitsCheck, TestProvider, TestSink, id, key, mref, ns, rid, some_hash, test_provider_descriptor, test_sink_descriptor,
     test_vocabulary,
 };
 
@@ -47,7 +46,8 @@ fn registry() -> ModuleRegistry {
     reg.register(test_provider_descriptor(),
         Factories { provider: true, authority: true, ..Factories::default() },)
         .expect("registers");
-    reg.register(test_sink_descriptor(), Factories { sink: true, ..Factories::default() })
+    reg.register(test_sink_descriptor(), Factories { sink: true, ..Factories::default() },
+    )
         .expect("registers");
     reg
 }
@@ -63,34 +63,44 @@ fn kinds() -> EventKindRegistry {
 // ---------------------------------------------------------------- the state machine
 
 #[test]
+fn rs_01_run_id_is_generated_and_unique_within_the_process() {
+    let first = RunId::generate();
+    let second = RunId::generate();
+    assert_ne!(first, second);
+    assert!(first.as_str().starts_with("local:"));
+    assert_eq!(first.as_str().split(':').count(), 3);
+    assert!(first.as_str().rsplit_once('-').is_some());
+}
+
+#[test]
 fn rs_02_happy_path_transitions() {
     let clock = FakeHostClock::new();
     let mut run = RunStateMachine::new(&clock);
     for state in [
-        RunState::Validated,
-        RunState::Planned,
-        RunState::Prepared,
-        RunState::Armed,
-        RunState::Running,
+        RunState::Validated {},
+        RunState::Planned {},
+        RunState::Prepared {},
+        RunState::Armed {},
+        RunState::Running {},
     ] {
         run.move_to(state, Some(t(0)), &clock).expect("forward");
     }
     run.begin_stopping(CleanupMode::Orderly, Some(t(1)), &clock).expect("into Stopping");
-    run.finish(Termination::Completed, Some(t(2)), &clock).expect("into CleanedUp");
+    run.finish(Termination::Completed {}, Some(t(2)), &clock).expect("into CleanedUp");
     let states: Vec<&RunState> = run.transitions().iter().map(|r| &r.state).collect();
     assert_eq!(states.len(), 8, "exactly the eight states, all recorded");
-    assert!(matches!(states[0], RunState::Created));
+    assert!(matches!(states[0], RunState::Created {}));
     assert!(matches!(states[7], RunState::CleanedUp { .. }));
     // RS-5: each carries its runtime instant and the host UTC time.
     assert!(run.transitions().iter().all(|r| r.host_utc_nanos > 0));
     // There is no going back, and no skipping.
     assert!(matches!(
-        run.move_to(RunState::Running, None, &clock),
+        run.move_to(RunState::Running {}, None, &clock),
         Err(RunError::IllegalTransition { .. })
     ));
     let mut fresh = RunStateMachine::new(&clock);
     assert!(matches!(
-        fresh.move_to(RunState::Running, None, &clock),
+        fresh.move_to(RunState::Running {}, None, &clock),
         Err(RunError::IllegalTransition { .. })
     ));
 }
@@ -100,9 +110,10 @@ fn rs_03_failure_at_each_stage_reaches_cleanup() {
     let clock = FakeHostClock::new();
     for (stage, reached) in [
         (Stage::Validate, vec![]),
-        (Stage::Plan, vec![RunState::Validated]),
-        (Stage::Prepare, vec![RunState::Validated, RunState::Planned]),
-        (Stage::Arm, vec![RunState::Validated, RunState::Planned, RunState::Prepared]),
+        (Stage::Plan, vec![RunState::Validated {}]),
+        (Stage::Prepare, vec![RunState::Validated {}, RunState::Planned {}]),
+        (Stage::Arm, vec![RunState::Validated {}, RunState::Planned {}, RunState::Prepared {}],
+        ),
     ] {
         let mut run = RunStateMachine::new(&clock);
         for s in reached {
@@ -114,9 +125,26 @@ fn rs_03_failure_at_each_stage_reaches_cleanup() {
             run.state(),
             RunState::CleanedUp { termination: Termination::Failed { stage: s } } if *s == stage
         ));
-        // RS-11: a Manifest is written for every Run that reaches CleanedUp.
-        let m = manifest_fixture(Termination::Failed { stage });
-        assert!(matches!(m.termination.reason, Termination::Failed { .. }));
+    }
+}
+
+#[test]
+fn rs_11_cleanup_reaches_the_manifest_step_with_nothing_prepared() {
+    // `run_cleanup` cannot observe a failure stage; what differs between stages is
+    // how much was prepared, and a `validate` failure leaves nothing. With no
+    // fragments, in either mode, step 8 is still reached and is still the last
+    // step run. Failing and wedged steps are RS-6's and RS-8a's tests (D70).
+    for mode in [CleanupMode::Orderly, CleanupMode::Abort] {
+        let cleanup = Arc::new(RecordingCleanup::new());
+        let ops: Arc<dyn ezsdr_kernel::run::CleanupOps> = cleanup.clone();
+        let outcome = run_cleanup(ops, &[], mode, &|| None);
+        assert!(outcome.failures.is_empty(), "nothing to fail under {mode:?}");
+        assert_eq!(
+            cleanup.steps().last(),
+            Some(&CleanupStep::ReleaseAndWriteManifest),
+            "step 8 is reached with nothing prepared under {mode:?}"
+        );
+        assert!(outcome.modes.iter().any(|(s, _)| *s == CleanupStep::ReleaseAndWriteManifest));
     }
 }
 
@@ -126,11 +154,11 @@ fn rs_04_structural_mutation_forbidden() {
     let mut run = RunStateMachine::new(&clock);
     assert!(run.check_structural_mutation().is_ok());
     for s in [
-        RunState::Validated,
-        RunState::Planned,
-        RunState::Prepared,
-        RunState::Armed,
-        RunState::Running,
+        RunState::Validated {},
+        RunState::Planned {},
+        RunState::Prepared {},
+        RunState::Armed {},
+        RunState::Running {},
     ] {
         run.move_to(s, None, &clock).expect("forward");
     }
@@ -225,8 +253,10 @@ fn rs_10_abort_during_orderly_escalates() {
     assert_eq!(out.modes[0].1, CleanupMode::Orderly);
     assert_eq!(out.modes.last().expect("nine steps").1, CleanupMode::Abort);
     // Both causes are recorded in the termination.
-    let mut section = termination_fixture(Termination::Stopped { cause: StopCause::Client });
-    section.also.push(StopCause::Abort { cause: "policy".to_owned() });
+    let mut section = termination_fixture(Termination::Stopped { cause: StopCause::Client {},
+    });
+    section.also.push(StopCause::Abort { cause: "policy".to_owned(),
+    });
     assert_eq!(section.also.len(), 1);
 }
 
@@ -254,7 +284,7 @@ fn rs_8a_wedged_cleanup_step_times_out() {
 
 #[test]
 fn rs_21_lease_default_and_ttl_required() {
-    assert_eq!(Lease::default().mode, LeaseMode::Attached);
+    assert_eq!(Lease::default().mode, LeaseMode::Attached {});
     let clock = FakeHostClock::new();
     assert_eq!(Lease::detached(0, true, "tok", &clock), Err(RunError::LeaseTtlRequired));
     assert!(Lease::detached(5_000, true, "tok", &clock).is_ok());
@@ -274,7 +304,7 @@ fn rs_22_ttl_uses_the_host_clock() {
 fn rs_23_attached_stops_on_disconnect() {
     let clock = FakeHostClock::new();
     let mut lease = Lease::attached();
-    assert_eq!(lease.on_disconnect(&clock), Some(StopCause::ClientDisconnect));
+    assert_eq!(lease.on_disconnect(&clock), Some(StopCause::ClientDisconnect {}));
 }
 
 #[test]
@@ -309,7 +339,8 @@ fn rs_21_lease_validate_refuses_a_zero_ttl() {
     let clock = FakeHostClock::new();
     assert_eq!(Lease::detached(0, true, "tok", &clock), Err(RunError::LeaseTtlRequired));
     let malformed = Lease {
-        mode: LeaseMode::Detached { ttl_ms: 0, renewable: true },
+        mode: LeaseMode::Detached { ttl_ms: 0, renewable: true,
+        },
         token: Some("tok".to_owned()),
         holder: None,
         expires_at_host: None,
@@ -344,13 +375,15 @@ fn rs_29_an_unregistered_fatal_kind_escalates() {
     // severity, and RS-36 sets the flag on the hot path.
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
     let unknown = EventKind::parse("vendor.crash").expect("parses");
-    let c = collector(8, &policy, &[(rid("radio"), EventKind::parse("test.custom").expect("k"))]);
+    let c = collector(8, &policy, &[(rid("radio"), EventKind::parse("test.custom").expect("k"))],
+    );
     let h = c.resolve(&rid("radio"), &unknown);
     c.emit(h, t(0), Severity::Fatal, &[]).expect("emits");
     assert_eq!(c.escalation().map(|(_, r)| r), Some(Reaction::Abort));
 
     // The same kind at `info` does not escalate.
-    let c = collector(8, &policy, &[(rid("radio"), EventKind::parse("test.custom").expect("k"))]);
+    let c = collector(8, &policy, &[(rid("radio"), EventKind::parse("test.custom").expect("k"))],
+    );
     let h = c.resolve(&rid("radio"), &unknown);
     c.emit(h, t(0), Severity::Info, &[]).expect("emits");
     assert!(c.escalation().is_none());
@@ -360,7 +393,8 @@ fn rs_29_an_unregistered_fatal_kind_escalates() {
 fn rs_30_marks_every_open_artifact_including_a_partial_one() {
     // MA-26 makes `partial` the ordinary state of an artifact still open on an
     // abort, so RS-30's "every artifact open at that moment" includes it.
-    let mut open = vec![artifact("a"), ArtifactRef { partial: true, ..artifact("b") }];
+    let mut open = vec![artifact("a"), ArtifactRef { partial: true, ..artifact("b") },
+    ];
     let kind = EventKind::parse("test.custom").expect("parses");
     mark_open_artifacts(&mut open, kind.clone(), t(1));
     mark_open_artifacts(&mut open, kind, t(2));
@@ -415,7 +449,8 @@ fn rs_28_policy_defaults_table() {
     // The test Module's own kind keeps its declared default.
     assert_eq!(policy.reaction_for(&k("test.custom")), Reaction::Continue);
     // No radio kind is registered by the Kernel.
-    for radio in ["RX_OVERFLOW", "TX_UNDERFLOW", "TX_DISCONTINUITY", "TIME_ERROR", "ALIGNMENT_ERROR"] {
+    for radio in ["RX_OVERFLOW", "TX_UNDERFLOW", "TX_DISCONTINUITY", "TIME_ERROR", "ALIGNMENT_ERROR",
+    ] {
         assert!(kinds.get(&k(radio)).is_none(), "{radio} is the Radio Model's, not the Kernel's");
     }
     assert_eq!(EventKind::kernel_kinds().len(), 5);
@@ -443,7 +478,8 @@ fn rs_26_policy_override_from_spec() {
 
     // An unregistered kind in the table is refused (SB-18).
     let bad: BTreeMap<EventKind, Reaction> =
-        [(EventKind::parse("RX_OVERFLOWS").expect("parses"), Reaction::Stop)].into_iter().collect();
+        [(EventKind::parse("RX_OVERFLOWS").expect("parses"), Reaction::Stop,
+    )].into_iter().collect();
     assert!(matches!(kinds.compile(&bad), Err(RunError::UnknownEventKind { .. })));
 }
 
@@ -570,7 +606,8 @@ fn rs_36_abort_survives_a_drop() {
     let c = collector(
         2,
         &policy,
-        &[(source.clone(), noise.clone()), (source.clone(), fatal.clone())],
+        &[(source.clone(), noise.clone()), (source.clone(), fatal.clone()),
+        ],
     );
     let hn = c.resolve(&source, &noise);
     for _ in 0..10 {
@@ -590,8 +627,10 @@ fn rs_36_abort_survives_a_drop() {
 fn rs_38_counters_include_zero_rows() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
     let pairs = [
-        (rid("radio"), EventKind::parse("test.custom").expect("parses")),
-        (rid("radio"), EventKind::parse(EventKind::DEVICE_LOST).expect("parses")),
+        (rid("radio"), EventKind::parse("test.custom").expect("parses"),
+        ),
+        (rid("radio"), EventKind::parse(EventKind::DEVICE_LOST).expect("parses"),
+        ),
     ];
     let c = collector(8, &policy, &pairs);
     let counters = c.counters();
@@ -617,7 +656,7 @@ fn session_profile() -> BindingProfile {
         bindings: [(
             id("radio"),
             ezsdr_kernel::binding::Binding {
-                module: mid("ezsdr.test.provider"),
+                module: mref("ezsdr.test.provider"),
                 feed: None,
                 selector: BTreeMap::new(),
                 profile: None,
@@ -635,7 +674,7 @@ fn session_profile() -> BindingProfile {
     p.bindings.insert(
         id("recorder"),
         ezsdr_kernel::binding::Binding {
-            module: mid("ezsdr.test.sink"),
+            module: mref("ezsdr.test.sink"),
             feed: Some(ezsdr_kernel::spec::SinkFeed {
                 port: ezsdr_kernel::contract::PortRef {
                     component: "radio".to_owned(),
@@ -674,7 +713,8 @@ fn test_sink() -> TestSink {
 }
 
 fn declared_classes() -> BTreeMap<Key, UpdateClass> {
-    [(key("test.capture"), UpdateClass::BlockBoundary), (key("test.flag"), UpdateClass::BlockBoundary)]
+    [(key("test.capture"), UpdateClass::BlockBoundary), (key("test.flag"), UpdateClass::BlockBoundary),
+    ]
         .into_iter()
         .collect()
 }
@@ -771,7 +811,8 @@ fn rs_14_capture_without_recorder_rejected() {
     };
     // RS-14: refused when the profile bound no recorder, rather than silently
     // buffered on the host.
-    let violations = compile(&capture, &reg, &declared_classes(), &Default::default(), t(0), None)
+    let violations = compile(&capture, &reg, &declared_classes(), &Default::default(), t(0), None,
+    )
         .expect_err("no recorder bound");
     assert!(violations[0].reason.contains("bound none"), "{:?}", violations[0]);
     // The same verb against a profile that did bind one compiles.
@@ -850,7 +891,8 @@ fn rs_19_capture_asap_records_applied_time() {
         // RS-14: the value is the action's own; the Kernel supplies no default (D46).
         params: [(key("test.capture"), Value::Bool(true))].into_iter().collect(),
     };
-    let compiled = compile(&action, &reg, &declared_classes(), &placed(), t(4_242), None).expect("compiles");
+    let compiled = compile(&action, &reg, &declared_classes(), &placed(), t(4_242), None,
+    ).expect("compiles");
     assert_eq!(compiled.coercions.len(), 1);
     assert_eq!(compiled.coercions[0].requested, Value::Str("asap".to_owned()));
     assert_eq!(compiled.coercions[0].applied, Value::Int(4_242));
@@ -928,11 +970,13 @@ fn rs_15_log_sequence_is_dense() {
     let mut log = SessionLog::new();
     for i in 0..5 {
         let outcome = if i == 1 || i == 3 {
-            Outcome::Rejected { violations: Vec::new() }
+            Outcome::Rejected { violations: Vec::new(),
+            }
         } else {
-            Outcome::Admitted { coercions: Vec::new(), warnings: Vec::new(), dispatched: Vec::new() }
+            Outcome::Admitted { coercions: Vec::new(), warnings: Vec::new(), dispatched: Vec::new(),
+            }
         };
-        log.append(t(i), SessionAction::Renew, outcome).expect("well-formed");
+        log.append(t(i), SessionAction::Renew {}, outcome).expect("well-formed");
     }
     let seqs: Vec<u32> = log.entries().iter().map(|e| e.seq).collect();
     assert_eq!(seqs, vec![0, 1, 2, 3, 4], "a rejected Action occupies a number too");
@@ -954,7 +998,8 @@ fn rs_20_replay_divergence() {
 fn rs_50_stop_with_and_without_a_target() {
     let reg = registry();
     let with = compile(
-        &SessionAction::Stop { target: Some(rid("radio")) },
+        &SessionAction::Stop { target: Some(rid("radio")),
+        },
         &reg,
         &declared_classes(),
         &placed(),
@@ -966,7 +1011,8 @@ fn rs_50_stop_with_and_without_a_target() {
     assert!(with.control.is_none(), "the Run keeps Running");
 
     let without =
-        compile(&SessionAction::Stop { target: None }, &reg, &declared_classes(), &placed(), t(0), None)
+        compile(&SessionAction::Stop { target: None }, &reg, &declared_classes(), &placed(), t(0), None,
+    )
             .expect("compiles");
     assert!(without.actions.is_empty());
     assert_eq!(without.control, Some(ControlOp::StopRun));
@@ -1049,15 +1095,18 @@ fn rs_17_undeclared_update_class_rejected() {
 fn rs_18_action_before_running_rejected() {
     let clock = FakeHostClock::new();
     let mut run = RunStateMachine::new(&clock);
-    for s in [RunState::Validated, RunState::Planned, RunState::Prepared, RunState::Armed] {
+    for s in [RunState::Validated {}, RunState::Planned {}, RunState::Prepared {}, RunState::Armed {},
+    ] {
         run.move_to(s, None, &clock).expect("forward");
     }
     assert_eq!(run.check_running(), Err(RunError::RunNotRunning));
     let mut log = SessionLog::new();
-    log.append(t(0), SessionAction::Renew, Outcome::Rejected { violations: Vec::new() })
+    log.append(t(0), SessionAction::Renew {}, Outcome::Rejected { violations: Vec::new(),
+        },
+    )
         .expect("a rejected Action is still logged (RS-15)");
     assert_eq!(log.entries().len(), 1, "it is rejected and logged");
-    run.move_to(RunState::Running, None, &clock).expect("forward");
+    run.move_to(RunState::Running {}, None, &clock).expect("forward");
     assert!(run.check_running().is_ok());
 }
 
@@ -1077,7 +1126,8 @@ fn rs_44a_waveform_ingested_before_admission() {
         params: BTreeMap::new(),
     };
     let compiled: Compiled =
-        compile(&action, &reg, &declared_classes(), &placed(), t(0), Some(waveform.clone()))
+        compile(&action, &reg, &declared_classes(), &placed(), t(0), Some(waveform.clone()),
+    )
             .expect("compiles with a resolved waveform");
     match &compiled.actions[0] {
         Action::TxBurst { waveform: w, repeat, .. } => {
@@ -1104,7 +1154,8 @@ fn rs_48_action_set_is_closed_and_schematised() {
             late_policy: LatePolicy::SendAsapAndFlag,
             metadata: BTreeMap::new(),
         },
-        Action::SetTimer { target: rid("radio"), at: AbsoluteDeadline::new(t(20)), token: 7 },
+        Action::SetTimer { target: rid("radio"), at: AbsoluteDeadline::new(t(20)), token: 7,
+        },
         Action::UpdateParameter {
             target: rid("radio"),
             key: key("test.flag"),
@@ -1129,7 +1180,8 @@ fn rs_48_action_set_is_closed_and_schematised() {
             },
         },
         Action::Stop { target: None },
-        Action::Abort { cause: StopCause::Client },
+        Action::Abort { cause: StopCause::Client {},
+        },
     ];
     assert_eq!(actions.len(), Action::MEMBERS, "the set has exactly seven members");
     for a in &actions {
@@ -1139,7 +1191,8 @@ fn rs_48_action_set_is_closed_and_schematised() {
         assert_eq!(back, *a);
     }
     // A Spec's scheduled Action is a template, with no time field (RS-49a).
-    let template = ActionTemplate::SetTimer { target: rid("radio"), token: 7 };
+    let template = ActionTemplate::SetTimer { target: rid("radio"), token: 7,
+    };
     let json = serde_json::to_value(&template).expect("serialises");
     assert!(json.get("at").is_none());
     assert!(matches!(
@@ -1187,6 +1240,7 @@ fn manifest_fixture(reason: Termination) -> Manifest {
             transitions: Vec::new(),
             deterministic: false,
         },
+        policy: None,
         spec: SpecSection {
             hash: ContentHash::of(&spec).expect("hashes"),
             body: serde_json::to_value(&spec).expect("serialises"),
@@ -1216,17 +1270,43 @@ fn manifest_fixture(reason: Termination) -> Manifest {
 }
 
 #[test]
+fn rs_01_manifest_records_the_compiled_policy() {
+    let kinds = kinds();
+    let custom = EventKind::parse("test.custom").expect("parses");
+    let overrides = [(custom.clone(), Reaction::Stop)].into_iter().collect();
+    let compiled = kinds
+        .compile(&overrides)
+        .expect("compiles the resolved table");
+    let mut manifest = manifest_fixture(Termination::Completed {});
+    manifest.policy = Some(compiled.clone());
+
+    let json = serde_json::to_value(&manifest).expect("serialises");
+    let recorded: Policy = serde_json::from_value(json["policy"].clone()).expect("policy is typed");
+    assert_eq!(recorded, compiled);
+    assert_eq!(recorded.reaction_for(&custom), Reaction::Stop);
+}
+
+#[test]
 fn rs_11_manifest_for_every_terminal_run() {
     for reason in [
-        Termination::Completed,
-        Termination::Stopped { cause: StopCause::Client },
-        Termination::Failed { stage: Stage::Validate },
+        Termination::Completed {},
+        Termination::Stopped { cause: StopCause::Client {},
+        },
+        Termination::Failed { stage: Stage::Validate,
+        },
     ] {
         let mut m = manifest_fixture(reason.clone());
         let hash = m.seal().expect("seals");
         assert_eq!(m.termination.reason, reason);
         assert_eq!(m.hash.as_ref(), Some(&hash));
     }
+    // A Run refused at validate never compiled a Policy (SB-18 refuses before
+    // `compile` could), so it records none rather than an empty table that would
+    // read as "continue for every kind" (RS-1, §65 #39).
+    let mut refused = manifest_fixture(Termination::Failed { stage: Stage::Validate });
+    refused.seal().expect("seals without a Policy");
+    let json = serde_json::to_value(&refused).expect("serialises");
+    assert!(json["policy"].is_null(), "{}", json["policy"]);
 }
 
 #[test]
@@ -1239,14 +1319,14 @@ fn rs_45_hash_equal_for_equal_inputs() {
         .expect("validates");
     assert_eq!(ContentHash::of(&a).expect("hashes"), ContentHash::of(&b).expect("hashes"));
 
-    let mut ma = manifest_fixture(Termination::Completed);
-    let mut mb = manifest_fixture(Termination::Completed);
+    let mut ma = manifest_fixture(Termination::Completed {});
+    let mut mb = manifest_fixture(Termination::Completed {});
     assert_eq!(ma.seal().expect("seals"), mb.seal().expect("seals"));
 }
 
 #[test]
 fn rs_46_manifest_hash_is_stored_beside_the_body() {
-    let mut m = manifest_fixture(Termination::Completed);
+    let mut m = manifest_fixture(Termination::Completed {});
     let hash = m.seal().expect("seals");
     // The hash is computed over the Manifest with that field **removed** — the shape
     // a non-Rust consumer implementing RS-46 will build.
@@ -1266,7 +1346,7 @@ fn rs_46_manifest_hash_is_stored_beside_the_body() {
 
 #[test]
 fn rs_39_section_namespace_enforced() {
-    let mut m = manifest_fixture(Termination::Completed);
+    let mut m = manifest_fixture(Termination::Completed {});
     assert!(m.write_section(&ns("ezsdr.test"), ns("ezsdr.test.bursts"), serde_json::json!([])).is_ok());
     assert_eq!(
         m.write_section(&ns("ezsdr.test"), ns("vendor.other"), serde_json::json!({})),
@@ -1279,7 +1359,7 @@ fn rs_39_section_namespace_enforced() {
 fn rs_43_no_seeds_field_in_the_envelope() {
     let mut profile = session_profile();
     profile.environment.insert(ns("sim.engine"), serde_json::json!({ "seed": 42 }));
-    let mut m = manifest_fixture(Termination::Completed);
+    let mut m = manifest_fixture(Termination::Completed {});
     m.binding.body = serde_json::to_value(&profile).expect("serialises");
     let json = serde_json::to_value(&m).expect("serialises");
     assert!(json.get("seeds").is_none(), "the envelope has no `seeds` field");
@@ -1291,7 +1371,7 @@ fn rs_38_environment_recorded_verbatim() {
     let mut profile = session_profile();
     let section = serde_json::json!({ "nested": { "a": [1, 2, 3] }, "s": "verbatim" });
     profile.environment.insert(ns("vendor.thing"), section.clone());
-    let mut m = manifest_fixture(Termination::Completed);
+    let mut m = manifest_fixture(Termination::Completed {});
     m.binding.body = serde_json::to_value(&profile).expect("serialises");
     assert_eq!(m.binding.body["environment"]["vendor.thing"], section);
 }
@@ -1309,8 +1389,10 @@ fn rs_32_a_fabricated_event_handle_does_not_panic_the_kernel() {
     // ring and moved the panic into the coordinator's `drain`, which indexes `kinds`
     // with it — away from the Module that caused it.
     for bad in [
-        ezsdr_kernel::event::EventHandle { row: u32::MAX, kind: 0 },
-        ezsdr_kernel::event::EventHandle { row: 0, kind: u32::MAX },
+        ezsdr_kernel::event::EventHandle { row: u32::MAX, kind: 0,
+        },
+        ezsdr_kernel::event::EventHandle { row: 0, kind: u32::MAX,
+        },
     ] {
         assert!(
             matches!(
@@ -1335,13 +1417,14 @@ fn rs_39_a_module_section_with_a_non_ascii_key_is_refused() {
     // it passes no `from_json`, so OV-15's ASCII key rule was never applied to it:
     // `seal()` then failed at cleanup step 8, after the Run had transmitted (SB-9a,
     // RS-11).
-    let mut m = manifest_fixture(Termination::Completed);
+    let mut m = manifest_fixture(Termination::Completed {});
     assert!(matches!(
         m.write_section(&ns("test"), ns("test.envelope"), serde_json::json!({ "\u{3c1}": 1 })),
         Err(ezsdr_kernel::run::RunError::SectionKeyNotAscii { .. })
     ));
     // An ASCII key is written, and the Manifest still seals.
-    m.write_section(&ns("test"), ns("test.envelope"), serde_json::json!({ "rho": 1 }))
+    m.write_section(&ns("test"), ns("test.envelope"), serde_json::json!({ "rho": 1 }),
+    )
         .expect("writes");
     assert!(m.seal().is_ok());
 }
@@ -1394,7 +1477,7 @@ fn rs_38_manifest_carries_its_mandatory_version() {
     // Vision §10 requires a mandatory `version` of the Manifest by name, and the
     // Manifest is the one document that outlives every Run. Without the field
     // SB-47's migrate-or-refuse has nothing to read (finding R10 / D-table N3).
-    let mut m = manifest_fixture(Termination::Completed);
+    let mut m = manifest_fixture(Termination::Completed {});
     m.seal().expect("seals");
     let doc = serde_json::to_value(&m).expect("serialises");
     assert_eq!(doc["version"], serde_json::json!(1), "the version is in the hashed body");
@@ -1438,13 +1521,13 @@ fn rs_41_fidelity_is_the_weakest() {
 
 #[test]
 fn rs_42_determinism_only_in_simulation() {
-    let mut m = manifest_fixture(Termination::Completed);
+    let mut m = manifest_fixture(Termination::Completed {});
     m.run.execution_class = ExecutionClass::RealtimeEmulation;
     m.run.deterministic = true; // a caller claims it anyway
     m.seal().expect("seals");
     assert!(!m.run.deterministic, "sealing clears a claim RS-42 does not allow");
 
-    let mut sim = manifest_fixture(Termination::Completed);
+    let mut sim = manifest_fixture(Termination::Completed {});
     sim.run.execution_class = ExecutionClass::Simulation;
     sim.run.deterministic = true;
     sim.seal().expect("seals");
@@ -1516,7 +1599,8 @@ fn rs_49a_scheduled_action_is_a_template() {
     };
     // The Spec-side shape: a mandatory `SpecTime`, and no domain anywhere in it.
     let entry = ezsdr_kernel::spec::ScheduleEntry {
-        at: ezsdr_kernel::spec::SpecTime { clock: Ident::parse("radio").expect("id"), offset_ticks: 0 },
+        at: ezsdr_kernel::spec::SpecTime { clock: Ident::parse("radio").expect("id"), offset_ticks: 0,
+        },
         action: template.clone(),
     };
     let written = serde_json::to_value(&entry).expect("serialises");
@@ -1620,14 +1704,17 @@ fn rs_13_every_session_action_compiles_to_its_kernel_form() {
     let reg = registry();
     let hash = some_hash("child-spec");
     let cases: Vec<(SessionAction, ControlOp)> = vec![
-        (SessionAction::Release, ControlOp::Release),
+        (SessionAction::Release {}, ControlOp::Release),
         (
-            SessionAction::Adopt { token: "tok".to_owned() },
-            ControlOp::Adopt { token: "tok".to_owned() },
+            SessionAction::Adopt { token: "tok".to_owned(),
+            },
+            ControlOp::Adopt { token: "tok".to_owned(),
+            },
         ),
-        (SessionAction::Renew, ControlOp::Renew),
+        (SessionAction::Renew {}, ControlOp::Renew),
         (
-            SessionAction::RunChild { spec_hash: hash.clone() },
+            SessionAction::RunChild { spec_hash: hash.clone(),
+            },
             ControlOp::RunChild { spec_hash: hash },
         ),
         (SessionAction::Stop { target: None }, ControlOp::StopRun),
@@ -1643,7 +1730,8 @@ fn rs_13_every_session_action_compiles_to_its_kernel_form() {
     // And the contrast RS-13 draws: `Stop { target }` addresses a resource, so it is
     // an Action and not a control op.
     let compiled = compile(
-        &SessionAction::Stop { target: Some(rid("radio")) },
+        &SessionAction::Stop { target: Some(rid("radio")),
+        },
         &reg,
         &declared_classes(),
         &placed(),

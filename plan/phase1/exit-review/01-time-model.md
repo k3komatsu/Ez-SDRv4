@@ -1,7 +1,7 @@
 # `01-time-model.md` — TM-n disposition table
 
 31 rules. Row format per [README.md](README.md). Tests are in `crates/ezsdr-kernel/tests/time_model.rs`
-unless the Carrier column names a different file. HEAD `e57d6db`, `cargo test -p ezsdr-kernel` clean (48/48
+unless the Carrier column names a different file. The working tree on `5c2d9b9` with D51–D94 applied, `cargo test -p ezsdr-kernel` clean (48/48
 in `time_model.rs`).
 
 | Rule | Disposition | Carrier | What the carrier asserts |
@@ -40,4 +40,4 @@ in `time_model.rs`).
 
 ## Withdrawn-ID check
 
-None of the six withdrawn rule ids (`SB-25a`, `SB-28`, `SB-32`, `RS-37`, `MA-4`, `MA-43`) is a `TM-` rule, so no row in this document is `withdrawn`. Confirmed by inspection of the 31 `TM-n` ids against that list.
+None of the seven withdrawn rule ids (`SB-25a`, `SB-28`, `SB-32`, `RS-32a`, `RS-37`, `MA-4`, `MA-43`) is a `TM-` rule, so no row in this document is `withdrawn`. Confirmed by inspection of the 29 `TM-n` ids against that list.

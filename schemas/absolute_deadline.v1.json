@@ -1,6 +1,7 @@
 {
   "$defs": {
     "ClockDomainId": {
+      "additionalProperties": false,
       "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
       "properties": {
         "local": {
@@ -27,6 +28,7 @@
       "type": "integer"
     },
     "TimePoint": {
+      "additionalProperties": false,
       "description": "An instant: integer ticks in a named clock domain. Never floating-point seconds.\n\nThere is deliberately no `PartialOrd`: two points of different domains cannot be\ncompared at all, and `a < b` silently answering `false` is the bug class this\nmodel exists to prevent (decision T3).\n\nRule: TM-1, TM-6.",
       "properties": {
         "domain": {
@@ -47,6 +49,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "A wall-time instant by which something must happen, in any domain (TM-15, Vision §19).",
   "properties": {
     "time_point": {

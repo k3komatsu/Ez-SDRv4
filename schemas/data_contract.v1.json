@@ -29,6 +29,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "A registered data contract: an id, a fixed attribute map, and the set of\nproducer contracts it accepts without conversion.\n\nRule: SC-2, SC-4.",
   "properties": {
     "attributes": {

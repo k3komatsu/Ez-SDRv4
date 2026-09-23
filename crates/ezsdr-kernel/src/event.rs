@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +39,8 @@ pub enum Severity {
 /// and every other kind belongs to the Vocabulary or Module that emits it.
 ///
 /// Rule: RS-27.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(transparent)]
 pub struct EventKind(String);
 
@@ -105,6 +106,7 @@ impl fmt::Display for EventKind {
 ///
 /// Rule: RS-31.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Event {
     /// Which resource it came from (RS-31).
     pub source: ResourceId,
@@ -121,19 +123,6 @@ pub struct Event {
 /// Largest inline payload a hot-path record carries. A larger payload is produced
 /// on the control path only (RS-32).
 pub const HOT_PAYLOAD_BYTES: usize = 32;
-
-/// A fixed hot-path layout of at most [`HOT_PAYLOAD_BYTES`] bytes together with the
-/// schema that layout decodes to; the collector decodes it once, off the hot path.
-/// A kind with no declared layout is control-path only.
-///
-/// Rule: RS-32a.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct HotLayout {
-    /// How many of the inline bytes this layout uses (RS-32a).
-    pub bytes: u8,
-    /// The schema the layout decodes to; opaque to the Kernel (RS-32a).
-    pub schema: serde_json::Value,
-}
 
 /// A fixed-size hot-path record: pre-resolved source and kind indices rather than
 /// strings, a `TimePoint`, a severity, and an inline payload.
@@ -160,25 +149,13 @@ pub struct EventRecord {
 
 /// One row of the never-dropping counter table (RS-33).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CounterRow {
     /// Which resource, or the fallback row's placeholder (RS-33).
     pub source: ResourceId,
     /// Which kind (RS-33).
     pub kind: EventKind,
     /// How many were emitted, whether or not the body survived (RS-33).
-    pub count: u64,
-}
-
-/// How many bodies of one kind the ring dropped since the last drain. Private to
-/// the collector; it becomes an `EVENTS_DROPPED` event. Not spec 02's `DropCarry`,
-/// which is about link-dropped sample blocks, not event bodies.
-///
-/// Rule: RS-34, RS-35.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct DroppedPerKind {
-    /// Which kind dropped (RS-35).
-    pub kind: EventKind,
-    /// The delta since the last drain, not a running total (RS-35).
     pub count: u64,
 }
 
@@ -353,13 +330,11 @@ impl EventCollector {
     /// storm would be discarded and the Run would continue on a device that is gone
     /// (RS-36).
     pub fn escalation(&self) -> Option<(EventKind, Reaction)> {
-        self.escalate.iter().enumerate().find_map(|(i, f)| {
-            match f.load(Ordering::Relaxed) {
+        self.escalate.iter().enumerate().find_map(|(i, f)| match f.load(Ordering::Relaxed) {
                 1 => Some((self.kinds[i].clone(), Reaction::Stop)),
                 2 => Some((self.kinds[i].clone(), Reaction::Abort)),
                 _ => None,
-            }
-        })
+            })
     }
 
     /// The reaction to one emission: the kind's Policy entry when it has one, and
@@ -421,7 +396,8 @@ impl EventCollector {
                 ),
             })
             .collect();
-        out.append(&mut self.control.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect());
+        out.append(&mut self.control.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect(),
+        );
         let dropped_kind = EventKind(EventKind::EVENTS_DROPPED.to_owned());
         for (i, d) in self.dropped.iter().enumerate() {
             let count = d.swap(0, Ordering::Relaxed);
@@ -444,19 +420,6 @@ impl EventCollector {
             }
         }
         out
-    }
-
-    /// The per-kind drop deltas without draining the bodies; the tests assert
-    /// RS-35's invariant against them (RS-34).
-    pub fn dropped_per_kind(&self) -> Vec<DroppedPerKind> {
-        self.dropped
-            .iter()
-            .enumerate()
-            .filter_map(|(i, d)| {
-                let count = d.load(Ordering::Relaxed);
-                (count > 0).then(|| DroppedPerKind { kind: self.kinds[i].clone(), count })
-            })
-            .collect()
     }
 
     /// Both fields of a handle, checked where one enters. `EventHandle`'s fields are
@@ -482,17 +445,21 @@ impl EventSink for EventCollector {
         let fallback_row = (self.pairs.len() - 1) as u32;
         match (si, ki) {
             (Some(s), Some(k)) => match self.index.get(&(s, k)) {
-                Some(row) => EventHandle { row: *row as u32, kind: k as u32 },
+                Some(row) => EventHandle { row: *row as u32, kind: k as u32,
+                },
                 // RS-33: an unforeseen pair merges into the fallback row, which is
                 // reported as such.
-                None => EventHandle { row: fallback_row, kind: k as u32 },
+                None => EventHandle { row: fallback_row, kind: k as u32,
+                },
             },
             // An unforeseen *source* must not cost the kind: RS-36's abort on
             // `DEVICE_LOST` and RS-31's delivered kind both hang off it, and a
             // second or hot-plugged device is an ordinary reason for a source the
             // plan did not foresee.
-            (None, Some(k)) => EventHandle { row: fallback_row, kind: k as u32 },
-            _ => EventHandle { row: fallback_row, kind: (self.kinds.len() - 1) as u32 },
+            (None, Some(k)) => EventHandle { row: fallback_row, kind: k as u32,
+            },
+            _ => EventHandle { row: fallback_row, kind: (self.kinds.len() - 1) as u32,
+            },
         }
     }
 
@@ -550,7 +517,8 @@ impl EventSink for EventCollector {
 // ---------------------------------------------------------------- the Kernel Action set
 
 /// Identifies one dispatched Action inside a Run (RS-15).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(transparent)]
 pub struct ActionId(pub u64);
 
@@ -563,6 +531,7 @@ pub struct ActionId(pub u64);
 ///
 /// Rule: RS-48, RS-49.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
     /// One transmit burst. Carries no channel list: mapping a burst's channels onto
@@ -626,7 +595,7 @@ pub enum Action {
         /// When, if it is timed (RS-49).
         at: Option<AbsoluteDeadline>,
     },
-    /// Produce an event (RS-32a).
+    /// Produce an event (RS-31).
     Emit {
         /// Whose event (RS-49).
         target: ResourceId,
@@ -675,6 +644,7 @@ impl Action {
 ///
 /// Rule: RS-49a.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ActionTemplate {
     /// [`Action::TxBurst`] without `at` (RS-49a).
@@ -732,8 +702,8 @@ impl ActionTemplate {
     /// Substitutes the deadline `arm` resolved, producing the Action (RS-49a, SB-43).
     pub fn resolve(self, at: AbsoluteDeadline) -> Action {
         match self {
-            ActionTemplate::TxBurst { target, waveform, repeat, late_policy, metadata } => {
-                Action::TxBurst {
+            ActionTemplate::TxBurst { target, waveform, repeat, late_policy, metadata,
+            } => Action::TxBurst {
                     target,
                     waveform,
                     repeat,
@@ -741,15 +711,14 @@ impl ActionTemplate {
                     requested_at: None,
                     late_policy,
                     metadata,
-                }
-            }
+                },
             ActionTemplate::SetTimer { target, token } => Action::SetTimer { target, at, token },
-            ActionTemplate::UpdateParameter { target, key, value, class } => {
-                Action::UpdateParameter { target, key, value, class, at: Some(at) }
-            }
-            ActionTemplate::PeripheralCommand { target, verb, params } => {
-                Action::PeripheralCommand { target, verb, params, at: Some(at) }
-            }
+            ActionTemplate::UpdateParameter { target, key, value, class,
+            } => Action::UpdateParameter { target, key, value, class, at: Some(at),
+            },
+            ActionTemplate::PeripheralCommand { target, verb, params,
+            } => Action::PeripheralCommand { target, verb, params, at: Some(at),
+            },
             ActionTemplate::Stop { target } => Action::Stop { target },
         }
     }

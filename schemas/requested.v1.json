@@ -4,6 +4,7 @@
       "description": "What a Spec requires of a key. Its value is a scalar: a constraint over a list\nor a map is refused, because the matcher would then need the Vocabulary's\nsemantics to compare them.\n\nRule: SB-5, decision B1.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Exactly this value.",
           "properties": {
             "kind": {
@@ -22,6 +23,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Within these bounds, either of which may be absent.",
           "properties": {
             "kind": {
@@ -57,6 +59,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Any of these values.",
           "properties": {
             "kind": {
@@ -78,6 +81,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "At least this value.",
           "properties": {
             "kind": {
@@ -96,6 +100,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "At most this value.",
           "properties": {
             "kind": {
@@ -114,6 +119,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "The key is declared at all.",
           "properties": {
             "kind": {
@@ -135,6 +141,7 @@
       "type": "integer"
     },
     "ResourceId": {
+      "additionalProperties": false,
       "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the\nreceive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
       "properties": {
         "node": {
@@ -191,6 +198,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "What a Provider was asked for; the input to `coerce` and the same input\n`prepare` sees (SB-7, MA-11).",
   "properties": {
     "constraints": {

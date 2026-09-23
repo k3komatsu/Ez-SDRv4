@@ -24,6 +24,7 @@
       "description": "The compilations a Vocabulary may declare for its verbs (RS-14).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "To an `UpdateParameter` on the named key, as `sink.capture` does (RS-14).",
           "properties": {
             "class": {
@@ -47,6 +48,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "To a `TxBurst`, as `radio.start_repeat` does (RS-14, SC-26).",
           "properties": {
             "kind": {
@@ -70,6 +72,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "To a `PeripheralCommand` carrying the verb (RS-14).",
           "properties": {
             "kind": {
@@ -83,6 +86,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "To nothing: the verb is recorded in the log and dispatches no Action (RS-13).",
           "properties": {
             "kind": {
@@ -102,22 +106,12 @@
       "type": "string"
     },
     "EventKindDecl": {
-      "description": "What a Vocabulary or the Kernel declares when it registers an event kind.\n\nA kind's default reaction is declared where the kind is registered: putting a\nradio kind's default reaction in the Kernel would be a radio policy decision\ninside a frozen tier.\n\nRule: RS-27, RS-28, RS-32a.",
+      "additionalProperties": false,
+      "description": "What a Vocabulary or the Kernel declares when it registers an event kind.\n\nA kind's default reaction is declared where the kind is registered: putting a\nradio kind's default reaction in the Kernel would be a radio policy decision\ninside a frozen tier.\n\nRule: RS-27, RS-28.",
       "properties": {
         "default": {
           "$ref": "#/$defs/Reaction",
           "description": "What to do when no Policy entry overrides it (RS-28)."
-        },
-        "hot_layout": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/HotLayout"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "A fixed hot-path layout, when the kind has one (RS-32a)."
         },
         "kind": {
           "$ref": "#/$defs/EventKind",
@@ -135,26 +129,6 @@
       ],
       "type": "object"
     },
-    "HotLayout": {
-      "description": "A fixed hot-path layout of at most [`HOT_PAYLOAD_BYTES`] bytes together with the\nschema that layout decodes to; the collector decodes it once, off the hot path.\nA kind with no declared layout is control-path only.\n\nRule: RS-32a.",
-      "properties": {
-        "bytes": {
-          "description": "How many of the inline bytes this layout uses (RS-32a).",
-          "format": "uint8",
-          "maximum": 255,
-          "minimum": 0,
-          "type": "integer"
-        },
-        "schema": {
-          "description": "The schema the layout decodes to; opaque to the Kernel (RS-32a)."
-        }
-      },
-      "required": [
-        "bytes",
-        "schema"
-      ],
-      "type": "object"
-    },
     "Ident": {
       "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
       "type": "string"
@@ -164,6 +138,7 @@
       "type": "string"
     },
     "KeyDecl": {
+      "additionalProperties": false,
       "description": "What a Vocabulary declares about one key (spec 05, MA-35).\n\nRule: SB-2, SB-7, SB-45.",
       "properties": {
         "coercible": {
@@ -343,6 +318,7 @@
       ]
     },
     "VerbDecl": {
+      "additionalProperties": false,
       "description": "How a Vocabulary's Session verb compiles to Kernel Actions (RS-13a, RS-14).",
       "properties": {
         "compiles_to": {
@@ -361,6 +337,7 @@
       "type": "object"
     },
     "Version": {
+      "additionalProperties": false,
       "description": "A release-only version. Module and Vocabulary versions carry a minor and a patch;\ndocuments do not, which is decision B7 of `03-spec-and-binding.md`.\n\nRule: MA-33, decision B7.",
       "properties": {
         "major": {
@@ -391,6 +368,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "What the Kernel is obliged to enforce on a Vocabulary's behalf but never\ninterprets: its key declarations, its event kinds with their defaults, its\nSession verbs and how each compiles, and its admission checks. Each of those\nfour is a place where an earlier draft had put Vocabulary content in the Kernel.\n\nRule: MA-35.",
   "properties": {
     "checks": {

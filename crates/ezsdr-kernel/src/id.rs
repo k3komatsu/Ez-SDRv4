@@ -3,7 +3,8 @@
 //! Every Kernel identifier that could ever name something on another host is a
 //! `{node, local}` pair, and `ResourceId` is a `{node, path}` pair because a resource
 //! is a composite tree (`03-spec-and-binding.md` SB-33). v4.0 refuses any id whose
-//! `node` is not [`NodeId::LOCAL`].
+//! `node` is not [`NodeId::LOCAL`]: [`NodeId`]'s deserialiser refuses it in every
+//! document, and `validate()` refuses it in the ids handed in as Rust values (D91).
 
 use std::fmt;
 
@@ -12,11 +13,24 @@ use serde::{Deserialize, Serialize};
 /// A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.
 ///
 /// Rule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.
-#[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct NodeId(pub u32);
+
+/// X7 at the document boundary (D91): every id in every document embeds a `NodeId`,
+/// so refusing a non-local node here covers them all. The schema stays `uint32`, so
+/// lifting X7 later is a code loosening, not a schema change.
+impl<'de> Deserialize<'de> for NodeId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let n = u32::deserialize(d)?;
+        if n != NodeId::LOCAL.0 {
+            return Err(serde::de::Error::custom(format!(
+                "X7: v4.0 accepts only node 0 (LOCAL), not node {n}"
+            )));
+        }
+        Ok(NodeId(n))
+    }
+}
 
 impl NodeId {
     /// The only node id v4.0 accepts (X7).
@@ -41,6 +55,7 @@ impl fmt::Display for NodeId {
     Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
     Serialize, Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct ClockDomainId {
     /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
     pub node: NodeId,
@@ -55,6 +70,7 @@ pub struct ClockDomainId {
     Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
     Serialize, Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct MemoryDomainId {
     /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
     pub node: NodeId,
@@ -69,6 +85,7 @@ pub struct MemoryDomainId {
     Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
     Serialize, Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct IslandId {
     /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
     pub node: NodeId,
@@ -83,6 +100,7 @@ pub struct IslandId {
     Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
     Serialize, Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct DataLinkId {
     /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
     pub node: NodeId,
@@ -164,6 +182,7 @@ impl ClockDomainId {
 ///
 /// Rule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceId {
     /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
     pub node: NodeId,

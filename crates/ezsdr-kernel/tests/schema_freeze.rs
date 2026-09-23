@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 
+use ezsdr_kernel::contract::{Port, PortRef};
 use ezsdr_kernel::schema::{document_schemas, file_name, render};
 
 fn schemas_dir() -> PathBuf {
@@ -46,7 +47,8 @@ fn ov_10_every_document_has_a_schema() {
     // A spot check that the list did not silently shrink: the three types the audit
     // singles out, plus the Manifest envelope.
     let schemas = document_schemas();
-    for name in ["time_point", "continuity_map", "resource", "manifest", "action"] {
+    for name in ["time_point", "continuity_map", "resource", "manifest", "action",
+    ] {
         assert!(schemas.contains_key(name), "{name} has no committed schema (OV-10)");
     }
     assert!(schemas.len() >= 40, "the document list shrank to {}", schemas.len());
@@ -57,7 +59,38 @@ fn x8_in_process_types_have_no_schema() {
     // SampleBlock, BufferRef and the link handles are in-process only by X8; a
     // SampleBlock schema would invite someone to serialise the real-time path.
     let schemas = document_schemas();
-    for name in ["sample_block", "buffer_ref", "event_record", "time_authority"] {
+    for name in ["sample_block", "buffer_ref", "event_record", "time_authority",
+    ] {
         assert!(!schemas.contains_key(name), "{name} must have no schema (X8)");
     }
+}
+
+#[test]
+fn sc_01_port_shapes_are_pinned_by_the_schema_freeze() {
+    fn properties<T: schemars::JsonSchema>() -> std::collections::BTreeSet<String> {
+        let schema =
+            serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<T>())
+                .expect("generated schema is JSON");
+        schema["properties"]
+            .as_object()
+            .expect("the document is an object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    assert_eq!(
+        properties::<Port>(),
+        ["contract", "direction", "name"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    assert_eq!(
+        properties::<PortRef>(),
+        ["component", "port"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
 }

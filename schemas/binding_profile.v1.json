@@ -21,6 +21,7 @@
       ]
     },
     "Binding": {
+      "additionalProperties": false,
       "description": "Which Provider serves a Spec resource, and how it is selected.\n\nA `selector` is Provider content. Vision §8's simulation example writes\n`instances: 2` under a Mock binding; that is selector content meaning one\nProvider instance emulating two motherboards, exactly as the laboratory\nexample's `addrs: [a, b]` is one instance spanning two. It is not two Provider\ninstances, which SB-35 would then have to reconcile with the single-instance\nrule.\n\nRule: SB-22, SB-23.",
       "properties": {
         "feed": {
@@ -35,8 +36,8 @@
           "description": "For a **Sink** binding on a Session profile: the port it records and the\ndrop-class policy and capacity of the link that feeds it. RS-12 makes it the\nimplicit Spec's output. A Spec Run's `outputs[]` already declare their feeds,\nso a binding that carries one there is refused (SB-17, SB-22, RS-12)."
         },
         "module": {
-          "$ref": "#/$defs/ModuleId",
-          "description": "The Module bound here: a Provider for a Spec resource, a Sink for an output\nid, an Executor for an Island's `executor` name. Named `module` rather than\n`provider` because all three roles are bound through this one map; Vision\n§8's illustrative YAML still writes `provider`, which 03 §9 records as a\nVision departure for §12 (SB-22, MA-25, MA-38)."
+          "$ref": "#/$defs/ModuleRef",
+          "description": "The Module bound here: a Provider for a Spec resource, a Sink for an output\nid, an Executor for an Island's `executor` name. Named `module` rather than\n`provider` because all three roles are bound through this one map; Vision\n§8's illustrative YAML still writes `provider`, which 03 §9 records as a\nVision departure for §12. It names the exact `{id, version}`, as\n`LinkPlacement` does, and every bound instance declares the same `ModuleRef`\n(a Provider's `instance()`, an Executor's or Sink's `descriptor()`), which\nadmission compares — a Provider's at `validate`, an Executor's at `plan()`, a\nSink's at both — so one profile hash cannot run two Module versions (SB-22,\nMA-25, MA-38, D78, D82)."
         },
         "profile": {
           "anyOf": [
@@ -64,6 +65,7 @@
       "type": "object"
     },
     "ComponentPlacement": {
+      "additionalProperties": false,
       "description": "Where a component runs (SB-25).",
       "properties": {
         "island": {
@@ -86,6 +88,7 @@
       "type": "string"
     },
     "IslandDecl": {
+      "additionalProperties": false,
       "description": "An Island declaration: an Executor instance, the components placed on it, and\nits optional affinity, real-time policy and preferred batch. Where it lives and\nthe requirement that every component be placed exactly once are SB-13 and SB-25.\n\nRule: MA-38.",
       "properties": {
         "affinity": {
@@ -144,6 +147,7 @@
       "type": "object"
     },
     "IslandId": {
+      "additionalProperties": false,
       "description": "Identifies a scheduling island (`05-module-api.md` MA-27).\n\nRule: MA-27, X7.",
       "properties": {
         "local": {
@@ -164,30 +168,31 @@
       "type": "object"
     },
     "LinkPlacement": {
-      "description": "Which Link Module carries a graph link (SB-25).",
+      "additionalProperties": false,
+      "description": "Which versioned Link Module carries one data link, named by its two ends: a\ngraph link's `from` and `to`, or an output's feed port and `{output id, \"in\"}`.\nNaming the ends rather than a position means reordering `graph.links` cannot\nrebind a Link Module (SB-25, D76).",
       "properties": {
-        "link": {
-          "$ref": "#/$defs/ModuleId",
-          "description": "The Link Module (MA-27)."
+        "from": {
+          "$ref": "#/$defs/PortRef",
+          "description": "The producer end (SB-25)."
         },
-        "memory_domain": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/MemoryDomainId"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "The memory domain it carries the blocks in (MA-39)."
+        "link": {
+          "$ref": "#/$defs/ModuleRef",
+          "description": "The Link Module (MA-27, MA-28)."
+        },
+        "to": {
+          "$ref": "#/$defs/PortRef",
+          "description": "The consumer end (SB-25)."
         }
       },
       "required": [
-        "link"
+        "link",
+        "from",
+        "to"
       ],
       "type": "object"
     },
     "MemoryDomainId": {
+      "additionalProperties": false,
       "description": "Identifies a memory domain a [`SampleBlock`](crate::stream::SampleBlock) lives in.\n\nRule: SC-6 (`02-stream-contract.md`), X7.",
       "properties": {
         "local": {
@@ -211,6 +216,25 @@
       "description": "Names a Module implementation in the registry (`05-module-api.md` MA-19).\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: MA-19.",
       "type": "string"
     },
+    "ModuleRef": {
+      "additionalProperties": false,
+      "description": "A Module by id and version (MA-31).",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ModuleId",
+          "description": "The Module (MA-19)."
+        },
+        "version": {
+          "$ref": "#/$defs/Version",
+          "description": "Its version (MA-33)."
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ],
+      "type": "object"
+    },
     "NodeId": {
       "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
       "format": "uint32",
@@ -218,7 +242,8 @@
       "type": "integer"
     },
     "Placements": {
-      "description": "The Island declarations, the component assignment and the Link Module for each\ngraph link. Every component of the Spec's graph appears in exactly one Island.\n\nRule: SB-25.",
+      "additionalProperties": false,
+      "description": "The Island declarations, the component assignment and the Link Module for each\ndata link — graph link or output feed. Every component of the Spec's graph\nappears in exactly one Island.\n\nRule: SB-25.",
       "properties": {
         "components": {
           "additionalProperties": {
@@ -237,17 +262,18 @@
           "type": "array"
         },
         "links": {
-          "additionalProperties": {
+          "default": [],
+          "description": "One placement per data link — every graph link and every output feed —\neach naming the link by its endpoints (SB-25, D76).",
+          "items": {
             "$ref": "#/$defs/LinkPlacement"
           },
-          "default": {},
-          "description": "Link key to Link Module (SB-25).",
-          "type": "object"
+          "type": "array"
         }
       },
       "type": "object"
     },
     "PortRef": {
+      "additionalProperties": false,
       "description": "Names one port of one component instance (SC-1).",
       "properties": {
         "component": {
@@ -266,6 +292,7 @@
       "type": "object"
     },
     "ProfileRef": {
+      "additionalProperties": false,
       "description": "A declared profile, by name and version. Vision §59 bumps a Mock profile's\nversion on measurement.\n\nRule: SB-22, MA-33 (decision B7).",
       "properties": {
         "name": {
@@ -284,6 +311,7 @@
       "type": "object"
     },
     "RtPolicy": {
+      "additionalProperties": false,
       "description": "A real-time scheduling policy (MA-38).",
       "properties": {
         "priority": {
@@ -303,6 +331,7 @@
       "type": "object"
     },
     "SinkFeed": {
+      "additionalProperties": false,
       "description": "The link that feeds a Sink: the port the samples leave from and the drop-class\npolicy and capacity of the link itself. One shape serves both a Spec `outputs[]`\nentry and a Session profile's Sink binding, because an output *is* the\ndeclaration of that link (SB-17, SB-22, SC-19, SC-21).\n\nRule: SB-17, SB-22.",
       "properties": {
         "capacity": {
@@ -365,6 +394,7 @@
       "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
     },
     "Version": {
+      "additionalProperties": false,
       "description": "A release-only version. Module and Vocabulary versions carry a minor and a patch;\ndocuments do not, which is decision B7 of `03-spec-and-binding.md`.\n\nRule: MA-33, decision B7.",
       "properties": {
         "major": {
@@ -395,6 +425,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "How this requirement is met, at this site, for this run.\n\n`environment` is the only place a channel model, a fault schedule, a virtual-time\nsetting, a clock distribution or a site limit may appear (SB-26).\n\nRule: SB-21…SB-27.",
   "properties": {
     "authority": {
@@ -413,7 +444,7 @@
         "$ref": "#/$defs/Binding"
       },
       "default": {},
-      "description": "Spec resource name to Binding (SB-22).",
+      "description": "Binding name to Binding: a Spec resource, an output id or an Island's executor\nname, each playing exactly one role (SB-22, D89).",
       "type": "object"
     },
     "environment": {
@@ -427,7 +458,7 @@
       "default": {
         "components": {},
         "islands": [],
-        "links": {}
+        "links": []
       },
       "description": "Islands, components and links (SB-25)."
     },

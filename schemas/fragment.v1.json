@@ -8,6 +8,25 @@
       "description": "Names a Module implementation in the registry (`05-module-api.md` MA-19).\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: MA-19.",
       "type": "string"
     },
+    "ModuleRef": {
+      "additionalProperties": false,
+      "description": "A Module by id and version (MA-31).",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ModuleId",
+          "description": "The Module (MA-19)."
+        },
+        "version": {
+          "$ref": "#/$defs/Version",
+          "description": "Its version (MA-33)."
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ],
+      "type": "object"
+    },
     "Role": {
       "description": "The five roles. There is exactly one trait each and no shared lifecycle\nsupertrait: one trait forced onto radios and executors alike is what audit\nFinding 22 rejects, and Link and Authority have no lifecycle at all.\n\nRule: MA-1, MA-2.",
       "oneOf": [
@@ -37,9 +56,40 @@
           "type": "string"
         }
       ]
+    },
+    "Version": {
+      "additionalProperties": false,
+      "description": "A release-only version. Module and Vocabulary versions carry a minor and a patch;\ndocuments do not, which is decision B7 of `03-spec-and-binding.md`.\n\nRule: MA-33, decision B7.",
+      "properties": {
+        "major": {
+          "description": "Breaking changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "description": "Additive changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "patch": {
+          "description": "Fixes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "One unit of work handed to one Module at `prepare`, in dependency order (SB-39).",
   "properties": {
     "after": {
@@ -58,8 +108,8 @@
       "description": "The fragment's name (SB-1)."
     },
     "instance": {
-      "$ref": "#/$defs/ModuleId",
-      "description": "Which Module instance performs it (SB-22)."
+      "$ref": "#/$defs/ModuleRef",
+      "description": "Which exact Module version performs it, as its binding names it (SB-22, D78)."
     },
     "role": {
       "$ref": "#/$defs/Role",

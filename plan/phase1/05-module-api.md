@@ -56,8 +56,7 @@ ModuleDescriptor  { id: ModuleId, version: Version, kernel_api: Version, roles: 
                     vocabularies: [{ id: Namespace, req: VersionReq }],
                     deployment: Deployment, impl_hash: optional ContentHash }
 VocabularyDescriptor { id: Namespace, version: Version, prefix: Namespace, keys: [KeyDecl],
-                       event_kinds: [{ kind: EventKind, default: Reaction, severity: Severity,
-                                       hot_layout: optional HotLayout }],   HotLayout: RS-32a
+                       event_kinds: [{ kind: EventKind, default: Reaction, severity: Severity }],
                        verbs: [{ verb: Ident, compiles_to: CompileRule }],
                        checks: [AdmissionCheck] }
 
@@ -70,10 +69,11 @@ Resource          { id: ResourceId, kind: Namespace, shareable: bool (default fa
 CoerceReport      { applied: Map<Key, Value>, coercions: [Coercion],
                     warnings: [Warning], rejected: [{ key, requested, reason }] }
 
-ExecutorDescriptor { kind: Namespace, memory_domains: [MemoryDomainId],
+ExecutorDescriptor { module: ModuleRef, kind: Namespace, memory_domains: [MemoryDomainId],
                      impl_kinds: [Namespace], capabilities: Map<Key, CapabilityValue> }
-SinkDescriptor     { kind: Namespace, contracts: [DataContractId], artifact_kinds: [Namespace] }
-LinkDescriptor     { kind: Namespace, connects: [(MemoryDomainId, MemoryDomainId)],
+SinkDescriptor     { module: ModuleRef, kind: Namespace, memory_domains: [MemoryDomainId],
+                     contracts: [DataContractId], artifact_kinds: [Namespace] }
+LinkDescriptor     { module: ModuleRef, kind: Namespace, connects: [(MemoryDomainId, MemoryDomainId)],
                      policies: [BackPressure], cross_process: bool }
 AuthorityDescriptor { governs: [ClockDomainId], pacing: FreeRunning | WallPaced | Device }
 
@@ -100,7 +100,8 @@ Endpoint          StreamIn(DataLink) | StreamOut(DataLink) | EventIn | EventOut
                   one attached end of a declared link (SC-19), handed over at prepare
 PrepareContext    { run: RunId, class: ExecutionClass, time: TimeAuthority handle,
                     events: EventSink, actions: ActionReceiver, actions_out: ActionSubmitter,
-                    links: [{ port: Ident, endpoint: Endpoint }], host_budget: RelativeBudget }
+                    links: [{ port: Ident, endpoint: Endpoint }],
+                    components: Map<Ident, ComponentDescriptor>, host_budget: RelativeBudget }
 ActionSubmitter   submits a proposed Action into admit() (RS-16), never to a Module directly
 StepOutcome       { progressed: bool }
 ModuleError       { kind: Rejected | Unsupported | Timeout | DeviceLost | Internal,
@@ -113,7 +114,7 @@ ModuleError       { kind: Rejected | Unsupported | Timeout | DeviceLost | Intern
 
 - **MA-1** The three axes of §3 are orthogonal. A Module declares its roles in its `ModuleDescriptor` and may hold several; `Plugin` names a deployment and never a role (Vision §7, audit Finding 22).
 - **MA-2** There are exactly five roles and one trait each. There is no shared lifecycle supertrait: where two traits have methods with the same name it is by convention, and the coordinator dispatches per role. One trait forced onto radios and executors alike is what Finding 22 rejects, and Link and Authority have no lifecycle at all.
-- **MA-3** A Module communicates only through Kernel-defined Resources, Ports, Events, Actions, Capabilities and DataContracts. In source terms, a Module crate depends on the Kernel crate and on Vocabulary crates, never on another Module crate. Binding to a sub-resource of another Module's device is resolved by the Kernel (SB-36) and is not a dependency (Vision §7, §39).
+- **MA-3** A Module communicates only through Kernel-defined Resources, Ports, Events, Actions, Capabilities and DataContracts. In source terms, a Module crate depends on the Kernel crate and on Vocabulary crates, never on another Module crate. Binding to a sub-resource of another Module's device is resolved by the Kernel (SB-36) and is not a dependency (Vision §7, §39). *Producer obligation; the Phase 2 workspace metadata check runs when a second Module crate exists.*
 - **MA-4** *Withdrawn.* It restated `00-overview.md` OV-23a, which OV-4 forbids. The ban stands there and `kernel_surface` enforces it; the `ma_04_kernel_surface_ban` test row now cites OV-23a.
 
 ### Rules common to every role trait
@@ -121,7 +122,7 @@ ModuleError       { kind: Rejected | Unsupported | Timeout | DeviceLost | Intern
 - **MA-5** Role traits are synchronous, object-safe and `Send`. No method is generic, none returns `Self` or an opaque type, and no trait is `async`. An async trait would not be object-safe without boxing and would pull an executor runtime into the Kernel, which every Provider would then inherit.
 - **MA-6** Every parameter and return type is one of three things: a document type with a schema, a Kernel handle (`EventSink`, `ActionReceiver`, `ActionSubmitter`, `Endpoint`, a `TimeAuthority` handle), or `ModuleError`. Never a raw slice, a closure, an iterator or a generic parameter. This is what lets a Plugin host implement any role later by message passing without a Kernel change, and it is the rule v3's string-keyed `setParam` violated.
 - **MA-7** The coordinator calls lifecycle methods, one call at a time per instance, in the order `prepare → arm → start → (step)* → stop → cleanup` (spec 04, RS-2). `stop(reason)` is always attempted before `cleanup`, on an abort as well. `cleanup` is infallible and idempotent and is called for every instance that reached `prepare`, in reverse dependency order, after a failure at any phase (RS-6, RS-8).
-- **MA-8** `prepare` and `arm` are bounded by `PrepareContext.host_budget`; a Module that cannot finish returns `ModuleError { kind: Timeout }`. Enforcing it is the Module's duty in Phase 1. *Ceiling: an in-process Module that hangs hangs the transaction; spec 04's RS-8a gives cleanup its own deadline, and running fragment calls on a worker thread with a join timeout is the upgrade, with no trait change.*
+- **MA-8** `prepare` and `arm` are bounded by `PrepareContext.host_budget`; a Module that cannot finish returns `ModuleError { kind: Timeout }`. Enforcing the budget and returning `Timeout` is the Module's duty. *Producer obligation; exercised by Phase 2 Module crates.* *Ceiling: an in-process Module that hangs hangs the transaction; spec 04's RS-8a gives cleanup its own deadline, and running fragment calls on a worker thread with a join timeout is the upgrade, with no trait change.*
 - **MA-9** A fault crosses the boundary only as `ModuleError`. No panic crosses a trait boundary, and a foreign exception is translated to a status (Vision §35). `DeviceLost` is the kind that spec 04's Policy maps to `abort`.
 
 ### Provider
@@ -133,8 +134,8 @@ ModuleError       { kind: Rejected | Unsupported | Timeout | DeviceLost | Intern
 - **MA-14** Actions reach a Provider only through `ctx.actions`, and only after Kernel admission (RS-16). A constraint that can only be checked at run time, such as the lead of a Reactor's burst, is enforced by the Provider, which emits the typed event; it never silently accepts.
 - **MA-14a** A Module **emits** an Action through `ctx.actions_out`, which submits it to `admit()` (RS-16) rather than to another Module. Without a sender the inbound queue would have no producer: Vision §5 and §19 define the Action set as what a Reactor emits into the real-time path, and §19's worked example is a Reactor that receives a decoded packet and schedules a `TxBurst`, so the reactive half of the architecture would have no interface at all. Routing through `admit()` rather than to the target keeps invariant 42 true for a Reactor's Action exactly as for a Session's, and it is why the handle is a submitter rather than a queue into a peer.
 - **MA-15** `step(until)` has a default no-op body on `Provider`. A Provider whose `driving.stepped` is true overrides it under MA-20's contract; a hardware Provider never receives a `step`.
-- **MA-16** A Module never holds a reference to another Module's instance.
-- **MA-17** An instance-level capability such as a Peripheral's timing class is knowable at instantiation, from the selector and profile, and appears in `instance()`. Vision §38 says the class "is returned as a capability at `prepare` time", but the pipeline matches capabilities before `prepare` (SB-37), so a class first visible at `prepare` could not be matched. `PrepareReport.effective` may narrow it (MA-12), which is what §38's sentence is really about.
+- **MA-16** No role trait reaches another role trait — through its supertraits or generics, its method signatures or associated types, or, transitively, the generics and fields of any struct or enum, the generics and target of any type alias, the signatures of any type's methods, inherent or from a trait impl (with the impl's trait and associated types), and the methods of any non-role trait those name, wherever the item is declared — so the Kernel role API gives a Module no reference to a peer Module instance. *Checked by the `ma_16_role_trait_signatures_do_not_name_peer_roles` `syn` gate and its own red test `ma_16_the_gate_sees_a_peer_behind_a_context_field` (D72). A `use … as` alias of a role trait, and a type generated by a macro, are not followed. Non-`pub` methods are followed too; a Kernel-internal helper that must name a peer is a free function, not a method of a type a Module can hold (D90).*
+- **MA-17** An instance-level capability such as a Peripheral's timing class is knowable at instantiation, from the selector and profile, and appears in `instance()`. Vision §38 says the class "is returned as a capability at `prepare` time", but the pipeline matches capabilities before `prepare` (SB-37), so a class first visible at `prepare` could not be matched. `PrepareReport.effective` may narrow it (MA-12), which is what §38's sentence is really about. *Producer obligation, Phase 2 Providers: the first Provider with a Peripheral (MockRadio's, then the Phase 7 UHD Provider) tests that its timing class is present in `instance()` before `prepare`. The Kernel half — matching reads the bound instance's capabilities (SB-37) and `prepare` may only narrow them — is checked under MA-12 (D80).*
 
 ```rust
 pub trait Provider: Send {
@@ -154,8 +155,10 @@ pub trait Provider: Send {
 
 ### Executor
 
-- **MA-18** `descriptor()` returns the `ExecutorDescriptor`. Admission reads `kind`, `memory_domains` and `impl_kinds`; everything else is opaque.
-- **MA-19** `prepare(island, ctx)` loads each component by its `impl` identity and returns a `PrepareReport` for the island.
+- **MA-18** `descriptor()` returns the `ExecutorDescriptor`. Admission reads `kind`, `memory_domains` (non-empty, D86) and `impl_kinds`, and `plan()` compares `module` with the binding (D82); everything else is opaque.
+- **MA-19** `PrepareContext.components` is the typed channel by which an Executor receives its Island's `ComponentDescriptor`s, keyed by component name; `prepare(island, ctx)` receives them typed, never as JSON. *Checked by `ma_19_executor_receives_the_descriptors_for_its_island`, which proves the field reaches `prepare` typed and readable; populating it with exactly the Island's descriptors is MA-19a (D71).*
+- **MA-19a** The Phase 2 coordinator populates `PrepareContext.components` with only the descriptors belonging to the Island being prepared. *Forward obligation, Phase 2.*
+- **MA-19b** The Executor loads each component by its `impl` identity and returns a `PrepareReport` for the Island. *Producer obligation, tested by the first Phase 2 Executor and the Phase 5 Reactor Executor.*
 - **MA-20** `step(until)` must consume every input at or before `until`, emit every output and event at or before `until`, emit nothing after it, never block on input, never call `wait_until` (TM-16d), and report `progressed` true exactly when it consumed an input or produced an output. It is required on `Executor`, because without it a deterministic Run is a wish (audit Finding 18).
 - **MA-21** The execution ABI is the Executor's. The Kernel defines no `work` or `process` signature and never inspects `impl` beyond its identity (audit Finding 8).
 - **MA-22** Plan admission rejects a cycle formed by `stream.*` links. A cycle is legal only when every edge that closes it is an Event or Action edge crossing an Island boundary. Adaptive feedback inside a component is state, not structure (Vision §19).
@@ -164,10 +167,12 @@ pub trait Provider: Send {
 
 ### Sink, Link and Authority
 
-- **MA-25** `Sink` has `descriptor()`, `prepare(fragment, ctx)`, `arm`, `start`, `step`, `stop(reason) -> [ArtifactRef]` and `cleanup`. Every Sink is stepped in the Simulation class and runs on a thread in the other three (MA-30), so the decision is the class's and no descriptor flag carries it; a Sink that leaves `step` at the default and therefore never drains is a defect the stepping test catches. Every link that feeds a Sink is drop-class, which is SC-21's predicate: the Kernel reads the role from the `ModuleDescriptor` of the Module the profile **binds** to the output, on a Spec Run and a Session alike (SB-17, SB-22). A Sink is bound, never placed — it is a role, not a component an Executor loads — so it carries no `ComponentDescriptor` and appears in no Island, and its own fragment is the one `plan()` emits per bound output.
+- **MA-25** `SinkDescriptor.memory_domains` declares the domains a Sink reads from, at least one — an empty list is refused at validate — and MA-39 checks a feed against it (D81, D86). `Sink` has `descriptor()`, `prepare(fragment, ctx)`, `arm`, `start`, `step`, `stop(reason) -> [ArtifactRef]` and `cleanup`. Every Sink is stepped in the Simulation class and runs on a thread in the other three (MA-30), so the decision is the class's and no descriptor flag carries it; a Sink that leaves `step` at the default and therefore never drains is a defect the stepping test catches. Every link that feeds a Sink is drop-class, which is SC-21's predicate: the Kernel reads the role from the `ModuleDescriptor` of the Module the profile **binds** to the output, on a Spec Run and a Session alike (SB-17, SB-22). A Sink is bound, never placed — it is a role, not a component an Executor loads — so it carries no `ComponentDescriptor` and appears in no Island, and its own fragment is the one `plan()` emits per bound output.
 - **MA-26** `stop` returns its `ArtifactRef`s even on an abort, with `partial` set (RS-44). A Sink whose `stop` fails leaves its artifacts recorded as unknown in the Manifest.
-- **MA-27** `Link` has `descriptor()` and `create(&DataLinkDecl) -> DataLink`, returning an implementation of spec 02's link interface, whose two ends the coordinator attaches to the producing and consuming ports as `Endpoint`s. Links are created before the Providers, Executors and Sinks are prepared, and dropped at cleanup; they have no lifecycle of their own.
-- **MA-28** A Link implements its declared policy exactly (SC-19, SC-20). `connects` and `cross_process` are the inputs to the memory-domain reachability check of MA-39; the Kernel never plans a transfer (SB-40). Event and Action queues between Islands are Kernel handles, not Link products.
+- **MA-27** `Link` has `descriptor()` and `create(&DataLinkDecl) -> DataLink`, returning an implementation of spec 02's link interface, whose two ends can be attached to producing and consuming ports as `Endpoint`s. *Checked by `ma_05_traits_are_object_safe_and_send`.*
+- **MA-27a** The coordinator creates selected Links before preparing Providers, Executors and Sinks, refusing an instance whose `descriptor()` differs from the descriptor registered for its `ModuleRef` (MA-28, D79), attaches their two ends, and drops them at cleanup; Links have no lifecycle of their own. *Forward obligation, Phase 2 coordinator.*
+- **MA-28** A Link's descriptor carries the Link Module's exact `{id, version}` as its `module` and is registered under it, one per version, so it cannot be filed under another version (D82); `LinkPlacement` selects that same `ModuleRef`. The descriptor declares supported policies and memory-domain pairs in `connects`; admission checks the selected descriptor (MA-39) and never plans a transfer (SB-40). `cross_process: true` is rejected in v4.0, at registration and again at admission. Event and Action queues between Islands are Kernel handles, not Link products. *Checked by `ma_28_link_registration_refuses_cross_process_in_v4` and `ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link` (D74).*
+- **MA-28a** A Link implements its declared policy exactly (SC-19, SC-20). *Producer obligation, Phase 2 Link Modules; the first carrier is the host-memory Link that replaces `tests/support`'s `MemLink` (D56, D74).*
 - **MA-29** There is one Authority instance per Run, named by the BindingProfile (SB-24). It provides a `TimeAuthority` handle (TM-16a) and declares an `AuthorityDescriptor` whose `governs` is the set TM-16a requires: a primary root, that root's derived domains, `host.monotonic`, and for a simulation Authority every root it simulates. Its `pacing` is cross-checked against the derived ExecutionClass by MA-41.
 - **MA-30** The coordinator owns the stepping loop, on one logical thread:
 
@@ -199,7 +204,7 @@ pub trait Provider: Send {
 ### Islands, class and fidelity
 
 - **MA-38** An `IslandDecl` names an Executor instance, the components placed on it, and its optional affinity, real-time policy and preferred batch. The `executor` name is a **binding** (SB-22), whose Module holds the Executor role; the runtime supplies only that instance's `ExecutorDescriptor`. Naming the instance without naming the Module in a document would leave the plan's `fragments[].instance` and the Manifest's `modules` resting on assembly-time input that nothing records, which is not provenance Vision §50 can rest on. Where it lives and the requirement that every component be placed exactly once are SB-13 and SB-25.
-- **MA-39** Island admission checks: every component placed exactly once; `requires.executor_kind` is `any` or the Executor's kind, `impl.kind` is among its `impl_kinds`, and the placement's memory domain is among its `memory_domains`; a link within an Island shares a memory domain or has a registered Link that `connects` the pair, and a link between Islands has a declared policy; MA-22's cycle rule; and an Island with an `rt_policy` requires a declared budget on every component. *The arithmetic feasibility check, that the sum of the budgets fits the block period, needs declared port rates from the Radio Model; Phase 1 checks presence only. Forward obligation, Phase 2.*
+- **MA-39** Island admission checks: every component placed exactly once; `requires.executor_kind` is `any` or the Executor's kind, `impl.kind` is among its `impl_kinds`, and the placement's memory domain is among its `memory_domains`; each data link's selected `LinkPlacement` descriptor — a graph link's or an output feed's (SB-25) — supports its declared policy, and if the producer's placement and the consumer's domains — a component's placement, or for an output feed the domains its bound `SinkDescriptor.memory_domains` declares — share no memory domain, in one Island or in two, that selected Link `connects` the pair (D77, D81; a resource-endpoint producer is skipped, D31); MA-22's cycle rule; and an Island with an `rt_policy` requires a declared budget on every component. *The arithmetic feasibility check, that the sum of the budgets fits the block period, needs declared port rates from the Radio Model; Phase 1 checks presence only. Forward obligation, Phase 2.*
 - **MA-40** Admission rejects; it never creates, merges or moves an Island (Vision §20, §63). A rejection names the rule it failed.
 - **MA-41** The ExecutionClass is derived from the environment and cross-checked against the Authority's pacing, and it is what spec 03's plan records (SB-39). Where the environment's `ezsdr.time` section is **present**, its `class` must be one of the four names and the derived class is compared with it; an absent, non-string or unrecognised `class` is refused rather than ignored, for the reason the `ezsdr.rf_path` clause gives — defaulting or ignoring turns a misspelling into agreement, and the class a misspelling lands on is the one that may claim determinism (RS-42). A mismatch is refused: "a class that was merely declared could lie" is only a rule if the declaration is read, and SB-26 lists that section as one the Kernel reads:
 
@@ -255,6 +260,11 @@ pub trait Provider: Send {
 | `ma_15_provider_step_default_is_idle` | a hardware-style double | `progressed` false, no override needed | MA-15 |
 | `ma_14_actions_arrive_only_after_admission` | an Action rejected by an admission check | the double's queue stays empty | MA-14, RS-16 |
 | `ma_39_island_admission` | each of the five checks violated in turn | rejected, naming the failed rule | MA-39, MA-40 |
+| `ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link` | two components in two memory domains, in one Island and in two; Links that join, do not join, lack the policy, or are cross-process | refused unless the selected Link joins the pair and implements the policy | MA-39, MA-28, SB-25 |
+| `ma_28_link_registration_refuses_cross_process_in_v4` | a Link descriptor for an unregistered Module; one with `cross_process: true`; a second for one version | each refused at registration; two versions keep their own descriptors | MA-28 |
+| `ma_19_executor_receives_the_descriptors_for_its_island` | a test Executor prepared with `PrepareContext.components` set | the typed descriptors are readable in `prepare` | MA-19 |
+| `ma_16_role_trait_signatures_do_not_name_peer_roles` (`kernel_surface.rs`) | every role trait's signatures and associated types, and the fields of every type they reach | no peer role trait | MA-16 |
+| `ma_16_the_gate_sees_a_peer_behind_a_context_field` (`kernel_surface.rs`) | a `&dyn Sink` two structs behind a signature's context type | caught | MA-16 |
 | `ma_22_cycle_rules` | a `stream.*` cycle; an Event cycle across Islands; an Event cycle inside one Island | rejected, accepted, rejected | MA-22 |
 | `ma_41_an_absent_or_non_string_class_is_refused` | `ezsdr.time` present with `clas`, with `{}`, with `class: 3`; then the section absent | the first three refused, the fourth planned — an absent section is not a declaration to disagree with | MA-41 |
 | `ma_41_execution_class_table` | every row of MA-41 including the rejection | the derived class, or a rejection | MA-41 |

@@ -15,7 +15,8 @@ const GHZ: u64 = 1_000_000_000;
 const MCLK: u64 = 200_000_000;
 
 fn arbitrary(set_by: &str) -> EpochRef {
-    EpochRef::Arbitrary { set_by: set_by.to_owned() }
+    EpochRef::Arbitrary { set_by: set_by.to_owned(),
+    }
 }
 
 fn rat(num: u64, den: u64) -> Rational {
@@ -26,7 +27,8 @@ fn rat(num: u64, den: u64) -> Rational {
 fn registry_with_device_root() -> (Arc<ClockRegistry>, ClockDomainId) {
     let reg = Arc::new(ClockRegistry::new());
     let root = reg.allocate_id();
-    reg.register(ClockDomain::root(root, rat(MCLK, 1), arbitrary("uhd.set_time_unknown_pps")))
+    reg.register(ClockDomain::root(root, rat(MCLK, 1), arbitrary("uhd.set_time_unknown_pps"),
+    ))
         .expect("root registers");
     (reg, root)
 }
@@ -214,6 +216,14 @@ fn tm_07_duration_add_checks_domain() {
         Err(TimeError::DomainMismatch { .. })
     ));
     assert_eq!(pa.checked_add(Duration::new(a, 10)), Ok(TimePoint::new(a, 110)));
+    assert!(matches!(
+        pa.checked_sub_duration(Duration::new(root, 10)),
+        Err(TimeError::DomainMismatch { .. })
+    ));
+    assert_eq!(
+        pa.checked_sub_duration(Duration::new(a, 10)),
+        Ok(TimePoint::new(a, 90))
+    );
 }
 
 #[test]
@@ -261,7 +271,8 @@ fn device_to_utc(dev: ClockDomainId, drift: f64, drift_uncertainty: f64) -> Cloc
         drift_uncertainty,
         uncertainty: Duration::new(ClockDomainId::UTC, 50),
         method: "test.poll".to_owned(),
-        valid: Validity { from: TimePoint::new(dev, 0), to: Some(TimePoint::new(dev, 1 << 40)) },
+        valid: Validity { from: TimePoint::new(dev, 0), to: Some(TimePoint::new(dev, 1 << 40)),
+        },
     }
 }
 
@@ -319,6 +330,19 @@ fn tm_15_budget_deadline_from_arrival() {
         budget.deadline_from(arrival),
         Ok(AbsoluteDeadline::new(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 501_000)))
     );
+    let deadline = AbsoluteDeadline::new(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 1_500));
+    assert_eq!(
+        deadline.remaining(arrival),
+        Ok(Duration::new(ClockDomainId::HOST_MONOTONIC, 500))
+    );
+    assert_eq!(
+        deadline.remaining(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 2_000)),
+        Ok(Duration::new(ClockDomainId::HOST_MONOTONIC, -500))
+    );
+    assert!(matches!(
+        deadline.remaining(TimePoint::new(ClockDomainId::UTC, 1_000)),
+        Err(TimeError::DomainMismatch { .. })
+    ));
     let (reg, root) = registry_with_device_root();
     let _ = &reg;
     assert!(matches!(
@@ -425,7 +449,7 @@ fn tm_11_reserved_domains_present() {
     assert_eq!(utc.root_id(), utc.id);
     assert!(matches!(
         reg.get(ClockDomainId::UTC).map(|d| d.kind),
-        Ok(ezsdr_kernel::time::ClockDomainKind::Root { epoch: EpochRef::Utc1970, .. })
+        Ok(ezsdr_kernel::time::ClockDomainKind::Root { epoch: EpochRef::Utc1970 {}, .. })
     ));
 }
 
@@ -456,6 +480,10 @@ fn tm_13a_sample_clock_declared_before_its_origin_exists() {
     // TM-13a: the id and the ratio exist now; the origin does not.
     assert!(!reg.is_registered(handle.id));
     assert_eq!(handle.root_ticks_per_tick, rat(10, 1));
+    // X7 / D91: a stream on another node is refused, because the record would reach
+    // a Manifest the Kernel's own deserialiser refuses.
+    let far = ezsdr_kernel::id::ResourceId { node: ezsdr_kernel::id::NodeId(9), path: "dev0/rx/0".to_owned() };
+    assert!(reg.declare_sample_clock(far, root, rat(10, 1)).is_err());
     reg.register_sample_clock(&handle, 1_000_000_003).expect("registered before the first block");
     assert_eq!(reg.nominal_rate(handle.id), Ok(rat(20_000_000, 1)));
 }
@@ -565,7 +593,8 @@ fn tm_21_duration_cmp_survives_awkward_rates() {
     let hz3 = reg.allocate_id();
     reg.register(ClockDomain::root(hz3, rat(3, 1), arbitrary("test"))).expect("root");
     let lte = reg.allocate_id();
-    reg.register(ClockDomain::root(lte, rat(30_720_000, 1), arbitrary("test"))).expect("root");
+    reg.register(ClockDomain::root(lte, rat(30_720_000, 1), arbitrary("test"),
+    )).expect("root");
 
     let one_ms = Duration::new(ClockDomainId::HOST_MONOTONIC, 1_000_000);
     // One tick at 3 Hz is 333 ms: a rescale-and-round implementation reports this
@@ -661,7 +690,8 @@ fn tm_17_authority_nested_schedule() {
 fn tm_17_authority_cancel_and_in_past() {
     let (_reg, root, auth) = sim_authority();
     let h = auth
-        .schedule(TimePoint::new(root, 10), Box::new(|_| unreachable!("cancelled")))
+        .schedule(TimePoint::new(root, 10), Box::new(|_| unreachable!("cancelled")),
+        )
         .expect("scheduled");
     assert!(auth.cancel(h));
     assert!(!auth.cancel(h));
@@ -732,7 +762,8 @@ fn tm_16a_host_monotonic_always_governed() {
     let (reg, root) = registry_with_device_root();
     let device = ManualTimeAuthority::new(reg.clone(), root, &[], Pacing::Device).expect("auth");
     let virt_root = reg.allocate_id();
-    reg.register(ClockDomain::root(virt_root, rat(MCLK, 1), arbitrary("sim.run_start")))
+    reg.register(ClockDomain::root(virt_root, rat(MCLK, 1), arbitrary("sim.run_start"),
+    ))
         .expect("root");
     let sim =
         ManualTimeAuthority::new(reg, virt_root, &[], Pacing::FreeRunning).expect("auth");
@@ -765,11 +796,13 @@ fn tm_16a1_host_monotonic_driven_only_in_simulation() {
 fn tm_16b_engine_governs_a_drifting_virtual_device() {
     let reg = Arc::new(ClockRegistry::new());
     let primary = reg.allocate_id();
-    reg.register(ClockDomain::root(primary, rat(MCLK, 1), arbitrary("sim.run_start")))
+    reg.register(ClockDomain::root(primary, rat(MCLK, 1), arbitrary("sim.run_start"),
+    ))
         .expect("root");
     let second = reg.allocate_id();
     // A second virtual device, drifting: a different rate and no exact relation.
-    reg.register(ClockDomain::root(second, rat(199_999_997, 1), arbitrary("sim.run_start")))
+    reg.register(ClockDomain::root(second, rat(199_999_997, 1), arbitrary("sim.run_start"),
+    ))
         .expect("root");
     let auth = ManualTimeAuthority::new(reg.clone(), primary, &[second], Pacing::FreeRunning)
         .expect("authority declares both roots");
@@ -801,7 +834,8 @@ fn tm_16b_engine_governs_a_drifting_virtual_device() {
 fn tm_16b_ungoverned_root_is_not_answered() {
     let (reg, root, auth) = sim_authority();
     let foreign = reg.allocate_id();
-    reg.register(ClockDomain::root(foreign, rat(MCLK, 1), arbitrary("hackrf-like")))
+    reg.register(ClockDomain::root(foreign, rat(MCLK, 1), arbitrary("hackrf-like"),
+    ))
         .expect("root");
     assert!(!auth.governs(foreign));
     assert_eq!(auth.now(foreign), Err(TimeError::NotGoverned { id: foreign }));
@@ -817,7 +851,8 @@ fn tm_16b_ungoverned_root_is_not_answered() {
         drift_uncertainty: 0.0,
         uncertainty: Duration::new(root, 2),
         method: "test.poll".to_owned(),
-        valid: Validity { from: TimePoint::new(foreign, 0), to: None },
+        valid: Validity { from: TimePoint::new(foreign, 0), to: None,
+        },
     };
     let got = rel.convert(&reg, TimePoint::new(foreign, 400)).expect("converts");
     assert_eq!(got.nominal, TimePoint::new(root, 1_400));

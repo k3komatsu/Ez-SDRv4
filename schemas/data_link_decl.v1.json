@@ -25,6 +25,7 @@
       "type": "string"
     },
     "DataLinkId": {
+      "additionalProperties": false,
       "description": "Identifies a [`DataLink`](crate::stream::DataLinkDecl) instance.\n\nRule: SC-18 (`02-stream-contract.md`), X7.",
       "properties": {
         "local": {
@@ -51,6 +52,7 @@
       "type": "integer"
     },
     "PortRef": {
+      "additionalProperties": false,
       "description": "Names one port of one component instance (SC-1).",
       "properties": {
         "component": {
@@ -70,6 +72,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "A declared link: its endpoints, the contract it carries, its policy and its\ncapacity in blocks (SC-19).",
   "properties": {
     "capacity": {

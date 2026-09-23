@@ -1,6 +1,7 @@
 {
   "$defs": {
     "ChannelGap": {
+      "additionalProperties": false,
       "description": "A channel that lost validity while the stream continued (SC-31a).\n\nVision §28 requires a capture to describe a multi-channel alignment failure, and\na hole between two segments alone is indistinguishable from a channel that was\nnever enabled over that interval.",
       "properties": {
         "cause": {
@@ -34,6 +35,7 @@
       "type": "object"
     },
     "ClockDomainId": {
+      "additionalProperties": false,
       "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
       "properties": {
         "local": {
@@ -54,6 +56,7 @@
       "type": "object"
     },
     "Gap": {
+      "additionalProperties": false,
       "description": "An interval of missing samples in the stream (SC-30, Vision §28).",
       "properties": {
         "cause": {
@@ -98,6 +101,7 @@
       "description": "What the **stream** lost. A closed, derived set (SC-31, decision S16).\n\nWhat the **link** lost is the separate `link_dropped` count, not a cause, so a\ndevice overflow inside an interval that also lost a block to the link is still\nreported as `OverflowRestart` with its sample count, beside a link-drop count of\none. Collapsing the two into a single cause loses the device's own diagnosis.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "`GAP_BEFORE` alone (SC-31).",
           "properties": {
             "kind": {
@@ -111,6 +115,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "`RESTARTED`: a stream restart, as a UHD overflow produces (SC-31, OV-23a).",
           "properties": {
             "kind": {
@@ -124,6 +129,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "`SEQ_DISCONTINUITY`: transport sequence loss (SC-31).",
           "properties": {
             "kind": {
@@ -137,6 +143,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "A per-channel break on a block carrying `ALIGNMENT` (SC-31a).",
           "properties": {
             "kind": {
@@ -150,6 +157,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "A jump with no gap flag on a lossy path (SC-31).",
           "properties": {
             "kind": {
@@ -163,6 +171,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "`GAP_BEFORE` with `lost` less than the jump on a lossy path and no carry to\nexplain the difference (SC-31).",
           "properties": {
             "kind": {
@@ -183,6 +192,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "`GAP_BEFORE` with `lost` absent (SC-31).",
           "properties": {
             "kind": {
@@ -204,6 +214,7 @@
       "type": "integer"
     },
     "Segment": {
+      "additionalProperties": false,
       "description": "A contiguous run of valid samples on one channel (SC-30).",
       "properties": {
         "len": {
@@ -224,6 +235,7 @@
       "type": "object"
     },
     "TimePoint": {
+      "additionalProperties": false,
       "description": "An instant: integer ticks in a named clock domain. Never floating-point seconds.\n\nThere is deliberately no `PartialOrd`: two points of different domains cannot be\ncompared at all, and `a < b` silently answering `false` is the bug class this\nmodel exists to prevent (decision T3).\n\nRule: TM-1, TM-6.",
       "properties": {
         "domain": {
@@ -244,6 +256,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "What a stream carried, per SampleClock. There is one map per SampleClock: a\nblock in another domain ends the map, and the Sink starts a new builder (SC-30).",
   "properties": {
     "channel_gaps": {

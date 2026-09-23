@@ -7,7 +7,7 @@ use std::sync::Arc;
 use ezsdr_kernel::contract::{
     ContractRegistry, DataContract, DataContractId, PortRef, Scalar, standard_contracts,
 };
-use ezsdr_kernel::id::{ClockDomainId, DataLinkId, ResourceId};
+use ezsdr_kernel::id::{ClockDomainId, DataLinkId, MemoryDomainId, NodeId, ResourceId};
 use ezsdr_kernel::stream::{
     BackPressure, BlockFlags, BlockHeader, BufferRef, BurstEnd, BurstOpen, BurstState, BurstStep,
     BurstTracker, ChannelMask, ContinuityBuilder, DataLink, DataLinkDecl, Direction, DropCarry,
@@ -18,8 +18,7 @@ use ezsdr_kernel::time::{
     ClockDomain, ClockRegistry, Duration, EpochRef, Rational, TimeError, TimePoint,
 };
 use support::{
-    CF32_BPS, GPU_MEM, MemLink, RetryingProducer, block, cf32, header, host_buffer,
-};
+    CF32_BPS, GPU_MEM, MemLink, RetryingProducer, block, cf32, header, host_buffer};
 
 const MCLK: u64 = 200_000_000;
 
@@ -28,7 +27,8 @@ fn rat(n: u64, d: u64) -> Rational {
 }
 
 fn arbitrary(s: &str) -> EpochRef {
-    EpochRef::Arbitrary { set_by: s.to_owned() }
+    EpochRef::Arbitrary { set_by: s.to_owned(),
+    }
 }
 
 /// A registry with a 200 MHz root and one 20 Msps SampleClock at the given origin.
@@ -90,7 +90,8 @@ fn sc_02_scalar_equality_is_exact_across_int_and_float() {
         (i64::MAX, 9_223_372_036_854_775_808.0, false),
         (i64::MIN, -9_223_372_036_854_775_808.0, true),
         (1_152_921_504_606_846_976, 1_152_921_504_606_846_976.0, true),
-        (1_152_921_504_606_847_000, 1_152_921_504_606_846_976.0, false),
+        (1_152_921_504_606_847_000, 1_152_921_504_606_846_976.0, false,
+        ),
     ];
     for (a, b, want) in vectors {
         let (si, sf) = (Scalar::Int(a), Scalar::Float(b));
@@ -204,7 +205,8 @@ fn sc_10_block_rejects_invalid_shape() {
 #[test]
 fn sc_10a_block_rejects_undersized_buffer() {
     let h = header(t(0), 2000, 4);
-    let small = BufferRef { memory_domain: support::HOST_MEM, handle: 1, len_bytes: 32_000 };
+    let small = BufferRef { memory_domain: support::HOST_MEM, handle: 1, len_bytes: 32_000,
+    };
     assert!(matches!(
         SampleBlock::new(h.clone(), small, CF32_BPS),
         Err(StreamError::InvalidBlock { .. })
@@ -289,6 +291,16 @@ fn sc_17_flag_bit_positions_are_fixed_by_the_document() {
     assert_eq!(BlockFlags::ALIGNMENT, BlockFlags::from_bits(0x0080));
     assert_eq!(BlockFlags::RESERVED, BlockFlags::from_bits(0xFF00), "bits 8-15 are reserved");
     assert_eq!(BlockFlags::NONE, BlockFlags::from_bits(0));
+    assert_eq!(BlockFlags::GAP_BEFORE.bits(), 0x0001);
+    assert_eq!(ChannelMask::from_bits(0b101).bits(), 0b101);
+}
+
+#[test]
+fn sc_06_memory_domain_id_is_node_qualified() {
+    let id = MemoryDomainId::local(7);
+    assert_eq!(id.node, NodeId::LOCAL);
+    assert_eq!(id.local, 7);
+    assert_eq!(id.to_string(), "local:mem#7");
 }
 
 #[test]
@@ -296,8 +308,10 @@ fn sc_19_link_declares_a_policy_and_a_capacity() {
     // There is no default policy, and both fields are mandatory in the type.
     let decl = DataLinkDecl {
         id: DataLinkId::local(1),
-        from: PortRef { component: "a".into(), port: "out".into() },
-        to: PortRef { component: "b".into(), port: "in".into() },
+        from: PortRef { component: "a".into(), port: "out".into(),
+        },
+        to: PortRef { component: "b".into(), port: "in".into(),
+        },
         contract: cf32(),
         policy: BackPressure::DropOldest,
         capacity: 4,
@@ -312,6 +326,10 @@ fn sc_19_link_declares_a_policy_and_a_capacity() {
     );
     assert!(BackPressure::DropOldest.is_drop_class());
     assert!(!BackPressure::Block.is_drop_class(), "a drop-class link never returns Full");
+    assert_eq!(
+        MemLink::new(BackPressure::DropNewest, 4).policy(),
+        BackPressure::DropNewest
+    );
 }
 
 #[test]
@@ -334,7 +352,8 @@ fn sc_08_buffer_map_host_none_for_gpu_domain() {
     assert!(link.map_host(&host).is_some());
 
     let h = header(t(0), 10, 1);
-    let gpu = BufferRef { memory_domain: GPU_MEM, handle: 0xdead, len_bytes: 1 << 20 };
+    let gpu = BufferRef { memory_domain: GPU_MEM, handle: 0xdead, len_bytes: 1 << 20,
+    };
     let gpu = Arc::new(SampleBlock::new(h, gpu, CF32_BPS).expect("valid"));
     assert!(link.map_host(&gpu).is_none());
 }
@@ -411,8 +430,10 @@ fn sc_20b_drop_carry_preserves_attribution() {
 fn sc_21_sink_links_must_be_drop_class() {
     let decl = |policy| DataLinkDecl {
         id: DataLinkId::local(3),
-        from: PortRef { component: "rx".into(), port: "out".into() },
-        to: PortRef { component: "rec".into(), port: "in".into() },
+        from: PortRef { component: "rx".into(), port: "out".into(),
+        },
+        to: PortRef { component: "rec".into(), port: "in".into(),
+        },
         contract: cf32(),
         policy,
         capacity: 8,
@@ -453,7 +474,9 @@ fn sc_24_burst_sob_eob_basic() {
 fn sc_24_burst_single_block() {
     let mut tr = BurstTracker::new(dom());
     let step = tr
-        .on_block(&tx(1000, 100, BlockFlags::START_OF_BURST | BlockFlags::END_OF_BURST), open())
+        .on_block(&tx(1000, 100, BlockFlags::START_OF_BURST | BlockFlags::END_OF_BURST,
+            ), open(),
+        )
         .expect("one-block burst");
     let BurstStep::Ended { record } = step else { panic!("expected Ended") };
     assert_eq!(record.samples, 100);
@@ -597,7 +620,8 @@ fn sc_24_a_discontinuity_that_also_ends_reports_both_records() {
     let step = tr
         .on_block(&tx(1300, 100, BlockFlags::END_OF_BURST), None)
         .expect("jumps and ends");
-    let BurstStep::Discontinuity { expected, got, closed, then_ended } = step else {
+    let BurstStep::Discontinuity { expected, got, closed, then_ended,
+    } = step else {
         panic!("expected a discontinuity")
     };
     assert_eq!((expected, got), (t(1100), t(1300)));
@@ -638,7 +662,7 @@ fn sc_29a_set_late_carries_a_discontinuity_opened_burst() {
     let mut tr = BurstTracker::new(dom());
     tr.on_block(&tx(1000, 100, BlockFlags::START_OF_BURST), open()).expect("start");
     tr.on_block(&tx(1300, 100, BlockFlags::NONE), None).expect("recovers");
-    tr.set_late(LateOutcome::OnTime);
+    tr.set_late(LateOutcome::OnTime {});
     let step = tr.on_block(&tx(1400, 100, BlockFlags::END_OF_BURST), None).expect("ends");
     let BurstStep::Ended { record } = step else { panic!("expected Ended") };
     assert_eq!(record.late_by, None);
@@ -745,7 +769,7 @@ fn sc_27_late_policy_decisions() {
 
     assert_eq!(
         LatePolicy::SendAsapAndFlag.decide(&reg, far, now, min_lead),
-        Ok(LateOutcome::OnTime)
+        Ok(LateOutcome::OnTime {})
     );
     let late_by = Duration::new(host, 500_000);
     assert_eq!(
@@ -780,12 +804,13 @@ fn sc_27_min_lead_cross_multiplied() {
     let hz3 = reg.allocate_id();
     reg.register(ClockDomain::root(hz3, rat(3, 1), arbitrary("test"))).expect("root");
     let lte = reg.allocate_id();
-    reg.register(ClockDomain::root(lte, rat(30_720_000, 1), arbitrary("test"))).expect("root");
+    reg.register(ClockDomain::root(lte, rat(30_720_000, 1), arbitrary("test"),
+    )).expect("root");
 
     // 3 Hz: one tick is 333 ms, comfortably over; zero ticks is under. A
     // rescale-and-round implementation reports the first case 333 times too strict.
     let p = LatePolicy::DropAndFlag;
-    assert_eq!(p.decide(&reg, TimePoint::new(hz3, 1), TimePoint::new(hz3, 0), min_lead), Ok(LateOutcome::OnTime));
+    assert_eq!(p.decide(&reg, TimePoint::new(hz3, 1), TimePoint::new(hz3, 0), min_lead), Ok(LateOutcome::OnTime {}));
     assert_eq!(
         p.decide(&reg, TimePoint::new(hz3, 0), TimePoint::new(hz3, 0), min_lead),
         Ok(LateOutcome::Drop { late_by: Duration::new(host, 1_000_000) })
@@ -793,7 +818,7 @@ fn sc_27_min_lead_cross_multiplied() {
     // 30.72 Msps: 1 ms is exactly 30 720 ticks, and one tick is 3125/96 ns.
     assert_eq!(
         p.decide(&reg, TimePoint::new(lte, 30_720), TimePoint::new(lte, 0), min_lead),
-        Ok(LateOutcome::OnTime)
+        Ok(LateOutcome::OnTime {})
     );
     assert_eq!(
         p.decide(&reg, TimePoint::new(lte, 30_719), TimePoint::new(lte, 0), min_lead),
@@ -835,7 +860,7 @@ fn sc_13_continuity_gap_before_known_lost() {
     assert_eq!(map.gaps[0].start, t(100));
     assert_eq!(map.gaps[0].len, 150);
     assert_eq!(map.gaps[0].lost, Some(150));
-    assert_eq!(map.gaps[0].cause, GapCause::Stream);
+    assert_eq!(map.gaps[0].cause, GapCause::Stream {});
 }
 
 #[test]
@@ -866,7 +891,7 @@ fn sc_30_continuity_jump_without_flag() {
     let map = lossy.finish(DropCarry::default());
     assert_eq!(map.gaps.len(), 1);
     assert_eq!((map.gaps[0].start, map.gaps[0].len), (t(100), 400));
-    assert_eq!(map.gaps[0].cause, GapCause::LinkDrop);
+    assert_eq!(map.gaps[0].cause, GapCause::LinkDrop {});
 }
 
 #[test]
@@ -892,13 +917,13 @@ fn sc_31_continuity_causes() {
     };
     assert_eq!(
         case(BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(200)),
-        GapCause::OverflowRestart
+        GapCause::OverflowRestart {}
     );
     assert_eq!(
         case(BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, Some(200)),
-        GapCause::SequenceError
+        GapCause::SequenceError {}
     );
-    assert_eq!(case(BlockFlags::GAP_BEFORE, None), GapCause::Unknown);
+    assert_eq!(case(BlockFlags::GAP_BEFORE, None), GapCause::Unknown {});
 }
 
 #[test]
@@ -972,11 +997,11 @@ fn sc_31a_channel_gap_carries_a_cause() {
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].channel, 2);
     assert_eq!((gaps[0].start, gaps[0].len), (t(100), 100));
-    assert_eq!(gaps[0].cause, GapCause::Alignment);
+    assert_eq!(gaps[0].cause, GapCause::Alignment {});
 
     let gaps = run(BlockFlags::NONE);
     assert_eq!(gaps.len(), 1);
-    assert_eq!(gaps[0].cause, GapCause::Stream);
+    assert_eq!(gaps[0].cause, GapCause::Stream {});
 }
 
 #[test]
@@ -1043,7 +1068,7 @@ fn sc_31d_break_across_a_stream_gap_is_split() {
         (2, t(100), 100),
         "the gap's 150 samples are not charged to channel 2"
     );
-    assert_eq!(map.channel_gaps[0].cause, GapCause::Alignment);
+    assert_eq!(map.channel_gaps[0].cause, GapCause::Alignment {});
 }
 
 #[test]
@@ -1099,7 +1124,7 @@ fn sc_30b_carry_merges_into_next_gap() {
     b.push(&header(t(350), 100, 1), carry).expect("accepted");
     let map = b.finish(DropCarry::default());
     assert_eq!(map.gaps.len(), 1);
-    assert_eq!(map.gaps[0].cause, GapCause::OverflowRestart, "not a plain LinkDrop");
+    assert_eq!(map.gaps[0].cause, GapCause::OverflowRestart {}, "not a plain LinkDrop");
     assert_eq!(map.gaps[0].lost, Some(150));
     assert_eq!(map.gaps[0].link_dropped, 1);
 }
@@ -1108,7 +1133,8 @@ fn sc_30b_carry_merges_into_next_gap() {
 fn sc_30c_carry_survives_a_rejected_push() {
     let mut b = builder(4, false);
     push(&mut b, header(t(0), 100, 4));
-    let carry = DropCarry { flags: BlockFlags::GAP_BEFORE, lost: Some(7), blocks: 2 };
+    let carry = DropCarry { flags: BlockFlags::GAP_BEFORE, lost: Some(7), blocks: 2,
+    };
     let (err, returned) = b.push(&header(t(100), 100, 2), carry).expect_err("channel count changed");
     assert!(matches!(err, StreamError::ChannelsChanged { .. }));
     assert_eq!(returned, carry, "the carry comes back to the consumer");
@@ -1125,13 +1151,14 @@ fn sc_30c_carry_survives_a_rejected_push() {
 fn sc_30c_trailing_carry_is_zero_extent() {
     let mut b = builder(1, false);
     push(&mut b, header(t(0), 100, 1));
-    let map = b.finish(DropCarry { flags: BlockFlags::NONE, lost: None, blocks: 3 });
+    let map = b.finish(DropCarry { flags: BlockFlags::NONE, lost: None, blocks: 3,
+    });
     assert_eq!(map.gaps.len(), 1);
     assert_eq!(map.gaps[0].start, t(100));
     assert_eq!(map.gaps[0].len, 0);
     assert_eq!(map.gaps[0].lost, None);
     assert_eq!(map.gaps[0].link_dropped, 3);
-    assert_eq!(map.gaps[0].cause, GapCause::LinkDrop);
+    assert_eq!(map.gaps[0].cause, GapCause::LinkDrop {});
     assert_eq!(map.end, t(100), "end does not move");
 }
 
@@ -1151,7 +1178,7 @@ fn sc_30c_trailing_carry_with_a_known_lost_stays_zero_extent() {
     assert_eq!(map.gaps[0].start, t(100));
     assert_eq!(map.gaps[0].len, 0, "zero-extent even when `lost` is known");
     assert_eq!(map.gaps[0].lost, Some(150), "the count is still carried");
-    assert_eq!(map.gaps[0].cause, GapCause::OverflowRestart);
+    assert_eq!(map.gaps[0].cause, GapCause::OverflowRestart {});
     assert_eq!(map.end, t(100), "end does not move");
 }
 
@@ -1181,7 +1208,8 @@ fn sc_13_tm_13c_rate_change_is_a_new_domain_not_a_gap() {
     let mut b = ContinuityBuilder::new(a, 1, true);
     b.push(&header(TimePoint::new(a, 0), 50, 1), DropCarry::default()).expect("accepted");
     let (err, _) = b
-        .push(&header(TimePoint::new(bdom, 0), 50, 1), DropCarry::default())
+        .push(&header(TimePoint::new(bdom, 0), 50, 1), DropCarry::default(),
+        )
         .expect_err("a rate change ends the map");
     assert!(matches!(err, StreamError::DomainChanged { .. }));
 }
@@ -1199,14 +1227,16 @@ fn sc_30b_a_carry_on_a_contiguous_block_is_not_discarded() {
     let mut b = builder(1, false);
     push(&mut b, header(t(0), 100, 1));
     // Two blocks refused, and the next delivered one is contiguous at 100.
-    b.push(&header(t(100), 100, 1), DropCarry { blocks: 2, ..DropCarry::default() })
+    b.push(&header(t(100), 100, 1), DropCarry { blocks: 2, ..DropCarry::default() },
+    )
         .expect("a contiguous block is accepted");
     // A later jump, with one more block refused at that point.
-    b.push(&header(t(400), 100, 1), DropCarry { blocks: 1, ..DropCarry::default() })
+    b.push(&header(t(400), 100, 1), DropCarry { blocks: 1, ..DropCarry::default() },
+    )
         .expect("accepted");
     let map = b.finish(DropCarry::default());
     assert_eq!(map.gaps.len(), 1, "one jump, one gap");
-    assert_eq!(map.gaps[0].cause, GapCause::LinkDrop);
+    assert_eq!(map.gaps[0].cause, GapCause::LinkDrop {});
     assert_eq!(map.gaps[0].link_dropped, 3, "two carried forward plus the one at the jump");
 }
 
@@ -1219,18 +1249,20 @@ fn sc_30b_a_carry_held_across_a_contiguous_block_reaches_the_trailing_gap() {
     // moved to the end of the stream.
     let mut b = builder(1, false);
     push(&mut b, header(t(0), 100, 1));
-    b.push(&header(t(100), 100, 1), DropCarry { blocks: 2, ..DropCarry::default() })
+    b.push(&header(t(100), 100, 1), DropCarry { blocks: 2, ..DropCarry::default() },
+    )
         .expect("a contiguous block is accepted");
     let map = b.finish(DropCarry::default());
     assert_eq!(map.gaps.len(), 1, "the drop is recorded even with no later jump");
-    assert_eq!(map.gaps[0].cause, GapCause::LinkDrop);
+    assert_eq!(map.gaps[0].cause, GapCause::LinkDrop {});
     assert_eq!(map.gaps[0].len, 0, "SC-30c: zero-extent, no sample is accounted for");
     assert_eq!(map.gaps[0].link_dropped, 2);
 
     // And the trailing carry sums with what was held, rather than replacing it.
     let mut b = builder(1, false);
     push(&mut b, header(t(0), 100, 1));
-    b.push(&header(t(100), 100, 1), DropCarry { blocks: 2, ..DropCarry::default() })
+    b.push(&header(t(100), 100, 1), DropCarry { blocks: 2, ..DropCarry::default() },
+    )
         .expect("accepted");
     let map = b.finish(DropCarry { blocks: 1, ..DropCarry::default() });
     assert_eq!(map.gaps.len(), 1);
@@ -1256,7 +1288,7 @@ fn sc_30b_a_held_carry_keeps_its_flags_and_lost_count() {
     b.push(&header(t(100), 100, 1), held).expect("a contiguous block is accepted");
     let map = b.finish(DropCarry::default());
     assert_eq!(map.gaps.len(), 1);
-    assert_eq!(map.gaps[0].cause, GapCause::OverflowRestart, "the carried flags derive it");
+    assert_eq!(map.gaps[0].cause, GapCause::OverflowRestart {}, "the carried flags derive it");
     assert_eq!(map.gaps[0].lost, Some(150), "and the carried count is not discarded");
     assert_eq!(map.gaps[0].link_dropped, 1);
 
@@ -1267,7 +1299,7 @@ fn sc_30b_a_held_carry_keeps_its_flags_and_lost_count() {
     b.push(&header(t(400), 100, 1), DropCarry::default()).expect("accepted");
     let map = b.finish(DropCarry::default());
     assert_eq!(map.gaps.len(), 1);
-    assert_eq!(map.gaps[0].cause, GapCause::OverflowRestart);
+    assert_eq!(map.gaps[0].cause, GapCause::OverflowRestart {});
     assert_eq!(map.gaps[0].lost, Some(150));
     assert_eq!(map.gaps[0].link_dropped, 1);
 }
@@ -1283,7 +1315,8 @@ fn sc_31_mixed_requires_that_no_carry_explains_the_shortfall() {
     let mut b = builder(1, false);
     push(&mut b, header(t(0), 100, 1));
     // One block dropped, and the delivered block is contiguous — so the count is held.
-    b.push(&header(t(100), 100, 1), DropCarry { blocks: 1, ..DropCarry::default() })
+    b.push(&header(t(100), 100, 1), DropCarry { blocks: 1, ..DropCarry::default() },
+    )
         .expect("accepted");
     // A jump the stream's own `lost` only partly accounts for, with an empty carry.
     let mut h = header(t(600), 100, 1);
@@ -1295,7 +1328,7 @@ fn sc_31_mixed_requires_that_no_carry_explains_the_shortfall() {
     assert_eq!(map.gaps[0].link_dropped, 1, "the held block reaches this Gap");
     assert_eq!(
         map.gaps[0].cause,
-        GapCause::Stream,
+        GapCause::Stream {},
         "a Gap that reports a link drop cannot also claim nothing explains the shortfall"
     );
 
@@ -1320,7 +1353,8 @@ fn sc_30b_a_rejected_push_does_not_destroy_the_held_carry() {
     // cleared before one of them.
     let mut b = builder(1, true); // lossless: the path that returns JumpWithoutGapFlag
     push(&mut b, header(t(0), 100, 1));
-    b.push(&header(t(100), 100, 1), DropCarry { blocks: 2, ..DropCarry::default() })
+    b.push(&header(t(100), 100, 1), DropCarry { blocks: 2, ..DropCarry::default() },
+    )
         .expect("a contiguous block is accepted");
     let (err, returned) = b
         .push(&header(t(500), 100, 1), DropCarry::default())

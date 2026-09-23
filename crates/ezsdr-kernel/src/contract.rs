@@ -109,6 +109,7 @@ impl PartialEq for Scalar {
 ///
 /// Rule: SC-2, SC-4.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DataContract {
     /// The namespaced id; identity is the id, not the shape (decision S7).
     pub id: DataContractId,
@@ -130,6 +131,7 @@ impl DataContract {
 
 /// Which way samples flow through a [`Port`] (SC-1).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum PortDirection {
     /// The component consumes blocks here.
@@ -144,6 +146,7 @@ pub enum PortDirection {
 ///
 /// Rule: SC-1.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Port {
     /// Port name, unique within its component (MA-37).
     pub name: String,
@@ -155,6 +158,7 @@ pub struct Port {
 
 /// Names one port of one component instance (SC-1).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PortRef {
     /// The component instance identifier (MA-36).
     pub component: String,

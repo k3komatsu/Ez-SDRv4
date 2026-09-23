@@ -7,6 +7,7 @@ use crate::id::ClockDomainId;
 
 /// The window over which a [`ClockRelation`] may be applied (TM-14).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Validity {
     /// First instant, in the source domain, at which the relation holds.
     pub from: TimePoint,
@@ -22,6 +23,7 @@ pub struct Validity {
 ///
 /// Rule: TM-5, TM-14, TM-18. Vision §24, §50.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ClockRelation {
     /// The domain being converted from.
     pub source: ClockDomainId,

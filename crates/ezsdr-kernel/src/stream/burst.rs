@@ -38,20 +38,24 @@ pub fn admit_burst_target(
     tx_domain: ClockDomainId,
 ) -> Result<AdmittedTarget, StreamError> {
     if target.domain == tx_domain {
-        return Ok(AdmittedTarget { target, requested_target: None });
+        return Ok(AdmittedTarget { target, requested_target: None,
+        });
     }
     // SC-23b: `Unrelated` propagates out of `conversion`, which is the refusal.
     match registry.conversion(target.domain, tx_domain)?.apply(target)? {
-        Converted::Exact { point } => Ok(AdmittedTarget { target: point, requested_target: None }),
+        Converted::Exact { point } => Ok(AdmittedTarget { target: point, requested_target: None,
+        }),
         Converted::Inexact { floor, .. } => {
             let next = floor.checked_add(Duration::new(tx_domain, 1))?;
-            Ok(AdmittedTarget { target: next, requested_target: Some(target) })
+            Ok(AdmittedTarget { target: next, requested_target: Some(target),
+            })
         }
     }
 }
 
 /// What to do about a burst whose lead is short (SC-27, Vision §22).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum LatePolicy {
     /// Legal only for a burst whose target is statically known; `validate()`
@@ -65,10 +69,11 @@ pub enum LatePolicy {
 
 /// The verdict on a burst's lead (SC-27).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LateOutcome {
     /// `target − now ≥ min_lead`.
-    OnTime,
+    OnTime {},
     /// Transmit immediately; the burst is this late.
     SendAsap {
         /// How far short of `min_lead` the lead fell, in `host.monotonic`.
@@ -119,7 +124,7 @@ impl LatePolicy {
         let min_lead_ticks = min_lead.ticks_in(host)?;
         let lead = target.checked_sub(now)?;
         if registry.compare_durations(lead, min_lead)?.is_ge() {
-            return Ok(LateOutcome::OnTime);
+            return Ok(LateOutcome::OnTime {});
         }
         let lead_host = registry.rescale(lead, host)?.floor();
         let late_by = Duration::new(
@@ -156,6 +161,7 @@ pub struct BurstOpen {
 
 /// How a burst ended (SC-28).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum BurstEnd {
     /// A block carrying `END_OF_BURST` (SC-24).
@@ -169,6 +175,7 @@ pub enum BurstEnd {
 /// What was transmitted, one per burst. The Provider puts these in its Manifest
 /// section (SC-28).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BurstRecord {
     /// The applied target on the sample grid (SC-23a).
     pub target: TimePoint,
@@ -282,18 +289,12 @@ impl Open {
 pub struct BurstTracker {
     domain: ClockDomainId,
     open: Option<Open>,
-    records: Vec<BurstRecord>,
 }
 
 impl BurstTracker {
     /// A tracker for one transmit SampleClock (SC-24, SC-29).
     pub fn new(domain: ClockDomainId) -> BurstTracker {
-        BurstTracker { domain, open: None, records: Vec::new() }
-    }
-
-    /// The domain this tracker accepts blocks in (SC-24).
-    pub fn domain(&self) -> ClockDomainId {
-        self.domain
+        BurstTracker { domain, open: None }
     }
 
     /// The current state (SC-24).
@@ -307,11 +308,6 @@ impl BurstTracker {
                 samples: o.samples,
             },
         }
-    }
-
-    /// Every burst closed so far, in order (SC-28).
-    pub fn records(&self) -> &[BurstRecord] {
-        &self.records
     }
 
     /// Feeds one transmit block through the state machine of `02-stream-contract.md` §6.
@@ -353,7 +349,6 @@ impl BurstTracker {
                 self.begin(t, end, h.len, open.unwrap_or_default());
                 if eob {
                     let record = self.open.take().expect("just opened").close(BurstEnd::Eob);
-                    self.records.push(record.clone());
                     return Ok(BurstStep::Ended { record });
                 }
                 Ok(BurstStep::Started)
@@ -373,7 +368,6 @@ impl BurstTracker {
                     self.open = Some(o);
                     if eob {
                         let record = self.open.take().expect("open").close(BurstEnd::Eob);
-                        self.records.push(record.clone());
                         return Ok(BurstStep::Ended { record });
                     }
                     return Ok(BurstStep::Continued);
@@ -382,16 +376,15 @@ impl BurstTracker {
                 // a burst is open, closes the burst and opens a new one here.
                 let expected = o.expected_next;
                 let closed = o.close(BurstEnd::Discontinuity);
-                self.records.push(closed.clone());
                 self.begin(t, end, h.len, open.unwrap_or_default());
                 let then_ended = if eob {
                     let record = self.open.take().expect("just opened").close(BurstEnd::Eob);
-                    self.records.push(record.clone());
                     Some(record)
                 } else {
                     None
                 };
-                Ok(BurstStep::Discontinuity { expected, got: t, closed, then_ended })
+                Ok(BurstStep::Discontinuity { expected, got: t, closed, then_ended,
+                })
             }
         }
     }
@@ -425,7 +418,7 @@ impl BurstTracker {
                 LateOutcome::SendAsap { late_by }
                 | LateOutcome::Drop { late_by }
                 | LateOutcome::PlanViolation { late_by } => Some(late_by),
-                LateOutcome::OnTime => None,
+                LateOutcome::OnTime {} => None,
             };
         }
     }
@@ -442,7 +435,6 @@ impl BurstTracker {
     /// burst, ended by the Run's stop or by an explicit `END_OF_BURST` (SC-25).
     pub fn stop(&mut self) -> Option<BurstRecord> {
         let record = self.open.take()?.close(BurstEnd::Stop);
-        self.records.push(record.clone());
         Some(record)
     }
 }

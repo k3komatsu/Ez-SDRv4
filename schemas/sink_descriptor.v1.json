@@ -4,12 +4,93 @@
       "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SC-2.",
       "type": "string"
     },
+    "MemoryDomainId": {
+      "additionalProperties": false,
+      "description": "Identifies a memory domain a [`SampleBlock`](crate::stream::SampleBlock) lives in.\n\nRule: SC-6 (`02-stream-contract.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "ModuleId": {
+      "description": "Names a Module implementation in the registry (`05-module-api.md` MA-19).\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: MA-19.",
+      "type": "string"
+    },
+    "ModuleRef": {
+      "additionalProperties": false,
+      "description": "A Module by id and version (MA-31).",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ModuleId",
+          "description": "The Module (MA-19)."
+        },
+        "version": {
+          "$ref": "#/$defs/Version",
+          "description": "Its version (MA-33)."
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ],
+      "type": "object"
+    },
     "Namespace": {
       "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
       "type": "string"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Version": {
+      "additionalProperties": false,
+      "description": "A release-only version. Module and Vocabulary versions carry a minor and a patch;\ndocuments do not, which is decision B7 of `03-spec-and-binding.md`.\n\nRule: MA-33, decision B7.",
+      "properties": {
+        "major": {
+          "description": "Breaking changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "description": "Additive changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "patch": {
+          "description": "Fixes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "What a Sink declares (MA-25).",
   "properties": {
     "artifact_kinds": {
@@ -29,10 +110,23 @@
     "kind": {
       "$ref": "#/$defs/Namespace",
       "description": "The Sink kind (MA-25)."
+    },
+    "memory_domains": {
+      "description": "The memory domains it can read a block from; a feed whose producer is placed\nelsewhere needs a selected Link that `connects` the pair (MA-25, MA-39, D81).",
+      "items": {
+        "$ref": "#/$defs/MemoryDomainId"
+      },
+      "type": "array"
+    },
+    "module": {
+      "$ref": "#/$defs/ModuleRef",
+      "description": "The exact Module version this instance is; `validate()` refuses one that\ndiffers from its binding (SB-22, MA-25, D82)."
     }
   },
   "required": [
+    "module",
     "kind",
+    "memory_domains",
     "contracts",
     "artifact_kinds"
   ],

@@ -24,7 +24,7 @@ ezsdr-kernel = { path = ".", features = ["testing"] }
 # in the shipped crate; a parser closes that class by construction. Adds no new
 # transitive crate — `syn`, `proc-macro2`, `quote` and `unicode-ident` are already
 # resolved through `serde_derive` and `schemars_derive` — and its MSRV is 1.71.
-syn = { version = "3", default-features = false, features = ["full", "parsing"] }
+syn = { version = "3", default-features = false, features = ["full", "parsing", "visit"] }
 
 [features]
 default = []

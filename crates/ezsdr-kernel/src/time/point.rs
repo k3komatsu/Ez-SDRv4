@@ -17,6 +17,7 @@ use crate::id::ClockDomainId;
 ///
 /// Rule: TM-1, TM-6.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TimePoint {
     /// The domain whose ticks `ticks` counts (TM-1).
     pub domain: ClockDomainId,
@@ -29,6 +30,7 @@ pub struct TimePoint {
 /// The domain tag is what stops 1 000 ticks at 20 Msps being added to a 200 MHz
 /// point as a silent factor-of-ten error.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Duration {
     /// The domain whose ticks `ticks` counts (TM-7).
     pub domain: ClockDomainId,
@@ -207,6 +209,7 @@ impl Duration {
 
 /// An instant known only to within a bound, the only result of crossing roots (TM-5, TM-14).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UncertainTimePoint {
     /// The best estimate of the instant.
     pub nominal: TimePoint,
@@ -221,6 +224,7 @@ pub struct UncertainTimePoint {
 ///
 /// Rule: TM-15.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RelativeBudget {
     duration: Duration,
 }
@@ -257,6 +261,7 @@ impl RelativeBudget {
 
 /// A wall-time instant by which something must happen, in any domain (TM-15, Vision §19).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AbsoluteDeadline {
     /// The instant itself.
     pub time_point: TimePoint,

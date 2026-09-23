@@ -14,6 +14,7 @@ use crate::time::{Duration, TimeError, TimePoint};
 /// construction. Without the field nothing can detect a receive Provider that sets
 /// a start-of-burst flag by copying a transmit code path (SC-16).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
     /// A receive stream.
@@ -51,11 +52,6 @@ impl ChannelMask {
     /// Whether channel `c` is valid (SC-14).
     pub fn is_set(self, c: u16) -> bool {
         c < 64 && self.0 & (1u64 << c) != 0
-    }
-
-    /// True when no channel is valid (SC-14).
-    pub fn is_empty(self) -> bool {
-        self.0 == 0
     }
 }
 
@@ -117,11 +113,6 @@ impl BlockFlags {
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
-
-    /// This set without the bits of `other` (SC-10).
-    pub fn without(self, other: BlockFlags) -> BlockFlags {
-        BlockFlags(self.0 & !other.0)
-    }
 }
 
 impl BitOr for BlockFlags {
@@ -166,7 +157,8 @@ pub struct BlockHeader {
 impl BlockHeader {
     /// Time just past the block's last sample: `first_sample_time + len`, checked (SC-12).
     pub fn end_time(&self) -> Result<TimePoint, TimeError> {
-        self.first_sample_time.checked_add(Duration::new(self.first_sample_time.domain, self.len.into()))
+        self.first_sample_time.checked_add(Duration::new(self.first_sample_time.domain, self.len.into(),
+        ))
     }
 }
 
@@ -204,11 +196,13 @@ impl SampleBlock {
         buffer: BufferRef,
         bytes_per_sample: u32,
     ) -> Result<SampleBlock, StreamError> {
-        let bad = |reason: &str| StreamError::InvalidBlock { reason: reason.to_owned() };
+        let bad = |reason: &str| StreamError::InvalidBlock { reason: reason.to_owned(),
+        };
         let f = header.flags;
 
         if header.len < 1 {
-            return Err(bad("len must be at least 1; zero-length blocks are never published"));
+            return Err(bad("len must be at least 1; zero-length blocks are never published",
+            ));
         }
         if header.channels < 1 || header.channels > 64 {
             return Err(bad("channels must be in 1..=64"));
@@ -220,7 +214,8 @@ impl SampleBlock {
             return Err(bad("a reserved flag bit (8..15) is set"));
         }
         if f.contains(BlockFlags::PARTIAL_CHANNELS) {
-            return Err(bad("PARTIAL_CHANNELS is derived by the constructor, never supplied"));
+            return Err(bad("PARTIAL_CHANNELS is derived by the constructor, never supplied",
+            ));
         }
         match header.lost {
             Some(0) => return Err(bad("`lost` must be at least 1 when present")),
@@ -239,12 +234,14 @@ impl SampleBlock {
                 BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY,
             )
         {
-            return Err(bad("a burst flag never accompanies GAP_BEFORE, RESTARTED or SEQ_DISCONTINUITY"));
+            return Err(bad("a burst flag never accompanies GAP_BEFORE, RESTARTED or SEQ_DISCONTINUITY",
+            ));
         }
         // SC-16: the direction rules.
         match header.direction {
             Direction::Rx if f.intersects(BlockFlags::START_OF_BURST | BlockFlags::END_OF_BURST) => {
-                return Err(bad("a receive block must not carry START_OF_BURST or END_OF_BURST"));
+                return Err(bad("a receive block must not carry START_OF_BURST or END_OF_BURST",
+                ));
             }
             Direction::Tx
                 if f.intersects(
@@ -254,7 +251,8 @@ impl SampleBlock {
                 ) =>
             {
                 // A jump in transmit time is a discontinuity (SC-24), never a flagged gap.
-                return Err(bad("a transmit block must not carry GAP_BEFORE, RESTARTED or SEQ_DISCONTINUITY"));
+                return Err(bad("a transmit block must not carry GAP_BEFORE, RESTARTED or SEQ_DISCONTINUITY",
+                ));
             }
             _ => {}
         }
@@ -264,7 +262,8 @@ impl SampleBlock {
             .and_then(|v| v.checked_mul(bytes_per_sample as u64))
             .ok_or_else(|| bad("the block's byte size overflows"))?;
         if buffer.len_bytes < needed {
-            return Err(bad("buffer.len_bytes is smaller than channels · len · bytes_per_sample"));
+            return Err(bad("buffer.len_bytes is smaller than channels · len · bytes_per_sample",
+            ));
         }
 
         let mut header = header;

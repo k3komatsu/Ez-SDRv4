@@ -29,7 +29,7 @@ The three types the audit singles out (§1.2) are settled first: `TimePoint` and
 plan/phase1/
   00-overview.md         this file: cross-cutting decisions, crate and schema strategy, tests, traceability, exit criteria
   01-time-model.md       TM-n   ClockDomain, TimePoint, Duration, the two Deadline kinds, ClockRelation, TimeAuthority, SampleClock
-  02-stream-contract.md  SC-n   DataContract, Port, MemoryDomain, BufferRef, SampleBlock, DataLink, BurstTracker, ContinuityMap
+  02-stream-contract.md  SC-n   DataContract, Port, MemoryDomainId, BufferRef, SampleBlock, DataLink, BurstTracker, ContinuityMap
   03-spec-and-binding.md SB-n   ExperimentSpec, BindingProfile, Constraint and matcher, compile pipeline, PrepareReport, versioning
   04-run-and-session.md  RS-n   Run state machine, cleanup, Session action log, Lease, Policy, the Kernel
                                 Action set, Event and counters, Manifest, hashing
@@ -40,7 +40,7 @@ Every spec carries: header (status, scope, Vision § covered, audit §14.1 items
 
 - **OV-1** A rule ID, once published in an accepted spec, is never reused or renumbered. A withdrawn rule keeps its number and is marked withdrawn, exactly as the Vision's §N numbers are stable.
 - **OV-2** Every normative obligation carries a rule ID. A rule that places obligations on more than one implementer, or in more than one phase, is split into lettered sub-rules (`TM-13a`, `TM-13b`, …), which OV-1 protects like any other ID. A rule whose several clauses are checked by one function and one test stays whole and enumerates them. Text with no rule ID is explanatory and binds nothing.
-- **OV-3** A rule with no disposition marker means "checked by a Kernel item and at least one Phase 1 test", and the exit review verifies that by finding a test row **whose expectation is that rule's own obligation**, not merely one citing its ID. The distinction matters: a producer-side rule such as spec 02's SC-13, an "if and only if" about what the producer knows, is cited by three rows that all test the builder's derivation instead, so an ID-matching check would pass it as covered. Every rule that is **not** in that class carries an explicit marker naming what it is — a **producer obligation**, a **consumer obligation**, a **forward obligation** or a **process obligation** — and the phase or artefact whose test covers it. The fourth marker exists because OV-4…OV-19 govern how the documents and the repository are written: their carrier is a document, `Cargo.toml` or the test tree, never a Kernel item, and the first three markers cannot describe them. The default's "a Kernel item" clause binds only where the rule names Kernel behaviour: OV-22, MA-44 and MA-45 are carried by test code, and searching `src/` for them is the wrong search. The default is inverted this way so that the marker is never a judgment call: the first draft said "written in the rule itself where it is not obvious", and the rules whose disposition was least obvious were exactly the ones left unmarked. The exit review produces a **per-rule table**: for an unmarked rule, the test whose assertion is that rule's obligation, **read from the test body**; for a marked rule, the marker and the phase or artefact. The table is the evidence. A rule-ID prefix on a test name is OV-19's navigation convention and is neither necessary nor sufficient here — three review passes each found a correctly prefixed test whose expectation was the implementation rather than the rule.
+- **OV-3** A rule with no disposition marker means "checked by a Kernel item and at least one Phase 1 test", and the exit review verifies that by finding a test row **whose expectation is that rule's own obligation**, not merely one citing its ID. The distinction matters: a producer-side rule such as spec 02's SC-13, an "if and only if" about what the producer knows, is cited by three rows that all test the builder's derivation instead, so an ID-matching check would pass it as covered. Every rule that is **not** in that class carries an explicit marker naming what it is — a **producer obligation**, a **consumer obligation**, a **forward obligation** or a **process obligation** — and the phase or artefact whose test covers it. The process marker covers OV-2…OV-19, whose carrier is a document, `Cargo.toml` or the test tree, never a Kernel item, and whose obligations the first three markers cannot describe. The default's "a Kernel item" clause binds only where the rule names Kernel behaviour: OV-22, MA-44 and MA-45 are carried by test code, and searching `src/` for them is the wrong search. The default is inverted this way so that the marker is never a judgment call: the first draft said "written in the rule itself where it is not obvious", and the rules whose disposition was least obvious were exactly the ones left unmarked. The exit review produces a **per-rule table**: for an unmarked rule, the test whose assertion is that rule's obligation, **read from the test body**; for a marked rule, the marker and the phase or artefact. The table is the evidence. A rule-ID prefix on a test name is OV-19's navigation convention and is neither necessary nor sufficient here — three review passes each found a correctly prefixed test whose expectation was the implementation rather than the rule.
 - **OV-4** A spec never restates a rule owned by another spec; it cites it. Cross-spec citation is by ID (`see TM-13c`), never by copying the text.
 - **OV-4a** In a rule, "must" and "must not" are the normative verbs. "Should" does not appear inside a rule; a recommendation that is not binding belongs in explanatory text. Each spec repeats this in its header.
 
@@ -71,6 +71,7 @@ Collected here so that the R13 pass (§12) can apply them in one edit. Per-spec 
 
 | Vision | Departure | Why |
 |---|---|---|
+| §5 and §31 describe `MemoryDomain` as a Core type | spec 02 SC-6 keeps `MemoryDomainId` in Core and assigns domain kinds such as host, pinned and GPU to Vocabulary content | Core compares domain identities but must not interpret a growing set of kinds or plan transfers (S6, Vision §63). Apply this correction together at Step 5 (§12) |
 | §49 writes `ResourceId { node, local }` | X7 writes `ResourceId { node, path }` | A resource is a composite tree (§8): a channel, a GPIO bank or a timekeeper is a sub-resource that must be addressable, and a flat `local` cannot name one. The node qualification §49 asks for is unchanged. Spec 03 fixes the path grammar |
 | §14's fidelity value sets stop at `hardware_quirk` | spec 05 will add `real` | §14 says every Run records the vector, and a Hardware Run has no value to record. Open question 1 |
 | §3's action log names `StartRepeat` and `Capture` as Session actions | spec 04 RS-13a makes them namespaced Vocabulary verbs | `repeat` is a Radio Model capability in audit §13 and a recorder is a Sink; a Kernel that enumerated them would need a new variant for the first peripheral or calibration verb (invariant 30) |
@@ -89,7 +90,7 @@ These bind all five specs. Each row is open to reversal at a gate; a reversal is
 | X4 | YAML | The Kernel does not parse YAML. Human-authored YAML BindingProfiles are converted to JSON by the frontend (Phase 6) | `serde_yaml` (deprecated and archived); its forks (maintenance unverified); either way YAML 1.1 type coercion (`no` → false) is the wrong failure mode for a document that gates RF transmission | A Rust CLI that wants YAML adds the dependency in its own crate |
 | X5 | Content hashing | `sha256:<64 lowercase hex>` over canonical JSON: **RFC 8785 (JCS) with an integer profile** — every value that came from an integer type is written as an exact decimal instead of through JCS's ECMAScript double rule (§7) | Strict JCS (its number rule routes every number through an IEEE-754 double, so two Manifests whose epoch-to-UTC offsets differ by 1 ns in 1.7 × 10^18 would share a hash); `serde_jcs` / `json-canon` (unverified, and now precluded by the deviation); BLAKE3 (speed is irrelevant for kilobyte documents); hashing the raw bytes (whitespace and key order would give two identities to one intent) | The deviation is why a stock JCS crate **cannot** be dropped in later; it is recorded as a named deviation in `SCHEMA_CHANGELOG.md` and pinned by the test vectors in §7 |
 | X6 | Dependencies | Four: `serde`, `serde_json` (never with `preserve_order`), `schemars`, `sha2`. Hand-written: `Rational`, `BlockFlags`, `Version` + caret matching, error `Display`, `RunId` (§8) | `thiserror`, `bitflags`, `semver`, `num-rational`, `uuid`, `proptest` — each replaces under ~50 lines of std code | §8 states the rule for adding one |
-| X7 | Identifiers | Node-qualified, `node = LOCAL = 0` in v4.0 (Vision §49): `ClockDomainId`, `MemoryDomainId`, `IslandId`, `DataLinkId` are `{node, local}`; `ResourceId` is `{node, path}` | A flat `u64` or a bare string (Vision §49 requires the qualification now so multi-host does not need a new public model) | v4.0 refuses any id whose `node ≠ LOCAL` |
+| X7 | Identifiers | Node-qualified, `node = LOCAL = 0` in v4.0 (Vision §49): `ClockDomainId`, `MemoryDomainId`, `IslandId`, `DataLinkId` are `{node, local}`; `ResourceId` is `{node, path}` | A flat `u64` or a bare string (Vision §49 requires the qualification now so multi-host does not need a new public model) | v4.0 refuses any id whose `node ≠ LOCAL`. *Enforced by `NodeId`'s deserialiser for every document and by `validate()` for ids handed in as Rust values (Islands, component placements, Executor and Sink memory domains, Provider trees, Authority domains); `ClockRegistry::register` keeps its own check (D91, `x7_non_local_ids_are_refused`).* |
 | X8 | Document versus in-process types | Anything that appears in a Manifest or crosses a frontend or Plugin boundary is a **document**: it has a schema, a version where the Vision requires one, and canonical hashing. Anything carrying samples or a live handle (`SampleBlock`, `BufferRef`, link handles, trait objects) is **in-process only** and has no schema | Schemas for everything (a `SampleBlock` schema invites someone to serialise the real-time path) | §6 lists both sets |
 | X9 | Floating point | The only floats in Kernel-owned document fields are `ClockRelation.drift` and `drift_uncertainty` (measurements; neither reaches a stored `TimePoint` unrounded). Floats also appear in `DataContract.attributes` (for example `full_scale`) and in Vocabulary values inside `requires` and `environment`, so canonical float formatting is required anyway | Integer parts-per-billion for drift (does not remove the need for canonical float formatting, so it saves nothing) | X5's number rule covers both |
 | X10 | Test style | Plain `#[test]`, one integration-test file per spec, test names prefixed with the rule ID they prove (`tm_04_sibling_exact`). Doubles live in `tests/support/` and never in `src/` (§9) | `proptest` in Phase 1 (boundary tables cover the arithmetic; add it only if a time bug escapes them) | §9 lists the doubles |
@@ -421,7 +422,7 @@ binding —
 ```text
 SinkFeed  { port: PortRef, policy: BackPressure (drop-class, SC-21), capacity: u32 >= 1 }
 OutputReq { id, kind, feed: SinkFeed, params }          -- replaces source + OutputSource
-Binding   { module: ModuleId, selector, profile, feed: optional SinkFeed }
+Binding   { module: ModuleId, selector, profile, feed: optional SinkFeed }   -- module: ModuleRef since D78
 ```
 
 SB-22 gains: a Sink binding on a Session profile carries `feed`, RS-12 makes it the
@@ -768,29 +769,22 @@ prefix.
 ### Findings from the exit-criterion-2 sweep
 
 The per-rule OV-3 table criterion 2 asks for now exists, in
-[`exit-review/`](exit-review/README.md), one file per document: **261 rows for 261
-rules**, each produced by reading a test **body**. Its own summary carries the counts.
-The criterion is **not met** — the table's job was to make that visible, and it does: 15
-rules have no carrier at all and OV-3 itself has no settled disposition.
+[`exit-review/`](exit-review/README.md), one file per document: **267 rows for 267
+rules**. D51–D68 and D69–D94 were adopted on 2026-09-23; no rule is left with a `GAP` or unassigned
+disposition. Thirty-seven `UNCERTAIN:` assertion cells remain as partial-coverage findings.
 
 Three classes of finding came out of it that no review pass had reached.
 
-**Fifteen predicates with no caller in `src/` and no test.** The crate's recurring defect
-class (a) had produced seven instances over thirteen review passes, all of them since
-wired; these fifteen are additional and all still dead, because a function nothing calls
-and nothing tests is invisible to a review that starts from the tests. Note what they are
-**not**: thirteen of the fifteen are methods on public types, and the gate governs
-module-level items only — "a method on a public type is not a Kernel concept of its own"
-(OV-23b) — so deleting one shrinks the public API without moving the growth number, and
-only `LinkPlacement` and `resolve_scheduled` are allow-list entries. `TimePoint::checked_sub_duration`, `AbsoluteDeadline::remaining`
-(01); `DataContractId::as_str`, `BlockFlags::without`, `BlockFlags::bits`,
-`ChannelMask::bits`, `ChannelMask::is_empty`, `DataLink::policy`, `BurstTracker::domain`,
-`BurstTracker::records`, `ContinuityBuilder::is_lossless` (02); `binding::LinkPlacement`
-with `Placements.links`, a type rather than a function (03); `session::resolve_scheduled`,
-`EventCollector::dropped_per_kind` (04); `ModuleRegistry::vocabularies` (05). Verified by
-deleting each from a scratch copy and compiling. `dropped_per_kind`'s own doc comment
-claims "the tests assert RS-35's invariant against them", and no test exists. This is the
-list §12 step 0 was written to produce.
+**The dead-predicate sweep is resolved (D66–D67, 2026-09-23).** The 2026-09-22 scan found fifteen
+unused predicates or fields. D66 removed eight (`BlockFlags::without`, `ChannelMask::is_empty`,
+`BurstTracker::domain`, `BurstTracker::records`, `ContinuityBuilder::is_lossless`,
+`session::resolve_scheduled`, `EventCollector::dropped_per_kind`/`DroppedPerKind`, and
+`ModuleRegistry::vocabularies`) and kept seven: `TimePoint::checked_sub_duration`,
+`AbsoluteDeadline::remaining`, `BlockFlags::bits`, `ChannelMask::bits`, `DataLink::policy`,
+`DataContractId::as_str`, and `LinkPlacement`. Tests now exercise the first five named methods;
+`DataContractId::as_str` stays as a low-cost identifier accessor despite having no current caller.
+D67 wires `LinkPlacement` into per-link plan admission. This closes the tracked no-caller findings;
+the accessor is an intentional API exception.
 
 **Six rules named a checker that does not check them — all resolved 2026-09-22.** Five
 were wrong citations, corrected in the rule text; the sixth, RS-13, had no carrier at all
@@ -807,75 +801,261 @@ RS-46's — the real carrier, `rs_46_manifest_hash_is_stored_beside_the_body`, i
 nowhere; `MA-44` lists "an event generator" among what the test double provides, and
 `tests/support/doubles.rs` has no `EventSink` use and emits no `Event`.
 
-**The `GAP` rules split into two shapes**, and the difference decides what to do about
-them. A type exists and nothing reads it — `RS-32a`'s `hot_layout` is `None` everywhere
-with no reader, `SB-49`'s `original_version`/`original_hash` are never set — which is
-what D40 withdrew `constraints_hit` for. Or the subject does not exist yet: nothing
-implements `Link`, so `MA-27` and `MA-28` have nothing to check, and `SC-5`'s
-PerformanceEnvelope is Phase 2's. The second shape wants a `forward` marker, which only
-the owner may add, because the rules as written name Phase 1 behaviour.
+**At the initial 2026-09-22 sweep, the `GAP` rules split into two shapes.** One was a
+field with no writer or reader: `RS-32a`'s `hot_layout` was `None` everywhere (D51
+withdrew it), and `SB-49`'s `original_version`/`original_hash` were never set (D53
+added the migration writer). The other was work whose producer did not exist yet:
+there was no real `Link` Module for `MA-27`'s runtime sequencing, and `SC-5`'s
+PerformanceEnvelope is Phase 2's. D56 keeps the trait shape in Phase 1 and marks its
+sequencing forward; D68 makes the Phase 1 registration refusal checkable while the
+Module author's work remains a producer obligation. Those dispositions are recorded in
+the current per-rule table.
 
-### Recommendations for the exit-criterion-2 open items — **pending the owner**
+### Recommendations for the exit-criterion-2 open items — **adopted 2026-09-23**
 
 A cross-family second opinion (Fable 5.1, 2026-09-22, under AGENTS.md §8's exception)
 was asked for verdicts on the 14 remaining `GAP` rules, on OV-3's own disposition and on
 the 15 predicates with no caller, **with the implementation procedure from Phase 1
-onwards as the lens**. Nothing below is adopted. `handoff.md` §4 carries the ordered work
-list; this section carries the reasoning, so that adopting a row does not require the
-report again.
+onwards as the lens**. The owner adopted all recommendations D51–D68 on 2026-09-23 and the code,
+schemas, phase documents, exit-review tables and `handoff.md` were updated. This section retains the
+reasoning and records each outcome.
 
 It corrected three premises of the question, each verified here afterwards:
 
 1. **Thirteen of the fifteen predicates are not allow-list entries.** The gate governs
    module-level items only — its own words, "a method on a public type is not a Kernel
    concept of its own" (OV-23b) — so deleting a method shrinks the public API without
-   moving the growth number. Only `LinkPlacement` and `session::resolve_scheduled` are
-   entries.
+   moving the growth number. At the baseline scan, only `LinkPlacement` and
+   `session::resolve_scheduled` were allow-list entries; D66 removed the latter and D67 wired the former.
 2. **The freeze asymmetry is not uniform.** After v4.0, removing anything is breaking;
    adding an inherent method is a minor release; adding a **schema field** is a v2 under
    OV-12; adding a **trait method** breaks every implementor. So an inherent getter with
    no Phase 2 caller can be deleted freely, while schema fields and trait methods must be
    decided **now**, either way.
-3. **The count is fifteen, not twenty** — the earlier seven were all wired. The §11 text
-   above and `handoff.md` said twenty and have been corrected.
+3. **The baseline count is fifteen, not twenty** — the earlier seven had all been wired. D66 records
+   their dispositions below.
 
-On the four-shape classification: sound as a first cut, too coarse as a decision
-procedure. `SB-49`'s writer is definable in a dozen lines today, so it is shape A rather
-than B; `MA-8` is a `producer` obligation, not a type nothing reads; `SC-5` and `MA-3`
-bind the **Module author**, so their marker is `producer` and not `forward`; and shape D
-needs no new marker, because each of its four rules already has a mechanical or document
-carrier. "Only one item can be closed without an owner decision" undercounts: `SB-49`,
-`SC-1`, `SC-7`, `MA-16`, `OV-2` and the Kernel halves of `RS-1` and `RS-11` add carriers
-without amending any obligation.
+On the four-shape classification at the time: sound as a first cut, too coarse as a decision
+procedure. `SB-49`'s writer was definable in a dozen lines, so it was shape A rather than B;
+`MA-8` was a `producer` obligation, not a type nothing reads; `SC-5` and `MA-3` bind the
+**Module author**, so their marker is `producer` and not `forward`; and shape D needed no new marker,
+because each of its four rules already had a mechanical or document carrier. "Only one item can be
+closed without an owner decision" undercounted: `SB-49`, `SC-1`, `SC-7`, `MA-16`, `OV-2` and the
+Kernel halves of `RS-1` and `RS-11` added carriers without amending any obligation.
 
-**The heaviest finding is that MA-19 is a defect, not a marker.** `IslandDecl.components`
-carries names only, `PrepareContext` holds no descriptors, and `spec.graph.components`
-never reaches the Executor — so **no Executor can reach a `ComponentImpl` through the
-typed API**, and the rule as written is unimplementable. A forward marker would leave the
-Phase 5 Reactor executor's author to decide how components reach an Executor **on a
-frozen ABI**, which is audit §14.3 verbatim. The recommendation is to add
-`PrepareContext.components` now — one field — and mark only the loading forward.
+**The heaviest baseline finding was that MA-19 was a defect, not a marker.** At the time of the
+2026-09-22 scan, `IslandDecl.components` carried names only, `PrepareContext` held no descriptors, and
+`spec.graph.components` never reached the Executor — so **no Executor could reach a `ComponentImpl`
+through the typed API**. D57 added `PrepareContext.components` and separated descriptor delivery,
+coordinator population and loading by `impl` identity into MA-19, MA-19a and MA-19b.
 
 | # | Item | Recommendation | Why, in one line |
 |---|---|---|---|
 | D51 | `RS-32a` | **withdraw** `HotLayout` and `EventKindDecl.hot_layout` | A JSON Schema is not a byte layout; decoding would make the Kernel read Vocabulary content (OV-21), and deferring lets MockRadio's first layout become the contract (§14.3) |
-| D52 | `SC-6` | **delete** the `MemoryDomain` struct, keep `MemoryDomainId` | The id is the Kernel concept; the kind — host, pinned, GPU, Vision §31's growing list — is Vocabulary content the Kernel is forbidden to read |
+| D52 | `SC-6` | **delete** the `MemoryDomain` struct, keep `MemoryDomainId` | The id is the Kernel concept; the kind — host, pinned, GPU, Vision §31's growing list — is Vocabulary content the Kernel is forbidden to read. The §5/§31 correction is queued in the departure table above and spec 02 §10 |
 | D53 | `SB-49` | **wire it**: `SpecSection::migrated` as the single writer | The meaning is crisp and the writer is a dozen lines; the first non-`None` value can only occur after the freeze, exactly when re-adding the fields would be a Manifest v2 |
 | D54 | `MA-8` | **`producer` marker**, Phase 2 | `Timeout` is a value a Module returns; the Kernel's half (`host_budget`, RS-8a) exists. Keep the variant: every real Module needs it and adding it later is a `module_error` v2 |
 | D55 | `SC-5` | **`producer` marker**, Phase 2; fix the name collision in the text | The Provider converts and reports the wire format; `ezsdr.stream.sc16` (SC-4) shares the spelling and is a host buffer layout, which the rule does not forbid |
 | D56 | `MA-27` | **split**: trait shape `default` (`ma_05_…`), sequencing `forward` (Phase 2) | D20's precedent; the first `impl Link` is the host-memory link that replaces `tests/support`'s `MemLink` when MockRadio feeds a recorder |
 | D57 | `MA-19` | **wire the ABI now** (`PrepareContext.components`), then `forward`/`producer` | See above: unimplementable as written, and a bare marker hands the decision to Phase 5 on a frozen ABI |
 | D58 | `RS-11` | **split**: assert `run_cleanup` reaches `ReleaseAndWriteManifest` from every stage; the writing is the coordinator's, `forward` | The step exists and is performed through `CleanupOps`; `manifest_fixture` proves `seal` (RS-46), not this rule |
-| D59 | `RS-1` | **split**: the document form is carried by `ov_22_schema_freeze` (TM-1's precedent) plus a `RunId::generate` test; the in-process composite is `forward` | **Open finding:** the "compiled Policy" RS-1 names appears nowhere in the Manifest — the profile's `policies` are recorded verbatim in `binding`, but the resolved table is not. INFERRED an omission against RS-38's intent; the owner should confirm, and if it belongs there it is a schema field |
+| D59 | `RS-1` | **split**: document form is carried by schema freeze plus a `RunId::generate` test; the in-process composite is `forward` | **Adopted:** the compiled `Policy` belongs in `Manifest.policy`; it is now required, tested against `EventKindRegistry::compile`, and pinned by the regenerated Manifest schema. The resolved table is distinct from the input overrides in the Spec's `policies.failure`. |
 | D60 | `MA-3` | **`producer` marker**; a workspace `cargo metadata` test from Phase 2 | The Kernel cannot see crates, and the rule binds Module authors; the test is meaningful at the second Module crate |
 | D61 | `SC-7` | **gate check**: assert `#![forbid(unsafe_code)]` is present | The attribute *is* the construction that makes a `u64` handle underefencable; make its removal a red test rather than marking the rule "true by construction" |
 | D62 | `MA-16` | **gate check**: a `syn` scan refusing any role-trait method whose signature names another role trait | Unchecked structural claims rot — this crate's whole no-caller class is the evidence; closes MA-6's `UNCERTAIN` in the same stroke |
 | D63 | `SC-1` | **`default`**, carrier `ov_22_schema_freeze` | The committed schemas pin `Port` to three fields and `PortRef` to two; TM-1 was resolved on this same carrier |
-| D64 | `OV-2` | **`process` marker**; widen D38's range to "OV-2…OV-19" | Criterion 2's "no coverage table contains a gap" *is* OV-2 applied |
-| D65 | `OV-3` | **`process`**, carrier `exit-review/` plus criterion 2 | Not a decision: D38 wrote "OV-4…OV-19" before OV-2 and OV-3 were themselves dispositioned. One range edit in OV-3's own text |
-| D66 | the 15 predicates | **delete 8, keep 7** (see `handoff.md` §4) | Sharpest: `BurstTracker::records` should go because `records.push` **allocates on the Provider's TX path**, which SC-9 says allocates nothing, and `step` already returns every closed record |
-| D67 | `LinkPlacement` | **wire it now**, with a key grammar | Vision mandates it, the map's key is undefined (`LinkReq` has no id), and `admit_islands` accepts **any** registered Link, ignoring the profile's choice |
-| D68 | `cross_process` | **refuse `true` at registration in v4.0** (X7's pattern) | Still unread after `MA-28`'s test gave `connects` a reader; three lines give it one and a test |
+| D64 | `OV-2` | **`process` marker**; widen D38's range to "OV-2…OV-19" | **Adopted:** per-rule tables and the no-gap inventory carry the authoring obligation. |
+| D65 | `OV-3` | **`process`**, carrier `exit-review/` plus criterion 2 | **Adopted:** the tables include OV-3's own disposition and satisfy the self-referential process obligation. |
+| D66 | the 15 predicates | **delete 8, keep 7** | **Adopted:** eight unused APIs are removed; seven are kept, with tests for the named methods where required. `BurstTracker::records` was removed because it allocated on the Provider's TX path and duplicated records returned by `step`. |
+| D67 | `LinkPlacement` | **wire it now**, with a key grammar | **Adopted:** `link-{i}` uses the zero-based `graph.links` position; each placement selects a versioned `ModuleRef`, admission requires exact coverage, resolves that exact registered descriptor, checks policy support and uses that descriptor for connectivity. The unused `memory_domain` field was removed. |
+| D68 | `cross_process` | **refuse `true` at registration in v4.0** (X7's pattern) | **Adopted:** Link descriptor registration rejects cross-process links and has a direct test. |
+
+**Adoption record (owner, 2026-09-23).** All D51–D68 recommendations are adopted and implemented. The changes remove `HotLayout` and the Core `MemoryDomain` kind, add migrated Spec provenance and the compiled Policy to the Manifest, expose component descriptors through `PrepareContext`, split coordinator and producer obligations into lettered rules, add the unsafe-code and role-signature gates, remove eight unused APIs while testing the kept predicates, and wire per-link `ModuleRef` placements to their exact registered descriptors. `schemas/SCHEMA_CHANGELOG.md` records the pre-freeze schema changes; generated schemas and their freeze test were updated. `handoff.md` §4 records the current status and remaining work.
+
+
+### Re-review of the D51–D68 application, and D69–D80 — **adopted 2026-09-23**
+
+An adversarial re-review of the uncommitted D51–D68 working tree (Opus 5.5,
+2026-09-23) found **no refusal of a legal document** — the crate's most repeated
+defect class did not recur — but one P0, eight P1s and a set of stale text. Each
+finding was reproduced before it was acted on.
+
+Fixed without a decision, because the rule text already settled them:
+
+- **The banned-token gate had been loosened by nobody's decision.** A `///` line
+  citing `OV-23a` exempted the next `pub` line, so `/// see OV-23a` above
+  `pub fn uhd_open_rfnoc` passed. The same-line form OV-23 names is restored and the
+  exemption deleted; the demonstrated item now fails `ma_04_kernel_surface_ban`. The
+  comment claiming `check_replay_target` does not match `replay` was wrong since
+  HEAD: `_` is a boundary, which is why the declaration line cites OV-23a.
+- **Two MA-28 refusals had no test.** The Link-policy check and the admission-side
+  `cross_process` check could each be turned into `if false && …` with every test
+  green. Both are now cases of `ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link`,
+  and neutering either fails it.
+- **`SpecSection::migrated` recorded a migration that never happened.** It took the
+  original version as an argument, so a current-version document got
+  `original_version: Some(1)`, and `migrated(body, 7, {"version": 0})` recorded 7. It
+  now takes the two documents and records provenance only when their versions differ
+  (SB-49's "when a document was migrated"); `sb_48_migration_point_exists` checks both
+  cases.
+- Spec shapes caught up with the code: 04 §4's `Policy` is `{ table, severities }`,
+  05 §4's `PrepareContext` carries `components`, 02 §4's `BurstTracker` has no
+  `records`, and D59's and the changelog's "BindingProfile overrides" are the Spec's
+  `policies.failure`.
+
+The judgment items went to a cross-family second opinion (Fable 5.1, AGENTS.md §8's
+exception, requested by the owner this session; lens: the implementation procedure from
+Phase 1 onwards). The owner adopted every recommendation.
+
+| # | Item | Verdict | Why, and the rejected alternative |
+|---|---|---|---|
+| D69 | `RS-1`, `RS-38` | **`Manifest.policy: Option<Policy>`**, absent when the Run failed before its Policy compiled | A Run refused at validate (an unregistered kind in `policies.failure`, SB-18) never compiles one, yet RS-11a owes it a Manifest. `Policy::default()` would read as "continue for every kind" — a silent reinterpretation (§65 #39). `plan` is already optional for the same reason. Rejected: compiling before SB-18 refuses its input. Schema. |
+| D70 | `RS-11` | **restate as stage-independent**; carrier `rs_11_cleanup_reaches_the_manifest_step_with_nothing_prepared` plus RS-6's and RS-8a's tests | `run_cleanup` takes no stage, so the loop over stages called it identically four times. What differs by stage is what was prepared, and a validate failure leaves nothing. Rejected: folding into forward RS-11a (a tested rule would become untested); a `stage` argument nothing reads (the no-caller defect). |
+| D71 | `MA-19` | **reword as the ABI shape**; population stays MA-19a | The test proves the typed field reaches `prepare`; no Kernel code populates it in Phase 1. Rejected: a Kernel helper building the map — a public item with no `src/` caller until Phase 2, and a free function can be added later without breaking anyone. |
+| D72 | `MA-16` | **extend the gate** to the fields of every struct or enum a role-trait signature or associated type names, transitively | `pub peer: Option<&mut dyn Sink>` in `PrepareContext` passed every test; it now fails `ma_16_role_trait_signatures_do_not_name_peer_roles`, and `ma_16_the_gate_sees_a_peer_behind_a_context_field` is the gate's own red test. Rejected: weakening MA-16 to "signatures only", which turns an architectural rule into a spelling rule. `use … as` aliases remain unchecked. |
+| D73 | `SB-9`, `SB-21` | **`deny_unknown_fields` on every Kernel document type** (95 structs, 36 enums) | Only the top level was checked, so the fields D51 and D66 removed were silently dropped from a v1 document. Extension content has named homes (`extensions`, `selector`, `environment`, `sections`), so this enforces the Extensions tier's boundary rather than conflicting with it. Rejected: only the two affected types, which leaves the next removal open. Schema (every object schema gains `additionalProperties: false`). |
+| D74 | `MA-28` | **split**: MA-28 Kernel-checked (`default`), **MA-28a** the producer clause | As D56 did for MA-27: four Kernel-checked clauses were hidden behind a `producer` disposition. |
+| D75 | `SB-25`, `MA-27a` | **output feeds are data links**: they need a selected Link, and `ExecutionPlan.links` carries them, numbered after the graph's links | Feeds were checked for SC-21 and then dropped, so the plan handed to MA-27a's coordinator had no feed link and no Link Module for one — and a feed's producer may be in a non-host memory domain. Rejected: Kernel-provided host links for feeds; deciding it in Phase 2 on a frozen profile schema. Schema. |
+| D76 | `SB-25`, `SB-15` | **`LinkPlacement { link, from, to }`**, named by endpoints; `placements.links` is an array; a `(from, to)` pair appears at most once in `graph.links` | **Reverses D67's key grammar.** `link-{i}` let a reordering of `graph.links` silently rebind Link Modules, and needed a second grammar for feeds. The endpoint pair identifies both uniformly and the plan already synthesises a feed's consumer end as `{output id, "in"}`. Rejected: keeping `link-{i}` plus a `feed-{id}` form. Schema. |
+| D77 | `MA-39` | **check `connects` across Islands too** | The check skipped a link whose ends are in two Islands, so a GPU→host link over a host-only Link was admitted and would fail at `create`. A tightening after the freeze would refuse profiles v4.0 accepted. |
+| D78 | `SB-22` | **`Binding.module: ModuleRef`**, and `plan()` refuses a Provider whose `instance().module` differs; `Fragment.instance` becomes `ModuleRef` too | An unversioned binding resolved to the **lowest** registered version (BTreeMap order) and let one profile hash run two Module versions with no `ReplayDivergence`; nothing compared the instance's own `ModuleRef` with its binding. Rejected: "highest registered" (a Kernel policy over versions, still unreproducible); recording the resolved version only in the Manifest. Schema. |
+| D79 | `MA-27a`, `MA-28` | **keep both descriptors**; MA-27a names the creation-time equality refusal | The registry copy is needed because selection happens before any Link exists; `Link::descriptor()` is the operand of the creation-time check. Rejected: dropping the trait method — irreversible after the freeze. No Phase 1 code: the Kernel never holds a Link instance. |
+| D80 | `MA-17` | **`producer`**, with the marker in the rule text | The exit-review row claimed D38 had converted MA-17; D38 only listed it as unreferenced and owed a verdict. The obligation is the Provider's: an instance-level capability in `instance()`. The Kernel half is MA-12's. |
+
+D67's row above is superseded by D76 for the key grammar; its exact-coverage,
+version-pinning and descriptor checks carry over unchanged.
+
+### Second re-review, and D81–D84 — **adopted 2026-09-23**
+
+A second Opus 5.5 pass over the D69–D80 application found no P0 and no refusal of a
+legal document; thirteen of the new refusals were each disabled in turn and every one
+but SB-25's "declared twice" failed a test. Fixed without a decision:
+
+- **D73 was incomplete in two ways.** The script that added `deny_unknown_fields`
+  matched one-line derives only, missing the four id objects and `Version`, so
+  `{ major, minor, patch, pre: "rc1" }` still read as the release a binding pins
+  (D78). And serde does not apply the attribute to a **unit** variant of an internally
+  tagged enum, so `{"kind":"completed","stage":"validate"}` read as `Completed` while
+  the schema said `additionalProperties: false`. Every such variant (25, in 11 enums)
+  is now an empty struct variant, `Completed {}`; the schemas and the serialised form
+  are unchanged.
+- **The MA-16 gate still had three routes**: a supertrait (`Provider: Link`), a type
+  alias used as a field, and a method of a non-role trait the context holds. The walk
+  now covers supertraits, generics, alias targets and non-role trait signatures; each
+  route was injected and fails the gate.
+- A Session binding naming an unregistered version was silently skipped by
+  `implicit_spec`, leaving the Session without the resource; it is now refused.
+  Admission's "declared twice" refusal has a direct test. Stale `link-{i}`,
+  `ModuleId` and "graph link" text was brought in line, and the RS-1 row now says its
+  absent-policy case is a hand-built fixture.
+
+The judgment items went to Fable 5.1 (AGENTS.md §8's exception, requested by the
+owner; same lens). The owner adopted every recommendation.
+
+| # | Item | Verdict | Why, and the rejected alternative |
+|---|---|---|---|
+| D81 | `MA-39`, `MA-25` | **`SinkDescriptor.memory_domains`**; a feed is checked against the bound Sink's domains | D75 gave feeds a Link because the producer may be in non-host memory, but the Sink declared no domain, so a GPU producer feeding a host Sink over a host-only Link was admitted — D77's failure on the other kind of data link. The field cannot be added after the freeze. Rejected: a Phase 2 marker; assuming every Sink is host memory; placing Sinks (SB-25a stays withdrawn). A resource-endpoint producer stays D31's Phase 2 value. Schema. |
+| D82 | `SB-22`, `MA-28` | **`module: ModuleRef` on the Executor, Sink and Link descriptors**; admission refuses an Executor (at `plan()`) or a Sink (at `validate` and `plan()`) whose `module` differs from its binding, and a Link descriptor is registered under its own `module` | D78 checked Providers only, so the `Binding.module` claim was false for three of four roles, and MA-27a's equality check could not tell two versions with identical descriptors apart. Rejected: weakening the claim; new `module()` trait methods (a breaking addition after the freeze). **Applied with one simplification:** Fable proposed keeping `register_link_descriptor(module, descriptor)` and refusing a mismatch; the parameter was removed instead, so a mismatch cannot be expressed. Schema. |
+| D83 | `SB-22`, `SB-15` | **graph component names join the one binding-name namespace, and an output id appears once**, at validate | A component named like an output, two outputs with one id, and a component shadowing a resource each passed `validate` and failed at `plan()` under SB-25 "declared twice" or an MA-22 cycle. Rejected: rewording the SB-25 message (the shadowing case is not on that path); prefixing synthesised feed ends (a schema change, and two of the three remain). |
+| D84 | `SB-9`, `SB-21` | **the depth split is acceptable; the text states it** | Top level is `UnknownField { path }`; below it `deny_unknown_fields` surfaces as `Structural` with an `SB-9:`/`SB-21:` reason naming the key. `SpecError` is not a document schema, so this can change later without a v2. Rejected: mapping serde's message text to `UnknownField` (a promise of a path it cannot keep); `serde_path_to_error` (a fifth dependency, exit criterion 6); a hand-written path-tracking deserialiser. |
+
+
+### Third re-review, and D85–D87 — **adopted 2026-09-23**
+
+A third Opus 5.5 pass found no P0 and one P1: the MA-16 gate did not follow a type's
+**inherent methods** (`impl PrepareContext<'_> { fn peer(&self) -> Option<&dyn Sink> }`
+passed every test) nor the **generics** of structs and aliases (a bound or default of
+`dyn Sink`). The walk now covers both; each route was injected and fails the gate, and
+the supertrait walk is shared with its red test instead of copied into it. A
+macro-generated type is not seen, which MA-16 now says.
+
+Fixed without a decision: `plan()` now checks the Sink's version as it does the
+Executor's, since its signature does not promise `validate` ran and the fragment records
+`binding.module`; D81 got a `plan()`-level test and a case in the Link's declared
+direction (the fixture Link declared both directions, so the forward half of the check
+could be deleted unnoticed); two Islands sharing one Executor got a test; "three sets"
+text, the `LinkDescriptor.module` and `ExecutorDescriptor` docs, MA-18, and the D82
+wording about where each version check runs were brought in line.
+
+The judgment items went to Fable 5.1 (AGENTS.md §8's exception, requested by the
+owner). The owner adopted every recommendation.
+
+| # | Item | Verdict | Why, and the rejected alternative |
+|---|---|---|---|
+| D85 | `SB-22` | **keep refusing a component named like an Island executor**; the rule is the namespace, not the current resolution paths. Also reserve the Islands' fragment ids `island_<n>` in it | Refusing now and loosening later breaks nobody; the reverse refuses profiles v4.0 accepted. A resource named `island_0` was refused only at `plan()`, as two fragments sharing an id. Rejected: exempting the pair; two namespaces. |
+| D86 | `MA-25`, `MA-18` | **refuse an empty `memory_domains`** — a Sink's at validate, an Executor's at `plan()` | A resource feed skips the domain check (D31), so a Sink that reads nowhere was admitted to read. The Executor case is harmless today (an empty Island) but the same tightening after the freeze would break Module authors. Rejected: registration (these descriptors are never registered); `minItems` in the schema (a schema change for a semantic check). |
+| D87 | `RS-12`, `SB-22`, `MA-1` | **one binding name plays one role, and in a Session the profile selects it**: an Island's executor name is its Executor, a binding with `feed` a Sink, any other Provider-holding binding a resource | A Provider+Sink Module could not be bound in a Session under any arrangement: bound once it became both a resource and an output, bound twice every binding still demanded a Provider instance. This contradicted MA-1. Rejected: a role priority (a radio-recorder would never record); a `Binding.role` field (the profile already carries the information). |
+
+
+### Fourth re-review, and D88–D91 — **adopted 2026-09-23**
+
+A fourth Opus 5.5 pass found no P0 and two P1s. One is D88 below. The other was the
+MA-16 gate again: it credited inherent methods to a type but not a **trait impl** on it
+(`impl Iterator for PrepareContext` yielding `&dyn Sink` passed every test, and needs
+no allow-list entry because the trait is std), and it walked only top-level items, so
+an impl inside a function body or a `const _` block was invisible. The collector is now
+a `syn::visit::Visit` over the whole file, and the red test pins each of seven routes
+separately — the reviewer showed that alias and enum generics could each be deleted
+from the walk unnoticed.
+
+Fixed without a decision: in a Session, a `feed` on an Island's executor binding was
+silently dropped (now refused: one name, one role), and a `feed` on a Module without
+the Sink role reported a missing instance (now `WrongBindingRole`, as for the other two
+roles); a Provider+Executor Module got a test; `plan()` re-checks a Sink's empty
+`memory_domains` as it re-checks its version; stale counts, SB-22's "three sets" row
+text and RS-14's Sink address (`sink/<output id>`, wrong since HEAD) were corrected.
+
+The judgment items went to Fable 5.1 (AGENTS.md §8's exception, requested by the
+owner). The owner adopted every recommendation.
+
+| # | Item | Verdict | Why, and the rejected alternative |
+|---|---|---|---|
+| D88 | `SB-24`, `MA-29`, `MA-41` | **the Authority is one of the Spec's resources**: inference considers resource bindings only, and a named non-resource is refused — after the role check | A Spec Run with an unused FreeRunning binding `spare` and `authority: spare` planned as Simulation, the one class that may claim determinism (RS-42), chosen by a binding with no fragment. Under D87 a Provider+Sink+Authority Module bound as `radio` and `rec` made two candidates. Rejected: an Authority fragment of its own for a non-resource; trusting the runtime to hand descriptors for resources only (assembly-time input, D18). |
+| D89 | `SB-22`, `RS-12` | **a binding that plays no role is refused**, on both Run kinds, in `check_binding_names`; the Session-only feedless-Sink refusal is subsumed and removed | Nothing read an unused binding: one naming unregistered version 9.9.9 validated, planned and would reach the Manifest verbatim. D87's "one binding name plays exactly one role" already says zero is not one. No Vision text promises one fat profile for many Specs; loosening later is a one-line filter. Rejected: accept with a warning (irrevocable after the freeze); refuse only in Sessions. The fixture cost was one helper line binding `exec` unconditionally. |
+| D90 | `MA-16` | **keep the gate conservative**: non-`pub` methods are followed | The gate already follows private fields, and its own red routes are private; a Kernel-internal helper that must name a peer is a free function. Rejected: a visibility filter (`pub(crate)`, trait-impl methods, re-exports — more code for a case that has not occurred). |
+| D91 | X7 | **enforce at `NodeId`'s deserialiser** for every document, and at `validate()` for ids handed in as Rust values | Only `ClockRegistry::register` checked X7: an Island on node 7 validated and planned, and `{0,0}` beside `{1,0}` was reported as D85's "fragment id declared twice". The deserialiser covers every id type at once and leaves the schemas unchanged. Rejected: `maximum: 0` in the schemas (a schema change now and another to lift it); private `node` fields (API growth); deferring to the multi-host phase. |
+
+
+### Fifth re-review, D92–D94, and the pause — **2026-09-23**
+
+A fifth Opus 5.5 pass found no P0 and three P1s. **D88 and D89 together left no way to
+bind an Authority-only Module** — Vision §7's `sim-engine`: not a resource, refused
+unnamed, refused named. The MA-16 gate missed impls whose self type is not a plain path
+(`impl IntoIterator for &Ctx`, `impl dyn Events`); every type name in the self type is
+now credited, and assoc consts are walked. And an SB-36 need could resolve onto a
+Provider no binding names; the search now covers resource providers only, with the
+first test that resolves a need across two instances.
+
+Fixed without a decision: the D89 check runs last in `validate`, so a misspelt output
+binding is `UnboundOutput`; X7 now also covers scheduled Action targets, Provider
+instance ids, `arm_after` and `declare_sample_clock`'s stream; untested branches got
+tests; two stale docs (`BindingProfile.bindings`, `implicit_spec`) were corrected.
+
+The judgment items went to Fable 5.1 (AGENTS.md §8's exception, requested by the
+owner). The owner adopted every recommendation.
+
+| # | Item | Verdict | Why, and the rejected alternative |
+|---|---|---|---|
+| D92 | `SB-24`, `SB-22`, MA-29 | **`authority` may name a dedicated binding** — one no resource, output or Island names, whose Module holds Authority — which gets a fragment of role `Authority`; inference stays over resources only; a named output or Island executor is refused | Vision §7's `sim-engine` is an Authority and not a Provider. **Reverses D88** for a named binding with no other role: it now has a fragment, is prepared and armed and is in the Manifest, which was D88's concern; D88's load-bearing half, no inference over non-resources, stays. No schema change: `Fragment.role` already admits `Authority`. Rejected: the engine as a Spec resource (environment in intent, §8); any Authority-holding binding (the fragmentless gap again); restricting to `[Authority]`-only Modules (a heuristic). |
+| D93 | `SB-24`, `SB-34` | **keep refusing duplicate candidates; name them** | Deduplicating by binding description would pick a name by sort order — the order-derived choice D78 rejected — and `plan.authority` records which fragment the Authority rides on. Loosening later breaks nobody. |
+| D94 | X7, D91 | **no `maximum: 0` in the schemas** | Thirty schemas embed `NodeId`; a bound would owe thirty v2 schemas to lift, the cost X7 exists to avoid. Shape in schema, policy in code, as D86 decided for `minItems`. |
+
+**The loop is paused here, by the owner, to firm up the specification first.** Five
+re-reviews found no P0 and no refusal of a legal document, but each found new P1s of
+two kinds: the MA-16 gate escaped by yet another syntactic form, and interactions
+between earlier decisions (D88 × D89 above). Both say the rules are being settled by
+review rather than written down. Open at the pause:
+
+1. **SB-1's grammar is not enforced on documents.** `Ident`, `Namespace` and `Key` are
+   `#[serde(transparent)]`; `"Radio Bad!"` deserialises as an `Ident`, and a
+   BindingProfile with a binding named `"Bad Name!"` passes `from_json` (verified). The
+   same boundary argument as D91 applies, and it is permanent.
+2. **`plan()` does not re-run D89 or D91**, although D81, D82 and D86 re-check in
+   `plan()` because it does not presume `validate` ran.
+3. **The MA-16 gate is syntactic** and cannot be closed by enumeration: `use … as`
+   aliases, macro-generated types and blanket impls stay out of reach. Whether MA-16
+   should be stated as "checked by a best-effort gate" or carried another way is open.
+4. The D89 cost to one lab-wide profile shared by several Specs (accepted knowingly).
 
 ## 12. What happens at acceptance (procedure only)
 
@@ -891,7 +1071,7 @@ frozen ABI**, which is audit §14.3 verbatim. The recommendation is to add
 ## 13. Exit criteria
 
 1. Six documents accepted across three gates, and every decision-table row has a verdict in §11.
-2. Every normative obligation of every covered Vision section has a rule ID and no coverage table contains a gap, and every rule has an OV-3 disposition **recorded in the per-rule table OV-3 requires** — for an unmarked rule the test whose assertion is that rule's obligation, read from the test body; for a marked rule the marker and the phase or artefact. Counting rule-ID prefixes is not this criterion: a present prefix is neither necessary nor sufficient. The table lives in [`exit-review/`](exit-review/README.md), one file per document. **It is complete — 261 rows for 261 rules, written 2026-09-22** — and the criterion is still **not met**: 15 rules have a `GAP` disposition, meaning nothing carries the obligation, and OV-3 itself has none, because D38's `process` marker was written for OV-4…OV-19 and excludes the rule that defines this table. Each needs a carrier, a marker the owner adds, or a withdrawal. Measured 2026-09-22 so the review knows its size: of 315 `#[test]` functions, **78** appear in no spec's test table — 19 of those are the `hashing`, `kernel_surface` and `schema_freeze` files this document names as groups rather than by test. The opposite direction is closed: every test name any spec cites now exists (`ma_42_fidelity_is_the_weakest` and `rs_49a_scheduled_action_is_a_template` were table rows with no function behind them and have been written).
+2. Every normative obligation of every covered Vision section has a rule ID and no coverage table contains a gap, and every rule has an OV-3 disposition **recorded in the per-rule table OV-3 requires** — for an unmarked rule the test whose assertion is that rule's obligation, read from the test body; for a marked rule the marker and the phase or artefact. Counting rule-ID prefixes is not this criterion: a present prefix is neither necessary nor sufficient. The table lives in [`exit-review/`](exit-review/README.md), one file per document. **It is complete — 267 rows for 267 current rules, updated 2026-09-23** — with no `GAP` or unassigned disposition. Thirty-seven assertion cells remain marked `UNCERTAIN:` for partial coverage; see the table before accepting the criterion as fully covered. Measured 2026-09-22 so the review knows the earlier test inventory's size: of 315 `#[test]` functions, **78** appeared in no spec's test table — 19 of those are the `hashing`, `kernel_surface` and `schema_freeze` files this document names as groups rather than by test. The opposite direction was closed then: every test name any spec cited resolved to a function.
 3. `cargo test` passes on the pinned MSRV and on stable, with no `#[ignore]` among the tests the five specs' test tables name, and the whole compile pipeline runs end to end against the test doubles with no Mock.
 4. `schemas/` is committed, `schema_freeze` passes, and `SCHEMA_CHANGELOG.md` has its v1 entry.
 5. `kernel_surface` passes: `src/` parses, every public item is on the allow-list with a specific audit §13 token or a `NEW:` justification, its doc comment cites a rule ID, and no token from `tests/banned_tokens.txt` appears outside a comment citing the ban. The review records the `NEW:` count as the Kernel-growth number.

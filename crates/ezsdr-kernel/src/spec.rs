@@ -18,7 +18,8 @@ use crate::stream::BackPressure;
 /// normalisation, so the canonical form of OV-15 stays byte-comparable.
 ///
 /// Rule: SB-1.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(transparent)]
 pub struct Ident(String);
 
@@ -26,7 +27,8 @@ pub struct Ident(String);
 /// matching `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`.
 ///
 /// Rule: SB-1.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(transparent)]
 pub struct Namespace(String);
 
@@ -36,7 +38,8 @@ pub struct Namespace(String);
 /// never interprets the meaning (audit Finding 7).
 ///
 /// Rule: SB-2, MA-34.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(transparent)]
 pub struct Key(String);
 
@@ -158,6 +161,7 @@ pub enum Value {
 
 /// The declared shape of a key's value (SB-2, MA-34).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum ValueKind {
     /// [`Value::Bool`].
@@ -195,9 +199,8 @@ impl Value {
     /// Refuses nesting beyond one level, and any non-finite float (SB-4, OV-15).
     pub fn check_nesting(&self, path: &str) -> Result<(), SpecError> {
         match self {
-            Value::Num(x) if !x.is_finite() => {
-                Err(SpecError::KeyShape { key: path.to_owned(), expected: "finite number".into(), found: "non-finite".into() })
-            }
+            Value::Num(x) if !x.is_finite() => Err(SpecError::KeyShape { key: path.to_owned(), expected: "finite number".into(), found: "non-finite".into(),
+            }),
             Value::List(items) => {
                 if !items.iter().all(Value::is_scalar) {
                     return Err(SpecError::KeyShape {
@@ -318,6 +321,7 @@ pub(crate) fn cmp_int_num(a: i64, b: f64) -> Option<std::cmp::Ordering> {
 ///
 /// Rule: SB-5, decision B1.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Constraint {
     /// Exactly this value.
@@ -348,7 +352,7 @@ pub enum Constraint {
         value: Value,
     },
     /// The key is declared at all.
-    Present,
+    Present {},
 }
 
 impl Constraint {
@@ -360,7 +364,7 @@ impl Constraint {
             }
             Constraint::Range { min, max } => min.iter().chain(max.iter()).collect(),
             Constraint::Set { values } => values.iter().collect(),
-            Constraint::Present => Vec::new(),
+            Constraint::Present {} => Vec::new(),
         }
     }
 }
@@ -369,6 +373,7 @@ impl Constraint {
 ///
 /// Rule: SB-6.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CapabilityValue {
     /// Exactly this value.
@@ -394,6 +399,7 @@ pub enum CapabilityValue {
 ///
 /// Rule: SB-2, SB-7, SB-45.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct KeyDecl {
     /// The key this declares (SB-2).
     pub key: Key,
@@ -416,6 +422,7 @@ pub struct KeyDecl {
 
 /// What to do when a Provider coerces a requested value (SB-45, SB-46).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum CoercionPolicy {
     /// Apply and record.
@@ -428,6 +435,7 @@ pub enum CoercionPolicy {
 
 /// A value the Provider changed, with its reason (SB-44).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Coercion {
     /// The key that was coerced.
     pub key: Key,
@@ -441,6 +449,7 @@ pub struct Coercion {
 
 /// A non-fatal note from a stage (SB-38, SB-41).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Warning {
     /// Where it came from.
     pub source: Namespace,
@@ -450,6 +459,7 @@ pub struct Warning {
 
 /// A constraint the bound instance could not satisfy (SB-38).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RejectedConstraint {
     /// The Spec resource whose constraint failed.
     pub resource: Ident,
@@ -465,6 +475,7 @@ pub struct RejectedConstraint {
 
 /// A capability this resource needs from somewhere, possibly another instance (SB-36).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SubResourceReq {
     /// The kind of node that can satisfy it.
     pub kind: Namespace,
@@ -482,6 +493,7 @@ pub struct SubResourceReq {
 ///
 /// Rule: SB-12, decision B2.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceReq {
     /// The kind of resource wanted (SB-12).
     pub kind: Namespace,
@@ -501,6 +513,7 @@ pub struct ResourceReq {
 ///
 /// Rule: SB-15.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LinkReq {
     /// The producing port.
     pub from: PortRef,
@@ -518,6 +531,7 @@ pub struct LinkReq {
 ///
 /// Rule: SB-16, decision B4.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpecTime {
     /// The Spec resource whose stream clock the offset counts in.
     pub clock: Ident,
@@ -532,6 +546,7 @@ pub struct SpecTime {
 ///
 /// Rule: SB-17, SB-22.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SinkFeed {
     /// The port the samples leave from: a component's port, or a port a bound
     /// resource declares (SB-15, MA-10).
@@ -548,6 +563,7 @@ pub struct SinkFeed {
 ///
 /// Rule: SB-17.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OutputReq {
     /// The artifact's name inside this document.
     pub id: Ident,
@@ -568,6 +584,7 @@ pub struct OutputReq {
 ///
 /// Rule: SB-11.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Requirements {
     /// One entry per Vocabulary the Spec's keys draw on (SB-11).
     #[serde(default)]
@@ -576,6 +593,7 @@ pub struct Requirements {
 
 /// One Vocabulary this Spec requires, by namespace and major version (SB-11).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VocabularyReq {
     /// The Vocabulary's namespace, which is also its key prefix (SB-2).
     pub id: Namespace,
@@ -585,6 +603,7 @@ pub struct VocabularyReq {
 
 /// The Spec's component graph (SB-15).
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpecGraph {
     /// Components by name (SB-15).
     #[serde(default)]
@@ -596,6 +615,7 @@ pub struct SpecGraph {
 
 /// The Spec's failure and coercion tables (SB-18, SB-19).
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpecPolicies {
     /// Registered event kinds mapped to reactions; an unregistered kind is refused
     /// at `validate()`, so a misspelling is an error rather than a silently
@@ -610,6 +630,7 @@ pub struct SpecPolicies {
 /// One scheduled Action, held as a template because the Spec cannot name a
 /// `ClockDomainId` (RS-49a, SB-16).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScheduleEntry {
     /// When, relative to the Run's start (SB-16).
     pub at: SpecTime,
@@ -622,6 +643,7 @@ pub struct ScheduleEntry {
 ///
 /// Rule: SB-9…SB-20. Vision §8, §9, §10.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExperimentSpec {
     /// Mandatory positive integer; Phase 1 supports exactly `{1}` (SB-10, SB-47).
     pub version: u32,
@@ -669,7 +691,8 @@ pub const SPEC_TOP_LEVEL: &[&str] = &[
 /// naming an Executor cannot be promoted to a host that lacks one, which is the
 /// regression re-review R21 caught (SB-13, decision B3).
 pub const PLACEMENT_FIELDS: &[&str] =
-    &["placements", "placement", "executor", "memory_domain", "island"];
+    &["placements", "placement", "executor", "memory_domain", "island",
+];
 
 /// The one field name SB-13 reports as `EnvironmentInSpec` rather than
 /// `PlacementInSpec` (SB-13).
@@ -729,8 +752,9 @@ pub enum SpecError {
         /// The constraint that could not be met by one instance.
         constraint: String,
     },
-    /// One name appears in more than one of the three sets `bindings` is keyed by:
-    /// resource names, output ids and Island executor names (SB-22).
+    /// One name appears in more than one of the four sets that share one namespace —
+    /// resource names, graph component names, output ids and Island executor names —
+    /// or an output id appears twice (SB-22, D83).
     DuplicateBindingName {
         /// The colliding name.
         name: Ident,
@@ -789,20 +813,23 @@ impl fmt::Display for SpecError {
             SpecError::UnknownKeyPrefix { key } => {
                 write!(f, "key {key:?} has a prefix no declared Vocabulary owns")
             }
-            SpecError::KeyShape { key, expected, found } => {
+            SpecError::KeyShape { key, expected, found,
+            } => {
                 write!(f, "key {key:?} wanted {expected} and found {found}")
             }
             SpecError::UnboundResource { name } => write!(f, "resource {name} has no binding"),
             SpecError::DuplicateBindingName { name, sets } => {
                 write!(
                     f,
-                    "SB-22: {name} is both {sets}; the three sets `bindings` is keyed by form one namespace"
+                    "SB-22: {name} collides as {sets}; resource names, graph component names, output ids and Island executor names form one namespace"
                 )
             }
-            SpecError::WrongBindingRole { name, expected, module } => {
+            SpecError::WrongBindingRole { name, expected, module,
+            } => {
                 write!(f, "SB-22: {name} needs a Module holding the {expected} role; {module} does not")
             }
-            SpecError::NodeAlreadyBound { node, first, second } => {
+            SpecError::NodeAlreadyBound { node, first, second,
+            } => {
                 write!(
                     f,
                     "SB-34: {second} wants node {node}, which {first} already binds and which \
@@ -857,7 +884,8 @@ pub fn check_version(doc: &serde_json::Value) -> Result<u32, SpecError> {
     let found = doc
         .get("version")
         .and_then(|v| v.as_u64())
-        .ok_or_else(|| SpecError::UnknownField { path: "version".to_owned() })?;
+        .ok_or_else(|| SpecError::UnknownField { path: "version".to_owned(),
+            })?;
     let found = u32::try_from(found).unwrap_or(u32::MAX);
     if found == 0 || !SUPPORTED_VERSIONS.contains(&found) {
         return Err(SpecError::UnsupportedVersion {
@@ -870,7 +898,8 @@ pub fn check_version(doc: &serde_json::Value) -> Result<u32, SpecError> {
 
 /// Refuses a top-level field outside `allowed` (SB-9, SB-21).
 pub fn check_top_level(doc: &serde_json::Value, allowed: &[&str]) -> Result<(), SpecError> {
-    let map = doc.as_object().ok_or_else(|| SpecError::UnknownField { path: "$".to_owned() })?;
+    let map = doc.as_object().ok_or_else(|| SpecError::UnknownField { path: "$".to_owned(),
+    })?;
     match map.keys().find(|k| !allowed.contains(&k.as_str())) {
         Some(k) => Err(SpecError::UnknownField { path: k.clone() }),
         None => Ok(()),
@@ -929,7 +958,8 @@ impl ExperimentSpec {
         check_no_placement(doc)?;
         check_ascii_keys(doc)?;
         let spec: ExperimentSpec = serde_json::from_value(doc.clone())
-            .map_err(|e| SpecError::Structural { reason: format!("SB-9: {e}") })?;
+            .map_err(|e| SpecError::Structural { reason: format!("SB-9: {e}"),
+            })?;
         spec.check_shapes()?;
         Ok(spec)
     }
@@ -1021,14 +1051,14 @@ impl MigrationRegistry {
     /// records beside the compiled one (SB-48, SB-49).
     pub fn migrate(
         &self,
-        doc: serde_json::Value,
-    ) -> Result<(serde_json::Value, u32), SpecError> {
+        doc: serde_json::Value) -> Result<(serde_json::Value, u32), SpecError> {
         let newest = *SUPPORTED_VERSIONS.iter().max().expect("at least one supported version");
         let original = doc
             .get("version")
             .and_then(|v| v.as_u64())
             .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
-            .ok_or_else(|| SpecError::UnknownField { path: "version".to_owned() })?;
+            .ok_or_else(|| SpecError::UnknownField { path: "version".to_owned(),
+            })?;
         let mut at = original;
         let mut doc = doc;
         while at < newest {

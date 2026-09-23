@@ -7,6 +7,7 @@
       "type": "integer"
     },
     "ClockDomainId": {
+      "additionalProperties": false,
       "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
       "properties": {
         "local": {
@@ -27,6 +28,7 @@
       "type": "object"
     },
     "Coercion": {
+      "additionalProperties": false,
       "description": "A value the Provider changed, with its reason (SB-44).",
       "properties": {
         "applied": {
@@ -80,6 +82,7 @@
       "description": "What `admit()` decided about one Session Action (RS-15, RS-16).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "It passed every check and was dispatched (RS-16).",
           "properties": {
             "coercions": {
@@ -117,6 +120,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "It was refused and never reached the real-time path (RS-16).",
           "properties": {
             "kind": {
@@ -140,6 +144,7 @@
       ]
     },
     "ResourceId": {
+      "additionalProperties": false,
       "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the\nreceive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
       "properties": {
         "node": {
@@ -161,6 +166,7 @@
       "description": "The Session action envelope: a closed set, and **not** the Kernel Action set.\n\nThe Kernel's Actions are what a Reactor emits into the real-time path, while a\nlease operation or a recorder request is a control-path act with no real-time\nmeaning. Each Session Action compiles to zero or more Kernel Actions, or to a\nLease or Run operation.\n\nOnly the lifecycle verbs are the Kernel's; a domain verb is\n[`SessionAction::Vocabulary`], and the Vocabulary that registers the verb\ndeclares how it compiles. Vision §3's log sketch names `StartRepeat` and\n`Capture` directly; here they are `radio.start_repeat` and `sink.capture`,\nbecause a Kernel that enumerated them would need a new variant for the first\nperipheral sweep or calibration verb.\n\nRule: RS-13, RS-13a, decision R3.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Generic over a namespaced key and value (RS-13a).",
           "properties": {
             "key": {
@@ -189,6 +195,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "A domain verb, whose compilation its Vocabulary declares (RS-13a, RS-14).",
           "properties": {
             "at": {
@@ -236,6 +243,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "With a target it stops that resource; without one it stops the Run (RS-50).",
           "properties": {
             "kind": {
@@ -260,6 +268,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Give up the Lease (RS-14).",
           "properties": {
             "kind": {
@@ -273,6 +282,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Reclaim a Detached Lease. Adoption by run id alone would let any client\nseize a live transmitter (RS-24).",
           "properties": {
             "kind": {
@@ -291,6 +301,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Extend a renewable Lease (RS-24).",
           "properties": {
             "kind": {
@@ -304,6 +315,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Create a child Run (RS-14, RS-25).",
           "properties": {
             "kind": {
@@ -324,6 +336,7 @@
       ]
     },
     "TimePoint": {
+      "additionalProperties": false,
       "description": "An instant: integer ticks in a named clock domain. Never floating-point seconds.\n\nThere is deliberately no `PartialOrd`: two points of different domains cannot be\ncompared at all, and `a < b` silently answering `false` is the bug class this\nmodel exists to prevent (decision T3).\n\nRule: TM-1, TM-6.",
       "properties": {
         "domain": {
@@ -380,6 +393,7 @@
       "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
     },
     "Violation": {
+      "additionalProperties": false,
       "description": "What an admission check refused (SB-29).",
       "properties": {
         "check": {
@@ -420,6 +434,7 @@
       "type": "object"
     },
     "Warning": {
+      "additionalProperties": false,
       "description": "A non-fatal note from a stage (SB-38, SB-41).",
       "properties": {
         "message": {
@@ -439,6 +454,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "One entry of the action log (RS-15).",
   "properties": {
     "action": {

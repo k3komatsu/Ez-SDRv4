@@ -4,6 +4,7 @@
       "description": "An Action as a Spec schedules it: the Action without its time field.\n\nA Spec cannot name a `ClockDomainId`, because domains are allocated at `prepare`\n(SB-16, TM-13a), and every timed Action names one through its\n[`AbsoluteDeadline`]. `arm` resolves the entry's `SpecTime` and substitutes it.\nWithout the split, `ExperimentSpec.schedule` could hold no timed Action at all,\nwhich is the one thing it exists for.\n\nRule: RS-49a.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "[`Action::TxBurst`] without `at` (RS-49a).",
           "properties": {
             "kind": {
@@ -45,6 +46,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "[`Action::SetTimer`] without `at` (RS-49a).",
           "properties": {
             "kind": {
@@ -70,6 +72,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "[`Action::UpdateParameter`] without `at`; `arm` substitutes the resolved\ndeadline, so a scheduled parameter change takes effect at the instant the\nSpec named (RS-49a).",
           "properties": {
             "class": {
@@ -103,6 +106,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "[`Action::PeripheralCommand`] without `at` (RS-49a).",
           "properties": {
             "kind": {
@@ -134,6 +138,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "[`Action::Stop`], which carries no time (RS-49a).",
           "properties": {
             "kind": {
@@ -160,6 +165,7 @@
       ]
     },
     "ArtifactMark": {
+      "additionalProperties": false,
       "description": "One `mark_artifact` reaction recorded against an artifact (RS-30).",
       "properties": {
         "kind": {
@@ -178,6 +184,7 @@
       "type": "object"
     },
     "ArtifactRef": {
+      "additionalProperties": false,
       "description": "Large data is always by reference: a locator, a content hash and a size, never\nthe bytes (RS-44, Vision §50, §51).",
       "properties": {
         "continuity": {
@@ -254,6 +261,7 @@
       ]
     },
     "ChannelGap": {
+      "additionalProperties": false,
       "description": "A channel that lost validity while the stream continued (SC-31a).\n\nVision §28 requires a capture to describe a multi-channel alignment failure, and\na hole between two segments alone is indistinguishable from a channel that was\nnever enabled over that interval.",
       "properties": {
         "cause": {
@@ -287,6 +295,7 @@
       "type": "object"
     },
     "ClockDomainId": {
+      "additionalProperties": false,
       "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
       "properties": {
         "local": {
@@ -327,6 +336,7 @@
       ]
     },
     "ComponentDescriptor": {
+      "additionalProperties": false,
       "description": "What a Processor or Reactor declares about itself (MA-36).",
       "properties": {
         "id": {
@@ -381,6 +391,7 @@
       "type": "object"
     },
     "ComponentImpl": {
+      "additionalProperties": false,
       "description": "How a component's code is identified. The Kernel never inspects `impl` beyond\nits identity (MA-21).",
       "properties": {
         "hash": {
@@ -419,6 +430,7 @@
       ]
     },
     "ComponentRequires": {
+      "additionalProperties": false,
       "description": "What a component requires of its Executor. Requirements only: the placement\nlives in the BindingProfile (MA-36, SB-25, re-review R21).",
       "properties": {
         "executor_kind": {
@@ -441,6 +453,7 @@
       "type": "object"
     },
     "ComponentTiming": {
+      "additionalProperties": false,
       "description": "A component's timing declaration (MA-36).",
       "properties": {
         "budget": {
@@ -486,6 +499,7 @@
       "description": "What a Spec requires of a key. Its value is a scalar: a constraint over a list\nor a map is refused, because the matcher would then need the Vocabulary's\nsemantics to compare them.\n\nRule: SB-5, decision B1.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Exactly this value.",
           "properties": {
             "kind": {
@@ -504,6 +518,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Within these bounds, either of which may be absent.",
           "properties": {
             "kind": {
@@ -539,6 +554,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Any of these values.",
           "properties": {
             "kind": {
@@ -560,6 +576,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "At least this value.",
           "properties": {
             "kind": {
@@ -578,6 +595,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "At most this value.",
           "properties": {
             "kind": {
@@ -596,6 +614,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "The key is declared at all.",
           "properties": {
             "kind": {
@@ -615,6 +634,7 @@
       "type": "string"
     },
     "ContinuityMap": {
+      "additionalProperties": false,
       "description": "What a stream carried, per SampleClock. There is one map per SampleClock: a\nblock in another domain ends the map, and the Sink starts a new builder (SC-30).",
       "properties": {
         "channel_gaps": {
@@ -677,6 +697,7 @@
       "type": "string"
     },
     "Duration": {
+      "additionalProperties": false,
       "description": "An elapsed time: integer ticks in a named clock domain (TM-1, TM-4 decision T4).\n\nThe domain tag is what stops 1 000 ticks at 20 Msps being added to a 200 MHz\npoint as a silent factor-of-ten error.",
       "properties": {
         "domain": {
@@ -700,6 +721,7 @@
       "type": "string"
     },
     "Gap": {
+      "additionalProperties": false,
       "description": "An interval of missing samples in the stream (SC-30, Vision §28).",
       "properties": {
         "cause": {
@@ -744,6 +766,7 @@
       "description": "What the **stream** lost. A closed, derived set (SC-31, decision S16).\n\nWhat the **link** lost is the separate `link_dropped` count, not a cause, so a\ndevice overflow inside an interval that also lost a block to the link is still\nreported as `OverflowRestart` with its sample count, beside a link-drop count of\none. Collapsing the two into a single cause loses the device's own diagnosis.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "`GAP_BEFORE` alone (SC-31).",
           "properties": {
             "kind": {
@@ -757,6 +780,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "`RESTARTED`: a stream restart, as a UHD overflow produces (SC-31, OV-23a).",
           "properties": {
             "kind": {
@@ -770,6 +794,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "`SEQ_DISCONTINUITY`: transport sequence loss (SC-31).",
           "properties": {
             "kind": {
@@ -783,6 +808,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "A per-channel break on a block carrying `ALIGNMENT` (SC-31a).",
           "properties": {
             "kind": {
@@ -796,6 +822,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "A jump with no gap flag on a lossy path (SC-31).",
           "properties": {
             "kind": {
@@ -809,6 +836,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "`GAP_BEFORE` with `lost` less than the jump on a lossy path and no carry to\nexplain the difference (SC-31).",
           "properties": {
             "kind": {
@@ -829,6 +857,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "`GAP_BEFORE` with `lost` absent (SC-31).",
           "properties": {
             "kind": {
@@ -872,6 +901,7 @@
       ]
     },
     "LinkReq": {
+      "additionalProperties": false,
       "description": "A link the Spec's graph declares. Both `policy` and `capacity` are mandatory:\nSC-19 forbids a default, and SC-21's Sink rule is a statement about the policy.\n\nRule: SB-15.",
       "properties": {
         "capacity": {
@@ -912,6 +942,7 @@
       "type": "integer"
     },
     "OutputReq": {
+      "additionalProperties": false,
       "description": "An artifact the Run must produce. A capture whose source has no placed Sink is\nrefused at `validate()`.\n\nRule: SB-17.",
       "properties": {
         "feed": {
@@ -943,6 +974,7 @@
       "type": "object"
     },
     "ParamDecl": {
+      "additionalProperties": false,
       "description": "One declared parameter of a component (MA-36).",
       "properties": {
         "default": {
@@ -970,6 +1002,7 @@
       "type": "object"
     },
     "Port": {
+      "additionalProperties": false,
       "description": "A name, a direction and a contract id, and nothing more. Per-port parameters\nthe Kernel does not interpret — a tensor shape, a maximum PDU length — live in\nthe `ComponentDescriptor`'s parameters (MA-36), not here.\n\nRule: SC-1.",
       "properties": {
         "contract": {
@@ -1008,6 +1041,7 @@
       ]
     },
     "PortRef": {
+      "additionalProperties": false,
       "description": "Names one port of one component instance (SC-1).",
       "properties": {
         "component": {
@@ -1051,6 +1085,7 @@
       ]
     },
     "RelativeBudget": {
+      "additionalProperties": false,
       "description": "A processing budget measured from a work item's arrival, in `host.monotonic`.\n\nDistinct from [`AbsoluteDeadline`] with no common supertype: the checks that\nconsume them differ (Vision §19, decision T5).\n\nRule: TM-15.",
       "properties": {
         "duration": {
@@ -1063,6 +1098,7 @@
       "type": "object"
     },
     "Requirements": {
+      "additionalProperties": false,
       "description": "The Vocabulary majors this Spec's keys belong to. It is the only content of\n`requirements`; per-resource requirements live in `resources[].requires`, which\nis the division that makes SB-2's prefix check possible.\n\nRule: SB-11.",
       "properties": {
         "vocabularies": {
@@ -1077,6 +1113,7 @@
       "type": "object"
     },
     "ResourceId": {
+      "additionalProperties": false,
       "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the\nreceive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
       "properties": {
         "node": {
@@ -1095,6 +1132,7 @@
       "type": "object"
     },
     "ResourceReq": {
+      "additionalProperties": false,
       "description": "What a Spec requires of one resource, and nothing about how it is met.\n\nDirection-asymmetric requests are expressed as distinct keys under the\nVocabulary's prefix — `radio.rx.channels`, `radio.tx.channels` — not as a single\ncount. The Kernel does not know that `rx` means anything; the flattening is what\nkeeps it generic while still expressing the asymmetry re-review R1 required.\n\nRule: SB-12, decision B2.",
       "properties": {
         "extensions": {
@@ -1130,6 +1168,7 @@
       "type": "object"
     },
     "ScheduleEntry": {
+      "additionalProperties": false,
       "description": "One scheduled Action, held as a template because the Spec cannot name a\n`ClockDomainId` (RS-49a, SB-16).",
       "properties": {
         "action": {
@@ -1148,6 +1187,7 @@
       "type": "object"
     },
     "Segment": {
+      "additionalProperties": false,
       "description": "A contiguous run of valid samples on one channel (SC-30).",
       "properties": {
         "len": {
@@ -1168,6 +1208,7 @@
       "type": "object"
     },
     "SinkFeed": {
+      "additionalProperties": false,
       "description": "The link that feeds a Sink: the port the samples leave from and the drop-class\npolicy and capacity of the link itself. One shape serves both a Spec `outputs[]`\nentry and a Session profile's Sink binding, because an output *is* the\ndeclaration of that link (SB-17, SB-22, SC-19, SC-21).\n\nRule: SB-17, SB-22.",
       "properties": {
         "capacity": {
@@ -1193,6 +1234,7 @@
       "type": "object"
     },
     "SpecGraph": {
+      "additionalProperties": false,
       "description": "The Spec's component graph (SB-15).",
       "properties": {
         "components": {
@@ -1215,6 +1257,7 @@
       "type": "object"
     },
     "SpecPolicies": {
+      "additionalProperties": false,
       "description": "The Spec's failure and coercion tables (SB-18, SB-19).",
       "properties": {
         "coercion": {
@@ -1237,6 +1280,7 @@
       "type": "object"
     },
     "SpecTime": {
+      "additionalProperties": false,
       "description": "A resource name plus an offset from the Run's start, in that resource's stream\nclock. A Spec cannot name a `ClockDomainId`, because domains are allocated at\n`prepare` (TM-13a) and fixed at `arm` for a transmit stream (TM-13e).\n\nRule: SB-16, decision B4.",
       "properties": {
         "clock": {
@@ -1256,6 +1300,7 @@
       "type": "object"
     },
     "SubResourceReq": {
+      "additionalProperties": false,
       "description": "A capability this resource needs from somewhere, possibly another instance (SB-36).",
       "properties": {
         "kind": {
@@ -1277,6 +1322,7 @@
       "type": "object"
     },
     "TimePoint": {
+      "additionalProperties": false,
       "description": "An instant: integer ticks in a named clock domain. Never floating-point seconds.\n\nThere is deliberately no `PartialOrd`: two points of different domains cannot be\ncompared at all, and `a < b` silently answering `false` is the bug class this\nmodel exists to prevent (decision T3).\n\nRule: TM-1, TM-6.",
       "properties": {
         "domain": {
@@ -1358,6 +1404,7 @@
       "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
     },
     "VocabularyReq": {
+      "additionalProperties": false,
       "description": "One Vocabulary this Spec requires, by namespace and major version (SB-11).",
       "properties": {
         "id": {
@@ -1379,6 +1426,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "What an experiment requires: intent, portable, with nothing about placement or\nenvironment in it.\n\nRule: SB-9…SB-20. Vision §8, §9, §10.",
   "properties": {
     "extensions": {

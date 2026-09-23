@@ -3,9 +3,9 @@
 | Field | Value |
 |---|---|
 | Status | Draft for Gate A. Normative for `ezsdr-kernel::stream` and `::contract` once accepted. |
-| Scope | The DataContract registry and Port; MemoryDomain and BufferRef; SampleBlock, its flags and its construction invariants; DataLink identity and back-pressure policy; the TX burst state machine and late policy; the derivation of ContinuityMap and ValidityMap. |
+| Scope | The DataContract registry and Port; `MemoryDomainId` and BufferRef; SampleBlock, its flags and its construction invariants; DataLink identity and back-pressure policy; the TX burst state machine and late policy; the derivation of ContinuityMap and ValidityMap. |
 | Not in scope | Block pools and real link implementations (Phase 2); the MockRadio device model (Phase 2); TimingEnvelope values, which supply `min_lead` (Radio Model, Phase 2); the SigMF writer; `pdu.*` and `tensor.*` contracts (registered later without changing anything here). |
-| Vision § covered | §21; §22's burst and late-policy parts; §23 in full, including the RX rules 1–8, the TX rules 1–5, the overflow paragraph and the ContinuityMap paragraph; §28; §30's link policy; §31's MemoryDomain and BufferRef; §34's wire-format note; §46's TX-tap note; §17's fault-equivalence requirement. |
+| Vision § covered | §21; §22's burst and late-policy parts; §23 in full, including the RX rules 1–8, the TX rules 1–5, the overflow paragraph and the ContinuityMap paragraph; §28; §30's link policy; §31's `MemoryDomainId` identity and BufferRef (domain kinds are Vocabulary content); §34's wire-format note; §46's TX-tap note; §17's fault-equivalence requirement. |
 | Audit §14.1 items | 3 in full (F3, F21); 9 in full (F9); 12 in part (link drop counters, F16). Also F28 (taint as a convention) and F29 (Probe is not a Kernel concept). |
 | Re-review | R12 (language-neutral shapes). |
 | Depends on | Spec 01 for `TimePoint`, `Duration`, `ClockDomainId`, `TimeError`, and TM-21 for comparing durations across domains. |
@@ -59,8 +59,6 @@ Port             { name: string, direction: In | Out, contract: DataContractId }
 PortRef          { component: ComponentId, port: string }
 
 MemoryDomainId   { node: NodeId, local: unsigned 32-bit }
-MemoryDomain     { id: MemoryDomainId, kind: namespaced string }
-                 kinds named at v4.0: ezsdr.mem.host | pinned_host | huge_pages | wasm_linear | gpu | device | remote
 BufferRef        { memory_domain: MemoryDomainId, handle: unsigned 64-bit (opaque), len_bytes: unsigned 64-bit }
 
 ChannelMask      unsigned 64-bit; bit c set means channel c is valid in this block
@@ -146,7 +144,7 @@ pub trait DataLink: Send + Sync {
     fn take_drop_carry(&self) -> DropCarry;   // SC-20a: what the dropped blocks were carrying
     fn policy(&self) -> BackPressure;
 }
-pub struct BurstTracker { /* domain, state, records */ }
+pub struct BurstTracker { /* domain, open burst */ }
 impl BurstTracker {
     pub fn on_block(&mut self, h: &BlockHeader, open: Option<BurstOpen>)
         -> Result<BurstStep, StreamError>;
@@ -169,16 +167,16 @@ impl ContinuityBuilder {
 
 ### Contracts and ports (Vision §21)
 
-- **SC-1** A `Port` is a name, a direction and a `DataContractId`, and nothing more. Per-port parameters the Kernel does not interpret — a tensor shape, a maximum PDU length — live in the `ComponentDescriptor`'s parameters (spec 05), not in the Port.
+- **SC-1** A `Port` is a name, a direction and a `DataContractId`, and nothing more. Per-port parameters the Kernel does not interpret — a tensor shape, a maximum PDU length — live in the `ComponentDescriptor`'s parameters (spec 05), not in the Port. *Checked by `sc_01_port_shapes_are_pinned_by_the_schema_freeze`: `Port` has exactly three properties and `PortRef` exactly two.*
 - **SC-2** A `DataContract` is registered under a namespaced id with a fixed attribute map and a set `compatible_from` of producer contracts it accepts without conversion. Registering an identical definition twice is a no-op; registering a different definition under an existing id fails. "Identical" is exact: an `Int` and a `Float` attribute are one value **iff they are numerically equal**, compared as SB-6 compares them — in 128-bit arithmetic, never through an `f64` cast. Two ways of getting this wrong were tried and both took a genuinely different definition for a re-registration and discarded it with no diagnostic, which is the harm this rule exists to prevent. Comparing through an `f64` made 2^53 + 1 equal to 2^53 and stopped equality being transitive. Comparing **canonical forms** instead made `1152921504606847000` equal to 2^60: above 2^53 a float's canonical text is the shortest decimal that names the `f64` rather than the number's exact decimal, so one text can name two numbers — the same harm, moved from 2^53 to 2^60. OV-15a's accepted consequence is that `20` and `20.0` share one hash, not that equality is decided by the hash: one value may have two canonical forms above 2^53, as `i64::MIN` and −2^63 do (finding D50). *Checked: `sc_02_scalar_equality_is_exact_across_int_and_float`.*
 - **SC-3** A link from a producer contract P to a consumer contract C is admissible if and only if P equals C, or P is a member of `compatible_from` for C. The check is directional, and it is the only contract check the Kernel performs. (Vision §21: "the Kernel does not become a type system".)
 - **SC-4** The contracts registered at v4.0, whose definitions belong to the contracts Vocabulary and serve as Phase 1 test fixtures, are `ezsdr.stream.cf32 { bytes_per_sample: 8, full_scale: 1.0, layout: "planar" }`, `ezsdr.stream.sc16 { bytes_per_sample: 4, full_scale: 32767, layout: "planar" }`, `ezsdr.control {}` and `ezsdr.event.<schema-id> { schema: <id> }`. All have an empty `compatible_from`. `full_scale` is the converter full-scale convention of Vision §23 rule 4, and `layout: "planar"` means channel c occupies the byte range `[c · len · bytes_per_sample, (c+1) · len · bytes_per_sample)` of the buffer.
-- **SC-5** The host-to-device wire format (`sc16`, `sc8`, `sc12`) is never a Port contract. The Provider converts and reports it in its PerformanceEnvelope. (Vision §34.)
+- **SC-5** The host-to-device wire format (`sc16`, `sc8`, `sc12`) is never a Port contract. The Provider converts and reports it in its PerformanceEnvelope. Here `sc16` means the device wire format, distinct from SC-4's `ezsdr.stream.sc16` host-memory DataContract. *Producer obligation; checked in Phase 2 with a Provider and its PerformanceEnvelope.* (Vision §34.)
 
 ### Buffers and memory domains (Vision §23 rules 5 and 6, §31)
 
-- **SC-6** `MemoryDomainId`s are node-qualified, with `node = LOCAL` in v4.0. A `MemoryDomain` carries a namespaced `kind` string; the Kernel compares ids and never interprets kinds.
-- **SC-7** A `BufferRef` is a memory domain, an opaque handle and a length in bytes. The handle is meaningful only to the owner of that memory domain — the producing pool, or the link that carries the domain. No Kernel interface dereferences a handle.
+- **SC-6** `MemoryDomainId`s are node-qualified, with `node = LOCAL` in v4.0; the Kernel compares ids and never interprets a domain kind. A kind such as host, pinned or GPU is Vocabulary content, not a Kernel type. *Checked by `sc_06_memory_domain_id_is_node_qualified`.*
+- **SC-7** A `BufferRef` is a memory domain, an opaque handle and a length in bytes. The handle is meaningful only to the owner of that memory domain — the producing pool, or the link that carries the domain. No Kernel interface dereferences a handle. *The `kernel_surface` gate asserts `#![forbid(unsafe_code)]` remains present.*
 - **SC-8** Host bytes are obtained only through the host-mapping interface implemented by the DataLink, which delegates to the owning pool, and which yields nothing for a domain that is not host-reachable. No Module contract takes or returns a raw host slice. (Vision invariant 34.)
 - **SC-9** A block's buffer remains valid while any reference to the block exists, and its owner must not reuse it earlier. Producers allocate blocks from their own Island's pool, and the real-time path performs no allocation. The pool is a Phase 2 shared helper. *Producer obligation; no real-time path exists in Phase 1, so the test is the Phase 2 and Phase 8 copy-regression benchmarks (Vision §61).*
 
@@ -309,7 +307,7 @@ The two guards matter. Without `closed_by_stream_gap` every stream gap would als
 | S3 | `PARTIAL_CHANNELS` | Derived by the constructor; supplying it is an error | Producer-set (the flag and the mask would drift apart); removing it (breaks the `flags == 0` fast path that one-to-one propagation relies on) | none |
 | S4 | Immutability, reference counting, pooling | Immutable by construction and shared through a reference-counted handle, both Kernel types; the pool is the producing Island's responsibility and a Phase 2 shared helper | A Kernel pool now (nothing real-time exists to use it); a custom reference count (the standard library already does it) | Phase 1 tests allocate per block; the Phase 2 pool recycles slots when the count drops to one |
 | S5 | BufferRef and host memory | An opaque handle plus a host-mapping interface reached through the link, whose returned slice borrows the **block**, not the link | An enum with a host variant holding a byte slice (bakes host memory into the contract, against invariant 34); a slice borrowing the link, which was the first draft's signature and outlives the block, so a pool recycling the buffer when the last reference drops would hand back recycled samples through a slice that still type-checks; a Kernel arena | none |
-| S6 | MemoryDomain kind | A namespaced string; the Kernel compares ids only | A closed enum (the Kernel is frozen while Vision §31's list will grow); a reachability matrix in the Kernel (the Core does not plan transfers, Vision §63) | none |
+| S6 | Memory-domain vocabulary | Keep `MemoryDomainId` as the Kernel identity; do not define a `MemoryDomain` kind type in Core | A closed enum (Vision §31's list will grow); a reachability matrix in the Kernel (the Core does not plan transfers, Vision §63) | A Vocabulary may define and interpret its own domain kinds |
 | S7 | Port and attributes | Port minimal, attributes fixed at registration, identity is the id | Structural identity over id and attributes (invites shape algebra into the Kernel); per-port attribute overrides | Tensor shapes live in descriptor parameters (spec 05) |
 | S8 | Compatibility | A directional `compatible_from` set, empty at v4.0 | Automatic insertion of conversion components (Vision §64 names it as future work); no mechanism at all (Vision §21 requires the check) | none |
 | S9 | The link interface | One trait with publish, receive, drop count, drop carry and policy; `publish` never parks; the Phase 1 test link is a mutex around a queue | Split sink and source traits; a parking `publish` (a step-driven Island cannot afford one, and it would make `PublishOutcome::Full` unobservable); asynchronous channels; a lock-free dependency (real links are Phase 2 Link Modules) | The test link is not lock-free and says so; real links replace it |
@@ -329,6 +327,9 @@ The two guards matter. Without `closed_by_stream_gap` every stream gap would als
 | test | input | expected | rules |
 |---|---|---|---|
 | `sc_10_block_rejects_invalid_shape` | len 0; channels 0; channels 65; a valid bit at or above `channels`; a reserved flag bit | `InvalidBlock` in each case | SC-10 |
+| `sc_01_port_shapes_are_pinned_by_the_schema_freeze` | generated schemas for `Port` and `PortRef` | exactly `name`, `direction`, `contract`; exactly `component`, `port` | SC-1, OV-22 |
+| `sc_06_memory_domain_id_is_node_qualified` | `MemoryDomainId::local(7)` | node is `NodeId::LOCAL`; local ordinal is 7 | SC-6, X7 |
+| `sc_07_unsafe_code_remains_forbidden` | removal of `#![forbid(unsafe_code)]` from `src/lib.rs` | `kernel_surface` fails | SC-7, OV-23 |
 | `sc_10a_block_rejects_undersized_buffer` | 4 channels of 2 000 samples at 8 bytes with a buffer of 32 000 bytes, then 64 000 | `InvalidBlock`, then accepted | SC-10a |
 | `sc_16_direction_flags_rejected` | a receive block with a start of burst; a transmit block with `GAP_BEFORE` | `InvalidBlock` in both | SC-16, SC-10 |
 | `sc_10_block_partial_channels_derived` | two channels with mask 0b01, then 0b11; then the flag as input | set, clear, then error | SC-10, SC-14 |
@@ -431,6 +432,7 @@ The two guards matter. Without `closed_by_stream_gap` every stream gap would als
 9. **§23 rule 8 names the policy `block` but the Vision never says whether `publish` parks.** A parking publish cannot be called from a step-driven Island (§32), and a non-parking one makes the name a misnomer. SC-20a keeps the Vision's word and fixes the semantics: the policy produces back-pressure through a refusal the producer must honour, not through a parked thread. §23 rule 8's wording should say so.
 10. **§28 requires a capture to describe a "multi-channel alignment failure" but §23 gives no way to carry the cause of a per-channel break.** Resolved by `ChannelGap` and `GapCause::Alignment` (SC-31a). The matching event kind `ALIGNMENT_ERROR` is in §29's list but appears in no §23 rule.
 11. **Neither §23 nor §30 says what a drop-class link does with the flags of the blocks it drops.** Since §23 rule 8 puts recorders as well as probes behind drop-class links, silently losing a dropped block's `RESTARTED` and its lost count would misattribute a device overflow in the very artifact §50 asks to be honest. Resolved by the `DropCarry` of SC-20b.
+12. **§5 and §31 model `MemoryDomain` as a Core concept with a growing set of kinds.** SC-6 keeps the node-qualified `MemoryDomainId` in Core and leaves host, pinned, GPU and future kinds to Vocabularies; Core compares identities and does not interpret kinds or plan transfers (S6, Vision §63). Correct both Vision sections together at Step 5 (§12).
 
 ## 11. Deferred
 

@@ -4,6 +4,7 @@
       "description": "What a Provider declares it can do for a key (spec 05 `ProviderInstance`).\n\nRule: SB-6.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Exactly this value.",
           "properties": {
             "kind": {
@@ -22,6 +23,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "A continuous range, inclusive.",
           "properties": {
             "kind": {
@@ -45,6 +47,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "A discrete set.",
           "properties": {
             "kind": {
@@ -82,6 +85,7 @@
       "type": "integer"
     },
     "Port": {
+      "additionalProperties": false,
       "description": "A name, a direction and a contract id, and nothing more. Per-port parameters\nthe Kernel does not interpret — a tensor shape, a maximum PDU length — live in\nthe `ComponentDescriptor`'s parameters (MA-36), not here.\n\nRule: SC-1.",
       "properties": {
         "contract": {
@@ -120,6 +124,7 @@
       ]
     },
     "ResourceId": {
+      "additionalProperties": false,
       "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the\nreceive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
       "properties": {
         "node": {
@@ -176,6 +181,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "One node of a Provider's composite resource tree: a device with channels,\nstreams, a timekeeper, GPIO banks and sensors beneath it, each with its own\n`ResourceId` and its own declared capabilities.\n\nRule: MA-10, SB-33.",
   "properties": {
     "capabilities": {

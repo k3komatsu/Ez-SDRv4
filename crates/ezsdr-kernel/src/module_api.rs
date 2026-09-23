@@ -37,6 +37,7 @@ use crate::time::{RelativeBudget, TimeAuthority, TimePoint};
 #[derive(
     Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct Version {
     /// Breaking changes.
     pub major: u32,
@@ -49,7 +50,8 @@ pub struct Version {
 impl Version {
     /// A version (MA-33).
     pub const fn new(major: u32, minor: u32, patch: u32) -> Version {
-        Version { major, minor, patch }
+        Version { major, minor, patch,
+        }
     }
 }
 
@@ -124,11 +126,12 @@ impl Role {
 /// How a Module is deployed. `Plugin` names a deployment, never a role, and is
 /// reserved: Phase 1 refuses it as `Unsupported` (MA-1, MA-32, MA-46).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Deployment {
     /// A Rust trait, compiled in. Rust has no stable ABI, so this is the default
     /// and out-of-process is the Plugin path (Vision §62).
-    InProcess,
+    InProcess {},
     /// Out-of-process, a typed protocol; reserved (MA-32, MA-46).
     Plugin {
         /// The protocol version.
@@ -141,6 +144,7 @@ pub enum Deployment {
 /// How a Time Authority paces its primary root; cross-checked against the derived
 /// [`ExecutionClass`] by MA-41 (MA-29, TM-16a1).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum Pacing {
     /// Virtual time advances as fast as the model allows: the Simulation class.
@@ -154,6 +158,7 @@ pub enum Pacing {
 
 /// What the Run's RF path is, as the environment declares it (MA-41).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum RfPath {
     /// Entirely modelled.
@@ -169,6 +174,7 @@ pub enum RfPath {
 ///
 /// Rule: MA-41, RS-42. Vision §14.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionClass {
     /// Simulation Engine, free-running, simulated RF path.
@@ -277,6 +283,7 @@ pub enum TransportFidelity {
 ///
 /// Rule: MA-42, RS-41. Vision §14.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Fidelity {
     /// How faithfully timing is modelled.
     pub timing: EnvelopeFidelity,
@@ -323,6 +330,7 @@ impl Fidelity {
 ///
 /// Rule: MA-24, RS-52.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateClass {
     /// Requires a stop and a re-plan; a sample-rate change is one (TM-13c).
@@ -346,6 +354,7 @@ pub const UPDATE_CLASSES: &[UpdateClass] = &[
 
 /// One declared parameter of a component (MA-36).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ParamDecl {
     /// Which parameter (SB-2).
     pub key: Key,
@@ -359,6 +368,7 @@ pub struct ParamDecl {
 
 /// A component's timing declaration (MA-36).
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ComponentTiming {
     /// The processing budget. A descriptor never carries an `AbsoluteDeadline`:
     /// they are distinct types (TM-15) and distinct schema definitions (MA-37).
@@ -374,6 +384,7 @@ pub struct ComponentTiming {
 /// What a component requires of its Executor. Requirements only: the placement
 /// lives in the BindingProfile (MA-36, SB-25, re-review R21).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ComponentRequires {
     /// The Executor kind, or `any` (MA-39).
     pub executor_kind: String,
@@ -384,6 +395,7 @@ pub struct ComponentRequires {
 /// How a component's code is identified. The Kernel never inspects `impl` beyond
 /// its identity (MA-21).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ComponentImpl {
     /// The implementation kind; the Executor's `impl_kinds` must list it (MA-39).
     pub kind: Namespace,
@@ -395,6 +407,7 @@ pub struct ComponentImpl {
 
 /// What a Processor or Reactor declares about itself (MA-36).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ComponentDescriptor {
     /// The component's name inside its document (SB-1).
     pub id: Ident,
@@ -417,6 +430,7 @@ pub struct ComponentDescriptor {
 
 /// What kind of component this is (MA-36).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum ComponentKind {
     /// Transforms samples.
@@ -467,6 +481,7 @@ impl ComponentDescriptor {
 ///
 /// Rule: MA-10, SB-33.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Resource {
     /// This node's address in the tree (SB-3).
     pub id: ResourceId,
@@ -506,6 +521,7 @@ impl Resource {
 
 /// One bound Provider instance (MA-10).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderInstance {
     /// The instance's root resource id (SB-3).
     pub id: ResourceId,
@@ -529,7 +545,8 @@ pub struct ProviderInstance {
 }
 
 /// A Module by id and version (MA-31).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ModuleRef {
     /// The Module (MA-19).
     pub id: ModuleId,
@@ -537,11 +554,17 @@ pub struct ModuleRef {
     pub version: Version,
 }
 
+/// Whether `descriptor` is the exact Module version `module` names (SB-22, D78).
+pub(crate) fn is_module(descriptor: &ModuleDescriptor, module: &ModuleRef) -> bool {
+    descriptor.id == module.id && descriptor.version == module.version
+}
+
 /// A declared profile, by name and version. Vision §59 bumps a Mock profile's
 /// version on measurement.
 ///
 /// Rule: SB-22, MA-33 (decision B7).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileRef {
     /// The profile's name.
     pub name: String,
@@ -550,7 +573,9 @@ pub struct ProfileRef {
 }
 
 /// Whether the coordinator steps this instance (MA-15, MA-30).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
 pub struct Driving {
     /// True for a model the coordinator drives; a hardware Provider never receives
     /// a `step` (MA-15).
@@ -560,6 +585,7 @@ pub struct Driving {
 /// What a Provider was asked for; the input to `coerce` and the same input
 /// `prepare` sees (SB-7, MA-11).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Requested {
     /// Which node of the tree (SB-34).
     pub resource: ResourceId,
@@ -569,6 +595,7 @@ pub struct Requested {
 
 /// A constraint the Provider refused outright (MA-11).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RejectedRequest {
     /// The key.
     pub key: Key,
@@ -581,6 +608,7 @@ pub struct RejectedRequest {
 /// What `coerce` returns. It is pure, deterministic and requires no hardware, which
 /// is what makes `validate()` a true dry run (MA-11, Vision §52).
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CoerceReport {
     /// What the Provider would apply (SB-44).
     #[serde(default)]
@@ -597,9 +625,14 @@ pub struct CoerceReport {
 }
 
 /// What an Executor declares. Admission reads `kind`, `memory_domains` and
-/// `impl_kinds`; everything else is opaque (MA-18).
+/// `impl_kinds`, and `plan()` compares `module` with the binding; everything else is
+/// opaque (MA-18, D82).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutorDescriptor {
+    /// The exact Module version this instance is; `plan()` refuses one that differs
+    /// from its binding (SB-22, MA-38, D82).
+    pub module: ModuleRef,
     /// The Executor kind a component's `requires.executor_kind` names (MA-39).
     pub kind: Namespace,
     /// The memory domains it can reach (MA-39).
@@ -613,20 +646,31 @@ pub struct ExecutorDescriptor {
 
 /// What a Sink declares (MA-25).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SinkDescriptor {
+    /// The exact Module version this instance is; `validate()` refuses one that
+    /// differs from its binding (SB-22, MA-25, D82).
+    pub module: ModuleRef,
     /// The Sink kind (MA-25).
     pub kind: Namespace,
+    /// The memory domains it can read a block from; a feed whose producer is placed
+    /// elsewhere needs a selected Link that `connects` the pair (MA-25, MA-39, D81).
+    pub memory_domains: Vec<MemoryDomainId>,
     /// The contracts it consumes (SC-3).
     pub contracts: Vec<DataContractId>,
     /// The artifact kinds it writes (RS-44).
     pub artifact_kinds: Vec<Namespace>,
 }
 
-/// What a Link declares. `connects` and `cross_process` are the inputs to the
-/// memory-domain reachability check of MA-39; the Kernel never plans a transfer
-/// (MA-28, SB-40).
+/// What a Link declares. `connects` is the input to the memory-domain reachability
+/// check of MA-39, and `policies` to the selection check of SB-25; `cross_process:
+/// true` is refused in v4.0 (MA-28). The Kernel never plans a transfer (SB-40).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LinkDescriptor {
+    /// The exact Module version this descriptor is; registration files it under this
+    /// `module`, so MA-27a's equality check covers the version (MA-28, D82).
+    pub module: ModuleRef,
     /// The Link kind (MA-27).
     pub kind: Namespace,
     /// Memory-domain pairs it joins (MA-39).
@@ -639,6 +683,7 @@ pub struct LinkDescriptor {
 
 /// What an Authority declares (MA-29).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AuthorityDescriptor {
     /// The domains it advances: a primary root, that root's derived domains,
     /// `host.monotonic`, and for a simulation Authority every root it simulates
@@ -650,6 +695,7 @@ pub struct AuthorityDescriptor {
 
 /// What a Module ships (MA-31).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ModuleDescriptor {
     /// The Module (MA-19).
     pub id: ModuleId,
@@ -670,6 +716,7 @@ pub struct ModuleDescriptor {
 
 /// A Vocabulary a Module declares, with its caret requirement (MA-32).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VocabularyRequirement {
     /// The Vocabulary's namespace, which is also its key prefix (MA-34).
     pub id: Namespace,
@@ -679,6 +726,7 @@ pub struct VocabularyRequirement {
 
 /// How a Vocabulary's Session verb compiles to Kernel Actions (RS-13a, RS-14).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VerbDecl {
     /// The verb (RS-13a).
     pub verb: Ident,
@@ -689,6 +737,7 @@ pub struct VerbDecl {
 
 /// The compilations a Vocabulary may declare for its verbs (RS-14).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CompileRule {
     /// To an `UpdateParameter` on the named key, as `sink.capture` does (RS-14).
@@ -709,9 +758,9 @@ pub enum CompileRule {
         late_policy: crate::stream::LatePolicy,
     },
     /// To a `PeripheralCommand` carrying the verb (RS-14).
-    PeripheralCommand,
+    PeripheralCommand {},
     /// To nothing: the verb is recorded in the log and dispatches no Action (RS-13).
-    None,
+    None {},
 }
 
 /// What the Kernel is obliged to enforce on a Vocabulary's behalf but never
@@ -721,6 +770,7 @@ pub enum CompileRule {
 ///
 /// Rule: MA-35.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VocabularyDescriptor {
     /// The Vocabulary (MA-34).
     pub id: Namespace,
@@ -748,6 +798,7 @@ pub struct VocabularyDescriptor {
 ///
 /// Rule: MA-38.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IslandDecl {
     /// The Island (MA-27).
     pub id: IslandId,
@@ -766,6 +817,7 @@ pub struct IslandDecl {
 
 /// A real-time scheduling policy (MA-38).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RtPolicy {
     /// The scheduler name, uninterpreted by the Kernel.
     pub sched: String,
@@ -781,6 +833,7 @@ pub struct RtPolicy {
 ///
 /// Rule: MA-9.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum ModuleErrorKind {
     /// The request was well formed and refused.
@@ -797,6 +850,7 @@ pub enum ModuleErrorKind {
 
 /// How a fault crosses a Module boundary (MA-9).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ModuleError {
     /// Which kind (MA-9).
     pub kind: ModuleErrorKind,
@@ -828,6 +882,7 @@ impl std::error::Error for ModuleError {}
 /// What one `step` did. `progressed` is true exactly when the instance consumed an
 /// input or produced an output (MA-20).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StepOutcome {
     /// Whether anything moved (MA-20, MA-30).
     pub progressed: bool,
@@ -895,6 +950,8 @@ pub struct PrepareContext<'a> {
     pub actions_out: &'a dyn ActionSubmitter,
     /// The link ends bound to this component's ports (MA-27).
     pub links: Vec<AttachedPort>,
+    /// The component descriptors in this Executor's Island, keyed by component name (MA-19).
+    pub components: BTreeMap<Ident, ComponentDescriptor>,
     /// The bound on `prepare` and `arm`; a Module that cannot finish returns
     /// `Timeout` (MA-8).
     pub host_budget: RelativeBudget,
@@ -902,6 +959,7 @@ pub struct PrepareContext<'a> {
 
 /// Why a Run is stopping, as it reaches a Module (MA-13, RS-9).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum StopMode {
     /// Deliver the declared tail (RS-9).
@@ -930,7 +988,8 @@ pub trait Provider: Send {
     /// Returns a report whose `coercions` equal what `coerce` returned for the same
     /// request. `effective` may narrow a declared capability and must not widen one
     /// (MA-12).
-    fn prepare(&mut self, f: &Fragment, ctx: PrepareContext<'_>) -> Result<PrepareReport, ModuleError>;
+    fn prepare(&mut self, f: &Fragment, ctx: PrepareContext<'_>,
+    ) -> Result<PrepareReport, ModuleError>;
     /// Reserves and synchronises, and radiates nothing (MA-13).
     fn arm(&mut self) -> Result<(), ModuleError>;
     /// Begins at that instant, or as soon as possible (MA-13).
@@ -952,7 +1011,8 @@ pub trait Executor: Send {
     /// What it can run (MA-18).
     fn descriptor(&self) -> &ExecutorDescriptor;
     /// Loads each component by its `impl` identity (MA-19).
-    fn prepare(&mut self, island: &IslandDecl, ctx: PrepareContext<'_>) -> Result<PrepareReport, ModuleError>;
+    fn prepare(&mut self, island: &IslandDecl, ctx: PrepareContext<'_>,
+    ) -> Result<PrepareReport, ModuleError>;
     /// Reserves (MA-7).
     fn arm(&mut self) -> Result<(), ModuleError>;
     /// Begins (MA-7).
@@ -974,7 +1034,8 @@ pub trait Sink: Send {
     /// What it writes (MA-25).
     fn descriptor(&self) -> &SinkDescriptor;
     /// Prepares (MA-25).
-    fn prepare(&mut self, f: &Fragment, ctx: PrepareContext<'_>) -> Result<PrepareReport, ModuleError>;
+    fn prepare(&mut self, f: &Fragment, ctx: PrepareContext<'_>,
+    ) -> Result<PrepareReport, ModuleError>;
     /// Reserves (MA-25).
     fn arm(&mut self) -> Result<(), ModuleError>;
     /// Begins (MA-25).
@@ -1135,7 +1196,8 @@ impl Factories {
 
     /// Every role this registration supplies (MA-31).
     pub fn roles(self) -> Vec<Role> {
-        [Role::Provider, Role::Executor, Role::Sink, Role::Link, Role::Authority]
+        [Role::Provider, Role::Executor, Role::Sink, Role::Link, Role::Authority,
+        ]
             .into_iter()
             .filter(|r| self.has(*r))
             .collect()
@@ -1154,6 +1216,7 @@ pub const KERNEL_API: Version = Version::new(4, 0, 0);
 pub struct ModuleRegistry {
     modules: BTreeMap<(ModuleId, Version), ModuleDescriptor>,
     vocabularies: BTreeMap<Namespace, VocabularyDescriptor>,
+    link_descriptors: BTreeMap<ModuleRef, LinkDescriptor>,
 }
 
 impl ModuleRegistry {
@@ -1251,19 +1314,56 @@ impl ModuleRegistry {
         Ok(())
     }
 
+    /// Registers the Link descriptor supplied by a registered Link Module, keyed by
+    /// the `module` it declares, so a descriptor cannot be filed under another
+    /// version than its own (D82). A descriptor for an unregistered Module or a
+    /// Module without the Link role is refused; Phase 1 also refuses cross-process
+    /// links (MA-28, D68).
+    pub fn register_link_descriptor(&mut self, descriptor: LinkDescriptor) -> Result<(), ModuleError> {
+        let module = descriptor.module.clone();
+        if descriptor.cross_process {
+            return Err(ModuleError::rejected(
+                "MA-28: cross_process links are unsupported in v4.0".to_owned(),
+            ));
+        }
+        let has_link_role = self
+            .modules
+            .get(&(module.id.clone(), module.version))
+            .is_some_and(|registered| registered.roles.contains(&Role::Link));
+        if !has_link_role {
+            return Err(ModuleError::rejected(format!(
+                "MA-28: {} {} is not a registered Link Module",
+                module.id, module.version
+            )));
+        }
+        if self.link_descriptors.contains_key(&module) {
+            return Err(ModuleError::rejected(format!(
+                "MA-28: {} {} already has a registered Link descriptor",
+                module.id, module.version
+            )));
+        }
+        self.link_descriptors.insert(module, descriptor);
+        Ok(())
+    }
+
     /// The registered Vocabulary, if any (MA-34).
     pub fn vocabulary(&self, id: &Namespace) -> Option<&VocabularyDescriptor> {
         self.vocabularies.get(id)
     }
 
-    /// Every registered Vocabulary, in namespace order (MA-35).
-    pub fn vocabularies(&self) -> impl Iterator<Item = &VocabularyDescriptor> {
-        self.vocabularies.values()
-    }
-
     /// Every registered Module, in `(id, version)` order (MA-32).
     pub fn modules(&self) -> impl Iterator<Item = &ModuleDescriptor> {
         self.modules.values()
+    }
+
+    /// The registered Link descriptor selected by a BindingProfile (MA-28, SB-25).
+    pub fn link_descriptor(&self, module: &ModuleRef) -> Option<&LinkDescriptor> {
+        self.link_descriptors.get(module)
+    }
+
+    /// Every registered Link descriptor, keyed by Module id and version (MA-28, SB-25).
+    pub fn link_descriptors(&self) -> &BTreeMap<ModuleRef, LinkDescriptor> {
+        &self.link_descriptors
     }
 
     /// The `KeyDecl` for a key, resolved through the Vocabulary that owns its

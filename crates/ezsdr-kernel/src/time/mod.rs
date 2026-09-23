@@ -17,9 +17,9 @@ mod relation;
 
 use std::fmt;
 
-pub use authority::{ScheduleHandle, TimeAuthority};
 #[cfg(feature = "testing")]
 pub use authority::ManualTimeAuthority;
+pub use authority::{ScheduleHandle, TimeAuthority};
 pub use domain::{
     ClockDomain, ClockDomainKind, ClockRegistry, EpochRef, RATIO_TERM_CAP, SampleClockHandle,
     SampleClockRecord,
@@ -113,9 +113,13 @@ impl fmt::Display for TimeError {
             TimeError::Inexact { floor } => write!(f, "conversion is inexact; floor is {floor}"),
             TimeError::Overflow => f.write_str("tick arithmetic overflowed"),
             TimeError::UnknownDomain { id } => write!(f, "clock domain {id} is not registered"),
-            TimeError::DuplicateDomain { id } => write!(f, "clock domain {id} is already registered"),
+            TimeError::DuplicateDomain { id } => {
+                write!(f, "clock domain {id} is already registered")
+            }
             TimeError::NotGoverned { id } => write!(f, "no timekeeper advances {id}"),
-            TimeError::OutsideValidity { at } => write!(f, "{at} is outside the relation's validity"),
+            TimeError::OutsideValidity { at } => {
+                write!(f, "{at} is outside the relation's validity")
+            }
             TimeError::InvalidRational => f.write_str("a rational had a zero component"),
             TimeError::LimitExceeded => f.write_str("a declared limit was exceeded"),
             TimeError::InPast { now, requested } => write!(f, "{requested} precedes now ({now})"),

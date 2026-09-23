@@ -47,6 +47,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "What an admission check refused (SB-29).",
   "properties": {
     "check": {

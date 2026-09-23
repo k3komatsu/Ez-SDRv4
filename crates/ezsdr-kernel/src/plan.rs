@@ -5,25 +5,25 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::binding::ComponentPlacement;
+use crate::binding::{ComponentPlacement, LinkPlacement};
 use crate::contract::PortRef;
-use crate::id::{DataLinkId, ModuleId, ResourceId};
+use crate::id::{DataLinkId, ResourceId};
 use crate::module_api::{
     ComponentDescriptor, ExecutionClass, ExecutorDescriptor, IslandDecl, LinkDescriptor,
-    ModuleError, Role,
+    ModuleError, ModuleRef, Role, SinkDescriptor,
 };
 use crate::spec::{
-    Coercion, CoercionPolicy, Ident, Key, KeyDecl, SpecError, Value, Warning,
-};
+    Coercion, CoercionPolicy, Ident, Key, KeyDecl, SpecError, Value, Warning};
 use crate::stream::{BackPressure, DataLinkDecl, StreamError};
 
 /// One unit of work handed to one Module at `prepare`, in dependency order (SB-39).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Fragment {
     /// The fragment's name (SB-1).
     pub id: Ident,
-    /// Which Module instance performs it (SB-22).
-    pub instance: ModuleId,
+    /// Which exact Module version performs it, as its binding names it (SB-22, D78).
+    pub instance: ModuleRef,
     /// In which role (MA-1).
     pub role: Role,
     /// What to do; namespaced content the Kernel does not interpret (SB-39).
@@ -38,6 +38,7 @@ pub struct Fragment {
 ///
 /// Rule: SB-40. Vision §20, §31, §63.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeclaredCost {
     /// Which link (SC-19).
     pub link: DataLinkId,
@@ -47,10 +48,12 @@ pub struct DeclaredCost {
 
 /// What `plan(spec, binding)` produces (SB-39).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionPlan {
     /// The fragments, already in dependency order (SB-39).
     pub fragments: Vec<Fragment>,
-    /// The DataLink declarations (SC-19).
+    /// The DataLink declarations: the graph's links, then the output feeds, numbered
+    /// on from them (SC-19, MA-27a, D75).
     pub links: Vec<DataLinkDecl>,
     /// The dependency edges, `(before, after)` (SB-39).
     pub deps: Vec<(Ident, Ident)>,
@@ -66,6 +69,7 @@ pub struct ExecutionPlan {
 
 /// What one fragment's `prepare` returned (SB-41, MA-12).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PrepareReport {
     /// Which fragment (SB-41).
     pub fragment: Ident,
@@ -85,6 +89,7 @@ pub struct PrepareReport {
 /// Vision §11 says a report per fragment and §52 says "the PrepareReport"; both are
 /// produced, and the merged one is what `run.effective()` returns (SB-41).
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MergedPrepare {
     /// One report per fragment, in dependency order (SB-41).
     pub reports: Vec<PrepareReport>,
@@ -152,7 +157,8 @@ pub fn arm_order(nodes: &[Ident], edges: &[(Ident, Ident)]) -> Result<Vec<Ident>
             None => {
                 let stuck: Vec<&str> =
                     nodes.iter().filter(|n| !done.contains(n)).map(|n| n.as_str()).collect();
-                return Err(SpecError::ArmCycle { path: stuck.join(" -> ") });
+                return Err(SpecError::ArmCycle { path: stuck.join(" -> "),
+                });
             }
         }
     }
@@ -221,10 +227,21 @@ pub struct IslandContext<'a> {
     pub placements: &'a BTreeMap<Ident, ComponentPlacement>,
     /// The Executor instance behind each Island (MA-18).
     pub executors: &'a BTreeMap<Ident, ExecutorDescriptor>,
-    /// The registered Link Modules (MA-28).
-    pub links: &'a [LinkDescriptor],
+    /// The registered Link descriptors, keyed by Module id and version (MA-28).
+    pub links: &'a BTreeMap<ModuleRef, LinkDescriptor>,
+    /// The selected Link Module for each data link, named by its endpoints (SB-25,
+    /// D76).
+    pub link_placements: &'a [LinkPlacement],
     /// The graph's links (SB-15).
     pub graph_links: &'a [(PortRef, PortRef, BackPressure)],
+    /// The links feeding the Spec's outputs, whose consumer end is `{output id,
+    /// "in"}`. They need a Link like any other data link; they join no component, so
+    /// they take no part in the cycle check, and their consumer's memory domains
+    /// are the bound Sink's (SB-17, SB-25, D75, D81).
+    pub feed_links: &'a [(PortRef, PortRef, BackPressure)],
+    /// The bound Sink's descriptor per output id, for the feed half of the
+    /// memory-domain check (MA-25, MA-39, D81).
+    pub sinks: &'a BTreeMap<Ident, SinkDescriptor>,
     /// The Spec resource names a link may name as an endpoint. A resource endpoint
     /// is a node of the graph but is placed in no Island — it lives on its bound
     /// Provider, not inside an Executor — so MA-39 asks for no placement and
@@ -237,10 +254,12 @@ pub struct IslandContext<'a> {
 ///
 /// Checks: every component placed exactly once; `requires.executor_kind` is `any`
 /// or the Executor's kind, `impl.kind` is among its `impl_kinds`, and the
-/// placement's memory domain is among its `memory_domains`; a link within an Island
-/// shares a memory domain or has a registered Link that `connects` the pair, and a
-/// link between Islands has a declared policy; MA-22's cycle rule; and an Island
-/// with an `rt_policy` requires a declared budget on every component.
+/// placement's memory domain is among its `memory_domains`; every data link —
+/// graph link or output feed — has exactly one `LinkPlacement` naming its ends, whose
+/// selected descriptor supports its policy and, when the two ends are placed in
+/// different memory domains, in one Island or in two, connects the pair; MA-22's
+/// cycle rule; and an Island with an `rt_policy` requires a declared budget on every
+/// component.
 ///
 /// Admission **rejects**; it never creates, merges or moves an Island, and a
 /// rejection names the rule it failed.
@@ -251,6 +270,59 @@ pub struct IslandContext<'a> {
 ///
 /// Rule: MA-39, MA-40.
 pub fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> {
+    // SB-25 / D76: a placement names its data link by its two ends. Coverage is
+    // exact over graph links and output feeds, so neither an omitted nor a stale
+    // placement is ignored, and a pair named twice is ambiguous rather than
+    // first-wins.
+    let pair = |from: &PortRef, to: &PortRef| {
+        format!("{}.{} -> {}.{}", from.component, from.port, to.component, to.port)
+    };
+    let mut selected: BTreeMap<(&PortRef, &PortRef), &LinkPlacement> = BTreeMap::new();
+    for p in ctx.link_placements {
+        if selected.insert((&p.from, &p.to), p).is_some() {
+            return Err(ModuleError::rejected(format!(
+                "SB-25: link placement {} appears more than once",
+                pair(&p.from, &p.to)
+            )));
+        }
+    }
+    let mut expected: BTreeSet<(&PortRef, &PortRef)> = BTreeSet::new();
+    for (from, to, policy) in ctx.graph_links.iter().chain(ctx.feed_links) {
+        let key = pair(from, to);
+        if !expected.insert((from, to)) {
+            return Err(ModuleError::rejected(format!(
+                "SB-25: data link {key} is declared twice, so no placement can name one of them"
+            )));
+        }
+        let placement = selected.get(&(from, to)).ok_or_else(|| {
+            ModuleError::rejected(format!("SB-25: data link {key} has no link placement"))
+        })?;
+        let descriptor = ctx.links.get(&placement.link).ok_or_else(|| {
+            ModuleError::rejected(format!(
+                "MA-28: link placement {key} names Module {} {}, which has no registered Link descriptor",
+                placement.link.id, placement.link.version
+            ))
+        })?;
+        if descriptor.cross_process {
+            return Err(ModuleError::rejected(format!(
+                "MA-28: link placement {key} selects Module {} {}, whose cross_process capability is unsupported in v4.0",
+                placement.link.id, placement.link.version
+            )));
+        }
+        if !descriptor.policies.contains(policy) {
+            return Err(ModuleError::rejected(format!(
+                "MA-28: link placement {key} selects Module {} {}, which does not implement policy {policy:?}",
+                placement.link.id, placement.link.version
+            )));
+        }
+    }
+    if let Some(stale) = ctx.link_placements.iter().find(|p| !expected.contains(&(&p.from, &p.to))) {
+        return Err(ModuleError::rejected(format!(
+            "SB-25: link placement {} names no graph link or output feed",
+            pair(&stale.from, &stale.to)
+        )));
+    }
+
     // Every component placed exactly once.
     let mut placed: BTreeMap<&Ident, usize> = ctx.components.keys().map(|c| (c, 0)).collect();
     for island in ctx.islands {
@@ -295,9 +367,7 @@ pub fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> {
                     c.implementation.kind, island.executor
                 )));
             }
-            let placement = ctx.placements.get(name).ok_or_else(|| {
-                ModuleError::rejected(format!("MA-39: {name} has no placement"))
-            })?;
+            let placement = ctx.placements.get(name).ok_or_else(|| ModuleError::rejected(format!("MA-39: {name} has no placement")))?;
             if !executor.memory_domains.contains(&placement.memory_domain) {
                 return Err(ModuleError::rejected(format!(
                     "MA-39: {name}'s memory domain {} is not among executor {}'s memory_domains",
@@ -337,12 +407,50 @@ pub fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> {
         .collect();
     check_cycles(&nodes, &edges)?;
 
-    // A link within an Island shares a memory domain or has a registered Link that
-    // `connects` the pair; a link between Islands has a declared policy.
-    let is_resource = |r: &PortRef| {
-        Ident::parse(&r.component).is_ok_and(|i| ctx.resource_endpoints.contains(&i))
-    };
+    // A link whose two ends share a memory domain needs nothing more; otherwise its
+    // selected Link (SB-25) `connects` the pair, whether the ends are in one Island
+    // or in two (D77).
+    let is_resource = |r: &PortRef| Ident::parse(&r.component).is_ok_and(|i| ctx.resource_endpoints.contains(&i));
+    let placement_of =
+        |r: &PortRef| Ident::parse(&r.component).ok().and_then(|i| ctx.placements.get(&i));
+    // D81: a feed's consumer is the bound Sink, whose readable domains its descriptor
+    // declares. A resource producer is skipped as for a graph link (D31).
+    for (from, to, _policy) in ctx.feed_links {
+        if is_resource(from) {
+            continue;
+        }
+        let fd = placement_of(from).ok_or_else(|| {
+            ModuleError::rejected(format!(
+                "MA-39: feed {}:{} -> {} leaves an unplaced component",
+                from.component, from.port, to.component
+            ))
+        })?;
+        let sink = Ident::parse(&to.component).ok().and_then(|i| ctx.sinks.get(&i)).ok_or_else(|| {
+            ModuleError::rejected(format!("SB-22: no Sink instance for output {}", to.component))
+        })?;
+        if sink.memory_domains.contains(&fd.memory_domain) {
+            continue;
+        }
+        let placement = selected[&(from, to)];
+        let joined = ctx.links[&placement.link].connects.iter().any(|(a, b)| {
+            (*a == fd.memory_domain && sink.memory_domains.contains(b))
+                || (*b == fd.memory_domain && sink.memory_domains.contains(a))
+        });
+        if !joined {
+            return Err(ModuleError::rejected(format!(
+                "MA-39: {} is in memory domain {} and output {}'s Sink reads [{}]; selected Link Module {} {} does not connect them",
+                from.component,
+                fd.memory_domain,
+                to.component,
+                sink.memory_domains.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "),
+                placement.link.id,
+                placement.link.version
+            )));
+        }
+    }
     for (from, to, _policy) in ctx.graph_links {
+        let placement = selected[&(from, to)];
+        let descriptor = &ctx.links[&placement.link];
         // A resource endpoint is not placed, so a link that touches one has nothing
         // to compare Islands or memory domains against here. Its producer-side
         // memory domain is Vocabulary content and a Phase 2 value (finding D31).
@@ -356,24 +464,19 @@ pub fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> {
                 from.component, from.port, to.component, to.port
             )));
         };
-        if fi.id != ti.id {
-            continue; // a declared policy is SB-15's mandatory field
-        }
-        let placement_of =
-            |r: &PortRef| Ident::parse(&r.component).ok().and_then(|i| ctx.placements.get(&i));
         let (fd, td) = (placement_of(from), placement_of(to));
         if let (Some(fd), Some(td)) = (fd, td) {
             if fd.memory_domain == td.memory_domain {
                 continue;
             }
-            let joined = ctx.links.iter().any(|l| {
-                l.connects.contains(&(fd.memory_domain, td.memory_domain))
-                    || l.connects.contains(&(td.memory_domain, fd.memory_domain))
+            let joined = descriptor.connects.iter().any(|pair| {
+                pair == &(fd.memory_domain, td.memory_domain)
+                    || pair == &(td.memory_domain, fd.memory_domain)
             });
             if !joined {
                 return Err(ModuleError::rejected(format!(
-                    "MA-39: {} and {} are in different memory domains inside island {} and no registered Link connects them",
-                    from.component, to.component, fi.id
+                    "MA-39: {} (island {}) and {} (island {}) are in different memory domains and selected Link Module {} {} does not connect them",
+                    from.component, fi.id, to.component, ti.id, placement.link.id, placement.link.version
                 )));
             }
         }
@@ -496,14 +599,14 @@ pub struct CompileInputs<'a> {
     pub kinds: &'a EventKindRegistry,
     /// The bound Provider per Spec resource name (SB-22).
     pub providers: &'a BTreeMap<Ident, &'a dyn Provider>,
-    /// The Authority descriptor per binding that holds the role (SB-24, MA-29).
+    /// The Authority descriptor per binding that holds the role and is a Spec
+    /// resource or is named by `authority`; only resources are inference candidates
+    /// (SB-24, MA-29, D88, D92).
     pub authorities: &'a BTreeMap<Ident, AuthorityDescriptor>,
     /// What each Island's Executor instance declares. Which **Module** supplies it
     /// is named by the profile, as `bindings[island.executor]`, so the plan and the
     /// Manifest rest on the document and not on assembly-time input (MA-19, MA-38).
     pub executors: &'a BTreeMap<Ident, ExecutorDescriptor>,
-    /// The registered Link Modules, which MA-39's reachability check reads (MA-28).
-    pub links: &'a [LinkDescriptor],
     /// The registered DataContracts, for SC-3 (SB-15).
     pub contracts: &'a ContractRegistry,
     /// The bound Sink per output id, from `bindings` (SB-17, SB-22, MA-25). A Sink
@@ -560,6 +663,7 @@ pub fn validate(
             reason: format!("SB-18: event kind {kind} is not registered"),
         })?;
     }
+    check_local_ids(spec, profile, inputs)?;
     check_binding_names(spec, profile, inputs)?;
     // SB-16: a `SpecTime` is "a resource name plus an offset in **that resource's**
     // stream clock", so the name must be one the Spec declares. Nothing read
@@ -657,10 +761,14 @@ pub fn validate(
             // SB-34 applies here too: a need consumes the node it resolves to
             // unless the Provider declared it shareable, so two needs of two
             // resources take two lines when there are two.
+            // Only the instances bound to this Spec's resources: an instance handed
+            // in under a name no resource binds is never prepared, armed or stopped,
+            // and no binding describes it (SB-22, SB-36).
             let resolved = inputs
                 .providers
-                .values()
-                .flat_map(|p| p.instance().tree.walk())
+                .iter()
+                .filter(|(bound, _)| spec.resources.contains_key(*bound))
+                .flat_map(|(_, p)| p.instance().tree.walk())
                 .find(|n| {
                     n.kind == need.kind
                         && need_satisfied(need, n)
@@ -701,6 +809,7 @@ pub fn validate(
     // before this point.
     check_graph_links(spec, inputs, &out.matched)?;
     check_outputs(spec, profile, inputs, &out.matched)?;
+    check_every_binding_plays_a_role(spec, profile)?;
 
     // SB-45, SB-46: a previewed coercion under `reject` fails the stage here rather
     // than at `prepare`. A dry run that reported a coercion it knows will be
@@ -820,7 +929,9 @@ fn match_constraints(
             // single-segment id such as `ezsdr` would own every `ext.ezsdr.*` key.
             let owner = key.as_str().trim_start_matches("ext.");
             let owned =
-                |id: &str| owner.strip_prefix(id).is_some_and(|rest| rest.starts_with('.'));
+                |id: &str| {
+                owner.strip_prefix(id).is_some_and(|rest| rest.starts_with('.'))
+            };
             if !inputs.registry.modules().any(|m| owned(m.id.as_str())) {
                 return Err(SpecError::UnknownKeyPrefix {
                     key: format!("{key}: MA-34: no registered Module owns this `ext.` prefix"),
@@ -837,9 +948,8 @@ fn match_constraints(
         let cap = node.capabilities.get(key);
         let direct = match cap {
             Some(cap) => satisfies(constraint, cap).map_err(|e| match e {
-                SpecError::KeyShape { expected, found, .. } => {
-                    SpecError::KeyShape { key: key.to_string(), expected, found }
-                }
+                SpecError::KeyShape { expected, found, .. } => SpecError::KeyShape { key: key.to_string(), expected, found,
+                },
                 other => other,
             })?,
             // SB-6: an absent capability satisfies nothing, `Present` included —
@@ -877,7 +987,8 @@ fn match_constraints(
         return Ok(());
     }
     let report = provider
-        .coerce(&Requested { resource: node.id.clone(), constraints: req.requires.clone() })
+        .coerce(&Requested { resource: node.id.clone(), constraints: req.requires.clone(),
+        })
         .map_err(|e| SpecError::Structural { reason: e.message })?;
     for key in to_coerce {
         if report.applied.contains_key(&key) {
@@ -914,9 +1025,9 @@ fn match_constraints(
     // Manifest through `AdmissionResult` (SB-38), and leaving it there both recorded a
     // substitution of a value nobody requested and fired that key's own policy default
     // — the two harms the refusal exists to prevent.
-    out.coercions_preview.extend(previewed.into_iter().map(|coercion| {
-        crate::binding::PreviewedCoercion { resource: name.clone(), coercion }
-    }));
+    out.coercions_preview.extend(previewed.into_iter().map(|coercion| crate::binding::PreviewedCoercion { resource: name.clone(), coercion,
+                }),
+        );
     out.warnings.extend(report.warnings);
     Ok(())
 }
@@ -929,6 +1040,19 @@ fn check_graph_links(
     inputs: &CompileInputs<'_>,
     matched: &BTreeMap<Ident, ResourceId>,
 ) -> Result<(), SpecError> {
+    // SB-15 / D76: a link is identified by its two ends, which is how a
+    // `LinkPlacement` names it, so a pair may appear only once.
+    let mut pairs = BTreeSet::new();
+    for link in &spec.graph.links {
+        if !pairs.insert((&link.from, &link.to)) {
+            return Err(SpecError::Structural {
+                reason: format!(
+                    "SB-15: link {}.{} -> {}.{} is declared twice",
+                    link.from.component, link.from.port, link.to.component, link.to.port
+                ),
+            });
+        }
+    }
     for link in &spec.graph.links {
         if link.capacity == 0 {
             return Err(SpecError::Structural {
@@ -975,7 +1099,8 @@ fn check_graph_links(
             inputs
                 .contracts
                 .check_link(from, to)
-                .map_err(|e| SpecError::Structural { reason: e.to_string() })?;
+                .map_err(|e| SpecError::Structural { reason: e.to_string(),
+                })?;
         }
         // SC-19's mandatory policy is checked above; a Sink is never a link's
         // consumer here, because a Sink is bound rather than placed and its own
@@ -984,9 +1109,86 @@ fn check_graph_links(
     Ok(())
 }
 
-/// SB-22: the three sets `bindings` is keyed by — the Spec's resource names, its
-/// output ids and the Island executor names — form **one** namespace, so a name in
-/// two of them is refused; and the Module bound to each name must hold the role that
+/// SB-22 / D89: one binding name plays exactly one role, and zero is not one. A
+/// binding no resource, output, Island or `authority` names is read by no check — its Module
+/// reference could be an unregistered version and still reach the Manifest, which
+/// records the profile verbatim (RS-38). Refused on both Run kinds, because both pass
+/// through `validate`, and last, so a misspelt output binding is still reported as
+/// `UnboundOutput` and a Session-style `feed` on a Spec Run by its own rule.
+///
+/// Rule: SB-22.
+fn check_every_binding_plays_a_role(spec: &ExperimentSpec, profile: &BindingProfile) -> Result<(), SpecError> {
+    if let Some(name) = profile.bindings.keys().find(|n| {
+        !spec.resources.contains_key(*n)
+            && !spec.outputs.iter().any(|o| &o.id == *n)
+            && !profile.placements.islands.iter().any(|i| &i.executor == *n)
+            && profile.authority.as_ref() != Some(*n)
+    }) {
+        return Err(SpecError::Structural {
+            reason: format!("SB-22: binding {name} plays no role in this Run"),
+        });
+    }
+    Ok(())
+}
+
+/// X7 for the ids that reach `validate()` as Rust values rather than documents: the
+/// Spec's scheduled Action targets, an Island's id and its components' memory
+/// domains, the Executors' and Sinks' declared domains, the Providers' instance ids,
+/// resource trees and `arm_after` lists, and the Authorities' governed domains. A document's ids are refused by `NodeId`'s deserialiser (D91).
+///
+/// Rule: X7.
+fn check_local_ids(spec: &ExperimentSpec, profile: &BindingProfile, inputs: &CompileInputs<'_>) -> Result<(), SpecError> {
+    let refuse = |what: String| {
+        Err(SpecError::Structural { reason: format!("X7: {what} is not on the local node") })
+    };
+    for entry in &spec.schedule {
+        if let Some(t) = entry.action.target().filter(|t| !t.node.is_local()) {
+            return refuse(format!("scheduled Action target {t}"));
+        }
+    }
+    for island in &profile.placements.islands {
+        if !island.id.node.is_local() {
+            return refuse(format!("island {}", island.id));
+        }
+    }
+    for (name, placement) in &profile.placements.components {
+        if !placement.memory_domain.node.is_local() {
+            return refuse(format!("component {name}'s memory domain {}", placement.memory_domain));
+        }
+    }
+    for (name, d) in inputs.executors {
+        if let Some(m) = d.memory_domains.iter().find(|m| !m.node.is_local()) {
+            return refuse(format!("executor {name}'s memory domain {m}"));
+        }
+    }
+    for (name, sink) in inputs.sinks {
+        if let Some(m) = sink.descriptor().memory_domains.iter().find(|m| !m.node.is_local()) {
+            return refuse(format!("output {name}'s Sink memory domain {m}"));
+        }
+    }
+    for (name, provider) in inputs.providers {
+        let instance = provider.instance();
+        if !instance.id.node.is_local() {
+            return refuse(format!("the instance bound to {name}, {},", instance.id));
+        }
+        if let Some(n) = instance.tree.walk().into_iter().find(|n| !n.id.node.is_local()) {
+            return refuse(format!("the instance bound to {name} declares node {}, which", n.id));
+        }
+        if let Some(a) = instance.arm_after.iter().find(|a| !a.node.is_local()) {
+            return refuse(format!("the instance bound to {name} arms after {a}, which"));
+        }
+    }
+    for (name, a) in inputs.authorities {
+        if let Some(d) = a.governs.iter().find(|d| !d.node.is_local()) {
+            return refuse(format!("Authority {name}'s governed domain {d}"));
+        }
+    }
+    Ok(())
+}
+
+/// SB-22: the Spec's resource names, its graph component names, its output ids and
+/// the Island executor names form **one** namespace (D83), so a name in two of them,
+/// or an output id given twice, is refused; and the Module bound to each name must hold the role that
 /// name requires. Without the first check a resource and an output could share a
 /// name, and `plan()` would emit one fragment for the two, leaving the Spec's
 /// declared resource never prepared, armed, stopped or recorded. Without the second,
@@ -999,21 +1201,36 @@ fn check_binding_names(
     profile: &BindingProfile,
     inputs: &CompileInputs<'_>,
 ) -> Result<(), SpecError> {
-    let executors: BTreeSet<&Ident> =
-        profile.placements.islands.iter().map(|i| &i.executor).collect();
-    let outputs: BTreeSet<&Ident> = spec.outputs.iter().map(|o| &o.id).collect();
-    for name in spec.resources.keys() {
-        let clash = if outputs.contains(name) {
-            Some("a resource and an output id")
-        } else if executors.contains(name) {
-            Some("a resource and an Island executor")
-        } else {
-            None
-        };
-        if let Some(sets) = clash {
+    // SB-22 / D83: one namespace over four sets. `PortRef.component` resolves a
+    // component before a resource, and a feed's consumer end is `{output id, "in"}`
+    // (D76), so any collision among them is an ambiguity; two outputs with one id
+    // are one Sink binding and two fragments. Two Islands may share one Executor.
+    // An Island's fragment is named `island_<n>` (SB-39), so that name is taken too:
+    // a resource called `island_0` otherwise surfaced only at `plan()` as two
+    // fragments sharing an id (D85).
+    let island_ids: Vec<Ident> = profile
+        .placements
+        .islands
+        .iter()
+        .filter_map(|i| Ident::parse(&format!("island_{}", i.id.local)).ok())
+        .collect();
+    let mut names: BTreeMap<&Ident, &str> = BTreeMap::new();
+    let sets = spec
+        .resources
+        .keys()
+        .map(|n| (n, "a resource"))
+        .chain(spec.graph.components.keys().map(|n| (n, "a graph component")))
+        .chain(spec.outputs.iter().map(|o| (&o.id, "an output id")))
+        .chain(profile.placements.islands.iter().map(|i| (&i.executor, "an Island executor")))
+        .chain(island_ids.iter().map(|n| (n, "an Island fragment id")));
+    for (name, set) in sets {
+        if let Some(first) = names.insert(name, set) {
+            if first == "an Island executor" && set == first {
+                continue;
+            }
             return Err(SpecError::DuplicateBindingName {
                 name: name.clone(),
-                sets: sets.to_owned(),
+                sets: if first == set { format!("{set} declared twice") } else { format!("{first} and {set}") },
             });
         }
     }
@@ -1032,15 +1249,6 @@ fn check_binding_names(
             }
         }
     }
-    for name in &outputs {
-        if executors.contains(*name) {
-            return Err(SpecError::DuplicateBindingName {
-                name: (*name).clone(),
-                sets: "an output id and an Island executor".to_owned(),
-            });
-        }
-    }
-
     // SB-22 reserves the first path segment `sink` for a bound Sink's address, so a
     // Provider may not declare a node under it. Without this the `sink/` prefix only
     // narrowed the collision from "any output id" to "a Provider that names a node
@@ -1072,10 +1280,11 @@ fn check_binding_names(
     // equal descriptions are one instance (SB-23 reads `instances: 2` that way), and
     // they must report one `instance().id`, or the runtime handed the Kernel two
     // objects for one description and the Manifest could not reproduce it.
-    let mut by_description: BTreeMap<(&ModuleId, String), (&Ident, &ResourceId)> = BTreeMap::new();
+    let mut by_description: BTreeMap<(&ModuleRef, String), (&Ident, &ResourceId)> = BTreeMap::new();
     let mut paths: BTreeMap<ResourceId, &Ident> = BTreeMap::new();
     for (name, provider) in inputs.providers {
-        let Some(binding) = profile.bindings.get(name) else { continue };
+        let Some(binding) = profile.bindings.get(name) else { continue;
+        };
         let description = (
             &binding.module,
             format!(
@@ -1085,6 +1294,16 @@ fn check_binding_names(
             ),
         );
         let instance = provider.instance();
+        // SB-22 / D78: the profile pins the Module version, and the instance the
+        // runtime hands in says which it is; nothing else ties the two together.
+        if instance.module != binding.module {
+            return Err(SpecError::Structural {
+                reason: format!(
+                    "SB-22: binding {name} names Module {} {}, but its Provider instance is {} {}",
+                    binding.module.id, binding.module.version, instance.module.id, instance.module.version
+                ),
+            });
+        }
         if let Some((first, first_id)) = by_description.insert(description, (name, &instance.id)) {
             if *first_id != instance.id {
                 return Err(SpecError::Structural {
@@ -1118,20 +1337,20 @@ fn check_binding_names(
         let binding = profile.bindings.get(name).ok_or_else(|| SpecError::Structural {
             reason: format!(
                 "SB-22: {name} has no binding (UnboundResource, UnboundOutput or \
-                 UnboundExecutor, by which of the three sets the name is in)"
+                 UnboundExecutor, by which of the three bound sets the name is in)"
             ),
         })?;
         if inputs
             .registry
             .modules()
-            .any(|m| m.id == binding.module && m.roles.contains(&role))
+            .any(|m| crate::module_api::is_module(m, &binding.module) && m.roles.contains(&role))
         {
             return Ok(());
         }
         Err(SpecError::WrongBindingRole {
             name: name.clone(),
             expected: format!("{role:?}"),
-            module: binding.module.to_string(),
+            module: format!("{} {}", binding.module.id, binding.module.version),
         })
     };
     for name in spec.resources.keys() {
@@ -1140,8 +1359,13 @@ fn check_binding_names(
         }
         holds(name, Role::Provider)?;
     }
-    for name in &executors {
-        holds(name, Role::Executor)?;
+    for island in &profile.placements.islands {
+        holds(&island.executor, Role::Executor)?;
+    }
+    // D92: a named Authority is a role like the other three, checked here as well as
+    // by `plan()`'s `declares_authority`.
+    if let Some(a) = profile.authority.as_ref().filter(|a| profile.bindings.contains_key(*a)) {
+        holds(a, Role::Authority)?;
     }
     // An output's Sink role is checked in `check_outputs`, which also needs the
     // descriptor; the name/namespace half is done here.
@@ -1194,7 +1418,8 @@ fn check_outputs(
         let decl = DataLinkDecl {
             id: DataLinkId::local(0),
             from: feed.port.clone(),
-            to: PortRef { component: output.id.to_string(), port: "in".to_owned() },
+            to: PortRef { component: output.id.to_string(), port: "in".to_owned(),
+            },
             contract: endpoint_port(&feed.port, spec, inputs, matched)
                 .map(|(_, c)| c)
                 .unwrap_or_else(|| {
@@ -1205,7 +1430,8 @@ fn check_outputs(
             capacity: feed.capacity,
         };
         crate::stream::check_sink_link(&decl, true)
-            .map_err(|e| SpecError::Structural { reason: e.to_string() })?;
+            .map_err(|e| SpecError::Structural { reason: e.to_string(),
+        })?;
 
         // The source port must exist, on a component or on a bound resource.
         let (direction, contract) =
@@ -1235,12 +1461,12 @@ fn check_outputs(
         let holds_sink = inputs
             .registry
             .modules()
-            .any(|m| m.id == binding.module && m.roles.contains(&Role::Sink));
+            .any(|m| crate::module_api::is_module(m, &binding.module) && m.roles.contains(&Role::Sink));
         if !holds_sink {
             return Err(SpecError::Structural {
                 reason: format!(
-                    "SB-17: output {} is bound to {}, which does not hold the Sink role",
-                    output.id, binding.module
+                    "SB-17: output {} is bound to {} {}, which does not hold the Sink role",
+                    output.id, binding.module.id, binding.module.version
                 ),
             });
         }
@@ -1251,6 +1477,22 @@ fn check_outputs(
             reason: format!("SB-22: no Sink instance for output {}", output.id),
         })?;
         let d = sink.descriptor();
+        // SB-22 / D82: as for a Provider, the instance says which version it is.
+        if d.module != binding.module {
+            return Err(SpecError::Structural {
+                reason: format!(
+                    "SB-22: binding {} names Module {} {}, but its Sink instance is {} {}",
+                    output.id, binding.module.id, binding.module.version, d.module.id, d.module.version
+                ),
+            });
+        }
+        // MA-25 / D86: a Sink that reads from no memory domain cannot be fed, yet a
+        // resource feed skips the domain check (D31) and would admit it.
+        if d.memory_domains.is_empty() {
+            return Err(SpecError::Structural {
+                reason: format!("MA-25: output {}'s Sink declares no memory domain it reads from", output.id),
+            });
+        }
         if !d.artifact_kinds.contains(&output.kind) {
             return Err(SpecError::Structural {
                 reason: format!(
@@ -1280,7 +1522,8 @@ fn endpoint_port(
     spec: &ExperimentSpec,
     inputs: &CompileInputs<'_>,
     matched: &BTreeMap<Ident, ResourceId>,
-) -> Option<(crate::contract::PortDirection, crate::contract::DataContractId)> {
+) -> Option<(crate::contract::PortDirection, crate::contract::DataContractId,
+)> {
     let name = Ident::parse(&r.component).ok()?;
     if let Some(c) = spec.graph.components.get(&name) {
         return c
@@ -1387,7 +1630,7 @@ pub fn plan(
             ),
         });
     }
-    let authority = pick_authority(profile, inputs)?;
+    let authority = pick_authority(spec, profile, inputs)?;
     let pacing = inputs
         .authorities
         .get(&authority)
@@ -1404,11 +1647,10 @@ pub fn plan(
     // `profile.bindings` and classifying by the Module's declared roles instead
     // manufactured a fragment for any binding whose Module happened to hold the
     // Provider role — an Island's `executor` among them — and, when a name was in two
-    // of SB-22's three sets, left the Spec's own resource with no fragment at all.
+    // of SB-22's sets, left the Spec's own resource with no fragment at all.
     for name in spec.resources.keys() {
         let binding = profile.bindings.get(name).ok_or_else(|| SpecError::UnboundResource {
-            name: name.clone(),
-        })?;
+            name: name.clone() })?;
         let after = arm_after_of(name, profile, inputs);
         for before in &after {
             edges.push((before.clone(), name.clone()));
@@ -1421,6 +1663,23 @@ pub fn plan(
             after,
         });
     }
+    // D92: a dedicated Authority binding — named by `authority`, no resource — is
+    // prepared and armed as a fragment of its own, so the binding that chose the
+    // ExecutionClass is part of the Run and of its Manifest.
+    // ponytail: no ordering edges; whether Providers arm after it is TM-16a/MA-30's
+    // Phase 2 call, plan content rather than schema.
+    if !spec.resources.contains_key(&authority) {
+        let binding = profile.bindings.get(&authority).ok_or_else(|| SpecError::Structural {
+            reason: format!("SB-24: `authority` names {authority}, which is not a binding"),
+        })?;
+        fragments.push(Fragment {
+            id: authority.clone(),
+            instance: binding.module.clone(),
+            role: Role::Authority,
+            content: serde_json::json!({ "selector": binding.selector }),
+            after: Vec::new(),
+        });
+    }
     // One fragment per bound output: a Sink is prepared, armed and stepped like any
     // other Module instance (MA-25, MA-30), and it is bound rather than placed, so
     // it gets its own fragment and never appears in an Island's component list.
@@ -1431,6 +1690,26 @@ pub fn plan(
         let binding = profile.bindings.get(&output.id).ok_or_else(|| SpecError::Structural {
             reason: format!("SB-22: output {} has no binding (UnboundOutput)", output.id),
         })?;
+        // SB-22 / D82: the fragment records `binding.module`, so the Sink instance
+        // must be that version — checked here as for an Executor, not only in
+        // `validate`.
+        let sink = inputs.sinks.get(&output.id).ok_or_else(|| SpecError::Structural {
+            reason: format!("SB-22: no Sink instance for output {}", output.id),
+        })?;
+        let d = sink.descriptor();
+        if d.module != binding.module {
+            return Err(SpecError::Structural {
+                reason: format!(
+                    "SB-22: binding {} names Module {} {}, but its Sink instance is {} {}",
+                    output.id, binding.module.id, binding.module.version, d.module.id, d.module.version
+                ),
+            });
+        }
+        if d.memory_domains.is_empty() {
+            return Err(SpecError::Structural {
+                reason: format!("MA-25: output {}'s Sink declares no memory domain it reads from", output.id),
+            });
+        }
         fragments.push(Fragment {
             id: output.id.clone(),
             instance: binding.module.clone(),
@@ -1453,18 +1732,35 @@ pub fn plan(
             }
         })?;
         let module = &binding.module;
-        inputs.executors.get(&island.executor).ok_or_else(|| SpecError::Structural {
+        let descriptor = inputs.executors.get(&island.executor).ok_or_else(|| SpecError::Structural {
             reason: format!(
                 "MA-38: executor instance {} declares no ExecutorDescriptor",
                 island.executor
             ),
         })?;
+        // SB-22 / D82: as for a Provider, the instance says which version it is.
+        if descriptor.module != *module {
+            return Err(SpecError::Structural {
+                reason: format!(
+                    "SB-22: binding {} names Module {} {}, but its Executor instance is {} {}",
+                    island.executor, module.id, module.version, descriptor.module.id, descriptor.module.version
+                ),
+            });
+        }
+        // MA-18 / D86: admission reads `memory_domains`; an Executor that reaches
+        // none can host no component.
+        if descriptor.memory_domains.is_empty() {
+            return Err(SpecError::Structural {
+                reason: format!("MA-18: executor {} declares no memory domain it can reach", island.executor),
+            });
+        }
         fragments.push(Fragment {
             // One fragment per Island, not per Executor instance: two Islands may
             // share one Executor (an affinity split), and a fragment id must be
             // unique (SB-39).
             id: Ident::parse(&format!("island_{}", island.id.local)).map_err(|_| {
-                SpecError::Structural { reason: "MA-38: island id is not a valid Ident".to_owned() }
+                SpecError::Structural { reason: "MA-38: island id is not a valid Ident".to_owned(),
+                }
             })?,
             instance: module.clone(),
             role: Role::Executor,
@@ -1477,27 +1773,37 @@ pub fn plan(
     // function a caller may forget.
     let executors: BTreeMap<Ident, ExecutorDescriptor> =
         inputs.executors.iter().map(|(k, d)| (k.clone(), d.clone())).collect();
+    let sinks: BTreeMap<Ident, SinkDescriptor> =
+        inputs.sinks.iter().map(|(k, s)| (k.clone(), s.descriptor().clone())).collect();
     let graph_links: Vec<(PortRef, PortRef, BackPressure)> = spec
         .graph
         .links
         .iter()
         .map(|l| (l.from.clone(), l.to.clone(), l.policy))
         .collect();
+    let feeds = output_links(spec, inputs, &admission.matched);
+    let feed_links: Vec<(PortRef, PortRef, BackPressure)> =
+        feeds.iter().map(|d| (d.from.clone(), d.to.clone(), d.policy)).collect();
     admit_islands(&IslandContext {
         islands: &profile.placements.islands,
         components: &spec.graph.components,
         placements: &profile.placements.components,
         executors: &executors,
-        links: inputs.links,
+        links: inputs.registry.link_descriptors(),
+        link_placements: &profile.placements.links,
         graph_links: &graph_links,
+        feed_links: &feed_links,
+        sinks: &sinks,
         resource_endpoints: &spec.resources.keys().cloned().collect(),
     })
     .map_err(|e| SpecError::Structural { reason: e.message })?;
     // SC-21 on the links that feed the bound Sinks. A Sink is not a graph component,
     // so the predicate is "this link is an output's feed" and not "its consumer is a
     // Sink component" (SB-17, findings D17, D29).
-    check_sink_links(&output_links(spec, inputs, &admission.matched), &|_r: &PortRef| true)
-        .map_err(|e| SpecError::Structural { reason: e.to_string() })?;
+    check_sink_links(&feeds, &|_r: &PortRef| true,
+    )
+        .map_err(|e| SpecError::Structural { reason: e.to_string(),
+    })?;
 
     // Explicit ordering edges from `ezsdr.arm_order` (SB-26, SB-39).
     //
@@ -1533,8 +1839,17 @@ pub fn plan(
     let order = arm_order(&names, &edges)?;
     fragments.sort_by_key(|f| order.iter().position(|n| *n == f.id).unwrap_or(usize::MAX));
 
-    let links = declared_links(spec, inputs, &admission.matched)?;
-    Ok(ExecutionPlan { fragments, links, deps: edges, authority, class, transfer_costs })
+    // The plan carries every data link a Link Module is created for (MA-27a): the
+    // graph's, then the output feeds', numbered on from them so no two share an id
+    // (D75).
+    let mut links = declared_links(spec, inputs, &admission.matched)?;
+    let base = links.len() as u32;
+    links.extend(feeds.into_iter().enumerate().map(|(i, mut feed)| {
+        feed.id = DataLinkId::local(base + i as u32);
+        feed
+    }));
+    Ok(ExecutionPlan { fragments, links, deps: edges, authority, class, transfer_costs,
+    })
 }
 
 /// `authority` names the binding whose Provider plays the Authority role and may be
@@ -1551,18 +1866,19 @@ fn declares_authority(
     if inputs
         .registry
         .modules()
-        .any(|m| m.id == binding.module && m.roles.contains(&Role::Authority))
+        .any(|m| crate::module_api::is_module(m, &binding.module) && m.roles.contains(&Role::Authority))
     {
         return Ok(());
     }
     Err(SpecError::WrongBindingRole {
         name: name.clone(),
         expected: "Authority".to_owned(),
-        module: binding.module.to_string(),
+        module: format!("{} {}", binding.module.id, binding.module.version),
     })
 }
 
 fn pick_authority(
+    spec: &ExperimentSpec,
     profile: &BindingProfile,
     inputs: &CompileInputs<'_>,
 ) -> Result<Ident, SpecError> {
@@ -1578,8 +1894,31 @@ fn pick_authority(
             });
         }
         declares_authority(named, profile, inputs)?;
+        // SB-24 / D88, D92: the Authority rides on a resource's Provider fragment, or
+        // is a binding of its own that nothing else names — Vision §7's `sim-engine`,
+        // an Authority and nothing else — which `plan()` gives a fragment of role
+        // Authority. A name that already plays Sink or Executor would play two roles.
+        // Checked after the role, so a wrong role is still reported as one.
+        let other = if spec.outputs.iter().any(|o| &o.id == named) {
+            Some("an output's Sink")
+        } else if profile.placements.islands.iter().any(|i| &i.executor == named) {
+            Some("an Island's Executor")
+        } else {
+            None
+        };
+        if let Some(role) = other {
+            return Err(SpecError::Structural {
+                reason: format!(
+                    "SB-24: `authority` names {named}, which is {role}; the Authority is a resource or a binding of its own"
+                ),
+            });
+        }
         return Ok(named.clone());
     }
+    // Inference considers resource bindings only: a dedicated Authority binding is
+    // always named, so a binding the author never designated cannot choose the
+    // ExecutionClass (D88, D92).
+    //
     // SB-24 names "the binding whose Provider plays the Authority role (MA-29)". Only
     // the runtime-supplied descriptor map was consulted, so assembly-time input
     // decided a role the registry declares — the category D18 settled the other way
@@ -1588,18 +1927,23 @@ fn pick_authority(
     let mut candidates: Vec<&Ident> = inputs
         .authorities
         .keys()
-        .filter(|n| declares_authority(n, profile, inputs).is_ok())
+        .filter(|n| spec.resources.contains_key(*n) && declares_authority(n, profile, inputs).is_ok())
         .collect();
     candidates.sort();
     match candidates.as_slice() {
         [only] => Ok((*only).clone()),
         [] => Err(SpecError::Structural {
-            reason: "SB-24: a Run has exactly one Authority and no binding provides one".to_owned(),
+            reason: "SB-24: a Run has exactly one Authority and no resource binding provides one; \
+                     a dedicated Authority binding must be named by `authority`"
+                .to_owned(),
         }),
         _ => Err(SpecError::Structural {
+            // D93: two names for one instance (SB-34) are two candidates too; the
+            // author picks which fragment the Authority rides on.
             reason: format!(
-                "SB-24: {} Authority candidates and no `authority` field",
-                candidates.len()
+                "SB-24: {} Authority candidates {:?} and no `authority` field; name one",
+                candidates.len(),
+                candidates.iter().map(|c| c.as_str()).collect::<Vec<_>>()
             ),
         }),
     }
@@ -1679,9 +2023,9 @@ fn derive_class(profile: &BindingProfile, pacing: Pacing) -> Result<ExecutionCla
 fn arm_after_of(
     name: &Ident,
     profile: &BindingProfile,
-    inputs: &CompileInputs<'_>,
-) -> Vec<Ident> {
-    let Some(provider) = inputs.providers.get(name) else { return Vec::new() };
+    inputs: &CompileInputs<'_>) -> Vec<Ident> {
+    let Some(provider) = inputs.providers.get(name) else { return Vec::new();
+    };
     let mut out: Vec<Ident> = provider
         .instance()
         .arm_after
@@ -1712,7 +2056,8 @@ fn output_links(
         .map(|(i, o)| DataLinkDecl {
             id: DataLinkId::local(i as u32),
             from: o.feed.port.clone(),
-            to: PortRef { component: o.id.to_string(), port: "in".to_owned() },
+            to: PortRef { component: o.id.to_string(), port: "in".to_owned(),
+            },
             contract: endpoint_port(&o.feed.port, spec, inputs, matched)
                 .map(|(_, c)| c)
                 .unwrap_or_else(|| {
@@ -1893,7 +2238,8 @@ pub fn collect_prepare(
     }
     let merged = MergedPrepare::from_reports(ok);
     violations
-        .extend(checks.run(environment, &merged.effective, &BTreeMap::new(), CheckStage::Prepare));
+        .extend(checks.run(environment, &merged.effective, &BTreeMap::new(), CheckStage::Prepare,
+    ));
 
     // MA-12's second sentence, both halves. `effective` may **narrow** a declared
     // capability and must not widen one, and the Spec's own constraints are re-matched
@@ -1901,8 +2247,10 @@ pub fn collect_prepare(
     // puts a value the Spec never asked for into `run.effective()` and the Manifest,
     // and MA-12 is a rule with a predicate nobody calls (SB-30, SB-44).
     for (name, req) in &spec.resources {
-        let Some(node_id) = admission.matched.get(name) else { continue };
-        let Some(provider) = providers.get(name) else { continue };
+        let Some(node_id) = admission.matched.get(name) else { continue;
+        };
+        let Some(provider) = providers.get(name) else { continue;
+        };
         let instance = provider.instance();
         let Some(node) = instance.tree.walk().into_iter().find(|n| n.id == *node_id) else {
             continue;
@@ -1917,8 +2265,10 @@ pub fn collect_prepare(
             continue;
         };
         for (key, declared) in &node.capabilities {
-            let Some(applied) = report.effective.get(key) else { continue };
-            let effective = crate::spec::CapabilityValue::One { value: applied.clone() };
+            let Some(applied) = report.effective.get(key) else { continue;
+            };
+            let effective = crate::spec::CapabilityValue::One { value: applied.clone(),
+            };
             if let Err(e) = check_effective_narrows(declared, &effective) {
                 violations.push(crate::binding::Violation {
                     check: crate::spec::Namespace::parse("ezsdr.effective")
@@ -1976,8 +2326,10 @@ pub fn collect_prepare(
                 }
                 continue;
             }
-            let Some(applied) = report.effective.get(key) else { continue };
-            let effective = crate::spec::CapabilityValue::One { value: applied.clone() };
+            let Some(applied) = report.effective.get(key) else { continue;
+            };
+            let effective = crate::spec::CapabilityValue::One { value: applied.clone(),
+            };
             if !satisfies(constraint, &effective).unwrap_or(false) {
                 violations.push(crate::binding::Violation {
                     check: crate::spec::Namespace::parse("ezsdr.effective")

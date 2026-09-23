@@ -41,10 +41,14 @@ pub enum HashError {
 impl fmt::Display for HashError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            HashError::NonFiniteNumber => f.write_str("a non-finite number cannot be canonicalised"),
+            HashError::NonFiniteNumber => {
+                f.write_str("a non-finite number cannot be canonicalised")
+            }
             HashError::NonAsciiKey { key } => write!(f, "object key {key:?} is not ASCII"),
             HashError::NotSerialisable { message } => write!(f, "not serialisable: {message}"),
-            HashError::MalformedHash => f.write_str("a content hash is `sha256:` plus 64 lowercase hex digits"),
+            HashError::MalformedHash => {
+                f.write_str("a content hash is `sha256:` plus 64 lowercase hex digits")
+            }
         }
     }
 }
@@ -53,7 +57,8 @@ impl std::error::Error for HashError {}
 
 /// `sha256:<64 lowercase hex>`. The algorithm is named in the value so a later
 /// algorithm is an additive change (OV-14).
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(transparent)]
 pub struct ContentHash(String);
 
@@ -167,7 +172,8 @@ fn write_value(v: &serde_json::Value, out: &mut String) -> Result<(), HashError>
             // map to insertion order.
             let mut keys: Vec<&String> = map.keys().collect();
             if let Some(bad) = keys.iter().find(|k| !k.is_ascii()) {
-                return Err(HashError::NonAsciiKey { key: (*bad).clone() });
+                return Err(HashError::NonAsciiKey { key: (*bad).clone(),
+                });
             }
             keys.sort_unstable();
             out.push('{');

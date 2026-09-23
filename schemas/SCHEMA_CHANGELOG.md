@@ -15,6 +15,69 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — 2026-09-23 — pre-freeze revision, adopted D51–D68
+
+Still version 1: v4.0 has not frozen, so this is a pre-freeze revision of the
+published v1 schemas.
+
+- `vocabulary_descriptor`: withdraws `EventKindDecl.hot_layout` and its `HotLayout`
+  type (D51). The Kernel no longer interprets a Vocabulary's hot-path byte layout.
+- `action`: corrects `Action::Emit`'s withdrawn `RS-32a` citation to `RS-31`.
+- `manifest`: adds the resolved `policy` table (D59), recording the compiled
+  Policy named by RS-1: the Spec's `policies.failure` overrides resolved against
+  the registered defaults. It is optional (D69): absent for a Run that failed
+  before its Policy compiled, as `plan` is absent before `plan()`.
+- `binding_profile`: `placements.links` selects a Link Module per graph link (D67;
+  its `link-{i}` key grammar, the zero-based index in `ExperimentSpec.graph.links`,
+  is superseded by D76 below and never froze). **Breaking for
+  existing documents:** `LinkPlacement.link` changes type from an unversioned
+  `ModuleId` string to a versioned `ModuleRef` object `{ id, version }`, and
+  admission resolves the descriptor for that exact Module version. The previously
+  unused `memory_domain` field was removed.
+
+The same revision then adopted D69–D80 (re-review of D51–D68):
+
+- **all object schemas** gain `additionalProperties: false` (D73): an unknown key at
+  any level of a Kernel document is refused, not dropped (SB-9, SB-21, §65 #39).
+  Extension content lives only in the namespaced maps the Kernel names. This
+  includes the four id objects (`ClockDomainId`, `MemoryDomainId`, `IslandId`,
+  `DataLinkId`) and `Version`, whose multi-line derives the first pass missed, so a
+  pinned `{ major, minor, patch, pre }` is refused rather than read as the release.
+  Every field-less variant of an internally tagged enum is now an empty struct
+  variant (`Completed {}`), because serde does not apply `deny_unknown_fields` to a
+  unit variant; the schemas and the serialised form are unchanged, and
+  `{"kind":"completed","stage":"validate"}` is refused instead of read as `Completed`.
+- `binding_profile`: **breaking** — `placements.links` changes from a map keyed
+  `link-{i}` to an array of `{ link, from, to }`, each naming its data link by its
+  two ends, and covers output feeds as well as graph links (D75, D76; reverses the
+  key grammar of D67). `Binding.module` changes from an unversioned `ModuleId` to a
+  versioned `ModuleRef` (D78).
+- `fragment`, `execution_plan` and `manifest` (which embed it): `Fragment.instance` changes
+  from `ModuleId` to `ModuleRef` (D78), and `links` now also carries the output
+  feeds, numbered after the graph's links (D75).
+- `link_descriptor` and `vocabulary_descriptor`: description text only.
+- `binding_profile`, `execution_plan`, `manifest`: description text for
+  `Placements` and `ExecutionPlan.links` now names output feeds (D75).
+
+And then D81–D84 (second re-review):
+
+- `sink_descriptor`: adds `memory_domains`, the domains a Sink reads from; MA-39
+  checks an output feed against it (D81).
+- `executor_descriptor`, `sink_descriptor`, `link_descriptor`: add `module`, the
+  exact `ModuleRef` the instance is. Admission refuses an Executor (at `plan()`) or a
+  Sink (at `validate` and `plan()`) whose
+  `module` differs from its binding, and a Link descriptor is registered under its
+  own `module` (D82).
+- `binding_profile`: description text of `Binding.module` names the per-role
+  comparison (D82).
+- `executor_descriptor`, `link_descriptor`: description text (D82).
+
+And then D88–D91 (fourth re-review), none of which changes a schema:
+
+- Every document refuses a `node` other than 0 (`LOCAL`) at any depth: `NodeId`'s
+  deserialiser enforces X7 (D91). The schemas keep `uint32`, so lifting X7 later is
+  a code loosening rather than a schema change.
+
 ## Named deviation: the integer profile
 
 Content hashes are taken over **RFC 8785 (JCS) with an integer profile**: a value

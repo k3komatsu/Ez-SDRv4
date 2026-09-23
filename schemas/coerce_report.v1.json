@@ -1,6 +1,7 @@
 {
   "$defs": {
     "Coercion": {
+      "additionalProperties": false,
       "description": "A value the Provider changed, with its reason (SB-44).",
       "properties": {
         "applied": {
@@ -32,6 +33,7 @@
       "description": "What a Spec requires of a key. Its value is a scalar: a constraint over a list\nor a map is refused, because the matcher would then need the Vocabulary's\nsemantics to compare them.\n\nRule: SB-5, decision B1.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Exactly this value.",
           "properties": {
             "kind": {
@@ -50,6 +52,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Within these bounds, either of which may be absent.",
           "properties": {
             "kind": {
@@ -85,6 +88,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Any of these values.",
           "properties": {
             "kind": {
@@ -106,6 +110,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "At least this value.",
           "properties": {
             "kind": {
@@ -124,6 +129,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "At most this value.",
           "properties": {
             "kind": {
@@ -142,6 +148,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "The key is declared at all.",
           "properties": {
             "kind": {
@@ -165,6 +172,7 @@
       "type": "string"
     },
     "RejectedRequest": {
+      "additionalProperties": false,
       "description": "A constraint the Provider refused outright (MA-11).",
       "properties": {
         "key": {
@@ -225,6 +233,7 @@
       "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
     },
     "Warning": {
+      "additionalProperties": false,
       "description": "A non-fatal note from a stage (SB-38, SB-41).",
       "properties": {
         "message": {
@@ -244,6 +253,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "What `coerce` returns. It is pure, deterministic and requires no hardware, which\nis what makes `validate()` a true dry run (MA-11, Vision §52).",
   "properties": {
     "applied": {

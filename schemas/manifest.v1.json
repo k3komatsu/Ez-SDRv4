@@ -7,6 +7,7 @@
       "type": "integer"
     },
     "AdmissionResult": {
+      "additionalProperties": false,
       "description": "What `validate(spec, binding, registry)` returns. It touches no hardware.\n\nRule: SB-38.",
       "properties": {
         "coercions_preview": {
@@ -53,6 +54,7 @@
       "type": "object"
     },
     "ArtifactMark": {
+      "additionalProperties": false,
       "description": "One `mark_artifact` reaction recorded against an artifact (RS-30).",
       "properties": {
         "kind": {
@@ -71,6 +73,7 @@
       "type": "object"
     },
     "ArtifactRef": {
+      "additionalProperties": false,
       "description": "Large data is always by reference: a locator, a content hash and a size, never\nthe bytes (RS-44, Vision §50, §51).",
       "properties": {
         "continuity": {
@@ -147,6 +150,7 @@
       ]
     },
     "BindingSection": {
+      "additionalProperties": false,
       "description": "The `binding` section: the BindingProfile body including its `environment`,\nrecorded verbatim (RS-38, SB-27).",
       "properties": {
         "body": {
@@ -164,6 +168,7 @@
       "type": "object"
     },
     "ChannelGap": {
+      "additionalProperties": false,
       "description": "A channel that lost validity while the stream continued (SC-31a).\n\nVision §28 requires a capture to describe a multi-channel alignment failure, and\na hole between two segments alone is indistinguishable from a channel that was\nnever enabled over that interval.",
       "properties": {
         "cause": {
@@ -197,6 +202,7 @@
       "type": "object"
     },
     "CleanupFailure": {
+      "additionalProperties": false,
       "description": "A cleanup step that failed or timed out. Every step is attempted even when an\nearlier one failed; each failure is recorded and the sequence continues (RS-6).",
       "properties": {
         "fragment": {
@@ -296,6 +302,7 @@
       ]
     },
     "ClockDomain": {
+      "additionalProperties": false,
       "description": "A registered clock domain. Immutable once registered, except that `ended_at`\nmay be set once (TM-12).",
       "properties": {
         "ended_at": {
@@ -325,6 +332,7 @@
       "type": "object"
     },
     "ClockDomainId": {
+      "additionalProperties": false,
       "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
       "properties": {
         "local": {
@@ -348,6 +356,7 @@
       "description": "A domain is either a timekeeper of its own or an exact division of one (TM-3).\n\nA `Derived` domain names a `Root` directly; there are no chains (decision T2).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "A timekeeper: a tick rate and what tick zero means.",
           "properties": {
             "epoch": {
@@ -371,6 +380,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "An exact division of a root, such as a SampleClock (TM-10, TM-13a).",
           "properties": {
             "kind": {
@@ -402,6 +412,7 @@
       ]
     },
     "ClockRelation": {
+      "additionalProperties": false,
       "description": "A measured relation between two roots: the only path between domains that are\nnot exactly related, and the record every Run carries from its root to `utc`.\n\n`drift` and `drift_uncertainty` are the only floating-point quantities in the\ntime model, and neither reaches a stored `TimePoint` unrounded (TM-14, X9).\n\nRule: TM-5, TM-14, TM-18. Vision §24, §50.",
       "properties": {
         "drift": {
@@ -457,6 +468,7 @@
       "type": "object"
     },
     "ClocksSection": {
+      "additionalProperties": false,
       "description": "The `clocks` section (RS-38, TM-13d, TM-18).",
       "properties": {
         "domains": {
@@ -487,6 +499,7 @@
       "type": "object"
     },
     "Coercion": {
+      "additionalProperties": false,
       "description": "A value the Provider changed, with its reason (SB-44).",
       "properties": {
         "applied": {
@@ -538,6 +551,7 @@
       "description": "What a Spec requires of a key. Its value is a scalar: a constraint over a list\nor a map is refused, because the matcher would then need the Vocabulary's\nsemantics to compare them.\n\nRule: SB-5, decision B1.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Exactly this value.",
           "properties": {
             "kind": {
@@ -556,6 +570,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Within these bounds, either of which may be absent.",
           "properties": {
             "kind": {
@@ -591,6 +606,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Any of these values.",
           "properties": {
             "kind": {
@@ -612,6 +628,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "At least this value.",
           "properties": {
             "kind": {
@@ -630,6 +647,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "At most this value.",
           "properties": {
             "kind": {
@@ -648,6 +666,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "The key is declared at all.",
           "properties": {
             "kind": {
@@ -667,6 +686,7 @@
       "type": "string"
     },
     "ContinuityMap": {
+      "additionalProperties": false,
       "description": "What a stream carried, per SampleClock. There is one map per SampleClock: a\nblock in another domain ends the map, and the Sink starts a new builder (SC-30).",
       "properties": {
         "channel_gaps": {
@@ -725,6 +745,7 @@
       "type": "object"
     },
     "CounterRow": {
+      "additionalProperties": false,
       "description": "One row of the never-dropping counter table (RS-33).",
       "properties": {
         "count": {
@@ -754,6 +775,7 @@
       "type": "string"
     },
     "DataLinkDecl": {
+      "additionalProperties": false,
       "description": "A declared link: its endpoints, the contract it carries, its policy and its\ncapacity in blocks (SC-19).",
       "properties": {
         "capacity": {
@@ -794,6 +816,7 @@
       "type": "object"
     },
     "DataLinkId": {
+      "additionalProperties": false,
       "description": "Identifies a [`DataLink`](crate::stream::DataLinkDecl) instance.\n\nRule: SC-18 (`02-stream-contract.md`), X7.",
       "properties": {
         "local": {
@@ -814,6 +837,7 @@
       "type": "object"
     },
     "DeclaredCost": {
+      "additionalProperties": false,
       "description": "A number the Link Module declares, not a measurement. The Core reports it and\nnever uses it to choose a placement; Phase 1 neither measures nor optimises.\n\nRule: SB-40. Vision §20, §31, §63.",
       "properties": {
         "cost": {
@@ -834,6 +858,7 @@
       "type": "object"
     },
     "Duration": {
+      "additionalProperties": false,
       "description": "An elapsed time: integer ticks in a named clock domain (TM-1, TM-4 decision T4).\n\nThe domain tag is what stops 1 000 ticks at 20 Msps being added to a 200 MHz\npoint as a silent factor-of-ten error.",
       "properties": {
         "domain": {
@@ -881,6 +906,7 @@
       "description": "What a domain's tick zero is anchored to (TM-3).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Tick zero is 1970-01-01T00:00:00Z.",
           "properties": {
             "kind": {
@@ -894,6 +920,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Tick zero is whatever set it; the string names the mechanism, for example\n`uhd.set_time_unknown_pps` or `sim.run_start` (Vision §15, §50; OV-23a: a\nnamed example, not a Kernel dependency).",
           "properties": {
             "kind": {
@@ -914,6 +941,7 @@
       ]
     },
     "Event": {
+      "additionalProperties": false,
       "description": "The control-path form of an event: a source, a `TimePoint` in a named domain, a\nseverity, a kind and a schema-versioned payload (Vision §29).\n\nRule: RS-31.",
       "properties": {
         "kind": {
@@ -950,6 +978,7 @@
       "type": "string"
     },
     "EventsSection": {
+      "additionalProperties": false,
       "description": "The `events` section: the complete counter table, including rows whose count is\nzero, and the bodies that were delivered (RS-33, RS-38).",
       "properties": {
         "counters": {
@@ -997,6 +1026,7 @@
       ]
     },
     "ExecutionPlan": {
+      "additionalProperties": false,
       "description": "What `plan(spec, binding)` produces (SB-39).",
       "properties": {
         "authority": {
@@ -1032,7 +1062,7 @@
           "type": "array"
         },
         "links": {
-          "description": "The DataLink declarations (SC-19).",
+          "description": "The DataLink declarations: the graph's links, then the output feeds, numbered\non from them (SC-19, MA-27a, D75).",
           "items": {
             "$ref": "#/$defs/DataLinkDecl"
           },
@@ -1057,6 +1087,7 @@
       "type": "object"
     },
     "Fidelity": {
+      "additionalProperties": false,
       "description": "What a Run's models actually claim, per aspect. A Run's value per aspect is the\n**weakest** over its bound Providers, so a Hardware Run with a best-effort\nMockPeripheral records `timing: envelope`.\n\nRule: MA-42, RS-41. Vision §14.",
       "properties": {
         "coercion": {
@@ -1090,6 +1121,7 @@
       "type": "object"
     },
     "Fragment": {
+      "additionalProperties": false,
       "description": "One unit of work handed to one Module at `prepare`, in dependency order (SB-39).",
       "properties": {
         "after": {
@@ -1108,8 +1140,8 @@
           "description": "The fragment's name (SB-1)."
         },
         "instance": {
-          "$ref": "#/$defs/ModuleId",
-          "description": "Which Module instance performs it (SB-22)."
+          "$ref": "#/$defs/ModuleRef",
+          "description": "Which exact Module version performs it, as its binding names it (SB-22, D78)."
         },
         "role": {
           "$ref": "#/$defs/Role",
@@ -1125,6 +1157,7 @@
       "type": "object"
     },
     "Gap": {
+      "additionalProperties": false,
       "description": "An interval of missing samples in the stream (SC-30, Vision §28).",
       "properties": {
         "cause": {
@@ -1169,6 +1202,7 @@
       "description": "What the **stream** lost. A closed, derived set (SC-31, decision S16).\n\nWhat the **link** lost is the separate `link_dropped` count, not a cause, so a\ndevice overflow inside an interval that also lost a block to the link is still\nreported as `OverflowRestart` with its sample count, beside a link-drop count of\none. Collapsing the two into a single cause loses the device's own diagnosis.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "`GAP_BEFORE` alone (SC-31).",
           "properties": {
             "kind": {
@@ -1182,6 +1216,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "`RESTARTED`: a stream restart, as a UHD overflow produces (SC-31, OV-23a).",
           "properties": {
             "kind": {
@@ -1195,6 +1230,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "`SEQ_DISCONTINUITY`: transport sequence loss (SC-31).",
           "properties": {
             "kind": {
@@ -1208,6 +1244,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "A per-channel break on a block carrying `ALIGNMENT` (SC-31a).",
           "properties": {
             "kind": {
@@ -1221,6 +1258,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "A jump with no gap flag on a lossy path (SC-31).",
           "properties": {
             "kind": {
@@ -1234,6 +1272,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "`GAP_BEFORE` with `lost` less than the jump on a lossy path and no carry to\nexplain the difference (SC-31).",
           "properties": {
             "kind": {
@@ -1254,6 +1293,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "`GAP_BEFORE` with `lost` absent (SC-31).",
           "properties": {
             "kind": {
@@ -1277,6 +1317,7 @@
       "type": "string"
     },
     "Lease": {
+      "additionalProperties": false,
       "description": "Who holds a Run, and for how long (RS-21…RS-25).",
       "properties": {
         "adoptions": {
@@ -1328,6 +1369,7 @@
       "description": "Whether a Run survives its client's disconnection (RS-21).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "The Run ends when the client disconnects. The default (RS-21, RS-23).",
           "properties": {
             "kind": {
@@ -1341,6 +1383,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "The Run survives the disconnect until the TTL expires (RS-21, RS-23).",
           "properties": {
             "kind": {
@@ -1368,6 +1411,7 @@
       ]
     },
     "LogEntry": {
+      "additionalProperties": false,
       "description": "One entry of the action log (RS-15).",
       "properties": {
         "action": {
@@ -1398,6 +1442,7 @@
       "type": "object"
     },
     "ModuleEntry": {
+      "additionalProperties": false,
       "description": "One Module the Run used (RS-38).",
       "properties": {
         "impl_hash": {
@@ -1437,6 +1482,7 @@
       "type": "string"
     },
     "ModuleRef": {
+      "additionalProperties": false,
       "description": "A Module by id and version (MA-31).",
       "properties": {
         "id": {
@@ -1468,6 +1514,7 @@
       "description": "What `admit()` decided about one Session Action (RS-15, RS-16).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "It passed every check and was dispatched (RS-16).",
           "properties": {
             "coercions": {
@@ -1505,6 +1552,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "It was refused and never reached the real-time path (RS-16).",
           "properties": {
             "kind": {
@@ -1527,7 +1575,33 @@
         }
       ]
     },
+    "Policy": {
+      "additionalProperties": false,
+      "description": "A compiled reaction table for one Run (RS-26).",
+      "properties": {
+        "severities": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Severity"
+          },
+          "description": "Kind to severity, which RS-29 falls back to (RS-28).",
+          "type": "object"
+        },
+        "table": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Reaction"
+          },
+          "description": "Kind to reaction (RS-26).",
+          "type": "object"
+        }
+      },
+      "required": [
+        "table",
+        "severities"
+      ],
+      "type": "object"
+    },
     "PortRef": {
+      "additionalProperties": false,
       "description": "Names one port of one component instance (SC-1).",
       "properties": {
         "component": {
@@ -1546,6 +1620,7 @@
       "type": "object"
     },
     "PrepareReport": {
+      "additionalProperties": false,
       "description": "What one fragment's `prepare` returned (SB-41, MA-12).",
       "properties": {
         "coercions": {
@@ -1583,6 +1658,7 @@
       "type": "object"
     },
     "PrepareSection": {
+      "additionalProperties": false,
       "description": "The `prepare` section (RS-38, SB-41).",
       "properties": {
         "merged_effective": {
@@ -1605,6 +1681,7 @@
       "type": "object"
     },
     "PreviewedCoercion": {
+      "additionalProperties": false,
       "description": "A coercion the Kernel previewed by calling one Provider's `coerce`, together with\nthe Spec resource whose request produced it.\n\nA `Coercion` names a key and two values and nothing else, because a Provider\nanswers about the request it was handed. The Kernel's own record has to say more:\ntwo resources may constrain one key on two different devices, and one of them\ncoercing says nothing about the other. Keyed on the key alone, `prepare`'s SB-44\ncheck charged one resource's coercion to every resource naming that key and\nrefused a value `coerce` was never asked about — so the resource name is part of\nthe record, as it already is in [`RejectedConstraint`].\n\nRule: SB-7, SB-38, SB-44.",
       "properties": {
         "coercion": {
@@ -1623,6 +1700,7 @@
       "type": "object"
     },
     "ProfileRef": {
+      "additionalProperties": false,
       "description": "A declared profile, by name and version. Vision §59 bumps a Mock profile's\nversion on measurement.\n\nRule: SB-22, MA-33 (decision B7).",
       "properties": {
         "name": {
@@ -1641,6 +1719,7 @@
       "type": "object"
     },
     "Rational": {
+      "additionalProperties": false,
       "description": "A positive rational, stored reduced by the greatest common divisor.\n\n`num > 0`, `den > 0`, `gcd(num, den) = 1`, so equality is structural. Every\noperation evaluates with 128-bit intermediates and returns an error rather than\nwrapping, saturating or panicking.\n\nRule: TM-2.",
       "properties": {
         "den": {
@@ -1660,7 +1739,33 @@
       ],
       "type": "object"
     },
+    "Reaction": {
+      "description": "One of exactly four reactions. It is a table: there is no expression language\nand no rules engine, and logic that needs conditions belongs in a Reactor or in\nclient orchestration.\n\nRule: RS-26.",
+      "oneOf": [
+        {
+          "const": "continue",
+          "description": "Carry on.",
+          "type": "string"
+        },
+        {
+          "const": "mark_artifact",
+          "description": "Record the kind and time against every artifact open at that moment (RS-30).",
+          "type": "string"
+        },
+        {
+          "const": "stop",
+          "description": "Stop the Run, orderly (RS-9).",
+          "type": "string"
+        },
+        {
+          "const": "abort",
+          "description": "End the Run immediately (RS-9).",
+          "type": "string"
+        }
+      ]
+    },
     "RejectedConstraint": {
+      "additionalProperties": false,
       "description": "A constraint the bound instance could not satisfy (SB-38).",
       "properties": {
         "constraint": {
@@ -1689,6 +1794,7 @@
       "type": "object"
     },
     "ResourceId": {
+      "additionalProperties": false,
       "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the\nreceive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
       "properties": {
         "node": {
@@ -1776,6 +1882,7 @@
       ]
     },
     "RunSection": {
+      "additionalProperties": false,
       "description": "The `run` section of the envelope (RS-38).",
       "properties": {
         "deterministic": {
@@ -1831,6 +1938,7 @@
       "description": "The eight states of a Run (RS-2).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Nothing has happened yet.",
           "properties": {
             "state": {
@@ -1844,6 +1952,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "`validate()` passed (SB-38).",
           "properties": {
             "state": {
@@ -1857,6 +1966,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "`plan()` passed (SB-39).",
           "properties": {
             "state": {
@@ -1870,6 +1980,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Every fragment prepared (SB-41).",
           "properties": {
             "state": {
@@ -1883,6 +1994,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Everything armed (SB-43).",
           "properties": {
             "state": {
@@ -1896,6 +2008,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Live.",
           "properties": {
             "state": {
@@ -1909,6 +2022,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Cleanup is under way (RS-6).",
           "properties": {
             "mode": {
@@ -1927,6 +2041,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Cleanup finished; a Manifest was written (RS-11).",
           "properties": {
             "state": {
@@ -1947,6 +2062,7 @@
       ]
     },
     "SampleClockRecord": {
+      "additionalProperties": false,
       "description": "One SampleClock as the Manifest records it, one per clock, in order, per stream (TM-13d).",
       "properties": {
         "domain": {
@@ -1996,6 +2112,7 @@
       "type": "object"
     },
     "Segment": {
+      "additionalProperties": false,
       "description": "A contiguous run of valid samples on one channel (SC-30).",
       "properties": {
         "len": {
@@ -2019,6 +2136,7 @@
       "description": "The Session action envelope: a closed set, and **not** the Kernel Action set.\n\nThe Kernel's Actions are what a Reactor emits into the real-time path, while a\nlease operation or a recorder request is a control-path act with no real-time\nmeaning. Each Session Action compiles to zero or more Kernel Actions, or to a\nLease or Run operation.\n\nOnly the lifecycle verbs are the Kernel's; a domain verb is\n[`SessionAction::Vocabulary`], and the Vocabulary that registers the verb\ndeclares how it compiles. Vision §3's log sketch names `StartRepeat` and\n`Capture` directly; here they are `radio.start_repeat` and `sink.capture`,\nbecause a Kernel that enumerated them would need a new variant for the first\nperipheral sweep or calibration verb.\n\nRule: RS-13, RS-13a, decision R3.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Generic over a namespaced key and value (RS-13a).",
           "properties": {
             "key": {
@@ -2047,6 +2165,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "A domain verb, whose compilation its Vocabulary declares (RS-13a, RS-14).",
           "properties": {
             "at": {
@@ -2094,6 +2213,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "With a target it stops that resource; without one it stops the Run (RS-50).",
           "properties": {
             "kind": {
@@ -2118,6 +2238,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Give up the Lease (RS-14).",
           "properties": {
             "kind": {
@@ -2131,6 +2252,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Reclaim a Detached Lease. Adoption by run id alone would let any client\nseize a live transmitter (RS-24).",
           "properties": {
             "kind": {
@@ -2149,6 +2271,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Extend a renewable Lease (RS-24).",
           "properties": {
             "kind": {
@@ -2162,6 +2285,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Create a child Run (RS-14, RS-25).",
           "properties": {
             "kind": {
@@ -2212,6 +2336,7 @@
       ]
     },
     "SpecSection": {
+      "additionalProperties": false,
       "description": "The `spec` section: the body after migration, its hash, and — when it was\nmigrated — the original version and hash (RS-38, SB-49).",
       "properties": {
         "body": {
@@ -2282,6 +2407,7 @@
       "description": "Why a Run stopped (RS-3, RS-23, RS-26).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "The client asked (RS-3).",
           "properties": {
             "reason": {
@@ -2295,6 +2421,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "An `Attached` Lease's client went away (RS-23).",
           "properties": {
             "reason": {
@@ -2308,6 +2435,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "A `Detached` Lease's TTL ran out (RS-23).",
           "properties": {
             "reason": {
@@ -2321,6 +2449,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "The Policy table reacted to an event (RS-26).",
           "properties": {
             "kind": {
@@ -2339,6 +2468,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Something aborted the Run (RS-9).",
           "properties": {
             "cause": {
@@ -2362,6 +2492,7 @@
       "description": "How a Run ended. There is no `Failed` **state**: a failure is a termination\nreached through `Stopping`, because a Run that failed and was not cleaned up is\na transmitter nobody turned off.\n\nRule: RS-2, RS-3, decision R1.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "It ran to completion.",
           "properties": {
             "kind": {
@@ -2375,6 +2506,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "It was stopped (RS-3, RS-23).",
           "properties": {
             "cause": {
@@ -2393,6 +2525,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "A stage failed (RS-3).",
           "properties": {
             "kind": {
@@ -2413,6 +2546,7 @@
       ]
     },
     "TerminationSection": {
+      "additionalProperties": false,
       "description": "The `termination` section (RS-3, RS-8a, RS-10).",
       "properties": {
         "also": {
@@ -2459,6 +2593,7 @@
       "type": "object"
     },
     "TimePoint": {
+      "additionalProperties": false,
       "description": "An instant: integer ticks in a named clock domain. Never floating-point seconds.\n\nThere is deliberately no `PartialOrd`: two points of different domains cannot be\ncompared at all, and `a < b` silently answering `false` is the bug class this\nmodel exists to prevent (decision T3).\n\nRule: TM-1, TM-6.",
       "properties": {
         "domain": {
@@ -2478,6 +2613,7 @@
       "type": "object"
     },
     "TransitionRecord": {
+      "additionalProperties": false,
       "description": "One recorded transition, with its runtime instant and the host UTC time (RS-5).",
       "properties": {
         "at": {
@@ -2528,6 +2664,7 @@
       ]
     },
     "Validity": {
+      "additionalProperties": false,
       "description": "The window over which a [`ClockRelation`] may be applied (TM-14).",
       "properties": {
         "from": {
@@ -2589,6 +2726,7 @@
       "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
     },
     "Version": {
+      "additionalProperties": false,
       "description": "A release-only version. Module and Vocabulary versions carry a minor and a patch;\ndocuments do not, which is decision B7 of `03-spec-and-binding.md`.\n\nRule: MA-33, decision B7.",
       "properties": {
         "major": {
@@ -2618,6 +2756,7 @@
       "type": "object"
     },
     "Violation": {
+      "additionalProperties": false,
       "description": "What an admission check refused (SB-29).",
       "properties": {
         "check": {
@@ -2658,6 +2797,7 @@
       "type": "object"
     },
     "Warning": {
+      "additionalProperties": false,
       "description": "A non-fatal note from a stage (SB-38, SB-41).",
       "properties": {
         "message": {
@@ -2677,6 +2817,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "A Kernel envelope with namespaced Module sections. The Kernel writes the\nenvelope; each Module writes its own section; no Provider-specific field ever\nrequires a Kernel change.\n\nVision §50 lists \"random seeds\" and an optional environment capture among the\nenvelope's contents; neither is an envelope field here. The Kernel owns no\nrandom number generator, so a seed is something the environment declared, and\nthe environment is already recorded verbatim under `binding.body`; the\nenvironment capture has no Kernel-defined content at all, so it belongs under\n`sections` as `ezsdr.capture` (RS-43).\n\nRule: RS-38…RS-47. Vision §50, Finding 19.",
   "properties": {
     "action_log": {
@@ -2776,6 +2917,17 @@
         }
       ],
       "description": "The plan as bound (RS-38)."
+    },
+    "policy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Policy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The resolved event reactions and severities for this Run; absent when the Run\nfailed before its Policy compiled, as `plan` is absent when it failed before\n`plan()` (RS-1, RS-3, RS-26, RS-38)."
     },
     "prepare": {
       "$ref": "#/$defs/PrepareSection",

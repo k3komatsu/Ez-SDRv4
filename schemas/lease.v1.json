@@ -4,6 +4,7 @@
       "description": "Whether a Run survives its client's disconnection (RS-21).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "The Run ends when the client disconnects. The default (RS-21, RS-23).",
           "properties": {
             "kind": {
@@ -17,6 +18,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "The Run survives the disconnect until the TTL expires (RS-21, RS-23).",
           "properties": {
             "kind": {
@@ -45,6 +47,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "Who holds a Run, and for how long (RS-21…RS-25).",
   "properties": {
     "adoptions": {

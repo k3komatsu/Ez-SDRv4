@@ -18,18 +18,19 @@ use crate::time::{TimeError, TimePoint};
 /// reported as `OverflowRestart` with its sample count, beside a link-drop count of
 /// one. Collapsing the two into a single cause loses the device's own diagnosis.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GapCause {
     /// `GAP_BEFORE` alone (SC-31).
-    Stream,
+    Stream {},
     /// `RESTARTED`: a stream restart, as a UHD overflow produces (SC-31, OV-23a).
-    OverflowRestart,
+    OverflowRestart {},
     /// `SEQ_DISCONTINUITY`: transport sequence loss (SC-31).
-    SequenceError,
+    SequenceError {},
     /// A per-channel break on a block carrying `ALIGNMENT` (SC-31a).
-    Alignment,
+    Alignment {},
     /// A jump with no gap flag on a lossy path (SC-31).
-    LinkDrop,
+    LinkDrop {},
     /// `GAP_BEFORE` with `lost` less than the jump on a lossy path and no carry to
     /// explain the difference (SC-31).
     Mixed {
@@ -37,11 +38,12 @@ pub enum GapCause {
         stream_lost: u64,
     },
     /// `GAP_BEFORE` with `lost` absent (SC-31).
-    Unknown,
+    Unknown {},
 }
 
 /// An interval of missing samples in the stream (SC-30, Vision §28).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Gap {
     /// Where the missing interval begins.
     pub start: TimePoint,
@@ -64,6 +66,7 @@ pub struct Gap {
 /// a hole between two segments alone is indistinguishable from a channel that was
 /// never enabled over that interval.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ChannelGap {
     /// Which channel (SC-31a).
     pub channel: u16,
@@ -78,6 +81,7 @@ pub struct ChannelGap {
 
 /// A contiguous run of valid samples on one channel (SC-30).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Segment {
     /// First sample of the run.
     pub start: TimePoint,
@@ -88,6 +92,7 @@ pub struct Segment {
 /// What a stream carried, per SampleClock. There is one map per SampleClock: a
 /// block in another domain ends the map, and the Sink starts a new builder (SC-30).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ContinuityMap {
     /// The SampleClock this map describes (SC-30).
     pub domain: ClockDomainId,
@@ -144,13 +149,13 @@ pub struct ContinuityBuilder {
 /// The cause a carry's flags alone imply (SC-30c, SC-31).
 fn cause_from_carry(carry: &DropCarry) -> GapCause {
     if carry.flags.contains(BlockFlags::RESTARTED) {
-        GapCause::OverflowRestart
+        GapCause::OverflowRestart {}
     } else if carry.flags.contains(BlockFlags::SEQ_DISCONTINUITY) {
-        GapCause::SequenceError
+        GapCause::SequenceError {}
     } else if carry.flags.contains(BlockFlags::GAP_BEFORE) {
-        if carry.lost.is_some() { GapCause::Stream } else { GapCause::Unknown }
+        if carry.lost.is_some() { GapCause::Stream {} } else { GapCause::Unknown {} }
     } else {
-        GapCause::LinkDrop
+        GapCause::LinkDrop {}
     }
 }
 
@@ -188,11 +193,6 @@ impl ContinuityBuilder {
         }
     }
 
-    /// Whether this path can lose blocks (SC-30).
-    pub fn is_lossless(&self) -> bool {
-        self.lossless
-    }
-
     /// Folds one block header in, together with the [`DropCarry`] the consumer read
     /// from its link (empty on a lossless path).
     ///
@@ -210,13 +210,15 @@ impl ContinuityBuilder {
         if h.first_sample_time.domain != self.domain {
             // SC-30: a rate change starts a new SampleClock (TM-13c), not a gap.
             return Err((
-                StreamError::DomainChanged { from: self.domain, to: h.first_sample_time.domain },
+                StreamError::DomainChanged { from: self.domain, to: h.first_sample_time.domain,
+                },
                 carry,
             ));
         }
         if h.channels != self.channels {
             return Err((
-                StreamError::ChannelsChanged { from: self.channels, to: h.channels },
+                StreamError::ChannelsChanged { from: self.channels, to: h.channels,
+                },
                 carry,
             ));
         }
@@ -269,21 +271,21 @@ impl ContinuityBuilder {
                             start: expected,
                             len: jump,
                             lost: None,
-                            cause: GapCause::LinkDrop,
+                            cause: GapCause::LinkDrop {},
                             link_dropped: dropped,
                         });
                     } else {
                         let cause = if flags.contains(BlockFlags::RESTARTED) {
-                            GapCause::OverflowRestart
+                            GapCause::OverflowRestart {}
                         } else if flags.contains(BlockFlags::SEQ_DISCONTINUITY) {
-                            GapCause::SequenceError
+                            GapCause::SequenceError {}
                         } else {
                             match lost {
-                                None => GapCause::Unknown,
+                                None => GapCause::Unknown {},
                                 Some(n) if n < jump && carried.blocks == 0 && !self.lossless => {
                                     GapCause::Mixed { stream_lost: n }
                                 }
-                                Some(_) => GapCause::Stream,
+                                Some(_) => GapCause::Stream {},
                             }
                         };
                         self.gaps.push(Gap {
@@ -318,18 +320,22 @@ impl ContinuityBuilder {
                 if let Some((start, cause)) = self.pending[i].take() {
                     // SC-31a: the break's extent is known now that the channel is back.
                     let len = t.ticks.saturating_sub(start.ticks).max(0) as u64;
-                    self.channel_gaps.push(ChannelGap { channel: c, start, len, cause });
+                    self.channel_gaps.push(ChannelGap { channel: c, start, len, cause,
+                    });
                 }
                 match self.open[i].as_mut() {
                     Some(seg) => seg.len = end.ticks.saturating_sub(seg.start.ticks).max(0) as u64,
-                    None => self.open[i] = Some(Segment { start: t, len: h.len as u64 }),
+                    None => {
+                        self.open[i] = Some(Segment { start: t, len: h.len as u64,
+                        })
+                    }
                 }
             } else {
                 // SC-31a: the flag on the block that DROPS the channel.
                 let cause = if h.flags.contains(BlockFlags::ALIGNMENT) {
-                    GapCause::Alignment
+                    GapCause::Alignment {}
                 } else {
-                    GapCause::Stream
+                    GapCause::Stream {}
                 };
                 if let Some(seg) = self.open[i].take() {
                     let at = TimePoint::new(self.domain, seg.start.ticks.saturating_add(seg.len as i64));
@@ -363,7 +369,8 @@ impl ContinuityBuilder {
             let i = c as usize;
             if let Some((start, cause)) = self.pending[i].take() {
                 let len = at.ticks.saturating_sub(start.ticks).max(0) as u64;
-                self.channel_gaps.push(ChannelGap { channel: c, start, len, cause });
+                self.channel_gaps.push(ChannelGap { channel: c, start, len, cause,
+                });
             }
         }
     }
@@ -404,7 +411,8 @@ impl ContinuityBuilder {
             let i = c as usize;
             if let Some((start, cause)) = self.pending[i].take() {
                 let len = end.ticks.saturating_sub(start.ticks).max(0) as u64;
-                self.channel_gaps.push(ChannelGap { channel: c, start, len, cause });
+                self.channel_gaps.push(ChannelGap { channel: c, start, len, cause,
+                });
             }
             if let Some(seg) = self.open[i].take() {
                 self.valid[i].push(seg);

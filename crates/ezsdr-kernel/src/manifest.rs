@@ -11,6 +11,7 @@ use crate::hash::{ContentHash, HashError};
 use crate::id::RunId;
 use crate::module_api::{ExecutionClass, Fidelity, ModuleRef, ProfileRef, Version};
 use crate::plan::{ExecutionPlan, PrepareReport};
+use crate::policy::Policy;
 use crate::run::{CleanupFailure, Lease, StopCause, Termination, TransitionRecord};
 use crate::spec::{Ident, Namespace};
 use crate::stream::ContinuityMap;
@@ -19,6 +20,7 @@ use crate::time::{ClockDomain, ClockRelation, SampleClockRecord, TimePoint};
 /// Large data is always by reference: a locator, a content hash and a size, never
 /// the bytes (RS-44, Vision §50, §51).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactRef {
     /// The artifact's name inside its Run (SB-17).
     pub id: Ident,
@@ -44,6 +46,7 @@ pub struct ArtifactRef {
 
 /// One `mark_artifact` reaction recorded against an artifact (RS-30).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactMark {
     /// Which kind triggered it (RS-30).
     pub kind: EventKind,
@@ -53,6 +56,7 @@ pub struct ArtifactMark {
 
 /// The `run` section of the envelope (RS-38).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RunSection {
     /// Which Run (RS-1).
     pub id: RunId,
@@ -72,6 +76,7 @@ pub struct RunSection {
 
 /// What kind of Run this is (RS-1, RS-12).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum RunKind {
     /// Driven by an explicit ExperimentSpec.
@@ -83,6 +88,7 @@ pub enum RunKind {
 /// The `spec` section: the body after migration, its hash, and — when it was
 /// migrated — the original version and hash (RS-38, SB-49).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpecSection {
     /// The hash of the body after migration (RS-45).
     pub hash: ContentHash,
@@ -94,9 +100,31 @@ pub struct SpecSection {
     pub original_hash: Option<ContentHash>,
 }
 
+impl SpecSection {
+    /// Builds the Manifest section from the document as submitted and the body
+    /// after migration. The original version and hash are recorded only when the
+    /// two declare different versions, i.e. when a migration actually ran (SB-49,
+    /// RS-38); the version is read from the document, so it cannot disagree with it.
+    pub fn migrated(
+        body: serde_json::Value,
+        original_body: &serde_json::Value,
+    ) -> Result<SpecSection, HashError> {
+        let was_migrated = original_body.get("version") != body.get("version");
+        Ok(SpecSection {
+            hash: ContentHash::of(&body)?,
+            original_version: was_migrated
+                .then(|| original_body.get("version")?.as_u64()?.try_into().ok())
+                .flatten(),
+            original_hash: was_migrated.then(|| ContentHash::of(original_body)).transpose()?,
+            body,
+        })
+    }
+}
+
 /// The `binding` section: the BindingProfile body including its `environment`,
 /// recorded verbatim (RS-38, SB-27).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BindingSection {
     /// The hash of the body (RS-45).
     pub hash: ContentHash,
@@ -106,6 +134,7 @@ pub struct BindingSection {
 
 /// One Module the Run used (RS-38).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ModuleEntry {
     /// Which Module and version (MA-31).
     pub module: ModuleRef,
@@ -117,6 +146,7 @@ pub struct ModuleEntry {
 
 /// The `clocks` section (RS-38, TM-13d, TM-18).
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ClocksSection {
     /// Every registered domain (TM-12).
     #[serde(default)]
@@ -132,6 +162,7 @@ pub struct ClocksSection {
 /// The `events` section: the complete counter table, including rows whose count is
 /// zero, and the bodies that were delivered (RS-33, RS-38).
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EventsSection {
     /// Every `(source, kind)` row reachable in the plan (RS-33).
     #[serde(default)]
@@ -143,6 +174,7 @@ pub struct EventsSection {
 
 /// The `termination` section (RS-3, RS-8a, RS-10).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TerminationSection {
     /// How it ended (RS-3).
     pub reason: Termination,
@@ -162,6 +194,7 @@ pub struct TerminationSection {
 
 /// The `prepare` section (RS-38, SB-41).
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PrepareSection {
     /// One report per fragment (SB-41).
     #[serde(default)]
@@ -184,6 +217,7 @@ pub struct PrepareSection {
 ///
 /// Rule: RS-38…RS-47. Vision §50, Finding 19.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     /// Mandatory document major, as on every other Kernel document; Phase 1 supports
     /// exactly `{1}` and [`crate::spec::check_version`] is what refuses another
@@ -191,6 +225,10 @@ pub struct Manifest {
     pub version: u32,
     /// Identity, class, fidelity and the transition sequence (RS-38).
     pub run: RunSection,
+    /// The resolved event reactions and severities for this Run; absent when the Run
+    /// failed before its Policy compiled, as `plan` is absent when it failed before
+    /// `plan()` (RS-1, RS-3, RS-26, RS-38).
+    pub policy: Option<Policy>,
     /// The Spec after migration, with its hashes (RS-38, SB-49).
     pub spec: SpecSection,
     /// The BindingProfile, environment included (RS-38, SB-27).
@@ -252,7 +290,8 @@ pub fn mark_open_artifacts(open: &mut [ArtifactRef], kind: EventKind, time: Time
     // Every artifact open at that moment, with no exception: MA-26 makes `partial`
     // the ordinary state of an artifact still open on an abort.
     for a in open.iter_mut() {
-        a.marks.push(ArtifactMark { kind: kind.clone(), time });
+        a.marks.push(ArtifactMark { kind: kind.clone(), time,
+        });
     }
 }
 
@@ -298,7 +337,8 @@ impl Manifest {
         crate::spec::check_version(doc)?;
         crate::spec::check_ascii_keys(doc)?;
         serde_json::from_value(doc.clone())
-            .map_err(|e| crate::spec::SpecError::Structural { reason: format!("RS-38: {e}") })
+            .map_err(|e| crate::spec::SpecError::Structural { reason: format!("RS-38: {e}"),
+        })
     }
 
     /// Computes the Manifest's own hash over the body with `hash` removed, and
@@ -343,9 +383,7 @@ impl Manifest {
         // and it passes no `from_json`, so OV-15's ASCII key rule is checked here.
         // Left to hashing time, `seal()` failed at cleanup step 8 — a Run that had
         // already transmitted and produced no Manifest, against RS-11 (SB-9a).
-        crate::spec::check_ascii_keys(&content).map_err(|e| {
-            crate::run::RunError::SectionKeyNotAscii { key: e.to_string() }
-        })?;
+        crate::spec::check_ascii_keys(&content).map_err(|e| crate::run::RunError::SectionKeyNotAscii { key: e.to_string() })?;
         self.sections.insert(section, content);
         Ok(())
     }

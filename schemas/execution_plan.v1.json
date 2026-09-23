@@ -25,6 +25,7 @@
       "type": "string"
     },
     "DataLinkDecl": {
+      "additionalProperties": false,
       "description": "A declared link: its endpoints, the contract it carries, its policy and its\ncapacity in blocks (SC-19).",
       "properties": {
         "capacity": {
@@ -65,6 +66,7 @@
       "type": "object"
     },
     "DataLinkId": {
+      "additionalProperties": false,
       "description": "Identifies a [`DataLink`](crate::stream::DataLinkDecl) instance.\n\nRule: SC-18 (`02-stream-contract.md`), X7.",
       "properties": {
         "local": {
@@ -85,6 +87,7 @@
       "type": "object"
     },
     "DeclaredCost": {
+      "additionalProperties": false,
       "description": "A number the Link Module declares, not a measurement. The Core reports it and\nnever uses it to choose a placement; Phase 1 neither measures nor optimises.\n\nRule: SB-40. Vision §20, §31, §63.",
       "properties": {
         "cost": {
@@ -130,6 +133,7 @@
       ]
     },
     "Fragment": {
+      "additionalProperties": false,
       "description": "One unit of work handed to one Module at `prepare`, in dependency order (SB-39).",
       "properties": {
         "after": {
@@ -148,8 +152,8 @@
           "description": "The fragment's name (SB-1)."
         },
         "instance": {
-          "$ref": "#/$defs/ModuleId",
-          "description": "Which Module instance performs it (SB-22)."
+          "$ref": "#/$defs/ModuleRef",
+          "description": "Which exact Module version performs it, as its binding names it (SB-22, D78)."
         },
         "role": {
           "$ref": "#/$defs/Role",
@@ -172,6 +176,25 @@
       "description": "Names a Module implementation in the registry (`05-module-api.md` MA-19).\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: MA-19.",
       "type": "string"
     },
+    "ModuleRef": {
+      "additionalProperties": false,
+      "description": "A Module by id and version (MA-31).",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ModuleId",
+          "description": "The Module (MA-19)."
+        },
+        "version": {
+          "$ref": "#/$defs/Version",
+          "description": "Its version (MA-33)."
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ],
+      "type": "object"
+    },
     "NodeId": {
       "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-19.",
       "format": "uint32",
@@ -179,6 +202,7 @@
       "type": "integer"
     },
     "PortRef": {
+      "additionalProperties": false,
       "description": "Names one port of one component instance (SC-1).",
       "properties": {
         "component": {
@@ -225,9 +249,40 @@
           "type": "string"
         }
       ]
+    },
+    "Version": {
+      "additionalProperties": false,
+      "description": "A release-only version. Module and Vocabulary versions carry a minor and a patch;\ndocuments do not, which is decision B7 of `03-spec-and-binding.md`.\n\nRule: MA-33, decision B7.",
+      "properties": {
+        "major": {
+          "description": "Breaking changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "description": "Additive changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "patch": {
+          "description": "Fixes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "What `plan(spec, binding)` produces (SB-39).",
   "properties": {
     "authority": {
@@ -263,7 +318,7 @@
       "type": "array"
     },
     "links": {
-      "description": "The DataLink declarations (SC-19).",
+      "description": "The DataLink declarations: the graph's links, then the output feeds, numbered\non from them (SC-19, MA-27a, D75).",
       "items": {
         "$ref": "#/$defs/DataLinkDecl"
       },

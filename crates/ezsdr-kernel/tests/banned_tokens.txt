@@ -4,8 +4,9 @@
 # in audit §13's module-api line, so a literal scan for §6's phrases would fail the
 # crate on its first run and the check would be disabled within a week.
 #
-# Matching is case-insensitive and on identifier boundaries, so `uncertainty` does
-# not match `taint` and `check_replay_target` does not match `replay`. A line that
+# Matching is case-insensitive and on identifier boundaries, where `_` is a
+# boundary: `uncertainty` does not match `taint`, but `check_replay_target` does
+# match `replay`, which is why its declaration line cites OV-23a. A line that
 # cites `OV-23a` is exempt: that is the escape hatch OV-23 names, for the places
 # where a banned word is the right word for a different concept.
 uhd

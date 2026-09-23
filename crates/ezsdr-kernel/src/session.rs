@@ -6,12 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::binding::{AdmissionCheckRegistry, BindingProfile, CheckStage, Violation};
-use crate::event::{Action, ActionId, ActionTemplate};
+use crate::event::{Action, ActionId};
 use crate::hash::ContentHash;
 use crate::id::ResourceId;
 use crate::module_api::{
-    CompileRule, ModuleRegistry, Role, UpdateClass,
-};
+    CompileRule, ModuleRegistry, Role, UpdateClass};
 use crate::plan::{apply_coercion, coercion_policy};
 use crate::run::RunError;
 use crate::spec::{
@@ -36,6 +35,7 @@ use crate::time::{AbsoluteDeadline, TimePoint};
 ///
 /// Rule: RS-13, RS-13a, decision R3.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionAction {
     /// Generic over a namespaced key and value (RS-13a).
@@ -69,7 +69,7 @@ pub enum SessionAction {
         target: Option<ResourceId>,
     },
     /// Give up the Lease (RS-14).
-    Release,
+    Release {},
     /// Reclaim a Detached Lease. Adoption by run id alone would let any client
     /// seize a live transmitter (RS-24).
     Adopt {
@@ -77,7 +77,7 @@ pub enum SessionAction {
         token: String,
     },
     /// Extend a renewable Lease (RS-24).
-    Renew,
+    Renew {},
     /// Create a child Run (RS-14, RS-25).
     RunChild {
         /// The child's Spec, by hash (RS-45).
@@ -87,6 +87,7 @@ pub enum SessionAction {
 
 /// What `admit()` decided about one Session Action (RS-15, RS-16).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Outcome {
     /// It passed every check and was dispatched (RS-16).
@@ -110,6 +111,7 @@ pub enum Outcome {
 
 /// One entry of the action log (RS-15).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LogEntry {
     /// Dense: a rejected Action occupies one too, because a log with holes cannot
     /// be replayed or audited (RS-15).
@@ -166,7 +168,8 @@ impl SessionLog {
     ) -> Result<u32, SpecError> {
         action.check_values()?;
         let seq = self.entries.len() as u32;
-        self.entries.push(LogEntry { seq, time, action, outcome });
+        self.entries.push(LogEntry { seq, time, action, outcome,
+        });
         Ok(seq)
     }
 
@@ -191,7 +194,8 @@ impl SessionLog {
         if recorded == target {
             Ok(())
         } else {
-            Err(RunError::ReplayDivergence { field: "binding.hash".to_owned() })
+            Err(RunError::ReplayDivergence { field: "binding.hash".to_owned(),
+            })
         }
     }
 }
@@ -255,7 +259,8 @@ impl Admitter<'_> {
             return Err(violations);
         }
         // 2. the coercion policy (SB-45, SB-46)
-        let mut out = Admitted { coercions: coercions.to_vec(), warnings: Vec::new() };
+        let mut out = Admitted { coercions: coercions.to_vec(), warnings: Vec::new(),
+        };
         for c in coercions {
             let policy = coercion_policy(
                 self.spec_coercion.get(&c.key).copied(),
@@ -392,7 +397,8 @@ pub fn compile(
     match action {
         SessionAction::SetParameter { target, key, value } => {
             let class = declared_class(key, declared_classes, registry).ok_or_else(|| {
-                reject("ezsdr.update_class", format!("RS-17: {key} has no declared update class"))
+                reject("ezsdr.update_class", format!("RS-17: {key} has no declared update class"),
+                )
             })?;
             // RS-19 / finding OQ2: a bare `SetParameter` carries no time, so the
             // Action carries none either and the class applies it at its first
@@ -407,9 +413,11 @@ pub fn compile(
                 at: None,
             });
         }
-        SessionAction::Vocabulary { ns, verb, target, at, params } => {
+        SessionAction::Vocabulary { ns, verb, target, at, params,
+        } => {
             let decl = registry.verb(ns, verb).ok_or_else(|| {
-                reject("ezsdr.vocabulary", format!("RS-13a: no loaded Vocabulary claims {ns}.{verb}"))
+                reject("ezsdr.vocabulary", format!("RS-13a: no loaded Vocabulary claims {ns}.{verb}"),
+                )
             })?;
             let at = match at {
                 Some(t) => *t,
@@ -466,9 +474,7 @@ pub fn compile(
                     // `rec` produced one `ResourceId` meaning two things, which no
                     // dispatcher can route and no `Event.source` can attribute. The
                     // `sink/` prefix keeps them disjoint by construction (SB-22).
-                    let recorder = ResourceId::parse(&format!("sink/{recorder}")).map_err(|e| {
-                        reject("ezsdr.placement", format!("RS-14: {e}"))
-                    })?;
+                    let recorder = ResourceId::parse(&format!("sink/{recorder}")).map_err(|e| reject("ezsdr.placement", format!("RS-14: {e}")))?;
                     // RS-14, RS-19: `sink.capture` compiles to a **timed**
                     // UpdateParameter. `at` is either the instant the caller named
                     // or `earliest`, recorded above as a coercion; dropping it here
@@ -492,7 +498,8 @@ pub fn compile(
                         at: Some(AbsoluteDeadline::new(at)),
                     });
                 }
-                CompileRule::TxBurst { repeat, late_policy } => {
+                CompileRule::TxBurst { repeat, late_policy,
+                } => {
                     let waveform = waveform.ok_or_else(|| {
                         reject(
                             "ezsdr.artifact",
@@ -509,7 +516,7 @@ pub fn compile(
                         metadata: params.clone(),
                     });
                 }
-                CompileRule::PeripheralCommand => {
+                CompileRule::PeripheralCommand {} => {
                     out.actions.push(Action::PeripheralCommand {
                         target: target.clone(),
                         verb: verb.clone(),
@@ -517,20 +524,23 @@ pub fn compile(
                         at: Some(AbsoluteDeadline::new(at)),
                     });
                 }
-                CompileRule::None => {}
+                CompileRule::None {} => {}
             }
         }
         SessionAction::Stop { target: Some(t) } => {
-            out.actions.push(Action::Stop { target: Some(t.clone()) });
+            out.actions.push(Action::Stop { target: Some(t.clone()),
+            });
         }
         SessionAction::Stop { target: None } => out.control = Some(ControlOp::StopRun),
-        SessionAction::Release => out.control = Some(ControlOp::Release),
+        SessionAction::Release {} => out.control = Some(ControlOp::Release),
         SessionAction::Adopt { token } => {
-            out.control = Some(ControlOp::Adopt { token: token.clone() })
+            out.control = Some(ControlOp::Adopt { token: token.clone(),
+            })
         }
-        SessionAction::Renew => out.control = Some(ControlOp::Renew),
+        SessionAction::Renew {} => out.control = Some(ControlOp::Renew),
         SessionAction::RunChild { spec_hash } => {
-            out.control = Some(ControlOp::RunChild { spec_hash: spec_hash.clone() })
+            out.control = Some(ControlOp::RunChild { spec_hash: spec_hash.clone(),
+            })
         }
     }
     Ok(out)
@@ -538,10 +548,11 @@ pub fn compile(
 
 // ---------------------------------------------------------------- the implicit Spec
 
-/// Builds a Session's implicit ExperimentSpec from the BindingProfile: one resource
-/// per **Provider** binding with empty `requires`, and one **output** per **Sink**
-/// binding, taking its artifact kind from the bound Sink's first declared
-/// `artifact_kinds` and its `feed` from the binding.
+/// Builds a Session's implicit ExperimentSpec from the BindingProfile. The profile
+/// selects each binding's role (D87): a binding with `feed` is one **output**, taking
+/// its artifact kind from the bound Sink's first declared `artifact_kinds` and its
+/// `feed` from the binding; any other binding whose Module holds Provider, and that
+/// no Island names as its executor, is one resource with empty `requires`.
 ///
 /// The Sink clause is not a convenience: RS-4 forbids adding a recorder while the
 /// Run is `Running` and RS-14 refuses a capture with no recorder, so an implicit
@@ -562,76 +573,99 @@ pub fn implicit_spec(
     sinks: &BTreeMap<Ident, &dyn crate::module_api::Sink>,
 ) -> Result<ExperimentSpec, SpecError> {
     let mut spec = ExperimentSpec { version: 1, ..ExperimentSpec::default() };
-    for (name, binding) in &profile.bindings {
-        // RS-12: one resource per **Provider** binding. A Sink binding becomes an
-        // output below and an Executor binding names an Island, so neither is a
-        // resource (SB-22).
-        let holds_provider = registry
-            .modules()
-            .find(|m| m.id == binding.module)
-            .is_some_and(|m| m.roles.contains(&Role::Provider));
-        if !holds_provider {
-            continue;
-        }
-        // The resource's `kind` is the bound instance's own root kind. Inventing a
-        // Kernel kind here would give the matcher (SB-34) nothing to bind to, and
-        // would put a Kernel-owned vocabulary word where RS-12 asks only for "one
-        // resource per binding with empty `requires`".
-        let provider = providers.get(name).ok_or_else(|| SpecError::Structural {
-            reason: format!("RS-12: no Provider instance for binding {name}"),
-        })?;
-        spec.resources.insert(
-            name.clone(),
-            ResourceReq {
-                kind: provider.instance().tree.kind.clone(),
-                requires: BTreeMap::new(),
-                needs: BTreeMap::new(),
-                extensions: BTreeMap::new(),
-            },
-        );
-    }
-    // RS-12: one output per Sink binding, taking its `feed` from the binding
-    // (SB-22). A Sink is bound and never placed, so nothing is inserted into
-    // `graph.components` here — and the output carries the link its recorder is fed
-    // by, which the placed-component version had no way to express, so a Session's
-    // capture recorded nothing (findings D17, N6).
-    for (name, binding) in &profile.bindings {
-        let is_sink = registry
-            .modules()
-            .find(|m| m.id == binding.module)
-            .is_some_and(|m| m.roles.contains(&Role::Sink));
-        if !is_sink {
-            continue;
-        }
-        let feed = binding.feed.clone().ok_or_else(|| SpecError::Structural {
+    // SB-22 / D78: a binding pins an exact Module version. One that names no
+    // registered version holds no role, and skipping it below would leave the
+    // Session silently without that resource or output.
+    if let Some((name, binding)) = profile
+        .bindings
+        .iter()
+        .find(|(_, b)| !registry.modules().any(|m| crate::module_api::is_module(m, &b.module)))
+    {
+        return Err(SpecError::Structural {
             reason: format!(
-                "SB-22: Sink binding {name} carries no `feed`, so RS-12 has no port to record"
+                "SB-22: binding {name} names Module {} {}, which is not registered",
+                binding.module.id, binding.module.version
             ),
-        })?;
-        // The output's `kind` is an **artifact** kind, which SB-17 checks against
-        // the Sink's `artifact_kinds`; the implicit Spec takes the first the bound
-        // Sink declares, because a Session states no preference (RS-12, RS-44).
-        let sink = sinks.get(name).ok_or_else(|| SpecError::Structural {
-            reason: format!("SB-22: no Sink instance for binding {name}"),
-        })?;
-        let kind = sink.descriptor().artifact_kinds.first().cloned().ok_or_else(|| {
-            SpecError::Structural {
-                reason: format!("RS-12: Sink binding {name} declares no artifact kind"),
-            }
-        })?;
-        spec.outputs.push(crate::spec::OutputReq {
-            id: name.clone(),
-            kind,
-            feed,
-            params: BTreeMap::new(),
         });
     }
+    // RS-12 / D87: one binding name plays exactly one role, and in a Session the
+    // profile — not the Module's role list — says which: an Island's `executor` name
+    // is its Executor, a binding with `feed` is a Sink, and any other binding whose
+    // Module holds Provider is a resource. The role list is the permission, checked
+    // again by `validate`; the profile is the selection. Reading the role list alone
+    // made a Provider+Sink Module unbindable under any arrangement (MA-1).
+    let island_executors: std::collections::BTreeSet<&Ident> =
+        profile.placements.islands.iter().map(|i| &i.executor).collect();
+    for (name, binding) in &profile.bindings {
+        if island_executors.contains(name) {
+            // An Island names it, so it plays Executor; a `feed` on it would be a
+            // second role and an unread source of truth (SB-22).
+            if binding.feed.is_some() {
+                return Err(SpecError::Structural {
+                    reason: format!(
+                        "SB-22: binding {name} is an Island's executor and carries a `feed`; one binding name plays one role"
+                    ),
+                });
+            }
+            continue;
+        }
+        let roles = &registry
+            .modules()
+            .find(|m| crate::module_api::is_module(m, &binding.module))
+            .expect("every binding's Module was checked registered above")
+            .roles;
+        if binding.feed.is_some() && !roles.contains(&Role::Sink) {
+            // As for a resource or an executor, a role the Module does not hold is a
+            // role error, reported before any instance is looked up (MA-1, SB-22).
+            return Err(SpecError::WrongBindingRole {
+                name: name.clone(),
+                expected: "Sink".to_owned(),
+                module: format!("{} {}", binding.module.id, binding.module.version),
+            });
+        }
+        if let Some(feed) = &binding.feed {
+            // One output per Sink binding, taking its `feed` from the binding
+            // (SB-22). A Sink is bound and never placed, so nothing is inserted into
+            // `graph.components` — and the output carries the link its recorder is
+            // fed by (findings D17, N6). Its `kind` is an **artifact** kind, which
+            // SB-17 checks against the Sink's `artifact_kinds`; the implicit Spec
+            // takes the first the bound Sink declares, because a Session states no
+            // preference (RS-12, RS-44).
+            let sink = sinks.get(name).ok_or_else(|| SpecError::Structural {
+                reason: format!("SB-22: no Sink instance for binding {name}"),
+            })?;
+            let kind = sink.descriptor().artifact_kinds.first().cloned().ok_or_else(|| {
+                SpecError::Structural {
+                    reason: format!("RS-12: Sink binding {name} declares no artifact kind"),
+                }
+            })?;
+            spec.outputs.push(crate::spec::OutputReq {
+                id: name.clone(),
+                kind,
+                feed: feed.clone(),
+                params: BTreeMap::new(),
+            });
+        } else if roles.contains(&Role::Provider) {
+            // The resource's `kind` is the bound instance's own root kind. Inventing
+            // a Kernel kind here would give the matcher (SB-34) nothing to bind to,
+            // and would put a Kernel-owned vocabulary word where RS-12 asks only for
+            // "one resource per binding with empty `requires`".
+            let provider = providers.get(name).ok_or_else(|| SpecError::Structural {
+                reason: format!("RS-12: no Provider instance for binding {name}"),
+            })?;
+            spec.resources.insert(
+                name.clone(),
+                ResourceReq {
+                    kind: provider.instance().tree.kind.clone(),
+                    requires: BTreeMap::new(),
+                    needs: BTreeMap::new(),
+                    extensions: BTreeMap::new(),
+                },
+            );
+        }
+        // Anything else — a feedless Sink-only binding, an Executor no Island names —
+        // plays no role unless `authority` names it (a dedicated Authority, D92),
+        // which `validate` refuses on both Run kinds (SB-22, D89).
+    }
     Ok(spec)
-}
-
-
-/// An Action that a Spec scheduled, resolved at `arm`: the template's `SpecTime`
-/// becomes an `AbsoluteDeadline` in the stream's SampleClock (SB-43, RS-49a).
-pub fn resolve_scheduled(template: ActionTemplate, at: AbsoluteDeadline) -> Action {
-    template.resolve(at)
 }

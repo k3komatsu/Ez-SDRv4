@@ -4,6 +4,7 @@
       "description": "What a Provider declares it can do for a key (spec 05 `ProviderInstance`).\n\nRule: SB-6.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Exactly this value.",
           "properties": {
             "kind": {
@@ -22,6 +23,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "A continuous range, inclusive.",
           "properties": {
             "kind": {
@@ -45,6 +47,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "A discrete set.",
           "properties": {
             "kind": {
@@ -68,6 +71,7 @@
       ]
     },
     "MemoryDomainId": {
+      "additionalProperties": false,
       "description": "Identifies a memory domain a [`SampleBlock`](crate::stream::SampleBlock) lives in.\n\nRule: SC-6 (`02-stream-contract.md`), X7.",
       "properties": {
         "local": {
@@ -84,6 +88,29 @@
       "required": [
         "node",
         "local"
+      ],
+      "type": "object"
+    },
+    "ModuleId": {
+      "description": "Names a Module implementation in the registry (`05-module-api.md` MA-19).\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: MA-19.",
+      "type": "string"
+    },
+    "ModuleRef": {
+      "additionalProperties": false,
+      "description": "A Module by id and version (MA-31).",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ModuleId",
+          "description": "The Module (MA-19)."
+        },
+        "version": {
+          "$ref": "#/$defs/Version",
+          "description": "Its version (MA-33)."
+        }
+      },
+      "required": [
+        "id",
+        "version"
       ],
       "type": "object"
     },
@@ -133,10 +160,41 @@
         }
       ],
       "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+    },
+    "Version": {
+      "additionalProperties": false,
+      "description": "A release-only version. Module and Vocabulary versions carry a minor and a patch;\ndocuments do not, which is decision B7 of `03-spec-and-binding.md`.\n\nRule: MA-33, decision B7.",
+      "properties": {
+        "major": {
+          "description": "Breaking changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "description": "Additive changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "patch": {
+          "description": "Fixes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "What an Executor declares. Admission reads `kind`, `memory_domains` and\n`impl_kinds`; everything else is opaque (MA-18).",
+  "additionalProperties": false,
+  "description": "What an Executor declares. Admission reads `kind`, `memory_domains` and\n`impl_kinds`, and `plan()` compares `module` with the binding; everything else is\nopaque (MA-18, D82).",
   "properties": {
     "capabilities": {
       "additionalProperties": {
@@ -163,9 +221,14 @@
         "$ref": "#/$defs/MemoryDomainId"
       },
       "type": "array"
+    },
+    "module": {
+      "$ref": "#/$defs/ModuleRef",
+      "description": "The exact Module version this instance is; `plan()` refuses one that differs\nfrom its binding (SB-22, MA-38, D82)."
     }
   },
   "required": [
+    "module",
     "kind",
     "memory_domains",
     "impl_kinds"

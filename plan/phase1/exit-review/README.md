@@ -19,8 +19,8 @@ One file per document, so the rows stay beside the rules they are about.
 | [01-time-model.md](01-time-model.md) | `01-time-model.md` (`TM-n`) | 31 |
 | [02-stream-contract.md](02-stream-contract.md) | `02-stream-contract.md` (`SC-n`) | 47 |
 | [03-spec-and-binding.md](03-spec-and-binding.md) | `03-spec-and-binding.md` (`SB-n`) | 52 |
-| [04-run-and-session.md](04-run-and-session.md) | `04-run-and-session.md` (`RS-n`) | 57 |
-| [05-module-api.md](05-module-api.md) | `05-module-api.md` (`MA-n`) | 47 |
+| [04-run-and-session.md](04-run-and-session.md) | `04-run-and-session.md` (`RS-n`) | 59 |
+| [05-module-api.md](05-module-api.md) | `05-module-api.md` (`MA-n`) | 51 |
 
 ## Row format
 
@@ -35,44 +35,41 @@ One file per document, so the rows stay beside the rules they are about.
   obligation the assertions actually check, so a reader can compare it with the rule
   without opening the file. `UNCERTAIN: …` where the match is arguable.
 
-A `GAP` or an `UNCERTAIN` row is a finding for the exit review, not a defect to fix in
-passing: the table's job is to make the coverage visible rule by rule.
+A `GAP` or an `UNCERTAIN` assertion is a finding for the exit review, not a defect to fix
+in passing: the table's job is to make the coverage visible rule by rule.
 
-## Result (2026-09-22)
+## Result (2026-09-23, after D69–D94)
 
-**261 rows for 261 rules — every rule of all six documents has a disposition.**
+**267 rows for 267 rules — every rule of all six documents has a disposition.** The six new lettered
+rules split Run/coordinator, Executor/Link and Link-implementation responsibilities by phase
+(D56–D59, D74).
 
 | Disposition | Count |
 |---|---|
-| `default` (a Kernel item plus at least one Phase 1 test) | 206 |
-| `process` (a document, `Cargo.toml` or the test tree) | 18 |
-| `producer` (the Module author's obligation) | 8 |
-| `forward` (a later phase) | 6 |
-| `withdrawn` (OV-1 keeps the number) | 6 |
+| `default` (a Kernel item plus at least one Phase 1 test) | 215 |
+| `process` (a document, `Cargo.toml` or the test tree) | 20 |
+| `producer` (the Module author's obligation) | 13 |
+| `forward` (a later phase) | 10 |
+| `withdrawn` (OV-1 keeps the number) | 7 |
 | `consumer` | 1 |
-| **`GAP`** (nothing carries the obligation) | **15** |
-| `UNCERTAIN` as the disposition itself | 1 (OV-3) |
+| `default` derivation + `producer` flag-setting (SC-31a) | 1 |
+| **`GAP`** (nothing carries the obligation) | **0** |
+| `UNCERTAIN` as the disposition itself | 0 |
 
-A further **39 assertion cells** carry an `UNCERTAIN:` note: the rule is carried, but
-only in part, or by a test the rule does not cite.
+A further **37 assertion cells** carry an `UNCERTAIN:` note: the rule has a carrier, but
+one or more clauses remain partial or are carried by a test the rule does not cite.
 
-**Criterion 2 is not yet met.** The table it asks for now exists and is complete, which
-is what makes the rest visible: 15 rules have no carrier at all, and OV-3 — the rule that
-defines this table — has no settled disposition of its own, because D38's `process`
-marker was written for OV-4…OV-19 and excludes it.
+**No rule is left without a disposition or carrier.** The 37 `UNCERTAIN:` notes are the remaining
+partial-coverage findings; they are not unassigned rules and remain visible for the acceptance review.
 
-### The 15 `GAP` rules
+### Former `GAP` rules — resolved by D51–D68
 
-`OV-2` · `SC-1` · `SC-5` · `SC-6` · `SC-7` · `SB-49` · `RS-1` · `RS-11` · `RS-32a` ·
-`MA-3` · `MA-8` · `MA-16` · `MA-19` · `MA-27` · `MA-28`
-
-Two shapes dominate. **A type exists and nothing reads it**: `RS-32a`'s `hot_layout` is
-`None` everywhere with no reader in `src/`, and `SB-49`'s `original_version` /
-`original_hash` are never set to `Some`, which is the shape D40 withdrew
-`constraints_hit` for. **The subject does not exist yet**: `MA-27`/`MA-28` are about Link
-Modules and nothing implements `Link`; `SC-5`'s PerformanceEnvelope is Phase 2's. The
-second shape is a candidate for a `forward` marker rather than a gap, but only the owner
-may add one — the rules as written name Phase 1 behaviour.
+The 15 baseline `GAP`s and OV-3's unassigned disposition have been resolved. The adopted carriers
+are recorded in the rows above: schema and API gates for SC-1/SC-7/MA-16, migration provenance for
+SB-49, compiled Policy and RunId assertions for RS-1, cleanup reachability for RS-11, and selected
+Link descriptor registration/admission for MA-28/MA-39. Module-author obligations are marked
+`producer`; coordinator work is marked `forward`; `RS-32a` is withdrawn and `OV-2`/`OV-3` are
+`process` obligations. The summary table carries the full disposition counts.
 
 ### The `SPEC-DEFECT` rules — all resolved 2026-09-22
 

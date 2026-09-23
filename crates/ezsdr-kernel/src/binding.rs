@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::{MemoryDomainId, ModuleId, ResourceId};
-use crate::module_api::{IslandDecl, ProfileRef};
+use crate::contract::PortRef;
+use crate::id::{MemoryDomainId, ResourceId};
+use crate::module_api::{IslandDecl, ModuleRef, ProfileRef};
 use crate::spec::{
     CapabilityValue, Coercion, Constraint, Ident, Key, KeyDecl, Namespace, RejectedConstraint,
     SpecError, Value, ValueKind, Warning, check_top_level, check_version,
@@ -24,13 +25,19 @@ use crate::spec::{
 ///
 /// Rule: SB-22, SB-23.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Binding {
     /// The Module bound here: a Provider for a Spec resource, a Sink for an output
     /// id, an Executor for an Island's `executor` name. Named `module` rather than
     /// `provider` because all three roles are bound through this one map; Vision
     /// §8's illustrative YAML still writes `provider`, which 03 §9 records as a
-    /// Vision departure for §12 (SB-22, MA-25, MA-38).
-    pub module: ModuleId,
+    /// Vision departure for §12. It names the exact `{id, version}`, as
+    /// `LinkPlacement` does, and every bound instance declares the same `ModuleRef`
+    /// (a Provider's `instance()`, an Executor's or Sink's `descriptor()`), which
+    /// admission compares — a Provider's at `validate`, an Executor's at `plan()`, a
+    /// Sink's at both — so one profile hash cannot run two Module versions (SB-22,
+    /// MA-25, MA-38, D78, D82).
+    pub module: ModuleRef,
     /// Namespaced content the Provider interprets (SB-23).
     #[serde(default)]
     pub selector: BTreeMap<Ident, Value>,
@@ -49,6 +56,7 @@ pub struct Binding {
 // rather than placed (D17, D18). Kept out of the doc comment because that text is the
 // schema's `description` and OV-10 freezes it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ComponentPlacement {
     /// Which Island (SB-25).
     pub island: Ident,
@@ -56,20 +64,28 @@ pub struct ComponentPlacement {
     pub memory_domain: MemoryDomainId,
 }
 
-/// Which Link Module carries a graph link (SB-25).
+/// Which versioned Link Module carries one data link, named by its two ends: a
+/// graph link's `from` and `to`, or an output's feed port and `{output id, "in"}`.
+/// Naming the ends rather than a position means reordering `graph.links` cannot
+/// rebind a Link Module (SB-25, D76).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LinkPlacement {
-    /// The Link Module (MA-27).
-    pub link: ModuleId,
-    /// The memory domain it carries the blocks in (MA-39).
-    pub memory_domain: Option<MemoryDomainId>,
+    /// The Link Module (MA-27, MA-28).
+    pub link: ModuleRef,
+    /// The producer end (SB-25).
+    pub from: PortRef,
+    /// The consumer end (SB-25).
+    pub to: PortRef,
 }
 
 /// The Island declarations, the component assignment and the Link Module for each
-/// graph link. Every component of the Spec's graph appears in exactly one Island.
+/// data link — graph link or output feed. Every component of the Spec's graph
+/// appears in exactly one Island.
 ///
 /// Rule: SB-25.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Placements {
     /// The Islands (MA-38).
     #[serde(default)]
@@ -77,9 +93,10 @@ pub struct Placements {
     /// Component name to placement (SB-25).
     #[serde(default)]
     pub components: BTreeMap<Ident, ComponentPlacement>,
-    /// Link key to Link Module (SB-25).
+    /// One placement per data link — every graph link and every output feed —
+    /// each naming the link by its endpoints (SB-25, D76).
     #[serde(default)]
-    pub links: BTreeMap<String, LinkPlacement>,
+    pub links: Vec<LinkPlacement>,
 }
 
 /// How this requirement is met, at this site, for this run.
@@ -89,10 +106,12 @@ pub struct Placements {
 ///
 /// Rule: SB-21…SB-27.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BindingProfile {
     /// Mandatory positive integer; Phase 1 supports exactly `{1}` (SB-21, SB-47).
     pub version: u32,
-    /// Spec resource name to Binding (SB-22).
+    /// Binding name to Binding: a Spec resource, an output id or an Island's executor
+    /// name, each playing exactly one role (SB-22, D89).
     #[serde(default)]
     pub bindings: BTreeMap<Ident, Binding>,
     /// Which binding keeps time; may be omitted when exactly one candidate exists
@@ -108,12 +127,14 @@ pub struct BindingProfile {
 
 /// Top-level fields a [`BindingProfile`] may carry (SB-21).
 pub const BINDING_TOP_LEVEL: &[&str] =
-    &["version", "bindings", "authority", "placements", "environment"];
+    &["version", "bindings", "authority", "placements", "environment",
+];
 
 /// The four `environment` sections the Kernel reads by name; every other section is
 /// opaque to it (SB-26).
 pub const KERNEL_SECTIONS: &[&str] =
-    &["ezsdr.time", "ezsdr.rf_path", "ezsdr.capture", "ezsdr.arm_order"];
+    &["ezsdr.time", "ezsdr.rf_path", "ezsdr.capture", "ezsdr.arm_order",
+];
 
 impl BindingProfile {
     /// Parses and validates the envelope: the version (SB-47) and the closed
@@ -124,7 +145,8 @@ impl BindingProfile {
         check_top_level(doc, BINDING_TOP_LEVEL)?;
         crate::spec::check_ascii_keys(doc)?;
         serde_json::from_value(doc.clone())
-            .map_err(|e| SpecError::Structural { reason: format!("SB-21: {e}") })
+            .map_err(|e| SpecError::Structural { reason: format!("SB-21: {e}"),
+        })
     }
 
     /// One `environment` section, or `None`. The Kernel reads the four of
@@ -188,7 +210,7 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
         Ok(true)
     };
     Ok(match (c, cap) {
-        (Constraint::Present, _) => true,
+        (Constraint::Present {}, _) => true,
 
         (Constraint::Eq { value: v }, CapabilityValue::One { value: x }) => same(v, x)?,
         (Constraint::Eq { value: v }, CapabilityValue::Range { min, max }) => {
@@ -205,7 +227,9 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
         (Constraint::Range { min, max }, CapabilityValue::One { value: x }) => {
             within(x, min.as_ref(), max.as_ref())?
         }
-        (Constraint::Range { min, max }, CapabilityValue::Range { min: cmin, max: cmax }) => {
+        (Constraint::Range { min, max }, CapabilityValue::Range { min: cmin, max: cmax,
+            },
+        ) => {
             // Propagated, not swallowed: a capability declared in the wrong kind is
             // malformed, not merely unsatisfiable (SB-6).
             let above = match min {
@@ -261,7 +285,9 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
             hit
         }
         (Constraint::Max { value: v }, CapabilityValue::One { value: x }) => cmp(x, v)? != Greater,
-        (Constraint::Max { value: v }, CapabilityValue::Range { min, .. }) => cmp(min, v)? != Greater,
+        (Constraint::Max { value: v }, CapabilityValue::Range { min, .. }) => {
+            cmp(min, v)? != Greater
+        }
         (Constraint::Max { value: v }, CapabilityValue::AnyOf { values: xs }) => {
             let mut hit = false;
             for x in xs {
@@ -299,6 +325,7 @@ pub fn check_constraint_kind(decl: &KeyDecl, c: &Constraint) -> Result<(), SpecE
 
 /// When an admission check runs (SB-29, SB-30).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStage {
     /// Against the requested configuration (SB-30).
@@ -314,6 +341,7 @@ pub enum CheckStage {
 
 /// What an admission check refused (SB-29).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Violation {
     /// Which check (SB-29).
     pub check: Namespace,
@@ -414,6 +442,7 @@ impl AdmissionCheckRegistry {
 ///
 /// Rule: SB-7, SB-38, SB-44.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PreviewedCoercion {
     /// The Spec resource whose `requires` map was coerced (SB-44).
     pub resource: Ident,
@@ -425,6 +454,7 @@ pub struct PreviewedCoercion {
 ///
 /// Rule: SB-38.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AdmissionResult {
     /// Spec resource name — and `needs` name — to the resolved `ResourceId` (SB-36).
     #[serde(default)]

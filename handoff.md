@@ -1,4 +1,4 @@
-# Ez-SDR v4 — Handoff (2026-09-22)
+# Ez-SDR v4 — Handoff (2026-09-23)
 
 次のセッション（人間・AI どちらでも）が最初に読む現状メモ．設計の中身は書かない．どこに何があり，何が終わっていて，次に何をするかだけ．
 開発時の恒常的なルールは [AGENTS.md](AGENTS.md)．
@@ -43,8 +43,8 @@ Phase 1 の Kernel crate は **実装済み**（Step 4 完了）．
 | crate | `crates/ezsdr-kernel` version `4.0.0-alpha.1`．`#![forbid(unsafe_code)]`，`#![warn(missing_docs)]` |
 | module | `id time contract stream hash module_api spec binding plan event policy run session manifest schema`（00-overview.md §5 のレイアウトどおり） |
 | 直接依存 | `serde` `serde_json` `schemars` `sha2` の4つだけ（exit criterion 6）．解決後のツリーは `Cargo.lock` で28 package（crate 自身を含む） |
-| test | 317 件．`spec_binding`(87) `stream_contract`(68) `run_session`(67) `time_model`(48) `module_api`(24) `hashing`(9) `kernel_surface`(9) `schema_freeze`(3) `event_hotpath`(1) `lib`(1) |
-| toolchain | `1.85.0` / `stable (1.98.1)` の両方で 317 passed．`cargo clippy --all-targets` も警告ゼロ |
+| test | 333 件．`spec_binding`(93) `stream_contract`(69) `run_session`(70) `time_model`(48) `module_api`(26) `hashing`(9) `kernel_surface`(12) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
+| toolchain | `1.85.0` / `stable (1.98.1)` の両方で 333 passed（2026-09-23，D92–D94 適用後）．`cargo +stable clippy --all-targets -- -D warnings` も通過 |
 | schemas | `schemas/` に45個の JSON Schema 2020-12 + `SCHEMA_CHANGELOG.md`．`schema_freeze` が byte 単位で凍結．再生成は `EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze` |
 | kernel surface | `tests/kernel_surface_allow.txt` が公開 item の allow-list（= レビュー用チェックリスト，`module::name` で key 付け）．`NEW:` 件数が OV-23b の Kernel 成長指標．banned token は `tests/banned_tokens.txt`（識別子内も検出，`OV-23a` を書いた行だけ免除） |
 
@@ -56,13 +56,14 @@ Vision §67 の Phase 1．詳細設計は [plan/phase1/](plan/phase1/)．計画�
 
 | spec | rule ID | 状態 |
 |---|---|---|
-| [01-time-model.md](plan/phase1/01-time-model.md) | TM-1..21（副番含め36） | Gate A 通過，実装済み |
-| [02-stream-contract.md](plan/phase1/02-stream-contract.md) | SC-1..32（副番含め48） | Gate A 通過，実装済み |
-| [03-spec-and-binding.md](plan/phase1/03-spec-and-binding.md) | SB-1..49（副番含め55） | Gate B 通過，実装済み |
-| [04-run-and-session.md](plan/phase1/04-run-and-session.md) | RS-1..52（副番含め57） | Gate B 通過，実装済み |
-| [05-module-api.md](plan/phase1/05-module-api.md) | MA-1..46 | Gate C 通過，実装済み |
+| [00-overview.md](plan/phase1/00-overview.md) | OV-1..23b（副番含め27） | criterion 2 の per-rule 表を含め更新済み |
+| [01-time-model.md](plan/phase1/01-time-model.md) | TM-1..21（副番含め31） | Gate A 通過，実装済み |
+| [02-stream-contract.md](plan/phase1/02-stream-contract.md) | SC-1..32（副番含め47） | Gate A 通過，実装済み |
+| [03-spec-and-binding.md](plan/phase1/03-spec-and-binding.md) | SB-1..49（副番含め52） | Gate B 通過，実装済み |
+| [04-run-and-session.md](plan/phase1/04-run-and-session.md) | RS-1..52（副番含め59） | Gate B 通過，実装済み |
+| [05-module-api.md](plan/phase1/05-module-api.md) | MA-1..46（副番含め51） | Gate C 通過，実装済み |
 
-6文書で261ルール（D47 で SB-15a を追加），欠番と未解決参照なし，撤回6件（SB-25a, SB-28, SB-32, RS-37, MA-4, MA-43 — OV-1 に従い番号は保持）．Gate A は敵対的レビュー3巡（31件・16件・13件），Gate B は2巡（19件・10件），Gate C は1巡（8件）．
+6文書で267ルール，欠番と未解決参照なし．撤回7件（SB-25a, SB-28, SB-32, RS-32a, RS-37, MA-4, MA-43 — OV-1 に従い番号は保持）．Gate A は敵対的レビュー3巡（31件・16件・13件），Gate B は2巡（19件・10件），Gate C は1巡（8件）．
 
 **Step 4（crate 実装）は完了**．00-overview.md §3 の表の module 順どおりに実装し，各 rule ID を doc comment と test 名から引用している（OV-3）．
 
@@ -84,11 +85,21 @@ Vision §67 の Phase 1．詳細設計は [plan/phase1/](plan/phase1/)．計画�
 | 12 | 11巡目の修正の検証（新たな拒否を2つ足したため） | P1 1・P2 1 | 修正済み．P1 はまた11巡目の修正自身 — SC-30b の carry は flags・lost・blocks の3つを運ぶのに，繰り越しが blocks しか持っていなかった |
 | 13 | `continuity.rs` に絞った検証（12巡目の作り直しが未レビューだったため） | **P0 ゼロ・P1 ゼロ**・P2 2 | 修正済み．差分 fuzz で lossless 経路は HEAD とビット同一，Gap の `link_dropped` と `lost` の総和が投入分と一致することを確認．**ここで収束** |
 | 14 | D45–D50 の判断（Fable 5.1，AGENTS.md §8 の second opinion 例外） | 6件 | **全件採用・適用済み**．D50 は判断ではなく**バグの発見**だった：10巡目で入れた canonical-form 基準が `Int(1152921504606847000) == Num(2^60)` を true にしていた（float の canonical 形は「その f64 を名指す最短十進」であって正確な値ではない）．等価性は厳密な数値比較に戻した．新規ルール SB-15a（ポート方向），`CompileRule::TxBurst` に `late_policy`（schema 変更） |
-| 15 | exit criterion 2 の per-rule 表（Sonnet 5 を文書ごとに1体，計6体．AGENTS.md §8 の「機械的調査 → Sonnet 5」） | レビューではなく**全261ルールの carrier 調査** | 表は完成（261行）．副産物として**呼び出し元ゼロの述語を15件検出**，**6ルールが自分を検査していない checker を名指し**（解決済み），`GAP` 15件．テストから出発するレビューには原理的に見えない層だった |
+| 15 | exit criterion 2 の per-rule 表（Sonnet 5 を文書ごとに1体，計6体．AGENTS.md §8 の「機械的調査 → Sonnet 5」） | レビューではなく初回261ルールの carrier 調査 | 初回表の副産物は未使用 predicate / field 15件，自己検査していない checker 6件，`GAP` 15件．D51–D68 の採用で表を266ルールへ更新し，`GAP` と未割当を解消（2026-09-23） |
+| 16 | D51–D68 適用の再レビュー（Opus 5.5） | P0 1・P1 8・P2 十数件 | **正当な文書の誤拒否はゼロ**．P0 は `Manifest.policy` が必須だったこと（validate で落ちた Run に書ける値がない）．gate の無断の緩和，テストのない拒否2件，移行していない文書の出自記録を修正 |
+| 17 | 16巡目の判断12件（Fable 5.1，AGENTS.md §8 の second opinion 例外） | 12件 | **全件採用・適用済み**（D69–D80）．うち6件が schema 変更．D76 は同日採用の D67 の key 文法を覆した |
+| 18 | D69–D80 適用の再レビュー（Opus 5.5） | P0 0・P1 2・P2 8 | **正当な文書の誤拒否はゼロ**．P1 は2件とも D73 の不完全（多行 derive の取りこぼしと，serde が unit variant に `deny_unknown_fields` を適用しないこと） |
+| 19 | 18巡目の判断4件（Fable 5.1） | 4件 | **全件採用・適用済み**（D81–D84）．D82 は引数を削る形に簡素化して適用 |
+| 20 | D81–D84 適用の再レビュー（Opus 5.5） | P0 0・P1 1・P2 10 | **正当な文書の誤拒否はゼロ**．P1 は MA-16 の gate が inherent メソッドとジェネリクスを辿っていなかったこと |
+| 21 | 20巡目の判断3件（Fable 5.1） | 3件 | **全件採用・適用済み**（D85–D87）．D87 は Session の既存バグ（複数役割 Module が bind 不能）の修正 |
+| 22 | D85–D87 適用の再レビュー（Opus 5.5） | P0 0・P1 2・P2 7 | **正当な文書の誤拒否はゼロ**．P1 は Authority が resource でない binding を指せることと，MA-16 の gate が trait impl を辿らないこと |
+| 23 | 22巡目の判断4件（Fable 5.1） | 4件 | **全件採用・適用済み**（D88–D91） |
+| 24 | D88–D91 適用の再レビュー（Opus 5.5） | P0 0・P1 3・P2 7 | **正当な文書の誤拒否はゼロ**．P1 は D88×D89 の矛盾，gate の self type，SB-36 の need |
+| 25 | 24巡目の判断3件（Fable 5.1） | 3件 | **全件採用・適用済み**（D92–D94）．ここでループを一時停止 |
 
 このクレートが繰り返し出した欠陥型は2つある．
 
-**「正しい関数を誰も呼んでいない」** — 13巡で計8件．さらに exit criterion 2 の per-rule 表を作る過程で**15件**が見つかった（先の7件はすべて配線済みなので，現在生きている dead は15件）（§11「Findings from the exit-criterion-2 sweep」）．テストから出発するレビューには原理的に見えない — 呼び出しもテストも無い関数だから．検出はスクラッチコピーから削除してビルドが通ることで確認している（`admit_islands`・`check_cycles`・`check_sink_links`・`CheckStage::Prepare`・SB-46 の coercion policy・`ComponentDescriptor::validate`・`check_effective_narrows`，加えて `Value::check_nesting` の ASCII 規則）．8件目は10巡目の `Admitter::admit` で，これだけ**未適用**：RS-17 が名指しする呼び出し口を作るとルール本文の判断が要るので D45 として記録してある．対策として，各ルールの本文に**呼び出し場所を明記**した（SB-30 は3点すべて，SB-41 は MA-12 の2義務，MA-37 は `validate()`，MA-41 は比較箇所）．レビュー側の提言：「`src/` 内に呼び出し元のない predicate を grep する」を exit review の手順に入れること — 4巡で7件を出している．
+**「正しい関数を誰も呼んでいない」** — 13巡で計8件が見つかり，exit criterion 2 の初回 sweep では未使用 predicate / field が15件に達した（2026-09-22 時点）．D51–D68 の採用で不要な8件を削除し，必要なものをテストまたは admission 経路へ接続した．`DataContractId::as_str` は現時点で呼び出し元がないが，低コストの識別子 accessor として意図的に残している．初回 sweep の経緯は §11「Findings from the exit-criterion-2 sweep」参照．
 
 **「ルールを初めて生かすと，そのルールが意図しないものを拒否する」** — P0 5件のうち4件がこれで，4件とも `collect_prepare` の中，しかも毎回別方向（merge を resource 別に解釈／coercion を構造的に拒否／Provider の自己申告で免除／coercion preview を key だけで引く）．
 
@@ -102,17 +113,17 @@ Vision §67 の Phase 1．詳細設計は [plan/phase1/](plan/phase1/)．計画�
 
 その後 `syn::parse_file` による parser に置き換え（D34–D44 の採用，`13c4070`）たが，10巡目がさらに**5通り**を実演した．うち1つは**出荷されるクレートで現に穴が開いていた**：`is_testing_gated` が `cfg` のトークン列に `testing` が*含まれるか*で判定していたため，`#[cfg(not(feature = "testing"))]`（＝デフォルトビルド）の public item を gate が丸ごとスキップしていた．他は `pub use {…}`（brace group が root を名乗らない），`pub extern crate`（match の catch-all に落ちる），非 `.rs` ファイルの `include!`，同名 item を持つ inline module 2つが1つの allow key に潰れる（key が名前でなく深さを符号化していた）．**5通りすべて注入して捕獲を確認済み．**
 
-exit criteria（§13）の達成状況：
+exit criteria（§13）の達成状況（2026-09-23 時点）：
 
 | # | 条件 | 状態 |
 |---|---|---|
-| 1 | 6文書の受理と §11 の全 verdict | **verdict は全件記録済み**（X1–X12，各 spec の Decisions 表，未決事項1–7，findings D1–D50）．残るのは6文書の受理そのもの（§12） |
-| 2 | 全 rule に ID と OV-3 disposition | **表は完成，条件は未達**（2026-09-22）．[plan/phase1/exit-review/](plan/phase1/exit-review/README.md) に文書ごと1ファイル，**261ルールに261行**．内訳は default 206・process 18・producer 8・forward 6・withdrawn 6・consumer 1・**GAP 15**・OV-3 自身が UNCERTAIN 1．別に39セルが部分カバーの `UNCERTAIN:` 注記付き．**GAP 15件に carrier を付けるか，owner が marker を足すか，撤回するか**が残り．表を作ったこと自体の成果は §11「Findings from the exit-criterion-2 sweep」参照 — 呼び出し元ゼロの述語が7件から**20件**になり，6ルールが「自分を検査していない checker」を名指ししていた（**解決済み** — 5件は引用の訂正，RS-13 は carrier テストを新設）．**規模の実測（2026-09-22）**：`#[test]` 関数315個のうち **78個** はどの spec のテスト表にも載っていない（うち19個は hashing / kernel_surface / schema_freeze で，00-overview がグループとして名指ししている分）．逆向き（表が挙げるのに関数が無い）は**ゼロ**にした |
-| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が double で端から端まで動く | **達成**（1.85.0 / stable ともに 317 passed，`#[ignore]` なし）．degenerate ではない：resource endpoint を含む graph が validate → plan を通り（`sb_15_a_bound_resource_port_is_a_link_endpoint`），Provider fragment は matched request を運び（`sb_39_a_provider_fragment_carries_the_matched_request`），Session は bound Sink を output として持つ（`rs_12_a_session_compiles_through_the_whole_pipeline`），coercion は accept/warn/reject の3分岐が到達可能（`sb_46_an_accepted_coercion_survives_prepare`） |
-| 4 | `schemas/` commit，`schema_freeze` 通過，`SCHEMA_CHANGELOG.md` の v1 entry | **達成** |
-| 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．件数は `cargo test --test kernel_surface -- --nocapture` が `OV-23b: Kernel growth = N NEW: items of M public items` で出す |
+| 1 | 6文書の受理と §11 の全 verdict | **verdict は D1–D94 まで記録・適用済み**．6文書の受理そのものは未実施（§12） |
+| 2 | 全 rule に ID と OV-3 disposition | **267ルールに267行を用意し，GAP と未割当を解消**．内訳は default 215・process 20・producer 13・forward 10・withdrawn 7・consumer 1・分割 marker 1．部分カバーを示す `UNCERTAIN:` は37セル残り，受理レビューで確認する |
+| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が端から端まで動く | **達成**（2026-09-23，1.85.0 / stable 1.98.1 ともに333 passed，`#[ignore]` なし）．end-to-end pipeline ケースも通過 |
+| 4 | `schemas/`，`schema_freeze`，`SCHEMA_CHANGELOG.md` | **達成**．D51–D68 の schema 変更を反映済み |
+| 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．`110 NEW / 282 public items`（2026-09-23） |
 | 6 | 直接依存が §8 の4 crate ちょうど | **達成** |
-| 7 | §12 の移動後に `design/` と `plan/phase1/` の全リンクが解決 | 未（Step 5 の作業） |
+| 7 | §12 の移動後に `design/` と `plan/phase1/` の全リンクが解決 | 未（spec 受理後の Step 5） |
 
 **§11 の判定は完了した**（2026-09-22，Fable 5.1 の second opinion をユーザ判定として採用）．
 verdict は confirm 91・amend 15・reverse 1・not-a-decision 5．not-a-decision の5件（OQ4,
@@ -159,151 +170,103 @@ v1 schema に消費者がついた状態で再現する．
 
 ---
 
-### Phase 1 に残っているもの（2026-09-22 時点）
+### Phase 1 に残っているもの（2026-09-23 時点）
 
-exit criteria 7つのうち **4つ達成，3つ未了**．コード側は完了していて，残りは**受理レビューと受理手続き**．
+Step 4（crate 実装），D51–D68・D69–D80・D81–D84・D85–D87・D88–D91・D92–D94 の採用は完了．**レビューループは owner の判断で一時停止し，仕様を固める段階に移る**（下記）．次は exit criterion 2 の残る部分カバー注記を受理レビューで確認し，6つの Phase 1 文書を受理すること．
 
-#### criterion 2 — 実作業はここだけ
+#### D51–D68 — 採用・適用済み（2026-09-23）
 
-per-rule 表は完成した（[plan/phase1/exit-review/](plan/phase1/exit-review/README.md)，261ルールに261行）．
-表が明らかにした宿題が4種類ある．
+推奨と判断理由は [00-overview.md §11](plan/phase1/00-overview.md) に記録．主な変更：
 
-| 種類 | 件数 | 誰の仕事か |
-|---|---|---|
-| `GAP` — 何もその義務を運んでいない | 15 | owner（marker を足す／撤回する）か実装側（carrier テストを書く） |
-| `UNCERTAIN` セル — 部分的にしか運ばれていない | 39 | 大半はテストを足せば埋まる．「これで十分」の判断は owner |
-| `SPEC-DEFECT` — ルールが自分を検査していない checker を名指し | 6 | **解決済み**（2026-09-22．5件は引用の訂正，RS-13 は carrier テストを新設） |
-| 呼び出し元ゼロの述語 | 15 | 1件ずつ「配線する／消す／forward marker を付ける」．Kernel surface が減る話なので owner |
+- `HotLayout` と `MemoryDomain` を公開面から削除し，未使用 API 8件を除去．
+- `SpecSection::migrated` に元の version / body を渡す経路を追加し，provenance を記録．
+- `PrepareContext.components` に当該 Island の `ComponentDescriptor` を渡す．`Manifest` に compiled `Policy` を記録．
+- `LinkPlacement` を選択した Link descriptor と policy で admission 検証し，v4.0 では `cross_process: true` を拒否．（`link-{i}` の key 文法は D76 で端点方式に置き換え）
+- OV-3 の process / producer / forward marker と split rule を更新し，`SC-7` / `MA-16` の API gate，schema freeze，migration，RunId，Policy，cleanup assertion 等の carrier を追加．JSON Schema と changelog も更新．
 
-`GAP` 15件は2つの形に分かれ，形が処置を決める．**①型はあるが誰も読まない**（`RS-32a` の
-`hot_layout` は全部 `None`，`SB-49` の `original_version`/`original_hash` は `Some` になる箇所がゼロ）
-— D40 が `constraints_hit` を撤回したのと同じ形．**②対象がまだ存在しない**（`Link` の実装が
-ゼロなので `MA-27`/`MA-28` は検査しようがない，`SC-5` の PerformanceEnvelope は Phase 2）．
-②は `forward` marker が妥当だが，**ルール本文が Phase 1 の挙動を述べている以上，marker を
-足せるのは owner だけ**．
+exit criteria は [exit-review/README.md](plan/phase1/exit-review/README.md) が最新．267ルールの disposition はすべて割当済み（default 215・process 20・producer 13・forward 10・withdrawn 7・consumer 1・分割 marker 1）で，`GAP` と未割当はゼロ．部分カバーの `UNCERTAIN:` 注記が37セルあり，criterion 2 の受理判断で確認する．
 
-#### criterion 1 — 6文書の受理
+#### D69–D80 — D51–D68 適用の再レビューと，その判断（2026-09-23，採用・適用済み）
 
-verdict は D1–D50・X1–X12・OQ1–7 まで全件記録済み．**受理という行為そのもの**が残っている．
+D51–D68 の未コミット適用を Opus 5.5 が敵対的に再レビューした（P0 1・P1 8・P2 十数件）．**正当な文書を誤って拒否する変更はゼロ**．判断不要のものはそのまま直し，判断が要る12件は Fable 5.1（AGENTS.md §8 の second opinion 例外，owner の依頼）に推奨を出させて全件採用した．理由と却下案は [00-overview.md §11](plan/phase1/00-overview.md)「Re-review of the D51–D68 application, and D69–D80」．
 
-#### criterion 7 — §12 の移動とリンクチェック
+判断不要で直したもの：
+- **banned-token gate が誰の判断もなく緩められていた**（`///` に `OV-23a` と書けば次の `pub` 行が免除）．同一行の形に戻し，免除を削除．`/// see OV-23a` 付きの `pub fn uhd_open_rfnoc` が捕まることを確認．
+- **MA-28 の拒否2件にテストがなかった**（policy 不一致，admission 側の `cross_process`）．テストを足し，どちらを無効化しても落ちることを確認．
+- **`SpecSection::migrated` が移行していない文書にも出自を記録していた**．2つの文書から version を読む形にした．
+- spec の形（`Policy`，`PrepareContext.components`，`BurstTracker`）と changelog の記述をコードに合わせた．
 
-§12 は6ステップ．**step 3（R13 に基づく Vision の書き換え）が別途 owner の承認を要する**最大の項目．
-これに加えて，判断の結果として溜まった Vision 編集がある：`Binding.provider → module`（03 §9），
-MA-42 の `real` 追加（05 §9 #2），MA-30 の §32/§15 文言（05 §9 #4），そして D47 が足した
-**§21 の「Kernel が port について見るのは2つだけ」**（方向検査が3つ目になる）．
+判断して変えたもの（**schema に効くものは太字**）：
+- **D69** `Manifest.policy` を `Option` に（validate で落ちた Run は Policy を持たない）．
+- **D73** 全文書型に `deny_unknown_fields`（入れ子の未知フィールドも拒否．schema は `additionalProperties: false`）．
+- **D75 / D76** `LinkPlacement { link, from, to }` を端点で識別し，**Sink の feed も data link として Link 選択の対象に**．`ExecutionPlan.links` に feed を graph links の後ろの番号で載せる．**D67 の `link-{i}` 文法を覆した**（並べ替えで Link が黙って付け替わるため）．`graph.links` の同じ `(from, to)` の重複を SB-15 で拒否．
+- **D78** `Binding.module` と `Fragment.instance` を `ModuleRef`（バージョン固定）に．Provider インスタンスの `instance().module` と食い違えば拒否．
+- D70 RS-11 を stage に依存しない性質として言い直し，空振りしていたテストを置き換え．D71 MA-19 を ABI の形として言い直し．D72 MA-16 の gate をシグネチャが名指す型のフィールドまで推移的に検査（`PrepareContext` に `&dyn Sink` を足す回避を捕獲）．D74 MA-28 を MA-28 / **MA-28a**（producer）に分割．D77 Island をまたぐ link にも `connects` を検査．D79 MA-27a に descriptor の一致検査を明記．D80 MA-17 に producer marker（exit-review の「D38 が変換した」は誤りだった）．
 
-#### D51–D68 — Fable 5.1 の推奨（**未採用．来週ここから**）
+#### D81–D84 — 2回目の再レビューと，その判断（2026-09-23，採用・適用済み）
 
-判断待ちの全件（`GAP` 14・OV-3 の disposition・呼び出し元ゼロの述語15）に推奨判定を出させた
-（2026-09-22，AGENTS.md §8 の second opinion 例外，判断軸は「Phase 1 以降の実装手続き」）．
-**理由と却下した代替は [00-overview.md §11](plan/phase1/00-overview.md) の
-「Recommendations for the exit-criterion-2 open items」に D51–D68 として全文がある．**
-採用するかはユーザ判断．以下は作業側から見た要約．
+D69–D80 の適用を Opus 5.5 がもう一度レビューした（P0 ゼロ・P1 2・P2 8，**正当な文書の誤拒否ゼロ**）．新しい拒否13件を1件ずつ無効化し，テストが落ちなかったのは SB-25 の "declared twice" だけだった．
 
-**この推奨は問いの前提を3つ訂正している**（いずれも検証済み）：
+判断不要で直したもの：
+- **D73 が2通り不完全だった**．(1) `deny_unknown_fields` を足したスクリプトが1行の derive しか拾わず，ID 4型と `Version` が漏れていた（`pre: "rc1"` 付きの version が release として読めた）．(2) serde は内部タグ付き enum の **unit variant** にこの属性を適用しないため，`{"kind":"completed","stage":"validate"}` が `Completed` として読めた．該当する25個（11 enum）を空の struct variant `Completed {}` に変えた．schema とシリアライズ結果は不変．
+- MA-16 の gate に残っていた3経路（supertrait，型エイリアス，role 以外の trait のメソッド）を塞いだ．3つとも注入して gate が落ちることを確認．
+- Session の `implicit_spec` が未登録バージョンの binding を黙って捨てていたので拒否に．"declared twice" に直接のテスト．古い記述を整理．
 
-1. **述語15件のうち13件は allow-list に載っていない．** gate は module-level item だけを見る
-   （`kernel_surface.rs` 自身「a method on a public type is not a Kernel concept of its own」）．
-   メソッドを消しても OV-23b の成長数は動かない．entry なのは `LinkPlacement` と
-   `session::resolve_scheduled` の2件だけ．
-2. **freeze の非対称性は一様でない．** v4.0 以降，削除はすべて breaking／inherent method の追加は
-   minor／**schema フィールドの追加は OV-12 の v2**／**trait メソッドの追加は全実装者を壊す**．
-   つまり「呼び出し元のない inherent getter」は後で消せるが，**schema フィールドと trait メソッドは
-   今どちらかに決めるしかない**．
-3. **件数は20ではなく15**（先の7件は配線済み）．私が足し間違えていたので §11 と本ファイルを訂正した．
+判断して変えたもの（Fable 5.1 の推奨を全件採用）：
+- **D81** `SinkDescriptor.memory_domains` を追加し，feed も Sink の domain に対して `connects` を検査（schema）．
+- **D82** Executor / Sink / Link の descriptor に `module: ModuleRef`．admission が binding と突き合わせる（Executor は `plan()`，Sink は `validate` と `plan()`）（schema）．Fable 案は `register_link_descriptor(module, descriptor)` に不一致検査を足すものだったが，**引数を削って不一致を表現不能にする形に簡素化**した．
+- **D83** graph component 名を SB-22 の名前空間に加え，output id の重複を validate で拒否（component が resource を隠す第3の衝突も解消）．
+- **D84** SB-9 のエラー型が深さで分かれることは許容し，本文に明記．
 
-**最も重い指摘 — `MA-19` は marker ではなく欠陥．** `IslandDecl.components` は名前だけ，
-`PrepareContext` は descriptor を持たず，`spec.graph.components` は Executor に届かない．
-**型付き API 経由で `ComponentImpl` に到達できる Executor は存在しない**＝ルールは現状
-実装不可能．ここに forward marker を貼ると，Phase 5 の Reactor executor の作者が
-「コンポーネントが Executor にどう届くか」を**凍結済み ABI の上で**決めることになり，
-audit §14.3 そのもの．推奨は「`PrepareContext.components` を今足す（1フィールド）→ そのあと forward」．
+#### D85–D87 — 3回目の再レビューと，その判断（2026-09-23，採用・適用済み）
 
-**私の4分類への判定**：first cut としては成立，決定手順としては粗い．`SB-49` は形 B ではなく
-A（writer が今日書ける），`MA-8` は `producer`，`SC-5`/`MA-3` は Module 作者を縛るので
-`forward` ではなく `producer`，形 D に新 marker は不要（4件とも既存の carrier を持てる）．
-「owner 決定なしで閉じられるのは1件」は過少で，`SB-49`・`SC-1`・`SC-7`・`MA-16`・`OV-2` と
-`RS-1`/`RS-11` の Kernel 半分は義務を改訂せずに carrier を足せる．
+D81–D84 の適用を Opus 5.5 が再レビューした（P0 ゼロ・P1 1・P2 10，正当な文書の誤拒否ゼロ）．
 
-##### freeze 前に決めるべき9件（schema / trait / public API に触る）
+判断不要で直したもの：
+- **P1**：MA-16 の gate が型の **inherent メソッド**（`impl PrepareContext { fn peer() -> &dyn Sink }`）と，構造体・エイリアスの**ジェネリクス**（`dyn Sink` を境界やデフォルトに持つもの）を辿っていなかった．両方を辿るようにし，3経路とも注入して gate が落ちることを確認．supertrait の赤テストが gate の処理を写しただけだったので，同じ関数を呼ぶ形に．
+- `plan()` でも Sink のバージョンを検査（`plan()` は `validate` 済みを前提しない）．D81 に `plan()` 経由のテストと，Link の宣言方向で繋がるケース（フィクスチャの Link が両方向を宣言していたため，片方向の照合を消しても気づけなかった）．Executor 共有のテスト．古い記述の整理．
 
-| | 内容 | 決めないと |
-|---|---|---|
-| 1 | `HotLayout` 撤回（D51） | `vocabulary_descriptor` の v2 になる |
-| 2 | `MemoryDomain` 削除（D52） | §13 が名前を挙げた public 型の削除＝ breaking |
-| 3 | `DataLink::policy` を keep してテスト（D66） | **trait メソッドは後から足せない**．consumer が SC-30 の lossless を知る唯一の経路 |
-| 4 | `PrepareContext.components`（D57） | Module ABI |
-| 5 | `LinkPlacement` のキー文法と admission 配線（D67） | 既存 schema フィールドの意味が未定義のまま凍る |
-| 6 | `SpecSection::migrated`（D53） | schema フィールド2つの意味が未定義のまま凍る |
-| 7 | 述語8件の削除（D66） | public API の削除＝ freeze 後は breaking |
-| 8 | `cross_process` の拒否（D68） | 同上 |
-| 9 | RS-1 の「compiled Policy」の記録先確認（D59） | Manifest に入れるなら schema フィールド |
+判断して変えたもの（Fable 5.1 の推奨を全件採用）：
+- **D85** component と Island executor が同名なら引き続き拒否（ルールは名前空間であって，現在の解決経路ではない）．Island の fragment id `island_<n>` も名前空間に予約．
+- **D86** `memory_domains` が空の Sink（validate）と Executor（`plan()`）を拒否．
+- **D87** Session では binding 名1つが役割1つで，**profile が役割を選ぶ**（Island の executor 名 → Executor，`feed` あり → Sink，それ以外で Provider を持つ → resource）．複数役割の Module は役割ごとに bind する．これまでは Provider+Sink の Module がどう bind しても通らなかった（MA-1 と矛盾）．
 
-##### Step 5 の文書パスで足りるもの（コード変更なし）
+#### D88–D91 — 4回目の再レビューと，その判断（2026-09-23，採用・適用済み）
 
-`SC-5`・`MA-8`・`MA-3` の `producer` marker，`MA-27` の `forward`，`OV-2`/`OV-3` の `process`
-（OV-3 本文の "OV-4…OV-19" → "OV-2…OV-19" の1箇所），`SC-1` の `ov_22_schema_freeze` 引用，
-`RS-1`/`RS-11`/`MA-19` の split marker（小さいテストができ次第）．
+D85–D87 の適用を Opus 5.5 が再レビューした（P0 ゼロ・P1 2・P2 7，正当な文書の誤拒否ゼロ）．
 
-##### 実装側でいつでもできるもの（テストと gate 行だけ）
+判断不要で直したもの：
+- **P1**：MA-16 の gate が **trait impl**（`impl Iterator for PrepareContext` で `&dyn Sink` を返す）を辿らず，関数本体や `const _` 内の impl も見えていなかった．収集をファイル全体の `syn::visit::Visit` に書き直し，7経路を赤テストで1つずつ固定．
+- Session で Island executor の binding に付いた `feed` が黙って捨てられていた → 拒否．Sink 役割のない Module への `feed` は `WrongBindingRole` に．`plan()` でも Sink の空 `memory_domains` を検査．古い件数・RS-14 の Sink アドレス（HEAD から誤り）を訂正．
 
-`SC-7` の `forbid(unsafe_code)` assert，`MA-16` の role-trait シグネチャ走査，
-`checked_sub_duration`／`remaining`／`bits`／`policy` のテスト，`RS-11` の step assertion，
-`RS-1` の `RunId` テスト．
+判断して変えたもの（Fable 5.1 の推奨を全件採用）：
+- **D88** Authority は Spec の **resource** でなければならない．使われていない binding が ExecutionClass（Simulation＝決定性を主張できる唯一のクラス）を決められた穴を塞いだ．
+- **D89** **どの役割も担わない binding は拒否**（Spec Run・Session とも）．未登録バージョン 9.9.9 の binding が検査を素通りして Manifest に載り得た．テスト側は `profile_binding` が `exec` を無条件に bind していたのを，Island を持つテストだけに限定．
+- **D90** MA-16 の gate は非 `pub` メソッドも辿る（保守的なまま）．
+- **D91** X7（node ≠ LOCAL の拒否）を `NodeId` の deserialize で全文書に強制し，Rust 値で渡る ID は `validate` で検査．これまで `ClockRegistry::register` だけが検査していた．schema は不変．
 
-##### 述語15件の内訳（D66）
+#### D92–D94 — 5回目の再レビューと，ループの一時停止（2026-09-23）
 
-**delete 8**: `BlockFlags::without`・`ChannelMask::is_empty`・`BurstTracker::domain`・
-`BurstTracker::records`・`ContinuityBuilder::is_lossless`・`session::resolve_scheduled`・
-`EventCollector::dropped_per_kind`（+`DroppedPerKind`）・`ModuleRegistry::vocabularies`．
-`records` の理由が鋭い — **`records.push` が Provider の TX 経路でアロケートしていて，
-SC-9 は「アロケートしない」と言っている**．`step` が閉じたレコードを返すので Vec は二重持ち．
+D88–D91 の適用を Opus 5.5 が再レビューした（P0 ゼロ・P1 3・P2 7，正当な文書の誤拒否ゼロ）．P1 は (1) **D88 と D89 の組み合わせで Authority だけを持つ Module（Vision §7 の `sim-engine`）がどうやっても bind できない**，(2) MA-16 の gate が self type が単純パスでない impl（`impl IntoIterator for &Ctx`，`impl dyn Events`）を見逃す，(3) SB-36 の need が binding のない Provider に解決される．(2)(3) と P2 は判断不要として修正．判断3件は Fable 5.1 の推奨を採用：
+- **D92** `authority` は，どの役割にも名指されない binding を**専用の Authority**として名指せる（`Role::Authority` の fragment を持つ）．推論は resource だけ．**D88 の「名指された非 resource は拒否」をこの場合に限り覆した**．schema 変更なし．
+- **D93** 同一 instance の2名は候補2つのまま拒否し，メッセージに候補名を出す．
+- **D94** `NodeId` の schema に `maximum: 0` は付けない（30 schema を v2 にしないと外せないため）．
 
-**keep 7**（うち5件は今テストを足す）: `checked_sub_duration`（TM-7 が本文で名指し）・
-`remaining`（TM-15 が名指し）・`BlockFlags::bits`／`ChannelMask::bits`（newtype の唯一の読み出し口．
-無いと Vocabulary crate から write-only）・`DataLink::policy`（**trait メソッド．freeze 前に決める**）・
-`DataContractId::as_str`（他7つの id newtype と揃える．費用ゼロなので判断に値しない）．
+**ループはここで一時停止**（owner「一度もっと仕様を固めたほうがいい」）．5巡とも P0・誤拒否はゼロだったが，毎回新しい P1 が出た．その型は2つ：MA-16 の gate が新しい構文形で抜けられること，過去の判断同士の組み合わせで矛盾が出ること（D88×D89）．どちらもルールがレビューで決まっていて，事前に書かれていないことを示す．停止時点の未決事項は [00-overview.md §11](plan/phase1/00-overview.md)「Fifth re-review, D92–D94, and the pause」の末尾に4つ：
+1. **SB-1 の文法が文書では強制されていない**（`"Radio Bad!"` が `Ident` として通る．確認済み）
+2. `plan()` が D89・D91 を再実行しない
+3. MA-16 の gate は構文ベースで列挙では閉じられない（ルールの書き方を決める必要）
+4. D89 による「1つのラボ用 profile を複数 Spec で使う」運用の不可（承知の上で採用）
 
-##### 新規の発見2件
+未追跡の `Cargo (1).lock` と `crates/ezsdr-kernel/Cargo (1).toml` は Google Drive の競合コピー（9/22 の古い版）．削除はユーザ判断．
 
-- **`RS-1` が名指しする "compiled Policy" が Manifest のどこにも無い．** profile の `policies` は
-  `binding` に verbatim 記録されるが，既定値を解決した後の表は記録されていない．RS-38 の
-  provenance 意図に反する漏れではないか（INFERRED，要確認）．
-- **`cross_process` が未読**（D68）．`MA-28` のテストで `connects` は読まれるようになったが，
-  `cross_process` は宣言だけ．X7 のパターン（フィールドは残し v4.0 では `true` を登録時に拒否）で3行．
+#### 次にすること
 
-#### 来週の再開手順
+1. **仕様を固める**（上記の未決事項と，binding・role・Authority・名前空間の規則を1箇所に書き下ろす）．D92–D94 の適用は未レビュー．
+2. 37個の `UNCERTAIN:` 注記を受理レビューで確認し，6つの spec を受理する．
+3. 受理後に §12 の Step 5 を進め，spec を `design/` へ移動して全リンクを確認する．Vision の規範文編集は OV-6 / §12 の別途承認を経て行う．
 
-**1つ目の判断はこれ**：D51–D68 を採用するか，個別に変えるか．採用するなら順序は下記．
-
-1. **freeze 前の9件**（上表）．schema・trait・public API に触るので，ここだけは Step 5 より前に
-   終える必要がある．`MA-19` の `PrepareContext.components` と `DataLink::policy` の2つが
-   「後から足せない」側なので最優先．
-2. **実装側でいつでもできるもの**（テストと gate 行）．`SC-7`・`MA-16` の gate 2件を入れると，
-   形 D の4件が marker なしで閉じる．
-3. **`UNCERTAIN` 39セル**のうちテストで埋まるもの（実装側で完結．十分かの判断は owner）．
-4. criterion 1 の受理 → §12 step 1–2・5 → step 3 の Vision 編集（owner の別途承認が要る）．
-
-**§12 step 3 に持ち越す Vision 編集**（Phase 1 ではやらない．OV-6）：R13 の要約置換に加えて，
-`Binding.provider → module`（03 §9），MA-42 の `real` 追加（05 §9 #2），MA-30 の §32/§15 文言
-（05 §9 #4），D47 が足した §21 の「Kernel が port について見るのは2つだけ」（方向検査が3つ目に
-なる），そして D51 を採るなら §29 の hot-path payload のレイアウトは「kind を登録した Vocabulary が
-所有し，それと一緒に versioned される」と書く．
-
-#### 未コミットの作業（2026-09-22 時点）
-
-作業ツリーに3ファイル．テストは317件 green（1.85.0 / stable），clippy 0．
-
-- `crates/ezsdr-kernel/tests/module_api.rs` — `ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link`
-  を追加．`GAP` のうち形 A の1件を解消し，`LinkDescriptor.connects` に**クレート内で唯一の読み手**を与える．
-  分岐を潰すとテストが落ちることを確認済み．
-- `plan/phase1/00-overview.md` — §11 に D51–D68 を追記．あわせて「述語20件」を15件に訂正．
-- `handoff.md` — このファイル．数値の訂正（316→317 test，`NEW:` は gate の出力 111 を使う）とこの節．
-
----
-
-その後が Step 5（§12 の受理手続き：spec 01–05 を `design/` へ移動，R13 の Vision 編集はユーザの別途承認が要る）．
+作業ツリーは未コミット．このセッションでは commit / push していない．
 
 型を書くときの拘束文は Vision §5（tiers），§15（time），§23（Stream Contract），§13（TimingEnvelope / Mock 強制），§3（Session），§8（composite resource，BindingProfile）．audit §13「Recommended Minimal Core」が freeze 対象の一覧で，§14.1 の項目 1–15 は 00-overview.md §10 の traceability 表に対応付けてある．
 
@@ -326,7 +289,7 @@ v4 が使える状態になるまで着手不要．ただし順序に注意：**
 
 - MSRV は X12 どおり **1.85 のまま**．edition 2024 の let-chain は 1.88 以降なので，8箇所を nested `if let` に書き直した（§11 D13）．spec を動かすより code を直すほうが小さい．
 - `Constraint` / `CapabilityValue` / `OutputSource` は struct variant．OV-13 の internal tag は payload が map でない newtype variant を serde が扱えない（§11 D1）．
-- `kernel_surface` の allow-list は「Core remains small」のレビュー用チェックリストそのもの．gate 自身が報告する **`NEW:` 111件 / public item 286件**が OV-23b の成長指標（ファイルの行数を数えるとヘッダのコメント行まで拾うので，必ず gate の出力を使う）．
+- `kernel_surface` の allow-list は「Core remains small」のレビュー用チェックリストそのもの．2026-09-22 時点の gate は **`NEW:` 111件 / public item 286件**を報告した．D66 適用後の現在値は **110 / 282**（2026-09-23）．OV-23b の成長指標には gate の出力を使う．
 - banned token の検査は OV-23 の文面どおり行単位で，`OV-23a` を明示した行だけ免除．UHD の証拠引用7箇所には marker を付け，`replay` / `taint` の散文4箇所は語を替えた（§11 D9）．
 - `EventCollector::new` で ring の mutex を1度 lock して捨てる．macOS では最初の lock が OS primitive を box するので，RS-32 の allocation 計測が1件だけ外れていた（§11 D11）．
 - **非有限 float は serialisation 時に拒否する**（`hash::serialize_finite_f64`）．`serde_json` は非有限を `null` に落としてから `Value` を作るので，canonicaliser には情報が届かない．Kernel が持つ float document field 4箇所すべてに付けた：`ClockRelation.drift` / `.drift_uncertainty` / `Scalar::Float` / `Value::Num`（§11 D1 の P0，3巡目の P0）．

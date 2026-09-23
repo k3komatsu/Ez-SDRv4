@@ -9,6 +9,7 @@ use crate::id::DataLinkId;
 
 /// What a link does when its queue is at capacity. There is no default (SC-19).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum BackPressure {
     /// Publishing returns [`PublishOutcome::Full`] and nothing is ever dropped.
@@ -32,6 +33,7 @@ impl BackPressure {
 /// A declared link: its endpoints, the contract it carries, its policy and its
 /// capacity in blocks (SC-19).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DataLinkDecl {
     /// Node-qualified identity (SC-19, X7).
     pub id: DataLinkId,

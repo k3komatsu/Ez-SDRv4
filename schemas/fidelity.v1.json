@@ -87,6 +87,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "What a Run's models actually claim, per aspect. A Run's value per aspect is the\n**weakest** over its bound Providers, so a Hardware Run with a best-effort\nMockPeripheral records `timing: envelope`.\n\nRule: MA-42, RS-41. Vision §14.",
   "properties": {
     "coercion": {

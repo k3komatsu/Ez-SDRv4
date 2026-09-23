@@ -15,6 +15,7 @@ use super::TimeError;
 ///
 /// Rule: TM-2.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Rational {
     num: u64,
     den: u64,

@@ -32,6 +32,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "How a fault crosses a Module boundary (MA-9).",
   "properties": {
     "detail": {

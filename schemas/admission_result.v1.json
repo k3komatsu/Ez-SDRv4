@@ -1,6 +1,7 @@
 {
   "$defs": {
     "Coercion": {
+      "additionalProperties": false,
       "description": "A value the Provider changed, with its reason (SB-44).",
       "properties": {
         "applied": {
@@ -32,6 +33,7 @@
       "description": "What a Spec requires of a key. Its value is a scalar: a constraint over a list\nor a map is refused, because the matcher would then need the Vocabulary's\nsemantics to compare them.\n\nRule: SB-5, decision B1.",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Exactly this value.",
           "properties": {
             "kind": {
@@ -50,6 +52,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Within these bounds, either of which may be absent.",
           "properties": {
             "kind": {
@@ -85,6 +88,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Any of these values.",
           "properties": {
             "kind": {
@@ -106,6 +110,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "At least this value.",
           "properties": {
             "kind": {
@@ -124,6 +129,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "At most this value.",
           "properties": {
             "kind": {
@@ -142,6 +148,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "The key is declared at all.",
           "properties": {
             "kind": {
@@ -175,6 +182,7 @@
       "type": "integer"
     },
     "PreviewedCoercion": {
+      "additionalProperties": false,
       "description": "A coercion the Kernel previewed by calling one Provider's `coerce`, together with\nthe Spec resource whose request produced it.\n\nA `Coercion` names a key and two values and nothing else, because a Provider\nanswers about the request it was handed. The Kernel's own record has to say more:\ntwo resources may constrain one key on two different devices, and one of them\ncoercing says nothing about the other. Keyed on the key alone, `prepare`'s SB-44\ncheck charged one resource's coercion to every resource naming that key and\nrefused a value `coerce` was never asked about — so the resource name is part of\nthe record, as it already is in [`RejectedConstraint`].\n\nRule: SB-7, SB-38, SB-44.",
       "properties": {
         "coercion": {
@@ -193,6 +201,7 @@
       "type": "object"
     },
     "RejectedConstraint": {
+      "additionalProperties": false,
       "description": "A constraint the bound instance could not satisfy (SB-38).",
       "properties": {
         "constraint": {
@@ -221,6 +230,7 @@
       "type": "object"
     },
     "ResourceId": {
+      "additionalProperties": false,
       "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments; `dev0/rx/0` names channel 0 of the\nreceive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
       "properties": {
         "node": {
@@ -276,6 +286,7 @@
       "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
     },
     "Violation": {
+      "additionalProperties": false,
       "description": "What an admission check refused (SB-29).",
       "properties": {
         "check": {
@@ -316,6 +327,7 @@
       "type": "object"
     },
     "Warning": {
+      "additionalProperties": false,
       "description": "A non-fatal note from a stage (SB-38, SB-41).",
       "properties": {
         "message": {
@@ -335,6 +347,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "What `validate(spec, binding, registry)` returns. It touches no hardware.\n\nRule: SB-38.",
   "properties": {
     "coercions_preview": {
