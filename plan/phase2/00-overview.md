@@ -287,3 +287,12 @@ Filled in at Gate P and after each review. One row per decision the owner confir
 | Spec 08 decisions S1–S7 | P | | |
 | Spec 09 decisions M1–M10 | P | | |
 | Spec 10 decisions H1–H8 | P | | |
+
+Confirmed individually before the rest of Gate P (owner, 2026-09-24):
+
+| Decision | Gate | Verdict | Note |
+|---|---|---|---|
+| Fault injection in Phase 2: the three kinds of SE-3, carried with §58 #5 and #6, and KA-22's amendment of spec 04's scope lines (Y9) | P | **accepted** | Further fault kinds stay Phase 4 |
+| `x310-like` transport limit 1.0 GB/s per direction per motherboard (MR-3, Y13) | P | **accepted** | INFERRED; replaced by the Phase 8 measurement |
+| No "record everything" capture mode: a capture needs `N` samples (HD-10, H8) | P | **accepted** | A `sink.capture_all` key can be added later without breaking anything |
+| `x310-like` requires `ezsdr.time.start_lead_ns ≥ startup_latency_ns` (2 s); an earlier start is refused (MR-11, M2) | P | **accepted** | Starting late with `LATE` was rejected by Y13 |

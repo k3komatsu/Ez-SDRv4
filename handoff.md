@@ -109,7 +109,7 @@ Vision §67 の Phase 2（Radio Model + Simulation Engine + MockRadio）．文�
 
 Phase 1 の Kernel には，最初の本物の Module が必ず踏む穴があった（例：`PrepareContext` のハンドルが借用で，Module が `prepare` 後にイベントも時刻も扱えない）．KA-1–KA-22 がそれを埋める．
 
-**Gate P で owner が決めること**：00-overview.md §11 の決定ログに，Y1–Y14 と各 spec の決定表（K1–K12，R1–R9，S1–S7，M1–M10，H1–H8）の verdict を記入する．特に確認が要るのは次の 4 点（どれも spec は推奨案で書いてあり，受理なら変更なし，覆すなら挙げた規則とテストを直す）：
+**Gate P で owner が決めること**：00-overview.md §11 の決定ログに，Y1–Y14 と各 spec の決定表（K1–K12，R1–R9，S1–S7，M1–M10，H1–H8）の verdict を記入する．特に確認が要った次の 4 点は，2026-09-24 に owner が推奨どおり**受理済み**（§11 に個別に記録）．残りの決定表と計画全体の受理は未：
 
 1. **故障注入 3 種を Phase 2 に入れる**（KA-22 で受理済み spec 04 の「fault injection は Phase 4」を改める）．覆すなら SE-3–SE-5，MR-20–MR-22，`v58_04`–`v58_06` を外し，SC-18 などの marker は forward のまま．
 2. **x310-like の転送上限 1.0 GB/s/方向**（MR-3，INFERRED）．10 GbE の line rate 1.25 GB/s から Y13 で厳しい側に丸めた．Phase 8 の実測で置き換える前提．
