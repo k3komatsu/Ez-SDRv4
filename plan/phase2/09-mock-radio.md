@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft for owner acceptance (Gate P). Normative for `crates/ezsdr-mock-radio`. |
+| Status | Accepted at Gate P (owner, 2026-09-24; `00-overview.md` §11). Normative for `crates/ezsdr-mock-radio`. |
 | Scope | The MockRadio Provider Module: construction from a binding, the `x310-like` and `ideal` profiles, the resource tree and capabilities, `coerce`, `prepare`, `arm`, `start`, the receive stream and its test pattern and block-length jitter, transmit bursts, parameter updates under their classes, fault injection, `stop` and its tail, the device model that raises `TIME_ERROR`, its events and its Manifest sections. |
 | Not in scope | A channel between MockRadios, RF impairments, clipping, random retune phase (Phase 3). A transmit port (Phase 10). RealtimeEmulation (Y1). Peripherals. |
 | Crate | `crates/ezsdr-mock-radio`, library `ezsdr_mock_radio`. Depends on `ezsdr-kernel`, `ezsdr-radio`, `ezsdr-sim`, `ezsdr-hostmem`, `serde`, `serde_json`. Dev-dependency: `ezsdr-kernel` with `testing` (for `ManualTimeAuthority`). |

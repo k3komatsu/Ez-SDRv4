@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft for owner acceptance (Gate P). Normative for `crates/ezsdr-radio` and for every radio Provider (MockRadio in Phase 2, UHD in Phase 7). |
+| Status | Accepted at Gate P (owner, 2026-09-24; `00-overview.md` §11). Normative for `crates/ezsdr-radio` and for every radio Provider (MockRadio in Phase 2, UHD in Phase 7). |
 | Scope | The `radio` Vocabulary: the resource kinds and tree shape a radio Provider exposes; the configuration keys and the capability keys, each with its `KeyDecl`; the TimingEnvelope and PerformanceEnvelope as capabilities; coercion rules; the event kinds with their defaults, severities and payloads; the Session verbs; the `TxBurst` conventions; the `radio.rf_envelope` section and its admission check. |
 | Not in scope | Any Provider's values (MockRadio's are spec 09's MR-3; UHD's are Phase 7's). Channel models (Phase 3). Per-channel configuration (RM-5's ceiling). Receive-side DDC and transmit-side DUC capabilities, device FFT and RFNoC (Vision §20, §35; Phase 7+). |
 | Crate | `crates/ezsdr-radio`, library `ezsdr_radio`. Depends on `ezsdr-kernel`, `serde`, `serde_json`, `schemars`. |

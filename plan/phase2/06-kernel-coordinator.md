@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft for owner acceptance (Gate P). Normative for `ezsdr-kernel` once accepted. |
+| Status | Accepted at Gate P (owner, 2026-09-24; `00-overview.md` §11). Normative for `ezsdr-kernel`. |
 | Scope | (a) The amendments KA-1…KA-22 that Phase 1's accepted specs need before a real Module can run; (b) the coordinator, `ezsdr-kernel::coordinator`, which drives one Run end to end in the Simulation class, for a Spec Run and for a Session; (c) what each update class means (UC-n). |
 | Not in scope | RealtimeEmulation, HardwareInLoop, Hardware (refused, KC-2); child Runs (refused, KC-37); session replay; the Radio Model's content (spec 07). |
 | Depends on | Specs 01–05 as amended here; `00-overview.md` §4 Y1–Y14. |

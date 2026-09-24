@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Draft for owner acceptance** (2026-09-24). Nothing in this directory is normative until the owner accepts it at Gate P (§9). After acceptance, the specs 06–10 are binding for the implementer, and `20-implementation-plan.md` is the order of work. |
+| Status | **Accepted at Gate P** (owner, 2026-09-24; verdicts in §11). Specs 06–10 are binding for the implementer, and `20-implementation-plan.md` is the order of work. |
 | Phase | Vision §67 Phase 2. Predecessor: Phase 1 (Kernel semantic model, accepted 2026-09-23). Successor: Phase 3 (SimulationChannel + deterministic Runs). |
 | Scope | The Kernel **coordinator** that drives a Run end to end in the Simulation class; the Kernel **amendments** Phase 1 left for the first real Module (§5); the **Radio Model** Vocabulary; the **Simulation** and **Sink** Vocabularies; the **Simulation Engine**; **MockRadio**; the host-memory Link and the capture Sink that a MockRadio stream needs to reach an artifact; the Phase 2 half of Vision §58. |
 | Not in scope | §3 of this file lists it. In one line: no SimulationChannel, no RealtimeEmulation, no hardware, no Python, no Reactor or Processor executor, no child Runs. |
@@ -281,14 +281,14 @@ Filled in at Gate P and after each review. One row per decision the owner confir
 
 | Decision | Gate | Verdict | Note |
 |---|---|---|---|
-| Y1–Y14 (§4) | P | | |
-| Spec 06 decisions K1–K12 | P | | |
-| Spec 07 decisions R1–R9 | P | | |
-| Spec 08 decisions S1–S7 | P | | |
-| Spec 09 decisions M1–M10 | P | | |
-| Spec 10 decisions H1–H8 | P | | |
+| Y1–Y14 (§4) | P | **accepted** | owner, 2026-09-24, as recommended |
+| Spec 06 decisions K1–K12 | P | **accepted** | owner, 2026-09-24, as recommended |
+| Spec 07 decisions R1–R9 | P | **accepted** | owner, 2026-09-24, as recommended |
+| Spec 08 decisions S1–S7 | P | **accepted** | owner, 2026-09-24, as recommended |
+| Spec 09 decisions M1–M10 | P | **accepted** | owner, 2026-09-24, as recommended |
+| Spec 10 decisions H1–H8 | P | **accepted** | owner, 2026-09-24, as recommended |
 
-Confirmed individually before the rest of Gate P (owner, 2026-09-24):
+Confirmed individually, before the rows above (owner, 2026-09-24):
 
 | Decision | Gate | Verdict | Note |
 |---|---|---|---|

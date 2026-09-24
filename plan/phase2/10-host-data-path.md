@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft for owner acceptance (Gate P). Normative for `crates/ezsdr-hostmem`, `crates/ezsdr-link-host`, `crates/ezsdr-sink` and `crates/ezsdr-sink-capture`. |
+| Status | Accepted at Gate P (owner, 2026-09-24; `00-overview.md` §11). Normative for `crates/ezsdr-hostmem`, `crates/ezsdr-link-host`, `crates/ezsdr-sink` and `crates/ezsdr-sink-capture`. |
 | Scope | The `host` memory domain and a buffer pool (SC-9's Phase 2 helper); the planar-to-interleaved sample layout helpers; the Link Module `ezsdr.link.host` 1.0.0, the first real `DataLink` (MA-28a); the `sink` Vocabulary 1.0.0, which owns the `capture` verb (RS-13a, RS-14); the capture Sink Module `ezsdr.sink.capture` 1.0.0, the first real consumer of a MockRadio stream. |
 | Not in scope | SigMF and other artifact formats (Phase 4); non-host memory domains; lock-free rings (Phase 7+); a copy-regression benchmark (Phase 8). |
 | Crates | `ezsdr-hostmem` (depends on `ezsdr-kernel`), `ezsdr-link-host` (Module; `ezsdr-kernel`), `ezsdr-sink` (Vocabulary; `ezsdr-kernel`, `serde`, `serde_json`, `schemars`), `ezsdr-sink-capture` (Module; `ezsdr-kernel`, `ezsdr-sink`, `ezsdr-hostmem`, `serde_json`). |

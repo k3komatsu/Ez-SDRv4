@@ -8,7 +8,7 @@
 | | |
 |---|---|
 | remote | `git@github.com:k3komatsu/Ez-SDR.git` |
-| `main` | v4（この worktree）．Phase 0 の設計文書に続き，Phase 1 の spec と `ezsdr-kernel` を実装・受理済み．Phase 1 は完了．Phase 2 は計画（spec 06–10 と実装計画）を起草済みで，owner の Gate P 待ち（§4）．|
+| `main` | v4（この worktree）．Phase 0 の設計文書に続き，Phase 1 の spec と `ezsdr-kernel` を実装・受理済み．Phase 1 は完了．Phase 2 は計画（spec 06–10 と実装計画）を Gate P で受理済み（2026-09-24）．次は実装（§4）．|
 | `master` | v3（D + C++ UHD bridge + Python client）．tip `4a474e9` = tag `v3.0.28`．**GitHub の default branch のまま** |
 | tags | 35 個（`v2.11`, `v3.0.0`–`v3.0.28`）．すべて v3 系 |
 | 履歴の関係 | **無関係（unrelated）**．graft も merge もしていない．v4 は clean-sheet なので今後も繋がない |
@@ -51,7 +51,7 @@ Phase 1 の Kernel crate は **実装済み**（Step 4 完了）．
 
 Python client，wire protocol，MockRadio，Simulation Engine は未着手（Phase 2 以降）．
 
-## 4. Phase の状態 — Phase 1 完了，Phase 2 は計画を起草済み（Gate P 待ち）
+## 4. Phase の状態 — Phase 1 完了，Phase 2 は計画を受理済み（実装前）
 
 ### Phase 1 — specs 受理・Kernel 実装済み
 
@@ -94,9 +94,9 @@ exit criteria（§13）の達成状況（2026-09-23 時点）：
 - **新しい拒否は1件ずつ無効化して，テストが落ちることを確かめる**（mutation）．落ちないものはテストを足すか，死にコードとして消す．
 - **gate は列挙では閉じない**．`kernel_surface` は構文の新しい形で何度も抜けられた．仕組み（`use … as` や一覧外の `macro_rules!`）を禁止し，残りは process obligation として名指す（D100）．
 
-### Phase 2 — 計画を起草済み，Gate P 待ち
+### Phase 2 — 計画を受理済み（Gate P，2026-09-24），実装前
 
-Vision §67 の Phase 2（Radio Model + Simulation Engine + MockRadio）．文書はすべて [plan/phase2/](plan/phase2) にあり，Gate P で owner が受理するまで規範ではない（[00-overview.md](plan/phase2/00-overview.md) §9）．
+Vision §67 の Phase 2（Radio Model + Simulation Engine + MockRadio）．文書はすべて [plan/phase2/](plan/phase2) にあり，2026-09-24 に Gate P で受理された（[00-overview.md](plan/phase2/00-overview.md) §9，§11）．spec 06–10 は実装者を拘束し，20-implementation-plan.md が作業順序．
 
 | 文書 | 中身 |
 |---|---|
@@ -109,7 +109,7 @@ Vision §67 の Phase 2（Radio Model + Simulation Engine + MockRadio）．文�
 
 Phase 1 の Kernel には，最初の本物の Module が必ず踏む穴があった（例：`PrepareContext` のハンドルが借用で，Module が `prepare` 後にイベントも時刻も扱えない）．KA-1–KA-22 がそれを埋める．
 
-**Gate P で owner が決めること**：00-overview.md §11 の決定ログに，Y1–Y14 と各 spec の決定表（K1–K12，R1–R9，S1–S7，M1–M10，H1–H8）の verdict を記入する．特に確認が要った次の 4 点は，2026-09-24 に owner が推奨どおり**受理済み**（§11 に個別に記録）．残りの決定表と計画全体の受理は未：
+**Gate P の判定**：00-overview.md §11 の決定ログに，Y1–Y14 と各 spec の決定表（K1–K12，R1–R9，S1–S7，M1–M10，H1–H8）の verdict を記入済み．2026-09-24 に owner が**全件を推奨どおり受理**した（§11 に記録）．特に確認が要った次の 4 点は，それに先立って個別に受理している：
 
 1. **故障注入 3 種を Phase 2 に入れる**（KA-22 で受理済み spec 04 の「fault injection は Phase 4」を改める）．覆すなら SE-3–SE-5，MR-20–MR-22，`v58_04`–`v58_06` を外し，SC-18 などの marker は forward のまま．
 2. **x310-like の転送上限 1.0 GB/s/方向**（MR-3，INFERRED）．10 GbE の line rate 1.25 GB/s から Y13 で厳しい側に丸めた．Phase 8 の実測で置き換える前提．
@@ -118,8 +118,8 @@ Phase 1 の Kernel には，最初の本物の Module が必ず踏む穴があ�
 
 ### 次にすること
 
-1. owner が Gate P：00-overview.md §4・§11，spec 06–10，20-implementation-plan.md を読み，§11 に verdict を記入して受理（または差し戻し）．`plan/phase2/` を commit．
-2. 受理後，実装者は [20-implementation-plan.md](plan/phase2/20-implementation-plan.md) の §0 を読んでから手順 1（patch 適用）から順に進める．手順 8 の後（Review K）と手順 15 の後（Review M）で止まり，owner がレビューを回す．実装者は commit しない．
+1. 実装者は [20-implementation-plan.md](plan/phase2/20-implementation-plan.md) の §0 を読んでから，手順 1（patch 適用）から順に進める．実装者は commit しない（手順ごとの commit 件名案は `plan/phase2/implementation-notes.md` に残す）．
+2. 手順 8 の後（Review K：Kernel の差分）と手順 15 の後（Review M：Module と受け入れテスト）で止まり，owner が敵対的レビューを 1 本ずつ回す．指摘は 00-overview.md §11 に verdict つきで記録する（OV-5）．
 3. Phase 2 の exit（Gate X）で spec 06–10 を `design/` へ移し，各 spec の「Vision issues found」を owner の承認のもとで Vision に反映する．
 
 ## 5. v3 → v4 切替で残っている作業（人間の判断が要るもの）

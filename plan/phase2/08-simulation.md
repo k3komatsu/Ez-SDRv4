@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft for owner acceptance (Gate P). Normative for `crates/ezsdr-sim` and `crates/ezsdr-sim-engine`. |
+| Status | Accepted at Gate P (owner, 2026-09-24; `00-overview.md` §11). Normative for `crates/ezsdr-sim` and `crates/ezsdr-sim-engine`. |
 | Scope | The `sim` Vocabulary: the `sim.seed` and `sim.faults` environment sections, their admission checks, the deterministic PRNG every simulated model uses, and the virtual-time constants. The Simulation Engine Module `ezsdr.sim-engine` 1.0.0: the discrete-event Time Authority of the Simulation class. |
 | Not in scope | Wall-paced pacing (RealtimeEmulation, Y1). Drifting per-device roots (Y11). The SimulationChannel section `sim.channel` (Phase 3). Fault kinds beyond three (Phase 4). |
 | Crates | `crates/ezsdr-sim` (library `ezsdr_sim`; depends on `ezsdr-kernel`, `serde`, `serde_json`, `schemars`); `crates/ezsdr-sim-engine` (library `ezsdr_sim_engine`; depends on `ezsdr-kernel`, `ezsdr-sim`, `serde_json`). |

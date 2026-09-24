@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Draft for owner acceptance** (Gate P, `00-overview.md` §9), together with specs 06–10. Nothing here is implemented before the owner accepts it. |
+| Status | **Accepted at Gate P** (owner, 2026-09-24; `00-overview.md` §11), together with specs 06–10. This is the order of work. |
 | Audience | The agent that implements Phase 2. This file tells you **what to do, in what order, and how to know you are done**. The specs `06`–`10` tell you **what is true**. You need nothing else except the repository itself. |
 | Base | The Kernel code of commit `96976c5`: the patch of step 1 is made against it. Later commits that touch only `plan/`, `handoff.md` or other documents (such as `8456975`, which added these documents) do not move the base. Step 1 fails loudly if the code has moved. |
 | Toolchains | Rust `1.85.0` (the MSRV) and `stable`. Both must pass at the end of every step. |
