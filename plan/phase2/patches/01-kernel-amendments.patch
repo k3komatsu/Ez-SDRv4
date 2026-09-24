@@ -1,0 +1,1678 @@
+diff --git a/crates/ezsdr-kernel/src/binding.rs b/crates/ezsdr-kernel/src/binding.rs
+index 16be920..c6927b6 100644
+--- a/crates/ezsdr-kernel/src/binding.rs
++++ b/crates/ezsdr-kernel/src/binding.rs
+@@ -170,6 +170,21 @@ impl BindingProfile {
+     }
+ }
+ 
++/// `ezsdr.time.start_lead_ns`: the lead between the end of `arm` and the Run's start
++/// instant, in nanoseconds; absent means 0. The one reader of the field, used by
++/// `plan()` and by the coordinator (MA-41, KC-15, KA-8).
++pub fn start_lead_ns(environment: &BTreeMap<Namespace, serde_json::Value>) -> Result<u64, SpecError> {
++    let Some(section) = Namespace::parse("ezsdr.time").ok().and_then(|n| environment.get(&n)) else {
++        return Ok(0);
++    };
++    match section.get("start_lead_ns") {
++        None => Ok(0),
++        Some(v) => v.as_u64().filter(|n| *n <= 1u64 << 62).ok_or_else(|| SpecError::Structural {
++            reason: format!("MA-41: ezsdr.time.start_lead_ns must be an integer in 0..=2^62, not {v}"),
++        }),
++    }
++}
++
+ // ---------------------------------------------------------------- the matcher
+ 
+ /// Whether a constraint is satisfied by a declared capability.
+@@ -357,8 +372,8 @@ pub trait AdmissionCheck: Send + Sync {
+     fn check(
+         &self,
+         section: &serde_json::Value,
+-        effective: &BTreeMap<Key, Value>,
+-        proposed: &BTreeMap<Key, Value>,
++        effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
++        proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+         stage: CheckStage,
+     ) -> Vec<Violation>;
+ }
+@@ -391,8 +406,8 @@ impl AdmissionCheckRegistry {
+     pub fn run(
+         &self,
+         environment: &BTreeMap<Namespace, serde_json::Value>,
+-        effective: &BTreeMap<Key, Value>,
+-        proposed: &BTreeMap<Key, Value>,
++        effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
++        proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+         stage: CheckStage,
+     ) -> Vec<Violation> {
+         let mut out = Vec::new();
+diff --git a/crates/ezsdr-kernel/src/module_api.rs b/crates/ezsdr-kernel/src/module_api.rs
+index 8dea9bd..8279a69 100644
+--- a/crates/ezsdr-kernel/src/module_api.rs
++++ b/crates/ezsdr-kernel/src/module_api.rs
+@@ -333,13 +333,17 @@ impl Fidelity {
+ #[serde(deny_unknown_fields)]
+ #[serde(rename_all = "snake_case")]
+ pub enum UpdateClass {
+-    /// Requires a stop and a re-plan; a sample-rate change is one (TM-13c).
++    /// The target stops the affected function, applies the value and restarts it; a
++    /// stream continues on a new SampleClock (UC-3, TM-13c).
+     Cold,
+-    /// Applied between blocks.
++    /// Applied from the first block or sample boundary at or after the effective
++    /// instant; no block mixes the old and new value (UC-4).
+     BlockBoundary,
+-    /// Applied inside the real-time path without a block boundary.
++    /// Applied to every sample processed after the Action arrives, with no torn state
++    /// (UC-5).
+     AtomicRealtime,
+-    /// Applied by the device at a declared instant.
++    /// Applied by the device at exactly the effective instant, which must respect the
++    /// device's command lead (UC-6).
+     HardwareTimed,
+ }
+ 
+@@ -546,6 +550,11 @@ pub struct ProviderInstance {
+     /// sources PPS is armed first (SB-39).
+     #[serde(default)]
+     pub arm_after: Vec<ResourceId>,
++    /// The least lead this instance needs between receiving a timed Action and that
++    /// Action's instant, in `host.monotonic`; absent means zero. The only envelope
++    /// value the Kernel reads (MA-10, RS-19, KA-7).
++    #[serde(default)]
++    pub min_command_lead: Option<crate::time::Duration>,
+     /// Namespaced Manifest content (RS-38, RS-39).
+     #[serde(default)]
+     pub sections: BTreeMap<Namespace, serde_json::Value>,
+@@ -915,6 +924,8 @@ pub enum Endpoint {
+ /// A link end bound to one of the component's ports (MA-27).
+ #[derive(Clone)]
+ pub struct AttachedPort {
++    /// Which component or resource the port belongs to (MA-27, KA-15).
++    pub component: Ident,
+     /// Which port (SC-1).
+     pub port: Ident,
+     /// Its end of the link (MA-27).
+@@ -945,21 +956,28 @@ pub trait ActionSubmitter: Send + Sync {
+     fn submit(&self, action: Action) -> Result<ActionId, Vec<Violation>>;
+ }
+ 
+-/// What a Module is handed at `prepare` (MA-6, MA-46).
+-pub struct PrepareContext<'a> {
++/// What a Module is handed at `prepare`. Every handle is shared, so a Module may keep
++/// it and use it from `prepare` through `cleanup` (MA-5a, MA-6, MA-46).
++pub struct PrepareContext {
+     /// Which Run (RS-1).
+     pub run: RunId,
+     /// Which class, derived and cross-checked (MA-41).
+     pub class: ExecutionClass,
+     /// The Run's single source of "now" (TM-16a).
+-    pub time: &'a dyn TimeAuthority,
++    pub time: Arc<dyn TimeAuthority>,
++    /// The node's clock registry, through which a Provider declares and registers its
++    /// SampleClocks (TM-13a, KA-2).
++    pub clocks: Arc<crate::time::ClockRegistry>,
+     /// Where to emit events (RS-31).
+-    pub events: &'a dyn EventSink,
++    pub events: Arc<dyn EventSink>,
+     /// Where admitted Actions arrive (MA-14).
+-    pub actions: &'a dyn ActionReceiver,
++    pub actions: Arc<dyn ActionReceiver>,
+     /// Where to emit an Action (MA-14a).
+-    pub actions_out: &'a dyn ActionSubmitter,
+-    /// The link ends bound to this component's ports (MA-27).
++    pub actions_out: Arc<dyn ActionSubmitter>,
++    /// The BindingProfile's `environment`, verbatim and read-only; a Module reads the
++    /// sections its own Vocabularies define (MA-5a, SB-26).
++    pub environment: Arc<BTreeMap<Namespace, serde_json::Value>>,
++    /// The link ends bound to this fragment's ports (MA-27).
+     pub links: Vec<AttachedPort>,
+     /// The component descriptors in this Executor's Island, keyed by component name (MA-19).
+     pub components: BTreeMap<Ident, ComponentDescriptor>,
+@@ -999,7 +1017,7 @@ pub trait Provider: Send {
+     /// Returns a report whose `coercions` equal what `coerce` returned for the same
+     /// request. `effective` may narrow a declared capability and must not widen one
+     /// (MA-12).
+-    fn prepare(&mut self, f: &Fragment, ctx: PrepareContext<'_>,
++    fn prepare(&mut self, f: &Fragment, ctx: PrepareContext,
+     ) -> Result<PrepareReport, ModuleError>;
+     /// Reserves and synchronises, and radiates nothing (MA-13).
+     fn arm(&mut self) -> Result<(), ModuleError>;
+@@ -1022,7 +1040,7 @@ pub trait Executor: Send {
+     /// What it can run (MA-18).
+     fn descriptor(&self) -> &ExecutorDescriptor;
+     /// Loads each component by its `impl` identity (MA-19).
+-    fn prepare(&mut self, island: &IslandDecl, ctx: PrepareContext<'_>,
++    fn prepare(&mut self, island: &IslandDecl, ctx: PrepareContext,
+     ) -> Result<PrepareReport, ModuleError>;
+     /// Reserves (MA-7).
+     fn arm(&mut self) -> Result<(), ModuleError>;
+@@ -1045,7 +1063,7 @@ pub trait Sink: Send {
+     /// What it writes (MA-25).
+     fn descriptor(&self) -> &SinkDescriptor;
+     /// Prepares (MA-25).
+-    fn prepare(&mut self, f: &Fragment, ctx: PrepareContext<'_>,
++    fn prepare(&mut self, f: &Fragment, ctx: PrepareContext,
+     ) -> Result<PrepareReport, ModuleError>;
+     /// Reserves (MA-25).
+     fn arm(&mut self) -> Result<(), ModuleError>;
+@@ -1080,7 +1098,11 @@ pub trait Authority: Send + Sync {
+     fn descriptor(&self) -> &AuthorityDescriptor;
+     /// The Run's `TimeAuthority` handle (TM-16a).
+     fn time(&self) -> Arc<dyn TimeAuthority>;
+-    /// The next instant at which anything is due; `None` ends the Run (MA-30).
++    /// Advances the governed clocks to the earliest instant at which a scheduled
++    /// callback is due, fires the callbacks due there in TM-16c order — including ones
++    /// they schedule at that instant, up to TM-17b's cap per call — and returns the
++    /// instant; with nothing scheduled it returns `None` and moves nothing (MA-29,
++    /// MA-30, KA-11).
+     fn next_wakeup(&self) -> Option<TimePoint>;
+ }
+ 
+diff --git a/crates/ezsdr-kernel/src/plan/compile.rs b/crates/ezsdr-kernel/src/plan/compile.rs
+index 27ff042..ecd19c9 100644
+--- a/crates/ezsdr-kernel/src/plan/compile.rs
++++ b/crates/ezsdr-kernel/src/plan/compile.rs
+@@ -291,6 +291,7 @@ fn derive_class(profile: &BindingProfile, pacing: Pacing) -> Result<ExecutionCla
+     // so a profile could declare `simulation` on a Hardware Run and be believed by
+     // every reader of its own text while the Manifest recorded something else.
+     if let Some(section) = profile.section("ezsdr.time") {
++
+         // MA-41 in full: "an absent, non-string or unrecognised `class` is refused
+         // rather than ignored". Reading it through `and_then(as_str)` refused the
+         // unrecognised *value* alone, so the two cases the clause names first —
+@@ -307,6 +308,15 @@ fn derive_class(profile: &BindingProfile, pacing: Pacing) -> Result<ExecutionCla
+             .ok_or_else(|| SpecError::Structural {
+                 reason: "MA-41: ezsdr.time.class is not a string".to_owned(),
+             })?;
++        // MA-41 (KA-8): the section is the closed set `{ class, start_lead_ns }`.
++        if let Some(obj) = section.as_object() {
++            if let Some(extra) = obj.keys().find(|k| !matches!(k.as_str(), "class" | "start_lead_ns")) {
++                return Err(SpecError::Structural {
++                    reason: format!("MA-41: ezsdr.time carries the field `{extra}`, which is not class or start_lead_ns"),
++                });
++            }
++        }
++        crate::binding::start_lead_ns(&profile.environment)?;
+         {
+             let matches_derived = match derived {
+                 ExecutionClass::Simulation => declared == "simulation",
+diff --git a/crates/ezsdr-kernel/src/plan/matching.rs b/crates/ezsdr-kernel/src/plan/matching.rs
+index 7edf2f0..b5c4f99 100644
+--- a/crates/ezsdr-kernel/src/plan/matching.rs
++++ b/crates/ezsdr-kernel/src/plan/matching.rs
+@@ -143,7 +143,11 @@ pub(super) fn match_constraints(
+     // `prepare` could only be approximate. With one call it is exact, by MA-11's
+     // determinism. The matcher still asks only what a value becomes; it never decides
+     // the grid.
+-    if to_coerce.is_empty() {
++    // SB-7 (KA-5): **exactly once** per bound node, unless a non-coercible key has
++    // already failed — including when every key was satisfied directly, because a
++    // Provider may refuse a combination whose every value it declares (Vision §13
++    // rule 1's PerformanceEnvelope).
++    if out.rejected.iter().any(|r| r.resource == *name) {
+         return Ok(());
+     }
+     let report = provider
+@@ -163,6 +167,29 @@ pub(super) fn match_constraints(
+             reason: "SB-7: the Provider could not coerce it".to_owned(),
+         });
+     }
++    // SB-7 (KA-5): the Provider's own refusals. One per key, replacing a reason
++    // recorded above; a key the request does not name is a malformed report.
++    for refused in &report.rejected {
++        if !req.requires.contains_key(&refused.key) {
++            out.violations.push(Violation {
++                check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
++                key: Some(refused.key.clone()),
++                requested: None,
++                reason: format!(
++                    "SB-7: {name}'s Provider refuses {}, which its request does not name",
++                    refused.key
++                ),
++            });
++            continue;
++        }
++        out.rejected.retain(|r| !(r.resource == *name && r.key == refused.key));
++        out.rejected.push(RejectedConstraint {
++            resource: name.clone(),
++            key: refused.key.clone(),
++            constraint: req.requires[&refused.key].clone(),
++            reason: refused.reason.clone(),
++        });
++    }
+     // SB-44: a `Coercion` for a key the request does not name is a malformed report at
+     // this stage for the same reason D42 made it one at `prepare` — nothing was
+     // requested, so nothing was coerced. D42 guarded `prepare` only, and the same
+diff --git a/crates/ezsdr-kernel/src/plan/prepare.rs b/crates/ezsdr-kernel/src/plan/prepare.rs
+index 3ec2505..ab2158f 100644
+--- a/crates/ezsdr-kernel/src/plan/prepare.rs
++++ b/crates/ezsdr-kernel/src/plan/prepare.rs
+@@ -122,9 +122,15 @@ pub(super) fn collect_prepare(
+         r.warnings.extend(warned);
+     }
+     let merged = MergedPrepare::from_reports(ok);
++    // SB-30's second point, per fragment (KA-4): each report's own `effective`.
++    let per_fragment: BTreeMap<crate::spec::Ident, BTreeMap<crate::spec::Key, Value>> = merged
++        .reports
++        .iter()
++        .map(|r| (r.fragment.clone(), r.effective.clone()))
++        .collect();
+     violations.extend(checks.run(
+         environment,
+-        &merged.effective,
++        &per_fragment,
+         &BTreeMap::new(),
+         CheckStage::Prepare,
+     ));
+diff --git a/crates/ezsdr-kernel/src/plan/validation.rs b/crates/ezsdr-kernel/src/plan/validation.rs
+index 24a7c5e..0e60a1b 100644
+--- a/crates/ezsdr-kernel/src/plan/validation.rs
++++ b/crates/ezsdr-kernel/src/plan/validation.rs
+@@ -20,15 +20,31 @@ pub(super) fn requested_violations(
+     profile: &BindingProfile,
+     inputs: &CompileInputs<'_>,
+ ) -> Vec<Violation> {
+-    let requested: BTreeMap<Key, Value> = spec
+-        .resources
+-        .values()
+-        .flat_map(|r| r.requires.iter())
+-        .filter_map(|(k, c)| match c {
+-            Constraint::Eq { value } => Some((k.clone(), value.clone())),
+-            _ => None,
+-        })
+-        .collect();
++    // SB-30 (KA-4): one entry per fragment, never merged, so that two fragments naming
++    // one key are each judged by their own value.
++    let mut requested: BTreeMap<Ident, BTreeMap<Key, Value>> = BTreeMap::new();
++    let eq_values = |requires: &BTreeMap<Key, Constraint>| -> Vec<(Key, Value)> {
++        requires
++            .iter()
++            .filter_map(|(k, c)| match c {
++                Constraint::Eq { value } => Some((k.clone(), value.clone())),
++                _ => None,
++            })
++            .collect()
++    };
++    for (name, r) in &spec.resources {
++        // The resource's needs are bound within its fragment (SB-36), so their values
++        // are the fragment's too; the resource's own value wins for a key both name.
++        let mut values: BTreeMap<Key, Value> = BTreeMap::new();
++        for need in r.needs.values() {
++            values.extend(eq_values(&need.requires));
++        }
++        values.extend(eq_values(&r.requires));
++        requested.insert(name.clone(), values);
++    }
++    for o in &spec.outputs {
++        requested.insert(o.id.clone(), o.params.clone());
++    }
+     inputs.checks.run(
+         &profile.environment,
+         &requested,
+@@ -249,6 +265,18 @@ pub(super) fn check_bindings(
+         for a in &instance.arm_after {
+             check_rid(&format!("the instance bound to {name} arms after"), a)?;
+         }
++        // SB-22f (KA-7): the one envelope value the Kernel reads is in host.monotonic
++        // and not negative.
++        if let Some(lead) = instance.min_command_lead {
++            if lead.domain != crate::id::ClockDomainId::HOST_MONOTONIC || lead.ticks < 0 {
++                return Err(SpecError::Structural {
++                    reason: format!(
++                        "SB-22f: the instance bound to {name} declares a min_command_lead of \
++                         {lead}, which is not a non-negative host.monotonic duration"
++                    ),
++                });
++            }
++        }
+     }
+     for output in &spec.outputs {
+         let name = &output.id;
+@@ -350,12 +378,19 @@ pub(super) fn check_bindings(
+         if let Some(clash) = instance
+             .tree
+             .walk_iter()
+-            .find(|n| n.id.segments().next() == Some("sink"))
++            .find(|n| {
++                // SB-22h (KA-14): also `kernel`, the Kernel's own event source, and
++                // `unforeseen`, RS-33's fallback row, and every `island_<n>`, an
++                // Executor's event source (KC-8).
++                n.id.segments().next().is_some_and(|s| {
++                    matches!(s, "sink" | "kernel" | "unforeseen") || s.starts_with("island_")
++                })
++            })
+         {
+             return Err(SpecError::Structural {
+                 reason: format!(
+                     "SB-22h: instance bound to {name} declares node {}, and the first path \
+-                     segment `sink` is reserved for a bound Sink's address",
++                     segments `sink`, `kernel`, `unforeseen` and `island_<n>` are reserved",
+                     clash.id
+                 ),
+             });
+@@ -369,7 +404,7 @@ pub(super) fn check_bindings(
+     // descriptions are one instance (SB-23 reads `instances: 2` that way) and must
+     // report one `instance().id`, or the runtime handed the Kernel two objects for one
+     // description and the Manifest could not reproduce it.
+-    let mut by_description: BTreeMap<(&ModuleRef, String), (&Ident, &ResourceId)> = BTreeMap::new();
++    let mut by_description: BTreeMap<(ModuleRef, String), (&Ident, &ResourceId)> = BTreeMap::new();
+     let mut paths: BTreeMap<ResourceId, &Ident> = BTreeMap::new();
+     for (name, binding) in profile
+         .bindings
+@@ -378,14 +413,7 @@ pub(super) fn check_bindings(
+     {
+         let instance =
+             super::supplied(inputs.providers, name, "Provider instance")?.instance();
+-        let description = (
+-            &binding.module,
+-            format!(
+-                "{}|{}",
+-                serde_json::to_string(&binding.selector).unwrap_or_default(),
+-                serde_json::to_string(&binding.profile).unwrap_or_default()
+-            ),
+-        );
++        let description = binding_description(binding);
+         if let Some((first, first_id)) = by_description.insert(description, (name, &instance.id)) {
+             if *first_id != instance.id {
+                 return Err(SpecError::Structural {
+@@ -634,6 +662,20 @@ fn not_local(what: String) -> SpecError {
+     }
+ }
+ 
++/// A binding's description `(module, selector, profile)`, which is an instance's
++/// identity (SB-3): two bindings with equal descriptions name one instance. Shared by
++/// `validate` and the coordinator's grouping (KC-4), so the two cannot disagree.
++pub(crate) fn binding_description(binding: &crate::binding::Binding) -> (ModuleRef, String) {
++    (
++        binding.module.clone(),
++        format!(
++            "{}|{}",
++            serde_json::to_string(&binding.selector).unwrap_or_default(),
++            serde_json::to_string(&binding.profile).unwrap_or_default()
++        ),
++    )
++}
++
+ /// A `ResourceId` handed in as a Rust value: on the local node (X7) and with a path of
+ /// SB-1's grammar, because its fields are public and a Rust caller can build one
+ /// unparsed — which would reach a Manifest the Kernel's own deserialiser refuses.
+diff --git a/crates/ezsdr-kernel/src/session.rs b/crates/ezsdr-kernel/src/session.rs
+index e075db6..d78f8be 100644
+--- a/crates/ezsdr-kernel/src/session.rs
++++ b/crates/ezsdr-kernel/src/session.rs
+@@ -195,14 +195,22 @@ impl SessionLog {
+         action: SessionAction,
+         outcome: Outcome,
+     ) -> Result<u32, SpecError> {
+-        action.check_values()?;
+-        check_ids(&time, &action)?;
++        self.check_entry(&time, &action)?;
+         let seq = self.entries.len() as u32;
+         self.entries.push(LogEntry { seq, time, action, outcome,
+         });
+         Ok(seq)
+     }
+ 
++    /// What `append` refuses, checked without appending: an Action that is not a
++    /// well-formed document, or that carries an id the Manifest's deserialiser would
++    /// refuse. The coordinator calls it before anything is compiled, so that a refused
++    /// Action takes no sequence number (RS-15, KC-28).
++    pub fn check_entry(&self, time: &TimePoint, action: &SessionAction) -> Result<(), SpecError> {
++        action.check_values()?;
++        check_ids(time, action)
++    }
++
+     /// Every entry, in order (RS-15).
+     pub fn entries(&self) -> &[LogEntry] {
+         &self.entries
+@@ -278,8 +286,8 @@ impl Admitter<'_> {
+     /// Rule: RS-16, RS-17, SB-30, SB-45, SB-46.
+     pub fn admit(
+         &self,
+-        effective: &BTreeMap<Key, Value>,
+-        proposed: &BTreeMap<Key, Value>,
++        effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
++        proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+         coercions: &[Coercion],
+         stage: CheckStage,
+     ) -> Result<Admitted, Vec<Violation>> {
+@@ -321,12 +329,12 @@ impl Admitter<'_> {
+         // 3. the parameter's declared update class. An update through an undeclared
+         //    class is rejected here, so an Executor never receives one (RS-17, RS-52).
+         if stage == CheckStage::Runtime {
+-            for key in proposed.keys() {
++            for (key, value) in proposed.values().flatten() {
+                 if declared_class(key, self.declared_classes, self.registry).is_none() {
+                     return Err(vec![Violation {
+                         check: Namespace::parse("ezsdr.update_class").expect("a valid literal"),
+                         key: Some(key.clone()),
+-                        requested: proposed.get(key).cloned(),
++                        requested: Some(value.clone()),
+                         reason: format!("RS-17: {key} has no declared update class"),
+                     }]);
+                 }
+diff --git a/crates/ezsdr-kernel/src/stream/block.rs b/crates/ezsdr-kernel/src/stream/block.rs
+index 99bdb16..297308d 100644
+--- a/crates/ezsdr-kernel/src/stream/block.rs
++++ b/crates/ezsdr-kernel/src/stream/block.rs
+@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
+ 
+ use super::{BufferRef, StreamError};
+ use crate::contract::DataContractId;
++use crate::id::MemoryDomainId;
+ use crate::time::{Duration, TimeError, TimePoint};
+ 
+ /// Which side of the radio produced the block, taken from the producing Port at
+@@ -176,6 +177,26 @@ impl BlockHeader {
+ pub struct SampleBlock {
+     header: BlockHeader,
+     buffer: BufferRef,
++    host: Option<HostBytes>,
++}
++
++/// Host bytes a producer attached to a block; they live as long as the block does
++/// (SC-8, SC-9). Compared by content and printed by length only.
++#[derive(Clone)]
++struct HostBytes(std::sync::Arc<[u8]>);
++
++impl PartialEq for HostBytes {
++    fn eq(&self, other: &Self) -> bool {
++        self.0[..] == other.0[..]
++    }
++}
++
++impl Eq for HostBytes {}
++
++impl fmt::Debug for HostBytes {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "HostBytes({} bytes)", self.0.len())
++    }
+ }
+ 
+ /// A shared, immutable reference to a [`SampleBlock`]; fan-out shares it (SC-11).
+@@ -271,7 +292,28 @@ impl SampleBlock {
+         if header.valid != ChannelMask::full(header.channels) {
+             header.flags = header.flags | BlockFlags::PARTIAL_CHANNELS;
+         }
+-        Ok(SampleBlock { header, buffer })
++        Ok(SampleBlock { header, buffer, host: None })
++    }
++
++    /// Builds a block whose bytes are host memory the producer attaches, with every
++    /// check of [`SampleBlock::new`]; the buffer reference names `memory_domain` with
++    /// the bytes' length (SC-8, SC-10a, KA-3).
++    pub fn new_host(
++        header: BlockHeader,
++        memory_domain: MemoryDomainId,
++        bytes: std::sync::Arc<[u8]>,
++        bytes_per_sample: u32,
++    ) -> Result<SampleBlock, StreamError> {
++        let buffer = BufferRef { memory_domain, handle: 0, len_bytes: bytes.len() as u64 };
++        let mut block = SampleBlock::new(header, buffer, bytes_per_sample)?;
++        block.host = Some(HostBytes(bytes));
++        Ok(block)
++    }
++
++    /// The host bytes a producer attached with [`SampleBlock::new_host`], or `None`
++    /// (SC-8).
++    pub fn host_bytes(&self) -> Option<&[u8]> {
++        self.host.as_ref().map(|h| &h.0[..])
+     }
+ 
+     /// The validated header, with `PARTIAL_CHANNELS` derived (SC-10).
+diff --git a/crates/ezsdr-kernel/src/stream/buffer.rs b/crates/ezsdr-kernel/src/stream/buffer.rs
+index 2717790..6a114f2 100644
+--- a/crates/ezsdr-kernel/src/stream/buffer.rs
++++ b/crates/ezsdr-kernel/src/stream/buffer.rs
+@@ -1,6 +1,5 @@
+ //! Memory domains and buffer references — `02-stream-contract.md` SC-6…SC-9 (Vision §31).
+ 
+-use super::BlockRef;
+ use crate::id::MemoryDomainId;
+ 
+ /// A memory domain, an opaque handle and a length in bytes. The handle is
+@@ -17,17 +16,3 @@ pub struct BufferRef {
+     /// Size of the buffer in bytes; SC-10a checks it against the block shape (SC-7).
+     pub len_bytes: u64,
+ }
+-
+-/// Host bytes are obtained only through this interface, implemented by the
+-/// [`DataLink`](super::DataLink), which delegates to the owning pool and yields
+-/// nothing for a domain that is not host-reachable.
+-///
+-/// The returned slice borrows the **block**, not the link: a pool may recycle the
+-/// buffer as soon as the last [`BlockRef`] is dropped, so a slice tied to the
+-/// link's lifetime would outlive its own bytes (decision S5).
+-///
+-/// Rule: SC-8. Vision invariant 34.
+-pub trait HostMemoryAccess {
+-    /// The block's bytes, or `None` when its domain is not host-reachable (SC-8).
+-    fn map_host<'a>(&self, b: &'a BlockRef) -> Option<&'a [u8]>;
+-}
+diff --git a/crates/ezsdr-kernel/src/stream/mod.rs b/crates/ezsdr-kernel/src/stream/mod.rs
+index 071c914..2cc47fd 100644
+--- a/crates/ezsdr-kernel/src/stream/mod.rs
++++ b/crates/ezsdr-kernel/src/stream/mod.rs
+@@ -16,7 +16,7 @@ use std::fmt;
+ 
+ pub use block::{
+     BlockFlags, BlockHeader, BlockRef, ChannelMask, Direction, SampleBlock};
+-pub use buffer::{BufferRef, HostMemoryAccess};
++pub use buffer::BufferRef;
+ pub use burst::{
+     AdmittedTarget, BurstEnd, BurstOpen, BurstRecord, BurstState, BurstStep, BurstTracker,
+     LateOutcome, LatePolicy, admit_burst_target,
+diff --git a/crates/ezsdr-kernel/src/time/authority.rs b/crates/ezsdr-kernel/src/time/authority.rs
+index 28ac3b4..d5e3484 100644
+--- a/crates/ezsdr-kernel/src/time/authority.rs
++++ b/crates/ezsdr-kernel/src/time/authority.rs
+@@ -170,6 +170,14 @@ mod manual {
+             self
+         }
+ 
++        /// The earliest pending callback's instant on the primary root, without
++        /// advancing (TM-17a, KA-17).
++        pub fn next_due(&self) -> Option<TimePoint> {
++            let state = self.lock();
++            let rs = state.roots.get(&self.primary)?;
++            rs.pending.keys().next().map(|(ticks, _)| TimePoint::new(self.primary, *ticks))
++        }
++
+         /// The registry this Authority resolves domains against (TM-16c).
+         pub fn registry(&self) -> &Arc<ClockRegistry> {
+             &self.registry
+diff --git a/crates/ezsdr-kernel/src/time/domain.rs b/crates/ezsdr-kernel/src/time/domain.rs
+index 31ee93d..54c003d 100644
+--- a/crates/ezsdr-kernel/src/time/domain.rs
++++ b/crates/ezsdr-kernel/src/time/domain.rs
+@@ -148,6 +148,7 @@ pub struct SampleClockHandle {
+ struct Inner {
+     domains: BTreeMap<ClockDomainId, ClockDomain>,
+     records: Vec<SampleClockRecord>,
++    declared: Vec<SampleClockHandle>,
+     next_local: u32,
+ }
+ 
+@@ -186,6 +187,7 @@ impl ClockRegistry {
+             inner: RwLock::new(Inner {
+                 domains,
+                 records: Vec::new(),
++                declared: Vec::new(),
+                 next_local: ClockDomainId::FIRST_ALLOCATABLE,
+             }),
+         }
+@@ -319,8 +321,22 @@ impl ClockRegistry {
+                 return Err(TimeError::NotARoot { id: root });
+             }
+         }
+-        Ok(SampleClockHandle { id: self.allocate_id(), root, root_ticks_per_tick, stream,
+-        })
++        let handle = SampleClockHandle { id: self.allocate_id(), root, root_ticks_per_tick, stream };
++        // TM-12 (KA-2): the declaration is recorded, so that a SpecTime can resolve
++        // against a receive clock that is registered only at its first sample.
++        self.write().declared.push(handle.clone());
++        Ok(handle)
++    }
++
++    /// Every declared SampleClock, registered or not, in declaration order (TM-12, KA-2).
++    pub fn declared_sample_clocks(&self) -> Vec<SampleClockHandle> {
++        self.read().declared.clone()
++    }
++
++    /// Every registered domain, in id order: what the Manifest's `clocks.domains`
++    /// records (TM-12, RS-38, KA-2).
++    pub fn domains(&self) -> Vec<ClockDomain> {
++        self.read().domains.values().cloned().collect()
+     }
+ 
+     /// Registers a declared SampleClock once its origin is known, and records it for
+diff --git a/crates/ezsdr-kernel/tests/kernel_surface.rs b/crates/ezsdr-kernel/tests/kernel_surface.rs
+index 2818470..2e4e215 100644
+--- a/crates/ezsdr-kernel/tests/kernel_surface.rs
++++ b/crates/ezsdr-kernel/tests/kernel_surface.rs
+@@ -42,9 +42,10 @@ fn is_token_at(lower: &str, start: usize, end: usize) -> bool {
+     boundary(lower[..start].chars().next_back()) && boundary(lower[end..].chars().next())
+ }
+ 
+-/// The six rule prefixes of `00-overview.md` §2. A public item's doc comment must
+-/// cite at least one (OV-23).
+-const RULE_PREFIXES: [&str; 6] = ["OV-", "TM-", "SC-", "SB-", "RS-", "MA-"];
++/// The Kernel's rule prefixes: Phase 1's six (`00-overview.md` §2) and Phase 2's
++/// three (`plan/phase2/06-kernel-coordinator.md`). A public item's doc comment must
++/// cite at least one (OV-23, KA-20).
++const RULE_PREFIXES: [&str; 9] = ["OV-", "TM-", "SC-", "SB-", "RS-", "MA-", "KA-", "KC-", "UC-"];
+ 
+ /// Every module name of this crate, taken from `src/` itself so the set cannot go
+ /// stale, so that a `pub use` can be told from a re-export of a dependency's type
+diff --git a/crates/ezsdr-kernel/tests/kernel_surface_allow.txt b/crates/ezsdr-kernel/tests/kernel_surface_allow.txt
+index f803713..f63b921 100644
+--- a/crates/ezsdr-kernel/tests/kernel_surface_allow.txt
++++ b/crates/ezsdr-kernel/tests/kernel_surface_allow.txt
+@@ -71,7 +71,6 @@ time::domain::SampleClockHandle = NEW: TM-13a's id-and-ratio allocated at prepar
+ 
+ # --- data / Stream Contract (audit §13 `data`) -------------------------------
+ stream::buffer::BufferRef = BufferRef
+-stream::buffer::HostMemoryAccess = NEW: SC-8's only route to host bytes, so that invariant 34's "no raw slices" has a mechanism.
+ stream::block::SampleBlock = SampleBlock
+ stream::block::BlockHeader = SampleBlock
+ stream::block::BlockRef = SampleBlock
+@@ -130,6 +129,7 @@ plan::apply_coercion = coercion policy
+ module_api::Resource = Resource tree
+ module_api::ProviderInstance = Resource tree
+ binding::Binding = Binding resolution
++binding::start_lead_ns = NEW: KA-8's single reader of ezsdr.time.start_lead_ns, used by plan() and the coordinator
+ binding::BindingProfile = BindingProfile
+ binding::Placements = NEW: SB-25's island, component and link assignment, which R21 keeps out of the Spec.
+ binding::ComponentPlacement = NEW: SB-25's component-to-island and memory-domain entry.
+diff --git a/crates/ezsdr-kernel/tests/module_api.rs b/crates/ezsdr-kernel/tests/module_api.rs
+index 93d2246..45dcb15 100644
+--- a/crates/ezsdr-kernel/tests/module_api.rs
++++ b/crates/ezsdr-kernel/tests/module_api.rs
+@@ -268,32 +268,12 @@ fn ma_35_vocabulary_carries_its_own_content() {
+ 
+ // ---------------------------------------------------------------- Provider behaviour
+ 
+-fn prepare_context<'a>(
+-    run: RunId,
+-    authority: &'a ManualTimeAuthority,
+-    events: &'a EventCollector,
+-    actions: &'a QueueReceiver,
+-    submitter: &'a TestSubmitter,
+-) -> PrepareContext<'a> {
+-    PrepareContext {
+-        run,
+-        class: ezsdr_kernel::module_api::ExecutionClass::Simulation,
+-        time: authority,
+-        events,
+-        actions,
+-        actions_out: submitter,
+-        links: Vec::new(),
+-        components: BTreeMap::new(),
+-        host_budget: RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 1_000_000))
+-            .expect("host.monotonic"),
+-    }
+-}
+-
+ struct Harness {
+-    authority: ManualTimeAuthority,
+-    events: EventCollector,
+-    actions: QueueReceiver,
+-    submitter: TestSubmitter,
++    clocks: Arc<ClockRegistry>,
++    authority: Arc<ManualTimeAuthority>,
++    events: Arc<EventCollector>,
++    actions: Arc<QueueReceiver>,
++    submitter: Arc<TestSubmitter>,
+ }
+ 
+ impl Harness {
+@@ -309,7 +289,7 @@ impl Harness {
+             ))
+             .expect("root");
+         let authority = ManualTimeAuthority::new(
+-            registry,
++            registry.clone(),
+             root,
+             &[],
+             ezsdr_kernel::module_api::Pacing::FreeRunning,
+@@ -319,18 +299,30 @@ impl Harness {
+         let policy = kinds.compile(&BTreeMap::new()).expect("compiles");
+         let events = EventCollector::new(&[], &policy.table.keys().cloned().collect::<Vec<_>>(), 16, &policy,
+         );
+-        Harness { authority, events, actions: QueueReceiver::new(), submitter,
++        Harness {
++            clocks: registry,
++            authority: Arc::new(authority),
++            events: Arc::new(events),
++            actions: Arc::new(QueueReceiver::new()),
++            submitter: Arc::new(submitter),
+         }
+     }
+ 
+-    fn ctx(&self) -> PrepareContext<'_> {
+-        prepare_context(
+-            RunId::generate(),
+-            &self.authority,
+-            &self.events,
+-            &self.actions,
+-            &self.submitter,
+-        )
++    fn ctx(&self) -> PrepareContext {
++        PrepareContext {
++            run: RunId::generate(),
++            class: ezsdr_kernel::module_api::ExecutionClass::Simulation,
++            time: self.authority.clone(),
++            clocks: self.clocks.clone(),
++            events: self.events.clone(),
++            actions: self.actions.clone(),
++            actions_out: self.submitter.clone(),
++            environment: Arc::new(BTreeMap::new()),
++            links: Vec::new(),
++            components: BTreeMap::new(),
++            host_budget: RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 1_000_000))
++                .expect("host.monotonic"),
++        }
+     }
+ }
+ 
+@@ -968,7 +960,7 @@ impl Provider for StepLogger {
+     ) -> Result<ezsdr_kernel::module_api::CoerceReport, ModuleError> {
+         Ok(Default::default())
+     }
+-    fn prepare(&mut self, _f: &ezsdr_kernel::plan::Fragment, _c: PrepareContext<'_>,
++    fn prepare(&mut self, _f: &ezsdr_kernel::plan::Fragment, _c: PrepareContext,
+     ) -> Result<PrepareReport, ModuleError> {
+         unreachable!("the stepping test does not prepare")
+     }
+@@ -991,7 +983,7 @@ impl Executor for StepLogger {
+     fn descriptor(&self) -> &ExecutorDescriptor {
+         &self.executor
+     }
+-    fn prepare(&mut self, _i: &IslandDecl, _c: PrepareContext<'_>,
++    fn prepare(&mut self, _i: &IslandDecl, _c: PrepareContext,
+     ) -> Result<PrepareReport, ModuleError> {
+         unreachable!("the stepping test does not prepare")
+     }
+@@ -1014,7 +1006,7 @@ impl Sink for StepLogger {
+     fn descriptor(&self) -> &ezsdr_kernel::module_api::SinkDescriptor {
+         &self.sink
+     }
+-    fn prepare(&mut self, _f: &ezsdr_kernel::plan::Fragment, _c: PrepareContext<'_>,
++    fn prepare(&mut self, _f: &ezsdr_kernel::plan::Fragment, _c: PrepareContext,
+     ) -> Result<PrepareReport, ModuleError> {
+         unreachable!("the stepping test does not prepare")
+     }
+diff --git a/crates/ezsdr-kernel/tests/run_session.rs b/crates/ezsdr-kernel/tests/run_session.rs
+index 66a985b..347c67e 100644
+--- a/crates/ezsdr-kernel/tests/run_session.rs
++++ b/crates/ezsdr-kernel/tests/run_session.rs
+@@ -981,7 +981,7 @@ fn rs_17_provider_parameter_class_comes_from_its_key_decl() {
+     };
+     let proposed: BTreeMap<Key, Value> =
+         [(key("test.gain"), Value::Num(20.0))].into_iter().collect();
+-    assert!(admitter.admit(&BTreeMap::new(), &proposed, &[], CheckStage::Runtime).is_ok());
++    assert!(admitter.admit(&BTreeMap::new(), &[(id("radio"), proposed.clone())].into_iter().collect(), &[], CheckStage::Runtime).is_ok());
+ 
+     // A key whose KeyDecl declares no class is still not changeable during a Run,
+     // so the absent value means "not changeable" and not "any class" (RS-17).
+@@ -1182,7 +1182,7 @@ fn rs_16_rejected_action_not_dispatched() {
+     };
+     let proposed: BTreeMap<Key, Value> = [(key("test.grid"), Value::Num(40.0))].into_iter().collect();
+     let violations = admitter
+-        .admit(&BTreeMap::new(), &proposed, &[], CheckStage::Runtime)
++        .admit(&BTreeMap::new(), &[(id("radio"), proposed.clone())].into_iter().collect(), &[], CheckStage::Runtime)
+         .expect_err("outside the limit");
+     assert_eq!(violations[0].check, ns("test.limits"));
+ 
+@@ -1222,7 +1222,7 @@ fn rs_17_undeclared_update_class_rejected() {
+     };
+     let proposed: BTreeMap<Key, Value> = [(key("test.flag"), Value::Bool(true))].into_iter().collect();
+     let violations = admitter
+-        .admit(&BTreeMap::new(), &proposed, &[], CheckStage::Runtime)
++        .admit(&BTreeMap::new(), &[(id("radio"), proposed.clone())].into_iter().collect(), &[], CheckStage::Runtime)
+         .expect_err("no declared class");
+     assert!(violations[0].reason.contains("update class"));
+ 
+diff --git a/crates/ezsdr-kernel/tests/spec_binding.rs b/crates/ezsdr-kernel/tests/spec_binding.rs
+index 7c9d11b..7a9dac9 100644
+--- a/crates/ezsdr-kernel/tests/spec_binding.rs
++++ b/crates/ezsdr-kernel/tests/spec_binding.rs
+@@ -1034,7 +1034,7 @@ fn sb_30_admission_check_runs_at_three_points() {
+     let proposed: BTreeMap<Key, Value> =
+         [(key("test.grid"), Value::Num(30.0))].into_iter().collect();
+     let violations = admitter
+-        .admit(&BTreeMap::new(), &proposed, &[], CheckStage::Runtime)
++        .admit(&BTreeMap::new(), &[(id("radio"), proposed.clone())].into_iter().collect(), &[], CheckStage::Runtime)
+         .expect_err("the runtime point ran the check");
+     assert_eq!(violations[0].check, ns("test.limits"));
+     assert_eq!(violations[0].requested, Some(Value::Num(30.0)));
+@@ -2704,6 +2704,18 @@ fn sb_22h_the_sink_path_segment_is_reserved() {
+         matches!(&err, SpecError::Structural { reason } if reason.contains("reserved")),
+         "{err:?}"
+     );
++    // KA-14: `kernel`, `unforeseen` and every `island_<n>` are reserved the same way,
++    // at any depth of the first segment's subtree.
++    for root in ["kernel", "unforeseen", "kernel/x", "island_0", "island_12/x"] {
++        let p = TestProvider::new(root, 2);
++        let providers = one_provider("radio", &p);
++        let err = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers))
++            .expect_err("reserved");
++        assert!(
++            matches!(&err, SpecError::Structural { reason } if reason.contains("reserved")),
++            "{root}: {err:?}"
++        );
++    }
+     // Any other root is fine.
+     let ok = TestProvider::new("radio", 2);
+     let providers = one_provider("radio", &ok);
+@@ -4570,3 +4582,219 @@ fn sb_39_plan_reruns_the_structural_checks_and_refuses_a_stale_admission() {
+     let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
+     assert!(v.iter().any(|x| x.reason.contains("is not one its bound instance declares")), "{v:?}");
+ }
++
++// ---------------------------------------------------------------- Phase 2 amendments
++
++#[test]
++fn sb_30_the_check_sees_each_fragment_s_own_value() {
++    // KA-4: two resources name one key. A merged map keeps one value — in resource
++    // order, `b`'s — so a check over it misses `a`, which is the one over the ceiling.
++    let env: BTreeMap<Namespace, serde_json::Value> =
++        [(ns("test.limits"), serde_json::json!({ "max_grid": 30.0 }))].into_iter().collect();
++    let grid = |v: f64| resource("test.device", &[("test.grid", Constraint::Eq { value: Value::Num(v) })]);
++    let spec = spec_with([(id("a"), grid(40.0)), (id("b"), grid(20.0))].into_iter().collect());
++    let mut fx = Fixture::new();
++    fx.checks.register(std::sync::Arc::new(TestLimitsCheck::new()));
++    let (pa, pb) = (TestProvider::new("a", 2), TestProvider::new("b", 2));
++    let providers: BTreeMap<Ident, &dyn Provider> =
++        [(id("a"), &pa as &dyn Provider), (id("b"), &pb as &dyn Provider)].into_iter().collect();
++    let mut profile = distinct_instances(profile_binding(&["a", "b"]), &["a", "b"]);
++    profile.environment = env.clone();
++    let names_a = |v: &[ezsdr_kernel::binding::Violation]| {
++        v.len() == 1 && v[0].reason.starts_with("a: ") && v[0].requested == Some(Value::Num(40.0))
++    };
++
++    // 1. validate: one entry per resource, holding its `Eq` constraints' values.
++    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("runs");
++    assert!(names_a(&admission.violations), "{:?}", admission.violations);
++
++    // A need's `Eq` values are its resource's fragment's too (SB-30, KA-4).
++    let mut with_need = spec_with([(id("a"), resource("test.device", &[])), (id("b"), grid(20.0))].into_iter().collect());
++    with_need.resources.get_mut(&id("a")).expect("a").needs.insert(
++        id("line"),
++        SubResourceReq {
++            kind: ns("test.line"),
++            requires: [(key("test.grid"), Constraint::Eq { value: Value::Num(40.0) })].into_iter().collect(),
++        },
++    );
++    let pa_lines = TestProvider::new("a", 2).with_line_grid();
++    let need_providers: BTreeMap<Ident, &dyn Provider> =
++        [(id("a"), &pa_lines as &dyn Provider), (id("b"), &pb as &dyn Provider)].into_iter().collect();
++    let admission = validate(&with_need, &profile, &fx.inputs(&need_providers)).expect("runs");
++    assert!(
++        admission.violations.iter().any(|v| v.check == ns("test.limits") && v.reason.starts_with("a: ")),
++        "the need's value is judged under its resource: {:?}",
++        admission.violations
++    );
++
++    // 2. prepare: one entry per report.
++    let admitted_spec = spec_with([(id("a"), grid(20.0)), (id("b"), grid(20.0))].into_iter().collect());
++    let admission = validate(&admitted_spec, &profile, &fx.inputs(&providers)).expect("runs");
++    assert!(admission.is_admitted(), "{admission:?}");
++    let report = |f: &str, v: f64| PrepareReport {
++        fragment: id(f),
++        effective: [(key("test.grid"), Value::Num(v))].into_iter().collect(),
++        coercions: Vec::new(),
++        warnings: Vec::new(),
++    };
++    // The reports disagree with the requests on purpose: the check must judge what
++    // each fragment applied, so the coercion check is the only other refusal.
++    let err = collect_prepare(
++        vec![Ok(report("a", 40.0)), Ok(report("b", 20.0))],
++        &admitted_spec,
++        &profile,
++        &fx.inputs(&providers),
++        &admission,
++    )
++    .expect_err("a's applied value is over the ceiling");
++    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
++    let limits: Vec<_> = v.into_iter().filter(|x| x.check == ns("test.limits")).collect();
++    assert!(names_a(&limits), "{limits:?}");
++
++    // 3. runtime: the current per-fragment configuration, with only the target's
++    //    proposed key.
++    let classes = BTreeMap::new();
++    let spec_coercion = BTreeMap::new();
++    let admitter = ezsdr_kernel::session::Admitter {
++        checks: &fx.checks,
++        environment: &env,
++        declared_classes: &classes,
++        spec_coercion: &spec_coercion,
++        registry: &fx.registry,
++        is_session: true,
++    };
++    let current: BTreeMap<Ident, BTreeMap<Key, Value>> = [
++        (id("a"), [(key("test.grid"), Value::Num(20.0))].into_iter().collect()),
++        (id("b"), [(key("test.grid"), Value::Num(20.0))].into_iter().collect()),
++    ]
++    .into_iter()
++    .collect();
++    let proposed: BTreeMap<Ident, BTreeMap<Key, Value>> =
++        [(id("a"), [(key("test.grid"), Value::Num(40.0))].into_iter().collect())].into_iter().collect();
++    let v = admitter
++        .admit(&current, &proposed, &[], CheckStage::Runtime)
++        .expect_err("a's proposed value is over the ceiling");
++    assert!(names_a(&v), "{v:?}");
++}
++
++#[test]
++fn sb_07_coerce_refuses_a_combination() {
++    // KA-5: every key is satisfied directly — count 2 and grid 40 are both declared —
++    // and the Provider still refuses the pair, which is Vision §13 rule 1's
++    // PerformanceEnvelope refusal at validate().
++    let pair = |grid: f64| {
++        spec_with(
++            [(
++                id("radio"),
++                resource(
++                    "test.device",
++                    &[
++                        ("test.count", Constraint::Eq { value: Value::Int(2) }),
++                        ("test.grid", Constraint::Eq { value: Value::Num(grid) }),
++                    ],
++                ),
++            )]
++            .into_iter()
++            .collect(),
++        )
++    };
++    let fx = Fixture::new();
++    let p = TestProvider::new("radio", 2).with_joint_limit(50.0);
++    let providers = one_provider("radio", &p);
++    let result = validate(&pair(40.0), &profile_binding(&["radio"]), &fx.inputs(&providers))
++        .expect("validates");
++    assert_eq!(p.coerce_calls.load(std::sync::atomic::Ordering::Relaxed), 1, "coerce is called");
++    assert!(!result.is_admitted());
++    assert_eq!(result.rejected.len(), 1, "{:?}", result.rejected);
++    assert_eq!(result.rejected[0].key, key("test.grid"));
++    assert!(result.rejected[0].reason.contains("joint limit"), "the Provider's reason");
++    // Inside the limit, the same pair is admitted.
++    let ok = validate(&pair(20.0), &profile_binding(&["radio"]), &fx.inputs(&providers))
++        .expect("validates");
++    assert!(ok.is_admitted(), "{ok:?}");
++}
++
++#[test]
++fn sb_07_a_stray_rejection_is_a_violation() {
++    // KA-5: a `rejected` entry for a key the request does not name is a malformed
++    // report, as SB-44 treats a stray coercion.
++    let spec = spec_with(
++        [(id("radio"), resource("test.device", &[("test.count", Constraint::Eq { value: Value::Int(2) })]))]
++            .into_iter()
++            .collect(),
++    );
++    let fx = Fixture::new();
++    let p = TestProvider::new("radio", 2).with_stray_rejection();
++    let providers = one_provider("radio", &p);
++    let result = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers))
++        .expect("validates");
++    assert!(!result.is_admitted());
++    assert!(result.rejected.is_empty(), "nothing the request names was refused");
++    assert_eq!(result.violations.len(), 1, "{:?}", result.violations);
++    assert_eq!(result.violations[0].check, ns("ezsdr.coercion"));
++    assert_eq!(result.violations[0].key, Some(key("test.flag")));
++}
++
++#[test]
++fn sb_22f_min_command_lead_is_in_host_monotonic() {
++    // KA-7: the one envelope number the Kernel reads is a Duration in host.monotonic
++    // and not negative.
++    use ezsdr_kernel::time::Duration;
++    let spec = minimal_spec();
++    let fx = Fixture::new();
++    for (lead, ok) in [
++        (Duration::new(ClockDomainId::HOST_MONOTONIC, 2_000_000), true),
++        (Duration::new(ClockDomainId::HOST_MONOTONIC, 0), true),
++        (Duration::new(ClockDomainId::HOST_MONOTONIC, -1), false),
++        (Duration::new(ClockDomainId::local(7), 2_000_000), false),
++    ] {
++        let p = TestProvider::new("radio", 2).with_min_command_lead(lead);
++        let providers = one_provider("radio", &p);
++        let result = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers));
++        if ok {
++            assert!(result.is_ok(), "{lead:?}: {result:?}");
++        } else {
++            assert!(
++                matches!(&result, Err(SpecError::Structural { reason }) if reason.contains("SB-22f")),
++                "{lead:?}: {result:?}"
++            );
++        }
++    }
++}
++
++#[test]
++fn ma_41_ezsdr_time_is_a_closed_set() {
++    // KA-8: `{ class, start_lead_ns }` and no other field; the lead is an integer in
++    // 0..=2^62. A misspelling must not become agreement (MA-41).
++    let spec = minimal_spec();
++    let p = TestProvider::new("radio", 2);
++    let providers = one_provider("radio", &p);
++    let fx = Fixture::new();
++    let plan_with = |section: serde_json::Value| {
++        let mut profile = profile_binding(&["radio"]);
++        profile.environment.insert(ns("ezsdr.time"), section);
++        let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
++        plan(&spec, &profile, &admission, &fx.inputs(&providers), Vec::new())
++    };
++    plan_with(serde_json::json!({ "class": "simulation", "start_lead_ns": 5 })).expect("plans");
++    plan_with(serde_json::json!({ "class": "simulation", "start_lead_ns": 4_611_686_018_427_387_904u64 }))
++        .expect("2^62 is the ceiling, inclusive");
++    for section in [
++        serde_json::json!({ "class": "simulation", "start_lead": 5 }),
++        serde_json::json!({ "class": "simulation", "start_lead_ns": -1 }),
++        serde_json::json!({ "class": "simulation", "start_lead_ns": 1.5 }),
++        serde_json::json!({ "class": "simulation", "start_lead_ns": "5" }),
++        serde_json::json!({ "class": "simulation", "start_lead_ns": 4_611_686_018_427_387_905u64 }),
++    ] {
++        let err = plan_with(section.clone()).expect_err("refused");
++        assert!(
++            matches!(&err, SpecError::Structural { reason } if reason.contains("MA-41")),
++            "{section}: {err:?}"
++        );
++    }
++    assert_eq!(
++        ezsdr_kernel::binding::start_lead_ns(&BTreeMap::new()),
++        Ok(0),
++        "absent means 0"
++    );
++}
+diff --git a/crates/ezsdr-kernel/tests/stream_contract.rs b/crates/ezsdr-kernel/tests/stream_contract.rs
+index 56c2429..78598d4 100644
+--- a/crates/ezsdr-kernel/tests/stream_contract.rs
++++ b/crates/ezsdr-kernel/tests/stream_contract.rs
+@@ -11,7 +11,7 @@ use ezsdr_kernel::id::{ClockDomainId, DataLinkId, MemoryDomainId, NodeId, Resour
+ use ezsdr_kernel::stream::{
+     BackPressure, BlockFlags, BlockHeader, BufferRef, BurstEnd, BurstOpen, BurstState, BurstStep,
+     BurstTracker, ChannelMask, ContinuityBuilder, DataLink, DataLinkDecl, Direction, DropCarry,
+-    GapCause, HostMemoryAccess, LateOutcome, LatePolicy, PublishOutcome, SampleBlock, Segment,
++    GapCause, LateOutcome, LatePolicy, PublishOutcome, SampleBlock, Segment,
+     StreamError, admit_burst_target, check_sink_link,
+ };
+ use ezsdr_kernel::time::{
+@@ -346,16 +346,20 @@ fn sc_11_block_fanout_shares_reference() {
+ }
+ 
+ #[test]
+-fn sc_08_buffer_map_host_none_for_gpu_domain() {
+-    let link = MemLink::new(BackPressure::Block, 2);
+-    let host = block(header(t(0), 10, 1));
+-    assert!(link.map_host(&host).is_some());
+-
++fn sc_08_host_bytes_only_for_a_block_that_carries_them() {
++    // SC-8 (KA-3): a block built with `new` carries no host bytes.
+     let h = header(t(0), 10, 1);
+-    let gpu = BufferRef { memory_domain: GPU_MEM, handle: 0xdead, len_bytes: 1 << 20,
+-    };
+-    let gpu = Arc::new(SampleBlock::new(h, gpu, CF32_BPS).expect("valid"));
+-    assert!(link.map_host(&gpu).is_none());
++    let gpu = BufferRef { memory_domain: GPU_MEM, handle: 0xdead, len_bytes: 1 << 20 };
++    let gpu = SampleBlock::new(h, gpu, CF32_BPS).expect("valid");
++    assert!(gpu.host_bytes().is_none());
++    // One built with `new_host` returns exactly the bytes it was given.
++    let bytes: Arc<[u8]> = vec![7u8; 4 * 1000 * 8].into();
++    let host = SampleBlock::new_host(header(t(0), 1000, 4), support::HOST_MEM, bytes, CF32_BPS).expect("valid");
++    assert_eq!(host.host_bytes().map(|b| b.len()), Some(32_000));
++    assert_eq!(host.buffer().len_bytes, 32_000);
++    // SC-10a refuses too few bytes exactly as `new` does.
++    let short: Arc<[u8]> = vec![0u8; 31_999].into();
++    assert!(SampleBlock::new_host(header(t(0), 1000, 4), support::HOST_MEM, short, CF32_BPS).is_err());
+ }
+ 
+ // ---------------------------------------------------------------- links
+diff --git a/crates/ezsdr-kernel/tests/support/doubles.rs b/crates/ezsdr-kernel/tests/support/doubles.rs
+index 54d6601..62b51ba 100644
+--- a/crates/ezsdr-kernel/tests/support/doubles.rs
++++ b/crates/ezsdr-kernel/tests/support/doubles.rs
+@@ -17,8 +17,8 @@ use ezsdr_kernel::module_api::{
+     ActionReceiver, ActionSubmitter, CoerceReport, CompileRule, ComponentDescriptor,
+     ComponentImpl, ComponentKind, ComponentRequires, ComponentTiming, Deployment, Driving,
+     Executor, ExecutorDescriptor, Fidelity, IslandDecl, LinkDescriptor, ModuleDescriptor, ModuleError,
+-    ModuleErrorKind, ModuleRef, ParamDecl, PrepareContext, Provider, ProviderInstance, Requested,
+-    Resource, Role, Sink, SinkDescriptor, StepOutcome, StopMode, UpdateClass, VerbDecl, Version,
++    ModuleErrorKind, ModuleRef, ParamDecl, PrepareContext, Provider, ProviderInstance,
++    RejectedRequest, Requested, Resource, Role, Sink, SinkDescriptor, StepOutcome, StopMode, UpdateClass, VerbDecl, Version,
+     VocabularyDescriptor,
+ };
+ use ezsdr_kernel::plan::{Fragment, PrepareReport};
+@@ -172,31 +172,38 @@ impl AdmissionCheck for TestLimitsCheck {
+     fn check(
+         &self,
+         section: &serde_json::Value,
+-        effective: &BTreeMap<Key, Value>,
+-        proposed: &BTreeMap<Key, Value>,
++        effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
++        proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+         _stage: CheckStage,
+     ) -> Vec<Violation> {
+         let ceiling = section.get("max_grid").and_then(|v| v.as_f64()).unwrap_or(f64::INFINITY);
+-        // SB-30: the effective configuration overlaid with what is proposed.
+-        let mut merged = effective.clone();
+-        merged.extend(proposed.iter().map(|(k, v)| (k.clone(), v.clone())));
+-        merged
+-            .iter()
+-            .filter(|(k, _)| k.as_str() == "test.grid")
+-            .filter_map(|(k, v)| {
++        // SB-30 (KA-4): each fragment's configuration overlaid with what is proposed
++        // for that fragment.
++        let mut names: std::collections::BTreeSet<&Ident> = effective.keys().collect();
++        names.extend(proposed.keys());
++        let mut out = Vec::new();
++        for name in names {
++            let mut merged = effective.get(name).cloned().unwrap_or_default();
++            if let Some(p) = proposed.get(name) {
++                merged.extend(p.iter().map(|(k, v)| (k.clone(), v.clone())));
++            }
++            for (k, v) in merged.iter().filter(|(k, _)| k.as_str() == "test.grid") {
+                 let n = match v {
+                     Value::Num(n) => *n,
+                     Value::Int(i) => *i as f64,
+-                    _ => return None,
++                    _ => continue,
+                 };
+-                (n > ceiling).then(|| Violation {
+-                    check: ns("test.limits"),
+-                    key: Some(k.clone()),
+-                    requested: Some(v.clone()),
+-                    reason: format!("test.grid {n} exceeds the declared ceiling {ceiling}"),
+-                })
+-            })
+-            .collect()
++                if n > ceiling {
++                    out.push(Violation {
++                        check: ns("test.limits"),
++                        key: Some(k.clone()),
++                        requested: Some(v.clone()),
++                        reason: format!("{name}: test.grid {n} exceeds the declared ceiling {ceiling}"),
++                    });
++                }
++            }
++        }
++        out
+     }
+ }
+ 
+@@ -241,6 +248,12 @@ pub struct TestProvider {
+     /// Makes `prepare` report something `coerce` did not, so that MA-12's equality
+     /// has a negative case.
+     pub prepare_disagrees: bool,
++    /// Refuses a request whose `test.count · test.grid` exceeds this, with a `rejected`
++    /// entry on `test.grid`: a joint limit no single key breaks (SB-7, KA-5).
++    pub joint_limit: Option<f64>,
++    /// Makes `coerce` reject `test.flag`, which no fixture requests: a malformed
++    /// report (SB-7, KA-5).
++    pub stray_rejection: bool,
+ }
+ 
+ impl TestProvider {
+@@ -326,6 +339,7 @@ impl TestProvider {
+                 fidelity: Fidelity::NONE,
+                 driving: Driving { stepped: false },
+                 arm_after: Vec::new(),
++                min_command_lead: None,
+                 sections: BTreeMap::new(),
+             },
+             grid: None,
+@@ -336,6 +350,8 @@ impl TestProvider {
+             last_request: Mutex::new(None),
+             actions: Mutex::new(Vec::new()),
+             prepare_disagrees: false,
++            joint_limit: None,
++            stray_rejection: false,
+         }
+     }
+ 
+@@ -369,6 +385,36 @@ impl TestProvider {
+         self
+     }
+ 
++    /// Declares `test.grid` on both `test.line` sub-resources, as the device root does,
++    /// so that a Spec's `needs` can constrain it (SB-30, KA-4).
++    pub fn with_line_grid(mut self) -> TestProvider {
++        for line in &mut self.instance.tree.children {
++            line.capabilities.insert(
++                key("test.grid"),
++                CapabilityValue::AnyOf { values: vec![Value::Num(20.0), Value::Num(40.0), Value::Num(100.0)] },
++            );
++        }
++        self
++    }
++
++    /// Refuses a request whose `test.count · test.grid` exceeds `limit` (SB-7, KA-5).
++    pub fn with_joint_limit(mut self, limit: f64) -> TestProvider {
++        self.joint_limit = Some(limit);
++        self
++    }
++
++    /// Makes `coerce` reject a key the request does not name (SB-7, KA-5).
++    pub fn with_stray_rejection(mut self) -> TestProvider {
++        self.stray_rejection = true;
++        self
++    }
++
++    /// Declares the least command lead the instance needs (MA-10, KA-7).
++    pub fn with_min_command_lead(mut self, lead: ezsdr_kernel::time::Duration) -> TestProvider {
++        self.instance.min_command_lead = Some(lead);
++        self
++    }
++
+     /// Makes `test.grid` snap to a multiple of `step` (MA-44, SB-7).
+     pub fn with_grid(mut self, step: f64) -> TestProvider {
+         self.grid = Some(step);
+@@ -478,10 +524,34 @@ impl Provider for TestProvider {
+             }
+             report.applied.insert(k.clone(), v.clone());
+         }
++        if let Some(limit) = self.joint_limit {
++            let number = |k: &str| match report.applied.get(&key(k)) {
++                Some(Value::Num(x)) => Some(*x),
++                Some(Value::Int(i)) => Some(*i as f64),
++                _ => None,
++            };
++            if let (Some(count), Some(grid)) = (number("test.count"), number("test.grid")) {
++                if count * grid > limit {
++                    report.applied.remove(&key("test.grid"));
++                    report.rejected.push(RejectedRequest {
++                        key: key("test.grid"),
++                        requested: request.constraints[&key("test.grid")].clone(),
++                        reason: format!("the joint limit {limit} is exceeded"),
++                    });
++                }
++            }
++        }
++        if self.stray_rejection {
++            report.rejected.push(RejectedRequest {
++                key: key("test.flag"),
++                requested: Constraint::Present {},
++                reason: "a key the request does not name".to_owned(),
++            });
++        }
+         Ok(report)
+     }
+ 
+-    fn prepare(&mut self, f: &Fragment, _ctx: PrepareContext<'_>,
++    fn prepare(&mut self, f: &Fragment, _ctx: PrepareContext,
+     ) -> Result<PrepareReport, ModuleError> {
+         self.record("prepare");
+         self.fail_if(FailAt::Prepare)?;
+@@ -588,7 +658,7 @@ impl Executor for TestExecutor {
+     }
+ 
+     fn prepare(&mut self, island: &IslandDecl,
+-        ctx: PrepareContext<'_>,
++        ctx: PrepareContext,
+     ) -> Result<PrepareReport, ModuleError> {
+         self.prepared_components
+             .lock()
+@@ -686,7 +756,7 @@ impl Sink for TestSink {
+         &self.descriptor
+     }
+ 
+-    fn prepare(&mut self, f: &Fragment, _ctx: PrepareContext<'_>,
++    fn prepare(&mut self, f: &Fragment, _ctx: PrepareContext,
+     ) -> Result<PrepareReport, ModuleError> {
+         Ok(PrepareReport {
+             fragment: f.id.clone(),
+diff --git a/crates/ezsdr-kernel/tests/support/mod.rs b/crates/ezsdr-kernel/tests/support/mod.rs
+index 2adf1d8..666c04a 100644
+--- a/crates/ezsdr-kernel/tests/support/mod.rs
++++ b/crates/ezsdr-kernel/tests/support/mod.rs
+@@ -19,7 +19,7 @@ use ezsdr_kernel::contract::DataContractId;
+ use ezsdr_kernel::id::MemoryDomainId;
+ use ezsdr_kernel::stream::{
+     BackPressure, BlockFlags, BlockHeader, BlockRef, BufferRef, ChannelMask, DataLink, Direction,
+-    DropCarry, HostMemoryAccess, PublishOutcome, SampleBlock,
++    DropCarry, PublishOutcome, SampleBlock,
+ };
+ use ezsdr_kernel::time::TimePoint;
+ 
+@@ -36,19 +36,11 @@ pub fn cf32() -> DataContractId {
+ /// Bytes per sample of [`cf32`] (SC-4).
+ pub const CF32_BPS: u32 = 8;
+ 
+-/// A buffer big enough for `channels · len` cf32 samples, in the host domain.
+-///
+-/// ponytail: the bytes are leaked so `map_host` can hand out a slice that outlives
+-/// the link, which is exactly what SC-8 and decision S5 require of a real pool.
+-/// The Phase 2 pool recycles slots instead.
++/// A buffer reference big enough for `channels · len` cf32 samples, in the host
++/// domain, for a block built with `SampleBlock::new` (no host bytes attached).
+ pub fn host_buffer(channels: u16, len: u32) -> BufferRef {
+-    let n = channels as usize * len as usize * CF32_BPS as usize;
+-    let bytes: &'static [u8] = Box::leak(vec![0u8; n].into_boxed_slice());
+-    BufferRef {
+-        memory_domain: HOST_MEM,
+-        handle: bytes.as_ptr() as u64,
+-        len_bytes: bytes.len() as u64,
+-    }
++    let n = channels as u64 * len as u64 * CF32_BPS as u64;
++    BufferRef { memory_domain: HOST_MEM, handle: 0, len_bytes: n }
+ }
+ 
+ /// A header with the common defaults; callers override what they are testing.
+@@ -67,8 +59,9 @@ pub fn header(t: TimePoint, len: u32, channels: u16) -> BlockHeader {
+ 
+ /// A block from a header, with a buffer sized to fit (SC-10a).
+ pub fn block(h: BlockHeader) -> BlockRef {
+-    let buffer = host_buffer(h.channels, h.len);
+-    BlockRef::new(SampleBlock::new(h, buffer, CF32_BPS).expect("a well-formed test block"))
++    let n = h.channels as usize * h.len as usize * CF32_BPS as usize;
++    let bytes: std::sync::Arc<[u8]> = vec![0u8; n].into();
++    BlockRef::new(SampleBlock::new_host(h, HOST_MEM, bytes, CF32_BPS).expect("a well-formed test block"))
+ }
+ 
+ /// An in-memory link implementing all three back-pressure policies.
+@@ -143,18 +136,6 @@ impl DataLink for MemLink {
+     }
+ }
+ 
+-impl HostMemoryAccess for MemLink {
+-    fn map_host<'a>(&self, b: &'a BlockRef) -> Option<&'a [u8]> {
+-        let buf = b.buffer();
+-        if buf.memory_domain != HOST_MEM {
+-            return None; // SC-8: nothing for a domain that is not host-reachable.
+-        }
+-        // Safety is not at stake here: the double leaks its buffers (see `host_buffer`),
+-        // so the slice is genuinely `'static`.
+-        Some(unsafe { std::slice::from_raw_parts(buf.handle as *const u8, buf.len_bytes as usize) })
+-    }
+-}
+-
+ /// A producer that honours SC-20a: on `Full` it keeps the block and retries,
+ /// never discarding it silently. It panics if it is ever asked to drop one.
+ pub struct RetryingProducer {
+diff --git a/crates/ezsdr-kernel/tests/time_model.rs b/crates/ezsdr-kernel/tests/time_model.rs
+index b35c746..a079e37 100644
+--- a/crates/ezsdr-kernel/tests/time_model.rs
++++ b/crates/ezsdr-kernel/tests/time_model.rs
+@@ -876,3 +876,46 @@ fn tm_16b_ungoverned_root_is_not_answered() {
+     let got = rel.convert(&reg, TimePoint::new(foreign, 400)).expect("converts");
+     assert_eq!(got.nominal, TimePoint::new(root, 1_400));
+ }
++
++// ---------------------------------------------------------------- Phase 2 amendments
++
++#[test]
++fn tm_12_domains_lists_every_registered_domain() {
++    // KA-2: the Manifest's `clocks.domains` is `domains()` verbatim (RS-38).
++    let reg = ClockRegistry::new();
++    let ids: Vec<ClockDomainId> = reg.domains().iter().map(|d| d.id).collect();
++    assert_eq!(ids, vec![ClockDomainId::UTC, ClockDomainId::HOST_MONOTONIC]);
++    let root = reg.allocate_id();
++    reg.register(ClockDomain::root(root, rat(MCLK, 1), arbitrary("test"))).expect("root");
++    let child = derived(&reg, root, 10, 1, 0);
++    let ids: Vec<ClockDomainId> = reg.domains().iter().map(|d| d.id).collect();
++    assert_eq!(ids, vec![ClockDomainId::UTC, ClockDomainId::HOST_MONOTONIC, root, child]);
++}
++
++#[test]
++fn tm_13a_declared_clocks_are_listed_before_registration() {
++    // KA-2: a receive clock is declared at `prepare` and registered only at its first
++    // sample; KC-16 resolves a SpecTime against it in between.
++    let (reg, root) = registry_with_device_root();
++    let rx = reg.declare_sample_clock(stream("dev/rx"), root, rat(50, 1)).expect("declared");
++    let tx = reg.declare_sample_clock(stream("dev/tx"), root, rat(20, 1)).expect("declared");
++    reg.register_sample_clock(&tx, 0).expect("registered");
++    let declared = reg.declared_sample_clocks();
++    assert_eq!(declared, vec![rx.clone(), tx.clone()], "both, in declaration order");
++    let records = reg.sample_clock_records();
++    assert_eq!(records.len(), 1, "only the registered one has a record");
++    assert_eq!(records[0].domain, tx.id);
++}
++
++#[test]
++fn tm_17_next_due_reports_without_advancing() {
++    // KA-17: the earliest pending instant on the primary root, and `now` unchanged.
++    let (_reg, root, auth) = sim_authority();
++    assert_eq!(auth.next_due(), None, "nothing pending");
++    auth.schedule(TimePoint::new(root, 30), Box::new(|_| {})).expect("scheduled");
++    auth.schedule(TimePoint::new(root, 10), Box::new(|_| {})).expect("scheduled");
++    assert_eq!(auth.next_due(), Some(TimePoint::new(root, 10)));
++    assert_eq!(auth.now(root), Ok(TimePoint::new(root, 0)), "next_due does not advance");
++    assert_eq!(auth.advance_to(TimePoint::new(root, 10)), Ok(1));
++    assert_eq!(auth.next_due(), Some(TimePoint::new(root, 30)));
++}
+diff --git a/schemas/SCHEMA_CHANGELOG.md b/schemas/SCHEMA_CHANGELOG.md
+index d34c834..4c396f2 100644
+--- a/schemas/SCHEMA_CHANGELOG.md
++++ b/schemas/SCHEMA_CHANGELOG.md
+@@ -15,6 +15,17 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
+ `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
+ (Vision §10, OV-12, SB-47, SB-48).
+ 
++## v1 — 2026-09-24 — pre-freeze revision, Phase 2 KA-7 and KA-10
++
++Still version 1: v4.0 has not frozen. Additive.
++
++- `provider_instance`: adds the optional `min_command_lead: Duration` (KA-7), the one
++  envelope value the Kernel reads. A document without it parses as before; absent means
++  zero.
++- `action`, `action_template`, `component_descriptor`, `experiment_spec` and
++  `vocabulary_descriptor`: the descriptions of the four `UpdateClass` variants say what
++  each class means (KA-10, UC-3…UC-6). No field, type or constraint changed.
++
+ ## v1 — 2026-09-23 — descriptions only, Phase 1 Step 5
+ 
+ Still version 1. No field, type or constraint changed.
+diff --git a/schemas/action.v1.json b/schemas/action.v1.json
+index decbd40..39c2eca 100644
+--- a/schemas/action.v1.json
++++ b/schemas/action.v1.json
+@@ -615,22 +615,22 @@
+       "oneOf": [
+         {
+           "const": "cold",
+-          "description": "Requires a stop and a re-plan; a sample-rate change is one (TM-13c).",
++          "description": "The target stops the affected function, applies the value and restarts it; a\nstream continues on a new SampleClock (UC-3, TM-13c).",
+           "type": "string"
+         },
+         {
+           "const": "block_boundary",
+-          "description": "Applied between blocks.",
++          "description": "Applied from the first block or sample boundary at or after the effective\ninstant; no block mixes the old and new value (UC-4).",
+           "type": "string"
+         },
+         {
+           "const": "atomic_realtime",
+-          "description": "Applied inside the real-time path without a block boundary.",
++          "description": "Applied to every sample processed after the Action arrives, with no torn state\n(UC-5).",
+           "type": "string"
+         },
+         {
+           "const": "hardware_timed",
+-          "description": "Applied by the device at a declared instant.",
++          "description": "Applied by the device at exactly the effective instant, which must respect the\ndevice's command lead (UC-6).",
+           "type": "string"
+         }
+       ]
+diff --git a/schemas/action_template.v1.json b/schemas/action_template.v1.json
+index d8d43e0..d9bc891 100644
+--- a/schemas/action_template.v1.json
++++ b/schemas/action_template.v1.json
+@@ -453,22 +453,22 @@
+       "oneOf": [
+         {
+           "const": "cold",
+-          "description": "Requires a stop and a re-plan; a sample-rate change is one (TM-13c).",
++          "description": "The target stops the affected function, applies the value and restarts it; a\nstream continues on a new SampleClock (UC-3, TM-13c).",
+           "type": "string"
+         },
+         {
+           "const": "block_boundary",
+-          "description": "Applied between blocks.",
++          "description": "Applied from the first block or sample boundary at or after the effective\ninstant; no block mixes the old and new value (UC-4).",
+           "type": "string"
+         },
+         {
+           "const": "atomic_realtime",
+-          "description": "Applied inside the real-time path without a block boundary.",
++          "description": "Applied to every sample processed after the Action arrives, with no torn state\n(UC-5).",
+           "type": "string"
+         },
+         {
+           "const": "hardware_timed",
+-          "description": "Applied by the device at a declared instant.",
++          "description": "Applied by the device at exactly the effective instant, which must respect the\ndevice's command lead (UC-6).",
+           "type": "string"
+         }
+       ]
+diff --git a/schemas/component_descriptor.v1.json b/schemas/component_descriptor.v1.json
+index fd6eca7..9cc94c9 100644
+--- a/schemas/component_descriptor.v1.json
++++ b/schemas/component_descriptor.v1.json
+@@ -257,22 +257,22 @@
+       "oneOf": [
+         {
+           "const": "cold",
+-          "description": "Requires a stop and a re-plan; a sample-rate change is one (TM-13c).",
++          "description": "The target stops the affected function, applies the value and restarts it; a\nstream continues on a new SampleClock (UC-3, TM-13c).",
+           "type": "string"
+         },
+         {
+           "const": "block_boundary",
+-          "description": "Applied between blocks.",
++          "description": "Applied from the first block or sample boundary at or after the effective\ninstant; no block mixes the old and new value (UC-4).",
+           "type": "string"
+         },
+         {
+           "const": "atomic_realtime",
+-          "description": "Applied inside the real-time path without a block boundary.",
++          "description": "Applied to every sample processed after the Action arrives, with no torn state\n(UC-5).",
+           "type": "string"
+         },
+         {
+           "const": "hardware_timed",
+-          "description": "Applied by the device at a declared instant.",
++          "description": "Applied by the device at exactly the effective instant, which must respect the\ndevice's command lead (UC-6).",
+           "type": "string"
+         }
+       ]
+diff --git a/schemas/experiment_spec.v1.json b/schemas/experiment_spec.v1.json
+index 6a47989..37d9504 100644
+--- a/schemas/experiment_spec.v1.json
++++ b/schemas/experiment_spec.v1.json
+@@ -1346,22 +1346,22 @@
+       "oneOf": [
+         {
+           "const": "cold",
+-          "description": "Requires a stop and a re-plan; a sample-rate change is one (TM-13c).",
++          "description": "The target stops the affected function, applies the value and restarts it; a\nstream continues on a new SampleClock (UC-3, TM-13c).",
+           "type": "string"
+         },
+         {
+           "const": "block_boundary",
+-          "description": "Applied between blocks.",
++          "description": "Applied from the first block or sample boundary at or after the effective\ninstant; no block mixes the old and new value (UC-4).",
+           "type": "string"
+         },
+         {
+           "const": "atomic_realtime",
+-          "description": "Applied inside the real-time path without a block boundary.",
++          "description": "Applied to every sample processed after the Action arrives, with no torn state\n(UC-5).",
+           "type": "string"
+         },
+         {
+           "const": "hardware_timed",
+-          "description": "Applied by the device at a declared instant.",
++          "description": "Applied by the device at exactly the effective instant, which must respect the\ndevice's command lead (UC-6).",
+           "type": "string"
+         }
+       ]
+diff --git a/schemas/provider_instance.v1.json b/schemas/provider_instance.v1.json
+index de75b3e..028ce73 100644
+--- a/schemas/provider_instance.v1.json
++++ b/schemas/provider_instance.v1.json
+@@ -70,6 +70,27 @@
+         }
+       ]
+     },
++    "ClockDomainId": {
++      "additionalProperties": false,
++      "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
++      "properties": {
++        "local": {
++          "description": "Node-local ordinal, allocated by the owning registry.",
++          "format": "uint32",
++          "minimum": 0,
++          "type": "integer"
++        },
++        "node": {
++          "$ref": "#/$defs/NodeId",
++          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
++        }
++      },
++      "required": [
++        "node",
++        "local"
++      ],
++      "type": "object"
++    },
+     "CoercionFidelity": {
+       "description": "`none < grid < real` (MA-42).",
+       "oneOf": [
+@@ -108,6 +129,26 @@
+       ],
+       "type": "object"
+     },
++    "Duration": {
++      "additionalProperties": false,
++      "description": "An elapsed time: integer ticks in a named clock domain (TM-1, TM-4 decision T4).\n\nThe domain tag is what stops 1 000 ticks at 20 Msps being added to a 200 MHz\npoint as a silent factor-of-ten error.",
++      "properties": {
++        "domain": {
++          "$ref": "#/$defs/ClockDomainId",
++          "description": "The domain whose ticks `ticks` counts (TM-7)."
++        },
++        "ticks": {
++          "description": "Tick count; may be negative (TM-7).",
++          "format": "int64",
++          "type": "integer"
++        }
++      },
++      "required": [
++        "domain",
++        "ticks"
++      ],
++      "type": "object"
++    },
+     "EnvelopeFidelity": {
+       "description": "The value set MA-42 gives timing and continuity: `none < envelope <\nhardware_quirk < real`. `real` is added to Vision §14's sets, which stop at\n`hardware_quirk` and leave a Hardware Run with nothing to record although the\nsame section says every Run records the vector.\n\nRule: MA-42.",
+       "oneOf": [
+@@ -461,6 +502,18 @@
+       "$ref": "#/$defs/ResourceId",
+       "description": "The instance's root resource id (SB-3)."
+     },
++    "min_command_lead": {
++      "anyOf": [
++        {
++          "$ref": "#/$defs/Duration"
++        },
++        {
++          "type": "null"
++        }
++      ],
++      "default": null,
++      "description": "The least lead this instance needs between receiving a timed Action and that\nAction's instant, in `host.monotonic`; absent means zero. The only envelope\nvalue the Kernel reads (MA-10, RS-19, KA-7)."
++    },
+     "module": {
+       "$ref": "#/$defs/ModuleRef",
+       "description": "Which Module and version supplies it (MA-31)."
+diff --git a/schemas/vocabulary_descriptor.v1.json b/schemas/vocabulary_descriptor.v1.json
+index af168a9..210abfb 100644
+--- a/schemas/vocabulary_descriptor.v1.json
++++ b/schemas/vocabulary_descriptor.v1.json
+@@ -262,22 +262,22 @@
+       "oneOf": [
+         {
+           "const": "cold",
+-          "description": "Requires a stop and a re-plan; a sample-rate change is one (TM-13c).",
++          "description": "The target stops the affected function, applies the value and restarts it; a\nstream continues on a new SampleClock (UC-3, TM-13c).",
+           "type": "string"
+         },
+         {
+           "const": "block_boundary",
+-          "description": "Applied between blocks.",
++          "description": "Applied from the first block or sample boundary at or after the effective\ninstant; no block mixes the old and new value (UC-4).",
+           "type": "string"
+         },
+         {
+           "const": "atomic_realtime",
+-          "description": "Applied inside the real-time path without a block boundary.",
++          "description": "Applied to every sample processed after the Action arrives, with no torn state\n(UC-5).",
+           "type": "string"
+         },
+         {
+           "const": "hardware_timed",
+-          "description": "Applied by the device at a declared instant.",
++          "description": "Applied by the device at exactly the effective instant, which must respect the\ndevice's command lead (UC-6).",
+           "type": "string"
+         }
+       ]

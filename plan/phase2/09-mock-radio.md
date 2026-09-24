@@ -1,0 +1,226 @@
+# Phase 2 spec 09 — MockRadio (`ezsdr.radio.mock` 1.0.0)
+
+| Field | Value |
+|---|---|
+| Status | Draft for owner acceptance (Gate P). Normative for `crates/ezsdr-mock-radio`. |
+| Scope | The MockRadio Provider Module: construction from a binding, the `x310-like` and `ideal` profiles, the resource tree and capabilities, `coerce`, `prepare`, `arm`, `start`, the receive stream and its test pattern and block-length jitter, transmit bursts, parameter updates under their classes, fault injection, `stop` and its tail, the device model that raises `TIME_ERROR`, its events and its Manifest sections. |
+| Not in scope | A channel between MockRadios, RF impairments, clipping, random retune phase (Phase 3). A transmit port (Phase 10). RealtimeEmulation (Y1). Peripherals. |
+| Crate | `crates/ezsdr-mock-radio`, library `ezsdr_mock_radio`. Depends on `ezsdr-kernel`, `ezsdr-radio`, `ezsdr-sim`, `ezsdr-hostmem`, `serde`, `serde_json`. Dev-dependency: `ezsdr-kernel` with `testing` (for `ManualTimeAuthority`). |
+| Modal verbs | "must" and "must not" are normative (OV-4a). |
+
+---
+
+## 1. Purpose
+
+Vision §12: "Mock is a peer *because* it implements the same contract **and the same constraint envelope**. A Mock that accepts what its emulated hardware would reject is a bug." This document specifies a MockRadio that implements spec 07 exactly, enforces the `x310-like` envelope, and produces the same flags, gaps, events and records a USRP would, so that the Phase 8 parity test has something precise to compare against.
+
+## 2. Evidence
+
+The values of MR-3 come from these sources, each marked in the table:
+
+- **VERIFIED** (audit Appendix B, UHD documentation): X310 master clock 200 MHz with integer decimation; two RX and two TX channels per motherboard; `OVERRUN_RESTART_DELAY = 0.05 s`; `set_time_unknown_pps` takes up to two seconds; about 2 000 `sc16` samples per 10 GbE packet; UBX-160 daughterboards tune 10 MHz–6 GHz with gain 0–31.5 dB in 0.5 dB steps; random inter-frontend phase after an untimed retune.
+- **INFERRED** (engineering judgement where UHD states no number; Y13 takes the stricter value): the 2 ms minimum timed-command lead, the 1 ms stop tail, the command-queue depth of 16, the 1.0 GB/s per-direction transport of one 10 GbE link (its 1.25 GB/s line rate less framing, rounded down), the decimation range 1–512, Replay's 2-sample alignment and 256 Mi-sample maximum. Phase 8 measures each and bumps the profile version (Vision §59).
+
+## 3. Rules
+
+### Identity and construction
+
+- **MR-1** The Module is `ModuleDescriptor { id: ezsdr.radio.mock, version: 1.0.0, kernel_api: 4.0.0, roles: [Provider], vocabularies: [{ radio, ^1.0.0 }, { sim, ^1.0.0 }], deployment: InProcess, impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 1.0.0")) }`, returned by `ezsdr_mock_radio::descriptor()`. *Checked by `mr_01_descriptor_registers`.*
+- **MR-2** `MockRadio::from_binding(binding: &Binding) -> Result<MockRadio, ModuleError>` refuses with `Rejected`: a `module` other than MR-1's; an absent `profile`, or one other than `x310-like 1.0.0` or `ideal 1.0.0`; a `feed`; and a selector key other than these, or one of the wrong kind or out of range:
+
+  | Selector key | Kind | Default | Meaning |
+  |---|---|---|---|
+  | `id` | str, one `ResourceId` segment | `"mock"` | the device node's path, and so the instance id (SB-3) |
+  | `instances` | int, 1…4 | 1 | the number of motherboards this one instance emulates (SB-23): channel counts and transport scale by it; one timekeeper |
+  | `block_len_jitter` | bool | false | MR-12 |
+  | `rx_test_pattern` | str, `"zero"` or `"ramp"` | `"zero"` | MR-13 |
+  | `arm_after` | list of str, each a `ResourceId` path | `[]` | other instances' ids this one arms after (SB-39) |
+
+  *This carries SB-23's producer obligation.* *Checked by `mr_02_from_binding_refusals` and `mr_02_the_tree_has_the_radio_model_shape`.*
+
+### Profiles
+
+- **MR-3** The two profiles, with `n` = `instances`:
+
+  | Value | `x310-like` 1.0.0 | Source | `ideal` 1.0.0 |
+  |---|---|---|---|
+  | master clock | 200 000 000 Hz | VERIFIED | — |
+  | sample rates (each direction) | `200e6 / N` for integer `N` in 1…512 | VERIFIED (integer decimation), INFERRED (range) | any integer Hz in 1…1 000 000 000 |
+  | channels (each direction) | 0…`2n` | VERIFIED | 0…64 |
+  | frequency | 10 000 000…6 000 000 000 Hz, step 1 Hz | VERIFIED (range), INFERRED (step) | 0…1e12 Hz, step 0 (no grid) |
+  | gain | 0…31.5 dB, step 0.5 | VERIFIED | −200…200 dB, step 0 |
+  | antennas | rx `RX2`, `TX/RX`; tx `TX/RX` | VERIFIED | the same |
+  | `radio.rx.coherent`, `radio.full_duplex`, `radio.hardware_time` | true, true, true | VERIFIED | true, true, true |
+  | `radio.phase_behavior_on_retune` | `random_unless_timed_tune` | VERIFIED | `deterministic` |
+  | `radio.tx.repeat_max_samples`, `radio.tx.repeat_align_samples` | 268 435 456, 2 | INFERRED | 4 294 967 295 (the largest `BurstOpen.waveform_len`, a `u32`), 1 |
+  | `radio.rx.block_len` | 2 000 | VERIFIED (about) | 2 000 |
+  | `min_timed_command_lead_ns` | 2 000 000 | INFERRED | 0 |
+  | `startup_latency_ns` | 2 000 000 000 | VERIFIED | 0 |
+  | `stop_tail_ns` | 1 000 000 | INFERRED | 0 |
+  | `command_queue_depth` | 16 | INFERRED | 4 294 967 295 |
+  | `overflow_restart_gap_ns` | 50 000 000 | VERIFIED | 0 |
+  | `rx_bytes_per_s`, `tx_bytes_per_s` | 1 000 000 000 · `n` | INFERRED: one 10 GbE link's 1.25 GB/s line rate less framing and CHDR overhead, rounded down to the stricter value (Y13) | 2^62 |
+  | `wire_bytes_per_sample` | 4 (`sc16`) | VERIFIED | 8 |
+  | fidelity | timing `envelope`, continuity `envelope`, coercion `grid`, rf `none`, transport `none` | — | every aspect `none` (Vision §13) |
+
+  A later profile version changes a value and bumps `version`; a Run records the profile it used in `ModuleEntry.profile` and in its `envelope` section (MR-27). *Checked by `mr_03_profile_values_reach_the_capabilities_and_the_envelope_section`.*
+- **MR-4** `instance()` returns `ProviderInstance { id: <id>, module: MR-1's, profile: the binding's, tree: MR-2's tree with RM-2's shape and the capabilities of this table, fidelity: MR-3's, driving: { stepped: true }, arm_after: the selector's, min_command_lead: Some(Duration(host.monotonic, min_timed_command_lead_ns)) — None for a lead of 0, sections: MR-27's }`. The device node's capabilities: channels as `Range { Int 0, Int max }`; `x310-like` sample rates as `AnyOf` of the 512 `Num` values for `N` = 1…512 in that order, `ideal`'s as `Range { Num 1, Num 1e9 }`; frequency and gain as `Range`; the step keys, booleans, strings, repeat, block and envelope keys as `One`; antennas as `AnyOf`. The device node's `ports` are `[{ name: rx, direction: out, contract: ezsdr.stream.cf32 }]`. *Checked by `mr_04_instance`.*
+- **MR-5** The defaults, for a configuration key the request leaves unconstrained or constrains with `Present`: `radio.rx.channels` 1, `radio.tx.channels` 0, both sample rates 1 000 000, both frequencies 1 000 000 000, both gains 0.0, `radio.rx.antenna` `RX2`, `radio.tx.antenna` `TX/RX`.
+
+### `coerce`
+
+- **MR-6** `coerce(request)` is pure (MA-11) and computes:
+  1. `request.resource` must be the device node; otherwise `Err(Rejected)`.
+  2. For each constraint on a **capability** key: applied is the declared value when it satisfies the constraint (`binding::satisfies`), and the key is `rejected` otherwise. A key outside RM-4 is `rejected` with reason `"MR-6: not a radio key"`.
+  3. For each constraint on a **configuration** key: RM-8's rule over MR-3's grid, where an `Int` is read as the number it is. For `ideal`, a non-integer sample rate is `rejected` ("MR-6: the ideal profile represents a rate as whole hertz", TM-20). An `Eq` value off the grid gives a `Coercion` with reason `"RM-8: nearest grid value"`.
+  4. The PerformanceEnvelope (RM-7) over the configuration that would result — the applied values, and MR-5's defaults for keys not requested — in each direction; a violation removes the named key from `applied` and adds a `rejected` entry with reason `"RM-7: <d> needs <x> B/s, the transport carries <y>"`.
+  5. `applied` holds exactly the requested keys that were not rejected; `warnings` is empty.
+
+  *Checked by `mr_06_coerce_cases` (19.5 Msps → 20 Msps with a coercion; 20.2 dB → 20.0 with a coercion; 20.25 → 20.0, the lower of two; 7 GHz rejected, not clamped; `Min(1.1e6)` → 200e6/181 with no coercion; two channels at 200 Msps rejected on the rate; `radio.tx.channels: Eq 2` with `radio.tx.sample_rate_hz: Eq 200e6` rejected on the rate (RM-7's `radio.d.channels` branch is not reachable with MockRadio 1.0.0: at its default rate a channel count alone never exceeds the transport); `ideal` at 19.5e6 accepted exactly and at 1e6/3 rejected; `antenna: J1` rejected) and `mr_06_coerce_is_pure` (the same request twice gives identical reports).*
+
+### `prepare`, `arm`, `start`
+
+- **MR-7** `prepare(fragment, ctx)`:
+  1. A second `prepare` on one instance returns `Rejected` ("MR-7: one resource per MockRadio instance", KA-9).
+  2. `ctx.class` other than Simulation returns `Unsupported` (Y1).
+  3. `fragment.content.requested` must parse as a `Requested` naming the device node; its `coerce` report must have no `rejected` entry; otherwise `Rejected`.
+  4. The configuration is MR-5's defaults overlaid with the report's `applied` configuration keys.
+  5. The primary root `V = ctx.time.primary_root()` must have an integer nominal rate `R` (`ctx.clocks.nominal_rate(V)`, denominator 1); otherwise `Unsupported`.
+  6. For each direction whose channel count is > 0, declare its SampleClock: `ctx.clocks.declare_sample_clock(<device>/<d>, V, ratio)` with `ratio = R · N / 200 000 000` for `x310-like` at decimation `N`, and `R / rate` for `ideal`, as a reduced `Rational` computed from integers, never from the `f64` rate (TM-20).
+  7. Every `ctx.links` entry must be `{ component: fragment.id, port: rx, StreamOut }`; any other is `Rejected`. A link whose `policy()` is `Block` must be the only `rx` link ("MR-7: a Block link must be the Mock's only rx link"): a `Full` on one of several links could not be an overrun of all of them (MR-19).
+  8. The fault entries of `ezsdr_sim::faults(&ctx.environment)` whose `target` is `fragment.id` are kept (SE-4); a reader error is `Rejected`. The jitter generator is `SimRng::new(ezsdr_sim::seed(&ctx.environment)?, "<device>/rx")`.
+  9. The handles of `ctx` are kept (MA-5a).
+  10. It returns `PrepareReport { fragment: fragment.id, effective: the ten configuration keys (RM-5), coercions: the report's, warnings: [] }`.
+
+  `prepare` does not block (MA-8). *Checked by `mr_07_prepare_cases` and `mr_08_effective_holds_exactly_the_ten_configuration_keys`, and MA-12's agreement by `mr_07_prepare_reports_the_coercions_coerce_reported`.*
+- **MR-8** The coercions `prepare` reports are those `coerce` returned for the fragment's `requested`, because `prepare` calls `coerce` on it (MA-12, SB-44).
+- **MR-9** `arm()` records the arm instant `A = now(V)` and the synchronisation end `S = A + startup_latency_ns` (rescaled to `V`, rounded up). If the transmit channel count is > 0, it registers the transmit SampleClock with origin `A` (TM-13e).
+- **MR-10** Stream ids are `<device>/rx` and `<device>/tx` (RM-3), and every SampleClock the Mock declares or registers uses one of them. A `cold` change declares a new clock for the same stream (UC-3).
+- **MR-11** `start(at)` takes `T0 = at` (the coordinator always passes `Some`; `None` is taken as `now(V)`). If `T0 < S`, it emits `radio.LATE_COMMAND { key: null, requested: T0, applied: S }` and returns `Rejected` with the reason `"MR-11: the start at <T0> precedes synchronisation at <S>; the profile needs ezsdr.time.start_lead_ns ≥ <startup_latency_ns>"`, and no stream starts: stricter than starting late, so no receive block ever carries `LATE` (SC-16a, Y13). Otherwise, if the receive channel count is > 0 and at least one link is attached to `rx`, it registers the receive SampleClock with origin `T0`, so its first sample is tick 0 at T0 (TM-13b), and it inserts each kept fault as a pending event at `T0 + at_ns`; it then schedules its wakeup as MR-14 says. *Checked by `mr_11_start_cases`.*
+
+### Receive
+
+- **MR-12** A receive block's length is `radio.rx.block_len` (2 000). With `block_len_jitter`, each block's length is instead `1 + rng.below(2 · block_len)`, drawn when the block begins, in block order. A block is shortened to end at the next fault, `cold` change or stream end. Consecutive blocks are contiguous except across an injected gap. *Checked by `mr_12_block_lengths` (without jitter every length is 2 000; with it every length is in 1…4 000, the sequence repeats for one seed and differs for another, and the samples are contiguous).*
+- **MR-13** Receive samples are `ezsdr.stream.cf32` in SC-4's planar layout. With `rx_test_pattern: zero` every byte is 0, written explicitly (a reused pool slot holds old bytes, HD-2). With `ramp`, sample index `k` (the block's SampleClock tick) of channel `c` is `re = (k mod 65 536) / 65 536`, `im = c / 64`, as `f32`, little-endian. Each block's bytes come from a `HostPool` (HD-2) and the block is built with `SampleBlock::new_host(header, HOST_MEMORY, bytes, 8)` (KA-3), with `valid` full, `direction: rx`, and flags only as MR-21 and MR-22 set them. *Checked by `mr_13_ramp_values`.*
+- **MR-14** A receive block is published when the Authority's time has reached its last sample: in `step(until)`, a block `[s, s + L)` is published when `until` is at or after the root tick of sample `s + L − 1`, rounded up. It is published to every attached `rx` link, the same `BlockRef` to each (SC-11, SC-22). After publishing what is due, the Mock schedules a wakeup at the earliest of: the root tick, rounded up, of the next receive block's last sample, that of the next transmit block's last sample, and the earliest pending event (a fault, a command, a burst start, the stream end). It holds **at most one** scheduled wakeup: one at another instant is cancelled first, one at the same instant is kept, because a second callback at one instant would be a second wakeup the stepping loop counts (KC-22). *Checked by `mr_14_blocks_appear_when_their_last_sample_has_occurred`.*
+
+### Transmit
+
+- **MR-15** Transmit blocks are headers only, fed to the Kernel's `BurstTracker` and to the device model (MR-24); their bytes are never built in Phase 2 (Y8). `BurstTracker::new(tx domain)` and `DeviceModel::new()` are created whenever a transmit SampleClock is registered — at `arm` and at a `cold` transmit change (MR-18) — replacing the ones of the ended clock, after `BurstTracker::stop` closed its burst. A transmit block has length `radio.rx.block_len`, shortened at the waveform's end, at a wrap of a repeated waveform, at the next burst's start, at a `cold` transmit change and at the transmit stream's end; a block that ends at the next burst's start carries `END_OF_BURST`; the first block of a burst carries `START_OF_BURST` and a `BurstOpen { waveform_len: Some(L), late, requested_target }`, and the last `END_OF_BURST`, except when the burst ends by `stop` or a `cold` change, which closes it with `BurstTracker::stop`. The Mock has no device feedback and never calls `BurstTracker::set_actual_start`, so `BurstRecord.actual_start` is absent (SC-28: "where the Provider can supply it"). A block is emitted when `until` has reached its last sample, as MR-14 says.
+- **MR-16** A `TxBurst` is refused with `radio.COMMAND_REJECTED` when: its target is not `<device>/tx`; the transmit channel count is 0; its `at` is not in the current transmit SampleClock; `size_bytes` is not a positive multiple of `8 · channels`; it repeats and its length breaks the repeat constraints (RM-13); its `metadata` is not empty; a held burst has the same start — judged on the start after MR-17's decision, since `SendAsap` moves it; it would start before the synchronisation end `S` (MR-9), which a device that has not synchronised cannot honour; or it would start before the open burst's next sample, which that burst has already reserved. *Ceiling: a Spec cannot schedule a burst on a transmit clock that a scheduled `cold` change creates, because KC-24 needs a running transmit SampleClock at `arm`; a Session can.* Otherwise it is decided by MR-17 and held in target order. A repeated burst is transmitted so that repetition `w` begins at `target + w · L` and the block sequence is contiguous across every wrap (SC-26); it never underflows. *Checked by `mr_16_burst_refusals` and `mr_16_repeat_is_contiguous_across_wraps` (a waveform of 1 000 samples: five contiguous blocks of 1 000 at block length 2 000, `Continued` at each wrap, the record's `wraps == 5` for 5 000 samples — `wraps` counts complete repetitions; and, against a `BurstTracker` driven directly, the v3 tail pattern 300, 300, 300, 100, 300 all `Continued`).*
+- **MR-17** On receipt at `now` (in the transmit SampleClock, floored), `LatePolicy::decide(clocks, at, now, Duration(host.monotonic, min_timed_command_lead_ns))` decides as RM-14 says; `SendAsap` moves the start to the first transmit sample at or after `now + lead`, and the burst's `BurstOpen.requested_target` is then its original `at` (when admission already advanced it, SC-23a, `requested_at` is used instead), so that the record keeps both the applied and the requested target (SC-28). *Checked by `mr_17_late_policy_outcomes` (1 ms lead against 2 ms under each policy; the `TIME_ERROR` payload; the `BurstRecord.late_by`).*
+
+### Parameter updates
+
+- **MR-18** An `UpdateParameter` must target the device node and name a configuration key with an update class; otherwise `radio.COMMAND_REJECTED`. **When the update applies**, at its effective instant, the Mock re-runs its own `coerce` over the configuration **at that instant** with the new value; a rejection is `radio.COMMAND_REJECTED` and nothing changes (RM-7). Checking at application rather than at receipt matters for scheduled updates, which all arrive at the start round before the earlier ones have applied (KC-17 admitted them cumulatively). The effective instant `e` is UC-1's, with `at` converted to `V` rounded up:
+  - `hardware_timed` (frequency, gain): absent `at`, `e = now + lead`; `e < now + lead` is late — `radio.LATE_COMMAND { key, requested, applied: now + lead }` and `e = now + lead`. With `command_queue_depth` updates already pending, the update is refused with `radio.COMMAND_QUEUE_FULL { key, depth }` (UC-6). At `e` the configuration takes the value.
+  - `cold` (channel counts, sample rates): absent `at`, or `at` before `now`, `e = now` (a past `at` also emits `radio.LATE_COMMAND`). For a receive change `e` is moreover never before T0: one earlier applies at T0, because the receive stream does not exist before its start (MR-11). At `e`: for a receive change, the receive block in progress is cut at `e`, the receive SampleClock, if one is registered and has not ended, is ended at `e` (`ClockRegistry::end`), and — if the new count is > 0 and `rx` has a link — a new clock is declared and registered with origin `e` and streaming continues from its tick 0; for a transmit change, an open burst closes with `BurstTracker::stop`, every held burst of the old clock is cancelled (`radio.COMMAND_REJECTED`, reason `"cancelled by a cold change"`), the transmit clock, if one exists, is ended at `e`, and — if the new count is > 0 — a new one is registered with origin `e` (TM-13e as KA-10 amends it) with a new `BurstTracker` and `DeviceModel` (MR-15).
+
+  Two updates at one `e` apply in delivery order (UC-2). Every applied update is recorded in `ezsdr.radio.mock.applied` (MR-27). *Checked by `mr_18_hardware_timed_updates` (lead, lateness, queue depth, order), `mr_18_a_cold_rate_change_starts_a_new_sample_clock` (the old clock's `ended_at`, the new clock's origin, the next block at tick 0 of the new domain, no `GAP_BEFORE`), `mr_18_a_cold_transmit_change_replaces_the_tracker` and `mr_18_a_scheduled_pair_is_checked_when_it_applies`.*
+- **MR-19** A publish that returns `Full` — possible only on a `Block` link, which is then the Mock's only `rx` link (MR-7) — is a device overrun at that block's first sample `a`: the block is dropped and RM-17's overrun begins at `a`, with `k_g = max(b, a + ceil(gap · den / num))` for the dropped block `[a, b)`, the ratio `num/den` and `gap` the restart gap in root ticks — at least the dropped block is lost even when the gap is 0; the next block begins at `k_g` with `GAP_BEFORE | RESTARTED` added to any flags already pending and `lost` equal to its whole time jump, `k_g − a` plus any `lost` the dropped block carried, the dropped block is not counted in `rx_blocks`, and `radio.RX_OVERFLOW { cause: overrun }` is emitted. The block is never dropped silently (SC-20a). *Checked by `mr_19_backpressure_is_an_overrun` (the event, and the next published block's `GAP_BEFORE | RESTARTED` with `lost` equal to its time jump).*
+
+### Faults
+
+- **MR-20** A kept fault fires at its instant `f = T0 + at_ns` (SE-4). `rx_overflow` and `rx_sequence_error` are MR-21's and MR-22's; on a Mock whose receive stream is not running they have no effect and are recorded with `applied: false`. `device_lost` makes the first `step` at or after `f` return `ModuleError { kind: DeviceLost }`; afterwards `step` does nothing and reports no progress, and `stop` and `cleanup` still succeed, so that cleanup runs to its end (RS-11). *This carries SC-13's producer obligation.* *Checked by `mr_20_faults_fire_at_their_instants`.*
+- **MR-21** Overrun at `f` (RM-17): with `k_f` the first receive sample at or after `f` and `k_g` the first at or after `f + overflow_restart_gap_ns`, samples `k_f … k_g − 1` are not delivered; the block in progress ends at `k_f` (published if it holds any sample); the next block begins at `k_g` with `GAP_BEFORE | RESTARTED` added to any pending flags and `lost` equal to its whole time jump — `k_g − k_f` plus any `lost` already pending for it (two faults with no block between them add up). `k_g = k_f` sets no flag and changes no `lost`. *This carries SC-18.* *Checked by `mr_21_overrun_shape` (at 1 Msps a 50 ms gap loses 50 000 samples; the next block's time jump equals `lost`; the `ContinuityBuilder` derives `OverflowRestart` with that count).*
+- **MR-22** Sequence error at `f` (RM-18): `radio.rx.block_len` samples from `k_f` are lost; the next block begins at `k_f + block_len` with `GAP_BEFORE | SEQ_DISCONTINUITY` added to any pending flags and `lost` equal to its whole time jump, as MR-21 says. *Checked by `mr_22_sequence_error_shape`.*
+
+### Stop, the device model, and records
+
+- **MR-23** Every `BurstRecord` the tracker returns is appended to the section `ezsdr.radio.mock.bursts` (SC-28).
+- **MR-24** `DeviceModel` is the Mock's model of the device's own framing check, independent of the Kernel's tracker: `on_tx_block(&header) -> Result<(), DeviceTimeError>` is `Err` when a block carrying `START_OF_BURST` arrives while a burst it saw open has not been closed by an `END_OF_BURST` block or `close()`. The Mock Provider feeds it every transmit block after the tracker, and calls `close()` wherever the tracker closes a burst by `stop` — the equivalent of UHD's zero-length end-of-burst send (SC-29). An `Err` makes the Mock emit `radio.TIME_ERROR { cause: unclosed_burst, outcome: refused }` and drop the block. `DeviceModel` is public so that a test can play a Provider that bypasses the tracker (spec 02 decision S12, Vision §58 #15). *Checked by `mr_24_a_bypassing_provider_gets_time_error`.*
+- **MR-25** `stop(mode)` is RM-16: the transmit side first — close the open burst (`BurstTracker::stop`, recorded), `DeviceModel::close()`, cancel held bursts and pending commands (recorded in `ezsdr.radio.mock.rejected`) — then the receive side: under `orderly`, the stream continues to `stop instant + stop_tail_ns` (rescaled to `V`, rounded up), its last block ending there, and then ends; under `abort` it ends at once. Fault wakeups are cancelled. A `Stop` Action for `<device>/tx`, `<device>/rx` or `<device>` does the matching half or both, as RM-16 says. *This carries MA-13's producer obligation.* *Checked by `mr_25_orderly_stop_delivers_the_tail_abort_does_not`.*
+- **MR-26** `cleanup()` drops every link and handle and is idempotent (MA-7).
+- **MR-27** `instance().sections` holds, under the Module's namespace `ezsdr.radio.mock` (KA-13): `ezsdr.radio.mock.envelope`, the Radio Model's `RadioEnvelope` document (RM-20), from construction; `ezsdr.radio.mock.bursts` (MR-23); `ezsdr.radio.mock.faults`, one `{ at: TimePoint, fault, applied: bool, lost: int }` per kept fault; `ezsdr.radio.mock.rejected`, one `{ action, reason, at: TimePoint }` per refused, dropped or cancelled Action; `ezsdr.radio.mock.stats`, `{ rx_blocks, rx_samples, tx_blocks }`; `ezsdr.radio.mock.applied`, one `{ key, value, at: TimePoint }` per applied `UpdateParameter` in application order (MR-18), which is how a test observes when an update took effect. All six sections exist from construction — the arrays empty, the stats zero. The tree, capabilities and the other `instance()` fields do not change (KA-13).
+- **MR-28** Every event the Mock emits is RM-10's, with RM-11's payload, through `emit_control`, with source `<device>/rx`, `<device>/tx` or `<device>`.
+- **MR-29** An Action other than `TxBurst`, `UpdateParameter` and `Stop` is refused with `radio.COMMAND_REJECTED`.
+- **MR-30** The Mock's randomness is its `SimRng` (MR-12), its only time source is `ctx.time`, and it iterates ordered collections only (PO-11); two Mocks prepared with one seed and fed one sequence produce identical blocks, events and sections. *Checked by `mr_30_two_mocks_one_seed_identical_output`.*
+
+## 4. The step algorithm
+
+`step(until)` is MR-12…MR-25 in one order, so that commands, faults and block boundaries interleave exactly:
+
+```text
+step(until):
+  if device_lost has fired and was reported: return { progressed: false }
+  if a device_lost fault's instant is ≤ until and it is not yet reported: report it (Err(DeviceLost))
+  now := time.now(V)                                   -- equals `until` in the Simulation class
+  for each Action in actions.recv() order: handle it at `now`   (MR-16, MR-17, MR-18, MR-25's Stop, MR-29)
+  progressed := any Action handled
+  loop:
+      emit every receive block whose last sample is ≤ until and that ends at or before the first sample at or
+          after the earliest pending RECEIVE CUT — an rx_overflow or rx_sequence_error fault, a cold receive
+          change, the receive stream's end (MR-12) — shortening the block in progress to end there
+      emit every transmit block whose last sample is ≤ until and that ends at or before the earliest pending
+          TRANSMIT CUT — the next held burst's start, a cold transmit change, the transmit stream's end — and
+          at its burst's waveform end or wrap (MR-15)
+      E := the earliest pending event of any kind (a fault, a command, a burst start, a stream end)
+      if E is none or E's instant > until: break
+      apply E (ties in (instant, insertion) order): a command (MR-18), a fault (MR-20…MR-22),
+          a stream end (MR-25), a burst start (MR-15)
+      progressed := true
+  schedule the wakeup of MR-14
+  progressed |= any block emitted
+  return { progressed }
+```
+
+"Emit" includes the tracker, the device model and the section records. A `hardware_timed` command does not cut a block (M9: frequency and gain are recorded, not modelled). Each iteration applies one event, so the loop ends. A wakeup at or before `now` is not scheduled: the loop above has already done what was due.
+
+## 5. Decisions
+
+| # | Decision | Choice | Rejected (one line each) | Ceiling / upgrade path |
+|---|---|---|---|---|
+| M1 | One resource per instance | Refuse a second fragment (MR-7) | Serving several resources on one Mock (two Spec resources would share one stream; the Radio Model binds a device, Y5) | A multi-device instance is `instances: n` |
+| M2 | A late start | Refused, no stream (MR-11) | Starting late with `LATE` (looser than UHD's idle radio after a late stream command, which Y13 forbids when unsure) | Phase 8 measures what the X310 does |
+| M3 | Where rates become rationals | From the decimation integer (MR-7) | From the `f64` rate (TM-20: the Kernel offers no float-to-rational, and 200e6/3 has no exact `f64`) | none |
+| M4 | TX bytes | Not built (MR-15) | Building them (no Phase 2 consumer) | Phase 3 |
+| M5 | Jitter distribution | Uniform in 1…2·block_len (MR-12) | Only near the nominal length (a consumer assuming ≥ 2 samples would pass) | none |
+| M6 | Block publication | When the last sample has occurred (MR-14) | When the first sample occurs (a block of future samples) | none |
+| M7 | Backpressure | An overrun (MR-19) | Retrying forever (a device cannot wait for its host) | none |
+| M8 | Test pattern | Zero and ramp, selected in the selector (MR-13) | Noise (needs a seed stream and a model; Phase 3) | Phase 3's channel replaces it |
+| M9 | Parameter updates' effect on samples | None in Phase 2: frequency and gain are recorded, not modelled | Modelling gain as scaling (RF behaviour belongs to the channel, Vision §13 rule 3) | Phase 3 |
+| M10 | Device model visibility | Public `DeviceModel` (MR-24) | Private (the #15 bypass case could not be tested without a second Provider) | none |
+
+## 6. Tests
+
+In `crates/ezsdr-mock-radio/tests/mock_radio.rs`, with a harness built from `ManualTimeAuthority` (FreeRunning, a 1 GHz root registered as `V`), an `EventCollector`, a `ClockRegistry`, a queue `ActionReceiver`, a refusing `ActionSubmitter`, and a local `MemLink`-like link. The harness steps the Mock by `advance_to(t)` followed by `step(t)`.
+
+| test | expected | rules |
+|---|---|---|
+| `mr_01_descriptor_registers` | registers with `radio` and `sim` present; refused without them | MR-1 |
+| `mr_02_from_binding_refusals` | each MR-2 refusal; the defaults otherwise | MR-2 |
+| `mr_02_the_tree_has_the_radio_model_shape` | root kind `radio.device` with children `<id>/rx`, `<id>/tx`; `instances: 2` doubles the channel ranges and the transport | MR-2, RM-2, SB-23 |
+| `mr_03_profile_values_reach_the_capabilities_and_the_envelope_section` | every MR-3 value in the capabilities and in `ezsdr.radio.mock.envelope`; the six MR-27 sections exist before `prepare` | MR-3, RM-20, MR-27 |
+| `mr_04_instance` | MR-4's fields; `min_command_lead` 2 ms for `x310-like`, `None` for `ideal` | MR-4, KA-7 |
+| `mr_06_coerce_cases`, `mr_06_coerce_is_pure` | MR-6's listed cases | MR-6, RM-7, RM-8, MA-11 |
+| `mr_07_prepare_cases` | each MR-7 refusal; a clock declared per direction with channels > 0 and the ratio of step 6 (5·N at 1 GHz) | MR-7 |
+| `mr_07_prepare_reports_the_coercions_coerce_reported` | equal lists | MR-8, MA-12 |
+| `mr_08_effective_holds_exactly_the_ten_configuration_keys` | ten keys, defaults where unconstrained | MR-5, RM-5 |
+| `mr_11_start_cases` | a start before `S` refused with `LATE_COMMAND` and a reason naming `ezsdr.time.start_lead_ns`; an on-time start registers the receive clock with origin T0 only when `rx` has a link; the transmit clock registered at `arm` has origin `A`; no receive block ever carries `LATE` | MR-9, MR-11, TM-13b, TM-13e, SC-16a |
+| `mr_12_block_lengths` | MR-12's statement | MR-12, SC-15 |
+| `mr_13_ramp_values` | the bytes of sample `k` on channel `c` are MR-13's | MR-13 |
+| `mr_14_blocks_appear_when_their_last_sample_has_occurred` | at 1 Msps with 1 GHz root, block 0 appears at `T0 + 1 999 000`, not before; the next wakeup is at `T0 + 3 999 000` | MR-14 |
+| `mr_16_burst_refusals` | each MR-16 refusal as `COMMAND_REJECTED` with its reason | MR-16, RM-13 |
+| `mr_16_repeat_is_contiguous_across_wraps` | MR-16's statement | MR-16, MR-23, SC-26 |
+| `mr_17_late_policy_outcomes` | MR-17's statement | MR-17, RM-14 |
+| `mr_18_hardware_timed_updates` | a frequency update at `now + 5 ms` is in `ezsdr.radio.mock.applied` with `at = now + 5 ms`; one at `now + 1 ms` is late and applied at `now + 2 ms` with `LATE_COMMAND`; two at one instant are applied in delivery order; the seventeenth pending one is `COMMAND_QUEUE_FULL` | MR-18, UC-2, UC-6, MR-27 |
+| `mr_18_a_cold_rate_change_starts_a_new_sample_clock` | MR-18's statement | MR-18, UC-3, TM-13c |
+| `mr_18_a_cold_transmit_change_replaces_the_tracker` | a repeated burst open on the transmit clock, a `cold` `radio.tx.sample_rate_hz` change, then a new burst on the new clock: the old burst's record ends `Stop`; the new burst's blocks are accepted (with the old tracker every block would be `DomainMismatch`) | MR-15, MR-18 |
+| `mr_18_a_scheduled_pair_is_checked_when_it_applies` | `x310-like` (1 GB/s transport; arm at 0, start at T0 = 2 000 000 000), rx 2 channels at 100 Msps; at a `now` after T0, an update of `radio.rx.channels` to 1 at `now + 10 µs` and one of `radio.rx.sample_rate_hz` to 200e6 at `now + 20 µs`, both delivered at `now`: both applied (`ezsdr.radio.mock.applied` holds both, in order), no `COMMAND_REJECTED` — checked at receipt, the rate change would meet 2 × 200e6 × 4 = 1.6 GB/s and be refused | MR-18, RM-7 |
+| `mr_19_backpressure_is_an_overrun` | `x310-like` at 1 Msps (restart gap 50 ms = 50 000 samples), one `Block` link of capacity 1; step to the instant of block 0's last sample (block 0 accepted), then of block 1's (block 1 is `Full`: an overrun at sample 2 000, `k_g = 52 000`), then drain the link and step to the last sample of the block beginning at 52 000: the received blocks are block 0 and `[52 000, 54 000)` with `GAP_BEFORE \| RESTARTED` and `lost == Some(50 000)`, equal to its time jump; one `RX_OVERFLOW`; `stats.rx_blocks == 2` | MR-19, SC-20a, SC-18 |
+| `mr_20_faults_fire_at_their_instants` | each fault at `T0 + at_ns`; a fault for another target ignored; `device_lost` returns `DeviceLost` once; each is recorded in `ezsdr.radio.mock.faults` | MR-20, SE-4, MR-27 |
+| `mr_21_overrun_shape`, `mr_22_sequence_error_shape` | MR-21, MR-22 | SC-18 |
+| `mr_24_a_bypassing_provider_gets_time_error` | two `START_OF_BURST` blocks fed to `DeviceModel` with no `END_OF_BURST` between → `Err`; with `close()` between → `Ok` | MR-24 |
+| `mr_25_orderly_stop_delivers_the_tail_abort_does_not` | `x310-like` (tail 1 ms) at 1 Msps, `stop` at a sample instant (block 0's last sample): orderly — the last delivered sample is the last one **before** `stop + 1 ms`, i.e. at `stop + 999 µs` (the tail's end is exclusive); abort — no sample at or after the first undelivered one (`next` at `stop`) is delivered | MR-25, MA-13 |
+| `mr_26_cleanup_is_idempotent` | `cleanup()` twice after `stop`; no panic; `step` afterwards publishes nothing and returns `progressed: false` | MR-26, MA-7 |
+| `mr_29_other_actions_are_command_rejected` | a `SetTimer` and a `PeripheralCommand` delivered: two `radio.COMMAND_REJECTED` events with `action` `set_timer` and `peripheral_command` and source `<device>`; two `rejected` section records | MR-29, MR-27, MR-28 |
+| `mr_30_two_mocks_one_seed_identical_output` | identical block headers, events and sections | MR-30 |
+
+## 7. Vision issues found
+
+1. **§13's rule 1 says an injected overflow "reproduces the same restart gap"** without naming what reproduces it; MR-21 is that rule, built on RM-17.
+2. **§13 says MockRadio emulates the start-up latency** without saying what happens when a start comes too early; MR-11 refuses it, which is stricter than a late start (Y13).
+
+## 8. Deferred
+
+The channel as the receive source; clipping; random retune phase; a transmit port and `TX_UNDERFLOW`; the hot-path event layout; `ALIGNMENT` injection (Phase 4).
