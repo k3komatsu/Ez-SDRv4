@@ -1078,6 +1078,33 @@ fn sb_39_arm_order_follows_edges() {
 }
 
 #[test]
+fn sb_39_arm_order_deduplicates_edges_and_keeps_cycle_path_order() {
+    let nodes = vec![id("a"), id("b"), id("c")];
+    let duplicate_edges = vec![(id("a"), id("b")), (id("a"), id("b"))];
+    assert_eq!(
+        arm_order(&nodes, &duplicate_edges),
+        Ok(vec![id("a"), id("b"), id("c")])
+    );
+
+    // The diagnostic lists unresolved fragments in their original input order.
+    let nodes = vec![id("b"), id("a"), id("c")];
+    let cycle = vec![
+        (id("a"), id("b")),
+        (id("b"), id("a")),
+        (id("b"), id("a")),
+    ];
+    assert_eq!(
+        arm_order(&nodes, &cycle),
+        Err(SpecError::ArmCycle { path: "b -> a".to_owned() })
+    );
+
+    assert_eq!(
+        arm_order(&[id("a")], &[(id("a"), id("a"))]),
+        Err(SpecError::ArmCycle { path: "a".to_owned() })
+    );
+}
+
+#[test]
 fn sb_39_arm_cycle_refused() {
     let nodes = vec![id("a"), id("b")];
     let edges = vec![(id("a"), id("b")), (id("b"), id("a"))];
@@ -1131,6 +1158,33 @@ fn sb_39_arm_after_from_the_provider_declaration() {
     let names: Vec<&str> = plan.fragments.iter().map(|f| f.id.as_str()).collect();
     assert_eq!(names, vec!["pps", "slave"]);
     assert!(plan.deps.contains(&(id("pps"), id("slave"))));
+}
+
+#[test]
+fn sb_39_arm_after_resolves_a_shared_instance_to_its_first_resource_name() {
+    let resources = [
+        (id("a"), resource("test.line", &[])),
+        (id("b"), resource("test.line", &[])),
+        (id("c"), resource("test.device", &[])),
+    ]
+    .into_iter()
+    .collect();
+    let spec = spec_with(resources);
+    let shared = TestProvider::new("radio", 2);
+    let c = TestProvider::new("c", 2).arm_after(rid("radio"));
+    let providers: BTreeMap<Ident, &dyn Provider> = [
+        (id("a"), &shared as &dyn Provider),
+        (id("b"), &shared as &dyn Provider),
+        (id("c"), &c as &dyn Provider),
+    ]
+    .into_iter()
+    .collect();
+    let profile = distinct_instances(profile_binding(&["a", "b", "c"]), &["c"]);
+    let fx = Fixture::new();
+    let plan = validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new())
+        .expect("plans");
+
+    assert_eq!(plan.deps, vec![(id("a"), id("c"))]);
 }
 
 #[test]
@@ -3023,6 +3077,45 @@ fn sb_06_a_capability_of_the_wrong_kind_is_key_shape_in_every_cell() {
     ] {
         assert!(matches!(satisfies(&c, &wrong), Err(SpecError::KeyShape { .. })), "{c:?}");
     }
+}
+
+#[test]
+fn sb_06_any_of_checks_later_values_after_a_match() {
+    let capability_any = || CapabilityValue::AnyOf {
+        values: vec![Value::Int(1), Value::Str("wrong kind".to_owned())],
+    };
+    let malformed_after_match = |constraint: Constraint, capability: CapabilityValue| {
+        assert!(matches!(
+            satisfies(&constraint, &capability),
+            Err(SpecError::KeyShape { .. })
+        ));
+    };
+
+    malformed_after_match(Constraint::Eq { value: Value::Int(1) }, capability_any());
+    malformed_after_match(
+        Constraint::Range { min: Some(Value::Int(0)), max: Some(Value::Int(2)) },
+        capability_any(),
+    );
+    malformed_after_match(Constraint::Min { value: Value::Int(1) }, capability_any());
+    malformed_after_match(Constraint::Max { value: Value::Int(1) }, capability_any());
+    malformed_after_match(
+        Constraint::Set { values: vec![Value::Int(1), Value::Str("wrong kind".to_owned())] },
+        CapabilityValue::One { value: Value::Int(1) },
+    );
+    malformed_after_match(
+        Constraint::Set { values: vec![Value::Int(1), Value::Str("wrong kind".to_owned())] },
+        CapabilityValue::Range { min: Value::Int(0), max: Value::Int(2) },
+    );
+    // Here the outer Set fold must continue after the first set value matches.
+    malformed_after_match(
+        Constraint::Set { values: vec![Value::Int(1), Value::Str("wrong kind".to_owned())] },
+        CapabilityValue::AnyOf { values: vec![Value::Int(1)] },
+    );
+    // Here the inner AnyOf fold must continue after its first capability matches.
+    malformed_after_match(
+        Constraint::Set { values: vec![Value::Int(1)] },
+        capability_any(),
+    );
 }
 
 #[test]

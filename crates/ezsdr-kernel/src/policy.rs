@@ -101,7 +101,12 @@ impl EventKindRegistry {
         decl: EventKindDecl,
     ) -> Result<(), RunError> {
         if let Some(ns) = &owner {
-            if !decl.kind.as_str().starts_with(&format!("{ns}.")) {
+            let owned = decl
+                .kind
+                .as_str()
+                .strip_prefix(ns.as_str())
+                .is_some_and(|suffix| suffix.starts_with('.'));
+            if !owned {
                 return Err(RunError::SectionNamespaceForbidden { ns: ns.to_string() });
             }
         }

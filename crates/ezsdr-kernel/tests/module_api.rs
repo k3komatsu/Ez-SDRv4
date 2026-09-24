@@ -14,8 +14,8 @@ use ezsdr_kernel::module_api::{
     ActionSubmitter, Authority, ComponentDescriptor, ComponentImpl,
     ComponentKind, ComponentRequires, ComponentTiming, Deployment, Executor, ExecutorDescriptor,
     Factories, IslandDecl, Link, LinkDescriptor, ModuleDescriptor, ModuleError, ModuleErrorKind, ModuleRef, ModuleRegistry,
-    ParamDecl, PrepareContext, Provider, Requested, Role, RtPolicy, Sink, SinkDescriptor, StepOutcome,
-    SteppedInstance, SteppedRef, StopMode, UpdateClass, Version, VersionReq,
+    ParamDecl, PrepareContext, Provider, Requested, Resource, Role, RtPolicy, Sink, SinkDescriptor,
+    StepOutcome, SteppedInstance, SteppedRef, StopMode, UpdateClass, Version, VersionReq,
     step_until_quiescent,
 };
 use ezsdr_kernel::plan::{
@@ -505,9 +505,40 @@ fn ma_10_sub_resource_binding() {
     let p = TestProvider::new("radio", 2);
     let nodes = p.instance().tree.walk();
     assert_eq!(nodes.len(), 3, "a two-level tree of a device with two sub-resources");
+    assert_eq!(
+        nodes.iter().map(|node| node.id.path.as_str()).collect::<Vec<_>>(),
+        ["radio", "radio/0", "radio/1"],
+        "the iterator preserves depth-first pre-order"
+    );
     let line = nodes.iter().find(|n| n.kind == ns("test.line")).expect("present");
     assert_eq!(line.id, rid("radio/0"), "a sub-resource carries its own ResourceId");
     assert!(line.id.is_within(&p.instance().id));
+}
+
+#[test]
+fn ma_10_resource_walk_is_depth_first_preorder() {
+    let resource = |path: &str, children| Resource {
+        id: rid(path),
+        kind: ns("test.node"),
+        capabilities: BTreeMap::new(),
+        children,
+        ports: Vec::new(),
+        shareable: false,
+    };
+    let tree = resource(
+        "root",
+        vec![
+            resource("root/a", vec![resource("root/a/x", Vec::new())]),
+            resource("root/b", Vec::new()),
+        ],
+    );
+    assert_eq!(
+        tree.walk()
+            .iter()
+            .map(|node| node.id.path.as_str())
+            .collect::<Vec<_>>(),
+        ["root", "root/a", "root/a/x", "root/b"]
+    );
 }
 
 #[test]

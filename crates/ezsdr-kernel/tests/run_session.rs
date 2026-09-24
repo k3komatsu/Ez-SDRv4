@@ -623,6 +623,94 @@ fn rs_33_unforeseen_pair_uses_the_fallback_row() {
 }
 
 #[test]
+fn rs_33_duplicate_pairs_share_one_counter_row() {
+    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
+    let source = rid("radio");
+    let kind = EventKind::parse("test.custom").expect("parses");
+    let pairs = [(source.clone(), kind.clone()), (source.clone(), kind.clone())];
+    let c = collector(8, &policy, &pairs);
+
+    let matching_rows = |rows: &[CounterRow]| {
+        rows.iter().filter(|row| row.source == source && row.kind == kind).count()
+    };
+    assert_eq!(matching_rows(&c.counters()), 1);
+
+    let handle = c.resolve(&source, &kind);
+    c.emit(handle, t(0), Severity::Info, &[]).expect("emits");
+    let row = c
+        .counters()
+        .into_iter()
+        .find(|row| row.source == source && row.kind == kind)
+        .expect("the planned row exists");
+    assert_eq!(row.count, 1);
+}
+
+#[test]
+fn rs_33_planned_fallback_source_shares_its_meta_counter_row() {
+    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
+    let source = rid("unforeseen");
+    let kind = EventKind::parse(EventKind::EVENTS_DROPPED).expect("parses");
+    let c = collector(8, &policy, &[(source.clone(), kind.clone())]);
+
+    assert_eq!(
+        c.counters()
+            .iter()
+            .filter(|row| row.source == source && row.kind == kind)
+            .count(),
+        1,
+        "the planned and fallback source indices identify the same row"
+    );
+}
+
+#[test]
+fn rs_33_drain_uses_the_planned_fallback_source_for_meta_events() {
+    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
+    let source = rid("unforeseen");
+    let kind = EventKind::parse("test.custom").expect("parses");
+    let c = collector(1, &policy, &[(source.clone(), kind.clone())]);
+    let handle = c.resolve(&source, &kind);
+    for _ in 0..2 {
+        c.emit(handle, t(0), Severity::Info, &[]).expect("emits");
+    }
+
+    let dropped_kind = EventKind::parse(EventKind::EVENTS_DROPPED).expect("parses");
+    let drained = c.drain();
+    assert_eq!(
+        drained.iter().filter(|event| event.kind == dropped_kind).count(),
+        1
+    );
+    let dropped_row = c
+        .counters()
+        .into_iter()
+        .find(|row| row.source == source && row.kind == dropped_kind)
+        .expect("the planned fallback source has a meta-event counter");
+    assert_eq!(dropped_row.count, 1);
+}
+
+#[test]
+fn rs_33_duplicate_declared_kinds_resolve_to_the_first_index() {
+    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
+    let source = rid("radio");
+    let kind = EventKind::parse("test.custom").expect("parses");
+    let declared_kinds = [kind.clone(), kind.clone()];
+    let c = EventCollector::new(
+        &[(source.clone(), kind.clone())],
+        &declared_kinds,
+        8,
+        &policy,
+    );
+    let handle = c.resolve(&source, &kind);
+    assert_eq!(handle.kind, 0, "duplicate kinds use the first declared index");
+    c.emit(handle, t(0), Severity::Info, &[]).expect("emits");
+    let row = c
+        .counters()
+        .into_iter()
+        .find(|row| row.source == source && row.kind == kind)
+        .expect("the planned pair exists");
+    assert_eq!(row.count, 1);
+}
+
+#[test]
 fn rs_36_abort_survives_a_drop() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
     let source = rid("radio");

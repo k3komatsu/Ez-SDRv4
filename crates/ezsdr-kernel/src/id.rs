@@ -299,8 +299,10 @@ impl ResourceId {
     /// True when `self` is `other` or lies underneath it in the composite tree (SB-33).
     pub fn is_within(&self, other: &ResourceId) -> bool {
         self.node == other.node
-            && self.path.starts_with(&other.path)
-            && matches!(self.path.as_bytes().get(other.path.len()), None | Some(b'/'))
+            && self
+                .path
+                .strip_prefix(&other.path)
+                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
     }
 
     /// Appends one segment, validating it (SB-34).

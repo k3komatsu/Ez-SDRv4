@@ -1,7 +1,7 @@
 //! Events, counters and the Kernel Action set —
 //! `04-run-and-session.md` RS-26…RS-36, RS-48…RS-52 (Vision §29, §5, §19).
 
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry, BTreeMap};
 use std::fmt;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -212,7 +212,9 @@ struct Ring {
 /// Rule: RS-32…RS-36.
 pub struct EventCollector {
     sources: Vec<ResourceId>,
+    source_index: BTreeMap<ResourceId, usize>,
     kinds: Vec<EventKind>,
+    kind_index: BTreeMap<EventKind, usize>,
     /// `(row, kind)` → counter index; the last row is the fallback (RS-33).
     index: BTreeMap<(usize, usize), usize>,
     pairs: Vec<(usize, usize)>,
@@ -237,42 +239,63 @@ impl EventCollector {
         policy: &Policy,
     ) -> EventCollector {
         let mut sources: Vec<ResourceId> = Vec::new();
+        let mut source_index = BTreeMap::new();
         let mut kind_list: Vec<EventKind> = kinds.to_vec();
+        let mut kind_index = BTreeMap::new();
+        for (i, kind) in kind_list.iter().enumerate() {
+            kind_index.entry(kind.clone()).or_insert(i);
+        }
         for (s, k) in pairs {
-            if !sources.contains(s) {
+            if let Entry::Vacant(entry) = source_index.entry(s.clone()) {
+                entry.insert(sources.len());
                 sources.push(s.clone());
             }
-            if !kind_list.contains(k) {
+            if let Entry::Vacant(entry) = kind_index.entry(k.clone()) {
+                entry.insert(kind_list.len());
                 kind_list.push(k.clone());
             }
         }
         // RS-33: one fallback row, not one per source, which would be unbounded
         // when a Module mislabels its source.
         let fallback = ResourceId::parse("unforeseen").expect("a valid literal path");
-        sources.push(fallback);
-        let fallback_source = sources.len() - 1;
+        let fallback_source = match source_index.entry(fallback.clone()) {
+            Entry::Vacant(entry) => {
+                let index = sources.len();
+                sources.push(fallback);
+                entry.insert(index);
+                index
+            }
+            Entry::Occupied(entry) => *entry.get(),
+        };
 
         let mut index = BTreeMap::new();
         let mut resolved = Vec::new();
         for (s, k) in pairs {
-            let si = sources.iter().position(|x| x == s).expect("just inserted");
-            let ki = kind_list.iter().position(|x| x == k).expect("just inserted");
-            if index.insert((si, ki), resolved.len()).is_none() {
-                resolved.push((si, ki));
+            let pair = (source_index[s], kind_index[k]);
+            if let Entry::Vacant(entry) = index.entry(pair) {
+                entry.insert(resolved.len());
+                resolved.push(pair);
             }
         }
         // RS-35's meta-event always exists, so its row always exists: without it the
         // drain's own `EVENTS_DROPPED` bodies would land on the fallback row, which
         // reports a different kind, and RS-35's invariant would read as violated for
         // exactly the kind that exists to keep it true (RS-33, RS-38).
-        if let Some(ki) = kind_list.iter().position(|k| k.as_str() == EventKind::EVENTS_DROPPED) {
+        if let Some(ki) = kind_index
+            .get(&EventKind(EventKind::EVENTS_DROPPED.to_owned()))
+            .copied()
+        {
             index.entry((fallback_source, ki)).or_insert_with(|| {
                 resolved.push((fallback_source, ki));
                 resolved.len() - 1
             });
         }
         let fallback_kind = kind_list.len();
-        kind_list.push(EventKind("unforeseen".to_owned()));
+        let unforeseen_kind = EventKind("unforeseen".to_owned());
+        kind_index
+            .entry(unforeseen_kind.clone())
+            .or_insert(fallback_kind);
+        kind_list.push(unforeseen_kind);
         index.insert((fallback_source, fallback_kind), resolved.len());
         resolved.push((fallback_source, fallback_kind));
 
@@ -295,7 +318,9 @@ impl EventCollector {
         };
         let collector = EventCollector {
             sources,
+            source_index,
             kinds: kind_list,
+            kind_index,
             index,
             pairs: resolved,
             counts,
@@ -403,7 +428,11 @@ impl EventCollector {
                 ),
             })
             .collect();
-        out.append(&mut self.control.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect(),
+        out.extend(
+            self.control
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .drain(..),
         );
         let dropped_kind = EventKind(EventKind::EVENTS_DROPPED.to_owned());
         for (i, d) in self.dropped.iter().enumerate() {
@@ -411,7 +440,8 @@ impl EventCollector {
             if count > 0 {
                 // RS-35's invariant is stated "for every kind", so the meta-event is
                 // counted like any other body it is delivered beside (RS-33, RS-38).
-                let source = self.sources[self.sources.len() - 1].clone();
+                let fallback_source = self.pairs.last().expect("fallback counter exists").0;
+                let source = self.sources[fallback_source].clone();
                 let handle = self.resolve(&source, &dropped_kind);
                 self.counts[handle.row as usize].fetch_add(1, Ordering::Relaxed);
                 out.push(Event {
@@ -447,8 +477,8 @@ impl EventCollector {
 
 impl EventSink for EventCollector {
     fn resolve(&self, source: &ResourceId, kind: &EventKind) -> EventHandle {
-        let si = self.sources.iter().position(|x| x == source);
-        let ki = self.kinds.iter().position(|x| x == kind);
+        let si = self.source_index.get(source).copied();
+        let ki = self.kind_index.get(kind).copied();
         let fallback_row = (self.pairs.len() - 1) as u32;
         match (si, ki) {
             (Some(s), Some(k)) => match self.index.get(&(s, k)) {

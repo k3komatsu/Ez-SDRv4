@@ -512,11 +512,17 @@ pub struct Resource {
 impl Resource {
     /// This node and every node beneath it, depth first (SB-33, SB-34).
     pub fn walk(&self) -> Vec<&Resource> {
-        let mut out = vec![self];
-        for c in &self.children {
-            out.extend(c.walk());
-        }
-        out
+        self.walk_iter().collect()
+    }
+
+    /// Lazily walks this tree depth first without allocating a `Vec` per subtree.
+    pub(crate) fn walk_iter(&self) -> impl Iterator<Item = &Resource> + '_ {
+        let mut pending = vec![self];
+        std::iter::from_fn(move || {
+            let node = pending.pop()?;
+            pending.extend(node.children.iter().rev());
+            Some(node)
+        })
     }
 }
 
@@ -1378,16 +1384,15 @@ impl ModuleRegistry {
     ///
     /// Rule: MA-34, SB-2.
     pub fn key_decl(&self, key: &Key) -> Result<&KeyDecl, ModuleError> {
-        for v in self.vocabularies.values() {
-            if key.has_prefix(&v.prefix) {
-                if let Some(d) = v.keys.iter().find(|d| d.key == *key) {
-                    return Ok(d);
-                }
-            }
-        }
-        Err(ModuleError::rejected(format!(
-            "MA-34: key {key} has a prefix no registered Vocabulary owns"
-        )))
+        self.vocabularies
+            .values()
+            .filter(|v| key.has_prefix(&v.prefix))
+            .find_map(|v| v.keys.iter().find(|d| d.key == *key))
+            .ok_or_else(|| {
+                ModuleError::rejected(format!(
+                    "MA-34: key {key} has a prefix no registered Vocabulary owns"
+                ))
+            })
     }
 
     /// The compilation a Vocabulary declares for one of its verbs (RS-13a, RS-14).

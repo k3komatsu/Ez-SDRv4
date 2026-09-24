@@ -9,5 +9,8 @@ v3/
 # Rust build output (Cargo.lock IS committed, see plan/phase1/00-overview.md OV-11)
 /target/
 
+# Local review state and scratch files
+/tmp/
+
 # Local-only: build output lives outside the synced folder (see .cargo/config.toml)
 /.cargo/

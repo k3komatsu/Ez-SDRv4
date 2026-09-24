@@ -14,6 +14,14 @@ use crate::spec::{
     SpecError, Value, ValueKind, Warning, check_top_level, check_version,
 };
 
+/// Tests every candidate so a later kind mismatch is not hidden by an earlier hit (SB-6).
+fn any_evaluating_all<'a>(
+    mut values: impl Iterator<Item = &'a Value>,
+    mut predicate: impl FnMut(&Value) -> Result<bool, SpecError>,
+) -> Result<bool, SpecError> {
+    values.try_fold(false, |found, value| Ok(predicate(value)? | found))
+}
+
 /// Which Provider serves a Spec resource, and how it is selected.
 ///
 /// A `selector` is Provider content. Vision §8's simulation example writes
@@ -216,11 +224,7 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
             within(v, Some(min), Some(max))?
         }
         (Constraint::Eq { value: v }, CapabilityValue::AnyOf { values: xs }) => {
-            let mut hit = false;
-            for x in xs {
-                hit |= same(v, x)?;
-            }
-            hit
+            any_evaluating_all(xs.iter(), |x| same(v, x))?
         }
 
         (Constraint::Range { min, max }, CapabilityValue::One { value: x }) => {
@@ -242,57 +246,33 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
             above && below
         }
         (Constraint::Range { min, max }, CapabilityValue::AnyOf { values: xs }) => {
-            let mut hit = false;
-            for x in xs {
-                hit |= within(x, min.as_ref(), max.as_ref())?;
-            }
-            hit
+            any_evaluating_all(xs.iter(), |x| within(x, min.as_ref(), max.as_ref()))?
         }
 
         (Constraint::Set { values: s }, CapabilityValue::One { value: x }) => {
-            let mut hit = false;
-            for v in s {
-                hit |= same(v, x)?;
-            }
-            hit
+            any_evaluating_all(s.iter(), |v| same(v, x))?
         }
         (Constraint::Set { values: s }, CapabilityValue::Range { min, max }) => {
-            let mut hit = false;
-            for v in s {
-                hit |= within(v, Some(min), Some(max))?;
-            }
-            hit
+            any_evaluating_all(s.iter(), |v| within(v, Some(min), Some(max)))?
         }
         (Constraint::Set { values: s }, CapabilityValue::AnyOf { values: xs }) => {
-            let mut hit = false;
-            for v in s {
-                for x in xs {
-                    hit |= same(v, x)?;
-                }
-            }
-            hit
+            any_evaluating_all(s.iter(), |v| {
+                any_evaluating_all(xs.iter(), |x| same(v, x))
+            })?
         }
 
         // Min and Max are satisfied by the corresponding bound of the capability.
         (Constraint::Min { value: v }, CapabilityValue::One { value: x }) => cmp(x, v)? != Less,
         (Constraint::Min { value: v }, CapabilityValue::Range { max, .. }) => cmp(max, v)? != Less,
         (Constraint::Min { value: v }, CapabilityValue::AnyOf { values: xs }) => {
-            let mut hit = false;
-            for x in xs {
-                hit |= cmp(x, v)? != Less;
-            }
-            hit
+            any_evaluating_all(xs.iter(), |x| Ok(cmp(x, v)? != Less))?
         }
         (Constraint::Max { value: v }, CapabilityValue::One { value: x }) => cmp(x, v)? != Greater,
         (Constraint::Max { value: v }, CapabilityValue::Range { min, .. }) => {
             cmp(min, v)? != Greater
         }
         (Constraint::Max { value: v }, CapabilityValue::AnyOf { values: xs }) => {
-            let mut hit = false;
-            for x in xs {
-                hit |= cmp(x, v)? != Greater;
-            }
-            hit
+            any_evaluating_all(xs.iter(), |x| Ok(cmp(x, v)? != Greater))?
         }
     })
 }

@@ -69,7 +69,7 @@ impl Ident {
 impl Namespace {
     /// Parses a dotted namespace (SB-1).
     pub fn parse(s: &str) -> Result<Namespace, SpecError> {
-        if !s.is_empty() && s.split('.').all(parse_segment) {
+        if s.split('.').all(parse_segment) {
             Ok(Namespace(s.to_owned()))
         } else {
             Err(SpecError::UnknownField { path: s.to_owned() })
@@ -84,7 +84,10 @@ impl Namespace {
     /// True when `self` is `other` or lies under it, on segment boundaries (SB-2).
     pub fn is_under(&self, other: &Namespace) -> bool {
         self.0 == other.0
-            || (self.0.starts_with(&other.0) && self.0.as_bytes().get(other.0.len()) == Some(&b'.'))
+            || self
+                .0
+                .strip_prefix(&other.0)
+                .is_some_and(|suffix| suffix.starts_with('.'))
     }
 }
 
@@ -116,8 +119,9 @@ impl Key {
 
     /// True when the key sits under `prefix` (SB-2, MA-34).
     pub fn has_prefix(&self, prefix: &Namespace) -> bool {
-        self.0.starts_with(prefix.as_str())
-            && self.0.as_bytes().get(prefix.as_str().len()) == Some(&b'.')
+        self.0
+            .strip_prefix(prefix.as_str())
+            .is_some_and(|suffix| suffix.starts_with('.'))
     }
 
     /// The `ext.<module-id>` escape prefix (MA-34).
