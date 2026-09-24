@@ -8,7 +8,7 @@
 | | |
 |---|---|
 | remote | `git@github.com:k3komatsu/Ez-SDR.git` |
-| `main` | v4（この worktree）．Phase 0 の設計文書に続き，Phase 1 の spec と `ezsdr-kernel` を実装・受理済み．Phase 1 は完了し，次は Phase 2 の計画．|
+| `main` | v4（この worktree）．Phase 0 の設計文書に続き，Phase 1 の spec と `ezsdr-kernel` を実装・受理済み．Phase 1 は完了．Phase 2 は計画（spec 06–10 と実装計画）を起草済みで，owner の Gate P 待ち（§4）．|
 | `master` | v3（D + C++ UHD bridge + Python client）．tip `4a474e9` = tag `v3.0.28`．**GitHub の default branch のまま** |
 | tags | 35 個（`v2.11`, `v3.0.0`–`v3.0.28`）．すべて v3 系 |
 | 履歴の関係 | **無関係（unrelated）**．graft も merge もしていない．v4 は clean-sheet なので今後も繋がない |
@@ -24,6 +24,7 @@
   ```
 
 - `v3/` を消してしまった場合：`git worktree prune && git worktree add v3 master`
+- **Google Drive の同期で追跡ファイルが消えることがある**．2026-09-24 に `crates/ezsdr-kernel/tests/` と `schemas/`（61 ファイル）が作業ツリーから消え，`git restore crates/ezsdr-kernel/tests schemas` で戻した．作業を始める前に `git status --short` に ` D` 行がないことを確かめる．Drive の同期中に戻すと競合コピー（`… (1).…`）が増えるので，同期を止めてから戻す．
 
 ## 2. 設計文書の状態 — Phase 0 完了
 
@@ -50,7 +51,9 @@ Phase 1 の Kernel crate は **実装済み**（Step 4 完了）．
 
 Python client，wire protocol，MockRadio，Simulation Engine は未着手（Phase 2 以降）．
 
-## 4. Phase 1 完了 — specs 受理・Kernel 実装済み
+## 4. Phase の状態 — Phase 1 完了，Phase 2 は計画を起草済み（Gate P 待ち）
+
+### Phase 1 — specs 受理・Kernel 実装済み
 
 Vision §67 の Phase 1．**受理済み**（2026-09-23，Step 5 完了）．5つの spec は `design/0N-*.md` に移り，横断決定・OV 規則・決定ログは [plan/phase1/00-overview.md](plan/phase1/00-overview.md) に残る．
 
@@ -91,11 +94,33 @@ exit criteria（§13）の達成状況（2026-09-23 時点）：
 - **新しい拒否は1件ずつ無効化して，テストが落ちることを確かめる**（mutation）．落ちないものはテストを足すか，死にコードとして消す．
 - **gate は列挙では閉じない**．`kernel_surface` は構文の新しい形で何度も抜けられた．仕組み（`use … as` や一覧外の `macro_rules!`）を禁止し，残りは process obligation として名指す（D100）．
 
+### Phase 2 — 計画を起草済み，Gate P 待ち
+
+Vision §67 の Phase 2（Radio Model + Simulation Engine + MockRadio）．文書はすべて [plan/phase2/](plan/phase2) にあり，Gate P で owner が受理するまで規範ではない（[00-overview.md](plan/phase2/00-overview.md) §9）．
+
+| 文書 | 中身 |
+|---|---|
+| [00-overview.md](plan/phase2/00-overview.md) | 範囲，横断決定 Y1–Y14，10 crate の構成と許される依存，運用規則 PO-1–PO-12，Vision §58/§61 と Phase 1 marker の対応表，gate，exit criteria，決定ログ（§11，Gate P で記入） |
+| [06-kernel-coordinator.md](plan/phase2/06-kernel-coordinator.md) | Phase 1 spec への修正 KA-1–KA-22，Run coordinator KC-1–KC-45，update class UC-1–UC-6 |
+| [07-radio-model.md](plan/phase2/07-radio-model.md) / [08-simulation.md](plan/phase2/08-simulation.md) / [09-mock-radio.md](plan/phase2/09-mock-radio.md) / [10-host-data-path.md](plan/phase2/10-host-data-path.md) | `radio` Vocabulary（RM），`sim` Vocabulary と Simulation Engine（SE），MockRadio（MR），host メモリ・Link・`sink` Vocabulary・capture Sink（HD） |
+| [20-implementation-plan.md](plan/phase2/20-implementation-plan.md) | 実装者（安価なモデルを想定）向けの 16 手順．各手順にファイル・シグネチャ・疑似コード・テスト表・mutation check・完了条件．付録 A = patch 適用後の Kernel API，付録 B = 全規則→手順→テストの対応（テストの無い規則 0） |
+| [patches/01-kernel-amendments.patch](plan/phase2/patches/01-kernel-amendments.patch) | KA のうち coordinator 以外のコード（28 ファイル）．`96976c5` に `git apply` でき，1.85.0 / stable ともに 361 passed，clippy 通過．新テスト 8 件は各規則を無効化すると落ちることを確認済み．**まだ当てていない**（実装手順 1） |
+| [reviews/planning-reviews.md](plan/phase2/reviews/planning-reviews.md) | Gate P 前の Opus 敵対的レビュー 3 巡（指摘 56 → 34 → 18）と各指摘の判定．全件反映済み |
+
+Phase 1 の Kernel には，最初の本物の Module が必ず踏む穴があった（例：`PrepareContext` のハンドルが借用で，Module が `prepare` 後にイベントも時刻も扱えない）．KA-1–KA-22 がそれを埋める．
+
+**Gate P で owner が決めること**：00-overview.md §11 の決定ログに，Y1–Y14 と各 spec の決定表（K1–K12，R1–R9，S1–S7，M1–M10，H1–H8）の verdict を記入する．特に確認が要るのは次の 4 点（どれも spec は推奨案で書いてあり，受理なら変更なし，覆すなら挙げた規則とテストを直す）：
+
+1. **故障注入 3 種を Phase 2 に入れる**（KA-22 で受理済み spec 04 の「fault injection は Phase 4」を改める）．覆すなら SE-3–SE-5，MR-20–MR-22，`v58_04`–`v58_06` を外し，SC-18 などの marker は forward のまま．
+2. **x310-like の転送上限 1.0 GB/s/方向**（MR-3，INFERRED）．10 GbE の line rate 1.25 GB/s から Y13 で厳しい側に丸めた．Phase 8 の実測で置き換える前提．
+3. **capture Sink に「全サンプル記録」モードを設けない**（HD-10，H8）．記録は `N` サンプル指定のみ．
+4. **x310-like では `ezsdr.time.start_lead_ns ≥ 2 s` が必須**（MR-11）．足りない開始は拒否（遅れて開始して `LATE` を付ける案は Y13 で不採用）．
+
 ### 次にすること
 
-Phase 1 は完了．Phase 2（Radio Model + Simulation Engine + MockRadio，Vision §67）の計画に入る．最初に [00-overview.md](plan/phase1/00-overview.md) §11 D109 の raised 3件（TimingEnvelope / PerformanceEnvelope の検査，update class の意味，Mock の義務）と，forward / producer marker を持つ規則（[exit-review/README.md](plan/phase1/exit-review/README.md)）を Phase 2 の入力として拾う．
-
-型を書くときの拘束文は Vision §5（tiers），§15（time），§23（Stream Contract），§13（TimingEnvelope / Mock 強制），§3（Session），§8（composite resource，BindingProfile）．audit §13「Recommended Minimal Core」が freeze 対象の一覧で，§14.1 の項目 1–15 は 00-overview.md §10 の traceability 表に対応付けてある．
+1. owner が Gate P：00-overview.md §4・§11，spec 06–10，20-implementation-plan.md を読み，§11 に verdict を記入して受理（または差し戻し）．`plan/phase2/` を commit．
+2. 受理後，実装者は [20-implementation-plan.md](plan/phase2/20-implementation-plan.md) の §0 を読んでから手順 1（patch 適用）から順に進める．手順 8 の後（Review K）と手順 15 の後（Review M）で止まり，owner がレビューを回す．実装者は commit しない．
+3. Phase 2 の exit（Gate X）で spec 06–10 を `design/` へ移し，各 spec の「Vision issues found」を owner の承認のもとで Vision に反映する．
 
 ## 5. v3 → v4 切替で残っている作業（人間の判断が要るもの）
 

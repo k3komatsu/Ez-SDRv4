@@ -4,7 +4,7 @@
 |---|---|
 | Status | **Draft for owner acceptance** (Gate P, `00-overview.md` §9), together with specs 06–10. Nothing here is implemented before the owner accepts it. |
 | Audience | The agent that implements Phase 2. This file tells you **what to do, in what order, and how to know you are done**. The specs `06`–`10` tell you **what is true**. You need nothing else except the repository itself. |
-| Base | `main` at commit `96976c5` ("docs: move the Phase 1 history out of handoff.md"). Step 1 fails loudly if the base has moved. |
+| Base | The Kernel code of commit `96976c5`: the patch of step 1 is made against it. Later commits that touch only `plan/`, `handoff.md` or other documents (such as `8456975`, which added these documents) do not move the base. Step 1 fails loudly if the code has moved. |
 | Toolchains | Rust `1.85.0` (the MSRV) and `stable`. Both must pass at the end of every step. |
 | Language | English, like the specs. |
 
@@ -134,13 +134,17 @@ Record each check as `mutation: <rule> / <test>: fails when disabled — yes` in
 
 The patch was written and verified before this plan was accepted. You apply it; you do not retype it.
 
-1. Confirm the base:
+1. Confirm the base: the Kernel code must be exactly that of `96976c5`, and the working tree clean.
 
    ```bash
-   git rev-parse --short HEAD
+   git diff --quiet 96976c5 HEAD -- crates schemas Cargo.toml Cargo.lock && echo base-ok
    ```
 
-   It must print `96976c5`, and `git status --short` must show nothing but untracked files under `plan/phase2/`. If either differs, stop (§0.3).
+   ```bash
+   git status --short
+   ```
+
+   The first must print `base-ok`; the second must print nothing. If either differs, stop (§0.3).
 
 2. Apply:
 

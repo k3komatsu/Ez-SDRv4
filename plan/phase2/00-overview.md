@@ -23,6 +23,8 @@ plan/phase2/
   09-mock-radio.md          MR-n  the MockRadio Module: profiles, coercion, streams, bursts, faults, stop, sections
   10-host-data-path.md      HD-n  host memory and its pool, the host Link Module, the `sink` Vocabulary, the capture Sink Module
   20-implementation-plan.md       the ordered steps for the implementer, with files, signatures, tests and commands
+  patches/01-kernel-amendments.patch  the Kernel amendments of spec 06 §2, as a git patch against 96976c5 (plan step 1)
+  reviews/planning-reviews.md     the three adversarial reviews of these documents before Gate P, and each finding's verdict
 ```
 
 ---
