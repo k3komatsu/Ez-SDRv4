@@ -1,0 +1,13 @@
+You are finishing the Phase 2 implementation of Ez-SDR v4 in
+/Users/komatsu/GoogleDrive/github/Ez-SDRv4 (branch `main`). Steps 1-15 are
+done, and Reviews K and M have run; their verdicts are in
+plan/phase2/00-overview.md section 11.
+
+Read these again: AGENTS.md; handoff.md section 4;
+plan/phase2/00-overview.md; plan/phase2/20-implementation-plan.md section 0;
+plan/phase2/implementation-notes.md. The same rules apply as before.
+
+Scope of this session: step 16 only. That covers the exit-review tables, the
+Phase 1 markers, the NEW: count, the link and v3/ path checks, the Vision
+issues list, and handoff.md. Do not move any spec to design/, and do not edit
+the Vision: both are the owner's, at Gate X. Report to the owner in Japanese.

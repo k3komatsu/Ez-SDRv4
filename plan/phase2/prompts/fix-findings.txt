@@ -1,0 +1,22 @@
+You are continuing the Phase 2 implementation of Ez-SDR v4 in
+/Users/komatsu/GoogleDrive/github/Ez-SDRv4 (branch `main`). A review has run,
+and the owner has accepted the findings listed below; their verdicts are in
+plan/phase2/00-overview.md section 11.
+
+Fix exactly these findings, and nothing else.
+
+For each finding:
+1. make the fix;
+2. redo the mutation checks of the tests that finding concerns (plan section
+   0.7);
+3. run the three commands of plan section 0.5; all must pass;
+4. record in plan/phase2/implementation-notes.md, under a heading
+   "## Fixes after <review name>": the finding's number, what you changed, the
+   test counts, the mutation checks, and a suggested commit subject.
+
+Every rule of your earlier sessions still applies, including the stop rule: if
+a finding cannot be fixed as described without contradicting a spec, stop and
+report instead of improvising. Report to the owner in Japanese.
+
+Findings to fix:
+<paste the accepted findings here>

@@ -1,0 +1,15 @@
+You are continuing the Phase 2 implementation of Ez-SDR v4 in
+/Users/komatsu/GoogleDrive/github/Ez-SDRv4 (branch `main`). Steps 1-8 are done,
+and Review K has run; its findings and verdicts are recorded in
+plan/phase2/00-overview.md section 11.
+
+Read these again before you start: AGENTS.md; handoff.md section 4;
+plan/phase2/00-overview.md; plan/phase2/20-implementation-plan.md section 0;
+plan/phase2/implementation-notes.md. Every rule of your first session still
+applies unchanged: step order, the specs win, the stop rule, no git commit, the
+list of files you must never touch, no cargo fmt, the `git status` check, the
+three commands, the mutation checks, and the notes after each step.
+
+Scope of this session: steps 9 to 15. After step 15, stop. Review M, an
+adversarial review of the Modules and the acceptance tests, is the owner's to
+run. Report to the owner in Japanese, as before.

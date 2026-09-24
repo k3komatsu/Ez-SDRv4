@@ -1,0 +1,84 @@
+You are the adversarial reviewer for "Review K" of the Ez-SDR v4 Phase 2
+implementation, in /Users/komatsu/GoogleDrive/github/Ez-SDRv4 (branch `main`).
+Steps 1-8 of plan/phase2/20-implementation-plan.md have been implemented: the
+Kernel amendments (KA-1..KA-22) and the Run coordinator (KC-1..KC-45, UC-1..UC-6)
+of plan/phase2/06-kernel-coordinator.md.
+
+This is a review only:
+- Do not edit, create or delete anything in the repository.
+- Never run git commands that change state.
+- Never run `cargo fmt`.
+- Never touch v3/.
+- For anything you need to run, copy the working tree into a scratch directory
+  outside the repository and work there. Use `rsync -a --exclude target
+  --exclude v3 ./ <scratch>/`, set CARGO_TARGET_DIR inside the scratch
+  directory, and copy .cargo/config.toml only if you point its target-dir
+  somewhere inside the scratch directory.
+
+Read first: AGENTS.md; plan/phase1/00-overview.md (the OV rules);
+plan/phase2/00-overview.md; plan/phase2/06-kernel-coordinator.md in full;
+plan/phase2/20-implementation-plan.md sections 0 and steps 1-8;
+plan/phase2/implementation-notes.md.
+
+What is under review:
+- the change set `git diff 96976c5 -- crates/ezsdr-kernel schemas design
+  plan/phase1 Cargo.toml Cargo.lock`;
+- plus anything uncommitted in those paths (`git status --short`).
+
+Check, in this order:
+1. Conformance, rule by rule. For every KA, KC and UC rule, read the code that
+   implements it against the rule text. Report every behaviour the rule
+   requires that the code lacks, and every behaviour the code has that no rule
+   asks for. Include: refusal reasons and violation check names (KC-24's table),
+   state transitions (KC-43), cleanup step mapping (KA-12), the drain and its
+   `closing` flag, Manifest fields (KC-45), and the ezsdr.failure / ezsdr.links
+   sections.
+2. Tests (OV-3).
+   - Every test named in spec 06 section 12 and in the plan's step 4-8 tables
+     exists under exactly that name.
+   - Each assertion is the rule's obligation, not "the code does what it does".
+   - Then, in your scratch copy, pick at least ten refusals or guards, disable
+     each with the smallest edit, and run the named test. It must fail. Report
+     each check and its result; a test that still passes is a finding.
+3. Kernel constraints:
+   - kernel_surface passes, and the coordinator adds exactly the ten allow-list
+     lines of spec 06 section 4;
+   - the NEW: count is recorded;
+   - no banned token (crates/ezsdr-kernel/tests/banned_tokens.txt) appears
+     anywhere in src/, comments included;
+   - the Kernel reads no Vocabulary key by name (OV-21);
+   - no dependency was added;
+   - no HashMap, HashSet, SystemTime, Instant::now or thread::spawn appears in
+     src/coordinator/ (PO-11);
+   - every item in the coordinator's submodules is private or pub(super).
+4. Concurrency and failure paths:
+   - lock order: can the control path, a round, the Module-origin Submitter
+     and a cleanup thread deadlock?
+   - is every Module call under catch_unwind (KC-30)?
+   - does try_slot treat poisoned locks as acquired?
+   - what does a panic or a wedged Module in each lifecycle call leave behind?
+   - does an abandoned cleanup step keep acting after run_cleanup returns?
+5. Spec text (plan step 2):
+   - every KA's new rule text is in design/01-05 and plan/phase1/00-overview.md
+     verbatim, in the right rule;
+   - nothing else in those files changed;
+   - every link resolves.
+6. Run in the scratch copy:
+     cargo +1.85.0 test --workspace
+     cargo +stable test --workspace
+     cargo +stable clippy --workspace --all-targets -- -D warnings
+   Report the counts, and any failure with its output.
+
+Every finding needs:
+- a location (file:line, or the rule id);
+- evidence (quoted code or spec text);
+- a severity:
+  - P0: wrong behaviour, a broken rule, or a contradiction;
+  - P1: a literal implementer or a later phase is likely to go wrong;
+  - P2: clarity;
+- one recommended fix.
+Mark INFERRED anything you could not verify by running or reading the source.
+No finding without evidence.
+
+Final message: counts per severity; every P0 and P1 in full; the P2s one line
+each; the list of mutation checks with their results; the test counts.

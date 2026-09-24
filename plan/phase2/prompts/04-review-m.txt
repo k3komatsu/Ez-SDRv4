@@ -1,0 +1,97 @@
+You are the adversarial reviewer for "Review M" of the Ez-SDR v4 Phase 2
+implementation, in /Users/komatsu/GoogleDrive/github/Ez-SDRv4 (branch `main`).
+Steps 9-15 of plan/phase2/20-implementation-plan.md have been implemented:
+- the nine new crates: ezsdr-radio, ezsdr-sim, ezsdr-sink, ezsdr-hostmem,
+  ezsdr-sim-engine, ezsdr-mock-radio, ezsdr-link-host, ezsdr-sink-capture,
+  ezsdr-acceptance;
+- their Vocabulary schemas;
+- the Phase 2 acceptance tests.
+Review K has already covered the Kernel.
+
+This is a review only:
+- Do not edit, create or delete anything in the repository.
+- Never run git commands that change state.
+- Never run `cargo fmt`.
+- Never touch v3/.
+- For anything you need to run, copy the working tree into a scratch directory
+  outside the repository. Use `rsync -a --exclude target --exclude v3 ./
+  <scratch>/`, and set CARGO_TARGET_DIR inside it.
+
+Read first: AGENTS.md; plan/phase2/00-overview.md;
+plan/phase2/07-radio-model.md; 08-simulation.md; 09-mock-radio.md;
+10-host-data-path.md (all in full); plan/phase2/20-implementation-plan.md
+section 0 and steps 9-15; plan/phase2/implementation-notes.md; and the Review K
+verdicts in plan/phase2/00-overview.md section 11.
+
+What is under review:
+- every crate under crates/ except crates/ezsdr-kernel;
+- schemas/radio/, schemas/sim/, schemas/sink/ and schemas/SCHEMA_CHANGELOG.md;
+- the root Cargo.toml and Cargo.lock;
+- any change to crates/ezsdr-kernel made since Review K. It should contain only
+  Review K's fixes; report anything else.
+
+Check, in this order:
+1. Conformance, rule by rule. For every RM, SE, MR, HD and PO rule, read the
+   code against the rule text and report every divergence.
+   For MockRadio, recompute from the rules and compare with the code and the
+   tests:
+   - block publication instants and the next wakeup (MR-14);
+   - jittered lengths from SimRng (SE-6, MR-12);
+   - the overrun and sequence-error shapes, including a gap that is already
+     pending (MR-19, MR-21, MR-22);
+   - the orderly tail (MR-25);
+   - cold changes and the T0 rule (MR-18);
+   - burst refusals judged on the final start (MR-16, MR-17);
+   - the BurstTracker lifecycle (MR-15);
+   - the six Manifest sections (MR-27).
+   For the capture Sink, check:
+   - own captures and requests, and the <output>_<k> ids (HD-10);
+   - the DropCarry rule;
+   - HD-14's REQUEST_REJECTED event in place of Err.
+2. Tests (OV-3).
+   - Every test named in the test tables of specs 07-10 and in the plan's steps
+     10-15 exists under exactly that name.
+   - Each assertion is the rule's obligation.
+   - The acceptance tests are the carriers that plan/phase2/00-overview.md
+     section 8 names, with the horizons and numbers of plan step 15.
+   - Then, in your scratch copy, disable at least ten refusals or rules across
+     the crates, including MR-7, MR-16, MR-18's application-time check, MR-19,
+     RM-7, RM-19, SE-5 and HD-14. Run the named test each time and report
+     whether it failed.
+3. Architecture and governance:
+   - no Module crate depends on another Module crate (MA-3, PO-8; check with
+     `cargo metadata --format-version 1 --no-deps`);
+   - the only dependencies are those of 00-overview.md section 5;
+   - Cargo.lock gains no external package (PO-4);
+   - every crate has #![forbid(unsafe_code)] and #![warn(missing_docs)] (PO-2);
+   - no HashMap, HashSet, SystemTime, Instant::now, thread::spawn or rand::
+     appears in the new crates' src/ (PO-11);
+   - randomness comes only from SimRng;
+   - ezsdr-acceptance/src/experiments.rs names no Mock type or profile
+     (Vision §58 #10);
+   - the committed schemas match the Rust types (PO-7).
+4. Behaviour end to end:
+   - run v58_03 twice and confirm the determinism projection is equal;
+   - time v58_02;
+   - run the whole acceptance crate on both toolchains;
+   - look for any acceptance test that could pass while the behaviour it
+     carries is broken.
+5. Run in the scratch copy:
+     cargo +1.85.0 test --workspace
+     cargo +stable test --workspace
+     cargo +stable clippy --workspace --all-targets -- -D warnings
+   Report the counts, and any failure with its output.
+
+Every finding needs:
+- a location (file:line, or the rule id);
+- evidence (quoted code or spec text);
+- a severity:
+  - P0: wrong behaviour, a broken rule, or a contradiction;
+  - P1: likely to mislead a later phase, or a test that proves less than its
+    rule;
+  - P2: clarity;
+- one recommended fix.
+Mark INFERRED anything you could not verify. No finding without evidence.
+
+Final message: counts per severity; every P0 and P1 in full; the P2s one line
+each; the mutation checks with their results; the test counts.

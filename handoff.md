@@ -118,7 +118,7 @@ Phase 1 の Kernel には，最初の本物の Module が必ず踏む穴があ�
 
 ### 次にすること
 
-1. 実装者は [20-implementation-plan.md](plan/phase2/20-implementation-plan.md) の §0 を読んでから，手順 1（patch 適用）から順に進める．実装者は commit しない（手順ごとの commit 件名案は `plan/phase2/implementation-notes.md` に残す）．
+1. 実装担当とレビュー担当に渡すプロンプトは [plan/phase2/prompts/](plan/phase2/prompts)（使う順番は README）．実装者は [20-implementation-plan.md](plan/phase2/20-implementation-plan.md) の §0 を読んでから，手順 1（patch 適用）から順に進める．実装者は commit しない（手順ごとの commit 件名案は `plan/phase2/implementation-notes.md` に残す）．
 2. 手順 8 の後（Review K：Kernel の差分）と手順 15 の後（Review M：Module と受け入れテスト）で止まり，owner が敵対的レビューを 1 本ずつ回す．指摘は 00-overview.md §11 に verdict つきで記録する（OV-5）．
 3. Phase 2 の exit（Gate X）で spec 06–10 を `design/` へ移し，各 spec の「Vision issues found」を owner の承認のもとで Vision に反映する．
 

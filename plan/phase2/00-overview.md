@@ -25,6 +25,7 @@ plan/phase2/
   20-implementation-plan.md       the ordered steps for the implementer, with files, signatures, tests and commands
   patches/01-kernel-amendments.patch  the Kernel amendments of spec 06 §2, as a git patch against 96976c5 (plan step 1)
   reviews/planning-reviews.md     the three adversarial reviews of these documents before Gate P, and each finding's verdict
+  prompts/                        the prompts for the implementing agent (three sessions), for Reviews K and M, and for fixes
 ```
 
 ---

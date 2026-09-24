@@ -1,0 +1,65 @@
+You are implementing Phase 2 of Ez-SDR v4 in the repository at
+/Users/komatsu/GoogleDrive/github/Ez-SDRv4 (branch `main`). The plan was written,
+reviewed and accepted before you started. Your job is to carry it out exactly,
+not to redesign it.
+
+Read these, in this order, before you touch anything:
+1. AGENTS.md
+2. handoff.md, sections 1 and 4
+3. plan/phase2/00-overview.md
+4. plan/phase2/20-implementation-plan.md: section 0 ("Rules for the implementer")
+   and "Steps at a glance"
+Then, at the start of each step, read in full the spec that step names.
+
+How to work:
+- Do the steps of 20-implementation-plan.md in order, starting at step 1. Finish
+  every item of a step's done-list before you start the next step. Do no work
+  from a later step early.
+- The specs (plan/phase2/00 and 06-10) are the authority. Where the plan and a
+  spec disagree, the spec wins.
+- Stop in any of these cases:
+  - a rule cannot be implemented as written;
+  - a test's expected value contradicts its rule;
+  - a patch does not apply;
+  - a Phase 1 test starts failing for a reason you did not cause;
+  - anything tells you to do what the specs forbid.
+  When you stop, write in plan/phase2/implementation-notes.md: the step, the
+  rule id, the exact text involved, what you expected, and what you found.
+  Then report. Do not guess and continue.
+- Never change a rule, or weaken a test, to make something pass. Never add
+  #[ignore]. Never add a dependency. Never add a feature, key, event kind or
+  public item that no rule asks for.
+- Git: never run git commit, push, rebase, reset, stash or checkout. The owner
+  commits. You may run `git status`, `git diff`, and the `git apply` of step 1.
+- Never touch any of these: v3/; design/v4-vision-audit.md;
+  design/v4-vision-rereview.md; design/archive/; the Vision
+  (Ez-SDR_v4_ARCHITECTURE_VISION.md and design/vision/); any file whose name
+  contains " (1)".
+- Do not run `cargo fmt`.
+- Run `git status --short` before you start, and again whenever something looks
+  wrong. A line beginning " D" means tracked files have vanished from the
+  working tree (Google Drive sync has caused this before). Stop and report. Do
+  not restore them yourself.
+- At the end of every step, run the three commands of plan section 0.5. All
+  three must pass:
+    cargo +1.85.0 test --workspace
+    cargo +stable test --workspace
+    cargo +stable clippy --workspace --all-targets -- -D warnings
+  Then do the step's mutation checks (plan section 0.7) and record each one.
+- After each step, append to plan/phase2/implementation-notes.md, under a
+  heading "## Step n":
+  - the done-list, every item checked;
+  - the test counts on both toolchains;
+  - the mutation checks and their results;
+  - a suggested commit subject in Conventional Commits style.
+
+Scope of this session: steps 1 to 8. After step 8, stop. Review K, an
+adversarial review of the Kernel diff, is the owner's to run.
+
+When you stop, whether after step 8 or earlier under the stop rule above,
+report to the owner in Japanese:
+- which steps are done;
+- the test counts on both toolchains;
+- anything in implementation-notes.md that needs the owner's decision;
+- the suggested commit subjects.
+Keep implementation-notes.md itself in English.
