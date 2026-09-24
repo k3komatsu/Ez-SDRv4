@@ -1,4 +1,4 @@
-# Ez-SDR v4 — Handoff (2026-09-23)
+# Ez-SDR v4 — Handoff (2026-09-24)
 
 次のセッション（人間・AI どちらでも）が最初に読む現状メモ．設計の中身は書かない．どこに何があり，何が終わっていて，次に何をするかだけ．
 開発時の恒常的なルールは [AGENTS.md](AGENTS.md)．
@@ -8,7 +8,7 @@
 | | |
 |---|---|
 | remote | `git@github.com:k3komatsu/Ez-SDR.git` |
-| `main` | v4（この worktree）．commit 16 個．Phase 0 の設計文書3個のあと，Phase 1 の spec と `ezsdr-kernel` crate（`79334fc`）とレビュー適用が続く．`origin/main` と同期 |
+| `main` | v4（この worktree）．Phase 0 の設計文書に続き，Phase 1 の spec と `ezsdr-kernel` を実装・受理済み．Phase 1 は完了し，次は Phase 2 の計画．|
 | `master` | v3（D + C++ UHD bridge + Python client）．tip `4a474e9` = tag `v3.0.28`．**GitHub の default branch のまま** |
 | tags | 35 個（`v2.11`, `v3.0.0`–`v3.0.28`）．すべて v3 系 |
 | 履歴の関係 | **無関係（unrelated）**．graft も merge もしていない．v4 は clean-sheet なので今後も繋がない |
@@ -29,9 +29,9 @@
 
 - 単一の設計ソース = **Vision**：索引 [Ez-SDR_v4_ARCHITECTURE_VISION.md](Ez-SDR_v4_ARCHITECTURE_VISION.md) + [design/vision/](design/vision) の 11 part（§1–§68，番号は不変）．
 - [design/v4-vision-audit.md](design/v4-vision-audit.md)（Findings 1–34，判定 READY WITH REQUIRED CHANGES）→ 全項目を Vision に反映済み．
-- [design/v4-vision-rereview.md](design/v4-vision-rereview.md)（Findings R1–R22，判定 READY）→ 全項目反映済み．R13「規範部分の spec 化」だけは 11 ファイル分割で暫定対応し，**本対応は Phase 1 の作業**として繰り延べ．
+- [design/v4-vision-rereview.md](design/v4-vision-rereview.md)（Findings R1–R22，判定 READY）→ 全項目反映済み．R13「規範部分の spec 化」は当初11ファイル分割で暫定対応したが，Phase 1 Step 5（D109，2026-09-23）で規範部分を accepted specs へ移し，完了した．
 - 旧 CMA は退役．[design/archive/](design/archive) に保管（audit / rereview の `CMA §N` 引用のためだけに残す）．編集しない．
-- Vision の改訂履歴は索引ファイル末尾の表（7 pass，すべて 2026-09-21）．
+- Vision の改訂履歴は索引ファイル末尾の表（8 pass：7件は2026-09-21，最終の1件は2026-09-23）．
 
 ## 3. 実装の状態
 
@@ -41,16 +41,16 @@ Phase 1 の Kernel crate は **実装済み**（Step 4 完了）．
 |---|---|
 | workspace | ルートの `Cargo.toml`（`resolver = "3"`，edition 2024，`rust-version = "1.85"`）．`Cargo.lock` は commit 対象 |
 | crate | `crates/ezsdr-kernel` version `4.0.0-alpha.1`．`#![forbid(unsafe_code)]`，`#![warn(missing_docs)]` |
-| module | `id time contract stream hash module_api spec binding plan event policy run session manifest schema`（00-overview.md §5 のレイアウトどおり） |
+| module | `id time contract stream hash module_api spec binding plan event policy run session manifest schema`．`plan` は `coercion` `compile` `graph` `islands` `links` `matching` `prepare` `validation` の private submodule に分割済み |
 | 直接依存 | `serde` `serde_json` `schemars` `sha2` の4つだけ（exit criterion 6）．解決後のツリーは `Cargo.lock` で28 package（crate 自身を含む） |
-| test | 345 件．`spec_binding`(99) `stream_contract`(69) `run_session`(72) `time_model`(49) `module_api`(26) `hashing`(9) `kernel_surface`(15) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
-| toolchain | `1.85.0` / `stable (1.98.1)` の両方で 345 passed（2026-09-23，D108 適用後）．`cargo +stable clippy --all-targets --all-features -- -D warnings` も通過 |
+| test | 353 件．`spec_binding`(102) `stream_contract`(69) `run_session`(76) `time_model`(49) `module_api`(27) `hashing`(9) `kernel_surface`(15) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
+| toolchain | Rust `1.85.0` / stable (`1.98.1`) の両方で 353 passed（2026-09-24）．`cargo +stable clippy --workspace --all-targets -- -D warnings` も通過 |
 | schemas | `schemas/` に47個の JSON Schema 2020-12 + `SCHEMA_CHANGELOG.md`．`schema_freeze` が byte 単位で凍結．再生成は `EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze` |
 | kernel surface | `tests/kernel_surface_allow.txt` が公開 item の allow-list（= レビュー用チェックリスト，`module::name` で key 付け）．`NEW:` 件数が OV-23b の Kernel 成長指標．banned token は `tests/banned_tokens.txt`（識別子内も検出，`OV-23a` を書いた行だけ免除） |
 
 Python client，wire protocol，MockRadio，Simulation Engine は未着手（Phase 2 以降）．
 
-## 4. Phase 1 の状態 — spec 受理待ち（binding / role の規範を固め直し済み）
+## 4. Phase 1 完了 — specs 受理・Kernel 実装済み
 
 Vision §67 の Phase 1．**受理済み**（2026-09-23，Step 5 完了）．5つの spec は `design/0N-*.md` に移り，横断決定・OV 規則・決定ログは [plan/phase1/00-overview.md](plan/phase1/00-overview.md) に残る．
 
@@ -119,7 +119,7 @@ exit criteria（§13）の達成状況（2026-09-23 時点）：
 |---|---|---|
 | 1 | 6文書の受理と §11 の全 verdict | **達成**．verdict は D1–D109．6文書を受理し，spec を `design/` へ移した（D109） |
 | 2 | 全 rule に ID と OV-3 disposition | **277ルールに277行を用意し，GAP と未割当を解消**．内訳は default 207・process 22・producer 13・forward 11・withdrawn 7・consumer 1・分割 16（default+forward 12，default+producer 3，forward+producer 1）．`UNCERTAIN:` は D108 でゼロ **（達成）** |
-| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が端から端まで動く | **達成**（2026-09-23，1.85.0 / stable 1.98.1 ともに345 passed，`#[ignore]` なし）．end-to-end pipeline ケースも通過 |
+| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が端から端まで動く | **達成**（Step 5 受理時点の記録：2026-09-23，1.85.0 / stable 1.98.1 ともに345 passed，`#[ignore]` なし）．end-to-end pipeline ケースも通過 |
 | 4 | `schemas/`，`schema_freeze`，`SCHEMA_CHANGELOG.md` | **達成**．D51–D68・D95–D103・D104 の schema 変更を反映済み（`pattern` は無し） |
 | 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．`109 NEW / 281 public items`（2026-09-23，`plan::check_sink_links` を D99 で削除） |
 | 6 | 直接依存が §8 の4 crate ちょうど | **達成** |
@@ -129,13 +129,13 @@ exit criteria（§13）の達成状況（2026-09-23 時点）：
 verdict は confirm 91・amend 15・reverse 1・not-a-decision 5．not-a-decision の5件（OQ4,
 D1, D6, D11, D14）は encoding の帰結と fixture note で，裁定を要しない．
 
-**bin (i)–(iii) はすべて適用済み**（記録として残す）．second opinion は当時，適用可否を3つに分けていた：
+**bin (i)(ii) と (iii) の Vision 編集は適用済み**（記録として残す）．second opinion は当時，適用可否を3つに分けていた：
 
 | bin | 内容 | 状態 |
 |---|---|---|
 | (i) prose / コードのみ，rule text を変えない | D15・D24・S1・B4・OQ4 | **適用済み**（2026-09-22） |
 | (ii) rule text を変えるが freeze 前で自己完結 | OQ2・R10・D8・D16・D22・D23・D25・D26・D27・D32・D33，および D17 + D18 + D31 + D29 のクラスタ | **適用済み**（2026-09-22） |
-| (iii) 待ち | confirm が含意する Vision 編集（OV-6 のため §12 手続き），および Phase 2 の値を要する2件（resource port の producer 側 memory domain，port contract と format coercion の関係） | 未（§12 / Phase 2） |
+| (iii) Phase 2 の値待ち | confirm が含意する Vision 編集は D109 の §12 手続きで適用済み．残る2件は Phase 2 の値を要する（resource port の producer 側 memory domain，port contract と format coercion の関係） | Vision 編集は完了．2件は Phase 2 で判断 |
 
 **§11 の verdict は D1–D50 まで全件記録済み**（D34–D44 と X11，および D45–D50 は 2026-09-22 の Fable 5.1 second opinion を採用）．採用に伴い次を適用した：`Value` の cross-kind 等価・比較を正確化（D34），`to_root` が非整数 tick の schedule を拒否（D35），`BurstStep::Discontinuity.then_ended`（D36），schedule entry の `target` 検査と「Spec target は Spec 相対」の明文化（D37），OV-3 に4つ目の marker と exit criterion 2 を per-rule 表へ（D38/D39），`constraints_hit` 削除（D40，schema 変更），`coerce` は node あたり1回・map 全体で呼ぶ（D41），要求していない key の coercion は malformed report（D42），`SessionLog::append` が不正な Action を拒否（D43），**instance identity は binding description**（D44，ポインタ比較を廃止）．
 
@@ -170,9 +170,9 @@ v1 schema に消費者がついた状態で再現する．
 
 ---
 
-### Phase 1 に残っているもの（2026-09-23 時点）
+### Phase 1 Step 5 前の状態（2026-09-23，履歴）
 
-Step 4（crate 実装），D51–D68・D69–D80・D81–D84・D85–D87・D88–D91・D92–D94 の採用は完了．レビューループは owner の判断で一時停止し，binding と role の規則を先に書き下ろした（D95–D103，下記）．その適用への適合性レビューも済み，残っていた raised 4件も D104–D107 で適用した．次は exit criterion 2 の部分カバー注記を受理レビューで確認し，6つの Phase 1 文書を受理すること．
+以下は D109 の受理前の状態を残した履歴で，現在の残件ではない．この時点では exit criterion 2 の部分カバー注記の受理レビューと6文書の受理が残っていたが，後続の D109 で Vision の規範部分を spec に整理し，Step 5 と Phase 1 を完了した．
 
 #### D51–D68 — 採用・適用済み（2026-09-23）
 
@@ -312,7 +312,7 @@ owner が推奨を全件採用した．規則数は277のまま．理由と退�
 
 Phase 1 は完了．Phase 2（Radio Model + Simulation Engine + MockRadio，Vision §67）の計画に入る．最初に §11 D109 の raised 3件（envelope の検査，update class の意味，Mock の義務）と，forward / producer marker を持つ規則（exit-review の README）を Phase 2 の入力として拾う．
 
-作業ツリーは未コミット．このセッションでは commit / push していない．
+2026-09-24 時点で Phase 1 の実装・リファクタは commit 済み（`c849e6e`）．この handoff 更新もローカルで commit し，push は行わない．
 
 型を書くときの拘束文は Vision §5（tiers），§15（time），§23（Stream Contract），§13（TimingEnvelope / Mock 強制），§3（Session），§8（composite resource，BindingProfile）．audit §13「Recommended Minimal Core」が freeze 対象の一覧で，§14.1 の項目 1–15 は 00-overview.md §10 の traceability 表に対応付けてある．
 
@@ -335,7 +335,7 @@ v4 が使える状態になるまで着手不要．ただし順序に注意：**
 
 - MSRV は X12 どおり **1.85 のまま**．edition 2024 の let-chain は 1.88 以降なので，8箇所を nested `if let` に書き直した（§11 D13）．spec を動かすより code を直すほうが小さい．
 - `Constraint` / `CapabilityValue` / `OutputSource` は struct variant．OV-13 の internal tag は payload が map でない newtype variant を serde が扱えない（§11 D1）．
-- `kernel_surface` の allow-list は「Core remains small」のレビュー用チェックリストそのもの．2026-09-22 時点の gate は **`NEW:` 111件 / public item 286件**を報告した．D66 適用後の現在値は **110 / 282**（2026-09-23）．OV-23b の成長指標には gate の出力を使う．
+- `kernel_surface` の allow-list は「Core remains small」のレビュー用チェックリストそのもの．2026-09-22 時点の gate は **`NEW:` 111件 / public item 286件**を報告した．D66 適用後は **110 / 282**（2026-09-23）．D99 で `plan::check_sink_links` を削除した後は **109 NEW / 281 public items**となり，同日の exit review に記録した（§13）．2026-09-24 の planner split 後も gate でこの値を再確認した．OV-23b の成長指標には gate の出力を使う．
 - banned token の検査は OV-23 の文面どおり行単位で，`OV-23a` を明示した行だけ免除．UHD の証拠引用7箇所には marker を付け，`replay` / `taint` の散文4箇所は語を替えた（§11 D9）．
 - `EventCollector::new` で ring の mutex を1度 lock して捨てる．macOS では最初の lock が OS primitive を box するので，RS-32 の allocation 計測が1件だけ外れていた（§11 D11）．
 - **非有限 float は serialisation 時に拒否する**（`hash::serialize_finite_f64`）．`serde_json` は非有限を `null` に落としてから `Value` を作るので，canonicaliser には情報が届かない．Kernel が持つ float document field 4箇所すべてに付けた：`ClockRelation.drift` / `.drift_uncertainty` / `Scalar::Float` / `Value::Num`（§11 D1 の P0，3巡目の P0）．
