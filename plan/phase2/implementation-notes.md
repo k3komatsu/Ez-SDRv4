@@ -310,3 +310,17 @@ Step 16 is complete. Stop at Gate X for the owner's decision.
 - [x] Updated `AGENTS.md` §1–2, this overview, the exit-review links, `20-implementation-plan.md`, and `handoff.md` §2–4 to describe the accepted layout and remaining risks.
 - [x] Post-move validation: 303 local Markdown links and all 15 checked heading fragments resolve; the prescribed `v3/` citation-path check reports no missing files; `git diff --check` passes.
 - The final code verification remains the Gate X remediation result above: 547 workspace tests passed on Rust 1.85.0 and stable, stable Clippy passed, and no runtime code changed during Step X. No commit was made.
+
+## Post-acceptance dynamic review (2026-09-25)
+
+- Claude Opus 5.5 re-checked Phase 2 by running it rather than reading it. It ran the workspace on Rust 1.85.0 and stable with Clippy, rechecked exit criteria 2 and 5–8 mechanically, ran 36 mutations of Phase 2 refusals in a scratch copy, and ran 11 probe Runs against the real Modules. Every exit criterion held. The probes found the named Gate X risk, a Kernel-routed Session `Stop(sink/rec)`, working: the Stop returns a partial artifact and a later capture still succeeds.
+- Two reachable rules had no test that failed when they were disabled. Each now has one:
+  - MR-18: a cold receive change submitted before T0 applies at T0. Without the rule a receive SampleClock started before synchronisation. Carried by `mr_18_a_cold_receive_change_before_t0_applies_at_t0`.
+  - KC-24 step 4, with RM-3: once `radio.tx.channels` is 0 the ended transmit clock is not a running one, so the burst is refused at admission. Without the `ended_at` filter it was logged `Admitted` and refused only by the Mock. Carried by `kc_24_a_burst_after_the_transmit_clock_ends_is_refused_at_admission`. `kc_24_a_burst_needs_a_transmit_sample_clock` now asserts the exact SC-23 reason; its old `SC-23` prefix check also matched `SC-23b`.
+- Mutation: each of the two new tests failed with its rule disabled and passed after restoration.
+- Recorded as test ceilings in `exit-review/06.md` and `09.md`: four surviving refusals that Phase 2 cannot reach. They are MR-18's class-mismatch refusal, its antenna refusal, its cold `LATE_COMMAND` for a past `at`, and KC-24 step 2 (RS-18).
+- `handoff.md`'s stale "uncommitted" lines are corrected.
+- Follow-up, owner-directed:
+  - HD-11 now states that a `Stop` for the Sink discards every request that has not started, as HD-13 does. A discarded request produces no artifact and takes no `k`, and a later request is served. The current code already did this, and `hd_11_a_stop_discards_unstarted_requests_and_later_ones_are_served` now pins it: the test failed with the queue clearing disabled.
+  - The capture Sink's `last_end` and `Capture.end` are removed. Queue order already makes the previous capture's end a lower bound, so disabling them changed nothing any test could see.
+- Verification: `cargo +1.85.0 test --workspace` and `cargo +stable test --workspace` each gave 550 passed and 0 failed, and `cargo +stable clippy --workspace --all-targets -- -D warnings` passed.

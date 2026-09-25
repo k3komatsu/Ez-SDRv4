@@ -348,6 +348,25 @@ fn v58_16_runtime_retune_outside_the_rf_envelope_is_rejected() {
 }
 
 #[test]
+fn kc_24_a_burst_after_the_transmit_clock_ends_is_refused_at_admission() {
+    let temp = rig::TempDir::new("kc-24-ended-tx");
+    let profile = rig::session_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let mut run = session_run(&temp, &profile);
+    let clock = root(&run);
+    run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
+    for channels in [1, 0] {
+        let entry = run.submit(SessionAction::SetParameter { target: ResourceId::parse("radio").unwrap(), key: Key::parse("radio.tx.channels").unwrap(), value: Value::Int(channels) }, None).unwrap();
+        assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
+    }
+    let (bytes, _) = experiments::waveform(1_000);
+    let entry = run.submit(SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: ResourceId::parse("radio/tx").unwrap(), at: None, params: Default::default() }, Some(&bytes)).unwrap();
+    let Outcome::Rejected { violations } = entry.outcome else { panic!("a burst on an ended transmit clock was admitted") };
+    assert!(violations.iter().any(|violation| violation.reason.starts_with("SC-23: ") && violation.reason.ends_with("has no running transmit SampleClock")));
+    let manifest = end_session(run, clock, T0 + 5_000_000);
+    assert_eq!(section(&manifest, "ezsdr.radio.mock.rejected").as_array().unwrap().len(), 0);
+}
+
+#[test]
 fn v58_16_runtime_rate_beyond_the_envelope_is_rejected() {
     let temp = rig::TempDir::new("v58-16-rate");
     let profile = rig::session_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));

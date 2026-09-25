@@ -904,6 +904,23 @@ fn mr_18_a_cold_rate_change_starts_a_new_sample_clock() {
 }
 
 #[test]
+fn mr_18_a_cold_receive_change_before_t0_applies_at_t0() {
+    let mut harness = Harness::new("x310-like", &[], &[], &[], Some((BackPressure::DropOldest, 8)));
+    let t0 = 2_000_000_000;
+    harness.arm_start(t0).unwrap();
+    harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, None));
+    harness.step(0).unwrap();
+    harness.step(t0 + 999_500).unwrap();
+    let records = harness.clocks.sample_clock_records();
+    assert!(records.iter().all(|record| record.origin.ticks >= t0), "a receive clock starts before T0: {records:?}");
+    let applied = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.applied").unwrap()];
+    assert_eq!(applied[0]["at"]["ticks"], t0);
+    let first = harness.link.as_ref().unwrap().receive().unwrap();
+    assert_eq!(first.header().first_sample_time.domain, records.last().unwrap().domain);
+    assert_eq!(first.header().first_sample_time.ticks, 0);
+}
+
+#[test]
 fn mr_18_a_cold_transmit_change_replaces_the_tracker() {
     let mut harness = tx_harness("ideal");
     harness.arm_start(0).unwrap();

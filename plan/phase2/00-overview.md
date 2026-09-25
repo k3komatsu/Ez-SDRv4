@@ -411,6 +411,16 @@ Gate X same-session re-review findings (owner-directed remediation, 2026-09-25; 
 | P3-e [P3] Drop integration fixture wording could imply the eviction traverses Provider→Sink | X | **accepted** | Clarify that the test double seeds an eviction during Link creation and verifies cleanup-to-Manifest propagation |
 | P3-f [P3] KA-12 row omits the documented marker check/acquire race limit | X | **accepted** | State that the race has no deterministic test seam and link to the implementation note that records it |
 
+Post-acceptance dynamic review findings (owner direction to fix, 2026-09-25):
+
+| Finding | Gate | Verdict | Note |
+|---|---|---|---|
+| D1 [P2] MR-18's pre-T0 cold receive rule and KC-24's ended-clock filter are reachable but unpinned by any test | X | **accepted** | Add `mr_18_a_cold_receive_change_before_t0_applies_at_t0` and `kc_24_a_burst_after_the_transmit_clock_ends_is_refused_at_admission`; tighten the SC-23 reason assertion |
+| D2 [P2] Four unreachable refusals are untested without an exit-table ceiling | X | **accepted** | Record them as test ceilings on the MR-18 and KC-24 rows |
+| D3 [P2] `handoff.md` says the Gate X work is uncommitted | X | **accepted** | Corrected; `bf3b1bf` holds it |
+| D4 [P3] HD-11 does not say what a `Stop` does to requests that have not started | X | **accepted** | Discard them as HD-13 does (the existing behaviour); clarified in spec 10 and pinned by `hd_11_a_stop_discards_unstarted_requests_and_later_ones_are_served` |
+| D5 [P3] The capture Sink's `last_end` is redundant with queue order | X | **accepted** | Removed |
+
 Confirmed individually, before the rows above (owner, 2026-09-24):
 
 | Decision | Gate | Verdict | Note |

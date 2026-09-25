@@ -797,6 +797,28 @@ fn hd_11_stop_for_own_target_finishes_the_capture() {
 }
 
 #[test]
+fn hd_11_a_stop_discards_unstarted_requests_and_later_ones_are_served() {
+    let mut rig = Rig::new("stop-discards-queue", sample_count(8));
+    rig.push_ramp(0, 4);
+    rig.step().expect("start the own capture");
+    rig.env.actions.push(request(Value::Int(3), None));
+    rig.env.actions.push(Action::Stop {
+        target: Some(ResourceId::parse("sink/rec").expect("Sink target")),
+    });
+    rig.step().expect("the Stop finishes the own capture");
+    rig.env.actions.push(request(Value::Int(2), None));
+    rig.push_ramp(4, 6);
+    rig.step().expect("a request after the Stop is served");
+
+    let artifacts = rig.stop(StopMode::Orderly);
+    assert_eq!(artifacts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["rec", "rec_0"]);
+    assert!(artifacts[0].partial);
+    assert_ramp(&artifacts[0], 0, 4);
+    assert!(!artifacts[1].partial);
+    assert_ramp(&artifacts[1], 4, 2);
+}
+
+#[test]
 fn hd_10_unknown_contract_is_rejected() {
     let mut rig = Rig::new("unknown-contract", sample_count(4));
     let header = BlockHeader {

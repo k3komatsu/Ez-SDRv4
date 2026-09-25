@@ -1376,7 +1376,7 @@ fn kc_24_a_burst_needs_a_transmit_sample_clock() {
         )
         .expect("well-formed Action is logged");
     assert!(matches!(entry.outcome, Outcome::Rejected { ref violations }
-        if violations.iter().any(|v| v.reason.starts_with("SC-23"))));
+        if violations.iter().any(|v| v.reason.starts_with("SC-23: ") && v.reason.ends_with("has no running transmit SampleClock"))));
     let _ = run.finish();
 }
 

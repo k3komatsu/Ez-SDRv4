@@ -80,7 +80,6 @@ struct Capture {
     builders: Vec<ContinuityMap>,
     builder: Option<(ContinuityBuilder, ClockDomainId, u16)>,
     started: bool,
-    end: Option<TimePoint>,
 }
 
 impl Capture {
@@ -97,7 +96,6 @@ impl Capture {
             builders: Vec::new(),
             builder: None,
             started: false,
-            end: None,
         }
     }
 }
@@ -116,7 +114,6 @@ pub struct CaptureSink {
     queue: VecDeque<Capture>,
     done: Vec<ArtifactRef>,
     requests: u32,
-    last_end: Option<TimePoint>,
 }
 
 impl CaptureSink {
@@ -158,7 +155,6 @@ impl CaptureSink {
             queue: VecDeque::new(),
             done: Vec::new(),
             requests: 0,
-            last_end: None,
         })
     }
 
@@ -258,16 +254,12 @@ impl CaptureSink {
         let mut carry_pending = recording_before_block;
         let mut sample = 0_usize;
         while sample < header.len as usize {
-            let Some((at, last_end)) = self
-                .queue
-                .front()
-                .map(|capture| (capture.at, self.last_end))
-            else {
+            let Some(at) = self.queue.front().map(|capture| capture.at) else {
                 break;
             };
             let is_started = self.queue.front().is_some_and(|capture| capture.started);
             if !is_started {
-                let start = match sample_at_or_after(sample, &header, at, last_end, &clocks) {
+                let start = match sample_at_or_after(sample, &header, at, &clocks) {
                     Ok(start) => start,
                     Err(error) => {
                         self.queue.pop_front();
@@ -337,9 +329,6 @@ impl CaptureSink {
                 ModuleError::rejected(format!("HD-10: cannot write {}: {error}", path.display()))
             })?;
             capture.written = capture.written.saturating_add(take as u64);
-            capture.end = Some(overlap.end_time().map_err(|error| {
-                ModuleError::rejected(format!("HD-10: capture end time is invalid: {error}"))
-            })?);
             sample += take;
             if capture.written == capture.n {
                 self.finish_front(false)?;
@@ -432,9 +421,6 @@ impl CaptureSink {
             marks: Vec::new(),
             continuity: capture.builders,
         });
-        if let Some(end) = capture.end {
-            self.last_end = Some(end);
-        }
         Ok(())
     }
 }
@@ -502,7 +488,6 @@ impl Sink for CaptureSink {
         self.queue.clear();
         self.done.clear();
         self.requests = 0;
-        self.last_end = None;
         if let Some(n) = capture_samples {
             self.queue.push_back(Capture::new(Some(request.id), n, None));
         }
@@ -577,19 +562,16 @@ fn sample_at_or_after(
     from: usize,
     header: &BlockHeader,
     at: Option<AbsoluteDeadline>,
-    last_end: Option<TimePoint>,
     clocks: &ClockRegistry,
 ) -> Result<Option<usize>, TimeError> {
-    let mut lower_tick = None;
-    for bound in at.map(|deadline| deadline.time_point).into_iter().chain(last_end) {
-        let ticks = match clocks.convert(bound, header.first_sample_time.domain)? {
-            Converted::Exact { point } => point.ticks,
-            Converted::Inexact { floor, .. } => floor.ticks.checked_add(1).ok_or(TimeError::Overflow)?,
-        };
-        lower_tick = Some(lower_tick.map_or(ticks, |current: i64| current.max(ticks)));
-    }
-    let Some(lower_tick) = lower_tick else {
+    // HD-10: requests are served in queue order from the current sample, so the end
+    // of the capture before this one is already a lower bound; only `at` adds one.
+    let Some(at) = at else {
         return Ok(Some(from));
+    };
+    let lower_tick = match clocks.convert(at.time_point, header.first_sample_time.domain)? {
+        Converted::Exact { point } => point.ticks,
+        Converted::Inexact { floor, .. } => floor.ticks.checked_add(1).ok_or(TimeError::Overflow)?,
     };
     let relative = i128::from(lower_tick) - i128::from(header.first_sample_time.ticks);
     if relative >= i128::from(header.len) {
