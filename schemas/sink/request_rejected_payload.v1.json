@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Payload for a rejected capture request or unsupported Action (HD-14).",
+  "properties": {
+    "action": {
+      "description": "The Action's kind tag for a rejected Action (HD-14).",
+      "type": "string"
+    },
+    "reason": {
+      "description": "The reason the Sink could not carry out the request (HD-14).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "action",
+    "reason"
+  ],
+  "title": "RequestRejectedPayload",
+  "type": "object"
+}

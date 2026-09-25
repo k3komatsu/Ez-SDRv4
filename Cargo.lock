@@ -59,6 +59,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "ezsdr-acceptance"
+version = "0.0.0"
+dependencies = [
+ "ezsdr-hostmem",
+ "ezsdr-kernel",
+ "ezsdr-link-host",
+ "ezsdr-mock-radio",
+ "ezsdr-radio",
+ "ezsdr-sim",
+ "ezsdr-sim-engine",
+ "ezsdr-sink",
+ "ezsdr-sink-capture",
+ "serde_json",
+]
+
+[[package]]
+name = "ezsdr-hostmem"
+version = "1.0.0"
+dependencies = [
+ "ezsdr-kernel",
+]
+
+[[package]]
 name = "ezsdr-kernel"
 version = "4.0.0-alpha.1"
 dependencies = [
@@ -68,6 +91,74 @@ dependencies = [
  "serde_json",
  "sha2",
  "syn",
+]
+
+[[package]]
+name = "ezsdr-link-host"
+version = "1.0.0"
+dependencies = [
+ "ezsdr-kernel",
+]
+
+[[package]]
+name = "ezsdr-mock-radio"
+version = "1.0.0"
+dependencies = [
+ "ezsdr-hostmem",
+ "ezsdr-kernel",
+ "ezsdr-radio",
+ "ezsdr-sim",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ezsdr-radio"
+version = "1.0.0"
+dependencies = [
+ "ezsdr-kernel",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ezsdr-sim"
+version = "1.0.0"
+dependencies = [
+ "ezsdr-kernel",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ezsdr-sim-engine"
+version = "1.0.0"
+dependencies = [
+ "ezsdr-kernel",
+ "ezsdr-sim",
+ "serde_json",
+]
+
+[[package]]
+name = "ezsdr-sink"
+version = "1.0.0"
+dependencies = [
+ "ezsdr-kernel",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ezsdr-sink-capture"
+version = "1.0.0"
+dependencies = [
+ "ezsdr-hostmem",
+ "ezsdr-kernel",
+ "ezsdr-sink",
+ "serde_json",
 ]
 
 [[package]]

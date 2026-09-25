@@ -1,0 +1,28 @@
+{
+  "$defs": {
+    "Key": {
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Timed-command queue exhaustion data (RM-22).",
+  "properties": {
+    "depth": {
+      "description": "Queue depth at refusal (RM-22).",
+      "format": "int64",
+      "type": "integer"
+    },
+    "key": {
+      "$ref": "#/$defs/Key",
+      "description": "The key of the timed command (RM-22)."
+    }
+  },
+  "required": [
+    "key",
+    "depth"
+  ],
+  "title": "CommandQueueFullPayload",
+  "type": "object"
+}

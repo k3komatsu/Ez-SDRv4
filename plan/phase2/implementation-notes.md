@@ -153,3 +153,116 @@
 - **Accepted residuals:** the `now()` panic fixture still targets call 6; the marker check/acquire race has no deterministic test seam; other previously identified test gaps remain nonblocking. The review also confirmed the per-instance marker recheck is needed to prevent stepping a cleaned-up instance.
 - **Verification after follow-up:** `kc_44_a_wedged_provider_stop_does_not_block_other_cleanup` passed with the drain wakeup; coordinator suite: 80 passed; `cargo +stable test --workspace` and `cargo +1.85.0 test --workspace` passed; `cargo +stable clippy --workspace --all-targets -- -D warnings` passed.
 - **Formatting note:** `cargo +stable fmt --all` was inadvertently run during the B3 work, contrary to the implementation-plan instruction. Files that were clean before the command were restored; the cited forwarding methods and regression assertion were manually returned to the compact style. Some already-modified files may still contain formatter-only changes. No formatter was run again.
+
+## Step 9
+
+- [x] Recorded `baseline_external_packages.txt` before updating `Cargo.lock`; it contains 27 external packages and does not name `ezsdr-kernel`.
+- [x] Added all nine Phase 2 crates as workspace members with their specified package metadata, allowed dependencies, dev-dependencies, crate documentation and safety lints. The acceptance crate is `publish = false` and contains the PO-4 baseline.
+- [x] `cargo +stable build --workspace` succeeded. `Cargo.lock` adds exactly nine local workspace packages and their dependency lists; the 27 external packages are unchanged, and none of the new entries has a `source`.
+- [x] `cargo +1.85.0 test --workspace`: 442 passed, 0 failed.
+- [x] `cargo +stable test --workspace`: 442 passed, 0 failed.
+- [x] `cargo +stable clippy --workspace --all-targets -- -D warnings`: passed.
+- Mutation checks: none required by this step.
+- Suggested commit subject: `build(workspace): add Phase 2 crate skeletons`
+
+## Step 10
+
+- [x] Implemented `ezsdr-sim`: the `sim` Vocabulary, `sim.seed` and `sim.faults` readers/checks, SplitMix64 `SimRng`, virtual-time constants, and SE-12 schema generation.
+- [x] Implemented `ezsdr-sim-engine`: the descriptor, free-running root and Authority, time conversion and scheduling, callback ordering/cap, and wakeups.
+- [x] Added the six Vocabulary tests and seven Engine tests from spec 08 §5; both crate suites pass.
+- [x] Generated `schemas/sim/fault_entry.v1.json` and `schemas/sim/seed.v1.json`; added the SE-12 line to `schemas/SCHEMA_CHANGELOG.md`. Kernel `schema_freeze`: 4 passed.
+- Mutation: SE-5 unknown fault target / `se_05_checks`: failed with the target refusal disabled; passed after restoration.
+- Mutation: SE-10 `InPast` / `se_10_time_authority_contract`: failed with the past-time refusal disabled; passed after restoration.
+- Mutation: SE-11 callback cap / `se_11_next_wakeup_order_ties_and_cap`: with `CALLBACK_CAP = usize::MAX`, the test timed out after 60 seconds as expected; passed after restoring the cap to 1000. The system `timeout` command was unavailable, so the same bound was enforced with Python's standard-library subprocess timeout and process-group cleanup.
+- [x] `cargo +1.85.0 test --workspace`: 455 passed, 0 failed.
+- [x] `cargo +stable test --workspace`: 455 passed, 0 failed.
+- [x] `cargo +stable clippy --workspace --all-targets -- -D warnings`: passed.
+- Suggested commit subject: `feat(sim): add Simulation Vocabulary and Engine`
+
+## Step 11
+
+- [x] Implemented the `radio` Vocabulary descriptor and ordered registration for all 29 RM-4 keys, nine RM-10 event kinds, RM-12 verbs and `RfEnvelopeCheck`.
+- [x] Added the RM-19 RF safety check for merged effective/proposed configurations, including bands, gain, channel enables, both antenna directions and malformed profile sections.
+- [x] Added the RM-20 envelopes, RM-22 payload types and ten spec 07 §6 integration tests.
+- [x] Generated all seven `schemas/radio/*.v1.json` files and added the RM-20/RM-22 changelog entry.
+- Mutation: RM-19 frequency band / `rm_19_rf_envelope_cases`: failed with the band guard disabled; passed after restoration.
+- Mutation: RM-19 maximum gain / `rm_19_rf_envelope_cases`: failed with the gain guard disabled; passed after restoration.
+- Mutation: RM-19 disabled TX channel / `rm_19_rf_envelope_cases`: failed with channel-enable validation disabled; passed after restoration.
+- Mutation: RM-19 TX antenna / `rm_19_rf_envelope_cases`: failed with the TX antenna guard disabled; passed after restoration.
+- Mutation: RM-19 RX antenna / `rm_19_rf_envelope_cases`: failed with the RX antenna guard disabled; passed after restoration.
+- Mutation: RM-19 malformed section / `rm_19_a_malformed_section_is_one_violation`: failed with parse refusal disabled; passed after restoration.
+- [x] `cargo +1.85.0 test --workspace`: 465 passed, 0 failed.
+- [x] `cargo +stable test --workspace`: 465 passed, 0 failed.
+- [x] `cargo +stable clippy --workspace --all-targets -- -D warnings`: passed.
+- [x] `git diff --check`: passed.
+- Suggested commit subject: `feat(radio): add Radio Model Vocabulary`
+
+## Step 12
+
+- [x] Implemented `ezsdr-hostmem`: host memory identity, reusable Arc-backed slots, planar `cf32` helpers and panic-free interleaving for invalid ranges or absent host bytes.
+- [x] Implemented `ezsdr-link-host`: Module and Link descriptors, zero-capacity refusal, all three back-pressure policies, persistent drop counts and cleared-on-read `DropCarry`.
+- [x] Implemented the `sink` Vocabulary, its `capture` action compilation and HD-14 rejected-request payload schema.
+- [x] Added the two host memory tests, two Link tests and two Sink Vocabulary/schema tests from spec 10 §7.
+- [x] Generated `schemas/sink/request_rejected_payload.v1.json` and added the HD-14 changelog entry.
+- Mutation: HD-4 capacity-zero refusal / `hd_04_descriptor_and_create`: failed when the guard was disabled; passed after restoration.
+- Mutation: HD-5 Block policy / `hd_05_policies`: failed when a full queue recorded a drop under `Block`; passed after restoration.
+- [x] `cargo +1.85.0 test --workspace`: 471 passed, 0 failed.
+- [x] `cargo +stable test --workspace`: 471 passed, 0 failed.
+- [x] `cargo +stable clippy --workspace --all-targets -- -D warnings`: passed.
+- [x] `git diff --check`: passed.
+- Suggested commit subject: `feat(data-path): add host memory link and sink vocabulary`
+
+## Step 13
+
+- [x] Implemented `ezsdr-sink-capture`: binding and descriptor validation, ordered own/request captures, sample-boundary time conversion, interleaved host-memory output, artifact hashes, continuity maps across gaps and SampleClock changes, DropCarry attribution, rejected-request events and partial stop artifacts.
+- [x] Added all eleven spec 10 §7 capture-table tests plus `hd_10_unknown_contract_is_rejected`; all twelve pass. Test temp directories are removed after each test.
+- Mutation: HD-9 exactly-one-link refusal / `hd_09_prepare_cases`: failed with the guard disabled; passed after restoration.
+- Mutation: HD-14 unexpected Action event / `hd_11_an_unexpected_action_is_rejected`: failed with the event suppressed; passed after restoration.
+- Mutation: HD-10 unknown-contract refusal / `hd_10_unknown_contract_is_rejected`: failed with unknown contracts accepted; passed after restoration.
+- Mutation: HD-14 `N < 1` event / `hd_14_a_bad_capture_value_is_an_event_not_a_failure`: failed when zero was admitted; passed after restoration.
+- Mutation: SC-30b carry pass / `hd_10_the_carry_attributes_a_dropped_overflow`: failed when the carry was discarded; passed after restoration.
+- [x] `cargo +1.85.0 test --workspace`: 483 passed, 0 failed.
+- [x] `cargo +stable test --workspace`: 483 passed, 0 failed.
+- [x] `cargo +stable clippy --workspace --all-targets -- -D warnings`: passed.
+- [x] `git diff --check`: passed.
+- Suggested commit subject: `feat(data-path): add capture Sink Module`
+
+## Step 14
+
+- [x] Completed `ezsdr-mock-radio`: X310-like and ideal profiles, capability tree, coercion and PerformanceEnvelope enforcement, integer clock conversion, RX/TX streams, timed and cold updates, fault handling, burst tracking, stop behavior and the public `DeviceModel`.
+- [x] Extended `mr_06_coerce_cases` to assert that 7 GHz is rejected rather than clamped. Extended `mr_07_prepare_cases` to cover second-prepare refusal and rejection of every execution class other than Simulation; added the missing MR-7 execution-class check. Strengthened `mr_16_burst_refusals` to identify the metadata refusal and `mr_17_late_policy_outcomes` to assert that dropped bursts are recorded as rejected.
+- [x] All 30 `mock_radio.rs` integration tests pass; the test set matches spec 09 §6. `cargo tree -p ezsdr-mock-radio --edges normal,dev` shows only the allowed local dependencies (`ezsdr-kernel`, `ezsdr-radio`, `ezsdr-sim`, `ezsdr-hostmem`) plus serde packages.
+- Mutation: MR-18 application-time validation / `mr_18_a_scheduled_pair_is_checked_when_it_applies`: moving the envelope check to receipt made the test fail; passed after restoration.
+- Mutation: MR-2 unknown selector / `mr_02_from_binding_refusals`: allowing `unknown` made the test fail; passed after restoration.
+- Mutation: MR-6 out-of-range 7 GHz / `mr_06_coerce_cases`: widening the profile limit made the test fail; passed after restoration.
+- Mutation: RM-7 PerformanceEnvelope / `mr_06_coerce_cases`: disabling the envelope check made the test fail; passed after restoration.
+- Mutation: MR-7 second prepare / `mr_07_prepare_cases`: disabling the guard made the test fail; passed after restoration.
+- Mutation: MR-7 execution class / `mr_07_prepare_cases`: disabling the Simulation-class check made the test fail; passed after restoration.
+- Mutation: MR-11 early start / `mr_11_start_cases`: disabling the early-start refusal made the test fail; passed after restoration.
+- Mutation: MR-16 metadata / `mr_16_burst_refusals`: accepting non-empty metadata made the test fail; passed after restoration.
+- Mutation: MR-17 Drop / `mr_17_late_policy_outcomes`: transmitting a dropped burst made the test fail; passed after restoration.
+- Mutation: MR-18 queue full / `mr_18_hardware_timed_updates`: disabling the queue-depth refusal made the test fail; passed after restoration.
+- Mutation: MR-21 lost count / `mr_21_overrun_shape`: setting the lost count to `None` made the test fail; passed after restoration.
+- Mutation: MR-24 duplicate start / `mr_24_a_bypassing_provider_gets_time_error`: accepting a second `START_OF_BURST` made the test fail; passed after restoration.
+
+## Step 15
+
+- [x] Added the four `v61_*` tests for continuous repeat, capture at a requested sample index, timed TX/RX start and PPS dependency ordering with aligned stream origins.
+- [x] Added all four governance carriers: PO-2 crate lints, PO-4 external lockfile baseline, MA-3 Module dependency metadata and PO-11 nondeterminism source scan. The four governance tests and all 19 `v58_*` tests pass.
+- Mutation: `v58_10_experiments_name_no_mock_type`: adding a `mock` comment to `experiments.rs` made the test fail; passed after restoration.
+- Mutation: `ma_03_no_module_crate_depends_on_another`: adding `ezsdr-link-host` as a MockRadio dev-dependency made the test fail; passed after restoration.
+- [x] Required verification after Steps 14–15: `cargo +1.85.0 test --workspace` — 541 passed, 0 failed; `cargo +stable test --workspace` — 541 passed, 0 failed; `cargo +stable clippy --workspace --all-targets -- -D warnings` — passed; `git diff --check` — passed.
+- [x] Step 15 completed; Review M and its follow-up fixes are recorded below.
+
+## Review M — owner-directed Opus review and fixes
+
+- Claude Opus 5.5 reviewed the Phase 2 Modules and acceptance tests in one persistent Review M session. The initial review found 3 P0, 6 P1 and 16 P2; successive same-session re-reviews reduced the open findings to P2-a/b, then P2-c/d. The latest Opus verdict was `PASS_WITH_RISK`, with 0 P0, 0 P1 and 2 P2. The reviewer was static-only and ran no commands.
+- Closed R1 (Capture Sink Stop target), N7 (RX fault after RX stop), N8 (restore the accepted determinism projection text), the PO-8 dev-dependency check and the MR-27 pre-start timestamp semantics. The review found no regressions in those fixes.
+- P2-a: clamp an RX overflow restart sample to the exclusive stream end. The tail regression checks that a 1.5 ms overflow during a 1 ms orderly stop tail reports 500 lost samples, publishes 1,500 samples, and emits the same 500 in the event payload.
+- P2-b: convert `FaultEntry.at_ns` with `ns_to_v` at prepare and add T0 only on successful start. The pre-start regression uses a 2 GHz root and checks that 5 ms is recorded as 10,000,000 root ticks.
+- P2-c: `schedule_wakeup` excludes fault offsets before start. The MR-14 regression steps a prepared Provider before start and checks `next_due()` stays empty.
+- P2-d: calculate absolute fault ticks locally, then commit them after RX SampleClock registration succeeds. A scheduling failure also restores the pre-start tick offsets and start state. The MR-20 regression forces RX registration to fail after arming and checks the pending fault is still recorded as the 10,000,000-tick T0-relative offset.
+- No further Opus re-review was run after P2-c/d: all three skill axes were low. These are local MockRadio lifecycle changes outside the Kernel's normal pre-start step path; each has a focused regression, and mutation checks below show each assertion detects its corresponding defect.
+- Scratch checks in `/private/tmp/ezsdr-phase2-review-m-20260925`: `cargo +1.85.0 test --workspace` — 546 passed; `cargo +stable test --workspace` — 546 passed; `cargo +stable clippy --workspace --all-targets -- -D warnings` — passed; `git diff --check` — passed. `v58_03_same_seed_same_manifest_projection` passed twice; `v58_02_ten_virtual_seconds_run_faster_than_wall_clock` passed in 0.06 s test time (0.83 s Cargo wall time).
+- Mutation checks, each restored afterward: removing the P2-a clamp failed at `lost` 50,000 vs 500; bypassing P2-b's `ns_to_v` failed at 5,000,000 vs 10,000,000; removing P2-c's `started` gate scheduled a spurious wakeup at 5,000,000; committing P2-d's rebased tick before RX registration failed at 5,010,000,000 vs 10,000,000.
+- Remaining nonblocking test gap from the static review: there is no acceptance-level Session test that routes `Stop(sink/rec)` through the Kernel; the Sink crate's own-target test covers the guard in isolation. No implementation files have been committed for Steps 9–15.

@@ -1,0 +1,14 @@
+[package]
+name = "ezsdr-hostmem"
+version = "1.0.0"
+description = "Ez-SDR v4 host memory domain and buffer pool (plan/phase2/10-host-data-path.md)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ezsdr-kernel = { path = "../ezsdr-kernel" }
+
+[dev-dependencies]
+ezsdr-kernel = { path = "../ezsdr-kernel", features = ["testing"] }

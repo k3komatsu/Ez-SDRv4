@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Data for an admitted Action the Provider could not perform (RM-22).",
+  "properties": {
+    "action": {
+      "description": "The Action's kind tag (RM-22).",
+      "type": "string"
+    },
+    "reason": {
+      "description": "Why the Provider refused the Action (RM-22).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "action",
+    "reason"
+  ],
+  "title": "CommandRejectedPayload",
+  "type": "object"
+}

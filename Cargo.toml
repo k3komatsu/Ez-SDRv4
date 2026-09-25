@@ -1,6 +1,17 @@
 [workspace]
 resolver = "3"
-members = ["crates/ezsdr-kernel"]
+members = [
+    "crates/ezsdr-kernel",
+    "crates/ezsdr-radio",
+    "crates/ezsdr-sim",
+    "crates/ezsdr-sink",
+    "crates/ezsdr-hostmem",
+    "crates/ezsdr-sim-engine",
+    "crates/ezsdr-mock-radio",
+    "crates/ezsdr-link-host",
+    "crates/ezsdr-sink-capture",
+    "crates/ezsdr-acceptance",
+]
 
 [workspace.package]
 edition = "2024"

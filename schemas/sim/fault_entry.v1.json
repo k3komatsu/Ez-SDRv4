@@ -1,0 +1,54 @@
+{
+  "$defs": {
+    "FaultKind": {
+      "description": "The kind of deterministic fault a Provider applies (SE-3).",
+      "oneOf": [
+        {
+          "const": "rx_overflow",
+          "description": "Report an RX overrun (SE-3).",
+          "type": "string"
+        },
+        {
+          "const": "rx_sequence_error",
+          "description": "Report a receive sequence error (SE-3).",
+          "type": "string"
+        },
+        {
+          "const": "device_lost",
+          "description": "Lose the device (SE-3).",
+          "type": "string"
+        }
+      ]
+    },
+    "Ident": {
+      "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One fault scheduled relative to the Run's start instant (SE-3).",
+  "properties": {
+    "at_ns": {
+      "description": "Nanoseconds after T0, in the inclusive range `0..=2^62` (SE-3).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "fault": {
+      "$ref": "#/$defs/FaultKind",
+      "description": "The fault to apply (SE-3)."
+    },
+    "target": {
+      "$ref": "#/$defs/Ident",
+      "description": "The Run fragment that owns the fault (SE-3)."
+    }
+  },
+  "required": [
+    "at_ns",
+    "fault",
+    "target"
+  ],
+  "title": "FaultEntry",
+  "type": "object"
+}

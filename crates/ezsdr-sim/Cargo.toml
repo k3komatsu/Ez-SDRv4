@@ -1,0 +1,17 @@
+[package]
+name = "ezsdr-sim"
+version = "1.0.0"
+description = "Ez-SDR v4 Simulation Vocabulary sim 1.0.0 (plan/phase2/08-simulation.md)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ezsdr-kernel = { path = "../ezsdr-kernel" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+schemars = "1.2.2"
+
+[dev-dependencies]
+ezsdr-kernel = { path = "../ezsdr-kernel", features = ["testing"] }

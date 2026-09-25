@@ -1,0 +1,17 @@
+[package]
+name = "ezsdr-sink-capture"
+version = "1.0.0"
+description = "Ez-SDR v4 Module ezsdr.sink.capture 1.0.0 (plan/phase2/10-host-data-path.md)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ezsdr-kernel = { path = "../ezsdr-kernel" }
+ezsdr-sink = { path = "../ezsdr-sink" }
+ezsdr-hostmem = { path = "../ezsdr-hostmem" }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+ezsdr-kernel = { path = "../ezsdr-kernel", features = ["testing"] }

@@ -317,6 +317,15 @@ Review K re-review findings (owner, 2026-09-25):
 | R4 [P2] Strengthen the KA-12 and Module-origin Action regressions | K | **accepted** | Replace negative polling with condition-variable observations; check StopRx ordering and count; compare Provider coercion count at the instant before Module submission and assert Provider receipt |
 | B3 [P0] A wedged cleanup Module must not block later steps for other instances | K | **accepted** | Hold `done` only while claiming markers and acquiring one instance slot; release it before Module calls so other instances can stop, clean up, and reach the Manifest |
 
+Review M follow-up (owner-directed, 2026-09-25):
+
+| Finding / decision | Gate | Verdict | Note |
+|---|---|---|---|
+| Pre-start pending fault timestamp (MR-27) | M | **accepted** | If stop or cleanup records a fault before `start` succeeds, preserve `at_ns` converted to a T0-relative root-tick offset using the registered root rate; after start succeeds, record the absolute fault instant |
+| RX overflow during an orderly RX-stop tail (MR-21) | M | **accepted** | Clamp the restart sample to the stream's exclusive end; event and fault records count only samples remaining in the tail |
+| Pre-start fault wakeup (MR-14/MR-20) | M | **accepted** | Treat prepared fault ticks as offsets; include them in the absolute wakeup set only after `start` succeeds |
+| Failed start after preparing fault instants (MR-11/MR-27) | M | **accepted** | Compute rebased ticks locally and commit only after RX clock registration; restore offsets and start state if wakeup scheduling fails |
+
 Confirmed individually, before the rows above (owner, 2026-09-24):
 
 | Decision | Gate | Verdict | Note |

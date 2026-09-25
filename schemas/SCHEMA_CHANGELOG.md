@@ -25,6 +25,10 @@ Still version 1: v4.0 has not frozen. Additive.
 - `action`, `action_template`, `component_descriptor`, `experiment_spec` and
   `vocabulary_descriptor`: the descriptions of the four `UpdateClass` variants say what
   each class means (KA-10, UC-3…UC-6). No field, type or constraint changed.
+- New `sim/fault_entry` and `sim/seed` (Phase 2, SE-12).
+- New `radio/rf_envelope`, `radio/envelope` and the five `radio/*_payload` schemas (Phase 2, RM-20, RM-22).
+- New `sink/request_rejected_payload` (Phase 2, HD-14); `action` is the rejected
+  Action's kind tag, including `update_parameter` for malformed capture requests.
 
 ## v1 — 2026-09-23 — descriptions only, Phase 1 Step 5
 

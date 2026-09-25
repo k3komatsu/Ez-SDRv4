@@ -1,0 +1,46 @@
+{
+  "$defs": {
+    "RxOverflowCause": {
+      "description": "Whether sample loss came from an overrun or a sequence error (RM-22).",
+      "oneOf": [
+        {
+          "const": "overrun",
+          "description": "A receive overrun (RM-22).",
+          "type": "string"
+        },
+        {
+          "const": "sequence",
+          "description": "A receive sequence error (RM-22).",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Receive-loss event data (RM-22).",
+  "properties": {
+    "cause": {
+      "$ref": "#/$defs/RxOverflowCause",
+      "description": "The kind of receive loss (RM-22)."
+    },
+    "lost": {
+      "description": "Number of lost samples (RM-22).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "restart_gap_ns": {
+      "description": "Restart gap in nanoseconds, or zero for a sequence error (RM-22).",
+      "format": "int64",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "cause",
+    "lost",
+    "restart_gap_ns"
+  ],
+  "title": "RxOverflowPayload",
+  "type": "object"
+}

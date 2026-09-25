@@ -1,0 +1,19 @@
+[package]
+name = "ezsdr-mock-radio"
+version = "1.0.0"
+description = "Ez-SDR v4 Module ezsdr.radio.mock 1.0.0 (plan/phase2/09-mock-radio.md)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ezsdr-kernel = { path = "../ezsdr-kernel" }
+ezsdr-radio = { path = "../ezsdr-radio" }
+ezsdr-sim = { path = "../ezsdr-sim" }
+ezsdr-hostmem = { path = "../ezsdr-hostmem" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+ezsdr-kernel = { path = "../ezsdr-kernel", features = ["testing"] }

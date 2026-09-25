@@ -1,0 +1,90 @@
+{
+  "$defs": {
+    "Band": {
+      "additionalProperties": false,
+      "description": "One inclusive RF band in hertz (RM-19).",
+      "properties": {
+        "hi_hz": {
+          "description": "Highest allowed frequency (RM-19).",
+          "format": "double",
+          "type": "number"
+        },
+        "lo_hz": {
+          "description": "Lowest allowed frequency (RM-19).",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "lo_hz",
+        "hi_hz"
+      ],
+      "type": "object"
+    },
+    "TxEnabled": {
+      "anyOf": [
+        {
+          "description": "One setting for every transmit channel (RM-19).",
+          "type": "boolean"
+        },
+        {
+          "description": "One setting per channel (RM-19).",
+          "items": {
+            "type": "boolean"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "Global or per-channel transmit enable state (RM-19)."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "RF transmit constraints supplied by a BindingProfile (RM-19).",
+  "properties": {
+    "allowed_bands": {
+      "description": "Inclusive RF bands available at the site (RM-19).",
+      "items": {
+        "$ref": "#/$defs/Band"
+      },
+      "type": "array"
+    },
+    "antenna_ports": {
+      "default": null,
+      "description": "Optional allowed antenna names for receive and transmit (RM-19).",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "max_gain_db": {
+      "default": null,
+      "description": "Optional maximum transmit gain in decibels (RM-19).",
+      "format": "double",
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "tx_enabled": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TxEnabled"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Whether all channels or each channel may transmit (RM-19)."
+    }
+  },
+  "required": [
+    "allowed_bands"
+  ],
+  "title": "RfEnvelope",
+  "type": "object"
+}

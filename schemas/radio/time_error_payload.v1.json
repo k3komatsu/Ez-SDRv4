@@ -1,0 +1,121 @@
+{
+  "$defs": {
+    "ClockDomainId": {
+      "additionalProperties": false,
+      "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "TimeErrorCause": {
+      "description": "Why a radio burst reported a time error (RM-22).",
+      "oneOf": [
+        {
+          "const": "late",
+          "description": "The target did not meet the required lead (RM-22).",
+          "type": "string"
+        },
+        {
+          "const": "unclosed_burst",
+          "description": "A new timed block followed an unclosed burst (RM-22).",
+          "type": "string"
+        }
+      ]
+    },
+    "TimeErrorOutcome": {
+      "description": "What the Provider did about a late burst (RM-22).",
+      "oneOf": [
+        {
+          "const": "send_asap",
+          "description": "Transmit as soon as possible (RM-22).",
+          "type": "string"
+        },
+        {
+          "const": "drop",
+          "description": "Drop the burst (RM-22).",
+          "type": "string"
+        },
+        {
+          "const": "plan_violation",
+          "description": "Reject a plan-time violation at runtime (RM-22).",
+          "type": "string"
+        },
+        {
+          "const": "refused",
+          "description": "Refuse the burst (RM-22).",
+          "type": "string"
+        }
+      ]
+    },
+    "TimePoint": {
+      "additionalProperties": false,
+      "description": "An instant: integer ticks in a named clock domain. Never floating-point seconds.\n\nThere is deliberately no `PartialOrd`: two points of different domains cannot be\ncompared at all, and `a < b` silently answering `false` is the bug class this\nmodel exists to prevent (decision T3).\n\nRule: TM-1, TM-6.",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The domain whose ticks `ticks` counts (TM-1)."
+        },
+        "ticks": {
+          "description": "Tick count relative to the domain's origin; a sample index in a SampleClock (TM-10).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "domain",
+        "ticks"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Timed burst error data (RM-22).",
+  "properties": {
+    "cause": {
+      "$ref": "#/$defs/TimeErrorCause",
+      "description": "Why the time error occurred (RM-22)."
+    },
+    "late_by_ns": {
+      "description": "How late the target was, in nanoseconds (RM-22).",
+      "format": "int64",
+      "type": "integer"
+    },
+    "outcome": {
+      "$ref": "#/$defs/TimeErrorOutcome",
+      "description": "How the Provider handled it (RM-22)."
+    },
+    "target": {
+      "$ref": "#/$defs/TimePoint",
+      "description": "The requested burst target (RM-22)."
+    }
+  },
+  "required": [
+    "cause",
+    "outcome",
+    "late_by_ns",
+    "target"
+  ],
+  "title": "TimeErrorPayload",
+  "type": "object"
+}

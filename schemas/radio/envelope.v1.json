@@ -1,0 +1,143 @@
+{
+  "$defs": {
+    "PerformanceEnvelope": {
+      "additionalProperties": false,
+      "description": "Throughput values recorded in a radio Provider's Manifest (RM-20).",
+      "properties": {
+        "rx_bytes_per_s": {
+          "description": "Receive throughput limit in bytes per second (RM-20).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "tx_bytes_per_s": {
+          "description": "Transmit throughput limit in bytes per second (RM-20).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "wire_bytes_per_sample": {
+          "description": "Wire-format bytes per complex sample (RM-20).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rx_bytes_per_s",
+        "tx_bytes_per_s",
+        "wire_bytes_per_sample"
+      ],
+      "type": "object"
+    },
+    "ProfileRef": {
+      "additionalProperties": false,
+      "description": "A declared profile, by name and version. Vision §59 bumps a Mock profile's\nversion on measurement.\n\nRule: SB-22, MA-33 (decision B7).",
+      "properties": {
+        "name": {
+          "description": "The profile's name.",
+          "type": "string"
+        },
+        "version": {
+          "$ref": "#/$defs/Version",
+          "description": "Its version."
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "TimingEnvelope": {
+      "additionalProperties": false,
+      "description": "Timing values recorded in a radio Provider's Manifest (RM-20).",
+      "properties": {
+        "command_queue_depth": {
+          "description": "Timed-command queue capacity (RM-20).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "min_timed_command_lead_ns": {
+          "description": "Minimum lead for a timed command (RM-20).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "overflow_restart_gap_ns": {
+          "description": "Receive restart gap after overrun (RM-20).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "startup_latency_ns": {
+          "description": "Time from arm to stream start (RM-20).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "stop_tail_ns": {
+          "description": "Receive tail after orderly stop (RM-20).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "min_timed_command_lead_ns",
+        "startup_latency_ns",
+        "stop_tail_ns",
+        "command_queue_depth",
+        "overflow_restart_gap_ns"
+      ],
+      "type": "object"
+    },
+    "Version": {
+      "additionalProperties": false,
+      "description": "A release-only version. Module and Vocabulary versions carry a minor and a patch;\ndocuments do not, which is decision B7 of `03-spec-and-binding.md`.\n\nRule: MA-33, decision B7.",
+      "properties": {
+        "major": {
+          "description": "Breaking changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "description": "Additive changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "patch": {
+          "description": "Fixes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The profile and envelopes a radio Provider records in its Manifest (RM-20).",
+  "properties": {
+    "performance": {
+      "$ref": "#/$defs/PerformanceEnvelope",
+      "description": "The throughput limits declared by the Provider (RM-20)."
+    },
+    "profile": {
+      "$ref": "#/$defs/ProfileRef",
+      "description": "The exact Provider profile applied (RM-20)."
+    },
+    "timing": {
+      "$ref": "#/$defs/TimingEnvelope",
+      "description": "The timing limits declared by the Provider (RM-20)."
+    }
+  },
+  "required": [
+    "profile",
+    "timing",
+    "performance"
+  ],
+  "title": "RadioEnvelope",
+  "type": "object"
+}

@@ -8,7 +8,7 @@
 | | |
 |---|---|
 | remote | `git@github.com:k3komatsu/Ez-SDR.git` |
-| `main` | v4（この worktree）．Phase 0/1 完了．Phase 2 は Step 1–8 を実装済み．次は Kernel 差分の Review K（§4）．Step 9 は owner の指示まで開始しない．|
+| `main` | v4（この worktree）．Phase 0/1 完了．Phase 2 Step 1–15 を実装済み．Review K 完了，Review M は Opus `PASS_WITH_RISK`（P0/P1 なし）後に残った P2 を局所修正・検証済み．Steps 9–15 は未 commit．次は Step 16 / Gate X の owner 判断．|
 | `master` | v3（D + C++ UHD bridge + Python client）．tip `4a474e9` = tag `v3.0.28`．**GitHub の default branch のまま** |
 | tags | 35 個（`v2.11`, `v3.0.0`–`v3.0.28`）．すべて v3 系 |
 | 履歴の関係 | **無関係（unrelated）**．graft も merge もしていない．v4 は clean-sheet なので今後も繋がない |
@@ -49,9 +49,9 @@ Phase 1 の Kernel crate は **実装済み**（Step 4 完了）．
 | schemas | `schemas/` に47個の JSON Schema 2020-12 + `SCHEMA_CHANGELOG.md`．`schema_freeze` が byte 単位で凍結．再生成は `EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze` |
 | kernel surface | `tests/kernel_surface_allow.txt` が公開 item の allow-list（= レビュー用チェックリスト，`module::name` で key 付け）．OV-23b は **115 NEW / 291 public items**（2026-09-25）．banned token は `tests/banned_tokens.txt`（識別子内も検出，`OV-23a` を書いた行だけ免除） |
 
-Python client，wire protocol，MockRadio，Simulation Engine は未着手（Phase 2 以降）．
+Python client と wire protocol は未着手．Radio/Simulation/Sink Vocabulary，Simulation Engine，MockRadio，host data path と acceptance tests は Phase 2 Steps 1–15 で実装済み．
 
-## 4. Phase の状態 — Phase 1 完了，Phase 2 Step 1–8 完了（Review K 待ち）
+## 4. Phase の状態 — Phase 1 完了，Phase 2 Step 1–15 完了（Gate X 前）
 
 ### Phase 1 — specs 受理・Kernel 実装済み
 
@@ -94,9 +94,9 @@ exit criteria（§13）の達成状況（2026-09-23 時点）：
 - **新しい拒否は1件ずつ無効化して，テストが落ちることを確かめる**（mutation）．落ちないものはテストを足すか，死にコードとして消す．
 - **gate は列挙では閉じない**．`kernel_surface` は構文の新しい形で何度も抜けられた．仕組み（`use … as` や一覧外の `macro_rules!`）を禁止し，残りは process obligation として名指す（D100）．
 
-### Phase 2 — Step 1–8 完了，Review K 待ち
+### Phase 2 — Step 1–15 実装済み，Review K/M 完了
 
-Vision §67 の Phase 2（Radio Model + Simulation Engine + MockRadio）．文書はすべて [plan/phase2/](plan/phase2) にあり，2026-09-24 に Gate P で受理された（[00-overview.md](plan/phase2/00-overview.md) §9，§11）．spec 06–10 は実装者を拘束し，20-implementation-plan.md が作業順序．Step 1–8 は実装・検証済み（[implementation-notes.md](plan/phase2/implementation-notes.md)）．
+Vision §67 の Phase 2（Radio Model + Simulation Engine + MockRadio）．文書はすべて [plan/phase2/](plan/phase2) にあり，2026-09-24 に Gate P で受理された（[00-overview.md](plan/phase2/00-overview.md) §9，§11）．spec 06–10 は実装者を拘束し，20-implementation-plan.md が作業順序．Steps 1–15 は実装済み（[implementation-notes.md](plan/phase2/implementation-notes.md)）．Review K は完了．Review M の最新 Opus 再レビューは `PASS_WITH_RISK`（P0/P1 なし，P2 2件）で，その P2 修正を focused regressions と scratch 検証で確認した．低リスクの局所修正後に Opus を再起動していない（スキルの軸評価による）．Steps 9–15 は未 commit．静的レビューが残した非 blocking の穴は，`Stop(sink/rec)` の Kernel 経由 acceptance test がない点（Sink crate 単体の Stop test はある）．
 
 | 文書 | 中身 |
 |---|---|
@@ -118,10 +118,9 @@ Phase 1 の Kernel には，最初の本物の Module が必ず踏む穴があ�
 
 ### 次にすること
 
-1. **Review K が必要**：`96976c5` 以降の Kernel 差分を敵対的レビューし，指摘を `00-overview.md` §11 に verdict つきで記録する（OV-5）．
-2. Owner が Review K を完了し次の手順を指示するまで，Step 9 を始めない．以後は [20-implementation-plan.md](plan/phase2/20-implementation-plan.md) と対応する実装プロンプトを使う．実装者は commit しない．
-3. 手順 15 の後（Review M：Module と受け入れテスト）で止まり，owner が敵対的レビューを行う．
-4. Phase 2 の exit（Gate X）で spec 06–10 を `design/` へ移し，各 spec の「Vision issues found」を owner の承認のもとで Vision に反映する．
+1. **Step 16 / Gate X**：`20-implementation-plan.md` の per-rule exit review tables（PO-10）を作り，Vision issue の一覧を整理する．
+2. Owner が Phase 2 の exit を受理した後，spec 06–10 を `design/` へ移し，各 spec の「Vision issues found」を owner の承認のもとで Vision に反映する（OV-6）．
+3. Review M の `Stop(sink/rec)` Kernel 経由 acceptance gap は非 blocking として記録済み．必要なら Step 16 の前に追加するか，owner が残余リスクとして判断する．
 
 ## 5. v3 → v4 切替で残っている作業（人間の判断が要るもの）
 
