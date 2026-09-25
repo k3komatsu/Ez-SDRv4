@@ -1152,6 +1152,7 @@ pub struct TestLinkModule {
     pub probe: Probe,
     pub panic_descriptor: bool,
     pub panic_drops: bool,
+    pub seed_drop: bool,
 }
 
 impl TestLinkModule {
@@ -1162,6 +1163,7 @@ impl TestLinkModule {
             probe: probe.clone(),
             panic_descriptor: false,
             panic_drops: false,
+            seed_drop: false,
         }
     }
 
@@ -1182,6 +1184,12 @@ impl TestLinkModule {
         self.panic_drops = true;
         self
     }
+
+    /// Seeds one DropOldest eviction so the coordinator's Manifest path is exercised (KA-18).
+    pub fn seeding_one_drop(mut self) -> TestLinkModule {
+        self.seed_drop = true;
+        self
+    }
 }
 
 impl Link for TestLinkModule {
@@ -1198,6 +1206,11 @@ impl Link for TestLinkModule {
             decl.from.component, decl.from.port, decl.to.component, decl.to.port
         ));
         let link = MemLink::new(decl.policy, decl.capacity);
+        if self.seed_drop {
+            let root = ClockDomainId::local(0);
+            assert_eq!(link.publish(block(header(TimePoint::new(root, 0), 10, 1))), PublishOutcome::Accepted);
+            assert_eq!(link.publish(block(header(TimePoint::new(root, 10), 10, 1))), PublishOutcome::DroppedOldest);
+        }
         if self.panic_drops {
             Ok(Arc::new(PanickingDropsLink(link)))
         } else {

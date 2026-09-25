@@ -111,13 +111,13 @@ Every radio has a fixed TX→RX delay through its digital and analog chain. Any 
 
 ## Retune phase behaviour is a declared capability
 
-Daughterboards such as UBX/CBX/SBX have a random inter-frontend phase after every untimed retune; timed tuning keeps the offset constant. The Radio Model therefore has
+Daughterboards such as UBX/CBX/SBX have a random inter-frontend phase after every untimed retune; timed tuning keeps the offset constant. The Radio Model declares this behavior as a device capability:
 
 ```text
 phase_behavior_on_retune:  deterministic | random_unless_timed_tune
 ```
 
-declared per device profile. MockRadio emulates the declared behaviour (randomising phase on untimed retune when the profile says so), so that a coherent-MIMO experiment which forgets to calibrate after retune fails in simulation rather than on the bench (§25).
+declared per device profile as `radio.phase_behavior_on_retune`. Phase 2 records the capability; emulation of phase changes on retune is Phase 3 work.
 
 ---
 
@@ -275,7 +275,7 @@ A Probe must not impose backpressure on the real-time path.
 
 A Probe is a **lossy DataLink** (`drop_oldest` or `drop_newest`, §23) feeding a **Recorder Sink**. Nothing else is needed: fan-out shares block references, so tapping costs no copy, and intermediate values such as CFO estimates, channel estimates or SIC residuals are ordinary additional output ports of the Processor with `event.*` or `tensor.*` contracts (§21). The Kernel defines link policies and DataContracts; it does not define "Probe".
 
-Recorder controls include:
+Recorder controls are optional. The feed's drop-class policy owns `drop if busy`; a Recorder may expose the other controls as Sink parameters:
 
 ```text
 sample every N blocks

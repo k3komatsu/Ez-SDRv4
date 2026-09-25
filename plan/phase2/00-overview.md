@@ -2,30 +2,32 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted at Gate P** (owner, 2026-09-24; verdicts in §11). Specs 06–10 are binding for the implementer, and `20-implementation-plan.md` is the order of work. |
+| Status | **Accepted at Gate P and Gate X** (owner; 2026-09-24 and 2026-09-25; verdicts and named risks in §11). Specs 06–10 are accepted in `design/`; `20-implementation-plan.md` remains the implementation record. |
 | Phase | Vision §67 Phase 2. Predecessor: Phase 1 (Kernel semantic model, accepted 2026-09-23). Successor: Phase 3 (SimulationChannel + deterministic Runs). |
 | Scope | The Kernel **coordinator** that drives a Run end to end in the Simulation class; the Kernel **amendments** Phase 1 left for the first real Module (§5); the **Radio Model** Vocabulary; the **Simulation** and **Sink** Vocabularies; the **Simulation Engine**; **MockRadio**; the host-memory Link and the capture Sink that a MockRadio stream needs to reach an artifact; the Phase 2 half of Vision §58. |
 | Not in scope | §3 of this file lists it. In one line: no SimulationChannel, no RealtimeEmulation, no hardware, no Python, no Reactor or Processor executor, no child Runs. |
 | Language | English, like Phase 1. Code, rule text, test names and schema descriptions share one vocabulary. |
-| Location | `plan/phase2/` while drafting. On acceptance at the end of Phase 2 (§9, step X), specs 06–10 move to `design/`; this file and `20-implementation-plan.md` stay here as the record. |
+| Location | Specs 06–10 were drafted here and moved to `design/` at Gate X; this file, `20-implementation-plan.md` and the exit-review evidence stay here as the Phase 2 process record. |
 | Modal verbs | "must" and "must not" are normative (OV-4a). "Should" does not appear inside a rule. |
 
 Documents:
 
 ```text
+design/
+  06-kernel-coordinator.md  accepted Gate X spec: KA-n, KC-n, UC-n
+  07-radio-model.md         accepted Gate X spec: RM-n
+  08-simulation.md          accepted Gate X spec: SE-n
+  09-mock-radio.md          accepted Gate X spec: MR-n
+  10-host-data-path.md      accepted Gate X spec: HD-n
 plan/phase2/
   00-overview.md            this file: scope, decisions, crates, governance, gates, traceability, exit criteria
-  06-kernel-coordinator.md  KA-n  amendments to the accepted Phase 1 specs
-                            KC-n  the Run coordinator (Kernel), Simulation class
-                            UC-n  what each update class means
-  07-radio-model.md         RM-n  the `radio` Vocabulary: resource kinds, keys, envelopes, events, verbs, the RF-envelope check
-  08-simulation.md          SE-n  the `sim` Vocabulary (seed, fault schedule, PRNG) and the Simulation Engine Module
-  09-mock-radio.md          MR-n  the MockRadio Module: profiles, coercion, streams, bursts, faults, stop, sections
-  10-host-data-path.md      HD-n  host memory and its pool, the host Link Module, the `sink` Vocabulary, the capture Sink Module
   20-implementation-plan.md       the ordered steps for the implementer, with files, signatures, tests and commands
-  patches/01-kernel-amendments.patch  the Kernel amendments of spec 06 §2, as a git patch against 96976c5 (plan step 1)
-  reviews/planning-reviews.md     the three adversarial reviews of these documents before Gate P, and each finding's verdict
-  prompts/                        the prompts for the implementing agent (three sessions), for Reviews K and M, and for fixes
+  implementation-notes.md  implementation and review record
+  vision-issues.md          accepted Vision edits applied at Step X
+  exit-review/              per-rule disposition and evidence tables
+  patches/                  Kernel amendment patch as applied in step 1
+  reviews/                  planning reviews before Gate P
+  prompts/                  implementation and review prompts
 ```
 
 ---
@@ -40,7 +42,7 @@ Phase 1's own history (`plan/phase1/history.md` §1) is the second reason this d
 
 ## 2. What Phase 2 found in Phase 1 before writing a line of code
 
-Reading the Phase 1 crate against what the first real Module needs found twenty-two places where the accepted specs or the code cannot carry Phase 2. They are listed with evidence in `06-kernel-coordinator.md` §2 as KA-1…KA-22. The five that change what a Module can do at all:
+Reading the Phase 1 crate against what the first real Module needs found twenty-two places where the accepted specs or the code cannot carry Phase 2. They are listed with evidence in `design/06-kernel-coordinator.md` §2 as KA-1…KA-22. The five that change what a Module can do at all:
 
 | # | What Phase 1 has | Why the first Module cannot work with it |
 |---|---|---|
@@ -232,12 +234,12 @@ Every Phase 1 rule whose marker names Phase 2, MockRadio or "the Phase 2 coordin
 | RS-4 | forward (re-plan entry) | *re-marked*: Phase 2 has no operation that changes a plan; the call site is the first re-plan or GraphEpoch API |
 | RS-31 | producer (non-Kernel payload schemas) | RM-22 (KA-22) |
 | MA-17 | producer (a Peripheral's timing class) | *re-marked* to Phase 9 (KA-19): MockRadio has no Peripheral |
-| MA-10 | a Phase 2 value (the memory domain a port delivers from) | RM-2 (host memory in 1.0.0); MR-13 |
+| MA-10 | a Phase 2 value (the memory domain a port delivers from) | RM-2 (tree and Port); MR-13 (block buffer is `HOST_MEMORY`) |
 | MA-19b | producer (an Executor loads components) | *re-marked* to Phase 5 (KA-19): Phase 2 has no Executor Module |
 | RS-25, RS-25a | forward (child Runs) | *re-marked* to Phase 6 (Y14, KC-37) |
 | MA-3 | producer (workspace check) | PO-8 |
 | MA-7, MA-9, MA-19a, MA-24 (delivery), MA-26, MA-27a, MA-29 | forward | KC-13, KC-30, KC-11, KC-25, KC-41, KC-10, KC-3 |
-| MA-8 | producer (budget) | MR-7, HD-11 (both finish `prepare` without blocking) |
+| MA-8 | producer (budget) | MR-7, HD-9 (both finish `prepare` without blocking; timeout enforcement is not tested) |
 | MA-13 | producer (orderly tail) | MR-25 |
 | MA-24 (applying) | producer | UC-2…UC-6, MR-18 |
 | MA-28a | producer (Link implements its policy) | HD-5 |
@@ -261,7 +263,7 @@ RM-6…RM-8 (contents), MR-3 (values), MR-6 (coercion), MR-17 (late policy), MR-
 | 10–14 | `sim` and the Simulation Engine; `radio`; host memory, the host Link and `sink`; the capture Sink; MockRadio | each crate green in isolation |
 | 15 | The acceptance crate | **Review M** — one adversarial pass over the Modules and the acceptance tests |
 | 16 | Exit review tables (PO-10), `handoff.md`, Vision issues collected | **Gate X** — owner acceptance of Phase 2 |
-| X | Specs 06–10 move to `design/`; the Vision's Phase 2 issues are applied with owner approval (OV-6's procedure, as Phase 1 §12 did) | — |
+| X | Specs 06–10 move to `design/`; the Vision's Phase 2 issues are applied with owner approval (OV-6's procedure, as Phase 1 §12 did) | **Completed 2026-09-25**; owner acceptance and named risks are recorded in §11 |
 
 A review pass's findings are recorded in §11 with a verdict, never silently applied (OV-5).
 
@@ -275,6 +277,8 @@ A review pass's findings are recorded in §11 with a verdict, never silently app
 6. The Kernel's direct dependencies are still exactly X6's four; `Cargo.lock` gains no external package (PO-4).
 7. Every Phase 1 marker in §8's marker table is either carried by a passing Phase 2 test or re-marked in the Phase 1 rule's own text (PO-9).
 8. Every link in `design/` and `plan/` resolves, and the `v3/` path check of `handoff.md` §1 passes.
+
+**Exit status:** owner accepted Gate X on 2026-09-25 with the named risks below. Step X moved specs 06–10 into `design/`, applied the fifteen Vision issues, and rechecked links and `v3/` evidence paths.
 
 ## 11. Decision log
 
@@ -317,6 +321,60 @@ Review K re-review findings (owner, 2026-09-25):
 | R4 [P2] Strengthen the KA-12 and Module-origin Action regressions | K | **accepted** | Replace negative polling with condition-variable observations; check StopRx ordering and count; compare Provider coercion count at the instant before Module submission and assert Provider receipt |
 | B3 [P0] A wedged cleanup Module must not block later steps for other instances | K | **accepted** | Hold `done` only while claiming markers and acquiring one instance slot; release it before Module calls so other instances can stop, clean up, and reach the Manifest |
 
+Review M initial findings (owner direction to fix, 2026-09-25):
+
+| Finding | Gate | Verdict | Note |
+|---|---|---|---|
+| B1 [P0] RX-half stop silences later TX bursts | M | **accepted** | Keep TX lifecycle independent of RX completion; record unstarted/open and held bursts on cancellation; regression `mr_25_rx_stop_leaves_transmit_running_and_stop_records_an_unstarted_burst` |
+| B2 [P0] Kept faults are not all recorded with correct `applied` state | M | **accepted** | Separate resolved from applied state and record every kept fault on stop/cleanup; regression `mr_20_faults_fire_at_their_instants` |
+| B3 [P0] MockRadio selector default `id: mock` is refused | M | **accepted** | Accept the missing selector and assert its default in `mr_02_from_binding_refusals` |
+| N1 [P1] Jitter draw is consumed at receive cuts | M | **accepted** | Determine the cut before drawing; `mr_12_jitter_draws_belong_to_blocks_after_a_receive_cut` |
+| N2 [P1] Late Drop/PlanViolation emits duplicate event kinds | M | **accepted** | Emit only the RM-14 event for lateness; check a moved SendAsap refusal after final placement |
+| N3 [P1] Queue-full Action is omitted from rejected records and may emit LATE_COMMAND | M | **accepted** | Check queue depth before lateness and record the refused Action in `mr_18_hardware_timed_updates` |
+| N4 [P1] Sink rejection schema description conflicts with HD-14 | M | **accepted** | Correct the source description, regenerate the schema, and align `SCHEMA_CHANGELOG.md` |
+| N5 [P1] Acceptance carriers allow no-op timing or jitter implementations | M | **accepted** | Assert RX sample totals in `v58_02` and differing block counts in `v58_12` |
+| N6 [P1] MockRadio test assertions miss several §6 obligations | M | **accepted** | Add the named refusal and shape assertions; keep unimplemented or unreachable branches listed as test gaps |
+| P2-1 Repeat-length refusal reports the wrong MR rule prefix | M | **accepted** | Correct the prefix to MR-16 and retain RM-13 as the validation rule |
+| P2-2 SendAsap reports `send_asap` even when the moved start is refused | M | **accepted** | Validate the final start before reporting; emit `outcome: refused` and `COMMAND_REJECTED` on refusal |
+| P2-3 TX publish error branch counts a block not dropped | M | **accepted** | Keep the tracker and block count consistent with the publish result; document the branch's reachability limit |
+| P2-4 MR-19 uses a different expression for the restart sample | M | **accepted** | Use the rule's integer formula and retain fractional-root coverage |
+| P2-5 Event emission result is discarded and unused bindings remain | M | **accepted** | Propagate control-event emission failures and remove the unused/no-op code |
+| P2-6 `add_rx_stats(0)` is a no-op | M | **accepted** | Remove the no-op call |
+| P2-7 Pre-start fault tick is mistaken for an absolute instant | M | **accepted** | Keep offsets T0-relative until successful start and suppress pre-start fault wakeups |
+| P2-8 Cleanup permits a second prepare on one instance | M | **accepted** | Preserve the prepare-called guard across cleanup |
+| P2-9 PO-4 lock check omits path packages | M | **accepted** | Check workspace and path package sets against the baseline |
+| P2-10 PO-8 dependency guard omits the allow-list and other dev-dependencies | M | **accepted** | Enforce the declared crate/dependency allow-list, including permitted optional test dependencies |
+| P2-11 Acceptance tests assert impossible TX_DISCONTINUITY absence | M | **accepted** | Remove the vacuous assertions; retain the burst/sample assertions that exercise the behavior |
+| P2-12 `v58_11` omits the event's target | M | **accepted** | Assert the expected transmit tick in the `TIME_ERROR` payload |
+| P2-13 Partial-on-abort request is queued after the final Sink step | M | **accepted** | Queue the request before the step that delivers it |
+| P2-14 Ramp test omits imaginary-channel and zero-pattern bytes | M | **accepted** | Assert both channels' real/imaginary layout and all-zero output |
+| P2-15 Overflow/sequence flags and deterministic event equality are under-asserted | M | **accepted** | Assert the gap/discontinuity flags, overflow event, and paired-run event equality |
+| P2-16 Capture Sink honours a Stop for any target | M | **accepted** | Match `sink/<output>` and add positive and wrong-target Sink tests; later re-review R1 caught and closed a regression |
+
+Review M re-review 1 findings (owner direction, 2026-09-25):
+
+| Finding | Gate | Verdict | Note |
+|---|---|---|---|
+| R1 [P0] Capture Sink rejects the Kernel-routable own-target Stop | M | **accepted** | Match `sink/<output>` and assert the partial artifact in `hd_11_stop_for_own_target_finishes_the_capture` |
+| N7 [P1] RX fault after an RX-half stop is applied to an ended stream | M | **accepted** | Resolve without applying when the fault is beyond the exclusive stream end; covered in `mr_20_faults_fire_at_their_instants` |
+| N8 [P1] An unapproved Gate P determinism-projection change was applied silently | M | **accepted** | Revert that text/code change; keep the original projection and same-directory acceptance test |
+| PO-8 dev-dependency subset [P2] The governance test requires an optional Kernel test dependency | M | **accepted** | Check that dev-dependencies are a subset of the allowed set |
+| Pre-start fault time [P2] A pre-start `at_ns` is written as root ticks | M | **accepted** | Preserve it as a T0-relative nanosecond offset until start succeeds; document the interpretation in MR-27 |
+
+Review M re-review 2 findings (owner direction, 2026-09-25):
+
+| Finding | Gate | Verdict | Note |
+|---|---|---|---|
+| P2-a RX fault restart extends lost count past RX-stop tail end | M | **accepted** | Clamp to the exclusive stream end; `tail_fault` in `mr_20_faults_fire_at_their_instants` checks row, stats, and event |
+| P2-b MR-27 equates nanoseconds with root ticks | M | **accepted** | Convert offsets with `ns_to_v` at the registered root rate; covered at 2 GHz |
+
+Review M re-review 3 findings (owner direction, 2026-09-25):
+
+| Finding | Gate | Verdict | Note |
+|---|---|---|---|
+| P2-c Prepared fault offsets schedule a spurious pre-start wakeup | M | **accepted** | Include fault instants in wakeups only after start; pre-start `next_due()` is asserted empty |
+| P2-d Failed start can leave partially rebased fault ticks | M | **accepted** | Calculate locally, commit after clock registration, and restore offsets on scheduling failure; `mr_20` checks the failed-start record |
+
 Review M follow-up (owner-directed, 2026-09-25):
 
 | Finding / decision | Gate | Verdict | Note |
@@ -326,6 +384,33 @@ Review M follow-up (owner-directed, 2026-09-25):
 | Pre-start fault wakeup (MR-14/MR-20) | M | **accepted** | Treat prepared fault ticks as offsets; include them in the absolute wakeup set only after `start` succeeds |
 | Failed start after preparing fault instants (MR-11/MR-27) | M | **accepted** | Compute rebased ticks locally and commit only after RX clock registration; restore offsets and start state if wakeup scheduling fails |
 
+Gate X review findings (owner direction to fix or record risk, 2026-09-25):
+
+| Finding | Gate | Verdict | Note |
+|---|---|---|---|
+| B1 [P1] KA-2's TM-13a normative amendment was lost during marker replacement | X | **accepted** | Restore the Provider clock-allocation and Manifest duties and cite both registry and coordinator carriers; this remediation finding predates the final owner acceptance recorded below |
+| B2 [P1] Exit-review citations overstate what several test bodies assert | X | **accepted** | Add focused assertions, correct the cited tests/markers, body-read the cited Kernel/Radio/Mock/Sink regressions, and record evidence limits in the updated tables |
+| N1 [P2] Review M's individual findings lack §11 verdicts | X | **accepted** | Record each initial and follow-up finding separately above; no prior finding is silently treated as a Gate X acceptance |
+| N2 [P2] MA-8 cites HD-11 instead of HD-9 | X | **accepted** | Align §8 and the Phase 1 marker on `hd_09_prepare_cases`; timeout enforcement remains an explicit untested ceiling |
+| N3 [P2] No positive Link-to-Manifest nonzero drop assertion | X | **accepted** | Add `ka_18_nonzero_link_drops_reach_the_manifest` with one seeded `DropOldest` eviction |
+| N4 [P2] No Kernel-routed Session test for `Stop(sink/rec)` | X | **accepted as documented risk** | The Sink-level own-target and wrong-target tests cover its guard; Phase 2 §58 does not require the additional Session path |
+| N5 [P2] Handoff's schema and package counts are ambiguous | X | **accepted** | State Kernel schema count (47), Phase 2 Vocabulary count (10), total (57), Kernel dependency tree scope (28) and whole-lock scope (27 external + 10 workspace) separately |
+| P3-1 UC-5 `forward` disposition overstates Phase 7 as the definite carrier | X | **accepted** | Defer until the first later phase that declares an `atomic_realtime` Provider key or component parameter; Phase 7 remains conditional on the UHD Provider being first |
+| P3-2 KA-22 text amendment is labelled `default` | X | **accepted** | Reclassify its exit disposition as `process`; the amended spec text is the carrier |
+| P3-3 SendAsap move-then-refuse event behavior is missing from RM-14/MR-16 | X | **accepted** | Specify `TIME_ERROR { outcome: refused }` plus `COMMAND_REJECTED` and assert the pair |
+| P3-4 MA-10 marker omits the host memory-domain assertion | X | **accepted** | Add the block buffer's `HOST_MEMORY` assertion and cite it beside the tree test |
+
+Gate X same-session re-review findings (owner-directed remediation, 2026-09-25; does not itself accept Gate X):
+
+| Finding | Gate | Verdict | Note |
+|---|---|---|---|
+| P3-a [P3] KC-7 cites the RunStateMachine unit test instead of coordinator evidence, and omits the prepare-abort regression | X | **accepted** | Remove `rs_03_failure_at_each_stage_reaches_cleanup`; cite coordinator failure-stage tests under KC-7 and add `kc_24_a_prepare_abort_stops_before_arm_and_start` to KC-24 |
+| P3-b [P3] KA-22 read-from points to the wrong section | X | **accepted** | Correct the process carrier from spec 06 §10 to KA-22's §2 |
+| P3-c [P3] UC-5 names Phase 7 as an unsupported definite carrier | X | **accepted** | Defer until the first later phase that declares an `atomic_realtime` Provider key or component parameter; keep Phase 7 conditional |
+| P3-d [P3] RM-14 could imply two TIME_ERROR events on moved-then-refused SendAsap | X | **accepted** | Specify that only the `refused` event is emitted on refusal and assert exactly one TIME_ERROR in `mr_16_burst_refusals` |
+| P3-e [P3] Drop integration fixture wording could imply the eviction traverses Provider→Sink | X | **accepted** | Clarify that the test double seeds an eviction during Link creation and verifies cleanup-to-Manifest propagation |
+| P3-f [P3] KA-12 row omits the documented marker check/acquire race limit | X | **accepted** | State that the race has no deterministic test seam and link to the implementation note that records it |
+
 Confirmed individually, before the rows above (owner, 2026-09-24):
 
 | Decision | Gate | Verdict | Note |
@@ -334,3 +419,9 @@ Confirmed individually, before the rows above (owner, 2026-09-24):
 | `x310-like` transport limit 1.0 GB/s per direction per motherboard (MR-3, Y13) | P | **accepted** | INFERRED; replaced by the Phase 8 measurement |
 | No "record everything" capture mode: a capture needs `N` samples (HD-10, H8) | P | **accepted** | A `sink.capture_all` key can be added later without breaking anything |
 | `x310-like` requires `ezsdr.time.start_lead_ns ≥ startup_latency_ns` (2 s); an earlier start is refused (MR-11, M2) | P | **accepted** | Starting late with `LATE` was rejected by Y13 |
+
+Gate X owner acceptance (2026-09-25):
+
+| Decision | Gate | Verdict | Note |
+|---|---|---|---|
+| Phase 2 exit artifacts, Phase 1 markers, and the Phase 2 Vision issues | X | **accepted with named risks** | Owner accepted Opus 5.5's `PASS_WITH_RISK` recommendation (no blockers). Named risks: MA-8 timeout enforcement is untested; there is no Kernel-routed Session test for `Stop(sink/rec)`; the review was static and relied on reported verification. Step X is complete; remaining test ceilings are in `implementation-notes.md` and the exit-review tables. |

@@ -2,10 +2,10 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted at Gate P (owner, 2026-09-24; `00-overview.md` §11). Normative for `ezsdr-kernel`. |
+| Status | Accepted at Gate P (owner, 2026-09-24) and ratified at Gate X (owner, 2026-09-25; [`plan/phase2/00-overview.md`](../plan/phase2/00-overview.md) §11). Normative for `ezsdr-kernel`. |
 | Scope | (a) The amendments KA-1…KA-22 that Phase 1's accepted specs need before a real Module can run; (b) the coordinator, `ezsdr-kernel::coordinator`, which drives one Run end to end in the Simulation class, for a Spec Run and for a Session; (c) what each update class means (UC-n). |
 | Not in scope | RealtimeEmulation, HardwareInLoop, Hardware (refused, KC-2); child Runs (refused, KC-37); session replay; the Radio Model's content (spec 07). |
-| Depends on | Specs 01–05 as amended here; `00-overview.md` §4 Y1–Y14. |
+| Depends on | Specs 01–05 as amended here; [`plan/phase2/00-overview.md`](../plan/phase2/00-overview.md) §4 Y1–Y14. |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
 
 ---
@@ -399,7 +399,7 @@ pub mod coordinator {
 }
 ```
 
-Allow-list lines (PO-5), in `tests/kernel_surface_allow.txt` under a new heading `# --- coordinator (Phase 2, plan/phase2/06-kernel-coordinator.md)`: `coordinator = Run / Session state machine`, `coordinator::start_spec_run = Run / Session state machine`, `coordinator::connect = Run / Session state machine`, `coordinator::RunHandle = Run / Session state machine`, `coordinator::Assembly = NEW: KC-4's bundle of the registries, clocks and Module instances the runtime hands one Run`, `coordinator::RunHandleError = NEW: the refusals of a live Run's control API (RS-15, RS-18, KC-28)`, `coordinator::KERNEL_SOURCE = NEW: KA-14's reserved source of the Kernel's own events`, `coordinator::EVENT_RING_DEPTH = NEW: RS-34's bounded ring, sized once by the coordinator`, `coordinator::DEFAULT_HOST_BUDGET_NS = NEW: MA-8's bound on prepare and arm where nothing declares one`, `coordinator::DRAIN_WAKEUP_CAP = NEW: KA-12's bound on the orderly drain`. The `NEW:` count rises by six. Every item in the coordinator's submodules is private or `pub(super)`, never `pub`, so that these ten are its whole public surface.
+Allow-list lines (PO-5), in `tests/kernel_surface_allow.txt` under a new heading `# --- coordinator (Phase 2, design/06-kernel-coordinator.md)`: `coordinator = Run / Session state machine`, `coordinator::start_spec_run = Run / Session state machine`, `coordinator::connect = Run / Session state machine`, `coordinator::RunHandle = Run / Session state machine`, `coordinator::Assembly = NEW: KC-4's bundle of the registries, clocks and Module instances the runtime hands one Run`, `coordinator::RunHandleError = NEW: the refusals of a live Run's control API (RS-15, RS-18, KC-28)`, `coordinator::KERNEL_SOURCE = NEW: KA-14's reserved source of the Kernel's own events`, `coordinator::EVENT_RING_DEPTH = NEW: RS-34's bounded ring, sized once by the coordinator`, `coordinator::DEFAULT_HOST_BUDGET_NS = NEW: MA-8's bound on prepare and arm where nothing declares one`, `coordinator::DRAIN_WAKEUP_CAP = NEW: KA-12's bound on the orderly drain`. The `NEW:` count rises by six. Every item in the coordinator's submodules is private or `pub(super)`, never `pub`, so that these ten are its whole public surface.
 
 ## 5. Rules — assembly and entry
 

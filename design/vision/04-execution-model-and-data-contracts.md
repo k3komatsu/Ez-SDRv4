@@ -220,7 +220,7 @@ repeat
 
 A Processor or Reactor must be able to generate a burst dynamically during RUN.
 
-A TxBurst is a Kernel Action carrying a waveform by reference, a `repeat` attribute, a target `at`, the originally requested target, a late policy and namespaced metadata; a Radio Model's channel mapping travels in that metadata, not in a Kernel field, and where the sample format is stated is the Radio Model's to decide (Phase 2).
+A TxBurst is a Kernel Action carrying a waveform by reference, a `repeat` attribute, a target `at`, the originally requested target, a late policy and namespaced metadata. `TxBurst.format` is determined by the transmit stream's Stream Contract, and the burst uses every channel of that stream; a Radio Model's channel mapping travels in namespaced metadata, not in a Kernel field (Phase 2).
 
 This is essential for:
 
@@ -230,7 +230,7 @@ This is essential for:
 - reactive protocols,
 - closed-loop experiments.
 
-The target is an AbsoluteDeadline in the transmit stream's SampleClock: a target in another exactly related domain is converted, advanced to the next sample instant only when the conversion is inexact, with both times kept, and one in an unrelated domain is refused. Every burst carries a **late policy** — `reject_at_plan`, `send_asap_and_flag` or `drop_and_flag` — decided against the bound Provider's `min_timed_command_lead` (§13), declared in `host.monotonic` and compared exactly; `reject_at_plan` is legal only for a statically known target. When the lead is statically known (scheduled actions), `validate()` is to check it at plan time; no Phase 1 rule does yet, because the TimingEnvelope is opaque until the Radio Model (Phase 2). When it is decided at run time (Reactor responses), the Provider enforces it and emits a typed event of the Radio Model's, while the lateness itself is recorded on the burst's record. `LATE` is a block flag (§23), not the name of this event.
+The target is an AbsoluteDeadline in the transmit stream's SampleClock: a target in another exactly related domain is converted, advanced to the next sample instant only when the conversion is inexact, with both times kept, and one in an unrelated domain is refused. Every burst carries a **late policy** — `reject_at_plan`, `send_asap_and_flag` or `drop_and_flag` — decided against the target Provider's `min_command_lead` (§13), declared in `host.monotonic` and compared exactly; `reject_at_plan` is legal only for a statically known target. When the lead is statically known (scheduled actions), the coordinator checks it at arm, once T0 exists and before start; it uses the ProviderInstance's generic `min_command_lead` value, not a Radio Model key. When it is decided at run time (Reactor responses), the Provider enforces it and emits a typed event of the Radio Model's, while the lateness itself is recorded on the burst's record. `LATE` is a block flag (§23), not the name of this event.
 
 Normative: [design/04-run-and-session.md](../04-run-and-session.md), rules RS-49, RS-51; [design/02-stream-contract.md](../02-stream-contract.md), rules SC-23, SC-23a, SC-23b, SC-26…SC-29a; [design/05-module-api.md](../05-module-api.md), MA-14.
 

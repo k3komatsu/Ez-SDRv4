@@ -80,7 +80,7 @@ rf_envelope
 └── antenna_ports                     allowed port names
 ```
 
-The Kernel does not interpret the envelope. The Radio Model registers an admission check against its `radio.rf_envelope` section, and the Kernel guarantees that every registered check runs at three points: `validate()` over the requested configuration; `prepare()` over the configuration each Provider applied, so a coercion that lands outside the envelope is refused; and the admission of every Session Action before dispatch (§3), over the effective configuration overlaid with the proposed value. A check is pure and needs no hardware, so `validate()` is a true dry run. **Nothing transmits before `validate()` passes, including this check.** MockRadio runs the same check, so an agent learns the site limits in simulation.
+The Kernel does not interpret the envelope. The Radio Model registers an admission check against its `radio.rf_envelope` section, and the Kernel guarantees that every registered check runs at three points: `validate()` over each fragment's requested configuration; `prepare()` over each Provider fragment's effective configuration, so a coercion that lands outside the envelope is refused; and the admission of every Session Action before dispatch (§3), over each fragment's effective configuration with the proposed value overlaid on its target fragment. Checks judge per-fragment values rather than a merged configuration, so two Providers' values cannot mask one another. A check is pure and needs no hardware, so `validate()` is a true dry run. **Nothing transmits before `validate()` passes, including this check.** MockRadio runs the same check, so an agent learns the site limits in simulation.
 
 ## What each step returns
 
@@ -111,6 +111,8 @@ runtime abort
 ```
 
 the Runtime runs one ordered cleanup, however the Run ends: (0) end child Runs; (1) freeze dispatch and cancel pending bursts and timers; (2) stop TX and (3) then RX, each in reverse dependency order; (4) cancel Peripheral operations; (5) restore baseline state; (6) finalise artifacts, marking open ones partial; (7) flush events and collect counters; (8) release the Lease and write the Manifest. The freeze precedes stopping TX, because a queued timed burst would otherwise reopen it. Every step runs under a deadline and is attempted even when an earlier one failed, so a failed Run's Manifest is always written. A Lease is `Attached` by default and ends the Run when its client disconnects; a `Detached` Lease needs a TTL on the host monotonic clock, and only its adoption token reclaims it; a child Run inherits its parent's Lease. The Policy is a closed table from registered event kinds to `continue`, `mark_artifact`, `stop` or `abort`; each kind's default is declared where the kind is registered — the Kernel's `DEVICE_LOST` aborts, and the Radio Model is to declare `RX_OVERFLOW` continue-and-mark — and a kind with no entry falls back by severity.
+
+The Kernel maps these numbered steps to role calls: step 2 calls `Provider::stop(mode)`; in an orderly Simulation Run, step 3 drains the stepped instances and then calls `Executor::stop(mode)` and `Sink::stop(mode)`, collecting returned artifacts; step 5 calls `cleanup()` on every instance that reached `prepare()`. The Provider owns its internal TX-before-RX stop order.
 
 Normative: [design/04-run-and-session.md](../04-run-and-session.md), rules RS-6…RS-11a, RS-21…RS-25a, RS-26…RS-30.
 

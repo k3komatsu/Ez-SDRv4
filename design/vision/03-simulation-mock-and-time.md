@@ -44,9 +44,10 @@ Simulation Environment
 ├── SimulationChannel
 ├── SimulationEngine (discrete-event Time Authority; virtual clock, §15)
 ├── MockPeripheral
-├── MockNetworkEndpoint
-└── FaultInjector
+└── MockNetworkEndpoint
 ```
+
+The BindingProfile's `sim.faults` environment document is read by each target Provider; it is not a FaultInjector Module.
 
 An AI agent should be able to:
 
@@ -65,22 +66,23 @@ An AI agent should be able to:
 
 A software radio that accepts everything is the OpenAirInterface `rfsimulator` pattern: it implements the same device interface as real hardware but never emulates late, underflow or overflow, so experiments pass in software and fail on the bench.
 
-Therefore the Radio Model requires every Provider to publish, next to its PerformanceEnvelope (§34):
+Therefore the Radio Model requires every Provider to publish, next to its PerformanceEnvelope (§34), timing values as capabilities:
 
 ```text
-TimingEnvelope
-├── min_timed_command_lead
-├── startup_latency_max
-├── stop_tail_max
-├── timed_command_queue_depth
-├── overflow_restart_gap
-└── coercion rules        sample-rate grid, gain step, frequency resolution
+TimingEnvelope capabilities (RM-6)
+├── radio.timing.min_timed_command_lead_ns
+├── radio.timing.startup_latency_ns
+├── radio.timing.stop_tail_ns
+├── radio.timing.command_queue_depth
+└── radio.timing.overflow_restart_gap_ns
 ```
+
+The Radio Model Vocabulary defines coercion rules; supported grids, such as the values in `radio.rx.sample_rate_hz` and `radio.tx.sample_rate_hz`, are declared as capabilities. A Provider also exposes its command lead through the generic `ProviderInstance.min_command_lead`. The Kernel uses that field for Action admission and the pre-start `RejectAtPlan` check; it does not read `radio.timing.*` by name (KA-7).
 
 and the following are rules, not options:
 
-1. **MockRadio enforces the envelope of the profile it emulates** (`x310-like`): a timed command issued with insufficient lead produces the same typed `LATE_COMMAND` / `TIME_ERROR` event as the hardware; requested rates are coerced on the same grid and reported in the PrepareReport (§11); `stop` delivers the same tail; an injected overflow reproduces the same restart gap and block flags (§23); and a request that exceeds the profile's PerformanceEnvelope (§34), channel count × rate × format beyond the emulated transport, is rejected at `validate()` / `prepare()`, so a four-channel 200 Msps request fails on a 1GbE-like profile in simulation as it would on the bench.
-2. **`validate()` checks reactive timing against the bound Provider's envelope**, for example that a Reactor's turnaround is not shorter than `min_timed_command_lead`. It is the same code path for Mock and hardware.
+1. **MockRadio enforces the envelope of the profile it emulates** (`x310-like`): it refuses `start(T0)` before synchronization ends, rather than starting late (MR-11); a timed command issued with insufficient lead produces the same typed `LATE_COMMAND` / `TIME_ERROR` event as the hardware; requested rates are coerced on the same grid and reported in each fragment's PrepareReport (§11); `stop` delivers the same tail; an injected overflow reproduces the RM-17/MR-21 restart gap and block flags (§23); and a request that exceeds the profile's PerformanceEnvelope (§34), channel count × rate × format beyond the emulated transport, is rejected at `validate()` / `prepare()`, so a four-channel 200 Msps request fails on a 1GbE-like profile in simulation as it would on the bench.
+2. **Timing requirements are checked at the layer that owns them.** The generic matcher compares requested timing constraints with the bound Provider's declared TimingEnvelope capabilities at `validate()`; for Actions, the Kernel uses only `ProviderInstance.min_command_lead`, and the target Provider enforces its own timed commands. Mock and hardware follow the same checks.
 3. **RF behaviour is not part of the envelope.** It stays in SimulationChannel (§16) and is reported as unmodelled unless a model is bound (§14).
 
 Profiles are versioned. An `x310-like` profile carries a version that the Manifest records in its `mock.*` section, and its envelope values come from measurement on the hardware, not from data sheets (§59). An `ideal` profile without constraints may exist for algorithm work; a Run on it is recorded with `timing: none` and `coercion: none` and is not evidence for promotion.
@@ -93,7 +95,7 @@ The first MockRadio implementation must enforce the envelope. It is a few timest
 
 Every Run must record what kind of evidence it represents.
 
-The ExecutionClass is one of Simulation, RealtimeEmulation, HardwareInLoop and Hardware. It is derived at binding resolution from two axes — whether the Time Authority is the Simulation Engine (free-running or wall-paced) or a device timekeeper (§15), and whether the RF path is simulated, cabled or over the air — and cross-checked against any `ezsdr.time` class the environment declares; a simulated Authority on a real RF path is refused. The class never changes during a Run. Determinism is a property of the Simulation class only, and only with a recorded seed: RealtimeEmulation trades it for real deadlines, and HardwareInLoop and Hardware are never deterministic. A single label cannot express "timing is modelled, RF is not", so every Run records a **fidelity vector** over five aspects — timing (lead times, start-up, stop tail, queue depth), continuity (overflow gaps, restarts, sequence errors), coercion (rate, gain and frequency grids), rf (SimulationChannel models, §16) and transport (packetisation, NIC behaviour) — each the weakest value any bound Provider declares, with `real` at the top of every aspect so that a Hardware Run has something to record.
+The ExecutionClass is one of Simulation, RealtimeEmulation, HardwareInLoop and Hardware. It is derived at binding resolution from two axes — whether the Time Authority is the Simulation Engine (free-running or wall-paced) or a device timekeeper (§15), and whether the RF path is simulated, cabled or over the air — and cross-checked against any `ezsdr.time` class the environment declares; a simulated Authority on a real RF path is refused. The class never changes during a Run. Determinism is a property of the Simulation class only, and only with a recorded seed: RealtimeEmulation trades it for real deadlines, and HardwareInLoop and Hardware are never deterministic. A single label cannot express "timing is modelled, RF is not", so every Run records a **fidelity vector** over five aspects — timing (lead times, start-up, stop tail, queue depth), continuity (overflow gaps, restarts, sequence errors), coercion (rate, gain and frequency grids), rf (SimulationChannel models, §16) and transport (packetisation, NIC behaviour) — each the weakest value any bound Provider declares, with `real` at the top of every aspect so that a Hardware Run has something to record. A Simulation Run's virtual root need not have a relation to UTC; transition `host_utc_nanos` values place its lifecycle transitions on the wall clock.
 
 Normative: [design/05-module-api.md](../05-module-api.md), rules MA-41, MA-42; [design/04-run-and-session.md](../04-run-and-session.md), rules RS-41, RS-42.
 
@@ -139,7 +141,7 @@ Real-time emulation may bind virtual time approximately 1:1 to wall time.
 
 ## Representation
 
-Time is integer ticks, never floating-point seconds. A TimePoint is a ClockDomain id plus a signed 64-bit tick count, a Duration names its domain, and every rate is an exact reduced rational. A domain is a Root — one per timekeeper, with an epoch; `utc` and `host.monotonic` are reserved — or a Derived domain naming its root directly, with an exact ratio and an origin. Every stream's **SampleClock** is a Derived domain, so a tick is a sample index. Two domains with one root convert exactly, or report an inexact floor with its remainder; domains with different roots convert only through a ClockRelation, with uncertainty. There is no other path, and TimePoints of different domains do not compare. A sample-rate change is a `cold` update (§27) that ends the SampleClock and allocates a new one, so a consumer detects the change from the block's own domain id. The Manifest records every stream's SampleClock sequence and a relation from the Run's root to UTC with its uncertainty; without it, correlation with cameras, positioners or other hosts (§24, §47) is impossible.
+Time is integer ticks, never floating-point seconds. A TimePoint is a ClockDomain id plus a signed 64-bit tick count, a Duration names its domain, and every rate is an exact reduced rational. A domain is a Root — one per timekeeper, with an epoch; `utc` and `host.monotonic` are reserved — or a Derived domain naming its root directly, with an exact ratio and an origin. Every stream's **SampleClock** is a Derived domain, so a tick is a sample index. Two domains with one root convert exactly, or report an inexact floor with its remainder; domains with different roots convert only through a ClockRelation, with uncertainty. There is no other path, and TimePoints of different domains do not compare. A sample-rate change is a `cold` update (§27) that ends the SampleClock and allocates a new one, so a consumer detects the change from the block's own domain id. The Manifest records every stream's SampleClock sequence and any relation from the Run's root to UTC; Simulation Runs may omit that relation because their virtual root need not map to wall time, while transition `host_utc_nanos` values place lifecycle transitions on the host clock.
 
 Normative: [design/01-time-model.md](../01-time-model.md), rules TM-1…TM-12, TM-13a, TM-13b, TM-13c, TM-13d, TM-13e, TM-18, TM-19.
 
@@ -151,7 +153,7 @@ Normative: [design/01-time-model.md](../01-time-model.md), rules TM-16a…TM-17b
 
 Three consequences:
 
-- The Simulation Environment (§13) *is* a discrete-event engine, the **Simulation Engine**. MockRadio, SimulationChannel, MockPeripheral and FaultInjector are models scheduled on it. Determinism with a seed follows from delivering events in virtual-time order, not from threads happening to agree.
+- The Simulation Environment (§13) *is* a discrete-event engine, the **Simulation Engine**. MockRadio, SimulationChannel and MockPeripheral are models scheduled on it; each target Provider reads its applicable entries from the `sim.faults` environment document (§17). Determinism with a seed follows from delivering events in virtual-time order, not from threads happening to agree.
 - **No client API waits on wall-clock time for something that happens in runtime time.** Python has `run.wait_until(t)` and `run.wait_for(event)`; it does not have a device-time `sleep`. A `time.sleep(0.5)` in a script means nothing in a Run that simulates ten seconds in 0.3 seconds.
 - Every stepped instance implements `step(until: TimePoint)`. The Kernel coordinator runs the stepping loop in a fixed order on one logical thread, and the Authority decides the instants; RealtimeEmulation, HIL and Hardware run Islands on real threads (§32; [design/05-module-api.md](../05-module-api.md), MA-20, MA-30).
 
@@ -220,7 +222,7 @@ TUN/TAP queue overflow
 plugin crash
 ```
 
-Injected faults must produce the same typed RuntimeEvent, the same SampleBlock flags and the same timing consequence as the equivalent hardware fault. An injected RX overflow is zero samples, a restart gap and a `GAP_BEFORE` flag (§23, §13). Fault schedules live in the BindingProfile `environment` (§8).
+Injected faults must produce the same typed RuntimeEvent, the same SampleBlock flags and the same timing consequence as the equivalent hardware fault. An injected RX overflow is zero samples, a restart gap and a `GAP_BEFORE` flag (§23, §13). Fault schedules live in the BindingProfile `environment` (§8) as a document read by each target Provider, not as a Module.
 
 This is essential for AI-agent validation.
 

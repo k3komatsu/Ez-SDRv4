@@ -478,9 +478,9 @@ crates/ezsdr-kernel/src/coordinator/
 In `src/lib.rs`: add `/// The Run coordinator: one Run from its documents to its sealed Manifest (KC-1…KC-45).` and `pub mod coordinator;` after `pub mod contract;` (alphabetical order), and add three rows to the rule-index table in the crate doc comment:
 
 ```text
-//! | `KA-n` | `plan/phase2/06-kernel-coordinator.md` §2 — amendments to the five specs above |
-//! | `KC-n` | `plan/phase2/06-kernel-coordinator.md` §5–§9 — [`coordinator`] |
-//! | `UC-n` | `plan/phase2/06-kernel-coordinator.md` §10 — update classes |
+//! | `KA-n` | `design/06-kernel-coordinator.md` §2 — amendments to the five specs above |
+//! | `KC-n` | `design/06-kernel-coordinator.md` §5–§9 — [`coordinator`] |
+//! | `UC-n` | `design/06-kernel-coordinator.md` §10 — update classes |
 ```
 
 In `src/plan.rs`, change the crate-private re-export line to `pub(crate) use validation::{binding_description, check_rid, not_registered, require_role};`.
@@ -1180,14 +1180,14 @@ Continue `pipeline` after `move_to(Planned)`:
 
    | name | version | description | `[dependencies]` | `[dev-dependencies]` |
    |---|---|---|---|---|
-   | `ezsdr-radio` | `1.0.0` | `Ez-SDR v4 Radio Model Vocabulary radio 1.0.0 (plan/phase2/07-radio-model.md)` | kernel, serde, serde_json, schemars | kernel+testing |
-   | `ezsdr-sim` | `1.0.0` | `Ez-SDR v4 Simulation Vocabulary sim 1.0.0 (plan/phase2/08-simulation.md)` | kernel, serde, serde_json, schemars | kernel+testing |
-   | `ezsdr-sink` | `1.0.0` | `Ez-SDR v4 Sink Vocabulary sink 1.0.0 (plan/phase2/10-host-data-path.md)` | kernel, serde, serde_json, schemars | kernel+testing |
-   | `ezsdr-hostmem` | `1.0.0` | `Ez-SDR v4 host memory domain and buffer pool (plan/phase2/10-host-data-path.md)` | kernel | kernel+testing |
-   | `ezsdr-sim-engine` | `1.0.0` | `Ez-SDR v4 Module ezsdr.sim-engine 1.0.0 (plan/phase2/08-simulation.md)` | kernel, ezsdr-sim, serde_json | kernel+testing |
-   | `ezsdr-mock-radio` | `1.0.0` | `Ez-SDR v4 Module ezsdr.radio.mock 1.0.0 (plan/phase2/09-mock-radio.md)` | kernel, ezsdr-radio, ezsdr-sim, ezsdr-hostmem, serde, serde_json | kernel+testing |
-   | `ezsdr-link-host` | `1.0.0` | `Ez-SDR v4 Module ezsdr.link.host 1.0.0 (plan/phase2/10-host-data-path.md)` | kernel | kernel+testing |
-   | `ezsdr-sink-capture` | `1.0.0` | `Ez-SDR v4 Module ezsdr.sink.capture 1.0.0 (plan/phase2/10-host-data-path.md)` | kernel, ezsdr-sink, ezsdr-hostmem, serde_json | kernel+testing |
+   | `ezsdr-radio` | `1.0.0` | `Ez-SDR v4 Radio Model Vocabulary radio 1.0.0 (design/07-radio-model.md)` | kernel, serde, serde_json, schemars | kernel+testing |
+   | `ezsdr-sim` | `1.0.0` | `Ez-SDR v4 Simulation Vocabulary sim 1.0.0 (design/08-simulation.md)` | kernel, serde, serde_json, schemars | kernel+testing |
+   | `ezsdr-sink` | `1.0.0` | `Ez-SDR v4 Sink Vocabulary sink 1.0.0 (design/10-host-data-path.md)` | kernel, serde, serde_json, schemars | kernel+testing |
+   | `ezsdr-hostmem` | `1.0.0` | `Ez-SDR v4 host memory domain and buffer pool (design/10-host-data-path.md)` | kernel | kernel+testing |
+   | `ezsdr-sim-engine` | `1.0.0` | `Ez-SDR v4 Module ezsdr.sim-engine 1.0.0 (design/08-simulation.md)` | kernel, ezsdr-sim, serde_json | kernel+testing |
+   | `ezsdr-mock-radio` | `1.0.0` | `Ez-SDR v4 Module ezsdr.radio.mock 1.0.0 (design/09-mock-radio.md)` | kernel, ezsdr-radio, ezsdr-sim, ezsdr-hostmem, serde, serde_json | kernel+testing |
+   | `ezsdr-link-host` | `1.0.0` | `Ez-SDR v4 Module ezsdr.link.host 1.0.0 (design/10-host-data-path.md)` | kernel | kernel+testing |
+   | `ezsdr-sink-capture` | `1.0.0` | `Ez-SDR v4 Module ezsdr.sink.capture 1.0.0 (design/10-host-data-path.md)` | kernel, ezsdr-sink, ezsdr-hostmem, serde_json | kernel+testing |
    | `ezsdr-acceptance` | `0.0.0` | `Ez-SDR v4 Phase 2 acceptance tests (plan/phase2/00-overview.md §8)` | every crate above, serde_json | kernel+testing |
 
    The dependency lines are written exactly like this (the versions are the ones already in `Cargo.lock`; do not change them):

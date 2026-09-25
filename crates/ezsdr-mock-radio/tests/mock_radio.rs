@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -316,7 +316,13 @@ fn mr_02_the_tree_has_the_radio_model_shape() {
     assert_eq!(instance.id, rid("mock"));
     assert_eq!(instance.tree.kind.as_str(), "radio.device");
     assert_eq!(instance.tree.children.iter().map(|child| child.id.path.as_str()).collect::<Vec<_>>(), ["mock/rx", "mock/tx"]);
+    assert_eq!(instance.tree.children.iter().map(|child| child.kind.as_str()).collect::<Vec<_>>(), ["radio.rx_stream", "radio.tx_stream"]);
+    assert!(instance.tree.children.iter().all(|child| child.capabilities.is_empty() && child.ports.is_empty() && child.children.is_empty() && !child.shareable));
     assert_eq!(instance.tree.ports.len(), 1);
+    assert_eq!(instance.tree.ports[0].name.as_str(), "rx");
+    assert_eq!(instance.tree.ports[0].direction, ezsdr_kernel::contract::PortDirection::Out);
+    assert_eq!(instance.tree.ports[0].contract.as_str(), "ezsdr.stream.cf32");
+    assert!(!instance.tree.shareable);
     assert_eq!(instance.tree.capabilities[&key("radio.rx.channels")], ezsdr_kernel::spec::CapabilityValue::Range { min: Value::Int(0), max: Value::Int(4) });
     assert_eq!(instance.tree.capabilities[&key("radio.perf.rx_bytes_per_s")], ezsdr_kernel::spec::CapabilityValue::One { value: Value::Int(2_000_000_000) });
 }
@@ -543,8 +549,22 @@ fn mr_07_prepare_reports_the_coercions_coerce_reported() {
 fn mr_08_effective_holds_exactly_the_ten_configuration_keys() {
     let harness = Harness::new("ideal", &[], &[], &[], None);
     let effective = &harness.effective;
-    assert_eq!(ezsdr_radio::keys::CONFIGURATION.len(), 10);
-    assert_eq!(effective.len(), 10);
+    let expected_keys: BTreeSet<_> = ezsdr_radio::keys::CONFIGURATION.into_iter().collect();
+    let actual_keys: BTreeSet<_> = effective.keys().map(Key::as_str).collect();
+    assert_eq!(expected_keys.len(), 10);
+    assert_eq!(actual_keys, expected_keys);
+    assert_eq!(effective, &BTreeMap::from([
+        (key(ezsdr_radio::keys::RX_CHANNELS), Value::Int(1)),
+        (key(ezsdr_radio::keys::TX_CHANNELS), Value::Int(0)),
+        (key(ezsdr_radio::keys::RX_SAMPLE_RATE_HZ), Value::Num(1_000_000.0)),
+        (key(ezsdr_radio::keys::TX_SAMPLE_RATE_HZ), Value::Num(1_000_000.0)),
+        (key(ezsdr_radio::keys::RX_FREQUENCY_HZ), Value::Num(1_000_000_000.0)),
+        (key(ezsdr_radio::keys::TX_FREQUENCY_HZ), Value::Num(1_000_000_000.0)),
+        (key(ezsdr_radio::keys::RX_GAIN_DB), Value::Num(0.0)),
+        (key(ezsdr_radio::keys::TX_GAIN_DB), Value::Num(0.0)),
+        (key(ezsdr_radio::keys::RX_ANTENNA), Value::Str("RX2".to_owned())),
+        (key(ezsdr_radio::keys::TX_ANTENNA), Value::Str("TX/RX".to_owned())),
+    ]));
 }
 
 #[test]
@@ -555,6 +575,9 @@ fn mr_11_start_cases() {
     assert!(harness.mock.start(Some(TimePoint::new(ROOT, 1_999_999_999))).unwrap_err().message.contains("ezsdr.time.start_lead_ns"));
     let early = harness.events.drain();
     assert_eq!(early.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).count(), 1);
+    let late = early.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).unwrap();
+    assert_eq!(late.source, rid("mock"));
+    assert_eq!(late.time, TimePoint::new(ROOT, 0));
     harness.mock.start(Some(TimePoint::new(ROOT, 2_000_000_000))).unwrap();
     let clocks = harness.clocks.sample_clock_records();
     assert_eq!(clocks.iter().find(|record| record.stream == rid("mock/rx")).unwrap().origin, TimePoint::new(ROOT, 2_000_000_000));
@@ -634,6 +657,7 @@ fn mr_13_ramp_values() {
     harness.arm_start(0).unwrap();
     harness.step(1_999_000).unwrap();
     let block = harness.link.as_ref().unwrap().receive().unwrap();
+    assert_eq!(block.buffer().memory_domain, ezsdr_hostmem::HOST_MEMORY);
     let bytes = block.host_bytes().unwrap();
     let f32_at = |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
     assert_eq!(f32_at(0), 0.0);
@@ -646,6 +670,13 @@ fn mr_13_ramp_values() {
     assert_eq!(f32_at(16_004), 1.0 / 64.0);
     assert_eq!(f32_at(16_008), 1.0 / 65536.0);
     assert_eq!(f32_at(16_012), 1.0 / 64.0);
+
+    let mut zero = Harness::new("ideal", &[("radio.rx.channels", eq(Value::Int(2)))], &[], &[], Some((BackPressure::DropOldest, 4)));
+    zero.arm_start(0).unwrap();
+    zero.step(1_999_000).unwrap();
+    let block = zero.link.as_ref().unwrap().receive().unwrap();
+    assert_eq!(block.buffer().memory_domain, ezsdr_hostmem::HOST_MEMORY);
+    assert!(block.host_bytes().unwrap().iter().all(|byte| *byte == 0));
 }
 
 #[test]
@@ -735,7 +766,13 @@ fn mr_16_burst_refusals() {
     let rejected = &moved_duplicate.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.rejected").unwrap()];
     assert_eq!(rejected.as_array().unwrap().len(), 1);
     assert!(rejected[0]["reason"].as_str().unwrap().contains("held burst already has this start"));
-    assert_eq!(moved_duplicate.events.drain().iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).unwrap().payload["outcome"], "refused");
+    let events = moved_duplicate.events.drain();
+    assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).count(), 1);
+    let refused = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).unwrap();
+    assert_eq!(refused.payload["outcome"], "refused");
+    assert_eq!(refused.source, rid("mock/tx"));
+    assert_eq!(refused.time.domain, domain);
+    assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 1);
 }
 
 #[test]
@@ -785,6 +822,8 @@ fn mr_17_late_policy_outcomes() {
         let late = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).unwrap();
         assert_eq!(late.payload["outcome"], outcome);
         assert_eq!(late.payload["late_by_ns"], 1_000_000);
+        assert_eq!(late.source, rid("mock/tx"));
+        assert_eq!(late.time, TimePoint::new(domain, 2_010_000));
         assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).count(), 1);
         assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 0);
         if transmitted {
@@ -835,6 +874,9 @@ fn mr_18_hardware_timed_updates() {
     let events = full.events.drain();
     assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_QUEUE_FULL).count(), 1);
     assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).count(), 0);
+    let full_event = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_QUEUE_FULL).unwrap();
+    assert_eq!(full_event.source, rid("mock"));
+    assert_eq!(full_event.time, TimePoint::new(ROOT, 0));
     let rejected = &full.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.rejected").unwrap()];
     assert_eq!(rejected.as_array().unwrap().len(), 1);
     assert!(rejected[0]["reason"].as_str().unwrap().contains("queue is full"));
@@ -981,6 +1023,10 @@ fn mr_20_faults_fire_at_their_instants() {
     harness.step(2_002_000_000).unwrap();
     let events = harness.events.drain();
     assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 1);
+    let overflow = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).unwrap();
+    let rx_domain = harness.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/rx")).unwrap().domain;
+    assert_eq!(overflow.source, rid("mock/rx"));
+    assert_eq!(overflow.time, TimePoint::new(rx_domain, 1_000));
     let faults = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.faults").unwrap()];
     assert_eq!(faults.as_array().unwrap().len(), 1);
     assert_eq!(faults[0]["fault"], "rx_overflow");
@@ -1233,7 +1279,10 @@ fn mr_29_other_actions_are_command_rejected() {
     assert_eq!(rejected.as_array().unwrap().len(), 2);
     assert_eq!(rejected[0]["action"], "set_timer");
     assert_eq!(rejected[1]["action"], "peripheral_command");
-    assert_eq!(harness.events.drain().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 2);
+    let events = harness.events.drain();
+    let rejected_events: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
+    assert_eq!(rejected_events.len(), 2);
+    assert!(rejected_events.iter().all(|event| event.source == rid("mock") && event.time == TimePoint::new(ROOT, 1)));
 }
 
 #[test]

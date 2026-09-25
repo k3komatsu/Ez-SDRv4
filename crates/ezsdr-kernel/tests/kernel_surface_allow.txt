@@ -29,7 +29,7 @@ spec = ExperimentSpec envelope
 stream = Stream Contract
 time = time
 
-# --- coordinator (Phase 2, plan/phase2/06-kernel-coordinator.md) --------------
+# --- coordinator (Phase 2, design/06-kernel-coordinator.md) --------------
 coordinator = Run / Session state machine
 coordinator::start_spec_run = Run / Session state machine
 coordinator::connect = Run / Session state machine

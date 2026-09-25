@@ -25,7 +25,8 @@ Example:
         "radio.rx.coherent":    { "kind": "eq",  "value": true },
         "radio.tx.channels":    { "kind": "min", "value": 2 },
         "radio.full_duplex":    { "kind": "eq",  "value": true },
-        "radio.sample_rate_hz": { "kind": "eq",  "value": 20000000 },
+        "radio.rx.sample_rate_hz": { "kind": "eq",  "value": 20000000 },
+        "radio.tx.sample_rate_hz": { "kind": "eq",  "value": 20000000 },
         "radio.hardware_time":  { "kind": "eq",  "value": true }
       }
     }
@@ -96,10 +97,10 @@ environment:
     model: awgn
     snr_db: 10
     delay_samples: 37
-  sim.faults:                            # FaultInjector schedule (§17)
-    - at: "2.5s"
-      inject: rx_overflow
-      target: radio[0].rx
+  sim.faults:                            # fault schedule read by its target Provider (§17)
+    - at_ns: 2500000000                  # nanoseconds after T0
+      fault: rx_overflow
+      target: radio                     # target fragment id
 ```
 
 > **The ExperimentSpec never describes the environment.** Channel models, fault schedules, virtual-time settings, clock distribution and site constraints live in `environment`. A channel emulator or attenuator that the *experiment itself controls* is a Peripheral resource in the Spec; a channel that merely *exists* around the experiment is environment.
@@ -214,7 +215,7 @@ Normative: [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-
 
 The Core composes Module plan fragments.
 
-The ExecutionPlan is a set of fragments, one per role slot: a Provider fragment per bound resource, one per Island, one per bound output's Sink, and the Authority's when it stands alone; the Kernel builds a Provider fragment's content from the selector and the matched request and reads no other content, so no fragment type names a resource model. Each fragment carries its dependency edges. The Core drives `prepare → arm → start → running → stop → cleanup` as one transaction: `prepare` and `arm` run in dependency order (the device that sources PPS before the devices that consume it), any fragment's failure fails the whole Run, and cleanup runs in reverse order. `prepare` returns one PrepareReport per fragment — effective configuration, coercions, warnings — plus the merged effective configuration that `run.effective()` exposes to Python and Reactors. Each coercion is judged by its key's policy, `accept`, `warn` or `reject`: the Spec's `policies.coercion` first, then `warn` for a Session, then the Vocabulary's declared default, which the Radio Model is to set to `reject` for sample rate and frequency and `warn` for gain, because a publication Run must not silently change its waveform timing.
+The ExecutionPlan is a set of fragments, one per role slot: a Provider fragment per bound resource, one per Island, one per bound output's Sink, and the Authority's when it stands alone; the Kernel builds a Provider fragment's content from the selector and the matched request and reads no other content, so no fragment type names a resource model. Each fragment carries its dependency edges. The Core drives `prepare → arm → start → running → stop → cleanup` as one transaction: `prepare` and `arm` run in dependency order (the device that sources PPS before the devices that consume it), any fragment's failure fails the whole Run, and cleanup runs in reverse order. `prepare` returns one PrepareReport per fragment — that fragment's effective configuration, coercions and warnings — plus the merged effective configuration that `run.effective()` exposes to Python and Reactors. Registered checks judge the effective configuration per fragment; the merged view is for Run consumers. Each coercion is judged by its key's policy, `accept`, `warn` or `reject`: the Spec's `policies.coercion` first, then `warn` for a Session, then the Vocabulary's declared default, which the Radio Model is to set to `reject` for sample rate and frequency and `warn` for gain, because a publication Run must not silently change its waveform timing.
 
 Normative: [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-22b, SB-24, SB-39, SB-41, SB-42, SB-44…SB-46 (the fragments: table SB-T1); [design/04-run-and-session.md](../04-run-and-session.md), rules RS-2, RS-3, RS-6; [design/05-module-api.md](../05-module-api.md), MA-7.
 

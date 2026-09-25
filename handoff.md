@@ -8,7 +8,7 @@
 | | |
 |---|---|
 | remote | `git@github.com:k3komatsu/Ez-SDR.git` |
-| `main` | v4（この worktree）．Phase 0/1 完了．Phase 2 Step 1–15 を実装済み．Review K 完了，Review M は Opus `PASS_WITH_RISK`（P0/P1 なし）後に残った P2 を局所修正・検証済み．Steps 9–15 は未 commit．次は Step 16 / Gate X の owner 判断．|
+| `main` | v4（この worktree）．Phase 0–2 の受理完了．Phase 2 Gate X を owner が2026-09-25に受理し，spec 06–10 を `design/` へ移動，Vision issue 15件を適用（Step X 完了）．Step 16/Gate X/Step X の差分は未 commit．Opus `PASS_WITH_RISK` の残余リスクは §4 と `plan/phase2/00-overview.md` §11 に記録．|
 | `master` | v3（D + C++ UHD bridge + Python client）．tip `4a474e9` = tag `v3.0.28`．**GitHub の default branch のまま** |
 | tags | 35 個（`v2.11`, `v3.0.0`–`v3.0.28`）．すべて v3 系 |
 | 履歴の関係 | **無関係（unrelated）**．graft も merge もしていない．v4 は clean-sheet なので今後も繋がない |
@@ -26,13 +26,14 @@
 - `v3/` を消してしまった場合：`git worktree prune && git worktree add v3 master`
 - **Google Drive の同期で追跡ファイルが消えることがある**．2026-09-24 に `crates/ezsdr-kernel/tests/` と `schemas/`（61 ファイル）が作業ツリーから消え，`git restore crates/ezsdr-kernel/tests schemas` で戻した．作業を始める前に `git status --short` に ` D` 行がないことを確かめる．Drive の同期中に戻すと競合コピー（`… (1).…`）が増えるので，同期を止めてから戻す．
 
-## 2. 設計文書の状態 — Phase 0 完了
+## 2. 設計文書の状態 — Phase 0・1・2 完了
 
 - 単一の設計ソース = **Vision**：索引 [Ez-SDR_v4_ARCHITECTURE_VISION.md](Ez-SDR_v4_ARCHITECTURE_VISION.md) + [design/vision/](design/vision) の 11 part（§1–§68，番号は不変）．
 - [design/v4-vision-audit.md](design/v4-vision-audit.md)（Findings 1–34，判定 READY WITH REQUIRED CHANGES）→ 全項目を Vision に反映済み．
-- [design/v4-vision-rereview.md](design/v4-vision-rereview.md)（Findings R1–R22，判定 READY）→ 全項目反映済み．R13「規範部分の spec 化」は当初11ファイル分割で暫定対応したが，Phase 1 Step 5（D109，2026-09-23）で規範部分を accepted specs へ移し，完了した．
+- [design/v4-vision-rereview.md](design/v4-vision-rereview.md)（Findings R1–R22，判定 READY）→ 全項目反映済み．R13「規範部分の spec 化」は当初11ファイル分割で暫定対応したが，Phase 1 Step 5（D109，2026-09-23）で Phase 1 specs へ，Phase 2 Gate X（2026-09-25）で specs 06–10 へ反映し，完了した．
+- accepted specs は Phase 1 の [design/01-time-model.md](design/01-time-model.md)〜[design/05-module-api.md](design/05-module-api.md) と Phase 2 の [design/06-kernel-coordinator.md](design/06-kernel-coordinator.md)〜[design/10-host-data-path.md](design/10-host-data-path.md)．Phase 2 の決定ログ・実装計画・rule exit evidence は [plan/phase2/](plan/phase2) に残る．
 - 旧 CMA は退役．[design/archive/](design/archive) に保管（audit / rereview の `CMA §N` 引用のためだけに残す）．編集しない．
-- Vision の改訂履歴は索引ファイル末尾の表（8 pass：7件は2026-09-21，最終の1件は2026-09-23）．
+- Vision の改訂履歴は索引ファイル末尾の表（Phase 0/1 の8 passに加え，Phase 2 Gate X の適用を2026-09-25に記録）．
 
 ## 3. 実装の状態
 
@@ -43,15 +44,31 @@ Phase 1 の Kernel crate は **実装済み**（Step 4 完了）．
 | workspace | ルートの `Cargo.toml`（`resolver = "3"`，edition 2024，`rust-version = "1.85"`）．`Cargo.lock` は commit 対象 |
 | crate | `crates/ezsdr-kernel` version `4.0.0-alpha.1`．`#![forbid(unsafe_code)]`，`#![warn(missing_docs)]` |
 | module | `id time contract coordinator stream hash module_api spec binding plan event policy run session manifest schema`．`plan` は `coercion` `compile` `graph` `islands` `links` `matching` `prepare` `validation` の private submodule に分割済み |
-| 直接依存 | `serde` `serde_json` `schemars` `sha2` の4つだけ（exit criterion 6）．解決後のツリーは `Cargo.lock` で28 package（crate 自身を含む） |
-| test | 427 件．`coordinator`(65) `spec_binding`(107) `stream_contract`(69) `run_session`(76) `time_model`(52) `module_api`(27) `run_doubles`(1) `hashing`(9) `kernel_surface`(15) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
-| toolchain | Rust `1.85.0` / stable (`1.98.1`) の両方で 427 passed（2026-09-25）．`cargo +stable clippy --workspace --all-targets -- -D warnings` も通過 |
-| schemas | `schemas/` に47個の JSON Schema 2020-12 + `SCHEMA_CHANGELOG.md`．`schema_freeze` が byte 単位で凍結．再生成は `EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze` |
-| kernel surface | `tests/kernel_surface_allow.txt` が公開 item の allow-list（= レビュー用チェックリスト，`module::name` で key 付け）．OV-23b は **115 NEW / 291 public items**（2026-09-25）．banned token は `tests/banned_tokens.txt`（識別子内も検出，`OV-23a` を書いた行だけ免除） |
+| 直接依存 | `serde` `serde_json` `schemars` `sha2` の4つだけ（exit criterion 6）．`cargo tree -p ezsdr-kernel` の解決ツリーはKernel自身を含む28 package．workspace全体のlockはexternal 27 package + workspace member 10 package |
+| test | Kernel package 443 件：`coordinator`(81) `spec_binding`(107) `stream_contract`(69) `run_session`(76) `time_model`(52) `module_api`(27) `run_doubles`(1) `hashing`(9) `kernel_surface`(15) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
+| toolchain | Rust `1.85.0` (`4d91de4e4`, 2025-02-17) / stable `1.98.1` (`48a229cea`, 2026-09-01) の両方で workspace 547 passed，0 failed，0 ignored（2026-09-25）．`cargo +stable clippy --workspace --all-targets -- -D warnings` も再通過 |
+| schemas | Kernelの `schemas/` 直下に47個の JSON Schema 2020-12．Phase 2 Vocabularyの `schemas/{radio,sim,sink}/` に10個あり，合計57個 + `SCHEMA_CHANGELOG.md`．`schema_freeze` が byte 単位で凍結．再生成は `EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze` |
+| kernel surface | `tests/kernel_surface_allow.txt` が公開 item の allow-list（= レビュー用チェックリスト，`module::name` で key 付け）．`cargo +stable test -p ezsdr-kernel --test kernel_surface ov_23b -- --nocapture` は **115 NEW / 291 public items**（2026-09-25）．banned token は `tests/banned_tokens.txt`（識別子内も検出，`OV-23a` を書いた行だけ免除） |
 
-Python client と wire protocol は未着手．Radio/Simulation/Sink Vocabulary，Simulation Engine，MockRadio，host data path と acceptance tests は Phase 2 Steps 1–15 で実装済み．
+Phase 2 の workspace tests（2026-09-25，Gate X 修正後にRust 1.85.0 / stable の両方で各547 passed）：
 
-## 4. Phase の状態 — Phase 1 完了，Phase 2 Step 1–15 完了（Gate X 前）
+| crate | tests |
+|---|---:|
+| `ezsdr-kernel` | 443 |
+| `ezsdr-radio` | 10 |
+| `ezsdr-sim` | 6 |
+| `ezsdr-sim-engine` | 7 |
+| `ezsdr-hostmem` | 2 |
+| `ezsdr-link-host` | 2 |
+| `ezsdr-sink` | 2 |
+| `ezsdr-sink-capture` | 14 |
+| `ezsdr-mock-radio` | 33 |
+| `ezsdr-acceptance` | 28 |
+| **合計** | **547** |
+
+Python client と wire protocol は未着手．Phase 2 はGate X受理・Step X完了まで済み（2026-09-25）．実装・review・exit artifacts・受理処理は未 commit．
+
+## 4. Phase の状態 — Phase 1・Phase 2 完了（Gate X受理）
 
 ### Phase 1 — specs 受理・Kernel 実装済み
 
@@ -94,15 +111,15 @@ exit criteria（§13）の達成状況（2026-09-23 時点）：
 - **新しい拒否は1件ずつ無効化して，テストが落ちることを確かめる**（mutation）．落ちないものはテストを足すか，死にコードとして消す．
 - **gate は列挙では閉じない**．`kernel_surface` は構文の新しい形で何度も抜けられた．仕組み（`use … as` や一覧外の `macro_rules!`）を禁止し，残りは process obligation として名指す（D100）．
 
-### Phase 2 — Step 1–15 実装済み，Review K/M 完了
+### Phase 2 — Gate X受理・Step X完了
 
-Vision §67 の Phase 2（Radio Model + Simulation Engine + MockRadio）．文書はすべて [plan/phase2/](plan/phase2) にあり，2026-09-24 に Gate P で受理された（[00-overview.md](plan/phase2/00-overview.md) §9，§11）．spec 06–10 は実装者を拘束し，20-implementation-plan.md が作業順序．Steps 1–15 は実装済み（[implementation-notes.md](plan/phase2/implementation-notes.md)）．Review K は完了．Review M の最新 Opus 再レビューは `PASS_WITH_RISK`（P0/P1 なし，P2 2件）で，その P2 修正を focused regressions と scratch 検証で確認した．低リスクの局所修正後に Opus を再起動していない（スキルの軸評価による）．Steps 9–15 は未 commit．静的レビューが残した非 blocking の穴は，`Stop(sink/rec)` の Kernel 経由 acceptance test がない点（Sink crate 単体の Stop test はある）．
+Vision §67 の Phase 2（Radio Model + Simulation Engine + MockRadio）．2026-09-24に Gate P，2026-09-25に Gate X を受理済み（[00-overview.md](plan/phase2/00-overview.md) §9，§11）．accepted specs 06–10 は [design/](design/) に移し，Phase 2 の決定・手順・exit evidence は [plan/phase2/](plan/phase2) に残した．Steps 1–15 は commit `6bf67fb` までに実装済み（[implementation-notes.md](plan/phase2/implementation-notes.md)）．Review K/M と Gate X の Opus review は完了．Gate X は `PASS_WITH_RISK`（blockerなし）を受けて owner が受理した．named risks は MA-8 timeout enforcement 未試験，Kernel 経由 Session `Stop(sink/rec)` test なし，reviewer は静的レビューのみ．Phase 2 の Vision issue 15件を適用し，stable/MSRV の workspace 547 tests と stable Clippy は適用前の最終コードで通過済み．残る test ceilings は [implementation-notes.md](plan/phase2/implementation-notes.md) と exit tables に記録した．
 
 | 文書 | 中身 |
 |---|---|
 | [00-overview.md](plan/phase2/00-overview.md) | 範囲，横断決定 Y1–Y14，10 crate の構成と許される依存，運用規則 PO-1–PO-12，Vision §58/§61 と Phase 1 marker の対応表，gate，exit criteria，決定ログ（§11，Gate P で記入） |
-| [06-kernel-coordinator.md](plan/phase2/06-kernel-coordinator.md) | Phase 1 spec への修正 KA-1–KA-22，Run coordinator KC-1–KC-45，update class UC-1–UC-6 |
-| [07-radio-model.md](plan/phase2/07-radio-model.md) / [08-simulation.md](plan/phase2/08-simulation.md) / [09-mock-radio.md](plan/phase2/09-mock-radio.md) / [10-host-data-path.md](plan/phase2/10-host-data-path.md) | `radio` Vocabulary（RM），`sim` Vocabulary と Simulation Engine（SE），MockRadio（MR），host メモリ・Link・`sink` Vocabulary・capture Sink（HD） |
+| [06-kernel-coordinator.md](design/06-kernel-coordinator.md) | Phase 1 spec への修正 KA-1–KA-22，Run coordinator KC-1–KC-45，update class UC-1–UC-6 |
+| [07-radio-model.md](design/07-radio-model.md) / [08-simulation.md](design/08-simulation.md) / [09-mock-radio.md](design/09-mock-radio.md) / [10-host-data-path.md](design/10-host-data-path.md) | `radio` Vocabulary（RM），`sim` Vocabulary と Simulation Engine（SE），MockRadio（MR），host メモリ・Link・`sink` Vocabulary・capture Sink（HD） |
 | [20-implementation-plan.md](plan/phase2/20-implementation-plan.md) | 実装者（安価なモデルを想定）向けの 16 手順．各手順にファイル・シグネチャ・疑似コード・テスト表・mutation check・完了条件．付録 A = patch 適用後の Kernel API，付録 B = 全規則→手順→テストの対応（テストの無い規則 0） |
 | [patches/01-kernel-amendments.patch](plan/phase2/patches/01-kernel-amendments.patch) | KA のうち coordinator 以外のコード（28 ファイル）．実装手順 1 で `96976c5` に適用済み．同パッチの新テスト 8 件は各規則を無効化すると落ちることを確認済み |
 | [reviews/planning-reviews.md](plan/phase2/reviews/planning-reviews.md) | Gate P 前の Opus 敵対的レビュー 3 巡（指摘 56 → 34 → 18）と各指摘の判定．全件反映済み |
@@ -118,9 +135,9 @@ Phase 1 の Kernel には，最初の本物の Module が必ず踏む穴があ�
 
 ### 次にすること
 
-1. **Step 16 / Gate X**：`20-implementation-plan.md` の per-rule exit review tables（PO-10）を作り，Vision issue の一覧を整理する．
-2. Owner が Phase 2 の exit を受理した後，spec 06–10 を `design/` へ移し，各 spec の「Vision issues found」を owner の承認のもとで Vision に反映する（OV-6）．
-3. Review M の `Stop(sink/rec)` Kernel 経由 acceptance gap は非 blocking として記録済み．必要なら Step 16 の前に追加するか，owner が残余リスクとして判断する．
+1. **Phase 2 は完了**：Gate X owner acceptance と Step X を2026-09-25に完了．spec 06–10 は `design/` にあり，15件の Vision issue を適用済み．
+2. **Gate X の named risks**：`MA-8` timeout enforcement は未試験，Kernel 経由 Session `Stop(sink/rec)` test は未実装，Opus review は静的のみ．
+3. その他の test ceilings：sc16 capture と contract change 時の `partial`，KC-29 の直接 assert，到達不能な N8/N10 分岐，KA-12 marker check/acquire race の決定的 test seam，Provider→Sink datapath の nonzero drop→Manifest 経路．詳細は [implementation-notes.md](plan/phase2/implementation-notes.md) と exit tables を参照．
 
 ## 5. v3 → v4 切替で残っている作業（人間の判断が要るもの）
 

@@ -265,4 +265,48 @@
 - No further Opus re-review was run after P2-c/d: all three skill axes were low. These are local MockRadio lifecycle changes outside the Kernel's normal pre-start step path; each has a focused regression, and mutation checks below show each assertion detects its corresponding defect.
 - Scratch checks in `/private/tmp/ezsdr-phase2-review-m-20260925`: `cargo +1.85.0 test --workspace` — 546 passed; `cargo +stable test --workspace` — 546 passed; `cargo +stable clippy --workspace --all-targets -- -D warnings` — passed; `git diff --check` — passed. `v58_03_same_seed_same_manifest_projection` passed twice; `v58_02_ten_virtual_seconds_run_faster_than_wall_clock` passed in 0.06 s test time (0.83 s Cargo wall time).
 - Mutation checks, each restored afterward: removing the P2-a clamp failed at `lost` 50,000 vs 500; bypassing P2-b's `ns_to_v` failed at 5,000,000 vs 10,000,000; removing P2-c's `started` gate scheduled a spurious wakeup at 5,000,000; committing P2-d's rebased tick before RX registration failed at 5,010,000,000 vs 10,000,000.
-- Remaining nonblocking test gap from the static review: there is no acceptance-level Session test that routes `Stop(sink/rec)` through the Kernel; the Sink crate's own-target test covers the guard in isolation. No implementation files have been committed for Steps 9–15.
+- Remaining nonblocking test gap from the static review: there is no acceptance-level Session test that routes `Stop(sink/rec)` through the Kernel; the Sink crate's own-target test covers the guard in isolation. At the time of this Review M entry, the Step 9–15 implementation had not yet been committed; commit `6bf67fb` subsequently recorded it.
+
+## Step 16
+
+- [x] Added `plan/phase2/exit-review/{README,06,07,08,09,10,00}.md`: 164 rule rows in source order with the OV-3 disposition set. The initial mechanical check verified rule coverage, no duplicate IDs, valid dispositions, and that cited test functions/sources exist; it did **not** establish that every cited test body asserted the row's full claim. Gate X remediation below records the body-read corrections. No row is `GAP` or `UNCERTAIN`.
+- [x] Replaced the Phase 2 portions of every §8 marker not re-marked in `design/01-time-model.md` through `design/05-module-api.md`; retained the Phase 1 evidence and later-phase re-markers. The MA-8 marker records that the cited Modules receive a `host_budget` but those tests do not assert timeout enforcement.
+- [x] `CARGO_TARGET_DIR=/private/tmp/ezsdr-phase2-step16-target cargo +stable test -p ezsdr-kernel --test kernel_surface ov_23b -- --nocapture`: passed; **115 NEW / 291 public items**.
+- [x] Collected the fifteen items from specs 06–10 into `plan/phase2/vision-issues.md`; no Vision or specs 06–10 were moved or edited.
+- [x] Ran the prescribed link and `v3/` path checks. The `v3/` check printed nothing. The grep link command prints `CHECK` for relative targets because it tests them from the repository root (plus the existing Rustdoc and shell-fragment false positives); the source-relative check resolved all 290 local Markdown links, including the new exit-review links.
+- [x] Updated `handoff.md` §3–4 with per-crate counts, toolchains, NEW count, Step 16 status, and Gate X as the next owner decision.
+- [x] `cargo +1.85.0 test --workspace`: 546 passed, 0 failed, 0 ignored (2026-09-25).
+- [x] `cargo +stable test --workspace`: 546 passed, 0 failed, 0 ignored (stable 1.98.1, 2026-09-25).
+- [x] `cargo +stable clippy --workspace --all-targets -- -D warnings`: passed.
+- [x] `git diff --check`: passed.
+- Evidence limits recorded for owner review: the coordinator Manifest success test asserts `drops: 0`, the failed snapshot test asserts `null`, and the Link tests assert nonzero counts locally; there is no positive nonzero Link-to-Manifest integration assertion. The prior Review M `Stop(sink/rec)` Kernel-path acceptance-test gap remains nonblocking.
+- Suggested commit subject: `docs(phase2): complete Step 16 exit review`
+
+Step 16 is complete. Stop at Gate X for the owner's decision.
+
+## Gate X review remediation (2026-09-25; acceptance remains the owner's decision)
+
+- Restored KA-2's exact TM-13a normative amendment, including Provider allocation through `PrepareContext.clocks.declare_sample_clock`, stream naming via a `ResourceId` in its tree, origin-time registration, and KC-45 Manifest recording. The Phase 2 marker now cites both the Mock cold-rate test and the pre-registration declaration test.
+- Read the review-cited test bodies and amended the disposition tables: KA-6, KA-12, KC-8, KC-30, KC-36, KC-44, KC-45, KA-13, KC-7/KC-24, RM-2, RM-5/MR-5, RM-11/MR-28, and HD-10/HD-11 now cite the regressions/assertions that actually cover them. KA-12's construction-level closing coverage and marker check/acquire race limit are stated explicitly.
+- Corrected SC-20 / KA-18 citations and added exact Manifest `link`/`from`/`to`/`drops` assertions plus `ka_18_nonzero_link_drops_reach_the_manifest`: its test Link double seeds one capacity-1 `DropOldest` eviction during `Link::create`, then the Run's cleanup snapshot is asserted in the Manifest. This does not exercise a Provider-to-Sink data-path drop.
+- Added exact MockRadio assertions for the ten effective keys and defaults, resource-tree child kinds and Port contract, device/stream event source and event time, moved `SendAsap` refusal events, and the published block's `HOST_MEMORY` domain. Updated RM-14/MR-16 to state the moved-then-refused behavior.
+- Recorded individual Review M and Gate X findings in `00-overview.md` §11, including N4 as a documented nonblocking risk. Corrected MA-8 to cite HD-9 and clarified handoff package/schema count scopes.
+- Verification after remediation: `cargo +stable test --workspace` — 547 passed, 0 failed; `cargo +1.85.0 test --workspace` — 547 passed, 0 failed; `cargo +stable clippy --workspace --all-targets -- -D warnings` — passed; coordinator — 81 passed; MockRadio — 32 passed; `ma_04_kernel_surface_ban` — passed; `git diff --check` — passed. The source-relative Markdown check resolved all 291 local links; the `v3/` path check printed nothing. Stable and MSRV workspace runs each contain 547 Rust tests; no test is ignored.
+- The generated test names, table rows, and links were not made an acceptance decision. Gate X remains with the owner after the same-session Opus re-review.
+
+### Same-session re-review P3 fixes
+
+- Removed the `RunStateMachine` unit test from KC-7's citations; the row now cites coordinator failures at validate/plan/prepare/arm/start/run. Added `kc_24_a_prepare_abort_stops_before_arm_and_start` to KC-24.
+- Corrected KA-22's process carrier to spec 06 §2. UC-5 now defers until the first later phase declaring an `atomic_realtime` Provider key or component parameter; Phase 7 is conditional, not presumed.
+- RM-14 now makes the event exclusive on a moved-then-refused `SendAsap`; the regression asserts exactly one `TIME_ERROR`.
+- Clarified that the nonzero-drop fixture seeds the eviction in Link creation, and documented the KA-12 marker check/acquire race as lacking a deterministic test seam.
+- Verification after these P3 fixes: `cargo +stable test --workspace` — 547 passed, 0 failed; `cargo +1.85.0 test --workspace` — 547 passed, 0 failed; `cargo +stable clippy --workspace --all-targets -- -D warnings` — passed after the assertion edit. The focused `mr_16_burst_refusals` test also passed on both toolchains; no runtime code changed.
+
+## Gate X acceptance and Step X (2026-09-25)
+
+- The owner accepted Phase 2 at Gate X with the Opus 5.5 `PASS_WITH_RISK` recommendation and no blockers. The named risks are: MA-8 timeout enforcement is untested; there is no Kernel-routed Session test for `Stop(sink/rec)`; the review was static and relied on reported verification. Other test ceilings remain in the per-rule tables and this record.
+- [x] Moved accepted specs 06–10 from `plan/phase2/` to `design/06-*.md` … `design/10-*.md`; their status rows now record Gate X ratification and link back to the Phase 2 decision log.
+- [x] Applied all 15 accepted issues in `plan/phase2/vision-issues.md` to the Vision without renumbering sections or changing part navigation; appended the Gate X/Step X row to the Vision revision history.
+- [x] Updated `AGENTS.md` §1–2, this overview, the exit-review links, `20-implementation-plan.md`, and `handoff.md` §2–4 to describe the accepted layout and remaining risks.
+- [x] Post-move validation: 303 local Markdown links and all 15 checked heading fragments resolve; the prescribed `v3/` citation-path check reports no missing files; `git diff --check` passes.
+- The final code verification remains the Gate X remediation result above: 547 workspace tests passed on Rust 1.85.0 and stable, stable Clippy passed, and no runtime code changed during Step X. No commit was made.

@@ -2410,6 +2410,12 @@ fn kc_45_manifest_fields() {
             .len(),
         1
     );
+    let link = &manifest.sections[&ns("ezsdr.links")][0];
+    assert!(link["link"]["node"].is_number());
+    assert!(link["link"]["local"].is_number());
+    assert_eq!(link["from"], serde_json::json!({"component": "radio", "port": "rx"}));
+    assert_eq!(link["to"], serde_json::json!({"component": "rec", "port": "in"}));
+    assert_eq!(link["drops"], 0);
     assert_eq!(
         manifest.sections[&ns("ezsdr.test.provider.details")]["samples"],
         1
@@ -2421,6 +2427,25 @@ fn kc_45_manifest_fields() {
             cause: StopCause::Client {}
         }
     ));
+}
+
+#[test]
+fn ka_18_nonzero_link_drops_reach_the_manifest() {
+    let (mut spec, profile) = output_docs();
+    spec["outputs"][0]["feed"]["capacity"] = serde_json::json!(1);
+    let probe = Probe::new();
+    let mut assembly = output_assembly(&probe, None, None);
+    assembly.links.insert(
+        mref("ezsdr.test.link"),
+        Box::new(TestLinkModule::new(&probe).seeding_one_drop()),
+    );
+    let run = start_spec_run(&spec, &profile, assembly).expect("entry creates a Run");
+    let manifest = run.finish();
+    let links = manifest.sections[&ns("ezsdr.links")].as_array().unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0]["from"], serde_json::json!({"component": "radio", "port": "rx"}));
+    assert_eq!(links[0]["to"], serde_json::json!({"component": "rec", "port": "in"}));
+    assert_eq!(links[0]["drops"], 1);
 }
 
 #[test]

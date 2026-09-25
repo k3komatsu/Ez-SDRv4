@@ -8,7 +8,7 @@ Ez-SDR is an SDR experiment runtime. Two unrelated lines live in one repository:
 
 | Branch | Content | Status |
 |---|---|---|
-| `main` | **v4** — clean-sheet Rust rewrite. Phase 1's accepted specs in `design/0N-*.md` (the record of how Phase 1 was run in `plan/phase1/`), plus the `ezsdr-kernel` crate that implements them (`crates/`, `schemas/`). Phase 2 onwards is unwritten. | active development |
+| `main` | **v4** — clean-sheet Rust rewrite. Phase 1 and Phase 2's accepted specs in `design/01-*.md` … `design/10-*.md` (their process records remain in `plan/phase1/` and `plan/phase2/`), plus the Kernel, Radio Model, Simulation Engine and MockRadio implementation (`crates/`, `schemas/`). Phase 3 onwards is unwritten. | active development |
 | `master` | **v3** — D + C++ UHD bridge + Python client. Tags `v2.11`, `v3.0.0`–`v3.0.28`. | maintenance; still the GitHub default branch |
 
 Rules that follow from this layout:
@@ -24,9 +24,9 @@ Rules that follow from this layout:
 - **§N is the citation unit and is stable.** Never renumber, merge or delete a section. If content moves out, leave the section as a summary plus a link. [design/v4-vision-audit.md](design/v4-vision-audit.md) (Findings 1–34) and [design/v4-vision-rereview.md](design/v4-vision-rereview.md) (R1–R22) cite `§N` and `CMA §N`.
 - [design/archive/Ez-SDR_v4_core_module_architecture.md](design/archive/Ez-SDR_v4_core_module_architecture.md) is retired and frozen. Do not edit or revive it; it exists only to keep `CMA §N` citations resolvable.
 - When you edit the Vision: keep each part's header and footer navigation, and add a row to the revision history table in the index. Shapes in `{ ... }` blocks are illustrative, not schemas.
-- Normative schemas (Stream Contract, time model, Session, BindingProfile, PrepareReport, Manifest) live in the accepted specs `design/01-time-model.md` … `design/05-module-api.md`; a Vision section they cover keeps its reasons and ends in a `Normative:` line (re-review R13). Do not grow the Vision with more normative text.
-- `plan/` holds design work in progress, `design/` holds accepted text. `plan/phase1/00-overview.md` stays in `plan/` as the record of Phase 1 and the home of X1–X12 and the `OV-n` governance rules.
-- Reading order for implementers: index "How to read" → Part 01 → §65 (42 invariants) → audit §13 (minimal Kernel) and §14.1 (P0 checklist) → §58 (acceptance tests).
+- Normative schemas and contracts live in the accepted specs `design/01-time-model.md` … `design/10-host-data-path.md`; a Vision section they cover keeps its reasons and ends in a `Normative:` line (re-review R13). Do not grow the Vision with more normative text.
+- `plan/` holds design work in progress and process records; `design/` holds accepted text. `plan/phase1/00-overview.md` and `plan/phase2/00-overview.md` remain the respective phase records and governance logs.
+- Reading order for implementers: index "How to read" → Part 01 → §65 (42 invariants) → audit §13 (minimal Kernel) and §14.1 (P0 checklist) → the applicable accepted specs and phase overview → §58 (acceptance tests).
 
 ## 3. Design constraints that shape every type (settled; do not relitigate)
 
