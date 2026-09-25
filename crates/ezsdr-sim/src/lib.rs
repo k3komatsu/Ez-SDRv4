@@ -1,6 +1,8 @@
-//! Ez-SDR v4 Simulation Vocabulary sim 1.0.0 (plan/phase2/08-simulation.md).
+//! Ez-SDR v4 Simulation Vocabulary sim 1.1.0 (design/08-simulation.md; the channel is spec 11).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+pub mod channel;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -67,21 +69,25 @@ fn faults_namespace() -> &'static Namespace {
     FAULTS_NAMESPACE.get_or_init(|| Namespace::parse(FAULTS_SECTION).expect("a valid section name"))
 }
 
-/// Describes Vocabulary `sim` 1.0.0 (SE-1).
+/// Describes Vocabulary `sim` 1.1.0 (SE-1).
 pub fn vocabulary() -> VocabularyDescriptor {
     let id = Namespace::parse(VOCABULARY).expect("a valid Vocabulary namespace");
     VocabularyDescriptor {
         id: id.clone(),
-        version: Version::new(1, 0, 0),
+        version: Version::new(1, 1, 0),
         prefix: id,
         keys: vec![],
         event_kinds: vec![],
         verbs: vec![],
-        checks: vec![seed_namespace().clone(), faults_namespace().clone()],
+        checks: vec![
+            seed_namespace().clone(),
+            faults_namespace().clone(),
+            Namespace::parse(channel::CHANNEL_SECTION).expect("a valid section name"),
+        ],
     }
 }
 
-/// Registers the descriptor, then the seed and fault checks, in that order (SE-1).
+/// Registers the descriptor, then the seed, fault and channel checks, in that order (SE-1, CH-2).
 pub fn register(
     registry: &mut ModuleRegistry,
     checks: &mut AdmissionCheckRegistry,
@@ -90,6 +96,7 @@ pub fn register(
     registry.register_vocabulary(vocabulary())?;
     checks.register(Arc::new(SeedCheck));
     checks.register(Arc::new(FaultsCheck));
+    checks.register(Arc::new(channel::ChannelCheck));
     Ok(())
 }
 
@@ -218,9 +225,14 @@ impl SimRng {
     }
 }
 
-/// Generates the committed `fault_entry` and `seed` schemas (SE-12).
+/// Generates the committed `channel`, `fault_entry` and `seed` schemas (SE-12, CH-10).
 pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     let mut schemas = BTreeMap::new();
+    schemas.insert(
+        "channel",
+        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<channel::ChannelSpec>())
+            .expect("a generated schema is JSON"),
+    );
     schemas.insert(
         "fault_entry",
         serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<FaultEntry>())

@@ -3009,3 +3009,84 @@ fn kc_30_a_panicking_time_cancel_is_a_cleanup_failure() {
                 .starts_with("KC-30: a Module panicked during cleanup: Authority cancel()")
     }));
 }
+
+// ---------------------------------------------------------------- Phase 3 amendments (KB)
+
+#[test]
+fn kb_01_a_provider_reads_a_spec_input_by_hash() {
+    let mut spec = spec_one();
+    let (bytes, reference) = input_ref();
+    add_schedule(
+        &mut spec,
+        "radio",
+        10,
+        tx_template("radio/tx", &reference, "send_asap_and_flag"),
+    );
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(
+            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
+                .declaring("radio/tx", 1, 1)
+                .registering_at_arm("radio/tx"),
+        ),
+    );
+    let size = bytes.len();
+    assembly.inputs.insert(reference.hash.clone(), bytes);
+    let run = start_spec_run(&spec, &profile_one(), assembly).unwrap();
+    let manifest = run.finish();
+    assert_eq!(manifest.inputs.len(), 1);
+    assert_eq!(probe.with_prefix("p:burst_input:"), vec![format!("p:burst_input:{size}")]);
+}
+
+#[test]
+fn kb_01_a_provider_reads_a_session_waveform_by_hash() {
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(
+            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
+                .declaring("radio/tx", 1, 1)
+                .registering_at_arm("radio/tx"),
+        ),
+    );
+    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let bytes: Vec<u8> = (0..800u32).map(|i| (i % 251) as u8).collect();
+    let entry = run
+        .submit(
+            SessionAction::Vocabulary {
+                ns: ns("test"),
+                verb: Ident::parse("start_repeat").unwrap(),
+                target: ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap(),
+                at: None,
+                params: BTreeMap::new(),
+            },
+            Some(&bytes),
+        )
+        .unwrap();
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
+    let _ = run.finish();
+    assert_eq!(probe.with_prefix("p:burst_input:"), vec!["p:burst_input:800".to_owned()]);
+}
+
+#[test]
+fn kb_02_the_manifest_records_the_fidelity_settled_in_prepare() {
+    let probe = Probe::new();
+    let settled = ezsdr_kernel::module_api::Fidelity {
+        rf: ezsdr_kernel::module_api::RfFidelity::ImpairmentModel,
+        ..ezsdr_kernel::module_api::Fidelity::NONE
+    };
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(
+            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
+                .settling_fidelity(settled),
+        ),
+    );
+    let run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
+    let manifest = run.finish();
+    assert_eq!(manifest.run.fidelity, settled);
+}

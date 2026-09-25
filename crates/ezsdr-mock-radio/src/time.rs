@@ -20,6 +20,14 @@ pub(crate) fn v_of(o: i64, q: ezsdr_kernel::time::Rational, k: i64) -> Option<i6
     i64::try_from(i128::from(o).checked_add(offset)?).ok()
 }
 
+/// Returns the first virtual-root tick strictly after sample `k`'s instant:
+/// `floor(o + k · q) + 1`, the earliest round at which sample `k` is in the past (MR-14).
+pub(crate) fn v_after(o: i64, q: ezsdr_kernel::time::Rational, k: i64) -> Option<i64> {
+    let scaled = i128::from(k).checked_mul(i128::from(q.num()))?;
+    let offset = scaled.div_euclid(i128::from(q.den()));
+    i64::try_from(i128::from(o).checked_add(offset)?.checked_add(1)?).ok()
+}
+
 /// Returns the first nonnegative sample index at or after virtual tick `t` (MR-7).
 pub(crate) fn k_at_or_after(
     o: i64,
@@ -71,6 +79,14 @@ pub(crate) fn to_ns(clocks: &ClockRegistry, duration: Duration) -> Result<i64, T
 mod tests {
     use super::{k_at_or_after, v_of};
     use ezsdr_kernel::time::Rational;
+
+    #[test]
+    fn mr_14_a_block_is_published_strictly_after_its_last_sample() {
+        use super::v_after;
+        assert_eq!(v_after(0, Rational::new(5, 1).unwrap(), 3), Some(16));
+        assert_eq!(v_after(10, Rational::new(1_000, 3).unwrap(), 1), Some(344));
+        assert_eq!(v_after(10, Rational::new(1_000, 3).unwrap(), 3), Some(1_011));
+    }
 
     #[test]
     fn mr_14_tick_arithmetic_rounds_up() {

@@ -80,7 +80,7 @@ fn rm_01_register_adds_the_descriptor_the_check_and_the_kinds() {
         .vocabulary(&Namespace::parse("radio").unwrap())
         .unwrap();
     assert_eq!(descriptor.id, Namespace::parse("radio").unwrap());
-    assert_eq!(descriptor.version, Version::new(1, 0, 0));
+    assert_eq!(descriptor.version, Version::new(1, 1, 0));
     assert_eq!(descriptor.prefix, Namespace::parse("radio").unwrap());
     assert_eq!(descriptor.checks, [Namespace::parse("radio.rf_envelope").unwrap()]);
 
@@ -110,7 +110,7 @@ fn rm_01_register_twice_is_refused() {
     ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
     assert!(ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).is_err());
 
-    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 29);
+    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 31);
     assert_eq!(kinds.kinds().len(), 9);
     assert_eq!(
         checks
@@ -166,6 +166,8 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
         ("radio.perf.rx_bytes_per_s", int, false, reject, none),
         ("radio.perf.tx_bytes_per_s", int, false, reject, none),
         ("radio.perf.wire_bytes_per_sample", int, false, reject, none),
+        ("radio.tx.path_delay_samples", int, false, reject, none),
+        ("radio.rx.path_delay_samples", int, false, reject, none),
     ];
     let declarations = ezsdr_radio::vocabulary().keys;
     assert_eq!(declarations.len(), expected.len());

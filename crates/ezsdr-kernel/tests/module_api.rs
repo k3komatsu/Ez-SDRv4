@@ -392,6 +392,7 @@ impl Harness {
             actions: self.actions.clone(),
             actions_out: self.submitter.clone(),
             environment: Arc::new(BTreeMap::new()),
+            inputs: Arc::new(BTreeMap::<ezsdr_kernel::hash::ContentHash, Arc<[u8]>>::new()),
             links: Vec::new(),
             components: BTreeMap::new(),
             host_budget: RelativeBudget::new(Duration::new(

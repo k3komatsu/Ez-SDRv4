@@ -310,6 +310,7 @@ module_api::AuthorityDescriptor = TimeAuthority
 module_api::Requested = Capability matcher
 module_api::CoerceReport = coercion policy
 module_api::PrepareContext = NEW: MA-6's handle set, which MA-46 freezes so a Plugin host needs no Kernel change.
+module_api::InputStore = NEW: KB-1's read handle on the Run's inputs by hash, so a Provider can read a TxBurst waveform the Action names only by its ArtifactRef.
 module_api::Endpoint = NEW: SC-19's attached link end, handed over at prepare.
 module_api::AttachedPort = NEW: which of a component's ports an Endpoint belongs to.
 module_api::StepOutcome = step(until) requirement

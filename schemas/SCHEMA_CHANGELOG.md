@@ -15,6 +15,13 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — Phase 3 — the SimulationChannel
+
+Still version 1: v4.0 has not frozen. Additive. No Kernel schema changed.
+
+- New `sim/channel`: the `sim.channel` environment section, `ChannelSpec { couplings, noise_dbfs }`
+  (Phase 3, CH-1, CH-10).
+
 ## v1 — 2026-09-24 — pre-freeze revision, Phase 2 KA-7 and KA-10
 
 Still version 1: v4.0 has not frozen. Additive.

@@ -1035,6 +1035,30 @@ pub trait ActionSubmitter: Send + Sync {
     fn submit(&self, action: Action) -> Result<ActionId, Vec<Violation>>;
 }
 
+/// Where a Module reads a Run input by its content hash: the bytes of every input the
+/// Spec names (KC-9) and of every waveform a Session ingested (KC-28). A radio Provider
+/// that transmits sample content reads a `TxBurst` waveform here, because the Action
+/// carries only its `ArtifactRef` (RS-44a, MA-5a).
+///
+/// Rule: RS-44a, MA-5a.
+pub trait InputStore: Send + Sync {
+    /// The bytes stored under `hash`, or `None` when the Run holds no such input
+    /// (RS-44a).
+    fn get(&self, hash: &ContentHash) -> Option<Arc<[u8]>>;
+}
+
+impl InputStore for BTreeMap<ContentHash, Arc<[u8]>> {
+    fn get(&self, hash: &ContentHash) -> Option<Arc<[u8]>> {
+        BTreeMap::get(self, hash).cloned()
+    }
+}
+
+impl InputStore for std::sync::Mutex<BTreeMap<ContentHash, Arc<[u8]>>> {
+    fn get(&self, hash: &ContentHash) -> Option<Arc<[u8]>> {
+        self.lock().unwrap_or_else(|e| e.into_inner()).get(hash).cloned()
+    }
+}
+
 /// What a Module is handed at `prepare`. Every handle is shared, so a Module may keep
 /// it and use it from `prepare` through `cleanup` (MA-5a, MA-6, MA-46).
 pub struct PrepareContext {
@@ -1056,6 +1080,9 @@ pub struct PrepareContext {
     /// The BindingProfile's `environment`, verbatim and read-only; a Module reads the
     /// sections its own Vocabularies define (MA-5a, SB-26).
     pub environment: Arc<BTreeMap<Namespace, serde_json::Value>>,
+    /// The Run's inputs by content hash, read-only; a Session's later waveforms are
+    /// added before the Action that names them is dispatched (RS-44a, MA-5a).
+    pub inputs: Arc<dyn InputStore>,
     /// The link ends bound to this fragment's ports (MA-27).
     pub links: Vec<AttachedPort>,
     /// The component descriptors in this Executor's Island, keyed by component name (MA-19).

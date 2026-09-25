@@ -73,9 +73,9 @@ fn profile_document(profile: &str, selector: JsonValue, dir: &Path, environment:
         "version": 1,
         "bindings": {
             "radio": {
-                "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 0, "patch": 0 } },
+                "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 1, "patch": 0 } },
                 "selector": selector,
-                "profile": { "name": profile, "version": { "major": 1, "minor": 0, "patch": 0 } }
+                "profile": { "name": profile, "version": { "major": 1, "minor": 1, "patch": 0 } }
             },
             "rec": recorder,
             "sim": {
@@ -90,6 +90,56 @@ fn profile_document(profile: &str, selector: JsonValue, dir: &Path, environment:
                 "from": { "component": "radio", "port": "rx" },
                 "to": { "component": "rec", "port": "in" }
             }]
+        },
+        "environment": env
+    })
+}
+
+/// Builds the BindingProfile of [`crate::experiments::link`]: one simulated radio per
+/// resource (device ids `dev_tx` and `dev_rx`, whatever the resources are called), the
+/// recorder on `rx`, and `environment` (with the rig's time section).
+pub fn link_profile(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path, environment: JsonValue) -> JsonValue {
+    link_document(profile, tx, rx, rx_jitter, dir, environment, false)
+}
+
+/// Builds the Session BindingProfile of two simulated radios `tx` and `rx`, with the
+/// recorder fed from `rx`'s receive port.
+pub fn link_session_profile(profile: &str, tx: &str, rx: &str, dir: &Path, environment: JsonValue) -> JsonValue {
+    link_document(profile, tx, rx, false, dir, environment, true)
+}
+
+fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path, environment: JsonValue, session: bool) -> JsonValue {
+    let mut env = serde_json::Map::new();
+    env.insert("ezsdr.time".to_owned(), json!({ "class": "simulation", "start_lead_ns": 2_000_000_000u64 }));
+    if let Some(extra) = environment.as_object() {
+        env.extend(extra.clone());
+    }
+    let radio = |id: String, jitter: bool| json!({
+        "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 1, "patch": 0 } },
+        "selector": { "id": id, "block_len_jitter": jitter },
+        "profile": { "name": profile, "version": { "major": 1, "minor": 1, "patch": 0 } }
+    });
+    let mut bindings = serde_json::Map::new();
+    bindings.insert(tx.to_owned(), radio("dev_tx".to_owned(), false));
+    bindings.insert(rx.to_owned(), radio("dev_rx".to_owned(), rx_jitter));
+    let mut recorder = json!({
+        "module": { "id": "ezsdr.sink.capture", "version": { "major": 1, "minor": 0, "patch": 0 } },
+        "selector": { "dir": dir.to_string_lossy() }
+    });
+    if session {
+        recorder["feed"] = json!({ "port": { "component": rx, "port": "rx" }, "policy": "drop_oldest", "capacity": 64 });
+    }
+    bindings.insert("rec".to_owned(), recorder);
+    bindings.insert("sim".to_owned(), json!({
+        "module": { "id": "ezsdr.sim-engine", "version": { "major": 1, "minor": 0, "patch": 0 } },
+        "selector": {}
+    }));
+    json!({
+        "version": 1,
+        "bindings": bindings,
+        "authority": "sim",
+        "placements": {
+            "links": [{ "link": link_module(), "from": { "component": rx, "port": "rx" }, "to": { "component": "rec", "port": "in" } }]
         },
         "environment": env
     })
@@ -115,10 +165,12 @@ pub fn assemble(profile_doc: &JsonValue, inputs: BTreeMap<ContentHash, Vec<u8>>)
     let authority = Box::new(ezsdr_sim_engine::SimEngine::from_binding(authority_binding, clocks.clone()).expect("build simulation Engine"));
     let mut providers: BTreeMap<Ident, Box<dyn Provider>> = BTreeMap::new();
     let mut sinks: BTreeMap<Ident, Box<dyn Sink>> = BTreeMap::new();
+    let medium = ezsdr_sim::channel::Medium::new();
     for (name, binding) in &profile.bindings {
         match binding.module.id.as_str() {
             "ezsdr.radio.mock" => {
-                providers.insert(name.clone(), Box::new(ezsdr_mock_radio::MockRadio::from_binding(binding).expect("build Provider")));
+                let radio = ezsdr_mock_radio::MockRadio::from_binding(binding).expect("build Provider").with_medium(medium.clone());
+                providers.insert(name.clone(), Box::new(radio));
             }
             "ezsdr.sink.capture" => {
                 sinks.insert(name.clone(), Box::new(ezsdr_sink_capture::CaptureSink::from_binding(binding).expect("build capture Sink")));

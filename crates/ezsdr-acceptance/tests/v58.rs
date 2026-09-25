@@ -382,3 +382,166 @@ fn v58_16_runtime_rate_beyond_the_envelope_is_rejected() {
     assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("radio.rx.sample_rate_hz").unwrap()], prior);
     end_session(run, clock, T0 + 5_000_000);
 }
+
+// ---------------------------------------------------------------- Phase 3: the SimulationChannel
+
+fn ramp(len: usize) -> Vec<(f32, f32)> {
+    (0..len).map(|n| ((n + 1) as f32 / 4096.0, -((n + 1) as f32) / 8192.0)).collect()
+}
+
+fn link_run(temp: &rig::TempDir, tx: &str, rx: &str, profile: &str, rx_jitter: bool, environment: serde_json::Value, samples: &[(f32, f32)]) -> (Manifest, Vec<(f32, f32)>) {
+    let (bytes, waveform) = experiments::waveform_of(samples);
+    let spec = experiments::link(tx, rx, 1.0e6, &waveform, 10_000, 20_000);
+    let profile = rig::link_profile(profile, tx, rx, rx_jitter, &temp.0, environment);
+    let run = spec_run(temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    let clock = root(&run);
+    let manifest = finish_at(run, clock, T0 + 25_000_000);
+    let capture = rig::read_capture(artifact(&manifest, "rec"), 1).remove(0);
+    (manifest, capture)
+}
+
+fn coupling(tx: &str, rx: &str, gain_db: f64, delay_ns: u64, noise_dbfs: Option<f64>, seed: u64) -> serde_json::Value {
+    let mut channel = json!({ "couplings": [{ "tx": tx, "tx_channel": 0, "rx": rx, "rx_channel": 0, "gain_db": gain_db, "delay_ns": delay_ns }] });
+    if let Some(noise) = noise_dbfs {
+        channel["noise_dbfs"] = json!({ rx: noise });
+    }
+    json!({ "sim.seed": seed, "sim.channel": channel })
+}
+
+#[test]
+fn v58_08_two_mock_radios_communicate_through_the_channel() {
+    let samples = ramp(3_000);
+    let temp = rig::TempDir::new("v58-08");
+    let (manifest, capture) = link_run(&temp, "a", "b", "ideal", false, coupling("a", "b", -6.0, 1_000, None, 0), &samples);
+    assert!(!serde_json::to_string(&manifest.spec.body).unwrap().contains("sim."), "the Spec carries no channel");
+    assert_eq!(manifest.run.fidelity.rf, ezsdr_kernel::module_api::RfFidelity::ImpairmentModel);
+    assert_eq!(capture.len(), 20_000);
+    let gain = 10f64.powf(-6.0 / 20.0);
+    for (k, (re, im)) in capture.iter().enumerate() {
+        let n = k as i64 - 10_001;
+        let expected = if (0..3_000).contains(&n) {
+            let (wr, wi) = samples[n as usize];
+            ((gain * f64::from(wr)) as f32, (gain * f64::from(wi)) as f32)
+        } else {
+            (0.0, 0.0)
+        };
+        assert_eq!((*re, *im), expected, "captured sample {k}");
+    }
+}
+
+#[test]
+fn v58_08_without_a_channel_the_same_spec_hears_nothing() {
+    let temp = rig::TempDir::new("v58-08-none");
+    let (manifest, capture) = link_run(&temp, "a", "b", "ideal", false, json!({}), &ramp(3_000));
+    assert_eq!(manifest.run.fidelity.rf, ezsdr_kernel::module_api::RfFidelity::None);
+    assert_eq!(capture.len(), 20_000);
+    assert!(capture.iter().all(|sample| *sample == (0.0, 0.0)));
+}
+
+#[test]
+fn v58_03_channel_noise_reproduces_with_its_seed() {
+    let samples = ramp(3_000);
+    let temp = rig::TempDir::new("v58-03-noise");
+    let noisy = |seed| link_run(&temp, "a", "b", "x310-like", false, coupling("a", "b", -6.0, 1_000, Some(-30.0), seed), &samples);
+    let (first, first_capture) = noisy(7);
+    let (second, _) = noisy(7);
+    let (other, other_capture) = noisy(8);
+    assert_eq!(rig::determinism_projection(&first), rig::determinism_projection(&second));
+    assert_ne!(artifact(&first, "rec").hash, artifact(&other, "rec").hash);
+    let power = |capture: &[(f32, f32)]| capture[..10_000].iter().map(|(re, im)| f64::from(*re).powi(2) + f64::from(*im).powi(2)).sum::<f64>() / 10_000.0;
+    for capture in [&first_capture, &other_capture] {
+        assert!((power(capture) - 0.001).abs() < 0.0001, "noise power {}", power(capture));
+    }
+}
+
+#[test]
+fn v58_12_the_channel_output_does_not_depend_on_block_lengths() {
+    let samples = ramp(3_000);
+    let environment = coupling("a", "b", -6.0, 1_000, Some(-30.0), 7);
+    let temp = rig::TempDir::new("v58-12-channel");
+    let (plain, _) = link_run(&temp, "a", "b", "x310-like", false, environment.clone(), &samples);
+    let (jitter, _) = link_run(&temp, "a", "b", "x310-like", true, environment, &samples);
+    assert_eq!(artifact(&plain, "rec").hash, artifact(&jitter, "rec").hash);
+    assert_ne!(section(&plain, "ezsdr.radio.mock.stats")["rx_blocks"], section(&jitter, "ezsdr.radio.mock.stats")["rx_blocks"]);
+}
+
+#[test]
+fn v58_08_a_session_hears_a_burst_from_its_first_sample_in_either_instance_order() {
+    // `ideal` (no command lead, no LO draws), one sample per microsecond. The transmitter is
+    // `a` in one Run and `z` in the other, so the stepping loop visits it before the receiver
+    // `b` in one and after it in the other (MA-30 orders by fragment id).
+    let samples = ramp(1_000);
+    let run = |tx: &str| {
+        let temp = rig::TempDir::new(&format!("v58-08-session-{tx}"));
+        let profile = rig::link_session_profile("ideal", tx, "b", &temp.0, coupling(tx, "b", 0.0, 0, None, 0));
+        let mut run = session_run(&temp, &profile);
+        let clock = root(&run);
+        let rid = |path: String| ResourceId::parse(&path).unwrap();
+        run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
+        let (bytes, _) = experiments::waveform_of(&samples);
+        let entries = [
+            run.submit(SessionAction::SetParameter { target: rid(tx.to_owned()), key: Key::parse("radio.tx.channels").unwrap(), value: Value::Int(1) }, None).unwrap(),
+            run.submit(SessionAction::Vocabulary { ns: Namespace::parse("sink").unwrap(), verb: Ident::parse("capture").unwrap(), target: rid("rec".to_owned()), at: Some(TimePoint::new(clock, T0 + 1_990_000)), params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::Int(5_000))]) }, None).unwrap(),
+        ];
+        // T0 + 1 999 000 ns is the instant of the receiver's sample 1 999, the last of its
+        // first block; the burst starts there, in the round that could have published it.
+        run.advance_to(TimePoint::new(clock, T0 + 1_999_000)).unwrap();
+        let burst = run.submit(SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: rid(format!("{tx}/tx")), at: None, params: Default::default() }, Some(&bytes)).unwrap();
+        run.advance_to(TimePoint::new(clock, T0 + 3_500_500)).unwrap();
+        let stop = run.submit(SessionAction::Stop { target: Some(rid(format!("{tx}/tx"))) }, None).unwrap();
+        assert!(entries.iter().chain([&burst, &stop]).all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
+        let manifest = end_session(run, clock, T0 + 8_000_000);
+        let capture = artifact(&manifest, "rec_0");
+        (capture.continuity[0].first.ticks, rig::read_capture(capture, 1).remove(0))
+    };
+    let (first_a, capture_a) = run("a");
+    let (first_z, capture_z) = run("z");
+    assert_eq!((first_a, &capture_a), (first_z, &capture_z), "CH-9: the capture does not depend on the stepping order");
+    assert_eq!(first_a, 1_990);
+    assert_eq!(capture_a.len(), 5_000);
+    for (index, sample) in capture_a.iter().enumerate() {
+        let k = first_a + index as i64;
+        let expected = if (1_999..=3_500).contains(&k) { samples[((k - 1_999) % 1_000) as usize] } else { (0.0, 0.0) };
+        assert_eq!(*sample, expected, "captured sample {k}");
+    }
+}
+
+#[test]
+fn v57_a_software_loopback_session_captures_what_it_transmits() {
+    let temp = rig::TempDir::new("v57-loopback");
+    let environment = json!({ "sim.channel": { "couplings": [{ "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 }] } });
+    let profile = rig::session_profile("ideal", json!({ "id": "mock" }), &temp.0, environment);
+    let mut run = session_run(&temp, &profile);
+    let clock = root(&run);
+    run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
+    let samples = ramp(1_000);
+    let (bytes, _) = experiments::waveform_of(&samples);
+    let entries = [
+        run.submit(SessionAction::SetParameter { target: ResourceId::parse("radio").unwrap(), key: Key::parse("radio.tx.channels").unwrap(), value: Value::Int(1) }, None).unwrap(),
+        run.submit(SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: ResourceId::parse("radio/tx").unwrap(), at: None, params: Default::default() }, Some(&bytes)).unwrap(),
+        run.submit(SessionAction::Vocabulary { ns: Namespace::parse("sink").unwrap(), verb: Ident::parse("capture").unwrap(), target: ResourceId::parse("rec").unwrap(), at: None, params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::Int(5_000))]) }, None).unwrap(),
+    ];
+    assert!(entries.iter().all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
+    let manifest = end_session(run, clock, T0 + 20_000_000);
+    let capture = artifact(&manifest, "rec_0");
+    let first = capture.continuity[0].first.ticks;
+    let received = rig::read_capture(capture, 1).remove(0);
+    assert_eq!(received.len(), 5_000);
+    for (index, sample) in received.iter().enumerate() {
+        let k = first + index as i64;
+        assert_eq!(*sample, samples[((k - 1_000) % 1_000) as usize], "captured sample {k}");
+    }
+}
+
+#[test]
+fn v58_03_a_run_reproduces_from_its_own_manifest() {
+    let temp = rig::TempDir::new("v58-03-reproduce");
+    let samples = ramp(3_000);
+    let (first, _) = link_run(&temp, "a", "b", "x310-like", true, coupling("a", "b", -6.0, 1_000, Some(-30.0), 11), &samples);
+    let (bytes, waveform) = experiments::waveform_of(&samples);
+    assert_eq!(first.inputs, vec![waveform.clone()]);
+    let rerun = spec_run(&temp, &first.spec.body, &first.binding.body, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    let clock = root(&rerun);
+    let second = finish_at(rerun, clock, T0 + 25_000_000);
+    assert_eq!(rig::determinism_projection(&first), rig::determinism_projection(&second));
+}

@@ -233,6 +233,7 @@ impl Environment {
             actions: self.actions.clone(),
             actions_out: self.submitter.clone(),
             environment: Arc::new(BTreeMap::new()),
+            inputs: Arc::new(BTreeMap::<ezsdr_kernel::hash::ContentHash, Arc<[u8]>>::new()),
             links,
             components: BTreeMap::new(),
             host_budget: RelativeBudget::new(ezsdr_kernel::time::Duration::new(

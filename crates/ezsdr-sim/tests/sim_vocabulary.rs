@@ -18,7 +18,7 @@ fn schemas_dir() -> PathBuf {
 }
 
 #[test]
-fn se_01_register_adds_the_descriptor_and_both_checks() {
+fn se_01_register_adds_the_descriptor_and_the_three_checks() {
     let mut registry = ModuleRegistry::new();
     let mut checks = AdmissionCheckRegistry::new();
     let mut kinds = EventKindRegistry::new();
@@ -26,19 +26,20 @@ fn se_01_register_adds_the_descriptor_and_both_checks() {
 
     let descriptor = registry.vocabulary(&Namespace::parse("sim").unwrap()).unwrap();
     assert_eq!(descriptor.id, Namespace::parse("sim").unwrap());
-    assert_eq!(descriptor.version, Version::new(1, 0, 0));
+    assert_eq!(descriptor.version, Version::new(1, 1, 0));
     assert_eq!(descriptor.prefix, Namespace::parse("sim").unwrap());
     assert!(descriptor.keys.is_empty());
     assert!(descriptor.event_kinds.is_empty());
     assert!(descriptor.verbs.is_empty());
     assert_eq!(
         descriptor.checks,
-        ["sim.seed", "sim.faults"].map(|s| Namespace::parse(s).unwrap())
+        ["sim.seed", "sim.faults", "sim.channel"].map(|s| Namespace::parse(s).unwrap())
     );
 
     let environment = BTreeMap::from([
         (Namespace::parse("sim.seed").unwrap(), json!("bad")),
         (Namespace::parse("sim.faults").unwrap(), json!({})),
+        (Namespace::parse("sim.channel").unwrap(), json!([])),
     ]);
     let violations = checks.run(
         &environment,
@@ -46,10 +47,12 @@ fn se_01_register_adds_the_descriptor_and_both_checks() {
         &BTreeMap::new(),
         CheckStage::Validate,
     );
-    assert_eq!(violations.len(), 2);
+    assert_eq!(violations.len(), 3);
     assert_eq!(violations[0].check, Namespace::parse("sim.seed").unwrap());
     assert_eq!(violations[1].check, Namespace::parse("sim.faults").unwrap());
-    assert!(violations.iter().all(|item| item.reason.starts_with("SE-5: ")));
+    assert_eq!(violations[2].check, Namespace::parse("sim.channel").unwrap());
+    assert!(violations[..2].iter().all(|item| item.reason.starts_with("SE-5: ")));
+    assert!(violations[2].reason.starts_with("CH-2: "));
 
 }
 

@@ -1,7 +1,8 @@
-//! Ez-SDR v4 Module ezsdr.radio.mock 1.0.0 (plan/phase2/09-mock-radio.md).
+//! Ez-SDR v4 Module ezsdr.radio.mock 1.1.0 (design/09-mock-radio.md).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod channel;
 mod coerce;
 mod profile;
 mod time;
@@ -25,6 +26,8 @@ use ezsdr_kernel::time::{AbsoluteDeadline, ClockRegistry, Duration, Rational, Sa
 use ezsdr_kernel::module_api::UpdateClass;
 use ezsdr_hostmem::{HostPool, HOST_MEMORY, write_cf32};
 use ezsdr_sim::{FaultEntry, FaultKind, SimRng};
+use ezsdr_sim::channel::{Medium, RootInstant};
+use ezsdr_kernel::module_api::InputStore;
 
 pub use device::{DeviceModel, DeviceTimeError};
 pub use profile::{Profile, ProfileKind};
@@ -32,26 +35,26 @@ pub use profile::{Profile, ProfileKind};
 fn module_ref() -> ModuleRef {
     ModuleRef {
         id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"),
-        version: Version::new(1, 0, 0),
+        version: Version::new(1, 1, 0),
     }
 }
 
-/// The Module descriptor for `ezsdr.radio.mock` 1.0.0 (MR-1).
+/// The Module descriptor for `ezsdr.radio.mock` 1.1.0 (MR-1).
 pub fn descriptor() -> ModuleDescriptor {
     ModuleDescriptor {
         id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"),
-        version: Version::new(1, 0, 0),
+        version: Version::new(1, 1, 0),
         kernel_api: KERNEL_API,
         roles: vec![Role::Provider],
         vocabularies: ["radio", "sim"]
             .into_iter()
             .map(|id| VocabularyRequirement {
                 id: Namespace::parse(id).expect("valid vocabulary"),
-                req: VersionReq(Version::new(1, 0, 0)),
+                req: VersionReq(Version::new(1, 1, 0)),
             })
             .collect(),
         deployment: Deployment::InProcess {},
-        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 1.0.0")),
+        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 1.1.0")),
     }
 }
 
@@ -89,6 +92,18 @@ pub struct MockRadio {
     open_tx: Option<OpenBurst>,
     updates: BTreeMap<(i64, u64), PendingUpdate>,
     next_order: u64,
+    medium: Option<std::sync::Arc<Medium>>,
+    channel: Option<ChannelMode>,
+    tx_gen: u32,
+}
+
+/// The channel-coupled state of a Mock whose environment declares `sim.channel` (MR-31).
+struct ChannelMode {
+    medium: std::sync::Arc<Medium>,
+    fragment: Ident,
+    inputs: std::sync::Arc<dyn InputStore>,
+    tx: std::sync::Arc<channel::TxShared>,
+    rx: channel::RxModel,
 }
 
 #[derive(Clone)]
@@ -150,15 +165,15 @@ impl MockRadio {
             return Err(reject("binding names a different Module version"));
         }
         let profile = match binding.profile.as_ref() {
-            Some(p) if p.version == Version::new(1, 0, 0) && p.name == "x310-like" => Profile {
+            Some(p) if p.version == Version::new(1, 1, 0) && p.name == "x310-like" => Profile {
                 kind: ProfileKind::X310Like,
                 n: 1,
             },
-            Some(p) if p.version == Version::new(1, 0, 0) && p.name == "ideal" => Profile {
+            Some(p) if p.version == Version::new(1, 1, 0) && p.name == "ideal" => Profile {
                 kind: ProfileKind::Ideal,
                 n: 1,
             },
-            _ => return Err(reject("profile must be x310-like or ideal 1.0.0")),
+            _ => return Err(reject("profile must be x310-like or ideal 1.1.0")),
         };
         if binding.feed.is_some() {
             return Err(reject("Provider binding cannot carry a feed"));
@@ -214,7 +229,7 @@ impl MockRadio {
         sections.insert(section("bursts"), serde_json::json!([]));
         sections.insert(section("faults"), serde_json::json!([]));
         sections.insert(section("rejected"), serde_json::json!([]));
-        sections.insert(section("stats"), serde_json::json!({"rx_blocks": 0, "rx_samples": 0, "tx_blocks": 0}));
+        sections.insert(section("stats"), serde_json::json!({"rx_blocks": 0, "rx_samples": 0, "tx_blocks": 0, "rx_clipped": 0, "tx_clipped": 0}));
         sections.insert(section("applied"), serde_json::json!([]));
         let instance = ProviderInstance {
             id: id.clone(),
@@ -262,7 +277,17 @@ impl MockRadio {
             open_tx: None,
             updates: BTreeMap::new(),
             next_order: 0,
+            medium: None,
+            channel: None,
+            tx_gen: 0,
         })
+    }
+
+    /// Hands this instance the Run's shared SimulationChannel medium; a Mock whose
+    /// environment declares `sim.channel` refuses `prepare` without one (MR-31, CH-6).
+    pub fn with_medium(mut self, medium: std::sync::Arc<Medium>) -> MockRadio {
+        self.medium = Some(medium);
+        self
     }
 
     fn reject(&self, reason: impl Into<String>) -> ModuleError {
@@ -333,8 +358,8 @@ impl MockRadio {
             if let Some(cut) = cut { stop = stop.min(cut); }
             if let Some(end) = rx.end { stop = stop.min(end); }
             if stop <= next { break; }
-            let last = time::v_of(origin, ratio, stop - 1).ok_or_else(|| self.reject("MR-14: block time overflow"))?;
-            if last > until { break; }
+            let after = time::v_after(origin, ratio, stop - 1).ok_or_else(|| self.reject("MR-14: block time overflow"))?;
+            if after > until { break; }
             let flags = rx.flags;
             let lost = rx.lost;
             let full = self.publish_rx(next, stop, domain, rx.channels, flags, lost)?;
@@ -369,10 +394,34 @@ impl MockRadio {
         let bytes_len = channels as usize * len as usize * 8;
         let pattern = self.selector.rx_test_pattern.clone();
         if self.pool.is_none() { return Err(self.reject("MR-13: receive pool is absent")); }
+        let (origin, ratio) = self.rx.as_ref().map(|rx| (rx.origin, rx.ratio)).expect("a receive stream publishes");
+        let mut clipped = 0u64;
+        let received: Option<Vec<(f32, f32)>> = self.channel.as_ref().map(|mode| {
+            let mut out = Vec::with_capacity(channels as usize * len as usize);
+            for c in 0..channels {
+                let phase = mode.rx.phase.get(usize::from(c));
+                for k in first..stop {
+                    let stamp = RootInstant::of_sample(origin, ratio, k);
+                    let (fr, fi) = mode.medium.field(&mode.fragment, c, mode.rx.frequency_hz.at(stamp), stamp);
+                    let amplitude = 10f64.powf(mode.rx.gain_db.at(stamp) / 20.0);
+                    let (sin, cos) = phase.map_or(0.0, |p| p.at(stamp)).sin_cos();
+                    let re = amplitude * (fr * cos + fi * sin);
+                    let im = amplitude * (fi * cos - fr * sin);
+                    let (cre, cim) = (re.clamp(-1.0, 1.0), im.clamp(-1.0, 1.0));
+                    if cre != re || cim != im { clipped += 1; }
+                    out.push((cre as f32, cim as f32));
+                }
+            }
+            out
+        });
         let pool = self.pool.as_mut().expect("pool was checked");
         let bytes = pool.fill(bytes_len, |buffer| {
             buffer[..bytes_len].fill(0);
-            if pattern == "ramp" {
+            if let Some(received) = &received {
+                for (index, (re, im)) in received.iter().enumerate() {
+                    write_cf32(buffer, len as usize, index / len as usize, index % len as usize, *re, *im);
+                }
+            } else if pattern == "ramp" {
                 for channel in 0..channels as usize {
                     for index in 0..len as usize {
                         let sample = (first as u64 + index as u64) % 65_536;
@@ -392,6 +441,7 @@ impl MockRadio {
             contract: ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("cf32 contract"),
         };
         let block = std::sync::Arc::new(SampleBlock::new_host(header, HOST_MEMORY, bytes, 8).map_err(|error| self.reject(format!("MR-13: {error}")))?);
+        self.add_stat("rx_clipped", clipped);
         let mut full = false;
         for link in &self.links {
             if link.publish(block.clone()) == PublishOutcome::Full { full = true; }
@@ -510,7 +560,7 @@ impl MockRadio {
                         if let Some(cut) = cut { stop = stop.min(cut); }
                         if let Some(end) = rx.end { stop = stop.min(end); }
                         if stop > rx.next {
-                            if let Some(tick) = time::v_of(rx.origin, rx.ratio, stop - 1) { next = Some(next.map_or(tick, |old| old.min(tick))); }
+                            if let Some(tick) = time::v_after(rx.origin, rx.ratio, stop - 1) { next = Some(next.map_or(tick, |old| old.min(tick))); }
                         }
                     }
                 }
@@ -527,7 +577,7 @@ impl MockRadio {
             let cut = held_cut.min(update_cut);
             let stop = block_end.min(waveform_end).min(cut);
             if stop > open.next {
-                if let Some(tick) = time::v_of(origin, handle.root_ticks_per_tick, stop - 1) { next = Some(next.map_or(tick, |old| old.min(tick))); }
+                if let Some(tick) = time::v_after(origin, handle.root_ticks_per_tick, stop - 1) { next = Some(next.map_or(tick, |old| old.min(tick))); }
             }
         }
         if let (Some(handle), Some(origin)) = (&self.tx_handle, self.tx_origin) {
@@ -567,6 +617,51 @@ impl MockRadio {
         if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("bursts")) {
             rows.push(serde_json::to_value(record).expect("burst record"));
         }
+    }
+
+    fn add_stat(&mut self, name: &str, n: u64) {
+        if n == 0 { return; }
+        if let Some(serde_json::Value::Object(stats)) = self.instance.sections.get_mut(&section("stats")) {
+            let total = stats.get(name).and_then(serde_json::Value::as_u64).unwrap_or(0);
+            stats.insert(name.to_owned(), serde_json::json!(total + n));
+        }
+    }
+
+    /// Cuts every burst of the current transmit clock at sample `k` and withdraws the
+    /// bursts that start at or after it, as a stop or a cold change does (MR-32).
+    fn cut_segments(&mut self, k: i64) {
+        let Some(mode) = &self.channel else { return };
+        let generation = self.tx_gen;
+        let mut plan = mode.tx.plan();
+        plan.segments.retain(|(g, start), _| *g != generation || *start < k);
+        for ((g, _), segment) in plan.segments.iter_mut() {
+            if *g == generation {
+                segment.end = Some(segment.end.map_or(k, |end| end.min(k)));
+            }
+        }
+    }
+
+    /// Ends the open burst's radiation at transmit sample `stop` (MR-32).
+    fn end_open_segment(&mut self, stop: i64) {
+        let (Some(mode), Some(open)) = (&self.channel, &self.open_tx) else { return };
+        if let Some(segment) = mode.tx.plan().segments.get_mut(&(self.tx_gen, open.start)) {
+            segment.end = Some(segment.end.map_or(stop, |end| end.min(stop)));
+        }
+    }
+
+    /// Transmits every sample before `cut`: the open burst up to it, and every held burst
+    /// that starts before it, opened in turn (MR-25, MR-32).
+    fn transmit_until_cut(&mut self, now: i64, cut: i64) -> Result<(), ModuleError> {
+        loop {
+            if self.open_tx.is_some() {
+                self.emit_tx_until(now, Some(cut))?;
+            }
+            if self.open_tx.is_some() { break; }
+            let Some(start) = self.held.keys().next().copied().filter(|start| *start < cut) else { break };
+            let held = self.held.remove(&start).expect("the first held burst");
+            self.open_tx = Some(OpenBurst { start: held.start, len: held.len, repeat: held.repeat, next: held.start, first: true, open: held.open });
+        }
+        Ok(())
     }
 
     fn add_tx_stat(&mut self) {
@@ -614,6 +709,12 @@ impl MockRadio {
     }
 
     fn stop_tx(&mut self, now: i64, reason: &str, emit_command_rejected: bool) -> Result<(), ModuleError> {
+        if let (Some(handle), Some(origin)) = (self.tx_handle.clone(), self.tx_origin) {
+            if let Some(cut) = time::k_at_or_after(origin, handle.root_ticks_per_tick, now) {
+                self.transmit_until_cut(now, cut)?;
+                self.cut_segments(cut);
+            }
+        }
         let tracked = self.tx_tracker.as_mut().and_then(BurstTracker::stop);
         let open_burst_without_record = self.open_tx.is_some() && tracked.is_none();
         if let Some(record) = tracked { self.record_burst(record); }
@@ -695,14 +796,37 @@ impl MockRadio {
             self.reject_action_at("tx_burst", "MR-16: repeated waveform violates RM-13's length or alignment limits", now)?;
             return Ok(());
         }
+        let decoded = match self.channel.as_ref().map(|mode| mode.inputs.get(&waveform.hash)) {
+            None => None,
+            Some(None) => {
+                self.reject_action_at("tx_burst", "MR-32: the waveform's bytes are not an input of this Run", now)?;
+                return Ok(());
+            }
+            Some(Some(bytes)) if bytes.len() as u64 != size_bytes => {
+                self.reject_action_at("tx_burst", "MR-32: the waveform's bytes do not have its size_bytes", now)?;
+                return Ok(());
+            }
+            Some(Some(bytes)) => match channel::decode_waveform(&bytes) {
+                Ok(decoded) => Some(decoded),
+                Err(reason) => {
+                    self.reject_action_at("tx_burst", reason, now)?;
+                    return Ok(());
+                }
+            },
+        };
         let handle = self.tx_handle.as_ref().expect("tx channel has a handle");
         let origin = self.tx_origin.expect("tx clock origin");
         let clocks = self.clocks.as_ref().expect("prepared clocks");
-        let now_tx = clocks.convert(TimePoint::new(root, now), tx_domain).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?.floor();
+        let converted = clocks.convert(TimePoint::new(root, now), tx_domain).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
+        let now_tx = converted.floor();
+        let now_tx_up = match converted {
+            ezsdr_kernel::time::Converted::Exact { point } => point,
+            ezsdr_kernel::time::Converted::Inexact { floor, .. } => TimePoint::new(floor.domain, floor.ticks.saturating_add(1)),
+        };
         let policy = late_policy.decide(
             clocks,
             at.time_point,
-            now_tx,
+            now_tx_up,
             Duration::new(ClockDomainId::HOST_MONOTONIC, self.profile.timing().min_timed_command_lead_ns),
         ).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
         let mut start = at.time_point.ticks;
@@ -733,8 +857,8 @@ impl MockRadio {
             Some("MR-16: burst begins before synchronization")
         } else if self.held.contains_key(&start) {
             Some("MR-16: a held burst already has this start")
-        } else if self.open_tx.as_ref().is_some_and(|open| start < open.next) {
-            Some("MR-16: burst begins before the open burst's next sample")
+        } else if self.open_tx.as_ref().is_some_and(|open| start <= open.next) {
+            Some("MR-16: burst begins at or before the open burst's next sample")
         } else {
             None
         };
@@ -749,6 +873,20 @@ impl MockRadio {
             self.emit_late_burst(late_by, at.time_point, tx_domain, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::SendAsap)?;
         }
         let waveform_len = u32::try_from(length).map_err(|_| ModuleError::rejected("MR-16: waveform length exceeds u32"))?;
+        if let (Some(mode), Some((samples, clipped))) = (&self.channel, decoded) {
+            let ratio = self.tx_handle.as_ref().expect("tx channel has a handle").root_ticks_per_tick;
+            mode.tx.plan().segments.insert((self.tx_gen, start), channel::Segment {
+                origin,
+                ratio,
+                start,
+                len: length,
+                repeat,
+                channels: channels as u16,
+                samples,
+                end: None,
+            });
+            self.add_stat("tx_clipped", clipped);
+        }
         self.held.insert(start, HeldBurst {
             start,
             len: length,
@@ -764,7 +902,7 @@ impl MockRadio {
         Ok(())
     }
 
-    fn emit_tx_until(&mut self, until: i64) -> Result<bool, ModuleError> {
+    fn emit_tx_until(&mut self, until: i64, extra_cut: Option<i64>) -> Result<bool, ModuleError> {
         let mut progressed = false;
         while let Some(open) = self.open_tx.as_ref() {
             let Some(handle) = self.tx_handle.as_ref() else { break; };
@@ -775,10 +913,10 @@ impl MockRadio {
             let held_cut = self.held.keys().next().copied().unwrap_or(i64::MAX);
             let cold_tick = self.updates.iter().filter(|(_, update)| is_tx_cold_key(update.key.as_str())).map(|((tick, _), _)| *tick).min();
             let cold_cut = cold_tick.and_then(|tick| time::k_at_or_after(self.tx_origin.expect("tx origin"), handle.root_ticks_per_tick, tick)).unwrap_or(i64::MAX);
-            let cut = held_cut.min(cold_cut);
+            let cut = held_cut.min(cold_cut).min(extra_cut.unwrap_or(i64::MAX));
             stop = stop.min(repeat_end).min(cut);
             if stop <= open.next { break; }
-            let last = time::v_of(self.tx_origin.expect("tx origin"), handle.root_ticks_per_tick, stop - 1).ok_or_else(|| ModuleError::rejected("MR-15: transmit time overflow"))?;
+            let last = time::v_after(self.tx_origin.expect("tx origin"), handle.root_ticks_per_tick, stop - 1).ok_or_else(|| ModuleError::rejected("MR-15: transmit time overflow"))?;
             if last > until { break; }
             let start = open.start;
             let next = open.next;
@@ -810,6 +948,7 @@ impl MockRadio {
                 Ok(BurstStep::Started | BurstStep::Continued) => {}
                 Err(error) => {
                     self.reject_action_at("tx_burst", &format!("MR-15: {error}"), until)?;
+                    self.end_open_segment(next);
                     if let Some(record) = self.tx_tracker.as_mut().and_then(BurstTracker::stop) { self.record_burst(record); }
                     self.tx_device.close();
                     self.open_tx = None;
@@ -825,6 +964,7 @@ impl MockRadio {
                 }).expect("device error payload");
                 self.emit_event("tx", ezsdr_radio::kinds::TIME_ERROR, Severity::Error, payload, header.first_sample_time)?;
                 self.record_rejected_action("tx_burst", "MR-24: the device rejected an unclosed burst", until);
+                self.end_open_segment(next);
                 if let Some(record) = self.tx_tracker.as_mut().and_then(BurstTracker::stop) { self.record_burst(record); }
                 self.tx_device.close();
                 self.open_tx = None;
@@ -916,6 +1056,23 @@ impl MockRadio {
         let applied = report.applied.get(&update.key).cloned().unwrap_or(update.value);
         self.config.insert(update.key.clone(), applied.clone());
         self.record_update(&update.key, &applied, tick);
+        if let (Some(mode), Some(value)) = (self.channel.as_mut(), match &applied { Value::Num(v) => Some(*v), Value::Int(v) => Some(*v as f64), _ => None }) {
+            match update.key.as_str() {
+                ezsdr_radio::keys::TX_GAIN_DB => mode.tx.plan().gain_db.set(tick, value),
+                ezsdr_radio::keys::TX_FREQUENCY_HZ => {
+                    let mut plan = mode.tx.plan();
+                    plan.frequency_hz.set(tick, value);
+                    let timed = plan.timed_phase.clone();
+                    for (phase, value) in plan.phase.iter_mut().zip(timed) { phase.set(tick, value); }
+                }
+                ezsdr_radio::keys::RX_GAIN_DB => mode.rx.gain_db.set(tick, value),
+                ezsdr_radio::keys::RX_FREQUENCY_HZ => {
+                    mode.rx.frequency_hz.set(tick, value);
+                    for (phase, value) in mode.rx.phase.iter_mut().zip(mode.rx.timed_phase.iter()) { phase.set(tick, *value); }
+                }
+                _ => {}
+            }
+        }
         if update.class == UpdateClass::Cold && is_rx_cold_key(update.key.as_str()) {
             if let (Some(clocks), Some(rx)) = (&self.clocks, &self.rx) {
                 if clocks.is_registered(rx.domain) && clocks.get(rx.domain).is_ok_and(|domain| domain.ended_at.is_none()) {
@@ -947,6 +1104,7 @@ impl MockRadio {
                 self.tx_origin = Some(tick);
                 self.tx_handle = Some(handle);
                 self.tx_domain = Some(domain);
+                self.tx_gen = self.tx_gen.saturating_add(1);
                 self.tx_tracker = Some(BurstTracker::new(domain));
                 self.tx_device = DeviceModel::new();
             } else {
@@ -1082,6 +1240,46 @@ impl Provider for MockRadio {
             let tick = time::ns_to_v(&ctx.clocks, root, offset).map_err(|error| self.reject(format!("MR-20: {error}")))?;
             faults.push(ScheduledFault { tick, entry, applied: false, resolved: false, order: order as u64 });
         }
+        let channel_mode = match ezsdr_sim::channel::read(&ctx.environment).map_err(|error| self.reject(format!("MR-7: {error}")))? {
+            None => None,
+            Some(spec) => {
+                let medium = self.medium.clone().ok_or_else(|| self.reject("MR-31: the environment declares sim.channel, but this instance has no medium"))?;
+                if self.selector.rx_test_pattern != "zero" {
+                    return Err(self.reject("MR-31: a channel-coupled Mock takes no receive test pattern"));
+                }
+                let max = self.profile.max_channels();
+                if let Some(coupling) = spec.couplings.iter().find(|c| (c.tx == f.id && i64::from(c.tx_channel) >= max) || (c.rx == f.id && i64::from(c.rx_channel) >= max)) {
+                    return Err(self.reject(format!("MR-31: a coupling {} -> {} names a channel beyond this profile's {max}", coupling.tx, coupling.rx)));
+                }
+                let random = self.profile.random_phase_on_untimed_tune();
+                let mut lo = SimRng::new(seed, &format!("{}/lo", self.selector_id()));
+                let mut phases = || (0..max).map(|_| if random { channel::lo_phase(&mut lo) } else { 0.0 }).collect::<Vec<f64>>();
+                let rx_phase: Vec<channel::Timeline> = phases().into_iter().map(channel::Timeline::new).collect();
+                let tx_phase: Vec<channel::Timeline> = phases().into_iter().map(channel::Timeline::new).collect();
+                let rx_timed = phases();
+                let tx_timed = phases();
+                let tx = channel::TxShared::new(channel::TxPlan {
+                    segments: BTreeMap::new(),
+                    gain_db: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::TX_GAIN_DB)),
+                    frequency_hz: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::TX_FREQUENCY_HZ)),
+                    phase: tx_phase,
+                    timed_phase: tx_timed,
+                    path_delay: self.profile.tx_path_delay_samples(),
+                });
+                let rx = channel::RxModel {
+                    gain_db: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::RX_GAIN_DB)),
+                    frequency_hz: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::RX_FREQUENCY_HZ)),
+                    phase: rx_phase,
+                    timed_phase: rx_timed,
+                };
+                medium.join(&ctx.run, &f.id, &spec, seed, root_rate.num(), tx.clone()).map_err(|error| self.reject(format!("MR-31: {error}")))?;
+                Some(ChannelMode { medium, fragment: f.id.clone(), inputs: ctx.inputs.clone(), tx, rx })
+            }
+        };
+        if channel_mode.is_some() {
+            self.instance.fidelity.rf = ezsdr_kernel::module_api::RfFidelity::ImpairmentModel;
+        }
+        self.channel = channel_mode;
         self.root = Some(root);
         self.clocks = Some(ctx.clocks);
         self.time = Some(ctx.time);
@@ -1100,6 +1298,13 @@ impl Provider for MockRadio {
 
     fn arm(&mut self) -> Result<(), ModuleError> {
         if !self.prepared { return Err(self.reject("MR-9: prepare must precede arm")); }
+        if let Some(mode) = &self.channel {
+            let missing = mode.medium.missing();
+            if !missing.is_empty() {
+                let names: Vec<&str> = missing.iter().map(Ident::as_str).collect();
+                return Err(self.reject(format!("MR-31: the channel names {}, which did not join its medium", names.join(", "))));
+            }
+        }
         let root = self.root.expect("prepared root");
         let time = self.time.as_ref().expect("prepared time");
         let clocks = self.clocks.as_ref().expect("prepared clocks");
@@ -1109,6 +1314,7 @@ impl Provider for MockRadio {
         if let Some(handle) = &self.tx_handle {
             self.tx_domain = Some(clocks.register_sample_clock(handle, now).map_err(|error| self.reject(format!("MR-9: {error}")))?);
             self.tx_origin = Some(now);
+            self.tx_gen = self.tx_gen.saturating_add(1);
             self.tx_tracker = Some(BurstTracker::new(self.tx_domain.expect("registered tx clock")));
             self.tx_device = DeviceModel::new();
         }
@@ -1199,6 +1405,8 @@ impl Provider for MockRadio {
         self.time = None;
         self.events = None;
         self.root = None;
+        self.channel = None;
+        self.medium = None;
     }
 
     fn step(&mut self, until: TimePoint) -> Result<StepOutcome, ModuleError> {
@@ -1240,7 +1448,7 @@ impl Provider for MockRadio {
             if tick > u { break; }
             if self.started {
                 let _ = self.emit_rx_until(tick)?;
-                let _ = self.emit_tx_until(tick)?;
+                let _ = self.emit_tx_until(tick, None)?;
             }
             if kind == 0 {
                 let index = value as usize;
@@ -1262,7 +1470,7 @@ impl Provider for MockRadio {
         }
         if self.started {
             progressed |= self.emit_rx_until(u)?;
-            progressed |= self.emit_tx_until(u)?;
+            progressed |= self.emit_tx_until(u, None)?;
         }
         self.schedule_wakeup()?;
         Ok(StepOutcome { progressed })

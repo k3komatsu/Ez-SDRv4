@@ -39,7 +39,7 @@ impl Profile {
                 ProfileKind::Ideal => "ideal",
             }
             .to_owned(),
-            version: Version::new(1, 0, 0),
+            version: Version::new(1, 1, 0),
         }
     }
 
@@ -134,6 +134,26 @@ impl Profile {
 
     pub(crate) fn block_len(self) -> u32 {
         2_000
+    }
+
+    /// The transmit path delay in transmit samples: srsRAN's X300 time advance for
+    /// `x310-like` (INFERRED), none for `ideal` (MR-3, RM-23).
+    pub(crate) fn tx_path_delay_samples(self) -> i64 {
+        match self.kind {
+            ProfileKind::X310Like => 45,
+            ProfileKind::Ideal => 0,
+        }
+    }
+
+    /// The receive path delay in receive samples: 0, because `x310-like` carries the
+    /// whole loopback delay on its transmit side (MR-3, RM-23).
+    pub(crate) fn rx_path_delay_samples(self) -> i64 {
+        0
+    }
+
+    /// Whether an untimed tune leaves each channel's LO at a random phase (MR-34).
+    pub(crate) fn random_phase_on_untimed_tune(self) -> bool {
+        self.kind == ProfileKind::X310Like
     }
 
     pub(crate) fn timing(self) -> TimingEnvelope {
@@ -273,6 +293,8 @@ impl Profile {
                 WIRE_BYTES_PER_SAMPLE,
                 Value::Int(self.performance().wire_bytes_per_sample),
             ),
+            (TX_PATH_DELAY_SAMPLES, Value::Int(self.tx_path_delay_samples())),
+            (RX_PATH_DELAY_SAMPLES, Value::Int(self.rx_path_delay_samples())),
         ] {
             capabilities.insert(key(name), one(value));
         }

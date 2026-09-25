@@ -1,10 +1,10 @@
-# Phase 2 spec 08 — The Simulation Vocabulary (`sim` 1.0.0) and the Simulation Engine
+# Phase 2 spec 08 — The Simulation Vocabulary (`sim` 1.1.0) and the Simulation Engine
 
 | Field | Value |
 |---|---|
-| Status | Accepted at Gate P (owner, 2026-09-24) and ratified at Gate X (owner, 2026-09-25; [`plan/phase2/00-overview.md`](../plan/phase2/00-overview.md) §11). Normative for `crates/ezsdr-sim` and `crates/ezsdr-sim-engine`. |
-| Scope | The `sim` Vocabulary: the `sim.seed` and `sim.faults` environment sections, their admission checks, the deterministic PRNG every simulated model uses, and the virtual-time constants. The Simulation Engine Module `ezsdr.sim-engine` 1.0.0: the discrete-event Time Authority of the Simulation class. |
-| Not in scope | Wall-paced pacing (RealtimeEmulation, Y1). Drifting per-device roots (Y11). The SimulationChannel section `sim.channel` (Phase 3). Fault kinds beyond three (Phase 4). |
+| Status | Accepted at Gate P (owner, 2026-09-24) and ratified at Gate X (owner, 2026-09-25; [`plan/phase2/00-overview.md`](../plan/phase2/00-overview.md) §11). Normative for `crates/ezsdr-sim` and `crates/ezsdr-sim-engine`. Amended in Phase 3 by VB-2; the SimulationChannel is spec 11. |
+| Scope | The `sim` Vocabulary: the `sim.seed` and `sim.faults` environment sections, their admission checks, the deterministic PRNG every simulated model uses, and the virtual-time constants; from 1.1.0, the `sim.channel` section, whose content is spec 11. The Simulation Engine Module `ezsdr.sim-engine` 1.0.0: the discrete-event Time Authority of the Simulation class. |
+| Not in scope | Wall-paced pacing (RealtimeEmulation, Y1). Drifting per-device roots (Y11). Fault kinds beyond three (Phase 4). |
 | Crates | `crates/ezsdr-sim` (library `ezsdr_sim`; depends on `ezsdr-kernel`, `serde`, `serde_json`, `schemars`); `crates/ezsdr-sim-engine` (library `ezsdr_sim_engine`; depends on `ezsdr-kernel`, `ezsdr-sim`, `serde_json`). |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
 
@@ -18,12 +18,12 @@ The FaultInjector of Vision §13 is not a Module here. A Module cannot call anot
 
 ## 2. The `sim` Vocabulary
 
-- **SE-1** The Vocabulary is `VocabularyDescriptor { id: sim, version: 1.0.0, prefix: sim, keys: [], event_kinds: [], verbs: [], checks: [sim.seed, sim.faults] }`, returned by `ezsdr_sim::vocabulary()`. `ezsdr_sim::register(registry, checks, kinds)` registers it and the two checks of SE-5, in that order. *Checked by `se_01_register_adds_the_descriptor_and_both_checks`.*
+- **SE-1** The Vocabulary is `VocabularyDescriptor { id: sim, version: 1.1.0, prefix: sim, keys: [], event_kinds: [], verbs: [], checks: [sim.seed, sim.faults, sim.channel] }`, returned by `ezsdr_sim::vocabulary()`. `ezsdr_sim::register(registry, checks, kinds)` registers it, the two checks of SE-5 and spec 11's `ChannelCheck` (CH-2), in that order (Phase 3, VB-2). *Checked by `se_01_register_adds_the_descriptor_and_the_three_checks`.*
 - **SE-2** `sim.seed`, when present, is a JSON integer in `0 ..= 2^64 − 1`; absent means 0. `ezsdr_sim::seed(environment) -> Result<u64, String>` is the one reader. The seed is recorded by the environment itself, verbatim (RS-43), so a Run without the section is reproducible under seed 0. *Checked by `se_02_seed_reader`.*
 - **SE-3** `sim.faults`, when present, is a JSON array of `FaultEntry { at_ns: integer in 0 ..= 2^62, fault: rx_overflow | rx_sequence_error | device_lost, target: Ident }` with no other member (`deny_unknown_fields`); absent means no faults. `ezsdr_sim::faults(environment) -> Result<Vec<FaultEntry>, String>` is the one reader and returns the entries in document order. *Checked by `se_03_faults_reader`.*
 - **SE-4** A fault is carried out by the Provider bound to its `target`, which is a fragment id (in practice a Spec resource name): the Provider reads `sim.faults` from `PrepareContext.environment` in `prepare` and keeps the entries whose `target` equals its fragment's id. `at_ns` counts nanoseconds after the Run's start instant T0 (KC-15), which the Provider receives as `start(Some(T0))`. `rx_overflow` is the Radio Model's overrun (RM-17), `rx_sequence_error` its sequence error (RM-18), and `device_lost` means that the Provider's first `step` at or after that instant returns `ModuleError { kind: DeviceLost }` and it produces nothing afterwards, which the coordinator turns into `DEVICE_LOST` (KC-30). Entries at one instant apply in document order. A Provider that does not implement the `sim` Vocabulary does not read the section; a fault schedule has meaning only in a simulated Run (Vision §17). *Producer obligation of each simulated Provider; MockRadio's tests are MR-20's.*
 - **SE-5** `SeedCheck` (section `sim.seed`) and `FaultsCheck` (section `sim.faults`) run at `validate` only. `SeedCheck` reports one violation when SE-2's reader fails. `FaultsCheck` reports one violation when SE-3's reader fails, and one per entry whose `target` is not a key of the per-fragment configuration it receives (KA-4) — a fault naming nothing in the Run would otherwise be silently never applied. Each violation's `check` is the section and its reason begins `"SE-5: "`. *Ceiling: the per-fragment configuration holds outputs as well as resources, so a fault naming an output passes the check and no Phase 2 Sink applies it; a Sink that implements `sim` would.* *Checked by `se_05_checks`.*
-- **SE-6** `SimRng` is SplitMix64. `SimRng::new(seed, stream)` sets its state to `seed XOR fnv1a64(stream.as_bytes())`, where FNV-1a 64 starts at `0xcbf29ce484222325` and multiplies by `0x100000001b3`. `next_u64` adds `0x9E3779B97F4A7C15` to the state (wrapping) and returns `z` computed from the new state as `z = (z ^ (z >> 30)) · 0xBF58476D1CE4E5B9; z = (z ^ (z >> 27)) · 0x94D049BB133111EB; z ^ (z >> 31)` (wrapping multiplications). `below(n)` for `n ≥ 1` is `next_u64() % n`. Every random draw in a Phase 2 model comes from a `SimRng` whose `stream` names what it drives (MockRadio's receive jitter uses `"<device>/rx"`), so adding a model never changes another model's sequence. *Ceiling: `below` has modulo bias of at most `n / 2^64`, irrelevant for block lengths.* *Checked by `se_06_splitmix_vectors`: `SimRng::new(0, "")` yields `0xc3817c016ba4ff30, 0x100cdaacc0bc9316, 0x54c3a569ecf61b1b`; `SimRng::new(42, "mock/rx")` yields `0xf7aebfe5ed07745b, 0x0c111bab322a67d5, 0xd7ecc327e164609a`.*
+- **SE-6** `SimRng` is SplitMix64. `SimRng::new(seed, stream)` sets its state to `seed XOR fnv1a64(stream.as_bytes())`, where FNV-1a 64 starts at `0xcbf29ce484222325` and multiplies by `0x100000001b3`. `next_u64` adds `0x9E3779B97F4A7C15` to the state (wrapping) and returns `z` computed from the new state as `z = (z ^ (z >> 30)) · 0xBF58476D1CE4E5B9; z = (z ^ (z >> 27)) · 0x94D049BB133111EB; z ^ (z >> 31)` (wrapping multiplications). `below(n)` for `n ≥ 1` is `next_u64() % n`. Every random draw in a Phase 2 model comes from a `SimRng` whose `stream` names what it drives (MockRadio's receive jitter uses `"<device>/rx"`), so adding a model never changes another model's sequence. The SimulationChannel's noise uses the streams `sim.channel/<rx>/<channel>` (CH-5) and MockRadio's LO phases the stream `<device>/lo` (MR-34) (Phase 3, VB-2). *Ceiling: `below` has modulo bias of at most `n / 2^64`, irrelevant for block lengths.* *Checked by `se_06_splitmix_vectors`: `SimRng::new(0, "")` yields `0xc3817c016ba4ff30, 0x100cdaacc0bc9316, 0x54c3a569ecf61b1b`; `SimRng::new(42, "mock/rx")` yields `0xf7aebfe5ed07745b, 0x0c111bab322a67d5, 0xd7ecc327e164609a`.*
 - **SE-7** `ezsdr_sim::VIRTUAL_TICK_RATE_HZ = 1_000_000_000` and `ezsdr_sim::VIRTUAL_EPOCH = "sim.run_start"` are the virtual root's rate and epoch name (Y11). A model that needs the virtual root's rate reads it from the registry (`clocks.nominal_rate(time.primary_root())`) rather than assuming the constant.
 
 ## 3. The Simulation Engine Module
@@ -41,7 +41,7 @@ The FaultInjector of Vision §13 is not a Module here. A Module cannot call anot
 
   *Checked by `se_10_time_authority_contract`.*
 - **SE-11** `Authority::next_wakeup()` (KA-11): with nothing pending it returns `None` and changes nothing. Otherwise it sets `now` to the smallest pending tick `t`, then repeatedly removes the pending entry with the smallest `(tick, seq)` whose tick is `t` and calls it with `TimePoint(V, t)` — outside the Engine's lock, so the callback may call `now`, `schedule` and `cancel` — until none is left at `t` or `CALLBACK_CAP = 1000` have run in this call; it wakes every `wait_until` waiter and returns `Some(TimePoint(V, t))`. A callback that schedules at `t` is run in the same call, subject to the cap; entries left at `t` by the cap are run by the next call, which returns `t` again, and KC-22 turns a thousand such calls into `STEP_LIVELOCK`. *Checked by `se_11_next_wakeup_order_ties_and_cap`.*
-- **SE-12** The documents `FaultEntry` and the seed (a `u64`) have committed schemas `schemas/sim/fault_entry.v1.json` and `schemas/sim/seed.v1.json` (PO-7). *Checked by `se_12_schema_freeze`.*
+- **SE-12** The documents `FaultEntry`, the seed (a `u64`) and, from 1.1.0, spec 11's `ChannelSpec` have committed schemas `schemas/sim/fault_entry.v1.json`, `schemas/sim/seed.v1.json` and `schemas/sim/channel.v1.json` (PO-7; Phase 3, VB-2). *Checked by `se_12_schema_freeze`.*
 - **SE-13** The Engine draws no random number and reads no clock but its own; the order in which it fires callbacks is a function of `(tick, seq)` alone. *Checked by `se_13_two_engines_fed_the_same_schedule_fire_identically`.*
 
 ## 4. Decisions
@@ -62,12 +62,12 @@ The FaultInjector of Vision §13 is not a Module here. A Module cannot call anot
 
 | test | input | expected | rules |
 |---|---|---|---|
-| `se_01_register_adds_the_descriptor_and_both_checks` | empty registries, `register` | `sim 1.0.0` registered; a present `sim.seed` section is checked | SE-1 |
+| `se_01_register_adds_the_descriptor_and_the_three_checks` | empty registries, `register` | `sim 1.1.0` registered with the checks `sim.seed`, `sim.faults` and `sim.channel`; a present `sim.seed` section is checked | SE-1 |
 | `se_02_seed_reader` | absent; `42`; `18446744073709551615`; `-1`; `"42"`; `1.5` | 0; 42; `u64::MAX`; three errors | SE-2 |
 | `se_03_faults_reader` | absent; one entry of each fault; an unknown fault; an extra member; a negative `at_ns`; a non-array | `[]`; three entries in order; four errors | SE-3 |
 | `se_05_checks` | a valid seed and schedule targeting `radio`; a schedule targeting `nobody`; a malformed seed | no violation; one naming `nobody`; one on `sim.seed` | SE-5, KA-4 |
 | `se_06_splitmix_vectors` | SE-6's two streams | SE-6's six values; `below(10)` always `< 10` over 10 000 draws | SE-6 |
-| `se_12_schema_freeze` | regenerate | byte-equal to `schemas/sim/*.v1.json`; no other file | SE-12, PO-7 |
+| `se_12_schema_freeze` | regenerate | byte-equal to the three `schemas/sim/*.v1.json`; no other file | SE-12, PO-7, CH-10 |
 
 `crates/ezsdr-sim-engine/tests/sim_engine.rs` (dev-dependency: `ezsdr-kernel` with `testing` for nothing but the shared fixtures; the Engine is tested directly):
 
@@ -88,4 +88,4 @@ The FaultInjector of Vision §13 is not a Module here. A Module cannot call anot
 
 ## 7. Deferred
 
-Wall-paced pacing and the RealtimeEmulation class. Per-device drifting roots. `sim.channel` (Phase 3). More fault kinds (Phase 4).
+Wall-paced pacing and the RealtimeEmulation class. Per-device drifting roots. More fault kinds (Phase 4).

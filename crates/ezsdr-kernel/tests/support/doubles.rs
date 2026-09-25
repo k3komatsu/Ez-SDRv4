@@ -498,6 +498,12 @@ impl TestProvider {
         self
     }
 
+    /// Changes the declared fidelity in place, as a Provider settling it in `prepare`
+    /// does (MA-10 as KB-2 amends it).
+    pub fn set_fidelity(&mut self, fidelity: Fidelity) {
+        self.instance.fidelity = fidelity;
+    }
+
     /// Reports another instance id than its root's (X7, D91).
     pub fn with_instance_id(mut self, id: ResourceId) -> TestProvider {
         self.instance.id = id;

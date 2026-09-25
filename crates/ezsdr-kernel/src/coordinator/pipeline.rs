@@ -256,7 +256,9 @@ pub(super) fn assemble(
         lease,
         log: SessionLog::new(),
         inputs: Vec::new(),
-        store: assembly.inputs,
+        store: Arc::new(Mutex::new(
+            assembly.inputs.into_iter().map(|(hash, bytes)| (hash, Arc::from(bytes))).collect(),
+        )),
         agenda: Vec::<(i64, usize, Action)>::new(),
         t0: None,
         admission: AdmissionResult::default(),
@@ -425,14 +427,14 @@ impl RunHandle {
             let refusal =
                 if !(waveform.uri.starts_with("mem:") || waveform.uri.starts_with("file://")) {
                     Some("uri must begin with mem: or file://".to_owned())
-                } else if let Some(bytes) = self.store.get(&waveform.hash) {
+                } else if let Some(bytes) = crate::module_api::InputStore::get(&*self.store, &waveform.hash) {
                     if bytes.len() as u64 != waveform.size_bytes {
                         Some(format!(
                             "size is {}, but the ArtifactRef declares {}",
                             bytes.len(),
                             waveform.size_bytes
                         ))
-                    } else if crate::hash::ContentHash::of_bytes(bytes) != waveform.hash {
+                    } else if crate::hash::ContentHash::of_bytes(&bytes) != waveform.hash {
                         Some("bytes do not match the ArtifactRef hash".to_owned())
                     } else {
                         None
@@ -729,6 +731,7 @@ impl RunHandle {
                 actions: self.shared.queue(instance).clone(),
                 actions_out: submitter.clone(),
                 environment: self.shared.ctx.environment.clone(),
+                inputs: self.store.clone(),
                 links: self.attached_links.remove(&fragment.id).unwrap_or_default(),
                 components,
                 host_budget: budget,
@@ -1190,7 +1193,7 @@ pub(super) fn submit(
             run.inputs.push(reference.clone());
             reference
         };
-        run.store.entry(hash).or_insert_with(|| bytes.to_vec());
+        lock(&run.store).entry(hash).or_insert_with(|| Arc::from(bytes));
         Some(reference)
     } else {
         None

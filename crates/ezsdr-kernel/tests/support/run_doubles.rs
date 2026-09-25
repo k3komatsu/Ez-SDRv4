@@ -344,6 +344,8 @@ pub struct SteppedProvider {
     pub prepare_abort: Option<String>,
     pub block_step_at: Option<i64>,
     pub step_gate: Option<Arc<(Mutex<bool>, Condvar)>>,
+    pub inputs: Option<Arc<dyn ezsdr_kernel::module_api::InputStore>>,
+    pub settle_fidelity: Option<ezsdr_kernel::module_api::Fidelity>,
 }
 
 impl SteppedProvider {
@@ -379,7 +381,15 @@ impl SteppedProvider {
             prepare_abort: None,
             block_step_at: None,
             step_gate: None,
+            inputs: None,
+            settle_fidelity: None,
         }
+    }
+
+    /// Sets its instance's fidelity to `fidelity` inside `prepare` (MA-10 as KB-2 amends it).
+    pub fn settling_fidelity(mut self, fidelity: ezsdr_kernel::module_api::Fidelity) -> SteppedProvider {
+        self.settle_fidelity = Some(fidelity);
+        self
     }
 
     /// Schedules these primary-root instants at `start`.
@@ -549,8 +559,14 @@ impl SteppedProvider {
                     let value = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned());
                     self.record(format!("update:{key}={value}"));
                 }
-                Action::TxBurst { at, .. } => {
-                    self.record(format!("burst_at:{}", at.time_point.ticks))
+                Action::TxBurst { at, waveform, .. } => {
+                    self.record(format!("burst_at:{}", at.time_point.ticks));
+                    let found = self
+                        .inputs
+                        .as_ref()
+                        .and_then(|inputs| inputs.get(&waveform.hash))
+                        .map_or_else(|| "missing".to_owned(), |bytes| bytes.len().to_string());
+                    self.record(format!("burst_input:{found}"));
                 }
                 _ => {}
             }
@@ -586,6 +602,10 @@ impl Provider for SteppedProvider {
         self.clocks = Some(ctx.clocks.clone());
         self.events = Some(ctx.events.clone());
         self.actions = Some(ctx.actions.clone());
+        self.inputs = Some(ctx.inputs.clone());
+        if let Some(fidelity) = self.settle_fidelity {
+            self.inner.set_fidelity(fidelity);
+        }
         self.outs.clear();
         self.handles.clear();
         for attached in &ctx.links {

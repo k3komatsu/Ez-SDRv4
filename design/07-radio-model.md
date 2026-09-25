@@ -1,8 +1,8 @@
-# Phase 2 spec 07 — The Radio Model Vocabulary (`radio` 1.0.0)
+# Phase 2 spec 07 — The Radio Model Vocabulary (`radio` 1.1.0)
 
 | Field | Value |
 |---|---|
-| Status | Accepted at Gate P (owner, 2026-09-24) and ratified at Gate X (owner, 2026-09-25; [`plan/phase2/00-overview.md`](../plan/phase2/00-overview.md) §11). Normative for `crates/ezsdr-radio` and for every radio Provider (MockRadio in Phase 2, UHD in Phase 7). |
+| Status | Accepted at Gate P (owner, 2026-09-24) and ratified at Gate X (owner, 2026-09-25; [`plan/phase2/00-overview.md`](../plan/phase2/00-overview.md) §11). Normative for `crates/ezsdr-radio` and for every radio Provider (MockRadio in Phase 2, UHD in Phase 7). Amended in Phase 3 by VB-1. |
 | Scope | The `radio` Vocabulary: the resource kinds and tree shape a radio Provider exposes; the configuration keys and the capability keys, each with its `KeyDecl`; the TimingEnvelope and PerformanceEnvelope as capabilities; coercion rules; the event kinds with their defaults, severities and payloads; the Session verbs; the `TxBurst` conventions; the `radio.rf_envelope` section and its admission check. |
 | Not in scope | Any Provider's values (MockRadio's are spec 09's MR-3; UHD's are Phase 7's). Channel models (Phase 3). Per-channel configuration (RM-5's ceiling). Receive-side DDC and transmit-side DUC capabilities, device FFT and RFNoC (Vision §20, §35; Phase 7+). |
 | Crate | `crates/ezsdr-radio`, library `ezsdr_radio`. Depends on `ezsdr-kernel`, `serde`, `serde_json`, `schemars`. |
@@ -44,7 +44,7 @@ envelope (capabilities of <device>; matchable, never read by the Kernel except m
 
 ### Identity and registration
 
-- **RM-1** The Vocabulary is `VocabularyDescriptor { id: radio, version: 1.0.0, prefix: radio, keys: RM-4's table, event_kinds: RM-10's table, verbs: RM-12's table, checks: [radio.rf_envelope] }`, returned by `ezsdr_radio::vocabulary()`. `ezsdr_radio::register(registry, checks, kinds)` registers the descriptor, the `RfEnvelopeCheck` of RM-19 and every event kind with owner `Some(radio)`, in that order, and is the only way a runtime assembles the Vocabulary. *Checked by `rm_01_register_adds_the_descriptor_the_check_and_the_kinds`.*
+- **RM-1** The Vocabulary is `VocabularyDescriptor { id: radio, version: 1.1.0, prefix: radio, keys: RM-4's table, event_kinds: RM-10's table, verbs: RM-12's table, checks: [radio.rf_envelope] }`, returned by `ezsdr_radio::vocabulary()`. `ezsdr_radio::register(registry, checks, kinds)` registers the descriptor, the `RfEnvelopeCheck` of RM-19 and every event kind with owner `Some(radio)`, in that order, and is the only way a runtime assembles the Vocabulary. Version 1.1.0 adds the two path-delay capabilities of RM-4 and RM-23 (Phase 3, VB-1). *Checked by `rm_01_register_adds_the_descriptor_the_check_and_the_kinds`.*
 
 ### Resource tree
 
@@ -86,8 +86,10 @@ envelope (capabilities of <device>; matchable, never read by the Kernel except m
   | `radio.perf.rx_bytes_per_s` | int | no | reject | — | PerformanceEnvelope (RM-7) |
   | `radio.perf.tx_bytes_per_s` | int | no | reject | — | PerformanceEnvelope |
   | `radio.perf.wire_bytes_per_sample` | int | no | reject | — | PerformanceEnvelope: the host–device wire format's bytes per complex sample (SC-5) |
+  | `radio.tx.path_delay_samples` | int | no | reject | — | capability: transmit path delay (RM-23) |
+  | `radio.rx.path_delay_samples` | int | no | reject | — | capability: receive path delay (RM-23) |
 
-  No other `radio.` key exists in 1.0.0; a later key is an additive minor version. *Checked by `rm_04_the_key_table_is_exactly_the_declared_one`.*
+  No other `radio.` key exists in 1.1.0; version 1.0.0 declared the first twenty-nine rows, and a later key is an additive minor version (Phase 3, VB-1). *Checked by `rm_04_the_key_table_is_exactly_the_declared_one`.*
 - **RM-5** A radio Provider's `PrepareReport.effective` holds exactly the ten configuration keys of RM-4 for its fragment, with the applied values, whether or not the Spec constrained them; an unconstrained key takes the Provider's default. The capability keys are never in `effective`. All channels of a stream share the stream's frequency, gain and antenna. *Ceiling: per-channel values are an additive key later, for example `radio.rx.gain_db_per_channel` as a list-valued parameter.* *Producer obligation; MockRadio's test is `mr_08_effective_holds_exactly_the_ten_configuration_keys`.*
 
 ### Envelopes
@@ -98,7 +100,7 @@ envelope (capabilities of <device>; matchable, never read by the Kernel except m
 
 ### Coherence
 
-- **RM-9** `radio.rx.coherent: One(true)` declares that the receive channels of the device's one stream are sample-aligned with a known phase relation (Vision §25's CoherentGroup, owned by the Provider; the Kernel never infers it, SB-35). `radio.phase_behavior_on_retune` declares whether that phase relation survives an untimed retune (`deterministic`) or only a `hardware_timed` one (`random_unless_timed_tune`, Vision §26). *Producer obligation. Emulating the random phase needs a channel and is Phase 3's.*
+- **RM-9** `radio.rx.coherent: One(true)` declares that the receive channels of the device's one stream are sample-aligned with a known phase relation (Vision §25's CoherentGroup, owned by the Provider; the Kernel never infers it, SB-35). `radio.phase_behavior_on_retune` declares whether that phase relation survives an untimed retune (`deterministic`) or only a `hardware_timed` one (`random_unless_timed_tune`, Vision §26). *Producer obligation; MockRadio emulates both behaviours on the SimulationChannel (MR-34) (Phase 3, VB-1).*
 
 ### Events
 
@@ -132,10 +134,10 @@ envelope (capabilities of <device>; matchable, never read by the Kernel except m
 ### Verbs and bursts
 
 - **RM-12** The Session verbs are: `start_repeat` → `CompileRule::TxBurst { repeat: true, late_policy: send_asap_and_flag }`; `send` → `CompileRule::TxBurst { repeat: false, late_policy: drop_and_flag }`. Their target is the transmit stream, `<resource>/tx` (RM-13). *Checked by `rm_12_the_verbs_compile_to_bursts`.*
-- **RM-13** A `TxBurst`'s target is a transmit stream node (`<device>/tx`). Its waveform `ArtifactRef` holds complex samples in the transmit stream's contract — `ezsdr.stream.cf32` in 1.0.0 — channel-interleaved (sample `n` of channel `c` at byte offset `(n · channels + c) · 8`), little-endian, with `channels` = the effective `radio.tx.channels`. Its length in samples is `size_bytes / (8 · channels)`, which must be a whole number ≥ 1. The burst transmits on every channel of the stream. A repeated waveform's length must be at most `radio.tx.repeat_max_samples` and a multiple of `radio.tx.repeat_align_samples`. `TxBurst.metadata` is unused in 1.0.0 and must be empty; a burst that breaks any of these is not transmitted and is reported with `radio.COMMAND_REJECTED`. *Producer obligation.*
-- **RM-14** On receipt of a `TxBurst` a radio Provider evaluates `LatePolicy::decide(registry, at, now, min_lead)` with `now` its current instant in the transmit SampleClock and `min_lead` its TimingEnvelope's lead in `host.monotonic` (SC-27). `OnTime`: the burst starts at `at`. `SendAsap`: the target moves to the first transmit sample at or after `now + min_lead`; if admitted, `radio.TIME_ERROR { cause: late, outcome: send_asap }` is emitted. If MR-16 refuses that moved start, the burst is not transmitted and the Provider emits only `TIME_ERROR { outcome: refused }` plus `COMMAND_REJECTED` instead of a `send_asap` event. `Drop` and `PlanViolation`: the burst is not transmitted, and `radio.TIME_ERROR` with that outcome is emitted. The outcome reaches an admitted burst's `BurstRecord` through `BurstOpen.late` (SC-29a). *Producer obligation.*
+- **RM-13** A `TxBurst`'s target is a transmit stream node (`<device>/tx`). Its waveform `ArtifactRef` holds complex samples in the transmit stream's contract — `ezsdr.stream.cf32` in 1.0.0 — channel-interleaved (sample `n` of channel `c` at byte offset `(n · channels + c) · 8`), little-endian, with `channels` = the effective `radio.tx.channels`. Its length in samples is `size_bytes / (8 · channels)`, which must be a whole number ≥ 1. The burst transmits on every channel of the stream. A repeated waveform's length must be at most `radio.tx.repeat_max_samples` and a multiple of `radio.tx.repeat_align_samples`. `TxBurst.metadata` is unused in 1.0.0 and must be empty; a burst that breaks any of these is not transmitted and is reported with `radio.COMMAND_REJECTED`. A Provider that reads the waveform's bytes refuses one with a non-finite component the same way (Phase 3, VB-1). *Producer obligation.*
+- **RM-14** On receipt of a `TxBurst` a radio Provider evaluates `LatePolicy::decide(registry, at, now, min_lead)` with `now` its current instant in the transmit SampleClock rounded up to a sample — so that a target whose instant has passed is late even when it is the sample the current instant falls in (Phase 3, VB-1) — and `min_lead` its TimingEnvelope's lead in `host.monotonic` (SC-27). `OnTime`: the burst starts at `at`. `SendAsap`: the target moves to the first transmit sample at or after `now + min_lead`; if admitted, `radio.TIME_ERROR { cause: late, outcome: send_asap }` is emitted. If MR-16 refuses that moved start, the burst is not transmitted and the Provider emits only `TIME_ERROR { outcome: refused }` plus `COMMAND_REJECTED` instead of a `send_asap` event. `Drop` and `PlanViolation`: the burst is not transmitted, and `radio.TIME_ERROR` with that outcome is emitted. The outcome reaches an admitted burst's `BurstRecord` through `BurstOpen.late` (SC-29a). *Producer obligation.*
 - **RM-15** Bursts on one transmit stream are held in target order. A burst ends at the end of its waveform (without `repeat`), at the start of the next burst, at a `Stop` for its stream or device, at a `cold` change of the stream (UC-3), or at the Run's stop, whichever is first; a repeated burst ends only at one of the last four. A burst whose target equals a burst already held is refused with `radio.COMMAND_REJECTED`. Every block a Provider transmits goes through the Kernel's `BurstTracker` (SC-29). *Producer obligation.*
-- **RM-16** `Provider::stop(mode)` stops the transmit side first — the open burst closes (`BurstTracker::stop`, `BurstEnd::Stop`), and every held burst and every pending timed command is cancelled — and the receive side second: under `orderly` the receive stream keeps delivering until `stop instant + radio.timing.stop_tail_ns` and then ends, under `abort` it ends at once. A `Stop` Action for `<device>/tx` does the transmit half; for `<device>/rx` the receive half, with the tail; for `<device>` both. *Producer obligation (MA-13, KA-12).*
+- **RM-16** `Provider::stop(mode)` stops the transmit side first (every transmit sample before the stop instant has been transmitted: the burst transmitting at the stop instant, including a held burst whose start was before it, closes at the first sample at or after it with `BurstTracker::stop` and `BurstEnd::Stop`, a burst that had already ended keeps its end, and every held burst that starts at or after the stop instant and every pending timed command is cancelled; Phase 3, VB-1) — and the receive side second: under `orderly` the receive stream keeps delivering until `stop instant + radio.timing.stop_tail_ns` and then ends, under `abort` it ends at once. A `Stop` Action for `<device>/tx` does the transmit half; for `<device>/rx` the receive half, with the tail; for `<device>` both. *Producer obligation (MA-13, KA-12).*
 
 ### Receive faults
 
@@ -185,6 +187,10 @@ envelope (capabilities of <device>; matchable, never read by the Kernel except m
 
 - **RM-21** For radio keys, UC-3's `cold` applies to the channel counts and the sample rates — a change ends the stream's SampleClock and starts a new one, and a count changed to 0 ends the stream, from 0 starts it — and UC-6's `hardware_timed` to frequency and gain, with the device's command queue of `radio.timing.command_queue_depth` slots. The antennas are not changeable during a Run. *Producer obligation.*
 
+### Path delay
+
+- **RM-23** `radio.tx.path_delay_samples` and `radio.rx.path_delay_samples` are the device's fixed delays between a sample's timestamp and the antenna, in samples of the stream's current rate, declared on the device node as `One(Int(n))` with `n ≥ 0`: a transmit sample stamped `T` is at the antenna `n_tx` transmit samples after `T`, and a receive sample stamped `T` is what was at the antenna `n_rx` receive samples before `T`, so a loopback through a zero-delay path at one rate shows `n_tx + n_rx` samples of delay. This is Vision §26's per-profile delay default; a per-Run override by a CalibrationArtifact is later work (Phase 3, VB-1). *Producer obligation; MockRadio's values are MR-3's and its test is `mr_32_the_transmit_path_delay_shifts_a_loopback`.*
+
 ## 5. Decisions
 
 | # | Decision | Choice | Rejected (one line each) | Ceiling / upgrade path |
@@ -205,9 +211,9 @@ In `crates/ezsdr-radio/tests/radio_model.rs`.
 
 | test | input | expected | rules |
 |---|---|---|---|
-| `rm_01_register_adds_the_descriptor_the_check_and_the_kinds` | empty registries, then `register` | the Vocabulary is `radio 1.0.0`; `checks.run` on a present `radio.rf_envelope` section runs the check; each RM-10 kind is registered with its default | RM-1 |
+| `rm_01_register_adds_the_descriptor_the_check_and_the_kinds` | empty registries, then `register` | the Vocabulary is `radio 1.1.0`; `checks.run` on a present `radio.rf_envelope` section runs the check; each RM-10 kind is registered with its default | RM-1 |
 | `rm_01_register_twice_is_refused` | `register` called twice | the second returns an error; nothing is overwritten | RM-1, MA-32, RS-27 |
-| `rm_04_the_key_table_is_exactly_the_declared_one` | `vocabulary().keys` | exactly RM-4's rows, each field as the table says | RM-4 |
+| `rm_04_the_key_table_is_exactly_the_declared_one` | `vocabulary().keys` | exactly RM-4's thirty-one rows, each field as the table says | RM-4, RM-23 |
 | `rm_10_the_kinds_are_registered_under_radio_with_their_defaults` | `vocabulary().event_kinds` | exactly RM-10's nine, severities and defaults as the table says, each under `radio.` | RM-10 |
 | `rm_12_the_verbs_compile_to_bursts` | `vocabulary().verbs` | `start_repeat` → repeat, `send_asap_and_flag`; `send` → no repeat, `drop_and_flag`; the Kernel registry accepts both (no `RejectAtPlan`) | RM-12 |
 | `rm_19_rf_envelope_cases` | a band `[2.4e9, 2.5e9]`, `max_gain_db: 20`, `tx_enabled: [true, false]`, `antenna_ports: ["TX/RX", "RX2"]`; configurations: TX at 2.45e9 gain 10 one channel; TX at 2.6e9; gain 25; two channels; antenna `J1`; TX count 0 with frequency 2.6e9; RX antenna `J1`; the same two fragments with only one violating | no violation; one each on frequency, gain, channels and antenna; none with count 0; one on the RX antenna; the violation names only the violating fragment | RM-19, KA-4 |
@@ -225,4 +231,4 @@ In `crates/ezsdr-radio/tests/radio_model.rs`.
 
 ## 8. Deferred
 
-A transmit port and link-fed transmission (Phase 10). Per-channel configuration. DDC/DUC and decimation capabilities, device FFT (Phase 7+). A hot-path payload layout for radio events (Phase 7). A delay-calibration default per profile (Vision §26; Phase 3, when a loopback makes it observable).
+A transmit port and link-fed transmission (Phase 10). Per-channel configuration. DDC/DUC and decimation capabilities, device FFT (Phase 7+). A hot-path payload layout for radio events (Phase 7). A per-Run delay override by a CalibrationArtifact (Vision §26).

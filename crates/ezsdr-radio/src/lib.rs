@@ -1,4 +1,4 @@
-//! Ez-SDR v4 Radio Model Vocabulary radio 1.0.0 (plan/phase2/07-radio-model.md).
+//! Ez-SDR v4 Radio Model Vocabulary radio 1.1.0 (design/07-radio-model.md).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -91,6 +91,10 @@ pub mod keys {
     pub const TX_BYTES_PER_S: &str = "radio.perf.tx_bytes_per_s";
     /// Wire-format bytes per complex sample (RM-4).
     pub const WIRE_BYTES_PER_SAMPLE: &str = "radio.perf.wire_bytes_per_sample";
+    /// Transmit path delay, in transmit samples, from a sample's timestamp to the antenna (RM-23).
+    pub const TX_PATH_DELAY_SAMPLES: &str = "radio.tx.path_delay_samples";
+    /// Receive path delay, in receive samples, from the antenna to a sample's timestamp (RM-23).
+    pub const RX_PATH_DELAY_SAMPLES: &str = "radio.rx.path_delay_samples";
     /// The ten configuration keys in RM-5 order (RM-5).
     pub const CONFIGURATION: [&str; 10] = [
         RX_CHANNELS,
@@ -197,6 +201,8 @@ fn radio_keys() -> Vec<KeyDecl> {
         key_decl(keys::RX_BYTES_PER_S, Int, false, Reject, None),
         key_decl(keys::TX_BYTES_PER_S, Int, false, Reject, None),
         key_decl(keys::WIRE_BYTES_PER_SAMPLE, Int, false, Reject, None),
+        key_decl(keys::TX_PATH_DELAY_SAMPLES, Int, false, Reject, None),
+        key_decl(keys::RX_PATH_DELAY_SAMPLES, Int, false, Reject, None),
     ]
 }
 
@@ -223,11 +229,11 @@ fn radio_event_kinds() -> Vec<EventKindDecl> {
     .collect()
 }
 
-/// Describes the Radio Model Vocabulary `radio` 1.0.0 (RM-1).
+/// Describes the Radio Model Vocabulary `radio` 1.1.0 (RM-1).
 pub fn vocabulary() -> VocabularyDescriptor {
     VocabularyDescriptor {
         id: radio_namespace().clone(),
-        version: Version::new(1, 0, 0),
+        version: Version::new(1, 1, 0),
         prefix: radio_namespace().clone(),
         keys: radio_keys(),
         event_kinds: radio_event_kinds(),

@@ -41,6 +41,7 @@ fn ma_44_the_run_doubles_record_their_calls() {
         actions: queue,
         actions_out: submitter,
         environment: Arc::new(BTreeMap::new()),
+        inputs: Arc::new(BTreeMap::<ezsdr_kernel::hash::ContentHash, Arc<[u8]>>::new()),
         links: Vec::new(),
         components: BTreeMap::new(),
         host_budget,

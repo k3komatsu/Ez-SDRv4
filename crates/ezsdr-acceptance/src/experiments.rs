@@ -94,7 +94,13 @@ pub fn with_timed_capture(spec: Value, samples: i64, offset_ticks: i64) -> Value
 
 /// Builds zero-valued complex samples and their content-addressed input reference.
 pub fn waveform(samples: usize) -> (Vec<u8>, ArtifactRef) {
-    let bytes = vec![0; samples.checked_mul(8).expect("waveform size fits memory")];
+    waveform_of(&vec![(0.0, 0.0); samples])
+}
+
+/// Builds one channel of little-endian `cf32` samples and their content-addressed input
+/// reference (RM-13).
+pub fn waveform_of(samples: &[(f32, f32)]) -> (Vec<u8>, ArtifactRef) {
+    let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| re.to_le_bytes().into_iter().chain(im.to_le_bytes())).collect();
     let hash = ContentHash::of_bytes(&bytes);
     let artifact = ArtifactRef {
         id: Ident::parse("waveform").expect("valid artifact id"),
@@ -107,4 +113,52 @@ pub fn waveform(samples: usize) -> (Vec<u8>, ArtifactRef) {
         continuity: Vec::new(),
     };
     (bytes, artifact)
+}
+
+/// A transmitter resource `tx` sending `waveform` once at `offset_ticks` on its own clock,
+/// and a receiver resource `rx` recorded by the output `rec`; nothing says how the two are
+/// coupled, which is the environment's (Vision §8, §58 #8).
+pub fn link(tx: &str, rx: &str, rate_hz: f64, waveform: &ArtifactRef, offset_ticks: i64, capture: i64) -> Value {
+    let mut resources = serde_json::Map::new();
+    resources.insert(tx.to_owned(), json!({
+        "kind": "radio.device",
+        "requires": {
+            "radio.tx.channels": { "kind": "eq", "value": 1 },
+            "radio.tx.sample_rate_hz": { "kind": "eq", "value": rate_hz },
+            "radio.tx.frequency_hz": { "kind": "eq", "value": 1.0e9 }
+        }
+    }));
+    resources.insert(rx.to_owned(), json!({
+        "kind": "radio.device",
+        "requires": {
+            "radio.rx.channels": { "kind": "eq", "value": 1 },
+            "radio.rx.sample_rate_hz": { "kind": "eq", "value": rate_hz },
+            "radio.rx.frequency_hz": { "kind": "eq", "value": 1.0e9 }
+        }
+    }));
+    let target = ResourceId::parse(&format!("{tx}/tx")).expect("valid resource id");
+    json!({
+        "version": 1,
+        "requirements": { "vocabularies": [{ "id": "radio", "major": 1 }, { "id": "sink", "major": 1 }] },
+        "resources": resources,
+        "outputs": [{
+            "id": "rec",
+            "kind": "sink.capture",
+            "feed": { "port": { "component": rx, "port": "rx" }, "policy": "drop_oldest", "capacity": 64 },
+            "params": { "sink.capture_samples": capture }
+        }],
+        "schedule": [{
+            "at": { "clock": tx, "offset_ticks": offset_ticks },
+            "action": {
+                "kind": "tx_burst",
+                "target": serde_json::to_value(target).expect("resource id serializes"),
+                "waveform": waveform,
+                "repeat": false,
+                "late_policy": "send_asap_and_flag",
+                "metadata": {}
+            }
+        }],
+        "policies": {},
+        "extensions": {}
+    })
 }

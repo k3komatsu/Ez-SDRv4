@@ -1,0 +1,80 @@
+{
+  "$defs": {
+    "Coupling": {
+      "additionalProperties": false,
+      "description": "One path of the coupling matrix (CH-1).",
+      "properties": {
+        "delay_ns": {
+          "default": 0,
+          "description": "The path's delay in nanoseconds, in `0..=2^62` (CH-1, CH-4).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gain_db": {
+          "description": "The path's amplitude gain in dB, in `−400..=400`; negative is a loss (CH-1, CH-4).",
+          "format": "double",
+          "type": "number"
+        },
+        "rx": {
+          "$ref": "#/$defs/Ident",
+          "description": "The receiving fragment (CH-1)."
+        },
+        "rx_channel": {
+          "description": "The receive channel of `rx` (CH-1).",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tx": {
+          "$ref": "#/$defs/Ident",
+          "description": "The transmitting fragment (CH-1)."
+        },
+        "tx_channel": {
+          "description": "The transmit channel of `tx` (CH-1).",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tx",
+        "tx_channel",
+        "rx",
+        "rx_channel",
+        "gain_db"
+      ],
+      "type": "object"
+    },
+    "Ident": {
+      "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The `sim.channel` document: the coupling matrix and the receivers' noise (CH-1).",
+  "properties": {
+    "couplings": {
+      "default": [],
+      "description": "One entry per path from a transmit channel to a receive channel; a fragment may\nbe both ends, which is its self-interference (CH-1, CH-4).",
+      "items": {
+        "$ref": "#/$defs/Coupling"
+      },
+      "type": "array"
+    },
+    "noise_dbfs": {
+      "additionalProperties": {
+        "format": "double",
+        "type": "number"
+      },
+      "default": {},
+      "description": "Receiver noise power in dB relative to full scale, in `−400..=100`, per receiving\nfragment, added to every receive channel of that fragment (CH-1, CH-5).",
+      "type": "object"
+    }
+  },
+  "title": "ChannelSpec",
+  "type": "object"
+}
