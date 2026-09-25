@@ -29,6 +29,18 @@ spec = ExperimentSpec envelope
 stream = Stream Contract
 time = time
 
+# --- coordinator (Phase 2, plan/phase2/06-kernel-coordinator.md) --------------
+coordinator = Run / Session state machine
+coordinator::start_spec_run = Run / Session state machine
+coordinator::connect = Run / Session state machine
+coordinator::RunHandle = Run / Session state machine
+coordinator::Assembly = NEW: KC-4's bundle of the registries, clocks and Module instances the runtime hands one Run
+coordinator::RunHandleError = NEW: the refusals of a live Run's control API (RS-15, RS-18, KC-28)
+coordinator::KERNEL_SOURCE = NEW: KA-14's reserved source of the Kernel's own events
+coordinator::EVENT_RING_DEPTH = NEW: RS-34's bounded ring, sized once by the coordinator
+coordinator::DEFAULT_HOST_BUDGET_NS = NEW: MA-8's bound on prepare and arm where nothing declares one
+coordinator::DRAIN_WAKEUP_CAP = NEW: KA-12's bound on the orderly drain
+
 # --- identity (audit §13 `identity`) -----------------------------------------
 id::NodeId = NodeId-qualified ids
 id::ClockDomainId = time model: ClockDomain id, node-qualified (X7).
@@ -71,7 +83,6 @@ time::domain::SampleClockHandle = NEW: TM-13a's id-and-ratio allocated at prepar
 
 # --- data / Stream Contract (audit §13 `data`) -------------------------------
 stream::buffer::BufferRef = BufferRef
-stream::buffer::HostMemoryAccess = NEW: SC-8's only route to host bytes, so that invariant 34's "no raw slices" has a mechanism.
 stream::block::SampleBlock = SampleBlock
 stream::block::BlockHeader = SampleBlock
 stream::block::BlockRef = SampleBlock
@@ -130,6 +141,7 @@ plan::apply_coercion = coercion policy
 module_api::Resource = Resource tree
 module_api::ProviderInstance = Resource tree
 binding::Binding = Binding resolution
+binding::start_lead_ns = NEW: KA-8's single reader of ezsdr.time.start_lead_ns, used by plan() and the coordinator
 binding::BindingProfile = BindingProfile
 binding::Placements = NEW: SB-25's island, component and link assignment, which R21 keeps out of the Spec.
 binding::ComponentPlacement = NEW: SB-25's component-to-island and memory-domain entry.

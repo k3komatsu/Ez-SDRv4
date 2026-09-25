@@ -133,14 +133,21 @@ pub struct BindingProfile {
 }
 
 /// Top-level fields a [`BindingProfile`] may carry (SB-21).
-pub const BINDING_TOP_LEVEL: &[&str] =
-    &["version", "bindings", "authority", "placements", "environment",
+pub const BINDING_TOP_LEVEL: &[&str] = &[
+    "version",
+    "bindings",
+    "authority",
+    "placements",
+    "environment",
 ];
 
 /// The four `environment` sections the Kernel reads by name; every other section is
 /// opaque to it (SB-26).
-pub const KERNEL_SECTIONS: &[&str] =
-    &["ezsdr.time", "ezsdr.rf_path", "ezsdr.capture", "ezsdr.arm_order",
+pub const KERNEL_SECTIONS: &[&str] = &[
+    "ezsdr.time",
+    "ezsdr.rf_path",
+    "ezsdr.capture",
+    "ezsdr.arm_order",
 ];
 
 impl BindingProfile {
@@ -151,8 +158,8 @@ impl BindingProfile {
         check_version(doc)?;
         check_top_level(doc, BINDING_TOP_LEVEL)?;
         crate::spec::check_ascii_keys(doc)?;
-        serde_json::from_value(doc.clone())
-            .map_err(|e| SpecError::Structural { reason: format!("SB-21: {e}"),
+        serde_json::from_value(doc.clone()).map_err(|e| SpecError::Structural {
+            reason: format!("SB-21: {e}"),
         })
     }
 
@@ -166,7 +173,34 @@ impl BindingProfile {
         if !KERNEL_SECTIONS.contains(&ns) {
             return None;
         }
-        Namespace::parse(ns).ok().and_then(|n| self.environment.get(&n))
+        Namespace::parse(ns)
+            .ok()
+            .and_then(|n| self.environment.get(&n))
+    }
+}
+
+/// `ezsdr.time.start_lead_ns`: the lead between the end of `arm` and the Run's start
+/// instant, in nanoseconds; absent means 0. The one reader of the field, used by
+/// `plan()` and by the coordinator (MA-41, KC-15, KA-8).
+pub fn start_lead_ns(
+    environment: &BTreeMap<Namespace, serde_json::Value>,
+) -> Result<u64, SpecError> {
+    let Some(section) = Namespace::parse("ezsdr.time")
+        .ok()
+        .and_then(|n| environment.get(&n))
+    else {
+        return Ok(0);
+    };
+    match section.get("start_lead_ns") {
+        None => Ok(0),
+        Some(v) => v
+            .as_u64()
+            .filter(|n| *n <= 1u64 << 62)
+            .ok_or_else(|| SpecError::Structural {
+                reason: format!(
+                    "MA-41: ezsdr.time.start_lead_ns must be an integer in 0..=2^62, not {v}"
+                ),
+            }),
     }
 }
 
@@ -200,9 +234,7 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
     // a float's canonical text is the shortest decimal that names the `f64` and not the
     // number's exact decimal (finding D50). The kind check still runs through `cmp`,
     // because a capability declared in the wrong kind is malformed rather than unequal.
-    let same = |a: &Value, b: &Value| -> Result<bool, SpecError> {
-        Ok(cmp(a, b)? == Equal)
-    };
+    let same = |a: &Value, b: &Value| -> Result<bool, SpecError> { Ok(cmp(a, b)? == Equal) };
     let within = |v: &Value, lo: Option<&Value>, hi: Option<&Value>| -> Result<bool, SpecError> {
         if let Some(lo) = lo {
             if cmp(v, lo)? == Less {
@@ -230,7 +262,11 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
         (Constraint::Range { min, max }, CapabilityValue::One { value: x }) => {
             within(x, min.as_ref(), max.as_ref())?
         }
-        (Constraint::Range { min, max }, CapabilityValue::Range { min: cmin, max: cmax,
+        (
+            Constraint::Range { min, max },
+            CapabilityValue::Range {
+                min: cmin,
+                max: cmax,
             },
         ) => {
             // Propagated, not swallowed: a capability declared in the wrong kind is
@@ -256,9 +292,7 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
             any_evaluating_all(s.iter(), |v| within(v, Some(min), Some(max)))?
         }
         (Constraint::Set { values: s }, CapabilityValue::AnyOf { values: xs }) => {
-            any_evaluating_all(s.iter(), |v| {
-                any_evaluating_all(xs.iter(), |x| same(v, x))
-            })?
+            any_evaluating_all(s.iter(), |v| any_evaluating_all(xs.iter(), |x| same(v, x)))?
         }
 
         // Min and Max are satisfied by the corresponding bound of the capability.
@@ -357,8 +391,8 @@ pub trait AdmissionCheck: Send + Sync {
     fn check(
         &self,
         section: &serde_json::Value,
-        effective: &BTreeMap<Key, Value>,
-        proposed: &BTreeMap<Key, Value>,
+        effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+        proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
         stage: CheckStage,
     ) -> Vec<Violation>;
 }
@@ -391,8 +425,8 @@ impl AdmissionCheckRegistry {
     pub fn run(
         &self,
         environment: &BTreeMap<Namespace, serde_json::Value>,
-        effective: &BTreeMap<Key, Value>,
-        proposed: &BTreeMap<Key, Value>,
+        effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+        proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
         stage: CheckStage,
     ) -> Vec<Violation> {
         let mut out = Vec::new();

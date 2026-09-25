@@ -35,7 +35,17 @@ use crate::time::{RelativeBudget, TimeAuthority, TimePoint};
 ///
 /// Rule: MA-33, decision B7.
 #[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct Version {
@@ -50,7 +60,10 @@ pub struct Version {
 impl Version {
     /// A version (MA-33).
     pub const fn new(major: u32, minor: u32, patch: u32) -> Version {
-        Version { major, minor, patch,
+        Version {
+            major,
+            minor,
+            patch,
         }
     }
 }
@@ -63,7 +76,17 @@ impl fmt::Display for Version {
 
 /// A caret requirement over a [`Version`] (MA-33).
 #[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
 )]
 #[serde(transparent)]
 pub struct VersionReq(pub Version);
@@ -94,7 +117,17 @@ impl VersionReq {
 ///
 /// Rule: MA-1, MA-2.
 #[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -221,7 +254,17 @@ impl ExecutionClass {
 ///
 /// Rule: MA-42.
 #[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum EnvelopeFidelity {
@@ -237,7 +280,17 @@ pub enum EnvelopeFidelity {
 
 /// `none < grid < real` (MA-42).
 #[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CoercionFidelity {
@@ -251,7 +304,17 @@ pub enum CoercionFidelity {
 
 /// `none < impairment_model < real` (MA-42).
 #[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum RfFidelity {
@@ -265,7 +328,17 @@ pub enum RfFidelity {
 
 /// `none < model < real` (MA-42).
 #[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum TransportFidelity {
@@ -333,13 +406,17 @@ impl Fidelity {
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateClass {
-    /// Requires a stop and a re-plan; a sample-rate change is one (TM-13c).
+    /// The target stops the affected function, applies the value and restarts it; a
+    /// stream continues on a new SampleClock (UC-3, TM-13c).
     Cold,
-    /// Applied between blocks.
+    /// Applied from the first block or sample boundary at or after the effective
+    /// instant; no block mixes the old and new value (UC-4).
     BlockBoundary,
-    /// Applied inside the real-time path without a block boundary.
+    /// Applied to every sample processed after the Action arrives, with no torn state
+    /// (UC-5).
     AtomicRealtime,
-    /// Applied by the device at a declared instant.
+    /// Applied by the device at exactly the effective instant, which must respect the
+    /// device's command lead (UC-6).
     HardwareTimed,
 }
 
@@ -457,7 +534,10 @@ impl ComponentDescriptor {
                 return Err(reject(format!("MA-37: duplicate port name {:?}", p.name)));
             }
             if !contracts.contains(&p.contract) {
-                return Err(reject(format!("MA-37: contract {} is not registered", p.contract)));
+                return Err(reject(format!(
+                    "MA-37: contract {} is not registered",
+                    p.contract
+                )));
             }
         }
         // MA-37's "update classes from the closed set" and "an `impl.hash` present"
@@ -546,13 +626,20 @@ pub struct ProviderInstance {
     /// sources PPS is armed first (SB-39).
     #[serde(default)]
     pub arm_after: Vec<ResourceId>,
+    /// The least lead this instance needs between receiving a timed Action and that
+    /// Action's instant, in `host.monotonic`; absent means zero. The only envelope
+    /// value the Kernel reads (MA-10, RS-19, KA-7).
+    #[serde(default)]
+    pub min_command_lead: Option<crate::time::Duration>,
     /// Namespaced Manifest content (RS-38, RS-39).
     #[serde(default)]
     pub sections: BTreeMap<Namespace, serde_json::Value>,
 }
 
 /// A Module by id and version (MA-31).
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleRef {
     /// The Module (SB-1, MA-31).
@@ -580,7 +667,8 @@ pub struct ProfileRef {
 }
 
 /// Whether the coordinator steps this instance (MA-15, MA-30).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema,
+#[derive(
+    Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct Driving {
@@ -915,6 +1003,8 @@ pub enum Endpoint {
 /// A link end bound to one of the component's ports (MA-27).
 #[derive(Clone)]
 pub struct AttachedPort {
+    /// Which component or resource the port belongs to (MA-27, KA-15).
+    pub component: Ident,
     /// Which port (SC-1).
     pub port: Ident,
     /// Its end of the link (MA-27).
@@ -945,21 +1035,28 @@ pub trait ActionSubmitter: Send + Sync {
     fn submit(&self, action: Action) -> Result<ActionId, Vec<Violation>>;
 }
 
-/// What a Module is handed at `prepare` (MA-6, MA-46).
-pub struct PrepareContext<'a> {
+/// What a Module is handed at `prepare`. Every handle is shared, so a Module may keep
+/// it and use it from `prepare` through `cleanup` (MA-5a, MA-6, MA-46).
+pub struct PrepareContext {
     /// Which Run (RS-1).
     pub run: RunId,
     /// Which class, derived and cross-checked (MA-41).
     pub class: ExecutionClass,
     /// The Run's single source of "now" (TM-16a).
-    pub time: &'a dyn TimeAuthority,
+    pub time: Arc<dyn TimeAuthority>,
+    /// The node's clock registry, through which a Provider declares and registers its
+    /// SampleClocks (TM-13a, KA-2).
+    pub clocks: Arc<crate::time::ClockRegistry>,
     /// Where to emit events (RS-31).
-    pub events: &'a dyn EventSink,
+    pub events: Arc<dyn EventSink>,
     /// Where admitted Actions arrive (MA-14).
-    pub actions: &'a dyn ActionReceiver,
+    pub actions: Arc<dyn ActionReceiver>,
     /// Where to emit an Action (MA-14a).
-    pub actions_out: &'a dyn ActionSubmitter,
-    /// The link ends bound to this component's ports (MA-27).
+    pub actions_out: Arc<dyn ActionSubmitter>,
+    /// The BindingProfile's `environment`, verbatim and read-only; a Module reads the
+    /// sections its own Vocabularies define (MA-5a, SB-26).
+    pub environment: Arc<BTreeMap<Namespace, serde_json::Value>>,
+    /// The link ends bound to this fragment's ports (MA-27).
     pub links: Vec<AttachedPort>,
     /// The component descriptors in this Executor's Island, keyed by component name (MA-19).
     pub components: BTreeMap<Ident, ComponentDescriptor>,
@@ -999,8 +1096,7 @@ pub trait Provider: Send {
     /// Returns a report whose `coercions` equal what `coerce` returned for the same
     /// request. `effective` may narrow a declared capability and must not widen one
     /// (MA-12).
-    fn prepare(&mut self, f: &Fragment, ctx: PrepareContext<'_>,
-    ) -> Result<PrepareReport, ModuleError>;
+    fn prepare(&mut self, f: &Fragment, ctx: PrepareContext) -> Result<PrepareReport, ModuleError>;
     /// Reserves and synchronises, and radiates nothing (MA-13).
     fn arm(&mut self) -> Result<(), ModuleError>;
     /// Begins at that instant, or as soon as possible (MA-13).
@@ -1022,7 +1118,10 @@ pub trait Executor: Send {
     /// What it can run (MA-18).
     fn descriptor(&self) -> &ExecutorDescriptor;
     /// Loads each component by its `impl` identity (MA-19).
-    fn prepare(&mut self, island: &IslandDecl, ctx: PrepareContext<'_>,
+    fn prepare(
+        &mut self,
+        island: &IslandDecl,
+        ctx: PrepareContext,
     ) -> Result<PrepareReport, ModuleError>;
     /// Reserves (MA-7).
     fn arm(&mut self) -> Result<(), ModuleError>;
@@ -1045,8 +1144,7 @@ pub trait Sink: Send {
     /// What it writes (MA-25).
     fn descriptor(&self) -> &SinkDescriptor;
     /// Prepares (MA-25).
-    fn prepare(&mut self, f: &Fragment, ctx: PrepareContext<'_>,
-    ) -> Result<PrepareReport, ModuleError>;
+    fn prepare(&mut self, f: &Fragment, ctx: PrepareContext) -> Result<PrepareReport, ModuleError>;
     /// Reserves (MA-25).
     fn arm(&mut self) -> Result<(), ModuleError>;
     /// Begins (MA-25).
@@ -1080,7 +1178,11 @@ pub trait Authority: Send + Sync {
     fn descriptor(&self) -> &AuthorityDescriptor;
     /// The Run's `TimeAuthority` handle (TM-16a).
     fn time(&self) -> Arc<dyn TimeAuthority>;
-    /// The next instant at which anything is due; `None` ends the Run (MA-30).
+    /// Advances the governed clocks to the earliest instant at which a scheduled
+    /// callback is due, fires the callbacks due there in TM-16c order — including ones
+    /// they schedule at that instant, up to TM-17b's cap per call — and returns the
+    /// instant; with nothing scheduled it returns `None` and moves nothing (MA-29,
+    /// MA-30, KA-11).
     fn next_wakeup(&self) -> Option<TimePoint>;
 }
 
@@ -1145,7 +1247,8 @@ pub fn step_until_quiescent(
     coordinator: &ResourceId,
 ) -> Result<usize, ModuleError> {
     instances.sort_by(|a, b| {
-        (a.inner.role().step_rank(), a.id.as_str()).cmp(&(b.inner.role().step_rank(), b.id.as_str()))
+        (a.inner.role().step_rank(), a.id.as_str())
+            .cmp(&(b.inner.role().step_rank(), b.id.as_str()))
     });
     for round in 1..=STEP_ROUND_CAP {
         let mut progressed = false;
@@ -1207,11 +1310,16 @@ impl Factories {
 
     /// Every role this registration supplies (MA-31).
     pub fn roles(self) -> Vec<Role> {
-        [Role::Provider, Role::Executor, Role::Sink, Role::Link, Role::Authority,
+        [
+            Role::Provider,
+            Role::Executor,
+            Role::Sink,
+            Role::Link,
+            Role::Authority,
         ]
-            .into_iter()
-            .filter(|r| self.has(*r))
-            .collect()
+        .into_iter()
+        .filter(|r| self.has(*r))
+        .collect()
     }
 }
 
@@ -1240,14 +1348,19 @@ impl ModuleRegistry {
     /// then enforces without interpreting them (MA-35).
     pub fn register_vocabulary(&mut self, v: VocabularyDescriptor) -> Result<(), ModuleError> {
         if self.vocabularies.contains_key(&v.id) {
-            return Err(ModuleError::rejected(format!("MA-32: vocabulary {} is already registered", v.id)));
+            return Err(ModuleError::rejected(format!(
+                "MA-32: vocabulary {} is already registered",
+                v.id
+            )));
         }
         // RS-14: a Session burst's target is resolved at `compile`, so `RejectAtPlan`
         // names a stage this Action never passes through and the verb would be
         // undispatchable (SC-27, RS-51).
         for verb in &v.verbs {
-            if let CompileRule::TxBurst { late_policy: crate::stream::LatePolicy::RejectAtPlan, .. } =
-                verb.compiles_to
+            if let CompileRule::TxBurst {
+                late_policy: crate::stream::LatePolicy::RejectAtPlan,
+                ..
+            } = verb.compiles_to
             {
                 return Err(ModuleError::rejected(format!(
                     "RS-14: verb {} compiles to a TxBurst with `RejectAtPlan`, which a Session \
@@ -1274,7 +1387,8 @@ impl ModuleRegistry {
         if let Deployment::Plugin { .. } = d.deployment {
             return Err(ModuleError {
                 kind: ModuleErrorKind::Unsupported,
-                message: "MA-32: deployment `Plugin` is reserved and unsupported in Phase 1".to_owned(),
+                message: "MA-32: deployment `Plugin` is reserved and unsupported in Phase 1"
+                    .to_owned(),
                 detail: serde_json::Value::Null,
             });
         }
@@ -1330,7 +1444,10 @@ impl ModuleRegistry {
     /// version than its own (D82). A descriptor for an unregistered Module or a
     /// Module without the Link role is refused; Phase 1 also refuses cross-process
     /// links (MA-28, D68).
-    pub fn register_link_descriptor(&mut self, descriptor: LinkDescriptor) -> Result<(), ModuleError> {
+    pub fn register_link_descriptor(
+        &mut self,
+        descriptor: LinkDescriptor,
+    ) -> Result<(), ModuleError> {
         let module = descriptor.module.clone();
         if descriptor.cross_process {
             return Err(ModuleError::rejected(
@@ -1397,6 +1514,10 @@ impl ModuleRegistry {
 
     /// The compilation a Vocabulary declares for one of its verbs (RS-13a, RS-14).
     pub fn verb(&self, ns: &Namespace, verb: &Ident) -> Option<&VerbDecl> {
-        self.vocabularies.get(ns)?.verbs.iter().find(|v| v.verb == *verb)
+        self.vocabularies
+            .get(ns)?
+            .verbs
+            .iter()
+            .find(|v| v.verb == *verb)
     }
 }

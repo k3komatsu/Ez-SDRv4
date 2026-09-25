@@ -289,6 +289,34 @@ Filled in at Gate P and after each review. One row per decision the owner confir
 | Spec 09 decisions M1–M10 | P | **accepted** | owner, 2026-09-24, as recommended |
 | Spec 10 decisions H1–H8 | P | **accepted** | owner, 2026-09-24, as recommended |
 
+Review K findings (owner, 2026-09-25):
+
+| Finding | Gate | Verdict | Note |
+|---|---|---|---|
+| B1 [P0] Module-origin `UpdateParameter` must not invoke Provider `coerce` | K | **accepted** | Avoid re-locking a Provider held by the stepping round; add a coordinator regression test |
+| B2 [P1] KA-12 drain must stop after its cleanup operation is abandoned | K | **accepted** | Set `closing` on later step-3 entries and prevent the drain owner from acting after it wakes |
+| N1 [P1] KC-30 containment for Link descriptor and Authority time-handle calls | K | **accepted** | Contain `descriptor`, `now`, `schedule` and `cancel`; fail the active stage and keep the Run manifestable |
+| N2 [P1] Preserve a built non-Simulation plan in the refusal Manifest | K | **accepted** | Record the plan's execution class and plan before KC-2 refusal |
+| N3 [P1] Register Executor events for every Island fragment | K | **accepted** | Add per-Island event-source coverage and a second-Island regression test |
+| N4 [P2] Keep rejected validation details in `Manifest.admission` | K | **accepted** | Store the `AdmissionResult` before checking whether it was admitted |
+| N5 [P2] Stop the pipeline when a lifecycle call requests an end | K | **accepted** | Check for a pending end between prepare, arm, schedule and start |
+| N6 [P2] Refuse invalid Module namespaces only when sections are supplied | K | **accepted** | Match KA-13's conditional section failure |
+| N7 [P2] Check lease expiry before `finish` chooses the client cause | K | **accepted** | Run `check_lease()` before normal finish cleanup |
+| N8 [P2] Refuse `RejectAtPlan` when duration comparison errors | K | **accepted** | Treat comparison errors as failed plan-time validation |
+| N9 [P2] Remove stale `allow(dead_code)` and duplicate/discarded schedule code | K | **accepted** | Keep the coordinator minimal and call `ActionTemplate::is_timed()` |
+| N10 [P2] Collect violations from every refused compiled Action | K | **accepted** | Continue checking against the working copy; dispatch none if any Action fails |
+| N11 [P2] Report unavailable link-drop counts as unknown | K | **accepted** | Store JSON `null` rather than reporting a false zero |
+
+Review K re-review findings (owner, 2026-09-25):
+
+| Finding | Gate | Verdict | Note |
+|---|---|---|---|
+| R1 [P2] Preserve StopRx-before-cleanup and prevent a stale drain owner from acting after cleanup | K | **accepted** | Coordinate StopRx and RestoreBaseline with per-instance markers and slots; restore stops a Sink or Executor when its slot is available, otherwise it records KC-39 and skips cleanup |
+| R2 [P2] Do not start Modules after an Authority `now()` failure during Arm | K | **accepted** | Check for a pending end after T0 and schedule resolution/admission, before `start` |
+| R3 [P2] Preserve successful partial PrepareReports after a mid-prepare Abort | K | **accepted as documented risk** | KC-12 does not require incomplete reports in the Manifest; `collect_prepare` rejects a missing fragment report, and recording partial values as merged would misstate completion |
+| R4 [P2] Strengthen the KA-12 and Module-origin Action regressions | K | **accepted** | Replace negative polling with condition-variable observations; check StopRx ordering and count; compare Provider coercion count at the instant before Module submission and assert Provider receipt |
+| B3 [P0] A wedged cleanup Module must not block later steps for other instances | K | **accepted** | Hold `done` only while claiming markers and acquiring one instance slot; release it before Module calls so other instances can stop, clean up, and reach the Manifest |
+
 Confirmed individually, before the rows above (owner, 2026-09-24):
 
 | Decision | Gate | Verdict | Note |

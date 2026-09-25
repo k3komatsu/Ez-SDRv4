@@ -77,7 +77,10 @@ pub(crate) fn to_root(
     // instants collapse onto one root tick. A reading may round (`now` still floors);
     // a firing may not. A caller that wants one converts and rounds itself, rather
     // than having the Kernel pick a rounding on its behalf (§65 #39).
-    Ok((root, registry.conversion(t.domain, root)?.try_exact(t)?.ticks))
+    Ok((
+        root,
+        registry.conversion(t.domain, root)?.try_exact(t)?.ticks,
+    ))
 }
 
 #[cfg(feature = "testing")]
@@ -144,7 +147,10 @@ mod manual {
             for id in std::iter::once(&primary).chain(extra_roots) {
                 let domain = registry.get(*id)?;
                 if domain.root_id() != *id {
-                    return Err(TimeError::Unrelated { a: *id, b: domain.root_id() });
+                    return Err(TimeError::Unrelated {
+                        a: *id,
+                        b: domain.root_id(),
+                    });
                 }
                 roots.insert(*id, RootState::default());
             }
@@ -168,6 +174,17 @@ mod manual {
         pub fn with_callback_cap(mut self, cap: usize) -> ManualTimeAuthority {
             self.callback_cap = cap;
             self
+        }
+
+        /// The earliest pending callback's instant on the primary root, without
+        /// advancing (TM-17a, KA-17).
+        pub fn next_due(&self) -> Option<TimePoint> {
+            let state = self.lock();
+            let rs = state.roots.get(&self.primary)?;
+            rs.pending
+                .keys()
+                .next()
+                .map(|(ticks, _)| TimePoint::new(self.primary, *ticks))
         }
 
         /// The registry this Authority resolves domains against (TM-16c).
@@ -201,8 +218,8 @@ mod manual {
                 // moved it past this, and syncing backwards would fail with `InPast`
                 // naming a domain the caller never asked about.
                 let at_least = self.root_now(ClockDomainId::HOST_MONOTONIC)?;
-                fired += self
-                    .advance_root(ClockDomainId::HOST_MONOTONIC, host.ticks.max(at_least))?;
+                fired +=
+                    self.advance_root(ClockDomainId::HOST_MONOTONIC, host.ticks.max(at_least))?;
             }
             Ok(fired)
         }
@@ -265,8 +282,12 @@ mod manual {
         }
 
         fn root_now(&self, root: ClockDomainId) -> Result<i64, TimeError> {
-            let queued =
-                self.lock().roots.get(&root).map(|rs| rs.now).ok_or(TimeError::NotGoverned { id: root })?;
+            let queued = self
+                .lock()
+                .roots
+                .get(&root)
+                .map(|rs| rs.now)
+                .ok_or(TimeError::NotGoverned { id: root })?;
             if root == ClockDomainId::HOST_MONOTONIC && self.pacing != Pacing::FreeRunning {
                 // TM-16a1: outside the Simulation class host.monotonic is the real
                 // host clock, which this Authority reads rather than drives. It is
@@ -314,7 +335,10 @@ mod manual {
                 return Ok(TimePoint::new(domain, ticks));
             }
             // TM-16c, decision T12: a derived domain's now is the floor conversion.
-            Ok(self.registry.convert(TimePoint::new(root, ticks), domain)?.floor())
+            Ok(self
+                .registry
+                .convert(TimePoint::new(root, ticks), domain)?
+                .floor())
         }
 
         fn wait_until(&self, t: TimePoint) -> Result<(), TimeError> {
@@ -330,7 +354,11 @@ mod manual {
             }
             let mut state = self.lock();
             loop {
-                let now = state.roots.get(&root).ok_or(TimeError::NotGoverned { id: root })?.now;
+                let now = state
+                    .roots
+                    .get(&root)
+                    .ok_or(TimeError::NotGoverned { id: root })?
+                    .now;
                 if now >= target {
                     return Ok(());
                 }
@@ -356,7 +384,10 @@ mod manual {
             }
             let mut state = self.lock();
             let seq = state.next_seq;
-            let rs = state.roots.get_mut(&root).ok_or(TimeError::NotGoverned { id: root })?;
+            let rs = state
+                .roots
+                .get_mut(&root)
+                .ok_or(TimeError::NotGoverned { id: root })?;
             rs.pending.insert((ticks, seq), f);
             state.next_seq += 1;
             Ok(ScheduleHandle { root, ticks, seq })

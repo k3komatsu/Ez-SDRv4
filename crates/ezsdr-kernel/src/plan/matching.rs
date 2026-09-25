@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::binding::{satisfies, AdmissionResult, PreviewedCoercion, Violation};
+use crate::binding::{AdmissionResult, PreviewedCoercion, Violation, satisfies};
 use crate::id::ResourceId;
 use crate::module_api::{Provider, Requested, Resource};
 use crate::spec::{
@@ -143,7 +143,11 @@ pub(super) fn match_constraints(
     // `prepare` could only be approximate. With one call it is exact, by MA-11's
     // determinism. The matcher still asks only what a value becomes; it never decides
     // the grid.
-    if to_coerce.is_empty() {
+    // SB-7 (KA-5): **exactly once** per bound node, unless a non-coercible key has
+    // already failed — including when every key was satisfied directly, because a
+    // Provider may refuse a combination whose every value it declares (Vision §13
+    // rule 1's PerformanceEnvelope).
+    if out.rejected.iter().any(|r| r.resource == *name) {
         return Ok(());
     }
     let report = provider
@@ -161,6 +165,30 @@ pub(super) fn match_constraints(
             key: key.clone(),
             constraint: req.requires[&key].clone(),
             reason: "SB-7: the Provider could not coerce it".to_owned(),
+        });
+    }
+    // SB-7 (KA-5): the Provider's own refusals. One per key, replacing a reason
+    // recorded above; a key the request does not name is a malformed report.
+    for refused in &report.rejected {
+        if !req.requires.contains_key(&refused.key) {
+            out.violations.push(Violation {
+                check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
+                key: Some(refused.key.clone()),
+                requested: None,
+                reason: format!(
+                    "SB-7: {name}'s Provider refuses {}, which its request does not name",
+                    refused.key
+                ),
+            });
+            continue;
+        }
+        out.rejected
+            .retain(|r| !(r.resource == *name && r.key == refused.key));
+        out.rejected.push(RejectedConstraint {
+            resource: name.clone(),
+            key: refused.key.clone(),
+            constraint: req.requires[&refused.key].clone(),
+            reason: refused.reason.clone(),
         });
     }
     // SB-44: a `Coercion` for a key the request does not name is a malformed report at
@@ -190,14 +218,10 @@ pub(super) fn match_constraints(
     // substitution of a value nobody requested and fired that key's own policy default
     // — the two harms the refusal exists to prevent.
     out.coercions_preview
-        .extend(
-            previewed
-                .into_iter()
-                .map(|coercion| PreviewedCoercion {
-                    resource: name.clone(),
-                    coercion,
-                }),
-        );
+        .extend(previewed.into_iter().map(|coercion| PreviewedCoercion {
+            resource: name.clone(),
+            coercion,
+        }));
     out.warnings.extend(report.warnings);
     Ok(())
 }

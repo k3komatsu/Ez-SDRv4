@@ -1346,22 +1346,22 @@
       "oneOf": [
         {
           "const": "cold",
-          "description": "Requires a stop and a re-plan; a sample-rate change is one (TM-13c).",
+          "description": "The target stops the affected function, applies the value and restarts it; a\nstream continues on a new SampleClock (UC-3, TM-13c).",
           "type": "string"
         },
         {
           "const": "block_boundary",
-          "description": "Applied between blocks.",
+          "description": "Applied from the first block or sample boundary at or after the effective\ninstant; no block mixes the old and new value (UC-4).",
           "type": "string"
         },
         {
           "const": "atomic_realtime",
-          "description": "Applied inside the real-time path without a block boundary.",
+          "description": "Applied to every sample processed after the Action arrives, with no torn state\n(UC-5).",
           "type": "string"
         },
         {
           "const": "hardware_timed",
-          "description": "Applied by the device at a declared instant.",
+          "description": "Applied by the device at exactly the effective instant, which must respect the\ndevice's command lead (UC-6).",
           "type": "string"
         }
       ]

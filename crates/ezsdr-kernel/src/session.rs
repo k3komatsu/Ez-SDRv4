@@ -9,8 +9,7 @@ use crate::binding::{AdmissionCheckRegistry, BindingProfile, CheckStage, Violati
 use crate::event::{Action, ActionId};
 use crate::hash::ContentHash;
 use crate::id::ResourceId;
-use crate::module_api::{
-    CompileRule, ModuleRegistry, Role, UpdateClass};
+use crate::module_api::{CompileRule, ModuleRegistry, Role, UpdateClass};
 use crate::plan::{apply_coercion, coercion_policy};
 use crate::run::RunError;
 use crate::spec::{
@@ -138,7 +137,9 @@ impl SessionAction {
             SessionAction::Vocabulary { params, .. } => params.iter().collect(),
             _ => Vec::new(),
         };
-        carried.into_iter().try_for_each(|(k, v)| v.check_nesting(k.as_str()))
+        carried
+            .into_iter()
+            .try_for_each(|(k, v)| v.check_nesting(k.as_str()))
     }
 }
 
@@ -160,7 +161,10 @@ fn check_ids(time: &TimePoint, action: &SessionAction) -> Result<(), SpecError> 
     for t in std::iter::once(time).chain(at) {
         if !t.domain.node.is_local() {
             return Err(SpecError::Structural {
-                reason: format!("X7: the entry's time is in {}, which is not on the local node", t.domain.node),
+                reason: format!(
+                    "X7: the entry's time is in {}, which is not on the local node",
+                    t.domain.node
+                ),
             });
         }
     }
@@ -195,12 +199,24 @@ impl SessionLog {
         action: SessionAction,
         outcome: Outcome,
     ) -> Result<u32, SpecError> {
-        action.check_values()?;
-        check_ids(&time, &action)?;
+        self.check_entry(&time, &action)?;
         let seq = self.entries.len() as u32;
-        self.entries.push(LogEntry { seq, time, action, outcome,
+        self.entries.push(LogEntry {
+            seq,
+            time,
+            action,
+            outcome,
         });
         Ok(seq)
+    }
+
+    /// What `append` refuses, checked without appending: an Action that is not a
+    /// well-formed document, or that carries an id the Manifest's deserialiser would
+    /// refuse. The coordinator calls it before anything is compiled, so that a refused
+    /// Action takes no sequence number (RS-15, KC-28).
+    pub fn check_entry(&self, time: &TimePoint, action: &SessionAction) -> Result<(), SpecError> {
+        action.check_values()?;
+        check_ids(time, action)
     }
 
     /// Every entry, in order (RS-15).
@@ -210,7 +226,9 @@ impl SessionLog {
 
     /// The entries RS-20 re-applies: those that were admitted (RS-20).
     pub fn admitted(&self) -> impl Iterator<Item = &LogEntry> {
-        self.entries.iter().filter(|e| matches!(e.outcome, Outcome::Admitted { .. }))
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.outcome, Outcome::Admitted { .. }))
     }
 
     /// Replaying a Session means re-applying its admitted entries against the same
@@ -224,7 +242,8 @@ impl SessionLog {
         if recorded == target {
             Ok(())
         } else {
-            Err(RunError::ReplayDivergence { field: "binding.hash".to_owned(),
+            Err(RunError::ReplayDivergence {
+                field: "binding.hash".to_owned(),
             })
         }
     }
@@ -278,18 +297,22 @@ impl Admitter<'_> {
     /// Rule: RS-16, RS-17, SB-30, SB-45, SB-46.
     pub fn admit(
         &self,
-        effective: &BTreeMap<Key, Value>,
-        proposed: &BTreeMap<Key, Value>,
+        effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+        proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
         coercions: &[Coercion],
         stage: CheckStage,
     ) -> Result<Admitted, Vec<Violation>> {
         // 1. the registered admission checks (SB-30)
-        let violations = self.checks.run(self.environment, effective, proposed, stage);
+        let violations = self
+            .checks
+            .run(self.environment, effective, proposed, stage);
         if !violations.is_empty() {
             return Err(violations);
         }
         // 2. the coercion policy (SB-45, SB-46)
-        let mut out = Admitted { coercions: coercions.to_vec(), warnings: Vec::new(),
+        let mut out = Admitted {
+            coercions: coercions.to_vec(),
+            warnings: Vec::new(),
         };
         for c in coercions {
             let policy = coercion_policy(
@@ -321,12 +344,12 @@ impl Admitter<'_> {
         // 3. the parameter's declared update class. An update through an undeclared
         //    class is rejected here, so an Executor never receives one (RS-17, RS-52).
         if stage == CheckStage::Runtime {
-            for key in proposed.keys() {
+            for (key, value) in proposed.values().flatten() {
                 if declared_class(key, self.declared_classes, self.registry).is_none() {
                     return Err(vec![Violation {
                         check: Namespace::parse("ezsdr.update_class").expect("a valid literal"),
                         key: Some(key.clone()),
-                        requested: proposed.get(key).cloned(),
+                        requested: Some(value.clone()),
                         reason: format!("RS-17: {key} has no declared update class"),
                     }]);
                 }
@@ -429,7 +452,9 @@ pub fn compile(
     match action {
         SessionAction::SetParameter { target, key, value } => {
             let class = declared_class(key, declared_classes, registry).ok_or_else(|| {
-                reject("ezsdr.update_class", format!("RS-17: {key} has no declared update class"),
+                reject(
+                    "ezsdr.update_class",
+                    format!("RS-17: {key} has no declared update class"),
                 )
             })?;
             // RS-19 / finding OQ2: a bare `SetParameter` carries no time, so the
@@ -445,10 +470,17 @@ pub fn compile(
                 at: None,
             });
         }
-        SessionAction::Vocabulary { ns, verb, target, at, params,
+        SessionAction::Vocabulary {
+            ns,
+            verb,
+            target,
+            at,
+            params,
         } => {
             let decl = registry.verb(ns, verb).ok_or_else(|| {
-                reject("ezsdr.vocabulary", format!("RS-13a: no loaded Vocabulary claims {ns}.{verb}"),
+                reject(
+                    "ezsdr.vocabulary",
+                    format!("RS-13a: no loaded Vocabulary claims {ns}.{verb}"),
                 )
             })?;
             let at = match at {
@@ -506,7 +538,8 @@ pub fn compile(
                     // `rec` produced one `ResourceId` meaning two things, which no
                     // dispatcher can route and no `Event.source` can attribute. The
                     // `sink/` prefix keeps them disjoint by construction (SB-22).
-                    let recorder = ResourceId::parse(&format!("sink/{recorder}")).map_err(|e| reject("ezsdr.placement", format!("RS-14: {e}")))?;
+                    let recorder = ResourceId::parse(&format!("sink/{recorder}"))
+                        .map_err(|e| reject("ezsdr.placement", format!("RS-14: {e}")))?;
                     // RS-14, RS-19: `sink.capture` compiles to a **timed**
                     // UpdateParameter. `at` is either the instant the caller named
                     // or `earliest`, recorded above as a coercion; dropping it here
@@ -530,7 +563,9 @@ pub fn compile(
                         at: Some(AbsoluteDeadline::new(at)),
                     });
                 }
-                CompileRule::TxBurst { repeat, late_policy,
+                CompileRule::TxBurst {
+                    repeat,
+                    late_policy,
                 } => {
                     let waveform = waveform.ok_or_else(|| {
                         reject(
@@ -560,17 +595,22 @@ pub fn compile(
             }
         }
         SessionAction::Stop { target: Some(t) } => {
-            out.actions.push(Action::Stop { target: Some(t.clone()),
+            out.actions.push(Action::Stop {
+                target: Some(t.clone()),
             });
         }
         SessionAction::Stop { target: None } => out.control = Some(ControlOp::StopRun),
         SessionAction::Release {} => out.control = Some(ControlOp::Release),
         SessionAction::Adopt { token } => {
-            out.control = Some(ControlOp::Adopt { token: token.clone(),
+            out.control = Some(ControlOp::Adopt {
+                token: token.clone(),
             })
         }
         SessionAction::Renew {} => out.control = Some(ControlOp::Renew),
-        SessionAction::RunChild { spec_hash, binding_hash } => {
+        SessionAction::RunChild {
+            spec_hash,
+            binding_hash,
+        } => {
             out.control = Some(ControlOp::RunChild {
                 spec_hash: spec_hash.clone(),
                 binding_hash: binding_hash.clone(),
@@ -612,9 +652,16 @@ pub fn implicit_spec(
     providers: &BTreeMap<Ident, &dyn crate::module_api::Provider>,
     sinks: &BTreeMap<Ident, &dyn crate::module_api::Sink>,
 ) -> Result<ExperimentSpec, SpecError> {
-    let mut spec = ExperimentSpec { version: 1, ..ExperimentSpec::default() };
-    let island_executors: BTreeSet<&Ident> =
-        profile.placements.islands.iter().map(|i| &i.executor).collect();
+    let mut spec = ExperimentSpec {
+        version: 1,
+        ..ExperimentSpec::default()
+    };
+    let island_executors: BTreeSet<&Ident> = profile
+        .placements
+        .islands
+        .iter()
+        .map(|i| &i.executor)
+        .collect();
     let missing = |what: &str, name: &Ident| SpecError::Structural {
         reason: format!("SB-22f: no {what} for binding {name}"),
     };
@@ -627,12 +674,17 @@ pub fn implicit_spec(
         // artifact kind from the bound Sink, because a Session states no preference.
         if let Some(feed) = &binding.feed {
             crate::plan::require_role(registry, name, &binding.module, Role::Sink)?;
-            let sink = sinks.get(name).ok_or_else(|| missing("Sink instance", name))?;
-            let kind = sink.descriptor().artifact_kinds.first().cloned().ok_or_else(|| {
-                SpecError::Structural {
+            let sink = sinks
+                .get(name)
+                .ok_or_else(|| missing("Sink instance", name))?;
+            let kind = sink
+                .descriptor()
+                .artifact_kinds
+                .first()
+                .cloned()
+                .ok_or_else(|| SpecError::Structural {
                     reason: format!("RS-12: Sink binding {name} declares no artifact kind"),
-                }
-            })?;
+                })?;
             spec.outputs.push(crate::spec::OutputReq {
                 id: name.clone(),
                 kind,
@@ -643,7 +695,10 @@ pub fn implicit_spec(
         }
         // Rows 3 and 4 read the registered roles, which a version nobody registered
         // does not have: refused as SB-22e refuses it on a Spec Run.
-        let Some(module) = registry.modules().find(|m| crate::module_api::is_module(m, &binding.module)) else {
+        let Some(module) = registry
+            .modules()
+            .find(|m| crate::module_api::is_module(m, &binding.module))
+        else {
             return Err(crate::plan::not_registered(name, &binding.module));
         };
         // Row 3: a resource, of the bound instance's own root kind. Inventing a
@@ -651,7 +706,9 @@ pub fn implicit_spec(
         // would put a Kernel-owned vocabulary word where RS-12 asks only for "one
         // resource per binding with empty `requires`" (finding D21).
         if module.roles.contains(&Role::Provider) {
-            let provider = providers.get(name).ok_or_else(|| missing("Provider instance", name))?;
+            let provider = providers
+                .get(name)
+                .ok_or_else(|| missing("Provider instance", name))?;
             spec.resources.insert(
                 name.clone(),
                 ResourceReq {

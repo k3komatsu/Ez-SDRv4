@@ -6,8 +6,7 @@ use crate::binding::{AdmissionResult, Binding, BindingProfile};
 use crate::contract::{DataContractId, PortRef};
 use crate::id::{DataLinkId, ResourceId};
 use crate::module_api::{
-    ExecutionClass, ExecutorDescriptor, ModuleRef, Pacing, Requested, RfPath, Role,
-    SinkDescriptor,
+    ExecutionClass, ExecutorDescriptor, ModuleRef, Pacing, Requested, RfPath, Role, SinkDescriptor,
 };
 use crate::spec::{ExperimentSpec, Ident, SpecError};
 use crate::stream::{BackPressure, DataLinkDecl};
@@ -73,14 +72,14 @@ pub(super) fn plan(
     {
         return Err(SpecError::Violation(v));
     }
-    super::validation::admission_is_this_runs(spec, inputs, admission)
-        .map_err(|reason| SpecError::Structural {
+    super::validation::admission_is_this_runs(spec, inputs, admission).map_err(|reason| {
+        SpecError::Structural {
             reason: format!("SB-39: {reason}"),
-        })?;
+        }
+    })?;
     super::links::check_endpoints(spec, inputs, &admission.matched)?;
     let authority = profile.authority.clone();
-    let pacing =
-        super::supplied(inputs.authorities, &authority, "AuthorityDescriptor")?.pacing;
+    let pacing = super::supplied(inputs.authorities, &authority, "AuthorityDescriptor")?.pacing;
     let class = derive_class(profile, pacing)?;
 
     // One fragment per slot (SB-T1): a Provider per resource, the Authority when it is
@@ -169,14 +168,12 @@ pub(super) fn plan(
     // function a caller may forget. Its descriptors are read under slot names only.
     let mut executors: BTreeMap<Ident, ExecutorDescriptor> = BTreeMap::new();
     for island in &profile.placements.islands {
-        let d =
-            super::supplied(inputs.executors, &island.executor, "ExecutorDescriptor")?;
+        let d = super::supplied(inputs.executors, &island.executor, "ExecutorDescriptor")?;
         executors.insert(island.executor.clone(), d.clone());
     }
     let mut sinks: BTreeMap<Ident, SinkDescriptor> = BTreeMap::new();
     for output in &spec.outputs {
-        let d =
-            super::supplied(inputs.sinks, &output.id, "Sink instance")?.descriptor();
+        let d = super::supplied(inputs.sinks, &output.id, "Sink instance")?.descriptor();
         sinks.insert(output.id.clone(), d.clone());
     }
     let graph_links: Vec<(PortRef, PortRef, BackPressure)> = spec
@@ -236,8 +233,11 @@ pub(super) fn plan(
 
     let names: Vec<Ident> = fragments.iter().map(|f| f.id.clone()).collect();
     let order = super::graph::arm_order(&names, &edges)?;
-    let order_index: BTreeMap<&Ident, usize> =
-        order.iter().enumerate().map(|(index, name)| (name, index)).collect();
+    let order_index: BTreeMap<&Ident, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name, index))
+        .collect();
     fragments.sort_by_key(|f| order_index.get(&f.id).copied().unwrap_or(usize::MAX));
 
     // The plan carries every data link a Link Module is created for (MA-27a): the
@@ -307,6 +307,20 @@ fn derive_class(profile: &BindingProfile, pacing: Pacing) -> Result<ExecutionCla
             .ok_or_else(|| SpecError::Structural {
                 reason: "MA-41: ezsdr.time.class is not a string".to_owned(),
             })?;
+        // MA-41 (KA-8): the section is the closed set `{ class, start_lead_ns }`.
+        if let Some(obj) = section.as_object() {
+            if let Some(extra) = obj
+                .keys()
+                .find(|k| !matches!(k.as_str(), "class" | "start_lead_ns"))
+            {
+                return Err(SpecError::Structural {
+                    reason: format!(
+                        "MA-41: ezsdr.time carries the field `{extra}`, which is not class or start_lead_ns"
+                    ),
+                });
+            }
+        }
+        crate::binding::start_lead_ns(&profile.environment)?;
         {
             let matches_derived = match derived {
                 ExecutionClass::Simulation => declared == "simulation",

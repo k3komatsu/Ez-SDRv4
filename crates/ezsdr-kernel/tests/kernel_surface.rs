@@ -36,15 +36,17 @@ fn sources() -> Vec<(PathBuf, String)> {
         .collect()
 }
 
-
 fn is_token_at(lower: &str, start: usize, end: usize) -> bool {
     let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric());
     boundary(lower[..start].chars().next_back()) && boundary(lower[end..].chars().next())
 }
 
-/// The six rule prefixes of `00-overview.md` §2. A public item's doc comment must
-/// cite at least one (OV-23).
-const RULE_PREFIXES: [&str; 6] = ["OV-", "TM-", "SC-", "SB-", "RS-", "MA-"];
+/// The Kernel's rule prefixes: Phase 1's six (`00-overview.md` §2) and Phase 2's
+/// three (`plan/phase2/06-kernel-coordinator.md`). A public item's doc comment must
+/// cite at least one (OV-23, KA-20).
+const RULE_PREFIXES: [&str; 9] = [
+    "OV-", "TM-", "SC-", "SB-", "RS-", "MA-", "KA-", "KC-", "UC-",
+];
 
 /// Every module name of this crate, taken from `src/` itself so the set cannot go
 /// stale, so that a `pub use` can be told from a re-export of a dependency's type
@@ -58,8 +60,10 @@ fn crate_modules() -> BTreeSet<String> {
             let decl = line.strip_prefix("pub ").unwrap_or(line);
             let decl = decl.strip_prefix("pub(crate) ").unwrap_or(decl);
             if let Some(rest) = decl.strip_prefix("mod ") {
-                let name: String =
-                    rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
                 if !name.is_empty() {
                     out.insert(name);
                 }
@@ -70,7 +74,11 @@ fn crate_modules() -> BTreeSet<String> {
                 out.insert(stem.to_owned());
             }
         }
-        if let Some(dir) = path.parent().and_then(|d| d.file_name()).and_then(|d| d.to_str()) {
+        if let Some(dir) = path
+            .parent()
+            .and_then(|d| d.file_name())
+            .and_then(|d| d.to_str())
+        {
             if dir != "src" {
                 out.insert(dir.to_owned());
             }
@@ -87,8 +95,10 @@ fn cites_a_rule(doc: &str) -> bool {
             if number.is_empty() {
                 return false;
             }
-            let suffix: String =
-                rest[number.len()..].chars().take_while(|c| c.is_ascii_lowercase()).collect();
+            let suffix: String = rest[number.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_lowercase())
+                .collect();
             // A withdrawn rule keeps its number (OV-1) but no longer states an
             // obligation, so citing one satisfies nothing.
             !WITHDRAWN.contains(&format!("{p}{number}{suffix}").as_str())
@@ -107,7 +117,8 @@ fn ov_01_citing_a_withdrawn_rule_satisfies_nothing() {
 
 /// The rules withdrawn so far. OV-1 keeps their numbers, and nothing may cite one as
 /// the rule it implements.
-const WITHDRAWN: [&str; 7] = ["SB-25a", "SB-28", "SB-32", "RS-32a", "RS-37", "MA-4", "MA-43",
+const WITHDRAWN: [&str; 7] = [
+    "SB-25a", "SB-28", "SB-32", "RS-32a", "RS-37", "MA-4", "MA-43",
 ];
 
 /// The allow-list key for an item: `<module>::<name>`.
@@ -162,7 +173,10 @@ fn module_level_public_items() -> BTreeMap<String, (PathBuf, String)> {
     let modules = crate_modules();
     for (path, text) in sources() {
         let file = syn::parse_file(&text).unwrap_or_else(|e| {
-            panic!("OV-23: {} does not parse, so its surface is unknown: {e}", path.display())
+            panic!(
+                "OV-23: {} does not parse, so its surface is unknown: {e}",
+                path.display()
+            )
         });
         walk_items(&path, &file.items, &[], &modules, &mut out);
     }
@@ -177,7 +191,11 @@ fn doc_of(attrs: &[syn::Attribute]) -> String {
             continue;
         }
         if let syn::Meta::NameValue(nv) = &a.meta {
-            if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value {
+            if let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) = &nv.value
+            {
                 out.push_str(&s.value());
                 out.push('\n');
             }
@@ -226,7 +244,9 @@ fn walk_items(
             );
             let body = m.mac.tokens.to_string();
             assert!(
-                !body.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == "pub"),
+                !body
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .any(|w| w == "pub"),
                 "OV-23: {} has a macro whose body carries `pub`; a parser does not expand \
                  macros, so anything public in one is invisible to the allow-list — declare \
                  it directly",
@@ -235,8 +255,10 @@ fn walk_items(
             continue;
         }
         if matches!(item, syn::Item::ForeignMod(_)) {
-            panic!("OV-23: {} declares an extern block, whose surface this scan does not model",
-                path.display());
+            panic!(
+                "OV-23: {} declares an extern block, whose surface this scan does not model",
+                path.display()
+            );
         }
         // `pub extern crate serde_json as x;` puts a whole dependency on the surface
         // under a name this scan read as no item at all, because `ExternCrate` fell
@@ -288,7 +310,11 @@ fn walk_items(
             // Returning the empty string for both put them in the accepted set, so
             // `pub use {serde_json::Value as X};` re-exported a dependency's type past
             // the check that exists to refuse exactly that.
-            assert!(!roots.is_empty(), "OV-23: {} has a `pub use` with no root", path.display());
+            assert!(
+                !roots.is_empty(),
+                "OV-23: {} has a `pub use` with no root",
+                path.display()
+            );
             for first in roots {
                 assert!(
                     matches!(first.as_str(), "crate" | "self" | "super")
@@ -354,7 +380,6 @@ fn use_roots(tree: &syn::UseTree, out: &mut Vec<String>) {
     }
 }
 
-
 fn allow_list() -> BTreeMap<String, String> {
     let text = std::fs::read_to_string(crate_dir().join("tests/kernel_surface_allow.txt"))
         .expect("the allow-list is the review checklist and must exist");
@@ -374,8 +399,10 @@ fn allow_list() -> BTreeMap<String, String> {
 fn ov_23_every_public_item_is_on_the_allow_list() {
     let items = module_level_public_items();
     let allowed = allow_list();
-    let missing: Vec<&String> =
-        items.keys().filter(|name| !allowed.contains_key(*name)).collect();
+    let missing: Vec<&String> = items
+        .keys()
+        .filter(|name| !allowed.contains_key(*name))
+        .collect();
     assert!(
         missing.is_empty(),
         "OV-23: {} public item(s) are not on the allow-list. Each needs a specific \
@@ -388,7 +415,10 @@ fn ov_23_every_public_item_is_on_the_allow_list() {
         .keys()
         .filter(|name| !items.contains_key(*name) && name.as_str() != "FEATURE:testing")
         .collect();
-    assert!(stale.is_empty(), "OV-23: stale allow-list entries: {stale:#?}");
+    assert!(
+        stale.is_empty(),
+        "OV-23: stale allow-list entries: {stale:#?}"
+    );
 }
 
 #[test]
@@ -413,8 +443,11 @@ fn ov_23_allow_list_entries_name_a_token_or_a_justification() {
 #[test]
 fn ov_23b_kernel_growth_is_the_new_count() {
     let allowed = allow_list();
-    let new: BTreeSet<&String> =
-        allowed.iter().filter(|(_, why)| why.starts_with("NEW:")).map(|(n, _)| n).collect();
+    let new: BTreeSet<&String> = allowed
+        .iter()
+        .filter(|(_, why)| why.starts_with("NEW:"))
+        .map(|(n, _)| n)
+        .collect();
     // Audit §13's `data` line ends with the catch-all "Stream Contract (normative)",
     // which would otherwise absorb every type spec 02 invents; OV-23b makes each one
     // an explicit `NEW:` instead.
@@ -433,7 +466,10 @@ fn ov_23b_kernel_growth_is_the_new_count() {
         );
     }
     let total = allowed.len() - 1; // the `testing` feature line is not an item
-    eprintln!("OV-23b: Kernel growth = {} NEW: items of {total} public items", new.len());
+    eprintln!(
+        "OV-23b: Kernel growth = {} NEW: items of {total} public items",
+        new.len()
+    );
     // The bound is not a rule; it is the shape the measurement must keep for the
     // number to mean anything: most of the Kernel surface is still audit §13's, and
     // every departure from it is written out with its reason.
@@ -539,7 +575,10 @@ fn ov_23_the_allow_list_key_names_the_module() {
     let items = module_level_public_items();
     assert!(items.contains_key("plan::Fragment"));
     assert!(items.contains_key("plan::plan"));
-    assert!(!items.contains_key("Fragment"), "a bare name is never a key");
+    assert!(
+        !items.contains_key("Fragment"),
+        "a bare name is never a key"
+    );
 }
 
 #[test]
@@ -562,7 +601,8 @@ fn ov_23_testing_feature_items_are_excluded_by_one_line() {
     // ManualTimeAuthority's re-export in `time/mod.rs` is itself cfg-gated, so the
     // public surface of the default build really does not carry it.
     let time_mod = std::fs::read_to_string(crate_dir().join("src/time/mod.rs")).expect("readable");
-    assert!(time_mod.contains("#[cfg(feature = \"testing\")]\npub use authority::ManualTimeAuthority;")
+    assert!(
+        time_mod.contains("#[cfg(feature = \"testing\")]\npub use authority::ManualTimeAuthority;")
     );
 }
 
@@ -654,8 +694,12 @@ fn field_names(items: &[syn::Item], out: &mut BTreeMap<String, BTreeSet<String>>
             }
             for member in &imp.items {
                 match member {
-                    syn::ImplItem::Fn(method) => syn::visit::Visit::visit_signature(&mut named, &method.sig),
-                    syn::ImplItem::Type(assoc) => syn::visit::Visit::visit_type(&mut named, &assoc.ty),
+                    syn::ImplItem::Fn(method) => {
+                        syn::visit::Visit::visit_signature(&mut named, &method.sig)
+                    }
+                    syn::ImplItem::Type(assoc) => {
+                        syn::visit::Visit::visit_type(&mut named, &assoc.ty)
+                    }
                     syn::ImplItem::Const(c) => syn::visit::Visit::visit_type(&mut named, &c.ty),
                     _ => {}
                 }
@@ -663,7 +707,10 @@ fn field_names(items: &[syn::Item], out: &mut BTreeMap<String, BTreeSet<String>>
             let mut owners = Named::default();
             syn::visit::Visit::visit_type(&mut owners, &imp.self_ty);
             for owner in owners.0 {
-                self.0.entry(owner).or_default().extend(named.0.iter().cloned());
+                self.0
+                    .entry(owner)
+                    .or_default()
+                    .extend(named.0.iter().cloned());
             }
             syn::visit::visit_item_impl(self, imp);
         }
@@ -687,16 +734,28 @@ fn data_types() -> BTreeMap<String, BTreeSet<String>> {
 /// every struct or enum they name, transitively. A peer reached through a field of
 /// `PrepareContext` is as much a reference to a peer as one in a signature (MA-16,
 /// D72).
-fn roles_reachable(seed: BTreeSet<String>, types: &BTreeMap<String, BTreeSet<String>>) -> BTreeSet<String> {
+fn roles_reachable(
+    seed: BTreeSet<String>,
+    types: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeSet<String> {
     let mut seen = BTreeSet::new();
     let mut work: Vec<String> = seed.into_iter().collect();
     while let Some(name) = work.pop() {
         if !seen.insert(name.clone()) {
             continue;
         }
-        work.extend(types.get(&name).into_iter().flatten().filter(|n| !seen.contains(*n)).cloned());
+        work.extend(
+            types
+                .get(&name)
+                .into_iter()
+                .flatten()
+                .filter(|n| !seen.contains(*n))
+                .cloned(),
+        );
     }
-    seen.into_iter().filter(|n| ROLE_TRAITS.contains(&n.as_str())).collect()
+    seen.into_iter()
+        .filter(|n| ROLE_TRAITS.contains(&n.as_str()))
+        .collect()
 }
 
 /// What a role trait's header names: its supertraits and generics, which are part of
@@ -731,7 +790,10 @@ fn ma_16_role_trait_signatures_do_not_name_peer_roles() {
             .into_iter()
             .filter(|r| r != &role)
             .collect();
-        assert!(peers.is_empty(), "MA-16: {role}'s supertraits or generics reach another role trait: {peers:?}");
+        assert!(
+            peers.is_empty(),
+            "MA-16: {role}'s supertraits or generics reach another role trait: {peers:?}"
+        );
         for member in &role_trait.items {
             let mut named = Named::default();
             let what = match member {
@@ -746,8 +808,10 @@ fn ma_16_role_trait_signatures_do_not_name_peer_roles() {
                 }
                 _ => continue,
             };
-            let peers: Vec<String> =
-                roles_reachable(named.0, &types).into_iter().filter(|r| r != &role).collect();
+            let peers: Vec<String> = roles_reachable(named.0, &types)
+                .into_iter()
+                .filter(|r| r != &role)
+                .collect();
             assert!(
                 peers.is_empty(),
                 "MA-16: {role}::{what} reaches another role trait through its signature or the \
@@ -772,7 +836,12 @@ fn ma_16_the_gate_sees_a_peer_behind_a_context_field() {
         syn::parse_str("fn prepare(&mut self, ctx: &mut Ctx<'_>)").expect("parses");
     let mut named = Named::default();
     syn::visit::Visit::visit_signature(&mut named, &signature);
-    assert_eq!(roles_reachable(named.0, &types).into_iter().collect::<Vec<_>>(), ["Sink"]);
+    assert_eq!(
+        roles_reachable(named.0, &types)
+            .into_iter()
+            .collect::<Vec<_>>(),
+        ["Sink"]
+    );
     // Through a type alias, and through a method of a non-role trait the context
     // holds (the two routes the first extension missed).
     let file: syn::File = syn::parse_str(
@@ -787,21 +856,59 @@ fn ma_16_the_gate_sees_a_peer_behind_a_context_field() {
         &mut named,
         &syn::parse_str("fn prepare(&mut self, ctx: &mut Ctx<'_>)").expect("parses"),
     );
-    assert_eq!(roles_reachable(named.0, &types).into_iter().collect::<Vec<_>>(), ["Link", "Sink"]);
+    assert_eq!(
+        roles_reachable(named.0, &types)
+            .into_iter()
+            .collect::<Vec<_>>(),
+        ["Link", "Sink"]
+    );
     // One peer role per route, each on its own, so deleting any one route from the
     // walk changes the answer (D72).
     let routes = [
-        ("struct generic", "struct Ctx<'a> { h: Hidden<'a> } struct Hidden<'a, S: ?Sized + Link = dyn Link> { s: &'a S }"),
-        ("enum generic", "struct Ctx { h: Choice } enum Choice<S: ?Sized + Link = dyn Link> { A(Box<S>) }"),
-        ("alias generic", "struct Ctx<'a> { h: H<'a> } type H<'a, S = dyn Link> = &'a S;"),
-        ("inherent method", "struct Ctx; impl Ctx { fn peer(&self) -> Option<&'static dyn Link> { None } }"),
-        ("trait impl", "struct Ctx; impl Iterator for Ctx { type Item = &'static dyn Link; fn next(&mut self) -> Option<Self::Item> { None } }"),
-        ("impl in a fn body", "struct Ctx; fn hide() { impl Ctx { fn peer(&self) -> &'static dyn Link { todo!() } } }"),
-        ("impl in a const block", "struct Ctx; const _: () = { impl Ctx { fn peer(&self) -> &'static dyn Link { todo!() } } };"),
-        ("impl for a reference", "struct Ctx; impl<'a> IntoIterator for &'a Ctx { type Item = &'static dyn Link; type IntoIter = std::iter::Empty<Self::Item>; fn into_iter(self) -> Self::IntoIter { todo!() } }"),
-        ("impl on a trait object", "struct Ctx<'a> { e: &'a dyn Events } trait Events {} impl dyn Events { fn peer(&self) -> Option<&dyn Link> { None } }"),
-        ("impl assoc const", "struct Ctx; impl Ctx { const P: Option<&'static dyn Link> = None; }"),
-        ("impl through its trait path", "struct Ctx; trait Tag<T: ?Sized> {} impl Tag<dyn Link> for Ctx {}"),
+        (
+            "struct generic",
+            "struct Ctx<'a> { h: Hidden<'a> } struct Hidden<'a, S: ?Sized + Link = dyn Link> { s: &'a S }",
+        ),
+        (
+            "enum generic",
+            "struct Ctx { h: Choice } enum Choice<S: ?Sized + Link = dyn Link> { A(Box<S>) }",
+        ),
+        (
+            "alias generic",
+            "struct Ctx<'a> { h: H<'a> } type H<'a, S = dyn Link> = &'a S;",
+        ),
+        (
+            "inherent method",
+            "struct Ctx; impl Ctx { fn peer(&self) -> Option<&'static dyn Link> { None } }",
+        ),
+        (
+            "trait impl",
+            "struct Ctx; impl Iterator for Ctx { type Item = &'static dyn Link; fn next(&mut self) -> Option<Self::Item> { None } }",
+        ),
+        (
+            "impl in a fn body",
+            "struct Ctx; fn hide() { impl Ctx { fn peer(&self) -> &'static dyn Link { todo!() } } }",
+        ),
+        (
+            "impl in a const block",
+            "struct Ctx; const _: () = { impl Ctx { fn peer(&self) -> &'static dyn Link { todo!() } } };",
+        ),
+        (
+            "impl for a reference",
+            "struct Ctx; impl<'a> IntoIterator for &'a Ctx { type Item = &'static dyn Link; type IntoIter = std::iter::Empty<Self::Item>; fn into_iter(self) -> Self::IntoIter { todo!() } }",
+        ),
+        (
+            "impl on a trait object",
+            "struct Ctx<'a> { e: &'a dyn Events } trait Events {} impl dyn Events { fn peer(&self) -> Option<&dyn Link> { None } }",
+        ),
+        (
+            "impl assoc const",
+            "struct Ctx; impl Ctx { const P: Option<&'static dyn Link> = None; }",
+        ),
+        (
+            "impl through its trait path",
+            "struct Ctx; trait Tag<T: ?Sized> {} impl Tag<dyn Link> for Ctx {}",
+        ),
     ];
     for (route, source) in routes {
         let file: syn::File = syn::parse_str(source).expect("synthetic items parse");
@@ -812,12 +919,21 @@ fn ma_16_the_gate_sees_a_peer_behind_a_context_field() {
             &mut named,
             &syn::parse_str("fn prepare(&mut self, ctx: &mut Ctx)").expect("parses"),
         );
-        assert_eq!(roles_reachable(named.0, &types).into_iter().collect::<Vec<_>>(), ["Link"], "{route}");
+        assert_eq!(
+            roles_reachable(named.0, &types)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["Link"],
+            "{route}"
+        );
     }
     // A role trait's supertraits are checked like its signatures.
-    let role: syn::ItemTrait = syn::parse_str("trait Provider<T: Sink>: Send + Link {}").expect("parses");
+    let role: syn::ItemTrait =
+        syn::parse_str("trait Provider<T: Sink>: Send + Link {}").expect("parses");
     assert_eq!(
-        roles_reachable(role_header_names(&role), &BTreeMap::new()).into_iter().collect::<Vec<_>>(),
+        roles_reachable(role_header_names(&role), &BTreeMap::new())
+            .into_iter()
+            .collect::<Vec<_>>(),
         ["Link", "Sink"]
     );
     // And directly in a signature, as before.
@@ -825,7 +941,12 @@ fn ma_16_the_gate_sees_a_peer_behind_a_context_field() {
         syn::parse_str("fn peer(&self, value: &dyn Sink)").expect("parses");
     let mut named = Named::default();
     syn::visit::Visit::visit_signature(&mut named, &signature);
-    assert_eq!(roles_reachable(named.0, &BTreeMap::new()).into_iter().collect::<Vec<_>>(), ["Sink"]);
+    assert_eq!(
+        roles_reachable(named.0, &BTreeMap::new())
+            .into_iter()
+            .collect::<Vec<_>>(),
+        ["Sink"]
+    );
 }
 
 /// The gate's own predicates, against the spellings that walked past them.
@@ -847,11 +968,17 @@ fn ov_23_the_gate_predicates_answer_the_demonstrated_evasions() {
         }
     };
     // The feature gate OV-20 gives one allow-list line.
-    assert!(is_testing_gated(&attrs_of(r#"#[cfg(feature = "testing")] mod x {}"#)));
+    assert!(is_testing_gated(&attrs_of(
+        r#"#[cfg(feature = "testing")] mod x {}"#
+    )));
     // And its negation, which is the **default** build: matching any `cfg` whose
     // tokens contain "testing" skipped items that ship.
-    assert!(!is_testing_gated(&attrs_of(r#"#[cfg(not(feature = "testing"))] mod x {}"#)));
-    assert!(!is_testing_gated(&attrs_of(r#"#[cfg(all(unix, feature = "testing"))] mod x {}"#)));
+    assert!(!is_testing_gated(&attrs_of(
+        r#"#[cfg(not(feature = "testing"))] mod x {}"#
+    )));
+    assert!(!is_testing_gated(&attrs_of(
+        r#"#[cfg(all(unix, feature = "testing"))] mod x {}"#
+    )));
     assert!(!is_testing_gated(&attrs_of("mod x {}")));
 
     let use_tree = |src: &str| -> syn::UseTree {
@@ -870,14 +997,19 @@ fn ov_23_the_gate_predicates_answer_the_demonstrated_evasions() {
     // A brace group has one root per branch. Returning the empty string for the group
     // put it in the accepted set, so a dependency's type re-exported inside braces
     // walked past the check written to refuse exactly that.
-    assert_eq!(roots("pub use {serde_json::Value as X, crate::spec::Key};"), ["serde_json", "crate"]);
+    assert_eq!(
+        roots("pub use {serde_json::Value as X, crate::spec::Key};"),
+        ["serde_json", "crate"]
+    );
     assert_eq!(roots("pub use crate::{spec::Key, id::Ident};"), ["crate"]);
     // A glob is refused wherever it sits: the root check short-circuits at the first
     // segment, so `pub use crate::internal::*;` named a module of this crate and put
     // every item behind it on the surface with no allow-list line at all.
     assert!(has_glob(&use_tree("pub use crate::internal::*;")));
     assert!(has_glob(&use_tree("pub use crate::{spec::Key, id::*};")));
-    assert!(!has_glob(&use_tree("pub use crate::{spec::Key, id::Ident};")));
+    assert!(!has_glob(&use_tree(
+        "pub use crate::{spec::Key, id::Ident};"
+    )));
 
     // Two inline modules of one file that declare a same-named item are two items.
     // Keying on depth collapsed them onto one key, so the second inherited the
@@ -887,7 +1019,10 @@ fn ov_23_the_gate_predicates_answer_the_demonstrated_evasions() {
         allow_key(f, &["m1".to_owned()], "Dup"),
         allow_key(f, &["m2".to_owned()], "Dup")
     );
-    assert_ne!(allow_key(f, &[], "Dup"), allow_key(f, &["m1".to_owned()], "Dup"));
+    assert_ne!(
+        allow_key(f, &[], "Dup"),
+        allow_key(f, &["m1".to_owned()], "Dup")
+    );
 }
 
 /// The `macro_rules!` definitions `src/` may hold, by name. A macro can emit an item
@@ -941,20 +1076,38 @@ fn ma_16_the_names_the_walk_reads_are_the_names_declared() {
     }
     // The predicate's own red test: each spelling is caught once, wherever it sits.
     for (what, source) in [
-        ("a renamed import", "use crate::module_api::Sink as Fragment;"),
-        ("a rename in a brace group", "use crate::module_api::{Provider, Sink as Peer};"),
-        ("a rename inside a fn body", "fn hide() { use crate::module_api::Sink as Peer; }"),
+        (
+            "a renamed import",
+            "use crate::module_api::Sink as Fragment;",
+        ),
+        (
+            "a rename in a brace group",
+            "use crate::module_api::{Provider, Sink as Peer};",
+        ),
+        (
+            "a rename inside a fn body",
+            "fn hide() { use crate::module_api::Sink as Peer; }",
+        ),
         ("a renamed extern crate", "extern crate serde as s;"),
         ("an unlisted macro", "macro_rules! hidden { () => {} }"),
-        ("an unlisted macro inside a fn body", "fn hide() { macro_rules! hidden { () => {} } }"),
-        ("an unlisted macro inside a const block", "const _: () = { macro_rules! hidden { () => {} } };"),
+        (
+            "an unlisted macro inside a fn body",
+            "fn hide() { macro_rules! hidden { () => {} } }",
+        ),
+        (
+            "an unlisted macro inside a const block",
+            "const _: () = { macro_rules! hidden { () => {} } };",
+        ),
     ] {
         let file: syn::File = syn::parse_str(source).expect("the fixture parses");
         assert_eq!(renames_and_macros(&file).len(), 1, "{what}");
     }
     let listed: syn::File =
         syn::parse_str("macro_rules! display_newtype { () => {} } use std::fmt;").expect("parses");
-    assert!(renames_and_macros(&listed).is_empty(), "a listed macro and a plain import pass");
+    assert!(
+        renames_and_macros(&listed).is_empty(),
+        "a listed macro and a plain import pass"
+    );
 }
 
 fn assert_document<T: serde::Serialize + serde::de::DeserializeOwned + schemars::JsonSchema>() {}
@@ -978,8 +1131,15 @@ ma6_documents! {
 }
 
 /// MA-6's Kernel handles, and the wrappers it allows over its categories.
-const MA6_HANDLES: [&str; 7] =
-    ["PrepareContext", "EventSink", "ActionReceiver", "ActionSubmitter", "Endpoint", "DataLink", "TimeAuthority"];
+const MA6_HANDLES: [&str; 7] = [
+    "PrepareContext",
+    "EventSink",
+    "ActionReceiver",
+    "ActionSubmitter",
+    "Endpoint",
+    "DataLink",
+    "TimeAuthority",
+];
 const MA6_WRAPPERS: [&str; 5] = ["Option", "Result", "Vec", "Box", "Arc"];
 
 /// What in one signature MA-6 does not allow: a name outside its categories, a slice, a
@@ -1008,7 +1168,10 @@ fn ma6_violations(sig: &syn::Signature, allowed: &BTreeSet<&str>) -> Vec<String>
             syn::visit::visit_path_segment(self, s);
         }
     }
-    let mut check = Check { allowed, out: Vec::new() };
+    let mut check = Check {
+        allowed,
+        out: Vec::new(),
+    };
     for input in &sig.inputs {
         if let syn::FnArg::Typed(t) = input {
             syn::visit::Visit::visit_type(&mut check, &t.ty);
@@ -1017,7 +1180,12 @@ fn ma6_violations(sig: &syn::Signature, allowed: &BTreeSet<&str>) -> Vec<String>
     if let syn::ReturnType::Type(_, t) = &sig.output {
         syn::visit::Visit::visit_type(&mut check, t);
     }
-    if sig.generics.params.iter().any(|p| !matches!(p, syn::GenericParam::Lifetime(_))) {
+    if sig
+        .generics
+        .params
+        .iter()
+        .any(|p| !matches!(p, syn::GenericParam::Lifetime(_)))
+    {
         check.out.push("a generic parameter".to_owned());
     }
     check.out
@@ -1025,13 +1193,18 @@ fn ma6_violations(sig: &syn::Signature, allowed: &BTreeSet<&str>) -> Vec<String>
 
 #[test]
 fn ma_06_role_signatures_name_only_documents_and_handles() {
-    let allowed: BTreeSet<&str> =
-        ma6_documents().into_iter().chain(MA6_HANDLES).chain(MA6_WRAPPERS).collect();
+    let allowed: BTreeSet<&str> = ma6_documents()
+        .into_iter()
+        .chain(MA6_HANDLES)
+        .chain(MA6_WRAPPERS)
+        .collect();
     let source = std::fs::read_to_string(crate_dir().join("src/module_api.rs")).expect("readable");
     let file = syn::parse_file(&source).expect("module_api.rs parses");
     let mut checked = 0;
     for item in &file.items {
-        let syn::Item::Trait(role) = item else { continue };
+        let syn::Item::Trait(role) = item else {
+            continue;
+        };
         if !ROLE_TRAITS.contains(&role.ident.to_string().as_str()) {
             continue;
         }
@@ -1042,7 +1215,13 @@ fn ma_06_role_signatures_name_only_documents_and_handles() {
             .supertraits
             .iter()
             .map(|b| match b {
-                syn::TypeParamBound::Trait(t) => t.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::"),
+                syn::TypeParamBound::Trait(t) => t
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::"),
                 _ => "a non-trait bound".to_owned(),
             })
             .collect();
@@ -1054,7 +1233,12 @@ fn ma_06_role_signatures_name_only_documents_and_handles() {
         for member in &role.items {
             if let syn::TraitItem::Fn(method) = member {
                 let bad = ma6_violations(&method.sig, &allowed);
-                assert!(bad.is_empty(), "MA-6: {}::{} names {bad:?}", role.ident, method.sig.ident);
+                assert!(
+                    bad.is_empty(),
+                    "MA-6: {}::{} names {bad:?}",
+                    role.ident,
+                    method.sig.ident
+                );
             }
         }
     }
@@ -1063,20 +1247,29 @@ fn ma_06_role_signatures_name_only_documents_and_handles() {
     // the list cannot again fall behind the signatures (D104).
     let frozen = ezsdr_kernel::schema::document_schemas();
     for doc in ma6_documents() {
-        let snake = doc.chars().enumerate().fold(String::new(), |mut s, (i, c)| {
-            if c.is_ascii_uppercase() && i > 0 {
-                s.push('_');
-            }
-            s.push(c.to_ascii_lowercase());
-            s
-        });
-        assert!(frozen.contains_key(snake.as_str()), "MA-46: {doc} has no schema under schemas/");
+        let snake = doc
+            .chars()
+            .enumerate()
+            .fold(String::new(), |mut s, (i, c)| {
+                if c.is_ascii_uppercase() && i > 0 {
+                    s.push('_');
+                }
+                s.push(c.to_ascii_lowercase());
+                s
+            });
+        assert!(
+            frozen.contains_key(snake.as_str()),
+            "MA-46: {doc} has no schema under schemas/"
+        );
     }
     // The check's own red test, one per thing MA-6 names.
     for (what, sig) in [
         ("a raw slice", "fn f(&self, bytes: &[u8])"),
         ("a closure", "fn f(&self, f: Box<dyn Fn(u32)>)"),
-        ("an iterator", "fn f(&self) -> impl Iterator<Item = TimePoint>"),
+        (
+            "an iterator",
+            "fn f(&self) -> impl Iterator<Item = TimePoint>",
+        ),
         ("a bare fn", "fn f(&self, f: fn(u32))"),
         ("a generic parameter", "fn f<T>(&self, x: T)"),
         ("a type outside the list", "fn f(&self, x: &String)"),
@@ -1084,8 +1277,9 @@ fn ma_06_role_signatures_name_only_documents_and_handles() {
         let sig: syn::Signature = syn::parse_str(sig).expect("parses");
         assert!(!ma6_violations(&sig, &allowed).is_empty(), "{what}");
     }
-    let fine: syn::Signature =
-        syn::parse_str("fn stop(&mut self, mode: StopMode) -> Result<Vec<ArtifactRef>, ModuleError>")
-            .expect("parses");
+    let fine: syn::Signature = syn::parse_str(
+        "fn stop(&mut self, mode: StopMode) -> Result<Vec<ArtifactRef>, ModuleError>",
+    )
+    .expect("parses");
     assert!(ma6_violations(&fine, &allowed).is_empty());
 }

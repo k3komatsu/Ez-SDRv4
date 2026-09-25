@@ -4,8 +4,8 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ezsdr_kernel::binding::{AdmissionCheck, CheckStage, Violation};
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection};
@@ -14,12 +14,12 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, MemoryDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
-    ActionReceiver, ActionSubmitter, CoerceReport, CompileRule, ComponentDescriptor,
-    ComponentImpl, ComponentKind, ComponentRequires, ComponentTiming, Deployment, Driving,
-    Executor, ExecutorDescriptor, Fidelity, IslandDecl, LinkDescriptor, ModuleDescriptor, ModuleError,
-    ModuleErrorKind, ModuleRef, ParamDecl, PrepareContext, Provider, ProviderInstance, Requested,
-    Resource, Role, Sink, SinkDescriptor, StepOutcome, StopMode, UpdateClass, VerbDecl, Version,
-    VocabularyDescriptor,
+    ActionReceiver, ActionSubmitter, CoerceReport, CompileRule, ComponentDescriptor, ComponentImpl,
+    ComponentKind, ComponentRequires, ComponentTiming, Deployment, Driving, Executor,
+    ExecutorDescriptor, Fidelity, IslandDecl, LinkDescriptor, ModuleDescriptor, ModuleError,
+    ModuleErrorKind, ModuleRef, ParamDecl, PrepareContext, Provider, ProviderInstance,
+    RejectedRequest, Requested, Resource, Role, Sink, SinkDescriptor, StepOutcome, StopMode,
+    UpdateClass, VerbDecl, Version, VocabularyDescriptor,
 };
 use ezsdr_kernel::plan::{Fragment, PrepareReport};
 use ezsdr_kernel::policy::{EventKindDecl, Reaction};
@@ -57,7 +57,10 @@ pub fn mid(s: &str) -> ModuleId {
 
 /// The exact version every test Module registers, as a binding pins it (SB-22, D78).
 pub fn mref(s: &str) -> ModuleRef {
-    ModuleRef { id: mid(s), version: Version::new(1, 0, 0) }
+    ModuleRef {
+        id: mid(s),
+        version: Version::new(1, 0, 0),
+    }
 }
 
 /// A placeholder content hash for descriptors that need one (MA-37).
@@ -129,7 +132,9 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
                     late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
                 },
             },
-            VerbDecl { verb: id("sweep"), compiles_to: CompileRule::PeripheralCommand {},
+            VerbDecl {
+                verb: id("sweep"),
+                compiles_to: CompileRule::PeripheralCommand {},
             },
         ],
         checks: vec![ns("test.limits")],
@@ -154,7 +159,10 @@ impl TestLimitsCheck {
     pub fn new() -> TestLimitsCheck {
         TestLimitsCheck {
             section: ns("test.limits"),
-            stages: vec![CheckStage::Validate, CheckStage::Prepare, CheckStage::Runtime,
+            stages: vec![
+                CheckStage::Validate,
+                CheckStage::Prepare,
+                CheckStage::Runtime,
             ],
         }
     }
@@ -172,31 +180,53 @@ impl AdmissionCheck for TestLimitsCheck {
     fn check(
         &self,
         section: &serde_json::Value,
-        effective: &BTreeMap<Key, Value>,
-        proposed: &BTreeMap<Key, Value>,
+        effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+        proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
         _stage: CheckStage,
     ) -> Vec<Violation> {
-        let ceiling = section.get("max_grid").and_then(|v| v.as_f64()).unwrap_or(f64::INFINITY);
-        // SB-30: the effective configuration overlaid with what is proposed.
-        let mut merged = effective.clone();
-        merged.extend(proposed.iter().map(|(k, v)| (k.clone(), v.clone())));
-        merged
-            .iter()
-            .filter(|(k, _)| k.as_str() == "test.grid")
-            .filter_map(|(k, v)| {
+        let ceiling = section
+            .get("max_grid")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(f64::INFINITY);
+        let gate = section
+            .get("gate")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Key::parse(s).ok());
+        // SB-30 (KA-4): each fragment's configuration overlaid with what is proposed
+        // for that fragment.
+        let mut names: std::collections::BTreeSet<&Ident> = effective.keys().collect();
+        names.extend(proposed.keys());
+        let mut out = Vec::new();
+        for name in names {
+            let mut merged = effective.get(name).cloned().unwrap_or_default();
+            if let Some(p) = proposed.get(name) {
+                merged.extend(p.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+            if gate
+                .as_ref()
+                .is_some_and(|gate| !matches!(merged.get(gate), Some(Value::Bool(true))))
+            {
+                continue;
+            }
+            for (k, v) in merged.iter().filter(|(k, _)| k.as_str() == "test.grid") {
                 let n = match v {
                     Value::Num(n) => *n,
                     Value::Int(i) => *i as f64,
-                    _ => return None,
+                    _ => continue,
                 };
-                (n > ceiling).then(|| Violation {
-                    check: ns("test.limits"),
-                    key: Some(k.clone()),
-                    requested: Some(v.clone()),
-                    reason: format!("test.grid {n} exceeds the declared ceiling {ceiling}"),
-                })
-            })
-            .collect()
+                if n > ceiling {
+                    out.push(Violation {
+                        check: ns("test.limits"),
+                        key: Some(k.clone()),
+                        requested: Some(v.clone()),
+                        reason: format!(
+                            "{name}: test.grid {n} exceeds the declared ceiling {ceiling}"
+                        ),
+                    });
+                }
+            }
+        }
+        out
     }
 }
 
@@ -232,7 +262,7 @@ pub struct TestProvider {
     /// The recorded call log (MA-44).
     pub log: Mutex<Vec<String>>,
     /// How many times `coerce` was called (MA-11).
-    pub coerce_calls: AtomicU64,
+    pub coerce_calls: Arc<AtomicU64>,
     /// The last request `coerce` was handed, so a test can assert SB-7's "one call
     /// with the whole map" rather than only the call count (SB-7, SB-44).
     pub last_request: Mutex<Option<Requested>>,
@@ -241,6 +271,18 @@ pub struct TestProvider {
     /// Makes `prepare` report something `coerce` did not, so that MA-12's equality
     /// has a negative case.
     pub prepare_disagrees: bool,
+    /// Refuses a request whose `test.count · test.grid` exceeds this, with a `rejected`
+    /// entry on `test.grid`: a joint limit no single key breaks (SB-7, KA-5).
+    pub joint_limit: Option<f64>,
+    /// Makes `coerce` reject `test.flag`, which no fixture requests: a malformed
+    /// report (SB-7, KA-5).
+    pub stray_rejection: bool,
+    /// Makes `coerce` panic for the coordinator's containment test (KC-30).
+    pub panic_in_coerce: bool,
+    /// Removes this key from `coerce`'s applied map without rejecting it (KC-26).
+    pub omit_applied: Option<Key>,
+    /// Additional values inserted into `prepare`'s effective report (KC-27).
+    pub effective: BTreeMap<Key, Value>,
 }
 
 impl TestProvider {
@@ -251,11 +293,14 @@ impl TestProvider {
         let line = |root: &ResourceId, n: u32| Resource {
             id: root.child(&n.to_string()).expect("a valid child path"),
             kind: ns("test.line"),
-            capabilities: [(key("test.count"), CapabilityValue::One { value: Value::Int(count),
+            capabilities: [(
+                key("test.count"),
+                CapabilityValue::One {
+                    value: Value::Int(count),
                 },
             )]
-                .into_iter()
-                .collect(),
+            .into_iter()
+            .collect(),
             children: Vec::new(),
             // A line is one physical channel: exclusive, like SB-34's default.
             shareable: false,
@@ -267,8 +312,7 @@ impl TestProvider {
                 Port {
                     name: id("rx"),
                     direction: PortDirection::Out,
-                    contract: DataContractId::parse("ezsdr.stream.sc16")
-                        .expect("a valid literal"),
+                    contract: DataContractId::parse("ezsdr.stream.sc16").expect("a valid literal"),
                 },
                 // The TX end of Vision §7's `PHY Processor -> Radio Port`: a link
                 // whose **consumer** is a resource port, which is the case the plan's
@@ -276,22 +320,26 @@ impl TestProvider {
                 Port {
                     name: id("tx"),
                     direction: PortDirection::In,
-                    contract: DataContractId::parse("ezsdr.stream.sc16")
-                        .expect("a valid literal"),
+                    contract: DataContractId::parse("ezsdr.stream.sc16").expect("a valid literal"),
                 },
             ],
         };
         TestProvider {
             instance: ProviderInstance {
                 id: root.clone(),
-                module: ModuleRef { id: mid("ezsdr.test.provider"), version: Version::new(1, 0, 0),
+                module: ModuleRef {
+                    id: mid("ezsdr.test.provider"),
+                    version: Version::new(1, 0, 0),
                 },
                 profile: None,
                 tree: Resource {
                     id: root.clone(),
                     kind: ns("test.device"),
                     capabilities: [
-                        (key("test.count"), CapabilityValue::One { value: Value::Int(count),
+                        (
+                            key("test.count"),
+                            CapabilityValue::One {
+                                value: Value::Int(count),
                             },
                         ),
                         // A grid is a discrete set: a declared continuous range
@@ -326,16 +374,22 @@ impl TestProvider {
                 fidelity: Fidelity::NONE,
                 driving: Driving { stepped: false },
                 arm_after: Vec::new(),
+                min_command_lead: None,
                 sections: BTreeMap::new(),
             },
             grid: None,
             stray_coercion: false,
             fail_at: FailAt::Never,
             log: Mutex::new(Vec::new()),
-            coerce_calls: AtomicU64::new(0),
+            coerce_calls: Arc::new(AtomicU64::new(0)),
             last_request: Mutex::new(None),
             actions: Mutex::new(Vec::new()),
             prepare_disagrees: false,
+            joint_limit: None,
+            stray_rejection: false,
+            panic_in_coerce: false,
+            omit_applied: None,
+            effective: BTreeMap::new(),
         }
     }
 
@@ -353,9 +407,10 @@ impl TestProvider {
     pub fn with_asymmetric_lines(mut self, first: i64, second: i64) -> TestProvider {
         for (i, child) in self.instance.tree.children.iter_mut().enumerate() {
             let n = if i == 0 { first } else { second };
-            child
-                .capabilities
-                .insert(key("test.count"), CapabilityValue::One { value: Value::Int(n),
+            child.capabilities.insert(
+                key("test.count"),
+                CapabilityValue::One {
+                    value: Value::Int(n),
                 },
             );
         }
@@ -366,6 +421,68 @@ impl TestProvider {
     /// SB-44's malformed report, from the `validate` side (MA-44, SB-44).
     pub fn with_stray_coercion(mut self) -> TestProvider {
         self.stray_coercion = true;
+        self
+    }
+
+    /// Declares `test.grid` on both `test.line` sub-resources, as the device root does,
+    /// so that a Spec's `needs` can constrain it (SB-30, KA-4).
+    pub fn with_line_grid(mut self) -> TestProvider {
+        for line in &mut self.instance.tree.children {
+            line.capabilities.insert(
+                key("test.grid"),
+                CapabilityValue::AnyOf {
+                    values: vec![Value::Num(20.0), Value::Num(40.0), Value::Num(100.0)],
+                },
+            );
+        }
+        self
+    }
+
+    /// Refuses a request whose `test.count · test.grid` exceeds `limit` (SB-7, KA-5).
+    pub fn with_joint_limit(mut self, limit: f64) -> TestProvider {
+        self.joint_limit = Some(limit);
+        self
+    }
+
+    /// Makes `coerce` reject a key the request does not name (SB-7, KA-5).
+    pub fn with_stray_rejection(mut self) -> TestProvider {
+        self.stray_rejection = true;
+        self
+    }
+
+    /// Makes the instance use the stepping interface (MA-15).
+    pub fn stepped(mut self) -> TestProvider {
+        self.instance.driving.stepped = true;
+        self
+    }
+
+    /// Adds a value to the effective configuration returned by `prepare` (KC-27).
+    pub fn with_effective(mut self, key_name: &str, value: Value) -> TestProvider {
+        self.effective.insert(key(key_name), value);
+        self
+    }
+
+    /// Adds a namespaced section to the Provider's instance (KC-45).
+    pub fn with_section(mut self, namespace: &str, value: serde_json::Value) -> TestProvider {
+        self.instance.sections.insert(ns(namespace), value);
+        self
+    }
+
+    /// Makes `coerce` panic so the coordinator can prove it contains Module faults (KC-30).
+    pub fn panicking_in_coerce(mut self) -> TestProvider {
+        self.panic_in_coerce = true;
+        self
+    }
+
+    /// Omits a key from `applied` without a rejection (KC-26).
+    pub fn omitting_from_applied(mut self, key_name: &str) -> TestProvider {
+        self.omit_applied = Some(key(key_name));
+        self
+    }
+
+    /// Declares the least command lead the instance needs (MA-10, KA-7).
+    pub fn with_min_command_lead(mut self, lead: ezsdr_kernel::time::Duration) -> TestProvider {
+        self.instance.min_command_lead = Some(lead);
         self
     }
 
@@ -416,7 +533,7 @@ impl TestProvider {
         self.log.lock().expect("lock").push(what.to_owned());
     }
 
-    fn fail_if(&self, phase: FailAt) -> Result<(), ModuleError> {
+    pub fn fail_if(&self, phase: FailAt) -> Result<(), ModuleError> {
         if self.fail_at == phase {
             return Err(ModuleError {
                 kind: ModuleErrorKind::Rejected,
@@ -451,6 +568,9 @@ impl Provider for TestProvider {
     fn coerce(&self, request: &Requested) -> Result<CoerceReport, ModuleError> {
         self.coerce_calls.fetch_add(1, Ordering::Relaxed);
         *self.last_request.lock().unwrap_or_else(|e| e.into_inner()) = Some(request.clone());
+        if self.panic_in_coerce {
+            panic!("test: panic in coerce");
+        }
         let mut report = CoerceReport::default();
         if self.stray_coercion {
             report.coercions.push(Coercion {
@@ -461,7 +581,8 @@ impl Provider for TestProvider {
             });
         }
         for (k, c) in &request.constraints {
-            let Constraint::Eq { value: v } = c else { continue;
+            let Constraint::Eq { value: v } = c else {
+                continue;
             };
             if let (true, Some(step), Value::Num(x)) = (k.as_str() == "test.grid", self.grid, v) {
                 let snapped = (x / step).round() * step;
@@ -478,10 +599,40 @@ impl Provider for TestProvider {
             }
             report.applied.insert(k.clone(), v.clone());
         }
+        if let Some(limit) = self.joint_limit {
+            let number = |k: &str| match report.applied.get(&key(k)) {
+                Some(Value::Num(x)) => Some(*x),
+                Some(Value::Int(i)) => Some(*i as f64),
+                _ => None,
+            };
+            if let (Some(count), Some(grid)) = (number("test.count"), number("test.grid")) {
+                if count * grid > limit {
+                    report.applied.remove(&key("test.grid"));
+                    report.rejected.push(RejectedRequest {
+                        key: key("test.grid"),
+                        requested: request.constraints[&key("test.grid")].clone(),
+                        reason: format!("the joint limit {limit} is exceeded"),
+                    });
+                }
+            }
+        }
+        if self.stray_rejection {
+            report.rejected.push(RejectedRequest {
+                key: key("test.flag"),
+                requested: Constraint::Present {},
+                reason: "a key the request does not name".to_owned(),
+            });
+        }
+        if let Some(key) = &self.omit_applied {
+            report.applied.remove(key);
+        }
         Ok(report)
     }
 
-    fn prepare(&mut self, f: &Fragment, _ctx: PrepareContext<'_>,
+    fn prepare(
+        &mut self,
+        f: &Fragment,
+        _ctx: PrepareContext,
     ) -> Result<PrepareReport, ModuleError> {
         self.record("prepare");
         self.fail_if(FailAt::Prepare)?;
@@ -495,10 +646,16 @@ impl Provider for TestProvider {
             Ok(request) => self.coerce(&request)?,
             Err(_) => CoerceReport::default(),
         };
-        let coercions = if self.prepare_disagrees { Vec::new() } else { report.coercions };
+        let coercions = if self.prepare_disagrees {
+            Vec::new()
+        } else {
+            report.coercions
+        };
+        let mut effective = report.applied;
+        effective.extend(self.effective.iter().map(|(k, v)| (k.clone(), v.clone())));
         Ok(PrepareReport {
             fragment: f.id.clone(),
-            effective: report.applied,
+            effective,
             coercions,
             warnings: Vec::<Warning>::new(),
         })
@@ -587,8 +744,10 @@ impl Executor for TestExecutor {
         &self.descriptor
     }
 
-    fn prepare(&mut self, island: &IslandDecl,
-        ctx: PrepareContext<'_>,
+    fn prepare(
+        &mut self,
+        island: &IslandDecl,
+        ctx: PrepareContext,
     ) -> Result<PrepareReport, ModuleError> {
         self.prepared_components
             .lock()
@@ -686,7 +845,10 @@ impl Sink for TestSink {
         &self.descriptor
     }
 
-    fn prepare(&mut self, f: &Fragment, _ctx: PrepareContext<'_>,
+    fn prepare(
+        &mut self,
+        f: &Fragment,
+        _ctx: PrepareContext,
     ) -> Result<PrepareReport, ModuleError> {
         Ok(PrepareReport {
             fragment: f.id.clone(),
@@ -743,7 +905,10 @@ pub fn test_executor_descriptor() -> ModuleDescriptor {
         version: Version::new(1, 0, 0),
         kernel_api: Version::new(4, 0, 0),
         roles: vec![Role::Executor],
-        vocabularies: Vec::new(),
+        vocabularies: vec![ezsdr_kernel::module_api::VocabularyRequirement {
+            id: ns("test"),
+            req: ezsdr_kernel::module_api::VersionReq(Version::new(1, 0, 0)),
+        }],
         deployment: Deployment::InProcess {},
         impl_hash: Some(some_hash("ezsdr.test.executor")),
     }
@@ -797,7 +962,9 @@ pub fn recorder_component(contract: DataContractId) -> ComponentDescriptor {
             default: Value::Bool(false),
         }],
         timing: ComponentTiming::default(),
-        requires: ComponentRequires { executor_kind: ns("any"), memory_bytes: None,
+        requires: ComponentRequires {
+            executor_kind: ns("any"),
+            memory_bytes: None,
         },
         implementation: ComponentImpl {
             kind: ns("test.impl"),
@@ -812,7 +979,10 @@ pub fn recorder_component(contract: DataContractId) -> ComponentDescriptor {
 pub fn source_component(contract: DataContractId) -> ComponentDescriptor {
     let mut c = recorder_component(contract.clone());
     c.id = id("source");
-    c.ports = vec![Port { name: id("out"), direction: PortDirection::Out, contract,
+    c.ports = vec![Port {
+        name: id("out"),
+        direction: PortDirection::Out,
+        contract,
     }];
     c.implementation.id = "source".to_owned();
     c
@@ -876,7 +1046,11 @@ impl QueueReceiver {
 impl ActionReceiver for QueueReceiver {
     fn recv(&self) -> Option<Action> {
         let mut q = self.queue.lock().expect("lock");
-        if q.is_empty() { None } else { Some(q.remove(0)) }
+        if q.is_empty() {
+            None
+        } else {
+            Some(q.remove(0))
+        }
     }
 }
 
@@ -893,7 +1067,10 @@ pub struct TestSubmitter {
 impl TestSubmitter {
     /// A submitter admitting everything (MA-14a).
     pub fn new() -> TestSubmitter {
-        TestSubmitter { delivered: Mutex::new(Vec::new()), ceiling: None, next: AtomicU64::new(0),
+        TestSubmitter {
+            delivered: Mutex::new(Vec::new()),
+            ceiling: None,
+            next: AtomicU64::new(0),
         }
     }
 
@@ -973,7 +1150,12 @@ impl RecordingCleanup {
 
     /// The steps attempted, in order (RS-6).
     pub fn steps(&self) -> Vec<CleanupStep> {
-        self.log.lock().expect("lock").iter().map(|(s, _, _)| *s).collect()
+        self.log
+            .lock()
+            .expect("lock")
+            .iter()
+            .map(|(s, _, _)| *s)
+            .collect()
     }
 
     /// The `(step, fragment)` pairs attempted, in order (RS-8).
@@ -995,13 +1177,18 @@ impl CleanupOps for RecordingCleanup {
         fragment: Option<&Ident>,
         mode: CleanupMode,
     ) -> Result<(), ModuleError> {
-        self.log.lock().expect("lock").push((step, fragment.cloned(), mode));
+        self.log
+            .lock()
+            .expect("lock")
+            .push((step, fragment.cloned(), mode));
         if self.wedge == Some(step) {
             // RS-8a: a step that never returns must not stop the sequence.
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
         if self.fail == Some(step) {
-            return Err(ModuleError::rejected(format!("injected failure at {step:?}")));
+            return Err(ModuleError::rejected(format!(
+                "injected failure at {step:?}"
+            )));
         }
         Ok(())
     }

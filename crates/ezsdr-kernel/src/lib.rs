@@ -17,6 +17,9 @@
 //! | `SB-n` | `design/03-spec-and-binding.md` — [`spec`], [`binding`], [`plan`] |
 //! | `RS-n` | `design/04-run-and-session.md` — [`event`], [`policy`], [`run`], [`session`], [`manifest`] |
 //! | `MA-n` | `design/05-module-api.md` — [`module_api`] |
+//! | `KA-n` | `plan/phase2/06-kernel-coordinator.md` §2 — amendments to the five specs above |
+//! | `KC-n` | `plan/phase2/06-kernel-coordinator.md` §5–§9 — [`coordinator`] |
+//! | `UC-n` | `plan/phase2/06-kernel-coordinator.md` §10 — update classes |
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -25,6 +28,8 @@
 pub mod binding;
 /// The DataContract registry and Port (SC-1…SC-5).
 pub mod contract;
+/// The Run coordinator: one Run from its documents to its sealed Manifest (KC-1…KC-45).
+pub mod coordinator;
 /// Events, counters and the Kernel Action set (RS-26…RS-36, RS-48…RS-52).
 pub mod event;
 /// Canonical JSON and content hashes (OV-14…OV-17).

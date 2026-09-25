@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::binding::{AdmissionResult, BindingProfile, CheckStage, satisfies, Violation};
+use crate::binding::{AdmissionResult, BindingProfile, CheckStage, Violation, satisfies};
 use crate::module_api::ModuleError;
 use crate::spec::{CapabilityValue, Constraint, ExperimentSpec, Namespace, Value};
 
@@ -13,7 +13,13 @@ pub(super) fn check_effective_narrows(
     effective: &CapabilityValue,
 ) -> Result<(), ModuleError> {
     let within = |value: &Value| {
-        satisfies(&Constraint::Eq { value: value.clone() }, declared).unwrap_or(false)
+        satisfies(
+            &Constraint::Eq {
+                value: value.clone(),
+            },
+            declared,
+        )
+        .unwrap_or(false)
     };
     let narrows = match effective {
         CapabilityValue::One { value } => within(value),
@@ -122,9 +128,15 @@ pub(super) fn collect_prepare(
         r.warnings.extend(warned);
     }
     let merged = MergedPrepare::from_reports(ok);
+    // SB-30's second point, per fragment (KA-4): each report's own `effective`.
+    let per_fragment: BTreeMap<crate::spec::Ident, BTreeMap<crate::spec::Key, Value>> = merged
+        .reports
+        .iter()
+        .map(|r| (r.fragment.clone(), r.effective.clone()))
+        .collect();
     violations.extend(checks.run(
         environment,
-        &merged.effective,
+        &per_fragment,
         &BTreeMap::new(),
         CheckStage::Prepare,
     ));

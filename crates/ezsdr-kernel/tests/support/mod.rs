@@ -10,6 +10,9 @@
 pub mod doubles;
 #[allow(unused_imports)]
 pub use doubles::*;
+pub mod run_doubles;
+#[allow(unused_imports)]
+pub use run_doubles::*;
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -19,7 +22,7 @@ use ezsdr_kernel::contract::DataContractId;
 use ezsdr_kernel::id::MemoryDomainId;
 use ezsdr_kernel::stream::{
     BackPressure, BlockFlags, BlockHeader, BlockRef, BufferRef, ChannelMask, DataLink, Direction,
-    DropCarry, HostMemoryAccess, PublishOutcome, SampleBlock,
+    DropCarry, PublishOutcome, SampleBlock,
 };
 use ezsdr_kernel::time::TimePoint;
 
@@ -36,18 +39,14 @@ pub fn cf32() -> DataContractId {
 /// Bytes per sample of [`cf32`] (SC-4).
 pub const CF32_BPS: u32 = 8;
 
-/// A buffer big enough for `channels · len` cf32 samples, in the host domain.
-///
-/// ponytail: the bytes are leaked so `map_host` can hand out a slice that outlives
-/// the link, which is exactly what SC-8 and decision S5 require of a real pool.
-/// The Phase 2 pool recycles slots instead.
+/// A buffer reference big enough for `channels · len` cf32 samples, in the host
+/// domain, for a block built with `SampleBlock::new` (no host bytes attached).
 pub fn host_buffer(channels: u16, len: u32) -> BufferRef {
-    let n = channels as usize * len as usize * CF32_BPS as usize;
-    let bytes: &'static [u8] = Box::leak(vec![0u8; n].into_boxed_slice());
+    let n = channels as u64 * len as u64 * CF32_BPS as u64;
     BufferRef {
         memory_domain: HOST_MEM,
-        handle: bytes.as_ptr() as u64,
-        len_bytes: bytes.len() as u64,
+        handle: 0,
+        len_bytes: n,
     }
 }
 
@@ -67,8 +66,11 @@ pub fn header(t: TimePoint, len: u32, channels: u16) -> BlockHeader {
 
 /// A block from a header, with a buffer sized to fit (SC-10a).
 pub fn block(h: BlockHeader) -> BlockRef {
-    let buffer = host_buffer(h.channels, h.len);
-    BlockRef::new(SampleBlock::new(h, buffer, CF32_BPS).expect("a well-formed test block"))
+    let n = h.channels as usize * h.len as usize * CF32_BPS as usize;
+    let bytes: std::sync::Arc<[u8]> = vec![0u8; n].into();
+    BlockRef::new(
+        SampleBlock::new_host(h, HOST_MEM, bytes, CF32_BPS).expect("a well-formed test block"),
+    )
 }
 
 /// An in-memory link implementing all three back-pressure policies.
@@ -143,18 +145,6 @@ impl DataLink for MemLink {
     }
 }
 
-impl HostMemoryAccess for MemLink {
-    fn map_host<'a>(&self, b: &'a BlockRef) -> Option<&'a [u8]> {
-        let buf = b.buffer();
-        if buf.memory_domain != HOST_MEM {
-            return None; // SC-8: nothing for a domain that is not host-reachable.
-        }
-        // Safety is not at stake here: the double leaks its buffers (see `host_buffer`),
-        // so the slice is genuinely `'static`.
-        Some(unsafe { std::slice::from_raw_parts(buf.handle as *const u8, buf.len_bytes as usize) })
-    }
-}
-
 /// A producer that honours SC-20a: on `Full` it keeps the block and retries,
 /// never discarding it silently. It panics if it is ever asked to drop one.
 pub struct RetryingProducer {
@@ -166,13 +156,20 @@ pub struct RetryingProducer {
 impl RetryingProducer {
     /// A producer with nothing pending (SC-20a).
     pub fn new() -> RetryingProducer {
-        RetryingProducer { pending: None, delivered: 0, refusals: 0 }
+        RetryingProducer {
+            pending: None,
+            delivered: 0,
+            refusals: 0,
+        }
     }
 
     /// Offers `b` — or the block held over from a previous refusal — to the link.
     /// Returns what the link said.
     pub fn offer(&mut self, link: &dyn DataLink, b: BlockRef) -> PublishOutcome {
-        assert!(self.pending.is_none(), "SC-20a: a refused block must be retried, never dropped");
+        assert!(
+            self.pending.is_none(),
+            "SC-20a: a refused block must be retried, never dropped"
+        );
         match link.publish(b.clone()) {
             PublishOutcome::Full => {
                 self.pending = Some(b);

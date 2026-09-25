@@ -1,4 +1,4 @@
-# Ez-SDR v4 — Handoff (2026-09-24)
+# Ez-SDR v4 — Handoff (2026-09-25)
 
 次のセッション（人間・AI どちらでも）が最初に読む現状メモ．設計の中身は書かない．どこに何があり，何が終わっていて，次に何をするかだけ．
 開発時の恒常的なルールは [AGENTS.md](AGENTS.md)．
@@ -8,7 +8,7 @@
 | | |
 |---|---|
 | remote | `git@github.com:k3komatsu/Ez-SDR.git` |
-| `main` | v4（この worktree）．Phase 0 の設計文書に続き，Phase 1 の spec と `ezsdr-kernel` を実装・受理済み．Phase 1 は完了．Phase 2 は計画（spec 06–10 と実装計画）を Gate P で受理済み（2026-09-24）．次は実装（§4）．|
+| `main` | v4（この worktree）．Phase 0/1 完了．Phase 2 は Step 1–8 を実装済み．次は Kernel 差分の Review K（§4）．Step 9 は owner の指示まで開始しない．|
 | `master` | v3（D + C++ UHD bridge + Python client）．tip `4a474e9` = tag `v3.0.28`．**GitHub の default branch のまま** |
 | tags | 35 個（`v2.11`, `v3.0.0`–`v3.0.28`）．すべて v3 系 |
 | 履歴の関係 | **無関係（unrelated）**．graft も merge もしていない．v4 は clean-sheet なので今後も繋がない |
@@ -42,16 +42,16 @@ Phase 1 の Kernel crate は **実装済み**（Step 4 完了）．
 |---|---|
 | workspace | ルートの `Cargo.toml`（`resolver = "3"`，edition 2024，`rust-version = "1.85"`）．`Cargo.lock` は commit 対象 |
 | crate | `crates/ezsdr-kernel` version `4.0.0-alpha.1`．`#![forbid(unsafe_code)]`，`#![warn(missing_docs)]` |
-| module | `id time contract stream hash module_api spec binding plan event policy run session manifest schema`．`plan` は `coercion` `compile` `graph` `islands` `links` `matching` `prepare` `validation` の private submodule に分割済み |
+| module | `id time contract coordinator stream hash module_api spec binding plan event policy run session manifest schema`．`plan` は `coercion` `compile` `graph` `islands` `links` `matching` `prepare` `validation` の private submodule に分割済み |
 | 直接依存 | `serde` `serde_json` `schemars` `sha2` の4つだけ（exit criterion 6）．解決後のツリーは `Cargo.lock` で28 package（crate 自身を含む） |
-| test | 353 件．`spec_binding`(102) `stream_contract`(69) `run_session`(76) `time_model`(49) `module_api`(27) `hashing`(9) `kernel_surface`(15) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
-| toolchain | Rust `1.85.0` / stable (`1.98.1`) の両方で 353 passed（2026-09-24）．`cargo +stable clippy --workspace --all-targets -- -D warnings` も通過 |
+| test | 427 件．`coordinator`(65) `spec_binding`(107) `stream_contract`(69) `run_session`(76) `time_model`(52) `module_api`(27) `run_doubles`(1) `hashing`(9) `kernel_surface`(15) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
+| toolchain | Rust `1.85.0` / stable (`1.98.1`) の両方で 427 passed（2026-09-25）．`cargo +stable clippy --workspace --all-targets -- -D warnings` も通過 |
 | schemas | `schemas/` に47個の JSON Schema 2020-12 + `SCHEMA_CHANGELOG.md`．`schema_freeze` が byte 単位で凍結．再生成は `EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze` |
-| kernel surface | `tests/kernel_surface_allow.txt` が公開 item の allow-list（= レビュー用チェックリスト，`module::name` で key 付け）．`NEW:` 件数が OV-23b の Kernel 成長指標．banned token は `tests/banned_tokens.txt`（識別子内も検出，`OV-23a` を書いた行だけ免除） |
+| kernel surface | `tests/kernel_surface_allow.txt` が公開 item の allow-list（= レビュー用チェックリスト，`module::name` で key 付け）．OV-23b は **115 NEW / 291 public items**（2026-09-25）．banned token は `tests/banned_tokens.txt`（識別子内も検出，`OV-23a` を書いた行だけ免除） |
 
 Python client，wire protocol，MockRadio，Simulation Engine は未着手（Phase 2 以降）．
 
-## 4. Phase の状態 — Phase 1 完了，Phase 2 は計画を受理済み（実装前）
+## 4. Phase の状態 — Phase 1 完了，Phase 2 Step 1–8 完了（Review K 待ち）
 
 ### Phase 1 — specs 受理・Kernel 実装済み
 
@@ -94,9 +94,9 @@ exit criteria（§13）の達成状況（2026-09-23 時点）：
 - **新しい拒否は1件ずつ無効化して，テストが落ちることを確かめる**（mutation）．落ちないものはテストを足すか，死にコードとして消す．
 - **gate は列挙では閉じない**．`kernel_surface` は構文の新しい形で何度も抜けられた．仕組み（`use … as` や一覧外の `macro_rules!`）を禁止し，残りは process obligation として名指す（D100）．
 
-### Phase 2 — 計画を受理済み（Gate P，2026-09-24），実装前
+### Phase 2 — Step 1–8 完了，Review K 待ち
 
-Vision §67 の Phase 2（Radio Model + Simulation Engine + MockRadio）．文書はすべて [plan/phase2/](plan/phase2) にあり，2026-09-24 に Gate P で受理された（[00-overview.md](plan/phase2/00-overview.md) §9，§11）．spec 06–10 は実装者を拘束し，20-implementation-plan.md が作業順序．
+Vision §67 の Phase 2（Radio Model + Simulation Engine + MockRadio）．文書はすべて [plan/phase2/](plan/phase2) にあり，2026-09-24 に Gate P で受理された（[00-overview.md](plan/phase2/00-overview.md) §9，§11）．spec 06–10 は実装者を拘束し，20-implementation-plan.md が作業順序．Step 1–8 は実装・検証済み（[implementation-notes.md](plan/phase2/implementation-notes.md)）．
 
 | 文書 | 中身 |
 |---|---|
@@ -104,7 +104,7 @@ Vision §67 の Phase 2（Radio Model + Simulation Engine + MockRadio）．文�
 | [06-kernel-coordinator.md](plan/phase2/06-kernel-coordinator.md) | Phase 1 spec への修正 KA-1–KA-22，Run coordinator KC-1–KC-45，update class UC-1–UC-6 |
 | [07-radio-model.md](plan/phase2/07-radio-model.md) / [08-simulation.md](plan/phase2/08-simulation.md) / [09-mock-radio.md](plan/phase2/09-mock-radio.md) / [10-host-data-path.md](plan/phase2/10-host-data-path.md) | `radio` Vocabulary（RM），`sim` Vocabulary と Simulation Engine（SE），MockRadio（MR），host メモリ・Link・`sink` Vocabulary・capture Sink（HD） |
 | [20-implementation-plan.md](plan/phase2/20-implementation-plan.md) | 実装者（安価なモデルを想定）向けの 16 手順．各手順にファイル・シグネチャ・疑似コード・テスト表・mutation check・完了条件．付録 A = patch 適用後の Kernel API，付録 B = 全規則→手順→テストの対応（テストの無い規則 0） |
-| [patches/01-kernel-amendments.patch](plan/phase2/patches/01-kernel-amendments.patch) | KA のうち coordinator 以外のコード（28 ファイル）．`96976c5` に `git apply` でき，1.85.0 / stable ともに 361 passed，clippy 通過．新テスト 8 件は各規則を無効化すると落ちることを確認済み．**まだ当てていない**（実装手順 1） |
+| [patches/01-kernel-amendments.patch](plan/phase2/patches/01-kernel-amendments.patch) | KA のうち coordinator 以外のコード（28 ファイル）．実装手順 1 で `96976c5` に適用済み．同パッチの新テスト 8 件は各規則を無効化すると落ちることを確認済み |
 | [reviews/planning-reviews.md](plan/phase2/reviews/planning-reviews.md) | Gate P 前の Opus 敵対的レビュー 3 巡（指摘 56 → 34 → 18）と各指摘の判定．全件反映済み |
 
 Phase 1 の Kernel には，最初の本物の Module が必ず踏む穴があった（例：`PrepareContext` のハンドルが借用で，Module が `prepare` 後にイベントも時刻も扱えない）．KA-1–KA-22 がそれを埋める．
@@ -118,9 +118,10 @@ Phase 1 の Kernel には，最初の本物の Module が必ず踏む穴があ�
 
 ### 次にすること
 
-1. 実装担当とレビュー担当に渡すプロンプトは [plan/phase2/prompts/](plan/phase2/prompts)（使う順番は README）．実装者は [20-implementation-plan.md](plan/phase2/20-implementation-plan.md) の §0 を読んでから，手順 1（patch 適用）から順に進める．実装者は commit しない（手順ごとの commit 件名案は `plan/phase2/implementation-notes.md` に残す）．
-2. 手順 8 の後（Review K：Kernel の差分）と手順 15 の後（Review M：Module と受け入れテスト）で止まり，owner が敵対的レビューを 1 本ずつ回す．指摘は 00-overview.md §11 に verdict つきで記録する（OV-5）．
-3. Phase 2 の exit（Gate X）で spec 06–10 を `design/` へ移し，各 spec の「Vision issues found」を owner の承認のもとで Vision に反映する．
+1. **Review K が必要**：`96976c5` 以降の Kernel 差分を敵対的レビューし，指摘を `00-overview.md` §11 に verdict つきで記録する（OV-5）．
+2. Owner が Review K を完了し次の手順を指示するまで，Step 9 を始めない．以後は [20-implementation-plan.md](plan/phase2/20-implementation-plan.md) と対応する実装プロンプトを使う．実装者は commit しない．
+3. 手順 15 の後（Review M：Module と受け入れテスト）で止まり，owner が敵対的レビューを行う．
+4. Phase 2 の exit（Gate X）で spec 06–10 を `design/` へ移し，各 spec の「Vision issues found」を owner の承認のもとで Vision に反映する．
 
 ## 5. v3 → v4 切替で残っている作業（人間の判断が要るもの）
 

@@ -11,29 +11,28 @@ use ezsdr_kernel::event::{Action, EventCollector, EventKind};
 use ezsdr_kernel::id::{ClockDomainId, DataLinkId, IslandId, MemoryDomainId, RunId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
-    ActionSubmitter, Authority, ComponentDescriptor, ComponentImpl,
-    ComponentKind, ComponentRequires, ComponentTiming, Deployment, Executor, ExecutorDescriptor,
-    Factories, IslandDecl, Link, LinkDescriptor, ModuleDescriptor, ModuleError, ModuleErrorKind, ModuleRef, ModuleRegistry,
-    ParamDecl, PrepareContext, Provider, Requested, Resource, Role, RtPolicy, Sink, SinkDescriptor,
-    StepOutcome, SteppedInstance, SteppedRef, StopMode, UpdateClass, Version, VersionReq,
-    step_until_quiescent,
+    ActionSubmitter, Authority, ComponentDescriptor, ComponentImpl, ComponentKind,
+    ComponentRequires, ComponentTiming, Deployment, Executor, ExecutorDescriptor, Factories,
+    IslandDecl, Link, LinkDescriptor, ModuleDescriptor, ModuleError, ModuleErrorKind, ModuleRef,
+    ModuleRegistry, ParamDecl, PrepareContext, Provider, Requested, Resource, Role, RtPolicy, Sink,
+    SinkDescriptor, StepOutcome, SteppedInstance, SteppedRef, StopMode, UpdateClass, Version,
+    VersionReq, step_until_quiescent,
 };
 use ezsdr_kernel::plan::{
     EdgeKind, GraphEdge, IslandContext, PrepareReport, admit_islands, check_cycles,
     check_effective_narrows,
 };
 use ezsdr_kernel::policy::EventKindRegistry;
-use ezsdr_kernel::spec::{
-    CapabilityValue, Constraint, Ident, Value};
+use ezsdr_kernel::spec::{CapabilityValue, Constraint, Ident, Value};
 use ezsdr_kernel::stream::{BackPressure, DataLinkDecl, LatePolicy};
 use ezsdr_kernel::time::{
     AbsoluteDeadline, ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority,
     Rational, RelativeBudget, TimePoint,
 };
 use support::{
-    FailAt, QueueReceiver, TestExecutor, TestProvider, TestSink, TestSubmitter, id, key, mid, mref, ns,
-    rid, some_hash, test_link_descriptor, test_link_module_descriptor, test_provider_descriptor, test_sink_descriptor,
-    test_vocabulary,
+    FailAt, QueueReceiver, TestExecutor, TestProvider, TestSink, TestSubmitter, id, key, mid, mref,
+    ns, rid, some_hash, test_link_descriptor, test_link_module_descriptor,
+    test_provider_descriptor, test_sink_descriptor, test_vocabulary,
 };
 
 fn cf32() -> DataContractId {
@@ -99,7 +98,12 @@ fn ma_32_registry_refusals() {
     // A missing Vocabulary.
     let mut reg = ModuleRegistry::new();
     let err = reg
-        .register(descriptor(), Factories { provider: true, ..Factories::default() },
+        .register(
+            descriptor(),
+            Factories {
+                provider: true,
+                ..Factories::default()
+            },
         )
         .expect_err("the `test` Vocabulary is not registered");
     assert!(err.message.contains("vocabulary test"), "{err}");
@@ -110,7 +114,12 @@ fn ma_32_registry_refusals() {
     v.version = Version::new(2, 0, 0);
     reg.register_vocabulary(v).expect("fresh");
     let err = reg
-        .register(descriptor(), Factories { provider: true, ..Factories::default() },
+        .register(
+            descriptor(),
+            Factories {
+                provider: true,
+                ..Factories::default()
+            },
         )
         .expect_err("2.0.0 does not satisfy ^1.0.0");
     assert!(err.message.contains("does not satisfy"), "{err}");
@@ -121,17 +130,28 @@ fn ma_32_registry_refusals() {
     let mut d = descriptor();
     d.kernel_api = Version::new(5, 0, 0);
     let err = reg
-        .register(d, Factories { provider: true, ..Factories::default() },
+        .register(
+            d,
+            Factories {
+                provider: true,
+                ..Factories::default()
+            },
         )
         .expect_err("major mismatch");
     assert!(err.message.contains("kernel_api major"), "{err}");
 
     // `deployment: Plugin` is Unsupported in Phase 1.
     let mut d = descriptor();
-    d.deployment = Deployment::Plugin { protocol: Version::new(1, 0, 0),
+    d.deployment = Deployment::Plugin {
+        protocol: Version::new(1, 0, 0),
     };
     let err = reg
-        .register(d, Factories { provider: true, ..Factories::default() },
+        .register(
+            d,
+            Factories {
+                provider: true,
+                ..Factories::default()
+            },
         )
         .expect_err("Plugin is reserved");
     assert_eq!(err.kind, ModuleErrorKind::Unsupported);
@@ -142,17 +162,33 @@ fn ma_32_registry_refusals() {
         .expect_err("Provider has no factory");
     assert!(err.message.contains("has no factory"), "{err}");
     let err = reg
-        .register(descriptor(), Factories { provider: true, sink: true, ..Factories::default() },
+        .register(
+            descriptor(),
+            Factories {
+                provider: true,
+                sink: true,
+                ..Factories::default()
+            },
         )
         .expect_err("the Sink factory has no declared role");
     assert!(err.message.contains("has no declared role"), "{err}");
 
     // A duplicate `(id, version)`.
-    reg.register(descriptor(), Factories { provider: true, ..Factories::default() },
+    reg.register(
+        descriptor(),
+        Factories {
+            provider: true,
+            ..Factories::default()
+        },
     )
-        .expect("first registration");
+    .expect("first registration");
     let err = reg
-        .register(descriptor(), Factories { provider: true, ..Factories::default() },
+        .register(
+            descriptor(),
+            Factories {
+                provider: true,
+                ..Factories::default()
+            },
         )
         .expect_err("duplicate");
     assert!(err.message.contains("already registered"), "{err}");
@@ -161,7 +197,10 @@ fn ma_32_registry_refusals() {
 #[test]
 fn ma_28_link_registration_refuses_cross_process_in_v4() {
     let module = mid("ezsdr.test.link");
-    let module_v1 = ModuleRef { id: module.clone(), version: Version::new(1, 0, 0) };
+    let module_v1 = ModuleRef {
+        id: module.clone(),
+        version: Version::new(1, 0, 0),
+    };
     let mut reg = ModuleRegistry::new();
     assert!(
         reg.register_link_descriptor(test_link_descriptor())
@@ -181,7 +220,7 @@ fn ma_28_link_registration_refuses_cross_process_in_v4() {
     let mut cross_process = test_link_descriptor();
     cross_process.cross_process = true;
     assert!(
-    reg.register_link_descriptor(cross_process)
+        reg.register_link_descriptor(cross_process)
             .expect_err("cross-process links are unsupported in v4")
             .message
             .contains("cross_process links are unsupported")
@@ -200,16 +239,33 @@ fn ma_28_link_registration_refuses_cross_process_in_v4() {
     // Two versions of one Module id retain their own descriptors and policies.
     let mut v2 = test_link_module_descriptor();
     v2.version = Version::new(2, 0, 0);
-    reg.register(v2, Factories { link: true, ..Factories::default() })
-        .expect("a different Module version can be registered");
-    let module_v2 = ModuleRef { id: module, version: Version::new(2, 0, 0) };
+    reg.register(
+        v2,
+        Factories {
+            link: true,
+            ..Factories::default()
+        },
+    )
+    .expect("a different Module version can be registered");
+    let module_v2 = ModuleRef {
+        id: module,
+        version: Version::new(2, 0, 0),
+    };
     let mut descriptor_v2 = test_link_descriptor();
     descriptor_v2.module = module_v2.clone();
     descriptor_v2.policies = vec![BackPressure::DropNewest];
     reg.register_link_descriptor(descriptor_v2)
         .expect("the second Module version has its own descriptor");
-    assert!(reg.link_descriptor(&module_v1).unwrap().policies.contains(&BackPressure::Block));
-    assert_eq!(reg.link_descriptor(&module_v2).unwrap().policies, vec![BackPressure::DropNewest]);
+    assert!(
+        reg.link_descriptor(&module_v1)
+            .unwrap()
+            .policies
+            .contains(&BackPressure::Block)
+    );
+    assert_eq!(
+        reg.link_descriptor(&module_v2).unwrap().policies,
+        vec![BackPressure::DropNewest]
+    );
 }
 
 #[test]
@@ -235,8 +291,13 @@ fn ma_34_key_prefix_refused() {
     let mut reg = ModuleRegistry::new();
     reg.register_vocabulary(test_vocabulary()).expect("fresh");
     assert!(reg.key_decl(&key("test.count")).is_ok());
-    let err = reg.key_decl(&key("radio.rx.channels")).expect_err("no Vocabulary owns `radio`");
-    assert!(err.message.contains("radio.rx.channels"), "the refusal names the prefix: {err}");
+    let err = reg
+        .key_decl(&key("radio.rx.channels"))
+        .expect_err("no Vocabulary owns `radio`");
+    assert!(
+        err.message.contains("radio.rx.channels"),
+        "the refusal names the prefix: {err}"
+    );
 }
 
 #[test]
@@ -245,13 +306,21 @@ fn ma_35_vocabulary_carries_its_own_content() {
     reg.register_vocabulary(test_vocabulary()).expect("fresh");
     let v = reg.vocabulary(&ns("test")).expect("registered");
     // 1. Its KeyDecls, which the Kernel enforces and never interprets (SB-2).
-    assert!(v.keys.iter().any(|k| k.key == key("test.grid") && k.coercible));
+    assert!(
+        v.keys
+            .iter()
+            .any(|k| k.key == key("test.grid") && k.coercible)
+    );
     // 2. Its event kinds with their defaults and severities (RS-27, RS-28).
     let mut kinds = EventKindRegistry::with_kernel_kinds();
     for decl in v.event_kinds.clone() {
         kinds.register(Some(ns("test")), decl).expect("fresh");
     }
-    assert!(kinds.get(&EventKind::parse("test.custom").expect("parses")).is_some());
+    assert!(
+        kinds
+            .get(&EventKind::parse("test.custom").expect("parses"))
+            .is_some()
+    );
     // A kind outside its owner's namespace is refused (RS-27, RS-39).
     let stray = ezsdr_kernel::policy::EventKindDecl {
         kind: EventKind::parse("vendor.other").expect("parses"),
@@ -268,32 +337,12 @@ fn ma_35_vocabulary_carries_its_own_content() {
 
 // ---------------------------------------------------------------- Provider behaviour
 
-fn prepare_context<'a>(
-    run: RunId,
-    authority: &'a ManualTimeAuthority,
-    events: &'a EventCollector,
-    actions: &'a QueueReceiver,
-    submitter: &'a TestSubmitter,
-) -> PrepareContext<'a> {
-    PrepareContext {
-        run,
-        class: ezsdr_kernel::module_api::ExecutionClass::Simulation,
-        time: authority,
-        events,
-        actions,
-        actions_out: submitter,
-        links: Vec::new(),
-        components: BTreeMap::new(),
-        host_budget: RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 1_000_000))
-            .expect("host.monotonic"),
-    }
-}
-
 struct Harness {
-    authority: ManualTimeAuthority,
-    events: EventCollector,
-    actions: QueueReceiver,
-    submitter: TestSubmitter,
+    clocks: Arc<ClockRegistry>,
+    authority: Arc<ManualTimeAuthority>,
+    events: Arc<EventCollector>,
+    actions: Arc<QueueReceiver>,
+    submitter: Arc<TestSubmitter>,
 }
 
 impl Harness {
@@ -304,12 +353,13 @@ impl Harness {
             .register(ClockDomain::root(
                 root,
                 Rational::new(200_000_000, 1).expect("rate"),
-                EpochRef::Arbitrary { set_by: "test".to_owned(),
+                EpochRef::Arbitrary {
+                    set_by: "test".to_owned(),
                 },
             ))
             .expect("root");
         let authority = ManualTimeAuthority::new(
-            registry,
+            registry.clone(),
             root,
             &[],
             ezsdr_kernel::module_api::Pacing::FreeRunning,
@@ -317,20 +367,39 @@ impl Harness {
         .expect("authority");
         let kinds = EventKindRegistry::with_kernel_kinds();
         let policy = kinds.compile(&BTreeMap::new()).expect("compiles");
-        let events = EventCollector::new(&[], &policy.table.keys().cloned().collect::<Vec<_>>(), 16, &policy,
+        let events = EventCollector::new(
+            &[],
+            &policy.table.keys().cloned().collect::<Vec<_>>(),
+            16,
+            &policy,
         );
-        Harness { authority, events, actions: QueueReceiver::new(), submitter,
+        Harness {
+            clocks: registry,
+            authority: Arc::new(authority),
+            events: Arc::new(events),
+            actions: Arc::new(QueueReceiver::new()),
+            submitter: Arc::new(submitter),
         }
     }
 
-    fn ctx(&self) -> PrepareContext<'_> {
-        prepare_context(
-            RunId::generate(),
-            &self.authority,
-            &self.events,
-            &self.actions,
-            &self.submitter,
-        )
+    fn ctx(&self) -> PrepareContext {
+        PrepareContext {
+            run: RunId::generate(),
+            class: ezsdr_kernel::module_api::ExecutionClass::Simulation,
+            time: self.authority.clone(),
+            clocks: self.clocks.clone(),
+            events: self.events.clone(),
+            actions: self.actions.clone(),
+            actions_out: self.submitter.clone(),
+            environment: Arc::new(BTreeMap::new()),
+            links: Vec::new(),
+            components: BTreeMap::new(),
+            host_budget: RelativeBudget::new(Duration::new(
+                ClockDomainId::HOST_MONOTONIC,
+                1_000_000,
+            ))
+            .expect("host.monotonic"),
+        }
     }
 }
 
@@ -364,15 +433,21 @@ fn ma_11_coerce_is_pure() {
     let p = TestProvider::new("radio", 2).with_grid(20.0);
     let request = Requested {
         resource: rid("radio"),
-        constraints: [(key("test.grid"), Constraint::Eq { value: Value::Num(19.5),
+        constraints: [(
+            key("test.grid"),
+            Constraint::Eq {
+                value: Value::Num(19.5),
             },
         )]
-            .into_iter()
-            .collect(),
+        .into_iter()
+        .collect(),
     };
     let a = p.coerce(&request).expect("pure");
     let b = p.coerce(&request).expect("pure");
-    assert_eq!(a, b, "two calls with the same request return identical reports");
+    assert_eq!(
+        a, b,
+        "two calls with the same request return identical reports"
+    );
     assert_eq!(a.applied[&key("test.grid")], Value::Num(20.0));
 }
 
@@ -381,11 +456,14 @@ fn ma_12_prepare_matches_coerce() {
     let mut p = TestProvider::new("radio", 2).with_grid(20.0);
     let request = Requested {
         resource: rid("radio"),
-        constraints: [(key("test.grid"), Constraint::Eq { value: Value::Num(19.5),
+        constraints: [(
+            key("test.grid"),
+            Constraint::Eq {
+                value: Value::Num(19.5),
             },
         )]
-            .into_iter()
-            .collect(),
+        .into_iter()
+        .collect(),
     };
     let from_coerce = p.coerce(&request).expect("coerces");
     assert_eq!(from_coerce.coercions.len(), 1, "the request does coerce");
@@ -418,11 +496,14 @@ fn ma_12_prepare_that_disagrees_with_coerce_is_visible() {
     p.prepare_disagrees = true;
     let request = Requested {
         resource: rid("radio"),
-        constraints: [(key("test.grid"), Constraint::Eq { value: Value::Num(19.5),
+        constraints: [(
+            key("test.grid"),
+            Constraint::Eq {
+                value: Value::Num(19.5),
             },
         )]
-            .into_iter()
-            .collect(),
+        .into_iter()
+        .collect(),
     };
     let from_coerce = p.coerce(&request).expect("coerces");
     let h = Harness::new(TestSubmitter::new());
@@ -434,26 +515,42 @@ fn ma_12_prepare_that_disagrees_with_coerce_is_visible() {
         after: Vec::new(),
     };
     let report = p.prepare(&fragment, h.ctx()).expect("prepares");
-    assert_ne!(report.coercions, from_coerce.coercions, "MA-12 would catch this Provider");
+    assert_ne!(
+        report.coercions, from_coerce.coercions,
+        "MA-12 would catch this Provider"
+    );
 }
 
 #[test]
 fn ma_12_narrowing_triggers_readmission() {
-    let declared = CapabilityValue::Range { min: Value::Int(1), max: Value::Int(8),
+    let declared = CapabilityValue::Range {
+        min: Value::Int(1),
+        max: Value::Int(8),
     };
     // Narrowing is allowed.
-    let narrowed = CapabilityValue::Range { min: Value::Int(2), max: Value::Int(4),
+    let narrowed = CapabilityValue::Range {
+        min: Value::Int(2),
+        max: Value::Int(4),
     };
     assert!(check_effective_narrows(&declared, &narrowed).is_ok());
     // Widening is refused.
-    let widened = CapabilityValue::Range { min: Value::Int(1), max: Value::Int(16),
+    let widened = CapabilityValue::Range {
+        min: Value::Int(1),
+        max: Value::Int(16),
     };
     assert!(check_effective_narrows(&declared, &widened).is_err());
     // Re-admission over the narrowed `effective` fails the Spec's own constraint.
-    let asked = Constraint::Eq { value: Value::Int(8),
+    let asked = Constraint::Eq {
+        value: Value::Int(8),
     };
-    assert_eq!(ezsdr_kernel::binding::satisfies(&asked, &declared), Ok(true));
-    assert_eq!(ezsdr_kernel::binding::satisfies(&asked, &narrowed), Ok(false));
+    assert_eq!(
+        ezsdr_kernel::binding::satisfies(&asked, &declared),
+        Ok(true)
+    );
+    assert_eq!(
+        ezsdr_kernel::binding::satisfies(&asked, &narrowed),
+        Ok(false)
+    );
 }
 
 #[test]
@@ -482,7 +579,10 @@ fn ma_07_lifecycle_order_and_cleanup() {
         p.cleanup();
         let calls = p.calls();
         assert_eq!(calls.last().map(String::as_str), Some("cleanup"));
-        assert!(calls.contains(&"stop:Abort".to_owned()), "stop precedes cleanup: {calls:?}");
+        assert!(
+            calls.contains(&"stop:Abort".to_owned()),
+            "stop precedes cleanup: {calls:?}"
+        );
         // `cleanup` is idempotent (MA-7).
         p.cleanup();
         assert_eq!(p.calls().iter().filter(|c| *c == "cleanup").count(), 2);
@@ -492,7 +592,10 @@ fn ma_07_lifecycle_order_and_cleanup() {
 #[test]
 fn ma_15_provider_step_default_is_idle() {
     let mut p = TestProvider::new("radio", 2);
-    assert!(!p.instance().driving.stepped, "a hardware-style double is not stepped");
+    assert!(
+        !p.instance().driving.stepped,
+        "a hardware-style double is not stepped"
+    );
     assert_eq!(
         p.step(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)),
         Ok(StepOutcome { progressed: false }),
@@ -504,14 +607,28 @@ fn ma_15_provider_step_default_is_idle() {
 fn ma_10_sub_resource_binding() {
     let p = TestProvider::new("radio", 2);
     let nodes = p.instance().tree.walk();
-    assert_eq!(nodes.len(), 3, "a two-level tree of a device with two sub-resources");
     assert_eq!(
-        nodes.iter().map(|node| node.id.path.as_str()).collect::<Vec<_>>(),
+        nodes.len(),
+        3,
+        "a two-level tree of a device with two sub-resources"
+    );
+    assert_eq!(
+        nodes
+            .iter()
+            .map(|node| node.id.path.as_str())
+            .collect::<Vec<_>>(),
         ["radio", "radio/0", "radio/1"],
         "the iterator preserves depth-first pre-order"
     );
-    let line = nodes.iter().find(|n| n.kind == ns("test.line")).expect("present");
-    assert_eq!(line.id, rid("radio/0"), "a sub-resource carries its own ResourceId");
+    let line = nodes
+        .iter()
+        .find(|n| n.kind == ns("test.line"))
+        .expect("present");
+    assert_eq!(
+        line.id,
+        rid("radio/0"),
+        "a sub-resource carries its own ResourceId"
+    );
     assert!(line.id.is_within(&p.instance().id));
 }
 
@@ -567,7 +684,10 @@ fn ma_14_actions_arrive_only_after_admission() {
     // The submitter this test *did* submit to is the carrier: the rejected Action did
     // not reach its queue. (A fresh Provider double's queue stood here too, which
     // nothing had written to and which therefore asserted nothing.)
-    assert!(submitter.delivered.lock().expect("lock").is_empty(), "the queue stays empty");
+    assert!(
+        submitter.delivered.lock().expect("lock").is_empty(),
+        "the queue stays empty"
+    );
 }
 
 #[test]
@@ -595,15 +715,23 @@ fn ma_14a_reactor_emits_through_admit() {
     assert!(submitter.submit(burst(10.0)).is_ok());
     assert_eq!(submitter.delivered.lock().expect("lock").len(), 1);
     // Outside it: rejected before reaching the Provider.
-    let violations = submitter.submit(burst(40.0)).expect_err("outside the envelope");
+    let violations = submitter
+        .submit(burst(40.0))
+        .expect_err("outside the envelope");
     assert_eq!(violations[0].check, ns("test.limits"));
-    assert_eq!(submitter.delivered.lock().expect("lock").len(), 1, "nothing further was dispatched");
+    assert_eq!(
+        submitter.delivered.lock().expect("lock").len(),
+        1,
+        "nothing further was dispatched"
+    );
 }
 
 #[test]
 fn ma_26_sink_returns_partial_on_abort() {
     let mut sink = TestSink::new(cf32());
-    let refs = sink.stop(StopMode::Abort).expect("stop returns refs even on an abort");
+    let refs = sink
+        .stop(StopMode::Abort)
+        .expect("stop returns refs even on an abort");
     assert!(refs[0].partial);
     assert!(*sink.aborted.lock().expect("lock"));
 }
@@ -615,9 +743,15 @@ fn component(name: &str) -> ComponentDescriptor {
         id: id(name),
         kind: ComponentKind::Processor,
         ports: vec![
-            Port { name: id("in"), direction: PortDirection::In, contract: cf32(),
+            Port {
+                name: id("in"),
+                direction: PortDirection::In,
+                contract: cf32(),
             },
-            Port { name: id("out"), direction: PortDirection::Out, contract: cf32(),
+            Port {
+                name: id("out"),
+                direction: PortDirection::Out,
+                contract: cf32(),
             },
         ],
         params: vec![ParamDecl {
@@ -627,7 +761,9 @@ fn component(name: &str) -> ComponentDescriptor {
             default: Value::Bool(false),
         }],
         timing: ComponentTiming::default(),
-        requires: ComponentRequires { executor_kind: ns("any"), memory_bytes: None,
+        requires: ComponentRequires {
+            executor_kind: ns("any"),
+            memory_bytes: None,
         },
         implementation: ComponentImpl {
             kind: ns("test.impl"),
@@ -648,12 +784,18 @@ fn ma_37_descriptor_structural_validation() {
 
     let mut unknown = component("a");
     unknown.ports[0].contract = DataContractId::parse("vendor.unregistered").expect("id");
-    assert!(unknown.validate(&contracts).is_err(), "unregistered contract");
+    assert!(
+        unknown.validate(&contracts).is_err(),
+        "unregistered contract"
+    );
 
     let mut budget = component("a");
-    budget.timing.budget = Some(
-        RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 0)).expect("host"));
-    assert!(budget.validate(&contracts).is_err(), "a budget must be finite and positive");
+    budget.timing.budget =
+        Some(RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 0)).expect("host"));
+    assert!(
+        budget.validate(&contracts).is_err(),
+        "a budget must be finite and positive"
+    );
 
     // A descriptor never carries an AbsoluteDeadline: they are distinct types, and
     // the budget field will not hold one.
@@ -684,9 +826,13 @@ fn placement(domain: u32) -> ComponentPlacement {
 #[test]
 fn ma_39_island_admission() {
     let components: BTreeMap<Ident, ComponentDescriptor> =
-        [(id("a"), component("a")), (id("b"), component("b"))].into_iter().collect();
+        [(id("a"), component("a")), (id("b"), component("b"))]
+            .into_iter()
+            .collect();
     let placements: BTreeMap<Ident, ComponentPlacement> =
-        [(id("a"), placement(0)), (id("b"), placement(0))].into_iter().collect();
+        [(id("a"), placement(0)), (id("b"), placement(0))]
+            .into_iter()
+            .collect();
     let executors: BTreeMap<Ident, ExecutorDescriptor> = [(
         id("exec"),
         ExecutorDescriptor {
@@ -699,7 +845,10 @@ fn ma_39_island_admission() {
     )]
     .into_iter()
     .collect();
-    let link_id = ModuleRef { id: mid("ezsdr.test.link"), version: Version::new(1, 0, 0) };
+    let link_id = ModuleRef {
+        id: mid("ezsdr.test.link"),
+        version: Version::new(1, 0, 0),
+    };
     let links = [(link_id.clone(), test_link_descriptor())]
         .into_iter()
         .collect();
@@ -733,94 +882,190 @@ fn ma_39_island_admission() {
     assert!(admit_islands(&ctx).is_ok());
 
     // SB-25 / D76: coverage is exact and by endpoints.
-    let bad = IslandContext { link_placements: &[], ..ctx_clone(&ctx) };
+    let bad = IslandContext {
+        link_placements: &[],
+        ..ctx_clone(&ctx)
+    };
     assert!(
         admit_islands(&bad)
             .expect_err("every graph link needs a placement")
             .message
             .contains("data link a.out -> b.in has no link placement")
     );
-    let stale = vec![place(&link_id, ("a", "out"), ("b", "in")), place(&link_id, ("b", "out"), ("a", "in"))];
-    let bad = IslandContext { link_placements: &stale, ..ctx_clone(&ctx) };
-    assert!(admit_islands(&bad)
+    let stale = vec![
+        place(&link_id, ("a", "out"), ("b", "in")),
+        place(&link_id, ("b", "out"), ("a", "in")),
+    ];
+    let bad = IslandContext {
+        link_placements: &stale,
+        ..ctx_clone(&ctx)
+    };
+    assert!(
+        admit_islands(&bad)
             .expect_err("a placement for no link is refused")
             .message
-            .contains("b.out -> a.in names no graph link or output feed"));
-    let twice = vec![place(&link_id, ("a", "out"), ("b", "in")), place(&link_id, ("a", "out"), ("b", "in"))];
-    let bad = IslandContext { link_placements: &twice, ..ctx_clone(&ctx) };
-    assert!(admit_islands(&bad)
+            .contains("b.out -> a.in names no graph link or output feed")
+    );
+    let twice = vec![
+        place(&link_id, ("a", "out"), ("b", "in")),
+        place(&link_id, ("a", "out"), ("b", "in")),
+    ];
+    let bad = IslandContext {
+        link_placements: &twice,
+        ..ctx_clone(&ctx)
+    };
+    assert!(
+        admit_islands(&bad)
             .expect_err("a pair placed twice is ambiguous")
             .message
-            .contains("appears more than once"));
+            .contains("appears more than once")
+    );
     // An output feed needs a placement like a graph link (D75)...
     let feeds = vec![(
-        PortRef { component: id("b"), port: id("out") },
-        PortRef { component: id("rec"), port: id("in") },
+        PortRef {
+            component: id("b"),
+            port: id("out"),
+        },
+        PortRef {
+            component: id("rec"),
+            port: id("in"),
+        },
         BackPressure::Block,
     )];
-    let bad = IslandContext { feed_links: &feeds, ..ctx_clone(&ctx) };
-    assert!(admit_islands(&bad)
+    let bad = IslandContext {
+        feed_links: &feeds,
+        ..ctx_clone(&ctx)
+    };
+    assert!(
+        admit_islands(&bad)
             .expect_err("an unplaced feed is refused")
             .message
-            .contains("data link b.out -> rec.in has no link placement"));
+            .contains("data link b.out -> rec.in has no link placement")
+    );
     // ...and with one it is admitted.
-    let with_feed = vec![place(&link_id, ("a", "out"), ("b", "in")), place(&link_id, ("b", "out"), ("rec", "in"))];
-    admit_islands(&IslandContext { feed_links: &feeds, link_placements: &with_feed, ..ctx_clone(&ctx) })
-        .expect("a placed feed is admitted");
+    let with_feed = vec![
+        place(&link_id, ("a", "out"), ("b", "in")),
+        place(&link_id, ("b", "out"), ("rec", "in")),
+    ];
+    admit_islands(&IslandContext {
+        feed_links: &feeds,
+        link_placements: &with_feed,
+        ..ctx_clone(&ctx)
+    })
+    .expect("a placed feed is admitted");
     // A feed whose ends coincide with a graph link — an output named like a graph
     // component, fed from the same port — is two data links no placement can tell
     // apart, so admission refuses it rather than letting one placement serve both.
     let colliding = vec![(
-        PortRef { component: id("a"), port: id("out") },
-        PortRef { component: id("b"), port: id("in") },
+        PortRef {
+            component: id("a"),
+            port: id("out"),
+        },
+        PortRef {
+            component: id("b"),
+            port: id("in"),
+        },
         BackPressure::Block,
     )];
-    let bad = IslandContext { feed_links: &colliding, ..ctx_clone(&ctx) };
-    assert!(admit_islands(&bad)
+    let bad = IslandContext {
+        feed_links: &colliding,
+        ..ctx_clone(&ctx)
+    };
+    assert!(
+        admit_islands(&bad)
             .expect_err("a feed coinciding with a graph link is refused")
             .message
-            .contains("a.out -> b.in is declared twice"));
+            .contains("a.out -> b.in is declared twice")
+    );
 
     // 1. A component placed twice.
     let twice = vec![island(&["a", "b"], "exec"), island(&["a"], "exec")];
-    let bad = IslandContext { islands: &twice, ..ctx_clone(&ctx) };
+    let bad = IslandContext {
+        islands: &twice,
+        ..ctx_clone(&ctx)
+    };
     let err = admit_islands(&bad).expect_err("placed twice");
     assert!(err.message.contains("exactly once"), "{err}");
 
     // An Island naming an Executor with no descriptor. `plan()` refuses it earlier
     // (SB-22f), and a direct caller of `admit_islands` is refused here (MA-38).
     let orphan = vec![island(&["a", "b"], "nowhere")];
-    let bad = IslandContext { islands: &orphan, ..ctx_clone(&ctx) };
+    let bad = IslandContext {
+        islands: &orphan,
+        ..ctx_clone(&ctx)
+    };
     let err = admit_islands(&bad).expect_err("an unknown executor");
-    assert!(err.message.contains("names unknown executor nowhere"), "{err}");
+    assert!(
+        err.message.contains("names unknown executor nowhere"),
+        "{err}"
+    );
 
     // 2. An executor kind the component does not want.
     let mut picky = components.clone();
-    picky.get_mut(&id("a")).expect("present").requires.executor_kind = ns("test.gpu");
-    let bad = IslandContext { components: &picky, ..ctx_clone(&ctx) };
+    picky
+        .get_mut(&id("a"))
+        .expect("present")
+        .requires
+        .executor_kind = ns("test.gpu");
+    let bad = IslandContext {
+        components: &picky,
+        ..ctx_clone(&ctx)
+    };
     let err = admit_islands(&bad).expect_err("wrong executor kind");
     assert!(err.message.contains("executor kind"), "{err}");
 
     // 3. An impl kind the Executor cannot load.
     let mut alien = components.clone();
-    alien.get_mut(&id("a")).expect("present").implementation.kind = ns("vendor.wasm");
-    let bad = IslandContext { components: &alien, ..ctx_clone(&ctx) };
-    assert!(admit_islands(&bad).expect_err("unknown impl kind").message.contains("impl_kinds"));
+    alien
+        .get_mut(&id("a"))
+        .expect("present")
+        .implementation
+        .kind = ns("vendor.wasm");
+    let bad = IslandContext {
+        components: &alien,
+        ..ctx_clone(&ctx)
+    };
+    assert!(
+        admit_islands(&bad)
+            .expect_err("unknown impl kind")
+            .message
+            .contains("impl_kinds")
+    );
 
     // 4. A memory domain the Executor cannot reach.
     let far: BTreeMap<Ident, ComponentPlacement> =
-        [(id("a"), placement(9)), (id("b"), placement(0))].into_iter().collect();
-    let bad = IslandContext { placements: &far, ..ctx_clone(&ctx) };
-    assert!(admit_islands(&bad).expect_err("unreachable domain").message.contains("memory_domains"));
+        [(id("a"), placement(9)), (id("b"), placement(0))]
+            .into_iter()
+            .collect();
+    let bad = IslandContext {
+        placements: &far,
+        ..ctx_clone(&ctx)
+    };
+    assert!(
+        admit_islands(&bad)
+            .expect_err("unreachable domain")
+            .message
+            .contains("memory_domains")
+    );
 
     // 5. An rt_policy with a component that declares no budget.
     let rt = vec![IslandDecl {
-        rt_policy: Some(RtPolicy { sched: "fifo".to_owned(), priority: 50,
+        rt_policy: Some(RtPolicy {
+            sched: "fifo".to_owned(),
+            priority: 50,
         }),
         ..island(&["a", "b"], "exec")
     }];
-    let bad = IslandContext { islands: &rt, ..ctx_clone(&ctx) };
-    assert!(admit_islands(&bad).expect_err("no budget").message.contains("budget"));
+    let bad = IslandContext {
+        islands: &rt,
+        ..ctx_clone(&ctx)
+    };
+    assert!(
+        admit_islands(&bad)
+            .expect_err("no budget")
+            .message
+            .contains("budget")
+    );
 }
 
 fn ctx_clone<'a>(ctx: &IslandContext<'a>) -> IslandContext<'a> {
@@ -853,8 +1098,14 @@ fn sink_in(domain: u32) -> SinkDescriptor {
 fn place(link: &ModuleRef, from: (&str, &str), to: (&str, &str)) -> LinkPlacement {
     LinkPlacement {
         link: link.clone(),
-        from: PortRef { component: id(from.0), port: id(from.1) },
-        to: PortRef { component: id(to.0), port: id(to.1) },
+        from: PortRef {
+            component: id(from.0),
+            port: id(from.1),
+        },
+        to: PortRef {
+            component: id(to.0),
+            port: id(to.1),
+        },
     }
 }
 
@@ -863,27 +1114,51 @@ fn ma_22_cycle_rules() {
     let nodes = vec![id("a"), id("b")];
     // A stream.* cycle is rejected.
     let stream = vec![
-        GraphEdge { from: id("a"), to: id("b"), kind: EdgeKind::Stream, crosses_island: false,
+        GraphEdge {
+            from: id("a"),
+            to: id("b"),
+            kind: EdgeKind::Stream,
+            crosses_island: false,
         },
-        GraphEdge { from: id("b"), to: id("a"), kind: EdgeKind::Stream, crosses_island: false,
+        GraphEdge {
+            from: id("b"),
+            to: id("a"),
+            kind: EdgeKind::Stream,
+            crosses_island: false,
         },
     ];
     assert!(check_cycles(&nodes, &stream).is_err());
 
     // An Event cycle across Islands is accepted.
     let across = vec![
-        GraphEdge { from: id("a"), to: id("b"), kind: EdgeKind::Stream, crosses_island: true,
+        GraphEdge {
+            from: id("a"),
+            to: id("b"),
+            kind: EdgeKind::Stream,
+            crosses_island: true,
         },
-        GraphEdge { from: id("b"), to: id("a"), kind: EdgeKind::Event, crosses_island: true,
+        GraphEdge {
+            from: id("b"),
+            to: id("a"),
+            kind: EdgeKind::Event,
+            crosses_island: true,
         },
     ];
     assert!(check_cycles(&nodes, &across).is_ok());
 
     // An Event cycle inside one Island is rejected.
     let inside = vec![
-        GraphEdge { from: id("a"), to: id("b"), kind: EdgeKind::Stream, crosses_island: false,
+        GraphEdge {
+            from: id("a"),
+            to: id("b"),
+            kind: EdgeKind::Stream,
+            crosses_island: false,
         },
-        GraphEdge { from: id("b"), to: id("a"), kind: EdgeKind::Event, crosses_island: false,
+        GraphEdge {
+            from: id("b"),
+            to: id("a"),
+            kind: EdgeKind::Event,
+            crosses_island: false,
         },
     ];
     assert!(check_cycles(&nodes, &inside).is_err());
@@ -897,26 +1172,45 @@ fn ma_25_sink_role_is_read_from_the_binding() {
     // on a Spec Run, so SC-21 was unenforceable on the publication path (D17).
     let mut reg = ModuleRegistry::new();
     reg.register_vocabulary(test_vocabulary()).expect("fresh");
-    reg.register(test_sink_descriptor(), Factories { sink: true, ..Factories::default() },
+    reg.register(
+        test_sink_descriptor(),
+        Factories {
+            sink: true,
+            ..Factories::default()
+        },
     )
-        .expect("registers");
-    reg.register(test_provider_descriptor(),
-        Factories { provider: true, authority: true, ..Factories::default() },)
-        .expect("registers");
+    .expect("registers");
+    reg.register(
+        test_provider_descriptor(),
+        Factories {
+            provider: true,
+            authority: true,
+            ..Factories::default()
+        },
+    )
+    .expect("registers");
 
     let holds_sink = |m: &ezsdr_kernel::id::ModuleId| {
-        reg.modules().any(|d| d.id == *m && d.roles.contains(&Role::Sink))
+        reg.modules()
+            .any(|d| d.id == *m && d.roles.contains(&Role::Sink))
     };
     assert!(holds_sink(&mid("ezsdr.test.sink")));
-    assert!(!holds_sink(&mid("ezsdr.test.provider")), "a Provider is not a Sink");
+    assert!(
+        !holds_sink(&mid("ezsdr.test.provider")),
+        "a Provider is not a Sink"
+    );
 
     // SC-21: a `Block` link into a Sink is refused, and the predicate is now
     // available on both paths because it reads a binding rather than a placement.
     let decl = DataLinkDecl {
         id: DataLinkId::local(0),
-        from: PortRef { component: id("radio"), port: id("rx"),
+        from: PortRef {
+            component: id("radio"),
+            port: id("rx"),
         },
-        to: PortRef { component: id("capture0"), port: id("in"),
+        to: PortRef {
+            component: id("capture0"),
+            port: id("in"),
         },
         contract: cf32(),
         policy: BackPressure::Block,
@@ -946,13 +1240,18 @@ impl StepLogger {
             log,
             budget: Mutex::new(budget),
             instance: TestProvider::new("x", 1).instance().clone(),
-            executor: TestExecutor::new(MemoryDomainId::local(0)).descriptor().clone(),
+            executor: TestExecutor::new(MemoryDomainId::local(0))
+                .descriptor()
+                .clone(),
             sink: TestSink::new(cf32()).descriptor().clone(),
         }
     }
 
     fn tick(&self, role: &str) -> StepOutcome {
-        self.log.lock().expect("lock").push(format!("{role}:{}", self.name));
+        self.log
+            .lock()
+            .expect("lock")
+            .push(format!("{role}:{}", self.name));
         let mut b = self.budget.lock().expect("lock");
         let progressed = *b > 0;
         *b = b.saturating_sub(1);
@@ -964,11 +1263,16 @@ impl Provider for StepLogger {
     fn instance(&self) -> &ezsdr_kernel::module_api::ProviderInstance {
         &self.instance
     }
-    fn coerce(&self, _r: &Requested,
+    fn coerce(
+        &self,
+        _r: &Requested,
     ) -> Result<ezsdr_kernel::module_api::CoerceReport, ModuleError> {
         Ok(Default::default())
     }
-    fn prepare(&mut self, _f: &ezsdr_kernel::plan::Fragment, _c: PrepareContext<'_>,
+    fn prepare(
+        &mut self,
+        _f: &ezsdr_kernel::plan::Fragment,
+        _c: PrepareContext,
     ) -> Result<PrepareReport, ModuleError> {
         unreachable!("the stepping test does not prepare")
     }
@@ -991,7 +1295,10 @@ impl Executor for StepLogger {
     fn descriptor(&self) -> &ExecutorDescriptor {
         &self.executor
     }
-    fn prepare(&mut self, _i: &IslandDecl, _c: PrepareContext<'_>,
+    fn prepare(
+        &mut self,
+        _i: &IslandDecl,
+        _c: PrepareContext,
     ) -> Result<PrepareReport, ModuleError> {
         unreachable!("the stepping test does not prepare")
     }
@@ -1014,7 +1321,10 @@ impl Sink for StepLogger {
     fn descriptor(&self) -> &ezsdr_kernel::module_api::SinkDescriptor {
         &self.sink
     }
-    fn prepare(&mut self, _f: &ezsdr_kernel::plan::Fragment, _c: PrepareContext<'_>,
+    fn prepare(
+        &mut self,
+        _f: &ezsdr_kernel::plan::Fragment,
+        _c: PrepareContext,
     ) -> Result<PrepareReport, ModuleError> {
         unreachable!("the stepping test does not prepare")
     }
@@ -1041,11 +1351,17 @@ fn ma_30_stepping_order_and_quiescence() {
     let mut provider = StepLogger::new("c", log.clone(), 0);
     // Registered in reverse role order.
     let mut instances = vec![
-        SteppedInstance { id: id("a"), inner: SteppedRef::Sink(&mut sink),
+        SteppedInstance {
+            id: id("a"),
+            inner: SteppedRef::Sink(&mut sink),
         },
-        SteppedInstance { id: id("b"), inner: SteppedRef::Executor(&mut executor),
+        SteppedInstance {
+            id: id("b"),
+            inner: SteppedRef::Executor(&mut executor),
         },
-        SteppedInstance { id: id("c"), inner: SteppedRef::Provider(&mut provider),
+        SteppedInstance {
+            id: id("c"),
+            inner: SteppedRef::Provider(&mut provider),
         },
     ];
     let until = TimePoint::new(ClockDomainId::HOST_MONOTONIC, 100);
@@ -1055,7 +1371,11 @@ fn ma_30_stepping_order_and_quiescence() {
     let seen = log.lock().expect("lock").clone();
     assert_eq!(
         &seen[..3],
-        &["provider:c".to_owned(), "executor:b".to_owned(), "sink:a".to_owned()],
+        &[
+            "provider:c".to_owned(),
+            "executor:b".to_owned(),
+            "sink:a".to_owned()
+        ],
         "role rank, then instance id; not registration order"
     );
     assert_eq!(rounds, 2, "one round made progress, the next quiesced");
@@ -1068,9 +1388,13 @@ fn ma_30_stepping_livelock_cap() {
     let mut a = StepLogger::new("a", log.clone(), usize::MAX);
     let mut b = StepLogger::new("b", log.clone(), usize::MAX);
     let mut instances = vec![
-        SteppedInstance { id: id("a"), inner: SteppedRef::Executor(&mut a),
+        SteppedInstance {
+            id: id("a"),
+            inner: SteppedRef::Executor(&mut a),
         },
-        SteppedInstance { id: id("b"), inner: SteppedRef::Executor(&mut b),
+        SteppedInstance {
+            id: id("b"),
+            inner: SteppedRef::Executor(&mut b),
         },
     ];
     let until = TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0);
@@ -1078,12 +1402,19 @@ fn ma_30_stepping_livelock_cap() {
     let err = step_until_quiescent(&mut instances, until, &events, &rid("coordinator"))
         .expect_err("STEP_LIVELOCK, not a hang");
     assert!(err.message.contains("stepping rounds"), "{err}");
-    assert_eq!(err.detail["event_kind"], serde_json::json!(EventKind::STEP_LIVELOCK));
+    assert_eq!(
+        err.detail["event_kind"],
+        serde_json::json!(EventKind::STEP_LIVELOCK)
+    );
 
     // RS-27 registers STEP_LIVELOCK as a kind the Kernel emits from its own
     // stepping loop, so it must reach the counters and the escalation flag.
     let drained = events.drain();
-    assert!(drained.iter().any(|e| e.kind.as_str() == EventKind::STEP_LIVELOCK));
+    assert!(
+        drained
+            .iter()
+            .any(|e| e.kind.as_str() == EventKind::STEP_LIVELOCK)
+    );
     assert_eq!(
         events.escalation().map(|(_, r)| r),
         Some(ezsdr_kernel::policy::Reaction::Abort),
@@ -1095,7 +1426,11 @@ fn ma_30_stepping_livelock_cap() {
 fn collector() -> EventCollector {
     let kinds = EventKindRegistry::with_kernel_kinds();
     let policy = kinds.compile(&BTreeMap::new()).expect("compiles");
-    EventCollector::new(&[], &policy.table.keys().cloned().collect::<Vec<_>>(), 16, &policy,
+    EventCollector::new(
+        &[],
+        &policy.table.keys().cloned().collect::<Vec<_>>(),
+        16,
+        &policy,
     )
 }
 
@@ -1124,8 +1459,16 @@ fn ma_42_fidelity_is_the_weakest() {
     let run = Fidelity::weakest(&[quirky, enveloped]);
     assert_eq!(run.timing, EnvelopeFidelity::Envelope);
     assert_eq!(run.continuity, EnvelopeFidelity::Envelope);
-    assert_eq!(run.coercion, CoercionFidelity::Grid, "equal on this axis, so unchanged");
-    assert_eq!(run.rf, RfFidelity::None, "weakest per aspect, not per Provider");
+    assert_eq!(
+        run.coercion,
+        CoercionFidelity::Grid,
+        "equal on this axis, so unchanged"
+    );
+    assert_eq!(
+        run.rf,
+        RfFidelity::None,
+        "weakest per aspect, not per Provider"
+    );
     assert_eq!(run.transport, TransportFidelity::Model);
 
     // MA-42's own reason for adding `real` to Vision §14's sets: a Hardware Run has
@@ -1138,8 +1481,15 @@ fn ma_42_fidelity_is_the_weakest() {
         rf: RfFidelity::Real,
         transport: TransportFidelity::Real,
     };
-    assert_eq!(Fidelity::weakest(&[real]), real, "a Hardware Run records `real` where declared");
-    assert_eq!(Fidelity::weakest(&[real, enveloped]).timing, EnvelopeFidelity::Envelope);
+    assert_eq!(
+        Fidelity::weakest(&[real]),
+        real,
+        "a Hardware Run records `real` where declared"
+    );
+    assert_eq!(
+        Fidelity::weakest(&[real, enveloped]).timing,
+        EnvelopeFidelity::Envelope
+    );
     // RS-41: a Run with no bound Providers records the all-`none` vector, not `real`.
     assert_eq!(Fidelity::weakest(&[]), Fidelity::NONE);
 }
@@ -1152,10 +1502,14 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
     // that reached this check placed both components in the same domain, so the
     // branch was unreached — the code existed and nothing ran it (exit-review GAP).
     let components: BTreeMap<Ident, ComponentDescriptor> =
-        [(id("a"), component("a")), (id("b"), component("b"))].into_iter().collect();
+        [(id("a"), component("a")), (id("b"), component("b"))]
+            .into_iter()
+            .collect();
     // `b` sits in memory domain 1, `a` in 0.
     let placements: BTreeMap<Ident, ComponentPlacement> =
-        [(id("a"), placement(0)), (id("b"), placement(1))].into_iter().collect();
+        [(id("a"), placement(0)), (id("b"), placement(1))]
+            .into_iter()
+            .collect();
     let executors: BTreeMap<Ident, ExecutorDescriptor> = [(
         id("exec"),
         ExecutorDescriptor {
@@ -1169,17 +1523,27 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
     .into_iter()
     .collect();
     let graph_links = vec![(
-        PortRef { component: id("a"), port: id("out"),
+        PortRef {
+            component: id("a"),
+            port: id("out"),
         },
-        PortRef { component: id("b"), port: id("in"),
+        PortRef {
+            component: id("b"),
+            port: id("in"),
         },
         BackPressure::Block,
     )];
     let islands = vec![island(&["a", "b"], "exec")];
     let no_resources = BTreeSet::new();
 
-    let selected = ModuleRef { id: mid("ezsdr.test.link"), version: Version::new(1, 0, 0) };
-    let other_version = ModuleRef { id: selected.id.clone(), version: Version::new(2, 0, 0) };
+    let selected = ModuleRef {
+        id: mid("ezsdr.test.link"),
+        version: Version::new(1, 0, 0),
+    };
+    let other_version = ModuleRef {
+        id: selected.id.clone(),
+        version: Version::new(2, 0, 0),
+    };
     let link_placements = vec![place(&selected, ("a", "out"), ("b", "in"))];
     let descriptor = |connects| LinkDescriptor {
         module: mref("ezsdr.test.link"),
@@ -1204,7 +1568,10 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
         resource_endpoints: &no_resources,
     };
     let err = admit_islands(&ctx).expect_err("two domains, no Link");
-    assert!(err.message.contains("no registered Link descriptor"), "{err}");
+    assert!(
+        err.message.contains("no registered Link descriptor"),
+        "{err}"
+    );
 
     // A Link that joins the pair admits it — and the check is symmetric, so a Link
     // declaring the reverse direction serves as well.
@@ -1237,7 +1604,10 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
     ]
     .into_iter()
     .collect();
-        let ctx = IslandContext { links: &elsewhere, ..ctx_clone(&ctx) };
+    let ctx = IslandContext {
+        links: &elsewhere,
+        ..ctx_clone(&ctx)
+    };
     let err = admit_islands(&ctx).expect_err("unselected Link is irrelevant");
     assert!(
         err.message
@@ -1250,54 +1620,105 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
     let joins = vec![(MemoryDomainId::local(0), MemoryDomainId::local(1))];
     let wrong_policy = [(
         selected.clone(),
-        LinkDescriptor { policies: vec![BackPressure::DropNewest], ..descriptor(joins.clone()) },
+        LinkDescriptor {
+            policies: vec![BackPressure::DropNewest],
+            ..descriptor(joins.clone())
+        },
     )]
     .into_iter()
     .collect();
-    let ctx_wrong = IslandContext { links: &wrong_policy, ..ctx_clone(&ctx) };
+    let ctx_wrong = IslandContext {
+        links: &wrong_policy,
+        ..ctx_clone(&ctx)
+    };
     let err = admit_islands(&ctx_wrong).expect_err("Link lacks the link's policy");
-    assert!(err.message.contains("does not implement policy Block"), "{err}");
+    assert!(
+        err.message.contains("does not implement policy Block"),
+        "{err}"
+    );
 
     // A cross-process Link is refused at admission as well as at registration
     // (MA-28, D63): a descriptor map built without the registry cannot smuggle one in.
-    let cross = [(selected.clone(), LinkDescriptor { cross_process: true, ..descriptor(joins) })]
-        .into_iter()
-        .collect();
-    let ctx_cross = IslandContext { links: &cross, ..ctx_clone(&ctx) };
+    let cross = [(
+        selected.clone(),
+        LinkDescriptor {
+            cross_process: true,
+            ..descriptor(joins)
+        },
+    )]
+    .into_iter()
+    .collect();
+    let ctx_cross = IslandContext {
+        links: &cross,
+        ..ctx_clone(&ctx)
+    };
     let err = admit_islands(&ctx_cross).expect_err("cross_process is unsupported in v4.0");
-    assert!(err.message.contains("cross_process capability is unsupported"), "{err}");
+    assert!(
+        err.message
+            .contains("cross_process capability is unsupported"),
+        "{err}"
+    );
 
     // D77: the same holds when the two ends are in different Islands. Splitting the
     // pair across two Islands used to skip the `connects` check entirely.
     let split = vec![
         island(&["a"], "exec"),
-        IslandDecl { id: IslandId::local(1), ..island(&["b"], "exec") },
+        IslandDecl {
+            id: IslandId::local(1),
+            ..island(&["b"], "exec")
+        },
     ];
-    let unjoined = [(selected.clone(), descriptor(vec![(MemoryDomainId::local(1), MemoryDomainId::local(2))]))]
-        .into_iter()
-        .collect();
-    let ctx_split = IslandContext { islands: &split, links: &unjoined, ..ctx_clone(&ctx) };
+    let unjoined = [(
+        selected.clone(),
+        descriptor(vec![(MemoryDomainId::local(1), MemoryDomainId::local(2))]),
+    )]
+    .into_iter()
+    .collect();
+    let ctx_split = IslandContext {
+        islands: &split,
+        links: &unjoined,
+        ..ctx_clone(&ctx)
+    };
     let err = admit_islands(&ctx_split).expect_err("cross-Island link between unjoined domains");
     assert!(err.message.contains("does not connect them"), "{err}");
-    let joined = [(selected.clone(), descriptor(vec![(MemoryDomainId::local(0), MemoryDomainId::local(1))]))]
-        .into_iter()
-        .collect();
-    admit_islands(&IslandContext { islands: &split, links: &joined, ..ctx_clone(&ctx) })
-        .expect("a Link joining the two domains admits the cross-Island link");
+    let joined = [(
+        selected.clone(),
+        descriptor(vec![(MemoryDomainId::local(0), MemoryDomainId::local(1))]),
+    )]
+    .into_iter()
+    .collect();
+    admit_islands(&IslandContext {
+        islands: &split,
+        links: &joined,
+        ..ctx_clone(&ctx)
+    })
+    .expect("a Link joining the two domains admits the cross-Island link");
 
     // D81: an output feed is checked the same way, its consumer's domains being the
     // bound Sink's. `b` (domain 1) feeds a Sink that reads only domain 0.
     let feeds = vec![(
-        PortRef { component: id("b"), port: id("out") },
-        PortRef { component: id("rec"), port: id("in") },
+        PortRef {
+            component: id("b"),
+            port: id("out"),
+        },
+        PortRef {
+            component: id("rec"),
+            port: id("in"),
+        },
         BackPressure::DropOldest,
     )];
-    let with_feed = vec![place(&selected, ("a", "out"), ("b", "in")), place(&selected, ("b", "out"), ("rec", "in"))];
-    let host_sink: BTreeMap<Ident, SinkDescriptor> = [(id("rec"), sink_in(0))].into_iter().collect();
+    let with_feed = vec![
+        place(&selected, ("a", "out"), ("b", "in")),
+        place(&selected, ("b", "out"), ("rec", "in")),
+    ];
+    let host_sink: BTreeMap<Ident, SinkDescriptor> =
+        [(id("rec"), sink_in(0))].into_iter().collect();
     let both = |connects| {
         let mut d = descriptor(connects);
         d.policies.push(BackPressure::DropOldest);
-        [(selected.clone(), d)].into_iter().collect::<BTreeMap<_, _>>()
+        [(selected.clone(), d)]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
     };
     let joins_0_1 = both(vec![(MemoryDomainId::local(0), MemoryDomainId::local(1))]);
     let feed_ctx = |sinks| IslandContext {
@@ -1315,15 +1736,25 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
     let same: BTreeMap<Ident, SinkDescriptor> = [(id("rec"), sink_in(1))].into_iter().collect();
     // The selected Link joins 0↔1 only, which does not join domain 1 to a Sink
     // reading domain 1; what admits the feed is the shared domain itself.
-    admit_islands(&feed_ctx(&same)).expect("a Sink reading the producer's own domain needs no join");
+    admit_islands(&feed_ctx(&same))
+        .expect("a Sink reading the producer's own domain needs no join");
     // The Link declares only (0, 1): `a` (domain 0) feeding a Sink reading domain 1
     // is joined in the declared direction, the case above in the reverse one.
     let forward_feeds = vec![(
-        PortRef { component: id("a"), port: id("out") },
-        PortRef { component: id("rec"), port: id("in") },
+        PortRef {
+            component: id("a"),
+            port: id("out"),
+        },
+        PortRef {
+            component: id("rec"),
+            port: id("in"),
+        },
         BackPressure::DropOldest,
     )];
-    let forward_placed = vec![place(&selected, ("a", "out"), ("b", "in")), place(&selected, ("a", "out"), ("rec", "in"))];
+    let forward_placed = vec![
+        place(&selected, ("a", "out"), ("b", "in")),
+        place(&selected, ("a", "out"), ("rec", "in")),
+    ];
     let reads_1: BTreeMap<Ident, SinkDescriptor> = [(id("rec"), sink_in(1))].into_iter().collect();
     admit_islands(&IslandContext {
         feed_links: &forward_feeds,

@@ -3,7 +3,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::binding::{AdmissionResult, BindingProfile, CheckStage, Violation, check_constraint_kind};
+use crate::binding::{
+    AdmissionResult, BindingProfile, CheckStage, Violation, check_constraint_kind,
+};
 use crate::id::ResourceId;
 use crate::module_api::{ModuleRef, ModuleRegistry, Role};
 use crate::spec::{Constraint, ExperimentSpec, Ident, Key, Namespace, SpecError, Value};
@@ -20,15 +22,31 @@ pub(super) fn requested_violations(
     profile: &BindingProfile,
     inputs: &CompileInputs<'_>,
 ) -> Vec<Violation> {
-    let requested: BTreeMap<Key, Value> = spec
-        .resources
-        .values()
-        .flat_map(|r| r.requires.iter())
-        .filter_map(|(k, c)| match c {
-            Constraint::Eq { value } => Some((k.clone(), value.clone())),
-            _ => None,
-        })
-        .collect();
+    // SB-30 (KA-4): one entry per fragment, never merged, so that two fragments naming
+    // one key are each judged by their own value.
+    let mut requested: BTreeMap<Ident, BTreeMap<Key, Value>> = BTreeMap::new();
+    let eq_values = |requires: &BTreeMap<Key, Constraint>| -> Vec<(Key, Value)> {
+        requires
+            .iter()
+            .filter_map(|(k, c)| match c {
+                Constraint::Eq { value } => Some((k.clone(), value.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    for (name, r) in &spec.resources {
+        // The resource's needs are bound within its fragment (SB-36), so their values
+        // are the fragment's too; the resource's own value wins for a key both name.
+        let mut values: BTreeMap<Key, Value> = BTreeMap::new();
+        for need in r.needs.values() {
+            values.extend(eq_values(&need.requires));
+        }
+        values.extend(eq_values(&r.requires));
+        requested.insert(name.clone(), values);
+    }
+    for o in &spec.outputs {
+        requested.insert(o.id.clone(), o.params.clone());
+    }
     inputs.checks.run(
         &profile.environment,
         &requested,
@@ -233,8 +251,7 @@ pub(super) fn check_bindings(
             .get(name)
             .ok_or_else(|| SpecError::UnboundResource { name: name.clone() })?;
         require_role(registry, name, &binding.module, Role::Provider)?;
-        let instance =
-            super::supplied(inputs.providers, name, "Provider instance")?.instance();
+        let instance = super::supplied(inputs.providers, name, "Provider instance")?.instance();
         version(name, "Provider instance", &binding.module, &instance.module)?;
         check_rid(
             &format!("the instance bound to {name} has id"),
@@ -248,6 +265,18 @@ pub(super) fn check_bindings(
         }
         for a in &instance.arm_after {
             check_rid(&format!("the instance bound to {name} arms after"), a)?;
+        }
+        // SB-22f (KA-7): the one envelope value the Kernel reads is in host.monotonic
+        // and not negative.
+        if let Some(lead) = instance.min_command_lead {
+            if lead.domain != crate::id::ClockDomainId::HOST_MONOTONIC || lead.ticks < 0 {
+                return Err(SpecError::Structural {
+                    reason: format!(
+                        "SB-22f: the instance bound to {name} declares a min_command_lead of \
+                         {lead}, which is not a non-negative host.monotonic duration"
+                    ),
+                });
+            }
         }
     }
     for output in &spec.outputs {
@@ -271,9 +300,7 @@ pub(super) fn check_bindings(
             });
         }
         if let Some(m) = d.memory_domains.iter().find(|m| !m.node.is_local()) {
-            return Err(not_local(format!(
-                "output {name}'s Sink memory domain {m}"
-            )));
+            return Err(not_local(format!("output {name}'s Sink memory domain {m}")));
         }
     }
     for name in &executors {
@@ -291,9 +318,7 @@ pub(super) fn check_bindings(
             });
         }
         if let Some(m) = d.memory_domains.iter().find(|m| !m.node.is_local()) {
-            return Err(not_local(format!(
-                "executor {name}'s memory domain {m}"
-            )));
+            return Err(not_local(format!("executor {name}'s memory domain {m}")));
         }
     }
     // SB-24: `authority` names a binding whose Module holds Authority — a resource the
@@ -345,17 +370,19 @@ pub(super) fn check_bindings(
     // narrowed the collision from "any output id" to "a Provider that names a node
     // `sink`" — `ResourceId::parse("sink/rec")` is a legal Provider node path.
     for name in spec.resources.keys() {
-        let instance =
-            super::supplied(inputs.providers, name, "Provider instance")?.instance();
-        if let Some(clash) = instance
-            .tree
-            .walk_iter()
-            .find(|n| n.id.segments().next() == Some("sink"))
-        {
+        let instance = super::supplied(inputs.providers, name, "Provider instance")?.instance();
+        if let Some(clash) = instance.tree.walk_iter().find(|n| {
+            // SB-22h (KA-14): also `kernel`, the Kernel's own event source, and
+            // `unforeseen`, RS-33's fallback row, and every `island_<n>`, an
+            // Executor's event source (KC-8).
+            n.id.segments().next().is_some_and(|s| {
+                matches!(s, "sink" | "kernel" | "unforeseen") || s.starts_with("island_")
+            })
+        }) {
             return Err(SpecError::Structural {
                 reason: format!(
                     "SB-22h: instance bound to {name} declares node {}, and the first path \
-                     segment `sink` is reserved for a bound Sink's address",
+                     segments `sink`, `kernel`, `unforeseen` and `island_<n>` are reserved",
                     clash.id
                 ),
             });
@@ -369,23 +396,15 @@ pub(super) fn check_bindings(
     // descriptions are one instance (SB-23 reads `instances: 2` that way) and must
     // report one `instance().id`, or the runtime handed the Kernel two objects for one
     // description and the Manifest could not reproduce it.
-    let mut by_description: BTreeMap<(&ModuleRef, String), (&Ident, &ResourceId)> = BTreeMap::new();
+    let mut by_description: BTreeMap<(ModuleRef, String), (&Ident, &ResourceId)> = BTreeMap::new();
     let mut paths: BTreeMap<ResourceId, &Ident> = BTreeMap::new();
     for (name, binding) in profile
         .bindings
         .iter()
         .filter(|(n, _)| spec.resources.contains_key(*n))
     {
-        let instance =
-            super::supplied(inputs.providers, name, "Provider instance")?.instance();
-        let description = (
-            &binding.module,
-            format!(
-                "{}|{}",
-                serde_json::to_string(&binding.selector).unwrap_or_default(),
-                serde_json::to_string(&binding.profile).unwrap_or_default()
-            ),
-        );
+        let instance = super::supplied(inputs.providers, name, "Provider instance")?.instance();
+        let description = binding_description(binding);
         if let Some((first, first_id)) = by_description.insert(description, (name, &instance.id)) {
             if *first_id != instance.id {
                 return Err(SpecError::Structural {
@@ -632,6 +651,20 @@ fn not_local(what: String) -> SpecError {
     SpecError::Structural {
         reason: format!("X7: {what} is not on the local node"),
     }
+}
+
+/// A binding's description `(module, selector, profile)`, which is an instance's
+/// identity (SB-3): two bindings with equal descriptions name one instance. Shared by
+/// `validate` and the coordinator's grouping (KC-4), so the two cannot disagree.
+pub(crate) fn binding_description(binding: &crate::binding::Binding) -> (ModuleRef, String) {
+    (
+        binding.module.clone(),
+        format!(
+            "{}|{}",
+            serde_json::to_string(&binding.selector).unwrap_or_default(),
+            serde_json::to_string(&binding.profile).unwrap_or_default()
+        ),
+    )
 }
 
 /// A `ResourceId` handed in as a Rust value: on the local node (X7) and with a path of

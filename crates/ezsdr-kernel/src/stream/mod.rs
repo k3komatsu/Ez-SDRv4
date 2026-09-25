@@ -14,16 +14,14 @@ mod link;
 
 use std::fmt;
 
-pub use block::{
-    BlockFlags, BlockHeader, BlockRef, ChannelMask, Direction, SampleBlock};
-pub use buffer::{BufferRef, HostMemoryAccess};
+pub use block::{BlockFlags, BlockHeader, BlockRef, ChannelMask, Direction, SampleBlock};
+pub use buffer::BufferRef;
 pub use burst::{
     AdmittedTarget, BurstEnd, BurstOpen, BurstRecord, BurstState, BurstStep, BurstTracker,
     LateOutcome, LatePolicy, admit_burst_target,
 };
 pub use continuity::{ChannelGap, ContinuityBuilder, ContinuityMap, Gap, GapCause, Segment};
-pub use link::{
-    BackPressure, DataLink, DataLinkDecl, DropCarry, PublishOutcome, check_sink_link};
+pub use link::{BackPressure, DataLink, DataLinkDecl, DropCarry, PublishOutcome, check_sink_link};
 
 use crate::contract::DataContractId;
 use crate::id::ClockDomainId;
@@ -87,7 +85,10 @@ impl fmt::Display for StreamError {
                 f.write_str("a transmit block was published while idle without START_OF_BURST")
             }
             StreamError::TimeOverlap { expected, got } => {
-                write!(f, "block time {got} precedes the previous block's end {expected}")
+                write!(
+                    f,
+                    "block time {got} precedes the previous block's end {expected}"
+                )
             }
             StreamError::GapFlagWithoutJump => f.write_str("GAP_BEFORE on a contiguous block"),
             StreamError::JumpWithoutGapFlag => {

@@ -18,5 +18,18 @@ Every rule of your earlier sessions still applies, including the stop rule: if
 a finding cannot be fixed as described without contradicting a spec, stop and
 report instead of improvising. Report to the owner in Japanese.
 
-Findings to fix:
-<paste the accepted findings here>
+Findings to fix (Review K, all accepted in `plan/phase2/00-overview.md` §11):
+
+- **B1 [P0] KA-6 / KC-24:** guard Provider coercion so it only applies to Session and schedule origins. A Module-origin `UpdateParameter` must not call `Provider::coerce`; add a coordinator test proving it is admitted without a second coercion or deadlock.
+- **B2 [P1] KA-12:** later cleanup operations must set `closing` when they enter after the drain starts. If the original drain was abandoned, it must return before stopping its own instance after it wakes. Add a bounded regression test for an over-deadline drain.
+- **N1 [P1] KC-30:** contain the Link `descriptor()` call and calls through the Authority's `TimeAuthority` handle (`now`, `schedule`, `cancel`). Turn panics and invalid time-handle results into a stage or cleanup failure without unwinding the caller. Add a Link descriptor panic test.
+- **N2 [P1] KC-45 / KC-2:** preserve the built plan and its class in the Manifest before refusing a non-Simulation plan. Assert the refused WallPaced plan is present and its execution class is retained.
+- **N3 [P1] KC-8:** register Vocabulary event pairs for each Executor Island, with `DEVICE_LOST` under the instance's first Island source. Test one Executor serving two Islands and emitting from the second.
+- **N4 [P2]:** retain the rejected `AdmissionResult` in the Manifest. Test a validation refusal.
+- **N5 [P2] RS-3:** stop the lifecycle pipeline when a Module requests an end during prepare or arm; do not proceed to later lifecycle stages. Add a test for a prepare-time abort.
+- **N6 [P2] KA-13:** report an invalid Module namespace only when that Provider supplies at least one Manifest section. Test an invalid namespace with no sections.
+- **N7 [P2] KC-36:** check the Lease before `finish` chooses `Stopped { client }`. Test an expired Detached Lease finished without an explicit `check_lease` call.
+- **N8 [P2] KC-19:** reject a `RejectAtPlan` burst if `compare_durations` returns an error. Test refusal on a comparison error where reachable.
+- **N9 [P2]:** remove stale dead-code allowances, unused bindings, the duplicate timing helper and discarded schedule clones/targets. Use `ActionTemplate::is_timed()`.
+- **N10 [P2] KC-28:** collect every violation across compiled Actions using a working copy updated only by admitted Actions; dispatch none if any fail.
+- **N11 [P2] KA-18:** serialize missing link-drop counts as JSON `null`, not zero. Test a `drops()` panic or abandoned step.

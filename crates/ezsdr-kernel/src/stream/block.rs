@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{BufferRef, StreamError};
 use crate::contract::DataContractId;
+use crate::id::MemoryDomainId;
 use crate::time::{Duration, TimeError, TimePoint};
 
 /// Which side of the radio produced the block, taken from the producing Port at
@@ -46,7 +47,11 @@ impl ChannelMask {
 
     /// The mask with every channel below `channels` set (SC-14).
     pub fn full(channels: u16) -> ChannelMask {
-        if channels >= 64 { ChannelMask(u64::MAX) } else { ChannelMask((1u64 << channels) - 1) }
+        if channels >= 64 {
+            ChannelMask(u64::MAX)
+        } else {
+            ChannelMask((1u64 << channels) - 1)
+        }
     }
 
     /// Whether channel `c` is valid (SC-14).
@@ -157,7 +162,9 @@ pub struct BlockHeader {
 impl BlockHeader {
     /// Time just past the block's last sample: `first_sample_time + len`, checked (SC-12).
     pub fn end_time(&self) -> Result<TimePoint, TimeError> {
-        self.first_sample_time.checked_add(Duration::new(self.first_sample_time.domain, self.len.into(),
+        self.first_sample_time.checked_add(Duration::new(
+            self.first_sample_time.domain,
+            self.len.into(),
         ))
     }
 }
@@ -176,6 +183,26 @@ impl BlockHeader {
 pub struct SampleBlock {
     header: BlockHeader,
     buffer: BufferRef,
+    host: Option<HostBytes>,
+}
+
+/// Host bytes a producer attached to a block; they live as long as the block does
+/// (SC-8, SC-9). Compared by content and printed by length only.
+#[derive(Clone)]
+struct HostBytes(std::sync::Arc<[u8]>);
+
+impl PartialEq for HostBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.0[..] == other.0[..]
+    }
+}
+
+impl Eq for HostBytes {}
+
+impl fmt::Debug for HostBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "HostBytes({} bytes)", self.0.len())
+    }
 }
 
 /// A shared, immutable reference to a [`SampleBlock`]; fan-out shares it (SC-11).
@@ -196,12 +223,14 @@ impl SampleBlock {
         buffer: BufferRef,
         bytes_per_sample: u32,
     ) -> Result<SampleBlock, StreamError> {
-        let bad = |reason: &str| StreamError::InvalidBlock { reason: reason.to_owned(),
+        let bad = |reason: &str| StreamError::InvalidBlock {
+            reason: reason.to_owned(),
         };
         let f = header.flags;
 
         if header.len < 1 {
-            return Err(bad("len must be at least 1; zero-length blocks are never published",
+            return Err(bad(
+                "len must be at least 1; zero-length blocks are never published",
             ));
         }
         if header.channels < 1 || header.channels > 64 {
@@ -214,7 +243,8 @@ impl SampleBlock {
             return Err(bad("a reserved flag bit (8..15) is set"));
         }
         if f.contains(BlockFlags::PARTIAL_CHANNELS) {
-            return Err(bad("PARTIAL_CHANNELS is derived by the constructor, never supplied",
+            return Err(bad(
+                "PARTIAL_CHANNELS is derived by the constructor, never supplied",
             ));
         }
         match header.lost {
@@ -234,24 +264,27 @@ impl SampleBlock {
                 BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY,
             )
         {
-            return Err(bad("a burst flag never accompanies GAP_BEFORE, RESTARTED or SEQ_DISCONTINUITY",
+            return Err(bad(
+                "a burst flag never accompanies GAP_BEFORE, RESTARTED or SEQ_DISCONTINUITY",
             ));
         }
         // SC-16: the direction rules.
         match header.direction {
-            Direction::Rx if f.intersects(BlockFlags::START_OF_BURST | BlockFlags::END_OF_BURST) => {
-                return Err(bad("a receive block must not carry START_OF_BURST or END_OF_BURST",
+            Direction::Rx
+                if f.intersects(BlockFlags::START_OF_BURST | BlockFlags::END_OF_BURST) =>
+            {
+                return Err(bad(
+                    "a receive block must not carry START_OF_BURST or END_OF_BURST",
                 ));
             }
             Direction::Tx
                 if f.intersects(
-                    BlockFlags::GAP_BEFORE
-                        | BlockFlags::RESTARTED
-                        | BlockFlags::SEQ_DISCONTINUITY,
+                    BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY,
                 ) =>
             {
                 // A jump in transmit time is a discontinuity (SC-24), never a flagged gap.
-                return Err(bad("a transmit block must not carry GAP_BEFORE, RESTARTED or SEQ_DISCONTINUITY",
+                return Err(bad(
+                    "a transmit block must not carry GAP_BEFORE, RESTARTED or SEQ_DISCONTINUITY",
                 ));
             }
             _ => {}
@@ -262,7 +295,8 @@ impl SampleBlock {
             .and_then(|v| v.checked_mul(bytes_per_sample as u64))
             .ok_or_else(|| bad("the block's byte size overflows"))?;
         if buffer.len_bytes < needed {
-            return Err(bad("buffer.len_bytes is smaller than channels · len · bytes_per_sample",
+            return Err(bad(
+                "buffer.len_bytes is smaller than channels · len · bytes_per_sample",
             ));
         }
 
@@ -271,7 +305,36 @@ impl SampleBlock {
         if header.valid != ChannelMask::full(header.channels) {
             header.flags = header.flags | BlockFlags::PARTIAL_CHANNELS;
         }
-        Ok(SampleBlock { header, buffer })
+        Ok(SampleBlock {
+            header,
+            buffer,
+            host: None,
+        })
+    }
+
+    /// Builds a block whose bytes are host memory the producer attaches, with every
+    /// check of [`SampleBlock::new`]; the buffer reference names `memory_domain` with
+    /// the bytes' length (SC-8, SC-10a, KA-3).
+    pub fn new_host(
+        header: BlockHeader,
+        memory_domain: MemoryDomainId,
+        bytes: std::sync::Arc<[u8]>,
+        bytes_per_sample: u32,
+    ) -> Result<SampleBlock, StreamError> {
+        let buffer = BufferRef {
+            memory_domain,
+            handle: 0,
+            len_bytes: bytes.len() as u64,
+        };
+        let mut block = SampleBlock::new(header, buffer, bytes_per_sample)?;
+        block.host = Some(HostBytes(bytes));
+        Ok(block)
+    }
+
+    /// The host bytes a producer attached with [`SampleBlock::new_host`], or `None`
+    /// (SC-8).
+    pub fn host_bytes(&self) -> Option<&[u8]> {
+        self.host.as_ref().map(|h| &h.0[..])
     }
 
     /// The validated header, with `PARTIAL_CHANNELS` derived (SC-10).
