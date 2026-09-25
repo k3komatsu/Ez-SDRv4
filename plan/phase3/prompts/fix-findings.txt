@@ -1,0 +1,31 @@
+You are continuing the Phase 3 implementation of Ez-SDR v4 in
+/Users/komatsu/GoogleDrive/github/Ez-SDRv4 (branch `main`). A review has run,
+and the owner has accepted the findings listed below; their verdicts are in
+plan/phase3/00-overview.md section 11.
+
+Fix exactly these findings, and nothing else.
+
+For each finding:
+1. make the fix, in the smallest change that makes the rule true;
+2. if the finding says a test proves too little, strengthen that test's
+   assertion to the rule's obligation (OV-3); never weaken one;
+3. disable the fixed rule once in a scratch copy (for example with
+   plan/phase3/tools/mutate.py and a mutation of your own in a separate JSON
+   file) and confirm the test fails; restore it (PO-12);
+4. run the three commands of plan section 0.5; all must pass;
+5. record in plan/phase3/implementation-notes.md, under a heading
+   "## Fixes after <review name>": the finding's id, what you changed, the new
+   test counts, the mutation check, and a suggested commit subject.
+
+If a fix changes a rule's text, change spec 11 or 12 and the design/ spec it
+was applied to in the same way, and say so in the notes. The patches in
+plan/phase3/patches/ are the record of what Gate P accepted: do not edit them.
+
+Every rule of your earlier sessions still applies, including the stop rule: if
+a finding cannot be fixed as described without contradicting a spec, stop and
+report instead of improvising. Report to the owner in Japanese.
+
+Findings to fix:
+
+<paste the accepted findings here, each with its id, severity, location and
+the recommended fix>

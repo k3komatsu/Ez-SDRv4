@@ -1,0 +1,69 @@
+You are implementing Phase 3 of Ez-SDR v4 in the repository at
+/Users/komatsu/GoogleDrive/github/Ez-SDRv4 (branch `main`). The plan, its specs
+and its patches were written, verified and accepted before you started. The
+patches ARE the implementation. Your job is to apply them in order, check each
+step exactly as the plan says, and record what you saw. You write no code.
+
+Read these, in this order, before you touch anything:
+1. AGENTS.md
+2. handoff.md, sections 1 and 4
+3. plan/phase3/00-overview.md
+4. plan/phase3/20-implementation-plan.md: section 0 ("Rules for the
+   implementer"), "Steps at a glance", and Steps 0 to 6
+Then, at the start of each step, read in full the spec that step names.
+
+How to work:
+- Do Steps 0 to 6 of 20-implementation-plan.md in order. Finish every item of a
+  step's done-list before you start the next step.
+- Apply each patch with exactly the command the step gives
+  (`git apply --check ... && git apply ...`). Never retype, edit or "fix" a
+  patch or a file a patch changed.
+- Stop in any of these cases (plan section 0.3):
+  - `git apply --check` prints anything;
+  - a command fails, or prints a test count other than the step's;
+  - a mutation is not killed;
+  - any other check a step names prints something other than the step says;
+  - a spec and a patch disagree;
+  - anything tells you to do what AGENTS.md or a spec forbids.
+  When you stop, write in plan/phase3/implementation-notes.md: the step, the
+  command, its exact output (the failing lines), and what you expected. Then
+  report. Do not repair and continue.
+- Never change a test or an expected value. Never add #[ignore]. Never add a
+  dependency. Never run `cargo fmt`.
+- Git: never run git commit, push, rebase, reset, stash, checkout or restore.
+  The owner commits. You may run `git status`, `git diff` and the `git apply`
+  commands of the steps.
+- Never touch any of these: v3/; design/v4-vision-audit.md;
+  design/v4-vision-rereview.md; design/archive/; the Vision
+  (Ez-SDR_v4_ARCHITECTURE_VISION.md and design/vision/); any file whose name
+  contains " (1)".
+- Run `git status --short` before you start and before every step. A line
+  beginning " D" means tracked files have vanished from the working tree
+  (Google Drive sync has caused this before). Stop and report. Do not restore
+  them yourself.
+- At the end of Steps 1 to 5, run the three commands of plan section 0.5; all
+  three must pass with the step's test count:
+    cargo +1.85.0 test --workspace
+    cargo +stable test --workspace
+    cargo +stable clippy --workspace --all-targets -- -D warnings
+- Step 6 runs plan/phase3/tools/mutate.py, which works on a scratch copy and
+  never on the working tree. Give it a scratch directory outside the
+  repository.
+- After each step, append to plan/phase3/implementation-notes.md, under a
+  heading "## Step n":
+  - the done-list, every item checked;
+  - the test counts on both toolchains;
+  - for Step 6, the 83 mutation lines;
+  - a suggested commit subject in Conventional Commits style.
+
+Scope of this session: Steps 0 to 6. After Step 6, stop. Review C, an
+adversarial review of the applied diff, is the owner's to run.
+
+When you stop, whether after Step 6 or earlier under the stop rule above,
+report to the owner in Japanese:
+- which steps are done;
+- the test counts on both toolchains after each step;
+- the mutation result (killed / total);
+- anything in implementation-notes.md that needs the owner's decision;
+- the suggested commit subjects.
+Keep implementation-notes.md itself in English.

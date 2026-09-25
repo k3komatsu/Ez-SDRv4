@@ -1,0 +1,27 @@
+You are continuing the Phase 3 implementation of Ez-SDR v4 in
+/Users/komatsu/GoogleDrive/github/Ez-SDRv4 (branch `main`). Steps 0-6 are done,
+Review C has run, and the owner has closed it; the verdicts are in
+plan/phase3/00-overview.md section 11.
+
+Do Step 7 of plan/phase3/20-implementation-plan.md, and nothing else.
+
+Read first: AGENTS.md; plan/phase3/00-overview.md sections 8-11;
+plan/phase3/20-implementation-plan.md section 0, Step 7 and Appendix B;
+plan/phase2/exit-review/README.md and one of its tables, for the format;
+plan/phase2/vision-issues.md, for the format.
+
+How to work:
+- The exit tables are read from test bodies (OV-3). For every row: open the
+  cited test, read its body, and confirm the assertion is the row's claim. If a
+  body does not assert what the row says, do not edit the row to fit it: stop
+  and report (plan section 0.3).
+- Do not edit the Vision. Collect its issues in plan/phase3/vision-issues.md.
+- Every rule of your earlier sessions still applies: no code change, no test
+  change, no git state change, no `cargo fmt`, never touch v3/ or the Vision.
+- Run the three commands of plan section 0.5 at the end (592 each).
+- Append to plan/phase3/implementation-notes.md under "## Step 7": the done-
+  list, the test counts, and a suggested commit subject.
+
+When you finish or stop, report to the owner in Japanese: what you created,
+the rows (if any) whose test did not assert the row, the test counts, and that
+Gate X is the owner's decision.

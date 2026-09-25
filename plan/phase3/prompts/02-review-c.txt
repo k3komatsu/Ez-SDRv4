@@ -1,0 +1,93 @@
+You are the adversarial reviewer for "Review C" of the Ez-SDR v4 Phase 3
+implementation, in /Users/komatsu/GoogleDrive/github/Ez-SDRv4 (branch `main`).
+Steps 0-6 of plan/phase3/20-implementation-plan.md have been carried out: the
+five patches of plan/phase3/patches/ are applied (the Kernel's KB-1 and KB-2,
+the `radio` and `sim` Vocabularies 1.1.0 with the SimulationChannel,
+MockRadio 1.1.0, the acceptance tests, and the amended spec text), and the 83
+mutations of Appendix C were run.
+
+This is a review only:
+- Do not edit, create or delete anything in the repository.
+- Never run git commands that change state. Never run `cargo fmt`.
+- Never touch v3/.
+- For anything you run, copy the working tree into a scratch directory outside
+  the repository (`rsync -a --exclude target --exclude v3 --exclude .git ./
+  <scratch>/`) and set CARGO_TARGET_DIR inside it. The zsh shell does not
+  word-split an unquoted $VAR: write cargo arguments out literally.
+- Run things. Phase 2's Gate X review read the code and ran nothing, and a
+  later dynamic review found two reachable rules no test pinned
+  (plan/phase2/implementation-notes.md, "Post-acceptance dynamic review").
+
+Read first: AGENTS.md; plan/phase3/00-overview.md; plan/phase3/11-simulation-
+channel.md and plan/phase3/12-amendments.md in full; design/07-radio-model.md,
+design/08-simulation.md and design/09-mock-radio.md as patched;
+plan/phase3/20-implementation-plan.md, including its three appendices;
+plan/phase3/implementation-notes.md; plan/phase3/reviews/planning-reviews.md
+(what the planning review already found and how it was resolved).
+
+What is under review: the diff from commit 612b9eb to the working tree
+(`git diff 612b9eb -- crates schemas design`) and specs 11 and 12.
+
+Check, in this order:
+1. Conformance, rule by rule. For every CH rule, KB-1, KB-2, and every rule
+   VB-1 to VB-8 amend or add (RM-1, RM-4, RM-9, RM-13, RM-14, RM-16, RM-23,
+   SE-1, SE-6, SE-12, MR-1 to MR-4, MR-13 to MR-18, MR-25, MR-27, MR-30,
+   MR-31 to MR-36), read the code against the rule text and report every
+   divergence. Recompute from the rules, and compare with the code and tests:
+   - the field of CH-4: path order, the delay's rounding, the frequency gate;
+   - the noise of CH-5: the stream names, sigma, the Box-Muller formula;
+   - finality (CH-9): every place MockRadio changes what it radiates, and
+     every place it evaluates the field. Try to construct a stepping order, a
+     zero-lead burst, a cold change, a gain change or a stop that makes a
+     receiver's samples depend on the order of stepping, and run it;
+   - the transmit segments of MR-32: the latest-start resolution, the path
+     delay, the cuts, the held bursts a stop or cold change withdraws;
+   - the LO phases of MR-34: the draw order and the timed-tune constants;
+   - strict publication and emission (MR-14, MR-15) and the next wakeups;
+   - the stop cut (MR-25): a held burst that starts before the stop instant
+     is transmitted up to it, one that starts at or after it is cancelled;
+     and the rounded-up late comparison (MR-17).
+2. Tests (OV-3).
+   - Every test named in specs 11 and 12 and in Appendix B exists under exactly
+     that name, and its assertion is the rule's obligation.
+   - The acceptance tests are the carriers 00-overview.md section 8 names.
+   - Re-run plan/phase3/tools/mutate.py in your scratch copy, then design at
+     least ten mutations of your own that Appendix C does not contain — in
+     particular in MockRadio's channel mode and in the medium — and report
+     which survive.
+   - Look for a test that could pass while the behaviour it carries is broken.
+3. Architecture and governance:
+   - the channel lives only in ezsdr_sim::channel and MockRadio's private
+     channel module; no Module crate depends on another (MA-3, PO-8);
+   - Cargo.lock gains no package (PO-4); no crate was added;
+   - kernel_surface reports 116 NEW / 292 public items, and InputStore is the
+     only new public Kernel item;
+   - PO-11 (no HashMap, SystemTime, Instant::now, thread::spawn, rand:: in the
+     Phase 2 and 3 code);
+   - experiments.rs names no Mock type (Vision §58 #10);
+   - every schema matches its Rust type (PO-7), and SCHEMA_CHANGELOG.md has the
+     Phase 3 entry;
+   - the amended spec text in design/ is spec 12's, verbatim.
+4. Decisions. For each of Z1-Z11 (00-overview.md §4), C1-C11 (spec 11 §5) and
+   M11-M15 (spec 12 VB-7), say whether the evidence supports the choice. Mark
+   what you could not verify INFERRED.
+5. Run in the scratch copy:
+     cargo +1.85.0 test --workspace
+     cargo +stable test --workspace
+     cargo +stable clippy --workspace --all-targets -- -D warnings
+   Report the counts (592 expected), and any failure with its output.
+
+Every finding needs:
+- a location (file:line, or the rule id);
+- evidence (quoted code or spec text, or the command you ran and its output);
+- a severity:
+  - P0: wrong behaviour, a broken rule, or a contradiction;
+  - P1: likely to mislead a later phase, or a test that proves less than its
+    rule;
+  - P2: clarity;
+- one recommended fix.
+No finding without evidence.
+
+Final message: a verdict (PASS, PASS_WITH_RISK or FAIL); counts per severity;
+every P0 and P1 in full; the P2s one line each; the mutation results (Appendix
+C and your own); the test counts.

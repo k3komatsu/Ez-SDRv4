@@ -1,0 +1,348 @@
+diff --git a/crates/ezsdr-kernel/src/coordinator/mod.rs b/crates/ezsdr-kernel/src/coordinator/mod.rs
+index b10c2803e9c292e5b5a6b087b7b10e5a7efee8d0..3fa7a1f8cb0bd28c1497ed07b215ea4455b41489 100644
+--- a/crates/ezsdr-kernel/src/coordinator/mod.rs
++++ b/crates/ezsdr-kernel/src/coordinator/mod.rs
+@@ -103,7 +103,7 @@ pub struct RunHandle {
+     lease: Lease,
+     log: SessionLog,
+     inputs: Vec<ArtifactRef>,
+-    store: BTreeMap<ContentHash, Vec<u8>>,
++    store: Arc<std::sync::Mutex<BTreeMap<ContentHash, Arc<[u8]>>>>,
+     agenda: Vec<(i64, usize, crate::event::Action)>,
+     t0: Option<TimePoint>,
+     admission: crate::binding::AdmissionResult,
+diff --git a/crates/ezsdr-kernel/src/coordinator/pipeline.rs b/crates/ezsdr-kernel/src/coordinator/pipeline.rs
+index 52d123d20786c562a51472f92c5ce341d8d4c748..06a7ae03415566f12ea33de7c1793a5947f66edc 100644
+--- a/crates/ezsdr-kernel/src/coordinator/pipeline.rs
++++ b/crates/ezsdr-kernel/src/coordinator/pipeline.rs
+@@ -256,7 +256,9 @@ pub(super) fn assemble(
+         lease,
+         log: SessionLog::new(),
+         inputs: Vec::new(),
+-        store: assembly.inputs,
++        store: Arc::new(Mutex::new(
++            assembly.inputs.into_iter().map(|(hash, bytes)| (hash, Arc::from(bytes))).collect(),
++        )),
+         agenda: Vec::<(i64, usize, Action)>::new(),
+         t0: None,
+         admission: AdmissionResult::default(),
+@@ -425,14 +427,14 @@ impl RunHandle {
+             let refusal =
+                 if !(waveform.uri.starts_with("mem:") || waveform.uri.starts_with("file://")) {
+                     Some("uri must begin with mem: or file://".to_owned())
+-                } else if let Some(bytes) = self.store.get(&waveform.hash) {
++                } else if let Some(bytes) = crate::module_api::InputStore::get(&*self.store, &waveform.hash) {
+                     if bytes.len() as u64 != waveform.size_bytes {
+                         Some(format!(
+                             "size is {}, but the ArtifactRef declares {}",
+                             bytes.len(),
+                             waveform.size_bytes
+                         ))
+-                    } else if crate::hash::ContentHash::of_bytes(bytes) != waveform.hash {
++                    } else if crate::hash::ContentHash::of_bytes(&bytes) != waveform.hash {
+                         Some("bytes do not match the ArtifactRef hash".to_owned())
+                     } else {
+                         None
+@@ -729,6 +731,7 @@ impl RunHandle {
+                 actions: self.shared.queue(instance).clone(),
+                 actions_out: submitter.clone(),
+                 environment: self.shared.ctx.environment.clone(),
++                inputs: self.store.clone(),
+                 links: self.attached_links.remove(&fragment.id).unwrap_or_default(),
+                 components,
+                 host_budget: budget,
+@@ -1190,7 +1193,7 @@ pub(super) fn submit(
+             run.inputs.push(reference.clone());
+             reference
+         };
+-        run.store.entry(hash).or_insert_with(|| bytes.to_vec());
++        lock(&run.store).entry(hash).or_insert_with(|| Arc::from(bytes));
+         Some(reference)
+     } else {
+         None
+diff --git a/crates/ezsdr-kernel/src/module_api.rs b/crates/ezsdr-kernel/src/module_api.rs
+index bdcc3861b31301b8ec20658ebfc5e53eb9352cae..97bfc706b50c3356c429391e2c7a5d47480537f5 100644
+--- a/crates/ezsdr-kernel/src/module_api.rs
++++ b/crates/ezsdr-kernel/src/module_api.rs
+@@ -1035,6 +1035,30 @@ pub trait ActionSubmitter: Send + Sync {
+     fn submit(&self, action: Action) -> Result<ActionId, Vec<Violation>>;
+ }
+ 
++/// Where a Module reads a Run input by its content hash: the bytes of every input the
++/// Spec names (KC-9) and of every waveform a Session ingested (KC-28). A radio Provider
++/// that transmits sample content reads a `TxBurst` waveform here, because the Action
++/// carries only its `ArtifactRef` (RS-44a, MA-5a).
++///
++/// Rule: RS-44a, MA-5a.
++pub trait InputStore: Send + Sync {
++    /// The bytes stored under `hash`, or `None` when the Run holds no such input
++    /// (RS-44a).
++    fn get(&self, hash: &ContentHash) -> Option<Arc<[u8]>>;
++}
++
++impl InputStore for BTreeMap<ContentHash, Arc<[u8]>> {
++    fn get(&self, hash: &ContentHash) -> Option<Arc<[u8]>> {
++        BTreeMap::get(self, hash).cloned()
++    }
++}
++
++impl InputStore for std::sync::Mutex<BTreeMap<ContentHash, Arc<[u8]>>> {
++    fn get(&self, hash: &ContentHash) -> Option<Arc<[u8]>> {
++        self.lock().unwrap_or_else(|e| e.into_inner()).get(hash).cloned()
++    }
++}
++
+ /// What a Module is handed at `prepare`. Every handle is shared, so a Module may keep
+ /// it and use it from `prepare` through `cleanup` (MA-5a, MA-6, MA-46).
+ pub struct PrepareContext {
+@@ -1056,6 +1080,9 @@ pub struct PrepareContext {
+     /// The BindingProfile's `environment`, verbatim and read-only; a Module reads the
+     /// sections its own Vocabularies define (MA-5a, SB-26).
+     pub environment: Arc<BTreeMap<Namespace, serde_json::Value>>,
++    /// The Run's inputs by content hash, read-only; a Session's later waveforms are
++    /// added before the Action that names them is dispatched (RS-44a, MA-5a).
++    pub inputs: Arc<dyn InputStore>,
+     /// The link ends bound to this fragment's ports (MA-27).
+     pub links: Vec<AttachedPort>,
+     /// The component descriptors in this Executor's Island, keyed by component name (MA-19).
+diff --git a/crates/ezsdr-kernel/tests/coordinator.rs b/crates/ezsdr-kernel/tests/coordinator.rs
+index d9f93b9d2ecd9f165f440787ec9fcaeb917a01e0..73c3d9ab26b3d360e6b4188c93ac97d5c1592371 100644
+--- a/crates/ezsdr-kernel/tests/coordinator.rs
++++ b/crates/ezsdr-kernel/tests/coordinator.rs
+@@ -3009,3 +3009,84 @@ fn kc_30_a_panicking_time_cancel_is_a_cleanup_failure() {
+                 .starts_with("KC-30: a Module panicked during cleanup: Authority cancel()")
+     }));
+ }
++
++// ---------------------------------------------------------------- Phase 3 amendments (KB)
++
++#[test]
++fn kb_01_a_provider_reads_a_spec_input_by_hash() {
++    let mut spec = spec_one();
++    let (bytes, reference) = input_ref();
++    add_schedule(
++        &mut spec,
++        "radio",
++        10,
++        tx_template("radio/tx", &reference, "send_asap_and_flag"),
++    );
++    let probe = Probe::new();
++    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
++    assembly.providers.insert(
++        Ident::parse("radio").unwrap(),
++        Box::new(
++            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
++                .declaring("radio/tx", 1, 1)
++                .registering_at_arm("radio/tx"),
++        ),
++    );
++    let size = bytes.len();
++    assembly.inputs.insert(reference.hash.clone(), bytes);
++    let run = start_spec_run(&spec, &profile_one(), assembly).unwrap();
++    let manifest = run.finish();
++    assert_eq!(manifest.inputs.len(), 1);
++    assert_eq!(probe.with_prefix("p:burst_input:"), vec![format!("p:burst_input:{size}")]);
++}
++
++#[test]
++fn kb_01_a_provider_reads_a_session_waveform_by_hash() {
++    let probe = Probe::new();
++    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
++    assembly.providers.insert(
++        Ident::parse("radio").unwrap(),
++        Box::new(
++            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
++                .declaring("radio/tx", 1, 1)
++                .registering_at_arm("radio/tx"),
++        ),
++    );
++    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
++    let bytes: Vec<u8> = (0..800u32).map(|i| (i % 251) as u8).collect();
++    let entry = run
++        .submit(
++            SessionAction::Vocabulary {
++                ns: ns("test"),
++                verb: Ident::parse("start_repeat").unwrap(),
++                target: ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap(),
++                at: None,
++                params: BTreeMap::new(),
++            },
++            Some(&bytes),
++        )
++        .unwrap();
++    assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
++    let _ = run.finish();
++    assert_eq!(probe.with_prefix("p:burst_input:"), vec!["p:burst_input:800".to_owned()]);
++}
++
++#[test]
++fn kb_02_the_manifest_records_the_fidelity_settled_in_prepare() {
++    let probe = Probe::new();
++    let settled = ezsdr_kernel::module_api::Fidelity {
++        rf: ezsdr_kernel::module_api::RfFidelity::ImpairmentModel,
++        ..ezsdr_kernel::module_api::Fidelity::NONE
++    };
++    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
++    assembly.providers.insert(
++        Ident::parse("radio").unwrap(),
++        Box::new(
++            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
++                .settling_fidelity(settled),
++        ),
++    );
++    let run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
++    let manifest = run.finish();
++    assert_eq!(manifest.run.fidelity, settled);
++}
+diff --git a/crates/ezsdr-kernel/tests/kernel_surface_allow.txt b/crates/ezsdr-kernel/tests/kernel_surface_allow.txt
+index 3935e9662c2cac2998e443e1da9a79881bc1fea8..d44305452c9865d69b8702353e136b01666af66a 100644
+--- a/crates/ezsdr-kernel/tests/kernel_surface_allow.txt
++++ b/crates/ezsdr-kernel/tests/kernel_surface_allow.txt
+@@ -310,6 +310,7 @@ module_api::AuthorityDescriptor = TimeAuthority
+ module_api::Requested = Capability matcher
+ module_api::CoerceReport = coercion policy
+ module_api::PrepareContext = NEW: MA-6's handle set, which MA-46 freezes so a Plugin host needs no Kernel change.
++module_api::InputStore = NEW: KB-1's read handle on the Run's inputs by hash, so a Provider can read a TxBurst waveform the Action names only by its ArtifactRef.
+ module_api::Endpoint = NEW: SC-19's attached link end, handed over at prepare.
+ module_api::AttachedPort = NEW: which of a component's ports an Endpoint belongs to.
+ module_api::StepOutcome = step(until) requirement
+diff --git a/crates/ezsdr-kernel/tests/module_api.rs b/crates/ezsdr-kernel/tests/module_api.rs
+index 0e546543a5e68fb0fb036588b8be58b361bb2ebb..f7252f80658b38ec1c5926013eed402f4ffc5c28 100644
+--- a/crates/ezsdr-kernel/tests/module_api.rs
++++ b/crates/ezsdr-kernel/tests/module_api.rs
+@@ -392,6 +392,7 @@ impl Harness {
+             actions: self.actions.clone(),
+             actions_out: self.submitter.clone(),
+             environment: Arc::new(BTreeMap::new()),
++            inputs: Arc::new(BTreeMap::<ezsdr_kernel::hash::ContentHash, Arc<[u8]>>::new()),
+             links: Vec::new(),
+             components: BTreeMap::new(),
+             host_budget: RelativeBudget::new(Duration::new(
+diff --git a/crates/ezsdr-kernel/tests/run_doubles.rs b/crates/ezsdr-kernel/tests/run_doubles.rs
+index b20d25671edb0ecad5a3ba617506302b52907783..2a8a03860145dad34985ce7e46ad5d6e6fad5706 100644
+--- a/crates/ezsdr-kernel/tests/run_doubles.rs
++++ b/crates/ezsdr-kernel/tests/run_doubles.rs
+@@ -41,6 +41,7 @@ fn ma_44_the_run_doubles_record_their_calls() {
+         actions: queue,
+         actions_out: submitter,
+         environment: Arc::new(BTreeMap::new()),
++        inputs: Arc::new(BTreeMap::<ezsdr_kernel::hash::ContentHash, Arc<[u8]>>::new()),
+         links: Vec::new(),
+         components: BTreeMap::new(),
+         host_budget,
+diff --git a/crates/ezsdr-kernel/tests/support/doubles.rs b/crates/ezsdr-kernel/tests/support/doubles.rs
+index 78df7839ecc86d28e07b1806a0b12637a47622bc..562fd9e1c55beba4a4e6ff6c5f336ef0685266c9 100644
+--- a/crates/ezsdr-kernel/tests/support/doubles.rs
++++ b/crates/ezsdr-kernel/tests/support/doubles.rs
+@@ -498,6 +498,12 @@ impl TestProvider {
+         self
+     }
+ 
++    /// Changes the declared fidelity in place, as a Provider settling it in `prepare`
++    /// does (MA-10 as KB-2 amends it).
++    pub fn set_fidelity(&mut self, fidelity: Fidelity) {
++        self.instance.fidelity = fidelity;
++    }
++
+     /// Reports another instance id than its root's (X7, D91).
+     pub fn with_instance_id(mut self, id: ResourceId) -> TestProvider {
+         self.instance.id = id;
+diff --git a/crates/ezsdr-kernel/tests/support/run_doubles.rs b/crates/ezsdr-kernel/tests/support/run_doubles.rs
+index 4bb6b1823b87c9c7ee7c8db5ac9d245ecbb5cfd0..68bcf09d1b7003c7234a201bf10838c9c1ea68ba 100644
+--- a/crates/ezsdr-kernel/tests/support/run_doubles.rs
++++ b/crates/ezsdr-kernel/tests/support/run_doubles.rs
+@@ -344,6 +344,8 @@ pub struct SteppedProvider {
+     pub prepare_abort: Option<String>,
+     pub block_step_at: Option<i64>,
+     pub step_gate: Option<Arc<(Mutex<bool>, Condvar)>>,
++    pub inputs: Option<Arc<dyn ezsdr_kernel::module_api::InputStore>>,
++    pub settle_fidelity: Option<ezsdr_kernel::module_api::Fidelity>,
+ }
+ 
+ impl SteppedProvider {
+@@ -379,9 +381,17 @@ impl SteppedProvider {
+             prepare_abort: None,
+             block_step_at: None,
+             step_gate: None,
++            inputs: None,
++            settle_fidelity: None,
+         }
+     }
+ 
++    /// Sets its instance's fidelity to `fidelity` inside `prepare` (MA-10 as KB-2 amends it).
++    pub fn settling_fidelity(mut self, fidelity: ezsdr_kernel::module_api::Fidelity) -> SteppedProvider {
++        self.settle_fidelity = Some(fidelity);
++        self
++    }
++
+     /// Schedules these primary-root instants at `start`.
+     pub fn with_wakeups(mut self, ticks: &[i64]) -> SteppedProvider {
+         self.wakeups = ticks.to_vec();
+@@ -549,8 +559,14 @@ impl SteppedProvider {
+                     let value = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned());
+                     self.record(format!("update:{key}={value}"));
+                 }
+-                Action::TxBurst { at, .. } => {
+-                    self.record(format!("burst_at:{}", at.time_point.ticks))
++                Action::TxBurst { at, waveform, .. } => {
++                    self.record(format!("burst_at:{}", at.time_point.ticks));
++                    let found = self
++                        .inputs
++                        .as_ref()
++                        .and_then(|inputs| inputs.get(&waveform.hash))
++                        .map_or_else(|| "missing".to_owned(), |bytes| bytes.len().to_string());
++                    self.record(format!("burst_input:{found}"));
+                 }
+                 _ => {}
+             }
+@@ -586,6 +602,10 @@ impl Provider for SteppedProvider {
+         self.clocks = Some(ctx.clocks.clone());
+         self.events = Some(ctx.events.clone());
+         self.actions = Some(ctx.actions.clone());
++        self.inputs = Some(ctx.inputs.clone());
++        if let Some(fidelity) = self.settle_fidelity {
++            self.inner.set_fidelity(fidelity);
++        }
+         self.outs.clear();
+         self.handles.clear();
+         for attached in &ctx.links {
+diff --git a/crates/ezsdr-mock-radio/tests/mock_radio.rs b/crates/ezsdr-mock-radio/tests/mock_radio.rs
+index 000fa8f9c1409298c5b31248b97a8c1653f64058..5dd3ac2e3df79b784694ae660082e10d43133562 100644
+--- a/crates/ezsdr-mock-radio/tests/mock_radio.rs
++++ b/crates/ezsdr-mock-radio/tests/mock_radio.rs
+@@ -219,6 +219,7 @@ impl Harness {
+             actions: actions.clone(),
+             actions_out: Arc::new(RefusingSubmitter),
+             environment,
++            inputs: Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new()),
+             links: attached,
+             components: BTreeMap::new(),
+             host_budget: RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap(),
+@@ -474,6 +475,7 @@ fn mr_07_prepare_cases() {
+         actions: second.actions.clone(),
+         actions_out: Arc::new(RefusingSubmitter),
+         environment: Arc::new(BTreeMap::new()),
++        inputs: Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new()),
+         links: Vec::new(),
+         components: BTreeMap::new(),
+         host_budget: RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap(),
+@@ -499,6 +501,7 @@ fn mr_07_prepare_cases() {
+         actions: second.actions.clone(),
+         actions_out: Arc::new(RefusingSubmitter),
+         environment: Arc::new(BTreeMap::new()),
++        inputs: Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new()),
+         links: Vec::new(),
+         components: BTreeMap::new(),
+         host_budget: RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap(),
+diff --git a/crates/ezsdr-sink-capture/tests/sink_capture.rs b/crates/ezsdr-sink-capture/tests/sink_capture.rs
+index 7f63ca996c465ba5bc5d68ea23d6b49a8ae2b841..5ec8336efd3b5c6ff1c25c4492e854493b948445 100644
+--- a/crates/ezsdr-sink-capture/tests/sink_capture.rs
++++ b/crates/ezsdr-sink-capture/tests/sink_capture.rs
+@@ -233,6 +233,7 @@ impl Environment {
+             actions: self.actions.clone(),
+             actions_out: self.submitter.clone(),
+             environment: Arc::new(BTreeMap::new()),
++            inputs: Arc::new(BTreeMap::<ezsdr_kernel::hash::ContentHash, Arc<[u8]>>::new()),
+             links,
+             components: BTreeMap::new(),
+             host_budget: RelativeBudget::new(ezsdr_kernel::time::Duration::new(

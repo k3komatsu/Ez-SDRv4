@@ -1,0 +1,2001 @@
+diff --git a/crates/ezsdr-acceptance/src/rig.rs b/crates/ezsdr-acceptance/src/rig.rs
+index 95587bd1840266a2e896f8ae74272b35d3012c25..9ba3bde33ef19a62245298b53b8ab0c02a1572e3 100644
+--- a/crates/ezsdr-acceptance/src/rig.rs
++++ b/crates/ezsdr-acceptance/src/rig.rs
+@@ -73,9 +73,9 @@ fn profile_document(profile: &str, selector: JsonValue, dir: &Path, environment:
+         "version": 1,
+         "bindings": {
+             "radio": {
+-                "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 0, "patch": 0 } },
++                "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 1, "patch": 0 } },
+                 "selector": selector,
+-                "profile": { "name": profile, "version": { "major": 1, "minor": 0, "patch": 0 } }
++                "profile": { "name": profile, "version": { "major": 1, "minor": 1, "patch": 0 } }
+             },
+             "rec": recorder,
+             "sim": {
+@@ -115,10 +115,12 @@ pub fn assemble(profile_doc: &JsonValue, inputs: BTreeMap<ContentHash, Vec<u8>>)
+     let authority = Box::new(ezsdr_sim_engine::SimEngine::from_binding(authority_binding, clocks.clone()).expect("build simulation Engine"));
+     let mut providers: BTreeMap<Ident, Box<dyn Provider>> = BTreeMap::new();
+     let mut sinks: BTreeMap<Ident, Box<dyn Sink>> = BTreeMap::new();
++    let medium = ezsdr_sim::channel::Medium::new();
+     for (name, binding) in &profile.bindings {
+         match binding.module.id.as_str() {
+             "ezsdr.radio.mock" => {
+-                providers.insert(name.clone(), Box::new(ezsdr_mock_radio::MockRadio::from_binding(binding).expect("build Provider")));
++                let radio = ezsdr_mock_radio::MockRadio::from_binding(binding).expect("build Provider").with_medium(medium.clone());
++                providers.insert(name.clone(), Box::new(radio));
+             }
+             "ezsdr.sink.capture" => {
+                 sinks.insert(name.clone(), Box::new(ezsdr_sink_capture::CaptureSink::from_binding(binding).expect("build capture Sink")));
+diff --git a/crates/ezsdr-mock-radio/src/channel.rs b/crates/ezsdr-mock-radio/src/channel.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ab94246bead31490cd0726b0dea859b10398ada7
+--- /dev/null
++++ b/crates/ezsdr-mock-radio/src/channel.rs
+@@ -0,0 +1,141 @@
++//! MockRadio's radio-side signal model on the SimulationChannel: what its transmit side
++//! radiates and how its receive side turns the field into samples (MR-31…MR-36).
++
++use std::collections::BTreeMap;
++use std::sync::{Arc, Mutex, MutexGuard};
++
++use ezsdr_kernel::time::Rational;
++use ezsdr_sim::channel::{Radiated, RootInstant, Transmitter};
++
++/// A parameter's value over time: `initial` until its first change, and each change from
++/// its effective root tick on; changes are appended in application order (MR-33, UC-2).
++#[derive(Clone, Debug)]
++pub(crate) struct Timeline {
++    initial: f64,
++    changes: Vec<(i64, f64)>,
++}
++
++impl Timeline {
++    pub(crate) fn new(initial: f64) -> Timeline {
++        Timeline { initial, changes: Vec::new() }
++    }
++
++    pub(crate) fn set(&mut self, tick: i64, value: f64) {
++        self.changes.push((tick, value));
++    }
++
++    /// The value in force at `t`: the last change whose tick is at or before `t`.
++    pub(crate) fn at(&self, t: RootInstant) -> f64 {
++        self.changes
++            .iter()
++            .rev()
++            .find(|(tick, _)| t.is_at_or_after(*tick))
++            .map_or(self.initial, |(_, value)| *value)
++    }
++}
++
++/// One admitted burst as the medium sees it (MR-32).
++pub(crate) struct Segment {
++    pub origin: i64,
++    pub ratio: Rational,
++    pub start: i64,
++    pub len: i64,
++    pub repeat: bool,
++    pub channels: u16,
++    /// `(n · channels + c) · 2` is sample `n`'s real part on channel `c`, `+ 1` its
++    /// imaginary part, each already clipped to the contract's full scale.
++    pub samples: Arc<[f32]>,
++    /// The first sample not radiated, once a stop or a cold change cut the burst.
++    pub end: Option<i64>,
++}
++
++/// The transmit side's plan: every admitted burst keyed by `(clock generation, start)`,
++/// and the parameters that shape what it radiates (MR-32, MR-33, MR-34).
++pub(crate) struct TxPlan {
++    pub segments: BTreeMap<(u32, i64), Segment>,
++    pub gain_db: Timeline,
++    pub frequency_hz: Timeline,
++    pub phase: Vec<Timeline>,
++    /// The phase each channel's LO takes after every timed tune (MR-34).
++    pub timed_phase: Vec<f64>,
++    pub path_delay: i64,
++}
++
++/// The shared handle the medium reads the transmit side through (MR-32, CH-8).
++pub(crate) struct TxShared(Mutex<TxPlan>);
++
++impl TxShared {
++    pub(crate) fn new(plan: TxPlan) -> Arc<TxShared> {
++        Arc::new(TxShared(Mutex::new(plan)))
++    }
++
++    pub(crate) fn plan(&self) -> MutexGuard<'_, TxPlan> {
++        self.0.lock().unwrap_or_else(|error| error.into_inner())
++    }
++}
++
++impl Transmitter for TxShared {
++    fn radiated(&self, channel: u16, at: RootInstant) -> Option<Radiated> {
++        let plan = self.plan();
++        for segment in plan.segments.values().rev() {
++            let j = at.sample_at_or_before(segment.origin, segment.ratio).saturating_sub(plan.path_delay);
++            if j < segment.start {
++                continue;
++            }
++            let natural_end = if segment.repeat { i64::MAX } else { segment.start.saturating_add(segment.len) };
++            if j >= segment.end.unwrap_or(i64::MAX).min(natural_end) || channel >= segment.channels {
++                return None;
++            }
++            let n = usize::try_from((j - segment.start) % segment.len).ok()?;
++            let index = (n * usize::from(segment.channels) + usize::from(channel)) * 2;
++            let (re, im) = (f64::from(segment.samples[index]), f64::from(segment.samples[index + 1]));
++            let stamp = RootInstant::of_sample(segment.origin, segment.ratio, j);
++            let amplitude = 10f64.powf(plan.gain_db.at(stamp) / 20.0);
++            let (sin, cos) = plan.phase.get(usize::from(channel)).map_or(0.0, |phase| phase.at(stamp)).sin_cos();
++            return Some(Radiated {
++                re: amplitude * (re * cos - im * sin),
++                im: amplitude * (re * sin + im * cos),
++                frequency_hz: plan.frequency_hz.at(stamp),
++            });
++        }
++        None
++    }
++}
++
++/// The receive side's parameters (MR-33, MR-34, MR-35). Its antenna instant is the
++/// sample's own: both profiles declare `radio.rx.path_delay_samples` 0 (MR-3).
++pub(crate) struct RxModel {
++    pub gain_db: Timeline,
++    pub frequency_hz: Timeline,
++    pub phase: Vec<Timeline>,
++    /// The phase each channel's LO takes after every timed tune (MR-34).
++    pub timed_phase: Vec<f64>,
++}
++
++/// Decodes a `cf32` waveform, refusing a non-finite component and clipping each
++/// component to `[−1, 1]`; returns the samples and how many sample-channel pairs had a
++/// component clipped (RM-13, MR-32, MR-36).
++pub(crate) fn decode_waveform(bytes: &[u8]) -> Result<(Arc<[f32]>, u64), &'static str> {
++    let mut samples = Vec::with_capacity(bytes.len() / 4);
++    let mut clipped = 0;
++    for pair in bytes.chunks_exact(8) {
++        let re = f32::from_le_bytes(pair[0..4].try_into().expect("four bytes"));
++        let im = f32::from_le_bytes(pair[4..8].try_into().expect("four bytes"));
++        if !re.is_finite() || !im.is_finite() {
++            return Err("RM-13: a waveform sample is not finite");
++        }
++        let (cre, cim) = (re.clamp(-1.0, 1.0), im.clamp(-1.0, 1.0));
++        if cre != re || cim != im {
++            clipped += 1;
++        }
++        samples.push(cre);
++        samples.push(cim);
++    }
++    Ok((samples.into(), clipped))
++}
++
++/// A random LO phase in `[0, 2π)` from one draw: `2π · ⌊x / 2^11⌋ · 2^−53` (MR-34).
++pub(crate) fn lo_phase(rng: &mut ezsdr_sim::SimRng) -> f64 {
++    const SCALE: f64 = 1.0 / (1u64 << 53) as f64;
++    2.0 * std::f64::consts::PI * ((rng.next_u64() >> 11) as f64 * SCALE)
++}
+diff --git a/crates/ezsdr-mock-radio/src/lib.rs b/crates/ezsdr-mock-radio/src/lib.rs
+index c4f06d7b89f85dec4707f53ac9efe9ba07a58885..55e697de0044ed656e7eaf92fad1e824fd691abd 100644
+--- a/crates/ezsdr-mock-radio/src/lib.rs
++++ b/crates/ezsdr-mock-radio/src/lib.rs
+@@ -1,7 +1,8 @@
+-//! Ez-SDR v4 Module ezsdr.radio.mock 1.0.0 (plan/phase2/09-mock-radio.md).
++//! Ez-SDR v4 Module ezsdr.radio.mock 1.1.0 (design/09-mock-radio.md).
+ #![forbid(unsafe_code)]
+ #![warn(missing_docs)]
+ 
++mod channel;
+ mod coerce;
+ mod profile;
+ mod time;
+@@ -25,6 +26,8 @@ use ezsdr_kernel::time::{AbsoluteDeadline, ClockRegistry, Duration, Rational, Sa
+ use ezsdr_kernel::module_api::UpdateClass;
+ use ezsdr_hostmem::{HostPool, HOST_MEMORY, write_cf32};
+ use ezsdr_sim::{FaultEntry, FaultKind, SimRng};
++use ezsdr_sim::channel::{Medium, RootInstant};
++use ezsdr_kernel::module_api::InputStore;
+ 
+ pub use device::{DeviceModel, DeviceTimeError};
+ pub use profile::{Profile, ProfileKind};
+@@ -32,26 +35,26 @@ pub use profile::{Profile, ProfileKind};
+ fn module_ref() -> ModuleRef {
+     ModuleRef {
+         id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"),
+-        version: Version::new(1, 0, 0),
++        version: Version::new(1, 1, 0),
+     }
+ }
+ 
+-/// The Module descriptor for `ezsdr.radio.mock` 1.0.0 (MR-1).
++/// The Module descriptor for `ezsdr.radio.mock` 1.1.0 (MR-1).
+ pub fn descriptor() -> ModuleDescriptor {
+     ModuleDescriptor {
+         id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"),
+-        version: Version::new(1, 0, 0),
++        version: Version::new(1, 1, 0),
+         kernel_api: KERNEL_API,
+         roles: vec![Role::Provider],
+         vocabularies: ["radio", "sim"]
+             .into_iter()
+             .map(|id| VocabularyRequirement {
+                 id: Namespace::parse(id).expect("valid vocabulary"),
+-                req: VersionReq(Version::new(1, 0, 0)),
++                req: VersionReq(Version::new(1, 1, 0)),
+             })
+             .collect(),
+         deployment: Deployment::InProcess {},
+-        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 1.0.0")),
++        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 1.1.0")),
+     }
+ }
+ 
+@@ -89,6 +92,18 @@ pub struct MockRadio {
+     open_tx: Option<OpenBurst>,
+     updates: BTreeMap<(i64, u64), PendingUpdate>,
+     next_order: u64,
++    medium: Option<std::sync::Arc<Medium>>,
++    channel: Option<ChannelMode>,
++    tx_gen: u32,
++}
++
++/// The channel-coupled state of a Mock whose environment declares `sim.channel` (MR-31).
++struct ChannelMode {
++    medium: std::sync::Arc<Medium>,
++    fragment: Ident,
++    inputs: std::sync::Arc<dyn InputStore>,
++    tx: std::sync::Arc<channel::TxShared>,
++    rx: channel::RxModel,
+ }
+ 
+ #[derive(Clone)]
+@@ -150,15 +165,15 @@ impl MockRadio {
+             return Err(reject("binding names a different Module version"));
+         }
+         let profile = match binding.profile.as_ref() {
+-            Some(p) if p.version == Version::new(1, 0, 0) && p.name == "x310-like" => Profile {
++            Some(p) if p.version == Version::new(1, 1, 0) && p.name == "x310-like" => Profile {
+                 kind: ProfileKind::X310Like,
+                 n: 1,
+             },
+-            Some(p) if p.version == Version::new(1, 0, 0) && p.name == "ideal" => Profile {
++            Some(p) if p.version == Version::new(1, 1, 0) && p.name == "ideal" => Profile {
+                 kind: ProfileKind::Ideal,
+                 n: 1,
+             },
+-            _ => return Err(reject("profile must be x310-like or ideal 1.0.0")),
++            _ => return Err(reject("profile must be x310-like or ideal 1.1.0")),
+         };
+         if binding.feed.is_some() {
+             return Err(reject("Provider binding cannot carry a feed"));
+@@ -214,7 +229,7 @@ impl MockRadio {
+         sections.insert(section("bursts"), serde_json::json!([]));
+         sections.insert(section("faults"), serde_json::json!([]));
+         sections.insert(section("rejected"), serde_json::json!([]));
+-        sections.insert(section("stats"), serde_json::json!({"rx_blocks": 0, "rx_samples": 0, "tx_blocks": 0}));
++        sections.insert(section("stats"), serde_json::json!({"rx_blocks": 0, "rx_samples": 0, "tx_blocks": 0, "rx_clipped": 0, "tx_clipped": 0}));
+         sections.insert(section("applied"), serde_json::json!([]));
+         let instance = ProviderInstance {
+             id: id.clone(),
+@@ -262,9 +277,19 @@ impl MockRadio {
+             open_tx: None,
+             updates: BTreeMap::new(),
+             next_order: 0,
++            medium: None,
++            channel: None,
++            tx_gen: 0,
+         })
+     }
+ 
++    /// Hands this instance the Run's shared SimulationChannel medium; a Mock whose
++    /// environment declares `sim.channel` refuses `prepare` without one (MR-31, CH-6).
++    pub fn with_medium(mut self, medium: std::sync::Arc<Medium>) -> MockRadio {
++        self.medium = Some(medium);
++        self
++    }
++
+     fn reject(&self, reason: impl Into<String>) -> ModuleError {
+         ModuleError::rejected(reason)
+     }
+@@ -333,8 +358,8 @@ impl MockRadio {
+             if let Some(cut) = cut { stop = stop.min(cut); }
+             if let Some(end) = rx.end { stop = stop.min(end); }
+             if stop <= next { break; }
+-            let last = time::v_of(origin, ratio, stop - 1).ok_or_else(|| self.reject("MR-14: block time overflow"))?;
+-            if last > until { break; }
++            let after = time::v_after(origin, ratio, stop - 1).ok_or_else(|| self.reject("MR-14: block time overflow"))?;
++            if after > until { break; }
+             let flags = rx.flags;
+             let lost = rx.lost;
+             let full = self.publish_rx(next, stop, domain, rx.channels, flags, lost)?;
+@@ -369,10 +394,34 @@ impl MockRadio {
+         let bytes_len = channels as usize * len as usize * 8;
+         let pattern = self.selector.rx_test_pattern.clone();
+         if self.pool.is_none() { return Err(self.reject("MR-13: receive pool is absent")); }
++        let (origin, ratio) = self.rx.as_ref().map(|rx| (rx.origin, rx.ratio)).expect("a receive stream publishes");
++        let mut clipped = 0u64;
++        let received: Option<Vec<(f32, f32)>> = self.channel.as_ref().map(|mode| {
++            let mut out = Vec::with_capacity(channels as usize * len as usize);
++            for c in 0..channels {
++                let phase = mode.rx.phase.get(usize::from(c));
++                for k in first..stop {
++                    let stamp = RootInstant::of_sample(origin, ratio, k);
++                    let (fr, fi) = mode.medium.field(&mode.fragment, c, mode.rx.frequency_hz.at(stamp), stamp);
++                    let amplitude = 10f64.powf(mode.rx.gain_db.at(stamp) / 20.0);
++                    let (sin, cos) = phase.map_or(0.0, |p| p.at(stamp)).sin_cos();
++                    let re = amplitude * (fr * cos + fi * sin);
++                    let im = amplitude * (fi * cos - fr * sin);
++                    let (cre, cim) = (re.clamp(-1.0, 1.0), im.clamp(-1.0, 1.0));
++                    if cre != re || cim != im { clipped += 1; }
++                    out.push((cre as f32, cim as f32));
++                }
++            }
++            out
++        });
+         let pool = self.pool.as_mut().expect("pool was checked");
+         let bytes = pool.fill(bytes_len, |buffer| {
+             buffer[..bytes_len].fill(0);
+-            if pattern == "ramp" {
++            if let Some(received) = &received {
++                for (index, (re, im)) in received.iter().enumerate() {
++                    write_cf32(buffer, len as usize, index / len as usize, index % len as usize, *re, *im);
++                }
++            } else if pattern == "ramp" {
+                 for channel in 0..channels as usize {
+                     for index in 0..len as usize {
+                         let sample = (first as u64 + index as u64) % 65_536;
+@@ -392,6 +441,7 @@ impl MockRadio {
+             contract: ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("cf32 contract"),
+         };
+         let block = std::sync::Arc::new(SampleBlock::new_host(header, HOST_MEMORY, bytes, 8).map_err(|error| self.reject(format!("MR-13: {error}")))?);
++        self.add_stat("rx_clipped", clipped);
+         let mut full = false;
+         for link in &self.links {
+             if link.publish(block.clone()) == PublishOutcome::Full { full = true; }
+@@ -510,7 +560,7 @@ impl MockRadio {
+                         if let Some(cut) = cut { stop = stop.min(cut); }
+                         if let Some(end) = rx.end { stop = stop.min(end); }
+                         if stop > rx.next {
+-                            if let Some(tick) = time::v_of(rx.origin, rx.ratio, stop - 1) { next = Some(next.map_or(tick, |old| old.min(tick))); }
++                            if let Some(tick) = time::v_after(rx.origin, rx.ratio, stop - 1) { next = Some(next.map_or(tick, |old| old.min(tick))); }
+                         }
+                     }
+                 }
+@@ -527,7 +577,7 @@ impl MockRadio {
+             let cut = held_cut.min(update_cut);
+             let stop = block_end.min(waveform_end).min(cut);
+             if stop > open.next {
+-                if let Some(tick) = time::v_of(origin, handle.root_ticks_per_tick, stop - 1) { next = Some(next.map_or(tick, |old| old.min(tick))); }
++                if let Some(tick) = time::v_after(origin, handle.root_ticks_per_tick, stop - 1) { next = Some(next.map_or(tick, |old| old.min(tick))); }
+             }
+         }
+         if let (Some(handle), Some(origin)) = (&self.tx_handle, self.tx_origin) {
+@@ -569,6 +619,51 @@ impl MockRadio {
+         }
+     }
+ 
++    fn add_stat(&mut self, name: &str, n: u64) {
++        if n == 0 { return; }
++        if let Some(serde_json::Value::Object(stats)) = self.instance.sections.get_mut(&section("stats")) {
++            let total = stats.get(name).and_then(serde_json::Value::as_u64).unwrap_or(0);
++            stats.insert(name.to_owned(), serde_json::json!(total + n));
++        }
++    }
++
++    /// Cuts every burst of the current transmit clock at sample `k` and withdraws the
++    /// bursts that start at or after it, as a stop or a cold change does (MR-32).
++    fn cut_segments(&mut self, k: i64) {
++        let Some(mode) = &self.channel else { return };
++        let generation = self.tx_gen;
++        let mut plan = mode.tx.plan();
++        plan.segments.retain(|(g, start), _| *g != generation || *start < k);
++        for ((g, _), segment) in plan.segments.iter_mut() {
++            if *g == generation {
++                segment.end = Some(segment.end.map_or(k, |end| end.min(k)));
++            }
++        }
++    }
++
++    /// Ends the open burst's radiation at transmit sample `stop` (MR-32).
++    fn end_open_segment(&mut self, stop: i64) {
++        let (Some(mode), Some(open)) = (&self.channel, &self.open_tx) else { return };
++        if let Some(segment) = mode.tx.plan().segments.get_mut(&(self.tx_gen, open.start)) {
++            segment.end = Some(segment.end.map_or(stop, |end| end.min(stop)));
++        }
++    }
++
++    /// Transmits every sample before `cut`: the open burst up to it, and every held burst
++    /// that starts before it, opened in turn (MR-25, MR-32).
++    fn transmit_until_cut(&mut self, now: i64, cut: i64) -> Result<(), ModuleError> {
++        loop {
++            if self.open_tx.is_some() {
++                self.emit_tx_until(now, Some(cut))?;
++            }
++            if self.open_tx.is_some() { break; }
++            let Some(start) = self.held.keys().next().copied().filter(|start| *start < cut) else { break };
++            let held = self.held.remove(&start).expect("the first held burst");
++            self.open_tx = Some(OpenBurst { start: held.start, len: held.len, repeat: held.repeat, next: held.start, first: true, open: held.open });
++        }
++        Ok(())
++    }
++
+     fn add_tx_stat(&mut self) {
+         if let Some(serde_json::Value::Object(stats)) = self.instance.sections.get_mut(&section("stats")) {
+             let blocks = stats.get("tx_blocks").and_then(serde_json::Value::as_u64).unwrap_or(0);
+@@ -614,6 +709,12 @@ impl MockRadio {
+     }
+ 
+     fn stop_tx(&mut self, now: i64, reason: &str, emit_command_rejected: bool) -> Result<(), ModuleError> {
++        if let (Some(handle), Some(origin)) = (self.tx_handle.clone(), self.tx_origin) {
++            if let Some(cut) = time::k_at_or_after(origin, handle.root_ticks_per_tick, now) {
++                self.transmit_until_cut(now, cut)?;
++                self.cut_segments(cut);
++            }
++        }
+         let tracked = self.tx_tracker.as_mut().and_then(BurstTracker::stop);
+         let open_burst_without_record = self.open_tx.is_some() && tracked.is_none();
+         if let Some(record) = tracked { self.record_burst(record); }
+@@ -695,14 +796,37 @@ impl MockRadio {
+             self.reject_action_at("tx_burst", "MR-16: repeated waveform violates RM-13's length or alignment limits", now)?;
+             return Ok(());
+         }
++        let decoded = match self.channel.as_ref().map(|mode| mode.inputs.get(&waveform.hash)) {
++            None => None,
++            Some(None) => {
++                self.reject_action_at("tx_burst", "MR-32: the waveform's bytes are not an input of this Run", now)?;
++                return Ok(());
++            }
++            Some(Some(bytes)) if bytes.len() as u64 != size_bytes => {
++                self.reject_action_at("tx_burst", "MR-32: the waveform's bytes do not have its size_bytes", now)?;
++                return Ok(());
++            }
++            Some(Some(bytes)) => match channel::decode_waveform(&bytes) {
++                Ok(decoded) => Some(decoded),
++                Err(reason) => {
++                    self.reject_action_at("tx_burst", reason, now)?;
++                    return Ok(());
++                }
++            },
++        };
+         let handle = self.tx_handle.as_ref().expect("tx channel has a handle");
+         let origin = self.tx_origin.expect("tx clock origin");
+         let clocks = self.clocks.as_ref().expect("prepared clocks");
+-        let now_tx = clocks.convert(TimePoint::new(root, now), tx_domain).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?.floor();
++        let converted = clocks.convert(TimePoint::new(root, now), tx_domain).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
++        let now_tx = converted.floor();
++        let now_tx_up = match converted {
++            ezsdr_kernel::time::Converted::Exact { point } => point,
++            ezsdr_kernel::time::Converted::Inexact { floor, .. } => TimePoint::new(floor.domain, floor.ticks.saturating_add(1)),
++        };
+         let policy = late_policy.decide(
+             clocks,
+             at.time_point,
+-            now_tx,
++            now_tx_up,
+             Duration::new(ClockDomainId::HOST_MONOTONIC, self.profile.timing().min_timed_command_lead_ns),
+         ).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
+         let mut start = at.time_point.ticks;
+@@ -733,8 +857,8 @@ impl MockRadio {
+             Some("MR-16: burst begins before synchronization")
+         } else if self.held.contains_key(&start) {
+             Some("MR-16: a held burst already has this start")
+-        } else if self.open_tx.as_ref().is_some_and(|open| start < open.next) {
+-            Some("MR-16: burst begins before the open burst's next sample")
++        } else if self.open_tx.as_ref().is_some_and(|open| start <= open.next) {
++            Some("MR-16: burst begins at or before the open burst's next sample")
+         } else {
+             None
+         };
+@@ -749,6 +873,20 @@ impl MockRadio {
+             self.emit_late_burst(late_by, at.time_point, tx_domain, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::SendAsap)?;
+         }
+         let waveform_len = u32::try_from(length).map_err(|_| ModuleError::rejected("MR-16: waveform length exceeds u32"))?;
++        if let (Some(mode), Some((samples, clipped))) = (&self.channel, decoded) {
++            let ratio = self.tx_handle.as_ref().expect("tx channel has a handle").root_ticks_per_tick;
++            mode.tx.plan().segments.insert((self.tx_gen, start), channel::Segment {
++                origin,
++                ratio,
++                start,
++                len: length,
++                repeat,
++                channels: channels as u16,
++                samples,
++                end: None,
++            });
++            self.add_stat("tx_clipped", clipped);
++        }
+         self.held.insert(start, HeldBurst {
+             start,
+             len: length,
+@@ -764,7 +902,7 @@ impl MockRadio {
+         Ok(())
+     }
+ 
+-    fn emit_tx_until(&mut self, until: i64) -> Result<bool, ModuleError> {
++    fn emit_tx_until(&mut self, until: i64, extra_cut: Option<i64>) -> Result<bool, ModuleError> {
+         let mut progressed = false;
+         while let Some(open) = self.open_tx.as_ref() {
+             let Some(handle) = self.tx_handle.as_ref() else { break; };
+@@ -775,10 +913,10 @@ impl MockRadio {
+             let held_cut = self.held.keys().next().copied().unwrap_or(i64::MAX);
+             let cold_tick = self.updates.iter().filter(|(_, update)| is_tx_cold_key(update.key.as_str())).map(|((tick, _), _)| *tick).min();
+             let cold_cut = cold_tick.and_then(|tick| time::k_at_or_after(self.tx_origin.expect("tx origin"), handle.root_ticks_per_tick, tick)).unwrap_or(i64::MAX);
+-            let cut = held_cut.min(cold_cut);
++            let cut = held_cut.min(cold_cut).min(extra_cut.unwrap_or(i64::MAX));
+             stop = stop.min(repeat_end).min(cut);
+             if stop <= open.next { break; }
+-            let last = time::v_of(self.tx_origin.expect("tx origin"), handle.root_ticks_per_tick, stop - 1).ok_or_else(|| ModuleError::rejected("MR-15: transmit time overflow"))?;
++            let last = time::v_after(self.tx_origin.expect("tx origin"), handle.root_ticks_per_tick, stop - 1).ok_or_else(|| ModuleError::rejected("MR-15: transmit time overflow"))?;
+             if last > until { break; }
+             let start = open.start;
+             let next = open.next;
+@@ -810,6 +948,7 @@ impl MockRadio {
+                 Ok(BurstStep::Started | BurstStep::Continued) => {}
+                 Err(error) => {
+                     self.reject_action_at("tx_burst", &format!("MR-15: {error}"), until)?;
++                    self.end_open_segment(next);
+                     if let Some(record) = self.tx_tracker.as_mut().and_then(BurstTracker::stop) { self.record_burst(record); }
+                     self.tx_device.close();
+                     self.open_tx = None;
+@@ -825,6 +964,7 @@ impl MockRadio {
+                 }).expect("device error payload");
+                 self.emit_event("tx", ezsdr_radio::kinds::TIME_ERROR, Severity::Error, payload, header.first_sample_time)?;
+                 self.record_rejected_action("tx_burst", "MR-24: the device rejected an unclosed burst", until);
++                self.end_open_segment(next);
+                 if let Some(record) = self.tx_tracker.as_mut().and_then(BurstTracker::stop) { self.record_burst(record); }
+                 self.tx_device.close();
+                 self.open_tx = None;
+@@ -916,6 +1056,23 @@ impl MockRadio {
+         let applied = report.applied.get(&update.key).cloned().unwrap_or(update.value);
+         self.config.insert(update.key.clone(), applied.clone());
+         self.record_update(&update.key, &applied, tick);
++        if let (Some(mode), Some(value)) = (self.channel.as_mut(), match &applied { Value::Num(v) => Some(*v), Value::Int(v) => Some(*v as f64), _ => None }) {
++            match update.key.as_str() {
++                ezsdr_radio::keys::TX_GAIN_DB => mode.tx.plan().gain_db.set(tick, value),
++                ezsdr_radio::keys::TX_FREQUENCY_HZ => {
++                    let mut plan = mode.tx.plan();
++                    plan.frequency_hz.set(tick, value);
++                    let timed = plan.timed_phase.clone();
++                    for (phase, value) in plan.phase.iter_mut().zip(timed) { phase.set(tick, value); }
++                }
++                ezsdr_radio::keys::RX_GAIN_DB => mode.rx.gain_db.set(tick, value),
++                ezsdr_radio::keys::RX_FREQUENCY_HZ => {
++                    mode.rx.frequency_hz.set(tick, value);
++                    for (phase, value) in mode.rx.phase.iter_mut().zip(mode.rx.timed_phase.iter()) { phase.set(tick, *value); }
++                }
++                _ => {}
++            }
++        }
+         if update.class == UpdateClass::Cold && is_rx_cold_key(update.key.as_str()) {
+             if let (Some(clocks), Some(rx)) = (&self.clocks, &self.rx) {
+                 if clocks.is_registered(rx.domain) && clocks.get(rx.domain).is_ok_and(|domain| domain.ended_at.is_none()) {
+@@ -947,6 +1104,7 @@ impl MockRadio {
+                 self.tx_origin = Some(tick);
+                 self.tx_handle = Some(handle);
+                 self.tx_domain = Some(domain);
++                self.tx_gen = self.tx_gen.saturating_add(1);
+                 self.tx_tracker = Some(BurstTracker::new(domain));
+                 self.tx_device = DeviceModel::new();
+             } else {
+@@ -1082,6 +1240,46 @@ impl Provider for MockRadio {
+             let tick = time::ns_to_v(&ctx.clocks, root, offset).map_err(|error| self.reject(format!("MR-20: {error}")))?;
+             faults.push(ScheduledFault { tick, entry, applied: false, resolved: false, order: order as u64 });
+         }
++        let channel_mode = match ezsdr_sim::channel::read(&ctx.environment).map_err(|error| self.reject(format!("MR-7: {error}")))? {
++            None => None,
++            Some(spec) => {
++                let medium = self.medium.clone().ok_or_else(|| self.reject("MR-31: the environment declares sim.channel, but this instance has no medium"))?;
++                if self.selector.rx_test_pattern != "zero" {
++                    return Err(self.reject("MR-31: a channel-coupled Mock takes no receive test pattern"));
++                }
++                let max = self.profile.max_channels();
++                if let Some(coupling) = spec.couplings.iter().find(|c| (c.tx == f.id && i64::from(c.tx_channel) >= max) || (c.rx == f.id && i64::from(c.rx_channel) >= max)) {
++                    return Err(self.reject(format!("MR-31: a coupling {} -> {} names a channel beyond this profile's {max}", coupling.tx, coupling.rx)));
++                }
++                let random = self.profile.random_phase_on_untimed_tune();
++                let mut lo = SimRng::new(seed, &format!("{}/lo", self.selector_id()));
++                let mut phases = || (0..max).map(|_| if random { channel::lo_phase(&mut lo) } else { 0.0 }).collect::<Vec<f64>>();
++                let rx_phase: Vec<channel::Timeline> = phases().into_iter().map(channel::Timeline::new).collect();
++                let tx_phase: Vec<channel::Timeline> = phases().into_iter().map(channel::Timeline::new).collect();
++                let rx_timed = phases();
++                let tx_timed = phases();
++                let tx = channel::TxShared::new(channel::TxPlan {
++                    segments: BTreeMap::new(),
++                    gain_db: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::TX_GAIN_DB)),
++                    frequency_hz: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::TX_FREQUENCY_HZ)),
++                    phase: tx_phase,
++                    timed_phase: tx_timed,
++                    path_delay: self.profile.tx_path_delay_samples(),
++                });
++                let rx = channel::RxModel {
++                    gain_db: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::RX_GAIN_DB)),
++                    frequency_hz: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::RX_FREQUENCY_HZ)),
++                    phase: rx_phase,
++                    timed_phase: rx_timed,
++                };
++                medium.join(&ctx.run, &f.id, &spec, seed, root_rate.num(), tx.clone()).map_err(|error| self.reject(format!("MR-31: {error}")))?;
++                Some(ChannelMode { medium, fragment: f.id.clone(), inputs: ctx.inputs.clone(), tx, rx })
++            }
++        };
++        if channel_mode.is_some() {
++            self.instance.fidelity.rf = ezsdr_kernel::module_api::RfFidelity::ImpairmentModel;
++        }
++        self.channel = channel_mode;
+         self.root = Some(root);
+         self.clocks = Some(ctx.clocks);
+         self.time = Some(ctx.time);
+@@ -1100,6 +1298,13 @@ impl Provider for MockRadio {
+ 
+     fn arm(&mut self) -> Result<(), ModuleError> {
+         if !self.prepared { return Err(self.reject("MR-9: prepare must precede arm")); }
++        if let Some(mode) = &self.channel {
++            let missing = mode.medium.missing();
++            if !missing.is_empty() {
++                let names: Vec<&str> = missing.iter().map(Ident::as_str).collect();
++                return Err(self.reject(format!("MR-31: the channel names {}, which did not join its medium", names.join(", "))));
++            }
++        }
+         let root = self.root.expect("prepared root");
+         let time = self.time.as_ref().expect("prepared time");
+         let clocks = self.clocks.as_ref().expect("prepared clocks");
+@@ -1109,6 +1314,7 @@ impl Provider for MockRadio {
+         if let Some(handle) = &self.tx_handle {
+             self.tx_domain = Some(clocks.register_sample_clock(handle, now).map_err(|error| self.reject(format!("MR-9: {error}")))?);
+             self.tx_origin = Some(now);
++            self.tx_gen = self.tx_gen.saturating_add(1);
+             self.tx_tracker = Some(BurstTracker::new(self.tx_domain.expect("registered tx clock")));
+             self.tx_device = DeviceModel::new();
+         }
+@@ -1199,6 +1405,8 @@ impl Provider for MockRadio {
+         self.time = None;
+         self.events = None;
+         self.root = None;
++        self.channel = None;
++        self.medium = None;
+     }
+ 
+     fn step(&mut self, until: TimePoint) -> Result<StepOutcome, ModuleError> {
+@@ -1240,7 +1448,7 @@ impl Provider for MockRadio {
+             if tick > u { break; }
+             if self.started {
+                 let _ = self.emit_rx_until(tick)?;
+-                let _ = self.emit_tx_until(tick)?;
++                let _ = self.emit_tx_until(tick, None)?;
+             }
+             if kind == 0 {
+                 let index = value as usize;
+@@ -1262,7 +1470,7 @@ impl Provider for MockRadio {
+         }
+         if self.started {
+             progressed |= self.emit_rx_until(u)?;
+-            progressed |= self.emit_tx_until(u)?;
++            progressed |= self.emit_tx_until(u, None)?;
+         }
+         self.schedule_wakeup()?;
+         Ok(StepOutcome { progressed })
+diff --git a/crates/ezsdr-mock-radio/src/profile.rs b/crates/ezsdr-mock-radio/src/profile.rs
+index 76db7f3fffe58a4de91c96ebb26fe296910db056..58b845be51247ee8c4285af3de3cce220b6419eb 100644
+--- a/crates/ezsdr-mock-radio/src/profile.rs
++++ b/crates/ezsdr-mock-radio/src/profile.rs
+@@ -39,7 +39,7 @@ impl Profile {
+                 ProfileKind::Ideal => "ideal",
+             }
+             .to_owned(),
+-            version: Version::new(1, 0, 0),
++            version: Version::new(1, 1, 0),
+         }
+     }
+ 
+@@ -136,6 +136,26 @@ impl Profile {
+         2_000
+     }
+ 
++    /// The transmit path delay in transmit samples: srsRAN's X300 time advance for
++    /// `x310-like` (INFERRED), none for `ideal` (MR-3, RM-23).
++    pub(crate) fn tx_path_delay_samples(self) -> i64 {
++        match self.kind {
++            ProfileKind::X310Like => 45,
++            ProfileKind::Ideal => 0,
++        }
++    }
++
++    /// The receive path delay in receive samples: 0, because `x310-like` carries the
++    /// whole loopback delay on its transmit side (MR-3, RM-23).
++    pub(crate) fn rx_path_delay_samples(self) -> i64 {
++        0
++    }
++
++    /// Whether an untimed tune leaves each channel's LO at a random phase (MR-34).
++    pub(crate) fn random_phase_on_untimed_tune(self) -> bool {
++        self.kind == ProfileKind::X310Like
++    }
++
+     pub(crate) fn timing(self) -> TimingEnvelope {
+         match self.kind {
+             ProfileKind::X310Like => TimingEnvelope {
+@@ -273,6 +293,8 @@ impl Profile {
+                 WIRE_BYTES_PER_SAMPLE,
+                 Value::Int(self.performance().wire_bytes_per_sample),
+             ),
++            (TX_PATH_DELAY_SAMPLES, Value::Int(self.tx_path_delay_samples())),
++            (RX_PATH_DELAY_SAMPLES, Value::Int(self.rx_path_delay_samples())),
+         ] {
+             capabilities.insert(key(name), one(value));
+         }
+diff --git a/crates/ezsdr-mock-radio/src/time.rs b/crates/ezsdr-mock-radio/src/time.rs
+index e6a5b81f5d1e2c88ed8c2daef48f789ce772f095..13a3544bb41eded57b073c94d84833876608d3f7 100644
+--- a/crates/ezsdr-mock-radio/src/time.rs
++++ b/crates/ezsdr-mock-radio/src/time.rs
+@@ -20,6 +20,14 @@ pub(crate) fn v_of(o: i64, q: ezsdr_kernel::time::Rational, k: i64) -> Option<i6
+     i64::try_from(i128::from(o).checked_add(offset)?).ok()
+ }
+ 
++/// Returns the first virtual-root tick strictly after sample `k`'s instant:
++/// `floor(o + k · q) + 1`, the earliest round at which sample `k` is in the past (MR-14).
++pub(crate) fn v_after(o: i64, q: ezsdr_kernel::time::Rational, k: i64) -> Option<i64> {
++    let scaled = i128::from(k).checked_mul(i128::from(q.num()))?;
++    let offset = scaled.div_euclid(i128::from(q.den()));
++    i64::try_from(i128::from(o).checked_add(offset)?.checked_add(1)?).ok()
++}
++
+ /// Returns the first nonnegative sample index at or after virtual tick `t` (MR-7).
+ pub(crate) fn k_at_or_after(
+     o: i64,
+@@ -72,6 +80,14 @@ mod tests {
+     use super::{k_at_or_after, v_of};
+     use ezsdr_kernel::time::Rational;
+ 
++    #[test]
++    fn mr_14_a_block_is_published_strictly_after_its_last_sample() {
++        use super::v_after;
++        assert_eq!(v_after(0, Rational::new(5, 1).unwrap(), 3), Some(16));
++        assert_eq!(v_after(10, Rational::new(1_000, 3).unwrap(), 1), Some(344));
++        assert_eq!(v_after(10, Rational::new(1_000, 3).unwrap(), 3), Some(1_011));
++    }
++
+     #[test]
+     fn mr_14_tick_arithmetic_rounds_up() {
+         assert_eq!(v_of(0, Rational::new(5, 1).unwrap(), 3), Some(15));
+diff --git a/crates/ezsdr-mock-radio/tests/mock_channel.rs b/crates/ezsdr-mock-radio/tests/mock_channel.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a20309a98aceb19b518477713e307a024ae4c27
+--- /dev/null
++++ b/crates/ezsdr-mock-radio/tests/mock_channel.rs
+@@ -0,0 +1,1040 @@
++//! MockRadio on the SimulationChannel (spec 09 as amended in Phase 3, MR-25, MR-31…MR-36).
++
++use std::collections::{BTreeMap, VecDeque};
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::{Arc, Mutex};
++
++use ezsdr_kernel::binding::{AdmissionCheckRegistry, Binding, Violation};
++use ezsdr_kernel::event::{Action, ActionId, Event, EventCollector};
++use ezsdr_kernel::hash::ContentHash;
++use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId, RunId};
++use ezsdr_kernel::manifest::ArtifactRef;
++use ezsdr_kernel::module_api::{
++    ActionReceiver, ActionSubmitter, AttachedPort, Endpoint, ExecutionClass, ModuleError, ModuleRef,
++    Pacing, PrepareContext, ProfileRef, Provider, Requested, RfFidelity, Role, UpdateClass, Version,
++};
++use ezsdr_kernel::plan::Fragment;
++use ezsdr_kernel::policy::{EventKindRegistry, Policy};
++use ezsdr_kernel::spec::{Constraint, Ident, Key, Namespace, Value};
++use ezsdr_kernel::stream::{BackPressure, BlockRef, BurstEnd, BurstRecord, DataLink, DropCarry, LatePolicy, PublishOutcome};
++use ezsdr_kernel::time::{AbsoluteDeadline, ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority, Rational, RelativeBudget, TimePoint};
++use ezsdr_mock_radio::MockRadio;
++use ezsdr_sim::channel::Medium;
++use ezsdr_sim::SimRng;
++use serde_json::json;
++
++const ROOT: ClockDomainId = ClockDomainId::local(7);
++
++fn rid(name: &str) -> ResourceId { ResourceId::parse(name).unwrap() }
++fn key(name: &str) -> Key { Key::parse(name).unwrap() }
++fn eq(value: Value) -> Constraint { Constraint::Eq { value } }
++
++fn module_ref() -> ModuleRef {
++    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 1, 0) }
++}
++
++#[derive(Default)]
++struct Queue(Mutex<VecDeque<Action>>);
++impl ActionReceiver for Queue {
++    fn recv(&self) -> Option<Action> { self.0.lock().unwrap().pop_front() }
++}
++
++struct Accepting;
++impl ActionSubmitter for Accepting {
++    fn submit(&self, _action: Action) -> Result<ActionId, Vec<Violation>> { Ok(ActionId(1)) }
++}
++
++#[derive(Default)]
++struct Sink {
++    queue: Mutex<VecDeque<BlockRef>>,
++    drops: AtomicU64,
++}
++impl DataLink for Sink {
++    fn publish(&self, block: BlockRef) -> PublishOutcome { self.queue.lock().unwrap().push_back(block); PublishOutcome::Accepted }
++    fn receive(&self) -> Option<BlockRef> { self.queue.lock().unwrap().pop_front() }
++    fn drops(&self) -> u64 { self.drops.load(Ordering::Relaxed) }
++    fn take_drop_carry(&self) -> DropCarry { DropCarry::default() }
++    fn policy(&self) -> BackPressure { BackPressure::DropOldest }
++}
++
++/// One Run's shared time, clocks, inputs and medium.
++struct World {
++    clocks: Arc<ClockRegistry>,
++    auth: Arc<ManualTimeAuthority>,
++    medium: Arc<Medium>,
++    inputs: Arc<Mutex<BTreeMap<ContentHash, Arc<[u8]>>>>,
++    environment: Arc<BTreeMap<Namespace, serde_json::Value>>,
++}
++
++impl World {
++    fn new(environment: serde_json::Value) -> World {
++        let clocks = Arc::new(ClockRegistry::new());
++        clocks.register(ClockDomain::root(ROOT, Rational::new(1_000_000_000, 1).unwrap(), EpochRef::Arbitrary { set_by: "test".to_owned() })).unwrap();
++        let auth = Arc::new(ManualTimeAuthority::new(clocks.clone(), ROOT, &[], Pacing::FreeRunning).unwrap());
++        let environment = environment.as_object().unwrap().iter().map(|(name, value)| (Namespace::parse(name).unwrap(), value.clone())).collect();
++        World { clocks, auth, medium: Medium::new(), inputs: Arc::new(Mutex::new(BTreeMap::new())), environment: Arc::new(environment) }
++    }
++
++    /// Stores `samples` (one channel, interleaved) as an input and returns its reference.
++    fn waveform(&self, samples: &[(f32, f32)]) -> ArtifactRef {
++        let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| re.to_le_bytes().into_iter().chain(im.to_le_bytes())).collect();
++        let reference = ezsdr_kernel::manifest::ingest_input(Ident::parse("waveform").unwrap(), Namespace::parse("ezsdr.input").unwrap(), "mem:test", &bytes);
++        self.inputs.lock().unwrap().insert(reference.hash.clone(), bytes.into());
++        reference
++    }
++}
++
++struct Radio {
++    mock: MockRadio,
++    id: String,
++    events: Arc<EventCollector>,
++    actions: Arc<Queue>,
++    link: Arc<Sink>,
++}
++
++struct Options<'a> {
++    profile: &'a str,
++    fragment: &'a str,
++    id: &'a str,
++    constraints: &'a [(&'a str, Constraint)],
++    selector: &'a [(&'a str, Value)],
++    medium: bool,
++}
++
++impl Default for Options<'_> {
++    fn default() -> Self {
++        Options { profile: "ideal", fragment: "radio", id: "mock", constraints: &[("radio.tx.channels", Constraint::Eq { value: Value::Int(1) })], selector: &[], medium: true }
++    }
++}
++
++fn prepare(world: &World, options: Options<'_>) -> Result<Radio, ModuleError> {
++    let mut selector = BTreeMap::from([(Ident::parse("id").unwrap(), Value::Str(options.id.to_owned()))]);
++    for (name, value) in options.selector {
++        selector.insert(Ident::parse(name).unwrap(), value.clone());
++    }
++    let binding = Binding { module: module_ref(), selector, profile: Some(ProfileRef { name: options.profile.to_owned(), version: Version::new(1, 1, 0) }), feed: None };
++    let mut mock = MockRadio::from_binding(&binding).unwrap();
++    if options.medium {
++        mock = mock.with_medium(world.medium.clone());
++    }
++    let mut registry = ezsdr_kernel::module_api::ModuleRegistry::new();
++    let mut checks = AdmissionCheckRegistry::new();
++    let mut kinds = EventKindRegistry::new();
++    ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
++    ezsdr_sim::register(&mut registry, &mut checks, &mut kinds).unwrap();
++    let event_kinds = kinds.kinds();
++    let id = options.id.to_owned();
++    let pairs: Vec<_> = [rid(&id), rid(&format!("{id}/rx")), rid(&format!("{id}/tx"))].into_iter()
++        .flat_map(|source| event_kinds.iter().cloned().map(move |kind| (source.clone(), kind)))
++        .collect();
++    let events = Arc::new(EventCollector::new(&pairs, &event_kinds, 4096, &Policy::default()));
++    let actions = Arc::new(Queue::default());
++    let link = Arc::new(Sink::default());
++    let ctx = PrepareContext {
++        run: RunId::from_string("mock-channel".to_owned()),
++        class: ExecutionClass::Simulation,
++        time: world.auth.clone(),
++        clocks: world.clocks.clone(),
++        events: events.clone(),
++        actions: actions.clone(),
++        actions_out: Arc::new(Accepting),
++        environment: world.environment.clone(),
++        inputs: world.inputs.clone(),
++        links: vec![AttachedPort { component: Ident::parse(options.fragment).unwrap(), port: Ident::parse("rx").unwrap(), endpoint: Endpoint::StreamOut(link.clone()) }],
++        components: BTreeMap::new(),
++        host_budget: RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap(),
++    };
++    let requested = Requested {
++        resource: rid(&id),
++        constraints: options.constraints.iter().map(|(name, constraint)| (key(name), constraint.clone())).collect(),
++    };
++    let fragment = Fragment {
++        id: Ident::parse(options.fragment).unwrap(),
++        instance: module_ref(),
++        role: Role::Provider,
++        content: json!({ "selector": {}, "requested": requested }),
++        after: Vec::new(),
++    };
++    mock.prepare(&fragment, ctx)?;
++    Ok(Radio { mock, id, events, actions, link })
++}
++
++impl Radio {
++    fn push(&self, action: Action) { self.actions.0.lock().unwrap().push_back(action); }
++
++    fn tx_domain(&self, world: &World) -> ClockDomainId {
++        world.clocks.sample_clock_records().iter().rev().find(|record| record.stream == rid(&format!("{}/tx", self.id))).unwrap().domain
++    }
++
++    /// Every received sample of channel `channel`, by sample index, in arrival order.
++    fn received(&self, channel: usize) -> Vec<(i64, f32, f32)> {
++        let mut out = Vec::new();
++        while let Some(block) = self.link.receive() {
++            let header = block.header().clone();
++            let bytes = block.host_bytes().unwrap();
++            for index in 0..header.len as usize {
++                let (re, im) = ezsdr_hostmem::read_cf32(bytes, header.len as usize, channel, index);
++                out.push((header.first_sample_time.ticks + index as i64, re, im));
++            }
++        }
++        out
++    }
++
++    fn section(&self, name: &str) -> serde_json::Value {
++        self.mock.instance().sections[&Namespace::parse(&format!("ezsdr.radio.mock.{name}")).unwrap()].clone()
++    }
++
++    fn drain_events(&self) -> Vec<Event> { self.events.drain() }
++}
++
++fn burst(radio: &Radio, world: &World, waveform: ArtifactRef, at: i64, repeat: bool) -> Action {
++    Action::TxBurst {
++        target: rid(&format!("{}/tx", radio.id)),
++        waveform,
++        repeat,
++        at: AbsoluteDeadline::new(TimePoint::new(radio.tx_domain(world), at)),
++        requested_at: None,
++        late_policy: LatePolicy::SendAsapAndFlag,
++        metadata: BTreeMap::new(),
++    }
++}
++
++fn update(radio: &Radio, name: &str, value: Value, at: i64) -> Action {
++    Action::UpdateParameter { target: rid(&radio.id), key: key(name), value, class: UpdateClass::HardwareTimed, at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, at))) }
++}
++
++fn step(world: &World, radios: &mut [&mut Radio], tick: i64) {
++    world.auth.advance_to(TimePoint::new(ROOT, tick)).unwrap();
++    for radio in radios.iter_mut() {
++        radio.mock.step(TimePoint::new(ROOT, tick)).unwrap();
++    }
++}
++
++fn loopback(noise: Option<f64>) -> serde_json::Value {
++    let mut channel = json!({ "couplings": [{ "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 }] });
++    if let Some(noise) = noise {
++        channel["noise_dbfs"] = json!({ "radio": noise });
++    }
++    json!({ "sim.channel": channel })
++}
++
++fn ramp(len: usize) -> Vec<(f32, f32)> {
++    (0..len).map(|n| ((n + 1) as f32 / 4096.0, -((n + 1) as f32) / 8192.0)).collect()
++}
++
++/// Two started `ideal` Mocks, `a` (device `dev_a`) and `b` (device `dev_b`), at the given
++/// sample rates, each with one transmit channel.
++fn two(environment: serde_json::Value, a_rate: f64, b_rate: f64) -> (World, Radio, Radio) {
++    let world = World::new(environment);
++    let a_constraints = [("radio.tx.channels", eq(Value::Int(1))), ("radio.tx.sample_rate_hz", eq(Value::Num(a_rate))), ("radio.rx.sample_rate_hz", eq(Value::Num(a_rate)))];
++    let b_constraints = [("radio.tx.channels", eq(Value::Int(1))), ("radio.tx.sample_rate_hz", eq(Value::Num(b_rate))), ("radio.rx.sample_rate_hz", eq(Value::Num(b_rate)))];
++    let mut a = prepare(&world, Options { fragment: "a", id: "dev_a", constraints: &a_constraints, ..Options::default() }).unwrap();
++    let mut b = prepare(&world, Options { fragment: "b", id: "dev_b", constraints: &b_constraints, ..Options::default() }).unwrap();
++    for radio in [&mut a, &mut b] {
++        radio.mock.arm().unwrap();
++        radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++    }
++    (world, a, b)
++}
++
++fn a_into_b() -> serde_json::Value {
++    json!({ "sim.seed": 5, "sim.channel": { "couplings": [{ "tx": "a", "tx_channel": 0, "rx": "b", "rx_channel": 0, "gain_db": 0.0 }] } })
++}
++
++fn ordered(world: &World, a: &mut Radio, b: &mut Radio, tick: i64, a_first: bool) {
++    if a_first { step(world, &mut [a, b], tick) } else { step(world, &mut [b, a], tick) }
++}
++
++/// Steps the radios at every due wakeup up to and including `until`, as MA-30's loop does.
++fn run_to(world: &World, radios: &mut [&mut Radio], until: i64) {
++    while let Some(due) = world.auth.next_due() {
++        if due.ticks > until { break; }
++        step(world, radios, due.ticks);
++    }
++}
++
++fn records(radio: &Radio) -> Vec<BurstRecord> {
++    serde_json::from_value(radio.section("bursts")).unwrap()
++}
++
++#[test]
++fn mr_31_channel_mode_needs_a_medium_a_zero_pattern_and_valid_channels() {
++    let world = World::new(loopback(None));
++    let refusal = |result: Result<Radio, ModuleError>| result.err().expect("prepare must be refused").message;
++    assert!(refusal(prepare(&world, Options { medium: false, ..Options::default() })).starts_with("MR-31: the environment declares sim.channel"));
++    let ramp_pattern = [("rx_test_pattern", Value::Str("ramp".to_owned()))];
++    assert!(refusal(prepare(&world, Options { selector: &ramp_pattern, ..Options::default() })).starts_with("MR-31: a channel-coupled Mock takes no receive test pattern"));
++
++    let wide = World::new(json!({ "sim.channel": { "couplings": [{ "tx": "radio", "tx_channel": 2, "rx": "radio", "rx_channel": 0, "gain_db": 0 }] } }));
++    assert!(refusal(prepare(&wide, Options { profile: "x310-like", ..Options::default() })).contains("names a channel beyond this profile's 2"));
++    let deep = World::new(json!({ "sim.channel": { "couplings": [{ "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 2, "gain_db": 0 }] } }));
++    assert!(refusal(prepare(&deep, Options { profile: "x310-like", ..Options::default() })).contains("names a channel beyond this profile's 2"));
++
++    let first = prepare(&world, Options::default()).unwrap();
++    assert_eq!(first.mock.instance().fidelity.rf, RfFidelity::ImpairmentModel);
++    assert!(refusal(prepare(&world, Options { id: "other", ..Options::default() })).starts_with("MR-31: CH-6: radio has already joined"));
++    let malformed = World::new(json!({ "sim.channel": [] }));
++    assert!(refusal(prepare(&malformed, Options::default())).starts_with("MR-7: CH-1: "));
++
++    let ghost = World::new(json!({ "sim.channel": { "couplings": [{ "tx": "ghost", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0 }] } }));
++    let mut lonely = prepare(&ghost, Options::default()).unwrap();
++    assert!(lonely.mock.arm().unwrap_err().message.starts_with("MR-31: the channel names ghost, which did not join its medium"));
++
++    let plain = World::new(json!({}));
++    let unchanneled = prepare(&plain, Options { medium: false, ..Options::default() }).unwrap();
++    assert_eq!(unchanneled.mock.instance().fidelity.rf, RfFidelity::None);
++}
++
++#[test]
++fn mr_32_a_loopback_receives_what_it_transmits() {
++    let world = World::new(json!({ "sim.channel": { "couplings": [
++        { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 },
++        { "tx": "radio", "tx_channel": 1, "rx": "radio", "rx_channel": 0, "gain_db": 20.0 }
++    ] } }));
++    let mut radio = prepare(&world, Options::default()).unwrap();
++    radio.mock.arm().unwrap();
++    radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++    let samples = ramp(3_000);
++    let waveform = world.waveform(&samples);
++    radio.push(burst(&radio, &world, waveform, 1_000, false));
++    step(&world, &mut [&mut radio], 0);
++    step(&world, &mut [&mut radio], 6_000_001);
++    let received = radio.received(0);
++    assert_eq!(received.len(), 6_000);
++    for (k, re, im) in received {
++        let expected = if (1_000..4_000).contains(&k) { samples[(k - 1_000) as usize] } else { (0.0, 0.0) };
++        assert_eq!((re, im), expected, "sample {k}");
++    }
++    let stats = radio.section("stats");
++    assert_eq!((stats["rx_clipped"].as_u64(), stats["tx_clipped"].as_u64()), (Some(0), Some(0)));
++}
++
++#[test]
++fn mr_32_waveform_refusals() {
++    let world = World::new(loopback(None));
++    let mut radio = prepare(&world, Options::default()).unwrap();
++    radio.mock.arm().unwrap();
++    radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++    let absent = ezsdr_kernel::manifest::ingest_input(Ident::parse("waveform").unwrap(), Namespace::parse("ezsdr.input").unwrap(), "mem:none", &[0u8; 80]);
++    let mut short = world.waveform(&ramp(10));
++    short.size_bytes = 72;
++    let not_finite = world.waveform(&[(f32::NAN, 0.0), (0.5, 0.5)]);
++    for (waveform, at) in [(absent, 100), (short, 200), (not_finite, 300)] {
++        radio.push(burst(&radio, &world, waveform, at, false));
++    }
++    step(&world, &mut [&mut radio], 0);
++    step(&world, &mut [&mut radio], 2_000_001);
++    let rejected = radio.section("rejected");
++    let reasons: Vec<&str> = rejected.as_array().unwrap().iter().map(|row| row["reason"].as_str().unwrap()).collect();
++    assert_eq!(reasons, [
++        "MR-32: the waveform's bytes are not an input of this Run",
++        "MR-32: the waveform's bytes do not have its size_bytes",
++        "RM-13: a waveform sample is not finite",
++    ]);
++    assert_eq!(radio.drain_events().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 3);
++    assert!(radio.received(0).iter().all(|(_, re, im)| (*re, *im) == (0.0, 0.0)));
++}
++
++#[test]
++fn mr_25_a_stopped_burst_transmits_every_sample_before_the_stop() {
++    for environment in [loopback(None), json!({})] {
++        let channelled = environment.get("sim.channel").is_some();
++        let world = World::new(environment);
++        let mut radio = prepare(&world, Options { medium: channelled, ..Options::default() }).unwrap();
++        radio.mock.arm().unwrap();
++        radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++        let samples = ramp(1_000);
++        let waveform = world.waveform(&samples);
++        radio.push(burst(&radio, &world, waveform, 0, true));
++        step(&world, &mut [&mut radio], 0);
++        step(&world, &mut [&mut radio], 2_000_001);
++        let held = world.waveform(&[(0.75, 0.75)]);
++        radio.push(burst(&radio, &world, held, 4_000, true));
++        step(&world, &mut [&mut radio], 2_000_001);
++        radio.push(Action::Stop { target: Some(rid("mock/tx")) });
++        step(&world, &mut [&mut radio], 2_500_500);
++        step(&world, &mut [&mut radio], 6_000_001);
++        let records: Vec<BurstRecord> = serde_json::from_value(radio.section("bursts")).unwrap();
++        assert_eq!(records.len(), 1);
++        assert_eq!(records[0].end, BurstEnd::Stop);
++        assert_eq!(records[0].samples, 2_501, "the samples before the stop instant 2 500 500 are 0 … 2 500");
++        let rejected = radio.section("rejected");
++        assert_eq!(rejected.as_array().unwrap().len(), 1, "the held burst is cancelled by the stop");
++        assert!(rejected[0]["reason"].as_str().unwrap().contains("cancelled by stop"));
++        if channelled {
++            for (k, re, im) in radio.received(0) {
++                let expected = if k <= 2_500 { samples[(k % 1_000) as usize] } else { (0.0, 0.0) };
++                assert_eq!((re, im), expected, "sample {k}");
++            }
++        }
++    }
++}
++
++#[test]
++fn mr_33_gain_scales_the_samples_from_its_instant() {
++    let world = World::new(loopback(None));
++    let mut radio = prepare(&world, Options::default()).unwrap();
++    radio.mock.arm().unwrap();
++    radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++    let waveform = world.waveform(&[(0.5, 0.25)]);
++    radio.push(burst(&radio, &world, waveform, 0, true));
++    radio.push(update(&radio, "radio.tx.gain_db", Value::Num(-6.0), 1_000_500));
++    radio.push(update(&radio, "radio.rx.gain_db", Value::Num(6.0), 3_000_000));
++    radio.push(update(&radio, "radio.tx.gain_db", Value::Num(-12.0), 4_000_000));
++    step(&world, &mut [&mut radio], 0);
++    step(&world, &mut [&mut radio], 6_000_001);
++    let down = 10f64.powf(-6.0 / 20.0);
++    let up = 10f64.powf(6.0 / 20.0);
++    let further = 10f64.powf(-12.0 / 20.0);
++    for (k, re, im) in radio.received(0) {
++        let scale = if k <= 1_000 { 1.0 } else if k < 3_000 { down } else if k < 4_000 { down * up } else { further * up };
++        assert!((f64::from(re) - 0.5 * scale).abs() < 1e-6 && (f64::from(im) - 0.25 * scale).abs() < 1e-6, "sample {k}: ({re}, {im})");
++    }
++}
++
++#[test]
++fn mr_33_a_receiver_hears_only_its_own_frequency() {
++    let world = World::new(loopback(None));
++    let mut radio = prepare(&world, Options::default()).unwrap();
++    radio.mock.arm().unwrap();
++    radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++    let waveform = world.waveform(&[(0.5, 0.25)]);
++    radio.push(burst(&radio, &world, waveform, 0, true));
++    radio.push(update(&radio, "radio.tx.frequency_hz", Value::Num(2.0e9), 1_000_000));
++    radio.push(update(&radio, "radio.rx.frequency_hz", Value::Num(2.0e9), 3_000_000));
++    step(&world, &mut [&mut radio], 0);
++    step(&world, &mut [&mut radio], 6_000_001);
++    for (k, re, im) in radio.received(0) {
++        let heard = !(1_000..3_000).contains(&k);
++        assert_eq!((re, im), if heard { (0.5, 0.25) } else { (0.0, 0.0) }, "sample {k}");
++    }
++}
++
++/// The draws of MR-34 for a two-channel `x310-like` device: the receive and transmit
++/// phases after the untimed tune, then after every timed tune.
++struct Phases { rx: Vec<f64>, tx: Vec<f64>, rx_timed: Vec<f64>, tx_timed: Vec<f64> }
++
++fn phases(seed: u64, device: &str) -> Phases {
++    let mut rng = SimRng::new(seed, &format!("{device}/lo"));
++    let mut draw = || 2.0 * std::f64::consts::PI * ((rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64);
++    let mut pair = || vec![draw(), draw()];
++    Phases { rx: pair(), tx: pair(), rx_timed: pair(), tx_timed: pair() }
++}
++
++#[test]
++fn mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant() {
++    let t0 = 2_000_000_000;
++    let environment = json!({
++        "sim.seed": 1,
++        "sim.channel": { "couplings": [
++            { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 },
++            { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 1, "gain_db": 0.0 }
++        ] }
++    });
++    let world = World::new(environment);
++    let constraints = [("radio.tx.channels", eq(Value::Int(1))), ("radio.rx.channels", eq(Value::Int(2)))];
++    let mut radio = prepare(&world, Options { profile: "x310-like", constraints: &constraints, ..Options::default() }).unwrap();
++    radio.mock.arm().unwrap();
++    radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
++    step(&world, &mut [&mut radio], t0);
++    let waveform = world.waveform(&[(0.5, 0.0), (0.5, 0.0)]);
++    radio.push(burst(&radio, &world, waveform, 2_002_000, true));
++    radio.push(update(&radio, "radio.rx.frequency_hz", Value::Num(1.0e9), t0 + 6_000_000));
++    radio.push(update(&radio, "radio.tx.frequency_hz", Value::Num(1.0e9), t0 + 8_000_000));
++    radio.push(update(&radio, "radio.rx.frequency_hz", Value::Num(1.0e9), t0 + 9_500_000));
++    step(&world, &mut [&mut radio], t0);
++    step(&world, &mut [&mut radio], t0 + 10_000_001);
++    let Phases { rx, tx, rx_timed, tx_timed } = phases(1, "mock");
++    let blocks: Vec<_> = std::iter::from_fn(|| radio.link.receive()).collect();
++    let check = |k: i64, channel: usize, expected: f64| {
++        let block = blocks.iter().find(|b| b.header().first_sample_time.ticks <= k && k < b.header().first_sample_time.ticks + i64::from(b.header().len)).unwrap();
++        let index = (k - block.header().first_sample_time.ticks) as usize;
++        let (re, im) = ezsdr_hostmem::read_cf32(block.host_bytes().unwrap(), block.header().len as usize, channel, index);
++        let (want_re, want_im) = (0.5 * expected.cos(), 0.5 * expected.sin());
++        assert!((f64::from(re) - want_re).abs() < 1e-6 && (f64::from(im) - want_im).abs() < 1e-6, "k {k} channel {channel}: ({re}, {im}) vs ({want_re}, {want_im})");
++    };
++    check(3_000, 0, tx[0] - rx[0]);
++    check(3_000, 1, tx[0] - rx[1]);
++    check(7_000, 0, tx[0] - rx_timed[0]);
++    check(7_000, 1, tx[0] - rx_timed[1]);
++    check(9_000, 0, tx_timed[0] - rx_timed[0]);
++    check(9_000, 1, tx_timed[0] - rx_timed[1]);
++    check(9_900, 0, tx_timed[0] - rx_timed[0]);
++    check(9_900, 1, tx_timed[0] - rx_timed[1]);
++    assert!((rx[0] - rx[1]).abs() > 1e-3, "seed 1 gives the two receive channels different phases");
++    assert!((rx[0] - rx_timed[0]).abs() > 1e-3, "a timed tune moves the phase to its own constant");
++}
++
++#[test]
++fn mr_34_the_deterministic_profile_keeps_every_phase_zero() {
++    let environment = json!({ "sim.seed": 1, "sim.channel": { "couplings": [
++        { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 1, "gain_db": 0.0 }
++    ] } });
++    let world = World::new(environment);
++    let constraints = [("radio.tx.channels", eq(Value::Int(1))), ("radio.rx.channels", eq(Value::Int(2)))];
++    let mut radio = prepare(&world, Options { constraints: &constraints, ..Options::default() }).unwrap();
++    radio.mock.arm().unwrap();
++    radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++    let waveform = world.waveform(&[(0.5, 0.0)]);
++    radio.push(burst(&radio, &world, waveform, 0, true));
++    step(&world, &mut [&mut radio], 0);
++    step(&world, &mut [&mut radio], 2_000_001);
++    assert!(radio.received(1).iter().all(|(_, re, im)| (*re, *im) == (0.5, 0.0)));
++}
++
++#[test]
++fn mr_32_the_transmit_path_delay_shifts_a_loopback() {
++    let t0 = 2_000_000_000;
++    let world = World::new(json!({ "sim.seed": 3, "sim.channel": { "couplings": [
++        { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 }
++    ] } }));
++    let mut radio = prepare(&world, Options { profile: "x310-like", ..Options::default() }).unwrap();
++    radio.mock.arm().unwrap();
++    radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
++    step(&world, &mut [&mut radio], t0);
++    let samples = ramp(1_000);
++    let waveform = world.waveform(&samples);
++    radio.push(burst(&radio, &world, waveform, 2_002_000, false));
++    radio.push(update(&radio, "radio.tx.gain_db", Value::Num(6.0), t0 + 2_500_000));
++    step(&world, &mut [&mut radio], t0);
++    step(&world, &mut [&mut radio], t0 + 4_000_001);
++    let Phases { rx, tx, .. } = phases(3, "mock");
++    let (sin, cos) = (tx[0] - rx[0]).sin_cos();
++    for (k, re, im) in radio.received(0) {
++        let n = k - 2_045;
++        let (want_re, want_im) = if (0..1_000).contains(&n) {
++            let (wr, wi) = samples[n as usize];
++            // the gain change applies to transmit samples stamped from T0 + 2.5 ms, which reach
++            // the antenna 45 samples later: receive samples from 2 545 on, not from 2 500 on
++            let gain = if k >= 2_545 { 10f64.powf(6.0 / 20.0) } else { 1.0 };
++            (gain * (f64::from(wr) * cos - f64::from(wi) * sin), gain * (f64::from(wr) * sin + f64::from(wi) * cos))
++        } else {
++            (0.0, 0.0)
++        };
++        assert!((f64::from(re) - want_re).abs() < 1e-6 && (f64::from(im) - want_im).abs() < 1e-6, "sample {k}");
++    }
++}
++
++#[test]
++fn mr_36_clipping_at_full_scale_is_counted() {
++    let world = World::new(loopback(None));
++    let mut radio = prepare(&world, Options::default()).unwrap();
++    radio.mock.arm().unwrap();
++    radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++    let waveform = world.waveform(&[(2.0, -3.0), (0.05, 0.05), (0.05, 1.5), (0.02, 0.05)]);
++    radio.push(burst(&radio, &world, waveform, 0, true));
++    radio.push(update(&radio, "radio.rx.gain_db", Value::Num(20.0), 1_000_000));
++    step(&world, &mut [&mut radio], 0);
++    step(&world, &mut [&mut radio], 2_000_001);
++    let received = radio.received(0);
++    assert_eq!(received.len(), 2_000);
++    for (k, re, im) in &received {
++        let before = *k < 1_000;
++        let expected = match (k % 4, before) {
++            (0, _) => (1.0, -1.0),
++            (1, true) => (0.05, 0.05),
++            (1, false) => (0.5, 0.5),
++            (2, true) => (0.05, 1.0),
++            (2, false) => (0.5, 1.0),
++            (_, true) => (0.02, 0.05),
++            (_, false) => (0.2, 0.5),
++        };
++        assert!((re - expected.0).abs() < 1e-6 && (im - expected.1).abs() < 1e-6, "sample {k}: ({re}, {im})");
++    }
++    let stats = radio.section("stats");
++    assert_eq!(stats["tx_clipped"], 2, "two waveform samples have a component beyond full scale, one of them only its imaginary part");
++    assert_eq!(stats["rx_clipped"], 500, "from sample 1 000 on, two samples in four have a component beyond full scale, one of them only its imaginary part");
++}
++
++#[test]
++fn ch_09_the_receive_output_does_not_depend_on_the_stepping_order() {
++    let run = |a_first: bool| {
++        let world = World::new(json!({ "sim.seed": 5, "sim.channel": {
++            "couplings": [{ "tx": "a", "tx_channel": 0, "rx": "b", "rx_channel": 0, "gain_db": 0.0 }],
++            "noise_dbfs": { "b": -60.0 }
++        } }));
++        let mut a = prepare(&world, Options { fragment: "a", id: "dev_a", ..Options::default() }).unwrap();
++        let mut b = prepare(&world, Options { fragment: "b", id: "dev_b", ..Options::default() }).unwrap();
++        for radio in [&mut a, &mut b] {
++            radio.mock.arm().unwrap();
++            radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++        }
++        let samples = vec![(0.5f32, 0.25f32); 2_000];
++        let waveform = world.waveform(&samples);
++        let order = |world: &World, a: &mut Radio, b: &mut Radio, tick: i64| {
++            if a_first { step(world, &mut [a, b], tick) } else { step(world, &mut [b, a], tick) }
++        };
++        order(&world, &mut a, &mut b, 0);
++        a.push(burst(&a, &world, waveform, 1_999, false));
++        order(&world, &mut a, &mut b, 1_999_000);
++        order(&world, &mut a, &mut b, 1_999_001);
++        a.push(Action::Stop { target: Some(rid("dev_a/tx")) });
++        order(&world, &mut a, &mut b, 2_000_500);
++        order(&world, &mut a, &mut b, 6_000_001);
++        (b.received(0), samples)
++    };
++    let (first, samples) = run(true);
++    let (second, _) = run(false);
++    assert_eq!(first, second);
++    let at = |k: i64| first.iter().find(|(index, _, _)| *index == k).map(|(_, re, im)| (*re, *im)).unwrap();
++    let near = |(re, im): (f32, f32), (want_re, want_im): (f32, f32)| (re - want_re).abs() < 0.01 && (im - want_im).abs() < 0.01;
++    assert!(near(at(1_999), samples[0]));
++    assert!(near(at(2_000), samples[1]));
++    assert!(near(at(2_001), (0.0, 0.0)));
++}
++
++#[test]
++fn mr_17_a_target_whose_instant_has_passed_is_late_even_on_the_floor_sample() {
++    let world = World::new(json!({}));
++    let mut radio = prepare(&world, Options { medium: false, ..Options::default() }).unwrap();
++    radio.mock.arm().unwrap();
++    radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++    step(&world, &mut [&mut radio], 0);
++    let waveform = world.waveform(&ramp(10));
++    let mut late = burst(&radio, &world, waveform, 1, false);
++    if let Action::TxBurst { late_policy, .. } = &mut late { *late_policy = LatePolicy::DropAndFlag; }
++    radio.push(late);
++    step(&world, &mut [&mut radio], 1_500);
++    let events = radio.drain_events();
++    let time_errors: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
++    assert_eq!(time_errors.len(), 1, "sample 1 is at 1 000 ns, before the round at 1 500 ns");
++    assert_eq!(time_errors[0].payload["outcome"], "drop");
++    assert_eq!(time_errors[0].payload["late_by_ns"], 1_000, "measured from the first transmit sample at or after the round");
++    assert_eq!(time_errors[0].time, TimePoint::new(radio.tx_domain(&world), 1), "the event's time is the round's instant in the transmit clock, floored");
++    assert_eq!(radio.section("rejected")[0]["reason"], "MR-17: the late policy dropped the burst");
++}
++
++#[test]
++fn mr_32_a_cold_transmit_change_ends_the_old_radiation() {
++    let world = World::new(loopback(None));
++    let mut radio = prepare(&world, Options::default()).unwrap();
++    radio.mock.arm().unwrap();
++    radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++    let before = world.waveform(&[(0.5, 0.0)]);
++    radio.push(burst(&radio, &world, before, 0, true));
++    step(&world, &mut [&mut radio], 0);
++    radio.push(Action::UpdateParameter { target: rid("mock"), key: key("radio.tx.sample_rate_hz"), value: Value::Num(2_000_000.0), class: UpdateClass::Cold, at: None });
++    step(&world, &mut [&mut radio], 2_000_500);
++    let after = world.waveform(&[(0.0, 0.5)]);
++    radio.push(burst(&radio, &world, after, 3, true));
++    step(&world, &mut [&mut radio], 2_000_500);
++    step(&world, &mut [&mut radio], 6_000_001);
++    for (k, re, im) in radio.received(0) {
++        let expected = match k {
++            ..=2_000 => (0.5, 0.0),
++            2_001 => (0.0, 0.0),
++            _ => (0.0, 0.5),
++        };
++        assert_eq!((re, im), expected, "sample {k}");
++    }
++}
++
++#[test]
++fn mr_35_a_cold_receive_change_samples_the_field_on_the_new_clock() {
++    let world = World::new(loopback(None));
++    let mut radio = prepare(&world, Options::default()).unwrap();
++    radio.mock.arm().unwrap();
++    radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++    let samples = ramp(10_000);
++    let waveform = world.waveform(&samples);
++    radio.push(burst(&radio, &world, waveform, 0, false));
++    step(&world, &mut [&mut radio], 0);
++    radio.push(Action::UpdateParameter { target: rid("mock"), key: key("radio.rx.sample_rate_hz"), value: Value::Num(2_000_000.0), class: UpdateClass::Cold, at: None });
++    step(&world, &mut [&mut radio], 1_000_000);
++    step(&world, &mut [&mut radio], 4_000_001);
++    let first_domain = world.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/rx")).unwrap().domain;
++    let mut checked = (0, 0);
++    while let Some(block) = radio.link.receive() {
++        let header = block.header().clone();
++        let bytes = block.host_bytes().unwrap();
++        for index in 0..header.len as usize {
++            let k = header.first_sample_time.ticks + index as i64;
++            let (re, im) = ezsdr_hostmem::read_cf32(bytes, header.len as usize, 0, index);
++            let j = if header.first_sample_time.domain == first_domain { checked.0 += 1; k } else { checked.1 += 1; 1_000 + k / 2 };
++            assert_eq!((re, im), samples[j as usize], "clock {:?} sample {k}", header.first_sample_time.domain);
++        }
++    }
++    assert_eq!(checked, (1_000, 6_000));
++}
++
++#[test]
++fn mr_25_a_stop_at_a_held_burst_s_start_silences_the_transmitter() {
++    enum End { StopBefore, StopInTheRound, ColdChange }
++    for end in [End::StopBefore, End::StopInTheRound, End::ColdChange] {
++        let world = World::new(loopback(None));
++        let mut radio = prepare(&world, Options::default()).unwrap();
++        radio.mock.arm().unwrap();
++        radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++        let first = world.waveform(&ramp(1_000));
++        let second = world.waveform(&[(0.0, 0.5)]);
++        radio.push(burst(&radio, &world, first, 0, true));
++        radio.push(burst(&radio, &world, second, 4_000, true));
++        step(&world, &mut [&mut radio], 0);
++        let (tick, reason) = match end {
++            End::StopBefore => {
++                run_to(&world, &mut [&mut radio], 3_999_499);
++                radio.push(Action::Stop { target: Some(rid("mock/tx")) });
++                (3_999_500, "cancelled by stop")
++            }
++            End::StopInTheRound => {
++                run_to(&world, &mut [&mut radio], 3_999_999);
++                radio.push(Action::Stop { target: Some(rid("mock/tx")) });
++                (4_000_000, "cancelled by stop")
++            }
++            End::ColdChange => {
++                radio.push(Action::UpdateParameter { target: rid("mock"), key: key("radio.tx.sample_rate_hz"), value: Value::Num(2_000_000.0), class: UpdateClass::Cold, at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, 3_999_500))) });
++                run_to(&world, &mut [&mut radio], 3_999_499);
++                (3_999_500, "cancelled by a cold change")
++            }
++        };
++        step(&world, &mut [&mut radio], tick);
++        run_to(&world, &mut [&mut radio], 9_000_001);
++        step(&world, &mut [&mut radio], 9_000_001);
++        let heard: Vec<_> = radio.received(0).into_iter().filter(|(_, re, im)| (*re, *im) != (0.0, 0.0)).map(|(k, _, _)| k).collect();
++        assert_eq!(heard.len(), 4_000, "the first burst's 4 000 samples and nothing after the held start");
++        assert_eq!(heard.last(), Some(&3_999));
++        let records = records(&radio);
++        assert_eq!(records.len(), 1);
++        assert_eq!((records[0].samples, records[0].end), (4_000, BurstEnd::Eob), "the first burst ended at the held burst's start");
++        let rejected = radio.section("rejected");
++        assert_eq!(rejected.as_array().unwrap().len(), 1, "the held burst never started");
++        assert!(rejected[0]["reason"].as_str().unwrap().contains(reason));
++    }
++
++    let (world, mut a, mut b) = two(a_into_b(), 1_000_000.0, 1_000_000.0);
++    let first = world.waveform(&[(0.5, 0.0)]);
++    let second = world.waveform(&[(0.0, 0.5)]);
++    a.push(burst(&a, &world, first, 0, true));
++    a.push(burst(&a, &world, second, 3_000, true));
++    step(&world, &mut [&mut a, &mut b], 0);
++    run_to(&world, &mut [&mut a, &mut b], 2_999_499);
++    world.auth.advance_to(TimePoint::new(ROOT, 2_999_500)).unwrap();
++    a.mock.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
++    run_to(&world, &mut [&mut a, &mut b], 8_000_001);
++    step(&world, &mut [&mut a, &mut b], 8_000_001);
++    let late: Vec<_> = b.received(0).into_iter().filter(|(k, re, im)| *k >= 3_000 && (*re, *im) != (0.0, 0.0)).collect();
++    assert!(late.is_empty(), "Provider::stop before a held start leaves the transmitter silent, not {} samples", late.len());
++}
++
++#[test]
++fn ch_09_a_burst_starting_between_rounds_survives_a_stop_in_either_order() {
++    let run = |a_first: bool| {
++        let (world, mut a, mut b) = two(a_into_b(), 3_000_000.0, 3_000_000.0);
++        let first = world.waveform(&ramp(999));
++        let second = world.waveform(&[(0.0, 0.5)]);
++        a.push(burst(&a, &world, first, 0, true));
++        a.push(burst(&a, &world, second, 1_999, true));
++        ordered(&world, &mut a, &mut b, 0, a_first);
++        while let Some(due) = world.auth.next_due() {
++            if due.ticks >= 666_334 { break; }
++            ordered(&world, &mut a, &mut b, due.ticks, a_first);
++        }
++        a.push(Action::Stop { target: Some(rid("dev_a/tx")) });
++        ordered(&world, &mut a, &mut b, 666_334, a_first);
++        while let Some(due) = world.auth.next_due() {
++            if due.ticks > 2_000_001 { break; }
++            ordered(&world, &mut a, &mut b, due.ticks, a_first);
++        }
++        ordered(&world, &mut a, &mut b, 2_000_001, a_first);
++        (b.received(0), records(&a))
++    };
++    let (first, records_a_first) = run(true);
++    let (second, records_b_first) = run(false);
++    assert_eq!(first, second, "CH-9: the receiver's samples do not depend on the stepping order");
++    assert_eq!(records_a_first, records_b_first);
++    let at = |k: i64| first.iter().find(|(index, _, _)| *index == k).map(|(_, re, im)| (*re, *im)).unwrap();
++    assert_eq!(at(1_999), (0.0, 0.5), "sample 1 999 (666 333⅓ ns) is before the stop's round and belongs to the second burst");
++    assert_eq!(at(2_000), (0.0, 0.0));
++    assert_eq!(records_a_first.len(), 2);
++    assert_eq!((records_a_first[0].samples, records_a_first[0].end), (1_999, BurstEnd::Eob));
++    assert_eq!((records_a_first[1].samples, records_a_first[1].end), (1, BurstEnd::Stop), "the second burst transmitted its one sample before the stop");
++}
++
++#[test]
++fn mr_32_a_two_channel_waveform_is_channel_interleaved() {
++    let world = World::new(json!({ "sim.channel": { "couplings": [
++        { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 },
++        { "tx": "radio", "tx_channel": 1, "rx": "radio", "rx_channel": 1, "gain_db": 0.0 }
++    ] } }));
++    let constraints = [("radio.tx.channels", eq(Value::Int(2))), ("radio.rx.channels", eq(Value::Int(2)))];
++    let mut radio = prepare(&world, Options { constraints: &constraints, ..Options::default() }).unwrap();
++    radio.mock.arm().unwrap();
++    radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++    let interleaved: Vec<(f32, f32)> = (0..2_000).flat_map(|n| [((n + 1) as f32 / 4096.0, 0.0), (0.0, (n + 1) as f32 / 4096.0)]).collect();
++    let waveform = world.waveform(&interleaved);
++    radio.push(Action::TxBurst {
++        target: rid("mock/tx"),
++        waveform,
++        repeat: false,
++        at: AbsoluteDeadline::new(TimePoint::new(radio.tx_domain(&world), 0)),
++        requested_at: None,
++        late_policy: LatePolicy::SendAsapAndFlag,
++        metadata: BTreeMap::new(),
++    });
++    step(&world, &mut [&mut radio], 0);
++    step(&world, &mut [&mut radio], 2_000_001);
++    let blocks: Vec<_> = std::iter::from_fn(|| radio.link.receive()).collect();
++    assert_eq!(blocks.len(), 1);
++    let block = &blocks[0];
++    for index in 0..2_000usize {
++        let expected = (index + 1) as f32 / 4096.0;
++        assert_eq!(ezsdr_hostmem::read_cf32(block.host_bytes().unwrap(), 2_000, 0, index), (expected, 0.0), "channel 0 sample {index}");
++        assert_eq!(ezsdr_hostmem::read_cf32(block.host_bytes().unwrap(), 2_000, 1, index), (0.0, expected), "channel 1 sample {index}");
++    }
++}
++
++#[test]
++fn mr_25_a_stop_on_a_sample_instant_does_not_transmit_that_sample() {
++    let world = World::new(loopback(None));
++    let mut radio = prepare(&world, Options::default()).unwrap();
++    radio.mock.arm().unwrap();
++    radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++    let waveform = world.waveform(&[(0.5, 0.25)]);
++    radio.push(burst(&radio, &world, waveform, 0, true));
++    step(&world, &mut [&mut radio], 0);
++    step(&world, &mut [&mut radio], 2_000_001);
++    radio.push(Action::Stop { target: Some(rid("mock/tx")) });
++    step(&world, &mut [&mut radio], 2_500_000);
++    step(&world, &mut [&mut radio], 4_000_001);
++    assert_eq!(records(&radio)[0].samples, 2_500, "sample 2 500 is at the stop instant 2 500 000 and is not transmitted");
++    let last_heard = radio.received(0).into_iter().filter(|(_, re, im)| (*re, *im) != (0.0, 0.0)).map(|(k, _, _)| k).max();
++    assert_eq!(last_heard, Some(2_499));
++}
++
++#[test]
++fn mr_31_the_medium_takes_the_run_s_seed() {
++    let sigma = (10f64.powf(-20.0 / 10.0) / 2.0).sqrt();
++    for seed in [7u64, 8] {
++        let world = World::new(json!({ "sim.seed": seed, "sim.channel": { "couplings": [], "noise_dbfs": { "radio": -20.0 } } }));
++        let mut radio = prepare(&world, Options::default()).unwrap();
++        radio.mock.arm().unwrap();
++        radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++        step(&world, &mut [&mut radio], 0);
++        step(&world, &mut [&mut radio], 2_000_001);
++        let received = radio.received(0);
++        let (g1, g2) = ezsdr_sim::channel::gaussian_pair(&mut SimRng::new(seed, "sim.channel/radio/0"));
++        let (k, re, im) = received[0];
++        assert_eq!(k, 0);
++        assert!((f64::from(re) - sigma * g1).abs() < 1e-6 && (f64::from(im) - sigma * g2).abs() < 1e-6, "seed {seed}: ({re}, {im})");
++    }
++}
++
++#[test]
++fn mr_32_a_stop_after_a_cold_change_keeps_the_old_clock_s_radiation() {
++    // a 1 ms path, so that `b` evaluates instants of the old transmit clock after the stop on the new one
++    let environment = json!({ "sim.channel": { "couplings": [{ "tx": "a", "tx_channel": 0, "rx": "b", "rx_channel": 0, "gain_db": 0.0, "delay_ns": 1_000_000 }] } });
++    let (world, mut a, mut b) = two(environment, 1_000_000.0, 1_000_000.0);
++    let first = world.waveform(&[(0.5, 0.0)]);
++    let second = world.waveform(&[(0.0, 0.5)]);
++    a.push(burst(&a, &world, first, 0, true));
++    a.push(burst(&a, &world, second, 1_500, true));
++    step(&world, &mut [&mut a, &mut b], 0);
++    a.push(Action::UpdateParameter { target: rid("dev_a"), key: key("radio.tx.sample_rate_hz"), value: Value::Num(2_000_000.0), class: UpdateClass::Cold, at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, 2_000_500))) });
++    run_to(&world, &mut [&mut a, &mut b], 2_000_500);
++    let samples = ramp(100);
++    let third = world.waveform(&samples);
++    a.push(burst(&a, &world, third, 3, false));
++    step(&world, &mut [&mut a, &mut b], 2_000_500);
++    run_to(&world, &mut [&mut a, &mut b], 2_002_249);
++    a.push(Action::Stop { target: Some(rid("dev_a/tx")) });
++    step(&world, &mut [&mut a, &mut b], 2_002_250);
++    run_to(&world, &mut [&mut a, &mut b], 6_000_001);
++    step(&world, &mut [&mut a, &mut b], 6_000_001);
++    let summary: Vec<_> = records(&a).iter().map(|record| (record.samples, record.end)).collect();
++    assert_eq!(summary, vec![(1_500, BurstEnd::Eob), (501, BurstEnd::Stop), (1, BurstEnd::Stop)], "the cold change at 2 000.5 us cuts the old clock at sample 2 001; the stop at 2 002.25 us cuts the new one at sample 4");
++    let received = b.received(0);
++    assert_eq!(received.len(), 6_000);
++    for (k, re, im) in received {
++        let want = match k {
++            1_000..=2_499 => (0.5, 0.0),
++            2_500..=3_000 => (0.0, 0.5),
++            3_002 => samples[0],
++            _ => (0.0, 0.0),
++        };
++        assert_eq!((re, im), want, "sample {k}");
++    }
++}
++
++#[test]
++fn mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused() {
++    let refused = "MR-16: burst begins at or before the open burst's next sample";
++    let started = |environment: serde_json::Value, medium: bool, waveform: &[(f32, f32)]| {
++        let world = World::new(environment);
++        let mut radio = prepare(&world, Options { medium, ..Options::default() }).unwrap();
++        radio.mock.arm().unwrap();
++        radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++        let first = world.waveform(waveform);
++        radio.push(burst(&radio, &world, first, 1_000, true));
++        step(&world, &mut [&mut radio], 0);
++        (world, radio)
++    };
++    let summary = |radio: &Radio| records(radio).iter().map(|record| (record.samples, record.end)).collect::<Vec<_>>();
++    let samples = ramp(1_000);
++
++    // at the start of a burst the round at sample 1 000 opened, which has transmitted nothing;
++    // with and without a channel (Z11)
++    for (environment, medium) in [(loopback(None), true), (json!({}), false)] {
++        let (world, mut radio) = started(environment, medium, &samples);
++        step(&world, &mut [&mut radio], 1_000_000);
++        let second = world.waveform(&[(0.0, 0.5)]);
++        radio.push(burst(&radio, &world, second, 1_000, true));
++        step(&world, &mut [&mut radio], 1_000_000);
++        radio.push(Action::Stop { target: Some(rid("mock/tx")) });
++        step(&world, &mut [&mut radio], 3_000_500);
++        step(&world, &mut [&mut radio], 6_000_001);
++        assert_eq!(radio.section("rejected")[0]["reason"], refused);
++        assert_eq!(summary(&radio), vec![(2_001, BurstEnd::Stop)]);
++        if medium {
++            for (k, re, im) in radio.received(0) {
++                let want = if (1_000..=3_000).contains(&k) { samples[((k - 1_000) % 1_000) as usize] } else { (0.0, 0.0) };
++                assert_eq!((re, im), want, "sample {k}");
++            }
++        }
++    }
++
++    // at the next sample of a burst whose block ending there has been emitted without END_OF_BURST:
++    // a one-sample waveform repeats in one-sample blocks, so the round at 1 000 001 ns emits
++    // [1 000, 1 001) and the open burst's next sample is 1 001; a burst one sample later is admitted
++    let (world, mut radio) = started(loopback(None), true, &[(0.5, 0.0)]);
++    run_to(&world, &mut [&mut radio], 1_000_001);
++    let second = world.waveform(&[(0.0, 0.5)]);
++    let third = world.waveform(&[(0.25, 0.25)]);
++    radio.push(burst(&radio, &world, second, 1_001, true));
++    radio.push(burst(&radio, &world, third, 1_002, true));
++    step(&world, &mut [&mut radio], 1_000_001);
++    run_to(&world, &mut [&mut radio], 1_500_000);
++    radio.push(Action::Stop { target: Some(rid("mock/tx")) });
++    step(&world, &mut [&mut radio], 1_500_500);
++    run_to(&world, &mut [&mut radio], 3_000_001);
++    assert_eq!(radio.section("rejected").as_array().unwrap().len(), 1);
++    assert_eq!(radio.section("rejected")[0]["reason"], refused);
++    assert_eq!(summary(&radio), vec![(2, BurstEnd::Eob), (499, BurstEnd::Stop)]);
++    for (k, re, im) in radio.received(0) {
++        let want = match k { 1_000..=1_001 => (0.5, 0.0), 1_002..=1_500 => (0.25, 0.25), _ => (0.0, 0.0) };
++        assert_eq!((re, im), want, "sample {k}");
++    }
++
++    // a late burst for sample 500, judged where MR-17's SendAsap moves it (no lead on `ideal`):
++    // onto the open burst's start in the round at 1 000 000 ns, refused with TIME_ERROR { refused };
++    // one sample past it in the round at 1 000 500 ns, admitted, and the open burst ends there
++    let (world, mut radio) = started(loopback(None), true, &samples);
++    step(&world, &mut [&mut radio], 1_000_000);
++    radio.drain_events();
++    let second = world.waveform(&[(0.0, 0.5)]);
++    radio.push(burst(&radio, &world, second, 500, true));
++    step(&world, &mut [&mut radio], 1_000_000);
++    let events = radio.drain_events();
++    assert_eq!(radio.section("rejected")[0]["reason"], refused);
++    assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR && event.payload["outcome"] == "refused").count(), 1);
++    assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 1);
++
++    let (world, mut radio) = started(loopback(None), true, &samples);
++    step(&world, &mut [&mut radio], 1_000_000);
++    let second = world.waveform(&[(0.0, 0.5)]);
++    radio.push(burst(&radio, &world, second, 500, true));
++    step(&world, &mut [&mut radio], 1_000_500);
++    radio.push(Action::Stop { target: Some(rid("mock/tx")) });
++    step(&world, &mut [&mut radio], 3_000_500);
++    step(&world, &mut [&mut radio], 6_000_001);
++    assert_eq!(radio.section("rejected"), json!([]));
++    assert_eq!(summary(&radio), vec![(1, BurstEnd::Eob), (2_000, BurstEnd::Stop)]);
++    for (k, re, im) in radio.received(0) {
++        let want = match k { 1_000 => samples[0], 1_001..=3_000 => (0.0, 0.5), _ => (0.0, 0.0) };
++        assert_eq!((re, im), want, "sample {k}");
++    }
++}
++
++#[test]
++fn mr_15_a_transmit_block_is_emitted_only_after_its_last_sample() {
++    // a round at the instant of sample 999, the last of the first block, is stepped twice, and an
++    // Action arrives for its second pass: sample 999 has not been transmitted in either pass;
++    // with a loopback channel and without one (Z11)
++    let first_pass = |environment: serde_json::Value, medium: bool, waveform: &[(f32, f32)], repeat: bool| {
++        let world = World::new(environment);
++        let mut radio = prepare(&world, Options { medium, ..Options::default() }).unwrap();
++        radio.mock.arm().unwrap();
++        radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
++        let first = world.waveform(waveform);
++        radio.push(burst(&radio, &world, first, 0, repeat));
++        step(&world, &mut [&mut radio], 0);
++        run_to(&world, &mut [&mut radio], 999_000);
++        step(&world, &mut [&mut radio], 999_000);
++        (world, radio)
++    };
++    let summary = |radio: &Radio| records(radio).iter().map(|record| (record.samples, record.end)).collect::<Vec<_>>();
++    let samples = ramp(1_000);
++
++    for (environment, medium) in [(loopback(None), true), (json!({}), false)] {
++        // a stop: the burst transmits samples 0 … 998, is recorded with 999 and radiates 999
++        let (world, mut radio) = first_pass(environment.clone(), medium, &samples, true);
++        radio.push(Action::Stop { target: Some(rid("mock/tx")) });
++        step(&world, &mut [&mut radio], 999_000);
++        run_to(&world, &mut [&mut radio], 3_000_001);
++        step(&world, &mut [&mut radio], 3_000_001);
++        assert_eq!(summary(&radio), vec![(999, BurstEnd::Stop)]);
++        if medium {
++            for (k, re, im) in radio.received(0) {
++                let want = if k < 999 { samples[k as usize] } else { (0.0, 0.0) };
++                assert_eq!((re, im), want, "sample {k}");
++            }
++        }
++
++        // a burst at sample 999, the last of a burst that has not ended: it takes over there, and
++        // no two records hold one sample
++        let (world, mut radio) = first_pass(environment, medium, &samples, false);
++        let second = world.waveform(&[(0.0, 0.5)]);
++        radio.push(burst(&radio, &world, second, 999, true));
++        step(&world, &mut [&mut radio], 999_000);
++        run_to(&world, &mut [&mut radio], 1_500_000);
++        radio.push(Action::Stop { target: Some(rid("mock/tx")) });
++        step(&world, &mut [&mut radio], 1_500_500);
++        run_to(&world, &mut [&mut radio], 3_000_001);
++        step(&world, &mut [&mut radio], 3_000_001);
++        assert_eq!(radio.section("rejected"), json!([]));
++        assert_eq!(summary(&radio), vec![(999, BurstEnd::Eob), (502, BurstEnd::Stop)]);
++        if medium {
++            for (k, re, im) in radio.received(0) {
++                let want = match k { 0..=998 => samples[k as usize], 999..=1_500 => (0.0, 0.5), _ => (0.0, 0.0) };
++                assert_eq!((re, im), want, "sample {k}");
++            }
++        }
++    }
++}
++
++#[test]
++fn mr_25_a_stop_transmits_every_held_burst_before_it() {
++    // the Mocks are stepped at 0, 1 ms and the stop only, so three held bursts start before the stop's round
++    let run = |a_first: bool| {
++        let (world, mut a, mut b) = two(a_into_b(), 1_000_000.0, 1_000_000.0);
++        let first = world.waveform(&ramp(1_000));
++        let second = world.waveform(&[(0.0, 0.5)]);
++        let third = world.waveform(&ramp(100));
++        let fourth = world.waveform(&[(0.25, 0.25)]);
++        a.push(burst(&a, &world, first, 0, true));
++        a.push(burst(&a, &world, second, 1_500, true));
++        a.push(burst(&a, &world, third, 2_500, false));
++        a.push(burst(&a, &world, fourth, 3_000, true));
++        ordered(&world, &mut a, &mut b, 0, a_first);
++        ordered(&world, &mut a, &mut b, 1_000_000, a_first);
++        a.push(Action::Stop { target: Some(rid("dev_a/tx")) });
++        ordered(&world, &mut a, &mut b, 3_200_500, a_first);
++        ordered(&world, &mut a, &mut b, 8_000_001, a_first);
++        let summary: Vec<_> = records(&a).iter().map(|record| (record.samples, record.end)).collect();
++        (b.received(0), summary, a.section("rejected"))
++    };
++    let (received, summary, rejected) = run(true);
++    assert_eq!((received.clone(), summary.clone(), rejected.clone()), run(false));
++    assert_eq!(summary, vec![(1_500, BurstEnd::Eob), (1_000, BurstEnd::Eob), (100, BurstEnd::Eob), (201, BurstEnd::Stop)]);
++    assert_eq!(rejected, json!([]));
++    let (first, third) = (ramp(1_000), ramp(100));
++    for (k, re, im) in received {
++        let want = match k {
++            0..=1_499 => first[(k % 1_000) as usize],
++            1_500..=2_499 => (0.0, 0.5),
++            2_500..=2_599 => third[(k - 2_500) as usize],
++            3_000..=3_200 => (0.25, 0.25),
++            _ => (0.0, 0.0),
++        };
++        assert_eq!((re, im), want, "sample {k}");
++    }
++}
+diff --git a/crates/ezsdr-mock-radio/tests/mock_radio.rs b/crates/ezsdr-mock-radio/tests/mock_radio.rs
+index 5dd3ac2e3df79b784694ae660082e10d43133562..100c2451e5b5ef1e59dee48d0cca89813125d6be 100644
+--- a/crates/ezsdr-mock-radio/tests/mock_radio.rs
++++ b/crates/ezsdr-mock-radio/tests/mock_radio.rs
+@@ -23,7 +23,7 @@ use ezsdr_mock_radio::{descriptor, MockRadio};
+ const ROOT: ClockDomainId = ClockDomainId::local(7);
+ 
+ fn module_ref() -> ModuleRef {
+-    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 0, 0) }
++    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 1, 0) }
+ }
+ 
+ fn waveform(samples: usize) -> ArtifactRef {
+@@ -75,7 +75,7 @@ fn binding(profile: &str) -> Binding {
+     Binding {
+         module: module_ref(),
+         selector: BTreeMap::from([(Ident::parse("id").unwrap(), Value::Str("mock".to_owned()))]),
+-        profile: Some(ProfileRef { name: profile.to_owned(), version: Version::new(1, 0, 0) }),
++        profile: Some(ProfileRef { name: profile.to_owned(), version: Version::new(1, 1, 0) }),
+         feed: None,
+     }
+ }
+@@ -258,7 +258,7 @@ fn mr_01_descriptor_registers() {
+     registry.register(descriptor(), Factories { provider: true, ..Factories::default() }).unwrap();
+     let d = descriptor();
+     assert_eq!(d.id.as_str(), "ezsdr.radio.mock");
+-    assert_eq!(d.version, Version::new(1, 0, 0));
++    assert_eq!(d.version, Version::new(1, 1, 0));
+     assert_eq!(d.kernel_api, KERNEL_API);
+     assert_eq!(d.roles, [Role::Provider]);
+     assert_eq!(d.vocabularies.len(), 2);
+@@ -380,7 +380,10 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
+             assert!(radio.instance().sections.contains_key(&Namespace::parse(&format!("ezsdr.radio.mock.{suffix}")).unwrap()));
+         }
+         assert_eq!(envelope["profile"]["name"], name);
+-        assert_eq!(envelope["profile"]["version"], serde_json::json!({ "major": 1, "minor": 0, "patch": 0 }));
++        assert_eq!(envelope["profile"]["version"], serde_json::json!({ "major": 1, "minor": 1, "patch": 0 }));
++        let (tx_delay, rx_delay) = if name == "x310-like" { (45, 0) } else { (0, 0) };
++        assert_eq!(capabilities[&key("radio.tx.path_delay_samples")], one(Value::Int(tx_delay)));
++        assert_eq!(capabilities[&key("radio.rx.path_delay_samples")], one(Value::Int(rx_delay)));
+         assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], lead);
+         assert_eq!(envelope["timing"]["startup_latency_ns"], startup);
+         assert_eq!(envelope["timing"]["stop_tail_ns"], tail);
+@@ -658,7 +661,7 @@ fn mr_12_jitter_draws_belong_to_blocks_after_a_receive_cut() {
+ fn mr_13_ramp_values() {
+     let mut harness = Harness::new("ideal", &[("radio.rx.channels", eq(Value::Int(2)))], &[("rx_test_pattern", Value::Str("ramp".to_owned()))], &[], Some((BackPressure::DropOldest, 4)));
+     harness.arm_start(0).unwrap();
+-    harness.step(1_999_000).unwrap();
++    harness.step(1_999_001).unwrap();
+     let block = harness.link.as_ref().unwrap().receive().unwrap();
+     assert_eq!(block.buffer().memory_domain, ezsdr_hostmem::HOST_MEMORY);
+     let bytes = block.host_bytes().unwrap();
+@@ -676,7 +679,7 @@ fn mr_13_ramp_values() {
+ 
+     let mut zero = Harness::new("ideal", &[("radio.rx.channels", eq(Value::Int(2)))], &[], &[], Some((BackPressure::DropOldest, 4)));
+     zero.arm_start(0).unwrap();
+-    zero.step(1_999_000).unwrap();
++    zero.step(1_999_001).unwrap();
+     let block = zero.link.as_ref().unwrap().receive().unwrap();
+     assert_eq!(block.buffer().memory_domain, ezsdr_hostmem::HOST_MEMORY);
+     assert!(block.host_bytes().unwrap().iter().all(|byte| *byte == 0));
+@@ -693,13 +696,13 @@ fn mr_14_blocks_appear_when_their_last_sample_has_occurred() {
+ 
+     let mut harness = Harness::new("ideal", &[], &[], &[], Some((BackPressure::DropOldest, 4)));
+     harness.arm_start(0).unwrap();
+-    assert_eq!(harness.auth.next_due(), Some(TimePoint::new(ROOT, 1_999_000)));
+-    harness.step(1_998_999).unwrap();
++    assert_eq!(harness.auth.next_due(), Some(TimePoint::new(ROOT, 1_999_001)));
++    harness.step(1_999_000).unwrap();
+     assert_eq!(harness.link.as_ref().unwrap().queued(), 0);
+-    assert_eq!(harness.auth.advance_to(TimePoint::new(ROOT, 1_999_000)).unwrap(), 1);
+-    harness.mock.step(TimePoint::new(ROOT, 1_999_000)).unwrap();
++    assert_eq!(harness.auth.advance_to(TimePoint::new(ROOT, 1_999_001)).unwrap(), 1);
++    harness.mock.step(TimePoint::new(ROOT, 1_999_001)).unwrap();
+     assert_eq!(harness.link.as_ref().unwrap().receive().unwrap().header().len, 2000);
+-    assert_eq!(harness.auth.next_due(), Some(TimePoint::new(ROOT, 3_999_000)));
++    assert_eq!(harness.auth.next_due(), Some(TimePoint::new(ROOT, 3_999_001)));
+ }
+ 
+ #[test]
+@@ -753,9 +756,9 @@ fn mr_16_burst_refusals() {
+     let domain = tx_domain(&overlap);
+     overlap.actions.push(tx_action(domain, 0, 4_000, false, LatePolicy::SendAsapAndFlag));
+     overlap.step(0).unwrap();
+-    overlap.step(1_999_000).unwrap();
++    overlap.step(1_999_001).unwrap();
+     overlap.actions.push(tx_action(domain, 1_999, 2, false, LatePolicy::SendAsapAndFlag));
+-    overlap.step(1_999_000).unwrap();
++    overlap.step(1_999_001).unwrap();
+     let rejected = &overlap.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.rejected").unwrap()];
+     assert_eq!(rejected.as_array().unwrap().len(), 1);
+     assert!(rejected[0]["reason"].as_str().unwrap().contains("open burst's next sample"));
+@@ -785,7 +788,7 @@ fn mr_16_repeat_is_contiguous_across_wraps() {
+     let domain = tx_domain(&harness);
+     harness.actions.push(tx_action(domain, 0, 1_000, true, LatePolicy::SendAsapAndFlag));
+     harness.step(0).unwrap();
+-    harness.step(4_999_000).unwrap();
++    harness.step(4_999_001).unwrap();
+     harness.mock.stop(StopMode::Orderly).unwrap();
+     let record: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(
+         harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()][0].clone(),
+@@ -830,7 +833,7 @@ fn mr_17_late_policy_outcomes() {
+         assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).count(), 1);
+         assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 0);
+         if transmitted {
+-            harness.step(2_012_999_000).unwrap();
++            harness.step(2_012_999_001).unwrap();
+             let record: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(
+                 harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()][0].clone(),
+             ).unwrap();
+@@ -895,7 +898,7 @@ fn mr_18_a_cold_rate_change_starts_a_new_sample_clock() {
+     harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, effective))));
+     harness.step(effective).unwrap();
+     harness.link.as_ref().unwrap().queue.lock().unwrap().clear();
+-    harness.step(effective + 999_500).unwrap();
++    harness.step(effective + 999_501).unwrap();
+     let records = harness.clocks.sample_clock_records();
+     assert_eq!(records[0].ended_at, Some(TimePoint::new(ROOT, effective)));
+     let current = records.last().unwrap();
+@@ -913,7 +916,7 @@ fn mr_18_a_cold_receive_change_before_t0_applies_at_t0() {
+     harness.arm_start(t0).unwrap();
+     harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, None));
+     harness.step(0).unwrap();
+-    harness.step(t0 + 999_500).unwrap();
++    harness.step(t0 + 999_501).unwrap();
+     let records = harness.clocks.sample_clock_records();
+     assert!(records.iter().all(|record| record.origin.ticks >= t0), "a receive clock starts before T0: {records:?}");
+     let applied = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.applied").unwrap()];
+@@ -940,7 +943,7 @@ fn mr_18_a_cold_transmit_change_replaces_the_tracker() {
+     assert_eq!(records.last().unwrap().origin, TimePoint::new(ROOT, 2_000_000));
+     harness.actions.push(tx_action(new, 0, 3_000, false, LatePolicy::SendAsapAndFlag));
+     harness.step(2_000_000).unwrap();
+-    harness.step(3_499_500).unwrap();
++    harness.step(3_499_501).unwrap();
+     let bursts = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()];
+     let records: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(bursts.clone()).unwrap();
+     assert_eq!(records.len(), 2);
+@@ -996,11 +999,11 @@ fn mr_18_a_scheduled_pair_is_checked_when_it_applies() {
+ fn mr_19_backpressure_is_an_overrun() {
+     let mut harness = Harness::new("x310-like", &[], &[], &[], Some((BackPressure::Block, 1)));
+     harness.arm_start(2_000_000_000).unwrap();
+-    harness.step(2_001_999_000).unwrap();
+-    harness.step(2_003_999_000).unwrap();
++    harness.step(2_001_999_001).unwrap();
++    harness.step(2_003_999_001).unwrap();
+     let first = harness.link.as_ref().unwrap().receive().unwrap();
+     assert_eq!(first.header().first_sample_time.ticks, 0);
+-    harness.step(2_053_999_000).unwrap();
++    harness.step(2_053_999_001).unwrap();
+     let restarted = harness.link.as_ref().unwrap().receive().unwrap();
+     assert_eq!(restarted.header().first_sample_time.ticks, 52_000);
+     assert!(restarted.header().flags.contains(BlockFlags::GAP_BEFORE));
+@@ -1159,7 +1162,7 @@ fn mr_21_overrun_shape() {
+     let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
+     let mut harness = Harness::new("x310-like", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
+     harness.arm_start(2_000_000_000).unwrap();
+-    harness.step(2_052_999_000).unwrap();
++    harness.step(2_052_999_001).unwrap();
+     let mut headers = Vec::new();
+     while let Some(block) = harness.link.as_ref().unwrap().receive() { headers.push(block.header().clone()); }
+     let restarted = headers.iter().find(|header| header.first_sample_time.ticks == 51_000).unwrap();
+@@ -1175,7 +1178,7 @@ fn mr_21_overrun_shape() {
+     ]))];
+     let mut overlap = Harness::new("x310-like", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
+     overlap.arm_start(2_000_000_000).unwrap();
+-    overlap.step(2_062_999_000).unwrap();
++    overlap.step(2_062_999_001).unwrap();
+     let mut headers = Vec::new();
+     while let Some(block) = overlap.link.as_ref().unwrap().receive() { headers.push(block.header().clone()); }
+     let restarted = headers.iter().find(|header| header.first_sample_time.ticks == 60_000).unwrap();
+@@ -1188,7 +1191,7 @@ fn mr_22_sequence_error_shape() {
+     let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_sequence_error", "target": "radio" }]))];
+     let mut harness = Harness::new("ideal", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
+     harness.arm_start(0).unwrap();
+-    harness.step(4_999_000).unwrap();
++    harness.step(4_999_001).unwrap();
+     let mut headers = Vec::new();
+     while let Some(block) = harness.link.as_ref().unwrap().receive() { headers.push(block.header().clone()); }
+     let restarted = headers.iter().find(|header| header.first_sample_time.ticks == 3000).unwrap();
+@@ -1223,7 +1226,7 @@ fn mr_25_orderly_stop_delivers_the_tail_abort_does_not() {
+     orderly.step(2_001_999_000).unwrap();
+     let stop = 2_001_999_000;
+     orderly.mock.stop(StopMode::Orderly).unwrap();
+-    orderly.step(stop + 999_000).unwrap();
++    orderly.step(stop + 999_001).unwrap();
+     let mut blocks = Vec::new();
+     while let Some(block) = orderly.link.as_ref().unwrap().receive() { blocks.push(block); }
+     let last = blocks.last().unwrap().header();
+@@ -1231,7 +1234,7 @@ fn mr_25_orderly_stop_delivers_the_tail_abort_does_not() {
+ 
+     let mut abort = Harness::new("x310-like", &[], &[], &[], Some((BackPressure::DropOldest, 16)));
+     abort.arm_start(2_000_000_000).unwrap();
+-    abort.step(2_001_999_000).unwrap();
++    abort.step(2_001_999_001).unwrap();
+     abort.mock.stop(StopMode::Abort).unwrap();
+     abort.step(2_010_000_000).unwrap();
+     let mut after_abort = Vec::new();
