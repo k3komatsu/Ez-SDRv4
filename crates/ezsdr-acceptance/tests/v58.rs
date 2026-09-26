@@ -84,6 +84,24 @@ fn v58_10_experiments_name_no_mock_type() {
             );
         }
     }
+    // Since Phase 6 the Python package and its examples: they name Vocabulary keys, verbs
+    // and event kinds, and no Module, device profile or simulation section (EA-18, GY-6).
+    let python = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python");
+    let mut scanned = 0;
+    for dir in ["ezsdr", "examples"] {
+        for entry in std::fs::read_dir(python.join(dir)).expect("the Python sources are readable") {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|extension| extension != "py") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for forbidden in ["mock", "Mock", "x310", "ideal", "sim-engine", "sim_engine", "sim.channel", "sim.seed", "ezsdr.radio", "ezsdr.sink", "ezsdr.sim", "ezsdr.link", "ezsdr.exec"] {
+                assert!(!source.contains(forbidden), "{}: found forbidden name {forbidden}", path.display());
+            }
+            scanned += 1;
+        }
+    }
+    assert!(scanned >= 5, "the Python package and examples were found ({scanned} files)");
 }
 
 #[test]

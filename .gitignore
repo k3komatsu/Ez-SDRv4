@@ -14,3 +14,8 @@ v3/
 
 # Local-only: build output lives outside the synced folder (see .cargo/config.toml)
 /.cargo/
+
+# Python (plan/phase6): bytecode, packaging metadata, and the server's default Session directory
+__pycache__/
+*.egg-info/
+ezsdr-runs/
