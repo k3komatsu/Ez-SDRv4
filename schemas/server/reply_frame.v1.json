@@ -2255,6 +2255,10 @@
               "minimum": 0,
               "type": "integer"
             },
+            "horizon": {
+              "$ref": "#/$defs/TimePoint",
+              "description": "The instant the wait would have stood at."
+            },
             "index": {
               "description": "Its index.",
               "format": "uint",
@@ -2276,6 +2280,7 @@
           "required": [
             "op",
             "now",
+            "horizon",
             "events"
           ],
           "type": "object"

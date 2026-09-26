@@ -271,18 +271,33 @@
               "const": "wait_for",
               "type": "string"
             },
+            "until": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TimePoint"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "the instant to wait until (a previous reply's `horizon`, so that a client that\nwaits again keeps its deadline)."
+            },
             "within_ns": {
-              "description": "How long to wait, in nanoseconds of Run time.",
+              "default": null,
+              "description": "How long to wait, in nanoseconds of Run time; or else",
               "format": "uint64",
               "minimum": 0,
-              "type": "integer"
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
             "op",
             "kinds",
-            "from",
-            "within_ns"
+            "from"
           ],
           "type": "object"
         },

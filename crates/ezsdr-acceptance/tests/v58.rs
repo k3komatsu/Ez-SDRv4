@@ -95,7 +95,7 @@ fn v58_10_experiments_name_no_mock_type() {
                 continue;
             }
             let source = std::fs::read_to_string(&path).unwrap();
-            for forbidden in ["mock", "Mock", "x310", "ideal", "sim-engine", "sim_engine", "sim.channel", "sim.seed", "ezsdr.radio", "ezsdr.sink", "ezsdr.sim", "ezsdr.link", "ezsdr.exec"] {
+            for forbidden in ["mock", "Mock", "x310", "ideal", "sim-engine", "sim_engine", "sim.channel", "sim.seed", "sim.faults", "ezsdr.radio", "ezsdr.sink", "ezsdr.sim", "ezsdr.link", "ezsdr.exec"] {
                 assert!(!source.contains(forbidden), "{}: found forbidden name {forbidden}", path.display());
             }
             scanned += 1;

@@ -419,9 +419,13 @@ impl AdmissionCheckRegistry {
         self.checks.push(check);
     }
 
-    /// The sections the registered checks read (SB-29; KC-37a).
-    pub(crate) fn sections(&self) -> impl Iterator<Item = &Namespace> {
-        self.checks.iter().map(|check| check.section())
+    /// The sections read by the registered checks that judge a running Session's
+    /// Actions (SB-29, SB-30's runtime stage; KC-37a).
+    pub(crate) fn runtime_sections(&self) -> impl Iterator<Item = &Namespace> {
+        self.checks
+            .iter()
+            .filter(|check| check.stages().contains(&CheckStage::Runtime))
+            .map(|check| check.section())
     }
 
     /// Runs every check whose section is present in `environment` and whose stages

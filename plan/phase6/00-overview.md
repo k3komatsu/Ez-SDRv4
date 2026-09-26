@@ -142,7 +142,7 @@ OV-1…OV-23b, PO-1…PO-12, GV-1…GV-6, GW-1…GW-5 and GX-1…GX-6 bind Phase
 
 | Vision | Test | Phase 6 carrier | Remaining |
 |---|---|---|---|
-| §57 | the snippet, in software, with its Manifest | `test_v57_repeat_then_capture_in_software` (Python): `y` is the repeated waveform; the Manifest has the log, `inputs` holding the waveform's hash, the capture's `continuity` (first sample, validity) and the effective configuration | — |
+| §57 | the snippet, in software, with its Manifest | `test_v57_repeat_then_capture_in_software` (Python): `y` is the repeated waveform; the Manifest has the log, `inputs` holding the waveform's hash, the capture's `continuity` (first sample, validity) and the effective configuration. The carrier sleeps 5 ms between the two lines: the snippet verbatim captures from the current instant, and the repeat starts RS-19's lead later, so its first 2 045 samples are silence, as on a timed device (`examples/minimal.py` runs it verbatim) | — |
 | §58 #13 | Sessions leave provenance | `test_v58_13_the_session_manifest_is_written_and_complete` (Python): `manifest.json` in the Session directory is the Manifest `finish` returned, sealed, and names every call, the rejected one included | — |
 | §58 #16 | Session Actions are admitted | `test_v58_16_a_rejected_call_raises_and_is_logged` (Python): a frequency outside the profile's RF envelope raises `ezsdr.Rejected` naming `radio.rf_envelope`, the effective value is unchanged, the log holds the rejection | — |
 | §3 | the second snippet | `test_v3_parameters_through_attributes` (Python): the three setters, the read-back from the effective configuration; 19.5 Msps is coerced to 20 Msps and the coercion is on the entry | — |

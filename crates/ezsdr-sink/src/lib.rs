@@ -95,6 +95,10 @@ pub struct RequestRejectedPayload {
     pub action: String,
     /// The reason the Sink could not carry out the request (HD-14).
     pub reason: String,
+    /// The capture request's number when the rejected Action was one (HD-16; Phase 6,
+    /// Review H, P0-2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<u64>,
 }
 
 /// Payload of `sink.CAPTURE_WRITTEN`: the artifact the Sink just recorded (HD-16).
@@ -103,6 +107,12 @@ pub struct RequestRejectedPayload {
 pub struct CaptureWrittenPayload {
     /// The recorded capture, as the Sink's `stop` will return it (HD-16).
     pub artifact: ezsdr_kernel::manifest::ArtifactRef,
+    /// The number of the capture request it served, counting from 0 every capture request
+    /// the Sink received, accepted or not; `None` for the output's own capture (HD-16).
+    /// A client that submitted the `k`-th request waits for `request: k` (Phase 6, Review
+    /// H, P0-2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<u64>,
 }
 
 /// Generates the Sink Vocabulary's committed schemas (HD-14, HD-16).

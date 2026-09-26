@@ -473,6 +473,20 @@ impl RunHandle {
         };
         lock(&self.shared.scheduled).push(handle);
         self.run_loop(Some(t), Some(stop));
+        // Returned early at `stop`: the no-op at `t` is withdrawn, so no later round runs
+        // at an instant an earlier wait's horizon chose (KC-29b; Phase 6 Review H, P1-3).
+        let live = lock(&self.shared.end).is_none() && matches!(self.state(), RunState::Running {});
+        if live && self.shared.now().ticks < t.ticks {
+            lock(&self.shared.scheduled).retain(|pending| *pending != handle);
+            if self.shared.cancel(handle).is_err() {
+                super::ending::request(
+                    &self.shared,
+                    Termination::Failed { stage: Stage::Run },
+                    CleanupMode::Abort,
+                    Some("KC-30: a Module panicked during run: Authority cancel()".to_owned()),
+                );
+            }
+        }
         self.settle();
         self.ended_result()
     }
@@ -490,6 +504,10 @@ impl RunHandle {
         from: usize,
         horizon: TimePoint,
     ) -> Result<Option<usize>, super::RunHandleError> {
+        // KC-29's prologue first: a Run that has ended, or whose Lease has expired, answers
+        // `Ended` even when a match was delivered earlier (Phase 6 Review H, P0-5).
+        self.check_lease();
+        self.ensure_live()?;
         let first = |shared: &Shared| {
             lock(&shared.delivered)
                 .iter()

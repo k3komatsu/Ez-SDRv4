@@ -9,12 +9,14 @@ a wait and a read.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import os
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from ._client import Connection, Error
+from ._client import Connection, Error, ProtocolError
 
 CAPTURE_WRITTEN = "sink.CAPTURE_WRITTEN"
 REQUEST_REJECTED = "sink.REQUEST_REJECTED"
@@ -79,9 +81,16 @@ def _cf32(x: Any) -> Tuple[int, bytes]:
 def samples(data: bytes, artifact: dict) -> np.ndarray:
     """A capture artifact's bytes as ``complex64``: ``(n,)`` for one channel, ``(channels, n)``
     otherwise, with the channel count its continuity records (EA-17)."""
-    counts = {int(m["channels"]) for m in artifact.get("continuity", [])}
+    maps = artifact.get("continuity", [])
+    counts = {int(m["channels"]) for m in maps}
     if len(counts) != 1:
         raise Error(f"artifact {artifact['id']} does not have one channel count: {sorted(counts)}")
+    domains = {json.dumps(m["domain"], sort_keys=True) for m in maps}
+    if len(domains) != 1:
+        raise Error(
+            f"artifact {artifact['id']} spans {len(domains)} SampleClocks (a rate change, §23): "
+            "one array would hide it; read its bytes with Session.read and split them by its continuity"
+        )
     channels = counts.pop()
     frames = np.frombuffer(data, dtype="<c8").reshape(-1, channels).T
     return frames[0].copy() if channels == 1 else frames.copy()
@@ -138,6 +147,8 @@ class Rx(_Side):
         if timeout is None:
             timeout = n / float(self.sample_rate) + 1.0
         start = self._session._status()["events"]
+        # The Sink numbers the capture requests it receives (HD-16); this one is the next.
+        number = self._session._captures.get(recorder, 0)
         action = {
             "kind": "vocabulary",
             "ns": "sink",
@@ -148,16 +159,17 @@ class Rx(_Side):
         }
         entry = _admitted(self._session.submit(action))
         source = _rid(f"sink/{recorder}")
-        within = max(0, math.ceil(timeout * 1e9))
+        wait = {"within_ns": max(0, math.ceil(timeout * 1e9))}
         while True:
-            result, _ = self._session._call(
-                {"op": "wait_for", "kinds": [CAPTURE_WRITTEN, REQUEST_REJECTED], "from": start, "within_ns": within}
-            )
+            request = {"op": "wait_for", "kinds": [CAPTURE_WRITTEN, REQUEST_REJECTED], "from": start}
+            result, _ = self._session._call({**request, **wait})
             if result["index"] is None:
                 raise CaptureTimeout(f"no capture of {n} samples was written within {timeout} s of Run time")
+            # Waiting again keeps the first wait's deadline (Review H, P2-5).
+            wait = {"until": result["horizon"]}
             start = result["index"] + 1
             event = result["event"]
-            if event["source"] != source:
+            if event["source"] != source or event["payload"].get("request") != number:
                 continue
             if event["kind"] == REQUEST_REJECTED:
                 raise Rejected(entry, event)
@@ -228,6 +240,8 @@ class Session:
         self.start_instant: dict = connected["start_instant"]
         self._now: dict = connected["now"]
         self._waited = 0
+        # Capture requests admitted per recorder: the Sink's next request number (HD-16).
+        self._captures: Dict[str, int] = {}
         self.manifest: Optional[dict] = None
         self.manifest_path: Optional[str] = None
 
@@ -281,7 +295,16 @@ class Session:
 
     def submit(self, action: dict, waveform: Optional[bytes] = None) -> dict:
         """Submits any ``SessionAction`` document and returns its log entry, admitted or rejected."""
-        return self._call({"op": "submit", "action": action}, waveform or b"")[0]["entry"]
+        entry = self._call({"op": "submit", "action": action}, waveform or b"")[0]["entry"]
+        if (
+            entry["outcome"]["kind"] == "admitted"
+            and action.get("kind") == "vocabulary"
+            and (action.get("ns"), action.get("verb")) == ("sink", "capture")
+        ):
+            # One admitted `sink.capture` is one request the recorder numbers (HD-16).
+            recorder = action["target"]["path"]
+            self._captures[recorder] = self._captures.get(recorder, 0) + 1
+        return entry
 
     def set(self, target: str, key: str, value: Any) -> dict:
         """``SetParameter``; raises ``Rejected`` if the Kernel rejects it."""
@@ -356,6 +379,13 @@ class Session:
             try:
                 result, _ = self._call({"op": "finish"})
                 self.manifest, self.manifest_path = result["manifest"], result["path"]
+            except ProtocolError:
+                # The server has gone; every exit of it writes the Manifest (EA-15).
+                written = os.path.join(self.dir, "manifest.json")
+                if not os.path.exists(written):
+                    raise
+                with open(written, encoding="utf-8") as file:
+                    self.manifest, self.manifest_path = json.load(file), written
             finally:
                 self._connection.close()
         return self.manifest

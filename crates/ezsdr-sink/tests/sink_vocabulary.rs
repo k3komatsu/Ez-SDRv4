@@ -128,6 +128,7 @@ fn hd_14_schema_freeze() {
     let payload = RequestRejectedPayload {
         action: "capture".to_owned(),
         reason: "HD-14: N must be positive".to_owned(),
+        request: None,
     };
     assert_eq!(
         serde_json::to_value(payload).unwrap(),

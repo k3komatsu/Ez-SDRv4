@@ -3537,10 +3537,15 @@ fn kf_03_a_child_run_is_admitted_logged_run_and_recorded() {
 fn kf_03_rs_25a_refusals() {
     // The parent's profile carries the checked section `test.limits` and an unchecked one.
     let mut parent_profile = profile_one();
-    parent_profile["environment"] = serde_json::json!({ "test.limits": { "max": 10 }, "test.note": "a" });
+    parent_profile["environment"] = serde_json::json!({ "test.limits": { "max": 10 }, "test.note": "a", "test.plan": 1 });
+    let checks = || {
+        let mut checks = run_checks(true);
+        checks.register(Arc::new(PlanOnlyCheck(ns("test.plan"))));
+        checks
+    };
     let session = || {
         let mut assembly = rig(Pacing::FreeRunning).assembly;
-        assembly.checks = run_checks(true);
+        assembly.checks = checks();
         assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
         connect(&parent_profile, assembly, Lease::attached()).expect("valid Session entry")
     };
@@ -3558,6 +3563,11 @@ fn kf_03_rs_25a_refusals() {
     changed["environment"]["test.limits"] = serde_json::json!({ "max": 11 });
     let mut unchecked = parent_profile.clone();
     unchecked["environment"]["test.note"] = serde_json::json!("b");
+    // A section only a validate-stage check reads — `sim.channel`, `sim.seed`, `sim.faults`
+    // in the real Vocabularies — may differ: §54's sweep over a simulated channel, and §58
+    // #14's environment variation (Phase 6 Review H, P0-1).
+    let mut planned = parent_profile.clone();
+    planned["environment"]["test.plan"] = serde_json::json!(2);
     let cases = [
         (spec_one(), other_selector, Some("RS-25a: radio binds an instance its parent does not")),
         (spec_one(), other_authority, Some("RS-25a: the Authority")),
@@ -3565,12 +3575,12 @@ fn kf_03_rs_25a_refusals() {
         (spec_one(), changed, Some("RS-25a: section test.limits")),
         (serde_json::json!({ "version": 1, "resources": 3 }), parent_profile.clone(), Some("RS-25a: the child's Spec")),
         (spec_one(), unchecked, None),
+        (spec_one(), planned, None),
     ];
     for (spec, profile, refusal) in cases {
         let mut run = session();
-        let mut assembly = child_assembly();
-        assembly.checks = run_checks(true);
-        let (entry, child) = run.run_child(&spec, &profile, assembly, &mut drive_to(100)).unwrap();
+        // The child's Assembly registers no check: the parent's judge it (Review H, P1-2).
+        let (entry, child) = run.run_child(&spec, &profile, child_assembly(), &mut drive_to(100)).unwrap();
         let manifest = run.finish();
         assert_eq!(manifest.action_log, vec![entry.clone()], "the entry is logged either way");
         match refusal {
@@ -3624,5 +3634,150 @@ fn kf_03_run_child_is_a_session_verb() {
         run.run_child(&spec_one(), &profile_one(), child_assembly(), &mut drive_to(100)),
         Err(ezsdr_kernel::coordinator::RunHandleError::Ended { .. })
     ));
+    let _ = run.finish();
+}
+
+/// A check that runs only at `validate`, like the `sim` Vocabulary's.
+struct PlanOnlyCheck(ezsdr_kernel::spec::Namespace);
+
+impl ezsdr_kernel::binding::AdmissionCheck for PlanOnlyCheck {
+    fn section(&self) -> &ezsdr_kernel::spec::Namespace {
+        &self.0
+    }
+    fn stages(&self) -> &[ezsdr_kernel::binding::CheckStage] {
+        &[ezsdr_kernel::binding::CheckStage::Validate]
+    }
+    fn check(
+        &self,
+        _section: &serde_json::Value,
+        _effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+        _proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+        _stage: ezsdr_kernel::binding::CheckStage,
+    ) -> Vec<ezsdr_kernel::binding::Violation> {
+        Vec::new()
+    }
+}
+
+/// A Session of two stepped Providers `a` and `b` emitting `test.custom` at `at_a` and `at_b`.
+fn two_emitters(at_a: i64, at_b: i64, probe: &Probe) -> ezsdr_kernel::coordinator::RunHandle {
+    let (_, profile) = distinct_resource_docs(&["a", "b"]);
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    for (name, at) in [("a", at_a), ("b", at_b)] {
+        let provider = SteppedProvider::new(name, TestProvider::new(name, 2), probe)
+            .with_wakeups(&[at_a, at_b, 9_000])
+            .emitting("test.custom", ezsdr_kernel::event::Severity::Info, at);
+        assembly.providers.insert(Ident::parse(name).unwrap(), Box::new(provider));
+    }
+    connect(&profile, assembly, Lease::attached()).expect("valid Session entry")
+}
+
+#[test]
+fn kf_02_wait_for_returns_the_first_match_and_withdraws_its_horizon() {
+    let probe = Probe::new();
+    let mut run = two_emitters(3_000, 5_000, &probe);
+    let root = run.now().domain;
+    let index = run.wait_for(&[custom()], 0, TimePoint::new(root, 8_000)).unwrap().expect("a match");
+    assert_eq!(run.events(index)[0].time.ticks, 3_000, "the first match, not a later one");
+    assert_eq!(run.now().ticks, 3_000);
+    let second = run.wait_for(&[custom()], index + 1, TimePoint::new(root, 8_000)).unwrap().expect("the second match");
+    assert_eq!(run.events(second)[0].time.ticks, 5_000);
+    // The early returns withdrew their no-op at 8 000: no round runs there later
+    // (Phase 6 Review H, P1-3).
+    run.advance_to(TimePoint::new(root, 10_000)).unwrap();
+    let steps = probe.lines();
+    assert!(steps.iter().any(|line| line == "a:step:9000"));
+    assert!(!steps.iter().any(|line| line.ends_with(":step:8000")), "{steps:?}");
+    let _ = run.finish();
+}
+
+#[test]
+fn kf_02_wait_for_with_no_kinds_is_advance_to() {
+    let mut run = emitting_session(Some(50), &[50]);
+    let root = run.now().domain;
+    assert_eq!(run.wait_for(&[], 0, TimePoint::new(root, 7_000)).unwrap(), None);
+    assert_eq!(run.now().ticks, 7_000);
+    let _ = run.finish();
+}
+
+#[test]
+fn kf_02_wait_for_answers_ended_first() {
+    // KC-29's prologue comes before the already-delivered answer (Phase 6 Review H, P0-5).
+    let mut run = emitting_session(Some(50), &[50]);
+    let root = run.now().domain;
+    run.advance_to(TimePoint::new(root, 60)).unwrap();
+    run.submit(SessionAction::Stop { target: None }, None).unwrap();
+    assert!(matches!(run.wait_for(&[custom()], 0, TimePoint::new(root, 1_000)), Err(ezsdr_kernel::coordinator::RunHandleError::Ended { .. })));
+    let _ = run.finish();
+
+    let mut rig = rig(Pacing::FreeRunning);
+    let lease = Lease::detached(1_000, false, "tok", &*rig.host).unwrap();
+    let probe = Probe::new();
+    let provider = SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).with_wakeups(&[50]).emitting("test.custom", ezsdr_kernel::event::Severity::Info, 50);
+    rig.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(provider));
+    let mut run = connect(&profile_one(), rig.assembly, lease).unwrap();
+    run.advance_to(TimePoint::new(root, 60)).unwrap();
+    run.disconnect();
+    rig.host.advance(5_000);
+    assert!(matches!(run.wait_for(&[custom()], 0, TimePoint::new(root, 1_000)), Err(ezsdr_kernel::coordinator::RunHandleError::Ended { .. })));
+    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Stopped { cause: StopCause::LeaseExpiry {} } }));
+    let _ = run.finish();
+}
+
+#[test]
+fn kf_03_children_are_recorded_in_order() {
+    let mut run = session_with_provider(Box::new(TestProvider::new("radio", 2)));
+    run.submit(SessionAction::SetParameter { target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(), key: Key::parse("test.count").unwrap(), value: Value::Int(2) }, None).unwrap();
+    let (first, one) = run.run_child(&spec_one(), &profile_one(), child_assembly(), &mut drive_to(100)).unwrap();
+    let (second, two) = run.run_child(&spec_one(), &profile_one(), child_assembly(), &mut drive_to(100)).unwrap();
+    assert_eq!((first.seq, second.seq), (1, 2));
+    let manifest = run.finish();
+    assert_eq!(
+        manifest.sections[&ns("ezsdr.children")],
+        serde_json::json!([
+            { "seq": 1, "run": one.as_ref().unwrap().run.id, "manifest": one.unwrap().hash },
+            { "seq": 2, "run": two.as_ref().unwrap().run.id, "manifest": two.unwrap().hash }
+        ])
+    );
+}
+
+#[test]
+fn kf_03_a_lease_that_expires_during_a_child_ends_the_child_first() {
+    // The child reads its Lease copy on the parent's host clock, whatever its Assembly
+    // holds (Phase 6 Review H, P1-2).
+    let mut rig = rig(Pacing::FreeRunning);
+    let lease = Lease::detached(1_000, false, "tok", &*rig.host).unwrap();
+    rig.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
+    let host = rig.host.clone();
+    let mut run = connect(&profile_one(), rig.assembly, lease).unwrap();
+    run.disconnect();
+    let mut child_assembly = child_assembly();
+    child_assembly.host_clock = Arc::new(FakeHostClock::new());
+    let mut drive = |child: &mut ezsdr_kernel::coordinator::RunHandle| {
+        host.advance(5_000);
+        drive_to(100)(child);
+    };
+    let (_, child) = run.run_child(&spec_one(), &profile_one(), child_assembly, &mut drive).unwrap();
+    assert_eq!(child.unwrap().termination.reason, Termination::Stopped { cause: StopCause::LeaseExpiry {} });
+    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Stopped { cause: StopCause::LeaseExpiry {} } }));
+    let _ = run.finish();
+}
+
+#[test]
+fn kf_03_the_parents_checks_judge_the_child() {
+    // A child whose Assembly registers no check is still judged by the parent's, under
+    // the section it had to copy (Phase 6 Review H, P1-2).
+    let mut profile = profile_one();
+    profile["environment"] = serde_json::json!({ "test.limits": { "max_grid": 1.0 } });
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.checks = run_checks(true);
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
+    let mut run = connect(&profile, assembly, Lease::attached()).unwrap();
+    let mut child_assembly = rig(Pacing::FreeRunning).assembly;
+    child_assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2).with_effective("test.grid", Value::Num(5.0))));
+    let (entry, child) = run.run_child(&spec_one(), &profile, child_assembly, &mut drive_to(100)).unwrap();
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
+    let child = child.unwrap();
+    assert!(matches!(child.termination.reason, Termination::Failed { .. }), "{:?}", child.termination.reason);
+    assert!(serde_json::to_string(&child.sections[&ns("ezsdr.failure")]).unwrap().contains("exceeds the declared ceiling"));
     let _ = run.finish();
 }

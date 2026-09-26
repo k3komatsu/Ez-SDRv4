@@ -1181,6 +1181,7 @@ fn hd_16_a_written_capture_is_announced() {
     assert_eq!(first[0].kind.as_str(), CAPTURE_WRITTEN);
     assert_eq!(first[0].source, ResourceId::parse("sink/rec").expect("event source"));
     let announced: ezsdr_sink::CaptureWrittenPayload = serde_json::from_value(first[0].payload.clone()).expect("the payload is a CaptureWrittenPayload");
+    assert_eq!(announced.request, Some(0), "the first capture request the Sink received");
     let path = PathBuf::from(announced.artifact.uri.strip_prefix("file://").expect("a file URI"));
     assert!(path.with_extension("sigmf-meta").exists(), "the metadata is written before the announcement");
 
@@ -1195,7 +1196,33 @@ fn hd_16_a_written_capture_is_announced() {
     assert_eq!(second[0].kind.as_str(), CAPTURE_WRITTEN);
     let partial: ezsdr_sink::CaptureWrittenPayload = serde_json::from_value(second[0].payload.clone()).expect("payload");
     assert!(partial.artifact.partial);
+    assert_eq!(partial.request, Some(1));
 
     let artifacts = rig.stop(StopMode::Orderly);
     assert_eq!(artifacts, vec![announced.artifact, partial.artifact], "each announcement is the artifact stop returns");
+}
+
+#[test]
+fn hd_16_every_capture_request_is_numbered() {
+    // Refused or served, each capture request takes the next number, and the output's own
+    // capture has none; a client waits for its own (Phase 6 Review H, P0-2).
+    let mut rig = Rig::new("numbered", sample_count(4));
+    rig.push_ramp(0, 4);
+    rig.step().expect("the own capture completes");
+    rig.env.actions.push(request(Value::Int(0), None));
+    rig.env.actions.push(request(Value::Num(5.0), None));
+    rig.env.actions.push(request(Value::Int(5), Some(AbsoluteDeadline::new(TimePoint::new(rig.env.unrelated_root, 0)))));
+    rig.env.actions.push(request(Value::Int(3), None));
+    rig.env.actions.push(tx_burst());
+    rig.push_ramp(4, 10);
+    rig.step().expect("the requests are handled");
+    let numbers: Vec<(String, serde_json::Value)> = rig.env.events.drain().iter().map(|event| (event.kind.as_str().to_owned(), event.payload["request"].clone())).collect();
+    assert_eq!(numbers, vec![
+        (CAPTURE_WRITTEN.to_owned(), json!(null)),
+        (REQUEST_REJECTED.to_owned(), json!(0)),
+        (REQUEST_REJECTED.to_owned(), json!(1)),
+        (REQUEST_REJECTED.to_owned(), json!(null)),
+        (REQUEST_REJECTED.to_owned(), json!(2)),
+        (CAPTURE_WRITTEN.to_owned(), json!(3)),
+    ]);
 }

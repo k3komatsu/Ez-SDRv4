@@ -1383,7 +1383,7 @@ pub(super) fn run_child(
     run: &mut RunHandle,
     spec_doc: &serde_json::Value,
     profile_doc: &serde_json::Value,
-    assembly: Assembly,
+    mut assembly: Assembly,
     drive: &mut dyn FnMut(&mut RunHandle),
 ) -> Result<(crate::session::LogEntry, Option<crate::manifest::Manifest>), super::RunHandleError> {
     let now = run.shared.now();
@@ -1415,6 +1415,10 @@ pub(super) fn run_child(
         )
         .map_err(|error| super::RunHandleError::Malformed { error })?;
     let entry = run.log.entries().last().expect("entry appended").clone();
+    // The child reads its Lease copy on the parent's host clock and is judged by the
+    // parent's checks, whatever the caller's Assembly holds (Phase 6 Review H, P1-2).
+    assembly.host_clock = run.shared.ctx.host_clock.clone();
+    assembly.checks = run.shared.ctx.checks.clone();
     // The documents parsed in `child_refusal`, so a refusal here is a hash or migration
     // failure of a document that parsed; it cannot happen for a document that hashed above.
     let mut child = super::start_spec(
@@ -1478,11 +1482,11 @@ fn child_refusal(
     if authority(&child).is_none() || authority(&child) != authority(parent) {
         return Some("RS-25a: the Authority is not bound as its parent's is".to_owned());
     }
-    for section in run.shared.ctx.checks.sections() {
+    for section in run.shared.ctx.checks.runtime_sections() {
         if let Some(value) = parent.environment.get(section) {
             if child.environment.get(section) != Some(value) {
                 return Some(format!(
-                    "RS-25a: section {section} is not its parent's, which a registered check reads"
+                    "RS-25a: section {section} is not its parent's, which a runtime check reads"
                 ));
             }
         }

@@ -10,6 +10,15 @@
     "reason": {
       "description": "The reason the Sink could not carry out the request (HD-14).",
       "type": "string"
+    },
+    "request": {
+      "description": "The capture request's number when the rejected Action was one (HD-16; Phase 6,\nReview H, P0-2).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
     }
   },
   "required": [

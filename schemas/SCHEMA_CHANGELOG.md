@@ -22,10 +22,14 @@ Still version 1: v4.0 has not frozen. Additive; no Kernel schema changes.
 - New `sink/capture_written_payload` (Phase 6, VD-1; HD-16): the payload of the `sink` 1.1.0
   event kind `sink.CAPTURE_WRITTEN`, `{ artifact: ArtifactRef }`, emitted by the capture Sink
   1.2.0 when it records a capture, so a client learns during the Session that the capture is
-  written and where.
+  written and where. After Phase 6 Review H (P0-2) it also carries `request`, the capture
+  request's number, and `sink/request_rejected_payload` gains the same optional member
+  (absent for a refused Action that is no capture request, so Phase 2's payloads read as
+  before).
 - New `server/request_frame` and `server/reply_frame` (Phase 6, spec 16 EA-6): the frames of
   `ezsdr.protocol` 1 between a client and `ezsdr-server`, which embed the Kernel's documents
-  and add no Kernel type.
+  and add no Kernel type. After Review H, `wait_for` takes `within_ns` or `until` and its
+  reply carries `horizon`.
 
 ## v1 — Phase 5 — a Spec's inputs
 

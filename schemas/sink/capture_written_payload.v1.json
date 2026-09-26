@@ -413,6 +413,15 @@
     "artifact": {
       "$ref": "#/$defs/ArtifactRef",
       "description": "The recorded capture, as the Sink's `stop` will return it (HD-16)."
+    },
+    "request": {
+      "description": "The number of the capture request it served, counting from 0 every capture request\nthe Sink received, accepted or not; `None` for the output's own capture (HD-16).\nA client that submitted the `k`-th request waits for `request: k` (Phase 6, Review\nH, P0-2).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
     }
   },
   "required": [

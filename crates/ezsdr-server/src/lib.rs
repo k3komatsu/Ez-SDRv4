@@ -136,7 +136,7 @@ impl Server {
                         }
                     }
                     Request::Advance { to, by_ns } => advance(live, to, by_ns),
-                    Request::WaitFor { kinds, from, within_ns } => wait_for(live, &kinds, from, within_ns),
+                    Request::WaitFor { kinds, from, within_ns, until } => wait_for(live, &kinds, from, within_ns, until),
                     Request::Events { from } => {
                         let events = live.run.events(from);
                         Handled::ok(Response::Events { next: count(&live.run), events })
@@ -189,9 +189,10 @@ impl Server {
             Err(error) => return fail(ErrorKind::Refused, error.to_string()),
         };
         if let (RunState::Running {}, Some(t0)) = (run.state(), run.start_instant()) {
-            if let Err(error) = run.advance_to(t0) {
-                return run_error(error);
-            }
+            // A Run that ends on its way to T0 falls through to the `ended` reply below with
+            // its Manifest written (Review H, P0-4); any other refusal is impossible for T0,
+            // which is on the primary root by construction.
+            let _ = run.advance_to(t0);
         }
         let (RunState::Running {}, Some(start_instant)) = (run.state(), run.start_instant()) else {
             let manifest = run.finish();
@@ -238,7 +239,8 @@ impl Server {
         let Some(live) = self.live.as_mut() else {
             return fail(ErrorKind::Protocol, "EA-4: no Session is connected");
         };
-        if sizes.iter().sum::<u64>() != body.len() as u64 {
+        let total = sizes.iter().try_fold(0u64, |sum, size| sum.checked_add(*size));
+        if total != Some(body.len() as u64) {
             return fail(ErrorKind::Protocol, "EA-14: the inputs' sizes do not add up to the body");
         }
         let mut inputs = BTreeMap::new();
@@ -257,6 +259,14 @@ impl Server {
             Err(message) => return fail(ErrorKind::Refused, message),
         };
         let clocks = assembly.clocks.clone();
+        if let Some(ns) = duration_ns {
+            // A duration that does not fit the child's clock would run nothing (Review H, P2-3).
+            let root = assembly.authority.time().primary_root();
+            let fits = ticks(&clocks, TimePoint::new(root, 0), ns).is_some_and(|ticks| ticks <= i64::MAX / 2);
+            if !fits {
+                return fail(ErrorKind::Refused, "EA-14: duration_ns does not fit the child's clock");
+            }
+        }
         let mut drive = |child: &mut RunHandle| {
             let Some(t0) = child.start_instant() else {
                 return;
@@ -346,6 +356,14 @@ impl Server {
     }
 }
 
+impl Drop for Server {
+    /// Every exit — a reply that cannot be written, a panic unwinding — still finishes a
+    /// live Session and writes its Manifest (EA-15; Review H, P0-4).
+    fn drop(&mut self) {
+        self.disconnect();
+    }
+}
+
 /// The number of events the Run has delivered.
 // ponytail: clones every event to count them; a count accessor if Sessions grow long event logs.
 fn count(run: &RunHandle) -> usize {
@@ -360,7 +378,7 @@ fn run_error(error: RunHandleError) -> Handled {
         }),
         RunHandleError::Malformed { error } => fail(ErrorKind::Malformed, error.to_string()),
         RunHandleError::NotOnPrimaryRoot { t } => fail(ErrorKind::NotOnPrimaryRoot, format!("{t} is not on the Authority's primary root")),
-        RunHandleError::NotSession => fail(ErrorKind::Protocol, "submit is available only on a Session"),
+        RunHandleError::NotSession => fail(ErrorKind::Protocol, "the request is available only on a Session"),
     }
 }
 
@@ -390,17 +408,30 @@ fn advance(live: &mut Live, to: Option<TimePoint>, by_ns: Option<u64>) -> Handle
     }
 }
 
-fn wait_for(live: &mut Live, kinds: &[ezsdr_kernel::event::EventKind], from: usize, within_ns: u64) -> Handled {
-    let now = live.run.now();
-    let Some(within) = ticks(&live.clocks, now, within_ns) else {
-        return fail(ErrorKind::NotOnPrimaryRoot, "EA-12: the duration does not fit the Run's clock");
+fn wait_for(
+    live: &mut Live,
+    kinds: &[ezsdr_kernel::event::EventKind],
+    from: usize,
+    within_ns: Option<u64>,
+    until: Option<TimePoint>,
+) -> Handled {
+    let horizon = match (within_ns, until) {
+        (Some(ns), None) => {
+            let now = live.run.now();
+            let Some(within) = ticks(&live.clocks, now, ns) else {
+                return fail(ErrorKind::NotOnPrimaryRoot, "EA-12: the duration does not fit the Run's clock");
+            };
+            TimePoint::new(now.domain, now.ticks.saturating_add(within))
+        }
+        (None, Some(until)) => until,
+        _ => return fail(ErrorKind::Protocol, "EA-4: wait_for takes exactly one of within_ns and until"),
     };
-    let horizon = TimePoint::new(now.domain, now.ticks.saturating_add(within));
     match live.run.wait_for(kinds, from, horizon) {
         Ok(index) => Handled::ok(Response::Waited {
             index,
             event: index.and_then(|index| live.run.events(index).into_iter().next()),
             now: live.run.now(),
+            horizon,
             events: count(&live.run),
         }),
         Err(error) => run_error(error),
@@ -457,21 +488,43 @@ pub fn serve(input: impl BufRead, mut output: impl Write, config: Config) -> io:
             server.disconnect();
             return Ok(Exit::BadFrame);
         }
-        let frame: RequestFrame = match serde_json::from_slice(&line) {
-            Ok(frame) => frame,
-            Err(error) => {
-                write_reply(&mut output, &fail(ErrorKind::Protocol, format!("EA-2: not a request frame: {error}")))?;
+        // The frame in two steps: a JSON object whose `body_bytes` is readable frames the
+        // stream, so a request that then fails to decode costs only that request
+        // (Review H, P1-1); a header that is not such an object loses the framing.
+        let header: serde_json::Value = match serde_json::from_slice(&line) {
+            Ok(header @ serde_json::Value::Object(_)) => header,
+            Ok(_) | Err(_) => {
+                write_reply(&mut output, &fail(ErrorKind::Protocol, "EA-2: the header is not a JSON object"))?;
                 server.disconnect();
                 return Ok(Exit::BadFrame);
             }
         };
+        let body_bytes = match header.get("body_bytes") {
+            None => 0,
+            Some(value) => match value.as_u64() {
+                Some(n) => n,
+                None => {
+                    write_reply(&mut output, &fail(ErrorKind::Protocol, "EA-2: body_bytes is not a count"))?;
+                    server.disconnect();
+                    return Ok(Exit::BadFrame);
+                }
+            },
+        };
+        // ponytail: no limit on body_bytes; Phase 7's remote listener needs one.
         let mut body = Vec::new();
-        let complete = (&mut input).take(frame.body_bytes).read_to_end(&mut body).is_ok_and(|n| n as u64 == frame.body_bytes);
+        let complete = (&mut input).take(body_bytes).read_to_end(&mut body).is_ok_and(|n| n as u64 == body_bytes);
         if !complete {
             write_reply(&mut output, &fail(ErrorKind::Protocol, "EA-2: the stream ended inside a body"))?;
             server.disconnect();
             return Ok(Exit::BadFrame);
         }
+        let frame: RequestFrame = match serde_json::from_value(header) {
+            Ok(frame) => frame,
+            Err(error) => {
+                write_reply(&mut output, &fail(ErrorKind::Protocol, format!("EA-2: not a request frame: {error}")))?;
+                continue;
+            }
+        };
         let handled = server.handle(frame.request, body);
         write_reply(&mut output, &handled)?;
         if handled.exit {

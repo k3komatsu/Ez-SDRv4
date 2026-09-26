@@ -81,8 +81,13 @@ pub enum Request {
         kinds: Vec<EventKind>,
         /// The first event index to consider.
         from: usize,
-        /// How long to wait, in nanoseconds of Run time.
-        within_ns: u64,
+        /// How long to wait, in nanoseconds of Run time; or else
+        #[serde(default)]
+        within_ns: Option<u64>,
+        /// the instant to wait until (a previous reply's `horizon`, so that a client that
+        /// waits again keeps its deadline).
+        #[serde(default)]
+        until: Option<TimePoint>,
     },
     /// Reads the delivered events from index `from` (EA-12, KC-29a).
     Events {
@@ -176,6 +181,8 @@ pub enum Response {
         event: Option<Event>,
         /// The Run's instant.
         now: TimePoint,
+        /// The instant the wait would have stood at.
+        horizon: TimePoint,
         /// The number of events delivered so far.
         events: usize,
     },

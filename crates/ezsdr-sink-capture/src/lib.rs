@@ -85,11 +85,14 @@ struct Capture {
     builders: Vec<ContinuityMap>,
     builder: Option<(ContinuityBuilder, ClockDomainId, u16)>,
     started: bool,
+    /// The request's number (HD-16); `None` for the output's own capture.
+    request: Option<u64>,
 }
 
 impl Capture {
-    fn new(id: Option<Ident>, n: u64, at: Option<AbsoluteDeadline>) -> Capture {
+    fn new(id: Option<Ident>, n: u64, at: Option<AbsoluteDeadline>, request: Option<u64>) -> Capture {
         Capture {
+            request,
             id,
             n,
             at,
@@ -118,6 +121,8 @@ pub struct CaptureSink {
     queue: VecDeque<Capture>,
     done: Vec<ArtifactRef>,
     requests: u32,
+    /// Capture requests received so far, accepted or not: the next one's number (HD-16).
+    received: u64,
 }
 
 impl CaptureSink {
@@ -159,6 +164,7 @@ impl CaptureSink {
             queue: VecDeque::new(),
             done: Vec::new(),
             requests: 0,
+            received: 0,
         })
     }
 
@@ -166,7 +172,7 @@ impl CaptureSink {
         ModuleError::rejected(message)
     }
 
-    fn event_for_rejection(&self, action: &str, reason: String) {
+    fn event_for_rejection(&self, action: &str, reason: String, request: Option<u64>) {
         let (Some(events), Some(time), Some(output)) = (&self.events, &self.time, &self.output) else {
             return;
         };
@@ -185,6 +191,7 @@ impl CaptureSink {
             payload: serde_json::to_value(RequestRejectedPayload {
                 action: action.to_owned(),
                 reason,
+                request,
             })
             .expect("a rejection payload is JSON"),
         };
@@ -196,14 +203,17 @@ impl CaptureSink {
             Action::UpdateParameter { key, value, at, .. }
                 if key.as_str() == CAPTURE_SAMPLES =>
             {
+                let request = self.received;
+                self.received += 1;
                 match value {
                     Value::Int(n) if n >= 1 => {
                         self.queue
-                            .push_back(Capture::new(None, n as u64, at));
+                            .push_back(Capture::new(None, n as u64, at, Some(request)));
                     }
                     _ => self.event_for_rejection(
                         "update_parameter",
                         "HD-14: sink.capture_samples must be a positive Int".to_owned(),
+                        Some(request),
                     ),
                 }
             }
@@ -222,6 +232,7 @@ impl CaptureSink {
                 self.event_for_rejection(
                     kind,
                     format!("HD-14: Action kind `{kind}` is not supported by the capture Sink"),
+                    None,
                 );
             }
         }
@@ -266,10 +277,11 @@ impl CaptureSink {
                 let start = match sample_at_or_after(sample, &header, at, &clocks) {
                     Ok(start) => start,
                     Err(error) => {
-                        self.queue.pop_front();
+                        let request = self.queue.pop_front().and_then(|capture| capture.request);
                         self.event_for_rejection(
                             "update_parameter",
                             format!("HD-14: capture start time cannot be converted: {error}"),
+                            request,
                         );
                         continue;
                     }
@@ -440,12 +452,12 @@ impl CaptureSink {
                     ModuleError::rejected(format!("HD-15: cannot write {}: {error}", meta_path.display()))
                 })?;
         }
-        self.announce(self.done.last().expect("the capture was just recorded").clone());
+        self.announce(self.done.last().expect("the capture was just recorded").clone(), capture.request);
         Ok(())
     }
 
-    /// HD-16: `sink.CAPTURE_WRITTEN` with the artifact just recorded.
-    fn announce(&self, artifact: ArtifactRef) {
+    /// HD-16: `sink.CAPTURE_WRITTEN` with the artifact just recorded and its request's number.
+    fn announce(&self, artifact: ArtifactRef, request: Option<u64>) {
         let (Some(events), Some(time), Some(output)) = (&self.events, &self.time, &self.output) else {
             return;
         };
@@ -460,7 +472,7 @@ impl CaptureSink {
             time: now,
             severity: Severity::Info,
             kind: EventKind::parse(CAPTURE_WRITTEN).expect("a valid Sink event kind"),
-            payload: serde_json::to_value(CaptureWrittenPayload { artifact }).expect("an ArtifactRef is JSON"),
+            payload: serde_json::to_value(CaptureWrittenPayload { artifact, request }).expect("an ArtifactRef is JSON"),
         });
     }
 }
@@ -528,8 +540,9 @@ impl Sink for CaptureSink {
         self.queue.clear();
         self.done.clear();
         self.requests = 0;
+        self.received = 0;
         if let Some(n) = capture_samples {
-            self.queue.push_back(Capture::new(Some(request.id), n, None));
+            self.queue.push_back(Capture::new(Some(request.id), n, None, None));
         }
 
         Ok(PrepareReport {

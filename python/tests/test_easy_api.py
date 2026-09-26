@@ -232,6 +232,67 @@ class EasyApi(unittest.TestCase):
             self.assertEqual(ended.exception.termination, {"kind": "stopped", "cause": {"reason": "client"}})
         self.assertEqual(sdr.manifest["termination"]["reason"], {"kind": "stopped", "cause": {"reason": "client"}})
 
+    def test_ea_17_each_capture_gets_its_own_samples(self) -> None:
+        # The recorder numbers its requests, and a capture waits for its own (Review H, P0-2).
+        with self.connect() as sdr:
+            self.assertEqual(sdr.rx.capture(100).shape, (100,))
+            self.assertEqual(sdr.rx.capture(200).shape, (200,))
+            with self.assertRaises(ezsdr.CaptureTimeout):
+                sdr.rx.capture(1_000_000, timeout=0.001)
+            self.assertEqual(sdr.rx.capture(100, timeout=3.0).shape, (100,), "not the timed-out request's million")
+            raw = sdr.submit({
+                "kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"node": 0, "path": "rec"},
+                "at": None, "params": {"sink.capture_samples": 777},
+            })
+            self.assertEqual(raw["outcome"]["kind"], "admitted")
+            self.assertEqual(sdr.rx.capture(100).shape, (100,), "not the raw request's 777")
+
+    def test_ea_17_a_capture_the_recorder_refuses_raises(self) -> None:
+        with self.connect() as sdr:
+            with self.assertRaises(ezsdr.Rejected) as raised:
+                sdr.rx.capture(0)
+            self.assertEqual(raised.exception.event["kind"], "sink.REQUEST_REJECTED")
+            self.assertEqual(raised.exception.entry["outcome"]["kind"], "admitted", "the Kernel admitted it; the recorder refused it")
+
+    def test_ea_17_capture_at_an_instant(self) -> None:
+        with self.connect() as sdr:
+            at = dict(sdr.now)
+            at["ticks"] += 5_000_000
+            sdr.rx.capture(1000, at=at)
+            t0 = sdr.start_instant["ticks"]
+        (artifact,) = sdr.manifest["artifacts"]
+        self.assertEqual(artifact["continuity"][0]["first"]["ticks"], (at["ticks"] - t0) // 1000, "the first sample at `at`, 1 Msps from T0")
+
+    def test_ea_17_a_capture_across_a_rate_change_is_refused(self) -> None:
+        with self.connect() as sdr:
+            sdr.submit({
+                "kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"node": 0, "path": "rec"},
+                "at": None, "params": {"sink.capture_samples": 20_000},
+            })
+            sdr.sleep(0.005)
+            sdr.rx.sample_rate = 2e6
+            event = sdr.wait_for([ezsdr.session.CAPTURE_WRITTEN], timeout=1.0)
+            artifact = event["payload"]["artifact"]
+            self.assertEqual(len(artifact["continuity"]), 2)
+            with self.assertRaises(ezsdr.Error):
+                ezsdr.samples(sdr.read(artifact), artifact)
+
+    def test_ea_16_repeat_sets_the_channel_count_only_when_it_differs(self) -> None:
+        with self.connect() as sdr:
+            sdr.tx.repeat(ramp())
+            sdr.tx.repeat(ramp(500))
+        kinds = [entry["action"]["kind"] for entry in sdr.manifest["action_log"]]
+        self.assertEqual(kinds, ["set_parameter", "vocabulary", "vocabulary"])
+
+    def test_ea_16_close_after_the_server_exited(self) -> None:
+        sdr = self.connect()
+        sdr._connection._process.stdin.write(b"not json\n")
+        sdr._connection._process.stdin.flush()
+        sdr._connection._process.wait(timeout=30)
+        manifest = sdr.close()
+        self.assertEqual(manifest["termination"]["reason"], {"kind": "stopped", "cause": {"reason": "client_disconnect"}})
+        self.assertEqual(Path(sdr.manifest_path), Path(sdr.dir) / "manifest.json")
+
     # -- EA-19
 
     def test_ea_19_the_examples_run(self) -> None:

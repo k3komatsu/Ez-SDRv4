@@ -91,9 +91,9 @@
  },
  {
   "id": "F10",
-  "name": "RS-25a the environment check also binds unchecked sections",
+  "name": "RS-25a the environment check also binds sections no runtime check reads",
   "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
-  "old": "for section in run.shared.ctx.checks.sections() {",
+  "old": "for section in run.shared.ctx.checks.runtime_sections() {",
   "new": "for section in parent.environment.keys() {",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
@@ -153,7 +153,7 @@
   "id": "F16",
   "name": "HD-16 no CAPTURE_WRITTEN",
   "file": "crates/ezsdr-sink-capture/src/lib.rs",
-  "old": "        self.announce(self.done.last().expect(\"the capture was just recorded\").clone());\n",
+  "old": "        self.announce(self.done.last().expect(\"the capture was just recorded\").clone(), capture.request);\n",
   "new": "",
   "crate": "ezsdr-sink-capture",
   "test_bin": "sink_capture",
@@ -163,8 +163,8 @@
   "id": "F17",
   "name": "HD-16 no CAPTURE_WRITTEN for a partial capture",
   "file": "crates/ezsdr-sink-capture/src/lib.rs",
-  "old": "        self.announce(self.done.last().expect(\"the capture was just recorded\").clone());\n",
-  "new": "        if !partial {\n            self.announce(self.done.last().expect(\"the capture was just recorded\").clone());\n        }\n",
+  "old": "        self.announce(self.done.last().expect(\"the capture was just recorded\").clone(), capture.request);\n",
+  "new": "        if !partial {\n            self.announce(self.done.last().expect(\"the capture was just recorded\").clone(), capture.request);\n        }\n",
   "crate": "ezsdr-sink-capture",
   "test_bin": "sink_capture",
   "filter": "hd_16_a_written_capture_is_announced"
@@ -193,8 +193,8 @@
   "id": "F20",
   "name": "EA-10 connect does not advance to T0",
   "file": "crates/ezsdr-server/src/lib.rs",
-  "old": "if let Err(error) = run.advance_to(t0) {",
-  "new": "if let Err(error) = run.advance_to(TimePoint::new(t0.domain, 0)) {",
+  "old": "let _ = run.advance_to(t0);",
+  "new": "let _ = run.advance_to(TimePoint::new(t0.domain, 0));",
   "crate": "ezsdr-server",
   "test_bin": "protocol",
   "filter": "ea_10_connect_stands_at_t0"
@@ -213,7 +213,7 @@
   "id": "F22",
   "name": "EA-2 body_bytes not checked against the stream",
   "file": "crates/ezsdr-server/src/lib.rs",
-  "old": ".is_ok_and(|n| n as u64 == frame.body_bytes);",
+  "old": ".is_ok_and(|n| n as u64 == body_bytes);",
   "new": ".is_ok();",
   "crate": "ezsdr-server",
   "test_bin": "protocol",
@@ -263,7 +263,7 @@
   "id": "F27",
   "name": "HD-16 end to end: no CAPTURE_WRITTEN",
   "file": "crates/ezsdr-sink-capture/src/lib.rs",
-  "old": "        self.announce(self.done.last().expect(\"the capture was just recorded\").clone());\n",
+  "old": "        self.announce(self.done.last().expect(\"the capture was just recorded\").clone(), capture.request);\n",
   "new": "",
   "python": "test_easy_api.EasyApi.test_v57_repeat_then_capture_in_software"
  },
@@ -330,5 +330,231 @@
   "old": "            request[\"duration_ns\"] = max(0, math.ceil(duration * 1e9))",
   "new": "            pass",
   "python": "test_easy_api.EasyApi.test_v54_a_sweep_of_child_runs"
+ },
+ {
+  "id": "G01",
+  "name": "KC-29b the last match, not the first",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": ".find(|(_, event)| kinds.contains(&event.kind))",
+  "new": ".filter(|(_, event)| kinds.contains(&event.kind)).last()",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kf_02_wait_for_returns_the_first_match_and_withdraws_its_horizon"
+ },
+ {
+  "id": "G02",
+  "name": "KC-29b no kinds does not advance",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "        let first = |shared: &Shared| {",
+  "new": "        if kinds.is_empty() {\n            return Ok(None);\n        }\n        let first = |shared: &Shared| {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kf_02_wait_for_with_no_kinds_is_advance_to"
+ },
+ {
+  "id": "G03",
+  "name": "KC-37a the parent's Lease is not checked after the child",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "    run.check_lease();\n    run.settle();\n    Ok((entry, Some(manifest)))",
+  "new": "    run.settle();\n    Ok((entry, Some(manifest)))",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kf_03_a_lease_that_expires_during_a_child_ends_the_child_first"
+ },
+ {
+  "id": "G04",
+  "name": "KC-45 ezsdr.children records seq 0",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "\"seq\": entry.seq,",
+  "new": "\"seq\": 0,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kf_03_children_are_recorded_in_order"
+ },
+ {
+  "id": "G05",
+  "name": "KC-29b the prologue skipped",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "        self.check_lease();\n        self.ensure_live()?;\n        let first = |shared: &Shared| {",
+  "new": "        let first = |shared: &Shared| {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kf_02_wait_for_answers_ended_first"
+ },
+ {
+  "id": "G06",
+  "name": "KC-29b the early return keeps its horizon",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "        if live && self.shared.now().ticks < t.ticks {",
+  "new": "        if false && live && self.shared.now().ticks < t.ticks {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kf_02_wait_for_returns_the_first_match_and_withdraws_its_horizon"
+ },
+ {
+  "id": "G07",
+  "name": "RS-25a every checked section binds the child",
+  "file": "crates/ezsdr-kernel/src/binding.rs",
+  "old": ".filter(|check| check.stages().contains(&CheckStage::Runtime))",
+  "new": ".filter(|check| !check.stages().is_empty())",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kf_03_rs_25a_refusals"
+ },
+ {
+  "id": "G08",
+  "name": "KC-37a the child keeps its Assembly's host clock",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "    assembly.host_clock = run.shared.ctx.host_clock.clone();\n",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kf_03_a_lease_that_expires_during_a_child_ends_the_child_first"
+ },
+ {
+  "id": "G09",
+  "name": "KC-37a the child keeps its Assembly's checks",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "    assembly.checks = run.shared.ctx.checks.clone();\n",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kf_03_the_parents_checks_judge_the_child"
+ },
+ {
+  "id": "G10",
+  "name": "HD-16 every request numbered alike",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "                let request = self.received;\n                self.received += 1;",
+  "new": "                let request = self.received;",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_16_every_capture_request_is_numbered"
+ },
+ {
+  "id": "G11",
+  "name": "EA-14 input sizes not checked",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "        if total != Some(body.len() as u64) {",
+  "new": "        if total.is_none() && false {",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_14_run_child_refusals"
+ },
+ {
+  "id": "G12",
+  "name": "EA-13 read accepts a URI extending a reported one",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": ".filter(|_| self.readable.contains(uri));",
+  "new": ".filter(|_| self.readable.iter().any(|known| uri.starts_with(known.as_str())));",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_13_read_serves_only_reported_artifacts"
+ },
+ {
+  "id": "G13",
+  "name": "EA-5 an undecodable request ends the Session",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "                write_reply(&mut output, &fail(ErrorKind::Protocol, format!(\"EA-2: not a request frame: {error}\")))?;\n                continue;",
+  "new": "                write_reply(&mut output, &fail(ErrorKind::Protocol, format!(\"EA-2: not a request frame: {error}\")))?;\n                server.disconnect();\n                return Ok(Exit::BadFrame);",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_05_a_request_that_does_not_decode_costs_only_itself"
+ },
+ {
+  "id": "G14",
+  "name": "EA-15 no Drop for Server",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "    fn drop(&mut self) {\n        self.disconnect();\n    }",
+  "new": "    fn drop(&mut self) {}",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_15_every_exit_writes_the_manifest"
+ },
+ {
+  "id": "G15",
+  "name": "EA-10 a Run that ends on its way to T0 is dropped",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "            let _ = run.advance_to(t0);",
+  "new": "            if let Err(error) = run.advance_to(t0) {\n                return run_error(error);\n            }",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_10_a_run_that_ends_on_its_way_to_t0_writes_its_manifest"
+ },
+ {
+  "id": "G16",
+  "name": "EA-14 a duration that does not fit is admitted",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "            if !fits {",
+  "new": "            if !fits && false {",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_14_run_child_refusals"
+ },
+ {
+  "id": "G17",
+  "name": "EA-12 until ignored",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "        (None, Some(until)) => until,",
+  "new": "        (None, Some(until)) => TimePoint::new(until.domain, until.ticks + 1),",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_12_time_and_events"
+ },
+ {
+  "id": "P09",
+  "name": "EA-17 capture ignores the request number",
+  "file": "python/ezsdr/session.py",
+  "old": "            if event[\"source\"] != source or event[\"payload\"].get(\"request\") != number:",
+  "new": "            if event[\"source\"] != source:",
+  "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples"
+ },
+ {
+  "id": "P10",
+  "name": "EA-17 a refused capture does not raise",
+  "file": "python/ezsdr/session.py",
+  "old": "            if event[\"kind\"] == REQUEST_REJECTED:\n                raise Rejected(entry, event)\n",
+  "new": "",
+  "python": "test_easy_api.EasyApi.test_ea_17_a_capture_the_recorder_refuses_raises"
+ },
+ {
+  "id": "P11",
+  "name": "EA-16 repeat always sets the channel count",
+  "file": "python/ezsdr/session.py",
+  "old": "        if self.channels != channels:\n            self.channels = channels\n",
+  "new": "        self.channels = channels\n",
+  "python": "test_easy_api.EasyApi.test_ea_16_repeat_sets_the_channel_count_only_when_it_differs"
+ },
+ {
+  "id": "P12",
+  "name": "EA-17 a capture across a rate change is returned",
+  "file": "python/ezsdr/session.py",
+  "old": "    if len(domains) != 1:",
+  "new": "    if False:",
+  "python": "test_easy_api.EasyApi.test_ea_17_a_capture_across_a_rate_change_is_refused"
+ },
+ {
+  "id": "P13",
+  "name": "EA-17 capture drops at",
+  "file": "python/ezsdr/session.py",
+  "old": "            \"at\": at,",
+  "new": "            \"at\": None,",
+  "python": "test_easy_api.EasyApi.test_ea_17_capture_at_an_instant"
+ },
+ {
+  "id": "P14",
+  "name": "EA-16 close does not fall back to the written Manifest",
+  "file": "python/ezsdr/session.py",
+  "old": "                if not os.path.exists(written):",
+  "new": "                if True:",
+  "python": "test_easy_api.EasyApi.test_ea_16_close_after_the_server_exited"
+ },
+ {
+  "id": "P15",
+  "name": "EA-16 submit does not count captures",
+  "file": "python/ezsdr/session.py",
+  "old": "            self._captures[recorder] = self._captures.get(recorder, 0) + 1",
+  "new": "            pass",
+  "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples"
  }
 ]

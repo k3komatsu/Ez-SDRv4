@@ -99,7 +99,7 @@ fn capture_uri(server: &mut Server, n: i64) -> (String, TimePoint) {
     let Response::Status { events, .. } = ok(server.handle(Request::Status {}, Vec::new())) else { panic!() };
     let entry = submit(server, capture(n), Vec::new());
     assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
-    let Response::Waited { event: Some(event), now, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: events, within_ns: 1_000_000_000 }, Vec::new())) else { panic!("no capture") };
+    let Response::Waited { event: Some(event), now, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: events, within_ns: Some(1_000_000_000), until: None }, Vec::new())) else { panic!("no capture") };
     (event.payload["artifact"]["uri"].as_str().unwrap().to_owned(), now)
 }
 
@@ -151,9 +151,9 @@ fn ea_02_framing() {
     let temp = TempDir::new("framing");
     let cases: Vec<(Vec<u8>, &str)> = vec![
         (HELLO.trim_end().as_bytes().to_vec(), "EA-2: the stream ended inside a header"),
-        (b"not json\n".to_vec(), "EA-2: not a request frame"),
-        (b"{\"request\":{\"op\":\"hello\",\"protocol\":1},\"extra\":1}\n".to_vec(), "EA-2: not a request frame"),
-        (b"{\"request\":{\"op\":\"hello\",\"protocol\":1,\"extra\":1}}\n".to_vec(), "EA-2: not a request frame"),
+        (b"not json\n".to_vec(), "EA-2: the header is not a JSON object"),
+        (b"[1]\n".to_vec(), "EA-2: the header is not a JSON object"),
+        (b"{\"request\":{\"op\":\"status\"},\"body_bytes\":-1}\n".to_vec(), "EA-2: body_bytes is not a count"),
         ([HELLO.as_bytes(), b"{\"request\":{\"op\":\"status\"},\"body_bytes\":10}\nabc"].concat(), "EA-2: the stream ended inside a body"),
     ];
     for (input, message) in cases {
@@ -392,9 +392,14 @@ fn ea_12_time_and_events() {
     assert_eq!(events[index].time, at, "the wait ended at the round that delivered the event");
     let Response::Events { events: tail, .. } = ok(server.handle(Request::Events { from: index }, Vec::new())) else { panic!() };
     assert_eq!(tail[0], events[index]);
-    let Response::Waited { index: none, now: horizon, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: next, within_ns: 3_000_000 }, Vec::new())) else { panic!() };
+    let Response::Waited { index: none, now: horizon, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: next, within_ns: Some(3_000_000), until: None }, Vec::new())) else { panic!() };
     assert_eq!(none, None);
     assert_eq!(horizon.ticks, at.ticks + 3_000_000);
+    // `until` keeps a deadline across waits: the reply's `horizon` is where it would stand.
+    let deadline = TimePoint::new(horizon.domain, horizon.ticks + 2_000_000);
+    let Response::Waited { index: none, now: stood, horizon: echoed, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: next, within_ns: None, until: Some(deadline) }, Vec::new())) else { panic!() };
+    assert_eq!((none, stood, echoed), (None, deadline, deadline));
+    assert_eq!(err(server.handle(Request::WaitFor { kinds: vec![], from: 0, within_ns: Some(1), until: Some(deadline) }, Vec::new())).kind, ErrorKind::Protocol);
     finish(&mut server);
 }
 
@@ -416,7 +421,7 @@ fn ea_13_read_serves_only_reported_artifacts() {
     let (uri, _) = capture_uri(&mut server, 100);
     assert_eq!(read(&mut server, &uri).len(), 800);
     let manifest = format!("file://{}", server.dir().unwrap().join("manifest.json").display());
-    for uri in [manifest, "file:///etc/hosts".to_owned(), uri.replace(".sigmf-data", ".sigmf-meta")] {
+    for uri in [manifest, "file:///etc/hosts".to_owned(), uri.replace(".sigmf-data", ".sigmf-meta"), format!("{uri}/../x"), format!("{uri}x")] {
         let error = err(server.handle(Request::Read { uri: uri.clone() }, Vec::new()));
         assert_eq!(error.kind, ErrorKind::NotFound, "{uri}");
     }
@@ -498,4 +503,108 @@ fn ea_binary_speaks_the_protocol() {
     let Reply::Result(Response::Finished { path, .. }) = ask("{\"request\":{\"op\":\"finish\"}}\n") else { panic!() };
     assert!(Path::new(&path).starts_with(temp.0.canonicalize().unwrap()));
     assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn ea_05_a_request_that_does_not_decode_costs_only_itself() {
+    // The header is framed before the request is decoded, so an unknown field, an unknown
+    // request or a malformed Kernel document is a `protocol` error and the Session goes on
+    // (Review H, P1-1); its body is consumed with it.
+    let temp = TempDir::new("undecodable");
+    let requests = [
+        HELLO.to_owned(),
+        "{\"request\":{\"op\":\"connect\"}}\n".to_owned(),
+        "{\"request\":{\"op\":\"status\"},\"extra\":1}\n".to_owned(),
+        "{\"request\":{\"op\":\"nope\"},\"body_bytes\":3}\nabc".to_owned(),
+        "{\"request\":{\"op\":\"submit\",\"action\":{\"kind\":\"set_paramter\"}}}\n".to_owned(),
+        "{\"request\":{\"op\":\"status\"}}\n".to_owned(),
+        "{\"request\":{\"op\":\"finish\"}}\n".to_owned(),
+    ];
+    let (frames, exit) = serve_bytes(&temp.0, requests.concat().into_bytes());
+    assert_eq!(exit, Exit::Replied);
+    for frame in &frames[2..5] {
+        let error = error_of(&frame.0);
+        assert_eq!(error.kind, ErrorKind::Protocol);
+        assert!(error.message.starts_with("EA-2: not a request frame"), "{}", error.message);
+    }
+    assert!(matches!(frames[5].0.reply, Reply::Result(Response::Status { .. })));
+    let Reply::Result(Response::Finished { manifest, .. }) = &frames[6].0.reply else { panic!() };
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
+}
+
+#[test]
+fn ea_15_every_exit_writes_the_manifest() {
+    // Dropping a server with a live Session — an unwritable reply, a panic — finishes it
+    // and writes its Manifest (Review H, P0-4).
+    let temp = TempDir::new("dropped");
+    let (server, _) = connected(&temp.0);
+    let dir = server.dir().unwrap().to_path_buf();
+    drop(server);
+    let written: Manifest = serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(written.termination.reason, Termination::Stopped { cause: StopCause::ClientDisconnect {} });
+
+    // A reader that stops after a few kilobytes: a reply cannot be written, and the
+    // Manifest still is.
+    struct Closing(usize);
+    impl Write for Closing {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.0 < bytes.len() {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            self.0 -= bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let runs = TempDir::new("closed");
+    let input = format!("{HELLO}{{\"request\":{{\"op\":\"connect\"}}}}\n{}", "{\"request\":{\"op\":\"status\"}}\n".repeat(50)).into_bytes();
+    assert!(serve(Cursor::new(input), Closing(8_000), config(&runs.0)).is_err());
+    let session = std::fs::read_dir(&runs.0).unwrap().next().unwrap().unwrap().path();
+    let written: Manifest = serde_json::from_str(&std::fs::read_to_string(session.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(written.termination.reason, Termination::Stopped { cause: StopCause::ClientDisconnect {} });
+    let mut greeted = Server::new(config(&runs.0));
+    ok(greeted.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    ok(greeted.handle(Request::Connect { profile: None, lease: None }, Vec::new()));
+    let dir = greeted.dir().unwrap().to_path_buf();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _held = greeted;
+        panic!("a panic while the Session is live");
+    }));
+    assert!(result.is_err());
+    assert!(dir.join("manifest.json").exists(), "the unwinding server wrote its Manifest");
+}
+
+#[test]
+fn ea_10_a_run_that_ends_on_its_way_to_t0_writes_its_manifest() {
+    let temp = TempDir::new("lost-at-start");
+    let mut profile = ezsdr_server::default_profile(&temp.0.join("captures").to_string_lossy());
+    profile["environment"]["sim.faults"] = json!([{ "at_ns": 0, "fault": "device_lost", "target": "radio" }]);
+    let mut server = greeted(&temp.0);
+    let handled = server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new());
+    assert!(handled.exit);
+    let error = err(handled);
+    assert_eq!(error.kind, ErrorKind::Ended);
+    let written: Manifest = serde_json::from_str(&std::fs::read_to_string(server.dir().unwrap().join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(Some(written.termination.reason), error.termination);
+}
+
+#[test]
+fn ea_14_run_child_refusals() {
+    let temp = TempDir::new("child-refusals");
+    let (mut server, _) = connected(&temp.0);
+    let refuse = |server: &mut Server, spec: serde_json::Value, inputs: Vec<u64>, duration_ns: Option<u64>, body: Vec<u8>| {
+        err(server.handle(Request::RunChild { spec, profile: None, inputs, duration_ns }, body))
+    };
+    // Sizes that overflow, or do not add up, are refused and change nothing (Review H, P0-3).
+    let overflow = refuse(&mut server, receive_spec(10), vec![u64::MAX, 1], Some(1_000_000), Vec::new());
+    assert_eq!((overflow.kind, overflow.message.as_str()), (ErrorKind::Protocol, "EA-14: the inputs' sizes do not add up to the body"));
+    assert_eq!(refuse(&mut server, receive_spec(10), vec![3], Some(1_000_000), vec![0; 4]).kind, ErrorKind::Protocol);
+    // A targeted Stop does not end a Run: without a duration it is refused (KC-33).
+    let mut targeted = receive_spec(10);
+    targeted["schedule"] = json!([{ "at": { "clock": "radio", "offset_ticks": 5_000 }, "action": { "kind": "stop", "target": { "node": 0, "path": "radio/tx" } } }]);
+    assert!(refuse(&mut server, targeted, Vec::new(), None, Vec::new()).message.starts_with("EA-14: a child Run needs duration_ns"));
+    // A duration that does not fit the child's clock (Review H, P2-3).
+    assert_eq!(refuse(&mut server, receive_spec(10), Vec::new(), Some(u64::MAX), Vec::new()).message, "EA-14: duration_ns does not fit the child's clock");
+    let (manifest, _) = finish(&mut server);
+    assert!(manifest.action_log.is_empty(), "no refused request reached the log");
 }
