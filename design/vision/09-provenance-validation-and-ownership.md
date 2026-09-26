@@ -32,6 +32,8 @@ For large tensors and derived measurements, formats should be selected based on:
 
 The Run Manifest should reference artifacts rather than embedding large data.
 
+Normative: [design/10-host-data-path.md](../10-host-data-path.md), rule HD-15; [design/02-stream-contract.md](../02-stream-contract.md), rule SC-32.
+
 ---
 
 # 52. Validation and dry-run are first-class

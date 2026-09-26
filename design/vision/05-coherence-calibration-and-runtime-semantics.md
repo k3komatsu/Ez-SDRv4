@@ -186,6 +186,8 @@ This information should propagate into Artifacts and Run provenance.
 
 SigMF interoperability should be considered for captured IQ datasets.
 
+Normative: [design/02-stream-contract.md](../02-stream-contract.md), rules SC-30…SC-32; [design/10-host-data-path.md](../10-host-data-path.md), rule HD-15.
+
 ---
 
 # 29. Observability is structured, typed, and non-blocking
@@ -231,7 +233,7 @@ Event storms and event-queue loss must themselves be observable.
 
 ## Event envelope, counters and storms
 
-An Event carries a node-qualified source, a TimePoint in a named domain, a severity, a kind and a schema-versioned payload. The hot path emits a fixed-size record with at most 32 bytes inline and allocates nothing. Every `(source, kind)` pair reachable in the plan has a **never-dropping counter**, incremented before the body is queued. Bodies travel through a bounded ring and are dropped, not sampled, when it is full; each drain emits, outside the ring, one `EVENTS_DROPPED { kind, count }` per kind that dropped, so every counter equals the delivered bodies plus the reported drops, and a ten-minute Run with thirty thousand overflows through a queue of four thousand records thirty thousand, not four thousand. A kind whose reaction is `stop` or `abort` also raises an escalation flag that survives a dropped body. The Kernel registers only the kinds it emits or owns the policy for — `EVENTS_DROPPED`, `LINK_BACKPRESSURE`, `PROCESSOR_DEADLINE_MISS`, `DEVICE_LOST`, `STEP_LIVELOCK` — and every other kind is registered by its Vocabulary or Module.
+An Event carries a node-qualified source, a TimePoint in a named domain, a severity, a kind and a schema-versioned payload. The hot path emits a fixed-size record with at most 32 bytes inline and allocates nothing. The bytes are the owning Vocabulary's layout, which it also decodes; the Kernel counts and queues them without interpreting them (`radio.RX_OVERFLOW` is the first, RM-24). Every `(source, kind)` pair reachable in the plan has a **never-dropping counter**, incremented before the body is queued. Bodies travel through a bounded ring and are dropped, not sampled, when it is full; each drain emits, outside the ring, one `EVENTS_DROPPED { kind, count }` per kind that dropped, so every counter equals the delivered bodies plus the reported drops, and a ten-minute Run with thirty thousand overflows through a queue of four thousand records thirty thousand, not four thousand. A kind whose reaction is `stop` or `abort` also raises an escalation flag that survives a dropped body. The Kernel registers only the kinds it emits or owns the policy for — `EVENTS_DROPPED`, `LINK_BACKPRESSURE`, `PROCESSOR_DEADLINE_MISS`, `DEVICE_LOST`, `STEP_LIVELOCK` — and every other kind is registered by its Vocabulary or Module.
 
 Normative: [design/04-run-and-session.md](../04-run-and-session.md), rules RS-27…RS-36.
 

@@ -2,12 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Status | **Planned and implemented under the owner's delegation** (2026-09-26: "plan Phase 4, and implement it too if that is faster than handing it to another session"). There was no separate Gate P: every decision below is recorded as recommended and stays open to reversal at **Gate X**, where the owner rules on it (§11). |
+| Status | **Planned and implemented under the owner's delegation** (2026-09-26: "plan Phase 4, and implement it too if that is faster than handing it to another session"); there was no separate Gate P. Reviews D and E closed; **Accepted at Gate X** (owner, 2026-09-26, every decision as recommended; §11); **Step X done** (two Vision issues applied). Phase 4 is complete. |
 | Phase | Vision §67 Phase 4. Predecessor: Phase 3 (SimulationChannel and deterministic Runs; accepted at Gate X 2026-09-26). Successor: Phase 5 (Mini Reactive Radio). |
 | Scope | What the accepted specs and Phases 1–3 left to "Phase 4", after checking each item against what now exists: the **first hot-path event layout** (RS-32a's withdrawal left it to the Vocabulary, D51 left it to MockRadio's first one); the **error round** Phase 3 left open (Review C P2-1); **SigMF** captures (SC-32, the only Phase 1 rule still marked forward to Phase 4); and one missing carrier, a Kernel-routed Session `Stop(sink/rec)` (Phase 2's named Gate X risk). |
 | Not in scope | §3 lists it. In one line: no new fault kinds, no calibration artifacts, no artifact store, no clock drift, no hardware-only questions from the UHD spike. |
 | Language | English, like Phases 1–3. |
-| Location | The amendments are spec 13, [`13-amendments.md`](13-amendments.md). Their text is applied to `design/02`, `05`, `07`, `08`, `09`, `10` and `11` in the implementation commits (GW-5); the Vision is not edited before Gate X. |
+| Location | The amendments are spec 13, [`13-amendments.md`](13-amendments.md), which stays here as the record. Their text is applied to `design/02`, `05`, `07`, `08`, `09`, `10` and `11` in the implementation commits (GW-5); the Vision issues were applied at Step X. |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
 
 Documents:
@@ -179,7 +179,8 @@ OV-1…OV-23b, PO-1…PO-12 and Phase 3's lessons bind Phase 4. The rules below 
 |---|---|---|---|
 | Plan and implement in one session (Q8) | — | **delegated** | owner, 2026-09-26: "pushしてphase4の計画を立ててください．…あなたが実装したほうがはやいなら計画を立てた後に実装まで進んでください" |
 | Reviews D and E: every defect fixed with a test (`implementation-notes.md`, "Reviews D and E") | — | **closed** | 2026-09-26, before Gate X |
-| K3 — Phase 7, or a Kernel amendment now (§3) | X | *pending* | recommended: Phase 7, with the transmit model |
-| The drain order and dropped-body marks as RM-24 ceilings rather than a Kernel change (Review D P2-1, P2-2) | X | *pending* | recommended: ceilings |
-| P2-3 left with the first transmit-header consumer (Phase 10), although `handoff.md` listed it for Phase 4 | X | *pending* | recommended: as §3 says |
-| Q1–Q8, spec 13 | X | *pending* | |
+| K3 — Phase 7, or a Kernel amendment now (§3) | X | **Phase 7** | owner, 2026-09-26, as recommended: fixed with Phase 7's transmit model; the ceiling test stays until then |
+| The drain order and dropped-body marks as RM-24 ceilings rather than a Kernel change (Review D P2-1, P2-2) | X | **ceilings** | owner, 2026-09-26, as recommended |
+| P2-3 left with the first transmit-header consumer (Phase 10), although `handoff.md` listed it for Phase 4 | X | **Phase 10** | owner, 2026-09-26, as recommended |
+| Q1–Q8, spec 13 (exit criterion 1) | X | **accepted** | owner, 2026-09-26, as recommended ("すべて推奨で受理します") |
+| Step X: the two Vision issues | X | **done** | 2026-09-26: §§28, 29, 51 and a revision-history row ([vision-issues.md](vision-issues.md)) |

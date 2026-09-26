@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft under the owner's delegation (2026-09-26); decided at Gate X ([`00-overview.md`](00-overview.md) §11). |
+| Status | **Accepted at Gate X** (owner, 2026-09-26, as recommended; [`00-overview.md`](00-overview.md) §11). Its text is in `design/`; this file is the record. |
 | Scope | One Kernel amendment (KD-1: MA-30's round after a Module error) and three Vocabulary and Module amendments (VC-1: `radio` 1.2.0 and RM-24; VC-2: `ezsdr.radio.mock` 1.2.0 and MR-37; VC-3: `ezsdr.sink.capture` 1.1.0 and HD-15). |
 | Amends | `design/05-module-api.md` (MA-30), `design/07-radio-model.md` (RM-1, RM-11, RM-20, RM-22; new RM-24), `design/09-mock-radio.md` (MR-1, MR-19, MR-28, MR-30, §8; new MR-37), `design/10-host-data-path.md` (HD-7, HD-10, H3, §9; new HD-15), `design/02-stream-contract.md` (SC-32's text and marker), `design/08-simulation.md` (S1, §7), `design/11-simulation-channel.md` (CH-9's ceiling). |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
@@ -128,7 +128,7 @@ until no instance reports progressed; a cap of 1 000 iterations raises STEP_LIVE
 
 ## 3. Vision issues found
 
-Applied at Step X with the owner's approval (OV-6, GW-5), recorded in [`vision-issues.md`](vision-issues.md):
+Applied at Step X on 2026-09-26 (OV-6, GW-5), recorded in [`vision-issues.md`](vision-issues.md):
 
 1. **§28 and §51** say SigMF interoperability "should be considered". It now exists; each gains a `Normative:` line naming `design/10-host-data-path.md` HD-15 and `design/02-stream-contract.md` SC-32 (re-review R13).
 2. **§29** says the hot path "emits a fixed-size record with at most 32 bytes inline", and nothing about who reads those bytes. A sentence: "The bytes are the owning Vocabulary's layout, which it also decodes; the Kernel counts and queues them without interpreting them (`radio.RX_OVERFLOW` is the first, RM-24)."
