@@ -176,5 +176,17 @@ Each mutation disables one rule's code; the listed test must fail. The list is `
 | F21 | EA-12 | durations rounded down | `ea_12_time_and_events` |
 | F22 | EA-2 | `body_bytes` not checked against the stream | `ea_02_framing` |
 | F23 | EA-3 | any protocol version accepted | `ea_03_handshake` |
+| F24 | EA-13 | a reported capture is not made readable | `ea_13_*` |
+| F25 | EA-14 | a child without duration or stop is not refused, and one with a stop is | `ea_14_run_child` |
+| F26 | KC-37a | the Provider description check skipped, through the server | `ea_14_run_child` |
+| F27 | HD-16 | no `CAPTURE_WRITTEN`, through the Python client | `test_v57_repeat_then_capture_in_software` |
+| P01 | EA-16 | `repeat` does not set the channel count | `test_v57_repeat_then_capture_in_software` |
+| P02 | EA-17 | captured frames not transposed | `test_ea_17_two_channels_round_trip` |
+| P03 | EA-17 | a 2-D waveform sent without interleaving | `test_ea_17_two_channels_round_trip` |
+| P04 | EA-16 | `sleep` converts seconds wrongly | `test_v54_sleep_is_run_time` |
+| P05 | EA-16 | `wait_for` returns one event twice | `test_ea_16_events_and_wait_for` |
+| P06 | EA-16 | a rejected entry does not raise | `test_v58_16_a_rejected_call_raises_and_is_logged` |
+| P07 | EA-16 | a capture timeout is not raised | `test_ea_16_errors` |
+| P08 | EA-16 | `run` does not pass the duration | `test_v54_a_sweep_of_child_runs` |
 
-The list may grow with the reviews; the final count is `mutations.json`'s.
+F24 onwards and P01–P08 were added while running the list (spec 16's rules have code in the server and the Python package too). The Python mutations (`python` in `mutations.json`) run their unittest against the scratch copy's server. The list may grow with the reviews; the final count is `mutations.json`'s.

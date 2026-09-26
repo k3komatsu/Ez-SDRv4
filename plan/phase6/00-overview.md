@@ -185,7 +185,7 @@ OV-1…OV-23b, PO-1…PO-12, GV-1…GV-6, GW-1…GW-5 and GX-1…GX-6 bind Phase
 3. `cargo test --workspace` passes on Rust 1.85.0 and on stable with no `#[ignore]`; `cargo +stable clippy --workspace --all-targets -- -D warnings` passes.
 4. Every carrier of §8 exists and passes; the Python suite passes on Python 3.9 and on a current Python (GY-7).
 5. `kernel_surface` (116 NEW / 292 public items), `schema_freeze`, every Vocabulary freeze test and the server's freeze test pass.
-6. Every mutation of spec 17's Appendix A is killed (GY-4).
+6. Every mutation of spec 17's Appendix A (35: F01–F27, P01–P08) is killed (GY-4).
 7. The Kernel's direct dependencies are still exactly four; `Cargo.lock` gains no external package (PO-4); the Python package depends on numpy only.
 8. Every link in `design/` and `plan/` resolves, and the `v3/` path check of `handoff.md` §1 passes.
 

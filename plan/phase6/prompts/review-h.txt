@@ -1,0 +1,130 @@
+You are the adversarial reviewer for "Review H" of the Ez-SDR v4 Phase 6
+implementation, in /Users/komatsu/GoogleDrive/github/Ez-SDRv4 (branch `main`).
+Phase 6 is Vision §67's "Python Easy API". It was planned from a prototype and
+implemented in one session under the owner's delegation, commit by commit
+(read `git log --oneline d977ad8..HEAD`):
+
+  be6285a docs(phase6): plan and draft specs 16 and 17
+  5f42d3b feat(kernel): events and wait_for, child Runs (KF-1..KF-4)
+  4635d91 feat(sink,sink-capture): sink.CAPTURE_WRITTEN (VD-1)
+  adee35e feat(server): ezsdr-server and ezsdr.protocol 1 (spec 16)
+  7433ffa feat(python): the ezsdr package (spec 16)
+  (later commits record the mutation run, the notes and the exit tables)
+
+This is a review only:
+- Do not edit, create or delete anything in the repository. Never run git
+  commands that change state. Never run `cargo fmt`. Never touch v3/.
+- For anything you run, copy the working tree into a scratch directory outside
+  the repository with fresh timestamps (`rsync -a --no-times --exclude target
+  --exclude v3 --exclude .git --exclude tmp --exclude .cargo --exclude
+  ezsdr-runs ./ <scratch>/`) and build there with
+  CARGO_TARGET_DIR=$HOME/.cache/cargo-target/Ez-SDRv4-review. Cargo judges
+  freshness by mtime and reuses any artifact newer than a copy's files, so run
+  `find <scratch> -type f -exec touch {} +` immediately before each build
+  session in a copy, and never interleave two copies' builds in that directory
+  (AGENTS.md §7). Nothing else builds there while you run. The zsh shell does
+  not word-split an unquoted $VAR: write cargo arguments out literally.
+- Python: use ~/.cache/ezsdr-venv/bin/python (3.13 with numpy) and
+  /usr/bin/python3 (3.9 with numpy 1.24). Set PYTHONDONTWRITEBYTECODE=1 so no
+  __pycache__ lands anywhere. The Python suite needs the server binary:
+  `cargo +stable build -p ezsdr-server` in your copy, then
+  EZSDR_SERVER=$HOME/.cache/cargo-target/Ez-SDRv4-review/debug/ezsdr-server.
+- Run things. Build probes — small Rust tests, Python scripts, or raw protocol
+  frames piped into the binary — for every claim you doubt, and report what
+  they printed.
+
+Read first: AGENTS.md; handoff.md §4 (what Phases 1-5 left for Phase 6);
+plan/phase6/00-overview.md, plan/phase6/16-easy-api.md and
+plan/phase6/17-amendments.md in full; plan/phase6/implementation-notes.md;
+plan/phase6/exit-review/; the Vision sections the phase cites
+(design/vision/01-purpose-and-core-boundary.md §3,
+design/vision/03-simulation-mock-and-time.md §15,
+design/vision/09-provenance-validation-and-ownership.md §52-§54,
+design/vision/10-implementation-path-and-testing.md §57-§58,
+design/vision/11-boundaries-invariants-and-roadmap.md §62);
+design/04-run-and-session.md (RS-6, RS-12..RS-25a), design/06-kernel-
+coordinator.md (KC-20, KC-28, KC-29, KC-29a, KC-29b, KC-31, KC-37, KC-37a,
+KC-45), design/10-host-data-path.md (HD-6..HD-16), design/03-spec-and-
+binding.md (SB-3, SB-14, SB-22c, SB-22g, SB-29).
+
+What is under review: `git diff d977ad8 -- crates schemas design python
+plan/phase6 .gitignore Cargo.toml` and specs 16 and 17.
+
+Check, in this order:
+1. The premise and scope. Does the phase deliver what §3, §54, §57 and §58
+   #13 ask of a "Python Easy API", or does a reading the plan did not consider
+   make it fall short? Is anything in §3's out-of-scope table something §58
+   (the definition of done for Phases 1-6) needs? Is anything in scope that
+   should not be (AGENTS.md §6: scope creep is a defect)? Judge decisions
+   S1-S11 and A1-A8: does the evidence support each choice, above all S1 (out
+   of process) against its rejected alternatives? Mark what you could not
+   verify INFERRED.
+2. The holes of 00-overview.md §2. Confirm or refute each evidence cell
+   against the parent commit d977ad8 (a probe in a scratch copy of it).
+3. Spec 17 against the code, rule by rule, and attack each amendment:
+   - KC-29a/KC-29b: can `wait_for` return a stale or wrong index, stand
+     anywhere but where the rule says, leave a scheduled callback that changes
+     later behaviour, or disagree with `advance_to` for an empty `kinds`? What
+     happens when the Run ends in the round that delivers the match?
+   - KC-37a: every admission check, its order, the log entry, the Lease copy,
+     `ezsdr.children`, the parent's time, a child whose pipeline fails, a
+     `drive` that does nothing or disconnects the child, a Detached parent's
+     expiry during the child. Does RS-25a's new environment rule close hole 4
+     without refusing what §54's sweeps need? Can a child still leave its
+     parent's RF envelope some other way (another section, a Provider binding
+     the parent holds under another name, the Authority)?
+   - HD-16: emitted exactly once per recorded artifact, after the metadata;
+     what a client sees for a capture finished by `stop` and by a `Stop`.
+   - KF-4: is SB-14's new text accurate?
+4. Spec 16 against crates/ezsdr-server and python/, rule by rule (EA-1..EA-19):
+   every divergence between rule text and code. Attack the protocol and the
+   server: malformed frames, a body on the wrong request, huge `body_bytes`,
+   requests out of order, a second connect after a refused one, EOF at every
+   point, `read` of paths that escape (symlinks, `..`, URIs of another
+   Session's captures in the same runs directory), `run_child` input sizes that
+   do not add up, a child with a duration that overflows, durations of 0.
+   Attack the Python package: the channel handling of `repeat` and `capture`
+   (1-D, 2-D, dtype other than complex64, non-contiguous arrays), a capture
+   whose artifact spans a SampleClock change, `Session.close` after the server
+   died, exceptions carrying what they claim, Python 3.9 compatibility.
+5. The carriers of 00-overview.md §8: does each test prove what the table says
+   it carries? Look for a test that would pass with the behaviour broken.
+6. Tests and mutations (OV-3, GY-4).
+   - Every test named in specs 16 and 17 and the exit tables exists under that
+     name and asserts the rule's obligation.
+   - Run `EZSDR_PYTHON=$HOME/.cache/ezsdr-venv/bin/python python3
+     plan/phase6/tools/mutate.py plan/phase6/tools/mutations.json
+     <another-scratch-dir>` from your scratch copy's root (the scratch
+     directory outside that copy). Then design at least eight mutations of your
+     own that the list does not contain — in `wait_for`, `run_child`, the
+     server's framing and `read`, and the Python package — and report which
+     survive.
+7. Architecture and governance: no Module crate depends on another (MA-3,
+   PO-8); Cargo.lock gains no external package (PO-4); kernel_surface reports
+   116 NEW / 292 (GY-2) and no Kernel schema changed; the new schemas have a
+   SCHEMA_CHANGELOG.md entry; PO-11 in the new crate; the Python package names
+   no Module (EA-18); the amended text in design/ is spec 17's; the Vision was
+   not edited (GY-5).
+8. Run in the scratch copy:
+     cargo +1.85.0 test --workspace
+     cargo +stable test --workspace
+     cargo +stable clippy --workspace --all-targets -- -D warnings
+     the Python suite on both interpreters (GY-7)
+     python3 plan/phase3/tools/check_links.py
+   Report the counts, and any failure with its output.
+
+Every finding needs:
+- a location (file:line, or the rule id);
+- evidence (quoted code or spec text, or the command you ran and its output);
+- a severity:
+  - P0: wrong behaviour, a broken rule, or a contradiction;
+  - P1: likely to mislead a later phase, a test that proves less than its rule,
+    or a claim in the plan the evidence does not support;
+  - P2: clarity;
+- one recommended fix.
+No finding without evidence.
+
+Final message: a verdict (PASS, PASS_WITH_RISK or CHANGES_REQUIRED); counts
+per severity; every P0 and P1 in full; the P2s one line each; your judgement of
+S1-S11 and A1-A8 (one line each); the mutation results (the list's and your
+own); the test counts.
