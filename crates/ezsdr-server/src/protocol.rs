@@ -81,11 +81,12 @@ pub enum Request {
         kinds: Vec<EventKind>,
         /// The first event index to consider.
         from: usize,
-        /// How long to wait, in nanoseconds of Run time; or else
+        /// How long to wait, in nanoseconds of Run time; exactly one of `within_ns` and
+        /// `until` is given.
         #[serde(default)]
         within_ns: Option<u64>,
-        /// the instant to wait until (a previous reply's `horizon`, so that a client that
-        /// waits again keeps its deadline).
+        /// The instant to wait until, such as a previous reply's `horizon`, so that a client
+        /// that waits again keeps its deadline; exactly one of `within_ns` and `until` is given.
         #[serde(default)]
         until: Option<TimePoint>,
     },
@@ -224,8 +225,8 @@ pub enum Response {
     Finished {
         /// The Manifest.
         manifest: Box<Manifest>,
-        /// Where it was written.
-        path: String,
+        /// Where it was written; absent when it could not be.
+        path: Option<String>,
     },
 }
 

@@ -91,6 +91,12 @@ def samples(data: bytes, artifact: dict) -> np.ndarray:
             f"artifact {artifact['id']} spans {len(domains)} SampleClocks (a rate change, §23): "
             "one array would hide it; read its bytes with Session.read and split them by its continuity"
         )
+    broken = any(m.get("gaps") or m.get("channel_gaps") or any(len(segments) != 1 for segments in m.get("valid", [])) for m in maps)
+    if broken:
+        raise Error(
+            f"artifact {artifact['id']} has a gap or an invalid stretch (§23: a gap is a flag and a time jump): "
+            "one array would hide it; read its bytes with Session.read and split them by its continuity"
+        )
     channels = counts.pop()
     frames = np.frombuffer(data, dtype="<c8").reshape(-1, channels).T
     return frames[0].copy() if channels == 1 else frames.copy()
@@ -320,15 +326,27 @@ class Session:
     def submit(self, action: dict, waveform: Optional[bytes] = None) -> dict:
         """Submits any ``SessionAction`` document and returns its log entry, admitted or rejected."""
         entry = self._call({"op": "submit", "action": action}, waveform or b"")[0]["entry"]
-        if (
-            entry["outcome"]["kind"] == "admitted"
-            and action.get("kind") == "vocabulary"
-            and (action.get("ns"), action.get("verb")) == ("sink", "capture")
-        ):
-            # One admitted `sink.capture` is one request the recorder numbers (HD-16).
-            recorder = action["target"]["path"]
+        recorder = self._capture_recorder(action) if entry["outcome"]["kind"] == "admitted" else None
+        if recorder is not None:
+            # One admitted capture request is one request the recorder numbers (HD-16).
             self._captures[recorder] = self._captures.get(recorder, 0) + 1
         return entry
+
+    def _capture_recorder(self, action: dict) -> Optional[str]:
+        """The recorder an admitted action hands a capture request to, as the Kernel routes
+        it (RS-14): a ``sink.capture`` goes to the only recorder when one is bound, or else to
+        the one its target names; a ``SetParameter`` of ``sink.capture_samples`` to the
+        recorder ``sink/<recorder>`` names (Review I, P0-A)."""
+        recorders = self.recorders()
+        path = (action.get("target") or {}).get("path", "")
+        named = path[len("sink/"):] if path.startswith("sink/") else path
+        if action.get("kind") == "vocabulary" and (action.get("ns"), action.get("verb")) == ("sink", "capture"):
+            if len(recorders) == 1:
+                return recorders[0]
+            return named if named in recorders else None
+        if action.get("kind") == "set_parameter" and action.get("key") == "sink.capture_samples":
+            return named if named in recorders else None
+        return None
 
     def set(self, target: str, key: str, value: Any) -> dict:
         """``SetParameter``; raises ``Rejected`` if the Kernel rejects it."""
@@ -360,6 +378,10 @@ class Session:
     @property
     def tx(self) -> Tx:
         return self.radio().tx
+
+    def recorders(self) -> List[str]:
+        """The bindings of the Session's profile that record a feed."""
+        return sorted(name for name, binding in self.profile["bindings"].items() if binding.get("feed"))
 
     def _recorder(self, radio: str) -> str:
         """The binding whose feed starts at ``radio``'s receive port (EA-17)."""

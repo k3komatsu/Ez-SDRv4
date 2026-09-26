@@ -115,7 +115,7 @@ fn finish(server: &mut Server) -> (Manifest, String) {
     let handled = server.handle(Request::Finish {}, Vec::new());
     assert!(handled.exit);
     let Response::Finished { manifest, path } = ok(handled) else { panic!() };
-    (*manifest, path)
+    (*manifest, path.expect("the Manifest was written"))
 }
 
 /// Runs `serve` over `input` and returns the reply frames, their bodies and the exit.
@@ -190,6 +190,14 @@ fn ea_03_handshake() {
     let handled = Server::new(config(&temp.0)).handle(Request::Status {}, Vec::new());
     assert!(handled.exit);
     assert_eq!(err(handled).kind, ErrorKind::Protocol);
+
+    // A first frame that does not decode ends the handshake as well (Review I, P1-B).
+    for first in ["{\"request\":{\"op\":\"nope\"}}\n", "{\"request\":{\"op\":\"hello\",\"protocol\":1,\"x\":1}}\n"] {
+        let (frames, exit) = serve_bytes(&temp.0, format!("{first}{HELLO}").into_bytes());
+        assert_eq!(exit, Exit::BadFrame, "{first}");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(error_of(&frames[0].0).kind, ErrorKind::Protocol);
+    }
 }
 
 #[test]
@@ -384,9 +392,16 @@ fn ea_12_time_and_events() {
     let (mut server, now) = connected(&temp.0);
     let Response::Advanced { now: later, .. } = ok(server.handle(Request::Advance { to: None, by_ns: Some(1_000_000) }, Vec::new())) else { panic!() };
     assert_eq!(later.ticks - now.ticks, 1_000_000, "1 ms on a nanosecond root");
+    // A wait that returns early echoes the horizon it would have stood at, not `now`
+    // (Review I, P2-5).
+    let Response::Status { events: before, now: asked, .. } = ok(server.handle(Request::Status {}, Vec::new())) else { panic!() };
+    submit(&mut server, capture(500), Vec::new());
+    let Response::Waited { index: Some(_), now: early, horizon: far, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: before, within_ns: Some(1_000_000_000), until: None }, Vec::new())) else { panic!() };
+    assert_eq!(far.ticks, asked.ticks + 1_000_000_000);
+    assert!(early.ticks < far.ticks);
     let (uri, at) = capture_uri(&mut server, 2_000);
     let Response::Events { events, next } = ok(server.handle(Request::Events { from: 0 }, Vec::new())) else { panic!() };
-    let index = events.iter().position(|event| event.kind == written()).unwrap();
+    let index = events.iter().rposition(|event| event.kind == written()).unwrap();
     assert_eq!(next, events.len());
     assert_eq!(events[index].payload["artifact"]["uri"], json!(uri));
     assert_eq!(events[index].time, at, "the wait ended at the round that delivered the event");
@@ -500,7 +515,7 @@ fn ea_binary_speaks_the_protocol() {
     };
     assert!(matches!(ask(HELLO), Reply::Result(Response::Hello { protocol: 1, .. })));
     assert!(matches!(ask("{\"request\":{\"op\":\"connect\"}}\n"), Reply::Result(Response::Connected { .. })));
-    let Reply::Result(Response::Finished { path, .. }) = ask("{\"request\":{\"op\":\"finish\"}}\n") else { panic!() };
+    let Reply::Result(Response::Finished { path: Some(path), .. }) = ask("{\"request\":{\"op\":\"finish\"}}\n") else { panic!() };
     assert!(Path::new(&path).starts_with(temp.0.canonicalize().unwrap()));
     assert!(child.wait().unwrap().success());
 }
@@ -605,6 +620,26 @@ fn ea_14_refusals_before_a_child_runs() {
     assert!(refuse(&mut server, targeted, Vec::new(), None, Vec::new()).message.starts_with("EA-14: a child Run needs duration_ns"));
     // A duration that does not fit the child's clock (Review H, P2-3).
     assert_eq!(refuse(&mut server, receive_spec(10), Vec::new(), Some(u64::MAX), Vec::new()).message, "EA-14: duration_ns does not fit the child's clock");
+    // Half the tick range is the bound: 5·10^18 ns on a nanosecond root is over it (Review I, P2-4).
+    assert_eq!(refuse(&mut server, receive_spec(10), Vec::new(), Some(5_000_000_000_000_000_000), Vec::new()).message, "EA-14: duration_ns does not fit the child's clock");
     let (manifest, _) = finish(&mut server);
     assert!(manifest.action_log.is_empty(), "no refused request reached the log");
+}
+
+#[test]
+fn ea_15_a_manifest_that_cannot_be_written_is_still_returned() {
+    let temp = TempDir::new("unwritable");
+    let (mut server, _) = connected(&temp.0);
+    let dir = server.dir().unwrap().to_path_buf();
+    let mut permissions = std::fs::metadata(&dir).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&dir, permissions.clone()).unwrap();
+    let handled = server.handle(Request::Finish {}, Vec::new());
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&dir, permissions).unwrap();
+    assert!(handled.exit);
+    let Response::Finished { manifest, path } = ok(handled) else { panic!() };
+    assert_eq!(path, None, "the write failed (Review I, P2-7)");
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
 }

@@ -2432,14 +2432,16 @@
               "type": "string"
             },
             "path": {
-              "description": "Where it was written.",
-              "type": "string"
+              "description": "Where it was written; absent when it could not be.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
             "op",
-            "manifest",
-            "path"
+            "manifest"
           ],
           "type": "object"
         }

@@ -1,4 +1,4 @@
-# Ez-SDR v4 — Handoff (2026-09-26)
+# Ez-SDR v4 — Handoff (2026-09-27)
 
 次のセッション（人間・AI どちらでも）が最初に読む現状メモ．設計の中身は書かない．どこに何があり，何が終わっていて，次に何をするかだけ．
 開発時の恒常的なルールは [AGENTS.md](AGENTS.md)．
@@ -8,7 +8,7 @@
 | | |
 |---|---|
 | remote | `origin` = `git@github.com:k3komatsu/Ez-SDRv4.git`（https://github.com/k3komatsu/Ez-SDRv4，default branch `main`）．2026-09-26 に v4 を新リポジトリへ分離した．v3 は https://github.com/k3komatsu/Ez-SDR（`master` のみ，v3 の tags もそちら）に残る |
-| `main` | v4（この worktree）．**Phase 0–5 の受理完了**，最新は `762051d`（Phase 5 Step X，push 済み）．Phase 2 Gate X を owner が2026-09-25に受理し，spec 06–10 を `design/` へ移動，Vision issue 15件を適用（Step X 完了）．Step 16/Gate X/Step X は `bf3b1bf` で commit・push 済み．2026-09-25 の動的レビューで見つかったテスト欠落2件を追加テストで塞いだ（[implementation-notes.md](plan/phase2/implementation-notes.md) 末尾）．Opus `PASS_WITH_RISK` の残余リスクは §4 と `plan/phase2/00-overview.md` §11 に記録．**Phase 3 は 2026-09-26 に Gate P 受理・実装・Review C・Gate X 受理・Step X 完了**（spec 11 を `design/` へ移動，Vision issue 8件を適用）．**Phase 4 は同日に計画・実装・Review D/E・Gate X 受理（すべて推奨どおり）・Step X 完了**．**Phase 5 は同日に計画・実装・Review F/G・Gate X 受理（すべて推奨どおり）・Step X 完了**（spec 14 を `design/` へ移動，Vision issue 3 件を適用）．§4 参照．|
+| `main` | v4（この worktree）．**Phase 0–5 の受理完了，Phase 6 は実装・Review H/I 済みで Gate X 待ち**（Phase 6 の commit は未 push．push 済みは `d977ad8` まで）．Phase 2 Gate X を owner が2026-09-25に受理し，spec 06–10 を `design/` へ移動，Vision issue 15件を適用（Step X 完了）．Step 16/Gate X/Step X は `bf3b1bf` で commit・push 済み．2026-09-25 の動的レビューで見つかったテスト欠落2件を追加テストで塞いだ（[implementation-notes.md](plan/phase2/implementation-notes.md) 末尾）．Opus `PASS_WITH_RISK` の残余リスクは §4 と `plan/phase2/00-overview.md` §11 に記録．**Phase 3 は 2026-09-26 に Gate P 受理・実装・Review C・Gate X 受理・Step X 完了**（spec 11 を `design/` へ移動，Vision issue 8件を適用）．**Phase 4 は同日に計画・実装・Review D/E・Gate X 受理（すべて推奨どおり）・Step X 完了**．**Phase 5 は同日に計画・実装・Review F/G・Gate X 受理（すべて推奨どおり）・Step X 完了**（spec 14 を `design/` へ移動，Vision issue 3 件を適用）．**Phase 6 は 2026-09-26〜27 に計画・実装・Review H/I**（Gate X 待ち）．§4 参照．|
 | `master` | v3（D + C++ UHD bridge + Python client）．tip `4a474e9` = tag `v3.0.28`．この clone ではローカルのみ（upstream なし）．GitHub 上の置き場は `k3komatsu/Ez-SDR` |
 | `spike/uhd` | **使い捨ての UHD spike**（2026-09-26，push 済み）．`main` から分岐し，Kernel 1 行の変更（K1）と `spike/uhd/` crate を載せる．**`main` へ merge しない**．成果は発見の記録だけで，`main` の [plan/spikes/2026-09-26-uhd.md](plan/spikes/2026-09-26-uhd.md) に移した．実機検証は保留．§4「UHD spike」参照 |
 | `gh-pages` | GitHub Pages 用の orphan branch（`main`・`master` と履歴を共有しない）．2026-09-26 に `24229a9` で作成し，プロジェクト概要サイト（`index.html`，`showreel/`）を載せた．最新は `af488c9`「update Pages status after Phase 4」で push 済み．**Pages は公開済み**：https://k3komatsu.github.io/Ez-SDRv4/（branch `gh-pages` の root から配信，2026-09-26 に `gh api repos/k3komatsu/Ez-SDRv4/pages` で `status: built` を確認）．**サイトの状態表示は Phase 4 時点のまま**（「Phase 5 の計画は未作成」などと書いてある）で，Phase 5 完了を反映するには更新が要る．AGENTS.md §1 のとおり，gh-pages は owner の依頼があるときだけ変更する |
@@ -30,30 +30,30 @@
 - v3 の更新を取り込むときの取得元は `origin` ではなく `k3komatsu/Ez-SDR`（例：`git fetch git@github.com:k3komatsu/Ez-SDR.git master`）．
 - **Google Drive の同期で追跡ファイルが消えることがある**．2026-09-24 に `crates/ezsdr-kernel/tests/` と `schemas/`（61 ファイル）が作業ツリーから消え，`git restore crates/ezsdr-kernel/tests schemas` で戻した．作業を始める前に `git status --short` に ` D` 行がないことを確かめる．Drive の同期中に戻すと競合コピー（`… (1).…`）が増えるので，同期を止めてから戻す．
 
-## 2. 設計文書の状態 — Phase 0・1・2・3・4・5 完了
+## 2. 設計文書の状態 — Phase 0・1・2・3・4・5 完了，Phase 6 は Gate X 待ち
 
 - 単一の設計ソース = **Vision**：索引 [Ez-SDR_v4_ARCHITECTURE_VISION.md](Ez-SDR_v4_ARCHITECTURE_VISION.md) + [design/vision/](design/vision) の 11 part（§1–§68，番号は不変）．
 - [design/v4-vision-audit.md](design/v4-vision-audit.md)（Findings 1–34，判定 READY WITH REQUIRED CHANGES）→ 全項目を Vision に反映済み．
 - [design/v4-vision-rereview.md](design/v4-vision-rereview.md)（Findings R1–R22，判定 READY）→ 全項目反映済み．R13「規範部分の spec 化」は当初11ファイル分割で暫定対応したが，Phase 1 Step 5（D109，2026-09-23）で Phase 1 specs へ，Phase 2 Gate X（2026-09-25）で specs 06–10 へ反映し，完了した．
-- accepted specs は Phase 1 の [design/01-time-model.md](design/01-time-model.md)〜[design/05-module-api.md](design/05-module-api.md) と Phase 2 の [design/06-kernel-coordinator.md](design/06-kernel-coordinator.md)〜[design/10-host-data-path.md](design/10-host-data-path.md)，Phase 3 の [design/11-simulation-channel.md](design/11-simulation-channel.md)（spec 12 の修正は design/04–09 に適用済み），Phase 5 の [design/14-native-executor.md](design/14-native-executor.md)（spec 15 の修正は design/03–06 に適用済み）．各 Phase の決定ログ・実装計画・rule exit evidence は [plan/phase1/](plan/phase1)〜[plan/phase5/](plan/phase5) に残る．
+- accepted specs は Phase 1 の [design/01-time-model.md](design/01-time-model.md)〜[design/05-module-api.md](design/05-module-api.md) と Phase 2 の [design/06-kernel-coordinator.md](design/06-kernel-coordinator.md)〜[design/10-host-data-path.md](design/10-host-data-path.md)，Phase 3 の [design/11-simulation-channel.md](design/11-simulation-channel.md)（spec 12 の修正は design/04–09 に適用済み），Phase 5 の [design/14-native-executor.md](design/14-native-executor.md)（spec 15 の修正は design/03–06 に適用済み）．各 Phase の決定ログ・実装計画・rule exit evidence は [plan/phase1/](plan/phase1)〜[plan/phase5/](plan/phase5) に残る．Phase 6 の spec 16（Easy API）と spec 17（修正）は [plan/phase6/](plan/phase6) にあり，spec 17 の本文は実装 commit で `design/03・04・06・10` に入っている．spec 16 は Step X で `design/` へ移す．
 - 旧 CMA は退役．[design/archive/](design/archive) に保管（audit / rereview の `CMA §N` 引用のためだけに残す）．編集しない．
 - Vision の改訂履歴は索引ファイル末尾の表（Phase 0/1 の8 passに加え，Phase 2 Gate X の適用を2026-09-25に，Phase 3・4・5 の Gate X の適用を2026-09-26に記録）．Phase 4 の spec 13 は amendment だけなので `design/` へ移すものはなく，本文は実装 commit で `design/02・05・07・08・09・10・11` に入っている．
 
 ## 3. 実装の状態
 
-現在（2026-09-26，Phase 5 Step X 後の `762051d`）の状態：
+現在（2026-09-27，Phase 6 Review I の修正後）の状態：
 
 | | |
 |---|---|
-| workspace | ルートの `Cargo.toml`（`resolver = "3"`，edition 2024，`rust-version = "1.85"`）．member は 11 crate：`ezsdr-kernel`，Vocabulary の `ezsdr-radio` `ezsdr-sim` `ezsdr-sink`，補助の `ezsdr-hostmem`，Module の `ezsdr-sim-engine` `ezsdr-mock-radio` `ezsdr-link-host` `ezsdr-sink-capture` `ezsdr-exec-native`，テストの `ezsdr-acceptance`．`Cargo.lock` は commit 対象（external 27 package + workspace member 11） |
+| workspace | ルートの `Cargo.toml`（`resolver = "3"`，edition 2024，`rust-version = "1.85"`）．member は 12 crate：`ezsdr-kernel`，Vocabulary の `ezsdr-radio` `ezsdr-sim` `ezsdr-sink`，補助の `ezsdr-hostmem`，Module の `ezsdr-sim-engine` `ezsdr-mock-radio` `ezsdr-link-host` `ezsdr-sink-capture` `ezsdr-exec-native`，frontend（Module ではない Runtime）の `ezsdr-server`，テストの `ezsdr-acceptance`．`Cargo.lock` は commit 対象（external 27 package + workspace member 12）．Python パッケージ `python/ezsdr`（Python ≥ 3.9 + numpy） |
 | Kernel crate | `crates/ezsdr-kernel` version `4.0.0-alpha.1`．`#![forbid(unsafe_code)]`，`#![warn(missing_docs)]` |
 | module | `id time contract coordinator stream hash module_api spec binding plan event policy run session manifest schema`．`plan` は `coercion` `compile` `graph` `islands` `links` `matching` `prepare` `validation` の private submodule に分割済み |
 | 直接依存 | `serde` `serde_json` `schemars` `sha2` の4つだけ（Phase 1 exit criterion 6）．Module crate は他の Module crate に依存しない（MA-3，`ma_03_no_module_crate_depends_on_another`） |
-| test | workspace 644 件（1.85.0 / stable とも 0 failed，0 ignored）．Kernel package 456 件：`coordinator`(90) `spec_binding`(108) `stream_contract`(69) `run_session`(76) `time_model`(52) `module_api`(30) `run_doubles`(1) `hashing`(9) `kernel_surface`(15) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
+| test | workspace 684 件（1.85.0 / stable とも 0 failed，0 ignored）＋ Python 21 件（3.9 / 3.13）．Kernel package の内訳は Phase 5 時点で 456 件：`coordinator`(90) `spec_binding`(108) `stream_contract`(69) `run_session`(76) `time_model`(52) `module_api`(30) `run_doubles`(1) `hashing`(9) `kernel_surface`(15) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
 | toolchain | Rust `1.85.0` (`4d91de4e4`, 2025-02-17)（MSRV）/ stable `1.98.1` (`48a229cea`, 2026-09-01)．`cargo +stable clippy --workspace --all-targets -- -D warnings` clean |
-| schemas | Kernel の `schemas/` 直下に 47 個の JSON Schema 2020-12，Vocabulary の `schemas/{radio,sim,sink}/` に 12 個，合計 59 個 + `SCHEMA_CHANGELOG.md`．`schema_freeze` が byte 単位で凍結．再生成は `EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze` |
+| schemas | Kernel の `schemas/` 直下に 47 個の JSON Schema 2020-12，Vocabulary の `schemas/{radio,sim,sink}/` に 13 個，server の `schemas/server/` に 2 個，合計 62 個 + `SCHEMA_CHANGELOG.md`．`schema_freeze` が byte 単位で凍結．再生成は `EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze` |
 | kernel surface | `tests/kernel_surface_allow.txt` が公開 item の allow-list（= レビュー用チェックリスト，`module::name` で key 付け）．`cargo +stable test -p ezsdr-kernel --test kernel_surface ov_23b -- --nocapture` は **116 NEW / 292 public items**（Phase 3 の KB-1 で 1 つ増えてから変わっていない）．banned token は `tests/banned_tokens.txt`（識別子内も検出，`OV-23a` を書いた行だけ免除） |
-| mutation | 各 Phase の `plan/phaseN/tools/mutate.py` と `mutations.json`．Phase 5 は 29/29 killed．コピーの作り方は AGENTS.md §7 |
+| mutation | 各 Phase の `plan/phaseN/tools/mutate.py` と `mutations.json`．Phase 5 は 29/29，Phase 6 は 70/70 killed（Phase 6 の tool は Python の carrier も走らせる）．コピーの作り方は AGENTS.md §7 |
 
 以下は Phase ごとの記録．
 
@@ -93,11 +93,13 @@ Phase 3 の workspace tests（2026-09-26，Review C と Gate X の修正込み�
 
 Phase 4（2026-09-26，Review D/E の修正込み）：1.85.0 / stable とも 626 passed（`ezsdr-kernel` 452，`ezsdr-radio` 12，`ezsdr-sink-capture` 24，`ezsdr-mock-radio` 66，`ezsdr-acceptance` 41，ほかは Phase 3 と同じ）．Kernel の public item は増えていない．
 
+Phase 6（2026-09-27，Review H/I の修正込み）：1.85.0 / stable とも 684 passed，Python 21 passed（3.9.6 / 3.13.15）．Kernel の public item は増えていない（`RunHandle` に 3 メソッド，116 NEW / 292）．Kernel schema の変更なし．
+
 Phase 5（2026-09-26，Review F/G の修正込み）：1.85.0 / stable とも 644 passed（`ezsdr-kernel` 456，新 crate `ezsdr-exec-native` 8，`ezsdr-acceptance` 47，ほかは Phase 4 と同じ）．Kernel の public item は増えていない（116 NEW / 292）．Kernel schema の変更は `experiment_spec` の `inputs` と，`ComponentKind` の `reactor` の説明文だけ．workspace member は 11 個になった．
 
 Phase 3 の時点：`kernel_surface` は `116 NEW / 292 public items`（KB-1 の `module_api::InputStore` の 1 つだけ増えた）．mutation は Appendix C 83/83 + Review C の fix-check 15/15 + Gate X の fix-check 4/4 killed．
 
-## 4. Phase の状態 — Phase 1・2・3・4・5 完了（Gate X受理）
+## 4. Phase の状態 — Phase 1・2・3・4・5 完了（Gate X受理），Phase 6 は Gate X 待ち
 
 ### Phase 1 — specs 受理・Kernel 実装済み
 
@@ -230,6 +232,29 @@ Vision §67 の Phase 3（SimulationChannel + deterministic Runs）．計画は 
 
 **Step X**：spec 14 を [design/14-native-executor.md](design/14-native-executor.md) へ移し，`design/05` と crate の参照を書き換えた．Vision issue 3 件（§9 の Spec の形に `inputs`，§19 に spec 14 の Normative 行，§22 の文言）を適用し，索引に改訂履歴の行を加えた（[vision-issues.md](plan/phase5/vision-issues.md)）．
 
+### Phase 6 — 実装・Review H/I 済み，Gate X 待ち
+
+2026-09-26〜27，owner の委任（「それではPhase4/5と同じ用にPhase6も設計と実装をしてください」）で，Phase 5 と同じく試作から計画し，実装し，Opus のレビューを回した．正本は [plan/phase6/00-overview.md](plan/phase6/00-overview.md)（範囲・決定 S1–S11・§11 の決定ログ），spec 16 は [plan/phase6/16-easy-api.md](plan/phase6/16-easy-api.md)（server・protocol・Python，EA-1…EA-19，決定 A1–A8），spec 17 は [plan/phase6/17-amendments.md](plan/phase6/17-amendments.md)（KF-1…KF-4，VD-1），記録は [implementation-notes.md](plan/phase6/implementation-notes.md)．
+
+| 項目 | 内容 |
+|---|---|
+| 形 | **Python は別プロセス**（S1）：Rust の `ezsdr-server` が Module を組み込み，1 プロセス 1 Session を stdio 上の `ezsdr.protocol` 1（JSON のヘッダ行＋生のボディ）で動かす．プロトコルは Kernel の文書と `RunHandle` の呼び出しをそのまま運ぶ．Python パッケージ `ezsdr` は名前付け（`rx.frequency` → `radio.rx.frequency_hz`）と `capture` の組み立てだけで，Run の意味は持たない |
+| Kernel | KF-1 `RunHandle::events`（配信済みイベントを Run 中に読む），KF-2 `wait_for`（Run の時間でイベントを待つ，Vision §15），KF-3 `run_child`（child Run を同期で実行，親の Lease・host clock・check を引き継ぐ，`ezsdr.children`，RS-25a に「runtime check が読む環境セクションは親と同じ」を追加），KF-4（SB-14 が存在しない Manifest フィールドを参照していた → forward に）．public item の増減なし |
+| Vocabulary / Module | `sink` 1.1.0 の `sink.CAPTURE_WRITTEN`，capture Sink 1.2.0 が capture を書き終えるたびに出す．要求に番号を振り，`REQUEST_REJECTED` にも付ける（Review H/I） |
+| Python | `connect()`（既定はサーバ側の x310-like ループバック），`tx.repeat`，`rx.capture`，`rx.request` / `rx.result`（先に要求を出すと連続して取れる，owner の依頼），`sleep`・`wait_until`・`wait_for`，`run(spec)`（child Run）．Vision §3・§54・§57 の例がそのまま動く |
+| carriers | Python：§57，§58 #1/#3/#13/#16，§3 の 2 つ目の例，§54 ほか 21 件．Rust：Session の child Run として Phase 5 の Reactor が動く（`v58_09_a_reactor_runs_in_a_child_run_of_a_session`） |
+| レビュー | Review H（Opus）CHANGES_REQUIRED：P0 5・P1 6・P2 12 → 全件修正．Review I（再レビュー）CHANGES_REQUIRED：P0 1（H の P0-2 が別経路で残っていた）・P1 3・P2 7 → 全件修正．修正は小規模で，すべてテストと mutation 付きなので owner の規則どおり再レビューせず終了．記録は [reviews/](plan/phase6/reviews) |
+| 検証 | 1.85.0 / stable とも 684 passed，Python 21（3.9 / 3.13），Clippy clean，mutation 70/70 killed，link 全解決 |
+| 注意 | Phase 6 の commit のうち `79c7655` は，会話から派生した別エージェントが作業途中のツリーをそのまま commit したもの（中身は Review H の修正の途中）．失われたものはない |
+
+**Gate X で owner が決めること**（[00-overview.md](plan/phase6/00-overview.md) §11）：
+
+1. **Session replay と artifact store** は Phase 6 の範囲外とする（推奨：Phase 7 で実機が入ったあと，frontend で一緒に作る．Kernel の型は変わらないので凍結を待たせない）．
+2. **KF-4**：SB-14 / Vision §9 の「Spec builder のソースハッシュを Manifest に記録する」．推奨は v4.0 凍結前に Manifest の `spec` に optional の `source` を足す（最初の Spec builder と一緒に）．足さないなら Vision issue 4 で §9 の文を削る．
+3. S1–S11，A1–A8，spec 16・17 の受理．
+
+**Phase 7 へ持ち越すもの**（Phase 6）：実機（wall-paced）での `sleep` と `capture` の間の往復遅延と「今から d 秒後」を返す補助（`00-overview.md` §3），`run_child` 中に親のデバイスを止めるか（S5 の ceiling），remote listener と server 所有のプロファイル・認証（S9），`body_bytes` の上限．
+
 ### UHD spike（2026-09-26，branch `spike/uhd`）
 
 Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実機 USRP にどこまで通用するか」を確かめる使い捨て実装を作った．実機は X310+UBX と USRP2（owner の IBFD+SEFDM 実験系）．**Linux PC で実行する**（開発した Mac には USRP を繋がない）．
@@ -267,12 +292,12 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-1. **Phase 6 の計画**：Python Easy API（Vision §67）．Phase 5 から持ち越すもの：Session の中の Reactor（Session の implicit Spec は graph component を持たない．`sdr.run(spec)` と child Run で），Reactor が送れる波形は Run 前に宣言したもの（`inputs`）だけであること．
+1. **Phase 6 の Gate X**：上の 3 点を owner が判断する．受理後は Step X（spec 16 を `design/16-easy-api.md` へ移し，[vision-issues.md](plan/phase6/vision-issues.md) の Vision issue を適用）と push．
 2. **v4.0 凍結前に決めること**（Phase 5 Gate X）：`Endpoint::EventIn` / `EventOut` の形（event edge は Phase 10），`ParamDecl.update_class` を optional にすること．
 3. **Phase 10 へ持ち越すもの**（Phase 5）：event edge，component parameter を適用する Executor（UC-2…UC-6，MA-24），component の処理時間（budget）を仮想時間で課すこと，component parameter key の MA-34 検査，MA-30 の Action latency．
 4. **Phase 7 へ持ち越すもの**（Phase 4 Gate X）：K3 の修正（TX model と一緒に），spike の K2・K5・K6・K8・K11，MA-8 の Kernel 側強制，UHD の `ERROR_CODE_ALIGNMENT` は部分 channel を返さない（VERIFIED）ので SC-31a の per-channel `ALIGNMENT` に producer がないかもしれないこと．詳細は [plan/phase4/00-overview.md](plan/phase4/00-overview.md) §3．
 5. **Phase 2 の Gate X named risks**：Kernel 経由 Session `Stop(sink/rec)` test は Phase 4 で追加（`v58_13_a_session_stop_…`）．`MA-8` の強制は Phase 7 へ（Phase 4 §3）．
-6. **GitHub Pages の状態表示**（https://k3komatsu.github.io/Ez-SDRv4/）は Phase 4 時点のまま．Phase 5 完了を反映するかは owner の判断（gh-pages は依頼があるときだけ変更する，AGENTS.md §1）．
+6. **GitHub Pages の状態表示**（https://k3komatsu.github.io/Ez-SDRv4/）は Phase 5 完了まで反映済み（別エージェントの `origin/gh-pages` commit「update Pages status after Phase 5」）．Phase 6 を反映するかは owner の判断（gh-pages は依頼があるときだけ変更する，AGENTS.md §1）．
 7. Phase 2 のその他の test ceilings：sc16 capture と contract change 時の `partial`，KC-29 の直接 assert，到達不能な N8/N10 分岐，KA-12 marker check/acquire race の決定的 test seam，Provider→Sink datapath の nonzero drop→Manifest 経路．詳細は [implementation-notes.md](plan/phase2/implementation-notes.md) と exit tables を参照．
 
 ## 5. v3 → v4 切替で残っている作業（人間の判断が要るもの）

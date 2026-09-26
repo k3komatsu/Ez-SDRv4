@@ -29,7 +29,8 @@ Still version 1: v4.0 has not frozen. Additive; no Kernel schema changes.
 - New `server/request_frame` and `server/reply_frame` (Phase 6, spec 16 EA-6): the frames of
   `ezsdr.protocol` 1 between a client and `ezsdr-server`, which embed the Kernel's documents
   and add no Kernel type. After Review H, `wait_for` takes `within_ns` or `until` and its
-  reply carries `horizon`.
+  reply carries `horizon`. After Review I, `finished`'s `path` is optional: absent when the
+  Manifest could not be written.
 
 ## v1 — Phase 5 — a Spec's inputs
 

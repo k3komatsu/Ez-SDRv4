@@ -62,9 +62,9 @@ No expected value of a Phase 1–5 test moved.
 
 | Check | Result |
 |---|---|
-| `cargo +stable test --workspace` | 671 passed, 0 failed |
-| `cargo +1.85.0 test --workspace` | 671 passed, 0 failed |
-| `python3 -m unittest discover -s python/tests` (GY-7) | 12 passed on Python 3.13.15 (numpy 2.5.3) and 3.9.6 (numpy 1.24.2), with `-W error::ResourceWarning` on 3.13 |
+| `cargo +stable test --workspace` | 684 passed, 0 failed (671 before Reviews H and I) |
+| `cargo +1.85.0 test --workspace` | 684 passed, 0 failed |
+| `python3 -m unittest discover -s python/tests` (GY-7) | 21 passed on Python 3.13.15 (numpy 2.5.3) and 3.9.6 (numpy 1.24.2), with `-W error::ResourceWarning` (12 before Reviews H and I) |
 | `#[ignore]` in `crates/` | none |
 | `cargo +stable clippy --workspace --all-targets -- -D warnings` | clean |
 | `kernel_surface` `ov_23b` | 116 NEW / 292 public items (unchanged: the three methods are not items, GY-2) |
@@ -98,7 +98,7 @@ Adversarial dynamic review by Opus, brief [`prompts/review-h.txt`](prompts/revie
 | P1-3 an early `wait_for` left its no-op at the horizon | Cancelled on an early return (KC-29b) | `kf_02_wait_for_returns_the_first_match_and_withdraws_its_horizon` (G06, G01) |
 | P1-4 a capture across a SampleClock change came back as one array | `samples()` refuses more than one domain (EA-17) | `test_ea_17_a_capture_across_a_rate_change_is_refused` (P12) |
 | P1-5 H01–H05 | the cases above, plus `kf_02_wait_for_with_no_kinds_is_advance_to` (G02) and `kf_03_children_are_recorded_in_order` (G04). H05 (KC-37a's `check_entry` removed) is equivalent: for `RunChild`, `check_entry` checks only that the entry's time is on the local node, which a Session's `now` always is; the call stays, as in `submit`, for the day `RunChild` carries more | — |
-| P1-6 H06–H14 | `ea_14_refusals_before_a_child_runs` (H06 as G11, H07's targeted `Stop`), `ea_13_*` gains `<uri>/../x` and `<uri>x` (G12), `ea_05_a_request_that_…` (H09 as G13), the Python cases (H10 as P09, H11 as P10, H12 as P11, H14 as P13). H13 (mixed channel counts) is not reachable by any Phase 6 capture and stays untested; H07 as a mutation would run a child forever, so the targeted-`Stop` case is a test without a mutation | — |
+| P1-6 H06–H14 | `ea_14_refusals_before_a_child_runs` (H06 as G11, H07's targeted `Stop`), `ea_13_*` gains `<uri>/../x` and `<uri>x` (G12), `ea_05_a_request_that_…` (H09 as G13), the Python cases (H10 as P09, H11 as P10, H12 as P11, H14 as P13). H13 (mixed channel counts) is equivalent: a capture across an `rx.channels` change is reachable (Review I), but each channel count comes with its own SampleClock, so the domain check refuses the artifact first; H07 as a mutation is killed only by the tool's timeout (the child runs forever), so the targeted-`Stop` case is a test without a listed mutation | — |
 | P2-1 EA-3's field name | EA-3 says `kernel_api` | — |
 | P2-2 §57's silence | `00-overview.md` §8 says why the carrier sleeps | — |
 | P2-3 a duration that does not fit the child's clock | refused before the Kernel (EA-14) | `ea_14_refusals_before_a_child_runs` (G16) |
@@ -117,3 +117,25 @@ The list after Review H: 60 mutations (F01–F27, P01–P16, G01–G17). A run o
 ### Added at the owner's request during Review H: `Rx.request` / `Rx.result`
 
 Asked whether two `capture` calls in a row lose samples: they do. `capture` returns once its artifact is written, which is known only when the block holding its last sample arrives, and the next request starts at the instant it is admitted (at 1 Msps on `x310-like`, `capture(1000)` twice gave samples 0–1 000 and 2 000–3 000). Two requests submitted before either is answered are served one after another from the end of the one before (HD-10) and are contiguous (4 000–5 000 and 5 000–6 000). The owner asked for the split: `Rx.request(n, at)` submits and returns a `CaptureRequest` carrying the recorder's request number (HD-16); `Rx.result(request, timeout)` waits for that number's artifact; `capture` is `result(request(n, at), timeout)`. EA-16's table has the two rows; `test_ea_17_requests_made_ahead_capture_contiguous_samples` takes the results in reverse order and checks one continuous stretch of the waveform across the boundary (mutation P16). v3 had the same split (`receiveRequestOnly` / `receiveResponseOnly`, `v3/client/ezsdr.py:253`, `:262`).
+
+## Review I
+
+The re-review of Review H's fixes (Opus), brief [`prompts/review-i.txt`](prompts/review-i.txt), report [`reviews/review-i.md`](reviews/review-i.md). Verdict **CHANGES_REQUIRED**: Review H's P0-2 not closed (P0-A), 3 P1, 7 P2; every other Review H finding closed; 60/60 listed mutations killed. Every finding was taken.
+
+| Finding | Fix | Test (and mutation) |
+|---|---|---|
+| P0-A a capture routed to the recorder by another target path, or a `SetParameter` of `sink.capture_samples`, took a number `Session.submit` did not count | `Session.submit` counts what the Kernel routes (RS-14): a `sink.capture` for the only recorder when one is bound, else for the one it names; a `SetParameter` of `sink.capture_samples` on `sink/<recorder>`; EA-17 rewritten, its ceiling gone | `test_ea_17_each_capture_gets_its_own_samples` gains both routes (P19, P20) |
+| P1-B an undecodable first frame did not end the handshake | before `hello`, a decode failure replies `protocol` and exits (EA-3) | `ea_03_handshake` (G18) |
+| P1-C a capture across a gap came back as one array | `samples()` refuses a map with a gap, a channel gap or more than one valid stretch on a channel (EA-17) | `test_ea_17_a_capture_across_a_gap_is_refused` (P21) |
+| P1-D N05, N06 | a Kernel-rejected capture takes no number; a foreign announcement inside the timeout does not restart it | the same test (P17); `test_ea_17_a_capture_keeps_its_first_deadline` (P18) |
+| P2-1 a discarded request was never answered | the Sink answers each with `REQUEST_REJECTED` and its number (HD-11, HD-16) | `hd_16_a_discarded_request_is_answered` (G19) |
+| P2-2 the `wait_for` fields' descriptions | each stands alone and says "exactly one"; the schema cannot say it without `oneOf`, which the frame types do not generate | — |
+| P2-3 no prepare-only check in the test | `kf_03_rs_25a_refusals` gains one | G22 |
+| P2-4 the `i64::MAX / 2` bound | its reason in EA-14 and the code; a duration just over it refused | `ea_14_refusals_before_a_child_runs` (G21) |
+| P2-5 `ea_12` compared `horizon` only where it equals `now` | a wait that returns early is checked to echo its far horizon | `ea_12_time_and_events` |
+| P2-6 stale "Checked by" lines | EA-17, KC-29b and KC-37a list every test | — |
+| P2-7 `finish` lost the Manifest when it could not be written | returned with no `path` (EA-15) | `ea_15_a_manifest_that_cannot_be_written_is_still_returned` (G20) |
+
+The reviewer's H09a and H10 are equivalent after the fixes (`Drop` disconnects; the request number filters older events), and N11 (`<=` in the cancellation) is equivalent (cancelling a callback that already fired returns false). The fixes are small and each is tested and mutation-guarded, so, by the owner's rule, there is no further review.
+
+After Review I's fixes: **70 of 70 mutations killed** (F01–F27, P01–P21, G01–G22). G21 (the whole tick range admitted) is killed only by the tool's timeout, because the admitted duration then runs for 5·10¹⁸ ns; the refusal test itself is fast. Workspace 684 on 1.85.0 and stable, Clippy clean, Python 21 on 3.9.6 and 3.13.15, `ov_23b` 116 NEW / 292, every link resolved.

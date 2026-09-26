@@ -246,6 +246,38 @@ class EasyApi(unittest.TestCase):
             })
             self.assertEqual(raw["outcome"]["kind"], "admitted")
             self.assertEqual(sdr.rx.capture(100).shape, (100,), "not the raw request's 777")
+            # The Kernel routes a capture to the only recorder whatever its target names, and a
+            # SetParameter of sink.capture_samples on sink/rec is a request too; a capture the
+            # Kernel rejects reaches no recorder (Review I, P0-A, P1-D).
+            for action in (
+                {"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"node": 0, "path": "radio/rx"}, "at": None, "params": {"sink.capture_samples": 333}},
+                {"kind": "set_parameter", "target": {"node": 0, "path": "sink/rec"}, "key": "sink.capture_samples", "value": 555},
+            ):
+                self.assertEqual(sdr.submit(action)["outcome"]["kind"], "admitted")
+                self.assertEqual(sdr.rx.capture(100).shape, (100,), f"not {action['kind']}'s request")
+            rejected = sdr.submit({"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"node": 0, "path": "rec"}, "at": None, "params": {}})
+            self.assertEqual(rejected["outcome"]["kind"], "rejected")
+            self.assertEqual(sdr.rx.capture(100).shape, (100,), "a rejected capture takes no number")
+
+    def test_ea_17_a_capture_keeps_its_first_deadline(self) -> None:
+        # Another request's announcement inside the timeout does not restart it (Review H,
+        # P2-5; Review I, P1-D): the raw 10 000-sample request is written at ~10 ms, this
+        # capture's at ~16 ms, and 12 ms is the whole budget.
+        with self.connect() as sdr:
+            sdr.submit({"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"node": 0, "path": "rec"}, "at": None, "params": {"sink.capture_samples": 10_000}})
+            with self.assertRaises(ezsdr.CaptureTimeout):
+                sdr.rx.capture(5000, timeout=0.012)
+            written = [e for e in sdr.events() if e["kind"] == ezsdr.session.CAPTURE_WRITTEN]
+            self.assertEqual([e["payload"]["request"] for e in written], [0], "the foreign announcement came inside the timeout")
+
+    def test_ea_17_a_capture_across_a_gap_is_refused(self) -> None:
+        # §23: a gap is a flag and a time jump, which one array would hide (Review I, P1-C).
+        profile = self.default_profile()
+        profile["environment"]["sim.faults"] = [{"at_ns": 2_000_000, "fault": "rx_overflow", "target": "radio"}]
+        with self.connect(profile) as sdr:
+            with self.assertRaises(ezsdr.Error) as refused:
+                sdr.rx.capture(5000)
+            self.assertIn("gap", str(refused.exception))
 
     def test_ea_17_requests_made_ahead_capture_contiguous_samples(self) -> None:
         # Two back-to-back `capture` calls lose the samples between them; requests made

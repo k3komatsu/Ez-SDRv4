@@ -281,11 +281,11 @@
                 }
               ],
               "default": null,
-              "description": "the instant to wait until (a previous reply's `horizon`, so that a client that\nwaits again keeps its deadline)."
+              "description": "The instant to wait until, such as a previous reply's `horizon`, so that a client\nthat waits again keeps its deadline; exactly one of `within_ns` and `until` is given."
             },
             "within_ns": {
               "default": null,
-              "description": "How long to wait, in nanoseconds of Run time; or else",
+              "description": "How long to wait, in nanoseconds of Run time; exactly one of `within_ns` and\n`until` is given.",
               "format": "uint64",
               "minimum": 0,
               "type": [

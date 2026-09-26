@@ -455,8 +455,8 @@
   "id": "G13",
   "name": "EA-5 an undecodable request ends the Session",
   "file": "crates/ezsdr-server/src/lib.rs",
-  "old": "                write_reply(&mut output, &fail(ErrorKind::Protocol, format!(\"EA-2: not a request frame: {error}\")))?;\n                continue;",
-  "new": "                write_reply(&mut output, &fail(ErrorKind::Protocol, format!(\"EA-2: not a request frame: {error}\")))?;\n                server.disconnect();\n                return Ok(Exit::BadFrame);",
+  "old": "                if !server.greeted() {\n                    return Ok(Exit::BadFrame);\n                }\n                continue;",
+  "new": "                server.disconnect();\n                return Ok(Exit::BadFrame);",
   "crate": "ezsdr-server",
   "test_bin": "protocol",
   "filter": "ea_05_a_request_that_does_not_decode_costs_only_itself"
@@ -564,5 +564,95 @@
   "old": "        return CaptureRequest(recorder, number, int(n), start, entry)",
   "new": "        return CaptureRequest(recorder, number + 1, int(n), start, entry)",
   "python": "test_easy_api.EasyApi.test_ea_17_requests_made_ahead_capture_contiguous_samples"
+ },
+ {
+  "id": "G18",
+  "name": "EA-3 an undecodable first frame does not end the handshake",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "                if !server.greeted() {\n                    return Ok(Exit::BadFrame);\n                }\n",
+  "new": "",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_03_handshake"
+ },
+ {
+  "id": "G19",
+  "name": "HD-11 a discarded request is not answered",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "                    if discarded.request.is_some() {",
+  "new": "                    if discarded.request.is_some() && false {",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_16_a_discarded_request_is_answered"
+ },
+ {
+  "id": "G20",
+  "name": "EA-15 an unwritten Manifest is not returned",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "        let path = self.write_manifest(\"manifest.json\", &manifest).ok();\n        Handled::ok(Response::Finished { manifest: Box::new(manifest), path }).exiting()",
+  "new": "        match self.write_manifest(\"manifest.json\", &manifest) {\n            Ok(path) => Handled::ok(Response::Finished { manifest: Box::new(manifest), path: Some(path) }).exiting(),\n            Err(error) => fail(ErrorKind::Io, format!(\"EA-8: {error}\")).exiting(),\n        }",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_15_a_manifest_that_cannot_be_written_is_still_returned"
+ },
+ {
+  "id": "G21",
+  "name": "EA-14 the whole tick range admitted",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "is_some_and(|ticks| ticks <= i64::MAX / 2);",
+  "new": "is_some_and(|ticks| ticks <= i64::MAX);",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_14_refusals_before_a_child_runs"
+ },
+ {
+  "id": "G22",
+  "name": "RS-25a prepare-stage sections bound",
+  "file": "crates/ezsdr-kernel/src/binding.rs",
+  "old": ".filter(|check| check.stages().contains(&CheckStage::Runtime))",
+  "new": ".filter(|check| check.stages().contains(&CheckStage::Runtime) || check.stages().contains(&CheckStage::Prepare))",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kf_03_rs_25a_refusals"
+ },
+ {
+  "id": "P17",
+  "name": "EA-17 a rejected capture is counted",
+  "file": "python/ezsdr/session.py",
+  "old": "        recorder = self._capture_recorder(action) if entry[\"outcome\"][\"kind\"] == \"admitted\" else None",
+  "new": "        recorder = self._capture_recorder(action)",
+  "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples"
+ },
+ {
+  "id": "P18",
+  "name": "EA-17 the deadline restarts per skipped event",
+  "file": "python/ezsdr/session.py",
+  "old": "            wait = {\"until\": result[\"horizon\"]}\n",
+  "new": "",
+  "python": "test_easy_api.EasyApi.test_ea_17_a_capture_keeps_its_first_deadline"
+ },
+ {
+  "id": "P19",
+  "name": "EA-17 a capture counted by its target path",
+  "file": "python/ezsdr/session.py",
+  "old": "            if len(recorders) == 1:\n                return recorders[0]\n",
+  "new": "",
+  "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples"
+ },
+ {
+  "id": "P20",
+  "name": "EA-17 a SetParameter request not counted",
+  "file": "python/ezsdr/session.py",
+  "old": "        if action.get(\"kind\") == \"set_parameter\" and action.get(\"key\") == \"sink.capture_samples\":\n            return named if named in recorders else None\n",
+  "new": "",
+  "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples"
+ },
+ {
+  "id": "P21",
+  "name": "EA-17 a capture across a gap returned",
+  "file": "python/ezsdr/session.py",
+  "old": "    if broken:",
+  "new": "    if False:",
+  "python": "test_easy_api.EasyApi.test_ea_17_a_capture_across_a_gap_is_refused"
  }
 ]

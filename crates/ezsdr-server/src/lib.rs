@@ -91,6 +91,11 @@ impl Server {
         Server { config, greeted: false, dir: None, live: None, readable: BTreeSet::new(), scanned: 0 }
     }
 
+    /// Whether `hello` has been answered (EA-3).
+    pub fn greeted(&self) -> bool {
+        self.greeted
+    }
+
     /// The Session directory, once created (EA-8).
     pub fn dir(&self) -> Option<&Path> {
         self.dir.as_deref()
@@ -262,6 +267,8 @@ impl Server {
         if let Some(ns) = duration_ns {
             // A duration that does not fit the child's clock would run nothing (Review H, P2-3).
             let root = assembly.authority.time().primary_root();
+            // T0 + duration must be an instant: T0 is the start lead (seconds of a root that
+            // counts from 0), so half the tick range leaves it room (Review I, P2-4).
             let fits = ticks(&clocks, TimePoint::new(root, 0), ns).is_some_and(|ticks| ticks <= i64::MAX / 2);
             if !fits {
                 return fail(ErrorKind::Refused, "EA-14: duration_ns does not fit the child's clock");
@@ -303,10 +310,9 @@ impl Server {
             return fail(ErrorKind::Protocol, "EA-4: no Session is connected");
         };
         let manifest = live.run.finish();
-        match self.write_manifest("manifest.json", &manifest) {
-            Ok(path) => Handled::ok(Response::Finished { manifest: Box::new(manifest), path }).exiting(),
-            Err(error) => fail(ErrorKind::Io, format!("EA-8: {error}")).exiting(),
-        }
+        // A Manifest that cannot be written is still returned (Review I, P2-7).
+        let path = self.write_manifest("manifest.json", &manifest).ok();
+        Handled::ok(Response::Finished { manifest: Box::new(manifest), path }).exiting()
     }
 
     /// Adds the URIs of newly delivered `sink.CAPTURE_WRITTEN` events (EA-13).
@@ -522,6 +528,10 @@ pub fn serve(input: impl BufRead, mut output: impl Write, config: Config) -> io:
             Ok(frame) => frame,
             Err(error) => {
                 write_reply(&mut output, &fail(ErrorKind::Protocol, format!("EA-2: not a request frame: {error}")))?;
+                // Before `hello`, anything but `hello` ends the handshake (EA-3; Review I, P1-B).
+                if !server.greeted() {
+                    return Ok(Exit::BadFrame);
+                }
                 continue;
             }
         };

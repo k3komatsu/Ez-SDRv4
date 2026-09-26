@@ -1226,3 +1226,18 @@ fn hd_16_every_capture_request_is_numbered() {
         (CAPTURE_WRITTEN.to_owned(), json!(3)),
     ]);
 }
+
+#[test]
+fn hd_16_a_discarded_request_is_answered() {
+    // A Stop for the Sink discards the requests that have not started; each is answered
+    // with its number, so a client does not wait out its timeout (Review I, P2-1).
+    let mut rig = Rig::new("discarded", BTreeMap::new());
+    rig.env.actions.push(request(Value::Int(8), None));
+    rig.env.actions.push(request(Value::Int(3), None));
+    rig.push_ramp(0, 4);
+    rig.step().expect("the first request starts");
+    rig.env.actions.push(Action::Stop { target: Some(ResourceId::parse("sink/rec").expect("Sink target")) });
+    rig.step().expect("the Stop");
+    let answers: Vec<(String, serde_json::Value)> = rig.env.events.drain().iter().map(|event| (event.kind.as_str().to_owned(), event.payload["request"].clone())).collect();
+    assert_eq!(answers, vec![(CAPTURE_WRITTEN.to_owned(), json!(0)), (REQUEST_REJECTED.to_owned(), json!(1))]);
+}

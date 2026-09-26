@@ -186,7 +186,7 @@ OV-1…OV-23b, PO-1…PO-12, GV-1…GV-6, GW-1…GW-5 and GX-1…GX-6 bind Phase
 3. `cargo test --workspace` passes on Rust 1.85.0 and on stable with no `#[ignore]`; `cargo +stable clippy --workspace --all-targets -- -D warnings` passes.
 4. Every carrier of §8 exists and passes; the Python suite passes on Python 3.9 and on a current Python (GY-7).
 5. `kernel_surface` (116 NEW / 292 public items), `schema_freeze`, every Vocabulary freeze test and the server's freeze test pass.
-6. Every mutation of spec 17's Appendix A (60: F01–F27, P01–P16, G01–G17) is killed (GY-4).
+6. Every mutation of spec 17's Appendix A (70: F01–F27, P01–P21, G01–G22) is killed (GY-4).
 7. The Kernel's direct dependencies are still exactly four; `Cargo.lock` gains no external package (PO-4); the Python package depends on numpy only.
 8. Every link in `design/` and `plan/` resolves, and the `v3/` path check of `handoff.md` §1 passes.
 
@@ -198,4 +198,5 @@ OV-1…OV-23b, PO-1…PO-12, GV-1…GV-6, GW-1…GW-5 and GX-1…GX-6 bind Phase
 | Session replay and the artifact store: out of Phase 6 (§3). Recommendation: build them together in the frontend, after Phase 7 has a real device to replay against; no Kernel type changes, so the freeze does not wait | X | *pending* | |
 | KF-4: the builder source hash SB-14 promises. Recommendation: add an optional `source` hash to the Manifest's `spec` section, set by the caller that starts the Run, **before the v4.0 freeze**, with the first Spec builder; until then SB-14 says it is forward | X | *pending* | |
 | Review H: every P0, P1 and P2 fixed or answered (`implementation-notes.md`, "Review H") | — | **closed** | 2026-09-26; the fixes change behaviour in the Kernel, the Sink, the server and the Python package, so Review I re-reviews them (the owner's rule) |
+| Review I (re-review): Review H's P0-2 was not closed (a capture routed by another path took a number the client did not count); it and every P1 and P2 fixed with tests and mutations (`implementation-notes.md`, "Review I"); no further review, the fixes being small, each tested and mutation-guarded | — | **closed** | 2026-09-26, the owner's rule for small, low-risk fixes |
 | S1–S11, A1–A8, specs 16 and 17 (exit criterion 1) | X | *pending* | |

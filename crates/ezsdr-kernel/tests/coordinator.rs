@@ -3537,10 +3537,11 @@ fn kf_03_a_child_run_is_admitted_logged_run_and_recorded() {
 fn kf_03_rs_25a_refusals() {
     // The parent's profile carries the checked section `test.limits` and an unchecked one.
     let mut parent_profile = profile_one();
-    parent_profile["environment"] = serde_json::json!({ "test.limits": { "max": 10 }, "test.note": "a", "test.plan": 1 });
+    parent_profile["environment"] = serde_json::json!({ "test.limits": { "max": 10 }, "test.note": "a", "test.plan": 1, "test.prep": 1 });
     let checks = || {
         let mut checks = run_checks(true);
-        checks.register(Arc::new(PlanOnlyCheck(ns("test.plan"))));
+        checks.register(Arc::new(PlanOnlyCheck(ns("test.plan"), ezsdr_kernel::binding::CheckStage::Validate)));
+        checks.register(Arc::new(PlanOnlyCheck(ns("test.prep"), ezsdr_kernel::binding::CheckStage::Prepare)));
         checks
     };
     let session = || {
@@ -3568,6 +3569,8 @@ fn kf_03_rs_25a_refusals() {
     // #14's environment variation (Phase 6 Review H, P0-1).
     let mut planned = parent_profile.clone();
     planned["environment"]["test.plan"] = serde_json::json!(2);
+    let mut prepared = parent_profile.clone();
+    prepared["environment"]["test.prep"] = serde_json::json!(2);
     let cases = [
         (spec_one(), other_selector, Some("RS-25a: radio binds an instance its parent does not")),
         (spec_one(), other_authority, Some("RS-25a: the Authority")),
@@ -3576,6 +3579,7 @@ fn kf_03_rs_25a_refusals() {
         (serde_json::json!({ "version": 1, "resources": 3 }), parent_profile.clone(), Some("RS-25a: the child's Spec")),
         (spec_one(), unchecked, None),
         (spec_one(), planned, None),
+        (spec_one(), prepared, None),
     ];
     for (spec, profile, refusal) in cases {
         let mut run = session();
@@ -3637,15 +3641,15 @@ fn kf_03_run_child_is_a_session_verb() {
     let _ = run.finish();
 }
 
-/// A check that runs only at `validate`, like the `sim` Vocabulary's.
-struct PlanOnlyCheck(ezsdr_kernel::spec::Namespace);
+/// A check that runs at one stage before the runtime, like the `sim` Vocabulary's.
+struct PlanOnlyCheck(ezsdr_kernel::spec::Namespace, ezsdr_kernel::binding::CheckStage);
 
 impl ezsdr_kernel::binding::AdmissionCheck for PlanOnlyCheck {
     fn section(&self) -> &ezsdr_kernel::spec::Namespace {
         &self.0
     }
     fn stages(&self) -> &[ezsdr_kernel::binding::CheckStage] {
-        &[ezsdr_kernel::binding::CheckStage::Validate]
+        std::slice::from_ref(&self.1)
     }
     fn check(
         &self,

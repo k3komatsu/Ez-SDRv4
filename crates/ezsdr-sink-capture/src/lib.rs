@@ -225,7 +225,17 @@ impl CaptureSink {
                 if self.queue.front().is_some_and(|capture| capture.started) {
                     self.finish_front(true)?;
                 }
-                self.queue.clear();
+                // A discarded request is answered, so its client does not wait out its
+                // timeout (HD-11; Review I, P2-1).
+                for discarded in std::mem::take(&mut self.queue) {
+                    if discarded.request.is_some() {
+                        self.event_for_rejection(
+                            "update_parameter",
+                            "HD-11: discarded by a Stop for the Sink".to_owned(),
+                            discarded.request,
+                        );
+                    }
+                }
             }
             other => {
                 let kind = action_kind(&other);
