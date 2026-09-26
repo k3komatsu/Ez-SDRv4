@@ -327,7 +327,8 @@ pub(super) fn drain_cleanup(shared: &Shared) -> bool {
 }
 
 impl RunHandle {
-    pub(super) fn run_loop(&mut self, until: Option<TimePoint>) {
+    /// KC-20's loop until `until`, or until `stop` answers true after a round (KC-29b).
+    pub(super) fn run_loop(&mut self, until: Option<TimePoint>, mut stop: Option<&mut dyn FnMut(&Shared) -> bool>) {
         loop {
             if lock(&self.shared.end).is_some() || !matches!(self.state(), RunState::Running {}) {
                 return;
@@ -390,6 +391,9 @@ impl RunHandle {
             self.dispatch_agenda(at);
             round(&self.shared, at, false);
             self.check_lease();
+            if stop.as_mut().is_some_and(|stop| stop(&self.shared)) {
+                return;
+            }
             if let Some(horizon) = until {
                 if at.domain != horizon.domain || at.ticks >= horizon.ticks {
                     return;
@@ -435,6 +439,15 @@ impl RunHandle {
 
     /// Advances the Run to an instant on the Authority's primary root (KC-29).
     pub fn advance_to(&mut self, target: TimePoint) -> Result<(), super::RunHandleError> {
+        self.advance_to_with(target, &mut |_| false)
+    }
+
+    /// `advance_to`, returning early after a round at which `stop` answers true.
+    fn advance_to_with(
+        &mut self,
+        target: TimePoint,
+        stop: &mut dyn FnMut(&Shared) -> bool,
+    ) -> Result<(), super::RunHandleError> {
         self.check_lease();
         self.ensure_live()?;
         let t = super::state::ceil_convert(&self.shared.ctx.clocks, target, self.shared.primary)
@@ -459,9 +472,37 @@ impl RunHandle {
             }
         };
         lock(&self.shared.scheduled).push(handle);
-        self.run_loop(Some(t));
+        self.run_loop(Some(t), Some(stop));
         self.settle();
         self.ended_result()
+    }
+
+    /// The events delivered so far from index `from` on (KC-29a).
+    pub fn events(&self, from: usize) -> Vec<Event> {
+        lock(&self.shared.delivered).iter().skip(from).cloned().collect()
+    }
+
+    /// Advances until a delivered event at or after `from` has one of `kinds`, or to
+    /// `horizon` (KC-29b).
+    pub fn wait_for(
+        &mut self,
+        kinds: &[EventKind],
+        from: usize,
+        horizon: TimePoint,
+    ) -> Result<Option<usize>, super::RunHandleError> {
+        let first = |shared: &Shared| {
+            lock(&shared.delivered)
+                .iter()
+                .enumerate()
+                .skip(from)
+                .find(|(_, event)| kinds.contains(&event.kind))
+                .map(|(index, _)| index)
+        };
+        if let Some(index) = first(&self.shared) {
+            return Ok(Some(index));
+        }
+        self.advance_to_with(horizon, &mut |shared| first(shared).is_some())?;
+        Ok(first(&self.shared))
     }
 
     /// Runs until the Run ends or reaches the requested horizon (KC-29).
@@ -471,7 +512,7 @@ impl RunHandle {
         let horizon =
             super::state::ceil_convert(&self.shared.ctx.clocks, horizon, self.shared.primary)
                 .map_err(|_| super::RunHandleError::NotOnPrimaryRoot { t: horizon })?;
-        self.run_loop(Some(horizon));
+        self.run_loop(Some(horizon), None);
         self.settle();
         self.ended_result()
     }

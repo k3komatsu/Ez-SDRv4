@@ -113,6 +113,8 @@ pub struct RunHandle {
     last_wakeup: Option<TimePoint>,
     same_count: usize,
     manifest: Option<Manifest>,
+    parent: Option<RunId>,
+    children: Vec<serde_json::Value>,
 }
 
 /// Parses and starts a Spec Run; parse and hash refusals create no Run (KC-1, KC-5).
@@ -120,6 +122,17 @@ pub fn start_spec_run(
     spec_doc: &serde_json::Value,
     profile_doc: &serde_json::Value,
     assembly: Assembly,
+) -> Result<RunHandle, SpecError> {
+    start_spec(spec_doc, profile_doc, assembly, Lease::attached(), None)
+}
+
+/// A Spec Run with its Lease and parent: `start_spec_run`'s, or a child's (KC-37a).
+fn start_spec(
+    spec_doc: &serde_json::Value,
+    profile_doc: &serde_json::Value,
+    assembly: Assembly,
+    lease: Lease,
+    parent: Option<RunId>,
 ) -> Result<RunHandle, SpecError> {
     let spec = ExperimentSpec::from_json(spec_doc)?;
     let profile = BindingProfile::from_json(profile_doc)?;
@@ -142,8 +155,9 @@ pub fn start_spec_run(
         profile,
         binding_section,
         assembly,
-        Lease::attached(),
+        lease,
     );
+    run.parent = parent;
     run.pipeline();
     run.settle();
     Ok(run)
@@ -251,6 +265,23 @@ impl RunHandle {
     /// Sample clocks declared during prepare (TM-13d).
     pub fn sample_clocks(&self) -> Vec<SampleClockRecord> {
         self.shared.ctx.clocks.sample_clock_records()
+    }
+
+    /// Admits, logs and runs a child Spec Run to its end under this Session's Lease,
+    /// and returns the entry and, when admitted, the child's Manifest (KC-37a).
+    pub fn run_child(
+        &mut self,
+        spec_doc: &serde_json::Value,
+        profile_doc: &serde_json::Value,
+        assembly: Assembly,
+        drive: &mut dyn FnMut(&mut RunHandle),
+    ) -> Result<(LogEntry, Option<Manifest>), RunHandleError> {
+        self.check_lease();
+        self.ensure_live()?;
+        if self.kind() == RunKind::Spec {
+            return Err(RunHandleError::NotSession);
+        }
+        pipeline::run_child(self, spec_doc, profile_doc, assembly, drive)
     }
 
     /// Handles an Attached disconnect or starts a Detached Lease's expiry (KC-36).

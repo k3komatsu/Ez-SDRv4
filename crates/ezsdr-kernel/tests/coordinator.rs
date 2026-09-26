@@ -3408,3 +3408,221 @@ fn ke_02_a_module_burst_must_name_a_run_input() {
         assert!(probe.with_prefix("p:burst_input:").is_empty());
     }
 }
+
+// ---------------------------------------------------------------- Phase 6: KF-1…KF-3
+
+fn emitting_session(at: Option<i64>, wakeups: &[i64]) -> ezsdr_kernel::coordinator::RunHandle {
+    let probe = Probe::new();
+    let mut provider = SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).with_wakeups(wakeups);
+    if let Some(at) = at {
+        provider = provider.emitting("test.custom", ezsdr_kernel::event::Severity::Info, at);
+    }
+    session_with_provider(Box::new(provider))
+}
+
+fn custom() -> ezsdr_kernel::event::EventKind {
+    ezsdr_kernel::event::EventKind::parse("test.custom").unwrap()
+}
+
+#[test]
+fn kf_01_the_delivered_events_are_readable_during_the_run() {
+    let mut run = emitting_session(Some(50), &[50]);
+    let root = run.now().domain;
+    assert!(run.events(0).is_empty());
+    run.advance_to(TimePoint::new(root, 60)).unwrap();
+    let events = run.events(0);
+    let index = events.iter().position(|event| event.kind == custom()).expect("the event is readable before the Run ends");
+    assert_eq!(events[index].time.ticks, 50);
+    assert_eq!(run.events(index), events[index..].to_vec(), "`from` skips the earlier events");
+    assert!(run.events(events.len()).is_empty());
+    assert!(run.events(99).is_empty());
+    let stop = run.submit(SessionAction::Stop { target: None }, None).unwrap();
+    assert!(matches!(stop.outcome, Outcome::Admitted { .. }));
+    assert!(matches!(run.state(), RunState::CleanedUp { .. }));
+    let after = run.events(0);
+    assert_eq!(after[index], events[index], "an index names one event for the whole Run");
+    let manifest = run.finish();
+    assert_eq!(manifest.events.delivered, after, "the events a client read are the Manifest's");
+}
+
+#[test]
+fn kf_02_wait_for_returns_at_the_round_that_delivered() {
+    let mut run = emitting_session(Some(5_000), &[3_000, 5_000]);
+    let root = run.now().domain;
+    let found = run.wait_for(&[custom()], 0, TimePoint::new(root, 10_000)).unwrap();
+    let index = found.expect("the event arrived before the horizon");
+    assert_eq!(run.events(index)[0].kind, custom());
+    assert_eq!(run.now().ticks, 5_000, "the Run stands at the round that delivered the event");
+    let _ = run.finish();
+
+    // A kind that never comes: the emitted `test.custom` does not match.
+    let mut run = emitting_session(Some(5_000), &[3_000, 5_000]);
+    let lost = ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::DEVICE_LOST).unwrap();
+    assert_eq!(run.wait_for(&[lost], 0, TimePoint::new(root, 10_000)).unwrap(), None);
+    assert_eq!(run.now().ticks, 10_000);
+    let _ = run.finish();
+}
+
+#[test]
+fn kf_02_wait_for_stands_at_its_horizon() {
+    let mut run = emitting_session(None, &[3_000]);
+    let root = run.now().domain;
+    assert_eq!(run.wait_for(&[custom()], 0, TimePoint::new(root, 7_000)).unwrap(), None);
+    assert_eq!(run.now().ticks, 7_000, "no match: the Run stands at the horizon");
+    assert!(matches!(run.state(), RunState::Running {}));
+    let _ = run.finish();
+}
+
+#[test]
+fn kf_02_wait_for_finds_an_event_already_delivered() {
+    let mut run = emitting_session(Some(50), &[50]);
+    let root = run.now().domain;
+    run.advance_to(TimePoint::new(root, 60)).unwrap();
+    let index = run.events(0).iter().position(|event| event.kind == custom()).unwrap();
+    assert_eq!(run.wait_for(&[custom()], index, TimePoint::new(root, 1_000)).unwrap(), Some(index));
+    assert_eq!(run.now().ticks, 60, "an event already delivered runs no round");
+    assert_eq!(run.wait_for(&[custom()], index + 1, TimePoint::new(root, 1_000)).unwrap(), None);
+    assert_eq!(run.now().ticks, 1_000);
+    let _ = run.finish();
+}
+
+/// A child's Assembly: one TestProvider under `radio` and its own Authority.
+fn child_assembly() -> Assembly {
+    with_provider(rig(Pacing::FreeRunning).assembly, "radio", "radio")
+}
+
+fn drive_to(ticks: i64) -> impl FnMut(&mut ezsdr_kernel::coordinator::RunHandle) {
+    move |child| {
+        let root = child.now().domain;
+        let _ = child.run_until_end(TimePoint::new(root, ticks));
+    }
+}
+
+#[test]
+fn kf_03_a_child_run_is_admitted_logged_run_and_recorded() {
+    let mut run = session_with_provider(Box::new(TestProvider::new("radio", 2)));
+    let parent = run.id();
+    let before = run.now();
+    let mut drove = false;
+    let mut drive = |child: &mut ezsdr_kernel::coordinator::RunHandle| {
+        drove = true;
+        assert_eq!(child.kind(), RunKind::Spec);
+        drive_to(100)(child);
+    };
+    let (entry, child) = run.run_child(&spec_one(), &profile_one(), child_assembly(), &mut drive).unwrap();
+    assert!(drove, "the caller drives the child");
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
+    assert_eq!(
+        entry.action,
+        SessionAction::RunChild {
+            spec_hash: ContentHash::of_value(&spec_one()).unwrap(),
+            binding_hash: ContentHash::of_value(&profile_one()).unwrap(),
+        }
+    );
+    let child = child.expect("an admitted child returns its Manifest");
+    assert_eq!(child.run.parent, Some(parent.clone()));
+    assert_eq!(child.run.kind, RunKind::Spec);
+    assert!(child.hash.is_some());
+    assert_eq!(run.now(), before, "the parent's time stands still while its child runs");
+    let manifest = run.finish();
+    assert_eq!(manifest.run.parent, None);
+    assert_eq!(manifest.action_log[0], entry);
+    assert_eq!(
+        manifest.sections[&ns("ezsdr.children")],
+        serde_json::json!([{ "seq": entry.seq, "run": child.run.id, "manifest": child.hash }])
+    );
+}
+
+#[test]
+fn kf_03_rs_25a_refusals() {
+    // The parent's profile carries the checked section `test.limits` and an unchecked one.
+    let mut parent_profile = profile_one();
+    parent_profile["environment"] = serde_json::json!({ "test.limits": { "max": 10 }, "test.note": "a" });
+    let session = || {
+        let mut assembly = rig(Pacing::FreeRunning).assembly;
+        assembly.checks = run_checks(true);
+        assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
+        connect(&parent_profile, assembly, Lease::attached()).expect("valid Session entry")
+    };
+    let mut other_selector = parent_profile.clone();
+    other_selector["bindings"]["radio"]["selector"] = serde_json::json!({ "slot": "elsewhere" });
+    let mut other_authority = parent_profile.clone();
+    other_authority["bindings"]["clock"] = serde_json::json!({
+        "module": { "id": "ezsdr.test.provider", "version": { "major": 1, "minor": 0, "patch": 0 } },
+        "selector": { "slot": "clock" }
+    });
+    other_authority["authority"] = serde_json::json!("clock");
+    let mut dropped = parent_profile.clone();
+    dropped["environment"].as_object_mut().unwrap().remove("test.limits");
+    let mut changed = parent_profile.clone();
+    changed["environment"]["test.limits"] = serde_json::json!({ "max": 11 });
+    let mut unchecked = parent_profile.clone();
+    unchecked["environment"]["test.note"] = serde_json::json!("b");
+    let cases = [
+        (spec_one(), other_selector, Some("RS-25a: radio binds an instance its parent does not")),
+        (spec_one(), other_authority, Some("RS-25a: the Authority")),
+        (spec_one(), dropped, Some("RS-25a: section test.limits")),
+        (spec_one(), changed, Some("RS-25a: section test.limits")),
+        (serde_json::json!({ "version": 1, "resources": 3 }), parent_profile.clone(), Some("RS-25a: the child's Spec")),
+        (spec_one(), unchecked, None),
+    ];
+    for (spec, profile, refusal) in cases {
+        let mut run = session();
+        let mut assembly = child_assembly();
+        assembly.checks = run_checks(true);
+        let (entry, child) = run.run_child(&spec, &profile, assembly, &mut drive_to(100)).unwrap();
+        let manifest = run.finish();
+        assert_eq!(manifest.action_log, vec![entry.clone()], "the entry is logged either way");
+        match refusal {
+            Some(reason) => {
+                let Outcome::Rejected { violations } = &entry.outcome else { panic!("admitted: {reason}") };
+                assert_eq!(violations.len(), 1);
+                assert_eq!(violations[0].check, ns("ezsdr.run_child"));
+                assert!(violations[0].reason.starts_with(reason), "{} does not start with {reason}", violations[0].reason);
+                assert!(child.is_none());
+                assert!(!manifest.sections.contains_key(&ns("ezsdr.children")));
+            }
+            None => {
+                assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
+                assert!(child.is_some());
+            }
+        }
+    }
+}
+
+#[test]
+fn kf_03_a_child_inherits_the_lease() {
+    let mut rig = rig(Pacing::FreeRunning);
+    let lease = Lease::detached(5000, true, "tok", &*rig.host).unwrap();
+    rig.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
+    let mut run = connect(&profile_one(), rig.assembly, lease).unwrap();
+    let (_, child) = run.run_child(&spec_one(), &profile_one(), child_assembly(), &mut drive_to(100)).unwrap();
+    let child = child.unwrap();
+    assert!(matches!(child.lease.mode, LeaseMode::Detached { .. }), "the child holds its parent's Lease, not an Attached one of its own");
+    assert_eq!(child.lease.token.as_deref(), Some("tok"));
+    let _ = run.finish();
+}
+
+#[test]
+fn kf_03_run_child_is_a_session_verb() {
+    let mut spec_run = start_spec_run(&spec_one(), &profile_one(), child_assembly()).unwrap();
+    assert!(matches!(
+        spec_run.run_child(&spec_one(), &profile_one(), child_assembly(), &mut drive_to(100)),
+        Err(ezsdr_kernel::coordinator::RunHandleError::NotSession)
+    ));
+    let _ = spec_run.finish();
+
+    let mut run = session_with_provider(Box::new(TestProvider::new("radio", 2)));
+    let entry = run
+        .submit(SessionAction::RunChild { spec_hash: ContentHash::of_value(&spec_one()).unwrap(), binding_hash: ContentHash::of_value(&profile_one()).unwrap() }, None)
+        .unwrap();
+    let Outcome::Rejected { violations } = entry.outcome else { panic!("submit created a child") };
+    assert_eq!(violations[0].check, ns("ezsdr.run_child"));
+    assert_eq!(violations[0].reason, "RS-25a: a child Run is created with `run_child`, which carries its documents and Modules");
+    run.submit(SessionAction::Stop { target: None }, None).unwrap();
+    assert!(matches!(
+        run.run_child(&spec_one(), &profile_one(), child_assembly(), &mut drive_to(100)),
+        Err(ezsdr_kernel::coordinator::RunHandleError::Ended { .. })
+    ));
+    let _ = run.finish();
+}

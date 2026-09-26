@@ -95,7 +95,7 @@ Each amendment gives the problem, the rule text as it reads after the amendment,
 
 **Ceiling.** On a wall-paced class the parent's devices keep running while the child uses them; the first hardware Provider decides whether `run_child` quiesces the parent's streams (Phase 7). A Session replayed later (RS-20) re-creates a child from the child's Manifest, which holds both documents; replay itself is out of Phase 6 (`00-overview.md` §3).
 
-**Code.** `coordinator/state.rs`: `Context.parent: Option<RunId>`; `coordinator/mod.rs`: `pub fn run_child(&mut self, spec_doc: &serde_json::Value, profile_doc: &serde_json::Value, assembly: Assembly, drive: &mut dyn FnMut(&mut RunHandle)) -> Result<(LogEntry, Option<Manifest>), RunHandleError>`, the children list on `RunHandle`; `coordinator/pipeline.rs`: KC-37's reason; `coordinator/ending.rs`: `run.parent` and `ezsdr.children`.
+**Code.** `coordinator/mod.rs`: the parent id and the children list on `RunHandle`; `pub fn run_child(&mut self, spec_doc: &serde_json::Value, profile_doc: &serde_json::Value, assembly: Assembly, drive: &mut dyn FnMut(&mut RunHandle)) -> Result<(LogEntry, Option<Manifest>), RunHandleError>`; `coordinator/pipeline.rs`: the admission and KC-37's reason; `coordinator/ending.rs`: `run.parent` and `ezsdr.children`.
 
 **Tests.**
 

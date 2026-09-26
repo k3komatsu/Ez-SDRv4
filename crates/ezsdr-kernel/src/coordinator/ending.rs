@@ -129,7 +129,7 @@ impl RunHandle {
         let run = RunSection {
             id: self.shared.ctx.id.clone(),
             kind: self.shared.ctx.kind,
-            parent: None,
+            parent: self.parent.clone(),
             execution_class: self
                 .shared
                 .routing()
@@ -220,6 +220,12 @@ impl RunHandle {
             Namespace::parse("ezsdr.links").expect("a valid section name"),
             serde_json::Value::Array(link_sections),
         );
+        if !self.children.is_empty() {
+            sections.insert(
+                Namespace::parse("ezsdr.children").expect("a valid section name"),
+                serde_json::Value::Array(self.children.clone()),
+            );
+        }
         if let Termination::Failed { stage } = &termination {
             if let Some((failure_stage, reason)) = lock(&self.shared.failure).as_ref() {
                 if failure_stage == stage {

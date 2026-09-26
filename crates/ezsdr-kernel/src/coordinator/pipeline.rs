@@ -269,6 +269,8 @@ pub(super) fn assemble(
         last_wakeup: None,
         same_count: 0,
         manifest: None,
+        parent: None,
+        children: Vec::new(),
     }
 }
 
@@ -1252,7 +1254,10 @@ pub(super) fn submit(
             run,
             now,
             action,
-            vec![violation("ezsdr.run_child", "RS-25a: child Runs are Phase 6's")],
+            vec![violation(
+                "ezsdr.run_child",
+                "RS-25a: a child Run is created with `run_child`, which carries its documents and Modules",
+            )],
         );
     }
 
@@ -1371,6 +1376,118 @@ pub(super) fn submit(
     }
     run.settle();
     Ok(entry)
+}
+
+/// KC-37a: admits, logs, runs and records one child Spec Run.
+pub(super) fn run_child(
+    run: &mut RunHandle,
+    spec_doc: &serde_json::Value,
+    profile_doc: &serde_json::Value,
+    assembly: Assembly,
+    drive: &mut dyn FnMut(&mut RunHandle),
+) -> Result<(crate::session::LogEntry, Option<crate::manifest::Manifest>), super::RunHandleError> {
+    let now = run.shared.now();
+    let malformed = |error: crate::hash::HashError| super::RunHandleError::Malformed {
+        error: crate::spec::SpecError::Structural {
+            reason: format!("KC-37a: {error}"),
+        },
+    };
+    let action = SessionAction::RunChild {
+        spec_hash: ContentHash::of_value(spec_doc).map_err(malformed)?,
+        binding_hash: ContentHash::of_value(profile_doc).map_err(malformed)?,
+    };
+    run.log
+        .check_entry(&now, &action)
+        .map_err(|error| super::RunHandleError::Malformed { error })?;
+    if let Some(reason) = child_refusal(run, spec_doc, profile_doc, &assembly) {
+        let entry = rejected(run, now, action, vec![violation("ezsdr.run_child", reason)])?;
+        return Ok((entry, None));
+    }
+    run.log
+        .append(
+            now,
+            action,
+            Outcome::Admitted {
+                coercions: Vec::new(),
+                warnings: Vec::new(),
+                dispatched: Vec::new(),
+            },
+        )
+        .map_err(|error| super::RunHandleError::Malformed { error })?;
+    let entry = run.log.entries().last().expect("entry appended").clone();
+    // The documents parsed in `child_refusal`, so a refusal here is a hash or migration
+    // failure of a document that parsed; it cannot happen for a document that hashed above.
+    let mut child = super::start_spec(
+        spec_doc,
+        profile_doc,
+        assembly,
+        run.lease.clone(),
+        Some(run.shared.ctx.id.clone()),
+    )
+    .map_err(|error| super::RunHandleError::Malformed { error })?;
+    drive(&mut child);
+    let manifest = child.finish();
+    run.children.push(serde_json::json!({
+        "seq": entry.seq,
+        "run": manifest.run.id,
+        "manifest": manifest.hash,
+    }));
+    run.check_lease();
+    run.settle();
+    Ok((entry, Some(manifest)))
+}
+
+/// KC-37a step 2: why the child is refused, if it is.
+fn child_refusal(
+    run: &RunHandle,
+    spec_doc: &serde_json::Value,
+    profile_doc: &serde_json::Value,
+    assembly: &Assembly,
+) -> Option<String> {
+    if !matches!(run.state(), RunState::Running {}) {
+        return Some("RS-18: the Run is not Running".to_owned());
+    }
+    if let Err(error) = ExperimentSpec::from_json(spec_doc) {
+        return Some(format!("RS-25a: the child's Spec: {error}"));
+    }
+    let child = match BindingProfile::from_json(profile_doc) {
+        Ok(child) => child,
+        Err(error) => return Some(format!("RS-25a: the child's profile: {error}")),
+    };
+    let parent = &run.shared.ctx.profile;
+    let held: BTreeSet<_> = parent
+        .bindings
+        .values()
+        .map(crate::plan::binding_description)
+        .collect();
+    for name in assembly.providers.keys() {
+        let binds_held = child
+            .bindings
+            .get(name)
+            .is_some_and(|binding| held.contains(&crate::plan::binding_description(binding)));
+        if !binds_held {
+            return Some(format!("RS-25a: {name} binds an instance its parent does not"));
+        }
+    }
+    let authority = |profile: &BindingProfile| {
+        profile
+            .bindings
+            .get(&profile.authority)
+            .map(crate::plan::binding_description)
+    };
+    if authority(&child).is_none() || authority(&child) != authority(parent) {
+        return Some("RS-25a: the Authority is not bound as its parent's is".to_owned());
+    }
+    for section in run.shared.ctx.checks.sections() {
+        if let Some(value) = parent.environment.get(section) {
+            if child.environment.get(section) != Some(value) {
+                return Some(format!(
+                    "RS-25a: section {section} is not its parent's, which a registered check reads"
+                ));
+            }
+        }
+    }
+    None
 }
 
 fn session_earliest(

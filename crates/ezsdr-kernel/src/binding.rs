@@ -419,6 +419,11 @@ impl AdmissionCheckRegistry {
         self.checks.push(check);
     }
 
+    /// The sections the registered checks read (SB-29; KC-37a).
+    pub(crate) fn sections(&self) -> impl Iterator<Item = &Namespace> {
+        self.checks.iter().map(|check| check.section())
+    }
+
     /// Runs every check whose section is present in `environment` and whose stages
     /// include `stage`. A section with no registered check is informational and is
     /// still recorded verbatim (SB-30, SB-31).
