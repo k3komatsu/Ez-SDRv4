@@ -66,7 +66,7 @@ fn env_section(extra: JsonValue) -> serde_json::Map<String, JsonValue> {
 /// profile is one and left unfed for a Spec Run, which declares its feed in `outputs[]`.
 fn recorder(dir: &Path, component: Option<&str>) -> JsonValue {
     let mut recorder = json!({
-        "module": { "id": "ezsdr.sink.capture", "version": { "major": 1, "minor": 1, "patch": 0 } },
+        "module": { "id": "ezsdr.sink.capture", "version": { "major": 1, "minor": 2, "patch": 0 } },
         "selector": { "dir": dir.to_string_lossy() }
     });
     if let Some(component) = component {
@@ -257,6 +257,13 @@ pub fn determinism_projection(manifest: &Manifest) -> JsonValue {
     if let Some(artifacts) = value.get_mut("artifacts").and_then(JsonValue::as_array_mut) {
         for artifact in artifacts {
             if let Some(object) = artifact.as_object_mut() { object.remove("uri"); }
+        }
+    }
+    // A `sink.CAPTURE_WRITTEN` event carries its artifact, and so its Run-unique URI
+    // (Phase 6, VD-1).
+    if let Some(events) = value.pointer_mut("/events/delivered").and_then(JsonValue::as_array_mut) {
+        for event in events {
+            if let Some(object) = event.pointer_mut("/payload/artifact").and_then(JsonValue::as_object_mut) { object.remove("uri"); }
         }
     }
     strip_utc(&mut value);

@@ -26,7 +26,10 @@ use ezsdr_kernel::stream::{
     BlockFlags, BlockHeader, ContinuityBuilder, ContinuityMap, DataLink, DropCarry, StreamError,
 };
 use ezsdr_kernel::time::{AbsoluteDeadline, ClockRegistry, Converted, Duration, Rational, TimeAuthority, TimeError, TimePoint};
-use ezsdr_sink::{CAPTURE_ARTIFACT_KIND, CAPTURE_SAMPLES, REQUEST_REJECTED, RequestRejectedPayload};
+use ezsdr_sink::{
+    CAPTURE_ARTIFACT_KIND, CAPTURE_SAMPLES, CAPTURE_WRITTEN, CaptureWrittenPayload, REQUEST_REJECTED,
+    RequestRejectedPayload,
+};
 
 const CF32_CONTRACT: &str = "ezsdr.stream.cf32";
 const SC16_CONTRACT: &str = "ezsdr.stream.sc16";
@@ -37,23 +40,23 @@ const SIGMF_VERSION: &str = "1.2.6";
 fn module_ref() -> ModuleRef {
     ModuleRef {
         id: ModuleId::parse("ezsdr.sink.capture").expect("a valid Module id"),
-        version: Version::new(1, 1, 0),
+        version: Version::new(1, 2, 0),
     }
 }
 
-/// The Module descriptor for `ezsdr.sink.capture` 1.1.0 (HD-7).
+/// The Module descriptor for `ezsdr.sink.capture` 1.2.0 (HD-7; Phase 6, VD-1).
 pub fn descriptor() -> ModuleDescriptor {
     ModuleDescriptor {
         id: ModuleId::parse("ezsdr.sink.capture").expect("a valid Module id"),
-        version: Version::new(1, 1, 0),
+        version: Version::new(1, 2, 0),
         kernel_api: KERNEL_API,
         roles: vec![Role::Sink],
         vocabularies: vec![VocabularyRequirement {
             id: Namespace::parse("sink").expect("a valid Vocabulary namespace"),
-            req: VersionReq(Version::new(1, 0, 0)),
+            req: VersionReq(Version::new(1, 1, 0)),
         }],
         deployment: Deployment::InProcess {},
-        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.sink.capture 1.1.0")),
+        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.sink.capture 1.2.0")),
     }
 }
 
@@ -437,7 +440,28 @@ impl CaptureSink {
                     ModuleError::rejected(format!("HD-15: cannot write {}: {error}", meta_path.display()))
                 })?;
         }
+        self.announce(self.done.last().expect("the capture was just recorded").clone());
         Ok(())
+    }
+
+    /// HD-16: `sink.CAPTURE_WRITTEN` with the artifact just recorded.
+    fn announce(&self, artifact: ArtifactRef) {
+        let (Some(events), Some(time), Some(output)) = (&self.events, &self.time, &self.output) else {
+            return;
+        };
+        let Ok(now) = time.now(time.primary_root()) else {
+            return;
+        };
+        let Ok(source) = ezsdr_kernel::id::ResourceId::parse(&format!("sink/{output}")) else {
+            return;
+        };
+        let _ = events.emit_control(Event {
+            source,
+            time: now,
+            severity: Severity::Info,
+            kind: EventKind::parse(CAPTURE_WRITTEN).expect("a valid Sink event kind"),
+            payload: serde_json::to_value(CaptureWrittenPayload { artifact }).expect("an ArtifactRef is JSON"),
+        });
     }
 }
 
@@ -658,7 +682,7 @@ pub fn sigmf_meta(
             "core:version": SIGMF_VERSION,
             "core:num_channels": map.channels,
             "core:sample_rate": rate.num() as f64 / rate.den() as f64,
-            "core:recorder": "ezsdr.sink.capture 1.1.0",
+            "core:recorder": "ezsdr.sink.capture 1.2.0",
             "core:extensions": [{ "name": "ezsdr", "version": "1.0.0", "optional": true }],
             "ezsdr:sample_rate": { "num": rate.num(), "den": rate.den() },
             "ezsdr:partial": partial,

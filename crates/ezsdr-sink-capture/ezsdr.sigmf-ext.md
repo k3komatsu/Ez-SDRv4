@@ -1,6 +1,6 @@
 # The `ezsdr` SigMF extension, version 1.0.0
 
-The extension namespace that `ezsdr.sink.capture` 1.1.0 writes into every SigMF Recording's metadata (`design/10-host-data-path.md`, HD-15). It carries what SigMF's `core` namespace has no field for: where the stream lost samples, and which channels were valid (`design/02-stream-contract.md`, SC-32). It is declared `optional`, so a reader that does not support it can still read the Recording.
+The extension namespace that `ezsdr.sink.capture` 1.1.0 and later write into every SigMF Recording's metadata (`design/10-host-data-path.md`, HD-15). It carries what SigMF's `core` namespace has no field for: where the stream lost samples, and which channels were valid (`design/02-stream-contract.md`, SC-32). It is declared `optional`, so a reader that does not support it can still read the Recording.
 
 A **file index** is a sample index in the Dataset file, which holds only the samples the stream delivered. A **global index** is a sample index in the stream's SampleClock, as `core:global_index` uses. Both count multi-channel samples (one index per sample instant, whatever `core:num_channels` is).
 

@@ -27,7 +27,7 @@ use ezsdr_kernel::time::{
     AbsoluteDeadline, ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational,
     RelativeBudget, TimePoint,
 };
-use ezsdr_sink::{CAPTURE_ARTIFACT_KIND, CAPTURE_SAMPLES, REQUEST_REJECTED};
+use ezsdr_sink::{CAPTURE_ARTIFACT_KIND, CAPTURE_SAMPLES, CAPTURE_WRITTEN, REQUEST_REJECTED};
 use ezsdr_sink_capture::{descriptor, sigmf_meta, sink_descriptor, CaptureSink};
 use serde_json::json;
 
@@ -459,19 +459,19 @@ fn tx_burst() -> Action {
 fn hd_07_descriptor() {
     let module = descriptor();
     assert_eq!(module.id, ModuleId::parse("ezsdr.sink.capture").expect("module id"));
-    assert_eq!(module.version, Version::new(1, 1, 0));
+    assert_eq!(module.version, Version::new(1, 2, 0));
     assert_eq!(module.kernel_api, KERNEL_API);
     assert_eq!(module.roles, vec![ezsdr_kernel::module_api::Role::Sink]);
     assert_eq!(module.deployment, Deployment::InProcess {});
     assert_eq!(
         module.impl_hash,
-        Some(ContentHash::of_bytes(b"ezsdr.sink.capture 1.1.0"))
+        Some(ContentHash::of_bytes(b"ezsdr.sink.capture 1.2.0"))
     );
     assert_eq!(
         module.vocabularies,
         vec![VocabularyRequirement {
             id: Namespace::parse("sink").expect("namespace"),
-            req: VersionReq(Version::new(1, 0, 0)),
+            req: VersionReq(Version::new(1, 1, 0)),
         }]
     );
     let sink = sink_descriptor();
@@ -725,7 +725,8 @@ fn hd_14_a_bad_capture_value_is_an_event_not_a_failure() {
     rig.env.actions.push(request(Value::Int(10), None));
     rig.push_ramp(0, 10);
     assert!(rig.step().expect("unrelated time is rejected and valid request runs"));
-    let events = rig.env.events.drain();
+    // Phase 6, VD-1: the served request is announced too (HD-16); the three refusals remain.
+    let events: Vec<_> = rig.env.events.drain().into_iter().filter(|event| event.kind.as_str() != CAPTURE_WRITTEN).collect();
     assert_eq!(events.len(), 3);
     assert!(events.iter().all(|event| event.kind.as_str() == REQUEST_REJECTED));
     assert!(events.iter().all(|event| {
@@ -789,7 +790,9 @@ fn hd_11_stop_for_own_target_finishes_the_capture() {
         target: Some(ResourceId::parse("sink/rec").expect("Sink target")),
     });
     assert!(rig.step().expect("own Stop finishes the capture"));
-    assert!(rig.env.events.drain().is_empty());
+    // Phase 6, VD-1: the only event is the partial capture's announcement (HD-16).
+    let events = rig.env.events.drain();
+    assert_eq!(events.iter().map(|event| event.kind.as_str()).collect::<Vec<_>>(), [CAPTURE_WRITTEN]);
 
     let artifacts = rig.stop(StopMode::Orderly);
     assert_eq!(artifacts.len(), 1);
@@ -899,7 +902,7 @@ fn hd_15_a_capture_is_a_sigmf_recording() {
                 "core:version": "1.2.6",
                 "core:num_channels": 1,
                 "core:sample_rate": 1_000_000.0,
-                "core:recorder": "ezsdr.sink.capture 1.1.0",
+                "core:recorder": "ezsdr.sink.capture 1.2.0",
                 "core:extensions": [{ "name": "ezsdr", "version": "1.0.0", "optional": true }],
                 "ezsdr:sample_rate": { "num": 1_000_000, "den": 1 },
                 "ezsdr:partial": false,
@@ -1162,4 +1165,37 @@ fn hd_15_an_sc16_capture_is_ci16_le() {
     let meta = meta_of(&artifacts[0]).expect("metadata");
     assert_eq!(meta["global"]["core:datatype"], "ci16_le");
     assert_eq!(meta["global"]["core:num_channels"], 2);
+}
+
+#[test]
+fn hd_16_a_written_capture_is_announced() {
+    let mut rig = Rig::new("capture-written", BTreeMap::new());
+    rig.env.actions.push(request(Value::Int(1_000), None));
+    rig.push_ramp(0, 600);
+    rig.step().expect("the capture starts");
+    assert!(rig.env.events.drain().is_empty(), "nothing is announced before the capture is recorded");
+    rig.push_ramp(600, 600);
+    rig.step().expect("the capture completes");
+    let first = rig.env.events.drain();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].kind.as_str(), CAPTURE_WRITTEN);
+    assert_eq!(first[0].source, ResourceId::parse("sink/rec").expect("event source"));
+    let announced: ezsdr_sink::CaptureWrittenPayload = serde_json::from_value(first[0].payload.clone()).expect("the payload is a CaptureWrittenPayload");
+    let path = PathBuf::from(announced.artifact.uri.strip_prefix("file://").expect("a file URI"));
+    assert!(path.with_extension("sigmf-meta").exists(), "the metadata is written before the announcement");
+
+    // A second request, finished partial by a Stop for the Sink (HD-11).
+    rig.env.actions.push(request(Value::Int(1_000), None));
+    rig.push_ramp(1_200, 300);
+    rig.step().expect("the second capture starts");
+    rig.env.actions.push(Action::Stop { target: Some(ResourceId::parse("sink/rec").expect("Sink target")) });
+    rig.step().expect("the Stop finishes it");
+    let second = rig.env.events.drain();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].kind.as_str(), CAPTURE_WRITTEN);
+    let partial: ezsdr_sink::CaptureWrittenPayload = serde_json::from_value(second[0].payload.clone()).expect("payload");
+    assert!(partial.artifact.partial);
+
+    let artifacts = rig.stop(StopMode::Orderly);
+    assert_eq!(artifacts, vec![announced.artifact, partial.artifact], "each announcement is the artifact stop returns");
 }

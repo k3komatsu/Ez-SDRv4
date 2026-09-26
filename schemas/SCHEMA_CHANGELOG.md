@@ -15,6 +15,15 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — Phase 6 — `sink.CAPTURE_WRITTEN`
+
+Still version 1: v4.0 has not frozen. Additive; no Kernel schema changes.
+
+- New `sink/capture_written_payload` (Phase 6, VD-1; HD-16): the payload of the `sink` 1.1.0
+  event kind `sink.CAPTURE_WRITTEN`, `{ artifact: ArtifactRef }`, emitted by the capture Sink
+  1.2.0 when it records a capture, so a client learns during the Session that the capture is
+  written and where.
+
 ## v1 — Phase 5 — a Spec's inputs
 
 Still version 1: v4.0 has not frozen. Additive.

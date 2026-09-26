@@ -1,4 +1,4 @@
-//! Ez-SDR v4 Sink Vocabulary sink 1.0.0 (plan/phase2/10-host-data-path.md).
+//! Ez-SDR v4 Sink Vocabulary sink 1.1.0 (design/10-host-data-path.md).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -23,26 +23,35 @@ pub const CAPTURE_SAMPLES: &str = "sink.capture_samples";
 pub const CAPTURE_ARTIFACT_KIND: &str = "sink.capture";
 /// The event kind emitted when a capture request cannot be served (HD-14).
 pub const REQUEST_REJECTED: &str = "sink.REQUEST_REJECTED";
+/// The event kind emitted when a capture's artifact is recorded (HD-16).
+pub const CAPTURE_WRITTEN: &str = "sink.CAPTURE_WRITTEN";
 
 fn sink_namespace() -> Namespace {
     Namespace::parse(VOCABULARY).expect("a valid Vocabulary namespace")
 }
 
-/// The one event kind HD-6 declares, which `vocabulary()` and `register()` both carry.
-fn request_rejected() -> EventKindDecl {
-    EventKindDecl {
-        kind: EventKind::parse(REQUEST_REJECTED).expect("a valid Sink event kind"),
-        default: Reaction::Continue,
-        severity: Severity::Warning,
-    }
+/// The event kinds HD-6 declares, which `vocabulary()` and `register()` both carry.
+fn event_kinds() -> Vec<EventKindDecl> {
+    vec![
+        EventKindDecl {
+            kind: EventKind::parse(REQUEST_REJECTED).expect("a valid Sink event kind"),
+            default: Reaction::Continue,
+            severity: Severity::Warning,
+        },
+        EventKindDecl {
+            kind: EventKind::parse(CAPTURE_WRITTEN).expect("a valid Sink event kind"),
+            default: Reaction::Continue,
+            severity: Severity::Info,
+        },
+    ]
 }
 
-/// Describes the `sink` Vocabulary 1.0.0 (HD-6).
+/// Describes the `sink` Vocabulary 1.1.0 (HD-6; Phase 6, VD-1).
 pub fn vocabulary() -> VocabularyDescriptor {
     let namespace = sink_namespace();
     VocabularyDescriptor {
         id: namespace.clone(),
-        version: Version::new(1, 0, 0),
+        version: Version::new(1, 1, 0),
         prefix: namespace,
         keys: vec![KeyDecl {
             key: Key::parse(CAPTURE_SAMPLES).expect("a valid Sink key"),
@@ -51,7 +60,7 @@ pub fn vocabulary() -> VocabularyDescriptor {
             coercion_default: CoercionPolicy::Reject,
             update_class: Some(UpdateClass::BlockBoundary),
         }],
-        event_kinds: vec![request_rejected()],
+        event_kinds: event_kinds(),
         verbs: vec![VerbDecl {
             verb: Ident::parse("capture").expect("a valid Session verb"),
             compiles_to: CompileRule::UpdateParameter {
@@ -63,16 +72,19 @@ pub fn vocabulary() -> VocabularyDescriptor {
     }
 }
 
-/// Registers the Vocabulary and its event kind under owner `sink` (HD-6).
+/// Registers the Vocabulary and its event kinds under owner `sink` (HD-6).
 pub fn register(
     registry: &mut ModuleRegistry,
     _checks: &mut AdmissionCheckRegistry,
     kinds: &mut EventKindRegistry,
 ) -> Result<(), ModuleError> {
     registry.register_vocabulary(vocabulary())?;
-    kinds
-        .register(Some(sink_namespace()), request_rejected())
-        .map_err(|error| ModuleError::rejected(format!("HD-6: {error}")))
+    for decl in event_kinds() {
+        kinds
+            .register(Some(sink_namespace()), decl)
+            .map_err(|error| ModuleError::rejected(format!("HD-6: {error}")))?;
+    }
+    Ok(())
 }
 
 /// Payload for a rejected capture request or unsupported Action (HD-14).
@@ -85,14 +97,32 @@ pub struct RequestRejectedPayload {
     pub reason: String,
 }
 
-/// Generates the Sink Vocabulary's committed schemas (HD-14).
+/// Payload of `sink.CAPTURE_WRITTEN`: the artifact the Sink just recorded (HD-16).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureWrittenPayload {
+    /// The recorded capture, as the Sink's `stop` will return it (HD-16).
+    pub artifact: ezsdr_kernel::manifest::ArtifactRef,
+}
+
+/// Generates the Sink Vocabulary's committed schemas (HD-14, HD-16).
 pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
-    BTreeMap::from([(
-        "request_rejected_payload",
-        serde_json::to_value(
-            ezsdr_kernel::schema::generator()
-                .into_root_schema_for::<RequestRejectedPayload>(),
-        )
-        .expect("a generated schema is JSON"),
-    )])
+    BTreeMap::from([
+        (
+            "request_rejected_payload",
+            serde_json::to_value(
+                ezsdr_kernel::schema::generator()
+                    .into_root_schema_for::<RequestRejectedPayload>(),
+            )
+            .expect("a generated schema is JSON"),
+        ),
+        (
+            "capture_written_payload",
+            serde_json::to_value(
+                ezsdr_kernel::schema::generator()
+                    .into_root_schema_for::<CaptureWrittenPayload>(),
+            )
+            .expect("a generated schema is JSON"),
+        ),
+    ])
 }

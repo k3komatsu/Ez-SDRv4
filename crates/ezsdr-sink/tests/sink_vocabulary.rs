@@ -25,7 +25,7 @@ fn hd_06_vocabulary() {
 
     let descriptor = registry.vocabulary(&Namespace::parse("sink").unwrap()).unwrap();
     assert_eq!(descriptor.id, Namespace::parse("sink").unwrap());
-    assert_eq!(descriptor.version, Version::new(1, 0, 0));
+    assert_eq!(descriptor.version, Version::new(1, 1, 0));
     assert_eq!(descriptor.prefix, Namespace::parse("sink").unwrap());
     assert!(descriptor.checks.is_empty());
     assert_eq!(descriptor.keys.len(), 1);
@@ -35,7 +35,7 @@ fn hd_06_vocabulary() {
     assert!(!key.coercible);
     assert_eq!(key.coercion_default, CoercionPolicy::Reject);
     assert_eq!(key.update_class, Some(UpdateClass::BlockBoundary));
-    assert_eq!(descriptor.event_kinds.len(), 1);
+    assert_eq!(descriptor.event_kinds.len(), 2);
     let event = &descriptor.event_kinds[0];
     assert_eq!(event.kind.as_str(), "sink.REQUEST_REJECTED");
     assert_eq!(event.default, Reaction::Continue);
@@ -44,6 +44,12 @@ fn hd_06_vocabulary() {
         kinds.get(&EventKind::parse("sink.REQUEST_REJECTED").unwrap()),
         Some(event)
     );
+    // Phase 6, VD-1 (HD-16).
+    let written = &descriptor.event_kinds[1];
+    assert_eq!(written.kind.as_str(), ezsdr_sink::CAPTURE_WRITTEN);
+    assert_eq!(written.default, Reaction::Continue);
+    assert_eq!(written.severity, Severity::Info);
+    assert_eq!(kinds.get(&written.kind), Some(written));
     assert_eq!(descriptor.verbs.len(), 1);
     assert_eq!(descriptor.verbs[0].verb.as_str(), "capture");
     assert!(matches!(
