@@ -407,20 +407,6 @@ impl CaptureSink {
             .id
             .take()
             .ok_or_else(|| ModuleError::rejected("HD-10: started capture has no id"))?;
-        // HD-15: a Recording has one sample rate and one channel count, so only a
-        // capture with a single ContinuityMap gets metadata.
-        if let ([map], Some(contract)) = (capture.builders.as_slice(), capture.contract.as_ref()) {
-            let clocks = self.clocks.as_ref().expect("prepare installs the ClockRegistry");
-            let rate = clocks
-                .nominal_rate(map.domain)
-                .map_err(|error| ModuleError::rejected(format!("HD-15: {error}")))?;
-            let meta = sigmf_meta(map, rate, contract).map_err(ModuleError::rejected)?;
-            let meta_path = path.with_extension("sigmf-meta");
-            let text = serde_json::to_string_pretty(&meta).expect("SigMF metadata is JSON");
-            fs::write(&meta_path, text).map_err(|error| {
-                ModuleError::rejected(format!("HD-15: cannot write {}: {error}", meta_path.display()))
-            })?;
-        }
         self.done.push(ArtifactRef {
             id,
             kind: Namespace::parse(CAPTURE_ARTIFACT_KIND).expect("a valid artifact kind"),
@@ -431,6 +417,26 @@ impl CaptureSink {
             marks: Vec::new(),
             continuity: capture.builders,
         });
+        // HD-15: a Recording has one sample rate and one channel count, so only a
+        // capture with a single ContinuityMap gets metadata. The data's ArtifactRef is
+        // recorded first, so a failed metadata write cannot cost the capture, and the
+        // metadata is renamed into place, so a reader never sees half of it.
+        let done = self.done.last().expect("the capture was just recorded");
+        if let ([map], Some(contract)) = (done.continuity.as_slice(), capture.contract.as_ref()) {
+            let clocks = self.clocks.as_ref().expect("prepare installs the ClockRegistry");
+            let rate = clocks
+                .nominal_rate(map.domain)
+                .map_err(|error| ModuleError::rejected(format!("HD-15: {error}")))?;
+            let meta = sigmf_meta(map, rate, contract, partial).map_err(ModuleError::rejected)?;
+            let meta_path = path.with_extension("sigmf-meta");
+            let staged = path.with_extension("sigmf-meta.partial");
+            let text = serde_json::to_string_pretty(&meta).expect("SigMF metadata is JSON");
+            fs::write(&staged, text)
+                .and_then(|()| fs::rename(&staged, &meta_path))
+                .map_err(|error| {
+                    ModuleError::rejected(format!("HD-15: cannot write {}: {error}", meta_path.display()))
+                })?;
+        }
         Ok(())
     }
 }
@@ -557,65 +563,82 @@ impl Sink for CaptureSink {
 }
 
 /// The SigMF metadata of a capture with one ContinuityMap: each run of delivered
-/// samples between stream gaps is a capture segment, and the gaps and per-channel
-/// validity go in the `ezsdr` extension (HD-15, SC-32).
+/// samples between stream gaps is a capture segment, and the gaps, per-channel
+/// validity and whether the capture is partial go in the `ezsdr` extension (HD-15,
+/// SC-32).
 ///
 /// A file index counts delivered samples from `map.first`: gaps are not in the file,
-/// so a tick's index is its offset less the extent of every gap before it.
+/// so a tick's index is its offset less the extent of every gap before it. A map
+/// whose indices would be negative or out of range — which no `ContinuityBuilder`
+/// produces, but a hand-built map can — is refused rather than described wrongly.
 pub fn sigmf_meta(
     map: &ContinuityMap,
     rate: Rational,
     contract: &DataContractId,
+    partial: bool,
 ) -> Result<serde_json::Value, String> {
     let datatype = match contract.as_str() {
         CF32_CONTRACT => "cf32_le",
         SC16_CONTRACT => "ci16_le",
         other => return Err(format!("HD-15: contract {other} has no SigMF datatype")),
     };
-    let first = map.first.ticks;
-    let gap_end = |gap: &ezsdr_kernel::stream::Gap| gap.start.ticks.saturating_add(gap.len as i64);
-    let file_index = |tick: i64| -> i64 {
-        let skipped: u64 = map.gaps.iter().filter(|gap| gap_end(gap) <= tick).map(|gap| gap.len).sum();
-        tick - first - skipped as i64
+    let first = i128::from(map.first.ticks);
+    let gap_end = |gap: &ezsdr_kernel::stream::Gap| i128::from(gap.start.ticks) + i128::from(gap.len);
+    let file_index = |tick: i64| -> Result<u64, String> {
+        let tick = i128::from(tick);
+        let skipped: i128 = map.gaps.iter().filter(|gap| gap_end(gap) <= tick).map(|gap| i128::from(gap.len)).sum();
+        u64::try_from(tick - first - skipped)
+            .ok()
+            .filter(|index| *index <= i64::MAX as u64)
+            .ok_or_else(|| format!("HD-15: tick {tick} has no file index in this map"))
     };
-    let segment = |tick: i64| serde_json::json!({ "core:sample_start": file_index(tick), "core:global_index": tick });
+    let segment = |tick: i64| -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({ "core:sample_start": file_index(tick)?, "core:global_index": tick }))
+    };
 
     let mut captures = Vec::new();
-    let mut run_start = first;
+    let mut run_start = i128::from(map.first.ticks);
     for gap in &map.gaps {
-        if gap.start.ticks > run_start {
-            captures.push(segment(run_start));
+        if i128::from(gap.start.ticks) > run_start {
+            captures.push(segment(run_start as i64)?);
         }
         run_start = gap_end(gap);
     }
-    if map.end.ticks > run_start {
-        captures.push(segment(run_start));
+    if i128::from(map.end.ticks) > run_start {
+        captures.push(segment(run_start as i64)?);
     }
-    let gaps: Vec<_> = map
+    let gaps = map
         .gaps
         .iter()
         .map(|gap| {
-            serde_json::json!({
-                "sample_start": file_index(gap_end(gap)),
+            let after = i64::try_from(gap_end(gap)).map_err(|_| format!("HD-15: a gap of {} samples leaves the tick range", gap.len))?;
+            Ok(serde_json::json!({
+                "sample_start": file_index(after)?,
                 "global_index": gap.start.ticks,
                 "len": gap.len,
                 "lost": gap.lost,
                 "cause": gap.cause,
                 "link_dropped": gap.link_dropped,
-            })
+            }))
         })
-        .collect();
-    let valid: Vec<Vec<_>> = map
+        .collect::<Result<Vec<_>, String>>()?;
+    let valid = map
         .valid
         .iter()
         .map(|segments| {
             segments
                 .iter()
-                .map(|s| serde_json::json!({ "sample_start": file_index(s.start.ticks), "sample_count": s.len }))
-                .collect()
+                .map(|s| Ok(serde_json::json!({ "sample_start": file_index(s.start.ticks)?, "sample_count": s.len })))
+                .collect::<Result<Vec<_>, String>>()
         })
-        .collect();
-    let mut channel_gaps: Vec<_> = map.channel_gaps.iter().map(|g| (file_index(g.start.ticks), g)).collect();
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut channel_gaps = map
+        .channel_gaps
+        .iter()
+        .map(|g| Ok((file_index(g.start.ticks)?, g)))
+        .collect::<Result<Vec<_>, String>>()?;
+    // The builder emits a channel's break when it closes, so a short break on a high
+    // channel can precede a long one below it; SigMF requires start order.
     channel_gaps.sort_by_key(|(index, g)| (*index, g.channel));
     let annotations: Vec<_> = channel_gaps
         .into_iter()
@@ -638,6 +661,7 @@ pub fn sigmf_meta(
             "core:recorder": "ezsdr.sink.capture 1.1.0",
             "core:extensions": [{ "name": "ezsdr", "version": "1.0.0", "optional": true }],
             "ezsdr:sample_rate": { "num": rate.num(), "den": rate.den() },
+            "ezsdr:partial": partial,
             "ezsdr:gaps": gaps,
             "ezsdr:valid": valid,
         },

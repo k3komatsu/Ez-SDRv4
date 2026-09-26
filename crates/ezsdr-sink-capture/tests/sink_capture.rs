@@ -902,6 +902,7 @@ fn hd_15_a_capture_is_a_sigmf_recording() {
                 "core:recorder": "ezsdr.sink.capture 1.1.0",
                 "core:extensions": [{ "name": "ezsdr", "version": "1.0.0", "optional": true }],
                 "ezsdr:sample_rate": { "num": 1_000_000, "den": 1 },
+                "ezsdr:partial": false,
                 "ezsdr:gaps": [{
                     "sample_start": 100, "global_index": 200, "len": 50, "lost": 50,
                     "cause": { "kind": "overflow_restart" }, "link_dropped": 0
@@ -967,6 +968,17 @@ fn hd_15_a_capture_across_a_clock_change_has_no_metadata() {
     assert!(artifacts[0].uri.ends_with(".sigmf-data"));
     assert!(Path::new(artifacts[0].uri.strip_prefix("file://").unwrap()).exists());
     assert_eq!(meta_of(&artifacts[0]), None, "one Recording has one sample rate");
+
+    // The other way to two maps: a channel-count change (SC-30a).
+    let mut rig = Rig::new("sigmf-channels-change", sample_count(8));
+    let one = channel_block(&mut rig.pool, rig.env.sample_clock, 0, 4, 1, ChannelMask::full(1), BlockFlags::NONE);
+    rig.link.publish(one);
+    let two = channel_block(&mut rig.pool, rig.env.sample_clock, 4, 4, 2, ChannelMask::full(2), BlockFlags::NONE);
+    rig.link.publish(two);
+    rig.step().expect("two channel counts");
+    let artifacts = rig.stop(StopMode::Orderly);
+    assert_eq!(artifacts[0].continuity.len(), 2);
+    assert_eq!(meta_of(&artifacts[0]), None, "one Recording has one channel count");
 }
 
 #[test]
@@ -987,13 +999,167 @@ fn hd_15_the_datatype_follows_the_contract() {
     let map = builder.finish(DropCarry::default());
     let rate = Rational::new(3, 2).expect("rate");
     let datatype = |contract: &str| {
-        sigmf_meta(&map, rate, &DataContractId::parse(contract).expect("contract id"))
+        sigmf_meta(&map, rate, &DataContractId::parse(contract).expect("contract id"), false)
             .map(|meta| meta["global"]["core:datatype"].clone())
     };
     assert_eq!(datatype("ezsdr.stream.cf32"), Ok(json!("cf32_le")));
     assert_eq!(datatype("ezsdr.stream.sc16"), Ok(json!("ci16_le")));
     assert!(datatype("ezsdr.stream.cs8").unwrap_err().starts_with("HD-15"));
-    let meta = sigmf_meta(&map, rate, &DataContractId::parse("ezsdr.stream.sc16").unwrap()).unwrap();
+    let meta = sigmf_meta(&map, rate, &DataContractId::parse("ezsdr.stream.sc16").unwrap(), false).unwrap();
     assert_eq!(meta["global"]["core:sample_rate"], json!(1.5));
     assert_eq!(meta["global"]["ezsdr:sample_rate"], json!({ "num": 3, "den": 2 }));
+}
+
+/// A one-channel map built from the headers given, then finished with `trailing`.
+fn map_of(headers: &[(i64, u32, BlockFlags, Option<u64>, DropCarry)], trailing: DropCarry) -> ezsdr_kernel::stream::ContinuityMap {
+    let clock = ClockDomainId::local(9);
+    let mut builder = ezsdr_kernel::stream::ContinuityBuilder::new(clock, 1, false);
+    for (first, len, flags, lost, carry) in headers {
+        let header = BlockHeader {
+            first_sample_time: TimePoint::new(clock, *first),
+            len: *len,
+            channels: 1,
+            direction: Direction::Rx,
+            valid: ChannelMask::full(1),
+            flags: *flags,
+            lost: *lost,
+            contract: DataContractId::parse("ezsdr.stream.cf32").expect("cf32 contract"),
+        };
+        builder.push(&header, *carry).expect("a well-formed header");
+    }
+    builder.finish(trailing)
+}
+
+fn cf32() -> DataContractId {
+    DataContractId::parse("ezsdr.stream.cf32").expect("cf32 contract")
+}
+
+#[test]
+fn hd_15_gap_fields_carry_the_continuity_causes() {
+    let none = DropCarry::default();
+    let dropped = DropCarry { flags: BlockFlags::NONE, lost: None, blocks: 1 };
+    let evicted_overflow = DropCarry { flags: BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, lost: Some(50), blocks: 1 };
+    // [0, 10); a link drop of 5 (SC-31 LinkDrop); [15, 25); a stream gap of 50 that
+    // reported 30 lost (Mixed); [75, 85); then a carry no block follows (SC-30c).
+    let map = map_of(&[
+        (0, 10, BlockFlags::NONE, None, none),
+        (15, 10, BlockFlags::NONE, None, dropped),
+        (75, 10, BlockFlags::GAP_BEFORE, Some(30), none),
+    ], evicted_overflow);
+    let meta = sigmf_meta(&map, Rational::integer(1).unwrap(), &cf32(), true).unwrap();
+    assert_eq!(meta["global"]["ezsdr:partial"], true);
+    assert_eq!(meta["global"]["ezsdr:gaps"], json!([
+        { "sample_start": 10, "global_index": 10, "len": 5, "lost": null, "cause": { "kind": "link_drop" }, "link_dropped": 1 },
+        { "sample_start": 20, "global_index": 25, "len": 50, "lost": 30, "cause": { "kind": "mixed", "stream_lost": 30 }, "link_dropped": 0 },
+        { "sample_start": 30, "global_index": 85, "len": 0, "lost": 50, "cause": { "kind": "overflow_restart" }, "link_dropped": 1 }
+    ]));
+    // The zero-extent gap at the end opens no empty capture segment.
+    assert_eq!(meta["captures"], json!([
+        { "core:sample_start": 0, "core:global_index": 0 },
+        { "core:sample_start": 10, "core:global_index": 15 },
+        { "core:sample_start": 20, "core:global_index": 75 }
+    ]));
+}
+
+#[test]
+fn hd_15_annotations_are_sorted_by_index_then_channel() {
+    // The builder emits a break when it closes: channel 2's [20, 30) closes before
+    // channel 1's [10, 40), so the map lists channel 2 first (SC-31d).
+    let clock = ClockDomainId::local(9);
+    let mut builder = ezsdr_kernel::stream::ContinuityBuilder::new(clock, 3, false);
+    for (first, valid) in [(0, 0b111), (10, 0b101), (20, 0b001), (30, 0b101), (40, 0b111)] {
+        let header = BlockHeader {
+            first_sample_time: TimePoint::new(clock, first),
+            len: 10,
+            channels: 3,
+            direction: Direction::Rx,
+            valid: ChannelMask::from_bits(valid),
+            flags: BlockFlags::NONE,
+            lost: None,
+            contract: cf32(),
+        };
+        builder.push(&header, DropCarry::default()).expect("a well-formed header");
+    }
+    let map = builder.finish(DropCarry::default());
+    assert_eq!(map.channel_gaps.iter().map(|g| g.channel).collect::<Vec<_>>(), [2, 1]);
+    let meta = sigmf_meta(&map, Rational::integer(1).unwrap(), &cf32(), false).unwrap();
+    let order: Vec<_> = meta["annotations"].as_array().unwrap().iter()
+        .map(|a| (a["core:sample_start"].as_u64().unwrap(), a["ezsdr:channel"].as_u64().unwrap(), a["core:sample_count"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(order, [(10, 1, 30), (20, 2, 10)]);
+}
+
+#[test]
+fn hd_15_a_map_it_cannot_describe_is_refused() {
+    // `sigmf_meta` is public and so are a map's fields: a hand-built map whose file
+    // indices would be negative or out of range is refused, not written as invalid
+    // SigMF (a `core:sample_start` below 0).
+    let mut before_first = map_of(&[(100, 10, BlockFlags::NONE, None, DropCarry::default())], DropCarry::default());
+    before_first.gaps.push(ezsdr_kernel::stream::Gap {
+        start: TimePoint::new(before_first.domain, 0),
+        len: 5,
+        lost: None,
+        cause: ezsdr_kernel::stream::GapCause::Stream {},
+        link_dropped: 0,
+    });
+    assert!(sigmf_meta(&before_first, Rational::integer(1).unwrap(), &cf32(), false).unwrap_err().starts_with("HD-15"));
+    let mut huge = map_of(&[(0, 10, BlockFlags::NONE, None, DropCarry::default())], DropCarry::default());
+    huge.gaps.push(ezsdr_kernel::stream::Gap {
+        start: TimePoint::new(huge.domain, 10),
+        len: u64::MAX,
+        lost: None,
+        cause: ezsdr_kernel::stream::GapCause::Stream {},
+        link_dropped: 0,
+    });
+    assert!(sigmf_meta(&huge, Rational::integer(1).unwrap(), &cf32(), false).unwrap_err().starts_with("HD-15"));
+}
+
+#[test]
+fn hd_15_a_partial_capture_has_metadata() {
+    let mut rig = Rig::new("sigmf-partial", sample_count(5_000));
+    let block = ramp_block(&mut rig.pool, rig.env.sample_clock, 0, 0.0, 1_000, BlockFlags::NONE, None);
+    rig.link.publish(block);
+    rig.step().expect("one block");
+    let artifacts = rig.stop(StopMode::Abort);
+    assert!(artifacts[0].partial);
+    let meta = meta_of(&artifacts[0]).expect("a partial capture is a Recording too");
+    assert_eq!(meta["global"]["ezsdr:partial"], true);
+    assert_eq!(meta["captures"], json!([{ "core:sample_start": 0, "core:global_index": 0 }]));
+    let data = artifacts[0].uri.strip_prefix("file://").unwrap();
+    assert!(!Path::new(data).with_extension("sigmf-meta.partial").exists(), "no staging file is left behind");
+}
+
+#[test]
+fn hd_15_an_sc16_capture_is_ci16_le() {
+    let mut rig = Rig::new("sigmf-sc16", sample_count(16));
+    let len = 16usize;
+    let bytes = rig.pool.fill(len * 2 * 4, |buf| {
+        for c in 0..2 {
+            for i in 0..len {
+                let at = (c * len + i) * 4;
+                buf[at..at + 2].copy_from_slice(&(i as i16).to_le_bytes());
+                buf[at + 2..at + 4].copy_from_slice(&(c as i16).to_le_bytes());
+            }
+        }
+    });
+    let header = BlockHeader {
+        first_sample_time: TimePoint::new(rig.env.sample_clock, 0),
+        len: len as u32,
+        channels: 2,
+        direction: Direction::Rx,
+        valid: ChannelMask::full(2),
+        flags: BlockFlags::NONE,
+        lost: None,
+        contract: DataContractId::parse("ezsdr.stream.sc16").expect("sc16 contract"),
+    };
+    rig.link.publish(BlockRef::new(SampleBlock::new_host(header, HOST_MEMORY, bytes, 4).expect("sc16 block")));
+    rig.step().expect("one block");
+    let artifacts = rig.stop(StopMode::Orderly);
+    let data = fs::read(artifacts[0].uri.strip_prefix("file://").unwrap()).unwrap();
+    assert_eq!(data.len(), 16 * 2 * 4);
+    // SigMF's interleave: sample 1 of channel 0, then of channel 1 (I then Q, LE).
+    assert_eq!(&data[8..16], &[1, 0, 0, 0, 1, 0, 1, 0]);
+    let meta = meta_of(&artifacts[0]).expect("metadata");
+    assert_eq!(meta["global"]["core:datatype"], "ci16_le");
+    assert_eq!(meta["global"]["core:num_channels"], 2);
 }

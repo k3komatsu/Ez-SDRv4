@@ -620,6 +620,14 @@ pub mod payloads {
     /// The length of [`RxOverflowPayload`]'s hot-path form (RM-24).
     pub const RX_OVERFLOW_HOT_BYTES: usize = 17;
 
+    /// `RX_OVERFLOW`'s payload as a Manifest holds it when a Provider emitted it on the
+    /// hot path: the Kernel's drain turns the record's bytes into this array (RS-34).
+    /// Its schema gives a Manifest reader the shape; RM-24 gives the layout, which only
+    /// [`RxOverflowPayload::from_payload`] interprets.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+    #[serde(transparent)]
+    pub struct RxOverflowHotPayload(pub [u8; RX_OVERFLOW_HOT_BYTES]);
+
     impl RxOverflowPayload {
         /// The hot-path form: the cause byte (0 overrun, 1 sequence), then `lost` as a
         /// little-endian u64 and `restart_gap_ns` as a little-endian i64 (RM-24). The
@@ -742,11 +750,11 @@ pub mod payloads {
     }
 }
 
-/// Generates the seven committed Radio Model schemas (RM-20, RM-22).
+/// Generates the eight committed Radio Model schemas (RM-20, RM-22, RM-24).
 pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     use payloads::{
         CommandQueueFullPayload, CommandRejectedPayload, LateCommandPayload,
-        RxOverflowPayload, TimeErrorPayload,
+        RxOverflowHotPayload, RxOverflowPayload, TimeErrorPayload,
     };
 
     fn of<T: JsonSchema>() -> serde_json::Value {
@@ -757,6 +765,7 @@ pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
         ("rf_envelope", of::<RfEnvelope>()),
         ("envelope", of::<RadioEnvelope>()),
         ("rx_overflow_payload", of::<RxOverflowPayload>()),
+        ("rx_overflow_hot_payload", of::<RxOverflowHotPayload>()),
         ("time_error_payload", of::<TimeErrorPayload>()),
         ("late_command_payload", of::<LateCommandPayload>()),
         ("command_queue_full_payload", of::<CommandQueueFullPayload>()),

@@ -1306,6 +1306,12 @@ pub fn step_until_quiescent(
             };
         }
     }
+    // The failure ends the Run: reporting the cap instead would record the Kernel's
+    // own STEP_LIVELOCK as the cause and drop the Module's error, which returning at
+    // once — before KD-1 — never did (Phase 4 Review, P1-1).
+    if let Some(error) = first_error {
+        return Err(error);
+    }
     // RS-27 registers STEP_LIVELOCK as a kind the Kernel emits from "its own
     // stepping loop", and RS-28 gives it `abort` at `fatal`. Emitting it is what
     // puts it through RS-33's counters and RS-36's escalation flag; the returned

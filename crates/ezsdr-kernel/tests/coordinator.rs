@@ -3124,3 +3124,113 @@ fn kb_02_the_manifest_records_the_fidelity_settled_in_prepare() {
     let manifest = run.finish();
     assert_eq!(manifest.run.fidelity, settled);
 }
+
+/// A Sink whose `step` always reports progress, so a round can never quiesce.
+struct ForeverSink {
+    probe: Probe,
+    descriptor: ezsdr_kernel::module_api::SinkDescriptor,
+    steps: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ezsdr_kernel::module_api::Sink for ForeverSink {
+    fn descriptor(&self) -> &ezsdr_kernel::module_api::SinkDescriptor {
+        &self.descriptor
+    }
+    fn prepare(
+        &mut self,
+        _f: &ezsdr_kernel::plan::Fragment,
+        _c: ezsdr_kernel::module_api::PrepareContext,
+    ) -> Result<ezsdr_kernel::plan::PrepareReport, ezsdr_kernel::module_api::ModuleError> {
+        Ok(ezsdr_kernel::plan::PrepareReport {
+            fragment: ezsdr_kernel::spec::Ident::parse("rec").expect("id"),
+            effective: BTreeMap::new(),
+            coercions: Vec::new(),
+            warnings: Vec::new(),
+        })
+    }
+    fn arm(&mut self) -> Result<(), ezsdr_kernel::module_api::ModuleError> { Ok(()) }
+    fn start(&mut self) -> Result<(), ezsdr_kernel::module_api::ModuleError> { Ok(()) }
+    fn step(&mut self, _until: TimePoint) -> Result<ezsdr_kernel::module_api::StepOutcome, ezsdr_kernel::module_api::ModuleError> {
+        self.steps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(ezsdr_kernel::module_api::StepOutcome { progressed: true })
+    }
+    fn stop(&mut self, _m: ezsdr_kernel::module_api::StopMode) -> Result<Vec<ezsdr_kernel::manifest::ArtifactRef>, ezsdr_kernel::module_api::ModuleError> {
+        self.probe.record("forever:stop");
+        Ok(Vec::new())
+    }
+    fn cleanup(&mut self) {}
+}
+
+/// KD-1 with the STEP_ROUND_CAP: a Provider that reports `device_lost` in the same
+/// round as a Sink that can never quiesce. The Run must stop on DEVICE_LOST, not on
+/// the Kernel's own STEP_LIVELOCK (Phase 4 review P1-1; found by the SpaceBunny
+/// second opinion, whose probe this is).
+#[test]
+fn kd_01_a_device_lost_is_not_reported_as_a_step_livelock() {
+    let (spec, profile) = output_docs();
+    let probe = Probe::new();
+    let mut assembly = output_assembly(&probe, None, None);
+    let steps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    assembly.sinks.insert(
+        Ident::parse("rec").unwrap(),
+        Box::new(ForeverSink {
+            probe: probe.clone(),
+            descriptor: RecordingSink::new("rec", &probe).descriptor.clone(),
+            steps: steps.clone(),
+        }),
+    );
+    let mut provider = SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
+        .with_wakeups(&[1]);
+    provider.device_lost_at = Some(0);
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(provider));
+
+    let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
+    assert_eq!(
+        manifest.termination.reason,
+        Termination::Stopped { cause: StopCause::Policy { kind: ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::DEVICE_LOST).expect("kind") } },
+        "a device_lost must not be reported as the Kernel's own STEP_LIVELOCK"
+    );
+    assert!(manifest.events.delivered.iter().all(|e| e.kind.as_str() != ezsdr_kernel::event::EventKind::STEP_LIVELOCK));
+}
+
+/// KD-1 steps the instances after a failure, so a second failure in one round is now
+/// found. The first decides the termination; every `DeviceLost` of the round is
+/// still reported as `DEVICE_LOST` (Phase 4 Review D, P1-1).
+#[test]
+fn kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides() {
+    let run = |p_lost: bool| {
+        let (spec, profile) = distinct_resource_docs(&["p", "q"]);
+        let probe = Probe::new();
+        let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+        let provider = |name: &str, lost: bool| {
+            let double = SteppedProvider::new(name, TestProvider::new(name, 2), &probe).with_wakeups(&[1]);
+            if lost { double.device_lost_at(0) } else { double.step_error_at(0) }
+        };
+        assembly.providers.insert(Ident::parse("p").unwrap(), Box::new(provider("p", p_lost)));
+        assembly.providers.insert(Ident::parse("q").unwrap(), Box::new(provider("q", true)));
+        start_spec_run(&spec, &profile, assembly).unwrap().finish()
+    };
+    let lost_sources = |manifest: &ezsdr_kernel::manifest::Manifest| -> Vec<String> {
+        manifest.events.delivered.iter()
+            .filter(|e| e.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST)
+            .map(|e| e.source.path.clone())
+            .collect()
+    };
+
+    // `p` sorts first and returns an ordinary error: the Run fails on it, and `q`'s
+    // lost device, found in the same round, is still delivered.
+    let failed = run(false);
+    assert_eq!(failed.termination.reason, Termination::Failed { stage: Stage::Run });
+    assert!(failure(&failed)["reason"].as_str().unwrap().starts_with("KC-30: p: "), "{}", failure(&failed));
+    assert_eq!(lost_sources(&failed).len(), 1);
+
+    // Both lose their device: the Run stops on DEVICE_LOST and both are reported.
+    let both = run(true);
+    assert_eq!(
+        both.termination.reason,
+        Termination::Stopped { cause: StopCause::Policy { kind: ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::DEVICE_LOST).unwrap() } }
+    );
+    let mut sources = lost_sources(&both);
+    sources.dedup();
+    assert_eq!(sources.len(), 2, "one DEVICE_LOST per device: {sources:?}");
+}

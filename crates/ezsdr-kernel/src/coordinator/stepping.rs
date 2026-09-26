@@ -15,7 +15,10 @@ use crate::time::TimePoint;
 use super::state::{Inst, Shared, Slot, contain, contain_all, lock, try_slot};
 use super::{DRAIN_WAKEUP_CAP, RunHandle};
 
-struct Fault(Mutex<Option<(Inst, ModuleError)>>);
+/// Every step failure of one round, in call order — which is stepping order, since
+/// `step_until_quiescent` steps in its fixed order and a failed instance is not
+/// stepped again that round (KD-1).
+struct Fault(Mutex<Vec<(Inst, ModuleError)>>);
 
 fn guard_step(
     inst: Inst,
@@ -24,10 +27,7 @@ fn guard_step(
 ) -> Result<StepOutcome, ModuleError> {
     let result = contain(call);
     if let Err(error) = &result {
-        let mut first = lock(&fault.0);
-        if first.is_none() {
-            *first = Some((inst, error.clone()));
-        }
+        lock(&fault.0).push((inst, error.clone()));
     }
     result
 }
@@ -120,7 +120,7 @@ pub(super) fn round(shared: &Shared, at: TimePoint, cleaning: bool) {
     let Some(collector) = shared.collector.get() else {
         return;
     };
-    let fault = Fault(Mutex::new(None));
+    let fault = Fault(Mutex::new(Vec::new()));
     let restored = CleanupStep::RestoreBaseline as u8;
     let is_done = |inst: Inst| cleaning && lock(&shared.done).contains(&(restored, inst));
     // A scope, so the guards and the watches borrowing them are released in reverse
@@ -186,13 +186,19 @@ pub(super) fn round(shared: &Shared, at: TimePoint, cleaning: bool) {
             &super::state::kernel_source(),
         )
     };
-    if let Err(_error) = result {
-        match lock(&fault.0).take() {
-            Some((inst, failure)) if failure.kind == ModuleErrorKind::DeviceLost => {
-                super::pipeline::emit_device_lost(shared, inst, &failure);
+    if result.is_err() {
+        // The first failure decides the termination, as before KD-1. Every later
+        // `DeviceLost` of the same round is still reported: KD-1 steps the instances
+        // after a failure, so a second lost device is now found and must not vanish
+        // (Phase 4 Review D, P1-1). A later failure of another kind is not recorded
+        // here; its Run is already ending.
+        let failures = std::mem::take(&mut *lock(&fault.0));
+        for (index, (inst, failure)) in failures.iter().enumerate() {
+            if failure.kind == ModuleErrorKind::DeviceLost {
+                super::pipeline::emit_device_lost(shared, *inst, failure);
+            } else if index == 0 {
+                fail_run(shared, *inst, &failure.message);
             }
-            Some((inst, failure)) => fail_run(shared, inst, &failure.message),
-            None => {}
         }
     }
     drain_and_react(shared);

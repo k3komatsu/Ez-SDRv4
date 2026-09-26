@@ -1484,6 +1484,29 @@ fn ma_30_a_second_failure_does_not_replace_the_first() {
 }
 
 #[test]
+fn ma_30_a_failure_beats_the_step_livelock_cap() {
+    // KD-1 with a peer that never quiesces: the round runs to the cap, and the
+    // failure — not the Kernel's own STEP_LIVELOCK — is what the coordinator acts on,
+    // as it was when the loop returned at the first error.
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut failer = FailsOnce { log: log.clone(), name: "a".to_owned(), inner: StepLogger::new("a", log.clone(), 0) };
+    let mut forever = StepLogger::new("s", log.clone(), usize::MAX);
+    let mut instances = vec![
+        SteppedInstance { id: id("a"), inner: SteppedRef::Provider(&mut failer) },
+        SteppedInstance { id: id("s"), inner: SteppedRef::Sink(&mut forever) },
+    ];
+    let until = TimePoint::new(ClockDomainId::HOST_MONOTONIC, 100);
+    let events = collector();
+    let error = step_until_quiescent(&mut instances, until, &events, &rid("coordinator"))
+        .expect_err("the failure is returned");
+    assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
+    assert!(
+        events.drain().iter().all(|e| e.kind.as_str() != EventKind::STEP_LIVELOCK),
+        "no STEP_LIVELOCK is emitted over a failure"
+    );
+}
+
+#[test]
 fn ma_30_stepping_livelock_cap() {
     let log = Arc::new(Mutex::new(Vec::new()));
     // Two components that keep rescheduling each other at one instant.

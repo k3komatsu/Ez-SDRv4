@@ -505,6 +505,10 @@ fn rm_24_a_delivered_payload_reads_in_either_form() {
     assert_eq!(RxOverflowPayload::from_payload(&serde_json::to_value(payload).unwrap()), Ok(payload));
     let drained = JsonValue::Array(payload.to_hot().iter().map(|byte| json!(byte)).collect());
     assert_eq!(RxOverflowPayload::from_payload(&drained), Ok(payload));
+    // The drained array is the committed hot-form schema's shape (RM-24's reader schema).
+    let hot: ezsdr_radio::payloads::RxOverflowHotPayload = serde_json::from_value(drained.clone()).unwrap();
+    assert_eq!(hot.0, payload.to_hot());
+    assert!(serde_json::from_value::<ezsdr_radio::payloads::RxOverflowHotPayload>(json!([0, 1, 2])).is_err());
     let mut not_a_byte = drained.clone();
     not_a_byte[3] = json!(256);
     assert!(RxOverflowPayload::from_payload(&not_a_byte).unwrap_err().starts_with("RM-24"));

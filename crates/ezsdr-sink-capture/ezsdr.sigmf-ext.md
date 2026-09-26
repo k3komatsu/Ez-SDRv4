@@ -9,6 +9,7 @@ A **file index** is a sample index in the Dataset file, which holds only the sam
 | Field | Required | Type | Description |
 |---|---|---|---|
 | `ezsdr:sample_rate` | true | object | The exact sample rate as a rational, `{ "num": integer, "den": integer }`; `core:sample_rate` is its floating-point value. |
+| `ezsdr:partial` | true | boolean | Whether the capture stopped before it held the samples it was asked for (a stop, an abort, or a contract change); the Dataset then holds what was recorded. |
 | `ezsdr:gaps` | true | array | One object per stream gap, in stream order (below). A gap is not in the Dataset file; the capture segments around it carry the jump in `core:global_index`. |
 | `ezsdr:valid` | true | array | One array per channel, in channel order, of `{ "sample_start": file index, "sample_count": integer }`: the runs over which that channel's samples are valid. A sample outside every run of its channel is present in the file but not valid. |
 

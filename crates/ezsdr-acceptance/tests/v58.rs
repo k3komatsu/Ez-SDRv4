@@ -185,6 +185,7 @@ fn v51_an_overflowed_capture_is_a_sigmf_recording() {
     let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(std::path::Path::new(data).with_extension("sigmf-meta")).unwrap()).unwrap();
     assert_eq!(meta["global"]["core:datatype"], "cf32_le");
     assert_eq!(meta["global"]["core:sample_rate"], json!(1_000_000.0));
+    assert_eq!(meta["global"]["ezsdr:partial"], false);
     assert_eq!(meta["captures"], json!([
         { "core:sample_start": 0, "core:global_index": 0 },
         { "core:sample_start": 1_000, "core:global_index": 51_000 }
@@ -374,6 +375,11 @@ fn v58_13_a_session_stop_of_the_recorder_keeps_a_partial_capture() {
     assert!(!later.partial);
     assert_eq!((later.continuity[0].first.ticks, later.size_bytes), (11_000, 8_000));
     assert_eq!(manifest.action_log.len(), 3);
+    // HD-15: the partial capture is a Recording too, and says it is partial.
+    let data = stopped.uri.strip_prefix("file://").unwrap();
+    let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(std::path::Path::new(data).with_extension("sigmf-meta")).unwrap()).unwrap();
+    assert_eq!(meta["global"]["ezsdr:partial"], true);
+    assert_eq!(meta["captures"], json!([{ "core:sample_start": 0, "core:global_index": 1_000 }]));
 }
 
 #[test]
@@ -565,6 +571,57 @@ fn kd_01_a_faulted_round_does_not_depend_on_fragment_names() {
     let receiver_first = run("z", "a");
     assert_eq!(transmitter_first, receiver_first);
     assert_eq!(receiver_first, (json!(1), json!(2_000)));
+
+    // Both radios lose their device in that round: each is reported, whichever sorts
+    // first (Review D, P1-1: the second used to be found and dropped).
+    for (tx, rx) in [("a", "b"), ("z", "a")] {
+        let temp = rig::TempDir::new("kd-01-both");
+        let (bytes, waveform) = experiments::waveform_of(&ramp(3_000));
+        let spec = experiments::link(tx, rx, 1.0e6, &waveform, 10_000, 20_000);
+        let mut environment = coupling(tx, rx, -6.0, 1_000, None, 0);
+        environment["sim.faults"] = json!([
+            { "at_ns": 1_999_001, "fault": "device_lost", "target": tx },
+            { "at_ns": 1_999_001, "fault": "device_lost", "target": rx }
+        ]);
+        let profile = rig::link_profile("x310-like", tx, rx, false, &temp.0, environment);
+        let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+        let clock = root(&run);
+        let manifest = finish_at(run, clock, T0 + 25_000_000);
+        let mut lost: Vec<_> = manifest.events.delivered.iter()
+            .filter(|event| event.kind.as_str() == EventKind::DEVICE_LOST)
+            .map(|event| event.source.path.clone())
+            .collect();
+        lost.sort();
+        assert_eq!(lost, ["dev_rx", "dev_tx"], "tx {tx}, rx {rx}");
+    }
+}
+
+#[test]
+fn k3_an_off_grid_start_lead_moves_a_burst_to_the_next_transmit_sample() {
+    // A ceiling, pinned so it cannot change unnoticed (Phase 4 Review D, P0-1; UHD spike
+    // K3): the transmit SampleClock starts at arm (MR-9) and the receive one at T0
+    // (MR-11), so a start lead that is not a whole number of samples puts the two grids
+    // out of step. A burst at T0 + n transmit samples is rounded up onto the transmit
+    // grid (SC-23b) and is heard one receive sample late; only the burst record's
+    // `requested_target` shows the move. Owned by Phase 7 (`plan/phase4/00-overview.md` §3).
+    let first_heard = |start_lead_ns: u64| {
+        let temp = rig::TempDir::new("k3");
+        let samples = ramp(3_000);
+        let (bytes, waveform) = experiments::waveform_of(&samples);
+        let spec = experiments::link("a", "b", 1.0e6, &waveform, 10_000, 20_000);
+        let mut environment = coupling("a", "b", 0.0, 1_000, None, 0);
+        environment["ezsdr.time"] = json!({ "class": "simulation", "start_lead_ns": start_lead_ns });
+        let profile = rig::link_profile("ideal", "a", "b", false, &temp.0, environment);
+        let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+        let clock = root(&run);
+        let manifest = finish_at(run, clock, T0 + 25_000_000);
+        let capture = rig::read_capture(artifact(&manifest, "rec"), 1).remove(0);
+        let first = capture.iter().position(|sample| *sample != (0.0, 0.0)).unwrap();
+        let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "ezsdr.radio.mock.dev_tx.bursts").clone()).unwrap();
+        (first, bursts[0].requested_target.is_some())
+    };
+    assert_eq!(first_heard(2_000_000_000), (10_001, false));
+    assert_eq!(first_heard(2_000_000_500), (10_002, true));
 }
 
 #[test]

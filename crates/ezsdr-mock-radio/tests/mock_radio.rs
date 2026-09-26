@@ -1057,7 +1057,10 @@ fn mr_19_backpressure_is_an_overrun() {
     assert_eq!(overflows.len(), 1);
     // MR-37: the back-pressure overrun travels the hot path too, as RM-24's bytes.
     assert!(overflows[0].payload.is_array(), "{}", overflows[0].payload);
-    assert_eq!(RxOverflowPayload::from_payload(&overflows[0].payload).unwrap().cause, RxOverflowCause::Overrun);
+    assert_eq!(
+        RxOverflowPayload::from_payload(&overflows[0].payload).unwrap(),
+        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000, restart_gap_ns: 50_000_000 }
+    );
 
     let mut fractional = Harness::new_with_options(
         "x310-like",
@@ -1394,6 +1397,8 @@ fn mr_37_the_overflow_travels_the_hot_path() {
     let events = harness.events.drain();
     let delivered: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
     assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].severity, ezsdr_kernel::event::Severity::Warning, "RM-10's severity");
+    assert_eq!(delivered[0].source, rid("mock/rx"));
     assert_eq!(
         RxOverflowPayload::from_payload(&delivered[0].payload).unwrap(),
         RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000, restart_gap_ns: 50_000_000 }

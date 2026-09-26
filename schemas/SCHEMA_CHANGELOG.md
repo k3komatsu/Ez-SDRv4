@@ -15,6 +15,16 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — Phase 4 — the hot-path form of `RX_OVERFLOW`
+
+Still version 1: v4.0 has not frozen. Additive. No Kernel schema changed.
+
+- New `radio/rx_overflow_hot_payload`: `RX_OVERFLOW`'s payload as a Manifest holds it when a
+  Provider emitted it on the hot path — the Kernel's drain makes the record's 17 bytes a JSON
+  array (RS-34); RM-24 defines the layout and `RxOverflowPayload::from_payload` reads both
+  forms (Phase 4, VC-1). `radio/rx_overflow_payload` is unchanged and still describes the
+  control-path object.
+
 ## v1 — Phase 3 — the SimulationChannel
 
 Still version 1: v4.0 has not frozen. Additive. No Kernel schema changed.
