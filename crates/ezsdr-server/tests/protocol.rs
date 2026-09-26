@@ -437,6 +437,13 @@ fn ea_14_run_child() {
     let Response::Status { now: after, .. } = ok(server.handle(Request::Status {}, Vec::new())) else { panic!() };
     assert_eq!(after, now, "the Session stood still while its child ran");
 
+    // A Spec that schedules its own stop needs no duration.
+    let mut stopping = receive_spec(1_000);
+    stopping["schedule"] = json!([{ "at": { "clock": "radio", "offset_ticks": 5_000 }, "action": { "kind": "stop" } }]);
+    let Response::Ran { manifest: Some(stopped), .. } = ok(run_child(&mut server, stopping, None, None)) else { panic!() };
+    assert_eq!(stopped.termination.reason, Termination::Completed {});
+
+    // Neither: refused before the Kernel sees it (and before it could run forever).
     let refused = err(run_child(&mut server, receive_spec(1_000), None, None));
     assert_eq!(refused.kind, ErrorKind::Refused);
     assert!(refused.message.starts_with("EA-14: a child Run needs duration_ns or a scheduled Stop"));
@@ -447,11 +454,6 @@ fn ea_14_run_child() {
     let Outcome::Rejected { violations } = entry.outcome else { panic!() };
     assert_eq!(violations[0].check, Namespace::parse("ezsdr.run_child").unwrap());
 
-    // A Spec that schedules its own stop needs no duration.
-    let mut stopping = receive_spec(1_000);
-    stopping["schedule"] = json!([{ "at": { "clock": "radio", "offset_ticks": 5_000 }, "action": { "kind": "stop" } }]);
-    let Response::Ran { manifest: Some(stopped), .. } = ok(run_child(&mut server, stopping, None, None)) else { panic!() };
-    assert_eq!(stopped.termination.reason, Termination::Completed {});
     let (manifest, _) = finish(&mut server);
     assert_eq!(manifest.sections[&Namespace::parse("ezsdr.children").unwrap()].as_array().unwrap().len(), 2);
 }
