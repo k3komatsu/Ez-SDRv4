@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::event::{Action, Event, EventKind, EventSink};
 use crate::manifest::ArtifactRef;
@@ -9,10 +9,10 @@ use crate::module_api::{
 };
 use crate::plan::{Fragment, PrepareReport};
 use crate::policy::Reaction;
-use crate::run::{CleanupMode, RunState, Stage, StopCause, Termination};
+use crate::run::{CleanupMode, CleanupStep, RunState, Stage, StopCause, Termination};
 use crate::time::TimePoint;
 
-use super::state::{contain, contain_all, lock, try_slot, Inst, Shared};
+use super::state::{Inst, Shared, Slot, contain, contain_all, lock, try_slot};
 use super::{DRAIN_WAKEUP_CAP, RunHandle};
 
 struct Fault(Mutex<Option<(Inst, ModuleError)>>);
@@ -32,13 +32,16 @@ fn guard_step(
     result
 }
 
-struct WatchProvider<'a> {
-    inner: &'a mut dyn Provider,
+/// One role's watched instance. The three role traits differ in their signatures but
+/// not in their wrapping, so one generic wrapper serves all three: only `step` is
+/// contained and attributed, and every other method passes straight through.
+struct Watch<'a, T: ?Sized> {
+    inner: &'a mut T,
     inst: Inst,
     fault: &'a Fault,
 }
 
-impl Provider for WatchProvider<'_> {
+impl Provider for Watch<'_, dyn Provider> {
     fn instance(&self) -> &ProviderInstance { self.inner.instance() }
     fn coerce(&self, request: &Requested) -> Result<CoerceReport, ModuleError> { self.inner.coerce(request) }
     fn prepare(&mut self, f: &Fragment, ctx: PrepareContext) -> Result<PrepareReport, ModuleError> { self.inner.prepare(f, ctx) }
@@ -51,13 +54,7 @@ impl Provider for WatchProvider<'_> {
     }
 }
 
-struct WatchExecutor<'a> {
-    inner: &'a mut dyn Executor,
-    inst: Inst,
-    fault: &'a Fault,
-}
-
-impl Executor for WatchExecutor<'_> {
+impl Executor for Watch<'_, dyn Executor> {
     fn descriptor(&self) -> &ExecutorDescriptor { self.inner.descriptor() }
     fn prepare(&mut self, island: &crate::module_api::IslandDecl, ctx: PrepareContext) -> Result<PrepareReport, ModuleError> { self.inner.prepare(island, ctx) }
     fn arm(&mut self) -> Result<(), ModuleError> { self.inner.arm() }
@@ -69,13 +66,7 @@ impl Executor for WatchExecutor<'_> {
     fn cleanup(&mut self) { self.inner.cleanup() }
 }
 
-struct WatchSink<'a> {
-    inner: &'a mut dyn Sink,
-    inst: Inst,
-    fault: &'a Fault,
-}
-
-impl Sink for WatchSink<'_> {
+impl Sink for Watch<'_, dyn Sink> {
     fn descriptor(&self) -> &crate::module_api::SinkDescriptor { self.inner.descriptor() }
     fn prepare(&mut self, f: &Fragment, ctx: PrepareContext) -> Result<PrepareReport, ModuleError> { self.inner.prepare(f, ctx) }
     fn arm(&mut self) -> Result<(), ModuleError> { self.inner.arm() }
@@ -87,115 +78,114 @@ impl Sink for WatchSink<'_> {
     fn cleanup(&mut self) { self.inner.cleanup() }
 }
 
+/// The `(Inst, guard)` pairs of one role that `round` may step: every instance whose
+/// `done` set does not yet hold its `RestoreBaseline` step. A cleanup step holds the
+/// lock while it runs, so a cleaning round skips what it cannot take.
+fn steppable<'a, T: ?Sized + 'a>(
+    slots: impl Iterator<Item = (Inst, &'a Slot<T>)>,
+    cleaning: bool,
+    is_done: &impl Fn(Inst) -> bool,
+) -> Vec<(Inst, MutexGuard<'a, Box<T>>)> {
+    let mut out = Vec::new();
+    for (inst, slot) in slots {
+        if is_done(inst) {
+            continue;
+        }
+        let guard = if cleaning { try_slot(slot) } else { Some(lock(slot)) };
+        if let Some(guard) = guard {
+            // Read twice: a `RestoreBaseline` that took the lock between the two
+            // reads recorded `done`, and stepping the instance again would run it
+            // after its `cleanup()`.
+            if !is_done(inst) {
+                out.push((inst, guard));
+            }
+        }
+    }
+    out
+}
+
+/// Wraps each locked instance so its `step` is contained and attributed. `***guard`
+/// is guard → `MutexGuard` → `Box<T>` → `T`.
+fn watched<'g, 'f: 'g, T: ?Sized + 'f>(
+    guarded: impl Iterator<Item = &'g mut (Inst, MutexGuard<'f, Box<T>>)>,
+    fault: &'g Fault,
+) -> Vec<Watch<'g, T>> {
+    guarded
+        .map(|(inst, guard)| Watch { inner: &mut ***guard, inst: *inst, fault })
+        .collect()
+}
+
 /// Runs the deterministic stepping table, contains Module errors and applies events.
 pub(super) fn round(shared: &Shared, at: TimePoint, cleaning: bool) {
     let Some(collector) = shared.collector.get() else {
         return;
     };
     let fault = Fault(Mutex::new(None));
-    let is_done = |inst: Inst| cleaning && lock(&shared.done).contains(&(5, inst));
-    let mut providers = Vec::new();
-    for (i, slot) in shared.providers.iter().enumerate().filter(|(_, slot)| slot.stepped) {
-        let inst = Inst::Provider(i);
-        if is_done(inst) {
-            continue;
+    let restored = CleanupStep::RestoreBaseline as u8;
+    let is_done = |inst: Inst| cleaning && lock(&shared.done).contains(&(restored, inst));
+    // A scope, so the guards and the watches borrowing them are released in reverse
+    // declaration order before the fault is read: `step_until_quiescent` borrows the
+    // instances, and no Module may still be locked when `drain_and_react` runs.
+    let result = {
+        let mut providers = steppable(
+            shared
+                .providers
+                .iter()
+                .enumerate()
+                .filter(|(_, slot)| slot.stepped)
+                .map(|(i, slot)| (Inst::Provider(i), &slot.object)),
+            cleaning,
+            &is_done,
+        );
+        let mut executors = steppable(
+            shared
+                .executors
+                .iter()
+                .enumerate()
+                .map(|(i, slot)| (Inst::Executor(i), &slot.object)),
+            cleaning,
+            &is_done,
+        );
+        let mut sinks = steppable(
+            shared
+                .sinks
+                .iter()
+                .enumerate()
+                .map(|(i, slot)| (Inst::Sink(i), &slot.object)),
+            cleaning,
+            &is_done,
+        );
+        let mut watched_providers = watched(providers.iter_mut(), &fault);
+        let mut watched_executors = watched(executors.iter_mut(), &fault);
+        let mut watched_sinks = watched(sinks.iter_mut(), &fault);
+        let mut instances = Vec::with_capacity(
+            watched_providers.len() + watched_executors.len() + watched_sinks.len(),
+        );
+        for watch in watched_providers.iter_mut() {
+            instances.push(SteppedInstance {
+                id: shared.first_fragment(watch.inst),
+                inner: SteppedRef::Provider(watch),
+            });
         }
-        let guard = if cleaning { try_slot(&slot.object) } else { Some(lock(&slot.object)) };
-        if let Some(guard) = guard {
-            if !is_done(inst) {
-                providers.push((inst, guard));
-            }
+        for watch in watched_executors.iter_mut() {
+            instances.push(SteppedInstance {
+                id: shared.first_fragment(watch.inst),
+                inner: SteppedRef::Executor(watch),
+            });
         }
-    }
-    let mut executors = Vec::new();
-    for (i, slot) in shared.executors.iter().enumerate() {
-        let inst = Inst::Executor(i);
-        if is_done(inst) {
-            continue;
+        for watch in watched_sinks.iter_mut() {
+            instances.push(SteppedInstance {
+                id: shared.first_fragment(watch.inst),
+                inner: SteppedRef::Sink(watch),
+            });
         }
-        let guard = if cleaning { try_slot(&slot.object) } else { Some(lock(&slot.object)) };
-        if let Some(guard) = guard {
-            if !is_done(inst) {
-                executors.push((inst, guard));
-            }
-        }
-    }
-    let mut sinks = Vec::new();
-    for (i, slot) in shared.sinks.iter().enumerate() {
-        let inst = Inst::Sink(i);
-        if is_done(inst) {
-            continue;
-        }
-        let guard = if cleaning { try_slot(&slot.object) } else { Some(lock(&slot.object)) };
-        if let Some(guard) = guard {
-            if !is_done(inst) {
-                sinks.push((inst, guard));
-            }
-        }
-    }
-    let provider_ids: Vec<_> = providers.iter().map(|(inst, _)| *inst).collect();
-    let executor_ids: Vec<_> = executors.iter().map(|(inst, _)| *inst).collect();
-    let sink_ids: Vec<_> = sinks.iter().map(|(inst, _)| *inst).collect();
-    let mut watched_providers: Vec<_> = providers
-        .iter_mut()
-        .zip(&provider_ids)
-        .map(|((_, guard), inst)| WatchProvider {
-            inner: &mut ***guard,
-            inst: *inst,
-            fault: &fault,
-        })
-        .collect();
-    let mut watched_executors: Vec<_> = executors
-        .iter_mut()
-        .zip(&executor_ids)
-        .map(|((_, guard), inst)| WatchExecutor {
-            inner: &mut ***guard,
-            inst: *inst,
-            fault: &fault,
-        })
-        .collect();
-    let mut watched_sinks: Vec<_> = sinks
-        .iter_mut()
-        .zip(&sink_ids)
-        .map(|((_, guard), inst)| WatchSink {
-            inner: &mut ***guard,
-            inst: *inst,
-            fault: &fault,
-        })
-        .collect();
-    let mut instances =
-        Vec::with_capacity(watched_providers.len() + watched_executors.len() + watched_sinks.len());
-    for (watch, inst) in watched_providers.iter_mut().zip(&provider_ids) {
-        instances.push(SteppedInstance {
-            id: shared.first_fragment(*inst),
-            inner: SteppedRef::Provider(watch),
-        });
-    }
-    for (watch, inst) in watched_executors.iter_mut().zip(&executor_ids) {
-        instances.push(SteppedInstance {
-            id: shared.first_fragment(*inst),
-            inner: SteppedRef::Executor(watch),
-        });
-    }
-    for (watch, inst) in watched_sinks.iter_mut().zip(&sink_ids) {
-        instances.push(SteppedInstance {
-            id: shared.first_fragment(*inst),
-            inner: SteppedRef::Sink(watch),
-        });
-    }
-    let result = crate::module_api::step_until_quiescent(
-        &mut instances,
-        at,
-        &**collector,
-        &super::state::kernel_source(),
-    );
-    drop(instances);
-    drop(watched_sinks);
-    drop(watched_executors);
-    drop(watched_providers);
-    drop(sinks);
-    drop(executors);
-    drop(providers);
+        crate::module_api::step_until_quiescent(
+            &mut instances,
+            at,
+            &**collector,
+            &super::state::kernel_source(),
+        )
+    };
     if let Err(_error) = result {
         match lock(&fault.0).take() {
             Some((inst, failure)) if failure.kind == ModuleErrorKind::DeviceLost => {
@@ -231,36 +221,27 @@ pub(super) fn drain_and_react(shared: &Shared) {
         if reaction == Reaction::MarkArtifact {
             lock(&shared.marks).push((event.kind.clone(), event.time));
         }
-        match reaction {
-            Reaction::Continue | Reaction::MarkArtifact => {}
-            Reaction::Stop => super::ending::request(
-                shared,
-                Termination::Stopped {
-                    cause: StopCause::Policy {
-                        kind: event.kind.clone(),
-                    },
+        let mode = match reaction {
+            Reaction::Continue | Reaction::MarkArtifact => continue,
+            Reaction::Stop => CleanupMode::Orderly,
+            Reaction::Abort => CleanupMode::Abort,
+        };
+        super::ending::request(
+            shared,
+            Termination::Stopped {
+                cause: StopCause::Policy {
+                    kind: event.kind.clone(),
                 },
-                CleanupMode::Orderly,
-                None,
-            ),
-            Reaction::Abort => super::ending::request(
-                shared,
-                Termination::Stopped {
-                    cause: StopCause::Policy {
-                        kind: event.kind.clone(),
-                    },
-                },
-                CleanupMode::Abort,
-                None,
-            ),
-        }
+            },
+            mode,
+            None,
+        );
     }
     lock(&shared.delivered).extend(events);
     if let Some((kind, reaction)) = collector.escalation() {
-        let mode = if reaction == Reaction::Abort {
-            CleanupMode::Abort
-        } else {
-            CleanupMode::Orderly
+        let mode = match reaction {
+            Reaction::Abort => CleanupMode::Abort,
+            Reaction::Continue | Reaction::MarkArtifact | Reaction::Stop => CleanupMode::Orderly,
         };
         super::ending::request(
             shared,
@@ -273,6 +254,24 @@ pub(super) fn drain_and_react(shared: &Shared) {
     }
 }
 
+/// KC-22's livelock event at `at`: source `kernel`, severity `fatal`, payload
+/// `{ "wakeups": … }` through `emit_control` (RS-27, RS-28). The two loops that
+/// count `next_wakeup` results at one instant report it here rather than each
+/// spelling the Event; `step_until_quiescent`'s own `STEP_LIVELOCK` carries
+/// `{ "rounds": … }` (MA-30) and is not this one.
+fn emit_livelock(shared: &Shared, at: TimePoint) {
+    let Some(collector) = shared.collector.get() else {
+        return;
+    };
+    let _ = collector.emit_control(Event {
+        source: super::state::kernel_source(),
+        time: at,
+        severity: crate::event::Severity::Fatal,
+        kind: EventKind::parse(EventKind::STEP_LIVELOCK).expect("Kernel event kind"),
+        payload: serde_json::json!({ "wakeups": crate::module_api::STEP_ROUND_CAP }),
+    });
+}
+
 pub(super) fn drain_cleanup(shared: &Shared) -> bool {
     let mode = lock(&shared.end).as_ref().map(|end| end.mode);
     if mode != Some(CleanupMode::Orderly)
@@ -282,24 +281,24 @@ pub(super) fn drain_cleanup(shared: &Shared) -> bool {
     {
         return false;
     }
-    let mut last = None;
-    let mut count = 0usize;
-    for _ in 0..DRAIN_WAKEUP_CAP {
-        if lock(&shared.end)
+    // Read on both sides of `next_wakeup()`, which is a Module call: a later abort or a
+    // `closing` flag must break the drain even if it arrives while the Authority runs.
+    let interrupted = || {
+        lock(&shared.end)
             .as_ref()
             .is_some_and(|end| end.mode == CleanupMode::Abort)
             || shared.closing.load(std::sync::atomic::Ordering::Acquire)
-        {
+    };
+    let mut last = None;
+    let mut count = 0usize;
+    for _ in 0..DRAIN_WAKEUP_CAP {
+        if interrupted() {
             break;
         }
         let wakeup = contain_all(|| shared.authority.next_wakeup())
             .ok()
             .flatten();
-        if lock(&shared.end)
-            .as_ref()
-            .is_some_and(|end| end.mode == CleanupMode::Abort)
-            || shared.closing.load(std::sync::atomic::Ordering::Acquire)
-        {
+        if interrupted() {
             break;
         }
         let Some(at) = wakeup else {
@@ -312,15 +311,7 @@ pub(super) fn drain_cleanup(shared: &Shared) -> bool {
         };
         last = Some(at);
         if count > crate::module_api::STEP_ROUND_CAP {
-            if let Some(collector) = shared.collector.get() {
-                let _ = collector.emit_control(Event {
-                    source: super::state::kernel_source(),
-                    time: at,
-                    severity: crate::event::Severity::Fatal,
-                    kind: EventKind::parse(EventKind::STEP_LIVELOCK).expect("Kernel event kind"),
-                    payload: serde_json::json!({ "wakeups": crate::module_api::STEP_ROUND_CAP }),
-                });
-            }
+            emit_livelock(shared, at);
             drain_and_react(shared);
             break;
         }
@@ -366,15 +357,7 @@ impl RunHandle {
             self.last_wakeup = Some(at);
             if self.same_count > crate::module_api::STEP_ROUND_CAP {
                 self.same_count = 0;
-                if let Some(collector) = self.shared.collector.get() {
-                    let _ = collector.emit_control(Event {
-                        source: super::state::kernel_source(),
-                        time: at,
-                        severity: crate::event::Severity::Fatal,
-                        kind: EventKind::parse(EventKind::STEP_LIVELOCK).expect("Kernel event kind"),
-                        payload: serde_json::json!({ "wakeups": crate::module_api::STEP_ROUND_CAP }),
-                    });
-                }
+                emit_livelock(&self.shared, at);
                 drain_and_react(&self.shared);
                 if lock(&self.shared.end).is_none()
                     && self.shared.policy.get().is_some_and(|p| {
@@ -444,7 +427,8 @@ impl RunHandle {
         }
     }
 
-    pub(super) fn advance(&mut self, target: TimePoint) -> Result<(), super::RunHandleError> {
+    /// Advances the Run to an instant on the Authority's primary root (KC-29).
+    pub fn advance_to(&mut self, target: TimePoint) -> Result<(), super::RunHandleError> {
         self.check_lease();
         self.ensure_live()?;
         let t = super::state::ceil_convert(&self.shared.ctx.clocks, target, self.shared.primary)
@@ -474,7 +458,8 @@ impl RunHandle {
         self.ended_result()
     }
 
-    pub(super) fn run_until(&mut self, horizon: TimePoint) -> Result<(), super::RunHandleError> {
+    /// Runs until the Run ends or reaches the requested horizon (KC-29).
+    pub fn run_until_end(&mut self, horizon: TimePoint) -> Result<(), super::RunHandleError> {
         self.check_lease();
         self.ensure_live()?;
         let horizon =
@@ -492,15 +477,4 @@ impl RunHandle {
             Ok(())
         }
     }
-}
-
-pub(super) fn advance(run: &mut RunHandle, target: TimePoint) -> Result<(), super::RunHandleError> {
-    run.advance(target)
-}
-
-pub(super) fn run_until(
-    run: &mut RunHandle,
-    horizon: TimePoint,
-) -> Result<(), super::RunHandleError> {
-    run.run_until(horizon)
 }

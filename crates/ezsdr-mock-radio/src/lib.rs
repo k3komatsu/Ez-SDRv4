@@ -395,7 +395,10 @@ impl MockRadio {
                 rx.planned = None;
                 rx.flags = BlockFlags::NONE;
                 rx.lost = None;
-                self.add_rx_stats((stop - next) as u64);
+                // `stop > next` was checked above, so both counts are at least one.
+                let samples = (stop - next) as u64;
+                self.add_stat("rx_blocks", 1);
+                self.add_stat("rx_samples", samples);
             }
         }
         Ok(progressed)
@@ -540,15 +543,6 @@ impl MockRadio {
         }
     }
 
-    fn add_rx_stats(&mut self, samples: u64) {
-        if let Some(serde_json::Value::Object(stats)) = self.instance.sections.get_mut(&section(&self.section_id, "stats")) {
-            let blocks = stats.get("rx_blocks").and_then(serde_json::Value::as_u64).unwrap_or(0);
-            let total = stats.get("rx_samples").and_then(serde_json::Value::as_u64).unwrap_or(0);
-            stats.insert("rx_blocks".to_owned(), serde_json::json!(blocks + u64::from(samples > 0)));
-            stats.insert("rx_samples".to_owned(), serde_json::json!(total + samples));
-        }
-    }
-
     fn schedule_wakeup(&mut self) -> Result<(), ModuleError> {
         let (Some(time), Some(root)) = (self.time.clone(), self.root) else { return Ok(()); };
         let now = time.now(root).map_err(|error| self.reject(format!("MR-14: {error}")))?.ticks;
@@ -676,13 +670,6 @@ impl MockRadio {
         Ok(())
     }
 
-    fn add_tx_stat(&mut self) {
-        if let Some(serde_json::Value::Object(stats)) = self.instance.sections.get_mut(&section(&self.section_id, "stats")) {
-            let blocks = stats.get("tx_blocks").and_then(serde_json::Value::as_u64).unwrap_or(0);
-            stats.insert("tx_blocks".to_owned(), serde_json::json!(blocks + 1));
-        }
-    }
-
     fn action_name(action: &Action) -> &'static str {
         match action {
             Action::TxBurst { .. } => "tx_burst",
@@ -699,16 +686,6 @@ impl MockRadio {
         let late_by_ns = time::to_ns(self.clocks.as_ref().expect("prepared clocks"), late_by).unwrap_or(late_by.ticks);
         let payload = serde_json::to_value(ezsdr_radio::payloads::TimeErrorPayload { cause: ezsdr_radio::payloads::TimeErrorCause::Late, outcome, late_by_ns, target }).expect("time error payload");
         self.emit_event("tx", ezsdr_radio::kinds::TIME_ERROR, Severity::Error, payload, TimePoint::new(tx_domain, now_tx.ticks))
-    }
-
-    fn record_fault_applied(&mut self, index: usize, lost: u64) {
-        #[derive(serde::Serialize)]
-        struct FaultRecord { at: TimePoint, fault: FaultKind, applied: bool, lost: u64 }
-        let fault = &self.faults[index];
-        let record = FaultRecord { at: TimePoint::new(self.root.expect("root"), fault.tick), fault: fault.entry.fault, applied: fault.applied, lost };
-        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section(&self.section_id, "faults")) {
-            rows.push(serde_json::to_value(record).expect("fault row"));
-        }
     }
 
     fn record_update(&mut self, key: &ezsdr_kernel::spec::Key, value: &Value, at: i64) {
@@ -983,7 +960,7 @@ impl MockRadio {
                 progressed = true;
                 break;
             }
-            self.add_tx_stat();
+            self.add_stat("tx_blocks", 1);
             progressed = true;
             if ends {
                 self.open_tx = None;
@@ -1435,7 +1412,7 @@ impl Provider for MockRadio {
             if let Some(index) = self.faults.iter().position(|fault| !fault.resolved && fault.entry.fault == FaultKind::DeviceLost && fault.tick <= u) {
                 self.faults[index].applied = true;
                 self.faults[index].resolved = true;
-                self.record_fault_applied(index, 0);
+                self.record_fault(index, 0);
                 self.device_lost_reported = true;
                 return Err(ModuleError { kind: ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost, message: "MR-20: device lost".to_owned(), detail: serde_json::Value::Null });
             }
@@ -1474,7 +1451,7 @@ impl Provider for MockRadio {
                 } else {
                     self.faults[index].applied = true;
                     self.faults[index].resolved = true;
-                    self.record_fault_applied(index, 0);
+                    self.record_fault(index, 0);
                 }
             } else if kind == 1 {
                 if let Some(held) = self.held.remove(&value) {

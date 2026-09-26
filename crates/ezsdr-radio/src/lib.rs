@@ -695,41 +695,17 @@ pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
         RxOverflowPayload, TimeErrorPayload,
     };
 
-    let mut schemas = BTreeMap::new();
-    schemas.insert(
-        "rf_envelope",
-        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<RfEnvelope>())
-            .expect("a generated schema is JSON"),
-    );
-    schemas.insert(
-        "envelope",
-        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<RadioEnvelope>())
-            .expect("a generated schema is JSON"),
-    );
-    schemas.insert(
-        "rx_overflow_payload",
-        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<RxOverflowPayload>())
-            .expect("a generated schema is JSON"),
-    );
-    schemas.insert(
-        "time_error_payload",
-        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<TimeErrorPayload>())
-            .expect("a generated schema is JSON"),
-    );
-    schemas.insert(
-        "late_command_payload",
-        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<LateCommandPayload>())
-            .expect("a generated schema is JSON"),
-    );
-    schemas.insert(
-        "command_queue_full_payload",
-        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<CommandQueueFullPayload>())
-            .expect("a generated schema is JSON"),
-    );
-    schemas.insert(
-        "command_rejected_payload",
-        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<CommandRejectedPayload>())
-            .expect("a generated schema is JSON"),
-    );
-    schemas
+    fn of<T: JsonSchema>() -> serde_json::Value {
+        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<T>())
+            .expect("a generated schema is JSON")
+    }
+    BTreeMap::from([
+        ("rf_envelope", of::<RfEnvelope>()),
+        ("envelope", of::<RadioEnvelope>()),
+        ("rx_overflow_payload", of::<RxOverflowPayload>()),
+        ("time_error_payload", of::<TimeErrorPayload>()),
+        ("late_command_payload", of::<LateCommandPayload>()),
+        ("command_queue_full_payload", of::<CommandQueueFullPayload>()),
+        ("command_rejected_payload", of::<CommandRejectedPayload>()),
+    ])
 }

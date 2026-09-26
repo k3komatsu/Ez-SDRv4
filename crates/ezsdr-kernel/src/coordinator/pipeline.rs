@@ -1170,6 +1170,21 @@ impl RunHandle {
     }
 }
 
+/// Records one refused Session Action and hands back its log entry, which is the
+/// whole of `submit`'s answer to a refusal: the Action takes a sequence number and
+/// the caller learns why (RS-15, RS-18).
+fn rejected(
+    run: &mut RunHandle,
+    at: TimePoint,
+    action: SessionAction,
+    violations: Vec<Violation>,
+) -> Result<crate::session::LogEntry, super::RunHandleError> {
+    run.log
+        .append(at, action, Outcome::Rejected { violations })
+        .map_err(|error| super::RunHandleError::Malformed { error })?;
+    Ok(run.log.entries().last().expect("entry appended").clone())
+}
+
 pub(super) fn submit(
     run: &mut RunHandle,
     action: SessionAction,
@@ -1205,18 +1220,7 @@ pub(super) fn submit(
 
     let earliest = match session_earliest(&run.shared, &action, now) {
         Ok(earliest) => earliest,
-        Err(violation) => {
-            run.log
-                .append(
-                    now,
-                    action,
-                    Outcome::Rejected {
-                        violations: vec![violation],
-                    },
-                )
-                .map_err(|error| super::RunHandleError::Malformed { error })?;
-            return Ok(run.log.entries().last().expect("entry appended").clone());
-        }
+        Err(violation) => return rejected(run, now, action, vec![violation]),
     };
     let mut compiled = match crate::session::compile(
         &action,
@@ -1227,28 +1231,16 @@ pub(super) fn submit(
         waveform,
     ) {
         Ok(compiled) => compiled,
-        Err(violations) => {
-            run.log
-                .append(now, action, Outcome::Rejected { violations })
-                .map_err(|error| super::RunHandleError::Malformed { error })?;
-            return Ok(run.log.entries().last().expect("entry appended").clone());
-        }
+        Err(violations) => return rejected(run, now, action, violations),
     };
 
     if matches!(compiled.control.as_ref(), Some(ControlOp::RunChild { .. })) {
-        run.log
-            .append(
-                now,
-                action,
-                Outcome::Rejected {
-                    violations: vec![violation(
-                        "ezsdr.run_child",
-                        "RS-25a: child Runs are Phase 6's",
-                    )],
-                },
-            )
-            .map_err(|error| super::RunHandleError::Malformed { error })?;
-        return Ok(run.log.entries().last().expect("entry appended").clone());
+        return rejected(
+            run,
+            now,
+            action,
+            vec![violation("ezsdr.run_child", "RS-25a: child Runs are Phase 6's")],
+        );
     }
 
     let mut end_after_admission = None;
@@ -1272,30 +1264,22 @@ pub(super) fn submit(
         }
         Some(ControlOp::Adopt { token }) => {
             if let Err(error) = run.lease.adopt(&token, "client") {
-                run.log
-                    .append(
-                        now,
-                        action,
-                        Outcome::Rejected {
-                            violations: vec![violation("ezsdr.lease", format!("RS-24: {error}"))],
-                        },
-                    )
-                    .map_err(|error| super::RunHandleError::Malformed { error })?;
-                return Ok(run.log.entries().last().expect("entry appended").clone());
+                return rejected(
+                    run,
+                    now,
+                    action,
+                    vec![violation("ezsdr.lease", format!("RS-24: {error}"))],
+                );
             }
         }
         Some(ControlOp::Renew) => {
             if let Err(error) = run.lease.renew(&*run.shared.ctx.host_clock) {
-                run.log
-                    .append(
-                        now,
-                        action,
-                        Outcome::Rejected {
-                            violations: vec![violation("ezsdr.lease", format!("RS-24: {error}"))],
-                        },
-                    )
-                    .map_err(|error| super::RunHandleError::Malformed { error })?;
-                return Ok(run.log.entries().last().expect("entry appended").clone());
+                return rejected(
+                    run,
+                    now,
+                    action,
+                    vec![violation("ezsdr.lease", format!("RS-24: {error}"))],
+                );
             }
         }
         Some(ControlOp::RunChild { .. }) => unreachable!("refused above"),
@@ -1346,10 +1330,7 @@ pub(super) fn submit(
     }
 
     if !violations.is_empty() {
-        run.log
-            .append(now, log_action, Outcome::Rejected { violations })
-            .map_err(|error| super::RunHandleError::Malformed { error })?;
-        return Ok(run.log.entries().last().expect("entry appended").clone());
+        return rejected(run, now, log_action, violations);
     }
 
     let dispatched = admitted

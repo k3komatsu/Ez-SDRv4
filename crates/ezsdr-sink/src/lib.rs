@@ -28,6 +28,15 @@ fn sink_namespace() -> Namespace {
     Namespace::parse(VOCABULARY).expect("a valid Vocabulary namespace")
 }
 
+/// The one event kind HD-6 declares, which `vocabulary()` and `register()` both carry.
+fn request_rejected() -> EventKindDecl {
+    EventKindDecl {
+        kind: EventKind::parse(REQUEST_REJECTED).expect("a valid Sink event kind"),
+        default: Reaction::Continue,
+        severity: Severity::Warning,
+    }
+}
+
 /// Describes the `sink` Vocabulary 1.0.0 (HD-6).
 pub fn vocabulary() -> VocabularyDescriptor {
     let namespace = sink_namespace();
@@ -42,11 +51,7 @@ pub fn vocabulary() -> VocabularyDescriptor {
             coercion_default: CoercionPolicy::Reject,
             update_class: Some(UpdateClass::BlockBoundary),
         }],
-        event_kinds: vec![EventKindDecl {
-            kind: EventKind::parse(REQUEST_REJECTED).expect("a valid Sink event kind"),
-            default: Reaction::Continue,
-            severity: Severity::Warning,
-        }],
+        event_kinds: vec![request_rejected()],
         verbs: vec![VerbDecl {
             verb: Ident::parse("capture").expect("a valid Session verb"),
             compiles_to: CompileRule::UpdateParameter {
@@ -66,14 +71,7 @@ pub fn register(
 ) -> Result<(), ModuleError> {
     registry.register_vocabulary(vocabulary())?;
     kinds
-        .register(
-            Some(sink_namespace()),
-            EventKindDecl {
-                kind: EventKind::parse(REQUEST_REJECTED).expect("a valid Sink event kind"),
-                default: Reaction::Continue,
-                severity: Severity::Warning,
-            },
-        )
+        .register(Some(sink_namespace()), request_rejected())
         .map_err(|error| ModuleError::rejected(format!("HD-6: {error}")))
 }
 

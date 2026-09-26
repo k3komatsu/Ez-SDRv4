@@ -108,3 +108,22 @@ fn hd_03_layout_round_trip() {
     .unwrap();
     assert!(interleave(&no_host_bytes, CF32_BYTES, 0, 1).is_empty());
 }
+
+/// HD-3, and the check `interleave` keeps after the arithmetic guards were dropped:
+/// SC-10a sizes the buffer against the **producer's** `bytes_per_sample`, which the
+/// block does not store, so a producer that under-declares it yields a block that is
+/// well formed and short for the consumer's contract. That must read as an empty
+/// result, which `sink-capture` turns into HD-10's "no readable host bytes", and never
+/// as a panic.
+#[test]
+fn hd_03_a_buffer_short_for_the_consumers_contract_reads_empty() {
+    let bytes: Arc<[u8]> = vec![0u8; CF32_BYTES].into();
+    let short = SampleBlock::new_host(header(0, 1, 2), HOST_MEMORY, bytes, 0).unwrap();
+    assert!(interleave(&short, CF32_BYTES, 0, 1).is_empty());
+
+    // The same block read at the width it was built for is not short.
+    let honest: Arc<[u8]> = vec![0u8; 2 * CF32_BYTES].into();
+    let whole = SampleBlock::new_host(header(0, 1, 2), HOST_MEMORY, honest, CF32_BYTES as u32)
+        .unwrap();
+    assert_eq!(interleave(&whole, CF32_BYTES, 0, 1).len(), 2 * CF32_BYTES);
+}

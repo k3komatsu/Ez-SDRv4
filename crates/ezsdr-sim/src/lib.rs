@@ -227,21 +227,13 @@ impl SimRng {
 
 /// Generates the committed `channel`, `fault_entry` and `seed` schemas (SE-12, CH-10).
 pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
-    let mut schemas = BTreeMap::new();
-    schemas.insert(
-        "channel",
-        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<channel::ChannelSpec>())
-            .expect("a generated schema is JSON"),
-    );
-    schemas.insert(
-        "fault_entry",
-        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<FaultEntry>())
-            .expect("a generated schema is JSON"),
-    );
-    schemas.insert(
-        "seed",
-        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<u64>())
-            .expect("a generated schema is JSON"),
-    );
-    schemas
+    fn of<T: JsonSchema>() -> serde_json::Value {
+        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<T>())
+            .expect("a generated schema is JSON")
+    }
+    BTreeMap::from([
+        ("channel", of::<channel::ChannelSpec>()),
+        ("fault_entry", of::<FaultEntry>()),
+        ("seed", of::<u64>()),
+    ])
 }

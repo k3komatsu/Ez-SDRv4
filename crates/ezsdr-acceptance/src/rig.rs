@@ -51,24 +51,35 @@ pub fn session_profile(profile: &str, selector: JsonValue, dir: &Path, environme
     profile_document(profile, selector, dir, environment, true)
 }
 
-fn profile_document(profile: &str, selector: JsonValue, dir: &Path, environment: JsonValue, session: bool) -> JsonValue {
-    let link = link_module();
+/// The `ezsdr.time` section every acceptance profile carries, under the caller's own
+/// sections. A 2 s start lead is MR-11's floor for an x310-like profile.
+fn env_section(extra: JsonValue) -> serde_json::Map<String, JsonValue> {
     let mut env = serde_json::Map::new();
     env.insert("ezsdr.time".to_owned(), json!({ "class": "simulation", "start_lead_ns": 2_000_000_000u64 }));
-    if let Some(extra) = environment.as_object() {
+    if let Some(extra) = extra.as_object() {
         env.extend(extra.clone());
     }
+    env
+}
+
+/// The capture Sink's binding, fed from `component`'s receive port when a Session
+/// profile is one and left unfed for a Spec Run, which declares its feed in `outputs[]`.
+fn recorder(dir: &Path, component: Option<&str>) -> JsonValue {
     let mut recorder = json!({
         "module": { "id": "ezsdr.sink.capture", "version": { "major": 1, "minor": 0, "patch": 0 } },
         "selector": { "dir": dir.to_string_lossy() }
     });
-    if session {
+    if let Some(component) = component {
         recorder["feed"] = json!({
-            "port": { "component": "radio", "port": "rx" },
+            "port": { "component": component, "port": "rx" },
             "policy": "drop_oldest",
             "capacity": 64
         });
     }
+    recorder
+}
+
+fn profile_document(profile: &str, selector: JsonValue, dir: &Path, environment: JsonValue, session: bool) -> JsonValue {
     json!({
         "version": 1,
         "bindings": {
@@ -77,7 +88,7 @@ fn profile_document(profile: &str, selector: JsonValue, dir: &Path, environment:
                 "selector": selector,
                 "profile": { "name": profile, "version": { "major": 1, "minor": 1, "patch": 0 } }
             },
-            "rec": recorder,
+            "rec": recorder(dir, session.then_some("radio")),
             "sim": {
                 "module": { "id": "ezsdr.sim-engine", "version": { "major": 1, "minor": 0, "patch": 0 } },
                 "selector": {}
@@ -86,12 +97,12 @@ fn profile_document(profile: &str, selector: JsonValue, dir: &Path, environment:
         "authority": "sim",
         "placements": {
             "links": [{
-                "link": link,
+                "link": link_module(),
                 "from": { "component": "radio", "port": "rx" },
                 "to": { "component": "rec", "port": "in" }
             }]
         },
-        "environment": env
+        "environment": env_section(environment)
     })
 }
 
@@ -109,11 +120,6 @@ pub fn link_session_profile(profile: &str, tx: &str, rx: &str, dir: &Path, envir
 }
 
 fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path, environment: JsonValue, session: bool) -> JsonValue {
-    let mut env = serde_json::Map::new();
-    env.insert("ezsdr.time".to_owned(), json!({ "class": "simulation", "start_lead_ns": 2_000_000_000u64 }));
-    if let Some(extra) = environment.as_object() {
-        env.extend(extra.clone());
-    }
     let radio = |id: String, jitter: bool| json!({
         "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 1, "patch": 0 } },
         "selector": { "id": id, "block_len_jitter": jitter },
@@ -122,14 +128,7 @@ fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path,
     let mut bindings = serde_json::Map::new();
     bindings.insert(tx.to_owned(), radio("dev_tx".to_owned(), false));
     bindings.insert(rx.to_owned(), radio("dev_rx".to_owned(), rx_jitter));
-    let mut recorder = json!({
-        "module": { "id": "ezsdr.sink.capture", "version": { "major": 1, "minor": 0, "patch": 0 } },
-        "selector": { "dir": dir.to_string_lossy() }
-    });
-    if session {
-        recorder["feed"] = json!({ "port": { "component": rx, "port": "rx" }, "policy": "drop_oldest", "capacity": 64 });
-    }
-    bindings.insert("rec".to_owned(), recorder);
+    bindings.insert("rec".to_owned(), recorder(dir, session.then_some(rx)));
     bindings.insert("sim".to_owned(), json!({
         "module": { "id": "ezsdr.sim-engine", "version": { "major": 1, "minor": 0, "patch": 0 } },
         "selector": {}
@@ -141,7 +140,7 @@ fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path,
         "placements": {
             "links": [{ "link": link_module(), "from": { "component": rx, "port": "rx" }, "to": { "component": "rec", "port": "in" } }]
         },
-        "environment": env
+        "environment": env_section(environment)
     })
 }
 

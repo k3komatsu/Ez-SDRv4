@@ -101,16 +101,13 @@ pub fn interleave(
     let mut interleaved = Vec::new();
     for sample in from..to {
         for channel in 0..header.channels as usize {
-            let Some(sample_index) = channel.checked_mul(len).and_then(|base| base.checked_add(sample)) else {
-                return Vec::new();
-            };
-            let Some(offset) = sample_index.checked_mul(bytes_per_sample) else {
-                return Vec::new();
-            };
-            let Some(end) = offset.checked_add(bytes_per_sample) else {
-                return Vec::new();
-            };
-            let Some(sample_bytes) = bytes.get(offset..end) else {
+            // `channels` is a `u16` and `len` a `u32`, so for any bytes-per-sample a
+            // DataContract names the offset fits a 64-bit `usize` and cannot overflow.
+            // A buffer short for *this* contract — SC-10a checks the producer's own
+            // `bytes_per_sample`, which is not stored on the block — fails the slice
+            // read, and the caller turns the empty result into a clean refusal.
+            let offset = (channel * len + sample) * bytes_per_sample;
+            let Some(sample_bytes) = bytes.get(offset..offset + bytes_per_sample) else {
                 return Vec::new();
             };
             interleaved.extend_from_slice(sample_bytes);

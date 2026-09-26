@@ -230,16 +230,6 @@ impl RunHandle {
         self.t0
     }
 
-    /// Advances the Run to an instant on the Authority's primary root (KC-29).
-    pub fn advance_to(&mut self, t: TimePoint) -> Result<(), RunHandleError> {
-        stepping::advance(self, t)
-    }
-
-    /// Runs until the Run ends or reaches the requested horizon (KC-29).
-    pub fn run_until_end(&mut self, horizon: TimePoint) -> Result<(), RunHandleError> {
-        stepping::run_until(self, horizon)
-    }
-
     /// Admits one Session Action before appending it to the action log (KC-28).
     pub fn submit(
         &mut self,

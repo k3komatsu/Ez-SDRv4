@@ -208,6 +208,21 @@ pub(super) fn kernel_source() -> ResourceId {
     ResourceId::parse(super::KERNEL_SOURCE).expect("a valid literal")
 }
 
+/// A cleanup failure of the Manifest step, which is every failure the coordinator
+/// itself records rather than one `run_cleanup` recorded under its own step
+/// (KC-44, KC-30).
+pub(super) fn manifest_failure(
+    fragment: Option<Ident>,
+    reason: impl Into<String>,
+) -> crate::run::CleanupFailure {
+    crate::run::CleanupFailure {
+        step: crate::run::CleanupStep::ReleaseAndWriteManifest,
+        fragment,
+        reason: reason.into(),
+        timed_out: false,
+    }
+}
+
 impl Shared {
     pub(super) fn now(&self) -> TimePoint {
         match contain_all(|| self.time.now(self.primary)) {
@@ -230,12 +245,7 @@ impl Shared {
         let state = lock(&self.machine).state().clone();
         match state {
             RunState::Stopping { .. } | RunState::CleanedUp { .. } => {
-                lock(&self.cleanup_failures).push(CleanupFailure {
-                    step: crate::run::CleanupStep::ReleaseAndWriteManifest,
-                    fragment: None,
-                    reason: reason.to_owned(),
-                    timed_out: false,
-                });
+                lock(&self.cleanup_failures).push(manifest_failure(None, reason));
             }
             _ => {
                 let stage = match state {

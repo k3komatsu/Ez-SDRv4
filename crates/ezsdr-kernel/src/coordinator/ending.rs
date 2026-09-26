@@ -15,7 +15,7 @@ use crate::run::{
 use crate::spec::{Ident, Namespace};
 
 use super::RunHandle;
-use super::state::{Inst, Shared, contain, contain_all, lock, try_slot};
+use super::state::{Inst, Shared, contain, contain_all, lock, manifest_failure, try_slot};
 
 impl RunHandle {
     pub(super) fn settle(&mut self) {
@@ -97,36 +97,26 @@ impl RunHandle {
         for (i, slot) in self.shared.providers.iter().enumerate() {
             let first = self.shared.first_fragment(Inst::Provider(i));
             match try_slot(&slot.object) {
-                None => manifest_failures.push(CleanupFailure {
-                    step: CleanupStep::ReleaseAndWriteManifest,
-                    fragment: Some(first),
-                    reason: "KC-44: the instance is still held by an abandoned cleanup step"
-                        .to_owned(),
-                    timed_out: false,
-                }),
+                None => manifest_failures.push(manifest_failure(
+                    Some(first),
+                    "KC-44: the instance is still held by an abandoned cleanup step",
+                )),
                 Some(guard) => match contain_all(|| {
                     let instance = guard.instance();
                     (instance.fidelity, instance.sections.clone())
                 }) {
-                    Err(()) => manifest_failures.push(CleanupFailure {
-                        step: CleanupStep::ReleaseAndWriteManifest,
-                        fragment: Some(first),
-                        reason: "KC-44: a Module panicked while reading instance()".to_owned(),
-                        timed_out: false,
-                    }),
+                    Err(()) => manifest_failures.push(manifest_failure(
+                        Some(first),
+                        "KC-44: a Module panicked while reading instance()",
+                    )),
                     Ok((fidelity, sections)) => {
                         fidelities.push(fidelity);
                         let Some(owner) = Namespace::parse(slot.module.id.as_str()).ok() else {
                             if !sections.is_empty() {
-                                manifest_failures.push(CleanupFailure {
-                                    step: CleanupStep::ReleaseAndWriteManifest,
-                                    fragment: Some(first),
-                                    reason: format!(
-                                        "KC-44: Module id {} is not a Namespace",
-                                        slot.module.id
-                                    ),
-                                    timed_out: false,
-                                });
+                                manifest_failures.push(manifest_failure(
+                                    Some(first),
+                                    format!("KC-44: Module id {} is not a Namespace", slot.module.id),
+                                ));
                             }
                             continue;
                         };
@@ -285,22 +275,18 @@ impl RunHandle {
         for (owner, fragment, entries) in module_sections {
             for (section, value) in entries {
                 if let Err(error) = manifest.write_section(&owner, section, value) {
-                    manifest.termination.cleanup_failures.push(CleanupFailure {
-                        step: CleanupStep::ReleaseAndWriteManifest,
-                        fragment: Some(fragment.clone()),
-                        reason: format!("KC-44: {error}"),
-                        timed_out: false,
-                    });
+                    manifest
+                        .termination
+                        .cleanup_failures
+                        .push(manifest_failure(Some(fragment.clone()), format!("KC-44: {error}")));
                 }
             }
         }
         if let Err(error) = manifest.seal() {
-            manifest.termination.cleanup_failures.push(CleanupFailure {
-                step: CleanupStep::ReleaseAndWriteManifest,
-                fragment: None,
-                reason: format!("KC-44: the Manifest could not be sealed: {error}"),
-                timed_out: false,
-            });
+            manifest.termination.cleanup_failures.push(manifest_failure(
+                None,
+                format!("KC-44: the Manifest could not be sealed: {error}"),
+            ));
             manifest.hash = None;
         }
         manifest
@@ -355,6 +341,22 @@ pub(super) fn request(
 
 struct Ops {
     shared: Arc<Shared>,
+}
+
+impl Ops {
+    /// The instance that owns `fragment`, when that fragment reached `prepare` and the
+    /// plan routed it to an instance. The three per-fragment steps of RS-6 all ask it,
+    /// and `prepared` is a pure read, so folding the two checks together changes no
+    /// ordering that matters.
+    fn routed(&self, fragment: Option<&Ident>) -> Option<Inst> {
+        let fragment = fragment?;
+        if !lock(&self.shared.prepared).contains(fragment) {
+            return None;
+        }
+        self.shared
+            .routing()
+            .and_then(|routing| routing.fragment_of.get(fragment).copied())
+    }
 }
 
 impl CleanupOps for Ops {
@@ -441,17 +443,7 @@ impl CleanupOps for Ops {
                 Ok(())
             }
             CleanupStep::RestoreBaseline => {
-                let Some(fragment) = fragment else {
-                    return Ok(());
-                };
-                if !lock(&self.shared.prepared).contains(fragment) {
-                    return Ok(());
-                }
-                let Some(instance) = self
-                    .shared
-                    .routing()
-                    .and_then(|routing| routing.fragment_of.get(fragment).copied())
-                else {
+                let Some(instance) = self.routed(fragment) else {
                     return Ok(());
                 };
                 let mut done = lock(&self.shared.done);
@@ -494,22 +486,12 @@ impl CleanupOps for Ops {
                 }
             }
             CleanupStep::StopTx => {
-                let Some(fragment) = fragment else {
-                    return Ok(());
-                };
-                let Some(instance) = self
-                    .shared
-                    .routing()
-                    .and_then(|routing| routing.fragment_of.get(fragment).copied())
-                else {
+                let Some(instance) = self.routed(fragment) else {
                     return Ok(());
                 };
                 let Inst::Provider(i) = instance else {
                     return Ok(());
                 };
-                if !lock(&self.shared.prepared).contains(fragment) {
-                    return Ok(());
-                }
                 let mut done = lock(&self.shared.done);
                 if done.contains(&(CleanupStep::RestoreBaseline as u8, instance))
                     || done.contains(&(step as u8, instance))
@@ -533,19 +515,10 @@ impl CleanupOps for Ops {
                 if drain_owner && self.shared.closing.load(Ordering::Acquire) {
                     return Ok(());
                 }
-                let Some(fragment) = fragment else {
+                let Some(instance) = self.routed(fragment) else {
                     return Ok(());
                 };
-                let Some(instance) = self
-                    .shared
-                    .routing()
-                    .and_then(|routing| routing.fragment_of.get(fragment).copied())
-                else {
-                    return Ok(());
-                };
-                if !matches!(instance, Inst::Executor(_) | Inst::Sink(_))
-                    || !lock(&self.shared.prepared).contains(fragment)
-                {
+                if !matches!(instance, Inst::Executor(_) | Inst::Sink(_)) {
                     return Ok(());
                 }
                 let mode = current_stop_mode(&self.shared);
