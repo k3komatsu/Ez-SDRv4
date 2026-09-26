@@ -8,7 +8,7 @@
 | | |
 |---|---|
 | remote | `origin` = `git@github.com:k3komatsu/Ez-SDRv4.git`（https://github.com/k3komatsu/Ez-SDRv4，default branch `main`）．2026-09-26 に v4 を新リポジトリへ分離した．v3 は https://github.com/k3komatsu/Ez-SDR（`master` のみ，v3 の tags もそちら）に残る |
-| `main` | v4（この worktree）．Phase 0–3 の受理完了．Phase 2 Gate X を owner が2026-09-25に受理し，spec 06–10 を `design/` へ移動，Vision issue 15件を適用（Step X 完了）．Step 16/Gate X/Step X は `bf3b1bf` で commit・push 済み．2026-09-25 の動的レビューで見つかったテスト欠落2件を追加テストで塞いだ（[implementation-notes.md](plan/phase2/implementation-notes.md) 末尾）．Opus `PASS_WITH_RISK` の残余リスクは §4 と `plan/phase2/00-overview.md` §11 に記録．**Phase 3 は 2026-09-26 に Gate P 受理・実装・Review C・Gate X 受理・Step X 完了**（spec 11 を `design/` へ移動，Vision issue 8件を適用）．**Phase 4 は同日に計画・実装・Review D/E・Gate X 受理（すべて推奨どおり）・Step X 完了**．§4 参照．|
+| `main` | v4（この worktree）．Phase 0–3 の受理完了．Phase 2 Gate X を owner が2026-09-25に受理し，spec 06–10 を `design/` へ移動，Vision issue 15件を適用（Step X 完了）．Step 16/Gate X/Step X は `bf3b1bf` で commit・push 済み．2026-09-25 の動的レビューで見つかったテスト欠落2件を追加テストで塞いだ（[implementation-notes.md](plan/phase2/implementation-notes.md) 末尾）．Opus `PASS_WITH_RISK` の残余リスクは §4 と `plan/phase2/00-overview.md` §11 に記録．**Phase 3 は 2026-09-26 に Gate P 受理・実装・Review C・Gate X 受理・Step X 完了**（spec 11 を `design/` へ移動，Vision issue 8件を適用）．**Phase 4 は同日に計画・実装・Review D/E・Gate X 受理（すべて推奨どおり）・Step X 完了**．**Phase 5 は同日に計画・実装・Review F/G まで完了し，Gate X 待ち**（commit のみ，push していない）．§4 参照．|
 | `master` | v3（D + C++ UHD bridge + Python client）．tip `4a474e9` = tag `v3.0.28`．この clone ではローカルのみ（upstream なし）．GitHub 上の置き場は `k3komatsu/Ez-SDR` |
 | `spike/uhd` | **使い捨ての UHD spike**（2026-09-26，push 済み）．`main` から分岐し，Kernel 1 行の変更（K1）と `spike/uhd/` crate を載せる．**`main` へ merge しない**．成果は発見の記録だけで，`main` の [plan/spikes/2026-09-26-uhd.md](plan/spikes/2026-09-26-uhd.md) に移した．実機検証は保留．§4「UHD spike」参照 |
 | `gh-pages` | GitHub Pages 用の orphan branch．2026-09-26 に空のコミット `24229a9` で作成．`main`・`master` と履歴を共有しない．push 済み，Pages の公開設定は未実施 |
@@ -89,9 +89,11 @@ Phase 3 の workspace tests（2026-09-26，Review C と Gate X の修正込み�
 
 Phase 4（2026-09-26，Review D/E の修正込み）：1.85.0 / stable とも 626 passed（`ezsdr-kernel` 452，`ezsdr-radio` 12，`ezsdr-sink-capture` 24，`ezsdr-mock-radio` 66，`ezsdr-acceptance` 41，ほかは Phase 3 と同じ）．Kernel の public item は増えていない．
 
+Phase 5（2026-09-26，Review F/G の修正込み）：1.85.0 / stable とも 644 passed（`ezsdr-kernel` 456，新 crate `ezsdr-exec-native` 8，`ezsdr-acceptance` 47，ほかは Phase 4 と同じ）．Kernel の public item は増えていない（116 NEW / 292）．Kernel schema の変更は `experiment_spec` の `inputs` と，`ComponentKind` の `reactor` の説明文だけ．workspace member は 11 個になった．
+
 `kernel_surface` は `116 NEW / 292 public items`（Phase 3 で Kernel の public item は 1 つだけ増えた：KB-1 の `module_api::InputStore`）．mutation は Appendix C 83/83 + Review C の fix-check 15/15 + Gate X の fix-check 4/4 killed．`cargo +stable clippy --workspace --all-targets -- -D warnings` clean，`check_links.py` 全リンク解決．Toolchain：Rust `1.85.0`（MSRV）と `stable 1.98.1` の両方で 2026-09-26 に 604 passed．
 
-## 4. Phase の状態 — Phase 1・2・3・4 完了（Gate X受理）
+## 4. Phase の状態 — Phase 1・2・3・4 完了（Gate X受理），Phase 5 は Gate X 待ち
 
 ### Phase 1 — specs 受理・Kernel 実装済み
 
@@ -198,6 +200,30 @@ Vision §67 の Phase 3（SimulationChannel + deterministic Runs）．計画は 
 | Gate X の判断（§11） | **K3**（TX clock が arm 起点のため，`start_lead_ns` が sample 周期の倍数でないと burst が 1 sample 遅れる．Simulation でも再現し，ceiling test `k3_an_off_grid_start_lead_moves_a_burst_to_the_next_transmit_sample` で固定）は **Phase 7** で TX model と一緒に直す．drain 順（ring が control より先）と drop した hot body の mark は **ceiling**．P2-3 は **Phase 10**．Q1–Q8 と spec 13 は受理 |
 | Step X | Vision issue 2 件を適用（§28/§51 の Normative 行，§29 の hot path の bytes の持ち主），索引に改訂履歴の行．[vision-issues.md](plan/phase4/vision-issues.md) |
 
+### Phase 5 — 実装・Review F/G 完了，Gate X 待ち
+
+2026-09-26，owner の委任（「Phase4と同様に計画を立てて実装まで．実装後に Opus 5.5 でレビューし，修正して再レビュー．修正が小規模で低リスクなら再レビュー不要．これをループ」）で，Phase 4 と同じく計画と実装を 1 セッションで行った．Gate P は置いていない．正本は [plan/phase5/00-overview.md](plan/phase5/00-overview.md)（範囲・決定 R1–R11・§11 の owner 判断待ち）．新しい Module の spec 14 は [plan/phase5/14-native-executor.md](plan/phase5/14-native-executor.md)（Step X で `design/14-native-executor.md` へ移す），Kernel 修正の spec 15 は [plan/phase5/15-amendments.md](plan/phase5/15-amendments.md)，記録は [implementation-notes.md](plan/phase5/implementation-notes.md)．
+
+| 項目 | 内容 |
+|---|---|
+| 進め方 | まず試作（Executor + responder + 2 台の MockRadio を実 coordinator で走らせる）で Kernel の穴を 3 つ実測し，その証拠から計画した |
+| 範囲 | §58 の「minimal reactive test」そのもの：A が PING，B の Reactor が受信 sample から PING の先頭 sample を検出し，その時刻 + turnaround に timed PONG を返す．radio が lead を実機と同じ envelope で判定する |
+| Kernel | KE-1（Spec の `inputs`：schedule に載らない入力を宣言でき，KC-9 が検証して store に入れる．これがないと Reactor は自分の波形を送れなかった），KE-2（Module の TxBurst の波形が Run の入力か admission で確かめる，RS-44a），KE-3（drain 中の `ezsdr.dispatch` / `ezsdr.run_state` 拒否は Module の失敗ではない．MA-14a），KE-4（RS-17 の reactive coerce は「しない」で確定，MA-30 の Action latency は Phase 10 へ），KE-5（MA-24・UC-1・UC-2：Action を適用しない Executor は拒否する）．public item の増減なし |
+| 新 Module | `ezsdr.exec.native` 1.0.0（`crates/ezsdr-exec-native`）：compiled-in component を `impl` の kind・id・hash で読み込み（MA-19b を carry），component id 順に step，component が積んだ Action を submit．Action は適用しない（NX-7），Simulation のみ |
+| Reactor | `crates/ezsdr-acceptance/src/responder.rs`（application logic．Kernel と Executor の ABI だけを使う，§58 #10） |
+| carriers | `tests/reactive.rs`：§58 #9（PONG が 15 092 sample に届く），#11（turnaround 不足は drop / send_asap で TIME_ERROR．境界は 14 000 sample ちょうど），#3（seed で再現，radio の名前に依存しない），#12（block 長に依存しない，block 境界をまたぐ PING も 1 回だけ応答），KE-3（drain 中の判断は abort にならない） |
+| 発見 | block-length jitter 下では block が最大 4 000 sample になり，5 ms の turnaround は late になりうる（デバイスの配送遅延を lead に含めるから．実機と同じ挙動で欠陥ではない）．jitter を使う carrier は 7 ms |
+| レビュー | Review F（Opus）CHANGES_REQUIRED：P0 2（仕様文の矛盾：KC-9 の旧文，NX-7 と MA-24/UC-2）・P1 4・P2 11 → 全件修正．Review G（Opus，修正の再レビュー）CHANGES_REQUIRED：P0 0・P1 4・P2 9 → 全件修正．残りは文面と 2 テストだけなので，owner の規則どおり再レビューせず終了．記録は [reviews/](plan/phase5/reviews) |
+| 検証 | 1.85.0 / stable とも 644 passed，Clippy clean，mutation 29/29 killed，link 全解決 |
+| ビルド衛生 | 共有 target dir（`Ez-SDRv4-review`）では，mtime を保ったコピーや他コピーの後のビルドが古い（改変済みの）成果物を再利用する．AGENTS.md §7 に対策を書いた（`rsync -a --no-times --exclude .cargo`，ビルド前に touch，ビルドを交互に走らせない） |
+
+**Gate X で owner の判断が要るもの**（[00-overview.md](plan/phase5/00-overview.md) §11）：
+
+1. **Event edge**（Detector などから Reactor へイベントを渡す経路）：推奨は Phase 10．Kernel の `Endpoint::EventIn` / `EventOut` は handle を持たない未完成の variant で，形を v4.0 凍結までに決める必要がある．
+2. **Vision §22**「実機に間に合わない Reactor は simulation で失敗する」：推奨は文言の修正（Vision issue 2）．Simulation は component 自身の処理時間を数えず，デバイスに渡った時点からの lead だけを判定する．budget を仮想時間で課す案は Phase 10 へ．
+3. **Action で変更できない component parameter**（Vision §27）：`ParamDecl.update_class` が必須のため表現できない．推奨は凍結前に optional にすること（Phase 10 の最初の parameter 適用 Executor と一緒に）．
+4. R1–R11，spec 14・15 の受理．
+
 ### UHD spike（2026-09-26，branch `spike/uhd`）
 
 Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実機 USRP にどこまで通用するか」を確かめる使い捨て実装を作った．実機は X310+UBX と USRP2（owner の IBFD+SEFDM 実験系）．**Linux PC で実行する**（開発した Mac には USRP を繋がない）．
@@ -235,7 +261,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-1. **Phase 5 の計画**：Mini Reactive Radio（PING → Reactor → timed PONG，§58 #9）．Phase 4 の KD-1 で，Module error の round と STEP_LIVELOCK の優先順位は決まっている（MA-30）．
+1. **Phase 5 の Gate X**：§4「Phase 5」の 4 項目を owner が判断する．受理後の Step X は spec 14 を `design/14-native-executor.md` へ移し，`design/05` の `plan/phase5/14-native-executor.md` 参照を書き換え，Vision issue 3 件（§9 の `inputs`，§22 の文言，§19 の Normative 行）を適用する．その後が Phase 6（Python Easy API）．
 2. **Phase 7 へ持ち越すもの**（Phase 4 Gate X）：K3 の修正（TX model と一緒に），spike の K2・K5・K6・K8・K11，MA-8 の Kernel 側強制，UHD の `ERROR_CODE_ALIGNMENT` は部分 channel を返さない（VERIFIED）ので SC-31a の per-channel `ALIGNMENT` に producer がないかもしれないこと．詳細は [plan/phase4/00-overview.md](plan/phase4/00-overview.md) §3．
 3. **Phase 2 の Gate X named risks**：Kernel 経由 Session `Stop(sink/rec)` test は Phase 4 で追加（`v58_13_a_session_stop_…`）．`MA-8` の強制は Phase 7 へ（Phase 4 §3）．
 4. Phase 2 のその他の test ceilings：sc16 capture と contract change 時の `partial`，KC-29 の直接 assert，到達不能な N8/N10 分岐，KA-12 marker check/acquire race の決定的 test seam，Provider→Sink datapath の nonzero drop→Manifest 経路．詳細は [implementation-notes.md](plan/phase2/implementation-notes.md) と exit tables を参照．

@@ -12,7 +12,8 @@
 //!
 //! What it does not do, being a Mini radio's detector: it reads channel 0 only and ignores
 //! per-channel validity (SC-14), and it counts its rearm in samples delivered, so a gap
-//! (`GAP_BEFORE`, SC-13) shortens the quiet it waits for by the samples the gap lost.
+//! (`GAP_BEFORE`, SC-13) lengthens, in time, the quiet it waits for by the samples the gap
+//! lost, and a PING wholly inside a gap is not heard.
 
 use std::sync::Arc;
 

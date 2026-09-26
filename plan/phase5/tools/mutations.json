@@ -268,5 +268,25 @@
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "ke_02_a_module_burst_must_name_a_run_input"
+ },
+ {
+  "id": "E28",
+  "name": "KC-9 an input's continuity is not checked",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "let refusal = if waveform.partial || !waveform.marks.is_empty() || !waveform.continuity.is_empty() {",
+  "new": "let refusal = if waveform.partial || !waveform.marks.is_empty() {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "ke_01_a_declared_input_is_verified_as_a_scheduled_one_is"
+ },
+ {
+  "id": "E29",
+  "name": "KC-9 the id rule compares listed inputs only",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "} else if named.iter().any(|(_, other)| other.id == waveform.id && other.hash != waveform.hash) {",
+  "new": "} else if what.starts_with(\"input\") && named.iter().filter(|(w, _)| w.starts_with(\"input\")).any(|(_, other)| other.id == waveform.id && other.hash != waveform.hash) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "ke_01_a_declared_input_is_verified_as_a_scheduled_one_is"
  }
 ]

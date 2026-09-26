@@ -65,7 +65,9 @@ fn v58_10_experiments_name_no_mock_type() {
         ("responder.rs", include_str!("../src/responder.rs"), &["use ezsdr_kernel", "use ezsdr_exec_native", "use serde_json", "use std"][..]),
     ];
     for (file, source, allowed) in sources {
-        for forbidden in ["mock", "Mock", "x310", "ideal", "sim-engine", "sim_engine", "ezsdr_mock_radio", "pub use"] {
+        // `crate::` and `super::` would reach the rig, which builds the simulated radios
+        // (Review G, P2-4).
+        for forbidden in ["mock", "Mock", "x310", "ideal", "sim-engine", "sim_engine", "ezsdr_mock_radio", "pub use", "crate::", "super::"] {
             assert!(!source.contains(forbidden), "{file}: found forbidden name {forbidden}");
         }
         // Every crate path, not only a `use` line: an inline `ezsdr_radio::…` is a

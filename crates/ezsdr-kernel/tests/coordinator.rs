@@ -3320,7 +3320,16 @@ fn ke_01_a_declared_input_is_verified_as_a_scheduled_one_is() {
     });
     let mark = plan_failure(marked, Some(bytes.clone()));
     assert!(mark.starts_with("KC-9: input 0: an input carries no partial flag"), "{mark}");
-    // Two inputs under one name: refused, whichever of them is listed first.
+    let mut mapped = valid.clone();
+    let point = serde_json::json!({ "domain": { "node": 0, "local": 1 }, "ticks": 0 });
+    mapped.continuity.push(serde_json::from_value(serde_json::json!({
+        "channel_gaps": [], "channels": 1, "domain": { "node": 0, "local": 1 },
+        "end": { "domain": { "node": 0, "local": 1 }, "ticks": 10 }, "first": point,
+        "gaps": [], "valid": [[{ "len": 10, "start": point }]]
+    })).expect("a one-block ContinuityMap"));
+    let map = plan_failure(mapped, Some(bytes.clone()));
+    assert!(map.starts_with("KC-9: input 0: an input carries no partial flag"), "{map}");
+    // Two listed inputs under one name and two hashes: refused.
     let other_bytes = vec![1u8; 80];
     let mut namesake = valid.clone();
     namesake.hash = ContentHash::of_bytes(&other_bytes);
@@ -3337,6 +3346,25 @@ fn ke_01_a_declared_input_is_verified_as_a_scheduled_one_is() {
     };
     assert_eq!(twice.termination.reason, Termination::Failed { stage: Stage::Plan });
     let reason = failure(&twice)["reason"].as_str().unwrap();
+    assert!(reason.starts_with("KC-9: input 0: another input is also called waveform"), "{reason}");
+    // A listed input and a scheduled waveform of one name and two hashes: the same refusal
+    // (Review G, G-3: the rule compares every input, listed or scheduled).
+    let listed_and_scheduled = {
+        let mut spec = spec_one();
+        spec["inputs"] = serde_json::json!([valid]);
+        let target = serde_json::to_value(ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap()).unwrap();
+        spec["schedule"] = serde_json::json!([{
+            "at": { "clock": "radio", "offset_ticks": 0 },
+            "action": { "kind": "tx_burst", "target": target, "waveform": namesake,
+                "repeat": false, "late_policy": "send_asap_and_flag", "metadata": {} }
+        }]);
+        let mut assembly = with_provider(rig(Pacing::FreeRunning).assembly, "radio", "radio");
+        assembly.inputs.insert(valid.hash.clone(), bytes.clone());
+        assembly.inputs.insert(namesake.hash.clone(), vec![1u8; 80]);
+        start_spec_run(&spec, &profile_one(), assembly).unwrap().finish()
+    };
+    assert_eq!(listed_and_scheduled.termination.reason, Termination::Failed { stage: Stage::Plan });
+    let reason = failure(&listed_and_scheduled)["reason"].as_str().unwrap();
     assert!(reason.starts_with("KC-9: input 0: another input is also called waveform"), "{reason}");
 
     // Listed and scheduled: one input, recorded once, listed first.

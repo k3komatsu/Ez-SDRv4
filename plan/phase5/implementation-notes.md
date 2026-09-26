@@ -63,7 +63,7 @@ Per crate: `ezsdr-kernel` 456, `ezsdr-radio` 12, `ezsdr-sim` 17, `ezsdr-sim-engi
 
 ## Mutations (GX-4)
 
-`python3 plan/phase5/tools/mutate.py plan/phase5/tools/mutations.json <scratch>` — Phase 4's tool, pointed at Phase 5's list (20 mutations, 27 after Review F), run in a scratch copy with the shared review target directory.
+`python3 plan/phase5/tools/mutate.py plan/phase5/tools/mutations.json <scratch>` — Phase 4's tool, pointed at Phase 5's list (20 mutations; 27 after Review F, 29 after Review G), run in a scratch copy with the shared review target directory.
 
 | Mutation | Result |
 |---|---|
@@ -94,8 +94,10 @@ Per crate: `ezsdr-kernel` 456, `ezsdr-radio` 12, `ezsdr-sim` 17, `ezsdr-sim-engi
 | E25 | `mutation: NX-8 cleanup keeps the queues: killed` (after Review F) |
 | E26 | `mutation: the responder rounds a turnaround down: killed` (after Review F) |
 | E27 | `mutation: KE-2 the stored length compared one way only: killed` (after Review F) |
+| E28 | `mutation: KC-9 an input's continuity is not checked: killed` (after Review G) |
+| E29 | `mutation: KC-9 the id rule compares listed inputs only: killed` (after Review G) |
 
-After Review F the whole list (27) was run again with the timestamp fix of `mutate.py`: all killed.
+After Review F the whole list (27) was run again with the timestamp fix of `mutate.py`, and after Review G the whole list (29): all killed.
 
 ## Review F
 
@@ -124,3 +126,25 @@ Opus, adversarial and dynamic (AGENTS.md §8), brief [`prompts/review-f.txt`](pr
 The reviewer's judgement of R4 — §22's "a Reactor that is too slow for the hardware fails in simulation" is not met as written — is now an owner decision in `00-overview.md` §11, with Vision issue 2 as the recommendation.
 
 After the fixes: stable 644 passed, 1.85.0 644 passed, Clippy clean, `kernel_surface` 116 NEW / 292, `check_links.py` every link. The mutation list has 27 entries (E21–E27 added for the findings).
+
+## Review G
+
+The re-review of Review F's fixes (Opus), brief [`prompts/review-g.txt`](prompts/review-g.txt), report [`reviews/review-g.md`](reviews/review-g.md). Verdict **CHANGES_REQUIRED**: no P0, 4 P1, 9 P2 — two text defects the fixes introduced (G-1, G-2), two refusals the fixes left untested (G-3), and the build-hygiene fix incomplete (G-4). The code was correct (644 on both toolchains, 27/27 mutations). Every finding was taken.
+
+| Finding | What was done | Where |
+|---|---|---|
+| G-1 UC-2's qualifier freed Providers and Sinks too; UC-1 and UC-3…UC-6 still bound the native Executor | UC-2's marker names every Provider and Sink and the Executors that apply Actions; UC-1's last clause carries the exception | `design/05`, `design/06` UC-1, UC-2; spec 15 KE-5 |
+| G-2 KC-9's spliced sentence inverted "anything else is refused" | the new conditions are part of the list of requirements, citing KE-1 | `design/06` KC-9; spec 15 KE-1 |
+| G-3 the `continuity` refusal and the id rule across listed and scheduled inputs untested | `ke_01_a_declared_input_is_verified_as_a_scheduled_one_is` adds an input with a `ContinuityMap`, and a listed input and a scheduled waveform of one id and two hashes; mutations E28, E29 | `coordinator.rs`; Appendix A |
+| G-4 a later build in the shared directory is still reused | AGENTS.md §7: refresh the copy's timestamps before each build session, `--exclude .cargo`, never interleave | `AGENTS.md`; `prompts/review-g.txt` (a note) |
+| P2-1, P2-2 | the table row's separator restored; §66 cited | `00-overview.md` |
+| P2-3 | "lengthens, in time", and a PING wholly inside a gap is not heard | `responder.rs` |
+| P2-4 | `v58_10` forbids `crate::` and `super::` in both files | `tests/v58.rs` |
+| P2-5 | MA-24's first sentence says "applies it … or, if it applies no Action, refuses it"; its marker names `nx_07_…` | `design/05` MA-24; spec 15 KE-5 |
+| P2-6 | spec 15's `Amends` row lists UC-1, UC-2 in both specs and both schema descriptions | spec 15 |
+| P2-7 | `--exclude .cargo` | `AGENTS.md` §7 |
+| P2-8 | KC-9's ceiling: a produced artifact is listed as an input without `partial`, `marks` and `continuity`, its hash linking it to the Manifest that produced it | `design/06` KC-9; spec 15 KE-1 |
+| P2-9 | a component parameter that no Action may change is an owner decision before the freeze | `00-overview.md` §11; spec 15 KE-5 |
+
+**No further review.** The owner's instruction was to re-review unless the fixes are small and low-risk. These are: text in five rules, two test cases, one test-of-the-test line and documentation, with the whole list of mutations run again. Stable 644 passed, 1.85.0 644 passed, Clippy clean, `check_links.py` every link, and the 29 mutations all killed (the table above).
+
