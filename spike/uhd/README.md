@@ -20,6 +20,13 @@ cargo run --bin uhd-spike -- rx fake
 libuhd is found through `UHD_LIB_DIR`, else `pkg-config --variable=libdir uhd`,
 else `/opt/homebrew/lib`. Tested against UHD 4.10.0 (Homebrew, arm64).
 
+**Linux**: Rust ≥ 1.85 (`rustup update`), UHD 4.x with its headers and `.pc` file
+(Ubuntu: `sudo apt install libuhd-dev uhd-host pkg-config`, or the Ettus PPA for a
+newer UHD; a source build under `/usr/local` needs `PKG_CONFIG_PATH` or
+`UHD_LIB_DIR=/usr/local/lib`). Check with `pkg-config --modversion uhd`. For 10 GbE,
+raise the socket buffers UHD asks for at start-up (`sudo sysctl -w
+net.core.rmem_max=33554432 net.core.wmem_max=33554432`) and set MTU 9000 on the NIC.
+
 ## At the bench
 
 Order matters: each step checks what the next relies on. Every Run writes
