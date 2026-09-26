@@ -1,0 +1,202 @@
+[
+ {
+  "id": "D01",
+  "name": "KD-1 return at the first error",
+  "file": "crates/ezsdr-kernel/src/module_api.rs",
+  "old": "                Err(error) => {\n                    *failed = true;\n                    first_error.get_or_insert(error);\n                }",
+  "new": "                Err(error) => return Err(error),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_30_a_step_error_finishes_the_round"
+ },
+ {
+  "id": "D02",
+  "name": "KD-1 return at the first error, end to end",
+  "file": "crates/ezsdr-kernel/src/module_api.rs",
+  "old": "                Err(error) => {\n                    *failed = true;\n                    first_error.get_or_insert(error);\n                }",
+  "new": "                Err(error) => return Err(error),",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "v58",
+  "filter": "kd_01_a_faulted_round_does_not_depend_on_fragment_names"
+ },
+ {
+  "id": "D03",
+  "name": "KD-1 a failed instance is stepped again",
+  "file": "crates/ezsdr-kernel/src/module_api.rs",
+  "old": "            if *failed {\n                continue;\n            }\n",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_30_a_step_error_finishes_the_round"
+ },
+ {
+  "id": "D04",
+  "name": "KD-1 the last error wins",
+  "file": "crates/ezsdr-kernel/src/module_api.rs",
+  "old": "                    first_error.get_or_insert(error);",
+  "new": "                    first_error = Some(error);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_30_a_second_failure_does_not_replace_the_first"
+ },
+ {
+  "id": "D05",
+  "name": "RM-24 cause bytes swapped",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "                RxOverflowCause::Overrun => 0,\n                RxOverflowCause::Sequence => 1,\n            };",
+  "new": "                RxOverflowCause::Overrun => 1,\n                RxOverflowCause::Sequence => 0,\n            };",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_24_the_hot_form_round_trips"
+ },
+ {
+  "id": "D06",
+  "name": "RM-24 no length check",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "            let bytes: &[u8; RX_OVERFLOW_HOT_BYTES] = bytes.try_into().map_err(|_| {",
+  "new": "            let bytes: &[u8; RX_OVERFLOW_HOT_BYTES] = bytes.get(..RX_OVERFLOW_HOT_BYTES).unwrap_or(bytes).try_into().map_err(|_| {",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_24_the_hot_form_round_trips"
+ },
+ {
+  "id": "D07",
+  "name": "RM-24 the byte array refused",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "                serde_json::Value::Array(values) => {",
+  "new": "                serde_json::Value::Array(_) if false => unreachable!(),\n                serde_json::Value::Array(_values) if true => Err(\"refused\".to_owned()),\n                serde_json::Value::Array(values) => {",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_24_a_delivered_payload_reads_in_either_form"
+ },
+ {
+  "id": "D08",
+  "name": "RM-24 the byte array refused, end to end",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "                serde_json::Value::Array(values) => {",
+  "new": "                serde_json::Value::Array(_) if false => unreachable!(),\n                serde_json::Value::Array(_values) if true => Err(\"refused\".to_owned()),\n                serde_json::Value::Array(values) => {",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "v58",
+  "filter": "v58_04_mock_events_reach_counters_policy_and_manifest"
+ },
+ {
+  "id": "D09",
+  "name": "MR-37 the injected overflow on the control path",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        self.emit_overflow(payload, TimePoint::new(domain, kf))?;",
+  "new": "        self.emit_event(\"rx\", ezsdr_radio::kinds::RX_OVERFLOW, Severity::Warning, serde_json::to_value(payload).unwrap(), TimePoint::new(domain, kf))?;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_37_the_overflow_travels_the_hot_path"
+ },
+ {
+  "id": "D10",
+  "name": "MR-37 the back-pressure overrun on the control path",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        self.emit_overflow(payload, TimePoint::new(domain, at))",
+  "new": "        self.emit_event(\"rx\", ezsdr_radio::kinds::RX_OVERFLOW, Severity::Warning, serde_json::to_value(payload).unwrap(), TimePoint::new(domain, at))",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_backpressure_is_an_overrun"
+ },
+ {
+  "id": "D11",
+  "name": "MR-1 radio requirement left at 1.1.0",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "[(\"radio\", Version::new(1, 2, 0)), (\"sim\", Version::new(1, 1, 0))]",
+  "new": "[(\"radio\", Version::new(1, 1, 0)), (\"sim\", Version::new(1, 1, 0))]",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_01_descriptor_registers"
+ },
+ {
+  "id": "D12",
+  "name": "HD-15 global index written as the file index",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "    let segment = |tick: i64| serde_json::json!({ \"core:sample_start\": file_index(tick), \"core:global_index\": tick });",
+  "new": "    let segment = |tick: i64| serde_json::json!({ \"core:sample_start\": file_index(tick), \"core:global_index\": file_index(tick) });",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_15_a_capture_is_a_sigmf_recording"
+ },
+ {
+  "id": "D13",
+  "name": "HD-15 global index written as the file index, end to end",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "    let segment = |tick: i64| serde_json::json!({ \"core:sample_start\": file_index(tick), \"core:global_index\": tick });",
+  "new": "    let segment = |tick: i64| serde_json::json!({ \"core:sample_start\": file_index(tick), \"core:global_index\": file_index(tick) });",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "v58",
+  "filter": "v51_an_overflowed_capture_is_a_sigmf_recording"
+ },
+ {
+  "id": "D14",
+  "name": "HD-15 the file index ignores earlier gaps",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "        tick - first - skipped as i64",
+  "new": "        let _ = skipped;\n        tick - first",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_15_a_capture_is_a_sigmf_recording"
+ },
+ {
+  "id": "D15",
+  "name": "HD-15 metadata for a capture with two maps",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "        if let ([map], Some(contract)) = (capture.builders.as_slice(), capture.contract.as_ref()) {",
+  "new": "        if let (Some(map), Some(contract)) = (capture.builders.first(), capture.contract.as_ref()) {",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_15_a_capture_across_a_clock_change_has_no_metadata"
+ },
+ {
+  "id": "D16",
+  "name": "HD-15 sc16 as cf32_le",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "        SC16_CONTRACT => \"ci16_le\",",
+  "new": "        SC16_CONTRACT => \"cf32_le\",",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_15_the_datatype_follows_the_contract"
+ },
+ {
+  "id": "D17",
+  "name": "HD-15 no channel annotations",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "    let mut channel_gaps: Vec<_> = map.channel_gaps.iter().map(",
+  "new": "    let mut channel_gaps: Vec<_> = map.channel_gaps.iter().take(0).map(",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_15_channel_validity_and_its_causes"
+ },
+ {
+  "id": "D18",
+  "name": "HD-15 the Dataset keeps the raw extension",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "        let file_name = format!(\"{safe_run}_{id}.sigmf-data\");",
+  "new": "        let file_name = format!(\"{safe_run}_{id}.cf32\");",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_15_a_capture_is_a_sigmf_recording"
+ },
+ {
+  "id": "D19",
+  "name": "HD-15 the Dataset keeps the raw extension, end to end",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "        let file_name = format!(\"{safe_run}_{id}.sigmf-data\");",
+  "new": "        let file_name = format!(\"{safe_run}_{id}.cf32\");",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "v58",
+  "filter": "v51_an_overflowed_capture_is_a_sigmf_recording"
+ },
+ {
+  "id": "D20",
+  "name": "HD-7 version left at 1.0.0",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "        impl_hash: Some(ContentHash::of_bytes(b\"ezsdr.sink.capture 1.1.0\")),",
+  "new": "        impl_hash: Some(ContentHash::of_bytes(b\"ezsdr.sink.capture 1.0.0\")),",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_07_descriptor"
+ }
+]
