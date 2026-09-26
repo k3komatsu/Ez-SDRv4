@@ -3687,6 +3687,8 @@ fn kf_02_wait_for_returns_the_first_match_and_withdraws_its_horizon() {
     let steps = probe.lines();
     assert!(steps.iter().any(|line| line == "a:step:9000"));
     assert!(!steps.iter().any(|line| line.ends_with(":step:8000")), "{steps:?}");
+    // With both delivered, a wait from index 0 answers the first of them.
+    assert_eq!(run.wait_for(&[custom()], 0, TimePoint::new(root, 20_000)).unwrap(), Some(index));
     let _ = run.finish();
 }
 
