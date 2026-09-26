@@ -113,8 +113,8 @@
   "id": "D12",
   "name": "HD-15 global index written as the file index",
   "file": "crates/ezsdr-sink-capture/src/lib.rs",
-  "old": "    let segment = |tick: i64| serde_json::json!({ \"core:sample_start\": file_index(tick), \"core:global_index\": tick });",
-  "new": "    let segment = |tick: i64| serde_json::json!({ \"core:sample_start\": file_index(tick), \"core:global_index\": file_index(tick) });",
+  "old": "        Ok(serde_json::json!({ \"core:sample_start\": file_index(tick)?, \"core:global_index\": tick }))",
+  "new": "        Ok(serde_json::json!({ \"core:sample_start\": file_index(tick)?, \"core:global_index\": file_index(tick)? }))",
   "crate": "ezsdr-sink-capture",
   "test_bin": "sink_capture",
   "filter": "hd_15_a_capture_is_a_sigmf_recording"
@@ -123,8 +123,8 @@
   "id": "D13",
   "name": "HD-15 global index written as the file index, end to end",
   "file": "crates/ezsdr-sink-capture/src/lib.rs",
-  "old": "    let segment = |tick: i64| serde_json::json!({ \"core:sample_start\": file_index(tick), \"core:global_index\": tick });",
-  "new": "    let segment = |tick: i64| serde_json::json!({ \"core:sample_start\": file_index(tick), \"core:global_index\": file_index(tick) });",
+  "old": "        Ok(serde_json::json!({ \"core:sample_start\": file_index(tick)?, \"core:global_index\": tick }))",
+  "new": "        Ok(serde_json::json!({ \"core:sample_start\": file_index(tick)?, \"core:global_index\": file_index(tick)? }))",
   "crate": "ezsdr-acceptance",
   "test_bin": "v58",
   "filter": "v51_an_overflowed_capture_is_a_sigmf_recording"
@@ -133,8 +133,8 @@
   "id": "D14",
   "name": "HD-15 the file index ignores earlier gaps",
   "file": "crates/ezsdr-sink-capture/src/lib.rs",
-  "old": "        tick - first - skipped as i64",
-  "new": "        let _ = skipped;\n        tick - first",
+  "old": "        u64::try_from(tick - first - skipped)",
+  "new": "        u64::try_from(tick - first + 0 * skipped)",
   "crate": "ezsdr-sink-capture",
   "test_bin": "sink_capture",
   "filter": "hd_15_a_capture_is_a_sigmf_recording"
@@ -143,8 +143,8 @@
   "id": "D15",
   "name": "HD-15 metadata for a capture with two maps",
   "file": "crates/ezsdr-sink-capture/src/lib.rs",
-  "old": "        if let ([map], Some(contract)) = (capture.builders.as_slice(), capture.contract.as_ref()) {",
-  "new": "        if let (Some(map), Some(contract)) = (capture.builders.first(), capture.contract.as_ref()) {",
+  "old": "        if let ([map], Some(contract)) = (done.continuity.as_slice(), capture.contract.as_ref()) {",
+  "new": "        if let (Some(map), Some(contract)) = (done.continuity.first(), capture.contract.as_ref()) {",
   "crate": "ezsdr-sink-capture",
   "test_bin": "sink_capture",
   "filter": "hd_15_a_capture_across_a_clock_change_has_no_metadata"
@@ -163,8 +163,8 @@
   "id": "D17",
   "name": "HD-15 no channel annotations",
   "file": "crates/ezsdr-sink-capture/src/lib.rs",
-  "old": "    let mut channel_gaps: Vec<_> = map.channel_gaps.iter().map(",
-  "new": "    let mut channel_gaps: Vec<_> = map.channel_gaps.iter().take(0).map(",
+  "old": "        .map(|g| Ok((file_index(g.start.ticks)?, g)))",
+  "new": "        .take(0)\n        .map(|g| Ok((file_index(g.start.ticks)?, g)))",
   "crate": "ezsdr-sink-capture",
   "test_bin": "sink_capture",
   "filter": "hd_15_channel_validity_and_its_causes"
@@ -191,12 +191,152 @@
  },
  {
   "id": "D20",
-  "name": "HD-7 version left at 1.0.0",
+  "name": "HD-7 implementation hash left at 1.0.0",
   "file": "crates/ezsdr-sink-capture/src/lib.rs",
   "old": "        impl_hash: Some(ContentHash::of_bytes(b\"ezsdr.sink.capture 1.1.0\")),",
   "new": "        impl_hash: Some(ContentHash::of_bytes(b\"ezsdr.sink.capture 1.0.0\")),",
   "crate": "ezsdr-sink-capture",
   "test_bin": "sink_capture",
   "filter": "hd_07_descriptor"
+ },
+ {
+  "id": "D21",
+  "name": "KD-1 the cap's STEP_LIVELOCK beats a failure",
+  "file": "crates/ezsdr-kernel/src/module_api.rs",
+  "old": "    if let Some(error) = first_error {\n        return Err(error);\n    }\n",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_30_a_failure_beats_the_step_livelock_cap"
+ },
+ {
+  "id": "D22",
+  "name": "KD-1 the cap's STEP_LIVELOCK beats a failure, in the coordinator",
+  "file": "crates/ezsdr-kernel/src/module_api.rs",
+  "old": "    if let Some(error) = first_error {\n        return Err(error);\n    }\n",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kd_01_a_device_lost_is_not_reported_as_a_step_livelock"
+ },
+ {
+  "id": "D23",
+  "name": "KD-1 only the first failure of a round is reported",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "        for (index, (inst, failure)) in failures.iter().enumerate() {",
+  "new": "        for (index, (inst, failure)) in failures.iter().enumerate().take(1) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides"
+ },
+ {
+  "id": "D24",
+  "name": "KD-1 only the first failure of a round is reported, end to end",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "        for (index, (inst, failure)) in failures.iter().enumerate() {",
+  "new": "        for (index, (inst, failure)) in failures.iter().enumerate().take(1) {",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "v58",
+  "filter": "kd_01_a_faulted_round_does_not_depend_on_fragment_names"
+ },
+ {
+  "id": "D25",
+  "name": "KD-1 the last failure decides",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "        lock(&fault.0).push((inst, error.clone()));",
+  "new": "        lock(&fault.0).insert(0, (inst, error.clone()));",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides"
+ },
+ {
+  "id": "D26",
+  "name": "HD-15 annotations not sorted",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "    channel_gaps.sort_by_key(|(index, g)| (*index, g.channel));\n",
+  "new": "",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_15_annotations_are_sorted_by_index_then_channel"
+ },
+ {
+  "id": "D27",
+  "name": "HD-15 an empty run gets a capture segment",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "    if i128::from(map.end.ticks) > run_start {",
+  "new": "    if i128::from(map.end.ticks) >= run_start {",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_15_gap_fields_carry_the_continuity_causes"
+ },
+ {
+  "id": "D28",
+  "name": "HD-15 the Sink reports every capture as complete",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "            let meta = sigmf_meta(map, rate, contract, partial).map_err(ModuleError::rejected)?;",
+  "new": "            let meta = sigmf_meta(map, rate, contract, false).map_err(ModuleError::rejected)?;",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_15_a_partial_capture_has_metadata"
+ },
+ {
+  "id": "D29",
+  "name": "HD-15 a gap's lost written as its len",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "                \"lost\": gap.lost,",
+  "new": "                \"lost\": gap.len,",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_15_gap_fields_carry_the_continuity_causes"
+ },
+ {
+  "id": "D30",
+  "name": "HD-15 a gap's link_dropped written as 0",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "                \"link_dropped\": gap.link_dropped,",
+  "new": "                \"link_dropped\": 0,",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_15_gap_fields_carry_the_continuity_causes"
+ },
+ {
+  "id": "D31",
+  "name": "HD-15 a negative file index clamped instead of refused",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "        u64::try_from(tick - first - skipped)",
+  "new": "        u64::try_from((tick - first - skipped).max(0))",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_15_a_map_it_cannot_describe_is_refused"
+ },
+ {
+  "id": "D32",
+  "name": "HD-15 the staged metadata never renamed into place",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "                .and_then(|()| fs::rename(&staged, &meta_path))",
+  "new": "                .and_then(|()| Ok(()))",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_15_a_partial_capture_has_metadata"
+ },
+ {
+  "id": "D33",
+  "name": "MR-37 the overflow emitted at info severity",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        events.emit(handle, at, Severity::Warning, &payload.to_hot())",
+  "new": "        events.emit(handle, at, Severity::Info, &payload.to_hot())",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_37_the_overflow_travels_the_hot_path"
+ },
+ {
+  "id": "D34",
+  "name": "MR-19 the back-pressure overrun reports no loss",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            lost: lost.max(0) as u64,",
+  "new": "            lost: 0,",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_backpressure_is_an_overrun"
  }
 ]

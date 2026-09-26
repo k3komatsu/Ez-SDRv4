@@ -41,7 +41,7 @@ Phase 2 pulled fault injection forward (KA-22), and Phase 3 added a channel. Wha
 
 | # | Hole | Evidence | Amendment |
 |---|---|---|---|
-| 1 | **No Module has ever emitted on the hot path.** Every radio event goes through `emit_control` (RM-11: "RS-32's hot path is the Phase 7 Provider's concern"), so §58 #4's "RuntimeEvents flow through the same path used by hardware" holds only from the collector onward. The UHD spike's hardware Provider emitted from its receive thread with `emit_control` too, because no hot-path layout exists (spike finding K10, [`plan/spikes/2026-09-26-uhd.md`](../spikes/2026-09-26-uhd.md)) — an allocating, locking call on the sample path, which Vision §29 forbids | `grep '\.emit(' crates` finds only Kernel tests; `crates/ezsdr-mock-radio/src/lib.rs` `emit_event` calls `emit_control` | VC-1 (RM-24), VC-2 (MR-37) |
+| 1 | **No Module has ever emitted on the hot path.** Every radio event goes through `emit_control` (RM-11: "RS-32's hot path is the Phase 7 Provider's concern"), so §58 #4's "RuntimeEvents flow through the same path used by hardware" holds only from the collector onward. The UHD spike's hardware Provider emitted from its receive thread with `emit_control` too, because no hot-path layout exists (spike finding K10, [`plan/spikes/2026-09-26-uhd.md`](../spikes/2026-09-26-uhd.md)) — an allocating, locking call on the sample path, which Vision §29 forbids | `crates/ezsdr-mock-radio/src/lib.rs`: `emit_event`, the one path every Mock event took, calls `emit_control`; `grep -rn '\.emit(' crates` finds hot-path emission only in Kernel tests | VC-1 (RM-24), VC-2 (MR-37) |
 | 2 | **A Module error cuts a stepping round short**, so which blocks a receiver published before a fault depends on fragment names. Phase 3 measured it (receiver `rx_blocks` 0 or 1 by name) and accepted a ceiling on CH-9 and MR-30 that names "Phase 4's failure work" as the owner | `crates/ezsdr-kernel/src/module_api.rs` `step_until_quiescent` returns at the first `?`; `plan/phase3/implementation-notes.md`, "P2-1, measured after B1"; `design/11-simulation-channel.md` CH-9 | KD-1 |
 | 3 | **No SigMF writer.** SC-32 is the only Phase 1 rule whose marker still says "tested in Phase 4"; spec 10 H3 deferred SigMF to "Phase 4's SigMF Sink"; Vision §51 calls SigMF interoperability "a standard feature" | `plan/phase1/exit-review/02-stream-contract.md` SC-32 row; `design/10-host-data-path.md` H3, §9 | VC-3 (HD-15) |
 | 4 | **No Kernel-routed test of a Session `Stop(sink/rec)`.** Named at Phase 2 Gate X; a probe showed it works, but no test pins it | `plan/phase2/implementation-notes.md`, "Post-acceptance dynamic review" | a carrier only (§8) |
@@ -60,15 +60,16 @@ Phase 2 pulled fault injection forward (KA-22), and Phase 3 added a channel. Wha
 
 | Item | Why not now | Owner |
 |---|---|---|
-| New fault kinds. Vision §17 lists twelve; three exist (SE-3). The others need a mechanism that does not exist yet: TX underflow needs a transmit source that can starve (a TX port); alignment failure needs to know what the UHD Provider does with `ERROR_CODE_ALIGNMENT` (UHD returns no samples rather than a partial channel set — INFERRED, to be settled in Phase 7), so defining the Mock's version now would fix a contract with no hardware behind it; clock loss needs a reference-lock sensor; deadline miss needs a Processor; peripheral timeout and queue overflow need Peripherals and TUN/TAP; a plugin crash is already contained (KC-30) and tested with doubles. Phase 2's "more fault kinds (Phase 4)" note on §58 #5 was a note, not a requirement: #5 is satisfied | each kind with its mechanism: TX underflow Phase 10; alignment and clock loss Phase 7; deadline miss Phase 10; peripheral timeout and TUN/TAP Phase 9 |
-| The producer of SC-31a's `ALIGNMENT` flag | The same reason as alignment injection; the Kernel side (`ContinuityBuilder`, `ChannelGap`) is tested, and HD-15 maps channel gaps whatever produces them | Phase 7 |
+| New fault kinds. Vision §17 lists twelve; three exist (SE-3). The others need a mechanism that does not exist yet: TX underflow needs a transmit source that can starve (a TX port); alignment failure needs to know what the UHD Provider does with `ERROR_CODE_ALIGNMENT` — UHD returns no samples, or only those already aligned, and discards packets whose timestamps disagree, never a partial channel set (VERIFIED by Review D in UHD master `0d7ed3b`: `rx_streamer_zero_copy.hpp`, `rx_streamer_impl.hpp`, `get_aligned_buffs.hpp`) — so defining the Mock's version now would fix a contract with no hardware behind it; clock loss needs a reference-lock sensor; deadline miss needs a Processor; peripheral timeout and queue overflow need Peripherals and TUN/TAP; a plugin crash is already contained (KC-30) and tested with doubles. Phase 2's "more fault kinds (Phase 4)" note on §58 #5 was a note, not a requirement: #5 is satisfied | each kind with its mechanism: TX underflow Phase 10; alignment and clock loss Phase 7; deadline miss Phase 10; peripheral timeout and TUN/TAP Phase 9 |
+| The producer of SC-31a's `ALIGNMENT` flag | The same reason as alignment injection; the Kernel side (`ContinuityBuilder`, `ChannelGap`) is tested, and HD-15 maps channel gaps whatever produces them. Since UHD never delivers a partial channel set, SC-31a's per-channel `ALIGNMENT` may have no UHD producer at all — a Phase 7 input | Phase 7 |
 | A CalibrationArtifact overriding path delays (Vision §26; Phase 3 §3) | No experiment or test consumes one; it would add artifact typing with no reader | the first phase with a calibration experiment |
 | An artifact store beyond `mem:` and `file://` (Phase 2 Y12) | Its consumers are Session replay and child Runs, both Phase 6 | Phase 6 |
 | Per-device drifting roots and clock drift (Phase 3 Z2) | A ClockRelation with uncertainty and resampling, for no Phase 4 test | the first phase that models drift |
 | Kernel decoding of hot-path payloads | Phase 1 withdrew it (D51, RS-32a): "the Kernel does not interpret a Vocabulary's hot-path byte layout". Reversing that is the owner's call, not Phase 4's (§4 Q1) | — |
-| Hot-path emission of `TIME_ERROR`, `LATE_COMMAND` and the other radio kinds | They are emitted while handling an Action or a start, which is control-path work; `TIME_ERROR` carries a `TimePoint`, which has no fixed-size form | none |
+| Hot-path emission of `TIME_ERROR`, `LATE_COMMAND` and the other radio kinds | They are emitted while handling an Action or a start, which is control-path work | none |
 | MA-8 enforcement by the Kernel (a worker thread with a join timeout for `prepare` and `arm`) — Phase 2's named Gate X risk | In Simulation every Module call is in-process and instant; the first Module whose calls can block on I/O is the UHD Provider, and the spike's K9 (an abandoned cleanup step loses the Provider's Manifest sections) belongs with it | Phase 7 |
-| The spike's K2, K3, K5, K6, K8, K11 | Each needs a Provider that is not stepped, which only hardware has; Simulation cannot reach them | Phase 7 |
+| The spike's K2, K5, K6, K8, K11 | Each needs a Provider that is not stepped, which only hardware has; Simulation does not reach them (INFERRED: Session admission and the Provider's receipt happen at one simulated instant) | Phase 7 |
+| The spike's K3: the transmit SampleClock starts at arm (MR-9), the receive one at T0 (MR-11), so the grids are out of step whenever T0 − arm is not a whole number of samples | **Reachable in Simulation** (Review D, P0-1): a `start_lead_ns` of 2 000 000 500 moves a burst one receive sample late with only `requested_target` to show it, pinned as a ceiling by `k3_an_off_grid_start_lead_moves_a_burst_to_the_next_transmit_sample`. Not fixed here because the fix depends on Phase 7's transmit model: rounding T0 onto the transmit grids at `plan` (Review D's proposal) assumes a transmit grid exists, while UHD starts a burst at any master-clock tick; and a Session's `cold` change starts a new transmit clock off the receive grid, which KC-15 cannot reach. **Owner decision before the Kernel freezes**: Phase 7, or a Kernel amendment now | Phase 7 (owner may pull forward) |
 | P2-3 (a cold `radio.tx.channels` change writes `config` before `stop_tx`) | Its ceiling names the first consumer of transmit block headers, a TX port | Phase 10 |
 | SigMF for a capture spanning a SampleClock change, and `core:frequency` / `core:datetime` | SigMF has one `core:sample_rate` and one `core:num_channels` per Recording; the capture Sink knows neither the RF frequency nor a UTC relation | a later Sink version when asked (HD-15's ceiling) |
 
@@ -80,11 +81,11 @@ Each row is open to reversal at Gate X; a reversal is recorded in §11.
 |---|---|---|---|---|
 | Q1 | Who decodes a hot-path payload | The Vocabulary that owns the kind (RM-24's `RxOverflowPayload::from_payload`); the Kernel keeps draining the bytes as a JSON array of integers, as it does now | The Kernel decoding a declared layout (D51 withdrew `HotLayout` for exactly this: the Kernel would read Vocabulary content, OV-21); a decoder callback registered with the collector (a Kernel API for one kind, and not language-neutral) | A Manifest reader decodes `RX_OVERFLOW` through the radio Vocabulary; Phase 6's Python client does the same |
 | Q2 | Which events MockRadio moves to the hot path | `RX_OVERFLOW` only, both causes and both producers (MR-19's back-pressure overrun and MR-21/MR-22's injected faults) | Every radio kind (the others are control-path work, §3); none, leaving it to Phase 7 as RM-11 said (then the first layout would be defined with hardware in the loop, where D51 wanted MockRadio's to become the contract, and §58 #4 would stay true only from the collector onward) | none |
-| Q3 | `radio` version | 1.2.0: RM-24 is additive — the control-path object stays valid, and `from_payload` reads both forms | 2.0.0 (nothing is removed); 1.1.0 unchanged (a Manifest would name one version for two payload forms of the Mock) | none |
+| Q3 | `radio` version | 1.2.0: RM-24 is additive for Providers — the control-path object stays valid — and a reader has `from_payload` for both forms and a committed schema for the array (`rx_overflow_hot_payload`, added after Review D); a reader that validated `RX_OVERFLOW` payloads against `rx_overflow_payload` alone must now accept either | 2.0.0 (nothing is removed); 1.1.0 unchanged (a Manifest would name one version for two payload forms of the Mock) | none |
 | Q4 | The error round (KD-1) | Finish the round: skip the failed instance, step the rest to quiescence, return the first error in stepping order | Keep Phase 3's ceiling (every later determinism claim would carry the exception); step the failed instance again (it has reported that it cannot run); stop after the current pass only (an instance that needs a second pass to consume what a peer published would still depend on order) | none |
 | Q5 | SigMF form | The capture Sink writes every capture as a SigMF Recording: `.sigmf-data` always, `.sigmf-meta` when the capture has one ContinuityMap | A separate SigMF Sink Module (it would duplicate the capture logic, and H6's reason for a `sink` Vocabulary was a *different* sink needing the verb, not a second copy of this one); a `format` selector key (a SigMF dataset is the same interleaved bytes, so raw loses nothing but the extension, and §51 calls SigMF standard); a post-Run export function (a user would have to call it; the Sink already has the continuity and the rate) | HD-15's ceiling (§3) |
 | Q6 | Where the SigMF mapping lives | `ezsdr_sink_capture::sigmf_meta`, a public pure function of one `ContinuityMap`, the rate and the contract, tested without a Run | In the `sink` Vocabulary crate (one user today; moving it is cheap when a second Sink needs it) | Move to `ezsdr-sink` when a second Sink writes SigMF |
-| Q7 | The meta file and the Manifest | The Manifest's `ArtifactRef` stays one per capture, naming the data file; the meta file is not hashed in the Manifest, because it is a function of that `ArtifactRef`'s continuity and the SampleClock's recorded rate | A second `ArtifactRef` per capture (two records for one Recording, and `marks` would apply to only one); embedding the meta in the Manifest (large data by value, §50) | none |
+| Q7 | The meta file and the Manifest | The Manifest's `ArtifactRef` stays one per capture, naming the data file; the meta file is not hashed in the Manifest, because it is a function of that `ArtifactRef`'s continuity and partial flag and the SampleClock's recorded rate, and SigMF's naming rule finds it beside the data | A second `ArtifactRef` per capture (two records for one Recording, and `marks` would apply to only one); embedding the meta in the Manifest (large data by value, §50) | none |
 | Q8 | How Phase 4 is delivered | Planned and implemented in one session under the owner's delegation, commit by commit on `main`, then one dynamic adversarial review (Opus, AGENTS.md §8) that runs the tests and the mutations | Phase 3's verified patches and five planning reviews before Gate P (sized for a phase with two Kernel amendments and a new spec; Phase 4 has one ten-line Kernel change) | The owner can still reverse any row at Gate X; a reversal becomes a follow-up commit |
 
 ## 5. Crate layout
@@ -93,8 +94,8 @@ No crate is added and no dependency changes (PO-4, PO-8).
 
 | Crate | Tier | Change |
 |---|---|---|
-| `ezsdr-kernel` | Kernel | KD-1: `step_until_quiescent`; one test. No public item added or removed |
-| `ezsdr-radio` | Vocabulary | 1.2.0: RM-24's `to_hot`, `from_hot`, `from_payload` on `RxOverflowPayload` |
+| `ezsdr-kernel` | Kernel | KD-1: `step_until_quiescent` and the coordinator's `round`; its tests. No public item added or removed |
+| `ezsdr-radio` | Vocabulary | 1.2.0: RM-24's `to_hot`, `from_hot`, `from_payload` on `RxOverflowPayload`; `RxOverflowHotPayload` and its schema `schemas/radio/rx_overflow_hot_payload.v1.json` (after Review D) |
 | `ezsdr-mock-radio` | Module | 1.2.0: MR-37 (the handle resolved in `prepare`, the hot-path emission); vocabulary requirement `radio ^1.2.0` |
 | `ezsdr-sink-capture` | Module | 1.1.0: HD-15 (`sigmf_meta`, `.sigmf-data`, `.sigmf-meta`); `ezsdr.sigmf-ext.md`, the extension's definition file that SigMF requires |
 | `ezsdr-acceptance` | tests | the rig's versions; §8's carriers |
@@ -105,7 +106,7 @@ No crate is added and no dependency changes (PO-4, PO-8).
 OV-1…OV-23b, PO-1…PO-12 and Phase 3's lessons bind Phase 4. The rules below add what its form of delivery needs.
 
 - **GW-1** Phase 4 rule ids are `KD-n` (Kernel amendments), `VC-n` (Vocabulary and Module amendments) and `GW-n`, protected by OV-1. New rules in existing series take the next number: `RM-24`, `MR-37`, `HD-15`. An amended rule keeps its id (PO-1). *Process obligation.*
-- **GW-2** The Kernel changes only as KD-1 says. `kernel_surface` stays at 116 NEW / 292 public items and `schema_freeze` unchanged. *Checked by `kernel_surface` and `schema_freeze`.*
+- **GW-2** The Kernel changes only as KD-1 says. No Kernel public item is added or removed and no Kernel schema changes. *Checked by `kernel_surface` (the allow-list is unchanged and its completeness check passes; `ov_23b` prints 116 NEW / 292 public items) and `schema_freeze`.*
 - **GW-3** A Phase 1–3 test changes only where spec 13 changes what it observes, and each such change is listed in `implementation-notes.md` with the rule that forces it. *Process obligation.*
 - **GW-4** Every new or amended rule has a test that fails when the rule's code is disabled, shown by a recorded mutation (Appendix A of `13-amendments.md`), as PO-12 requires. *Process obligation; exit criterion 6.*
 - **GW-5** Spec 13's text reaches `design/` in the same commit as the code it describes; the Vision is not edited before Gate X (OV-6). *Process obligation.*
@@ -124,12 +125,13 @@ OV-1…OV-23b, PO-1…PO-12 and Phase 3's lessons bind Phase 4. The rules below 
 
 | # | Test | Phase 4 carrier (acceptance crate unless named) | Remaining |
 |---|---|---|---|
-| 3 | Deterministic with a seed | `kd_01_a_faulted_round_does_not_depend_on_fragment_names` (the Phase 3 probe, now a test: the receiver's output is the same whether it sorts before or after the transmitter reporting `device_lost`) | Reactor decisions (Phase 5) |
+| 3 | Deterministic with a seed | `kd_01_a_faulted_round_does_not_depend_on_fragment_names` (the Phase 3 probe, now a test: the receiver's output is the same whether it sorts before or after the transmitter reporting `device_lost`, and two lost devices are both reported in either order) | Reactor decisions (Phase 5) |
 | 4 | Events flow through the hardware path | `v58_04_mock_events_reach_counters_policy_and_manifest` (the delivered payload is RM-24's byte array and decodes to the overflow), `mr_37_the_overflow_travels_the_hot_path` (MockRadio crate) | — |
-| 5 | Fault injection triggers cleanup and policy | unchanged (`v58_05_*`) | fault kinds with their mechanisms (§3) |
+| 5 | Fault injection triggers cleanup and policy | `v58_05_*` unchanged; the coordinator's `kd_01_a_device_lost_is_not_reported_as_a_step_livelock` and `kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides` (Kernel crate) | fault kinds with their mechanisms (§3) |
 | 6 | Gaps equal a UHD overflow | `v58_06_injected_overflow_is_a_uhd_overflow` (the payload decoded through RM-24) | Phase 8 re-measures |
 | 7 | Runs record Spec, Binding, plan, events, artifacts | `v51_an_overflowed_capture_is_a_sigmf_recording` (the capture's `.sigmf-meta` has two capture segments around the overflow's gap, with `core:global_index` jumping by the gap) | — |
-| 13 | Sessions leave provenance | `v58_13_a_session_stop_of_the_recorder_keeps_a_partial_capture` (a Kernel-routed `Stop(sink/rec)` mid-capture gives a partial artifact, and a later `capture` is served) | Python (Phase 6) |
+| 13 | Sessions leave provenance | `v58_13_a_session_stop_of_the_recorder_keeps_a_partial_capture` (a Kernel-routed `Stop(sink/rec)` mid-capture gives a partial artifact, a Recording marked `ezsdr:partial`, and a later `capture` is served) | Python (Phase 6) |
+| — | (a ceiling, not a §58 row) | `k3_an_off_grid_start_lead_moves_a_burst_to_the_next_transmit_sample` pins the spike's K3 as Simulation shows it (§3) | Phase 7, or the owner's decision |
 
 ### Earlier deferrals → Phase 4
 
@@ -156,13 +158,13 @@ OV-1…OV-23b, PO-1…PO-12 and Phase 3's lessons bind Phase 4. The rules below 
 | 3 | VC-3 | the same |
 | 4 | §8's acceptance carriers | the same |
 | 5 | Appendix A's mutations | each killed |
-| — | **Review D**: one adversarial pass (Opus) over the diff and spec 13, running the tests and the mutations | findings recorded in §11 with verdicts (OV-5) |
+| — | **Review D**: one adversarial pass (Opus) over the diff and spec 13, running the tests and the mutations; **Review E**, in parallel at the owner's request, the same brief given to OpenCode's SpaceBunny through Orca orchestration (a second model family) | findings triaged in `implementation-notes.md`, fixed with tests, recorded in §11 (OV-5) |
 | 6 | Exit tables, Vision issues collected, `handoff.md` | **Gate X** (owner) |
 | X | Vision issues applied with the owner's approval | links and `v3/` paths recheck |
 
 ## 10. Exit criteria
 
-1. Spec 13 accepted at Gate X, and every decision row — Q1–Q8 here — has a verdict in §11.
+1. Spec 13 accepted at Gate X, and every decision row — Q1–Q8 here, and the review's owner decisions — has a verdict in §11.
 2. Every Phase 4 rule — KD-1, VC-1…VC-3, RM-24, MR-37, HD-15 and each amended rule — has an OV-3 disposition in `plan/phase4/exit-review/`, read from test bodies (PO-10), with no `GAP` and no `UNCERTAIN`.
 3. `cargo test --workspace` passes on Rust 1.85.0 and on stable with no `#[ignore]`; `cargo +stable clippy --workspace --all-targets -- -D warnings` passes.
 4. Every carrier of §8 exists and passes.
@@ -176,4 +178,8 @@ OV-1…OV-23b, PO-1…PO-12 and Phase 3's lessons bind Phase 4. The rules below 
 | Decision | Gate | Verdict | Note |
 |---|---|---|---|
 | Plan and implement in one session (Q8) | — | **delegated** | owner, 2026-09-26: "pushしてphase4の計画を立ててください．…あなたが実装したほうがはやいなら計画を立てた後に実装まで進んでください" |
+| Reviews D and E: every defect fixed with a test (`implementation-notes.md`, "Reviews D and E") | — | **closed** | 2026-09-26, before Gate X |
+| K3 — Phase 7, or a Kernel amendment now (§3) | X | *pending* | recommended: Phase 7, with the transmit model |
+| The drain order and dropped-body marks as RM-24 ceilings rather than a Kernel change (Review D P2-1, P2-2) | X | *pending* | recommended: ceilings |
+| P2-3 left with the first transmit-header consumer (Phase 10), although `handoff.md` listed it for Phase 4 | X | *pending* | recommended: as §3 says |
 | Q1–Q8, spec 13 | X | *pending* | |

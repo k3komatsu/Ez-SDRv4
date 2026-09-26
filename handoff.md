@@ -8,7 +8,7 @@
 | | |
 |---|---|
 | remote | `origin` = `git@github.com:k3komatsu/Ez-SDRv4.git`（https://github.com/k3komatsu/Ez-SDRv4，default branch `main`）．2026-09-26 に v4 を新リポジトリへ分離した．v3 は https://github.com/k3komatsu/Ez-SDR（`master` のみ，v3 の tags もそちら）に残る |
-| `main` | v4（この worktree）．Phase 0–3 の受理完了．Phase 2 Gate X を owner が2026-09-25に受理し，spec 06–10 を `design/` へ移動，Vision issue 15件を適用（Step X 完了）．Step 16/Gate X/Step X は `bf3b1bf` で commit・push 済み．2026-09-25 の動的レビューで見つかったテスト欠落2件を追加テストで塞いだ（[implementation-notes.md](plan/phase2/implementation-notes.md) 末尾）．Opus `PASS_WITH_RISK` の残余リスクは §4 と `plan/phase2/00-overview.md` §11 に記録．**Phase 3 は 2026-09-26 に Gate P 受理・実装・Review C・Gate X 受理・Step X 完了**（spec 11 を `design/` へ移動，Vision issue 8件を適用）．§4 参照．|
+| `main` | v4（この worktree）．Phase 0–3 の受理完了．Phase 2 Gate X を owner が2026-09-25に受理し，spec 06–10 を `design/` へ移動，Vision issue 15件を適用（Step X 完了）．Step 16/Gate X/Step X は `bf3b1bf` で commit・push 済み．2026-09-25 の動的レビューで見つかったテスト欠落2件を追加テストで塞いだ（[implementation-notes.md](plan/phase2/implementation-notes.md) 末尾）．Opus `PASS_WITH_RISK` の残余リスクは §4 と `plan/phase2/00-overview.md` §11 に記録．**Phase 3 は 2026-09-26 に Gate P 受理・実装・Review C・Gate X 受理・Step X 完了**（spec 11 を `design/` へ移動，Vision issue 8件を適用）．**Phase 4 は同日に計画・実装・Review D/E まで済み，Gate X 待ち**．§4 参照．|
 | `master` | v3（D + C++ UHD bridge + Python client）．tip `4a474e9` = tag `v3.0.28`．この clone ではローカルのみ（upstream なし）．GitHub 上の置き場は `k3komatsu/Ez-SDR` |
 | `spike/uhd` | **使い捨ての UHD spike**（2026-09-26，push 済み）．`main` から分岐し，Kernel 1 行の変更（K1）と `spike/uhd/` crate を載せる．**`main` へ merge しない**．成果は発見の記録だけで，`main` の [plan/spikes/2026-09-26-uhd.md](plan/spikes/2026-09-26-uhd.md) に移した．実機検証は保留．§4「UHD spike」参照 |
 | `gh-pages` | GitHub Pages 用の orphan branch．2026-09-26 に空のコミット `24229a9` で作成．`main`・`master` と履歴を共有しない．push 済み，Pages の公開設定は未実施 |
@@ -87,9 +87,11 @@ Phase 3 の workspace tests（2026-09-26，Review C と Gate X の修正込み�
 | `ezsdr-acceptance` | 37 |
 | **合計** | **604** |
 
+Phase 4（2026-09-26，Review D/E の修正込み）：1.85.0 / stable とも 626 passed（`ezsdr-kernel` 452，`ezsdr-radio` 12，`ezsdr-sink-capture` 24，`ezsdr-mock-radio` 66，`ezsdr-acceptance` 41，ほかは Phase 3 と同じ）．Kernel の public item は増えていない．
+
 `kernel_surface` は `116 NEW / 292 public items`（Phase 3 で Kernel の public item は 1 つだけ増えた：KB-1 の `module_api::InputStore`）．mutation は Appendix C 83/83 + Review C の fix-check 15/15 + Gate X の fix-check 4/4 killed．`cargo +stable clippy --workspace --all-targets -- -D warnings` clean，`check_links.py` 全リンク解決．Toolchain：Rust `1.85.0`（MSRV）と `stable 1.98.1` の両方で 2026-09-26 に 604 passed．
 
-## 4. Phase の状態 — Phase 1・2・3 完了（Gate X受理）
+## 4. Phase の状態 — Phase 1・2・3 完了（Gate X受理），Phase 4 実装済み（Gate X 待ち）
 
 ### Phase 1 — specs 受理・Kernel 実装済み
 
@@ -182,6 +184,20 @@ Vision §67 の Phase 3（SimulationChannel + deterministic Runs）．計画は 
 
 **Phase 4 へ持ち越すもの**：Module error で短絡した round の意味（P2-1 の ceiling，`step_until_quiescent`），TX block header の最初の消費者が直すべき cold change 順序（P2-3 の ceiling）．
 
+### Phase 4 — 計画・実装・レビュー済み，Gate X 待ち
+
+2026-09-26，owner の委任（「計画を立てて，実装したほうが速いなら実装まで」）で，計画と実装を 1 セッションで行った．Gate P は置かず，すべての決定は Gate X で覆せる．正本は [plan/phase4/00-overview.md](plan/phase4/00-overview.md)（範囲・決定 Q1–Q8・§11 の owner 判断待ち），spec 13 は [plan/phase4/13-amendments.md](plan/phase4/13-amendments.md)，記録は [implementation-notes.md](plan/phase4/implementation-notes.md)．
+
+| 項目 | 内容 |
+|---|---|
+| 範囲 | Phase 1–3 でほぼ済んでいたので，証拠のある穴 4 つだけ：KD-1（Module error で round が途中で切れる，Phase 3 P2-1），VC-1/VC-2（hot path を使う Module が一つもなかった．`radio` 1.2.0 RM-24 が `RX_OVERFLOW` の 17 byte 形式と decoder を持ち，MockRadio 1.2.0 MR-37 が hot path で出す．D51 どおり Kernel は decode しない），VC-3（SigMF：capture Sink 1.1.0 HD-15 が全 capture を `.sigmf-data` + `.sigmf-meta` にする，SC-32），Session `Stop(sink/rec)` の Kernel 経由 test |
+| 範囲外 | 新しい fault kind（それぞれ機構を持つ Phase へ），CalibrationArtifact，artifact store（Phase 6），drift，MA-8 の Kernel 側強制（Phase 7），spike の K2/K5/K6/K8/K11（Phase 7），P2-3（Phase 10） |
+| Kernel | `step_until_quiescent` と coordinator の `round` だけ．public item の増減なし（116 NEW / 292），Kernel schema 変更なし |
+| レビュー | Review D（Claude Opus）と Review E（OpenCode の SpaceBunny，owner の依頼で Orca orchestration から並列に起動）の 2 本．どちらも CHANGES_REQUIRED．P0 1・P1 5（重複あり）を含む全指摘をテスト付きで修正し，owner 判断が要るものは §11 に残した．SpaceBunny の報告は `tmp/review-spacebunny/REPORT.md`（git 管理外） |
+| 検証 | 1.85.0 / stable とも workspace 626 passed，Clippy clean，mutation は Appendix A の全件 killed，link 全解決 |
+| owner の判断待ち（§11） | **K3**（TX clock が arm 起点のため，`start_lead_ns` が sample 周期の倍数でないと burst が 1 sample 遅れる．Simulation でも再現し，ceiling test で固定．Phase 7 で TX model と一緒に直すか，今 Kernel を直すか），drain 順（ring が control より先）と drop した hot body の mark を ceiling とするか，P2-3 の Phase 10 送り，Q1–Q8 と spec 13 の受理 |
+| Step X で適用する Vision issue | 2 件（§28/§51 の Normative 行，§29 の hot path の bytes の持ち主）．[vision-issues.md](plan/phase4/vision-issues.md) |
+
 ### UHD spike（2026-09-26，branch `spike/uhd`）
 
 Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実機 USRP にどこまで通用するか」を確かめる使い捨て実装を作った．実機は X310+UBX と USRP2（owner の IBFD+SEFDM 実験系）．**Linux PC で実行する**（開発した Mac には USRP を繋がない）．
@@ -219,10 +235,10 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-1. **Phase 4 の計画**：Vision §67 の Phase 4（Events, failure, continuity, artifacts）．Phase 3 は Gate X 受理・Step X 完了（2026-09-26）．上の持ち越し 2 件を範囲に含める．UHD spike の K2・K5・K6・K8（[plan/spikes/2026-09-26-uhd.md](plan/spikes/2026-09-26-uhd.md)）も Kernel 契約の問いとして範囲の判断に使う．UHD spike の実機検証は保留（上の節）で，Phase 4 はそれを待たない．
-2. **Phase 2 は完了**：Gate X owner acceptance と Step X を2026-09-25に完了．spec 06–10 は `design/` にあり，15件の Vision issue を適用済み．
-3. **Gate X の named risks**：`MA-8` timeout enforcement は未試験，Kernel 経由 Session `Stop(sink/rec)` test は未実装，Opus review は静的のみ．
-4. その他の test ceilings：sc16 capture と contract change 時の `partial`，KC-29 の直接 assert，到達不能な N8/N10 分岐，KA-12 marker check/acquire race の決定的 test seam，Provider→Sink datapath の nonzero drop→Manifest 経路．詳細は [implementation-notes.md](plan/phase2/implementation-notes.md) と exit tables を参照．
+1. **Phase 4 の Gate X**（owner）：[plan/phase4/00-overview.md](plan/phase4/00-overview.md) §11 の判断待ち（K3 をどうするか，drain 順と mark の ceiling，P2-3，Q1–Q8，spec 13）．受理後に Step X（Vision issue 2 件の適用）．
+2. **Phase 5 の計画**：Mini Reactive Radio（PING → Reactor → timed PONG，§58 #9）．Phase 4 の KD-1 で，Module error の round と STEP_LIVELOCK の優先順位は決まっている（MA-30）．
+3. **Phase 2 の Gate X named risks**：Kernel 経由 Session `Stop(sink/rec)` test は Phase 4 で追加（`v58_13_a_session_stop_…`）．`MA-8` の強制は Phase 7 へ（Phase 4 §3）．
+4. Phase 2 のその他の test ceilings：sc16 capture と contract change 時の `partial`，KC-29 の直接 assert，到達不能な N8/N10 分岐，KA-12 marker check/acquire race の決定的 test seam，Provider→Sink datapath の nonzero drop→Manifest 経路．詳細は [implementation-notes.md](plan/phase2/implementation-notes.md) と exit tables を参照．
 
 ## 5. v3 → v4 切替で残っている作業（人間の判断が要るもの）
 
