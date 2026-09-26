@@ -1266,6 +1266,12 @@ pub const STEP_ROUND_CAP: usize = 1_000;
 /// (Vision §58 #3). Exceeding [`STEP_ROUND_CAP`] is `STEP_LIVELOCK`, which the
 /// Policy table turns into an abort rather than a hang.
 ///
+/// A step that fails takes its instance out of the rest of the round, and the
+/// others go on to quiescence before the first error is returned: returning at
+/// once would leave whatever sorts after the failed instance unstepped, so a
+/// fragment's name would decide what a peer published before the failure
+/// (Phase 4, KD-1).
+///
 /// Rule: MA-30.
 pub fn step_until_quiescent(
     instances: &mut [SteppedInstance<'_>],
@@ -1277,13 +1283,27 @@ pub fn step_until_quiescent(
         (a.inner.role().step_rank(), a.id.as_str())
             .cmp(&(b.inner.role().step_rank(), b.id.as_str()))
     });
+    let mut failed = vec![false; instances.len()];
+    let mut first_error = None;
     for round in 1..=STEP_ROUND_CAP {
         let mut progressed = false;
-        for inst in instances.iter_mut() {
-            progressed |= inst.inner.step(until)?.progressed;
+        for (inst, failed) in instances.iter_mut().zip(failed.iter_mut()) {
+            if *failed {
+                continue;
+            }
+            match inst.inner.step(until) {
+                Ok(outcome) => progressed |= outcome.progressed,
+                Err(error) => {
+                    *failed = true;
+                    first_error.get_or_insert(error);
+                }
+            }
         }
         if !progressed {
-            return Ok(round);
+            return match first_error {
+                Some(error) => Err(error),
+                None => Ok(round),
+            };
         }
     }
     // RS-27 registers STEP_LIVELOCK as a kind the Kernel emits from "its own

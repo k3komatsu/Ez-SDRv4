@@ -472,6 +472,31 @@ fn v58_08_b_two_mocks_in_one_run_keep_both_sets_of_sections() {
 }
 
 #[test]
+fn kd_01_a_faulted_round_does_not_depend_on_fragment_names() {
+    // Phase 3's Review C P2-1, now MA-30's rule (Phase 4, KD-1): a transmitter that
+    // reports `device_lost` in the round where the receiver publishes its first block
+    // must not decide, by sorting before it, whether that block was published.
+    let run = |tx: &str, rx: &str| {
+        let temp = rig::TempDir::new("kd-01");
+        let (bytes, waveform) = experiments::waveform_of(&ramp(3_000));
+        let spec = experiments::link(tx, rx, 1.0e6, &waveform, 10_000, 20_000);
+        let mut environment = coupling(tx, rx, -6.0, 1_000, None, 0);
+        environment["sim.faults"] = json!([{ "at_ns": 1_999_001, "fault": "device_lost", "target": tx }]);
+        let profile = rig::link_profile("x310-like", tx, rx, false, &temp.0, environment);
+        let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+        let clock = root(&run);
+        let manifest = finish_at(run, clock, T0 + 25_000_000);
+        assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: EventKind::parse(EventKind::DEVICE_LOST).unwrap() } });
+        let stats = section(&manifest, "ezsdr.radio.mock.dev_rx.stats");
+        (stats["rx_blocks"].clone(), stats["rx_samples"].clone())
+    };
+    let transmitter_first = run("a", "b");
+    let receiver_first = run("z", "a");
+    assert_eq!(transmitter_first, receiver_first);
+    assert_eq!(receiver_first, (json!(1), json!(2_000)));
+}
+
+#[test]
 fn v58_08_without_a_channel_the_same_spec_hears_nothing() {
     let temp = rig::TempDir::new("v58-08-none");
     let (manifest, capture) = link_run(&temp, "a", "b", "ideal", false, json!({}), &ramp(3_000));

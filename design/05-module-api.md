@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted 2026-09-23 (Gate C; Phase 1 Step 5). Normative for `ezsdr-kernel::module_api`. Amended in Phase 2 by KA-1, KA-5, KA-7, KA-8, KA-9, KA-10, KA-11, KA-12, KA-13, KA-15, KA-19. Amended in Phase 3 by KB-1, KB-2. |
+| Status | Accepted 2026-09-23 (Gate C; Phase 1 Step 5). Normative for `ezsdr-kernel::module_api`. Amended in Phase 2 by KA-1, KA-5, KA-7, KA-8, KA-9, KA-10, KA-11, KA-12, KA-13, KA-15, KA-19. Amended in Phase 3 by KB-1, KB-2. Amended in Phase 4 by KD-1 ([`plan/phase4/13-amendments.md`](../plan/phase4/13-amendments.md)). |
 | Scope | The three axes and the five role traits; the rules every role trait obeys; `ModuleDescriptor`, `VocabularyDescriptor` and the registry; `ComponentDescriptor`; the ExecutionIsland declaration and its admission; ExecutionClass and the fidelity vector; the Phase 1 test doubles; what is fixed now so that an out-of-process Plugin later needs no Kernel change. |
 | Not in scope | Radio Model traits and keys (Phase 2); MockRadio and the Simulation Engine (Phase 2); the Peripheral and Endpoint vocabularies (Phase 9); the native, WASM and GPU execution ABIs (Phases 10 and 11); the Plugin wire protocol (Phase 9). |
 | Vision § covered | §4; §5's Module API line; §7 in full; §14; §15's `step`; §19; §20; §32; §35's bridge requirements; §36; §37 and §38; §42's Executor rule; §62. |
@@ -195,7 +195,7 @@ pub trait Provider: Send {
 
   ```text
   until = authority.next_wakeup()        None ends a Spec Run (KC-33); a Session waits for its client
-  repeat: step(until) over every stepped instance in a fixed order
+  repeat: step(until) over every stepped instance not failed at this until, in a fixed order
           role rank Provider < Executor < Sink, then instance id
   until no instance reports progressed; a cap of 1 000 iterations raises STEP_LIVELOCK and aborts
   ```
@@ -206,7 +206,11 @@ pub trait Provider: Send {
   | RealtimeEmulation | step, wall-paced inside `next_wakeup` | threads | threads |
   | HardwareInLoop, Hardware | none | threads | threads |
 
-  The order is fixed by rule and not by registration, so determinism does not depend on the order in which a runtime happened to assemble its Modules (Vision §58 #3). *Ceiling: a zero-latency Event or Action cycle at one instant hits the cap, and the coordinator also counts consecutive `next_wakeup` results at one instant, more than `STEP_ROUND_CAP` of which is `STEP_LIVELOCK` (KC-22). Delivery latency on inter-Island Action edges, which would let such a cycle advance in time, is not added in Phase 2, which has no Reactor and so no such edge; it is Phase 5's (Phase 2, KA-11).*
+  The order is fixed by rule and not by registration, so determinism does not depend on the order in which a runtime happened to assemble its Modules (Vision §58 #3).
+
+  A `step` that returns an error — a panic included, which the coordinator contains as one (KC-30) — marks its instance failed for the rest of the round: it is not stepped again at that `until`, and the round goes on over the other instances until none reports `progressed`. `step_until_quiescent` then returns the **first** error in stepping order (pass, then role rank, then instance id), and the coordinator acts on that one as before — `DEVICE_LOST` for `DeviceLost`, a failed Run otherwise. The instances a failure did not touch are therefore stepped as they would be if the failed instance had produced nothing at that instant, wherever it sorts, and no instance's output depends on a failed peer's name (Phase 4, KD-1). *Checked by `ma_30_a_step_error_finishes_the_round`, `ma_30_a_second_failure_does_not_replace_the_first` and, end to end, `kd_01_a_faulted_round_does_not_depend_on_fragment_names`.*
+
+  *Ceiling: a zero-latency Event or Action cycle at one instant hits the cap, and the coordinator also counts consecutive `next_wakeup` results at one instant, more than `STEP_ROUND_CAP` of which is `STEP_LIVELOCK` (KC-22). Delivery latency on inter-Island Action edges, which would let such a cycle advance in time, is not added in Phase 2, which has no Reactor and so no such edge; it is Phase 5's (Phase 2, KA-11).*
 
 ### Descriptors and the registry
 

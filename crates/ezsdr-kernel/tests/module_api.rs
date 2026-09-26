@@ -1382,6 +1382,107 @@ fn ma_30_stepping_order_and_quiescence() {
     assert_eq!(rounds, 2, "one round made progress, the next quiesced");
 }
 
+/// A Provider whose first step fails as a lost device would (KD-1).
+struct FailsOnce {
+    log: Arc<Mutex<Vec<String>>>,
+    name: String,
+    inner: StepLogger,
+}
+
+impl Provider for FailsOnce {
+    fn instance(&self) -> &ezsdr_kernel::module_api::ProviderInstance {
+        self.inner.instance()
+    }
+    fn coerce(
+        &self,
+        r: &Requested,
+    ) -> Result<ezsdr_kernel::module_api::CoerceReport, ModuleError> {
+        Provider::coerce(&self.inner, r)
+    }
+    fn prepare(
+        &mut self,
+        _f: &ezsdr_kernel::plan::Fragment,
+        _c: PrepareContext,
+    ) -> Result<PrepareReport, ModuleError> {
+        unreachable!("the stepping test does not prepare")
+    }
+    fn arm(&mut self) -> Result<(), ModuleError> {
+        Ok(())
+    }
+    fn start(&mut self, _at: Option<TimePoint>) -> Result<(), ModuleError> {
+        Ok(())
+    }
+    fn stop(&mut self, _m: StopMode) -> Result<(), ModuleError> {
+        Ok(())
+    }
+    fn cleanup(&mut self) {}
+    fn step(&mut self, _until: TimePoint) -> Result<StepOutcome, ModuleError> {
+        self.log.lock().expect("lock").push(format!("failing:{}", self.name));
+        Err(ModuleError {
+            kind: ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost,
+            message: format!("{} lost its device", self.name),
+            detail: serde_json::Value::Null,
+        })
+    }
+}
+
+#[test]
+fn ma_30_a_step_error_finishes_the_round() {
+    // KD-1: the steps the healthy instances get must not depend on where the
+    // failing one sorts, and must equal what they get with no failure at all.
+    let run = |failing: Option<&str>| {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut busy = StepLogger::new("m", log.clone(), 2);
+        let mut sink = StepLogger::new("s", log.clone(), 0);
+        let mut failer = failing.map(|name| FailsOnce {
+            log: log.clone(),
+            name: name.to_owned(),
+            inner: StepLogger::new(name, log.clone(), 0),
+        });
+        let mut instances = vec![
+            SteppedInstance { id: id("m"), inner: SteppedRef::Provider(&mut busy) },
+            SteppedInstance { id: id("s"), inner: SteppedRef::Sink(&mut sink) },
+        ];
+        if let (Some(name), Some(failer)) = (failing, failer.as_mut()) {
+            instances.push(SteppedInstance { id: id(name), inner: SteppedRef::Provider(failer) });
+        }
+        let until = TimePoint::new(ClockDomainId::HOST_MONOTONIC, 100);
+        let events = collector();
+        let result = step_until_quiescent(&mut instances, until, &events, &rid("coordinator"));
+        let seen = log.lock().expect("lock").clone();
+        let count = |entry: &str| seen.iter().filter(|e| e.as_str() == entry).count();
+        (result, count("provider:m"), count("sink:s"), seen.iter().filter(|e| e.starts_with("failing:")).count())
+    };
+    let (clean, busy_clean, sink_clean, _) = run(None);
+    assert_eq!(clean.expect("quiesces"), 3, "two progressing rounds, then a quiet one");
+    for name in ["a", "z"] {
+        let (result, busy, sink, failures) = run(Some(name));
+        let error = result.expect_err("the failure is returned");
+        assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
+        assert_eq!(error.message, format!("{name} lost its device"));
+        assert_eq!(failures, 1, "a failed instance is not stepped again at this instant");
+        assert_eq!((busy, sink), (busy_clean, sink_clean), "failing instance named {name}");
+    }
+}
+
+#[test]
+fn ma_30_a_second_failure_does_not_replace_the_first() {
+    // KD-1: the coordinator acts on the first error in stepping order.
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut first = FailsOnce { log: log.clone(), name: "a".to_owned(), inner: StepLogger::new("a", log.clone(), 0) };
+    let mut second = FailsOnce { log: log.clone(), name: "b".to_owned(), inner: StepLogger::new("b", log.clone(), 0) };
+    let mut instances = vec![
+        SteppedInstance { id: id("b"), inner: SteppedRef::Provider(&mut second) },
+        SteppedInstance { id: id("a"), inner: SteppedRef::Provider(&mut first) },
+    ];
+    let until = TimePoint::new(ClockDomainId::HOST_MONOTONIC, 100);
+    let events = collector();
+    let error = step_until_quiescent(&mut instances, until, &events, &rid("coordinator"))
+        .expect_err("both fail");
+    assert_eq!(error.message, "a lost its device");
+    assert_eq!(log.lock().expect("lock").len(), 2, "each failing instance is stepped once");
+}
+
 #[test]
 fn ma_30_stepping_livelock_cap() {
     let log = Arc::new(Mutex::new(Vec::new()));
