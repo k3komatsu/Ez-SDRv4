@@ -10,7 +10,7 @@
 | remote | `origin` = `git@github.com:k3komatsu/Ez-SDRv4.git`（https://github.com/k3komatsu/Ez-SDRv4，default branch `main`）．2026-09-26 に v4 を新リポジトリへ分離した．v3 は https://github.com/k3komatsu/Ez-SDR（`master` のみ，v3 の tags もそちら）に残る |
 | `main` | v4（この worktree）．Phase 0–3 の受理完了．Phase 2 Gate X を owner が2026-09-25に受理し，spec 06–10 を `design/` へ移動，Vision issue 15件を適用（Step X 完了）．Step 16/Gate X/Step X は `bf3b1bf` で commit・push 済み．2026-09-25 の動的レビューで見つかったテスト欠落2件を追加テストで塞いだ（[implementation-notes.md](plan/phase2/implementation-notes.md) 末尾）．Opus `PASS_WITH_RISK` の残余リスクは §4 と `plan/phase2/00-overview.md` §11 に記録．**Phase 3 は 2026-09-26 に Gate P 受理・実装・Review C・Gate X 受理・Step X 完了**（spec 11 を `design/` へ移動，Vision issue 8件を適用）．§4 参照．|
 | `master` | v3（D + C++ UHD bridge + Python client）．tip `4a474e9` = tag `v3.0.28`．この clone ではローカルのみ（upstream なし）．GitHub 上の置き場は `k3komatsu/Ez-SDR` |
-| `spike/uhd` | **使い捨ての UHD spike**（2026-09-26，push 済み）．`main` から分岐し，Kernel 1 行の変更（K1）と `spike/uhd/` crate を載せる．**`main` へ merge しない**．成果は発見の記録だけで，確定版は `main` の `plan/spikes/` に移す．§4「UHD spike」参照 |
+| `spike/uhd` | **使い捨ての UHD spike**（2026-09-26，push 済み）．`main` から分岐し，Kernel 1 行の変更（K1）と `spike/uhd/` crate を載せる．**`main` へ merge しない**．成果は発見の記録だけで，`main` の [plan/spikes/2026-09-26-uhd.md](plan/spikes/2026-09-26-uhd.md) に移した．実機検証は保留．§4「UHD spike」参照 |
 | `gh-pages` | GitHub Pages 用の orphan branch．2026-09-26 に空のコミット `24229a9` で作成．`main`・`master` と履歴を共有しない．push 済み，Pages の公開設定は未実施 |
 | tags | ローカルに 35 個（`v2.11`, `v3.0.0`–`v3.0.28`）．すべて v3 系で，`Ez-SDR` 側にある．`Ez-SDRv4` には tag なし．**`git push --tags` / `--all` をしない**（v3 の tag と `master` が v4 リポジトリに上がる） |
 | 履歴の関係 | **無関係（unrelated）**．graft も merge もしていない．v4 は clean-sheet なので今後も繋がない |
@@ -193,7 +193,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 - Kernel を変えるのは spike branch 上だけ．1 か所につき 1 commit とし，変えたこと自体を発見として記録する．
 - 今は design 文書も spec も変えない．実測した値（lead，丸めの刻み，遅延）は記録するだけで，Mock profile の更新は Phase 8 の仕事．
 
-中身（詳細は `spike/uhd/README.md` と `spike/uhd/FINDINGS.md`．どちらも `spike/uhd` branch にある）：
+中身（発見は `main` の [plan/spikes/2026-09-26-uhd.md](plan/spikes/2026-09-26-uhd.md)．実機の手順は `spike/uhd` branch の `spike/uhd/README.md`）：
 
 | 項目 | 状態 |
 |---|---|
@@ -201,15 +201,15 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 | crate | `spike/uhd/` は**独立した cargo workspace**（`main` は libuhd なしでビルドでき，PO-2 の unsafe 禁止に触れない）．Module `ezsdr.radio.uhd` 0.1.0 が Provider（step されない，MA-15）と `Pacing::Device` の Authority を **1 つの binding** で兼ねる（`"authority": "radio"`）．UHD C API は約 40 関数を手書きで `extern "C"` 宣言 |
 | Spec | acceptance crate の `experiments::*` をそのまま使う（変えたのは周波数と利得だけ）．Mock のテストとの違いは BindingProfile だけ（Vision §59） |
 | オフライン検証 | wall-clock の fake device（`args = "fake"`）で `cd spike/uhd && cargo test` の 6 本が通過．`main` の workspace テストも K1 を当てた状態で全通過 |
-| 実機 | **未実施**．Mac では「UHD のエラー文が返ること」までしか確かめていない |
+| 実機 | **保留**（2026-09-26，owner の判断でソフトだけの開発を続ける）．Mac では「UHD のエラー文が返ること」までしか確かめていない |
 | 発見 | FINDINGS.md の K1–K13（実機前・fake で VERIFIED）．大きいのは K2（agenda が空になると Spec Run が完了する），K3（TX clock が arm 起点のため TX/RX の grid が 1 sample 未満ずれる），K5（Session の admission が step されない Provider の処理を待たない），K6（RS-19 の lead を admission から数えている），K8（Sink が step されるのは client が呼んでいる間だけ） |
 
-次のセッションでやること（Linux PC）：
+実機検証を再開するときの手順（Linux PC．保留中．測定値は Phase 7/8 の入力なので，Phase 4 はこれを待たない）：
 
 1. `git fetch origin && git switch spike/uhd`．`pkg-config --modversion uhd` で UHD 4.x が見えることを確かめ，`cd spike/uhd && cargo test` で 6 本が通ることを確認する（Linux でのビルドはまだ一度も試していない）．
 2. `spike/uhd/README.md` の表の順に実行する：`find` → `probe ARGS` → `rx` → `session-rx` → `overflow` → `txrx` → `repeat` → `loopback` → `leads`．`ARGS` は X310 の 10 GbE なら `addr=192.168.40.2`，1 GbE と USRP2 なら `addr=192.168.10.2`．USRP2 には `--grid ideal` を付ける．**TX（`txrx` 以降）は ≥ 30 dB の減衰器を挟み `--tx-gain 0` で**．各 Run の出力は `spike/uhd/out/<cmd>-<time>/` に残る（`.gitignore` 済み）．
 3. 結果で FINDINGS.md 末尾の「実機で埋める表」を埋め，実機でしか分からない発見（INFERRED だったもの，UHD 固有の挙動）を追記する．spike branch に commit する．
-4. 確定した発見を `main` の `plan/spikes/2026-09-26-uhd.md` に移し，Phase 4 と Phase 7 の計画への入力にする（K2・K5・K6・K8 は Kernel 契約の問いなので Phase 4 の範囲を決めるときに扱う）．
+4. 実機で分かったことを `main` の `plan/spikes/2026-09-26-uhd.md` にも反映する（末尾の表と，INFERRED だった項目）．
 
 注意：
 
@@ -219,8 +219,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-0. **UHD spike の実機検証**（上の節）．その結果を `plan/spikes/` に移してから Phase 4 の計画に入る．
-1. **Phase 4 の計画**：Vision §67 の Phase 4（Events, failure, continuity, artifacts）．Phase 3 は Gate X 受理・Step X 完了（2026-09-26）．上の持ち越し 2 件を範囲に含める．
+1. **Phase 4 の計画**：Vision §67 の Phase 4（Events, failure, continuity, artifacts）．Phase 3 は Gate X 受理・Step X 完了（2026-09-26）．上の持ち越し 2 件を範囲に含める．UHD spike の K2・K5・K6・K8（[plan/spikes/2026-09-26-uhd.md](plan/spikes/2026-09-26-uhd.md)）も Kernel 契約の問いとして範囲の判断に使う．UHD spike の実機検証は保留（上の節）で，Phase 4 はそれを待たない．
 2. **Phase 2 は完了**：Gate X owner acceptance と Step X を2026-09-25に完了．spec 06–10 は `design/` にあり，15件の Vision issue を適用済み．
 3. **Gate X の named risks**：`MA-8` timeout enforcement は未試験，Kernel 経由 Session `Stop(sink/rec)` test は未実装，Opus review は静的のみ．
 4. その他の test ceilings：sc16 capture と contract change 時の `partial`，KC-29 の直接 assert，到達不能な N8/N10 分岐，KA-12 marker check/acquire race の決定的 test seam，Provider→Sink datapath の nonzero drop→Manifest 経路．詳細は [implementation-notes.md](plan/phase2/implementation-notes.md) と exit tables を参照．
