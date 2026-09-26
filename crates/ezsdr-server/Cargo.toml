@@ -1,26 +1,29 @@
 [package]
-name = "ezsdr-acceptance"
-version = "0.0.0"
-description = "Ez-SDR v4 acceptance tests: the Vision §58 and §61 carriers (plan/phase2/00-overview.md §8, plan/phase3/00-overview.md §8)"
-publish = false
+name = "ezsdr-server"
+version = "0.1.0"
+description = "Ez-SDR v4 server: runs one Session for a client over the protocol ezsdr.protocol 1 (plan/phase6/16-easy-api.md)"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[[bin]]
+name = "ezsdr-server"
+path = "src/main.rs"
 
 [dependencies]
 ezsdr-kernel = { path = "../ezsdr-kernel" }
 ezsdr-radio = { path = "../ezsdr-radio" }
 ezsdr-sim = { path = "../ezsdr-sim" }
 ezsdr-sink = { path = "../ezsdr-sink" }
-ezsdr-hostmem = { path = "../ezsdr-hostmem" }
 ezsdr-sim-engine = { path = "../ezsdr-sim-engine" }
 ezsdr-mock-radio = { path = "../ezsdr-mock-radio" }
 ezsdr-link-host = { path = "../ezsdr-link-host" }
 ezsdr-sink-capture = { path = "../ezsdr-sink-capture" }
 ezsdr-exec-native = { path = "../ezsdr-exec-native" }
-ezsdr-server = { path = "../ezsdr-server" }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+schemars = "1.2.2"
 
 [dev-dependencies]
 ezsdr-kernel = { path = "../ezsdr-kernel", features = ["testing"] }

@@ -1,0 +1,676 @@
+{
+  "$defs": {
+    "ClockDomainId": {
+      "additionalProperties": false,
+      "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "ContentHash": {
+      "description": "`sha256:<64 lowercase hex>`, matching `^sha256:[0-9a-f]{64}$`. The algorithm is\nnamed in the value so a later algorithm is an additive change (OV-14, SB-1).",
+      "type": "string"
+    },
+    "EventKind": {
+      "description": "What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$`;\nthe Kernel owns the five of RS-28 and every other kind belongs to the Vocabulary or\nModule that emits it.\n\nRule: SB-1, RS-27.",
+      "type": "string"
+    },
+    "Ident": {
+      "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "Key": {
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
+      "type": "string"
+    },
+    "Lease": {
+      "additionalProperties": false,
+      "description": "Who holds a Run, and for how long (RS-21…RS-25).",
+      "properties": {
+        "adoptions": {
+          "description": "How many times it has been adopted (RS-24).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expires_at_host": {
+          "description": "When it expires, on the host monotonic clock (RS-22).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "holder": {
+          "description": "Who holds it now, uninterpreted by the Kernel (RS-24).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/LeaseMode",
+          "description": "Attached or Detached (RS-21)."
+        },
+        "released": {
+          "description": "Whether it has been released (RS-6, step 8).",
+          "type": "boolean"
+        },
+        "token": {
+          "description": "Issued at grant for a Detached Lease; only `Adopt { token }` reclaims it\n(RS-24, decision R5).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "adoptions",
+        "released"
+      ],
+      "type": "object"
+    },
+    "LeaseMode": {
+      "description": "Whether a Run survives its client's disconnection (RS-21).",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The Run ends when the client disconnects. The default (RS-21, RS-23).",
+          "properties": {
+            "kind": {
+              "const": "attached",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The Run survives the disconnect until the TTL expires (RS-21, RS-23).",
+          "properties": {
+            "kind": {
+              "const": "detached",
+              "type": "string"
+            },
+            "renewable": {
+              "description": "Whether `Renew` is allowed (RS-24).",
+              "type": "boolean"
+            },
+            "ttl_ms": {
+              "description": "How long, on the host monotonic clock (RS-22).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "ttl_ms",
+            "renewable"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Namespace": {
+      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "type": "string"
+    },
+    "NodeId": {
+      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "Request": {
+      "description": "What a client asks (EA-4).",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The first request: the protocol version the client speaks (EA-3).",
+          "properties": {
+            "op": {
+              "const": "hello",
+              "type": "string"
+            },
+            "protocol": {
+              "description": "The version.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "op",
+            "protocol"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Opens the Session, with the default profile when `profile` is absent (EA-9, EA-10).",
+          "properties": {
+            "lease": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lease"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The Lease; Attached when absent."
+            },
+            "op": {
+              "const": "connect",
+              "type": "string"
+            },
+            "profile": {
+              "default": null,
+              "description": "A BindingProfile document."
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Submits one Session Action; the body, if any, is its waveform (EA-11).",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/SessionAction",
+              "description": "The action."
+            },
+            "op": {
+              "const": "submit",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "action"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Advances the Run to `to`, or by `by_ns` nanoseconds; exactly one is given (EA-12).",
+          "properties": {
+            "by_ns": {
+              "default": null,
+              "description": "A duration in nanoseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "advance",
+              "type": "string"
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TimePoint"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "An instant on the primary root or a domain related to it."
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Waits for an event of one of `kinds` at or after index `from` (EA-12, KC-29b).",
+          "properties": {
+            "from": {
+              "description": "The first event index to consider.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kinds": {
+              "description": "The kinds that end the wait.",
+              "items": {
+                "$ref": "#/$defs/EventKind"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "wait_for",
+              "type": "string"
+            },
+            "within_ns": {
+              "description": "How long to wait, in nanoseconds of Run time.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "op",
+            "kinds",
+            "from",
+            "within_ns"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Reads the delivered events from index `from` (EA-12, KC-29a).",
+          "properties": {
+            "from": {
+              "description": "The first index.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "op": {
+              "const": "events",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "from"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Reports the Run's state (EA-12).",
+          "properties": {
+            "op": {
+              "const": "status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Reads an artifact this server's Runs reported (EA-13).",
+          "properties": {
+            "op": {
+              "const": "read",
+              "type": "string"
+            },
+            "uri": {
+              "description": "The artifact's URI.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "uri"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Runs a child Spec Run; the body is the inputs' bytes, concatenated (EA-14).",
+          "properties": {
+            "duration_ns": {
+              "default": null,
+              "description": "How long the child runs after its T0, in nanoseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "inputs": {
+              "default": [],
+              "description": "The size of each input in the body, in order.",
+              "items": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "run_child",
+              "type": "string"
+            },
+            "profile": {
+              "default": null,
+              "description": "The child's BindingProfile document; derived from the Session's when absent."
+            },
+            "spec": {
+              "description": "The ExperimentSpec document."
+            }
+          },
+          "required": [
+            "op",
+            "spec"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Ends the Session and returns its Manifest (EA-15).",
+          "properties": {
+            "op": {
+              "const": "finish",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ResourceId": {
+      "additionalProperties": false,
+      "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments matching\n`^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+){0,15}$`, at most 256 bytes; `dev0/rx/0` names\nchannel 0 of the receive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-1, SB-3, SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        },
+        "path": {
+          "description": "Slash-joined path through the composite resource tree (SB-34).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "path"
+      ],
+      "type": "object"
+    },
+    "SessionAction": {
+      "description": "The Session action envelope: a closed set, and **not** the Kernel Action set.\n\nThe Kernel's Actions are what a Reactor emits into the real-time path, while a\nlease operation or a recorder request is a control-path act with no real-time\nmeaning. Each Session Action compiles to zero or more Kernel Actions, or to a\nLease or Run operation.\n\nOnly the lifecycle verbs are the Kernel's; a domain verb is\n[`SessionAction::Vocabulary`], and the Vocabulary that registers the verb\ndeclares how it compiles. The Vision's §3 log sketch named `StartRepeat` and\n`Capture` directly before Step 5; here they are `radio.start_repeat` and `sink.capture`,\nbecause a Kernel that enumerated them would need a new variant for the first\nperipheral sweep or calibration verb.\n\nRule: RS-13, RS-13a, decision R3.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Generic over a namespaced key and value (RS-13a).",
+          "properties": {
+            "key": {
+              "$ref": "#/$defs/Key",
+              "description": "Which parameter (SB-2)."
+            },
+            "kind": {
+              "const": "set_parameter",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/ResourceId",
+              "description": "Whose parameter."
+            },
+            "value": {
+              "$ref": "#/$defs/Value",
+              "description": "Its new value (SB-4)."
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "key",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A domain verb, whose compilation its Vocabulary declares (RS-13a, RS-14).",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TimePoint"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "When. A Kernel field, not a param: SB-4 caps a `Value` at one level of\nnesting and a `TimePoint` is two, so a time could not travel inside\n`params` at all (RS-19)."
+            },
+            "kind": {
+              "const": "vocabulary",
+              "type": "string"
+            },
+            "ns": {
+              "$ref": "#/$defs/Namespace",
+              "description": "The Vocabulary that owns the verb."
+            },
+            "params": {
+              "additionalProperties": {
+                "$ref": "#/$defs/Value"
+              },
+              "default": {},
+              "description": "The verb's parameters (SB-4).",
+              "type": "object"
+            },
+            "target": {
+              "$ref": "#/$defs/ResourceId",
+              "description": "Whose resource."
+            },
+            "verb": {
+              "$ref": "#/$defs/Ident",
+              "description": "The verb."
+            }
+          },
+          "required": [
+            "kind",
+            "ns",
+            "verb",
+            "target"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "With a target it stops that resource; without one it stops the Run (RS-50).",
+          "properties": {
+            "kind": {
+              "const": "stop",
+              "type": "string"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResourceId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The resource, or the Run when absent."
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Give up the Lease (RS-14).",
+          "properties": {
+            "kind": {
+              "const": "release",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Reclaim a Detached Lease. Adoption by run id alone would let any client\nseize a live transmitter (RS-24).",
+          "properties": {
+            "kind": {
+              "const": "adopt",
+              "type": "string"
+            },
+            "token": {
+              "description": "The token issued at grant.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "token"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Extend a renewable Lease (RS-24).",
+          "properties": {
+            "kind": {
+              "const": "renew",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Create a child Run (RS-14, RS-25).",
+          "properties": {
+            "binding_hash": {
+              "$ref": "#/$defs/ContentHash",
+              "description": "The child's own profile, by hash: a Session's cannot serve a Spec Run\n(RS-25a, D103)."
+            },
+            "kind": {
+              "const": "run_child",
+              "type": "string"
+            },
+            "spec_hash": {
+              "$ref": "#/$defs/ContentHash",
+              "description": "The child's Spec, by hash (RS-45)."
+            }
+          },
+          "required": [
+            "kind",
+            "spec_hash",
+            "binding_hash"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TimePoint": {
+      "additionalProperties": false,
+      "description": "An instant: integer ticks in a named clock domain. Never floating-point seconds.\n\nThere is deliberately no `PartialOrd`: two points of different domains cannot be\ncompared at all, and `a < b` silently answering `false` is the bug class this\nmodel exists to prevent (decision T3).\n\nRule: TM-1, TM-6.",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The domain whose ticks `ticks` counts (TM-1)."
+        },
+        "ticks": {
+          "description": "Tick count relative to the domain's origin; a sample index in a SampleClock (TM-10).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "domain",
+        "ticks"
+      ],
+      "type": "object"
+    },
+    "Value": {
+      "anyOf": [
+        {
+          "description": "A boolean.",
+          "type": "boolean"
+        },
+        {
+          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "description": "A string.",
+          "type": "string"
+        },
+        {
+          "description": "A list of scalars; nesting deeper is refused (SB-4).",
+          "items": {
+            "$ref": "#/$defs/Value"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/Value"
+          },
+          "description": "A map of scalars; nesting deeper is refused (SB-4).",
+          "type": "object"
+        }
+      ],
+      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A client's header line (EA-2).",
+  "properties": {
+    "body_bytes": {
+      "description": "How many raw bytes follow the header line (EA-2).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "request": {
+      "$ref": "#/$defs/Request",
+      "description": "The request."
+    }
+  },
+  "required": [
+    "request"
+  ],
+  "title": "RequestFrame",
+  "type": "object"
+}

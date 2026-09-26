@@ -15,7 +15,7 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
-## v1 — Phase 6 — `sink.CAPTURE_WRITTEN`
+## v1 — Phase 6 — `sink.CAPTURE_WRITTEN` and the protocol frames
 
 Still version 1: v4.0 has not frozen. Additive; no Kernel schema changes.
 
@@ -23,6 +23,9 @@ Still version 1: v4.0 has not frozen. Additive; no Kernel schema changes.
   event kind `sink.CAPTURE_WRITTEN`, `{ artifact: ArtifactRef }`, emitted by the capture Sink
   1.2.0 when it records a capture, so a client learns during the Session that the capture is
   written and where.
+- New `server/request_frame` and `server/reply_frame` (Phase 6, spec 16 EA-6): the frames of
+  `ezsdr.protocol` 1 between a client and `ezsdr-server`, which embed the Kernel's documents
+  and add no Kernel type.
 
 ## v1 — Phase 5 — a Spec's inputs
 

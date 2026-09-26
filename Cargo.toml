@@ -11,6 +11,7 @@ members = [
     "crates/ezsdr-link-host",
     "crates/ezsdr-sink-capture",
     "crates/ezsdr-exec-native",
+    "crates/ezsdr-server",
     "crates/ezsdr-acceptance",
 ]
 

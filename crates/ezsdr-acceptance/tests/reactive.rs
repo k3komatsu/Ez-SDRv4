@@ -336,3 +336,43 @@ fn ke_03_a_decision_after_the_stop_is_not_an_abort() {
     assert!(section(&manifest, "ezsdr.radio.mock.dev_b.stats")["rx_samples"].as_u64().unwrap() > 26_006, "the PING's first sample was delivered");
     assert!(bursts(&manifest, "dev_b").is_empty());
 }
+
+#[test]
+fn v58_09_a_reactor_runs_in_a_child_run_of_a_session() {
+    // Phase 5 deferred "a Reactor in a Session" to Phase 6's child Runs (KF-3): a Session
+    // binds both radios, and the ping-pong Spec runs as its child, with the responder on
+    // the native Executor, through the server (spec 16 EA-14).
+    use ezsdr_server::protocol::{Reply, Request, Response};
+    let temp = rig::TempDir::new("v58-09-child");
+    let ((ping_bytes, ping_ref), (pong_bytes, pong_ref)) = waveforms();
+    let hash = responder::impl_hash();
+    let spec = experiments::ping_pong("a", "b", 1.0e6, &ping_ref, &pong_ref, 10_000, TURNAROUND_NS, "drop_and_flag", 20_000, (responder::IMPL_ID, &hash));
+    let child_profile = rig::ping_pong_profile("x310-like", "a", "b", false, &temp.0, couplings("a", "b", None, 0));
+    // The Session's own profile: the same radios and Authority, the recorder fed from `a`,
+    // and no Executor, which only the child places.
+    let mut session_profile = child_profile.clone();
+    session_profile["bindings"].as_object_mut().unwrap().remove("exec");
+    session_profile["bindings"]["rec"]["feed"] = json!({ "port": { "component": "a", "port": "rx" }, "policy": "drop_oldest", "capacity": 64 });
+    session_profile["placements"] = json!({ "links": [child_profile["placements"]["links"][0].clone()] });
+
+    let mut server = ezsdr_server::Server::new(ezsdr_server::Config { runs_dir: temp.0.join("runs"), implementations: vec![responder::implementation()] });
+    let result = |handled: ezsdr_server::Handled| match handled.reply {
+        Reply::Result(response) => response,
+        Reply::Error(error) => panic!("{error:?}"),
+    };
+    result(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    let Response::Connected { run: session, .. } = result(server.handle(Request::Connect { profile: Some(session_profile), lease: None }, Vec::new())) else { panic!() };
+    let inputs = vec![ping_bytes.len() as u64, pong_bytes.len() as u64];
+    let request = Request::RunChild { spec, profile: Some(child_profile), inputs, duration_ns: Some(25_000_000) };
+    let Response::Ran { entry, manifest: Some(child), .. } = result(server.handle(request, [ping_bytes, pong_bytes].concat())) else { panic!("the child was refused") };
+    assert!(matches!(entry.outcome, ezsdr_kernel::session::Outcome::Admitted { .. }));
+    assert_eq!(child.run.parent, Some(session));
+    clean_stop(&child);
+    // The same decision as `v58_09_a_reactor_answers_a_ping_with_a_timed_pong`'s.
+    let answered = bursts(&child, "dev_b");
+    assert_eq!(answered.iter().map(decision).collect::<Vec<_>>(), vec![(TX_AT_T0 + 15_046, None, None, 500, 1)]);
+    let capture = rig::read_capture(artifact(&child, "rec"), 1).remove(0);
+    assert_eq!(heard(&capture), Some(15_092));
+    let Response::Finished { manifest, .. } = result(server.handle(Request::Finish {}, Vec::new())) else { panic!() };
+    assert_eq!(manifest.sections[&ezsdr_kernel::spec::Namespace::parse("ezsdr.children").unwrap()].as_array().unwrap().len(), 1);
+}

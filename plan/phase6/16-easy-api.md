@@ -108,7 +108,7 @@ Rules are `EA-n`; decisions are `A1`…`A8` (§6).
 | `ea_06_schema_freeze` | the frame types | equal to `schemas/server/*.v1.json` | EA-6 |
 | `ea_07_a_profile_naming_an_unknown_module_is_refused` | a profile binding `ezsdr.radio.nonexistent` | `refused`, naming the Module | EA-7 |
 | `ea_08_the_manifests_are_written_to_the_session_directory` | a Session with one child, finished | `session-<pid>-0/manifest.json` and `child-<seq>.manifest.json`, equal to the replies' Manifests | EA-8 |
-| `ea_09_the_default_profile_loops_back` | `connect {}`, `radio.tx.channels = 1`, a repeat, a capture | the capture holds the waveform | EA-9 |
+| `ea_09_the_default_profile_loops_back` | `connect {}`, `radio.tx.channels = 1`, a repeat, a capture | the capture holds the waveform at some offset, rotated by one unit phasor (MR-34's LO phases) | EA-9 |
 | `ea_10_connect_stands_at_t0`, `ea_10_a_failed_connect_writes_its_manifest` | a default `connect`; a profile whose Sink directory cannot be created | `now == start_instant`; `ended` with `Failed { prepare }` and a written Manifest | EA-10 |
 | `ea_11_submit_returns_the_logged_entry` | an admitted and a rejected action | both entries, dense sequence numbers | EA-11 |
 | `ea_12_time_and_events` | `advance { by_ns: 1_000_000 }`; a capture's `wait_for`; `events { from }` | `now` moved by exactly 1 ms on the root; the event and its index; the same event read back | EA-12 |

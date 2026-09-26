@@ -68,6 +68,7 @@ dependencies = [
  "ezsdr-link-host",
  "ezsdr-mock-radio",
  "ezsdr-radio",
+ "ezsdr-server",
  "ezsdr-sim",
  "ezsdr-sim-engine",
  "ezsdr-sink",
@@ -126,6 +127,24 @@ name = "ezsdr-radio"
 version = "1.0.0"
 dependencies = [
  "ezsdr-kernel",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ezsdr-server"
+version = "0.1.0"
+dependencies = [
+ "ezsdr-exec-native",
+ "ezsdr-kernel",
+ "ezsdr-link-host",
+ "ezsdr-mock-radio",
+ "ezsdr-radio",
+ "ezsdr-sim",
+ "ezsdr-sim-engine",
+ "ezsdr-sink",
+ "ezsdr-sink-capture",
  "schemars",
  "serde",
  "serde_json",

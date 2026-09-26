@@ -134,7 +134,7 @@ OV-1…OV-23b, PO-1…PO-12, GV-1…GV-6, GW-1…GW-5 and GX-1…GX-6 bind Phase
 - The server: the protocol in process (`serve` over in-memory pipes) — handshake, every request, every error kind, the framing refusals, `read`'s restriction — plus one test that spawns the binary; a schema freeze test for `schemas/server/`.
 - End to end in Rust (`ezsdr-acceptance`): a Session whose child Run holds the Phase 5 responder, driven through the server with the responder registered.
 - End to end in Python (`python/tests/test_easy_api.py`, standard `unittest`): each Vision snippet of §8, against the binary.
-- Timing the loopback carriers assert: at 1 Msps on `x310-like` the radio's transmit path delay is 45 samples and its receive path delay 0 (MR-3), so with a 0 dB coupling and no propagation delay a repeat that starts at transmit sample `s` is heard from receive sample `s + 45`. The Python tests compare a capture with the repeated waveform shifted by the offset they read from the capture's own `continuity` and the burst record, not a constant.
+- What the loopback carriers assert: `x310-like` delays what it radiates (MR-3) and rotates it by the transmit and receive LO phases it draws at `prepare` (MR-34), so a 0 dB loopback returns the repeated waveform at some offset, multiplied by one unit phasor. The carriers find the offset by magnitude and check that one phasor fits every sample, rather than asserting a constant offset or the samples themselves.
 
 ## 8. Traceability
 

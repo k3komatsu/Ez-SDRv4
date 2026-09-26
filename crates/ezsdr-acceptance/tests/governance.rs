@@ -118,10 +118,16 @@ fn ma_03_no_module_crate_depends_on_another() {
         ("ezsdr-link-host", BTreeSet::from(["ezsdr-kernel"])),
         ("ezsdr-sink-capture", BTreeSet::from(["ezsdr-kernel", "ezsdr-sink", "ezsdr-hostmem", "serde_json"])),
         ("ezsdr-exec-native", BTreeSet::from(["ezsdr-kernel", "serde_json"])),
+        // The server is the Runtime that compiles the Modules in, not a Module (Phase 6 §5).
+        ("ezsdr-server", BTreeSet::from([
+            "ezsdr-kernel", "ezsdr-radio", "ezsdr-sim", "ezsdr-sink", "ezsdr-sim-engine",
+            "ezsdr-mock-radio", "ezsdr-link-host", "ezsdr-sink-capture", "ezsdr-exec-native",
+            "serde", "serde_json", "schemars",
+        ])),
         ("ezsdr-acceptance", BTreeSet::from([
             "ezsdr-kernel", "ezsdr-radio", "ezsdr-sim", "ezsdr-sink", "ezsdr-hostmem",
             "ezsdr-sim-engine", "ezsdr-mock-radio", "ezsdr-link-host", "ezsdr-sink-capture",
-            "ezsdr-exec-native", "serde_json",
+            "ezsdr-exec-native", "ezsdr-server", "serde_json",
         ])),
     ]);
     for package in metadata["packages"].as_array().expect("metadata packages") {
@@ -179,6 +185,7 @@ fn po_11_no_hashmap_and_no_wall_clock_in_simulation_code() {
         "ezsdr-sink",
         "ezsdr-sink-capture",
         "ezsdr-exec-native",
+        "ezsdr-server",
     ];
     let mut source_roots: Vec<PathBuf> = new_crates
         .iter()

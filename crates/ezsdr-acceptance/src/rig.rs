@@ -1,20 +1,14 @@
 //! Real Module assembly and artifact helpers for the acceptance tests.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
-use ezsdr_kernel::binding::{AdmissionCheckRegistry, BindingProfile};
-use ezsdr_kernel::contract::ContractRegistry;
 use ezsdr_kernel::coordinator::Assembly;
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
-use ezsdr_kernel::module_api::{Executor, Factories, ModuleRef, ModuleRegistry, Provider, Sink, Version};
-use ezsdr_kernel::policy::EventKindRegistry;
-use ezsdr_kernel::spec::Ident;
-use ezsdr_kernel::time::ClockRegistry;
+use ezsdr_kernel::module_api::{ModuleRef, Version};
 use serde_json::{json, Value as JsonValue};
 
 /// A test-specific temporary capture directory that is removed on drop.
@@ -182,61 +176,10 @@ pub fn ping_pong_profile(profile: &str, pinger: &str, responder_radio: &str, jit
     })
 }
 
-/// Builds the four real Modules and Vocabulary registries named by a BindingProfile.
+/// Builds the real Modules named by a BindingProfile, with the server's catalogue (EA-7)
+/// and the Phase 5 responder handed to the native Executor.
 pub fn assemble(profile_doc: &JsonValue, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Assembly {
-    let profile = BindingProfile::from_json(profile_doc).expect("valid acceptance BindingProfile");
-    let mut registry = ModuleRegistry::new();
-    let mut checks = AdmissionCheckRegistry::new();
-    let mut kinds = EventKindRegistry::with_kernel_kinds();
-    ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).expect("register radio Vocabulary");
-    ezsdr_sim::register(&mut registry, &mut checks, &mut kinds).expect("register sim Vocabulary");
-    ezsdr_sink::register(&mut registry, &mut checks, &mut kinds).expect("register sink Vocabulary");
-    registry.register(ezsdr_sim_engine::descriptor(), Factories { authority: true, ..Factories::default() }).expect("register simulation Engine");
-    registry.register(ezsdr_mock_radio::descriptor(), Factories { provider: true, ..Factories::default() }).expect("register Provider");
-    registry.register(ezsdr_link_host::descriptor(), Factories { link: true, ..Factories::default() }).expect("register host Link");
-    registry.register_link_descriptor(ezsdr_link_host::link_descriptor()).expect("register host Link descriptor");
-    registry.register(ezsdr_sink_capture::descriptor(), Factories { sink: true, ..Factories::default() }).expect("register capture Sink");
-    registry.register(ezsdr_exec_native::descriptor(), Factories { executor: true, ..Factories::default() }).expect("register native Executor");
-
-    let clocks = Arc::new(ClockRegistry::new());
-    let authority_binding = profile.bindings.get(&profile.authority).expect("authority binding");
-    let authority = Box::new(ezsdr_sim_engine::SimEngine::from_binding(authority_binding, clocks.clone()).expect("build simulation Engine"));
-    let mut providers: BTreeMap<Ident, Box<dyn Provider>> = BTreeMap::new();
-    let mut sinks: BTreeMap<Ident, Box<dyn Sink>> = BTreeMap::new();
-    let mut executors: BTreeMap<Ident, Box<dyn Executor>> = BTreeMap::new();
-    let medium = ezsdr_sim::channel::Medium::new();
-    for (name, binding) in &profile.bindings {
-        match binding.module.id.as_str() {
-            "ezsdr.radio.mock" => {
-                let radio = ezsdr_mock_radio::MockRadio::from_binding(binding).expect("build Provider").with_medium(medium.clone());
-                providers.insert(name.clone(), Box::new(radio));
-            }
-            "ezsdr.sink.capture" => {
-                sinks.insert(name.clone(), Box::new(ezsdr_sink_capture::CaptureSink::from_binding(binding).expect("build capture Sink")));
-            }
-            "ezsdr.exec.native" => {
-                let executor = ezsdr_exec_native::NativeExecutor::new(vec![crate::responder::implementation()]).expect("build native Executor");
-                executors.insert(name.clone(), Box::new(executor));
-            }
-            _ => {}
-        }
-    }
-    let link_modules: BTreeSet<ModuleRef> = profile.placements.links.iter().map(|placement| placement.link.clone()).collect();
-    let links = link_modules.into_iter().map(|module| (module, Box::new(ezsdr_link_host::HostLinkModule::new()) as Box<dyn ezsdr_kernel::module_api::Link>)).collect();
-    Assembly {
-        registry,
-        checks,
-        kinds,
-        contracts: ContractRegistry::with_standard_contracts(),
-        clocks,
-        host_clock: Arc::new(ezsdr_kernel::run::SystemHostClock::new()),
-        providers,
-        executors,
-        sinks,
-        authority,
-        links,
-        inputs,
-    }
+    ezsdr_server::assemble(profile_doc, inputs, vec![crate::responder::implementation()]).expect("valid acceptance BindingProfile")
 }
 
 /// Removes run-unique fields from a Manifest for deterministic comparisons.
