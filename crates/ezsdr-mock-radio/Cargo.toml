@@ -1,7 +1,7 @@
 [package]
 name = "ezsdr-mock-radio"
 version = "1.0.0"
-description = "Ez-SDR v4 Module ezsdr.radio.mock 1.1.0 (design/09-mock-radio.md)"
+description = "Ez-SDR v4 Module ezsdr.radio.mock 1.2.0 (design/09-mock-radio.md)"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

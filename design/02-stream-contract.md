@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted 2026-09-23 (Gate A; Phase 1 Step 5). Normative for `ezsdr-kernel::stream` and `::contract`. Amended in Phase 2 by KA-3, KA-18, KA-19. |
+| Status | Accepted 2026-09-23 (Gate A; Phase 1 Step 5). Normative for `ezsdr-kernel::stream` and `::contract`. Amended in Phase 2 by KA-3, KA-18, KA-19. SC-32's marker updated in Phase 4 (VC-3). |
 | Scope | The DataContract registry and Port; `MemoryDomainId` and BufferRef; SampleBlock, its flags and its construction invariants; DataLink identity and back-pressure policy; the TX burst state machine and late policy; the derivation of ContinuityMap and ValidityMap. |
 | Not in scope | Block pools and real link implementations (Phase 2); the MockRadio device model (Phase 2); TimingEnvelope values, which supply `min_lead` (Radio Model, Phase 2); the SigMF writer; `pdu.*` and `tensor.*` contracts (registered later without changing anything here). |
 | Vision § covered | §21; §22's burst and late-policy parts; §23 in full, including the RX rules 1–8, the TX rules 1–5, the overflow paragraph and the ContinuityMap paragraph; §28; §30's link policy; §31's `MemoryDomainId` identity and BufferRef (domain kinds are Vocabulary content); §34's wire-format note; §46's TX-tap note; §17's fault-equivalence requirement. |
@@ -228,7 +228,7 @@ impl ContinuityBuilder {
 - **SC-31b** A per-channel break caused by a **stream** gap produces no `ChannelGap`. The stream `Gap` already covers those samples for every channel, and emitting both would report one overflow on a four-channel stream as one `Gap` plus four duplicates of it, which a SigMF export (SC-32) would then write as four channel annotations for one gap. *Checked: `ContinuityBuilder`.*
 - **SC-31c** A channel that was valid somewhere in the map and is invalid at its end produces a `ChannelGap` running to the map's end. A channel that fails and never returns is the usual outcome of an alignment error, and a builder that emitted a break only when a channel came back would describe that capture as though the channel had simply ended. A channel that was never valid produces nothing, because never enabled is not a gap. *Checked: `ContinuityBuilder`.*
 - **SC-31d** A channel's break is held as a pending close and emitted only when its extent is known: when the channel returns, when a stream gap ends it early, or at `finish`. A break that coincides with a stream gap is recorded from the gap's end, not from the channel's last valid sample, because the samples before the gap were lost by the stream and are already in its `Gap`. Emitting at the moment of the break instead would either double-count those samples against the channel or, when the stream gap closed the channel's segment first, lose the break entirely. *Checked: `ContinuityBuilder`.*
-- **SC-32** A SigMF export maps each valid segment to a capture with `core:sample_start` and `core:global_index`, and carries per-channel validity in an `ezsdr` extension namespace, since no existing SigMF extension covers validity. *Forward obligation: binds the SigMF Sink; no Phase 1 code, tested in Phase 4.*
+- **SC-32** A SigMF export maps each valid segment to a capture with `core:sample_start` and `core:global_index`, and carries per-channel validity in an `ezsdr` extension namespace, since no existing SigMF extension covers validity. *Checked in Phase 4 by `hd_15_a_capture_is_a_sigmf_recording` and `hd_15_channel_validity_and_its_causes`: the capture Sink writes every capture as a SigMF Recording (spec 10 HD-15; Phase 4, VC-3).*
 
 ## 6. Algorithms
 

@@ -66,7 +66,7 @@ fn env_section(extra: JsonValue) -> serde_json::Map<String, JsonValue> {
 /// profile is one and left unfed for a Spec Run, which declares its feed in `outputs[]`.
 fn recorder(dir: &Path, component: Option<&str>) -> JsonValue {
     let mut recorder = json!({
-        "module": { "id": "ezsdr.sink.capture", "version": { "major": 1, "minor": 0, "patch": 0 } },
+        "module": { "id": "ezsdr.sink.capture", "version": { "major": 1, "minor": 1, "patch": 0 } },
         "selector": { "dir": dir.to_string_lossy() }
     });
     if let Some(component) = component {

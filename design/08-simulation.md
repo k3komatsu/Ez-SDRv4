@@ -4,7 +4,7 @@
 |---|---|
 | Status | Accepted at Gate P (owner, 2026-09-24) and ratified at Gate X (owner, 2026-09-25; [`plan/phase2/00-overview.md`](../plan/phase2/00-overview.md) §11). Normative for `crates/ezsdr-sim` and `crates/ezsdr-sim-engine`. Amended in Phase 3 by VB-2; the SimulationChannel is spec 11. |
 | Scope | The `sim` Vocabulary: the `sim.seed` and `sim.faults` environment sections, their admission checks, the deterministic PRNG every simulated model uses, and the virtual-time constants; from 1.1.0, the `sim.channel` section, whose content is spec 11. The Simulation Engine Module `ezsdr.sim-engine` 1.0.0: the discrete-event Time Authority of the Simulation class. |
-| Not in scope | Wall-paced pacing (RealtimeEmulation, Y1). Drifting per-device roots (Y11). Fault kinds beyond three (Phase 4). |
+| Not in scope | Wall-paced pacing (RealtimeEmulation, Y1). Drifting per-device roots (Y11). Fault kinds beyond three (each with the phase that owns its mechanism; Phase 4 §3). |
 | Crates | `crates/ezsdr-sim` (library `ezsdr_sim`; depends on `ezsdr-kernel`, `serde`, `serde_json`, `schemars`); `crates/ezsdr-sim-engine` (library `ezsdr_sim_engine`; depends on `ezsdr-kernel`, `ezsdr-sim`, `serde_json`). |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
 
@@ -48,7 +48,7 @@ The FaultInjector of Vision §13 is not a Module here. A Module cannot call anot
 
 | # | Decision | Choice | Rejected (one line each) | Ceiling / upgrade path |
 |---|---|---|---|---|
-| S1 | FaultInjector | A Vocabulary document each model applies to itself (SE-4) | A FaultInjector Module (MA-3: it cannot reach MockRadio); Kernel-delivered fault Actions (the closed Action set, RS-48, has no member for it and should not) | Phase 4 adds kinds to the same section |
+| S1 | FaultInjector | A Vocabulary document each model applies to itself (SE-4) | A FaultInjector Module (MA-3: it cannot reach MockRadio); Kernel-delivered fault Actions (the closed Action set, RS-48, has no member for it and should not) | A later phase adds a kind to the same section with the mechanism it needs (Phase 4's re-marking: `plan/phase4/00-overview.md` §3) |
 | S2 | Seed location | `sim.seed` in the environment (SE-2) | An envelope field (RS-43 refuses it); a selector field (then two Modules could disagree about the Run's seed) | none |
 | S3 | PRNG | SplitMix64, hand-written (SE-6) | `rand` (a dependency, and its default generators change between versions, which would change recorded Runs) | A second generator is a new `SimRng` constructor, never a change to this one |
 | S4 | Streams of randomness | One `SimRng` per named stream, seeded from the seed and the name (SE-6) | One shared generator (adding a model would reorder every other model's draws) | none |
@@ -88,4 +88,4 @@ The FaultInjector of Vision §13 is not a Module here. A Module cannot call anot
 
 ## 7. Deferred
 
-Wall-paced pacing and the RealtimeEmulation class. Per-device drifting roots. More fault kinds (Phase 4).
+Wall-paced pacing and the RealtimeEmulation class. Per-device drifting roots. More fault kinds, each with the phase that owns its mechanism ([`plan/phase4/00-overview.md`](../plan/phase4/00-overview.md) §3).

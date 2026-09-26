@@ -168,6 +168,34 @@ fn v58_06_injected_overflow_is_a_uhd_overflow() {
 }
 
 #[test]
+fn v51_an_overflowed_capture_is_a_sigmf_recording() {
+    // HD-15: v58_06's overflow Run, read as SigMF. The Dataset holds only delivered
+    // samples, so the capture segment after the gap starts where the first run ends in
+    // the file, and its global index is 50 000 samples further on.
+    let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
+    let faults = json!({ "sim.faults": [{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }] });
+    let temp = rig::TempDir::new("v51-sigmf");
+    let profile = rig::spec_profile("x310-like", json!({ "id": "mock" }), &temp.0, faults);
+    let run = spec_run(&temp, &spec, &profile, BTreeMap::new());
+    let clock = root(&run);
+    let manifest = finish_at(run, clock, T0 + 160_000_000);
+    let capture = artifact(&manifest, "rec");
+    let data = capture.uri.strip_prefix("file://").unwrap();
+    assert!(data.ends_with(".sigmf-data"), "{data}");
+    let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(std::path::Path::new(data).with_extension("sigmf-meta")).unwrap()).unwrap();
+    assert_eq!(meta["global"]["core:datatype"], "cf32_le");
+    assert_eq!(meta["global"]["core:sample_rate"], json!(1_000_000.0));
+    assert_eq!(meta["captures"], json!([
+        { "core:sample_start": 0, "core:global_index": 0 },
+        { "core:sample_start": 1_000, "core:global_index": 51_000 }
+    ]));
+    let gaps = meta["global"]["ezsdr:gaps"].as_array().unwrap();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0]["cause"], json!({ "kind": "overflow_restart" }));
+    assert_eq!((gaps[0]["global_index"].clone(), gaps[0]["len"].clone(), gaps[0]["lost"].clone()), (json!(1_000), json!(50_000), json!(50_000)));
+}
+
+#[test]
 fn v58_06_sequence_error_is_seq_discontinuity() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
     let faults = json!({ "sim.faults": [{ "at_ns": 1_000_000, "fault": "rx_sequence_error", "target": "radio" }] });
@@ -310,6 +338,42 @@ fn v58_13_session_manifest_has_log_waveform_and_capture() {
     let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "ezsdr.radio.mock.mock.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1);
     assert_eq!(bursts[0].end, ezsdr_kernel::stream::BurstEnd::Stop);
+}
+
+#[test]
+fn v58_13_a_session_stop_of_the_recorder_keeps_a_partial_capture() {
+    // Phase 2's named Gate X risk: a `Stop` for the recorder routed through the Kernel's
+    // admission and dispatch, not handed to the Sink directly (HD-11, HD-13).
+    let temp = rig::TempDir::new("v58-13-stop");
+    let profile = rig::session_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let mut run = session_run(&temp, &profile);
+    let clock = root(&run);
+    let capture = |run: &mut ezsdr_kernel::coordinator::RunHandle, samples: i64| {
+        run.submit(SessionAction::Vocabulary {
+            ns: Namespace::parse("sink").unwrap(),
+            verb: Ident::parse("capture").unwrap(),
+            target: ResourceId::parse("rec").unwrap(),
+            at: None,
+            params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::Int(samples))]),
+        }, None).unwrap()
+    };
+    run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
+    assert!(matches!(capture(&mut run, 50_000).outcome, Outcome::Admitted { .. }));
+    run.advance_to(TimePoint::new(clock, T0 + 10_000_000)).unwrap();
+    let stop = run.submit(SessionAction::Stop { target: Some(ResourceId::parse("sink/rec").unwrap()) }, None).unwrap();
+    assert!(matches!(stop.outcome, Outcome::Admitted { .. }), "{:?}", stop.outcome);
+    run.advance_to(TimePoint::new(clock, T0 + 11_000_000)).unwrap();
+    assert!(matches!(capture(&mut run, 1_000).outcome, Outcome::Admitted { .. }));
+    let manifest = end_session(run, clock, T0 + 20_000_000);
+    let stopped = artifact(&manifest, "rec_0");
+    let later = artifact(&manifest, "rec_1");
+    // The Stop finished the recording capture with what it held — samples 1 000 to
+    // 9 999, delivered before T0 + 10 ms — and the Sink went on to serve the next one.
+    assert!(stopped.partial);
+    assert_eq!((stopped.continuity[0].first.ticks, stopped.continuity[0].end.ticks, stopped.size_bytes), (1_000, 10_000, 72_000));
+    assert!(!later.partial);
+    assert_eq!((later.continuity[0].first.ticks, later.size_bytes), (11_000, 8_000));
+    assert_eq!(manifest.action_log.len(), 3);
 }
 
 #[test]

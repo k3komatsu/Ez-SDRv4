@@ -1,7 +1,7 @@
 [package]
 name = "ezsdr-radio"
 version = "1.0.0"
-description = "Ez-SDR v4 Radio Model Vocabulary radio 1.1.0 (design/07-radio-model.md)"
+description = "Ez-SDR v4 Radio Model Vocabulary radio 1.2.0 (design/07-radio-model.md)"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

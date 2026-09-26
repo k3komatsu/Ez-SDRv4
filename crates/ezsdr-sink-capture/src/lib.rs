@@ -1,4 +1,4 @@
-//! Ez-SDR v4 Module ezsdr.sink.capture 1.0.0 (plan/phase2/10-host-data-path.md).
+//! Ez-SDR v4 Module ezsdr.sink.capture 1.1.0 (design/10-host-data-path.md).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -25,24 +25,27 @@ use ezsdr_kernel::spec::{Ident, Key, Namespace, OutputReq, Value};
 use ezsdr_kernel::stream::{
     BlockFlags, BlockHeader, ContinuityBuilder, ContinuityMap, DataLink, DropCarry, StreamError,
 };
-use ezsdr_kernel::time::{AbsoluteDeadline, ClockRegistry, Converted, Duration, TimeAuthority, TimeError, TimePoint};
+use ezsdr_kernel::time::{AbsoluteDeadline, ClockRegistry, Converted, Duration, Rational, TimeAuthority, TimeError, TimePoint};
 use ezsdr_sink::{CAPTURE_ARTIFACT_KIND, CAPTURE_SAMPLES, REQUEST_REJECTED, RequestRejectedPayload};
 
 const CF32_CONTRACT: &str = "ezsdr.stream.cf32";
 const SC16_CONTRACT: &str = "ezsdr.stream.sc16";
 
+/// The SigMF specification version the metadata follows (HD-15).
+const SIGMF_VERSION: &str = "1.2.6";
+
 fn module_ref() -> ModuleRef {
     ModuleRef {
         id: ModuleId::parse("ezsdr.sink.capture").expect("a valid Module id"),
-        version: Version::new(1, 0, 0),
+        version: Version::new(1, 1, 0),
     }
 }
 
-/// The Module descriptor for `ezsdr.sink.capture` 1.0.0 (HD-7).
+/// The Module descriptor for `ezsdr.sink.capture` 1.1.0 (HD-7).
 pub fn descriptor() -> ModuleDescriptor {
     ModuleDescriptor {
         id: ModuleId::parse("ezsdr.sink.capture").expect("a valid Module id"),
-        version: Version::new(1, 0, 0),
+        version: Version::new(1, 1, 0),
         kernel_api: KERNEL_API,
         roles: vec![Role::Sink],
         vocabularies: vec![VocabularyRequirement {
@@ -50,7 +53,7 @@ pub fn descriptor() -> ModuleDescriptor {
             req: VersionReq(Version::new(1, 0, 0)),
         }],
         deployment: Deployment::InProcess {},
-        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.sink.capture 1.0.0")),
+        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.sink.capture 1.1.0")),
     }
 }
 
@@ -76,7 +79,6 @@ struct Capture {
     file: Option<(PathBuf, File)>,
     bps: Option<usize>,
     contract: Option<DataContractId>,
-    ext: Option<&'static str>,
     builders: Vec<ContinuityMap>,
     builder: Option<(ContinuityBuilder, ClockDomainId, u16)>,
     started: bool,
@@ -92,7 +94,6 @@ impl Capture {
             file: None,
             bps: None,
             contract: None,
-            ext: None,
             builders: Vec::new(),
             builder: None,
             started: false,
@@ -237,9 +238,9 @@ impl CaptureSink {
             DropCarry::default()
         };
         let header = block.header().clone();
-        let (bps, ext) = match header.contract.as_str() {
-            CF32_CONTRACT => (8, "cf32"),
-            SC16_CONTRACT => (4, "sc16"),
+        let bps = match header.contract.as_str() {
+            CF32_CONTRACT => 8,
+            SC16_CONTRACT => 4,
             contract => {
                 return Err(self.reject(format!(
                     "HD-10: contract {contract} is not supported by the capture Sink"
@@ -274,7 +275,7 @@ impl CaptureSink {
                     break;
                 };
                 sample = start;
-                self.start_front(bps, ext, header.contract.clone())?;
+                self.start_front(bps, header.contract.clone())?;
             }
 
             let same_contract = self
@@ -337,12 +338,7 @@ impl CaptureSink {
         Ok(())
     }
 
-    fn start_front(
-        &mut self,
-        bps: usize,
-        ext: &'static str,
-        contract: DataContractId,
-    ) -> Result<(), ModuleError> {
+    fn start_front(&mut self, bps: usize, contract: DataContractId) -> Result<(), ModuleError> {
         let id = if let Some(id) = self.queue.front().and_then(|capture| capture.id.clone()) {
             id
         } else {
@@ -373,7 +369,8 @@ impl CaptureSink {
                 }
             })
             .collect();
-        let file_name = format!("{safe_run}_{id}.{ext}");
+        // HD-15: the capture's file is a SigMF Dataset, whatever its contract.
+        let file_name = format!("{safe_run}_{id}.sigmf-data");
         let absolute = std::path::absolute(self.dir.join(file_name))
             .map_err(|error| ModuleError::rejected(format!("HD-10: cannot resolve capture path: {error}")))?;
         let file = File::create(&absolute).map_err(|error| {
@@ -383,7 +380,6 @@ impl CaptureSink {
         capture.id = Some(id);
         capture.file = Some((absolute, file));
         capture.bps = Some(bps);
-        capture.ext = Some(ext);
         capture.contract = Some(contract);
         capture.started = true;
         Ok(())
@@ -411,6 +407,20 @@ impl CaptureSink {
             .id
             .take()
             .ok_or_else(|| ModuleError::rejected("HD-10: started capture has no id"))?;
+        // HD-15: a Recording has one sample rate and one channel count, so only a
+        // capture with a single ContinuityMap gets metadata.
+        if let ([map], Some(contract)) = (capture.builders.as_slice(), capture.contract.as_ref()) {
+            let clocks = self.clocks.as_ref().expect("prepare installs the ClockRegistry");
+            let rate = clocks
+                .nominal_rate(map.domain)
+                .map_err(|error| ModuleError::rejected(format!("HD-15: {error}")))?;
+            let meta = sigmf_meta(map, rate, contract).map_err(ModuleError::rejected)?;
+            let meta_path = path.with_extension("sigmf-meta");
+            let text = serde_json::to_string_pretty(&meta).expect("SigMF metadata is JSON");
+            fs::write(&meta_path, text).map_err(|error| {
+                ModuleError::rejected(format!("HD-15: cannot write {}: {error}", meta_path.display()))
+            })?;
+        }
         self.done.push(ArtifactRef {
             id,
             kind: Namespace::parse(CAPTURE_ARTIFACT_KIND).expect("a valid artifact kind"),
@@ -544,6 +554,96 @@ impl Sink for CaptureSink {
         self.run = None;
         self.output = None;
     }
+}
+
+/// The SigMF metadata of a capture with one ContinuityMap: each run of delivered
+/// samples between stream gaps is a capture segment, and the gaps and per-channel
+/// validity go in the `ezsdr` extension (HD-15, SC-32).
+///
+/// A file index counts delivered samples from `map.first`: gaps are not in the file,
+/// so a tick's index is its offset less the extent of every gap before it.
+pub fn sigmf_meta(
+    map: &ContinuityMap,
+    rate: Rational,
+    contract: &DataContractId,
+) -> Result<serde_json::Value, String> {
+    let datatype = match contract.as_str() {
+        CF32_CONTRACT => "cf32_le",
+        SC16_CONTRACT => "ci16_le",
+        other => return Err(format!("HD-15: contract {other} has no SigMF datatype")),
+    };
+    let first = map.first.ticks;
+    let gap_end = |gap: &ezsdr_kernel::stream::Gap| gap.start.ticks.saturating_add(gap.len as i64);
+    let file_index = |tick: i64| -> i64 {
+        let skipped: u64 = map.gaps.iter().filter(|gap| gap_end(gap) <= tick).map(|gap| gap.len).sum();
+        tick - first - skipped as i64
+    };
+    let segment = |tick: i64| serde_json::json!({ "core:sample_start": file_index(tick), "core:global_index": tick });
+
+    let mut captures = Vec::new();
+    let mut run_start = first;
+    for gap in &map.gaps {
+        if gap.start.ticks > run_start {
+            captures.push(segment(run_start));
+        }
+        run_start = gap_end(gap);
+    }
+    if map.end.ticks > run_start {
+        captures.push(segment(run_start));
+    }
+    let gaps: Vec<_> = map
+        .gaps
+        .iter()
+        .map(|gap| {
+            serde_json::json!({
+                "sample_start": file_index(gap_end(gap)),
+                "global_index": gap.start.ticks,
+                "len": gap.len,
+                "lost": gap.lost,
+                "cause": gap.cause,
+                "link_dropped": gap.link_dropped,
+            })
+        })
+        .collect();
+    let valid: Vec<Vec<_>> = map
+        .valid
+        .iter()
+        .map(|segments| {
+            segments
+                .iter()
+                .map(|s| serde_json::json!({ "sample_start": file_index(s.start.ticks), "sample_count": s.len }))
+                .collect()
+        })
+        .collect();
+    let mut channel_gaps: Vec<_> = map.channel_gaps.iter().map(|g| (file_index(g.start.ticks), g)).collect();
+    channel_gaps.sort_by_key(|(index, g)| (*index, g.channel));
+    let annotations: Vec<_> = channel_gaps
+        .into_iter()
+        .map(|(index, g)| {
+            serde_json::json!({
+                "core:sample_start": index,
+                "core:sample_count": g.len,
+                "core:label": "invalid channel",
+                "ezsdr:channel": g.channel,
+                "ezsdr:cause": g.cause,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "global": {
+            "core:datatype": datatype,
+            "core:version": SIGMF_VERSION,
+            "core:num_channels": map.channels,
+            "core:sample_rate": rate.num() as f64 / rate.den() as f64,
+            "core:recorder": "ezsdr.sink.capture 1.1.0",
+            "core:extensions": [{ "name": "ezsdr", "version": "1.0.0", "optional": true }],
+            "ezsdr:sample_rate": { "num": rate.num(), "den": rate.den() },
+            "ezsdr:gaps": gaps,
+            "ezsdr:valid": valid,
+        },
+        "captures": captures,
+        "annotations": annotations,
+    }))
 }
 
 fn action_kind(action: &Action) -> &'static str {
