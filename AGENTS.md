@@ -4,21 +4,22 @@ Read this before touching anything. Current state and the next step: [handoff.md
 
 ## 1. What this repository is
 
-Ez-SDR is an SDR experiment runtime. Two unrelated lines live in one repository:
+Ez-SDR is an SDR experiment runtime with two unrelated lines, which since 2026-09-26 live in two GitHub repositories: v4 in **[k3komatsu/Ez-SDRv4](https://github.com/k3komatsu/Ez-SDRv4)** (this repository's `origin`, default branch `main`) and v3 in **[k3komatsu/Ez-SDR](https://github.com/k3komatsu/Ez-SDR)** (`master` and the v3 tags). This local clone holds both histories:
 
 | Branch | Content | Status |
 |---|---|---|
 | `main` | **v4** — clean-sheet Rust rewrite. Phases 1–3's accepted specs in `design/01-*.md` … `design/11-*.md` (their process records remain in `plan/phase1/` … `plan/phase3/`; spec 12's amendments are applied to `design/04…09` and recorded in `plan/phase3/12-amendments.md`), plus the Kernel, Radio Model, Simulation Engine, MockRadio and SimulationChannel implementation (`crates/`, `schemas/`). Phase 3 was accepted at Gate X on 2026-09-26; Phase 4 onwards is unwritten. | active development |
-| `master` | **v3** — D + C++ UHD bridge + Python client. Tags `v2.11`, `v3.0.0`–`v3.0.28`. | maintenance; still the GitHub default branch |
-| `gh-pages` | GitHub Pages content only. An orphan branch, created empty on 2026-09-26; no history shared with `main` or `master`. | empty; not yet published |
+| `master` | **v3** — D + C++ UHD bridge + Python client. Tags `v2.11`, `v3.0.0`–`v3.0.28`. Local only here; its GitHub home is `k3komatsu/Ez-SDR`. | maintenance |
+| `gh-pages` | GitHub Pages content for `Ez-SDRv4` only. An orphan branch, created empty on 2026-09-26; no history shared with `main` or `master`. | empty; pushed, Pages not yet configured |
 
 Rules that follow from this layout:
 
 - Never graft, rebase or merge `master` and `main` into each other (not even `merge -s ours`). v4 shares no code with v3; the histories are unrelated on purpose.
 - v4 work happens on `main` only. Do not commit to `master` from a v4 session unless the user explicitly asks for a v3 change.
+- Never push `master` or the v3 tags to `origin` (`Ez-SDRv4`): no `git push --tags`, no `git push --all`. The v3 history belongs to `k3komatsu/Ez-SDR`.
 - `gh-pages` holds only what GitHub Pages serves. Never merge it with `main` or `master`, and change it only when the user asks.
 - `v3/` in the working tree is a **git worktree** of `master`, listed in `.gitignore`. Never `git add v3/`. Never delete it: the design documents cite 22 `v3/...` paths as behavioural evidence (check command in handoff.md §1).
-- `master` stays the default branch until v4 is usable. Flipping it is the user's call and has a Docker `:latest` prerequisite (handoff.md §5).
+- There is no default-branch flip: the two lines are separate repositories. The v3 → v4 items that remain (a container image name shared by both, the v3 README pointing to v4) are in handoff.md §5.
 
 ## 2. Where the design truth lives
 

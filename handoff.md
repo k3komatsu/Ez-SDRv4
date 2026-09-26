@@ -7,11 +7,11 @@
 
 | | |
 |---|---|
-| remote | `git@github.com:k3komatsu/Ez-SDRv4.git`（https://github.com/k3komatsu/Ez-SDRv4，2026-09-26 に `Ez-SDR` から変更） |
+| remote | `origin` = `git@github.com:k3komatsu/Ez-SDRv4.git`（https://github.com/k3komatsu/Ez-SDRv4，default branch `main`）．2026-09-26 に v4 を新リポジトリへ分離した．v3 は https://github.com/k3komatsu/Ez-SDR（`master` のみ，v3 の tags もそちら）に残る |
 | `main` | v4（この worktree）．Phase 0–3 の受理完了．Phase 2 Gate X を owner が2026-09-25に受理し，spec 06–10 を `design/` へ移動，Vision issue 15件を適用（Step X 完了）．Step 16/Gate X/Step X は `bf3b1bf` で commit・push 済み．2026-09-25 の動的レビューで見つかったテスト欠落2件を追加テストで塞いだ（[implementation-notes.md](plan/phase2/implementation-notes.md) 末尾）．Opus `PASS_WITH_RISK` の残余リスクは §4 と `plan/phase2/00-overview.md` §11 に記録．**Phase 3 は 2026-09-26 に Gate P 受理・実装・Review C・Gate X 受理・Step X 完了**（spec 11 を `design/` へ移動，Vision issue 8件を適用）．§4 参照．|
-| `master` | v3（D + C++ UHD bridge + Python client）．tip `4a474e9` = tag `v3.0.28`．**GitHub の default branch のまま** |
-| `gh-pages` | GitHub Pages 用の orphan branch．2026-09-26 に空のコミット `24229a9` で作成．`main`・`master` と履歴を共有しない．push・Pages 設定は未実施 |
-| tags | 35 個（`v2.11`, `v3.0.0`–`v3.0.28`）．すべて v3 系 |
+| `master` | v3（D + C++ UHD bridge + Python client）．tip `4a474e9` = tag `v3.0.28`．この clone ではローカルのみ（upstream なし）．GitHub 上の置き場は `k3komatsu/Ez-SDR` |
+| `gh-pages` | GitHub Pages 用の orphan branch．2026-09-26 に空のコミット `24229a9` で作成．`main`・`master` と履歴を共有しない．push 済み，Pages の公開設定は未実施 |
+| tags | ローカルに 35 個（`v2.11`, `v3.0.0`–`v3.0.28`）．すべて v3 系で，`Ez-SDR` 側にある．`Ez-SDRv4` には tag なし．**`git push --tags` / `--all` をしない**（v3 の tag と `master` が v4 リポジトリに上がる） |
 | 履歴の関係 | **無関係（unrelated）**．graft も merge もしていない．v4 は clean-sheet なので今後も繋がない |
 
 ローカル：
@@ -25,6 +25,7 @@
   ```
 
 - `v3/` を消してしまった場合：`git worktree prune && git worktree add v3 master`
+- v3 の更新を取り込むときの取得元は `origin` ではなく `k3komatsu/Ez-SDR`（例：`git fetch git@github.com:k3komatsu/Ez-SDR.git master`）．
 - **Google Drive の同期で追跡ファイルが消えることがある**．2026-09-24 に `crates/ezsdr-kernel/tests/` と `schemas/`（61 ファイル）が作業ツリーから消え，`git restore crates/ezsdr-kernel/tests schemas` で戻した．作業を始める前に `git status --short` に ` D` 行がないことを確かめる．Drive の同期中に戻すと競合コピー（`… (1).…`）が増えるので，同期を止めてから戻す．
 
 ## 2. 設計文書の状態 — Phase 0・1・2・3 完了
@@ -189,13 +190,10 @@ Vision §67 の Phase 3（SimulationChannel + deterministic Runs）．計画は 
 
 ## 5. v3 → v4 切替で残っている作業（人間の判断が要るもの）
 
-v4 が使える状態になるまで着手不要．ただし順序に注意：**default branch を `main` に変える前に Docker の件を片付ける**．
+2026-09-26 に v4 を `k3komatsu/Ez-SDRv4` へ分離したので，default branch の切替（旧 #1），`release: published` がどの branch の workflow を使うか（旧 #4），dub registry の `~master`（旧 #5）は問題でなくなった．v3 の `Ez-SDR` は `master` と `dub.json` をそのまま持つ．残るもの：
 
 | # | 項目 | 状態 |
 |---|---|---|
-| 1 | GitHub の default branch を `master` → `main` | 未．v4 が使えるまで据え置き |
-| 2 | `ghcr.io/<owner>/ezsdr:latest` が v4 初回リリースで v3 → v4 に化ける | 未．v3 の `.github/workflows/ezsdr-build.yml` が `release: published` で `:latest` を push する（`matrix.uhd == DEFAULT_UHD` のとき）．v3 利用者を固定 tag（例 `:v3.0.28`）へ誘導してから v4 をリリースする |
-| 3 | v3 readme の `ghcr.io/k3kaimu/ezsdr:latest` と現 owner `k3komatsu` の不一致 | 未確認．workflow は `github.repository_owner` を使うので現在の image は `k3komatsu/ezsdr` のはず |
-| 4 | `release: published` がどの branch の workflow file を使うか | **未検証**．初回の v4 release で実測する |
-| 5 | dub registry の `ezsdr` package | 既存 tag は解決し続ける．`~master` 指定と新 version 登録は default branch に `dub.json` がある前提 |
-| 6 | `master` の readme に branch 構成の一行を足す | 未 |
+| 1 | container image 名の衝突：v3 の `.github/workflows/ezsdr-build.yml`（`Ez-SDR` 側）は `release: published` で `ghcr.io/<owner>/ezsdr:latest` を push する（`matrix.uhd == DEFAULT_UHD` のとき）．ghcr の package は owner 単位なので，v4 が同じ `ezsdr` 名で image を出すと `:latest` を取り合う | 未．v4 の image 名を変えるか，v3 利用者を固定 tag（例 `:v3.0.28`）へ誘導してから v4 をリリースする |
+| 2 | v3 readme の `ghcr.io/k3kaimu/ezsdr:latest` と現 owner `k3komatsu` の不一致 | 未確認．workflow は `github.repository_owner` を使うので現在の image は `k3komatsu/ezsdr` のはず |
+| 3 | `Ez-SDR`（v3）の readme に v4 リポジトリ `Ez-SDRv4` への一行を足す | 未 |
