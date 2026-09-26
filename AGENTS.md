@@ -74,7 +74,7 @@ Vision §67: Phase 1 Kernel semantic model → Phase 2 Radio Model + Simulation 
 - Stop exactly where asked: `git add` is not a commit, and a commit is not a push. The user usually commits themselves.
 - Commit subjects in Conventional Commits style (`chore:`, `docs:`, `feat:`); the body records the decision, not the diff.
 - `.DS_Store` is ignored; keep the tree free of OS and editor junk.
-- Build output never goes inside the working tree (it is synced by Google Drive). The main tree builds into `~/.cache/cargo-target/Ez-SDRv4` (untracked `.cargo/config.toml`). A review, mutation or probe build in a copy or worktree — which does not inherit that config — sets `CARGO_TARGET_DIR=~/.cache/cargo-target/Ez-SDRv4-review`, shared by every reviewer; never a per-copy target directory.
+- Build output never goes inside the working tree (it is synced by Google Drive). The main tree builds into `~/.cache/cargo-target/Ez-SDRv4` (untracked `.cargo/config.toml`). A review, mutation or probe build in a copy or worktree — which does not inherit that config — sets `CARGO_TARGET_DIR=~/.cache/cargo-target/Ez-SDRv4-review`, shared by every reviewer; never a per-copy target directory. Make such a copy with fresh timestamps (`rsync -a --no-times`, or `shutil.copy` rather than `copy2`): Cargo judges freshness by mtime, so a copy that keeps old timestamps silently reuses whatever another copy last built there, mutated builds included, and two copies must not build in it at the same time (Phase 5 Review F, P1-4).
 
 ## 8. Subagent usage policy (Claude only)
 

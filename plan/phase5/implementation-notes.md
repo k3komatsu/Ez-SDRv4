@@ -63,7 +63,7 @@ Per crate: `ezsdr-kernel` 456, `ezsdr-radio` 12, `ezsdr-sim` 17, `ezsdr-sim-engi
 
 ## Mutations (GX-4)
 
-`python3 plan/phase5/tools/mutate.py plan/phase5/tools/mutations.json <scratch>` — Phase 4's tool, pointed at Phase 5's list (20 mutations), run in a scratch copy with the shared review target directory.
+`python3 plan/phase5/tools/mutate.py plan/phase5/tools/mutations.json <scratch>` — Phase 4's tool, pointed at Phase 5's list (20 mutations, 27 after Review F), run in a scratch copy with the shared review target directory.
 
 | Mutation | Result |
 |---|---|
@@ -87,7 +87,40 @@ Per crate: `ezsdr-kernel` 456, `ezsdr-radio` 12, `ezsdr-sim` 17, `ezsdr-sim-engi
 | E18 | `mutation: the responder answers at the block's first sample, not the PING's: killed` |
 | E19 | `mutation: the responder answers every loud sample: killed` |
 | E20 | `mutation: KE-1 the scheduled inputs are recorded before the listed ones: killed` |
+| E21 | `mutation: the responder forgets its rearm state at each block: killed` (after Review F) |
+| E22 | `mutation: KC-9 a partial or marked input is accepted: killed` (after Review F) |
+| E23 | `mutation: KC-9 two inputs may share an id: killed` (after Review F) |
+| E24 | `mutation: the drain never steps an Executor: killed` (after Review F) |
+| E25 | `mutation: NX-8 cleanup keeps the queues: killed` (after Review F) |
+| E26 | `mutation: the responder rounds a turnaround down: killed` (after Review F) |
+| E27 | `mutation: KE-2 the stored length compared one way only: killed` (after Review F) |
 
-## Reviews
+After Review F the whole list (27) was run again with the timestamp fix of `mutate.py`: all killed.
 
-Review F (Opus, AGENTS.md §8) — pending.
+## Review F
+
+Opus, adversarial and dynamic (AGENTS.md §8), brief [`prompts/review-f.txt`](prompts/review-f.txt), report [`reviews/review-f.md`](reviews/review-f.md). Verdict **CHANGES_REQUIRED**: 2 P0, 4 P1, 11 P2, all three holes of `00-overview.md` §2 reproduced at `0627839`, the code's behaviour correct (644 on both toolchains, the 20 mutations killed). Every finding was taken; none was rejected.
+
+| Finding | What was done | Where |
+|---|---|---|
+| P0-1 KC-9 kept "an entry no schedule entry references is not kept" | the store's sentence now names the listed inputs too | `design/06` KC-9; spec 15 KE-1 |
+| P0-2 NX-7 against MA-24 and UC-2 | **KE-5** (text): MA-24 and UC-2 bind an Executor that applies Actions; one that applies none refuses them, failing its step; spec 14 §2's "only obligation with no producer" corrected | `design/05` MA-24, UC-2; `design/06` UC-2; spec 15 KE-5; spec 14 §2, NX-7 |
+| P1-1 MA-14a's sentence too broad | restricted to Actions submitted from `step` | `design/05` MA-14a; spec 15 KE-3; spec 14 NX-6 |
+| P1-2 §58 #9 on the wrong evidence | #9 rests on §58's minimal reactive test; its Remaining is a Reactor fed by an event or message edge (Phase 10, §11's owner decision); `ComponentKind::Reactor`'s doc comment follows §19, which regenerates two schema descriptions | `00-overview.md` §3, R1, §8; `module_api.rs`; `schemas/component_descriptor.v1.json`, `experiment_spec.v1.json`; `SCHEMA_CHANGELOG.md` |
+| P1-3 state across a block boundary untested | `v58_12` gains the PING at 11 500 that straddles the boundary at 12 000 (one burst at 18 546); mutation E21 | `tests/reactive.rs`; Appendix A |
+| P1-4 stale builds in the shared target directory | `mutate.py` copies with fresh timestamps; the brief uses `rsync -a --no-times`; AGENTS.md §7 says why | `tools/mutate.py`; `prompts/review-f.txt`; `AGENTS.md` |
+| P2-1 R8's reason | "every stepped Module", and MA-14 for a hardware Provider | `design/04` RS-17; spec 15 KE-4; `00-overview.md` R8 |
+| P2-2 NX-3's "nothing is built" | "that component is not built; those before it were, and stop and cleanup reach them" | spec 14 NX-3 |
+| P2-3 Run-owned provenance in `Manifest.inputs` | KC-9 refuses an input with `partial`, marks or continuity, and two inputs of one id and two hashes; tests; mutations E22, E23 | `pipeline.rs`; `design/06` KC-9; `ke_01_a_declared_input_is_verified_as_a_scheduled_one_is` |
+| P2-4 KE-2 one way | `ke_02` checks a declared size one too small as well; mutation E27 | `coordinator.rs` |
+| P2-5 `v58_10` reads only `use` lines | every `ezsdr_…` crate path is checked, `pub use` is forbidden, and the misspelt `ezsdr_radio_mock` is `ezsdr_mock_radio` | `tests/v58.rs` |
+| P2-6 `ke_03` made no decision | the test wraps the responder to count its decisions and asserts exactly one; mutation E24 (the drain never steps an Executor) | `tests/reactive.rs` |
+| P2-7 NX-8's handles | `nx_08` asserts the queue and the submitter are the harness's alone after `cleanup`, and that an Action then reaches nothing; mutation E25 | `native_executor.rs` |
+| P2-8 the turnaround's rounding | a 3 953.5 µs turnaround is rounded up to 14 000 and is on time; mutation E26 | `tests/reactive.rs` |
+| P2-9 test tables | spec 14's and spec 15's tables now say what the tests do | specs 14 and 15 |
+| P2-10 `plan/phase5/14-…` in `design/05` | the path change is part of Step X | `00-overview.md` §9; spec 15, "Vision issues found" |
+| P2-11 the responder's limits | its doc comment says it reads channel 0 only, ignores validity, and counts its rearm in samples across a gap | `responder.rs` |
+
+The reviewer's judgement of R4 — §22's "a Reactor that is too slow for the hardware fails in simulation" is not met as written — is now an owner decision in `00-overview.md` §11, with Vision issue 2 as the recommendation.
+
+After the fixes: stable 644 passed, 1.85.0 644 passed, Clippy clean, `kernel_surface` 116 NEW / 292, `check_links.py` every link. The mutation list has 27 entries (E21–E27 added for the findings).

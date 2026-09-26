@@ -3,8 +3,8 @@
 | Field | Value |
 |---|---|
 | Status | **Draft, implemented under the owner's delegation** ([`00-overview.md`](00-overview.md) §11). Its text is applied to `design/` in the commit that implements each amendment (GX-5); this file is the record. |
-| Scope | Four Kernel amendments: KE-1 (a Spec lists inputs no schedule entry carries), KE-2 (admission checks a burst's waveform for every origin), KE-3 (a refusal because the Run is ending is not a Module's failure), KE-4 (the two Phase 5 forwards settled). |
-| Amends | `design/03-spec-and-binding.md` (SB-9; new SB-20a; §4's `ExperimentSpec`), `design/04-run-and-session.md` (RS-17, RS-44a), `design/05-module-api.md` (MA-14a, MA-19b, MA-30's ceiling), `design/06-kernel-coordinator.md` (§3, KC-9, KC-24, K11, §13a), `schemas/experiment_spec.v1.json`. |
+| Scope | Five Kernel amendments: KE-1 (a Spec lists inputs no schedule entry carries), KE-2 (admission checks a burst's waveform for every origin), KE-3 (a refusal because the Run is ending is not a Module's failure), KE-4 (the two Phase 5 forwards settled), KE-5 (an Executor that applies no Action refuses one; after Review F). |
+| Amends | `design/03-spec-and-binding.md` (SB-9; new SB-20a; §4's `ExperimentSpec`), `design/04-run-and-session.md` (RS-17, RS-44a), `design/05-module-api.md` (MA-14a, MA-19b, MA-24, UC-2, MA-30's ceiling), `design/06-kernel-coordinator.md` (§3, KC-9, KC-24, K11, §13a), `schemas/experiment_spec.v1.json`. |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
 
 Each amendment gives the problem, the rule text as it reads after the amendment, the rejected alternatives and the tests. Appendix A lists the mutations that show each test guards its rule (GX-4).
@@ -21,9 +21,11 @@ Each amendment gives the problem, the rule text as it reads after the amendment,
 
 > `inputs` lists artifacts the Run consumes that no schedule entry carries — the waveform a Reactor transmits, for example. Each is an `ArtifactRef`, which KC-9 verifies exactly as it verifies a scheduled waveform and whose bytes join the Run's input store, where a Module reads them by hash (MA-5a) and may name them in an Action (RS-44a). The Kernel reads nothing else about an input: which component uses it, and how, is that component's parameters' business (MA-36). Absent means empty (Phase 5, KE-1). *Checked by `ke_01_a_declared_input_is_stored_and_recorded`, `ke_01_a_declared_input_is_verified_as_a_scheduled_one_is` and `sb_09_inputs_is_a_top_level_field`.*
 
-**KC-9 amended** (its first and last sentences):
+**KC-9 amended** (its first sentence, its refusal, the store's sentence and its last sentence):
 
-> Every `ArtifactRef` the Spec's `inputs` lists and every one a Spec schedule entry carries is an input. … anything else is refused (`Failed { plan }`, reason beginning `"KC-9: input <i>: "` for the `i`-th listed input or `"KC-9: entry <i>: "` for a schedule entry). … Each distinct hash is recorded once in `Manifest.inputs`, as the `ArtifactRef` the Spec wrote, the listed inputs first in their order and then the schedule's in schedule order (Phase 5, KE-1).
+> Every `ArtifactRef` the Spec's `inputs` lists and every one a Spec schedule entry carries is an input. … An input is consumed whole and named once: one whose `partial` is true or whose `marks` or `continuity` is not empty — what the Run records on an artifact it *produces* — or whose `id` another input with a different `hash` also has, is refused too (Phase 5 Review F). Anything else is refused (`Failed { plan }`, reason beginning `"KC-9: input <i>: "` for the `i`-th listed input or `"KC-9: entry <i>: "` for a schedule entry). … The bytes of the inputs so verified become the Run's input store, which KC-28 extends; an `Assembly.inputs` entry that the Spec's `inputs` does not list and no schedule entry carries is not kept, so the store holds only verified bytes (Phase 3, KB-1; Phase 5, KE-1). … Each distinct hash is recorded once in `Manifest.inputs`, as the `ArtifactRef` the Spec wrote, the listed inputs first in their order and then the schedule's in schedule order (Phase 5, KE-1).
+
+The store's sentence was left as it stood in the first draft, which kept "an `Assembly.inputs` entry no schedule entry references is not kept" — read literally, that dropped a listed input again (Review F, P0-1). The refusal of `partial`, `marks`, `continuity` and a shared `id` was added after Review F (P2-3): KE-1 let a Spec write Run-owned provenance into `Manifest.inputs`, as a scheduled waveform already could.
 
 The Spec schema (`schemas/experiment_spec.v1.json`) gains the optional property `inputs`, an array of `ArtifactRef`; `SCHEMA_CHANGELOG.md` records it. A document without it reads as before.
 
@@ -35,8 +37,8 @@ The Spec schema (`schemas/experiment_spec.v1.json`) gains the optional property 
 
 | test | input | expected | rules |
 |---|---|---|---|
-| `ke_01_a_declared_input_is_stored_and_recorded` (coordinator) | a Spec listing one input no schedule entry carries, its bytes in `Assembly.inputs`, a stepped test Provider that reads the store in `prepare` | the Provider reads the bytes; `Manifest.inputs` is exactly that `ArtifactRef` | SB-20a, KC-9, KE-1 |
-| `ke_01_a_declared_input_is_verified_as_a_scheduled_one_is` (coordinator) | the listed input with its bytes absent; with one byte changed; with `size_bytes` one too large; with the uri `http://x`; then listed and also scheduled | `Failed { plan }` each time, reason beginning `"KC-9: input 0: "`; the last plans, and `Manifest.inputs` holds the hash once | KC-9, KE-1 |
+| `ke_01_a_declared_input_is_stored_and_recorded` (coordinator) | a Spec listing one input no schedule entry carries, its bytes in `Assembly.inputs`; a test Executor bursting it to a stepped test Provider, which reads the store when it handles the burst | the burst is admitted and the Provider finds the bytes; `Manifest.inputs` is exactly that `ArtifactRef` | SB-20a, KC-9, KE-1 |
+| `ke_01_a_declared_input_is_verified_as_a_scheduled_one_is` (coordinator) | the listed input with its bytes absent; with one byte changed; with `size_bytes` one too large; with the uri `http://x`; with `partial: true`; with a mark; two inputs of one `id` and two hashes; then listed and also scheduled | `Failed { plan }` each time, reason beginning `"KC-9: input 0: "`; the last plans, and `Manifest.inputs` holds the hash once | KC-9, KE-1 |
 | `sb_09_inputs_is_a_top_level_field` (`spec_binding.rs`) | a Spec with `inputs: [ArtifactRef]`; one with `inputs: [{ "uri": 1 }]`; one with no `inputs` | the first parses with the reference; the second is refused by the deserialiser (SB-9); the third reads as empty | SB-9, SB-20a |
 
 `ov_22_schema_freeze` changes with the schema (GX-3).
@@ -68,7 +70,7 @@ The Spec schema (`schemas/experiment_spec.v1.json`) gains the optional property 
 
 | test | input | expected | rules |
 |---|---|---|---|
-| `ke_02_a_module_burst_must_name_a_run_input` (coordinator) | a test Executor submitting a `TxBurst` whose waveform is not an input; one whose waveform the Spec lists but with `size_bytes` one too large; one whose waveform the Spec lists | `Err` with check `ezsdr.input` and the two reasons above; then `Ok`, and the Provider receives the burst | RS-44a, KC-24, KE-2 |
+| `ke_02_a_module_burst_must_name_a_run_input` (coordinator) | a test Executor submitting a `TxBurst` whose waveform is not an input; one whose waveform the Spec lists but with `size_bytes` one too large, and one too small | `Err` with check `ezsdr.input` and the two reasons above, and the Provider receives nothing; the listed waveform itself is admitted in `ke_01_a_declared_input_is_stored_and_recorded` | RS-44a, KC-24, KE-2 |
 
 ---
 
@@ -78,7 +80,9 @@ The Spec schema (`schemas/experiment_spec.v1.json`) gains the optional property 
 
 **MA-14a amended** (sentence added at the end):
 
-> A refusal whose every violation has the check `ezsdr.dispatch` or `ezsdr.run_state` (KC-24 steps 1 and 2) says that the Run is ending, not that the Action was wrong: the emitting Module must not turn it into an error of its own, which the coordinator would record as an abort of a Run that was stopping cleanly (KC-32). The Action simply does not happen, and the termination already records why (Phase 5, KE-3). *Carried by the native Executor, `design/14-native-executor.md` NX-6 (`nx_06_a_refusal_because_the_run_is_ending_is_not_a_failure`), and end to end by `ke_03_a_decision_after_the_stop_is_not_an_abort`.*
+> For an Action submitted from `step` — where a round runs only while the Run is `Running` or in cleanup's drain, which freezes dispatch first (RS-6 step 1) — a refusal whose every violation has the check `ezsdr.dispatch` or `ezsdr.run_state` (KC-24 steps 1 and 2) says that the Run is ending, not that the Action was wrong: the emitting Module must not turn it into an error of its own, which the coordinator would record as an abort of a Run that was stopping cleanly (KC-32). The Action simply does not happen, and the termination already records why (Phase 5, KE-3). *Carried by the native Executor, `design/14-native-executor.md` NX-6 (`nx_06_a_refusal_because_the_run_is_ending_is_not_a_failure`), and end to end by `ke_03_a_decision_after_the_stop_is_not_an_abort`.*
+
+The first draft said this of every refusal with those checks. Review F (P1-1) showed it too broad: an Executor that submits from `start()`, before the Run is `Running`, gets `ezsdr.run_state`, and there the Run is not ending at all; the sentence now binds only what `step` submits.
 
 **Rejected.** Not stepping Executors in the drain (an Executor or Sink would lose the tail a Provider delivers, which is what KA-12's drain exists for). Admitting Module Actions during the drain (RS-7: a burst queued after dispatch froze would reopen the transmitter that step 2 stopped). A distinct error kind for "the Run is ending" (a Kernel type change for what the two existing checks already say).
 
@@ -86,7 +90,7 @@ The Spec schema (`schemas/experiment_spec.v1.json`) gains the optional property 
 
 | test | input | expected | rules |
 |---|---|---|---|
-| `ke_03_a_decision_after_the_stop_is_not_an_abort` (acceptance) | the Mini Reactive Radio with the PING at 25 960 µs and the Run advanced to 25 990 µs and finished, so the PING's first sample reaches the responder only in the drain | the termination is `Stopped { client }` with `also` empty; the responder radio records no burst | MA-14a, KE-3, NX-6 |
+| `ke_03_a_decision_after_the_stop_is_not_an_abort` (acceptance) | the Mini Reactive Radio with the PING at 25 960 µs and the Run advanced to 25 990 µs and finished, so the PING's first sample reaches the responder only in the drain; the responder wrapped to count its decisions | exactly one decision was made; the termination is `Stopped { client }` with `also` empty; the responder radio records no burst | MA-14a, KE-3, NX-6 |
 
 ---
 
@@ -94,7 +98,9 @@ The Spec schema (`schemas/experiment_spec.v1.json`) gains the optional property 
 
 **RS-17 amended**: its sentence "*Forward: whether the reactive path coerces is Phase 5's to settle (Phase 2, KA-6).*" becomes:
 
-> *Settled in Phase 5 (KE-4): it does not. The stepping loop holds every Module while one runs, so the Kernel cannot call the target's `coerce` for a Module's Action, and MA-14 already makes the target enforce its own envelope and report its Vocabulary's event; MockRadio re-runs its `coerce` when an update applies (MR-18). Checked by `kc_24_a_module_update_is_not_coerced_by_the_kernel`.*
+> *Settled in Phase 5 (KE-4): it does not. The stepping loop holds every stepped Module while one runs, so the Kernel cannot call a stepped target's `coerce` for a Module's Action; and for every target — a hardware Provider is not stepped and not held (MA-15) — MA-14 already makes the target enforce its own envelope and report its Vocabulary's event, which keeps Mock and hardware alike (§59); MockRadio re-runs its `coerce` when an update applies (MR-18). Checked by `kc_24_a_module_update_is_not_coerced_by_the_kernel`.*
+
+(The first draft gave only the lock as the reason, which holds for stepped Modules alone; Review F, P2-1.)
 
 **Spec 06 K11**'s ceiling cell "Phase 5" becomes "settled in Phase 5: not coerced (KE-4)", and §13a loses "The reactive path's coerce (Phase 5)."
 
@@ -108,6 +114,22 @@ The Spec schema (`schemas/experiment_spec.v1.json`) gains the optional property 
 
 ---
 
+## KE-5 — An Executor that applies no Action refuses one (after Review F)
+
+**Problem.** MA-24 says an admitted `UpdateParameter` that reaches an Executor "is applied under the parameter's declared update class as UC-2…UC-6 define it", and UC-2 makes that a "producer obligation of every Provider, Executor and Sink". The native Executor applies no Action (NX-7): it fails its step instead. Review F (P0-2) ran it: a responder pushing `UpdateParameter { target: responder, key: …ping.threshold, class: cold }` is admitted by the Kernel (the parameter declares its class, RS-17) and the Run ends `Failed { run }`, "KC-30: island_0: NX-7: …". NX-7 contradicted two accepted rules that no amendment had touched.
+
+**MA-24 amended** (after "…as UC-2…UC-6 define it"):
+
+> — by an Executor that applies Actions. An Executor that applies none refuses one that reaches it, failing its `step` (MA-14: never silently accepted), and its spec says so; `ezsdr.exec.native` 1.0.0 is one (`design/14-native-executor.md` NX-7), and an Executor that applies component parameters is Phase 10's (Phase 5, KE-5).
+
+**UC-2 amended** (its italic marker, in `design/05` and in `design/06` §10): "*Producer obligation of every Provider, Executor and Sink that applies updates; an Executor that applies no Action refuses one instead (MA-24) and has none (Phase 5, KE-5). MockRadio's test is MR-18's.*"
+
+**Rejected.** Applying UC-2…UC-6 to component parameters now (no Phase 5 path needs it: a schedule entry cannot target a component, SB-16; a Session has none, SB-22c; and a Reactor updating a peer is Phase 10's). Refusing component-parameter updates at admission (the Kernel would have to know which Executor applies which Action, and a later Executor that does would need a Kernel change). Dropping them in the Executor (MA-14).
+
+**Tests.** `nx_07_an_action_addressed_to_the_executor_fails_the_step` (spec 14) carries the refusal; KE-5 changes text only.
+
+---
+
 ## Vision issues found
 
 Applied at Step X with the owner's approval (OV-6, GX-5), recorded in [`vision-issues.md`](vision-issues.md):
@@ -115,6 +137,8 @@ Applied at Step X with the owner's approval (OV-6, GX-5), recorded in [`vision-i
 1. **§9's conceptual shape of an ExperimentSpec** lists `version, requirements, resources, graph, schedule, outputs, policies, extensions`. It gains `inputs — artifacts the Run consumes that no schedule entry carries, such as a Reactor's waveform or a calibration artifact (§26)` (KE-1, SB-20a).
 2. **§22 says "a Reactor that is too slow for the hardware fails in simulation."** What Simulation enforces is the device's side: the lead of a response, counted from when the device delivered the samples it reacts to, against the same envelope as on hardware. Simulation charges a component no processing time (`00-overview.md` R4). The sentence should say so, and name RealtimeEmulation and a component's declared budget as where processing time is exposed.
 3. **§19** gains spec 14's `Normative:` line (spec 14 §8).
+
+At Step X, when spec 14 moves to `design/14-native-executor.md`, the references to `plan/phase5/14-native-executor.md` that the implementation commits put in `design/05` (MA-14a, MA-19b, MA-24, MA-30) are changed to the new path (Review F, P2-10).
 
 ---
 
@@ -144,3 +168,10 @@ The list is [`tools/mutations.json`](tools/mutations.json), run with `python3 pl
 | E18 | the responder answers at the block's first sample, not the PING's | `ezsdr-acceptance` | `v58_12_a_reactor_answers_whatever_the_block_lengths` |
 | E19 | the responder answers every loud sample | `ezsdr-acceptance` | `v58_09_every_ping_gets_one_pong` |
 | E20 | KE-1 the scheduled inputs are recorded before the listed ones | `ezsdr-kernel` | `v58_09_a_reactor_answers_a_ping_with_a_timed_pong` |
+| E21 | the responder forgets its rearm state at each block (Review F F17) | `ezsdr-acceptance` | `v58_12_a_reactor_answers_whatever_the_block_lengths` |
+| E22 | KC-9 a `partial` or marked input is accepted (Review F P2-3) | `ezsdr-kernel` | `ke_01_a_declared_input_is_verified_as_a_scheduled_one_is` |
+| E23 | KC-9 two inputs may share an id (Review F P2-3) | `ezsdr-kernel` | `ke_01_a_declared_input_is_verified_as_a_scheduled_one_is` |
+| E24 | the drain never steps an Executor (Review F F21) | `ezsdr-kernel` | `ke_03_a_decision_after_the_stop_is_not_an_abort` |
+| E25 | NX-8 `cleanup` keeps the queues (Review F F07) | `ezsdr-exec-native` | `nx_08_stop_reaches_every_component_and_cleanup_is_idempotent` |
+| E26 | the responder rounds a turnaround down (Review F F18) | `ezsdr-acceptance` | `v58_09_a_pong_short_of_the_lead_is_late_as_on_hardware` |
+| E27 | KE-2 the stored length compared one way only (Review F F10) | `ezsdr-kernel` | `ke_02_a_module_burst_must_name_a_run_input` |

@@ -15,8 +15,8 @@ This is a review only:
 - Do not edit, create or delete anything in the repository. Never run git
   commands that change state. Never run `cargo fmt`. Never touch v3/.
 - For anything you run, copy the working tree into a scratch directory outside
-  the repository (`rsync -a --exclude target --exclude v3 --exclude .git
-  --exclude tmp ./ <scratch>/`) and build there with
+  the repository (`rsync -a --no-times --exclude target --exclude v3 --exclude
+  .git --exclude tmp ./ <scratch>/` — `--no-times` added after Review F, P1-4) and build there with
   CARGO_TARGET_DIR=$HOME/.cache/cargo-target/Ez-SDRv4-review (AGENTS.md §7;
   shared by every reviewer). The zsh shell does not word-split an unquoted
   $VAR: write cargo arguments out literally.

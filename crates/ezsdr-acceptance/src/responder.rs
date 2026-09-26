@@ -9,6 +9,10 @@
 //! turnaround, in the receive stream's SampleClock, which the Executor submits (NX-6).
 //! Admission converts the target onto the transmit clock (SC-23a), and the radio decides
 //! the burst's lead (MA-14, SC-27).
+//!
+//! What it does not do, being a Mini radio's detector: it reads channel 0 only and ignores
+//! per-channel validity (SC-14), and it counts its rearm in samples delivered, so a gap
+//! (`GAP_BEFORE`, SC-13) shortens the quiet it waits for by the samples the gap lost.
 
 use std::sync::Arc;
 

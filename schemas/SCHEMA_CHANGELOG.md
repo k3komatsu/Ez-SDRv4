@@ -23,6 +23,9 @@ Still version 1: v4.0 has not frozen. Additive.
   consumes that no schedule entry carries, such as the waveform a Reactor transmits. KC-9
   verifies and stores them as it does a scheduled waveform (SB-20a; Phase 5, KE-1). A document
   without it parses as before; absent means empty.
+- `component_descriptor`, `experiment_spec`: the description of `ComponentKind`'s `reactor`
+  value, which said a Reactor "reacts to samples"; Vision §19 says events and messages (Phase 5
+  Review F, P1-2). Description only; no document changes meaning.
 
 ## v1 — Phase 4 — the hot-path form of `RX_OVERFLOW`
 

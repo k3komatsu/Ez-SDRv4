@@ -12,15 +12,19 @@
 mod support;
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ezsdr_acceptance::{experiments, responder, rig};
+use ezsdr_exec_native::{Component, ComponentContext, Implementation, NativeExecutor};
+use ezsdr_kernel::event::Action;
 use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
+use ezsdr_kernel::module_api::{ModuleError, StepOutcome, StopMode};
 use ezsdr_kernel::run::{StopCause, Termination};
 use ezsdr_kernel::spec::Ident;
 use ezsdr_kernel::stream::BurstRecord;
 use ezsdr_kernel::time::TimePoint;
 use serde_json::json;
-use support::{artifact, finish_at, root, section, spec_run, T0};
+use support::{artifact, finish_at, root, section, T0};
 
 /// The transmit clock starts at arm and the receive clock at T0, 2 s later (MR-9, MR-11),
 /// so transmit tick `2 000 000 + k` is receive sample `k` at 1 Msps.
@@ -67,6 +71,8 @@ struct Ping<'a> {
     seed: u64,
     /// Where the Run is stopped: `None` runs to T0 + 25 ms as the other carriers do.
     stop_at: Option<i64>,
+    /// The responder's implementation, when a test wraps it.
+    implementation: Option<Implementation>,
 }
 
 impl Default for Ping<'_> {
@@ -81,6 +87,7 @@ impl Default for Ping<'_> {
             noise_dbfs: None,
             seed: 0,
             stop_at: None,
+            implementation: None,
         }
     }
 }
@@ -102,7 +109,11 @@ fn ping_pong(temp: &rig::TempDir, ping: Ping<'_>) -> (Manifest, Vec<(f32, f32)>)
     let environment = couplings(ping.pinger, ping.responder, ping.noise_dbfs, ping.seed);
     let profile = rig::ping_pong_profile("x310-like", ping.pinger, ping.responder, ping.jitter, &temp.0, environment);
     let inputs = BTreeMap::from([(ping_ref.hash.clone(), ping_bytes), (pong_ref.hash.clone(), pong_bytes)]);
-    let mut run = spec_run(temp, &spec, &profile, inputs);
+    let mut assembly = rig::assemble(&profile, inputs);
+    if let Some(implementation) = ping.implementation {
+        assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(NativeExecutor::new(vec![implementation]).unwrap()));
+    }
+    let mut run = ezsdr_kernel::coordinator::start_spec_run(&spec, &profile, assembly).expect("Spec Run starts");
     let clock = root(&run);
     let manifest = match ping.stop_at {
         Some(tick) => {
@@ -224,6 +235,10 @@ fn v58_09_a_pong_short_of_the_lead_is_late_as_on_hardware() {
     let (one_early, _) = late("drop_and_flag", 3_953_000, "v58-09-edge-late");
     assert!(bursts(&one_early, "dev_b").is_empty());
     assert_eq!(time_errors(&one_early)[0]["late_by_ns"], json!(1_000));
+    // A turnaround between two samples is rounded up to the next one, so 3 953.5 µs is
+    // on time where 3 953 µs is not (Review F, P2-8).
+    let (rounded, _) = late("drop_and_flag", 3_953_500, "v58-09-edge-rounded");
+    assert_eq!(bursts(&rounded, "dev_b").iter().map(decision).collect::<Vec<_>>(), vec![(TX_AT_T0 + 14_000, None, None, 500, 1)]);
 }
 
 #[test]
@@ -264,6 +279,36 @@ fn v58_12_a_reactor_answers_whatever_the_block_lengths() {
     // … and the blocks really differed, or the equality proves nothing.
     let blocks = |manifest: &Manifest| section(manifest, "ezsdr.radio.mock.dev_b.stats")["rx_blocks"].clone();
     assert_ne!(blocks(&plain), blocks(&jittered));
+
+    // A PING that straddles a block boundary is one PING, whatever seed: at 11 500 its
+    // first sample reaches the responder at 11 546 and its last at 12 545, across the
+    // boundary at 12 000, and it is answered once (Review F, P1-3).
+    let (straddling, _) = ping_pong(&rig::TempDir::new("v58-12-reactor-straddle"), Ping { pings: &[11_500], turnaround_ns: JITTER_TURNAROUND_NS, ..Ping::default() });
+    assert_eq!(bursts(&straddling, "dev_b").iter().map(decision).collect::<Vec<_>>(), vec![(TX_AT_T0 + 18_546, None, None, 500, 1)]);
+}
+
+/// How many Actions the wrapped responder decided, for `ke_03`, the only test that wraps it
+/// (a cleanup step runs on a thread of its own, RS-8a, so a thread-local would miss it).
+static DECIDED: AtomicUsize = AtomicUsize::new(0);
+
+struct Counting(Box<dyn Component>);
+
+impl Component for Counting {
+    fn prepare(&mut self, ctx: ComponentContext) -> Result<(), ModuleError> {
+        self.0.prepare(ctx)
+    }
+    fn step(&mut self, until: TimePoint, out: &mut Vec<Action>) -> Result<StepOutcome, ModuleError> {
+        let before = out.len();
+        let outcome = self.0.step(until, out);
+        DECIDED.fetch_add(out.len() - before, Ordering::SeqCst);
+        outcome
+    }
+    fn stop(&mut self, mode: StopMode) -> Result<(), ModuleError> {
+        self.0.stop(mode)
+    }
+    fn cleanup(&mut self) {
+        self.0.cleanup()
+    }
 }
 
 #[test]
@@ -272,7 +317,19 @@ fn ke_03_a_decision_after_the_stop_is_not_an_abort() {
     // 30 samples, which reach the responder from receive sample 26 006, in a block it is
     // handed only in the orderly drain (KA-12). Dispatch is frozen by then, admit() refuses
     // the PONG with ezsdr.dispatch, and that refusal must not become an abort (KE-3, NX-6).
-    let (manifest, _) = ping_pong(&rig::TempDir::new("ke-03-drain"), Ping { pings: &[25_960], stop_at: Some(T0 + 25_990_000), ..Ping::default() });
+    let counting = Implementation {
+        id: responder::IMPL_ID.to_owned(),
+        hash: responder::impl_hash(),
+        make: || Box::new(Counting((responder::implementation().make)())),
+    };
+    let (manifest, _) = ping_pong(
+        &rig::TempDir::new("ke-03-drain"),
+        Ping { pings: &[25_960], stop_at: Some(T0 + 25_990_000), implementation: Some(counting), ..Ping::default() },
+    );
+    // The responder did decide — in the drain, the one place it heard the PING — and the
+    // refusal left the stop clean (Review F, P2-6: without the count the test would pass
+    // with no decision at all).
+    assert_eq!(DECIDED.load(Ordering::SeqCst), 1);
     clean_stop(&manifest);
     let pinged = bursts(&manifest, "dev_a");
     assert_eq!((pinged.len(), pinged[0].samples), (1, 30), "{pinged:?}");

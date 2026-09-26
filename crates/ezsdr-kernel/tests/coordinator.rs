@@ -3307,6 +3307,37 @@ fn ke_01_a_declared_input_is_verified_as_a_scheduled_one_is() {
     http.uri = "http://x".to_owned();
     let uri = plan_failure(http, Some(bytes.clone()));
     assert!(uri.starts_with("KC-9: input 0: uri must begin"), "{uri}");
+    // An input is consumed whole: a Spec cannot write the provenance the Run records on
+    // what it produces (Review F, P2-3).
+    let mut partial = valid.clone();
+    partial.partial = true;
+    let flag = plan_failure(partial, Some(bytes.clone()));
+    assert!(flag.starts_with("KC-9: input 0: an input carries no partial flag"), "{flag}");
+    let mut marked = valid.clone();
+    marked.marks.push(ezsdr_kernel::manifest::ArtifactMark {
+        kind: ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::DEVICE_LOST).unwrap(),
+        time: TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0),
+    });
+    let mark = plan_failure(marked, Some(bytes.clone()));
+    assert!(mark.starts_with("KC-9: input 0: an input carries no partial flag"), "{mark}");
+    // Two inputs under one name: refused, whichever of them is listed first.
+    let other_bytes = vec![1u8; 80];
+    let mut namesake = valid.clone();
+    namesake.hash = ContentHash::of_bytes(&other_bytes);
+    namesake.uri = format!("mem:{}", namesake.hash);
+    let twice = {
+        let (mut spec, profile) = executor_docs();
+        spec["inputs"] = serde_json::json!([valid, namesake]);
+        let mut assembly = rig(Pacing::FreeRunning).assembly;
+        assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
+        assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &Probe::new())));
+        assembly.inputs.insert(valid.hash.clone(), bytes.clone());
+        assembly.inputs.insert(namesake.hash.clone(), other_bytes);
+        start_spec_run(&spec, &profile, assembly).unwrap().finish()
+    };
+    assert_eq!(twice.termination.reason, Termination::Failed { stage: Stage::Plan });
+    let reason = failure(&twice)["reason"].as_str().unwrap();
+    assert!(reason.starts_with("KC-9: input 0: another input is also called waveform"), "{reason}");
 
     // Listed and scheduled: one input, recorded once, listed first.
     let mut spec = spec_one();
@@ -3335,13 +3366,17 @@ fn ke_02_a_module_burst_must_name_a_run_input() {
     assert!(probe.with_prefix("p:burst_input:").is_empty(), "the Provider must not receive it");
     assert!(manifest.inputs.is_empty());
 
-    let mut wrong_size = reference.clone();
-    wrong_size.size_bytes = 81;
-    let (probe, _) = ke_run(std::slice::from_ref(&reference), wrong_size, Some(bytes));
-    let refused = format!(
-        "x:submit:err:ezsdr.input:RS-44a: input {} holds 80 bytes, and the burst declares 81",
-        reference.hash
-    );
-    assert!(probe.lines().contains(&refused), "{:?}", probe.lines());
-    assert!(probe.with_prefix("p:burst_input:").is_empty());
+    // Either way round: a burst declaring more bytes than the input holds, or fewer
+    // (Review F, P2-4).
+    for declared in [81, 79] {
+        let mut wrong_size = reference.clone();
+        wrong_size.size_bytes = declared;
+        let (probe, _) = ke_run(std::slice::from_ref(&reference), wrong_size, Some(bytes.clone()));
+        let refused = format!(
+            "x:submit:err:ezsdr.input:RS-44a: input {} holds 80 bytes, and the burst declares {declared}",
+            reference.hash
+        );
+        assert!(probe.lines().contains(&refused), "{:?}", probe.lines());
+        assert!(probe.with_prefix("p:burst_input:").is_empty());
+    }
 }

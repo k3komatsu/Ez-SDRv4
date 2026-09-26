@@ -513,7 +513,8 @@ pub struct ComponentDescriptor {
 pub enum ComponentKind {
     /// Transforms samples.
     Processor,
-    /// Reacts to samples by emitting Actions (MA-14a, Vision §19).
+    /// A stateful decision component: it turns what it receives — events and messages
+    /// in Vision §19's words — into Actions, which it emits through `admit()` (MA-14a).
     Reactor,
 }
 

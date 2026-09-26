@@ -427,8 +427,13 @@ fn nx_08_stop_reaches_every_component_and_cleanup_is_idempotent() {
     SCRIPT.with(|s| s.borrow_mut().failing_stop.push("a".to_owned()));
     let error = executor.stop(StopMode::Orderly).unwrap_err();
     assert_eq!(error.message, "test: a fails its stop");
+    assert_eq!((Arc::strong_count(&h.out), Arc::strong_count(&h.actions)), (2, 2), "the Executor keeps both queues");
     executor.cleanup();
     executor.cleanup();
+    // Every kept handle is dropped (MA-5a, MA-7): the queues are the harness's alone, and an
+    // Action that arrives now reaches nothing (Review F, P2-7).
+    assert_eq!((Arc::strong_count(&h.out), Arc::strong_count(&h.actions)), (1, 1));
+    h.actions.0.lock().unwrap().push_back(stop_action("a"));
     assert!(executor.step(at(10)).unwrap() == StepOutcome { progressed: false });
     let ending: Vec<_> = log().into_iter().filter(|l| !l.starts_with("prepare:")).collect();
     assert_eq!(ending, vec!["stop:a:Orderly", "stop:b:Orderly", "cleanup:a", "cleanup:b"]);

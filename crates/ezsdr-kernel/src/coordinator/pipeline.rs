@@ -429,8 +429,16 @@ impl RunHandle {
         });
         let named: Vec<(String, ArtifactRef)> = declared.chain(scheduled).map(|(what, input)| (what, input.clone())).collect();
         for (what, waveform) in &named {
-            let refusal =
-                if !(waveform.uri.starts_with("mem:") || waveform.uri.starts_with("file://")) {
+            // An input is consumed whole and named once: `partial`, `marks` and
+            // `continuity` are what the Run records on an artifact it produces, and a Spec
+            // that wrote them would put Run-owned provenance in `Manifest.inputs`; two
+            // inputs under one name would leave a reader unable to tell them apart
+            // (Phase 5 Review F, P2-3).
+            let refusal = if waveform.partial || !waveform.marks.is_empty() || !waveform.continuity.is_empty() {
+                Some("an input carries no partial flag, marks or continuity; those are a produced artifact's".to_owned())
+            } else if named.iter().any(|(_, other)| other.id == waveform.id && other.hash != waveform.hash) {
+                Some(format!("another input is also called {}", waveform.id))
+            } else if !(waveform.uri.starts_with("mem:") || waveform.uri.starts_with("file://")) {
                     Some("uri must begin with mem: or file://".to_owned())
                 } else if let Some(bytes) = crate::module_api::InputStore::get(&*self.shared.store, &waveform.hash) {
                     if bytes.len() as u64 != waveform.size_bytes {

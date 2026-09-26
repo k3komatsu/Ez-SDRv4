@@ -51,7 +51,10 @@ def prepare_scratch(root, scratch):
             return []
         return [name for name in names if name in IGNORED]
 
-    shutil.copytree(root, scratch, ignore=ignore)
+    # Fresh timestamps (shutil.copy, not copytree's default copy2): Cargo judges freshness
+    # by mtime, so a copy that keeps old timestamps reuses whatever another copy last built
+    # in the shared target directory, mutated builds included (Phase 5 Review F, P1-4).
+    shutil.copytree(root, scratch, ignore=ignore, copy_function=shutil.copy)
     open(os.path.join(scratch, MARKER), "w").close()
     return scratch
 

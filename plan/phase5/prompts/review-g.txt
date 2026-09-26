@@ -1,0 +1,64 @@
+You are the adversarial reviewer for "Review G" of the Ez-SDR v4 Phase 5
+implementation, in /Users/komatsu/GoogleDrive/github/Ez-SDRv4 (branch `main`).
+Review G is a re-review scoped to the fixes of Review F. Review F's report is
+plan/phase5/reviews/review-f.md; the triage, finding by finding, is the
+"Review F" section of plan/phase5/implementation-notes.md. The fixes are the
+commit after 35cdeaf (read `git log --oneline 0627839..HEAD`).
+
+This is a review only:
+- Do not edit, create or delete anything in the repository. Never run git
+  commands that change state. Never run `cargo fmt`. Never touch v3/.
+- For anything you run, copy the working tree into a scratch directory outside
+  the repository with fresh timestamps (`rsync -a --no-times --exclude target
+  --exclude v3 --exclude .git --exclude tmp ./ <scratch>/`; AGENTS.md §7 says
+  why) and build there with
+  CARGO_TARGET_DIR=$HOME/.cache/cargo-target/Ez-SDRv4-review. Nothing else
+  builds in that directory while you run. The zsh shell does not word-split an
+  unquoted $VAR: write cargo arguments out literally.
+- Run things, and build probes for every claim you doubt.
+
+Check, in this order:
+1. Each Review F finding: is the fix what the finding asked for, does it hold,
+   and did it introduce a new defect? In particular:
+   - P0-1: KC-9 in design/06 and spec 15 now reads consistently with SB-20a
+     and the code, sentence by sentence.
+   - P0-2: KE-5's text in design/05 (MA-24, UC-2) and design/06 (UC-2) removes
+     the contradiction with NX-7 without weakening what a Provider or Sink
+     owes; spec 14 §2's corrected claim is true (check the Phase 1 exit-review
+     tables).
+   - P1-1: MA-14a's restricted sentence; is "a round runs only while Running or
+     in cleanup's drain, which freezes dispatch first" true in the coordinator
+     (KC-18's start round, KC-21's rounds after a dispatch, the drain)?
+   - P1-2: the §58 #9 row, R1 and §3's event-edge row; the new doc comment of
+     ComponentKind::Reactor and the two regenerated schema descriptions.
+   - P1-3: the straddling PING in v58_12; does it fail with the rearm state
+     reset per block, deterministically?
+   - P1-4: mutate.py's copy and the recipe; does a fresh copy now rebuild?
+   - P2-3: KC-9's new refusals. Can they refuse anything a valid Spec or a
+     Session sends (a scheduled waveform reused by two entries, KC-28's
+     generated ids, an input listed and scheduled)? Is the id rule the right
+     one?
+   - P2-5, P2-6, P2-7, P2-8: do the new assertions fail when the behaviour
+     they carry is broken?
+2. Run the 27 mutations: `python3 plan/phase5/tools/mutate.py
+   plan/phase5/tools/mutations.json <scratch-dir>` from your scratch copy's root
+   (the scratch directory outside that copy). Re-run the Review F mutations
+   that survived (F07, F10, F18, F19, F20, F21 in review-f.md's terms) against
+   the new tests and report each.
+3. Anything Review F did not look at that the fixes now touch.
+4. Run in the scratch copy:
+     cargo +1.85.0 test --workspace
+     cargo +stable test --workspace
+     cargo +stable clippy --workspace --all-targets -- -D warnings
+     python3 plan/phase3/tools/check_links.py
+   and check that kernel_surface's ov_23b still prints 116 NEW / 292.
+
+Every finding needs a location, evidence (quoted text or the command and its
+output), a severity (P0 wrong behaviour, a broken rule or a contradiction; P1
+likely to mislead a later phase, a test that proves less than its rule, or a
+claim the evidence does not support; P2 clarity), and one recommended fix. No
+finding without evidence.
+
+Final message: a verdict (PASS, PASS_WITH_RISK or CHANGES_REQUIRED); for each
+Review F finding one line, closed or not and why; any new findings in full
+(P0/P1) or one line (P2); the mutation results; the test counts.

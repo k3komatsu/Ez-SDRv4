@@ -55,7 +55,7 @@
         },
         {
           "const": "reactor",
-          "description": "Reacts to samples by emitting Actions (MA-14a, Vision §19).",
+          "description": "A stateful decision component: it turns what it receives — events and messages\nin Vision §19's words — into Actions, which it emits through `admit()` (MA-14a).",
           "type": "string"
         }
       ]

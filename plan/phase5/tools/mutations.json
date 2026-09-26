@@ -198,5 +198,75 @@
   "crate": "ezsdr-acceptance",
   "test_bin": "reactive",
   "filter": "v58_09_a_reactor_answers_a_ping_with_a_timed_pong"
+ },
+ {
+  "id": "E21",
+  "name": "the responder forgets its rearm state at each block",
+  "file": "crates/ezsdr-acceptance/src/responder.rs",
+  "old": "            let first = header.first_sample_time;\n",
+  "new": "            let first = header.first_sample_time;\n            self.quiet = self.rearm;\n",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "reactive",
+  "filter": "v58_12_a_reactor_answers_whatever_the_block_lengths"
+ },
+ {
+  "id": "E22",
+  "name": "KC-9 a partial or marked input is accepted",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "let refusal = if waveform.partial || !waveform.marks.is_empty() || !waveform.continuity.is_empty() {",
+  "new": "let refusal = if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "ke_01_a_declared_input_is_verified_as_a_scheduled_one_is"
+ },
+ {
+  "id": "E23",
+  "name": "KC-9 two inputs may share an id",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "} else if named.iter().any(|(_, other)| other.id == waveform.id && other.hash != waveform.hash) {",
+  "new": "} else if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "ke_01_a_declared_input_is_verified_as_a_scheduled_one_is"
+ },
+ {
+  "id": "E24",
+  "name": "the drain never steps an Executor",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "                .map(|(i, slot)| (Inst::Executor(i), &slot.object)),",
+  "new": "                .filter(|_| !cleaning)\n                .map(|(i, slot)| (Inst::Executor(i), &slot.object)),",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "reactive",
+  "filter": "ke_03_a_decision_after_the_stop_is_not_an_abort"
+ },
+ {
+  "id": "E25",
+  "name": "NX-8 cleanup keeps the queues",
+  "file": "crates/ezsdr-exec-native/src/lib.rs",
+  "old": "        self.actions = None;\n        self.actions_out = None;\n",
+  "new": "",
+  "crate": "ezsdr-exec-native",
+  "test_bin": "native_executor",
+  "filter": "nx_08_stop_reaches_every_component_and_cleanup_is_idempotent"
+ },
+ {
+  "id": "E26",
+  "name": "the responder rounds a turnaround down",
+  "file": "crates/ezsdr-acceptance/src/responder.rs",
+  "old": "ezsdr_kernel::time::Rescaled::Inexact { floor, .. } => floor.ticks + 1,",
+  "new": "ezsdr_kernel::time::Rescaled::Inexact { floor, .. } => floor.ticks,",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "reactive",
+  "filter": "v58_09_a_pong_short_of_the_lead_is_late_as_on_hardware"
+ },
+ {
+  "id": "E27",
+  "name": "KE-2 the stored length compared one way only",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "Some(bytes) if bytes.len() as u64 != waveform.size_bytes => {",
+  "new": "Some(bytes) if (bytes.len() as u64) < waveform.size_bytes => {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "ke_02_a_module_burst_must_name_a_run_input"
  }
 ]

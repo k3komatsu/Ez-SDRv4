@@ -65,8 +65,15 @@ fn v58_10_experiments_name_no_mock_type() {
         ("responder.rs", include_str!("../src/responder.rs"), &["use ezsdr_kernel", "use ezsdr_exec_native", "use serde_json", "use std"][..]),
     ];
     for (file, source, allowed) in sources {
-        for forbidden in ["mock", "Mock", "x310", "ideal", "sim-engine", "sim_engine", "ezsdr_radio_mock"] {
+        for forbidden in ["mock", "Mock", "x310", "ideal", "sim-engine", "sim_engine", "ezsdr_mock_radio", "pub use"] {
             assert!(!source.contains(forbidden), "{file}: found forbidden name {forbidden}");
+        }
+        // Every crate path, not only a `use` line: an inline `ezsdr_radio::…` is a
+        // dependency too (Review F, P2-5).
+        let crates: Vec<&str> = allowed.iter().map(|prefix| prefix.trim_start_matches("use ")).collect();
+        for (at, _) in source.match_indices("ezsdr_") {
+            let name: String = source[at..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+            assert!(crates.contains(&name.as_str()), "{file}: names crate {name}");
         }
         for line in source.lines().filter(|line| line.trim_start().starts_with("use ")) {
             assert!(
