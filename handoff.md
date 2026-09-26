@@ -8,7 +8,7 @@
 | | |
 |---|---|
 | remote | `origin` = `git@github.com:k3komatsu/Ez-SDRv4.git`（https://github.com/k3komatsu/Ez-SDRv4，default branch `main`）．2026-09-26 に v4 を新リポジトリへ分離した．v3 は https://github.com/k3komatsu/Ez-SDR（`master` のみ，v3 の tags もそちら）に残る |
-| `main` | v4（この worktree）．Phase 0–3 の受理完了．Phase 2 Gate X を owner が2026-09-25に受理し，spec 06–10 を `design/` へ移動，Vision issue 15件を適用（Step X 完了）．Step 16/Gate X/Step X は `bf3b1bf` で commit・push 済み．2026-09-25 の動的レビューで見つかったテスト欠落2件を追加テストで塞いだ（[implementation-notes.md](plan/phase2/implementation-notes.md) 末尾）．Opus `PASS_WITH_RISK` の残余リスクは §4 と `plan/phase2/00-overview.md` §11 に記録．**Phase 3 は 2026-09-26 に Gate P 受理・実装・Review C・Gate X 受理・Step X 完了**（spec 11 を `design/` へ移動，Vision issue 8件を適用）．**Phase 4 は同日に計画・実装・Review D/E・Gate X 受理（すべて推奨どおり）・Step X 完了**．**Phase 5 は同日に計画・実装・Review F/G まで完了し，Gate X 待ち**（commit のみ，push していない）．§4 参照．|
+| `main` | v4（この worktree）．Phase 0–3 の受理完了．Phase 2 Gate X を owner が2026-09-25に受理し，spec 06–10 を `design/` へ移動，Vision issue 15件を適用（Step X 完了）．Step 16/Gate X/Step X は `bf3b1bf` で commit・push 済み．2026-09-25 の動的レビューで見つかったテスト欠落2件を追加テストで塞いだ（[implementation-notes.md](plan/phase2/implementation-notes.md) 末尾）．Opus `PASS_WITH_RISK` の残余リスクは §4 と `plan/phase2/00-overview.md` §11 に記録．**Phase 3 は 2026-09-26 に Gate P 受理・実装・Review C・Gate X 受理・Step X 完了**（spec 11 を `design/` へ移動，Vision issue 8件を適用）．**Phase 4 は同日に計画・実装・Review D/E・Gate X 受理（すべて推奨どおり）・Step X 完了**．**Phase 5 は同日に計画・実装・Review F/G・Gate X 受理（すべて推奨どおり）・Step X 完了**（spec 14 を `design/` へ移動，Vision issue 3 件を適用）．§4 参照．|
 | `master` | v3（D + C++ UHD bridge + Python client）．tip `4a474e9` = tag `v3.0.28`．この clone ではローカルのみ（upstream なし）．GitHub 上の置き場は `k3komatsu/Ez-SDR` |
 | `spike/uhd` | **使い捨ての UHD spike**（2026-09-26，push 済み）．`main` から分岐し，Kernel 1 行の変更（K1）と `spike/uhd/` crate を載せる．**`main` へ merge しない**．成果は発見の記録だけで，`main` の [plan/spikes/2026-09-26-uhd.md](plan/spikes/2026-09-26-uhd.md) に移した．実機検証は保留．§4「UHD spike」参照 |
 | `gh-pages` | GitHub Pages 用の orphan branch．2026-09-26 に空のコミット `24229a9` で作成．`main`・`master` と履歴を共有しない．push 済み，Pages の公開設定は未実施 |
@@ -29,14 +29,14 @@
 - v3 の更新を取り込むときの取得元は `origin` ではなく `k3komatsu/Ez-SDR`（例：`git fetch git@github.com:k3komatsu/Ez-SDR.git master`）．
 - **Google Drive の同期で追跡ファイルが消えることがある**．2026-09-24 に `crates/ezsdr-kernel/tests/` と `schemas/`（61 ファイル）が作業ツリーから消え，`git restore crates/ezsdr-kernel/tests schemas` で戻した．作業を始める前に `git status --short` に ` D` 行がないことを確かめる．Drive の同期中に戻すと競合コピー（`… (1).…`）が増えるので，同期を止めてから戻す．
 
-## 2. 設計文書の状態 — Phase 0・1・2・3・4 完了
+## 2. 設計文書の状態 — Phase 0・1・2・3・4・5 完了
 
 - 単一の設計ソース = **Vision**：索引 [Ez-SDR_v4_ARCHITECTURE_VISION.md](Ez-SDR_v4_ARCHITECTURE_VISION.md) + [design/vision/](design/vision) の 11 part（§1–§68，番号は不変）．
 - [design/v4-vision-audit.md](design/v4-vision-audit.md)（Findings 1–34，判定 READY WITH REQUIRED CHANGES）→ 全項目を Vision に反映済み．
 - [design/v4-vision-rereview.md](design/v4-vision-rereview.md)（Findings R1–R22，判定 READY）→ 全項目反映済み．R13「規範部分の spec 化」は当初11ファイル分割で暫定対応したが，Phase 1 Step 5（D109，2026-09-23）で Phase 1 specs へ，Phase 2 Gate X（2026-09-25）で specs 06–10 へ反映し，完了した．
-- accepted specs は Phase 1 の [design/01-time-model.md](design/01-time-model.md)〜[design/05-module-api.md](design/05-module-api.md) と Phase 2 の [design/06-kernel-coordinator.md](design/06-kernel-coordinator.md)〜[design/10-host-data-path.md](design/10-host-data-path.md)，Phase 3 の [design/11-simulation-channel.md](design/11-simulation-channel.md)（spec 12 の修正は design/04–09 に適用済み）．各 Phase の決定ログ・実装計画・rule exit evidence は [plan/phase2/](plan/phase2)，[plan/phase3/](plan/phase3) に残る．
+- accepted specs は Phase 1 の [design/01-time-model.md](design/01-time-model.md)〜[design/05-module-api.md](design/05-module-api.md) と Phase 2 の [design/06-kernel-coordinator.md](design/06-kernel-coordinator.md)〜[design/10-host-data-path.md](design/10-host-data-path.md)，Phase 3 の [design/11-simulation-channel.md](design/11-simulation-channel.md)（spec 12 の修正は design/04–09 に適用済み），Phase 5 の [design/14-native-executor.md](design/14-native-executor.md)（spec 15 の修正は design/03–06 に適用済み）．各 Phase の決定ログ・実装計画・rule exit evidence は [plan/phase2/](plan/phase2)，[plan/phase3/](plan/phase3) に残る．
 - 旧 CMA は退役．[design/archive/](design/archive) に保管（audit / rereview の `CMA §N` 引用のためだけに残す）．編集しない．
-- Vision の改訂履歴は索引ファイル末尾の表（Phase 0/1 の8 passに加え，Phase 2 Gate X の適用を2026-09-25に，Phase 3 と Phase 4 の Gate X の適用を2026-09-26に記録）．Phase 4 の spec 13 は amendment だけなので `design/` へ移すものはなく，本文は実装 commit で `design/02・05・07・08・09・10・11` に入っている．
+- Vision の改訂履歴は索引ファイル末尾の表（Phase 0/1 の8 passに加え，Phase 2 Gate X の適用を2026-09-25に，Phase 3・4・5 の Gate X の適用を2026-09-26に記録）．Phase 4 の spec 13 は amendment だけなので `design/` へ移すものはなく，本文は実装 commit で `design/02・05・07・08・09・10・11` に入っている．
 
 ## 3. 実装の状態
 
@@ -93,7 +93,7 @@ Phase 5（2026-09-26，Review F/G の修正込み）：1.85.0 / stable とも 64
 
 `kernel_surface` は `116 NEW / 292 public items`（Phase 3 で Kernel の public item は 1 つだけ増えた：KB-1 の `module_api::InputStore`）．mutation は Appendix C 83/83 + Review C の fix-check 15/15 + Gate X の fix-check 4/4 killed．`cargo +stable clippy --workspace --all-targets -- -D warnings` clean，`check_links.py` 全リンク解決．Toolchain：Rust `1.85.0`（MSRV）と `stable 1.98.1` の両方で 2026-09-26 に 604 passed．
 
-## 4. Phase の状態 — Phase 1・2・3・4 完了（Gate X受理），Phase 5 は Gate X 待ち
+## 4. Phase の状態 — Phase 1・2・3・4・5 完了（Gate X受理）
 
 ### Phase 1 — specs 受理・Kernel 実装済み
 
@@ -200,9 +200,9 @@ Vision §67 の Phase 3（SimulationChannel + deterministic Runs）．計画は 
 | Gate X の判断（§11） | **K3**（TX clock が arm 起点のため，`start_lead_ns` が sample 周期の倍数でないと burst が 1 sample 遅れる．Simulation でも再現し，ceiling test `k3_an_off_grid_start_lead_moves_a_burst_to_the_next_transmit_sample` で固定）は **Phase 7** で TX model と一緒に直す．drain 順（ring が control より先）と drop した hot body の mark は **ceiling**．P2-3 は **Phase 10**．Q1–Q8 と spec 13 は受理 |
 | Step X | Vision issue 2 件を適用（§28/§51 の Normative 行，§29 の hot path の bytes の持ち主），索引に改訂履歴の行．[vision-issues.md](plan/phase4/vision-issues.md) |
 
-### Phase 5 — 実装・Review F/G 完了，Gate X 待ち
+### Phase 5 — Gate X受理・Step X完了
 
-2026-09-26，owner の委任（「Phase4と同様に計画を立てて実装まで．実装後に Opus 5.5 でレビューし，修正して再レビュー．修正が小規模で低リスクなら再レビュー不要．これをループ」）で，Phase 4 と同じく計画と実装を 1 セッションで行った．Gate P は置いていない．正本は [plan/phase5/00-overview.md](plan/phase5/00-overview.md)（範囲・決定 R1–R11・§11 の owner 判断待ち）．新しい Module の spec 14 は [plan/phase5/14-native-executor.md](plan/phase5/14-native-executor.md)（Step X で `design/14-native-executor.md` へ移す），Kernel 修正の spec 15 は [plan/phase5/15-amendments.md](plan/phase5/15-amendments.md)，記録は [implementation-notes.md](plan/phase5/implementation-notes.md)．
+2026-09-26，owner の委任（「Phase4と同様に計画を立てて実装まで．実装後に Opus 5.5 でレビューし，修正して再レビュー．修正が小規模で低リスクなら再レビュー不要．これをループ」）で，Phase 4 と同じく計画と実装を 1 セッションで行った．Gate P は置いていない．正本は [plan/phase5/00-overview.md](plan/phase5/00-overview.md)（範囲・決定 R1–R11・§11 の決定ログ）．新しい Module の spec 14 は Step X で [design/14-native-executor.md](design/14-native-executor.md) へ移した．Kernel 修正の spec 15 は [plan/phase5/15-amendments.md](plan/phase5/15-amendments.md)，記録は [implementation-notes.md](plan/phase5/implementation-notes.md)．
 
 | 項目 | 内容 |
 |---|---|
@@ -217,12 +217,14 @@ Vision §67 の Phase 3（SimulationChannel + deterministic Runs）．計画は 
 | 検証 | 1.85.0 / stable とも 644 passed，Clippy clean，mutation 29/29 killed，link 全解決 |
 | ビルド衛生 | 共有 target dir（`Ez-SDRv4-review`）では，mtime を保ったコピーや他コピーの後のビルドが古い（改変済みの）成果物を再利用する．AGENTS.md §7 に対策を書いた（`rsync -a --no-times --exclude .cargo`，ビルド前に touch，ビルドを交互に走らせない） |
 
-**Gate X で owner の判断が要るもの**（[00-overview.md](plan/phase5/00-overview.md) §11）：
+**Gate X の判断**（2026-09-26，owner「すべて推奨で受理します」，[00-overview.md](plan/phase5/00-overview.md) §11）：
 
-1. **Event edge**（Detector などから Reactor へイベントを渡す経路）：推奨は Phase 10．Kernel の `Endpoint::EventIn` / `EventOut` は handle を持たない未完成の variant で，形を v4.0 凍結までに決める必要がある．
-2. **Vision §22**「実機に間に合わない Reactor は simulation で失敗する」：推奨は文言の修正（Vision issue 2）．Simulation は component 自身の処理時間を数えず，デバイスに渡った時点からの lead だけを判定する．budget を仮想時間で課す案は Phase 10 へ．
-3. **Action で変更できない component parameter**（Vision §27）：`ParamDecl.update_class` が必須のため表現できない．推奨は凍結前に optional にすること（Phase 10 の最初の parameter 適用 Executor と一緒に）．
-4. R1–R11，spec 14・15 の受理．
+1. **Event edge**（Detector などから Reactor へイベントを渡す経路）は **Phase 10**，Reactor にイベントを渡す最初の Processor と一緒に作る．Kernel の `Endpoint::EventIn` / `EventOut` は handle を持たない未完成の variant なので，形は v4.0 凍結までに決める．
+2. **Vision §22** は文言を修正した（Vision issue 2，Step X で適用）：Simulation はデバイスに渡った時点からの lead を判定し，component 自身の処理時間は数えない．budget を仮想時間で課す案は Phase 10 の budget / `PROCESSOR_DEADLINE_MISS` と一緒に．
+3. **Action で変更できない component parameter**（Vision §27）：`ParamDecl.update_class` を **v4.0 凍結前に optional にする**（Phase 10 の最初の parameter 適用 Executor と一緒に）．それまでは NX-7 の拒否で表に出る．
+4. R1–R11，N1–N6，spec 14・15 を受理．
+
+**Step X**：spec 14 を [design/14-native-executor.md](design/14-native-executor.md) へ移し，`design/05` と crate の参照を書き換えた．Vision issue 3 件（§9 の Spec の形に `inputs`，§19 に spec 14 の Normative 行，§22 の文言）を適用し，索引に改訂履歴の行を加えた（[vision-issues.md](plan/phase5/vision-issues.md)）．
 
 ### UHD spike（2026-09-26，branch `spike/uhd`）
 
@@ -261,10 +263,12 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-1. **Phase 5 の Gate X**：§4「Phase 5」の 4 項目を owner が判断する．受理後の Step X は spec 14 を `design/14-native-executor.md` へ移し，`design/05` の `plan/phase5/14-native-executor.md` 参照を書き換え，Vision issue 3 件（§9 の `inputs`，§22 の文言，§19 の Normative 行）を適用する．その後が Phase 6（Python Easy API）．
-2. **Phase 7 へ持ち越すもの**（Phase 4 Gate X）：K3 の修正（TX model と一緒に），spike の K2・K5・K6・K8・K11，MA-8 の Kernel 側強制，UHD の `ERROR_CODE_ALIGNMENT` は部分 channel を返さない（VERIFIED）ので SC-31a の per-channel `ALIGNMENT` に producer がないかもしれないこと．詳細は [plan/phase4/00-overview.md](plan/phase4/00-overview.md) §3．
-3. **Phase 2 の Gate X named risks**：Kernel 経由 Session `Stop(sink/rec)` test は Phase 4 で追加（`v58_13_a_session_stop_…`）．`MA-8` の強制は Phase 7 へ（Phase 4 §3）．
-4. Phase 2 のその他の test ceilings：sc16 capture と contract change 時の `partial`，KC-29 の直接 assert，到達不能な N8/N10 分岐，KA-12 marker check/acquire race の決定的 test seam，Provider→Sink datapath の nonzero drop→Manifest 経路．詳細は [implementation-notes.md](plan/phase2/implementation-notes.md) と exit tables を参照．
+1. **Phase 6 の計画**：Python Easy API（Vision §67）．Phase 5 から持ち越すもの：Session の中の Reactor（Session の implicit Spec は graph component を持たない．`sdr.run(spec)` と child Run で），Reactor が送れる波形は Run 前に宣言したもの（`inputs`）だけであること．
+2. **v4.0 凍結前に決めること**（Phase 5 Gate X）：`Endpoint::EventIn` / `EventOut` の形（event edge は Phase 10），`ParamDecl.update_class` を optional にすること．
+3. **Phase 10 へ持ち越すもの**（Phase 5）：event edge，component parameter を適用する Executor（UC-2…UC-6，MA-24），component の処理時間（budget）を仮想時間で課すこと，component parameter key の MA-34 検査，MA-30 の Action latency．
+4. **Phase 7 へ持ち越すもの**（Phase 4 Gate X）：K3 の修正（TX model と一緒に），spike の K2・K5・K6・K8・K11，MA-8 の Kernel 側強制，UHD の `ERROR_CODE_ALIGNMENT` は部分 channel を返さない（VERIFIED）ので SC-31a の per-channel `ALIGNMENT` に producer がないかもしれないこと．詳細は [plan/phase4/00-overview.md](plan/phase4/00-overview.md) §3．
+5. **Phase 2 の Gate X named risks**：Kernel 経由 Session `Stop(sink/rec)` test は Phase 4 で追加（`v58_13_a_session_stop_…`）．`MA-8` の強制は Phase 7 へ（Phase 4 §3）．
+6. Phase 2 のその他の test ceilings：sc16 capture と contract change 時の `partial`，KC-29 の直接 assert，到達不能な N8/N10 分岐，KA-12 marker check/acquire race の決定的 test seam，Provider→Sink datapath の nonzero drop→Manifest 経路．詳細は [implementation-notes.md](plan/phase2/implementation-notes.md) と exit tables を参照．
 
 ## 5. v3 → v4 切替で残っている作業（人間の判断が要るもの）
 

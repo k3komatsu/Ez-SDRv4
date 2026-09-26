@@ -148,6 +148,7 @@ ExperimentSpec
 ├── version          mandatory; migrated or refused, never reinterpreted (§10)
 ├── requirements     the Vocabulary majors the Spec is written against; constraints live in each resource's `requires`
 ├── resources        per-direction radio requests, peripherals, endpoints (§8)
+├── inputs           artifacts the Run consumes that no schedule entry carries, such as a Reactor's waveform or a calibration artifact (§26)
 ├── graph            components, links and their requirements; never a placement (§20)
 ├── schedule         Action templates at a resource-relative time, resolved to AbsoluteDeadlines at arm (§19, §22)
 ├── outputs          Artifacts to produce, including CalibrationArtifacts (§26)

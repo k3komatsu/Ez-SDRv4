@@ -146,7 +146,7 @@ Applied at Step X with the owner's approval (OV-6, GX-5), recorded in [`vision-i
 2. **§22 says "a Reactor that is too slow for the hardware fails in simulation."** What Simulation enforces is the device's side: the lead of a response, counted from when the device delivered the samples it reacts to, against the same envelope as on hardware. Simulation charges a component no processing time (`00-overview.md` R4). The sentence should say so, and name RealtimeEmulation and a component's declared budget as where processing time is exposed.
 3. **§19** gains spec 14's `Normative:` line (spec 14 §8).
 
-At Step X, when spec 14 moves to `design/14-native-executor.md`, the references to `plan/phase5/14-native-executor.md` that the implementation commits put in `design/05` (MA-14a, MA-19b, MA-24, MA-30) are changed to the new path (Review F, P2-10).
+At Step X, when spec 14 moved to `design/14-native-executor.md`, the references to `plan/phase5/14-native-executor.md` that the implementation commits had put in `design/05` (MA-14a, MA-19b, MA-24, MA-30) were changed to the new path (Review F, P2-10).
 
 ---
 

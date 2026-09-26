@@ -2,9 +2,9 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted at Gate X** (owner, 2026-09-26, as recommended; [`00-overview.md`](00-overview.md) §11). Normative for `crates/ezsdr-exec-native`; moves to `design/14-native-executor.md` at Step X. |
+| Status | Accepted at Gate X (owner, 2026-09-26, as recommended; [`plan/phase5/00-overview.md`](../plan/phase5/00-overview.md) §11) and moved here at Step X. Normative for `crates/ezsdr-exec-native`. Its record — the prototype, the reviews and the mutations — stays in [`plan/phase5/`](../plan/phase5). |
 | Scope | The Executor Module `ezsdr.exec.native` 1.0.0: its descriptors, how it loads a component by its `impl` identity, `prepare`, the stepping of its components, how it submits their Actions and handles refusals, the Actions addressed to it, `stop` and `cleanup`; and its component ABI (`Component`, `ComponentContext`, `Implementation`). |
-| Not in scope | Components that apply Actions (Phase 10). Threaded execution, RealtimeEmulation and hardware (KC-2; Phase 7 onwards). A component's processing time in virtual time (`00-overview.md` R4; Phase 10). WASM and GPU Executors (Phase 11). Event edges (`00-overview.md` §3). |
+| Not in scope | Components that apply Actions (Phase 10). Threaded execution, RealtimeEmulation and hardware (KC-2; Phase 7 onwards). A component's processing time in virtual time (`plan/phase5/00-overview.md` R4; Phase 10). WASM and GPU Executors (Phase 11). Event edges (`plan/phase5/00-overview.md` §3). |
 | Crate | `crates/ezsdr-exec-native`, library `ezsdr_exec_native`. Depends on `ezsdr-kernel` and `serde_json`. Dev-dependency: `ezsdr-kernel` with `testing`. |
 | Vision § covered | §19 ("Concrete execution engines remain Modules"; the Executor owns its ABI); §20 (placement validated, never selected); §32's driving model for the Simulation class. |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
@@ -21,7 +21,7 @@ It is deliberately small. It runs compiled-in Rust components, step-driven, in t
 
 - **MA-19b is the Phase 1 Module-API obligation that names this phase's Executor as its producer** (`plan/phase1/exit-review/05-module-api.md`: "Phase 2 Simulation Engine and Phase 5 Reactor Executor"; the Simulation Engine is an Authority and loads nothing). Two other producer obligations have no producer yet, and this Executor does not take them on: MA-24's applying half — spec 15 KE-5 limits it to Executors that apply Actions, which this one does not (NX-7) — and MA-17, a Peripheral's timing class (Phase 9).
 - **The coordinator already drives an Executor end to end**: KC-10 attaches a component's link ends to its Island fragment, KC-11 hands the Island exactly its descriptors (MA-19a), KC-23 steps every Executor in MA-30's order, KC-24 admits what it submits, KC-39 stops and cleans it up. `ProbeExecutor` in `crates/ezsdr-kernel/tests/support/run_doubles.rs` exercises each; it loads nothing.
-- **The prototype** (`00-overview.md` §2): this Executor with the responder of `00-overview.md` §7 ran a PING → PONG Run through the real coordinator, and showed that a component submitting its own Actions reports a refusal during the orderly drain as an error, which the coordinator records as an abort (KE-3). NX-6 is the answer.
+- **The prototype** (`plan/phase5/00-overview.md` §2): this Executor with the responder of `plan/phase5/00-overview.md` §7 ran a PING → PONG Run through the real coordinator, and showed that a component submitting its own Actions reports a refusal during the orderly drain as an error, which the coordinator records as an abort (KE-3). NX-6 is the answer.
 
 ## 3. Types
 
@@ -106,7 +106,7 @@ A `ComponentContext` carries no `ActionSubmitter`: a component's Actions go thro
 | # | Decision | Choice | Rejected (one line each) | Ceiling / upgrade path |
 |---|---|---|---|---|
 | N1 | How components are found | A table of compiled-in `Implementation`s handed to `new`, checked against `impl.kind`, `impl.id` and `impl.hash` (NX-3) | Dynamic loading (Rust has no stable ABI, Vision §62; it is the Plugin path); a global registry filled at link time (MA-32 rejects it for Modules for the same reasons) | Phase 10's native engine may add a loader; the table stays the explicit form |
-| N2 | How a component emits an Action | Pushes it onto `out`; the Executor submits (NX-5, NX-6) | Each component holding `actions_out` (`00-overview.md` R6: each would have to know KC-24's refusal checks) | A component that must learn an admission result |
+| N2 | How a component emits an Action | Pushes it onto `out`; the Executor submits (NX-5, NX-6) | Each component holding `actions_out` (`plan/phase5/00-overview.md` R6: each would have to know KC-24's refusal checks) | A component that must learn an admission result |
 | N3 | Actions addressed to a component | Refused, failing the step (NX-7) | Applying them (no Phase 5 path sends one); dropping them (MA-14) | Phase 10 |
 | N4 | Execution classes | Simulation only (NX-4) | Accepting any class and stepping anyway (the other classes run Executors on threads, MA-30's table) | Phase 7 onwards, with KC-2's threaded driver |
 | N5 | `PrepareReport.effective` | Empty | The components' parameter defaults (two components of one Island may share a key, and the Spec already records every descriptor, KC-45) | An Executor that applies parameters reports what it applied |
@@ -127,7 +127,7 @@ In `crates/ezsdr-exec-native/tests/native_executor.rs`, with a harness in the st
 | `nx_07_an_action_addressed_to_the_executor_fails_the_step` | an `UpdateParameter` in the queue fails the step naming it; no component was stepped | NX-7, MA-14 |
 | `nx_08_stop_reaches_every_component_and_cleanup_is_idempotent` | a component failing `stop` does not keep the next from being stopped, and its error is returned; `cleanup` twice is harmless; afterwards the harness alone holds the Action queue and the submitter, and a `step` with an Action queued steps nothing and refuses nothing | NX-8, MA-7 |
 
-The end-to-end carriers, which run this Executor with the responder through the coordinator, are in `00-overview.md` §8 and spec 15.
+The end-to-end carriers, which run this Executor with the responder through the coordinator, are in `plan/phase5/00-overview.md` §8 and spec 15 (`plan/phase5/15-amendments.md`).
 
 ## 7. Vision coverage
 
@@ -136,7 +136,7 @@ The end-to-end carriers, which run this Executor with the responder through the 
 | §19 "Concrete execution engines remain Modules"; the ABI belongs to each Executor | §3, NX-3, NX-5 |
 | §20 placement is explicit and validated | NX-2 (what admission reads), NX-4 |
 | §32 the Simulation class steps every Island | NX-4, NX-5 |
-| §58 #3, #9 | NX-5, NX-6, NX-9 and `00-overview.md` §8 |
+| §58 #3, #9 | NX-5, NX-6, NX-9 and `plan/phase5/00-overview.md` §8 |
 
 ## 8. Vision issues found
 

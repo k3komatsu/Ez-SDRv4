@@ -1,6 +1,6 @@
 # Phase 5 — implementation notes
 
-What was run, in order, and what it showed. The plan is [`00-overview.md`](00-overview.md); spec 14 is [`14-native-executor.md`](14-native-executor.md) and spec 15 is [`15-amendments.md`](15-amendments.md).
+What was run, in order, and what it showed. The plan is [`00-overview.md`](00-overview.md); spec 14 is [`design/14-native-executor.md`](../../design/14-native-executor.md) and spec 15 is [`15-amendments.md`](15-amendments.md).
 
 ## Baseline (2026-09-26, `0627839`)
 

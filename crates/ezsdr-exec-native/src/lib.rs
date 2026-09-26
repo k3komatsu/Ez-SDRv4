@@ -1,5 +1,5 @@
 //! Ez-SDR v4 Module `ezsdr.exec.native` 1.0.0: the step-driven, in-process Executor
-//! (plan/phase5/14-native-executor.md, rules `NX-n`).
+//! (design/14-native-executor.md, rules `NX-n`).
 //!
 //! It loads each component of its Islands by the `impl` identity the Spec's
 //! `ComponentDescriptor` names, from the compiled-in implementations the runtime hands

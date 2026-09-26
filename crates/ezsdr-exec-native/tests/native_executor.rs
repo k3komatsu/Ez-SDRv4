@@ -1,4 +1,4 @@
-//! Spec 14's tests (plan/phase5/14-native-executor.md §6): the Executor driven directly,
+//! Spec 14's tests (design/14-native-executor.md §6): the Executor driven directly,
 //! with a harness in the style of spec 09's and a scripted test component.
 
 use std::cell::RefCell;

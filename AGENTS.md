@@ -8,7 +8,7 @@ Ez-SDR is an SDR experiment runtime with two unrelated lines, which since 2026-0
 
 | Branch | Content | Status |
 |---|---|---|
-| `main` | **v4** — clean-sheet Rust rewrite. Phases 1–4's accepted specs in `design/01-*.md` … `design/11-*.md` (their process records remain in `plan/phase1/` … `plan/phase4/`; the amendment-only specs 12 and 13 are applied to `design/` and recorded in `plan/phase3/12-amendments.md` and `plan/phase4/13-amendments.md`), plus the Kernel, Radio Model, Simulation Engine, MockRadio and SimulationChannel implementation (`crates/`, `schemas/`). Phase 4 (events, failure, continuity, artifacts) was accepted at Gate X on 2026-09-26. Phase 5 (the Mini Reactive Radio: the native Executor `ezsdr.exec.native` and a PING responder, `plan/phase5/`) is implemented and reviewed and awaits Gate X; Phase 6 onwards is unwritten. | active development |
+| `main` | **v4** — clean-sheet Rust rewrite. Phases 1–5's accepted specs in `design/01-*.md` … `design/11-*.md` and `design/14-*.md` (their process records remain in `plan/phase1/` … `plan/phase5/`; the amendment-only specs 12, 13 and 15 are applied to `design/` and recorded in `plan/phase3/12-amendments.md`, `plan/phase4/13-amendments.md` and `plan/phase5/15-amendments.md`), plus the Kernel, Radio Model, Simulation Engine, MockRadio, SimulationChannel and native Executor implementation (`crates/`, `schemas/`). Phase 5 (the Mini Reactive Radio: the native Executor `ezsdr.exec.native` and a PING responder) was accepted at Gate X on 2026-09-26; Phase 6 onwards is unwritten. | active development |
 | `master` | **v3** — D + C++ UHD bridge + Python client. Tags `v2.11`, `v3.0.0`–`v3.0.28`. Local only here; its GitHub home is `k3komatsu/Ez-SDR`. | maintenance |
 | `gh-pages` | GitHub Pages content for `Ez-SDRv4` only. An orphan branch, created empty on 2026-09-26; no history shared with `main` or `master`. | empty; pushed, Pages not yet configured |
 
@@ -27,8 +27,8 @@ Rules that follow from this layout:
 - **§N is the citation unit and is stable.** Never renumber, merge or delete a section. If content moves out, leave the section as a summary plus a link. [design/v4-vision-audit.md](design/v4-vision-audit.md) (Findings 1–34) and [design/v4-vision-rereview.md](design/v4-vision-rereview.md) (R1–R22) cite `§N` and `CMA §N`.
 - [design/archive/Ez-SDR_v4_core_module_architecture.md](design/archive/Ez-SDR_v4_core_module_architecture.md) is retired and frozen. Do not edit or revive it; it exists only to keep `CMA §N` citations resolvable.
 - When you edit the Vision: keep each part's header and footer navigation, and add a row to the revision history table in the index. Shapes in `{ ... }` blocks are illustrative, not schemas.
-- Normative schemas and contracts live in the accepted specs `design/01-time-model.md` … `design/11-simulation-channel.md`; a Vision section they cover keeps its reasons and ends in a `Normative:` line (re-review R13). Do not grow the Vision with more normative text.
-- `plan/` holds design work in progress and process records; `design/` holds accepted text. `plan/phaseN/00-overview.md` (N = 1…4) remains each phase's record and governance log.
+- Normative schemas and contracts live in the accepted specs `design/01-time-model.md` … `design/11-simulation-channel.md` and `design/14-native-executor.md`; a Vision section they cover keeps its reasons and ends in a `Normative:` line (re-review R13). Do not grow the Vision with more normative text.
+- `plan/` holds design work in progress and process records; `design/` holds accepted text. `plan/phaseN/00-overview.md` (N = 1…5) remains each phase's record and governance log.
 - Reading order for implementers: index "How to read" → Part 01 → §65 (42 invariants) → audit §13 (minimal Kernel) and §14.1 (P0 checklist) → the applicable accepted specs and phase overview → §58 (acceptance tests).
 
 ## 3. Design constraints that shape every type (settled; do not relitigate)

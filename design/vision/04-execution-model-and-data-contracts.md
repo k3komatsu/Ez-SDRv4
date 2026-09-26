@@ -91,6 +91,8 @@ The Core defines these concepts.
 
 Concrete execution engines remain Modules.
 
+Normative: [design/14-native-executor.md](../14-native-executor.md) (the first, `ezsdr.exec.native`).
+
 ## What the Kernel owns, and what it does not
 
 The Kernel owns the **descriptor** of a component and the **vocabulary** it speaks, not the way it is called:
@@ -234,7 +236,7 @@ The target is an AbsoluteDeadline in the transmit stream's SampleClock: a target
 
 Normative: [design/04-run-and-session.md](../04-run-and-session.md), rules RS-49, RS-51; [design/02-stream-contract.md](../02-stream-contract.md), rules SC-23, SC-23a, SC-23b, SC-26…SC-29a; [design/05-module-api.md](../05-module-api.md), MA-14.
 
-MockRadio applies the same policy with the same envelope, so a Reactor that is too slow for the hardware fails in simulation.
+MockRadio applies the same policy with the same envelope, so a Reactor whose response leaves the device too little lead — counted from when the device delivered the samples it reacts to — fails in simulation as on hardware. Simulation charges a component no processing time of its own; RealtimeEmulation and a component's declared budget are where that is exposed.
 
 A TxBurst is **one burst** of the TX stream (§23), and `repeat` is an attribute of the burst, not a stream of re-sent blocks.
 

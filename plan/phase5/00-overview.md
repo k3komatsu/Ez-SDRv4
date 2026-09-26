@@ -2,12 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Status | **Planned and implemented under the owner's delegation** (2026-09-26: "Phase4と同様にPhase 5の計画を立てて実装まで進んでください"); there is no separate Gate P. **Accepted at Gate X** (owner, 2026-09-26, every decision as recommended; §11); Step X pending. Reviewed by an Opus review loop (§9): Review F found 2 P0, 4 P1 and 11 P2 and Review G, the re-review of those fixes, 4 P1 and 9 P2; all were fixed with tests or text (`implementation-notes.md`, "Review F", "Review G"), and the last fixes, being small and low-risk, were not reviewed again (the owner's rule). |
+| Status | **Planned and implemented under the owner's delegation** (2026-09-26: "Phase4と同様にPhase 5の計画を立てて実装まで進んでください"); there is no separate Gate P. **Accepted at Gate X** (owner, 2026-09-26, every decision as recommended; §11); **Step X done** (spec 14 moved to `design/`, three Vision issues applied). Phase 5 is complete. Reviewed by an Opus review loop (§9): Review F found 2 P0, 4 P1 and 11 P2 and Review G, the re-review of those fixes, 4 P1 and 9 P2; all were fixed with tests or text (`implementation-notes.md`, "Review F", "Review G"), and the last fixes, being small and low-risk, were not reviewed again (the owner's rule). |
 | Phase | Vision §67 Phase 5: "Mini Reactive Radio — PING → Reactor → timed PONG". Predecessor: Phase 4 (events, failure, continuity, artifacts; accepted at Gate X 2026-09-26). Successor: Phase 6 (Python Easy API). |
 | Scope | The first Executor Module and the first Reactor, run end to end: a radio sends a PING, a Reactor on the other radio hears it in its receive samples and answers with a timed PONG through `admit()`, and the radio decides the PONG's lead as hardware would. Three Kernel holes the prototype hit (§2), and the Phase 5 items earlier phases left open (§8). |
 | Not in scope | §3 lists it. In one line: no Event edges, no Reactor in a Session, no Actions applied to components, no model of a component's processing time, no dynamic waveform content. |
 | Language | English, like Phases 1–4. |
-| Location | Spec 14, [`14-native-executor.md`](14-native-executor.md), is the new Module's spec; it stays here until Gate X and moves to `design/14-native-executor.md` at Step X, as spec 11 did. Spec 15, [`15-amendments.md`](15-amendments.md), holds the Kernel amendments; their text reaches `design/` in the commit that implements them (GX-5), and the file stays here as the record. |
+| Location | Spec 14, the new Module's spec, was drafted here and moved to [`design/14-native-executor.md`](../../design/14-native-executor.md) at Step X, as spec 11 was. Spec 15, [`15-amendments.md`](15-amendments.md), holds the Kernel amendments; their text reaches `design/` in the commit that implements them (GX-5), and the file stays here as the record. |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
 
 Documents:
@@ -15,7 +15,7 @@ Documents:
 ```text
 plan/phase5/
   00-overview.md           this file: scope, holes, decisions, crates, governance, traceability, sequencing, exit criteria, decision log
-  14-native-executor.md    spec 14: the Module ezsdr.exec.native 1.0.0 (NX-1…NX-9) and its component ABI
+  (spec 14, the Module ezsdr.exec.native 1.0.0 and its component ABI, is design/14-native-executor.md since Step X)
   15-amendments.md         spec 15: Kernel amendments KE-1…KE-5
   implementation-notes.md  what was run, what the reviews found, what was fixed
   exit-review/             per-rule dispositions (PO-10)
@@ -185,3 +185,4 @@ OV-1…OV-23b, PO-1…PO-12, GV-1…GV-6 and GW-1…GW-5 bind Phase 5. The rules
 | Review G (re-review): every P1 and P2 fixed (`implementation-notes.md`); no further review, the fixes being text and two test cases | — | **closed** | 2026-09-26, the owner's rule for small, low-risk fixes |
 | A component parameter that no Action may change (Vision §27's "a key with no class cannot change during a Run"): `ParamDecl.update_class` is mandatory, so every component parameter is admitted at run time and then refused by an Executor that applies none (Review G, P2-9) | X | **optional before the freeze** | owner, 2026-09-26, as recommended ("すべて推奨で受理します"): make the class optional before v4.0 freezes, with Phase 10's first Executor that applies parameters; until then the refusal (NX-7) keeps it loud |
 | R1–R11, N1–N6, specs 14 and 15 (exit criterion 1) | X | **accepted** | owner, 2026-09-26, as recommended ("すべて推奨で受理します") |
+| Step X: spec 14 moved to `design/14-native-executor.md`; the three Vision issues | X | **done** | 2026-09-26: §§9, 19, 22 and a revision-history row ([vision-issues.md](vision-issues.md)) |
