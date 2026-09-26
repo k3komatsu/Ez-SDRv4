@@ -41,7 +41,7 @@
 
 ## 3. 実装の状態
 
-現在（2026-09-27，Phase 6 Review I の修正後）の状態：
+現在（2026-09-27，Phase 6 Step X 後の `618ae4a`）の状態：
 
 | | |
 |---|---|
@@ -300,7 +300,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 4. **Phase 10 へ持ち越すもの**（Phase 5）：event edge，component parameter を適用する Executor（UC-2…UC-6，MA-24），component の処理時間（budget）を仮想時間で課すこと，component parameter key の MA-34 検査，MA-30 の Action latency．
 5. **Phase 7 へ持ち越すもの**（Phase 4 Gate X）：K3 の修正（TX model と一緒に），spike の K2・K5・K6・K8・K11，MA-8 の Kernel 側強制，UHD の `ERROR_CODE_ALIGNMENT` は部分 channel を返さない（VERIFIED）ので SC-31a の per-channel `ALIGNMENT` に producer がないかもしれないこと．詳細は [plan/phase4/00-overview.md](plan/phase4/00-overview.md) §3．
 6. **Phase 2 の Gate X named risks**：Kernel 経由 Session `Stop(sink/rec)` test は Phase 4 で追加（`v58_13_a_session_stop_…`）．`MA-8` の強制は Phase 7 へ（Phase 4 §3）．
-7. **GitHub Pages の状態表示**（https://k3komatsu.github.io/Ez-SDRv4/）は Phase 5 完了まで反映済み（別エージェントの `origin/gh-pages` commit「update Pages status after Phase 5」）．Phase 6 を反映するかは owner の判断（gh-pages は依頼があるときだけ変更する，AGENTS.md §1）．
+7. **GitHub Pages の状態表示**（https://k3komatsu.github.io/Ez-SDRv4/）は Phase 5 完了まで反映済み．その後，別エージェントが概要ページの読みやすさを改善した（`origin/gh-pages` の最新は `030e19a`「improve landing page readability」）．Phase 6 を反映するかは owner の判断（gh-pages は依頼があるときだけ変更する，AGENTS.md §1）．
 8. Phase 2 のその他の test ceilings：sc16 capture と contract change 時の `partial`，KC-29 の直接 assert，到達不能な N8/N10 分岐，KA-12 marker check/acquire race の決定的 test seam，Provider→Sink datapath の nonzero drop→Manifest 経路．詳細は [implementation-notes.md](plan/phase2/implementation-notes.md) と exit tables を参照．
 
 ## 5. v3 → v4 切替で残っている作業（人間の判断が要るもの）
