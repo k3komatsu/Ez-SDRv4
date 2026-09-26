@@ -439,7 +439,7 @@
   "new": "        if total.is_none() && false {",
   "crate": "ezsdr-server",
   "test_bin": "protocol",
-  "filter": "ea_14_run_child_refusals"
+  "filter": "ea_14_refusals_before_a_child_runs"
  },
  {
   "id": "G12",
@@ -489,7 +489,7 @@
   "new": "            if !fits && false {",
   "crate": "ezsdr-server",
   "test_bin": "protocol",
-  "filter": "ea_14_run_child_refusals"
+  "filter": "ea_14_refusals_before_a_child_runs"
  },
  {
   "id": "G17",
@@ -556,5 +556,13 @@
   "old": "            self._captures[recorder] = self._captures.get(recorder, 0) + 1",
   "new": "            pass",
   "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples"
+ },
+ {
+  "id": "P16",
+  "name": "EA-16 request hands back the wrong number",
+  "file": "python/ezsdr/session.py",
+  "old": "        return CaptureRequest(recorder, number, int(n), start, entry)",
+  "new": "        return CaptureRequest(recorder, number + 1, int(n), start, entry)",
+  "python": "test_easy_api.EasyApi.test_ea_17_requests_made_ahead_capture_contiguous_samples"
  }
 ]

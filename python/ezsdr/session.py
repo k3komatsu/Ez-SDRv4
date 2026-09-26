@@ -137,15 +137,31 @@ class _Side:
         return self._session.stop(f"{self._radio}/{self._direction}")
 
 
+class CaptureRequest:
+    """A capture request the recorder has been sent and not yet answered (EA-17):
+    ``Rx.request`` makes one, ``Rx.result`` waits for its samples."""
+
+    def __init__(self, recorder: str, number: int, n: int, start: int, entry: dict):
+        self.recorder = recorder
+        self.number = number
+        self.n = n
+        self.entry = entry
+        self._start = start
+
+
 class Rx(_Side):
     """A radio's receive side."""
 
     def capture(self, n: int, at: Optional[dict] = None, timeout: Optional[float] = None) -> np.ndarray:
         """Captures ``n`` samples from this radio's recorder and returns them (EA-17).
         ``at`` is a ``TimePoint``; ``timeout`` is in seconds of Run time."""
+        return self.result(self.request(n, at), timeout)
+
+    def request(self, n: int, at: Optional[dict] = None) -> CaptureRequest:
+        """Asks the recorder for ``n`` samples and returns at once (EA-17). Requests are
+        served one after another, each from the end of the one before it (HD-10), so
+        requests made before the earlier ones are answered capture contiguous samples."""
         recorder = self._session._recorder(self._radio)
-        if timeout is None:
-            timeout = n / float(self.sample_rate) + 1.0
         start = self._session._status()["events"]
         # The Sink numbers the capture requests it receives (HD-16); this one is the next.
         number = self._session._captures.get(recorder, 0)
@@ -158,7 +174,15 @@ class Rx(_Side):
             "params": {"sink.capture_samples": int(n)},
         }
         entry = _admitted(self._session.submit(action))
-        source = _rid(f"sink/{recorder}")
+        return CaptureRequest(recorder, number, int(n), start, entry)
+
+    def result(self, handle: CaptureRequest, timeout: Optional[float] = None) -> np.ndarray:
+        """Waits, in Run time, for ``handle``'s capture and returns its samples (EA-17);
+        ``timeout`` defaults to ``n / rate + 1`` seconds."""
+        n, number, entry, start = handle.n, handle.number, handle.entry, handle._start
+        if timeout is None:
+            timeout = n / float(self.sample_rate) + 1.0
+        source = _rid(f"sink/{handle.recorder}")
         wait = {"within_ns": max(0, math.ceil(timeout * 1e9))}
         while True:
             request = {"op": "wait_for", "kinds": [CAPTURE_WRITTEN, REQUEST_REJECTED], "from": start}

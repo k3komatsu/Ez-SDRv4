@@ -83,7 +83,8 @@ Rules are `EA-n`; decisions are `A1`…`A8` (§6).
   | `Radio.rx`, `Radio.tx` | the receive and transmit sides, with the attributes `frequency`, `sample_rate`, `gain`, `antenna`, `channels`: reading one returns the effective value (KC-27), setting one submits `SetParameter` on the radio for `radio.<rx or tx>.frequency_hz`, `sample_rate_hz`, `gain_db`, `antenna`, `channels` and raises `Rejected` if the entry is rejected |
   | `Radio.tx.repeat(x)` | sets `radio.tx.channels` to the waveform's channel count when the effective value differs, then submits `radio.start_repeat` on `<radio>/tx` with `x`'s bytes; raises `Rejected` on a rejected entry; returns the entry |
   | `Radio.tx.stop()`, `Radio.rx.stop()`, `Session.stop(target=None)` | submits `Stop { target }` (`<radio>/tx`, `<radio>/rx`, the given target, or none) |
-  | `Radio.rx.capture(n, at=None, timeout=None) -> numpy.ndarray` | EA-17 |
+  | `Radio.rx.capture(n, at=None, timeout=None) -> numpy.ndarray` | EA-17; `result(request(n, at), timeout)` |
+  | `Radio.rx.request(n, at=None) -> CaptureRequest`, `Radio.rx.result(request, timeout=None) -> numpy.ndarray` | a capture split in two: `request` submits and returns at once, `result` waits for that request's samples. Requests made before the earlier ones are answered are served one after another from the end of the one before (HD-10), so they capture contiguous samples where two `capture` calls lose what passes between them (v3's `receiveRequestOnly` / `receiveResponseOnly`; the owner's request, 2026-09-26) |
   | `Session.sleep(seconds)`, `Session.wait_until(t)`, `Session.now` | `advance { by_ns }`, `advance { to }`, the Run's current `TimePoint` (Vision §54: the client never uses `time.sleep` for Run time) |
   | `Session.wait_for(kinds, timeout)`, `Session.events(start=0)` | `wait_for` from the first event the client has not yet waited past, `events { from }` |
   | `Session.set(target, key, value)`, `Session.submit(action, waveform=None)` | a `SetParameter` that raises `Rejected`; any `SessionAction` document, returning the entry without raising (the descent of Vision §3: explicit targets, timed operations, any Vocabulary verb) |
@@ -119,10 +120,11 @@ Rules are `EA-n`; decisions are `A1`…`A8` (§6).
 | `ea_15_finish_and_disconnect` | `finish`; a stream that ends after `connect` | `finished` and exit 0; `Stopped { client_disconnect }` in the written Manifest | EA-15 |
 | `ea_15_every_exit_writes_the_manifest` (Review H) | a server dropped with a live Session; a reader that stops after 8 kB; a panic while the Session is live | `manifest.json` written each time | EA-15 |
 | `ea_10_a_run_that_ends_on_its_way_to_t0_writes_its_manifest` (Review H) | a `device_lost` fault at instant 0 | `ended` with the Policy's termination, exit, the written Manifest | EA-10 |
-| `ea_14_run_child_refusals` (Review H) | input sizes that overflow; that do not add up; a Spec whose only `Stop` targets a stream, with no duration; a duration that does not fit the clock | `protocol`, `protocol`, `refused`, `refused`; nothing logged | EA-14 |
+| `ea_14_refusals_before_a_child_runs` (Review H) | input sizes that overflow; that do not add up; a Spec whose only `Stop` targets a stream, with no duration; a duration that does not fit the clock | `protocol`, `protocol`, `refused`, `refused`; nothing logged | EA-14 |
 | `ea_binary_speaks_the_protocol` (server) | the built binary, spawned | `hello`, `connect`, `finish` over its standard streams; exit status 0 | EA-2, EA-8, EA-15 |
 | Python carriers | [`00-overview.md`](00-overview.md) §8 | as listed there | EA-1, EA-16…EA-19 |
 | `test_ea_17_each_capture_gets_its_own_samples` (Review H) | two captures in a row; one after a capture that timed out; one after a raw `sink.capture` of 777 | 100, 200, 100 and 100 samples | EA-17 |
+| `test_ea_17_requests_made_ahead_capture_contiguous_samples` | two `request`s, then their `result`s in reverse order | 1 000 and 1 500 samples, the second starting where the first ends, one continuous stretch of the waveform | EA-16, EA-17 |
 | `test_ea_17_a_capture_the_recorder_refuses_raises` (Review H) | `capture(0)` | `Rejected` carrying the admitted entry and the recorder's `REQUEST_REJECTED` | EA-17 |
 | `test_ea_17_capture_at_an_instant` (Review H) | `capture(1000, at=now + 5 ms)` | the artifact's first sample is that instant's | EA-17 |
 | `test_ea_17_a_capture_across_a_rate_change_is_refused` (Review H) | a rate change during a capture | two continuity maps; `samples()` raises | EA-17 |

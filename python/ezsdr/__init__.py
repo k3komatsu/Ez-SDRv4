@@ -12,6 +12,7 @@ profile binds hardware; the Session's Manifest is ``sdr.manifest`` afterwards.
 
 from ._client import Error, ProtocolError, RunEnded, ServerError
 from .session import (
+    CaptureRequest,
     CaptureTimeout,
     Radio,
     Rejected,
@@ -27,6 +28,7 @@ from .session import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "CaptureRequest",
     "CaptureTimeout",
     "Error",
     "ProtocolError",

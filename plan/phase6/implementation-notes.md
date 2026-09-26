@@ -81,3 +81,37 @@ No expected value of a Phase 1–5 test moved.
 Run of 2026-09-26 on the tree of Step 4: **35 of 35 killed** — F01–F27 (Kernel, Sink, server) and P01–P08 (the Python package). Every baseline passed first.
 
 One mutation was designed and dropped: the Python capture accepting an event from another recorder (`if event["source"] != source: continue` removed) is equivalent under every profile Phase 6 has, because a radio's receive port feeds one recorder; a profile with two recorders on two radios would distinguish it, and none exists yet.
+
+## Review H
+
+Adversarial dynamic review by Opus, brief [`prompts/review-h.txt`](prompts/review-h.txt), report [`reviews/review-h.md`](reviews/review-h.md). Verdict **CHANGES_REQUIRED**: 5 P0, 6 P1, 12 P2. Everything that existed passed; the defects were where no test reached, and all 14 of the reviewer's own mutations survived. Every finding was taken.
+
+| Finding | Fix | Test (and mutation) |
+|---|---|---|
+| P0-1 RS-25a bound `sim.channel`, `sim.seed`, `sim.faults`, refusing §54's sweeps and §58 #14 inside a Session; spec 17's rejected alternative claimed no check reads `sim.channel` | The rule binds only the sections of checks that run at the runtime stage (`AdmissionCheckRegistry::runtime_sections`, crate-private) — the checks that judge what a running Session may do, `radio.rf_envelope` among them. RS-25a, KC-37a and spec 17's rejected alternative rewritten | `kf_03_rs_25a_refusals` gains a validate-only section (G07) |
+| P0-2 `Rx.capture` could return another request's samples (a timed-out request, a raw `submit`) | The capture Sink numbers every capture request it receives; `CAPTURE_WRITTEN` and `REQUEST_REJECTED` carry `request`; `Session.submit` counts the captures it has admitted per recorder, and `capture` waits for its own number (HD-16, EA-17) | `hd_16_every_capture_request_is_numbered` (G10), `test_ea_17_each_capture_gets_its_own_samples` (P09, P15) |
+| P0-3 input sizes that overflow crashed the server | Checked sum; a mismatch is `protocol` | `ea_14_refusals_before_a_child_runs` (G11) |
+| P0-4 no Manifest when the Run ended on its way to T0, when a reply could not be written, on a panic | `impl Drop for Server` finishes a live Session and writes `manifest.json`; `connect` lets a Run that ended on its way to T0 fall through to the `ended` path, which writes it | `ea_15_every_exit_writes_the_manifest` (G14), `ea_10_a_run_that_ends_on_its_way_to_t0_writes_its_manifest` (G15) |
+| P0-5 `wait_for`'s already-delivered answer skipped KC-29's Ended-first rule and KC-36's lease check | KC-29's prologue first | `kf_02_wait_for_answers_ended_first` (G05) |
+| P1-1 a request that failed to decode ended the Session | Frame first (a JSON object, `body_bytes`, the body), decode second; a decode failure costs only that request (EA-5) | `ea_05_a_request_that_does_not_decode_costs_only_itself` (G13) |
+| P1-2 the child took its host clock and checks from the caller's Assembly | `run_child` gives the child the parent's host clock and checks (KC-37a) | `kf_03_a_lease_that_expires_during_a_child_ends_the_child_first` (G08, G03), `kf_03_the_parents_checks_judge_the_child` (G09) |
+| P1-3 an early `wait_for` left its no-op at the horizon | Cancelled on an early return (KC-29b) | `kf_02_wait_for_returns_the_first_match_and_withdraws_its_horizon` (G06, G01) |
+| P1-4 a capture across a SampleClock change came back as one array | `samples()` refuses more than one domain (EA-17) | `test_ea_17_a_capture_across_a_rate_change_is_refused` (P12) |
+| P1-5 H01–H05 | the cases above, plus `kf_02_wait_for_with_no_kinds_is_advance_to` (G02) and `kf_03_children_are_recorded_in_order` (G04). H05 (KC-37a's `check_entry` removed) is equivalent: for `RunChild`, `check_entry` checks only that the entry's time is on the local node, which a Session's `now` always is; the call stays, as in `submit`, for the day `RunChild` carries more | — |
+| P1-6 H06–H14 | `ea_14_refusals_before_a_child_runs` (H06 as G11, H07's targeted `Stop`), `ea_13_*` gains `<uri>/../x` and `<uri>x` (G12), `ea_05_a_request_that_…` (H09 as G13), the Python cases (H10 as P09, H11 as P10, H12 as P11, H14 as P13). H13 (mixed channel counts) is not reachable by any Phase 6 capture and stays untested; H07 as a mutation would run a child forever, so the targeted-`Stop` case is a test without a mutation | — |
+| P2-1 EA-3's field name | EA-3 says `kernel_api` | — |
+| P2-2 §57's silence | `00-overview.md` §8 says why the carrier sleeps | — |
+| P2-3 a duration that does not fit the child's clock | refused before the Kernel (EA-14) | `ea_14_refusals_before_a_child_runs` (G16) |
+| P2-4 an artifact whose metadata write fails | HD-16 says it is not announced and the Sink's error fails the Run | — |
+| P2-5 the capture timeout re-armed per skipped event | `wait_for` takes `until`, its reply `horizon`; `capture` keeps its first deadline | `ea_12_time_and_events` (G17) |
+| P2-6 `close` after the server exited | falls back to the `manifest.json` every exit writes | `test_ea_16_close_after_the_server_exited` (P14) |
+| P2-7 `v58_10` lacked `sim.faults` | added | — |
+| P2-8 `design/03` §10 | now an owner decision before the freeze (KF-4) | — |
+| P2-9 Appendix A's F05 and F21 rows | corrected | — |
+| P2-10 no limit on `body_bytes` | recorded as a ceiling in the server (`ponytail:`) for Phase 7's listener | — |
+| P2-11 `samples()` assumes cf32 | recorded as a ceiling in EA-17 | — |
+| P2-12 `NotSession`'s message | generic | — |
+
+### Added at the owner's request during Review H: `Rx.request` / `Rx.result`
+
+Asked whether two `capture` calls in a row lose samples: they do. `capture` returns once its artifact is written, which is known only when the block holding its last sample arrives, and the next request starts at the instant it is admitted (at 1 Msps on `x310-like`, `capture(1000)` twice gave samples 0–1 000 and 2 000–3 000). Two requests submitted before either is answered are served one after another from the end of the one before (HD-10) and are contiguous (4 000–5 000 and 5 000–6 000). The owner asked for the split: `Rx.request(n, at)` submits and returns a `CaptureRequest` carrying the recorder's request number (HD-16); `Rx.result(request, timeout)` waits for that number's artifact; `capture` is `result(request(n, at), timeout)`. EA-16's table has the two rows; `test_ea_17_requests_made_ahead_capture_contiguous_samples` takes the results in reverse order and checks one continuous stretch of the waveform across the boundary (mutation P16). v3 had the same split (`receiveRequestOnly` / `receiveResponseOnly`, `v3/client/ezsdr.py:253`, `:262`).

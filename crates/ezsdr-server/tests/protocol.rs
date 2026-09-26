@@ -589,7 +589,7 @@ fn ea_10_a_run_that_ends_on_its_way_to_t0_writes_its_manifest() {
 }
 
 #[test]
-fn ea_14_run_child_refusals() {
+fn ea_14_refusals_before_a_child_runs() {
     let temp = TempDir::new("child-refusals");
     let (mut server, _) = connected(&temp.0);
     let refuse = |server: &mut Server, spec: serde_json::Value, inputs: Vec<u64>, duration_ns: Option<u64>, body: Vec<u8>| {

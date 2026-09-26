@@ -195,5 +195,32 @@ Each mutation disables one rule's code; the listed test must fail. The list is `
 | P06 | EA-16 | a rejected entry does not raise | `test_v58_16_a_rejected_call_raises_and_is_logged` |
 | P07 | EA-16 | a capture timeout is not raised | `test_ea_16_errors` |
 | P08 | EA-16 | `run` does not pass the duration | `test_v54_a_sweep_of_child_runs` |
+| G01 | KC-29b | the last match, not the first | `kf_02_wait_for_returns_the_first_match_and_withdraws_its_horizon` |
+| G02 | KC-29b | no kinds does not advance | `kf_02_wait_for_with_no_kinds_is_advance_to` |
+| G03 | KC-37a | the parent's Lease is not checked after the child | `kf_03_a_lease_that_expires_during_a_child_ends_the_child_first` |
+| G04 | KC-45 | ezsdr.children records seq 0 | `kf_03_children_are_recorded_in_order` |
+| G05 | KC-29b | the prologue skipped | `kf_02_wait_for_answers_ended_first` |
+| G06 | KC-29b | the early return keeps its horizon | `kf_02_wait_for_returns_the_first_match_and_withdraws_its_horizon` |
+| G07 | RS-25a | every checked section binds the child | `kf_03_rs_25a_refusals` |
+| G08 | KC-37a | the child keeps its Assembly's host clock | `kf_03_a_lease_that_expires_during_a_child_ends_the_child_first` |
+| G09 | KC-37a | the child keeps its Assembly's checks | `kf_03_the_parents_checks_judge_the_child` |
+| G10 | HD-16 | every request numbered alike | `hd_16_every_capture_request_is_numbered` |
+| G11 | EA-14 | input sizes not checked | `ea_14_refusals_before_a_child_runs` |
+| G12 | EA-13 | read accepts a URI extending a reported one | `ea_13_read_serves_only_reported_artifacts` |
+| G13 | EA-5 | an undecodable request ends the Session | `ea_05_a_request_that_does_not_decode_costs_only_itself` |
+| G14 | EA-15 | no Drop for Server | `ea_15_every_exit_writes_the_manifest` |
+| G15 | EA-10 | a Run that ends on its way to T0 is dropped | `ea_10_a_run_that_ends_on_its_way_to_t0_writes_its_manifest` |
+| G16 | EA-14 | a duration that does not fit is admitted | `ea_14_refusals_before_a_child_runs` |
+| G17 | EA-12 | until ignored | `ea_12_time_and_events` |
+| P09 | EA-17 | capture ignores the request number | `test_ea_17_each_capture_gets_its_own_samples` |
+| P10 | EA-17 | a refused capture does not raise | `test_ea_17_a_capture_the_recorder_refuses_raises` |
+| P11 | EA-16 | repeat always sets the channel count | `test_ea_16_repeat_sets_the_channel_count_only_when_it_differs` |
+| P12 | EA-17 | a capture across a rate change is returned | `test_ea_17_a_capture_across_a_rate_change_is_refused` |
+| P13 | EA-17 | capture drops at | `test_ea_17_capture_at_an_instant` |
+| P14 | EA-16 | close does not fall back to the written Manifest | `test_ea_16_close_after_the_server_exited` |
+| P15 | EA-16 | submit does not count captures | `test_ea_17_each_capture_gets_its_own_samples` |
+| P16 | EA-16 | `request` hands back the wrong number | `test_ea_17_requests_made_ahead_capture_contiguous_samples` |
+
+G01–G17 and P09–P15 come from Review H: its findings, and its own mutations H01–H14 turned into the list once each had a test (H05 is equivalent and H07 would hang; `implementation-notes.md`, "Review H"). P16 guards `Rx.request` / `Rx.result`, added at the owner's request during Review H.
 
 F24 onwards and P01–P08 were added while running the list (spec 16's rules have code in the server and the Python package too). The Python mutations (`python` in `mutations.json`) run their unittest against the scratch copy's server. The list may grow with the reviews; the final count is `mutations.json`'s.

@@ -247,6 +247,23 @@ class EasyApi(unittest.TestCase):
             self.assertEqual(raw["outcome"]["kind"], "admitted")
             self.assertEqual(sdr.rx.capture(100).shape, (100,), "not the raw request's 777")
 
+    def test_ea_17_requests_made_ahead_capture_contiguous_samples(self) -> None:
+        # Two back-to-back `capture` calls lose the samples between them; requests made
+        # before the first is answered are served one after another (HD-10), as v3's
+        # receiveRequestOnly/receiveResponseOnly split did.
+        with self.connect() as sdr:
+            sdr.tx.repeat(ramp())
+            sdr.sleep(0.005)
+            first, second = sdr.rx.request(1000), sdr.rx.request(1500)
+            self.assertEqual((first.number, second.number), (0, 1))
+            b = sdr.rx.result(second)
+            a = sdr.rx.result(first)
+            self.assertEqual((a.shape, b.shape), ((1000,), (1500,)))
+            # One continuous stretch of the repeated waveform across the boundary.
+            rotation(np.concatenate([a, b]), ramp())
+        spans = [(c["first"]["ticks"], c["end"]["ticks"]) for c in (art["continuity"][0] for art in sdr.manifest["artifacts"])]
+        self.assertEqual(spans[0][1], spans[1][0], "the second capture starts where the first ends")
+
     def test_ea_17_a_capture_the_recorder_refuses_raises(self) -> None:
         with self.connect() as sdr:
             with self.assertRaises(ezsdr.Rejected) as raised:

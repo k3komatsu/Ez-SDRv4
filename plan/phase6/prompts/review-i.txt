@@ -1,0 +1,72 @@
+You are the adversarial reviewer for "Review I" of the Ez-SDR v4 Phase 6
+implementation, in /Users/komatsu/GoogleDrive/github/Ez-SDRv4 (branch `main`).
+Review I is a re-review scoped to the fixes of Review H. Review H's report is
+plan/phase6/reviews/review-h.md; the triage, finding by finding, is the
+"Review H" section of plan/phase6/implementation-notes.md. The fixes are the
+commits after 474082b (read `git log --oneline 474082b..HEAD`).
+
+This is a review only:
+- Do not edit, create or delete anything in the repository. Never run git
+  commands that change state. Never run `cargo fmt`. Never touch v3/.
+- For anything you run, copy the working tree into a scratch directory outside
+  the repository with fresh timestamps (`rsync -a --no-times --exclude target
+  --exclude v3 --exclude .git --exclude tmp --exclude .cargo --exclude
+  ezsdr-runs ./ <scratch>/`), run `find <scratch> -type f -exec touch {} +`
+  immediately before each build session in it, and build there with
+  CARGO_TARGET_DIR=$HOME/.cache/cargo-target/Ez-SDRv4-review; never interleave
+  two copies' builds (AGENTS.md §7). Nothing else builds there while you run.
+  The zsh shell does not word-split an unquoted $VAR.
+- Python: ~/.cache/ezsdr-venv/bin/python (3.13, numpy) and /usr/bin/python3
+  (3.9, numpy 1.24), with PYTHONDONTWRITEBYTECODE=1, and
+  EZSDR_SERVER=$HOME/.cache/cargo-target/Ez-SDRv4-review/debug/ezsdr-server
+  after `cargo +stable build -p ezsdr-server` in your copy.
+- Run things, and build probes for every claim you doubt.
+
+Check, in this order:
+1. Each Review H finding: is the fix what the finding asked for, does it hold,
+   and did it introduce a new defect? In particular:
+   - P0-1: RS-25a now binds only sections read by runtime-stage checks. Can a
+     child still leave its parent's RF envelope (a check registered at
+     Validate and Runtime; a section the parent lacks; the child's Assembly
+     registering checks of its own)? Does §58 #14's variation now work in a
+     child through the server (change sim.channel, sim.seed, sim.faults)?
+   - P0-2: the Sink's request numbering and the Python client's count. Can
+     the count and the Sink's number disagree (a capture the Kernel admits but
+     the Sink never receives; a Stop that discards queued requests; a
+     rejected entry; two recorders; a Spec Run's own capture; a child Run)?
+   - P0-3, P0-4: every exit path of the server now writes the Manifest?
+     (Drop during a panic, a failed connect, EOF, finish, a bad frame.)
+   - P0-5, P1-3: wait_for's prologue and the cancelled horizon; any
+     interaction with a Run ending in the matching round, or with an
+     advance_to that shares the horizon's instant.
+   - P1-1: the two-step framing: every header shape (not an object, a
+     body_bytes that is negative, fractional, huge, a string; a body on an
+     undecodable request).
+   - P1-2: the child with the parent's host clock and checks.
+   - P1-4, P2-5, P2-6 in the Python package.
+2. Run the mutation list: `EZSDR_PYTHON=$HOME/.cache/ezsdr-venv/bin/python
+   python3 plan/phase6/tools/mutate.py plan/phase6/tools/mutations.json
+   <another-scratch-dir>` from your scratch copy's root. Re-run your own
+   Review H mutations H01-H14 against the new tests and report each (H05 and
+   H07 are argued equivalent / untestable-by-mutation in the notes: judge the
+   argument). Design at least six new mutations of the fixed code.
+3. Anything Review H did not look at that the fixes now touch (the schemas,
+   SCHEMA_CHANGELOG.md, the design/ text of RS-25a, KC-29b, KC-37a, HD-16,
+   specs 16 and 17, the exit tables).
+4. Run in the scratch copy:
+     cargo +1.85.0 test --workspace
+     cargo +stable test --workspace
+     cargo +stable clippy --workspace --all-targets -- -D warnings
+     the Python suite on both interpreters
+     python3 plan/phase3/tools/check_links.py
+   and check that kernel_surface's ov_23b still prints 116 NEW / 292.
+
+Every finding needs a location, evidence (quoted text or the command and its
+output), a severity (P0 wrong behaviour, a broken rule or a contradiction; P1
+likely to mislead a later phase, a test that proves less than its rule, or a
+claim the evidence does not support; P2 clarity), and one recommended fix. No
+finding without evidence.
+
+Final message: a verdict (PASS, PASS_WITH_RISK or CHANGES_REQUIRED); for each
+Review H finding one line, closed or not and why; any new findings in full
+(P0/P1) or one line (P2); the mutation results; the test counts.
