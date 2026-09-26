@@ -103,7 +103,8 @@ def main():
     mutations = json.load(open(sys.argv[1], encoding="utf-8"))
     selected = set(sys.argv[3:])
     scratch = prepare_scratch(root, os.path.abspath(sys.argv[2]))
-    env = dict(os.environ, CARGO_TARGET_DIR=os.path.join(scratch, "target"))
+    # Shared by every review copy (AGENTS.md §7); a per-scratch target cost ~2 GB each.
+    env = dict(os.environ, CARGO_TARGET_DIR=os.path.expanduser("~/.cache/cargo-target/Ez-SDRv4-review"))
     failures = 0
     for mutation in mutations:
         if selected and mutation["id"] not in selected:
