@@ -450,6 +450,10 @@ impl RunHandle {
                 self.inputs.push(waveform.clone());
             }
         }
+        // KC-9: the store keeps only the inputs verified above, so a Module reads no
+        // unverified bytes and KC-28 never finds a mis-keyed entry under a waveform's hash.
+        let inputs = &self.inputs;
+        lock(&self.store).retain(|hash, _| inputs.iter().any(|input| &input.hash == hash));
         true
     }
 

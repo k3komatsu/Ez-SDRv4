@@ -93,10 +93,10 @@ authority: sim                           # the Simulation Engine is the Time Aut
 environment:
   ezsdr.time: { class: simulation }      # discrete-event virtual time (§15)
   ezsdr.rf_path: { path: simulated }
-  sim.channel:                           # SimulationChannel (§16)
-    model: awgn
-    snr_db: 10
-    delay_samples: 37
+  sim.channel:                           # SimulationChannel: a coupling matrix (§16)
+    couplings:                           # one path per TX channel → RX channel, explicit ends
+      - { tx: radio, tx_channel: 0, rx: radio, rx_channel: 1, gain_db: -30, delay_ns: 37 }
+    noise_dbfs: { radio: -60 }           # receiver noise power per receiving fragment, not an SNR
   sim.faults:                            # fault schedule read by its target Provider (§17)
     - at_ns: 2500000000                  # nanoseconds after T0
       fault: rx_overflow

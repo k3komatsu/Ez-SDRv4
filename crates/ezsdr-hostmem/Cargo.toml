@@ -1,7 +1,7 @@
 [package]
 name = "ezsdr-hostmem"
 version = "1.0.0"
-description = "Ez-SDR v4 host memory domain and buffer pool (plan/phase2/10-host-data-path.md)"
+description = "Ez-SDR v4 host memory domain and buffer pool (design/10-host-data-path.md)"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

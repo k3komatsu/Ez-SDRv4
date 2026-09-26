@@ -34,7 +34,7 @@ Rules:
 
 - **The Core never infers coherence.** Across Provider instances it composes only `ClockRelation`s (§24); a cross-provider set is called coherent only if a CalibrationArtifact (§26) asserts it, with provenance.
 - Aligned multi-channel samples come from **one stream of one Provider instance**. A vector of independently started streams is a DeviceGroup, whatever its clock wiring.
-- Coherence has a basis and a validity. A daughterboard whose LO phase is random after each retune is coherent only under timed tuning and only until the next untimed retune; the Provider declares this behaviour and MockRadio emulates it.
+- Coherence has a basis and a validity. A daughterboard whose LO phase is random after each retune is coherent only under timed tuning and only until the next untimed retune; the Provider declares this behaviour and MockRadio emulates it (MR-34).
 
 This is important for:
 
@@ -107,7 +107,7 @@ A calibration procedure — transmit a known signal, receive, estimate — is an
 
 ## Delay calibration is not optional, even for SISO
 
-Every radio has a fixed TX→RX delay through its digital and analog chain. Any timing claim — a packet arrival time, a radar range, an IBFD reference alignment — needs it. srsRAN carries it as a per-device `time_alignment_calibration` in samples; OpenAirInterface as `tx_sample_advance`. Ez-SDR carries a default per device profile in the Radio Model and allows a per-Run override by a CalibrationArtifact of kind `delay`.
+Every radio has a fixed TX→RX delay through its digital and analog chain. Any timing claim — a packet arrival time, a radar range, an IBFD reference alignment — needs it. srsRAN carries it as a per-device `time_alignment_calibration` in samples; OpenAirInterface as `tx_sample_advance`. Ez-SDR carries a default per device profile in the Radio Model, as two capabilities in samples, `radio.tx.path_delay_samples` and `radio.rx.path_delay_samples` (RM-23), and allows a per-Run override by a CalibrationArtifact of kind `delay`.
 
 ## Retune phase behaviour is a declared capability
 
@@ -117,7 +117,7 @@ Daughterboards such as UBX/CBX/SBX have a random inter-frontend phase after ever
 phase_behavior_on_retune:  deterministic | random_unless_timed_tune
 ```
 
-declared per device profile as `radio.phase_behavior_on_retune`. Phase 2 records the capability; emulation of phase changes on retune is Phase 3 work.
+declared per device profile as `radio.phase_behavior_on_retune`. Phase 2 records the capability; MockRadio emulates it from Phase 3 (MR-34).
 
 ---
 

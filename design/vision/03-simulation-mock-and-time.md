@@ -41,13 +41,13 @@ A software environment may contain:
 ```text
 Simulation Environment
 ├── MockRadio
-├── SimulationChannel
+├── SimulationChannel (the `sim` Vocabulary's shared medium, not a Module)
 ├── SimulationEngine (discrete-event Time Authority; virtual clock, §15)
 ├── MockPeripheral
 └── MockNetworkEndpoint
 ```
 
-The BindingProfile's `sim.faults` environment document is read by each target Provider; it is not a FaultInjector Module.
+The BindingProfile's `sim.faults` environment document is read by each target Provider; it is not a FaultInjector Module. Likewise the SimulationChannel is not a Module: it is the `sim` Vocabulary's shared medium, which the runtime hands to each simulated radio, configured by the `sim.channel` environment document (§16).
 
 An AI agent should be able to:
 
@@ -83,7 +83,7 @@ and the following are rules, not options:
 
 1. **MockRadio enforces the envelope of the profile it emulates** (`x310-like`): it refuses `start(T0)` before synchronization ends, rather than starting late (MR-11); a timed command issued with insufficient lead produces the same typed `LATE_COMMAND` / `TIME_ERROR` event as the hardware; requested rates are coerced on the same grid and reported in each fragment's PrepareReport (§11); `stop` delivers the same tail; an injected overflow reproduces the RM-17/MR-21 restart gap and block flags (§23); and a request that exceeds the profile's PerformanceEnvelope (§34), channel count × rate × format beyond the emulated transport, is rejected at `validate()` / `prepare()`, so a four-channel 200 Msps request fails on a 1GbE-like profile in simulation as it would on the bench.
 2. **Timing requirements are checked at the layer that owns them.** The generic matcher compares requested timing constraints with the bound Provider's declared TimingEnvelope capabilities at `validate()`; for Actions, the Kernel uses only `ProviderInstance.min_command_lead`, and the target Provider enforces its own timed commands. Mock and hardware follow the same checks.
-3. **RF behaviour is not part of the envelope.** It stays in SimulationChannel (§16) and is reported as unmodelled unless a model is bound (§14).
+3. **RF behaviour is not part of the envelope.** Propagation stays in the SimulationChannel (§16); the device's own RF behaviour — gain, LO phase, clipping, path delay — belongs to the radio model (MR-32…MR-36). RF behaviour no bound model covers is reported as unmodelled (§14).
 
 Profiles are versioned. An `x310-like` profile carries a version that the Manifest records in its `mock.*` section, and its envelope values come from measurement on the hardware, not from data sheets (§59). An `ideal` profile without constraints may exist for algorithm work; a Run on it is recorded with `timing: none` and `coercion: none` and is not evidence for promotion.
 
@@ -147,13 +147,13 @@ Normative: [design/01-time-model.md](../01-time-model.md), rules TM-1…TM-12, T
 
 ## Time Authority
 
-Something must be the authority on "now" and on "wait until". One Time Authority per Run answers `now`, `wait_until` and `schedule` for the domains it declares: a primary root, that root's derived domains, `host.monotonic`, and, for the Simulation Engine, every root it simulates. In a Hardware or HIL Run it is the device timekeeper, which publishes a relation to host monotonic. In a Simulation Run it is the **discrete-event Simulation Engine**, which advances virtual time — `host.monotonic` included — and delivers every waiting party its wake-up in order: Reactor timers, Processor deadlines, Peripheral latency models, SimulationChannel delays and client waits. In RealtimeEmulation the same Engine reads the real host clock and paces to it. `schedule` takes a callback at an instant of a governed domain that is at or after `now` and is a tick of that domain's root; callbacks fire in time order, ties in insertion order.
+Something must be the authority on "now" and on "wait until". One Time Authority per Run answers `now`, `wait_until` and `schedule` for the domains it declares: a primary root, that root's derived domains, `host.monotonic`, and, for the Simulation Engine, every root it simulates. In a Hardware or HIL Run it is the device timekeeper, which publishes a relation to host monotonic. In a Simulation Run it is the **discrete-event Simulation Engine**, which advances virtual time — `host.monotonic` included — and delivers every waiting party its wake-up in order: Reactor timers, Processor deadlines, Peripheral latency models and client waits. The SimulationChannel needs no wake-up: a transmitter's content is known before its instant, so the receiving radio evaluates the channel, delayed paths included, when it publishes a block (CH-4, CH-9). In RealtimeEmulation the same Engine reads the real host clock and paces to it. `schedule` takes a callback at an instant of a governed domain that is at or after `now` and is a tick of that domain's root; callbacks fire in time order, ties in insertion order.
 
 Normative: [design/01-time-model.md](../01-time-model.md), rules TM-16a…TM-17b; [design/05-module-api.md](../05-module-api.md), MA-29.
 
 Three consequences:
 
-- The Simulation Environment (§13) *is* a discrete-event engine, the **Simulation Engine**. MockRadio, SimulationChannel and MockPeripheral are models scheduled on it; each target Provider reads its applicable entries from the `sim.faults` environment document (§17). Determinism with a seed follows from delivering events in virtual-time order, not from threads happening to agree.
+- The Simulation Environment (§13) *is* a discrete-event engine, the **Simulation Engine**. MockRadio and MockPeripheral are models scheduled on it, and the SimulationChannel is the medium the radios read (§16); each target Provider reads its applicable entries from the `sim.faults` environment document (§17). Determinism with a seed follows from delivering events in virtual-time order, not from threads happening to agree.
 - **No client API waits on wall-clock time for something that happens in runtime time.** Python has `run.wait_until(t)` and `run.wait_for(event)`; it does not have a device-time `sleep`. A `time.sleep(0.5)` in a script means nothing in a Run that simulates ten seconds in 0.3 seconds.
 - Every stepped instance implements `step(until: TimePoint)`. The Kernel coordinator runs the stepping loop in a fixed order on one logical thread, and the Authority decides the instants; RealtimeEmulation, HIL and Hardware run Islands on real threads (§32; [design/05-module-api.md](../05-module-api.md), MA-20, MA-30).
 
@@ -178,7 +178,6 @@ SimulationChannel
       ├── phase noise
       ├── PA nonlinearity
       ├── IQ imbalance
-      ├── clipping
       ├── self-interference
       └── MIMO channel
       │
@@ -189,17 +188,18 @@ MockRadio RX
 The initial implementation may support only:
 
 ```text
-loopback
 gain
 delay
 AWGN
 ```
 
-The architecture must allow richer models later without changing Radio semantics.
+A loopback is not a separate model: it is a coupling whose two ends are one radio, the diagonal block below. Clipping is the radio's, not the channel's: MockRadio clips at the contract's full scale (§23). The architecture must allow richer models later without changing Radio semantics.
 
 The channel is a coupling matrix over **all TX ports × all RX ports, including a device's own RX**. Self-interference is a diagonal-block entry, not a special case; this is what an IBFD graph (§46) is simulated against.
 
 SimulationChannel configuration lives in the BindingProfile `environment` (§8), never in the ExperimentSpec.
+
+Normative: [design/11-simulation-channel.md](../11-simulation-channel.md), rules CH-1…CH-11; [design/09-mock-radio.md](../09-mock-radio.md), MR-31…MR-36.
 
 ---
 

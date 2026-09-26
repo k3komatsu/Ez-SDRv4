@@ -8,7 +8,7 @@ Ez-SDR is an SDR experiment runtime. Two unrelated lines live in one repository:
 
 | Branch | Content | Status |
 |---|---|---|
-| `main` | **v4** — clean-sheet Rust rewrite. Phase 1 and Phase 2's accepted specs in `design/01-*.md` … `design/10-*.md` (their process records remain in `plan/phase1/` and `plan/phase2/`), plus the Kernel, Radio Model, Simulation Engine and MockRadio implementation (`crates/`, `schemas/`). Phase 3's plan (specs 11–12, verified patches) is in `plan/phase3/`, accepted at Gate P (2026-09-26) and awaiting implementation; Phase 4 onwards is unwritten. | active development |
+| `main` | **v4** — clean-sheet Rust rewrite. Phases 1–3's accepted specs in `design/01-*.md` … `design/11-*.md` (their process records remain in `plan/phase1/` … `plan/phase3/`; spec 12's amendments are applied to `design/04…09` and recorded in `plan/phase3/12-amendments.md`), plus the Kernel, Radio Model, Simulation Engine, MockRadio and SimulationChannel implementation (`crates/`, `schemas/`). Phase 3 was accepted at Gate X on 2026-09-26; Phase 4 onwards is unwritten. | active development |
 | `master` | **v3** — D + C++ UHD bridge + Python client. Tags `v2.11`, `v3.0.0`–`v3.0.28`. | maintenance; still the GitHub default branch |
 
 Rules that follow from this layout:

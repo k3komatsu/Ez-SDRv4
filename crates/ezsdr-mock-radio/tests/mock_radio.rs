@@ -903,6 +903,25 @@ fn mr_18_hardware_timed_updates() {
 }
 
 #[test]
+fn mr_25_a_stream_stop_keeps_the_pending_commands() {
+    // RM-16, MR-25: a `Stop` for `<device>/tx` or `<device>/rx` cancels no pending timed command
+    // (one may be for the other direction); `Stop` for the device cancels them all
+    let now = 2_001_000_000;
+    for (target, applied) in [("mock/tx", 2), ("mock/rx", 2), ("mock", 0)] {
+        let mut harness = Harness::new("x310-like", &[], &[], &[], None);
+        harness.arm_start(2_000_000_000).unwrap();
+        harness.step(now).unwrap();
+        harness.actions.push(update_action("radio.rx.frequency_hz", Value::Num(2.4e9), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, now + 5_000_000))));
+        harness.actions.push(update_action("radio.tx.frequency_hz", Value::Num(2.6e9), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, now + 5_000_000))));
+        harness.actions.push(Action::Stop { target: Some(rid(target)) });
+        harness.step(now).unwrap();
+        harness.step(now + 5_000_000).unwrap();
+        let rows = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()];
+        assert_eq!(rows.as_array().unwrap().len(), applied, "Stop {target}");
+    }
+}
+
+#[test]
 fn mr_18_a_cold_rate_change_starts_a_new_sample_clock() {
     let mut harness = Harness::new("x310-like", &[], &[], &[], Some((BackPressure::DropOldest, 8)));
     harness.arm_start(2_000_000_000).unwrap();

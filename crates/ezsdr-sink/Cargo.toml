@@ -1,7 +1,7 @@
 [package]
 name = "ezsdr-sink"
 version = "1.0.0"
-description = "Ez-SDR v4 Sink Vocabulary sink 1.0.0 (plan/phase2/10-host-data-path.md)"
+description = "Ez-SDR v4 Sink Vocabulary sink 1.0.0 (design/10-host-data-path.md)"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

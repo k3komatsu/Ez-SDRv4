@@ -3072,6 +3072,40 @@ fn kb_01_a_provider_reads_a_session_waveform_by_hash() {
 }
 
 #[test]
+fn kb_01_b_the_store_keeps_no_unverified_entry() {
+    // an `Assembly.inputs` entry no schedule entry references is not kept (KC-9), so a Session
+    // waveform whose hash it was filed under is stored as submitted, not as the stale 3 bytes
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(
+            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
+                .declaring("radio/tx", 1, 1)
+                .registering_at_arm("radio/tx"),
+        ),
+    );
+    let bytes: Vec<u8> = (0..800u32).map(|i| (i % 251) as u8).collect();
+    assembly.inputs.insert(ezsdr_kernel::hash::ContentHash::of_bytes(&bytes), vec![1, 2, 3]);
+    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let entry = run
+        .submit(
+            SessionAction::Vocabulary {
+                ns: ns("test"),
+                verb: Ident::parse("start_repeat").unwrap(),
+                target: ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap(),
+                at: None,
+                params: BTreeMap::new(),
+            },
+            Some(&bytes),
+        )
+        .unwrap();
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
+    let _ = run.finish();
+    assert_eq!(probe.with_prefix("p:burst_input:"), vec!["p:burst_input:800".to_owned()]);
+}
+
+#[test]
 fn kb_02_the_manifest_records_the_fidelity_settled_in_prepare() {
     let probe = Probe::new();
     let settled = ezsdr_kernel::module_api::Fidelity {

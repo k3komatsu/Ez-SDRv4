@@ -1,11 +1,15 @@
 # Phase 3 Vision issues collected at Step 7
 
 Eight edits, from the "Vision issues found" sections of
-[spec 11 §7](11-simulation-channel.md#7-vision-issues-found) (four) and
+[spec 11 §7](../../design/11-simulation-channel.md#7-vision-issues-found) (four) and
 [spec 12 §3](12-amendments.md#3-vision-issues-found) (four). Per GV-5 the
 Vision is **not** edited during Phase 3; these are applied at Step X with the
 owner's approval, adding one row to the revision history in
 `Ez-SDR_v4_ARCHITECTURE_VISION.md` (AGENTS.md §2).
+
+**Applied at Step X (2026-09-26)**, after the owner accepted Gate X, with the
+revision-history row of that date. Issue 1 also rewrote §15's "models scheduled on
+it" sentence, and issue 8 moved clipping out of §16's channel list.
 
 ## Spec 11 — the SimulationChannel
 

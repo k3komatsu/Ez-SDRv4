@@ -279,7 +279,7 @@ The numbered rules below are cited by number; each is now stated by the rules it
 | RX 7 | Transmit blocks carry their first sample's target time, in continuous mode too | SC-23 |
 | RX 8 | Every link declares a policy and a capacity; `block` is back-pressure by refusal, not a parked thread; Sink links are drop-class | SC-19…SC-21 |
 
-A Mock may deliver any block length and should offer a length-jitter option, so that a Processor assuming a fixed block size fails in simulation, and MockRadio clips at the contract's full scale (Phase 2 Mock obligations).
+A Mock may deliver any block length and should offer a length-jitter option, so that a Processor assuming a fixed block size fails in simulation, and MockRadio clips at the contract's full scale (MR-36).
 
 An overflow on UHD hardware returns zero samples, distinguishes buffer overrun from host-side sequence error, and restarts a continuous stream about 50 ms later; under this contract it appears as one block boundary with `GAP_BEFORE`, `RESTARTED` and the restart gap as its time jump, identically from a UHD Provider and from a MockRadio fault injection (SC-18).
 

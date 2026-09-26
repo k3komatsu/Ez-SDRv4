@@ -20,7 +20,7 @@ Simulation Engine (discrete-event Time Authority)
 +
 MockRadio (enforcing the x310-like envelope)
 +
-SimulationChannel (coupling matrix; loopback / gain / delay / AWGN)
+SimulationChannel (coupling matrix; gain / delay / AWGN; a loopback is a coupling)
 +
 RuntimeEvent pipeline
 +
@@ -42,11 +42,12 @@ but entirely in software, and it must already produce a Session Manifest contain
 The initial SimulationChannel may support only:
 
 ```text
-loopback
 gain
 delay
 AWGN
 ```
+
+with a loopback expressed as a coupling whose two ends are one radio (§16).
 
 ---
 

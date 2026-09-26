@@ -2,12 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted at Gate P** (owner, 2026-09-26; verdicts in §11). The patches are applied by `20-implementation-plan.md` Steps 0–7; Gate X follows. |
+| Status | **Accepted at Gate P** (owner, 2026-09-26; verdicts in §11). Steps 0–7 and Review C are done (`5eb61dd`, `857a1c2`, `3cbc103`); **Accepted at Gate X** (owner, 2026-09-26; §11), with Review C's P2-1 … P2-9 applied (VB-10, KC-9); **Step X done** (spec 11 in `design/`, eight Vision issues applied). Phase 3 is complete. |
 | Phase | Vision §67 Phase 3. Predecessor: Phase 2 (Radio Model, Simulation Engine, MockRadio; accepted at Gate X 2026-09-25, fixes `612b9eb`). Successor: Phase 4 (Events, failure, continuity, artifacts). |
 | Scope | The **SimulationChannel** of Vision §16 and §57 — loopback, gain, delay and AWGN over a coupling matrix declared in the BindingProfile's `environment`; **MockRadio on that channel** — transmit sample content, gain and frequency acting on samples, the LO phase behaviour of RM-9, clipping, a path-delay default; the **two Kernel amendments** it needs; and **deterministic Runs** with the channel in the loop (Z10). The Phase 3 half of Vision §58: #8, and #3, #12 and #14 extended to the channel. |
 | Not in scope | §3 lists it. In one line: no richer channel model than §57's four, no drifting clocks, no Reactor, no RealtimeEmulation, no hardware, no Python. |
 | Language | English, like Phases 1 and 2. |
-| Location | Spec 11 is drafted here and moves to `design/11-simulation-channel.md` at Step X. Spec 12's amendments are applied to `design/04…09` by a patch at Step 5 and stay here as the record. |
+| Location | Spec 11 was drafted here and moved to [`design/11-simulation-channel.md`](../../design/11-simulation-channel.md) at Step X (2026-09-26). Spec 12's amendments are applied to `design/04…09` by a patch at Step 5 and stay here as the record. |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
 
 Documents:
@@ -15,14 +15,14 @@ Documents:
 ```text
 plan/phase3/
   00-overview.md              this file: scope, decisions, crates, governance, traceability, gates, exit criteria, decision log
-  11-simulation-channel.md    spec 11 (new): the `sim.channel` section, the medium, the field, finality — CH-1…CH-11
-  12-amendments.md            spec 12: Kernel amendments KB-1, KB-2; Vocabulary and Module amendments VB-1…VB-8,
+  (spec 11, the SimulationChannel — CH-1…CH-11 — moved to design/11-simulation-channel.md at Step X)
+  12-amendments.md            spec 12: Kernel amendments KB-1, KB-2; Vocabulary and Module amendments VB-1…VB-10,
                               with the new rules RM-23 and MR-31…MR-36
   20-implementation-plan.md   the ordered steps for the implementer: patches, commands, mutation checks, done-lists,
                               Appendix A (every changed file), Appendix B (every rule → test), Appendix C (mutations)
   patches/                    01-kernel, 02-vocabularies, 03-mock-radio, 04-acceptance, 05-design-text
   prompts/                    implementation and review prompts
-  reviews/                    planning reviews before Gate P
+  reviews/                    planning reviews before Gate P; Review C and the open items for Gate X
 ```
 
 ---
@@ -92,7 +92,7 @@ Each row is open to reversal at Gate P; a reversal is recorded in §11. Spec 11'
 | Z7 | Crates | None added: the channel is `ezsdr_sim::channel`, MockRadio's side is `ezsdr_mock_radio`'s private `channel` module | An `ezsdr-sim-channel` crate (its behaviour would need its own recorded version, spec 11 C2) | Crates are added, never merged, later |
 | Z8 | Determinism scope | Bit-identical for one build on one platform (CH-11) | A portable math library now (a dependency or several hundred lines, for no Phase 3 need) | CH-11's ceiling |
 | Z9 | Receive publication | Strictly after the last sample, in every mode (VB-4) | Only in channel mode (two publication rules in one Provider version) | none |
-| Z10 | What "deterministic Runs" means in Phase 3 | Four properties, each with a carrier: one seed and one set of documents give one Manifest projection, noise included (`v58_03_channel_noise_reproduces_with_its_seed`); a Run reproduces from its own Manifest's documents and inputs (`v58_03_a_run_reproduces_from_its_own_manifest`); the channel's output does not depend on block lengths (`v58_12_the_channel_output_does_not_depend_on_block_lengths`) nor on the order the stepping loop visits the radios (`ch_09_the_receive_output_does_not_depend_on_the_stepping_order`, `ch_09_a_burst_starting_between_rounds_survives_a_stop_in_either_order`, `v58_08_a_session_hears_a_burst_from_its_first_sample_in_either_instance_order`) | Session replay (needs the waveform store by hash beyond a Run, Phase 6); cross-platform bit-exactness (Z8) | Reactor decisions join #3 in Phase 5 |
+| Z10 | What "deterministic Runs" means in Phase 3 | Four properties, each with a carrier: one seed and one set of documents give one Manifest projection, noise included (`v58_03_channel_noise_reproduces_with_its_seed`); a Run reproduces from its own Manifest's documents and inputs (`v58_03_a_run_reproduces_from_its_own_manifest`); the channel's output does not depend on block lengths (`v58_12_the_channel_output_does_not_depend_on_block_lengths`) nor on the order the stepping loop visits the radios (`ch_09_the_receive_output_does_not_depend_on_the_stepping_order`, `ch_09_a_burst_starting_between_rounds_survives_a_stop_in_either_order`, `v58_08_a_session_hears_a_burst_from_its_first_sample_in_either_instance_order`) | Session replay (needs the waveform store by hash beyond a Run, Phase 6); cross-platform bit-exactness (Z8); stepping-order independence in a round a Module error ends early (CH-9's ceiling, Review C P2-1, accepted at Gate X) | Reactor decisions join #3 in Phase 5 |
 | Z11 | VB-4…VB-6 and VB-8 without a channel | They apply in both modes | Channel-only fixes (a pattern-mode Mock would keep a defect the channel-mode one does not have) | none |
 
 ## 5. Crate layout
@@ -183,8 +183,8 @@ A review pass's findings are recorded in §11 with a verdict, never silently app
 ## 10. Exit criteria
 
 1. Specs 11 and 12 accepted at Gate X, and every decision row — Z1–Z11 here, C1–C11 in spec 11, M11–M15 in spec 12 — has a verdict in §11.
-2. Every Phase 3 rule — CH-1…CH-11, KB-1, KB-2, VB-1…VB-8, RM-23, MR-31…MR-36 and each amended rule — has an OV-3 disposition in `plan/phase3/exit-review/`, read from test bodies (PO-10), with no `GAP` and no `UNCERTAIN`.
-3. `cargo test --workspace` passes on Rust 1.85.0 and on stable with 592 tests and no `#[ignore]`; `cargo +stable clippy --workspace --all-targets -- -D warnings` passes.
+2. Every Phase 3 rule — CH-1…CH-11, KB-1, KB-2, VB-1…VB-10, RM-23, MR-31…MR-36 and each amended rule — has an OV-3 disposition in `plan/phase3/exit-review/`, read from test bodies (PO-10), with no `GAP` and no `UNCERTAIN`.
+3. `cargo test --workspace` passes on Rust 1.85.0 and on stable with 592 tests (602 after Review C's fixes, 604 after Gate X's) and no `#[ignore]`; `cargo +stable clippy --workspace --all-targets -- -D warnings` passes.
 4. Every carrier of §8 exists and passes.
 5. `kernel_surface` (116 NEW / 292 public items), `schema_freeze` and every Vocabulary freeze test pass; `SCHEMA_CHANGELOG.md` has the Phase 3 entry.
 6. The Kernel's direct dependencies are still exactly four; `Cargo.lock` gains no package (PO-4).
@@ -202,3 +202,8 @@ Filled in at Gate P and after each review. One row per decision the owner confir
 | Spec 12: KB-1, KB-2, VB-1…VB-8, M11–M15 | P | **accepted** | owner, 2026-09-26, as recommended; this includes VB-8's consequence on `ideal` and M15's split of RF behaviour, whose Vision conflict is spec 12 §3 issue 4 |
 | The patches `patches/01…05` and `tools/mutations.json` (83 mutations) | P | **accepted** | owner, 2026-09-26; the record of what Gate P accepted, not edited afterwards (§9) |
 | Planning reviews, passes 1–5 (`reviews/planning-reviews.md`) | P | **accepted** | owner, 2026-09-26, as triaged there: every finding applied except pass 4's P2-5, rejected with its reason |
+| VB-9: MR-27's per-instance section names and MR-2's `id` shape (Review C's B1) | Review C | **accepted** | owner, 2026-09-26, during Review C; applied in `857a1c2`, Kernel unchanged ([reviews/review-c.md](reviews/review-c.md) §2) |
+| Review C: B1, P1-1, P1-2, the test gaps and P2 nits | Review C | **closed** | by tests and text in `857a1c2`; record in [reviews/review-c.md](reviews/review-c.md) §2 and `implementation-notes.md` |
+| Review C P2-1 … P2-9 | X | **accepted** | owner, 2026-09-26, as recommended in [reviews/review-c.md](reviews/review-c.md) §3: ceilings for P2-1, P2-3, P2-5; P2-2 fixed in the Kernel (KB-1's KC-9 amendment, `kb_01_b_…`); P2-4, P2-7 amended (spec 12 VB-10, `mr_25_a_stream_stop_…`); P2-8 package descriptions; P2-6 and P2-9 no action. 604 tests |
+| Specs 11 and 12, Z1–Z11, C1–C11, M11–M15 (exit criterion 1) | X | **accepted** | owner, 2026-09-26, as recommended; Review C found them supported, M13 after P2-7's correction |
+| Step X: spec 11 to `design/`, the eight Vision issues | X | **done** | 2026-09-26: [`design/11-simulation-channel.md`](../../design/11-simulation-channel.md); Vision §§8, 13, 15, 16, 23, 25, 26, 57 and a revision-history row ([vision-issues.md](vision-issues.md)) |

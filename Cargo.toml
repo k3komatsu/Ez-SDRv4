@@ -17,4 +17,4 @@ members = [
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/k3komatsu/Ez-SDR"
+repository = "https://github.com/k3komatsu/Ez-SDRv4"
