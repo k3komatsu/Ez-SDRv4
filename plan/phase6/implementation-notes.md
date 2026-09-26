@@ -30,6 +30,9 @@ Holes 2 (no `wait_for`), 4 (RS-25a's environment) and 5 (SB-14's field) are from
 | 2 | `4635d91` | VD-1: `sink` 1.1.0, the capture Sink 1.2.0, the payload schema, `design/10` text; the rig's profiles and determinism projection | 653 |
 | 3 | `adee35e` | spec 16's server: `ezsdr-server`, `schemas/server/`, the acceptance rig on the server's catalogue, the Reactor-in-a-child-Run carrier; the governance lists | 671 |
 | 4 | `7433ffa` | spec 16's Python package, its tests and examples; `v58_10` over the Python sources | 671 (+ 12 Python) |
+| 5 | `a8f7979`, `474082b` | the mutation list and tool, the notes, the exit tables, Review H's brief | 671 (+ 12) |
+| Review H | `79c7655`, `69883ef`, `2b607a2` | the fixes (`79c7655` is the work in progress, committed by a forked agent), `Rx.request` / `Rx.result`, mutations to 60 | 682 (+ 19) |
+| Review I | `ecca745` | the fixes, mutations to 70, `AGENTS.md` and `handoff.md` | 684 (+ 21) |
 
 Each step was verified before its commit on 1.85.0 and on stable (and Step 4's Python suite on 3.9 and 3.13).
 
