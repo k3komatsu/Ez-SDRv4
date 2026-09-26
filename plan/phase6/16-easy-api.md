@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft, implemented under the owner's delegation; awaiting Gate X ([`00-overview.md`](00-overview.md) §11). Moves to `design/16-easy-api.md` at Step X. |
+| Status | **Accepted at Gate X** (owner, 2026-09-27, as recommended; [`00-overview.md`](00-overview.md) §11). Moves to `design/16-easy-api.md` at Step X. |
 | Scope | The frontend that makes Vision §3's Easy API real: the server `ezsdr-server` 0.1.0 (a Rust binary that compiles the Modules in and runs one Session), the protocol `ezsdr.protocol` 1 between a client and the server, and the Python package `ezsdr` 0.1.0. |
 | Not in scope | A remote listener, server-owned profiles and authentication (Phase 7); Session replay; a Spec builder; a CLI or MCP client ([`00-overview.md`](00-overview.md) §3). |
 | Depends on | Specs 01–11 and 14 as amended; spec 17 (KF-1 `events`, KF-2 `wait_for`, KF-3 `run_child`, VD-1 `sink.CAPTURE_WRITTEN`). |

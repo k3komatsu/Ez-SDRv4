@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft, implemented under the owner's delegation; awaiting Gate X ([`00-overview.md`](00-overview.md) §11). Its text reaches `design/` in the commit that implements it (GY-5); this file is the record. |
+| Status | **Accepted at Gate X** (owner, 2026-09-27, as recommended; [`00-overview.md`](00-overview.md) §11). Its text reaches `design/` in the commit that implements it (GY-5); this file is the record. |
 | Scope | Four Kernel amendments: KF-1 (a client reads the delivered events during the Run), KF-2 (`wait_for`: wait in Run time for an event), KF-3 (child Runs, with the environment rule RS-25a lacked), KF-4 (SB-14's dangling reference). One Vocabulary amendment: VD-1 (`sink.CAPTURE_WRITTEN`). |
 | Amends | `design/03-spec-and-binding.md` (SB-14), `design/04-run-and-session.md` (RS-6's coordinator paragraph, RS-25, RS-25a), `design/06-kernel-coordinator.md` (KC-28 step 5, new KC-29a and KC-29b, KC-37, new KC-37a, KC-45), `design/10-host-data-path.md` (HD-6, HD-7, new HD-16). |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |

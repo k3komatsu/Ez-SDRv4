@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Planned and implemented under the owner's delegation** (2026-09-26: "それではPhase4/5と同じ用にPhase6も設計と実装をしてください"); there is no separate Gate P. Reviewed by an Opus review loop (§9). Awaiting Gate X. |
+| Status | **Planned and implemented under the owner's delegation** (2026-09-26: "それではPhase4/5と同じ用にPhase6も設計と実装をしてください"); there is no separate Gate P. Reviewed by an Opus review loop (§9): Review H and Review I, the re-review of its fixes; every finding fixed with tests and mutations. **Accepted at Gate X** (owner, 2026-09-27, every decision as recommended; §11). |
 | Phase | Vision §67 Phase 6: "Python Easy API". Predecessor: Phase 5 (Mini Reactive Radio; accepted at Gate X 2026-09-26). Successor: Phase 7 (native UHD Provider). |
 | Scope | Vision §3's and §57's snippets, run from Python entirely in software: `with ezsdr.connect() as sdr: sdr.tx.repeat(x); y = sdr.rx.capture(N)` yields `y` and a Session Manifest with the action log, the waveform hash, the capture's first sample time and validity, and the effective configuration. §54's `result = sdr.run(spec)` as a child Run. The three Kernel holes the prototype hit (§2), and the Phase 6 items earlier phases left open (§8). |
 | Not in scope | §3 lists it. In one line: no remote transport, no Session replay, no artifact store, no Spec builder, no CLI or MCP frontend, no hardware pacing. |
@@ -195,8 +195,8 @@ OV-1…OV-23b, PO-1…PO-12, GV-1…GV-6, GW-1…GW-5 and GX-1…GX-6 bind Phase
 | Decision | Gate | Verdict | Note |
 |---|---|---|---|
 | Plan and implement in one session, then an Opus review loop (S11) | — | **delegated** | owner, 2026-09-26: "それではPhase4/5と同じ用にPhase6も設計と実装をしてください" (Phase 5's instruction: implement, have Opus review, fix, re-review unless the fixes are small and low-risk, and loop) |
-| Session replay and the artifact store: out of Phase 6 (§3). Recommendation: build them together in the frontend, after Phase 7 has a real device to replay against; no Kernel type changes, so the freeze does not wait | X | *pending* | |
-| KF-4: the builder source hash SB-14 promises. Recommendation: add an optional `source` hash to the Manifest's `spec` section, set by the caller that starts the Run, **before the v4.0 freeze**, with the first Spec builder; until then SB-14 says it is forward | X | *pending* | |
+| Session replay and the artifact store: out of Phase 6 (§3). Recommendation: build them together in the frontend, after Phase 7 has a real device to replay against; no Kernel type changes, so the freeze does not wait | X | **after Phase 7, in the frontend** | owner, 2026-09-27, as recommended ("すべて推奨で受理します") |
+| KF-4: the builder source hash SB-14 promises. Recommendation: add an optional `source` hash to the Manifest's `spec` section, set by the caller that starts the Run, **before the v4.0 freeze**, with the first Spec builder; until then SB-14 says it is forward | X | **the field, before the freeze** | owner, 2026-09-27, as recommended ("すべて推奨で受理します"); Vision §9 stands, so Vision issue 4 is not applied |
 | Review H: every P0, P1 and P2 fixed or answered (`implementation-notes.md`, "Review H") | — | **closed** | 2026-09-26; the fixes change behaviour in the Kernel, the Sink, the server and the Python package, so Review I re-reviews them (the owner's rule) |
 | Review I (re-review): Review H's P0-2 was not closed (a capture routed by another path took a number the client did not count); it and every P1 and P2 fixed with tests and mutations (`implementation-notes.md`, "Review I"); no further review, the fixes being small, each tested and mutation-guarded | — | **closed** | 2026-09-26, the owner's rule for small, low-risk fixes |
-| S1–S11, A1–A8, specs 16 and 17 (exit criterion 1) | X | *pending* | |
+| S1–S11, A1–A8, specs 16 and 17 (exit criterion 1) | X | **accepted** | owner, 2026-09-27, as recommended ("すべて推奨で受理します") |
