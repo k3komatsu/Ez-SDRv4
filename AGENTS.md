@@ -10,12 +10,13 @@ Ez-SDR is an SDR experiment runtime with two unrelated lines, which since 2026-0
 |---|---|---|
 | `main` | **v4** — clean-sheet Rust rewrite. Phases 1–5's accepted specs in `design/01-*.md` … `design/11-*.md` and `design/14-*.md` (their process records remain in `plan/phase1/` … `plan/phase5/`; the amendment-only specs 12, 13 and 15 are applied to `design/` and recorded in `plan/phase3/12-amendments.md`, `plan/phase4/13-amendments.md` and `plan/phase5/15-amendments.md`), plus the Kernel, Radio Model, Simulation Engine, MockRadio, SimulationChannel and native Executor implementation (`crates/`, `schemas/`). Phase 5 (the Mini Reactive Radio: the native Executor `ezsdr.exec.native` and a PING responder) was accepted at Gate X on 2026-09-26; Phase 6 onwards is unwritten. | active development |
 | `master` | **v3** — D + C++ UHD bridge + Python client. Tags `v2.11`, `v3.0.0`–`v3.0.28`. Local only here; its GitHub home is `k3komatsu/Ez-SDR`. | maintenance |
-| `gh-pages` | GitHub Pages content for `Ez-SDRv4` only. An orphan branch, created empty on 2026-09-26; no history shared with `main` or `master`. | empty; pushed, Pages not yet configured |
+| `spike/uhd` | A throwaway UHD spike (2026-09-26), branched from `main`: a one-line Kernel change (K1) and a separate `spike/uhd/` Cargo workspace. Never merge it into `main`; its findings live in `main`'s `plan/spikes/2026-09-26-uhd.md` (handoff.md §4, "UHD spike"). | pushed; bench runs deferred |
+| `gh-pages` | GitHub Pages content for `Ez-SDRv4` only: an orphan branch (no history shared with `main` or `master`) holding a project overview site, served at https://k3komatsu.github.io/Ez-SDRv4/ from the branch root. Its status text is updated only when the user asks. | pushed; Pages published |
 
 Rules that follow from this layout:
 
 - Never graft, rebase or merge `master` and `main` into each other (not even `merge -s ours`). v4 shares no code with v3; the histories are unrelated on purpose.
-- v4 work happens on `main` only. Do not commit to `master` from a v4 session unless the user explicitly asks for a v3 change.
+- v4 work happens on `main` only (the throwaway `spike/uhd` excepted, and it is never merged). Do not commit to `master` from a v4 session unless the user explicitly asks for a v3 change.
 - Never push `master` or the v3 tags to `origin` (`Ez-SDRv4`): no `git push --tags`, no `git push --all`. The v3 history belongs to `k3komatsu/Ez-SDR`.
 - `gh-pages` holds only what GitHub Pages serves. Never merge it with `main` or `master`, and change it only when the user asks.
 - `v3/` in the working tree is a **git worktree** of `master`, listed in `.gitignore`. Never `git add v3/`. Never delete it: the design documents cite 22 `v3/...` paths as behavioural evidence (check command in handoff.md §1).
