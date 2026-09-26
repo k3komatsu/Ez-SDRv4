@@ -49,7 +49,7 @@ fn v58_02_ten_virtual_seconds_run_faster_than_wall_clock() {
     assert!(began.elapsed().as_secs() < 10);
     assert!(run.now().ticks >= T0 + 10_000_000_000);
     let manifest = run.finish();
-    let stats = section(&manifest, "ezsdr.radio.mock.stats");
+    let stats = section(&manifest, "ezsdr.radio.mock.mock.stats");
     let samples = stats["rx_samples"].as_u64().unwrap();
     assert!((10_000_000..=10_010_000).contains(&samples));
 }
@@ -101,8 +101,8 @@ fn v58_03_the_seed_changes_block_boundaries_not_data() {
     let seven = run_seed(7);
     let eight = run_seed(8);
     assert_eq!(artifact(&seven, "rec").hash, artifact(&eight, "rec").hash);
-    assert_eq!(section(&seven, "ezsdr.radio.mock.stats")["rx_blocks"], 12);
-    assert_eq!(section(&eight, "ezsdr.radio.mock.stats")["rx_blocks"], 11);
+    assert_eq!(section(&seven, "ezsdr.radio.mock.mock.stats")["rx_blocks"], 12);
+    assert_eq!(section(&eight, "ezsdr.radio.mock.mock.stats")["rx_blocks"], 11);
 }
 
 #[test]
@@ -204,8 +204,14 @@ fn v58_07_manifest_records_every_input_and_output() {
     }
     for vocabulary in ["radio", "sim", "sink"] { assert!(manifest.vocabularies.keys().any(|id| id.as_str() == vocabulary)); }
     for stream in ["mock/rx", "mock/tx"] { assert!(manifest.clocks.sample_clocks.iter().any(|clock| clock.stream.path == stream)); }
-    for name in ["ezsdr.links", "ezsdr.radio.mock.envelope", "ezsdr.radio.mock.bursts", "ezsdr.radio.mock.faults", "ezsdr.radio.mock.rejected", "ezsdr.radio.mock.stats", "ezsdr.radio.mock.applied"] {
+    for name in ["ezsdr.links", "ezsdr.radio.mock.mock.envelope", "ezsdr.radio.mock.mock.bursts", "ezsdr.radio.mock.mock.faults", "ezsdr.radio.mock.mock.rejected", "ezsdr.radio.mock.mock.stats", "ezsdr.radio.mock.mock.applied"] {
         assert!(manifest.sections.contains_key(&ezsdr_kernel::spec::Namespace::parse(name).unwrap()), "missing section {name}");
+        // MR-27: a MockRadio section is under its instance's own id, so a Run with two
+        // Mocks keeps both sets; the unqualified name must be gone.
+        if name.starts_with("ezsdr.radio.mock.") {
+            let unqualified = name.replace(".mock.", ".");
+            assert!(!manifest.sections.contains_key(&ezsdr_kernel::spec::Namespace::parse(&unqualified).unwrap()), "{unqualified} must not exist");
+        }
     }
     assert_eq!(manifest.spec.body, spec);
     assert_eq!(manifest.binding.body, profile);
@@ -228,7 +234,7 @@ fn v58_11_short_lead_burst_is_a_time_error() {
     assert_eq!(events[0].payload["outcome"], "send_asap");
     assert_eq!(events[0].payload["late_by_ns"], 1_000_000);
     assert_eq!(events[0].payload["target"]["ticks"], 1_000);
-    let burst: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(section(&manifest, "ezsdr.radio.mock.bursts")[0].clone()).unwrap();
+    let burst: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(section(&manifest, "ezsdr.radio.mock.mock.bursts")[0].clone()).unwrap();
     assert_eq!(burst.late_by.unwrap().ticks, 1_000_000);
 }
 
@@ -274,7 +280,7 @@ fn v58_12_jitter_leaves_the_capture_unchanged() {
     let jitter = complete(&spec, "x310-like", selector(true), json!({ "sim.seed": 7 }), "v58-12-jitter", 20_000_000);
     assert_eq!(artifact(&plain, "rec").hash, artifact(&jitter, "rec").hash);
     assert_eq!(artifact(&plain, "rec").continuity, artifact(&jitter, "rec").continuity);
-    assert_ne!(section(&plain, "ezsdr.radio.mock.stats")["rx_blocks"], section(&jitter, "ezsdr.radio.mock.stats")["rx_blocks"]);
+    assert_ne!(section(&plain, "ezsdr.radio.mock.mock.stats")["rx_blocks"], section(&jitter, "ezsdr.radio.mock.mock.stats")["rx_blocks"]);
 }
 
 #[test]
@@ -294,7 +300,7 @@ fn v58_13_session_manifest_has_log_waveform_and_capture() {
     assert_eq!(manifest.action_log.len(), 3);
     assert_eq!(manifest.inputs.len(), 1);
     assert_eq!(artifact(&manifest, "rec_0").size_bytes, 40_000);
-    let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "ezsdr.radio.mock.bursts").clone()).unwrap();
+    let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "ezsdr.radio.mock.mock.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1);
     assert_eq!(bursts[0].end, ezsdr_kernel::stream::BurstEnd::Stop);
 }
@@ -320,7 +326,7 @@ fn v58_15_repeat_wraps_without_a_gap() {
     let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash, bytes)]));
     let clock = root(&run);
     let manifest = finish_at(run, clock, T0 + 15_000_000);
-    let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "ezsdr.radio.mock.bursts").clone()).unwrap();
+    let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "ezsdr.radio.mock.mock.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1);
     assert!(bursts[0].wraps >= 4);
     assert!(bursts[0].samples >= 4_000);
@@ -363,7 +369,7 @@ fn kc_24_a_burst_after_the_transmit_clock_ends_is_refused_at_admission() {
     let Outcome::Rejected { violations } = entry.outcome else { panic!("a burst on an ended transmit clock was admitted") };
     assert!(violations.iter().any(|violation| violation.reason.starts_with("SC-23: ") && violation.reason.ends_with("has no running transmit SampleClock")));
     let manifest = end_session(run, clock, T0 + 5_000_000);
-    assert_eq!(section(&manifest, "ezsdr.radio.mock.rejected").as_array().unwrap().len(), 0);
+    assert_eq!(section(&manifest, "ezsdr.radio.mock.mock.rejected").as_array().unwrap().len(), 0);
 }
 
 #[test]
@@ -430,6 +436,42 @@ fn v58_08_two_mock_radios_communicate_through_the_channel() {
 }
 
 #[test]
+fn v58_08_b_two_mocks_in_one_run_keep_both_sets_of_sections() {
+    // MR-27: every MockRadio instance writes its six sections under its own id, because
+    // `Manifest::write_section` inserts. With one shared name the last instance written won
+    // and the other's records were silently gone, and *which* one won depended on the
+    // selector sort, so it flipped with `block_len_jitter`.
+    let temp = rig::TempDir::new("v58-08-sections");
+    let (manifest, _) = link_run(
+        &temp, "a", "b", "x310-like", false,
+        coupling("a", "b", -6.0, 1_000, Some(-30.0), 0), &ramp(3_000),
+    );
+    for suffix in ["applied", "bursts", "envelope", "faults", "rejected", "stats"] {
+        for id in ["dev_tx", "dev_rx"] {
+            let name = format!("ezsdr.radio.mock.{id}.{suffix}");
+            assert!(
+                manifest.sections.contains_key(&Namespace::parse(&name).unwrap()),
+                "{name} is missing: {sections:?}",
+                sections = manifest.sections.keys().map(|n| n.as_str()).collect::<Vec<_>>()
+            );
+        }
+    }
+    // the two are genuinely different documents, not one written twice
+    assert_eq!(section(&manifest, "ezsdr.radio.mock.dev_tx.stats")["rx_blocks"], 0);
+    assert_ne!(section(&manifest, "ezsdr.radio.mock.dev_rx.stats")["rx_blocks"], 0);
+    assert_eq!(section(&manifest, "ezsdr.radio.mock.dev_tx.bursts").as_array().unwrap().len(), 1, "SC-28: the transmitter's burst record");
+    assert_eq!(section(&manifest, "ezsdr.radio.mock.dev_rx.bursts").as_array().unwrap().len(), 0, "the receiver transmits nothing");
+
+    // and the winner does not depend on the selector: the other jitter value, same ids
+    let (jitter, _) = link_run(
+        &temp, "a", "b", "x310-like", true,
+        coupling("a", "b", -6.0, 1_000, Some(-30.0), 0), &ramp(3_000),
+    );
+    assert_eq!(section(&jitter, "ezsdr.radio.mock.dev_tx.bursts").as_array().unwrap().len(), 1);
+    assert_ne!(section(&jitter, "ezsdr.radio.mock.dev_rx.stats")["rx_blocks"], 0);
+}
+
+#[test]
 fn v58_08_without_a_channel_the_same_spec_hears_nothing() {
     let temp = rig::TempDir::new("v58-08-none");
     let (manifest, capture) = link_run(&temp, "a", "b", "ideal", false, json!({}), &ramp(3_000));
@@ -461,8 +503,22 @@ fn v58_12_the_channel_output_does_not_depend_on_block_lengths() {
     let temp = rig::TempDir::new("v58-12-channel");
     let (plain, _) = link_run(&temp, "a", "b", "x310-like", false, environment.clone(), &samples);
     let (jitter, _) = link_run(&temp, "a", "b", "x310-like", true, environment, &samples);
-    assert_eq!(artifact(&plain, "rec").hash, artifact(&jitter, "rec").hash);
-    assert_ne!(section(&plain, "ezsdr.radio.mock.stats")["rx_blocks"], section(&jitter, "ezsdr.radio.mock.stats")["rx_blocks"]);
+    // §58 #12: the channel's output does not depend on the block lengths. Two things have
+    // to hold, and the first is what makes the second mean anything.
+    assert_eq!(artifact(&plain, "rec").hash, artifact(&jitter, "rec").hash, "the capture must not depend on the block lengths");
+    // MR-27: the Run holds two Mocks, so the counts have to be read from the *receiver's*
+    // own section. The unqualified name used to compare the transmitter's, whose
+    // `rx_blocks` is 0 in both runs, so the assertion passed whatever the receiver did.
+    // `rx_samples` is the witness and not `rx_blocks`: the Run's end depends on which block
+    // the capture completes in, so jittering the block lengths changes how many samples the
+    // receiver was given, while the block *count* rounds to the same 14 either way.
+    let receiver = |manifest: &ezsdr_kernel::manifest::Manifest| section(manifest, "ezsdr.radio.mock.dev_rx.stats").clone();
+    let (plain_rx, jitter_rx) = (receiver(&plain), receiver(&jitter));
+    assert_eq!(section(&plain, "ezsdr.radio.mock.dev_tx.stats")["rx_blocks"], 0, "the transmitter has no receive link");
+    assert_ne!(
+        plain_rx["rx_samples"], jitter_rx["rx_samples"],
+        "the two runs must really use different block lengths, or the equal capture proves nothing"
+    );
 }
 
 #[test]

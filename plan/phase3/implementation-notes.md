@@ -849,3 +849,381 @@ and Step 5's commits or keep them separate.
 (`plan/phase3/prompts/02-review-c.txt`) is the owner's. Step 7 — the exit
 tables of `plan/phase3/exit-review/`, `vision-issues.md` and the `handoff.md`
 update — waits for the owner to say Review C is closed.
+
+## Fixes after Review C
+
+Review C ran on `5eb61dd` and returned **`PASS_WITH_RISK`**: no P0, two P1 (both
+test gaps), nine P2. The owner accepted closing the unpinned rule clauses with
+tests and asked for P2-1 to be measured; the other eight P2 items are left for the
+owner's Gate X verdict.
+
+### What the review and the mutation work found
+
+The property the whole review turned on is the same everywhere: **a rule is
+correctly implemented, but no test distinguishes one of its clauses.** Eleven
+clauses were unpinned. Every one was confirmed by a mutation that survives the
+whole workspace, and every fix is a test, so `crates/*/src` is unchanged:
+
+```bash
+git diff --stat -- 'crates/*/src'      # empty
+```
+
+| # | Rule | Clause that nothing pinned | Confirmed by | Fix |
+|---|---|---|---|---|
+| 1 | CH-4 | "Two couplings with the same ends are two paths and **both count**" | `sim_channel.rs:168-174` has no duplicate ends; a duplicate-skipping join passes | `ch_04_b_two_couplings_with_the_same_ends_are_two_paths` |
+| 2 | CH-4 | "The sum is taken in `f64`, **in document order**" | F03 (reverse the sum) survived `sim_channel` and `v58` | `ch_04_c_the_field_sums_the_paths_in_document_order` |
+| 3 | MR-16 (VB-7) | the MR-32 refusals **follow the repeat constraints** | A2 survived | `mr_32_a_the_waveform_refusals_hold_their_place_in_handle_tx_burst` |
+| 4 | MR-16 (VB-7) | the MR-32 refusals **precede MR-17's decision** | A1 survived | the same test, its other case |
+| 5 | CH-3 | "saturating to `i64::MIN` or `i64::MAX`" — the **sign** | N01 survived `sim_channel`, `mock_channel` and `v58` | `ch_03_a_sample_at_or_before_saturates_with_the_sign_of_the_instant` |
+| 6 | CH-2 | `named(spec)` returns names "in **`Ident` order**" | N06 survived all three test binaries | `ch_02_check`, its second case |
+| 7 | CH-6 | "**A refusal changes nothing**" on the first join | D6 survived | `ch_06_join_rules_and_missing_fragments`, its last case |
+| 8 | MR-32 | the transmit **phase** is read at the sample's own instant | D1 survived | `mr_32_b_the_transmitted_timelines_are_read_at_the_samples_own_instant` |
+| 9 | MR-33 | the radiated **frequency** is read at the sample's own instant | D2 survived | `mr_32_c_the_transmitted_frequency_is_read_at_the_samples_own_instant` |
+| 10 | MR-34 | **every** transmit channel takes the timed-tune constant | D3 (`.take(1)`) survived | `mr_34_a_a_timed_tune_reaches_every_transmit_channel` |
+| 11 | MR-17 | the rounded-up instant reaches `decide` **in channel mode** | D5 survived | `mr_17_a_a_target_whose_instant_has_passed_is_late_in_channel_mode_too` |
+
+### The mutation check for each fix
+
+Eleven mutations of my own, in a separate JSON file as `prompts/fix-findings.txt`
+requires — `plan/phase3/tools/mutations.json` is the record of what Gate P
+accepted and was not edited. Each disables the fixed clause once and must be
+killed:
+
+```text
+F01 CH-3 sample_at_or_before saturates always to i64::MAX: killed
+F02 CH-2 named loses the Ident ordering: killed
+F03 CH-4 the field sums the paths in reverse document order: killed
+F04 CH-6 a join skips a coupling whose ends another path already has: killed
+F05 CH-6 the first join records the Run before the delay loop: killed
+F06 MR-32 the three waveform refusals move AFTER MR-17's decision: killed
+F07 MR-32 the three waveform refusals move BEFORE the repeat constraints: killed
+F08 MR-32 the transmit phase is read at the antenna instant: killed
+F09 MR-33 the radiated frequency is read at the antenna instant: killed
+F10 MR-34 only the first transmit channel takes the timed-tune constant: killed
+F11 MR-17 the late comparison floors instead of rounding up, in channel mode only: killed
+```
+
+Eleven of eleven killed, exit 0. The mutation JSONs are outside the repository,
+under the scratch directory the runner uses; nothing new was added to
+`plan/phase3/tools/`.
+
+### B1 — the P0 the P2-1 probe exposed
+
+The re-review returned **`CHANGES_REQUIRED`** with a new P0, and it credits my
+P2-1 probe with finding it. B1: **in a Run with two MockRadios the Manifest
+silently kept only one Mock's `ezsdr.radio.mock.*` sections.**
+
+The mechanism, read then measured:
+
+- `Manifest::write_section` does `self.sections.insert(section, content)`
+  (`crates/ezsdr-kernel/src/manifest.rs:387`), so the last writer wins and no
+  `CleanupFailure` is recorded — KC-44 has nothing to fire on.
+- Every MockRadio instance creates the same six names from construction.
+- KC-45 says `sections` is "every Provider's `instance().sections` under its
+  Module id", and RS-39 says SC-28's burst records go in "that Module's section".
+  Neither addresses two instances of one Module.
+
+Measured through the acceptance rig, before the fix:
+
+| `rx_jitter` | the surviving `ezsdr.radio.mock.stats` | `bursts` records |
+|---|---|---|
+| `false` | the **transmitter's**: `{"rx_blocks":0,…,"tx_blocks":2,…}` | 1 |
+| `true` | the **receiver's**: `{"rx_blocks":14,…,"tx_blocks":0,…}` | 0 |
+
+**Which instance survived depended on the `block_len_jitter` selector**, because
+the coordinator writes Providers in `binding_description` order. So the Z10
+determinism projections compared one radio's sections, and my P2-1 probe read the
+transmitter's in both runs — which is exactly why the two runs looked identical
+and why I read that as "the order effect is masked". It was masked by my reading
+the wrong section, not by the run.
+
+The owner accepted **MR-27 amended for one section name per instance** (option a
+of three; the alternatives were a recorded ceiling, and a KC-45 change in the
+Kernel). `RS-39` and `KC-45` already permit a sub-namespace under the Module's
+own, so **no Kernel change was needed**.
+
+**What changed.** `crates/ezsdr-mock-radio/src/lib.rs`: `section(instance,
+suffix)` builds `ezsdr.radio.mock.<id>.<suffix>`; a new `section_id: Ident` field
+carries the validated id; and `from_binding` refuses an `id` that is not a legal
+section-name segment. That last part is not optional — a `ResourceId` segment
+admits `[A-Za-z0-9_.-]` (SB-34) while a namespace admits only `^[a-z][a-z0-9_]*$`
+(SB-1), so `id: "Dev-Rx"` is legal under MR-2 as it stood and would have panicked
+in `Namespace::parse`. MR-2's `id` row and MR-27's six names are amended in
+`design/09-mock-radio.md` and in `plan/phase3/12-amendments.md` as a new **VB-9**,
+as `prompts/fix-findings.txt` requires for a rule-text change.
+
+**Tests.** `mr_03_…` now asserts the six names exactly (in `Namespace` order);
+`mr_02_from_binding_refusals` gained the five illegal `id` shapes; and
+`v58_08_b_two_mocks_in_one_run_keep_both_sets_of_sections` is new — two Mocks, all
+twelve names present, the two documents genuinely different, and the survivor
+independent of `rx_jitter`.
+
+**Two mutations** confirm the fix, against both the acceptance carrier and the
+unit tests:
+
+```text
+F12 MR-27 the section names drop the instance id, so two Mocks overwrite each other: killed
+F13 MR-27 the section names drop the instance id (vs the mock-radio unit tests): killed
+```
+
+#### `v58_12`'s guard was vacuous twice over
+
+Correcting B1 exposed a second defect in the same test. Its guard asserted the two
+runs' `rx_blocks` differ, which proves §58 #12's two runs really used different
+block lengths. But:
+
+1. it read the unqualified name, so it compared the **transmitter's** `rx_blocks`
+   (0) with the **receiver's** (14) and passed whatever the receiver did; and
+2. with the receiver's own section the count is **14 in both runs** — a fixed
+   sample total over jittered block lengths rounds to the same block count.
+
+`rx_samples` does differ: **27 000 without jitter, 26 349 with**. The guard now
+asserts that, so the equal capture artifact at the line above means what §58 #12
+says it means.
+
+#### The P2 nits, and the one remaining test gap
+
+Fixed without a decision, all read-and-confirm:
+
+| Where | What |
+|---|---|
+| `ch_04_c_…` | the comment claimed "any other order"; it is the reverse order, and the order that only swaps the two large terms happens to agree. Both are now asserted, so a reader sees which is which. The couplings are also written in the order tx channel 2, 0, 1 now, so the document order and the ends order disagree and a join that sorted by ends would read them the other way round. |
+| `mr_32_b_…` | a duplicated transmit update, removed. |
+| `mr_32_c_…` | the comment said "the correct behaviour"; it is what MR-32 with UC-6, RM-23 and C4 imply, and whether a real X310's LO acts before or after the 45-sample advance is Phase 8's measurement. Reworded, and the 45-sample window is pinned as specified rather than argued for. |
+| `mr_34_a_a_…` | a comment said "length of 4" where the length is 4 samples over 2 channels; and there was no precondition that channel 1's phase actually moves, so a seed that gave it the same constant would have passed. Both fixed. |
+
+**MR-35 / CH-5, "the receive gain scales the noise"** — the gap Opus left OPEN. It
+belongs to MR-35, whose formula is what MR-33 and CH-5 cite. A 0 dB receive gain
+cannot tell a gain that scales the noise from one that scales only the signal, so
+`mr_35_the_receive_gain_scales_the_noise_with_the_signal` applies +6 dB and expects
+`10^(6/20)·σ·gaussian_pair(…)`, with a precondition that the gain moves the value.
+`F15` (the receive side applying no gain at all) is killed.
+
+```text
+F15 MR-35 the receive side applies no receive gain, so the noise is unscaled: killed
+```
+
+### The counts after B1
+
+| | after the eleven fixes | after B1 |
+|---|---:|---:|
+| `cargo +1.85.0 test --workspace` | 600 | **602** passed, 0 failed, 0 ignored |
+| `cargo +stable test --workspace` | 600 | **602** passed, 0 failed, 0 ignored |
+| `cargo +stable clippy --workspace --all-targets -- -D warnings` | clean | clean |
+| `kernel_surface` | 116 / 292 | 116 / 292 |
+| `se_12_schema_freeze` | passed | passed, no schema regenerated |
+| `check_links.py` | `ok: 322 links` | `ok: 322 links` |
+| the `v3/` path check | printed nothing | printed nothing |
+| `#[ignore]` in `crates/` | none | none |
+
+Per crate, `ezsdr-mock-radio` 63 → **64** and `ezsdr-acceptance` 36 → **37**; the
+other eight are unchanged. `crates/ezsdr-kernel` is untouched at 446: B1 was a
+Module-side fix, so the Kernel's surface is still 116 NEW / 292 public items and
+no Kernel test changed.
+
+Appendix C's own 83 were then re-run against the B1 tree, with the runner's own
+exit status captured rather than a pipeline's: 83 lines, every one `killed`,
+`RUNNER_EXIT=0`. An earlier attempt piped the output through `tail`, which both
+truncated the log and made `$?` the exit status of `tail`; that attempt proved
+nothing and is not counted here.
+
+Opus's three "fresh mutations I expect to be killed" were also run and were
+killed, as it predicted: a finished segment `continue`ing instead of returning
+`None`, a receive block's samples computed in reverse, and `sample_at_or_before`
+truncating instead of flooring.
+
+### The test counts
+
+| Command | Before | After |
+|---|---|---|
+| `cargo +1.85.0 test --workspace` | 592 passed, 0 failed | **600** passed, 0 failed, 0 ignored |
+| `cargo +stable test --workspace` | 592 passed, 0 failed | **600** passed, 0 failed, 0 ignored |
+| `cargo +stable clippy --workspace --all-targets -- -D warnings` | clean | clean, 0 warning or error line |
+
+Eight tests were added, none removed or weakened. Per crate:
+
+| Crate | Before | After |
+|---|---:|---:|
+| `ezsdr-kernel` | 446 | 446 |
+| `ezsdr-radio` | 10 | 10 |
+| `ezsdr-sim` | 14 | **17** |
+| `ezsdr-sim-engine` | 7 | 7 |
+| `ezsdr-hostmem` | 2 | 2 |
+| `ezsdr-link-host` | 2 | 2 |
+| `ezsdr-sink` | 2 | 2 |
+| `ezsdr-sink-capture` | 15 | 15 |
+| `ezsdr-mock-radio` | 58 | **63** |
+| `ezsdr-acceptance` | 36 | 36 |
+| **total** | **592** | **600** |
+
+The other checks, all re-run after the fixes:
+
+| Check | Result |
+|---|---|
+| `kernel_surface` `OV-23b` | `116 NEW: items of 292 public items` |
+| `se_12_schema_freeze` without `EZSDR_UPDATE_SCHEMAS` | passed; no schema regenerated |
+| `v58_10_experiments_name_no_mock_type` | passed |
+| `check_links.py` | `ok: 322 links`, exit 0 |
+| `v3/` path check | printed nothing |
+| `#[ignore]` in `crates/` | none |
+| the five patches still reverse cleanly against the tree | all five, in reverse order |
+
+### What the fixes had to get right, and what I got wrong first
+
+Five of the eleven needed the harness's own arithmetic worked out, and four
+attempts were wrong before they were right. They are recorded because the same
+traps will catch whoever writes the next test here.
+
+1. **MR-32's refusals are channel-mode rules.** A pattern-mode Mock never reads a
+   waveform, so there is no refusal to place. The first version of
+   `mr_32_a_…` asserted the refusal with `medium: false` and failed; the position
+   can only be observed on a channelled Mock.
+2. **An `x310-like` burst must start past the synchronisation end.** `arm()`
+   registers the transmit clock at the arm instant, so transmit sample 0 is at
+   root tick 0 while `S = A + 2 s`. A burst at transmit sample 0 is refused by
+   MR-16 before the channel is involved at all.
+3. **`x310-like` aligns a repeated waveform to two samples.** A one-sample
+   waveform is refused by the repeat constraints — this is exactly the
+   consequence spec 12 VB-8 names ("with a one-sample waveform, whose blocks are
+   one sample long, that is every such switch"). Two failures came from this.
+4. **A burst must be handled in a round where its target is inside the 2 ms
+   lead.** Handled one microsecond before the target, MR-17's `SendAsap` moves
+   it to `now + lead` and every expected sample index shifts. The existing
+   `mr_34_a_timed_tune_…` steps at `t0` before and after its pushes for this
+   reason, and the new tests do the same.
+5. **What is heard is the transmit phase minus the receive phase**, and the
+   receive phase is per channel (`rx[channel]`, not `rx[0]`).
+
+One finding is worth keeping for Phase 4 and Phase 8 rather than only for this
+review. A transmitted sample is stamped 45 samples before the instant it is
+radiated at, so a simultaneous retune of both directions leaves the transmitter on
+the new frequency 45 samples before the receiver asks for it. CH-4's gate is
+exact equality, so the correct behaviour is a **45-sample silent window**, and
+`mr_32_c_…` pins it: `assert_eq!((first, last, len), (Some(2_500), Some(2_544), 45))`.
+Reading the transmit frequency at the antenna instant would close that window.
+This is the same strictness C4 records — "a 1 Hz offset is silence, not a slowly
+rotating signal" — reaching the transmit advance.
+
+### P2-1, measured
+
+`step_until_quiescent` (`crates/ezsdr-kernel/src/module_api.rs:1283`) sorts the
+instances and returns at the first `?`, so an instance that reports `DeviceLost`
+leaves every instance later in the sorted order unstepped in that round. The
+order is `(role().step_rank(), id)`, so a fragment's **name** decides it.
+
+The probe ran the acceptance rig exactly as Review C specified —
+`sim.faults: [{ at_ns: 1_999_001, fault: device_lost, target: <tx> }]`, with the
+transmitter named `a` and then `z`, comparing the capture:
+
+| tx / rx | outcome | `rec` artifact | `ezsdr.radio.mock.stats` |
+|---|---|---|---|
+| `a` / `b` | `Err(Ended { termination: Stopped { cause: Policy { kind: DEVICE_LOST } } })` | absent | `{"rx_blocks":0,"rx_clipped":0,"rx_samples":0,"tx_blocks":0,"tx_clipped":0}` |
+| `z` / `a` | the same | absent | the same |
+
+**The two runs are identical.** No capture artifact is produced in either, because
+the run stops before the capture Sink flushes, and `rx_blocks` is 0 in both.
+
+> **This paragraph's conclusion was wrong, and the re-review said so.** I wrote
+> that the order effect "is not observable through the acceptance rig in this
+> configuration". Both `stats` rows are the **transmitter's** — one Mock's
+> sections had overwritten the other's in the Manifest, so the comparison was of a
+> document with itself. That is B1, below, and fixing it is what made the real
+> question answerable.
+
+#### P2-1, measured after B1
+
+The same probe, run again now that each Mock keeps its own sections, reading the
+**receiver's** `ezsdr.radio.mock.dev_rx.stats`:
+
+| tx / rx | the receiver's `rx_blocks` / `rx_samples` | the transmitter's | outcome |
+|---|---|---|---|
+| `a` / `b` — `a` sorts **first** | **0 / 0** | 0 / 0 | `Stopped { DEVICE_LOST }` |
+| `z` / `a` — `a` sorts **first** as the receiver | **1 / 2 000** | 0 / 0 | `Stopped { DEVICE_LOST }` |
+
+**The order effect reproduces.** The fragment named `a` sorts before `z`, and
+whether that is the transmitter or the receiver decides whether the receiver
+published its first block before the round was cut short: 0 blocks when the
+faulted transmitter is stepped first, 1 block (2 000 samples) when the receiver
+is. Nothing else differs between the two runs.
+
+So Opus's reading of `step_until_quiescent` is **VERIFIED**: it returns at the
+first `?`, so a Provider reporting `DeviceLost` leaves every Provider later in the
+sorted order unstepped in that round, and which samples are published depends on
+the order the coordinator happens to sort the instances in. CH-9's precondition
+("the loop steps every radio at every instant any radio scheduled") implicitly
+assumes no round is cut short by an error, and nothing states that.
+
+**This is a P2 the owner must judge at Gate X**, and it is not mine to close: the
+two options are a ceiling sentence on CH-9 and MR-30, or a change to
+`step_until_quiescent` that finishes the round before propagating the error —
+which is a Kernel behaviour change, and the Kernel is meant to stay as it is
+(§5, §65). The evidence is here; the decision is the owner's. The probe ran in a
+scratch copy and nothing was added to the repository for it.
+
+### What Review C cost, in one place
+
+| | |
+|---|---|
+| Verdict, first pass | `PASS_WITH_RISK` — no P0, two P1, nine P2 |
+| Verdict, after the first fixes | **`CHANGES_REQUIRED`** — a new P0, **B1** |
+| P0s closed | 1 (B1: the Manifest silently keeping one Mock's sections) |
+| P1s closed | 2 (`ch_04_b` / `ch_04_c`, `mr_32_a_…`) |
+| Unpinned rule clauses closed | 11, all by tests |
+| Test gaps closed | 6, including MR-35's receive gain on the noise |
+| P2 nits fixed | 5, plus 2 more found by the second re-review |
+| Still OPEN, for the owner's Gate X verdict | P2-1 (**measured — reproduces**, see above), P2-2 … P2-9 |
+| Tests | 592 → **602**, both toolchains, Clippy clean |
+| Kernel | **untouched**: 446 tests, 116 NEW / 292 public items |
+
+Two things worth carrying into Phase 4, both from this round:
+
+- **A vacuous guard can be green for two independent reasons.** `v58_12`'s
+  assertion failed to test its rule because it read the wrong section *and*
+  because the quantity it named does not vary with the thing it was meant to
+  detect. Fixing the first exposed the second. Reading a value is not evidence
+  that the value means what the rule says it means.
+- **I compared a document with itself and called the result a measurement.** The
+  mutation work in this same session had already taught me that a `SURVIVED` on
+  one filter is not a workspace-wide result, and I did not apply the lesson to
+  the probe. Opus caught it from the `{"rx_blocks":0,…,"tx_blocks":2,…}` shape,
+  by noticing whose Mock it was.
+
+### The review loop, and where it ended
+
+| Attempt | Verdict | What it produced |
+|---|---|---|
+| 1 (initial review) | `PASS_WITH_RISK` | two P1 test gaps, nine P2 |
+| after the eleven fixes | **`CHANGES_REQUIRED`** | a new **P0, B1**: the Manifest silently keeping one Mock's sections |
+| after B1 | `PASS_WITH_RISK` | no blockers; two P2 text inconsistencies, P2-1 still inferred |
+| after the text fixes and the P2-1 measurement | `PASS_WITH_RISK` | no blockers; nothing left that the implementer can close |
+
+**Closed:** B1 and its two consequences (`v58_12`'s guard, the P2-1 measurement);
+P1-1; P1-2; the eleven unpinned rule clauses; six test gaps including MR-35's
+receive gain on the noise; seven P2 nits.
+
+**The re-review was stopped on the three-axis rule.** After the third pass every
+remaining finding is a decision only the owner can make, the fix scope is nil and
+the regression risk is nil, so a fourth pass would spend Claude usage to confirm
+nothing changed. The checks below were run instead.
+
+**P2-1, the owner's call, with the evidence.** Opus's recommendation is to add a
+ceiling sentence to CH-9 and MR-30 — "a round that a Module error ends early does
+not step the remaining instances, so which blocks a receiver published before the
+abort can depend on fragment order; the published values do not" — and to reject
+a change to `step_until_quiescent` for Phase 3, because error-round semantics
+belong to Phase 4's failure work. Until the owner decides, CH-9's sentence and
+Z10 overstate stepping-order independence for error-terminated rounds.
+
+**Suggested commit subjects**
+
+Two commits, because they are separable and the first is a pure test change:
+
+| | Subject |
+|---|---|
+| 1 | `test(phase3): pin the eleven rule clauses Review C found unpinned` |
+| 2 | `fix(mock-radio): give each instance its own Manifest sections (Phase 3 VB-9, Review C B1)` |
+
+The first is 592 → 600 with `crates/*/src` unchanged, because every rule was
+already correctly implemented. The second is B1 — MR-27's per-instance names, the
+MR-2 `id` refusal that keeps them legal, `design/09` and spec 12's VB-9, the
+`v58_12` guard, the five P2 nits and the MR-35 test — 600 → 602.

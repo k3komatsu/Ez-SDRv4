@@ -61,6 +61,9 @@ pub fn descriptor() -> ModuleDescriptor {
 /// Deterministic in-process radio Provider (MR-1…MR-30).
 pub struct MockRadio {
     instance: ProviderInstance,
+    /// The selector's `id` as a legal section-name segment, validated in `from_binding`
+    /// (MR-2), which every one of this instance's six section names carries (MR-27).
+    section_id: Ident,
     profile: Profile,
     config: BTreeMap<ezsdr_kernel::spec::Key, Value>,
     prepare_called: bool,
@@ -195,6 +198,14 @@ impl MockRadio {
                 .ok_or_else(|| reject("selector `id` must be one resource path segment"))?,
             Some(_) => return Err(reject("selector `id` must be a string")),
         };
+        // The id becomes a segment of this instance's six Manifest section names (MR-27), so
+        // it must be a legal one: a `ResourceId` segment also admits upper case, `-` and `.`,
+        // which a namespace does not (SB-1). Refused here rather than panicked on later.
+        let section_id = id
+            .segments()
+            .next()
+            .and_then(|segment| Ident::parse(segment).ok())
+            .ok_or_else(|| reject("selector `id` must match ^[a-z][a-z0-9_]*$, the shape of a section name segment"))?;
         let n = match selector_value("instances") {
             None => 1,
             Some(Value::Int(n)) if (1..=4).contains(n) => *n as u32,
@@ -225,12 +236,12 @@ impl MockRadio {
         let profile = Profile { kind: profile.kind, n };
         let timing = profile.timing();
         let mut sections = BTreeMap::new();
-        sections.insert(section("envelope"), serde_json::to_value(profile.envelope()).expect("serializable envelope"));
-        sections.insert(section("bursts"), serde_json::json!([]));
-        sections.insert(section("faults"), serde_json::json!([]));
-        sections.insert(section("rejected"), serde_json::json!([]));
-        sections.insert(section("stats"), serde_json::json!({"rx_blocks": 0, "rx_samples": 0, "tx_blocks": 0, "rx_clipped": 0, "tx_clipped": 0}));
-        sections.insert(section("applied"), serde_json::json!([]));
+        sections.insert(section(&section_id, "envelope"), serde_json::to_value(profile.envelope()).expect("serializable envelope"));
+        sections.insert(section(&section_id, "bursts"), serde_json::json!([]));
+        sections.insert(section(&section_id, "faults"), serde_json::json!([]));
+        sections.insert(section(&section_id, "rejected"), serde_json::json!([]));
+        sections.insert(section(&section_id, "stats"), serde_json::json!({"rx_blocks": 0, "rx_samples": 0, "tx_blocks": 0, "rx_clipped": 0, "tx_clipped": 0}));
+        sections.insert(section(&section_id, "applied"), serde_json::json!([]));
         let instance = ProviderInstance {
             id: id.clone(),
             module: module_ref(),
@@ -246,6 +257,7 @@ impl MockRadio {
         };
         Ok(MockRadio {
             instance,
+            section_id,
             profile,
             config: coerce::defaults(),
             prepare_called: false,
@@ -514,7 +526,7 @@ impl MockRadio {
         struct Record { at: TimePoint, fault: FaultKind, applied: bool, lost: u64 }
         let fault = &self.faults[index];
         let record = Record { at: TimePoint::new(self.root.expect("prepared root"), fault.tick), fault: fault.entry.fault, applied: fault.applied, lost };
-        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("faults")) {
+        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section(&self.section_id, "faults")) {
             rows.push(serde_json::to_value(record).expect("fault section row"));
         }
     }
@@ -529,7 +541,7 @@ impl MockRadio {
     }
 
     fn add_rx_stats(&mut self, samples: u64) {
-        if let Some(serde_json::Value::Object(stats)) = self.instance.sections.get_mut(&section("stats")) {
+        if let Some(serde_json::Value::Object(stats)) = self.instance.sections.get_mut(&section(&self.section_id, "stats")) {
             let blocks = stats.get("rx_blocks").and_then(serde_json::Value::as_u64).unwrap_or(0);
             let total = stats.get("rx_samples").and_then(serde_json::Value::as_u64).unwrap_or(0);
             stats.insert("rx_blocks".to_owned(), serde_json::json!(blocks + u64::from(samples > 0)));
@@ -601,7 +613,7 @@ impl MockRadio {
         #[derive(serde::Serialize)]
         struct Rejected { action: String, reason: String, at: TimePoint }
         let time = TimePoint::new(self.root.expect("prepared root"), at);
-        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("rejected")) {
+        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section(&self.section_id, "rejected")) {
             rows.push(serde_json::to_value(Rejected { action: action.to_owned(), reason: reason.to_owned(), at: time }).expect("rejection section row"));
         }
     }
@@ -614,14 +626,14 @@ impl MockRadio {
     }
 
     fn record_burst(&mut self, record: BurstRecord) {
-        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("bursts")) {
+        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section(&self.section_id, "bursts")) {
             rows.push(serde_json::to_value(record).expect("burst record"));
         }
     }
 
     fn add_stat(&mut self, name: &str, n: u64) {
         if n == 0 { return; }
-        if let Some(serde_json::Value::Object(stats)) = self.instance.sections.get_mut(&section("stats")) {
+        if let Some(serde_json::Value::Object(stats)) = self.instance.sections.get_mut(&section(&self.section_id, "stats")) {
             let total = stats.get(name).and_then(serde_json::Value::as_u64).unwrap_or(0);
             stats.insert(name.to_owned(), serde_json::json!(total + n));
         }
@@ -665,7 +677,7 @@ impl MockRadio {
     }
 
     fn add_tx_stat(&mut self) {
-        if let Some(serde_json::Value::Object(stats)) = self.instance.sections.get_mut(&section("stats")) {
+        if let Some(serde_json::Value::Object(stats)) = self.instance.sections.get_mut(&section(&self.section_id, "stats")) {
             let blocks = stats.get("tx_blocks").and_then(serde_json::Value::as_u64).unwrap_or(0);
             stats.insert("tx_blocks".to_owned(), serde_json::json!(blocks + 1));
         }
@@ -694,7 +706,7 @@ impl MockRadio {
         struct FaultRecord { at: TimePoint, fault: FaultKind, applied: bool, lost: u64 }
         let fault = &self.faults[index];
         let record = FaultRecord { at: TimePoint::new(self.root.expect("root"), fault.tick), fault: fault.entry.fault, applied: fault.applied, lost };
-        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("faults")) {
+        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section(&self.section_id, "faults")) {
             rows.push(serde_json::to_value(record).expect("fault row"));
         }
     }
@@ -703,7 +715,7 @@ impl MockRadio {
         #[derive(serde::Serialize)]
         struct Applied<'a> { key: &'a ezsdr_kernel::spec::Key, value: &'a Value, at: TimePoint }
         let row = Applied { key, value, at: TimePoint::new(self.root.expect("root"), at) };
-        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("applied")) {
+        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section(&self.section_id, "applied")) {
             rows.push(serde_json::to_value(row).expect("applied row"));
         }
     }
@@ -1157,8 +1169,13 @@ fn is_hardware_key(key: &str) -> bool {
         | ezsdr_radio::keys::RX_GAIN_DB | ezsdr_radio::keys::TX_GAIN_DB)
 }
 
-fn section(suffix: &str) -> Namespace {
-    Namespace::parse(&format!("ezsdr.radio.mock.{suffix}")).expect("module section")
+/// One MockRadio instance's own six Manifest sections, named
+/// `ezsdr.radio.mock.<instance id>.<suffix>`. The instance id is in the name because
+/// `Manifest::write_section` inserts: two instances of this Module in one Run would
+/// otherwise overwrite each other's records and only the last one written would survive,
+/// which is a silent loss of SC-28's burst records (MR-27, RS-39, KC-45).
+fn section(instance: &Ident, suffix: &str) -> Namespace {
+    Namespace::parse(&format!("ezsdr.radio.mock.{instance}.{suffix}")).expect("module section")
 }
 
 impl Provider for MockRadio {

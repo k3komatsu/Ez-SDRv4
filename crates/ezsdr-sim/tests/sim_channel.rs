@@ -56,6 +56,17 @@ impl Transmitter for Silent {
     }
 }
 
+/// A transmitter whose channel `c` radiates the fixed `(re, im)` of that channel on
+/// 1 GHz, so a test can choose the magnitudes a sum adds up.
+struct Fixed(Vec<(f64, f64)>);
+
+impl Transmitter for Fixed {
+    fn radiated(&self, channel: u16, _at: RootInstant) -> Option<Radiated> {
+        let (re, im) = self.0.get(usize::from(channel)).copied()?;
+        Some(Radiated { re, im, frequency_hz: 1.0e9 })
+    }
+}
+
 fn run() -> RunId {
     RunId::from_string("ch-run".to_owned())
 }
@@ -144,6 +155,21 @@ fn ch_02_check() {
     let malformed = ChannelCheck.check(&json!({ "couplings": 3 }), &effective, &empty, CheckStage::Validate);
     assert_eq!(malformed.len(), 1);
     assert!(malformed[0].reason.starts_with("CH-2: CH-1: "));
+
+    // CH-2: the violations come in `Ident` order, not in the document's order. Here
+    // the document names `z` before `y`, so document order and `Ident` order differ.
+    let unordered = json!({
+        "couplings": [
+            { "tx": "z", "tx_channel": 0, "rx": "b", "rx_channel": 0, "gain_db": 0 },
+            { "tx": "a", "tx_channel": 0, "rx": "y", "rx_channel": 0, "gain_db": 0 }
+        ]
+    });
+    let unordered_violations = ChannelCheck.check(&unordered, &effective, &empty, CheckStage::Validate);
+    let unordered_reasons: Vec<&str> = unordered_violations.iter().map(|v| v.reason.as_str()).collect();
+    assert_eq!(
+        unordered_reasons,
+        ["CH-2: y names no fragment of this Run", "CH-2: z names no fragment of this Run"]
+    );
 }
 
 #[test]
@@ -160,6 +186,22 @@ fn ch_03_root_instants_are_exact() {
     assert!(k7.is_at_or_after(2343));
     assert!(!k7.is_at_or_after(2344));
     assert!(RootInstant::tick(5).is_at_or_after(5));
+}
+
+#[test]
+fn ch_03_a_sample_at_or_before_saturates_with_the_sign_of_the_instant() {
+    // CH-3: the quotient does not fit an i64, so it saturates to i64::MIN or i64::MAX
+    // according to the sign of the instant, not to i64::MAX either way.
+    let unit = Rational::new(1, 1).unwrap();
+    let over = RootInstant { num: i128::from(i64::MAX) + 1, den: 1 };
+    let under = RootInstant { num: i128::from(i64::MIN) - 1, den: 1 };
+    assert_eq!(over.sample_at_or_before(0, unit), i64::MAX);
+    assert_eq!(under.sample_at_or_before(0, unit), i64::MIN);
+    // One tick inside the range the quotient is exact, which is what shows the
+    // saturation is a fallback and not a clamp: a mutation that always answered
+    // i64::MAX would return i64::MAX here instead.
+    assert_eq!(RootInstant { num: i128::from(i64::MAX) - 1, den: 1 }.sample_at_or_before(0, unit), i64::MAX - 1);
+    assert_eq!(RootInstant { num: i128::from(i64::MIN) + 1, den: 1 }.sample_at_or_before(0, unit), i64::MIN + 1);
 }
 
 #[test]
@@ -212,6 +254,59 @@ fn ch_04_a_delay_rounds_up_to_a_root_tick() {
     medium.join(&run(), &id("a"), &spec, 0, 250_000_000, a.clone()).unwrap();
     let _ = medium.field(&id("a"), 0, 1.0e9, RootInstant::tick(10));
     assert_eq!(a.asked.lock().unwrap().as_slice(), &[(0, 9, 1)]);
+}
+
+#[test]
+fn ch_04_b_two_couplings_with_the_same_ends_are_two_paths() {
+    // CH-4: a two-tap channel costs nothing to allow, so both couplings count. A join
+    // that keyed the paths by their ends, or skipped a duplicate, would read only one.
+    let spec = ChannelSpec {
+        couplings: vec![
+            coupling("a", 0, "b", 0, -20.0, 100),
+            coupling("a", 0, "b", 0, 0.0, 0),
+        ],
+        noise_dbfs: BTreeMap::new(),
+    };
+    let medium = Medium::new();
+    let a = Ramp::new(1.0e9);
+    medium.join(&run(), &id("a"), &spec, 0, 1_000_000_000, a.clone()).unwrap();
+    medium.join(&run(), &id("b"), &spec, 0, 1_000_000_000, Arc::new(Silent)).unwrap();
+
+    let (re, im) = medium.field(&id("b"), 0, 1.0e9, RootInstant::tick(1_000));
+    let (expected_re, expected_im) = (0.1 * 900.0 + 1_000.0, 0.1 * -900.0 + -1_000.0);
+    assert!((re - expected_re).abs() < 1e-9, "{re} vs {expected_re}");
+    assert!((im - expected_im).abs() < 1e-9, "{im} vs {expected_im}");
+}
+
+#[test]
+fn ch_04_c_the_field_sums_the_paths_in_document_order() {
+    // CH-4: "The sum is taken in `f64`, in document order." That is not the same answer as
+    // every other order. The couplings are written in the order tx channel 2, 0, 1, and
+    // `Fixed` gives channel c the term TERMS[c] = [1e16, 1, −1e16], so:
+    //   document order (2, 0, 1):  −1e16 + 1e16 + 1  =  1.0   (the large terms cancel first)
+    //   sorted by ends  (0, 1, 2):   1e16 + 1 + −1e16  =  0.0   (the small term is absorbed)
+    //   reverse         (1, 0, 2):   1 + 1e16 + −1e16  =  0.0
+    // So the field is 1.0 exactly in document order and 0.0 in the other two, which kills a
+    // join that iterated the paths in ends order or in reverse, and kills any reordering
+    // that moves the small term behind a large one.
+    let spec = ChannelSpec {
+        couplings: vec![
+            coupling("a", 2, "b", 0, 0.0, 0),
+            coupling("a", 0, "b", 0, 0.0, 0),
+            coupling("a", 1, "b", 0, 0.0, 0),
+        ],
+        noise_dbfs: BTreeMap::new(),
+    };
+    let medium = Medium::new();
+    let a = Fixed(vec![(1.0e16, 0.0), (1.0, 0.0), (-1.0e16, 0.0)]);
+    medium.join(&run(), &id("a"), &spec, 0, 1_000_000_000, Arc::new(a)).unwrap();
+    medium.join(&run(), &id("b"), &spec, 0, 1_000_000_000, Arc::new(Silent)).unwrap();
+
+    let (re, im) = medium.field(&id("b"), 0, 1.0e9, RootInstant::tick(0));
+    assert_eq!((re, im), (1.0, 0.0), "document order: -1e16 + 1e16 + 1");
+    // the two orders it must differ from, spelled out so a reader sees why 1.0 discriminates
+    assert_eq!((1.0e16 + 1.0) + -1.0e16, 0.0, "ends order absorbs the small term");
+    assert_eq!((1.0 + 1.0e16) + -1.0e16, 0.0, "reverse order absorbs the small term");
 }
 
 #[test]
@@ -291,4 +386,16 @@ fn ch_06_join_rules_and_missing_fragments() {
         "2^62 ns at a 2 GHz root is 2^63 root ticks"
     );
     assert!(Medium::new().join(&run(), &id("a"), &far, 1, 1_000_000_000, Arc::new(Silent)).is_ok());
+
+    // CH-6: "A refusal changes nothing." The same medium is reused after the refused
+    // first join above, so a join that recorded the Run or the document before it
+    // validated the paths would refuse the good join that follows as a later one.
+    let reused = Medium::new();
+    assert_eq!(
+        reused.join(&run(), &id("a"), &far, 1, 2_000_000_000, Arc::new(Silent)).unwrap_err(),
+        "CH-6: a delay overflows the root"
+    );
+    assert!(reused.missing().is_empty(), "a refused first join leaves the medium unjoined");
+    reused.join(&run(), &id("a"), &spec, 1, 1_000_000_000, Arc::new(Silent)).unwrap();
+    assert_eq!(reused.missing(), vec![id("b"), id("c")], "the refused document was not adopted");
 }

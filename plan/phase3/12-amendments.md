@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Status | **Accepted at Gate P** (owner, 2026-09-26; `00-overview.md` §11). Each amendment is applied verbatim to the accepted spec it names by `patches/05-design-text.patch` (`20-implementation-plan.md` Step 5; GV-5). This file then stays in `plan/phase3/` as the record, as spec 06 §2 does for Phase 2's KA-n. |
-| Scope | (a) **KB-1, KB-2**: the two Kernel amendments the SimulationChannel needs (specs 04, 05, 06). (b) **VB-1…VB-8**: the amendments of the Radio Model (spec 07, `radio` 1.1.0), the Simulation Vocabulary (spec 08, `sim` 1.1.0) and MockRadio (spec 09, `ezsdr.radio.mock` 1.1.0), including MockRadio's new rules MR-31…MR-36 and the Radio Model's RM-23. |
+| Scope | (a) **KB-1, KB-2**: the two Kernel amendments the SimulationChannel needs (specs 04, 05, 06). (b) **VB-1…VB-9**: the amendments of the Radio Model (spec 07, `radio` 1.1.0), the Simulation Vocabulary (spec 08, `sim` 1.1.0) and MockRadio (spec 09, `ezsdr.radio.mock` 1.1.0), including MockRadio's new rules MR-31…MR-36, the Radio Model's RM-23, and MR-27's one section name per instance. |
 | Not in scope | The channel itself (spec 11). Spec 10 (host data path) is unchanged. |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
 
@@ -226,6 +226,33 @@ Amended rules of spec 09:
 **Tests.** `mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused` (in `mock_channel.rs`: case a with a channel and without one (Z11); case b, with a burst one sample later admitted; a late burst that MR-17's `SendAsap` moves onto the open burst's start, refused, and one it moves one sample past it, admitted; with `<` the Mock loses or cuts short a burst); `mr_16_burst_refusals` changes only by VB-4's step instant: its overlap burst at 1 999 is then late, MR-17 moves it onto the open burst's next sample, 2 000, and the refusal's reason still contains "open burst's next sample". With VB-4's strict emission this refusal fires only at the open burst's next sample, never before it: every admitted start is at or after the first transmit sample at or after the round, which is at or after the open burst's next sample. With VB-8, MockRadio's own emission never makes the tracker or the device model refuse a block (INFERRED: every held burst starts after the open burst's next sample, and the open burst's block is cut there), so the one-segment cuts of MR-32's MR-15 and MR-24 branches are unexercised; before VB-8 case b reached them.
 
 ---
+
+### VB-9 — `MR-27`: one section name per instance, and `MR-2`'s `id` shape
+
+**Evidence.** `Manifest::write_section` does `self.sections.insert(section, content)` (`crates/ezsdr-kernel/src/manifest.rs:387`), so the last writer wins and no `CleanupFailure` is recorded (KC-44 has nothing to fire on). Every MockRadio instance creates the same six names from construction, so a Run holding two of them kept one instance's records and silently lost the other's. This contradicted KC-45 ("`sections` = every Provider's `instance().sections` under its Module id") and RS-39 ("the transmit burst records of SC-28 … go in that Module's section"). Phase 2 never ran two Mocks in one Run; Phase 3's `rig::link_document` does, in every §58 #8, #3 and #12 carrier. Which instance survived depended on `binding_description` order, so it **flipped with the `block_len_jitter` selector**: with `false` the transmitter's sections survived, with `true` the receiver's.
+
+Measured before the fix, through the acceptance rig:
+
+| `rx_jitter` | surviving `ezsdr.radio.mock.stats` | `bursts` records |
+|---|---|---|
+| `false` | the **transmitter's**: `{"rx_blocks":0,…,"tx_blocks":2,…}` | 1 |
+| `true` | the **receiver's**: `{"rx_blocks":14,…,"tx_blocks":0,…}` | 0 |
+
+**New text** (spec 09):
+
+**MR-2 amended** (the `id` row of the selector table): "| `id` | str, one `ResourceId` segment matching `^[a-z][a-z0-9_]*$` | `\"mock\"` | the device node's path, and so the instance id (SB-3), and the `<id>` of MR-27's six section names, which is why the shape is a section-name segment's |" (Phase 3, VB-9). A `ResourceId` segment also admits upper case, `-` and `.` (SB-34), none of which a namespace admits (SB-1), so the id is refused rather than panicked on when MR-27 builds a name from it.
+
+Every other reference to a MockRadio section in spec 09 — MR-18's `applied`, MR-23's `bursts`, MR-25's `rejected`, MR-36's `stats` and the §6 table's rows — is rewritten to the same `<id>` form (Phase 3, VB-9).
+
+**MR-27 amended**: the six names become `ezsdr.radio.mock.<id>.envelope`, `.bursts`, `.faults`, `.rejected`, `.stats` and `.applied`, where `<id>` is MR-2's `id`, with the sentence "The `<id>` is in every name because `Manifest::write_section` inserts: a Run holding two instances of this Module would otherwise keep only the sections of whichever was written last, silently losing the other's burst records (SC-28), and which one that was depended on the order the coordinator happened to write them in. The `<id>` is MR-2's `id`, so it must be a legal section-name segment — `^[a-z][a-z0-9_]*$` — which MR-2 refuses otherwise." (Phase 3, VB-9).
+
+**Rejected.** A Kernel guard refusing to overwrite an existing section (KC-44): it makes a collision visible but still loses the data, so it is not a fix on its own. Naming the sections by fragment in the coordinator (KC-45): it touches the Kernel and changes every Module's Manifest shape, for a defect a Module can fix alone. Sanitising or hashing the id: two ids could collide, and the Manifest should say which radio a record came from.
+
+**Code.** `patches/` is not edited (the record of what Gate P accepted). Applied in the repository as the Review C fix: `crates/ezsdr-mock-radio/src/lib.rs` (`section(instance, suffix)`, a `section_id: Ident` field, the MR-2 refusal) and the tests that read the six names.
+
+**Tests.** `mr_03_profile_values_reach_the_capabilities_and_the_envelope_section` now asserts the six names exactly, `mr_02_from_binding_refusals` gained the five illegal `id` shapes, and `v58_08_b_two_mocks_in_one_run_keep_both_sets_of_sections` is new: two Mocks in one Run, twelve section names present, the two documents genuinely different, and the winner independent of `rx_jitter`.
+
+**Also fixed with it.** `v58_12_the_channel_output_does_not_depend_on_block_lengths`'s guard was vacuous twice over: it read the unqualified name, so it compared the transmitter's `rx_blocks` (0) with the receiver's (14) and passed whatever the receiver did; and with the receiver's own section the count is **14 in both runs**, because a fixed sample total over jittered block lengths rounds to the same block count. `rx_samples` does differ (27 000 against 26 349), so the guard now asserts that, which is what proves the two runs really used different block lengths and makes the equal capture artifact mean something (§58 #12).
 
 ## 3. Vision issues found
 
