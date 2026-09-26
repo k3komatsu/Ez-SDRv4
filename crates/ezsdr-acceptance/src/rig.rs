@@ -84,7 +84,7 @@ fn profile_document(profile: &str, selector: JsonValue, dir: &Path, environment:
         "version": 1,
         "bindings": {
             "radio": {
-                "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 1, "patch": 0 } },
+                "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 2, "patch": 0 } },
                 "selector": selector,
                 "profile": { "name": profile, "version": { "major": 1, "minor": 1, "patch": 0 } }
             },
@@ -121,7 +121,7 @@ pub fn link_session_profile(profile: &str, tx: &str, rx: &str, dir: &Path, envir
 
 fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path, environment: JsonValue, session: bool) -> JsonValue {
     let radio = |id: String, jitter: bool| json!({
-        "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 1, "patch": 0 } },
+        "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 2, "patch": 0 } },
         "selector": { "id": id, "block_len_jitter": jitter },
         "profile": { "name": profile, "version": { "major": 1, "minor": 1, "patch": 0 } }
     });

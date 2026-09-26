@@ -1,4 +1,4 @@
-//! Ez-SDR v4 Module ezsdr.radio.mock 1.1.0 (design/09-mock-radio.md).
+//! Ez-SDR v4 Module ezsdr.radio.mock 1.2.0 (design/09-mock-radio.md).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -11,7 +11,7 @@ mod device;
 use std::collections::BTreeMap;
 
 use ezsdr_kernel::binding::Binding;
-use ezsdr_kernel::event::{Action, Event, EventKind, EventSink, Severity};
+use ezsdr_kernel::event::{Action, Event, EventHandle, EventKind, EventSink, Severity};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::module_api::{
@@ -35,26 +35,27 @@ pub use profile::{Profile, ProfileKind};
 fn module_ref() -> ModuleRef {
     ModuleRef {
         id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"),
-        version: Version::new(1, 1, 0),
+        version: Version::new(1, 2, 0),
     }
 }
 
-/// The Module descriptor for `ezsdr.radio.mock` 1.1.0 (MR-1).
+/// The Module descriptor for `ezsdr.radio.mock` 1.2.0 (MR-1).
 pub fn descriptor() -> ModuleDescriptor {
     ModuleDescriptor {
         id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"),
-        version: Version::new(1, 1, 0),
+        version: Version::new(1, 2, 0),
         kernel_api: KERNEL_API,
         roles: vec![Role::Provider],
-        vocabularies: ["radio", "sim"]
+        // radio 1.2.0 for RM-24's hot-path form of RX_OVERFLOW (MR-37).
+        vocabularies: [("radio", Version::new(1, 2, 0)), ("sim", Version::new(1, 1, 0))]
             .into_iter()
-            .map(|id| VocabularyRequirement {
+            .map(|(id, version)| VocabularyRequirement {
                 id: Namespace::parse(id).expect("valid vocabulary"),
-                req: VersionReq(Version::new(1, 1, 0)),
+                req: VersionReq(version),
             })
             .collect(),
         deployment: Deployment::InProcess {},
-        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 1.1.0")),
+        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 1.2.0")),
     }
 }
 
@@ -75,6 +76,8 @@ pub struct MockRadio {
     clocks: Option<std::sync::Arc<ClockRegistry>>,
     time: Option<std::sync::Arc<dyn TimeAuthority>>,
     events: Option<std::sync::Arc<dyn EventSink>>,
+    /// `(<device>/rx, radio.RX_OVERFLOW)`, resolved in `prepare` for the hot path (MR-37).
+    overflow_handle: Option<EventHandle>,
     root: Option<ClockDomainId>,
     rx_handle: Option<SampleClockHandle>,
     tx_handle: Option<SampleClockHandle>,
@@ -269,6 +272,7 @@ impl MockRadio {
             clocks: None,
             time: None,
             events: None,
+            overflow_handle: None,
             root: None,
             rx_handle: None,
             tx_handle: None,
@@ -330,6 +334,17 @@ impl MockRadio {
             detail: serde_json::Value::Null,
         })?;
         Ok(())
+    }
+
+    /// Emits `radio.RX_OVERFLOW` on the hot path with RM-24's bytes, as a device's
+    /// sample path must (MR-37, RS-32).
+    fn emit_overflow(&self, payload: ezsdr_radio::payloads::RxOverflowPayload, at: TimePoint) -> Result<(), ModuleError> {
+        let (Some(events), Some(handle)) = (&self.events, self.overflow_handle) else { return Ok(()); };
+        events.emit(handle, at, Severity::Warning, &payload.to_hot()).map_err(|error| ModuleError {
+            kind: ezsdr_kernel::module_api::ModuleErrorKind::Internal,
+            message: format!("MR-37: registered Radio event could not be emitted: {error:?}"),
+            detail: serde_json::Value::Null,
+        })
     }
 
     fn plan_rx_block(&mut self) {
@@ -465,12 +480,12 @@ impl MockRadio {
     }
 
     fn emit_rx_overflow(&mut self, domain: ClockDomainId, at: i64, lost: i64, gap_ns: i64) -> Result<(), ModuleError> {
-        let payload = serde_json::to_value(ezsdr_radio::payloads::RxOverflowPayload {
+        let payload = ezsdr_radio::payloads::RxOverflowPayload {
             cause: ezsdr_radio::payloads::RxOverflowCause::Overrun,
             lost: lost.max(0) as u64,
             restart_gap_ns: gap_ns,
-        }).expect("RX overflow payload");
-        self.emit_event("rx", ezsdr_radio::kinds::RX_OVERFLOW, Severity::Warning, payload, TimePoint::new(domain, at))
+        };
+        self.emit_overflow(payload, TimePoint::new(domain, at))
     }
 
     fn apply_rx_fault(&mut self, index: usize) -> Result<(), ModuleError> {
@@ -518,8 +533,8 @@ impl MockRadio {
         }
         self.faults[index].applied = true;
         self.faults[index].resolved = true;
-        let payload = serde_json::to_value(ezsdr_radio::payloads::RxOverflowPayload { cause, lost: n as u64, restart_gap_ns: gap_ns }).expect("RX fault payload");
-        self.emit_event("rx", ezsdr_radio::kinds::RX_OVERFLOW, Severity::Warning, payload, TimePoint::new(domain, kf))?;
+        let payload = ezsdr_radio::payloads::RxOverflowPayload { cause, lost: n as u64, restart_gap_ns: gap_ns };
+        self.emit_overflow(payload, TimePoint::new(domain, kf))?;
         self.record_fault(index, n as u64);
         Ok(())
     }
@@ -1277,6 +1292,10 @@ impl Provider for MockRadio {
         self.root = Some(root);
         self.clocks = Some(ctx.clocks);
         self.time = Some(ctx.time);
+        // MR-37: `resolve` is control-path only (RS-33), so the handle is taken here.
+        let rx_node = self.instance.id.child("rx").map_err(|error| self.reject(format!("MR-37: {error}")))?;
+        let overflow = EventKind::parse(ezsdr_radio::kinds::RX_OVERFLOW).expect("declared radio event kind");
+        self.overflow_handle = Some(ctx.events.resolve(&rx_node, &overflow));
         self.events = Some(ctx.events);
         self.actions = Some(ctx.actions);
         self.rx_handle = rx_handle;
@@ -1398,6 +1417,7 @@ impl Provider for MockRadio {
         self.clocks = None;
         self.time = None;
         self.events = None;
+        self.overflow_handle = None;
         self.root = None;
         self.channel = None;
         self.medium = None;

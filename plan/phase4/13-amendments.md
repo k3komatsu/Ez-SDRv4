@@ -4,7 +4,7 @@
 |---|---|
 | Status | Draft under the owner's delegation (2026-09-26); decided at Gate X ([`00-overview.md`](00-overview.md) §11). |
 | Scope | One Kernel amendment (KD-1: MA-30's round after a Module error) and three Vocabulary and Module amendments (VC-1: `radio` 1.2.0 and RM-24; VC-2: `ezsdr.radio.mock` 1.2.0 and MR-37; VC-3: `ezsdr.sink.capture` 1.1.0 and HD-15). |
-| Amends | `design/05-module-api.md` (MA-30), `design/07-radio-model.md` (RM-1, RM-11; new RM-24), `design/09-mock-radio.md` (MR-1, MR-19, MR-21, MR-22, MR-30, §8; new MR-37), `design/10-host-data-path.md` (HD-7, HD-10, H3, §9; new HD-15), `design/02-stream-contract.md` (SC-32's marker), `design/08-simulation.md` (S1, §7), `design/11-simulation-channel.md` (CH-9's ceiling). |
+| Amends | `design/05-module-api.md` (MA-30), `design/07-radio-model.md` (RM-1, RM-11; new RM-24), `design/09-mock-radio.md` (MR-1, MR-19, MR-28, MR-30, §8; new MR-37), `design/10-host-data-path.md` (HD-7, HD-10, H3, §9; new HD-15), `design/02-stream-contract.md` (SC-32's marker), `design/08-simulation.md` (S1, §7), `design/11-simulation-channel.md` (CH-9's ceiling). |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
 
 Each amendment gives the problem, the rule text as it reads after the amendment, the rejected alternatives and the tests. Appendix A lists the mutations that show each test guards its rule (GW-4).
@@ -74,13 +74,13 @@ until no instance reports progressed; a cap of 1 000 iterations raises STEP_LIVE
 
 **MR-1 amended**: `version: 1.2.0`, `vocabularies: [{ radio, ^1.2.0 }, { sim, ^1.1.0 }]`, `impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 1.2.0"))` (Phase 4, VC-2). The profiles stay `x310-like 1.1.0` and `ideal 1.1.0`: their content does not change.
 
-**MR-19, MR-21, MR-22 amended**: each "`radio.RX_OVERFLOW { … }` is emitted" gains "on the hot path (MR-37)".
+**MR-19 amended**: "`radio.RX_OVERFLOW { cause: overrun }` is emitted" gains "on the hot path (MR-37)" (MR-21 and MR-22 name the samples, and RM-17 and RM-18 the event). **MR-28 amended**: "through `emit_control`" gains "— except `RX_OVERFLOW`, which MR-37 puts on the hot path —".
 
 **§8 Deferred amended**: "A transmit port and `TX_UNDERFLOW`; the hot-path event layout; `ALIGNMENT` injection (Phase 4); a nonzero receive path delay (MR-35)." becomes "A transmit port and `TX_UNDERFLOW` (Phase 10); `ALIGNMENT` injection (Phase 7, with the UHD Provider's alignment behaviour); a nonzero receive path delay (MR-35)."
 
 **Rejected.** Moving `TIME_ERROR`, `LATE_COMMAND`, `COMMAND_REJECTED` too (control-path work; `TIME_ERROR` carries a `TimePoint`, `00-overview.md` §3). Resolving the handle on every emission (`resolve` is control-path only, RS-33).
 
-**Tests.** `mr_37_the_overflow_travels_the_hot_path` (new); the overflow payload assertions of `mr_19_backpressure_is_an_overrun`, `mr_20_*`, `mr_21_overrun_shape` and `mr_22_sequence_error_shape` read the payload with `from_payload` (GW-3); `mr_01_descriptor_registers` reads 1.2.0.
+**Tests.** `mr_37_the_overflow_travels_the_hot_path` (new); `mr_19_backpressure_is_an_overrun` asserts the byte form and `mr_20_faults_fire_at_their_instants` reads `lost` with `from_payload` (GW-3); `mr_01_descriptor_registers` pins 1.2.0, both vocabulary requirements and the implementation hash.
 
 ### VC-3 — `ezsdr.sink.capture` 1.1.0: every capture is a SigMF Recording (HD-15)
 

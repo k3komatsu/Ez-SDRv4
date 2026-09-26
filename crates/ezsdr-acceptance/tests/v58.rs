@@ -10,6 +10,7 @@ use ezsdr_kernel::run::{CleanupMode, RunState, Stage, StopCause, Termination};
 use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::TimePoint;
+use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload};
 use serde_json::json;
 use support::{artifact, end_session, finish_at, root, section, session_run, spec_run, T0};
 
@@ -114,7 +115,10 @@ fn v58_04_mock_events_reach_counters_policy_and_manifest() {
     assert_eq!(rows.iter().find(|row| row.source.path == "mock/rx" && row.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).unwrap().count, 1);
     let events: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].payload["cause"], "overrun");
+    // MR-37: the Mock raises it on the hot path, as a device's sample path would, so the
+    // Manifest holds RM-24's bytes, which the radio Vocabulary decodes (RS-32a withdrawn).
+    assert!(events[0].payload.is_array(), "{}", events[0].payload);
+    assert_eq!(RxOverflowPayload::from_payload(&events[0].payload).unwrap().cause, RxOverflowCause::Overrun);
     assert_eq!(artifact(&manifest, "rec").marks.len(), 1);
     assert_eq!(artifact(&manifest, "rec").marks[0].kind.as_str(), ezsdr_radio::kinds::RX_OVERFLOW);
 
@@ -157,7 +161,10 @@ fn v58_06_injected_overflow_is_a_uhd_overflow() {
     assert_eq!(gap.lost, Some(50_000));
     assert_eq!(gap.link_dropped, 0);
     let event = manifest.events.delivered.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).unwrap();
-    assert_eq!(event.payload, json!({ "cause": "overrun", "lost": 50_000, "restart_gap_ns": 50_000_000 }));
+    assert_eq!(
+        RxOverflowPayload::from_payload(&event.payload).unwrap(),
+        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000, restart_gap_ns: 50_000_000 }
+    );
 }
 
 #[test]

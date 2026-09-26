@@ -80,7 +80,7 @@ fn rm_01_register_adds_the_descriptor_the_check_and_the_kinds() {
         .vocabulary(&Namespace::parse("radio").unwrap())
         .unwrap();
     assert_eq!(descriptor.id, Namespace::parse("radio").unwrap());
-    assert_eq!(descriptor.version, Version::new(1, 1, 0));
+    assert_eq!(descriptor.version, Version::new(1, 2, 0));
     assert_eq!(descriptor.prefix, Namespace::parse("radio").unwrap());
     assert_eq!(descriptor.checks, [Namespace::parse("radio.rf_envelope").unwrap()]);
 
@@ -469,4 +469,44 @@ fn rm_22_payloads_round_trip() {
         },
         json!({"action": "tx_burst", "reason": "bad waveform"}),
     );
+}
+
+#[test]
+fn rm_24_the_hot_form_round_trips() {
+    let overrun = RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000, restart_gap_ns: 50_000_000 };
+    // Pinned byte for byte: this layout is the contract a hardware Provider meets.
+    assert_eq!(
+        overrun.to_hot(),
+        [0, 0x50, 0xc3, 0, 0, 0, 0, 0, 0, 0x80, 0xf0, 0xfa, 0x02, 0, 0, 0, 0]
+    );
+    for payload in [
+        overrun,
+        RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: u64::MAX, restart_gap_ns: i64::MIN },
+        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 0, restart_gap_ns: -1 },
+    ] {
+        let bytes = payload.to_hot();
+        assert_eq!(bytes.len(), 17);
+        assert_eq!(RxOverflowPayload::from_hot(&bytes), Ok(payload));
+    }
+    let bytes = overrun.to_hot();
+    assert!(RxOverflowPayload::from_hot(&bytes[..16]).unwrap_err().starts_with("RM-24"));
+    let mut long = bytes.to_vec();
+    long.push(0);
+    assert!(RxOverflowPayload::from_hot(&long).unwrap_err().starts_with("RM-24"));
+    let mut bad_cause = bytes;
+    bad_cause[0] = 2;
+    assert!(RxOverflowPayload::from_hot(&bad_cause).unwrap_err().starts_with("RM-24"));
+}
+
+#[test]
+fn rm_24_a_delivered_payload_reads_in_either_form() {
+    let payload = RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: 2_000, restart_gap_ns: 0 };
+    // The control path's object (RM-11) and the Kernel drain's byte array (RS-34).
+    assert_eq!(RxOverflowPayload::from_payload(&serde_json::to_value(payload).unwrap()), Ok(payload));
+    let drained = JsonValue::Array(payload.to_hot().iter().map(|byte| json!(byte)).collect());
+    assert_eq!(RxOverflowPayload::from_payload(&drained), Ok(payload));
+    let mut not_a_byte = drained.clone();
+    not_a_byte[3] = json!(256);
+    assert!(RxOverflowPayload::from_payload(&not_a_byte).unwrap_err().starts_with("RM-24"));
+    assert!(RxOverflowPayload::from_payload(&json!("overrun")).unwrap_err().starts_with("RM-24"));
 }

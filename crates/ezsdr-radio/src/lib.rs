@@ -1,4 +1,4 @@
-//! Ez-SDR v4 Radio Model Vocabulary radio 1.1.0 (design/07-radio-model.md).
+//! Ez-SDR v4 Radio Model Vocabulary radio 1.2.0 (design/07-radio-model.md).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -229,11 +229,11 @@ fn radio_event_kinds() -> Vec<EventKindDecl> {
     .collect()
 }
 
-/// Describes the Radio Model Vocabulary `radio` 1.1.0 (RM-1).
+/// Describes the Radio Model Vocabulary `radio` 1.2.0 (RM-1).
 pub fn vocabulary() -> VocabularyDescriptor {
     VocabularyDescriptor {
         id: radio_namespace().clone(),
-        version: Version::new(1, 1, 0),
+        version: Version::new(1, 2, 0),
         prefix: radio_namespace().clone(),
         keys: radio_keys(),
         event_kinds: radio_event_kinds(),
@@ -606,7 +606,7 @@ pub mod payloads {
     }
 
     /// Receive-loss event data (RM-22).
-    #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct RxOverflowPayload {
         /// The kind of receive loss (RM-22).
@@ -615,6 +615,60 @@ pub mod payloads {
         pub lost: u64,
         /// Restart gap in nanoseconds, or zero for a sequence error (RM-22).
         pub restart_gap_ns: i64,
+    }
+
+    /// The length of [`RxOverflowPayload`]'s hot-path form (RM-24).
+    pub const RX_OVERFLOW_HOT_BYTES: usize = 17;
+
+    impl RxOverflowPayload {
+        /// The hot-path form: the cause byte (0 overrun, 1 sequence), then `lost` as a
+        /// little-endian u64 and `restart_gap_ns` as a little-endian i64 (RM-24). The
+        /// Vocabulary owns this layout; the Kernel only queues the bytes (RS-32a,
+        /// withdrawn).
+        pub fn to_hot(&self) -> [u8; RX_OVERFLOW_HOT_BYTES] {
+            let mut out = [0; RX_OVERFLOW_HOT_BYTES];
+            out[0] = match self.cause {
+                RxOverflowCause::Overrun => 0,
+                RxOverflowCause::Sequence => 1,
+            };
+            out[1..9].copy_from_slice(&self.lost.to_le_bytes());
+            out[9..17].copy_from_slice(&self.restart_gap_ns.to_le_bytes());
+            out
+        }
+
+        /// Reads the hot-path form, refusing another length or an unknown cause (RM-24).
+        pub fn from_hot(bytes: &[u8]) -> Result<RxOverflowPayload, String> {
+            let bytes: &[u8; RX_OVERFLOW_HOT_BYTES] = bytes.try_into().map_err(|_| {
+                format!("RM-24: the hot-path form is {RX_OVERFLOW_HOT_BYTES} bytes, not {}", bytes.len())
+            })?;
+            let cause = match bytes[0] {
+                0 => RxOverflowCause::Overrun,
+                1 => RxOverflowCause::Sequence,
+                other => return Err(format!("RM-24: {other} is not a cause")),
+            };
+            let lost = u64::from_le_bytes(bytes[1..9].try_into().expect("eight bytes"));
+            let restart_gap_ns = i64::from_le_bytes(bytes[9..17].try_into().expect("eight bytes"));
+            Ok(RxOverflowPayload { cause, lost, restart_gap_ns })
+        }
+
+        /// Reads a delivered event's payload in either form: RM-11's object from the
+        /// control path, or the array of byte values the Kernel's drain makes of a
+        /// hot-path record (RM-24, RS-34).
+        pub fn from_payload(payload: &serde_json::Value) -> Result<RxOverflowPayload, String> {
+            match payload {
+                serde_json::Value::Array(values) => {
+                    let bytes = values
+                        .iter()
+                        .map(|value| value.as_u64().and_then(|byte| u8::try_from(byte).ok()))
+                        .collect::<Option<Vec<u8>>>()
+                        .ok_or_else(|| "RM-24: the hot-path form holds byte values only".to_owned())?;
+                    RxOverflowPayload::from_hot(&bytes)
+                }
+                serde_json::Value::Object(_) => serde_json::from_value(payload.clone())
+                    .map_err(|error| format!("RM-24: {error}")),
+                _ => Err("RM-24: a payload is an object or an array of bytes".to_owned()),
+            }
+        }
     }
 
     /// Why a radio burst reported a time error (RM-22).

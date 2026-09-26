@@ -19,11 +19,12 @@ use ezsdr_kernel::time::{AbsoluteDeadline, ClockDomain, ClockRegistry, Duration,
 use ezsdr_kernel::module_api::Requested;
 
 use ezsdr_mock_radio::{descriptor, MockRadio};
+use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload};
 
 const ROOT: ClockDomainId = ClockDomainId::local(7);
 
 fn module_ref() -> ModuleRef {
-    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 1, 0) }
+    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 2, 0) }
 }
 
 fn waveform(samples: usize) -> ArtifactRef {
@@ -152,6 +153,12 @@ impl DataLink for MemLink {
     fn policy(&self) -> BackPressure { self.policy }
 }
 
+thread_local! {
+    /// The event ring each harness on this thread gets: MR-37's test needs a one-slot
+    /// ring to tell the hot path, which drops, from the control path, which never does.
+    static RING_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(4096) };
+}
+
 struct Harness {
     mock: MockRadio,
     clocks: Arc<ClockRegistry>,
@@ -195,7 +202,7 @@ impl Harness {
         let pairs: Vec<_> = [rid("mock"), rid("mock/rx"), rid("mock/tx")].into_iter()
             .flat_map(|source| event_kinds.iter().cloned().map(move |kind| (source.clone(), kind)))
             .collect();
-        let events = Arc::new(EventCollector::new(&pairs, &event_kinds, 4096, &Policy::default()));
+        let events = Arc::new(EventCollector::new(&pairs, &event_kinds, RING_DEPTH.with(|depth| depth.get()), &Policy::default()));
         let link = link.map(|(policy, capacity)| Arc::new(MemLink::new(policy, capacity)));
         let mut attached: Vec<_> = link.as_ref().map(|link| AttachedPort {
             component: Ident::parse("radio").unwrap(),
@@ -258,10 +265,12 @@ fn mr_01_descriptor_registers() {
     registry.register(descriptor(), Factories { provider: true, ..Factories::default() }).unwrap();
     let d = descriptor();
     assert_eq!(d.id.as_str(), "ezsdr.radio.mock");
-    assert_eq!(d.version, Version::new(1, 1, 0));
+    assert_eq!(d.version, Version::new(1, 2, 0));
     assert_eq!(d.kernel_api, KERNEL_API);
     assert_eq!(d.roles, [Role::Provider]);
-    assert_eq!(d.vocabularies.len(), 2);
+    let requirements: Vec<_> = d.vocabularies.iter().map(|v| (v.id.as_str().to_owned(), v.req.0)).collect();
+    assert_eq!(requirements, [("radio".to_owned(), Version::new(1, 2, 0)), ("sim".to_owned(), Version::new(1, 1, 0))]);
+    assert_eq!(d.impl_hash, Some(ezsdr_kernel::hash::ContentHash::of_bytes(b"ezsdr.radio.mock 1.2.0")));
 }
 
 #[test]
@@ -1043,7 +1052,12 @@ fn mr_19_backpressure_is_an_overrun() {
     assert!(restarted.header().flags.contains(ezsdr_kernel::stream::BlockFlags::RESTARTED));
     assert_eq!(restarted.header().lost, Some(50_000));
     assert_eq!(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.stats").unwrap()]["rx_blocks"], 2);
-    assert_eq!(harness.events.drain().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 1);
+    let events = harness.events.drain();
+    let overflows: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
+    assert_eq!(overflows.len(), 1);
+    // MR-37: the back-pressure overrun travels the hot path too, as RM-24's bytes.
+    assert!(overflows[0].payload.is_array(), "{}", overflows[0].payload);
+    assert_eq!(RxOverflowPayload::from_payload(&overflows[0].payload).unwrap().cause, RxOverflowCause::Overrun);
 
     let mut fractional = Harness::new_with_options(
         "x310-like",
@@ -1187,7 +1201,7 @@ fn mr_20_faults_fire_at_their_instants() {
     assert_eq!(stats["rx_samples"], 1_500);
     let events = tail_fault.events.drain();
     let overflow = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).unwrap();
-    assert_eq!(overflow.payload["lost"], 500);
+    assert_eq!(RxOverflowPayload::from_payload(&overflow.payload).unwrap().lost, 500);
 }
 
 #[test]
@@ -1353,4 +1367,38 @@ fn mr_30_two_mocks_one_seed_identical_output() {
     assert_eq!(a, b);
     assert_eq!(left.mock.instance().sections, right.mock.instance().sections);
     assert_eq!(left.events.drain(), right.events.drain());
+}
+
+#[test]
+fn mr_37_the_overflow_travels_the_hot_path() {
+    // A one-slot ring: the hot path counts every overflow but queues one body and
+    // reports the other in EVENTS_DROPPED; the control path never drops, so a Mock that
+    // still used it would deliver both (RS-33, RS-34, RS-35).
+    RING_DEPTH.with(|depth| depth.set(1));
+    let env = [("sim.faults", serde_json::json!([
+        { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
+        { "at_ns": 60_000_000, "fault": "rx_sequence_error", "target": "radio" }
+    ]))];
+    let mut harness = Harness::new("x310-like", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
+    RING_DEPTH.with(|depth| depth.set(4096));
+    harness.arm_start(2_000_000_000).unwrap();
+    for ms in 1..=66 {
+        harness.step(2_000_000_000 + ms * 1_000_000).unwrap();
+    }
+    let faults = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.faults").unwrap()];
+    assert_eq!(faults.as_array().unwrap().iter().filter(|fault| fault["applied"] == true).count(), 2, "{faults}");
+    let counted = harness.events.counters().into_iter()
+        .find(|row| row.source == rid("mock/rx") && row.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW)
+        .unwrap().count;
+    assert_eq!(counted, 2);
+    let events = harness.events.drain();
+    let delivered: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(
+        RxOverflowPayload::from_payload(&delivered[0].payload).unwrap(),
+        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000, restart_gap_ns: 50_000_000 }
+    );
+    let dropped: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::EVENTS_DROPPED).collect();
+    assert_eq!(dropped.len(), 1);
+    assert_eq!(dropped[0].payload, serde_json::json!({ "kind": ezsdr_radio::kinds::RX_OVERFLOW, "count": 1 }));
 }

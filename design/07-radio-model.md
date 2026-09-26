@@ -1,8 +1,8 @@
-# Phase 2 spec 07 — The Radio Model Vocabulary (`radio` 1.1.0)
+# Phase 2 spec 07 — The Radio Model Vocabulary (`radio` 1.2.0)
 
 | Field | Value |
 |---|---|
-| Status | Accepted at Gate P (owner, 2026-09-24) and ratified at Gate X (owner, 2026-09-25; [`plan/phase2/00-overview.md`](../plan/phase2/00-overview.md) §11). Normative for `crates/ezsdr-radio` and for every radio Provider (MockRadio in Phase 2, UHD in Phase 7). Amended in Phase 3 by VB-1 and VB-10. |
+| Status | Accepted at Gate P (owner, 2026-09-24) and ratified at Gate X (owner, 2026-09-25; [`plan/phase2/00-overview.md`](../plan/phase2/00-overview.md) §11). Normative for `crates/ezsdr-radio` and for every radio Provider (MockRadio in Phase 2, UHD in Phase 7). Amended in Phase 3 by VB-1 and VB-10. Amended in Phase 4 by VC-1 ([`plan/phase4/13-amendments.md`](../plan/phase4/13-amendments.md)). |
 | Scope | The `radio` Vocabulary: the resource kinds and tree shape a radio Provider exposes; the configuration keys and the capability keys, each with its `KeyDecl`; the TimingEnvelope and PerformanceEnvelope as capabilities; coercion rules; the event kinds with their defaults, severities and payloads; the Session verbs; the `TxBurst` conventions; the `radio.rf_envelope` section and its admission check. |
 | Not in scope | Any Provider's values (MockRadio's are spec 09's MR-3; UHD's are Phase 7's). Channel models (Phase 3). Per-channel configuration (RM-5's ceiling). Receive-side DDC and transmit-side DUC capabilities, device FFT and RFNoC (Vision §20, §35; Phase 7+). |
 | Crate | `crates/ezsdr-radio`, library `ezsdr_radio`. Depends on `ezsdr-kernel`, `serde`, `serde_json`, `schemars`. |
@@ -44,7 +44,7 @@ envelope (capabilities of <device>; matchable, never read by the Kernel except m
 
 ### Identity and registration
 
-- **RM-1** The Vocabulary is `VocabularyDescriptor { id: radio, version: 1.1.0, prefix: radio, keys: RM-4's table, event_kinds: RM-10's table, verbs: RM-12's table, checks: [radio.rf_envelope] }`, returned by `ezsdr_radio::vocabulary()`. `ezsdr_radio::register(registry, checks, kinds)` registers the descriptor, the `RfEnvelopeCheck` of RM-19 and every event kind with owner `Some(radio)`, in that order, and is the only way a runtime assembles the Vocabulary. Version 1.1.0 adds the two path-delay capabilities of RM-4 and RM-23 (Phase 3, VB-1). *Checked by `rm_01_register_adds_the_descriptor_the_check_and_the_kinds`.*
+- **RM-1** The Vocabulary is `VocabularyDescriptor { id: radio, version: 1.2.0, prefix: radio, keys: RM-4's table, event_kinds: RM-10's table, verbs: RM-12's table, checks: [radio.rf_envelope] }`, returned by `ezsdr_radio::vocabulary()`. `ezsdr_radio::register(registry, checks, kinds)` registers the descriptor, the `RfEnvelopeCheck` of RM-19 and every event kind with owner `Some(radio)`, in that order, and is the only way a runtime assembles the Vocabulary. Version 1.1.0 adds the two path-delay capabilities of RM-4 and RM-23 (Phase 3, VB-1); version 1.2.0 adds RM-24's hot-path form of `RX_OVERFLOW` (Phase 4, VC-1). *Checked by `rm_01_register_adds_the_descriptor_the_check_and_the_kinds`.*
 
 ### Resource tree
 
@@ -119,11 +119,11 @@ envelope (capabilities of <device>; matchable, never read by the Kernel except m
   | `radio.COMMAND_REJECTED` | error | mark_artifact | the Provider could not carry out an admitted Action: an unsupported Action, a malformed waveform, a target it does not have, a configuration its envelope refuses |
 
   `radio.TX_UNDERFLOW`, `radio.TX_DISCONTINUITY`, `radio.ALIGNMENT_ERROR` and `radio.CLOCK_LOST` are declared so that a Spec's `policies.failure` may name them (SB-18); MockRadio 1.0.0 never emits them. *Checked by `rm_10_the_kinds_are_registered_under_radio_with_their_defaults`.*
-- **RM-11** Every radio event is emitted with `emit_control` in Phase 2 (RS-32's hot path is the Phase 7 Provider's concern), with source the stream node for a stream event (`RX_OVERFLOW`, `TIME_ERROR`) and the device node otherwise (`LATE_COMMAND` for a start or a `hardware_timed` update, `COMMAND_QUEUE_FULL`, `COMMAND_REJECTED`), `time` in the stream's SampleClock or, before one exists, the Authority's primary root, and a payload that is a JSON object with exactly these members:
+- **RM-11** Every radio event is emitted with `emit_control`, except `radio.RX_OVERFLOW`, which is emitted on the hot path (`EventSink::emit`, RS-32) with RM-24's bytes, because a device reports it from its sample path (Phase 4, VC-1); the source is the stream node for a stream event (`RX_OVERFLOW`, `TIME_ERROR`) and the device node otherwise (`LATE_COMMAND` for a start or a `hardware_timed` update, `COMMAND_QUEUE_FULL`, `COMMAND_REJECTED`), `time` in the stream's SampleClock or, before one exists, the Authority's primary root, and a payload that is a JSON object with exactly these members:
 
   | Kind | Payload |
   |---|---|
-  | `radio.RX_OVERFLOW` | `{ "cause": "overrun" \| "sequence", "lost": int, "restart_gap_ns": int }` (`restart_gap_ns` 0 for `sequence`) |
+  | `radio.RX_OVERFLOW` | `{ "cause": "overrun" \| "sequence", "lost": int, "restart_gap_ns": int }` (`restart_gap_ns` 0 for `sequence`); on the hot path, RM-24's bytes |
   | `radio.TIME_ERROR` | `{ "cause": "late" \| "unclosed_burst", "outcome": "send_asap" \| "drop" \| "plan_violation" \| "refused", "late_by_ns": int, "target": TimePoint }` |
   | `radio.LATE_COMMAND` | `{ "key": string \| null, "requested": TimePoint, "applied": TimePoint }` |
   | `radio.COMMAND_QUEUE_FULL` | `{ "key": string, "depth": int }` |
@@ -191,6 +191,10 @@ envelope (capabilities of <device>; matchable, never read by the Kernel except m
 
 - **RM-23** `radio.tx.path_delay_samples` and `radio.rx.path_delay_samples` are the device's fixed delays between a sample's timestamp and the antenna, in samples of the stream's current rate, declared on the device node as `One(Int(n))` with `n ≥ 0`: a transmit sample stamped `T` is at the antenna `n_tx` transmit samples after `T`, and a receive sample stamped `T` is what was at the antenna `n_rx` receive samples before `T`, so a loopback through a zero-delay path at one rate shows `n_tx + n_rx` samples of delay. This is Vision §26's per-profile delay default; a per-Run override by a CalibrationArtifact is later work (Phase 3, VB-1). *Producer obligation; MockRadio's values are MR-3's and its test is `mr_32_the_transmit_path_delay_shifts_a_loopback`.*
 
+### Hot-path forms
+
+- **RM-24** `radio.RX_OVERFLOW` has a hot-path form of 17 bytes, little-endian: byte 0 the cause (`0` overrun, `1` sequence), bytes 1–8 `lost` as u64, bytes 9–16 `restart_gap_ns` as i64. `RxOverflowPayload::to_hot(&self) -> [u8; 17]` writes it. `RxOverflowPayload::from_hot(bytes: &[u8]) -> Result<RxOverflowPayload, String>` reads it and refuses another length or a cause byte other than 0 or 1. `RxOverflowPayload::from_payload(payload: &serde_json::Value) -> Result<RxOverflowPayload, String>` reads a delivered event's payload in either form — RM-11's object, from the control path, or the array of byte values the Kernel's drain makes of a hot-path record (RS-34) — and refuses anything else, so a reader of a Manifest needs one call whichever path a Provider used. The Kernel does not decode it (RS-32a, withdrawn: the Vocabulary owns its layout) (Phase 4, VC-1). *Checked by `rm_24_the_hot_form_round_trips` and `rm_24_a_delivered_payload_reads_in_either_form`.*
+
 ## 5. Decisions
 
 | # | Decision | Choice | Rejected (one line each) | Ceiling / upgrade path |
@@ -211,7 +215,7 @@ In `crates/ezsdr-radio/tests/radio_model.rs`.
 
 | test | input | expected | rules |
 |---|---|---|---|
-| `rm_01_register_adds_the_descriptor_the_check_and_the_kinds` | empty registries, then `register` | the Vocabulary is `radio 1.1.0`; `checks.run` on a present `radio.rf_envelope` section runs the check; each RM-10 kind is registered with its default | RM-1 |
+| `rm_01_register_adds_the_descriptor_the_check_and_the_kinds` | empty registries, then `register` | the Vocabulary is `radio 1.2.0`; `checks.run` on a present `radio.rf_envelope` section runs the check; each RM-10 kind is registered with its default | RM-1 |
 | `rm_01_register_twice_is_refused` | `register` called twice | the second returns an error; nothing is overwritten | RM-1, MA-32, RS-27 |
 | `rm_04_the_key_table_is_exactly_the_declared_one` | `vocabulary().keys` | exactly RM-4's thirty-one rows, each field as the table says | RM-4, RM-23 |
 | `rm_10_the_kinds_are_registered_under_radio_with_their_defaults` | `vocabulary().event_kinds` | exactly RM-10's nine, severities and defaults as the table says, each under `radio.` | RM-10 |
@@ -221,6 +225,8 @@ In `crates/ezsdr-radio/tests/radio_model.rs`.
 | `rm_19_the_proposed_value_is_judged` | at `runtime`, `effective` in band and `proposed` frequency out of band | one violation carrying the proposed value | RM-19, SB-30 |
 | `rm_20_schema_freeze` | regenerate `RfEnvelope`, `RadioEnvelope` and the five RM-22 payloads | byte-equal to `schemas/radio/*.v1.json` (seven files); no other file there | RM-20, RM-22, PO-7 |
 | `rm_22_payloads_round_trip` | one value of each RM-22 type | `to_value` gives exactly RM-11's members with snake_case enum strings; `from_value` gives the value back; an extra member is refused | RM-22, RM-11 |
+| `rm_24_the_hot_form_round_trips` | an overrun of 50 000 samples and 50 ms; both causes with `lost` `u64::MAX` and `restart_gap_ns` `i64::MIN`; a 16- and an 18-byte slice; a cause byte of 2 | the first's 17 bytes pinned byte for byte; `from_hot(to_hot(p)) == p`; three refusals naming RM-24 | RM-24 |
+| `rm_24_a_delivered_payload_reads_in_either_form` | `to_value(p)`; `p.to_hot()` as a JSON array of integers; that array with a 256; a string | `p` twice; two refusals | RM-24, RM-11 |
 
 ## 7. Vision issues found
 

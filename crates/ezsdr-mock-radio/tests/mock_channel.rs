@@ -30,7 +30,7 @@ fn key(name: &str) -> Key { Key::parse(name).unwrap() }
 fn eq(value: Value) -> Constraint { Constraint::Eq { value } }
 
 fn module_ref() -> ModuleRef {
-    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 1, 0) }
+    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 2, 0) }
 }
 
 #[derive(Default)]
