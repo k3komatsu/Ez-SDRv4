@@ -18,6 +18,7 @@ ezsdr-sim-engine = { path = "../ezsdr-sim-engine" }
 ezsdr-mock-radio = { path = "../ezsdr-mock-radio" }
 ezsdr-link-host = { path = "../ezsdr-link-host" }
 ezsdr-sink-capture = { path = "../ezsdr-sink-capture" }
+ezsdr-exec-native = { path = "../ezsdr-exec-native" }
 serde_json = "1.0.151"
 
 [dev-dependencies]

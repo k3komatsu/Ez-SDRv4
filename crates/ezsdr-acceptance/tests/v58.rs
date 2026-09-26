@@ -57,15 +57,23 @@ fn v58_02_ten_virtual_seconds_run_faster_than_wall_clock() {
 
 #[test]
 fn v58_10_experiments_name_no_mock_type() {
-    let source = include_str!("../src/experiments.rs");
-    for forbidden in ["mock", "Mock", "x310", "ideal", "sim-engine", "sim_engine", "ezsdr_radio_mock"] {
-        assert!(!source.contains(forbidden), "found forbidden name {forbidden}");
-    }
-    for line in source.lines().filter(|line| line.trim_start().starts_with("use ")) {
-        assert!(
-            ["use ezsdr_kernel", "use serde_json", "use std"].iter().any(|prefix| line.trim_start().starts_with(prefix)),
-            "unexpected import: {line}"
-        );
+    // The experiments and, since Phase 5, the responder component: application logic,
+    // which speaks the Kernel contract and — the responder — the native Executor's
+    // component ABI, and names no Mock (GX-6).
+    let sources = [
+        ("experiments.rs", include_str!("../src/experiments.rs"), &["use ezsdr_kernel", "use serde_json", "use std"][..]),
+        ("responder.rs", include_str!("../src/responder.rs"), &["use ezsdr_kernel", "use ezsdr_exec_native", "use serde_json", "use std"][..]),
+    ];
+    for (file, source, allowed) in sources {
+        for forbidden in ["mock", "Mock", "x310", "ideal", "sim-engine", "sim_engine", "ezsdr_radio_mock"] {
+            assert!(!source.contains(forbidden), "{file}: found forbidden name {forbidden}");
+        }
+        for line in source.lines().filter(|line| line.trim_start().starts_with("use ")) {
+            assert!(
+                allowed.iter().any(|prefix| line.trim_start().starts_with(prefix)),
+                "{file}: unexpected import: {line}"
+            );
+        }
     }
 }
 

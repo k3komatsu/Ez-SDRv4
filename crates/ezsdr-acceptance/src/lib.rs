@@ -4,4 +4,5 @@
 #![warn(missing_docs)]
 
 pub mod experiments;
+pub mod responder;
 pub mod rig;

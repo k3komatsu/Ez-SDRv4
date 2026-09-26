@@ -162,3 +162,91 @@ pub fn link(tx: &str, rx: &str, rate_hz: f64, waveform: &ArtifactRef, offset_tic
         "extensions": {}
     })
 }
+
+/// The Mini Reactive Radio (Vision §67 Phase 5, §58 #9): `pinger` sends `ping` once at
+/// `offset_ticks` on its own clock; the component `responder`, fed by `responder_radio`'s
+/// receive port, answers each PING it hears with `pong` on `responder_radio`'s transmit
+/// stream, `turnaround_ns` after the PING's first sample; the output `rec` records
+/// `pinger`'s receive port. `implementation` is the responder's `(impl.id, impl.hash)`.
+/// How the two radios hear each other is the environment's (Vision §8).
+#[allow(clippy::too_many_arguments)]
+pub fn ping_pong(
+    pinger: &str,
+    responder_radio: &str,
+    rate_hz: f64,
+    ping: &ArtifactRef,
+    pong: &ArtifactRef,
+    offset_ticks: i64,
+    turnaround_ns: i64,
+    late_policy: &str,
+    capture: i64,
+    implementation: (&str, &ContentHash),
+) -> Value {
+    let radio = || json!({
+        "kind": "radio.device",
+        "requires": {
+            "radio.rx.channels": { "kind": "eq", "value": 1 },
+            "radio.rx.sample_rate_hz": { "kind": "eq", "value": rate_hz },
+            "radio.rx.frequency_hz": { "kind": "eq", "value": 1.0e9 },
+            "radio.tx.channels": { "kind": "eq", "value": 1 },
+            "radio.tx.sample_rate_hz": { "kind": "eq", "value": rate_hz },
+            "radio.tx.frequency_hz": { "kind": "eq", "value": 1.0e9 }
+        }
+    });
+    let mut resources = serde_json::Map::new();
+    resources.insert(pinger.to_owned(), radio());
+    resources.insert(responder_radio.to_owned(), radio());
+    let param = |key: &str, default: Value| json!({ "key": key, "schema": {}, "update_class": "cold", "default": default });
+    let ping_target = ResourceId::parse(&format!("{pinger}/tx")).expect("valid resource id");
+    json!({
+        "version": 1,
+        "requirements": { "vocabularies": [{ "id": "radio", "major": 1 }, { "id": "sink", "major": 1 }] },
+        "resources": resources,
+        "inputs": [pong],
+        "graph": {
+            "components": {
+                "responder": {
+                    "id": "responder",
+                    "kind": "reactor",
+                    "ports": [{ "name": "rx", "direction": "in", "contract": "ezsdr.stream.cf32" }],
+                    "params": [
+                        param("ext.ezsdr.exec.native.ping.threshold", json!(0.02)),
+                        param("ext.ezsdr.exec.native.ping.turnaround_ns", json!(turnaround_ns)),
+                        param("ext.ezsdr.exec.native.ping.rearm_samples", json!(100)),
+                        param("ext.ezsdr.exec.native.ping.target", json!(format!("{responder_radio}/tx"))),
+                        param("ext.ezsdr.exec.native.ping.waveform", json!(pong.hash)),
+                        param("ext.ezsdr.exec.native.ping.late_policy", json!(late_policy))
+                    ],
+                    "timing": { "stateful": true },
+                    "requires": { "executor_kind": "ezsdr.exec.native", "memory_bytes": null },
+                    "impl": { "kind": "ezsdr.impl.native", "id": implementation.0, "hash": implementation.1 }
+                }
+            },
+            "links": [{
+                "from": { "component": responder_radio, "port": "rx" },
+                "to": { "component": "responder", "port": "rx" },
+                "policy": "drop_oldest",
+                "capacity": 64
+            }]
+        },
+        "outputs": [{
+            "id": "rec",
+            "kind": "sink.capture",
+            "feed": { "port": { "component": pinger, "port": "rx" }, "policy": "drop_oldest", "capacity": 64 },
+            "params": { "sink.capture_samples": capture }
+        }],
+        "schedule": [{
+            "at": { "clock": pinger, "offset_ticks": offset_ticks },
+            "action": {
+                "kind": "tx_burst",
+                "target": serde_json::to_value(ping_target).expect("resource id serializes"),
+                "waveform": ping,
+                "repeat": false,
+                "late_policy": "send_asap_and_flag",
+                "metadata": {}
+            }
+        }],
+        "policies": {},
+        "extensions": {}
+    })
+}

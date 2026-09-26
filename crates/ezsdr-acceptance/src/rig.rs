@@ -11,7 +11,7 @@ use ezsdr_kernel::contract::ContractRegistry;
 use ezsdr_kernel::coordinator::Assembly;
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
-use ezsdr_kernel::module_api::{Factories, ModuleRef, ModuleRegistry, Provider, Sink, Version};
+use ezsdr_kernel::module_api::{Executor, Factories, ModuleRef, ModuleRegistry, Provider, Sink, Version};
 use ezsdr_kernel::policy::EventKindRegistry;
 use ezsdr_kernel::spec::Ident;
 use ezsdr_kernel::time::ClockRegistry;
@@ -144,6 +144,44 @@ fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path,
     })
 }
 
+/// Builds the BindingProfile of [`crate::experiments::ping_pong`]: one simulated radio per
+/// resource (device ids `dev_<name>`), the recorder on `pinger`'s receive port, the native
+/// Executor `exec` running the Island that holds `responder`, and `environment` (with the
+/// rig's time section). `jitter` turns on the responder radio's block-length jitter.
+pub fn ping_pong_profile(profile: &str, pinger: &str, responder_radio: &str, jitter: bool, dir: &Path, environment: JsonValue) -> JsonValue {
+    let radio = |id: String, jitter: bool| json!({
+        "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 2, "patch": 0 } },
+        "selector": { "id": id, "block_len_jitter": jitter },
+        "profile": { "name": profile, "version": { "major": 1, "minor": 1, "patch": 0 } }
+    });
+    let mut bindings = serde_json::Map::new();
+    bindings.insert(pinger.to_owned(), radio(format!("dev_{pinger}"), false));
+    bindings.insert(responder_radio.to_owned(), radio(format!("dev_{responder_radio}"), jitter));
+    bindings.insert("rec".to_owned(), recorder(dir, None));
+    bindings.insert("exec".to_owned(), json!({
+        "module": { "id": "ezsdr.exec.native", "version": { "major": 1, "minor": 0, "patch": 0 } },
+        "selector": {}
+    }));
+    bindings.insert("sim".to_owned(), json!({
+        "module": { "id": "ezsdr.sim-engine", "version": { "major": 1, "minor": 0, "patch": 0 } },
+        "selector": {}
+    }));
+    json!({
+        "version": 1,
+        "bindings": bindings,
+        "authority": "sim",
+        "placements": {
+            "islands": [{ "id": { "node": 0, "local": 0 }, "executor": "exec", "components": ["responder"] }],
+            "components": { "responder": { "island": "island_0", "memory_domain": { "node": 0, "local": 0 } } },
+            "links": [
+                { "link": link_module(), "from": { "component": pinger, "port": "rx" }, "to": { "component": "rec", "port": "in" } },
+                { "link": link_module(), "from": { "component": responder_radio, "port": "rx" }, "to": { "component": "responder", "port": "rx" } }
+            ]
+        },
+        "environment": env_section(environment)
+    })
+}
+
 /// Builds the four real Modules and Vocabulary registries named by a BindingProfile.
 pub fn assemble(profile_doc: &JsonValue, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Assembly {
     let profile = BindingProfile::from_json(profile_doc).expect("valid acceptance BindingProfile");
@@ -158,12 +196,14 @@ pub fn assemble(profile_doc: &JsonValue, inputs: BTreeMap<ContentHash, Vec<u8>>)
     registry.register(ezsdr_link_host::descriptor(), Factories { link: true, ..Factories::default() }).expect("register host Link");
     registry.register_link_descriptor(ezsdr_link_host::link_descriptor()).expect("register host Link descriptor");
     registry.register(ezsdr_sink_capture::descriptor(), Factories { sink: true, ..Factories::default() }).expect("register capture Sink");
+    registry.register(ezsdr_exec_native::descriptor(), Factories { executor: true, ..Factories::default() }).expect("register native Executor");
 
     let clocks = Arc::new(ClockRegistry::new());
     let authority_binding = profile.bindings.get(&profile.authority).expect("authority binding");
     let authority = Box::new(ezsdr_sim_engine::SimEngine::from_binding(authority_binding, clocks.clone()).expect("build simulation Engine"));
     let mut providers: BTreeMap<Ident, Box<dyn Provider>> = BTreeMap::new();
     let mut sinks: BTreeMap<Ident, Box<dyn Sink>> = BTreeMap::new();
+    let mut executors: BTreeMap<Ident, Box<dyn Executor>> = BTreeMap::new();
     let medium = ezsdr_sim::channel::Medium::new();
     for (name, binding) in &profile.bindings {
         match binding.module.id.as_str() {
@@ -173,6 +213,10 @@ pub fn assemble(profile_doc: &JsonValue, inputs: BTreeMap<ContentHash, Vec<u8>>)
             }
             "ezsdr.sink.capture" => {
                 sinks.insert(name.clone(), Box::new(ezsdr_sink_capture::CaptureSink::from_binding(binding).expect("build capture Sink")));
+            }
+            "ezsdr.exec.native" => {
+                let executor = ezsdr_exec_native::NativeExecutor::new(vec![crate::responder::implementation()]).expect("build native Executor");
+                executors.insert(name.clone(), Box::new(executor));
             }
             _ => {}
         }
@@ -187,7 +231,7 @@ pub fn assemble(profile_doc: &JsonValue, inputs: BTreeMap<ContentHash, Vec<u8>>)
         clocks,
         host_clock: Arc::new(ezsdr_kernel::run::SystemHostClock::new()),
         providers,
-        executors: BTreeMap::new(),
+        executors,
         sinks,
         authority,
         links,

@@ -121,7 +121,7 @@ fn ma_03_no_module_crate_depends_on_another() {
         ("ezsdr-acceptance", BTreeSet::from([
             "ezsdr-kernel", "ezsdr-radio", "ezsdr-sim", "ezsdr-sink", "ezsdr-hostmem",
             "ezsdr-sim-engine", "ezsdr-mock-radio", "ezsdr-link-host", "ezsdr-sink-capture",
-            "serde_json",
+            "ezsdr-exec-native", "serde_json",
         ])),
     ]);
     for package in metadata["packages"].as_array().expect("metadata packages") {
