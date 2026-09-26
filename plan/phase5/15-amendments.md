@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Draft, implemented under the owner's delegation** ([`00-overview.md`](00-overview.md) §11). Its text is applied to `design/` in the commit that implements each amendment (GX-5); this file is the record. |
+| Status | **Accepted at Gate X** (owner, 2026-09-26, as recommended; [`00-overview.md`](00-overview.md) §11). Its text is in `design/`; this file is the record. |
 | Scope | Five Kernel amendments: KE-1 (a Spec lists inputs no schedule entry carries), KE-2 (admission checks a burst's waveform for every origin), KE-3 (a refusal because the Run is ending is not a Module's failure), KE-4 (the two Phase 5 forwards settled), KE-5 (an Executor that applies no Action refuses one; after Review F). |
 | Amends | `design/03-spec-and-binding.md` (SB-9; new SB-20a; §4's `ExperimentSpec`), `design/04-run-and-session.md` (RS-17, RS-44a), `design/05-module-api.md` (MA-14a, MA-19b, MA-24, UC-1, UC-2, MA-30's ceiling), `design/06-kernel-coordinator.md` (§3, KC-9, KC-24, UC-1, UC-2, K11, §13a), `schemas/experiment_spec.v1.json` (`inputs`; the `reactor` value's description) and `schemas/component_descriptor.v1.json` (the `reactor` value's description). |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |

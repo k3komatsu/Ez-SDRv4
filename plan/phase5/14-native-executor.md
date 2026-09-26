@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Draft, implemented under the owner's delegation** ([`00-overview.md`](00-overview.md) §11). Normative for `crates/ezsdr-exec-native` once accepted at Gate X; moves to `design/14-native-executor.md` at Step X. |
+| Status | **Accepted at Gate X** (owner, 2026-09-26, as recommended; [`00-overview.md`](00-overview.md) §11). Normative for `crates/ezsdr-exec-native`; moves to `design/14-native-executor.md` at Step X. |
 | Scope | The Executor Module `ezsdr.exec.native` 1.0.0: its descriptors, how it loads a component by its `impl` identity, `prepare`, the stepping of its components, how it submits their Actions and handles refusals, the Actions addressed to it, `stop` and `cleanup`; and its component ABI (`Component`, `ComponentContext`, `Implementation`). |
 | Not in scope | Components that apply Actions (Phase 10). Threaded execution, RealtimeEmulation and hardware (KC-2; Phase 7 onwards). A component's processing time in virtual time (`00-overview.md` R4; Phase 10). WASM and GPU Executors (Phase 11). Event edges (`00-overview.md` §3). |
 | Crate | `crates/ezsdr-exec-native`, library `ezsdr_exec_native`. Depends on `ezsdr-kernel` and `serde_json`. Dev-dependency: `ezsdr-kernel` with `testing`. |
