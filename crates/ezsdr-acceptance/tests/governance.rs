@@ -105,6 +105,7 @@ fn ma_03_no_module_crate_depends_on_another() {
         "ezsdr-mock-radio",
         "ezsdr-link-host",
         "ezsdr-sink-capture",
+        "ezsdr-exec-native",
     ]);
     let expected_normal = BTreeMap::from([
         ("ezsdr-kernel", BTreeSet::from(["serde", "serde_json", "schemars", "sha2"])),
@@ -116,6 +117,7 @@ fn ma_03_no_module_crate_depends_on_another() {
         ("ezsdr-mock-radio", BTreeSet::from(["ezsdr-kernel", "ezsdr-radio", "ezsdr-sim", "ezsdr-hostmem", "serde", "serde_json"])),
         ("ezsdr-link-host", BTreeSet::from(["ezsdr-kernel"])),
         ("ezsdr-sink-capture", BTreeSet::from(["ezsdr-kernel", "ezsdr-sink", "ezsdr-hostmem", "serde_json"])),
+        ("ezsdr-exec-native", BTreeSet::from(["ezsdr-kernel", "serde_json"])),
         ("ezsdr-acceptance", BTreeSet::from([
             "ezsdr-kernel", "ezsdr-radio", "ezsdr-sim", "ezsdr-sink", "ezsdr-hostmem",
             "ezsdr-sim-engine", "ezsdr-mock-radio", "ezsdr-link-host", "ezsdr-sink-capture",
@@ -176,6 +178,7 @@ fn po_11_no_hashmap_and_no_wall_clock_in_simulation_code() {
         "ezsdr-sim-engine",
         "ezsdr-sink",
         "ezsdr-sink-capture",
+        "ezsdr-exec-native",
     ];
     let mut source_roots: Vec<PathBuf> = new_crates
         .iter()

@@ -10,6 +10,7 @@ members = [
     "crates/ezsdr-mock-radio",
     "crates/ezsdr-link-host",
     "crates/ezsdr-sink-capture",
+    "crates/ezsdr-exec-native",
     "crates/ezsdr-acceptance",
 ]
 

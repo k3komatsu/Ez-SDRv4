@@ -75,6 +75,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ezsdr-exec-native"
+version = "1.0.0"
+dependencies = [
+ "ezsdr-kernel",
+ "serde_json",
+]
+
+[[package]]
 name = "ezsdr-hostmem"
 version = "1.0.0"
 dependencies = [

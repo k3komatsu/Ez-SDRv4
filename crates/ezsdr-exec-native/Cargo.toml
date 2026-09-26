@@ -1,0 +1,15 @@
+[package]
+name = "ezsdr-exec-native"
+version = "1.0.0"
+description = "Ez-SDR v4 Module ezsdr.exec.native 1.0.0: the step-driven in-process Executor (plan/phase5/14-native-executor.md)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ezsdr-kernel = { path = "../ezsdr-kernel" }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+ezsdr-kernel = { path = "../ezsdr-kernel", features = ["testing"] }
