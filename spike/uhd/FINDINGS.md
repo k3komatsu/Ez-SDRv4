@@ -1,0 +1,60 @@
+# UHD spike の発見（暫定：実機前）
+
+2026-09-26．branch `spike/uhd`．実機（X310+UBX，USRP2）での確認前に，wall-clock の fake device で Kernel の経路を端から端まで通した時点の記録．実機の結果は末尾の表に追記し，確定版を `main` の `plan/spikes/` に移す．
+
+**判定の書き方**：VERIFIED = fake device 上の実行で再現を確認（Kernel 側の性質なので実機に依存しない），INFERRED = 実機でしか確かめられない予想．
+
+## 変えずに通ったもの
+
+Spec はすべて acceptance crate の実験文書（`experiments::receive` / `transmit` / `with_timed_capture`）で，変えたのは周波数と利得だけ．Session の Action も v57/v61 の Mock テストと同じ．BindingProfile を差し替えただけで次が動いた（VERIFIED）．
+
+- validate・admission・matching（Mock の resource tree をそのまま使用）
+- MA-41 の class 導出：`Pacing::Device` + `ezsdr.rf_path: cabled` → `HardwareInLoop`．`ezsdr.time.class` との照合も
+- device root 上での T0 = now + start_lead（KC-15）と，KC-16 による schedule の解決（device tick 単位）
+- SC-23b による TX target の変換
+- capture Sink，host Link，continuity．overflow は `overflow_restart` の gap として lost 数つきで記録された
+- `BurstTracker` の burst 記録（wraps の数え方も Mock と同じ）
+- policy 経由の event（`MarkArtifact`），fidelity を `real` にした Manifest の組み立て
+- Session：開始，時刻指定の capture（v61_02 相当），`start_repeat` + `capture`（§57 相当）
+
+Kernel surface gate は，Kernel のコメントに入れた `uhd` という語まで検出した（gate は機能している）．
+
+## Kernel を変えた箇所（1 か所）
+
+| # | 内容 | 変更 |
+|---|---|---|
+| K1 | KC-2 は plan の後で Simulation 以外の class をすべて拒否する．device-paced の class を通すようにした（RealtimeEmulation は引き続き拒否）．**既存テストは全て通過**：KC-2 のテストは `kc_02_a_wall_paced_authority_is_refused` だけで，`Device` pacing の拒否を固定するテストがない | `crates/ezsdr-kernel/src/coordinator/pipeline.rs` の 1 行 |
+
+## Kernel を変えずに Provider 側で回避したもの（設計の問い）
+
+| # | 発見 | 証拠 | 回避 | 誰が決めるか |
+|---|---|---|---|---|
+| K2 | **Authority の agenda が空になると Spec Run が完了する**（`run_loop` は `next_wakeup` が `None` なら `Completed`）．step されない Provider はデータを出していても agenda に現れない | VERIFIED：rx thread がブロックごとに wakeup を予約する方式では，Authority との競合で 1 ブロック目の直後に `completed` になった | 自分で次を予約し直す heartbeat callback．callback は `next_wakeup` の中で実行されるので，予約が途切れない | Phase 4/7：device-paced な Run の「終わり」をどう定義するか |
+| K3 | **TX と RX の sample grid がずれる**．TX の SampleClock は arm 時刻を起点にし（MR-9 の規則），RX は T0 を起点にする．実機ではこの 2 つの差が ratio で割り切れず，「T0 + n sample」の burst は TX grid に切り上げられて（SC-23b），RX sample n から 1 sample 未満遅れる | VERIFIED：200 MHz / 1 Msps で 83 tick = 415 ns のずれ．Mock では virtual T0 − arm が ratio で割り切れる区切りのよい値なので現れない | RX の起点を TX grid に揃える（T0 から最大 1 sample 未満後ろにずれる） | Kernel：T0 と TX の起点を共通 grid に載せる必要がある．ただし TX clock は admission（start より前）で必要になるので，順序の問題がある |
+| K4 | **Provider 役を兼ねる Module を Authority 用に別 binding で束縛すると，Session だけが失敗する**（"SB-22f: no Provider instance for binding clock"）．implicit Spec が Provider 役を持つ binding をすべて resource にするため．Spec Run では通る | VERIFIED | 1 つの binding を Provider と Authority の両方にする（Kernel 自身の coordinator テストも `"authority": "radio"` でこうしている） | 文書化：一貫しない挙動が暗黙のまま |
+| K5 | **Session の admission が，step されない Provider の状態変化を待たない**．`submit` は同期的に 1 回 `round` を回し，Mock はそこで `SetParameter(tx.channels=1)` を適用して TX SampleClock を登録する．hardware Provider は自分の thread で処理するので，直後の `start_repeat` が "SC-23: usrp/tx has no running transmit SampleClock" で拒否される | VERIFIED：競合次第で拒否される（fake のテストでは拒否，CLI では通過） | 次の Action の前に `advance_to(+20 ms)` で待つ | Kernel：cold change を control path で同期適用するか，admission を後回しにする契約が要る |
+| K6 | **RS-19 の asap（admission 時の now + min_command_lead）を，Provider が受け取る時点ではもう使い切っている**．min_command_lead は「Action を受け取ってからの lead」と定義されているのに，Kernel は admission から数えている | VERIFIED：untimed な Session TX がすべて `TIME_ERROR send_asap` になる（fake では 2 ms 中 1.83 ms 遅れ） | なし（記録のみ） | Kernel / Radio Model：lead の起点と，配送遅延の見積もり |
+| K7 | `ActionReceiver` は pull のみ（MA-14）．step されない Provider は poll するしかない（ここでは 1 ms 間隔）．K6 の遅延の一部になる | 観察 | poll | Kernel：通知 hook が要るか |
+| K8 | **coordinator が Sink を step するのは client が `advance_to` / `run_until_end` / `submit` を呼んでいる間だけ**．device は常にデータを出すので，client が呼んでいない間（`provider.stop()` が止まっている cleanup 中を含む）は Link が溢れる | VERIFIED：overflow の Run で capture 後に `link_drops_seen: 298` | なし | Phase 6（Python）より前に：hardware Run には client に頼らない coordinator 自身の loop が要る |
+
+## その他の観察
+
+- **K9** RS-8a は cleanup の step を 5 s で打ち切る．この spike で TX thread が deadlock したとき，Manifest から Provider の section が丸ごと消えた（KC-44 "instance still held by an abandoned cleanup step"）．保護は設計どおり動いたが，hardware の記録は全部失われる．
+- **K10** Provider の thread からの event は `emit_control`（control path 用と文書化されている）で出している．collector が Mutex なので動くが，hardware Provider では hot path / control path の区別が意味を持たない．
+- **K11** `TimeErrorPayload` の outcome（send_asap / drop / plan_violation / refused）では，「Provider が受け付けた burst を device が捨てた」（UHD async の TIME_ERROR）を表せない．refused に割り当てた．`TX_UNDERFLOW` には payload 型がない．
+- **K12** TM-16c の「callback の中では now() が fire time に等しい」は，device-paced な Authority では成り立たない（device の時刻は進み続ける）．host.monotonic と device root の対応は Authority が持つ anchor で決めた（Simulation Engine は host.monotonic の tick を root の tick と同一視している）．
+- **K13** MA-11（coerce は pure で hardware 不要）の結果，この repository で X310 を静的に記述しているのは Mock profile だけ．spike は MockRadio の tree と coerce を借り，Mock の非公開の defaults を写した．device が実際に適用した値は claim と並べて記録するが，`PrepareReport.effective` は claim を報告する（MA-12 が coercions の一致を要求するため）．device が別の値を適用すると，Manifest の effective 設定は device の実際と食い違う．予想：周波数に 0 でない `diff_hz` が出る（DSP の分解能 mcr/2^32 ≈ 0.047 Hz）— INFERRED．
+
+## 実機で埋める表
+
+| 項目 | コマンド | Mock / 予想 | X310+UBX | USRP2 |
+|---|---|---|---|---|
+| FFI・発見 | `find`, `probe` | — | | |
+| T0 に開始（first_rx_block.k） | `rx` | 0 | | |
+| capture の開始 sample | `rx`, `session-rx` | 要求どおり | | |
+| coercion の claim と device の差（rate / freq / gain） | `rx` | rate・gain は一致，freq は差あり（INFERRED） | | |
+| overflow の gap・flag・restart_gap | `overflow` | Mock x310-like：50 ms | | |
+| TX→RX 遅延（sample） | `txrx` | x310-like：45（INFERRED） | | |
+| repeat の wrap と underflow | `repeat` | 途切れなし | | |
+| 開始 lead の device 下限 | `leads` | x310-like：start 2 s（MR-11），命令 2 ms | | |
+| §57 Session の TIME_ERROR（K6） | `loopback` | fake：send_asap | | |

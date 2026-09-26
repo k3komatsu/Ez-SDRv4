@@ -1,0 +1,24 @@
+# Throwaway spike: how far the Phase 1–3 Kernel carries a real USRP.
+# Its own workspace, so the main workspace builds without libuhd and its
+# governance tests (PO-2: every crate forbids unsafe code) are untouched.
+[workspace]
+
+[package]
+name = "ezsdr-uhd-spike"
+version = "0.1.0"
+description = "Spike: a UHD Provider and device-paced Authority against the Phase 3 Kernel (not for main)"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[dependencies]
+ezsdr-kernel = { path = "../../crates/ezsdr-kernel" }
+ezsdr-radio = { path = "../../crates/ezsdr-radio" }
+ezsdr-sink = { path = "../../crates/ezsdr-sink" }
+ezsdr-hostmem = { path = "../../crates/ezsdr-hostmem" }
+ezsdr-mock-radio = { path = "../../crates/ezsdr-mock-radio" }
+ezsdr-link-host = { path = "../../crates/ezsdr-link-host" }
+ezsdr-sink-capture = { path = "../../crates/ezsdr-sink-capture" }
+ezsdr-acceptance = { path = "../../crates/ezsdr-acceptance" }
+serde_json = "1.0.151"
