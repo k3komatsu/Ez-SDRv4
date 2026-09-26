@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ezsdr"
 version = "0.1.0"
-description = "Ez-SDR v4 Easy API: a client of ezsdr-server (plan/phase6/16-easy-api.md)"
+description = "Ez-SDR v4 Easy API: a client of ezsdr-server (design/16-easy-api.md)"
 requires-python = ">=3.9"
 dependencies = ["numpy"]
 license = { text = "MIT" }

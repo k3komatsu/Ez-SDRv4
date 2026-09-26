@@ -2,12 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Status | **Planned and implemented under the owner's delegation** (2026-09-26: "それではPhase4/5と同じ用にPhase6も設計と実装をしてください"); there is no separate Gate P. Reviewed by an Opus review loop (§9): Review H and Review I, the re-review of its fixes; every finding fixed with tests and mutations. **Accepted at Gate X** (owner, 2026-09-27, every decision as recommended; §11). |
+| Status | **Planned and implemented under the owner's delegation** (2026-09-26: "それではPhase4/5と同じ用にPhase6も設計と実装をしてください"); there is no separate Gate P. Reviewed by an Opus review loop (§9): Review H and Review I, the re-review of its fixes; every finding fixed with tests and mutations. **Accepted at Gate X** (owner, 2026-09-27, every decision as recommended; §11); **Step X done** (spec 16 moved to `design/`, three Vision issues applied). Phase 6 is complete. |
 | Phase | Vision §67 Phase 6: "Python Easy API". Predecessor: Phase 5 (Mini Reactive Radio; accepted at Gate X 2026-09-26). Successor: Phase 7 (native UHD Provider). |
 | Scope | Vision §3's and §57's snippets, run from Python entirely in software: `with ezsdr.connect() as sdr: sdr.tx.repeat(x); y = sdr.rx.capture(N)` yields `y` and a Session Manifest with the action log, the waveform hash, the capture's first sample time and validity, and the effective configuration. §54's `result = sdr.run(spec)` as a child Run. The three Kernel holes the prototype hit (§2), and the Phase 6 items earlier phases left open (§8). |
 | Not in scope | §3 lists it. In one line: no remote transport, no Session replay, no artifact store, no Spec builder, no CLI or MCP frontend, no hardware pacing. |
 | Language | English, like Phases 1–5. |
-| Location | Spec 16, [`16-easy-api.md`](16-easy-api.md), is the new frontend's spec (the server, its protocol and the Python package); it moves to `design/` at Step X, as specs 11 and 14 did. Spec 17, [`17-amendments.md`](17-amendments.md), holds the Kernel and Vocabulary amendments; their text reaches `design/` in the commit that implements them (GY-5), and the file stays here as the record. |
+| Location | Spec 16, the new frontend's spec (the server, its protocol and the Python package), was drafted here and moved to [`design/16-easy-api.md`](../../design/16-easy-api.md) at Step X, as specs 11 and 14 were. Spec 17, [`17-amendments.md`](17-amendments.md), holds the Kernel and Vocabulary amendments; their text reaches `design/` in the commit that implements them (GY-5), and the file stays here as the record. |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
 
 Documents:
@@ -15,7 +15,7 @@ Documents:
 ```text
 plan/phase6/
   00-overview.md           this file: scope, holes, decisions, crates, governance, traceability, sequencing, exit criteria, decision log
-  16-easy-api.md           spec 16: the server ezsdr-server, the protocol ezsdr.protocol 1, the Python package ezsdr (EA-1…EA-19)
+  (spec 16, the server ezsdr-server, the protocol ezsdr.protocol 1 and the Python package ezsdr, EA-1…EA-19, is design/16-easy-api.md since Step X)
   17-amendments.md         spec 17: Kernel amendments KF-1…KF-4 and the Vocabulary amendment VD-1
   implementation-notes.md  what was run, what the reviews found, what was fixed
   exit-review/             per-rule dispositions (PO-10)
@@ -200,3 +200,4 @@ OV-1…OV-23b, PO-1…PO-12, GV-1…GV-6, GW-1…GW-5 and GX-1…GX-6 bind Phase
 | Review H: every P0, P1 and P2 fixed or answered (`implementation-notes.md`, "Review H") | — | **closed** | 2026-09-26; the fixes change behaviour in the Kernel, the Sink, the server and the Python package, so Review I re-reviews them (the owner's rule) |
 | Review I (re-review): Review H's P0-2 was not closed (a capture routed by another path took a number the client did not count); it and every P1 and P2 fixed with tests and mutations (`implementation-notes.md`, "Review I"); no further review, the fixes being small, each tested and mutation-guarded | — | **closed** | 2026-09-26, the owner's rule for small, low-risk fixes |
 | S1–S11, A1–A8, specs 16 and 17 (exit criterion 1) | X | **accepted** | owner, 2026-09-27, as recommended ("すべて推奨で受理します") |
+| Step X: spec 16 moved to `design/16-easy-api.md`; three Vision issues applied (the fourth not needed) | X | **done** | 2026-09-27: §§3, 15, 62 and a revision-history row ([vision-issues.md](vision-issues.md)) |

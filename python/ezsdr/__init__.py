@@ -1,4 +1,4 @@
-"""Ez-SDR v4 Easy API (plan/phase6/16-easy-api.md).
+"""Ez-SDR v4 Easy API (design/16-easy-api.md).
 
     import ezsdr
 

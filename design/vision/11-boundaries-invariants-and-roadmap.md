@@ -32,6 +32,9 @@ The RF safety envelope of the BindingProfile (§52) is a trust boundary too: it 
 in-process (Rust traits)         Radio Providers (UHD, Soapy, Mock), Executors (native, WASM, GPU),
                                  Links, Sinks: the sample path never crosses an IPC boundary
 out-of-process (typed protocol)  Peripheral Plugins (vendor SDKs), the privileged host-I/O helper (§41)
+out-of-process (typed protocol)  clients: Python, and later CLI and MCP, through ezsdr-server
+                                 (design/16-easy-api.md); a client's waveforms and captures cross
+                                 as bytes, and the sample path between Modules stays in process
 ```
 
 Rust has no stable ABI, so a dynamically loaded in-process Module is either compiled with the Runtime or exposed through a C-ABI layer; the default is compiled-in. A DataLink crosses a process boundary only through an implementation that can do so without copying, such as shared memory or DMA. Because buffers are handles (§23), a remote Radio Provider that speaks the same contract over shared memory can be added later without changing the contract (§35).

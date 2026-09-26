@@ -1,7 +1,7 @@
 [package]
 name = "ezsdr-server"
 version = "0.1.0"
-description = "Ez-SDR v4 server: runs one Session for a client over the protocol ezsdr.protocol 1 (plan/phase6/16-easy-api.md)"
+description = "Ez-SDR v4 server: runs one Session for a client over the protocol ezsdr.protocol 1 (design/16-easy-api.md)"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

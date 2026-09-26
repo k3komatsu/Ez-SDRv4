@@ -154,7 +154,7 @@ Normative: [design/01-time-model.md](../01-time-model.md), rules TM-16a…TM-17b
 Three consequences:
 
 - The Simulation Environment (§13) *is* a discrete-event engine, the **Simulation Engine**. MockRadio and MockPeripheral are models scheduled on it, and the SimulationChannel is the medium the radios read (§16); each target Provider reads its applicable entries from the `sim.faults` environment document (§17). Determinism with a seed follows from delivering events in virtual-time order, not from threads happening to agree.
-- **No client API waits on wall-clock time for something that happens in runtime time.** Python has `run.wait_until(t)` and `run.wait_for(event)`; it does not have a device-time `sleep`. A `time.sleep(0.5)` in a script means nothing in a Run that simulates ten seconds in 0.3 seconds.
+- **No client API waits on wall-clock time for something that happens in runtime time.** Python has `run.wait_until(t)` and `run.wait_for(event)` ([design/06-kernel-coordinator.md](../06-kernel-coordinator.md), KC-29 and KC-29b); it does not have a device-time `sleep`. A `time.sleep(0.5)` in a script means nothing in a Run that simulates ten seconds in 0.3 seconds.
 - Every stepped instance implements `step(until: TimePoint)`. The Kernel coordinator runs the stepping loop in a fixed order on one logical thread, and the Authority decides the instants; RealtimeEmulation, HIL and Hardware run Islands on real threads (§32; [design/05-module-api.md](../05-module-api.md), MA-20, MA-30).
 
 ---

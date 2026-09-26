@@ -2,10 +2,10 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted at Gate X** (owner, 2026-09-27, as recommended; [`00-overview.md`](00-overview.md) §11). Moves to `design/16-easy-api.md` at Step X. |
+| Status | Accepted at Gate X (owner, 2026-09-27, as recommended; [`plan/phase6/00-overview.md`](../plan/phase6/00-overview.md) §11) and moved here at Step X. Normative for `crates/ezsdr-server` and `python/ezsdr`. Its record — the prototype, the reviews and the mutations — stays in [`plan/phase6/`](../plan/phase6/). |
 | Scope | The frontend that makes Vision §3's Easy API real: the server `ezsdr-server` 0.1.0 (a Rust binary that compiles the Modules in and runs one Session), the protocol `ezsdr.protocol` 1 between a client and the server, and the Python package `ezsdr` 0.1.0. |
-| Not in scope | A remote listener, server-owned profiles and authentication (Phase 7); Session replay; a Spec builder; a CLI or MCP client ([`00-overview.md`](00-overview.md) §3). |
-| Depends on | Specs 01–11 and 14 as amended; spec 17 (KF-1 `events`, KF-2 `wait_for`, KF-3 `run_child`, VD-1 `sink.CAPTURE_WRITTEN`). |
+| Not in scope | A remote listener, server-owned profiles and authentication (Phase 7); Session replay; a Spec builder; a CLI or MCP client ([`plan/phase6/00-overview.md`](../plan/phase6/00-overview.md) §3). |
+| Depends on | Specs 01–11 and 14 as amended; spec 17 ([`plan/phase6/17-amendments.md`](../plan/phase6/17-amendments.md)) (KF-1 `events`, KF-2 `wait_for`, KF-3 `run_child`, VD-1 `sink.CAPTURE_WRITTEN`). |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
 
 Rules are `EA-n`; decisions are `A1`…`A8` (§6).
@@ -14,7 +14,7 @@ Rules are `EA-n`; decisions are `A1`…`A8` (§6).
 
 ## 1. The three parts
 
-- **EA-1** The Easy API has three parts. The **server** `ezsdr-server` (crate `crates/ezsdr-server`) is the Runtime: it compiles the Modules in (Vision §62), builds each Run's `Assembly`, and drives one Session through the Kernel's `RunHandle`. The **protocol** `ezsdr.protocol` 1 carries the Kernel's own documents — `SessionAction`, `LogEntry`, `Event`, `Manifest`, `TimePoint`, `Lease`, BindingProfile and ExperimentSpec documents — between a client and the server. The **Python package** `ezsdr` (directory `python/`) is a client: it spawns the server, names Radio Model keys in Python terms and composes a capture from protocol requests. The Python package holds no Run semantics: every change it asks for is a `SessionAction` the Kernel admits and logs, and every advance of time is the server's (Vision §3: "nothing bypasses the log"). *Checked by the Python carriers of [`00-overview.md`](00-overview.md) §8, all of which read the logged entries back.*
+- **EA-1** The Easy API has three parts. The **server** `ezsdr-server` (crate `crates/ezsdr-server`) is the Runtime: it compiles the Modules in (Vision §62), builds each Run's `Assembly`, and drives one Session through the Kernel's `RunHandle`. The **protocol** `ezsdr.protocol` 1 carries the Kernel's own documents — `SessionAction`, `LogEntry`, `Event`, `Manifest`, `TimePoint`, `Lease`, BindingProfile and ExperimentSpec documents — between a client and the server. The **Python package** `ezsdr` (directory `python/`) is a client: it spawns the server, names Radio Model keys in Python terms and composes a capture from protocol requests. The Python package holds no Run semantics: every change it asks for is a `SessionAction` the Kernel admits and logs, and every advance of time is the server's (Vision §3: "nothing bypasses the log"). *Checked by the Python carriers of [`plan/phase6/00-overview.md`](../plan/phase6/00-overview.md) §8, all of which read the logged entries back.*
 
 ## 2. The protocol
 
@@ -122,7 +122,7 @@ Rules are `EA-n`; decisions are `A1`…`A8` (§6).
 | `ea_10_a_run_that_ends_on_its_way_to_t0_writes_its_manifest` (Review H) | a `device_lost` fault at instant 0 | `ended` with the Policy's termination, exit, the written Manifest | EA-10 |
 | `ea_14_refusals_before_a_child_runs` (Review H) | input sizes that overflow; that do not add up; a Spec whose only `Stop` targets a stream, with no duration; a duration that does not fit the clock | `protocol`, `protocol`, `refused`, `refused`; nothing logged | EA-14 |
 | `ea_binary_speaks_the_protocol` (server) | the built binary, spawned | `hello`, `connect`, `finish` over its standard streams; exit status 0 | EA-2, EA-8, EA-15 |
-| Python carriers | [`00-overview.md`](00-overview.md) §8 | as listed there | EA-1, EA-16…EA-19 |
+| Python carriers | [`plan/phase6/00-overview.md`](../plan/phase6/00-overview.md) §8 | as listed there | EA-1, EA-16…EA-19 |
 | `test_ea_17_each_capture_gets_its_own_samples` (Review H, I) | two captures in a row; one after a capture that timed out; after a raw `sink.capture` of 777; after one targeting `radio/rx`; after a `SetParameter` of `sink.capture_samples` on `sink/rec`; after a capture the Kernel rejects | 100 samples each time after the first two | EA-17 |
 | `test_ea_17_a_capture_keeps_its_first_deadline` (Review I) | a raw 10 000-sample request, then `capture(5000, timeout=0.012)` | `CaptureTimeout`, though the raw request's announcement came inside the timeout | EA-17 |
 | `test_ea_17_a_capture_across_a_gap_is_refused` (Review I) | an `rx_overflow` fault during the capture | `Error` naming the gap | EA-17 |

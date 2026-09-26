@@ -1,6 +1,6 @@
 # Phase 6 — implementation notes
 
-What was run, in order, and what it showed. The plan is [`00-overview.md`](00-overview.md); spec 16 is [`16-easy-api.md`](16-easy-api.md) and spec 17 is [`17-amendments.md`](17-amendments.md).
+What was run, in order, and what it showed. The plan is [`00-overview.md`](00-overview.md); spec 16 is [`design/16-easy-api.md`](../../design/16-easy-api.md) and spec 17 is [`17-amendments.md`](17-amendments.md).
 
 ## Baseline (2026-09-26, `d977ad8`)
 

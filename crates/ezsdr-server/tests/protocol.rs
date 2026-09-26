@@ -1,4 +1,4 @@
-//! Spec 16's server tests (plan/phase6/16-easy-api.md §5).
+//! Spec 16's server tests (design/16-easy-api.md §5).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};

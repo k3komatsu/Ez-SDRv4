@@ -1,5 +1,5 @@
 //! Ez-SDR v4 server `ezsdr-server` 0.1.0: the Runtime a client drives over
-//! `ezsdr.protocol` 1 (plan/phase6/16-easy-api.md).
+//! `ezsdr.protocol` 1 (design/16-easy-api.md).
 //!
 //! It compiles the Modules in (EA-7), runs one Session through the Kernel's
 //! `RunHandle` and answers one request at a time. It is a frontend, not a Module: it
