@@ -367,7 +367,9 @@ impl RunHandle {
         let plan_class = plan.class;
         let routing = build_routing(plan, self.admission.matched.clone(), &self.shared);
         let _ = self.shared.routing.set(routing);
-        if plan_class != ExecutionClass::Simulation {
+        // SPIKE (hardware spike branch, finding K1): KC-2 refused every class but Simulation. The
+        // device-paced classes are let through; RealtimeEmulation still has no Authority.
+        if plan_class == ExecutionClass::RealtimeEmulation {
             self.fail(
                 Stage::Plan,
                 format!(
