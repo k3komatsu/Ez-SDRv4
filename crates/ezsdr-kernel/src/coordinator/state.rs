@@ -143,6 +143,9 @@ pub(super) struct Shared {
     pub(super) closing: AtomicBool,
     pub(super) scheduled: Mutex<Vec<ScheduleHandle>>,
     pub(super) cleanup_failures: Mutex<Vec<CleanupFailure>>,
+    /// The Run's input store (KC-9, KC-28), here rather than in the `RunHandle` because
+    /// admission reads it for a Module's burst too, from inside a round (KE-2).
+    pub(super) store: Arc<Mutex<BTreeMap<crate::hash::ContentHash, Arc<[u8]>>>>,
 }
 
 /// Poison-tolerant lock (§0.6 rule 7).

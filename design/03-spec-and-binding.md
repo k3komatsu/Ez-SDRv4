@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted 2026-09-23 (Gate B; Phase 1 Step 5). Normative for `ezsdr-kernel::{spec, binding, plan}`. Amended in Phase 2 by KA-4, KA-5, KA-7, KA-8, KA-14. |
+| Status | Accepted 2026-09-23 (Gate B; Phase 1 Step 5). Normative for `ezsdr-kernel::{spec, binding, plan}`. Amended in Phase 2 by KA-4, KA-5, KA-7, KA-8, KA-14. Amended in Phase 5 by KE-1 (SB-9, SB-20a; [`plan/phase5/15-amendments.md`](../plan/phase5/15-amendments.md)). |
 | Scope | The identifier, key, value and constraint model; the ExperimentSpec envelope; the BindingProfile with its bindings, placements and environment; the admission-check hook through which a Vocabulary enforces something like an RF envelope; composite resource resolution and binding; the compile pipeline from `validate` to `arm`; the PrepareReport and the coercion policy; document versioning. |
 | Not in scope | Radio Model keys and the fields of `rf_envelope` (Vocabulary, Phase 2); the simulation `environment` sections (Phases 2 and 3); the Run state machine, Actions, Lease, Policy and the Manifest (spec 04); the role traits and `ComponentDescriptor` (spec 05); the Python builder (Phase 6). |
 | Vision § covered | §8; §9; §10; §11; §20's placement rules; §31's three-part admission; §33's profiles as hints; §52 including the RF safety envelope. |
@@ -66,6 +66,7 @@ KeyDecl          { key: Key, kind: bool|int|num|str|list|map, coercible: bool,
 ExperimentSpec   { version: 1,
                    requirements: { vocabularies: [{ id: Namespace, major: int }] },
                    resources: Map<Ident, ResourceReq>,
+                   inputs: [ArtifactRef],                           SB-20a; absent means empty
                    graph: { components: Map<Ident, ComponentDescriptor>, links: [LinkReq] },
                    schedule: [{ at: SpecTime, action: ActionTemplate }],
                    outputs: [OutputReq],
@@ -154,7 +155,7 @@ SpecError        UnsupportedVersion { found, supported } | UnknownField { path }
 
 ### ExperimentSpec
 
-- **SB-9** The top level of an ExperimentSpec is the closed set `version, requirements, resources, graph, schedule, outputs, policies, extensions`. An unknown **top-level** field is `UnknownField { path }`, not a warning. v3's configuration accreted keys nobody removed; a closed envelope with a namespaced `extensions` map is how a document stays extensible without becoming unbounded. The rule applies at **every object** of every Kernel document, not only its top level: every document type refuses an unknown key (its schema says `additionalProperties: false`). Extension content lives only in the namespaced maps the Kernel names (`extensions`, `selector`, `environment`, `sections`, `Fragment.content`, `ModuleError.detail`); it never adds a key beside a Kernel field. Below the top level the rule is enforced at parse and surfaces as `Structural` whose `reason` is prefixed `SB-9:` (`SB-21:` for a profile) and names the key, e.g. ``SB-9: unknown field `memory_domain` ``; a dotted path is not promised for a nested key in v4.0 (D84). *Checked by `sb_09_unknown_top_level_field_refused` and `sb_09_an_unknown_nested_field_is_refused` (D73).*
+- **SB-9** The top level of an ExperimentSpec is the closed set `version, requirements, resources, inputs, graph, schedule, outputs, policies, extensions` (`inputs` since Phase 5, KE-1). An unknown **top-level** field is `UnknownField { path }`, not a warning. v3's configuration accreted keys nobody removed; a closed envelope with a namespaced `extensions` map is how a document stays extensible without becoming unbounded. The rule applies at **every object** of every Kernel document, not only its top level: every document type refuses an unknown key (its schema says `additionalProperties: false`). Extension content lives only in the namespaced maps the Kernel names (`extensions`, `selector`, `environment`, `sections`, `Fragment.content`, `ModuleError.detail`); it never adds a key beside a Kernel field. Below the top level the rule is enforced at parse and surfaces as `Structural` whose `reason` is prefixed `SB-9:` (`SB-21:` for a profile) and names the key, e.g. ``SB-9: unknown field `memory_domain` ``; a dotted path is not promised for a nested key in v4.0 (D84). *Checked by `sb_09_unknown_top_level_field_refused` and `sb_09_an_unknown_nested_field_is_refused` (D73).*
 - **SB-10** `version` is a positive integer and is mandatory. Phase 1 supports exactly `{1}`.
 - **SB-11** `requirements.vocabularies` lists the Vocabulary majors this Spec's keys belong to. It is the only content of `requirements`; the per-resource requirements live in `resources[].requires`. Vision §9's tree lists both, which reads as an overlap; this is the division that makes SB-2's prefix check possible.
 - **SB-12** A `ResourceReq` states `kind` and `requires` and nothing about how the requirement is met. Per Vision §8 and re-review R1, direction-asymmetric requests are expressed as distinct keys under the Vocabulary's prefix — `radio.rx.channels`, `radio.tx.channels`, `radio.rx.coherent` — not as a single count. The Kernel does not know that `rx` means anything; the flattening is what keeps it generic while still expressing the asymmetry R1 required.
@@ -168,6 +169,7 @@ SpecError        UnsupportedVersion { found, supported } | UnknownField { path }
 - **SB-18** `policies.failure` maps registered event kinds to reactions (spec 04). An unregistered kind is refused at `validate()`, so a misspelling is an error rather than a silently ineffective entry.
 - **SB-19** `policies.coercion` sets a policy per key. SB-45 gives the resolution order.
 - **SB-20** `extensions` is a map from a `Namespace` to opaque content. The Kernel copies it into the Manifest and never interprets it.
+- **SB-20a** `inputs` lists artifacts the Run consumes that no schedule entry carries — the waveform a Reactor transmits, for example. Each is an `ArtifactRef`, which KC-9 verifies exactly as it verifies a scheduled waveform and whose bytes join the Run's input store, where a Module reads them by hash (MA-5a) and may name them in an Action (RS-44a). The Kernel reads nothing else about an input: which component uses it, and how, is that component's parameters' business (MA-36). Absent means empty (Phase 5, KE-1). *Checked by `ke_01_a_declared_input_is_stored_and_recorded`, `ke_01_a_declared_input_is_verified_as_a_scheduled_one_is` and `sb_09_inputs_is_a_top_level_field`.*
 
 ### BindingProfile
 

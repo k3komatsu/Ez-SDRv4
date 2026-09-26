@@ -1443,6 +1443,14 @@
       },
       "description": "Components and links (SB-15)."
     },
+    "inputs": {
+      "default": [],
+      "description": "Artifacts the Run consumes that no schedule entry carries, such as the waveform a\nReactor transmits: each is verified and stored like a scheduled waveform, so a\nModule can read it and name it in an Action (SB-20a, KC-9; Phase 5, KE-1).",
+      "items": {
+        "$ref": "#/$defs/ArtifactRef"
+      },
+      "type": "array"
+    },
     "outputs": {
       "default": [],
       "description": "The artifacts the Run must produce (SB-17).",

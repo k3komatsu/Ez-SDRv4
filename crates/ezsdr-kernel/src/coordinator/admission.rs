@@ -64,6 +64,7 @@ pub(super) fn admit_with(
     let mut coercions = incoming.to_vec();
     if let Action::TxBurst {
         target,
+        waveform,
         at,
         requested_at,
         late_policy,
@@ -103,6 +104,29 @@ pub(super) fn admit_with(
             Err(error) => {
                 return Err(vec![violation("ezsdr.target", format!("SC-23b: {error}"))]);
             }
+        }
+        // RS-44a: a burst's waveform is an input of this Run. KC-9 and KC-28 make that
+        // true for the schedule and a Session before admission; nothing did for a
+        // Module's burst, which reached its Provider naming bytes nobody holds (KE-2).
+        match crate::module_api::InputStore::get(&*shared.store, &waveform.hash) {
+            None => {
+                return Err(vec![violation(
+                    "ezsdr.input",
+                    format!("RS-44a: {} is not an input of this Run", waveform.hash),
+                )]);
+            }
+            Some(bytes) if bytes.len() as u64 != waveform.size_bytes => {
+                return Err(vec![violation(
+                    "ezsdr.input",
+                    format!(
+                        "RS-44a: input {} holds {} bytes, and the burst declares {}",
+                        waveform.hash,
+                        bytes.len(),
+                        waveform.size_bytes
+                    ),
+                )]);
+            }
+            Some(_) => {}
         }
     }
     if origin != Origin::Module {

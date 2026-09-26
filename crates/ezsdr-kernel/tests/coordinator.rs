@@ -3234,3 +3234,114 @@ fn kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides(
     sources.dedup();
     assert_eq!(sources.len(), 2, "one DEVICE_LOST per device: {sources:?}");
 }
+
+// ---------------------------------------------------------------- Phase 5 amendments (KE)
+
+/// A Spec Run whose test Executor submits one `TxBurst` of `burst` to `radio/tx` on its
+/// first step, with `listed` as the Spec's `inputs` and `stored` in `Assembly.inputs`.
+fn ke_run(
+    listed: &[ezsdr_kernel::manifest::ArtifactRef],
+    burst: ezsdr_kernel::manifest::ArtifactRef,
+    stored: Option<Vec<u8>>,
+) -> (Probe, ezsdr_kernel::manifest::Manifest) {
+    let (mut spec, profile) = executor_docs();
+    spec["inputs"] = serde_json::to_value(listed).unwrap();
+    let probe = Probe::new();
+    let root = rig(Pacing::FreeRunning).root;
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(
+            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
+                .declaring("radio/tx", 1, 1)
+                .registering_at_arm("radio/tx"),
+        ),
+    );
+    if let Some(bytes) = stored {
+        assembly.inputs.insert(burst.hash.clone(), bytes);
+    }
+    assembly.executors.insert(
+        Ident::parse("exec").unwrap(),
+        Box::new(ProbeExecutor::new("x", &probe).submitting(Action::TxBurst {
+            target: ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap(),
+            waveform: burst,
+            repeat: false,
+            at: ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(root, 10)),
+            requested_at: None,
+            late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+            metadata: BTreeMap::new(),
+        })),
+    );
+    let manifest = start_spec_run(&spec, &profile, assembly).expect("entry creates a Run").finish();
+    (probe, manifest)
+}
+
+#[test]
+fn ke_01_a_declared_input_is_stored_and_recorded() {
+    // SB-20a: an input no schedule entry carries is verified and stored, so a Module reads
+    // its bytes and names it in a burst; before KE-1 KC-9 dropped it (Phase 5 §2, hole 1).
+    let (bytes, reference) = input_ref();
+    let (probe, manifest) = ke_run(std::slice::from_ref(&reference), reference.clone(), Some(bytes));
+    assert!(probe.lines().iter().any(|line| line.starts_with("x:submit:ok:")), "{:?}", probe.lines());
+    assert_eq!(probe.with_prefix("p:burst_input:"), vec!["p:burst_input:80".to_owned()]);
+    assert_eq!(manifest.inputs, vec![reference]);
+}
+
+#[test]
+fn ke_01_a_declared_input_is_verified_as_a_scheduled_one_is() {
+    let (bytes, valid) = input_ref();
+    let plan_failure = |listed: ezsdr_kernel::manifest::ArtifactRef, stored: Option<Vec<u8>>| {
+        let (_, manifest) = ke_run(std::slice::from_ref(&listed), listed.clone(), stored);
+        assert_eq!(manifest.termination.reason, Termination::Failed { stage: Stage::Plan });
+        failure(&manifest)["reason"].as_str().unwrap().to_owned()
+    };
+    let absent = plan_failure(valid.clone(), None);
+    assert!(absent.starts_with("KC-9: input 0: no bytes were supplied"), "{absent}");
+    let changed = plan_failure(valid.clone(), Some(vec![1u8; 80]));
+    assert!(changed.starts_with("KC-9: input 0: bytes do not match"), "{changed}");
+    let mut too_large = valid.clone();
+    too_large.size_bytes = 81;
+    let size = plan_failure(too_large, Some(bytes.clone()));
+    assert!(size.starts_with("KC-9: input 0: size is 80"), "{size}");
+    let mut http = valid.clone();
+    http.uri = "http://x".to_owned();
+    let uri = plan_failure(http, Some(bytes.clone()));
+    assert!(uri.starts_with("KC-9: input 0: uri must begin"), "{uri}");
+
+    // Listed and scheduled: one input, recorded once, listed first.
+    let mut spec = spec_one();
+    spec["inputs"] = serde_json::json!([valid]);
+    let target = serde_json::to_value(ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap()).unwrap();
+    spec["schedule"] = serde_json::json!([{
+        "at": { "clock": "radio", "offset_ticks": 0 },
+        "action": { "kind": "tx_burst", "target": target, "waveform": valid,
+            "repeat": false, "late_policy": "send_asap_and_flag", "metadata": {} }
+    }]);
+    let mut assembly = with_provider(rig(Pacing::FreeRunning).assembly, "radio", "radio");
+    assembly.inputs.insert(valid.hash.clone(), bytes);
+    let manifest = start_spec_run(&spec, &profile_one(), assembly).unwrap().finish();
+    assert_ne!(manifest.termination.reason, Termination::Failed { stage: Stage::Plan });
+    assert_eq!(manifest.inputs, vec![valid]);
+}
+
+#[test]
+fn ke_02_a_module_burst_must_name_a_run_input() {
+    // RS-44a at admission, for a Module's burst: before KE-2 it reached the Provider
+    // naming bytes nobody held (Phase 5 §2, hole 2).
+    let (bytes, reference) = input_ref();
+    let (probe, manifest) = ke_run(&[], reference.clone(), Some(bytes.clone()));
+    let refused = format!("x:submit:err:ezsdr.input:RS-44a: {} is not an input of this Run", reference.hash);
+    assert!(probe.lines().contains(&refused), "{:?}", probe.lines());
+    assert!(probe.with_prefix("p:burst_input:").is_empty(), "the Provider must not receive it");
+    assert!(manifest.inputs.is_empty());
+
+    let mut wrong_size = reference.clone();
+    wrong_size.size_bytes = 81;
+    let (probe, _) = ke_run(std::slice::from_ref(&reference), wrong_size, Some(bytes));
+    let refused = format!(
+        "x:submit:err:ezsdr.input:RS-44a: input {} holds 80 bytes, and the burst declares 81",
+        reference.hash
+    );
+    assert!(probe.lines().contains(&refused), "{:?}", probe.lines());
+    assert!(probe.with_prefix("p:burst_input:").is_empty());
+}

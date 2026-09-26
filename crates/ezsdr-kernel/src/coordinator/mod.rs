@@ -103,7 +103,6 @@ pub struct RunHandle {
     lease: Lease,
     log: SessionLog,
     inputs: Vec<ArtifactRef>,
-    store: Arc<std::sync::Mutex<BTreeMap<ContentHash, Arc<[u8]>>>>,
     agenda: Vec<(i64, usize, crate::event::Action)>,
     t0: Option<TimePoint>,
     admission: crate::binding::AdmissionResult,

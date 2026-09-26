@@ -400,6 +400,29 @@ fn sb_09_unknown_top_level_field_refused() {
 }
 
 #[test]
+fn sb_09_inputs_is_a_top_level_field() {
+    // SB-20a (Phase 5, KE-1): `inputs` joins the closed top-level set; its entries are
+    // `ArtifactRef`s, refused by the deserialiser when they are not, and absent is empty.
+    let bytes = [0u8; 8];
+    let reference = ezsdr_kernel::manifest::ingest_input(
+        Ident::parse("pong").unwrap(),
+        ns("ezsdr.input"),
+        format!("mem:{}", ezsdr_kernel::hash::ContentHash::of_bytes(&bytes)),
+        &bytes,
+    );
+    let listed = ExperimentSpec::from_json(&serde_json::json!({ "version": 1, "inputs": [reference] }))
+        .expect("a Spec may list its inputs");
+    assert_eq!(listed.inputs, vec![reference]);
+    let malformed = ExperimentSpec::from_json(&serde_json::json!({ "version": 1, "inputs": [{ "uri": 1 }] }));
+    assert!(
+        matches!(&malformed, Err(SpecError::Structural { reason }) if reason.starts_with("SB-9:")),
+        "{malformed:?}"
+    );
+    let absent = ExperimentSpec::from_json(&serde_json::json!({ "version": 1 })).unwrap();
+    assert!(absent.inputs.is_empty());
+}
+
+#[test]
 fn sb_09_an_unknown_nested_field_is_refused() {
     // D73: the unknown-field rule holds at every object of a document, not only its
     // top level. The two fields D51 and D66 removed are the proof: a v1 document that

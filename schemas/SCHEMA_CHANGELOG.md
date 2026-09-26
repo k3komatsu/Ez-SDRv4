@@ -15,6 +15,15 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — Phase 5 — a Spec's inputs
+
+Still version 1: v4.0 has not frozen. Additive.
+
+- `experiment_spec`: adds the optional `inputs`, an array of `ArtifactRef`: artifacts the Run
+  consumes that no schedule entry carries, such as the waveform a Reactor transmits. KC-9
+  verifies and stores them as it does a scheduled waveform (SB-20a; Phase 5, KE-1). A document
+  without it parses as before; absent means empty.
+
 ## v1 — Phase 4 — the hot-path form of `RX_OVERFLOW`
 
 Still version 1: v4.0 has not frozen. Additive. No Kernel schema changed.

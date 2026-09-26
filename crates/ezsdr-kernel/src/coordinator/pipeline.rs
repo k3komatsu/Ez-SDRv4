@@ -8,7 +8,7 @@ use crate::event::{
 };
 use crate::hash::ContentHash;
 use crate::id::{ClockDomainId, ResourceId, RunId};
-use crate::manifest::{BindingSection, RunKind, SpecSection};
+use crate::manifest::{ArtifactRef, BindingSection, RunKind, SpecSection};
 use crate::module_api::{
     ActionSubmitter, AttachedPort, Authority, Endpoint, ExecutionClass, Executor,
     ExecutorDescriptor, ModuleError, ModuleErrorKind, ModuleRef, PrepareContext, Provider, Sink,
@@ -250,15 +250,15 @@ pub(super) fn assemble(
         closing: AtomicBool::new(false),
         scheduled: Mutex::new(Vec::new()),
         cleanup_failures: Mutex::new(Vec::new()),
+        store: Arc::new(Mutex::new(
+            assembly.inputs.into_iter().map(|(hash, bytes)| (hash, Arc::from(bytes))).collect(),
+        )),
     });
     RunHandle {
         shared,
         lease,
         log: SessionLog::new(),
         inputs: Vec::new(),
-        store: Arc::new(Mutex::new(
-            assembly.inputs.into_iter().map(|(hash, bytes)| (hash, Arc::from(bytes))).collect(),
-        )),
         agenda: Vec::<(i64, usize, Action)>::new(),
         t0: None,
         admission: AdmissionResult::default(),
@@ -420,14 +420,19 @@ impl RunHandle {
     }
 
     fn check_inputs(&mut self) -> bool {
-        for (i, entry) in self.shared.ctx.spec.schedule.iter().enumerate() {
-            let crate::event::ActionTemplate::TxBurst { waveform, .. } = &entry.action else {
-                continue;
-            };
+        // KE-1: the Spec's declared inputs first, in the order it lists them, then every
+        // scheduled waveform in schedule order; one rule verifies both.
+        let declared = self.shared.ctx.spec.inputs.iter().enumerate().map(|(i, input)| (format!("input {i}"), input));
+        let scheduled = self.shared.ctx.spec.schedule.iter().enumerate().filter_map(|(i, entry)| match &entry.action {
+            crate::event::ActionTemplate::TxBurst { waveform, .. } => Some((format!("entry {i}"), waveform)),
+            _ => None,
+        });
+        let named: Vec<(String, ArtifactRef)> = declared.chain(scheduled).map(|(what, input)| (what, input.clone())).collect();
+        for (what, waveform) in &named {
             let refusal =
                 if !(waveform.uri.starts_with("mem:") || waveform.uri.starts_with("file://")) {
                     Some("uri must begin with mem: or file://".to_owned())
-                } else if let Some(bytes) = crate::module_api::InputStore::get(&*self.store, &waveform.hash) {
+                } else if let Some(bytes) = crate::module_api::InputStore::get(&*self.shared.store, &waveform.hash) {
                     if bytes.len() as u64 != waveform.size_bytes {
                         Some(format!(
                             "size is {}, but the ArtifactRef declares {}",
@@ -443,7 +448,7 @@ impl RunHandle {
                     Some(format!("no bytes were supplied for {}", waveform.hash))
                 };
             if let Some(reason) = refusal {
-                self.fail(Stage::Plan, format!("KC-9: entry {i}: {reason}"));
+                self.fail(Stage::Plan, format!("KC-9: {what}: {reason}"));
                 return false;
             }
             if !self.inputs.iter().any(|input| input.hash == waveform.hash) {
@@ -453,7 +458,7 @@ impl RunHandle {
         // KC-9: the store keeps only the inputs verified above, so a Module reads no
         // unverified bytes and KC-28 never finds a mis-keyed entry under a waveform's hash.
         let inputs = &self.inputs;
-        lock(&self.store).retain(|hash, _| inputs.iter().any(|input| &input.hash == hash));
+        lock(&self.shared.store).retain(|hash, _| inputs.iter().any(|input| &input.hash == hash));
         true
     }
 
@@ -735,7 +740,7 @@ impl RunHandle {
                 actions: self.shared.queue(instance).clone(),
                 actions_out: submitter.clone(),
                 environment: self.shared.ctx.environment.clone(),
-                inputs: self.store.clone(),
+                inputs: self.shared.store.clone(),
                 links: self.attached_links.remove(&fragment.id).unwrap_or_default(),
                 components,
                 host_budget: budget,
@@ -1212,7 +1217,7 @@ pub(super) fn submit(
             run.inputs.push(reference.clone());
             reference
         };
-        lock(&run.store).entry(hash).or_insert_with(|| Arc::from(bytes));
+        lock(&run.shared.store).entry(hash).or_insert_with(|| Arc::from(bytes));
         Some(reference)
     } else {
         None

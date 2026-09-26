@@ -679,6 +679,11 @@ pub struct ExperimentSpec {
     /// Per-resource requirements (SB-12).
     #[serde(default)]
     pub resources: BTreeMap<Ident, ResourceReq>,
+    /// Artifacts the Run consumes that no schedule entry carries, such as the waveform a
+    /// Reactor transmits: each is verified and stored like a scheduled waveform, so a
+    /// Module can read it and name it in an Action (SB-20a, KC-9; Phase 5, KE-1).
+    #[serde(default)]
+    pub inputs: Vec<crate::manifest::ArtifactRef>,
     /// Components and links (SB-15).
     #[serde(default)]
     pub graph: SpecGraph,
@@ -706,6 +711,7 @@ pub const SPEC_TOP_LEVEL: &[&str] = &[
     "version",
     "requirements",
     "resources",
+    "inputs",
     "graph",
     "schedule",
     "outputs",
