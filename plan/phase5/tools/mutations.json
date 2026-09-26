@@ -1,1 +1,202 @@
-[]
+[
+ {
+  "id": "E01",
+  "name": "KE-1 the listed inputs are not verified or stored",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "let declared = self.shared.ctx.spec.inputs.iter().enumerate()",
+  "new": "let declared = self.shared.ctx.spec.inputs.iter().take(0).enumerate()",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "ke_01_a_declared_input_is_stored_and_recorded"
+ },
+ {
+  "id": "E02",
+  "name": "KE-1 the listed inputs are not verified or stored, end to end",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "let declared = self.shared.ctx.spec.inputs.iter().enumerate()",
+  "new": "let declared = self.shared.ctx.spec.inputs.iter().take(0).enumerate()",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "reactive",
+  "filter": "v58_09_a_reactor_answers_a_ping_with_a_timed_pong"
+ },
+ {
+  "id": "E03",
+  "name": "KE-1 a listed input's size is not checked",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "if bytes.len() as u64 != waveform.size_bytes {",
+  "new": "if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "ke_01_a_declared_input_is_verified_as_a_scheduled_one_is"
+ },
+ {
+  "id": "E04",
+  "name": "KE-1 `inputs` missing from the top-level set",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "    \"resources\",\n    \"inputs\",\n    \"graph\",",
+  "new": "    \"resources\",\n    \"graph\",",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_09_inputs_is_a_top_level_field"
+ },
+ {
+  "id": "E05",
+  "name": "KE-2 no waveform check at admission",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "match crate::module_api::InputStore::get(&*shared.store, &waveform.hash) {",
+  "new": "match Some(std::sync::Arc::<[u8]>::from(vec![0u8; waveform.size_bytes as usize])) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "ke_02_a_module_burst_must_name_a_run_input"
+ },
+ {
+  "id": "E06",
+  "name": "KE-2 the stored length is not compared",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "Some(bytes) if bytes.len() as u64 != waveform.size_bytes => {",
+  "new": "Some(bytes) if false && bytes.len() as u64 != waveform.size_bytes => {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "ke_02_a_module_burst_must_name_a_run_input"
+ },
+ {
+  "id": "E07",
+  "name": "NX-6 every refusal fails the step",
+  "file": "crates/ezsdr-exec-native/src/lib.rs",
+  "old": "                    Err(violations)\n                        if !violations.is_empty()\n                            && violations.iter().all(|v| ENDING.contains(&v.check.as_str())) => {}\n",
+  "new": "",
+  "crate": "ezsdr-exec-native",
+  "test_bin": "native_executor",
+  "filter": "nx_06_a_refusal_because_the_run_is_ending_is_not_a_failure"
+ },
+ {
+  "id": "E08",
+  "name": "NX-6 every refusal fails the step, end to end",
+  "file": "crates/ezsdr-exec-native/src/lib.rs",
+  "old": "                    Err(violations)\n                        if !violations.is_empty()\n                            && violations.iter().all(|v| ENDING.contains(&v.check.as_str())) => {}\n",
+  "new": "",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "reactive",
+  "filter": "ke_03_a_decision_after_the_stop_is_not_an_abort"
+ },
+ {
+  "id": "E09",
+  "name": "NX-6 any Run-ending check in a refusal drops it",
+  "file": "crates/ezsdr-exec-native/src/lib.rs",
+  "old": "&& violations.iter().all(|v| ENDING.contains(&v.check.as_str())) => {}",
+  "new": "&& violations.iter().any(|v| ENDING.contains(&v.check.as_str())) => {}",
+  "crate": "ezsdr-exec-native",
+  "test_bin": "native_executor",
+  "filter": "nx_06_any_other_refusal_fails_the_step"
+ },
+ {
+  "id": "E10",
+  "name": "NX-6 every refusal is dropped",
+  "file": "crates/ezsdr-exec-native/src/lib.rs",
+  "old": "                        if !violations.is_empty()\n                            && violations.iter().all(|v| ENDING.contains(&v.check.as_str())) => {}",
+  "new": "                        if !violations.is_empty() || violations.is_empty() => {}",
+  "crate": "ezsdr-exec-native",
+  "test_bin": "native_executor",
+  "filter": "nx_06_any_other_refusal_fails_the_step"
+ },
+ {
+  "id": "E11",
+  "name": "NX-3 the implementation hash is not compared",
+  "file": "crates/ezsdr-exec-native/src/lib.rs",
+  "old": "if implementation.hash != named.hash {",
+  "new": "if false {",
+  "crate": "ezsdr-exec-native",
+  "test_bin": "native_executor",
+  "filter": "nx_03_a_component_is_loaded_by_its_impl_identity"
+ },
+ {
+  "id": "E12",
+  "name": "NX-3 the implementation kind is not compared",
+  "file": "crates/ezsdr-exec-native/src/lib.rs",
+  "old": "if named.kind.as_str() != IMPL_KIND {",
+  "new": "if false {",
+  "crate": "ezsdr-exec-native",
+  "test_bin": "native_executor",
+  "filter": "nx_03_a_component_is_loaded_by_its_impl_identity"
+ },
+ {
+  "id": "E13",
+  "name": "NX-4 a component receives every link end of the Island",
+  "file": "crates/ezsdr-exec-native/src/lib.rs",
+  "old": "links: ctx.links.iter().filter(|l| &l.component == id).cloned().collect(),",
+  "new": "links: ctx.links.clone(),",
+  "crate": "ezsdr-exec-native",
+  "test_bin": "native_executor",
+  "filter": "nx_04_prepare_cases"
+ },
+ {
+  "id": "E14",
+  "name": "NX-5 components stepped in reverse id order",
+  "file": "crates/ezsdr-exec-native/src/lib.rs",
+  "old": "for (id, component) in &mut self.components {",
+  "new": "for (id, component) in self.components.iter_mut().rev() {",
+  "crate": "ezsdr-exec-native",
+  "test_bin": "native_executor",
+  "filter": "nx_05_components_step_in_id_order_and_their_actions_follow_each_step"
+ },
+ {
+  "id": "E15",
+  "name": "NX-5 a pushed Action alone does not report progress",
+  "file": "crates/ezsdr-exec-native/src/lib.rs",
+  "old": "            progressed |= !out.is_empty();\n",
+  "new": "",
+  "crate": "ezsdr-exec-native",
+  "test_bin": "native_executor",
+  "filter": "nx_05_components_step_in_id_order_and_their_actions_follow_each_step"
+ },
+ {
+  "id": "E16",
+  "name": "NX-7 an Action in the queue is ignored",
+  "file": "crates/ezsdr-exec-native/src/lib.rs",
+  "old": "            if let Some(action) = actions.recv() {",
+  "new": "            if let Some(action) = actions.recv().filter(|_| false) {",
+  "crate": "ezsdr-exec-native",
+  "test_bin": "native_executor",
+  "filter": "nx_07_an_action_addressed_to_the_executor_fails_the_step"
+ },
+ {
+  "id": "E17",
+  "name": "NX-8 `stop` returns at the first error",
+  "file": "crates/ezsdr-exec-native/src/lib.rs",
+  "old": "            if let Err(error) = component.stop(mode) {\n                first.get_or_insert(error);\n            }",
+  "new": "            if let Err(error) = component.stop(mode) {\n                return Err(error);\n            }",
+  "crate": "ezsdr-exec-native",
+  "test_bin": "native_executor",
+  "filter": "nx_08_stop_reaches_every_component_and_cleanup_is_idempotent"
+ },
+ {
+  "id": "E18",
+  "name": "the responder answers at the block's first sample, not the PING's",
+  "file": "crates/ezsdr-acceptance/src/responder.rs",
+  "old": "out.push(self.answer(TimePoint::new(first.domain, first.ticks + k as i64))?);",
+  "new": "out.push(self.answer(TimePoint::new(first.domain, first.ticks))?);",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "reactive",
+  "filter": "v58_12_a_reactor_answers_whatever_the_block_lengths"
+ },
+ {
+  "id": "E19",
+  "name": "the responder answers every loud sample",
+  "file": "crates/ezsdr-acceptance/src/responder.rs",
+  "old": "if self.quiet >= self.rearm {",
+  "new": "if self.quiet < u64::MAX {",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "reactive",
+  "filter": "v58_09_every_ping_gets_one_pong"
+ },
+ {
+  "id": "E20",
+  "name": "KE-1 the scheduled inputs are recorded before the listed ones",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "declared.chain(scheduled)",
+  "new": "scheduled.chain(declared)",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "reactive",
+  "filter": "v58_09_a_reactor_answers_a_ping_with_a_timed_pong"
+ }
+]

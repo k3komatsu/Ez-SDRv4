@@ -1,0 +1,119 @@
+You are the adversarial reviewer for "Review F" of the Ez-SDR v4 Phase 5
+implementation, in /Users/komatsu/GoogleDrive/github/Ez-SDRv4 (branch `main`).
+Phase 5 is Vision §67's "Mini Reactive Radio — PING -> Reactor -> timed PONG".
+It was planned from a prototype and implemented in one session under the
+owner's delegation, commit by commit:
+
+  e13348c docs(phase5): plan and draft specs 14 and 15
+  0140755 feat(kernel): KE-1..KE-4 (a Spec's inputs, RS-44a for every burst,
+          the Run-ending refusal, two forwards settled)
+  7c5f0dd feat(exec-native): the native Executor ezsdr.exec.native 1.0.0
+  ec46527 test(phase5): the Mini Reactive Radio carriers
+  (later commits, if any, record the mutation run and the notes)
+
+This is a review only:
+- Do not edit, create or delete anything in the repository. Never run git
+  commands that change state. Never run `cargo fmt`. Never touch v3/.
+- For anything you run, copy the working tree into a scratch directory outside
+  the repository (`rsync -a --exclude target --exclude v3 --exclude .git
+  --exclude tmp ./ <scratch>/`) and build there with
+  CARGO_TARGET_DIR=$HOME/.cache/cargo-target/Ez-SDRv4-review (AGENTS.md §7;
+  shared by every reviewer). The zsh shell does not word-split an unquoted
+  $VAR: write cargo arguments out literally.
+- Run things. A static read has missed reachable defects before
+  (plan/phase2/implementation-notes.md, "Post-acceptance dynamic review").
+  Build probes — small tests or Runs in your scratch copy — for every claim you
+  doubt, and report what they printed.
+
+Read first: AGENTS.md; handoff.md §4 (Phase 4's state and what it left);
+plan/phase5/00-overview.md, plan/phase5/14-native-executor.md and
+plan/phase5/15-amendments.md in full; plan/phase5/implementation-notes.md;
+the Vision sections the phase cites (design/vision/04-execution-model-and-
+data-contracts.md §19, §22; design/vision/10-implementation-path-and-testing.md
+§58); design/05-module-api.md (MA-14, MA-14a, MA-19b, MA-20, MA-30),
+design/06-kernel-coordinator.md (§3, KC-9, KC-23, KC-24, KC-30, KC-32, KA-12's
+cleanup), design/04-run-and-session.md (RS-6, RS-17, RS-44a), design/03-spec-
+and-binding.md (SB-9, SB-20a), design/09-mock-radio.md (MR-14, MR-16, MR-17).
+
+What is under review: `git diff 0627839 -- crates schemas design plan/phase5`
+and specs 14 and 15.
+
+Check, in this order:
+1. The phase's premise and scope. §58 #9 reads "Reactive execution can receive
+   an event and generate a dynamic TxBurst". Does the Mini Reactive Radio
+   actually satisfy it, and #3's "Reactor decisions", or does a reading of the
+   Vision the plan did not consider make it fall short? Is anything in §3's
+   out-of-scope table something §58 (the definition of done for Phases 1-6)
+   needs before Phase 6? Is anything in scope that should not be (AGENTS.md §6:
+   scope creep is a defect)? Judge decisions R1-R11 and N1-N6: does the
+   evidence support each choice? Mark what you could not verify INFERRED.
+2. The three holes of 00-overview.md §2. Reproduce each against the parent
+   commit 0627839 (a scratch copy at that commit plus the prototype's pieces, or
+   a probe that shows the same behaviour) and confirm or refute the evidence
+   column. Then attack each amendment:
+   - KE-1: KC-9's loop over listed and scheduled inputs; the Manifest order;
+     SB-9's closed set; the schema; anything a listed input can do that a
+     scheduled one could not (a listed input a Session cannot have; a listed
+     input that is also a component's param; duplicate ids; `partial` or
+     `continuity` on an input ArtifactRef).
+   - KE-2: the input store moved into the coordinator's shared state. Is every
+     path that reads or writes it (KC-9's retain, KC-28's ingest, prepare's
+     handles, admission) still correct, and can admission race or deadlock with
+     a round? Does the new check refuse anything the schedule or a Session used
+     to be allowed to send?
+   - KE-3: is dropping a refusal whose checks are all ezsdr.dispatch or
+     ezsdr.run_state right in every case those checks are returned (KC-24 steps
+     1 and 2), including a refusal before Running and an abort in progress? Is
+     the text in MA-14a the right place and wording?
+   - KE-4: are the two forwards really settled by the evidence cited?
+3. Spec 14 against crates/ezsdr-exec-native, rule by rule (NX-1..NX-9): every
+   divergence between rule text and code. Try to break MA-7's lifecycle across
+   the Executor and its components (a prepare failure midway through an Island,
+   two Islands, cleanup after a failed prepare), MA-20's stepping contract, and
+   the determinism claim of NX-9.
+4. The responder and the carriers (crates/ezsdr-acceptance/src/responder.rs,
+   experiments.rs `ping_pong`, rig.rs, tests/reactive.rs, v58.rs's v58_10):
+   recompute every timing number the tests assert from MR-3, MR-9, MR-11,
+   MR-14, MR-17 and spec 11, and check each assertion proves what 00-overview.md
+   §8 says it carries. Look for a test that would pass with the behaviour
+   broken. Does the responder read its block correctly for more than one
+   channel, a gap (GAP_BEFORE), a PING straddling blocks, jitter? Does any
+   carrier depend on luck (a seed, a block boundary) rather than on the rules?
+5. Tests and mutations (OV-3, GX-4).
+   - Every test named in specs 14 and 15 exists under that name and asserts the
+     rule's obligation.
+   - Run `python3 plan/phase5/tools/mutate.py plan/phase5/tools/mutations.json
+     <another-scratch-dir>` from your scratch copy's root (it copies again; the
+     scratch directory must be outside the copy). Then design at least eight
+     mutations of your own that the list does not contain — in the Executor, in
+     admission's new check, in KC-9's loop and in the responder — and report
+     which survive.
+6. Architecture and governance: no Module crate depends on another (MA-3,
+   PO-8); Cargo.lock gains no external package (PO-4); kernel_surface reports
+   116 NEW / 292 public items and no Kernel public item was added (GX-2); the
+   only Kernel schema change is experiment_spec's `inputs`, with a
+   SCHEMA_CHANGELOG.md entry; PO-11 in the new crate; the responder names no
+   Mock type and imports only what GX-6 allows; the amended text in design/ is
+   spec 15's; the Vision was not edited (GX-5).
+7. Run in the scratch copy:
+     cargo +1.85.0 test --workspace
+     cargo +stable test --workspace
+     cargo +stable clippy --workspace --all-targets -- -D warnings
+     python3 plan/phase3/tools/check_links.py
+   Report the counts, and any failure with its output.
+
+Every finding needs:
+- a location (file:line, or the rule id);
+- evidence (quoted code or spec text, or the command you ran and its output);
+- a severity:
+  - P0: wrong behaviour, a broken rule, or a contradiction;
+  - P1: likely to mislead a later phase, a test that proves less than its rule,
+    or a claim in the plan the evidence does not support;
+  - P2: clarity;
+- one recommended fix.
+No finding without evidence.
+
+Final message: a verdict (PASS, PASS_WITH_RISK or CHANGES_REQUIRED); counts
+per severity; every P0 and P1 in full; the P2s one line each; your judgement of
+R1-R11 and N1-N6 (one line each); the mutation results (the list's and your
+own); the test counts.

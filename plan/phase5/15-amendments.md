@@ -143,3 +143,4 @@ The list is [`tools/mutations.json`](tools/mutations.json), run with `python3 pl
 | E17 | NX-8 `stop` returns at the first error | `ezsdr-exec-native` | `nx_08_stop_reaches_every_component_and_cleanup_is_idempotent` |
 | E18 | the responder answers at the block's first sample, not the PING's | `ezsdr-acceptance` | `v58_12_a_reactor_answers_whatever_the_block_lengths` |
 | E19 | the responder answers every loud sample | `ezsdr-acceptance` | `v58_09_every_ping_gets_one_pong` |
+| E20 | KE-1 the scheduled inputs are recorded before the listed ones | `ezsdr-kernel` | `v58_09_a_reactor_answers_a_ping_with_a_timed_pong` |
