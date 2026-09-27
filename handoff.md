@@ -1,4 +1,4 @@
-# Ez-SDR v4 — Handoff (2026-09-27)
+# Ez-SDR v4 — Handoff (2026-09-28)
 
 次のセッション（人間・AI どちらでも）が最初に読む現状メモ．設計の中身は書かない．どこに何があり，何が終わっていて，次に何をするかだけ．
 開発時の恒常的なルールは [AGENTS.md](AGENTS.md)．
@@ -31,7 +31,7 @@
 - v3 の更新を取り込むときの取得元は `origin` ではなく `k3komatsu/Ez-SDR`（例：`git fetch git@github.com:k3komatsu/Ez-SDR.git master`）．
 - `~/work` は Google Drive で同期していない．Drive 上にあった頃（〜2026-09-27）は同期で追跡ファイルが消えることがあった（2026-09-24 に `crates/ezsdr-kernel/tests/` と `schemas/` の 61 ファイルが消え，`git restore` で戻した）．clone を Drive 配下へ戻すなら，作業前に `git status --short` に ` D` 行がないことを確かめる．
 
-## 2. 設計文書の状態 — Phase 0・1・2・3・4・5・6 完了，Phase 7 は設計のみ（Gate P 受理，未実装）
+## 2. 設計文書の状態 — Phase 0・1・2・3・4・5・6 完了，Phase 7 は実装済み（Review L・M 済み，実機セッションと Gate X 待ち）
 
 - 単一の設計ソース = **Vision**：索引 [Ez-SDR_v4_ARCHITECTURE_VISION.md](Ez-SDR_v4_ARCHITECTURE_VISION.md) + [design/vision/](design/vision) の 11 part（§1–§68，番号は不変）．
 - [design/v4-vision-audit.md](design/v4-vision-audit.md)（Findings 1–34，判定 READY WITH REQUIRED CHANGES）→ 全項目を Vision に反映済み．
@@ -42,7 +42,7 @@
 
 ## 3. 実装の状態
 
-現在（2026-09-27，Phase 6 Step X 後の `618ae4a`）の状態：
+現在（2026-09-27，Phase 6 Step X 後の `618ae4a`）の状態．Phase 7 の実装（branch `worktree-phase7-impl`，未 merge）で変わったものは §4「Phase 7」を見ること：
 
 | | |
 |---|---|
@@ -100,7 +100,7 @@ Phase 5（2026-09-26，Review F/G の修正込み）：1.85.0 / stable とも 64
 
 Phase 3 の時点：`kernel_surface` は `116 NEW / 292 public items`（KB-1 の `module_api::InputStore` の 1 つだけ増えた）．mutation は Appendix C 83/83 + Review C の fix-check 15/15 + Gate X の fix-check 4/4 killed．
 
-## 4. Phase の状態 — Phase 1・2・3・4・5・6 完了（Gate X受理），Phase 7 設計済み（Gate P 受理，未実装）
+## 4. Phase の状態 — Phase 1・2・3・4・5・6 完了（Gate X受理），Phase 7 実装済み（Gate P 受理，Review L・M 済み，実機・Gate X 待ち）
 
 ### Phase 1 — specs 受理・Kernel 実装済み
 
@@ -258,7 +258,26 @@ Vision §67 の Phase 3（SimulationChannel + deterministic Runs）．計画は 
 
 **Phase 7 へ持ち越すもの**（Phase 6）：実機（wall-paced）での `sleep` と `capture` の間の往復遅延と「今から d 秒後」を返す補助（`00-overview.md` §3），`run_child` 中に親のデバイスを止めるか（S5 の ceiling），remote listener と server 所有のプロファイル・認証（S9），`body_bytes` の上限．
 
-### Phase 7 — 設計のみ（Gate P 受理，未実装）
+### Phase 7 — 実装済み（2026-09-27〜28，branch `worktree-phase7-impl`，未 merge・未 push）
+
+owner の依頼（「Phase 7を実装してください」，続けて「終わったらサブエージェントOpus 5.5にレビューさせて，修正してください．修正が大規模なら再レビュー，小規模で低リスクならそれで終わりです」）で，00-overview §9 の手順 1–6 を実装し，Opus のレビューを 2 回回した．commit（`main` の `25e79f3` から）：
+
+| commit | 中身 |
+|---|---|
+| `3172a1f` | 手順 1–2：Kernel KG-1…KG-14（device-paced class，data thread，KC-21a/KC-24a，MA-8 の強制，T0 の格子，TM-18 の relation，child Run 拒否），`radio` 1.3.0（`device` module：Grid，DeviceDescription，RM-26），MockRadio 1.3.0 |
+| `27065e7` | 手順 3–4：`crates/ezsdr-radio-uhd`（Module `ezsdr.radio.uhd` 0.1.0：`Device` trait と `FakeDevice`，`DeviceAuthority`，`UhdRadio` の 3 thread，profile `x310-ubx`，feature `uhd` の `src/uhd.rs`（unsafe はここだけ，GZ-3），`tests/fake.rs`・`uhd_api.rs`・`hardware.rs`（全部 `#[ignore]`）） |
+| `2c4a8ae` | 手順 5：server 0.2.0（catalogue に UHD，`Config.open_device`・`default_profile`，binary の `EZSDR_PROFILE`，`status.root_rate`，device-paced の child は KG-12 で拒否），Python 0.2.0（`sleep`/`wait_until` が時刻を返す，`Session.after`，`examples/bench_loopback.py`），acceptance `tests/uhd.rs`（§59 の rehearsal を FakeDevice で），design/16 |
+| `89f02b7` | 手順 6：mutation（`plan/phase7/tools/`，Appendix A と spec 18 §8）．`mutate.py` は timeout で process group ごと kill するよう直した |
+| `e2d4d26` | Review L（CHANGES_REQUIRED：P0 3・P1 8・P2 19）の修正：streamer の二重 free，UR-12 の rate 規則（512 中 487 を拒否していた），0 channel からの受信開始時刻，受信 timed stop の早すぎる発行，UHD のエラー文，preempt 時の end-of-burst，テスト多数．大規模なので再レビュー |
+| （最後の commit） | Review M（同じ reviewer の再レビュー：P0 0・P1 2・P2 8）の修正：遅れた timed stop を missed start と取り違えて受信を再開していた件，1.85 で flaky だった `ur_21` など．小規模・局所的なので owner の規則どおり再レビューせず終了 |
+
+状態（最後の commit）：`cargo test --workspace` 839 passed（stable と 1.85.0，libuhd なしでもビルド可），clippy `-D warnings` clean（feature `uhd` の有無とも），`cargo test -p ezsdr-radio-uhd --features uhd` は libuhd 4.10 のこの Mac で通る（実機なし），Python 23 件（3.9/3.13），mutation は `plan/phase7/tools/mutations.json` の 114 行（G09 だけ black-box では勝てない race として記録）．実装が spec と違うところは [design-notes.md](plan/phase7/design-notes.md) §6，Review L・M の全指摘と対応は §7・§8，レビュー本文は [reviews/](plan/phase7/reviews)．
+
+注意：scratch copy を共有 target dir でビルドしたあと worktree をビルドすると，mutation 入りの成果物が再利用されることがある（Review L の修正中に 1 回起きた）．ビルド前に必ず `find crates schemas python Cargo.toml Cargo.lock -type f -exec touch {} +`．
+
+残り（owner）：branch を `main` へ入れるか（fast-forward 可能），実機セッション（[bench.md](plan/phase7/bench.md)，Linux PC + X310/UBX，B0–B8 合格が Gate X の条件），Gate X，Step X（spec 18 を `design/` へ，Vision の issue 適用）．
+
+### Phase 7 — 設計（Gate P 受理）
 
 2026-09-27，owner の依頼（「Phase7の設計と実装を進めてください．実機がいる直前まで進めてください」）で着手し，途中で「設計だけで止めてください．ただし，設計は詳しく設計してください」と変更された．**コードは書いていない**（KG-4 の実装に着手した分は commit せず `git checkout` で戻した）．成果物はすべて [plan/phase7/](plan/phase7)（未 commit）：
 
@@ -313,7 +332,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-1. **Phase 7 の実装**（owner の依頼があったとき）：Gate P 受理済みの [plan/phase7/](plan/phase7) に従い，00-overview §9 の手順 1–6（Kernel → radio/Mock → UHD crate → C API → server/Python/acceptance → mutation）を実装し，Review L（実装のレビュー），実機セッション（bench.md），Gate X．Phase 4・6 から持ち越した項目は 00-overview §2・§8 で全件に行き先を付けてある．
+1. **Phase 7 の仕上げ**（owner）：branch `worktree-phase7-impl` を `main` へ入れる判断，実機セッション（[bench.md](plan/phase7/bench.md) の B0–B9，結果は `bench-results.md`），Gate X，Step X．実装と Review L・M の記録は [plan/phase7/design-notes.md](plan/phase7/design-notes.md) §6–§8．
 2. **v4.0 凍結前にすること**：`Endpoint::EventIn` / `EventOut` の形（event edge は Phase 10），`ParamDecl.update_class` を optional にすること（以上 Phase 5 Gate X），Manifest の `spec.source`（Spec builder のソースハッシュ，Phase 6 Gate X，KF-4）．
 3. **Session replay と artifact store**：Phase 7 のあと frontend で（Phase 6 Gate X）．
 4. **Phase 10 へ持ち越すもの**（Phase 5）：event edge，component parameter を適用する Executor（UC-2…UC-6，MA-24），component の処理時間（budget）を仮想時間で課すこと，component parameter key の MA-34 検査，MA-30 の Action latency．

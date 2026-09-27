@@ -18,7 +18,7 @@ use serde_json::json;
 
 use super::core::{Clock, Core, lattice, lock};
 use crate::device::{Dir, Iq, RxRecv, Settings};
-use crate::profile::RESTART_LEAD_NS;
+use crate::profile::{DEVICE_LEAD_NS, RESTART_LEAD_NS};
 
 pub(crate) enum RxCmd {
     /// A stream enabled from 0 channels, already configured and started (UR-25).
@@ -78,6 +78,8 @@ pub(crate) struct Rx {
     first: bool,
     first_block: Option<Instant>,
     exit: bool,
+    /// `Provider::stop` has begun: a later switch no longer applies (Review M, N-1).
+    stopping: bool,
 }
 
 const RECV_TIMEOUT: Wall = Wall::from_millis(100);
@@ -97,6 +99,7 @@ impl Rx {
             first: true,
             first_block: None,
             exit: false,
+            stopping: false,
         }
     }
 
@@ -160,17 +163,22 @@ impl Rx {
                 self.stream = Some(Stream { clock, channels, expected: 0, pending: Pending::None, start: clock.origin, cut: None, held_stop: None });
                 self.last_samples = Instant::now();
             }
+            RxCmd::Switch { .. } if self.stopping => {}
             RxCmd::Switch { e1, clock, channels, settings } => {
                 let from = self.stream.as_ref().map_or(0, |stream| stream.channels);
                 self.switch = Some(Switch { clock, channels, from, settings, e1 });
                 if let Some(stream) = self.stream.as_mut() {
-                    stream.cut = Some(e1);
-                    stream.held_stop = Some(e1);
+                    // A cut already set (a `Stop` for `<id>/rx`) stays if it is earlier.
+                    if stream.cut.is_none_or(|cut| e1 < cut) {
+                        stream.cut = Some(e1);
+                        stream.held_stop = Some(e1);
+                    }
                 }
             }
             RxCmd::Stop => self.stop_orderly(tail),
             RxCmd::Cut { at, mode } => {
                 self.switch = None;
+                self.stopping = true;
                 match mode {
                     StopMode::Orderly => self.stop_at(at, at + tail),
                     StopMode::Abort => {
@@ -231,7 +239,11 @@ impl Rx {
             stream.held_stop = None;
             let cut = stream.cut.expect("set above");
             self.core.timing(json!({ "what": "rx_stop", "at": now, "until": cut }));
-            if !self.core.is_lost() {
+            // A timed stop needs the device lead; a closer one would be late at the device
+            // (Review M, P1-A), so the stream is stopped untimed when a sample past the cut
+            // arrives (`samples`), and the cut discards the samples after it either way.
+            let issued = self.core.now();
+            if !self.core.is_lost() && cut - issued >= self.core.ticks(DEVICE_LEAD_NS) {
                 if let Err(error) = self.core.device.rx_stop(Some(cut)) {
                     self.core.device_failed("stop", &error);
                 }
@@ -266,6 +278,14 @@ impl Rx {
                 self.core.stat("rx_overflows", 1);
             }
             RxRecv::Alignment => stream.pending = Pending::Alignment,
+            RxRecv::LateCommand if stream.cut.is_some() => {
+                // A late timed stop, not a missed start: stop it untimed, never restart a
+                // stream that is ending (Review M, P1-A).
+                self.core.timing(json!({ "what": "rx_stop_late", "cut": stream.cut, "at": now }));
+                if let Err(error) = self.core.device.rx_stop(None) {
+                    self.core.device_failed("stop", &error);
+                }
+            }
             RxRecv::LateCommand => {
                 // UR-17: the device missed the timed start; the origin stays.
                 let restart = lattice(now + self.core.ticks(RESTART_LEAD_NS), stream.clock.n);
@@ -296,6 +316,11 @@ impl Rx {
     fn samples(&mut self, first_tick: i64, mut samples: Vec<Vec<Iq>>) {
         let stream = self.stream.as_mut().expect("a stream");
         let clock = stream.clock;
+        if first_tick < clock.origin {
+            // The old stream's samples still in flight after its stop (Review M, N-3).
+            self.core.stat("rx_before_origin", 1);
+            return;
+        }
         let offset = first_tick - clock.origin;
         if offset.rem_euclid(clock.n) != 0 {
             self.core.stat("rx_off_lattice", 1);

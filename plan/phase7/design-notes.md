@@ -230,3 +230,27 @@ Brief: [`prompts/review-l.txt`](prompts/review-l.txt). Report: [`reviews/review-
 **Mutations after the fixes.** `mutations.json` gained Review L's rows R01…R16, each killed by the test its fix added (named in the table above). The whole list of 109 ran once: **107 killed**, then R08 (its first text was equivalent — under abort the immediate untimed stop hides the cut — and now makes abort behave as orderly) and R16 (its test's 2 ms blocks made the straddling block a matter of chance; the test now uses 20 ms blocks) were rewritten and killed in two further runs each. G36 is killed by its new test. **G09 was killed in this run** after surviving the two before: it remains a race the tests only sometimes win, not killable deterministically without a Kernel hook, which Review L advised against.
 
 A process note: a probe built in a scratch copy with the shared target directory left mutated artifacts that a later build of this worktree reused (AGENTS.md §7's mtime rule, met again) — three runs of `ur_26_an_abort_publishes_nothing_after_the_stop_instant` failed on the mutant's code until `find … -exec touch {} +`. Every run recorded here followed a `touch`.
+
+## 8. Review M
+
+Brief: [`prompts/review-m.txt`](prompts/review-m.txt). Report: [`reviews/review-m.md`](reviews/review-m.md). The same Opus reviewer, resuming its Review L session with the fix commit, 2026-09-28, read-only.
+
+**Verdict: CHANGES_REQUIRED** — 0 P0, 2 P1, 8 P2 (new). Every Review L P0 and P1 closed (P1-7's L04 an accepted ceiling), every R01…R16 and G36 killed; the new findings came from the fixes' own new paths. All were accepted.
+
+| Finding | Disposition |
+|---|---|
+| **P1-A** a timed stop handed over inside the device lead is late, and uhd-rx took the device's `LATE_COMMAND` for a missed start and restarted the stream | `stop_at` issues a timed stop only when the cut is a device lead ahead, else the untimed fallback; a `LateCommand` while a cut is set stops the stream untimed and never restarts; the fake reports `LateCommand` for a timed `rx_stop` in its past; `ur_26_an_orderly_stop_does_not_restart_the_stream` (20 ms blocks: no `rx_start` after the stop, no `LATE_COMMAND`, no late stop issued); UR-17, UR-26, UR-33 amended; R17, R18 |
+| **P1-B** `ur_21_late_policies_on_the_device_lead` flaky under 1.85.0 | the on-time case 20 ms ahead; the device lead's boundary is B8's to measure; the spec's test row says so |
+| (found while checking P1-B) `rehearsal_b7_session_loopback` failed once in 10 runs under 1.85.0: a `send_asap` move of 2.09 ms, past Review L's one-device-lead bound | on the fake the bound is the whole 5 ms lead (spike K6 itself is `ur_21_an_untimed_send_is_on_time_after_its_delivery`'s); then 15 runs of the fake binary on 1.85.0 and 5 on stable without a failure |
+| N-1 a switch after a Cut moves the cut later | a switch is ignored once `stop` has begun, and never moves an earlier cut later; UR-25 amended (untested: the window between `Cut` and uhd-control's join needs a Module-level race; recorded) |
+| N-2 the lock held across `schedule` | KC-46a says a paced `schedule` may block only briefly and that a wake scheduled after RS-6 step 1 is a harmless no-op (M05 is equivalent in effect, as N-3's reasoning says) |
+| N-3 old samples reaching the new stream | a block whose first tick precedes the stream's origin is dropped and counted (`rx_before_origin`); UR-17 amended (untested on the fake, which stops at once) |
+| N-4 enabling a stream that is still draining | refused with `COMMAND_REJECTED` until its `e₁`; `ur_25_enabling_a_draining_stream_is_refused`; R20 |
+| N-5 global error text on shared objects | a ceiling (metadata and sensor-value calls, whose failure is rare) |
+| N-6 the orderly half of N-9 untested | `ur_26_orderly_stop_delivers_the_tail_abort_does_not` bounds the end at the stop instant + 1 ms + one sample; R19 |
+| N-7 the per-channel depth untested | `ur_24_the_queue_counts_a_command_per_channel` (two channels, the 9th update refused); R21 |
+| N-8 the `Inexact` host instant untested | recorded: no caller schedules a `host.monotonic` instant on a paced Authority (the reviewer checked `advance_to`, the agenda, the wake and the Providers) |
+
+**Mutations.** `mutations.json` gained R17…R21 (114 rows). Every row whose code or killing test changed in this round ran again — U24, U25, U26, U32, U37, U40, U41, U43, U45, R03…R08, R10, R12…R21 and G36: **27 of 27 killed**. G09 stays the one race the tests win only sometimes (it survived Review M's run and was killed in the run before).
+
+**No further review.** The owner's rule: re-review after a large fix, stop after a small one. Review L's fixes were large and were re-reviewed; Review M's are small and local — two branch conditions in uhd-rx's stop path and one in its switch, a refusal in uhd-control, a drop of stale blocks, the fake's late stop, a test's margin, and spec sentences — each the fix the reviewer recommended, each with its test.

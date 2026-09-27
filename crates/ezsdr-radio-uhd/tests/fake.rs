@@ -869,8 +869,10 @@ fn ur_21_late_policies_on_the_device_lead() {
     wait(&mut run, ms(50));
     let _ = run.submit(SessionAction::Stop { target: Some(ResourceId::parse("radio/tx").unwrap()) }, None);
     wait(&mut run, ms(20));
-    let _ = send(&mut run, "send", Some(ms(4)), &tone(10));
-    wait(&mut run, ms(50));
+    // On time with a margin that survives the test binary's parallel load (Review M,
+    // P1-B); the device lead's own boundary is the bench's to measure (B8).
+    let _ = send(&mut run, "send", Some(ms(20)), &tone(10));
+    wait(&mut run, ms(60));
     let manifest = run.finish();
     let outcomes: Vec<_> = time_errors(&manifest).iter().map(|p| p.outcome).collect();
     assert_eq!(outcomes, [TimeErrorOutcome::Drop, TimeErrorOutcome::SendAsap], "{outcomes:?}");
@@ -1188,8 +1190,9 @@ fn ur_25_a_device_that_ignores_the_timed_stop_is_stopped_at_e1() {
         assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(capture_at), &[("sink.capture_samples", Value::Int(20_000))]), None).unwrap()));
         let horizon = after(&run, ms(3_000));
         let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
-        let manifest = run.finish();
+        // Before the Run's own stop, which stops the stream untimed as well (Review M, P1-A).
         let calls = device.calls();
+        let manifest = run.finish();
         assert_eq!(calls.iter().filter(|c| c.starts_with("rx_open")).count(), 1, "one streamer: {calls:?}");
         assert_eq!(calls.iter().any(|c| c == "rx_stop now"), ignoring, "{calls:?}");
         let capture = capture_of(&manifest, "rec");
@@ -1373,6 +1376,8 @@ fn ur_26_orderly_stop_delivers_the_tail_abort_does_not() {
     // uhd-rx's own stop instant: the capture runs on for stop_tail_ns (1 ms) after it.
     let rx_stop = section(&manifest, "timing").as_array().unwrap().iter().find(|r| r["what"] == "rx_stop").unwrap()["at"].as_i64().unwrap();
     assert!(end + 200 >= rx_stop + ms(1), "the 1 ms tail: end {end}, uhd-rx stopped at {rx_stop}");
+    // …counted from the stop instant, not from when uhd-rx got to it (Review M, N-6).
+    assert!(end <= stop + ms(1) + 200, "the tail ends 1 ms after the stop instant: end {end}, stop {stop}");
     // Abort (CLOCK_LOST's default): nothing after the stop.
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::Unlocked(Wall::from_millis(2_200))], ..FakeConfig::default() });
@@ -1407,6 +1412,57 @@ fn ur_26_an_abort_publishes_nothing_after_the_stop_instant() {
     let origin = direct.clocks.sample_clock_records().iter().find(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).unwrap().origin.ticks;
     let end = origin + end.expect("blocks were published") * 200;
     assert!(end <= stop + 200, "published up to {end}, stopped at {stop}");
+}
+
+#[test]
+fn ur_26_an_orderly_stop_does_not_restart_the_stream() {
+    // RM-16's tail on 20 ms blocks: uhd-rx reaches the stop only after a whole block, too
+    // late for a timed stop, so it stops untimed, and a late stop never restarts the stream
+    // as a missed start would (Review M, P1-A).
+    let port = attached(ezsdr_kernel::stream::BackPressure::DropOldest);
+    let mut direct = Direct::build(FakeConfig::default(), &[], vec![port], json!({ "block_len": 20_000 }));
+    direct.settle(Wall::from_millis(50));
+    let device = direct.device.clone();
+    let starts = |calls: &[String]| calls.iter().filter(|c| c.starts_with("rx_start")).count();
+    let before = starts(&device.calls());
+    direct.radio.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
+    std::thread::sleep(Wall::from_millis(100));
+    assert_eq!(starts(&device.calls()), before, "{:?}", device.calls());
+    assert!(direct.of("radio.LATE_COMMAND").is_empty(), "{:?}", direct.of("radio.LATE_COMMAND"));
+    direct.radio.cleanup();
+    // No timed stop was handed over inside the device lead.
+    let instance = direct.radio.instance().clone();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
+    assert!(timing.as_array().unwrap().iter().all(|r| r["what"] != "rx_stop_late"), "{timing}");
+}
+
+#[test]
+fn ur_25_enabling_a_draining_stream_is_refused() {
+    // 1 → 0 → 1 receive channels inside the restart lead: the old stream still runs to its
+    // e₁, so the enable is refused rather than opening a second stream (Review M, N-4).
+    let dir = TempDir::new();
+    let mut run = session(&profile(&dir, json!({}), json!({}), true), fake(FakeConfig::default()));
+    past_t0(&mut run, ms(1));
+    assert!(admitted(&run.submit(set("radio.rx.channels", Value::Int(0)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.rx.channels", Value::Int(1)), None).unwrap()));
+    wait(&mut run, ms(100));
+    let manifest = run.finish();
+    assert!(rejections(&manifest).iter().any(|r| r.starts_with("UR-25: the stream changed to 0 channels is still draining")), "{:?}", rejections(&manifest));
+}
+
+#[test]
+fn ur_24_the_queue_counts_a_command_per_channel() {
+    // UR-24's 16 device commands, one per channel: with two receive channels the 9th
+    // update is refused (Review M, N-7).
+    use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
+    let mut direct = Direct::new(FakeConfig { command_queue: 64, ..FakeConfig::default() }, &[("radio.rx.channels", Value::Int(2))]);
+    let far = direct.now() + ms(5_000);
+    for i in 0..9 {
+        direct.update("radio.rx.gain_db", Value::Num(f64::from(i)), HardwareTimed, Some(far + i64::from(i)));
+    }
+    direct.settle(Wall::from_millis(30));
+    assert_eq!(direct.of("radio.COMMAND_QUEUE_FULL").len(), 1);
+    let _ = direct.finish();
 }
 
 #[test]

@@ -292,6 +292,10 @@ impl Control {
         let now = self.core.now();
         let requested = self.ceil_root(at);
         match old {
+            None if channels > 0 && lock(&self.core.streams).draining[dir as usize].is_some_and(|e1| now < e1) => {
+                // The old stream still runs to its e₁ (Review M, N-4).
+                self.core.command_rejected("update_parameter", "UR-25: the stream changed to 0 channels is still draining; enable it after its e₁");
+            }
             None if channels > 0 && (dir == Dir::Tx || !self.core.links.is_empty()) => {
                 if let Some(t) = requested.filter(|t| *t < now) {
                     self.late_command(Some(key.clone()), t, now);
@@ -328,6 +332,7 @@ impl Control {
                 let settings = self.settings_at(dir, clock.map_or(e1, |c| c.origin));
                 {
                     let mut streams = lock(&self.core.streams);
+                    streams.draining[dir as usize] = clock.is_none().then_some(e1);
                     match dir {
                         Dir::Rx => streams.rx = clock,
                         Dir::Tx => {

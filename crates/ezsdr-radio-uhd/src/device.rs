@@ -654,8 +654,11 @@ impl Device for FakeDevice {
         let mut st = self.lock();
         self.lost(&st)?;
         st.calls.push(format!("rx_stop {}", at.map_or("now".to_owned(), |t| t.to_string())));
+        let now = self.now(&st);
         match at {
             Some(_) if self.config.faults.contains(&FakeFault::IgnoresTimedStop) => {}
+            // A timed stream command in the device's past is reported late (UR-33).
+            Some(at) if at < now => st.rx_late = Some(now),
             Some(at) => st.rx_stop_at = Some(at),
             None => st.rx_next = None,
         }

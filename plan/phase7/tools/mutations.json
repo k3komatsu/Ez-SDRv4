@@ -1003,8 +1003,8 @@
   "id": "R08",
   "name": "an abort delivers the orderly tail (L12)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "            RxCmd::Cut { at, mode } => {\n                self.switch = None;\n                match mode {",
-  "new": "            RxCmd::Cut { at, mode } => {\n                self.switch = None;\n                let _ = mode;\n                match StopMode::Orderly {",
+  "old": "                self.stopping = true;\n                match mode {",
+  "new": "                self.stopping = true;\n                let _ = mode;\n                match StopMode::Orderly {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_26_an_abort_publishes_nothing_after_the_stop_instant"
@@ -1088,5 +1088,57 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_26_an_abort_publishes_nothing_after_the_stop_instant"
+ },
+ {
+  "id": "R17",
+  "name": "a timed stop handed over inside the device lead (P1-A)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if !self.core.is_lost() && cut - issued >= self.core.ticks(DEVICE_LEAD_NS) {",
+  "new": "if !self.core.is_lost() && cut - issued >= 0 * self.core.ticks(DEVICE_LEAD_NS) - i64::MAX {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_an_orderly_stop_does_not_restart_the_stream"
+ },
+ {
+  "id": "R18",
+  "name": "a late stop taken for a missed start, which restarts the stream (P1-A)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "            RxRecv::LateCommand if stream.cut.is_some() => {",
+  "new": "            RxRecv::LateCommand if false => {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_an_orderly_stop_does_not_restart_the_stream",
+  "old2": "if !self.core.is_lost() && cut - issued >= self.core.ticks(DEVICE_LEAD_NS) {",
+  "new2": "if !self.core.is_lost() {"
+ },
+ {
+  "id": "R19",
+  "name": "the orderly tail counted from when uhd-rx reaches the stop (Review M, N-6)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "StopMode::Orderly => self.stop_at(at, at + tail),",
+  "new": "StopMode::Orderly => self.stop_at(at, self.core.now() + tail),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_orderly_stop_delivers_the_tail_abort_does_not"
+ },
+ {
+  "id": "R20",
+  "name": "a draining stream enabled again (Review M, N-4)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "None if channels > 0 && lock(&self.core.streams).draining[dir as usize].is_some_and(|e1| now < e1) => {",
+  "new": "None if false && channels > 0 => {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_enabling_a_draining_stream_is_refused"
+ },
+ {
+  "id": "R21",
+  "name": "UR-24's depth counted one per update again (Review M, N-7)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "if pending + Core::channels(&self.config, dir) > depth {",
+  "new": "if self.held.len() + self.released.len() + 1 > depth + 0 * pending {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_24_the_queue_counts_a_command_per_channel"
  }
 ]
