@@ -17,7 +17,7 @@
 
 ローカル：
 
-- `/Users/komatsu/GoogleDrive/github/Ez-SDRv4` = `main` の worktree（メイン）．
+- `/Users/komatsu/work/Ez-SDRv4` = `main` の worktree（メイン）．2026-09-27 に `/Users/komatsu/GoogleDrive/github/Ez-SDRv4` から移した．
 - `…/Ez-SDRv4/v3` = `master` の **git worktree**（入れ子 clone ではない）．`.gitignore` で除外．
 - `/Users/komatsu/orca/workspaces/Ez-SDRv4/gh-pages` = `gh-pages` の git worktree（Orca の workspace．作業ツリーの外）．
 - 設計文書が v3 のパス 22 件を証拠として引用しているので `v3/` は消さない（`design/` と Vision に加えて `plan/phase1/` からも引用がある）．確認：
@@ -27,8 +27,9 @@
   ```
 
 - `v3/` を消してしまった場合：`git worktree prune && git worktree add v3 master`
+- clone を移動して `v3/` の git リンクが切れた場合（`git worktree list` で `prunable`，`git -C v3 status` が `not a git repository`）：`git worktree repair v3`（2026-09-27 に実施）
 - v3 の更新を取り込むときの取得元は `origin` ではなく `k3komatsu/Ez-SDR`（例：`git fetch git@github.com:k3komatsu/Ez-SDR.git master`）．
-- **Google Drive の同期で追跡ファイルが消えることがある**．2026-09-24 に `crates/ezsdr-kernel/tests/` と `schemas/`（61 ファイル）が作業ツリーから消え，`git restore crates/ezsdr-kernel/tests schemas` で戻した．作業を始める前に `git status --short` に ` D` 行がないことを確かめる．Drive の同期中に戻すと競合コピー（`… (1).…`）が増えるので，同期を止めてから戻す．
+- `~/work` は Google Drive で同期していない．Drive 上にあった頃（〜2026-09-27）は同期で追跡ファイルが消えることがあった（2026-09-24 に `crates/ezsdr-kernel/tests/` と `schemas/` の 61 ファイルが消え，`git restore` で戻した）．clone を Drive 配下へ戻すなら，作業前に `git status --short` に ` D` 行がないことを確かめる．
 
 ## 2. 設計文書の状態 — Phase 0・1・2・3・4・5・6 完了，Phase 7 は設計のみ（Gate P 受理，未実装）
 
