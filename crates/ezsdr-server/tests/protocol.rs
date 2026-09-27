@@ -762,6 +762,25 @@ fn ea_07_a_session_on_the_fake_device() {
 }
 
 #[test]
+fn ea_07_the_uhd_authority_takes_the_binding_s_sources() {
+    // UR-6, UR-7: the server builds the Authority with the binding's time source, which
+    // sets the device's time at the next PPS (Review L, L13).
+    let temp = TempDir::new("uhd-sources");
+    let device = Arc::new(FakeDevice::new(FakeConfig::default()));
+    let held = device.clone();
+    let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| Ok(held.clone() as Arc<dyn Device>));
+    let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
+    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    let mut profile = uhd_profile(&temp.0);
+    profile["bindings"]["radio"]["selector"]["time_source"] = json!("external");
+    ok(server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new()));
+    let calls = device.calls();
+    assert!(calls.iter().any(|c| c == "set_sources internal external"), "{calls:?}");
+    assert!(calls.iter().any(|c| c == "set_time_zero pps"), "{calls:?}");
+    finish(&mut server);
+}
+
+#[test]
 fn ea_07_two_uhd_bindings_are_refused() {
     let temp = TempDir::new("uhd-two");
     let (mut server, opened) = fake_server(&temp.0);

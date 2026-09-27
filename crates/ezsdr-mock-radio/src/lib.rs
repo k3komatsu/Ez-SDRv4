@@ -3,7 +3,6 @@
 #![warn(missing_docs)]
 
 mod channel;
-
 mod profile;
 mod time;
 mod device;

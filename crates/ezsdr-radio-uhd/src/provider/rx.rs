@@ -27,6 +27,9 @@ pub(crate) enum RxCmd {
     Switch { e1: i64, clock: Option<Clock>, channels: usize, settings: Settings },
     /// `Stop` for `<id>/rx` or `<id>`: RM-16's tail (UR-26).
     Stop,
+    /// `Provider::stop` began at `at`: the stream ends at `at` plus the tail under
+    /// `orderly` and at `at` under `abort` (RM-16, UR-26).
+    Cut { at: i64, mode: StopMode },
     /// `Provider::stop` (UR-26).
     Shutdown(StopMode),
 }
@@ -49,11 +52,16 @@ struct Stream {
     start: i64,
     /// Samples at or after this root tick are discarded, and the stream ends there.
     cut: Option<i64>,
+    /// A timed stop at `cut` not yet handed to the device: it is released a restart
+    /// lead ahead, as UR-24 releases timed commands (Review L, P1-1).
+    held_stop: Option<i64>,
 }
 
 struct Switch {
     clock: Option<Clock>,
     channels: usize,
+    /// The channel count before the change: the streamer is reopened only if it differs.
+    from: usize,
     settings: Settings,
     e1: i64,
 }
@@ -78,7 +86,7 @@ impl Rx {
     pub fn new(core: Arc<Core>, cmds: Receiver<RxCmd>, clock: Option<Clock>, channels: usize, stall: Option<(Wall, Wall)>) -> Rx {
         let pool = HostPool::new(core.block_len * channels.max(1) * 8);
         Rx {
-            stream: clock.map(|clock| Stream { clock, channels, expected: 0, pending: Pending::None, start: clock.origin, cut: None }),
+            stream: clock.map(|clock| Stream { clock, channels, expected: 0, pending: Pending::None, start: clock.origin, cut: None, held_stop: None }),
             core,
             cmds,
             switch: None,
@@ -92,18 +100,23 @@ impl Rx {
         }
     }
 
-    pub fn run(mut self) {
+    /// Carries out every command that has arrived.
+    fn poll(&mut self) {
         loop {
-            loop {
-                match self.cmds.try_recv() {
-                    Ok(cmd) => self.command(cmd),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        self.command(RxCmd::Shutdown(StopMode::Abort));
-                        break;
-                    }
+            match self.cmds.try_recv() {
+                Ok(cmd) => self.command(cmd),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.command(RxCmd::Shutdown(StopMode::Abort));
+                    break;
                 }
             }
+        }
+    }
+
+    pub fn run(mut self) {
+        loop {
+            self.poll();
             if self.exit && self.stream.is_none() {
                 return;
             }
@@ -131,7 +144,10 @@ impl Rx {
                     std::thread::sleep(duration);
                 }
             }
+            self.release_stop();
             let result = self.core.device.rx_recv(self.core.block_len, RECV_TIMEOUT);
+            // A stop that arrived during the wait cuts this block too (RM-16).
+            self.poll();
             self.receive(result);
         }
     }
@@ -141,20 +157,34 @@ impl Rx {
         match cmd {
             RxCmd::Enable { clock, channels } => {
                 self.pool = HostPool::new(self.core.block_len * channels.max(1) * 8);
-                self.stream = Some(Stream { clock, channels, expected: 0, pending: Pending::None, start: clock.origin, cut: None });
+                self.stream = Some(Stream { clock, channels, expected: 0, pending: Pending::None, start: clock.origin, cut: None, held_stop: None });
                 self.last_samples = Instant::now();
             }
             RxCmd::Switch { e1, clock, channels, settings } => {
-                self.switch = Some(Switch { clock, channels, settings, e1 });
+                let from = self.stream.as_ref().map_or(0, |stream| stream.channels);
+                self.switch = Some(Switch { clock, channels, from, settings, e1 });
                 if let Some(stream) = self.stream.as_mut() {
                     stream.cut = Some(e1);
-                    // INFERRED (UR-25): the X3x0 honours a timed stop of a continuous stream.
-                    if let Err(error) = self.core.device.rx_stop(Some(e1)) {
-                        self.core.device_failed("update_parameter", &error);
-                    }
+                    stream.held_stop = Some(e1);
                 }
             }
             RxCmd::Stop => self.stop_orderly(tail),
+            RxCmd::Cut { at, mode } => {
+                self.switch = None;
+                match mode {
+                    StopMode::Orderly => self.stop_at(at, at + tail),
+                    StopMode::Abort => {
+                        if let Some(stream) = self.stream.as_mut() {
+                            stream.cut = Some(at);
+                            stream.held_stop = None;
+                        }
+                        self.core.timing(json!({ "what": "rx_stop", "at": at, "until": at, "mode": "Abort" }));
+                        if self.stream.is_some() && !self.core.is_lost() {
+                            let _ = self.core.device.rx_stop(None);
+                        }
+                    }
+                }
+            }
             RxCmd::Shutdown(mode) => {
                 self.exit = true;
                 self.switch = None;
@@ -170,11 +200,36 @@ impl Rx {
         }
     }
 
+    /// Hands a held timed stop to the device once it is no more than a restart lead
+    /// ahead, and records it in `applied` (UR-24, UR-25, UR-30; Review L, P1-1).
+    fn release_stop(&mut self) {
+        let now = self.core.now();
+        let lead = self.core.ticks(RESTART_LEAD_NS);
+        let Some(stream) = self.stream.as_mut() else { return };
+        let Some(at) = stream.held_stop.filter(|at| at - now <= lead) else { return };
+        stream.held_stop = None;
+        // INFERRED (UR-25): the X3x0 honours a timed stop of a continuous stream; if it
+        // does not, `samples` stops it untimed when a sample at or after `at` arrives.
+        match self.core.device.rx_stop(Some(at)) {
+            Ok(()) => lock(&self.core.rec).applied.push(json!({ "key": "rx_stop", "at": self.core.at(at), "issued": self.core.at(now) })),
+            Err(error) => self.core.device_failed("update_parameter", &error),
+        }
+    }
+
     fn stop_orderly(&mut self, tail: i64) {
         let now = self.core.now();
+        self.stop_at(now, now + tail);
+    }
+
+    /// RM-16's tail: the stream delivers up to `cut` and then ends.
+    fn stop_at(&mut self, now: i64, cut: i64) {
         if let Some(stream) = self.stream.as_mut() {
-            let cut = now + tail;
+            if stream.cut.is_some_and(|c| c <= cut) && stream.held_stop.is_none() {
+                return;
+            }
             stream.cut = Some(stream.cut.map_or(cut, |c| c.min(cut)));
+            stream.held_stop = None;
+            let cut = stream.cut.expect("set above");
             self.core.timing(json!({ "what": "rx_stop", "at": now, "until": cut }));
             if !self.core.is_lost() {
                 if let Err(error) = self.core.device.rx_stop(Some(cut)) {
@@ -251,6 +306,13 @@ impl Rx {
         if let Some(cut) = stream.cut {
             let cut_k = clock.at_or_after(cut);
             if k + len >= cut_k {
+                if k + len > cut_k && stream.held_stop.is_none() && !self.core.is_lost() {
+                    // UR-25's fallback: samples past the timed stop, so stop it untimed.
+                    self.core.timing(json!({ "what": "rx_stop_untimed", "cut": cut, "at": self.core.now() }));
+                    if let Err(error) = self.core.device.rx_stop(None) {
+                        self.core.device_failed("update_parameter", &error);
+                    }
+                }
                 len = (cut_k - k).max(0);
                 ended = true;
             }
@@ -358,7 +420,8 @@ impl Rx {
             self.core.timing(json!({ "what": "rx_switch", "e1": switch.e1, "e2": null }));
             return;
         };
-        let reopened = self.core.device.rx_open(switch.channels);
+        // UR-25: the streamer is reopened when the channel count changed, and only then.
+        let reopened = if switch.channels != switch.from { self.core.device.rx_open(switch.channels) } else { Ok(()) };
         let configured = reopened.and_then(|()| self.core.configure(Dir::Rx, switch.channels, &switch.settings));
         let started = configured.and_then(|_| self.core.device.rx_start(new.origin));
         match started {
@@ -371,6 +434,7 @@ impl Rx {
                     pending: Pending::None,
                     start: new.origin,
                     cut: None,
+                    held_stop: None,
                 });
                 self.last_samples = Instant::now();
             }

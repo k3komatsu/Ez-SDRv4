@@ -114,6 +114,7 @@ mod ffi {
         pub fn uhd_usrp_find(args: *const c_char, strings_out: *mut uhd_string_vector_handle) -> uhd_error;
         pub fn uhd_usrp_make(h: *mut uhd_usrp_handle, args: *const c_char) -> uhd_error;
         pub fn uhd_usrp_free(h: *mut uhd_usrp_handle) -> uhd_error;
+        pub fn uhd_usrp_last_error(h: uhd_usrp_handle, error_out: *mut c_char, strbuffer_len: usize) -> uhd_error;
         pub fn uhd_usrp_get_pp_string(h: uhd_usrp_handle, pp_string_out: *mut c_char, strbuffer_len: usize) -> uhd_error;
         pub fn uhd_usrp_get_master_clock_rate(h: uhd_usrp_handle, mboard: usize, clock_rate_out: *mut f64) -> uhd_error;
         pub fn uhd_usrp_get_time_now(h: uhd_usrp_handle, mboard: usize, full_secs_out: *mut i64, frac_secs_out: *mut f64) -> uhd_error;
@@ -196,23 +197,42 @@ pub fn struct_sizes() -> [(&'static str, usize); 4] {
     ]
 }
 
-fn last_error() -> String {
+/// An error text read into a buffer by one of UHD's `*_last_error` calls.
+fn text(read: impl FnOnce(*mut c_char, usize) -> uhd_error) -> String {
     let mut buffer = [0 as c_char; 1024];
-    // SAFETY: the buffer is writable for its whole length, which is passed.
-    unsafe {
-        uhd_get_last_error(buffer.as_mut_ptr(), buffer.len());
-        CStr::from_ptr(buffer.as_ptr()).to_string_lossy().into_owned()
-    }
+    read(buffer.as_mut_ptr(), buffer.len());
+    // SAFETY: UHD writes a NUL-terminated string into the buffer, truncated to its length.
+    unsafe { CStr::from_ptr(buffer.as_ptr()).to_string_lossy().into_owned() }
 }
 
-/// A `uhd_error` as a [`DeviceError`]; `streaming` says whether a `RUNTIME` error
-/// counts as a lost device (UR-29, INFERRED).
-fn check(call: &str, code: uhd_error, streaming: bool) -> Result<(), DeviceError> {
+/// A `uhd_error` as a [`DeviceError`] whose text `message` reads; `streaming` says
+/// whether a `RUNTIME` error counts as a lost device (UR-29, INFERRED).
+fn check_with(call: &str, code: uhd_error, streaming: bool, message: impl FnOnce() -> String) -> Result<(), DeviceError> {
     if code == UHD_ERROR_NONE {
         return Ok(());
     }
     let lost = matches!(code, UHD_ERROR_IO | UHD_ERROR_USB | UHD_ERROR_OS) || (streaming && code == UHD_ERROR_RUNTIME);
-    Err(DeviceError { lost, message: format!("{call}: UHD error {code}: {}", last_error()) })
+    Err(DeviceError { lost, message: format!("{call}: UHD error {code}: {}", message()) })
+}
+
+/// A call with no handle of its own: UHD's process-global text, which another
+/// thread's call may already have overwritten (Review L, P1-2), so only for calls
+/// made before the Module's threads run or on objects no other thread touches.
+fn check(call: &str, code: uhd_error, streaming: bool) -> Result<(), DeviceError> {
+    // SAFETY: the buffer is writable for the length passed.
+    check_with(call, code, streaming, || text(|b, n| unsafe { uhd_get_last_error(b, n) }))
+}
+
+/// A call on a receive streamer, with that streamer's own error text.
+fn check_rx(h: uhd_rx_streamer_handle, call: &str, code: uhd_error) -> Result<(), DeviceError> {
+    // SAFETY: `h` is a live streamer; the buffer is writable for the length passed.
+    check_with(call, code, true, || text(|b, n| unsafe { uhd_rx_streamer_last_error(h, b, n) }))
+}
+
+/// A call on a transmit streamer, with that streamer's own error text.
+fn check_tx(h: uhd_tx_streamer_handle, call: &str, code: uhd_error) -> Result<(), DeviceError> {
+    // SAFETY: as for `check_rx`.
+    check_with(call, code, true, || text(|b, n| unsafe { uhd_tx_streamer_last_error(h, b, n) }))
 }
 
 fn cstring(s: &str) -> Result<CString, DeviceError> {
@@ -279,6 +299,46 @@ impl Drop for TxStream {
     }
 }
 
+impl RxStream {
+    /// Makes a receive streamer and its metadata, `attach` binding it to a device;
+    /// the value owns both handles from the first, so an early return frees them
+    /// once, and the caller moves it into its `Arc` (Review L, P0-1).
+    fn make(channels: usize, attach: impl FnOnce(uhd_rx_streamer_handle) -> Result<(), DeviceError>) -> Result<RxStream, DeviceError> {
+        let mut h: uhd_rx_streamer_handle = std::ptr::null_mut();
+        // SAFETY: `h` is written by the call.
+        unsafe { check("uhd_rx_streamer_make", uhd_rx_streamer_make(&mut h), true)? };
+        let mut stream = RxStream { h, md: std::ptr::null_mut(), channels };
+        attach(stream.h)?;
+        // SAFETY: the metadata handle is written into the value that frees it.
+        unsafe { check("uhd_rx_metadata_make", uhd_rx_metadata_make(&mut stream.md), true)? };
+        Ok(stream)
+    }
+}
+
+impl TxStream {
+    /// As [`RxStream::make`], for transmit.
+    fn make(channels: usize, attach: impl FnOnce(uhd_tx_streamer_handle) -> Result<(), DeviceError>) -> Result<TxStream, DeviceError> {
+        let mut h: uhd_tx_streamer_handle = std::ptr::null_mut();
+        // SAFETY: `h` is written by the call.
+        unsafe { check("uhd_tx_streamer_make", uhd_tx_streamer_make(&mut h), true)? };
+        let mut stream = TxStream { h, md: std::ptr::null_mut(), channels };
+        attach(stream.h)?;
+        // SAFETY: as above.
+        unsafe { check("uhd_async_metadata_make", uhd_async_metadata_make(&mut stream.md), true)? };
+        Ok(stream)
+    }
+}
+
+/// Makes and drops one unattached streamer per direction, through the same path as
+/// `rx_open` and `tx_open`: a handle freed twice aborts the process (Review L, P0-1).
+pub fn streamer_lifecycle() -> Result<(), DeviceError> {
+    let rx = Arc::new(RxStream::make(1, |_| Ok(()))?);
+    let tx = Arc::new(TxStream::make(1, |_| Ok(()))?);
+    drop((rx.clone(), tx.clone()));
+    drop((rx, tx));
+    Ok(())
+}
+
 // SAFETY (UR-3): a streamer is used by one owning thread at a time, and the Arc keeps
 // its handles alive until the last user drops it.
 unsafe impl Send for RxStream {}
@@ -306,6 +366,14 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl UhdDevice {
+    /// A call on the device handle, with the handle's own error text; made under the
+    /// control mutex, so the text is this call's (Review L, P1-2).
+    fn check_usrp(&self, call: &str, code: uhd_error, streaming: bool) -> Result<(), DeviceError> {
+        let usrp = self.usrp;
+        // SAFETY: the device handle lives as long as `self`; the buffer is writable.
+        check_with(call, code, streaming, || text(|b, n| unsafe { uhd_usrp_last_error(usrp, b, n) }))
+    }
+
     /// Opens the device `args` names; refuses one whose master clock is not a positive
     /// whole number of hertz (UR-3).
     pub fn open(args: &str) -> Result<UhdDevice, String> {
@@ -355,7 +423,7 @@ impl UhdDevice {
         };
         let _control = lock(&self.control);
         // SAFETY: the streamer is held by the Arc for the call.
-        unsafe { check("uhd_rx_streamer_issue_stream_cmd", uhd_rx_streamer_issue_stream_cmd(stream.h, &cmd), true) }
+        unsafe { check_rx(stream.h, "uhd_rx_streamer_issue_stream_cmd", uhd_rx_streamer_issue_stream_cmd(stream.h, &cmd)) }
     }
 }
 
@@ -423,8 +491,8 @@ impl Device for UhdDevice {
         let _control = lock(&self.control);
         // SAFETY: the strings outlive the calls. The clock source first (UR-7).
         unsafe {
-            check("uhd_usrp_set_clock_source", uhd_usrp_set_clock_source(self.usrp, clock_c.as_ptr(), 0), false)?;
-            check("uhd_usrp_set_time_source", uhd_usrp_set_time_source(self.usrp, time_c.as_ptr(), 0), false)
+            self.check_usrp("uhd_usrp_set_clock_source", uhd_usrp_set_clock_source(self.usrp, clock_c.as_ptr(), 0), false)?;
+            self.check_usrp("uhd_usrp_set_time_source", uhd_usrp_set_time_source(self.usrp, time_c.as_ptr(), 0), false)
         }
     }
 
@@ -433,9 +501,9 @@ impl Device for UhdDevice {
         // SAFETY: plain calls on the device handle.
         unsafe {
             if at_next_pps {
-                check("uhd_usrp_set_time_unknown_pps", uhd_usrp_set_time_unknown_pps(self.usrp, 0, 0.0), false)
+                self.check_usrp("uhd_usrp_set_time_unknown_pps", uhd_usrp_set_time_unknown_pps(self.usrp, 0, 0.0), false)
             } else {
-                check("uhd_usrp_set_time_now", uhd_usrp_set_time_now(self.usrp, 0, 0.0, 0), false)
+                self.check_usrp("uhd_usrp_set_time_now", uhd_usrp_set_time_now(self.usrp, 0, 0.0, 0), false)
             }
         }
     }
@@ -444,7 +512,7 @@ impl Device for UhdDevice {
         let (mut full, mut frac) = (0i64, 0f64);
         let _control = lock(&self.control);
         // SAFETY: both outputs are written by the call.
-        unsafe { check("uhd_usrp_get_time_now", uhd_usrp_get_time_now(self.usrp, 0, &mut full, &mut frac), false)? };
+        unsafe { self.check_usrp("uhd_usrp_get_time_now", uhd_usrp_get_time_now(self.usrp, 0, &mut full, &mut frac), false)? };
         from_time_spec(full, frac, self.mcr)
     }
 
@@ -454,7 +522,7 @@ impl Device for UhdDevice {
         // SAFETY: the vector and the sensor value are made and freed here.
         unsafe {
             check("uhd_string_vector_make", uhd_string_vector_make(&mut names), false)?;
-            let listed = check("uhd_usrp_get_mboard_sensor_names", uhd_usrp_get_mboard_sensor_names(self.usrp, 0, &mut names), false)
+            let listed = self.check_usrp("uhd_usrp_get_mboard_sensor_names", uhd_usrp_get_mboard_sensor_names(self.usrp, 0, &mut names), false)
                 .map(|()| strings(names));
             uhd_string_vector_free(&mut names);
             if !listed?.iter().any(|n| n == "ref_locked") {
@@ -464,7 +532,7 @@ impl Device for UhdDevice {
             let mut value: uhd_sensor_value_handle = std::ptr::null_mut();
             check("uhd_sensor_value_make", uhd_sensor_value_make(&mut value), false)?;
             let mut locked = false;
-            let read = check("uhd_usrp_get_mboard_sensor", uhd_usrp_get_mboard_sensor(self.usrp, name.as_ptr(), 0, &mut value), false)
+            let read = self.check_usrp("uhd_usrp_get_mboard_sensor", uhd_usrp_get_mboard_sensor(self.usrp, name.as_ptr(), 0, &mut value), false)
                 .and_then(|()| check("uhd_sensor_value_to_bool", uhd_sensor_value_to_bool(value, &mut locked), false));
             uhd_sensor_value_free(&mut value);
             read.map(|()| Some(locked))
@@ -480,13 +548,13 @@ impl Device for UhdDevice {
         unsafe {
             if let Some(at) = at {
                 let (full, frac) = to_time_spec(at, self.mcr);
-                check("uhd_usrp_set_command_time", uhd_usrp_set_command_time(self.usrp, full, frac, 0), false)?;
+                self.check_usrp("uhd_usrp_set_command_time", uhd_usrp_set_command_time(self.usrp, full, frac, 0), false)?;
             }
             let applied = (|| {
                 if let Some(rate) = s.rate {
                     match dir {
-                        Dir::Rx => check("uhd_usrp_set_rx_rate", uhd_usrp_set_rx_rate(self.usrp, rate, chan), false)?,
-                        Dir::Tx => check("uhd_usrp_set_tx_rate", uhd_usrp_set_tx_rate(self.usrp, rate, chan), false)?,
+                        Dir::Rx => self.check_usrp("uhd_usrp_set_rx_rate", uhd_usrp_set_rx_rate(self.usrp, rate, chan), false)?,
+                        Dir::Tx => self.check_usrp("uhd_usrp_set_tx_rate", uhd_usrp_set_tx_rate(self.usrp, rate, chan), false)?,
                     }
                 }
                 if let Some(freq) = s.freq {
@@ -500,39 +568,43 @@ impl Device for UhdDevice {
                     };
                     let mut result = uhd_tune_result_t::default();
                     match dir {
-                        Dir::Rx => check("uhd_usrp_set_rx_freq", uhd_usrp_set_rx_freq(self.usrp, &mut request, chan, &mut result), false)?,
-                        Dir::Tx => check("uhd_usrp_set_tx_freq", uhd_usrp_set_tx_freq(self.usrp, &mut request, chan, &mut result), false)?,
+                        Dir::Rx => self.check_usrp("uhd_usrp_set_rx_freq", uhd_usrp_set_rx_freq(self.usrp, &mut request, chan, &mut result), false)?,
+                        Dir::Tx => self.check_usrp("uhd_usrp_set_tx_freq", uhd_usrp_set_tx_freq(self.usrp, &mut request, chan, &mut result), false)?,
                     }
                 }
                 if let Some(gain) = s.gain {
                     match dir {
-                        Dir::Rx => check("uhd_usrp_set_rx_gain", uhd_usrp_set_rx_gain(self.usrp, gain, chan, empty.as_ptr()), false)?,
-                        Dir::Tx => check("uhd_usrp_set_tx_gain", uhd_usrp_set_tx_gain(self.usrp, gain, chan, empty.as_ptr()), false)?,
+                        Dir::Rx => self.check_usrp("uhd_usrp_set_rx_gain", uhd_usrp_set_rx_gain(self.usrp, gain, chan, empty.as_ptr()), false)?,
+                        Dir::Tx => self.check_usrp("uhd_usrp_set_tx_gain", uhd_usrp_set_tx_gain(self.usrp, gain, chan, empty.as_ptr()), false)?,
                     }
                 }
                 if let Some(antenna) = &antenna {
                     match dir {
-                        Dir::Rx => check("uhd_usrp_set_rx_antenna", uhd_usrp_set_rx_antenna(self.usrp, antenna.as_ptr(), chan), false)?,
-                        Dir::Tx => check("uhd_usrp_set_tx_antenna", uhd_usrp_set_tx_antenna(self.usrp, antenna.as_ptr(), chan), false)?,
+                        Dir::Rx => self.check_usrp("uhd_usrp_set_rx_antenna", uhd_usrp_set_rx_antenna(self.usrp, antenna.as_ptr(), chan), false)?,
+                        Dir::Tx => self.check_usrp("uhd_usrp_set_tx_antenna", uhd_usrp_set_tx_antenna(self.usrp, antenna.as_ptr(), chan), false)?,
                     }
                 }
                 Ok::<(), DeviceError>(())
             })();
-            if at.is_some() {
-                uhd_usrp_clear_command_time(self.usrp, 0);
-            }
+            // A command time left set would make every later untimed call timed.
+            let cleared = if at.is_some() {
+                self.check_usrp("uhd_usrp_clear_command_time", uhd_usrp_clear_command_time(self.usrp, 0), false)
+            } else {
+                Ok(())
+            };
             applied?;
+            cleared?;
             let (mut rate, mut freq, mut gain) = (0.0, 0.0, 0.0);
             match dir {
                 Dir::Rx => {
-                    check("uhd_usrp_get_rx_rate", uhd_usrp_get_rx_rate(self.usrp, chan, &mut rate), false)?;
-                    check("uhd_usrp_get_rx_freq", uhd_usrp_get_rx_freq(self.usrp, chan, &mut freq), false)?;
-                    check("uhd_usrp_get_rx_gain", uhd_usrp_get_rx_gain(self.usrp, chan, empty.as_ptr(), &mut gain), false)?;
+                    self.check_usrp("uhd_usrp_get_rx_rate", uhd_usrp_get_rx_rate(self.usrp, chan, &mut rate), false)?;
+                    self.check_usrp("uhd_usrp_get_rx_freq", uhd_usrp_get_rx_freq(self.usrp, chan, &mut freq), false)?;
+                    self.check_usrp("uhd_usrp_get_rx_gain", uhd_usrp_get_rx_gain(self.usrp, chan, empty.as_ptr(), &mut gain), false)?;
                 }
                 Dir::Tx => {
-                    check("uhd_usrp_get_tx_rate", uhd_usrp_get_tx_rate(self.usrp, chan, &mut rate), false)?;
-                    check("uhd_usrp_get_tx_freq", uhd_usrp_get_tx_freq(self.usrp, chan, &mut freq), false)?;
-                    check("uhd_usrp_get_tx_gain", uhd_usrp_get_tx_gain(self.usrp, chan, empty.as_ptr(), &mut gain), false)?;
+                    self.check_usrp("uhd_usrp_get_tx_rate", uhd_usrp_get_tx_rate(self.usrp, chan, &mut rate), false)?;
+                    self.check_usrp("uhd_usrp_get_tx_freq", uhd_usrp_get_tx_freq(self.usrp, chan, &mut freq), false)?;
+                    self.check_usrp("uhd_usrp_get_tx_gain", uhd_usrp_get_tx_gain(self.usrp, chan, empty.as_ptr(), &mut gain), false)?;
                 }
             }
             Ok(Applied { rate, freq, gain })
@@ -543,19 +615,19 @@ impl Device for UhdDevice {
         let (fc32, sc16, empty) = (cstring("fc32")?, cstring("sc16")?, cstring("")?);
         let mut list: Vec<usize> = (0..channels).collect();
         let mut args = Self::stream_args(&mut list, &fc32, &sc16, &empty);
-        let mut h: uhd_rx_streamer_handle = std::ptr::null_mut();
-        let mut md: uhd_rx_metadata_handle = std::ptr::null_mut();
         let _control = lock(&self.control);
-        // SAFETY: the streamer and metadata are made here and owned by the Arc below.
-        unsafe {
-            check("uhd_rx_streamer_make", uhd_rx_streamer_make(&mut h), true)?;
-            let stream = RxStream { h, md: std::ptr::null_mut(), channels };
-            check("uhd_usrp_get_rx_stream", uhd_usrp_get_rx_stream(self.usrp, &mut args, h), true)?;
-            check("uhd_rx_metadata_make", uhd_rx_metadata_make(&mut md), true)?;
+        // UR-25: the old streamer goes before the new one is made (a thread still inside
+        // a call on it keeps it alive through its own Arc, UR-16).
+        drop(lock(&self.rx).take());
+        let stream = RxStream::make(channels, |h| {
             let mut samples = 0usize;
-            uhd_rx_streamer_max_num_samps(h, &mut samples);
-            *lock(&self.rx) = Some(Arc::new(RxStream { md, ..stream }));
-        }
+            // SAFETY: the device handle lives as long as `self`; `args` outlives the call.
+            unsafe {
+                self.check_usrp("uhd_usrp_get_rx_stream", uhd_usrp_get_rx_stream(self.usrp, &mut args, h), true)?;
+                check_rx(h, "uhd_rx_streamer_max_num_samps", uhd_rx_streamer_max_num_samps(h, &mut samples))
+            }
+        })?;
+        *lock(&self.rx) = Some(Arc::new(stream));
         Ok(())
     }
 
@@ -579,7 +651,7 @@ impl Device for UhdDevice {
         let mut received = 0usize;
         // SAFETY: each buffer holds `n` samples per channel; the Arc keeps the streamer.
         let code = unsafe { uhd_rx_streamer_recv(stream.h, pointers.as_mut_ptr(), n, &mut md, timeout.as_secs_f64(), false, &mut received) };
-        if let Err(error) = check("uhd_rx_streamer_recv", code, true) {
+        if let Err(error) = check_rx(stream.h, "uhd_rx_streamer_recv", code) {
             return RxRecv::Failed(error);
         }
         let mut error_code: c_int = 0;
@@ -621,8 +693,8 @@ impl Device for UhdDevice {
                     uhd_rx_metadata_strerror(md, text.as_mut_ptr(), text.len());
                     CStr::from_ptr(text.as_ptr()).to_string_lossy().into_owned()
                 };
-                let lost = other == UHD_RX_METADATA_ERROR_CODE_BROKEN_CHAIN;
-                RxRecv::Failed(DeviceError { lost, message: format!("uhd_rx_streamer_recv: metadata error {other:#x}: {text}") })
+                // Not a lost device: UR-29's list names none of these codes.
+                RxRecv::Failed(DeviceError { lost: false, message: format!("uhd_rx_streamer_recv: metadata error {other:#x}: {text}") })
             }
         }
     }
@@ -631,19 +703,17 @@ impl Device for UhdDevice {
         let (fc32, sc16, empty) = (cstring("fc32")?, cstring("sc16")?, cstring("")?);
         let mut list: Vec<usize> = (0..channels).collect();
         let mut args = Self::stream_args(&mut list, &fc32, &sc16, &empty);
-        let mut h: uhd_tx_streamer_handle = std::ptr::null_mut();
-        let mut md: uhd_async_metadata_handle = std::ptr::null_mut();
         let _control = lock(&self.control);
-        // SAFETY: as for `rx_open`.
-        unsafe {
-            check("uhd_tx_streamer_make", uhd_tx_streamer_make(&mut h), true)?;
-            let stream = TxStream { h, md: std::ptr::null_mut(), channels };
-            check("uhd_usrp_get_tx_stream", uhd_usrp_get_tx_stream(self.usrp, &mut args, h), true)?;
-            check("uhd_async_metadata_make", uhd_async_metadata_make(&mut md), true)?;
+        drop(lock(&self.tx).take());
+        let stream = TxStream::make(channels, |h| {
             let mut samples = 0usize;
-            uhd_tx_streamer_max_num_samps(h, &mut samples);
-            *lock(&self.tx) = Some(Arc::new(TxStream { md, ..stream }));
-        }
+            // SAFETY: as for `rx_open`.
+            unsafe {
+                self.check_usrp("uhd_usrp_get_tx_stream", uhd_usrp_get_tx_stream(self.usrp, &mut args, h), true)?;
+                check_tx(h, "uhd_tx_streamer_max_num_samps", uhd_tx_streamer_max_num_samps(h, &mut samples))
+            }
+        })?;
+        *lock(&self.tx) = Some(Arc::new(stream));
         Ok(())
     }
 
@@ -662,7 +732,7 @@ impl Device for UhdDevice {
         // SAFETY: the metadata is made and freed here; each buffer holds `n` samples.
         unsafe {
             check("uhd_tx_metadata_make", uhd_tx_metadata_make(&mut md, at.is_some(), full, frac, sob, eob), true)?;
-            let result = check("uhd_tx_streamer_send", uhd_tx_streamer_send(stream.h, pointers.as_mut_ptr(), n, &mut md, timeout.as_secs_f64(), &mut sent), true);
+            let result = check_tx(stream.h, "uhd_tx_streamer_send", uhd_tx_streamer_send(stream.h, pointers.as_mut_ptr(), n, &mut md, timeout.as_secs_f64(), &mut sent));
             uhd_tx_metadata_free(&mut md);
             result?;
         }

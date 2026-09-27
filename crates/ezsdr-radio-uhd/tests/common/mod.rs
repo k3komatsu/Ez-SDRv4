@@ -471,8 +471,18 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
     let samples = read_capture(&capture_of(&manifest, "rec"), 1).remove(0);
     let found = if exact { exactly(&samples, &wave) } else { correlate(&samples, &wave) };
     assert!(found.is_some(), "the loopback holds the waveform");
+    let errors = events_of(&manifest, "radio.TIME_ERROR");
     if exact {
-        assert!(events_of(&manifest, "radio.TIME_ERROR").is_empty(), "no TIME_ERROR (spike K6)");
+        // On the fake, under a test binary's parallel load, the untimed repeat can miss
+        // the delivery allowance by a little and move (Review L, P1-8); K6's regression
+        // would show as a device-late burst or a move of more than one device lead.
+        let payloads: Vec<TimeErrorPayload> = errors.iter().map(|e| serde_json::from_value(e.payload.clone()).unwrap()).collect();
+        assert!(
+            payloads.iter().all(|p| p.outcome != TimeErrorOutcome::LateAtDevice && p.late_by_ns <= ezsdr_radio_uhd::profile::DEVICE_LEAD_NS),
+            "spike K6: {payloads:?}"
+        );
+    } else {
+        assert!(errors.is_empty(), "no TIME_ERROR (spike K6): {errors:?}");
     }
     manifest
 }

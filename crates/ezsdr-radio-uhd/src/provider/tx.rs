@@ -358,10 +358,10 @@ impl Tx {
                     return self.core.command_rejected("tx_burst", &format!("UR-21: {error}"));
                 }
             }
-            self.end_open(true);
-        } else {
-            self.end_open(false);
         }
+        // UR-23: the open burst's last buffer is closed with end-of-burst whether the new
+        // one preempts it or starts where it ends (Review L, P1-4).
+        self.end_open(true);
         self.held.insert(held.k, held);
     }
 

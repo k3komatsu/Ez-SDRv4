@@ -15,7 +15,7 @@ use ezsdr_radio::payloads::CommandRejectedPayload;
 use ezsdr_radio::{keys, kinds};
 use serde_json::{Value as Json, json};
 
-use crate::device::{Device, DeviceError, Dir, Settings, exact_decimation};
+use crate::device::{Device, DeviceError, Dir, Settings, decimation};
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -273,8 +273,8 @@ impl Core {
     }
 
     /// **Configuring a direction** (UR-12): the whole configuration on every channel,
-    /// untimed, read back; the rate must be exactly the claim, an exact division of
-    /// the master clock. Returns that division `N`.
+    /// untimed, read back; the rate must be exactly the claim, a decimation of the
+    /// master clock ([`crate::device::decimation`]). Returns that decimation `N`.
     pub fn configure(&self, dir: Dir, channels: usize, settings: &Settings) -> Result<i64, DeviceError> {
         let claim = settings.rate.unwrap_or(0.0);
         for chan in 0..channels {
@@ -299,9 +299,9 @@ impl Core {
                 return Err(DeviceError::failed(format!("UR-12: the device applied {} S/s for the claimed {claim}", applied.rate)));
             }
         }
-        exact_decimation(self.mcr, claim)
+        decimation(self.mcr, claim)
             .map(|n| n as i64)
-            .ok_or_else(|| DeviceError::failed(format!("UR-12: the device applied {claim} S/s for the claimed {claim}, which is no exact division of {} Hz", self.mcr)))
+            .ok_or_else(|| DeviceError::failed(format!("UR-12: {claim} S/s is no decimation 1…512 of {} Hz", self.mcr)))
     }
 
     /// Declares and registers a stream clock with origin `origin` (UR-12, RM-25).

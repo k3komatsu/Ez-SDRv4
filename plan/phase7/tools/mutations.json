@@ -335,11 +335,13 @@
   "id": "G36",
   "name": "the callback clears the pending wake without comparing generations, and the generation is stored after schedule returns",
   "file": "crates/ezsdr-kernel/src/coordinator/paced.rs",
-  "old": "    shared.wake_pending.store(generation, Ordering::Release);\n    let pending = shared.wake_pending.clone();\n    let clear = move |_| {\n        let _ = pending.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);\n    };\n    let at = TimePoint::new(shared.primary, shared.now().ticks);\n    match shared.schedule(at, Box::new(clear)) {\n        Ok(handle) => *lock(&shared.wake_handle) = Some(handle),",
-  "new": "    let pending = shared.wake_pending.clone();\n    let clear = move |_| {\n        pending.store(0, Ordering::Release);\n    };\n    let at = TimePoint::new(shared.primary, shared.now().ticks);\n    match shared.schedule(at, Box::new(clear)) {\n        Ok(handle) => {\n            shared.wake_pending.store(generation, Ordering::Release);\n            *lock(&shared.wake_handle) = Some(handle)\n        }",
+  "old": "    shared.wake_pending.store(generation, Ordering::Release);\n    let pending = shared.wake_pending.clone();\n    let clear = move |_| {\n        let _ = pending.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);\n    };",
+  "new": "    let pending = shared.wake_pending.clone();\n    let clear = move |_| {\n        pending.store(0, Ordering::Release);\n    };",
   "crate": "ezsdr-kernel",
   "test_bin": "device_paced",
-  "filter": "kg_02_every_delivery_wakes_a_waiting_call"
+  "filter": "kg_02_a_wake_that_fires_before_schedule_returns_still_clears",
+  "old2": "        Ok(handle) => *slot = Some(handle),",
+  "new2": "        Ok(handle) => {\n            shared.wake_pending.store(generation, Ordering::Release);\n            *slot = Some(handle)\n        }"
  },
  {
   "id": "V01",
@@ -661,8 +663,8 @@
   "id": "U20",
   "name": "the command queue not counted",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "if self.held.len() + self.released.len() >= depth {",
-  "new": "if false && self.held.len() + self.released.len() >= depth {",
+  "old": "if pending + Core::channels(&self.config, dir) > depth {",
+  "new": "if false && pending + Core::channels(&self.config, dir) > depth {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_24_hardware_timed_updates"
@@ -781,8 +783,8 @@
   "id": "U32",
   "name": "orderly stop discards the tail",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "            let cut = now + tail;",
-  "new": "            let cut = now + 0 * tail;",
+  "old": "StopMode::Orderly => self.stop_at(at, at + tail),",
+  "new": "StopMode::Orderly => self.stop_at(at, at + 0 * tail),",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_26_orderly_stop_delivers_the_tail_abort_does_not"
@@ -926,5 +928,165 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_21_a_burst_before_its_clock_s_origin_is_late"
+ },
+ {
+  "id": "R01",
+  "name": "KC-21a waits for the first Action dispatched to an instance, not the last (L01)",
+  "file": "crates/ezsdr-kernel/src/coordinator/paced.rs",
+  "old": "        *target = (*target).max(*pushed);",
+  "new": "        *target = if *target == 0 { *pushed } else { (*target).min(*pushed) };",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_04_every_action_of_one_call_is_finished"
+ },
+ {
+  "id": "R02",
+  "name": "UR-7's 1 ms bracket rule disabled (L05)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "if width <= WIDEST_BRACKET {",
+  "new": "if width <= WIDEST_BRACKET || width > WIDEST_BRACKET {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_a_read_bracketed_wider_than_1_ms_is_discarded"
+ },
+ {
+  "id": "R03",
+  "name": "a command before one already released is not moved behind it (L07)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "let effective = latest.map_or(e, |latest| latest.max(e));",
+  "new": "let effective = latest.map_or(e, |_| e);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_24_the_device_queue_order_is_the_effective_order"
+ },
+ {
+  "id": "R04",
+  "name": "a receive stream enabled from 0 ignores its instant (P0-3, L08)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "Dir::Rx => lattice(e.max(now + self.core.ticks(RESTART_LEAD_NS)), n),",
+  "new": "Dir::Rx => lattice(now + self.core.ticks(RESTART_LEAD_NS), n),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_rx_channels_from_zero_starts_at_its_instant"
+ },
+ {
+  "id": "R05",
+  "name": "the switch ignores held commands due by e2 (L09)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "if *e <= e2 && timed.dir == dir {",
+  "new": "if false && *e <= e2 && timed.dir == dir {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_the_switch_applies_the_configuration_in_effect_at_e2"
+ },
+ {
+  "id": "R06",
+  "name": "a preempted burst gets no end-of-burst (P1-4, L10)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        self.end_open(true);\n        self.held.insert(held.k, held);",
+  "new": "        self.end_open(false);\n        self.held.insert(held.k, held);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_21_a_burst_inside_the_in_flight_window_is_late"
+ },
+ {
+  "id": "R07",
+  "name": "a cold transmit switch emits no COMMAND_REJECTED for the cancelled bursts (L11)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.core.command_rejected(\"tx_burst\", \"cancelled by a cold change\");",
+  "new": "self.core.reject_note(json!({ \"reason\": \"cancelled by a cold change\" }));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_cold_transmit_change_cancels_the_held_bursts"
+ },
+ {
+  "id": "R08",
+  "name": "an abort delivers the orderly tail (L12)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "            RxCmd::Cut { at, mode } => {\n                self.switch = None;\n                match mode {",
+  "new": "            RxCmd::Cut { at, mode } => {\n                self.switch = None;\n                let _ = mode;\n                match StopMode::Orderly {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_an_abort_publishes_nothing_after_the_stop_instant"
+ },
+ {
+  "id": "R09",
+  "name": "the server's UHD Authority ignores the binding's time_source (L13)",
+  "file": "crates/ezsdr-server/src/catalogue.rs",
+  "old": "&selector(\"time_source\")",
+  "new": "\"internal\"",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_07_the_uhd_authority_takes_the_binding_s_sources"
+ },
+ {
+  "id": "R10",
+  "name": "UR-29's silence bound 3 s instead of 1 s (L14)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "&& self.last_samples.elapsed() > Wall::from_secs(1)",
+  "new": "&& self.last_samples.elapsed() > Wall::from_secs(3)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_29_a_silent_stream_is_a_lost_device"
+ },
+ {
+  "id": "R11",
+  "name": "UR-12 refuses a rate that is not an exact f64 quotient again (P0-2)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "if !(1.0..=512.0).contains(&n) || mcr as f64 / n != rate {",
+  "new": "if !(1.0..=512.0).contains(&n) || mcr as f64 / n != rate || (mcr as f64 / rate).fract() != 0.0 {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_12_every_advertised_rate_is_accepted"
+ },
+ {
+  "id": "R12",
+  "name": "the timed receive stop handed to the device at receipt (P1-1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                    stream.held_stop = Some(e1);",
+  "new": "                    let _ = self.core.device.rx_stop(Some(e1));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_timed_receive_stop_is_released_a_restart_lead_ahead"
+ },
+ {
+  "id": "R13",
+  "name": "UR-25's untimed fallback removed (P1-3)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if k + len > cut_k && stream.held_stop.is_none() && !self.core.is_lost() {",
+  "new": "if false && k + len > cut_k {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_device_that_ignores_the_timed_stop_is_stopped_at_e1"
+ },
+ {
+  "id": "R14",
+  "name": "the receive streamer reopened on every switch (P1-3)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let reopened = if switch.channels != switch.from {",
+  "new": "let reopened = if switch.channels == switch.channels {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_device_that_ignores_the_timed_stop_is_stopped_at_e1"
+ },
+ {
+  "id": "R15",
+  "name": "uhd-rx learns the stop instant only at its shutdown (NONBLOCKING 9)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "        let _ = to_rx.send(RxCmd::Cut { at, mode });\n",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_an_abort_publishes_nothing_after_the_stop_instant"
+ },
+ {
+  "id": "R16",
+  "name": "a stop that arrived during a receive wait does not cut its block (NONBLOCKING 9)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "            // A stop that arrived during the wait cuts this block too (RM-16).\n            self.poll();\n",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_an_abort_publishes_nothing_after_the_stop_instant"
  }
 ]

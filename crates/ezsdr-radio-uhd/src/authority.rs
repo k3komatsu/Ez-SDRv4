@@ -56,6 +56,7 @@ pub(crate) struct DeviceTime {
     schedule: Mutex<Schedule>,
     changed: Condvar,
     failed_reads: AtomicU64,
+    discarded_reads: AtomicU64,
 }
 
 impl DeviceTime {
@@ -80,6 +81,8 @@ impl DeviceTime {
         if let Some((anchor, width)) = self.read() {
             if width <= WIDEST_BRACKET {
                 *lock(&self.anchor) = anchor;
+            } else {
+                self.discarded_reads.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -105,7 +108,12 @@ impl DeviceTime {
             let anchor = *lock(&self.anchor);
             let anchor_ns = anchor.host.saturating_duration_since(self.built).as_nanos() as i128;
             let delta = t.ticks as i128 - anchor_ns;
-            return Ok(anchor.device + (delta * self.mcr as i128 / 1_000_000_000) as i64);
+            let scaled = delta * self.mcr as i128;
+            let floor = anchor.device + scaled.div_euclid(1_000_000_000) as i64;
+            if scaled.rem_euclid(1_000_000_000) != 0 {
+                return Err(TimeError::Inexact { floor: TimePoint::new(self.root, floor) });
+            }
+            return Ok(floor);
         }
         if !self.governs(t.domain) {
             return Err(TimeError::NotGoverned { id: t.domain });
@@ -266,6 +274,7 @@ impl DeviceAuthority {
             schedule: Mutex::new(Schedule { last_fired: None, pending: BTreeMap::new(), next_seq: 0 }),
             changed: Condvar::new(),
             failed_reads: AtomicU64::new(0),
+            discarded_reads: AtomicU64::new(0),
         });
         let stop = Arc::new(AtomicBool::new(false));
         let (clock, flag) = (Arc::downgrade(&time), stop.clone());
@@ -297,6 +306,11 @@ impl DeviceAuthority {
     /// Device time reads that failed and left the anchor as it was (UR-7).
     pub fn failed_reads(&self) -> u64 {
         self.time.failed_reads.load(Ordering::Relaxed)
+    }
+
+    /// Device time reads bracketed more widely than 1 ms, discarded (UR-7).
+    pub fn discarded_reads(&self) -> u64 {
+        self.time.discarded_reads.load(Ordering::Relaxed)
     }
 }
 

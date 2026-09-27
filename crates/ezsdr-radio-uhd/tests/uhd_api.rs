@@ -26,3 +26,11 @@ fn uhd_api_struct_sizes_match_the_headers() {
         [("uhd_stream_args_t", 40), ("uhd_stream_cmd_t", 40), ("uhd_tune_request_t", 48), ("uhd_tune_result_t", 40)]
     );
 }
+
+#[test]
+fn uhd_api_a_streamer_is_freed_once() {
+    // `rx_open`'s and `tx_open`'s own path, without a device: a double free aborts.
+    for _ in 0..3 {
+        ezsdr_radio_uhd::uhd_streamer_lifecycle().unwrap();
+    }
+}

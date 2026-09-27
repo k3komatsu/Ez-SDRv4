@@ -187,8 +187,11 @@ pub(super) fn wake(shared: &Shared, unconditional: bool) {
         let _ = pending.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);
     };
     let at = TimePoint::new(shared.primary, shared.now().ticks);
+    // Held across `schedule`, so that a concurrent FreezeDispatch cancels this wake
+    // rather than miss it (RS-6 step 1; Review L, NONBLOCKING 1).
+    let mut slot = lock(&shared.wake_handle);
     match shared.schedule(at, Box::new(clear)) {
-        Ok(handle) => *lock(&shared.wake_handle) = Some(handle),
+        Ok(handle) => *slot = Some(handle),
         Err(_) => {
             let _ = shared.wake_pending.compare_exchange(
                 generation,

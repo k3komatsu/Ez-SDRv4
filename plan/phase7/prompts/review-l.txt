@@ -10,7 +10,7 @@ implemented in one session under the owner's delegation, commit by commit
   3172a1f feat(phase7): steps 1-2, the device-paced coordinator and radio 1.3.0
   27065e7 feat(phase7): steps 3-4, the Module ezsdr.radio.uhd 0.1.0
   2c4a8ae feat(phase7): step 5, the server and the Python package on a USRP
-  (a later commit records step 6: the mutation tool and list, design-notes §6)
+  89f02b7 test(phase7): step 6, the mutations of spec 19 Appendix A and spec 18 §8
 
 No USRP is attached; the bench session (bench.md) is the owner's, later.
 libuhd 4.10 is installed on this Mac (Homebrew, /opt/homebrew), so the
@@ -87,6 +87,8 @@ Check, in this order:
    <another-scratch-dir> <ids>` from your scratch copy's root for the ones you
    doubt (the whole list takes more than an hour; G16 alone takes 900 s),
    check that each mutation in mutations.json is what the spec's table says,
+   judge design-notes §6.2's reading of the two survivors (G09, G36: races the
+   tests do not win; is a Kernel test hook warranted, or a better test?),
    and design at least eight mutations of your own in the new code (paced.rs,
    authority.rs, control.rs, tx.rs, rx.rs, the server's catalogue) and report
    which survive.

@@ -437,6 +437,9 @@ impl Provider for UhdRadio {
             return Ok(());
         };
         let at = core.now();
+        // uhd-rx learns the stop instant now, so that its tail is counted from it and not
+        // from when the transmit side has finished (RM-16; Review L, NONBLOCKING 9).
+        let _ = to_rx.send(RxCmd::Cut { at, mode });
         // uhd-control first: it cancels the held timed commands as it ends.
         stop.store(true, Ordering::Release);
         self.join(&core, "uhd-control");

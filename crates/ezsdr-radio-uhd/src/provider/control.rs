@@ -25,7 +25,7 @@ use serde_json::json;
 use super::core::{Core, lattice, lock};
 use super::rx::RxCmd;
 use super::tx::{Held, TxCmd};
-use crate::device::{Dir, Iq, Settings, exact_decimation};
+use crate::device::{Dir, Iq, Settings, decimation};
 use crate::profile::{DEVICE_LEAD_NS, RELEASE_WINDOW_NS, RESTART_LEAD_NS};
 
 const POLL: Wall = Wall::from_millis(1);
@@ -191,7 +191,9 @@ impl Control {
         }
         self.released.retain(|effective| *effective > now);
         let depth = self.core.description.timing.command_queue_depth as usize;
-        if self.held.len() + self.released.len() >= depth {
+        // The device queue holds one command per channel (Review L, NONBLOCKING 6).
+        let pending: usize = self.held.values().map(|t| Core::channels(&self.config, t.dir)).sum::<usize>() + self.released.len();
+        if pending + Core::channels(&self.config, dir) > depth {
             let payload = serde_json::to_value(CommandQueueFullPayload { key: key.clone(), depth: depth as i64 }).expect("a payload");
             self.core.emit(&self.core.id, kinds::COMMAND_QUEUE_FULL, Severity::Error, payload);
             self.core.reject_note(json!({ "action": "update_parameter", "reason": "UR-24: the command queue is full", "key": key }));
@@ -231,8 +233,8 @@ impl Control {
                     self.core.device_failed("update_parameter", &error);
                     return;
                 }
+                self.released.push(effective);
             }
-            self.released.push(effective);
             self.config.insert(timed.key.clone(), Value::Num(timed.value));
             lock(&self.core.rec).applied.push(json!({
                 "key": timed.key, "claimed": timed.value, "read_back": null, "at": self.core.at(effective), "issued": true,
@@ -271,10 +273,10 @@ impl Control {
         let channels = Core::channels(&candidate, dir);
         let rate = Core::settings(&candidate, dir).rate.unwrap_or(0.0);
         let n = if channels > 0 {
-            match exact_decimation(self.core.mcr, rate) {
+            match decimation(self.core.mcr, rate) {
                 Some(n) => n as i64,
                 None => {
-                    return self.core.command_rejected("update_parameter", &format!("UR-12: {rate} S/s is no exact division of {} Hz", self.core.mcr));
+                    return self.core.command_rejected("update_parameter", &format!("UR-12: {rate} S/s is no decimation 1…512 of {} Hz", self.core.mcr));
                 }
             }
         } else {
@@ -291,6 +293,9 @@ impl Control {
         let requested = self.ceil_root(at);
         match old {
             None if channels > 0 && (dir == Dir::Tx || !self.core.links.is_empty()) => {
+                if let Some(t) = requested.filter(|t| *t < now) {
+                    self.late_command(Some(key.clone()), t, now);
+                }
                 self.config = candidate;
                 self.enable(dir, channels, n, requested.unwrap_or(now).max(now));
             }
@@ -364,10 +369,12 @@ impl Control {
         if let Err(error) = configured {
             return self.core.device_failed("update_parameter", &error);
         }
+        // RM-25: at or after both `e` and the end of the configuration; a receive stream
+        // also a restart lead ahead, for its timed start (Review L, P0-3).
         let now = self.core.now();
         let origin = match dir {
             Dir::Tx => lattice(e.max(now), n),
-            Dir::Rx => lattice(now + self.core.ticks(RESTART_LEAD_NS), n),
+            Dir::Rx => lattice(e.max(now + self.core.ticks(RESTART_LEAD_NS)), n),
         };
         let clock = match self.core.register(dir, n, origin) {
             Ok(clock) => clock,

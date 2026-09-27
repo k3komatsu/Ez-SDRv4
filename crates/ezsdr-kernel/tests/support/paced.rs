@@ -30,6 +30,8 @@ struct WallState {
     pending: BTreeMap<(i64, u64), WallCallback>,
     next_seq: u64,
     last_fired: Option<i64>,
+    /// The callbacks that have run, for `firing_before_schedule_returns`.
+    ran: std::collections::BTreeSet<u64>,
 }
 
 /// The clock of [`WallAuthority`]: a 1 GHz root counting host nanoseconds since the
@@ -40,6 +42,7 @@ pub struct WallTime {
     base: std::time::Instant,
     state: Mutex<WallState>,
     changed: Condvar,
+    fire_first: AtomicBool,
 }
 
 impl WallTime {
@@ -115,6 +118,18 @@ impl TimeAuthority for WallTime {
         state.next_seq += 1;
         state.pending.insert((ticks, seq), f);
         self.changed.notify_all();
+        if self.fire_first.load(Ordering::Acquire) && ticks <= self.elapsed() {
+            // A paced Authority may return from `schedule` after the callback of an
+            // instant already passed has run on a waiting `next_wakeup` (KC-46a).
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(20);
+            while !state.ran.contains(&seq) {
+                let left = until.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                state = self.changed.wait_timeout(state, left).unwrap_or_else(|e| e.into_inner()).0;
+            }
+        }
         Ok(ScheduleHandle { root: self.root, ticks, seq })
     }
     /// MA-29 as KG-3 amends it: a cancel wakes a waiting `next_wakeup`.
@@ -151,6 +166,7 @@ impl WallAuthority {
             base: std::time::Instant::now(),
             state: Mutex::new(WallState::default()),
             changed: Condvar::new(),
+            fire_first: AtomicBool::new(false),
         });
         let utc = || {
             std::time::SystemTime::now()
@@ -196,6 +212,13 @@ impl WallAuthority {
     /// Publishes no relation (KG-11's negative case).
     pub fn without_relations(mut self) -> WallAuthority {
         self.relations.clear();
+        self
+    }
+
+    /// Makes `schedule` of an instant already passed return only once a waiting
+    /// `next_wakeup` has run its callback (Review L, P1-6).
+    pub fn firing_before_schedule_returns(self) -> WallAuthority {
+        self.time.fire_first.store(true, Ordering::Release);
         self
     }
 
@@ -246,10 +269,12 @@ impl Authority for WallAuthority {
             if !due {
                 break;
             }
-            let (_, callback) = state.pending.pop_first().expect("checked above");
+            let ((_, seq), callback) = state.pending.pop_first().expect("checked above");
             drop(state);
             callback(TimePoint::new(time.root, tick));
             state = time.lock();
+            state.ran.insert(seq);
+            time.changed.notify_all();
         }
         Some(TimePoint::new(time.root, tick))
     }

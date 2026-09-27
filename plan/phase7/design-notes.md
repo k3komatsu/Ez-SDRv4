@@ -133,6 +133,8 @@ The owner asked for it on 2026-09-27 ("Phase 7を実装してください"). It 
 
 ### 6.1 Deviations from the specs
 
+Review L judged each row (§7, DEVIATIONS); the specs now say what the code does where it asked for a spec change.
+
 | Where | The spec says | The code does | Why |
 |---|---|---|---|
 | KG-8 (`ProviderInstance::min_command_lead`) | the field's documentation carries KG-8's sentence | the rustdoc is unchanged and the sentence is a `//` comment beside it | the rustdoc is part of the Kernel's generated schema, which `schema_freeze` holds byte for byte (GZ-2: no Kernel schema changes in Phase 7) |
@@ -183,3 +185,48 @@ The first run left 13 rows not killed. Each was either a mutation that did not s
 | U41 | the test timed the second call, and the mutant blocks the first | it times both calls against 30 ms (the switch is 50 ms away): killed |
 
 **Two rows survive: G09 and G36.** Both are races between the data thread and the control thread whose window is a few microseconds: G09's between `drain` and the `delivered` lock in two concurrent `drain_and_react` calls, G36's between `schedule` returning and the generation being stored (the control thread must run the no-op before the data thread stores). The tests (`kg_02_the_first_delivered_stopping_event_is_the_termination_cause`, 50 Sessions; `kg_02_every_delivery_wakes_a_waiting_call`, 50 wakes) exercise the paths but do not win those races on this Mac. A deterministic kill needs a pause point inside the Kernel (a `testing`-feature hook between the two steps), which would be new Kernel code for a test; left to Review L to decide.
+
+## 7. Review L
+
+Brief: [`prompts/review-l.txt`](prompts/review-l.txt). Report: [`reviews/review-l.md`](reviews/review-l.md). An Opus subagent, 2026-09-28, read-only, probes in scratch copies.
+
+**Verdict: CHANGES_REQUIRED** — 3 P0, 8 P1, 19 P2. The Kernel half held; the UHD half had three defects the bench would have hit first. Every finding was accepted.
+
+| Finding | Disposition |
+|---|---|
+| **P0-1** `rx_open`/`tx_open` freed the streamer they stored (`..stream` copied a `Drop` value) | `RxStream::make`/`TxStream::make` own the handles from creation and are moved into the `Arc`; `uhd_api_a_streamer_is_freed_once` runs the same path without a device (the copying version aborts it with SIGTRAP, checked on a probe copy) |
+| **P0-2** UR-12's exact-arithmetic rule refused 487 of UR-9's 512 rates | UR-12 amended to MockRadio's rule; `decimation` replaces `exact_decimation`; `ur_12_every_advertised_rate_is_accepted` (all 512, 200 MHz/3 through `prepare`, 200 MHz/7 through a cold switch); mutation R11 |
+| **P0-3** a receive stream enabled from 0 ignored its instant | `lattice(e.max(now + 50 ms), n)`; UR-25 amended; `ur_25_rx_channels_from_zero_starts_at_its_instant` (through the `Direct` harness, which gained links and the clock registry); R04 |
+| **P1-1** the timed receive stop was issued at booking | uhd-rx holds it until `e₁` is a restart lead away, then issues it and records it in `applied`; UR-24 reworded (the stream commands stay off uhd-control's list, INFERRED ordering left to B8); `ur_25_a_timed_receive_stop_is_released_a_restart_lead_ahead`; R12 |
+| **P1-2** UHD's global error string | per-handle texts (`uhd_usrp_last_error` under the control mutex, the streamers' own); the global one only for handle-less calls; UR-3 amended |
+| **P1-3** no untimed fallback at `e₁`; reopen on every switch; new streamer before the old one released | all three fixed; `FakeFault::IgnoresTimedStop`; `ur_25_a_device_that_ignores_the_timed_stop_is_stopped_at_e1` (both with and without the fault: one `rx_open`, an untimed stop only when the timed one was ignored, a capture with no gap); R13, R14 |
+| **P1-4** a preempted burst could end without end-of-burst | `end_open(true)` always; `FakeDevice::unended_bursts()` counts a timed start-of-burst inside an un-ended burst; asserted zero in `ur_23_a_burst_ends_at_the_next_bursts_start` and `ur_21_a_burst_inside_the_in_flight_window_is_late`; R06 |
+| **P1-5** KC-21a's "every Action" unguarded | `kg_04_every_action_of_one_call_is_finished` (two schedule entries at T0, 30 ms each); R01 |
+| **P1-6** G36 killable without a Kernel hook | `WallAuthority::firing_before_schedule_returns` and `kg_02_a_wake_that_fires_before_schedule_returns_still_clears`; G36's row now names it |
+| **P1-7** eight obligations with no killing test | L07: `ur_24_the_device_queue_order_is_the_effective_order` (R03); L08: P0-3's test (R04); L09: `ur_25_the_switch_applies_the_configuration_in_effect_at_e2` (R05); L11: `ur_25_a_cold_transmit_change_cancels_the_held_bursts` (R07); L12: `ur_26_an_abort_publishes_nothing_after_the_stop_instant` (R08), which also needed NONBLOCKING 9's fix; L14: `ur_29_a_silent_stream_is_a_lost_device` bounds `DEVICE_LOST` to 1–2 s after the silence (R10); L05: `FakeFault::SlowTimeRead`, `DeviceAuthority::discarded_reads()`, `ur_07_a_read_bracketed_wider_than_1_ms_is_discarded` (R02); L13: `ea_07_the_uhd_authority_takes_the_binding_s_sources` (R09). L04 (a Module's submission under KC-24a's lock) is left untested: no Phase 7 Module submits |
+| **P1-8** `rehearsal_b7_session_loopback` flaky under load | on the fake the check is spike K6's regression — no `late_at_device` and no move of more than one device lead; the hardware run keeps "no `TIME_ERROR` at all" |
+| N-1 wake handle stored after `schedule` | stored under a lock held across `schedule` (KC-46a amended) |
+| N-2 the pass checks `done` before the slot lock | not changed: re-checking under the slot lock would take `done` inside a slot, the reverse of RestoreBaseline's order, and the case needs RS-8a to have abandoned step 3; recorded as a ceiling |
+| N-3 KC-46b's unconditional wake is equivalent | kept, and KC-46b says why it is redundant |
+| N-4 ignored results | `clear_command_time`'s result checked; `channels()` and the metadata getters left (a ceiling: a failed getter reads as 0) |
+| N-5 `BROKEN_CHAIN` as lost | not lost; UR-29 amended |
+| N-6 UR-24's depth per update | one per channel; UR-24 amended |
+| N-7 `host.monotonic` floors | refused as `Inexact` (TM-16c) |
+| N-8 a from-zero transmit enable with a passed `at` | `LATE_COMMAND`; UR-25 amended |
+| N-9 the receive tail counted from uhd-rx's shutdown | uhd-rx is told the stop instant as `stop` begins (`RxCmd::Cut`), and a stop that arrives during a receive wait cuts that block; UR-26 amended; R15, R16 |
+| N-10 a confusing message | reworded (`"UR-12: <rate> S/s is no decimation 1…512 of <mcr> Hz"`) |
+| N-11 cleanup closes both streamers or neither | a ceiling (conservative; the `Device` trait closes both) |
+| N-12 the fake never sends a partial count | a ceiling of the fake; the partial path is reached through `TxBlocks` |
+| N-13 U07 guards another claim | recorded (§6.2); the order inside `uhd.rs::set_sources` waits for the bench |
+| N-14 a test name in KG-9 | `tm_16_authority_order_and_now` |
+| N-15 NX-4's stale reason | design/14 reworded |
+| N-16 the 6 s bound | 3 s, as UR-16 says |
+| N-17 a blank line | removed |
+| N-18 unused declarations | used by P1-2 |
+| N-19 the per-nap re-anchor untested | recorded: near-equivalent while uhd-clock re-anchors every 100 ms |
+| DEVIATIONS 1–15 | the spec text now says what the code does: KG-8's comment (spec 19), the `mr_32` note (VE-4), the dev-dependencies (overview §5), UR-3's brackets, UR-7's counters, UR-21's refusal list, UR-24's stream commands, UR-32 deferred by name, UR-34's first block, EA-7's `Config::new` (design/16) |
+| G09 | kept as not killable by a black-box test (the reviewer's reading: only Kernel code runs in the window); no Kernel hook |
+
+**Mutations after the fixes.** `mutations.json` gained Review L's rows R01…R16, each killed by the test its fix added (named in the table above). The whole list of 109 ran once: **107 killed**, then R08 (its first text was equivalent — under abort the immediate untimed stop hides the cut — and now makes abort behave as orderly) and R16 (its test's 2 ms blocks made the straddling block a matter of chance; the test now uses 20 ms blocks) were rewritten and killed in two further runs each. G36 is killed by its new test. **G09 was killed in this run** after surviving the two before: it remains a race the tests only sometimes win, not killable deterministically without a Kernel hook, which Review L advised against.
+
+A process note: a probe built in a scratch copy with the shared target directory left mutated artifacts that a later build of this worktree reused (AGENTS.md §7's mtime rule, met again) — three runs of `ur_26_an_abort_publishes_nothing_after_the_stop_instant` failed on the mutant's code until `find … -exec touch {} +`. Every run recorded here followed a `touch`.

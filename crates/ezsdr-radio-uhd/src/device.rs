@@ -200,39 +200,20 @@ pub fn from_time_spec(full: i64, frac: f64, mcr: u64) -> Result<i64, DeviceError
         .ok_or_else(overflow)
 }
 
-/// UR-12: the integer decimation `N` with `mcr / N` exactly `rate`, in exact
-/// arithmetic over the `f64`'s own value.
-pub fn exact_decimation(mcr: u64, rate: f64) -> Option<u64> {
+/// UR-12 as Review L (P0-2) corrected it: the integer decimation `N = round(mcr /
+/// rate)`, 1 ≤ `N` ≤ 512, whose rate is `mcr / N` computed in `f64` — MockRadio's rule
+/// (`Profile::decimation`), so every rate the profile advertises is one the Provider
+/// accepts. `N` itself is exact whatever the `f64` rate's last bit: a SampleClock's
+/// ratio is `N / 1` (K13's hazard was computing `N` by float division, not the rate).
+pub fn decimation(mcr: u64, rate: f64) -> Option<u64> {
     if !rate.is_finite() || rate <= 0.0 {
         return None;
     }
     let n = (mcr as f64 / rate).round();
-    if !(1.0..=u32::MAX as f64).contains(&n) {
+    if !(1.0..=512.0).contains(&n) || mcr as f64 / n != rate {
         return None;
     }
-    let n = n as u64;
-    // rate = mantissa · 2^exponent exactly; mcr / n == rate ⟺ mcr · 2^-exponent == mantissa · n.
-    let bits = rate.to_bits();
-    let exponent = ((bits >> 52) & 0x7ff) as i32;
-    let mut mantissa = bits & ((1 << 52) - 1);
-    let mut exponent = if exponent == 0 {
-        -1074
-    } else {
-        mantissa |= 1 << 52;
-        exponent - 1075
-    };
-    while mantissa & 1 == 0 && mantissa != 0 {
-        mantissa >>= 1;
-        exponent += 1;
-    }
-    let lhs = u128::from(mcr);
-    let rhs = u128::from(mantissa).checked_mul(u128::from(n))?;
-    let equal = if exponent >= 0 {
-        rhs.checked_mul(1u128.checked_shl(exponent as u32)?) == Some(lhs)
-    } else {
-        lhs.checked_mul(1u128.checked_shl((-exponent) as u32)?) == Some(rhs)
-    };
-    equal.then_some(n)
+    Some(n as u64)
 }
 
 // ---------------------------------------------------------------- the fake
@@ -280,6 +261,11 @@ pub enum FakeFault {
     },
     /// The clock steps back by this many ticks, once.
     StepBack(Duration, i64),
+    /// A timed stop of the receive stream is ignored (UR-25's INFERRED case).
+    IgnoresTimedStop,
+    /// From this device time on, `time_now` takes 5 ms before it reads (UR-7's 1 ms
+    /// bracket rule).
+    SlowTimeRead(Duration),
 }
 
 /// How [`FakeDevice`] behaves (UR-33).
@@ -338,6 +324,7 @@ struct Fake {
     tx_samples: BTreeMap<i64, (i64, Vec<Iq>)>,
     reports: VecDeque<TxReport>,
     restarts: u64,
+    unended: u64,
     fired: Vec<bool>,
     rates_seen: Vec<f64>,
     calls: Vec<String>,
@@ -384,6 +371,7 @@ impl FakeDevice {
                 tx_samples: BTreeMap::new(),
                 reports: VecDeque::new(),
                 restarts: 0,
+                unended: 0,
                 fired,
                 rates_seen: Vec::new(),
                 calls: Vec::new(),
@@ -400,6 +388,12 @@ impl FakeDevice {
     /// Starts of burst without a time spec inside a burst (UR-22, RM-13's CORDIC reset).
     pub fn restarts(&self) -> u64 {
         self.lock().restarts
+    }
+
+    /// Timed starts of burst sent while a burst was still open: the device would start
+    /// a burst inside one that never ended (UR-23; Review L, P1-4).
+    pub fn unended_bursts(&self) -> u64 {
+        self.lock().unended
     }
 
     fn lock(&self) -> MutexGuard<'_, Fake> {
@@ -538,6 +532,13 @@ impl Device for FakeDevice {
     }
 
     fn time_now(&self) -> Result<i64, DeviceError> {
+        let slow = {
+            let st = self.lock();
+            self.config.faults.iter().any(|f| matches!(f, FakeFault::SlowTimeRead(at) if self.now(&st) >= self.ticks_of(*at)))
+        };
+        if slow {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let mut st = self.lock();
         self.lost(&st)?;
         for (index, fault) in self.config.faults.iter().enumerate() {
@@ -654,6 +655,7 @@ impl Device for FakeDevice {
         self.lost(&st)?;
         st.calls.push(format!("rx_stop {}", at.map_or("now".to_owned(), |t| t.to_string())));
         match at {
+            Some(_) if self.config.faults.contains(&FakeFault::IgnoresTimedStop) => {}
             Some(at) => st.rx_stop_at = Some(at),
             None => st.rx_next = None,
         }
@@ -812,6 +814,9 @@ impl Device for FakeDevice {
                 at.map_or("-".to_owned(), |t| t.to_string())
             ));
             if sob {
+                if at.is_some() && st.tx_in_burst {
+                    st.unended += 1;
+                }
                 match at {
                     Some(t) if t < now || t < st.tx_cursor => {
                         let tick = Some(now);

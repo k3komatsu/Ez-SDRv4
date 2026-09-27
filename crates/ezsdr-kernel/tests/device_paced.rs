@@ -528,6 +528,30 @@ fn kg_02_every_delivery_wakes_a_waiting_call() {
 }
 
 #[test]
+fn kg_02_a_wake_that_fires_before_schedule_returns_still_clears() {
+    // KC-46a: the pending generation is stored before `schedule`, so a callback that
+    // runs before `schedule` returns clears its own wake (Review L, P1-6).
+    let probe = Probe::new();
+    let mut double = ThreadedProvider::new("radio", "radio", &probe);
+    for i in 1..=20 {
+        double = double.marking("test.MARK", Wall::from_millis(10 * i));
+    }
+    let rig = paced_with(WallAuthority::firing_before_schedule_returns);
+    let mut run = session(provider(rig.assembly, "radio", double), &profile_one());
+    let mark = kind("test.MARK");
+    let mut from = 0;
+    for _ in 0..20 {
+        let horizon = after(&run, Wall::from_secs(2));
+        let begun = Instant::now();
+        let found = run.wait_for(std::slice::from_ref(&mark), from, horizon).unwrap();
+        let index = found.expect("each mark is found before the horizon");
+        assert!(begun.elapsed() < Wall::from_millis(200), "{:?}", begun.elapsed());
+        from = index + 1;
+    }
+    let _ = manifest_of(run);
+}
+
+#[test]
 fn kg_02_a_detached_lease_expires_while_no_call_runs() {
     let probe = Probe::new();
     let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe));
@@ -707,6 +731,33 @@ fn kg_04_a_session_call_returns_after_the_provider_has_finished() {
     let entry = run.submit(gain(3.0), None).unwrap();
     assert!(admitted(&entry), "{entry:?}");
     assert!(probe.lines().iter().any(|line| line == "radio:finished:UpdateParameter"));
+    let _ = manifest_of(run);
+}
+
+#[test]
+fn kg_04_every_action_of_one_call_is_finished() {
+    // KC-21a: two Actions dispatched to one threaded instance at one instant; the call
+    // that dispatched them returns only when both are finished (Review L, P1-5).
+    let probe = Probe::new();
+    let (mut spec, profile) = output_docs(64);
+    let radio = serde_json::to_value(ResourceId::parse("radio").unwrap()).unwrap();
+    let entry = |value: f64| serde_json::json!({
+        "at": { "clock": "radio", "offset_ticks": 0 },
+        "action": { "kind": "update_parameter", "target": radio, "key": "test.gain", "value": value, "class": "hardware_timed" }
+    });
+    spec["schedule"] = serde_json::json!([entry(1.0), entry(2.0)]);
+    let assembly = provider(
+        paced().assembly,
+        "radio",
+        ThreadedProvider::new("radio", "radio", &probe)
+            .publishing(100, Wall::from_millis(1))
+            .with_action_delay(Wall::from_millis(30)),
+    );
+    let mut run = start_spec_run(&spec, &profile, sink(assembly, RecordingSink::new("rec", &probe), &probe)).unwrap();
+    running(&run);
+    let t0 = run.start_instant().unwrap();
+    run.advance_to(TimePoint::new(t0.domain, t0.ticks + 1)).unwrap();
+    assert_eq!(count(&probe, "radio:finished:UpdateParameter"), 2, "{:?}", probe.lines());
     let _ = manifest_of(run);
 }
 
