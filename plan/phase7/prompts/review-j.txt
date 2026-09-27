@@ -1,0 +1,148 @@
+You are the independent, adversarial reviewer for "Review J" of the Ez-SDR v4
+Phase 7 DESIGN, in /Users/komatsu/work/Ez-SDRv4 (branch `main`, HEAD 7cc6147 plus
+uncommitted design documents under plan/phase7/). The design was written by a
+different model (Claude Opus, the primary engineer). Your value is independent
+scrutiny, not agreement. This review follows the luna-primary-engineer review
+protocol: one foreground review turn, read-only, one designated result file.
+
+Phase 7 is Vision §67's "Native UHD Provider". The owner first asked for design and
+implementation up to the point where hardware is needed, then, mid-way, to stop at
+the design and to design it in detail. So there is NO implementation: you are
+reviewing whether this design is right, complete, minimal and implementable, before
+the owner's Gate P. A design that would fail on the first implementation step, on
+the bench, or at the Phase 8 parity test is what this review exists to catch.
+
+What is under review (read all four in full):
+  plan/phase7/00-overview.md    holes (§2), scope (§3), decisions T1-T18 (§4),
+                                crates, governance GZ-1..GZ-10, tests, traceability,
+                                sequencing, exit criteria
+  plan/phase7/19-amendments.md  spec 19: Kernel KG-1..KG-13, Vocabulary/Module/
+                                frontend VE-1..VE-6, Appendix A mutations
+  plan/phase7/18-uhd-radio.md   spec 18: the Module ezsdr.radio.uhd 0.1.0, UR-1..UR-35,
+                                decisions U1-U12, tests, mutations
+  plan/phase7/bench.md          the first hardware session B0-B9
+  (also plan/phase7/vision-issues.md and plan/phase7/design-notes.md)
+
+Read first, for context: AGENTS.md (the repository's rules: minimal core, scope
+creep is a defect, evidence-driven, VERIFIED vs INFERRED); handoff.md §4 (what
+Phases 1-6 left for Phase 7); plan/spikes/2026-09-26-uhd.md (the UHD spike's findings
+K1-K13, which were Phase 7's prototype; its code is on branch spike/uhd:
+`git show origin/spike/uhd:spike/uhd/src/provider.rs` etc.); plan/phase4/00-overview.md
+§3 and plan/phase6/00-overview.md §3-§4 (the items handed to Phase 7).
+
+Normative text the design amends or relies on (read the rules it cites):
+  design/01-time-model.md (TM-13a..TM-13e, TM-16a..TM-17b, TM-18, TM-20)
+  design/04-run-and-session.md (RS-6, RS-8a, RS-19, RS-23, RS-25a)
+  design/05-module-api.md (MA-7, MA-8, MA-9, MA-10, MA-14, MA-14a, MA-15, MA-29,
+    MA-30, MA-41, UC-1..UC-6)
+  design/06-kernel-coordinator.md (KA-7, KA-12, KA-16, KC-2, KC-12..KC-24, KC-28..
+    KC-33, KC-37a, KC-38, KC-39, KC-44, KC-45, decisions K1-K12)
+  design/07-radio-model.md (RM-2..RM-24), design/09-mock-radio.md (MR-3, MR-7, MR-9,
+    MR-11, MR-16..MR-18), design/10-host-data-path.md (HD-10, HD-11),
+    design/16-easy-api.md (EA-7, EA-9, EA-14, EA-16, EA-17)
+  the Vision: design/vision/03-simulation-mock-and-time.md (§13-§15),
+    design/vision/06-performance-islands-and-radio-backends.md (§32, §34-§36),
+    design/vision/10-implementation-path-and-testing.md (§57-§61),
+    design/vision/11-boundaries-invariants-and-roadmap.md (§62-§67)
+  the code the design changes: crates/ezsdr-kernel/src/coordinator/*.rs,
+    crates/ezsdr-kernel/src/module_api.rs, crates/ezsdr-kernel/src/time/*.rs,
+    crates/ezsdr-kernel/src/event.rs, crates/ezsdr-kernel/src/run.rs,
+    crates/ezsdr-mock-radio/src/*.rs, crates/ezsdr-radio/src/lib.rs,
+    crates/ezsdr-server/src/*.rs, crates/ezsdr-acceptance/tests/governance.rs,
+    python/ezsdr/session.py
+  UHD 4.10's headers on this machine: /opt/homebrew/include/uhd.h and
+    /opt/homebrew/include/uhd/ (error.h, types/metadata.h, usrp/usrp.h,
+    usrp/multi_usrp.hpp, types/sensors.h)
+
+Rules for you:
+- Do not edit, create or delete anything in the repository, and write no file
+  except the designated result file named at the end. Never run a git command that
+  changes state, never run `cargo fmt`, never touch v3/.
+- You may run read-only commands (grep, git show, git log, reading headers). If you
+  need a probe to settle a claim (for example, what `ClockRegistry::end` accepts, or
+  whether `collect_prepare` locks every slot), copy the tree to a scratch directory
+  OUTSIDE the repository with fresh timestamps (`rsync -a --no-times --exclude
+  target --exclude v3 --exclude .git --exclude tmp --exclude .cargo --exclude
+  ezsdr-runs ./ <scratch>/`), run `find <scratch> -type f -exec touch {} +`, and
+  build there with CARGO_TARGET_DIR=$HOME/.cache/cargo-target/Ez-SDRv4-review. Report
+  what a probe printed. Nothing else builds in that directory while you run.
+- Mark what you could not verify INFERRED. No finding without evidence.
+
+Check, in this order:
+1. Premise and scope. Does the design deliver what Vision §35, §59 and §67 ask of a
+   "Native UHD Provider" up to the bench? Is anything out of scope (overview §3) that
+   §58/§59/§61 or the owner's earlier Gate X decisions put in Phase 7? Is anything in
+   scope that should not be (scope creep): in particular the stopper thread (KG-3),
+   moving RM-8's coercion into the radio Vocabulary (VE-1), `Authority::relations`
+   (KG-11), the UHD reference monitor (UR-27), EZSDR_PROFILE (VE-5)? Judge T1-T18 and
+   U1-U12 one line each: does the evidence support the choice over the rejected
+   alternatives?
+2. The holes (overview §2). Confirm or refute each evidence cell against the code at
+   7cc6147. Is a hole missing — a place where the Kernel, the Radio Model or the
+   server still assumes the Simulation class and the design does not say what
+   happens in HardwareInLoop / Hardware? (Candidates to check: Lease expiry and
+   Detached Leases while no client call runs; KC-22's same-instant count against a
+   device clock; KC-17/KC-19 lead checks at start; KC-29's advance_to rounding on a
+   device root; RS-8a deadlines against UHD calls; HD-11's `step(until)` contract
+   under a data thread; KC-44's try_lock while the data thread holds a Sink slot;
+   RS-42 and the Manifest's `deterministic`.)
+3. Concurrency of KG-2/KG-3/KG-4/KG-6. Walk every lock and thread the design adds
+   against the coordinator's existing locks (`Shared`'s mutexes, the Module slots,
+   `run_cleanup`'s per-step threads, `with_inputs`, `try_slot`): find deadlocks,
+   races, double stops, lost wakeups, a data thread that outlives cleanup, an event
+   index that can change, a KC-21a wait that can hang or return early wrongly, a
+   stopper that races the control thread's cleanup. Is the "one pass without
+   step_until_quiescent" rule sound for every Executor and Sink contract (MA-20,
+   HD-11)? Is the wake mechanism (a no-op callback at `now`) implementable on the
+   Authority contract (TM-16c's "a tick of the root", InPast) for both WallAuthority
+   and the UHD DeviceAuthority?
+4. Time. KG-7's T0 rounding and RM-25's lattice: is it correct for rational
+   root_ticks_per_tick, for clocks declared on another root, for MockRadio in every
+   existing test (will any existing Simulation test's T0 move, and is the design
+   honest about it)? KG-8's lead-from-dispatch with a delivery allowance and RM-14's
+   device lead: consistent with RS-19, KC-19, UC-6 and MR-17? KG-9, KG-11 (are the
+   ClockRelation fields filled correctly, TM-14/TM-18?), KG-13 against UC-3/TM-13c.
+5. Spec 18 against the Radio Model rule by rule (RM-2..RM-25): every producer
+   obligation the UHD Provider has, and whether a rule is missing, contradicts
+   RM/MR text, or cannot be implemented on UHD's C API as the headers declare it.
+   Attack UR-25 (cold changes: bookkeeping before the switch, future `end`, timed
+   stop), UR-23 (in-flight window), UR-24 (queue depth counting vs UHD
+   back-pressure), UR-21 (late policy with the device lead), UR-17/UR-18/UR-19
+   (receive flags, SC-18/SC-30 consistency), UR-7 (Authority time, schedule/cancel,
+   the 20 ms nap vs a 2 ms command lead), UR-3 (the C API slice: is every function
+   and struct named real in UHD 4.10's headers? TM-20 rounding), UR-33 (is FakeDevice
+   faithful enough for the tests it is used in, and could it make a test pass that
+   real hardware would fail?).
+6. Tests and mutations. Does every rule with code have a named test that would fail
+   if the rule's code were disabled (GZ-6)? Point to a test that would pass with the
+   behaviour broken, a flaky wall-clock test design, a test whose runtime is
+   unreasonable, a mutation in Appendix A / spec 18 §8 that its named test would not
+   kill.
+7. Governance: PO-2 (GZ-3), PO-4/PO-8 (GZ-5, MA-3 lists), PO-11 (GZ-4),
+   kernel_surface and MA-6 (GZ-2), schema changes (VE-3), versions (MockRadio 1.3.0,
+   radio 1.3.0, server 0.2.0), AGENTS.md's "Kernel stays small" and "Core validates,
+   it does not optimise".
+8. The bench (bench.md): is every step safe (RF), ordered correctly, and does each
+   pass criterion test what it claims? Can the bench session be run by the owner
+   from this page alone?
+
+Severity:
+  P0: a design that is wrong — it contradicts a normative rule it does not amend,
+      cannot be implemented as written, deadlocks/races, or breaks an existing
+      guarantee;
+  P1: likely to mislead the implementation or a later phase, a claim the evidence
+      does not support, a test that proves less than its rule, a missing rule;
+  P2: clarity.
+Each finding: a location (file and section/rule id, or file:line), evidence (quoted
+text or a command and its output), the severity, and one recommended fix.
+
+Result: write the complete review to the designated result file, and to no other
+file. Use exactly these five headings, each once, in this order, at the start of a
+line (content under each heading is free-form):
+
+VERDICT: PASS | CHANGES_REQUIRED | PASS_WITH_RISK   (choose one)
+BLOCKERS:            every P0 in full
+NONBLOCKING:         every P1 in full, then the P2s one line each; then your one-line
+                     judgement of each of T1-T18 and U1-U12
+TEST_GAPS:           the tests and mutations that would not catch what they claim to
+PREVIOUS_FINDINGS:   "none (first review)"
