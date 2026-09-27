@@ -1,0 +1,930 @@
+[
+ {
+  "id": "G01",
+  "name": "KC-2 refuses HardwareInLoop again",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "if plan_class == ExecutionClass::RealtimeEmulation {",
+  "new": "if matches!(plan_class, ExecutionClass::RealtimeEmulation | ExecutionClass::HardwareInLoop) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_01_a_device_paced_run_reaches_running"
+ },
+ {
+  "id": "G02",
+  "name": "KC-2 admits RealtimeEmulation",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "if plan_class == ExecutionClass::RealtimeEmulation {",
+  "new": "if false && plan_class == ExecutionClass::RealtimeEmulation {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_02_a_wall_paced_authority_is_refused"
+ },
+ {
+  "id": "G03",
+  "name": "KC-2a's stepped-Provider check removed",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "Some(Inst::Provider(i)) if shared.providers[*i].stepped => {",
+  "new": "Some(Inst::Provider(i)) if false && shared.providers[*i].stepped => {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_01_a_stepped_provider_is_refused_in_a_device_paced_class"
+ },
+ {
+  "id": "G04",
+  "name": "KC-2a checks affinity only",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "} else if island.rt_policy.is_some() {",
+  "new": "} else if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_01_an_island_with_an_rt_policy_is_refused"
+ },
+ {
+  "id": "G05",
+  "name": "the data thread is not started",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "super::paced::start_data_thread(&self.shared);",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_02_the_data_thread_drains_a_sink_while_no_call_runs"
+ },
+ {
+  "id": "G06",
+  "name": "the device-paced control round steps Sinks too",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "if shared.device_paced() && !cleaning {",
+  "new": "if false && shared.device_paced() && !cleaning {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_02_every_step_before_finish_runs_on_the_data_thread"
+ },
+ {
+  "id": "G07",
+  "name": "the pass steps a Sink with the Kernel's step_until_quiescent",
+  "file": "crates/ezsdr-kernel/src/coordinator/paced.rs",
+  "old": "        Inst::Sink(i) => {\n            let mut guard = lock(&shared.sinks[i].object);\n            contain(|| guard.step(t))\n        }",
+  "new": "        Inst::Sink(i) => {\n            let mut guard = lock(&shared.sinks[i].object);\n            let collector = shared.collector.get().expect(\"a collector\").clone();\n            let mut instances = [crate::module_api::SteppedInstance { id: shared.first_fragment(inst), inner: crate::module_api::SteppedRef::Sink(&mut **guard) }];\n            crate::module_api::step_until_quiescent(&mut instances, t, &*collector, &super::state::kernel_source()).map(|_| StepOutcome { progressed: false })\n        }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_02_a_sink_that_always_progresses_does_not_livelock"
+ },
+ {
+  "id": "G08",
+  "name": "no wake after a delivery",
+  "file": "crates/ezsdr-kernel/src/coordinator/paced.rs",
+  "old": "        } else if delivered > 0 {\n            wake(&shared, false);\n        }",
+  "new": "        }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_02_wait_for_returns_when_the_data_thread_delivers"
+ },
+ {
+  "id": "G09",
+  "name": "drain_and_react applies the reactions outside the delivered lock",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "    let mut delivered = lock(&shared.delivered);\n    let mut ended = false;",
+  "new": "    let mut ended = false;",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_02_the_first_delivered_stopping_event_is_the_termination_cause",
+  "old2": "    delivered.extend(events);",
+  "new2": "    lock(&shared.delivered).extend(events);"
+ },
+ {
+  "id": "G10",
+  "name": "the data thread does not perform RS-6 steps 1-2 after requesting an end",
+  "file": "crates/ezsdr-kernel/src/coordinator/paced.rs",
+  "old": "            stop_early(&shared);",
+  "new": "            wake(&shared, true);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_03_a_fatal_event_stops_the_providers_without_a_client_call"
+ },
+ {
+  "id": "G11",
+  "name": "StopTx (the data thread's included) not recorded as done",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                done.insert((step as u8, instance));\n                drop(done);\n                let mode = current_stop_mode(&self.shared);\n                let result = {",
+  "new": "                drop(done);\n                let mode = current_stop_mode(&self.shared);\n                let result = {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_03_a_step_done_early_is_not_repeated"
+ },
+ {
+  "id": "G12",
+  "name": "the device-paced step 3 skips the final round",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "        round(shared, shared.now(), true);\n        return true;",
+  "new": "        return true;",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_03_step_3_runs_a_final_round_over_the_sinks"
+ },
+ {
+  "id": "G13",
+  "name": "Drop does nothing",
+  "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
+  "old": "if self.shared.device_paced() && !matches!(self.state(), RunState::CleanedUp { .. }) {\n            ending::finish(self);",
+  "new": "if false && self.shared.device_paced() && !matches!(self.state(), RunState::CleanedUp { .. }) {\n            ending::finish(self);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_03_dropping_a_live_device_paced_handle_cleans_up"
+ },
+ {
+  "id": "G14",
+  "name": "recv() counts an Action finished when it takes it",
+  "file": "crates/ezsdr-kernel/src/coordinator/state.rs",
+  "old": "            state.taken += 1;",
+  "new": "            state.taken += 1;\n            state.finished = state.taken;",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_04_a_session_call_returns_after_the_provider_has_finished"
+ },
+ {
+  "id": "G15",
+  "name": "submit does not wait (KC-21a)",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "super::paced::wait_finished(&run.shared, &targets);",
+  "new": "let _ = &targets;",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_04_the_next_admission_sees_the_state_the_previous_action_made"
+ },
+ {
+  "id": "G16",
+  "name": "the wait has no deadline (killed by the per-mutation timeout)",
+  "file": "crates/ezsdr-kernel/src/coordinator/paced.rs",
+  "old": "            if remaining.is_zero() {",
+  "new": "            if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_04_a_provider_that_never_finishes_fails_the_run"
+ },
+ {
+  "id": "G17",
+  "name": "run_until_end schedules no horizon in a device-paced class",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "        if self.shared.device_paced() {\n            return self.advance_to(horizon);\n        }\n",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_05_a_device_paced_spec_run_runs_to_its_horizon"
+ },
+ {
+  "id": "G19",
+  "name": "prepare called directly in a device-paced class",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "let report = if self.shared.device_paced() {",
+  "new": "let report = if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_06_a_prepare_that_hangs_fails_the_run_within_its_budget"
+ },
+ {
+  "id": "G20",
+  "name": "arm called directly in a device-paced class",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "let result = if self.shared.device_paced() {",
+  "new": "let result = if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_06_an_arm_that_hangs_fails_the_run_within_its_budget"
+ },
+ {
+  "id": "G21",
+  "name": "the bounded call used in the Simulation class",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "let report = if self.shared.device_paced() {",
+  "new": "let report = if true {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_06_the_simulation_class_prepares_on_the_callers_thread"
+ },
+ {
+  "id": "G22",
+  "name": "T0 not rounded to L",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "                q.checked_mul(l)",
+  "new": "                let _ = q;\n                Some(earliest)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_07_t0_lies_on_every_declared_grid"
+ },
+ {
+  "id": "G23",
+  "name": "L from the first declared clock only",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "            lattice = l;",
+  "new": "            if lattice == 1 {\n                lattice = l;\n            }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_07_t0_lies_on_every_declared_grid"
+ },
+ {
+  "id": "G24",
+  "name": "T0 rounded down",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "earliest.div_euclid(l) + i64::from(earliest.rem_euclid(l) != 0)",
+  "new": "earliest.div_euclid(l)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_07_t0_lies_on_every_declared_grid"
+ },
+ {
+  "id": "G25",
+  "name": "relations always empty",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "let published = contain_all(|| self.shared.authority.relations()).unwrap_or_default();",
+  "new": "let published: Vec<crate::time::ClockRelation> = Vec::new();",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_11_a_device_paced_run_records_its_root_s_relations"
+ },
+ {
+  "id": "G26",
+  "name": "the relation recorded in the Simulation class",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "        if !self.shared.device_paced() {\n            return Vec::new();\n        }\n        let published",
+  "new": "        let published",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_11_a_simulation_run_records_none"
+ },
+ {
+  "id": "G27",
+  "name": "a relation with a foreign source recorded",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": ".partition(|relation| relation.source == self.shared.primary);",
+  "new": ".partition(|_| true);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_11_a_device_paced_run_without_a_utc_relation_says_so"
+ },
+ {
+  "id": "G28",
+  "name": "KG-12's check removed",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "    if run.shared.device_paced() {\n        return Some(",
+  "new": "    if false {\n        return Some(",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_12_run_child_is_refused_in_a_device_paced_session"
+ },
+ {
+  "id": "G29",
+  "name": "the admission lock not taken by FreezeDispatch",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                let _admission = lock(&self.shared.admission);\n                self.shared.frozen.store(true, Ordering::Release);",
+  "new": "                self.shared.frozen.store(true, Ordering::Release);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_04_no_action_is_dispatched_after_the_freeze"
+ },
+ {
+  "id": "G30",
+  "name": "the Lease deadline not checked by the data thread",
+  "file": "crates/ezsdr-kernel/src/coordinator/paced.rs",
+  "old": "if deadline.is_some_and(|at| shared.ctx.host_clock.monotonic_millis() >= at) {",
+  "new": "if false && deadline.is_some_and(|at| shared.ctx.host_clock.monotonic_millis() >= at) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_02_a_detached_lease_expires_while_no_call_runs"
+ },
+ {
+  "id": "G32",
+  "name": "a failed instance stepped again",
+  "file": "crates/ezsdr-kernel/src/coordinator/paced.rs",
+  "old": "if failed.contains(&inst) || lock(&shared.done)",
+  "new": "if lock(&shared.done)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_02_a_failed_sink_is_not_stepped_again"
+ },
+ {
+  "id": "G33",
+  "name": "the paced schedule refuses an instant before now (UR-7)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "schedule.last_fired.filter(|fired| ticks < *fired)",
+  "new": "Some(self.extrapolate()).filter(|fired| ticks < *fired)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_schedule_accepts_an_instant_already_passed"
+ },
+ {
+  "id": "G34",
+  "name": "KC-2 refuses Hardware",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "if plan_class == ExecutionClass::RealtimeEmulation {",
+  "new": "if matches!(plan_class, ExecutionClass::RealtimeEmulation | ExecutionClass::Hardware) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_01_the_hardware_class_reaches_running"
+ },
+ {
+  "id": "G35",
+  "name": "the data thread keeps stepping after an abort",
+  "file": "crates/ezsdr-kernel/src/coordinator/paced.rs",
+  "old": "        if shared.stopped_early.load(Ordering::Acquire) && end_mode(&shared) == Some(CleanupMode::Abort) {\n            return;\n        }\n",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_03_an_abort_stops_the_data_thread"
+ },
+ {
+  "id": "G36",
+  "name": "the callback clears the pending wake without comparing generations, and the generation is stored after schedule returns",
+  "file": "crates/ezsdr-kernel/src/coordinator/paced.rs",
+  "old": "    shared.wake_pending.store(generation, Ordering::Release);\n    let pending = shared.wake_pending.clone();\n    let clear = move |_| {\n        let _ = pending.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);\n    };\n    let at = TimePoint::new(shared.primary, shared.now().ticks);\n    match shared.schedule(at, Box::new(clear)) {\n        Ok(handle) => *lock(&shared.wake_handle) = Some(handle),",
+  "new": "    let pending = shared.wake_pending.clone();\n    let clear = move |_| {\n        pending.store(0, Ordering::Release);\n    };\n    let at = TimePoint::new(shared.primary, shared.now().ticks);\n    match shared.schedule(at, Box::new(clear)) {\n        Ok(handle) => {\n            shared.wake_pending.store(generation, Ordering::Release);\n            *lock(&shared.wake_handle) = Some(handle)\n        }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kg_02_every_delivery_wakes_a_waiting_call"
+ },
+ {
+  "id": "V01",
+  "name": "RM-8's tie goes to the higher grid value",
+  "file": "crates/ezsdr-radio/src/device.rs",
+  "old": "let rounded = if r > 0.5 { f + 1.0 } else { f };",
+  "new": "let rounded = if r >= 0.5 { f + 1.0 } else { f };",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_26_coerce_cases"
+ },
+ {
+  "id": "V02",
+  "name": "RM-7's check skips tx",
+  "file": "crates/ezsdr-radio/src/device.rs",
+  "old": "            (\"tx\", self.performance.tx_bytes_per_s),\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_26_coerce_cases"
+ },
+ {
+  "id": "V03",
+  "name": "the rate capability built as a Range for Values",
+  "file": "crates/ezsdr-radio/src/device.rs",
+  "old": "                Grid::Values(values) => CapabilityValue::AnyOf {\n                    values: values.iter().rev().map(|rate| Value::Num(*rate)).collect(),\n                },\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_26_the_description_builds_the_tree_mockradio_built"
+ },
+ {
+  "id": "V04",
+  "name": "LateAtDevice serialised as lateatdevice",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "        LateAtDevice,\n",
+  "new": "        #[serde(rename = \"lateatdevice\")]\n        LateAtDevice,\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_22_late_at_device_is_snake_case"
+ },
+ {
+  "id": "V05",
+  "name": "the transmit origin at A again",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "let origin = lattice_at_or_after(now, handle.root_ticks_per_tick).ok_or_else(|| self.reject(\"MR-9: lattice overflow\"))?;",
+  "new": "let origin = now;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_09_the_transmit_clock_starts_on_its_lattice"
+ },
+ {
+  "id": "V06",
+  "name": "the cold origin at e again",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "\n                    let origin = lattice_at_or_after(restart, handle.root_ticks_per_tick).ok_or_else(|| ModuleError::rejected(\"MR-18: lattice overflow\"))?;",
+  "new": "\n                    let origin = tick;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_18_a_cold_change_starts_its_clock_on_the_lattice"
+ },
+ {
+  "id": "V07",
+  "name": "two UHD bindings accepted",
+  "file": "crates/ezsdr-server/src/catalogue.rs",
+  "old": ".filter(|binding| binding.module.id.as_str() == UHD).count() > 1",
+  "new": ".filter(|binding| binding.module.id.as_str() == UHD).count() > 2",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_07_two_uhd_bindings_are_refused"
+ },
+ {
+  "id": "V08",
+  "name": "Config.default_profile ignored",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "let profile = match (profile, &self.config.default_profile) {",
+  "new": "let profile = match (profile, &None::<PathBuf>) {",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_09_the_configured_default_profile_is_used"
+ },
+ {
+  "id": "V09",
+  "name": "the child Assembly built from the child profile in a device-paced Session",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "let assembled = if live.device_paced {",
+  "new": "let assembled = if false {",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_14_a_child_of_a_device_paced_session_opens_no_device"
+ },
+ {
+  "id": "V10",
+  "name": "sleep returns None",
+  "file": "python/ezsdr/session.py",
+  "old": "        return self._call({\"op\": \"advance\", \"by_ns\": max(0, math.ceil(seconds * 1e9))})[0][\"now\"]",
+  "new": "        self._call({\"op\": \"advance\", \"by_ns\": max(0, math.ceil(seconds * 1e9))})",
+  "python": "test_easy_api.EasyApi.test_sleep_returns_the_instant"
+ },
+ {
+  "id": "V11",
+  "name": "after rounds the tick count down",
+  "file": "python/ezsdr/session.py",
+  "old": "math.ceil(Fraction(repr(seconds)) * rate)",
+  "new": "math.floor(Fraction(repr(seconds)) * rate)",
+  "python": "test_easy_api.EasyApi.test_after_names_an_instant_ahead"
+ },
+ {
+  "id": "V12",
+  "name": "status reports the rate of the receive clock instead of the root",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "root_rate: live.clocks.nominal_rate(live.run.now().domain)",
+  "new": "root_rate: live.clocks.nominal_rate(live.run.sample_clocks().first().map_or(live.run.now().domain, |c| c.domain))",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_12_status_carries_the_root_rate"
+ },
+ {
+  "id": "V13",
+  "name": "the new clock starts at e1 instead of e2",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "\n                    let origin = lattice_at_or_after(restart, handle.root_ticks_per_tick).ok_or_else(|| ModuleError::rejected(\"MR-18: lattice overflow\"))?;",
+  "new": "\n                    let origin = restart;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_18_a_cold_change_starts_its_clock_on_the_lattice"
+ },
+ {
+  "id": "U01",
+  "name": "from_binding accepts x310-like",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "if binding.profile.as_ref() != Some(&profile::profile_ref()) {",
+  "new": "if binding.profile.is_none() {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_05_from_binding_refusals"
+ },
+ {
+  "id": "U02",
+  "name": "UR-5's master-clock check removed",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "if mcr != MASTER_CLOCK_HZ {",
+  "new": "if false && mcr != MASTER_CLOCK_HZ {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_05_from_binding_refusals"
+ },
+ {
+  "id": "U03",
+  "name": "UR-6's root check removed",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "if !epoch.is_some_and(|e| own.contains(&e)) {",
+  "new": "if false && !epoch.is_some_and(|e| own.contains(&e)) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_06_the_provider_refuses_another_root"
+ },
+ {
+  "id": "U04",
+  "name": "next_wakeup returns before the device reaches the instant",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "if time.extrapolate() >= tick {",
+  "new": "if tick >= 0 || time.extrapolate() >= tick {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_the_authority_paces_to_the_device"
+ },
+ {
+  "id": "U05",
+  "name": "schedule does not wake a waiting next_wakeup",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "        drop(schedule);\n        self.changed.notify_all();\n        Ok(ScheduleHandle",
+  "new": "        drop(schedule);\n        Ok(ScheduleHandle",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_schedule_wakes_a_waiting_next_wakeup"
+ },
+ {
+  "id": "U06",
+  "name": "now not monotonic across a re-anchor",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "self.last.fetch_max(t, Ordering::AcqRel).max(t)",
+  "new": "t",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_now_is_monotonic_across_a_reanchor"
+ },
+ {
+  "id": "U07",
+  "name": "the device's time zeroed before its sources are set",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "        device.set_sources(clock_source, time_source).map_err(|e| format!(\"UR-7: {e}\"))?;\n        let pps = time_source != \"internal\";\n        device.set_time_zero(pps).map_err(|e| format!(\"UR-7: {e}\"))?;",
+  "new": "        let pps = time_source != \"internal\";\n        device.set_time_zero(pps).map_err(|e| format!(\"UR-7: {e}\"))?;\n        device.set_sources(clock_source, time_source).map_err(|e| format!(\"UR-7: {e}\"))?;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_the_time_is_set_at_the_next_pps_with_an_external_source"
+ },
+ {
+  "id": "U08",
+  "name": "the lead declared as 2 ms",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "Duration::new(ClockDomainId::HOST_MONOTONIC, timing.min_timed_command_lead_ns)",
+  "new": "Duration::new(ClockDomainId::HOST_MONOTONIC, 2_000_000)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_10_instance"
+ },
+ {
+  "id": "U09",
+  "name": "prepare accepts the Simulation class",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "if !matches!(ctx.class, ExecutionClass::HardwareInLoop | ExecutionClass::Hardware) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_12_prepare_refusals"
+ },
+ {
+  "id": "U10",
+  "name": "a read-back rate difference accepted",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "if applied.rate != claim {",
+  "new": "if false && applied.rate != claim {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_12_a_rate_the_device_does_not_apply_is_refused"
+ },
+ {
+  "id": "U11",
+  "name": "the transmit clock registered at A",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "let origin = lattice(a, n);",
+  "new": "let origin = a;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_15_every_clock_starts_on_its_lattice"
+ },
+ {
+  "id": "U12",
+  "name": "start accepts T0 before S",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "if t0 < s {",
+  "new": "if false && t0 < s {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_15_start_cases"
+ },
+ {
+  "id": "U13",
+  "name": "uhd-control takes the next Action before finishing the current",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "            while let Some(action) = self.actions.recv() {\n                if !self.core.is_lost() {\n                    self.book(action);\n                }\n                self.release();\n            }",
+  "new": "            let mut taken = Vec::new();\n            while let Some(action) = self.actions.recv() {\n                taken.push(action);\n            }\n            for action in taken {\n                if !self.core.is_lost() {\n                    self.book(action);\n                }\n                self.release();\n            }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_14_actions_are_finished_before_the_next_recv"
+ },
+ {
+  "id": "U14",
+  "name": "the late decision uses the 5 ms lead",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "            Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS),\n        );\n        let outcome = match decided {",
+  "new": "            Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS + crate::profile::DELIVERY_ALLOWANCE_NS),\n        );\n        let outcome = match decided {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_21_an_untimed_send_is_on_time_after_its_delivery"
+ },
+ {
+  "id": "U15",
+  "name": "SendAsap does not move the start",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                start = clock.at_or_after(clock.instant(now_k) + lead);",
+  "new": "                start += 0;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_21_late_policies_on_the_device_lead"
+ },
+ {
+  "id": "U16",
+  "name": "a repetition sent with start-of-burst",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        let first = open.first;\n",
+  "new": "        let first = open.first || (open.held.repeat && offset == 0);\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_22_repeat_is_continuous_across_the_wrap"
+ },
+ {
+  "id": "U17",
+  "name": "the repeat not ended at the next burst's start",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "            let held_cut = self.held.keys().next().copied();\n            self.send(clock, held_cut, e1_k);\n            return true;\n        }\n        if let Some(&k)",
+  "new": "            let held_cut = self.held.keys().next().copied().filter(|_| !self.open.as_ref().is_some_and(|o| o.held.repeat));\n            self.send(clock, held_cut, e1_k);\n            return true;\n        }\n        if let Some(&k)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_23_a_burst_ends_at_the_next_bursts_start"
+ },
+ {
+  "id": "U18",
+  "name": "bursts sent in arrival order (the later target booked first goes first)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        if let Some(&k) = self.held.keys().next() {",
+  "new": "        if let Some(&k) = self.held.keys().next_back() {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_23_bursts_go_out_in_target_order"
+ },
+ {
+  "id": "U19",
+  "name": "no in-flight bound",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "            if clock.instant(next) - now >= window {\n                return false;\n            }\n",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_23_a_stop_ends_the_burst_within_the_in_flight_window"
+ },
+ {
+  "id": "U20",
+  "name": "the command queue not counted",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "if self.held.len() + self.released.len() >= depth {",
+  "new": "if false && self.held.len() + self.released.len() >= depth {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_24_hardware_timed_updates"
+ },
+ {
+  "id": "U21",
+  "name": "a late timed update applied at its at",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                self.late_command(Some(key.clone()), requested, earliest);\n                earliest",
+  "new": "                self.late_command(Some(key.clone()), requested, earliest);\n                requested",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_24_hardware_timed_updates"
+ },
+ {
+  "id": "U22",
+  "name": "a cold change's clock published to the transmit path only at the switch",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                        Dir::Tx => {\n                            streams.tx = clock;\n                            streams.tx_channels = channels;\n                        }",
+  "new": "                        Dir::Tx => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_rate_change_admits_a_burst_on_the_new_clock"
+ },
+ {
+  "id": "U23",
+  "name": "e2 not on the new lattice",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "let e2 = lattice(e1 + restart, n);",
+  "new": "let e2 = e1 + restart + 1;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_cold_rate_change_starts_a_new_clock_on_its_lattice"
+ },
+ {
+  "id": "U24",
+  "name": "an overrun flagged SEQ_DISCONTINUITY",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "Pending::Overrun => BlockFlags::RESTARTED,",
+  "new": "Pending::Overrun => BlockFlags::SEQ_DISCONTINUITY,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_18_an_overrun_is_rm_17s_gap"
+ },
+ {
+  "id": "U25",
+  "name": "an alignment error flags one channel",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                valid: ChannelMask::full(channels as u16),",
+  "new": "                valid: if pending == Pending::Alignment { ChannelMask::full(1) } else { ChannelMask::full(channels as u16) },",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_19_an_alignment_error_is_a_whole_stream_gap"
+ },
+ {
+  "id": "U26",
+  "name": "RX_OVERFLOW emitted with emit_control",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if let Err(error) = self.core.events.emit(self.core.overflow, at, Severity::Warning, &payload.to_hot()) {",
+  "new": "if let Err(error) = self.core.events.emit_control(ezsdr_kernel::event::Event { source: self.core.rx_id.clone(), time: at, severity: Severity::Warning, kind: ezsdr_kernel::event::EventKind::parse(kinds::RX_OVERFLOW).expect(\"a kind\"), payload: serde_json::to_value(&payload).expect(\"a payload\") }) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_20_rx_overflow_is_emitted_on_the_hot_path"
+ },
+ {
+  "id": "U27",
+  "name": "the reference not monitored",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "if self.reference_monitored && !self.clock_lost {",
+  "new": "if false && self.reference_monitored && !self.clock_lost {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_27_a_lost_reference_is_clock_lost"
+ },
+ {
+  "id": "U28",
+  "name": "TimeError mapped to refused",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.time_error(TimeErrorOutcome::LateAtDevice, late_by_ns, target);",
+  "new": "self.time_error(TimeErrorOutcome::Refused, late_by_ns, target);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_28_the_device_reports_a_late_burst"
+ },
+ {
+  "id": "U29",
+  "name": "a lost-device error only recorded",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "        self.emit(\n            &self.id,\n            EventKind::DEVICE_LOST,\n            Severity::Fatal,\n            json!({ \"message\": message }),\n        );\n",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_29_a_lost_device_aborts_the_run"
+ },
+ {
+  "id": "U30",
+  "name": "FakeDevice::fidelity is real",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "    fn fidelity(&self) -> Fidelity {\n        Fidelity::NONE\n    }",
+  "new": "    fn fidelity(&self) -> Fidelity {\n        use ezsdr_kernel::module_api::*;\n        Fidelity { timing: EnvelopeFidelity::Real, continuity: EnvelopeFidelity::Real, coercion: CoercionFidelity::Real, rf: RfFidelity::Real, transport: TransportFidelity::Real }\n    }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_31_fidelity_follows_the_device"
+ },
+ {
+  "id": "U31",
+  "name": "open returns a FakeDevice for args = \"fake\"",
+  "file": "crates/ezsdr-radio-uhd/src/lib.rs",
+  "old": "        let _ = args;\n",
+  "new": "        if args == \"fake\" {\n            return Ok(Arc::new(device::FakeDevice::new(device::FakeConfig::default())));\n        }\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_33_no_document_selects_the_fake_device"
+ },
+ {
+  "id": "U32",
+  "name": "orderly stop discards the tail",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "            let cut = now + tail;",
+  "new": "            let cut = now + 0 * tail;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_orderly_stop_delivers_the_tail_abort_does_not"
+ },
+ {
+  "id": "U33",
+  "name": "schedule refuses an instant before now",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "schedule.last_fired.filter(|fired| ticks < *fired)",
+  "new": "Some(self.extrapolate()).filter(|fired| ticks < *fired)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_schedule_accepts_an_instant_already_passed"
+ },
+ {
+  "id": "U34",
+  "name": "cancel does not wake a waiting next_wakeup",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "        self.changed.notify_all();\n        removed",
+  "new": "        removed",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_cancel_wakes_a_waiting_next_wakeup"
+ },
+ {
+  "id": "U35",
+  "name": "uhd-clock not started",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "while !flag.load(Ordering::Acquire) {",
+  "new": "while false && !flag.load(Ordering::Acquire) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_now_tracks_the_device_while_no_call_runs"
+ },
+ {
+  "id": "U36",
+  "name": "the preemption bound ignores the in-flight window",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "TimePoint::new(clock.domain, next - lead_k),",
+  "new": "TimePoint::new(clock.domain, clock.at_or_after(self.core.now()) + 0 * lead_k),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_21_a_burst_inside_the_in_flight_window_is_late"
+ },
+ {
+  "id": "U37",
+  "name": "timed commands released at receipt",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "            if e - now > window {\n                break;\n            }\n",
+  "new": "            let _ = window;\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_24_a_far_future_update_does_not_delay_a_nearer_one"
+ },
+ {
+  "id": "U38",
+  "name": "Stop <id> does not cancel held commands",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                    self.cancel_held(\"Stop\");\n",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_24_stop_cancels_held_commands"
+ },
+ {
+  "id": "U39",
+  "name": "enabling a direction opens the streamer without configuring it",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "let configured = opened.and_then(|()| self.core.configure(dir, channels, &settings));",
+  "new": "let configured = { let _ = &settings; opened };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_enabling_tx_applies_the_configuration"
+ },
+ {
+  "id": "U40",
+  "name": "a rate mismatch at the switch accepted",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let configured = reopened.and_then(|()| self.core.configure(Dir::Rx, switch.channels, &switch.settings));",
+  "new": "let configured = reopened.and_then(|()| self.core.configure(Dir::Rx, switch.channels, &switch.settings).or(Ok(0)));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_rate_the_device_does_not_apply_at_the_switch_is_rejected"
+ },
+ {
+  "id": "U41",
+  "name": "the cold switch waited for on uhd-control",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                match dir {\n                    Dir::Rx => drop(self.to_rx.send(RxCmd::Switch",
+  "new": "                while self.core.now() < e1 {\n                    std::thread::sleep(POLL);\n                }\n                match dir {\n                    Dir::Rx => drop(self.to_rx.send(RxCmd::Switch",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_14_the_control_thread_never_waits_for_a_device_instant"
+ },
+ {
+  "id": "U42",
+  "name": "close_streams called with a detached thread",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "if !self.detached.is_empty() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_16_cleanup_keeps_the_streamer_of_a_detached_thread"
+ },
+ {
+  "id": "U43",
+  "name": "the idle device time read removed",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "        match self.core.device.time_now() {\n            Ok(_) => {}\n            Err(error) if error.lost => self.core.device_lost(&error.message),\n            Err(error) => self.core.timing(json!({ \"what\": \"time_read_failed\", \"error\": error.message })),\n        }\n",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_29_a_lost_device_is_found_while_idle"
+ },
+ {
+  "id": "U44",
+  "name": "the preemption not decided again on uhd-tx (uhd-control's booking stands)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        if h < next {\n            let lead_k",
+  "new": "        if false {\n            let lead_k",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_21_a_burst_inside_the_in_flight_window_is_late"
+ },
+ {
+  "id": "U45",
+  "name": "a change from 0 channels waits the restart lead",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "Dir::Tx => lattice(e.max(now), n),",
+  "new": "Dir::Tx => lattice(e.max(now) + self.core.ticks(RESTART_LEAD_NS), n),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_tx_channels_from_zero_transmits_the_next_burst_on_time"
+ },
+ {
+  "id": "U46",
+  "name": "a burst before its clock's origin accepted as OnTime",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "let now = self.core.now().max(clock.origin - lead);",
+  "new": "let now = self.core.now().min(clock.origin - lead);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_21_a_burst_before_its_clock_s_origin_is_late"
+ }
+]

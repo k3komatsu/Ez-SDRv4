@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted at Gate P** (owner, 2026-09-27, as recommended; [`00-overview.md`](00-overview.md) §11); **not implemented** (the owner: "実装はしないで"). Reviewed by Review J and revised for every finding; re-reviewed by Review K ([`design-notes.md`](design-notes.md) §4, §5). Moves to `design/18-uhd-radio.md` at Step X (GZ-7). |
+| Status | **Accepted at Gate P** (owner, 2026-09-27, as recommended; [`00-overview.md`](00-overview.md) §11); **implemented** on 2026-09-27 (the owner: "Phase 7を実装してください"; 00-overview §9 steps 1–6, [`design-notes.md`](design-notes.md) §6), not yet reviewed (Review L); earlier the same day: "実装はしないで". Reviewed by Review J and revised for every finding; re-reviewed by Review K ([`design-notes.md`](design-notes.md) §4, §5). Moves to `design/18-uhd-radio.md` at Step X (GZ-7). |
 | Scope | One Module with two roles — a Radio Provider of the `radio` Vocabulary 1.3.0 and a device-paced Time Authority — for one USRP X310 with UBX daughterboards per Run: its device boundary, its bridge to UHD, its profile `x310-ubx` 0.1.0, its Authority, its Provider's lifecycle, receive and transmit paths, parameter updates, events and Manifest sections, its test double `FakeDevice`, and its hardware tests. |
 | Not in scope | A second device per Run; a USRP2 profile; RFNoC Replay, DDC/DUC and FFT capabilities; `extensions.uhd.*`; GPIO and Peripherals (Phase 9); a transmit port (Phase 10) ([`00-overview.md`](00-overview.md) §3). |
 | Crate | `crates/ezsdr-radio-uhd`, library `ezsdr_radio_uhd`. Depends on `ezsdr-kernel`, `ezsdr-radio`, `ezsdr-hostmem`, `serde_json`. Feature `uhd` (off by default) compiles `src/uhd.rs` and links `libuhd` (UR-35). |

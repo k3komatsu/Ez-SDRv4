@@ -594,7 +594,9 @@ impl Provider for ThreadedProvider {
                 while let Some(action) = ctx.actions.recv() {
                     ctx.handle(action);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                // A spin, not a sleep: a push after the freeze is cleared again by the
+                // control thread's own RS-6 step 1 within about 100 µs.
+                std::thread::yield_now();
             }
         }
         if let Some((flag, worker)) = self.worker.take() {

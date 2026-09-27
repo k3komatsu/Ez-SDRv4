@@ -1,6 +1,6 @@
 # Phase 7 — design notes
 
-What the design of [`00-overview.md`](00-overview.md), [spec 18](18-uhd-radio.md) and [spec 19](19-amendments.md) was checked against, what writing it found, and what Review J found and how each finding was answered. There is no implementation yet (the owner's instruction, 2026-09-27: "設計だけで止めてください．ただし，設計は詳しく設計してください").
+What the design of [`00-overview.md`](00-overview.md), [spec 18](18-uhd-radio.md) and [spec 19](19-amendments.md) was checked against, what writing it found, and what Review J found and how each finding was answered. The design stopped short of code at first (the owner's instruction, 2026-09-27: "設計だけで止めてください．ただし，設計は詳しく設計してください"); the implementation followed the same day, and §6 records where it departs from the text.
 
 ## 1. The state the design starts from
 
@@ -126,3 +126,60 @@ Brief: [`prompts/review-k.txt`](prompts/review-k.txt). Report: [`reviews/review-
 | TEST_GAPS: G09, G31, G29, V11, U39, the preemption test, the from-zero test, the wake race, the tolerance, G33 | G09: the termination-cause test now drains on both threads at once; G31 withdrawn as unobservable (KC-46a no longer asks step 1 to clear the generation); G29, V11, U39, the preemption test, the from-zero test and the tolerance as above; the wake race's test added; G33 names the UHD Authority as the rule's real-code carrier |
 
 **No further review.** The owner's rule is to review again after a large fix and to stop after a small one. Review J's fixes were large (the time rules, the concurrency rules, the transmit path) and were re-reviewed. Review K's are small: each is the fix the reviewer recommended, confined to the sentences it names — the from-zero case of three rules (UC-3, RM-25, UR-25) restored to the first draft's immediate start with the configuration Review J asked for, one lower bound in RM-15 and UR-21, a generation counter in KC-46a, one decision moved from uhd-control to uhd-tx, and test and wording corrections. The from-zero path, the one place the Review J revision regressed, was checked again by walking Python `tx.repeat`'s two calls through KC-24, KC-21a, UR-25 and UR-21 against the fixed text; nothing else in the design changed. The implementation's own review (Review L, overview §9) will read the whole design again against running code.
+
+## 6. The implementation
+
+The owner asked for it on 2026-09-27 ("Phase 7を実装してください"). It followed §9's steps 1–6 in four commits on the branch `worktree-phase7-impl` (steps 1–2, 3–4, 5, 6); Review L, the bench session and Gate X are the owner's next steps. What the code does differently from the text, and why, is below; each row is a question for Review L, not a settled change of the design.
+
+### 6.1 Deviations from the specs
+
+| Where | The spec says | The code does | Why |
+|---|---|---|---|
+| KG-8 (`ProviderInstance::min_command_lead`) | the field's documentation carries KG-8's sentence | the rustdoc is unchanged and the sentence is a `//` comment beside it | the rustdoc is part of the Kernel's generated schema, which `schema_freeze` holds byte for byte (GZ-2: no Kernel schema changes in Phase 7) |
+| Spec 19's test locations | the KG tests in the Kernel's `tests/coordinator.rs`-style files | `crates/ezsdr-kernel/tests/device_paced.rs` with the doubles in `tests/support/paced.rs`; RM-26's tests in `crates/ezsdr-radio/tests/device.rs` | one file per rule family; the names are the spec's |
+| VE-4 and MockRadio's `mr_32_*` tests | — | two `mr_32` tests expect the post-change burst at index 2, not 3 | the new transmit origin moved onto its lattice (RM-25), which moves the first burst index; the tests' instants are the spec's |
+| PO-8's dev-dependency allow-list | the Kernel only | `ezsdr-radio-uhd` may also use `ezsdr-sink`, `ezsdr-sink-capture` and `ezsdr-link-host` in its tests | `tests/fake.rs` assembles a Run as the server's catalogue does (spec 18 §6); workspace crates only (`governance.rs` records it) |
+| UR-24, the timed stream commands | a stop at `e₁`, a start at `e₂` and a restart go through uhd-control's release list | uhd-rx issues them itself, under the control-call mutex, when it performs the switch or the restart | *ponytail*: the list would need a message path from the owning thread back to uhd-control; whether the device's queue orders stream commands with tunes is INFERRED and B8 measures it. If B8 shows a retune queued behind a stream command, route them through the list |
+| UR-3, the anchor's brackets | taken inside the control-call mutex | `DeviceAuthority::read` brackets `Device::time_now`, which takes the mutex inside | the `Device` trait has no "bracketed read"; UR-7's rule (a bracket wider than 1 ms is discarded) drops a read that waited for the mutex |
+| UR-7, failed time reads | counted | counted in `DeviceAuthority::failed_reads()`, not written to the Manifest | an Authority has no Manifest section in the Kernel's API (MA-29); the bench prints it |
+| UR-32, the receive buffer | reused | `UhdDevice::rx_recv` allocates per call (`ponytail:` comment) | the trait returns owned samples; Phase 8's copy-regression benchmark settles it |
+| UR-21, a burst at the open burst's next sample | refused on uhd-control | decided by uhd-tx's preemption (RM-15 as VE-2 amends it), like any burst inside the open one | one decision point, the one Review K's N-P1-2 moved to uhd-tx |
+| UR-34, `with_rx_stall(after, …)` | `after` the start | `after` the first received block | the start is two seconds before the first block (UR-15's start-up), so "after the start" would stall before any sample flowed |
+| Spec 18 §6, `tests/fake.rs` | the tests through the coordinator | also a `Direct` harness that drives the Provider without a coordinator, for `ur_24_hardware_timed_updates` and `ur_25_a_cold_change_the_envelope_refuses_changes_nothing` | the coordinator's admission (KC-24) refuses an out-of-envelope change, and moves a late instant, before the Provider sees it; the harness reaches the Provider's own checks |
+| EA-14 (VE-5), `catalogue::empty_assembly` | an Assembly with no Module object | no Provider, Sink, Executor or Link, and no device; its Authority is a Simulation Engine | `Assembly.authority` is not optional; the Kernel refuses the child before reading it (KG-12) |
+| EA-7 (VE-5), `assemble` | — | takes `open_device` as a fourth argument; `Config::new(runs_dir)` builds a Config with nothing else set | the acceptance rig and a test embedding pass their own opener; `Config` gained two fields |
+| The server and acceptance tests on the fake device | — | their profiles use a 2 s start lead | UR-15's start-up latency of the `x310-ubx` profile; each such test waits 2 s of wall time |
+| Spec 19's text as applied to `design/` (an Opus subagent applied it) | RM-1: "four payload types" | three payload types and one outcome value | what VE-3 adds; the other findings of that pass — RM-26 given its rule prefix, RM-11's source rule silent on the new kinds, design/14 NX-4's KC-2 reason now stale, KC-20 and KC-45 made consistent — are Review L's to confirm |
+
+### 6.2 The mutations (GZ-6)
+
+`plan/phase7/tools/mutate.py` is Phase 6's tool with `.claude` left out of the copy and two additions: a mutation may name a second edit in the same file (`old2`, `new2`), which G09 needs (the `delivered` lock taken after the reactions); and a timeout kills the test's whole process group — Phase 6's `subprocess.run` killed only cargo, and G16's hung mutant kept spinning through the rest of the first run. `plan/phase7/tools/mutations.json` holds Appendix A's 34 live rows (G18 and G31 are withdrawn) and spec 18 §8's 46.
+
+Where a row could not be written as the table words it:
+
+- **G11, G12, G29** live in `ending.rs`, `stepping.rs` and `ending.rs` (the table names other files): `StopTx`'s record, the final round of `drain_cleanup`, and `FreezeDispatch` are there.
+- **G36**: "the handle is stored after `schedule` returns" is read as the pending generation being stored then (the handle itself is only `FreezeDispatch`'s to cancel, and is stored after `schedule` in the implementation too).
+- **U07**: the clock-before-time order lives in `uhd.rs`'s two C calls, which only the bench reaches; the mutation reverses the Authority's order of `set_sources` and `set_time_zero`, which the killing test checks.
+- **U18**: held bursts are keyed by their start, so "arrival order" is written as taking the last key first, which for the test's two bursts (the later target booked first) is their arrival order.
+- **U22**: publishing the new clock at the switch would take an edit in two files; the mutation withholds it from the transmit path at receipt, which the killing test fails at the same assertion (the burst on the new clock is refused before the switch).
+- **U44**: the preemption is not decided again on uhd-tx (uhd-control's booking stands). It is killed deterministically here, where the spec expected only a probable kill.
+
+**Results** (2026-09-27; the whole list once, then the rows it did not kill again after the fixes below): **91 of 93 killed**; G16 by `mutate.py`'s 900 s timeout, as Appendix A intends.
+
+The first run left 13 rows not killed. Each was either a mutation that did not say what its row says, or a test that could not see the change:
+
+| Row | Why it survived the first run | Fix |
+|---|---|---|
+| G07 | the mutation looped one instance with no cap and no `STEP_LIVELOCK`, which the test does not look for; the row names the Kernel's `step_until_quiescent` | the mutation calls `step_until_quiescent` for the Sink, as the row says: killed |
+| G29 | a push after the freeze is cleared again by the control thread's own RS-6 step 1 about 100 µs later, and `draining_after_stop` polled every 1 ms | the double spins (`yield_now`) instead: killed |
+| G36 | the mutation was half of the row (the callback's unconditional clear alone never loses a wake) | the row's whole mutant, the generation also stored after `schedule` returns: **still survives**, below |
+| V01 | RM-8's tie case goes through the `Step` grid, and the mutation was in the `Values` arm | the mutation rounds the `Step` grid's tie up: killed |
+| V08 | the mutation did not compile (a guard made the `match` non-exhaustive) | the default profile replaced by `None`: killed |
+| U05, U34 | a missed wake delays the waiter by at most one 20 ms nap, inside the tests' 200 ms and 100 ms bounds | both tests measure the median lateness of 20 tries (under 4 ms and 3 ms; the mutants give about 13 ms): killed |
+| U21 | `ur_24_hardware_timed_updates` counted the `LATE_COMMAND` but not where the late update was applied | it checks the applied instant against the event's `applied` and the device lead: killed |
+| U22 | `ur_25_a_rate_change_admits_a_burst_on_the_new_clock` checked the Kernel's admission only | it waits past the switch and checks the burst went out on the new clock with no `COMMAND_REJECTED`: killed |
+| U32 | the test compared the capture's end with `Provider::stop`'s instant, before uhd-rx's own stop | it checks the 1 ms tail after uhd-rx's `rx_stop`: killed |
+| U37 | through the coordinator the nearer update reaches the Provider first, so the far one never held it | the test pushes the far one first through the `Direct` harness: killed |
+| U41 | the test timed the second call, and the mutant blocks the first | it times both calls against 30 ms (the switch is 50 ms away): killed |
+
+**Two rows survive: G09 and G36.** Both are races between the data thread and the control thread whose window is a few microseconds: G09's between `drain` and the `delivered` lock in two concurrent `drain_and_react` calls, G36's between `schedule` returning and the generation being stored (the control thread must run the no-op before the data thread stores). The tests (`kg_02_the_first_delivered_stopping_event_is_the_termination_cause`, 50 Sessions; `kg_02_every_delivery_wakes_a_waiting_call`, 50 wakes) exercise the paths but do not win those races on this Mac. A deterministic kill needs a pause point inside the Kernel (a `testing`-feature hook between the two steps), which would be new Kernel code for a test; left to Review L to decide.

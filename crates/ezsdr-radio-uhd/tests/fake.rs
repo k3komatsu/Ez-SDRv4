@@ -142,19 +142,27 @@ fn ur_07_the_authority_paces_to_the_device() {
 
 #[test]
 fn ur_07_schedule_wakes_a_waiting_next_wakeup() {
+    // Every nap is at most 20 ms (UR-7), so a missed wake only makes the waiter late by
+    // up to one nap: the instant is 1 ms ahead, and the median lateness of 20 tries
+    // tells a woken waiter (well under 1 ms) from one that sleeps out its nap (~10 ms).
     let (authority, _, root) = authority(FakeConfig::default(), "internal");
     let authority = Arc::new(authority);
     let time = authority.time();
-    let far = TimePoint::new(root, time.now(root).unwrap().ticks + ms(1_000));
-    time.schedule(far, Box::new(|_| {})).unwrap();
-    let waiter = { let a = authority.clone(); std::thread::spawn(move || (a.next_wakeup(), Instant::now())) };
-    std::thread::sleep(Wall::from_millis(20));
-    let begun = Instant::now();
-    let near = TimePoint::new(root, time.now(root).unwrap().ticks + ms(20));
-    time.schedule(near, Box::new(|_| {})).unwrap();
-    let (woke, at) = waiter.join().unwrap();
-    assert_eq!(woke, Some(near));
-    assert!(at.duration_since(begun) < Wall::from_millis(200), "{:?}", at.duration_since(begun));
+    let mut late = Vec::new();
+    for _ in 0..20 {
+        let far = time.schedule(TimePoint::new(root, time.now(root).unwrap().ticks + ms(1_000)), Box::new(|_| {})).unwrap();
+        let waiter = { let a = authority.clone(); std::thread::spawn(move || (a.next_wakeup(), Instant::now())) };
+        std::thread::sleep(Wall::from_millis(7));
+        let near = TimePoint::new(root, time.now(root).unwrap().ticks + ms(1));
+        let due = Instant::now() + Wall::from_millis(1);
+        time.schedule(near, Box::new(|_| {})).unwrap();
+        let (woke, at) = waiter.join().unwrap();
+        assert_eq!(woke, Some(near));
+        late.push(at.saturating_duration_since(due));
+        time.cancel(far);
+    }
+    late.sort();
+    assert!(late[10] < Wall::from_millis(4), "median lateness {:?} of {late:?}", late[10]);
 }
 
 #[test]
@@ -200,17 +208,23 @@ fn ur_07_schedule_accepts_an_instant_already_passed() {
 
 #[test]
 fn ur_07_cancel_wakes_a_waiting_next_wakeup() {
+    // As above: without the wake, the waiter returns only when its nap ends.
     let (authority, _, root) = authority(FakeConfig::default(), "internal");
     let authority = Arc::new(authority);
     let time = authority.time();
-    let handle = time.schedule(TimePoint::new(root, time.now(root).unwrap().ticks + ms(1_000)), Box::new(|_| {})).unwrap();
-    let waiter = { let a = authority.clone(); std::thread::spawn(move || (a.next_wakeup(), Instant::now())) };
-    std::thread::sleep(Wall::from_millis(20));
-    let begun = Instant::now();
-    assert!(time.cancel(handle));
-    let (woke, at) = waiter.join().unwrap();
-    assert_eq!(woke, None);
-    assert!(at.duration_since(begun) < Wall::from_millis(100), "{:?}", at.duration_since(begun));
+    let mut late = Vec::new();
+    for _ in 0..20 {
+        let handle = time.schedule(TimePoint::new(root, time.now(root).unwrap().ticks + ms(1_000)), Box::new(|_| {})).unwrap();
+        let waiter = { let a = authority.clone(); std::thread::spawn(move || (a.next_wakeup(), Instant::now())) };
+        std::thread::sleep(Wall::from_millis(7));
+        let begun = Instant::now();
+        assert!(time.cancel(handle));
+        let (woke, at) = waiter.join().unwrap();
+        assert_eq!(woke, None);
+        late.push(at.saturating_duration_since(begun));
+    }
+    late.sort();
+    assert!(late[10] < Wall::from_millis(3), "median delay {:?} of {late:?}", late[10]);
 }
 
 #[test]
@@ -529,10 +543,12 @@ fn ur_14_the_control_thread_never_waits_for_a_device_instant() {
     let device = fake(FakeConfig::default());
     let mut run = session(&profile(&dir, json!({}), json!({}), true), device.clone());
     past_t0(&mut run, ms(1));
-    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
+    // The switch is a restart lead (50 ms) away; booking it and the next Action takes
+    // uhd-control a few milliseconds, and KC-21a returns each call when it has booked.
     let begun = Instant::now();
+    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
     assert!(admitted(&run.submit(set("radio.rx.gain_db", Value::Num(3.0)), None).unwrap()));
-    assert!(begun.elapsed() < Wall::from_millis(100), "{:?}", begun.elapsed());
+    assert!(begun.elapsed() < Wall::from_millis(30), "{:?}", begun.elapsed());
     wait(&mut run, ms(200));
     let manifest = run.finish();
     let clocks: Vec<_> = manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).collect();
@@ -974,6 +990,11 @@ fn ur_24_hardware_timed_updates() {
     let applied = direct.device.calls();
     let tx = applied.iter().find(|c| c.starts_with("apply tx 0 rate=- freq=- gain=3")).unwrap();
     assert!(tx.contains(&format!("at={}", now + ms(40))), "{tx}");
+    // The late one is applied where LATE_COMMAND says, a device lead after its receipt.
+    let rx = applied.iter().find(|c| c.starts_with("apply rx 0") && c.contains("at=") && !c.contains("at=-")).unwrap();
+    let at: i64 = rx.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+    assert_eq!(Some(at), late[0].payload["applied"]["ticks"].as_i64(), "{rx}");
+    assert!(at >= now + ms(2), "{rx}");
     // 17 pending: the 17th is refused (UR-24's depth 16).
     let far = direct.now() + ms(5_000);
     for i in 0..17 {
@@ -988,32 +1009,28 @@ fn ur_24_hardware_timed_updates() {
 
 #[test]
 fn ur_24_a_far_future_update_does_not_delay_a_nearer_one() {
-    let dir = TempDir::new();
-    let device = fake(FakeConfig::default());
-    let mut spec = receive_spec(1, 1e6, 1e9, None);
-    let update = |offset: i64, value: f64| json!({
-        "at": { "clock": "radio", "offset_ticks": offset },
-        "action": { "kind": "update_parameter", "target": serde_json::to_value(ResourceId::parse("radio").unwrap()).unwrap(),
-                    "key": "radio.rx.frequency_hz", "value": value, "class": "hardware_timed" }
-    });
-    spec["schedule"] = json!([update(1_000_000, 2.1e9), update(20_000, 2.2e9)]);
-    let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
-    let t0 = run.start_instant().unwrap();
-    run.advance_to(TimePoint::new(t0.domain, t0.ticks + ms(1_100))).unwrap();
-    let manifest = run.finish();
-    let applied: Vec<(i64, i64)> = calls(&device, "apply rx 0 rate=- freq=")
+    // The far one reaches uhd-control first; the device's queue is in order (the fake
+    // keeps it so), so handing it over at receipt would hold the near one behind it.
+    use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
+    let mut direct = Direct::new(FakeConfig::default(), &[]);
+    let now = direct.now();
+    direct.update("radio.rx.frequency_hz", Value::Num(2.1e9), HardwareTimed, Some(now + ms(500)));
+    direct.update("radio.rx.frequency_hz", Value::Num(2.2e9), HardwareTimed, Some(now + ms(20)));
+    direct.settle(Wall::from_millis(80));
+    let applied: Vec<(i64, i64)> = direct
+        .device
+        .calls()
         .iter()
+        .filter(|c| c.starts_with("apply rx 0 rate=- freq=") && !c.contains("at=-"))
         .map(|c| {
             let at: i64 = c.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
             let effective: i64 = c.split("effective=").nth(1).unwrap().parse().unwrap();
             (at, effective)
         })
         .collect();
-    assert_eq!(applied.len(), 2, "{applied:?}");
-    assert_eq!(applied[0].0, t0.ticks + ms(20));
-    assert_eq!(applied[0].1, applied[0].0, "the near update took effect at its instant");
-    assert_eq!(applied[1].1, t0.ticks + ms(1_000));
-    assert_eq!(late_commands(&manifest), 0);
+    assert_eq!(applied, vec![(now + ms(20), now + ms(20))], "only the near one released, at its instant");
+    assert!(direct.of("radio.LATE_COMMAND").is_empty());
+    let _ = direct.finish();
 }
 
 #[test]
@@ -1127,7 +1144,12 @@ fn ur_25_a_rate_change_admits_a_burst_on_the_new_clock() {
     assert!(admitted(&run.submit(set("radio.tx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
     let entry = send(&mut run, "start_repeat", None, &tone(100));
     assert!(admitted(&entry), "{entry:?}");
-    let _ = run.finish();
+    // Booked before the switch (50 ms after receipt), transmitted after it on the new clock.
+    wait(&mut run, ms(150));
+    let manifest = run.finish();
+    assert!(events_of(&manifest, "radio.COMMAND_REJECTED").is_empty(), "{:?}", events_of(&manifest, "radio.COMMAND_REJECTED"));
+    let new = manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/tx").unwrap()).nth(1).expect("the new transmit clock");
+    assert!(bursts(&manifest).iter().any(|b| b.target.domain == new.domain), "{:?}", bursts(&manifest));
 }
 
 #[test]
@@ -1179,6 +1201,9 @@ fn ur_26_orderly_stop_delivers_the_tail_abort_does_not() {
     let manifest = run.finish();
     let (end, stop) = capture_end_and_stop(&manifest);
     assert!(end >= stop, "the tail after the stop was delivered: end {end}, stop {stop}");
+    // uhd-rx's own stop instant: the capture runs on for stop_tail_ns (1 ms) after it.
+    let rx_stop = section(&manifest, "timing").as_array().unwrap().iter().find(|r| r["what"] == "rx_stop").unwrap()["at"].as_i64().unwrap();
+    assert!(end + 200 >= rx_stop + ms(1), "the 1 ms tail: end {end}, uhd-rx stopped at {rx_stop}");
     // Abort (CLOCK_LOST's default): nothing after the stop.
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::Unlocked(Wall::from_millis(2_200))], ..FakeConfig::default() });
