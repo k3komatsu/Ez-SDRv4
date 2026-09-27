@@ -848,6 +848,12 @@ pub struct RecordingSink {
     pub spans: Vec<(i64, i64)>,
     pub fail_stop: bool,
     pub primary: Option<ClockDomainId>,
+    /// Records `<name>:step_on:<thread>` for every step (spec 19 §0).
+    pub record_threads: bool,
+    /// Every step reports `progressed` (KC-46's livelock test).
+    pub always_progress: bool,
+    /// The first step at or after this primary-root tick fails with this kind.
+    pub fail_step: Option<(i64, ModuleErrorKind)>,
 }
 
 impl RecordingSink {
@@ -871,7 +877,28 @@ impl RecordingSink {
             spans: Vec::new(),
             fail_stop: false,
             primary: None,
+            record_threads: false,
+            always_progress: false,
+            fail_step: None,
         }
+    }
+
+    /// Records the thread each step runs on (spec 19 §0).
+    pub fn recording_threads(mut self) -> RecordingSink {
+        self.record_threads = true;
+        self
+    }
+
+    /// Makes every step report `progressed` (spec 19 §0).
+    pub fn always_progressing(mut self) -> RecordingSink {
+        self.always_progress = true;
+        self
+    }
+
+    /// Fails the first step at or after `tick` with an error of `kind` (spec 19 §0).
+    pub fn failing_step_at(mut self, tick: i64, kind: ModuleErrorKind) -> RecordingSink {
+        self.fail_step = Some((tick, kind));
+        self
     }
 
     /// Sets the primary-root continuity spans returned by `stop`.
@@ -936,7 +963,21 @@ impl Sink for RecordingSink {
 
     fn step(&mut self, until: TimePoint) -> Result<StepOutcome, ModuleError> {
         self.record(format!("step:{}", until.ticks));
-        let mut progressed = false;
+        if self.record_threads {
+            let thread = std::thread::current();
+            self.record(format!("step_on:{:?}:{}", thread.id(), thread.name().unwrap_or("-")));
+        }
+        if let Some((tick, kind)) = self.fail_step {
+            if until.ticks >= tick {
+                self.fail_step = None;
+                return Err(ModuleError {
+                    kind,
+                    message: "test: sink step failed".to_owned(),
+                    detail: serde_json::Value::Null,
+                });
+            }
+        }
+        let mut progressed = self.always_progress;
         for link in &self.ins {
             while let Some(block) = link.receive() {
                 let header = block.header().clone();

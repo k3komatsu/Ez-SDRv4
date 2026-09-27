@@ -114,7 +114,7 @@ pub(super) fn assemble(
                     stepped,
                     lead,
                     object,
-                    queue: Arc::new(Queue(Mutex::new(Default::default()))),
+                    queue: Arc::new(Queue::new()),
                 });
             }
         }
@@ -137,7 +137,7 @@ pub(super) fn assemble(
         sinks.push(SinkSlot {
             output,
             object: Arc::new(Mutex::new(object)),
-            queue: Arc::new(Queue(Mutex::new(Default::default()))),
+            queue: Arc::new(Queue::new()),
         });
     }
 
@@ -171,7 +171,7 @@ pub(super) fn assemble(
             name,
             descriptor,
             object,
-            queue: Arc::new(Queue(Mutex::new(Default::default()))),
+            queue: Arc::new(Queue::new()),
         });
     }
 
@@ -253,6 +253,13 @@ pub(super) fn assemble(
         store: Arc::new(Mutex::new(
             assembly.inputs.into_iter().map(|(hash, bytes)| (hash, Arc::from(bytes))).collect(),
         )),
+        admission: Mutex::new(()),
+        data: Mutex::new(None),
+        wake_pending: Arc::new(AtomicU64::new(0)),
+        wake_next: AtomicU64::new(0),
+        wake_handle: Mutex::new(None),
+        lease_deadline: Mutex::new(None),
+        stopped_early: AtomicBool::new(false),
     });
     RunHandle {
         shared,
@@ -272,6 +279,45 @@ pub(super) fn assemble(
         parent: None,
         children: Vec::new(),
     }
+}
+
+/// KC-2a: what a device-paced class cannot honour, named for the first offender in
+/// plan order.
+fn device_paced_refusal(shared: &Shared) -> Option<String> {
+    let routing = shared.routing()?;
+    if !shared.device_paced() {
+        return None;
+    }
+    for fragment in &routing.plan.fragments {
+        match routing.fragment_of.get(&fragment.id) {
+            Some(Inst::Provider(i)) if shared.providers[*i].stepped => {
+                return Some(format!(
+                    "KC-2a: {} is a stepped Provider, and a device-paced class steps none (MA-30)",
+                    shared.first_fragment(Inst::Provider(*i))
+                ));
+            }
+            Some(Inst::Executor(_)) => {
+                let Ok(island) =
+                    serde_json::from_value::<crate::module_api::IslandDecl>(fragment.content.clone())
+                else {
+                    continue;
+                };
+                let field = if island.affinity.is_some() {
+                    "affinity"
+                } else if island.rt_policy.is_some() {
+                    "rt_policy"
+                } else {
+                    continue;
+                };
+                return Some(format!(
+                    "KC-2a: {} declares {field}, which a device-paced class does not apply before Phase 10",
+                    fragment.id
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn fallback_root(assembly: &Assembly) -> ClockDomainId {
@@ -369,14 +415,16 @@ impl RunHandle {
         let plan_class = plan.class;
         let routing = build_routing(plan, self.admission.matched.clone(), &self.shared);
         let _ = self.shared.routing.set(routing);
-        if plan_class != ExecutionClass::Simulation {
+        if plan_class == ExecutionClass::RealtimeEmulation {
             self.fail(
                 Stage::Plan,
-                format!(
-                    "KC-2: Phase 2 runs the Simulation class only; this plan's class is {:?}",
-                    plan_class
-                ),
+                "KC-2: RealtimeEmulation needs a wall-paced Simulation Engine, which no phase has built yet (Phase 10)"
+                    .to_owned(),
             );
+            return;
+        }
+        if let Some(reason) = device_paced_refusal(&self.shared) {
+            self.fail(Stage::Plan, reason);
             return;
         }
         self.shared.move_to(RunState::Planned {});
@@ -415,8 +463,23 @@ impl RunHandle {
         if lock(&self.shared.end).is_some() {
             return;
         }
-        for admitted in batch {
-            super::admission::dispatch(&self.shared, admitted);
+        let device_paced = self.shared.device_paced();
+        if device_paced {
+            super::paced::start_data_thread(&self.shared);
+        }
+        let dispatched: Vec<_> = {
+            let _admission = lock(&self.shared.admission);
+            if self.shared.frozen.load(std::sync::atomic::Ordering::Acquire) {
+                Vec::new()
+            } else {
+                batch
+                    .into_iter()
+                    .map(|admitted| super::admission::dispatch(&self.shared, admitted).1)
+                    .collect()
+            }
+        };
+        if device_paced {
+            super::paced::wait_finished(&self.shared, &dispatched);
         }
         super::stepping::round(&self.shared, self.shared.now(), false);
     }
@@ -757,19 +820,27 @@ impl RunHandle {
             };
             lock(&self.shared.prepared).insert(fragment.id.clone());
             report_fragments.push(fragment.id.clone());
-            let report = match instance {
-                Inst::Provider(i) => {
-                    let mut guard = lock(&self.shared.providers[i].object);
-                    contain(|| guard.prepare(fragment, context))
+            let slot = SlotRef::of(&self.shared, instance);
+            let report = if self.shared.device_paced() {
+                // KC-12a: a call that does not return in time is abandoned holding its
+                // slot, so `collect_prepare`, which locks every slot, is not reached.
+                let fragment = fragment.clone();
+                match super::paced::bounded(move || slot.prepare(&fragment, island.as_ref(), context)) {
+                    Some(report) => report,
+                    None => {
+                        self.fail(
+                            Stage::Prepare,
+                            format!(
+                                "KC-12a: prepare of {} did not return within {} ms",
+                                self.shared.first_fragment(instance),
+                                DEFAULT_HOST_BUDGET_NS / 1_000_000
+                            ),
+                        );
+                        return false;
+                    }
                 }
-                Inst::Sink(i) => {
-                    let mut guard = lock(&self.shared.sinks[i].object);
-                    contain(|| guard.prepare(fragment, context))
-                }
-                Inst::Executor(i) => {
-                    let mut guard = lock(&self.shared.executors[i].object);
-                    contain(|| guard.prepare(island.as_ref().expect("Executor Island"), context))
-                }
+            } else {
+                contain(|| slot.prepare(fragment, island.as_ref(), context))
             };
             let failed = report.is_err();
             reports.push(report);
@@ -836,19 +907,24 @@ impl RunHandle {
             .order
             .clone();
         for instance in order {
-            let result = match instance {
-                Inst::Provider(i) => {
-                    let mut g = lock(&self.shared.providers[i].object);
-                    contain(|| g.arm())
+            let slot = SlotRef::of(&self.shared, instance);
+            let result = if self.shared.device_paced() {
+                match super::paced::bounded(move || slot.arm()) {
+                    Some(result) => result,
+                    None => {
+                        self.fail(
+                            Stage::Arm,
+                            format!(
+                                "KC-12a: arm of {} did not return within {} ms",
+                                self.shared.first_fragment(instance),
+                                DEFAULT_HOST_BUDGET_NS / 1_000_000
+                            ),
+                        );
+                        return false;
+                    }
                 }
-                Inst::Executor(i) => {
-                    let mut g = lock(&self.shared.executors[i].object);
-                    contain(|| g.arm())
-                }
-                Inst::Sink(i) => {
-                    let mut g = lock(&self.shared.sinks[i].object);
-                    contain(|| g.arm())
-                }
+            } else {
+                contain(|| slot.arm())
             };
             if let Err(error) = result {
                 emit_device_lost(&self.shared, instance, &error);
@@ -883,7 +959,31 @@ impl RunHandle {
                 return false;
             }
         };
-        let Some(ticks) = self.shared.now().ticks.checked_add(lead_ticks) else {
+        // KG-7: T0 is a sample instant of every declared stream, the first multiple of
+        // the least common multiple of their ratios' numerators at or after now + lead.
+        let mut lattice: u64 = 1;
+        for clock in self.shared.ctx.clocks.declared_sample_clocks() {
+            if clock.root != self.shared.primary {
+                continue;
+            }
+            let n = clock.root_ticks_per_tick.num();
+            let Some(l) = (lattice / gcd(lattice, n)).checked_mul(n) else {
+                self.fail(Stage::Arm, "KC-15: overflow".to_owned());
+                return false;
+            };
+            lattice = l;
+        }
+        let t0 = self
+            .shared
+            .now()
+            .ticks
+            .checked_add(lead_ticks)
+            .zip(i64::try_from(lattice).ok())
+            .and_then(|(earliest, l)| {
+                let q = earliest.div_euclid(l) + i64::from(earliest.rem_euclid(l) != 0);
+                q.checked_mul(l)
+            });
+        let Some(ticks) = t0 else {
             self.fail(Stage::Arm, "KC-15: overflow".to_owned());
             return false;
         };
@@ -1185,6 +1285,54 @@ impl RunHandle {
     }
 }
 
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// An instance's slot, owned, so that `prepare` and `arm` can run on a worker thread
+/// that keeps it when abandoned (KC-12a).
+enum SlotRef {
+    Provider(super::state::Slot<dyn Provider>),
+    Sink(super::state::Slot<dyn Sink>),
+    Executor(super::state::Slot<dyn Executor>),
+}
+
+impl SlotRef {
+    fn of(shared: &Shared, instance: Inst) -> SlotRef {
+        match instance {
+            Inst::Provider(i) => SlotRef::Provider(shared.providers[i].object.clone()),
+            Inst::Sink(i) => SlotRef::Sink(shared.sinks[i].object.clone()),
+            Inst::Executor(i) => SlotRef::Executor(shared.executors[i].object.clone()),
+        }
+    }
+
+    fn prepare(
+        &self,
+        fragment: &crate::plan::Fragment,
+        island: Option<&crate::module_api::IslandDecl>,
+        context: PrepareContext,
+    ) -> Result<crate::plan::PrepareReport, ModuleError> {
+        match self {
+            SlotRef::Provider(slot) => lock(slot).prepare(fragment, context),
+            SlotRef::Sink(slot) => lock(slot).prepare(fragment, context),
+            SlotRef::Executor(slot) => {
+                lock(slot).prepare(island.expect("an Executor fragment has its Island"), context)
+            }
+        }
+    }
+
+    fn arm(&self) -> Result<(), ModuleError> {
+        match self {
+            SlotRef::Provider(slot) => lock(slot).arm(),
+            SlotRef::Sink(slot) => lock(slot).arm(),
+            SlotRef::Executor(slot) => lock(slot).arm(),
+        }
+    }
+}
+
 /// Records one refused Session Action and hands back its log entry, which is the
 /// whole of `submit`'s answer to a refusal: the Action takes a sequence number and
 /// the caller learns why (RS-15, RS-18).
@@ -1304,6 +1452,10 @@ pub(super) fn submit(
         None => {}
     }
 
+    run.sync_lease();
+    // KC-24a: from the first admission through the last dispatch.
+    let admission_lock = run.shared.clone();
+    let admission_guard = lock(&admission_lock.admission);
     let mut configuration = lock(&run.shared.configuration).clone();
     let mut admitted = Vec::with_capacity(compiled.actions.len());
     let mut violations = Vec::new();
@@ -1348,13 +1500,18 @@ pub(super) fn submit(
     }
 
     if !violations.is_empty() {
+        drop(admission_guard);
         return rejected(run, now, log_action, violations);
     }
 
-    let dispatched = admitted
+    let (dispatched, targets): (Vec<_>, Vec<_>) = admitted
         .into_iter()
         .map(|action| super::admission::dispatch(&run.shared, action))
-        .collect();
+        .unzip();
+    drop(admission_guard);
+    if run.shared.device_paced() {
+        super::paced::wait_finished(&run.shared, &targets);
+    }
     run.log
         .append(
             now,
@@ -1450,6 +1607,12 @@ fn child_refusal(
 ) -> Option<String> {
     if !matches!(run.state(), RunState::Running {}) {
         return Some("RS-18: the Run is not Running".to_owned());
+    }
+    if run.shared.device_paced() {
+        return Some(
+            "KC-37a: a device-paced Session runs no child Run: its devices are the parent's, and a child would open them again (Phase 7, KG-12)"
+                .to_owned(),
+        );
     }
     if let Err(error) = ExperimentSpec::from_json(spec_doc) {
         return Some(format!("RS-25a: the child's Spec: {error}"));
@@ -1576,8 +1739,10 @@ impl ActionSubmitter for Submitter {
             );
             return Ok(ActionId(0));
         }
+        // KC-24a; no KC-21a wait: the submitting step is still running (MA-14a).
+        let _admission = lock(&shared.admission);
         super::admission::admit(&shared, action, super::state::Origin::Module)
-            .map(|admitted| super::admission::dispatch(&shared, admitted))
+            .map(|admitted| super::admission::dispatch(&shared, admitted).0)
     }
 }
 

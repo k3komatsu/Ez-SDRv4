@@ -1128,6 +1128,8 @@ ma6_documents! {
     module_api::ExecutorDescriptor, module_api::IslandDecl, module_api::SinkDescriptor,
     module_api::LinkDescriptor, module_api::AuthorityDescriptor, plan::Fragment,
     plan::PrepareReport, time::TimePoint, manifest::ArtifactRef, stream::DataLinkDecl,
+    // KG-11: `Authority::relations` carries it (MA-46 as KG-11 amends it).
+    time::ClockRelation,
 }
 
 /// MA-6's Kernel handles, and the wrappers it allows over its categories.

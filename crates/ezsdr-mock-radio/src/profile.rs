@@ -1,17 +1,11 @@
 //! The two resource and timing envelopes the Mock exposes (MR-3, MR-4).
 
-use std::collections::BTreeMap;
-
-use ezsdr_kernel::contract::{DataContractId, Port, PortDirection};
-use ezsdr_kernel::id::ResourceId;
 use ezsdr_kernel::module_api::{
-    CoercionFidelity, EnvelopeFidelity, Fidelity, ProfileRef, Resource, RfFidelity,
-    TransportFidelity, Version,
+    CoercionFidelity, EnvelopeFidelity, Fidelity, ProfileRef, RfFidelity, TransportFidelity,
+    Version,
 };
-use ezsdr_kernel::spec::{CapabilityValue, Ident, Key, Namespace, Value};
+use ezsdr_radio::device::{DeviceDescription, Grid};
 use ezsdr_radio::{PerformanceEnvelope, RadioEnvelope, TimingEnvelope};
-
-use crate::coerce::Grid;
 
 /// Which Phase 2 radio envelope the Mock presents (MR-3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -43,18 +37,6 @@ impl Profile {
         }
     }
 
-    pub(crate) fn rate_grid(self) -> Grid {
-        match self.kind {
-            ProfileKind::X310Like => Grid::Values(
-                (1..=512).rev().map(|n| 200_000_000.0 / f64::from(n)).collect(),
-            ),
-            ProfileKind::Ideal => Grid::Integer {
-                lo: 1,
-                hi: 1_000_000_000,
-            },
-        }
-    }
-
     pub(crate) fn decimation(self, rate: f64) -> Option<u64> {
         if self.kind != ProfileKind::X310Like || !rate.is_finite() || rate <= 0.0 {
             return None;
@@ -70,51 +52,6 @@ impl Profile {
         match self.kind {
             ProfileKind::X310Like => i64::from(2 * self.n),
             ProfileKind::Ideal => 64,
-        }
-    }
-
-    pub(crate) fn freq_grid(self) -> Grid {
-        match self.kind {
-            ProfileKind::X310Like => Grid::Step {
-                lo: 10_000_000.0,
-                hi: 6_000_000_000.0,
-                step: 1.0,
-            },
-            ProfileKind::Ideal => Grid::Step {
-                lo: 0.0,
-                hi: 1_000_000_000_000.0,
-                step: 0.0,
-            },
-        }
-    }
-
-    pub(crate) fn gain_grid(self) -> Grid {
-        match self.kind {
-            ProfileKind::X310Like => Grid::Step {
-                lo: 0.0,
-                hi: 31.5,
-                step: 0.5,
-            },
-            ProfileKind::Ideal => Grid::Step {
-                lo: -200.0,
-                hi: 200.0,
-                step: 0.0,
-            },
-        }
-    }
-
-    pub(crate) fn rx_antennas(self) -> &'static [&'static str] {
-        &["RX2", "TX/RX"]
-    }
-
-    pub(crate) fn tx_antennas(self) -> &'static [&'static str] {
-        &["TX/RX"]
-    }
-
-    pub(crate) fn phase_behavior(self) -> &'static str {
-        match self.kind {
-            ProfileKind::X310Like => "random_unless_timed_tune",
-            ProfileKind::Ideal => "deterministic",
         }
     }
 
@@ -211,140 +148,46 @@ impl Profile {
         }
     }
 
-    pub(crate) fn tree(self, id: &ResourceId) -> Resource {
-        use ezsdr_radio::keys::*;
-
-        let mut capabilities = BTreeMap::new();
-        let range = |min, max| CapabilityValue::Range { min, max };
-        let one = |value| CapabilityValue::One { value };
-        for direction in ["rx", "tx"] {
-            let channel = key(&format!("radio.{direction}.channels"));
-            capabilities.insert(
-                channel,
-                range(Value::Int(0), Value::Int(self.max_channels())),
-            );
-            let rates = key(&format!("radio.{direction}.sample_rate_hz"));
-            let rate_cap = match self.kind {
-                ProfileKind::X310Like => CapabilityValue::AnyOf {
-                    values: (1..=512)
-                        .map(|n| Value::Num(200_000_000.0 / f64::from(n)))
-                        .collect(),
-                },
-                ProfileKind::Ideal => range(Value::Num(1.0), Value::Num(1_000_000_000.0)),
-            };
-            capabilities.insert(rates, rate_cap);
-            let frequency = key(&format!("radio.{direction}.frequency_hz"));
-            let frequency_grid = self.freq_grid();
-            capabilities.insert(
-                frequency,
-                range(Value::Num(frequency_grid.min()), Value::Num(frequency_grid.max())),
-            );
-            let gain = key(&format!("radio.{direction}.gain_db"));
-            let gain_grid = self.gain_grid();
-            capabilities.insert(
-                gain,
-                range(Value::Num(gain_grid.min()), Value::Num(gain_grid.max())),
-            );
-            let frequency_step = key(&format!("radio.{direction}.frequency_step_hz"));
-            capabilities.insert(frequency_step, one(Value::Num(frequency_grid.step())));
-            let gain_step = key(&format!("radio.{direction}.gain_step_db"));
-            capabilities.insert(gain_step, one(Value::Num(gain_grid.step())));
-        }
-        capabilities.insert(
-            key(RX_ANTENNA),
-            CapabilityValue::AnyOf {
-                values: self.rx_antennas().iter().map(|s| Value::Str((*s).to_owned())).collect(),
-            },
-        );
-        capabilities.insert(
-            key(TX_ANTENNA),
-            CapabilityValue::AnyOf {
-                values: self.tx_antennas().iter().map(|s| Value::Str((*s).to_owned())).collect(),
-            },
-        );
-        for (name, value) in [
-            (RX_COHERENT, Value::Bool(true)),
-            (FULL_DUPLEX, Value::Bool(true)),
-            (HARDWARE_TIME, Value::Bool(true)),
-            (PHASE_BEHAVIOR_ON_RETUNE, Value::Str(self.phase_behavior().to_owned())),
-            (
-                TX_REPEAT_MAX_SAMPLES,
-                Value::Int(i64::try_from(self.repeat_max_samples()).expect("profile limit fits i64")),
+    /// MR-3's values as RM-26's description, whose `tree` and `coerce` are MR-4's and
+    /// MR-6's (Phase 7, VE-1, VE-4).
+    pub(crate) fn description(self) -> DeviceDescription {
+        let (rates, whole_hertz_rates, frequency, gain, phase) = match self.kind {
+            ProfileKind::X310Like => (
+                Grid::Values((1..=512).rev().map(|n| 200_000_000.0 / f64::from(n)).collect()),
+                false,
+                Grid::Step { lo: 10_000_000.0, hi: 6_000_000_000.0, step: 1.0 },
+                Grid::Step { lo: 0.0, hi: 31.5, step: 0.5 },
+                "random_unless_timed_tune",
             ),
-            (TX_REPEAT_ALIGN_SAMPLES, Value::Int(self.repeat_align_samples() as i64)),
-            (RX_BLOCK_LEN, Value::Int(i64::from(self.block_len()))),
-            (
-                MIN_TIMED_COMMAND_LEAD_NS,
-                Value::Int(self.timing().min_timed_command_lead_ns),
+            ProfileKind::Ideal => (
+                Grid::Integer { lo: 1, hi: 1_000_000_000 },
+                true,
+                Grid::Step { lo: 0.0, hi: 1_000_000_000_000.0, step: 0.0 },
+                Grid::Step { lo: -200.0, hi: 200.0, step: 0.0 },
+                "deterministic",
             ),
-            (STARTUP_LATENCY_NS, Value::Int(self.timing().startup_latency_ns)),
-            (STOP_TAIL_NS, Value::Int(self.timing().stop_tail_ns)),
-            (
-                COMMAND_QUEUE_DEPTH,
-                Value::Int(self.timing().command_queue_depth),
-            ),
-            (
-                OVERFLOW_RESTART_GAP_NS,
-                Value::Int(self.timing().overflow_restart_gap_ns),
-            ),
-            (RX_BYTES_PER_S, Value::Int(self.performance().rx_bytes_per_s)),
-            (TX_BYTES_PER_S, Value::Int(self.performance().tx_bytes_per_s)),
-            (
-                WIRE_BYTES_PER_SAMPLE,
-                Value::Int(self.performance().wire_bytes_per_sample),
-            ),
-            (TX_PATH_DELAY_SAMPLES, Value::Int(self.tx_path_delay_samples())),
-            (RX_PATH_DELAY_SAMPLES, Value::Int(self.rx_path_delay_samples())),
-        ] {
-            capabilities.insert(key(name), one(value));
-        }
-        let rx_id = id.child("rx").expect("valid RX resource id");
-        let tx_id = id.child("tx").expect("valid TX resource id");
-        Resource {
-            id: id.clone(),
-            kind: Namespace::parse(DEVICE_KIND).expect("radio device kind"),
-            capabilities,
-            children: vec![
-                Resource {
-                    id: rx_id,
-                    kind: Namespace::parse(RX_STREAM_KIND).expect("RX stream kind"),
-                    capabilities: BTreeMap::new(),
-                    children: Vec::new(),
-                    ports: Vec::new(),
-                    shareable: false,
-                },
-                Resource {
-                    id: tx_id,
-                    kind: Namespace::parse(TX_STREAM_KIND).expect("TX stream kind"),
-                    capabilities: BTreeMap::new(),
-                    children: Vec::new(),
-                    ports: Vec::new(),
-                    shareable: false,
-                },
-            ],
-            ports: vec![Port {
-                name: Ident::parse("rx").expect("rx port name"),
-                direction: PortDirection::Out,
-                contract: DataContractId::parse("ezsdr.stream.cf32").expect("cf32"),
-            }],
-            shareable: false,
-        }
-    }
-}
-
-fn key(name: &str) -> Key {
-    Key::parse(name).expect("declared radio key")
-}
-
-const DEVICE_KIND: &str = ezsdr_radio::DEVICE_KIND;
-const RX_STREAM_KIND: &str = ezsdr_radio::RX_STREAM_KIND;
-const TX_STREAM_KIND: &str = ezsdr_radio::TX_STREAM_KIND;
-
-impl Grid {
-    pub(crate) fn step(&self) -> f64 {
-        match self {
-            Grid::Step { step, .. } => *step,
-            Grid::Values(_) | Grid::Integer { .. } => 0.0,
+        };
+        DeviceDescription {
+            profile: self.profile_ref(),
+            rates,
+            whole_hertz_rates,
+            frequency,
+            gain,
+            max_channels: self.max_channels(),
+            rx_antennas: vec!["RX2".to_owned(), "TX/RX".to_owned()],
+            tx_antennas: vec!["TX/RX".to_owned()],
+            coherent: true,
+            full_duplex: true,
+            hardware_time: true,
+            phase_behavior_on_retune: phase.to_owned(),
+            repeat_max_samples: self.repeat_max_samples(),
+            repeat_align_samples: self.repeat_align_samples(),
+            block_len: self.block_len(),
+            tx_path_delay_samples: self.tx_path_delay_samples(),
+            rx_path_delay_samples: self.rx_path_delay_samples(),
+            timing: self.timing(),
+            performance: self.performance(),
+            defaults: DeviceDescription::x310_defaults(),
         }
     }
 }

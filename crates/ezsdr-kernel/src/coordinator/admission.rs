@@ -243,7 +243,9 @@ pub(super) fn admit_with(
     })
 }
 
-pub(super) fn dispatch(shared: &Shared, admitted: AdmittedAction) -> ActionId {
+/// Dispatches one admitted Action and returns its id with the instance and the
+/// count KC-21a waits for. The caller holds the admission lock (KC-24a).
+pub(super) fn dispatch(shared: &Shared, admitted: AdmittedAction) -> (ActionId, (Inst, u64)) {
     let id = ActionId(shared.next_action.fetch_add(1, Ordering::SeqCst));
     if let Action::UpdateParameter { key, value, .. } = &admitted.action {
         lock(&shared.configuration)
@@ -251,8 +253,8 @@ pub(super) fn dispatch(shared: &Shared, admitted: AdmittedAction) -> ActionId {
             .or_default()
             .insert(key.clone(), value.clone());
     }
-    lock(&shared.queue(admitted.inst).0).push_back(admitted.action);
-    id
+    let pushed = shared.queue(admitted.inst).push(admitted.action);
+    (id, (admitted.inst, pushed))
 }
 
 fn violation(check: &str, reason: impl Into<String>) -> Violation {

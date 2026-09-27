@@ -192,8 +192,12 @@ fn po_11_no_hashmap_and_no_wall_clock_in_simulation_code() {
         .map(|name| root.join("crates").join(name).join("src"))
         .collect();
     source_roots.push(root.join("crates/ezsdr-kernel/src/coordinator"));
+    // GZ-4: `paced.rs` runs only in HardwareInLoop and Hardware, which read the host
+    // clock by definition; `kg_02_the_simulation_class_starts_no_thread` keeps a
+    // Simulation Run out of it.
+    let paced = root.join("crates/ezsdr-kernel/src/coordinator/paced.rs");
     for source_root in source_roots {
-        for file in rust_files(&source_root) {
+        for file in rust_files(&source_root).into_iter().filter(|file| *file != paced) {
             let source = fs::read_to_string(&file).unwrap();
             for (line_number, line) in source.lines().enumerate() {
                 let code = line.split("//").next().unwrap_or_default();

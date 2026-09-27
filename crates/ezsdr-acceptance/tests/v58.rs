@@ -632,15 +632,12 @@ fn kd_01_a_faulted_round_does_not_depend_on_fragment_names() {
 }
 
 #[test]
-fn k3_an_off_grid_start_lead_moves_a_burst_to_the_next_transmit_sample() {
-    // A ceiling, pinned so it cannot change unnoticed (Phase 4 Review D, P0-1; UHD spike
-    // K3): the transmit SampleClock starts at arm (MR-9) and the receive one at T0
-    // (MR-11), so a start lead that is not a whole number of samples puts the two grids
-    // out of step. A burst at T0 + n transmit samples is rounded up onto the transmit
-    // grid (SC-23b) and is heard one receive sample late; only the burst record's
-    // `requested_target` shows the move. Owned by Phase 7 (`plan/phase4/00-overview.md` §3).
-    let first_heard = |start_lead_ns: u64| {
-        let temp = rig::TempDir::new("k3");
+fn kg_07_a_burst_at_t0_plus_n_samples_is_exact() {
+    // Replaces Phase 4's K3 ceiling test (GY-3, Phase 7): with T0 on every declared
+    // grid (KC-15) and the transmit clock on its lattice (RM-25, MR-9), a start lead
+    // that is not a whole number of samples no longer moves a burst at T0 + n samples.
+    let heard = |start_lead_ns: u64| {
+        let temp = rig::TempDir::new("kg07");
         let samples = ramp(3_000);
         let (bytes, waveform) = experiments::waveform_of(&samples);
         let spec = experiments::link("a", "b", 1.0e6, &waveform, 10_000, 20_000);
@@ -648,15 +645,23 @@ fn k3_an_off_grid_start_lead_moves_a_burst_to_the_next_transmit_sample() {
         environment["ezsdr.time"] = json!({ "class": "simulation", "start_lead_ns": start_lead_ns });
         let profile = rig::link_profile("ideal", "a", "b", false, &temp.0, environment);
         let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+        let t0 = run.start_instant().unwrap().ticks;
         let clock = root(&run);
         let manifest = finish_at(run, clock, T0 + 25_000_000);
         let capture = rig::read_capture(artifact(&manifest, "rec"), 1).remove(0);
         let first = capture.iter().position(|sample| *sample != (0.0, 0.0)).unwrap();
         let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "ezsdr.radio.mock.dev_tx.bursts").clone()).unwrap();
-        (first, bursts[0].requested_target.is_some())
+        let burst = &bursts[0];
+        let tx = manifest.clocks.sample_clocks.iter().find(|record| record.domain == burst.target.domain).unwrap();
+        let ratio = tx.root_ticks_per_tick;
+        assert_eq!(ratio.den(), 1);
+        assert_eq!(tx.origin.ticks % ratio.num() as i64, 0, "the transmit origin is on its lattice");
+        let target = tx.origin.ticks + burst.target.ticks * ratio.num() as i64;
+        (first, target - t0, burst.requested_target.is_some(), burst.late_by.is_some())
     };
-    assert_eq!(first_heard(2_000_000_000), (10_001, false));
-    assert_eq!(first_heard(2_000_000_500), (10_002, true));
+    for lead in [2_000_000_000, 2_000_000_500] {
+        assert_eq!(heard(lead), (10_001, 10_000 * 1_000, false, false), "start_lead_ns {lead}");
+    }
 }
 
 #[test]

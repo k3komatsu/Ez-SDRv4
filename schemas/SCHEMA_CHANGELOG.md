@@ -15,6 +15,22 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — Phase 7 — what a device reports
+
+Still version 1: v4.0 has not frozen. No Kernel schema changed (`plan/phase7/00-overview.md`
+GZ-2); the Radio Model Vocabulary is `radio` 1.3.0.
+
+- `radio/time_error_payload`: `outcome` gains the value `late_at_device`, meaning the Provider
+  handed the burst to the device in time by its own clock and the device reported it late, so
+  nothing was transmitted (RM-11, RM-22; Phase 7, VE-3). Not additive for a validating reader:
+  one validating against the Phase 2 file would refuse the new value, so a validating reader
+  regenerates from 1.3.0. A document from before 1.3.0 reads as before.
+- New `radio/tx_underflow_payload` (`{ cause: "starved" | "lost" }`),
+  `radio/alignment_error_payload` (`{ lost }`) and `radio/clock_lost_payload`
+  (`{ reference: "frequency" }`): the payloads of the declared kinds `radio.TX_UNDERFLOW`,
+  `radio.ALIGNMENT_ERROR` and `radio.CLOCK_LOST`, which a hardware Provider emits (RM-10,
+  RM-11, RM-22; Phase 7, VE-3). `schemas/radio/` now holds eleven files (RM-20).
+
 ## v1 — Phase 6 — `sink.CAPTURE_WRITTEN` and the protocol frames
 
 Still version 1: v4.0 has not frozen. Additive; no Kernel schema changes.

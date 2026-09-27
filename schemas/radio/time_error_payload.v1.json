@@ -64,6 +64,11 @@
           "const": "refused",
           "description": "Refuse the burst (RM-22).",
           "type": "string"
+        },
+        {
+          "const": "late_at_device",
+          "description": "The Provider handed the burst over in time by its own clock and the device\nreported it late, so nothing was transmitted (RM-11, VE-3).",
+          "type": "string"
         }
       ]
     },

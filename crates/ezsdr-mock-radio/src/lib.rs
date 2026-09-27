@@ -1,9 +1,9 @@
-//! Ez-SDR v4 Module ezsdr.radio.mock 1.2.0 (design/09-mock-radio.md).
+//! Ez-SDR v4 Module ezsdr.radio.mock 1.3.0 (design/09-mock-radio.md).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 mod channel;
-mod coerce;
+
 mod profile;
 mod time;
 mod device;
@@ -35,19 +35,19 @@ pub use profile::{Profile, ProfileKind};
 fn module_ref() -> ModuleRef {
     ModuleRef {
         id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"),
-        version: Version::new(1, 2, 0),
+        version: Version::new(1, 3, 0),
     }
 }
 
-/// The Module descriptor for `ezsdr.radio.mock` 1.2.0 (MR-1).
+/// The Module descriptor for `ezsdr.radio.mock` 1.3.0 (MR-1).
 pub fn descriptor() -> ModuleDescriptor {
     ModuleDescriptor {
         id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"),
-        version: Version::new(1, 2, 0),
+        version: Version::new(1, 3, 0),
         kernel_api: KERNEL_API,
         roles: vec![Role::Provider],
-        // radio 1.2.0 for RM-24's hot-path form of RX_OVERFLOW (MR-37).
-        vocabularies: [("radio", Version::new(1, 2, 0)), ("sim", Version::new(1, 1, 0))]
+        // radio 1.3.0: RM-24's hot-path RX_OVERFLOW (MR-37), RM-26's description (VE-1).
+        vocabularies: [("radio", Version::new(1, 3, 0)), ("sim", Version::new(1, 1, 0))]
             .into_iter()
             .map(|(id, version)| VocabularyRequirement {
                 id: Namespace::parse(id).expect("valid vocabulary"),
@@ -55,7 +55,7 @@ pub fn descriptor() -> ModuleDescriptor {
             })
             .collect(),
         deployment: Deployment::InProcess {},
-        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 1.2.0")),
+        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 1.3.0")),
     }
 }
 
@@ -249,7 +249,7 @@ impl MockRadio {
             id: id.clone(),
             module: module_ref(),
             profile: binding.profile.clone(),
-            tree: profile.tree(&id),
+            tree: profile.description().tree(&id),
             fidelity: profile.fidelity(),
             driving: Driving { stepped: true },
             arm_after,
@@ -262,7 +262,7 @@ impl MockRadio {
             instance,
             section_id,
             profile,
-            config: coerce::defaults(),
+            config: ezsdr_radio::device::DeviceDescription::x310_defaults(),
             prepare_called: false,
             prepared: false,
             armed: false,
@@ -1052,7 +1052,7 @@ impl MockRadio {
         candidate.insert(update.key.clone(), update.value.clone());
         let constraints = candidate.iter().map(|(key, value)| (key.clone(), ezsdr_kernel::spec::Constraint::Eq { value: value.clone() })).collect();
         let requested = Requested { resource: self.instance.id.clone(), constraints };
-        let report = coerce::coerce(&self.profile, &self.instance.id, &requested).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
+        let report = self.profile.description().coerce(&self.instance.id, &requested).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
         if let Some(rejected) = report.rejected.first() {
             self.reject_action_at("update_parameter", &format!("MR-18: {}", rejected.reason), tick)?;
             return Ok(());
@@ -1077,35 +1077,44 @@ impl MockRadio {
                 _ => {}
             }
         }
+        // e₁ when an old clock runs, e otherwise; the new clock starts at e₂, its own
+        // lattice's first instant at or after e₁, with a restart lead of zero (VE-4).
+        let mut restart = tick;
         if update.class == UpdateClass::Cold && is_rx_cold_key(update.key.as_str()) {
             if let (Some(clocks), Some(rx)) = (&self.clocks, &self.rx) {
                 if clocks.is_registered(rx.domain) && clocks.get(rx.domain).is_ok_and(|domain| domain.ended_at.is_none()) {
-                    clocks.end(rx.domain, TimePoint::new(self.root.expect("root"), tick)).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
+                    // RM-25: e₁, the old clock's first lattice instant at or after e.
+                    restart = lattice_at_or_after(tick, rx.ratio).ok_or_else(|| ModuleError::rejected("MR-18: lattice overflow"))?;
+                    clocks.end(rx.domain, TimePoint::new(self.root.expect("root"), restart)).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
                 }
             }
             let channels = self.effective_channels(ezsdr_radio::keys::RX_CHANNELS);
             if channels > 0 {
                 let handle = self.declare_sample_handle("rx", num_config(&self.config, ezsdr_radio::keys::RX_SAMPLE_RATE_HZ))?;
                 if !self.links.is_empty() {
-                    let domain = self.clocks.as_ref().expect("clocks").register_sample_clock(&handle, tick).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
+                    // RM-25: e₂, the new lattice's first instant at or after e₁ (restart lead 0).
+                    let origin = lattice_at_or_after(restart, handle.root_ticks_per_tick).ok_or_else(|| ModuleError::rejected("MR-18: lattice overflow"))?;
+                    let domain = self.clocks.as_ref().expect("clocks").register_sample_clock(&handle, origin).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
                     let channels = channels as u16;
-                    self.rx = Some(Rx { handle: handle.clone(), domain, origin: tick, ratio: handle.root_ticks_per_tick, channels, next: 0, planned: None, flags: BlockFlags::NONE, lost: None, end: None });
+                    self.rx = Some(Rx { handle: handle.clone(), domain, origin, ratio: handle.root_ticks_per_tick, channels, next: 0, planned: None, flags: BlockFlags::NONE, lost: None, end: None });
                     self.pool = Some(HostPool::new(self.profile.block_len() as usize * 2 * channels as usize * 8));
                 } else { self.rx = None; }
                 self.rx_handle = Some(handle);
             } else { self.rx = None; self.rx_handle = None; }
         } else if update.class == UpdateClass::Cold && is_tx_cold_key(update.key.as_str()) {
             self.stop_tx(tick, "MR-18: cancelled by a cold change", true)?;
-            if let (Some(clocks), Some(domain)) = (&self.clocks, self.tx_domain) {
+            if let (Some(clocks), Some(domain), Some(old)) = (&self.clocks, self.tx_domain, &self.tx_handle) {
                 if clocks.is_registered(domain) && clocks.get(domain).is_ok_and(|d| d.ended_at.is_none()) {
-                    clocks.end(domain, TimePoint::new(self.root.expect("root"), tick)).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
+                    restart = lattice_at_or_after(tick, old.root_ticks_per_tick).ok_or_else(|| ModuleError::rejected("MR-18: lattice overflow"))?;
+                    clocks.end(domain, TimePoint::new(self.root.expect("root"), restart)).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
                 }
             }
             let channels = self.effective_channels(ezsdr_radio::keys::TX_CHANNELS);
             if channels > 0 {
                 let handle = self.declare_sample_handle("tx", num_config(&self.config, ezsdr_radio::keys::TX_SAMPLE_RATE_HZ))?;
-                let domain = self.clocks.as_ref().expect("clocks").register_sample_clock(&handle, tick).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
-                self.tx_origin = Some(tick);
+                let origin = lattice_at_or_after(restart, handle.root_ticks_per_tick).ok_or_else(|| ModuleError::rejected("MR-18: lattice overflow"))?;
+                let domain = self.clocks.as_ref().expect("clocks").register_sample_clock(&handle, origin).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
+                self.tx_origin = Some(origin);
                 self.tx_handle = Some(handle);
                 self.tx_domain = Some(domain);
                 self.tx_gen = self.tx_gen.saturating_add(1);
@@ -1135,6 +1144,14 @@ impl MockRadio {
         let stream = self.instance.id.child(direction).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
         clocks.declare_sample_clock(stream, root, ratio).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))
     }
+}
+
+/// RM-25: the first whole multiple, at or after `t`, of the numerator of `ratio` in
+/// lowest terms.
+fn lattice_at_or_after(t: i64, ratio: Rational) -> Option<i64> {
+    let n = i64::try_from(ratio.num()).ok()?;
+    let q = t.div_euclid(n) + i64::from(t.rem_euclid(n) != 0);
+    q.checked_mul(n)
 }
 
 fn int_config(config: &BTreeMap<ezsdr_kernel::spec::Key, Value>, name: &str) -> i64 {
@@ -1176,7 +1193,7 @@ impl Provider for MockRadio {
     }
 
     fn coerce(&self, request: &Requested) -> Result<CoerceReport, ModuleError> {
-        coerce::coerce(&self.profile, &self.instance.id, request)
+        self.profile.description().coerce(&self.instance.id, request)
     }
 
     fn prepare(&mut self, f: &Fragment, ctx: PrepareContext) -> Result<PrepareReport, ModuleError> {
@@ -1197,7 +1214,7 @@ impl Provider for MockRadio {
         if !report.rejected.is_empty() {
             return Err(self.reject(format!("MR-7: rejected requests: {:?}", report.rejected)));
         }
-        let mut config = coerce::defaults();
+        let mut config = ezsdr_radio::device::DeviceDescription::x310_defaults();
         for (key, value) in report.applied {
             if ezsdr_radio::keys::CONFIGURATION.contains(&key.as_str()) {
                 config.insert(key, value);
@@ -1325,8 +1342,10 @@ impl Provider for MockRadio {
         let latency = self.profile.timing().startup_latency_ns;
         self.sync_end = Some(now.checked_add(time::ns_to_v(clocks, root, latency).map_err(|error| self.reject(format!("MR-9: {error}")))?).ok_or_else(|| self.reject("MR-9: synchronisation time overflow"))?);
         if let Some(handle) = &self.tx_handle {
-            self.tx_domain = Some(clocks.register_sample_clock(handle, now).map_err(|error| self.reject(format!("MR-9: {error}")))?);
-            self.tx_origin = Some(now);
+            // RM-25: the first lattice instant at or after the arm instant (VE-4).
+            let origin = lattice_at_or_after(now, handle.root_ticks_per_tick).ok_or_else(|| self.reject("MR-9: lattice overflow"))?;
+            self.tx_domain = Some(clocks.register_sample_clock(handle, origin).map_err(|error| self.reject(format!("MR-9: {error}")))?);
+            self.tx_origin = Some(origin);
             self.tx_gen = self.tx_gen.saturating_add(1);
             self.tx_tracker = Some(BurstTracker::new(self.tx_domain.expect("registered tx clock")));
             self.tx_device = DeviceModel::new();

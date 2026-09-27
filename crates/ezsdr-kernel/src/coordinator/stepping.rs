@@ -120,6 +120,13 @@ pub(super) fn round(shared: &Shared, at: TimePoint, cleaning: bool) {
     let Some(collector) = shared.collector.get() else {
         return;
     };
+    // KC-46: in a device-paced class the data thread steps the Executors and Sinks and
+    // no Provider is stepped, so a control-path round only drains; step 3's final
+    // round is a cleaning one and steps them (KA-12 as KG-3 amends it).
+    if shared.device_paced() && !cleaning {
+        drain_and_react(shared);
+        return;
+    }
     let fault = Fault(Mutex::new(Vec::new()));
     let restored = CleanupStep::RestoreBaseline as u8;
     let is_done = |inst: Inst| cleaning && lock(&shared.done).contains(&(restored, inst));
@@ -204,23 +211,29 @@ pub(super) fn round(shared: &Shared, at: TimePoint, cleaning: bool) {
     drain_and_react(shared);
 }
 
-fn fail_run(shared: &Shared, inst: Inst, reason: &str) {
+/// Returns whether this request set the Run's end (KC-46b).
+pub(super) fn fail_run(shared: &Shared, inst: Inst, reason: &str) -> bool {
     let full = format!("KC-30: {}: {reason}", shared.first_fragment(inst));
     super::ending::request(
         shared,
         Termination::Failed { stage: Stage::Run },
         CleanupMode::Abort,
         Some(full),
-    );
+    )
 }
 
-pub(super) fn drain_and_react(shared: &Shared) {
+/// Drains the collector and applies the Policy under the `delivered` lock, so that two
+/// threads draining one Run append and react in one order (KC-31). Returns how many
+/// events were delivered and whether a reaction set the Run's end (KC-46a, KC-46b).
+pub(super) fn drain_and_react(shared: &Shared) -> (usize, bool) {
     let Some(collector) = shared.collector.get() else {
-        return;
+        return (0, false);
     };
     let Some(policy) = shared.policy.get() else {
-        return;
+        return (0, false);
     };
+    let mut delivered = lock(&shared.delivered);
+    let mut ended = false;
     let events = collector.drain();
     for event in &events {
         let reaction = policy.reaction_for_event(&event.kind, event.severity);
@@ -232,7 +245,7 @@ pub(super) fn drain_and_react(shared: &Shared) {
             Reaction::Stop => CleanupMode::Orderly,
             Reaction::Abort => CleanupMode::Abort,
         };
-        super::ending::request(
+        ended |= super::ending::request(
             shared,
             Termination::Stopped {
                 cause: StopCause::Policy {
@@ -243,13 +256,14 @@ pub(super) fn drain_and_react(shared: &Shared) {
             None,
         );
     }
-    lock(&shared.delivered).extend(events);
+    let count = events.len();
+    delivered.extend(events);
     if let Some((kind, reaction)) = collector.escalation() {
         let mode = match reaction {
             Reaction::Abort => CleanupMode::Abort,
             Reaction::Continue | Reaction::MarkArtifact | Reaction::Stop => CleanupMode::Orderly,
         };
-        super::ending::request(
+        ended |= super::ending::request(
             shared,
             Termination::Stopped {
                 cause: StopCause::Policy { kind },
@@ -258,6 +272,7 @@ pub(super) fn drain_and_react(shared: &Shared) {
             None,
         );
     }
+    (count, ended)
 }
 
 /// KC-22's livelock event at `at`: source `kernel`, severity `fatal`, payload
@@ -279,6 +294,12 @@ fn emit_livelock(shared: &Shared, at: TimePoint) {
 }
 
 pub(super) fn drain_cleanup(shared: &Shared) -> bool {
+    // KA-12 step 3 as KG-3 amends it: the data thread is joined before any Executor or
+    // Sink stops, whatever the mode.
+    let device_paced = shared.device_paced();
+    if device_paced {
+        super::paced::stop_data_thread(shared);
+    }
     let mode = lock(&shared.end).as_ref().map(|end| end.mode);
     if mode != Some(CleanupMode::Orderly)
         || shared
@@ -286,6 +307,12 @@ pub(super) fn drain_cleanup(shared: &Shared) -> bool {
             .swap(true, std::sync::atomic::Ordering::AcqRel)
     {
         return false;
+    }
+    if device_paced {
+        // The Providers stopped in step 2, so their tails are in the links and one
+        // round at the current instant is finite.
+        round(shared, shared.now(), true);
+        return true;
     }
     // Read on both sides of `next_wakeup()`, which is a Module call: a later abort or a
     // `closing` flag must break the drain even if it arrives while the Authority runs.
@@ -346,7 +373,8 @@ impl RunHandle {
                 }
             };
             let Some(at) = wakeup else {
-                if self.kind() == crate::manifest::RunKind::Spec {
+                // KC-33: a device keeps streaming with nothing scheduled (KG-5).
+                if self.kind() == crate::manifest::RunKind::Spec && !self.shared.device_paced() {
                     super::ending::request(
                         &self.shared,
                         Termination::Completed {},
@@ -410,6 +438,7 @@ impl RunHandle {
             .take_while(|(tick, _, _)| *tick <= at.ticks)
             .count();
         let due: Vec<_> = self.agenda.drain(..count).collect();
+        let mut dispatched = Vec::new();
         for (_, index, action) in due {
             if matches!(action, Action::Stop { target: None }) {
                 super::ending::request(
@@ -420,9 +449,10 @@ impl RunHandle {
                 );
                 break;
             }
+            let _admission = lock(&self.shared.admission);
             match super::admission::admit(&self.shared, action, super::state::Origin::Schedule) {
                 Ok(admitted) => {
-                    super::admission::dispatch(&self.shared, admitted);
+                    dispatched.push(super::admission::dispatch(&self.shared, admitted).1);
                 }
                 Err(violations) => {
                     super::ending::request(
@@ -434,6 +464,9 @@ impl RunHandle {
                     break;
                 }
             }
+        }
+        if self.shared.device_paced() {
+            super::paced::wait_finished(&self.shared, &dispatched);
         }
     }
 
@@ -525,6 +558,11 @@ impl RunHandle {
 
     /// Runs until the Run ends or reaches the requested horizon (KC-29).
     pub fn run_until_end(&mut self, horizon: TimePoint) -> Result<(), super::RunHandleError> {
+        // KC-29 as KG-5 amends it: nothing else would wake a device-paced loop at its
+        // horizon, so it is scheduled as `advance_to` schedules it.
+        if self.shared.device_paced() {
+            return self.advance_to(horizon);
+        }
         self.check_lease();
         self.ensure_live()?;
         let horizon =

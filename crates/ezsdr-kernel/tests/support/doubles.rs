@@ -111,12 +111,29 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
                 coercion_default: CoercionPolicy::Reject,
                 update_class: Some(ezsdr_kernel::module_api::UpdateClass::HardwareTimed),
             },
+            // What `ThreadedProvider` reads to register a transmit SampleClock at run
+            // time, as a radio Provider does on a `cold` change (spec 19 §0, KG-4).
+            KeyDecl {
+                key: key("test.tx_clock"),
+                kind: ValueKind::Int,
+                coercible: false,
+                coercion_default: CoercionPolicy::Reject,
+                update_class: Some(ezsdr_kernel::module_api::UpdateClass::Cold),
+            },
         ],
-        event_kinds: vec![EventKindDecl {
-            kind: EventKind::parse("test.custom").expect("a valid kind"),
-            default: Reaction::Continue,
-            severity: ezsdr_kernel::event::Severity::Info,
-        }],
+        event_kinds: vec![
+            EventKindDecl {
+                kind: EventKind::parse("test.custom").expect("a valid kind"),
+                default: Reaction::Continue,
+                severity: ezsdr_kernel::event::Severity::Info,
+            },
+            // What `ThreadedProvider` emits from its own thread (spec 19 §0).
+            EventKindDecl {
+                kind: EventKind::parse("test.MARK").expect("a valid kind"),
+                default: Reaction::Continue,
+                severity: ezsdr_kernel::event::Severity::Info,
+            },
+        ],
         verbs: vec![
             VerbDecl {
                 verb: id("capture"),

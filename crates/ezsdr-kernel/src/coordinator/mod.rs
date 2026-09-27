@@ -2,6 +2,7 @@
 
 mod admission;
 mod ending;
+mod paced;
 mod pipeline;
 mod state;
 mod stepping;
@@ -286,7 +287,9 @@ impl RunHandle {
 
     /// Handles an Attached disconnect or starts a Detached Lease's expiry (KC-36).
     pub fn disconnect(&mut self) {
-        if let Some(cause) = self.lease.on_disconnect(&*self.shared.ctx.host_clock) {
+        let cause = self.lease.on_disconnect(&*self.shared.ctx.host_clock);
+        self.sync_lease();
+        if let Some(cause) = cause {
             ending::request(
                 &self.shared,
                 crate::run::Termination::Stopped { cause },
@@ -324,6 +327,25 @@ impl RunHandle {
             Err(RunHandleError::Ended { termination })
         } else {
             Ok(())
+        }
+    }
+
+    /// Mirrors a Detached Lease's expiry for the data thread (KC-36 as KG-2 amends it).
+    pub(super) fn sync_lease(&self) {
+        let deadline = match self.lease.mode {
+            crate::run::LeaseMode::Detached { .. } => self.lease.expires_at_host,
+            crate::run::LeaseMode::Attached {} => None,
+        };
+        *state::lock(&self.shared.lease_deadline) = deadline;
+    }
+}
+
+/// KC-46c: a live device-paced Run is cleaned up when its handle is dropped, as
+/// `finish` does, and its Manifest discarded; in the Simulation class nothing happens.
+impl Drop for RunHandle {
+    fn drop(&mut self) {
+        if self.shared.device_paced() && !matches!(self.state(), RunState::CleanedUp { .. }) {
+            ending::finish(self);
         }
     }
 }

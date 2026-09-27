@@ -49,9 +49,13 @@ pub trait TimeAuthority: Send + Sync {
     /// components and must not be called by a step-driven one (TM-16d).
     fn wait_until(&self, t: TimePoint) -> Result<(), TimeError>;
 
-    /// Queues `f` to run at `t`. Fails with `InPast` when `t` precedes `now`.
-    /// Callbacks fire in ascending time, ties in insertion order, and observe
-    /// `now()` equal to their fire time while running (TM-16c).
+    /// Queues `f` to run at `t`. Under a `FreeRunning` Authority it fails with
+    /// `InPast` when `t` precedes `now`; under a `WallPaced` or `Device` one only when
+    /// `t` precedes the last instant `next_wakeup` fired, and a `t` at or before `now`
+    /// fires at the next `next_wakeup`. Callbacks fire in ascending time, ties in
+    /// insertion order, and observe `now()` equal to their fire time while running
+    /// under a `FreeRunning` Authority, at or after it under a paced one (TM-16c as
+    /// KG-9 amends it).
     fn schedule(
         &self,
         t: TimePoint,

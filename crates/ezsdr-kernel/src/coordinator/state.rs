@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, TryLockError};
 
 use crate::binding::{AdmissionCheckRegistry, BindingProfile};
 use crate::contract::ContractRegistry;
@@ -27,12 +27,71 @@ use crate::time::{
 
 pub(super) type Slot<T> = Arc<Mutex<Box<T>>>;
 
-/// One instance's inbound Action queue (MA-14, KC-25).
-pub(super) struct Queue(pub(super) Mutex<VecDeque<Action>>);
+/// One instance's inbound Action queue (MA-14, KC-25). It counts what was pushed,
+/// taken and finished, so that a device-paced call can wait for an instance that
+/// is not stepped to finish with what it was dispatched (MA-14b, KC-21a).
+pub(super) struct Queue {
+    state: Mutex<QueueState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct QueueState {
+    actions: VecDeque<Action>,
+    pushed: u64,
+    taken: u64,
+    finished: u64,
+}
+
+impl Queue {
+    pub(super) fn new() -> Queue {
+        Queue {
+            state: Mutex::new(QueueState::default()),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// Queues one Action and returns how many have been pushed, which is what the
+    /// instance must have finished for this one to be done (KC-21a).
+    pub(super) fn push(&self, action: Action) -> u64 {
+        let mut state = lock(&self.state);
+        state.actions.push_back(action);
+        state.pushed += 1;
+        self.changed.notify_all();
+        state.pushed
+    }
+
+    /// RS-6 step 1: the undelivered Actions leave the queue and the count.
+    pub(super) fn clear(&self) {
+        let mut state = lock(&self.state);
+        let undelivered = state.actions.len() as u64;
+        state.actions.clear();
+        state.pushed -= undelivered;
+        self.changed.notify_all();
+    }
+
+    /// Waits at most `timeout` for `finished` to reach `target` (KC-21a).
+    pub(super) fn wait_finished_for(&self, target: u64, timeout: std::time::Duration) -> bool {
+        let state = lock(&self.state);
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, timeout, |state| state.finished < target)
+            .unwrap_or_else(|e| e.into_inner());
+        state.finished >= target
+    }
+}
 
 impl ActionReceiver for Queue {
+    /// MA-14b: calling `recv` again is what says the Actions taken so far are done.
     fn recv(&self) -> Option<Action> {
-        lock(&self.0).pop_front()
+        let mut state = lock(&self.state);
+        state.finished = state.taken;
+        let action = state.actions.pop_front();
+        if action.is_some() {
+            state.taken += 1;
+        }
+        self.changed.notify_all();
+        action
     }
 }
 
@@ -146,6 +205,21 @@ pub(super) struct Shared {
     /// The Run's input store (KC-9, KC-28), here rather than in the `RunHandle` because
     /// admission reads it for a Module's burst too, from inside a round (KE-2).
     pub(super) store: Arc<Mutex<BTreeMap<crate::hash::ContentHash, Arc<[u8]>>>>,
+    /// Serializes admission with dispatch and with the freeze (KC-24a).
+    pub(super) admission: Mutex<()>,
+    /// The device-paced data thread, while it runs (KC-46).
+    pub(super) data: Mutex<Option<super::paced::DataThread>>,
+    /// The generation of the wake not yet fired, 0 for none, and the last one
+    /// issued (KC-46a).
+    pub(super) wake_pending: Arc<AtomicU64>,
+    pub(super) wake_next: AtomicU64,
+    /// The pending wake's handle, apart from `scheduled` (KC-46a).
+    pub(super) wake_handle: Mutex<Option<ScheduleHandle>>,
+    /// A Detached Lease's expiry in the host clock's monotonic milliseconds,
+    /// mirrored for the data thread (KC-36).
+    pub(super) lease_deadline: Mutex<Option<u64>>,
+    /// Whether the data thread has performed RS-6 steps 1 and 2 (KC-46b).
+    pub(super) stopped_early: AtomicBool,
 }
 
 /// Poison-tolerant lock (§0.6 rule 7).
@@ -291,6 +365,17 @@ impl Shared {
 
     pub(super) fn routing(&self) -> Option<&Routing> {
         self.routing.get()
+    }
+
+    /// HardwareInLoop or Hardware: an Authority whose pacing is `Device` (KC-2).
+    pub(super) fn device_paced(&self) -> bool {
+        self.routing().is_some_and(|routing| {
+            matches!(
+                routing.plan.class,
+                crate::module_api::ExecutionClass::HardwareInLoop
+                    | crate::module_api::ExecutionClass::Hardware
+            )
+        })
     }
 
     pub(super) fn queue(&self, i: Inst) -> &Arc<Queue> {
