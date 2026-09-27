@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101d27">
-  <meta name="description" content="Ez-SDR v4は、SDR実験を仮想無線機で試し、条件と結果を記録するソフトウェアです。現在できることと、人・AI向け機能の計画を紹介します。">
-  <title>Ez-SDR v4 — 仕様と実装状況</title>
+  <meta name="description" content="Ez-SDR v4は、PythonからPC上の仮想無線機を動かし、SDR実験の条件・受信データ・実行記録を残すソフトウェアです。実機接続は計画中で、AI連携は未実装です。">
+  <title>Ez-SDR v4 — 仮想無線機で始めるSDR実験</title>
   <style>
     :root {
       color-scheme: light;
@@ -343,8 +343,8 @@
     <section class="hero" aria-labelledby="hero-title">
       <div class="hero-copy">
         <div class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span> SDR実験を、まずPC上で試す</div>
-        <h1 id="hero-title">AI-Native<br>Software-Defined<br><em>Experiments</em></h1>
-        <p class="hero-lede">Ez-SDR v4 は、SDR実験の条件を書き、PC上の仮想無線機で試し、結果を記録するソフトウェアです。現在は仮想実験まで実装済みで、実機との接続と、人がPythonコードで実験を書く機能は計画中です。将来はAIエージェント（実験条件を組み立てるAI）も、人と同じ仕組みで実験を作成・評価できることを目指しています。</p>
+        <h1 id="hero-title">仮想無線機で<br>SDR実験を<br><em>試して記録する</em></h1>
+        <p class="hero-lede">Ez-SDR v4 は、Pythonで実験条件を記述し、PC上の仮想無線機で送受信を試し、受信データと実行記録を保存するソフトウェアです。現在は仮想実験と、Pythonから操作する機能（Python API）を使えます。SDR実機との接続は計画中で、AI連携はまだありません。AIが実験条件の作成や結果の確認を支援できるようにする設計方針を、AI-Nativeと呼びます。</p>
         <div class="hero-actions">
           <a class="button button-primary" href="#about">できること <span class="button-arrow" aria-hidden="true">↓</span></a>
           <a class="button button-quiet" href="#specifications">詳しい設計資料 <span class="button-arrow" aria-hidden="true">↗</span></a>
@@ -353,27 +353,27 @@
       <aside class="hero-panel" aria-label="開発状況">
         <div class="panel-top">
           <span class="panel-title">開発状況</span>
-          <span class="panel-date">2026.09.26</span>
+          <span class="panel-date">2026.09.27</span>
         </div>
-        <div class="phase-count">05 <small>完了フェーズ</small></div>
-        <div class="panel-caption">Phase 1〜5 の設計と実装が完了</div>
-        <div class="progress-dots" aria-label="Phase 1から5は完了。人向けPython APIは計画中">
-          <span class="done"></span><span class="done"></span><span class="done"></span><span class="done"></span><span class="done"></span>
+        <div class="phase-count">06 <small>完了フェーズ</small></div>
+        <div class="panel-caption">仮想実験からPython APIまで実装済み</div>
+        <div class="progress-dots" aria-label="Phase 1から6は完了。SDR実機との接続は計画中">
+          <span class="done"></span><span class="done"></span><span class="done"></span><span class="done"></span><span class="done"></span><span class="done"></span>
         </div>
         <div class="next-phase">
-          <span class="next-tag">NEXT · 06</span>
-          <div><strong>人向け Python API</strong><p>Pythonで実験条件を書き、仮想実験を動かす機能を計画中です。</p></div>
+          <span class="next-tag">NEXT · 07</span>
+          <div><strong>SDR実機との接続</strong><p>USRPなどの実機を操作する機能は、これから開発する計画です。</p></div>
         </div>
       </aside>
       <div class="hero-meta">
-        <span>掲載内容の基準: <a href="https://github.com/k3komatsu/Ez-SDRv4/commit/d977ad8" target="_blank" rel="noopener noreferrer"><code>main@d977ad8</code></a></span>
-        <span>Rustで書かれた実装部品 · 11個</span>
+        <span>掲載内容の基準: <a href="https://github.com/k3komatsu/Ez-SDRv4/commit/7cc614737de24ffaece87c156b403dccb3b4b429" target="_blank" rel="noopener noreferrer"><code>main@7cc6147</code></a></span>
+        <span>Python APIと仮想無線機を実装</span>
       </div>
     </section>
     <div class="metrics" aria-label="実装状況の概要">
-      <div class="metric"><div class="metric-value">12</div><div class="metric-label">設計仕様書</div></div>
-      <div class="metric"><div class="metric-value">644</div><div class="metric-label">自動テストに合格</div></div>
-      <div class="metric"><div class="metric-value">05</div><div class="metric-label">完了した実装フェーズ</div></div>
+      <div class="metric"><div class="metric-value">13</div><div class="metric-label">受理済みの設計仕様</div></div>
+      <div class="metric"><div class="metric-value">684 + 21</div><div class="metric-label">Rust・Pythonのテストに合格</div></div>
+      <div class="metric"><div class="metric-value">06</div><div class="metric-label">完了した実装フェーズ</div></div>
     </div>
   </div>
 
@@ -381,17 +381,17 @@
     <section class="section" id="about" aria-labelledby="about-title">
       <div class="section-heading">
         <div class="section-no">01 / OVERVIEW</div>
-        <div><p class="sub-eyebrow">できること</p><h2 id="about-title">Ez-SDR v4 でできること</h2><p>SDR実験の条件を保存し、SDR機器をつながずにPC上で動作を試せます。実行条件と結果を一緒に記録するため、同じ環境で実験を繰り返し、条件を変えた結果を比べやすくします。現在使えるのは仮想実験までで、実機接続は計画中です。</p></div>
+        <div><p class="sub-eyebrow">できること</p><h2 id="about-title">Ez-SDR v4 でできること</h2><p>Pythonから仮想無線機を操作し、送受信や測定を行えます。実験条件、実行中の操作、受信データを記録し、同じPC環境で同じ条件を再実行したり、条件を変えた結果を比べたりできます。SDR実機との接続は計画中です。</p></div>
       </div>
       <div class="intro-grid">
         <article class="intro-card">
           <h3>実験条件と実行環境を分ける</h3>
-          <p><code>ExperimentSpec</code>（実験条件）には、周波数やサンプルレート、必要な入出力を書きます。<code>BindingProfile</code>（実行環境）には、使う仮想無線機や周囲の条件を書きます。同じ実験条件を、異なる環境で試せる設計です。</p>
+          <p>実験条件（<code>ExperimentSpec</code>）には、周波数やサンプルレート、必要な入出力を記述します。実行環境（<code>BindingProfile</code>）には、使用する仮想無線機や周囲の条件を記述します。同じ実験条件を、異なる環境で試せる設計です。</p>
           <div class="boundary-tags"><span class="tag">実験条件</span><span class="tag">機器・環境</span><span class="tag">実行前に確認</span></div>
         </article>
         <article class="intro-card pull-quote">
-          <div><p class="sub-eyebrow">設計の考え方</p><blockquote>AIが実験案を作り、<br>実行前に条件を確かめる。</blockquote></div>
-          <cite>設計方針 · AIは実験を組み立て、高速な信号処理は専用の処理が担う</cite>
+          <div><p class="sub-eyebrow">AI-Nativeという設計方針</p><blockquote>AIが実験条件の作成や<br>結果の確認を手伝える。</blockquote></div>
+          <cite>AI連携機能はまだ実装されていません。現在は設計上の方針です。</cite>
         </article>
       </div>
     </section>
@@ -399,10 +399,10 @@
     <section class="section" aria-labelledby="flow-title">
       <div class="section-heading">
         <div class="section-no">02 / WORKFLOW</div>
-        <div><p class="sub-eyebrow">実験の流れ</p><h2 id="flow-title">実験条件を確認し、結果を記録する</h2><p>実行前に、機器が実験条件を満たすかを確認します。実行中の設定や出来事、出力データをまとめて記録するため、後から結果を確かめられます。AIも同じ実験条件を作成・評価できる設計です。</p></div>
+        <div><p class="sub-eyebrow">実験の流れ</p><h2 id="flow-title">条件を確かめてから実験し、記録する</h2><p>Pythonから実験条件を指定すると、実行前に仮想無線機がその条件に対応できるかを確認します。実験中の操作や受信データを保存し、あとから結果を確かめられます。</p></div>
       </div>
       <div class="flow-panel">
-        <div class="flow-topline"><strong>人にもAIにも共通する実験の手順</strong><span>実行前に条件確認 · 実行中は手順を固定</span></div>
+        <div class="flow-topline"><strong>現在のPython APIで実験する手順</strong><span>実行前に条件確認 · 実験後に記録を確認</span></div>
         <div class="flow" aria-label="実験条件と実行環境の確認から、仮想実験と記録までの手順">
           <div class="flow-step"><span class="flow-num">01 · 条件</span><strong>実験条件を書く</strong><p>周波数、サンプルレート、入出力などを指定</p></div>
           <div class="flow-step"><span class="flow-num">02 · 機器</span><strong>機器と環境を選ぶ</strong><p>使う仮想無線機や実験環境を設定</p></div>
@@ -410,13 +410,13 @@
           <div class="flow-step"><span class="flow-num">04 · 実行</span><strong>仮想実験を実行</strong><p>現在はPC上の仮想無線機で動作</p></div>
           <div class="flow-step"><span class="flow-num">05 · 記録</span><strong>条件と結果を保存</strong><p>設定、出力データ、実行中の出来事を記録</p></div>
         </div>
-        <p class="flow-note">仮想実験では、実時間を待たずに時間を進められます。同じ条件を使って結果を確かめ直せます。</p>
+        <p class="flow-note">仮想実験では、実時間を待たずに実験時間を進められます。同じPC環境で同じ条件を使って再実行し、結果を比べられます。</p>
       </div>
       <article class="experiment-example">
         <div class="experiment-example-copy">
           <p class="sub-eyebrow">DETAILED EXAMPLE · JSON</p>
           <h3>実験条件をJSONで表す</h3>
-          <p>1 GHz に同調し、毎秒100万サンプルで受信して、10,000サンプルを保存する例です。JSONは実験条件を機械で読み書きする形式です。使う無線機や実験環境は別の設定に分けます。</p>
+          <p>これはPythonの <code>sdr.run(spec, duration=0.02)</code> に渡す実験条件の例です。1 GHzで受信し、毎秒100万サンプルの速度で10,000サンプルを記録します。実験時間は20 msです。JSONはプログラムが実験条件を読み書きするための形式です。</p>
           <a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/03-spec-and-binding.md" target="_blank" rel="noopener noreferrer">実験条件の詳しい仕様 ↗</a>
         </div>
         <pre class="experiment-json"><code>{
@@ -444,51 +444,57 @@
       </article>
       <article class="experiment-example python-example">
         <div class="experiment-example-copy">
-          <p class="sub-eyebrow">PLANNED · PYTHON API</p>
-          <h3>人はPythonで手軽に書く</h3>
-          <p>長いJSONの項目を組み立てず、周波数やサンプル数をPythonで指定する使い方を目指しています。下は設計方針に沿った例で、APIの構文や機能はPhase 6で計画・実装します。</p>
-          <a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/vision/01-purpose-and-core-boundary.md#3-what-ez-sdr-should-feel-like" target="_blank" rel="noopener noreferrer">Python APIの設計方針 ↗</a>
+          <p class="sub-eyebrow">実装済み · PYTHON API</p>
+          <h3>Pythonから送受信を試す</h3>
+          <p>Pythonで生成した信号を仮想無線機から送り、戻ってきた信号を受信する例です。Python APIは実装済みです。利用にはPython 3.9以降とNumPyが必要です。実験実行プログラム（<code>ezsdr-server</code>）はリポジトリからビルドして利用します。</p>
+          <a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/python/examples/minimal.py" target="_blank" rel="noopener noreferrer">動作する最小例を見る ↗</a>
         </div>
-        <pre class="experiment-json"><code>import ezsdr
+        <pre class="experiment-json"><code>import numpy as np
+import ezsdr
+
+x = np.exp(2j * np.pi * np.arange(1000) / 100).astype(np.complex64) * 0.5
 
 with ezsdr.connect() as sdr:
-    sdr.rx.frequency = 1.0e9
-    sdr.rx.sample_rate = 1.0e6
-    samples = sdr.rx.capture(10_000)</code></pre>
+    sdr.tx.repeat(x)
+    y = sdr.rx.capture(100_000)
+
+print(f"captured {len(y)} samples")
+print(f"記録ファイル: {sdr.manifest_path}")</code></pre>
       </article>
     </section>
 
     <section class="section" aria-labelledby="tiers-title">
       <div class="section-heading">
         <div class="section-no">03 / DESIGN</div>
-        <div><p class="sub-eyebrow">システムの構成</p><h2 id="tiers-title">実験を支える三つの役割</h2><p>実験の進行を管理する中心、分野ごとの設定項目、無線機や保存処理などの交換可能な部品に分けています。人もAIも同じ実験条件を使える設計です。</p></div>
+        <div><p class="sub-eyebrow">設計の考え方</p><h2 id="tiers-title">実験を支える三つの役割</h2><p>実験の進行管理、周波数などの設定項目、無線機や保存処理を行う機能部品を分けています。Python APIは実装済みで、AIからも同じ実験条件を扱えるようにすることは今後の計画です。</p></div>
       </div>
       <div class="tiers">
         <article class="tier-card"><h3>実験の進行管理（Kernel）</h3><p>条件を確認し、実験の開始・停止から、設定や結果の記録までを管理します。</p><div class="tier-items"><span>条件確認</span><span>実行管理</span><span>結果記録</span></div></article>
         <article class="tier-card"><h3>分野ごとの設定項目（Vocabulary）</h3><p>周波数やサンプルレートなど、無線機やシミュレーションで使う項目の名前と意味を定めます。</p><div class="tier-items"><span>無線機</span><span>シミュレーション</span><span>データ保存</span></div></article>
         <article class="tier-card"><h3>交換できる機能部品（Modules）</h3><p>仮想無線機、信号処理、データ保存などを、共通の接続ルールに沿って追加できます。</p><div class="tier-items"><span>仮想無線機</span><span>信号処理</span><span>ファイル保存</span></div></article>
       </div>
-      <p class="design-note">AIエージェントは実験条件の作成や仮想実験の分析を助ける想定です。サンプルごとに時間を守る必要がある信号処理は、AIの応答を待たず専用のプログラムが行います。人向けPython APIと実機接続は計画中です。</p>
+      <p class="design-note">AI-Nativeは設計方針であり、AI連携機能はまだ実装されていません。将来AIが実験条件を作成・確認するときも、サンプルごとに時間を守る信号処理は専用プログラムが行います。</p>
     </section>
 
     <section class="section" id="specifications" aria-labelledby="specifications-title">
       <div class="section-heading">
         <div class="section-no">04 / DOCUMENTS</div>
-        <div><p class="sub-eyebrow">設計資料</p><h2 id="specifications-title">設計ルールと仕様書</h2><p>実験の時刻、データの受け渡し、無線機の条件、結果の記録方法などを仕様書にまとめています。AIが作成した実験条件も同じルールで確認します。</p></div>
+        <div><p class="sub-eyebrow">設計資料</p><h2 id="specifications-title">設計ルールと仕様書</h2><p>実験の時刻、データの受け渡し、無線機の条件、結果の記録方法に加え、Pythonからの操作方法も仕様書にまとめています。ページで紹介した機能の詳しい内容は、これらの設計資料で確認できます。</p></div>
       </div>
       <div class="spec-grid">
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/01-time-model.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 01</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>実験時刻の表し方</strong><small>Time Model · サンプル時刻と処理の速さ</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/02-stream-contract.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 02</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>データ形式と受け渡し</strong><small>Stream Contract · サンプルデータの形式と接続条件</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/03-spec-and-binding.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 03</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>実験条件と実行環境</strong><small>ExperimentSpec & BindingProfile · 条件と機材の指定</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/04-run-and-session.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 04</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>実行と結果の記録</strong><small>Run / Session / Manifest · 開始、停止、操作履歴、結果</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/05-module-api.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 05</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>機能部品の接続方法</strong><small>Module API · 無線機、信号処理、保存先</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/06-kernel-coordinator.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 06</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>実行前の準備と起動順</strong><small>Kernel Coordinator · 各部品を動かす順序</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/07-radio-model.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 07</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>無線機の設定と能力</strong><small>Radio Model · 周波数、速度、機器の対応条件</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/08-simulation.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 08</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>仮想実験の動かし方</strong><small>Simulation · PC上で実験を進める方法</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/09-mock-radio.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 09</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>仮想無線機の動作</strong><small>MockRadio · 実機を模した条件確認</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/10-host-data-path.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 10</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>PC内のデータ処理と保存</strong><small>Host Data Path · サンプルの受け渡しとファイル出力</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/11-simulation-channel.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 11</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>仮想環境の電波伝搬</strong><small>SimulationChannel · 遅延や雑音の設定</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/14-native-executor.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 14</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>Rust製処理部品の実行</strong><small>Native Executor · 仮想実験内で処理を進める方法</small></a>
+        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/01-time-model.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 01</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>実験時刻の表し方</strong><small>サンプル時刻と処理の速さ（Time Model）</small></a>
+        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/02-stream-contract.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 02</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>データ形式と受け渡し</strong><small>サンプルデータの形式と接続条件（Stream Contract）</small></a>
+        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/03-spec-and-binding.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 03</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>実験条件と実行環境</strong><small>実験条件と使う機材の指定（ExperimentSpec・BindingProfile）</small></a>
+        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/04-run-and-session.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 04</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>実行と結果の記録</strong><small>実行単位、操作履歴、結果の記録（Run・Session・Manifest）</small></a>
+        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/05-module-api.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 05</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>機能部品の接続方法</strong><small>無線機・信号処理・保存先の接続（Module API）</small></a>
+        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/06-kernel-coordinator.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 06</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>実行前の準備と起動順</strong><small>実験前の準備と機能部品の起動順（Kernel Coordinator）</small></a>
+        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/07-radio-model.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 07</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>無線機の設定と能力</strong><small>周波数・速度・機器の対応条件（Radio Model）</small></a>
+        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/08-simulation.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 08</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>仮想実験の動かし方</strong><small>PC上で実験を進める方法（Simulation）</small></a>
+        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/09-mock-radio.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 09</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>仮想無線機の動作</strong><small>仮想無線機が再現する機器の条件（MockRadio）</small></a>
+        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/10-host-data-path.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 10</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>PC内のデータ処理と保存</strong><small>PC内のサンプル受け渡しとファイル保存（Host Data Path）</small></a>
+        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/11-simulation-channel.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 11</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>仮想環境の電波伝搬</strong><small>仮想環境での遅延や雑音（SimulationChannel）</small></a>
+        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/14-native-executor.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 14</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>Rust製処理部品の実行</strong><small>仮想実験内でRustの処理部品を動かす方法（Native Executor）</small></a>
+        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/16-easy-api.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 16</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>Pythonから実験を操作する方法</strong><small>実験の実行、受信、記録の取得（Easy API）</small></a>
       </div>
       <div class="spec-bottom"><p>全体の設計意図と将来像は設計方針書に、各段階の決定や確認記録は開発記録にまとめています。</p><a class="text-link" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/Ez-SDR_v4_ARCHITECTURE_VISION.md" target="_blank" rel="noopener noreferrer">設計方針書を読む ↗</a></div>
     </section>
@@ -496,32 +502,32 @@ with ezsdr.connect() as sdr:
     <section class="section" id="implementation" aria-labelledby="implementation-title">
       <div class="section-heading">
         <div class="section-no">05 / STATUS</div>
-        <div><p class="sub-eyebrow">現在できること</p><h2 id="implementation-title">現在の実装</h2><p>実験条件を確認し、PC上の仮想無線機で動かして、データを保存するまでの基盤ができています。実装はRust製の11個の部品で構成しています。</p></div>
+        <div><p class="sub-eyebrow">現在できること</p><h2 id="implementation-title">現在の実装</h2><p>PC上の仮想無線機を動かす基盤に加え、Pythonから送信・受信・条件変更・記録の取得を行うAPIまで実装済みです。SDR実機を操作する機能はまだありません。</p></div>
       </div>
       <div class="impl-table-wrap">
         <table class="impl-table">
-          <thead><tr><th>役割</th><th>Rustの部品</th><th>現在できること</th><th>状態</th></tr></thead>
+          <thead><tr><th>役割</th><th>実装</th><th>現在できること</th><th>状態</th></tr></thead>
           <tbody>
-            <tr><td>実験の進行管理</td><td><code>ezsdr-kernel</code></td><td>実験条件の確認、開始・停止、設定や結果の記録</td><td><span class="status-pill">Phase 1〜5 実装済み</span></td></tr>
-            <tr><td>仮想無線機</td><td><code>ezsdr-radio</code><br><code>ezsdr-mock-radio</code></td><td>周波数やサンプルレートの条件を確認し、受信データの欠落を検出</td><td><span class="status-pill">Phase 2〜4 実装済み</span></td></tr>
-            <tr><td>仮想実験</td><td><code>ezsdr-sim</code><br><code>ezsdr-sim-engine</code></td><td>PC上で実験時間を進め、仮想無線機間の伝搬や指定した障害を再現</td><td><span class="status-pill">Phase 2〜3 実装済み</span></td></tr>
-            <tr><td>データの受け渡し・保存</td><td><code>ezsdr-hostmem</code> · <code>ezsdr-link-host</code><br><code>ezsdr-sink</code> · <code>ezsdr-sink-capture</code></td><td>PC内でサンプルを受け渡し、SDR測定データ用のSigMF形式で保存</td><td><span class="status-pill">Phase 2・4 実装済み</span></td></tr>
-            <tr><td>信号処理の実行</td><td><code>ezsdr-exec-native</code></td><td>仮想実験内でRust製の処理部品を実行。PINGを受けて指定時刻にPONGを返す例も動作</td><td><span class="status-pill">Phase 5 実装済み</span></td></tr>
-            <tr><td>自動確認</td><td><code>ezsdr-acceptance</code></td><td>設計で決めた動作条件を、複数部品を通した自動試験で確認</td><td><span class="status-pill">47件合格</span></td></tr>
+            <tr><td>実験の進行管理</td><td><code>ezsdr-kernel</code></td><td>条件の確認、開始・停止、設定や結果の記録</td><td><span class="status-pill">実装済み</span></td></tr>
+            <tr><td>仮想無線機</td><td><code>ezsdr-radio</code><br><code>ezsdr-mock-radio</code></td><td>周波数やサンプルレートの条件を確認し、受信データの欠落を検出</td><td><span class="status-pill">実装済み</span></td></tr>
+            <tr><td>仮想実験</td><td><code>ezsdr-sim</code><br><code>ezsdr-sim-engine</code></td><td>PC上で実験時間を進め、無線機間の伝搬や指定した障害を再現</td><td><span class="status-pill">実装済み</span></td></tr>
+            <tr><td>データの受け渡し・保存</td><td><code>ezsdr-hostmem</code> · <code>ezsdr-link-host</code><br><code>ezsdr-sink</code> · <code>ezsdr-sink-capture</code></td><td>PC内でサンプルを受け渡し、SDR測定データ用のSigMF形式で保存</td><td><span class="status-pill">実装済み</span></td></tr>
+            <tr><td>信号処理の実行</td><td><code>ezsdr-exec-native</code></td><td>仮想実験でRust製の処理部品を動かし、PINGを受けて指定時刻にPONGを返す例を実行</td><td><span class="status-pill">実装済み</span></td></tr>
+            <tr><td>Pythonからの操作</td><td><code>ezsdr-server</code><br><code>python/ezsdr</code></td><td>周波数などの設定、信号の送信、受信サンプルの取得、条件を変えた実験の実行</td><td><span class="status-pill">実装済み</span></td></tr>
           </tbody>
         </table>
       </div>
       <div class="impl-foot"><span>Rust部品の一覧は <a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/Cargo.toml" target="_blank" rel="noopener noreferrer">Cargo.toml ↗</a></span><span>JSON文書の形式定義は <a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/schemas/SCHEMA_CHANGELOG.md" target="_blank" rel="noopener noreferrer">形式定義の変更記録 ↗</a></span></div>
       <div class="proof-band">
-        <div><div class="proof-number">644 <span>合格</span></div><div class="proof-label">Rust自動テスト · 2026-09-26時点</div></div>
-        <div class="proof-copy"><p><strong>最低対応版のRust 1.85.0と、安定版Rust 1.98.1の両方で644件すべて合格。</strong> Phase 5の確認時点で失敗・未実施のテストはありません。</p><p>確認条件と内訳は <a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/handoff.md" target="_blank" rel="noopener noreferrer">開発状況の記録 ↗</a> を参照してください。</p></div>
+        <div><div class="proof-number">684 <span>合格</span></div><div class="proof-label">Rust自動テスト · 2026-09-27時点</div></div>
+        <div class="proof-copy"><p><strong>Rust 1.85.0と安定版Rust 1.98.1の両方で684件のRustテストが合格し、Python 3.9と3.13でも21件のテストが合格しています。</strong> Rustの静的解析もエラーなしです。</p><p>確認条件と内訳は <a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/handoff.md" target="_blank" rel="noopener noreferrer">2026-09-27時点の開発状況 ↗</a> を参照してください。</p></div>
       </div>
     </section>
 
     <section class="section" id="roadmap" aria-labelledby="roadmap-title">
       <div class="section-heading">
         <div class="section-no">06 / ROADMAP</div>
-        <div><p class="sub-eyebrow">これからの予定</p><h2 id="roadmap-title">Ez-SDRv4の現状と計画</h2><p>Phase 1〜5で仮想実験と記録の基盤を実装しました。次は人向けPython APIを計画し、その後に実機接続や測定を進める予定です。</p></div>
+        <div><p class="sub-eyebrow">これからの予定</p><h2 id="roadmap-title">現在できることと今後の計画</h2><p>現在はPython APIから仮想無線機を使う実験まで実装済みです。次に計画しているのはSDR実機との接続で、実機での測定や仮想実験との比較はまだできません。</p></div>
       </div>
       <div class="roadmap">
         <div class="roadmap-item done"><span class="phase-no">01</span><div class="roadmap-copy"><strong>実験条件と実行管理</strong><p>条件、時刻、データ形式、実行と結果記録の基礎</p></div><span class="roadmap-state">完了</span></div>
@@ -529,35 +535,37 @@ with ezsdr.connect() as sdr:
         <div class="roadmap-item done"><span class="phase-no">03</span><div class="roadmap-copy"><strong>電波伝搬と結果の再現</strong><p>仮想無線機間の伝搬と、同じ条件での再実行</p></div><span class="roadmap-state">完了</span></div>
         <div class="roadmap-item done"><span class="phase-no">04</span><div class="roadmap-copy"><strong>異常検知とデータ保存</strong><p>データ欠落などの検出と、SigMF形式での記録</p></div><span class="roadmap-state">完了</span></div>
         <div class="roadmap-item done"><span class="phase-no">05</span><div class="roadmap-copy"><strong>受信メッセージへの応答</strong><p>「PING」を受け取り、指定時刻に「PONG」を返す実験</p></div><span class="roadmap-state">完了</span></div>
-        <div class="roadmap-item next"><span class="phase-no">06</span><div class="roadmap-copy"><strong>人向け Python API</strong><p>短いPythonコードで実験条件を書き、実行結果を受け取る機能</p></div><span class="roadmap-state">計画中</span></div>
-        <div class="roadmap-item"><span class="phase-no">07</span><div class="roadmap-copy"><strong>SDR実機との接続</strong><p>USRP用制御ソフトUHDを使って無線機を操作</p></div><span class="roadmap-state">今後</span></div>
-        <div class="roadmap-item"><span class="phase-no">08</span><div class="roadmap-copy"><strong>仮想実験と実機測定の比較</strong><p>仮想無線機とUSRP X310の結果を照合</p></div><span class="roadmap-state">今後</span></div>
-        <div class="roadmap-item"><span class="phase-no">09–11+</span><div class="roadmap-copy"><strong>通信・信号処理機能の拡張</strong><p>ネットワーク接続、GPUによる高速処理、複数機器への対応</p></div><span class="roadmap-state">今後</span></div>
+        <div class="roadmap-item done"><span class="phase-no">06</span><div class="roadmap-copy"><strong>Pythonから実験を操作</strong><p>仮想無線機で送受信し、条件を変えた実験と記録を行う</p></div><span class="roadmap-state">完了</span></div>
+        <div class="roadmap-item next"><span class="phase-no">07</span><div class="roadmap-copy"><strong>SDR実機との接続</strong><p>USRPなどの機器を操作する機能を開発する計画</p></div><span class="roadmap-state">計画中</span></div>
+        <div class="roadmap-item"><span class="phase-no">08</span><div class="roadmap-copy"><strong>仮想実験と実機測定の比較</strong><p>仮想無線機とUSRP X310などの実測結果を照合</p></div><span class="roadmap-state">今後</span></div>
+        <div class="roadmap-item"><span class="phase-no">09</span><div class="roadmap-copy"><strong>パケット通信との連携</strong><p>パケット処理をOSのネットワーク機能と接続</p></div><span class="roadmap-state">今後</span></div>
+        <div class="roadmap-item"><span class="phase-no">10</span><div class="roadmap-copy"><strong>信号処理と応答機能の拡張</strong><p>検出した信号に応じて処理・応答する機能を追加</p></div><span class="roadmap-state">今後</span></div>
+        <div class="roadmap-item"><span class="phase-no">11+</span><div class="roadmap-copy"><strong>計算方式と対応機器の拡張</strong><p>GPUやWebAssemblyなどの処理、多様な機器への対応</p></div><span class="roadmap-state">今後</span></div>
       </div>
-      <p class="roadmap-more">Phase 6の詳細計画が次の作業です。実機との接続・比較や、通信機能の拡張も今後の計画段階です。<a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/vision/11-boundaries-invariants-and-roadmap.md" target="_blank" rel="noopener noreferrer">開発の順序 ↗</a></p>
+      <p class="roadmap-more">実機接続はまだ実装されておらず、USRPなどを使った実測も済んでいません。開発の全体順序は<a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/vision/11-boundaries-invariants-and-roadmap.md" target="_blank" rel="noopener noreferrer">ロードマップ ↗</a>、別ブランチで試したUHD接続の調査結果は<a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/plan/spikes/2026-09-26-uhd.md" target="_blank" rel="noopener noreferrer">UHD試作の記録 ↗</a>を参照してください。</p>
     </section>
 
     <section class="section" aria-labelledby="limits-title">
       <div class="section-heading">
         <div class="section-no">07 / LIMITS</div>
-        <div><p class="sub-eyebrow">現在の対応範囲</p><h2 id="limits-title">現状の制約条件</h2><p>現状ではまだPC上での仮想実験のみ可能です。今後、実機実験に対応させていきます。また、以下の制約があります。</p></div>
+        <div><p class="sub-eyebrow">現在の対応範囲</p><h2 id="limits-title">現状と未対応の機能</h2><p>現在使えるのは、Python APIからPC上の仮想無線機で行う実験です。実機を使った測定とAI連携はまだ実装されていません。</p></div>
       </div>
       <div class="limits-grid">
-        <article class="limit-card"><span class="limit-number">現在の範囲 · 01</span><h3>今はPC上の仮想実験まで</h3><p>USRPなどのSDR実機を直接操作する機能はPhase 7の計画です。実機測定との比較はPhase 8で予定しています。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/vision/11-boundaries-invariants-and-roadmap.md" target="_blank" rel="noopener noreferrer">今後の開発順序 ↗</a></article>
+        <article class="limit-card"><span class="limit-number">現在の範囲 · 01</span><h3>SDR実機はまだ操作できない</h3><p>USRPなどの実機を直接操作する機能は計画中です。実機測定との比較もまだ実施していません。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/vision/11-boundaries-invariants-and-roadmap.md" target="_blank" rel="noopener noreferrer">今後の開発順序 ↗</a></article>
         <article class="limit-card"><span class="limit-number">再現性 · 02</span><h3>再現性は同じPC環境が基準</h3><p>同じビルドと環境なら、同じ設定でシミュレーション結果を再現できます。異なるOSやCPU間では数値データの最終bitまで一致する保証はありません。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/11-simulation-channel.md" target="_blank" rel="noopener noreferrer">シミュレーション仕様 ↗</a></article>
-        <article class="limit-card"><span class="limit-number">AIとの分担 · 03</span><h3>AIは高速信号処理を担当しない</h3><p>AIエージェントは実験条件の作成や結果の分析を行う想定です。サンプルごとに決められた時間で処理する部分は、AIの応答を待たない専用プログラムが動かします。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/vision/08-future-workloads-and-targets.md#43-ai-is-outside-the-hard-real-time-loop" target="_blank" rel="noopener noreferrer">AIと処理の分担 ↗</a></article>
+        <article class="limit-card"><span class="limit-number">AIとの分担 · 03</span><h3>AI連携はまだ実装されていない</h3><p>AIが実験条件の作成や結果の確認を支援できるようにする設計方針を、AI-Nativeと呼びます。現在のソフトウェアにAIによる作成・分析機能はありません。高速な信号処理は今後も専用プログラムが担当します。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/vision/08-future-workloads-and-targets.md#43-ai-is-outside-the-hard-real-time-loop" target="_blank" rel="noopener noreferrer">AIと処理の分担 ↗</a></article>
       </div>
     </section>
 
     <section class="section" aria-labelledby="references-title">
       <div class="section-heading">
         <div class="section-no">08 / DETAILS</div>
-        <div><p class="sub-eyebrow">詳しく読む</p><h2 id="references-title">さらに詳しい資料</h2><p>このページでは全体像を紹介しました。以下の資料では設計方針、現在の実装状況、各段階の作業記録を確認できます。</p></div>
+        <div><p class="sub-eyebrow">詳しく読む</p><h2 id="references-title">さらに詳しい資料</h2><p>このページでは現在できることを紹介しました。以下の資料では設計の全体像、最新の実装状況、Python APIの仕様を確認できます。</p></div>
       </div>
       <div class="references">
         <a class="reference" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/Ez-SDR_v4_ARCHITECTURE_VISION.md" target="_blank" rel="noopener noreferrer"><span>設計方針</span><strong>Ez-SDR v4の全体像と将来像</strong><em aria-hidden="true">↗</em></a>
-        <a class="reference" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/handoff.md" target="_blank" rel="noopener noreferrer"><span>実装状況 · 2026-09-26</span><strong>できたことと次の作業</strong><em aria-hidden="true">↗</em></a>
-        <a class="reference" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/plan/phase5/00-overview.md" target="_blank" rel="noopener noreferrer"><span>Phase 5 · 完了記録</span><strong>受信に応じて送信する仮想実験</strong><em aria-hidden="true">↗</em></a>
+        <a class="reference" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/handoff.md" target="_blank" rel="noopener noreferrer"><span>実装状況 · 2026-09-27</span><strong>できたことと次の作業</strong><em aria-hidden="true">↗</em></a>
+        <a class="reference" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/16-easy-api.md" target="_blank" rel="noopener noreferrer"><span>Python API · 仕様</span><strong>Pythonから実験を操作する方法</strong><em aria-hidden="true">↗</em></a>
       </div>
     </section>
   </main>
@@ -565,7 +573,7 @@ with ezsdr.connect() as sdr:
   <footer class="site-footer">
     <div class="container footer-inner">
       <span>© Ez-SDR v4 · GitHub Pages</span>
-      <span class="footer-note">このページの内容は <a href="https://github.com/k3komatsu/Ez-SDRv4/commit/d977ad8" target="_blank" rel="noopener noreferrer"><code>main@d977ad8</code></a> に基づきます。</span>
+      <span class="footer-note">このページの内容は <a href="https://github.com/k3komatsu/Ez-SDRv4/commit/7cc614737de24ffaece87c156b403dccb3b4b429" target="_blank" rel="noopener noreferrer"><code>main@7cc6147</code></a> に基づきます。</span>
     </div>
   </footer>
 </body>
