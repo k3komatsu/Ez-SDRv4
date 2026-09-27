@@ -9,7 +9,7 @@ Results go to `plan/phase7/bench-results.md`, created at the session (GZ-10): th
 1. **Host.** Rust ≥ 1.85 (`rustup update`); UHD 4.x with headers and its `.pc` file (Ubuntu: `sudo apt install libuhd-dev uhd-host pkg-config`, or the Ettus PPA; a source build under `/usr/local` needs `PKG_CONFIG_PATH` or `UHD_LIB_DIR=/usr/local/lib` to build, and `sudo ldconfig` or `LD_LIBRARY_PATH=/usr/local/lib` to run, since the build adds no rpath, spec 18 UR-35). Check `pkg-config --modversion uhd`.
 2. **Network.** X310 10 GbE port 0 at `192.168.40.2`, host NIC `192.168.40.1/24`, MTU 9000; `sudo sysctl -w net.core.rmem_max=33554432 net.core.wmem_max=33554432`. `uhd_find_devices --args addr=192.168.40.2` lists it. An FPGA image that does not match UHD's compatibility number needs `uhd_image_loader --args addr=192.168.40.2` (UHD 4.x's image).
 3. **Master clock.** The X310 must run at 200 MHz (spec 18 UR-5 refuses 184.32 MHz for `x310-ubx`); if `uhd_usrp_probe` shows another rate, add `master_clock_rate=200e6` to the device string.
-4. **Software checks, still without RF.** In a clone of `main` at the implemented commit:
+4. **Software checks, still without RF.** In a clone at the implemented commit (the branch `worktree-phase7-impl` until it is merged into `main`; `handoff.md` §4 has the session's plan and what the tests implement of each step):
    ```sh
    cargo test --workspace                                   # the software exit criteria
    cargo test -p ezsdr-radio-uhd --features uhd             # the C API tests (uhd_api.rs); no device needed
