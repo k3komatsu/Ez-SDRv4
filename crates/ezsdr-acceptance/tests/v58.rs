@@ -101,7 +101,7 @@ fn v58_10_experiments_name_no_mock_type() {
             scanned += 1;
         }
     }
-    assert!(scanned >= 5, "the Python package and examples were found ({scanned} files)");
+    assert!(scanned >= 6, "the Python package and examples, bench_loopback.py included, were found ({scanned} files)");
 }
 
 #[test]

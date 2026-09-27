@@ -8,9 +8,9 @@ use ezsdr_kernel::binding::{AdmissionCheckRegistry, BindingProfile};
 use ezsdr_kernel::contract::ContractRegistry;
 use ezsdr_kernel::coordinator::Assembly;
 use ezsdr_kernel::hash::ContentHash;
-use ezsdr_kernel::module_api::{Executor, Factories, Link, ModuleRef, ModuleRegistry, Provider, Sink};
+use ezsdr_kernel::module_api::{Authority, Executor, Factories, Link, ModuleRef, ModuleRegistry, Provider, Sink};
 use ezsdr_kernel::policy::EventKindRegistry;
-use ezsdr_kernel::spec::Ident;
+use ezsdr_kernel::spec::{Ident, Value};
 use ezsdr_kernel::time::ClockRegistry;
 
 const RADIO: &str = "ezsdr.radio.mock";
@@ -18,6 +18,20 @@ const SINK: &str = "ezsdr.sink.capture";
 const EXECUTOR: &str = "ezsdr.exec.native";
 const AUTHORITY: &str = "ezsdr.sim-engine";
 const LINK: &str = "ezsdr.link.host";
+const UHD: &str = "ezsdr.radio.uhd";
+
+/// How the server opens the USRP a binding's `args` names (EA-7, VE-5). A test
+/// embedding passes one returning a `FakeDevice`; no document can (GZ-9).
+pub type OpenDevice = Arc<dyn Fn(&str) -> Result<Arc<dyn ezsdr_radio_uhd::Device>, String> + Send + Sync>;
+
+/// The binary's device: UHD's, when the server is built with the feature `uhd` (VE-5).
+fn open_uhd(args: &str) -> Result<Arc<dyn ezsdr_radio_uhd::Device>, String> {
+    if cfg!(feature = "uhd") {
+        ezsdr_radio_uhd::open(args)
+    } else {
+        Err("EA-7: ezsdr.radio.uhd: this server was built without UHD; rebuild ezsdr-server with --features uhd".to_owned())
+    }
+}
 
 /// The registries with every Vocabulary and Module of the catalogue (EA-7).
 fn registries() -> Result<(ModuleRegistry, AdmissionCheckRegistry, EventKindRegistry), String> {
@@ -34,6 +48,7 @@ fn registries() -> Result<(ModuleRegistry, AdmissionCheckRegistry, EventKindRegi
         (ezsdr_link_host::descriptor(), Factories { link: true, ..Factories::default() }),
         (ezsdr_sink_capture::descriptor(), Factories { sink: true, ..Factories::default() }),
         (ezsdr_exec_native::descriptor(), Factories { executor: true, ..Factories::default() }),
+        (ezsdr_radio_uhd::descriptor(), ezsdr_radio_uhd::factories()),
     ];
     for (descriptor, factories) in roles {
         let id = descriptor.id.clone();
@@ -46,12 +61,14 @@ fn registries() -> Result<(ModuleRegistry, AdmissionCheckRegistry, EventKindRegi
 }
 
 /// Builds the Assembly of one Run from its BindingProfile document: every binding
-/// must name a Module of the catalogue, and the native Executor gets `implementations`
+/// must name a Module of the catalogue, the native Executor gets `implementations`, and
+/// a binding of `ezsdr.radio.uhd` its device from `open_device` (UHD's when `None`)
 /// (EA-7). The refusal is a message naming the binding.
 pub fn assemble(
     profile_doc: &serde_json::Value,
     inputs: BTreeMap<ContentHash, Vec<u8>>,
     implementations: Vec<Implementation>,
+    open_device: Option<&OpenDevice>,
 ) -> Result<Assembly, String> {
     let profile = BindingProfile::from_json(profile_doc).map_err(|error| error.to_string())?;
     let (registry, checks, kinds) = registries()?;
@@ -60,11 +77,13 @@ pub fn assemble(
         .bindings
         .get(&profile.authority)
         .ok_or_else(|| format!("EA-7: the authority {} is not bound", profile.authority))?;
-    if authority_binding.module.id.as_str() != AUTHORITY {
-        return Err(format!("EA-7: the authority must be {AUTHORITY}, not {}", authority_binding.module.id));
+    if ![AUTHORITY, UHD].contains(&authority_binding.module.id.as_str()) {
+        return Err(format!("EA-7: the authority must be {AUTHORITY} or {UHD}, not {}", authority_binding.module.id));
     }
-    let authority = ezsdr_sim_engine::SimEngine::from_binding(authority_binding, clocks.clone())
-        .map_err(|error| format!("EA-7: {}: {error}", profile.authority))?;
+    if profile.bindings.values().filter(|binding| binding.module.id.as_str() == UHD).count() > 1 {
+        return Err("EA-7: one USRP per Run in this server (Phase 7)".to_owned());
+    }
+    let mut authority: Option<Box<dyn Authority>> = None;
     let medium = ezsdr_sim::channel::Medium::new();
     let mut providers: BTreeMap<Ident, Box<dyn Provider>> = BTreeMap::new();
     let mut sinks: BTreeMap<Ident, Box<dyn Sink>> = BTreeMap::new();
@@ -84,7 +103,31 @@ pub fn assemble(
                 let executor = NativeExecutor::new(implementations.clone()).map_err(|e| built(&e))?;
                 executors.insert(name.clone(), Box::new(executor));
             }
-            AUTHORITY if *name == profile.authority => {}
+            AUTHORITY if *name == profile.authority => {
+                let engine = ezsdr_sim_engine::SimEngine::from_binding(binding, clocks.clone()).map_err(|e| built(&e))?;
+                authority = Some(Box::new(engine));
+            }
+            UHD => {
+                let selector = |key: &str| match binding.selector.get(&Ident::parse(key).expect("a selector key")) {
+                    Some(Value::Str(value)) => value.clone(),
+                    _ => "internal".to_owned(),
+                };
+                let Some(Value::Str(args)) = binding.selector.get(&Ident::parse("args").expect("a selector key")) else {
+                    return Err(format!("EA-7: {name}: UR-5: the selector needs `args`"));
+                };
+                let device = match open_device {
+                    Some(open) => open(args),
+                    None => open_uhd(args),
+                }
+                .map_err(|e| if e.starts_with("EA-7") { e } else { built(&e) })?;
+                let radio = ezsdr_radio_uhd::UhdRadio::from_binding(binding, device.clone()).map_err(|e| built(&e))?;
+                providers.insert(name.clone(), Box::new(radio));
+                if *name == profile.authority {
+                    let time = ezsdr_radio_uhd::DeviceAuthority::new(device, clocks.clone(), &selector("clock_source"), &selector("time_source"), args)
+                        .map_err(|e| built(&e))?;
+                    authority = Some(Box::new(time));
+                }
+            }
             other => return Err(format!("EA-7: {name}: no Module {other} in this server")),
         }
     }
@@ -106,10 +149,32 @@ pub fn assemble(
         providers,
         executors,
         sinks,
-        authority: Box::new(authority),
+        authority: authority.expect("the authority's binding was built above"),
         links,
         inputs,
     })
+}
+
+/// The Assembly a device-paced Session hands `run_child`: no Provider, Sink, Executor
+/// or Link, and no device opened; the Kernel refuses the child before reading it
+/// (EA-14, KC-37a, KG-12). Its Authority is a Simulation Engine only because an
+/// Assembly must hold one.
+pub fn empty_assembly() -> Assembly {
+    let clocks = Arc::new(ClockRegistry::new());
+    Assembly {
+        registry: ModuleRegistry::new(),
+        checks: AdmissionCheckRegistry::new(),
+        kinds: EventKindRegistry::with_kernel_kinds(),
+        contracts: ContractRegistry::with_standard_contracts(),
+        clocks: clocks.clone(),
+        host_clock: Arc::new(ezsdr_kernel::run::SystemHostClock::new()),
+        providers: BTreeMap::new(),
+        executors: BTreeMap::new(),
+        sinks: BTreeMap::new(),
+        authority: Box::new(ezsdr_sim_engine::SimEngine::new(clocks).expect("a fresh registry takes a root")),
+        links: BTreeMap::new(),
+        inputs: BTreeMap::new(),
+    }
 }
 
 /// The BindingProfile `connect` uses when the client names none (EA-9).

@@ -149,12 +149,12 @@ fn ma_03_no_module_crate_depends_on_another() {
         ("ezsdr-server", BTreeSet::from([
             "ezsdr-kernel", "ezsdr-radio", "ezsdr-sim", "ezsdr-sink", "ezsdr-sim-engine",
             "ezsdr-mock-radio", "ezsdr-link-host", "ezsdr-sink-capture", "ezsdr-exec-native",
-            "serde", "serde_json", "schemars",
+            "ezsdr-radio-uhd", "serde", "serde_json", "schemars",
         ])),
         ("ezsdr-acceptance", BTreeSet::from([
             "ezsdr-kernel", "ezsdr-radio", "ezsdr-sim", "ezsdr-sink", "ezsdr-hostmem",
             "ezsdr-sim-engine", "ezsdr-mock-radio", "ezsdr-link-host", "ezsdr-sink-capture",
-            "ezsdr-exec-native", "ezsdr-server", "serde_json",
+            "ezsdr-exec-native", "ezsdr-server", "ezsdr-radio-uhd", "serde_json",
         ])),
     ]);
     for package in metadata["packages"].as_array().expect("metadata packages") {
@@ -260,4 +260,30 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
     }
     files.sort();
     files
+}
+
+#[test]
+fn gz_08_hardware_tests_are_gated() {
+    let root = workspace_root();
+    let hardware = root.join("crates/ezsdr-radio-uhd/tests/hardware.rs");
+    let source = fs::read_to_string(&hardware).unwrap();
+    assert!(source.contains("#![cfg(feature = \"uhd\")]"), "GZ-8: hardware.rs compiles only with the feature `uhd`");
+    assert!(source.contains("EZSDR_UHD_ARGS"), "GZ-8: the device comes from EZSDR_UHD_ARGS");
+    let lines: Vec<&str> = source.lines().map(str::trim).collect();
+    let tests: Vec<usize> = (0..lines.len()).filter(|at| lines[*at] == "#[test]").collect();
+    assert!(!tests.is_empty());
+    for at in tests {
+        assert_eq!(lines.get(at + 1).copied(), Some("#[ignore = \"needs a USRP: see plan/phase7/bench.md\"]"), "GZ-8: hardware.rs:{} is not ignored", at + 1);
+    }
+    // No other test reads the device string: the hardware tests live in hardware.rs only.
+    let this = root.join("crates/ezsdr-acceptance/tests/governance.rs");
+    for member in fs::read_dir(root.join("crates")).unwrap().map(Result::unwrap) {
+        let tests = member.path().join("tests");
+        if !tests.is_dir() {
+            continue;
+        }
+        for file in rust_files(&tests).into_iter().filter(|file| *file != hardware && *file != this) {
+            assert!(!fs::read_to_string(&file).unwrap().contains("EZSDR_UHD_ARGS"), "GZ-8: {} reads EZSDR_UHD_ARGS", file.display());
+        }
+    }
 }

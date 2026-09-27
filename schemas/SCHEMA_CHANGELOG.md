@@ -30,6 +30,10 @@ GZ-2); the Radio Model Vocabulary is `radio` 1.3.0.
   (`{ reference: "frequency" }`): the payloads of the declared kinds `radio.TX_UNDERFLOW`,
   `radio.ALIGNMENT_ERROR` and `radio.CLOCK_LOST`, which a hardware Provider emits (RM-10,
   RM-11, RM-22; Phase 7, VE-3). `schemas/radio/` now holds eleven files (RM-20).
+- `server/reply_frame`: the `status` reply gains the required member `root_rate`
+  (`Rational`, the primary root's nominal rate in ticks per second), so that a client can
+  name an instant ahead of the Run's time (EA-4, EA-12; Phase 7, VE-6). Additive for a
+  reader of replies; `ezsdr-server` 0.2.0 always sends it.
 
 ## v1 — Phase 6 — `sink.CAPTURE_WRITTEN` and the protocol frames
 

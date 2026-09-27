@@ -20,6 +20,7 @@ ezsdr-link-host = { path = "../ezsdr-link-host" }
 ezsdr-sink-capture = { path = "../ezsdr-sink-capture" }
 ezsdr-exec-native = { path = "../ezsdr-exec-native" }
 ezsdr-server = { path = "../ezsdr-server" }
+ezsdr-radio-uhd = { path = "../ezsdr-radio-uhd" }
 serde_json = "1.0.151"
 
 [dev-dependencies]

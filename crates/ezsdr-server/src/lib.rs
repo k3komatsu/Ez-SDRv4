@@ -1,4 +1,4 @@
-//! Ez-SDR v4 server `ezsdr-server` 0.1.0: the Runtime a client drives over
+//! Ez-SDR v4 server `ezsdr-server` 0.2.0: the Runtime a client drives over
 //! `ezsdr.protocol` 1 (design/16-easy-api.md).
 //!
 //! It compiles the Modules in (EA-7), runs one Session through the Kernel's
@@ -19,10 +19,11 @@ use ezsdr_exec_native::Implementation;
 use ezsdr_kernel::coordinator::{self, RunHandle, RunHandleError};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::manifest::Manifest;
+use ezsdr_kernel::module_api::Pacing;
 use ezsdr_kernel::run::{Lease, RunState};
 use ezsdr_kernel::time::{ClockRegistry, TimePoint};
 
-pub use catalogue::{assemble, default_profile};
+pub use catalogue::{OpenDevice, assemble, default_profile};
 use protocol::{
     ErrorKind, MAX_HEADER_BYTES, ProtocolError, Reply, ReplyFrame, Request, RequestFrame, Response,
     SUPPORTED,
@@ -35,6 +36,18 @@ pub struct Config {
     pub runs_dir: PathBuf,
     /// The component implementations handed to the native Executor (EA-7).
     pub implementations: Vec<Implementation>,
+    /// Opens a binding's USRP; `None` is UHD's, in a server built with `uhd` (EA-7).
+    pub open_device: Option<OpenDevice>,
+    /// The BindingProfile document `connect` without a profile uses; `None` is the
+    /// built-in simulated default (EA-9).
+    pub default_profile: Option<PathBuf>,
+}
+
+impl Config {
+    /// A Config with `runs_dir` and nothing else configured.
+    pub fn new(runs_dir: PathBuf) -> Config {
+        Config { runs_dir, implementations: Vec::new(), open_device: None, default_profile: None }
+    }
 }
 
 /// One reply: the frame's content, its body, and whether the server then exits.
@@ -71,6 +84,8 @@ struct Live {
     run: RunHandle,
     clocks: Arc<ClockRegistry>,
     profile: serde_json::Value,
+    /// Whether its Authority paces from a device (KG-12: no child Run).
+    device_paced: bool,
 }
 
 /// A server's state between requests (EA-4).
@@ -150,6 +165,7 @@ impl Server {
                         run: live.run.id(),
                         state: live.run.state(),
                         now: live.run.now(),
+                        root_rate: live.clocks.nominal_rate(live.run.now().domain).expect("the primary root is registered"),
                         effective: live.run.effective(),
                         events: count(&live.run),
                     }),
@@ -183,12 +199,20 @@ impl Server {
             Ok(dir) => dir,
             Err(error) => return fail(ErrorKind::Io, format!("EA-8: {error}")),
         };
-        let profile = profile.unwrap_or_else(|| default_profile(&dir.to_string_lossy()));
-        let assembly = match assemble(&profile, BTreeMap::new(), self.config.implementations.clone()) {
+        let profile = match (profile, &self.config.default_profile) {
+            (Some(profile), _) => profile,
+            (None, Some(path)) => match std::fs::read(path).map_err(|e| e.to_string()).and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string())) {
+                Ok(profile) => profile,
+                Err(error) => return fail(ErrorKind::Refused, format!("EA-9: {}: {error}", path.display())),
+            },
+            (None, None) => default_profile(&dir.to_string_lossy()),
+        };
+        let assembly = match assemble(&profile, BTreeMap::new(), self.config.implementations.clone(), self.config.open_device.as_ref()) {
             Ok(assembly) => assembly,
             Err(message) => return fail(ErrorKind::Refused, message),
         };
         let clocks = assembly.clocks.clone();
+        let device_paced = assembly.authority.descriptor().pacing == Pacing::Device;
         let mut run = match coordinator::connect(&profile, assembly, lease.unwrap_or_default()) {
             Ok(run) => run,
             Err(error) => return fail(ErrorKind::Refused, error.to_string()),
@@ -217,7 +241,7 @@ impl Server {
             profile: profile.clone(),
             effective: run.effective(),
         };
-        self.live = Some(Live { run, clocks, profile });
+        self.live = Some(Live { run, clocks, profile, device_paced });
         Handled::ok(response)
     }
 
@@ -259,7 +283,13 @@ impl Server {
             return fail(ErrorKind::Refused, "EA-14: a child Run needs duration_ns or a scheduled Stop {}, or it would never end");
         }
         let profile = profile.unwrap_or_else(|| without_feeds(&live.profile));
-        let assembly = match assemble(&profile, inputs, self.config.implementations.clone()) {
+        // A device-paced Session's child would open the device again (EA-14, KG-12).
+        let assembled = if live.device_paced {
+            Ok(catalogue::empty_assembly())
+        } else {
+            assemble(&profile, inputs, self.config.implementations.clone(), self.config.open_device.as_ref())
+        };
+        let assembly = match assembled {
             Ok(assembly) => assembly,
             Err(message) => return fail(ErrorKind::Refused, message),
         };

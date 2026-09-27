@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+from fractions import Fraction
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -298,13 +299,26 @@ class Session:
         """The effective configuration per fragment: what the Kernel admitted (KC-27)."""
         return self._status()["effective"]
 
-    def sleep(self, seconds: float) -> None:
-        """``run.wait_until(now + seconds)`` in the Run's time (Vision §54); never ``time.sleep``."""
-        self._call({"op": "advance", "by_ns": max(0, math.ceil(seconds * 1e9))})
+    def after(self, seconds: float) -> dict:
+        """The instant ``seconds`` after the Run's current one: ``now`` plus
+        ``ceil(seconds · root_rate)`` ticks, with ``seconds`` the decimal written
+        (``Fraction(repr(seconds))``, so ``0.001`` is exactly a thousandth) (EA-16, VE-6).
+        On a device-paced Session a capture meant to start at an instant names one ahead,
+        ``rx.capture(n, at=sdr.after(0.05))`` (EA-17)."""
+        status = self._status()
+        rate = Fraction(status["root_rate"]["num"], status["root_rate"]["den"])
+        now = status["now"]
+        return {**now, "ticks": now["ticks"] + math.ceil(Fraction(repr(seconds)) * rate)}
 
-    def wait_until(self, t: dict) -> None:
-        """Advances the Run to the ``TimePoint`` ``t`` (Vision §15)."""
-        self._call({"op": "advance", "to": t})
+    def sleep(self, seconds: float) -> dict:
+        """``run.wait_until(now + seconds)`` in the Run's time (Vision §54); never
+        ``time.sleep``. Returns the instant the Run stands at (EA-16, VE-6)."""
+        return self._call({"op": "advance", "by_ns": max(0, math.ceil(seconds * 1e9))})[0]["now"]
+
+    def wait_until(self, t: dict) -> dict:
+        """Advances the Run to the ``TimePoint`` ``t`` (Vision §15) and returns the instant
+        it stands at (EA-16, VE-6)."""
+        return self._call({"op": "advance", "to": t})[0]["now"]
 
     def wait_for(self, kinds: Sequence[str], timeout: float) -> Optional[dict]:
         """Waits, in Run time, for the next event of one of ``kinds`` that this method has not

@@ -68,6 +68,7 @@ dependencies = [
  "ezsdr-link-host",
  "ezsdr-mock-radio",
  "ezsdr-radio",
+ "ezsdr-radio-uhd",
  "ezsdr-server",
  "ezsdr-sim",
  "ezsdr-sim-engine",
@@ -147,13 +148,14 @@ dependencies = [
 
 [[package]]
 name = "ezsdr-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ezsdr-exec-native",
  "ezsdr-kernel",
  "ezsdr-link-host",
  "ezsdr-mock-radio",
  "ezsdr-radio",
+ "ezsdr-radio-uhd",
  "ezsdr-sim",
  "ezsdr-sim-engine",
  "ezsdr-sink",
