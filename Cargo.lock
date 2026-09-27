@@ -133,6 +133,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ezsdr-radio-uhd"
+version = "0.1.0"
+dependencies = [
+ "ezsdr-hostmem",
+ "ezsdr-kernel",
+ "ezsdr-link-host",
+ "ezsdr-radio",
+ "ezsdr-sink",
+ "ezsdr-sink-capture",
+ "serde_json",
+]
+
+[[package]]
 name = "ezsdr-server"
 version = "0.1.0"
 dependencies = [

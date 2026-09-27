@@ -54,7 +54,31 @@ fn po_02_every_crate_forbids_unsafe_code() {
         let crate_dir = member.path();
         let lib = fs::read_to_string(crate_dir.join("src/lib.rs"))
             .unwrap_or_else(|error| panic!("{name}/src/lib.rs: {error}"));
-        assert!(lib.contains("#![forbid(unsafe_code)]"), "{name} must forbid unsafe code");
+        if name == "ezsdr-radio-uhd" {
+            // GZ-3: the one exception. `deny` at the root, and `unsafe` only in
+            // `src/uhd.rs`, compiled with the feature `uhd` and allowed there alone.
+            assert!(lib.contains("#![deny(unsafe_code)]"), "{name} must deny unsafe code");
+            assert!(
+                lib.contains("#[cfg(feature = \"uhd\")]\n#[allow(unsafe_code)]\nmod uhd;"),
+                "{name}: `mod uhd` must be compiled only with the feature `uhd` and be the only module allowing unsafe"
+            );
+            let tests = crate_dir.join("tests");
+            let tests = if tests.is_dir() { rust_files(&tests) } else { Vec::new() };
+            for file in rust_files(&crate_dir.join("src")).into_iter().chain(tests) {
+                if file.ends_with("src/uhd.rs") {
+                    continue;
+                }
+                let source = fs::read_to_string(&file).unwrap();
+                let code: String = source.lines().map(|line| line.split("//").next().unwrap_or_default()).collect();
+                let ident = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+                let token = code.match_indices("unsafe").any(|(at, _)| {
+                    !ident(code[..at].chars().next_back()) && !ident(code[at + 6..].chars().next())
+                });
+                assert!(!token, "{}: `unsafe` outside src/uhd.rs (GZ-3)", file.display());
+            }
+        } else {
+            assert!(lib.contains("#![forbid(unsafe_code)]"), "{name} must forbid unsafe code");
+        }
         assert!(lib.contains("#![warn(missing_docs)]"), "{name} must warn on missing docs");
         let manifest = fs::read_to_string(crate_dir.join("Cargo.toml")).unwrap();
         for field in ["edition", "rust-version", "license"] {
@@ -106,6 +130,7 @@ fn ma_03_no_module_crate_depends_on_another() {
         "ezsdr-link-host",
         "ezsdr-sink-capture",
         "ezsdr-exec-native",
+        "ezsdr-radio-uhd",
     ]);
     let expected_normal = BTreeMap::from([
         ("ezsdr-kernel", BTreeSet::from(["serde", "serde_json", "schemars", "sha2"])),
@@ -118,6 +143,8 @@ fn ma_03_no_module_crate_depends_on_another() {
         ("ezsdr-link-host", BTreeSet::from(["ezsdr-kernel"])),
         ("ezsdr-sink-capture", BTreeSet::from(["ezsdr-kernel", "ezsdr-sink", "ezsdr-hostmem", "serde_json"])),
         ("ezsdr-exec-native", BTreeSet::from(["ezsdr-kernel", "serde_json"])),
+        // Phase 7 §5: the UHD Module uses the Kernel, the radio Vocabulary and hostmem.
+        ("ezsdr-radio-uhd", BTreeSet::from(["ezsdr-kernel", "ezsdr-radio", "ezsdr-hostmem", "serde_json"])),
         // The server is the Runtime that compiles the Modules in, not a Module (Phase 6 §5).
         ("ezsdr-server", BTreeSet::from([
             "ezsdr-kernel", "ezsdr-radio", "ezsdr-sim", "ezsdr-sink", "ezsdr-sim-engine",
@@ -153,6 +180,10 @@ fn ma_03_no_module_crate_depends_on_another() {
         assert_eq!(&normal, expected, "{package_name} normal dependencies must match plan/phase2/00-overview.md §5");
         let expected_dev = if package_name == "ezsdr-kernel" {
             BTreeSet::from(["ezsdr-kernel", "syn"])
+        } else if package_name == "ezsdr-radio-uhd" {
+            // Spec 18 §6: tests/fake.rs assembles a Run as the server's catalogue does,
+            // with the capture Sink and the host Link (Phase 7; workspace crates only).
+            BTreeSet::from(["ezsdr-kernel", "ezsdr-sink", "ezsdr-sink-capture", "ezsdr-link-host"])
         } else {
             BTreeSet::from(["ezsdr-kernel"])
         };
