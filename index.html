@@ -3,578 +3,625 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#101d27">
-  <meta name="description" content="Ez-SDR v4は、PythonからPC上の仮想無線機を動かし、SDR実験の条件・受信データ・実行記録を残すソフトウェアです。実機接続は計画中で、AI連携は未実装です。">
-  <title>Ez-SDR v4 — 仮想無線機で始めるSDR実験</title>
+  <meta name="theme-color" content="#08131b">
+  <meta name="description" content="Ez-SDR v4は、人にもAIにも使いやすいよう設計した、SDR実験のためのソフトウェアです。PC上の仮想無線機で実験を試し、実験条件・受信データ・実行記録を残して、条件を変えた結果を比べられます。SDR実機との接続は未実装です。">
+  <title>Ez-SDR v4 — AI-Native Software-Defined Radio Experiments</title>
   <style>
     :root {
-      color-scheme: light;
-      --ink: #17242d;
-      --muted: #56636d;
-      --paper: #f3f5f3;
-      --white: #fff;
-      --line: #dce2df;
-      --navy: #101d27;
-      --navy-2: #172a36;
-      --green: #b8ed77;
-      --green-dark: #487129;
-      --blue: #426bce;
-      --orange: #d17b48;
-      --content: 1160px;
-      --radius: 18px;
+      --ink: #0d1a22;
+      --ink-2: #33444f;
+      --muted: #5b6b75;
+      --paper: #f5f6f2;
+      --card: #ffffff;
+      --line: #dfe4e0;
+      --night: #08131b;
+      --night-2: #0f202b;
+      --night-line: rgba(255,255,255,.12);
+      --lime: #c6f36b;
+      --lime-deep: #3f6b12;
+      --cyan: #5fd8e3;
+      --amber: #f0b45a;
+      --amber-deep: #8a5a0f;
+      --link: #1f4fa8;
+      --content: 1120px;
+      --mono: "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
     }
-
     * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; scroll-padding-top: 90px; }
+    html { scroll-behavior: smooth; scroll-padding-top: 84px; }
     body {
-      margin: 0;
-      background: var(--paper);
-      color: var(--ink);
-      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif;
-      line-height: 1.75;
-      -webkit-font-smoothing: antialiased;
+      margin: 0; background: var(--paper); color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif;
+      line-height: 1.8; -webkit-font-smoothing: antialiased;
     }
-    a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 3px; }
-    a:hover { color: var(--blue); }
-    a:focus-visible { outline: 3px solid #8aa7ff; outline-offset: 4px; border-radius: 3px; }
-    code, .mono, .eyebrow, .section-no, .phase-no, .metric-value {
-      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    a { color: var(--link); text-underline-offset: 3px; }
+    a:focus-visible, button:focus-visible, summary:focus-visible { outline: 3px solid #7aa2ff; outline-offset: 3px; border-radius: 4px; }
+    code { font-family: var(--mono); font-size: .9em; }
+    h1, h2, h3, p { margin: 0; }
+    .container { width: min(var(--content), calc(100% - 40px)); margin-inline: auto; }
+
+    /* ---------- header ---------- */
+    .site-header { position: sticky; top: 0; z-index: 20; background: rgba(8,19,27,.82); backdrop-filter: blur(14px); border-bottom: 1px solid var(--night-line); }
+    .header-inner { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .brand { display: inline-flex; align-items: center; gap: 10px; color: #fff; text-decoration: none; font-weight: 800; letter-spacing: -.02em; white-space: nowrap; }
+    .brand-mark { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; background: var(--lime); color: var(--night); font: 800 12px var(--mono); letter-spacing: -.08em; }
+    .brand small { color: #93a5ae; font-weight: 500; font-size: 14px; }
+    .main-nav { display: flex; gap: 24px; }
+    .main-nav a { color: #c5d1d7; font-size: 14px; font-weight: 600; text-decoration: none; white-space: nowrap; }
+    .main-nav a:hover { color: var(--lime); }
+    .gh { padding: 7px 14px; border: 1px solid #3a4c57; border-radius: 999px; color: #fff; font-size: 13px; font-weight: 700; text-decoration: none; white-space: nowrap; }
+    .gh:hover { border-color: var(--lime); color: var(--lime); }
+
+    /* ---------- hero ---------- */
+    .hero { position: relative; isolation: isolate; overflow: hidden; background: var(--night); color: #eef4f2; }
+    .hero-visual { position: absolute; inset: 0 0 0 30%; z-index: -1; -webkit-mask-image: linear-gradient(90deg, transparent, #000 45%); mask-image: linear-gradient(90deg, transparent, #000 45%); }
+    .hero-visual canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    .hero-visual::after { content: ""; position: absolute; inset: 0; background-image: linear-gradient(rgba(255,255,255,.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.05) 1px, transparent 1px); background-size: 56px 56px; }
+    .hero::after { content: ""; position: absolute; inset: auto 0 0 0; height: 120px; z-index: -1; background: linear-gradient(transparent, var(--night)); }
+    .hero-inner { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, .85fr); gap: 56px; align-items: center; padding: 88px 0 96px; }
+    .eyebrow { display: inline-flex; align-items: center; gap: 10px; color: var(--lime); font: 700 12px var(--mono); letter-spacing: .14em; }
+    .eyebrow i { width: 8px; height: 8px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 0 5px rgba(198,243,107,.16); animation: pulse 2.4s ease-in-out infinite; }
+    @keyframes pulse { 50% { box-shadow: 0 0 0 9px rgba(198,243,107,0); } }
+    h1 span { white-space: nowrap; }
+    .tagline { margin: -6px 0 18px; color: #fff; font-size: clamp(19px, 2.2vw, 24px); font-weight: 800; letter-spacing: -.03em; line-height: 1.5; }
+    h1 { margin: 22px 0 22px; font-size: clamp(32px, 4.6vw, 58px); line-height: 1.2; letter-spacing: -.055em; font-weight: 800; }
+    h1 em { font-style: normal; background: linear-gradient(100deg, var(--lime), var(--cyan)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .lede { max-width: 590px; color: #c3d0d5; font-size: 17px; }
+    .lede strong { color: #fff; }
+    .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; }
+    .btn { display: inline-flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 22px; border-radius: 10px; font-size: 15px; font-weight: 800; text-decoration: none; transition: transform .18s ease, background .18s ease, border-color .18s ease; }
+    .btn:hover { transform: translateY(-2px); }
+    .btn-primary { background: var(--lime); color: var(--night); }
+    .btn-primary:hover { background: #d8ff86; }
+    .btn-ghost { border: 1px solid #47606d; color: #eef4f2; }
+    .btn-ghost:hover { border-color: #b7c6cd; }
+
+    .status-card { border: 1px solid var(--night-line); border-radius: 18px; background: rgba(8,19,27,.72); backdrop-filter: blur(10px); box-shadow: 0 24px 60px rgba(0,0,0,.35); }
+    .status-card h2 { padding: 18px 22px 14px; font: 700 12px var(--mono); letter-spacing: .14em; color: #93a5ae; border-bottom: 1px solid var(--night-line); }
+    .status-list { list-style: none; margin: 0; padding: 6px 0 10px; }
+    .status-list li { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 22px; font-size: 14px; line-height: 1.5; }
+    .status-list li + li { border-top: 1px solid rgba(255,255,255,.06); }
+
+    .badge { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 800; line-height: 1.6; white-space: nowrap; }
+    .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .badge.ok { color: var(--lime); background: rgba(198,243,107,.12); }
+    .badge.plan { color: var(--amber); border: 1px dashed rgba(240,180,90,.6); }
+    .badge.plan::before { background: transparent; border: 1.5px solid currentColor; }
+    .light .badge.ok { color: var(--lime-deep); background: #e6f4cf; }
+    .light .badge.plan { color: var(--amber-deep); border-color: #d9a14e; }
+
+    /* ---------- sections ---------- */
+    .section { padding: 104px 0 0; }
+    .kicker { color: var(--lime-deep); font: 800 12px var(--mono); letter-spacing: .16em; }
+    .section h2 { margin-top: 10px; font-size: clamp(27px, 3.6vw, 42px); line-height: 1.32; letter-spacing: -.045em; }
+    .section-lead { max-width: 720px; margin-top: 14px; color: var(--muted); font-size: 16px; }
+    .section-head { margin-bottom: 40px; }
+
+    /* questions */
+    .qa { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+    .qa-card { position: relative; padding: 30px 30px 28px; border: 1px solid var(--line); border-radius: 20px; background: var(--card); overflow: hidden; }
+    .qa-card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 5px; background: var(--lime); }
+    .qa-card.no::before { background: repeating-linear-gradient(180deg, var(--amber) 0 8px, transparent 8px 14px); }
+    .qa-q { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+    .qa-q h3 { font-size: 19px; line-height: 1.5; letter-spacing: -.03em; }
+    .qa-a { margin: 14px 0 10px; font-size: 22px; font-weight: 800; letter-spacing: -.04em; line-height: 1.4; }
+    .qa-card p:last-child { color: var(--muted); font-size: 15px; }
+
+    /* flow */
+    .flow { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; counter-reset: s; }
+    .flow li { position: relative; padding: 0 18px 0 0; }
+    .flow li::before { counter-increment: s; content: counter(s); display: grid; place-items: center; width: 44px; height: 44px; margin-bottom: 18px; border-radius: 50%; background: var(--night); color: var(--lime); font: 800 15px var(--mono); position: relative; z-index: 1; }
+    .flow li:not(:last-child)::after { content: ""; position: absolute; top: 21px; left: 44px; right: 0; height: 2px; background: linear-gradient(90deg, var(--lime-deep), #c9d5c0); }
+    .flow h3 { font-size: 16px; letter-spacing: -.02em; }
+    .flow p { margin-top: 6px; color: var(--muted); font-size: 14px; line-height: 1.7; }
+    .flow .hl h3 { color: var(--lime-deep); }
+
+    /* try it (dark band) */
+    .band { margin-top: 104px; padding: 88px 0 96px; background: var(--night); color: #eaf1ef; }
+    .band .kicker { color: var(--lime); }
+    .band .section-lead { color: #a9b9c0; }
+    .band a { color: #9fc0ff; }
+    .tabs { display: flex; gap: 6px; margin-bottom: -1px; }
+    .tab { padding: 10px 18px; border: 1px solid transparent; border-bottom: 0; border-radius: 10px 10px 0 0; background: none; color: #93a5ae; font: 700 14px inherit; font-family: inherit; cursor: pointer; }
+    .tab[aria-selected="true"] { background: var(--night-2); border-color: var(--night-line); color: var(--lime); }
+    .tab:hover { color: #fff; }
+    .terminal { border: 1px solid var(--night-line); border-radius: 0 14px 14px 14px; background: var(--night-2); overflow: hidden; }
+    .tab-desc { padding: 16px 24px; border-bottom: 1px solid var(--night-line); color: #b7c6cd; font-size: 14px; }
+    pre { margin: 0; padding: 22px 24px; overflow-x: auto; font: 13px/1.75 var(--mono); color: #dbe7e4; tab-size: 4; }
+    pre code { font-size: inherit; }
+    .c { color: #6f8794; } .k { color: #c8a4ff; } .s { color: #a5e3a0; } .n { color: #f5b97a; } .f { color: #7fd4ff; }
+    .out { border-top: 1px dashed #2c4250; background: #0a1820; }
+    .out-label { padding: 12px 24px 0; color: #7f95a0; font: 700 11px var(--mono); letter-spacing: .12em; }
+    .out pre { color: var(--lime); padding-top: 8px; }
+    [hidden] { display: none !important; }
+
+    .after { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+    .panel { border: 1px solid var(--night-line); border-radius: 14px; background: var(--night-2); }
+    .panel h3 { padding: 18px 24px 0; font-size: 16px; letter-spacing: -.02em; }
+    .panel > p { padding: 6px 24px 0; color: #a9b9c0; font-size: 14px; }
+    .tree { color: #cfe0dc; }
+    .tree .d { color: var(--cyan); }
+    .tree .m { color: #7f95a0; }
+    .copy { float: right; margin: 12px 14px 0 0; padding: 4px 12px; border: 1px solid #3a4c57; border-radius: 6px; background: none; color: #b7c6cd; font: 700 12px inherit; font-family: inherit; cursor: pointer; }
+    .copy:hover { border-color: var(--lime); color: var(--lime); }
+    .req { margin-top: 16px; color: #93a5ae; font-size: 13px; }
+
+    /* status columns */
+    .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .col { padding: 30px; border-radius: 20px; background: var(--card); border: 1px solid var(--line); }
+    .col.plan { background: #fbf6ec; border: 1px dashed #d9b779; }
+    .col h3 { display: flex; align-items: center; gap: 12px; font-size: 20px; letter-spacing: -.03em; }
+    .col ul { list-style: none; margin: 18px 0 0; padding: 0; }
+    .col li { position: relative; padding: 12px 0 12px 28px; border-top: 1px solid var(--line); font-size: 15px; line-height: 1.7; }
+    .col.plan li { border-color: #ecdcbb; }
+    .col li strong { display: block; }
+    .col li span { color: var(--muted); font-size: 14px; }
+    .col li::before { content: "✓"; position: absolute; left: 2px; top: 12px; color: var(--lime-deep); font-weight: 900; }
+    .col.plan li::before { content: "○"; color: var(--amber-deep); }
+
+    .ai { display: grid; grid-template-columns: auto 1fr; gap: 28px; align-items: center; margin-top: 16px; padding: 30px 34px; border-radius: 20px; background: linear-gradient(120deg, #e8f4d3, #dff2f0); }
+    .ai-mark { display: grid; place-items: center; width: 76px; height: 76px; border-radius: 22px; background: var(--night); color: var(--lime); font: 800 20px var(--mono); }
+    .ai h3 { font-size: 20px; letter-spacing: -.03em; }
+    .ai p { margin-top: 6px; color: #2e4a3e; font-size: 15px; }
+    .ai p strong { color: var(--ink); }
+    .ai-points { list-style: none; margin: 14px 0 0; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .ai-points li { padding: 12px 14px; border-radius: 12px; background: rgba(255,255,255,.65); color: #2e4a3e; font-size: 13px; line-height: 1.65; }
+    .ai-points strong { display: block; margin-bottom: 2px; color: var(--ink); font-size: 14px; }
+    .ai .ai-note { margin-top: 12px; font-size: 13px; color: #47645a; }
+
+    .track { list-style: none; margin: 12px 0 0; padding: 0; display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
+    .track li { padding: 14px 14px 16px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); border-top: 4px solid var(--lime); font-size: 13px; line-height: 1.6; }
+    .track strong { display: block; margin-bottom: 4px; font-size: 14px; }
+    .track span { color: var(--muted); }
+    .track-title { margin: 44px 0 0; font-size: 15px; font-weight: 800; }
+    .track.next { margin-top: 12px; grid-template-columns: 1.4fr repeat(4, 1fr); }
+    .track.next li { border-top: 4px dashed var(--amber); background: #fbf6ec; border-color: #ecdcbb; border-top-color: var(--amber); }
+
+    /* evidence + limits */
+    .evidence { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 16px; border-radius: 20px; background: var(--night); color: #eef4f2; overflow: hidden; }
+    .evidence div { padding: 26px 30px; }
+    .evidence div + div { border-left: 1px solid var(--night-line); }
+    .evidence b { display: block; color: var(--lime); font: 700 40px/1.1 var(--mono); letter-spacing: -.07em; }
+    .evidence span { display: block; margin-top: 6px; color: #a9b9c0; font-size: 13px; line-height: 1.6; }
+    .limits { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .limit { padding: 26px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); }
+    .limit h3 { font-size: 17px; line-height: 1.5; letter-spacing: -.025em; }
+    .limit p { margin-top: 8px; color: var(--muted); font-size: 14px; }
+    .limit a { display: inline-block; margin-top: 10px; font-size: 13px; font-weight: 700; }
+
+    /* docs */
+    .refs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .ref { display: flex; flex-direction: column; justify-content: space-between; gap: 22px; min-height: 140px; padding: 24px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); color: var(--ink); text-decoration: none; transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease; }
+    .ref:hover { transform: translateY(-3px); border-color: #a9b8b0; box-shadow: 0 14px 30px rgba(13,26,34,.08); }
+    .ref small { color: var(--lime-deep); font: 800 11px var(--mono); letter-spacing: .12em; }
+    .ref strong { display: block; margin-top: 6px; font-size: 16px; line-height: 1.5; letter-spacing: -.02em; }
+    .ref em { align-self: flex-end; color: var(--muted); font-style: normal; }
+    details.specs { margin-top: 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); }
+    details.specs summary { padding: 18px 24px; font-weight: 800; cursor: pointer; }
+    .spec-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 32px; margin: 0; padding: 0 24px 22px; list-style: none; }
+    .spec-list li { padding: 10px 0; border-top: 1px solid var(--line); font-size: 14px; line-height: 1.6; }
+    .spec-list a { font-weight: 700; }
+    .spec-list span { display: block; color: var(--muted); font-size: 13px; }
+
+    .site-footer { margin-top: 104px; padding: 30px 0 40px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+    .footer-inner { display: flex; justify-content: space-between; gap: 20px; }
+
+    /* reveal (only when JS is on) */
+    .js .reveal { opacity: 0; transform: translateY(22px); transition: opacity .7s ease, transform .7s ease; }
+    .js .reveal.in { opacity: 1; transform: none; }
+
+    @media (max-width: 960px) {
+      .main-nav { display: none; }
+      .hero-inner { grid-template-columns: minmax(0, 1fr); padding: 64px 0 72px; gap: 40px; }
+      .hero-visual { inset: 0; opacity: .32; -webkit-mask-image: none; mask-image: none; }
+      .flow { grid-template-columns: 1fr; gap: 26px; }
+      .flow li { padding: 0 0 0 64px; }
+      .flow li::before { position: absolute; left: 0; top: 0; margin: 0; }
+      .flow li:not(:last-child)::after { top: 44px; bottom: -26px; left: 21px; right: auto; width: 2px; height: auto; background: linear-gradient(var(--lime-deep), #c9d5c0); }
+      .track, .track.next { grid-template-columns: repeat(2, 1fr); }
     }
-    code { font-size: .92em; }
-    .container { width: min(var(--content), calc(100% - 48px)); margin-inline: auto; }
-
-    .site-header {
-      position: sticky;
-      z-index: 10;
-      top: 0;
-      border-bottom: 1px solid rgba(23, 36, 45, .08);
-      background: rgba(243, 245, 243, .94);
-      backdrop-filter: blur(14px);
-    }
-    .header-inner { min-height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
-    .brand { display: inline-flex; align-items: center; gap: 11px; text-decoration: none; white-space: nowrap; }
-    .brand-mark {
-      width: 30px; height: 30px; display: grid; place-items: center;
-      border-radius: 9px; background: var(--navy); color: var(--green);
-      font-size: 12px; font-weight: 800; letter-spacing: -.08em;
-    }
-    .brand-name { font-size: 15px; font-weight: 750; letter-spacing: -.025em; }
-    .brand-name span { color: var(--muted); font-weight: 500; }
-    .main-nav { display: flex; align-items: center; gap: 27px; }
-    .main-nav a { color: #4e5c65; font-size: 14px; font-weight: 650; text-decoration: none; white-space: nowrap; }
-    .main-nav a:hover { color: var(--blue); }
-    .header-source {
-      border: 1px solid #cbd4d0; border-radius: 999px; padding: 7px 13px;
-      color: var(--ink); font-size: 13px; font-weight: 700; text-decoration: none; white-space: nowrap;
-    }
-
-    .hero-wrap { padding: 24px 0 0; }
-    .hero {
-      position: relative; isolation: isolate; overflow: hidden;
-      min-height: 444px; display: grid; grid-template-columns: 1.2fr .8fr;
-      align-items: center; gap: 64px; padding: 66px 70px;
-      border-radius: 22px; background: var(--navy); color: #f3f6f4;
-    }
-    .hero::before {
-      position: absolute; z-index: -1; inset: 0; content: "";
-      background-image: linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
-      background-size: 46px 46px;
-      mask-image: linear-gradient(90deg, transparent, #000 36%, #000);
-    }
-    .hero::after {
-      position: absolute; z-index: -1; width: 480px; height: 480px; right: -185px; top: -235px;
-      border: 1px solid rgba(184,237,119,.18); border-radius: 50%; content: "";
-      box-shadow: 0 0 0 48px rgba(184,237,119,.025), 0 0 0 96px rgba(184,237,119,.02);
-    }
-    .hero-copy { max-width: 620px; }
-    .eyebrow { display: flex; align-items: center; gap: 10px; color: #bdc8ce; font-size: 12px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
-    .eyebrow-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px rgba(184,237,119,.12); }
-    h1 { max-width: 680px; margin: 24px 0 19px; font-size: clamp(38px, 5.3vw, 66px); line-height: 1.23; letter-spacing: -.065em; font-weight: 760; }
-    h1 em { color: var(--green); font-style: normal; }
-    .hero-lede { max-width: 590px; margin: 0; color: #c1cbd0; font-size: 17px; line-height: 1.85; }
-    .hero-actions { display: flex; flex-wrap: wrap; gap: 11px; margin-top: 31px; }
-    .button { display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-height: 46px; padding: 0 18px; border-radius: 8px; font-size: 14px; font-weight: 750; text-decoration: none; transition: transform .18s ease, background .18s ease; }
-    .button:hover { transform: translateY(-2px); }
-    .button-primary { background: var(--green); color: #17242d; }
-    .button-primary:hover { background: #cbf79a; color: #17242d; }
-    .button-quiet { border: 1px solid #52616a; color: #edf2ef; }
-    .button-quiet:hover { border-color: #a6b2b7; color: #fff; }
-    .button-arrow { font-size: 16px; line-height: 1; }
-
-    .hero-panel {
-      position: relative; padding: 25px; border: 1px solid rgba(255,255,255,.14);
-      border-radius: 15px; background: rgba(255,255,255,.045); box-shadow: 0 18px 54px rgba(0,0,0,.15);
-    }
-    .panel-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,.12); }
-    .panel-title { color: #dfe7e8; font-size: 14px; font-weight: 700; }
-    .panel-date { color: #91a1a9; font-size: 12px; }
-    .phase-count { margin: 23px 0 5px; color: var(--green); font: 500 48px/1 "SFMono-Regular", Consolas, monospace; letter-spacing: -.08em; }
-    .phase-count small { color: #91a1a9; font-size: 16px; letter-spacing: 0; }
-    .panel-caption { color: #b9c5c9; font-size: 14px; }
-    .progress-dots { display: flex; gap: 7px; margin: 20px 0 23px; }
-    .progress-dots span { height: 5px; flex: 1; border-radius: 99px; background: #33454f; }
-    .progress-dots span.done { background: var(--green); }
-    .next-phase { display: flex; align-items: start; gap: 13px; padding-top: 17px; border-top: 1px solid rgba(255,255,255,.12); }
-    .next-tag { flex: 0 0 auto; padding: 6px 9px; border: 1px solid rgba(184,237,119,.4); border-radius: 5px; color: var(--green); font: 700 12px/1.2 "SFMono-Regular", Consolas, monospace; letter-spacing: .06em; }
-    .next-phase strong { display: block; color: #f4f6f3; font-size: 14px; }
-    .next-phase p { margin: 4px 0 0; color: #9dabb1; font-size: 13px; line-height: 1.65; }
-    .hero-meta { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 25px; color: #9baab0; font-size: 12px; }
-    .hero-meta a { color: #c8d1d4; }
-
-    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); margin: 20px 0 0; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.67); }
-    .metric { padding: 22px 30px; }
-    .metric + .metric { border-left: 1px solid var(--line); }
-    .metric-value { color: var(--ink); font-size: 27px; line-height: 1.2; font-weight: 750; letter-spacing: -.06em; }
-    .metric-label { margin-top: 5px; color: var(--muted); font-size: 13px; }
-
-    main { padding-bottom: 88px; }
-    .section { padding-top: 105px; }
-    .section-heading { display: grid; grid-template-columns: 70px 1fr; gap: 17px; align-items: start; margin-bottom: 34px; }
-    .section-no { padding-top: 9px; color: #849097; font-size: 12px; letter-spacing: .06em; }
-    .section-heading h2 { margin: 0; font-size: clamp(25px, 3.4vw, 37px); line-height: 1.35; letter-spacing: -.05em; }
-    .section-heading p { max-width: 710px; margin: 10px 0 0; color: var(--muted); font-size: 16px; }
-    .sub-eyebrow { margin: 0 0 10px; color: var(--green-dark); font: 700 12px/1.4 "SFMono-Regular", Consolas, monospace; letter-spacing: .12em; text-transform: uppercase; }
-
-    .intro-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    .intro-card { min-height: 220px; padding: 30px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--white); }
-    .intro-card h3 { margin: 0 0 13px; font-size: 20px; letter-spacing: -.035em; }
-    .intro-card p { margin: 0; color: var(--muted); font-size: 16px; }
-    .pull-quote { display: flex; flex-direction: column; justify-content: space-between; background: #eaf1e3; }
-    .pull-quote blockquote { margin: 5px 0 25px; color: #263923; font-size: 22px; line-height: 1.65; font-weight: 650; letter-spacing: -.04em; }
-    .pull-quote cite { color: #62795a; font-size: 13px; font-style: normal; }
-    .boundary-tags { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 19px; }
-    .tag { padding: 6px 10px; border: 1px solid #dce4dd; border-radius: 6px; color: #506057; background: #fafcf9; font-size: 12px; }
-
-    .flow-panel { padding: 30px; border-radius: var(--radius); background: var(--navy); color: #eef3f0; }
-    .flow-topline { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 25px; }
-    .flow-topline strong { font-size: 15px; }
-    .flow-topline span { color: #9cabb0; font-size: 12px; }
-    .flow { display: grid; grid-template-columns: repeat(5, 1fr); align-items: stretch; gap: 23px; }
-    .flow-step { position: relative; min-height: 147px; padding: 18px 15px; border: 1px solid #334650; border-radius: 10px; background: #182a35; }
-    .flow-step:not(:last-child)::after { position: absolute; content: "→"; right: -20px; top: 54px; color: var(--green); font-size: 17px; }
-    .flow-num { display: block; margin-bottom: 20px; color: var(--green); font: 700 12px "SFMono-Regular", Consolas, monospace; }
-    .flow-step strong { display: block; margin-bottom: 7px; color: #f4f6f2; font-size: 14px; }
-    .flow-step p { margin: 0; color: #a9b7bb; font-size: 13px; line-height: 1.65; }
-    .flow-note { margin: 19px 0 0; color: #9eacb1; font-size: 13px; }
-    .flow-note code { color: #d4e2d7; }
-
-    .experiment-example { display: grid; grid-template-columns: .8fr 1.2fr; gap: 24px; align-items: center; margin-top: 16px; padding: 26px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--white); }
-    .experiment-example-copy h3 { margin: 0 0 10px; font-size: 19px; letter-spacing: -.035em; }
-    .experiment-example-copy p:not(.sub-eyebrow) { margin: 0; color: var(--muted); font-size: 15px; }
-    .experiment-example-copy a { display: inline-block; margin-top: 14px; color: #506e9c; font-size: 13px; font-weight: 750; text-decoration: none; }
-    .experiment-example-copy a:hover { text-decoration: underline; }
-    .experiment-json { overflow: auto; margin: 0; padding: 20px; border-radius: 10px; background: var(--navy); color: #dce8dd; font: 12px/1.65 "SFMono-Regular", Consolas, monospace; }
-    .experiment-json code { color: inherit; font-size: inherit; }
-    .python-example .experiment-json { background: #152b29; }
-
-    .tiers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; }
-    .tier-card { position: relative; overflow: hidden; min-height: 214px; padding: 25px; border: 1px solid var(--line); border-radius: 14px; background: var(--white); }
-    .tier-card::before { position: absolute; content: ""; height: 3px; top: 0; left: 0; right: 0; background: var(--tier-accent, var(--green)); }
-    .tier-card:nth-child(2) { --tier-accent: #78a6ec; }
-    .tier-card:nth-child(3) { --tier-accent: #e1a175; }
-    .tier-card h3 { margin: 0 0 9px; font-size: 20px; letter-spacing: -.035em; }
-    .tier-card p { min-height: 78px; margin: 0; color: var(--muted); font-size: 15px; }
-    .tier-items { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 17px; }
-    .tier-items span { padding: 5px 8px; border-radius: 5px; color: #4d5c62; background: #f0f3f1; font: 12px "SFMono-Regular", Consolas, monospace; }
-    .design-note { margin: 15px 0 0; color: #879299; font-size: 13px; }
-
-    .spec-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; }
-    .spec-card { min-height: 147px; display: flex; flex-direction: column; align-items: start; padding: 20px 21px; border: 1px solid var(--line); border-radius: 12px; background: var(--white); text-decoration: none; transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease; }
-    .spec-card:hover { transform: translateY(-3px); border-color: #acbbb4; box-shadow: 0 10px 25px rgba(23,36,45,.06); color: var(--ink); }
-    .spec-card-top { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 11px; }
-    .spec-id { color: #658045; font: 700 12px "SFMono-Regular", Consolas, monospace; }
-    .spec-link { color: #92a09a; font-size: 15px; }
-    .spec-card strong { font-size: 15px; line-height: 1.5; letter-spacing: -.015em; }
-    .spec-card small { display: block; margin-top: 5px; color: var(--muted); font-size: 13px; line-height: 1.6; }
-    .spec-bottom { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 19px; padding: 16px 18px; border-radius: 10px; background: #e9eeeb; }
-    .spec-bottom p { margin: 0; color: #59666d; font-size: 14px; }
-    .text-link { color: #254b9d; font-size: 13px; font-weight: 750; text-decoration: none; white-space: nowrap; }
-    .text-link:hover { text-decoration: underline; }
-
-    .impl-table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 14px; background: var(--white); }
-    .impl-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
-    .impl-table th { padding: 13px 19px; color: #6e7a80; background: #edf1ef; font: 700 12px "SFMono-Regular", Consolas, monospace; letter-spacing: .1em; text-transform: uppercase; }
-    .impl-table td { padding: 17px 19px; border-top: 1px solid #e7ebe9; vertical-align: top; }
-    .impl-table td:first-child { width: 145px; font-weight: 750; white-space: nowrap; }
-    .impl-table td:nth-child(2) { width: 340px; }
-    .impl-table code { color: #3c505b; font-size: 12px; }
-    .impl-detail { display: block; margin-top: 4px; color: var(--muted); line-height: 1.7; }
-    .status-pill { display: inline-flex; align-items: center; gap: 6px; color: #54723a; font-size: 12px; font-weight: 750; white-space: nowrap; }
-    .status-pill::before { width: 6px; height: 6px; border-radius: 50%; background: #82b64a; content: ""; }
-    .impl-foot { display: flex; justify-content: space-between; gap: 20px; margin-top: 15px; color: #77838a; font-size: 12px; }
-    .impl-foot a { color: #516a8d; }
-
-    .proof-band { display: grid; grid-template-columns: .8fr 1.2fr; gap: 35px; align-items: center; margin-top: 29px; padding: 27px 31px; border-radius: 14px; background: var(--navy); color: #f1f4f1; }
-    .proof-number { color: var(--green); font: 600 52px/.95 "SFMono-Regular", Consolas, monospace; letter-spacing: -.08em; }
-    .proof-number span { color: #a9b7bd; font-size: 15px; letter-spacing: 0; }
-    .proof-label { margin-top: 8px; color: #bac7cb; font-size: 13px; }
-    .proof-copy { padding-left: 30px; border-left: 1px solid #3c4d55; color: #bdc8cc; font-size: 14px; }
-    .proof-copy strong { color: #f2f5f1; }
-    .proof-copy p { margin: 0 0 9px; }
-    .proof-copy p:last-child { margin-bottom: 0; }
-
-    .roadmap { position: relative; display: grid; gap: 0; }
-    .roadmap::before { position: absolute; top: 21px; bottom: 23px; left: 51px; width: 1px; background: #d2dad5; content: ""; }
-    .roadmap-item { position: relative; display: grid; grid-template-columns: 105px 1fr auto; gap: 18px; align-items: center; min-height: 83px; padding: 15px 19px 15px 0; border-bottom: 1px solid #e0e5e2; }
-    .phase-no { position: relative; z-index: 1; display: grid; place-items: center; width: 42px; height: 42px; margin-left: 30px; border: 1px solid #c8d3cc; border-radius: 50%; color: #53616a; background: var(--paper); font-size: 12px; font-weight: 700; }
-    .roadmap-item.done .phase-no { border-color: var(--green-dark); color: #fff; background: #688b4c; }
-    .roadmap-item.next .phase-no { border: 2px solid #73994e; color: #47672d; background: #f7fbf2; box-shadow: 0 0 0 5px #e5eedb; }
-    .roadmap-copy strong { display: block; font-size: 15px; }
-    .roadmap-copy p { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
-    .roadmap-state { padding: 6px 10px; border-radius: 5px; color: #64727a; background: #e9edeb; font: 700 12px "SFMono-Regular", Consolas, monospace; white-space: nowrap; }
-    .roadmap-item.done .roadmap-state { color: #4e6f32; background: #e4eddc; }
-    .roadmap-item.next .roadmap-state { color: #466a2c; background: #e2f0d3; }
-    .roadmap-more { margin: 16px 0 0 105px; color: #76838a; font-size: 13px; }
-
-    .limits-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-    .limit-card { padding: 23px; border: 1px solid var(--line); border-radius: 13px; background: var(--white); }
-    .limit-number { display: block; margin-bottom: 17px; color: #8b9c80; font: 700 12px "SFMono-Regular", Consolas, monospace; }
-    .limit-card h3 { margin: 0 0 8px; font-size: 16px; letter-spacing: -.02em; }
-    .limit-card p { margin: 0; color: var(--muted); font-size: 14px; }
-    .limit-card a { display: inline-block; margin-top: 12px; color: #506e9c; font-size: 12px; font-weight: 700; text-decoration: none; }
-
-    .references { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-    .reference { display: flex; min-height: 112px; flex-direction: column; justify-content: space-between; padding: 19px; border: 1px solid var(--line); border-radius: 12px; background: var(--white); text-decoration: none; }
-    .reference:hover { border-color: #aebbb5; color: var(--ink); }
-    .reference span { color: #7e8a8f; font: 700 12px "SFMono-Regular", Consolas, monospace; letter-spacing: .1em; }
-    .reference strong { font-size: 14px; }
-    .reference em { color: #819097; font-size: 13px; font-style: normal; }
-
-    .site-footer { padding: 29px 0 36px; border-top: 1px solid var(--line); }
-    .footer-inner { display: flex; justify-content: space-between; align-items: center; gap: 20px; color: #758188; font-size: 12px; }
-    .footer-inner a { color: #4d637b; }
-    .footer-note { display: flex; align-items: center; gap: 8px; }
-    .footer-note::before { width: 6px; height: 6px; border-radius: 50%; background: #86ae5f; content: ""; }
-
-    @media (max-width: 900px) {
-      .main-nav { gap: 16px; }
-      .hero { grid-template-columns: 1fr .8fr; gap: 30px; padding: 53px 42px; }
-      .flow { grid-template-columns: repeat(5, minmax(115px, 1fr)); gap: 17px; overflow-x: auto; padding-bottom: 8px; }
-      .flow-step:not(:last-child)::after { right: -15px; }
-      .spec-grid { grid-template-columns: repeat(2, 1fr); }
-      .impl-table td:nth-child(2) { width: 285px; }
-    }
-    @media (max-width: 680px) {
-      html { scroll-padding-top: 68px; }
-      .container { width: min(var(--content), calc(100% - 30px)); }
-      .header-inner { min-height: 61px; gap: 12px; }
-      .brand { gap: 8px; }
-      .brand-mark { width: 27px; height: 27px; }
-      .brand-name { font-size: 13px; }
-      .main-nav { max-width: 45vw; overflow-x: auto; gap: 15px; scrollbar-width: none; }
-      .main-nav::-webkit-scrollbar { display: none; }
-      .main-nav a { font-size: 12px; }
-      .header-source { display: none; }
-      .hero-wrap { padding-top: 14px; }
-      .hero { grid-template-columns: 1fr; gap: 30px; min-height: 0; padding: 38px 25px 25px; border-radius: 15px; }
-      .hero::after { width: 320px; height: 320px; right: -190px; top: -185px; }
-      h1 { margin: 20px 0 14px; font-size: clamp(37px, 11vw, 54px); }
-      .hero-lede { font-size: 15px; }
-      .hero-actions { margin-top: 22px; }
-      .hero-panel { padding: 19px; }
-      .phase-count { font-size: 42px; }
-      .hero-meta { margin-top: 0; }
-      .metrics { grid-template-columns: 1fr; margin-top: 12px; }
-      .metric { display: flex; align-items: baseline; gap: 13px; padding: 14px 19px; }
-      .metric + .metric { border-top: 1px solid var(--line); border-left: 0; }
-      .metric-value { min-width: 55px; font-size: 23px; }
-      .metric-label { margin: 0; }
-      .section { padding-top: 75px; }
-      .section-heading { grid-template-columns: 39px 1fr; gap: 10px; margin-bottom: 25px; }
-      .section-no { padding-top: 8px; font-size: 12px; }
-      .section-heading p { font-size: 14px; }
-      .intro-grid, .tiers, .limits-grid, .references { grid-template-columns: 1fr; }
-      .intro-card { min-height: 0; padding: 23px; }
-      .pull-quote blockquote { font-size: 21px; }
-      .flow-panel { padding: 22px 18px; }
-      .flow-topline { align-items: start; flex-direction: column; gap: 4px; }
-      .flow { grid-template-columns: 1fr; gap: 19px; overflow: visible; }
-      .flow-step { min-height: 0; padding: 15px 17px; }
-      .flow-step:not(:last-child)::after { top: auto; right: 19px; bottom: -20px; content: "↓"; }
-      .flow-num { margin-bottom: 9px; }
-      .flow-note { line-height: 1.8; }
-      .experiment-example { grid-template-columns: 1fr; gap: 17px; padding: 20px; }
-      .experiment-json { padding: 16px; font-size: 11px; }
-      .tier-card { min-height: 0; padding: 23px; }
-      .tier-card p { min-height: 0; }
-      .spec-grid { grid-template-columns: 1fr; gap: 8px; }
-      .spec-card { min-height: 0; padding: 16px 18px; }
-      .spec-card-top { margin-bottom: 6px; }
-      .spec-bottom { align-items: start; flex-direction: column; gap: 9px; }
-      .impl-table { min-width: 720px; }
-      .impl-foot { flex-direction: column; gap: 6px; }
-      .proof-band { grid-template-columns: 1fr; gap: 19px; padding: 23px; }
-      .proof-number { font-size: 44px; }
-      .proof-copy { padding: 15px 0 0; border-top: 1px solid #3c4d55; border-left: 0; }
-      .roadmap::before { left: 37px; }
-      .roadmap-item { grid-template-columns: 75px 1fr; gap: 9px; padding-right: 0; }
-      .phase-no { margin-left: 17px; }
-      .roadmap-state { grid-column: 2; justify-self: start; margin-top: -3px; }
-      .roadmap-copy p { line-height: 1.6; }
-      .roadmap-more { margin-left: 75px; line-height: 1.7; }
-      .references { gap: 8px; }
-      .reference { min-height: 87px; }
-      .footer-inner { align-items: start; flex-direction: column; }
+    @media (max-width: 720px) {
+      .container { width: calc(100% - 32px); }
+      .section { padding-top: 76px; }
+      .band { margin-top: 76px; padding: 64px 0 72px; }
+      .qa, .two, .after, .limits, .refs, .spec-list, .evidence { grid-template-columns: 1fr; }
+      .evidence div + div { border-left: 0; border-top: 1px solid var(--night-line); }
+      .qa-card, .col { padding: 24px 22px; }
+      .ai { grid-template-columns: 1fr; gap: 16px; padding: 24px; }
+      .ai-points { grid-template-columns: 1fr; }
+      .tabs { overflow-x: auto; }
+      .tab { white-space: nowrap; }
+      .footer-inner { flex-direction: column; }
+      pre { font-size: 12px; padding: 18px; }
     }
     @media (prefers-reduced-motion: reduce) {
       html { scroll-behavior: auto; }
-      *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+      .eyebrow i { animation: none; }
+      .js .reveal { opacity: 1; transform: none; transition: none; }
     }
-  </style>
+  @media print{.js .reveal{opacity:1;transform:none}}</style>
+  <script>document.documentElement.classList.add('js')</script>
 </head>
 <body>
   <header class="site-header">
     <div class="container header-inner">
-      <a class="brand" href="#top" aria-label="Ez-SDR v4 トップ">
-        <span class="brand-mark" aria-hidden="true">EZ</span>
-        <span class="brand-name">Ez-SDR <span>/ v4</span></span>
-      </a>
+      <a class="brand" href="#top" aria-label="Ez-SDR v4 トップ"><span class="brand-mark" aria-hidden="true">EZ</span>Ez-SDR <small>v4</small></a>
       <nav class="main-nav" aria-label="ページ内ナビゲーション">
-        <a href="#about">概要</a>
-        <a href="#specifications">仕様</a>
-        <a href="#implementation">実装</a>
-        <a href="#roadmap">ロードマップ</a>
+        <a href="#questions">できること</a>
+        <a href="#try">試してみる</a>
+        <a href="#status">現状と計画</a>
+        <a href="#docs">資料</a>
       </nav>
-      <a class="header-source" href="https://github.com/k3komatsu/Ez-SDRv4" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
+      <a class="gh" href="https://github.com/k3komatsu/Ez-SDRv4" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
     </div>
   </header>
 
-  <div class="container hero-wrap" id="top">
-    <section class="hero" aria-labelledby="hero-title">
-      <div class="hero-copy">
-        <div class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span> SDR実験を、まずPC上で試す</div>
-        <h1 id="hero-title">仮想無線機で<br>SDR実験を<br><em>試して記録する</em></h1>
-        <p class="hero-lede">Ez-SDR v4 は、Pythonで実験条件を記述し、PC上の仮想無線機で送受信を試し、受信データと実行記録を保存するソフトウェアです。現在は仮想実験と、Pythonから操作する機能（Python API）を使えます。SDR実機との接続は計画中で、AI連携はまだありません。AIが実験条件の作成や結果の確認を支援できるようにする設計方針を、AI-Nativeと呼びます。</p>
-        <div class="hero-actions">
-          <a class="button button-primary" href="#about">できること <span class="button-arrow" aria-hidden="true">↓</span></a>
-          <a class="button button-quiet" href="#specifications">詳しい設計資料 <span class="button-arrow" aria-hidden="true">↗</span></a>
+  <section class="hero" id="top" aria-labelledby="hero-title">
+    <div class="hero-visual" aria-hidden="true"><canvas id="wf"></canvas><canvas id="trace"></canvas></div>
+    <div class="container hero-inner">
+      <div>
+        <div class="eyebrow"><i aria-hidden="true"></i>SDR実験を、まずPCの中で</div>
+        <h1 id="hero-title"><span>AI-Native</span><br><span>Software-Defined</span><br><em><span>Radio Experiments</span></em></h1>
+        <p class="tagline">仮想無線機で、SDR実験を試して記録する</p>
+        <p class="lede">Ez-SDR v4 は、Python から <strong>PC 上の仮想無線機</strong>を動かして送受信を試し、<strong>実験条件・受信データ・実行記録</strong>をまとめて保存するソフトウェアです。実機がなくても始められ、条件を変えた結果を並べて比べられます。条件も記録も機械が読める形式（JSON）なので、人だけでなく AI からも使いやすい設計です（AI-Native）。</p>
+        <div class="cta">
+          <a class="btn btn-primary" href="#try">試し方を見る <span aria-hidden="true">↓</span></a>
+          <a class="btn btn-ghost" href="#status">今できること・計画中のこと</a>
         </div>
       </div>
-      <aside class="hero-panel" aria-label="開発状況">
-        <div class="panel-top">
-          <span class="panel-title">開発状況</span>
-          <span class="panel-date">2026.09.27</span>
-        </div>
-        <div class="phase-count">06 <small>完了フェーズ</small></div>
-        <div class="panel-caption">仮想実験からPython APIまで実装済み</div>
-        <div class="progress-dots" aria-label="Phase 1から6は完了。SDR実機との接続は計画中">
-          <span class="done"></span><span class="done"></span><span class="done"></span><span class="done"></span><span class="done"></span><span class="done"></span>
-        </div>
-        <div class="next-phase">
-          <span class="next-tag">NEXT · 07</span>
-          <div><strong>SDR実機との接続</strong><p>USRPなどの実機を操作する機能は、これから開発する計画です。</p></div>
-        </div>
+      <aside class="status-card" aria-labelledby="status-card-title">
+        <h2 id="status-card-title">CURRENT STATUS · 2026.09.30 確認</h2>
+        <ul class="status-list">
+          <li>仮想無線機での送受信<span class="badge ok">使える</span></li>
+          <li>実験条件・結果の記録<span class="badge ok">使える</span></li>
+          <li>Python からの操作<span class="badge ok">使える</span></li>
+          <li>SDR 実機（USRP など）との接続<span class="badge plan">未実装</span></li>
+          <li>AI からも使いやすい設計（AI-Native）<span class="badge ok">採用済み</span></li>
+        </ul>
       </aside>
-      <div class="hero-meta">
-        <span>掲載内容の基準: <a href="https://github.com/k3komatsu/Ez-SDRv4/commit/7cc614737de24ffaece87c156b403dccb3b4b429" target="_blank" rel="noopener noreferrer"><code>main@7cc6147</code></a></span>
-        <span>Python APIと仮想無線機を実装</span>
-      </div>
-    </section>
-    <div class="metrics" aria-label="実装状況の概要">
-      <div class="metric"><div class="metric-value">13</div><div class="metric-label">受理済みの設計仕様</div></div>
-      <div class="metric"><div class="metric-value">684 + 21</div><div class="metric-label">Rust・Pythonのテストに合格</div></div>
-      <div class="metric"><div class="metric-value">06</div><div class="metric-label">完了した実装フェーズ</div></div>
     </div>
-  </div>
+  </section>
 
-  <main class="container">
-    <section class="section" id="about" aria-labelledby="about-title">
-      <div class="section-heading">
-        <div class="section-no">01 / OVERVIEW</div>
-        <div><p class="sub-eyebrow">できること</p><h2 id="about-title">Ez-SDR v4 でできること</h2><p>Pythonから仮想無線機を操作し、送受信や測定を行えます。実験条件、実行中の操作、受信データを記録し、同じPC環境で同じ条件を再実行したり、条件を変えた結果を比べたりできます。SDR実機との接続は計画中です。</p></div>
+  <main>
+    <section class="section light container" id="questions" aria-labelledby="q-title">
+      <div class="section-head reveal">
+        <p class="kicker">01 · 研究者の疑問に答える</p>
+        <h2 id="q-title">まず知りたい四つのこと</h2>
+        <p class="section-lead">SDR を使った実験をしている方が最初に気にする点に、現在の実装に基づいて答えます。</p>
       </div>
-      <div class="intro-grid">
-        <article class="intro-card">
-          <h3>実験条件と実行環境を分ける</h3>
-          <p>実験条件（<code>ExperimentSpec</code>）には、周波数やサンプルレート、必要な入出力を記述します。実行環境（<code>BindingProfile</code>）には、使用する仮想無線機や周囲の条件を記述します。同じ実験条件を、異なる環境で試せる設計です。</p>
-          <div class="boundary-tags"><span class="tag">実験条件</span><span class="tag">機器・環境</span><span class="tag">実行前に確認</span></div>
+      <div class="qa">
+        <article class="qa-card reveal">
+          <div class="qa-q"><h3>実機なしで試せる？</h3><span class="badge ok">使える</span></div>
+          <p class="qa-a">はい。PC の中で完結します。</p>
+          <p>Python から仮想無線機に信号を送り、戻ってきた信号を受信できます。無線機間の伝搬（遅延や雑音）や、指定した障害も再現できます。実験時間は実時間を待たずに進められるので、条件を変えた試行を手早く繰り返せます。</p>
         </article>
-        <article class="intro-card pull-quote">
-          <div><p class="sub-eyebrow">AI-Nativeという設計方針</p><blockquote>AIが実験条件の作成や<br>結果の確認を手伝える。</blockquote></div>
-          <cite>AI連携機能はまだ実装されていません。現在は設計上の方針です。</cite>
+        <article class="qa-card reveal">
+          <div class="qa-q"><h3>条件や結果は残る？</h3><span class="badge ok">使える</span></div>
+          <p class="qa-a">はい。実行ごとに自動で保存されます。</p>
+          <p>周波数・サンプルレートなどの<strong>実験条件</strong>、使った環境、実行中の操作履歴、受信データを保存します。受信データは SDR の測定データでよく使われる形式（SigMF）です。「あの結果はどの条件だったか」を後から確認できます。</p>
+        </article>
+        <article class="qa-card reveal">
+          <div class="qa-q"><h3>同じ条件で再実行・比較できる？</h3><span class="badge ok">使える</span></div>
+          <p class="qa-a">はい。同じ PC 環境なら同じ結果になります。</p>
+          <p>条件を書き換えて繰り返し実行すると、実行ごとに別の記録ファイルが残ります。たとえばゲインを 0・10・20 dB と変えた三つの結果を並べて比べられます。異なる OS や CPU の間では、数値が最後の bit まで一致する保証はありません。</p>
+        </article>
+        <article class="qa-card no reveal">
+          <div class="qa-q"><h3>実機で使える？</h3><span class="badge plan">未実装</span></div>
+          <p class="qa-a">まだです。設計を終えた段階です。</p>
+          <p>USRP などの SDR 実機を操作する機能は、設計を受理し、実装はこれからです。そのため、実機の測定と仮想実験の比較もまだ行えません。</p>
         </article>
       </div>
     </section>
 
-    <section class="section" aria-labelledby="flow-title">
-      <div class="section-heading">
-        <div class="section-no">02 / WORKFLOW</div>
-        <div><p class="sub-eyebrow">実験の流れ</p><h2 id="flow-title">条件を確かめてから実験し、記録する</h2><p>Pythonから実験条件を指定すると、実行前に仮想無線機がその条件に対応できるかを確認します。実験中の操作や受信データを保存し、あとから結果を確かめられます。</p></div>
+    <section class="section light container" aria-labelledby="flow-title">
+      <div class="section-head reveal">
+        <p class="kicker">02 · 実験の流れ</p>
+        <h2 id="flow-title">条件を確かめてから走らせ、条件ごと記録する</h2>
+        <p class="section-lead">実験条件（ExperimentSpec）と、使う機器・環境を分けて指定します。実行前に「その機器で条件を満たせるか」を確認し、満たせない場合は理由が返ります。そのため、人だけでなく AI も「条件を書く → 検証する → 結果を見て直す」というループを、自分で回せます。これが AI-Native の中心です。</p>
       </div>
-      <div class="flow-panel">
-        <div class="flow-topline"><strong>現在のPython APIで実験する手順</strong><span>実行前に条件確認 · 実験後に記録を確認</span></div>
-        <div class="flow" aria-label="実験条件と実行環境の確認から、仮想実験と記録までの手順">
-          <div class="flow-step"><span class="flow-num">01 · 条件</span><strong>実験条件を書く</strong><p>周波数、サンプルレート、入出力などを指定</p></div>
-          <div class="flow-step"><span class="flow-num">02 · 機器</span><strong>機器と環境を選ぶ</strong><p>使う仮想無線機や実験環境を設定</p></div>
-          <div class="flow-step"><span class="flow-num">03 · 確認</span><strong>実行前に確認</strong><p>機器が条件を満たすか、動かせるかを確認</p></div>
-          <div class="flow-step"><span class="flow-num">04 · 実行</span><strong>仮想実験を実行</strong><p>現在はPC上の仮想無線機で動作</p></div>
-          <div class="flow-step"><span class="flow-num">05 · 記録</span><strong>条件と結果を保存</strong><p>設定、出力データ、実行中の出来事を記録</p></div>
+      <ol class="flow reveal">
+        <li><h3>実験条件を書く</h3><p>周波数、サンプルレート、受信するサンプル数など、実験の中身を指定します。</p></li>
+        <li><h3>機器と環境を選ぶ</h3><p>使う仮想無線機や、周囲の環境（実行環境）を選びます。</p></li>
+        <li class="hl"><h3>実行前に確認</h3><p>機器が条件を満たせるかを事前に確認します。満たせない場合は実行前に分かります。</p></li>
+        <li><h3>仮想実験を実行</h3><p>PC 上の仮想無線機で送受信します。実時間を待つ必要はありません。</p></li>
+        <li><h3>条件と結果を保存</h3><p>条件・環境・操作履歴・受信データを、実行ごとにファイルへ残します。</p></li>
+      </ol>
+    </section>
+
+    <div class="band" id="try">
+      <div class="container">
+        <div class="section-head reveal">
+          <p class="kicker">03 · 試してみる</p>
+          <h2>Python で書いて、実行して、記録を見る</h2>
+          <p class="section-lead">下の二つは、リポジトリの <code>python/examples/</code> に入っている動作する例です。当サイトの作成時に実際に実行して、出力とファイルを確認しました。</p>
         </div>
-        <p class="flow-note">仮想実験では、実時間を待たずに実験時間を進められます。同じPC環境で同じ条件を使って再実行し、結果を比べられます。</p>
-      </div>
-      <article class="experiment-example">
-        <div class="experiment-example-copy">
-          <p class="sub-eyebrow">DETAILED EXAMPLE · JSON</p>
-          <h3>実験条件をJSONで表す</h3>
-          <p>これはPythonの <code>sdr.run(spec, duration=0.02)</code> に渡す実験条件の例です。1 GHzで受信し、毎秒100万サンプルの速度で10,000サンプルを記録します。実験時間は20 msです。JSONはプログラムが実験条件を読み書きするための形式です。</p>
-          <a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/03-spec-and-binding.md" target="_blank" rel="noopener noreferrer">実験条件の詳しい仕様 ↗</a>
-        </div>
-        <pre class="experiment-json"><code>{
-  "version": 1,
-  "requirements": { "vocabularies": [
-    { "id": "radio", "major": 1 },
-    { "id": "sink", "major": 1 }
-  ] },
-  "resources": { "radio": {
-    "kind": "radio.device",
-    "requires": {
-      "radio.rx.channels": { "kind": "eq", "value": 1 },
-      "radio.rx.sample_rate_hz": { "kind": "eq", "value": 1000000.0 },
-      "radio.rx.frequency_hz": { "kind": "eq", "value": 1000000000.0 }
+
+        <div class="reveal">
+          <div class="tabs" role="tablist" aria-label="コード例">
+            <button class="tab" role="tab" id="tab-a" aria-selected="true" aria-controls="pane-a">信号を送って受信する</button>
+            <button class="tab" role="tab" id="tab-b" aria-selected="false" aria-controls="pane-b" tabindex="-1">条件を変えて比べる</button>
+          </div>
+          <div class="terminal">
+            <div id="pane-a" role="tabpanel" aria-labelledby="tab-a">
+              <p class="tab-desc">複素正弦波を作り、仮想無線機から繰り返し送信して、10 万サンプルを受信します。<code>connect()</code> は実験を実行するプログラム（<code>ezsdr-server</code>）を自動で起動します。</p>
+<pre><code><span class="k">import</span> numpy <span class="k">as</span> np
+<span class="k">import</span> ezsdr
+
+<span class="c"># 周期 100 サンプルの複素正弦波（振幅 0.5）を作る</span>
+x = np.exp(<span class="n">2j</span> * np.pi * np.arange(<span class="n">1000</span>) / <span class="n">100</span>).astype(np.complex64) * <span class="n">0.5</span>
+
+<span class="k">with</span> ezsdr.<span class="f">connect</span>() <span class="k">as</span> sdr:       <span class="c"># 仮想無線機を起動</span>
+    sdr.tx.<span class="f">repeat</span>(x)               <span class="c"># 信号を繰り返し送信</span>
+    y = sdr.rx.<span class="f">capture</span>(<span class="n">100_000</span>)    <span class="c"># 10 万サンプルを受信</span>
+
+<span class="f">print</span>(<span class="s">f"captured {len(y)} samples, mean power {np.mean(np.abs(y) ** 2):.4f}"</span>)
+<span class="f">print</span>(<span class="s">f"Manifest: {sdr.manifest_path} ({len(sdr.manifest['action_log'])} logged calls)"</span>)</code></pre>
+              <div class="out"><p class="out-label">出力例</p><pre><code>captured 100000 samples, mean power 0.2449
+Manifest: …/ezsdr-runs/session-38976-0/manifest.json (3 logged calls)</code></pre></div>
+            </div>
+            <div id="pane-b" role="tabpanel" aria-labelledby="tab-b" hidden>
+              <p class="tab-desc">受信ゲインを 0・10・20 dB に変えて三回実行します。実験条件は Python の辞書で書き、実行ごとに 10,000 サンプルを取得して、それぞれ別の記録ファイルを残します（<code>examples/sweep.py</code> を読みやすく整形しています）。</p>
+<pre><code><span class="k">import</span> ezsdr
+
+<span class="k">def</span> <span class="f">build_experiment</span>(gain_db):
+    <span class="s">"""実験条件：指定したゲインで 10,000 サンプルを受信する"""</span>
+    <span class="k">return</span> {
+        <span class="s">"version"</span>: <span class="n">1</span>,
+        <span class="s">"requirements"</span>: {<span class="s">"vocabularies"</span>: [{<span class="s">"id"</span>: <span class="s">"radio"</span>, <span class="s">"major"</span>: <span class="n">1</span>}, {<span class="s">"id"</span>: <span class="s">"sink"</span>, <span class="s">"major"</span>: <span class="n">1</span>}]},
+        <span class="s">"resources"</span>: {<span class="s">"radio"</span>: {
+            <span class="s">"kind"</span>: <span class="s">"radio.device"</span>,                                   <span class="c"># 無線機を 1 台使う</span>
+            <span class="s">"requires"</span>: {<span class="s">"radio.rx.gain_db"</span>: {<span class="s">"kind"</span>: <span class="s">"eq"</span>, <span class="s">"value"</span>: gain_db},  <span class="c"># 受信ゲイン</span>
+        }},
+        <span class="s">"outputs"</span>: [{
+            <span class="s">"id"</span>: <span class="s">"rec"</span>, <span class="s">"kind"</span>: <span class="s">"sink.capture"</span>,                        <span class="c"># 受信データをファイルに保存</span>
+            <span class="s">"params"</span>: {<span class="s">"sink.capture_samples"</span>: <span class="n">10_000</span>},
+            <span class="s">"feed"</span>: {<span class="s">"port"</span>: {<span class="s">"component"</span>: <span class="s">"radio"</span>, <span class="s">"port"</span>: <span class="s">"rx"</span>}, <span class="s">"policy"</span>: <span class="s">"drop_oldest"</span>, <span class="s">"capacity"</span>: <span class="n">64</span>},
+        }],
     }
-  } },
-  "outputs": [{
-    "id": "rec", "kind": "sink.capture",
-    "feed": { "port": { "component": "radio", "port": "rx" },
-      "policy": "drop_oldest", "capacity": 64 },
-    "params": { "sink.capture_samples": 10000 }
-  }],
-  "policies": {}, "extensions": {}
-}</code></pre>
-      </article>
-      <article class="experiment-example python-example">
-        <div class="experiment-example-copy">
-          <p class="sub-eyebrow">実装済み · PYTHON API</p>
-          <h3>Pythonから送受信を試す</h3>
-          <p>Pythonで生成した信号を仮想無線機から送り、戻ってきた信号を受信する例です。Python APIは実装済みです。利用にはPython 3.9以降とNumPyが必要です。実験実行プログラム（<code>ezsdr-server</code>）はリポジトリからビルドして利用します。</p>
-          <a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/python/examples/minimal.py" target="_blank" rel="noopener noreferrer">動作する最小例を見る ↗</a>
+
+<span class="k">with</span> ezsdr.<span class="f">connect</span>() <span class="k">as</span> sdr:
+    <span class="k">for</span> gain <span class="k">in</span> (<span class="n">0.0</span>, <span class="n">10.0</span>, <span class="n">20.0</span>):                   <span class="c"># ゲインを変えて 3 回実行</span>
+        result = sdr.<span class="f">run</span>(build_experiment(gain), duration=<span class="n">0.02</span>)   <span class="c"># 実験時間 20 ms</span>
+        y = result.<span class="f">capture</span>(<span class="s">"rec"</span>)
+        <span class="f">print</span>(<span class="s">f"gain {gain:4.1f} dB: {len(y)} samples, Manifest {result.path}"</span>)</code></pre>
+              <div class="out"><p class="out-label">出力例</p><pre><code>gain  0.0 dB: 10000 samples, Manifest …/session-38990-0/child-0.manifest.json
+gain 10.0 dB: 10000 samples, Manifest …/session-38990-0/child-1.manifest.json
+gain 20.0 dB: 10000 samples, Manifest …/session-38990-0/child-2.manifest.json</code></pre></div>
+            </div>
+          </div>
         </div>
-        <pre class="experiment-json"><code>import numpy as np
-import ezsdr
 
-x = np.exp(2j * np.pi * np.arange(1000) / 100).astype(np.complex64) * 0.5
+        <div class="after reveal">
+          <div class="panel">
+            <h3>実行すると、こんなファイルが残る</h3>
+            <p>「条件を変えて比べる」の例を実行した後のフォルダです。</p>
+<pre class="tree"><code><span class="d">ezsdr-runs/session-38990-0/</span>
+├─ manifest.json            <span class="m"># 実験全体の実行記録</span>
+├─ child-0.manifest.json    <span class="m"># ゲイン 0 dB の実行記録</span>
+├─ child-1.manifest.json    <span class="m"># ゲイン 10 dB の実行記録</span>
+├─ child-2.manifest.json    <span class="m"># ゲイン 20 dB の実行記録</span>
+├─ …_rec.sigmf-data  ×3     <span class="m"># 受信した IQ サンプル</span>
+└─ …_rec.sigmf-meta  ×3     <span class="m"># そのサンプルの説明（SigMF）</span></code></pre>
+            <p style="padding-bottom:20px">実行記録（Manifest）は JSON ファイルで、実験条件・実行環境・操作履歴・出力ファイルの一覧・ハッシュ値が入っています。</p>
+          </div>
+          <div class="panel">
+            <button class="copy" type="button" data-copy="cmds">コピー</button>
+            <h3>自分の PC で動かすには</h3>
+            <p>Rust（cargo）と Python 3.9 以降が必要です。</p>
+<pre id="cmds"><code>git clone https://github.com/k3komatsu/Ez-SDRv4
+cd Ez-SDRv4
+cargo build -p ezsdr-server          <span class="c"># 実験実行プログラムをビルド</span>
+python3 -m venv .venv &amp;&amp; . .venv/bin/activate
+pip install -e python                <span class="c"># Python 側（NumPy も入る）</span>
+export EZSDR_SERVER=$PWD/target/debug/ezsdr-server
+python python/examples/minimal.py</code></pre>
+          </div>
+        </div>
+        <p class="req">Python 版の配布パッケージ（pip install ezsdr）はまだありません。現在はリポジトリからのビルドが必要です。</p>
+      </div>
+    </div>
 
-with ezsdr.connect() as sdr:
-    sdr.tx.repeat(x)
-    y = sdr.rx.capture(100_000)
+    <section class="section light container" id="status" aria-labelledby="status-title">
+      <div class="section-head reveal">
+        <p class="kicker">04 · 現状と計画</p>
+        <h2 id="status-title">今使えるものと、これから作るもの</h2>
+        <p class="section-lead">実装状況は 2026-09-30 にリポジトリの最新状態で確認しました。「計画中」は、まだ使えないものです。</p>
+      </div>
+      <div class="two">
+        <div class="col reveal">
+          <h3>今使える <span class="badge ok">実装済み</span></h3>
+          <ul>
+            <li><strong>PC 上の仮想無線機</strong><span>周波数・サンプルレートなどの条件を確認し、受信データの欠落も検出します。</span></li>
+            <li><strong>仮想環境での伝搬と障害の再現</strong><span>無線機間の遅延や雑音、指定した障害を PC 上で再現します。</span></li>
+            <li><strong>結果の保存</strong><span>SDR 測定データ用の形式（SigMF）と、実行記録（Manifest）を残します。</span></li>
+            <li><strong>応答する処理の実行</strong><span>Rust 製の処理部品が「PING」を受けて、指定した時刻に「PONG」を返す例を動かせます。</span></li>
+            <li><strong>Python からの操作</strong><span>送信・受信・条件の変更と繰り返し実行、記録の取得ができます。</span></li>
+          </ul>
+        </div>
+        <div class="col plan reveal">
+          <h3>計画中 <span class="badge plan">未実装</span></h3>
+          <ul>
+            <li><strong>SDR 実機（USRP など）との接続</strong><span>設計は受理済みで、実装はこれからです。</span></li>
+            <li><strong>仮想実験と実機測定の比較</strong><span>USRP X310 などの実測と、仮想無線機の結果を照合します。</span></li>
+            <li><strong>パケット通信との連携</strong><span>パケット処理を OS のネットワーク機能とつなぎます。</span></li>
+            <li><strong>信号処理・応答機能の拡張</strong><span>検出した信号に応じて処理し、応答する機能を追加します。</span></li>
+            <li><strong>GPU・WebAssembly など、対応する計算方式と機器の拡張</strong><span>さらに先の計画です。</span></li>
+          </ul>
+        </div>
+      </div>
 
-print(f"captured {len(y)} samples")
-print(f"記録ファイル: {sdr.manifest_path}")</code></pre>
-      </article>
-    </section>
+      <div class="ai reveal">
+        <div class="ai-mark" aria-hidden="true">AI</div>
+        <div>
+          <h3>AI-Native とは：<span class="badge ok" style="vertical-align:middle">設計に反映済み</span></h3>
+          <p>AI を内蔵するという意味ではなく、<strong>このソフトウェア自体が AI から使いやすいように設計されている</strong>という意味です。AI エージェントは、人と同じ Python の操作と実験条件を使い、まず<strong>仮想無線機（SDR エミュレーション）で自分で検証してから、同じ実験条件を実機で動かす</strong>という段階を踏めます。実機の接続は計画中なので、現在使えるのは仮想無線機での検証までです。</p>
+          <ul class="ai-points">
+            <li><strong>機械が読める形式</strong>実験条件も実行記録も JSON で、その形式（JSON Schema）が定義されています。</li>
+            <li><strong>理由つきの拒否</strong>条件を満たさない操作は、理由とともに拒否され、その拒否も記録に残ります。</li>
+            <li><strong>すべてが記録される</strong>操作履歴が残るので、AI が行った実験も後から人が確認できます。</li>
+          </ul>
+          <p class="ai-note">高速な信号処理は、AI ではなく専用のプログラムが担当します。AI は実験の条件づくりや結果の確認といった、その外側で使います。</p>
+        </div>
+      </div>
 
-    <section class="section" aria-labelledby="tiers-title">
-      <div class="section-heading">
-        <div class="section-no">03 / DESIGN</div>
-        <div><p class="sub-eyebrow">設計の考え方</p><h2 id="tiers-title">実験を支える三つの役割</h2><p>実験の進行管理、周波数などの設定項目、無線機や保存処理を行う機能部品を分けています。Python APIは実装済みで、AIからも同じ実験条件を扱えるようにすることは今後の計画です。</p></div>
-      </div>
-      <div class="tiers">
-        <article class="tier-card"><h3>実験の進行管理（Kernel）</h3><p>条件を確認し、実験の開始・停止から、設定や結果の記録までを管理します。</p><div class="tier-items"><span>条件確認</span><span>実行管理</span><span>結果記録</span></div></article>
-        <article class="tier-card"><h3>分野ごとの設定項目（Vocabulary）</h3><p>周波数やサンプルレートなど、無線機やシミュレーションで使う項目の名前と意味を定めます。</p><div class="tier-items"><span>無線機</span><span>シミュレーション</span><span>データ保存</span></div></article>
-        <article class="tier-card"><h3>交換できる機能部品（Modules）</h3><p>仮想無線機、信号処理、データ保存などを、共通の接続ルールに沿って追加できます。</p><div class="tier-items"><span>仮想無線機</span><span>信号処理</span><span>ファイル保存</span></div></article>
-      </div>
-      <p class="design-note">AI-Nativeは設計方針であり、AI連携機能はまだ実装されていません。将来AIが実験条件を作成・確認するときも、サンプルごとに時間を守る信号処理は専用プログラムが行います。</p>
-    </section>
+      <h3 class="track-title reveal">ここまでの歩み</h3>
+      <ol class="track reveal" aria-label="完了した開発の段階">
+        <li><strong>実験条件と実行管理</strong><span>条件・時刻・データ形式・記録の土台</span></li>
+        <li><strong>仮想無線機</strong><span>条件確認と、PC 上で動く無線機</span></li>
+        <li><strong>伝搬と再現</strong><span>無線機間の伝搬と、同条件での再実行</span></li>
+        <li><strong>異常検知とデータ保存</strong><span>欠落の検出と SigMF での記録</span></li>
+        <li><strong>受信への応答</strong><span>PING を受けて PONG を返す実験</span></li>
+        <li><strong>Python から操作</strong><span>送受信・条件変更・記録の取得</span></li>
+      </ol>
+      <h3 class="track-title reveal">これから</h3>
+      <ol class="track next reveal" aria-label="これからの開発の予定">
+        <li><strong>SDR 実機との接続</strong><span>次に取り組む予定。設計は受理済み</span></li>
+        <li><strong>仮想と実機の比較</strong><span>実測との照合</span></li>
+        <li><strong>パケット通信連携</strong><span>OS のネットワークと接続</span></li>
+        <li><strong>処理・応答の拡張</strong><span>信号に応じた応答</span></li>
+        <li><strong>計算方式・機器の拡張</strong><span>GPU・WebAssembly など</span></li>
+      </ol>
 
-    <section class="section" id="specifications" aria-labelledby="specifications-title">
-      <div class="section-heading">
-        <div class="section-no">04 / DOCUMENTS</div>
-        <div><p class="sub-eyebrow">設計資料</p><h2 id="specifications-title">設計ルールと仕様書</h2><p>実験の時刻、データの受け渡し、無線機の条件、結果の記録方法に加え、Pythonからの操作方法も仕様書にまとめています。ページで紹介した機能の詳しい内容は、これらの設計資料で確認できます。</p></div>
-      </div>
-      <div class="spec-grid">
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/01-time-model.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 01</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>実験時刻の表し方</strong><small>サンプル時刻と処理の速さ（Time Model）</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/02-stream-contract.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 02</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>データ形式と受け渡し</strong><small>サンプルデータの形式と接続条件（Stream Contract）</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/03-spec-and-binding.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 03</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>実験条件と実行環境</strong><small>実験条件と使う機材の指定（ExperimentSpec・BindingProfile）</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/04-run-and-session.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 04</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>実行と結果の記録</strong><small>実行単位、操作履歴、結果の記録（Run・Session・Manifest）</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/05-module-api.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 05</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>機能部品の接続方法</strong><small>無線機・信号処理・保存先の接続（Module API）</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/06-kernel-coordinator.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 06</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>実行前の準備と起動順</strong><small>実験前の準備と機能部品の起動順（Kernel Coordinator）</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/07-radio-model.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 07</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>無線機の設定と能力</strong><small>周波数・速度・機器の対応条件（Radio Model）</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/08-simulation.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 08</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>仮想実験の動かし方</strong><small>PC上で実験を進める方法（Simulation）</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/09-mock-radio.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 09</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>仮想無線機の動作</strong><small>仮想無線機が再現する機器の条件（MockRadio）</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/10-host-data-path.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 10</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>PC内のデータ処理と保存</strong><small>PC内のサンプル受け渡しとファイル保存（Host Data Path）</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/11-simulation-channel.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 11</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>仮想環境の電波伝搬</strong><small>仮想環境での遅延や雑音（SimulationChannel）</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/14-native-executor.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 14</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>Rust製処理部品の実行</strong><small>仮想実験内でRustの処理部品を動かす方法（Native Executor）</small></a>
-        <a class="spec-card" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/16-easy-api.md" target="_blank" rel="noopener noreferrer"><span class="spec-card-top"><span class="spec-id">仕様 16</span><span class="spec-link" aria-hidden="true">↗</span></span><strong>Pythonから実験を操作する方法</strong><small>実験の実行、受信、記録の取得（Easy API）</small></a>
-      </div>
-      <div class="spec-bottom"><p>全体の設計意図と将来像は設計方針書に、各段階の決定や確認記録は開発記録にまとめています。</p><a class="text-link" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/Ez-SDR_v4_ARCHITECTURE_VISION.md" target="_blank" rel="noopener noreferrer">設計方針書を読む ↗</a></div>
-    </section>
-
-    <section class="section" id="implementation" aria-labelledby="implementation-title">
-      <div class="section-heading">
-        <div class="section-no">05 / STATUS</div>
-        <div><p class="sub-eyebrow">現在できること</p><h2 id="implementation-title">現在の実装</h2><p>PC上の仮想無線機を動かす基盤に加え、Pythonから送信・受信・条件変更・記録の取得を行うAPIまで実装済みです。SDR実機を操作する機能はまだありません。</p></div>
-      </div>
-      <div class="impl-table-wrap">
-        <table class="impl-table">
-          <thead><tr><th>役割</th><th>実装</th><th>現在できること</th><th>状態</th></tr></thead>
-          <tbody>
-            <tr><td>実験の進行管理</td><td><code>ezsdr-kernel</code></td><td>条件の確認、開始・停止、設定や結果の記録</td><td><span class="status-pill">実装済み</span></td></tr>
-            <tr><td>仮想無線機</td><td><code>ezsdr-radio</code><br><code>ezsdr-mock-radio</code></td><td>周波数やサンプルレートの条件を確認し、受信データの欠落を検出</td><td><span class="status-pill">実装済み</span></td></tr>
-            <tr><td>仮想実験</td><td><code>ezsdr-sim</code><br><code>ezsdr-sim-engine</code></td><td>PC上で実験時間を進め、無線機間の伝搬や指定した障害を再現</td><td><span class="status-pill">実装済み</span></td></tr>
-            <tr><td>データの受け渡し・保存</td><td><code>ezsdr-hostmem</code> · <code>ezsdr-link-host</code><br><code>ezsdr-sink</code> · <code>ezsdr-sink-capture</code></td><td>PC内でサンプルを受け渡し、SDR測定データ用のSigMF形式で保存</td><td><span class="status-pill">実装済み</span></td></tr>
-            <tr><td>信号処理の実行</td><td><code>ezsdr-exec-native</code></td><td>仮想実験でRust製の処理部品を動かし、PINGを受けて指定時刻にPONGを返す例を実行</td><td><span class="status-pill">実装済み</span></td></tr>
-            <tr><td>Pythonからの操作</td><td><code>ezsdr-server</code><br><code>python/ezsdr</code></td><td>周波数などの設定、信号の送信、受信サンプルの取得、条件を変えた実験の実行</td><td><span class="status-pill">実装済み</span></td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="impl-foot"><span>Rust部品の一覧は <a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/Cargo.toml" target="_blank" rel="noopener noreferrer">Cargo.toml ↗</a></span><span>JSON文書の形式定義は <a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/schemas/SCHEMA_CHANGELOG.md" target="_blank" rel="noopener noreferrer">形式定義の変更記録 ↗</a></span></div>
-      <div class="proof-band">
-        <div><div class="proof-number">684 <span>合格</span></div><div class="proof-label">Rust自動テスト · 2026-09-27時点</div></div>
-        <div class="proof-copy"><p><strong>Rust 1.85.0と安定版Rust 1.98.1の両方で684件のRustテストが合格し、Python 3.9と3.13でも21件のテストが合格しています。</strong> Rustの静的解析もエラーなしです。</p><p>確認条件と内訳は <a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/handoff.md" target="_blank" rel="noopener noreferrer">2026-09-27時点の開発状況 ↗</a> を参照してください。</p></div>
-      </div>
-    </section>
-
-    <section class="section" id="roadmap" aria-labelledby="roadmap-title">
-      <div class="section-heading">
-        <div class="section-no">06 / ROADMAP</div>
-        <div><p class="sub-eyebrow">これからの予定</p><h2 id="roadmap-title">現在できることと今後の計画</h2><p>現在はPython APIから仮想無線機を使う実験まで実装済みです。次に計画しているのはSDR実機との接続で、実機での測定や仮想実験との比較はまだできません。</p></div>
-      </div>
-      <div class="roadmap">
-        <div class="roadmap-item done"><span class="phase-no">01</span><div class="roadmap-copy"><strong>実験条件と実行管理</strong><p>条件、時刻、データ形式、実行と結果記録の基礎</p></div><span class="roadmap-state">完了</span></div>
-        <div class="roadmap-item done"><span class="phase-no">02</span><div class="roadmap-copy"><strong>仮想無線機とシミュレーション</strong><p>無線機の条件確認、PC上で動く仮想無線機</p></div><span class="roadmap-state">完了</span></div>
-        <div class="roadmap-item done"><span class="phase-no">03</span><div class="roadmap-copy"><strong>電波伝搬と結果の再現</strong><p>仮想無線機間の伝搬と、同じ条件での再実行</p></div><span class="roadmap-state">完了</span></div>
-        <div class="roadmap-item done"><span class="phase-no">04</span><div class="roadmap-copy"><strong>異常検知とデータ保存</strong><p>データ欠落などの検出と、SigMF形式での記録</p></div><span class="roadmap-state">完了</span></div>
-        <div class="roadmap-item done"><span class="phase-no">05</span><div class="roadmap-copy"><strong>受信メッセージへの応答</strong><p>「PING」を受け取り、指定時刻に「PONG」を返す実験</p></div><span class="roadmap-state">完了</span></div>
-        <div class="roadmap-item done"><span class="phase-no">06</span><div class="roadmap-copy"><strong>Pythonから実験を操作</strong><p>仮想無線機で送受信し、条件を変えた実験と記録を行う</p></div><span class="roadmap-state">完了</span></div>
-        <div class="roadmap-item next"><span class="phase-no">07</span><div class="roadmap-copy"><strong>SDR実機との接続</strong><p>USRPなどの機器を操作する機能を開発する計画</p></div><span class="roadmap-state">計画中</span></div>
-        <div class="roadmap-item"><span class="phase-no">08</span><div class="roadmap-copy"><strong>仮想実験と実機測定の比較</strong><p>仮想無線機とUSRP X310などの実測結果を照合</p></div><span class="roadmap-state">今後</span></div>
-        <div class="roadmap-item"><span class="phase-no">09</span><div class="roadmap-copy"><strong>パケット通信との連携</strong><p>パケット処理をOSのネットワーク機能と接続</p></div><span class="roadmap-state">今後</span></div>
-        <div class="roadmap-item"><span class="phase-no">10</span><div class="roadmap-copy"><strong>信号処理と応答機能の拡張</strong><p>検出した信号に応じて処理・応答する機能を追加</p></div><span class="roadmap-state">今後</span></div>
-        <div class="roadmap-item"><span class="phase-no">11+</span><div class="roadmap-copy"><strong>計算方式と対応機器の拡張</strong><p>GPUやWebAssemblyなどの処理、多様な機器への対応</p></div><span class="roadmap-state">今後</span></div>
-      </div>
-      <p class="roadmap-more">実機接続はまだ実装されておらず、USRPなどを使った実測も済んでいません。開発の全体順序は<a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/vision/11-boundaries-invariants-and-roadmap.md" target="_blank" rel="noopener noreferrer">ロードマップ ↗</a>、別ブランチで試したUHD接続の調査結果は<a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/plan/spikes/2026-09-26-uhd.md" target="_blank" rel="noopener noreferrer">UHD試作の記録 ↗</a>を参照してください。</p>
-    </section>
-
-    <section class="section" aria-labelledby="limits-title">
-      <div class="section-heading">
-        <div class="section-no">07 / LIMITS</div>
-        <div><p class="sub-eyebrow">現在の対応範囲</p><h2 id="limits-title">現状と未対応の機能</h2><p>現在使えるのは、Python APIからPC上の仮想無線機で行う実験です。実機を使った測定とAI連携はまだ実装されていません。</p></div>
-      </div>
-      <div class="limits-grid">
-        <article class="limit-card"><span class="limit-number">現在の範囲 · 01</span><h3>SDR実機はまだ操作できない</h3><p>USRPなどの実機を直接操作する機能は計画中です。実機測定との比較もまだ実施していません。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/vision/11-boundaries-invariants-and-roadmap.md" target="_blank" rel="noopener noreferrer">今後の開発順序 ↗</a></article>
-        <article class="limit-card"><span class="limit-number">再現性 · 02</span><h3>再現性は同じPC環境が基準</h3><p>同じビルドと環境なら、同じ設定でシミュレーション結果を再現できます。異なるOSやCPU間では数値データの最終bitまで一致する保証はありません。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/11-simulation-channel.md" target="_blank" rel="noopener noreferrer">シミュレーション仕様 ↗</a></article>
-        <article class="limit-card"><span class="limit-number">AIとの分担 · 03</span><h3>AI連携はまだ実装されていない</h3><p>AIが実験条件の作成や結果の確認を支援できるようにする設計方針を、AI-Nativeと呼びます。現在のソフトウェアにAIによる作成・分析機能はありません。高速な信号処理は今後も専用プログラムが担当します。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/vision/08-future-workloads-and-targets.md#43-ai-is-outside-the-hard-real-time-loop" target="_blank" rel="noopener noreferrer">AIと処理の分担 ↗</a></article>
+      <div class="evidence reveal">
+        <div><b>684</b><span>Rust の自動テストが合格<br>（Rust 1.85.0・安定版 1.98.1 の両方）</span></div>
+        <div><b>21</b><span>Python のテストが合格<br>（Python 3.9 と 3.13）</span></div>
+        <div><b>13</b><span>受理済みの設計仕様<br>テスト結果は 2026-09-27 時点</span></div>
       </div>
     </section>
 
-    <section class="section" aria-labelledby="references-title">
-      <div class="section-heading">
-        <div class="section-no">08 / DETAILS</div>
-        <div><p class="sub-eyebrow">詳しく読む</p><h2 id="references-title">さらに詳しい資料</h2><p>このページでは現在できることを紹介しました。以下の資料では設計の全体像、最新の実装状況、Python APIの仕様を確認できます。</p></div>
+    <section class="section light container" aria-labelledby="limits-title">
+      <div class="section-head reveal">
+        <p class="kicker">05 · 使う前に知っておくこと</p>
+        <h2 id="limits-title">現時点の制約</h2>
       </div>
-      <div class="references">
-        <a class="reference" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/Ez-SDR_v4_ARCHITECTURE_VISION.md" target="_blank" rel="noopener noreferrer"><span>設計方針</span><strong>Ez-SDR v4の全体像と将来像</strong><em aria-hidden="true">↗</em></a>
-        <a class="reference" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/handoff.md" target="_blank" rel="noopener noreferrer"><span>実装状況 · 2026-09-27</span><strong>できたことと次の作業</strong><em aria-hidden="true">↗</em></a>
-        <a class="reference" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/16-easy-api.md" target="_blank" rel="noopener noreferrer"><span>Python API · 仕様</span><strong>Pythonから実験を操作する方法</strong><em aria-hidden="true">↗</em></a>
+      <div class="limits">
+        <article class="limit reveal"><h3>実機の測定はまだできない</h3><p>USRP などの実機を操作する機能は未実装で、実機との比較も行っていません。現在の結果はすべて仮想無線機によるものです。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/vision/11-boundaries-invariants-and-roadmap.md" target="_blank" rel="noopener noreferrer">開発の順序 ↗</a></article>
+        <article class="limit reveal"><h3>再現できるのは同じ PC 環境まで</h3><p>同じビルド・同じ環境なら、同じ設定でシミュレーション結果を再現できます。異なる OS や CPU の間で、数値が最後の bit まで一致する保証はありません。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/11-simulation-channel.md" target="_blank" rel="noopener noreferrer">シミュレーションの仕様 ↗</a></article>
+        <article class="limit reveal"><h3>導入には Rust のビルドが必要</h3><p>配布用のパッケージはまだありません。実験実行プログラムをリポジトリからビルドして使います。研究用途の初期版としてお試しください。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/python/examples/minimal.py" target="_blank" rel="noopener noreferrer">最小の例 ↗</a></article>
       </div>
+    </section>
+
+    <section class="section light container" id="docs" aria-labelledby="docs-title">
+      <div class="section-head reveal">
+        <p class="kicker">06 · さらに詳しく</p>
+        <h2 id="docs-title">設計資料と実装状況</h2>
+        <p class="section-lead">このページの内容は、リポジトリの資料に基づいています。細部を確かめたいときにどうぞ。</p>
+      </div>
+      <div class="refs">
+        <a class="ref reveal" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/Ez-SDR_v4_ARCHITECTURE_VISION.md" target="_blank" rel="noopener noreferrer"><div><small>設計方針</small><strong>Ez-SDR v4 の全体像と将来像</strong></div><em aria-hidden="true">↗</em></a>
+        <a class="ref reveal" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/handoff.md" target="_blank" rel="noopener noreferrer"><div><small>実装状況</small><strong>できたことと次の作業</strong></div><em aria-hidden="true">↗</em></a>
+        <a class="ref reveal" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/16-easy-api.md" target="_blank" rel="noopener noreferrer"><div><small>PYTHON API</small><strong>Python から実験を操作する方法</strong></div><em aria-hidden="true">↗</em></a>
+      </div>
+      <details class="specs reveal">
+        <summary>設計仕様 13 件の一覧を開く</summary>
+        <ul class="spec-list">
+          <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/01-time-model.md" target="_blank" rel="noopener noreferrer">実験時刻の表し方</a><span>サンプル時刻と処理の速さ（Time Model）</span></li>
+          <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/02-stream-contract.md" target="_blank" rel="noopener noreferrer">データ形式と受け渡し</a><span>サンプルデータの形式と接続条件（Stream Contract）</span></li>
+          <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/03-spec-and-binding.md" target="_blank" rel="noopener noreferrer">実験条件と実行環境</a><span>実験条件と使う機材の指定（ExperimentSpec・BindingProfile）</span></li>
+          <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/04-run-and-session.md" target="_blank" rel="noopener noreferrer">実行と結果の記録</a><span>実行単位、操作履歴、結果の記録（Run・Session・Manifest）</span></li>
+          <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/05-module-api.md" target="_blank" rel="noopener noreferrer">機能部品の接続方法</a><span>無線機・信号処理・保存先の接続（Module API）</span></li>
+          <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/06-kernel-coordinator.md" target="_blank" rel="noopener noreferrer">実行前の準備と起動順</a><span>実験前の準備と機能部品の起動順（Kernel Coordinator）</span></li>
+          <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/07-radio-model.md" target="_blank" rel="noopener noreferrer">無線機の設定と能力</a><span>周波数・速度・機器の対応条件（Radio Model）</span></li>
+          <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/08-simulation.md" target="_blank" rel="noopener noreferrer">仮想実験の動かし方</a><span>PC 上で実験を進める方法（Simulation）</span></li>
+          <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/09-mock-radio.md" target="_blank" rel="noopener noreferrer">仮想無線機の動作</a><span>仮想無線機が再現する機器の条件（MockRadio）</span></li>
+          <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/10-host-data-path.md" target="_blank" rel="noopener noreferrer">PC 内のデータ処理と保存</a><span>PC 内のサンプル受け渡しとファイル保存（Host Data Path）</span></li>
+          <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/11-simulation-channel.md" target="_blank" rel="noopener noreferrer">仮想環境の電波伝搬</a><span>仮想環境での遅延や雑音（SimulationChannel）</span></li>
+          <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/14-native-executor.md" target="_blank" rel="noopener noreferrer">Rust 製処理部品の実行</a><span>仮想実験内で Rust の処理部品を動かす方法（Native Executor）</span></li>
+          <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/16-easy-api.md" target="_blank" rel="noopener noreferrer">Python から実験を操作する方法</a><span>実験の実行、受信、記録の取得（Easy API）</span></li>
+        </ul>
+      </details>
     </section>
   </main>
 
   <footer class="site-footer">
     <div class="container footer-inner">
       <span>© Ez-SDR v4 · GitHub Pages</span>
-      <span class="footer-note">このページの内容は <a href="https://github.com/k3komatsu/Ez-SDRv4/commit/7cc614737de24ffaece87c156b403dccb3b4b429" target="_blank" rel="noopener noreferrer"><code>main@7cc6147</code></a> に基づきます。</span>
+      <span>機能の基準：<a href="https://github.com/k3komatsu/Ez-SDRv4/commit/7cc614737de24ffaece87c156b403dccb3b4b429" target="_blank" rel="noopener noreferrer"><code>main@7cc6147</code></a>（それ以降の <code>main</code> の更新は SDR 実機接続の設計文書のみ・2026-09-30 確認）</span>
     </div>
   </footer>
+
+  <script>
+  (() => {
+    /* tabs */
+    const tabs = [...document.querySelectorAll('.tab')];
+    const show = (t) => tabs.forEach((x) => {
+      const on = x === t;
+      x.setAttribute('aria-selected', on);
+      x.tabIndex = on ? 0 : -1;
+      document.getElementById(x.getAttribute('aria-controls')).hidden = !on;
+    });
+    tabs.forEach((t, i) => {
+      t.addEventListener('click', () => show(t));
+      t.addEventListener('keydown', (e) => {
+        if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+        const n = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+        show(n); n.focus();
+      });
+    });
+
+    /* copy */
+    document.querySelectorAll('.copy').forEach((b) => b.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(document.getElementById(b.dataset.copy).innerText);
+        b.textContent = 'コピーしました';
+      } catch { b.textContent = '選択してコピーしてください'; }
+      setTimeout(() => (b.textContent = 'コピー'), 1800);
+    }));
+
+    /* reveal */
+    const els = document.querySelectorAll('.reveal');
+    if ('IntersectionObserver' in window) {
+      const io = new IntersectionObserver((es) => es.forEach((e) => {
+        if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+      }), { threshold: .12 });
+      els.forEach((e) => io.observe(e));
+    } else els.forEach((e) => e.classList.add('in'));
+
+    /* hero: decorative waterfall + spectrum trace (illustration, not data) */
+    const wf = document.getElementById('wf'), tr = document.getElementById('trace');
+    const W = 220, H = 150, still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    wf.width = W; wf.height = H;
+    const g = wf.getContext('2d'), img = g.createImageData(W, H), px = img.data;
+    const stops = [[0, 6, 18, 27], [.28, 15, 76, 92], [.55, 47, 182, 163], [.8, 198, 243, 107], [1, 255, 255, 255]];
+    const color = (v) => {
+      v = Math.max(0, Math.min(1, v));
+      for (let i = 1; i < stops.length; i++) if (v <= stops[i][0]) {
+        const a = stops[i - 1], b = stops[i], f = (v - a[0]) / (b[0] - a[0]);
+        return [a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f, a[3] + (b[3] - a[3]) * f];
+      }
+      return [255, 255, 255];
+    };
+    const bump = (x, c, w) => Math.exp(-((x - c) ** 2) / (2 * w * w));
+    let t = 0, row = new Float32Array(W);
+    const step = () => {
+      t += 1 / 20;
+      const drift = W * (.5 + .22 * Math.sin(t * .35));
+      const burst = (t % 7) > 5.6 ? .7 : 0;
+      for (let x = 0; x < W; x++) {
+        row[x] = .07 + Math.random() * .1
+          + .95 * bump(x, drift, 2.2)
+          + .55 * bump(x, W * .2, 1.6)
+          + .3 * bump(x, W * .2 + 12, 1.2)
+          + burst * (x > W * .62 && x < W * .82 ? .75 + Math.random() * .25 : 0);
+      }
+      px.copyWithin(W * 4, 0, W * 4 * (H - 1));
+      for (let x = 0; x < W; x++) { const c = color(row[x]); px[x * 4] = c[0]; px[x * 4 + 1] = c[1]; px[x * 4 + 2] = c[2]; px[x * 4 + 3] = 255; }
+      g.putImageData(img, 0, 0);
+      const box = tr.getBoundingClientRect(), d = Math.min(devicePixelRatio || 1, 2);
+      const tw = Math.round(box.width * d), th = Math.round(box.height * d);
+      if (tr.width !== tw || tr.height !== th) { tr.width = tw; tr.height = th; }
+      const c = tr.getContext('2d'); c.clearRect(0, 0, tw, th);
+      const base = th * .3, amp = th * .24;
+      c.beginPath();
+      for (let x = 0; x < W; x++) { const X = x / (W - 1) * tw, Y = base - Math.min(row[x], 1) * amp; x ? c.lineTo(X, Y) : c.moveTo(X, Y); }
+      c.strokeStyle = 'rgba(198,243,107,.85)'; c.lineWidth = 1.5 * d; c.stroke();
+    };
+    for (let i = 0; i < H; i++) step();
+    if (!still) {
+      let last = 0;
+      const loop = (ts) => { if (ts - last > 50) { step(); last = ts; } requestAnimationFrame(loop); };
+      requestAnimationFrame(loop);
+    }
+  })();
+  </script>
 </body>
 </html>
