@@ -38,7 +38,7 @@ In the image on `usrp-lnx02`, native x86_64: `cargo test --workspace` 847 passed
 
 - The capture starts at receive sample 0, no gap; the first block at index 0, 2 004 ms after `start` (T0 is 2 s ahead).
 - `applied`: rate 1 000 000 = claim; **frequency read-back 1 000 000 000 Hz, difference 0.0** (K13 expected < 0.05 Hz); gain 0; antenna RX2.
-- **UR-25 finding: the X300 did not honour the timed stop of the continuous stream.** `timing`: `rx_stop` issued at tick 403 313 197 for 403 513 197; samples past the cut arrived and uhd-rx fell back to `rx_stop_untimed` at 404 292 083 (3.9 ms after the cut), as UR-25 provides. The step passes; whether UHD 4.10's RFNoC radio ignores a stop's time spec or honours it late is for B8's receive-stop measurement.
+- ~~**UR-25 finding: the X300 did not honour the timed stop of the continuous stream.**~~ `timing`: `rx_stop` at tick 403 313 197 with its cut at 403 513 197; samples past the cut arrived and uhd-rx stopped the stream untimed (`rx_stop_untimed`) at 404 292 083 (3.9 ms after the cut), as UR-25 provides. The step passes. **Corrected in session 2 (part 2):** no timed stop reached the device in this Run. uhd-rx hands the device a timed stop only when the cut is at least the device lead (2 ms) away (`stop_at`, `rx.rs:246`); an orderly stop's cut is `stop_tail_ns` (1 ms) after it, so the stream was stopped by UR-25's fallback (untimed, on the first sample past the cut) by design. What the X300 does with a timed stop is measured directly in "Session 2, part 2" (it stops at once, whatever the time: UHD 4.10's FPGA does not support a timed STOP).
 
 ## B4 — `hw_b4_capture_at_a_sample_index`: pass
 
@@ -212,7 +212,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; fini
 - **At 10 and 5 ms the burst is sent**: a record ending `eob`, 100 samples, `late_by: null`, and no `TIME_ERROR` (no `late_at_device` from the device).
 - **At 3 ms and less the Module drops the burst before the device sees it**: `TIME_ERROR { cause: late, outcome: drop }` and no burst record, in both runs. The drop is UR-21's: uhd-control decides `LatePolicy::decide(clocks, at, now', 2 ms)` when it books the Action, `now'` its receipt, and the Session's `radio.send` has the policy `drop`. From `late_by = (now' + 2 ms) − at` with `at = now() + lead`, **receipt − submission = late_by + lead − 2 ms: 1 035, 1 197, 1 144, 992, 1 152 µs (run 1) and 1 189, 1 154, 1 495, 1 085, 1 190 µs (run 2)** — within the delivery allowance of 3 ms (UR-14), the poll period 1 ms plus the booking.
 - **So the device lead (the least lead with no `late_at_device`) is not measured**: the Module's own 2 ms device lead refuses every burst that would probe it. What is measured is that a 5 ms lead from submission (the declared `min_timed_command_lead`, 2 + 3 ms) is enough and 3 ms is not, and that the device accepted a burst whose target was about 5 − 1.2 = 3.8 ms after its receipt. Measuring the device lead needs a test below UR-21 (raw `Device::tx_send` with a time spec at leads under 2 ms): not implemented; recorded for Phase 8 (spec 18 §3's 2 ms stays).
-- **UR-25 again: the timed receive stop is never honoured.** In all 7 Runs of run 1 the stop was issued 1.000 ms before its cut and uhd-rx fell back to `rx_stop_untimed` when samples past the cut arrived, 2.78, 3.35, 2.74, 2.36, 3.61, 2.00, 3.45 ms after the cut (B3's was 3.9 ms). With B3 that is 8 of 8: the X300 on UHD 4.10 ignores (or does not honour within ~2–4 ms) the time spec of a continuous stream's stop. An input for Phase 8 and for the owner (UR-25 says it is INFERRED); the Module's fallback works.
+- ~~**UR-25 again: the timed receive stop is never honoured.**~~ In all 7 Runs of run 1 the orderly stop's cut was 1.000 ms after the stop and uhd-rx stopped the stream untimed when samples past the cut arrived, 2.78, 3.35, 2.74, 2.36, 3.61, 2.00, 3.45 ms after the cut (B3's was 3.9 ms): UR-25's fallback, 7 of 7. **Corrected in session 2 (part 2):** no timed stop reached the device in this Run. uhd-rx hands the device a timed stop only when the cut is at least the device lead (2 ms) away (`stop_at`, `rx.rs:246`); an orderly stop's cut is `stop_tail_ns` (1 ms) after it, so the stream was stopped by UR-25's fallback (untimed, on the first sample past the cut) by design. What the X300 does with a timed stop is measured directly in "Session 2, part 2" (it stops at once, whatever the time: UHD 4.10's FPGA does not support a timed STOP).
 - The transmit SampleClock's origin (`enabled`) is 2.4–4.5 ms after T0 in the 7 Runs.
 - **Not implemented, so not measured** (bench.md B8's other rows, handoff.md §4's B8 row): timed retunes at the leads; `cold` restart leads 100/50/25/10 ms; the transmit end after `Stop`; in-flight windows 10/5/3/2 ms against `TX_UNDERFLOW`; the preemption bound at 20/10/5 ms; the queue depth of timed OBX tunes (UR-24); a dedicated timed-receive-stop measurement (answered above from the `timing` of every Run instead). Spec 18 §3's restart lead 50 ms, in-flight window 10 ms, release window 3 ms and queue depth 16 stay INFERRED.
 
@@ -259,7 +259,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; fini
 - What the gap is made of (from the numbers; the split is INFERRED): the stall (`with_rx_stall(500 ms, 1 000 ms)`) stops uhd-rx's reads from 500 ms after the first block (host delay 2 000 ms after `start`, i.e. about receive sample 0) to about 1 500 ms. The socket buffer absorbed 1 110.8 − 500 = 610.8 ms of stream (24.4 MB of `sc16` at 10 Msps, with `rmem_max` 50 000 000), then the device overran and stopped. The gap ends at receive sample 15 673 523 (1 567.4 ms), **about 67 ms after the stall ended**; in those 67 ms uhd-rx read the 610 ms backlog (the host link, `drop_oldest` capacity 64, dropped 1 217–1 265 blocks of it: the `link_drop` gaps between samples 5.2 M and 11.0 M) and UHD restarted the stream. So the gap an overflow leaves depends on how long the reader was away, and **UHD's own restart after it detects the overrun is at most ~67 ms** here, which does not contradict MR-3's 50 ms (profile `overflow_restart_gap_ns` 50 ms, unchanged: an input for Phase 8, which should measure the restart from the host's detection of the overflow, a time the Module does not record).
 - The stall that first overflowed: 1 000 ms (300 ms did not, in all three runs of the two sessions); `rmem_max` 50 000 000, `wmem_max` 33 554 432.
 - `rx_off_lattice` 2 174 (session 1: 2 179): again every block after the restart is off the 20-tick lattice (INFERRED, session 1's finding (b)).
-- The timed stop at the end of the Run was not honoured either (`rx_stop_untimed` 0.21 ms after the cut): 9 of 9 Runs in this session and B3.
+- The orderly stop at the end of the Run: `rx_stop_untimed` 0.21 ms after the cut (UR-25's fallback; no timed stop was issued, see the correction under B3).
 
 ## B7 (Python) — ran; one finding
 
@@ -307,8 +307,402 @@ Every capture is 20 000 samples with no gap. So a capture requested at an instan
 2. ~~Fix `python/examples/bench_loopback.py` to retune the transmitter; rerun B7 (Python); derive EA-17's answer from the Manifests.~~ Done in session 2.
 3. B9: the unplug (manual: the owner pulls the 10 GbE cable during a receive Run, and during a transmit-only Session — the latter has no test yet), the rerun of B3–B7 with no false `DEVICE_LOST`; the USRP2 probe if a USRP2 is at hand.
 4. Fill the table at the end of `plan/spikes/2026-09-26-uhd.md`; update handoff.md.
-5. B8's unimplemented rows (the device lead below UR-21, timed retunes, restart leads, the transmit end after `Stop`, in-flight windows, the preemption bound, the queue depth): add `hw_b8_*` tests or leave them to Phase 8 — the owner's call.
+5. ~~B8's unimplemented rows~~ Measured in session 2 part 2 (below).
+6. design-notes §11 F1–F3: the owner's decision, then the fixes (each with a `FakeDevice` test first) and B3–B8 again.
 
 ## Session 2 in short
 
-B6 pass (after the test's correlation fix), B7 Rust pass, B7 Python pass (fixed example), B8 run, B5's restart gap recorded. Numbers for Phase 8 (spec 18 §3 and the profiles unchanged): transmit-to-receive delay **44 samples** at 1 Msps (profile 45); loop gain −36.3 dB through 30 dB at 0 dB gains; a 5 ms lead from submission sends, 3 ms is dropped by UR-21 (receipt 1.0–1.5 ms after submission), the device lead itself not reached; the timed receive stop **never honoured** (9 of 9 Runs and B3; the untimed fallback 0.2–3.6 ms after the cut); the overflow gap 456 ms after a 1 s stall, UHD's restart ≤ ~67 ms after the reader returns; EA-17: a capture at the `t` `sleep` returned starts at `t`. Test code changed (no Module code): `correlate` phase-blind with a noise-floor threshold, `back_to_back`, and `println!`s in B5, B7, B8 (`4a9f2b2` … `c046a64`). The bench profiles of B6 and B8 carry no `radio.rf_envelope`.
+B6 pass (after the test's correlation fix), B7 Rust pass, B7 Python pass (fixed example), B8 run, B5's restart gap recorded. Numbers for Phase 8 (spec 18 §3 and the profiles unchanged): transmit-to-receive delay **44 samples** at 1 Msps (profile 45); loop gain −36.3 dB through 30 dB at 0 dB gains; a 5 ms lead from submission sends, 3 ms is dropped by UR-21 (receipt 1.0–1.5 ms after submission), the device lead itself not reached; the orderly receive stops all by UR-25's untimed fallback, 0.2–3.9 ms after the cut (no timed stop was issued in those Runs: corrected in part 2, which measures the timed stop itself); the overflow gap 456 ms after a 1 s stall, UHD's restart ≤ ~67 ms after the reader returns; EA-17: a capture at the `t` `sleep` returned starts at `t`. Test code changed (no Module code): `correlate` phase-blind with a noise-floor threshold, `back_to_back`, and `println!`s in B5, B7, B8 (`4a9f2b2` … `c046a64`). The bench profiles of B6 and B8 carry no `radio.rf_envelope`.
+
+## Session 2, part 2 — what the bench could still answer with the owner away (2026-09-30)
+
+The owner, away from the bench: "ちょっと今手元にUSRPがなくて遠隔でやってます．なので，とりあえず今のうちに今の状態でUSRPを使って確認しておいた方がいいことを考えて全部やってください". Nothing that needs a hand at the bench (B9's unplug) was done. What was: bench.md B8's rows the Module's own rules keep a Session from probing, measured on the `Device` itself (`hw_b8_raw_*`, test code in `hardware.rs`: the device used as the Module drives it); the rest of B8 through the Module; beyond bench.md, the receive rates, the loop delay by rate and B9's other half (long Runs with no false `DEVICE_LOST`); then B1–B8 once more at the commit of those tests (`b0aaa08`). Every log is `~/ezsdr-bench/<test>.log` (the final B1–B8 in `~/ezsdr-bench/s2-final/`). Below each test's output keeps its `B…` lines; a run of `TimeError` reports is shortened to its count and UHD's printed `L`s (one per late packet) to theirs.
+
+RF for the raw tests (`raw_tx` refuses anything else before it sends): the transmitter at 999.5–1 000.5 MHz only, at most 2 Msps (so the emission stays inside the bench envelope's 999–1 001 MHz), 0 dB, antenna `TX/RX`, amplitude ≤ 0.4, into the 30 dB loopback; the receiver's retunes stayed inside 999.6–1 000.4 MHz too. The raw tests bypass the Module's RF envelope, so these limits are the only guard there. The Module-level steps that transmit (B6, B8, and the new ones) now carry the bench envelope in their profile (`bench_envelope`, in `tests/common/mod.rs`: session 2's finding that B6's and B8's did not).
+
+UHD 4.10's source, in the Docker image under `/root/tmp/uhd-4.10.0.0/`, was read for the receive stop and the overrun restart (VERIFIED below means read there and seen on the bench).
+
+### The receive stop's time — `hw_b8_raw_rx_timed_stop`: **the X300 ignores it**
+
+A continuous 1 Msps stream, then `rx_stop(Some(now + lead))` (lead 0: untimed); where does the last sample end?
+
+```
+B8 rx stop lead 0 ms: first block Some((24256800, 2000)) (start 24256800); stop issued at 64615084…64698267 for now; last sample end 64689800: -0.042 ms from the issue, +0.374 ms from the stop's time; after the stop: 2 blocks, []
+B8 rx stop lead 1 ms: first block Some((108960000, 2000)) (start 108960000); stop issued at 149320947…149401582 for 149520947; last sample end 149398400: -0.016 ms from the issue, -0.613 ms from the stop's time; after the stop: 2 blocks, []
+B8 rx stop lead 5 ms: first block Some((193682600, 2000)) (start 193682600); stop issued at 234042826…234102171 for 235042826; last sample end 234097800: -0.022 ms from the issue, -4.725 ms from the stop's time; after the stop: 2 blocks, []
+B8 rx stop lead 20 ms: first block Some((278382800, 2000)) (start 278382800); stop issued at 318741398…318804796 for 322741398; last sample end 318802800: -0.010 ms from the issue, -19.693 ms from the stop's time; after the stop: 2 blocks, []
+B8 rx stop lead 100 ms: first block Some((363106000, 2000)) (start 363106000); stop issued at 403458422…403541707 for 423458422; last sample end 403538400: -0.017 ms from the issue, -99.600 ms from the stop's time; after the stop: 2 blocks, []
+B8 rx stop lead 500 ms: first block Some((447814800, 2000)) (start 447814800); stop issued at 488172567…488255353 for 588172567; last sample end 488248400: -0.035 ms from the issue, -499.621 ms from the stop's time; after the stop: 2 blocks, []
+```
+
+- **At every lead from 1 ms to 500 ms the stream ends where the stop was issued** (−0.010 to −0.042 ms from the issue), up to 499.6 ms before the stop's time. VERIFIED from the FPGA source: `fpga/usrp3/lib/rfnoc/blocks/rfnoc_block_radio/radio_rx_core.v` puts every command into the command FIFO "except STOP" (line 171) and says at line 526 "Nothing to do but stop (timed STOP commands are not supported)"; the host sends the time (`radio_control_impl.cpp:1116–1131`), the FPGA drops it.
+- **This answers UR-25's INFERRED point in the negative**, and it matters to the Module (design-notes §11 F1): uhd-rx hands the device a timed stop for a `cold` change's `e1` up to the restart lead (50 ms) early (`release_stop`, `rx.rs:213–225`), so the stream stops that much before `e1`. See the next test.
+- The earlier "timed stop not honoured" records of B3 and B8 were not about this: no timed stop was issued in those Runs (corrected above).
+
+### A capture across a `cold` receive change — `hw_b8_cold_change_capture`: **50 ms lost without a flag, then a late restart**
+
+A Session receiving at 1 Msps; a capture of 200 000 samples asked 20 ms ahead; 60 ms later `radio.rx.sample_rate_hz = 2e6`:
+
+```
+B8 cold: capture asked at TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 424645731 }; rate change submitted at TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 432766941 }: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }
+LB8 cold: termination Stopped { cause: Client }
+B8 cold: sample clocks [SampleClockRecord { stream: ResourceId { node: NodeId(0), path: "usrp/rx" }, domain: ClockDomainId { node: NodeId(0), local: 3 }, root: ClockDomainId { node: NodeId(0), local: 2 }, root_ticks_per_tick: Rational { num: 200, den: 1 }, origin: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 400562800 }, ended_at: Some(TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 442887800 }), nominal_rate: Rational { num: 1000000, den: 1 } }, SampleClockRecord { stream: ResourceId { node: NodeId(0), path: "usrp/rx" }, domain: ClockDomainId { node: NodeId(0), local: 4 }, root: ClockDomainId { node: NodeId(0), local: 2 }, root_ticks_per_tick: Rational { num: 100, den: 1 }, origin: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 452887800 }, ended_at: None, nominal_rate: Rational { num: 2000000, den: 1 } }]
+B8 cold: timing [{"at":426458,"start_up_until":400426458,"what":"arm"},{"lead_ns":1999996500,"t0":400562800,"what":"start"},{"host_delay_ms":2003,"index":0,"what":"first_rx_block"},{"booked_at":432887797,"e1":442887800,"e2":452887800,"key":"radio.rx.sample_rate_hz","what":"cold_change"},{"at":453003085,"e1":442887800,"e2":452887800,"what":"rx_switch"},{"at":483049900,"requested":452887800,"what":"rx_restart"},{"at":559740334,"until":559940334,"what":"rx_stop"},{"at":560068537,"cut":559940334,"what":"rx_stop_untimed"},{"at":559740334,"done":580241090,"mode":"Orderly","what":"stop"}]
+B8 cold: applied [{"at":{"domain":{"local":2,"node":0},"ticks":350628},"channel":0,"claimed":1000000.0,"difference":0.0,"key":"radio.rx.sample_rate_hz","read_back":1000000.0},{"at":{"domain":{"local":2,"node":0},"ticks":350628},"channel":0,"claimed":1000000000.0,"difference":0.0,"key":"radio.rx.frequency_hz","read_back":1000000000.0},{"at":{"domain":{"local":2,"node":0},"ticks":350628},"channel":0,"claimed":0.0,"difference":0.0,"key":"radio.rx.gain_db","read_back":0.0},{"at":{"domain":{"local":2,"node":0},"ticks":350628},"channel":0,"claimed":"RX2","key":"radio.rx.antenna"},{"at":{"domain":{"local":2,"node":0},"ticks":442887800},"issued":{"domain":{"local":2,"node":0},"ticks":432894229},"key":"rx_stop"},{"at":{"domain":{"local":2,"node":0},"ticks":452982620},"channel":0,"claimed":2000000.0,"difference":0.0,"key":"radio.rx.sample_rate_hz","read_back":2000000.0},{"at":{"domain":{"local":2,"node":0},"ticks":452982620},"channel":0,"claimed":1000000000.0,"difference":0.0,"key":"radio.rx.frequency_hz","read_back":1000000000.0},{"at":{"domain":{"local":2,"node":0},"ticks":452982620},"channel":0,"claimed":0.0,"difference":0.0,"key":"radio.rx.gain_db","read_back":0.0},{"at":{"domain":{"local":2,"node":0},"ticks":452982620},"channel":0,"claimed":"RX2","key":"radio.rx.antenna"}]
+B8 cold: stats {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":466,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":930722,"tx_bursts":0,"tx_samples":0}
+B8 cold: artifact rec_0 continuity [ContinuityMap { domain: ClockDomainId { node: NodeId(0), local: 3 }, channels: 1, valid: [[Segment { start: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 3 }, ticks: 120415 }, len: 41402 }]], gaps: [], channel_gaps: [], first: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 3 }, ticks: 120415 }, end: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 3 }, ticks: 161817 } }, ContinuityMap { domain: ClockDomainId { node: NodeId(0), local: 4 }, channels: 1, valid: [[Segment { start: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 4 }, ticks: 301621 }, len: 158598 }]], gaps: [], channel_gaps: [], first: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 4 }, ticks: 301621 }, end: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 4 }, ticks: 460219 } }]
+B8 cold: event radio.LATE_COMMAND from ResourceId { node: NodeId(0), path: "usrp/rx" } at TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 473050499 }: {"applied":{"domain":{"local":2,"node":0},"ticks":483049900},"key":null,"requested":{"domain":{"local":2,"node":0},"ticks":452887800}}
+B8 cold: event sink.CAPTURE_WRITTEN from ResourceId { node: NodeId(0), path: "sink/rec" } at TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 499487139 }: {"artifact":{"continuity":[{"channel_gaps":[],"channels":1,"domain":{"local":3,"node":0},"end":{"domain":{"local":3,"node":0},"ticks":161817},"first":{"domain":{"local":3,"node":0},"ticks":120415},"gaps":[],"valid":[[{"len":41402,"start":{"domain":{"local":3,"node":0},"ticks":120415}}]]},{"channel_gaps":[],"channels":1,"domain":{"local":4,"node":0},"end":{"domain":{"local":4,"node":0},"ticks":460219},"first":{"domain":{"local":4,"node":0},"ticks":301621},"gaps":[],"valid":[[{"len":158598,"start":{"domain":{"local":4,"node":0},"ticks":301621}}]]}],"hash":"sha256:f9f631cf76f16bdab26b99b3f81294332138021189171a7769cddccad4a3570e","id":"rec_0","kind":"sink.capture","marks":[],"partial":false,"size_bytes":1600000,"uri":"file:///tmp/ezsdr-uhd-80-0/local_50_18da120da170283a-0_rec_0.sigmf-data"},"request":0}
+```
+
+- The change was booked at 432 887 797 with `e1` 442 887 800 (the old clock's `ended_at`) and `e2` 452 887 800 (the new clock's origin), the restart lead 50 ms each way. uhd-rx handed the device the timed stop for `e1` at 432 894 229 (`applied`, `rx_stop`, 50 ms early), and the device stopped there.
+- **The old clock's part of the capture ends at receive sample 161 817 (root 432 926 200), not at `e1` (sample 211 625): 49 808 samples (49.8 ms) that the Stream Contract says exist are missing, with no gap, no flag and no event.** The continuity map is truthful about what it holds (`valid` ends at 161 817) but nothing says the stream ended early. `rx_samples` 930 722 over the Run.
+- **Then the restart was late:** the switch (`rx_switch`) ran at 453 003 085, 0.58 ms after `e2`, so the timed start at `e2` came back `LATE_COMMAND` and UR-17 restarted at 483 049 900: the new clock's samples begin at its sample 301 621, 150.8 ms after `e2`. Why (INFERRED from the timing, consistent to the tick): after the early stop no samples come, and uhd-rx ends the old stream only on a sample past the cut or on an `rx_recv` timeout (`RECV_TIMEOUT` 100 ms, `rx.rs:85`) with `now ≥ cut`; the first such timeout came ~100 ms after the stop, i.e. at `e2`. With a device that did stop at `e1` the same wait would still end ~50 ms after `e2`.
+- The same early stop happened in B7 (Python) at `sdr.rx.sample_rate = 19.5e6`: `applied` `rx_stop` issued at 441 233 380 for 451 149 800 (`session-7-1`), 441 220 199 for 451 040 600 (`session-7-3`), 49.6 ms early; the Session ended before the switch, and no capture spanned it.
+- Recorded as design-notes §11 F1–F2, for the owner; no Module code changed.
+
+### The restart lead — `hw_b8_raw_restart_lead`
+
+A stop (untimed), optionally a rate change (`cold`) and a new streamer, then a timed start `lead` ahead. Run 1's criterion counted the old stream's tail as new blocks (kept as `hw_b8_raw_restart_lead.run1.log`); the final run, with a new streamer added:
+
+```
+B8 restart warm lead 100 ms: stop→start issued 0.462 ms (apply 0.000 ms); first new block Some(70851400) for 70851400 (+0 ticks); 2 old blocks drained; other []
+B8 restart warm lead 50 ms: stop→start issued 0.482 ms (apply 0.000 ms); first new block Some(122104400) for 122104400 (+0 ticks); 2 old blocks drained; other []
+B8 restart warm lead 25 ms: stop→start issued 0.152 ms (apply 0.000 ms); first new block Some(168290800) for 168290800 (+0 ticks); 1 old blocks drained; other []
+B8 restart warm lead 10 ms: stop→start issued 0.364 ms (apply 0.000 ms); first new block Some(211521400) for 211521400 (+0 ticks); 2 old blocks drained; other []
+B8 restart warm lead 5 ms: stop→start issued 0.344 ms (apply 0.000 ms); first new block Some(253745600) for 253745600 (+0 ticks); 2 old blocks drained; other []
+B8 restart warm lead 2 ms: stop→start issued 0.421 ms (apply 0.000 ms); first new block Some(295379000) for 295379000 (+0 ticks); 2 old blocks drained; other []
+B8 restart warm lead 1 ms: stop→start issued 0.372 ms (apply 0.000 ms); first new block Some(336809000) for 336809000 (+0 ticks); 2 old blocks drained; other []
+B8 restart cold (rate change) lead 100 ms: stop→start issued 0.539 ms (apply 0.119 ms); first new block Some(398075400) for 398075400 (+0 ticks); 2 old blocks drained; other []
+B8 restart cold (rate change) lead 50 ms: stop→start issued 0.407 ms (apply 0.063 ms); first new block Some(448685400) for 448685400 (+0 ticks); 1 old blocks drained; other []
+B8 restart cold (rate change) lead 25 ms: stop→start issued 0.423 ms (apply 0.072 ms); first new block Some(494905800) for 494905800 (+0 ticks); 2 old blocks drained; other []
+B8 restart cold (rate change) lead 10 ms: stop→start issued 0.407 ms (apply 0.058 ms); first new block Some(535587000) for 537523000 (-1936000 ticks); 1 old blocks drained; other []
+B8 restart cold (rate change) lead 5 ms: stop→start issued 0.515 ms (apply 0.058 ms); first new block Some(576982200) for 576982200 (+0 ticks); 2 old blocks drained; other []
+B8 restart cold (rate change) lead 2 ms: stop→start issued 0.437 ms (apply 0.041 ms); first new block Some(617663400) for 618005400 (-342000 ticks); 1 old blocks drained; other []
+B8 restart cold (rate change) lead 1 ms: stop→start issued 0.302 ms (apply 0.038 ms); first new block Some(658203800) for 658203800 (+0 ticks); 1 old blocks drained; other []
+B8 restart: rx_open took 0.993 ms
+B8 restart cold (rate change, new streamer) lead 100 ms: stop→start issued 202.568 ms (apply 0.067 ms); first new block Some(759249000) for 759249000 (+0 ticks); 0 old blocks drained; other []
+B8 restart: rx_open took 0.739 ms
+B8 restart cold (rate change, new streamer) lead 50 ms: stop→start issued 202.776 ms (apply 0.089 ms); first new block Some(850968000) for 850968000 (+0 ticks); 0 old blocks drained; other []
+B8 restart: rx_open took 0.853 ms
+B8 restart cold (rate change, new streamer) lead 25 ms: stop→start issued 202.530 ms (apply 0.077 ms); first new block Some(937010400) for 937010400 (+0 ticks); 0 old blocks drained; other []
+B8 restart: rx_open took 0.922 ms
+B8 restart cold (rate change, new streamer) lead 10 ms: stop→start issued 202.720 ms (apply 0.073 ms); first new block Some(1020731800) for 1020731800 (+0 ticks); 0 old blocks drained; other []
+B8 restart: rx_open took 0.722 ms
+B8 restart cold (rate change, new streamer) lead 5 ms: stop→start issued 202.244 ms (apply 0.055 ms); first new block Some(1102712000) for 1102712000 (+0 ticks); 0 old blocks drained; other []
+B8 restart: rx_open took 0.668 ms
+B8 restart cold (rate change, new streamer) lead 2 ms: stop→start issued 202.439 ms (apply 0.082 ms); first new block Some(1184760400) for 1184760400 (+0 ticks); 0 old blocks drained; other []
+B8 restart: rx_open took 0.745 ms
+B8 restart cold (rate change, new streamer) lead 1 ms: stop→start issued 202.169 ms (apply 0.064 ms); first new block Some(1265933400) for 1265933400 (+0 ticks); 0 old blocks drained; other []
+```
+
+- **The device restarts on the requested tick at every lead down to 1 ms**, warm, after a rate change, and with a new streamer (`rx_open` 0.67–0.99 ms; the "stop→start issued 202 ms" of that row is the test's own drain of two 100 ms timeouts). The stop takes effect within ~0.4 ms (the old stream's 1–2 tail blocks).
+- So spec 18 §3's restart lead of 50 ms is not the device's need; what made the Module's `cold` restart late is uhd-rx's loop (above).
+
+### The device lead — `hw_b8_raw_device_lead`
+
+A 100-sample burst at `time_now() + lead`, 8 times per lead (the lead counts from the time read's return, so it includes the send):
+
+```
+B8 device lead 3000 µs: 0/8 late; send took [3, 2, 2, 2, 3, 2, 2, 2] µs; outcomes ["BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 device lead 2000 µs: 0/8 late; send took [2, 2, 2, 2, 2, 2, 2, 2] µs; outcomes ["BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 device lead 1500 µs: 0/8 late; send took [2, 2, 2, 2, 2, 2, 2, 13] µs; outcomes ["BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 device lead 1000 µs: 0/8 late; send took [3, 11, 2, 1, 3, 2, 2, 7] µs; outcomes ["BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 device lead 700 µs: 0/8 late; send took [2, 1, 1, 7, 7, 7, 3, 1] µs; outcomes ["BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 device lead 500 µs: 0/8 late; send took [2, 2, 1, 2, 3, 2, 2, 8] µs; outcomes ["BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+[UHD printed 34 × "L"] B8 device lead 300 µs: 1/8 late; send took [8, 9, 8, 8, 11, 8, 7, 7] µs; outcomes ["TimeError (×34)", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+[UHD printed 136 × "L"] B8 device lead 200 µs: 4/8 late; send took [2, 3, 7, 3, 10, 2, 7, 9] µs; outcomes ["BurstAck", "BurstAck", "TimeError (×33)", "BurstAck", "TimeError (×35)", "BurstAck", "TimeError (×34)", "TimeError (×34)"]
+[UHD printed 276 × "L"] B8 device lead 100 µs: 8/8 late; send took [3, 8, 8, 8, 7, 7, 8, 8] µs; outcomes ["TimeError (×34)", "TimeError (×35)", "TimeError (×35)", "TimeError (×34)", "TimeError (×35)", "TimeError (×35)", "TimeError (×34)", "TimeError (×34)"]
+[UHD printed 272 × "L"] B8 device lead 50 µs: 8/8 late; send took [12, 2, 3, 2, 2, 2, 6, 7] µs; outcomes ["TimeError (×35)", "TimeError (×34)", "TimeError (×35)", "TimeError (×34)", "TimeError (×33)", "TimeError (×34)", "TimeError (×33)", "TimeError (×34)"]
+[UHD printed 267 × "L"] B8 device lead 0 µs: 8/8 late; send took [2, 13, 13, 12, 13, 11, 13, 13] µs; outcomes ["TimeError (×34)", "TimeError (×33)", "TimeError (×33)", "TimeError (×34)", "TimeError (×33)", "TimeError (×33)", "TimeError (×33)", "TimeError (×34)"]
+```
+
+- **0 of 8 late at 500 µs and more; 1/8 at 300 µs, 4/8 at 200 µs, 8/8 at 100 µs and less.** The device lead is about 0.3–0.5 ms on this bench; spec 18 §3's 2 ms has a margin of about 4 (unchanged: an input for Phase 8).
+- A late 100-sample burst brings 33–35 `TimeError` reports (one per packet UHD sends, INFERRED) and is not played.
+
+### Timed receive retunes — `hw_b8_raw_timed_retune`
+
+A 100 kHz loopback tone; a receive retune by +50 kHz at `lead` from `time_now()` (0: untimed); the tone's frequency over 25-sample windows:
+
+```
+B8 retune lead 10000 µs: asked at 46878886 (issued at 44878886, apply 93 µs); the tone leaves 100 kHz at Some("+31.6 µs"), settles at 50 kHz at Some("+56.6 µs") (from the asked instant); before 99910 Hz, after 50114 Hz
+B8 retune lead 5000 µs: asked at 119900895 (issued at 118900895, apply 144 µs); the tone leaves 100 kHz at Some("+37.5 µs"), settles at 50 kHz at Some("+62.5 µs") (from the asked instant); before 99989 Hz, after 50003 Hz
+B8 retune lead 2000 µs: asked at 193281945 (issued at 192881945, apply 108 µs); the tone leaves 100 kHz at Some("+34.3 µs"), settles at 50 kHz at Some("+59.3 µs") (from the asked instant); before 99941 Hz, after 49887 Hz
+B8 retune lead 1000 µs: asked at 267114668 (issued at 266914668, apply 105 µs); the tone leaves 100 kHz at Some("+44.7 µs"), settles at 50 kHz at Some("+444.7 µs") (from the asked instant); before 99836 Hz, after 49842 Hz
+B8 retune lead 500 µs: asked at 340937192 (issued at 340837192, apply 115 µs); the tone leaves 100 kHz at Some("+37.0 µs"), settles at 50 kHz at Some("+437.0 µs") (from the asked instant); before 99875 Hz, after 49957 Hz
+B8 retune lead 200 µs: asked at 414908323 (issued at 414868323, apply 115 µs); the tone leaves 100 kHz at Some("+52.4 µs"), settles at 50 kHz at Some("+452.4 µs") (from the asked instant); before 99885 Hz, after 50109 Hz
+B8 retune lead 0 µs: asked at 488795434 (issued at 488795434, apply 74 µs); the tone leaves 100 kHz at Some("+184.8 µs"), settles at 50 kHz at Some("+434.8 µs") (from the asked instant); before 99940 Hz, after 50130 Hz
+```
+
+- **At leads of 2 ms and more the retune begins 31–52 µs after its instant and has settled by 57–62 µs.** At 1 ms and less it begins as early (37–52 µs) but the tone is disturbed until 437–452 µs: part of the tune landed late (INFERRED: an OBX tune is several register writes, the later ones past their time). Untimed, it begins 185 µs after the call. The Module's device lead of 2 ms is thus about the least lead for a clean timed retune on this bench.
+
+### Queue depth of timed tunes — `hw_b8_raw_queue_depth`
+
+Timed tunes all due 3 s ahead, one call each, alternating 999.6 and 1 000.4 MHz (nothing streamed, nothing emitted):
+
+```
+B8 queue Rx: call 8 took 2999.5 ms: Ok(Applied { rate: 200000000.0, freq: 1000400000.0, gain: 0.0 })
+B8 queue Rx: apply ms per call ["0.21", "0.05", "0.04", "0.06", "0.03", "0.05", "0.03", "2999.50"]
+B8 queue Rx: after the queue, untimed Ok(Applied { rate: 200000000.0, freq: 1000000000.0, gain: 0.0 })
+B8 queue Tx: call 8 took 2999.6 ms: Ok(Applied { rate: 200000000.0, freq: 1000400000.0, gain: 0.0 })
+B8 queue Tx: apply ms per call ["0.12", "0.06", "0.05", "0.06", "0.03", "0.05", "0.03", "2999.64"]
+B8 queue Tx: after the queue, untimed Ok(Applied { rate: 200000000.0, freq: 1000000000.0, gain: 0.0 })
+```
+
+- **Seven timed OBX tunes queue; the eighth `apply` blocks until the queue drains (3 s)**, receive and transmit alike. The profiles' `command_queue_depth` is 16 (spec 18 UR-24, INFERRED): the device holds 7 tunes. The Module releases a held command only 3 ms ahead (UR-24's release window), so it queues few at a time; eight timed changes due within 3 ms would block uhd-control (INFERRED). An input for Phase 8 (the Mock's envelope claims 16).
+
+### The loop's phase after a retune — `hw_b8_raw_timed_tune_phase`
+
+Both LOs moved away, then back to `f0` (timed or untimed), then a 100 kHz tone burst at a fixed tick; the loop's phase against the tone, 6 cycles each:
+
+```
+B8 phase: sent 20000; received 26000 samples from Some((48760400, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(40927104, "Timeout")]
+B8 phase 1000000000 Hz timed tune, cycle 0: 10000 samples, gain 0.0206, phase -137.3°
+B8 phase: sent 20000; received 26000 samples from Some((124828200, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(117009639, "Timeout")]
+B8 phase 1000000000 Hz timed tune, cycle 1: 10000 samples, gain 0.0206, phase -137.3°
+B8 phase: sent 20000; received 26000 samples from Some((200891400, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(193068826, "Timeout")]
+B8 phase 1000000000 Hz timed tune, cycle 2: 10000 samples, gain 0.0206, phase -137.3°
+B8 phase: sent 20000; received 26000 samples from Some((276870400, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(269092928, "Timeout")]
+B8 phase 1000000000 Hz timed tune, cycle 3: 10000 samples, gain 0.0206, phase -137.3°
+B8 phase: sent 20000; received 26000 samples from Some((352879400, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(345128918, "Timeout")]
+B8 phase 1000000000 Hz timed tune, cycle 4: 10000 samples, gain 0.0206, phase -137.3°
+B8 phase: sent 20000; received 26000 samples from Some((429016400, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(421234829, "Timeout")]
+B8 phase 1000000000 Hz timed tune, cycle 5: 10000 samples, gain 0.0206, phase -137.3°
+B8 phase 1000000000 Hz timed tune: phases [-137.3, -137.3, -137.3, -137.3, -137.3, -137.3], largest difference from the first 0.0°
+B8 phase: sent 20000; received 26000 samples from Some((505098800, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(497348587, "Timeout")]
+B8 phase 1000000000 Hz untimed tune, cycle 0: 10000 samples, gain 0.0206, phase -137.8°
+B8 phase: sent 20000; received 26000 samples from Some((581206800, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(573421982, "Timeout")]
+B8 phase 1000000000 Hz untimed tune, cycle 1: 10000 samples, gain 0.0206, phase -137.8°
+B8 phase: sent 20000; received 26000 samples from Some((657241800, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(649397981, "Timeout")]
+B8 phase 1000000000 Hz untimed tune, cycle 2: 10000 samples, gain 0.0206, phase -137.7°
+B8 phase: sent 20000; received 26000 samples from Some((733273000, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(725422682, "Timeout")]
+B8 phase 1000000000 Hz untimed tune, cycle 3: 10000 samples, gain 0.0206, phase -137.8°
+B8 phase: sent 20000; received 26000 samples from Some((809224800, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(801367455, "Timeout")]
+B8 phase 1000000000 Hz untimed tune, cycle 4: 10000 samples, gain 0.0206, phase -137.8°
+B8 phase: sent 20000; received 26000 samples from Some((885253800, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(877379843, "Timeout")]
+B8 phase 1000000000 Hz untimed tune, cycle 5: 10000 samples, gain 0.0206, phase -137.7°
+B8 phase 1000000000 Hz untimed tune: phases [-137.8, -137.8, -137.7, -137.8, -137.8, -137.7], largest difference from the first 0.1°
+B8 phase: sent 20000; received 26000 samples from Some((961297800, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(953457360, "Timeout")]
+B8 phase 1000123400 Hz timed tune, cycle 0: 10000 samples, gain 0.0206, phase 30.6°
+B8 phase: sent 20000; received 26000 samples from Some((1037389200, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(1029639614, "Timeout")]
+B8 phase 1000123400 Hz timed tune, cycle 1: 10000 samples, gain 0.0206, phase 30.7°
+B8 phase: sent 20000; received 26000 samples from Some((1113487800, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(1105747569, "Timeout")]
+B8 phase 1000123400 Hz timed tune, cycle 2: 10000 samples, gain 0.0206, phase 30.6°
+B8 phase: sent 20000; received 26000 samples from Some((1189576400, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(1181755548, "Timeout")]
+B8 phase 1000123400 Hz timed tune, cycle 3: 10000 samples, gain 0.0206, phase 30.7°
+B8 phase: sent 20000; received 26000 samples from Some((1265565600, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(1257723347, "Timeout")]
+B8 phase 1000123400 Hz timed tune, cycle 4: 10000 samples, gain 0.0206, phase 30.7°
+B8 phase: sent 20000; received 26000 samples from Some((1341539600, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(1333711828, "Timeout")]
+B8 phase 1000123400 Hz timed tune, cycle 5: 10000 samples, gain 0.0206, phase 30.7°
+B8 phase 1000123400 Hz timed tune: phases [30.6, 30.7, 30.6, 30.7, 30.7, 30.7], largest difference from the first 0.0°
+B8 phase: sent 20000; received 26000 samples from Some((1417537600, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(1409685759, "Timeout")]
+B8 phase 1000123400 Hz untimed tune, cycle 0: 10000 samples, gain 0.0206, phase -83.6°
+B8 phase: sent 20000; received 26000 samples from Some((1493582200, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(1485793351, "Timeout")]
+B8 phase 1000123400 Hz untimed tune, cycle 1: 10000 samples, gain 0.0206, phase 58.4°
+B8 phase: sent 20000; received 26000 samples from Some((1569624200, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(1561761909, "Timeout")]
+B8 phase 1000123400 Hz untimed tune, cycle 2: 10000 samples, gain 0.0206, phase 20.6°
+B8 phase: sent 20000; received 26000 samples from Some((1645691600, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(1637847703, "Timeout")]
+B8 phase 1000123400 Hz untimed tune, cycle 3: 10000 samples, gain 0.0206, phase 47.8°
+B8 phase: sent 20000; received 26000 samples from Some((1721740200, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(1713915874, "Timeout")]
+B8 phase 1000123400 Hz untimed tune, cycle 4: 10000 samples, gain 0.0206, phase -15.4°
+B8 phase: sent 20000; received 26000 samples from Some((1797809200, 2000)), rms 0.00722; tx reports ["BurstAck"]; other [(1789959364, "Timeout")]
+B8 phase 1000123400 Hz untimed tune, cycle 5: 10000 samples, gain 0.0206, phase 164.8°
+B8 phase 1000123400 Hz untimed tune: phases [-83.6, 58.4, 20.6, 47.8, -15.4, 164.8], largest difference from the first 142.0°
+```
+
+- **At a frequency the synthesizers reach in fractional-N (1 000.1234 MHz), a timed tune returns the loop's phase to 0.0–0.1°; an untimed one leaves it anywhere (spread 142°).** `phase_behavior_on_retune: random_unless_timed_tune` is true of the OBX on this bench (UHD's `_sync_phase`, design-notes §10).
+- At 1 GHz the phase repeats to 0.1° even untimed (INFERRED: an integer-N frequency, where the LO's phase is fixed by the reference).
+- The loop's amplitude gain from the tone: 0.0206 (−33.7 dB) at 1 GHz here, against 0.015 for the PN of B6 (the PN's bandwidth sees the IF filter; INFERRED).
+
+### The in-flight window — `hw_b8_raw_in_flight_window`
+
+A 2 s continuous burst at 2 Msps, each 0.5 ms buffer sent `window` before it plays:
+
+```
+B8 in-flight window 10000 µs: underflow 0, underflow in packet 0, time error 0, seq error 0, burst ack 1; first reports [TxReport { code: BurstAck, tick: Some(432470955), channel: 0 }]
+B8 in-flight window 5000 µs: underflow 0, underflow in packet 0, time error 0, seq error 0, burst ack 1; first reports [TxReport { code: BurstAck, tick: Some(883035804), channel: 0 }]
+B8 in-flight window 3000 µs: underflow 0, underflow in packet 0, time error 0, seq error 0, burst ack 1; first reports [TxReport { code: BurstAck, tick: Some(1333618929), channel: 0 }]
+B8 in-flight window 2000 µs: underflow 0, underflow in packet 0, time error 0, seq error 0, burst ack 1; first reports [TxReport { code: BurstAck, tick: Some(1784209573), channel: 0 }]
+B8 in-flight window 1000 µs: underflow 0, underflow in packet 0, time error 0, seq error 0, burst ack 1; first reports [TxReport { code: BurstAck, tick: Some(2234737048), channel: 0 }]
+B8 in-flight window 500 µs: underflow 0, underflow in packet 0, time error 0, seq error 0, burst ack 1; first reports [TxReport { code: BurstAck, tick: Some(2685208201), channel: 0 }]
+UB8 in-flight window 250 µs: underflow 1, underflow in packet 0, time error 0, seq error 0, burst ack 1; first reports [TxReport { code: Underflow, tick: Some(2949898664), channel: 0 }, TxReport { code: BurstAck, tick: Some(3135702341), channel: 0 }]
+```
+
+- **No underflow at 500 µs ahead and more; one at 250 µs.** Spec 18 §3's 10 ms window has a margin of about 20 at 2 Msps on this host.
+
+### Back-to-back bursts — `hw_b8_raw_burst_gap`: **a timed start at the previous burst's end is late**
+
+A 1 000-sample burst ending with end-of-burst at tick T, then a 100-sample burst with a timed start-of-burst at T + gap samples, 4 times each:
+
+```
+[UHD printed 132 × "L"] B8 burst gap 0 samples: ["BurstAck+TimeError", "BurstAck+TimeError", "BurstAck+TimeError", "BurstAck+TimeError"]
+B8 burst gap 1 samples: ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 burst gap 2 samples: ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 burst gap 3 samples: ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 burst gap 5 samples: ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 burst gap 10 samples: ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 burst gap 20 samples: ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 burst gap 50 samples: ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 burst gap 100 samples: ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 burst gap 1000 samples: ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+```
+
+- **At gap 0 the second burst is reported late (`TimeError`) and not played, 4 of 4; at a gap of 1 sample and more, never.** Spec 18 UR-23 makes exactly the gap-0 transition when a held burst starts where the open one is cut ("the current one is sent up to the sample before the next start, its last buffer with end-of-burst … the next starts with start-of-burst and its time spec"). See the next test; design-notes §11 F3.
+
+### Preemption of a running repeat — `hw_b8_preemption`
+
+A repeat running; a 100-sample burst `send` at `lead` ahead:
+
+```
+[UHD printed 33 × "L"] B8 preempt lead 20 ms: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(15), "outcome": String("late_at_device"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(121809)}}]
+B8 preempt lead 20 ms: asked 121809; bursts [{"actual_start":null,"blocks":117,"end":"eob","late_by":null,"requested_target":{"domain":{"local":2,"node":0},"ticks":402631574},"samples":116642,"target":{"domain":{"local":4,"node":0},"ticks":5167},"wraps":116},{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":100,"target":{"domain":{"local":4,"node":0},"ticks":121809},"wraps":1}]
+B8 preempt lead 10 ms: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(408000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(111623)}}]
+B8 preempt lead 10 ms: asked 111623; bursts [{"actual_start":null,"blocks":209,"end":"stop","late_by":null,"requested_target":{"domain":{"local":2,"node":0},"ticks":402173544},"samples":209000,"target":{"domain":{"local":4,"node":0},"ticks":5031},"wraps":209}]
+B8 preempt lead 5 ms: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(6277000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(107088)}}]
+B8 preempt lead 5 ms: asked 107088; bursts [{"actual_start":null,"blocks":210,"end":"stop","late_by":null,"requested_target":{"domain":{"local":2,"node":0},"ticks":402430829},"samples":210000,"target":{"domain":{"local":4,"node":0},"ticks":5365},"wraps":210}]
+B8 preempt lead 3 ms: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(8224000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(104843)}}]
+B8 preempt lead 3 ms: asked 104843; bursts [{"actual_start":null,"blocks":210,"end":"stop","late_by":null,"requested_target":{"domain":{"local":2,"node":0},"ticks":402461188},"samples":210000,"target":{"domain":{"local":4,"node":0},"ticks":5067},"wraps":210}]
+```
+
+- **At 20 ms the Module preempts as UR-21/UR-23 say — the repeat ends with `eob` at 121 809, exactly the burst's start — and the device reports the burst late (`late_at_device`, `late_by_ns` 15) and does not play it** (UHD's 33 `L`s): the gap-0 case above. The `TIME_ERROR` reports it; the burst's record still reads `end: eob, late_by: null`.
+- At 10, 5 and 3 ms UR-21 drops the burst (`cause: late, outcome: drop`, late by 0.41, 6.28, 8.22 ms): so a preempting burst needs a lead of about 10.4–11.3 ms from submission (lead + late_by at the three leads): the in-flight window (10 ms) plus the delivery and uhd-tx's position in its buffers.
+
+### The transmit end after `Stop` — `hw_b8_stop_end`
+
+A repeat, a capture across it, `Stop` for `radio/tx` 50 ms into the capture; where the loop stops hearing it (100-sample windows, less the 44-sample loop delay):
+
+```
+B8 stop end, trial 0: Stop submitted at root 415679130; the loop heard the repeat until root 417821400 (+10.711 ms from the Stop); steady power 1.24e-4, after 7.95e-9; bursts [{"actual_start":null,"blocks":77,"end":"stop","late_by":null,"requested_target":{"domain":{"local":2,"node":0},"ticks":402425430},"samples":77000,"target":{"domain":{"local":4,"node":0},"ticks":5151},"wraps":77}]
+B8 stop end, trial 0: tx clocks [(401395400, 200)]
+B8 stop end, trial 1: Stop submitted at root 415476294; the loop heard the repeat until root 417746400 (+11.351 ms from the Stop); steady power 1.24e-4, after 8.12e-9; bursts [{"actual_start":null,"blocks":78,"end":"stop","late_by":null,"requested_target":{"domain":{"local":2,"node":0},"ticks":402142599},"samples":78000,"target":{"domain":{"local":4,"node":0},"ticks":5031},"wraps":78}]
+B8 stop end, trial 1: tx clocks [(401136400, 200)]
+B8 stop end, trial 2: Stop submitted at root 415609792; the loop heard the repeat until root 417667400 (+10.288 ms from the Stop); steady power 1.24e-4, after 7.56e-9; bursts [{"actual_start":null,"blocks":77,"end":"stop","late_by":null,"requested_target":{"domain":{"local":2,"node":0},"ticks":402275704},"samples":77000,"target":{"domain":{"local":4,"node":0},"ticks":5031},"wraps":77}]
+B8 stop end, trial 2: tx clocks [(401269600, 200)]
+```
+
+- **The transmission ends 10.3–11.4 ms after the Stop's submission**, and where the burst record says it does (the record's end `target + samples` on the transmit clock, e.g. trial 0: 401 395 400 + (5 151 + 77 000) · 200 = 417 825 600, heard until 417 821 400, one 100-sample window). UR-23 bounds it by `s + 10 ms` from the instant uhd-tx takes the Stop; from the submission it adds the delivery (≤ 1.4 ms here). After it the capture's power is 7.6–8.1e-9 against 1.24e-4 (−42 dB: nothing).
+
+### The receive rate — `hw_perf_rx_rates`
+
+A receive Run of 3 s at each rate, no capture written (the Sink consumes the blocks):
+
+```
+B8 rate 10 Msps: Ok(()); termination Stopped { cause: Client }; overflows 0; stats {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":15008,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":30015627,"tx_bursts":0,"tx_samples":0}
+B8 rate 20 Msps: Ok(()); termination Stopped { cause: Client }; overflows 0; stats {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":30023,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":60045170,"tx_bursts":0,"tx_samples":0}
+B8 rate 25 Msps: Ok(()); termination Stopped { cause: Client }; overflows 0; stats {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":37521,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":75040674,"tx_bursts":0,"tx_samples":0}
+B8 rate 40 Msps: Ok(()); termination Stopped { cause: Client }; overflows 0; stats {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":60042,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":120082466,"tx_bursts":0,"tx_samples":0}
+B8 rate 50 Msps: Ok(()); termination Stopped { cause: Client }; overflows 0; stats {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":75042,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":150082602,"tx_bursts":0,"tx_samples":0}
+B8 rate 100 Msps: Ok(()); termination Stopped { cause: Client }; overflows 0; stats {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":150102,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":300203246,"tx_bursts":0,"tx_samples":0}
+B8 rate 200 Msps: Ok(()); termination Stopped { cause: Client }; overflows 0; stats {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":300195,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":600389384,"tx_bursts":0,"tx_samples":0}
+```
+
+- **10 to 200 Msps for 3 s: no overflow, no link drop, no off-lattice block** (600 389 384 samples at 200 Msps). The profiles' `rx_bytes_per_s` is 1e9 (250 Msps at 4 bytes a sample); 200 Msps, 800 MB/s, is what the X300's master clock allows. With a capture written to disk the numbers would be the disk's (not measured).
+
+### The loop delay by rate — `hw_b6_delay_by_rate`
+
+B6's burst at each rate the bench may emit at:
+
+```
+B6 400 ksps: 5000 samples, rms 0.00474; correlation peak Some((35, 0.017011456, 20.078028)) (offset, gain, phase °); peak over median 4073.2 (needs > 8)
+B6 400 ksps: delay Some(35) samples = Some(87.5) µs; TIME_ERROR 0
+B6 500 ksps: 5000 samples, rms 0.00495; correlation peak Some((44, 0.019085078, 22.403013)) (offset, gain, phase °); peak over median 4715.2 (needs > 8)
+B6 500 ksps: delay Some(44) samples = Some(88.0) µs; TIME_ERROR 0
+B6 1000 ksps: 5000 samples, rms 0.00493; correlation peak Some((44, 0.015061438, 25.127499)) (offset, gain, phase °); peak over median 3127.4 (needs > 8)
+B6 1000 ksps: delay Some(44) samples = Some(44.0) µs; TIME_ERROR 0
+B6 2000 ksps: 5000 samples, rms 0.00473; correlation peak Some((36, 0.017465504, 20.878965)) (offset, gain, phase °); peak over median 3112.9 (needs > 8)
+B6 2000 ksps: delay Some(36) samples = Some(18.0) µs; TIME_ERROR 0
+```
+
+- **35 samples at 400 ksps, 44 at 500 ksps, 44 at 1 Msps, 36 at 2 Msps** (87.5, 88, 44, 18 µs): neither a fixed sample count nor a fixed time (the rates' filter chains differ; INFERRED). The profiles' `tx_path_delay_samples` is one number, 45: Phase 8 needs a value per rate (or per decimation).
+
+### B9 without the unplug — `hw_b9_long_receive`, `hw_b9_transmit_only_session`
+
+```
+B9 long receive: Ok(()); termination Stopped { cause: Client }; DEVICE_LOST []; overflows 0; stats {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":600009,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":1200017333,"tx_bursts":0,"tx_samples":0}
+B9 transmit only: radio.rx.channels 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }
+B9 transmit only: termination Stopped { cause: Client }; DEVICE_LOST []; TX_UNDERFLOW 0; timing [{"at":387577,"start_up_until":400387577,"what":"arm"},{"lead_ns":1999997335,"t0":400517200,"what":"start"},{"channels":1,"dir":"tx","origin":401306600,"what":"enabled"},{"host_delay_ms":2003,"index":0,"what":"first_rx_block"},{"booked_at":401571902,"e1":411572000,"e2":null,"key":"radio.rx.channels","what":"cold_change"},{"e1":411572000,"e2":null,"what":"rx_switch"},{"at":12401755973,"done":12422857496,"mode":"Orderly","what":"stop"}]
+```
+
+- **A 120 s receive Run at 10 Msps (1.2 × 10⁹ samples): no `DEVICE_LOST`, no overflow, no link drop, ended by the client.** No `UHD_ERROR_RUNTIME` false positive over two minutes (UR-29's worry).
+- **A transmit-only Session for 60 s** (the receiver switched off with `radio.rx.channels = 0`, admitted as a `cold` change with no `e2`; nothing sent): no `DEVICE_LOST`, no `TX_UNDERFLOW`, ended by the client. The unplug itself during either stays for the owner at the bench.
+
+### Authority drift over 60 s — `hw_b2_drift_60s`
+
+```
+B2 drift after 10.000812179s: host-derived 2000070169 ticks, device 2000087280 ticks, difference -17111 ticks (-8.56 ppm)
+B2 drift after 20.00125855s: host-derived 4000177088 ticks, device 4000200029 ticks, difference -22941 ticks (-5.73 ppm)
+B2 drift after 30.001839729s: host-derived 6000272216 ticks, device 6000293694 ticks, difference -21478 ticks (-3.58 ppm)
+B2 drift after 40.002382363s: host-derived 8000394655 ticks, device 8000410128 ticks, difference -15473 ticks (-1.93 ppm)
+B2 drift after 50.002919483s: host-derived 10000501785 ticks, device 10000522687 ticks, difference -20902 ticks (-2.09 ppm)
+B2 drift after 60.003482287s: host-derived 12000597403 ticks, device 12000620033 ticks, difference -22630 ticks (-1.89 ppm)
+```
+
+- **The Authority's host-derived time runs 77–115 µs behind the device's, and the difference does not grow over 60 s** (−17 111 … −22 630 ticks): it re-anchors, so there is no ppm drift to bound, only an offset of about 0.1 ms, within B2's host-bracket uncertainty (306 µs, session 1). The "ppm" column is therefore not a drift.
+
+### B1–B8 once more at `b0aaa08`
+
+With the envelope in every transmitting step's profile and all the tests above in the tree. All eight pass; no `DEVICE_LOST` in any output:
+
+```
+B1 describe: {
+B1 profile: x310-obx
+B1 Rx: 2 channels, front ends [Ok("OBX RX"), Ok("Unknown (0xffff) - 0")]
+B1 Tx: 2 channels, front ends [Ok("OBX TX"), Ok("Unknown (0xffff) - 0")]
+B1 ref_locked: Ok(Some(false))
+B1 time advanced 20089344 ticks in 100 ms
+B1 time advanced 20127787 ticks in 100 ms
+B1 time advanced 20114969 ticks in 100 ms
+B1 tx 0: Ok(Applied { rate: 200000000.0, freq: 10000000.000000238, gain: 0.0 })
+B1 tx 1: Ok(Applied { rate: 200000000.0, freq: 0.0, gain: 0.0 })
+B2 lateness µs: median 513 max 614
+B2 relations: [
+B2 anchor drift over 10.000878905s: -26271 ticks
+B3 applied: [{"at":{"domain":{"local":2,"node":0},"ticks":346440},"channel":0,"claimed":1000000.0,"difference":0.0,"key":"radio.rx.sample_rate_hz","read_back":1000000.0},{"at":{"domain":{"local":2,"node":0},"ticks":346440},"channel":0,"claimed":1000000000.0,"difference":0.0,"key":"radio.rx.frequency_hz","read_back":1000000000.0},{"at":{"domain":{"local":2,"node":0},"ticks":346440},"channel":0,"claimed":0.0,"difference":0.0,"key":"radio.rx.gain_db","read_back":0.0},{"at":{"domain":{"local":2,"node":0},"ticks":346440},"channel":0,"claimed":"RX2","key":"radio.rx.antenna"}]
+B3 timing: [{"at":420659,"start_up_until":400420659,"what":"arm"},{"lead_ns":1999996815,"t0":400595000,"what":"start"},{"host_delay_ms":2003,"index":0,"what":"first_rx_block"},{"at":403228328,"until":403428328,"what":"rx_stop"},{"at":404164005,"cut":403428328,"what":"rx_stop_untimed"},{"at":403228328,"done":423696476,"mode":"Orderly","what":"stop"}]
+
+B5 no overflow with a 300 ms stall; the socket buffer absorbed it
+OB5 overflowed with a 1000 ms stall: {"link_drops_seen":1373,"rx_before_origin":0,"rx_blocks":7733,"rx_errors":0,"rx_off_lattice":2178,"rx_overflows":1,"rx_overlapping":0,"rx_samples":15462924,"tx_bursts":0,"tx_samples":0}
+B5 1256 gaps: 1255 link drops of 2746000 samples in all, from sample Some(5234000) to Some(10982000)
+B5 gap OverflowRestart at receive sample 11108408 for 4557377 samples (455.7377 ms at 10 Msps), lost Some(4557377)
+B5 capture 0 … 20020301, 1257 valid segment(s)
+B5 timing [{"at":277997,"start_up_until":400277997,"what":"arm"},{"lead_ns":1999997430,"t0":400393700,"what":"start"},{"host_delay_ms":2000,"index":0,"what":"first_rx_block"},{"ms":1000,"what":"rx_stall"},{"at":800599710,"until":800799710,"what":"rx_stop"},{"at":800823699,"cut":800799710,"what":"rx_stop_untimed"},{"at":800599710,"done":821273075,"mode":"Orderly","what":"stop"}]
+B5 sample clocks: [SampleClockRecord { stream: ResourceId { node: NodeId(0), path: "usrp/rx" }, domain: ClockDomainId { node: NodeId(0), local: 3 }, root: ClockDomainId { node: NodeId(0), local: 2 }, root_ticks_per_tick: Rational { num: 20, den: 1 }, origin: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 400393700 }, ended_at: None, nominal_rate: Rational { num: 10000000, den: 1 } }]
+B5 RX_OVERFLOW: Ok(RxOverflowPayload { cause: Overrun, lost: 4557377, restart_gap_ns: 455737700 })
+B6 burst: 5000 samples, rms 0.00490; correlation peak Some((44, 0.014989309, 25.364481)) (offset, gain, phase °); peak over median 2973.7 (needs > 8)
+B6: transmit-to-receive delay 44 samples
+B6 repeat: 4000 samples, rms 0.01100; correlation peak Some((44, 0.015289056, 24.842901)) (offset, gain, phase °); peak over median 28.8 (needs > 8)
+B6 repeat: 3 whole periods from sample 44 (offset, gain, phase °): [(44, 0.015289056, 24.842901), (1044, 0.015283262, 24.680117), (2044, 0.015288842, 24.655783)]
+B6 bursts: [{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":1000,"target":{"domain":{"local":4,"node":0},"ticks":2011996},"wraps":1}] / [{"actual_start":null,"blocks":20,"end":"stop","late_by":null,"requested_target":null,"samples":20000,"target":{"domain":{"local":4,"node":0},"ticks":2002742},"wraps":20}]
+B7 refused: Rejected { violations: [Violation { check: Namespace("radio.rf_envelope"), key: Some(Key("radio.tx.frequency_hz")), requested: Some(Num(1100000000.0)), reason: "RM-19: radio: 1100000000 Hz is in no allowed band" }] }
+B7 capture: 5000 samples, rms 0.01106; correlation peak Some((3800, 0.015282318, 24.471838)) (offset, gain, phase °); peak over median 28.9 (needs > 8)
+B7 capture asked at TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 411455955 }; artifact [ContinuityMap { domain: ClockDomainId { node: NodeId(0), local: 3 }, channels: 1, valid: [[Segment { start: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 3 }, ticks: 54627 }, len: 5000 }]], gaps: [], channel_gaps: [], first: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 3 }, ticks: 54627 }, end: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 3 }, ticks: 59627 } }]
+B7 sample clocks: [SampleClockRecord { stream: ResourceId { node: NodeId(0), path: "usrp/rx" }, domain: ClockDomainId { node: NodeId(0), local: 3 }, root: ClockDomainId { node: NodeId(0), local: 2 }, root_ticks_per_tick: Rational { num: 200, den: 1 }, origin: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 400530600 }, ended_at: None, nominal_rate: Rational { num: 1000000, den: 1 } }, SampleClockRecord { stream: ResourceId { node: NodeId(0), path: "usrp/tx" }, domain: ClockDomainId { node: NodeId(0), local: 4 }, root: ClockDomainId { node: NodeId(0), local: 2 }, root_ticks_per_tick: Rational { num: 200, den: 1 }, origin: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 401194600 }, ended_at: None, nominal_rate: Rational { num: 1000000, den: 1 } }]
+B7 time errors: []
+B8 lead 10000 µs: TIME_ERROR []
+B8 lead 10000 µs: timing [{"at":378710,"start_up_until":400378710,"what":"arm"},{"lead_ns":1999996980,"t0":400621800,"what":"start"},{"channels":1,"dir":"tx","origin":401192000,"what":"enabled"},{"host_delay_ms":2004,"index":0,"what":"first_rx_block"},{"at":421526477,"until":421726477,"what":"rx_stop"},{"at":422212034,"cut":421726477,"what":"rx_stop_untimed"},{"at":421526477,"done":442791555,"mode":"Orderly","what":"stop"}]
+B8 lead 10000 µs: bursts [{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":100,"target":{"domain":{"local":4,"node":0},"ticks":10021},"wraps":1}]
+B8 lead 5000 µs: TIME_ERROR []
+B8 lead 5000 µs: timing [{"at":411588,"start_up_until":400411588,"what":"arm"},{"lead_ns":1999996745,"t0":400562200,"what":"start"},{"channels":1,"dir":"tx","origin":401215200,"what":"enabled"},{"host_delay_ms":2003,"index":0,"what":"first_rx_block"},{"at":421619176,"until":421819176,"what":"rx_stop"},{"at":422524083,"cut":421819176,"what":"rx_stop_untimed"},{"at":421619176,"done":442556310,"mode":"Orderly","what":"stop"}]
+B8 lead 5000 µs: bursts [{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":100,"target":{"domain":{"local":4,"node":0},"ticks":5137},"wraps":1}]
+B8 lead 3000 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(126000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(3062)}}]
+B8 lead 3000 µs: timing [{"at":297153,"start_up_until":400297153,"what":"arm"},{"lead_ns":1999997800,"t0":400456000,"what":"start"},{"channels":1,"dir":"tx","origin":401156000,"what":"enabled"},{"host_delay_ms":2004,"index":0,"what":"first_rx_block"},{"at":421485967,"until":421685967,"what":"rx_stop"},{"at":422445561,"cut":421685967,"what":"rx_stop_untimed"},{"at":421485967,"done":442519834,"mode":"Orderly","what":"stop"}]
+B8 lead 3000 µs: bursts []
+B8 lead 2000 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(1205000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(2030)}}]
+B8 lead 2000 µs: timing [{"at":337884,"start_up_until":400337884,"what":"arm"},{"lead_ns":1999997705,"t0":400534000,"what":"start"},{"channels":1,"dir":"tx","origin":401240200,"what":"enabled"},{"host_delay_ms":2003,"index":0,"what":"first_rx_block"},{"at":421647584,"until":421847584,"what":"rx_stop"},{"at":422492753,"cut":421847584,"what":"rx_stop_untimed"},{"at":421647584,"done":442915902,"mode":"Orderly","what":"stop"}]
+B8 lead 2000 µs: bursts []
+B8 lead 1500 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(1427000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(1641)}}]
+B8 lead 1500 µs: timing [{"at":268565,"start_up_until":400268565,"what":"arm"},{"lead_ns":1999997740,"t0":400428400,"what":"start"},{"channels":1,"dir":"tx","origin":401203400,"what":"enabled"},{"host_delay_ms":2003,"index":0,"what":"first_rx_block"},{"at":421625410,"until":421825410,"what":"rx_stop"},{"at":422383610,"cut":421825410,"what":"rx_stop_untimed"},{"at":421625410,"done":442500443,"mode":"Orderly","what":"stop"}]
+B8 lead 1500 µs: bursts []
+B8 lead 1000 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(2220000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(1029)}}]
+B8 lead 1000 µs: timing [{"at":273722,"start_up_until":400273722,"what":"arm"},{"lead_ns":1999997725,"t0":400500200,"what":"start"},{"channels":1,"dir":"tx","origin":401280200,"what":"enabled"},{"host_delay_ms":2004,"index":0,"what":"first_rx_block"},{"at":421640066,"until":421840066,"what":"rx_stop"},{"at":422473685,"cut":421840066,"what":"rx_stop_untimed"},{"at":421640066,"done":442670671,"mode":"Orderly","what":"stop"}]
+B8 lead 1000 µs: bursts []
+B8 lead 500 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(2525000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(542)}}]
+B8 lead 500 µs: timing [{"at":315343,"start_up_until":400315343,"what":"arm"},{"lead_ns":1999995835,"t0":400488000,"what":"start"},{"channels":1,"dir":"tx","origin":401280800,"what":"enabled"},{"host_delay_ms":2004,"index":0,"what":"first_rx_block"},{"at":421630157,"until":421830157,"what":"rx_stop"},{"at":422461254,"cut":421830157,"what":"rx_stop_untimed"},{"at":421630157,"done":442688871,"mode":"Orderly","what":"stop"}]
+B8 lead 500 µs: bursts []
+```
+
+(B1's `describe` and B7's clocks are in the logs; the lines above are the tests' `B…` lines.)
+
+### Part 2 in short
+
+Three findings need the owner (design-notes §11): **F1** the X300 ignores a timed receive stop, so a `cold` receive change loses ~50 ms before `e1` without a flag; **F2** the restart after it is late, because uhd-rx waits for a 100 ms receive timeout; **F3** a burst whose timed start is the previous burst's end tick is dropped by the device, which is how UR-23 preempts. Phase 8 inputs (spec 18 §3 and the profiles unchanged): device lead 0.3–0.5 ms (Module 2 ms); a clean timed retune needs ~2 ms; restart lead ≥ 1 ms on the device (Module 50 ms); queue depth 7 OBX tunes (profile 16); in-flight window ≥ 0.5 ms at 2 Msps (Module 10 ms); transmit end ≤ 11.4 ms after the Stop's submission; receive 200 Msps sustained; loop delay 35–44 samples by rate (profile 45); timed tunes restore the loop phase (fractional-N), untimed do not; no false `DEVICE_LOST` in 120 s receive and 60 s transmit-only; the Authority's offset bounded at ~0.1 ms. Test code only (`b0aaa08`); no Module code changed.

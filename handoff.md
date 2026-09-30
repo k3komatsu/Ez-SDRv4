@@ -332,10 +332,17 @@ Python の B7 は同じ container を `-w /bench -e PYTHONPATH=/work/python -e E
 
 **4a. セッション 2（2026-09-30，`usrp-lnx02` 上の Claude Code）でしたこと**
 
-- 上の 4. の 2–4 は済み：B6 合格（テストの相関を直してから．遅延 44 samples），Rust の B7 合格，`bench_loopback.py` を送信周波数に直して Python の B7 合格（`rf_envelope` が拒否），EA-17 は「`z` は `t` から始まる」，B8 は実行（3 ms 以下は UR-21 が受け取り時に捨てるので device lead そのものは測れていない），B5 の restart gap は 456 ms（大半は stall，UHD の再開は ≤ 約 67 ms）．受信の timed stop は 9 回中 9 回守られなかった．詳細と出力は bench-results.md「Session 2」．
+- 上の 4. の 2–4 は済み：B6 合格（テストの相関を直してから．遅延 44 samples），Rust の B7 合格，`bench_loopback.py` を送信周波数に直して Python の B7 合格（`rf_envelope` が拒否），EA-17 は「`z` は `t` から始まる」，B8 は実行（3 ms 以下は UR-21 が受け取り時に捨てるので device lead そのものは測れていない），B5 の restart gap は 456 ms（大半は stall，UHD の再開は ≤ 約 67 ms）．（「受信の timed stop は 9 回中 9 回守られなかった」と書いたのは誤り：それらの Run では timed stop は device に出ていない．part 2 で訂正）．詳細と出力は bench-results.md「Session 2」．
 - 直したのはテストコードだけ（Module のコードと profile の値は変えていない）．`cargo test --workspace` 849 passed，`--features uhd` 103 passed・10 ignored，clippy clean．
 - **push**：このサーバーの `origin` は HTTPS で認証情報がない．SSH は通るので `git push git@github.com:k3komatsu/Ez-SDRv4.git worktree-phase7-impl` で push し，`git fetch origin` で追跡を合わせた（remote の設定は変えていない）．
-- 次：B9（owner がケーブルを抜く手作業．直前に止まって確認する），B8 の未実装の行をどうするか（owner の判断），spike 表の記入．
+- 次：B9 の抜線（owner がケーブルを抜く手作業．直前に止まって確認する），spike 表の記入，design-notes §11 の F1–F3 への owner の判断．
+
+**4b. セッション 2 part 2（owner が遠隔の間，手作業なしでできる確認をすべて）**
+
+- owner：「ちょっと今手元にUSRPがなくて遠隔でやってます．なので，とりあえず今のうちに今の状態でUSRPを使って確認しておいた方がいいことを考えて全部やってください」．
+- B8 の未実装の行を `Device` を直接叩くテスト（`hw_b8_raw_*`）と Module 経由のテストで測り，受信レート，レートごとの遅延，120 s の受信と 60 s の送信だけの Session（偽の `DEVICE_LOST` なし），60 s の drift も測った．最後に B1–B8 を `b0aaa08` で通しで流し直して全部合格．結果は bench-results.md「Session 2, part 2」．
+- **設計を変える必要のある発見が 3 つ**（design-notes §11，owner の判断待ち，コードは未変更）：F1 X300 は受信の timed stop の時刻を無視して即時に止まる（FPGA source で VERIFIED）→ `cold` な受信変更で e1 前の約 50 ms が flag なしで欠ける；F2 その後の再開が 100 ms の receive timeout 待ちで e2 に遅れる；F3 前の burst の終わりの tick ちょうどに timed SOB を置くと device が late として捨てる（UR-23 の preemption がこの形）．FakeDevice はどれも実機より緩い．
+- 前の記録「受信の timed stop は 9/9 守られなかった」は誤りだったので訂正した（その Run では timed stop は device に出ていない）．
 
 **5. 決まったこと・owner の判断待ち**
 
