@@ -307,3 +307,8 @@ Every capture is 20 000 samples with no gap. So a capture requested at an instan
 2. ~~Fix `python/examples/bench_loopback.py` to retune the transmitter; rerun B7 (Python); derive EA-17's answer from the Manifests.~~ Done in session 2.
 3. B9: the unplug (manual: the owner pulls the 10 GbE cable during a receive Run, and during a transmit-only Session — the latter has no test yet), the rerun of B3–B7 with no false `DEVICE_LOST`; the USRP2 probe if a USRP2 is at hand.
 4. Fill the table at the end of `plan/spikes/2026-09-26-uhd.md`; update handoff.md.
+5. B8's unimplemented rows (the device lead below UR-21, timed retunes, restart leads, the transmit end after `Stop`, in-flight windows, the preemption bound, the queue depth): add `hw_b8_*` tests or leave them to Phase 8 — the owner's call.
+
+## Session 2 in short
+
+B6 pass (after the test's correlation fix), B7 Rust pass, B7 Python pass (fixed example), B8 run, B5's restart gap recorded. Numbers for Phase 8 (spec 18 §3 and the profiles unchanged): transmit-to-receive delay **44 samples** at 1 Msps (profile 45); loop gain −36.3 dB through 30 dB at 0 dB gains; a 5 ms lead from submission sends, 3 ms is dropped by UR-21 (receipt 1.0–1.5 ms after submission), the device lead itself not reached; the timed receive stop **never honoured** (9 of 9 Runs and B3; the untimed fallback 0.2–3.6 ms after the cut); the overflow gap 456 ms after a 1 s stall, UHD's restart ≤ ~67 ms after the reader returns; EA-17: a capture at the `t` `sleep` returned starts at `t`. Test code changed (no Module code): `correlate` phase-blind with a noise-floor threshold, `back_to_back`, and `println!`s in B5, B7, B8 (`4a9f2b2` … `c046a64`). The bench profiles of B6 and B8 carry no `radio.rf_envelope`.
