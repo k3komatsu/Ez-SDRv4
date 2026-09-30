@@ -284,6 +284,15 @@ owner の依頼（「Phase 7を実装してください」，続けて「終わ�
 
 owner の指示（2026-09-28）：「実機では別のlinuxサーバーでUSRPを使うので，pushしておいてください．また実機検証は別エージェントで実施することになるので，handoffにも次の工程を細かく書いておいて」．この節だけで作業を始められるように書く．手順の本体は [plan/phase7/bench.md](plan/phase7/bench.md)（B0–B9，合格条件と記録する値）で，ここはその実行計画と，bench.md に書いていない実装側の事情．
 
+**進捗（2026-09-30，セッション 1）**：`usrp-lnx02`（X300 + OBX，`ARGS=addr=192.168.40.36`，NIC は `enp2s0f0np0`）で B0–B5 合格，Python の B7 は実行済み（例の不具合 1 件）．B6・Rust の B7・B8・B9 は未実行．結果と続きの手順は [plan/phase7/bench-results.md](plan/phase7/bench-results.md)，各テストの全出力はサーバーの `~/ezsdr-bench/`．サーバーでは clone `~/works/Ez-SDRv4`（この branch）で，各段を次の形で実行した（`-w` は `/work` にすること．`/bench` から cargo を呼ぶと `Cargo.toml` が見つからない）：
+```sh
+docker run --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(id -u):$(id -g)" \
+  -v "$PWD:/work" -v "$HOME/ezsdr-bench:/bench" -v ezsdr-v4-cargo-target:/cargo-target -w /work \
+  -e EZSDR_UHD_ARGS=addr=192.168.40.36 ezsdr-v4-dev:uhd4.10 \
+  cargo test -q --release -p ezsdr-radio-uhd --features uhd --test hardware <test> -- --ignored --nocapture
+```
+Python の B7 は同じ container で `-w /bench -e PYTHONPATH=/work/python -e EZSDR_SERVER=/cargo-target/release/ezsdr-server -e EZSDR_PROFILE=/bench/bench-session.json`（`~/ezsdr-bench/bench-session.json` は作成済み）．
+
 **前提と規則**
 
 - **実機構成**（owner，2026-09-30）：X310（**X300 でも可**：UHD は同じ `x300` driver で扱い，違いは FPGA の大きさだけで，この実装はそれを使わない．コードも profile `x310-obx` も変更不要．FPGA image は X300 用（`uhd_image_loader` が `usrp_x300_fpga_XG.bit` を選ぶ）を入れる．bench.md 冒頭）の slot A に **OBX 1枚**．TX/RX を 30 dB 以上の減衰器を通して同じ OBX の RX2 へ（ループバック）．送信だけの段のために 50 Ω 終端．10 GbE（SFP+）の Linux PC．外部の 10 MHz/PPS は不要．**UHD 4.9 以上が必須**（OBX は 2025 年 6 月に UHD に入った．古い UHD では unknown board になり UR-5 が拒否する）ので Docker 環境（UHD 4.10）を使う．X310 の FPGA image もその UHD に合わせる．profile は `x310-obx` 0.1.0（1 channel，10 MHz–8.4 GHz，既定周波数 1 GHz）で，テストは UHD が報告する front end 名（`OBX…`）から自動で選ぶ．OBX が 2 枚あっても同じ profile で動く（使うのは channel 0）．途中まで CBX 1枚で準備したので `x310-cbx` も残っている（OBX の driver が不調なときの予備）．事情は [design-notes.md](plan/phase7/design-notes.md) §9・§10．
