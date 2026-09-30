@@ -26,7 +26,7 @@
       --content: 1120px;
       --mono: "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
     }
-    * { box-sizing: border-box; }
+    *, *::before, *::after { box-sizing: border-box; }
     html { scroll-behavior: smooth; scroll-padding-top: 84px; }
     body {
       margin: 0; overflow-x: clip; background: var(--paper); color: var(--ink);
@@ -67,6 +67,8 @@
     h1 em { font-style: normal; background: linear-gradient(100deg, var(--lime), var(--cyan)); -webkit-background-clip: text; background-clip: text; color: transparent; }
     .lede { max-width: 590px; color: #c3d0d5; font-size: 17px; }
     .lede strong { color: #fff; }
+    .v3line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; max-width: 590px; margin-top: 18px; padding: 12px 16px; border: 1px solid rgba(95,216,227,.3); border-radius: 12px; background: rgba(95,216,227,.07); color: #d3e2e6; font-size: 14px; line-height: 1.7; }
+    .v3line a { color: var(--cyan); font-weight: 700; white-space: nowrap; }
     .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; }
     .btn { display: inline-flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 22px; border-radius: 10px; font-size: 15px; font-weight: 800; text-decoration: none; transition: transform .18s ease, background .18s ease, border-color .18s ease; }
     .btn:hover { transform: translateY(-2px); }
@@ -86,6 +88,9 @@
     .badge.ok { color: var(--lime); background: rgba(198,243,107,.12); }
     .badge.plan { color: var(--amber); border: 1px dashed rgba(240,180,90,.6); }
     .badge.plan::before { background: transparent; border: 1.5px solid currentColor; }
+    .badge.v3 { color: var(--cyan); background: rgba(95,216,227,.12); }
+    .badges { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+    .light .badge.v3 { color: #0d6a75; background: #d9f1f3; }
     .light .badge.ok { color: var(--lime-deep); background: #e6f4cf; }
     .light .badge.plan { color: var(--amber-deep); border-color: #d9a14e; }
 
@@ -106,14 +111,35 @@
     .qa-a { margin: 14px 0 10px; font-size: 22px; font-weight: 800; letter-spacing: -.04em; line-height: 1.4; }
     .qa-card p:last-child { color: var(--muted); font-size: 15px; }
 
+    /* v3 heritage */
+    .heritage { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 16px; align-items: stretch; }
+    .h-card { padding: 30px; border-radius: 20px; border: 1px solid var(--line); background: var(--card); }
+    .h-card.v3c { border-color: #b9dfe3; background: linear-gradient(160deg, #eaf7f8, #fff 60%); }
+    .h-card.v4c { background: var(--night); border-color: var(--night); color: #eaf1ef; }
+    .h-card h3 { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 20px; letter-spacing: -.03em; }
+    .h-card ul { list-style: none; margin: 16px 0 0; padding: 0; }
+    .h-card li { position: relative; padding: 11px 0 11px 26px; border-top: 1px solid var(--line); font-size: 15px; line-height: 1.7; }
+    .h-card li::before { content: "✓"; position: absolute; left: 2px; top: 11px; color: #0d6a75; font-weight: 900; }
+    .h-card li strong { display: block; }
+    .h-card li span { color: var(--muted); font-size: 14px; }
+    .h-card.v4c li { border-color: var(--night-line); }
+    .h-card.v4c li span { color: #a9b9c0; }
+    .h-card.v4c li::before { color: var(--lime); }
+    .h-card.v4c li.todo::before { content: "○"; color: var(--amber); }
+    .h-arrow { align-self: center; color: var(--lime-deep); font: 800 28px var(--mono); }
+    .h-note { margin-top: 16px; padding: 18px 24px; border-radius: 14px; background: #e9eeeb; color: var(--ink-2); font-size: 15px; }
     /* flow */
-    .flow { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; counter-reset: s; }
+    .flow { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(6, 1fr); gap: 0; counter-reset: s; }
     .flow li { position: relative; padding: 0 18px 0 0; }
     .flow li::before { counter-increment: s; content: counter(s); display: grid; place-items: center; width: 44px; height: 44px; margin-bottom: 18px; border-radius: 50%; background: var(--night); color: var(--lime); font: 800 15px var(--mono); position: relative; z-index: 1; }
     .flow li:not(:last-child)::after { content: ""; position: absolute; top: 21px; left: 44px; right: 0; height: 2px; background: linear-gradient(90deg, var(--lime-deep), #c9d5c0); }
     .flow h3 { font-size: 16px; letter-spacing: -.02em; }
-    .flow p { margin-top: 6px; color: var(--muted); font-size: 14px; line-height: 1.7; }
+    .flow p { margin-top: 6px; color: var(--muted); font-size: 13.5px; line-height: 1.7; }
     .flow .hl h3 { color: var(--lime-deep); }
+    .flow .badge { margin-top: 10px; }
+    .flow li.todo::before { background: #fbf6ec; color: var(--amber-deep); border: 2px dashed #d9a14e; }
+    .flow li.todo h3 { color: var(--amber-deep); }
+    .flow li.todo:not(:last-child)::after { background: repeating-linear-gradient(90deg, #d9a14e 0 6px, transparent 6px 11px); }
 
     /* try it (dark band) */
     .band { margin-top: 104px; padding: 88px 0 96px; background: var(--night); color: #eaf1ef; }
@@ -173,7 +199,7 @@
     .track strong { display: block; margin-bottom: 4px; font-size: 14px; }
     .track span { color: var(--muted); }
     .track-title { margin: 44px 0 0; font-size: 15px; font-weight: 800; }
-    .track.next { margin-top: 12px; grid-template-columns: 1.4fr repeat(4, 1fr); }
+    .track.next { margin-top: 12px; grid-template-columns: 1.3fr repeat(5, 1fr); }
     .track.next li { border-top: 4px dashed var(--amber); background: #fbf6ec; border-color: #ecdcbb; border-top-color: var(--amber); }
 
     /* evidence + limits */
@@ -223,6 +249,9 @@
       .container { width: calc(100% - 32px); }
       .section { padding-top: 76px; }
       .band { margin-top: 76px; padding: 64px 0 72px; }
+      .heritage { grid-template-columns: minmax(0, 1fr); }
+      .h-arrow { justify-self: center; transform: rotate(90deg); }
+      .h-card { padding: 24px 22px; }
       .qa, .two, .after, .limits, .refs, .spec-list, .evidence { grid-template-columns: minmax(0, 1fr); }
       .evidence div + div { border-left: 0; border-top: 1px solid var(--night-line); }
       .qa-card, .col { padding: 24px 22px; }
@@ -263,6 +292,7 @@
         <h1 id="hero-title"><span>AI-Native</span><br><span>Software-Defined</span><br><em><span>Radio Experiments</span></em></h1>
         <p class="tagline">仮想無線機で、SDR実験を試して記録する</p>
         <p class="lede">Ez-SDR v4 は、Python から <strong>PC 上の仮想無線機</strong>を動かして送受信を試し、<strong>実験条件・受信データ・実行記録</strong>をまとめて保存するソフトウェアです。実機がなくても始められ、条件を変えた結果を並べて比べられます。条件も記録も機械が読める形式（JSON）なので、人だけでなく AI からも使いやすい設計です（AI-Native）。</p>
+        <p class="v3line"><span class="badge v3">v3 で実績</span>USRP 実機やネットワーク越しの利用は、前身の v3 で動いています。v4 に引き継ぎます。<a href="#v3">詳しく ↓</a></p>
         <div class="cta">
           <a class="btn btn-primary" href="#try">試し方を見る <span aria-hidden="true">↓</span></a>
           <a class="btn btn-ghost" href="#status">今できること・計画中のこと</a>
@@ -274,7 +304,8 @@
           <li>仮想無線機での送受信<span class="badge ok">使える</span></li>
           <li>実験条件・結果の記録<span class="badge ok">使える</span></li>
           <li>Python からの操作<span class="badge ok">使える</span></li>
-          <li>SDR 実機（USRP など）との接続<span class="badge plan">未実装</span></li>
+          <li>SDR 実機（USRP など）との接続<span class="badges"><span class="badge v3">v3 は使える</span><span class="badge plan">v4 は未実装</span></span></li>
+          <li>ネットワーク越しの USRP 利用<span class="badges"><span class="badge v3">v3 は使える</span><span class="badge plan">v4 は未実装</span></span></li>
           <li>AI からも使いやすい設計（AI-Native）<span class="badge ok">採用済み</span></li>
         </ul>
       </aside>
@@ -305,32 +336,62 @@
           <p>条件を書き換えて繰り返し実行すると、実行ごとに別の記録ファイルが残ります。たとえばゲインを 0・10・20 dB と変えた三つの結果を並べて比べられます。異なる OS や CPU の間では、数値が最後の bit まで一致する保証はありません。</p>
         </article>
         <article class="qa-card no reveal">
-          <div class="qa-q"><h3>実機で使える？</h3><span class="badge plan">未実装</span></div>
-          <p class="qa-a">まだです。設計を終えた段階です。</p>
-          <p>USRP などの SDR 実機を操作する機能は、設計を受理し、実装はこれからです。そのため、実機の測定と仮想実験の比較もまだ行えません。</p>
+          <div class="qa-q"><h3>実機で使える？</h3><span class="badges"><span class="badge v3">v3 は使える</span><span class="badge plan">v4 は未実装</span></span></div>
+          <p class="qa-a">v4 はまだです。前身の v3 なら使えます。</p>
+          <p>USRP の実機制御とネットワーク越しの利用は、Ez-SDR v3 ですでに動いています。v4 では、その機能を引き継ぐ設計を終えた段階で、実装はこれからです。今すぐ実機で実験したい場合は、<a href="#v3">v3 をお使いください</a>。</p>
         </article>
       </div>
     </section>
 
+    <section class="section light container" id="v3" aria-labelledby="v3-title">
+      <div class="section-head reveal">
+        <p class="kicker">02 · 前身の Ez-SDR v3</p>
+        <h2 id="v3-title">実機も、ネットワーク越しの利用も、v3 で動いています</h2>
+        <p class="section-lead">Ez-SDR v4 は、Ez-SDR v3 の作り直しです。v3 で実際に動いている実機制御とネットワーク越しの利用は、v4 でも動かします。そこへ、仮想無線機での実験、条件と結果の記録、AI から使いやすい設計を加えます。</p>
+      </div>
+      <div class="heritage reveal">
+        <article class="h-card v3c">
+          <h3>Ez-SDR v3 <span class="badge v3">現在使える</span></h3>
+          <ul>
+            <li><strong>USRP 実機の制御</strong><span>UHD 経由で USRP を制御します。X310・N210 などの設定例が同梱されています。</span></li>
+            <li><strong>ネットワーク越しの操作</strong><span>USRP をつないだ PC で Ez-SDR を動かし、別の PC の Python から TCP で接続して送受信できます。</span></li>
+            <li><strong>Docker ですぐ起動</strong><span>ビルド済みイメージを配布しており、UHD などのドライバを別途入れずに試せます。</span></li>
+          </ul>
+        </article>
+        <div class="h-arrow" aria-hidden="true">→</div>
+        <article class="h-card v4c">
+          <h3>Ez-SDR v4 <span class="badge plan">引き継ぎは計画中</span></h3>
+          <ul>
+            <li class="todo"><strong>USRP 実機の制御</strong><span>v3 の動作を引き継ぎます。設計は受理済みで、実装はこれからです。</span></li>
+            <li class="todo"><strong>ネットワーク越しの利用</strong><span>接続の受け付けと認証を含め、実機接続の後の段階で作ります。</span></li>
+            <li><strong>PC 上の仮想無線機での実験</strong><span>v4 で新しく加わり、すでに使えます。</span></li>
+            <li><strong>条件・結果の記録と、AI から使いやすい設計</strong><span>v4 で新しく加わり、すでに使えます。</span></li>
+          </ul>
+        </article>
+      </div>
+      <p class="h-note reveal"><strong>今すぐ実機で実験したい方へ：</strong>実機とネットワーク越しの利用は <a href="https://github.com/k3komatsu/Ez-SDR" target="_blank" rel="noopener noreferrer">Ez-SDR v3 ↗</a> をお使いください。v4 は、仮想実験と記録の土台を先に作り、そこへ実機を載せていく順序で開発しています。</p>
+    </section>
+
     <section class="section light container" aria-labelledby="flow-title">
       <div class="section-head reveal">
-        <p class="kicker">02 · 実験の流れ</p>
-        <h2 id="flow-title">条件を確かめてから走らせ、条件ごと記録する</h2>
-        <p class="section-lead">実験条件（ExperimentSpec）と、使う機器・環境を分けて指定します。実行前に「その機器で条件を満たせるか」を確認し、満たせない場合は理由が返ります。そのため、人だけでなく AI も「条件を書く → 検証する → 結果を見て直す」というループを、自分で回せます。これが AI-Native の中心です。</p>
+        <p class="kicker">03 · 実験の流れ</p>
+        <h2 id="flow-title">まず仮想無線機で検証し、実機へ進む。条件ごと記録する</h2>
+        <p class="section-lead">実験条件（ExperimentSpec）と、使う機器・環境を分けて指定します。実行前に「その機器で条件を満たせるか」を確認し、満たせない場合は理由が返ります。仮想無線機での実験は、実機を動かす前に検証するための場です。人だけでなく AI も「条件を書く → 検証する → 結果を見て直す」というループを、実機に触れる前に自分で回せます。これが AI-Native の中心です。</p>
       </div>
       <ol class="flow reveal">
         <li><h3>実験条件を書く</h3><p>周波数、サンプルレート、受信するサンプル数など、実験の中身を指定します。</p></li>
-        <li><h3>機器と環境を選ぶ</h3><p>使う仮想無線機や、周囲の環境（実行環境）を選びます。</p></li>
-        <li class="hl"><h3>実行前に確認</h3><p>機器が条件を満たせるかを事前に確認します。満たせない場合は実行前に分かります。</p></li>
-        <li><h3>仮想実験を実行</h3><p>PC 上の仮想無線機で送受信します。実時間を待つ必要はありません。</p></li>
-        <li><h3>条件と結果を保存</h3><p>条件・環境・操作履歴・受信データを、実行ごとにファイルへ残します。</p></li>
+        <li><h3>機器と環境を選ぶ</h3><p>使う無線機や、周囲の環境（実行環境）を選びます。</p></li>
+        <li><h3>実行前に確認</h3><p>機器が条件を満たせるかを事前に確認します。満たせない場合は実行前に理由が分かります。</p></li>
+        <li class="hl"><h3>仮想無線機で検証</h3><p>実機の前に、PC 上で実験します。実時間を待たずに、AI が自律的に検証を繰り返せます。</p><span class="badge ok">使える</span></li>
+        <li class="todo"><h3>実機で実験</h3><p>検証した同じ実験条件で、USRP 実機を動かします。ネットワーク越しにも使えるようにします。</p><span class="badge plan">v4 は未実装（v3 は使える）</span></li>
+        <li><h3>条件と結果を保存</h3><p>条件・環境・操作履歴・受信データを、実行ごとにファイルへ残します。</p><span class="badge ok">仮想実験で使える</span></li>
       </ol>
     </section>
 
     <div class="band" id="try">
       <div class="container">
         <div class="section-head reveal">
-          <p class="kicker">03 · 試してみる</p>
+          <p class="kicker">04 · 試してみる</p>
           <h2>Python で書いて、実行して、記録を見る</h2>
           <p class="section-lead">下の二つは、リポジトリの <code>python/examples/</code> に入っている動作する例です。当サイトの作成時に実際に実行して、出力とファイルを確認しました。</p>
         </div>
@@ -422,7 +483,7 @@ python python/examples/minimal.py</code></pre>
 
     <section class="section light container" id="status" aria-labelledby="status-title">
       <div class="section-head reveal">
-        <p class="kicker">04 · 現状と計画</p>
+        <p class="kicker">05 · 現状と計画</p>
         <h2 id="status-title">今使えるものと、これから作るもの</h2>
         <p class="section-lead">実装状況は 2026-09-30 にリポジトリの最新状態で確認しました。「計画中」は、まだ使えないものです。</p>
       </div>
@@ -440,7 +501,8 @@ python python/examples/minimal.py</code></pre>
         <div class="col plan reveal">
           <h3>計画中 <span class="badge plan">未実装</span></h3>
           <ul>
-            <li><strong>SDR 実機（USRP など）との接続</strong><span>設計は受理済みで、実装はこれからです。</span></li>
+            <li><strong>SDR 実機（USRP など）との接続</strong><span>v3 で動いている機能を引き継ぎます。設計は受理済みで、実装はこれからです。</span></li>
+            <li><strong>ネットワーク越しの USRP 利用</strong><span>USRP をつないだ PC で実験実行プログラム（<code>ezsdr-server</code>）を動かし、別の PC の Python から接続します。v3 ではすでに動いており、v4 でも同じことができるようにします。手元の PC で仮想無線機で検証してから、研究室の USRP で動かせる構想です。実機接続の後の段階で、接続の受け付けと認証はこれから作ります。</span></li>
             <li><strong>仮想実験と実機測定の比較</strong><span>USRP X310 などの実測と、仮想無線機の結果を照合します。</span></li>
             <li><strong>パケット通信との連携</strong><span>パケット処理を OS のネットワーク機能とつなぎます。</span></li>
             <li><strong>信号処理・応答機能の拡張</strong><span>検出した信号に応じて処理し、応答する機能を追加します。</span></li>
@@ -474,7 +536,8 @@ python python/examples/minimal.py</code></pre>
       </ol>
       <h3 class="track-title reveal">これから</h3>
       <ol class="track next reveal" aria-label="これからの開発の予定">
-        <li><strong>SDR 実機との接続</strong><span>次に取り組む予定。設計は受理済み</span></li>
+        <li><strong>SDR 実機との接続</strong><span>v3 の機能を引き継ぐ。次に取り組む予定。設計は受理済み</span></li>
+        <li><strong>ネットワーク越しの利用</strong><span>v3 の機能を引き継ぐ。実機接続の後。認証も含め未実装</span></li>
         <li><strong>仮想と実機の比較</strong><span>実測との照合</span></li>
         <li><strong>パケット通信連携</strong><span>OS のネットワークと接続</span></li>
         <li><strong>処理・応答の拡張</strong><span>信号に応じた応答</span></li>
@@ -490,11 +553,11 @@ python python/examples/minimal.py</code></pre>
 
     <section class="section light container" aria-labelledby="limits-title">
       <div class="section-head reveal">
-        <p class="kicker">05 · 使う前に知っておくこと</p>
+        <p class="kicker">06 · 使う前に知っておくこと</p>
         <h2 id="limits-title">現時点の制約</h2>
       </div>
       <div class="limits">
-        <article class="limit reveal"><h3>実機の測定はまだできない</h3><p>USRP などの実機を操作する機能は未実装で、実機との比較も行っていません。現在の結果はすべて仮想無線機によるものです。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/vision/11-boundaries-invariants-and-roadmap.md" target="_blank" rel="noopener noreferrer">開発の順序 ↗</a></article>
+        <article class="limit reveal"><h3>v4 では実機の測定はまだできない</h3><p>USRP などの実機を操作する機能は v4 では未実装で、実機との比較も行っていません。v4 の結果はすべて仮想無線機によるものです。実機は v3 で使えます。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/vision/11-boundaries-invariants-and-roadmap.md" target="_blank" rel="noopener noreferrer">開発の順序 ↗</a></article>
         <article class="limit reveal"><h3>再現できるのは同じ PC 環境まで</h3><p>同じビルド・同じ環境なら、同じ設定でシミュレーション結果を再現できます。異なる OS や CPU の間で、数値が最後の bit まで一致する保証はありません。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/11-simulation-channel.md" target="_blank" rel="noopener noreferrer">シミュレーションの仕様 ↗</a></article>
         <article class="limit reveal"><h3>導入には Rust のビルドが必要</h3><p>配布用のパッケージはまだありません。実験実行プログラムをリポジトリからビルドして使います。研究用途の初期版としてお試しください。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/python/examples/minimal.py" target="_blank" rel="noopener noreferrer">最小の例 ↗</a></article>
       </div>
@@ -502,7 +565,7 @@ python python/examples/minimal.py</code></pre>
 
     <section class="section light container" id="docs" aria-labelledby="docs-title">
       <div class="section-head reveal">
-        <p class="kicker">06 · さらに詳しく</p>
+        <p class="kicker">07 · さらに詳しく</p>
         <h2 id="docs-title">設計資料と実装状況</h2>
         <p class="section-lead">このページの内容は、リポジトリの資料に基づいています。細部を確かめたいときにどうぞ。</p>
       </div>
