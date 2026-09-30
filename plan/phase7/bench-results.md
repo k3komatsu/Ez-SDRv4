@@ -803,3 +803,76 @@ error: test failed, to rerun pass `-p ezsdr-radio-uhd --test hardware`
 - `DeviceAuthority::new` (UR-7) selects the clock source; UHD's `set_clock_source("internal")` waited ~30 s and returned `UHD error 44: RuntimeError: Reference Clock PLL failed to lock to internal source.` The same happened once to `hw_b9_long_receive`. **2 of about 24 device opens after the fix; none in the ~50 of session 2 before it, none in 8 further runs of `hw_b2_authority` right after** (13.6–17.6 s each, the first 27.6 s). `uhd_usrp_probe` right after the first failure exits 0 with no warning (`~/ezsdr-bench/probe-after-refpll.log`).
 - Not the fix's (INFERRED: the failure is in UHD's clock-source call at the start of a process, before any stream; the fix changes only how streams stop and bursts join). Every test process re-initialises the X300 and re-selects its reference; the X300 had by then been running and re-initialised for about 8 hours.
 - What it means for the Module: a Run whose Authority cannot select its source fails at assembly with UR-7's error, which is the specified behaviour (a Run on an unlocked reference must not start). Whether UR-7 should retry the selection once before failing is a question for the owner and Phase 8, not changed here.
+
+## Session 2, part 4 — after Review N's fixes (`aaf1e00`)
+
+The owner: "推奨で直して再レビューをしてください". The fixes are design-notes §12; then on the bench at `aaf1e00`, logs in `~/ezsdr-bench/s2-reviewN/`.
+
+### The low rate and the long block — `hw_b8_cold_change_capture_low_rate`: pass
+
+A Session at 390 625 S/s (200 MHz / 512, the lowest rate), a capture across a `cold` change, once to 400 000 S/s with the default block and once to 2 Msps with `block_len` 65 536 (168 ms a block). The test now asserts: the old clock's samples end at `e₁`, the new clock's begin at `e₂`, no gap, no `LATE_COMMAND`.
+
+```
+B8 cold 390625 → 400000 S/s, block_len None: capture asked at TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 484981833 }; rate change submitted at TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 493099547 }: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }
+B8 cold: stats {"link_drops_seen":0,"rx_before_origin":2,"rx_blocks":225,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":448063,"tx_bursts":0,"tx_samples":0}
+B8 cold: artifact rec_0 continuity [ContinuityMap { domain: ClockDomainId { node: NodeId(0), local: 4 }, channels: 1, valid: [[Segment { start: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 4 }, ticks: 86079 }, len: 35559 }]], gaps: [], channel_gaps: [], first: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 4 }, ticks: 86079 }, end: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 4 }, ticks: 121638 } }, ContinuityMap { domain: ClockDomainId { node: NodeId(0), local: 5 }, channels: 1, valid: [[Segment { start: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 5 }, ticks: 0 }, len: 51316 }]], gaps: [], channel_gaps: [], first: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 5 }, ticks: 0 }, end: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 5 }, ticks: 51316 } }]
+B8 cold 390625 → 2000000 S/s, block_len Some(65536): capture asked at TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 484736279 }; rate change submitted at TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 492822188 }: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }
+B8 cold: stats {"link_drops_seen":0,"rx_before_origin":2,"rx_blocks":19,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":1143848,"tx_bursts":0,"tx_samples":0}
+B8 cold: artifact rec_0 continuity [ContinuityMap { domain: ClockDomainId { node: NodeId(0), local: 4 }, channels: 1, valid: [[Segment { start: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 4 }, ticks: 86020 }, len: 35747 }]], gaps: [], channel_gaps: [], first: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 4 }, ticks: 86020 }, end: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 4 }, ticks: 121767 } }, ContinuityMap { domain: ClockDomainId { node: NodeId(0), local: 5 }, channels: 1, valid: [[Segment { start: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 5 }, ticks: 0 }, len: 211128 }]], gaps: [], channel_gaps: [], first: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 5 }, ticks: 0 }, end: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 5 }, ticks: 211128 } }]
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 13.10s
+```
+
+- Both pass. The old stream's tail after the untimed stop is dropped (`rx_before_origin: 2` in each), not published.
+- From `timing`: with the default block the untimed stop came 0.41 ms after `e₁` and the switch 49.2 ms before `e₂`; **with the 168 ms block, the untimed stop came 25.5 ms after `e₁`** and the switch 23.8 ms before `e₂`. Review N B1's fix bounds every receive request issued once the cut is known, but not the one already in progress when the change is booked, which can last a whole block. **Residual (INFERRED from this and the code, recorded as design-notes §12 R-1 for the owner and the re-review):** with a block longer than about the restart lead less the delivery, a change booked early in a receive call can still miss `e₂` — a `LATE_COMMAND` and UR-17's restart, reported, and no old sample on the new clock (`not_before`).
+
+`hw_b8_cold_change_capture` (1 Msps → 2 Msps, the default block), also with the new assertions: pass; the untimed stop 1.85 ms after `e₁`, the switch 47.6 ms before `e₂`. Its first run failed for a reason of the test run, not the Module: the name filter also matched the new `…_low_rate`, so two tests opened the X300 at once in one process — UHD logged `[ERROR] [RFNOC::GRAPH::DETAIL] Attempting to reconnect output port 0/DDC#0:0`, the Session failed at `Arm`, and the process died of SIGSEGV (`hw_b8_cold_change_capture.two-in-parallel.log`). The bench script now passes `--exact`.
+
+### A burst booked at a sent burst's end — `hw_b8_burst_at_a_sent_burst_s_end`: pass
+
+```
+B8 burst at a sent burst's end, trial 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; 7.63583 ms before A's end; TIME_ERROR []; async [{"channel":0,"code":"BurstAck","tick":415642001}]; bursts [{"actual_start":null,"blocks":15,"end":"eob","late_by":null,"requested_target":null,"samples":30000,"target":{"domain":{"local":4,"node":0},"ticks":41237},"wraps":1},{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":1000,"target":{"domain":{"local":4,"node":0},"ticks":71237},"wraps":1}]
+B8 burst at a sent burst's end, trial 1: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; 7.89747 ms before A's end; TIME_ERROR []; async [{"channel":0,"code":"BurstAck","tick":415593401}]; bursts [{"actual_start":null,"blocks":15,"end":"eob","late_by":null,"requested_target":null,"samples":30000,"target":{"domain":{"local":4,"node":0},"ticks":41404},"wraps":1},{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":1000,"target":{"domain":{"local":4,"node":0},"ticks":71404},"wraps":1}]
+B8 burst at a sent burst's end, trial 2: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; 7.570635 ms before A's end; TIME_ERROR []; async [{"channel":0,"code":"BurstAck","tick":415777201}]; bursts [{"actual_start":null,"blocks":15,"end":"eob","late_by":null,"requested_target":null,"samples":30000,"target":{"domain":{"local":4,"node":0},"ticks":41605},"wraps":1},{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":1000,"target":{"domain":{"local":4,"node":0},"ticks":71605},"wraps":1}]
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 39.68s
+```
+
+- In all three trials the burst booked 7.6–7.9 ms before the first one's end (after its last buffer went out) is admitted, played and acknowledged (one `BurstAck` for the pair: one device burst), with no `TIME_ERROR`, no `TimeError`, no `Underflow`: Review N B3 closed on the bench.
+
+### Preemption and the transmit end, again
+
+```
+B8 preempt lead 20 ms: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR []
+B8 preempt lead 20 ms: asked 121717; bursts [{"actual_start":null,"blocks":117,"end":"eob","late_by":null,"requested_target":{"domain":{"local":2,"node":0},"ticks":402600037},"samples":116638,"target":{"domain":{"local":4,"node":0},"ticks":5079},"wraps":116},{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":100,"target":{"domain":{"local":4,"node":0},"ticks":121717},"wraps":1}]
+B8 preempt lead 10 ms: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(725000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(111492)}}]
+B8 preempt lead 10 ms: asked 111492; bursts [{"actual_start":null,"blocks":208,"end":"stop","late_by":null,"requested_target":{"domain":{"local":2,"node":0},"ticks":402395897},"samples":208000,"target":{"domain":{"local":4,"node":0},"ticks":5217},"wraps":208}]
+B8 preempt lead 5 ms: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(5500000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(106542)}}]
+B8 preempt lead 5 ms: asked 106542; bursts [{"actual_start":null,"blocks":209,"end":"stop","late_by":null,"requested_target":{"domain":{"local":2,"node":0},"ticks":402249328},"samples":209000,"target":{"domain":{"local":4,"node":0},"ticks":5042},"wraps":209}]
+B8 preempt lead 3 ms: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(78000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(104371)}}]
+B8 preempt lead 3 ms: asked 104371; bursts [{"actual_start":null,"blocks":209,"end":"stop","late_by":null,"requested_target":{"domain":{"local":2,"node":0},"ticks":402292343},"samples":209000,"target":{"domain":{"local":4,"node":0},"ticks":5031},"wraps":209}]
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 49.25s
+B8 stop end, trial 0: Stop submitted at root 415600770; the loop heard the repeat until root 417686200 (+10.427 ms from the Stop); steady power 1.24e-4, after 7.60e-9; bursts [{"actual_start":null,"blocks":77,"end":"stop","late_by":null,"requested_target":{"domain":{"local":2,"node":0},"ticks":402284508},"samples":77000,"target":{"domain":{"local":4,"node":0},"ticks":5029},"wraps":77}]
+B8 stop end, trial 0: tx clocks [(401278800, 200)]
+B8 stop end, trial 1: Stop submitted at root 415660978; the loop heard the repeat until root 418015800 (+11.774 ms from the Stop); steady power 1.24e-4, after 7.73e-9; bursts [{"actual_start":null,"blocks":78,"end":"stop","late_by":null,"requested_target":{"domain":{"local":2,"node":0},"ticks":402412539},"samples":78000,"target":{"domain":{"local":4,"node":0},"ticks":5143},"wraps":78}]
+B8 stop end, trial 1: tx clocks [(401384000, 200)]
+B8 stop end, trial 2: Stop submitted at root 415723318; the loop heard the repeat until root 417812200 (+10.444 ms from the Stop); steady power 1.24e-4, after 8.37e-9; bursts [{"actual_start":null,"blocks":77,"end":"stop","late_by":null,"requested_target":{"domain":{"local":2,"node":0},"ticks":402401275},"samples":77000,"target":{"domain":{"local":4,"node":0},"ticks":5164},"wraps":77}]
+B8 stop end, trial 2: tx clocks [(401368600, 200)]
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 19.62s
+```
+
+- The 20 ms preemption is played as at part 3; 10, 5 and 3 ms are dropped by UR-21 as before.
+- The transmission ends 10.4–11.8 ms after the Stop's submission (part 2: 10.3–11.4 ms).
+
+### B1–B8, B9's long Runs, B7 (Python): pass
+
+B1, B2, B3, B4, B5, B6 (delay 44 samples, the repeat back to back), B7 (Rust), B8 (`hw_b8_leads`, `hw_b8_stop_end`), `hw_b9_long_receive` (120 s), `hw_b9_transmit_only_session` (60 s): all pass, with no reference-PLL failure this time. B7 (Python), release server rebuilt from `aaf1e00`:
+
+```
+sample rate 20000000.0 S/s (coerced, a new SampleClock)
+the transmit retune outside the RF envelope was refused: radio.rf_envelope: RM-19: radio: 2400000000 Hz is in no allowed band
+y: correlation peak at sample 2952; z: at sample 864
+rec_0: first sample {'domain': {'node': 0, 'local': 3}, 'ticks': 55446}
+rec_1: first sample {'domain': {'node': 0, 'local': 3}, 'ticks': 179534}
+asked: y at {'domain': {'node': 0, 'local': 2}, 'ticks': 411604875}, z at {'domain': {'node': 0, 'local': 2}, 'ticks': 436422504}
+TIME_ERROR events: 0 (spike K6: none)
+Manifest: /bench/ezsdr-runs/session-7-7/manifest.json
+```
