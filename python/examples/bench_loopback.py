@@ -32,11 +32,12 @@ with ezsdr.connect() as sdr:
     z = sdr.rx.capture(N, at=t)
     sdr.rx.sample_rate = 19.5e6
     print(f"sample rate {sdr.rx.sample_rate} S/s (coerced, a new SampleClock)")
+    # The RF envelope limits what is emitted (RM-19): a transmit retune outside it.
     try:
-        sdr.rx.frequency = 2.4e9
-        print("the retune outside the RF envelope was admitted: check radio.rf_envelope")
+        sdr.tx.frequency = 2.4e9
+        print("the transmit retune outside the RF envelope was admitted: check radio.rf_envelope")
     except ezsdr.Rejected as rejected:
-        print(f"the retune outside the RF envelope was refused: {rejected}")
+        print(f"the transmit retune outside the RF envelope was refused: {rejected}")
 
 manifest = sdr.manifest
 captures = [a for a in manifest["artifacts"] if a["continuity"]]
