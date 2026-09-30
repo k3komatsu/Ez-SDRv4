@@ -121,7 +121,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; fini
 
 ### B7 (Rust) — `hw_b7_session_loopback`: pass
 
-First run (as `4a9f2b2`): `B7 time errors: []`, `test result: ok. 1 passed … finished in 17.56s`. The test prints nothing else, so `println!`s were added (test output only: the refusal, `diagnose` of the capture, the capture's continuity and the Manifest's sample clocks) and it was run twice more; the last run:
+First run (as `6aee7fc`): `B7 time errors: []`, `test result: ok. 1 passed … finished in 17.56s`. The test prints nothing else, so `println!`s were added (test output only: the refusal, `diagnose` of the capture, the capture's continuity and the Manifest's sample clocks) and it was run twice more; the last run:
 
 ```
 running 1 test
@@ -270,9 +270,9 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; fini
 - **Finding: "the retune outside the RF envelope was admitted".** Not a Module defect: the example retunes `sdr.rx.frequency`, and RM-19 limits only transmit frequencies ("Receive frequencies are not limited: the envelope is about emission", design/07). `hw_b7_session_loopback` retunes `radio.tx.frequency_hz`, which is the check bench.md asks for. Fix the example (`sdr.tx.frequency = 2.4e9`), then run it again.
 - Whether z started at t (EA-17): derived in session 2 from `session-7-1`'s Manifest, below.
 
-### B7 (Python), session 2 rerun with the fixed example (`36174d1`): pass
+### B7 (Python), session 2 rerun with the fixed example (`7221612`): pass
 
-Same container and environment as session 1 (`-w /bench -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH=/work/python -e EZSDR_SERVER=/cargo-target/release/ezsdr-server -e EZSDR_PROFILE=/bench/bench-session.json`; the release server rebuilt from `36174d1`, the server code unchanged since session 1). `bench_loopback.py` now retunes `sdr.tx.frequency = 2.4e9` (the fix: session 1's finding (c); the v58 scan and the Python suite, 23 tests against the debug server, pass). Session 1's two logs are kept as `~/ezsdr-bench/b7_minimal.s1.log` and `b7_loopback.s1.log`.
+Same container and environment as session 1 (`-w /bench -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH=/work/python -e EZSDR_SERVER=/cargo-target/release/ezsdr-server -e EZSDR_PROFILE=/bench/bench-session.json`; the release server rebuilt from `7221612`, the server code unchanged since session 1). `bench_loopback.py` now retunes `sdr.tx.frequency = 2.4e9` (the fix: session 1's finding (c); the v58 scan and the Python suite, 23 tests against the debug server, pass). Session 1's two logs are kept as `~/ezsdr-bench/b7_minimal.s1.log` and `b7_loopback.s1.log`.
 
 `python3 /work/python/examples/minimal.py`:
 
@@ -312,11 +312,11 @@ Every capture is 20 000 samples with no gap. So a capture requested at an instan
 
 ## Session 2 in short
 
-B6 pass (after the test's correlation fix), B7 Rust pass, B7 Python pass (fixed example), B8 run, B5's restart gap recorded. Numbers for Phase 8 (spec 18 §3 and the profiles unchanged): transmit-to-receive delay **44 samples** at 1 Msps (profile 45); loop gain −36.3 dB through 30 dB at 0 dB gains; a 5 ms lead from submission sends, 3 ms is dropped by UR-21 (receipt 1.0–1.5 ms after submission), the device lead itself not reached; the orderly receive stops all by UR-25's untimed fallback, 0.2–3.9 ms after the cut (no timed stop was issued in those Runs: corrected in part 2, which measures the timed stop itself); the overflow gap 456 ms after a 1 s stall, UHD's restart ≤ ~67 ms after the reader returns; EA-17: a capture at the `t` `sleep` returned starts at `t`. Test code changed (no Module code): `correlate` phase-blind with a noise-floor threshold, `back_to_back`, and `println!`s in B5, B7, B8 (`4a9f2b2` … `c046a64`). The bench profiles of B6 and B8 carry no `radio.rf_envelope`.
+B6 pass (after the test's correlation fix), B7 Rust pass, B7 Python pass (fixed example), B8 run, B5's restart gap recorded. Numbers for Phase 8 (spec 18 §3 and the profiles unchanged): transmit-to-receive delay **44 samples** at 1 Msps (profile 45); loop gain −36.3 dB through 30 dB at 0 dB gains; a 5 ms lead from submission sends, 3 ms is dropped by UR-21 (receipt 1.0–1.5 ms after submission), the device lead itself not reached; the orderly receive stops all by UR-25's untimed fallback, 0.2–3.9 ms after the cut (no timed stop was issued in those Runs: corrected in part 2, which measures the timed stop itself); the overflow gap 456 ms after a 1 s stall, UHD's restart ≤ ~67 ms after the reader returns; EA-17: a capture at the `t` `sleep` returned starts at `t`. Test code changed (no Module code): `correlate` phase-blind with a noise-floor threshold, `back_to_back`, and `println!`s in B5, B7, B8 (`6aee7fc` … `226122d`). The bench profiles of B6 and B8 carry no `radio.rf_envelope`.
 
 ## Session 2, part 2 — what the bench could still answer with the owner away (2026-09-30)
 
-The owner, away from the bench: "ちょっと今手元にUSRPがなくて遠隔でやってます．なので，とりあえず今のうちに今の状態でUSRPを使って確認しておいた方がいいことを考えて全部やってください". Nothing that needs a hand at the bench (B9's unplug) was done. What was: bench.md B8's rows the Module's own rules keep a Session from probing, measured on the `Device` itself (`hw_b8_raw_*`, test code in `hardware.rs`: the device used as the Module drives it); the rest of B8 through the Module; beyond bench.md, the receive rates, the loop delay by rate and B9's other half (long Runs with no false `DEVICE_LOST`); then B1–B8 once more at the commit of those tests (`b0aaa08`). Every log is `~/ezsdr-bench/<test>.log` (the final B1–B8 in `~/ezsdr-bench/s2-final/`). Below each test's output keeps its `B…` lines; a run of `TimeError` reports is shortened to its count and UHD's printed `L`s (one per late packet) to theirs.
+The owner, away from the bench: "ちょっと今手元にUSRPがなくて遠隔でやってます．なので，とりあえず今のうちに今の状態でUSRPを使って確認しておいた方がいいことを考えて全部やってください". Nothing that needs a hand at the bench (B9's unplug) was done. What was: bench.md B8's rows the Module's own rules keep a Session from probing, measured on the `Device` itself (`hw_b8_raw_*`, test code in `hardware.rs`: the device used as the Module drives it); the rest of B8 through the Module; beyond bench.md, the receive rates, the loop delay by rate and B9's other half (long Runs with no false `DEVICE_LOST`); then B1–B8 once more at the commit of those tests (`85ac77b`). Every log is `~/ezsdr-bench/<test>.log` (the final B1–B8 in `~/ezsdr-bench/s2-final/`). Below each test's output keeps its `B…` lines; a run of `TimeError` reports is shortened to its count and UHD's printed `L`s (one per late packet) to theirs.
 
 RF for the raw tests (`raw_tx` refuses anything else before it sends): the transmitter at 999.5–1 000.5 MHz only, at most 2 Msps (so the emission stays inside the bench envelope's 999–1 001 MHz), 0 dB, antenna `TX/RX`, amplitude ≤ 0.4, into the 30 dB loopback; the receiver's retunes stayed inside 999.6–1 000.4 MHz too. The raw tests bypass the Module's RF envelope, so these limits are the only guard there. The Module-level steps that transmit (B6, B8, and the new ones) now carry the bench envelope in their profile (`bench_envelope`, in `tests/common/mod.rs`: session 2's finding that B6's and B8's did not).
 
@@ -639,7 +639,7 @@ B2 drift after 60.003482287s: host-derived 12000597403 ticks, device 12000620033
 
 - **The Authority's host-derived time runs 77–115 µs behind the device's, and the difference does not grow over 60 s** (−17 111 … −22 630 ticks): it re-anchors, so there is no ppm drift to bound, only an offset of about 0.1 ms, within B2's host-bracket uncertainty (306 µs, session 1). The "ppm" column is therefore not a drift.
 
-### B1–B8 once more at `b0aaa08`
+### B1–B8 once more at `85ac77b`
 
 With the envelope in every transmitting step's profile and all the tests above in the tree. All eight pass; no `DEVICE_LOST` in any output:
 
@@ -705,11 +705,11 @@ B8 lead 500 µs: bursts []
 
 ### Part 2 in short
 
-Three findings need the owner (design-notes §11): **F1** the X300 ignores a timed receive stop, so a `cold` receive change loses ~50 ms before `e1` without a flag; **F2** the restart after it is late, because uhd-rx waits for a 100 ms receive timeout; **F3** a burst whose timed start is the previous burst's end tick is dropped by the device, which is how UR-23 preempts. Phase 8 inputs (spec 18 §3 and the profiles unchanged): device lead 0.3–0.5 ms (Module 2 ms); a clean timed retune needs ~2 ms; restart lead ≥ 1 ms on the device (Module 50 ms); queue depth 7 OBX tunes (profile 16); in-flight window ≥ 0.5 ms at 2 Msps (Module 10 ms); transmit end ≤ 11.4 ms after the Stop's submission; receive 200 Msps sustained; loop delay 35–44 samples by rate (profile 45); timed tunes restore the loop phase (fractional-N), untimed do not; no false `DEVICE_LOST` in 120 s receive and 60 s transmit-only; the Authority's offset bounded at ~0.1 ms. Test code only (`b0aaa08`); no Module code changed.
+Three findings need the owner (design-notes §11): **F1** the X300 ignores a timed receive stop, so a `cold` receive change loses ~50 ms before `e1` without a flag; **F2** the restart after it is late, because uhd-rx waits for a 100 ms receive timeout; **F3** a burst whose timed start is the previous burst's end tick is dropped by the device, which is how UR-23 preempts. Phase 8 inputs (spec 18 §3 and the profiles unchanged): device lead 0.3–0.5 ms (Module 2 ms); a clean timed retune needs ~2 ms; restart lead ≥ 1 ms on the device (Module 50 ms); queue depth 7 OBX tunes (profile 16); in-flight window ≥ 0.5 ms at 2 Msps (Module 10 ms); transmit end ≤ 11.4 ms after the Stop's submission; receive 200 Msps sustained; loop delay 35–44 samples by rate (profile 45); timed tunes restore the loop phase (fractional-N), untimed do not; no false `DEVICE_LOST` in 120 s receive and 60 s transmit-only; the Authority's offset bounded at ~0.1 ms. Test code only (`85ac77b`); no Module code changed.
 
-## Session 2, part 3 — after the fix of design-notes §11 F1–F3 (`92d00f8`)
+## Session 2, part 3 — after the fix of design-notes §11 F1–F3 (`bc0db98`)
 
-The owner: "F1-F3は推奨で". The fix is design-notes §11 "The decision and the change"; spec 18 UR-23, UR-25 and the rest follow. Then on the bench, at `92d00f8` (release server rebuilt from it for B7). Logs in `~/ezsdr-bench/s2-fixed/`.
+The owner: "F1-F3は推奨で". The fix is design-notes §11 "The decision and the change"; spec 18 UR-23, UR-25 and the rest follow. Then on the bench, at `bc0db98` (release server rebuilt from it for B7). Logs in `~/ezsdr-bench/s2-fixed/`.
 
 ### The two findings, again — fixed on the bench
 
@@ -746,7 +746,7 @@ B8 preempt lead 3 ms: asked 104537; bursts [{"actual_start":null,"blocks":210,"e
 
 ### B1–B8, B9's long Runs and B7 (Python) again: pass
 
-| Step | Outcome at `92d00f8` |
+| Step | Outcome at `bc0db98` |
 |---|---|
 | B1 `hw_b1_probe` | pass |
 | B2 `hw_b2_authority` | pass (and 8 more runs, below) |

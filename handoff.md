@@ -340,13 +340,13 @@ Python の B7 は同じ container を `-w /bench -e PYTHONPATH=/work/python -e E
 **4b. セッション 2 part 2（owner が遠隔の間，手作業なしでできる確認をすべて）**
 
 - owner：「ちょっと今手元にUSRPがなくて遠隔でやってます．なので，とりあえず今のうちに今の状態でUSRPを使って確認しておいた方がいいことを考えて全部やってください」．
-- B8 の未実装の行を `Device` を直接叩くテスト（`hw_b8_raw_*`）と Module 経由のテストで測り，受信レート，レートごとの遅延，120 s の受信と 60 s の送信だけの Session（偽の `DEVICE_LOST` なし），60 s の drift も測った．最後に B1–B8 を `b0aaa08` で通しで流し直して全部合格．結果は bench-results.md「Session 2, part 2」．
+- B8 の未実装の行を `Device` を直接叩くテスト（`hw_b8_raw_*`）と Module 経由のテストで測り，受信レート，レートごとの遅延，120 s の受信と 60 s の送信だけの Session（偽の `DEVICE_LOST` なし），60 s の drift も測った．最後に B1–B8 を `85ac77b` で通しで流し直して全部合格．結果は bench-results.md「Session 2, part 2」．
 - **設計を変える必要のある発見が 3 つ**（design-notes §11，owner の判断待ち，コードは未変更）：F1 X300 は受信の timed stop の時刻を無視して即時に止まる（FPGA source で VERIFIED）→ `cold` な受信変更で e1 前の約 50 ms が flag なしで欠ける；F2 その後の再開が 100 ms の receive timeout 待ちで e2 に遅れる；F3 前の burst の終わりの tick ちょうどに timed SOB を置くと device が late として捨てる（UR-23 の preemption がこの形）．FakeDevice はどれも実機より緩い．
 - 前の記録「受信の timed stop は 9/9 守られなかった」は誤りだったので訂正した（その Run では timed stop は device に出ていない）．
 
 **4c. F1–F3 の修正（owner：「F1-F3は推奨で」）**
 
-- `92d00f8`：FakeDevice を X300 と同じ厳しさにして 6 本の再現テストが落ちるのを確かめてから，uhd-rx は timed stop を出さず cut で untimed stop（F1），cut 待ちの間の `rx_recv` の timeout を cut + 1 block に（F2），uhd-tx は隙間 0 の次の burst を同じ device burst で続ける（F3）．spec 18 UR-17・UR-23〜26・UR-33・§6，mutations（124 行，変更したファイルの 31 行を再実行，R18 は取り下げ）．workspace 851 passed（stable と 1.85.0），clippy clean．
+- `bc0db98`：FakeDevice を X300 と同じ厳しさにして 6 本の再現テストが落ちるのを確かめてから，uhd-rx は timed stop を出さず cut で untimed stop（F1），cut 待ちの間の `rx_recv` の timeout を cut + 1 block に（F2），uhd-tx は隙間 0 の次の burst を同じ device burst で続ける（F3）．spec 18 UR-17・UR-23〜26・UR-33・§6，mutations（124 行，変更したファイルの 31 行を再実行，R18 は取り下げ）．workspace 851 passed（stable と 1.85.0），clippy clean．
 - 実機（bench-results.md「Session 2, part 3」）：cold 変更で e₁ まで sample が届き e₂ に遅れず開始，20 ms の preemption の burst が再生される．B1–B8・B9 の長時間 Run・Python B7 すべて合格．
 - 新しい発見：X300 の ref PLL が `set_clock_source` で lock しないことが 2 回（約 24 回の open 中）．UR-7 で再試行するかは owner の判断待ち．
 - 次：B9 の抜線（owner が現地で），spike 表の記入，main への merge と Gate X（owner）．
