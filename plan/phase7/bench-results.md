@@ -93,6 +93,32 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; 
 - The cause is the test, not the Module: `correlate` accepts a peak only when the **real part** of the correlation exceeds `0.5 × 0.0316` of the energy (−36.0 dB), a threshold that assumes a −30 dB loop (6 dB of margin) and a zero phase. The real loop is 0.4 dB below it in magnitude, and the real part (0.0138) loses another 0.8 dB to the 24.6° phase; any other LO phase moves it further (cos φ). Python's `bench_loopback.py` found its peaks because it takes `np.abs` of the complex correlation.
 - Per "If a step fails": fixed in the test code with a test that reproduces it first (next entry), then B6 is run again.
 
+**The fix (test code only; no Module code, no profile value).** `correlate_finds_the_bench_loop_at_any_phase` (`tests/fake.rs`) puts the waveform into 5 000 samples of noise (RMS 0.003) at sample 44 with gain 0.0152 at 24.6°, 90°, 180° and −120°, and noise alone; with the committed `correlate` it failed (`left: None, right: Some(44)` at 24.6°, `~/ezsdr-bench/correlate-before.log`). `correlate` now takes the **magnitude** of the complex correlation and accepts its peak when it stands `CORRELATION_PEAK_OVER_MEDIAN` = 8 times above the correlation's median (the noise floor; noise alone peaks about 3.5 times over a few thousand offsets), not above an absolute loop gain. Then the new test passes.
+
+A second gap found on reading the step: on the bench (`exact = false`) the test checked the repeat's capture only for a correlation peak, not bench.md's "back to back across every wrap" (the sample comparison runs only on the fake). Added: `back_to_back` correlates every whole period after the first peak and the step asserts each has more than half the first's gain and a phase within ±20° of it; `back_to_back_sees_a_slip_in_a_cabled_repeat` checks it sees a 7-sample slip. After both: `cargo test --workspace` 849 passed (847 + the two tests); `--features uhd`: fake 99, `uhd_api` 4, hardware 10 ignored; clippy `-D warnings` clean.
+
+### B6 — `hw_b6_txrx_and_repeat`, rerun: pass
+
+```
+running 1 test
+[INFO] [UHD] linux; GNU C++ version 15.2.0; Boost_109000; UHD_4.10.0.0-0-unknown
+[INFO] [X300] X300 initialization sequence...
+[INFO] [X300] Maximum frame size: 8000 bytes.
+[INFO] [X300] Radio 1x clock: 200 MHz
+B6 burst: 5000 samples, rms 0.00494; correlation peak Some((44, 0.0151171, 25.14115)) (offset, gain, phase °); peak over median 3113.8 (needs > 8)
+B6: transmit-to-receive delay 44 samples
+B6 repeat: 4000 samples, rms 0.01110; correlation peak Some((44, 0.015422871, 24.600775)) (offset, gain, phase °); peak over median 28.9 (needs > 8)
+B6 repeat: 3 whole periods from sample 44 (offset, gain, phase °): [(44, 0.015422871, 24.600775), (1044, 0.015420231, 24.492924), (2044, 0.01541671, 24.440487)]
+B6 bursts: [{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":1000,"target":{"domain":{"local":4,"node":0},"ticks":2011816},"wraps":1}] / [{"actual_start":null,"blocks":20,"end":"stop","late_by":null,"requested_target":null,"samples":20000,"target":{"domain":{"local":4,"node":0},"ticks":2002198},"wraps":20}]
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 8.55s
+```
+
+- **The transmit-to-receive delay: 44 samples at 1 Msps** (MR-3's 45 is INFERRED; the profile's `tx_path_delay_samples` stays 45, spec 18 §3: an input for Phase 8). The same 44 in all three runs of the session.
+- The loop: gain 0.0151–0.0154 (−36.4 to −36.2 dB) at 0 dB transmit and receive gain through 30 dB, phase 24.4°–25.3° (the TX and RX LOs' offset, steady within a run and across the three runs of this power cycle).
+- The repeat: back to back across the capture's two wraps (1 044 and 2 044), gain and phase unchanged to 0.2° and 0.03 %; the repeat's record `wraps: 20` (20 000 samples, ended by `stop` when the Run finished after its capture, not a 3 s repeat as bench.md words it); no `TX_UNDERFLOW`.
+- No `TIME_ERROR` in either Run's bursts (`late_by: null`).
+
 ## B7 (Python) — ran; one finding
 
 `EZSDR_SERVER=/cargo-target/release/ezsdr-server EZSDR_PROFILE=/bench/bench-session.json` (bench.md's Session profile with `x310-obx`, `addr=192.168.40.36`, the capture directory `/bench/b7-captures`):

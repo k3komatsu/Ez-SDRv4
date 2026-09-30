@@ -383,43 +383,72 @@ pub fn exactly(samples: &[(f32, f32)], wave: &[(f32, f32)]) -> Option<usize> {
     (0..=samples.len().saturating_sub(wave.len())).find(|at| samples[*at..].starts_with(wave))
 }
 
-/// Where `wave` first appears in `samples`, by the peak of their correlation.
-pub fn correlate(samples: &[(f32, f32)], wave: &[(f32, f32)]) -> Option<usize> {
-    let energy: f32 = wave.iter().map(|(re, im)| re * re + im * im).sum();
+/// The complex correlation of `wave` with `samples` at every offset: `Σ conj(w)·s`.
+fn correlation(samples: &[(f32, f32)], wave: &[(f32, f32)]) -> Vec<(f32, f32)> {
     (0..samples.len().saturating_sub(wave.len()))
-        .map(|at| {
-            let dot: f32 = wave.iter().zip(&samples[at..]).map(|((wr, wi), (sr, si))| wr * sr + wi * si).sum();
-            (at, dot)
-        })
-        .filter(|(_, dot)| *dot > 0.5 * energy * 0.0316)
-        .max_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(at, _)| at)
-}
-
-/// What a bench capture holds against `wave`: its RMS, and the peaks of the complex
-/// correlation's magnitude and of its real part (what `correlate` thresholds), each as a
-/// fraction of the waveform's energy (the loop's amplitude gain at the peak).
-pub fn diagnose(what: &str, samples: &[(f32, f32)], wave: &[(f32, f32)]) {
-    let energy: f32 = wave.iter().map(|(re, im)| re * re + im * im).sum();
-    let rms = (samples.iter().map(|(re, im)| re * re + im * im).sum::<f32>() / samples.len().max(1) as f32).sqrt();
-    let dots: Vec<(usize, f32, f32)> = (0..samples.len().saturating_sub(wave.len()))
         .map(|at| {
             let (mut re, mut im) = (0.0f32, 0.0f32);
             for ((wr, wi), (sr, si)) in wave.iter().zip(&samples[at..]) {
                 re += wr * sr + wi * si;
                 im += wr * si - wi * sr;
             }
-            (at, re, im)
+            (re, im)
         })
-        .collect();
-    let by_abs = dots.iter().max_by(|a, b| a.1.hypot(a.2).total_cmp(&b.1.hypot(b.2)));
-    let by_re = dots.iter().max_by(|a, b| a.1.total_cmp(&b.1));
+        .collect()
+}
+
+/// How far the correlation's magnitude must peak above its median, the capture's noise
+/// floor, for `correlate` to call it the waveform (noise alone peaks about 3.5 times over
+/// a few thousand offsets; the bench's loop peaked about 70 times).
+pub const CORRELATION_PEAK_OVER_MEDIAN: f32 = 8.0;
+
+/// Where `wave` first appears in `samples`: the peak of their complex correlation's
+/// magnitude, since a cabled loop turns the waveform by its LOs' phase offset, accepted
+/// when it stands `CORRELATION_PEAK_OVER_MEDIAN` times above the median. Not a threshold
+/// on the loop's gain, which is the attenuator's and the front ends' (the bench's was
+/// −36.4 dB, bench-results.md session 2).
+pub fn correlate(samples: &[(f32, f32)], wave: &[(f32, f32)]) -> Option<usize> {
+    let magnitudes: Vec<f32> = correlation(samples, wave).into_iter().map(|(re, im)| re.hypot(im)).collect();
+    let mut sorted = magnitudes.clone();
+    sorted.sort_by(f32::total_cmp);
+    let median = *sorted.get(sorted.len() / 2)?;
+    let (at, peak) = magnitudes.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1))?;
+    (*peak > CORRELATION_PEAK_OVER_MEDIAN * median).then_some(at)
+}
+
+/// The correlation with `wave` at `first` and every whole period after it, as (offset,
+/// gain, phase °), the gain a fraction of the waveform's energy.
+pub fn back_to_back(samples: &[(f32, f32)], wave: &[(f32, f32)], first: usize) -> Vec<(usize, f32, f32)> {
+    let energy: f32 = wave.iter().map(|(re, im)| re * re + im * im).sum();
+    (first..=samples.len().saturating_sub(wave.len()))
+        .step_by(wave.len())
+        .map(|at| {
+            let (mut re, mut im) = (0.0f32, 0.0f32);
+            for ((wr, wi), (sr, si)) in wave.iter().zip(&samples[at..]) {
+                re += wr * sr + wi * si;
+                im += wr * si - wi * sr;
+            }
+            (at, re.hypot(im) / energy, im.atan2(re).to_degrees())
+        })
+        .collect()
+}
+
+/// What a bench capture holds against `wave`: its RMS, the correlation's peak (offset,
+/// magnitude and phase, the magnitude as a fraction of the waveform's energy: the loop's
+/// amplitude gain) and how far it stands above the median (what `correlate` thresholds).
+pub fn diagnose(what: &str, samples: &[(f32, f32)], wave: &[(f32, f32)]) {
+    let energy: f32 = wave.iter().map(|(re, im)| re * re + im * im).sum();
+    let rms = (samples.iter().map(|(re, im)| re * re + im * im).sum::<f32>() / samples.len().max(1) as f32).sqrt();
+    let dots = correlation(samples, wave);
+    let mut sorted: Vec<f32> = dots.iter().map(|(re, im)| re.hypot(*im)).collect();
+    sorted.sort_by(f32::total_cmp);
+    let median = sorted.get(sorted.len() / 2).copied().unwrap_or_default();
+    let peak = dots.iter().enumerate().max_by(|a, b| a.1.0.hypot(a.1.1).total_cmp(&b.1.0.hypot(b.1.1)));
     println!(
-        "{what}: {} samples, rms {rms:.5}; |corr| peak {:?}; Re(corr) peak {:?}; threshold {:.5} (fractions of the energy {energy})",
+        "{what}: {} samples, rms {rms:.5}; correlation peak {:?} (offset, gain, phase °); peak over median {:.1} (needs > {CORRELATION_PEAK_OVER_MEDIAN})",
         samples.len(),
-        by_abs.map(|(at, re, im)| (*at, re.hypot(*im) / energy, im.atan2(*re).to_degrees())),
-        by_re.map(|(at, re, _)| (*at, re / energy)),
-        0.5 * 0.0316
+        peak.map(|(at, (re, im))| (at, re.hypot(*im) / energy, im.atan2(*re).to_degrees())),
+        peak.map_or(0.0, |(_, (re, im))| re.hypot(*im) / median)
     );
 }
 
@@ -512,6 +541,16 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
     for (i, sample) in samples[start..samples.len() - wave.len()].iter().enumerate() {
         if exact {
             assert_eq!(*sample, wave[i % wave.len()], "sample {i}");
+        }
+    }
+    if !exact {
+        // Back to back through a cable: every period after the first peak correlates with
+        // the waveform at the same gain and phase (a gap or a slip would break one).
+        let periods = back_to_back(&samples, &wave, start % wave.len());
+        let first = periods[0];
+        println!("B6 repeat: {} whole periods from sample {} (offset, gain, phase °): {periods:?}", periods.len(), start % wave.len());
+        for (at, gain, phase) in &periods {
+            assert!(*gain > 0.5 * first.1 && (phase - first.2 + 540.0).rem_euclid(360.0) - 180.0 < 20.0 && (phase - first.2 + 540.0).rem_euclid(360.0) - 180.0 > -20.0, "the repeat is not back to back at sample {at}: {periods:?}");
         }
     }
     assert!(events_of(&looped, "radio.TX_UNDERFLOW").is_empty());

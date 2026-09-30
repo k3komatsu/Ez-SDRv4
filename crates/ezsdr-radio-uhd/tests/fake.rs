@@ -1792,3 +1792,60 @@ fn rehearsal_b6_txrx_and_repeat_on_one_obx() {
 fn rehearsal_b7_session_loopback_on_one_obx() {
     let _ = rehearse_session_loopback(fake(one_obx()), true);
 }
+
+// ---------------------------------------------------------------- the bench's correlation
+// B6 on the bench (bench-results.md, session 2): the burst heard at sample 44 with a loop
+// gain of 0.0152 (−36.4 dB) at a 24.6° LO phase, which `correlate` must find whatever
+// the phase, and a capture of noise alone, in which it must find nothing.
+
+/// Gaussian-like noise of RMS `rms` per sample, deterministic (a sum of four uniforms).
+fn bench_noise(n: usize, rms: f32) -> Vec<(f32, f32)> {
+    let mut state: u32 = 0x9e37_79b9;
+    let mut uniform = move || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        f32::from(u16::try_from(state >> 16).unwrap()) / 65_536.0 - 0.5
+    };
+    // Four uniforms on [-0.5, 0.5) sum to variance 1/3 per component.
+    let scale = rms / (2.0f32 / 3.0).sqrt();
+    (0..n).map(|_| ((0..4).map(|_| uniform()).sum::<f32>() * scale, (0..4).map(|_| uniform()).sum::<f32>() * scale)).collect()
+}
+
+fn bench_loop(gain: f32, phase_deg: f32, delay: usize) -> Vec<(f32, f32)> {
+    let wave = pn(1_000);
+    let (sin, cos) = phase_deg.to_radians().sin_cos();
+    let mut samples = bench_noise(5_000, 0.003);
+    for (i, (re, im)) in wave.iter().enumerate() {
+        samples[delay + i].0 += gain * (re * cos - im * sin);
+        samples[delay + i].1 += gain * (re * sin + im * cos);
+    }
+    samples
+}
+
+#[test]
+fn correlate_finds_the_bench_loop_at_any_phase() {
+    let wave = pn(1_000);
+    for phase in [24.6, 90.0, 180.0, -120.0] {
+        assert_eq!(correlate(&bench_loop(0.0152, phase, 44), &wave), Some(44), "the loop at {phase}°");
+    }
+    assert_eq!(correlate(&bench_noise(5_000, 0.003), &wave), None, "noise alone");
+}
+
+#[test]
+fn back_to_back_sees_a_slip_in_a_cabled_repeat() {
+    let wave = pn(1_000);
+    let (sin, cos) = 24.6f32.to_radians().sin_cos();
+    let turned = |slip: usize| -> Vec<(f32, f32)> {
+        let mut samples = bench_noise(4_000, 0.003);
+        for i in 44..4_000 {
+            let (re, im) = wave[(i - 44 + if i >= 2_044 { slip } else { 0 }) % 1_000];
+            samples[i].0 += 0.0152 * (re * cos - im * sin);
+            samples[i].1 += 0.0152 * (re * sin + im * cos);
+        }
+        samples
+    };
+    let whole = back_to_back(&turned(0), &wave, 44);
+    assert_eq!(whole.len(), 3);
+    assert!(whole.iter().all(|(_, gain, phase)| (gain - 0.0152).abs() < 0.002 && (phase - 24.6).abs() < 5.0), "{whole:?}");
+    let slipped = back_to_back(&turned(7), &wave, 44);
+    assert!(slipped[2].1 < 0.5 * slipped[0].1, "a 7-sample slip at the third period: {slipped:?}");
+}
