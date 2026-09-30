@@ -143,6 +143,79 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; fini
 - **The capture starts at its instant:** asked at root tick 411 349 568 = receive sample (411 349 568 − 400 464 600) / 200 = 54 424.84; the artifact's first sample is 54 425, the next sample on the lattice (32 root ticks, 160 ns, after the instant), no gap, 5 000 samples.
 - The repeat is heard (untimed, so at an arbitrary offset: 2 883 and 786 in the last two runs) at gain 0.0154 and phase 24.2°, the same loop as B6.
 
+### B8 — `hw_b8_leads`: ran (a measurement); the device lead is not reached
+
+What the test implements of bench.md's B8: a Session per lead enables one transmit channel (1 Msps, 1 GHz, 0 dB: the defaults), then `radio.send` of a 100-sample PN burst `at` the Run's `now()` plus the lead (10, 5, 3, 2, 1.5, 1, 0.5 ms), waits 100 ms and prints the burst's `TIME_ERROR`s and the `timing` section. Run 1, as committed:
+
+```
+running 1 test
+[INFO] [UHD] linux; GNU C++ version 15.2.0; Boost_109000; UHD_4.10.0.0-0-unknown
+[INFO] [X300] X300 initialization sequence...
+[INFO] [X300] Maximum frame size: 8000 bytes.
+[INFO] [X300] Radio 1x clock: 200 MHz
+B8 lead 10000 µs: TIME_ERROR []
+B8 lead 10000 µs: timing [{"at":343073,"start_up_until":400343073,"what":"arm"},{"lead_ns":1999997345,"t0":400525800,"what":"start"},{"channels":1,"dir":"tx","origin":401266400,"what":"enabled"},{"host_delay_ms":2004,"index":0,"what":"first_rx_block"},{"at":421720943,"until":421920943,"what":"rx_stop"},{"at":422477227,"cut":421920943,"what":"rx_stop_untimed"},{"at":421720943,"done":442820017,"mode":"Orderly","what":"stop"}]
+[INFO] [X300] X300 initialization sequence...
+[INFO] [X300] Maximum frame size: 8000 bytes.
+[INFO] [X300] Radio 1x clock: 200 MHz
+B8 lead 5000 µs: TIME_ERROR []
+B8 lead 5000 µs: timing [{"at":358079,"start_up_until":400358079,"what":"arm"},{"lead_ns":1999997235,"t0":400601800,"what":"start"},{"channels":1,"dir":"tx","origin":401362400,"what":"enabled"},{"host_delay_ms":2004,"index":0,"what":"first_rx_block"},{"at":421698010,"until":421898010,"what":"rx_stop"},{"at":422568528,"cut":421898010,"what":"rx_stop_untimed"},{"at":421698010,"done":442786220,"mode":"Orderly","what":"stop"}]
+[INFO] [X300] X300 initialization sequence...
+[INFO] [X300] Maximum frame size: 8000 bytes.
+[INFO] [X300] Radio 1x clock: 200 MHz
+B8 lead 3000 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(35000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(3077)}}]
+B8 lead 3000 µs: timing [{"at":310390,"start_up_until":400310390,"what":"arm"},{"lead_ns":1999998390,"t0":400521000,"what":"start"},{"host_delay_ms":2004,"index":0,"what":"first_rx_block"},{"channels":1,"dir":"tx","origin":401428200,"what":"enabled"},{"at":421767631,"until":421967631,"what":"rx_stop"},{"at":422515799,"cut":421967631,"what":"rx_stop_untimed"},{"at":421767631,"done":442801364,"mode":"Orderly","what":"stop"}]
+[INFO] [X300] X300 initialization sequence...
+[INFO] [X300] Maximum frame size: 8000 bytes.
+[INFO] [X300] Radio 1x clock: 200 MHz
+B8 lead 2000 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(1197000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(2022)}}]
+B8 lead 2000 µs: timing [{"at":347901,"start_up_until":400347901,"what":"arm"},{"lead_ns":1999997170,"t0":400566400,"what":"start"},{"channels":1,"dir":"tx","origin":401042000,"what":"enabled"},{"host_delay_ms":2004,"index":0,"what":"first_rx_block"},{"at":421464089,"until":421664089,"what":"rx_stop"},{"at":422136724,"cut":421664089,"what":"rx_stop_untimed"},{"at":421464089,"done":442570291,"mode":"Orderly","what":"stop"}]
+[INFO] [X300] X300 initialization sequence...
+[INFO] [X300] Maximum frame size: 8000 bytes.
+[INFO] [X300] Radio 1x clock: 200 MHz
+B8 lead 1500 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(1644000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(1643)}}]
+B8 lead 1500 µs: timing [{"at":373295,"start_up_until":400373295,"what":"arm"},{"lead_ns":1999997600,"t0":400509800,"what":"start"},{"channels":1,"dir":"tx","origin":401091800,"what":"enabled"},{"host_delay_ms":2003,"index":0,"what":"first_rx_block"},{"at":421558443,"until":421758443,"what":"rx_stop"},{"at":422479452,"cut":421758443,"what":"rx_stop_untimed"},{"at":421558443,"done":442492684,"mode":"Orderly","what":"stop"}]
+[INFO] [X300] X300 initialization sequence...
+[INFO] [X300] Maximum frame size: 8000 bytes.
+[INFO] [X300] Radio 1x clock: 200 MHz
+B8 lead 1000 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(1992000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(1173)}}]
+B8 lead 1000 µs: timing [{"at":314803,"start_up_until":400314803,"what":"arm"},{"lead_ns":1999996920,"t0":400432800,"what":"start"},{"channels":1,"dir":"tx","origin":401030400,"what":"enabled"},{"host_delay_ms":2004,"index":0,"what":"first_rx_block"},{"at":421386302,"until":421586302,"what":"rx_stop"},{"at":421985735,"cut":421586302,"what":"rx_stop_untimed"},{"at":421386302,"done":442380253,"mode":"Orderly","what":"stop"}]
+[INFO] [X300] X300 initialization sequence...
+[INFO] [X300] Maximum frame size: 8000 bytes.
+[INFO] [X300] Radio 1x clock: 200 MHz
+B8 lead 500 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(2652000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(515)}}]
+B8 lead 500 µs: timing [{"at":394549,"start_up_until":400394549,"what":"arm"},{"lead_ns":1999997285,"t0":400597400,"what":"start"},{"channels":1,"dir":"tx","origin":401341200,"what":"enabled"},{"host_delay_ms":2003,"index":0,"what":"first_rx_block"},{"at":421663947,"until":421863947,"what":"rx_stop"},{"at":422554451,"cut":421863947,"what":"rx_stop_untimed"},{"at":421663947,"done":442687382,"mode":"Orderly","what":"stop"}]
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 51.90s
+```
+
+Run 2 adds the `bursts` section to the output (`hardware.rs`, test output only); its `TIME_ERROR` and `bursts` lines:
+
+```
+B8 lead 10000 µs: TIME_ERROR []
+B8 lead 10000 µs: bursts [{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":100,"target":{"domain":{"local":4,"node":0},"ticks":10020},"wraps":1}]
+B8 lead 5000 µs: TIME_ERROR []
+B8 lead 5000 µs: bursts [{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":100,"target":{"domain":{"local":4,"node":0},"ticks":5030},"wraps":1}]
+B8 lead 3000 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(189000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(3088)}}]
+B8 lead 3000 µs: bursts []
+B8 lead 2000 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(1154000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(2085)}}]
+B8 lead 2000 µs: bursts []
+B8 lead 1500 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(1995000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(1556)}}]
+B8 lead 1500 µs: bursts []
+B8 lead 1000 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(2085000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(1166)}}]
+B8 lead 1000 µs: bursts []
+B8 lead 500 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(2690000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(518)}}]
+B8 lead 500 µs: bursts []
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 63.91s
+```
+
+- **At 10 and 5 ms the burst is sent**: a record ending `eob`, 100 samples, `late_by: null`, and no `TIME_ERROR` (no `late_at_device` from the device).
+- **At 3 ms and less the Module drops the burst before the device sees it**: `TIME_ERROR { cause: late, outcome: drop }` and no burst record, in both runs. The drop is UR-21's: uhd-control decides `LatePolicy::decide(clocks, at, now', 2 ms)` when it books the Action, `now'` its receipt, and the Session's `radio.send` has the policy `drop`. From `late_by = (now' + 2 ms) − at` with `at = now() + lead`, **receipt − submission = late_by + lead − 2 ms: 1 035, 1 197, 1 144, 992, 1 152 µs (run 1) and 1 189, 1 154, 1 495, 1 085, 1 190 µs (run 2)** — within the delivery allowance of 3 ms (UR-14), the poll period 1 ms plus the booking.
+- **So the device lead (the least lead with no `late_at_device`) is not measured**: the Module's own 2 ms device lead refuses every burst that would probe it. What is measured is that a 5 ms lead from submission (the declared `min_timed_command_lead`, 2 + 3 ms) is enough and 3 ms is not, and that the device accepted a burst whose target was about 5 − 1.2 = 3.8 ms after its receipt. Measuring the device lead needs a test below UR-21 (raw `Device::tx_send` with a time spec at leads under 2 ms): not implemented; recorded for Phase 8 (spec 18 §3's 2 ms stays).
+- **UR-25 again: the timed receive stop is never honoured.** In all 7 Runs of run 1 the stop was issued 1.000 ms before its cut and uhd-rx fell back to `rx_stop_untimed` when samples past the cut arrived, 2.78, 3.35, 2.74, 2.36, 3.61, 2.00, 3.45 ms after the cut (B3's was 3.9 ms). With B3 that is 8 of 8: the X300 on UHD 4.10 ignores (or does not honour within ~2–4 ms) the time spec of a continuous stream's stop. An input for Phase 8 and for the owner (UR-25 says it is INFERRED); the Module's fallback works.
+- The transmit SampleClock's origin (`enabled`) is 2.4–4.5 ms after T0 in the 7 Runs.
+- **Not implemented, so not measured** (bench.md B8's other rows, handoff.md §4's B8 row): timed retunes at the leads; `cold` restart leads 100/50/25/10 ms; the transmit end after `Stop`; in-flight windows 10/5/3/2 ms against `TX_UNDERFLOW`; the preemption bound at 20/10/5 ms; the queue depth of timed OBX tunes (UR-24); a dedicated timed-receive-stop measurement (answered above from the `timing` of every Run instead). Spec 18 §3's restart lead 50 ms, in-flight window 10 ms, release window 3 ms and queue depth 16 stay INFERRED.
+
 ## B7 (Python) — ran; one finding
 
 `EZSDR_SERVER=/cargo-target/release/ezsdr-server EZSDR_PROFILE=/bench/bench-session.json` (bench.md's Session profile with `x310-obx`, `addr=192.168.40.36`, the capture directory `/bench/b7-captures`):

@@ -149,6 +149,7 @@ fn hw_b8_leads() {
         let manifest = run.finish();
         println!("B8 lead {lead_us} µs: TIME_ERROR {:?}", events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>());
         println!("B8 lead {lead_us} µs: timing {}", section(&manifest, "timing"));
+        println!("B8 lead {lead_us} µs: bursts {}", section(&manifest, "bursts"));
     }
 }
 
