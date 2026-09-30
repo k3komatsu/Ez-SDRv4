@@ -263,8 +263,6 @@ pub enum FakeFault {
     },
     /// The clock steps back by this many ticks, once.
     StepBack(Duration, i64),
-    /// A timed stop of the receive stream is ignored (UR-25's INFERRED case).
-    IgnoresTimedStop,
     /// From this device time on, `time_now` takes 5 ms before it reads (UR-7's 1 ms
     /// bracket rule).
     SlowTimeRead(Duration),
@@ -320,7 +318,6 @@ struct Fake {
     last_command: i64,
     rx_channels: usize,
     rx_next: Option<i64>,
-    rx_stop_at: Option<i64>,
     rx_late: Option<i64>,
     rx_last: Option<i64>,
     tx_channels: usize,
@@ -368,7 +365,6 @@ impl FakeDevice {
                 last_command: i64::MIN,
                 rx_channels: 0,
                 rx_next: None,
-                rx_stop_at: None,
                 rx_late: None,
                 rx_last: None,
                 tx_channels: 0,
@@ -539,7 +535,6 @@ impl Device for FakeDevice {
         st.tx_samples.clear();
         st.rx_next = None;
         st.rx_late = None;
-        st.rx_stop_at = None;
         Ok(())
     }
 
@@ -658,7 +653,6 @@ impl Device for FakeDevice {
         } else {
             st.rx_next = Some(at);
         }
-        st.rx_stop_at = None;
         Ok(())
     }
 
@@ -666,14 +660,10 @@ impl Device for FakeDevice {
         let mut st = self.lock();
         self.lost(&st)?;
         st.calls.push(format!("rx_stop {}", at.map_or("now".to_owned(), |t| t.to_string())));
-        let now = self.now(&st);
-        match at {
-            Some(_) if self.config.faults.contains(&FakeFault::IgnoresTimedStop) => {}
-            // A timed stream command in the device's past is reported late (UR-33).
-            Some(at) if at < now => st.rx_late = Some(now),
-            Some(at) => st.rx_stop_at = Some(at),
-            None => st.rx_next = None,
-        }
+        // The X3x0 stops a continuous stream at once, whatever the stop's time: UHD 4.10's
+        // `radio_rx_core.v` takes STOP outside its command FIFO, "timed STOP commands are
+        // not supported" (VERIFIED on the bench, design-notes §11 F1).
+        st.rx_next = None;
         Ok(())
     }
 
@@ -690,13 +680,12 @@ impl Device for FakeDevice {
                 st.rx_late = None;
                 return RxRecv::LateCommand;
             }
-            (None, Some(next)) if !st.rx_stop_at.is_some_and(|stop| next >= stop) => {
-                (next, self.ratio(st.settings[0][0].rate))
-            }
+            (None, Some(next)) => (next, self.ratio(st.settings[0][0].rate)),
             _ => {
+                // UHD's `recv` on a stopped stream waits its whole timeout.
                 st.rx_next = None;
                 drop(st);
-                std::thread::sleep(timeout.min(Duration::from_millis(10)));
+                std::thread::sleep(timeout);
                 return RxRecv::Timeout;
             }
         };
@@ -751,10 +740,7 @@ impl Device for FakeDevice {
             }
         }
         let behind = self.ticks_of(OVERRUN_BEHIND);
-        let mut n = n as i64;
-        if let Some(stop) = st.rx_stop_at {
-            n = n.min((stop - next + ratio - 1) / ratio).max(1);
-        }
+        let n = n as i64;
         let end = next + n * ratio;
         if now - end > behind {
             st.rx_next = Some(next + ((now - next) / ratio + 1) * ratio);
@@ -833,7 +819,10 @@ impl Device for FakeDevice {
                     st.unended += 1;
                 }
                 match at {
-                    Some(t) if t < now || t < st.tx_cursor => {
+                    // At the end of the samples queued is late too: the X300 reports a
+                    // timed start-of-burst at the tick its previous burst ended as late
+                    // and drops it (design-notes §11 F3).
+                    Some(t) if t < now || t <= st.tx_cursor => {
                         let tick = Some(now);
                         st.reports.push_back(TxReport { code: TxCode::TimeError, tick, channel: 0 });
                         st.tx_dropped = true;

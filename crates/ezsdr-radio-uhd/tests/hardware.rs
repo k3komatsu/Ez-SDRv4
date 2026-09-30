@@ -540,9 +540,10 @@ fn hw_b8_raw_in_flight_window() {
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_b8_cold_change_capture() {
-    // UR-25 on the bench: a capture spanning a `cold` receive rate change. uhd-rx hands the
-    // device a timed stop for e1 up to a restart lead early; if the device stops at once
-    // (hw_b8_raw_rx_timed_stop), how does the Manifest show the samples before e1?
+    // UR-25 on the bench: a capture spanning a `cold` receive rate change. Before the fix of
+    // design-notes §11 F1 uhd-rx handed the device a timed stop for e1 a restart lead early,
+    // and the X300 stopped at once (hw_b8_raw_rx_timed_stop): 50 ms lost before e1. Now the
+    // old clock's samples should reach e1 and the new clock's start at e2, on time.
     let dir = TempDir::new();
     let device = usrp();
     let mut run = session(&bench_profile(&*device, &dir, serde_json::json!({}), serde_json::json!({}), true), device);

@@ -1044,6 +1044,11 @@ fn ur_23_a_burst_ends_at_the_next_bursts_start() {
     assert!(records[1].late_by.is_none());
     assert!(time_errors(&manifest).is_empty());
     assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError"), "{:?}", device.calls());
+    // Two Kernel bursts, one device burst: the second continues the first without
+    // end-of-burst or a timed start at the tick the first ended (design-notes §11 F3).
+    let sends = calls(&device, "tx_send");
+    assert_eq!(sends.iter().filter(|c| c.contains("sob=true")).count(), 1, "{sends:?}");
+    assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "{sends:?}");
     assert_eq!(device.unended_bursts(), 0, "a burst started inside one without end-of-burst: {:?}", device.calls());
 }
 
@@ -1243,29 +1248,90 @@ fn ur_25_a_cold_rate_change_starts_a_new_clock_on_its_lattice() {
 }
 
 #[test]
-fn ur_25_a_device_that_ignores_the_timed_stop_is_stopped_at_e1() {
-    // UR-25's fallback: uhd-rx stops the stream untimed when its samples reach e₁, and
-    // does not reopen a streamer whose channel count did not change.
-    for faults in [vec![], vec![FakeFault::IgnoresTimedStop]] {
-        let ignoring = !faults.is_empty();
-        let dir = TempDir::new();
-        let device = fake(FakeConfig { faults, ..FakeConfig::default() });
-        let mut run = session(&profile(&dir, json!({}), json!({}), true), device.clone());
-        past_t0(&mut run, ms(1));
-        assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
-        let capture_at = after(&run, ms(100));
-        assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(capture_at), &[("sink.capture_samples", Value::Int(20_000))]), None).unwrap()));
-        let horizon = after(&run, ms(3_000));
-        let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
-        // Before the Run's own stop, which stops the stream untimed as well (Review M, P1-A).
-        let calls = device.calls();
-        let manifest = run.finish();
-        assert_eq!(calls.iter().filter(|c| c.starts_with("rx_open")).count(), 1, "one streamer: {calls:?}");
-        assert_eq!(calls.iter().any(|c| c == "rx_stop now"), ignoring, "{calls:?}");
-        let capture = capture_of(&manifest, "rec");
-        assert!(capture.continuity.iter().all(|m| m.gaps.is_empty()), "{:?}", capture.continuity);
-        assert_eq!(capture.size_bytes, 160_000);
-    }
+fn ur_25_the_old_stream_is_stopped_untimed_at_e1() {
+    // UR-25: the X3x0 ignores a stop's time (design-notes §11 F1), so uhd-rx stops the
+    // stream untimed when its samples reach e₁, never timed, and does not reopen a
+    // streamer whose channel count did not change.
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let mut run = session(&profile(&dir, json!({}), json!({}), true), device.clone());
+    past_t0(&mut run, ms(1));
+    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
+    let capture_at = after(&run, ms(100));
+    assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(capture_at), &[("sink.capture_samples", Value::Int(20_000))]), None).unwrap()));
+    let horizon = after(&run, ms(3_000));
+    let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
+    // Before the Run's own stop, which stops the stream untimed as well (Review M, P1-A).
+    let calls = device.calls();
+    let manifest = run.finish();
+    assert_eq!(calls.iter().filter(|c| c.starts_with("rx_open")).count(), 1, "one streamer: {calls:?}");
+    assert!(calls.iter().any(|c| c == "rx_stop now"), "{calls:?}");
+    assert!(calls.iter().all(|c| !c.starts_with("rx_stop ") || c == "rx_stop now"), "a timed receive stop: {calls:?}");
+    let capture = capture_of(&manifest, "rec");
+    assert!(capture.continuity.iter().all(|m| m.gaps.is_empty()), "{:?}", capture.continuity);
+    assert_eq!(capture.size_bytes, 160_000);
+}
+
+#[test]
+fn ur_25_a_cold_receive_change_delivers_every_sample_before_e1() {
+    // design-notes §11 F1 (the bench's hw_b8_cold_change_capture): a capture across a
+    // `cold` receive change holds the old clock's samples up to e₁ and the new clock's
+    // from e₂, with no LATE_COMMAND between them.
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let mut run = session(&profile(&dir, json!({}), json!({}), true), device.clone());
+    past_t0(&mut run, ms(1));
+    let capture_at = after(&run, ms(10));
+    assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(capture_at), &[("sink.capture_samples", Value::Int(200_000))]), None).unwrap()));
+    wait(&mut run, ms(60));
+    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
+    let horizon = after(&run, ms(5_000));
+    let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
+    let manifest = run.finish();
+    let clocks: Vec<_> = manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).collect();
+    assert_eq!(clocks.len(), 2, "{clocks:?}");
+    let (old, new) = (clocks[0], clocks[1]);
+    let e1_k = (old.ended_at.unwrap().ticks - old.origin.ticks) / old.root_ticks_per_tick.num() as i64;
+    let capture = capture_of(&manifest, "rec");
+    assert_eq!(capture.continuity.len(), 2, "{:?}", capture.continuity);
+    assert_eq!(capture.continuity[0].end.ticks, e1_k, "the old clock's samples end at e₁: {:?}", capture.continuity[0]);
+    assert_eq!(capture.continuity[1].first.ticks, 0, "the new clock's start at e₂ ({:?}): {:?}", new.origin, capture.continuity[1]);
+    assert!(capture.continuity.iter().all(|m| m.gaps.is_empty()), "{:?}", capture.continuity);
+    assert!(events_of(&manifest, "radio.LATE_COMMAND").is_empty(), "{:?}", events_of(&manifest, "radio.LATE_COMMAND"));
+}
+
+#[test]
+fn ur_25_a_stream_silent_before_e1_switches_before_e2() {
+    // design-notes §11 F2: a stream that stops yielding before e₁ is ended within a block
+    // of e₁, not at uhd-rx's next 100 ms receive timeout, so that the timed start at e₂
+    // is on time. The fake falls silent 105 ms before e₁: its timeouts come 100 ms apart.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    // Direct starts its Run ~2 s after the fake's time zero (the start-up lead).
+    let silent = ms(2_300);
+    let mut direct = Direct::with_links(
+        FakeConfig { faults: vec![FakeFault::Silence(Wall::from_millis(2_300))], ..FakeConfig::default() },
+        &[],
+        vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)],
+    );
+    assert!(direct.now() < silent - ms(150), "the Run started late: {}", direct.now());
+    direct.update("radio.rx.sample_rate_hz", Value::Num(2e6), Cold, Some(silent + ms(105)));
+    let until = silent + ms(300) - direct.now();
+    direct.settle(Wall::from_nanos((until * 5) as u64));
+    let late = direct.of("radio.LATE_COMMAND");
+    let direct_calls = direct.device.calls();
+    let instance = direct.finish();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
+    let switch = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_switch").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
+    let e2 = switch["e2"].as_i64().unwrap();
+    assert!(switch["at"].as_i64().unwrap() < e2, "switched after e₂: {switch}");
+    // Stopped untimed and recorded, before the new stream's start.
+    let calls = direct_calls;
+    let stop = calls.iter().position(|c| c == "rx_stop now").unwrap_or_else(|| panic!("{calls:?}"));
+    let start = calls.iter().position(|c| *c == format!("rx_start {e2}")).unwrap_or_else(|| panic!("{calls:?}"));
+    assert!(stop < start, "{calls:?}");
+    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.applied").unwrap()];
+    assert!(applied.as_array().unwrap().iter().any(|r| r["key"] == "rx_stop"), "{applied}");
+    assert!(late.is_empty(), "{late:?}");
 }
 
 #[test]
@@ -1302,24 +1368,24 @@ fn ur_25_rx_channels_from_zero_starts_at_its_instant() {
 }
 
 #[test]
-fn ur_25_a_timed_receive_stop_is_released_a_restart_lead_ahead() {
-    // UR-24: a stream command far ahead would hold every later timed command behind it
-    // in the device's queue; the stop at e₁ goes to the device only 50 ms before it.
+fn ur_25_the_receive_stop_is_recorded_when_it_is_issued() {
+    // UR-24, UR-25: no stop reaches the device before e₁ (the X3x0 would stop at once);
+    // the untimed stop issued when the samples reach e₁ is recorded in `applied`.
     use ezsdr_kernel::module_api::UpdateClass::Cold;
     let mut direct = Direct::with_links(FakeConfig::default(), &[], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)]);
     let at = direct.now() + ms(400);
     direct.update("radio.rx.sample_rate_hz", Value::Num(2e6), Cold, Some(at));
-    direct.settle(Wall::from_millis(150));
+    direct.settle(Wall::from_millis(300));
     let stops = |d: &Direct| d.device.calls().into_iter().filter(|c| c.starts_with("rx_stop ")).collect::<Vec<_>>();
     assert!(stops(&direct).is_empty(), "issued early: {:?}", stops(&direct));
-    direct.settle(Wall::from_millis(400));
-    let issued = stops(&direct);
-    assert!(!issued.is_empty(), "never issued");
-    let e1: i64 = issued[0].trim_start_matches("rx_stop ").parse().unwrap();
-    assert!(e1 >= at && e1 < at + 200, "stop at {e1}, asked {at}");
+    direct.settle(Wall::from_millis(300));
+    assert_eq!(stops(&direct).first().map(String::as_str), Some("rx_stop now"), "{:?}", stops(&direct));
     let instance = direct.finish();
     let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.applied").unwrap()];
-    assert!(applied.as_array().unwrap().iter().any(|r| r["key"] == "rx_stop" && r["at"]["ticks"] == e1), "{applied}");
+    let row = applied.as_array().unwrap().iter().find(|r| r["key"] == "rx_stop").cloned().unwrap_or_else(|| panic!("{applied}"));
+    let e1 = row["at"]["ticks"].as_i64().unwrap();
+    assert!(e1 >= at && e1 < at + 200, "cut at {e1}, asked {at}");
+    assert!(row["issued"]["ticks"].as_i64().unwrap() >= e1, "{row}");
 }
 
 #[test]

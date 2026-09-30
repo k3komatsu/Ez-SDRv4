@@ -18,7 +18,7 @@ use serde_json::json;
 
 use super::core::{Clock, Core, lattice, lock};
 use crate::device::{Dir, Iq, RxRecv, Settings};
-use crate::profile::{DEVICE_LEAD_NS, RESTART_LEAD_NS};
+use crate::profile::RESTART_LEAD_NS;
 
 pub(crate) enum RxCmd {
     /// A stream enabled from 0 channels, already configured and started (UR-25).
@@ -50,11 +50,10 @@ struct Stream {
     pending: Pending,
     /// The timed start's instant: T0, or a change's `e₂` (UR-17).
     start: i64,
-    /// Samples at or after this root tick are discarded, and the stream ends there.
+    /// Samples at or after this root tick are discarded, and the stream ends there: it is
+    /// stopped untimed when its samples reach the cut, since the X3x0 ignores a stop's
+    /// time (UR-25; design-notes §11 F1).
     cut: Option<i64>,
-    /// A timed stop at `cut` not yet handed to the device: it is released a restart
-    /// lead ahead, as UR-24 releases timed commands (Review L, P1-1).
-    held_stop: Option<i64>,
 }
 
 struct Switch {
@@ -88,7 +87,7 @@ impl Rx {
     pub fn new(core: Arc<Core>, cmds: Receiver<RxCmd>, clock: Option<Clock>, channels: usize, stall: Option<(Wall, Wall)>) -> Rx {
         let pool = HostPool::new(core.block_len * channels.max(1) * 8);
         Rx {
-            stream: clock.map(|clock| Stream { clock, channels, expected: 0, pending: Pending::None, start: clock.origin, cut: None, held_stop: None }),
+            stream: clock.map(|clock| Stream { clock, channels, expected: 0, pending: Pending::None, start: clock.origin, cut: None }),
             core,
             cmds,
             switch: None,
@@ -147,8 +146,7 @@ impl Rx {
                     std::thread::sleep(duration);
                 }
             }
-            self.release_stop();
-            let result = self.core.device.rx_recv(self.core.block_len, RECV_TIMEOUT);
+            let result = self.core.device.rx_recv(self.core.block_len, self.recv_timeout());
             // A stop that arrived during the wait cuts this block too (RM-16).
             self.poll();
             self.receive(result);
@@ -160,7 +158,7 @@ impl Rx {
         match cmd {
             RxCmd::Enable { clock, channels } => {
                 self.pool = HostPool::new(self.core.block_len * channels.max(1) * 8);
-                self.stream = Some(Stream { clock, channels, expected: 0, pending: Pending::None, start: clock.origin, cut: None, held_stop: None });
+                self.stream = Some(Stream { clock, channels, expected: 0, pending: Pending::None, start: clock.origin, cut: None });
                 self.last_samples = Instant::now();
             }
             RxCmd::Switch { .. } if self.stopping => {}
@@ -171,7 +169,6 @@ impl Rx {
                     // A cut already set (a `Stop` for `<id>/rx`) stays if it is earlier.
                     if stream.cut.is_none_or(|cut| e1 < cut) {
                         stream.cut = Some(e1);
-                        stream.held_stop = Some(e1);
                     }
                 }
             }
@@ -184,7 +181,6 @@ impl Rx {
                     StopMode::Abort => {
                         if let Some(stream) = self.stream.as_mut() {
                             stream.cut = Some(at);
-                            stream.held_stop = None;
                         }
                         self.core.timing(json!({ "what": "rx_stop", "at": at, "until": at, "mode": "Abort" }));
                         if self.stream.is_some() && !self.core.is_lost() {
@@ -208,20 +204,13 @@ impl Rx {
         }
     }
 
-    /// Hands a held timed stop to the device once it is no more than a restart lead
-    /// ahead, and records it in `applied` (UR-24, UR-25, UR-30; Review L, P1-1).
-    fn release_stop(&mut self) {
-        let now = self.core.now();
-        let lead = self.core.ticks(RESTART_LEAD_NS);
-        let Some(stream) = self.stream.as_mut() else { return };
-        let Some(at) = stream.held_stop.filter(|at| at - now <= lead) else { return };
-        stream.held_stop = None;
-        // INFERRED (UR-25): the X3x0 honours a timed stop of a continuous stream; if it
-        // does not, `samples` stops it untimed when a sample at or after `at` arrives.
-        match self.core.device.rx_stop(Some(at)) {
-            Ok(()) => lock(&self.core.rec).applied.push(json!({ "key": "rx_stop", "at": self.core.at(at), "issued": self.core.at(now) })),
-            Err(error) => self.core.device_failed("update_parameter", &error),
-        }
+    /// How long `rx_recv` may wait: while a cut is pending, no longer than to the cut
+    /// plus one block, so that a stream that has stopped yielding is ended within a
+    /// block of its cut and not at the next 100 ms timeout (UR-25; design-notes §11 F2).
+    fn recv_timeout(&self) -> Wall {
+        let Some((cut, n)) = self.stream.as_ref().and_then(|s| s.cut.map(|cut| (cut, s.clock.n))) else { return RECV_TIMEOUT };
+        let left = cut - self.core.now() + self.core.block_len as i64 * n;
+        Wall::from_nanos(self.core.ns(left.max(0)) as u64).clamp(Wall::from_millis(1), RECV_TIMEOUT)
     }
 
     fn stop_orderly(&mut self, tail: i64) {
@@ -232,22 +221,14 @@ impl Rx {
     /// RM-16's tail: the stream delivers up to `cut` and then ends.
     fn stop_at(&mut self, now: i64, cut: i64) {
         if let Some(stream) = self.stream.as_mut() {
-            if stream.cut.is_some_and(|c| c <= cut) && stream.held_stop.is_none() {
+            if stream.cut.is_some_and(|c| c <= cut) {
                 return;
             }
             stream.cut = Some(stream.cut.map_or(cut, |c| c.min(cut)));
-            stream.held_stop = None;
             let cut = stream.cut.expect("set above");
+            // No timed stop (§11 F1): the stream is stopped untimed when its samples reach
+            // the cut (`samples`), and the cut discards the samples after it either way.
             self.core.timing(json!({ "what": "rx_stop", "at": now, "until": cut }));
-            // A timed stop needs the device lead; a closer one would be late at the device
-            // (Review M, P1-A), so the stream is stopped untimed when a sample past the cut
-            // arrives (`samples`), and the cut discards the samples after it either way.
-            let issued = self.core.now();
-            if !self.core.is_lost() && cut - issued >= self.core.ticks(DEVICE_LEAD_NS) {
-                if let Err(error) = self.core.device.rx_stop(Some(cut)) {
-                    self.core.device_failed("stop", &error);
-                }
-            }
         }
     }
 
@@ -260,8 +241,10 @@ impl Rx {
                 self.samples(first_tick, samples);
             }
             RxRecv::Timeout => {
-                if stream.cut.is_some_and(|cut| now >= cut) {
+                if let Some(cut) = stream.cut.filter(|cut| now >= *cut) {
+                    // Silent past its cut: stopped all the same, never left streaming.
                     self.stream = None;
+                    stop_at_cut(&self.core, cut);
                 } else if stream.cut.is_none()
                     && now > stream.start + self.core.mcr as i64
                     && self.last_samples.elapsed() > Wall::from_secs(1)
@@ -279,8 +262,8 @@ impl Rx {
             }
             RxRecv::Alignment => stream.pending = Pending::Alignment,
             RxRecv::LateCommand if stream.cut.is_some() => {
-                // A late timed stop, not a missed start: stop it untimed, never restart a
-                // stream that is ending (Review M, P1-A).
+                // A late start of a stream that is ending: stop it untimed, never restart
+                // it (Review M, P1-A).
                 self.core.timing(json!({ "what": "rx_stop_late", "cut": stream.cut, "at": now }));
                 if let Err(error) = self.core.device.rx_stop(None) {
                     self.core.device_failed("stop", &error);
@@ -331,13 +314,8 @@ impl Rx {
         if let Some(cut) = stream.cut {
             let cut_k = clock.at_or_after(cut);
             if k + len >= cut_k {
-                if k + len > cut_k && stream.held_stop.is_none() && !self.core.is_lost() {
-                    // UR-25's fallback: samples past the timed stop, so stop it untimed.
-                    self.core.timing(json!({ "what": "rx_stop_untimed", "cut": cut, "at": self.core.now() }));
-                    if let Err(error) = self.core.device.rx_stop(None) {
-                        self.core.device_failed("update_parameter", &error);
-                    }
-                }
+                // UR-25: the samples reached the cut, so the stream is stopped untimed now.
+                stop_at_cut(&self.core, cut);
                 len = (cut_k - k).max(0);
                 ended = true;
             }
@@ -459,7 +437,6 @@ impl Rx {
                     pending: Pending::None,
                     start: new.origin,
                     cut: None,
-                    held_stop: None,
                 });
                 self.last_samples = Instant::now();
             }
@@ -470,5 +447,19 @@ impl Rx {
             }
         }
         self.core.timing(json!({ "what": "rx_switch", "e1": switch.e1, "e2": new.origin, "at": self.core.now() }));
+    }
+}
+
+/// Stops the stream untimed once its samples reached the cut, and records it (UR-25,
+/// UR-30): the X3x0 carries out a timed stop at once, before its time (§11 F1).
+fn stop_at_cut(core: &Core, cut: i64) {
+    if core.is_lost() {
+        return;
+    }
+    let now = core.now();
+    core.timing(json!({ "what": "rx_stop_untimed", "cut": cut, "at": now }));
+    match core.device.rx_stop(None) {
+        Ok(()) => lock(&core.rec).applied.push(json!({ "key": "rx_stop", "at": core.at(cut), "issued": core.at(now) })),
+        Err(error) => core.device_failed("update_parameter", &error),
     }
 }
