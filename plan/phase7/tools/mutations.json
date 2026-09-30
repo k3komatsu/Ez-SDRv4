@@ -1180,5 +1180,25 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_09_x310_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz"
+ },
+ {
+  "id": "R26",
+  "name": "UR-5 checks every device channel, slot B's unknown board too (Review of 09f11b4, P2-2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "for chan in 0..need {",
+  "new": "for chan in 0..have {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
+ },
+ {
+  "id": "R27",
+  "name": "UR-5 checks channel 0 only (Review of 09f11b4, P2-2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "for chan in 0..need {",
+  "new": "for chan in 0..need.min(1) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
  }
 ]

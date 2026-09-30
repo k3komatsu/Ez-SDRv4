@@ -285,10 +285,9 @@ pub struct FakeConfig {
     pub loopback_delay_samples: i64,
     /// The scripted faults.
     pub faults: Vec<FakeFault>,
-    /// Channels in each direction, at most two.
-    pub channels: usize,
-    /// How the front ends' names begin: `UBX` (two UBX) or `CBX` (one CBX).
-    pub front_end: &'static str,
+    /// One front end per channel, each direction (at most two): its UHD name without
+    /// ` RX` or ` TX`, such as `UBX` or `CBX-120`.
+    pub front_ends: Vec<&'static str>,
 }
 
 impl Default for FakeConfig {
@@ -300,8 +299,7 @@ impl Default for FakeConfig {
             command_queue: 16,
             loopback_delay_samples: 0,
             faults: Vec::new(),
-            channels: 2,
-            front_end: "UBX",
+            front_ends: vec!["UBX", "UBX"],
         }
     }
 }
@@ -348,9 +346,9 @@ const OVERRUN_BEHIND: Duration = Duration::from_millis(100);
 const TX_AHEAD: Duration = Duration::from_millis(50);
 
 impl FakeDevice {
-    /// A fake with `config.channels` receive and transmit channels (UR-33).
+    /// A fake with one receive and one transmit channel per front end (UR-33).
     pub fn new(config: FakeConfig) -> FakeDevice {
-        assert!(config.channels <= 2, "the fake has at most two channels");
+        assert!(config.front_ends.len() <= 2, "the fake has at most two channels");
         let channel = |antenna: &str| Channel {
             rate: 1_000_000.0,
             freq: 1_000_000_000.0,
@@ -487,8 +485,8 @@ impl Device for FakeDevice {
         serde_json::json!({
             "args": "fake",
             "master_clock_rate": self.config.master_clock_rate,
-            "rx_channels": self.config.channels,
-            "tx_channels": self.config.channels,
+            "rx_channels": self.config.front_ends.len(),
+            "tx_channels": self.config.front_ends.len(),
             "pp_string": "FakeDevice (UR-33)",
             "uhd_version": null,
             "fake": true,
@@ -504,14 +502,12 @@ impl Device for FakeDevice {
     }
 
     fn channels(&self, _dir: Dir) -> usize {
-        self.config.channels
+        self.config.front_ends.len()
     }
 
     fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> {
-        if chan >= self.config.channels {
-            return Err(DeviceError::failed(format!("no channel {chan}")));
-        }
-        Ok(format!("{} {}", self.config.front_end, if dir == Dir::Rx { "RX" } else { "TX" }))
+        let name = self.config.front_ends.get(chan).ok_or_else(|| DeviceError::failed(format!("no channel {chan}")))?;
+        Ok(format!("{name} {}", if dir == Dir::Rx { "RX" } else { "TX" }))
     }
 
     fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> {

@@ -328,7 +328,7 @@ owner の指示（2026-09-28）：「実機では別のlinuxサーバーでUSRP�
 
 | 段 | テスト | RF | 注意（実装側の事情） |
 |---|---|---|---|
-| B1 | `hw_b1_probe` | なし | `B1 profile: x310-cbx` と，各 channel の front end 名（`CBX RX`・`CBX-120 TX` など）と channel 数（1 + 1 以上）が出ること．`x310-ubx` と出たら UHD の front end 名が `CBX` で始まっていない：名前を記録して止まる（UR-5 がそう判定するので，以降の段は CBX として走らない）．送信を始める前に，各 TX channel の周波数と利得をそのまま記録する（何も設定しない Session が引き継ぐ値，UR-25） |
+| B1 | `hw_b1_probe` | なし | `B1 profile: x310-cbx` と，各 channel の front end 名（`CBX RX`・`CBX-120 TX` など）と channel 数（1 + 1 以上）が出ること．`x310-cbx` でなければテストが失敗する（UHD の front end 名が `CBX` で始まっていない）：名前を記録して止まる．UHD は空の slot B も unknown board の channel として数えるので，2 + 2 と出るのが正常．送信を始める前に，各 TX channel の周波数と利得をそのまま記録する（何も設定しない Session が引き継ぐ値，UR-25） |
 | B2 | `hw_b2_authority` | なし | 10 s 待つ．lateness の中央値 < 1 ms，最大 < 25 ms．`DeviceAuthority::failed_reads()`・`discarded_reads()` は Manifest に出ないので，出力に無ければテストに `println!` を足して記録してよい（test コードの追加は可） |
 | B3 | `hw_b3_receive_at_t0` | なし | `applied` と `timing` の section が出力される．周波数の read-back 差（K13：< 0.05 Hz 程度）を記録 |
 | B4 | `hw_b4_capture_at_a_sample_index` | なし | bench.md は Session の capture と書くが，実装は Spec の schedule で `sink.capture_samples` を sample 50 000 に置く形（`rehearse_capture_at_a_sample_index`）．合格条件（最初の sample が 50 000）は同じ |

@@ -78,9 +78,10 @@ pub fn profile_of(device: &dyn Device) -> Profile {
     }
 }
 
-/// A fake with one CBX, `x310-cbx`'s device.
+/// A fake of `x310-cbx`'s device: a CBX-120 in slot A and slot B empty, which UHD
+/// reports as a second channel on its unknown board (`db_unknown.cpp`).
 pub fn one_cbx() -> FakeConfig {
-    FakeConfig { channels: 1, front_end: "CBX-120", ..FakeConfig::default() }
+    FakeConfig { front_ends: vec!["CBX-120", "Unknown (0xffff) - 0"], ..FakeConfig::default() }
 }
 
 /// The frequency the steps receive and transmit at: the default of the device's

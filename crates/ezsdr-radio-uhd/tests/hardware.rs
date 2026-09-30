@@ -32,6 +32,7 @@ fn hw_b1_probe() {
     // The profile's channels and front ends, as UR-5 checks them.
     let profile = profile_of(&*device);
     println!("B1 profile: {}", profile.name());
+    assert_eq!(profile, ezsdr_radio_uhd::profile::Profile::X310Cbx, "bench.md: the bench is one CBX in slot A");
     let need = profile.description(2_000).max_channels as usize;
     for dir in [Dir::Rx, Dir::Tx] {
         let have = device.channels(dir);

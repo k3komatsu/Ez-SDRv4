@@ -202,8 +202,9 @@ pub fn struct_sizes() -> [(&'static str, usize); 4] {
 /// An error text read into a buffer by one of UHD's `*_last_error` calls.
 fn text(read: impl FnOnce(*mut c_char, usize) -> uhd_error) -> String {
     let mut buffer = [0 as c_char; 1024];
-    read(buffer.as_mut_ptr(), buffer.len());
-    // SAFETY: UHD writes a NUL-terminated string into the buffer, truncated to its length.
+    read(buffer.as_mut_ptr(), buffer.len() - 1);
+    // SAFETY: UHD's wrappers `strncpy` at most the length passed, one short of the
+    // zeroed buffer, so its last byte stays a NUL (Review of 09f11b4, P2-4).
     unsafe { CStr::from_ptr(buffer.as_ptr()).to_string_lossy().into_owned() }
 }
 
@@ -249,7 +250,7 @@ fn strings(h: uhd_string_vector_handle) -> Vec<String> {
         uhd_string_vector_size(h, &mut n);
         for i in 0..n {
             let mut buffer = [0 as c_char; 1024];
-            uhd_string_vector_at(h, i, buffer.as_mut_ptr(), buffer.len());
+            uhd_string_vector_at(h, i, buffer.as_mut_ptr(), buffer.len() - 1);
             out.push(CStr::from_ptr(buffer.as_ptr()).to_string_lossy().into_owned());
         }
     }
@@ -441,11 +442,12 @@ impl Device for UhdDevice {
     fn describe(&self) -> serde_json::Value {
         let mut pp = vec![0 as c_char; 16_384];
         let mut version = [0 as c_char; 256];
-        // SAFETY: both buffers are writable for their lengths.
+        // SAFETY: both buffers are writable for their lengths; as in `text`, UHD is
+        // given one byte less, so each ends in a NUL.
         let (pp, version) = unsafe {
             let _control = lock(&self.control);
-            uhd_usrp_get_pp_string(self.usrp, pp.as_mut_ptr(), pp.len());
-            uhd_get_version_string(version.as_mut_ptr(), version.len());
+            uhd_usrp_get_pp_string(self.usrp, pp.as_mut_ptr(), pp.len() - 1);
+            uhd_get_version_string(version.as_mut_ptr(), version.len() - 1);
             (
                 CStr::from_ptr(pp.as_ptr()).to_string_lossy().into_owned(),
                 CStr::from_ptr(version.as_ptr()).to_string_lossy().into_owned(),
@@ -708,9 +710,9 @@ impl Device for UhdDevice {
             UHD_RX_METADATA_ERROR_CODE_BAD_PACKET => RxRecv::BadPacket,
             other => {
                 let mut text = [0 as c_char; 256];
-                // SAFETY: the buffer is writable for its length.
+                // SAFETY: the buffer is writable for its length, less its final NUL.
                 let text = unsafe {
-                    uhd_rx_metadata_strerror(md, text.as_mut_ptr(), text.len());
+                    uhd_rx_metadata_strerror(md, text.as_mut_ptr(), text.len() - 1);
                     CStr::from_ptr(text.as_ptr()).to_string_lossy().into_owned()
                 };
                 // Not a lost device: UR-29's list names none of these codes.

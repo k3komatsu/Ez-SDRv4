@@ -117,10 +117,12 @@ fn ur_05_the_profile_must_be_the_device_s_front_ends() {
     let ok = json!({ "args": ARGS });
     let refuse = |profile: Json, config: FakeConfig| UhdRadio::from_binding(&binding(ok.clone(), Some(profile)), fake(config)).err().unwrap().message;
     assert!(UhdRadio::from_binding(&binding(ok.clone(), Some(x310_cbx())), fake(one_cbx())).is_ok());
-    assert_eq!(refuse(x310_ubx(), one_cbx()), "UR-5: profile x310-ubx needs 2 rx channels; the device has 1");
-    assert_eq!(refuse(x310_ubx(), FakeConfig { front_end: "CBX", ..FakeConfig::default() }), "UR-5: profile x310-ubx needs UBX front ends; rx channel 0 is `CBX RX`");
+    let boards = |front_ends: Vec<&'static str>| FakeConfig { front_ends, ..FakeConfig::default() };
+    assert_eq!(refuse(x310_ubx(), one_cbx()), "UR-5: profile x310-ubx needs UBX front ends; rx channel 0 is `CBX-120 RX`");
+    assert_eq!(refuse(x310_ubx(), boards(vec!["UBX", "CBX"])), "UR-5: profile x310-ubx needs UBX front ends; rx channel 1 is `CBX RX`");
+    assert_eq!(refuse(x310_ubx(), boards(vec!["UBX"])), "UR-5: profile x310-ubx needs 2 rx channels; the device has 1");
     assert_eq!(refuse(x310_cbx(), FakeConfig::default()), "UR-5: profile x310-cbx needs CBX front ends; rx channel 0 is `UBX RX`");
-    assert_eq!(refuse(x310_cbx(), FakeConfig { channels: 0, ..one_cbx() }), "UR-5: profile x310-cbx needs 1 rx channels; the device has 0");
+    assert_eq!(refuse(x310_cbx(), boards(vec![])), "UR-5: profile x310-cbx needs 1 rx channels; the device has 0");
 }
 
 #[test]

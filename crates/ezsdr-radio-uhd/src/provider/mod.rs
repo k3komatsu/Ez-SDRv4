@@ -132,7 +132,8 @@ impl UhdRadio {
         }
         let description = profile.description(block_len);
         // The profile's range must be the device's: UHD clips a tune outside its front
-        // end's range and says so only in a log, past the RF envelope's check.
+        // end's range without a warning, past the RF envelope's check. Only the profile's
+        // channels: slot B empty is a channel on UHD's unknown board.
         for (dir, name) in [(Dir::Rx, "rx"), (Dir::Tx, "tx")] {
             let (need, have) = (description.max_channels as usize, device.channels(dir));
             if have < need {
