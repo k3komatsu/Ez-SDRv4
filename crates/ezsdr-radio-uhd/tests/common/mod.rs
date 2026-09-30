@@ -576,8 +576,16 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     let refused = run.submit(set("radio.tx.frequency_hz", Value::Num(hz + 100e6)), None).unwrap();
     assert!(matches!(&refused.outcome, Outcome::Rejected { violations } if violations.iter().any(|v| v.check.as_str() == "radio.rf_envelope")), "{refused:?}");
+    if !exact {
+        println!("B7 refused: {:?}", refused.outcome);
+    }
     let manifest = run.finish();
     let samples = read_capture(&capture_of(&manifest, "rec"), 1).remove(0);
+    if !exact {
+        diagnose("B7 capture", &samples, &wave);
+        println!("B7 capture asked at {at:?}; artifact {:?}", capture_of(&manifest, "rec").continuity);
+        println!("B7 sample clocks: {:?}", manifest.clocks.sample_clocks);
+    }
     let found = if exact { exactly(&samples, &wave) } else { correlate(&samples, &wave) };
     assert!(found.is_some(), "the loopback holds the waveform");
     let errors = events_of(&manifest, "radio.TIME_ERROR");

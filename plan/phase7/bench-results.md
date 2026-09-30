@@ -119,6 +119,30 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; fini
 - The repeat: back to back across the capture's two wraps (1 044 and 2 044), gain and phase unchanged to 0.2° and 0.03 %; the repeat's record `wraps: 20` (20 000 samples, ended by `stop` when the Run finished after its capture, not a 3 s repeat as bench.md words it); no `TX_UNDERFLOW`.
 - No `TIME_ERROR` in either Run's bursts (`late_by: null`).
 
+### B7 (Rust) — `hw_b7_session_loopback`: pass
+
+First run (as `4a9f2b2`): `B7 time errors: []`, `test result: ok. 1 passed … finished in 17.56s`. The test prints nothing else, so `println!`s were added (test output only: the refusal, `diagnose` of the capture, the capture's continuity and the Manifest's sample clocks) and it was run twice more; the last run:
+
+```
+running 1 test
+[INFO] [UHD] linux; GNU C++ version 15.2.0; Boost_109000; UHD_4.10.0.0-0-unknown
+[INFO] [X300] X300 initialization sequence...
+[INFO] [X300] Maximum frame size: 8000 bytes.
+[INFO] [X300] Radio 1x clock: 200 MHz
+B7 refused: Rejected { violations: [Violation { check: Namespace("radio.rf_envelope"), key: Some(Key("radio.tx.frequency_hz")), requested: Some(Num(1100000000.0)), reason: "RM-19: radio: 1100000000 Hz is in no allowed band" }] }
+B7 capture: 5000 samples, rms 0.01113; correlation peak Some((786, 0.015383206, 24.249798)) (offset, gain, phase °); peak over median 28.9 (needs > 8)
+B7 capture asked at TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 411349568 }; artifact [ContinuityMap { domain: ClockDomainId { node: NodeId(0), local: 3 }, channels: 1, valid: [[Segment { start: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 3 }, ticks: 54425 }, len: 5000 }]], gaps: [], channel_gaps: [], first: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 3 }, ticks: 54425 }, end: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 3 }, ticks: 59425 } }]
+B7 sample clocks: [SampleClockRecord { stream: ResourceId { node: NodeId(0), path: "usrp/rx" }, domain: ClockDomainId { node: NodeId(0), local: 3 }, root: ClockDomainId { node: NodeId(0), local: 2 }, root_ticks_per_tick: Rational { num: 200, den: 1 }, origin: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 400464600 }, ended_at: None, nominal_rate: Rational { num: 1000000, den: 1 } }, SampleClockRecord { stream: ResourceId { node: NodeId(0), path: "usrp/tx" }, domain: ClockDomainId { node: NodeId(0), local: 4 }, root: ClockDomainId { node: NodeId(0), local: 2 }, root_ticks_per_tick: Rational { num: 200, den: 1 }, origin: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 401063800 }, ended_at: None, nominal_rate: Rational { num: 1000000, den: 1 } }]
+B7 time errors: []
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 5.56s
+```
+
+- **No `TIME_ERROR`** in all three runs (spike K6; on the bench the test demands none).
+- **The retune outside the envelope is refused** by `radio.rf_envelope` naming `radio.tx.frequency_hz` = 1.1 GHz (§58 #16).
+- **The capture starts at its instant:** asked at root tick 411 349 568 = receive sample (411 349 568 − 400 464 600) / 200 = 54 424.84; the artifact's first sample is 54 425, the next sample on the lattice (32 root ticks, 160 ns, after the instant), no gap, 5 000 samples.
+- The repeat is heard (untimed, so at an arbitrary offset: 2 883 and 786 in the last two runs) at gain 0.0154 and phase 24.2°, the same loop as B6.
+
 ## B7 (Python) — ran; one finding
 
 `EZSDR_SERVER=/cargo-target/release/ezsdr-server EZSDR_PROFILE=/bench/bench-session.json` (bench.md's Session profile with `x310-obx`, `addr=192.168.40.36`, the capture directory `/bench/b7-captures`):
