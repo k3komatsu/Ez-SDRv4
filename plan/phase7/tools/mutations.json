@@ -1175,8 +1175,8 @@
   "id": "R25",
   "name": "x310-cbx's range from 10 MHz, UBX's (the one-CBX bench)",
   "file": "crates/ezsdr-radio-uhd/src/profile.rs",
-  "old": "x310(self, 1_200_000_000.0, 1, block_len)",
-  "new": "x310(self, 10_000_000.0, 1, block_len)",
+  "old": "x310(self, 1_200_000_000.0, 6_000_000_000.0, 1, block_len)",
+  "new": "x310(self, 10_000_000.0, 6_000_000_000.0, 1, block_len)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_09_x310_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz"
@@ -1197,6 +1197,26 @@
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
   "old": "for chan in 0..need {",
   "new": "for chan in 0..need.min(1) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
+ },
+ {
+  "id": "R28",
+  "name": "x310-obx's range capped at 6 GHz, UBX's (the one-OBX bench)",
+  "file": "crates/ezsdr-radio-uhd/src/profile.rs",
+  "old": "x310(self, 10_000_000.0, 8_400_000_000.0, 1, block_len)",
+  "new": "x310(self, 10_000_000.0, 6_000_000_000.0, 1, block_len)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_09_x310_obx_is_one_channel_from_10_mhz_to_8_4_ghz_defaulting_to_1_ghz"
+ },
+ {
+  "id": "R29",
+  "name": "x310-obx names UBX front ends (the one-OBX bench)",
+  "file": "crates/ezsdr-radio-uhd/src/profile.rs",
+  "old": "Profile::X310Obx => \"OBX\",",
+  "new": "Profile::X310Obx => \"UBX\",",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"

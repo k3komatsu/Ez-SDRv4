@@ -69,13 +69,17 @@ pub fn x310_ubx() -> Json {
     json!({ "name": "x310-ubx", "version": { "major": 0, "minor": 1, "patch": 0 } })
 }
 
-/// The profile of the device's front ends: `x310-cbx` on a CBX (the one-CBX bench,
-/// bench.md), else `x310-ubx` (the fake's default).
+/// The profile of the device's front ends: `x310-obx` on an OBX (the bench, bench.md),
+/// `x310-cbx` on a CBX, else `x310-ubx` (the fake's default).
 pub fn profile_of(device: &dyn Device) -> Profile {
-    match device.front_end(ezsdr_radio_uhd::Dir::Rx, 0) {
-        Ok(name) if name.starts_with(Profile::X310Cbx.front_end()) => Profile::X310Cbx,
-        _ => Profile::X310Ubx,
-    }
+    let name = device.front_end(ezsdr_radio_uhd::Dir::Rx, 0).unwrap_or_default();
+    [Profile::X310Obx, Profile::X310Cbx].into_iter().find(|p| name.starts_with(p.front_end())).unwrap_or(Profile::X310Ubx)
+}
+
+/// A fake of `x310-obx`'s device, the bench's: an OBX in slot A and slot B empty, which
+/// UHD reports as a second channel on its unknown board (`db_unknown.cpp`).
+pub fn one_obx() -> FakeConfig {
+    FakeConfig { front_ends: vec!["OBX", "Unknown (0xffff) - 0"], ..FakeConfig::default() }
 }
 
 /// A fake of `x310-cbx`'s device: a CBX-120 in slot A and slot B empty, which UHD

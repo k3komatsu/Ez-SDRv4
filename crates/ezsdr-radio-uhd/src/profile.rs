@@ -1,4 +1,5 @@
-//! The profiles `x310-ubx` and `x310-cbx` 0.1.0 (UR-9) and the Module's own constants (§3).
+//! The profiles `x310-ubx`, `x310-obx` and `x310-cbx` 0.1.0 (UR-9) and the Module's own
+//! constants (§3).
 
 use ezsdr_kernel::module_api::{ProfileRef, Version};
 use ezsdr_kernel::spec::{Key, Value};
@@ -27,6 +28,8 @@ pub const CBX_DEFAULT_FREQUENCY_HZ: f64 = 2_450_000_000.0;
 pub enum Profile {
     /// `x310-ubx` 0.1.0: two UBX.
     X310Ubx,
+    /// `x310-obx` 0.1.0: one OBX, in slot A (the bench's).
+    X310Obx,
     /// `x310-cbx` 0.1.0: one CBX, in slot A.
     X310Cbx,
 }
@@ -34,13 +37,14 @@ pub enum Profile {
 impl Profile {
     /// The profile a binding names, if it is one of this Module's.
     pub fn from_ref(profile: &ProfileRef) -> Option<Profile> {
-        [Profile::X310Ubx, Profile::X310Cbx].into_iter().find(|p| p.profile_ref() == *profile)
+        [Profile::X310Ubx, Profile::X310Obx, Profile::X310Cbx].into_iter().find(|p| p.profile_ref() == *profile)
     }
 
     /// The profile's name.
     pub fn name(self) -> &'static str {
         match self {
             Profile::X310Ubx => "x310-ubx",
+            Profile::X310Obx => "x310-obx",
             Profile::X310Cbx => "x310-cbx",
         }
     }
@@ -53,10 +57,12 @@ impl Profile {
         }
     }
 
-    /// How UHD's names of the profile's front ends begin (`UBX RX`, `CBX-120 TX`; UR-5).
+    /// How UHD's names of the profile's front ends begin (`UBX RX`, `OBX TX`, `CBX-120 TX`;
+    /// UR-5).
     pub fn front_end(self) -> &'static str {
         match self {
             Profile::X310Ubx => "UBX",
+            Profile::X310Obx => "OBX",
             Profile::X310Cbx => "CBX",
         }
     }
@@ -64,11 +70,16 @@ impl Profile {
     /// UR-9's values as RM-26's description; `block_len` is the selector's.
     pub fn description(self, block_len: u32) -> DeviceDescription {
         match self {
-            Profile::X310Ubx => x310(self, 10_000_000.0, 2, block_len),
+            Profile::X310Ubx => x310(self, 10_000_000.0, 6_000_000_000.0, 2, block_len),
+            // UHD 4.10's `obx_freq_range(10e6, 8.4e9)` (`db_obx.hpp`, VERIFIED).
+            Profile::X310Obx => x310(self, 10_000_000.0, 8_400_000_000.0, 1, block_len),
             // UHD 4.10 clips a CBX tune to 1.2…6 GHz (`db_sbx_common.hpp`, VERIFIED), and
             // RM-5's 1 GHz is outside it.
+            // ponytail: CBX has no timed LO phase sync (UHD's `_sync_phase` is UBX's and
+            // OBX's only), so `random_unless_timed_tune` overstates it; `radio` has no value
+            // for "random" yet, a Vocabulary addition left to Phase 8 (design-notes §9).
             Profile::X310Cbx => {
-                let mut description = x310(self, 1_200_000_000.0, 1, block_len);
+                let mut description = x310(self, 1_200_000_000.0, 6_000_000_000.0, 1, block_len);
                 for key in [keys::RX_FREQUENCY_HZ, keys::TX_FREQUENCY_HZ] {
                     description.defaults.insert(Key::parse(key).expect("a radio key"), Value::Num(CBX_DEFAULT_FREQUENCY_HZ));
                 }
@@ -78,14 +89,14 @@ impl Profile {
     }
 }
 
-/// The values both profiles share; they differ in the lowest frequency, the channel
-/// count and `x310-cbx`'s default frequency.
-fn x310(profile: Profile, lowest_hz: f64, max_channels: i64, block_len: u32) -> DeviceDescription {
+/// The values the profiles share; they differ in the frequency range, the channel count
+/// and `x310-cbx`'s default frequency.
+fn x310(profile: Profile, lowest_hz: f64, highest_hz: f64, max_channels: i64, block_len: u32) -> DeviceDescription {
     DeviceDescription {
         profile: profile.profile_ref(),
         rates: Grid::Values((1..=512).rev().map(|n| MASTER_CLOCK_HZ as f64 / f64::from(n)).collect()),
         whole_hertz_rates: false,
-        frequency: Grid::Step { lo: lowest_hz, hi: 6_000_000_000.0, step: 1.0 },
+        frequency: Grid::Step { lo: lowest_hz, hi: highest_hz, step: 1.0 },
         gain: Grid::Step { lo: 0.0, hi: 31.5, step: 0.5 },
         max_channels,
         rx_antennas: vec!["RX2".to_owned(), "TX/RX".to_owned()],
@@ -93,9 +104,6 @@ fn x310(profile: Profile, lowest_hz: f64, max_channels: i64, block_len: u32) -> 
         coherent: true,
         full_duplex: true,
         hardware_time: true,
-        // ponytail: CBX has no timed LO phase sync (UHD's `sync_phase` is UBX's only), so
-        // this overstates `x310-cbx`; `radio` has no value for "random" yet, a Vocabulary
-        // addition left to Phase 8 (design-notes §9).
         phase_behavior_on_retune: "random_unless_timed_tune".to_owned(),
         // Streamed from host memory (UR-22): neither Replay's size nor its alignment
         // applies; the limit is `BurstOpen.waveform_len`'s u32.

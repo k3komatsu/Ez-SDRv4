@@ -1,5 +1,5 @@
-//! The bench steps of `plan/phase7/bench.md` (UR-34), on a USRP X310 with one CBX
-//! (`x310-cbx`) or two UBX (`x310-ubx`), the profile the one its front ends name.
+//! The bench steps of `plan/phase7/bench.md` (UR-34), on a USRP X310 with one OBX
+//! (`x310-obx`), the profile the one its front ends name.
 //! Compiled only with the feature `uhd`, every test ignored, the device from
 //! `EZSDR_UHD_ARGS` (GZ-8). Run each as `bench.md` says;
 //! each prints what `bench-results.md` records.
@@ -32,7 +32,7 @@ fn hw_b1_probe() {
     // The profile's channels and front ends, as UR-5 checks them.
     let profile = profile_of(&*device);
     println!("B1 profile: {}", profile.name());
-    assert_eq!(profile, ezsdr_radio_uhd::profile::Profile::X310Cbx, "bench.md: the bench is one CBX in slot A");
+    assert_eq!(profile, ezsdr_radio_uhd::profile::Profile::X310Obx, "bench.md: the bench is one OBX in slot A");
     let need = profile.description(2_000).max_channels as usize;
     for dir in [Dir::Rx, Dir::Tx] {
         let have = device.channels(dir);

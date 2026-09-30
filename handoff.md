@@ -271,7 +271,8 @@ owner の依頼（「Phase 7を実装してください」，続けて「終わ�
 | `e2d4d26` | Review L（CHANGES_REQUIRED：P0 3・P1 8・P2 19）の修正：streamer の二重 free，UR-12 の rate 規則（512 中 487 を拒否していた），0 channel からの受信開始時刻，受信 timed stop の早すぎる発行，UHD のエラー文，preempt 時の end-of-burst，テスト多数．大規模なので再レビュー |
 | `9b79b58` | Review M（同じ reviewer の再レビュー：P0 0・P1 2・P2 8）の修正：遅れた timed stop を missed start と取り違えて受信を再開していた件，1.85 で flaky だった `ur_21` など．小規模・局所的なので owner の規則どおり再レビューせず終了 |
 | `def6dc9`，`3ffb3bd` | 実機検証の手順（この節の下），UHD 4.10 の Docker 環境と devcontainer |
-| （最後の commit） | 実機を **X310 + CBX 1枚のループバック** に変更（owner，2026-09-30：「UBX2枚での試験ではなくCBX1枚でループバックで可能なように内容を修正してください」）：profile `x310-cbx` 0.1.0（1 channel，1.2–6 GHz，既定 2.45 GHz），UR-5 が front end 名と channel 数を実機と照合，テストは device の front end から profile を選ぶ．[design-notes.md](plan/phase7/design-notes.md) §9 |
+| `09f11b4`，`15f0c61` | 実機を **X310 + CBX 1枚のループバック** に変更（owner，2026-09-30：「UBX2枚での試験ではなくCBX1枚でループバックで可能なように内容を修正してください」）：profile `x310-cbx` 0.1.0（1 channel，1.2–6 GHz，既定 2.45 GHz），UR-5 が front end 名と channel 数を実機と照合，テストは device の front end から profile を選ぶ．Opus レビュー（P2 5 件）の修正．[design-notes.md](plan/phase7/design-notes.md) §9 |
+| （最後の commit） | 実機を **X310 + OBX 1枚のループバック** に再変更（owner，同日：「了解ですOBXに切り替えてください」）：profile `x310-obx` 0.1.0（1 channel，10 MHz–8.4 GHz，既定 1 GHz，UBX と同じ timed tune の位相同期）．`x310-cbx` は予備として残す．design-notes §10 |
 
 状態（`9b79b58`）：`cargo test --workspace` 839 passed（stable と 1.85.0，libuhd なしでもビルド可），clippy `-D warnings` clean（feature `uhd` の有無とも），`cargo test -p ezsdr-radio-uhd --features uhd` は libuhd 4.10 のこの Mac で通る（実機なし），Python 23 件（3.9/3.13），mutation は `plan/phase7/tools/mutations.json` の 114 行（G09 だけ black-box では勝てない race として記録）．実装が spec と違うところは [design-notes.md](plan/phase7/design-notes.md) §6，Review L・M の全指摘と対応は §7・§8，レビュー本文は [reviews/](plan/phase7/reviews)．
 
@@ -279,13 +280,13 @@ owner の依頼（「Phase 7を実装してください」，続けて「終わ�
 
 残り：実機セッション（下の「Phase 7 の実機検証」，別エージェントが Linux サーバーで行う），branch を `main` へ入れる判断（`main` が `25e79f3` のままなら fast-forward），Gate X（owner），Step X（spec 18 を `design/` へ，Vision の issue 適用）．
 
-### Phase 7 の実機検証 — 次の工程（別エージェント向け，Linux サーバー + USRP X310 + CBX 1枚のループバック）
+### Phase 7 の実機検証 — 次の工程（別エージェント向け，Linux サーバー + USRP X310 + OBX 1枚のループバック）
 
 owner の指示（2026-09-28）：「実機では別のlinuxサーバーでUSRPを使うので，pushしておいてください．また実機検証は別エージェントで実施することになるので，handoffにも次の工程を細かく書いておいて」．この節だけで作業を始められるように書く．手順の本体は [plan/phase7/bench.md](plan/phase7/bench.md)（B0–B9，合格条件と記録する値）で，ここはその実行計画と，bench.md に書いていない実装側の事情．
 
 **前提と規則**
 
-- **実機構成**（owner，2026-09-30）：X310 の slot A に CBX（または CBX-120）1枚．TX/RX を 30 dB 以上の減衰器を通して同じ CBX の RX2 へ（ループバック）．送信だけの段のために 50 Ω 終端．10 GbE（SFP+）の Linux PC．外部の 10 MHz/PPS は不要．profile は `x310-cbx` 0.1.0（1 channel，1.2–6 GHz，既定周波数 2.45 GHz）で，テストは UHD が報告する front end 名（`CBX…`）から自動で選ぶ．UBX 前提の記述（2 + 2 channel，1 GHz）は残っていない．事情は [design-notes.md](plan/phase7/design-notes.md) §9．
+- **実機構成**（owner，2026-09-30）：X310 の slot A に **OBX 1枚**．TX/RX を 30 dB 以上の減衰器を通して同じ OBX の RX2 へ（ループバック）．送信だけの段のために 50 Ω 終端．10 GbE（SFP+）の Linux PC．外部の 10 MHz/PPS は不要．**UHD 4.9 以上が必須**（OBX は 2025 年 6 月に UHD に入った．古い UHD では unknown board になり UR-5 が拒否する）ので Docker 環境（UHD 4.10）を使う．X310 の FPGA image もその UHD に合わせる．profile は `x310-obx` 0.1.0（1 channel，10 MHz–8.4 GHz，既定周波数 1 GHz）で，テストは UHD が報告する front end 名（`OBX…`）から自動で選ぶ．OBX が 2 枚あっても同じ profile で動く（使うのは channel 0）．途中まで CBX 1枚で準備したので `x310-cbx` も残っている（OBX の driver が不調なときの予備）．事情は [design-notes.md](plan/phase7/design-notes.md) §9・§10．
 - 作業するのは branch `worktree-phase7-impl`（`origin` にある，この節を書いた最後の commit 以降）．`main` にはまだ Phase 7 がない．この branch に commit して push してよい（v4 の作業なので `master` と v3 の tag には触れない，AGENTS.md §1）．`main` への merge は owner の判断なのでしない．
 - 実機で失敗したら，その場でコードを直さない（bench.md「If a step fails」）．`plan/phase7/bench-results.md` に出力ごと記録し，`FakeDevice` で再現するテストを先に書いてから直し，その段をやり直す．直したら `cargo test --workspace` を通して commit・push．
 - 設計を変える必要があると判断したら（INFERRED だった値が違う，規則が実機に合わない），実装より先に `plan/phase7/design-notes.md` に「§10 bench」節を作って記録し，owner に判断を仰ぐ．spec 18 の数値（device lead 2 ms，delivery allowance 3 ms，restart lead 50 ms，in-flight window 10 ms，release window 3 ms，queue depth 16）は Phase 8 の入力として **記録するだけ** で，profile の値はこの session では変えない（bench.md 冒頭，spec 18 §3）．
@@ -312,7 +313,7 @@ owner の指示（2026-09-28）：「実機では別のlinuxサーバーでUSRP�
    export CARGO_TARGET_DIR=$HOME/.cache/cargo-target/Ez-SDRv4
    cargo test --workspace                                  # 845 passed になるはず（libuhd を link しない）
    cargo +1.85.0 test --workspace                          # 同じ（MSRV）
-   cargo test -p ezsdr-radio-uhd --features uhd            # fake 96（うち CBX 1枚の rehearsal 4）+ uhd_api 4 が通り，hardware の 10 本は ignored
+   cargo test -p ezsdr-radio-uhd --features uhd            # fake 98（うち OBX 1枚の rehearsal 4，CBX 1枚の 1）+ uhd_api 4 が通り，hardware の 10 本は ignored
    cargo clippy -p ezsdr-radio-uhd -p ezsdr-server --features ezsdr-radio-uhd/uhd,ezsdr-server/uhd --all-targets -- -D warnings
    cargo build --release -p ezsdr-server --features uhd    # B7 用の server
    ```
@@ -328,12 +329,12 @@ owner の指示（2026-09-28）：「実機では別のlinuxサーバーでUSRP�
 
 | 段 | テスト | RF | 注意（実装側の事情） |
 |---|---|---|---|
-| B1 | `hw_b1_probe` | なし | `B1 profile: x310-cbx` と，各 channel の front end 名（`CBX RX`・`CBX-120 TX` など）と channel 数（1 + 1 以上）が出ること．`x310-cbx` でなければテストが失敗する（UHD の front end 名が `CBX` で始まっていない）：名前を記録して止まる．UHD は空の slot B も unknown board の channel として数えるので，2 + 2 と出るのが正常．送信を始める前に，各 TX channel の周波数と利得をそのまま記録する（何も設定しない Session が引き継ぐ値，UR-25） |
+| B1 | `hw_b1_probe` | なし | `B1 profile: x310-obx` と，各 channel の front end 名（`OBX RX`・`OBX TX`）と channel 数（1 + 1 以上）が出ること．`x310-obx` でなければテストが失敗する（UHD の front end 名が `OBX` で始まっていない．`Unknown` なら UHD が 4.9 より古い）：名前を記録して止まる．UHD は空の slot B も unknown board の channel として数えるので，2 + 2 と出るのが正常．送信を始める前に，各 TX channel の周波数と利得をそのまま記録する（何も設定しない Session が引き継ぐ値，UR-25） |
 | B2 | `hw_b2_authority` | なし | 10 s 待つ．lateness の中央値 < 1 ms，最大 < 25 ms．`DeviceAuthority::failed_reads()`・`discarded_reads()` は Manifest に出ないので，出力に無ければテストに `println!` を足して記録してよい（test コードの追加は可） |
 | B3 | `hw_b3_receive_at_t0` | なし | `applied` と `timing` の section が出力される．周波数の read-back 差（K13：< 0.05 Hz 程度）を記録 |
 | B4 | `hw_b4_capture_at_a_sample_index` | なし | bench.md は Session の capture と書くが，実装は Spec の schedule で `sink.capture_samples` を sample 50 000 に置く形（`rehearse_capture_at_a_sample_index`）．合格条件（最初の sample が 50 000）は同じ |
 | B5 | `hw_b5_overflow` | なし | 300 ms → 1 s → 2 s の stall で overflow を起こす．どれでも起きなければ panic するので，そのときの `net.core.rmem_max` を記録 |
-| — | RF 安全 | — | ここから送信する．bench.md「RF safety」：TX/RX → 30 dB 以上の減衰 → RX2（同じ CBX），利得 0 dB，振幅 ≤ 0.5．周波数は `x310-cbx` の既定 2.45 GHz（テストも B7 の `bench-session.json` も envelope は 2449–2451 MHz）．ラボの都合で変えるなら，`crates/ezsdr-radio-uhd/src/profile.rs` の `CBX_DEFAULT_FREQUENCY_HZ`（1.2–6 GHz 内）と bench.md の 2 つの JSON の envelope を一緒に変え，spec 18 UR-9 の値も直して commit する（テストの周波数と envelope はこの既定値に従う） |
+| — | RF 安全 | — | ここから送信する．bench.md「RF safety」：TX/RX → 30 dB 以上の減衰 → RX2（同じ OBX），利得 0 dB，振幅 ≤ 0.5．周波数は `x310-obx` の既定 1 GHz（テストも B7 の `bench-session.json` も envelope は 999–1001 MHz）．ラボの都合で変えるなら，`crates/ezsdr-radio-uhd/src/profile.rs` で `x310-obx` に `x310-cbx` と同じ形の既定周波数を持たせ（10 MHz–8.4 GHz 内），bench.md の 2 つの JSON の envelope を一緒に変え，spec 18 UR-9 も直して commit する（テストの周波数と envelope はこの既定値に従う） |
 | B6 | `hw_b6_txrx_and_repeat` | あり | 相関で探すので，fake の「完全一致」は求めない（`exact = false`） |
 | B7 | Python（bench.md B7） | あり | `bench-session.json` を bench.md の JSON から作る（`<dir>` を実在の directory に，`args` を `ARGS` に）．`EZSDR_SERVER=$CARGO_TARGET_DIR/release/ezsdr-server EZSDR_PROFILE=bench-session.json PYTHONDONTWRITEBYTECODE=1 python3 python/examples/minimal.py`，次に同じ環境変数で `python3 python/examples/bench_loopback.py`．Rust 版 `hw_b7_session_loopback` もあり，こちらは実機では「`TIME_ERROR` がひとつもない」ことを要求する（fake では負荷のため 5 ms までの send_asap を許している，Review M） |
 | B8 | `hw_b8_leads` | あり | **実装は bench.md B8 の一部だけ**：burst を受信後 10, 5, 3, 2, 1.5, 1, 0.5 ms の lead で送り，各回の `TIME_ERROR` と `timing` を出す．表の残り（timed retune の lead，`cold` の restart lead 100/50/25/10 ms，`Stop` 後の送信終端，in-flight window 10/5/3/2 ms での underflow，preemption の bound，timed retune を何個積めるか（queue depth），receive の timed stop が効くか）は未実装．これらは Phase 8 の入力なので，`hardware.rs` に `hw_b8_*` を足して測るか（`#[ignore = "needs a USRP: see plan/phase7/bench.md"]` を付けること，governance の `gz_08` が検査する），測れなかったと記録する |
@@ -347,7 +348,8 @@ owner の指示（2026-09-28）：「実機では別のlinuxサーバーでUSRP�
 - UR-29：抜線でどの UHD error が出るか（`IO`/`USB`/`OS`/`RUNTIME`）．`RUNTIME` が streaming 中に偽陽性を出さないか（B9 の rerun）．
 - UR-3：thread 安全性（control call は mutex，streamer は 1 thread 所有）．クラッシュや `double free` のメッセージが出たら最優先で記録．
 - EA-17：B7 の `z = sdr.rx.capture(N, at=t)` が `t` から始まるか（`bench_loopback.py` が y と z の相関位置を出す）．
-- UR-9（`x310-cbx`）：B3 の `applied` で周波数の read-back が 2.45 GHz に一致するか（CBX の範囲内なので丸められないはず）．B8 の lead と queue に積める timed tune の数は CBX の値として記録する（UBX の値の代わりにはならない，design-notes §9）．
+- UR-9（`x310-obx`）：B3 の `applied` で周波数の read-back が 1 GHz に一致するか．B8 の lead と queue に積める timed tune の数は OBX の値として記録する（UBX と同じ MAX2871 系だが tune の実装は別なので，UBX の値とみなさない，design-notes §10）．
+- OBX の driver は新しい（UHD 4.9 から）：UHD の警告（特に `OBX` の「Unable to set dboard clock rate - phase will vary」）が出たら記録する．
 
 **4. 終わったら**
 
@@ -364,7 +366,7 @@ owner の指示（2026-09-28）：「実機では別のlinuxサーバーでUSRP�
 | [00-overview.md](plan/phase7/00-overview.md) | 穴 19 件（spike K1–K13，Phase 2/4/6 からの持ち越し，設計中に見つけたもの）と証拠，範囲・範囲外，決定 T1–T18，crate 構成，GZ-1…GZ-10，テスト方針，Phase 8 への入力表，手順，exit criteria |
 | [19-amendments.md](plan/phase7/19-amendments.md) | spec 19：Kernel KG-1…KG-14（device-paced class を駆動，data thread，client 呼び出しなしで無線機を止める，KC-21a/KC-24a，MA-8 強制，T0 の格子，lead は dispatch から，TM-16c/TM-18/TM-13b/TM-13e/UC-3，child Run 拒否），Vocabulary/Module/frontend VE-1…VE-6（`radio` 1.3.0，MockRadio 1.3.0，server，Python の `after`），mutation 一覧 |
 | [18-uhd-radio.md](plan/phase7/18-uhd-radio.md) | spec 18：`ezsdr.radio.uhd` 0.1.0（UR-1…UR-35，U1–U14）。UHD の C API（feature `uhd`，unsafe は `src/uhd.rs` だけ），`Device` trait と `FakeDevice`，profile `x310-ubx` 0.1.0，device-paced Authority，送受信・更新・停止・事象・Manifest，テストと mutation |
-| [bench.md](plan/phase7/bench.md) | 実機セッションの手順 B0–B9（Linux PC + X310 + CBX 1枚のループバック（2026-09-30 に UBX から変更），RF 安全，プロファイル，各段の合格条件と記録） |
+| [bench.md](plan/phase7/bench.md) | 実機セッションの手順 B0–B9（Linux PC + X310 + OBX 1枚のループバック（2026-09-30 に UBX から CBX，さらに OBX へ変更），RF 安全，プロファイル，各段の合格条件と記録） |
 | [design-notes.md](plan/phase7/design-notes.md) | 確認した根拠，設計中の発見，Review J・K の全指摘と対応 |
 
 レビュー（luna-primary-engineer の手順を参考に Opus を subagent で）：**Review J**（CHANGES_REQUIRED：P0 4・P1 11・P2 23）→ 全件を文書で修正（大規模）→ **Review K**（同じ reviewer の再レビュー：新規 P0 1・P1 5・P2 14，J の未解決 1）→ 全件修正．K の修正は小規模（推奨修正そのもの，局所的）なので owner の規則どおり再レビューせず終了（理由は design-notes §5）．記録は [prompts/](plan/phase7/prompts)，[reviews/](plan/phase7/reviews)．
