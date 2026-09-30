@@ -633,8 +633,8 @@
   "id": "U17",
   "name": "the repeat not ended at the next burst's start",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "            let held_cut = self.held.keys().next().copied();\n            self.send(clock, held_cut, e1_k);\n            return true;\n        }\n        if self.continues_at",
-  "new": "            let held_cut = self.held.keys().next().copied().filter(|_| !self.open.as_ref().is_some_and(|o| o.held.repeat));\n            self.send(clock, held_cut, e1_k);\n            return true;\n        }\n        if self.continues_at",
+  "old": "            let held_cut = self.held.keys().next().copied();\n            self.send(clock, held_cut, e1_k);\n            return true;\n        }\n        if let Some(c) = self.continues_at",
+  "new": "            let held_cut = self.held.keys().next().copied().filter(|_| !self.open.as_ref().is_some_and(|o| o.held.repeat));\n            self.send(clock, held_cut, e1_k);\n            return true;\n        }\n        if let Some(c) = self.continues_at",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_23_a_burst_ends_at_the_next_bursts_start"
@@ -1053,7 +1053,7 @@
   "id": "R13",
   "name": "UR-25's untimed stop at the cut removed (P1-3; §11 F1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "                stop_at_cut(&self.core, cut);\n                len = (cut_k - k).max(0);",
+  "old": "                if !stream.stopped {\n                    stream.stopped = true;\n                    self.last_stop = stop_at_cut(&self.core, cut).or(self.last_stop);\n                }\n                len = (cut_k - k).max(0);",
   "new": "                len = (cut_k - k).max(0);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
@@ -1203,8 +1203,8 @@
   "id": "B01",
   "name": "the receive wait not bounded by a pending cut (§11 F2)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "self.core.device.rx_recv(self.core.block_len, self.recv_timeout())",
-  "new": "self.core.device.rx_recv(self.core.block_len, RECV_TIMEOUT)",
+  "old": "self.core.device.rx_recv(self.recv_len(), self.recv_timeout())",
+  "new": "self.core.device.rx_recv(self.recv_len(), RECV_TIMEOUT)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_stream_silent_before_e1_switches_before_e2"
@@ -1213,8 +1213,8 @@
   "id": "B02",
   "name": "a stream silent past its cut left without its stop record (§11 F1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "                    self.stream = None;\n                    stop_at_cut(&self.core, cut);\n",
-  "new": "                    self.stream = None;\n                    let _ = cut;\n",
+  "old": "                    if !stopped {\n                        self.last_stop = stop_at_cut(&self.core, cut).or(self.last_stop);\n                    }\n",
+  "new": "                    let _ = (stopped, cut);\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_stream_silent_before_e1_switches_before_e2"
@@ -1223,7 +1223,7 @@
   "id": "B03",
   "name": "end-of-burst at the next burst's start: a timed start at the tick the burst ended (§11 F3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let device_eob = eob && !ends_at_held;",
+  "old": "        let device_eob = false;",
   "new": "        let device_eob = eob;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
@@ -1238,5 +1238,97 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_21_a_burst_inside_the_in_flight_window_is_late"
+ },
+ {
+  "id": "B05",
+  "name": "the receive request not bounded by the cut (Review N, B1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.core.device.rx_recv(self.recv_len(), self.recv_timeout())",
+  "new": "self.core.device.rx_recv(self.core.block_len, self.recv_timeout())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_long_block_at_a_low_rate_stops_the_stream_at_e1"
+ },
+ {
+  "id": "B06",
+  "name": "the old stream's tail after a late switch published (Review N, B1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if first_tick < clock.origin || first_tick < stream.not_before {",
+  "new": "if first_tick < clock.origin {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_late_switch_drops_the_old_stream_s_tail"
+ },
+ {
+  "id": "B07",
+  "name": "a Timeout at the cut ends the stream, however late its samples (Review N, B2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                if let Some(cut) = stream.cut.filter(|cut| quiet && now >= cut + span) {",
+  "new": "                if let Some(cut) = stream.cut.filter(|cut| quiet || now >= *cut) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_late_switch_drops_the_old_stream_s_tail"
+ },
+ {
+  "id": "B08",
+  "name": "a Kernel burst's end is the device burst's at once again, as at bc0db98 (Review N, B3)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        let device_eob = false;",
+  "new": "        let device_eob = eob && !ends_at_held;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it",
+  "old2": "            self.continues_at = Some(open.next);\n",
+  "new2": "            if !device_eob {\n                self.continues_at = Some(open.next);\n            }\n"
+ },
+ {
+  "id": "B09",
+  "name": "a device burst held open past its end, with nothing booked (Review N, B3)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "                None if clock.instant(c) - now <= self.core.ticks(DEVICE_LEAD_NS) => {",
+  "new": "                None if false => {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_23_a_burst_alone_is_ended_before_it_runs_dry"
+ },
+ {
+  "id": "B10",
+  "name": "a Stop leaves a device burst held for a continuation open (Review N, T3)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        let device_open = self.open.as_ref().map_or(continuing.is_some(), |open| !open.first || continuing == Some(open.held.k));",
+  "new": "        let device_open = self.open.as_ref().is_some_and(|open| !open.first || continuing == Some(open.held.k));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_23_a_stop_while_the_device_burst_waits_for_a_continuation_ends_it"
+ },
+ {
+  "id": "B11",
+  "name": "an abort's stop issued again at the cut (Review N, N4)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                                stream.stopped = true;\n                                self.last_stop = Some(issued);",
+  "new": "                                stream.stopped = false;\n                                self.last_stop = Some(issued);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_an_abort_publishes_nothing_after_the_stop_instant"
+ },
+ {
+  "id": "B12",
+  "name": "the bounded receive wait allowed under 1 ms (Review N, T4)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "Wall::from_nanos(self.core.ns(left.max(0)) as u64).clamp(Wall::from_millis(1), RECV_TIMEOUT)",
+  "new": "Wall::from_nanos(self.core.ns(left.max(0)) as u64).min(RECV_TIMEOUT)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_late_switch_drops_the_old_stream_s_tail"
+ },
+ {
+  "id": "B13",
+  "name": "UR-29's silence check off while a cut is pending (Review N, N7)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "} else if stream.cut.is_none_or(|cut| now < cut)",
+  "new": "} else if stream.cut.is_none()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_29_a_stream_silent_before_a_far_cut_is_a_lost_device"
  }
 ]

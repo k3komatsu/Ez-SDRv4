@@ -196,10 +196,22 @@ impl Tx {
             self.send(clock, held_cut, e1_k);
             return true;
         }
-        if self.continues_at.is_some_and(|c| self.held.keys().next() != Some(&c)) {
-            // What was to continue the device burst is gone: end it.
-            self.end_open(true);
-            return true;
+        if let Some(c) = self.continues_at {
+            match self.held.keys().next() {
+                Some(&k) if k == c => {}
+                // Another burst is next, not the continuation: end the device burst first.
+                Some(_) => {
+                    self.end_open(true);
+                    return true;
+                }
+                // None booked yet: the device burst stays open for one booked at `c` until
+                // `c` is a device lead away, then ends before it runs dry (Review N, B3).
+                None if clock.instant(c) - now <= self.core.ticks(DEVICE_LEAD_NS) => {
+                    self.end_open(true);
+                    return true;
+                }
+                None => return false,
+            }
         }
         if let Some(&k) = self.held.keys().next() {
             if e1_k.is_some_and(|e1| k >= e1) {
@@ -238,7 +250,10 @@ impl Tx {
         // burst continues the device burst of the one before (§11 F3).
         let continuing = first && self.continues_at == Some(start);
         let device_sob = first && !continuing;
-        let device_eob = eob && !ends_at_held;
+        // A Kernel burst's end is never the device burst's at once: the next burst held at
+        // its next sample continues it, and a burst booked there later still may (Review N,
+        // B3); `step` ends the device burst otherwise, a device lead before it runs dry.
+        let device_eob = false;
         let at = device_sob.then(|| clock.instant(start));
         let result = self.core.device.tx_send(&slices, at, device_sob, device_eob, SEND_TIMEOUT);
         let next = open.next;
@@ -288,9 +303,7 @@ impl Tx {
         }
         if eob {
             let open = self.open.take().expect("open");
-            if !device_eob {
-                self.continues_at = Some(open.next);
-            }
+            self.continues_at = Some(open.next);
             self.forget(&open.held);
         }
     }
@@ -327,7 +340,14 @@ impl Tx {
     }
 
     fn abandon(&mut self) {
-        self.continues_at = None;
+        // A send that failed or came up short: end the device burst if one is open, so
+        // that none is left without end-of-burst (Review N, N7).
+        let continuing = self.continues_at.take();
+        let device_open = self.open.as_ref().is_some_and(|open| !open.first || continuing == Some(open.held.k));
+        if device_open && !self.core.is_lost() {
+            let empty: Vec<&[Iq]> = vec![&[]; self.channels.max(1)];
+            let _ = self.core.device.tx_send(&empty, None, false, true, SEND_TIMEOUT);
+        }
         if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {
             lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect("a record"));
         }

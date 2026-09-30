@@ -286,6 +286,12 @@ pub struct FakeConfig {
     /// One front end per channel, each direction (at most two): its UHD name without
     /// ` RX` or ` TX`, such as `UBX` or `CBX-120`.
     pub front_ends: Vec<&'static str>,
+    /// How long after its last sample a receive packet reaches `rx_recv` (the host's
+    /// delivery; the bench's orderly stops put it at 2–4 ms, INFERRED; Review N, T1).
+    pub rx_latency: Duration,
+    /// The samples of one receive packet (UHD's samples per packet; 1 996 on the bench's
+    /// X300 at MTU 9000); `None` makes a whole request one packet.
+    pub rx_packet: Option<usize>,
 }
 
 impl Default for FakeConfig {
@@ -298,6 +304,8 @@ impl Default for FakeConfig {
             loopback_delay_samples: 0,
             faults: Vec::new(),
             front_ends: vec!["UBX", "UBX"],
+            rx_latency: Duration::ZERO,
+            rx_packet: None,
         }
     }
 }
@@ -318,12 +326,26 @@ struct Fake {
     last_command: i64,
     rx_channels: usize,
     rx_next: Option<i64>,
+    /// The running stream's root ticks a sample, fixed when it starts.
+    rx_ratio: i64,
+    /// A stopped stream's end: its samples before it are still delivered (the device's
+    /// in-flight tail), ahead of the next stream's.
+    rx_end: Option<i64>,
+    /// A start issued while a stopped stream's tail is still being delivered.
+    rx_then: Option<i64>,
+    /// UHD's error cache: a `recv` cut short by a packet's timeout returns what it has,
+    /// and the next `recv` returns `TIMEOUT` at once (`rx_streamer_impl.hpp`).
+    rx_cached_timeout: bool,
+    /// The shortest timeout an `rx_recv` was given.
+    rx_min_timeout: Duration,
     rx_late: Option<i64>,
     rx_last: Option<i64>,
     tx_channels: usize,
     tx_cursor: i64,
     tx_in_burst: bool,
     tx_dropped: bool,
+    /// The open burst ran out of samples and was reported (UR-33: an underflow).
+    tx_starved: bool,
     tx_samples: BTreeMap<i64, (i64, Vec<Iq>)>,
     reports: VecDeque<TxReport>,
     restarts: u64,
@@ -365,12 +387,18 @@ impl FakeDevice {
                 last_command: i64::MIN,
                 rx_channels: 0,
                 rx_next: None,
+                rx_ratio: 1,
+                rx_end: None,
+                rx_then: None,
+                rx_cached_timeout: false,
+                rx_min_timeout: Duration::MAX,
                 rx_late: None,
                 rx_last: None,
                 tx_channels: 0,
                 tx_cursor: i64::MIN,
                 tx_in_burst: false,
                 tx_dropped: false,
+                tx_starved: false,
                 tx_samples: BTreeMap::new(),
                 reports: VecDeque::new(),
                 restarts: 0,
@@ -386,6 +414,12 @@ impl FakeDevice {
     /// Every call the fake saw, in order (UR-33).
     pub fn calls(&self) -> Vec<String> {
         self.lock().calls.clone()
+    }
+
+    /// The shortest timeout any `rx_recv` was given (UHD truncates it to whole
+    /// milliseconds, so less than 1 ms would be a zero wait).
+    pub fn min_recv_timeout(&self) -> Duration {
+        self.lock().rx_min_timeout
     }
 
     /// Starts of burst without a time spec inside a burst (UR-22, RM-13's CORDIC reset).
@@ -534,6 +568,9 @@ impl Device for FakeDevice {
         st.tx_dropped = false;
         st.tx_samples.clear();
         st.rx_next = None;
+        st.rx_end = None;
+        st.rx_then = None;
+        st.rx_cached_timeout = false;
         st.rx_late = None;
         Ok(())
     }
@@ -635,7 +672,11 @@ impl Device for FakeDevice {
         self.lost(&st)?;
         st.calls.push(format!("rx_open {channels}"));
         st.rx_channels = channels;
+        // A new streamer: nothing in flight on the old one is delivered.
         st.rx_next = None;
+        st.rx_end = None;
+        st.rx_then = None;
+        st.rx_cached_timeout = false;
         Ok(())
     }
 
@@ -650,8 +691,12 @@ impl Device for FakeDevice {
             st.rx_late = Some(at);
         } else if at < self.now(&st) {
             st.rx_late = Some(at);
+        } else if st.rx_end.is_some() {
+            // Behind the stopped stream's tail, which is delivered first.
+            st.rx_then = Some(at);
         } else {
             st.rx_next = Some(at);
+            st.rx_ratio = self.ratio(st.settings[0][0].rate);
         }
         Ok(())
     }
@@ -662,8 +707,17 @@ impl Device for FakeDevice {
         st.calls.push(format!("rx_stop {}", at.map_or("now".to_owned(), |t| t.to_string())));
         // The X3x0 stops a continuous stream at once, whatever the stop's time: UHD 4.10's
         // `radio_rx_core.v` takes STOP outside its command FIFO, "timed STOP commands are
-        // not supported" (VERIFIED on the bench, design-notes §11 F1).
-        st.rx_next = None;
+        // not supported" (VERIFIED on the bench, design-notes §11 F1). What it produced
+        // before the stop is still delivered (the bench: 1–2 blocks after it).
+        let now = self.now(&st);
+        st.rx_then = None;
+        match st.rx_next {
+            Some(next) if next < now => st.rx_end = Some(st.rx_end.map_or(now, |end| end.min(now))),
+            _ => {
+                st.rx_next = None;
+                st.rx_end = None;
+            }
+        }
         Ok(())
     }
 
@@ -674,13 +728,30 @@ impl Device for FakeDevice {
             std::thread::sleep(timeout.min(Duration::from_millis(10)));
             return RxRecv::Failed(error);
         }
+        st.rx_min_timeout = st.rx_min_timeout.min(timeout);
+        if std::mem::take(&mut st.rx_cached_timeout) {
+            return RxRecv::Timeout;
+        }
         let now = self.now(&st);
+        if st.rx_end.is_some_and(|end| st.rx_next.is_none_or(|next| next >= end)) {
+            // The stopped stream's tail is delivered; the next stream, if one was started.
+            st.rx_end = None;
+            st.rx_next = None;
+            if let Some(at) = st.rx_then.take() {
+                if at < now {
+                    st.rx_late = Some(at);
+                } else {
+                    st.rx_next = Some(at);
+                    st.rx_ratio = self.ratio(st.settings[0][0].rate);
+                }
+            }
+        }
         let (mut next, ratio) = match (st.rx_late, st.rx_next) {
             (Some(at), _) if now >= at => {
                 st.rx_late = None;
                 return RxRecv::LateCommand;
             }
-            (None, Some(next)) => (next, self.ratio(st.settings[0][0].rate)),
+            (None, Some(next)) => (next, st.rx_ratio),
             _ => {
                 // UHD's `recv` on a stopped stream waits its whole timeout.
                 st.rx_next = None;
@@ -740,39 +811,81 @@ impl Device for FakeDevice {
             }
         }
         let behind = self.ticks_of(OVERRUN_BEHIND);
-        let n = n as i64;
+        let mut n = n as i64;
+        if let Some(stop) = st.rx_end {
+            n = n.min((stop - next + ratio - 1) / ratio).max(1);
+        }
         let end = next + n * ratio;
         if now - end > behind {
             st.rx_next = Some(next + ((now - next) / ratio + 1) * ratio);
             return RxRecv::Overflow { out_of_sequence: false };
         }
-        if end - now > self.ticks_of(timeout) {
-            drop(st);
-            std::thread::sleep(timeout);
-            return RxRecv::Timeout;
-        }
         drop(st);
-        loop {
-            let st = self.lock();
-            let now = self.now(&st);
-            drop(st);
-            if now >= end {
+        // Whole packets as they reach the host, each waited for up to the timeout, as
+        // UHD's `recv` does; one that does not come in time cuts the call short.
+        let latency = self.ticks_of(self.config.rx_latency);
+        let packet = self.config.rx_packet.map_or(n, |p| p.max(1) as i64);
+        let patience = self.ticks_of(timeout);
+        let mut got = 0i64;
+        let mut cut_short = false;
+        while got < n {
+            let mut take = packet.min(n - got);
+            let (waiting, stop) = {
+                let st = self.lock();
+                (self.now(&st), st.rx_end)
+            };
+            if let Some(stop) = stop {
+                // Stopped meanwhile: nothing produced after the stop ever comes.
+                take = take.min(((stop - next + ratio - 1) / ratio - got).max(0));
+                if take == 0 {
+                    std::thread::sleep(timeout);
+                    if got == 0 {
+                        return RxRecv::Timeout;
+                    }
+                    cut_short = true;
+                    break;
+                }
+            }
+            let ready = next + (got + take) * ratio + latency;
+            if ready - waiting > patience {
+                if got == 0 {
+                    std::thread::sleep(timeout);
+                    return RxRecv::Timeout;
+                }
+                cut_short = true;
                 break;
             }
-            self.sleep_ticks((end - now).min(self.ticks_of(Duration::from_millis(5))));
+            loop {
+                let st = self.lock();
+                let now = self.now(&st);
+                drop(st);
+                if now >= ready {
+                    break;
+                }
+                self.sleep_ticks((ready - now).min(self.ticks_of(Duration::from_millis(5))));
+            }
+            got += take;
         }
         let mut st = self.lock();
+        if let Some(stop) = st.rx_end {
+            // Stopped during the wait: nothing produced after the stop.
+            got = got.min(((stop - next + ratio - 1) / ratio).max(0));
+        }
+        if got == 0 {
+            return RxRecv::Timeout;
+        }
+        st.rx_cached_timeout = cut_short;
         self.settle(&mut st);
         let channels = st.rx_channels.max(1);
         let samples = (0..channels)
-            .map(|chan| (0..n).map(|i| self.sample_at(&st, chan.min(1), next + i * ratio, ratio)).collect())
+            .map(|chan| (0..got).map(|i| self.sample_at(&st, chan.min(1), next + i * ratio, ratio)).collect())
             .collect();
         let _ = jumped;
         st.rx_last = Some(next);
         if st.rx_next.is_some() {
-            st.rx_next = Some(end);
+            st.rx_next = Some(next + got * ratio);
         }
-        let horizon = end - 2 * self.mcr();
+        let horizon = next + got * ratio - 2 * self.mcr();
         st.tx_samples.retain(|start, (ratio, v)| start + v.len() as i64 * *ratio > horizon);
         RxRecv::Samples { first_tick: next, samples }
     }
@@ -823,7 +936,8 @@ impl Device for FakeDevice {
                     // timed start-of-burst at the tick its previous burst ended as late
                     // and drops it (design-notes §11 F3).
                     Some(t) if t < now || t <= st.tx_cursor => {
-                        let tick = Some(now);
+                        // The X300 reports a tick at or after the late start (Review N, N2).
+                        let tick = Some(t.max(now));
                         st.reports.push_back(TxReport { code: TxCode::TimeError, tick, channel: 0 });
                         st.tx_dropped = true;
                         st.tx_in_burst = false;
@@ -835,11 +949,21 @@ impl Device for FakeDevice {
                 }
                 st.tx_in_burst = true;
                 st.tx_dropped = false;
+                st.tx_starved = false;
             } else if st.tx_dropped {
                 return Ok(n);
             } else if !st.tx_in_burst {
                 st.tx_cursor = st.tx_cursor.max(now);
                 st.tx_in_burst = true;
+            }
+            if st.tx_in_burst && n > 0 && now > st.tx_cursor && !st.tx_starved {
+                // The burst ran dry before these samples came (UR-33: an underflow).
+                let tick = Some(st.tx_cursor);
+                st.reports.push_back(TxReport { code: TxCode::Underflow, tick, channel: 0 });
+            }
+            if n > 0 && st.tx_in_burst {
+                st.tx_cursor = st.tx_cursor.max(now);
+                st.tx_starved = false;
             }
             let start = st.tx_cursor;
             if n > 0 {
@@ -880,6 +1004,13 @@ impl Device for FakeDevice {
                         st.reports.push_back(TxReport { code: *code, tick, channel: 0 });
                     }
                 }
+            }
+            let now = self.now(&st);
+            if st.tx_in_burst && !st.tx_dropped && !st.tx_starved && now > st.tx_cursor {
+                // The open burst ran out of samples before its end-of-burst (UR-33).
+                st.tx_starved = true;
+                let tick = Some(st.tx_cursor);
+                st.reports.push_back(TxReport { code: TxCode::Underflow, tick, channel: 0 });
             }
             if let Some(report) = st.reports.pop_front() {
                 return Some(report);

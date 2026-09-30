@@ -1319,6 +1319,8 @@ fn ur_25_a_stream_silent_before_e1_switches_before_e2() {
     direct.settle(Wall::from_nanos((until * 5) as u64));
     let late = direct.of("radio.LATE_COMMAND");
     let direct_calls = direct.device.calls();
+    // The bounded wait never goes under 1 ms (UHD truncates the timeout to whole ms).
+    assert!(direct.device.min_recv_timeout() >= Wall::from_millis(1), "{:?}", direct.device.min_recv_timeout());
     let instance = direct.finish();
     let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
     let switch = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_switch").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
@@ -1545,6 +1547,11 @@ fn ur_26_an_abort_publishes_nothing_after_the_stop_instant() {
     let origin = direct.clocks.sample_clock_records().iter().find(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).unwrap().origin.ticks;
     let end = origin + end.expect("blocks were published") * 200;
     assert!(end <= stop + 200, "published up to {end}, stopped at {stop}");
+    // One stop, recorded once: not again when the tail reaches the cut (Review N, N4).
+    let calls = direct.device.calls();
+    assert_eq!(calls.iter().filter(|c| c.starts_with("rx_stop")).count(), 1, "{calls:?}");
+    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.applied").unwrap()];
+    assert_eq!(applied.as_array().unwrap().iter().filter(|r| r["key"] == "rx_stop").count(), 1, "{applied}");
 }
 
 #[test]
@@ -1914,4 +1921,317 @@ fn back_to_back_sees_a_slip_in_a_cabled_repeat() {
     assert!(whole.iter().all(|(_, gain, phase)| (gain - 0.0152).abs() < 0.002 && (phase - 24.6).abs() < 5.0), "{whole:?}");
     let slipped = back_to_back(&turned(7), &wave, 44);
     assert!(slipped[2].1 < 0.5 * slipped[0].1, "a 7-sample slip at the third period: {slipped:?}");
+}
+
+// ---------------------------------------------------------------- Review N
+// The fake's ways of being as strict as the X300 (UR-33), each pinned on the device
+// itself (Review N, T2), and the bench link the receive tests of B1 and B2 use.
+
+/// The receive link as the bench measured it (INFERRED from its stops: 2–4 ms), with the
+/// X300's 1 996-sample packets.
+fn bench_link(latency_ms: u64) -> FakeConfig {
+    FakeConfig { rx_latency: Wall::from_millis(latency_ms), rx_packet: Some(1_996), ..FakeConfig::default() }
+}
+
+fn raw_rx(config: FakeConfig, rate: f64) -> (Arc<FakeDevice>, i64) {
+    let device = fake(config);
+    device.set_time_zero(false).unwrap();
+    let settings = ezsdr_radio_uhd::Settings { rate: Some(rate), ..Default::default() };
+    device.apply(ezsdr_radio_uhd::Dir::Rx, 0, &settings, None).unwrap();
+    device.rx_open(1).unwrap();
+    let start = (device.time_now().unwrap() / 200 + 5_000) * 200;
+    device.rx_start(start).unwrap();
+    (device, start)
+}
+
+/// Every block's (first tick, length) until `until` or two timeouts in a row.
+fn blocks_until(device: &FakeDevice, until: impl Fn(&[(i64, usize)]) -> bool) -> Vec<(i64, usize)> {
+    let mut blocks = Vec::new();
+    let mut timeouts = 0;
+    while timeouts < 2 && !until(&blocks) {
+        match device.rx_recv(2_000, Wall::from_millis(50)) {
+            ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
+                timeouts = 0;
+                blocks.push((first_tick, samples[0].len()));
+            }
+            ezsdr_radio_uhd::RxRecv::Timeout => timeouts += 1,
+            other => panic!("{other:?}"),
+        }
+    }
+    blocks
+}
+
+#[test]
+fn ur_33_a_timed_receive_stop_stops_the_stream_at_once() {
+    // design-notes §11 F1: the X3x0 ignores the stop's time. What was produced before
+    // the stop is still delivered; nothing after it.
+    let (device, start) = raw_rx(FakeConfig::default(), 1e6);
+    let _ = blocks_until(&device, |b| b.last().is_some_and(|(t, n)| t + *n as i64 * 200 >= start + ms(20)));
+    let issued = device.time_now().unwrap();
+    device.rx_stop(Some(issued + ms(100))).unwrap();
+    let tail = blocks_until(&device, |_| false);
+    let end = tail.last().map_or(issued, |(t, n)| t + *n as i64 * 200);
+    assert!(end <= issued + ms(1), "samples after the stop's issue: up to {end}, issued at {issued}");
+}
+
+#[test]
+fn ur_33_a_stopped_stream_s_tail_comes_before_the_next_stream() {
+    // The bench: 1–2 blocks after an untimed stop. The stop's tail, then the next
+    // stream from its start.
+    let (device, start) = raw_rx(bench_link(3), 1e6);
+    let _ = blocks_until(&device, |b| b.last().is_some_and(|(t, n)| t + *n as i64 * 200 >= start + ms(20)));
+    let stopped = device.time_now().unwrap();
+    device.rx_stop(None).unwrap();
+    let next = (stopped / 200 + 30_000) * 200;
+    device.rx_start(next).unwrap();
+    let blocks = blocks_until(&device, |b| b.iter().any(|(t, _)| *t >= next));
+    let tail: Vec<_> = blocks.iter().filter(|(t, _)| *t < stopped).collect();
+    assert!(!tail.is_empty(), "no tail: {blocks:?}");
+    let first_new = blocks.iter().position(|(t, _)| *t >= next).expect("the next stream");
+    assert!(blocks[..first_new].iter().all(|(t, _)| *t < stopped), "{blocks:?}");
+    assert_eq!(blocks[first_new].0, next);
+}
+
+#[test]
+fn ur_33_a_stopped_stream_s_recv_waits_its_whole_timeout() {
+    let (device, _) = raw_rx(FakeConfig::default(), 1e6);
+    device.rx_stop(None).unwrap();
+    let _ = blocks_until(&device, |_| false);
+    let begun = Instant::now();
+    assert_eq!(device.rx_recv(2_000, Wall::from_millis(60)), ezsdr_radio_uhd::RxRecv::Timeout);
+    assert!(begun.elapsed() >= Wall::from_millis(55), "{:?}", begun.elapsed());
+}
+
+#[test]
+fn ur_33_a_recv_cut_short_by_a_packet_s_timeout_is_followed_by_a_timeout_at_once() {
+    // UHD's `recv` waits for each packet up to its timeout and returns what it has, and
+    // its error cache makes the next `recv` return TIMEOUT at once (rx_streamer_impl.hpp).
+    // A stream stopped in the middle of a 20 ms request.
+    let (device, start) = raw_rx(bench_link(1), 1e6);
+    let _ = blocks_until(&device, |b| b.last().is_some_and(|(t, n)| t + *n as i64 * 200 >= start + ms(10)));
+    let stopper = device.clone();
+    let stop = std::thread::spawn(move || {
+        std::thread::sleep(Wall::from_millis(8));
+        stopper.rx_stop(None).unwrap();
+    });
+    let got = device.rx_recv(20_000, Wall::from_millis(5));
+    stop.join().unwrap();
+    let ezsdr_radio_uhd::RxRecv::Samples { samples, .. } = got else { panic!("{got:?}") };
+    assert!(samples[0].len() < 20_000, "{}", samples[0].len());
+    let begun = Instant::now();
+    assert_eq!(device.rx_recv(2_000, Wall::from_millis(50)), ezsdr_radio_uhd::RxRecv::Timeout);
+    assert!(begun.elapsed() < Wall::from_millis(5), "{:?}", begun.elapsed());
+}
+
+#[test]
+fn ur_33_a_timed_start_at_the_previous_burst_s_end_is_late() {
+    // design-notes §11 F3 (`hw_b8_raw_burst_gap`): at gap 0 the second burst is late and
+    // dropped, at one sample it is played. The late report's tick is at or after its time.
+    for (gap, late) in [(0i64, true), (1, false)] {
+        let device = fake(FakeConfig::default());
+        device.set_time_zero(false).unwrap();
+        device.tx_open(1).unwrap();
+        let wave = vec![[0.1f32, 0.0]; 100];
+        let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+        device.tx_send(&[&wave], Some(t0), true, true, Wall::from_secs(1)).unwrap();
+        let t1 = t0 + (100 + gap) * 200;
+        device.tx_send(&[&wave], Some(t1), true, true, Wall::from_secs(1)).unwrap();
+        let mut reports = Vec::new();
+        while let Some(report) = device.tx_async(Wall::ZERO) {
+            reports.push(report);
+        }
+        let error = reports.iter().find(|r| r.code == TxCode::TimeError);
+        assert_eq!(error.is_some(), late, "gap {gap}: {reports:?}");
+        if let Some(error) = error {
+            assert!(error.tick.unwrap() >= t1, "{error:?}");
+        }
+    }
+}
+
+#[test]
+fn ur_33_a_burst_that_runs_dry_underflows() {
+    // The X300 reports an underflow when an open burst runs out of samples before its
+    // end-of-burst.
+    let device = fake(FakeConfig::default());
+    device.set_time_zero(false).unwrap();
+    device.tx_open(1).unwrap();
+    let wave = vec![[0.1f32, 0.0]; 1_000];
+    let t0 = (device.time_now().unwrap() / 200 + 5_000) * 200;
+    device.tx_send(&[&wave], Some(t0), true, false, Wall::from_secs(1)).unwrap();
+    std::thread::sleep(Wall::from_millis(30));
+    let mut codes = Vec::new();
+    while let Some(report) = device.tx_async(Wall::ZERO) {
+        codes.push(report.code);
+    }
+    assert!(codes.contains(&TxCode::Underflow), "{codes:?}");
+}
+
+/// Captures across `changes` `cold` receive rate changes in one Session on `config`,
+/// alternating `rates`, and for each the old clock's end, the capture's maps and whether
+/// every sample of each map is its own clock's ramp (the fake without a transmitter).
+fn captures_across_cold_changes(config: FakeConfig, selector: Json, rates: [f64; 2], changes: usize) -> (Manifest, Vec<String>) {
+    let dir = TempDir::new();
+    let device = fake(config);
+    let mut run = session(&profile(&dir, selector, json!({}), true), device.clone());
+    past_t0(&mut run, ms(1));
+    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::Num(rates[0])), None).unwrap()));
+    wait(&mut run, ms(200));
+    for i in 0..changes {
+        let capture_at = after(&run, ms(10));
+        let n = (rates[i % 2] * 0.12) as i64 + (rates[(i + 1) % 2] * 0.08) as i64;
+        assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(capture_at), &[("sink.capture_samples", Value::Int(n))]), None).unwrap()));
+        wait(&mut run, ms(60));
+        assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::Num(rates[(i + 1) % 2])), None).unwrap()));
+        let horizon = after(&run, ms(3_000));
+        let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], i, horizon);
+    }
+    let manifest = run.finish();
+    let clocks = &manifest.clocks.sample_clocks;
+    let mut problems = Vec::new();
+    // The bounded wait never goes under 1 ms (UHD truncates the timeout to whole ms).
+    if device.min_recv_timeout() < Wall::from_millis(1) {
+        problems.push(format!("a receive wait of {:?}", device.min_recv_timeout()));
+    }
+    for artifact in manifest.artifacts.iter().filter(|a| a.id.as_str().starts_with("rec")) {
+        let data = read_capture(artifact, 1).remove(0);
+        let mut at = 0usize;
+        for (m, map) in artifact.continuity.iter().enumerate() {
+            let clock = clocks.iter().find(|c| c.domain == map.domain).unwrap();
+            let n = clock.root_ticks_per_tick.num() as i64;
+            if m == 0 && artifact.continuity.len() > 1 {
+                let e1 = (clock.ended_at.unwrap().ticks - clock.origin.ticks) / n;
+                if map.end.ticks != e1 {
+                    problems.push(format!("{}: the old clock's samples end at {} for e₁ {e1}", artifact.id, map.end.ticks));
+                }
+            }
+            let len = (map.end.ticks - map.first.ticks) as usize;
+            for i in 0..len {
+                let tick = clock.origin.ticks + (map.first.ticks + i as i64) * n;
+                let ramp = ((tick / n).rem_euclid(65_536)) as f32 / 65_536.0;
+                if data[at + i].0 != ramp {
+                    problems.push(format!("{}: map {m} sample {} is {}, its clock's ramp {ramp}", artifact.id, map.first.ticks + i as i64, data[at + i].0));
+                    break;
+                }
+            }
+            at += len;
+        }
+    }
+    for event in events_of(&manifest, "radio.LATE_COMMAND") {
+        problems.push(format!("LATE_COMMAND {}", event.payload));
+    }
+    (manifest, problems)
+}
+
+#[test]
+fn ur_25_a_long_block_at_a_low_rate_stops_the_stream_at_e1() {
+    // Review N, B1: at 390 625 S/s a block of 65 536 is 168 ms, longer than the restart
+    // lead. The stop must still come at e₁, the switch before e₂, and no old-clock sample
+    // may be published on the new clock.
+    let (_, problems) = captures_across_cold_changes(bench_link(2), json!({ "block_len": 65_536 }), [390_625.0, 2e6], 2);
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn ur_25_a_slow_link_at_a_low_rate_delivers_the_old_clock_to_e1() {
+    // Review N, B2: packets of 5 ms at 390 625 S/s delivered 3.5 ms late; the old stream
+    // must not be ended by a timeout before its samples up to e₁ arrive.
+    let config = FakeConfig { rx_latency: Wall::from_micros(3_500), ..bench_link(0) };
+    let (_, problems) = captures_across_cold_changes(config, json!({}), [390_625.0, 400_000.0], 5);
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it() {
+    // Review N, B3: a burst booked at the end of one whose last buffer already went out
+    // (5–10 ms before its end: inside the in-flight window, outside the 5 ms lead) is
+    // played, not dropped by the device at the tick the first ended.
+    let mut played = 0;
+    for _ in 0..3 {
+        let (mut run, device, _dir) = tx_session(FakeConfig::default());
+        wait(&mut run, ms(1));
+        let a = tx_at(&run, ms(40));
+        let _ = send_at(&mut run, "send", Some(a), &tone(30_000));
+        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
+        let a_end = clock.origin.ticks + (a.ticks + 30_000) * clock.root_ticks_per_tick.num() as i64;
+        while run.now().ticks < a_end - ms(8) {
+            wait(&mut run, ms(1) / 4);
+        }
+        let b = TimePoint::new(a.domain, a.ticks + 30_000);
+        let entry = send_at(&mut run, "send", Some(b), &tone(1_000));
+        wait(&mut run, ms(40));
+        let manifest = run.finish();
+        assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError" && r["code"] != "Underflow"), "{:?}", calls(&device, "tx_send"));
+        assert_eq!(device.unended_bursts(), 0, "{:?}", calls(&device, "tx_send"));
+        if admitted(&entry) && time_errors(&manifest).is_empty() && bursts(&manifest).len() == 2 {
+            played += 1;
+        }
+    }
+    assert!(played > 0, "the case was never reached");
+}
+
+#[test]
+fn ur_23_a_stop_while_the_device_burst_waits_for_a_continuation_ends_it() {
+    // Review N, T3: a burst whose device burst is held open for a burst that may be
+    // booked at its end, then `Stop`: one end-of-burst closes it, before it runs dry.
+    let (mut run, device, _dir) = tx_session(FakeConfig::default());
+    // `now()` is the Run's last instant: refresh it, and leave room for the submission.
+    wait(&mut run, ms(1));
+    let a = tx_at(&run, ms(40));
+    let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
+    assert!(admitted(&entry), "{entry:?}");
+    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
+    let a_end = clock.origin.ticks + (a.ticks + 30_000) * clock.root_ticks_per_tick.num() as i64;
+    while run.now().ticks < a_end - ms(7) {
+        wait(&mut run, ms(1) / 4);
+    }
+    let _ = run.submit(SessionAction::Stop { target: Some(ResourceId::parse("radio/tx").unwrap()) }, None);
+    wait(&mut run, ms(40));
+    let manifest = run.finish();
+    assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
+    let sends = calls(&device, "tx_send");
+    assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "{sends:?}");
+    assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "Underflow"), "{sends:?}");
+    assert_eq!(device.unended_bursts(), 0);
+}
+
+#[test]
+fn ur_23_a_burst_alone_is_ended_before_it_runs_dry() {
+    // Review N, B3's deferral: with no burst booked at its end, the device burst is
+    // closed a device lead before its end, not left to underflow.
+    let (mut run, device, _dir) = tx_session(FakeConfig::default());
+    let _ = send(&mut run, "send", Some(ms(20)), &tone(5_000));
+    wait(&mut run, ms(80));
+    let manifest = run.finish();
+    let codes: Vec<_> = section(&manifest, "async").as_array().unwrap().iter().map(|r| r["code"].as_str().unwrap().to_owned()).collect();
+    assert!(codes.contains(&"BurstAck".to_owned()) && !codes.contains(&"Underflow".to_owned()), "{codes:?} {:?}", calls(&device, "tx_send"));
+}
+
+#[test]
+fn ur_25_a_late_switch_drops_the_old_stream_s_tail() {
+    // Review N, B1's second guard: a link so slow (60 ms) that the stop at e₁ comes after
+    // e₂; the switch is late (LATE_COMMAND, UR-17's restart), but the old stream's tail,
+    // still in flight after its stop and past the new origin, is not published on the new
+    // clock.
+    let config = FakeConfig { rx_latency: Wall::from_millis(60), ..bench_link(0) };
+    let (_, problems) = captures_across_cold_changes(config, json!({}), [1e6, 2e6], 1);
+    let problems: Vec<_> = problems.into_iter().filter(|p| !p.starts_with("LATE_COMMAND")).collect();
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn ur_29_a_stream_silent_before_a_far_cut_is_a_lost_device() {
+    // Review N, N7: a `cold` change booked far ahead does not switch UR-29's silence check
+    // off until its e₁.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::with_links(
+        FakeConfig { faults: vec![FakeFault::Silence(Wall::from_millis(2_300))], ..FakeConfig::default() },
+        &[],
+        vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)],
+    );
+    let now = direct.now();
+    direct.update("radio.rx.sample_rate_hz", Value::Num(2e6), Cold, Some(now + ms(5_000)));
+    direct.settle(Wall::from_millis(2_000));
+    let lost = direct.of(EventKind::DEVICE_LOST);
+    let _ = direct.finish();
+    assert_eq!(lost.len(), 1, "{lost:?}");
 }

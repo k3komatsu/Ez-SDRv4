@@ -544,16 +544,38 @@ fn hw_b8_cold_change_capture() {
     // design-notes §11 F1 uhd-rx handed the device a timed stop for e1 a restart lead early,
     // and the X300 stopped at once (hw_b8_raw_rx_timed_stop): 50 ms lost before e1. Now the
     // old clock's samples should reach e1 and the new clock's start at e2, on time.
+    cold_change_capture(1e6, 2e6, None);
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_b8_cold_change_capture_low_rate() {
+    // Review N, B1 and B2 on the bench: the lowest rate, 200 MHz / 512, with the default
+    // block and with the largest (65 536 samples, 168 ms).
+    cold_change_capture(390_625.0, 400_000.0, None);
+    cold_change_capture(390_625.0, 2e6, Some(65_536));
+}
+
+/// A Session receiving at `from`; a capture across a `cold` change to `to`; prints the
+/// Manifest's view and asserts the old clock's samples reach e₁, the new clock's begin at
+/// e₂ and no `LATE_COMMAND`.
+fn cold_change_capture(from: f64, to: f64, block_len: Option<u32>) {
     let dir = TempDir::new();
     let device = usrp();
-    let mut run = session(&bench_profile(&*device, &dir, serde_json::json!({}), serde_json::json!({}), true), device);
+    let selector = block_len.map_or(serde_json::json!({}), |n| serde_json::json!({ "block_len": n }));
+    let mut run = session(&bench_profile(&*device, &dir, selector, serde_json::json!({}), true), device);
     past_t0(&mut run, ms(100));
+    if from != 1e6 {
+        assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::Num(from)), None).unwrap()));
+        wait(&mut run, ms(300));
+    }
     let at = after_ticks(&run, ms(20));
-    assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::Int(200_000))]), None).unwrap()));
+    let n = (from * 0.12) as i64 + (to * 0.1) as i64;
+    assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::Int(n))]), None).unwrap()));
     wait(&mut run, ms(60));
     let booked = run.now();
-    let entry = run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::Num(2e6)), None).unwrap();
-    println!("B8 cold: capture asked at {at:?}; rate change submitted at {booked:?}: {:?}", entry.outcome);
+    let entry = run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::Num(to)), None).unwrap();
+    println!("B8 cold {from} → {to} S/s, block_len {block_len:?}: capture asked at {at:?}; rate change submitted at {booked:?}: {:?}", entry.outcome);
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     wait(&mut run, ms(300));
@@ -563,14 +585,23 @@ fn hw_b8_cold_change_capture() {
     println!("B8 cold: timing {}", section(&manifest, "timing"));
     println!("B8 cold: applied {}", section(&manifest, "applied"));
     println!("B8 cold: stats {}", section(&manifest, "stats"));
-    for artifact in manifest.artifacts.iter().filter(|a| !a.continuity.is_empty()) {
-        println!("B8 cold: artifact {} continuity {:?}", artifact.id, artifact.continuity);
-    }
+    let artifact = capture_of(&manifest, "rec");
+    println!("B8 cold: artifact {} continuity {:?}", artifact.id, artifact.continuity);
+    let late = events_of(&manifest, "radio.LATE_COMMAND");
     for event in &manifest.events.delivered {
         if !event.kind.to_string().starts_with("ezsdr.") {
             println!("B8 cold: event {} from {:?} at {:?}: {}", event.kind, event.source, event.time, event.payload);
         }
     }
+    let clocks: Vec<_> = manifest.clocks.sample_clocks.iter().filter(|r| r.stream.to_string().ends_with("usrp/rx")).collect();
+    let (old, new) = (clocks[clocks.len() - 2], clocks[clocks.len() - 1]);
+    let e1_k = (old.ended_at.unwrap().ticks - old.origin.ticks) / old.root_ticks_per_tick.num() as i64;
+    assert_eq!(artifact.continuity.len(), 2, "{:?}", artifact.continuity);
+    assert_eq!(artifact.continuity[0].end.ticks, e1_k, "the old clock's samples end at e₁");
+    assert_eq!(artifact.continuity[1].domain, new.domain);
+    assert_eq!(artifact.continuity[1].first.ticks, 0, "the new clock's samples begin at e₂");
+    assert!(artifact.continuity.iter().all(|m| m.gaps.is_empty()));
+    assert!(late.is_empty(), "{late:?}");
 }
 
 // ---------------------------------------------------------------- B8 through the Module
@@ -834,5 +865,36 @@ fn hw_b8_raw_burst_gap() {
             outcomes.push(codes.join("+"));
         }
         println!("B8 burst gap {gap} samples: {outcomes:?}");
+    }
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_b8_burst_at_a_sent_burst_s_end() {
+    // Review N, B3 on the bench: a burst booked at the end of one whose last buffer already
+    // went out (8 ms before its end) continues its device burst and is played.
+    for trial in 0..3 {
+        let dir = TempDir::new();
+        let mut run = tx_session(usrp(), &dir);
+        wait(&mut run, ms(1));
+        let a = tx_at(&run, ms(40));
+        let (first, _) = waveform_of(&pn(30_000));
+        assert!(admitted(&run.submit(verb("send", "radio/tx", Some(a), &[]), Some(&first)).unwrap()));
+        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
+        let a_end = clock.origin.ticks + (a.ticks + 30_000) * clock.root_ticks_per_tick.num() as i64;
+        while run.now().ticks < a_end - ms(8) {
+            wait(&mut run, ms(1) / 4);
+        }
+        let b = TimePoint::new(a.domain, a.ticks + 30_000);
+        let (second, _) = waveform_of(&pn(1_000));
+        let entry = run.submit(verb("send", "radio/tx", Some(b), &[]), Some(&second)).unwrap();
+        wait(&mut run, ms(60));
+        let manifest = run.finish();
+        println!("B8 burst at a sent burst's end, trial {trial}: {:?}; {} ms before A's end; TIME_ERROR {:?}; async {}; bursts {}",
+            entry.outcome, (a_end - entry.time.ticks) as f64 / TICKS_PER_MS as f64,
+            events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>(),
+            section(&manifest, "async"), section(&manifest, "bursts"));
+        assert!(events_of(&manifest, "radio.TIME_ERROR").is_empty());
+        assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError" && r["code"] != "Underflow"));
     }
 }

@@ -18,7 +18,7 @@ use serde_json::json;
 
 use super::core::{Clock, Core, lattice, lock};
 use crate::device::{Dir, Iq, RxRecv, Settings};
-use crate::profile::RESTART_LEAD_NS;
+use crate::profile::{DELIVERY_ALLOWANCE_NS, RESTART_LEAD_NS};
 
 pub(crate) enum RxCmd {
     /// A stream enabled from 0 channels, already configured and started (UR-25).
@@ -54,6 +54,26 @@ struct Stream {
     /// stopped untimed when its samples reach the cut, since the X3x0 ignores a stop's
     /// time (UR-25; design-notes §11 F1).
     cut: Option<i64>,
+    /// The device was told to stop (at the cut, or by an abort): not again.
+    stopped: bool,
+    /// Blocks before this root tick are the previous stream's, still in flight after its
+    /// untimed stop, whatever this stream's origin (Review N, B1).
+    not_before: i64,
+}
+
+impl Stream {
+    fn new(clock: Clock, channels: usize, not_before: Option<i64>) -> Stream {
+        Stream {
+            clock,
+            channels,
+            expected: 0,
+            pending: Pending::None,
+            start: clock.origin,
+            cut: None,
+            stopped: false,
+            not_before: not_before.unwrap_or(i64::MIN),
+        }
+    }
 }
 
 struct Switch {
@@ -79,6 +99,8 @@ pub(crate) struct Rx {
     exit: bool,
     /// `Provider::stop` has begun: a later switch no longer applies (Review M, N-1).
     stopping: bool,
+    /// When the last untimed stop was issued: the next stream drops what precedes it.
+    last_stop: Option<i64>,
 }
 
 const RECV_TIMEOUT: Wall = Wall::from_millis(100);
@@ -87,7 +109,7 @@ impl Rx {
     pub fn new(core: Arc<Core>, cmds: Receiver<RxCmd>, clock: Option<Clock>, channels: usize, stall: Option<(Wall, Wall)>) -> Rx {
         let pool = HostPool::new(core.block_len * channels.max(1) * 8);
         Rx {
-            stream: clock.map(|clock| Stream { clock, channels, expected: 0, pending: Pending::None, start: clock.origin, cut: None }),
+            stream: clock.map(|clock| Stream::new(clock, channels, None)),
             core,
             cmds,
             switch: None,
@@ -99,6 +121,7 @@ impl Rx {
             first_block: None,
             exit: false,
             stopping: false,
+            last_stop: None,
         }
     }
 
@@ -146,7 +169,7 @@ impl Rx {
                     std::thread::sleep(duration);
                 }
             }
-            let result = self.core.device.rx_recv(self.core.block_len, self.recv_timeout());
+            let result = self.core.device.rx_recv(self.recv_len(), self.recv_timeout());
             // A stop that arrived during the wait cuts this block too (RM-16).
             self.poll();
             self.receive(result);
@@ -158,7 +181,7 @@ impl Rx {
         match cmd {
             RxCmd::Enable { clock, channels } => {
                 self.pool = HostPool::new(self.core.block_len * channels.max(1) * 8);
-                self.stream = Some(Stream { clock, channels, expected: 0, pending: Pending::None, start: clock.origin, cut: None });
+                self.stream = Some(Stream::new(clock, channels, self.last_stop.take()));
                 self.last_samples = Instant::now();
             }
             RxCmd::Switch { .. } if self.stopping => {}
@@ -179,12 +202,13 @@ impl Rx {
                 match mode {
                     StopMode::Orderly => self.stop_at(at, at + tail),
                     StopMode::Abort => {
+                        self.core.timing(json!({ "what": "rx_stop", "at": at, "until": at, "mode": "Abort" }));
                         if let Some(stream) = self.stream.as_mut() {
                             stream.cut = Some(at);
-                        }
-                        self.core.timing(json!({ "what": "rx_stop", "at": at, "until": at, "mode": "Abort" }));
-                        if self.stream.is_some() && !self.core.is_lost() {
-                            let _ = self.core.device.rx_stop(None);
+                            if let Some(issued) = stop_at_cut(&self.core, at) {
+                                stream.stopped = true;
+                                self.last_stop = Some(issued);
+                            }
                         }
                     }
                 }
@@ -204,12 +228,24 @@ impl Rx {
         }
     }
 
-    /// How long `rx_recv` may wait: while a cut is pending, no longer than to the cut
-    /// plus one block, so that a stream that has stopped yielding is ended within a
-    /// block of its cut and not at the next 100 ms timeout (UR-25; design-notes §11 F2).
+    /// How many samples to ask `rx_recv` for: while a cut is pending, no more than up to
+    /// the cut, so that the last block ends at the cut and the stream is stopped about a
+    /// delivery after it, whatever `block_len` (Review N, B1).
+    fn recv_len(&self) -> usize {
+        let block = self.core.block_len;
+        let Some(stream) = self.stream.as_ref() else { return block };
+        let Some(cut) = stream.cut.filter(|_| !stream.stopped) else { return block };
+        (stream.clock.at_or_after(cut) - stream.expected).clamp(1, block as i64) as usize
+    }
+
+    /// How long `rx_recv` may wait: while a cut is pending, no longer than to the cut plus
+    /// `quiet_span`, so that a stream that has stopped yielding is ended soon after its
+    /// cut and not at the next 100 ms timeout (UR-25; design-notes §11 F2); never under
+    /// 1 ms (UHD truncates the timeout to whole milliseconds).
     fn recv_timeout(&self) -> Wall {
-        let Some((cut, n)) = self.stream.as_ref().and_then(|s| s.cut.map(|cut| (cut, s.clock.n))) else { return RECV_TIMEOUT };
-        let left = cut - self.core.now() + self.core.block_len as i64 * n;
+        let Some(stream) = self.stream.as_ref() else { return RECV_TIMEOUT };
+        let Some(cut) = stream.cut else { return RECV_TIMEOUT };
+        let left = cut + quiet_span(&self.core, stream) - self.core.now();
         Wall::from_nanos(self.core.ns(left.max(0)) as u64).clamp(Wall::from_millis(1), RECV_TIMEOUT)
     }
 
@@ -241,11 +277,18 @@ impl Rx {
                 self.samples(first_tick, samples);
             }
             RxRecv::Timeout => {
-                if let Some(cut) = stream.cut.filter(|cut| now >= *cut) {
+                // Past the cut and its allowance, and silent for as long: a stream still
+                // delivering, however late, is waited for (Review N, B2).
+                let span = quiet_span(&self.core, stream);
+                let quiet = self.last_samples.elapsed() >= Wall::from_nanos(self.core.ns(span) as u64);
+                if let Some(cut) = stream.cut.filter(|cut| quiet && now >= cut + span) {
                     // Silent past its cut: stopped all the same, never left streaming.
+                    let stopped = stream.stopped;
                     self.stream = None;
-                    stop_at_cut(&self.core, cut);
-                } else if stream.cut.is_none()
+                    if !stopped {
+                        self.last_stop = stop_at_cut(&self.core, cut).or(self.last_stop);
+                    }
+                } else if stream.cut.is_none_or(|cut| now < cut)
                     && now > stream.start + self.core.mcr as i64
                     && self.last_samples.elapsed() > Wall::from_secs(1)
                 {
@@ -299,8 +342,9 @@ impl Rx {
     fn samples(&mut self, first_tick: i64, mut samples: Vec<Vec<Iq>>) {
         let stream = self.stream.as_mut().expect("a stream");
         let clock = stream.clock;
-        if first_tick < clock.origin {
-            // The old stream's samples still in flight after its stop (Review M, N-3).
+        if first_tick < clock.origin || first_tick < stream.not_before {
+            // The old stream's samples still in flight after its stop (Review M, N-3;
+            // Review N, B1: after a late switch they can follow the new origin).
             self.core.stat("rx_before_origin", 1);
             return;
         }
@@ -315,7 +359,10 @@ impl Rx {
             let cut_k = clock.at_or_after(cut);
             if k + len >= cut_k {
                 // UR-25: the samples reached the cut, so the stream is stopped untimed now.
-                stop_at_cut(&self.core, cut);
+                if !stream.stopped {
+                    stream.stopped = true;
+                    self.last_stop = stop_at_cut(&self.core, cut).or(self.last_stop);
+                }
                 len = (cut_k - k).max(0);
                 ended = true;
             }
@@ -430,14 +477,7 @@ impl Rx {
         match started {
             Ok(()) => {
                 self.pool = HostPool::new(self.core.block_len * switch.channels.max(1) * 8);
-                self.stream = Some(Stream {
-                    clock: new,
-                    channels: switch.channels,
-                    expected: 0,
-                    pending: Pending::None,
-                    start: new.origin,
-                    cut: None,
-                });
+                self.stream = Some(Stream::new(new, switch.channels, self.last_stop.take()));
                 self.last_samples = Instant::now();
             }
             Err(error) => {
@@ -450,16 +490,30 @@ impl Rx {
     }
 }
 
-/// Stops the stream untimed once its samples reached the cut, and records it (UR-25,
-/// UR-30): the X3x0 carries out a timed stop at once, before its time (§11 F1).
-fn stop_at_cut(core: &Core, cut: i64) {
+/// How long a stream past its cut must have been silent to be taken as ended: a block and
+/// the delivery allowance, so that a slow link's last samples before the cut are waited
+/// for (Review N, B2).
+fn quiet_span(core: &Core, stream: &Stream) -> i64 {
+    core.block_len as i64 * stream.clock.n + core.ticks(DELIVERY_ALLOWANCE_NS)
+}
+
+/// Stops the stream untimed once its samples reached the cut (or at an abort's), and
+/// records it (UR-25, UR-30): the X3x0 carries out a timed stop at once, before its time
+/// (§11 F1). Returns the instant it was issued.
+fn stop_at_cut(core: &Core, cut: i64) -> Option<i64> {
     if core.is_lost() {
-        return;
+        return None;
     }
     let now = core.now();
     core.timing(json!({ "what": "rx_stop_untimed", "cut": cut, "at": now }));
     match core.device.rx_stop(None) {
-        Ok(()) => lock(&core.rec).applied.push(json!({ "key": "rx_stop", "at": core.at(cut), "issued": core.at(now) })),
-        Err(error) => core.device_failed("update_parameter", &error),
+        Ok(()) => {
+            lock(&core.rec).applied.push(json!({ "key": "rx_stop", "at": core.at(cut), "issued": core.at(now) }));
+            Some(now)
+        }
+        Err(error) => {
+            core.device_failed("update_parameter", &error);
+            None
+        }
     }
 }
