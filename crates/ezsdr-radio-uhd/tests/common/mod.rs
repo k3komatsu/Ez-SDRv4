@@ -97,6 +97,13 @@ pub fn bench_hz(device: &dyn Device) -> f64 {
     }
 }
 
+/// bench.md's RF envelope around the bench frequency: every step that transmits carries
+/// it (RM-19), so that nothing but the envelope holds the transmitter to the band.
+pub fn bench_envelope(device: &dyn Device) -> Json {
+    let hz = bench_hz(device);
+    json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": hz - 1e6, "hi_hz": hz + 1e6 }], "max_gain_db": 0.0, "tx_enabled": [true] } })
+}
+
 /// `profile` with the radio binding's profile the device's (UR-5).
 pub fn bench_profile(device: &dyn Device, dir: &TempDir, selector: Json, environment: Json, session: bool) -> Json {
     let mut doc = profile(dir, selector, environment, session);
@@ -519,7 +526,7 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
     let mut burst = with_burst(with_tx(receive_spec(1, 1e6, bench_hz(&*device), None), 1e6), &waveform, false, "drop_and_flag", 10_000);
     capture(&mut burst, 10_000, 5_000);
     let inputs = BTreeMap::from([(waveform.hash.clone(), bytes.clone())]);
-    let heard = captured(spec_run(&burst, &bench_profile(&*device, &dir, json!({}), json!({}), false), device.clone(), inputs.clone()));
+    let heard = captured(spec_run(&burst, &bench_profile(&*device, &dir, json!({}), bench_envelope(&*device), false), device.clone(), inputs.clone()));
     let samples = read_capture(&capture_of(&heard, "rec"), 1).remove(0);
     if !exact {
         diagnose("B6 burst", &samples, &wave);
@@ -532,7 +539,7 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
     let dir = TempDir::new();
     let mut repeat = with_burst(with_tx(receive_spec(1, 1e6, bench_hz(&*device), None), 1e6), &waveform, true, "send_asap_and_flag", 1_000);
     capture(&mut repeat, 1_000, 4_000);
-    let looped = captured(spec_run(&repeat, &bench_profile(&*device, &dir, json!({}), json!({}), false), device, inputs));
+    let looped = captured(spec_run(&repeat, &bench_profile(&*device, &dir, json!({}), bench_envelope(&*device), false), device, inputs));
     let samples = read_capture(&capture_of(&looped, "rec"), 1).remove(0);
     if !exact {
         diagnose("B6 repeat", &samples, &wave);
@@ -563,7 +570,7 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
 pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manifest {
     let dir = TempDir::new();
     let hz = bench_hz(&*device);
-    let envelope = json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": hz - 1e6, "hi_hz": hz + 1e6 }], "max_gain_db": 0.0, "tx_enabled": [true] } });
+    let envelope = bench_envelope(&*device);
     let mut run = session(&bench_profile(&*device, &dir, json!({}), envelope, true), device);
     past_t0(&mut run, ms(1));
     assert!(admitted(&run.submit(set("radio.tx.channels", Value::Int(1)), None).unwrap()));
