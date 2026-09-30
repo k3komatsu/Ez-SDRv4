@@ -286,7 +286,7 @@ owner の指示（2026-09-28）：「実機では別のlinuxサーバーでUSRP�
 
 **前提と規則**
 
-- **実機構成**（owner，2026-09-30）：X310 の slot A に **OBX 1枚**．TX/RX を 30 dB 以上の減衰器を通して同じ OBX の RX2 へ（ループバック）．送信だけの段のために 50 Ω 終端．10 GbE（SFP+）の Linux PC．外部の 10 MHz/PPS は不要．**UHD 4.9 以上が必須**（OBX は 2025 年 6 月に UHD に入った．古い UHD では unknown board になり UR-5 が拒否する）ので Docker 環境（UHD 4.10）を使う．X310 の FPGA image もその UHD に合わせる．profile は `x310-obx` 0.1.0（1 channel，10 MHz–8.4 GHz，既定周波数 1 GHz）で，テストは UHD が報告する front end 名（`OBX…`）から自動で選ぶ．OBX が 2 枚あっても同じ profile で動く（使うのは channel 0）．途中まで CBX 1枚で準備したので `x310-cbx` も残っている（OBX の driver が不調なときの予備）．事情は [design-notes.md](plan/phase7/design-notes.md) §9・§10．
+- **実機構成**（owner，2026-09-30）：X310（**X300 でも可**：UHD は同じ `x300` driver で扱い，違いは FPGA の大きさだけで，この実装はそれを使わない．コードも profile `x310-obx` も変更不要．FPGA image は X300 用（`uhd_image_loader` が `usrp_x300_fpga_XG.bit` を選ぶ）を入れる．bench.md 冒頭）の slot A に **OBX 1枚**．TX/RX を 30 dB 以上の減衰器を通して同じ OBX の RX2 へ（ループバック）．送信だけの段のために 50 Ω 終端．10 GbE（SFP+）の Linux PC．外部の 10 MHz/PPS は不要．**UHD 4.9 以上が必須**（OBX は 2025 年 6 月に UHD に入った．古い UHD では unknown board になり UR-5 が拒否する）ので Docker 環境（UHD 4.10）を使う．X310 の FPGA image もその UHD に合わせる．profile は `x310-obx` 0.1.0（1 channel，10 MHz–8.4 GHz，既定周波数 1 GHz）で，テストは UHD が報告する front end 名（`OBX…`）から自動で選ぶ．OBX が 2 枚あっても同じ profile で動く（使うのは channel 0）．途中まで CBX 1枚で準備したので `x310-cbx` も残っている（OBX の driver が不調なときの予備）．事情は [design-notes.md](plan/phase7/design-notes.md) §9・§10．
 - 作業するのは branch `worktree-phase7-impl`（`origin` にある，この節を書いた最後の commit 以降）．`main` にはまだ Phase 7 がない．この branch に commit して push してよい（v4 の作業なので `master` と v3 の tag には触れない，AGENTS.md §1）．`main` への merge は owner の判断なのでしない．
 - 実機で失敗したら，その場でコードを直さない（bench.md「If a step fails」）．`plan/phase7/bench-results.md` に出力ごと記録し，`FakeDevice` で再現するテストを先に書いてから直し，その段をやり直す．直したら `cargo test --workspace` を通して commit・push．
 - 設計を変える必要があると判断したら（INFERRED だった値が違う，規則が実機に合わない），実装より先に `plan/phase7/design-notes.md` に「§10 bench」節を作って記録し，owner に判断を仰ぐ．spec 18 の数値（device lead 2 ms，delivery allowance 3 ms，restart lead 50 ms，in-flight window 10 ms，release window 3 ms，queue depth 16）は Phase 8 の入力として **記録するだけ** で，profile の値はこの session では変えない（bench.md 冒頭，spec 18 §3）．
@@ -321,7 +321,7 @@ owner の指示（2026-09-28）：「実機では別のlinuxサーバーでUSRP�
 
 **1. 記録ファイル**
 
-`plan/phase7/bench-results.md` を作る（GZ-10）．冒頭に：commit hash，OS と kernel，CPU，NIC，`uhd_config_info --version`，FPGA image，`ARGS`，RF の配線（減衰量）．各段ごとに：実行したコマンド，合否，出力（`--nocapture` の `B<n> …` 行はそのまま貼る），bench.md の「Records」列の値．最後に `plan/spikes/2026-09-26-uhd.md` 末尾の表を埋める．
+`plan/phase7/bench-results.md` を作る（GZ-10）．冒頭に：装置の製品名（X300 か X310 か，`pp_string` に出る），commit hash，OS と kernel，CPU，NIC，`uhd_config_info --version`，FPGA image，`ARGS`，RF の配線（減衰量）．各段ごとに：実行したコマンド，合否，出力（`--nocapture` の `B<n> …` 行はそのまま貼る），bench.md の「Records」列の値．最後に `plan/spikes/2026-09-26-uhd.md` 末尾の表を埋める．
 
 **2. 実行順（bench.md の表どおり，順序に意味がある）**
 
