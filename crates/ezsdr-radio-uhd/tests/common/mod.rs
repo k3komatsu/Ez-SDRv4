@@ -27,6 +27,7 @@ use ezsdr_kernel::spec::{Constraint, Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::{BurstEnd, BurstRecord, DataLinkDecl, GapCause};
 use ezsdr_kernel::time::{ClockRegistry, Duration, RelativeBudget, TimePoint};
 use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload, TimeErrorOutcome, TimeErrorPayload};
+use ezsdr_radio_uhd::profile::Profile;
 use ezsdr_radio_uhd::{Device, DeviceAuthority, FakeConfig, FakeDevice, FakeFault, TxCode, UhdRadio};
 use serde_json::{Value as Json, json};
 
@@ -66,6 +67,36 @@ pub fn uhd_module() -> Json {
 
 pub fn x310_ubx() -> Json {
     json!({ "name": "x310-ubx", "version": { "major": 0, "minor": 1, "patch": 0 } })
+}
+
+/// The profile of the device's front ends: `x310-cbx` on a CBX (the one-CBX bench,
+/// bench.md), else `x310-ubx` (the fake's default).
+pub fn profile_of(device: &dyn Device) -> Profile {
+    match device.front_end(ezsdr_radio_uhd::Dir::Rx, 0) {
+        Ok(name) if name.starts_with(Profile::X310Cbx.front_end()) => Profile::X310Cbx,
+        _ => Profile::X310Ubx,
+    }
+}
+
+/// A fake with one CBX, `x310-cbx`'s device.
+pub fn one_cbx() -> FakeConfig {
+    FakeConfig { channels: 1, front_end: "CBX-120", ..FakeConfig::default() }
+}
+
+/// The frequency the steps receive and transmit at: the default of the device's
+/// profile, so a Session that sets none (B7) stays inside the RF envelope around it.
+pub fn bench_hz(device: &dyn Device) -> f64 {
+    match profile_of(device).description(2_000).defaults[&Key::parse(ezsdr_radio::keys::RX_FREQUENCY_HZ).unwrap()] {
+        Value::Num(hz) => hz,
+        ref other => panic!("a default frequency, not {other:?}"),
+    }
+}
+
+/// `profile` with the radio binding's profile the device's (UR-5).
+pub fn bench_profile(device: &dyn Device, dir: &TempDir, selector: Json, environment: Json, session: bool) -> Json {
+    let mut doc = profile(dir, selector, environment, session);
+    doc["bindings"]["radio"]["profile"] = serde_json::to_value(profile_of(device).profile_ref()).unwrap();
+    doc
 }
 
 /// The bench profile of `bench.md` with the fake's args (Vision §59: only the radio
@@ -360,10 +391,10 @@ pub fn correlate(samples: &[(f32, f32)], wave: &[(f32, f32)]) -> Option<usize> {
         .map(|(at, _)| at)
 }
 
-/// B3: `experiments::receive(1, 1e6, 1e9, Some(10_000))` under the bench profile.
+/// B3: `experiments::receive(1, 1e6, f, Some(10_000))` at the bench frequency `f` under the bench profile.
 pub fn rehearse_receive_at_t0(device: Arc<dyn Device>) -> Manifest {
     let dir = TempDir::new();
-    let manifest = captured(spec_run(&receive_spec(1, 1e6, 1e9, Some(10_000)), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new()));
+    let manifest = captured(spec_run(&receive_spec(1, 1e6, bench_hz(&*device), Some(10_000)), &bench_profile(&*device, &dir, json!({}), json!({}), false), device, BTreeMap::new()));
     assert!(matches!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} }), "{:?}", manifest.termination);
     let map = &capture_of(&manifest, "rec").continuity[0];
     assert_eq!(map.first.ticks, 0, "the capture starts at receive sample 0");
@@ -378,13 +409,13 @@ pub fn rehearse_receive_at_t0(device: Arc<dyn Device>) -> Manifest {
 /// B4: a capture of 10 000 samples at receive sample 50 000 (v3 behaviour 2).
 pub fn rehearse_capture_at_a_sample_index(device: Arc<dyn Device>) -> Manifest {
     let dir = TempDir::new();
-    let mut spec = receive_spec(1, 1e6, 1e9, None);
+    let mut spec = receive_spec(1, 1e6, bench_hz(&*device), None);
     spec["schedule"] = json!([{
         "at": { "clock": "radio", "offset_ticks": 50_000 },
         "action": { "kind": "update_parameter", "target": serde_json::to_value(ResourceId::parse("sink/rec").unwrap()).unwrap(),
                     "key": "sink.capture_samples", "value": 10_000, "class": "block_boundary" }
     }]);
-    let manifest = captured(spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new()));
+    let manifest = captured(spec_run(&spec, &bench_profile(&*device, &dir, json!({}), json!({}), false), device, BTreeMap::new()));
     let map = &capture_of(&manifest, "rec").continuity[0];
     assert_eq!(map.first.ticks, 50_000);
     assert_eq!(map.end.ticks, 60_000);
@@ -394,8 +425,8 @@ pub fn rehearse_capture_at_a_sample_index(device: Arc<dyn Device>) -> Manifest {
 /// B5: a receive Run at 10 Msps whose reader stalls once: RM-17's overrun gap.
 pub fn rehearse_overflow(device: Arc<dyn Device>, after: Wall, stall: Wall) -> Manifest {
     let dir = TempDir::new();
-    let doc = profile(&dir, json!({}), json!({}), false);
-    let spec = receive_spec(1, 10e6, 1e9, Some(30_000_000));
+    let doc = bench_profile(&*device, &dir, json!({}), json!({}), false);
+    let spec = receive_spec(1, 10e6, bench_hz(&*device), Some(30_000_000));
     let mut run = start_spec_run(&spec, &doc, assembly(&doc, device, BTreeMap::new(), |r| r.with_rx_stall(after, stall))).unwrap();
     let horizon = after_ticks(&run, ms(2_000) + ms((after + stall).as_millis() as i64 + 500));
     let _ = run.advance_to(horizon);
@@ -424,10 +455,10 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
         }));
     };
     let dir = TempDir::new();
-    let mut burst = with_burst(with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &waveform, false, "drop_and_flag", 10_000);
+    let mut burst = with_burst(with_tx(receive_spec(1, 1e6, bench_hz(&*device), None), 1e6), &waveform, false, "drop_and_flag", 10_000);
     capture(&mut burst, 10_000, 5_000);
     let inputs = BTreeMap::from([(waveform.hash.clone(), bytes.clone())]);
-    let heard = captured(spec_run(&burst, &profile(&dir, json!({}), json!({}), false), device.clone(), inputs.clone()));
+    let heard = captured(spec_run(&burst, &bench_profile(&*device, &dir, json!({}), json!({}), false), device.clone(), inputs.clone()));
     let samples = read_capture(&capture_of(&heard, "rec"), 1).remove(0);
     let at = if exact { exactly(&samples, &wave) } else { correlate(&samples, &wave) }.expect("the burst's correlation peak");
     if exact {
@@ -435,9 +466,9 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
     }
     println!("B6: transmit-to-receive delay {at} samples");
     let dir = TempDir::new();
-    let mut repeat = with_burst(with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &waveform, true, "send_asap_and_flag", 1_000);
+    let mut repeat = with_burst(with_tx(receive_spec(1, 1e6, bench_hz(&*device), None), 1e6), &waveform, true, "send_asap_and_flag", 1_000);
     capture(&mut repeat, 1_000, 4_000);
-    let looped = captured(spec_run(&repeat, &profile(&dir, json!({}), json!({}), false), device, inputs));
+    let looped = captured(spec_run(&repeat, &bench_profile(&*device, &dir, json!({}), json!({}), false), device, inputs));
     let samples = read_capture(&capture_of(&looped, "rec"), 1).remove(0);
     let start = if exact { 0 } else { correlate(&samples, &wave).expect("the repeat is heard") };
     for (i, sample) in samples[start..samples.len() - wave.len()].iter().enumerate() {
@@ -454,8 +485,9 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
 /// (§58 #16).
 pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manifest {
     let dir = TempDir::new();
-    let envelope = json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 999_000_000.0, "hi_hz": 1_001_000_000.0 }], "max_gain_db": 0.0, "tx_enabled": [true] } });
-    let mut run = session(&profile(&dir, json!({}), envelope, true), device);
+    let hz = bench_hz(&*device);
+    let envelope = json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": hz - 1e6, "hi_hz": hz + 1e6 }], "max_gain_db": 0.0, "tx_enabled": [true] } });
+    let mut run = session(&bench_profile(&*device, &dir, json!({}), envelope, true), device);
     past_t0(&mut run, ms(1));
     assert!(admitted(&run.submit(set("radio.tx.channels", Value::Int(1)), None).unwrap()));
     let wave = pn(1_000);
@@ -465,7 +497,7 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
     assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(at), &[("sink.capture_samples", Value::Int(5_000))]), None).unwrap()));
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
-    let refused = run.submit(set("radio.tx.frequency_hz", Value::Num(2.4e9)), None).unwrap();
+    let refused = run.submit(set("radio.tx.frequency_hz", Value::Num(hz + 100e6)), None).unwrap();
     assert!(matches!(&refused.outcome, Outcome::Rejected { violations } if violations.iter().any(|v| v.check.as_str() == "radio.rf_envelope")), "{refused:?}");
     let manifest = run.finish();
     let samples = read_capture(&capture_of(&manifest, "rec"), 1).remove(0);

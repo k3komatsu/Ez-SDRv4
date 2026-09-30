@@ -35,7 +35,7 @@ use self::control::Control;
 use self::rx::{Rx, RxCmd};
 use self::tx::{Tx, TxCmd};
 use crate::device::{Device, Dir};
-use crate::profile::{self, MASTER_CLOCK_HZ};
+use crate::profile::{self, MASTER_CLOCK_HZ, Profile};
 
 fn rejected(message: impl Into<String>) -> ModuleError {
     ModuleError::rejected(message)
@@ -88,9 +88,9 @@ impl UhdRadio {
         if binding.module != crate::module_ref() {
             return Err(rejected("UR-5: the binding names another Module"));
         }
-        if binding.profile.as_ref() != Some(&profile::profile_ref()) {
-            return Err(rejected("UR-5: the profile must be x310-ubx 0.1.0"));
-        }
+        let Some(profile) = binding.profile.as_ref().and_then(Profile::from_ref) else {
+            return Err(rejected("UR-5: the profile must be x310-ubx 0.1.0 or x310-cbx 0.1.0"));
+        };
         if binding.feed.is_some() {
             return Err(rejected("UR-5: a Provider binding carries no feed"));
         }
@@ -126,10 +126,32 @@ impl UhdRadio {
         let mcr = device.master_clock_rate();
         if mcr != MASTER_CLOCK_HZ {
             return Err(rejected(format!(
-                "UR-5: profile x310-ubx needs a 200 MHz master clock; the device runs at {mcr} Hz"
+                "UR-5: profile {} needs a 200 MHz master clock; the device runs at {mcr} Hz",
+                profile.name()
             )));
         }
-        let description = profile::description(block_len);
+        let description = profile.description(block_len);
+        // The profile's range must be the device's: UHD clips a tune outside its front
+        // end's range and says so only in a log, past the RF envelope's check.
+        for (dir, name) in [(Dir::Rx, "rx"), (Dir::Tx, "tx")] {
+            let (need, have) = (description.max_channels as usize, device.channels(dir));
+            if have < need {
+                return Err(rejected(format!(
+                    "UR-5: profile {} needs {need} {name} channels; the device has {have}",
+                    profile.name()
+                )));
+            }
+            for chan in 0..need {
+                let front_end = device.front_end(dir, chan).map_err(|e| rejected(format!("UR-5: {}", e.message)))?;
+                if !front_end.starts_with(profile.front_end()) {
+                    return Err(rejected(format!(
+                        "UR-5: profile {} needs {} front ends; {name} channel {chan} is `{front_end}`",
+                        profile.name(),
+                        profile.front_end()
+                    )));
+                }
+            }
+        }
         let mut describe = device.describe();
         if let Some(object) = describe.as_object_mut() {
             object.insert("args".to_owned(), json!(args));

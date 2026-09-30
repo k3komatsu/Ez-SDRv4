@@ -108,6 +108,41 @@ fn ur_05_from_binding_refusals() {
     );
 }
 
+fn x310_cbx() -> Json {
+    json!({ "name": "x310-cbx", "version": { "major": 0, "minor": 1, "patch": 0 } })
+}
+
+#[test]
+fn ur_05_the_profile_must_be_the_device_s_front_ends() {
+    let ok = json!({ "args": ARGS });
+    let refuse = |profile: Json, config: FakeConfig| UhdRadio::from_binding(&binding(ok.clone(), Some(profile)), fake(config)).err().unwrap().message;
+    assert!(UhdRadio::from_binding(&binding(ok.clone(), Some(x310_cbx())), fake(one_cbx())).is_ok());
+    assert_eq!(refuse(x310_ubx(), one_cbx()), "UR-5: profile x310-ubx needs 2 rx channels; the device has 1");
+    assert_eq!(refuse(x310_ubx(), FakeConfig { front_end: "CBX", ..FakeConfig::default() }), "UR-5: profile x310-ubx needs UBX front ends; rx channel 0 is `CBX RX`");
+    assert_eq!(refuse(x310_cbx(), FakeConfig::default()), "UR-5: profile x310-cbx needs CBX front ends; rx channel 0 is `UBX RX`");
+    assert_eq!(refuse(x310_cbx(), FakeConfig { channels: 0, ..one_cbx() }), "UR-5: profile x310-cbx needs 1 rx channels; the device has 0");
+}
+
+#[test]
+fn ur_09_x310_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz() {
+    let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x310_cbx())), fake(one_cbx())).unwrap();
+    let capability = |name: &str| radio.instance().tree.capabilities[&Key::parse(name).unwrap()].clone();
+    let range = |min, max| ezsdr_kernel::spec::CapabilityValue::Range { min, max };
+    for dir in ["rx", "tx"] {
+        assert_eq!(capability(&format!("radio.{dir}.frequency_hz")), range(Value::Num(1.2e9), Value::Num(6e9)));
+        assert_eq!(capability(&format!("radio.{dir}.channels")), range(Value::Int(0), Value::Int(1)));
+    }
+    // A Session that sets no frequency tunes to the default, inside the CBX's range.
+    let dir = TempDir::new();
+    let mut doc = profile(&dir, json!({}), json!({}), true);
+    doc["bindings"]["radio"]["profile"] = x310_cbx();
+    let mut run = session(&doc, fake(one_cbx()));
+    past_t0(&mut run, ms(1));
+    let manifest = run.finish();
+    let applied = section(&manifest, "applied").as_array().unwrap().iter().find(|r| r["key"] == "radio.rx.frequency_hz").cloned().unwrap();
+    assert_eq!(applied["claimed"], 2.45e9);
+}
+
 #[test]
 fn ur_06_the_provider_refuses_another_root() {
     let dir = TempDir::new();
@@ -535,7 +570,7 @@ fn ur_12_a_rate_the_device_does_not_apply_is_refused() {
 #[test]
 fn ur_12_every_advertised_rate_is_accepted() {
     // UR-9 advertises 200 MHz / N for N in 1…512; UR-12 accepts each (Review L, P0-2).
-    let ezsdr_radio::device::Grid::Values(rates) = ezsdr_radio_uhd::profile::description(2_000).rates else { panic!("a Values grid") };
+    let ezsdr_radio::device::Grid::Values(rates) = ezsdr_radio_uhd::profile::Profile::X310Ubx.description(2_000).rates else { panic!("a Values grid") };
     assert_eq!(rates.len(), 512);
     for rate in &rates {
         let n = ezsdr_radio_uhd::decimation(200_000_000, *rate).unwrap_or_else(|| panic!("{rate} refused"));
@@ -1671,6 +1706,7 @@ fn ur_33_the_fake_device_keeps_the_devices_queues() {
 }
 
 // ---------------------------------------------------------------- the rehearsal (UR-34)
+// Each step on the fake's two UBX and, for the one-CBX bench, on one CBX (`x310-cbx`).
 
 #[test]
 fn rehearsal_b3_receive_at_t0() {
@@ -1695,4 +1731,26 @@ fn rehearsal_b6_txrx_and_repeat() {
 #[test]
 fn rehearsal_b7_session_loopback() {
     let _ = rehearse_session_loopback(fake(FakeConfig::default()), true);
+}
+
+#[test]
+fn rehearsal_b3_receive_at_t0_on_one_cbx() {
+    let manifest = rehearse_receive_at_t0(fake(one_cbx()));
+    let frequency = section(&manifest, "applied").as_array().unwrap().iter().find(|r| r["key"] == "radio.rx.frequency_hz").cloned().unwrap();
+    assert_eq!(frequency["claimed"], 2.45e9, "the bench frequency is x310-cbx's default");
+}
+
+#[test]
+fn rehearsal_b4_capture_at_a_sample_index_on_one_cbx() {
+    let _ = rehearse_capture_at_a_sample_index(fake(one_cbx()));
+}
+
+#[test]
+fn rehearsal_b6_txrx_and_repeat_on_one_cbx() {
+    let _ = rehearse_txrx_and_repeat(fake(one_cbx()), true);
+}
+
+#[test]
+fn rehearsal_b7_session_loopback_on_one_cbx() {
+    let _ = rehearse_session_loopback(fake(one_cbx()), true);
 }

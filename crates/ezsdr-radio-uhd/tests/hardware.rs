@@ -1,6 +1,8 @@
-//! The bench steps of `plan/phase7/bench.md` (UR-34), on a USRP X310 + UBX. Compiled
-//! only with the feature `uhd`, every test ignored, the device from `EZSDR_UHD_ARGS`
-//! (GZ-8). Run each as `bench.md` says; each prints what `bench-results.md` records.
+//! The bench steps of `plan/phase7/bench.md` (UR-34), on a USRP X310 with one CBX
+//! (`x310-cbx`) or two UBX (`x310-ubx`), the profile the one its front ends name.
+//! Compiled only with the feature `uhd`, every test ignored, the device from
+//! `EZSDR_UHD_ARGS` (GZ-8). Run each as `bench.md` says;
+//! each prints what `bench-results.md` records.
 #![cfg(feature = "uhd")]
 
 mod common;
@@ -27,7 +29,19 @@ fn hw_b1_probe() {
     let device = usrp();
     println!("B1 describe: {}", serde_json::to_string_pretty(&device.describe()).unwrap());
     assert_eq!(device.master_clock_rate(), 200_000_000, "B0.3: add master_clock_rate=200e6");
-    assert_eq!((device.channels(Dir::Rx), device.channels(Dir::Tx)), (2, 2));
+    // The profile's channels and front ends, as UR-5 checks them.
+    let profile = profile_of(&*device);
+    println!("B1 profile: {}", profile.name());
+    let need = profile.description(2_000).max_channels as usize;
+    for dir in [Dir::Rx, Dir::Tx] {
+        let have = device.channels(dir);
+        let names: Vec<_> = (0..have).map(|chan| device.front_end(dir, chan)).collect();
+        println!("B1 {dir:?}: {have} channels, front ends {names:?}");
+        assert!(have >= need, "{} needs {need} {dir:?} channels", profile.name());
+        for name in &names[..need] {
+            assert!(name.as_ref().unwrap().starts_with(profile.front_end()), "{name:?} is not a {} front end", profile.front_end());
+        }
+    }
     println!("B1 ref_locked: {:?}", device.ref_locked());
     let mut last = device.time_now().unwrap();
     for _ in 0..3 {
@@ -122,7 +136,8 @@ fn hw_b8_leads() {
     // device's late reports counted (the device lead, the delivery allowance).
     for lead_us in [10_000, 5_000, 3_000, 2_000, 1_500, 1_000, 500] {
         let dir = TempDir::new();
-        let mut run = session(&profile(&dir, serde_json::json!({}), serde_json::json!({}), true), usrp());
+        let device = usrp();
+        let mut run = session(&bench_profile(&*device, &dir, serde_json::json!({}), serde_json::json!({}), true), device);
         past_t0(&mut run, ms(1));
         assert!(admitted(&run.submit(set("radio.tx.channels", ezsdr_kernel::spec::Value::Int(1)), None).unwrap()));
         let (bytes, _) = waveform_of(&pn(100));
@@ -141,7 +156,8 @@ fn hw_b8_leads() {
 fn hw_b9_unplug() {
     // Manual: unplug the 10 GbE cable during the next 60 s.
     let dir = TempDir::new();
-    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, serde_json::json!({}), serde_json::json!({}), false), usrp(), Default::default());
+    let device = usrp();
+    let mut run = spec_run(&receive_spec(1, 1e6, bench_hz(&*device), None), &bench_profile(&*device, &dir, serde_json::json!({}), serde_json::json!({}), false), device, Default::default());
     println!("B9: unplug the cable now");
     let result = run.run_until_end(after(&run, ms(60_000)));
     let manifest = run.finish();
@@ -156,11 +172,12 @@ fn hw_b9_usrp2_probe() {
     println!("B9 USRP2 describe: {}", serde_json::to_string_pretty(&device.describe()).unwrap());
     let binding = serde_json::from_value(serde_json::json!({
         "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 1, "patch": 0 } },
-        "profile": { "name": "x310-ubx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+        "profile": profile_of(&*device).profile_ref(),
         "selector": { "args": args() }
     }))
     .unwrap();
+    let name = profile_of(&*device).name();
     let refused = UhdRadio::from_binding(&binding, device).err().expect("UR-5 refuses a USRP2");
     println!("B9 UR-5: {}", refused.message);
-    assert!(refused.message.starts_with("UR-5: profile x310-ubx needs a 200 MHz master clock"));
+    assert!(refused.message.starts_with(&format!("UR-5: profile {name} needs a 200 MHz master clock")));
 }

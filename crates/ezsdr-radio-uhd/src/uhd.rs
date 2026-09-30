@@ -132,6 +132,7 @@ mod ffi {
         pub fn uhd_sensor_value_to_bool(h: uhd_sensor_value_handle, value_out: *mut bool) -> uhd_error;
 
         pub fn uhd_usrp_get_rx_num_channels(h: uhd_usrp_handle, num_channels_out: *mut usize) -> uhd_error;
+        pub fn uhd_usrp_get_rx_subdev_name(h: uhd_usrp_handle, chan: usize, rx_subdev_name_out: *mut c_char, strbuffer_len: usize) -> uhd_error;
         pub fn uhd_usrp_set_rx_rate(h: uhd_usrp_handle, rate: f64, chan: usize) -> uhd_error;
         pub fn uhd_usrp_get_rx_rate(h: uhd_usrp_handle, chan: usize, rate_out: *mut f64) -> uhd_error;
         pub fn uhd_usrp_set_rx_freq(h: uhd_usrp_handle, tune_request: *mut uhd_tune_request_t, chan: usize, tune_result: *mut uhd_tune_result_t) -> uhd_error;
@@ -141,6 +142,7 @@ mod ffi {
         pub fn uhd_usrp_set_rx_antenna(h: uhd_usrp_handle, ant: *const c_char, chan: usize) -> uhd_error;
 
         pub fn uhd_usrp_get_tx_num_channels(h: uhd_usrp_handle, num_channels_out: *mut usize) -> uhd_error;
+        pub fn uhd_usrp_get_tx_subdev_name(h: uhd_usrp_handle, chan: usize, tx_subdev_name_out: *mut c_char, strbuffer_len: usize) -> uhd_error;
         pub fn uhd_usrp_set_tx_rate(h: uhd_usrp_handle, rate: f64, chan: usize) -> uhd_error;
         pub fn uhd_usrp_get_tx_rate(h: uhd_usrp_handle, chan: usize, rate_out: *mut f64) -> uhd_error;
         pub fn uhd_usrp_set_tx_freq(h: uhd_usrp_handle, tune_request: *mut uhd_tune_request_t, chan: usize, tune_result: *mut uhd_tune_result_t) -> uhd_error;
@@ -484,6 +486,24 @@ impl Device for UhdDevice {
             };
         }
         n
+    }
+
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> {
+        let _control = lock(&self.control);
+        let mut code = UHD_ERROR_NONE;
+        let name = text(|b, n| {
+            // SAFETY: `text`'s buffer is writable for the length passed.
+            code = unsafe {
+                match dir {
+                    Dir::Rx => uhd_usrp_get_rx_subdev_name(self.usrp, chan, b, n),
+                    Dir::Tx => uhd_usrp_get_tx_subdev_name(self.usrp, chan, b, n),
+                }
+            };
+            code
+        });
+        let call = if dir == Dir::Rx { "uhd_usrp_get_rx_subdev_name" } else { "uhd_usrp_get_tx_subdev_name" };
+        self.check_usrp(call, code, false)?;
+        Ok(name)
     }
 
     fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> {

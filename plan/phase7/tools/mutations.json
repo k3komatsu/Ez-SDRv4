@@ -473,8 +473,8 @@
   "id": "U01",
   "name": "from_binding accepts x310-like",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "if binding.profile.as_ref() != Some(&profile::profile_ref()) {",
-  "new": "if binding.profile.is_none() {",
+  "old": "let Some(profile) = binding.profile.as_ref().and_then(Profile::from_ref) else {",
+  "new": "let Some(profile) = binding.profile.as_ref().map(|_| Profile::X310Ubx) else {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_05_from_binding_refusals"
@@ -1140,5 +1140,45 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_24_the_queue_counts_a_command_per_channel"
+ },
+ {
+  "id": "R22",
+  "name": "UR-5's front-end check removed (the one-CBX bench, 2026-09-30)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "if !front_end.starts_with(profile.front_end()) {",
+  "new": "if false && !front_end.starts_with(profile.front_end()) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
+ },
+ {
+  "id": "R23",
+  "name": "UR-5's channel-count check removed (the one-CBX bench)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "if have < need {",
+  "new": "if false && have < need {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
+ },
+ {
+  "id": "R24",
+  "name": "x310-cbx keeps RM-5's 1 GHz default (the one-CBX bench)",
+  "file": "crates/ezsdr-radio-uhd/src/profile.rs",
+  "old": "Value::Num(CBX_DEFAULT_FREQUENCY_HZ));",
+  "new": "Value::Num(1e9));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_09_x310_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz"
+ },
+ {
+  "id": "R25",
+  "name": "x310-cbx's range from 10 MHz, UBX's (the one-CBX bench)",
+  "file": "crates/ezsdr-radio-uhd/src/profile.rs",
+  "old": "x310(self, 1_200_000_000.0, 1, block_len)",
+  "new": "x310(self, 10_000_000.0, 1, block_len)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_09_x310_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz"
  }
 ]

@@ -146,6 +146,8 @@ pub trait Device: Send + Sync {
     fn master_clock_rate(&self) -> u64;
     /// Channels in one direction.
     fn channels(&self, dir: Dir) -> usize;
+    /// UHD's name of the front end serving one channel, such as `UBX RX` (UR-5).
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError>;
     /// Selects the 10 MHz and PPS sources, the clock source first (UR-7).
     fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError>;
     /// Sets the device's time to zero, at the next PPS edge when asked (UR-7).
@@ -283,6 +285,10 @@ pub struct FakeConfig {
     pub loopback_delay_samples: i64,
     /// The scripted faults.
     pub faults: Vec<FakeFault>,
+    /// Channels in each direction, at most two.
+    pub channels: usize,
+    /// How the front ends' names begin: `UBX` (two UBX) or `CBX` (one CBX).
+    pub front_end: &'static str,
 }
 
 impl Default for FakeConfig {
@@ -294,6 +300,8 @@ impl Default for FakeConfig {
             command_queue: 16,
             loopback_delay_samples: 0,
             faults: Vec::new(),
+            channels: 2,
+            front_end: "UBX",
         }
     }
 }
@@ -340,8 +348,9 @@ const OVERRUN_BEHIND: Duration = Duration::from_millis(100);
 const TX_AHEAD: Duration = Duration::from_millis(50);
 
 impl FakeDevice {
-    /// A fake with two receive and two transmit channels (UR-33).
+    /// A fake with `config.channels` receive and transmit channels (UR-33).
     pub fn new(config: FakeConfig) -> FakeDevice {
+        assert!(config.channels <= 2, "the fake has at most two channels");
         let channel = |antenna: &str| Channel {
             rate: 1_000_000.0,
             freq: 1_000_000_000.0,
@@ -478,8 +487,8 @@ impl Device for FakeDevice {
         serde_json::json!({
             "args": "fake",
             "master_clock_rate": self.config.master_clock_rate,
-            "rx_channels": 2,
-            "tx_channels": 2,
+            "rx_channels": self.config.channels,
+            "tx_channels": self.config.channels,
             "pp_string": "FakeDevice (UR-33)",
             "uhd_version": null,
             "fake": true,
@@ -495,7 +504,14 @@ impl Device for FakeDevice {
     }
 
     fn channels(&self, _dir: Dir) -> usize {
-        2
+        self.config.channels
+    }
+
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> {
+        if chan >= self.config.channels {
+            return Err(DeviceError::failed(format!("no channel {chan}")));
+        }
+        Ok(format!("{} {}", self.config.front_end, if dir == Dir::Rx { "RX" } else { "TX" }))
     }
 
     fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> {
