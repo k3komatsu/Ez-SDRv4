@@ -223,11 +223,42 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; fini
 - `minimal.py` (Vision §3's snippet, unchanged): `captured 100000 samples, mean power 0.0001` (the 0.5-amplitude tone through 30 dB), 3 logged calls; Manifest `~/ezsdr-bench/ezsdr-runs/session-7-0/manifest.json`.
 - `bench_loopback.py`: the rate 19.5 Msps coerced to 20 Msps (a new SampleClock); **TIME_ERROR events: 0** (spike K6); y's correlation peak at sample 7 801, z's at 6 773; `rec_0` first sample tick 54 543, `rec_1` 179 571 (receive clock); asked y at root tick 411 438 339, z at 436 443 948; Manifest `~/ezsdr-bench/ezsdr-runs/session-7-1/manifest.json`.
 - **Finding: "the retune outside the RF envelope was admitted".** Not a Module defect: the example retunes `sdr.rx.frequency`, and RM-19 limits only transmit frequencies ("Receive frequencies are not limited: the envelope is about emission", design/07). `hw_b7_session_loopback` retunes `radio.tx.frequency_hz`, which is the check bench.md asks for. Fix the example (`sdr.tx.frequency = 2.4e9`), then run it again.
-- Whether z started at t (EA-17): not yet derived from the numbers above (the two clocks' origins are in the Manifests).
+- Whether z started at t (EA-17): derived in session 2 from `session-7-1`'s Manifest, below.
+
+### B7 (Python), session 2 rerun with the fixed example (`36174d1`): pass
+
+Same container and environment as session 1 (`-w /bench -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH=/work/python -e EZSDR_SERVER=/cargo-target/release/ezsdr-server -e EZSDR_PROFILE=/bench/bench-session.json`; the release server rebuilt from `36174d1`, the server code unchanged since session 1). `bench_loopback.py` now retunes `sdr.tx.frequency = 2.4e9` (the fix: session 1's finding (c); the v58 scan and the Python suite, 23 tests against the debug server, pass). Session 1's two logs are kept as `~/ezsdr-bench/b7_minimal.s1.log` and `b7_loopback.s1.log`.
+
+`python3 /work/python/examples/minimal.py`:
+
+```
+{mn}
+```
+
+`python3 /work/python/examples/bench_loopback.py`:
+
+```
+{lp}
+```
+
+- **The transmit retune outside the envelope raises `ezsdr.Rejected` naming `radio.rf_envelope`** and is logged: `session-7-3`'s `action_log` seq 5, `set_parameter radio.tx.frequency_hz 2400000000.0`, outcome `rejected`, check `radio.rf_envelope`, `RM-19: radio: 2400000000 Hz is in no allowed band` (§58 #16).
+- No `TIME_ERROR` (all three sources' counters 0); the rate 19.5 Msps coerced to 20 Msps with a new receive SampleClock (local 5, 20 Msps, from root tick 461 040 600, the 1 Msps clock ended at 451 040 600: a 50 ms restart, UR-25's restart lead).
+- `y` and `z` hold the waveform: from the capture files (`~/ezsdr-bench/b7-captures/`), the complex correlation with `x` peaks at gain 0.0149 (session 2) / 0.0153 (session 1), phase 19–20°, 30.7 times its median, and again one period (1 000 samples) later at the same gain.
+
+**EA-17: `z` starts at `t`.** The receive SampleClock (local 3, 1 Msps, 200 root ticks a sample) has its origin at root tick 400 529 800 (`session-7-1`) and 400 476 200 (`session-7-3`). Each capture asked at root tick `a` starts at the first receive sample at or after `a`:
+
+| Session | capture | asked (root tick) | = receive sample | first sample | after the instant |
+|---|---|---|---|---|---|
+| `session-7-1` | `y` (`after(0.05)`) | 411 438 339 | 54 542.69 | 54 543 | 305 ns |
+| `session-7-1` | `z` (`at=t`, `t = sleep(0.1)`) | 436 443 948 | 179 570.74 | 179 571 | 260 ns |
+| `session-7-3` | `y` | 411 283 596 | 54 036.98 | 54 037 | 20 ns |
+| `session-7-3` | `z` | 436 281 252 | 179 025.26 | 179 026 | 740 ns |
+
+Every capture is 20 000 samples with no gap. So a capture requested at an instant the Run has just reached (`t` returned by `sleep`) still starts there: the local request does not outrun the device's receive latency on this bench (the answer to EA-17's INFERRED case; the samples at `t` had not yet been delivered to the recorder when the request reached it, or the recorder kept them).
 
 ## Still to do
 
-1. Rerun B6, B7 (Rust) and B8 from `/work`.
-2. Fix `python/examples/bench_loopback.py` to retune the transmitter; rerun B7 (Python); derive EA-17's answer from the Manifests.
+1. ~~Rerun B6, B7 (Rust) and B8 from `/work`.~~ Done in session 2 (B6 after a fix of the test's correlation).
+2. ~~Fix `python/examples/bench_loopback.py` to retune the transmitter; rerun B7 (Python); derive EA-17's answer from the Manifests.~~ Done in session 2.
 3. B9: the unplug (manual: the owner pulls the 10 GbE cable during a receive Run, and during a transmit-only Session — the latter has no test yet), the rerun of B3–B7 with no false `DEVICE_LOST`; the USRP2 probe if a USRP2 is at hand.
 4. Fill the table at the end of `plan/spikes/2026-09-26-uhd.md`; update handoff.md.
