@@ -216,6 +216,51 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; fini
 - The transmit SampleClock's origin (`enabled`) is 2.4–4.5 ms after T0 in the 7 Runs.
 - **Not implemented, so not measured** (bench.md B8's other rows, handoff.md §4's B8 row): timed retunes at the leads; `cold` restart leads 100/50/25/10 ms; the transmit end after `Stop`; in-flight windows 10/5/3/2 ms against `TX_UNDERFLOW`; the preemption bound at 20/10/5 ms; the queue depth of timed OBX tunes (UR-24); a dedicated timed-receive-stop measurement (answered above from the `timing` of every Run instead). Spec 18 §3's restart lead 50 ms, in-flight window 10 ms, release window 3 ms and queue depth 16 stay INFERRED.
 
+### B5 — `hw_b5_overflow`, rerun for the restart gap: pass
+
+Session 1 did not print the gap. `hw_b5_overflow` now prints (test output only) the capture's gaps by cause, the `overflow_restart` gap, the decoded `RX_OVERFLOW` payload, the `timing` section and the sample clocks. Run 2 (without `timing`):
+
+```
+B5 no overflow with a 300 ms stall; the socket buffer absorbed it
+OB5 overflowed with a 1000 ms stall: {"link_drops_seen":1375,"rx_before_origin":0,"rx_blocks":7729,"rx_errors":0,"rx_off_lattice":2174,"rx_overflows":1,"rx_overlapping":0,"rx_samples":15455793,"tx_bursts":0,"tx_samples":0}
+B5 1266 gaps: 1265 link drops of 2750000 samples in all, from sample Some(5180000) to Some(10980000)
+B5 gap OverflowRestart at receive sample 11108408 for 4562577 samples (456.2577 ms at 10 Msps), lost Some(4562577)
+B5 capture 0 … 20018370, 1267 valid segment(s)
+B5 RX_OVERFLOW: Ok(RxOverflowPayload { cause: Overrun, lost: 4562577, restart_gap_ns: 456257700 })
+```
+
+Run 3, whole output:
+
+```
+running 1 test
+[INFO] [UHD] linux; GNU C++ version 15.2.0; Boost_109000; UHD_4.10.0.0-0-unknown
+[INFO] [X300] X300 initialization sequence...
+[INFO] [X300] Maximum frame size: 8000 bytes.
+[INFO] [X300] Radio 1x clock: 200 MHz
+thread 'hw_b5_overflow' (81) panicked at crates/ezsdr-radio-uhd/tests/common/mod.rs:496:5:
+no overflow; the host's socket buffer absorbed the stall
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+B5 no overflow with a 300 ms stall; the socket buffer absorbed it
+[INFO] [X300] X300 initialization sequence...
+[INFO] [X300] Maximum frame size: 8000 bytes.
+[INFO] [X300] Radio 1x clock: 200 MHz
+OB5 overflowed with a 1000 ms stall: {"link_drops_seen":1301,"rx_before_origin":0,"rx_blocks":7729,"rx_errors":0,"rx_off_lattice":2174,"rx_overflows":1,"rx_overlapping":0,"rx_samples":15455088,"tx_bursts":0,"tx_samples":0}
+B5 1218 gaps: 1217 link drops of 2602000 samples in all, from sample Some(5382000) to Some(10982000)
+B5 gap OverflowRestart at receive sample 11108408 for 4565115 samples (456.5115 ms at 10 Msps), lost Some(4565115)
+B5 capture 0 … 20020203, 1219 valid segment(s)
+B5 timing [{"at":333313,"start_up_until":400333313,"what":"arm"},{"lead_ns":1999993160,"t0":400572120,"what":"start"},{"host_delay_ms":2000,"index":0,"what":"first_rx_block"},{"ms":1000,"what":"rx_stall"},{"at":800776171,"until":800976171,"what":"rx_stop"},{"at":801017541,"cut":800976171,"what":"rx_stop_untimed"},{"at":800776171,"done":821439602,"mode":"Orderly","what":"stop"}]
+B5 sample clocks: [SampleClockRecord { stream: ResourceId { node: NodeId(0), path: "usrp/rx" }, domain: ClockDomainId { node: NodeId(0), local: 3 }, root: ClockDomainId { node: NodeId(0), local: 2 }, root_ticks_per_tick: Rational { num: 20, den: 1 }, origin: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 400572120 }, ended_at: None, nominal_rate: Rational { num: 10000000, den: 1 } }]
+B5 RX_OVERFLOW: Ok(RxOverflowPayload { cause: Overrun, lost: 4565115, restart_gap_ns: 456511500 })
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 18.13s
+```
+
+- **The `overflow_restart` gap: 4 562 577 and 4 565 115 samples at 10 Msps = 456.3 and 456.5 ms** (`RX_OVERFLOW.restart_gap_ns` 456 257 700 and 456 511 500; `lost` = the gap's length, as the test asserts), both starting at receive sample **11 108 408** (1 110.8 ms into the stream).
+- What the gap is made of (from the numbers; the split is INFERRED): the stall (`with_rx_stall(500 ms, 1 000 ms)`) stops uhd-rx's reads from 500 ms after the first block (host delay 2 000 ms after `start`, i.e. about receive sample 0) to about 1 500 ms. The socket buffer absorbed 1 110.8 − 500 = 610.8 ms of stream (24.4 MB of `sc16` at 10 Msps, with `rmem_max` 50 000 000), then the device overran and stopped. The gap ends at receive sample 15 673 523 (1 567.4 ms), **about 67 ms after the stall ended**; in those 67 ms uhd-rx read the 610 ms backlog (the host link, `drop_oldest` capacity 64, dropped 1 217–1 265 blocks of it: the `link_drop` gaps between samples 5.2 M and 11.0 M) and UHD restarted the stream. So the gap an overflow leaves depends on how long the reader was away, and **UHD's own restart after it detects the overrun is at most ~67 ms** here, which does not contradict MR-3's 50 ms (profile `overflow_restart_gap_ns` 50 ms, unchanged: an input for Phase 8, which should measure the restart from the host's detection of the overflow, a time the Module does not record).
+- The stall that first overflowed: 1 000 ms (300 ms did not, in all three runs of the two sessions); `rmem_max` 50 000 000, `wmem_max` 33 554 432.
+- `rx_off_lattice` 2 174 (session 1: 2 179): again every block after the restart is off the 20-tick lattice (INFERRED, session 1's finding (b)).
+- The timed stop at the end of the Run was not honoured either (`rx_stop_untimed` 0.21 ms after the cut): 9 of 9 Runs in this session and B3.
+
 ## B7 (Python) — ran; one finding
 
 `EZSDR_SERVER=/cargo-target/release/ezsdr-server EZSDR_PROFILE=/bench/bench-session.json` (bench.md's Session profile with `x310-obx`, `addr=192.168.40.36`, the capture directory `/bench/b7-captures`):
@@ -254,7 +299,7 @@ Same container and environment as session 1 (`-w /bench -e PYTHONDONTWRITEBYTECO
 | `session-7-3` | `y` | 411 283 596 | 54 036.98 | 54 037 | 20 ns |
 | `session-7-3` | `z` | 436 281 252 | 179 025.26 | 179 026 | 740 ns |
 
-Every capture is 20 000 samples with no gap. So a capture requested at an instant the Run has just reached (`t` returned by `sleep`) still starts there: the local request does not outrun the device's receive latency on this bench (the answer to EA-17's INFERRED case; the samples at `t` had not yet been delivered to the recorder when the request reached it, or the recorder kept them).
+Every capture is 20 000 samples with no gap. So a capture requested at an instant the Run has just reached (`t` returned by `sleep`) still starts there: the local request does not outrun the device's receive latency on this bench (the answer to EA-17's INFERRED case). Why — the samples at `t` not yet delivered to the recorder when the request reached it, or the recorder still holding them — is not visible in the Manifest (INFERRED either way).
 
 ## Still to do
 

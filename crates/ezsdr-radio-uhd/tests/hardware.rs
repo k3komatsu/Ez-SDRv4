@@ -108,6 +108,26 @@ fn hw_b5_overflow() {
         match result {
             Ok(manifest) => {
                 println!("B5 overflowed with a {stall} ms stall: {}", section(&manifest, "stats"));
+                // The restart gap MR-3 claims is 50 ms (at 10 Msps, 100 ns a sample).
+                let map = &capture_of(&manifest, "rec").continuity[0];
+                let drops: Vec<_> = map.gaps.iter().filter(|g| g.cause == ezsdr_kernel::stream::GapCause::LinkDrop {}).collect();
+                println!(
+                    "B5 {} gaps: {} link drops of {} samples in all, from sample {:?} to {:?}",
+                    map.gaps.len(),
+                    drops.len(),
+                    drops.iter().map(|g| g.len).sum::<u64>(),
+                    drops.first().map(|g| g.start.ticks),
+                    drops.last().map(|g| g.start.ticks + g.len as i64)
+                );
+                for gap in map.gaps.iter().filter(|g| g.cause != ezsdr_kernel::stream::GapCause::LinkDrop {}) {
+                    println!("B5 gap {:?} at receive sample {} for {} samples ({} ms at 10 Msps), lost {:?}", gap.cause, gap.start.ticks, gap.len, gap.len as f64 / 1e4, gap.lost);
+                }
+                println!("B5 capture {} … {}, {} valid segment(s)", map.first.ticks, map.end.ticks, map.valid[0].len());
+                println!("B5 timing {}", section(&manifest, "timing"));
+                println!("B5 sample clocks: {:?}", manifest.clocks.sample_clocks);
+                for event in events_of(&manifest, "radio.RX_OVERFLOW") {
+                    println!("B5 RX_OVERFLOW: {:?}", ezsdr_radio::payloads::RxOverflowPayload::from_payload(&event.payload));
+                }
                 return;
             }
             Err(_) => println!("B5 no overflow with a {stall} ms stall; the socket buffer absorbed it"),
