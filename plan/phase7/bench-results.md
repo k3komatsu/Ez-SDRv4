@@ -50,9 +50,48 @@ The capture's first sample is receive sample 50 000.
 - `stats`: rx_blocks 7 734, rx_samples 15 465 011, rx_overflows 1, link_drops_seen 1 530, **rx_off_lattice 2 179**, rx_before_origin 0.
 - Finding: 2 179 blocks came with a first tick off the stream's 20-tick lattice (10 Msps), which UR-17 rounds to the nearest sample and counts — INFERRED: every block after UHD's own restart of the overrun stream, whose new start UHD chooses. The restart gap's length itself was not printed (the test asserts on it); record it on a rerun (test output may be added).
 
-## B6, B7 (Rust), B8 — not run yet
+## B6, B7 (Rust), B8 — session 1 did not run them
 
-The session's script ran them from the wrong directory (`cargo` found no `Cargo.toml` in `/bench`): nothing was transmitted by them. Next: rerun them with the working directory `/work`.
+Session 1's script ran them from the wrong directory (`cargo` found no `Cargo.toml` in `/bench`): nothing was transmitted by them (the three logs are kept in `~/ezsdr-bench/s1-wrongdir/`). Session 2 runs them with `-w /work`.
+
+## Session 2 (2026-09-30, on `usrp-lnx02` itself)
+
+A Claude Code session on `usrp-lnx02`, from `de7b4b2`. Before transmitting: `uhd_usrp_probe` (`~/ezsdr-bench/probe-s2.log`) shows the bench as session 1 left it — X300, FPGA 39.3 `d375d68`, `OBX TX`/`OBX RX` in slot A, slot B `Unknown (0xffff) - 0`; `enp2s0f0np0` up at `192.168.40.10/24`, MTU 9000; `rmem_max` 50 000 000, `wmem_max` 33 554 432. Every step below runs as handoff.md §4 gives it (`docker run … -w /work … cargo test -q --release -p ezsdr-radio-uhd --features uhd --test hardware <test> -- --ignored --nocapture > ~/ezsdr-bench/<test>.log 2>&1`).
+
+RF, checked in the code before the first transmission: B6 and B8 transmit at the profile's default 1 GHz (B6's Spec sets `radio.tx.frequency_hz` to the receive frequency, B8's Session inherits `x310_defaults`), transmit gain 0 dB (the default; neither sets one), antenna `TX/RX`, a QPSK PN waveform of amplitude 0.4 (`pn`), into the 30 dB loopback. **B6's and B8's bench profiles carry no `radio.rf_envelope`** (`bench_profile(…, json!({}), …)`; only B7's does), unlike bench.md's "every bench profile carries" it: the transmissions stayed inside bench.md's RF conditions, but nothing but the test code held them there. Recorded, not changed.
+
+### B6 — `hw_b6_txrx_and_repeat`: fail (the test's detection threshold; the burst is heard)
+
+First run, as committed (`de7b4b2`):
+
+```
+running 1 test
+[INFO] [UHD] linux; GNU C++ version 15.2.0; Boost_109000; UHD_4.10.0.0-0-unknown
+[INFO] [X300] X300 initialization sequence...
+[INFO] [X300] Maximum frame size: 8000 bytes.
+[INFO] [X300] Radio 1x clock: 200 MHz
+
+thread 'hw_b6_txrx_and_repeat' (21) panicked at crates/ezsdr-radio-uhd/tests/common/mod.rs:468:88:
+the burst's correlation peak
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+hw_b6_txrx_and_repeat --- FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 5.54s
+```
+
+The capture is gone with the test's `TempDir`, so the second run adds `diagnose` to `tests/common/mod.rs` (test output only: the capture's RMS and the peaks of the complex correlation's magnitude and of its real part, as fractions of the waveform's energy, i.e. the loop's amplitude gain):
+
+```
+B6 burst: 5000 samples, rms 0.00496; |corr| peak Some((44, 0.015181948, 24.60064)); Re(corr) peak Some((44, 0.013803906)); threshold 0.01580 (fractions of the energy 320.00427)
+
+thread 'hw_b6_txrx_and_repeat' (81) panicked at crates/ezsdr-radio-uhd/tests/common/mod.rs:498:88:
+the burst's correlation peak
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 10.56s
+```
+
+- **The burst is heard at sample 44** of the capture that starts with it (T0 + 10 000 samples at 1 Msps): the transmit-to-receive delay is 44 samples (MR-3 claims 45, INFERRED).
+- **The loop's amplitude gain is 0.0152 (−36.4 dB)** with the OBX at 0 dB transmit and receive gain through the 30 dB attenuator, at a phase of 24.6° (the TX and RX LOs' offset).
+- The cause is the test, not the Module: `correlate` accepts a peak only when the **real part** of the correlation exceeds `0.5 × 0.0316` of the energy (−36.0 dB), a threshold that assumes a −30 dB loop (6 dB of margin) and a zero phase. The real loop is 0.4 dB below it in magnitude, and the real part (0.0138) loses another 0.8 dB to the 24.6° phase; any other LO phase moves it further (cos φ). Python's `bench_loopback.py` found its peaks because it takes `np.abs` of the complex correlation.
+- Per "If a step fails": fixed in the test code with a test that reproduces it first (next entry), then B6 is run again.
 
 ## B7 (Python) — ran; one finding
 

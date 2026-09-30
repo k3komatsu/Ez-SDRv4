@@ -396,6 +396,33 @@ pub fn correlate(samples: &[(f32, f32)], wave: &[(f32, f32)]) -> Option<usize> {
         .map(|(at, _)| at)
 }
 
+/// What a bench capture holds against `wave`: its RMS, and the peaks of the complex
+/// correlation's magnitude and of its real part (what `correlate` thresholds), each as a
+/// fraction of the waveform's energy (the loop's amplitude gain at the peak).
+pub fn diagnose(what: &str, samples: &[(f32, f32)], wave: &[(f32, f32)]) {
+    let energy: f32 = wave.iter().map(|(re, im)| re * re + im * im).sum();
+    let rms = (samples.iter().map(|(re, im)| re * re + im * im).sum::<f32>() / samples.len().max(1) as f32).sqrt();
+    let dots: Vec<(usize, f32, f32)> = (0..samples.len().saturating_sub(wave.len()))
+        .map(|at| {
+            let (mut re, mut im) = (0.0f32, 0.0f32);
+            for ((wr, wi), (sr, si)) in wave.iter().zip(&samples[at..]) {
+                re += wr * sr + wi * si;
+                im += wr * si - wi * sr;
+            }
+            (at, re, im)
+        })
+        .collect();
+    let by_abs = dots.iter().max_by(|a, b| a.1.hypot(a.2).total_cmp(&b.1.hypot(b.2)));
+    let by_re = dots.iter().max_by(|a, b| a.1.total_cmp(&b.1));
+    println!(
+        "{what}: {} samples, rms {rms:.5}; |corr| peak {:?}; Re(corr) peak {:?}; threshold {:.5} (fractions of the energy {energy})",
+        samples.len(),
+        by_abs.map(|(at, re, im)| (*at, re.hypot(*im) / energy, im.atan2(*re).to_degrees())),
+        by_re.map(|(at, re, _)| (*at, re / energy)),
+        0.5 * 0.0316
+    );
+}
+
 /// B3: `experiments::receive(1, 1e6, f, Some(10_000))` at the bench frequency `f` under the bench profile.
 pub fn rehearse_receive_at_t0(device: Arc<dyn Device>) -> Manifest {
     let dir = TempDir::new();
@@ -465,6 +492,9 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
     let inputs = BTreeMap::from([(waveform.hash.clone(), bytes.clone())]);
     let heard = captured(spec_run(&burst, &bench_profile(&*device, &dir, json!({}), json!({}), false), device.clone(), inputs.clone()));
     let samples = read_capture(&capture_of(&heard, "rec"), 1).remove(0);
+    if !exact {
+        diagnose("B6 burst", &samples, &wave);
+    }
     let at = if exact { exactly(&samples, &wave) } else { correlate(&samples, &wave) }.expect("the burst's correlation peak");
     if exact {
         assert_eq!(at, 0, "the burst at T0 + 10 000 samples is received at sample 10 000");
@@ -475,6 +505,9 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
     capture(&mut repeat, 1_000, 4_000);
     let looped = captured(spec_run(&repeat, &bench_profile(&*device, &dir, json!({}), json!({}), false), device, inputs));
     let samples = read_capture(&capture_of(&looped, "rec"), 1).remove(0);
+    if !exact {
+        diagnose("B6 repeat", &samples, &wave);
+    }
     let start = if exact { 0 } else { correlate(&samples, &wave).expect("the repeat is heard") };
     for (i, sample) in samples[start..samples.len() - wave.len()].iter().enumerate() {
         if exact {
