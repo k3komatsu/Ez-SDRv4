@@ -489,18 +489,47 @@ fn rs_36_an_unforeseen_source_does_not_silence_the_abort() {
     // delivered kind both hang off it.
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
     let fatal = EventKind::parse(EventKind::DEVICE_LOST).expect("parses");
+    // Delivered, the body keeps its kind, and the Policy aborts on it (KC-31).
     let c = collector(8, &policy, &[(rid("radio"), fatal.clone())]);
     let h = c.resolve(&rid("radio2"), &fatal);
     c.emit(h, t(0), Severity::Fatal, &[]).expect("emits");
+    let drained = c.drain();
+    assert!(drained.iter().any(|e| e.kind == fatal), "the delivered body keeps its kind");
+    assert_eq!(policy.reaction_for_event(&fatal, Severity::Fatal), Reaction::Abort);
+    // Dropped (the ring full), the escalation flag keeps the kind (RS-36).
+    let c = collector(1, &policy, &[(rid("radio"), fatal.clone())]);
+    let h = c.resolve(&rid("radio2"), &fatal);
+    c.emit(h, t(0), Severity::Fatal, &[]).expect("emits");
+    c.emit(h, t(1), Severity::Fatal, &[]).expect("emits");
     assert_eq!(
         c.escalation(),
         Some((fatal.clone(), Reaction::Abort)),
         "the Run aborts on a device that is gone, whatever its source name"
     );
-    assert!(
-        c.drain().iter().any(|e| e.kind == fatal),
-        "the delivered body keeps its kind"
-    );
+}
+
+#[test]
+fn rs_36_a_delivered_body_raises_no_escalation_flag() {
+    // design-notes §21: a stopping body that is queued, on the hot path or the control
+    // path, raises no flag — it is reacted to when delivered, so KC-31's cause is the
+    // first stopping event in `delivered`, not the lowest-index flag raised before its
+    // body arrived. Only a dropped body raises one.
+    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
+    let fatal = EventKind::parse(EventKind::DEVICE_LOST).expect("parses");
+    let c = collector(8, &policy, &[(rid("radio"), fatal.clone())]);
+    let h = c.resolve(&rid("radio"), &fatal);
+    c.emit(h, t(0), Severity::Fatal, &[]).expect("emits");
+    assert!(c.escalation().is_none(), "a queued hot-path body raises no flag");
+    c.emit_control(ezsdr_kernel::event::Event {
+        source: rid("radio"),
+        time: t(1),
+        severity: Severity::Fatal,
+        kind: fatal.clone(),
+        payload: serde_json::Value::Null,
+    })
+    .expect("emits");
+    assert!(c.escalation().is_none(), "a control-path body raises no flag");
+    assert_eq!(c.drain().iter().filter(|e| e.kind == fatal).count(), 2);
 }
 
 #[test]
@@ -515,7 +544,11 @@ fn rs_29_an_unregistered_fatal_kind_escalates() {
         &[(rid("radio"), EventKind::parse("test.custom").expect("k"))],
     );
     let h = c.resolve(&rid("radio"), &unknown);
-    c.emit(h, t(0), Severity::Fatal, &[]).expect("emits");
+    assert_eq!(policy.reaction_for_event(&unknown, Severity::Fatal), Reaction::Abort);
+    // A dropped body of it escalates (RS-36; a ring of 8, filled first).
+    for _ in 0..9 {
+        c.emit(h, t(0), Severity::Fatal, &[]).expect("emits");
+    }
     assert_eq!(c.escalation().map(|(_, r)| r), Some(Reaction::Abort));
 
     // The same kind at `info` does not escalate.

@@ -1704,5 +1704,25 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_a_moved_start_on_a_held_burst_s_is_refused"
+ },
+ {
+  "id": "D01",
+  "name": "a control-path stopping event raises the escalation flag again (design-notes §21)",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "        // The control path never drops a body, so it raises no escalation flag (RS-36).\n",
+  "new": "        self.escalate(handle.kind as usize, event.severity);\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_36_a_delivered_body_raises_no_escalation_flag"
+ },
+ {
+  "id": "D02",
+  "name": "a queued hot-path stopping event raises the escalation flag again (design-notes §21)",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "        let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());\n        if ring.len == ring.slots.len() {",
+  "new": "        self.escalate(handle.kind as usize, severity);\n        let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());\n        if ring.len == ring.slots.len() {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_36_a_delivered_body_raises_no_escalation_flag"
  }
 ]

@@ -380,8 +380,8 @@ impl EventCollector {
             .unwrap_or_else(|| Policy::by_severity(severity))
     }
 
-    /// Raises the escalation flag when the reaction is `stop` or `abort`, whatever
-    /// the ring then does with the body (RS-36).
+    /// Raises the escalation flag when the reaction is `stop` or `abort`, for a body the
+    /// full ring drops (RS-36).
     fn escalate(&self, kind: usize, severity: Severity) {
         let code = match self.reaction(kind, severity) {
             Reaction::Stop => 1,
@@ -517,14 +517,17 @@ impl EventSink for EventCollector {
         // path is infallible for the *Kernel's* handles only (MA-9).
         let row = self.check_handle(handle)?;
         row.fetch_add(1, Ordering::Relaxed);
-        // RS-36: the escalation flag is set on the hot path, whatever the ring does.
-        self.escalate(handle.kind as usize, severity);
         let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
         if ring.len == ring.slots.len() {
             drop(ring);
             if let Some(d) = self.dropped.get(handle.kind as usize) {
                 d.fetch_add(1, Ordering::Relaxed);
             }
+            // RS-36: a stopping body that is dropped still ends the Run, through the
+            // escalation flag. A body that is queued raises none: it is reacted to when
+            // it is delivered, so the cause is the first stopping event in `delivered`
+            // (KC-31), not a flag raised before its body arrives (design-notes §21).
+            self.escalate(handle.kind as usize, severity);
             return Ok(());
         }
         let cap = ring.slots.len();
@@ -545,7 +548,7 @@ impl EventSink for EventCollector {
         let handle = self.resolve(&event.source, &event.kind);
         let row = self.check_handle(handle)?;
         row.fetch_add(1, Ordering::Relaxed);
-        self.escalate(handle.kind as usize, event.severity);
+        // The control path never drops a body, so it raises no escalation flag (RS-36).
         self.control.lock().unwrap_or_else(|e| e.into_inner()).push(event);
         Ok(())
     }

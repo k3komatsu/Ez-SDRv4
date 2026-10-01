@@ -1533,16 +1533,18 @@ fn ma_30_stepping_livelock_cap() {
     );
 
     // RS-27 registers STEP_LIVELOCK as a kind the Kernel emits from its own
-    // stepping loop, so it must reach the counters and the escalation flag.
+    // stepping loop, so it must be delivered, and the Policy aborts on it when it is
+    // (KC-31; RS-36's flag is for dropped bodies only: design-notes §21).
     let drained = events.drain();
     assert!(
         drained
             .iter()
             .any(|e| e.kind.as_str() == EventKind::STEP_LIVELOCK)
     );
+    let policy = EventKindRegistry::with_kernel_kinds().compile(&BTreeMap::new()).expect("compiles");
     assert_eq!(
-        events.escalation().map(|(_, r)| r),
-        Some(ezsdr_kernel::policy::Reaction::Abort),
+        policy.reaction_for_event(&EventKind::parse(EventKind::STEP_LIVELOCK).unwrap(), ezsdr_kernel::event::Severity::Fatal),
+        ezsdr_kernel::policy::Reaction::Abort,
         "RS-28 gives it `abort` at `fatal`"
     );
 }
