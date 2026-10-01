@@ -185,6 +185,10 @@ pub trait Device: Send + Sync {
     fn tx_async(&self, timeout: Duration) -> Option<TxReport>;
     /// Frees both streamers; called only when no thread holds one (UR-16).
     fn close_streams(&self);
+    /// The Provider has found the device gone (UR-29): from now on neither the device
+    /// nor its streamers are freed, since UHD's teardown of an unreachable X300 ends the
+    /// process (design-notes §17, F4).
+    fn mark_lost(&self);
 }
 
 /// A tick as UHD's `(full_secs, frac_secs)` (UR-3, TM-20).
@@ -1109,5 +1113,9 @@ impl Device for FakeDevice {
 
     fn close_streams(&self) {
         self.lock().calls.push("close_streams".to_owned());
+    }
+
+    fn mark_lost(&self) {
+        self.lock().calls.push("mark_lost".to_owned());
     }
 }

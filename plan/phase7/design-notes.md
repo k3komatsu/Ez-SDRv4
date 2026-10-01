@@ -461,3 +461,11 @@ Rejected: ending the server with `_exit` after a loss, to skip UHD's static tear
 
 The transmit-only unplug and B3–B7 again wait for this decision.
 
+
+### The decision and the change
+
+The owner: "この推奨でOKです．直してください．その後の実機の手順も了解です". `Device` gains `mark_lost`, which `Core::device_lost` — the one path of every loss: a lost-device error, UR-29's silence, a panicking thread — calls once, before `DEVICE_LOST` is emitted and so before cleanup can close anything. `UhdDevice` keeps the mark in an `Arc<AtomicBool>` its streamers share: once it is set, `UhdDevice::drop` skips `close_streams` and `uhd_usrp_free`, and a streamer's `drop` skips its frees, so a streamer still held by a thread (UR-16) is leaked too when it goes. `FakeDevice` records `mark_lost`; the four loss tests (`ur_29_a_lost_device_aborts_the_run`, `ur_29_a_silent_stream_is_a_lost_device`, `ur_29_a_lost_device_is_found_while_idle`, `ur_16_a_panicking_thread_is_a_lost_device`) assert it once and before any `close_streams`; mutation B33 (the call removed) is killed. `UhdDevice`'s own side has no fake: bench step B9 checks it. Spec 18 UR-3's trait, UR-29, UR-33.
+
+The costs, recorded in UR-29: one leaked device per loss; a process exiting while the link is still down aborts in UHD's static teardown, after its Manifests are written; a kept device may stop the same process from opening it again (INFERRED, not checked). A panicking Provider thread also counts as a loss, so its device is kept though it may be reachable — the conservative side.
+
+**Checks.** `cargo test --workspace` 877 passed on stable and 1.85.0; `--features uhd` 163 passed; clippy `-D warnings` clean with and without `uhd`; B33 killed (153 rows).

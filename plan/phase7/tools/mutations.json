@@ -1520,5 +1520,15 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned"
+ },
+ {
+  "id": "B33",
+  "name": "a lost device not marked lost (F4)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "        self.device.mark_lost();\n",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_29_a_lost_device_aborts_the_run"
  }
 ]

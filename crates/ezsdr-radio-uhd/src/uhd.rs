@@ -7,6 +7,7 @@
 //! holds it through an `Arc` so that `close_streams` frees only one nobody holds.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -273,6 +274,8 @@ pub fn find(args: &str) -> Result<Vec<String>, DeviceError> {
 struct RxStream {
     h: uhd_rx_streamer_handle,
     md: uhd_rx_metadata_handle,
+    /// The device's lost mark: a lost device's streamer is not freed (F4).
+    lost: Arc<AtomicBool>,
     channels: usize,
     /// Samples per packet (`uhd_rx_streamer_max_num_samps`).
     spp: usize,
@@ -281,11 +284,18 @@ struct RxStream {
 struct TxStream {
     h: uhd_tx_streamer_handle,
     md: uhd_async_metadata_handle,
+    /// As for `RxStream`.
+    lost: Arc<AtomicBool>,
     channels: usize,
 }
 
 impl Drop for RxStream {
     fn drop(&mut self) {
+        // A lost device's handles are leaked: UHD's teardown writes to the device and,
+        // over a dead link, throws out of a destructor (design-notes §17, F4).
+        if self.lost.load(Ordering::Acquire) {
+            return;
+        }
         // SAFETY: the last `Arc` holder frees the handles it made, once.
         unsafe {
             uhd_rx_metadata_free(&mut self.md);
@@ -296,6 +306,9 @@ impl Drop for RxStream {
 
 impl Drop for TxStream {
     fn drop(&mut self) {
+        if self.lost.load(Ordering::Acquire) {
+            return;
+        }
         // SAFETY: as for `RxStream`.
         unsafe {
             uhd_async_metadata_free(&mut self.md);
@@ -308,11 +321,11 @@ impl RxStream {
     /// Makes a receive streamer and its metadata, `attach` binding it to a device;
     /// the value owns both handles from the first, so an early return frees them
     /// once, and the caller moves it into its `Arc` (Review L, P0-1).
-    fn make(channels: usize, attach: impl FnOnce(uhd_rx_streamer_handle) -> Result<usize, DeviceError>) -> Result<RxStream, DeviceError> {
+    fn make(channels: usize, lost: Arc<AtomicBool>, attach: impl FnOnce(uhd_rx_streamer_handle) -> Result<usize, DeviceError>) -> Result<RxStream, DeviceError> {
         let mut h: uhd_rx_streamer_handle = std::ptr::null_mut();
         // SAFETY: `h` is written by the call.
         unsafe { check("uhd_rx_streamer_make", uhd_rx_streamer_make(&mut h), true)? };
-        let mut stream = RxStream { h, md: std::ptr::null_mut(), channels, spp: 0 };
+        let mut stream = RxStream { h, md: std::ptr::null_mut(), lost, channels, spp: 0 };
         stream.spp = attach(stream.h)?;
         // SAFETY: the metadata handle is written into the value that frees it.
         unsafe { check("uhd_rx_metadata_make", uhd_rx_metadata_make(&mut stream.md), true)? };
@@ -322,11 +335,11 @@ impl RxStream {
 
 impl TxStream {
     /// As [`RxStream::make`], for transmit.
-    fn make(channels: usize, attach: impl FnOnce(uhd_tx_streamer_handle) -> Result<(), DeviceError>) -> Result<TxStream, DeviceError> {
+    fn make(channels: usize, lost: Arc<AtomicBool>, attach: impl FnOnce(uhd_tx_streamer_handle) -> Result<(), DeviceError>) -> Result<TxStream, DeviceError> {
         let mut h: uhd_tx_streamer_handle = std::ptr::null_mut();
         // SAFETY: `h` is written by the call.
         unsafe { check("uhd_tx_streamer_make", uhd_tx_streamer_make(&mut h), true)? };
-        let mut stream = TxStream { h, md: std::ptr::null_mut(), channels };
+        let mut stream = TxStream { h, md: std::ptr::null_mut(), lost, channels };
         attach(stream.h)?;
         // SAFETY: as above.
         unsafe { check("uhd_async_metadata_make", uhd_async_metadata_make(&mut stream.md), true)? };
@@ -337,8 +350,9 @@ impl TxStream {
 /// Makes and drops one unattached streamer per direction, through the same path as
 /// `rx_open` and `tx_open`: a handle freed twice aborts the process (Review L, P0-1).
 pub fn streamer_lifecycle() -> Result<(), DeviceError> {
-    let rx = Arc::new(RxStream::make(1, |_| Ok(0))?);
-    let tx = Arc::new(TxStream::make(1, |_| Ok(()))?);
+    let lost = Arc::new(AtomicBool::new(false));
+    let rx = Arc::new(RxStream::make(1, lost.clone(), |_| Ok(0))?);
+    let tx = Arc::new(TxStream::make(1, lost, |_| Ok(()))?);
     drop((rx.clone(), tx.clone()));
     drop((rx, tx));
     Ok(())
@@ -359,6 +373,8 @@ pub struct UhdDevice {
     control: Mutex<()>,
     rx: Mutex<Option<Arc<RxStream>>>,
     tx: Mutex<Option<Arc<TxStream>>>,
+    /// Set by `mark_lost`: the device and its streamers are then never freed (F4).
+    lost: Arc<AtomicBool>,
 }
 
 // SAFETY (UR-3, INFERRED from UHD's documented thread safety of multi_usrp control
@@ -401,6 +417,7 @@ impl UhdDevice {
             control: Mutex::new(()),
             rx: Mutex::new(None),
             tx: Mutex::new(None),
+            lost: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -434,6 +451,14 @@ impl UhdDevice {
 
 impl Drop for UhdDevice {
     fn drop(&mut self) {
+        // A lost device is not freed: `uhd_usrp_free` tears the RFNoC graph down, whose
+        // X300 radio `deinit()` writes the device's registers and, over a dead link, throws
+        // out of `~rfnoc_graph_impl`, ending the process (`x300_radio_control.cpp:1890–1911`;
+        // design-notes §17, F4). UHD's static registry still holds it until the process
+        // exits.
+        if self.lost.load(Ordering::Acquire) {
+            return;
+        }
         self.close_streams();
         // SAFETY: the device outlives every streamer made from it, then is freed once.
         unsafe { uhd_usrp_free(&mut self.usrp) };
@@ -643,7 +668,7 @@ impl Device for UhdDevice {
         // UR-25: the old streamer goes before the new one is made (a thread still inside
         // a call on it keeps it alive through its own Arc, UR-16).
         drop(lock(&self.rx).take());
-        let stream = RxStream::make(channels, |h| {
+        let stream = RxStream::make(channels, self.lost.clone(), |h| {
             let mut samples = 0usize;
             // SAFETY: the device handle lives as long as `self`; `args` outlives the call.
             unsafe {
@@ -734,7 +759,7 @@ impl Device for UhdDevice {
         let mut args = Self::stream_args(&mut list, &fc32, &sc16, &empty);
         let _control = lock(&self.control);
         drop(lock(&self.tx).take());
-        let stream = TxStream::make(channels, |h| {
+        let stream = TxStream::make(channels, self.lost.clone(), |h| {
             let mut samples = 0usize;
             // SAFETY: as for `rx_open`.
             unsafe {
@@ -797,9 +822,13 @@ impl Device for UhdDevice {
         }
     }
 
+    fn mark_lost(&self) {
+        self.lost.store(true, Ordering::Release);
+    }
+
     fn close_streams(&self) {
         // UR-16: dropping the device's reference frees a streamer only once no thread
-        // still holds its Arc.
+        // still holds its Arc (and never a lost device's, F4).
         lock(&self.rx).take();
         lock(&self.tx).take();
     }

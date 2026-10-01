@@ -228,6 +228,8 @@ impl Core {
         if self.lost.swap(true, Ordering::AcqRel) {
             return;
         }
+        // Before anything can free it: a lost device is never freed (F4).
+        self.device.mark_lost();
         self.timing(json!({ "what": "device_lost", "message": message, "at": self.now() }));
         self.emit(
             &self.id,

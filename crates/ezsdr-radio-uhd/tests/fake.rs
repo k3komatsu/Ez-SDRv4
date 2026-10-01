@@ -701,16 +701,26 @@ fn ur_15_every_clock_starts_on_its_lattice() {
     }
 }
 
+/// F4 (design-notes §17): a lost device is marked as such before anything could free
+/// its streamers, so that `UhdDevice` frees neither them nor itself.
+fn assert_marked_lost_before_closed(device: &FakeDevice) {
+    let calls = device.calls();
+    let marked = calls.iter().position(|c| c == "mark_lost").unwrap_or_else(|| panic!("the device was never marked lost: {calls:?}"));
+    assert!(calls.iter().filter(|c| *c == "mark_lost").count() == 1, "{calls:?}");
+    assert!(calls[..marked].iter().all(|c| c != "close_streams"), "closed before it was marked lost: {calls:?}");
+}
+
 #[test]
 fn ur_16_a_panicking_thread_is_a_lost_device() {
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::RxPanic(Wall::from_millis(2_200))], ..FakeConfig::default() });
-    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
     let result = run.run_until_end(after(&run, ms(5_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
     let manifest = run.finish();
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: kind(EventKind::DEVICE_LOST) } });
     assert!(section(&manifest, "rejected").as_array().unwrap().iter().any(|r| r["thread"] == "uhd-rx"));
+    assert_marked_lost_before_closed(&device);
 }
 
 fn wedged(dir: &TempDir) -> (Manifest, Arc<FakeDevice>, Wall) {
@@ -1666,19 +1676,20 @@ fn ur_28_the_device_reports_a_late_burst() {
 fn ur_29_a_lost_device_aborts_the_run() {
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::Lost(Wall::from_millis(2_200))], ..FakeConfig::default() });
-    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
     let result = run.run_until_end(after(&run, ms(5_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
     let manifest = run.finish();
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: kind(EventKind::DEVICE_LOST) } });
     assert_eq!(events_of(&manifest, EventKind::DEVICE_LOST)[0].source, ResourceId::parse("usrp").unwrap());
+    assert_marked_lost_before_closed(&device);
 }
 
 #[test]
 fn ur_29_a_silent_stream_is_a_lost_device() {
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::Silence(Wall::from_millis(2_100))], ..FakeConfig::default() });
-    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
     let begun = Instant::now();
     let result = run.run_until_end(after(&run, ms(8_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
@@ -1689,6 +1700,7 @@ fn ur_29_a_silent_stream_is_a_lost_device() {
     // Within 1 to 2 s of the silence, which begins 2.1 s after the time was set (L14).
     let after_silence = lost.time.ticks - ms(2_100);
     assert!(after_silence >= ms(1_000) && after_silence <= ms(2_000), "{} ms", after_silence / ms(1));
+    assert_marked_lost_before_closed(&device);
 }
 
 #[test]
@@ -1699,12 +1711,13 @@ fn ur_29_a_lost_device_is_found_while_idle() {
     doc["bindings"]["rec"].as_object_mut().unwrap().remove("feed");
     doc.as_object_mut().unwrap().remove("placements");
     doc["bindings"].as_object_mut().unwrap().remove("rec");
-    let mut run = session(&doc, device);
+    let mut run = session(&doc, device.clone());
     past_t0(&mut run, ms(1));
     let result = run.run_until_end(after(&run, ms(5_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
     let manifest = run.finish();
     assert_eq!(events_of(&manifest, EventKind::DEVICE_LOST).len(), 1);
+    assert_marked_lost_before_closed(&device);
 }
 
 // ---------------------------------------------------------------- records (UR-30, UR-31)
@@ -2586,6 +2599,7 @@ impl Device for Watched {
     fn tx_send(&self, s: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, at, sob, eob, t) }
     fn tx_async(&self, t: Wall) -> Option<ezsdr_radio_uhd::TxReport> { self.inner.tx_async(t) }
     fn close_streams(&self) { self.inner.close_streams() }
+    fn mark_lost(&self) { self.inner.mark_lost() }
 }
 
 fn watched() -> (Arc<Watched>, Arc<Mutex<Option<String>>>) {
