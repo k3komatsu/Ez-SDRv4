@@ -1427,3 +1427,38 @@ Thread 1 (Thread 0x7ffff5c6e8c0 (LWP 30) "hardware-4fa4ba"):
 #23 0x00007ffff68ad718 in __libc_start_main_impl (main=0x5555556953a0 <main>, argc=6, argv=0x7fffffffe648, init=<optimized out>, fini=<optimized out>, rtld_fini=<optimized out>, stack_end=0x7fffffffe638) at ../csu/libc-start.c:360
 #24 0x000055555566aef5 in _start ()
 ```
+
+
+### Transmit-only Session — `hw_b9_unplug_transmit_only`, under gdb: **`DEVICE_LOST`, the Session stopped by Policy**
+
+The owner: "準備OK", then pulled the cable at the X300. Started at UTC 1790835523.996 (the transmitter enabled, `radio.rx.channels` 0, nothing sent); the carrier dropped at 1790835547.174. The test's lines, as printed (the whole log: `~/ezsdr-bench/s2-b9/hw_b9_unplug_transmit_only.gdb.log`; the stray `D` before the first `B9` is in the log as printed):
+
+```
+DB9 transmit only: radio.rx.channels 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }
+B9: unplug the cable now (transmit-only Session; up to 300 s); started at UTC 1790835523.996
+B9 transmit only: not running at UTC 1790835553.193 (Err(Ended { termination: Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } } }), CleanedUp { termination: Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } } }); termination Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } }
+B9 transmit only DEVICE_LOST: [Event { source: ResourceId { node: NodeId(0), path: "usrp" }, time: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 6239997161 }, severity: Fatal, kind: EventKind("DEVICE_LOST"), payload: Object {"message": String("uhd_usrp_get_time_now: UHD error 30: EnvironmentError: IOError: send error on socket: Network is unreachable")} }]
+B9 transmit only rejected: []
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 37.08s
+terminate called after throwing an instance of 'uhd::io_error'
+```
+
+- `DEVICE_LOST` from `usrp`, found by UR-29's device time read (`uhd_usrp_get_time_now: UHD error 30: … Network is unreachable` — `UHD_ERROR_IO`, which UR-29 counts as lost); the Session `Stopped { policy { DEVICE_LOST } }`; `finish` returned; nothing in `rejected`.
+- Found not running at UTC …553.193, **6.0 s after the carrier dropped**, against bench.md's "about 1 s": the 500 ms read itself waits out UHD's control timeouts before it returns its error (INFERRED). Recorded, not changed.
+- The process then aborted at exit, as in the receive case — UHD's static map, from `exit` (the main thread's frames 11–22):
+
+```
+#11 0x00007ffff69ba7ac in __GI___clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+#11 0x00007ffff71e5a72 in ctrlport_endpoint_impl::poke32(unsigned int, unsigned int, uhd::time_spec_t, bool) () from /usr/local/lib/libuhd.so.4.10.0
+#12 0x00007ffff798dc11 in x300_radio_control_impl::deinit() () from /usr/local/lib/libuhd.so.4.10.0
+#13 0x00007ffff71c8797 in uhd::rfnoc::noc_block_base::shutdown() () from /usr/local/lib/libuhd.so.4.10.0
+#14 0x00007ffff7178488 in uhd::rfnoc::detail::block_container_t::shutdown() () from /usr/local/lib/libuhd.so.4.10.0
+#15 0x00007ffff71f6824 in rfnoc_graph_impl::~rfnoc_graph_impl() () from /usr/local/lib/libuhd.so.4.10.0
+#16 0x00007ffff70fa8d7 in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release_last_use_cold() () from /usr/local/lib/libuhd.so.4.10.0
+#17 0x00007ffff73737f5 in multi_usrp_rfnoc::~multi_usrp_rfnoc() () from /usr/local/lib/libuhd.so.4.10.0
+#18 0x00007ffff70fa8d7 in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release_last_use_cold() () from /usr/local/lib/libuhd.so.4.10.0
+#19 0x00007ffff73a9d63 in std::map<unsigned long, usrp_ptr, std::less<unsigned long>, std::allocator<std::pair<unsigned long const, usrp_ptr> > >::~map() () from /usr/local/lib/libuhd.so.4.10.0
+#20 0x00007ffff68cb5e1 in __run_exit_handlers (status=0, listp=0x7ffff6a95680 <__exit_funcs>, run_list_atexit=run_list_atexit@entry=true, run_dtors=run_dtors@entry=true) at ./stdlib/exit.c:118
+#21 0x00007ffff68cb6be in __GI_exit (status=<optimized out>) at ./stdlib/exit.c:148
+#22 0x00007ffff68ad608 in __libc_start_call_main (main=main@entry=0x5555556953a0 <main>, argc=argc@entry=6, argv=argv@entry=0x7fffffffe638) at ../sysdeps/nptl/libc_start_call_main.h:83
+```
