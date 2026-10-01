@@ -357,7 +357,9 @@ Python の B7 は同じ container を `-w /bench -e PYTHONPATH=/work/python -e E
 - 記録：design-notes §12–§14，bench-results.md「Session 2」part 4–6，`reviews/review-n.md`・`review-o.md`・`review-p.md`．
 - Review Q → `bd8151c`（D-1：B2 が終了時に double free で 1 回異常終了．`DeviceAuthority` の drop が `uhd-clock` を join していなかった．fake で再現するテストを書いてから修正）．Review R は blocker なし，NB-R1・NB-R2 は記録のみ（owner），NB-R3・TG-R1 は owner の判断待ち（design-notes §16）．
 - **X300 の状態**：B1 の `ref_locked` が part 5 から false になり，ref PLL の lock 失敗が増えた（bench-results.md part 7）．owner が 2026-10-01 に **X300 の電源を落とした**．owner が戻したと言うまで実機は動かさない．
-- 残り：NB-5（受信 cold 変更の lead を TimingEnvelope に出していない，Phase 8 の parity），TG-4・TG-5（以前からのテストの穴），ref PLL の再試行（UR-7），part 7 で通らなかった `hw_b8_cold_change_timing_at_the_extremes` の再実行，B9 の抜線，spike 表，main への merge と Gate X（owner）．
+- X300 は owner が電源を入れ直した（2026-10-01）．その後の全段は合格（part 8）．ref PLL の lock 失敗は open の約 4 %，`ref_locked` とは連動しない．
+- **B9 済み**（part 9）：抜線で X300 がプロセスごと落ちる F4（UHD の radio `deinit` が destructor から例外を投げる，gdb で VERIFIED）を `0c2ae4d` で直した（失われた device は free しない）．その後，受信・送信だけの両方で `DEVICE_LOST` → Policy で停止 → Manifest，ただし `DEVICE_LOST` まで 3–4 s／6.0 s，終了時に UHD の static teardown で abort（UR-29 に記録）．B3–B7 再実行で偽の `DEVICE_LOST` なし．USRP2 は不要（owner）．
+- 残り：NB-5（受信 cold 変更の lead を TimingEnvelope に出していない，Phase 8 の parity），TG-4・TG-5（以前からのテストの穴），ref PLL の再試行（UR-7），`DEVICE_LOST` までの時間（UR-29），F4 の修正のレビュー，spike 表，main への merge と Gate X（owner）．
 
 **5. 決まったこと・owner の判断待ち**
 

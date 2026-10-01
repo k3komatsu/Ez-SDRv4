@@ -469,3 +469,6 @@ The owner: "この推奨でOKです．直してください．その後の実機
 The costs, recorded in UR-29: one leaked device per loss; a process exiting while the link is still down aborts in UHD's static teardown, after its Manifests are written; a kept device may stop the same process from opening it again (INFERRED, not checked). A panicking Provider thread also counts as a loss, so its device is kept though it may be reachable — the conservative side.
 
 **Checks.** `cargo test --workspace` 877 passed on stable and 1.85.0; `--features uhd` 163 passed; clippy `-D warnings` clean with and without `uhd`; B33 killed (153 rows).
+
+**On the bench** (bench-results.md part 9): after the fix both unplugs end as UR-29 requires — `DEVICE_LOST`, the Run or Session stopped by Policy, `finish` returning its Manifest — and the process then aborts at exit in UHD's static teardown, as recorded (gdb: `__run_exit_handlers` → `~map` → `~multi_usrp_rfnoc` → … → `x300_radio_control_impl::deinit` → `poke32`). `DEVICE_LOST` came 3–4 s (receive) and 6.0 s (transmit-only) after the unplug, not "about 1 s": UHD's control timeouts come first. Recorded only; whether to shorten it (UR-29's silence rule, the time read's timeout) is the owner's. B3–B7 again: pass, no false `DEVICE_LOST`.
+

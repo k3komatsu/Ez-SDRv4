@@ -1462,3 +1462,32 @@ terminate called after throwing an instance of 'uhd::io_error'
 #21 0x00007ffff68cb6be in __GI_exit (status=<optimized out>) at ./stdlib/exit.c:148
 #22 0x00007ffff68ad608 in __libc_start_call_main (main=main@entry=0x5555556953a0 <main>, argc=argc@entry=6, argv=argv@entry=0x7fffffffe638) at ../sysdeps/nptl/libc_start_call_main.h:83
 ```
+
+
+### The cable back; B3–B7 again: pass, no false `DEVICE_LOST`
+
+The owner: "挿し直しました"; the carrier came back at UTC 1790835576.815, 29.6 s after it dropped. Then B3–B7 (logs in `~/ezsdr-bench/s2-b9/rerun/`):
+
+```
+hw_b3_receive_at_t0              test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 5.54s
+hw_b4_capture_at_a_sample_index  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 32.57s   (the reference PLL did not lock: UR-7)
+hw_b4_capture_at_a_sample_index  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 4.53s   (rerun)
+hw_b5_overflow                   test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 15.11s
+hw_b6_txrx_and_repeat            test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 8.54s
+hw_b7_session_loopback           test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 5.54s
+```
+
+No log of the five mentions `DEVICE_LOST`.
+
+### B9 in sum
+
+| Expectation (bench.md B9) | Outcome |
+|---|---|
+| `DEVICE_LOST` within about 1 s, receive Run | **3–4 s** after the carrier dropped (UR-29's 1 s silence, behind UHD's control timeouts); recorded, not changed |
+| `DEVICE_LOST` within about 1 s, transmit-only Session | **6.0 s** (the 500 ms time read waits out UHD's timeouts, then `UHD_ERROR_IO`); recorded, not changed |
+| each ending `Stopped { policy { DEVICE_LOST } }` with its Manifest written | yes, both, **after F4's fix** (`0c2ae4d`); before it the process aborted inside `finish` (design-notes §17) |
+| no false `DEVICE_LOST` in the rerun of B3–B7 | none |
+| the USRP2 probe | not run: no USRP2 on this bench; the owner: "USRP2は必要？X300だけじゃだめ？" — not needed for Gate X; its `pp_string` and profile wait for a USRP2 |
+| the UHD error each unplug produced | receive: control timeouts (`x300 fw communication failure #1…#3`), UHD's task loop exiting, then UR-29's silence rule; transmit-only: `uhd_usrp_get_time_now: UHD error 30` (`UHD_ERROR_IO`) |
+
+And what remains, recorded in UR-29: the process aborts at exit in UHD's static teardown while the link is down — after the Manifest, in both cases.
