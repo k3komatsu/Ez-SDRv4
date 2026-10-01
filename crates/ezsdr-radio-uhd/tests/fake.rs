@@ -1504,7 +1504,9 @@ fn ur_25_enabling_tx_applies_the_configuration() {
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     let manifest = run.finish();
     let samples = read_capture(&capture_of(&manifest, "rec"), 1).remove(0);
-    let first = samples.iter().position(|s| wave.contains(s)).expect("the loopback came back");
+    let first = samples.iter().position(|s| wave.contains(s)).unwrap_or_else(|| {
+        panic!("the loopback came back: async {} TIME_ERROR {:?}", section(&manifest, "async"), time_errors(&manifest))
+    });
     assert!(samples[first..].iter().zip(wave.iter().cycle().skip(wave.iter().position(|w| *w == samples[first]).unwrap())).all(|(a, b)| a == b));
 }
 
@@ -2230,6 +2232,37 @@ fn ur_33_a_burst_that_runs_dry_underflows() {
     assert!(codes.contains(&TxCode::Underflow), "{codes:?}");
 }
 
+#[test]
+fn ur_33_a_burst_resumed_after_an_underflow_plays_late() {
+    // UHD 4.10's `radio_tx_core.v`: a burst that runs dry between packets goes idle
+    // (`:359–370`), its next untimed packet plays at once (`:341`, `:347`), and a timed one
+    // whose time has passed is late (`:348–355`). So the rest of the burst is late by the
+    // gap, and a timed start at its scheduled end + 1 sample, before its actual end, is
+    // late. The ticks are the fake's. A host stall only widens the gap.
+    let device = fake(FakeConfig::default());
+    device.set_time_zero(false).unwrap();
+    device.tx_open(1).unwrap();
+    let wave = vec![[0.1f32, 0.0]; 1_000];
+    let rest = vec![[0.2f32, 0.0]; 20_000];
+    let t0 = (device.time_now().unwrap() / 200 + 100_000) * 200;
+    let dry = t0 + 1_000 * 200;
+    device.tx_send(&[&wave], Some(t0), true, false, Wall::from_secs(1)).unwrap();
+    while device.time_now().unwrap() < dry + ms(5) {
+        std::thread::sleep(Wall::from_millis(1));
+    }
+    device.tx_send(&[&rest], None, false, true, Wall::from_secs(1)).unwrap();
+    let resumed = device.time_now().unwrap();
+    let scheduled_end = dry + 20_000 * 200;
+    let b = scheduled_end + 200;
+    device.tx_send(&[&wave], Some(b), true, true, Wall::from_secs(1)).unwrap();
+    let reports = reports_until(&device, resumed + ms(60));
+    let codes: Vec<_> = reports.iter().map(|r| r.code).collect();
+    assert_eq!(codes, [TxCode::Underflow, TxCode::BurstAck, TxCode::TimeError], "{reports:?}");
+    assert_eq!(reports[0].tick, Some(dry), "it ran dry at the end of what it had");
+    assert!(reports[1].tick.unwrap() >= scheduled_end + ms(5), "the rest played late: {reports:?}");
+    assert!(reports[2].tick.unwrap() >= b, "{reports:?}");
+}
+
 /// Captures across `changes` `cold` receive rate changes in one Session on `config`,
 /// alternating `rates`, and for each the old clock's end, the capture's maps and whether
 /// every sample of each map is its own clock's ramp (the fake without a transmitter).
@@ -2413,31 +2446,92 @@ fn ur_29_a_stream_silent_before_a_far_cut_is_a_lost_device() {
 fn ur_23_a_burst_one_sample_after_a_burst_is_played() {
     // Review O, O-B1 (`hw_b8_raw_empty_eob_gap`): the device burst of a burst ending at c
     // must end at c, not a padded sample later, so that a burst at c + 1 is played —
-    // booked before the first's last buffer went out, and after.
+    // booked before the first's last buffer went out, and after. What uhd-tx hands the
+    // device is checked first: a slow host cannot fail it, though it can keep uhd-tx from
+    // holding a last sample back, the path where an empty end-of-burst would show. Then what
+    // the device did with it, which needs the host to keep up. A trial in which a burst was
+    // dropped at booking (booked within the 2 ms device lead) did not set the case up and
+    // is run again, three trials at most; an underflow or a late report at the device
+    // fails it.
     for late_booking in [false, true] {
-        let (mut run, device, _dir) = tx_session(FakeConfig::default());
-        wait(&mut run, ms(1));
-        let a = tx_at(&run, ms(40));
-        let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
-        assert!(admitted(&entry), "{entry:?}");
-        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
-        let a_end = clock.origin.ticks + (a.ticks + 30_000) * clock.root_ticks_per_tick.num() as i64;
-        if late_booking {
-            while run.now().ticks < a_end - ms(8) {
-                wait(&mut run, ms(1) / 4);
+        let mut not_booked = Vec::new();
+        loop {
+            let (mut run, device, _dir) = tx_session(FakeConfig::default());
+            wait(&mut run, ms(1));
+            let a = tx_at(&run, ms(40));
+            let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
+            assert!(admitted(&entry), "{entry:?}");
+            let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
+            let n = clock.root_ticks_per_tick.num() as i64;
+            let a_root = clock.origin.ticks + a.ticks * n;
+            let a_end = a_root + 30_000 * n;
+            if late_booking {
+                while run.now().ticks < a_end - ms(8) {
+                    wait(&mut run, ms(1) / 4);
+                }
             }
+            let b = TimePoint::new(a.domain, a.ticks + 30_001);
+            let entry = send_at(&mut run, "send", Some(b), &tone(1_000));
+            assert!(admitted(&entry), "{entry:?}");
+            wait(&mut run, ms(80));
+            // A host that fell behind may not have handed B over yet: `finish` would cancel it.
+            let horizon = Instant::now() + Wall::from_secs(2);
+            while tx_sends(&device).iter().filter(|s| s.eob).count() < 2 && Instant::now() < horizon {
+                wait(&mut run, ms(1));
+            }
+            let manifest = run.finish();
+            let dropped: Vec<_> = time_errors(&manifest).into_iter().filter(|p| p.outcome == TimeErrorOutcome::Drop).collect();
+            if !dropped.is_empty() {
+                not_booked.push(dropped);
+                assert!(not_booked.len() < 3, "booked late {late_booking}: dropped at booking in every trial: {not_booked:?}");
+                continue;
+            }
+            // Each device burst is its Kernel burst's samples and no more: an empty
+            // end-of-burst would add a zero sample, ending A at c + 1, B's start.
+            let sends = tx_sends(&device);
+            let device_bursts: Vec<&[Sent]> = sends.split_inclusive(|s| s.eob).collect();
+            assert_eq!(device_bursts.len(), 2, "booked late {late_booking}: {sends:?}");
+            for (burst, at, len) in [(device_bursts[0], a_root, 30_000), (device_bursts[1], a_end + n, 1_000)] {
+                assert!(burst[0].sob && burst[0].at == Some(at), "booked late {late_booking}: {sends:?}");
+                assert!(burst[1..].iter().all(|s| !s.sob && s.at.is_none()), "booked late {late_booking}: {sends:?}");
+                assert_eq!(burst.iter().map(|s| s.n).sum::<usize>(), len, "booked late {late_booking}: {sends:?}");
+            }
+            assert_eq!(device.unended_bursts(), 0);
+            // The device's reports, each at its tick from A's end: an underflow a sample before
+            // A's or B's end (-0.001 ms, +1.000 ms) is a held last sample sent too late, one
+            // earlier the host not keeping the burst fed.
+            let reports: Vec<String> = section(&manifest, "async").as_array().unwrap().iter().map(|r| {
+                let at = r["tick"].as_i64().map_or("-".to_owned(), |t| format!("{:+.3} ms", (t - a_end) as f64 / ms(1) as f64));
+                format!("{} {at}", r["code"].as_str().unwrap())
+            }).collect();
+            assert!(!reports.iter().any(|r| r.starts_with("TimeError") || r.starts_with("Underflow")), "booked late {late_booking}: {reports:?} {sends:?}");
+            assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
+            assert_eq!(bursts(&manifest).len(), 2, "{:?}", bursts(&manifest));
+            break;
         }
-        let b = TimePoint::new(a.domain, a.ticks + 30_001);
-        let entry = send_at(&mut run, "send", Some(b), &tone(1_000));
-        assert!(admitted(&entry), "{entry:?}");
-        wait(&mut run, ms(80));
-        let manifest = run.finish();
-        let codes: Vec<_> = section(&manifest, "async").as_array().unwrap().iter().map(|r| r["code"].as_str().unwrap().to_owned()).collect();
-        assert!(!codes.iter().any(|c| c == "TimeError" || c == "Underflow"), "booked late {late_booking}: {codes:?} {:?}", calls(&device, "tx_send"));
-        assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
-        assert_eq!(bursts(&manifest).len(), 2, "{:?}", bursts(&manifest));
-        assert_eq!(device.unended_bursts(), 0);
     }
+}
+
+/// A `tx_send` the fake saw, as its calls record it: `n` counts an empty end-of-burst's
+/// zero sample.
+#[derive(Debug)]
+struct Sent {
+    n: usize,
+    at: Option<i64>,
+    sob: bool,
+    eob: bool,
+}
+
+fn tx_sends(device: &FakeDevice) -> Vec<Sent> {
+    calls(device, "tx_send").iter().map(|c| {
+        let field = |key: &str| c.split_whitespace().find_map(|f| f.strip_prefix(key));
+        Sent {
+            n: field("n=").unwrap().parse().unwrap(),
+            at: field("at=").and_then(|t| t.parse().ok()),
+            sob: field("sob=") == Some("true"),
+            eob: field("eob=") == Some("true"),
+        }
+    }).collect()
 }
 
 #[test]

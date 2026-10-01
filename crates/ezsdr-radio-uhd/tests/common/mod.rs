@@ -531,7 +531,9 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
     if !exact {
         diagnose("B6 burst", &samples, &wave);
     }
-    let at = if exact { exactly(&samples, &wave) } else { correlate(&samples, &wave) }.expect("the burst's correlation peak");
+    let at = if exact { exactly(&samples, &wave) } else { correlate(&samples, &wave) }.unwrap_or_else(|| {
+        panic!("the burst's correlation peak: async {} TIME_ERROR {:?}", section(&heard, "async"), events_of(&heard, "radio.TIME_ERROR"))
+    });
     if exact {
         assert_eq!(at, 0, "the burst at T0 + 10 000 samples is received at sample 10 000");
     }
@@ -547,7 +549,7 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
     let start = if exact { 0 } else { correlate(&samples, &wave).expect("the repeat is heard") };
     for (i, sample) in samples[start..samples.len() - wave.len()].iter().enumerate() {
         if exact {
-            assert_eq!(*sample, wave[i % wave.len()], "sample {i}");
+            assert_eq!(*sample, wave[i % wave.len()], "sample {i}: async {} TIME_ERROR {:?}", section(&looped, "async"), events_of(&looped, "radio.TIME_ERROR"));
         }
     }
     if !exact {
