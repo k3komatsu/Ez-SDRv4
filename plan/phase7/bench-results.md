@@ -1614,3 +1614,13 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; fin
 ```
 
 - Unplugged at UTC 1790839332.037 (the carrier); `DEVICE_LOST` (the receive silence rule) at …333.134, 1.10 s after. One device kept after the loss; the carrier back at …369.748; the device opened again at …373.847 with **no device kept** — the open's `reclaim` read the kept device, found it answering, and freed it; B3 on the reopened device `Stopped { cause: Client }`; and **the process exited normally on the direct cable**, nothing left for UHD's static teardown to reach over a dead link.
+
+
+## Session 2, part 12 — the exit review's UR-31 row (`hw_b3_receive_at_t0`)
+
+The exit review (`plan/phase7/exit-review/`, written after Gate X for criterion 2) found UR-31's `UhdDevice` half carried by nothing: no test asserted that a Run on the real device records real fidelity. `hw_b3_receive_at_t0` now asserts `manifest.run.fidelity`'s five aspects `Real`; run on the X300 (direct cable), log `~/ezsdr-bench/s2-exit/hw_b3_receive_at_t0.log`:
+
+```
+B3 fidelity: Fidelity { timing: Real, continuity: Real, coercion: Real, rf: Real, transport: Real }
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 7.56s
+```

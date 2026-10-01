@@ -92,6 +92,16 @@ fn hw_b3_receive_at_t0() {
     let manifest = rehearse_receive_at_t0(usrp());
     println!("B3 applied: {}", section(&manifest, "applied"));
     println!("B3 timing: {}", section(&manifest, "timing"));
+    // UR-31: a Run on the real device records the device's fidelity, real on every aspect
+    // (the exit review's UR-31 row, 2026-10-01).
+    use ezsdr_kernel::module_api::{CoercionFidelity, EnvelopeFidelity, RfFidelity, TransportFidelity};
+    let fidelity = &manifest.run.fidelity;
+    println!("B3 fidelity: {fidelity:?}");
+    assert_eq!(fidelity.timing, EnvelopeFidelity::Real);
+    assert_eq!(fidelity.continuity, EnvelopeFidelity::Real);
+    assert_eq!(fidelity.coercion, CoercionFidelity::Real);
+    assert_eq!(fidelity.rf, RfFidelity::Real);
+    assert_eq!(fidelity.transport, TransportFidelity::Real);
 }
 
 #[test]
