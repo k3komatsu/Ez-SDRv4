@@ -898,3 +898,49 @@ fn hw_b8_burst_at_a_sent_burst_s_end() {
         assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError" && r["code"] != "Underflow"));
     }
 }
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_b8_raw_empty_eob_gap() {
+    // Review O, O-B1 (INFERRED there): UHD sends an empty end-of-burst as one zero sample
+    // (tx_streamer_impl.hpp:266–276). Does a burst A closed that way, as uhd-tx now closes
+    // every burst a device lead before its end, push the next burst's gap-0 drop
+    // (hw_b8_raw_burst_gap) one sample later? Against A closed with end-of-burst on its
+    // last data buffer, as at bc0db98.
+    let device = raw();
+    raw_tx(&*device, 1e6, 1e9);
+    while device.tx_async(Wall::from_millis(10)).is_some() {}
+    let (a, b) = (iq(&pn(1_000)), iq(&pn(100)));
+    for empty_eob in [true, false] {
+        for gap in [0i64, 1, 2, 3, 5] {
+            let mut outcomes = Vec::new();
+            for _ in 0..4 {
+                let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+                let end = t0 + 1_000 * 200;
+                if empty_eob {
+                    device.tx_send(&[&a], Some(t0), true, false, Wall::from_millis(100)).unwrap();
+                    // As uhd-tx: the end-of-burst a device lead (2 ms) before the end.
+                    while device.time_now().unwrap() < end - 2 * TICKS_PER_MS {
+                        std::thread::sleep(Wall::from_micros(100));
+                    }
+                    let empty: Vec<ezsdr_radio_uhd::Iq> = Vec::new();
+                    device.tx_send(&[&empty], None, false, true, Wall::from_millis(100)).unwrap();
+                } else {
+                    device.tx_send(&[&a], Some(t0), true, true, Wall::from_millis(100)).unwrap();
+                }
+                device.tx_send(&[&b], Some(end + gap * 200), true, true, Wall::from_millis(100)).unwrap();
+                let mut codes = Vec::new();
+                let waited = Instant::now();
+                while waited.elapsed() < Wall::from_millis(150) {
+                    if let Some(report) = device.tx_async(Wall::from_millis(20)) {
+                        codes.push(format!("{:?}", report.code));
+                    }
+                }
+                codes.dedup();
+                outcomes.push(codes.join("+"));
+            }
+            let late = outcomes.iter().filter(|o| o.contains("TimeError")).count();
+            println!("B8 A closed by {}, B at gap {gap} samples: {late}/4 late; {outcomes:?}", if empty_eob { "an empty end-of-burst 2 ms before its end" } else { "end-of-burst on its last data buffer" });
+        }
+    }
+}

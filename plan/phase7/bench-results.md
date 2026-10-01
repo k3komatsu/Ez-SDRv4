@@ -876,3 +876,29 @@ asked: y at {'domain': {'node': 0, 'local': 2}, 'ticks': 411604875}, z at {'doma
 TIME_ERROR events: 0 (spike K6: none)
 Manifest: /bench/ezsdr-runs/session-7-7/manifest.json
 ```
+
+### Review O's O-B1 on the bench — `hw_b8_raw_empty_eob_gap`: **VERIFIED**
+
+Review O inferred that a burst closed by an empty end-of-burst — as uhd-tx closes every burst since `aaf1e00`, a device lead before its end — ends one sample late on the device, because UHD sends an empty send as one zero sample (`tx_streamer_impl.hpp:266–276`), so that a burst one sample after it meets the X300's gap-0 drop. The owner: "推測を実機で確かめてください". On the `Device` itself at 1 Msps (1 GHz, 0 dB, amplitude 0.4, the 30 dB loopback): a 1 000-sample burst A, closed either by an empty end-of-burst 2 ms before its end or by end-of-burst on its last data buffer, then a 100-sample burst B with a timed start-of-burst 0, 1, 2, 3 or 5 samples after A's end, 4 times each:
+
+```
+[UHD printed 134 × "L"] B8 A closed by an empty end-of-burst 2 ms before its end, B at gap 0 samples: 4/4 late; ["BurstAck+TimeError", "BurstAck+TimeError", "BurstAck+TimeError", "BurstAck+TimeError"]
+[UHD printed 134 × "L"] B8 A closed by an empty end-of-burst 2 ms before its end, B at gap 1 samples: 4/4 late; ["BurstAck+TimeError", "BurstAck+TimeError", "BurstAck+TimeError", "BurstAck+TimeError"]
+B8 A closed by an empty end-of-burst 2 ms before its end, B at gap 2 samples: 0/4 late; ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 A closed by an empty end-of-burst 2 ms before its end, B at gap 3 samples: 0/4 late; ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 A closed by an empty end-of-burst 2 ms before its end, B at gap 5 samples: 0/4 late; ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+[UHD printed 128 × "L"] B8 A closed by end-of-burst on its last data buffer, B at gap 0 samples: 4/4 late; ["BurstAck+TimeError", "BurstAck+TimeError", "BurstAck+TimeError", "BurstAck+TimeError"]
+B8 A closed by end-of-burst on its last data buffer, B at gap 1 samples: 0/4 late; ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 A closed by end-of-burst on its last data buffer, B at gap 2 samples: 0/4 late; ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 A closed by end-of-burst on its last data buffer, B at gap 3 samples: 0/4 late; ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+B8 A closed by end-of-burst on its last data buffer, B at gap 5 samples: 0/4 late; ["BurstAck", "BurstAck", "BurstAck", "BurstAck"]
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 28 filtered out; finished in 20.57s
+```
+
+| A closed by | gap 0 | gap 1 | gap 2 | gap 3 | gap 5 |
+|---|---|---|---|---|---|
+| an empty end-of-burst, 2 ms before its end (`aaf1e00`) | 4/4 late | **4/4 late** | 0/4 | 0/4 | 0/4 |
+| end-of-burst on its last data buffer (`bc0db98`) | 4/4 late | 0/4 | 0/4 | 0/4 | 0/4 |
+
+- **O-B1 is real:** the empty end-of-burst moves the device burst's end one sample later, so a burst at gap 1 — played when A's last data buffer carried end-of-burst — is now late and dropped. A regression of `aaf1e00`, open (Review O's recommendation, or another, is the owner's call).
+- Gap 0 is late either way (as `hw_b8_raw_burst_gap`), which is why uhd-tx continues the device burst there.
