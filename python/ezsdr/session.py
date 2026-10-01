@@ -45,6 +45,10 @@ def _rid(path: str) -> dict:
     return {"node": 0, "path": path}
 
 
+def _seconds_to_ns(seconds: float) -> int:
+    return max(0, math.ceil(seconds * 1e9))
+
+
 def _admitted(entry: dict) -> dict:
     if entry["outcome"]["kind"] != "admitted":
         raise Rejected(entry)
@@ -190,7 +194,7 @@ class Rx(_Side):
         if timeout is None:
             timeout = n / float(self.sample_rate) + 1.0
         source = _rid(f"sink/{handle.recorder}")
-        wait = {"within_ns": max(0, math.ceil(timeout * 1e9))}
+        wait = {"within_ns": _seconds_to_ns(timeout)}
         while True:
             request = {"op": "wait_for", "kinds": [CAPTURE_WRITTEN, REQUEST_REJECTED], "from": start}
             result, _ = self._session._call({**request, **wait})
@@ -313,7 +317,7 @@ class Session:
     def sleep(self, seconds: float) -> dict:
         """``run.wait_until(now + seconds)`` in the Run's time (Vision §54); never
         ``time.sleep``. Returns the instant the Run stands at (EA-16, VE-6)."""
-        return self._call({"op": "advance", "by_ns": max(0, math.ceil(seconds * 1e9))})[0]["now"]
+        return self._call({"op": "advance", "by_ns": _seconds_to_ns(seconds)})[0]["now"]
 
     def wait_until(self, t: dict) -> dict:
         """Advances the Run to the ``TimePoint`` ``t`` (Vision §15) and returns the instant
@@ -324,7 +328,7 @@ class Session:
         """Waits, in Run time, for the next event of one of ``kinds`` that this method has not
         yet returned (Vision §15); returns it, or ``None`` after ``timeout`` seconds."""
         result, _ = self._call(
-            {"op": "wait_for", "kinds": list(kinds), "from": self._waited, "within_ns": max(0, math.ceil(timeout * 1e9))}
+            {"op": "wait_for", "kinds": list(kinds), "from": self._waited, "within_ns": _seconds_to_ns(timeout)}
         )
         if result["index"] is None:
             return None
@@ -426,7 +430,7 @@ class Session:
         if profile is not None:
             request["profile"] = profile
         if duration is not None:
-            request["duration_ns"] = max(0, math.ceil(duration * 1e9))
+            request["duration_ns"] = _seconds_to_ns(duration)
         result, _ = self._call(request, b"".join(data for _, data in pairs))
         entry = _admitted(result["entry"])
         return RunResult(self, entry, result["manifest"], result["path"])

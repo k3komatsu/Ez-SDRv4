@@ -112,7 +112,7 @@
  {
   "id": "D12",
   "name": "HD-15 global index written as the file index",
-  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "file": "crates/ezsdr-sink-capture/src/sigmf.rs",
   "old": "        Ok(serde_json::json!({ \"core:sample_start\": file_index(tick)?, \"core:global_index\": tick }))",
   "new": "        Ok(serde_json::json!({ \"core:sample_start\": file_index(tick)?, \"core:global_index\": file_index(tick)? }))",
   "crate": "ezsdr-sink-capture",
@@ -122,7 +122,7 @@
  {
   "id": "D13",
   "name": "HD-15 global index written as the file index, end to end",
-  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "file": "crates/ezsdr-sink-capture/src/sigmf.rs",
   "old": "        Ok(serde_json::json!({ \"core:sample_start\": file_index(tick)?, \"core:global_index\": tick }))",
   "new": "        Ok(serde_json::json!({ \"core:sample_start\": file_index(tick)?, \"core:global_index\": file_index(tick)? }))",
   "crate": "ezsdr-acceptance",
@@ -132,7 +132,7 @@
  {
   "id": "D14",
   "name": "HD-15 the file index ignores earlier gaps",
-  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "file": "crates/ezsdr-sink-capture/src/sigmf.rs",
   "old": "        u64::try_from(tick - first - skipped)",
   "new": "        u64::try_from(tick - first + 0 * skipped)",
   "crate": "ezsdr-sink-capture",
@@ -152,7 +152,7 @@
  {
   "id": "D16",
   "name": "HD-15 sc16 as cf32_le",
-  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "file": "crates/ezsdr-sink-capture/src/sigmf.rs",
   "old": "        SC16_CONTRACT => \"ci16_le\",",
   "new": "        SC16_CONTRACT => \"cf32_le\",",
   "crate": "ezsdr-sink-capture",
@@ -162,7 +162,7 @@
  {
   "id": "D17",
   "name": "HD-15 no channel annotations",
-  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "file": "crates/ezsdr-sink-capture/src/sigmf.rs",
   "old": "        .map(|g| Ok((file_index(g.start.ticks)?, g)))",
   "new": "        .take(0)\n        .map(|g| Ok((file_index(g.start.ticks)?, g)))",
   "crate": "ezsdr-sink-capture",
@@ -252,7 +252,7 @@
  {
   "id": "D26",
   "name": "HD-15 annotations not sorted",
-  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "file": "crates/ezsdr-sink-capture/src/sigmf.rs",
   "old": "    channel_gaps.sort_by_key(|(index, g)| (*index, g.channel));\n",
   "new": "",
   "crate": "ezsdr-sink-capture",
@@ -262,7 +262,7 @@
  {
   "id": "D27",
   "name": "HD-15 an empty run gets a capture segment",
-  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "file": "crates/ezsdr-sink-capture/src/sigmf.rs",
   "old": "    if i128::from(map.end.ticks) > run_start {",
   "new": "    if i128::from(map.end.ticks) >= run_start {",
   "crate": "ezsdr-sink-capture",
@@ -282,7 +282,7 @@
  {
   "id": "D29",
   "name": "HD-15 a gap's lost written as its len",
-  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "file": "crates/ezsdr-sink-capture/src/sigmf.rs",
   "old": "                \"lost\": gap.lost,",
   "new": "                \"lost\": gap.len,",
   "crate": "ezsdr-sink-capture",
@@ -292,7 +292,7 @@
  {
   "id": "D30",
   "name": "HD-15 a gap's link_dropped written as 0",
-  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "file": "crates/ezsdr-sink-capture/src/sigmf.rs",
   "old": "                \"link_dropped\": gap.link_dropped,",
   "new": "                \"link_dropped\": 0,",
   "crate": "ezsdr-sink-capture",
@@ -302,7 +302,7 @@
  {
   "id": "D31",
   "name": "HD-15 a negative file index clamped instead of refused",
-  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "file": "crates/ezsdr-sink-capture/src/sigmf.rs",
   "old": "        u64::try_from(tick - first - skipped)",
   "new": "        u64::try_from((tick - first - skipped).max(0))",
   "crate": "ezsdr-sink-capture",

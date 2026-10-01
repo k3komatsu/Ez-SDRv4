@@ -162,6 +162,13 @@ struct PendingUpdate {
     class: UpdateClass,
 }
 
+#[derive(Clone, Copy)]
+enum WorkKind {
+    Fault { index: usize },
+    HeldBurst { start: i64 },
+    Update,
+}
+
 impl MockRadio {
     /// Constructs a Mock Provider from a binding, rejecting unsupported content (MR-2).
     pub fn from_binding(binding: &Binding) -> Result<MockRadio, ModuleError> {
@@ -1463,40 +1470,66 @@ impl Provider for MockRadio {
             }
         }
         loop {
-            let mut candidates: Vec<(i64, u64, u8, i64)> = if self.started {
-                self.faults.iter().enumerate()
+            let mut candidates: Vec<(i64, u64, WorkKind)> = if self.started {
+                self.faults
+                    .iter()
+                    .enumerate()
                     .filter(|(_, fault)| !fault.resolved)
-                    .map(|(index, fault)| (fault.tick, fault.order, 0, index as i64)).collect()
+                    .map(|(index, fault)| (fault.tick, fault.order, WorkKind::Fault { index }))
+                    .collect()
             } else {
                 Vec::new()
             };
             candidates.extend(self.held.iter().filter_map(|(start, burst)| {
-                let tick = time::v_of(self.tx_origin?, self.tx_handle.as_ref()?.root_ticks_per_tick, *start)?;
-                Some((tick, burst.order, 1, *start))
+                let tick = time::v_of(
+                    self.tx_origin?,
+                    self.tx_handle.as_ref()?.root_ticks_per_tick,
+                    *start,
+                )?;
+                Some((tick, burst.order, WorkKind::HeldBurst { start: *start }))
             }));
-            candidates.extend(self.updates.keys().map(|(tick, order)| (*tick, *order, 2, 0)));
-            candidates.sort_by_key(|(tick, order, _, _)| (*tick, *order));
-            let Some((tick, order, kind, value)) = candidates.first().copied() else { break; };
-            if tick > u { break; }
+            candidates.extend(
+                self.updates
+                    .keys()
+                    .map(|(tick, order)| (*tick, *order, WorkKind::Update)),
+            );
+            candidates.sort_by_key(|(tick, order, _)| (*tick, *order));
+            let Some((tick, order, kind)) = candidates.first().copied() else {
+                break;
+            };
+            if tick > u {
+                break;
+            }
             if self.started {
                 let _ = self.emit_rx_until(tick)?;
                 let _ = self.emit_tx_until(tick, None)?;
             }
-            if kind == 0 {
-                let index = value as usize;
-                if matches!(self.faults[index].entry.fault, FaultKind::RxOverflow | FaultKind::RxSequenceError) {
-                    self.apply_rx_fault(index)?;
-                } else {
-                    self.faults[index].applied = true;
-                    self.faults[index].resolved = true;
-                    self.record_fault(index, 0);
+            match kind {
+                WorkKind::Fault { index } => {
+                    if matches!(
+                        self.faults[index].entry.fault,
+                        FaultKind::RxOverflow | FaultKind::RxSequenceError
+                    ) {
+                        self.apply_rx_fault(index)?;
+                    } else {
+                        self.faults[index].applied = true;
+                        self.faults[index].resolved = true;
+                        self.record_fault(index, 0);
+                    }
                 }
-            } else if kind == 1 {
-                if let Some(held) = self.held.remove(&value) {
-                    self.open_tx = Some(OpenBurst { start: held.start, len: held.len, repeat: held.repeat, next: held.start, first: true, open: held.open });
+                WorkKind::HeldBurst { start } => {
+                    if let Some(held) = self.held.remove(&start) {
+                        self.open_tx = Some(OpenBurst {
+                            start: held.start,
+                            len: held.len,
+                            repeat: held.repeat,
+                            next: held.start,
+                            first: true,
+                            open: held.open,
+                        });
+                    }
                 }
-            } else {
-                self.apply_update(tick, order)?;
+                WorkKind::Update => self.apply_update(tick, order)?,
             }
             progressed = true;
         }

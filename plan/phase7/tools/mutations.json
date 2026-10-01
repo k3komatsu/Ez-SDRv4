@@ -437,8 +437,8 @@
   "id": "V10",
   "name": "sleep returns None",
   "file": "python/ezsdr/session.py",
-  "old": "        return self._call({\"op\": \"advance\", \"by_ns\": max(0, math.ceil(seconds * 1e9))})[0][\"now\"]",
-  "new": "        self._call({\"op\": \"advance\", \"by_ns\": max(0, math.ceil(seconds * 1e9))})",
+  "old": "        return self._call({\"op\": \"advance\", \"by_ns\": _seconds_to_ns(seconds)})[0][\"now\"]",
+  "new": "        self._call({\"op\": \"advance\", \"by_ns\": _seconds_to_ns(seconds)})",
   "python": "test_easy_api.EasyApi.test_sleep_returns_the_instant"
  },
  {

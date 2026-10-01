@@ -1126,6 +1126,63 @@ fn mr_19_backpressure_is_an_overrun() {
 }
 
 #[test]
+fn mr_09_same_tick_work_keeps_insertion_order() {
+    // The fault was inserted at prepare, before the two cold updates and the burst.
+    // Turning RX off first would record the fault as unapplied; reversing the
+    // updates would leave RX off. TX still plays the held burst at the same tick.
+    let env = [(
+        "sim.faults",
+        serde_json::json!([
+            { "at_ns": 5_000_000, "fault": "rx_sequence_error", "target": "radio" }
+        ]),
+    )];
+    let mut harness = Harness::new(
+        "x310-like",
+        &[("radio.tx.channels", eq(Value::Int(1)))],
+        &[],
+        &env,
+        Some((BackPressure::DropOldest, 16)),
+    );
+    harness.arm_start(2_000_000_000).unwrap();
+    let at = TimePoint::new(ROOT, 2_005_000_000);
+    for channels in [0, 1] {
+        harness.actions.push(update_action(
+            "radio.rx.channels",
+            Value::Int(channels),
+            UpdateClass::Cold,
+            Some(at),
+        ));
+    }
+    harness.actions.push(tx_action(
+        tx_domain(&harness),
+        2_005_000,
+        2,
+        false,
+        LatePolicy::SendAsapAndFlag,
+    ));
+    harness.step(2_000_000_000).unwrap();
+    harness.step(at.ticks + 2_000_000).unwrap();
+    let instance = harness.mock.instance();
+    let faults = &instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.faults").unwrap()];
+    assert_eq!(faults.as_array().unwrap().len(), 1);
+    assert_eq!(faults[0]["applied"], true);
+    assert_eq!(faults[0]["lost"], 2_000);
+    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()];
+    assert_eq!(applied.as_array().unwrap().len(), 2);
+    assert_eq!(applied[0]["value"], 0);
+    assert_eq!(applied[1]["value"], 1);
+    assert_eq!(applied[0]["at"]["ticks"], at.ticks);
+    assert_eq!(applied[1]["at"]["ticks"], at.ticks);
+    let bursts = &instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.bursts").unwrap()];
+    let records: Vec<ezsdr_kernel::stream::BurstRecord> =
+        serde_json::from_value(bursts.clone()).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].target.ticks, 2_005_000);
+    assert_eq!(records[0].samples, 2);
+    assert!(harness.link.as_ref().unwrap().queued() > 0);
+}
+
+#[test]
 fn mr_20_faults_fire_at_their_instants() {
     let env = [("sim.faults", serde_json::json!([
         { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },

@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import Mock
 from pathlib import Path
 
 import numpy as np
@@ -373,6 +374,72 @@ class EasyApi(unittest.TestCase):
                 cwd=self.runs, env=env, capture_output=True, text=True, timeout=300,
             )
             self.assertEqual(done.returncode, 0, f"{example}: {done.stderr}")
+
+
+class DurationRequests(unittest.TestCase):
+    """Characterize seconds-to-nanoseconds at the four request boundaries (RF-001)."""
+
+    def session(self, reply: dict) -> ezsdr.Session:
+        connection = Mock()
+        connection.call.return_value = (reply, b"")
+        return ezsdr.Session(connection, {
+            "run": "test", "dir": "", "profile": {}, "start_instant": {}, "now": {},
+        })
+
+    def callers(self, sdr: ezsdr.Session, seconds: float) -> dict:
+        handle = ezsdr.session.CaptureRequest("rec", 0, 1, 0, {})
+        return {
+            "sleep": lambda: sdr.sleep(seconds),
+            "wait_for": lambda: sdr.wait_for(["test.EVENT"], seconds),
+            "run": lambda: sdr.run({}, duration=seconds),
+            "capture": lambda: ezsdr.session.Rx(sdr, "radio", "rx").result(handle, seconds),
+        }
+
+    def test_durations_round_up_and_clamp_at_each_caller(self) -> None:
+        reply = {"now": {}, "index": None, "entry": {"outcome": {"kind": "admitted"}}, "manifest": {}, "path": ""}
+        for seconds, expected in [(-1.0, 0), (0.0, 0), (1e-12, 1), (1e-9, 1), (1.0000000001e-9, 2)]:
+            for caller, field in [("sleep", "by_ns"), ("wait_for", "within_ns"), ("run", "duration_ns"), ("capture", "within_ns")]:
+                with self.subTest(seconds=seconds, caller=caller):
+                    sdr = self.session(reply)
+                    call = self.callers(sdr, seconds)[caller]
+                    if caller == "capture":
+                        with self.assertRaises(ezsdr.CaptureTimeout):
+                            call()
+                    else:
+                        call()
+                    sdr._connection.call.assert_called_once()
+                    request = sdr._connection.call.call_args.args[0]
+                    self.assertEqual(request[field], expected)
+
+    def test_nonfinite_durations_fail_before_a_request(self) -> None:
+        for seconds, error in [(float("nan"), ValueError), (float("inf"), OverflowError), (-float("inf"), OverflowError), (1e308, OverflowError)]:
+            for caller in ["sleep", "wait_for", "run", "capture"]:
+                with self.subTest(seconds=seconds, caller=caller):
+                    sdr = self.session({})
+                    with self.assertRaises(error):
+                        self.callers(sdr, seconds)[caller]()
+                    sdr._connection.call.assert_not_called()
+
+    def test_a_child_without_duration_omits_the_field(self) -> None:
+        sdr = self.session({"entry": {"outcome": {"kind": "admitted"}}, "manifest": {}, "path": ""})
+        sdr.run({})
+        self.assertEqual(sdr._connection.call.call_args.args[0], {"op": "run_child", "spec": {}, "inputs": []})
+
+    def test_capture_waits_again_with_the_first_horizon(self) -> None:
+        sdr = self.session({})
+        horizon = {"domain": {"node": 0, "path": "clock"}, "ticks": 12}
+        sdr._connection.call.side_effect = [
+            ({"index": 3, "horizon": horizon, "event": {"source": {"node": 0, "path": "sink/other"}, "payload": {"request": 0}}}, b""),
+            ({"index": None}, b""),
+        ]
+        handle = ezsdr.session.CaptureRequest("rec", 0, 1, 2, {})
+        with self.assertRaises(ezsdr.CaptureTimeout):
+            ezsdr.session.Rx(sdr, "radio", "rx").result(handle, 1e-12)
+        requests = [call.args[0] for call in sdr._connection.call.call_args_list]
+        self.assertEqual(requests, [
+            {"op": "wait_for", "kinds": [ezsdr.session.CAPTURE_WRITTEN, ezsdr.session.REQUEST_REJECTED], "from": 2, "within_ns": 1},
+            {"op": "wait_for", "kinds": [ezsdr.session.CAPTURE_WRITTEN, ezsdr.session.REQUEST_REJECTED], "from": 4, "until": horizon},
+        ])
 
 
 if __name__ == "__main__":

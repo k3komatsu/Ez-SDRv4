@@ -212,7 +212,7 @@
  {
   "id": "F22",
   "name": "EA-2 body_bytes not checked against the stream",
-  "file": "crates/ezsdr-server/src/lib.rs",
+  "file": "crates/ezsdr-server/src/transport.rs",
   "old": ".is_ok_and(|n| n as u64 == body_bytes);",
   "new": ".is_ok();",
   "crate": "ezsdr-server",
@@ -295,8 +295,8 @@
   "id": "P04",
   "name": "EA-16 sleep converts seconds wrongly",
   "file": "python/ezsdr/session.py",
-  "old": "self._call({\"op\": \"advance\", \"by_ns\": max(0, math.ceil(seconds * 1e9))})",
-  "new": "self._call({\"op\": \"advance\", \"by_ns\": max(0, math.ceil(seconds * 1e6))})",
+  "old": "return max(0, math.ceil(seconds * 1e9))",
+  "new": "return max(0, math.ceil(seconds * 1e6))",
   "python": "test_easy_api.EasyApi.test_v54_sleep_is_run_time"
  },
  {
@@ -327,7 +327,7 @@
   "id": "P08",
   "name": "EA-16 run does not pass the duration",
   "file": "python/ezsdr/session.py",
-  "old": "            request[\"duration_ns\"] = max(0, math.ceil(duration * 1e9))",
+  "old": "            request[\"duration_ns\"] = _seconds_to_ns(duration)",
   "new": "            pass",
   "python": "test_easy_api.EasyApi.test_v54_a_sweep_of_child_runs"
  },
@@ -454,7 +454,7 @@
  {
   "id": "G13",
   "name": "EA-5 an undecodable request ends the Session",
-  "file": "crates/ezsdr-server/src/lib.rs",
+  "file": "crates/ezsdr-server/src/transport.rs",
   "old": "                if !server.greeted() {\n                    return Ok(Exit::BadFrame);\n                }\n                continue;",
   "new": "                server.disconnect();\n                return Ok(Exit::BadFrame);",
   "crate": "ezsdr-server",
@@ -568,7 +568,7 @@
  {
   "id": "G18",
   "name": "EA-3 an undecodable first frame does not end the handshake",
-  "file": "crates/ezsdr-server/src/lib.rs",
+  "file": "crates/ezsdr-server/src/transport.rs",
   "old": "                if !server.greeted() {\n                    return Ok(Exit::BadFrame);\n                }\n",
   "new": "",
   "crate": "ezsdr-server",
