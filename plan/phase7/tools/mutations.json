@@ -533,11 +533,13 @@
   "id": "U07",
   "name": "the device's time zeroed before its sources are set",
   "file": "crates/ezsdr-radio-uhd/src/authority.rs",
-  "old": "        device.set_sources(clock_source, time_source).map_err(|e| format!(\"UR-7: {e}\"))?;\n        let pps = time_source != \"internal\";\n        device.set_time_zero(pps).map_err(|e| format!(\"UR-7: {e}\"))?;",
-  "new": "        let pps = time_source != \"internal\";\n        device.set_time_zero(pps).map_err(|e| format!(\"UR-7: {e}\"))?;\n        device.set_sources(clock_source, time_source).map_err(|e| format!(\"UR-7: {e}\"))?;",
+  "old": "        device.set_sources(clock_source, time_source).map_err(|e| {",
+  "new": "        device.set_time_zero(time_source != \"internal\").map_err(|e| format!(\"UR-7: {e}\"))?;\n        device.set_sources(clock_source, time_source).map_err(|e| {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_07_the_time_is_set_at_the_next_pps_with_an_external_source"
+  "filter": "ur_07_the_time_is_set_at_the_next_pps_with_an_external_source",
+  "old2": "        device.set_time_zero(pps).map_err(|e| format!(\"UR-7: {e}\"))?;",
+  "new2": ""
  },
  {
   "id": "U08",
@@ -893,7 +895,7 @@
   "id": "U43",
   "name": "the idle device time read removed",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "        match self.core.device.time_now() {\n            Ok(_) => {}\n            Err(error) if error.lost => self.core.device_lost(&error.message),\n            Err(error) => self.core.timing(json!({ \"what\": \"time_read_failed\", \"error\": error.message })),\n        }\n",
+  "old": "        let begun = Instant::now();\n        match self.core.device.time_now() {\n            Ok(_) => self.failing_since = None,\n            Err(error) if error.lost => self.core.device_lost(&error.message),\n            Err(error) => {\n                self.core.timing(json!({ \"what\": \"time_read_failed\", \"error\": error.message }));\n                let since = *self.failing_since.get_or_insert(begun);\n                if since.elapsed() >= FAILING_FOR {\n                    self.core.device_lost(&format!(\"UR-29: the device time reads have failed for 1 s: {}\", error.message));\n                }\n            }\n        }\n",
   "new": "",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
