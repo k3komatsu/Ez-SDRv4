@@ -521,8 +521,8 @@ The re-review ([`reviews/review-t.md`](reviews/review-t.md)): no blockers; every
 | TG-T1 (P2) | Done: `FakeFault::TimeReadFailsFor(at, length)` — a window, since the Authority's own 100 ms reads would use up a one-shot failure before uhd-control's 500 ms read came (the first try, which failed) —; `ur_29_time_reads_that_fail_apart_are_not_a_lost_device`; B39 killed. |
 | NB-T3 (P2) | Fixed: `reclaim` takes its `args`' entries out of `KEPT`, reads them without the lock, and puts back those that do not answer. |
 | NB-T4 (P2) | Fixed: a process-wide list of live `args` (pushed by `open`, removed by `drop`); `reclaim` frees nothing while one of its `args` lives. |
-| TG-T2 (P2) | `ezsdr_radio_uhd::uhd_kept_count()`; `hw_b9_unplug_and_reopen` prints it after the loss and after the reopen (expected 1, then 0). Bench. |
-| TG-T3 (P2) | The transmit-only unplug on the direct cable again, with the 1 s rule. Bench. |
+| TG-T2 (P2) | Done: `ezsdr_radio_uhd::uhd_kept_count()`; on the bench (part 11) `hw_b9_unplug_and_reopen` printed 1 after the loss and 0 after the reopen — `reclaim` freed the kept device — and the process exited normally on the direct cable. |
+| TG-T3 (P2) | Done (part 11): on the direct cable the 1 s rule found the transmit-only unplug in 3.0 s (`UHD error 47`), against 5.8–6.0 s before it — the same as through the switch. With the cable still out at exit, the process aborted in UHD's static teardown after its Manifest, as UR-29 records. |
 | NB-T2, NB-T5…NB-T8 | Checked, recorded; no change. |
 
 **Checks.** `cargo test --workspace` 885 passed on stable and 1.85.0; `--features uhd` 171 passed; clippy clean with and without `uhd`. NB-T3, NB-T4 and `uhd_kept_count` are in `uhd.rs`, which has no fake: the bench sees them.

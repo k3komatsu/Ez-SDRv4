@@ -1553,3 +1553,64 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; fin
 
 - Unplugged at UTC 1790837794.584 (the last ping reply); `DEVICE_LOST` (the receive silence rule) at …795.687, **1.10 s** after it. Plugged back at …830.866 (the first reply, 36.3 s out); the device opened again at …834.406 — the test's open retried every 2 s, each try's `reclaim` reading the kept device's time and timing out while the cable was out (the `Control operation timed out` errors, 14) —; B3 on it ended `Stopped { cause: Client }`; the process exited normally.
 - Not observed: whether that open freed the kept device first (NB-S2's `reclaim`) or left it to the exit — nothing prints the list, and through the switch the exit is normal either way.
+
+
+## Session 2, part 11 — Review T's fixes on the direct cable (`1d3f382`)
+
+The owner: "推奨通り直してください．また，スイッチを外して直結しました". The cable direct again, B1 passing (`Maximum frame size: 8000 bytes`); the host's carrier (`carrier.log`) and a 10 ms ping (`ping.log`) logged with the host's UTC. Logs in `~/ezsdr-bench/s2-direct2/`.
+
+```
+1790839158.017700164 carrier=1 (start)
+1790839237.133303993 carrier=0
+1790839274.431576502 carrier=1
+1790839332.037028202 carrier=0
+1790839369.748483636 carrier=1
+```
+
+### Transmit-only Session — `hw_b9_unplug_transmit_only` (Review T, TG-T3)
+
+```
+B9 transmit only: radio.rx.channels 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }
+B9: unplug the cable now (transmit-only Session; up to 300 s); started at UTC 1790839216.946
+B9 transmit only: not running at UTC 1790839241.135 (Err(Ended { termination: Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } } }), CleanedUp { termination: Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } } }); termination Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } }
+B9 transmit only DEVICE_LOST: [Event { source: ResourceId { node: NodeId(0), path: "usrp" }, time: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 5038880066 }, severity: Fatal, kind: EventKind("DEVICE_LOST"), payload: Object {"message": String("UR-29: the device time reads have failed for 1 s: uhd_usrp_get_time_now: UHD error 47: RfnocError: OpTimeout: Control operation ti
+B9 transmit only DEVICE_LOST at UTC 1790839240.133
+B9 transmit only rejected: []
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 37.51s
+terminate called after throwing an instance of 'uhd::io_error'
+	Inferior 1 [process 30] will be killed.
+```
+
+- The carrier dropped at UTC 1790839237.133 (the last ping reply …237.124); **`DEVICE_LOST` at …240.133, 3.0 s after**, by the 1 s time-read rule with `UHD error 47` — before the OS's `ENETUNREACH`, which found it in 5.8–6.0 s before the rule (part 9). The same 3.0 s as through the switch (part 10).
+- Stopped by Policy, its Manifest returned; then, the cable still out, the process aborted at exit in UHD's static teardown, as UR-29 records — the main thread's frames 11–22:
+
+```
+#11 0x00007ffff71e5a72 in ctrlport_endpoint_impl::poke32(unsigned int, unsigned int, uhd::time_spec_t, bool) () from /usr/local/lib/libuhd.so.4.10.0
+#12 0x00007ffff798dc11 in x300_radio_control_impl::deinit() () from /usr/local/lib/libuhd.so.4.10.0
+#13 0x00007ffff71c8797 in uhd::rfnoc::noc_block_base::shutdown() () from /usr/local/lib/libuhd.so.4.10.0
+#14 0x00007ffff7178488 in uhd::rfnoc::detail::block_container_t::shutdown() () from /usr/local/lib/libuhd.so.4.10.0
+#15 0x00007ffff71f6824 in rfnoc_graph_impl::~rfnoc_graph_impl() () from /usr/local/lib/libuhd.so.4.10.0
+#16 0x00007ffff70fa8d7 in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release_last_use_cold() () from /usr/local/lib/libuhd.so.4.10.0
+#17 0x00007ffff73737f5 in multi_usrp_rfnoc::~multi_usrp_rfnoc() () from /usr/local/lib/libuhd.so.4.10.0
+#18 0x00007ffff70fa8d7 in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release_last_use_cold() () from /usr/local/lib/libuhd.so.4.10.0
+#19 0x00007ffff73a9d63 in std::map<unsigned long, usrp_ptr, std::less<unsigned long>, std::allocator<std::pair<unsigned long const, usrp_ptr> > >::~map() () fro
+#20 0x00007ffff68cb5e1 in __run_exit_handlers (status=0, listp=0x7ffff6a95680 <__exit_funcs>, run_list_atexit=run_list_atexit@entry=true, run_dtors=run_dtors@en
+#21 0x00007ffff68cb6be in __GI_exit (status=<optimized out>) at ./stdlib/exit.c:148
+#22 0x00007ffff68ad608 in __libc_start_call_main (main=main@entry=0x555555696790 <main>, argc=argc@entry=6, argv=argv@entry=0x7fffffffe638) at ../sysdeps/nptl/l
+```
+
+### `hw_b9_unplug_and_reopen` (Review T, TG-T2): **`reclaim` frees the kept device**
+
+```
+B9: unplug the cable now (receive Run; up to 300 s); started at UTC 1790839304.915
+B9 reopen: not running at UTC 1790839336.046 (Err(Ended { termination: Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } } }), CleanedUp { termination: Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } } }); termination Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } }; DEVICE_LOST at UTC 1790839333.134
+B9 reopen: devices kept after the loss: 1
+B9: plug the cable back in now (waiting up to 300 s for the device); at UTC 1790839337.046
+B9 reopen: opened again at UTC 1790839373.847; devices kept now: 0 (Review T, TG-T2: 1 before, 0 once the open's reclaim freed it)
+DB9 reopen: B3 on the reopened device: termination Stopped { cause: Client }
+B9 reopen: the process exits next, at UTC 1790839376.195
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 81.83s
+[Inferior 1 (process 30) exited normally]
+```
+
+- Unplugged at UTC 1790839332.037 (the carrier); `DEVICE_LOST` (the receive silence rule) at …333.134, 1.10 s after. One device kept after the loss; the carrier back at …369.748; the device opened again at …373.847 with **no device kept** — the open's `reclaim` read the kept device, found it answering, and freed it; B3 on the reopened device `Stopped { cause: Client }`; and **the process exited normally on the direct cable**, nothing left for UHD's static teardown to reach over a dead link.
