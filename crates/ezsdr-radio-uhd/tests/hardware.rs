@@ -968,8 +968,8 @@ fn hw_b8_cold_change_timing_at_the_extremes() {
             wait(&mut run, ms(500));
             let manifest = run.finish();
             let timing = section(&manifest, "timing").as_array().unwrap().clone();
-            let change = timing.iter().filter(|r| r["what"] == "cold_change").last().cloned().unwrap();
-            let switch = timing.iter().filter(|r| r["what"] == "rx_switch").last().cloned().unwrap();
+            let change = timing.iter().rfind(|r| r["what"] == "cold_change").cloned().unwrap();
+            let switch = timing.iter().rfind(|r| r["what"] == "rx_switch").cloned().unwrap();
             let stop = timing.iter().find(|r| r["what"] == "rx_stop_untimed" && r["cut"] == change["e1"]).cloned();
             let (booked, e1, e2) = (change["booked_at"].as_i64().unwrap(), change["e1"].as_i64().unwrap(), change["e2"].as_i64().unwrap());
             let n_old = (200e6 / from) as i64;
