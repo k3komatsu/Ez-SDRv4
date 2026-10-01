@@ -115,17 +115,37 @@ pub fn assemble(
                 let Some(Value::Str(args)) = binding.selector.get(&Ident::parse("args").expect("a selector key")) else {
                     return Err(format!("EA-7: {name}: UR-5: the selector needs `args`"));
                 };
-                let device = match open_device {
-                    Some(open) => open(args),
-                    None => open_uhd(args),
-                }
-                .map_err(|e| if e.starts_with("EA-7") { e } else { built(&e) })?;
-                let radio = ezsdr_radio_uhd::UhdRadio::from_binding(binding, device.clone()).map_err(|e| built(&e))?;
-                providers.insert(name.clone(), Box::new(radio));
-                if *name == profile.authority {
-                    let time = ezsdr_radio_uhd::DeviceAuthority::new(device, clocks.clone(), &selector("clock_source"), &selector("time_source"), args)
-                        .map_err(|e| built(&e))?;
-                    authority = Some(Box::new(time));
+                // UR-7's reopen (design-notes §18): an Authority refused because the X300's
+                // reference PLL did not lock is built again once on a new open of the device,
+                // unless the binding's `reopen_on_unlock` is false; a second refusal stands.
+                let reopen = !matches!(binding.selector.get(&Ident::parse("reopen_on_unlock").expect("a selector key")), Some(Value::Bool(false)));
+                let mut first_error: Option<String> = None;
+                loop {
+                    let device = match open_device {
+                        Some(open) => open(args),
+                        None => open_uhd(args),
+                    }
+                    .map_err(|e| if e.starts_with("EA-7") { e } else { built(&e) })?;
+                    let mut radio = ezsdr_radio_uhd::UhdRadio::from_binding(binding, device.clone()).map_err(|e| built(&e))?;
+                    if let Some(error) = &first_error {
+                        radio = radio.with_reopened(error.clone());
+                    }
+                    if *name != profile.authority {
+                        providers.insert(name.clone(), Box::new(radio));
+                        break;
+                    }
+                    match ezsdr_radio_uhd::DeviceAuthority::new(device, clocks.clone(), &selector("clock_source"), &selector("time_source"), args) {
+                        Ok(time) => {
+                            providers.insert(name.clone(), Box::new(radio));
+                            authority = Some(Box::new(time));
+                            break;
+                        }
+                        // The radio and the device go here, before the next open.
+                        Err(error) if reopen && first_error.is_none() && error.starts_with(ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK) => {
+                            first_error = Some(error);
+                        }
+                        Err(error) => return Err(built(&error)),
+                    }
                 }
             }
             other => return Err(format!("EA-7: {name}: no Module {other} in this server")),

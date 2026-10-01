@@ -398,6 +398,7 @@ impl UhdDevice {
     /// Opens the device `args` names; refuses one whose master clock is not a positive
     /// whole number of hertz (UR-3).
     pub fn open(args: &str) -> Result<UhdDevice, String> {
+        reclaim(args);
         let c_args = cstring(args).map_err(|e| e.message)?;
         let mut usrp: uhd_usrp_handle = std::ptr::null_mut();
         // SAFETY: `usrp` is written by the call; `c_args` outlives it.
@@ -449,14 +450,59 @@ impl UhdDevice {
     }
 }
 
+/// A device kept rather than freed (F4), with its streamers, until a later open of the
+/// same `args` finds it answering again (Review S, NB-S2).
+struct Kept {
+    args: String,
+    usrp: uhd_usrp_handle,
+    lost: Arc<AtomicBool>,
+    streams: (Option<Arc<RxStream>>, Option<Arc<TxStream>>),
+}
+
+// SAFETY: a kept handle is touched only under `KEPT`'s lock, by one thread at a time.
+unsafe impl Send for Kept {}
+
+static KEPT: Mutex<Vec<Kept>> = Mutex::new(Vec::new());
+
+/// Whether the device behind `usrp` answers a time read (the C API catches the
+/// exception a dead link throws).
+fn answers(usrp: uhd_usrp_handle) -> bool {
+    let (mut full, mut frac) = (0i64, 0f64);
+    // SAFETY: `usrp` is a live handle; both outputs are written by the call.
+    unsafe { uhd_usrp_get_time_now(usrp, 0, &mut full, &mut frac) == UHD_ERROR_NONE }
+}
+
+/// Frees every kept device of `args` that answers again: its teardown writes to the
+/// device, which a live link takes (NB-S2). Called before a new open of `args`, so that
+/// its writes go out on its own transport.
+fn reclaim(args: &str) {
+    lock(&KEPT).retain_mut(|kept| {
+        if kept.args != args || !answers(kept.usrp) {
+            return true;
+        }
+        kept.lost.store(false, Ordering::Release);
+        kept.streams = (None, None);
+        // SAFETY: the kept handle is freed once, here, its streamers gone first.
+        unsafe { uhd_usrp_free(&mut kept.usrp) };
+        false
+    });
+}
+
 impl Drop for UhdDevice {
     fn drop(&mut self) {
         // A lost device is not freed: `uhd_usrp_free` tears the RFNoC graph down, whose
         // X300 radio `deinit()` writes the device's registers and, over a dead link, throws
         // out of `~rfnoc_graph_impl`, ending the process (`x300_radio_control.cpp:1890–1911`;
-        // design-notes §17, F4). UHD's static registry still holds it until the process
-        // exits.
+        // design-notes §17, F4). Nor is one that no longer answers, though not marked: a
+        // dead link the Provider has not found yet (Review S, S-B1). It is kept until a
+        // later open of the same `args` finds it answering (`reclaim`); UHD's static
+        // registry holds it till the process exits otherwise.
+        if !self.lost.load(Ordering::Acquire) && !answers(self.usrp) {
+            self.lost.store(true, Ordering::Release);
+        }
         if self.lost.load(Ordering::Acquire) {
+            let streams = (lock(&self.rx).take(), lock(&self.tx).take());
+            lock(&KEPT).push(Kept { args: self.args.clone(), usrp: self.usrp, lost: self.lost.clone(), streams });
             return;
         }
         self.close_streams();

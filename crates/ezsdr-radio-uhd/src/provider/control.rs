@@ -49,7 +49,14 @@ pub(crate) struct Control {
     released: Vec<i64>,
     seq: u64,
     clock_lost: bool,
+    /// When the device reads began failing without a lost-device error (Review S, S-B1).
+    failing_since: Option<Instant>,
 }
+
+/// How long the device reads may fail, whatever the error, before the device is lost: a
+/// dead link's control requests time out in UHD as `op_timeout`, which its C API returns as
+/// `UHD_ERROR_EXCEPT`, not counted lost (UR-29; Review S, S-B1).
+const FAILING_FOR: Wall = Wall::from_secs(1);
 
 fn number(value: &Value) -> Option<f64> {
     match value {
@@ -79,6 +86,7 @@ impl Control {
             released: Vec::new(),
             seq: 0,
             clock_lost: false,
+            failing_since: None,
         }
     }
 
@@ -541,6 +549,8 @@ impl Control {
     // ------------------------------------------------------------ UR-27, UR-29
 
     fn check_device(&mut self) {
+        let begun = Instant::now();
+        let mut failed = None;
         if self.reference_monitored && !self.clock_lost {
             match self.core.device.ref_locked() {
                 Ok(Some(false)) => {
@@ -550,13 +560,28 @@ impl Control {
                 }
                 Ok(_) => {}
                 Err(error) if error.lost => return self.core.device_lost(&error.message),
-                Err(error) => self.core.timing(json!({ "what": "ref_locked_failed", "error": error.message })),
+                Err(error) => {
+                    self.core.timing(json!({ "what": "ref_locked_failed", "error": error.message }));
+                    failed = Some(error.message);
+                }
             }
         }
         match self.core.device.time_now() {
+            Ok(_) if failed.is_none() => self.failing_since = None,
             Ok(_) => {}
-            Err(error) if error.lost => self.core.device_lost(&error.message),
-            Err(error) => self.core.timing(json!({ "what": "time_read_failed", "error": error.message })),
+            Err(error) if error.lost => return self.core.device_lost(&error.message),
+            Err(error) => {
+                self.core.timing(json!({ "what": "time_read_failed", "error": error.message }));
+                failed = Some(error.message);
+            }
+        }
+        // Reads failing for 1 s from the start of the first that failed: the device is gone,
+        // however UHD classified the error (one read on a dead link waits out UHD's timeouts).
+        if let Some(message) = failed {
+            let since = *self.failing_since.get_or_insert(begun);
+            if since.elapsed() >= FAILING_FOR {
+                self.core.device_lost(&format!("UR-29: the device reads have failed for 1 s: {message}"));
+            }
         }
     }
 }

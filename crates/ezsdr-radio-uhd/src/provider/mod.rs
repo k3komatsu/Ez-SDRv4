@@ -73,6 +73,8 @@ pub struct UhdRadio {
     clock_source: String,
     description: DeviceDescription,
     rx_stall: Option<(Wall, Wall)>,
+    /// The first open's error when the device was opened again on it (UR-7's reopen).
+    reopened: Option<String>,
     prepare_called: bool,
     prepared: Option<Prepared>,
     running: Option<Running>,
@@ -94,7 +96,7 @@ impl UhdRadio {
         if binding.feed.is_some() {
             return Err(rejected("UR-5: a Provider binding carries no feed"));
         }
-        let allowed = ["args", "id", "clock_source", "time_source", "block_len"];
+        let allowed = ["args", "id", "clock_source", "time_source", "block_len", "reopen_on_unlock"];
         if let Some(name) = binding.selector.keys().find(|k| !allowed.contains(&k.as_str())) {
             return Err(rejected(format!("UR-5: unsupported selector key `{name}`")));
         }
@@ -118,6 +120,9 @@ impl UhdRadio {
         };
         let clock_source = source("clock_source")?;
         source("time_source")?;
+        if get("reopen_on_unlock").is_some_and(|v| !matches!(v, Value::Bool(_))) {
+            return Err(rejected("UR-5: selector `reopen_on_unlock` must be a Bool"));
+        }
         let block_len = match get("block_len") {
             None => profile::DEFAULT_BLOCK_LEN,
             Some(Value::Int(n)) if (1..=65_536).contains(n) => *n as u32,
@@ -180,6 +185,7 @@ impl UhdRadio {
             clock_source,
             description,
             rx_stall: None,
+            reopened: None,
             prepare_called: false,
             prepared: None,
             running: None,
@@ -187,6 +193,13 @@ impl UhdRadio {
             cleaned: false,
             detached: BTreeSet::new(),
         })
+    }
+
+    /// Notes that this device was opened again after the first open's reference did not
+    /// lock (UR-7's reopen, done by whoever builds the Assembly): recorded in `timing`.
+    pub fn with_reopened(mut self, first_error: String) -> UhdRadio {
+        self.reopened = Some(first_error);
+        self
     }
 
     /// Makes uhd-rx stop calling `rx_recv` once, for `duration`, `after` its first
@@ -335,6 +348,9 @@ impl Provider for UhdRadio {
             links,
             self.description.clone(),
         ));
+        if let Some(error) = &self.reopened {
+            core.timing(json!({ "what": "reopened_on_unlock", "first_error": error }));
+        }
         let mut handles = [None, None];
         for (slot, dir) in [Dir::Rx, Dir::Tx].into_iter().enumerate() {
             let channels = Core::channels(&config, dir);

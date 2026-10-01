@@ -1491,3 +1491,8 @@ No log of the five mentions `DEVICE_LOST`.
 | the UHD error each unplug produced | receive: control timeouts (`x300 fw communication failure #1…#3`), UHD's task loop exiting, then UR-29's silence rule; transmit-only: `uhd_usrp_get_time_now: UHD error 30` (`UHD_ERROR_IO`) |
 
 And what remains, recorded in UR-29: the process aborts at exit in UHD's static teardown while the link is down — after the Manifest, in both cases.
+
+### A correction (Review S, NB-S1)
+
+The latencies above mix the event with the Run's end. From the events' ticks (the time was set before each test's start line): the receive Run's `DEVICE_LOST` (tick 4 235 276 494, 21.176 s after the time was set) came at most **1.10 s after the carrier dropped**, meeting bench.md's "about 1 s"; the "3–4 s" was when the test saw the Run stopped — its 1 s poll, and `Provider::stop` waiting UR-16's 1 s for a uhd-control blocked inside UHD. The transmit-only Session's (tick 6 239 997 161) came **5.8–6.0 s** after it: the event's own latency, the OS's route timeout reaching UHD as `ENETUNREACH`, which Review S's S-B1 explains. The owner's acceptance is withdrawn for the transmit-only figure, to be measured again after S-B1's fix (design-notes §19).
+

@@ -288,6 +288,10 @@ pub enum FakeFault {
     /// `set_sources` fails as the X300 does when its reference PLL does not lock within
     /// UHD's 30 s (`x300_mb_controller.cpp:243–255`), with UHD's own text.
     ReferenceDoesNotLock,
+    /// From this device time on the link is dead but no call says the device is lost:
+    /// control calls wait 100 ms and fail as UHD's `op_timeout` does (`UHD_ERROR_EXCEPT`,
+    /// not lost), receives time out, sends take nothing (Review S, TG-S1).
+    Unreachable(Duration),
 }
 
 /// How [`FakeDevice`] behaves (UR-33).
@@ -512,6 +516,19 @@ impl FakeDevice {
         !st.fired[index] && self.now(st) >= self.ticks_of(at)
     }
 
+    /// `FakeFault::Unreachable`: whether the link is dead now.
+    fn unreachable(&self) -> bool {
+        let st = self.lock();
+        let now = self.now(&st);
+        self.config.faults.iter().any(|f| matches!(f, FakeFault::Unreachable(at) if now >= self.ticks_of(*at)))
+    }
+
+    /// A control call on a dead link: it waits and fails, not lost.
+    fn timed_out(&self) -> DeviceError {
+        std::thread::sleep(Duration::from_millis(100));
+        DeviceError::failed("fake: control operation timed out waiting for ACK (UHD error 47)")
+    }
+
     fn lost(&self, st: &Fake) -> Result<(), DeviceError> {
         let now = self.now(st);
         let gone = self.config.faults.iter().any(|f| matches!(f, FakeFault::Lost(at) if now >= self.ticks_of(*at)));
@@ -621,6 +638,9 @@ impl Device for FakeDevice {
     }
 
     fn time_now(&self) -> Result<i64, DeviceError> {
+        if self.unreachable() {
+            return Err(self.timed_out());
+        }
         let slow = {
             let st = self.lock();
             self.config.faults.iter().any(|f| matches!(f, FakeFault::SlowTimeRead(at) if self.now(&st) >= self.ticks_of(*at)))
@@ -646,6 +666,9 @@ impl Device for FakeDevice {
     }
 
     fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
+        if self.unreachable() {
+            return Err(self.timed_out());
+        }
         let st = self.lock();
         self.lost(&st)?;
         let now = self.now(&st);
@@ -654,6 +677,9 @@ impl Device for FakeDevice {
     }
 
     fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
+        if self.unreachable() {
+            return Err(self.timed_out());
+        }
         if chan >= 2 {
             return Err(DeviceError::failed(format!("fake: no {} channel {chan}", dir.name())));
         }
@@ -725,6 +751,9 @@ impl Device for FakeDevice {
     }
 
     fn rx_start(&self, at: i64) -> Result<(), DeviceError> {
+        if self.unreachable() {
+            return Err(self.timed_out());
+        }
         let mut st = self.lock();
         self.lost(&st)?;
         st.calls.push(format!("rx_start {at}"));
@@ -751,6 +780,9 @@ impl Device for FakeDevice {
     }
 
     fn rx_stop(&self, at: Option<i64>) -> Result<(), DeviceError> {
+        if self.unreachable() {
+            return Err(self.timed_out());
+        }
         let mut st = self.lock();
         self.lost(&st)?;
         st.calls.push(format!("rx_stop {}", at.map_or("now".to_owned(), |t| t.to_string())));
@@ -771,6 +803,10 @@ impl Device for FakeDevice {
     }
 
     fn rx_recv(&self, n: usize, timeout: Duration) -> RxRecv {
+        if self.unreachable() {
+            std::thread::sleep(timeout);
+            return RxRecv::Timeout;
+        }
         let mut st = self.lock();
         if let Err(error) = self.lost(&st) {
             drop(st);
@@ -962,6 +998,10 @@ impl Device for FakeDevice {
         eob: bool,
         timeout: Duration,
     ) -> Result<usize, DeviceError> {
+        if self.unreachable() {
+            std::thread::sleep(timeout.min(Duration::from_millis(100)));
+            return Ok(0);
+        }
         if self.config.faults.contains(&FakeFault::TxBlocks) {
             loop {
                 std::thread::sleep(Duration::from_secs(1));

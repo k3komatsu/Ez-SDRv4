@@ -21,7 +21,7 @@ use ezsdr_kernel::module_api::{
 };
 use ezsdr_kernel::spec::Namespace;
 
-pub use authority::DeviceAuthority;
+pub use authority::{DeviceAuthority, REFERENCE_DID_NOT_LOCK};
 pub use device::{
     Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, FakeFault, Iq, RxRecv, Settings, TxCode, TxReport,
     decimation, from_time_spec, to_time_spec,

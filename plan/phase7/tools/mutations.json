@@ -1540,5 +1540,45 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_07_a_reference_that_does_not_lock_is_named"
+ },
+ {
+  "id": "B35",
+  "name": "device reads failing for 1 s not a lost device (Review S, S-B1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "self.core.device_lost(&format!(\"UR-29: the device reads have failed for 1 s: {message}\"));",
+  "new": "let _ = message;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_29_a_dead_link_that_fails_without_lost_is_a_lost_device"
+ },
+ {
+  "id": "B36",
+  "name": "UR-7's reopen never made (design-notes §18)",
+  "file": "crates/ezsdr-server/src/catalogue.rs",
+  "old": "let reopen = !matches!(",
+  "new": "let reopen = false && !matches!(",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_07_a_reference_that_locks_on_the_reopen_connects"
+ },
+ {
+  "id": "B37",
+  "name": "UR-7's reopen ignores reopen_on_unlock false (design-notes §18)",
+  "file": "crates/ezsdr-server/src/catalogue.rs",
+  "old": "Some(Value::Bool(false)));",
+  "new": "Some(Value::Bool(false))) || true;",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_07_the_reopen_can_be_switched_off"
+ },
+ {
+  "id": "B38",
+  "name": "UR-7's reopen not recorded in the Manifest (design-notes §18)",
+  "file": "crates/ezsdr-server/src/catalogue.rs",
+  "old": "radio = radio.with_reopened(error.clone());",
+  "new": "let _ = error;",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_07_a_reference_that_locks_on_the_reopen_connects"
  }
 ]

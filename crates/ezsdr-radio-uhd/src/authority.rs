@@ -30,6 +30,10 @@ const REANCHOR: Duration = Duration::from_millis(100);
 const WIDEST_BRACKET: Duration = Duration::from_millis(1);
 /// TM-17b's cap on callbacks at one instant.
 const CALLBACK_CAP: usize = 1_000;
+/// How `DeviceAuthority::new`'s error begins when the X300's reference PLL did not lock
+/// within UHD's 30 s (UR-7; design-notes §18): a builder may open the device again on it.
+pub const REFERENCE_DID_NOT_LOCK: &str = "UR-7: the reference clock did not lock";
+
 /// How long `drop` waits for `uhd-clock` to end; a read blocked inside UHD is left
 /// detached after it (D-1).
 const CLOCK_JOIN: Duration = Duration::from_secs(1);
@@ -226,7 +230,7 @@ impl DeviceAuthority {
             // The X300's reference PLL not locking within UHD's 30 s, named for the client;
             // a new open usually locks (bench-results.md parts 3–9; design-notes §18).
             if e.message.contains("Reference Clock PLL failed to lock") {
-                format!("UR-7: the reference clock did not lock to its {clock_source} source within UHD's 30 s; connecting again usually succeeds ({e})")
+                format!("{REFERENCE_DID_NOT_LOCK} to its {clock_source} source within UHD's 30 s; connecting again usually succeeds ({e})")
             } else {
                 format!("UR-7: {e}")
             }

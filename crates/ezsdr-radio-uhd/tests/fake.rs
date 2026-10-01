@@ -1704,6 +1704,31 @@ fn ur_29_a_silent_stream_is_a_lost_device() {
 }
 
 #[test]
+fn ur_29_a_dead_link_that_fails_without_lost_is_a_lost_device() {
+    // Review S, S-B1 and TG-S1: a link that answers nothing, its calls failing as UHD's
+    // `op_timeout` (not lost), in a transmit-only Session with nothing sent: the device
+    // reads failing for 1 s make the device lost, and it is marked lost (F4).
+    let dir = TempDir::new();
+    let device = fake(FakeConfig { faults: vec![FakeFault::Unreachable(Wall::from_millis(2_500))], ..FakeConfig::default() });
+    let mut doc = profile(&dir, json!({}), json!({}), true);
+    doc["bindings"]["rec"].as_object_mut().unwrap().remove("feed");
+    doc.as_object_mut().unwrap().remove("placements");
+    doc["bindings"].as_object_mut().unwrap().remove("rec");
+    let mut run = session(&doc, device.clone());
+    past_t0(&mut run, ms(1));
+    let result = run.run_until_end(after(&run, ms(6_000)));
+    assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
+    let manifest = run.finish();
+    let lost = events_of(&manifest, EventKind::DEVICE_LOST);
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert!(lost[0].payload["message"].as_str().unwrap().contains("UR-29: the device reads have failed for 1 s"), "{lost:?}");
+    // Within 2 s of the link's death (the reads every 500 ms; 100 ms each on the fake).
+    let after_death = lost[0].time.ticks - ms(2_500);
+    assert!((ms(1_000)..=ms(2_000)).contains(&after_death), "{} ms", after_death / ms(1));
+    assert_marked_lost_before_closed(&device);
+}
+
+#[test]
 fn ur_29_a_lost_device_is_found_while_idle() {
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::Lost(Wall::from_millis(2_500))], ..FakeConfig::default() });

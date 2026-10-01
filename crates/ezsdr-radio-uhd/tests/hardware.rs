@@ -188,6 +188,7 @@ fn hw_b9_unplug() {
     let manifest = run.finish();
     println!("B9 receive: {ended}; termination {:?}", manifest.termination.reason);
     println!("B9 receive DEVICE_LOST: {:?}", events_of(&manifest, ezsdr_kernel::event::EventKind::DEVICE_LOST));
+    println!("B9 receive DEVICE_LOST at UTC {}", lost_utc(&manifest));
     println!("B9 receive rejected: {}", section(&manifest, "rejected"));
 }
 
@@ -206,7 +207,48 @@ fn hw_b9_unplug_transmit_only() {
     let manifest = run.finish();
     println!("B9 transmit only: {ended}; termination {:?}", manifest.termination.reason);
     println!("B9 transmit only DEVICE_LOST: {:?}", events_of(&manifest, ezsdr_kernel::event::EventKind::DEVICE_LOST));
+    println!("B9 transmit only DEVICE_LOST at UTC {}", lost_utc(&manifest));
     println!("B9 transmit only rejected: {}", section(&manifest, "rejected"));
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_b9_unplug_and_reopen() {
+    // Manual (Review S, NB-S2, TG-S2): unplug the cable during a receive Run; after its
+    // DEVICE_LOST plug it back in. The test opens the device again in the same process —
+    // `UhdDevice::open` first frees the kept device once it answers — runs B3's receive on
+    // it, and then the process exits, which should not abort.
+    let dir = TempDir::new();
+    let device = usrp();
+    let mut run = spec_run(&receive_spec(1, 1e6, bench_hz(&*device), None), &bench_profile(&*device, &dir, serde_json::json!({}), serde_json::json!({}), false), device, Default::default());
+    println!("B9: unplug the cable now (receive Run; up to 300 s); started at UTC {:.3}", utc_now());
+    let ended = until_not_running(&mut run, 300);
+    let manifest = run.finish();
+    println!("B9 reopen: {ended}; termination {:?}; DEVICE_LOST at UTC {}", manifest.termination.reason, lost_utc(&manifest));
+    println!("B9: plug the cable back in now (waiting up to 300 s for the device); at UTC {:.3}", utc_now());
+    let deadline = Instant::now() + Wall::from_secs(300);
+    let device = loop {
+        match ezsdr_radio_uhd::open(&args()) {
+            Ok(device) if device.time_now().is_ok() => break device,
+            _ if Instant::now() < deadline => std::thread::sleep(Wall::from_secs(2)),
+            Ok(_) | Err(_) => panic!("the device did not come back within 300 s"),
+        }
+    };
+    println!("B9 reopen: opened again at UTC {:.3}", utc_now());
+    let manifest = rehearse_receive_at_t0(device);
+    println!("B9 reopen: B3 on the reopened device: termination {:?}", manifest.termination.reason);
+    println!("B9 reopen: the process exits next, at UTC {:.3}", utc_now());
+}
+
+/// The UTC of the Manifest's first `DEVICE_LOST`, from the Run's root-to-UTC relation
+/// (TM-18; the root's 200 MHz ticks, 5 ns each).
+fn lost_utc(manifest: &ezsdr_kernel::manifest::Manifest) -> String {
+    let Some(event) = events_of(manifest, ezsdr_kernel::event::EventKind::DEVICE_LOST).into_iter().next() else { return "-".to_owned() };
+    let utc = ezsdr_kernel::id::ClockDomainId::UTC;
+    match manifest.clocks.relations.iter().find(|r| r.source == event.time.domain && r.target == utc) {
+        Some(r) => format!("{:.3}", (r.offset.ticks + (event.time.ticks - r.measured_at.ticks) * 5) as f64 / 1e9),
+        None => "- (no relation to UTC)".to_owned(),
+    }
 }
 
 /// The host's UTC in seconds.

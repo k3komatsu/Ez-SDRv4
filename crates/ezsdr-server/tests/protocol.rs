@@ -803,19 +803,79 @@ fn ea_07_the_device_is_released_when_the_session_ends() {
     assert!(made.lock().unwrap().upgrade().is_none(), "a thread still holds the device after the Session ended");
 }
 
+/// A server whose `n`th open (0-based) gives a device whose reference does not lock,
+/// for each `n` in `unlocked`; counts the opens.
+fn unlocking_server(dir: &Path, unlocked: &'static [u64]) -> (Server, Arc<AtomicU64>) {
+    let opened = Arc::new(AtomicU64::new(0));
+    let count = opened.clone();
+    let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| {
+        let n = count.fetch_add(1, Ordering::SeqCst);
+        let faults = if unlocked.contains(&n) { vec![ezsdr_radio_uhd::FakeFault::ReferenceDoesNotLock] } else { Vec::new() };
+        Ok(Arc::new(FakeDevice::new(FakeConfig { faults, ..FakeConfig::default() })) as Arc<dyn Device>)
+    });
+    let mut server = Server::new(Config { open_device: Some(open), ..config(dir) });
+    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    (server, opened)
+}
+
+const UNLOCKED: &str = "EA-7: radio: UR-7: the reference clock did not lock to its internal source within UHD's 30 s; connecting again usually succeeds (";
+
 #[test]
 fn ea_07_a_reference_that_does_not_lock_refuses_the_connect_with_its_reason() {
-    // UR-7 (ezsdr-radio-uhd's design-notes §18): the client is told the reference clock
-    // did not lock, and that connecting again usually succeeds.
+    // UR-7 (ezsdr-radio-uhd's design-notes §18): opened again once, and the second open's
+    // reference does not lock either: the client is told so.
     let temp = TempDir::new("uhd-unlocked");
-    let open: ezsdr_server::OpenDevice = Arc::new(|_args: &str| {
-        Ok(Arc::new(FakeDevice::new(FakeConfig { faults: vec![ezsdr_radio_uhd::FakeFault::ReferenceDoesNotLock], ..FakeConfig::default() })) as Arc<dyn Device>)
-    });
-    let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
-    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    let (mut server, opened) = unlocking_server(&temp.0, &[0, 1]);
     let error = err(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new()));
     assert_eq!(error.kind, ErrorKind::Refused);
-    assert!(error.message.starts_with("EA-7: radio: UR-7: the reference clock did not lock to its internal source within UHD's 30 s; connecting again usually succeeds ("), "{}", error.message);
+    assert!(error.message.starts_with(UNLOCKED), "{}", error.message);
+    assert_eq!(opened.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn ea_07_a_reference_that_locks_on_the_reopen_connects() {
+    // UR-7's reopen: the first open's reference does not lock, the second's does; the
+    // Session runs, and its Manifest records the reopen with the first error.
+    let temp = TempDir::new("uhd-reopened");
+    let (mut server, opened) = unlocking_server(&temp.0, &[0]);
+    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new())) else { panic!("connect") };
+    assert_eq!(opened.load(Ordering::SeqCst), 2);
+    let (manifest, _) = finish(&mut server);
+    let timing = &manifest.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
+    let reopened = timing.as_array().unwrap().iter().find(|r| r["what"] == "reopened_on_unlock").unwrap_or_else(|| panic!("{timing}"));
+    assert!(reopened["first_error"].as_str().unwrap().starts_with("UR-7: the reference clock did not lock"), "{reopened}");
+}
+
+#[test]
+fn ea_07_the_reopen_can_be_switched_off() {
+    // UR-7's reopen is the binding's to refuse: `reopen_on_unlock: false` refuses at the
+    // first open's failure.
+    let temp = TempDir::new("uhd-no-reopen");
+    let (mut server, opened) = unlocking_server(&temp.0, &[0]);
+    let mut profile = uhd_profile(&temp.0);
+    profile["bindings"]["radio"]["selector"]["reopen_on_unlock"] = json!(false);
+    let error = err(server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new()));
+    assert!(error.message.starts_with(UNLOCKED), "{}", error.message);
+    assert_eq!(opened.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn ea_07_a_lost_device_ends_the_session_with_its_manifest() {
+    // Review S, TG-S3 (F4): a device lost during a Session stops the Run by Policy; Finish
+    // still returns the Manifest and writes it, and the device was marked lost first.
+    let temp = TempDir::new("uhd-lost");
+    let device = Arc::new(FakeDevice::new(FakeConfig { faults: vec![ezsdr_radio_uhd::FakeFault::Lost(std::time::Duration::from_millis(3_000))], ..FakeConfig::default() }));
+    let held = device.clone();
+    let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| Ok(held.clone() as Arc<dyn Device>));
+    let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
+    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new())) else { panic!("connect") };
+    let lost = EventKind::parse(EventKind::DEVICE_LOST).unwrap();
+    let _ = server.handle(Request::WaitFor { kinds: vec![lost], from: 0, within_ns: Some(5_000_000_000), until: None }, Vec::new());
+    let (manifest, path) = finish(&mut server);
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: EventKind::parse(EventKind::DEVICE_LOST).unwrap() } });
+    assert!(Path::new(&path).exists(), "{path}");
+    assert!(device.calls().iter().any(|c| c == "mark_lost"), "{:?}", device.calls());
 }
 
 #[test]
