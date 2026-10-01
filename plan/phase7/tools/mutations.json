@@ -1500,5 +1500,25 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_33_a_burst_s_acknowledgement_comes_once_its_end_has_played"
+ },
+ {
+  "id": "B31",
+  "name": "a held sample's failed send ahead of a continuation not abandoned (Review R, TG-R1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "                    Err(error) => {\n                        self.core.device_failed(\"tx_burst\", &error);\n                        return self.abandon(true);\n                    }",
+  "new": "                    Err(error) => {\n                        self.core.device_failed(\"tx_burst\", &error);\n                    }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned"
+ },
+ {
+  "id": "B32",
+  "name": "the fake's FailSend of one sample returns Ok(0) again (Review R, NB-R3)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "return if fail { Err(DeviceError::failed(\"fake: the send failed after half its samples\")) } else { Ok(0) };",
+  "new": "return if false { Err(DeviceError::failed(\"fake: the send failed after half its samples\")) } else { Ok(0) };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned"
  }
 ]

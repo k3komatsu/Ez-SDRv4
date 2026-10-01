@@ -274,8 +274,9 @@ pub enum FakeFault {
     /// returns their count, its end-of-burst not sent (UHD's `send` timing out part way;
     /// Review P, NB-1).
     ShortSend(usize),
-    /// The same `tx_send` takes its first half, then fails without the device being lost
-    /// (UHD failing after some packets went, which is not known to happen; Review Q, NB-Q1).
+    /// The same `tx_send` takes its first half (nothing of one sample), then fails without
+    /// the device being lost (UHD failing after some packets went, which is not known to
+    /// happen; Review Q, NB-Q1).
     FailSend(usize),
     /// The same `tx_send` takes nothing and returns 0 (UHD's `send` timing out on its first
     /// packet; Review Q, TG-Q2).
@@ -984,8 +985,11 @@ impl Device for FakeDevice {
             None => (false, false, n),
         };
         if short && took == 0 {
-            self.lock().calls.push(format!("tx_send n=0 stalled sob={sob} eob={eob}"));
-            return Ok(0);
+            // `FailSend` fails even with nothing taken, a one-sample send included (Review R,
+            // NB-R3).
+            let what = if fail { "failed" } else { "stalled" };
+            self.lock().calls.push(format!("tx_send n=0 {what} sob={sob} eob={eob}"));
+            return if fail { Err(DeviceError::failed("fake: the send failed after half its samples")) } else { Ok(0) };
         }
         let half: Vec<&[Iq]> = samples.iter().map(|s| &s[..took]).collect();
         let (samples, eob) = if short { (&half[..], false) } else { (samples, eob) };

@@ -441,8 +441,8 @@ The re-review ([`reviews/review-r.md`](reviews/review-r.md)): no blockers; every
 |---|---|
 | NB-R1 (P2) | Recorded, not fixed (the owner). D-1's residuals the fix cannot remove: a `uhd-clock` read blocked past the 1 s join is detached, and when it returns it can drop the last device handle on that thread, D-1's race again if the process is exiting — which needs a device gone at exit; UR-16's detached Provider threads hold the device past the Session by design; `ea_07_the_device_is_released_when_the_session_ends` pins that no reference survives the Session, not the race. |
 | NB-R2 (P2, INFERRED) | Recorded, not fixed (the owner). After a first send that failed having sent nothing, `abandon`'s empty end-of-burst is one zero sample the X300 plays untimed at once and acknowledges (the acknowledgement pairs with the start pushed, so the reports stay paired): one zero sample at an arbitrary instant, the price of never leaving a begun burst open. |
-| NB-R3 (P2) | Open, for the owner: `FakeFault::FailSend` on a one-sample send takes nothing and returns `Ok(0)` instead of an error, unlike UR-33's description. |
-| TG-R1 (P2) | Open, for the owner: the error branch of the held sample's send ahead of a continuation is untested (NB-R3 is why). |
+| NB-R3 (P2) | Fixed as recommended (the owner: "NB-R3・TG-R1は推奨で直してください"): `FakeFault::FailSend` fails even when it takes nothing, a one-sample send included. |
+| TG-R1 (P2) | Fixed: `ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned` runs with `StalledSend` and with `FailSend`, each asserting its own reason in `rejected` — accepting either let B32 survive at first. Mutations B31 (the error branch's `abandon` removed) and B32 (the fake's old `Ok(0)`) added: killed, as are the other rows on `device.rs` and on that test (B17, B28, B30, R11, U30, V01–V03). 152 rows. `cargo test --workspace` 877 passed on stable and 1.85.0; clippy clean. |
 | TG-Q4, NB-5, NB-6, TG-4, TG-5 | Open, as before. |
 
-**The device.** After part 7 (B1's `ref_locked` false since part 5, reference-PLL lock failures rising) the owner has powered the X300 off. No hardware run until the owner says it is back.
+**The device.** After part 7 (B1's `ref_locked` false since part 5, reference-PLL lock failures rising) the owner powered the X300 off, then on again: "X300の電源を入れました．抜線もできます" (bench-results.md part 8).

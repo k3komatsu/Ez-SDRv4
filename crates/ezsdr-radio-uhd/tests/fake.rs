@@ -2477,32 +2477,37 @@ fn ur_22_a_first_send_cut_short_keeps_the_reports_paired() {
 #[test]
 fn ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned() {
     // Review Q, NB-Q2: the send of A's held sample ahead of B, B continuing A's device
-    // burst, takes nothing. B would play a sample early: it is abandoned, and the device
-    // burst ended with an empty end-of-burst after A's 29 999 samples taken.
-    let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::StalledSend(15)], ..FakeConfig::default() });
-    wait(&mut run, ms(1));
-    let a = tx_at(&run, ms(40));
-    let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
-    assert!(admitted(&entry), "{entry:?}");
-    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
-    let a_root = clock.origin.ticks + a.ticks * clock.root_ticks_per_tick.num() as i64;
-    let a_end = a_root + 30_000 * clock.root_ticks_per_tick.num() as i64;
-    while run.now().ticks < a_end - ms(8) {
-        wait(&mut run, ms(1) / 4);
+    // burst, takes nothing or fails (Review R, TG-R1). B would play a sample early: it is
+    // abandoned, and the device burst ended with an empty end-of-burst after A's 29 999
+    // samples taken.
+    let cases = [(FakeFault::StalledSend(15), "UR-22: a send did not complete"), (FakeFault::FailSend(15), "fake: the send failed")];
+    for (fault, reason) in cases {
+        let what = format!("{fault:?}");
+        let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![fault], ..FakeConfig::default() });
+        wait(&mut run, ms(1));
+        let a = tx_at(&run, ms(40));
+        let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
+        assert!(admitted(&entry), "{entry:?}");
+        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
+        let a_root = clock.origin.ticks + a.ticks * clock.root_ticks_per_tick.num() as i64;
+        let a_end = a_root + 30_000 * clock.root_ticks_per_tick.num() as i64;
+        while run.now().ticks < a_end - ms(8) {
+            wait(&mut run, ms(1) / 4);
+        }
+        let entry = send_at(&mut run, "send", Some(TimePoint::new(a.domain, a.ticks + 30_000)), &[(-0.5, 0.5); 1_000]);
+        assert!(admitted(&entry), "{entry:?}");
+        wait(&mut run, ms(40));
+        let manifest = run.finish();
+        let sends = calls(&device, "tx_send");
+        assert!(sends.iter().any(|c| c.contains("stalled") || c.contains("failed")), "{what}: the case was not reached: {sends:?}");
+        let sent = device.transmitted(a_root, 30_001);
+        let whole: Vec<Option<[f32; 2]>> = tone(30_000).iter().map(|&(i, q)| Some([i, q])).collect();
+        assert!(sent[..29_999] == whole[..29_999], "{sends:?}");
+        assert_eq!(sent[29_999], Some([0.0, 0.0]), "B played in A's last sample's place: {sends:?}");
+        assert_eq!(sent[30_000], None, "{sends:?}");
+        assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "{sends:?}");
+        assert!(rejections(&manifest).iter().any(|r| r.contains(reason)), "{what}: {:?} {sends:?}", rejections(&manifest));
     }
-    let entry = send_at(&mut run, "send", Some(TimePoint::new(a.domain, a.ticks + 30_000)), &[(-0.5, 0.5); 1_000]);
-    assert!(admitted(&entry), "{entry:?}");
-    wait(&mut run, ms(40));
-    let manifest = run.finish();
-    let sends = calls(&device, "tx_send");
-    assert!(sends.iter().any(|c| c.contains("stalled")), "the case was not reached: {sends:?}");
-    let sent = device.transmitted(a_root, 30_001);
-    let whole: Vec<Option<[f32; 2]>> = tone(30_000).iter().map(|&(i, q)| Some([i, q])).collect();
-    assert!(sent[..29_999] == whole[..29_999], "{sends:?}");
-    assert_eq!(sent[29_999], Some([0.0, 0.0]), "B played in A's last sample's place: {sends:?}");
-    assert_eq!(sent[30_000], None, "{sends:?}");
-    assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "{sends:?}");
-    assert!(rejections(&manifest).iter().any(|r| r.contains("UR-22: a send did not complete")), "{sends:?}");
 }
 
 #[test]
