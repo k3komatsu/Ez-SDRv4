@@ -337,6 +337,9 @@ pub struct SteppedProvider {
     pub handles: Vec<SampleClockHandle>,
     pub stopped_at: Option<i64>,
     pub emitted: bool,
+    /// Bodies of `test.custom` at `info` emitted on the hot path just before `emit`,
+    /// which then also goes through the hot path (RS-36).
+    pub flood: Option<usize>,
     pub lost_reported: bool,
     pub declare_roots: BTreeMap<String, ClockDomainId>,
     pub next_publish: Option<i64>,
@@ -374,6 +377,7 @@ impl SteppedProvider {
             handles: Vec::new(),
             stopped_at: None,
             emitted: false,
+            flood: None,
             lost_reported: false,
             declare_roots: BTreeMap::new(),
             next_publish: None,
@@ -430,6 +434,14 @@ impl SteppedProvider {
             severity,
             at,
         ));
+        self
+    }
+
+    /// Emits `n` hot-path bodies of `test.custom` at `info`, then the `emitting`
+    /// event on the hot path too, in the same step: with `n` the ring's depth its body
+    /// is dropped (RS-36).
+    pub fn flooding(mut self, n: usize) -> SteppedProvider {
+        self.flood = Some(n);
         self
     }
 
@@ -754,11 +766,26 @@ impl Provider for SteppedProvider {
                         kind: kind.clone(),
                         payload: serde_json::json!({}),
                     };
-                    self.events
+                    let sink = self
+                        .events
                         .as_ref()
-                        .ok_or_else(|| ModuleError::rejected("test: no event sink"))?
-                        .emit_control(event)
-                        .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+                        .ok_or_else(|| ModuleError::rejected("test: no event sink"))?;
+                    if let Some(n) = self.flood {
+                        let noise = sink.resolve(
+                            &event.source,
+                            &EventKind::parse("test.custom").expect("a valid kind"),
+                        );
+                        for _ in 0..n {
+                            sink.emit(noise, until, Severity::Info, &[])
+                                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+                        }
+                        let handle = sink.resolve(&event.source, &event.kind);
+                        sink.emit(handle, until, event.severity, &[])
+                            .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+                    } else {
+                        sink.emit_control(event)
+                            .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+                    }
                     self.emitted = true;
                 }
             }

@@ -1724,5 +1724,15 @@
   "crate": "ezsdr-kernel",
   "test_bin": "run_session",
   "filter": "rs_36_a_delivered_body_raises_no_escalation_flag"
+ },
+ {
+  "id": "D03",
+  "name": "the coordinator ignores the escalation flag (Review U, E-2)",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "    if let Some((kind, reaction)) = collector.escalation() {",
+  "new": "    if let Some((kind, reaction)) = collector.escalation().filter(|_| false) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "rs_36_a_dropped_stopping_body_ends_the_run"
  }
 ]

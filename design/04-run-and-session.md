@@ -300,7 +300,8 @@ Fixtures: the test-double Provider of `00-overview.md` OV-21 with a recording ca
 | `rs_49a_scheduled_action_is_a_template` | a Spec scheduling a `TxBurst` | the Spec validates with no time field; `arm` substitutes the resolved deadline | RS-49a, SB-16 |
 | `rs_49_update_parameter_carries_its_instant` | a capture with no `at`; a bare `SetParameter`; a scheduled template | the resolved `earliest` reaches the Action's `at`; the bare one compiles with `at: None` and no coercion, and is not refused; the template is timed and `resolve` substitutes the Spec's instant | RS-49, RS-49a, RS-19 |
 | `rs_19_vocabulary_action_carries_a_time` | a capture verb with an `at`, then without | the first is admitted at that instant; the second records the coercion | RS-19 |
-| `rs_36_abort_survives_a_drop` | the ring filled, then a `DEVICE_LOST` whose body is dropped | the Run aborts; the counter reads one | RS-36 |
+| `rs_36_abort_survives_a_drop` | the ring filled, then a `DEVICE_LOST` whose body is dropped | the collector's escalation names it with `abort`; the counter reads one | RS-36 |
+| `rs_36_a_dropped_stopping_body_ends_the_run` | a Simulation Run whose Provider fills the ring in one step, then emits a hot-path `DEVICE_LOST` whose body is dropped | the Run ends `Stopped { policy { DEVICE_LOST } }` in `abort` mode; `delivered` holds no `DEVICE_LOST` but its `EVENTS_DROPPED` (count 1) (Phase 7, Review U, TG-U1) | RS-36, KC-31 |
 | `rs_11_manifest_for_every_terminal_run` | a failed, a stopped and a completed Run | one Manifest each, with the matching termination | RS-11 |
 | `rs_45_hash_equal_for_equal_inputs` | one Spec loaded from two differently ordered and differently spaced JSON texts | equal Spec, binding and Manifest hashes | RS-45, RS-47 |
 | `rs_39_section_namespace_enforced` | a Module writing under another Module's namespace | `SectionNamespaceForbidden` | RS-39 |

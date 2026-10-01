@@ -2126,6 +2126,47 @@ fn kc_31_mark_artifact_marks_only_artifacts_open_then() {
 }
 
 #[test]
+fn rs_36_a_dropped_stopping_body_ends_the_run() {
+    // Review U, TG-U1: the ring filled by one step, then a hot-path `DEVICE_LOST` whose
+    // body is dropped. Only the escalation flag can end the Run (RS-36, KC-31).
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(
+            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
+                .emitting("DEVICE_LOST", ezsdr_kernel::event::Severity::Fatal, 150)
+                .flooding(ezsdr_kernel::coordinator::EVENT_RING_DEPTH)
+                .with_wakeups(&[150]),
+        ),
+    );
+    let mut run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
+    let _ = run.advance_to(TimePoint::new(run.now().domain, 160));
+    let manifest = run.finish();
+    let kind = ezsdr_kernel::event::EventKind::parse("DEVICE_LOST").unwrap();
+    let source = ezsdr_kernel::id::ResourceId::parse("radio").unwrap();
+    assert!(!manifest.events.delivered.iter().any(|event| event.kind == kind));
+    assert!(manifest.events.delivered.iter().any(|event| event.kind.as_str() == "EVENTS_DROPPED"
+        && event.payload == serde_json::json!({ "kind": "DEVICE_LOST", "count": 1 })));
+    assert!(
+        manifest
+            .events
+            .counters
+            .iter()
+            .any(|row| row.source == source && row.kind == kind && row.count == 1)
+    );
+    assert!(matches!(manifest.termination.reason, Termination::Stopped {
+        cause: StopCause::Policy { kind: event_kind }
+    } if event_kind == kind));
+    assert!(manifest.run.transitions.iter().any(|row| matches!(
+        row.state,
+        RunState::Stopping {
+            mode: ezsdr_kernel::run::CleanupMode::Abort
+        }
+    )));
+}
+
+#[test]
 fn kc_32_an_abort_during_orderly_escalates_and_is_recorded() {
     let probe = Probe::new();
     let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;

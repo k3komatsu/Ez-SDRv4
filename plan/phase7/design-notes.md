@@ -541,3 +541,16 @@ The re-review ([`reviews/review-t.md`](reviews/review-t.md)): no blockers; every
 This is a Kernel change — `event.rs` and the text of KC-31 and RS-36 — so it waited for the owner.
 
 **Decided and done.** The owner: "推奨で直してください". `EventCollector::emit` raises the flag in its full-ring branch only, after counting the drop; `emit_control` raises none. RS-36 (`design/04-run-and-session.md`) and KC-31 (`design/06-kernel-coordinator.md`) say so, KC-31 with the sentence for a dropped body. Tests: `rs_36_a_delivered_body_raises_no_escalation_flag` (new: a queued hot-path body and a control-path body raise no flag); `rs_36_an_unforeseen_source_does_not_silence_the_abort`, `rs_29_an_unregistered_fatal_kind_escalates` and `ma_30_stepping_livelock_cap` restated — each asserted the flag for a body that is delivered, which the fix removes, so each now asserts the delivered body's reaction through the Policy and, where it is about the flag, a dropped body's; `rs_36_abort_survives_a_drop` unchanged. Mutations D01 (the flag back in `emit_control`) and D02 (the flag back before the ring check) killed (172 rows). The instrumented copy with the fix: the escalation path set no Run's end in 2 000 Runs of `kg_02` (17 before); `kg_02` itself passed 40 of 40 full runs of `device_paced` and 40 of 40 alone. Workspace 897 passed on stable and 1.85.0; `--features uhd` 174; clippy clean.
+
+## 22. Review U
+
+The review of §21's fix ([`reviews/review-u.md`](reviews/review-u.md)): no blockers; the cause right, the fix correct and minimal; every drain reacts through `drain_and_react`, nothing else reads the flags, and no stopping event can fail to end the Run. The owner: "推奨で直してください".
+
+| Finding | Disposition |
+|---|---|
+| NB-U1 (P2) | Fixed: the doc of `escalation()` (`event.rs`) and the STEP_LIVELOCK comment (`module_api.rs`) say the flag is raised only for a dropped body, a queued one being reacted to when drained (KC-31). |
+| TG-U1 (P2) | Done: `rs_36_a_dropped_stopping_body_ends_the_run` (`coordinator.rs`) — a Simulation Run whose Provider fills the ring (`EVENT_RING_DEPTH` bodies of `test.custom` at `info`, the test double's new `flooding`) and then emits a hot-path `DEVICE_LOST` whose body is dropped; the Run ends `Stopped { policy { DEVICE_LOST } }` in `abort` mode, `delivered` holding its `EVENTS_DROPPED` (count 1) and no body. Mutation D03 (Review U's E-2: `drain_and_react` ignores the flag) killed (173 rows). design/04's row for `rs_36_abort_survives_a_drop` now says what it checks (the collector's escalation), and the new test has its own row. |
+| TG-U2 (P2) | Done: KC-31's "Checked by" names `rs_36_a_delivered_body_raises_no_escalation_flag` as the deterministic guard of the order and `kg_02_the_first_delivered_stopping_event_is_the_termination_cause` as the end-to-end check, whose race depends on the machine's timing. |
+| NB-U2, NB-U3 (P2) | Recorded; no change (a delivered stopping event is the cause ahead of an earlier dropped one; a drop flagged one drain late; flags never cleared; `ma_30` stops at the collector and the Policy). |
+
+**Checks.** D01, D02 and D03 killed. Workspace 898 passed on stable and 1.85.0; clippy clean.

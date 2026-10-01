@@ -357,10 +357,10 @@ impl EventCollector {
             .collect()
     }
 
-    /// True when a kind whose reaction is `stop` or `abort` was emitted, even if
-    /// its body was dropped. Without this a `DEVICE_LOST` arriving during an event
-    /// storm would be discarded and the Run would continue on a device that is gone
-    /// (RS-36).
+    /// True when the hot path dropped the body of a kind whose reaction is `stop` or
+    /// `abort`. Without this a `DEVICE_LOST` arriving during an event storm would be
+    /// discarded and the Run would continue on a device that is gone (RS-36). A
+    /// queued body raises no flag: it is reacted to when it is drained (KC-31).
     pub fn escalation(&self) -> Option<(EventKind, Reaction)> {
         self.escalate.iter().enumerate().find_map(|(i, f)| match f.load(Ordering::Relaxed) {
                 1 => Some((self.kinds[i].clone(), Reaction::Stop)),

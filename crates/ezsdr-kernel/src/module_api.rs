@@ -1325,8 +1325,8 @@ pub fn step_until_quiescent(
     }
     // RS-27 registers STEP_LIVELOCK as a kind the Kernel emits from "its own
     // stepping loop", and RS-28 gives it `abort` at `fatal`. Emitting it is what
-    // puts it through RS-33's counters and RS-36's escalation flag; the returned
-    // error is what stops this loop.
+    // puts it through RS-33's counters, and it is reacted to when drained (KC-31);
+    // the returned error is what stops this loop.
     let kind = crate::event::EventKind::parse(crate::event::EventKind::STEP_LIVELOCK)
         .expect("a Kernel kind is well formed");
     let _ = events.emit_control(crate::event::Event {
