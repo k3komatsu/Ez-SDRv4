@@ -957,3 +957,96 @@ asked: y at {'domain': {'node': 0, 'local': 2}, 'ticks': 411734732}, z at {'doma
 TIME_ERROR events: 0 (spike K6: none)
 Manifest: /bench/ezsdr-runs/session-7-9/manifest.json
 ```
+
+
+## Session 2, part 6 — after Review P's fixes (`ea63b3a`)
+
+The owner: "推奨通りにしてください" (design-notes §14). `tx.rs` changed (a send cut short, the held sample), so every stage again, logs in `~/ezsdr-bench/s2-reviewP/`; the release server rebuilt from `ea63b3a` for B7 (Python). My first attempt at this pass ran no Rust stage (a wrong path in my runner script); while clearing it I deleted, without looking first, the 17 root-level `~/ezsdr-bench/hw_*.log` that its `mv` had swept in. Each was the copy of the last pass's log — every pass ran `hw.sh`, which writes the root log, then `cp`'d it into its `s2-*` directory, and part 5 ran all 17 — so the same logs remain in `~/ezsdr-bench/s2-reviewO/`.
+
+### Two failures that are not this change's
+
+**B2 — `hw_b2_authority`: the test passed, then the process aborted at exit** (first of the pass; never seen before in about ten B2 runs, `s2-fixed`'s eight loops included):
+
+```
+B2 anchor drift over 10.001079333s: 1911 ticks
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 23.05s
+double free or corruption (out)
+error: test failed, to rerun pass `-p ezsdr-radio-uhd --test hardware`
+Caused by:
+  process didn't exit successfully: `/cargo-target/release/deps/hardware-4fa4ba8ce0a41e45 hw_b2_authority --exact --ignored --nocapture --quiet` (signal: 6, SIGABRT: process abort signal)
+```
+
+Eight reruns (`hw_b2_authority.loop1.log` … `loop8.log`): all pass, none aborts. This commit does not touch `uhd.rs` or `authority.rs`. INFERRED cause, recorded as a finding (design-notes §14, D-1) and not fixed: `DeviceAuthority`'s `drop` only sets its stop flag and does not join its `uhd-clock` thread, which every 100 ms (`REANCHOR`) upgrades a weak reference to the device time and reads the device; when the test returns while that thread holds the device, the process can exit with it still in UHD, or free the `uhd_usrp` on that thread while UHD's static destructors run.
+
+**B8 leads — `hw_b8_leads`: the reference PLL did not lock** (UR-7; part 3's finding), twice: on its 4th device open, and on the rerun's 3rd. The second rerun passed:
+
+```
+called `Result::unwrap()` on an `Err` value: "UR-7: uhd_usrp_set_clock_source: UHD error 44: RuntimeError: Reference Clock PLL failed to lock to internal source."
+called `Result::unwrap()` on an `Err` value: "UR-7: uhd_usrp_set_clock_source: UHD error 44: RuntimeError: Reference Clock PLL failed to lock to internal source."
+```
+
+In this pass 2 of 56 device opens failed this way (part 3: 2 of about 24).
+
+### B8 leads — second rerun: pass
+
+```
+B8 lead 10000 µs: TIME_ERROR []
+B8 lead 5000 µs: TIME_ERROR []
+B8 lead 3000 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(40000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(3141)}}]
+B8 lead 2000 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(1292000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(2031)}}]
+B8 lead 1500 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(1543000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(1567)}}]
+B8 lead 1000 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(2232000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(1070)}}]
+B8 lead 500 µs: TIME_ERROR [Object {"cause": String("late"), "late_by_ns": Number(2742000), "outcome": String("drop"), "target": Object {"domain": Object {"local": Number(4), "node": Number(0)}, "ticks": Number(522)}}]
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 53.92s
+```
+
+### The rest: pass
+
+```
+B6: transmit-to-receive delay 44 samples
+B6 repeat: 3 whole periods from sample 44 (offset, gain, phase °): [(44, 0.01545647, 27.83225), (1044, 0.0154486215, 27.652273), (2044, 0.0154524455, 27.582119)]
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 7.55s
+B8 burst at a sent burst's end, trial 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; 7.640935 ms before A's end; TIME_ERROR [ …
+B8 burst at a sent burst's end, trial 1: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; 7.83131 ms before A's end; TIME_ERROR [] …
+B8 burst at a sent burst's end, trial 2: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; 7.68624 ms before A's end; TIME_ERROR [] …
+B8 burst one sample after a burst, booked late false: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR []; async [{"cha …
+B8 burst one sample after a burst, booked late true: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR []; async [{"chan …
+B8 burst one sample after a burst, booked late false: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR []; async [{"cha …
+B8 burst one sample after a burst, booked late true: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR []; async [{"chan …
+```
+
+```
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(0.07541) ms after e₁; switch 49.664 ms before e₂; LATE_COMMAND 0
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 1: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(-0.063695) ms after e₁; switch 49.687 ms before e₂; LATE_COMMAND 0
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 2: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(-0.01191) ms after e₁; switch 49.890 ms before e₂; LATE_COMMAND 0
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 3: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(0.052155) ms after e₁; switch 49.796 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 400000 S/s, block_len Some(100), packet 1996, phase 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 58.110 ms (floor 58.110 ms); untimed stop Some(1.232675) ms after e₁; switch 48.512 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 400000 S/s, block_len Some(100), packet 1996, phase 1: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 58.111 ms (floor 58.110 ms); untimed stop Some(0.551845) ms after e₁; switch 48.924 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 400000 S/s, block_len Some(100), packet 1996, phase 2: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 58.111 ms (floor 58.110 ms); untimed stop Some(4.361855) ms after e₁; switch 45.363 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 400000 S/s, block_len Some(100), packet 1996, phase 3: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 58.112 ms (floor 58.110 ms); untimed stop Some(2.76301) ms after e₁; switch 46.951 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 2000000 S/s, block_len Some(65536), packet 1996, phase 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 220.773 ms (floor 220.772 ms); untimed stop Some(4.105195) ms after e₁; switch 45.700 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 2000000 S/s, block_len Some(65536), packet 1996, phase 1: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 220.774 ms (floor 220.772 ms); untimed stop Some(3.20607) ms after e₁; switch 46.377 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 2000000 S/s, block_len Some(65536), packet 1996, phase 2: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 220.773 ms (floor 220.772 ms); untimed stop Some(1.244475) ms after e₁; switch 48.147 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 2000000 S/s, block_len Some(65536), packet 1996, phase 3: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 220.772 ms (floor 220.772 ms); untimed stop Some(1.2458) ms after e₁; switch 48.033 ms before e₂; LATE_COMMAND 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 82.62s
+```
+
+- B1, B3, B4, B5 (restart gap 455.7 ms at 10 Msps), B6 (delay 44 samples; the repeat's three periods at 44, 1 044, 2 044), B7 (Rust), B8 preemption (20 ms played), B8 stop end, `hw_b8_burst_at_a_sent_burst_s_end` (booked 7.6–7.8 ms before A's end, played, no `TIME_ERROR`), `hw_b8_burst_one_sample_after_a_burst` (4 of 4 played), both `cold_change_capture` tests, `hw_b9_long_receive` (`DEVICE_LOST []`, overflows 0) and `hw_b9_transmit_only_session` pass.
+- O-B2 at the extremes again: `e₁` at its floor, the switch 45.4–49.9 ms before `e₂`, no `LATE_COMMAND`; the untimed stop at most 4.4 ms after `e₁`.
+- NB-1's path (a send cut short) cannot be produced on the bench: the X300 took every send. The held sample's order (TG-1) is one sample in 31 000, below what the 30 dB loop's correlation resolves; both are pinned on `FakeDevice` (design-notes §14).
+
+B7 (Python), `minimal.py` and `bench_loopback.py`:
+
+```
+captured 100000 samples, mean power 0.0001
+Manifest: /bench/ezsdr-runs/session-7-12/manifest.json (3 logged calls)
+sample rate 20000000.0 S/s (coerced, a new SampleClock)
+the transmit retune outside the RF envelope was refused: radio.rf_envelope: RM-19: radio: 2400000000 Hz is in no allowed band
+y: correlation peak at sample 1881; z: at sample 10009
+rec_0: first sample {'domain': {'node': 0, 'local': 3}, 'ticks': 54539}
+rec_1: first sample {'domain': {'node': 0, 'local': 3}, 'ticks': 179411}
+asked: y at {'domain': {'node': 0, 'local': 2}, 'ticks': 411648095}, z at {'domain': {'node': 0, 'local': 2}, 'ticks': 436622508}
+TIME_ERROR events: 0 (spike K6: none)
+Manifest: /bench/ezsdr-runs/session-7-13/manifest.json
+```
