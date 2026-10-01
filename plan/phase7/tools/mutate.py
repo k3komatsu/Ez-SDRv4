@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Phase 7 mutation checks (plan/phase7/00-overview.md GZ-6, 19-amendments.md
-Appendix A, 18-uhd-radio.md §8); Phase 6's tool with its phase directory changed and
+Appendix A, design/18-uhd-radio.md §8); Phase 6's tool with its phase directory changed and
 `.claude` (a clone's worktrees) left out of the copy.
 
 Copies the repository into a scratch directory, and there, for each mutation in the

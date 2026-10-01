@@ -2,9 +2,9 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted at Gate P** (owner, 2026-09-27, as recommended; [`00-overview.md`](00-overview.md) §11); **implemented** on 2026-09-27 (the owner: "Phase 7を実装してください"; 00-overview §9 steps 1–6, [`design-notes.md`](design-notes.md) §6), not yet reviewed (Review L); earlier the same day: "実装はしないで". Reviewed by Review J and revised for every finding; re-reviewed by Review K ([`design-notes.md`](design-notes.md) §4, §5). Amended on 2026-09-30 for a bench of one CBX (the owner: "UBX2枚での試験ではなくCBX1枚でループバックで可能なように内容を修正してください"): the profile `x310-cbx` 0.1.0 and UR-5's front-end check ([`design-notes.md`](design-notes.md) §9); then, the same day, for one OBX ("了解ですOBXに切り替えてください"): the profile `x310-obx` 0.1.0, the bench's (§10). Moves to `design/18-uhd-radio.md` at Step X (GZ-7). |
+| Status | Accepted at Gate X (owner, 2026-10-01: "終わったらmainへmergeしてください．そしてGate Xを受理します"; [`plan/phase7/00-overview.md`](../plan/phase7/00-overview.md) §11) and moved here at Step X. Normative for `crates/ezsdr-radio-uhd`. Its record — the design reviews J and K, the implementation reviews L–T, the bench session on an X300 + OBX and the design changes it caused — stays in [`plan/phase7/`](../plan/phase7/00-overview.md): [`design-notes.md`](../plan/phase7/design-notes.md) §6–§20, [`bench-results.md`](../plan/phase7/bench-results.md). Accepted at Gate P on 2026-09-27. |
 | Scope | One Module with two roles — a Radio Provider of the `radio` Vocabulary 1.3.0 and a device-paced Time Authority — for one USRP X310 with two UBX, one OBX or one CBX daughterboard per Run: its device boundary, its bridge to UHD, its profiles `x310-ubx`, `x310-obx` and `x310-cbx` 0.1.0, its Authority, its Provider's lifecycle, receive and transmit paths, parameter updates, events and Manifest sections, its test double `FakeDevice`, and its hardware tests. |
-| Not in scope | A second device per Run; a USRP2 profile; RFNoC Replay, DDC/DUC and FFT capabilities; `extensions.uhd.*`; GPIO and Peripherals (Phase 9); a transmit port (Phase 10) ([`00-overview.md`](00-overview.md) §3). |
+| Not in scope | A second device per Run; a USRP2 profile; RFNoC Replay, DDC/DUC and FFT capabilities; `extensions.uhd.*`; GPIO and Peripherals (Phase 9); a transmit port (Phase 10) ([`00-overview.md`](../plan/phase7/00-overview.md) §3). |
 | Crate | `crates/ezsdr-radio-uhd`, library `ezsdr_radio_uhd`. Depends on `ezsdr-kernel`, `ezsdr-radio`, `ezsdr-hostmem`, `serde_json`. Feature `uhd` (off by default) compiles `src/uhd.rs` and links `libuhd` (UR-35). |
 | Depends on | Specs 01–07, 09 (for the values it shares with MockRadio's `x310-like`), 10, and spec 19's KG-1…KG-14 and VE-1…VE-3. |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
@@ -385,7 +385,7 @@ The acceptance rehearsal (`crates/ezsdr-acceptance/tests/uhd.rs`) is listed in t
 
 ## 9. Vision issues found
 
-1. **§35's "narrow native C++ bridge"** is UHD's own C API (§2): Ettus maintains a C interface that already translates every exception into a status and exposes only POD types and opaque handles. The Vision should say that the bridge may be UHD's C API, so that "write our own C++ shim" does not read as required ([`vision-issues.md`](vision-issues.md) issue 1).
+1. **§35's "narrow native C++ bridge"** is UHD's own C API (§2): Ettus maintains a C interface that already translates every exception into a status and exposes only POD types and opaque handles. The Vision should say that the bridge may be UHD's C API, so that "write our own C++ shim" does not read as required ([`vision-issues.md`](../plan/phase7/vision-issues.md) issue 1).
 
 ## 10. Deferred
 

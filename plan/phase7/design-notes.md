@@ -1,6 +1,6 @@
 # Phase 7 — design notes
 
-What the design of [`00-overview.md`](00-overview.md), [spec 18](18-uhd-radio.md) and [spec 19](19-amendments.md) was checked against, what writing it found, and what Review J found and how each finding was answered. The design stopped short of code at first (the owner's instruction, 2026-09-27: "設計だけで止めてください．ただし，設計は詳しく設計してください"); the implementation followed the same day, and §6 records where it departs from the text.
+What the design of [`00-overview.md`](00-overview.md), [spec 18](../../design/18-uhd-radio.md) and [spec 19](19-amendments.md) was checked against, what writing it found, and what Review J found and how each finding was answered. The design stopped short of code at first (the owner's instruction, 2026-09-27: "設計だけで止めてください．ただし，設計は詳しく設計してください"); the implementation followed the same day, and §6 records where it departs from the text.
 
 ## 1. The state the design starts from
 

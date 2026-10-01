@@ -86,7 +86,7 @@ The exact scheduling algorithm is not fixed by this Vision.
 
 An Island is declared in the BindingProfile — an Executor binding, the components placed on it, optional affinity, real-time policy and batch size — and admission checks it without creating, merging or moving one. Every stepped instance implements `step(until)`, which consumes and emits everything at or before `until`, nothing after, and never blocks. The Kernel coordinator owns the loop on one logical thread: the Authority's `next_wakeup` sets the instant, and `step` runs over every stepped instance in a fixed order (Providers, then Executors, then Sinks, each by instance id) until none progresses; the Simulation Engine decides the instants, and the fixed order keeps determinism independent of assembly order. In the Simulation class every stepped Provider, Executor and Sink is stepped, and each deterministic Link operation applies its declared drop-class policy in virtual time (Phase 2); in RealtimeEmulation stepped Providers are wall-paced while Executors and Sinks run on threads; in HardwareInLoop and Hardware, Islands run on real threads with their declared affinity and RT policy. Without this, "deterministic runs reproduce with a seed" (§58) is a wish: threads and lossy Probe links make event order a coin toss.
 
-Normative: [design/05-module-api.md](../05-module-api.md), rules MA-20, MA-22, MA-30, MA-38…MA-40.
+Normative: [design/05-module-api.md](../05-module-api.md), rules MA-20, MA-22, MA-30, MA-38…MA-40; [design/06-kernel-coordinator.md](../06-kernel-coordinator.md), KC-46 (the data thread of the device-paced classes).
 
 Within an Island the Executor schedules; between Islands only DataLinks and Event/Action queues exist, and cycles are allowed only through the latter (§19).
 
@@ -158,7 +158,7 @@ SoapySDR
 
 ## UHD
 
-USRP support should use a narrow native C++ bridge to UHD unless a mature Rust UHD interface becomes clearly superior.
+USRP support should use a narrow native C++ bridge to UHD unless a mature Rust UHD interface becomes clearly superior. UHD's own C API (`uhd.h`) is such a bridge: every entry point catches the exceptions UHD throws to it and returns a status, and only POD types and opaque handles cross it — though an exception thrown out of one of UHD's own destructors still ends the process, which the Provider avoids by never freeing a device it has lost.
 
 The bridge should:
 
@@ -172,6 +172,8 @@ The bridge should:
 Expert UHD extensions remain available when needed. Custom RFNoC blocks are reached through `extensions.uhd.rfnoc.*`.
 
 The UHD Provider runs **in-process** in v4.0: the sample path must not cross an IPC boundary. UHD can throw or abort; the bridge translates every exception into a typed status, and a device that disappears becomes a `DEVICE_LOST` event that the Run's Policy table maps to `abort` with full cleanup (§53). v3 handled the same situation by restarting the whole server behind a `--retry` flag; v4 makes it a Kernel policy. An out-of-process (remote) Radio Provider that implements the same Radio contract over shared memory remains possible later, because buffers are handles (§23), not slices (§62).
+
+Normative: [design/18-uhd-radio.md](../18-uhd-radio.md).
 
 ## SoapySDR
 

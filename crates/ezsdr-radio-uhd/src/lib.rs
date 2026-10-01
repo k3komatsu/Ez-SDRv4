@@ -1,4 +1,4 @@
-//! Ez-SDR v4 Module `ezsdr.radio.uhd` 0.1.0 (plan/phase7/18-uhd-radio.md): a Radio
+//! Ez-SDR v4 Module `ezsdr.radio.uhd` 0.1.0 (design/18-uhd-radio.md): a Radio
 //! Provider and a device-paced Time Authority for one USRP X310 per Run, on UHD's own
 //! C API. Everything but [`open`]'s device runs on [`FakeDevice`] without hardware.
 #![deny(unsafe_code)]
