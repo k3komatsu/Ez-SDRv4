@@ -1050,3 +1050,112 @@ asked: y at {'domain': {'node': 0, 'local': 2}, 'ticks': 411648095}, z at {'doma
 TIME_ERROR events: 0 (spike K6: none)
 Manifest: /bench/ezsdr-runs/session-7-13/manifest.json
 ```
+
+
+## Session 2, part 7 — after Review Q's fixes (`bd8151c`); the reference PLL
+
+The owner: "推奨ですすめてください" (design-notes §15). Every stage again, then `hw_b2_authority` twenty times for D-1; logs in `~/ezsdr-bench/s2-reviewQ/`, the release server rebuilt from `bd8151c`. The runner's summary, as printed:
+
+```
+hw_b1_probe exit=0
+hw_b2_authority exit=0
+hw_b3_receive_at_t0 exit=0
+hw_b4_capture_at_a_sample_index exit=0
+hw_b5_overflow exit=0
+hw_b6_txrx_and_repeat exit=0
+hw_b7_session_loopback exit=0
+hw_b8_leads exit=0
+hw_b8_preemption exit=0
+hw_b8_stop_end exit=0
+hw_b8_burst_at_a_sent_burst_s_end exit=0
+hw_b8_burst_one_sample_after_a_burst exit=0
+hw_b8_cold_change_capture exit=0
+hw_b8_cold_change_capture_low_rate exit=0
+hw_b8_cold_change_timing_at_the_extremes exit=101
+hw_b9_long_receive exit=0
+hw_b9_transmit_only_session exit=0
+server build exit=0
+b7 minimal exit=0
+b7 bench_loopback exit=0
+b2 loop1 exit=0 abort=0
+b2 loop2 exit=0 abort=0
+b2 loop3 exit=0 abort=0
+b2 loop4 exit=0 abort=0
+b2 loop5 exit=101 abort=0
+b2 loop6 exit=0 abort=0
+b2 loop7 exit=0 abort=0
+b2 loop8 exit=0 abort=0
+b2 loop9 exit=0 abort=0
+b2 loop10 exit=0 abort=0
+b2 loop11 exit=0 abort=0
+b2 loop12 exit=0 abort=0
+b2 loop13 exit=0 abort=0
+b2 loop14 exit=0 abort=0
+b2 loop15 exit=0 abort=0
+b2 loop16 exit=0 abort=0
+b2 loop17 exit=0 abort=0
+b2 loop18 exit=0 abort=0
+b2 loop19 exit=0 abort=0
+b2 loop20 exit=0 abort=0
+```
+
+### D-1: no abort in 21 B2 runs
+
+`hw_b2_authority` passed in the pass and in 19 of the 20 loops; loop 5 failed on the reference PLL (below) before it ran. No run aborted at exit (`double free`, `SIGABRT`: 0 in every log). Part 6 saw one abort in about twenty runs, so twenty clean runs alone show little; the fix rests on the fake tests that failed on the old code (design-notes §15).
+
+### The reference PLL: 4 failures in 66 opens, the extremes test not passed
+
+`hw_b8_cold_change_timing_at_the_extremes` failed three times running, each on a device open that did not lock (on its 6th, its 3rd, and its first open); B2's loop 5 failed the same way:
+
+```
+called `Result::unwrap()` on an `Err` value: "UR-7: uhd_usrp_set_clock_source: UHD error 44: RuntimeError: Reference Clock PLL failed to lock to internal source."
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(0.077325) ms after e₁; switch 49.562 ms before e₂; LATE_COMMAND 0
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 1: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(0.11933) ms after e₁; switch 49.488 ms before e₂; LATE_COMMAND 0
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 2: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(0.04455) ms after e₁; switch 49.705 ms before e₂; LATE_COMMAND 0
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 3: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(0.074065) ms after e₁; switch 49.794 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 400000 S/s, block_len Some(100), packet 1996, phase 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 58.112 ms (floor 58.110 ms); untimed stop Some(1.355245) ms after e₁; switch 48.248 ms before e₂; LATE_COMMAND 0
+called `Result::unwrap()` on an `Err` value: "UR-7: uhd_usrp_set_clock_source: UHD error 44: RuntimeError: Reference Clock PLL failed to lock to internal source."
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 75.35s
+called `Result::unwrap()` on an `Err` value: "UR-7: uhd_usrp_set_clock_source: UHD error 44: RuntimeError: Reference Clock PLL failed to lock to internal source."
+called `Result::unwrap()` on an `Err` value: "UR-7: uhd_usrp_set_clock_source: UHD error 44: RuntimeError: Reference Clock PLL failed to lock to internal source."
+```
+
+The five phases it reached before failing are as in parts 5 and 6 (`e₁` at its floor, the switch 48.2–49.8 ms before `e₂`, no `LATE_COMMAND`).
+
+**The device's state has changed since the handoff.** B1 reads the motherboard's `ref_locked` sensor right after the open, before any source is set:
+
+| Pass | B1 `ref_locked` | Device opens | PLL lock failures |
+|---|---|---|---|
+| part 3 (`s2-fixed`) | `Some(true)` | 39 | 3 |
+| part 4 (`s2-reviewN`) | `Some(true)` | 34 | 0 |
+| part 5 (`s2-reviewO`) | `Some(false)` | 48 | 0 |
+| part 6 (`s2-reviewP`) | `Some(false)` | 63 | 2 |
+| part 7 (`s2-reviewQ`) | `Some(false)` | 66 | 4 |
+
+The cause is not known (INFERRED candidates: the X300's temperature after a day of runs, its reference oscillator or PLL). Nothing in the code reads or sets the reference differently since part 4. The hardware runs stop here, as the session's instructions say for a device in a state other than the handoff's; the owner is asked.
+
+### The rest: pass
+
+```
+B6: transmit-to-receive delay 44 samples
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 9.57s
+B8 burst at a sent burst's end, trial 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; 7.87021 ms before A's end; TIME_ERROR [] …
+B8 burst at a sent burst's end, trial 1: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; 7.64496 ms before A's end; TIME_ERROR [] …
+B8 burst at a sent burst's end, trial 2: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; 7.64791 ms before A's end; TIME_ERROR [] …
+B8 burst one sample after a burst, booked late false: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR []; async [{"cha …
+B8 burst one sample after a burst, booked late true: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR []; async [{"chan …
+B8 burst one sample after a burst, booked late false: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR []; async [{"cha …
+B8 burst one sample after a burst, booked late true: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR []; async [{"chan …
+B5 gap OverflowRestart at receive sample 11108408 for 4684057 samples (468.4057 ms at 10 Msps), lost Some(4684057)
+B9 long receive: Ok(()); termination Stopped { cause: Client }; DEVICE_LOST []; overflows 0; stats {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":600011,"rx_errors":0,"rx_off_lattice":0,"rx_ove …
+```
+
+B1, B3, B4, B7 (Rust), B8 leads, preemption, stop end, both `cold_change_capture` tests and `hw_b9_transmit_only_session` pass. B7 (Python):
+
+```
+the transmit retune outside the RF envelope was refused: radio.rf_envelope: RM-19: radio: 2400000000 Hz is in no allowed band
+y: correlation peak at sample 2635; z: at sample 1301
+rec_0: first sample {'domain': {'node': 0, 'local': 3}, 'ticks': 54700}
+rec_1: first sample {'domain': {'node': 0, 'local': 3}, 'ticks': 180034}
+TIME_ERROR events: 0 (spike K6: none)
+```
