@@ -1,0 +1,33 @@
+{
+  "$defs": {
+    "TxUnderflowCause": {
+      "description": "Why a transmit stream underflowed (RM-11, VE-3).",
+      "oneOf": [
+        {
+          "const": "starved",
+          "description": "The device ran out of samples inside a burst because the host was late.",
+          "type": "string"
+        },
+        {
+          "const": "lost",
+          "description": "Samples of a burst were lost between host and device.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`radio.TX_UNDERFLOW` data (RM-11, VE-3).",
+  "properties": {
+    "cause": {
+      "$ref": "#/$defs/TxUnderflowCause",
+      "description": "Why (RM-11)."
+    }
+  },
+  "required": [
+    "cause"
+  ],
+  "title": "TxUnderflowPayload",
+  "type": "object"
+}

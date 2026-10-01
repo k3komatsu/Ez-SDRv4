@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ezsdr_kernel::event::EventKind;
@@ -13,6 +14,7 @@ use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::{ClockDomain, ClockRegistry, EpochRef, Rational, TimePoint};
 use ezsdr_server::protocol::{ErrorKind, ProtocolError, Reply, ReplyFrame, Request, Response};
+use ezsdr_radio_uhd::{Device, FakeConfig, FakeDevice};
 use ezsdr_server::{Config, Exit, Handled, Server, serve};
 use serde_json::json;
 
@@ -34,7 +36,7 @@ impl Drop for TempDir {
 }
 
 fn config(dir: &Path) -> Config {
-    Config { runs_dir: dir.to_path_buf(), implementations: Vec::new() }
+    Config::new(dir.to_path_buf())
 }
 
 fn ok(handled: Handled) -> Response {
@@ -179,7 +181,7 @@ fn ea_03_handshake() {
     let handled = server.handle(Request::Hello { protocol: 1 }, Vec::new());
     assert!(!handled.exit);
     let Response::Hello { protocol, server: name, kernel_api } = ok(handled) else { panic!() };
-    assert_eq!((protocol, name.as_str(), kernel_api.as_str()), (1, "ezsdr-server 0.1.0", "4.0.0"));
+    assert_eq!((protocol, name.as_str(), kernel_api.as_str()), (1, "ezsdr-server 0.2.0", "4.0.0"));
 
     let handled = Server::new(config(&temp.0)).handle(Request::Hello { protocol: 2 }, Vec::new());
     assert!(handled.exit);
@@ -642,4 +644,352 @@ fn ea_15_a_manifest_that_cannot_be_written_is_still_returned() {
     let Response::Finished { manifest, path } = ok(handled) else { panic!() };
     assert_eq!(path, None, "the write failed (Review I, P2-7)");
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
+}
+
+// ---------------------------------------------------------------- Phase 7 (VE-5, VE-6)
+
+/// A Session profile on one USRP whose binding is also the Authority (VE-5, UR-6).
+fn uhd_profile(dir: &Path) -> serde_json::Value {
+    json!({
+        "version": 1,
+        "bindings": {
+            "radio": {
+                "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 1, "patch": 0 } },
+                "profile": { "name": "x310-ubx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+                "selector": { "args": "addr=192.0.2.1" }
+            },
+            "rec": {
+                "module": { "id": "ezsdr.sink.capture", "version": { "major": 1, "minor": 2, "patch": 0 } },
+                "selector": { "dir": dir.to_string_lossy() },
+                "feed": { "port": { "component": "radio", "port": "rx" }, "policy": "drop_oldest", "capacity": 64 }
+            }
+        },
+        "authority": "radio",
+        "placements": { "links": [{
+            "link": { "id": "ezsdr.link.host", "version": { "major": 1, "minor": 0, "patch": 0 } },
+            "from": { "component": "radio", "port": "rx" },
+            "to": { "component": "rec", "port": "in" }
+        }] },
+        "environment": {
+            "ezsdr.time": { "class": "hardware_in_loop", "start_lead_ns": 2_000_000_000u64 },
+            "ezsdr.rf_path": { "path": "cabled" },
+            "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 999_000_000.0, "hi_hz": 1_001_000_000.0 }], "max_gain_db": 0.0, "tx_enabled": [true] }
+        }
+    })
+}
+
+/// A server whose devices are `FakeDevice`s, counting the opens (VE-5; GZ-9).
+fn fake_server(dir: &Path) -> (Server, Arc<AtomicU64>) {
+    let opened = Arc::new(AtomicU64::new(0));
+    let count = opened.clone();
+    let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| {
+        count.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(FakeDevice::new(FakeConfig::default())) as Arc<dyn Device>)
+    });
+    let mut server = Server::new(Config { open_device: Some(open), ..config(dir) });
+    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    (server, opened)
+}
+
+fn fake_session(dir: &Path) -> (Server, Arc<AtomicU64>) {
+    let (mut server, opened) = fake_server(dir);
+    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(dir)), lease: None }, Vec::new())) else { panic!("connect") };
+    (server, opened)
+}
+
+fn status(server: &mut Server) -> (TimePoint, Rational, usize) {
+    let Response::Status { now, root_rate, events, .. } = ok(server.handle(Request::Status {}, Vec::new())) else { panic!() };
+    (now, root_rate, events)
+}
+
+/// Captures `n` samples at `at` and returns the written artifact (EA-17).
+fn capture_at(server: &mut Server, n: i64, at: TimePoint) -> ezsdr_kernel::manifest::ArtifactRef {
+    let (_, _, events) = status(server);
+    let SessionAction::Vocabulary { ns, verb, target, params, .. } = capture(n) else { unreachable!() };
+    let entry = submit(server, SessionAction::Vocabulary { ns, verb, target, at: Some(at), params }, Vec::new());
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
+    let Response::Waited { event: Some(event), .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: events, within_ns: Some(3_000_000_000), until: None }, Vec::new())) else { panic!("no capture") };
+    serde_json::from_value::<ezsdr_sink::CaptureWrittenPayload>(event.payload).unwrap().artifact
+}
+
+/// The instant on the primary root of an artifact's first sample (TM-13d).
+fn first_on_root(manifest: &Manifest, artifact: &ezsdr_kernel::manifest::ArtifactRef) -> i64 {
+    let map = &artifact.continuity[0];
+    let clock = manifest.clocks.sample_clocks.iter().find(|record| record.domain == map.domain).expect("the capture's SampleClock");
+    assert_eq!(clock.root_ticks_per_tick.den(), 1);
+    clock.origin.ticks + map.first.ticks * clock.root_ticks_per_tick.num() as i64
+}
+
+fn complex(bytes: &[u8]) -> Vec<(f32, f32)> {
+    bytes.chunks_exact(8).map(|b| (f32::from_le_bytes(b[..4].try_into().unwrap()), f32::from_le_bytes(b[4..].try_into().unwrap()))).collect()
+}
+
+#[test]
+fn ea_07_a_uhd_profile_without_the_feature_is_refused() {
+    let temp = TempDir::new("uhd-refused");
+    let mut server = greeted(&temp.0);
+    let error = err(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new()));
+    assert_eq!(error.kind, ErrorKind::Refused);
+    if cfg!(feature = "uhd") {
+        // UHD's own refusal: nothing answers at TEST-NET-1.
+        assert!(error.message.starts_with("EA-7: radio: uhd_usrp_make: "), "{}", error.message);
+    } else {
+        assert_eq!(error.message, "EA-7: ezsdr.radio.uhd: this server was built without UHD; rebuild ezsdr-server with --features uhd");
+    }
+}
+
+#[test]
+fn ea_07_a_session_on_the_fake_device() {
+    let temp = TempDir::new("uhd-session");
+    let (mut server, opened) = fake_session(&temp.0);
+    assert_eq!(opened.load(Ordering::SeqCst), 1);
+    let wave: Vec<u8> = ramp(1_000);
+    assert!(matches!(submit(&mut server, set("radio.tx.channels", Value::Int(1)), Vec::new()).outcome, Outcome::Admitted { .. }));
+    assert!(matches!(submit(&mut server, repeat(), wave.clone()).outcome, Outcome::Admitted { .. }));
+    let (now, _, _) = status(&mut server);
+    // The repeat starts within a restart lead (50 ms); a capture 100 ms ahead is inside it.
+    let artifact = capture_at(&mut server, 3_000, TimePoint::new(now.domain, now.ticks + 20_000_000));
+    let captured = complex(&read(&mut server, &artifact.uri));
+    let sent = complex(&wave);
+    assert_eq!(captured.len(), 3_000);
+    // The fake loops transmit to receive sample for sample (UR-33): the waveform, repeated.
+    let offset = (0..1_000).find(|k| captured[0] == sent[*k]).expect("the capture holds the waveform");
+    for (index, sample) in captured.iter().enumerate() {
+        assert_eq!(*sample, sent[(offset + index) % 1_000], "captured sample {index}");
+    }
+    let (manifest, _) = finish(&mut server);
+    assert_eq!(manifest.run.execution_class, ezsdr_kernel::module_api::ExecutionClass::HardwareInLoop);
+}
+
+#[test]
+fn ea_07_the_uhd_authority_takes_the_binding_s_sources() {
+    // UR-6, UR-7: the server builds the Authority with the binding's time source, which
+    // sets the device's time at the next PPS (Review L, L13).
+    let temp = TempDir::new("uhd-sources");
+    let device = Arc::new(FakeDevice::new(FakeConfig::default()));
+    let held = device.clone();
+    let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| Ok(held.clone() as Arc<dyn Device>));
+    let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
+    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    let mut profile = uhd_profile(&temp.0);
+    profile["bindings"]["radio"]["selector"]["time_source"] = json!("external");
+    ok(server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new()));
+    let calls = device.calls();
+    assert!(calls.iter().any(|c| c == "set_sources internal external"), "{calls:?}");
+    assert!(calls.iter().any(|c| c == "set_time_zero pps"), "{calls:?}");
+    finish(&mut server);
+}
+
+#[test]
+fn ea_07_the_device_is_released_when_the_session_ends() {
+    // D-1 (ezsdr-radio-uhd's design-notes §15): once the Session has ended no thread holds
+    // the device — no Provider thread and no `uhd-clock` — so the server's exit, on the
+    // thread that served it, cannot race UHD's static teardown with a device call or the
+    // device's free.
+    let temp = TempDir::new("uhd-released");
+    let made = Arc::new(std::sync::Mutex::new(std::sync::Weak::<FakeDevice>::new()));
+    let keep = made.clone();
+    let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| {
+        let device = Arc::new(FakeDevice::new(FakeConfig::default()));
+        *keep.lock().unwrap() = Arc::downgrade(&device);
+        Ok(device as Arc<dyn Device>)
+    });
+    let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
+    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new()));
+    assert!(matches!(submit(&mut server, set("radio.tx.channels", Value::Int(1)), Vec::new()).outcome, Outcome::Admitted { .. }));
+    assert!(matches!(submit(&mut server, repeat(), ramp(1_000)).outcome, Outcome::Admitted { .. }));
+    finish(&mut server);
+    assert!(made.lock().unwrap().upgrade().is_none(), "a thread still holds the device after the Session ended");
+}
+
+/// A server whose `n`th open (0-based) gives a device whose reference does not lock,
+/// for each `n` in `unlocked`; counts the opens.
+fn unlocking_server(dir: &Path, unlocked: &'static [u64]) -> (Server, Arc<AtomicU64>) {
+    let opened = Arc::new(AtomicU64::new(0));
+    let count = opened.clone();
+    let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| {
+        let n = count.fetch_add(1, Ordering::SeqCst);
+        let faults = if unlocked.contains(&n) { vec![ezsdr_radio_uhd::FakeFault::ReferenceDoesNotLock] } else { Vec::new() };
+        Ok(Arc::new(FakeDevice::new(FakeConfig { faults, ..FakeConfig::default() })) as Arc<dyn Device>)
+    });
+    let mut server = Server::new(Config { open_device: Some(open), ..config(dir) });
+    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    (server, opened)
+}
+
+const UNLOCKED: &str = "EA-7: radio: UR-7: the reference clock did not lock to its internal source within UHD's 30 s; connecting again usually succeeds (";
+
+#[test]
+fn ea_07_a_reference_that_does_not_lock_refuses_the_connect_with_its_reason() {
+    // UR-7 (ezsdr-radio-uhd's design-notes §18): opened again once, and the second open's
+    // reference does not lock either: the client is told so.
+    let temp = TempDir::new("uhd-unlocked");
+    let (mut server, opened) = unlocking_server(&temp.0, &[0, 1]);
+    let error = err(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new()));
+    assert_eq!(error.kind, ErrorKind::Refused);
+    assert!(error.message.starts_with(UNLOCKED), "{}", error.message);
+    assert_eq!(opened.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn ea_07_a_reference_that_locks_on_the_reopen_connects() {
+    // UR-7's reopen: the first open's reference does not lock, the second's does; the
+    // Session runs, and its Manifest records the reopen with the first error.
+    let temp = TempDir::new("uhd-reopened");
+    let (mut server, opened) = unlocking_server(&temp.0, &[0]);
+    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new())) else { panic!("connect") };
+    assert_eq!(opened.load(Ordering::SeqCst), 2);
+    let (manifest, _) = finish(&mut server);
+    let timing = &manifest.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
+    let reopened = timing.as_array().unwrap().iter().find(|r| r["what"] == "reopened_on_unlock").unwrap_or_else(|| panic!("{timing}"));
+    assert!(reopened["first_error"].as_str().unwrap().starts_with("UR-7: the reference clock did not lock"), "{reopened}");
+}
+
+#[test]
+fn ea_07_the_reopen_can_be_switched_off() {
+    // UR-7's reopen is the binding's to refuse: `reopen_on_unlock: false` refuses at the
+    // first open's failure.
+    let temp = TempDir::new("uhd-no-reopen");
+    let (mut server, opened) = unlocking_server(&temp.0, &[0]);
+    let mut profile = uhd_profile(&temp.0);
+    profile["bindings"]["radio"]["selector"]["reopen_on_unlock"] = json!(false);
+    let error = err(server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new()));
+    assert!(error.message.starts_with(UNLOCKED), "{}", error.message);
+    assert_eq!(opened.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn ea_07_a_lost_device_ends_the_session_with_its_manifest() {
+    // Review S, TG-S3 (F4): a device lost during a Session stops the Run by Policy; Finish
+    // still returns the Manifest and writes it, and the device was marked lost first.
+    let temp = TempDir::new("uhd-lost");
+    let device = Arc::new(FakeDevice::new(FakeConfig { faults: vec![ezsdr_radio_uhd::FakeFault::Lost(std::time::Duration::from_millis(3_000))], ..FakeConfig::default() }));
+    let held = device.clone();
+    let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| Ok(held.clone() as Arc<dyn Device>));
+    let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
+    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new())) else { panic!("connect") };
+    let lost = EventKind::parse(EventKind::DEVICE_LOST).unwrap();
+    let _ = server.handle(Request::WaitFor { kinds: vec![lost], from: 0, within_ns: Some(5_000_000_000), until: None }, Vec::new());
+    let (manifest, path) = finish(&mut server);
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: EventKind::parse(EventKind::DEVICE_LOST).unwrap() } });
+    assert!(Path::new(&path).exists(), "{path}");
+    assert!(device.calls().iter().any(|c| c == "mark_lost"), "{:?}", device.calls());
+}
+
+#[test]
+fn ea_07_two_uhd_bindings_are_refused() {
+    let temp = TempDir::new("uhd-two");
+    let (mut server, opened) = fake_server(&temp.0);
+    let mut profile = uhd_profile(&temp.0);
+    profile["bindings"]["second"] = profile["bindings"]["radio"].clone();
+    let error = err(server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new()));
+    assert_eq!(error.kind, ErrorKind::Refused);
+    assert_eq!(error.message, "EA-7: one USRP per Run in this server (Phase 7)");
+    assert_eq!(opened.load(Ordering::SeqCst), 0, "refused before any device opens");
+}
+
+#[test]
+fn ea_09_the_configured_default_profile_is_used() {
+    let temp = TempDir::new("configured-default");
+    let mut profile = ezsdr_server::default_profile(&temp.0.to_string_lossy());
+    profile["environment"]["sim.seed"] = json!(7);
+    let path = temp.0.join("lab.json");
+    std::fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
+    let mut server = Server::new(Config { default_profile: Some(path), ..config(&temp.0) });
+    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    let Response::Connected { profile: used, .. } = ok(server.handle(Request::Connect { profile: None, lease: None }, Vec::new())) else { panic!() };
+    assert_eq!(used, profile);
+    finish(&mut server);
+
+    let missing = temp.0.join("missing.json");
+    let mut server = Server::new(Config { default_profile: Some(missing.clone()), ..config(&temp.0) });
+    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    let error = err(server.handle(Request::Connect { profile: None, lease: None }, Vec::new()));
+    assert_eq!(error.kind, ErrorKind::Refused);
+    assert!(error.message.starts_with(&format!("EA-9: {}: ", missing.display())), "{}", error.message);
+}
+
+#[test]
+fn ea_09_the_binary_reads_ezsdr_profile() {
+    let temp = TempDir::new("binary-profile");
+    let mut profile = ezsdr_server::default_profile(&temp.0.to_string_lossy());
+    profile["environment"]["sim.seed"] = json!(11);
+    let path = temp.0.join("lab.json");
+    std::fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ezsdr-server"))
+        .arg("--runs-dir")
+        .arg(&temp.0)
+        .env("EZSDR_PROFILE", &path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut ask = |request: &str| {
+        stdin.write_all(request.as_bytes()).unwrap();
+        stdin.flush().unwrap();
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        serde_json::from_str::<ReplyFrame>(&line).unwrap().reply
+    };
+    assert!(matches!(ask(HELLO), Reply::Result(Response::Hello { .. })));
+    let Reply::Result(Response::Connected { profile: used, .. }) = ask("{\"request\":{\"op\":\"connect\"}}\n") else { panic!() };
+    assert_eq!(used, profile);
+    assert!(matches!(ask("{\"request\":{\"op\":\"finish\"}}\n"), Reply::Result(Response::Finished { .. })));
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn ea_12_status_carries_the_root_rate() {
+    let temp = TempDir::new("root-rate");
+    let (mut server, _) = connected(&temp.0);
+    let (_, rate, _) = status(&mut server);
+    assert_eq!(rate, Rational::new(1_000_000_000, 1).unwrap());
+    let Reply::Result(response) = server.handle(Request::Status {}, Vec::new()).reply else { panic!() };
+    assert_eq!(serde_json::to_value(response).unwrap()["root_rate"], json!({ "num": 1_000_000_000u64, "den": 1 }));
+    finish(&mut server);
+}
+
+#[test]
+fn ea_14_a_child_of_a_device_paced_session_opens_no_device() {
+    let temp = TempDir::new("uhd-child");
+    let (mut server, opened) = fake_session(&temp.0);
+    let Response::Ran { entry, manifest: None, path: None } = ok(run_child(&mut server, receive_spec(1_000), None, Some(10_000_000))) else { panic!() };
+    let Outcome::Rejected { violations } = entry.outcome else { panic!("{:?}", entry.outcome) };
+    assert!(violations[0].reason.contains("KG-12"), "{}", violations[0].reason);
+    assert_eq!(opened.load(Ordering::SeqCst), 1, "only the parent's device was opened");
+    finish(&mut server);
+}
+
+#[test]
+fn ea_17_a_capture_ahead_starts_at_its_instant() {
+    let temp = TempDir::new("uhd-ahead");
+    let (mut server, _) = fake_session(&temp.0);
+    let (now, rate, _) = status(&mut server);
+    // 50 ms of the root, from its rate: a client's `after(0.05)` (VE-6).
+    let ahead = i64::try_from((50 * u128::from(rate.num())).div_ceil(1_000 * u128::from(rate.den()))).unwrap();
+    let at = TimePoint::new(now.domain, now.ticks + ahead);
+    let artifact = capture_at(&mut server, 1_000, at);
+    let (manifest, _) = finish(&mut server);
+    let first = first_on_root(&manifest, &artifact);
+    let n = manifest.clocks.sample_clocks.iter().find(|r| r.domain == artifact.continuity[0].domain).unwrap().root_ticks_per_tick.num() as i64;
+    assert!(first >= at.ticks && first < at.ticks + n, "the first sample at {first}, asked {}", at.ticks);
+}
+
+#[test]
+fn ea_17_a_capture_at_a_passed_instant_says_where_it_started() {
+    let temp = TempDir::new("uhd-passed");
+    let (mut server, _) = fake_session(&temp.0);
+    let (now, rate, _) = status(&mut server);
+    let back = i64::try_from((20 * u128::from(rate.num())).div_ceil(1_000 * u128::from(rate.den()))).unwrap();
+    let at = TimePoint::new(now.domain, now.ticks - back);
+    let artifact = capture_at(&mut server, 1_000, at);
+    let (manifest, _) = finish(&mut server);
+    let first = first_on_root(&manifest, &artifact);
+    // The samples at `at` were delivered before the request arrived: it starts later.
+    assert!(first > at.ticks, "the first sample at {first}, asked {}", at.ticks);
+    assert_eq!(artifact.continuity[0].end.ticks - artifact.continuity[0].first.ticks, 1_000, "the map names the samples it holds");
 }

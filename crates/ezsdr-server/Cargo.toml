@@ -1,6 +1,6 @@
 [package]
 name = "ezsdr-server"
-version = "0.1.0"
+version = "0.2.0"
 description = "Ez-SDR v4 server: runs one Session for a client over the protocol ezsdr.protocol 1 (design/16-easy-api.md)"
 edition.workspace = true
 rust-version.workspace = true
@@ -21,9 +21,14 @@ ezsdr-mock-radio = { path = "../ezsdr-mock-radio" }
 ezsdr-link-host = { path = "../ezsdr-link-host" }
 ezsdr-sink-capture = { path = "../ezsdr-sink-capture" }
 ezsdr-exec-native = { path = "../ezsdr-exec-native" }
+ezsdr-radio-uhd = { path = "../ezsdr-radio-uhd" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 schemars = "1.2.2"
+
+[features]
+# Links libuhd: the catalogue opens real USRPs (VE-5; spec 18 UR-2).
+uhd = ["ezsdr-radio-uhd/uhd"]
 
 [dev-dependencies]
 ezsdr-kernel = { path = "../ezsdr-kernel", features = ["testing"] }

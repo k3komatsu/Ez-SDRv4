@@ -1,4 +1,4 @@
-# Ez-SDR v4 — Handoff (2026-09-27)
+# Ez-SDR v4 — Handoff (2026-09-28)
 
 次のセッション（人間・AI どちらでも）が最初に読む現状メモ．設計の中身は書かない．どこに何があり，何が終わっていて，次に何をするかだけ．
 開発時の恒常的なルールは [AGENTS.md](AGENTS.md)．
@@ -31,7 +31,7 @@
 - v3 の更新を取り込むときの取得元は `origin` ではなく `k3komatsu/Ez-SDR`（例：`git fetch git@github.com:k3komatsu/Ez-SDR.git master`）．
 - `~/work` は Google Drive で同期していない．Drive 上にあった頃（〜2026-09-27）は同期で追跡ファイルが消えることがあった（2026-09-24 に `crates/ezsdr-kernel/tests/` と `schemas/` の 61 ファイルが消え，`git restore` で戻した）．clone を Drive 配下へ戻すなら，作業前に `git status --short` に ` D` 行がないことを確かめる．
 
-## 2. 設計文書の状態 — Phase 0・1・2・3・4・5・6 完了，Phase 7 は設計のみ（Gate P 受理，未実装）
+## 2. 設計文書の状態 — Phase 0・1・2・3・4・5・6 完了，Phase 7 は実装済み（Review L・M 済み，実機セッションと Gate X 待ち）
 
 - 単一の設計ソース = **Vision**：索引 [Ez-SDR_v4_ARCHITECTURE_VISION.md](Ez-SDR_v4_ARCHITECTURE_VISION.md) + [design/vision/](design/vision) の 11 part（§1–§68，番号は不変）．
 - [design/v4-vision-audit.md](design/v4-vision-audit.md)（Findings 1–34，判定 READY WITH REQUIRED CHANGES）→ 全項目を Vision に反映済み．
@@ -42,7 +42,7 @@
 
 ## 3. 実装の状態
 
-現在（2026-09-27，Phase 6 Step X 後の `618ae4a`）の状態：
+現在（2026-09-27，Phase 6 Step X 後の `618ae4a`）の状態．Phase 7 の実装（branch `worktree-phase7-impl`，未 merge）で変わったものは §4「Phase 7」を見ること：
 
 | | |
 |---|---|
@@ -100,7 +100,7 @@ Phase 5（2026-09-26，Review F/G の修正込み）：1.85.0 / stable とも 64
 
 Phase 3 の時点：`kernel_surface` は `116 NEW / 292 public items`（KB-1 の `module_api::InputStore` の 1 つだけ増えた）．mutation は Appendix C 83/83 + Review C の fix-check 15/15 + Gate X の fix-check 4/4 killed．
 
-## 4. Phase の状態 — Phase 1・2・3・4・5・6 完了（Gate X受理），Phase 7 設計済み（Gate P 受理，未実装）
+## 4. Phase の状態 — Phase 1・2・3・4・5・6 完了（Gate X受理），Phase 7 実装済み（Gate P 受理，Review L・M 済み，実機・Gate X 待ち）
 
 ### Phase 1 — specs 受理・Kernel 実装済み
 
@@ -258,7 +258,191 @@ Vision §67 の Phase 3（SimulationChannel + deterministic Runs）．計画は 
 
 **Phase 7 へ持ち越すもの**（Phase 6）：実機（wall-paced）での `sleep` と `capture` の間の往復遅延と「今から d 秒後」を返す補助（`00-overview.md` §3），`run_child` 中に親のデバイスを止めるか（S5 の ceiling），remote listener と server 所有のプロファイル・認証（S9），`body_bytes` の上限．
 
-### Phase 7 — 設計のみ（Gate P 受理，未実装）
+### Phase 7 — 実装済み（2026-09-27〜28，branch `worktree-phase7-impl`，`origin` へ push 済み，`main` へは未 merge）
+
+owner の依頼（「Phase 7を実装してください」，続けて「終わったらサブエージェントOpus 5.5にレビューさせて，修正してください．修正が大規模なら再レビュー，小規模で低リスクならそれで終わりです」）で，00-overview §9 の手順 1–6 を実装し，Opus のレビューを 2 回回した．commit（`main` の `25e79f3` から）：
+
+| commit | 中身 |
+|---|---|
+| `3172a1f` | 手順 1–2：Kernel KG-1…KG-14（device-paced class，data thread，KC-21a/KC-24a，MA-8 の強制，T0 の格子，TM-18 の relation，child Run 拒否），`radio` 1.3.0（`device` module：Grid，DeviceDescription，RM-26），MockRadio 1.3.0 |
+| `27065e7` | 手順 3–4：`crates/ezsdr-radio-uhd`（Module `ezsdr.radio.uhd` 0.1.0：`Device` trait と `FakeDevice`，`DeviceAuthority`，`UhdRadio` の 3 thread，profile `x310-ubx`，feature `uhd` の `src/uhd.rs`（unsafe はここだけ，GZ-3），`tests/fake.rs`・`uhd_api.rs`・`hardware.rs`（全部 `#[ignore]`）） |
+| `2c4a8ae` | 手順 5：server 0.2.0（catalogue に UHD，`Config.open_device`・`default_profile`，binary の `EZSDR_PROFILE`，`status.root_rate`，device-paced の child は KG-12 で拒否），Python 0.2.0（`sleep`/`wait_until` が時刻を返す，`Session.after`，`examples/bench_loopback.py`），acceptance `tests/uhd.rs`（§59 の rehearsal を FakeDevice で），design/16 |
+| `89f02b7` | 手順 6：mutation（`plan/phase7/tools/`，Appendix A と spec 18 §8）．`mutate.py` は timeout で process group ごと kill するよう直した |
+| `e2d4d26` | Review L（CHANGES_REQUIRED：P0 3・P1 8・P2 19）の修正：streamer の二重 free，UR-12 の rate 規則（512 中 487 を拒否していた），0 channel からの受信開始時刻，受信 timed stop の早すぎる発行，UHD のエラー文，preempt 時の end-of-burst，テスト多数．大規模なので再レビュー |
+| `9b79b58` | Review M（同じ reviewer の再レビュー：P0 0・P1 2・P2 8）の修正：遅れた timed stop を missed start と取り違えて受信を再開していた件，1.85 で flaky だった `ur_21` など．小規模・局所的なので owner の規則どおり再レビューせず終了 |
+| `def6dc9`，`3ffb3bd` | 実機検証の手順（この節の下），UHD 4.10 の Docker 環境と devcontainer |
+| `09f11b4`，`15f0c61` | 実機を **X310 + CBX 1枚のループバック** に変更（owner，2026-09-30：「UBX2枚での試験ではなくCBX1枚でループバックで可能なように内容を修正してください」）：profile `x310-cbx` 0.1.0（1 channel，1.2–6 GHz，既定 2.45 GHz），UR-5 が front end 名と channel 数を実機と照合，テストは device の front end から profile を選ぶ．Opus レビュー（P2 5 件）の修正．[design-notes.md](plan/phase7/design-notes.md) §9 |
+| （最後の commit） | 実機を **X310 + OBX 1枚のループバック** に再変更（owner，同日：「了解ですOBXに切り替えてください」）：profile `x310-obx` 0.1.0（1 channel，10 MHz–8.4 GHz，既定 1 GHz，UBX と同じ timed tune の位相同期）．`x310-cbx` は予備として残す．design-notes §10 |
+
+状態（`9b79b58`）：`cargo test --workspace` 839 passed（stable と 1.85.0，libuhd なしでもビルド可），clippy `-D warnings` clean（feature `uhd` の有無とも），`cargo test -p ezsdr-radio-uhd --features uhd` は libuhd 4.10 のこの Mac で通る（実機なし），Python 23 件（3.9/3.13），mutation は `plan/phase7/tools/mutations.json` の 114 行（G09 だけ black-box では勝てない race として記録）．実装が spec と違うところは [design-notes.md](plan/phase7/design-notes.md) §6，Review L・M の全指摘と対応は §7・§8，レビュー本文は [reviews/](plan/phase7/reviews)．
+
+注意：scratch copy を共有 target dir でビルドしたあと worktree をビルドすると，mutation 入りの成果物が再利用されることがある（Review L の修正中に 1 回起きた）．ビルド前に必ず `find crates schemas python Cargo.toml Cargo.lock -type f -exec touch {} +`．
+
+残り：実機セッション（下の「Phase 7 の実機検証」，別エージェントが Linux サーバーで行う），branch を `main` へ入れる判断（`main` が `25e79f3` のままなら fast-forward），Gate X（owner），Step X（spec 18 を `design/` へ，Vision の issue 適用）．
+
+### Phase 7 の実機検証 — 次の工程（別エージェント向け，Linux サーバー + USRP X310 + OBX 1枚のループバック）
+
+owner の指示（2026-09-28）：「実機では別のlinuxサーバーでUSRPを使うので，pushしておいてください．また実機検証は別エージェントで実施することになるので，handoffにも次の工程を細かく書いておいて」．この節だけで作業を始められるように書く．手順の本体は [plan/phase7/bench.md](plan/phase7/bench.md)（B0–B9，合格条件と記録する値）で，ここはその実行計画と，bench.md に書いていない実装側の事情．
+
+#### 引き継ぎ（2026-09-30 セッション 1 → 次のセッション）
+
+owner の依頼（2026-09-30）：「引き継ぎに必要な情報をまとめてどこかに保存しておいて」．次のセッションは `usrp-lnx02` の上で立つ（owner：「一旦家に帰るので，ssh先で別のセッションを立てようと思います」）．**この小節だけで再開できる**ように書く．結果の本体は [plan/phase7/bench-results.md](plan/phase7/bench-results.md)．
+
+**1. 実機と環境（すべて確認済み）**
+
+| 項目 | 値 |
+|---|---|
+| サーバー | `usrp-lnx02`（Ubuntu 24.04.4，x86_64，20 core）．Mac からは `ssh usrp-lnx02`（port 10022，user `komatsu`）．**sudo はパスワードが要る**：sudo の要る操作は owner に頼む |
+| clone | `~/works/Ez-SDRv4`，branch `worktree-phase7-impl`（origin を追跡，`9344952` 以降）．作業前に `git pull --ff-only` |
+| Rust / UHD | ホストには **Rust が無く，UHD は apt の 4.6（OBX を知らない）**．すべて Docker image `ezsdr-v4-dev:uhd4.10`（`docker/uhd4.10/Dockerfile`，サーバーで build 済み，UHD 4.10.0.0，Rust stable と 1.85.0）の中で行う．`komatsu` は `docker` group なので sudo 不要 |
+| build 出力 | Docker volume `ezsdr-v4-cargo-target`（`/cargo-target`，ツリーの外，AGENTS.md §7）．release の `ezsdr-server --features uhd` は `/cargo-target/release/ezsdr-server` に build 済み |
+| 装置 | **USRP X300**（serial 347D545），**FPGA は UHD 4.10 の HG image**（2026-09-30 に `uhd_image_loader` で書き換え，電源を入れ直した．owner 承認済み．もう書き換えないこと：ホストの UHD 4.6 からはこの X300 を使えなくなっている） |
+| daughterboard | slot A **OBX**（`OBX RX`/`OBX TX`），slot B 空（UHD は unknown board の channel 1 として数える：2 + 2 channel が正常）．profile は自動で `x310-obx` |
+| RF | OBX の TX/RX → SMA + 30 dB 減衰器 → OBX の RX2（owner 確認済み，bench.md の RF 安全条件を満たす）．利得 0 dB，振幅 ≤ 0.5，1 GHz（envelope 999–1001 MHz） |
+| ネットワーク | X300 の 10 GbE（X300 側 port 1，HG image）↔ サーバー NIC（Intel X710）**port 0 `enp2s0f0np0`**，`192.168.40.10/24`，MTU 9000（NetworkManager「USRP 10Gb(40)」，自動接続）．**`ARGS=addr=192.168.40.36`**（192.168.40.2 ではない）．port 1 `enp2s0f1np1` は `192.168.44.10/24`（別サブネット，使わない）．`net.core.wmem_max` 33 554 432・`rmem_max` 50 000 000（owner が設定済み．再起動で消えるかは未確認） |
+| 記録 | 各テストの全出力はサーバーの `~/ezsdr-bench/<名前>.log`，B7 用の Session profile は `~/ezsdr-bench/bench-session.json`（作成済み），Python の Manifest は `~/ezsdr-bench/ezsdr-runs/` |
+
+**2. 実行の形**（`-w /work` を忘れない．セッション 1 は `/bench` から cargo を呼んで B6–B8 を空振りした）
+
+```sh
+cd ~/works/Ez-SDRv4
+docker run --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(id -u):$(id -g)" \
+  -v "$PWD:/work" -v "$HOME/ezsdr-bench:/bench" -v ezsdr-v4-cargo-target:/cargo-target -w /work \
+  -e EZSDR_UHD_ARGS=addr=192.168.40.36 ezsdr-v4-dev:uhd4.10 \
+  cargo test -q --release -p ezsdr-radio-uhd --features uhd --test hardware <test> -- --ignored --nocapture \
+  > ~/ezsdr-bench/<test>.log 2>&1
+```
+
+Python の B7 は同じ container を `-w /bench -e PYTHONPATH=/work/python -e EZSDR_SERVER=/cargo-target/release/ezsdr-server -e EZSDR_PROFILE=/bench/bench-session.json` で，`python3 /work/python/examples/minimal.py` と `bench_loopback.py`（`PYTHONDONTWRITEBYTECODE=1`）．装置の確認は `docker run --rm --network=host ezsdr-v4-dev:uhd4.10 uhd_usrp_probe --args addr=192.168.40.36`．落とし穴：長い出力は `| cut` などで受けると最後まで届かないことがあったので，ファイルに書いてから読む．リンクが上がった直後の `uhd_find_devices` は空振りすることがある（数秒待って再実行）．
+
+**3. 済んだこと**（詳細と数値は bench-results.md）
+
+- B0（native x86_64 で 847 passed，stable と 1.85.0），B1（`x310-obx`，時刻 ±1 % 以内），B2（lateness 中央値 557 µs），B3（read-back 差 0），B4（先頭 sample 50 000），B5（1 s の stall で overrun）：**合格**．
+- Python の B7：実行済み（`TIME_ERROR` 0 件，20 Msps への丸め）．
+- 見つかったこと 3 件：(a) B3 で X300 が連続受信の **timed stop を守らず**，UR-25 の untimed 切り替えが働いた（B8 の受信 stop 測定で確かめる），(b) B5 で UHD の overrun 再開後の block 2 179 個が格子外（UR-17 の丸めで処理，推測），(c) `bench_loopback.py` が **受信**周波数を変えているので RF envelope に拒否されない（RM-19 は送信だけを制限する．直すのは例）．
+
+**4. 次にやること（この順）**
+
+1. `git pull --ff-only`．
+2. B6 `hw_b6_txrx_and_repeat`，Rust の B7 `hw_b7_session_loopback`，B8 `hw_b8_leads` を上の形で実行し，bench-results.md に記録（B8 は bench.md の表の一部しか実装されていない：下の B8 の行を参照）．
+3. `python/examples/bench_loopback.py` の `sdr.rx.frequency = 2.4e9` を `sdr.tx.frequency = 2.4e9` に直す（bench.md「If a step fails」に従い，直す前に記録済み．例なので fake のテストは不要）．commit・push し，Python の B7 をやり直す．EA-17（`z` が `t` から始まるか）を Manifest の時刻から出す．
+4. B5 の restart gap の長さを記録していない：`rehearse_overflow` か `hw_b5_overflow` に `println!` を足して再実行（テストコードの追加は可）．
+5. B9：owner に 10 GbE ケーブルを抜いてもらう手作業（受信 Run 中．送信だけの Session での抜線はテスト未実装）．その後 B3–B7 を再実行し偽の `DEVICE_LOST` がないことを確認．USRP2 があれば `hw_b9_usrp2_probe`．
+6. `plan/spikes/2026-09-26-uhd.md` 末尾の表を埋め，この節と bench-results.md を更新して commit・push．Gate X の材料（00-overview §10，criterion 9 は B0–B8 の合格，`plan/phase7/exit-review/` は未作成）を owner に渡す．
+
+**4a. セッション 2（2026-09-30，`usrp-lnx02` 上の Claude Code）でしたこと**
+
+- 上の 4. の 2–4 は済み：B6 合格（テストの相関を直してから．遅延 44 samples），Rust の B7 合格，`bench_loopback.py` を送信周波数に直して Python の B7 合格（`rf_envelope` が拒否），EA-17 は「`z` は `t` から始まる」，B8 は実行（3 ms 以下は UR-21 が受け取り時に捨てるので device lead そのものは測れていない），B5 の restart gap は 456 ms（大半は stall，UHD の再開は ≤ 約 67 ms）．（「受信の timed stop は 9 回中 9 回守られなかった」と書いたのは誤り：それらの Run では timed stop は device に出ていない．part 2 で訂正）．詳細と出力は bench-results.md「Session 2」．
+- 直したのはテストコードだけ（Module のコードと profile の値は変えていない）．`cargo test --workspace` 849 passed，`--features uhd` 103 passed・10 ignored，clippy clean．
+- **push**：このサーバーの `origin` は HTTPS で認証情報がない．SSH は通るので `git push git@github.com:k3komatsu/Ez-SDRv4.git worktree-phase7-impl` で push し，`git fetch origin` で追跡を合わせた（remote の設定は変えていない）．
+- 次：B9 の抜線（owner がケーブルを抜く手作業．直前に止まって確認する），spike 表の記入，design-notes §11 の F1–F3 への owner の判断．
+
+**4b. セッション 2 part 2（owner が遠隔の間，手作業なしでできる確認をすべて）**
+
+- owner：「ちょっと今手元にUSRPがなくて遠隔でやってます．なので，とりあえず今のうちに今の状態でUSRPを使って確認しておいた方がいいことを考えて全部やってください」．
+- B8 の未実装の行を `Device` を直接叩くテスト（`hw_b8_raw_*`）と Module 経由のテストで測り，受信レート，レートごとの遅延，120 s の受信と 60 s の送信だけの Session（偽の `DEVICE_LOST` なし），60 s の drift も測った．最後に B1–B8 を `85ac77b` で通しで流し直して全部合格．結果は bench-results.md「Session 2, part 2」．
+- **設計を変える必要のある発見が 3 つ**（design-notes §11，owner の判断待ち，コードは未変更）：F1 X300 は受信の timed stop の時刻を無視して即時に止まる（FPGA source で VERIFIED）→ `cold` な受信変更で e1 前の約 50 ms が flag なしで欠ける；F2 その後の再開が 100 ms の receive timeout 待ちで e2 に遅れる；F3 前の burst の終わりの tick ちょうどに timed SOB を置くと device が late として捨てる（UR-23 の preemption がこの形）．FakeDevice はどれも実機より緩い．
+- 前の記録「受信の timed stop は 9/9 守られなかった」は誤りだったので訂正した（その Run では timed stop は device に出ていない）．
+
+**4c. F1–F3 の修正（owner：「F1-F3は推奨で」）**
+
+- `bc0db98`：FakeDevice を X300 と同じ厳しさにして 6 本の再現テストが落ちるのを確かめてから，uhd-rx は timed stop を出さず cut で untimed stop（F1），cut 待ちの間の `rx_recv` の timeout を cut + 1 block に（F2），uhd-tx は隙間 0 の次の burst を同じ device burst で続ける（F3）．spec 18 UR-17・UR-23〜26・UR-33・§6，mutations（124 行，変更したファイルの 31 行を再実行，R18 は取り下げ）．workspace 851 passed（stable と 1.85.0），clippy clean．
+- 実機（bench-results.md「Session 2, part 3」）：cold 変更で e₁ まで sample が届き e₂ に遅れず開始，20 ms の preemption の burst が再生される．B1–B8・B9 の長時間 Run・Python B7 すべて合格．
+- 新しい発見：X300 の ref PLL が `set_clock_source` で lock しないことが 2 回（約 24 回の open 中）．UR-7 で再試行するかは owner の判断待ち．
+- 次：B9 の抜線（owner が現地で），spike 表の記入，main への merge と Gate X（owner）．
+
+**4d. Review N〜R（Opus による修正のレビュー，2026-09-30〜10-01）**
+
+- Review N（F1–F3 の修正）→ `aaf1e00` で直し，Review O → `10ddb73`・`b3c94ba`（O-B1：burst の最後の 1 sample を手元に残して EOB を付ける．空の EOB は UHD が 0 の 1 sample にするので device burst が 1 sample 延びる，`hw_b8_raw_empty_eob_gap` で VERIFIED．O-B2：受信 cold 変更の e₁ を進行中の受信呼び出しの後ろへ）．Review P は blocker なし（`reviews/review-p.md`），P2 の指摘を owner の「推奨通りにしてください」で直した（design-notes §14）．
+- 記録：design-notes §12–§14，bench-results.md「Session 2」part 4–6，`reviews/review-n.md`・`review-o.md`・`review-p.md`．
+- Review Q → `bd8151c`（D-1：B2 が終了時に double free で 1 回異常終了．`DeviceAuthority` の drop が `uhd-clock` を join していなかった．fake で再現するテストを書いてから修正）．Review R は blocker なし，NB-R1・NB-R2 は記録のみ（owner），NB-R3・TG-R1 は owner の判断待ち（design-notes §16）．
+- **X300 の状態**：B1 の `ref_locked` が part 5 から false になり，ref PLL の lock 失敗が増えた（bench-results.md part 7）．owner が 2026-10-01 に **X300 の電源を落とした**．owner が戻したと言うまで実機は動かさない．
+- X300 は owner が電源を入れ直した（2026-10-01）．その後の全段は合格（part 8）．ref PLL の lock 失敗は open の約 4 %，`ref_locked` とは連動しない．
+- **B9 済み**（part 9）：抜線で X300 がプロセスごと落ちる F4（UHD の radio `deinit` が destructor から例外を投げる，gdb で VERIFIED）を `0c2ae4d` で直した（失われた device は free しない）．その後，受信・送信だけの両方で `DEVICE_LOST` → Policy で停止 → Manifest，ただし `DEVICE_LOST` まで 3–4 s／6.0 s，終了時に UHD の static teardown で abort（UR-29 に記録）．B3–B7 再実行で偽の `DEVICE_LOST` なし．USRP2 は不要（owner）．
+- Review S（F4 の修正と B9 のレビュー）：P1 の S-B1（気づいていない死んだ link は free される）を直した（読み出しが 1 s 失敗し続けたら lost，drop の前に 1 回読む，失った device は args ごとに覚えて次の open で片付ける）．UR-7 は lock 失敗の理由を文で返し，既定で 1 回開き直す（`reopen_on_unlock` で止められる）．design-notes §18・§19．
+- **B9 をスイッチ経由でも実施**（part 10，`8ebf593`）：送信だけの Session も S-B1 の規則（`UHD error 47`）で 3.0 s 後に `DEVICE_LOST`，受信は 1.10 s，同じプロセスでの開き直しも成功，どのプロセスも正常終了．現在の配線は PC → L2 スイッチ → X300．
+- Review T（`4fd2ec2`）は blocker なし．P2 を `1d3f382` で直し，直結で実機確認（part 11）：送信だけの抜線は新しい規則で 3.0 s，開き直しで保持していた device が 1 → 0（`reclaim` が free），正常終了．配線は直結に戻した．spike 表は記入済み（`80f947a`）．
+- 残り：NB-5（Phase 8 の parity），TG-4・TG-5（以前からのテストの穴），main への merge と Gate X（owner）．
+
+**5. 決まったこと・owner の判断待ち**
+
+- 決定済み（2026-09-30）：実機は **X300 + OBX 1枚のループバック**（UBX 2 枚 → CBX 1枚 → OBX と変更．profile `x310-obx`，`x310-cbx` は予備），X300 は X310 の代わりで可，FPGA 書き換え承認．
+- owner の判断待ち：`origin/main` は `87b9461`（AGENTS.md の更新）に進み，この branch は `25e79f3` から分かれている（`main` へ入れるのは fast-forward でなく merge か rebase）．Phase 8 の Mock 比較で OBX 用の Mock profile を作るか（MockRadio の `x310-like` は UBX の値），`radio` 語彙に phase `random` を足すか（`x310-cbx` の制約，§10 の design-notes）．
+
+**前提と規則**
+
+- **実機構成**（owner，2026-09-30）：X310（**X300 でも可**：UHD は同じ `x300` driver で扱い，違いは FPGA の大きさだけで，この実装はそれを使わない．コードも profile `x310-obx` も変更不要．FPGA image は X300 用（`uhd_image_loader` が `usrp_x300_fpga_XG.bit` を選ぶ）を入れる．bench.md 冒頭）の slot A に **OBX 1枚**．TX/RX を 30 dB 以上の減衰器を通して同じ OBX の RX2 へ（ループバック）．送信だけの段のために 50 Ω 終端．10 GbE（SFP+）の Linux PC．外部の 10 MHz/PPS は不要．**UHD 4.9 以上が必須**（OBX は 2025 年 6 月に UHD に入った．古い UHD では unknown board になり UR-5 が拒否する）ので Docker 環境（UHD 4.10）を使う．X310 の FPGA image もその UHD に合わせる．profile は `x310-obx` 0.1.0（1 channel，10 MHz–8.4 GHz，既定周波数 1 GHz）で，テストは UHD が報告する front end 名（`OBX…`）から自動で選ぶ．OBX が 2 枚あっても同じ profile で動く（使うのは channel 0）．途中まで CBX 1枚で準備したので `x310-cbx` も残っている（OBX の driver が不調なときの予備）．事情は [design-notes.md](plan/phase7/design-notes.md) §9・§10．
+- 作業するのは branch `worktree-phase7-impl`（`origin` にある，この節を書いた最後の commit 以降）．`main` にはまだ Phase 7 がない．この branch に commit して push してよい（v4 の作業なので `master` と v3 の tag には触れない，AGENTS.md §1）．`main` への merge は owner の判断なのでしない．
+- 実機で失敗したら，その場でコードを直さない（bench.md「If a step fails」）．`plan/phase7/bench-results.md` に出力ごと記録し，`FakeDevice` で再現するテストを先に書いてから直し，その段をやり直す．直したら `cargo test --workspace` を通して commit・push．
+- 設計を変える必要があると判断したら（INFERRED だった値が違う，規則が実機に合わない），実装より先に `plan/phase7/design-notes.md` に「§10 bench」節を作って記録し，owner に判断を仰ぐ．spec 18 の数値（device lead 2 ms，delivery allowance 3 ms，restart lead 50 ms，in-flight window 10 ms，release window 3 ms，queue depth 16）は Phase 8 の入力として **記録するだけ** で，profile の値はこの session では変えない（bench.md 冒頭，spec 18 §3）．
+- build 出力は作業ツリーの外に置く（`CARGO_TARGET_DIR` をツリー外に，AGENTS.md §7）．Python は `PYTHONDONTWRITEBYTECODE=1`．
+
+**0. 取得と環境（B0）**
+
+1. `git clone git@github.com:k3komatsu/Ez-SDRv4.git && cd Ez-SDRv4 && git switch worktree-phase7-impl`（`git log -1` がこの節を書いた commit 以降であること）．`v3/` は不要（`.gitignore` 済み）．
+2. **推奨：Docker の UHD 4.10 環境**（`docker/uhd4.10/Dockerfile`，VS Code なら `.devcontainer/`）．v3 の `docker/v3_prebuild` と同じ base image `ghcr.io/k3komatsu/uhd:v4.10`（Ubuntu 26.04，UHD 4.10.0.0 を `/usr/local` に source build，FPGA image 取得済み，Python 3.14 + numpy）に Rust stable と 1.85.0 を足しただけ．source は mount，build 出力は volume `/cargo-target`（`CARGO_TARGET_DIR` と `EZSDR_SERVER` は設定済み）：
+   ```sh
+   docker build -t ezsdr-v4-dev:uhd4.10 docker/uhd4.10
+   docker run -it --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 \
+       --user "$(id -u):$(id -g)" -v "$PWD:/work" -v ezsdr-v4-cargo-target:/cargo-target \
+       ezsdr-v4-dev:uhd4.10
+   ```
+   `--network=host` は X310 の 10 GbE に届くため，SYS_NICE と rtprio は UHD の streaming thread の優先度のため．MTU と `net.core.{r,w}mem_max`（下の 3.）は host 側で設定する（container の設定ではない）．devcontainer（VS Code の「Reopen in Container」か `npx @devcontainers/cli up --workspace-folder .`）は同じ引数で起動し，user `ubuntu`（UID は host に合わせられる），build 出力は別の volume `ezsdr-v4-devcontainer-target` に置く．この環境では `LD_LIBRARY_PATH` も `UHD_LIB_DIR` も要らない（`ldconfig` 済み，`pkg-config` が `/usr/local/lib` を返す）．下の 4. のコマンドはこの中でそのまま動く（`export CARGO_TARGET_DIR` は不要）．
+   - 2026-09-28 に Mac（arm64）上の amd64 emulation でこの image を build し，確認済み：`cargo test -p ezsdr-radio-uhd --features uhd --test uhd_api` 4 passed（x86_64 Linux での 69 関数の link と構造体サイズ 40/40/48/40），clippy `-D warnings`（feature `uhd`）clean，`ezsdr-server --features uhd` が `/usr/local/lib/libuhd.so.4.10.0` に link，Python 23 件 OK（3.14），devcontainer（`DOCKER_DEFAULT_PLATFORM=linux/amd64`）でも user `ubuntu` のまま `uhd_api` 4 passed．`cargo test --workspace --no-fail-fast` は 836 passed・3 failed で，落ちたのは wall-clock に依存するテストだけ：`fake.rs` の `rehearsal_b6`・`rehearsal_b7`，acceptance の `ea_07_a_session_on_the_fake_device`．`--test-threads=1` にすると別の 4 本（`ur_07_now_tracks…`，`ur_22`，`ur_23`，`ur_25_tx_channels_from_zero…`）が落ちる．B6 の中身は `TIME_ERROR late_at_device`（5.35 ms 遅れ）で，burst が `drop_and_flag` で捨てられていた．emulation では Mac native より 6 倍ほど遅く（`fake.rs` が 33 s → 194 s），落ちるテストが実行ごとに変わるので，emulation の遅さによるものと判断した（INFERRED）．実機の x86_64 では native に動くので，4. の `cargo test --workspace` が 839 passed になることを最初に確かめる．そこで落ちたら負荷の問題ではない可能性があるので，出力ごと記録する．
+   Docker を使わない場合：Rust は `rustup` で stable と `1.85.0`．UHD 4.x の開発用パッケージと pkg-config：Ubuntu なら `sudo apt install libuhd-dev uhd-host pkg-config`（または Ettus PPA）．`pkg-config --modversion uhd` と `uhd_config_info --version` を記録．
+   - `/usr/local` に source build した UHD なら `PKG_CONFIG_PATH=/usr/local/lib/pkgconfig` か `UHD_LIB_DIR=/usr/local/lib` で build，実行時は `sudo ldconfig` か `LD_LIBRARY_PATH=/usr/local/lib`（build.rs は rpath を付けない，UR-35）．
+   - **未確認**：UHD 4.10 以外の版（Linux での build と構造体サイズは上の Docker 環境の UHD 4.10 で確認済み）．`src/uhd.rs` は UHD 4.10 の header に対して手書きで 69 関数を宣言しているので，古い UHD（Ubuntu 22.04 の apt は 4.1 系）で link error が出たら，足りない関数名を記録し，UHD を 4.6 以上にするか owner に相談する．`tests/uhd_api.rs` の構造体サイズ（40/40/48/40）は arm64 macOS で測り，x86_64 Linux の UHD 4.10（Docker）でも一致した．別の UHD 版で違ったら **実機に進まず** 記録して止まる（C API の構造体が合わないと未定義動作）．
+3. ネットワークと装置（bench.md B0.2–B0.3）：X310 の 10 GbE port 0 を `192.168.40.2`，host NIC `192.168.40.1/24`，MTU 9000，`sudo sysctl -w net.core.rmem_max=33554432 net.core.wmem_max=33554432`．`uhd_find_devices --args addr=192.168.40.2`．FPGA image が合わなければ `uhd_image_loader`．master clock が 200 MHz でなければ device string に `master_clock_rate=200e6` を足す（UR-5 が 184.32 MHz を拒否する）．以下 `ARGS` はこの device string．
+4. ソフトだけの確認（RF なし）：
+   ```sh
+   export CARGO_TARGET_DIR=$HOME/.cache/cargo-target/Ez-SDRv4
+   cargo test --workspace                                  # 845 passed になるはず（libuhd を link しない）
+   cargo +1.85.0 test --workspace                          # 同じ（MSRV）
+   cargo test -p ezsdr-radio-uhd --features uhd            # fake 98（うち OBX 1枚の rehearsal 4，CBX 1枚の 1）+ uhd_api 4 が通り，hardware の 10 本は ignored
+   cargo clippy -p ezsdr-radio-uhd -p ezsdr-server --features ezsdr-radio-uhd/uhd,ezsdr-server/uhd --all-targets -- -D warnings
+   cargo build --release -p ezsdr-server --features uhd    # B7 用の server
+   ```
+   `tests/fake.rs` は wall-clock のテストが多い（1 回 33 s ほど）．負荷の高い機械で flaky なら記録（Review L・M で 2 本直した）．
+
+**1. 記録ファイル**
+
+`plan/phase7/bench-results.md` を作る（GZ-10）．冒頭に：装置の製品名（X300 か X310 か，`pp_string` に出る），commit hash，OS と kernel，CPU，NIC，`uhd_config_info --version`，FPGA image，`ARGS`，RF の配線（減衰量）．各段ごとに：実行したコマンド，合否，出力（`--nocapture` の `B<n> …` 行はそのまま貼る），bench.md の「Records」列の値．最後に `plan/spikes/2026-09-26-uhd.md` 末尾の表を埋める．
+
+**2. 実行順（bench.md の表どおり，順序に意味がある）**
+
+各段は `EZSDR_UHD_ARGS=$ARGS cargo test --release -p ezsdr-radio-uhd --features uhd --test hardware <test> -- --ignored --nocapture`．テスト本体は `crates/ezsdr-radio-uhd/tests/hardware.rs`，B3–B7 の中身は `tests/common/mod.rs` の `rehearse_*`（`tests/fake.rs` が同じ関数を `FakeDevice` で毎回走らせているので，fake で通っていることは確認済み）．
+
+| 段 | テスト | RF | 注意（実装側の事情） |
+|---|---|---|---|
+| B1 | `hw_b1_probe` | なし | `B1 profile: x310-obx` と，各 channel の front end 名（`OBX RX`・`OBX TX`）と channel 数（1 + 1 以上）が出ること．`x310-obx` でなければテストが失敗する（UHD の front end 名が `OBX` で始まっていない．`Unknown` なら UHD が 4.9 より古い）：名前を記録して止まる．UHD は空の slot B も unknown board の channel として数えるので，2 + 2 と出るのが正常．送信を始める前に，各 TX channel の周波数と利得をそのまま記録する（何も設定しない Session が引き継ぐ値，UR-25） |
+| B2 | `hw_b2_authority` | なし | 10 s 待つ．lateness の中央値 < 1 ms，最大 < 25 ms．`DeviceAuthority::failed_reads()`・`discarded_reads()` は Manifest に出ないので，出力に無ければテストに `println!` を足して記録してよい（test コードの追加は可） |
+| B3 | `hw_b3_receive_at_t0` | なし | `applied` と `timing` の section が出力される．周波数の read-back 差（K13：< 0.05 Hz 程度）を記録 |
+| B4 | `hw_b4_capture_at_a_sample_index` | なし | bench.md は Session の capture と書くが，実装は Spec の schedule で `sink.capture_samples` を sample 50 000 に置く形（`rehearse_capture_at_a_sample_index`）．合格条件（最初の sample が 50 000）は同じ |
+| B5 | `hw_b5_overflow` | なし | 300 ms → 1 s → 2 s の stall で overflow を起こす．どれでも起きなければ panic するので，そのときの `net.core.rmem_max` を記録 |
+| — | RF 安全 | — | ここから送信する．bench.md「RF safety」：TX/RX → 30 dB 以上の減衰 → RX2（同じ OBX），利得 0 dB，振幅 ≤ 0.5．周波数は `x310-obx` の既定 1 GHz（テストも B7 の `bench-session.json` も envelope は 999–1001 MHz）．ラボの都合で変えるなら，`crates/ezsdr-radio-uhd/src/profile.rs` で `x310-obx` に `x310-cbx` と同じ形の既定周波数を持たせ（10 MHz–8.4 GHz 内），bench.md の 2 つの JSON の envelope を一緒に変え，spec 18 UR-9 も直して commit する（テストの周波数と envelope はこの既定値に従う） |
+| B6 | `hw_b6_txrx_and_repeat` | あり | 相関で探すので，fake の「完全一致」は求めない（`exact = false`） |
+| B7 | Python（bench.md B7） | あり | `bench-session.json` を bench.md の JSON から作る（`<dir>` を実在の directory に，`args` を `ARGS` に）．`EZSDR_SERVER=$CARGO_TARGET_DIR/release/ezsdr-server EZSDR_PROFILE=bench-session.json PYTHONDONTWRITEBYTECODE=1 python3 python/examples/minimal.py`，次に同じ環境変数で `python3 python/examples/bench_loopback.py`．Rust 版 `hw_b7_session_loopback` もあり，こちらは実機では「`TIME_ERROR` がひとつもない」ことを要求する（fake では負荷のため 5 ms までの send_asap を許している，Review M） |
+| B8 | `hw_b8_leads` | あり | **実装は bench.md B8 の一部だけ**：burst を受信後 10, 5, 3, 2, 1.5, 1, 0.5 ms の lead で送り，各回の `TIME_ERROR` と `timing` を出す．表の残り（timed retune の lead，`cold` の restart lead 100/50/25/10 ms，`Stop` 後の送信終端，in-flight window 10/5/3/2 ms での underflow，preemption の bound，timed retune を何個積めるか（queue depth），receive の timed stop が効くか）は未実装．これらは Phase 8 の入力なので，`hardware.rs` に `hw_b8_*` を足して測るか（`#[ignore = "needs a USRP: see plan/phase7/bench.md"]` を付けること，governance の `gz_08` が検査する），測れなかったと記録する |
+| B9 | `hw_b9_unplug`（手動），`hw_b9_usrp2_probe` | なし | unplug は 60 s の受信 Run 中に 10 GbE を抜く．`DEVICE_LOST` が約 1 s 以内，termination が `Stopped { policy { DEVICE_LOST } }`．送信だけの Session での unplug は bench.md の表にあるがテストは未実装（`hw_b9_unplug` を真似て足すか記録）．USRP2 は `EZSDR_UHD_ARGS=addr=192.168.10.2` で `hw_b9_usrp2_probe`：UR-5 の拒否（100 MHz）を確認．最後に B3–B7 をもう一度流し，偽の `DEVICE_LOST` が出ないことを確認 |
+
+**3. 実機で特に見てほしい点（コードで INFERRED にしているもの）**
+
+- UR-25：X3x0 が continuous stream の **timed stop** を守るか．守らないと uhd-rx が「cut を越えた sample」を見て untimed stop に切り替え，`timing` に `rx_stop_untimed` が出る．`cold` の rate 変更（B7 の `sample_rate = 19.5e6`）で確認．
+- Review M P1-A：遅れた timed stream command が receive metadata の `LATE_COMMAND` で返るか（返れば `timing` に `rx_stop_late`）．
+- UR-24：stream command と retune が device の同じ queue に並ぶか（B8 の追加測定）．
+- UR-29：抜線でどの UHD error が出るか（`IO`/`USB`/`OS`/`RUNTIME`）．`RUNTIME` が streaming 中に偽陽性を出さないか（B9 の rerun）．
+- UR-3：thread 安全性（control call は mutex，streamer は 1 thread 所有）．クラッシュや `double free` のメッセージが出たら最優先で記録．
+- EA-17：B7 の `z = sdr.rx.capture(N, at=t)` が `t` から始まるか（`bench_loopback.py` が y と z の相関位置を出す）．
+- UR-9（`x310-obx`）：B3 の `applied` で周波数の read-back が 1 GHz に一致するか．B8 の lead と queue に積める timed tune の数は OBX の値として記録する（UBX と同じ MAX2871 系だが tune の実装は別なので，UBX の値とみなさない，design-notes §10）．
+- OBX の driver は新しい（UHD 4.9 から）：UHD の警告（特に `OBX` の「Unable to set dboard clock rate - phase will vary」）が出たら記録する．
+
+**4. 終わったら**
+
+1. `plan/phase7/bench-results.md` と `plan/spikes/2026-09-26-uhd.md` の表を commit・push（`docs(phase7): bench session`）．
+2. `handoff.md` のこの節を結果で更新（合否，Phase 8 への入力値，未測定の項目）．
+3. Gate X の判断材料をそろえて owner に渡す：00-overview §10 の exit criteria（criterion 9 は B0–B8 の合格），`plan/phase7/exit-review/`（OV-3 の rule disposition，まだ作っていない）は Gate X の前に必要．
+
+### Phase 7 — 設計（Gate P 受理）
 
 2026-09-27，owner の依頼（「Phase7の設計と実装を進めてください．実機がいる直前まで進めてください」）で着手し，途中で「設計だけで止めてください．ただし，設計は詳しく設計してください」と変更された．**コードは書いていない**（KG-4 の実装に着手した分は commit せず `git checkout` で戻した）．成果物はすべて [plan/phase7/](plan/phase7)（未 commit）：
 
@@ -267,7 +451,7 @@ Vision §67 の Phase 3（SimulationChannel + deterministic Runs）．計画は 
 | [00-overview.md](plan/phase7/00-overview.md) | 穴 19 件（spike K1–K13，Phase 2/4/6 からの持ち越し，設計中に見つけたもの）と証拠，範囲・範囲外，決定 T1–T18，crate 構成，GZ-1…GZ-10，テスト方針，Phase 8 への入力表，手順，exit criteria |
 | [19-amendments.md](plan/phase7/19-amendments.md) | spec 19：Kernel KG-1…KG-14（device-paced class を駆動，data thread，client 呼び出しなしで無線機を止める，KC-21a/KC-24a，MA-8 強制，T0 の格子，lead は dispatch から，TM-16c/TM-18/TM-13b/TM-13e/UC-3，child Run 拒否），Vocabulary/Module/frontend VE-1…VE-6（`radio` 1.3.0，MockRadio 1.3.0，server，Python の `after`），mutation 一覧 |
 | [18-uhd-radio.md](plan/phase7/18-uhd-radio.md) | spec 18：`ezsdr.radio.uhd` 0.1.0（UR-1…UR-35，U1–U14）。UHD の C API（feature `uhd`，unsafe は `src/uhd.rs` だけ），`Device` trait と `FakeDevice`，profile `x310-ubx` 0.1.0，device-paced Authority，送受信・更新・停止・事象・Manifest，テストと mutation |
-| [bench.md](plan/phase7/bench.md) | 実機セッションの手順 B0–B9（Linux PC + X310/UBX，RF 安全，プロファイル，各段の合格条件と記録） |
+| [bench.md](plan/phase7/bench.md) | 実機セッションの手順 B0–B9（Linux PC + X310 + OBX 1枚のループバック（2026-09-30 に UBX から CBX，さらに OBX へ変更），RF 安全，プロファイル，各段の合格条件と記録） |
 | [design-notes.md](plan/phase7/design-notes.md) | 確認した根拠，設計中の発見，Review J・K の全指摘と対応 |
 
 レビュー（luna-primary-engineer の手順を参考に Opus を subagent で）：**Review J**（CHANGES_REQUIRED：P0 4・P1 11・P2 23）→ 全件を文書で修正（大規模）→ **Review K**（同じ reviewer の再レビュー：新規 P0 1・P1 5・P2 14，J の未解決 1）→ 全件修正．K の修正は小規模（推奨修正そのもの，局所的）なので owner の規則どおり再レビューせず終了（理由は design-notes §5）．記録は [prompts/](plan/phase7/prompts)，[reviews/](plan/phase7/reviews)．
@@ -313,7 +497,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-1. **Phase 7 の実装**（owner の依頼があったとき）：Gate P 受理済みの [plan/phase7/](plan/phase7) に従い，00-overview §9 の手順 1–6（Kernel → radio/Mock → UHD crate → C API → server/Python/acceptance → mutation）を実装し，Review L（実装のレビュー），実機セッション（bench.md），Gate X．Phase 4・6 から持ち越した項目は 00-overview §2・§8 で全件に行き先を付けてある．
+1. **Phase 7 の仕上げ**（owner）：branch `worktree-phase7-impl` を `main` へ入れる判断，実機セッション（[bench.md](plan/phase7/bench.md) の B0–B9，結果は `bench-results.md`），Gate X，Step X．実装と Review L・M の記録は [plan/phase7/design-notes.md](plan/phase7/design-notes.md) §6–§8．
 2. **v4.0 凍結前にすること**：`Endpoint::EventIn` / `EventOut` の形（event edge は Phase 10），`ParamDecl.update_class` を optional にすること（以上 Phase 5 Gate X），Manifest の `spec.source`（Spec builder のソースハッシュ，Phase 6 Gate X，KF-4）．
 3. **Session replay と artifact store**：Phase 7 のあと frontend で（Phase 6 Gate X）．
 4. **Phase 10 へ持ち越すもの**（Phase 5）：event edge，component parameter を適用する Executor（UC-2…UC-6，MA-24），component の処理時間（budget）を仮想時間で課すこと，component parameter key の MA-34 検査，MA-30 の Action latency．

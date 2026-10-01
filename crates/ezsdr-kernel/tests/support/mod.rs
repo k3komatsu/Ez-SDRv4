@@ -13,6 +13,9 @@ pub use doubles::*;
 pub mod run_doubles;
 #[allow(unused_imports)]
 pub use run_doubles::*;
+pub mod paced;
+#[allow(unused_imports)]
+pub use paced::*;
 
 use std::collections::VecDeque;
 use std::sync::Mutex;

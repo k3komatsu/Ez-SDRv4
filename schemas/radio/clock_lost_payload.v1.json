@@ -1,0 +1,28 @@
+{
+  "$defs": {
+    "ClockReference": {
+      "description": "Which reference a device lost (RM-11, VE-3).",
+      "oneOf": [
+        {
+          "const": "frequency",
+          "description": "The frequency reference (10 MHz).",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`radio.CLOCK_LOST` data (RM-11, VE-3).",
+  "properties": {
+    "reference": {
+      "$ref": "#/$defs/ClockReference",
+      "description": "The reference lost (RM-11)."
+    }
+  },
+  "required": [
+    "reference"
+  ],
+  "title": "ClockLostPayload",
+  "type": "object"
+}

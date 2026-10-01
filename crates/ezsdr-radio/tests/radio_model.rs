@@ -11,8 +11,9 @@ use ezsdr_kernel::spec::{CoercionPolicy, Ident, Key, Namespace, Value, ValueKind
 use ezsdr_kernel::stream::LatePolicy;
 use ezsdr_kernel::time::TimePoint;
 use ezsdr_radio::payloads::{
-    CommandQueueFullPayload, CommandRejectedPayload, LateCommandPayload, RxOverflowCause,
-    RxOverflowPayload, TimeErrorCause, TimeErrorOutcome, TimeErrorPayload,
+    AlignmentErrorPayload, ClockLostPayload, ClockReference, CommandQueueFullPayload,
+    CommandRejectedPayload, LateCommandPayload, RxOverflowCause, RxOverflowPayload,
+    TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload,
 };
 use ezsdr_radio::{RfEnvelopeCheck, keys};
 use serde::{Serialize, de::DeserializeOwned};
@@ -80,7 +81,7 @@ fn rm_01_register_adds_the_descriptor_the_check_and_the_kinds() {
         .vocabulary(&Namespace::parse("radio").unwrap())
         .unwrap();
     assert_eq!(descriptor.id, Namespace::parse("radio").unwrap());
-    assert_eq!(descriptor.version, Version::new(1, 2, 0));
+    assert_eq!(descriptor.version, Version::new(1, 3, 0));
     assert_eq!(descriptor.prefix, Namespace::parse("radio").unwrap());
     assert_eq!(descriptor.checks, [Namespace::parse("radio.rf_envelope").unwrap()]);
 
@@ -469,6 +470,34 @@ fn rm_22_payloads_round_trip() {
         },
         json!({"action": "tx_burst", "reason": "bad waveform"}),
     );
+    // VE-3 (radio 1.3.0).
+    assert_payload_round_trip(
+        TxUnderflowPayload { cause: TxUnderflowCause::Starved },
+        json!({"cause": "starved"}),
+    );
+    assert_payload_round_trip(
+        TxUnderflowPayload { cause: TxUnderflowCause::Lost },
+        json!({"cause": "lost"}),
+    );
+    assert_payload_round_trip(AlignmentErrorPayload { lost: 12 }, json!({"lost": 12}));
+    assert_payload_round_trip(
+        ClockLostPayload { reference: ClockReference::Frequency },
+        json!({"reference": "frequency"}),
+    );
+    assert_payload_round_trip(
+        TimeErrorPayload {
+            cause: TimeErrorCause::Late,
+            outcome: TimeErrorOutcome::LateAtDevice,
+            late_by_ns: 0,
+            target,
+        },
+        json!({"cause": "late", "outcome": "late_at_device", "late_by_ns": 0, "target": target_json}),
+    );
+}
+
+#[test]
+fn rm_22_late_at_device_is_snake_case() {
+    assert_eq!(serde_json::to_value(TimeErrorOutcome::LateAtDevice).unwrap(), json!("late_at_device"));
 }
 
 #[test]

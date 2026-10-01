@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ezsdr_kernel::coordinator::Assembly;
@@ -78,7 +79,7 @@ fn profile_document(profile: &str, selector: JsonValue, dir: &Path, environment:
         "version": 1,
         "bindings": {
             "radio": {
-                "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 2, "patch": 0 } },
+                "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 3, "patch": 0 } },
                 "selector": selector,
                 "profile": { "name": profile, "version": { "major": 1, "minor": 1, "patch": 0 } }
             },
@@ -115,7 +116,7 @@ pub fn link_session_profile(profile: &str, tx: &str, rx: &str, dir: &Path, envir
 
 fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path, environment: JsonValue, session: bool) -> JsonValue {
     let radio = |id: String, jitter: bool| json!({
-        "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 2, "patch": 0 } },
+        "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 3, "patch": 0 } },
         "selector": { "id": id, "block_len_jitter": jitter },
         "profile": { "name": profile, "version": { "major": 1, "minor": 1, "patch": 0 } }
     });
@@ -144,7 +145,7 @@ fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path,
 /// rig's time section). `jitter` turns on the responder radio's block-length jitter.
 pub fn ping_pong_profile(profile: &str, pinger: &str, responder_radio: &str, jitter: bool, dir: &Path, environment: JsonValue) -> JsonValue {
     let radio = |id: String, jitter: bool| json!({
-        "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 2, "patch": 0 } },
+        "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 3, "patch": 0 } },
         "selector": { "id": id, "block_len_jitter": jitter },
         "profile": { "name": profile, "version": { "major": 1, "minor": 1, "patch": 0 } }
     });
@@ -179,7 +180,46 @@ pub fn ping_pong_profile(profile: &str, pinger: &str, responder_radio: &str, jit
 /// Builds the real Modules named by a BindingProfile, with the server's catalogue (EA-7)
 /// and the Phase 5 responder handed to the native Executor.
 pub fn assemble(profile_doc: &JsonValue, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Assembly {
-    ezsdr_server::assemble(profile_doc, inputs, vec![crate::responder::implementation()]).expect("valid acceptance BindingProfile")
+    ezsdr_server::assemble(profile_doc, inputs, vec![crate::responder::implementation()], None).expect("valid acceptance BindingProfile")
+}
+
+/// Builds the BindingProfile of one USRP (`ezsdr.radio.uhd`, profile `x310-ubx`, device
+/// id `usrp`) that is also the Authority, cabled (HardwareInLoop), with the recorder on its
+/// receive port and `environment` beside the time section (Phase 7, VE-5).
+pub fn uhd_profile(dir: &Path, session: bool, environment: JsonValue) -> JsonValue {
+    let mut env = serde_json::Map::new();
+    env.insert("ezsdr.time".to_owned(), json!({ "class": "hardware_in_loop", "start_lead_ns": 2_000_000_000u64 }));
+    env.insert("ezsdr.rf_path".to_owned(), json!({ "path": "cabled" }));
+    if let Some(extra) = environment.as_object() {
+        env.extend(extra.clone());
+    }
+    json!({
+        "version": 1,
+        "bindings": {
+            "radio": {
+                "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 1, "patch": 0 } },
+                "profile": { "name": "x310-ubx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+                "selector": { "args": "addr=192.0.2.1", "id": "usrp" }
+            },
+            "rec": recorder(dir, session.then_some("radio"))
+        },
+        "authority": "radio",
+        "placements": {
+            "links": [{
+                "link": link_module(),
+                "from": { "component": "radio", "port": "rx" },
+                "to": { "component": "rec", "port": "in" }
+            }]
+        },
+        "environment": env
+    })
+}
+
+/// Builds a UHD profile's Modules with the server's catalogue, its device being
+/// `device` (a `FakeDevice` in these tests; GZ-9).
+pub fn assemble_on(profile_doc: &JsonValue, inputs: BTreeMap<ContentHash, Vec<u8>>, device: Arc<dyn ezsdr_radio_uhd::Device>) -> Assembly {
+    let open: ezsdr_server::OpenDevice = Arc::new(move |_: &str| Ok(device.clone()));
+    ezsdr_server::assemble(profile_doc, inputs, Vec::new(), Some(&open)).expect("valid acceptance BindingProfile")
 }
 
 /// Removes run-unique fields from a Manifest for deterministic comparisons.

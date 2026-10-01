@@ -312,6 +312,27 @@ class EasyApi(unittest.TestCase):
         (artifact,) = sdr.manifest["artifacts"]
         self.assertEqual(artifact["continuity"][0]["first"]["ticks"], (at["ticks"] - t0) // 1000, "the first sample at `at`, 1 Msps from T0")
 
+    # -- Phase 7, VE-6
+
+    def test_sleep_returns_the_instant(self) -> None:
+        with self.connect() as sdr:
+            t = sdr.sleep(0.01)
+            self.assertEqual(sdr.now, t)
+            later = dict(t, ticks=t["ticks"] + 1_234_567)
+            self.assertEqual(sdr.wait_until(later), later)
+            self.assertEqual(sdr.now, later)
+
+    def test_after_names_an_instant_ahead(self) -> None:
+        with self.connect() as sdr:
+            at = sdr.after(0.001)
+            self.assertEqual(at["ticks"], sdr.now["ticks"] + 1_000_000, "a thousandth, not the float nearest it")
+            tiny = sdr.after(1.5e-9)
+            self.assertEqual(tiny["ticks"], sdr.now["ticks"] + 2, "the ceiling of 1.5 ticks")
+            sdr.rx.capture(1000, at=at)
+            t0 = sdr.start_instant["ticks"]
+        (artifact,) = sdr.manifest["artifacts"]
+        self.assertEqual(artifact["continuity"][0]["first"]["ticks"], (at["ticks"] - t0) // 1000, "the capture starts at `after`'s instant")
+
     def test_ea_17_a_capture_across_a_rate_change_is_refused(self) -> None:
         with self.connect() as sdr:
             sdr.submit({

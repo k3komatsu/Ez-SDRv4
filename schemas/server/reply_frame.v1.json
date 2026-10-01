@@ -2342,6 +2342,10 @@
               "const": "status",
               "type": "string"
             },
+            "root_rate": {
+              "$ref": "#/$defs/Rational",
+              "description": "The primary root's nominal rate in ticks per second (VE-6)."
+            },
             "run": {
               "$ref": "#/$defs/RunId",
               "description": "The Run's id."
@@ -2356,6 +2360,7 @@
             "run",
             "state",
             "now",
+            "root_rate",
             "effective",
             "events"
           ],

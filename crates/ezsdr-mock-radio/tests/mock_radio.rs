@@ -24,7 +24,7 @@ use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload};
 const ROOT: ClockDomainId = ClockDomainId::local(7);
 
 fn module_ref() -> ModuleRef {
-    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 2, 0) }
+    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 3, 0) }
 }
 
 fn waveform(samples: usize) -> ArtifactRef {
@@ -265,12 +265,12 @@ fn mr_01_descriptor_registers() {
     registry.register(descriptor(), Factories { provider: true, ..Factories::default() }).unwrap();
     let d = descriptor();
     assert_eq!(d.id.as_str(), "ezsdr.radio.mock");
-    assert_eq!(d.version, Version::new(1, 2, 0));
+    assert_eq!(d.version, Version::new(1, 3, 0));
     assert_eq!(d.kernel_api, KERNEL_API);
     assert_eq!(d.roles, [Role::Provider]);
     let requirements: Vec<_> = d.vocabularies.iter().map(|v| (v.id.as_str().to_owned(), v.req.0)).collect();
-    assert_eq!(requirements, [("radio".to_owned(), Version::new(1, 2, 0)), ("sim".to_owned(), Version::new(1, 1, 0))]);
-    assert_eq!(d.impl_hash, Some(ezsdr_kernel::hash::ContentHash::of_bytes(b"ezsdr.radio.mock 1.2.0")));
+    assert_eq!(requirements, [("radio".to_owned(), Version::new(1, 3, 0)), ("sim".to_owned(), Version::new(1, 1, 0))]);
+    assert_eq!(d.impl_hash, Some(ezsdr_kernel::hash::ContentHash::of_bytes(b"ezsdr.radio.mock 1.3.0")));
 }
 
 #[test]
@@ -949,6 +949,48 @@ fn mr_18_a_cold_rate_change_starts_a_new_sample_clock() {
     assert_ne!(first.header().first_sample_time.domain, old);
     assert_eq!(first.header().first_sample_time.ticks, 0);
     assert!(!first.header().flags.contains(BlockFlags::GAP_BEFORE));
+}
+
+#[test]
+fn mr_09_the_transmit_clock_starts_on_its_lattice() {
+    // RM-25: 1 Msps on a 1 GHz root is a ratio of 1 000; armed at 7, the origin is 1 000.
+    let mut harness = tx_harness("ideal");
+    harness.auth.advance_to(TimePoint::new(ROOT, 7)).unwrap();
+    harness.mock.arm().unwrap();
+    let record = harness.clocks.sample_clock_records().into_iter().find(|r| r.stream == rid("mock/tx")).unwrap();
+    assert_eq!(record.origin, TimePoint::new(ROOT, 1_000));
+}
+
+#[test]
+fn mr_18_a_cold_change_starts_its_clock_on_the_lattice() {
+    // RM-25 with MockRadio's restart lead of zero: e₁ on the old lattice, e₂ on the new.
+    for (from, to, e1, e2) in [(1_000_000.0, 20_000_000.0, 1_001_000, 1_001_000), (20_000_000.0, 1_000_000.0, 1_000_050, 1_001_000)] {
+        let mut harness = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(from)))], &[], &[], Some((BackPressure::DropOldest, 64)));
+        harness.arm_start(0).unwrap();
+        let old = harness.clocks.sample_clock_records()[0].domain;
+        harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(to), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_037))));
+        harness.step(0).unwrap();
+        harness.step(1_000_037).unwrap();
+        harness.step(3_200_000).unwrap();
+        let records = harness.clocks.sample_clock_records();
+        assert_eq!(records[0].ended_at, Some(TimePoint::new(ROOT, e1)), "{from} -> {to}");
+        let new = records.last().unwrap();
+        assert_eq!(new.origin, TimePoint::new(ROOT, e2), "{from} -> {to}");
+        let old_ratio = records[0].root_ticks_per_tick.num() as i64;
+        let mut first_new = None;
+        while let Some(block) = harness.link.as_ref().unwrap().receive() {
+            let header = block.header().clone();
+            if header.first_sample_time.domain == old {
+                assert!((header.first_sample_time.ticks + i64::from(header.len)) * old_ratio <= e1, "an old block past e₁");
+            } else if first_new.is_none() {
+                first_new = Some(header);
+            }
+        }
+        let first_new = first_new.expect("the new clock delivered");
+        assert_eq!(first_new.first_sample_time.domain, new.domain);
+        assert_eq!(first_new.first_sample_time.ticks, 0);
+        assert!(!first_new.flags.contains(BlockFlags::GAP_BEFORE));
+    }
 }
 
 #[test]

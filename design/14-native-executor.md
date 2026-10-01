@@ -82,7 +82,7 @@ A `ComponentContext` carries no `ActionSubmitter`: a component's Actions go thro
 ### `prepare`
 
 - **NX-4** `prepare(island, ctx)`:
-  1. `ctx.class` other than Simulation returns `Unsupported` ("NX-4: … runs the Simulation class only"): the components are stepped, which only the Simulation class does (MA-30's table).
+  1. `ctx.class` other than Simulation returns `Unsupported` ("NX-4: … runs the Simulation class only"): the components are stepped on the calling thread, as the Simulation class steps them; the device-paced classes step Executors on the data thread (MA-30's table as Phase 7's KG-2 amends it), which this Executor does not yet accept (Phase 7, Review L, NONBLOCKING 15).
   2. Every `ctx.links` entry must name a component of `island.components`; one that does not is `Rejected`.
   3. For each component of `island.components`, in the Island's order: a component this Executor already holds (from another Island) is `Rejected`; its descriptor is `ctx.components[id]`, and a missing one is `Rejected`; it is loaded (NX-3); `(implementation.make)()` builds it, and the Executor keeps it **before** calling its `prepare`, so that `stop` and `cleanup` reach a component whose `prepare` failed, as MA-7 has them reach every instance that reached `prepare`; its `prepare` receives a `ComponentContext` whose `descriptor` is the Spec's, whose `links` are exactly the `ctx.links` entries naming it, whose `source` is `island_<island.id.local>`, and whose other handles are `ctx`'s. A component's error is `prepare`'s error.
   4. The Executor keeps `ctx.actions` and `ctx.actions_out` (MA-5a).

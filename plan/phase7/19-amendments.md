@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted at Gate P** (owner, 2026-09-27, as recommended; [`00-overview.md`](00-overview.md) §11); **not implemented** (the owner: "実装はしないで"). Reviewed by Review J and revised for every finding; re-reviewed by Review K ([`design-notes.md`](design-notes.md) §4, §5). Its text reaches `design/` in the commit that implements each amendment (GZ-7); this file stays as the record. |
+| Status | **Accepted at Gate P** (owner, 2026-09-27, as recommended; [`00-overview.md`](00-overview.md) §11); **implemented** on 2026-09-27 (the owner: "Phase 7を実装してください"; 00-overview §9 steps 1–6, [`design-notes.md`](design-notes.md) §6), not yet reviewed (Review L); earlier the same day: "実装はしないで". Reviewed by Review J and revised for every finding; re-reviewed by Review K ([`design-notes.md`](design-notes.md) §4, §5). Its text reaches `design/` in the commit that implements each amendment (GZ-7); this file stays as the record. |
 | Scope | Fourteen Kernel amendments, KG-1…KG-14 (the coordinator drives HardwareInLoop and Hardware; the UHD spike's K1–K3, K5, K6, K8, K12; MA-8; TM-18's relations; child Runs on hardware; UC-3 on a device that restarts later; TM-13b and TM-13e for a device). Six Vocabulary, Module and frontend amendments, VE-1…VE-6 (`radio` 1.3.0, `ezsdr.radio.mock` 1.3.0, the server, the Python package). |
 | Amends | `design/01-time-model.md` (TM-13b, TM-13e, TM-16c, TM-18); `design/04-run-and-session.md` (RS-6's coordinator table); `design/05-module-api.md` (MA-8, MA-9a new, MA-10, MA-14b new, MA-20, MA-29, MA-30, MA-46, UC-3, UC-6); `design/06-kernel-coordinator.md` (KA-12's table, KC-2, KC-2a new, KC-12a new, KC-15, KC-21a new, KC-24a new, KC-29, KC-30, KC-31, KC-33, KC-36, KC-37a, KC-45, KC-46…KC-46c new); `design/07-radio-model.md` (RM-1, RM-6, RM-10, RM-11, RM-14, RM-16, RM-20, RM-22, RM-25 new, RM-26 new); `design/09-mock-radio.md` (MR-1, MR-4, MR-6, MR-9, MR-18); `design/16-easy-api.md` (EA-4, EA-7, EA-9, EA-12, EA-14, EA-16, EA-17); `plan/phase2/00-overview.md` (PO-2, PO-11, through GZ-3 and GZ-4 of the overview). |
 | Modal verbs | "must" and "must not" are normative (OV-4a). |
@@ -265,7 +265,7 @@ GY-3 applied to Phase 7: the K3 test is removed because the behaviour it pinned 
 
 **Rejected.** The Kernel adding an estimate of each Provider's delivery (a guess about a Module); stamping each Action with its admission instant (a Kernel Action schema change); keeping MA-10 and letting a hardware Provider declare a lead that covers delivery while testing lateness against the whole lead (every untimed command would be late by its own delivery, K6).
 
-**Code.** None in the Kernel (RS-19's computation is unchanged: admission and dispatch happen at one instant on the control path). The doc comment of `ProviderInstance::min_command_lead` follows the rule. The Provider side is RM-14 (VE-2) and spec 18 UR-21.
+**Code.** None in the Kernel (RS-19's computation is unchanged: admission and dispatch happen at one instant on the control path). The rule reaches `ProviderInstance::min_command_lead` as a `//` comment beside its doc comment, which is part of the Kernel's generated schema and so stays as it was (GZ-2, `schema_freeze`; Review L, deviation 1). The Provider side is RM-14 (VE-2) and spec 18 UR-21.
 
 **Tests.** No Kernel test (no Kernel code); the rule is carried by MockRadio's unchanged `mr_17_*` and `mr_18_*` (a zero allowance) and by spec 18's `ur_21_an_untimed_send_is_on_time_after_its_delivery` and `ur_24_an_untimed_retune_is_on_time_after_its_delivery`.
 
@@ -289,7 +289,7 @@ The doc comment of `TimeAuthority::schedule` (`time/authority.rs:52-54`) follows
 |---|---|---|---|
 | `tm_16c_a_paced_callback_sees_now_at_or_after_its_instant` | `WallAuthority`; a callback scheduled 5 ms ahead reading `now()` after sleeping 2 ms inside itself | the reading is at least the fire time plus 2 ms | TM-16c |
 | `tm_16c_a_paced_authority_accepts_an_instant_already_passed` (Review J) | `WallAuthority`: schedule at `now − 1 ms` after a wakeup at `now − 5 ms` has fired; then at an instant before that fired wakeup | the first accepted and returned by the next `next_wakeup` at once, its instant as scheduled; the second `InPast` | TM-16c |
-| `tm_16c_ties_fire_in_insertion_order` (existing, kept) | — | unchanged | TM-16c |
+| `tm_16_authority_order_and_now` (existing, kept; the tie test, `time_model.rs`) | — | unchanged | TM-16c |
 
 ---
 
@@ -529,6 +529,8 @@ pub enum   ClockReference        { Frequency }                                  
 
 **MR-18** (`cold`, sentence added after "At `e`:"): "The old clock ends at `e₁` and the new one starts at `e₂` as RM-25 says, with a restart lead of zero: the receive block in progress is cut at `e₁`, the transmit side stops at `e₁`, and streaming continues from tick 0 of the new clock at `e₂`; the steps below that say `e` mean `e₁` for the old stream and `e₂` for the new (Phase 7, VE-4)."
 
+Moving the transmit origin onto its lattice moves the first burst of a post-change transmit clock too: two `mr_32_*` tests expect that burst at index 2, not 3 (Review L, deviation 3).
+
 **Tests** (`crates/ezsdr-mock-radio/tests/mock_radio.rs`).
 
 | test | input | expected | rules |
@@ -652,7 +654,7 @@ Each row names the mutation and the test that must kill it. They are run with `p
 | G33 | `ezsdr-radio-uhd/src/authority.rs` (the rule's only real-code carrier: the Kernel has no paced Authority; the same mutation of the `WallAuthority` double is killed by `tm_16c_a_paced_authority_accepts_an_instant_already_passed`) | the paced `schedule` refuses an instant before `now` | `ur_07_schedule_accepts_an_instant_already_passed` |
 | G34 | `coordinator/pipeline.rs` | KC-2 refuses `Hardware` | `kg_01_the_hardware_class_reaches_running` |
 | G35 | `coordinator/paced.rs` | the data thread keeps stepping after an abort | `kg_03_an_abort_stops_the_data_thread` |
-| G36 | `coordinator/paced.rs` | the callback clears the pending wake without comparing generations, and the handle is stored after `schedule` returns | `kg_02_every_delivery_wakes_a_waiting_call` |
+| G36 | `coordinator/paced.rs` | the callback clears the pending wake without comparing generations, and the pending generation is stored after `schedule` returns | `kg_02_a_wake_that_fires_before_schedule_returns_still_clears` (Review L, P1-6: `WallAuthority::firing_before_schedule_returns` runs the callback before `schedule` returns; `kg_02_every_delivery_wakes_a_waiting_call` exercises the path but cannot win the race) |
 | V01 | `ezsdr-radio/src/device.rs` | RM-8's tie goes to the higher grid value | `rm_26_coerce_cases` |
 | V02 | `ezsdr-radio/src/device.rs` | RM-7's check skips `tx` | `rm_26_coerce_cases` |
 | V03 | `ezsdr-radio/src/device.rs` | the rate capability built as a `Range` for `Values` | `rm_26_the_description_builds_the_tree_mockradio_built` |

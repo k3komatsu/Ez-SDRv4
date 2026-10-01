@@ -1,4 +1,4 @@
-//! Ez-SDR v4 Radio Model Vocabulary radio 1.2.0 (design/07-radio-model.md).
+//! Ez-SDR v4 Radio Model Vocabulary radio 1.3.0 (design/07-radio-model.md).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -19,6 +19,8 @@ use ezsdr_kernel::spec::{
 use ezsdr_kernel::stream::LatePolicy;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+pub mod device;
 
 /// The Radio Model Vocabulary id and key prefix (RM-1).
 pub const VOCABULARY: &str = "radio";
@@ -229,11 +231,11 @@ fn radio_event_kinds() -> Vec<EventKindDecl> {
     .collect()
 }
 
-/// Describes the Radio Model Vocabulary `radio` 1.2.0 (RM-1).
+/// Describes the Radio Model Vocabulary `radio` 1.3.0 (RM-1).
 pub fn vocabulary() -> VocabularyDescriptor {
     VocabularyDescriptor {
         id: radio_namespace().clone(),
-        version: Version::new(1, 2, 0),
+        version: Version::new(1, 3, 0),
         prefix: radio_namespace().clone(),
         keys: radio_keys(),
         event_kinds: radio_event_kinds(),
@@ -701,6 +703,51 @@ pub mod payloads {
         PlanViolation,
         /// Refuse the burst (RM-22).
         Refused,
+        /// The Provider handed the burst over in time by its own clock and the device
+        /// reported it late, so nothing was transmitted (RM-11, VE-3).
+        LateAtDevice,
+    }
+
+    /// Why a transmit stream underflowed (RM-11, VE-3).
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+    #[serde(rename_all = "snake_case")]
+    pub enum TxUnderflowCause {
+        /// The device ran out of samples inside a burst because the host was late.
+        Starved,
+        /// Samples of a burst were lost between host and device.
+        Lost,
+    }
+
+    /// `radio.TX_UNDERFLOW` data (RM-11, VE-3).
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct TxUnderflowPayload {
+        /// Why (RM-11).
+        pub cause: TxUnderflowCause,
+    }
+
+    /// `radio.ALIGNMENT_ERROR` data (RM-11, VE-3).
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct AlignmentErrorPayload {
+        /// The samples, on every channel of the stream, the misalignment removed (RM-11).
+        pub lost: u64,
+    }
+
+    /// Which reference a device lost (RM-11, VE-3).
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+    #[serde(rename_all = "snake_case")]
+    pub enum ClockReference {
+        /// The frequency reference (10 MHz).
+        Frequency,
+    }
+
+    /// `radio.CLOCK_LOST` data (RM-11, VE-3).
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct ClockLostPayload {
+        /// The reference lost (RM-11).
+        pub reference: ClockReference,
     }
 
     /// Timed burst error data (RM-22).
@@ -750,11 +797,12 @@ pub mod payloads {
     }
 }
 
-/// Generates the eight committed Radio Model schemas (RM-20, RM-22, RM-24).
+/// Generates the eleven committed Radio Model schemas (RM-20, RM-22, RM-24).
 pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     use payloads::{
-        CommandQueueFullPayload, CommandRejectedPayload, LateCommandPayload,
-        RxOverflowHotPayload, RxOverflowPayload, TimeErrorPayload,
+        AlignmentErrorPayload, ClockLostPayload, CommandQueueFullPayload,
+        CommandRejectedPayload, LateCommandPayload, RxOverflowHotPayload, RxOverflowPayload,
+        TimeErrorPayload, TxUnderflowPayload,
     };
 
     fn of<T: JsonSchema>() -> serde_json::Value {
@@ -770,5 +818,8 @@ pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
         ("late_command_payload", of::<LateCommandPayload>()),
         ("command_queue_full_payload", of::<CommandQueueFullPayload>()),
         ("command_rejected_payload", of::<CommandRejectedPayload>()),
+        ("tx_underflow_payload", of::<TxUnderflowPayload>()),
+        ("alignment_error_payload", of::<AlignmentErrorPayload>()),
+        ("clock_lost_payload", of::<ClockLostPayload>()),
     ])
 }

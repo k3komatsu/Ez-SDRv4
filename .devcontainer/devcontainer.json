@@ -1,0 +1,20 @@
+// Ez-SDR v4 on UHD 4.10: the image of docker/uhd4.10/Dockerfile (its header says what the
+// run arguments are for). Build output goes to the volume at /cargo-target, outside the tree;
+// a volume of its own, since `docker run --user` builds there as another user on macOS.
+// On an arm64 Mac, set DOCKER_DEFAULT_PLATFORM=linux/amd64: the UHD image is amd64 only.
+{
+  "name": "Ez-SDR v4 (UHD 4.10)",
+  "build": {
+    "dockerfile": "../docker/uhd4.10/Dockerfile",
+    "context": "../docker/uhd4.10"
+  },
+  "runArgs": ["--network=host", "--cap-add=SYS_NICE", "--ulimit", "rtprio=99"],
+  "mounts": ["source=ezsdr-v4-devcontainer-target,target=/cargo-target,type=volume"],
+  // Ubuntu 26.04's user 1000; its UID follows the host user's, so files in the tree stay theirs.
+  "remoteUser": "ubuntu",
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer", "ms-python.python"]
+    }
+  }
+}

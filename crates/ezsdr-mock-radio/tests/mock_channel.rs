@@ -30,7 +30,7 @@ fn key(name: &str) -> Key { Key::parse(name).unwrap() }
 fn eq(value: Value) -> Constraint { Constraint::Eq { value } }
 
 fn module_ref() -> ModuleRef {
-    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 2, 0) }
+    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 3, 0) }
 }
 
 #[derive(Default)]
@@ -858,7 +858,9 @@ fn mr_32_a_cold_transmit_change_ends_the_old_radiation() {
     radio.push(Action::UpdateParameter { target: rid("mock"), key: key("radio.tx.sample_rate_hz"), value: Value::Num(2_000_000.0), class: UpdateClass::Cold, at: None });
     step(&world, &mut [&mut radio], 2_000_500);
     let after = world.waveform(&[(0.0, 0.5)]);
-    radio.push(burst(&radio, &world, after, 3, true));
+    // RM-25: the new clock starts at 2 001 000, the lattice instant at or after the
+    // change, so its sample 2 is the instant 2 002 000 (Phase 7, VE-4).
+    radio.push(burst(&radio, &world, after, 2, true));
     step(&world, &mut [&mut radio], 2_000_500);
     step(&world, &mut [&mut radio], 6_000_001);
     for (k, re, im) in radio.received(0) {
@@ -1102,7 +1104,8 @@ fn mr_32_a_stop_after_a_cold_change_keeps_the_old_clock_s_radiation() {
     run_to(&world, &mut [&mut a, &mut b], 2_000_500);
     let samples = ramp(100);
     let third = world.waveform(&samples);
-    a.push(burst(&a, &world, third, 3, false));
+    // RM-25: the new clock starts at 2 001 000, so its sample 2 is 2 002 000 (VE-4).
+    a.push(burst(&a, &world, third, 2, false));
     step(&world, &mut [&mut a, &mut b], 2_000_500);
     run_to(&world, &mut [&mut a, &mut b], 2_002_249);
     a.push(Action::Stop { target: Some(rid("dev_a/tx")) });
@@ -1110,7 +1113,7 @@ fn mr_32_a_stop_after_a_cold_change_keeps_the_old_clock_s_radiation() {
     run_to(&world, &mut [&mut a, &mut b], 6_000_001);
     step(&world, &mut [&mut a, &mut b], 6_000_001);
     let summary: Vec<_> = records(&a).iter().map(|record| (record.samples, record.end)).collect();
-    assert_eq!(summary, vec![(1_500, BurstEnd::Eob), (501, BurstEnd::Stop), (1, BurstEnd::Stop)], "the cold change at 2 000.5 us cuts the old clock at sample 2 001; the stop at 2 002.25 us cuts the new one at sample 4");
+    assert_eq!(summary, vec![(1_500, BurstEnd::Eob), (501, BurstEnd::Stop), (1, BurstEnd::Stop)], "the cold change at 2 000.5 us cuts the old clock at sample 2 001; the stop at 2 002.25 us cuts the new one, whose origin is 2 001 us, at sample 3");
     let received = b.received(0);
     assert_eq!(received.len(), 6_000);
     for (k, re, im) in received {

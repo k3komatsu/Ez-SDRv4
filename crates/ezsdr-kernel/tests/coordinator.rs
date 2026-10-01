@@ -1172,7 +1172,7 @@ fn kc_02_a_wall_paced_authority_is_refused() {
         failure(&manifest)["reason"]
             .as_str()
             .unwrap()
-            .starts_with("KC-2: ")
+            .starts_with("KC-2: RealtimeEmulation")
     );
     assert_eq!(
         manifest.run.execution_class,

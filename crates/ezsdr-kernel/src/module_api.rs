@@ -26,7 +26,7 @@ use crate::spec::{
     CapabilityValue, Coercion, Constraint, Ident, Key, KeyDecl, Namespace, Value, Warning,
 };
 use crate::stream::{BackPressure, DataLink, DataLinkDecl};
-use crate::time::{RelativeBudget, TimeAuthority, TimePoint};
+use crate::time::{ClockRelation, RelativeBudget, TimeAuthority, TimePoint};
 
 // ---------------------------------------------------------------- versions
 
@@ -627,6 +627,10 @@ pub struct ProviderInstance {
     /// sources PPS is armed first (SB-39).
     #[serde(default)]
     pub arm_after: Vec<ResourceId>,
+    // MA-10 as KG-8 amends it: the lead is counted from the coordinator's dispatch, the
+    // time the instance takes to receive the Action included; a Provider that is not
+    // stepped states the delivery allowance this includes. The doc text below is part
+    // of the frozen `provider_instance` schema (GZ-2), so the amendment lives here.
     /// The least lead this instance needs between receiving a timed Action and that
     /// Action's instant, in `host.monotonic`; absent means zero. The only envelope
     /// value the Kernel reads (MA-10, RS-19, KA-7).
@@ -1212,6 +1216,12 @@ pub trait Authority: Send + Sync {
     /// instant; with nothing scheduled it returns `None` and moves nothing (MA-29,
     /// MA-30, KA-11).
     fn next_wakeup(&self) -> Option<TimePoint>;
+    /// TM-18: the measured relations of this Authority's primary root — to
+    /// `host.monotonic` and to `utc` — or none when the root is virtual (a Simulation
+    /// Authority, KA-16) (MA-29, KC-45).
+    fn relations(&self) -> Vec<ClockRelation> {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------- the stepping loop

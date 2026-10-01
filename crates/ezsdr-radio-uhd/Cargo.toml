@@ -1,0 +1,26 @@
+[package]
+name = "ezsdr-radio-uhd"
+version = "0.1.0"
+description = "Ez-SDR v4 Module ezsdr.radio.uhd 0.1.0 (plan/phase7/18-uhd-radio.md)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ezsdr-kernel = { path = "../ezsdr-kernel" }
+ezsdr-radio = { path = "../ezsdr-radio" }
+ezsdr-hostmem = { path = "../ezsdr-hostmem" }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+ezsdr-kernel = { path = "../ezsdr-kernel", features = ["testing"] }
+ezsdr-sink = { path = "../ezsdr-sink" }
+ezsdr-sink-capture = { path = "../ezsdr-sink-capture" }
+ezsdr-link-host = { path = "../ezsdr-link-host" }
+
+[features]
+default = []
+# UR-3, UR-35: compiles `src/uhd.rs` and links libuhd; off by default, so no build
+# needs UHD installed (GZ-5).
+uhd = []

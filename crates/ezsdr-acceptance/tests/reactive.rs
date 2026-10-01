@@ -355,7 +355,7 @@ fn v58_09_a_reactor_runs_in_a_child_run_of_a_session() {
     session_profile["bindings"]["rec"]["feed"] = json!({ "port": { "component": "a", "port": "rx" }, "policy": "drop_oldest", "capacity": 64 });
     session_profile["placements"] = json!({ "links": [child_profile["placements"]["links"][0].clone()] });
 
-    let mut server = ezsdr_server::Server::new(ezsdr_server::Config { runs_dir: temp.0.join("runs"), implementations: vec![responder::implementation()] });
+    let mut server = ezsdr_server::Server::new(ezsdr_server::Config { implementations: vec![responder::implementation()], ..ezsdr_server::Config::new(temp.0.join("runs")) });
     let result = |handled: ezsdr_server::Handled| match handled.reply {
         Reply::Result(response) => response,
         Reply::Error(error) => panic!("{error:?}"),

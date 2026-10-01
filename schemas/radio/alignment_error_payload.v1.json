@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`radio.ALIGNMENT_ERROR` data (RM-11, VE-3).",
+  "properties": {
+    "lost": {
+      "description": "The samples, on every channel of the stream, the misalignment removed (RM-11).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "lost"
+  ],
+  "title": "AlignmentErrorPayload",
+  "type": "object"
+}

@@ -2098,7 +2098,8 @@ fn sb_08_the_test_vocabulary_names_no_radio_word() {
         .iter()
         .map(|k| k.key.to_string())
         .collect();
-    let want: BTreeSet<String> = ["test.count", "test.grid", "test.flag", "test.gain"]
+    // `test.tx_clock` is spec 19 §0's (Phase 7, KG-4's tests).
+    let want: BTreeSet<String> = ["test.count", "test.grid", "test.flag", "test.gain", "test.tx_clock"]
         .map(str::to_owned)
         .into();
     assert_eq!(keys, want);

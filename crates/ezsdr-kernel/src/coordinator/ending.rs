@@ -65,6 +65,8 @@ impl RunHandle {
                     .then_some(CleanupMode::Abort)
             },
         );
+        // Step 3 joined the data thread; a Run with no fragment never ran step 3.
+        super::paced::stop_data_thread(&self.shared);
         self.shared.closing.store(true, Ordering::Release);
         self.lease.released = true;
         let termination = lock(&self.shared.end)
@@ -236,6 +238,7 @@ impl RunHandle {
                 }
             }
         }
+        let relations = self.relations(&mut manifest_failures);
         cleanup_failures.extend(lock(&self.shared.cleanup_failures).clone());
         cleanup_failures.extend(manifest_failures);
         let termination_at = run.transitions.last().and_then(|t| t.at);
@@ -255,7 +258,7 @@ impl RunHandle {
             inputs: self.inputs.clone(),
             clocks: ClocksSection {
                 domains: self.shared.ctx.clocks.domains(),
-                relations: Vec::new(),
+                relations,
                 sample_clocks: self.shared.ctx.clocks.sample_clock_records(),
             },
             events: EventsSection {
@@ -299,6 +302,36 @@ impl RunHandle {
     }
 }
 
+impl RunHandle {
+    /// KC-45's relations: the Authority's in a device-paced class, none in the
+    /// Simulation class (KA-16), each with the primary root as its source (TM-18).
+    fn relations(&self, failures: &mut Vec<CleanupFailure>) -> Vec<crate::time::ClockRelation> {
+        if !self.shared.device_paced() {
+            return Vec::new();
+        }
+        let published = contain_all(|| self.shared.authority.relations()).unwrap_or_default();
+        let (kept, foreign): (Vec<_>, Vec<_>) = published
+            .into_iter()
+            .partition(|relation| relation.source == self.shared.primary);
+        for _ in foreign {
+            failures.push(manifest_failure(
+                None,
+                "TM-18: a relation whose source is not the primary root",
+            ));
+        }
+        if !kept
+            .iter()
+            .any(|relation| relation.target == crate::id::ClockDomainId::UTC)
+        {
+            failures.push(manifest_failure(
+                None,
+                "TM-18: the Authority published no relation of its root to utc",
+            ));
+        }
+        kept
+    }
+}
+
 /// Requests orderly client finish when no other end was requested (KC-34).
 pub(super) fn finish(run: &mut RunHandle) {
     if !matches!(run.state(), RunState::CleanedUp { .. }) {
@@ -314,12 +347,13 @@ pub(super) fn finish(run: &mut RunHandle) {
     }
 }
 
+/// Requests the Run's end; returns whether this request set it (KC-46b).
 pub(super) fn request(
     shared: &Shared,
     termination: Termination,
     mode: CleanupMode,
     reason: Option<String>,
-) {
+) -> bool {
     let mut end = lock(&shared.end);
     match end.as_mut() {
         None => {
@@ -327,6 +361,7 @@ pub(super) fn request(
                 *lock(&shared.failure) = Some((*stage, reason));
             }
             *end = Some(super::state::EndRequest { termination, mode });
+            return true;
         }
         Some(current) if current.mode == CleanupMode::Orderly && mode == CleanupMode::Abort => {
             current.mode = CleanupMode::Abort;
@@ -343,13 +378,20 @@ pub(super) fn request(
         }
         Some(_) => {}
     }
+    false
 }
 
-struct Ops {
+/// The coordinator's cleanup operations: `run_cleanup`'s, and the data thread's
+/// steps 1 and 2 (KC-39, KC-46b).
+pub(super) struct Ops {
     shared: Arc<Shared>,
 }
 
 impl Ops {
+    pub(super) fn new(shared: Arc<Shared>) -> Ops {
+        Ops { shared }
+    }
+
     /// The instance that owns `fragment`, when that fragment reached `prepare` and the
     /// plan routed it to an instance. The three per-fragment steps of RS-6 all ask it,
     /// and `prepared` is a pure read, so folding the two checks together changes no
@@ -429,17 +471,21 @@ impl CleanupOps for Ops {
                 Ok(())
             }
             CleanupStep::FreezeDispatch => {
+                // KC-24a: no Action admitted before the freeze is dispatched after it.
+                let _admission = lock(&self.shared.admission);
                 self.shared.frozen.store(true, Ordering::Release);
                 for slot in &self.shared.providers {
-                    lock(&slot.queue.0).clear();
+                    slot.queue.clear();
                 }
                 for slot in &self.shared.sinks {
-                    lock(&slot.queue.0).clear();
+                    slot.queue.clear();
                 }
                 for slot in &self.shared.executors {
-                    lock(&slot.queue.0).clear();
+                    slot.queue.clear();
                 }
-                for handle in lock(&self.shared.scheduled).drain(..) {
+                let wake = lock(&self.shared.wake_handle).take();
+                let pending: Vec<_> = lock(&self.shared.scheduled).drain(..).chain(wake).collect();
+                for handle in pending {
                     if self.shared.cancel(handle).is_err() {
                         return Err(crate::module_api::ModuleError::rejected(
                             "KC-30: a Module panicked during cleanup: Authority cancel()",

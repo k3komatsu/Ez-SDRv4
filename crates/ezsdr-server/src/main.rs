@@ -1,5 +1,6 @@
 //! `ezsdr-server [--runs-dir <path>]`: serves one Session over standard input and
-//! output (EA-2, EA-8). Diagnostics go to standard error.
+//! output (EA-2, EA-8). `EZSDR_PROFILE`, when set, names the BindingProfile `connect`
+//! without a profile uses (EA-9). Diagnostics go to standard error.
 
 use std::io::{self, BufReader};
 use std::path::PathBuf;
@@ -23,7 +24,9 @@ fn main() -> ExitCode {
             other => return usage(&format!("unknown argument {other}")),
         }
     }
-    let config = Config { runs_dir, implementations: Vec::new() };
+    let mut config = Config::new(runs_dir);
+    // The lab server's own default profile (EA-9, VE-5); the library reads no environment.
+    config.default_profile = std::env::var_os("EZSDR_PROFILE").filter(|path| !path.is_empty()).map(PathBuf::from);
     match serve(BufReader::new(io::stdin().lock()), io::stdout().lock(), config) {
         Ok(Exit::Replied | Exit::EndOfInput) => ExitCode::SUCCESS,
         Ok(Exit::BadFrame) => ExitCode::from(2),
