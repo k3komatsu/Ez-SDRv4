@@ -222,7 +222,15 @@ impl DeviceAuthority {
         time_source: &str,
         args: &str,
     ) -> Result<DeviceAuthority, String> {
-        device.set_sources(clock_source, time_source).map_err(|e| format!("UR-7: {e}"))?;
+        device.set_sources(clock_source, time_source).map_err(|e| {
+            // The X300's reference PLL not locking within UHD's 30 s, named for the client;
+            // a new open usually locks (bench-results.md parts 3–9; design-notes §18).
+            if e.message.contains("Reference Clock PLL failed to lock") {
+                format!("UR-7: the reference clock did not lock to its {clock_source} source within UHD's 30 s; connecting again usually succeeds ({e})")
+            } else {
+                format!("UR-7: {e}")
+            }
+        })?;
         let pps = time_source != "internal";
         device.set_time_zero(pps).map_err(|e| format!("UR-7: {e}"))?;
         let mcr = device.master_clock_rate();

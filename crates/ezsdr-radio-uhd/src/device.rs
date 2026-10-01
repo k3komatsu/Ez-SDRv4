@@ -285,6 +285,9 @@ pub enum FakeFault {
     /// The same `tx_send` takes nothing and returns 0 (UHD's `send` timing out on its first
     /// packet; Review Q, TG-Q2).
     StalledSend(usize),
+    /// `set_sources` fails as the X300 does when its reference PLL does not lock within
+    /// UHD's 30 s (`x300_mb_controller.cpp:243–255`), with UHD's own text.
+    ReferenceDoesNotLock,
 }
 
 /// How [`FakeDevice`] behaves (UR-33).
@@ -582,6 +585,11 @@ impl Device for FakeDevice {
         let mut st = self.lock();
         self.lost(&st)?;
         st.calls.push(format!("set_sources {clock} {time}"));
+        if self.config.faults.contains(&FakeFault::ReferenceDoesNotLock) {
+            return Err(DeviceError::failed(format!(
+                "uhd_usrp_set_clock_source: UHD error 44: RuntimeError: Reference Clock PLL failed to lock to {clock} source."
+            )));
+        }
         Ok(())
     }
 

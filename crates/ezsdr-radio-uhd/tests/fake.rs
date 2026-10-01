@@ -2615,6 +2615,16 @@ fn watched() -> (Arc<Watched>, Arc<Mutex<Option<String>>>) {
 }
 
 #[test]
+fn ur_07_a_reference_that_does_not_lock_is_named() {
+    // design-notes §18: the X300's reference PLL that does not lock within UHD's 30 s is
+    // refused in words the client can read, UHD's text kept.
+    let device = fake(FakeConfig { faults: vec![FakeFault::ReferenceDoesNotLock], ..FakeConfig::default() });
+    let Err(error) = DeviceAuthority::new(device, Arc::new(ClockRegistry::new()), "internal", "internal", "fake") else { panic!("no error") };
+    assert!(error.starts_with("UR-7: the reference clock did not lock to its internal source within UHD's 30 s; connecting again usually succeeds ("), "{error}");
+    assert!(error.contains("Reference Clock PLL failed to lock to internal source."), "{error}");
+}
+
+#[test]
 fn ur_07_the_last_device_handle_is_not_dropped_on_uhd_clock() {
     // D-1 (design-notes §15): dropped in hw_b2's order while uhd-clock is inside a 60 ms
     // read, the last device handle goes on the dropping thread, not on uhd-clock, whose

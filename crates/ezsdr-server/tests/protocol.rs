@@ -804,6 +804,21 @@ fn ea_07_the_device_is_released_when_the_session_ends() {
 }
 
 #[test]
+fn ea_07_a_reference_that_does_not_lock_refuses_the_connect_with_its_reason() {
+    // UR-7 (ezsdr-radio-uhd's design-notes §18): the client is told the reference clock
+    // did not lock, and that connecting again usually succeeds.
+    let temp = TempDir::new("uhd-unlocked");
+    let open: ezsdr_server::OpenDevice = Arc::new(|_args: &str| {
+        Ok(Arc::new(FakeDevice::new(FakeConfig { faults: vec![ezsdr_radio_uhd::FakeFault::ReferenceDoesNotLock], ..FakeConfig::default() })) as Arc<dyn Device>)
+    });
+    let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
+    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    let error = err(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new()));
+    assert_eq!(error.kind, ErrorKind::Refused);
+    assert!(error.message.starts_with("EA-7: radio: UR-7: the reference clock did not lock to its internal source within UHD's 30 s; connecting again usually succeeds ("), "{}", error.message);
+}
+
+#[test]
 fn ea_07_two_uhd_bindings_are_refused() {
     let temp = TempDir::new("uhd-two");
     let (mut server, opened) = fake_server(&temp.0);

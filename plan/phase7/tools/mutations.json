@@ -1530,5 +1530,15 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_29_a_lost_device_aborts_the_run"
+ },
+ {
+  "id": "B34",
+  "name": "a reference that does not lock not named for the client (design-notes §18)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "if e.message.contains(\"Reference Clock PLL failed to lock\") {",
+  "new": "if false && e.message.contains(\"Reference Clock PLL failed to lock\") {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_a_reference_that_does_not_lock_is_named"
  }
 ]
