@@ -1,4 +1,4 @@
-# Ez-SDR v4 — Handoff (2026-10-01)
+# Ez-SDR v4 — Handoff (2026-10-02)
 
 次のセッション（人間・AI どちらでも）が最初に読む現状メモ．設計の中身は書かない．どこに何があり，何が終わっていて，次に何をするかだけ．
 開発時の恒常的なルールは [AGENTS.md](AGENTS.md)．
@@ -372,6 +372,24 @@ Python の B7 は同じ container を `-w /bench -e PYTHONPATH=/work/python -e E
 - **X300 の状態（2026-10-01 クローズ時）**：つながっていない（`enp2s0f0np0` の carrier 0）．Phase 8 で実機を使う前に owner に戻してもらい，`uhd_usrp_probe` で確認する．配線は直結．
 - 次：Phase 8（Mock ↔ X310 parity）の計画．owner の依頼を待つ．
 
+**Phase 7 後の保守**（2026-10-01〜02，`main` の `b8548da`・`287fff9`）
+
+- `b8548da`：private な実行時の責務の整理（refactor）．その途中で `tests/fake.rs` の 2 本が不安定に落ちた：`ur_25_enabling_tx_applies_the_configuration`（loopback が返らない）と `ur_23_a_burst_one_sample_after_a_burst_is_played`（device の Underflow / TimeError，または予約時の late policy で Drop）．
+- 原因（調査と Opus レビュー 2 回）：どちらも refactor 前の `0882992` でも負荷をかけると再現する．wall-clock のテストが，uhd-tx が host の期限を守ることを前提にしている：in-flight window 10 ms，保持した最後のサンプルは端の 2 ms 前（device lead）まで，予約は開始の 2 ms 前まで．FakeDevice の時計は実機と同じく host が止まっても進む．Underflow 後に残りを今の時刻から流す fake の動きは UHD 4.10 の `radio_tx_core.v`（`:341`，`:347`，`:359–370`）と整合する（INFERRED）．調査の証拠（トレース，負荷実験のログ）はリポジトリの外（`/tmp/ezsdr-origin-investigation/`，セッションの scratchpad）にあり，消えうる．
+- `287fff9`（テストだけ）：`ur_23_a_burst_one_sample_after_a_burst_is_played` は uhd-tx が device に渡した burst の構造（サンプル数，B の時刻）を先に確かめ，そのあと従来どおり strict な end-to-end を見る．予約時に Drop された試行だけ前提不成立として最大 3 回まで再試行する．新規テスト `ur_33_a_burst_resumed_after_an_underflow_plays_late` で Underflow 後の fake の動きを固定した．`ur_25` と B6 rehearsal は失敗時に async の報告を出す．mutation（空の end-of-burst，Underflow 後の再開位置，Underflow の報告）は killed．TX テストの直列化と `SlowSend` で Underflow を起こすテストは試したが，効果がない／テスト自体が負荷に依存するので入れていない．
+- **残課題**（owner の判断待ち，Phase 8 の前に）：
+
+| # | 分類 | 内容 | 次の一手 |
+|---|---|---|---|
+| 1 | production | uhd-tx は待機中の held burst を，自分の時計で開始時刻を過ぎていても late policy を判定し直さずに渡す（`tx.rs` の `step()`）．結果は `TIME_ERROR { late_at_device }` になるが，RM-11（`design/07-radio-model.md:135`）の「自分の時計では間に合って渡した」に反する．`send_asap` も守られない | UR-21 を改めて，渡す時点でも `LatePolicy::decide` するか決める |
+| 2 | spec の空白 | Underflow 後，uhd-tx の `next` は予定の時間軸のまま，device は後ろへずれる．device が持つのは window＋ずれ（fake では 50 ms の flow control で止まる）．UR-23 の「`s` で止めた burst は `s + 10 ms` までに終わる」は無条件に書いてあるが成り立たない．burst record の時刻もずれる．Underflow 後の再開を決めた契約はない | 実機の測定（下の H2）のあと，burst を終わらせるか，時刻を取り直すか，上限の書き方を変えるか決める |
+| 3 | fake の忠実度 | fake は TimeError で burst 全体を捨てる．FPGA の既定 policy は `TX_ERR_POLICY_PACKET`（host は `REG_TX_ERROR_POLICY` を書かない）で，遅れた packet だけ捨て，あとの時刻なし packet はすぐ流す．bench は 1 packet の burst しか測っていない．複数 packet だと UR-28 の `unacked` との対応付けもずれうる | H1 のあと UR-33 と fake を直すか決める |
+| 4 | 運用上の制約 | 保持した最後のサンプル（design-notes N-5）は，burst の端ごとに uhd-tx が約 2 ms 以内に動く必要がある．負荷のある開発機では `rehearsal_b6_*` と `ur_23` の end-to-end がこれで落ちる（B6 の burst は 1 buffer なので，Underflow は最後のサンプルでしか起きない） | Review N B3／O-B1 の設計の代償として受け入れるか，Phase 8 で見直すか |
+| 5 | テスト | 負荷で落ちうるテストが残る．開発用 Mac（load average 7–60）での全 suite は 17 回中 3 回失敗（すべて `rehearsal_b6` 系）．ほかに `ur_21_an_untimed_send_is_on_time_after_its_delivery` と `ur_23_a_continuation_s_first_send_that_takes_nothing_ends_the_device_burst` が予約時の遅れ（uhd-control が 10 ms 以上遅れた）で 1 回ずつ落ちた．`ur_23_a_burst_one_sample…` の late leg は，B が A の最後の buffer の後に予約されたことを確かめていない（以前から） | 残すか，個別に前提の確認を足すか |
+| 6 | 実機（Phase 8） | H1：開始が遅れた複数 packet の burst（TimeError の数，残りが流れるか，BurstAck）．H2：burst の途中の Underflow（再開時刻，ずれ，途中の packet を捨てるか，loopback の位相）．H3：TX の `max_num_samps`．H4：負荷下の uhd-tx・uhd-control の起床遅延．H5：保持したサンプルの 2 ms 期限 | Phase 8 の bench 計画に入れる |
+
+- 検討して採らなかったもの：FakeDevice の時間を遅くする（例：1/10 倍速）．`DeviceAuthority` は device の時計が公称の 200 MHz で進むとして外挿するので，fake だけ遅くすると壊れる．Authority と Provider の wall-clock の待ちまでそろえると，host の期限を 10 倍緩めることになり，Mock が実機より緩くなる（§13，§34）．決定的な検査は Simulation Engine か，`Tx::step()` を直接回す unit test で行う．
+
 **5. 決まったこと・owner の判断待ち**
 
 - 決定済み（2026-09-30）：実機は **X300 + OBX 1枚のループバック**（UBX 2 枚 → CBX 1枚 → OBX と変更．profile `x310-obx`，`x310-cbx` は予備），X300 は X310 の代わりで可，FPGA 書き換え承認．
@@ -505,7 +523,8 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-1. **Phase 7 の仕上げ**（owner）：branch `worktree-phase7-impl` を `main` へ入れる判断，実機セッション（[bench.md](plan/phase7/bench.md) の B0–B9，結果は `bench-results.md`），Gate X，Step X．実装と Review L・M の記録は [plan/phase7/design-notes.md](plan/phase7/design-notes.md) §6–§8．
+0. **Phase 7 後の保守の残課題**（§4「Phase 7 後の保守」の表）：production の 1–2 と fake の 3 は owner の判断，6 は Phase 8 の bench 計画へ．
+1. **Phase 8（Mock ↔ X310 parity）の計画**（owner の依頼待ち）：Phase 7 は 2026-10-01 にクローズ済み（merge，実機セッション，Gate X，Step X）．Phase 8 へ送ったものは §4「Phase 7 のクローズ」，Phase 8 inputs は [plan/phase7/00-overview.md](plan/phase7/00-overview.md) §3．実機を使う前に X300 を戻してもらい `uhd_usrp_probe` で確認する．
 2. **v4.0 凍結前にすること**：`Endpoint::EventIn` / `EventOut` の形（event edge は Phase 10），`ParamDecl.update_class` を optional にすること（以上 Phase 5 Gate X），Manifest の `spec.source`（Spec builder のソースハッシュ，Phase 6 Gate X，KF-4）．
 3. **Session replay と artifact store**：Phase 7 のあと frontend で（Phase 6 Gate X）．
 4. **Phase 10 へ持ち越すもの**（Phase 5）：event edge，component parameter を適用する Executor（UC-2…UC-6，MA-24），component の処理時間（budget）を仮想時間で課すこと，component parameter key の MA-34 検査，MA-30 の Action latency．
