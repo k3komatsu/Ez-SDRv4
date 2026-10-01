@@ -307,8 +307,11 @@ impl Control {
             Some(old) => {
                 let restart = self.core.ticks(RESTART_LEAD_NS);
                 // A receive stream's e₁ also waits for the receive call already in progress,
-                // which asks for a whole block (or packet, if longer) and is not bounded by
-                // the cut, plus the delivery of its last packet (Review O, O-B2).
+                // which asks for a whole block and is not bounded by the cut: the longer of a
+                // block and a packet, plus the delivery of its last packet (Review O, O-B2).
+                // The call can end up to one packet more after it began, its block's last
+                // sample in a packet that ends later; the restart lead's margin covers that
+                // (a packet is at most 5.1 ms on the X300; Review P, NB-4).
                 let in_progress = match dir {
                     Dir::Rx => self.core.block_len.max(self.core.device.rx_packet_samples()) as i64 * old.n + self.core.ticks(DELIVERY_ALLOWANCE_NS),
                     Dir::Tx => 0,

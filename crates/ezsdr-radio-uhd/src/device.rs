@@ -270,6 +270,10 @@ pub enum FakeFault {
     /// From this device time on, `time_now` takes 5 ms before it reads (UR-7's 1 ms
     /// bracket rule).
     SlowTimeRead(Duration),
+    /// The `nth` `tx_send` of two samples or more (0-based) takes only its first half and
+    /// returns their count, its end-of-burst not sent (UHD's `send` timing out part way;
+    /// Review P, NB-1).
+    ShortSend(usize),
 }
 
 /// How [`FakeDevice`] behaves (UR-33).
@@ -351,6 +355,8 @@ struct Fake {
     /// The open burst ran out of samples and was reported (UR-33: an underflow).
     tx_starved: bool,
     tx_samples: BTreeMap<i64, (i64, Vec<Iq>)>,
+    /// The `tx_send` calls of two samples or more so far (`FakeFault::ShortSend`).
+    tx_sends: usize,
     reports: VecDeque<TxReport>,
     restarts: u64,
     unended: u64,
@@ -404,6 +410,7 @@ impl FakeDevice {
                 tx_dropped: false,
                 tx_starved: false,
                 tx_samples: BTreeMap::new(),
+                tx_sends: 0,
                 reports: VecDeque::new(),
                 restarts: 0,
                 unended: 0,
@@ -429,6 +436,22 @@ impl FakeDevice {
     /// Starts of burst without a time spec inside a burst (UR-22, RM-13's CORDIC reset).
     pub fn restarts(&self) -> u64 {
         self.lock().restarts
+    }
+
+    /// What the device transmitted at `n` transmit sample instants from root tick `from`
+    /// on, channel 0, `None` where it transmitted nothing (Review P, TG-1). Kept for 2 s
+    /// behind a receive stream.
+    pub fn transmitted(&self, from: i64, n: usize) -> Vec<Option<Iq>> {
+        let st = self.lock();
+        let ratio = self.ratio(st.settings[1][0].rate);
+        (0..n as i64)
+            .map(|i| {
+                let t = from + i * ratio;
+                let (start, (r, samples)) = st.tx_samples.range(..=t).next_back()?;
+                let offset = t - start;
+                if offset % r == 0 { samples.get((offset / r) as usize).copied() } else { None }
+            })
+            .collect()
     }
 
     /// Timed starts of burst sent while a burst was still open: the device would start
@@ -935,6 +958,14 @@ impl Device for FakeDevice {
         let zero: Vec<Iq> = vec![[0.0, 0.0]];
         let padded: Vec<&[Iq]> = vec![&zero; samples.len().max(1)];
         let samples = if eob && samples.first().is_none_or(|s| s.is_empty()) { &padded[..] } else { samples };
+        let n = samples.first().map_or(0, |s| s.len());
+        let short = n >= 2 && {
+            let mut st = self.lock();
+            st.tx_sends += 1;
+            self.config.faults.contains(&FakeFault::ShortSend(st.tx_sends - 1))
+        };
+        let half: Vec<&[Iq]> = samples.iter().map(|s| &s[..n / 2]).collect();
+        let (samples, eob) = if short { (&half[..], false) } else { (samples, eob) };
         let n = samples.first().map_or(0, |s| s.len());
         let cursor = {
             let mut st = self.lock();

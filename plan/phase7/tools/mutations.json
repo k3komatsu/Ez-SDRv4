@@ -1368,5 +1368,47 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_33_an_empty_end_of_burst_is_one_zero_sample"
+ },
+ {
+  "id": "B18",
+  "name": "the held sample kept after a send cut short, then sent with end-of-burst (Review P, NB-1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        let was_open = !first || continuing;\n",
+  "new": "        let was_open = !first || continuing;\n        self.tail = tail.clone();\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took",
+  "old2": "        self.tail = None;\n        if device_open && !self.core.is_lost() {\n            self.close_device_burst(None);",
+  "new2": "        let tail = self.tail.take();\n        if device_open && !self.core.is_lost() {\n            self.close_device_burst(tail);"
+ },
+ {
+  "id": "B19",
+  "name": "a device burst begun by a first send cut short not ended (Review P, NB-1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "return self.abandon(was_open || sent > 0);",
+  "new": "return self.abandon(was_open);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took"
+ },
+ {
+  "id": "B20",
+  "name": "the held sample sent after the continuation's first buffer (Review P, TG-1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        if continuing {\n            if let Some(tail) = self.tail.take() {\n                // The burst before's held sample, ahead of this one, no end-of-burst between.\n                let tail: Vec<&[Iq]> = tail.iter().map(Vec::as_slice).collect();\n                let _ = self.core.device.tx_send(&tail, None, false, false, SEND_TIMEOUT);\n            }\n        }\n        let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();\n        let result = if sending > 0 { self.core.device.tx_send(&sent, at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };\n",
+  "new": "        let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();\n        let result = if sending > 0 { self.core.device.tx_send(&sent, at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };\n        if continuing {\n            if let Some(tail) = self.tail.take() {\n                let tail: Vec<&[Iq]> = tail.iter().map(Vec::as_slice).collect();\n                let _ = self.core.device.tx_send(&tail, None, false, false, SEND_TIMEOUT);\n            }\n        }\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it"
+ },
+ {
+  "id": "B21",
+  "name": "a one-sample burst's only buffer held back, its start and time not sent (Review P, TG-2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let hold = eob && !ends_at_held && open_ended && !(device_sob && count == 1);",
+  "new": "let hold = eob && !ends_at_held && open_ended;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_23_a_one_sample_burst_booked_ahead_starts_at_its_time"
  }
 ]

@@ -641,13 +641,19 @@ fn ur_13_arm_cases() {
 
 #[test]
 fn ur_14_actions_are_finished_before_the_next_recv() {
+    // KC-21a: an Action is finished when uhd-control takes the next, so its submit returns
+    // only once it is booked. Enabling transmit configures the direction untimed, which
+    // the fake's 20 ms `apply` makes slow (a timed update's `apply` does not wait), and
+    // registers the clock: both are done when the submit returns (Review P, NB-2).
     let dir = TempDir::new();
     let device = fake(FakeConfig { apply_delay: Wall::from_millis(20), ..FakeConfig::default() });
     let mut run = session(&profile(&dir, json!({}), json!({}), true), device.clone());
     past_t0(&mut run, ms(1));
-    let entry = run.submit(set("radio.rx.gain_db", Value::Num(5.0)), None).unwrap();
+    let entry = run.submit(set("radio.tx.channels", Value::Int(1)), None).unwrap();
     assert!(admitted(&entry), "{entry:?}");
-    assert!(calls(&device, "apply rx 0 rate=- freq=- gain=5").iter().any(|c| c.contains("effective=")), "{:?}", device.calls());
+    assert!(!calls(&device, "apply tx").is_empty(), "{:?}", device.calls());
+    let tx = ResourceId::parse("usrp/tx").unwrap();
+    assert!(run.sample_clocks().iter().any(|r| r.stream == tx && r.ended_at.is_none()), "{:?}", run.sample_clocks());
     let _ = run.finish();
 }
 
@@ -2183,7 +2189,8 @@ fn ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it() {
             wait(&mut run, ms(1) / 4);
         }
         let b = TimePoint::new(a.domain, a.ticks + 30_000);
-        let entry = send_at(&mut run, "send", Some(b), &tone(1_000));
+        let second: Vec<(f32, f32)> = (0..1_000).map(|i| (-0.25 - i as f32 / 4_000.0, 0.125)).collect();
+        let entry = send_at(&mut run, "send", Some(b), &second);
         wait(&mut run, ms(40));
         let manifest = run.finish();
         assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError" && r["code"] != "Underflow"), "{:?}", calls(&device, "tx_send"));
@@ -2193,6 +2200,11 @@ fn ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it() {
             // Every sample handed over once: the first's held last sample too (Review O).
             let handed: usize = calls(&device, "tx_send").iter().map(|c| c.split("n=").nth(1).unwrap().split(' ').next().unwrap().parse::<usize>().unwrap()).sum();
             assert_eq!(handed, 31_000, "{:?}", calls(&device, "tx_send"));
+            // And in order: the first's held last sample ahead of the second's first, the
+            // two waveforms end to end on the device (Review P, TG-1).
+            let a_root = clock.origin.ticks + a.ticks * clock.root_ticks_per_tick.num() as i64;
+            let whole: Vec<Option<[f32; 2]>> = tone(30_000).iter().chain(&second).map(|&(i, q)| Some([i, q])).collect();
+            assert!(device.transmitted(a_root, 31_000) == whole, "{:?}", calls(&device, "tx_send"));
         }
     }
     assert!(played > 0, "the case was never reached");
@@ -2299,29 +2311,35 @@ fn ur_23_a_burst_one_sample_after_a_burst_is_played() {
 #[test]
 fn ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time() {
     // Review O, O-B2 (R-1): with a 168 ms block at 390 625 S/s, a `cold` change booked at
-    // any phase of the receive call in progress still switches before e₂.
+    // any phase of the receive call in progress still switches before e₂; and with a
+    // 100-sample block, where the call in progress waits for a packet (Review P, TG-3; the
+    // packet term itself is a margin here: design-notes §14).
     use ezsdr_kernel::module_api::UpdateClass::Cold;
-    for phase in 0..6 {
+    let cases = [(65_536, 1_996, 28), (100, 1_996, 1)];
+    for (block_len, packet, step_ms, phase) in cases.into_iter().flat_map(|(b, k, s)| (0..6).map(move |p| (b, k, s, p))) {
         let port = attached(ezsdr_kernel::stream::BackPressure::DropOldest);
-        let mut direct = Direct::build(bench_link(2), &[("radio.rx.sample_rate_hz", Value::Num(390_625.0))], vec![port], json!({ "block_len": 65_536 }));
-        direct.settle(Wall::from_millis(200 + phase * 28));
+        let config = FakeConfig { rx_packet: Some(packet), ..bench_link(2) };
+        let mut direct = Direct::build(config, &[("radio.rx.sample_rate_hz", Value::Num(390_625.0))], vec![port], json!({ "block_len": block_len }));
+        direct.settle(Wall::from_millis(200 + phase * step_ms));
         direct.update("radio.rx.sample_rate_hz", Value::Num(2e6), Cold, None);
         direct.settle(Wall::from_millis(600));
         let late = direct.of("radio.LATE_COMMAND");
         let instance = direct.finish();
         let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
         let switch = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_switch").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
-        assert!(switch["at"].as_i64().unwrap() < switch["e2"].as_i64().unwrap(), "phase {phase}: switched after e₂: {switch}");
-        assert!(late.is_empty(), "phase {phase}: {late:?}");
+        assert!(switch["at"].as_i64().unwrap() < switch["e2"].as_i64().unwrap(), "block {block_len} packet {packet} phase {phase}: switched after e₂: {switch}");
+        assert!(late.is_empty(), "block {block_len} packet {packet} phase {phase}: {late:?}");
     }
 }
 
 #[test]
 fn ur_23_two_bursts_back_to_back_loop_back_whole() {
-    // Review O, O-B1's held sample: a burst held at another's end continues its device
-    // burst, the first's last sample (held back) sent ahead of the second's first; on the
+    // A burst booked ahead at another's end continues its device burst (§11 F3): on the
     // sample-exact loopback the capture is the two waveforms end to end, no sample lost,
-    // doubled or moved.
+    // doubled or moved. Both are booked before the first's last buffer goes out, so it
+    // ends at the second (`ends_at_held`) and nothing is held back; a continuation booked
+    // later, after a held sample, is `ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it`
+    // (Review P, NB-7).
     let dir = TempDir::new();
     let device = fake(FakeConfig::default());
     let first: Vec<(f32, f32)> = (0..1_000).map(|i| (0.1 + i as f32 / 4_000.0, 0.05)).collect();
@@ -2352,4 +2370,49 @@ fn ur_23_two_bursts_back_to_back_loop_back_whole() {
     assert_eq!(sends.iter().filter(|c| c.contains("sob=true")).count(), 1, "{sends:?}");
     assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "{sends:?}");
     assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError" && r["code"] != "Underflow"), "{sends:?}");
+}
+
+#[test]
+fn ur_23_a_one_sample_burst_booked_ahead_starts_at_its_time() {
+    // A one-sample burst's only buffer carries its start and time spec, so it is not held
+    // back: it is played at its time, not untimed at the deadline (Review P, NB-3, TG-2).
+    let (mut run, device, _dir) = tx_session(FakeConfig::default());
+    wait(&mut run, ms(1));
+    let a = tx_at(&run, ms(40));
+    let entry = send_at(&mut run, "send", Some(a), &[(0.5, -0.25)]);
+    assert!(admitted(&entry), "{entry:?}");
+    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
+    let a_root = clock.origin.ticks + a.ticks * clock.root_ticks_per_tick.num() as i64;
+    wait(&mut run, ms(60));
+    let manifest = run.finish();
+    assert_eq!(device.transmitted(a_root, 1), vec![Some([0.5, -0.25])], "{:?}", calls(&device, "tx_send"));
+    assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
+}
+
+#[test]
+fn ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took() {
+    // Review P, NB-1: a send that comes up short abandons the burst. The device burst is
+    // closed with an empty end-of-burst (one zero sample) straight after the samples the
+    // device took; the burst's held last sample is not sent there. The final buffer cut
+    // short is the burst's first (1 000 samples) or its second (3 000; 2 000 a buffer).
+    for (nth, len) in [(0usize, 1_000usize), (1, 3_000)] {
+        let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::ShortSend(nth)], ..FakeConfig::default() });
+        wait(&mut run, ms(1));
+        let a = tx_at(&run, ms(40));
+        let wave = tone(len);
+        let entry = send_at(&mut run, "send", Some(a), &wave);
+        assert!(admitted(&entry), "{entry:?}");
+        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
+        let a_root = clock.origin.ticks + a.ticks * clock.root_ticks_per_tick.num() as i64;
+        wait(&mut run, ms(60));
+        let manifest = run.finish();
+        let sends = calls(&device, "tx_send");
+        assert!(rejections(&manifest).iter().any(|r| r.contains("UR-22: a send did not complete")), "{sends:?}");
+        let sent = device.transmitted(a_root, len + 1);
+        let took = sent.iter().zip(&wave).take_while(|(s, w)| **s == Some([w.0, w.1])).count();
+        assert!(took < len - 1, "nth {nth}: {took} of {len} {sends:?}");
+        assert_eq!(sent[took], Some([0.0, 0.0]), "nth {nth}: after {took} {sends:?}");
+        assert!(sent[took + 1..].iter().all(Option::is_none), "nth {nth}: {sends:?}");
+        assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "nth {nth}: {sends:?}");
+    }
 }

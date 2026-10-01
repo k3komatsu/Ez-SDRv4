@@ -351,6 +351,12 @@ Python の B7 は同じ container を `-w /bench -e PYTHONPATH=/work/python -e E
 - 新しい発見：X300 の ref PLL が `set_clock_source` で lock しないことが 2 回（約 24 回の open 中）．UR-7 で再試行するかは owner の判断待ち．
 - 次：B9 の抜線（owner が現地で），spike 表の記入，main への merge と Gate X（owner）．
 
+**4d. Review N・O・P（Opus による修正のレビュー，2026-09-30〜10-01）**
+
+- Review N（F1–F3 の修正）→ `aaf1e00` で直し，Review O → `10ddb73`・`b3c94ba`（O-B1：burst の最後の 1 sample を手元に残して EOB を付ける．空の EOB は UHD が 0 の 1 sample にするので device burst が 1 sample 延びる，`hw_b8_raw_empty_eob_gap` で VERIFIED．O-B2：受信 cold 変更の e₁ を進行中の受信呼び出しの後ろへ）．Review P は blocker なし（`reviews/review-p.md`），P2 の指摘を owner の「推奨通りにしてください」で直した（design-notes §14）．
+- 記録：design-notes §12–§14，bench-results.md「Session 2」part 4–6，`reviews/review-n.md`・`review-o.md`・`review-p.md`．
+- 残り：NB-5（受信 cold 変更の lead を TimingEnvelope に出していない，Phase 8 の parity），TG-4・TG-5（以前からのテストの穴），ref PLL の再試行（UR-7），B9 の抜線，spike 表，main への merge と Gate X（owner）．
+
 **5. 決まったこと・owner の判断待ち**
 
 - 決定済み（2026-09-30）：実機は **X300 + OBX 1枚のループバック**（UBX 2 枚 → CBX 1枚 → OBX と変更．profile `x310-obx`，`x310-cbx` は予備），X300 は X310 の代わりで可，FPGA 書き換え承認．
