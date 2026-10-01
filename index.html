@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#08131b">
-  <meta name="description" content="Ez-SDR v4は、人にもAIにも使いやすいよう設計した、SDR実験のためのソフトウェアです。PC上の仮想無線機で実験を試し、実験条件・受信データ・実行記録を残して、条件を変えた結果を比べられます。SDR実機との接続は未実装です。">
+  <meta name="description" content="Ez-SDR v4は、人にもAIにも使いやすいよう設計した、SDR実験のためのソフトウェアです。PC上の仮想無線機で実験を試し、実験条件・受信データ・実行記録を残して、条件を変えた結果を比べられます。USRP 実機での送受信は X300 で確認済みです。ネットワーク越しの利用は未実装です。">
   <title>Ez-SDR v4 — AI-Native Software-Defined Radio Experiments</title>
   <style>
     :root {
@@ -194,12 +194,12 @@
     .ai-points strong { display: block; margin-bottom: 2px; color: var(--ink); font-size: 14px; }
     .ai .ai-note { margin-top: 12px; font-size: 13px; color: #47645a; }
 
-    .track { list-style: none; margin: 12px 0 0; padding: 0; display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
+    .track { list-style: none; margin: 12px 0 0; padding: 0; display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; }
     .track li { padding: 14px 14px 16px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); border-top: 4px solid var(--lime); font-size: 13px; line-height: 1.6; }
     .track strong { display: block; margin-bottom: 4px; font-size: 14px; }
     .track span { color: var(--muted); }
     .track-title { margin: 44px 0 0; font-size: 15px; font-weight: 800; }
-    .track.next { margin-top: 12px; grid-template-columns: 1.3fr repeat(5, 1fr); }
+    .track.next { margin-top: 12px; grid-template-columns: 1.3fr repeat(4, 1fr); }
     .track.next li { border-top: 4px dashed var(--amber); background: #fbf6ec; border-color: #ecdcbb; border-top-color: var(--amber); }
 
     /* evidence + limits */
@@ -292,19 +292,19 @@
         <h1 id="hero-title"><span>AI-Native</span><br><span>Software-Defined</span><br><em><span>Radio Experiments</span></em></h1>
         <p class="tagline">仮想無線機で、SDR実験を試して記録する</p>
         <p class="lede">Ez-SDR v4 は、Python から <strong>PC 上の仮想無線機</strong>を動かして送受信を試し、<strong>実験条件・受信データ・実行記録</strong>をまとめて保存するソフトウェアです。実機がなくても始められ、条件を変えた結果を並べて比べられます。条件も記録も機械が読める形式（JSON）なので、人だけでなく AI からも使いやすい設計です（AI-Native）。</p>
-        <p class="v3line"><span class="badge v3">v3 で実績</span>USRP 実機やネットワーク越しの利用は、前身の v3 で動いています。v4 に引き継ぎます。<a href="#v3">詳しく ↓</a></p>
+        <p class="v3line"><span class="badge v3">v3 で実績</span>USRP 実機は v4 でも動きます（X300 で確認）。ネットワーク越しの利用は前身の v3 で動いており、v4 へは引き継ぎ中です。<a href="#v3">詳しく ↓</a></p>
         <div class="cta">
           <a class="btn btn-primary" href="#try">試し方を見る <span aria-hidden="true">↓</span></a>
           <a class="btn btn-ghost" href="#status">今できること・計画中のこと</a>
         </div>
       </div>
       <aside class="status-card" aria-labelledby="status-card-title">
-        <h2 id="status-card-title">CURRENT STATUS · 2026.09.30 確認</h2>
+        <h2 id="status-card-title">CURRENT STATUS · 2026.10.01 確認</h2>
         <ul class="status-list">
           <li>仮想無線機での送受信<span class="badge ok">使える</span></li>
           <li>実験条件・結果の記録<span class="badge ok">使える</span></li>
           <li>Python からの操作<span class="badge ok">使える</span></li>
-          <li>SDR 実機（USRP など）との接続<span class="badges"><span class="badge v3">v3 は使える</span><span class="badge plan">v4 は未実装</span></span></li>
+          <li>USRP 実機との接続<span class="badges"><span class="badge ok">X300 で確認</span></span></li>
           <li>ネットワーク越しの USRP 利用<span class="badges"><span class="badge v3">v3 は使える</span><span class="badge plan">v4 は未実装</span></span></li>
           <li>AI からも使いやすい設計（AI-Native）<span class="badge ok">採用済み</span></li>
         </ul>
@@ -335,10 +335,10 @@
           <p class="qa-a">はい。同じ PC 環境なら同じ結果になります。</p>
           <p>条件を書き換えて繰り返し実行すると、実行ごとに別の記録ファイルが残ります。たとえばゲインを 0・10・20 dB と変えた三つの結果を並べて比べられます。異なる OS や CPU の間では、数値が最後の bit まで一致する保証はありません。</p>
         </article>
-        <article class="qa-card no reveal">
-          <div class="qa-q"><h3>実機で使える？</h3><span class="badges"><span class="badge v3">v3 は使える</span><span class="badge plan">v4 は未実装</span></span></div>
-          <p class="qa-a">v4 はまだです。前身の v3 なら使えます。</p>
-          <p>USRP の実機制御とネットワーク越しの利用は、Ez-SDR v3 ですでに動いています。v4 では、その機能を引き継ぐ設計を終えた段階で、実装はこれからです。今すぐ実機で実験したい場合は、<a href="#v3">v3 をお使いください</a>。</p>
+        <article class="qa-card reveal">
+          <div class="qa-q"><h3>実機で使える？</h3><span class="badge ok">X300 で確認</span></div>
+          <p class="qa-a">はい。ただし確認済みなのは USRP X300 までです。</p>
+          <p>仮想無線機で動かした実験を、機器の指定を替えて USRP 実機で動かせます（2026-10-01 に X300 と OBX 子基板 1 枚で、送受信と接続断の検出まで確認）。ネットワーク越しの利用、複数台、N210 などは未確認・未実装です。そこは、前身の <a href="#v3">v3</a> が使えます。</p>
         </article>
       </div>
     </section>
@@ -346,8 +346,8 @@
     <section class="section light container" id="v3" aria-labelledby="v3-title">
       <div class="section-head reveal">
         <p class="kicker">02 · 前身の Ez-SDR v3</p>
-        <h2 id="v3-title">実機も、ネットワーク越しの利用も、v3 で動いています</h2>
-        <p class="section-lead">Ez-SDR v4 は、Ez-SDR v3 の作り直しです。v3 で実際に動いている実機制御とネットワーク越しの利用は、v4 でも動かします。そこへ、仮想無線機での実験、条件と結果の記録、AI から使いやすい設計を加えます。</p>
+        <h2 id="v3-title">v3 の実機制御は、v4 でも動きます</h2>
+        <p class="section-lead">Ez-SDR v4 は、Ez-SDR v3 の作り直しです。v3 で動いている実機制御は、v4 でも USRP X300 で動くようになりました。ネットワーク越しの利用は、これから引き継ぎます。v4 では、そこへ仮想無線機での実験、条件と結果の記録、AI から使いやすい設計を加えます。</p>
       </div>
       <div class="heritage reveal">
         <article class="h-card v3c">
@@ -360,16 +360,16 @@
         </article>
         <div class="h-arrow" aria-hidden="true">→</div>
         <article class="h-card v4c">
-          <h3>Ez-SDR v4 <span class="badge plan">引き継ぎは計画中</span></h3>
+          <h3>Ez-SDR v4 <span class="badge ok">実機は X300 で確認</span></h3>
           <ul>
-            <li class="todo"><strong>USRP 実機の制御</strong><span>v3 の動作を引き継ぎます。設計は受理済みで、実装はこれからです。</span></li>
-            <li class="todo"><strong>ネットワーク越しの利用</strong><span>接続の受け付けと認証を含め、実機接続の後の段階で作ります。</span></li>
+            <li><strong>USRP 実機の制御</strong><span>UHD 経由で動きます。確認済みは X300 と OBX 子基板 1 枚で、N210 や複数台は未確認です。</span></li>
+            <li class="todo"><strong>ネットワーク越しの利用</strong><span>接続の受け付けと認証を含め、未実装です。実機接続ができたので、次の段階で作ります。</span></li>
             <li><strong>PC 上の仮想無線機での実験</strong><span>v4 で新しく加わり、すでに使えます。</span></li>
             <li><strong>条件・結果の記録と、AI から使いやすい設計</strong><span>v4 で新しく加わり、すでに使えます。</span></li>
           </ul>
         </article>
       </div>
-      <p class="h-note reveal"><strong>今すぐ実機で実験したい方へ：</strong>実機とネットワーク越しの利用は <a href="https://github.com/k3komatsu/Ez-SDR" target="_blank" rel="noopener noreferrer">Ez-SDR v3 ↗</a> をお使いください。v4 は、仮想実験と記録の土台を先に作り、そこへ実機を載せていく順序で開発しています。</p>
+      <p class="h-note reveal"><strong>ネットワーク越しや X300 以外の機器で今すぐ実験したい方へ：</strong>それらは <a href="https://github.com/k3komatsu/Ez-SDR" target="_blank" rel="noopener noreferrer">Ez-SDR v3 ↗</a> をお使いください。v4 は、仮想実験と記録の土台を先に作り、そこへ実機を載せていく順序で開発しています。</p>
     </section>
 
     <section class="section light container" aria-labelledby="flow-title">
@@ -383,8 +383,8 @@
         <li><h3>機器と環境を選ぶ</h3><p>使う無線機や、周囲の環境（実行環境）を選びます。</p></li>
         <li><h3>実行前に確認</h3><p>機器が条件を満たせるかを事前に確認します。満たせない場合は実行前に理由が分かります。</p></li>
         <li class="hl"><h3>仮想無線機で検証</h3><p>実機の前に、PC 上で実験します。実時間を待たずに、AI が自律的に検証を繰り返せます。</p><span class="badge ok">使える</span></li>
-        <li class="todo"><h3>実機で実験</h3><p>検証した同じ実験条件で、USRP 実機を動かします。ネットワーク越しにも使えるようにします。</p><span class="badge plan">v4 は未実装（v3 は使える）</span></li>
-        <li><h3>条件と結果を保存</h3><p>条件・環境・操作履歴・受信データを、実行ごとにファイルへ残します。</p><span class="badge ok">仮想実験で使える</span></li>
+        <li><h3>実機で実験</h3><p>検証した同じ実験条件で、機器の指定だけを替えて USRP 実機を動かします。ネットワーク越しの利用は今後です。</p><span class="badge ok">X300 で確認</span></li>
+        <li><h3>条件と結果を保存</h3><p>条件・環境・操作履歴・受信データを、実行ごとにファイルへ残します。</p><span class="badge ok">使える</span></li>
       </ol>
     </section>
 
@@ -485,7 +485,7 @@ python python/examples/minimal.py</code></pre>
       <div class="section-head reveal">
         <p class="kicker">05 · 現状と計画</p>
         <h2 id="status-title">今使えるものと、これから作るもの</h2>
-        <p class="section-lead">実装状況は 2026-09-30 にリポジトリの最新状態で確認しました。「計画中」は、まだ使えないものです。</p>
+        <p class="section-lead">実装状況は 2026-10-01 にリポジトリの最新状態で確認しました。「計画中」は、まだ使えないものです。</p>
       </div>
       <div class="two">
         <div class="col reveal">
@@ -494,6 +494,7 @@ python python/examples/minimal.py</code></pre>
             <li><strong>PC 上の仮想無線機</strong><span>周波数・サンプルレートなどの条件を確認し、受信データの欠落も検出します。</span></li>
             <li><strong>仮想環境での伝搬と障害の再現</strong><span>無線機間の遅延や雑音、指定した障害を PC 上で再現します。</span></li>
             <li><strong>結果の保存</strong><span>SDR 測定データ用の形式（SigMF）と、実行記録（Manifest）を残します。</span></li>
+            <li><strong>USRP 実機での送受信</strong><span>同じ Python 操作で USRP を動かします。X300 と OBX 子基板 1 枚で、指定時刻での受信、繰り返し送信、受信データ欠落の検出、ケーブルを抜いた際の検出と記録まで確認しました。UHD ドライバ付きでのビルドが必要です。</span></li>
             <li><strong>応答する処理の実行</strong><span>Rust 製の処理部品が「PING」を受けて、指定した時刻に「PONG」を返す例を動かせます。</span></li>
             <li><strong>Python からの操作</strong><span>送信・受信・条件の変更と繰り返し実行、記録の取得ができます。</span></li>
           </ul>
@@ -501,9 +502,9 @@ python python/examples/minimal.py</code></pre>
         <div class="col plan reveal">
           <h3>計画中 <span class="badge plan">未実装</span></h3>
           <ul>
-            <li><strong>SDR 実機（USRP など）との接続</strong><span>v3 で動いている機能を引き継ぎます。設計は受理済みで、実装はこれからです。</span></li>
-            <li><strong>ネットワーク越しの USRP 利用</strong><span>USRP をつないだ PC で実験実行プログラム（<code>ezsdr-server</code>）を動かし、別の PC の Python から接続します。v3 ではすでに動いており、v4 でも同じことができるようにします。手元の PC で仮想無線機で検証してから、研究室の USRP で動かせる構想です。実機接続の後の段階で、接続の受け付けと認証はこれから作ります。</span></li>
-            <li><strong>仮想実験と実機測定の比較</strong><span>USRP X310 などの実測と、仮想無線機の結果を照合します。</span></li>
+            <li><strong>X300 以外の USRP・複数台の同時利用</strong><span>N210 など他の機種や、複数台を同期させる使い方です。v3 では動いています。</span></li>
+            <li><strong>ネットワーク越しの USRP 利用</strong><span>USRP をつないだ PC で実験実行プログラム（<code>ezsdr-server</code>）を動かし、別の PC の Python から接続します。v3 ではすでに動いており、v4 でも同じことができるようにします。手元の PC で仮想無線機で検証してから、研究室の USRP で動かせる構想です。実機接続はできたので次の段階で、接続の受け付けと認証はこれから作ります。</span></li>
+            <li><strong>仮想実験と実機測定の比較</strong><span>USRP の実測と、仮想無線機の結果を照合し、仮想無線機の性能値を実測に合わせます。次の段階です。</span></li>
             <li><strong>パケット通信との連携</strong><span>パケット処理を OS のネットワーク機能とつなぎます。</span></li>
             <li><strong>信号処理・応答機能の拡張</strong><span>検出した信号に応じて処理し、応答する機能を追加します。</span></li>
             <li><strong>GPU・WebAssembly など、対応する計算方式と機器の拡張</strong><span>さらに先の計画です。</span></li>
@@ -515,7 +516,7 @@ python python/examples/minimal.py</code></pre>
         <div class="ai-mark" aria-hidden="true">AI</div>
         <div>
           <h3>AI-Native とは：<span class="badge ok" style="vertical-align:middle">設計に反映済み</span></h3>
-          <p>AI を内蔵するという意味ではなく、<strong>このソフトウェア自体が AI から使いやすいように設計されている</strong>という意味です。AI エージェントは、人と同じ Python の操作と実験条件を使い、まず<strong>仮想無線機（SDR エミュレーション）で自分で検証してから、同じ実験条件を実機で動かす</strong>という段階を踏めます。実機の接続は計画中なので、現在使えるのは仮想無線機での検証までです。</p>
+          <p>AI を内蔵するという意味ではなく、<strong>このソフトウェア自体が AI から使いやすいように設計されている</strong>という意味です。AI エージェントは、人と同じ Python の操作と実験条件を使い、まず<strong>仮想無線機（SDR エミュレーション）で自分で検証してから、同じ実験条件を実機で動かす</strong>という段階を踏めます。実機は USRP X300 で確認済みなので、この二段階を今すぐ踏めます。</p>
           <ul class="ai-points">
             <li><strong>機械が読める形式</strong>実験条件も実行記録も JSON で、その形式（JSON Schema）が定義されています。</li>
             <li><strong>理由つきの拒否</strong>条件を満たさない操作は、理由とともに拒否され、その拒否も記録に残ります。</li>
@@ -533,21 +534,21 @@ python python/examples/minimal.py</code></pre>
         <li><strong>異常検知とデータ保存</strong><span>欠落の検出と SigMF での記録</span></li>
         <li><strong>受信への応答</strong><span>PING を受けて PONG を返す実験</span></li>
         <li><strong>Python から操作</strong><span>送受信・条件変更・記録の取得</span></li>
+        <li><strong>USRP 実機との接続</strong><span>X300 での送受信と接続断の検出</span></li>
       </ol>
       <h3 class="track-title reveal">これから</h3>
       <ol class="track next reveal" aria-label="これからの開発の予定">
-        <li><strong>SDR 実機との接続</strong><span>v3 の機能を引き継ぐ。次に取り組む予定。設計は受理済み</span></li>
-        <li><strong>ネットワーク越しの利用</strong><span>v3 の機能を引き継ぐ。実機接続の後。認証も含め未実装</span></li>
-        <li><strong>仮想と実機の比較</strong><span>実測との照合</span></li>
+        <li><strong>ネットワーク越しの利用</strong><span>v3 の機能を引き継ぐ。認証も含め未実装</span></li>
+        <li><strong>仮想と実機の比較</strong><span>実測との照合。次に取り組む予定</span></li>
         <li><strong>パケット通信連携</strong><span>OS のネットワークと接続</span></li>
         <li><strong>処理・応答の拡張</strong><span>信号に応じた応答</span></li>
         <li><strong>計算方式・機器の拡張</strong><span>GPU・WebAssembly など</span></li>
       </ol>
 
       <div class="evidence reveal">
-        <div><b>684</b><span>Rust の自動テストが合格<br>（Rust 1.85.0・安定版 1.98.1 の両方）</span></div>
-        <div><b>21</b><span>Python のテストが合格<br>（Python 3.9 と 3.13）</span></div>
-        <div><b>13</b><span>受理済みの設計仕様<br>テスト結果は 2026-09-27 時点</span></div>
+        <div><b>885</b><span>Rust の自動テストが合格<br>（Rust 1.85.0・安定版の両方）</span></div>
+        <div><b>23</b><span>Python のテストが合格<br>（Python 3.9 と 3.14）</span></div>
+        <div><b>14</b><span>受理済みの設計仕様<br>テスト結果は 2026-10-01 時点</span></div>
       </div>
     </section>
 
@@ -557,9 +558,9 @@ python python/examples/minimal.py</code></pre>
         <h2 id="limits-title">現時点の制約</h2>
       </div>
       <div class="limits">
-        <article class="limit reveal"><h3>v4 では実機の測定はまだできない</h3><p>USRP などの実機を操作する機能は v4 では未実装で、実機との比較も行っていません。v4 の結果はすべて仮想無線機によるものです。実機は v3 で使えます。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/vision/11-boundaries-invariants-and-roadmap.md" target="_blank" rel="noopener noreferrer">開発の順序 ↗</a></article>
+        <article class="limit reveal"><h3>実機で確認できたのは USRP X300 まで</h3><p>実機の動作確認は、X300 と OBX 子基板 1 枚をケーブルでつないだ構成だけです。仮想無線機と実機の数値の照合はこれからで、仮想の結果がそのまま実機の性能を表すとは限りません。N210・複数台・ネットワーク越しは v3 で使えます。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/plan/phase7/bench-results.md" target="_blank" rel="noopener noreferrer">実機試験の記録 ↗</a></article>
         <article class="limit reveal"><h3>再現できるのは同じ PC 環境まで</h3><p>同じビルド・同じ環境なら、同じ設定でシミュレーション結果を再現できます。異なる OS や CPU の間で、数値が最後の bit まで一致する保証はありません。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/11-simulation-channel.md" target="_blank" rel="noopener noreferrer">シミュレーションの仕様 ↗</a></article>
-        <article class="limit reveal"><h3>導入には Rust のビルドが必要</h3><p>配布用のパッケージはまだありません。実験実行プログラムをリポジトリからビルドして使います。研究用途の初期版としてお試しください。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/python/examples/minimal.py" target="_blank" rel="noopener noreferrer">最小の例 ↗</a></article>
+        <article class="limit reveal"><h3>導入には Rust のビルドが必要</h3><p>配布用のパッケージはまだありません。実験実行プログラムをリポジトリからビルドして使います。実機で使うには、UHD ドライバ（4.10 で確認）を入れたうえで <code>--features uhd</code> を付けてビルドし、使う機器を記した設定ファイルを渡します。研究用途の初期版としてお試しください。</p><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/python/examples/minimal.py" target="_blank" rel="noopener noreferrer">最小の例 ↗</a></article>
       </div>
     </section>
 
@@ -575,7 +576,7 @@ python python/examples/minimal.py</code></pre>
         <a class="ref reveal" href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/16-easy-api.md" target="_blank" rel="noopener noreferrer"><div><small>PYTHON API</small><strong>Python から実験を操作する方法</strong></div><em aria-hidden="true">↗</em></a>
       </div>
       <details class="specs reveal">
-        <summary>設計仕様 13 件の一覧を開く</summary>
+        <summary>設計仕様 14 件の一覧を開く</summary>
         <ul class="spec-list">
           <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/01-time-model.md" target="_blank" rel="noopener noreferrer">実験時刻の表し方</a><span>サンプル時刻と処理の速さ（Time Model）</span></li>
           <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/02-stream-contract.md" target="_blank" rel="noopener noreferrer">データ形式と受け渡し</a><span>サンプルデータの形式と接続条件（Stream Contract）</span></li>
@@ -590,6 +591,7 @@ python python/examples/minimal.py</code></pre>
           <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/11-simulation-channel.md" target="_blank" rel="noopener noreferrer">仮想環境の電波伝搬</a><span>仮想環境での遅延や雑音（SimulationChannel）</span></li>
           <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/14-native-executor.md" target="_blank" rel="noopener noreferrer">Rust 製処理部品の実行</a><span>仮想実験内で Rust の処理部品を動かす方法（Native Executor）</span></li>
           <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/16-easy-api.md" target="_blank" rel="noopener noreferrer">Python から実験を操作する方法</a><span>実験の実行、受信、記録の取得（Easy API）</span></li>
+          <li><a href="https://github.com/k3komatsu/Ez-SDRv4/blob/main/design/18-uhd-radio.md" target="_blank" rel="noopener noreferrer">USRP 実機の制御</a><span>UHD 経由で USRP を動かす部品（UHD Radio Module）</span></li>
         </ul>
       </details>
     </section>
@@ -598,7 +600,7 @@ python python/examples/minimal.py</code></pre>
   <footer class="site-footer">
     <div class="container footer-inner">
       <span>© Ez-SDR v4 · GitHub Pages</span>
-      <span>機能の基準：<a href="https://github.com/k3komatsu/Ez-SDRv4/commit/7cc614737de24ffaece87c156b403dccb3b4b429" target="_blank" rel="noopener noreferrer"><code>main@7cc6147</code></a>（それ以降の <code>main</code> の更新は SDR 実機接続の設計文書のみ・2026-09-30 確認）</span>
+      <span>機能の基準：<a href="https://github.com/k3komatsu/Ez-SDRv4/commit/e24a3ddf37e157c1b21526f38c0faf4fb244083e" target="_blank" rel="noopener noreferrer"><code>main@e24a3dd</code></a>（2026-10-01 確認）</span>
     </div>
   </footer>
 
