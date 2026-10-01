@@ -1330,3 +1330,52 @@ Caused by:
 - Recorded as design-notes §17 F4, for the owner. The transmit-only case and B3–B7 again have not been run.
 
 The owner replugged the cable at the X300 ("X300側を挿し直しました"); the carrier came back at UTC 1790833117.715 (05:38:37.7), 35.9 s after it dropped. B1 then opened the device and passed (`~/ezsdr-bench/s2-b9/hw_b1_probe.after-replug.log`: OBX found, the time advancing 20.03–20.04 M ticks per 100 ms, `ref_locked` `Some(false)`).
+
+
+### Receive Run again, under gdb — `hw_b9_unplug`: the abort's stack
+
+The owner: "推奨で．gdbでもう一回やりましょう". The same test, its binary run under `gdb -batch` (cargo's runner; `catch signal SIGABRT`, then every thread's stack), the cable pulled at the X300 ("X300側を抜き，30秒待機して挿し直しました"): started at UTC 1790833372.179, the carrier dropped at 1790833398.062 and came back at 1790833433.153 (35.1 s). The process aborted as before (`terminate called after throwing an instance of 'uhd::io_error'`, the same destructor warnings). The aborting thread's stack, as gdb printed it (the whole log: `~/ezsdr-bench/s2-b9/hw_b9_unplug.gdb.log`; the other threads were UHD's logger, a control endpoint's receive worker, and the test harness's main thread, all waiting):
+
+```
+Thread 2 (Thread 0x7ffff5c6a6c0 (LWP 33) "hw_b9_unplug"):
+#0  __pthread_kill_implementation (threadid=<optimized out>, signo=6, no_tid=0) at ./nptl/pthread_kill.c:44
+#1  __pthread_kill_internal (threadid=<optimized out>, signo=6) at ./nptl/pthread_kill.c:89
+#2  __GI___pthread_kill (threadid=<optimized out>, signo=signo@entry=6) at ./nptl/pthread_kill.c:100
+#3  0x00007ffff68c8b7e in __GI_raise (sig=sig@entry=6) at ../sysdeps/posix/raise.c:26
+#4  0x00007ffff68ab8ec in __GI_abort () at ./stdlib/abort.c:77
+#5  0x00007ffff5db3275 in ?? () from /usr/lib/x86_64-linux-gnu/libstdc++.so.6
+#6  0x00007ffff5dca64a in ?? () from /usr/lib/x86_64-linux-gnu/libstdc++.so.6
+#7  0x00007ffff5db2af4 in __cxa_call_terminate () from /usr/lib/x86_64-linux-gnu/libstdc++.so.6
+#8  0x00007ffff5dc9b2c in __gxx_personality_v0 () from /usr/lib/x86_64-linux-gnu/libstdc++.so.6
+#9  0x00007ffff6bec592 in ?? () from /usr/lib/x86_64-linux-gnu/libgcc_s.so.1
+#10 0x00007ffff6bed0db in _Unwind_Resume () from /usr/lib/x86_64-linux-gnu/libgcc_s.so.1
+#11 0x00007ffff71e5a72 in ctrlport_endpoint_impl::poke32(unsigned int, unsigned int, uhd::time_spec_t, bool) () from /usr/local/lib/libuhd.so.4.10.0
+#12 0x00007ffff798dc11 in x300_radio_control_impl::deinit() () from /usr/local/lib/libuhd.so.4.10.0
+#13 0x00007ffff71c8797 in uhd::rfnoc::noc_block_base::shutdown() () from /usr/local/lib/libuhd.so.4.10.0
+#14 0x00007ffff7178488 in uhd::rfnoc::detail::block_container_t::shutdown() () from /usr/local/lib/libuhd.so.4.10.0
+#15 0x00007ffff71f6824 in rfnoc_graph_impl::~rfnoc_graph_impl() () from /usr/local/lib/libuhd.so.4.10.0
+#16 0x00007ffff70fa8d7 in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release_last_use_cold() () from /usr/local/lib/libuhd.so.4.10.0
+#17 0x00007ffff73737f5 in multi_usrp_rfnoc::~multi_usrp_rfnoc() () from /usr/local/lib/libuhd.so.4.10.0
+#18 0x00007ffff70fa8d7 in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release_last_use_cold() () from /usr/local/lib/libuhd.so.4.10.0
+#19 0x00007ffff7398e94 in std::_Rb_tree<unsigned long, std::pair<unsigned long const, usrp_ptr>, std::_Select1st<std::pair<unsigned long const, usrp_ptr> >, std::less<unsigned long>, std::allocator<std::pair<unsigned long const, usrp_ptr> > >::_M_erase(std::_Rb_tree_node<std::pair<unsigned long const, usrp_ptr> >*) [clone .isra.0] () from /usr/local/lib/libuhd.so.4.10.0
+#20 0x00007ffff739a1a2 in uhd_usrp_free () from /usr/local/lib/libuhd.so.4.10.0
+#21 0x000055555576eeb7 in core::ptr::drop_glue::<ezsdr_radio_uhd::uhd::UhdDevice> ()
+#22 0x00005555557a12ba in <alloc::sync::Arc<dyn ezsdr_radio_uhd::device::Device>>::drop_slow ()
+#23 0x000055555569746b in core::ptr::drop_glue::<ezsdr_radio_uhd::authority::DeviceTime> ()
+#24 0x00005555559107fa in <alloc::sync::Arc<dyn ezsdr_kernel::stream::link::DataLink>>::drop_slow ()
+#25 0x00005555559047b3 in core::ptr::drop_glue::<ezsdr_kernel::coordinator::state::Shared> ()
+#26 0x0000555555910ca0 in <alloc::sync::Arc<ezsdr_kernel::coordinator::state::Shared>>::drop_slow ()
+#27 0x000055555596029c in core::ptr::drop_glue::<ezsdr_kernel::coordinator::RunHandle> ()
+#28 0x000055555597b95a in <ezsdr_kernel::coordinator::RunHandle>::finish ()
+#29 0x000055555567e323 in <hardware::hw_b9_unplug::{closure#0} as core::ops::function::FnOnce<()>>::call_once ()
+#30 0x00005555557099fb in test::__rust_begin_short_backtrace::<core::result::Result<(), alloc::string::String>, fn() -> core::result::Result<(), alloc::string::String>> ()
+#31 0x0000555555717045 in test::run_test::{closure#0} ()
+#32 0x00005555557109f4 in std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> ()
+#33 0x000055555571a192 in <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#34 0x00005555559f093f in <std::sys::thread::unix::Thread>::new::thread_start ()
+#35 0x00007ffff69270da in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:454
+#36 0x00007ffff69ba7ac in __GI___clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+```
+
+- **The cause, VERIFIED (the stack and UHD 4.10's source):** `RunHandle::finish` drops the Run; the last `Arc<dyn Device>`, held through `DeviceTime`, drops `UhdDevice`, which calls `uhd_usrp_free`; that erases the device from the C API's static map, destroying `multi_usrp_rfnoc` and then `rfnoc_graph_impl`, whose destructor shuts every block down (`rfnoc_graph.cpp:122–129`, `block_container.cpp:81–87`, `noc_block_base.cpp:351–357`); the X300 radio's `deinit()` writes its registers (`x300_radio_control.cpp:1890–1911`) with no `try`; over the dead link `ctrlport_endpoint_impl::poke32` throws `uhd::io_error`, which leaves a destructor and so terminates the process.
+- So the Run did stop: `finish` had sealed its Manifest (cleanup builds it, `coordinator/mod.rs:319–323`), and the process died while `finish` dropped the Run's state, before returning it. The server writes `manifest.json` only after `finish` returns (`ezsdr-server/src/lib.rs:189–190`, `:227–229`), so in a Session the Manifest and the client's reply would both be lost.
