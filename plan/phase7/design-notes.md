@@ -509,3 +509,5 @@ The review of F4's fix and B9 ([`reviews/review-s.md`](reviews/review-s.md)): on
 
 **Checks.** `cargo test --workspace` 883 passed on stable and 1.85.0; `--features uhd` 169 passed; clippy `-D warnings` clean with and without `uhd`; B33–B38 killed (158 rows).
 
+**On the bench, through the owner's L2 switch** (bench-results.md part 10; the host's carrier kept): the transmit-only unplug was found by S-B1's rule — `UHD error 47: RfnocError: OpTimeout`, as the review read UHD — 3.0 s after the unplug, where before the fix there would have been no `DEVICE_LOST`; the receive unplugs by the silence rule, 1.10 s after; every Run stopped by Policy with its Manifest; `hw_b9_unplug_and_reopen` opened the device again in the same process after the replug and ran B3 on it; every process exited normally, UHD's teardown timing out rather than throwing with the route kept. Not observed: whether the reopen's `reclaim` freed the kept device first.
+

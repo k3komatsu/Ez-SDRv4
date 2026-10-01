@@ -1496,3 +1496,60 @@ And what remains, recorded in UR-29: the process aborts at exit in UHD's static 
 
 The latencies above mix the event with the Run's end. From the events' ticks (the time was set before each test's start line): the receive Run's `DEVICE_LOST` (tick 4 235 276 494, 21.176 s after the time was set) came at most **1.10 s after the carrier dropped**, meeting bench.md's "about 1 s"; the "3–4 s" was when the test saw the Run stopped — its 1 s poll, and `Provider::stop` waiting UR-16's 1 s for a uhd-control blocked inside UHD. The transmit-only Session's (tick 6 239 997 161) came **5.8–6.0 s** after it: the event's own latency, the OS's route timeout reaching UHD as `ENETUNREACH`, which Review S's S-B1 explains. The owner's acceptance is withdrawn for the transmit-only figure, to be measured again after S-B1's fix (design-notes §19).
 
+
+
+## Session 2, part 10 — B9 through an L2 switch (`8ebf593`)
+
+The owner: "4はスイッチがあるので可能です", then "L2スイッチ経由でつなげました": the host's 10 GbE → an L2 switch → the X300, the cable pulled each time between the switch and the X300, at the X300 (Review S, TG-S2). Logs in `~/ezsdr-bench/s2-switch/`.
+
+**The link.** ping and an unfragmented 8 000-byte ping pass (the jumbo's round trip 23 ms against 0.8 ms for a small one, the X300's firmware answering slowly; streaming is not affected); B1 passes (`Maximum frame size: 8000 bytes`, `ref_locked` `Some(true)`); B3 passes (24.6 s, within its past spread of 4.5–20.6 s, the open's lock wait). The host's carrier stayed `1` through every unplug (`carrier.log`) — the case Review S's S-B1 is about. For the second and third runs the X300 was pinged every 10 ms with the host's UTC (`ping2.log`); the last reply before a gap is the unplug, the first after it the replug.
+
+### Receive Run — `hw_b9_unplug`: `DEVICE_LOST`, stopped by Policy, **the process exits normally**
+
+```
+B9: unplug the cable now (receive Run; up to 300 s); started at UTC 1790837464.480
+B9 receive: not running at UTC 1790837492.058 (Err(Ended { termination: Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } } }), CleanedUp { termination: Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } } }); termination Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } }
+B9 receive DEVICE_LOST: [Event { source: ResourceId { node: NodeId(0), path: "usrp" }, time: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 4935112480 }, severity: Fatal, kind: EventKind("DEVICE_LOST"), payload: Object {"message": String("UR-29: the receive stream yielded nothing for 1 s")} }]
+B9 receive DEVICE_LOST at UTC 1790837489.152
+B9 receive rejected: [{"reason":"did not join within 1 s; left detached","thread":"uhd-control"},{"because":["uhd-control"],"leaked":"streamers"}]
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 40.08s
+[Inferior 1 (process 30) exited normally]
+```
+
+- `DEVICE_LOST` by the receive silence rule; the unplug's instant is not known (the carrier stayed up and the ping was not yet running), so this run gives no latency.
+- At exit UHD's destructors (`~dboard_manager_impl`, `~x300_dboard_iface`, `~x300_impl`) hit control timeouts that UHD's safe-calls caught, and the process **exited normally** — unlike the direct cable, where a send failed with `Network is unreachable` and the throw escaped the radio's `deinit` (part 9). INFERRED: with the host's route kept, the writes only time out.
+
+### Transmit-only Session — `hw_b9_unplug_transmit_only`: **S-B1's rule found it**
+
+```
+B9 transmit only: radio.rx.channels 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }
+B9: unplug the cable now (transmit-only Session; up to 300 s); started at UTC 1790837649.048
+B9 transmit only: not running at UTC 1790837673.992 (Err(Ended { termination: Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } } }), CleanedUp { termination: Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } } }); termination Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } }
+B9 transmit only DEVICE_LOST: [Event { source: ResourceId { node: NodeId(0), path: "usrp" }, time: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 5189580693 }, severity: Fatal, kind: EventKind("DEVICE_LOST"), payload: Object {"message": String("UR-29: the device reads have failed for 1 s: uhd_usrp_get_time_now: UHD error 47: RfnocError: OpTimeout: Control operation timed o
+B9 transmit only DEVICE_LOST at UTC 1790837672.989
+B9 transmit only rejected: []
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 34.49s
+[Inferior 1 (process 30) exited normally]
+```
+
+- Unplugged at UTC 1790837669.971 (the last ping reply; the cable back at …698.966, 29.0 s). `DEVICE_LOST` at …672.989, **3.0 s** after it, from the new rule (`UR-29: the device reads have failed for 1 s: uhd_usrp_get_time_now: UHD error 47: RfnocError: OpTimeout: Control operation timed out waiting for ACK …`): the dead link's error is `UHD_ERROR_EXCEPT`, as Review S found in UHD's source — before the fix this Session would have had no `DEVICE_LOST` at all. The 3.0 s: up to 0.5 s to the next read, then reads that each wait out UHD's ACK timeout (INFERRED).
+- Stopped by Policy, the Manifest returned, nothing in `rejected`; the process exited normally.
+
+### `hw_b9_unplug_and_reopen`: lost, plugged back, **opened again in the same process**, B3 on it, a normal exit
+
+```
+[INFO] [X300] X300 initialization sequence...
+B9: unplug the cable now (receive Run; up to 300 s); started at UTC 1790837754.381
+B9 reopen: not running at UTC 1790837798.596 (Err(Ended { termination: Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } } }), CleanedUp { termination: Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } } }); termination Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } }; DEVICE_LOST at UTC 1790837795.687
+B9: plug the cable back in now (waiting up to 300 s for the device); at UTC 1790837799.595
+[INFO] [X300] X300 initialization sequence...
+[WARNING] [RFNOC::GRAPH] One or more blocks timed out during flush!
+B9 reopen: opened again at UTC 1790837834.406
+DB9 reopen: B3 on the reopened device: termination Stopped { cause: Client }
+B9 reopen: the process exits next, at UTC 1790837841.755
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 113.87s
+[Inferior 1 (process 30) exited normally]
+```
+
+- Unplugged at UTC 1790837794.584 (the last ping reply); `DEVICE_LOST` (the receive silence rule) at …795.687, **1.10 s** after it. Plugged back at …830.866 (the first reply, 36.3 s out); the device opened again at …834.406 — the test's open retried every 2 s, each try's `reclaim` reading the kept device's time and timing out while the cable was out (the `Control operation timed out` errors, 14) —; B3 on it ended `Stopped { cause: Client }`; the process exited normally.
+- Not observed: whether that open freed the kept device first (NB-S2's `reclaim`) or left it to the exit — nothing prints the list, and through the switch the exit is normal either way.
