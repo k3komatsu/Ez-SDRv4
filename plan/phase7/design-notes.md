@@ -432,3 +432,17 @@ The re-review ([`reviews/review-q.md`](reviews/review-q.md)): no blockers; Revie
 | NB-5, NB-6, TG-4, TG-5 | Open, as before. |
 
 **Checks.** `cargo test --workspace` 877 passed on stable and 1.85.0; `--features uhd` (`ezsdr-radio-uhd` and `ezsdr-server`) 163 passed; clippy `-D warnings` clean with and without `uhd` (after two fixes: a type alias for `uhd-clock`'s stop, and `Ok(1)` for a redundant guard). Mutations: B22 restored, B23 (`drop` not waiting for `uhd-clock`), B24 (the stop flag not checked before a read), B25, B26 (NB-Q1), B27 (TG-Q1), B28 (NB-Q2), B29 (TG-Q2), B30 (the fake acknowledging at once) added; U35 and B20 rewritten for the new code; the 47 rows on `tx.rs`, `device.rs`, `authority.rs` and on the changed tests run: **all killed**. 150 rows.
+
+## 16. Review R
+
+The re-review ([`reviews/review-r.md`](reviews/review-r.md)): no blockers; every Review Q finding closed but TG-Q4 (accepted as near-equivalent); D-1's join judged correct (no lost wake-up, no deadlock against `next_wakeup`, the last device handle never on `uhd-clock`), and the fake's end-timed acknowledgements the device's behaviour, not stricter. The owner: "NB-R1・NB-R2 は記録だけで．X300は一旦電源を落としています．"
+
+| Finding | Disposition |
+|---|---|
+| NB-R1 (P2) | Recorded, not fixed (the owner). D-1's residuals the fix cannot remove: a `uhd-clock` read blocked past the 1 s join is detached, and when it returns it can drop the last device handle on that thread, D-1's race again if the process is exiting — which needs a device gone at exit; UR-16's detached Provider threads hold the device past the Session by design; `ea_07_the_device_is_released_when_the_session_ends` pins that no reference survives the Session, not the race. |
+| NB-R2 (P2, INFERRED) | Recorded, not fixed (the owner). After a first send that failed having sent nothing, `abandon`'s empty end-of-burst is one zero sample the X300 plays untimed at once and acknowledges (the acknowledgement pairs with the start pushed, so the reports stay paired): one zero sample at an arbitrary instant, the price of never leaving a begun burst open. |
+| NB-R3 (P2) | Open, for the owner: `FakeFault::FailSend` on a one-sample send takes nothing and returns `Ok(0)` instead of an error, unlike UR-33's description. |
+| TG-R1 (P2) | Open, for the owner: the error branch of the held sample's send ahead of a continuation is untested (NB-R3 is why). |
+| TG-Q4, NB-5, NB-6, TG-4, TG-5 | Open, as before. |
+
+**The device.** After part 7 (B1's `ref_locked` false since part 5, reference-PLL lock failures rising) the owner has powered the X300 off. No hardware run until the owner says it is back.
