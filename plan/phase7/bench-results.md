@@ -1379,3 +1379,51 @@ Thread 2 (Thread 0x7ffff5c6a6c0 (LWP 33) "hw_b9_unplug"):
 
 - **The cause, VERIFIED (the stack and UHD 4.10's source):** `RunHandle::finish` drops the Run; the last `Arc<dyn Device>`, held through `DeviceTime`, drops `UhdDevice`, which calls `uhd_usrp_free`; that erases the device from the C API's static map, destroying `multi_usrp_rfnoc` and then `rfnoc_graph_impl`, whose destructor shuts every block down (`rfnoc_graph.cpp:122–129`, `block_container.cpp:81–87`, `noc_block_base.cpp:351–357`); the X300 radio's `deinit()` writes its registers (`x300_radio_control.cpp:1890–1911`) with no `try`; over the dead link `ctrlport_endpoint_impl::poke32` throws `uhd::io_error`, which leaves a destructor and so terminates the process.
 - So the Run did stop: `finish` had sealed its Manifest (cleanup builds it, `coordinator/mod.rs:319–323`), and the process died while `finish` dropped the Run's state, before returning it. The server writes `manifest.json` only after `finish` returns (`ezsdr-server/src/lib.rs:189–190`, `:227–229`), so in a Session the Manifest and the client's reply would both be lost.
+
+
+### After F4's fix (`0c2ae4d`) — the receive Run again, under gdb: **`DEVICE_LOST`, the Run stopped by Policy, its Manifest returned**
+
+The owner: "この推奨でOKです．直してください．その後の実機の手順も了解です". A first try ran its 300 s with the cable in (the owner had not seen my message: "ごめんみてなかった"); its log is `~/ezsdr-bench/s2-b9/hw_b9_unplug.after-f4.gdb.log` (`still running after 300 s`, `Stopped { cause: Client }`, no `DEVICE_LOST`). The second, `hw_b9_unplug.after-f4.run2.gdb.log`: started at UTC 1790835361.774; the carrier dropped at 1790835381.853 (pulled at the X300); the test's lines, as printed (UHD's control-timeout errors between them cut, as in the first log):
+
+```
+B9: unplug the cable now (receive Run; up to 300 s); started at UTC 1790835361.774
+[ERROR] [UHD] An unexpected exception was caught in a task loop.The task loop will now exit, things may not work.EnvironmentError: IOError: 192.168.40.36: x300 fw communication failure #3
+B9 receive: not running at UTC 1790835385.864 (Err(Ended { termination: Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } } }), CleanedUp { termination: Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } } }); termination Stopped { cause: Policy { kind: EventKind("DEVICE_LOST") } }
+B9 receive DEVICE_LOST: [Event { source: ResourceId { node: NodeId(0), path: "usrp" }, time: TimePoint { domain: ClockDomainId { node: NodeId(0), local: 2 }, ticks: 4235276494 }, severity: Fatal, kind: EventKind("DEVICE_LOST"), payload: Object {"message": String("UR-29: the receive stream yielded nothing for 1 s")} }]
+B9 receive rejected: [{"reason":"did not join within 1 s; left detached","thread":"uhd-control"},{"because":["uhd-control"],"leaked":"streamers"}]
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 27.28s
+terminate called after throwing an instance of 'uhd::io_error'
+```
+
+- **B9's receive case passes its first two expectations:** `DEVICE_LOST` from `usrp` (UR-29's silence rule: "the receive stream yielded nothing for 1 s"), the Run `Stopped { policy { DEVICE_LOST } }`, and `finish` returned its Manifest — where before the fix the process died inside `finish`.
+- **But not within about 1 s:** the Run was found not running at UTC …385.864, **4.0 s after the carrier dropped** (the Run is advanced a second at a time, so the loss was raised 3–4 s after the unplug). UHD's control requests block for its timeouts meanwhile ("x300 fw communication failure #1…#3"); `uhd-control` was inside one and did not join within UR-16's 1 s (`rejected`: `"did not join within 1 s; left detached"`, its streamers leaked). Recorded, not changed (spec 18's numbers are the owner's).
+- **Then the process aborted at exit, on the main thread** — the residual UR-29 records: UHD's static map of open devices, destroyed by `exit`, tears down the kept device by the same path. The main thread's stack, as gdb printed it:
+
+```
+Thread 1 (Thread 0x7ffff5c6e8c0 (LWP 30) "hardware-4fa4ba"):
+#0  __pthread_kill_implementation (threadid=<optimized out>, signo=6, no_tid=0) at ./nptl/pthread_kill.c:44
+#1  __pthread_kill_internal (threadid=<optimized out>, signo=6) at ./nptl/pthread_kill.c:89
+#2  __GI___pthread_kill (threadid=<optimized out>, signo=signo@entry=6) at ./nptl/pthread_kill.c:100
+#3  0x00007ffff68c8b7e in __GI_raise (sig=sig@entry=6) at ../sysdeps/posix/raise.c:26
+#4  0x00007ffff68ab8ec in __GI_abort () at ./stdlib/abort.c:77
+#5  0x00007ffff5db3275 in ?? () from /usr/lib/x86_64-linux-gnu/libstdc++.so.6
+#6  0x00007ffff5dca64a in ?? () from /usr/lib/x86_64-linux-gnu/libstdc++.so.6
+#7  0x00007ffff5db2af4 in __cxa_call_terminate () from /usr/lib/x86_64-linux-gnu/libstdc++.so.6
+#8  0x00007ffff5dc9b2c in __gxx_personality_v0 () from /usr/lib/x86_64-linux-gnu/libstdc++.so.6
+#9  0x00007ffff6bec592 in ?? () from /usr/lib/x86_64-linux-gnu/libgcc_s.so.1
+#10 0x00007ffff6bed0db in _Unwind_Resume () from /usr/lib/x86_64-linux-gnu/libgcc_s.so.1
+#11 0x00007ffff71e5a72 in ctrlport_endpoint_impl::poke32(unsigned int, unsigned int, uhd::time_spec_t, bool) () from /usr/local/lib/libuhd.so.4.10.0
+#12 0x00007ffff798dc11 in x300_radio_control_impl::deinit() () from /usr/local/lib/libuhd.so.4.10.0
+#13 0x00007ffff71c8797 in uhd::rfnoc::noc_block_base::shutdown() () from /usr/local/lib/libuhd.so.4.10.0
+#14 0x00007ffff7178488 in uhd::rfnoc::detail::block_container_t::shutdown() () from /usr/local/lib/libuhd.so.4.10.0
+#15 0x00007ffff71f6824 in rfnoc_graph_impl::~rfnoc_graph_impl() () from /usr/local/lib/libuhd.so.4.10.0
+#16 0x00007ffff70fa8d7 in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release_last_use_cold() () from /usr/local/lib/libuhd.so.4.10.0
+#17 0x00007ffff73737f5 in multi_usrp_rfnoc::~multi_usrp_rfnoc() () from /usr/local/lib/libuhd.so.4.10.0
+#18 0x00007ffff70fa8d7 in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release_last_use_cold() () from /usr/local/lib/libuhd.so.4.10.0
+#19 0x00007ffff73a9d63 in std::map<unsigned long, usrp_ptr, std::less<unsigned long>, std::allocator<std::pair<unsigned long const, usrp_ptr> > >::~map() () from /usr/local/lib/libuhd.so.4.10.0
+#20 0x00007ffff68cb5e1 in __run_exit_handlers (status=0, listp=0x7ffff6a95680 <__exit_funcs>, run_list_atexit=run_list_atexit@entry=true, run_dtors=run_dtors@entry=true) at ./stdlib/exit.c:118
+#21 0x00007ffff68cb6be in __GI_exit (status=<optimized out>) at ./stdlib/exit.c:148
+#22 0x00007ffff68ad608 in __libc_start_call_main (main=main@entry=0x5555556953a0 <main>, argc=argc@entry=6, argv=argv@entry=0x7fffffffe648) at ../sysdeps/nptl/libc_start_call_main.h:83
+#23 0x00007ffff68ad718 in __libc_start_main_impl (main=0x5555556953a0 <main>, argc=6, argv=0x7fffffffe648, init=<optimized out>, fini=<optimized out>, rtld_fini=<optimized out>, stack_end=0x7fffffffe638) at ../csu/libc-start.c:360
+#24 0x000055555566aef5 in _start ()
+```
