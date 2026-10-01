@@ -26,7 +26,7 @@ use super::core::{Core, lattice, lock};
 use super::rx::RxCmd;
 use super::tx::{Held, TxCmd};
 use crate::device::{Dir, Iq, Settings, decimation};
-use crate::profile::{DEVICE_LEAD_NS, RELEASE_WINDOW_NS, RESTART_LEAD_NS};
+use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS, RELEASE_WINDOW_NS, RESTART_LEAD_NS};
 
 const POLL: Wall = Wall::from_millis(1);
 const CHECK: Wall = Wall::from_millis(500);
@@ -306,7 +306,14 @@ impl Control {
             None => self.config = candidate,
             Some(old) => {
                 let restart = self.core.ticks(RESTART_LEAD_NS);
-                let earliest = now + restart;
+                // A receive stream's e₁ also waits for the receive call already in progress,
+                // which asks for a whole block (or packet, if longer) and is not bounded by
+                // the cut, plus the delivery of its last packet (Review O, O-B2).
+                let in_progress = match dir {
+                    Dir::Rx => self.core.block_len.max(self.core.device.rx_packet_samples()) as i64 * old.n + self.core.ticks(DELIVERY_ALLOWANCE_NS),
+                    Dir::Tx => 0,
+                };
+                let earliest = now + restart + in_progress;
                 let e = match requested {
                     Some(t) if t < earliest => {
                         self.late_command(Some(key.clone()), t, earliest);

@@ -162,6 +162,10 @@ pub trait Device: Send + Sync {
     fn rx_open(&self, channels: usize) -> Result<(), DeviceError>;
     /// A timed continuous start.
     fn rx_start(&self, at: i64) -> Result<(), DeviceError>;
+    /// Samples a receive packet carries (UHD's `max_num_samps`); 0 when the receive
+    /// streamer is not open or packets are not known (UR-25: a stop's delivery waits for
+    /// the packet holding the cut).
+    fn rx_packet_samples(&self) -> usize;
     /// Stops the continuous stream, at a device tick when given.
     fn rx_stop(&self, at: Option<i64>) -> Result<(), DeviceError>;
     /// Receives up to `n` samples per channel.
@@ -333,9 +337,9 @@ struct Fake {
     rx_end: Option<i64>,
     /// A start issued while a stopped stream's tail is still being delivered.
     rx_then: Option<i64>,
-    /// UHD's error cache: a `recv` cut short by a packet's timeout returns what it has,
-    /// and the next `recv` returns `TIMEOUT` at once (`rx_streamer_impl.hpp`).
-    rx_cached_timeout: bool,
+    /// Where the running stream's packets begin: its start (UHD's packets are the
+    /// stream's, not a request's; Review O, N-2).
+    rx_origin: i64,
     /// The shortest timeout an `rx_recv` was given.
     rx_min_timeout: Duration,
     rx_late: Option<i64>,
@@ -390,7 +394,7 @@ impl FakeDevice {
                 rx_ratio: 1,
                 rx_end: None,
                 rx_then: None,
-                rx_cached_timeout: false,
+                rx_origin: 0,
                 rx_min_timeout: Duration::MAX,
                 rx_late: None,
                 rx_last: None,
@@ -570,7 +574,6 @@ impl Device for FakeDevice {
         st.rx_next = None;
         st.rx_end = None;
         st.rx_then = None;
-        st.rx_cached_timeout = false;
         st.rx_late = None;
         Ok(())
     }
@@ -676,7 +679,6 @@ impl Device for FakeDevice {
         st.rx_next = None;
         st.rx_end = None;
         st.rx_then = None;
-        st.rx_cached_timeout = false;
         Ok(())
     }
 
@@ -696,9 +698,14 @@ impl Device for FakeDevice {
             st.rx_then = Some(at);
         } else {
             st.rx_next = Some(at);
+            st.rx_origin = at;
             st.rx_ratio = self.ratio(st.settings[0][0].rate);
         }
         Ok(())
+    }
+
+    fn rx_packet_samples(&self) -> usize {
+        self.config.rx_packet.unwrap_or(0)
     }
 
     fn rx_stop(&self, at: Option<i64>) -> Result<(), DeviceError> {
@@ -729,9 +736,6 @@ impl Device for FakeDevice {
             return RxRecv::Failed(error);
         }
         st.rx_min_timeout = st.rx_min_timeout.min(timeout);
-        if std::mem::take(&mut st.rx_cached_timeout) {
-            return RxRecv::Timeout;
-        }
         let now = self.now(&st);
         if st.rx_end.is_some_and(|end| st.rx_next.is_none_or(|next| next >= end)) {
             // The stopped stream's tail is delivered; the next stream, if one was started.
@@ -742,6 +746,7 @@ impl Device for FakeDevice {
                     st.rx_late = Some(at);
                 } else {
                     st.rx_next = Some(at);
+                    st.rx_origin = at;
                     st.rx_ratio = self.ratio(st.settings[0][0].rate);
                 }
             }
@@ -822,14 +827,25 @@ impl Device for FakeDevice {
         }
         drop(st);
         // Whole packets as they reach the host, each waited for up to the timeout, as
-        // UHD's `recv` does; one that does not come in time cuts the call short.
+        // UHD's `recv` does; one that does not come in time cuts the call short, and the
+        // next call waits as usual (UHD caches no timeout: `rx_streamer_impl.hpp`). The
+        // packets are the stream's, on its own grid from its start: a sample is there
+        // once the packet holding it is, and the rest of a packet a call left comes at once
+        // (Review O, N-2).
         let latency = self.ticks_of(self.config.rx_latency);
-        let packet = self.config.rx_packet.map_or(n, |p| p.max(1) as i64);
+        let origin = self.lock().rx_origin;
         let patience = self.ticks_of(timeout);
         let mut got = 0i64;
-        let mut cut_short = false;
         while got < n {
-            let mut take = packet.min(n - got);
+            let k = (next - origin) / ratio + got;
+            let (mut take, packet_end) = match self.config.rx_packet {
+                Some(p) => {
+                    let p = p.max(1) as i64;
+                    let end = (k / p + 1) * p;
+                    ((end - k).min(n - got), origin + end * ratio)
+                }
+                None => (n - got, next + n * ratio),
+            };
             let (waiting, stop) = {
                 let st = self.lock();
                 (self.now(&st), st.rx_end)
@@ -842,17 +858,16 @@ impl Device for FakeDevice {
                     if got == 0 {
                         return RxRecv::Timeout;
                     }
-                    cut_short = true;
                     break;
                 }
             }
-            let ready = next + (got + take) * ratio + latency;
+            // A stopped stream's last packet ends at the stop.
+            let ready = stop.map_or(packet_end, |stop| packet_end.min(stop.max(next + (got + take) * ratio))) + latency;
             if ready - waiting > patience {
                 if got == 0 {
                     std::thread::sleep(timeout);
                     return RxRecv::Timeout;
                 }
-                cut_short = true;
                 break;
             }
             loop {
@@ -874,7 +889,6 @@ impl Device for FakeDevice {
         if got == 0 {
             return RxRecv::Timeout;
         }
-        st.rx_cached_timeout = cut_short;
         self.settle(&mut st);
         let channels = st.rx_channels.max(1);
         let samples = (0..channels)
@@ -916,6 +930,11 @@ impl Device for FakeDevice {
                 std::thread::sleep(*delay);
             }
         }
+        // UHD sends an empty end-of-burst as one zero sample: a CHDR packet carries at
+        // least one (`tx_streamer_impl.hpp:266–276`; the bench: `hw_b8_raw_empty_eob_gap`).
+        let zero: Vec<Iq> = vec![[0.0, 0.0]];
+        let padded: Vec<&[Iq]> = vec![&zero; samples.len().max(1)];
+        let samples = if eob && samples.first().is_none_or(|s| s.is_empty()) { &padded[..] } else { samples };
         let n = samples.first().map_or(0, |s| s.len());
         let cursor = {
             let mut st = self.lock();

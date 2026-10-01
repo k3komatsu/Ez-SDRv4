@@ -76,6 +76,11 @@ pub(crate) struct Tx {
     /// the X300 drops a timed start at the tick its previous burst ended (UR-23;
     /// design-notes §11 F3). The Kernel bursts keep their own records.
     continues_at: Option<i64>,
+    /// The last sample of a Kernel burst, one per channel, held back while its device
+    /// burst stays open: the end-of-burst goes with it, so that the device burst ends at
+    /// the burst's own end and not a padded sample later, as an empty end-of-burst would
+    /// (UHD sends one zero sample; `hw_b8_raw_empty_eob_gap`; Review O, O-B1).
+    tail: Option<Vec<Vec<Iq>>>,
 }
 
 const IDLE: Wall = Wall::from_micros(200);
@@ -95,6 +100,7 @@ impl Tx {
             switch: None,
             unacked: VecDeque::new(),
             continues_at: None,
+            tail: None,
         }
     }
 
@@ -198,7 +204,8 @@ impl Tx {
         }
         if let Some(c) = self.continues_at {
             match self.held.keys().next() {
-                Some(&k) if k == c => {}
+                // Not across e₁: there the device burst ends (Review O, N-4).
+                Some(&k) if k == c && e1_k.is_none_or(|e1| c < e1) => {}
                 // Another burst is next, not the continuation: end the device burst first.
                 Some(_) => {
                     self.end_open(true);
@@ -250,15 +257,32 @@ impl Tx {
         // burst continues the device burst of the one before (§11 F3).
         let continuing = first && self.continues_at == Some(start);
         let device_sob = first && !continuing;
-        // A Kernel burst's end is never the device burst's at once: the next burst held at
-        // its next sample continues it, and a burst booked there later still may (Review N,
-        // B3); `step` ends the device burst otherwise, a device lead before it runs dry.
-        let device_eob = false;
+        // A Kernel burst's end is the device burst's only once no burst can still be booked
+        // at its next sample (it is a device lead away): otherwise its last sample is held
+        // back, and `step` sends it with end-of-burst at that deadline, or without it ahead
+        // of a burst that continues the device burst there (Review N, B3; Review O, O-B1).
+        // A one-sample burst's first buffer is not held: its start goes with it.
+        let open_ended = clock.instant(open.next + count) - self.core.now() > self.core.ticks(DEVICE_LEAD_NS);
+        let hold = eob && !ends_at_held && open_ended && !(device_sob && count == 1);
+        let device_eob = eob && !ends_at_held && !hold;
+        let sending = if hold { count - 1 } else { count } as usize;
         let at = device_sob.then(|| clock.instant(start));
-        let result = self.core.device.tx_send(&slices, at, device_sob, device_eob, SEND_TIMEOUT);
+        if continuing {
+            if let Some(tail) = self.tail.take() {
+                // The burst before's held sample, ahead of this one, no end-of-burst between.
+                let tail: Vec<&[Iq]> = tail.iter().map(Vec::as_slice).collect();
+                let _ = self.core.device.tx_send(&tail, None, false, false, SEND_TIMEOUT);
+            }
+        }
+        let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();
+        let result = if sending > 0 { self.core.device.tx_send(&sent, at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };
+        if hold {
+            self.tail = Some(slices.iter().map(|ch| ch[sending..].to_vec()).collect());
+        }
+        let open = self.open.as_mut().expect("a burst is open");
         let next = open.next;
         match result {
-            Ok(sent) if sent == count as usize => {}
+            Ok(sent) if sent == sending => {}
             Ok(_) => {
                 self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
                 return self.abandon();
@@ -303,7 +327,9 @@ impl Tx {
         }
         if eob {
             let open = self.open.take().expect("open");
-            self.continues_at = Some(open.next);
+            if !device_eob {
+                self.continues_at = Some(open.next);
+            }
             self.forget(&open.held);
         }
     }
@@ -327,10 +353,13 @@ impl Tx {
     /// `device_eob` the device burst too, also one a held burst was to continue (§11 F3).
     fn end_open(&mut self, device_eob: bool) {
         let continuing = self.continues_at.take();
+        let tail = self.tail.take();
         let device_open = self.open.as_ref().map_or(continuing.is_some(), |open| !open.first || continuing == Some(open.held.k));
         if device_eob && device_open && !self.core.is_lost() {
-            let empty: Vec<&[Iq]> = vec![&[]; self.channels.max(1)];
-            let _ = self.core.device.tx_send(&empty, None, false, true, SEND_TIMEOUT);
+            self.close_device_burst(tail);
+        } else if !device_eob {
+            // Still open for a continuation (`preempt`): the held sample stays.
+            self.tail = tail;
         }
         let Some(open) = self.open.take() else { return };
         if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {
@@ -339,14 +368,25 @@ impl Tx {
         self.forget(&open.held);
     }
 
+    /// Ends the open device burst: with the held last sample when there is one, else with
+    /// an empty buffer, which UHD pads to one zero sample (a repeat stopped mid-waveform).
+    fn close_device_burst(&self, tail: Option<Vec<Vec<Iq>>>) {
+        let empty: Vec<Iq> = Vec::new();
+        let buffers: Vec<&[Iq]> = match &tail {
+            Some(tail) => tail.iter().map(Vec::as_slice).collect(),
+            None => vec![&empty; self.channels.max(1)],
+        };
+        let _ = self.core.device.tx_send(&buffers, None, false, true, SEND_TIMEOUT);
+    }
+
     fn abandon(&mut self) {
         // A send that failed or came up short: end the device burst if one is open, so
         // that none is left without end-of-burst (Review N, N7).
         let continuing = self.continues_at.take();
+        let tail = self.tail.take();
         let device_open = self.open.as_ref().is_some_and(|open| !open.first || continuing == Some(open.held.k));
         if device_open && !self.core.is_lost() {
-            let empty: Vec<&[Iq]> = vec![&[]; self.channels.max(1)];
-            let _ = self.core.device.tx_send(&empty, None, false, true, SEND_TIMEOUT);
+            self.close_device_burst(tail);
         }
         if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {
             lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect("a record"));

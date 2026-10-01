@@ -18,7 +18,7 @@ use serde_json::json;
 
 use super::core::{Clock, Core, lattice, lock};
 use crate::device::{Dir, Iq, RxRecv, Settings};
-use crate::profile::{DELIVERY_ALLOWANCE_NS, RESTART_LEAD_NS};
+use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS, RESTART_LEAD_NS};
 
 pub(crate) enum RxCmd {
     /// A stream enabled from 0 channels, already configured and started (UR-25).
@@ -509,7 +509,10 @@ fn stop_at_cut(core: &Core, cut: i64) -> Option<i64> {
     match core.device.rx_stop(None) {
         Ok(()) => {
             lock(&core.rec).applied.push(json!({ "key": "rx_stop", "at": core.at(cut), "issued": core.at(now) }));
-            Some(now)
+            // The device produces samples until the stop reaches it (the bench: ~0.4 ms
+            // into the call): the next stream drops anything before the call's return
+            // plus a device lead (Review O, N-3); it starts a restart lead later anyway.
+            Some(core.now() + core.ticks(DEVICE_LEAD_NS))
         }
         Err(error) => {
             core.device_failed("update_parameter", &error);

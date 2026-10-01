@@ -944,3 +944,51 @@ fn hw_b8_raw_empty_eob_gap() {
         }
     }
 }
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_b8_cold_change_timing_at_the_extremes() {
+    // Review O, O-B2 on the bench, at the rates' extremes (the owner: "100kspsでも200Mspsでも
+    // 大丈夫？" — 390 625 S/s is the X300's lowest): a receive `cold` change, booked at four
+    // phases of the receive call in progress, must put e₁ past that call (50 ms + the old
+    // stream's longer of block and packet + 3 ms) and switch before e₂, with no
+    // LATE_COMMAND. No capture (200 Msps is 1.6 GB/s of cf32): the Manifest's timing.
+    for (from, to, block_len) in [(200e6, 100e6, None), (390_625.0, 400_000.0, Some(100u32)), (390_625.0, 2e6, Some(65_536))] {
+        for phase in 0..4i64 {
+            let dir = TempDir::new();
+            let device = usrp();
+            let spp = |d: &dyn Device| d.rx_packet_samples();
+            let selector = block_len.map_or(serde_json::json!({}), |n| serde_json::json!({ "block_len": n }));
+            let mut run = session(&bench_profile(&*device, &dir, selector, serde_json::json!({}), true), device.clone());
+            past_t0(&mut run, ms(100));
+            assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::Num(from)), None).unwrap()));
+            wait(&mut run, ms(300 + phase * 37));
+            let packet = spp(&*device);
+            let entry = run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::Num(to)), None).unwrap();
+            wait(&mut run, ms(500));
+            let manifest = run.finish();
+            let timing = section(&manifest, "timing").as_array().unwrap().clone();
+            let change = timing.iter().filter(|r| r["what"] == "cold_change").last().cloned().unwrap();
+            let switch = timing.iter().filter(|r| r["what"] == "rx_switch").last().cloned().unwrap();
+            let stop = timing.iter().find(|r| r["what"] == "rx_stop_untimed" && r["cut"] == change["e1"]).cloned();
+            let (booked, e1, e2) = (change["booked_at"].as_i64().unwrap(), change["e1"].as_i64().unwrap(), change["e2"].as_i64().unwrap());
+            let n_old = (200e6 / from) as i64;
+            let block = block_len.unwrap_or(2_000).max(packet as u32) as i64;
+            let floor = booked + ms(50) + block * n_old + ms(3);
+            let late = events_of(&manifest, "radio.LATE_COMMAND");
+            println!(
+                "B8 cold {from} → {to} S/s, block_len {block_len:?}, packet {packet}, phase {phase}: {:?}; e₁ − booking {:.3} ms (floor {:.3} ms); untimed stop {:?} ms after e₁; switch {:.3} ms before e₂; LATE_COMMAND {}; stats {}",
+                entry.outcome,
+                (e1 - booked) as f64 / TICKS_PER_MS as f64,
+                (floor - booked) as f64 / TICKS_PER_MS as f64,
+                stop.map(|s| (s["at"].as_i64().unwrap() - e1) as f64 / TICKS_PER_MS as f64),
+                (e2 - switch["at"].as_i64().unwrap()) as f64 / TICKS_PER_MS as f64,
+                late.len(),
+                section(&manifest, "stats")
+            );
+            assert!(e1 >= floor, "e₁ not past the call in progress");
+            assert!(switch["at"].as_i64().unwrap() < e2, "switched after e₂");
+            assert!(late.is_empty(), "{late:?}");
+        }
+    }
+}

@@ -274,6 +274,8 @@ struct RxStream {
     h: uhd_rx_streamer_handle,
     md: uhd_rx_metadata_handle,
     channels: usize,
+    /// Samples per packet (`uhd_rx_streamer_max_num_samps`).
+    spp: usize,
 }
 
 struct TxStream {
@@ -306,12 +308,12 @@ impl RxStream {
     /// Makes a receive streamer and its metadata, `attach` binding it to a device;
     /// the value owns both handles from the first, so an early return frees them
     /// once, and the caller moves it into its `Arc` (Review L, P0-1).
-    fn make(channels: usize, attach: impl FnOnce(uhd_rx_streamer_handle) -> Result<(), DeviceError>) -> Result<RxStream, DeviceError> {
+    fn make(channels: usize, attach: impl FnOnce(uhd_rx_streamer_handle) -> Result<usize, DeviceError>) -> Result<RxStream, DeviceError> {
         let mut h: uhd_rx_streamer_handle = std::ptr::null_mut();
         // SAFETY: `h` is written by the call.
         unsafe { check("uhd_rx_streamer_make", uhd_rx_streamer_make(&mut h), true)? };
-        let mut stream = RxStream { h, md: std::ptr::null_mut(), channels };
-        attach(stream.h)?;
+        let mut stream = RxStream { h, md: std::ptr::null_mut(), channels, spp: 0 };
+        stream.spp = attach(stream.h)?;
         // SAFETY: the metadata handle is written into the value that frees it.
         unsafe { check("uhd_rx_metadata_make", uhd_rx_metadata_make(&mut stream.md), true)? };
         Ok(stream)
@@ -335,7 +337,7 @@ impl TxStream {
 /// Makes and drops one unattached streamer per direction, through the same path as
 /// `rx_open` and `tx_open`: a handle freed twice aborts the process (Review L, P0-1).
 pub fn streamer_lifecycle() -> Result<(), DeviceError> {
-    let rx = Arc::new(RxStream::make(1, |_| Ok(()))?);
+    let rx = Arc::new(RxStream::make(1, |_| Ok(0))?);
     let tx = Arc::new(TxStream::make(1, |_| Ok(()))?);
     drop((rx.clone(), tx.clone()));
     drop((rx, tx));
@@ -646,8 +648,9 @@ impl Device for UhdDevice {
             // SAFETY: the device handle lives as long as `self`; `args` outlives the call.
             unsafe {
                 self.check_usrp("uhd_usrp_get_rx_stream", uhd_usrp_get_rx_stream(self.usrp, &mut args, h), true)?;
-                check_rx(h, "uhd_rx_streamer_max_num_samps", uhd_rx_streamer_max_num_samps(h, &mut samples))
+                check_rx(h, "uhd_rx_streamer_max_num_samps", uhd_rx_streamer_max_num_samps(h, &mut samples))?;
             }
+            Ok(samples)
         })?;
         *lock(&self.rx) = Some(Arc::new(stream));
         Ok(())
@@ -655,6 +658,10 @@ impl Device for UhdDevice {
 
     fn rx_start(&self, at: i64) -> Result<(), DeviceError> {
         self.stream_cmd(true, Some(at))
+    }
+
+    fn rx_packet_samples(&self) -> usize {
+        lock(&self.rx).as_ref().map_or(0, |stream| stream.spp)
     }
 
     fn rx_stop(&self, at: Option<i64>) -> Result<(), DeviceError> {

@@ -1948,7 +1948,9 @@ fn raw_rx(config: FakeConfig, rate: f64) -> (Arc<FakeDevice>, i64) {
 fn blocks_until(device: &FakeDevice, until: impl Fn(&[(i64, usize)]) -> bool) -> Vec<(i64, usize)> {
     let mut blocks = Vec::new();
     let mut timeouts = 0;
+    let deadline = Instant::now() + Wall::from_secs(5);
     while timeouts < 2 && !until(&blocks) {
+        assert!(Instant::now() < deadline, "no end in 5 s: {} blocks, the last {:?}", blocks.len(), blocks.last());
         match device.rx_recv(2_000, Wall::from_millis(50)) {
             ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
                 timeouts = 0;
@@ -2003,10 +2005,10 @@ fn ur_33_a_stopped_stream_s_recv_waits_its_whole_timeout() {
 }
 
 #[test]
-fn ur_33_a_recv_cut_short_by_a_packet_s_timeout_is_followed_by_a_timeout_at_once() {
-    // UHD's `recv` waits for each packet up to its timeout and returns what it has, and
-    // its error cache makes the next `recv` return TIMEOUT at once (rx_streamer_impl.hpp).
-    // A stream stopped in the middle of a 20 ms request.
+fn ur_33_a_recv_cut_short_by_a_packet_s_timeout_returns_what_it_has() {
+    // UHD's `recv` waits for each packet up to its timeout and returns what it has; it
+    // caches no timeout, so the next call waits as usual (`rx_streamer_impl.hpp:25–47`;
+    // Review O, N-1). A stream stopped in the middle of a 20 ms request.
     let (device, start) = raw_rx(bench_link(1), 1e6);
     let _ = blocks_until(&device, |b| b.last().is_some_and(|(t, n)| t + *n as i64 * 200 >= start + ms(10)));
     let stopper = device.clone();
@@ -2020,7 +2022,31 @@ fn ur_33_a_recv_cut_short_by_a_packet_s_timeout_is_followed_by_a_timeout_at_once
     assert!(samples[0].len() < 20_000, "{}", samples[0].len());
     let begun = Instant::now();
     assert_eq!(device.rx_recv(2_000, Wall::from_millis(50)), ezsdr_radio_uhd::RxRecv::Timeout);
-    assert!(begun.elapsed() < Wall::from_millis(5), "{:?}", begun.elapsed());
+    assert!(begun.elapsed() >= Wall::from_millis(45), "the next call waited only {:?}", begun.elapsed());
+}
+
+#[test]
+fn ur_33_an_empty_end_of_burst_is_one_zero_sample() {
+    // UHD sends an empty end-of-burst as one zero sample (`tx_streamer_impl.hpp:266–276`):
+    // the burst ends a sample later, and a timed start one sample after its data is late
+    // (`hw_b8_raw_empty_eob_gap`: 4 of 4), while after end-of-burst on the data it is not.
+    for (empty, late) in [(true, true), (false, false)] {
+        let device = fake(FakeConfig::default());
+        device.set_time_zero(false).unwrap();
+        device.tx_open(1).unwrap();
+        let wave = vec![[0.1f32, 0.0]; 100];
+        let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+        device.tx_send(&[&wave], Some(t0), true, !empty, Wall::from_secs(1)).unwrap();
+        if empty {
+            device.tx_send(&[&[][..]], None, false, true, Wall::from_secs(1)).unwrap();
+        }
+        device.tx_send(&[&wave], Some(t0 + 101 * 200), true, true, Wall::from_secs(1)).unwrap();
+        let mut codes = Vec::new();
+        while let Some(report) = device.tx_async(Wall::ZERO) {
+            codes.push(report.code);
+        }
+        assert_eq!(codes.contains(&TxCode::TimeError), late, "empty end-of-burst {empty}: {codes:?}");
+    }
 }
 
 #[test]
@@ -2164,6 +2190,9 @@ fn ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it() {
         assert_eq!(device.unended_bursts(), 0, "{:?}", calls(&device, "tx_send"));
         if admitted(&entry) && time_errors(&manifest).is_empty() && bursts(&manifest).len() == 2 {
             played += 1;
+            // Every sample handed over once: the first's held last sample too (Review O).
+            let handed: usize = calls(&device, "tx_send").iter().map(|c| c.split("n=").nth(1).unwrap().split(' ').next().unwrap().parse::<usize>().unwrap()).sum();
+            assert_eq!(handed, 31_000, "{:?}", calls(&device, "tx_send"));
         }
     }
     assert!(played > 0, "the case was never reached");
@@ -2234,4 +2263,93 @@ fn ur_29_a_stream_silent_before_a_far_cut_is_a_lost_device() {
     let lost = direct.of(EventKind::DEVICE_LOST);
     let _ = direct.finish();
     assert_eq!(lost.len(), 1, "{lost:?}");
+}
+
+#[test]
+fn ur_23_a_burst_one_sample_after_a_burst_is_played() {
+    // Review O, O-B1 (`hw_b8_raw_empty_eob_gap`): the device burst of a burst ending at c
+    // must end at c, not a padded sample later, so that a burst at c + 1 is played —
+    // booked before the first's last buffer went out, and after.
+    for late_booking in [false, true] {
+        let (mut run, device, _dir) = tx_session(FakeConfig::default());
+        wait(&mut run, ms(1));
+        let a = tx_at(&run, ms(40));
+        let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
+        assert!(admitted(&entry), "{entry:?}");
+        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
+        let a_end = clock.origin.ticks + (a.ticks + 30_000) * clock.root_ticks_per_tick.num() as i64;
+        if late_booking {
+            while run.now().ticks < a_end - ms(8) {
+                wait(&mut run, ms(1) / 4);
+            }
+        }
+        let b = TimePoint::new(a.domain, a.ticks + 30_001);
+        let entry = send_at(&mut run, "send", Some(b), &tone(1_000));
+        assert!(admitted(&entry), "{entry:?}");
+        wait(&mut run, ms(80));
+        let manifest = run.finish();
+        let codes: Vec<_> = section(&manifest, "async").as_array().unwrap().iter().map(|r| r["code"].as_str().unwrap().to_owned()).collect();
+        assert!(!codes.iter().any(|c| c == "TimeError" || c == "Underflow"), "booked late {late_booking}: {codes:?} {:?}", calls(&device, "tx_send"));
+        assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
+        assert_eq!(bursts(&manifest).len(), 2, "{:?}", bursts(&manifest));
+        assert_eq!(device.unended_bursts(), 0);
+    }
+}
+
+#[test]
+fn ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time() {
+    // Review O, O-B2 (R-1): with a 168 ms block at 390 625 S/s, a `cold` change booked at
+    // any phase of the receive call in progress still switches before e₂.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    for phase in 0..6 {
+        let port = attached(ezsdr_kernel::stream::BackPressure::DropOldest);
+        let mut direct = Direct::build(bench_link(2), &[("radio.rx.sample_rate_hz", Value::Num(390_625.0))], vec![port], json!({ "block_len": 65_536 }));
+        direct.settle(Wall::from_millis(200 + phase * 28));
+        direct.update("radio.rx.sample_rate_hz", Value::Num(2e6), Cold, None);
+        direct.settle(Wall::from_millis(600));
+        let late = direct.of("radio.LATE_COMMAND");
+        let instance = direct.finish();
+        let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
+        let switch = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_switch").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
+        assert!(switch["at"].as_i64().unwrap() < switch["e2"].as_i64().unwrap(), "phase {phase}: switched after e₂: {switch}");
+        assert!(late.is_empty(), "phase {phase}: {late:?}");
+    }
+}
+
+#[test]
+fn ur_23_two_bursts_back_to_back_loop_back_whole() {
+    // Review O, O-B1's held sample: a burst held at another's end continues its device
+    // burst, the first's last sample (held back) sent ahead of the second's first; on the
+    // sample-exact loopback the capture is the two waveforms end to end, no sample lost,
+    // doubled or moved.
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let first: Vec<(f32, f32)> = (0..1_000).map(|i| (0.1 + i as f32 / 4_000.0, 0.05)).collect();
+    let second: Vec<(f32, f32)> = (0..500).map(|i| (-0.1 - i as f32 / 4_000.0, -0.05)).collect();
+    let (one, a) = waveform_of(&first);
+    let (two, _) = waveform_of(&second);
+    // A second input needs its own name (KC-9).
+    let b = ezsdr_kernel::manifest::ingest_input(
+        Ident::parse("waveform2").unwrap(),
+        Namespace::parse("ezsdr.input").unwrap(),
+        format!("mem:{}", ContentHash::of_bytes(&two)),
+        &two,
+    );
+    let mut spec = with_tx(receive_spec(1, 1e6, 1e9, None), 1e6);
+    let target = serde_json::to_value(ResourceId::parse("radio/tx").unwrap()).unwrap();
+    spec["schedule"] = json!([
+        { "at": { "clock": "radio", "offset_ticks": 10_000 }, "action": { "kind": "tx_burst", "target": target, "waveform": a, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } },
+        { "at": { "clock": "radio", "offset_ticks": 11_000 }, "action": { "kind": "tx_burst", "target": target, "waveform": b, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } },
+        { "at": { "clock": "radio", "offset_ticks": 10_000 }, "action": { "kind": "update_parameter", "target": serde_json::to_value(ResourceId::parse("sink/rec").unwrap()).unwrap(),
+                    "key": "sink.capture_samples", "value": 1_500, "class": "block_boundary" } }
+    ]);
+    let inputs = BTreeMap::from([(a.hash.clone(), one), (b.hash.clone(), two)]);
+    let manifest = captured(spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), inputs));
+    let samples = read_capture(&capture_of(&manifest, "rec"), 1).remove(0);
+    let whole: Vec<_> = first.iter().chain(&second).copied().collect();
+    assert_eq!(samples, whole, "{:?}", calls(&device, "tx_send"));
+    let sends = calls(&device, "tx_send");
+    assert_eq!(sends.iter().filter(|c| c.contains("sob=true")).count(), 1, "{sends:?}");
+    assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "{sends:?}");
+    assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError" && r["code"] != "Underflow"), "{sends:?}");
 }

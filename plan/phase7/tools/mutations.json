@@ -1223,8 +1223,8 @@
   "id": "B03",
   "name": "end-of-burst at the next burst's start: a timed start at the tick the burst ended (§11 F3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let device_eob = false;",
-  "new": "        let device_eob = eob;",
+  "old": "        let device_eob = eob && !ends_at_held && !hold;",
+  "new": "        let device_eob = eob && !hold;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_23_a_burst_ends_at_the_next_bursts_start"
@@ -1247,7 +1247,7 @@
   "new": "self.core.device.rx_recv(self.core.block_len, self.recv_timeout())",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_25_a_long_block_at_a_low_rate_stops_the_stream_at_e1"
+  "filter": "ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time"
  },
  {
   "id": "B06",
@@ -1273,13 +1273,11 @@
   "id": "B08",
   "name": "a Kernel burst's end is the device burst's at once again, as at bc0db98 (Review N, B3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let device_eob = false;",
-  "new": "        let device_eob = eob && !ends_at_held;",
+  "old": "        let hold = eob && !ends_at_held && open_ended && !(device_sob && count == 1);",
+  "new": "        let hold = false;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it",
-  "old2": "            self.continues_at = Some(open.next);\n",
-  "new2": "            if !device_eob {\n                self.continues_at = Some(open.next);\n            }\n"
+  "filter": "ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it"
  },
  {
   "id": "B09",
@@ -1330,5 +1328,45 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_29_a_stream_silent_before_a_far_cut_is_a_lost_device"
+ },
+ {
+  "id": "B14",
+  "name": "an empty end-of-burst instead of the held sample (Review O, O-B1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "            Some(tail) => tail.iter().map(Vec::as_slice).collect(),\n            None => vec![&empty; self.channels.max(1)],",
+  "new": "            Some(_) | None => vec![&empty; self.channels.max(1)],",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "rehearsal_b6_txrx_and_repeat"
+ },
+ {
+  "id": "B15",
+  "name": "a receive cold change's e₁ not past the call in progress (Review O, O-B2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                let earliest = now + restart + in_progress;",
+  "new": "                let earliest = now + restart + in_progress * 0;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time"
+ },
+ {
+  "id": "B16",
+  "name": "the held sample not sent ahead of the continuation (Review O, O-B1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "            if let Some(tail) = self.tail.take() {",
+  "new": "            if let Some(tail) = self.tail.take().filter(|_| false) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it"
+ },
+ {
+  "id": "B17",
+  "name": "the fake's empty end-of-burst adds no sample again (Review O, T-a)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "        let samples = if eob && samples.first().is_none_or(|s| s.is_empty()) { &padded[..] } else { samples };",
+  "new": "        let samples = if false { &padded[..] } else { samples };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_33_an_empty_end_of_burst_is_one_zero_sample"
  }
 ]
