@@ -4,8 +4,9 @@
 //! and `wait_until` re-reads as well.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use ezsdr_kernel::id::ClockDomainId;
@@ -18,6 +19,8 @@ use ezsdr_kernel::time::{
 use crate::device::Device;
 
 type Callback = Box<dyn FnOnce(TimePoint) + Send>;
+/// `uhd-clock`'s stop flag and its wake-up.
+type ClockStop = Arc<(Mutex<bool>, Condvar)>;
 
 /// The longest single wait of `next_wakeup` and `wait_until` (UR-7).
 const NAP: Duration = Duration::from_millis(20);
@@ -27,6 +30,9 @@ const REANCHOR: Duration = Duration::from_millis(100);
 const WIDEST_BRACKET: Duration = Duration::from_millis(1);
 /// TM-17b's cap on callbacks at one instant.
 const CALLBACK_CAP: usize = 1_000;
+/// How long `drop` waits for `uhd-clock` to end; a read blocked inside UHD is left
+/// detached after it (D-1).
+const CLOCK_JOIN: Duration = Duration::from_secs(1);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -201,7 +207,8 @@ pub struct DeviceAuthority {
     time: Arc<DeviceTime>,
     descriptor: AuthorityDescriptor,
     relations: Vec<ClockRelation>,
-    stop: Arc<AtomicBool>,
+    /// `uhd-clock`'s stop and the thread.
+    clock: Option<(ClockStop, JoinHandle<()>)>,
 }
 
 impl DeviceAuthority {
@@ -276,17 +283,23 @@ impl DeviceAuthority {
             failed_reads: AtomicU64::new(0),
             discarded_reads: AtomicU64::new(0),
         });
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop: ClockStop = Arc::new((Mutex::new(false), Condvar::new()));
         let (clock, flag) = (Arc::downgrade(&time), stop.clone());
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("uhd-clock".to_owned())
-            .spawn(move || {
-                while !flag.load(Ordering::Acquire) {
-                    std::thread::sleep(REANCHOR);
-                    match clock.upgrade() {
-                        Some(time) => time.reanchor(),
-                        None => return,
+            .spawn(move || loop {
+                {
+                    // Woken at once by `drop`, and the flag checked before the device is
+                    // read, so that no read follows the Authority's end (D-1).
+                    let (stopped, wake) = &*flag;
+                    let stopped = wake.wait_timeout_while(lock(stopped), REANCHOR, |stopped| !*stopped);
+                    if *stopped.unwrap_or_else(|e| e.into_inner()).0 {
+                        return;
                     }
+                }
+                match clock.upgrade() {
+                    Some(time) => time.reanchor(),
+                    None => return,
                 }
             })
             .map_err(|e| format!("UR-7: uhd-clock: {e}"))?;
@@ -295,7 +308,7 @@ impl DeviceAuthority {
             governs: vec![root, ClockDomainId::HOST_MONOTONIC],
             pacing: Pacing::Device,
         };
-        Ok(DeviceAuthority { time, descriptor, relations, stop })
+        Ok(DeviceAuthority { time, descriptor, relations, clock: Some((stop, thread)) })
     }
 
     /// The device's Root.
@@ -315,8 +328,23 @@ impl DeviceAuthority {
 }
 
 impl Drop for DeviceAuthority {
+    /// Stops `uhd-clock` and waits for it, so that no device call outlives the Authority
+    /// and the last device handle is not dropped on that thread while the process exits,
+    /// racing UHD's static registry of open devices (`usrp_c.cpp:80–84`; design-notes §15,
+    /// D-1). A read blocked inside UHD past `CLOCK_JOIN` leaves the thread detached.
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
+        let Some((stop, thread)) = self.clock.take() else { return };
+        *lock(&stop.0) = true;
+        stop.1.notify_all();
+        let deadline = Instant::now() + CLOCK_JOIN;
+        while !thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Past the deadline the handle is dropped, detaching the thread: a read blocked
+        // that long is a device gone, which the Provider reports (UR-29).
+        if thread.is_finished() {
+            let _ = thread.join();
+        }
     }
 }
 

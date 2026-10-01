@@ -781,6 +781,29 @@ fn ea_07_the_uhd_authority_takes_the_binding_s_sources() {
 }
 
 #[test]
+fn ea_07_the_device_is_released_when_the_session_ends() {
+    // D-1 (ezsdr-radio-uhd's design-notes §15): once the Session has ended no thread holds
+    // the device — no Provider thread and no `uhd-clock` — so the server's exit, on the
+    // thread that served it, cannot race UHD's static teardown with a device call or the
+    // device's free.
+    let temp = TempDir::new("uhd-released");
+    let made = Arc::new(std::sync::Mutex::new(std::sync::Weak::<FakeDevice>::new()));
+    let keep = made.clone();
+    let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| {
+        let device = Arc::new(FakeDevice::new(FakeConfig::default()));
+        *keep.lock().unwrap() = Arc::downgrade(&device);
+        Ok(device as Arc<dyn Device>)
+    });
+    let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
+    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new()));
+    assert!(matches!(submit(&mut server, set("radio.tx.channels", Value::Int(1)), Vec::new()).outcome, Outcome::Admitted { .. }));
+    assert!(matches!(submit(&mut server, repeat(), ramp(1_000)).outcome, Outcome::Admitted { .. }));
+    finish(&mut server);
+    assert!(made.lock().unwrap().upgrade().is_none(), "a thread still holds the device after the Session ended");
+}
+
+#[test]
 fn ea_07_two_uhd_bindings_are_refused() {
     let temp = TempDir::new("uhd-two");
     let (mut server, opened) = fake_server(&temp.0);

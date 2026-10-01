@@ -813,8 +813,8 @@
   "id": "U35",
   "name": "uhd-clock not started",
   "file": "crates/ezsdr-radio-uhd/src/authority.rs",
-  "old": "while !flag.load(Ordering::Acquire) {",
-  "new": "while false && !flag.load(Ordering::Acquire) {",
+  "old": "                match clock.upgrade() {\n                    Some(time) => time.reanchor(),",
+  "new": "                match clock.upgrade().filter(|_| false) {\n                    Some(time) => time.reanchor(),",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_07_now_tracks_the_device_while_no_call_runs"
@@ -1395,8 +1395,8 @@
   "id": "B20",
   "name": "the held sample sent after the continuation's first buffer (Review P, TG-1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        if continuing {\n            if let Some(tail) = self.tail.take() {\n                // The burst before's held sample, ahead of this one, no end-of-burst between.\n                let tail: Vec<&[Iq]> = tail.iter().map(Vec::as_slice).collect();\n                let _ = self.core.device.tx_send(&tail, None, false, false, SEND_TIMEOUT);\n            }\n        }\n        let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();\n        let result = if sending > 0 { self.core.device.tx_send(&sent, at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };\n",
-  "new": "        let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();\n        let result = if sending > 0 { self.core.device.tx_send(&sent, at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };\n        if continuing {\n            if let Some(tail) = self.tail.take() {\n                let tail: Vec<&[Iq]> = tail.iter().map(Vec::as_slice).collect();\n                let _ = self.core.device.tx_send(&tail, None, false, false, SEND_TIMEOUT);\n            }\n        }\n",
+  "old": "        if continuing {\n            if let Some(tail) = self.tail.take() {\n                // The burst before's held sample, ahead of this one, no end-of-burst between;\n                // without it this one would play a sample early, so its failure abandons this\n                // burst, the device burst ended (Review Q, NB-Q2).\n                let tail: Vec<&[Iq]> = tail.iter().map(Vec::as_slice).collect();\n                match self.core.device.tx_send(&tail, None, false, false, SEND_TIMEOUT) {\n                    Ok(1) => {}\n                    Ok(_) => {\n                        self.core.reject_note(json!({ \"action\": \"tx_burst\", \"reason\": \"UR-22: a send did not complete within 1 s\" }));\n                        return self.abandon(true);\n                    }\n                    Err(error) => {\n                        self.core.device_failed(\"tx_burst\", &error);\n                        return self.abandon(true);\n                    }\n                }\n            }\n        }\n        let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();\n        let result = if sending > 0 { self.core.device.tx_send(&sent, at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };\n",
+  "new": "        let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();\n        let result = if sending > 0 { self.core.device.tx_send(&sent, at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };\n        if continuing {\n            if let Some(tail) = self.tail.take() {\n                // The burst before's held sample, ahead of this one, no end-of-burst between;\n                // without it this one would play a sample early, so its failure abandons this\n                // burst, the device burst ended (Review Q, NB-Q2).\n                let tail: Vec<&[Iq]> = tail.iter().map(Vec::as_slice).collect();\n                match self.core.device.tx_send(&tail, None, false, false, SEND_TIMEOUT) {\n                    Ok(1) => {}\n                    Ok(_) => {\n                        self.core.reject_note(json!({ \"action\": \"tx_burst\", \"reason\": \"UR-22: a send did not complete within 1 s\" }));\n                        return self.abandon(true);\n                    }\n                    Err(error) => {\n                        self.core.device_failed(\"tx_burst\", &error);\n                        return self.abandon(true);\n                    }\n                }\n            }\n        }\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it"
@@ -1410,5 +1410,95 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_23_a_one_sample_burst_booked_ahead_starts_at_its_time"
+ },
+ {
+  "id": "B22",
+  "name": "O-B2's bound without the packet term (Review Q, TG-Q3)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "Dir::Rx => self.core.block_len.max(self.core.device.rx_packet_samples()) as i64 * old.n",
+  "new": "Dir::Rx => self.core.block_len as i64 * old.n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time"
+ },
+ {
+  "id": "B23",
+  "name": "the Authority's drop does not wait for uhd-clock (D-1)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "let deadline = Instant::now() + CLOCK_JOIN;",
+  "new": "let deadline = Instant::now();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_the_last_device_handle_is_not_dropped_on_uhd_clock"
+ },
+ {
+  "id": "B24",
+  "name": "uhd-clock reads the device without checking its stop flag (D-1)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "                    if *stopped.unwrap_or_else(|e| e.into_inner()).0 {\n                        return;\n                    }",
+  "new": "                    let _ = stopped;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_no_device_read_follows_the_authority_s_drop"
+ },
+ {
+  "id": "B25",
+  "name": "a first send that fails taken for no device burst (Review Q, NB-Q1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "                if device_sob {\n                    self.unacked.push_back(TimePoint::new(clock.domain, start));\n                }\n                return self.abandon(true);",
+  "new": "                return self.abandon(was_open);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took"
+ },
+ {
+  "id": "B26",
+  "name": "a first send that fails not counted for its report (Review Q, NB-Q1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "                if device_sob {\n                    self.unacked.push_back(TimePoint::new(clock.domain, start));\n                }\n                return self.abandon(true);",
+  "new": "                return self.abandon(true);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_22_a_first_send_cut_short_keeps_the_reports_paired"
+ },
+ {
+  "id": "B27",
+  "name": "a first send cut short not counted for its report (Review Q, TG-Q1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "if device_sob && sent > 0 {",
+  "new": "if false && device_sob && sent > 0 {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_22_a_first_send_cut_short_keeps_the_reports_paired"
+ },
+ {
+  "id": "B28",
+  "name": "the held sample's send ahead of a continuation unchecked (Review Q, NB-Q2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "match self.core.device.tx_send(&tail, None, false, false, SEND_TIMEOUT) {",
+  "new": "match self.core.device.tx_send(&tail, None, false, false, SEND_TIMEOUT).map(|_| 1) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned"
+ },
+ {
+  "id": "B29",
+  "name": "a continuation's device burst taken as not open (Review Q, TG-Q2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let was_open = !first || continuing;",
+  "new": "let was_open = !first;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_23_a_continuation_s_first_send_that_takes_nothing_ends_the_device_burst"
+ },
+ {
+  "id": "B30",
+  "name": "the fake acknowledges a burst at once (Review Q, TG-Q1)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "let due = st.reports.front().is_some_and(|r| r.code != TxCode::BurstAck || r.tick.is_none_or(|t| t <= now));",
+  "new": "let due = st.reports.front().is_some();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_33_a_burst_s_acknowledgement_comes_once_its_end_has_played"
  }
 ]

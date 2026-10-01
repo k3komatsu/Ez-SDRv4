@@ -2031,6 +2031,17 @@ fn ur_33_a_recv_cut_short_by_a_packet_s_timeout_returns_what_it_has() {
     assert!(begun.elapsed() >= Wall::from_millis(45), "the next call waited only {:?}", begun.elapsed());
 }
 
+/// The device's transmit reports until its time passes `tick` (a burst's acknowledgement
+/// comes once its end has played, and a later report behind it).
+fn reports_until(device: &FakeDevice, tick: i64) -> Vec<ezsdr_radio_uhd::TxReport> {
+    let mut reports = Vec::new();
+    while device.time_now().unwrap() <= tick + 200_000 {
+        reports.extend(device.tx_async(Wall::from_millis(1)));
+    }
+    reports.extend(std::iter::from_fn(|| device.tx_async(Wall::ZERO)));
+    reports
+}
+
 #[test]
 fn ur_33_an_empty_end_of_burst_is_one_zero_sample() {
     // UHD sends an empty end-of-burst as one zero sample (`tx_streamer_impl.hpp:266–276`):
@@ -2047,10 +2058,7 @@ fn ur_33_an_empty_end_of_burst_is_one_zero_sample() {
             device.tx_send(&[&[][..]], None, false, true, Wall::from_secs(1)).unwrap();
         }
         device.tx_send(&[&wave], Some(t0 + 101 * 200), true, true, Wall::from_secs(1)).unwrap();
-        let mut codes = Vec::new();
-        while let Some(report) = device.tx_async(Wall::ZERO) {
-            codes.push(report.code);
-        }
+        let codes: Vec<_> = reports_until(&device, t0 + 201 * 200).into_iter().map(|r| r.code).collect();
         assert_eq!(codes.contains(&TxCode::TimeError), late, "empty end-of-burst {empty}: {codes:?}");
     }
 }
@@ -2068,10 +2076,7 @@ fn ur_33_a_timed_start_at_the_previous_burst_s_end_is_late() {
         device.tx_send(&[&wave], Some(t0), true, true, Wall::from_secs(1)).unwrap();
         let t1 = t0 + (100 + gap) * 200;
         device.tx_send(&[&wave], Some(t1), true, true, Wall::from_secs(1)).unwrap();
-        let mut reports = Vec::new();
-        while let Some(report) = device.tx_async(Wall::ZERO) {
-            reports.push(report);
-        }
+        let reports = reports_until(&device, t1 + 100 * 200);
         let error = reports.iter().find(|r| r.code == TxCode::TimeError);
         assert_eq!(error.is_some(), late, "gap {gap}: {reports:?}");
         if let Some(error) = error {
@@ -2327,6 +2332,10 @@ fn ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time() {
         let instance = direct.finish();
         let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
         let switch = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_switch").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
+        // UR-25's floor: 50 ms + the longer of a block and a packet + 3 ms (Review Q, TG-Q3).
+        let booked = timing.as_array().unwrap().iter().find(|r| r["what"] == "cold_change").cloned().unwrap();
+        let floor = ms(50) + block_len.max(packet) as i64 * 512 + ms(3);
+        assert!(booked["e1"].as_i64().unwrap() - booked["booked_at"].as_i64().unwrap() >= floor, "block {block_len} packet {packet}: {booked}");
         assert!(switch["at"].as_i64().unwrap() < switch["e2"].as_i64().unwrap(), "block {block_len} packet {packet} phase {phase}: switched after e₂: {switch}");
         assert!(late.is_empty(), "block {block_len} packet {packet} phase {phase}: {late:?}");
     }
@@ -2395,8 +2404,11 @@ fn ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took() {
     // closed with an empty end-of-burst (one zero sample) straight after the samples the
     // device took; the burst's held last sample is not sent there. The final buffer cut
     // short is the burst's first (1 000 samples) or its second (3 000; 2 000 a buffer).
-    for (nth, len) in [(0usize, 1_000usize), (1, 3_000)] {
-        let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::ShortSend(nth)], ..FakeConfig::default() });
+    // A send that fails after taking half is ended the same way (Review Q, NB-Q1).
+    let cases = [(FakeFault::ShortSend(0), 1_000usize), (FakeFault::ShortSend(1), 3_000), (FakeFault::FailSend(0), 1_000)];
+    for (fault, len) in cases {
+        let nth = format!("{fault:?}");
+        let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![fault], ..FakeConfig::default() });
         wait(&mut run, ms(1));
         let a = tx_at(&run, ms(40));
         let wave = tone(len);
@@ -2407,7 +2419,7 @@ fn ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took() {
         wait(&mut run, ms(60));
         let manifest = run.finish();
         let sends = calls(&device, "tx_send");
-        assert!(rejections(&manifest).iter().any(|r| r.contains("UR-22: a send did not complete")), "{sends:?}");
+        assert!(rejections(&manifest).iter().any(|r| r.contains("UR-22: a send did not complete") || r.contains("fake: the send failed")), "{nth}: {:?} {sends:?}", rejections(&manifest));
         let sent = device.transmitted(a_root, len + 1);
         let took = sent.iter().zip(&wave).take_while(|(s, w)| **s == Some([w.0, w.1])).count();
         assert!(took < len - 1, "nth {nth}: {took} of {len} {sends:?}");
@@ -2415,4 +2427,209 @@ fn ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took() {
         assert!(sent[took + 1..].iter().all(Option::is_none), "nth {nth}: {sends:?}");
         assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "nth {nth}: {sends:?}");
     }
+}
+
+#[test]
+fn ur_33_a_burst_s_acknowledgement_comes_once_its_end_has_played() {
+    // The device sends BURST_ACK when a burst's end plays, so a later burst's report waits
+    // behind it (Review Q, TG-Q1).
+    let device = fake(FakeConfig::default());
+    device.set_time_zero(false).unwrap();
+    device.tx_open(1).unwrap();
+    let wave = vec![[0.1f32, 0.0]; 100];
+    let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+    device.tx_send(&[&wave], Some(t0), true, true, Wall::from_secs(1)).unwrap();
+    device.tx_send(&[&wave], Some(t0 + 100 * 200), true, true, Wall::from_secs(1)).unwrap();
+    assert!(device.tx_async(Wall::ZERO).is_none(), "an acknowledgement before the burst played");
+    let codes: Vec<_> = reports_until(&device, t0 + 100 * 200).into_iter().map(|r| r.code).collect();
+    assert_eq!(codes.first(), Some(&TxCode::BurstAck), "{codes:?}");
+    assert!(codes.contains(&TxCode::TimeError), "the second burst's report behind the first's: {codes:?}");
+}
+
+#[test]
+fn ur_22_a_first_send_cut_short_keeps_the_reports_paired() {
+    // Review Q, TG-Q1: a burst whose first send came up short, or failed after taking half
+    // (NB-Q1), is still counted for its report, so the late report of the burst after it
+    // names that burst. B starts where A's device burst ended (499 samples taken, then the
+    // empty end-of-burst's zero sample), booked once A was abandoned: the device drops it.
+    for fault in [FakeFault::ShortSend(0), FakeFault::FailSend(0)] {
+        let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![fault], ..FakeConfig::default() });
+        wait(&mut run, ms(1));
+        let a = tx_at(&run, ms(40));
+        let entry = send_at(&mut run, "send", Some(a), &tone(1_000));
+        assert!(admitted(&entry), "{entry:?}");
+        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
+        let a_root = clock.origin.ticks + a.ticks * clock.root_ticks_per_tick.num() as i64;
+        while run.now().ticks < a_root - ms(8) {
+            wait(&mut run, ms(1) / 4);
+        }
+        let b = TimePoint::new(a.domain, a.ticks + 500);
+        let entry = send_at(&mut run, "send", Some(b), &tone(1_000));
+        assert!(admitted(&entry), "{entry:?}");
+        wait(&mut run, ms(60));
+        let manifest = run.finish();
+        let late: Vec<_> = time_errors(&manifest).into_iter().filter(|p| p.outcome == TimeErrorOutcome::LateAtDevice).collect();
+        assert_eq!(late.len(), 1, "{:?} {:?}", time_errors(&manifest), calls(&device, "tx_send"));
+        assert_eq!(late[0].target, b);
+    }
+}
+
+#[test]
+fn ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned() {
+    // Review Q, NB-Q2: the send of A's held sample ahead of B, B continuing A's device
+    // burst, takes nothing. B would play a sample early: it is abandoned, and the device
+    // burst ended with an empty end-of-burst after A's 29 999 samples taken.
+    let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::StalledSend(15)], ..FakeConfig::default() });
+    wait(&mut run, ms(1));
+    let a = tx_at(&run, ms(40));
+    let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
+    assert!(admitted(&entry), "{entry:?}");
+    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
+    let a_root = clock.origin.ticks + a.ticks * clock.root_ticks_per_tick.num() as i64;
+    let a_end = a_root + 30_000 * clock.root_ticks_per_tick.num() as i64;
+    while run.now().ticks < a_end - ms(8) {
+        wait(&mut run, ms(1) / 4);
+    }
+    let entry = send_at(&mut run, "send", Some(TimePoint::new(a.domain, a.ticks + 30_000)), &[(-0.5, 0.5); 1_000]);
+    assert!(admitted(&entry), "{entry:?}");
+    wait(&mut run, ms(40));
+    let manifest = run.finish();
+    let sends = calls(&device, "tx_send");
+    assert!(sends.iter().any(|c| c.contains("stalled")), "the case was not reached: {sends:?}");
+    let sent = device.transmitted(a_root, 30_001);
+    let whole: Vec<Option<[f32; 2]>> = tone(30_000).iter().map(|&(i, q)| Some([i, q])).collect();
+    assert!(sent[..29_999] == whole[..29_999], "{sends:?}");
+    assert_eq!(sent[29_999], Some([0.0, 0.0]), "B played in A's last sample's place: {sends:?}");
+    assert_eq!(sent[30_000], None, "{sends:?}");
+    assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "{sends:?}");
+    assert!(rejections(&manifest).iter().any(|r| r.contains("UR-22: a send did not complete")), "{sends:?}");
+}
+
+#[test]
+fn ur_23_a_continuation_s_first_send_that_takes_nothing_ends_the_device_burst() {
+    // Review Q, TG-Q2: B continues A's device burst (booked after A's last buffer went out,
+    // A's held sample sent ahead of B); B's first send takes nothing: the device burst is
+    // still open, and is ended with an empty end-of-burst after A's last sample.
+    let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::StalledSend(16)], ..FakeConfig::default() });
+    wait(&mut run, ms(1));
+    let a = tx_at(&run, ms(40));
+    let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
+    assert!(admitted(&entry), "{entry:?}");
+    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
+    let a_root = clock.origin.ticks + a.ticks * clock.root_ticks_per_tick.num() as i64;
+    let a_end = a_root + 30_000 * clock.root_ticks_per_tick.num() as i64;
+    while run.now().ticks < a_end - ms(8) {
+        wait(&mut run, ms(1) / 4);
+    }
+    let entry = send_at(&mut run, "send", Some(TimePoint::new(a.domain, a.ticks + 30_000)), &tone(1_000));
+    assert!(admitted(&entry), "{entry:?}");
+    wait(&mut run, ms(40));
+    let manifest = run.finish();
+    let sends = calls(&device, "tx_send");
+    assert!(sends.iter().any(|c| c.contains("stalled")), "the case was not reached: {sends:?}");
+    assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "{sends:?}");
+    assert_eq!(device.unended_bursts(), 0, "{sends:?}");
+    let sent = device.transmitted(a_root, 30_002);
+    let whole: Vec<Option<[f32; 2]>> = tone(30_000).iter().map(|&(i, q)| Some([i, q])).collect();
+    assert!(sent[..30_000] == whole[..], "{sends:?}");
+    assert_eq!(sent[30_000], Some([0.0, 0.0]), "{sends:?}");
+    assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "Underflow"), "{sends:?}");
+}
+
+/// A `FakeDevice` that records the thread its last handle is dropped on and the reads
+/// after a flag, and can make `uhd-clock`'s reads slow (Review Q's D-1 probe).
+struct Watched {
+    inner: FakeDevice,
+    slow: std::sync::atomic::AtomicBool,
+    after: std::sync::atomic::AtomicBool,
+    reads_after: std::sync::atomic::AtomicUsize,
+    dropped_on: Arc<Mutex<Option<String>>>,
+}
+
+impl Drop for Watched {
+    fn drop(&mut self) {
+        *self.dropped_on.lock().unwrap() = Some(std::thread::current().name().unwrap_or("?").to_owned());
+    }
+}
+
+impl Device for Watched {
+    fn describe(&self) -> Json { self.inner.describe() }
+    fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity { self.inner.fidelity() }
+    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+    fn channels(&self, dir: ezsdr_radio_uhd::Dir) -> usize { self.inner.channels(dir) }
+    fn front_end(&self, dir: ezsdr_radio_uhd::Dir, chan: usize) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.front_end(dir, chan) }
+    fn set_sources(&self, c: &str, t: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_sources(c, t) }
+    fn set_time_zero(&self, p: bool) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_time_zero(p) }
+    fn time_now(&self) -> Result<i64, ezsdr_radio_uhd::DeviceError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.after.load(SeqCst) {
+            self.reads_after.fetch_add(1, SeqCst);
+        }
+        if self.slow.load(SeqCst) && std::thread::current().name() == Some("uhd-clock") {
+            std::thread::sleep(Wall::from_millis(60));
+        }
+        self.inner.time_now()
+    }
+    fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> { self.inner.ref_locked() }
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> { self.inner.apply(d, c, s, at) }
+    fn rx_open(&self, c: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(c) }
+    fn rx_start(&self, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(at) }
+    fn rx_packet_samples(&self) -> usize { self.inner.rx_packet_samples() }
+    fn rx_stop(&self, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(at) }
+    fn rx_recv(&self, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(n, t) }
+    fn tx_open(&self, c: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(c) }
+    fn tx_send(&self, s: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, at, sob, eob, t) }
+    fn tx_async(&self, t: Wall) -> Option<ezsdr_radio_uhd::TxReport> { self.inner.tx_async(t) }
+    fn close_streams(&self) { self.inner.close_streams() }
+}
+
+fn watched() -> (Arc<Watched>, Arc<Mutex<Option<String>>>) {
+    let on = Arc::new(Mutex::new(None));
+    let device = Watched {
+        inner: FakeDevice::new(FakeConfig::default()),
+        slow: Default::default(),
+        after: Default::default(),
+        reads_after: Default::default(),
+        dropped_on: on.clone(),
+    };
+    (Arc::new(device), on)
+}
+
+#[test]
+fn ur_07_the_last_device_handle_is_not_dropped_on_uhd_clock() {
+    // D-1 (design-notes §15): dropped in hw_b2's order while uhd-clock is inside a 60 ms
+    // read, the last device handle goes on the dropping thread, not on uhd-clock, whose
+    // drop would race UHD's static teardown at process exit.
+    use std::sync::atomic::Ordering::SeqCst;
+    for _ in 0..3 {
+        let (device, on) = watched();
+        let authority = DeviceAuthority::new(device.clone(), Arc::new(ClockRegistry::new()), "internal", "internal", "fake").unwrap();
+        let time = authority.time();
+        device.slow.store(true, SeqCst);
+        std::thread::sleep(Wall::from_millis(130));
+        drop(time);
+        drop(authority);
+        drop(device);
+        std::thread::sleep(Wall::from_millis(200));
+        let here = std::thread::current().name().map(str::to_owned);
+        assert_eq!(*on.lock().unwrap(), here);
+    }
+}
+
+#[test]
+fn ur_07_no_device_read_follows_the_authority_s_drop() {
+    // D-1: with a TimeAuthority handle outliving the Authority (the Kernel's, a
+    // Provider's), uhd-clock makes no device read once `drop` has returned.
+    use std::sync::atomic::Ordering::SeqCst;
+    let (device, _) = watched();
+    let authority = DeviceAuthority::new(device.clone(), Arc::new(ClockRegistry::new()), "internal", "internal", "fake").unwrap();
+    let time = authority.time();
+    std::thread::sleep(Wall::from_millis(50));
+    let begun = Instant::now();
+    drop(authority);
+    assert!(begun.elapsed() < Wall::from_millis(50), "drop waited {:?}", begun.elapsed());
+    device.after.store(true, SeqCst);
+    std::thread::sleep(Wall::from_millis(350));
+    assert_eq!(device.reads_after.load(SeqCst), 0);
+    drop(time);
 }

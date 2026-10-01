@@ -270,10 +270,16 @@ pub enum FakeFault {
     /// From this device time on, `time_now` takes 5 ms before it reads (UR-7's 1 ms
     /// bracket rule).
     SlowTimeRead(Duration),
-    /// The `nth` `tx_send` of two samples or more (0-based) takes only its first half and
+    /// The `nth` `tx_send` carrying samples (0-based) takes only its first half and
     /// returns their count, its end-of-burst not sent (UHD's `send` timing out part way;
     /// Review P, NB-1).
     ShortSend(usize),
+    /// The same `tx_send` takes its first half, then fails without the device being lost
+    /// (UHD failing after some packets went, which is not known to happen; Review Q, NB-Q1).
+    FailSend(usize),
+    /// The same `tx_send` takes nothing and returns 0 (UHD's `send` timing out on its first
+    /// packet; Review Q, TG-Q2).
+    StalledSend(usize),
 }
 
 /// How [`FakeDevice`] behaves (UR-33).
@@ -355,7 +361,7 @@ struct Fake {
     /// The open burst ran out of samples and was reported (UR-33: an underflow).
     tx_starved: bool,
     tx_samples: BTreeMap<i64, (i64, Vec<Iq>)>,
-    /// The `tx_send` calls of two samples or more so far (`FakeFault::ShortSend`).
+    /// The `tx_send` calls carrying samples so far (`FakeFault::ShortSend`).
     tx_sends: usize,
     reports: VecDeque<TxReport>,
     restarts: u64,
@@ -959,12 +965,29 @@ impl Device for FakeDevice {
         let padded: Vec<&[Iq]> = vec![&zero; samples.len().max(1)];
         let samples = if eob && samples.first().is_none_or(|s| s.is_empty()) { &padded[..] } else { samples };
         let n = samples.first().map_or(0, |s| s.len());
-        let short = n >= 2 && {
+        // `ShortSend`, `FailSend`, `StalledSend`: what this send takes, if it is cut.
+        let cut = if n >= 1 {
             let mut st = self.lock();
             st.tx_sends += 1;
-            self.config.faults.contains(&FakeFault::ShortSend(st.tx_sends - 1))
+            let nth = st.tx_sends - 1;
+            self.config.faults.iter().find_map(|fault| match fault {
+                FakeFault::ShortSend(k) if *k == nth => Some((n / 2, false)),
+                FakeFault::FailSend(k) if *k == nth => Some((n / 2, true)),
+                FakeFault::StalledSend(k) if *k == nth => Some((0, false)),
+                _ => None,
+            })
+        } else {
+            None
         };
-        let half: Vec<&[Iq]> = samples.iter().map(|s| &s[..n / 2]).collect();
+        let (short, fail, took) = match cut {
+            Some((took, fail)) => (true, fail, took),
+            None => (false, false, n),
+        };
+        if short && took == 0 {
+            self.lock().calls.push(format!("tx_send n=0 stalled sob={sob} eob={eob}"));
+            return Ok(0);
+        }
+        let half: Vec<&[Iq]> = samples.iter().map(|s| &s[..took]).collect();
         let (samples, eob) = if short { (&half[..], false) } else { (samples, eob) };
         let n = samples.first().map_or(0, |s| s.len());
         let cursor = {
@@ -1040,6 +1063,9 @@ impl Device for FakeDevice {
             }
             self.sleep_ticks(ahead.min(self.ticks_of(Duration::from_millis(5))));
         }
+        if fail {
+            return Err(DeviceError::failed("fake: the send failed after half its samples"));
+        }
         Ok(n)
     }
 
@@ -1062,8 +1088,13 @@ impl Device for FakeDevice {
                 let tick = Some(st.tx_cursor);
                 st.reports.push_back(TxReport { code: TxCode::Underflow, tick, channel: 0 });
             }
-            if let Some(report) = st.reports.pop_front() {
-                return Some(report);
+            // In order, and a burst's acknowledgement only once its end has played: the
+            // device sends it then, and judges a later burst only after it
+            // (`radio_tx_core.v:348–374`), so that burst's report waits behind (Review Q,
+            // TG-Q1).
+            let due = st.reports.front().is_some_and(|r| r.code != TxCode::BurstAck || r.tick.is_none_or(|t| t <= now));
+            if due {
+                return st.reports.pop_front();
             }
         }
         if !timeout.is_zero() {

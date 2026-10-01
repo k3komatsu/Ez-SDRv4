@@ -269,9 +269,21 @@ impl Tx {
         let at = device_sob.then(|| clock.instant(start));
         if continuing {
             if let Some(tail) = self.tail.take() {
-                // The burst before's held sample, ahead of this one, no end-of-burst between.
+                // The burst before's held sample, ahead of this one, no end-of-burst between;
+                // without it this one would play a sample early, so its failure abandons this
+                // burst, the device burst ended (Review Q, NB-Q2).
                 let tail: Vec<&[Iq]> = tail.iter().map(Vec::as_slice).collect();
-                let _ = self.core.device.tx_send(&tail, None, false, false, SEND_TIMEOUT);
+                match self.core.device.tx_send(&tail, None, false, false, SEND_TIMEOUT) {
+                    Ok(1) => {}
+                    Ok(_) => {
+                        self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
+                        return self.abandon(true);
+                    }
+                    Err(error) => {
+                        self.core.device_failed("tx_burst", &error);
+                        return self.abandon(true);
+                    }
+                }
             }
         }
         let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();
@@ -293,8 +305,14 @@ impl Tx {
                 return self.abandon(was_open || sent > 0);
             }
             Err(error) => {
+                // Whether UHD sent packets before the error is unknown: a start that may have
+                // gone is taken as a device burst begun, ended and counted for its report (an
+                // end-of-burst outside a burst costs one zero sample; Review Q, NB-Q1).
                 self.core.device_failed("tx_burst", &error);
-                return self.abandon(was_open);
+                if device_sob {
+                    self.unacked.push_back(TimePoint::new(clock.domain, start));
+                }
+                return self.abandon(true);
             }
         }
         self.tail = tail;
