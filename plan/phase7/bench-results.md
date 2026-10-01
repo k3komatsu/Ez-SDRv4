@@ -1159,3 +1159,88 @@ rec_0: first sample {'domain': {'node': 0, 'local': 3}, 'ticks': 54700}
 rec_1: first sample {'domain': {'node': 0, 'local': 3}, 'ticks': 180034}
 TIME_ERROR events: 0 (spike K6: none)
 ```
+
+
+## Session 2, part 8 — after the X300's power cycle (`7793fc7`)
+
+The owner powered the X300 off after part 7, then on: "X300の電源を入れました．抜線もできます". `7793fc7` changes only the fake and its tests since part 7 (Review R's NB-R3, TG-R1). Logs in `~/ezsdr-bench/s2-poweron/`.
+
+**B1 right after the power cycle** (its log was then overwritten by the pass's B1 below — my runner moves each log into the same directory; the lines as they were printed):
+
+```
+B1 ref_locked: Ok(Some(true))
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 3.55s
+```
+
+Then every stage, and `hw_b2_authority` twenty times; the runner's summary:
+
+```
+hw_b1_probe exit=0
+hw_b2_authority exit=0
+hw_b3_receive_at_t0 exit=0
+hw_b4_capture_at_a_sample_index exit=0
+hw_b5_overflow exit=0
+hw_b6_txrx_and_repeat exit=0
+hw_b7_session_loopback exit=0
+hw_b8_leads exit=0
+hw_b8_preemption exit=0
+hw_b8_stop_end exit=0
+hw_b8_burst_at_a_sent_burst_s_end exit=0
+hw_b8_burst_one_sample_after_a_burst exit=0
+hw_b8_cold_change_capture exit=0
+hw_b8_cold_change_capture_low_rate exit=0
+hw_b8_cold_change_timing_at_the_extremes exit=0
+hw_b9_long_receive exit=0
+hw_b9_transmit_only_session exit=0
+server build exit=0
+b7 minimal exit=0
+b7 bench_loopback exit=0
+b2 loop1 exit=0 abort=0
+b2 loop2 exit=0 abort=0
+b2 loop3 exit=101 abort=0
+b2 loop4 exit=0 abort=0
+b2 loop5 exit=0 abort=0
+b2 loop6 exit=0 abort=0
+b2 loop7 exit=0 abort=0
+b2 loop8 exit=0 abort=0
+b2 loop9 exit=101 abort=0
+b2 loop10 exit=0 abort=0
+b2 loop11 exit=0 abort=0
+b2 loop12 exit=0 abort=0
+b2 loop13 exit=0 abort=0
+b2 loop14 exit=101 abort=0
+b2 loop15 exit=0 abort=0
+b2 loop16 exit=0 abort=0
+b2 loop17 exit=0 abort=0
+b2 loop18 exit=0 abort=0
+b2 loop19 exit=0 abort=0
+b2 loop20 exit=0 abort=0
+```
+
+- **Every stage passes**, `hw_b8_cold_change_timing_at_the_extremes` included (part 7 could not finish it):
+
+```
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(0.07041) ms after e₁; switch 49.577 ms before e₂; LATE_COMMAND 0
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 1: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(0.026505) ms after e₁; switch 49.802 ms before e₂; LATE_COMMAND 0
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 2: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(-0.096635) ms after e₁; switch 49.693 ms before e₂; LATE_COMMAND 0
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 3: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(0.086745) ms after e₁; switch 49.546 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 400000 S/s, block_len Some(100), packet 1996, phase 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 58.110 ms (floor 58.110 ms); untimed stop Some(2.358605) ms after e₁; switch 47.261 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 400000 S/s, block_len Some(100), packet 1996, phase 1: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 58.112 ms (floor 58.110 ms); untimed stop Some(4.974255) ms after e₁; switch 44.626 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 400000 S/s, block_len Some(100), packet 1996, phase 2: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 58.111 ms (floor 58.110 ms); untimed stop Some(4.15285) ms after e₁; switch 45.538 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 400000 S/s, block_len Some(100), packet 1996, phase 3: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 58.112 ms (floor 58.110 ms); untimed stop Some(2.78481) ms after e₁; switch 46.803 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 2000000 S/s, block_len Some(65536), packet 1996, phase 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 220.772 ms (floor 220.772 ms); untimed stop Some(3.79542) ms after e₁; switch 45.690 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 2000000 S/s, block_len Some(65536), packet 1996, phase 1: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 220.774 ms (floor 220.772 ms); untimed stop Some(3.09304) ms after e₁; switch 46.530 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 2000000 S/s, block_len Some(65536), packet 1996, phase 2: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 220.773 ms (floor 220.772 ms); untimed stop Some(1.41314) ms after e₁; switch 48.031 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 2000000 S/s, block_len Some(65536), packet 1996, phase 3: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 220.774 ms (floor 220.772 ms); untimed stop Some(1.368485) ms after e₁; switch 48.082 ms before e₂; LATE_COMMAND 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 100.67s
+```
+
+- **The reference PLL still fails to lock now and then:** B2's loops 3, 9 and 14, 3 of 68 opens in the pass:
+
+```
+called `Result::unwrap()` on an `Err` value: "UR-7: uhd_usrp_set_clock_source: UHD error 44: RuntimeError: Reference Clock PLL failed to lock to internal source."
+```
+
+- **`ref_locked` is not a sign of it:** it read `true` at the first open after the power cycle and `false` at the pass's B1, minutes later; the failures came either way. Part 7's table is therefore no evidence of a degrading device; what remains is a lock failure on about 4 % of opens since part 6 (2 of 63, 4 of 66, 3 of 68), against 3 of 39 in part 3 and 0 in parts 4–5. Why `ref_locked` reads `false` is not known.
+- **D-1:** no abort at exit in 18 B2 runs that ran (or in any log of the pass).
+- B6 delay 44 samples; B7 (Python): TIME_ERROR events: 0 (spike K6: none).

@@ -177,15 +177,54 @@ fn hw_b8_leads() {
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_b9_unplug() {
-    // Manual: unplug the 10 GbE cable during the next 60 s.
+    // Manual: unplug the 10 GbE cable within the next 300 s, during a receive Run. The Run
+    // is advanced a second at a time until it is no longer running; the host's UTC at that
+    // point is printed, to set against the instant the host's NIC lost its carrier.
     let dir = TempDir::new();
     let device = usrp();
     let mut run = spec_run(&receive_spec(1, 1e6, bench_hz(&*device), None), &bench_profile(&*device, &dir, serde_json::json!({}), serde_json::json!({}), false), device, Default::default());
-    println!("B9: unplug the cable now");
-    let result = run.run_until_end(after(&run, ms(60_000)));
+    println!("B9: unplug the cable now (receive Run; up to 300 s); started at UTC {:.3}", utc_now());
+    let ended = until_not_running(&mut run, 300);
     let manifest = run.finish();
-    println!("B9 result {result:?}; termination {:?}", manifest.termination.reason);
-    println!("B9 DEVICE_LOST: {:?}", events_of(&manifest, ezsdr_kernel::event::EventKind::DEVICE_LOST));
+    println!("B9 receive: {ended}; termination {:?}", manifest.termination.reason);
+    println!("B9 receive DEVICE_LOST: {:?}", events_of(&manifest, ezsdr_kernel::event::EventKind::DEVICE_LOST));
+    println!("B9 receive rejected: {}", section(&manifest, "rejected"));
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_b9_unplug_transmit_only() {
+    // Manual: unplug the 10 GbE cable within the next 300 s, during a transmit-only Session
+    // with nothing sent (bench.md B9's second case): only uhd-clock's and the idle time
+    // reads touch the device (UR-29's 500 ms read).
+    let dir = TempDir::new();
+    let mut run = tx_session(usrp(), &dir);
+    let off = run.submit(set("radio.rx.channels", ezsdr_kernel::spec::Value::Int(0)), None).unwrap();
+    println!("B9 transmit only: radio.rx.channels 0: {:?}", off.outcome);
+    println!("B9: unplug the cable now (transmit-only Session; up to 300 s); started at UTC {:.3}", utc_now());
+    let ended = until_not_running(&mut run, 300);
+    let manifest = run.finish();
+    println!("B9 transmit only: {ended}; termination {:?}", manifest.termination.reason);
+    println!("B9 transmit only DEVICE_LOST: {:?}", events_of(&manifest, ezsdr_kernel::event::EventKind::DEVICE_LOST));
+    println!("B9 transmit only rejected: {}", section(&manifest, "rejected"));
+}
+
+/// The host's UTC in seconds.
+fn utc_now() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()
+}
+
+/// Advances `run` a second at a time until it is no longer running or `limit_s` pass;
+/// says which, with the host's UTC then.
+fn until_not_running(run: &mut ezsdr_kernel::coordinator::RunHandle, limit_s: u64) -> String {
+    let deadline = Instant::now() + Wall::from_secs(limit_s);
+    while Instant::now() < deadline {
+        let step = run.advance_to(after(run, ms(1_000)));
+        if step.is_err() || !matches!(run.state(), ezsdr_kernel::run::RunState::Running {}) {
+            return format!("not running at UTC {:.3} ({step:?}, {:?})", utc_now(), run.state());
+        }
+    }
+    format!("still running after {limit_s} s, at UTC {:.3}", utc_now())
 }
 
 #[test]
