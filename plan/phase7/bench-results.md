@@ -902,3 +902,58 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 28 filtered out; fin
 
 - **O-B1 is real:** the empty end-of-burst moves the device burst's end one sample later, so a burst at gap 1 — played when A's last data buffer carried end-of-burst — is now late and dropped. A regression of `aaf1e00`, open (Review O's recommendation, or another, is the owner's call).
 - Gap 0 is late either way (as `hw_b8_raw_burst_gap`), which is why uhd-tx continues the device burst there.
+
+## Session 2, part 5 — after Review O's fixes (`10ddb73`, `b3c94ba`)
+
+The owner: "それでは二つとも推奨で直してください", and on O-B2: "O-B2で時間固定はサンプリングレートを変えてもこの時間でいいの？たとえば100kspsでも200Mspsでも大丈夫" — the bound is the old stream's block at its rate, not a fixed time; the question showed the packet term was missing (design-notes §13). Logs in `~/ezsdr-bench/s2-reviewO/`.
+
+### O-B2 at the rates' extremes — `hw_b8_cold_change_timing_at_the_extremes`: pass
+
+A receive `cold` change booked at four phases of the receive call in progress, at 200 Msps → 100 Msps (the highest rate), 390 625 → 400 000 S/s with `block_len` 100 (the packet, 1 996 samples, longer than the block) and 390 625 S/s → 2 Msps with `block_len` 65 536 (168 ms a block). No capture (200 Msps of `cf32` is 1.6 GB/s); the Manifest's timing. Each asserts `e₁` past the call in progress, the switch before `e₂`, no `LATE_COMMAND` (`stats` cut from the lines below):
+
+```
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(-0.0426) ms after e₁; switch 49.675 ms before e₂; LATE_COMMAND 0
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 1: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(0.050135) ms after e₁; switch 49.774 ms before e₂; LATE_COMMAND 0
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 2: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(0.006885) ms after e₁; switch 49.700 ms before e₂; LATE_COMMAND 0
+B8 cold 200000000 → 100000000 S/s, block_len None, packet 1996, phase 3: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 53.010 ms (floor 53.010 ms); untimed stop Some(0.0311) ms after e₁; switch 49.646 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 400000 S/s, block_len Some(100), packet 1996, phase 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 58.112 ms (floor 58.110 ms); untimed stop Some(1.28296) ms after e₁; switch 48.274 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 400000 S/s, block_len Some(100), packet 1996, phase 1: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 58.111 ms (floor 58.110 ms); untimed stop Some(0.571795) ms after e₁; switch 48.851 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 400000 S/s, block_len Some(100), packet 1996, phase 2: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 58.112 ms (floor 58.110 ms); untimed stop Some(3.349935) ms after e₁; switch 46.340 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 400000 S/s, block_len Some(100), packet 1996, phase 3: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 58.111 ms (floor 58.110 ms); untimed stop Some(2.91755) ms after e₁; switch 46.701 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 2000000 S/s, block_len Some(65536), packet 1996, phase 0: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 220.773 ms (floor 220.772 ms); untimed stop Some(4.338895) ms after e₁; switch 44.834 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 2000000 S/s, block_len Some(65536), packet 1996, phase 1: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 220.773 ms (floor 220.772 ms); untimed stop Some(3.48607) ms after e₁; switch 46.128 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 2000000 S/s, block_len Some(65536), packet 1996, phase 2: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 220.774 ms (floor 220.772 ms); untimed stop Some(2.471775) ms after e₁; switch 46.873 ms before e₂; LATE_COMMAND 0
+B8 cold 390625 → 2000000 S/s, block_len Some(65536), packet 1996, phase 3: Admitted { coercions: [], warnings: [], dispatched: [ActionId(2)] }; e₁ − booking 220.775 ms (floor 220.772 ms); untimed stop Some(0.65763) ms after e₁; switch 48.830 ms before e₂; LATE_COMMAND 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 88.68s
+```
+
+- **All twelve: `e₁` at its floor (53.0, 58.1, 220.8 ms after the booking), the switch 44.8–49.8 ms before `e₂`, no `LATE_COMMAND`.** The untimed stop came −0.04…+4.3 ms from `e₁`; the negative values at 200 Msps are the Authority's host-derived time running ~0.1 ms behind the device's (part 2's 60 s drift), the stop issued once the samples up to `e₁` had arrived.
+- `rx_packet_samples()` read 1 996 at every rate (UHD's `max_num_samps` at MTU 9000).
+- The fixed 50 ms and 3 ms hold at both ends on this bench: the largest stop after `e₁` was 4.3 ms, at the lowest rate with the longest block.
+
+### O-B1 — `hw_b8_burst_one_sample_after_a_burst`: pass
+
+```
+B8 burst one sample after a burst, booked late false: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR []; async [{"channel":0,"code":"BurstAck","tick":415556401},{"channel":0,"code":"BurstAck","tick":415756601}]; bursts [{"actual_start":null,"blocks":15,"end":"eob","late_by":null,"requested_target":null,"samples":30000,"target":{"domain":{"local":4,"node":0},"ticks":41174},"wraps":1},{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":1000,"target":{"domain":{"local":4,"node":0},"ticks":71175},"wraps":1}]
+B8 burst one sample after a burst, booked late true: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR []; async [{"channel":0,"code":"BurstAck","tick":415458801},{"channel":0,"code":"BurstAck","tick":415659001}]; bursts [{"actual_start":null,"blocks":15,"end":"eob","late_by":null,"requested_target":null,"samples":30000,"target":{"domain":{"local":4,"node":0},"ticks":41448},"wraps":1},{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":1000,"target":{"domain":{"local":4,"node":0},"ticks":71449},"wraps":1}]
+B8 burst one sample after a burst, booked late false: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR []; async [{"channel":0,"code":"BurstAck","tick":415489601},{"channel":0,"code":"BurstAck","tick":415689801}]; bursts [{"actual_start":null,"blocks":15,"end":"eob","late_by":null,"requested_target":null,"samples":30000,"target":{"domain":{"local":4,"node":0},"ticks":41382},"wraps":1},{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":1000,"target":{"domain":{"local":4,"node":0},"ticks":71383},"wraps":1}]
+B8 burst one sample after a burst, booked late true: Admitted { coercions: [], warnings: [], dispatched: [ActionId(3)] }; TIME_ERROR []; async [{"channel":0,"code":"BurstAck","tick":415636201},{"channel":0,"code":"BurstAck","tick":415836401}]; bursts [{"actual_start":null,"blocks":15,"end":"eob","late_by":null,"requested_target":null,"samples":30000,"target":{"domain":{"local":4,"node":0},"ticks":41512},"wraps":1},{"actual_start":null,"blocks":1,"end":"eob","late_by":null,"requested_target":null,"samples":1000,"target":{"domain":{"local":4,"node":0},"ticks":71513},"wraps":1}]
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 31.21s
+```
+
+- A burst at a 30 000-sample burst's end + 1 sample, booked before and after the first's last buffer went out, twice each: played, no `TIME_ERROR`, no `TimeError`, no `Underflow` — where `aaf1e00`'s empty end-of-burst made it late (part 4: 4 of 4).
+
+### The rest, again: pass
+
+`hw_b8_burst_at_a_sent_burst_s_end`, `hw_b8_cold_change_capture`, `hw_b8_cold_change_capture_low_rate`, B1–B8 (B6: delay 44 samples), `hw_b8_preemption` (20 ms played), `hw_b8_stop_end` (the transmission ends 10.1–11.6 ms after the Stop's submission), `hw_b9_long_receive`, `hw_b9_transmit_only_session`: all pass, no reference-PLL failure. B7 (Python), release server rebuilt from `b3c94ba`:
+
+```
+sample rate 20000000.0 S/s (coerced, a new SampleClock)
+the transmit retune outside the RF envelope was refused: radio.rf_envelope: RM-19: radio: 2400000000 Hz is in no allowed band
+y: correlation peak at sample 12934; z: at sample 13052
+rec_0: first sample {'domain': {'node': 0, 'local': 3}, 'ticks': 55865}
+rec_1: first sample {'domain': {'node': 0, 'local': 3}, 'ticks': 179747}
+asked: y at {'domain': {'node': 0, 'local': 2}, 'ticks': 411734732}, z at {'domain': {'node': 0, 'local': 2}, 'ticks': 436511002}
+TIME_ERROR events: 0 (spike K6: none)
+Manifest: /bench/ezsdr-runs/session-7-9/manifest.json
+```

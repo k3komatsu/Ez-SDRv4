@@ -992,3 +992,36 @@ fn hw_b8_cold_change_timing_at_the_extremes() {
         }
     }
 }
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_b8_burst_one_sample_after_a_burst() {
+    // Review O, O-B1 on the bench: a burst at a burst's end + 1 sample, booked before the
+    // first's last buffer went out and after, is played (an empty end-of-burst made it late:
+    // hw_b8_raw_empty_eob_gap).
+    for late_booking in [false, true, false, true] {
+        let dir = TempDir::new();
+        let mut run = tx_session(usrp(), &dir);
+        wait(&mut run, ms(1));
+        let a = tx_at(&run, ms(40));
+        let (first, _) = waveform_of(&pn(30_000));
+        assert!(admitted(&run.submit(verb("send", "radio/tx", Some(a), &[]), Some(&first)).unwrap()));
+        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
+        let a_end = clock.origin.ticks + (a.ticks + 30_000) * clock.root_ticks_per_tick.num() as i64;
+        if late_booking {
+            while run.now().ticks < a_end - ms(8) {
+                wait(&mut run, ms(1) / 4);
+            }
+        }
+        let b = TimePoint::new(a.domain, a.ticks + 30_001);
+        let (second, _) = waveform_of(&pn(1_000));
+        let entry = run.submit(verb("send", "radio/tx", Some(b), &[]), Some(&second)).unwrap();
+        wait(&mut run, ms(80));
+        let manifest = run.finish();
+        println!("B8 burst one sample after a burst, booked late {late_booking}: {:?}; TIME_ERROR {:?}; async {}; bursts {}",
+            entry.outcome, events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>(),
+            section(&manifest, "async"), section(&manifest, "bursts"));
+        assert!(events_of(&manifest, "radio.TIME_ERROR").is_empty());
+        assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError" && r["code"] != "Underflow"));
+    }
+}
