@@ -1244,3 +1244,87 @@ called `Result::unwrap()` on an `Err` value: "UR-7: uhd_usrp_set_clock_source: U
 - **`ref_locked` is not a sign of it:** it read `true` at the first open after the power cycle and `false` at the pass's B1, minutes later; the failures came either way. Part 7's table is therefore no evidence of a degrading device; what remains is a lock failure on about 4 % of opens since part 6 (2 of 63, 4 of 66, 3 of 68), against 3 of 39 in part 3 and 0 in parts 4–5. Why `ref_locked` reads `false` is not known.
 - **D-1:** no abort at exit in 18 B2 runs that ran (or in any log of the pass).
 - B6 delay 44 samples; B7 (Python): TIME_ERROR events: 0 (spike K6: none).
+
+
+## Session 2, part 9 — B9, the unplug (`fdea39d`)
+
+The owner: "準備OK"; then, on my "今抜いてください", unplugged the 10 GbE cable **at the X300's end** ("X300側を抜きました"). The host's NIC (`enp2s0f0np0`) carrier was logged every 10 ms with the host's UTC (`~/ezsdr-bench/s2-b9/carrier.log`):
+
+```
+1790833054.634383214 carrier=1 (start)
+1790833081.848528081 carrier=0
+1790833117.715439794 carrier=1
+```
+
+### Receive Run — `hw_b9_unplug`: **the process aborted** (B9 fails)
+
+Started at UTC 1790833057.830 (05:37:37); the carrier dropped at 05:38:01.849; the log was last written at 05:38:07.919 (its file time), about 6.1 s after the unplug. The whole log, as printed:
+
+```
+
+running 1 test
+[INFO] [UHD] linux; GNU C++ version 15.2.0; Boost_109000; UHD_4.10.0.0-0-unknown
+[INFO] [X300] X300 initialization sequence...
+[INFO] [X300] Maximum frame size: 8000 bytes.
+[INFO] [X300] Radio 1x clock: 200 MHz
+B9: unplug the cable now (receive Run; up to 300 s); started at UTC 1790833057.830
+[ERROR] [0/Radio#0::CTRLEP] Control operation timed out waiting for ACK. Request sent: ctrl_payload{dst_port:4, src_port:4, seq_num:18, timestamp:<not present>, is_ack:false, src_epid:1, address:0x00004, byte_enable:0xf, op_code:2, status:0, num_data:1 data[0]:0x00000000}
+
+[ERROR] [X300] 192.168.40.36: x300 fw communication failure #1
+EnvironmentError: IOError: x300 fw poke32 - reply timed out
+[ERROR] [0/Radio#0::CTRLEP] Control operation timed out waiting for ACK. Request sent: ctrl_payload{dst_port:4, src_port:4, seq_num:19, timestamp:<not present>, is_ack:false, src_epid:1, address:0x00004, byte_enable:0xf, op_code:2, status:0, num_data:1 data[0]:0x00000000}
+
+[ERROR] [X300] 192.168.40.36: x300 fw communication failure #2
+EnvironmentError: IOError: x300 fw poke32 - reply timed out
+[ERROR] [0/Radio#0::CTRLEP] Control operation timed out waiting for ACK. Request sent: ctrl_payload{dst_port:4, src_port:4, seq_num:20, timestamp:<not present>, is_ack:false, src_epid:1, address:0x00004, byte_enable:0xf, op_code:2, status:0, num_data:1 data[0]:0x00000000}
+
+[ERROR] [X300] 192.168.40.36: x300 fw communication failure #3
+EnvironmentError: IOError: x300 fw poke32 - reply timed out
+[ERROR] [UHD] An unexpected exception was caught in a task loop.The task loop will now exit, things may not work.EnvironmentError: IOError: 192.168.40.36: x300 fw communication failure #3
+EnvironmentError: IOError: x300 fw poke32 - reply timed out
+[ERROR] [0/Radio#0::CTRLEP] Control operation timed out waiting for ACK. Request sent: ctrl_payload{dst_port:4, src_port:4, seq_num:21, timestamp:<not present>, is_ack:false, src_epid:1, address:0x00004, byte_enable:0xf, op_code:2, status:0, num_data:1 data[0]:0x00000000}
+
+[ERROR] [0/Radio#0::CTRLEP] Control operation timed out waiting for ACK. Request sent: ctrl_payload{dst_port:4, src_port:4, seq_num:22, timestamp:<not present>, is_ack:false, src_epid:1, address:0x00004, byte_enable:0xf, op_code:2, status:0, num_data:1 data[0]:0x00000000}
+
+[ERROR] [X300] 192.168.40.36: x300 fw communication failure #1
+EnvironmentError: IOError: x300 fw poke32 - reply timed out
+[WARNING] [UHD] Exception caught in safe-call.
+  in ~dboard_manager_impl
+  at /root/tmp/uhd-4.10.0.0/host/lib/usrp/dboard_manager.cpp:506
+set_nice_dboard_if() -> send: Network is unreachable [system:101]
+[WARNING] [UHD] Exception caught in safe-call.
+  in ~max287x
+  at /root/tmp/uhd-4.10.0.0/host/lib/include/uhdlib/usrp/common/max287x.hpp:712
+shutdown() -> EnvironmentError: IOError: send error on socket: Network is unreachable
+[WARNING] [UHD] Exception caught in safe-call.
+  in ~max287x
+  at /root/tmp/uhd-4.10.0.0/host/lib/include/uhdlib/usrp/common/max287x.hpp:712
+shutdown() -> EnvironmentError: IOError: send error on socket: Network is unreachable
+[WARNING] [UHD] Exception caught in safe-call.
+  in ~max287x
+  at /root/tmp/uhd-4.10.0.0/host/lib/include/uhdlib/usrp/common/max287x.hpp:712
+shutdown() -> EnvironmentError: IOError: send error on socket: Network is unreachable
+[WARNING] [UHD] Exception caught in safe-call.
+  in ~max287x
+  at /root/tmp/uhd-4.10.0.0/host/lib/include/uhdlib/usrp/common/max287x.hpp:712
+shutdown() -> EnvironmentError: IOError: send error on socket: Network is unreachable
+[WARNING] [UHD] Exception caught in safe-call.
+  in ~obx_cpld_ctrl
+  at /root/tmp/uhd-4.10.0.0/host/lib/usrp/dboard/obx/obx_cpld_ctrl.cpp:36
+_tx_value = 0; _rx_value = 0; write(); -> EnvironmentError: IOError: send error on socket: Network is unreachable
+[WARNING] [UHD] Exception caught in safe-call.
+  in ~obx_gpio_ctrl
+  at /root/tmp/uhd-4.10.0.0/host/lib/usrp/dboard/obx/obx_gpio_ctrl.cpp:67
+set_field(TX_GAIN, 0); set_field(CPLD_RST_N, 0); set_field(RX2_EN_N, 0); set_field(TX_EN_N, 1); set_field(RX_EN_N, 1); set_field(SPI_ADDR, 0x7); set_field(RX_GAIN, 0); set_field(TXLO1_SYNC, 0); set_field(TXLO2_SYNC, 0); set_field(RXLO1_SYNC, 0); set_field(RXLO1_SYNC, 0); write(); -> EnvironmentError: IOError: send error on socket: Network is unreachable
+terminate called after throwing an instance of 'uhd::io_error'
+  what():  EnvironmentError: IOError: send error on socket: Network is unreachable
+error: test failed, to rerun pass `-p ezsdr-radio-uhd --test hardware`
+
+Caused by:
+  process didn't exit successfully: `/cargo-target/release/deps/hardware-4fa4ba8ce0a41e45 hw_b9_unplug --exact --ignored --nocapture --quiet` (signal: 6, SIGABRT: process abort signal)
+```
+
+- **Expected** (bench.md B9): `DEVICE_LOST` within about 1 s, the Run `Stopped { policy { DEVICE_LOST } }`, its Manifest written.
+- **Observed:** UHD's control requests timed out (`x300 fw communication failure #1…#3`), UHD's own task loop exited on the error, and while the device was being torn down — the `safe-call` warnings come from destructors (`~max287x`, `~obx_cpld_ctrl`, `~obx_gpio_ctrl`) — a `uhd::io_error` escaped and the C++ runtime terminated the process (SIGABRT). None of the test's result lines printed, so it died before `finish` returned; whether the Run saw `DEVICE_LOST` and wrote its Manifest is unknown (the Run's directory was the container's and went with it).
+- Where the exception escaped from is not known: a destructor that throws ends the process whatever catches it (C++ destructors are `noexcept`), so UHD's C API's own `try` cannot stop it. INFERRED from the log's order; a backtrace would need another unplug under a debugger.
+- Recorded as design-notes §17 F4, for the owner. The transmit-only case and B3–B7 again have not been run.

@@ -446,3 +446,15 @@ The re-review ([`reviews/review-r.md`](reviews/review-r.md)): no blockers; every
 | TG-Q4, NB-5, NB-6, TG-4, TG-5 | Open, as before. |
 
 **The device.** After part 7 (B1's `ref_locked` false since part 5, reference-PLL lock failures rising) the owner powered the X300 off, then on again: "X300の電源を入れました．抜線もできます" (bench-results.md part 8). After it every stage passed, the extremes test included; the reference PLL still failed to lock on 3 of 68 opens, and `ref_locked` read `true` then `false` minutes later, so it is no sign of the failures: part 7's conclusion that the device had degraded does not stand. Whether UR-7 retries `set_clock_source` remains the owner's.
+
+## 17. Bench: B9's unplug
+
+### F4 — an unplugged X300 aborts the process during its teardown (UR-29, UR-26)
+
+**Found:** bench-results.md part 9. With the 10 GbE cable pulled at the X300's end during a receive Run, UHD's control requests time out, its own task loop exits, and about 6 s after the unplug, while the device is torn down (destructor warnings `~max287x`, `~obx_cpld_ctrl`, `~obx_gpio_ctrl`), an uncaught `uhd::io_error` terminates the process (SIGABRT) before `finish` returns. UR-29 requires `DEVICE_LOST`, the Run stopped by Policy, and its Manifest written; a server would lose the Session's Manifest and its client's connection with it.
+
+**What is known:** VERIFIED that the process aborts and that it does so during UHD's teardown. INFERRED that the throw comes from a destructor (or a UHD thread) outside the C API's `try`, which therefore cannot be caught: a throwing C++ destructor ends the process. Not known: which object; whether `DEVICE_LOST` had already been raised and the Manifest written; whether the device was being freed by the Provider's cleanup or by the last handle's drop.
+
+**Why it is a design question:** the only remedy within the Module is not to free a device that is gone — `UhdDevice` would keep its `uhd_usrp` handle and streamers once the device is lost, a leak per loss. That avoids the teardown during the Run, but UHD's static registry of open devices (`usrp_c.cpp:80–84`) still destroys the kept device at process exit, so the abort may only move to the exit, after the Manifest is written. Other remedies are outside it (a UHD patch; ending the process with `_exit` after the Manifest).
+
+**Recommendation (for the owner):** first get the backtrace — one more unplug with the test under `gdb` (`catch throw`, or the core) to name the object — then decide. The evidence decides between keeping the lost device (if the throw is in a destructor reached only by our free) and accepting an abort at exit, recorded in UR-29 (if UHD's static teardown reaches it anyway). The transmit-only unplug and B3–B7 again wait for that decision.
