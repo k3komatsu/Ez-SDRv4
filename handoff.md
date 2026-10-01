@@ -31,18 +31,18 @@
 - v3 の更新を取り込むときの取得元は `origin` ではなく `k3komatsu/Ez-SDR`（例：`git fetch git@github.com:k3komatsu/Ez-SDR.git master`）．
 - `~/work` は Google Drive で同期していない．Drive 上にあった頃（〜2026-09-27）は同期で追跡ファイルが消えることがあった（2026-09-24 に `crates/ezsdr-kernel/tests/` と `schemas/` の 61 ファイルが消え，`git restore` で戻した）．clone を Drive 配下へ戻すなら，作業前に `git status --short` に ` D` 行がないことを確かめる．
 
-## 2. 設計文書の状態 — Phase 0・1・2・3・4・5・6 完了，Phase 7 は実装済み（Review L・M 済み，実機セッションと Gate X 待ち）
+## 2. 設計文書の状態 — Phase 0〜7 完了（Phase 7 は 2026-10-01 に Gate X 受理・Step X 完了・クローズ）
 
 - 単一の設計ソース = **Vision**：索引 [Ez-SDR_v4_ARCHITECTURE_VISION.md](Ez-SDR_v4_ARCHITECTURE_VISION.md) + [design/vision/](design/vision) の 11 part（§1–§68，番号は不変）．
 - [design/v4-vision-audit.md](design/v4-vision-audit.md)（Findings 1–34，判定 READY WITH REQUIRED CHANGES）→ 全項目を Vision に反映済み．
 - [design/v4-vision-rereview.md](design/v4-vision-rereview.md)（Findings R1–R22，判定 READY）→ 全項目反映済み．R13「規範部分の spec 化」は当初11ファイル分割で暫定対応したが，Phase 1 Step 5（D109，2026-09-23）で Phase 1 specs へ，Phase 2 Gate X（2026-09-25）で specs 06–10 へ反映し，完了した．
-- accepted specs は Phase 1 の [design/01-time-model.md](design/01-time-model.md)〜[design/05-module-api.md](design/05-module-api.md) と Phase 2 の [design/06-kernel-coordinator.md](design/06-kernel-coordinator.md)〜[design/10-host-data-path.md](design/10-host-data-path.md)，Phase 3 の [design/11-simulation-channel.md](design/11-simulation-channel.md)（spec 12 の修正は design/04–09 に適用済み），Phase 5 の [design/14-native-executor.md](design/14-native-executor.md)（spec 15 の修正は design/03–06 に適用済み）．各 Phase の決定ログ・実装計画・rule exit evidence は [plan/phase1/](plan/phase1)〜[plan/phase5/](plan/phase5) に残る．Phase 6 の [design/16-easy-api.md](design/16-easy-api.md)（server・protocol・Python）．spec 17 の修正は `design/03・04・06・10` に適用済みで，記録は [plan/phase6/17-amendments.md](plan/phase6/17-amendments.md)．
+- accepted specs は Phase 1 の [design/01-time-model.md](design/01-time-model.md)〜[design/05-module-api.md](design/05-module-api.md) と Phase 2 の [design/06-kernel-coordinator.md](design/06-kernel-coordinator.md)〜[design/10-host-data-path.md](design/10-host-data-path.md)，Phase 3 の [design/11-simulation-channel.md](design/11-simulation-channel.md)（spec 12 の修正は design/04–09 に適用済み），Phase 5 の [design/14-native-executor.md](design/14-native-executor.md)（spec 15 の修正は design/03–06 に適用済み）．各 Phase の決定ログ・実装計画・rule exit evidence は [plan/phase1/](plan/phase1)〜[plan/phase5/](plan/phase5) に残る．Phase 6 の [design/16-easy-api.md](design/16-easy-api.md)（server・protocol・Python）．spec 17 の修正は `design/03・04・06・10` に適用済みで，記録は [plan/phase6/17-amendments.md](plan/phase6/17-amendments.md)．Phase 7 の [design/18-uhd-radio.md](design/18-uhd-radio.md)（UHD Provider）．spec 19 の修正は実装の commit で `design/` に入り，記録は [plan/phase7/19-amendments.md](plan/phase7/19-amendments.md)．Gate X の後に Kernel の race を直し，RS-36（`design/04`）と KC-31（`design/06`）の文を変えた（design-notes §21・§22）．
 - 旧 CMA は退役．[design/archive/](design/archive) に保管（audit / rereview の `CMA §N` 引用のためだけに残す）．編集しない．
 - Vision の改訂履歴は索引ファイル末尾の表（Phase 0/1 の8 passに加え，Phase 2 Gate X の適用を2026-09-25に，Phase 3・4・5 の Gate X の適用を2026-09-26に記録）．Phase 4 の spec 13 は amendment だけなので `design/` へ移すものはなく，本文は実装 commit で `design/02・05・07・08・09・10・11` に入っている．
 
 ## 3. 実装の状態
 
-現在（2026-09-27，Phase 6 Step X 後の `618ae4a`）の状態．Phase 7 の実装（branch `worktree-phase7-impl`，未 merge）で変わったものは §4「Phase 7」を見ること：
+下の表は 2026-09-27（Phase 6 Step X 後の `618ae4a`）の状態．Phase 7 で変わったもの（`main`，2026-10-01，Phase 7 クローズ時の `b60f57a`）：crate `ezsdr-radio-uhd` が加わり 13 crate，`cargo test --workspace` 898 passed（stable と 1.85.0），`-p ezsdr-radio-uhd --features uhd` 174 passed（libuhd 4.10 の Docker image `ezsdr-v4-dev:uhd4.10` の中で），clippy clean，`kernel_surface` は 116 NEW / 292 public items（OV-23b が assert する），Phase 7 の mutation は `plan/phase7/tools/mutations.json` の 173 行で生きている行はすべて killed．詳細は §4「Phase 7」：
 
 | | |
 |---|---|
@@ -100,7 +100,7 @@ Phase 5（2026-09-26，Review F/G の修正込み）：1.85.0 / stable とも 64
 
 Phase 3 の時点：`kernel_surface` は `116 NEW / 292 public items`（KB-1 の `module_api::InputStore` の 1 つだけ増えた）．mutation は Appendix C 83/83 + Review C の fix-check 15/15 + Gate X の fix-check 4/4 killed．
 
-## 4. Phase の状態 — Phase 1・2・3・4・5・6 完了（Gate X受理），Phase 7 実装済み（Gate P 受理，Review L・M 済み，実機・Gate X 待ち）
+## 4. Phase の状態 — Phase 1〜7 完了（Gate X 受理）．次は Phase 8（未着手）
 
 ### Phase 1 — specs 受理・Kernel 実装済み
 
@@ -278,7 +278,7 @@ owner の依頼（「Phase 7を実装してください」，続けて「終わ�
 
 注意：scratch copy を共有 target dir でビルドしたあと worktree をビルドすると，mutation 入りの成果物が再利用されることがある（Review L の修正中に 1 回起きた）．ビルド前に必ず `find crates schemas python Cargo.toml Cargo.lock -type f -exec touch {} +`．
 
-残り：実機セッション（下の「Phase 7 の実機検証」，別エージェントが Linux サーバーで行う），branch を `main` へ入れる判断（`main` が `25e79f3` のままなら fast-forward），Gate X（owner），Step X（spec 18 を `design/` へ，Vision の issue 適用）．
+（当時の）残り：実機セッション，`main` への merge，Gate X，Step X — **すべて 2026-10-01 に済んだ**（下の「Phase 7 のクローズ」）．
 
 ### Phase 7 の実機検証 — 次の工程（別エージェント向け，Linux サーバー + USRP X310 + OBX 1枚のループバック）
 
@@ -362,12 +362,20 @@ Python の B7 は同じ container を `-w /bench -e PYTHONPATH=/work/python -e E
 - Review S（F4 の修正と B9 のレビュー）：P1 の S-B1（気づいていない死んだ link は free される）を直した（読み出しが 1 s 失敗し続けたら lost，drop の前に 1 回読む，失った device は args ごとに覚えて次の open で片付ける）．UR-7 は lock 失敗の理由を文で返し，既定で 1 回開き直す（`reopen_on_unlock` で止められる）．design-notes §18・§19．
 - **B9 をスイッチ経由でも実施**（part 10，`8ebf593`）：送信だけの Session も S-B1 の規則（`UHD error 47`）で 3.0 s 後に `DEVICE_LOST`，受信は 1.10 s，同じプロセスでの開き直しも成功，どのプロセスも正常終了．現在の配線は PC → L2 スイッチ → X300．
 - Review T（`4fd2ec2`）は blocker なし．P2 を `1d3f382` で直し，直結で実機確認（part 11）：送信だけの抜線は新しい規則で 3.0 s，開き直しで保持していた device が 1 → 0（`reclaim` が free），正常終了．配線は直結に戻した．spike 表は記入済み（`80f947a`）．
-- 残り：NB-5（Phase 8 の parity），TG-4・TG-5（以前からのテストの穴），main への merge と Gate X（owner）．
+- **Gate X 受理**（2026-10-01，owner「終わったらmainへmergeしてください．そしてGate Xを受理します」）．`worktree-phase7-impl` を `main` へ merge．**Step X**：spec 18 を `design/18-uhd-radio.md` へ，Vision issue 3 件（§35・§15・§32）を適用．受理時に未確認だった 3 点（criterion 2 の exit-review，Python 3.9，`v3/` パス）も実施，exit-review の 9 か所の未検査の文にテストを足した（mutation C01–C10）．
+- その途中で `kg_02` の不安定なテストから **Kernel の race** を見つけて直した（`b7a7271`，design-notes §21）：RS-36 の escalation flag は hot path が「止める」event の中身を捨てたときだけ立てる．Review U（blocker なし）の P2 も直した（`b60f57a`，§22）．
+
+**Phase 7 のクローズ**（2026-10-01，owner「記録を直してPhase 7を閉じてください」，00-overview §11 の最後の行）
+
+- Phase 8 へ送ったもの：NB-5（TimingEnvelope の parity），UR-32（spec 18 の「0.1.0 では満たさない」），B8 の未測定の項目と spec 18 の lead の値（00-overview §3「Phase 8 inputs」），OBX 用の Mock profile を作るか・`radio` 語彙に phase `random` を足すか（Phase 8 で owner が決める），複数台と v61_04（Phase 8 の後）．
+- 記録だけ（作業予定なし）：TG-4・TG-5，KC-36 の `Release` での更新（観測できず assert できない），X300 の参照 PLL の lock 失敗（open の約 4 %，UR-7 の 1 回の開き直しで救える）．
+- **X300 の状態（2026-10-01 クローズ時）**：つながっていない（`enp2s0f0np0` の carrier 0）．Phase 8 で実機を使う前に owner に戻してもらい，`uhd_usrp_probe` で確認する．配線は直結．
+- 次：Phase 8（Mock ↔ X310 parity）の計画．owner の依頼を待つ．
 
 **5. 決まったこと・owner の判断待ち**
 
 - 決定済み（2026-09-30）：実機は **X300 + OBX 1枚のループバック**（UBX 2 枚 → CBX 1枚 → OBX と変更．profile `x310-obx`，`x310-cbx` は予備），X300 は X310 の代わりで可，FPGA 書き換え承認．
-- owner の判断待ち：`origin/main` は `87b9461`（AGENTS.md の更新）に進み，この branch は `25e79f3` から分かれている（`main` へ入れるのは fast-forward でなく merge か rebase）．Phase 8 の Mock 比較で OBX 用の Mock profile を作るか（MockRadio の `x310-like` は UBX の値），`radio` 語彙に phase `random` を足すか（`x310-cbx` の制約，§10 の design-notes）．
+- owner の判断待ち（Phase 8 で）：Phase 8 の Mock 比較で OBX 用の Mock profile を作るか（MockRadio の `x310-like` は UBX の値），`radio` 語彙に phase `random` を足すか（`x310-cbx` の制約，§10 の design-notes）．
 
 **前提と規則**
 
