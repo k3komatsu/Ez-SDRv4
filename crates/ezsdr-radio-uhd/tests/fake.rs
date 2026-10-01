@@ -285,6 +285,37 @@ fn ur_07_schedule_accepts_an_instant_already_passed() {
 }
 
 #[test]
+fn ur_07_callbacks_run_outside_the_schedule_lock() {
+    // MA-29 as KG-3 amends it (the exit review's UR-7 clause): a callback may schedule at
+    // its own instant, fired in the same wakeup, and another thread may schedule while a
+    // callback runs. `next_wakeup` runs on a thread so that a callback holding the lock
+    // fails the test in seconds instead of hanging it.
+    let (authority, _device, root) = authority(FakeConfig::default(), "internal");
+    let time = authority.time();
+    let t = TimePoint::new(root, time.now(root).unwrap().ticks + ms(20));
+    let fired = Arc::new(Mutex::new(Vec::new()));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (inner, log) = (time.clone(), fired.clone());
+    time.schedule(t, Box::new(move |at| {
+        log.lock().unwrap().push("first");
+        let log2 = log.clone();
+        inner.schedule(at, Box::new(move |_| log2.lock().unwrap().push("second"))).unwrap();
+        started_tx.send(()).unwrap();
+        std::thread::sleep(Wall::from_millis(200));
+        log.lock().unwrap().push("first ends");
+    })).unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || done_tx.send(authority.next_wakeup()).unwrap());
+    started_rx.recv_timeout(Wall::from_secs(3)).expect("the first callback ran");
+    let begun = Instant::now();
+    time.schedule(TimePoint::new(root, t.ticks + ms(1_000)), Box::new(|_| {})).unwrap();
+    assert!(begun.elapsed() < Wall::from_millis(100), "schedule waited {:?} for the running callback", begun.elapsed());
+    let woke = done_rx.recv_timeout(Wall::from_secs(3)).expect("next_wakeup returned");
+    assert_eq!(woke, Some(t));
+    assert_eq!(*fired.lock().unwrap(), vec!["first", "first ends", "second"]);
+}
+
+#[test]
 fn ur_07_cancel_wakes_a_waiting_next_wakeup() {
     // As above: without the wake, the waiter returns only when its nap ends.
     let (authority, _, root) = authority(FakeConfig::default(), "internal");
@@ -1215,6 +1246,34 @@ fn ur_25_the_switch_applies_the_configuration_in_effect_at_e2() {
     let calls = direct.device.calls();
     assert!(calls.iter().any(|c| c.starts_with("apply rx 0 rate=2000000 freq=2100000000") && c.ends_with("at=-")), "{calls:?}");
     let _ = direct.finish();
+}
+
+#[test]
+fn ur_24_a_released_command_is_not_recalled_by_stop() {
+    // UR-24, UR-26, UR-30, RM-16 (the exit review's clause): a timed command already
+    // released to the device (inside the 3 ms release window) when a `Stop` comes is not
+    // recalled: it is applied at its `e`, and recorded in `applied` as issued, not cancelled.
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let radio = serde_json::to_value(ResourceId::parse("radio").unwrap()).unwrap();
+    let mut spec = receive_spec(1, 1e6, 1e9, None);
+    spec["schedule"] = json!([{
+        "at": { "clock": "radio", "offset_ticks": 20_000 },
+        "action": { "kind": "update_parameter", "target": radio, "key": "radio.rx.frequency_hz", "value": 2.3e9, "class": "hardware_timed" }
+    }, {
+        "at": { "clock": "radio", "offset_ticks": 19_500 },
+        "action": { "kind": "stop", "target": radio }
+    }]);
+    let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
+    let t0 = run.start_instant().unwrap();
+    run.advance_to(TimePoint::new(t0.domain, t0.ticks + ms(100))).unwrap();
+    let manifest = run.finish();
+    let applied = calls(&device, "apply rx 0 rate=- freq=2300000000");
+    assert_eq!(applied.len(), 1, "{:?}", device.calls());
+    assert!(!applied[0].contains("at=-"), "a timed apply: {applied:?}");
+    let rows: Vec<_> = section(&manifest, "applied").as_array().unwrap().iter().filter(|r| r["key"] == "radio.rx.frequency_hz" && r["claimed"] == 2.3e9).cloned().collect();
+    assert!(rows.iter().any(|r| r["issued"] == true), "{rows:?}");
+    assert!(rows.iter().all(|r| r.get("cancelled").is_none()), "{rows:?}");
 }
 
 #[test]

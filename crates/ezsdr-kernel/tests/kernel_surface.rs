@@ -478,6 +478,9 @@ fn ov_23b_kernel_growth_is_the_new_count() {
         "OV-23b: {} of {total} public items are NEW:; the Kernel is no longer mostly audit §13's",
         new.len()
     );
+    // Phase 7's exit criterion 6 and GZ-2 name the counts themselves (116 NEW: of 292): a
+    // change to the Kernel's public surface updates them here, with its reason.
+    assert_eq!((new.len(), total), (116, 292), "OV-23b, GZ-2: the Kernel's public surface changed");
 }
 
 #[test]

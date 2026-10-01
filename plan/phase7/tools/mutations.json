@@ -1602,5 +1602,107 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_29_a_failing_reference_sensor_alone_is_not_a_lost_device"
+ },
+ {
+  "id": "C04",
+  "name": "KC-15's overflow checks of L and of T0 wrap instead (exit review)",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "let Some(l) = (lattice / gcd(lattice, n)).checked_mul(n) else {",
+  "new": "let Some(l) = Some((lattice / gcd(lattice, n)).wrapping_mul(n)) else {",
+  "old2": "q.checked_mul(l)",
+  "new2": "Some(q.wrapping_mul(l))",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_15_an_overflow_of_l_or_of_t0_fails_arm"
+ },
+ {
+  "id": "C05",
+  "name": "KC-21a's wait does not re-check an end every 10 ms (exit review)",
+  "file": "crates/ezsdr-kernel/src/coordinator/paced.rs",
+  "old": "wait_finished_for(target, remaining.min(RECHECK))",
+  "new": "wait_finished_for(target, remaining)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_21a_an_end_requested_during_the_wait_ends_it"
+ },
+ {
+  "id": "C06",
+  "name": "the data thread moves the Run to Stopping itself (KC-29 as KG-3 amends it; exit review)",
+  "file": "crates/ezsdr-kernel/src/coordinator/paced.rs",
+  "old": "    record(CleanupStep::FreezeDispatch, None);\n",
+  "new": "    let _ = lock(&shared.machine).begin_stopping(mode, Some(shared.now()), &*shared.ctx.host_clock);\n    record(CleanupStep::FreezeDispatch, None);\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_29_an_end_the_data_thread_requested_is_cleaned_up_at_the_next_call"
+ },
+ {
+  "id": "C07",
+  "name": "KC-36: Renew and Adopt do not update the deadline the data thread checks (exit review)",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "    run.sync_lease();\n    // KC-24a: from the first admission through the last dispatch.\n",
+  "new": "    // KC-24a: from the first admission through the last dispatch.\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_36_"
+ },
+ {
+  "id": "C08",
+  "name": "KC-45: the Authority's relations() read without catch_unwind (exit review)",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "contain_all(|| self.shared.authority.relations()).unwrap_or_default()",
+  "new": "self.shared.authority.relations()",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_45_an_authority_whose_relations_panic_records_none_and_says_so"
+ },
+ {
+  "id": "C09",
+  "name": "KC-46b: the data thread stops stepping after its RS-6 steps 1-2 under orderly too (exit review)",
+  "file": "crates/ezsdr-kernel/src/coordinator/paced.rs",
+  "old": "if shared.stopped_early.load(Ordering::Acquire) && end_mode(&shared) == Some(CleanupMode::Abort) {",
+  "new": "if shared.stopped_early.load(Ordering::Acquire) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_46b_under_orderly_the_data_thread_steps_on_after_its_stop"
+ },
+ {
+  "id": "C10",
+  "name": "KC-21a waits for an Action a Module submits from its step (MA-14a; exit review)",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "        let _admission = lock(&shared.admission);\n        super::admission::admit(&shared, action, super::state::Origin::Module)\n            .map(|admitted| super::admission::dispatch(&shared, admitted).0)\n",
+  "new": "        let dispatched = {\n            let _admission = lock(&shared.admission);\n            super::admission::admit(&shared, action, super::state::Origin::Module)\n                .map(|admitted| super::admission::dispatch(&shared, admitted))\n        };\n        if let Ok((_, target)) = &dispatched {\n            super::paced::wait_finished(&shared, std::slice::from_ref(target));\n        }\n        dispatched.map(|(id, _)| id)\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_21a_a_module_s_own_submission_is_not_waited_for"
+ },
+ {
+  "id": "C01",
+  "name": "the Authority's callbacks run holding the schedule lock (the exit review's UR-7 clause)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "            drop(schedule);\n            callback(TimePoint::new(time.root, tick));\n            schedule = lock(&time.schedule);",
+  "new": "            callback(TimePoint::new(time.root, tick));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_callbacks_run_outside_the_schedule_lock"
+ },
+ {
+  "id": "C02",
+  "name": "a released timed command not recorded as issued (the exit review's UR-24 clause)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "\"issued\": true,",
+  "new": "\"issued\": false,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_24_a_released_command_is_not_recalled_by_stop"
+ },
+ {
+  "id": "C03",
+  "name": "a move onto a held burst's start not refused (the exit review's UR-21 clause)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "if self.held.contains_key(&next) {",
+  "new": "if false && self.held.contains_key(&next) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_a_moved_start_on_a_held_burst_s_is_refused"
  }
 ]

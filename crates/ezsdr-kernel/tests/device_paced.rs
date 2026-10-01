@@ -11,10 +11,10 @@ use std::time::{Duration as Wall, Instant};
 use ezsdr_kernel::binding::{AdmissionCheck, AdmissionCheckRegistry, CheckStage, Violation};
 use ezsdr_kernel::contract::ContractRegistry;
 use ezsdr_kernel::coordinator::{Assembly, RunHandle, RunHandleError, connect, start_spec_run};
-use ezsdr_kernel::event::EventKind;
+use ezsdr_kernel::event::{Action, EventKind};
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::manifest::Manifest;
-use ezsdr_kernel::module_api::{ExecutionClass, ModuleErrorKind, Pacing, Provider};
+use ezsdr_kernel::module_api::{ExecutionClass, ModuleErrorKind, Pacing, Provider, UpdateClass};
 use ezsdr_kernel::policy::{EventKindDecl, EventKindRegistry, Reaction};
 use ezsdr_kernel::run::{CleanupStep, Lease, RunState, Stage, StopCause, SystemHostClock, Termination};
 use ezsdr_kernel::session::{Outcome, SessionAction};
@@ -218,7 +218,8 @@ fn kg_01_a_stepped_provider_is_refused_in_a_device_paced_class() {
     assert!(!probe.lines().iter().any(|line| line.starts_with("p:prepare")));
 }
 
-fn island_docs(field: &str, value: serde_json::Value) -> (serde_json::Value, serde_json::Value) {
+/// A Spec Run with one component `c1` on an Island of the Executor `exec`.
+fn executor_docs() -> (serde_json::Value, serde_json::Value) {
     let mut spec = spec_one();
     let mut component = support::recorder_component(support::cf32());
     component.id = Ident::parse("c1").unwrap();
@@ -236,12 +237,16 @@ fn island_docs(field: &str, value: serde_json::Value) -> (serde_json::Value, ser
     profile["bindings"]["exec"] = serde_json::json!({
         "module": { "id": "ezsdr.test.executor", "version": { "major": 1, "minor": 0, "patch": 0 } }
     });
-    let mut island = serde_json::json!({ "id": { "node": 0, "local": 0 }, "executor": "exec", "components": ["c1"] });
-    island[field] = value;
     profile["placements"] = serde_json::json!({
-        "islands": [island],
+        "islands": [{ "id": { "node": 0, "local": 0 }, "executor": "exec", "components": ["c1"] }],
         "components": { "c1": { "island": "island_0", "memory_domain": { "node": 0, "local": 0 } } }
     });
+    (spec, profile)
+}
+
+fn island_docs(field: &str, value: serde_json::Value) -> (serde_json::Value, serde_json::Value) {
+    let (spec, mut profile) = executor_docs();
+    profile["placements"]["islands"][0][field] = value;
     (spec, profile)
 }
 
@@ -567,6 +572,58 @@ fn kg_02_a_detached_lease_expires_while_no_call_runs() {
     );
 }
 
+fn detached_session(probe: &Probe, ttl_ms: u64) -> RunHandle {
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", probe));
+    let lease = Lease::detached(ttl_ms, true, "token", &SystemHostClock::new()).unwrap();
+    let run = connect(&profile_one(), assembly, lease).unwrap();
+    running(&run);
+    run
+}
+
+fn provider_stopped(probe: &Probe) -> bool {
+    probe.lines().iter().any(|line| line == "radio:stop")
+}
+
+#[test]
+fn kc_36_renew_moves_the_deadline_the_data_thread_checks() {
+    // The exit review's KC-36 clause, for `Renew`: renewed every 50 ms for 600 ms, a
+    // 200 ms Lease outlives its first deadline, and then expires with no call running.
+    let probe = Probe::new();
+    let mut run = detached_session(&probe, 200);
+    run.disconnect();
+    let begun = Instant::now();
+    while begun.elapsed() < Wall::from_millis(600) {
+        std::thread::sleep(Wall::from_millis(50));
+        let entry = run.submit(SessionAction::Renew {}, None).unwrap();
+        assert!(admitted(&entry), "{entry:?}");
+    }
+    assert!(!provider_stopped(&probe), "{:?}", probe.lines());
+    running(&run);
+    assert!(probe.wait_for("radio:stop", Wall::from_secs(1)));
+    assert_eq!(
+        manifest_of(run).termination.reason,
+        Termination::Stopped { cause: StopCause::LeaseExpiry {} }
+    );
+}
+
+#[test]
+fn kc_36_adopt_clears_the_deadline_the_data_thread_checks() {
+    // The exit review's KC-36 clause, for `Adopt`: adopted at once, a 100 ms Lease
+    // whose TTL the disconnect started does not expire in the next 300 ms.
+    let probe = Probe::new();
+    let mut run = detached_session(&probe, 100);
+    run.disconnect();
+    let entry = run.submit(SessionAction::Adopt { token: "token".to_owned() }, None).unwrap();
+    assert!(admitted(&entry), "{entry:?}");
+    std::thread::sleep(Wall::from_millis(300));
+    assert!(!provider_stopped(&probe), "{:?}", probe.lines());
+    running(&run);
+    assert_eq!(
+        manifest_of(run).termination.reason,
+        Termination::Stopped { cause: StopCause::Client {} }
+    );
+}
+
 // ---------------------------------------------------------------- KG-3
 
 fn lost_device_session(probe: &Probe) -> RunHandle {
@@ -592,6 +649,27 @@ fn kg_03_a_fatal_event_stops_the_providers_without_a_client_call() {
         Termination::Stopped { cause: StopCause::Policy { kind: kind(EventKind::DEVICE_LOST) } }
     );
     assert_eq!(count(&probe, "radio:stop"), 1);
+}
+
+#[test]
+fn kc_29_an_end_the_data_thread_requested_is_cleaned_up_at_the_next_call() {
+    // The exit review's KC-29 clause (as KG-3 amends it): after an end the data thread
+    // requested while no call ran, `state()` reads `Running` and `events()` already
+    // shows the cause, until the next call cleans up.
+    let probe = Probe::new();
+    let mut run = lost_device_session(&probe);
+    assert!(probe.wait_for("radio:stop", Wall::from_millis(500)));
+    std::thread::sleep(Wall::from_millis(50));
+    running(&run);
+    let lost = kind(EventKind::DEVICE_LOST);
+    let radio = ResourceId::parse("radio").unwrap();
+    assert!(run.events(0).iter().any(|e| e.kind == lost && e.source == radio), "{:?}", run.events(0));
+    let begun = Instant::now();
+    let result = run.advance_to(after(&run, Wall::from_secs(5)));
+    assert!(begun.elapsed() < Wall::from_secs(1), "{:?}", begun.elapsed());
+    let termination = Termination::Stopped { cause: StopCause::Policy { kind: lost } };
+    assert_eq!(result, Err(RunHandleError::Ended { termination: termination.clone() }));
+    assert_eq!(run.state(), RunState::CleanedUp { termination });
 }
 
 #[test]
@@ -667,6 +745,52 @@ fn kg_03_step_3_runs_a_final_round_over_the_sinks() {
     );
     let last_tail = lines.iter().rposition(|line| line == "radio:tail").unwrap();
     assert!(lines[last_tail..sink_stop].iter().any(|line| line.starts_with("rec:block:")));
+}
+
+#[test]
+fn kc_46b_under_orderly_the_data_thread_steps_on_after_its_stop() {
+    // The exit review's KC-46b clause: under `orderly` (here an expired Lease, KC-36)
+    // the data thread goes on stepping the Sinks after its own RS-6 steps 1-2, so the
+    // tail the Provider delivers in step 2 reaches the Sink with no call running, and
+    // the Run stays `Running` until the control thread's cleanup.
+    let probe = Probe::new();
+    let assembly = provider(
+        paced().assembly,
+        "radio",
+        ThreadedProvider::new("radio", "radio", &probe)
+            .publishing(100, Wall::from_millis(1))
+            .with_stop_tail(2),
+    );
+    let assembly = sink(assembly, RecordingSink::new("rec", &probe).recording_threads(), &probe);
+    let lease = Lease::detached(50, false, "token", &SystemHostClock::new()).unwrap();
+    let mut run = connect(&session_sink_profile(), assembly, lease).unwrap();
+    running(&run);
+    run.disconnect();
+    assert!(probe.wait_for_count("radio:tail", 2, Wall::from_secs(1)));
+    std::thread::sleep(Wall::from_millis(100));
+    running(&run);
+    let lines = probe.lines();
+    let last_tail = lines.iter().rposition(|line| line == "radio:tail").unwrap();
+    let after_stop = &lines[last_tail..];
+    assert!(after_stop.iter().any(|line| line.starts_with("rec:block:")), "{after_stop:?}");
+    let steps: Vec<_> = after_stop.iter().filter(|line| line.starts_with("rec:step_on:")).collect();
+    assert!(steps.len() >= 2, "{after_stop:?}");
+    assert!(steps.iter().all(|line| line.ends_with(":ezsdr-data")), "{steps:?}");
+    assert!(!lines.iter().any(|line| line.starts_with("rec:stop:")), "{lines:?}");
+    let manifest = manifest_of(run);
+    assert_eq!(
+        manifest.termination.reason,
+        Termination::Stopped { cause: StopCause::LeaseExpiry {} }
+    );
+    assert!(
+        manifest
+            .run
+            .transitions
+            .iter()
+            .any(|t| matches!(t.state, RunState::Stopping { mode: ezsdr_kernel::run::CleanupMode::Orderly })),
+        "{:?}",
+        manifest.run.transitions
+    );
 }
 
 #[test]
@@ -811,6 +935,71 @@ fn kg_04_a_provider_that_never_finishes_fails_the_run() {
     let manifest = manifest_of(run);
     assert_eq!(manifest.termination.reason, Termination::Failed { stage: Stage::Run });
     assert!(failure(&manifest).starts_with("KC-21a: radio did not finish"), "{}", failure(&manifest));
+}
+
+#[test]
+fn kc_21a_an_end_requested_during_the_wait_ends_it() {
+    // The exit review's KC-21a clause, its re-check: the Provider never finishes the
+    // Action and loses its device 100 ms after the start; the end the data thread
+    // requests ends the wait long before the 5 s budget.
+    let probe = Probe::new();
+    let assembly = provider(
+        paced().assembly,
+        "radio",
+        ThreadedProvider::new("radio", "radio", &probe)
+            .never_finishing()
+            .losing_device(Wall::from_millis(100)),
+    );
+    let mut run = session(assembly, &profile_one());
+    let begun = Instant::now();
+    let _ = run.submit(gain(1.0), None);
+    assert!(begun.elapsed() < Wall::from_secs(1), "{:?}", begun.elapsed());
+    assert!(probe.lines().iter().any(|line| line == "radio:took:UpdateParameter"));
+    let manifest = manifest_of(run);
+    assert_eq!(
+        manifest.termination.reason,
+        Termination::Stopped { cause: StopCause::Policy { kind: kind(EventKind::DEVICE_LOST) } }
+    );
+}
+
+#[test]
+fn kc_21a_a_module_s_own_submission_is_not_waited_for() {
+    // The exit review's KC-21a clause, its scope: an Action an Executor submits from
+    // its step (MA-14a) is not waited for. The Provider takes it and never finishes
+    // it; the data thread goes on stepping the Executor all the same.
+    let probe = Probe::new();
+    let (spec, profile) = executor_docs();
+    let mut assembly = provider(
+        paced().assembly,
+        "radio",
+        ThreadedProvider::new("radio", "radio", &probe).never_finishing(),
+    );
+    let action = Action::UpdateParameter {
+        target: ResourceId::parse("radio").unwrap(),
+        key: Key::parse("test.gain").unwrap(),
+        value: Value::Num(3.0),
+        class: UpdateClass::HardwareTimed,
+        at: None,
+    };
+    assembly.executors.insert(
+        Ident::parse("exec").unwrap(),
+        Box::new(support::ProbeExecutor::new("x", &probe).submitting(action)),
+    );
+    let run = start_spec_run(&spec, &profile, assembly).unwrap();
+    running(&run);
+    assert!(probe.wait_for("radio:took:UpdateParameter", Wall::from_millis(500)));
+    std::thread::sleep(Wall::from_millis(100));
+    running(&run);
+    let lines = probe.lines();
+    let submitted = lines
+        .iter()
+        .position(|line| line.starts_with("x:submit:"))
+        .expect("the submission returned");
+    assert!(lines[submitted].starts_with("x:submit:ok:"), "{}", lines[submitted]);
+    let later = lines[submitted..].iter().filter(|line| line.starts_with("x:step:")).count();
+    assert!(later >= 2, "{:?}", &lines[submitted..]);
+    let manifest = manifest_of(run);
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
 }
 
 /// The runtime check of `kg_04_no_action_is_dispatched_after_the_freeze`: on its first
@@ -1013,10 +1202,11 @@ fn kg_06_the_simulation_class_prepares_on_the_callers_thread() {
 
 // ---------------------------------------------------------------- KG-7
 
-fn t0_after(declare: &[(&str, u64)], lead: u64) -> i64 {
+/// A Simulation Spec Run armed at `now` with these declared clocks and lead.
+fn armed_at(declare: &[(&str, u64)], now: i64, lead: u64) -> RunHandle {
     let clocks = Arc::new(ClockRegistry::new());
     let (authority, root) = SimAuthority::new(&clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
-    authority.manual().advance_to(TimePoint::new(root, 7)).unwrap();
+    authority.manual().advance_to(TimePoint::new(root, now)).unwrap();
     let mut double = SteppedProvider::new("p", TestProvider::new("radio", 2), &Probe::new());
     for (stream, ratio) in declare {
         double = double.declaring(stream, *ratio, 1);
@@ -1024,7 +1214,11 @@ fn t0_after(declare: &[(&str, u64)], lead: u64) -> i64 {
     let assembly = provider(assembly_with(Box::new(authority), clocks), "radio", double);
     let mut profile = profile_one();
     profile["environment"] = serde_json::json!({ "ezsdr.time": { "class": "simulation", "start_lead_ns": lead } });
-    let run = start_spec_run(&spec_one(), &profile, assembly).unwrap();
+    start_spec_run(&spec_one(), &profile, assembly).unwrap()
+}
+
+fn t0_after(declare: &[(&str, u64)], lead: u64) -> i64 {
+    let run = armed_at(declare, 7, lead);
     running(&run);
     let t0 = run.start_instant().unwrap().ticks;
     let _ = manifest_of(run);
@@ -1040,6 +1234,26 @@ fn kg_07_t0_lies_on_every_declared_grid() {
 #[test]
 fn kg_07_with_no_declared_clock_t0_is_not_rounded() {
     assert_eq!(t0_after(&[], 1_007), 7 + 1_007);
+}
+
+#[test]
+fn kc_15_an_overflow_of_l_or_of_t0_fails_arm() {
+    // The exit review's KC-15 clause: an overflow of L or of T0 is `Failed { arm }`
+    // with the reason "KC-15: overflow". Ratio terms stop at 2^31 (TM-3).
+    let cap = 1_u64 << 31;
+    // L = lcm(2^31, 2^31 - 1, 2^31 - 3), pairwise coprime, about 2^93: past u64::MAX.
+    let l = armed_at(&[("radio/a", cap), ("radio/b", cap - 1), ("radio/c", cap - 3)], 7, 1_000);
+    // L = 2^31; the first multiple of it at or after 2^63 - 2^31 + 1 007 is 2^63, past
+    // i64::MAX.
+    let t0 = armed_at(&[("radio/a", cap)], i64::MAX - cap as i64 + 8, 1_000);
+    for (name, run) in [("L", l), ("T0", t0)] {
+        assert_eq!(
+            run.state(),
+            RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm } },
+            "{name}"
+        );
+        assert_eq!(failure(&manifest_of(run)), "KC-15: overflow", "{name}");
+    }
 }
 
 // ---------------------------------------------------------------- KG-9 (TM-16c)
@@ -1211,6 +1425,43 @@ fn kg_11_a_device_paced_run_without_a_utc_relation_says_so() {
             "TM-18: the Authority published no relation of its root to utc"
         ]
     );
+}
+
+/// A device-paced Authority whose `relations()` panics (KC-45).
+struct PanickingRelations(WallAuthority);
+
+impl ezsdr_kernel::module_api::Authority for PanickingRelations {
+    fn descriptor(&self) -> &ezsdr_kernel::module_api::AuthorityDescriptor {
+        self.0.descriptor()
+    }
+    fn time(&self) -> Arc<dyn ezsdr_kernel::time::TimeAuthority> {
+        self.0.time()
+    }
+    fn next_wakeup(&self) -> Option<TimePoint> {
+        self.0.next_wakeup()
+    }
+    fn relations(&self) -> Vec<ezsdr_kernel::time::ClockRelation> {
+        panic!("test: relations() panics")
+    }
+}
+
+#[test]
+fn kc_45_an_authority_whose_relations_panic_records_none_and_says_so() {
+    // The exit review's KC-45 clause: an Authority whose `relations()` panics records no
+    // relation and the missing-`utc` failure.
+    let probe = Probe::new();
+    let clocks = Arc::new(ClockRegistry::new());
+    let (authority, _) = WallAuthority::new(&clocks, mref("ezsdr.test.provider"));
+    let assembly = provider(
+        assembly_with(Box::new(PanickingRelations(authority)), clocks),
+        "radio",
+        ThreadedProvider::new("radio", "radio", &probe),
+    );
+    let manifest = manifest_of(start_spec_run(&spec_one(), &profile_one(), assembly).unwrap());
+    assert_eq!(manifest.run.execution_class, ExecutionClass::HardwareInLoop);
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
+    assert!(manifest.clocks.relations.is_empty());
+    assert_eq!(tm_18_failures(&manifest), ["TM-18: the Authority published no relation of its root to utc"]);
 }
 
 // ---------------------------------------------------------------- KG-12

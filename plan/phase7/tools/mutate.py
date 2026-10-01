@@ -82,8 +82,9 @@ def run(command, cwd, env, timeout):
 def cargo_test(scratch, env, mutation):
     if "python" in mutation:
         return python_test(scratch, env, mutation)
-    command = ["cargo", "+stable", "test", "-q", "-p", mutation["crate"],
-               "--test", mutation["test_bin"], mutation["filter"]]
+    # `test_bin: "lib"` names the crate's own unit tests (`--lib`).
+    target = ["--lib"] if mutation["test_bin"] == "lib" else ["--test", mutation["test_bin"]]
+    command = ["cargo", "+stable", "test", "-q", "-p", mutation["crate"], *target, mutation["filter"]]
     return run(command, scratch, env, 900)
 
 

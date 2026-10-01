@@ -581,3 +581,93 @@ impl Tx {
 fn h_lt(held_cut: Option<i64>, e1: i64) -> bool {
     held_cut.is_some_and(|h| h < e1)
 }
+
+#[cfg(test)]
+mod tests {
+    //! uhd-tx driven directly, where the order of its commands and steps matters and the
+    //! Provider's threads cannot arrange it (the exit review's UR-21 clause).
+
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use ezsdr_kernel::event::{EventCollector, EventKind};
+    use ezsdr_kernel::hash::ContentHash;
+    use ezsdr_kernel::id::ResourceId;
+    use ezsdr_kernel::module_api::Authority;
+    use ezsdr_kernel::policy::{EventKindRegistry, Policy};
+    use ezsdr_kernel::stream::{BurstOpen, LatePolicy};
+    use ezsdr_kernel::time::{ClockRegistry, TimePoint};
+
+    use super::{Held, Tx, TxCmd};
+    use crate::device::{Device, Dir, FakeConfig, FakeDevice, Settings};
+    use crate::provider::core::{Core, lock};
+    use crate::DeviceAuthority;
+
+    fn held(clock: &super::Clock, k: i64, len: usize, policy: LatePolicy) -> Held {
+        Held {
+            k,
+            domain: clock.domain,
+            samples: Arc::new(vec![vec![[0.25f32, 0.0]; len]]),
+            repeat: false,
+            open: BurstOpen { waveform_len: None, late: None, requested_target: None },
+            policy,
+            target: TimePoint::new(clock.domain, k),
+        }
+    }
+
+    #[test]
+    fn ur_21_a_moved_start_on_a_held_burst_s_is_refused() {
+        // RM-15 as VE-2 amends it: B, late against the open burst A's next sample, moves
+        // there under `send_asap`; C is already held at that sample, so B is refused
+        // (`TIME_ERROR { refused }`, `COMMAND_REJECTED`) and C keeps its start.
+        let device = Arc::new(FakeDevice::new(FakeConfig::default()));
+        let clocks = Arc::new(ClockRegistry::new());
+        let authority = DeviceAuthority::new(device.clone(), clocks.clone(), "internal", "internal", "fake").unwrap();
+        device.tx_open(1).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        let mut kinds = EventKindRegistry::with_kernel_kinds();
+        ezsdr_radio::register(&mut ezsdr_kernel::module_api::ModuleRegistry::new(), &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
+        let usrp = ResourceId::parse("usrp").unwrap();
+        let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (ResourceId::parse(s).unwrap(), k))).collect();
+        let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
+        let inputs: Arc<BTreeMap<ContentHash, Arc<[u8]>>> = Arc::new(BTreeMap::new());
+        let core = Arc::new(Core::new(
+            device.clone(),
+            usrp,
+            authority.root(),
+            authority.time(),
+            clocks,
+            events.clone(),
+            inputs,
+            Vec::new(),
+            crate::profile::Profile::X310Ubx.description(2_000),
+        ));
+        let origin = (core.now() / 200 + 1) * 200;
+        let clock = core.register(Dir::Tx, 200, origin).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        // A, 30 ms, 20 ms ahead; stepped until it has handed over a few buffers.
+        let a = clock.at_or_after(core.now() + core.ticks(20_000_000));
+        tx.command(TxCmd::Burst(held(&clock, a, 30_000, LatePolicy::DropAndFlag)));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tx.open.as_ref().is_none_or(|open| open.next < a + 4_000) {
+            assert!(std::time::Instant::now() < deadline, "A never got 4 000 samples out");
+            if !tx.step() {
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+        }
+        let next = tx.open.as_ref().unwrap().next;
+        // C at A's next sample, B before it: both queued before the step that decides B.
+        tx.command(TxCmd::Burst(held(&clock, next, 1_000, LatePolicy::DropAndFlag)));
+        tx.command(TxCmd::Burst(held(&clock, next - 500, 1_000, LatePolicy::SendAsapAndFlag)));
+        assert!(tx.step());
+        assert!(tx.held.contains_key(&next), "C keeps its start");
+        assert_eq!(tx.held.len(), 1, "B is not held: {:?}", tx.held.keys().collect::<Vec<_>>());
+        let reasons: Vec<String> = lock(&core.rec).rejected.iter().filter_map(|r| r["reason"].as_str().map(str::to_owned)).collect();
+        assert!(reasons.iter().any(|r| r == "UR-21: the moved start is a held burst's"), "{reasons:?}");
+        let refused = events.drain().into_iter().any(|e| {
+            e.kind == EventKind::parse(ezsdr_radio::kinds::TIME_ERROR).unwrap() && e.payload["outcome"] == "refused"
+        });
+        assert!(refused, "no TIME_ERROR {{ refused }}");
+    }
+}
