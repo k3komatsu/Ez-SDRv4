@@ -1721,11 +1721,41 @@ fn ur_29_a_dead_link_that_fails_without_lost_is_a_lost_device() {
     let manifest = run.finish();
     let lost = events_of(&manifest, EventKind::DEVICE_LOST);
     assert_eq!(lost.len(), 1, "{lost:?}");
-    assert!(lost[0].payload["message"].as_str().unwrap().contains("UR-29: the device reads have failed for 1 s"), "{lost:?}");
+    assert!(lost[0].payload["message"].as_str().unwrap().contains("UR-29: the device time reads have failed for 1 s"), "{lost:?}");
     // Within 2 s of the link's death (the reads every 500 ms; 100 ms each on the fake).
     let after_death = lost[0].time.ticks - ms(2_500);
     assert!((ms(1_000)..=ms(2_000)).contains(&after_death), "{} ms", after_death / ms(1));
     assert_marked_lost_before_closed(&device);
+}
+
+#[test]
+fn ur_29_time_reads_that_fail_apart_are_not_a_lost_device() {
+    // Review T, TG-T1: time reads failing for 600 ms twice, 1.5 s apart (each catching one
+    // or two of uhd-control's reads, 500 ms apart), each followed by reads that succeed,
+    // start the 1 s count again: no DEVICE_LOST.
+    let dir = TempDir::new();
+    let window = Wall::from_millis(600);
+    let faults = vec![FakeFault::TimeReadFailsFor(Wall::from_millis(2_500), window), FakeFault::TimeReadFailsFor(Wall::from_millis(4_000), window)];
+    let device = fake(FakeConfig { faults, ..FakeConfig::default() });
+    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
+    let result = run.run_until_end(after(&run, ms(5_000)));
+    let manifest = run.finish();
+    assert!(events_of(&manifest, EventKind::DEVICE_LOST).is_empty(), "{result:?} {:?}", events_of(&manifest, EventKind::DEVICE_LOST));
+    let failed = section(&manifest, "timing").as_array().unwrap().iter().filter(|r| r["what"] == "time_read_failed").count();
+    assert!(failed >= 2, "{}", section(&manifest, "timing"));
+}
+
+#[test]
+fn ur_29_a_failing_reference_sensor_alone_is_not_a_lost_device() {
+    // Review T, NB-T1: with the reference monitored, `ref_locked` failing while the time
+    // reads succeed is recorded, not a lost device.
+    let dir = TempDir::new();
+    let device = fake(FakeConfig { faults: vec![FakeFault::RefLockedFails(Wall::from_millis(2_300))], ..FakeConfig::default() });
+    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({ "clock_source": "external" }), json!({}), false), device, BTreeMap::new());
+    let result = run.run_until_end(after(&run, ms(5_000)));
+    let manifest = run.finish();
+    assert!(events_of(&manifest, EventKind::DEVICE_LOST).is_empty(), "{result:?} {:?}", events_of(&manifest, EventKind::DEVICE_LOST));
+    assert!(section(&manifest, "timing").as_array().unwrap().iter().any(|r| r["what"] == "ref_locked_failed"), "{}", section(&manifest, "timing"));
 }
 
 #[test]

@@ -292,6 +292,12 @@ pub enum FakeFault {
     /// control calls wait 100 ms and fail as UHD's `op_timeout` does (`UHD_ERROR_EXCEPT`,
     /// not lost), receives time out, sends take nothing (Review S, TG-S1).
     Unreachable(Duration),
+    /// `time_now` fails, not lost, from the first device time for the second's length, and
+    /// succeeds again after it (Review T, TG-T1).
+    TimeReadFailsFor(Duration, Duration),
+    /// From this device time on, every `ref_locked` fails, not lost, while the time reads
+    /// succeed (Review T, NB-T1).
+    RefLockedFails(Duration),
 }
 
 /// How [`FakeDevice`] behaves (UR-33).
@@ -655,6 +661,11 @@ impl Device for FakeDevice {
                 FakeFault::TimeReadFails(at) if self.now(&st) >= self.ticks_of(*at) => {
                     return Err(DeviceError::failed("fake: the time read failed"));
                 }
+                FakeFault::TimeReadFailsFor(at, length)
+                    if self.now(&st) >= self.ticks_of(*at) && self.now(&st) < self.ticks_of(*at + *length) =>
+                {
+                    return Err(DeviceError::failed("fake: the time read failed for a while"));
+                }
                 FakeFault::StepBack(at, ticks) if self.due(&st, index, *at) => {
                     st.fired[index] = true;
                     st.offset -= ticks;
@@ -672,6 +683,9 @@ impl Device for FakeDevice {
         let st = self.lock();
         self.lost(&st)?;
         let now = self.now(&st);
+        if self.config.faults.iter().any(|f| matches!(f, FakeFault::RefLockedFails(at) if now >= self.ticks_of(*at))) {
+            return Err(DeviceError::failed("fake: the reference sensor read failed"));
+        }
         let unlocked = self.config.faults.iter().any(|f| matches!(f, FakeFault::Unlocked(at) if now >= self.ticks_of(*at)));
         Ok(Some(!unlocked))
     }

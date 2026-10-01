@@ -1545,8 +1545,8 @@
   "id": "B35",
   "name": "device reads failing for 1 s not a lost device (Review S, S-B1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "self.core.device_lost(&format!(\"UR-29: the device reads have failed for 1 s: {message}\"));",
-  "new": "let _ = message;",
+  "old": "self.core.device_lost(&format!(\"UR-29: the device time reads have failed for 1 s: {}\", error.message));",
+  "new": "let _ = since;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_29_a_dead_link_that_fails_without_lost_is_a_lost_device"
@@ -1580,5 +1580,25 @@
   "crate": "ezsdr-server",
   "test_bin": "protocol",
   "filter": "ea_07_a_reference_that_locks_on_the_reopen_connects"
+ },
+ {
+  "id": "B39",
+  "name": "a time read that succeeds does not start the 1 s count again (Review T, TG-T1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "            Ok(_) => self.failing_since = None,",
+  "new": "            Ok(_) => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_29_time_reads_that_fail_apart_are_not_a_lost_device"
+ },
+ {
+  "id": "B40",
+  "name": "a failing reference sensor read is a lost device (Review T, NB-T1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                Err(error) => self.core.timing(json!({ \"what\": \"ref_locked_failed\", \"error\": error.message })),",
+  "new": "                Err(error) => return self.core.device_lost(&error.message),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_29_a_failing_reference_sensor_alone_is_not_a_lost_device"
  }
 ]

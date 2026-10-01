@@ -225,6 +225,7 @@ fn hw_b9_unplug_and_reopen() {
     let ended = until_not_running(&mut run, 300);
     let manifest = run.finish();
     println!("B9 reopen: {ended}; termination {:?}; DEVICE_LOST at UTC {}", manifest.termination.reason, lost_utc(&manifest));
+    println!("B9 reopen: devices kept after the loss: {}", ezsdr_radio_uhd::uhd_kept_count());
     println!("B9: plug the cable back in now (waiting up to 300 s for the device); at UTC {:.3}", utc_now());
     let deadline = Instant::now() + Wall::from_secs(300);
     let device = loop {
@@ -234,7 +235,7 @@ fn hw_b9_unplug_and_reopen() {
             Ok(_) | Err(_) => panic!("the device did not come back within 300 s"),
         }
     };
-    println!("B9 reopen: opened again at UTC {:.3}", utc_now());
+    println!("B9 reopen: opened again at UTC {:.3}; devices kept now: {} (Review T, TG-T2: 1 before, 0 once the open's reclaim freed it)", utc_now(), ezsdr_radio_uhd::uhd_kept_count());
     let manifest = rehearse_receive_at_t0(device);
     println!("B9 reopen: B3 on the reopened device: termination {:?}", manifest.termination.reason);
     println!("B9 reopen: the process exits next, at UTC {:.3}", utc_now());

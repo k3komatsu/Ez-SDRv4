@@ -29,7 +29,7 @@ pub use device::{
 pub use provider::UhdRadio;
 /// UHD's own calls for the C API tests and the bench (feature `uhd`, UR-3).
 #[cfg(feature = "uhd")]
-pub use uhd::{UhdDevice, find as uhd_find, streamer_lifecycle as uhd_streamer_lifecycle, struct_sizes as uhd_struct_sizes};
+pub use uhd::{UhdDevice, find as uhd_find, kept_count as uhd_kept_count, streamer_lifecycle as uhd_streamer_lifecycle, struct_sizes as uhd_struct_sizes};
 
 /// `ezsdr.radio.uhd` 0.1.0 (UR-1).
 pub fn module_ref() -> ModuleRef {

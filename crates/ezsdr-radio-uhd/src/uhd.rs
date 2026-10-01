@@ -420,6 +420,7 @@ impl UhdDevice {
             tx: Mutex::new(None),
             lost: Arc::new(AtomicBool::new(false)),
         })
+        .inspect(|_| lock(&LIVE).push(args.to_owned()))
     }
 
     fn stream_args(channels: &mut [usize], fc32: &CString, sc16: &CString, empty: &CString) -> uhd_stream_args_t {
@@ -464,6 +465,16 @@ unsafe impl Send for Kept {}
 
 static KEPT: Mutex<Vec<Kept>> = Mutex::new(Vec::new());
 
+/// The live `UhdDevice`s per `args`: a kept device is freed only when none of its `args`
+/// lives, since its teardown writes the X300's registers and releases its claim (Review T,
+/// NB-T4).
+static LIVE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// How many devices this process keeps rather than freed (F4; Review T, TG-T2).
+pub fn kept_count() -> usize {
+    lock(&KEPT).len()
+}
+
 /// Whether the device behind `usrp` answers a time read (the C API catches the
 /// exception a dead link throws).
 fn answers(usrp: uhd_usrp_handle) -> bool {
@@ -476,16 +487,27 @@ fn answers(usrp: uhd_usrp_handle) -> bool {
 /// device, which a live link takes (NB-S2). Called before a new open of `args`, so that
 /// its writes go out on its own transport.
 fn reclaim(args: &str) {
-    lock(&KEPT).retain_mut(|kept| {
-        if kept.args != args || !answers(kept.usrp) {
-            return true;
+    if lock(&LIVE).iter().any(|live| live == args) {
+        return;
+    }
+    // Taken out of the list and read without its lock: on a dead link each read waits out
+    // UHD's timeouts, which would hold up every drop that keeps a device (Review T, NB-T3).
+    let mine: Vec<Kept> = {
+        let mut kept = lock(&KEPT);
+        let (mine, others) = std::mem::take(&mut *kept).into_iter().partition(|k| k.args == args);
+        *kept = others;
+        mine
+    };
+    for mut kept in mine {
+        if !answers(kept.usrp) {
+            lock(&KEPT).push(kept);
+            continue;
         }
         kept.lost.store(false, Ordering::Release);
         kept.streams = (None, None);
         // SAFETY: the kept handle is freed once, here, its streamers gone first.
         unsafe { uhd_usrp_free(&mut kept.usrp) };
-        false
-    });
+    }
 }
 
 impl Drop for UhdDevice {
@@ -499,6 +521,12 @@ impl Drop for UhdDevice {
         // registry holds it till the process exits otherwise.
         if !self.lost.load(Ordering::Acquire) && !answers(self.usrp) {
             self.lost.store(true, Ordering::Release);
+        }
+        {
+            let mut live = lock(&LIVE);
+            if let Some(i) = live.iter().position(|a| *a == self.args) {
+                live.swap_remove(i);
+            }
         }
         if self.lost.load(Ordering::Acquire) {
             let streams = (lock(&self.rx).take(), lock(&self.tx).take());

@@ -549,8 +549,6 @@ impl Control {
     // ------------------------------------------------------------ UR-27, UR-29
 
     fn check_device(&mut self) {
-        let begun = Instant::now();
-        let mut failed = None;
         if self.reference_monitored && !self.clock_lost {
             match self.core.device.ref_locked() {
                 Ok(Some(false)) => {
@@ -560,27 +558,23 @@ impl Control {
                 }
                 Ok(_) => {}
                 Err(error) if error.lost => return self.core.device_lost(&error.message),
-                Err(error) => {
-                    self.core.timing(json!({ "what": "ref_locked_failed", "error": error.message }));
-                    failed = Some(error.message);
-                }
+                // Recorded only: a device whose time it can read is not gone (Review T, NB-T1).
+                Err(error) => self.core.timing(json!({ "what": "ref_locked_failed", "error": error.message })),
             }
         }
+        // Time reads failing for 1 s from the start of the first that failed: the device is
+        // gone, however UHD classified the error (one read on a dead link waits out UHD's
+        // timeouts); a read that succeeds starts the count again.
+        let begun = Instant::now();
         match self.core.device.time_now() {
-            Ok(_) if failed.is_none() => self.failing_since = None,
-            Ok(_) => {}
-            Err(error) if error.lost => return self.core.device_lost(&error.message),
+            Ok(_) => self.failing_since = None,
+            Err(error) if error.lost => self.core.device_lost(&error.message),
             Err(error) => {
                 self.core.timing(json!({ "what": "time_read_failed", "error": error.message }));
-                failed = Some(error.message);
-            }
-        }
-        // Reads failing for 1 s from the start of the first that failed: the device is gone,
-        // however UHD classified the error (one read on a dead link waits out UHD's timeouts).
-        if let Some(message) = failed {
-            let since = *self.failing_since.get_or_insert(begun);
-            if since.elapsed() >= FAILING_FOR {
-                self.core.device_lost(&format!("UR-29: the device reads have failed for 1 s: {message}"));
+                let since = *self.failing_since.get_or_insert(begun);
+                if since.elapsed() >= FAILING_FOR {
+                    self.core.device_lost(&format!("UR-29: the device time reads have failed for 1 s: {}", error.message));
+                }
             }
         }
     }

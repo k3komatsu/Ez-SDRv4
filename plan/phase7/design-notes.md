@@ -511,3 +511,19 @@ The review of F4's fix and B9 ([`reviews/review-s.md`](reviews/review-s.md)): on
 
 **On the bench, through the owner's L2 switch** (bench-results.md part 10; the host's carrier kept): the transmit-only unplug was found by S-B1's rule — `UHD error 47: RfnocError: OpTimeout`, as the review read UHD — 3.0 s after the unplug, where before the fix there would have been no `DEVICE_LOST`; the receive unplugs by the silence rule, 1.10 s after; every Run stopped by Policy with its Manifest; `hw_b9_unplug_and_reopen` opened the device again in the same process after the replug and ran B3 on it; every process exited normally, UHD's teardown timing out rather than throwing with the route kept. Not observed: whether the reopen's `reclaim` freed the kept device first.
 
+## 20. Review T
+
+The re-review ([`reviews/review-t.md`](reviews/review-t.md)): no blockers; every Review S finding closed in the code; UR-7's reopen sound (the first device freed on its live link before the second open; no root left in the `ClockRegistry`, since `DeviceAuthority::new` fails before registering one; the prefix a shared constant). The owner: "推奨通り直してください．また，スイッチを外して直結しました".
+
+| Finding | Disposition |
+|---|---|
+| NB-T1 (P2) | Fixed: the 1 s rule counts the time reads only, a read that succeeds resetting it; a failing `ref_locked` is `timing { ref_locked_failed }` only. `FakeFault::RefLockedFails`; `ur_29_a_failing_reference_sensor_alone_is_not_a_lost_device`; B40 killed. |
+| TG-T1 (P2) | Done: `FakeFault::TimeReadFailsFor(at, length)` — a window, since the Authority's own 100 ms reads would use up a one-shot failure before uhd-control's 500 ms read came (the first try, which failed) —; `ur_29_time_reads_that_fail_apart_are_not_a_lost_device`; B39 killed. |
+| NB-T3 (P2) | Fixed: `reclaim` takes its `args`' entries out of `KEPT`, reads them without the lock, and puts back those that do not answer. |
+| NB-T4 (P2) | Fixed: a process-wide list of live `args` (pushed by `open`, removed by `drop`); `reclaim` frees nothing while one of its `args` lives. |
+| TG-T2 (P2) | `ezsdr_radio_uhd::uhd_kept_count()`; `hw_b9_unplug_and_reopen` prints it after the loss and after the reopen (expected 1, then 0). Bench. |
+| TG-T3 (P2) | The transmit-only unplug on the direct cable again, with the 1 s rule. Bench. |
+| NB-T2, NB-T5…NB-T8 | Checked, recorded; no change. |
+
+**Checks.** `cargo test --workspace` 885 passed on stable and 1.85.0; `--features uhd` 171 passed; clippy clean with and without `uhd`. NB-T3, NB-T4 and `uhd_kept_count` are in `uhd.rs`, which has no fake: the bench sees them.
+
