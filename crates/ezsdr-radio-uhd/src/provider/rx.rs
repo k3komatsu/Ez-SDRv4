@@ -184,7 +184,9 @@ impl Rx {
                 self.stream = Some(Stream::new(clock, channels, self.last_stop.take()));
                 self.last_samples = Instant::now();
             }
-            RxCmd::Switch { .. } if self.stopping => {}
+            RxCmd::Switch { .. } if self.stopping => {
+                lock(&self.core.streams).switching[Dir::Rx as usize] = false;
+            }
             RxCmd::Switch { e1, clock, channels, settings } => {
                 let from = self.stream.as_ref().map_or(0, |stream| stream.channels);
                 self.switch = Some(Switch { clock, channels, from, settings, e1 });
@@ -198,6 +200,7 @@ impl Rx {
             RxCmd::Stop => self.stop_orderly(tail),
             RxCmd::Cut { at, mode } => {
                 self.switch = None;
+                lock(&self.core.streams).switching[Dir::Rx as usize] = false;
                 self.stopping = true;
                 match mode {
                     StopMode::Orderly => self.stop_at(at, at + tail),
@@ -216,6 +219,7 @@ impl Rx {
             RxCmd::Shutdown(mode) => {
                 self.exit = true;
                 self.switch = None;
+                lock(&self.core.streams).switching[Dir::Rx as usize] = false;
                 match mode {
                     StopMode::Orderly => self.stop_orderly(tail),
                     StopMode::Abort => {
@@ -468,6 +472,7 @@ impl Rx {
         let Some(switch) = self.switch.take() else { return };
         let Some(new) = switch.clock else {
             self.core.timing(json!({ "what": "rx_switch", "e1": switch.e1, "e2": null }));
+            lock(&self.core.streams).switching[Dir::Rx as usize] = false;
             return;
         };
         // UR-25: the streamer is reopened when the channel count changed, and only then.
@@ -487,6 +492,7 @@ impl Rx {
             }
         }
         self.core.timing(json!({ "what": "rx_switch", "e1": switch.e1, "e2": new.origin, "at": self.core.now() }));
+        lock(&self.core.streams).switching[Dir::Rx as usize] = false;
     }
 }
 

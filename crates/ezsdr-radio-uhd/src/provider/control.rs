@@ -262,6 +262,19 @@ impl Control {
     // ------------------------------------------------------------ UR-25
 
     fn book_cold(&mut self, key: Key, value: Value, at: Option<AbsoluteDeadline>) {
+        let dir = if key.as_str().starts_with("radio.rx.") { Dir::Rx } else { Dir::Tx };
+        {
+            let streams = lock(&self.core.streams);
+            if streams.switching[dir as usize] {
+                let disabled = match dir { Dir::Rx => streams.rx, Dir::Tx => streams.tx }.is_none();
+                drop(streams);
+                return self.core.command_rejected("update_parameter", if disabled {
+                    "UR-25: the stream changed to 0 channels is still draining; wait for its pending cold change"
+                } else {
+                    "UR-25: a cold change is still pending for this direction"
+                });
+            }
+        }
         let mut candidate = self.config.clone();
         candidate.insert(key.clone(), value.clone());
         let request = Requested {
@@ -277,7 +290,6 @@ impl Control {
         }
         let value = report.applied.get(&key).cloned().unwrap_or(value);
         candidate.insert(key.clone(), value);
-        let dir = if key.as_str().starts_with("radio.rx.") { Dir::Rx } else { Dir::Tx };
         let channels = Core::channels(&candidate, dir);
         let rate = Core::settings(&candidate, dir).rate.unwrap_or(0.0);
         let n = if channels > 0 {
@@ -350,6 +362,7 @@ impl Control {
                 let settings = self.settings_at(dir, clock.map_or(e1, |c| c.origin));
                 {
                     let mut streams = lock(&self.core.streams);
+                    streams.switching[dir as usize] = true;
                     streams.draining[dir as usize] = clock.is_none().then_some(e1);
                     match dir {
                         Dir::Rx => streams.rx = clock,
@@ -575,6 +588,47 @@ impl Control {
                 if since.elapsed() >= FAILING_FOR {
                     self.core.device_lost(&format!("UR-29: the device time reads have failed for 1 s: {}", error.message));
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct NoActions;
+    impl ActionReceiver for NoActions {
+        fn recv(&self) -> Option<Action> { None }
+    }
+
+    #[test]
+    fn ur_25_overlapping_cold_changes_are_refused_before_bookkeeping() {
+        for dir in [Dir::Rx, Dir::Tx] {
+            let (core, _, time) = crate::provider::test_support::rig();
+            let clock = core.register(dir, 200, 0).unwrap();
+            { let mut streams = lock(&core.streams);
+                match dir { Dir::Rx => streams.rx = Some(clock), Dir::Tx => streams.tx = Some(clock) }
+            }
+            let (to_tx, tx) = std::sync::mpsc::channel();
+            let (to_rx, rx) = std::sync::mpsc::channel();
+            let mut config = core.description.defaults.clone();
+            config.insert(super::super::core::key(&format!("radio.{}.channels", dir.name())), Value::Int(1));
+            let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false);
+            let key = super::super::core::key(&format!("radio.{}.sample_rate_hz", dir.name()));
+            control.book_cold(key.clone(), Value::Num(2e6), None);
+            let records = core.clocks.sample_clock_records();
+            assert_eq!(records.len(), 2);
+            assert!(lock(&core.streams).switching[dir as usize]);
+            control.book_cold(key.clone(), Value::Num(4e6), None);
+            // Even after e2, completion is the owner's, not an inference from now.
+            time.advance_to(core.at(records[1].origin.ticks + core.ticks(1_000_000))).unwrap();
+            control.book_cold(key.clone(), Value::Num(4e6), None);
+            assert_eq!(core.clocks.sample_clock_records(), records);
+            assert_eq!(control.config[&key], Value::Num(2e6));
+            assert_eq!(lock(&core.rec).rejected.len(), 2);
+            match dir {
+                Dir::Rx => { assert!(matches!(rx.try_recv().unwrap(), RxCmd::Switch { .. })); assert!(rx.try_recv().is_err()); }
+                Dir::Tx => { assert!(matches!(tx.try_recv().unwrap(), TxCmd::Switch { .. })); assert!(tx.try_recv().is_err()); }
             }
         }
     }

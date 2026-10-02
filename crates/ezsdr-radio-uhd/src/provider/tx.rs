@@ -527,6 +527,7 @@ impl Tx {
         self.channels = switch.channels;
         self.core.timing(json!({ "what": "tx_switch", "e1": switch.e1, "e2": switch.clock.map(|c| c.origin), "at": self.core.now() }));
         self.adopt_later();
+        lock(&self.core.streams).switching[Dir::Tx as usize] = false;
     }
 
     /// UR-28: every report recorded; underflows and late bursts become events.

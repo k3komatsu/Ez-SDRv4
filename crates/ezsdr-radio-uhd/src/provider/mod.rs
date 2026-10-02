@@ -5,6 +5,8 @@ mod control;
 mod core;
 mod rx;
 mod tx;
+#[cfg(test)]
+mod test_support;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};

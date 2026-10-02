@@ -58,6 +58,8 @@ pub(crate) struct Streams {
     pub tx_channels: usize,
     /// Per direction, the `e₁` a stream changed to 0 channels drains to (UR-25).
     pub draining: [Option<i64>; 2],
+    /// A booked cold change until its streamer owner finishes the switch.
+    pub switching: [bool; 2],
 }
 
 /// Everything the threads record; written to the sections at `cleanup` (UR-30).
