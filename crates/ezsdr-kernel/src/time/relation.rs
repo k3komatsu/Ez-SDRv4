@@ -78,6 +78,12 @@ impl ClockRelation {
         t: TimePoint,
     ) -> Result<UncertainTimePoint, TimeError> {
         t.ticks_in(self.source)?;
+        let measurement_bound = self.uncertainty.ticks_in(self.target)?;
+        // Like a negative drift error, a negative measurement error cannot be a
+        // one-sided bound. Reject before accumulated error could hide its sign.
+        if measurement_bound < 0 {
+            return Err(TimeError::Overflow);
+        }
         if t.try_cmp(self.valid.from)? == std::cmp::Ordering::Less {
             return Err(TimeError::OutsideValidity { at: t });
         }
@@ -98,9 +104,7 @@ impl ClockRelation {
             .checked_add(Duration::new(self.target, drift_ticks))?;
 
         let drift_error = ceil_non_negative(delta_t.ticks.unsigned_abs() as f64 * self.drift_uncertainty)?;
-        let ticks = self
-            .uncertainty
-            .ticks_in(self.target)?
+        let ticks = measurement_bound
             .checked_add(drift_error)
             .and_then(|v| v.checked_add(1))
             .and_then(|v| v.checked_add(i64::from(had_remainder)))

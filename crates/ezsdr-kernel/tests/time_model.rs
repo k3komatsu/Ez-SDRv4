@@ -338,6 +338,24 @@ fn tm_14_relation_converts_with_uncertainty() {
 }
 
 #[test]
+fn tm_14_relation_refuses_negative_measurement_bounds() {
+    let (reg, root) = registry_with_device_root();
+    for ticks in [-100, -1, 0, 50] {
+        let mut rel = device_to_utc(root, 0.0, 1e-8);
+        rel.uncertainty = Duration::new(ClockDomainId::UTC, ticks);
+        // Test both the measurement and an instant whose drift error masks -1.
+        for at in [200_000_000, 400_000_000] {
+            let result = rel.convert(&reg, TimePoint::new(root, at));
+            if ticks < 0 {
+                assert_eq!(result, Err(TimeError::Overflow));
+            } else {
+                assert!(result.unwrap().uncertainty.ticks >= ticks + 1);
+            }
+        }
+    }
+}
+
+#[test]
 fn tm_14_relation_outside_validity() {
     let (reg, root) = registry_with_device_root();
     let rel = device_to_utc(root, 1e-6, 1e-8);
