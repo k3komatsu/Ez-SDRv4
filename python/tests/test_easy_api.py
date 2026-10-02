@@ -442,5 +442,25 @@ class DurationRequests(unittest.TestCase):
         ])
 
 
+class SampleValidity(unittest.TestCase):
+    def test_samples_requires_full_validity_on_every_channel(self) -> None:
+        domain = {"node": 0, "local": 7}
+        def t(k): return {"domain": domain, "ticks": k}
+        data = np.arange(10, dtype=np.complex64).tobytes()
+        for start, length in [(2, 3), (0, 3), (0, 5)]:
+            with self.subTest(start=start, length=length):
+                artifact = {"id": "rec", "continuity": [{
+                    "domain": domain, "channels": 2, "first": t(0), "end": t(5),
+                    "valid": [[{"start": t(0), "len": 5}], [{"start": t(start), "len": length}]],
+                    "gaps": [], "channel_gaps": [],
+                }]}
+                if (start, length) == (0, 5):
+                    np.testing.assert_array_equal(ezsdr.samples(data, artifact),
+                        np.arange(10, dtype=np.complex64).reshape(5, 2).T)
+                else:
+                    with self.assertRaises(ezsdr.Error):
+                        ezsdr.samples(data, artifact)
+
+
 if __name__ == "__main__":
     unittest.main()

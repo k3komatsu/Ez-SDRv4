@@ -96,7 +96,17 @@ def samples(data: bytes, artifact: dict) -> np.ndarray:
             f"artifact {artifact['id']} spans {len(domains)} SampleClocks (a rate change, §23): "
             "one array would hide it; read its bytes with Session.read and split them by its continuity"
         )
-    broken = any(m.get("gaps") or m.get("channel_gaps") or any(len(segments) != 1 for segments in m.get("valid", [])) for m in maps)
+    broken = any(
+        m.get("gaps") or m.get("channel_gaps")
+        or len(m.get("valid", [])) != int(m["channels"])
+        or any(
+            len(segments) != 1
+            or segments[0]["start"] != m["first"]
+            or segments[0]["len"] != m["end"]["ticks"] - m["first"]["ticks"]
+            for segments in m.get("valid", [])
+        )
+        for m in maps
+    )
     if broken:
         raise Error(
             f"artifact {artifact['id']} has a gap or an invalid stretch (§23: a gap is a flag and a time jump): "
