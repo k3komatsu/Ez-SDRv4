@@ -208,9 +208,11 @@ impl Rx {
                         self.core.timing(json!({ "what": "rx_stop", "at": at, "until": at, "mode": "Abort" }));
                         if let Some(stream) = self.stream.as_mut() {
                             stream.cut = Some(at);
-                            if let Some(issued) = stop_at_cut(&self.core, at) {
-                                stream.stopped = true;
-                                self.last_stop = Some(issued);
+                            if !stream.stopped {
+                                if let Some(issued) = stop_at_cut(&self.core, at) {
+                                    stream.stopped = true;
+                                    self.last_stop = Some(issued);
+                                }
                             }
                         }
                     }
@@ -223,8 +225,9 @@ impl Rx {
                 match mode {
                     StopMode::Orderly => self.stop_orderly(tail),
                     StopMode::Abort => {
-                        if self.stream.take().is_some() && !self.core.is_lost() {
-                            let _ = self.core.device.rx_stop(None);
+                        if let Some(stream) = self.stream.take().filter(|stream| !stream.stopped) {
+                            self.last_stop = stop_at_cut(&self.core, stream.cut.unwrap_or_else(|| self.core.now()))
+                                .or(self.last_stop);
                         }
                     }
                 }
@@ -312,8 +315,11 @@ impl Rx {
                 // A late start of a stream that is ending: stop it untimed, never restart
                 // it (Review M, P1-A).
                 self.core.timing(json!({ "what": "rx_stop_late", "cut": stream.cut, "at": now }));
-                if let Err(error) = self.core.device.rx_stop(None) {
-                    self.core.device_failed("stop", &error);
+                if !stream.stopped {
+                    if let Some(issued) = stop_at_cut(&self.core, stream.cut.expect("a cut")) {
+                        stream.stopped = true;
+                        self.last_stop = Some(issued);
+                    }
                 }
             }
             RxRecv::LateCommand => {
@@ -524,5 +530,49 @@ fn stop_at_cut(core: &Core, cut: i64) -> Option<i64> {
             core.device_failed("update_parameter", &error);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ur_26_a_late_start_after_abort_does_not_stop_again() {
+        let (core, device, _, _) = super::super::test_support::rig();
+        let clock = core.register(Dir::Rx, 200, 0).unwrap();
+        let (_to_rx, cmds) = std::sync::mpsc::channel();
+        let mut rx = Rx::new(core.clone(), cmds, Some(clock), 1, None);
+        rx.command(RxCmd::Cut { at: 0, mode: StopMode::Abort });
+        rx.receive(RxRecv::LateCommand);
+        rx.command(RxCmd::Cut { at: 0, mode: StopMode::Abort });
+        rx.command(RxCmd::Shutdown(StopMode::Abort));
+        assert_eq!(device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count(), 1);
+        assert_eq!(lock(&core.rec).applied.iter().filter(|r| r["key"] == "rx_stop").count(), 1);
+        assert!(!device.calls().iter().any(|c| c.starts_with("rx_start ")));
+    }
+
+    #[test]
+    fn ur_26_a_late_start_during_orderly_stop_is_recorded_once() {
+        let (core, device, time, _) = super::super::test_support::rig();
+        let clock = core.register(Dir::Rx, 200, 0).unwrap();
+        let (_to_rx, cmds) = std::sync::mpsc::channel();
+        let mut rx = Rx::new(core.clone(), cmds, Some(clock), 1, None);
+        rx.command(RxCmd::Cut { at: 0, mode: StopMode::Orderly });
+        let cut = rx.stream.as_ref().unwrap().cut.unwrap();
+        rx.receive(RxRecv::LateCommand);
+        rx.receive(RxRecv::LateCommand);
+        assert!(rx.stream.as_ref().unwrap().stopped);
+        time.advance_to(core.at(cut + core.ticks(20_000_000))).unwrap();
+        rx.last_samples = Instant::now() - Wall::from_secs(1);
+        rx.receive(RxRecv::Timeout);
+        rx.command(RxCmd::Shutdown(StopMode::Abort));
+        assert!(rx.stream.is_none());
+        assert_eq!(device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count(), 1);
+        let rec = lock(&core.rec);
+        let stops: Vec<_> = rec.applied.iter().filter(|r| r["key"] == "rx_stop").collect();
+        assert_eq!(stops.len(), 1);
+        assert_eq!(stops[0]["at"], serde_json::to_value(core.at(cut)).unwrap());
+        assert!(!device.calls().iter().any(|c| c.starts_with("rx_start ")));
     }
 }
