@@ -185,6 +185,11 @@ impl Tx {
             }
         }
         if let Some(next) = self.open.as_ref().map(|o| o.next) {
+            if clock.instant(next) < now {
+                self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-22: the transmit timeline expired; burst not resumed" }));
+                self.abandon(true);
+                return true;
+            }
             if let Some(&h) = self.held.keys().next() {
                 if h <= next && e1_k.is_none_or(|e1| h < e1) {
                     self.preempt(clock, h, next);
@@ -203,6 +208,11 @@ impl Tx {
             return true;
         }
         if let Some(c) = self.continues_at {
+            if clock.instant(c) < now {
+                self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-22: the transmit timeline expired; burst not resumed" }));
+                self.abandon(true);
+                return true;
+            }
             match self.held.keys().next() {
                 // Not across e₁: there the device burst ends (Review O, N-4).
                 Some(&k) if k == c && e1_k.is_none_or(|e1| c < e1) => {}
@@ -623,8 +633,18 @@ impl Tx {
             TxCode::BurstAck => {
                 self.unacked.pop_front();
             }
-            TxCode::Underflow | TxCode::UnderflowInPacket => underflow(TxUnderflowCause::Starved),
-            TxCode::SeqError | TxCode::SeqErrorInBurst => underflow(TxUnderflowCause::Lost),
+            TxCode::Underflow | TxCode::UnderflowInPacket | TxCode::SeqError | TxCode::SeqErrorInBurst => {
+                let cause = if matches!(report.code, TxCode::Underflow | TxCode::UnderflowInPacket) {
+                    TxUnderflowCause::Starved
+                } else { TxUnderflowCause::Lost };
+                underflow(cause);
+                // Its nominal next sample no longer bounds actual playback. Do not
+                // resume untimed payload on the shifted device timeline (UR-22).
+                if self.open.is_some() || self.continues_at.is_some() {
+                    self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-22: the device burst underflowed; burst not resumed" }));
+                    self.abandon(true);
+                }
+            }
             TxCode::TimeError => {
                 let Some(target) = self.unacked.pop_front() else { return };
                 let late_by_ns = match (report.tick, self.clock) {
@@ -684,6 +704,85 @@ mod tests {
             policy,
             target: TimePoint::new(clock.domain, k),
         }
+    }
+
+    #[test]
+    fn ur_22_underflow_and_loss_end_the_damaged_burst() {
+        for code in [crate::device::TxCode::Underflow, crate::device::TxCode::UnderflowInPacket,
+            crate::device::TxCode::SeqError, crate::device::TxCode::SeqErrorInBurst] {
+            let (core, device, time, events) = super::super::test_support::rig();
+            device.tx_open(1).unwrap();
+            let clock = core.register(Dir::Tx, 200, 0).unwrap();
+            let (_to_tx, cmds) = std::sync::mpsc::channel();
+            let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+            let mut burst = held(&clock, 20_000, 10_000, LatePolicy::DropAndFlag);
+            burst.repeat = true;
+            lock(&core.held).insert((clock.domain, 20_000));
+            tx.command(TxCmd::Burst(burst));
+            time.advance_to(core.at(core.ticks(11_000_000))).unwrap();
+            assert!(tx.step());
+            lock(&core.held).insert((clock.domain, 100_000));
+            tx.command(TxCmd::Burst(held(&clock, 100_000, 10_000, LatePolicy::DropAndFlag)));
+            tx.report(crate::device::TxReport { code, tick: Some(clock.instant(22_000)), channel: 0 });
+            assert!(tx.open.is_none() && tx.continues_at.is_none() && tx.tail.is_none());
+            assert!(!lock(&core.held).contains(&(clock.domain, 20_000)));
+            assert!(tx.held.contains_key(&100_000), "future bursts retain their reservations");
+            let sent = device.calls();
+            assert!(!tx.step());
+            tx.stop_now("test stop", false);
+            assert_eq!(device.calls(), sent, "no payload or second EOB after abandonment");
+            assert_eq!(lock(&core.rec).bursts[0]["end"], "stop");
+            assert!(events.drain().iter().any(|e| e.kind == EventKind::parse(ezsdr_radio::kinds::TX_UNDERFLOW).unwrap()));
+        }
+    }
+
+    #[test]
+    fn ur_22_an_expired_timeline_is_not_resumed_before_its_report() {
+        let (core, device, time, _) = super::super::test_support::rig();
+        device.tx_open(1).unwrap();
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        tx.command(TxCmd::Burst(held(&clock, 20_000, 10_000, LatePolicy::DropAndFlag)));
+        time.advance_to(core.at(core.ticks(11_000_000))).unwrap();
+        assert!(tx.step());
+        time.advance_to(core.at(core.ticks(70_000_000))).unwrap();
+        assert!(tx.step());
+        assert!(tx.open.is_none());
+        assert_eq!(device.calls().iter().filter(|c| c.starts_with("tx_send ")).count(), 2,
+            "one payload buffer and one empty EOB, no resumed payload");
+    }
+
+    #[test]
+    fn ur_22_real_starvation_does_not_extend_the_stop_window() {
+        // Intentionally starve the fake; the test does not require a millisecond
+        // host wake-up. Synchronize the manual decision clock to the fake afterward.
+        let (core, device, time, _) = super::super::test_support::rig();
+        device.tx_open(1).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        let mut burst = held(&clock, 0, 100_000, LatePolicy::SendAsapAndFlag);
+        burst.repeat = true;
+        // Prime an untimed device burst to make starvation independent of a
+        // host deadline for the initial timed SOB (covered by UR-21 tests).
+        device.tx_send(&[&burst.samples[0][..2_000]], None, true, false, std::time::Duration::from_secs(1)).unwrap();
+        tx.open = Some(super::Open { held: burst, next: 2_000, first: false });
+        tx.unacked.push_back(TimePoint::new(clock.domain, 0));
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        time.advance_to(core.at(device.time_now().unwrap().max(core.now()))).unwrap();
+        tx.reports(std::time::Duration::ZERO);
+        assert!(lock(&core.rec).device_async.iter().any(|r| r["code"] == "Underflow"));
+        assert!(tx.open.is_none());
+        for _ in 0..20 { assert!(!tx.step()); }
+        let stop = device.time_now().unwrap();
+        tx.stop_now("test stop", false);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        tx.reports(std::time::Duration::ZERO);
+        let rec = lock(&core.rec);
+        let end = rec.device_async.iter().find(|r| r["code"] == "BurstAck").unwrap()["tick"].as_i64().unwrap();
+        assert!(end <= stop + core.ticks(10_000_000), "stop={stop}, playback end={end}");
     }
 
     #[test]
