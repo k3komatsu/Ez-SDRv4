@@ -61,6 +61,25 @@ pub(super) fn admit_with(
     } else {
         (None, None)
     };
+    if let Action::UpdateParameter { key, class, .. } = &action {
+        // SB-2: a component declaration cannot override a Provider/Sink key.
+        let declared = match inst {
+            Some(Inst::Executor(_)) => shared.ctx.declared_classes.get(key).copied(),
+            _ => None,
+        }
+        .or_else(|| shared.ctx.registry.key_decl(key).ok().and_then(|d| d.update_class));
+        match declared {
+            Some(declared) if declared == *class => {}
+            Some(declared) => return Err(vec![violation(
+                "ezsdr.update_class",
+                format!("RS-52: update states {class:?} for {key}, which declares {declared:?}"),
+            )]),
+            None => return Err(vec![violation(
+                "ezsdr.update_class",
+                format!("RS-52: {key} declares no update class"),
+            )]),
+        }
+    }
     let mut coercions = incoming.to_vec();
     if let Action::TxBurst {
         target,

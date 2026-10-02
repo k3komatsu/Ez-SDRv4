@@ -2592,6 +2592,36 @@ fn kc_24_a_module_update_is_not_coerced_by_the_kernel() {
 }
 
 #[test]
+fn kc_24_a_module_update_must_state_its_providers_declared_class() {
+    for component_shadow in [false, true] {
+        let (mut spec, profile) = executor_docs();
+        if component_shadow {
+            spec["graph"]["components"]["c1"]["params"] = serde_json::json!([{
+                "key": "test.gain", "schema": {"type": "number"},
+                "update_class": "cold", "default": 0.0
+            }]);
+        }
+        let probe = Probe::new();
+        let action = Action::UpdateParameter {
+            target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
+            key: Key::parse("test.gain").unwrap(),
+            value: Value::Num(3.0),
+            class: ezsdr_kernel::module_api::UpdateClass::Cold,
+            at: None,
+        };
+        let mut assembly = rig(Pacing::FreeRunning).assembly;
+        assembly.providers.insert(Ident::parse("radio").unwrap(),
+            Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)));
+        assembly.executors.insert(Ident::parse("exec").unwrap(),
+            Box::new(ProbeExecutor::new("x", &probe).submitting(action)));
+        let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
+        assert!(probe.lines().iter().any(|line| line.starts_with("x:submit:err:ezsdr.update_class:RS-52")));
+        assert!(!probe.lines().iter().any(|line| line.starts_with("p:action:UpdateParameter:")));
+        assert!(manifest.termination.cleanup_failures.is_empty());
+    }
+}
+
+#[test]
 fn kc_30_a_panicking_link_descriptor_fails_plan_without_unwinding() {
     let (spec, profile) = output_docs();
     let probe = Probe::new();
