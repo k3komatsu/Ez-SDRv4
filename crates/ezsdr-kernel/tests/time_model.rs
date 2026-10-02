@@ -1139,3 +1139,21 @@ fn tm_17_next_due_reports_without_advancing() {
     assert_eq!(auth.advance_to(TimePoint::new(root, 10)), Ok(1));
     assert_eq!(auth.next_due(), Some(TimePoint::new(root, 30)));
 }
+
+#[test]
+fn tm_02_deserialization_enforces_rational_invariants() {
+    for json in [
+        r#"{"num":0,"den":1}"#, r#"{"num":1,"den":0}"#,
+        r#"{"num":0,"den":0}"#, r#"{"num":1}"#,
+        r#"{"num":1,"den":1,"extra":0}"#,
+    ] {
+        assert!(serde_json::from_str::<Rational>(json).is_err(), "{json}");
+    }
+    let reduced: Rational = serde_json::from_str(r#"{"num":2,"den":2}"#).unwrap();
+    assert_eq!(reduced, Rational::ONE);
+    assert_eq!(reduced.cmp(&Rational::ONE), Ordering::Equal);
+    for rational in [Rational::ONE, Rational::new(3, 2).unwrap(), Rational::new(u64::MAX, 1).unwrap()] {
+        let json = serde_json::to_string(&rational).unwrap();
+        assert_eq!(serde_json::from_str::<Rational>(&json).unwrap(), rational);
+    }
+}

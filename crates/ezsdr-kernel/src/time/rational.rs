@@ -14,11 +14,24 @@ use super::TimeError;
 /// wrapping, saturating or panicking.
 ///
 /// Rule: TM-2.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Rational {
     num: u64,
     den: u64,
+}
+
+impl<'de> Deserialize<'de> for Rational {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Parts {
+            num: u64,
+            den: u64,
+        }
+        let parts = Parts::deserialize(deserializer)?;
+        Rational::new(parts.num, parts.den).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Greatest common divisor, binary-free Euclid; `gcd(x, 0) = x`.
