@@ -9,7 +9,7 @@ use ezsdr_kernel::time::{ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthori
 use crate::device::{FakeConfig, FakeDevice};
 use super::core::Core;
 
-pub(super) fn rig() -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>) {
+pub(super) fn rig() -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let clocks = Arc::new(ClockRegistry::new());
     let root = clocks.allocate_id();
     clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(),
@@ -23,7 +23,7 @@ pub(super) fn rig() -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>) {
         kinds.kinds().into_iter().map(move |k| (ResourceId::parse(s).unwrap(), k))).collect();
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
     let core = Arc::new(Core::new(device.clone(), ResourceId::parse("usrp").unwrap(),
-        root, time.clone(), clocks, events, Arc::new(BTreeMap::new()), Vec::new(),
+        root, time.clone(), clocks, events.clone(), Arc::new(BTreeMap::new()), Vec::new(),
         crate::profile::Profile::X310Ubx.description(2_000)));
-    (core, device, time)
+    (core, device, time, events)
 }

@@ -989,7 +989,10 @@ fn ur_21_late_policies_on_the_device_lead() {
     wait(&mut run, ms(60));
     let manifest = run.finish();
     let outcomes: Vec<_> = time_errors(&manifest).iter().map(|p| p.outcome).collect();
-    assert_eq!(outcomes, [TimeErrorOutcome::Drop, TimeErrorOutcome::SendAsap], "{outcomes:?}");
+    // Booking moved the repeat to receipt + 2 ms; ownership transfer consumes
+    // some of that lead, so first dispatch moves it again instead of lying OnTime.
+    assert_eq!(outcomes, [TimeErrorOutcome::Drop, TimeErrorOutcome::SendAsap,
+        TimeErrorOutcome::SendAsap], "{outcomes:?}");
 }
 
 #[test]

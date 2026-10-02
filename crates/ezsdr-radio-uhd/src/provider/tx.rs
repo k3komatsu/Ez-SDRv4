@@ -226,7 +226,26 @@ impl Tx {
             }
             if clock.instant(k) - now < window {
                 let held = self.held.remove(&k).expect("the first key");
-                self.open = Some(Open { held, next: k, first: true });
+                // Continuations have no timed SOB; a new device burst must still
+                // have its device lead after waiting in the owner's queue.
+                let held = if self.continues_at == Some(k) {
+                    held
+                } else {
+                    let Some(held) = self.dispatch_start(clock, held) else { return true };
+                    held
+                };
+                if e1_k.is_some_and(|e1| held.k >= e1) {
+                    // A late-policy move cannot send on the old clock past its cut.
+                    // The pending switch will cancel this old-clock reservation.
+                    self.held.insert(held.k, held);
+                    return true;
+                }
+                if self.held.keys().next().is_some_and(|k| *k < held.k) {
+                    self.held.insert(held.k, held);
+                    return true;
+                }
+                let next = held.k;
+                self.open = Some(Open { held, next, first: true });
                 let held_cut = self.held.keys().next().copied();
                 self.send(clock, held_cut, e1_k);
                 return true;
@@ -426,6 +445,54 @@ impl Tx {
         self.core.emit(&self.core.tx_id, kinds::TIME_ERROR, Severity::Error, payload);
     }
 
+    /// UR-21: booking's verdict can expire before the first device hand-over.
+    fn dispatch_start(&self, clock: Clock, mut held: Held) -> Option<Held> {
+        let lead = self.core.ticks(DEVICE_LEAD_NS);
+        let now = clock.at_or_after(self.core.now().max(clock.origin - lead));
+        let outcome = held.policy.decide(&self.core.clocks,
+            TimePoint::new(clock.domain, held.k), TimePoint::new(clock.domain, now),
+            Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS));
+        match outcome {
+            Ok(LateOutcome::OnTime {}) => Some(held),
+            Ok(late @ LateOutcome::SendAsap { late_by }) => {
+                let start = clock.at_or_after(clock.instant(now) + lead);
+                let mut reservations = lock(&self.core.held);
+                if reservations.contains(&(held.domain, start)) {
+                    reservations.remove(&(held.domain, held.k));
+                    drop(reservations);
+                    self.time_error(TimeErrorOutcome::Refused, late_by.ticks, held.target);
+                    self.core.command_rejected("tx_burst", "UR-21: the moved start is a held burst's");
+                    return None;
+                }
+                reservations.remove(&(held.domain, held.k));
+                reservations.insert((held.domain, start));
+                drop(reservations);
+                held.k = start;
+                held.open.late = Some(late);
+                held.open.requested_target = held.open.requested_target.or(Some(held.target));
+                self.time_error(TimeErrorOutcome::SendAsap, late_by.ticks, held.target);
+                Some(held)
+            }
+            Ok(LateOutcome::Drop { late_by }) => {
+                self.forget(&held);
+                self.time_error(TimeErrorOutcome::Drop, late_by.ticks, held.target);
+                self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-21: the late policy dropped the burst" }));
+                None
+            }
+            Ok(LateOutcome::PlanViolation { late_by }) => {
+                self.forget(&held);
+                self.time_error(TimeErrorOutcome::PlanViolation, late_by.ticks, held.target);
+                self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-21: the planned burst arrived late" }));
+                None
+            }
+            Err(error) => {
+                self.forget(&held);
+                self.core.command_rejected("tx_burst", &format!("UR-21: {error}"));
+                None
+            }
+        }
+    }
+
     /// RM-15 as VE-2 amends it: a burst that would start while another is open is
     /// decided again here, against the first sample not yet handed over.
     fn preempt(&mut self, clock: Clock, h: i64, next: i64) {
@@ -441,15 +508,18 @@ impl Tx {
             match outcome {
                 Ok(LateOutcome::OnTime {}) => held.k = next,
                 Ok(late @ LateOutcome::SendAsap { late_by }) => {
-                    if self.held.contains_key(&next) {
-                        self.forget(&held);
+                    let mut reservations = lock(&self.core.held);
+                    if reservations.contains(&(held.domain, next)) {
+                        reservations.remove(&(held.domain, held.k));
+                        drop(reservations);
                         self.time_error(TimeErrorOutcome::Refused, late_by.ticks, held.target);
                         return self.core.command_rejected("tx_burst", "UR-21: the moved start is a held burst's");
                     }
+                    reservations.remove(&(held.domain, held.k));
+                    reservations.insert((held.domain, next));
+                    drop(reservations);
                     self.time_error(TimeErrorOutcome::SendAsap, late_by.ticks, held.target);
-                    self.forget(&held);
                     held.k = next;
-                    lock(&self.core.held).insert((held.domain, next));
                     held.open.late = Some(late);
                     held.open.requested_target = held.open.requested_target.or(Some(held.target));
                 }
@@ -617,6 +687,94 @@ mod tests {
     }
 
     #[test]
+    fn ur_21_first_dispatch_rechecks_all_late_policies() {
+        for (policy, expected) in [(LatePolicy::DropAndFlag, "drop"),
+            (LatePolicy::RejectAtPlan, "plan_violation"),
+            (LatePolicy::SendAsapAndFlag, "send_asap")] {
+            let (core, device, time, events) = super::super::test_support::rig();
+            device.tx_open(1).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            let clock = core.register(Dir::Tx, 200, 0).unwrap();
+            let (_to_tx, cmds) = std::sync::mpsc::channel();
+            let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+            lock(&core.held).insert((clock.domain, 20_000));
+            tx.command(TxCmd::Burst(held(&clock, 20_000, 10_000, policy)));
+            assert!(!tx.step(), "still outside the in-flight window");
+            time.advance_to(core.at(core.ticks(40_000_000))).unwrap();
+            assert!(tx.step());
+            let events = events.drain();
+            assert!(events.iter().any(|e| e.payload["outcome"] == expected));
+            if policy == LatePolicy::SendAsapAndFlag {
+                let open = tx.open.as_ref().unwrap();
+                assert_eq!(open.held.k, 42_000);
+                assert_eq!(open.held.open.requested_target, Some(TimePoint::new(clock.domain, 20_000)));
+                assert!(matches!(open.held.open.late, Some(ezsdr_kernel::stream::LateOutcome::SendAsap { .. })));
+            } else {
+                assert!(tx.open.is_none());
+                assert!(!device.calls().iter().any(|call| call.starts_with("tx_send ")));
+            }
+            assert!(!lock(&core.held).contains(&(clock.domain, 20_000)));
+        }
+    }
+
+    #[test]
+    fn ur_21_first_dispatch_cannot_move_past_a_cold_switch() {
+        let (core, device, time, _) = super::super::test_support::rig();
+        device.tx_open(1).unwrap();
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        lock(&core.held).insert((clock.domain, 17_000));
+        tx.command(TxCmd::Burst(held(&clock, 17_000, 10_000, LatePolicy::SendAsapAndFlag)));
+        tx.command(TxCmd::Switch { e1: core.ticks(20_000_000), clock: None,
+            channels: 0, settings: Settings::default() });
+        time.advance_to(core.at(core.ticks(19_000_000))).unwrap();
+        assert!(tx.step());
+        assert!(tx.open.is_none());
+        assert!(!tx.step());
+        time.advance_to(core.at(core.ticks(20_000_000))).unwrap();
+        assert!(tx.step());
+        assert!(lock(&core.held).is_empty());
+        assert!(!device.calls().iter().any(|c| c.starts_with("tx_send ")));
+    }
+
+    #[test]
+    fn ur_21_first_dispatch_preserves_an_on_time_start() {
+        let (core, device, time, events) = super::super::test_support::rig();
+        device.tx_open(1).unwrap();
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        lock(&core.held).insert((clock.domain, 20_000));
+        tx.command(TxCmd::Burst(held(&clock, 20_000, 10_000, LatePolicy::DropAndFlag)));
+        time.advance_to(core.at(core.ticks(18_000_000))).unwrap();
+        assert!(tx.step());
+        assert_eq!(tx.open.as_ref().unwrap().held.k, 20_000);
+        assert!(tx.open.as_ref().unwrap().held.open.late.is_none());
+        assert!(events.drain().is_empty());
+        assert!(device.calls().iter().any(|c| c.contains("at=4000000 sob=true")));
+    }
+
+    #[test]
+    fn ur_21_first_dispatch_refuses_a_moved_start_collision() {
+        let (core, device, time, events) = super::super::test_support::rig();
+        device.tx_open(1).unwrap();
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        for k in [20_000, 42_000] {
+            lock(&core.held).insert((clock.domain, k));
+            tx.command(TxCmd::Burst(held(&clock, k, 1_000, LatePolicy::SendAsapAndFlag)));
+        }
+        time.advance_to(core.at(core.ticks(40_000_000))).unwrap();
+        assert!(tx.step());
+        assert!(tx.open.is_none());
+        assert!(tx.held.contains_key(&42_000));
+        assert!(events.drain().iter().any(|e| e.payload["outcome"] == "refused"));
+        assert!(!device.calls().iter().any(|call| call.starts_with("tx_send ")));
+    }
+
+    #[test]
     fn ur_21_a_moved_start_on_a_held_burst_s_is_refused() {
         // RM-15 as VE-2 amends it: B, late against the open burst A's next sample, moves
         // there under `send_asap`; C is already held at that sample, so B is refused
@@ -661,6 +819,8 @@ mod tests {
         // C at A's next sample, B before it: both queued before the step that decides B.
         tx.command(TxCmd::Burst(held(&clock, next, 1_000, LatePolicy::DropAndFlag)));
         tx.command(TxCmd::Burst(held(&clock, next - 500, 1_000, LatePolicy::SendAsapAndFlag)));
+        lock(&core.held).insert((clock.domain, next));
+        lock(&core.held).insert((clock.domain, next - 500));
         assert!(tx.step());
         assert!(tx.held.contains_key(&next), "C keeps its start");
         assert_eq!(tx.held.len(), 1, "B is not held: {:?}", tx.held.keys().collect::<Vec<_>>());

@@ -604,7 +604,7 @@ mod tests {
     #[test]
     fn ur_25_overlapping_cold_changes_are_refused_before_bookkeeping() {
         for dir in [Dir::Rx, Dir::Tx] {
-            let (core, _, time) = crate::provider::test_support::rig();
+            let (core, _, time, _) = crate::provider::test_support::rig();
             let clock = core.register(dir, 200, 0).unwrap();
             { let mut streams = lock(&core.streams);
                 match dir { Dir::Rx => streams.rx = Some(clock), Dir::Tx => streams.tx = Some(clock) }
