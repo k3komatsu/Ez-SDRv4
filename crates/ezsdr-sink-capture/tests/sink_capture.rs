@@ -1241,3 +1241,32 @@ fn hd_16_a_discarded_request_is_answered() {
     let answers: Vec<(String, serde_json::Value)> = rig.env.events.drain().iter().map(|event| (event.kind.as_str().to_owned(), event.payload["request"].clone())).collect();
     assert_eq!(answers, vec![(CAPTURE_WRITTEN.to_owned(), json!(0)), (REQUEST_REJECTED.to_owned(), json!(1))]);
 }
+
+#[test]
+fn hd_10_a_colliding_request_preserves_the_completed_recording() {
+    let mut rig = Rig::new("collision", BTreeMap::new());
+    let mut other = CaptureSink::from_binding(&binding(rig._temp.path(), false, None)).unwrap();
+    let other_link = Arc::new(TestLink::new(BackPressure::DropOldest, 8));
+    let mut own = fragment(sample_count(2));
+    own.id = ident("rec_0");
+    own.content["id"] = json!("rec_0");
+    other.prepare(&own, rig.env.context(vec![attached(
+        "rec_0", "in", Endpoint::StreamIn(other_link.clone()),
+    )])).unwrap();
+    other_link.publish(ramp_block(&mut rig.pool, rig.env.sample_clock,
+        0, 0.0, 2, BlockFlags::NONE, None));
+    other.step(TimePoint::new(rig.env.root, 0)).unwrap();
+    let original = other.stop(StopMode::Orderly).unwrap().remove(0);
+    let path = Path::new(original.uri.strip_prefix("file://").unwrap());
+    let data = fs::read(path).unwrap();
+    let meta_path = path.with_extension("sigmf-meta");
+    let meta = fs::read(&meta_path).unwrap();
+
+    rig.env.actions.push(request(Value::Int(3), None));
+    rig.push_ramp(2, 3);
+    assert!(rig.step().unwrap_err().message.contains("cannot create"));
+    assert_eq!(fs::read(path).unwrap(), data);
+    assert_eq!(ContentHash::of_bytes(&data), original.hash);
+    assert_eq!(fs::read(meta_path).unwrap(), meta);
+    assert!(rig.stop(StopMode::Abort).is_empty());
+}

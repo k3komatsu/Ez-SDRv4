@@ -401,7 +401,7 @@ impl CaptureSink {
         let file_name = format!("{safe_run}_{id}.sigmf-data");
         let absolute = std::path::absolute(self.dir.join(file_name))
             .map_err(|error| ModuleError::rejected(format!("HD-10: cannot resolve capture path: {error}")))?;
-        let file = File::create(&absolute).map_err(|error| {
+        let file = File::create_new(&absolute).map_err(|error| {
             ModuleError::rejected(format!("HD-10: cannot create {}: {error}", absolute.display()))
         })?;
         let capture = self.queue.front_mut().expect("a capture is queued");
