@@ -390,6 +390,48 @@ Python の B7 は同じ container を `-w /bench -e PYTHONPATH=/work/python -e E
 
 - 検討して採らなかったもの：FakeDevice の時間を遅くする（例：1/10 倍速）．`DeviceAuthority` は device の時計が公称の 200 MHz で進むとして外挿するので，fake だけ遅くすると壊れる．Authority と Provider の wall-clock の待ちまでそろえると，host の期限を 10 倍緩めることになり，Mock が実機より緩くなる（§13，§34）．決定的な検査は Simulation Engine か，`Tx::step()` を直接回す unit test で行う．
 
+**Bug-fix maintenance, 2026-10-03 (owner-authorized fixes, review, commit and push)**
+
+The preceding Phase 7 maintenance table records the findings before this audit.
+Its items 1 and 2 are now fixed: first dispatch reapplies the burst's late policy,
+and underflow/loss or an expired transmit timeline abandons the damaged device
+burst rather than resuming untimed payload. Hardware H1–H5 remain Phase 8 inputs;
+these fixes do not claim a new hardware measurement.
+
+GitHub issues [#1–#10](https://github.com/k3komatsu/Ez-SDRv4/issues?q=is%3Aissue)
+were handled in order, with a separate GPT-6.1 Sol review before each fix commit:
+
+| Issue | Fix | Commit |
+|---|---|---|
+| #1 | Refuse an existing capture artifact path; preserve its data and metadata | `5809f0e` |
+| #2 | Validate and reduce deserialized Rational values | `c1e905a` |
+| #3 | Refuse overlapping same-direction cold changes until the owner finishes | `930457a` |
+| #4 | Python `samples()` requires every channel's validity to cover the entire span | `56ae95f` |
+| #5 | Reject runtime updates whose class differs from the target's declaration | `8bb7571` |
+| #6 | Recheck the first timed TX dispatch; preserve cold cuts and replace reservations atomically | `40dbb0d` |
+| #7 | Refuse negative ClockRelation measurement bounds without changing frozen schemas | `90e934e` |
+| #8 | End damaged/expired TX timelines, preserving independent future held bursts | `99511ab` |
+| #9 | Record RX stop issuance once across LateCommand, repeated Abort and Shutdown | `535d4f3` |
+| #10 | Correct timing measurements; prove control ordering with a controlled clock; report measured stream prerequisites before waveform/index assertions | this maintenance commit |
+
+Final software validation: **916 passed, 0 failed, 0 ignored**, both stable and
+Rust 1.85.0; Python **28 passed** on 3.9 and 3.13 against the server built from
+this tree; UHD 4.10 API/link tests **4 passed**; Clippy with `-D warnings` clean
+for the workspace and for the UHD/server feature build. All reviews returned
+PASS; #6's cold-cut/reservation findings and #7's schema-description finding
+were fixed and re-reviewed before commit.
+
+Maintenance item 5's host-load limitation remains explicit. The 128-thread
+stress probe of 134 wall-clock trials had **100 passed, 34 failed**, including
+8 `TIMING_PRECONDITION_UNMET` diagnostics. This is not a passing stress run or
+proof that the host caused every failure. No fake clock/envelope was relaxed,
+no trial was ignored, and a missed prerequisite remains a test failure. The
+subsequent diagnostic regression brings the ordinary fake suite to 135 trials,
+all passing in the normal stable/MSRV runs. See
+[the test guide](crates/ezsdr-radio-uhd/tests/README.md) for commands and failure
+interpretation. Audit evidence is in `~/.cache/ezsdr-audits/2026-10-03-3b0444e/`;
+fix-validation logs are in `~/.cache/ezsdr-fixes/2026-10-03/`.
+
 **5. 決まったこと・owner の判断待ち**
 
 - 決定済み（2026-09-30）：実機は **X300 + OBX 1枚のループバック**（UBX 2 枚 → CBX 1枚 → OBX と変更．profile `x310-obx`，`x310-cbx` は予備），X300 は X310 の代わりで可，FPGA 書き換え承認．

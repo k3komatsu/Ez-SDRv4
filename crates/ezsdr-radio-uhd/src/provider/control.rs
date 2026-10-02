@@ -596,9 +596,32 @@ impl Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::Device;
     struct NoActions;
     impl ActionReceiver for NoActions {
         fn recv(&self) -> Option<Action> { None }
+    }
+
+    #[test]
+    fn ur_14_booking_does_not_wait_for_a_future_cold_switch() {
+        let (core, device, _, _) = crate::provider::test_support::rig();
+        let clock = core.register(Dir::Rx, 200, 0).unwrap();
+        lock(&core.streams).rx = Some(clock);
+        device.rx_open(1).unwrap();
+        let (to_tx, _tx) = std::sync::mpsc::channel();
+        let (to_rx, rx) = std::sync::mpsc::channel();
+        let mut config = core.description.defaults.clone();
+        config.insert(super::super::core::key("radio.rx.channels"), Value::Int(1));
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false);
+        control.book_cold(super::super::core::key("radio.rx.sample_rate_hz"), Value::Num(2e6),
+            Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
+        control.book_timed(super::super::core::key("radio.rx.gain_db"), Value::Num(3.0), None);
+        control.release();
+        assert_eq!(core.now(), 0, "booking never advanced to the future device instant");
+        assert!(matches!(rx.try_recv().unwrap(), RxCmd::Switch { e1, .. } if e1 == core.ticks(1_000_000_000)));
+        assert!(lock(&core.rec).applied.iter().any(|r|
+            r["key"] == "radio.rx.gain_db" && r["issued"] == true && r["at"]["ticks"] == core.ticks(2_000_000)));
+        assert!(lock(&core.rec).rejected.is_empty());
     }
 
     #[test]

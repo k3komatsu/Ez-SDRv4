@@ -302,6 +302,26 @@ pub fn events_of(manifest: &Manifest, name: &str) -> Vec<Event> {
     manifest.events.delivered.iter().filter(|e| e.kind == kind(name)).cloned().collect()
 }
 
+/// Check the measured prerequisites before interpreting a continuous waveform or
+/// an exact capture index. Failure remains a test failure, with raw evidence;
+/// it does not prove the host is at fault or rule out a runtime regression.
+pub fn require_stream_timing(manifest: &Manifest, trial: &str, tx: bool) {
+    let mut evidence: Vec<_> = manifest.events.delivered.iter().filter(|e|
+        (e.kind == kind("radio.LATE_COMMAND") && e.payload["key"].is_null())
+        || e.kind == kind("radio.RX_OVERFLOW")
+        || (tx && e.kind == kind("radio.TX_UNDERFLOW"))
+        || (tx && e.kind == kind("radio.TIME_ERROR") && matches!(
+            e.payload["outcome"].as_str(), Some("drop" | "plan_violation" | "late_at_device"))))
+        .map(|e| json!({ "kind": e.kind, "time": e.time, "payload": e.payload })).collect();
+    if tx {
+        evidence.extend(section(manifest, "rejected").as_array().unwrap().iter()
+            .filter(|r| r["reason"].as_str().is_some_and(|s| s.contains("transmit timeline expired"))).cloned());
+    }
+    assert!(evidence.is_empty(),
+        "TIMING_PRECONDITION_UNMET ({trial}): exact indices/uninterrupted playback require on-time, loss-free streams. Evidence: {evidence:?}; async: {}. Host scheduling or a runtime regression may cause this; see tests/README.md. The trial remains a test failure.",
+        section(manifest, "async"));
+}
+
 pub fn section<'a>(manifest: &'a Manifest, suffix: &str) -> &'a Json {
     &manifest.sections[&Namespace::parse(&format!("ezsdr.radio.uhd.usrp.{suffix}")).unwrap()]
 }
@@ -463,6 +483,7 @@ pub fn diagnose(what: &str, samples: &[(f32, f32)], wave: &[(f32, f32)]) {
 pub fn rehearse_receive_at_t0(device: Arc<dyn Device>) -> Manifest {
     let dir = TempDir::new();
     let manifest = captured(spec_run(&receive_spec(1, 1e6, bench_hz(&*device), Some(10_000)), &bench_profile(&*device, &dir, json!({}), json!({}), false), device, BTreeMap::new()));
+    require_stream_timing(&manifest, "B3 receive at T0", false);
     assert!(matches!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} }), "{:?}", manifest.termination);
     let map = &capture_of(&manifest, "rec").continuity[0];
     assert_eq!(map.first.ticks, 0, "the capture starts at receive sample 0");
@@ -484,6 +505,7 @@ pub fn rehearse_capture_at_a_sample_index(device: Arc<dyn Device>) -> Manifest {
                     "key": "sink.capture_samples", "value": 10_000, "class": "block_boundary" }
     }]);
     let manifest = captured(spec_run(&spec, &bench_profile(&*device, &dir, json!({}), json!({}), false), device, BTreeMap::new()));
+    require_stream_timing(&manifest, "B4 capture at an index", false);
     let map = &capture_of(&manifest, "rec").continuity[0];
     assert_eq!(map.first.ticks, 50_000);
     assert_eq!(map.end.ticks, 60_000);
@@ -527,6 +549,7 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
     capture(&mut burst, 10_000, 5_000);
     let inputs = BTreeMap::from([(waveform.hash.clone(), bytes.clone())]);
     let heard = captured(spec_run(&burst, &bench_profile(&*device, &dir, json!({}), bench_envelope(&*device), false), device.clone(), inputs.clone()));
+    require_stream_timing(&heard, "B6 single-burst loopback", true);
     let samples = read_capture(&capture_of(&heard, "rec"), 1).remove(0);
     if !exact {
         diagnose("B6 burst", &samples, &wave);
@@ -542,6 +565,7 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
     let mut repeat = with_burst(with_tx(receive_spec(1, 1e6, bench_hz(&*device), None), 1e6), &waveform, true, "send_asap_and_flag", 1_000);
     capture(&mut repeat, 1_000, 4_000);
     let looped = captured(spec_run(&repeat, &bench_profile(&*device, &dir, json!({}), bench_envelope(&*device), false), device, inputs));
+    require_stream_timing(&looped, "B6 repeat loopback", true);
     let samples = read_capture(&capture_of(&looped, "rec"), 1).remove(0);
     if !exact {
         diagnose("B6 repeat", &samples, &wave);
@@ -589,6 +613,7 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
         println!("B7 refused: {:?}", refused.outcome);
     }
     let manifest = run.finish();
+    require_stream_timing(&manifest, "B7 session loopback", true);
     let samples = read_capture(&capture_of(&manifest, "rec"), 1).remove(0);
     if !exact {
         diagnose("B7 capture", &samples, &wave);

@@ -1,7 +1,8 @@
 //! Spec 18 §6: every UR rule through the real coordinator on `FakeDevice`, with an
 //! Assembly built as the server's catalogue builds it (the capture Sink, the host
 //! Link, `DeviceAuthority` and `UhdRadio` on one device), unless a test says "unit".
-//! Timings are wall-clock; each assertion allows a loaded machine's jitter.
+//! Timings are wall-clock. Stream-integrity trials require the host to meet the
+//! device's deadlines; see tests/README.md for timing-precondition diagnostics.
 
 mod common;
 
@@ -199,9 +200,9 @@ fn authority(config: FakeConfig, time_source: &str) -> (DeviceAuthority, Arc<Fak
 fn ur_07_the_authority_paces_to_the_device() {
     let (authority, _, root) = authority(FakeConfig::default(), "internal");
     let time = authority.time();
+    let begun = Instant::now();
     let at = TimePoint::new(root, time.now(root).unwrap().ticks + ms(30));
     time.schedule(at, Box::new(|_| {})).unwrap();
-    let begun = Instant::now();
     assert_eq!(authority.next_wakeup(), Some(at));
     assert!(begun.elapsed() >= Wall::from_millis(29), "{:?}", begun.elapsed());
     assert!(time.now(root).unwrap().ticks >= at.ticks);
@@ -696,10 +697,11 @@ fn ur_14_the_control_thread_never_waits_for_a_device_instant() {
     past_t0(&mut run, ms(1));
     // The switch is a restart lead (50 ms) away; booking it and the next Action takes
     // uhd-control a few milliseconds, and KC-21a returns each call when it has booked.
-    let begun = Instant::now();
     assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
     assert!(admitted(&run.submit(set("radio.rx.gain_db", Value::Num(3.0)), None).unwrap()));
-    assert!(begun.elapsed() < Wall::from_millis(30), "{:?}", begun.elapsed());
+    // Command ordering is proved with a controlled clock by the library's
+    // ur_14_booking_does_not_wait_for_a_future_cold_switch. A wall-time upper
+    // bound here would also measure whether the host scheduled these threads.
     wait(&mut run, ms(200));
     let manifest = run.finish();
     let clocks: Vec<_> = manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).collect();
@@ -1075,9 +1077,27 @@ fn ur_22_a_single_burst_ends_with_end_of_burst() {
     let _ = send(&mut run, "send", Some(ms(20)), &tone(3_000));
     wait(&mut run, ms(60));
     let manifest = run.finish();
-    assert!(calls(&device, "tx_send").last().unwrap().ends_with("eob=true"), "{:?}", calls(&device, "tx_send"));
-    assert_eq!(bursts(&manifest)[0].end, BurstEnd::Eob);
-    assert_eq!(bursts(&manifest)[0].samples, 3_000);
+    require_stream_timing(&manifest, "single burst", true);
+    let sends = calls(&device, "tx_send");
+    assert!(sends.last().is_some_and(|s| s.ends_with("eob=true")), "{sends:?}");
+    let records = bursts(&manifest);
+    assert_eq!(records.len(), 1, "records={records:?}; sends={sends:?}; rejected={}", section(&manifest, "rejected"));
+    assert_eq!(records[0].end, BurstEnd::Eob);
+    assert_eq!(records[0].samples, 3_000);
+}
+
+#[test]
+fn timing_precondition_failure_reports_evidence_and_still_fails() {
+    let (mut run, _, _dir) = tx_session(FakeConfig::default());
+    // At most 1 ms ahead of receipt, below the real 2 ms device lead.
+    let _ = send(&mut run, "send", Some(ms(1)), &tone(10));
+    let manifest = run.finish();
+    assert!(time_errors(&manifest).iter().any(|p| p.outcome == TimeErrorOutcome::Drop));
+    let failure = std::panic::catch_unwind(|| require_stream_timing(&manifest, "diagnostic regression", true))
+        .expect_err("a missed prerequisite must fail, not skip or pass the trial");
+    let message = failure.downcast_ref::<String>().unwrap();
+    assert!(message.contains("TIMING_PRECONDITION_UNMET (diagnostic regression)"));
+    assert!(message.contains("radio.TIME_ERROR") && message.contains("drop"));
 }
 
 #[test]

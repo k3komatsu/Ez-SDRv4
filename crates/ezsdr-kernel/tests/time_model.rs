@@ -349,7 +349,7 @@ fn tm_14_relation_refuses_negative_measurement_bounds() {
             if ticks < 0 {
                 assert_eq!(result, Err(TimeError::Overflow));
             } else {
-                assert!(result.unwrap().uncertainty.ticks >= ticks + 1);
+                assert!(result.unwrap().uncertainty.ticks > ticks);
             }
         }
     }
