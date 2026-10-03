@@ -1,7 +1,7 @@
 //! Validates and merges Module prepare reports before the Run proceeds (SB-30, SB-41, SB-42).
 
 use std::cmp::Ordering::{Equal, Less};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::binding::{AdmissionResult, BindingProfile, CheckStage, Violation, satisfies};
 use crate::module_api::ModuleError;
@@ -87,6 +87,35 @@ pub(super) fn collect_prepare(
         }
     }
     let mut violations = Vec::new();
+    // Authority fragments have no lifecycle (MA-2); every other fragment reports
+    // exactly once. Check identities before any first/last-wins map can lose them.
+    let expected: BTreeSet<_> = spec.resources.keys().cloned()
+        .chain(spec.outputs.iter().map(|output| output.id.clone()))
+        .chain(profile.placements.islands.iter().map(|island| {
+            crate::spec::Ident::parse(&format!("island_{}", island.id.local))
+                .expect("an Island's numeric local id forms an Ident")
+        }))
+        .collect();
+    let mut seen = BTreeSet::new();
+    let identity_violation = |reason| Violation {
+        check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
+        key: None, requested: None, reason,
+    };
+    for report in &ok {
+        if !seen.insert(report.fragment.clone()) {
+            violations.push(identity_violation(format!(
+                "SB-41: duplicate PrepareReport for fragment {}", report.fragment)));
+        } else if !expected.contains(&report.fragment) {
+            violations.push(identity_violation(format!(
+                "SB-41: unexpected PrepareReport for fragment {}", report.fragment)));
+        }
+    }
+    for missing in expected.difference(&seen) {
+        violations.push(identity_violation(format!("SB-41: no PrepareReport for fragment {missing}")));
+    }
+    if !violations.is_empty() {
+        return Err(PrepareError::Violations(violations));
+    }
     // SB-46 names "the stage", not "the validate stage": a Provider whose `prepare`
     // reports a coercion on a `reject` key must be refused here as well. SB-44 makes
     // the two agree only as a producer obligation, so the gap is reachable.
@@ -176,18 +205,8 @@ pub(super) fn collect_prepare(
         // merge here interpreted it per resource against data that cannot tell two
         // resources apart, so two channels asking their own line's declared rate
         // refused each other. A Provider fragment's id is the resource name.
-        // SB-41: one report per fragment. A resource with none was not prepared, or its
-        // report names another fragment, and every check below would be skipped for it
-        // in silence (D105).
-        let Some(report) = merged.reports.iter().find(|r| r.fragment == *name) else {
-            violations.push(Violation {
-                check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
-                key: None,
-                requested: None,
-                reason: format!("SB-41: no PrepareReport for fragment {name}"),
-            });
-            continue;
-        };
+        let report = merged.reports.iter().find(|r| r.fragment == *name)
+            .expect("SB-41 checked every lifecycle fragment's report");
         for (key, declared) in &node.capabilities {
             let Some(applied) = report.effective.get(key) else {
                 continue;

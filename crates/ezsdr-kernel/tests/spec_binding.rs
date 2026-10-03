@@ -1241,6 +1241,58 @@ fn sb_41_a_resource_with_no_report_is_refused() {
 }
 
 #[test]
+fn sb_41_duplicate_prepare_reports_are_refused_before_merging() {
+    let spec = minimal_spec();
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let admission = validate(&spec, &profile, &fx.inputs(&providers)).unwrap();
+    let report = |count| Ok(PrepareReport {
+        fragment: id("radio"),
+        effective: [(key("test.count"), Value::Int(count))].into_iter().collect(),
+        coercions: Vec::new(),
+        warnings: Vec::new(),
+    });
+    for (first, last) in [(2, 99), (99, 2), (2, 2)] {
+        let err = collect_prepare(vec![report(first), report(last)], &spec, &profile,
+            &fx.inputs(&providers), &admission).expect_err("duplicate fragment report");
+        assert!(matches!(err, ezsdr_kernel::plan::PrepareError::Violations(v)
+            if v.iter().any(|x| x.reason == "SB-41: duplicate PrepareReport for fragment radio")));
+    }
+}
+
+#[test]
+fn sb_41_sink_reports_are_required_and_unknown_reports_are_refused() {
+    let mut spec = minimal_spec();
+    spec.outputs.push(output("rec"));
+    let mut profile = profile_binding(&["radio"]);
+    profile.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
+    let sink = cf32_sink();
+    let mut fx = Fixture::new();
+    fx.sinks.insert(id("rec"), &sink);
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let admission = validate(&spec, &profile, &fx.inputs(&providers)).unwrap();
+    let report = |name: &str| Ok(PrepareReport {
+        fragment: id(name), effective: BTreeMap::new(),
+        coercions: Vec::new(), warnings: Vec::new(),
+    });
+    for (reports, reason) in [
+        (vec![report("radio")], "SB-41: no PrepareReport for fragment rec"),
+        (vec![report("radio"), report("rec"), report("other")],
+            "SB-41: unexpected PrepareReport for fragment other"),
+    ] {
+        let err = collect_prepare(reports, &spec, &profile, &fx.inputs(&providers), &admission)
+            .expect_err("exactly one report per lifecycle fragment");
+        assert!(matches!(err, ezsdr_kernel::plan::PrepareError::Violations(v)
+            if v.iter().any(|x| x.reason == reason)));
+    }
+    collect_prepare(vec![report("radio"), report("rec")], &spec, &profile,
+        &fx.inputs(&providers), &admission).expect("complete reports are accepted");
+}
+
+#[test]
 fn sb_36_needs_resolves_across_instances() {
     let mut req = resource("test.device", &[]);
     req.needs.insert(

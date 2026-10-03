@@ -3858,3 +3858,62 @@ fn kf_03_the_parents_checks_judge_the_child() {
     assert!(serde_json::to_string(&child.sections[&ns("ezsdr.failure")]).unwrap().contains("exceeds the declared ceiling"));
     let _ = run.finish();
 }
+
+struct MisnamedPrepareSink(RecordingSink, Ident);
+impl ezsdr_kernel::module_api::Sink for MisnamedPrepareSink {
+    fn descriptor(&self) -> &ezsdr_kernel::module_api::SinkDescriptor { self.0.descriptor() }
+    fn prepare(&mut self, f: &ezsdr_kernel::plan::Fragment, ctx: ezsdr_kernel::module_api::PrepareContext)
+        -> Result<ezsdr_kernel::plan::PrepareReport, ezsdr_kernel::module_api::ModuleError> {
+        let mut report = self.0.prepare(f, ctx)?;
+        report.fragment = self.1.clone();
+        report.effective.insert(Key::parse("test.count").unwrap(), Value::Int(99));
+        Ok(report)
+    }
+    fn arm(&mut self) -> Result<(), ezsdr_kernel::module_api::ModuleError> { self.0.arm() }
+    fn start(&mut self) -> Result<(), ezsdr_kernel::module_api::ModuleError> { self.0.start() }
+    fn step(&mut self, t: TimePoint) -> Result<ezsdr_kernel::module_api::StepOutcome, ezsdr_kernel::module_api::ModuleError> { self.0.step(t) }
+    fn stop(&mut self, m: ezsdr_kernel::module_api::StopMode) -> Result<Vec<ezsdr_kernel::manifest::ArtifactRef>, ezsdr_kernel::module_api::ModuleError> { self.0.stop(m) }
+    fn cleanup(&mut self) { self.0.cleanup(); }
+}
+#[test]
+fn kc_12_a_misnamed_prepare_report_is_refused_before_start() {
+    let (spec, profile) = output_docs();
+    let probe = Probe::new();
+    let mut assembly = output_assembly(&probe, None, None);
+    assembly.sinks.insert(Ident::parse("rec").unwrap(), Box::new(MisnamedPrepareSink(RecordingSink::new("rec", &probe), Ident::parse("radio").unwrap())));
+    let run = start_spec_run(&spec, &profile, assembly).unwrap();
+    assert!(matches!(run.state(), RunState::CleanedUp {
+        termination: Termination::Failed { stage: Stage::Prepare }
+    }));
+    assert!(!probe.lines().iter().any(|line| line.contains(":start")));
+    let manifest = run.finish();
+    assert!(manifest.termination.cleanup_failures.is_empty());
+}
+
+#[test]
+fn kc_12_prepare_report_ownership_is_checked_before_collecting() {
+    // Swapped Sink IDs would produce unique, complete reports. Set membership
+    // alone cannot establish that a report belongs to the fragment just called.
+    let (mut spec, mut profile) = output_docs();
+    let mut second_output = spec["outputs"][0].clone();
+    second_output["id"] = serde_json::json!("rec2");
+    spec["outputs"].as_array_mut().unwrap().push(second_output);
+    profile["bindings"]["rec2"] = profile["bindings"]["rec"].clone();
+    let mut second_link = profile["placements"]["links"][0].clone();
+    second_link["to"]["component"] = serde_json::json!("rec2");
+    profile["placements"]["links"].as_array_mut().unwrap().push(second_link);
+    let probe = Probe::new();
+    let mut assembly = output_assembly(&probe, None, None);
+    for (name, returned) in [("rec", "rec2"), ("rec2", "rec")] {
+        assembly.sinks.insert(Ident::parse(name).unwrap(), Box::new(MisnamedPrepareSink(
+            RecordingSink::new(name, &probe), Ident::parse(returned).unwrap())));
+    }
+    let run = start_spec_run(&spec, &profile, assembly).unwrap();
+    assert!(matches!(run.state(), RunState::CleanedUp {
+        termination: Termination::Failed { stage: Stage::Prepare }
+    }));
+    let lines = probe.lines();
+    assert!(!lines.iter().any(|line| line.contains("rec2:prepare") || line.contains(":start")));
+    assert!(lines.iter().any(|line| line == "rec:cleanup"));
+    assert!(run.finish().termination.cleanup_failures.is_empty());
+}

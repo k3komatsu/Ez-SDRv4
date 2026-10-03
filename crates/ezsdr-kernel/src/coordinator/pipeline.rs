@@ -842,6 +842,16 @@ impl RunHandle {
             } else {
                 contain(|| slot.prepare(fragment, island.as_ref(), context))
             };
+            let report = report.and_then(|report| {
+                if report.fragment == fragment.id {
+                    Ok(report)
+                } else {
+                    Err(ModuleError::rejected(format!(
+                        "SB-41: prepare of {} returned a report for {}",
+                        fragment.id, report.fragment
+                    )))
+                }
+            });
             let failed = report.is_err();
             reports.push(report);
             if failed {
