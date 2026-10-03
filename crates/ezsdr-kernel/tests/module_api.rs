@@ -523,6 +523,33 @@ fn ma_12_prepare_that_disagrees_with_coerce_is_visible() {
 }
 
 #[test]
+fn ma_12_discrete_capabilities_do_not_cover_a_ranges_interior() {
+    let declared = CapabilityValue::AnyOf { values: vec![Value::Int(1), Value::Int(3)] };
+    let widened = CapabilityValue::Range { min: Value::Int(1), max: Value::Int(3) };
+    let interior = Constraint::Eq { value: Value::Int(2) };
+    assert!(!ezsdr_kernel::binding::satisfies(&interior, &declared).unwrap());
+    assert!(ezsdr_kernel::binding::satisfies(&interior, &widened).unwrap());
+    assert!(check_effective_narrows(&declared, &widened).is_err());
+
+    // Int bounds still permit fractional Num values under SB-6.
+    let adjacent = CapabilityValue::AnyOf { values: vec![Value::Int(1), Value::Int(2)] };
+    let range = CapabilityValue::Range { min: Value::Int(1), max: Value::Int(2) };
+    assert!(check_effective_narrows(&adjacent, &range).is_err());
+
+    let singleton = CapabilityValue::Range { min: Value::Int(3), max: Value::Num(3.0) };
+    assert!(check_effective_narrows(&declared, &singleton).is_ok());
+    assert!(check_effective_narrows(&CapabilityValue::One { value: Value::Num(3.0) }, &singleton).is_ok());
+
+    let booleans = CapabilityValue::AnyOf { values: vec![Value::Bool(false), Value::Bool(true)] };
+    let both = CapabilityValue::Range { min: Value::Bool(false), max: Value::Bool(true) };
+    assert!(check_effective_narrows(&booleans, &both).is_ok());
+    assert!(check_effective_narrows(&CapabilityValue::One { value: Value::Bool(false) }, &both).is_err());
+    let reversed = CapabilityValue::Range { min: Value::Int(3), max: Value::Int(1) };
+    let ordered = CapabilityValue::Range { min: Value::Int(1), max: Value::Int(3) };
+    assert!(check_effective_narrows(&ordered, &reversed).is_err());
+}
+
+#[test]
 fn ma_12_narrowing_triggers_readmission() {
     let declared = CapabilityValue::Range {
         min: Value::Int(1),

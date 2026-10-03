@@ -1,5 +1,6 @@
 //! Validates and merges Module prepare reports before the Run proceeds (SB-30, SB-41, SB-42).
 
+use std::cmp::Ordering::{Equal, Less};
 use std::collections::BTreeMap;
 
 use crate::binding::{AdmissionResult, BindingProfile, CheckStage, Violation, satisfies};
@@ -24,7 +25,19 @@ pub(super) fn check_effective_narrows(
     let narrows = match effective {
         CapabilityValue::One { value } => within(value),
         CapabilityValue::AnyOf { values } => values.iter().all(within),
-        CapabilityValue::Range { min, max } => within(min) && within(max),
+        CapabilityValue::Range { min, max } => {
+            let order = min.partial_cmp_scalar(max);
+            // Endpoints prove containment in another range, not in a discrete set.
+            // Singletons and booleans have no untested interior values.
+            // ponytail: other finite intervals (adjacent strings or floats) are
+            // conservatively refused; exact enumeration if a caller needs them.
+            within(min)
+                && within(max)
+                && matches!(order, Some(Less | Equal))
+                && (matches!(declared, CapabilityValue::Range { .. })
+                    || order == Some(Equal)
+                    || matches!((min, max), (Value::Bool(_), Value::Bool(_))))
+        }
     };
     if narrows {
         Ok(())
