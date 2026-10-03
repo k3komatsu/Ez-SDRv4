@@ -34,10 +34,10 @@ fn arbitrary(s: &str) -> EpochRef {
 /// A registry with a 200 MHz root and one 20 Msps SampleClock at the given origin.
 fn sample_clock(origin: i64) -> (Arc<ClockRegistry>, ClockDomainId, ClockDomainId) {
     let reg = Arc::new(ClockRegistry::new());
-    let root = reg.allocate_id();
+    let root = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(root, rat(MCLK, 1), arbitrary("test")))
         .expect("root");
-    let sc = reg.allocate_id();
+    let sc = reg.allocate_id().unwrap();
     reg.register(ClockDomain::derived(sc, root, rat(10, 1), origin))
         .expect("derived");
     (reg, root, sc)
@@ -944,10 +944,10 @@ fn sc_23a_requested_target_reaches_the_record() {
     // alongside the applied `target`". The admission result travels on the block
     // that opens the burst, like the other fields no header can carry (SC-29a).
     let reg = Arc::new(ClockRegistry::new());
-    let root = reg.allocate_id();
+    let root = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(root, rat(MCLK, 1), arbitrary("test")))
         .expect("root");
-    let txdom = reg.allocate_id();
+    let txdom = reg.allocate_id().unwrap();
     reg.register(ClockDomain::derived(txdom, root, rat(8, 1), 0))
         .expect("derived");
 
@@ -988,10 +988,10 @@ fn sc_24_burst_domain_mismatch() {
 #[test]
 fn sc_23a_tx_target_advances_to_next_sample() {
     let reg = Arc::new(ClockRegistry::new());
-    let root = reg.allocate_id();
+    let root = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(root, rat(MCLK, 1), arbitrary("test")))
         .expect("root");
-    let tx = reg.allocate_id();
+    let tx = reg.allocate_id().unwrap();
     reg.register(ClockDomain::derived(tx, root, rat(8, 1), 0))
         .expect("derived");
 
@@ -1011,14 +1011,14 @@ fn sc_23a_tx_target_advances_to_next_sample() {
 #[test]
 fn sc_23a_reactive_target_across_disjoint_grids() {
     let reg = Arc::new(ClockRegistry::new());
-    let root = reg.allocate_id();
+    let root = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(root, rat(MCLK, 1), arbitrary("test")))
         .expect("root");
     // TM-13b makes each stream's origin its own first sample, so the grids are disjoint.
-    let rx = reg.allocate_id();
+    let rx = reg.allocate_id().unwrap();
     reg.register(ClockDomain::derived(rx, root, rat(10, 1), 1_000_000_000))
         .expect("rx");
-    let tx = reg.allocate_id();
+    let tx = reg.allocate_id().unwrap();
     reg.register(ClockDomain::derived(tx, root, rat(10, 1), 1_000_000_003))
         .expect("tx");
 
@@ -1040,7 +1040,7 @@ fn sc_23a_reactive_target_across_disjoint_grids() {
 #[test]
 fn sc_23b_tx_target_unrelated_domain_refused() {
     let (reg, _root, sc) = sample_clock(0);
-    let other = reg.allocate_id();
+    let other = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(other, rat(MCLK, 1), arbitrary("other")))
         .expect("root");
     assert!(matches!(
@@ -1097,10 +1097,10 @@ fn sc_27_min_lead_cross_multiplied() {
     let reg = ClockRegistry::new();
     let host = ClockDomainId::HOST_MONOTONIC;
     let min_lead = Duration::new(host, 1_000_000); // 1 ms
-    let hz3 = reg.allocate_id();
+    let hz3 = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(hz3, rat(3, 1), arbitrary("test")))
         .expect("root");
-    let lte = reg.allocate_id();
+    let lte = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(
         lte,
         rat(30_720_000, 1),
@@ -1588,7 +1588,7 @@ fn sc_27_min_lead_domain_is_checked_before_the_verdict() {
 fn sc_13_tm_13c_rate_change_is_a_new_domain_not_a_gap() {
     // A sample-rate change ends the map and the Sink starts a new builder (TM-13c).
     let (reg, root, a) = sample_clock(0);
-    let bdom = reg.allocate_id();
+    let bdom = reg.allocate_id().unwrap();
     reg.register(ClockDomain::derived(bdom, root, rat(8, 1), 500))
         .expect("derived");
     let _ = ResourceId::parse("dev0/rx/0").expect("path");

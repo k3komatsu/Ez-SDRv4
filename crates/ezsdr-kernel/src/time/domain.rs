@@ -217,15 +217,13 @@ impl ClockRegistry {
 
     /// Allocates a fresh, strictly increasing, never-reused local id (TM-11).
     ///
-    /// ponytail: saturating rather than fallible. Reaching `u32::MAX` needs 2^32
-    /// allocations in one Run — each one a SampleClock, so each one a rate change —
-    /// and `register` already refuses the only reachable way to jump there
-    /// (TM-11, TM-2).
-    pub fn allocate_id(&self) -> ClockDomainId {
+    /// Fails with `LimitExceeded` when the id space is exhausted, without changing
+    /// the allocator. `u32::MAX` is the exhaustion sentinel, never a usable id.
+    pub fn allocate_id(&self) -> Result<ClockDomainId, TimeError> {
         let mut inner = self.write();
         let local = inner.next_local;
-        inner.next_local = inner.next_local.saturating_add(1);
-        ClockDomainId::local(local)
+        inner.next_local = local.checked_add(1).ok_or(TimeError::LimitExceeded)?;
+        Ok(ClockDomainId::local(local))
     }
 
     /// Registers a domain. Fails with `DuplicateDomain` on a known id, `UnknownDomain`
@@ -237,9 +235,7 @@ impl ClockRegistry {
             return Err(TimeError::UnknownDomain { id: domain.id });
         }
         if domain.id.local == u32::MAX {
-            // TM-11: ids are allocated by the registry, strictly increasing and
-            // never reused. Accepting the top id would leave the registry unable to
-            // allocate another without reusing one.
+            // TM-11: the top id is reserved as the allocation-exhaustion sentinel.
             return Err(TimeError::LimitExceeded);
         }
         let mut inner = self.write();
@@ -274,10 +270,9 @@ impl ClockRegistry {
             }
         }
         if inner.next_local <= domain.id.local {
-            // TM-11: ids are strictly increasing and never reused. A plain `+ 1`
-            // panics in debug and wraps to the reserved id 0 in release when a
-            // caller registers `u32::MAX`, which TM-2 forbids.
-            inner.next_local = domain.id.local.saturating_add(1);
+            // MAX was refused above, so the next value can be the sentinel but
+            // never wraps or reuses an id. allocate_id reports exhaustion there.
+            inner.next_local = domain.id.local + 1;
         }
         inner.domains.insert(domain.id, domain);
         Ok(())
@@ -355,7 +350,7 @@ impl ClockRegistry {
             }
         }
         let handle = SampleClockHandle {
-            id: self.allocate_id(),
+            id: self.allocate_id()?,
             root,
             root_ticks_per_tick,
             stream,

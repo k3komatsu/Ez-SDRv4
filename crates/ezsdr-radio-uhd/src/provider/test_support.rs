@@ -11,7 +11,7 @@ use super::core::Core;
 
 pub(super) fn rig() -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let clocks = Arc::new(ClockRegistry::new());
-    let root = clocks.allocate_id();
+    let root = clocks.allocate_id().unwrap();
     clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(),
         EpochRef::Arbitrary { set_by: "uhd.test".to_owned() })).unwrap();
     let time = Arc::new(ManualTimeAuthority::new(clocks.clone(), root, &[], Pacing::FreeRunning).unwrap());

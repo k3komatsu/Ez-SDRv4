@@ -242,7 +242,7 @@ impl DeviceAuthority {
         device.set_time_zero(pps).map_err(|e| format!("UR-7: {e}"))?;
         let mcr = device.master_clock_rate();
         let rate = Rational::new(mcr, 1).map_err(|e| format!("UR-7: {e}"))?;
-        let root = clocks.allocate_id();
+        let root = clocks.allocate_id().map_err(|e| format!("UR-7: {e}"))?;
         let set_by = if pps { "set_time_unknown_pps" } else { "set_time_now" };
         clocks
             .register(ClockDomain::root(

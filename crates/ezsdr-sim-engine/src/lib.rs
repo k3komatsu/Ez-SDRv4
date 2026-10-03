@@ -167,7 +167,7 @@ pub fn descriptor() -> ModuleDescriptor {
 impl SimEngine {
     /// Creates an Engine and registers its 1 GHz virtual root (SE-9).
     pub fn new(clocks: Arc<ClockRegistry>) -> Result<SimEngine, TimeError> {
-        let root = clocks.allocate_id();
+        let root = clocks.allocate_id()?;
         let tick_rate = Rational::new(VIRTUAL_TICK_RATE_HZ, 1)?;
         clocks.register(ClockDomain::root(
             root,

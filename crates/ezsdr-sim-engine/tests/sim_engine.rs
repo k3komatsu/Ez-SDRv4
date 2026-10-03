@@ -39,6 +39,15 @@ fn binding() -> Binding {
 }
 
 #[test]
+fn se_09_exhausted_clock_ids_refuse_a_new_engine() {
+    let clocks = Arc::new(ClockRegistry::new());
+    clocks.register(ClockDomain::root(ClockDomainId::local(u32::MAX - 1),
+        Rational::ONE, EpochRef::Arbitrary { set_by: "test".to_owned() })).unwrap();
+    assert!(matches!(SimEngine::new(clocks.clone()), Err(TimeError::LimitExceeded)));
+    assert_eq!(clocks.allocate_id(), Err(TimeError::LimitExceeded));
+}
+
+#[test]
 fn se_08_descriptor_registers() {
     let mut modules = ModuleRegistry::new();
     let mut checks = ezsdr_kernel::binding::AdmissionCheckRegistry::new();
@@ -117,7 +126,7 @@ fn se_10_time_authority_contract() {
     let (engine, clocks) = engine();
     let root = engine.root();
     let time = Authority::time(&engine);
-    let derived = clocks.allocate_id();
+    let derived = clocks.allocate_id().unwrap();
     clocks
         .register(ClockDomain::derived(
             derived,
@@ -126,7 +135,7 @@ fn se_10_time_authority_contract() {
             1,
         ))
         .unwrap();
-    let inexact = clocks.allocate_id();
+    let inexact = clocks.allocate_id().unwrap();
     clocks
         .register(ClockDomain::derived(
             inexact,
@@ -135,7 +144,7 @@ fn se_10_time_authority_contract() {
             1,
         ))
         .unwrap();
-    let unrelated = clocks.allocate_id();
+    let unrelated = clocks.allocate_id().unwrap();
     clocks
         .register(ClockDomain::root(
             unrelated,

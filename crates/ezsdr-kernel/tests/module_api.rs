@@ -348,7 +348,7 @@ struct Harness {
 impl Harness {
     fn new(submitter: TestSubmitter) -> Harness {
         let registry = Arc::new(ClockRegistry::new());
-        let root = registry.allocate_id();
+        let root = registry.allocate_id().unwrap();
         registry
             .register(ClockDomain::root(
                 root,

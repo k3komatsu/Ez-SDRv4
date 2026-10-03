@@ -135,7 +135,7 @@ impl SimAuthority {
         pacing: Pacing,
     ) -> (SimAuthority, ClockDomainId) {
         let tick_rate = Rational::new(1_000_000_000, 1).expect("the test root rate is valid");
-        let root = clocks.allocate_id();
+        let root = clocks.allocate_id().unwrap();
         clocks
             .register(ClockDomain::root(
                 root,

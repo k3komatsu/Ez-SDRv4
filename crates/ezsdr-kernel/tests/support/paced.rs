@@ -150,7 +150,7 @@ pub struct WallAuthority {
 impl WallAuthority {
     /// Registers a fresh 1 GHz root and measures its two relations.
     pub fn new(clocks: &Arc<ClockRegistry>, module: ModuleRef) -> (WallAuthority, ClockDomainId) {
-        let root = clocks.allocate_id();
+        let root = clocks.allocate_id().unwrap();
         clocks
             .register(ClockDomain::root(
                 root,

@@ -432,6 +432,40 @@ all passing in the normal stable/MSRV runs. See
 interpretation. Audit evidence is in `~/.cache/ezsdr-audits/2026-10-03-3b0444e/`;
 fix-validation logs are in `~/.cache/ezsdr-fixes/2026-10-03/`.
 
+**Independent audit follow-up, 2026-10-03 (issues #11–#14)**
+
+The second audit checked current `main` against the specifications and all
+existing issues, including closed #1–#10 and the known stress failures above.
+Only four new, verified defects were filed. The owner then authorized fixes,
+GPT-6.1 Sol subagent review, commit and push, in issue order:
+
+| Issue | Fix | Commit |
+|---|---|---|
+| [#11](https://github.com/k3komatsu/Ez-SDRv4/issues/11) | Enforce the host-domain invariant when deserializing RelativeBudget | `c46bbe5` |
+| [#12](https://github.com/k3komatsu/Ez-SDRv4/issues/12) | Refuse cancellation handles from another authority's root before queue access | `2dbcc62` |
+| [#13](https://github.com/k3komatsu/Ez-SDRv4/issues/13) | Refuse capability ranges whose interiors are not proved covered by the declared set | `04387d7` |
+| [#14](https://github.com/k3komatsu/Ez-SDRv4/issues/14) | Report clock-ID exhaustion without reuse or partial SampleClock declarations | this maintenance commit |
+
+Rust source compatibility: `ClockRegistry::allocate_id` now returns
+`Result<ClockDomainId, TimeError>`; callers must handle `LimitExceeded`.
+TM-11 documents the exhaustion sentinel. Serialized types and frozen schemas
+are unchanged. #13 conservatively refuses general non-singleton ranges against
+discrete declarations; singleton and Boolean intervals remain supported.
+Current runtime prepare reports use `CapabilityValue::One`.
+
+Final software validation after #11–#14: **923 passed, 0 failed, 0 ignored**
+on both stable and Rust 1.85.0; Python **28 passed** on each of 3.9 and 3.13
+against the freshly built server; UHD 4.10 API/link tests **4 passed**.
+Workspace and UHD/server feature Clippy builds pass with `-D warnings`.
+Each fix passed a separate GPT-6.1 Sol review before commit; #13's suggested
+test strengthening was applied and re-reviewed.
+
+The 128-thread stress failures and hardware H1–H5 remain unresolved validation
+items; these fixes provide no new stress or hardware measurement. Independent
+audit evidence is in
+`~/.cache/ezsdr-audits/2026-10-03-b4c2934-independent/`; fix-validation and Sol
+review logs are in `~/.cache/ezsdr-fixes/2026-10-03-second/`.
+
 **5. 決まったこと・owner の判断待ち**
 
 - 決定済み（2026-09-30）：実機は **X300 + OBX 1枚のループバック**（UBX 2 枚 → CBX 1枚 → OBX と変更．profile `x310-obx`，`x310-cbx` は予備），X300 は X310 の代わりで可，FPGA 書き換え承認．

@@ -27,7 +27,7 @@ fn rat(num: u64, den: u64) -> Rational {
 /// A registry with a 200 MHz device root registered; returns it and the root id.
 fn registry_with_device_root() -> (Arc<ClockRegistry>, ClockDomainId) {
     let reg = Arc::new(ClockRegistry::new());
-    let root = reg.allocate_id();
+    let root = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(
         root,
         rat(MCLK, 1),
@@ -39,7 +39,7 @@ fn registry_with_device_root() -> (Arc<ClockRegistry>, ClockDomainId) {
 
 /// Registers a derived domain with the given root ratio and origin.
 fn derived(reg: &ClockRegistry, root: ClockDomainId, n: u64, d: u64, origin: i64) -> ClockDomainId {
-    let id = reg.allocate_id();
+    let id = reg.allocate_id().unwrap();
     reg.register(ClockDomain::derived(id, root, rat(n, d), origin))
         .expect("derived registers");
     id
@@ -176,21 +176,21 @@ fn tm_08_conversion_overflow_is_error() {
 fn tm_03_registration_limits() {
     let (reg, root) = registry_with_device_root();
     let over = (1u64 << 31) + 1;
-    let id = reg.allocate_id();
+    let id = reg.allocate_id().unwrap();
     assert_eq!(
         reg.register(ClockDomain::derived(id, root, rat(over, 1), 0)),
         Err(TimeError::LimitExceeded)
     );
 
     let mid = derived(&reg, root, 10, 1, 0);
-    let id = reg.allocate_id();
+    let id = reg.allocate_id().unwrap();
     assert!(matches!(
         reg.register(ClockDomain::derived(id, mid, rat(2, 1), 0)),
         Err(TimeError::Unrelated { .. })
     ));
 
     let ghost = ClockDomainId::local(9_999);
-    let id = reg.allocate_id();
+    let id = reg.allocate_id().unwrap();
     assert_eq!(
         reg.register(ClockDomain::derived(id, ghost, rat(2, 1), 0)),
         Err(TimeError::UnknownDomain { id: ghost })
@@ -200,7 +200,7 @@ fn tm_03_registration_limits() {
 #[test]
 fn tm_03_root_tick_rate_capped() {
     let reg = ClockRegistry::new();
-    let id = reg.allocate_id();
+    let id = reg.allocate_id().unwrap();
     let p = 1u64 << 40;
     assert_eq!(
         reg.register(ClockDomain::root(id, rat(p, p - 1), arbitrary("test"))),
@@ -292,7 +292,7 @@ fn tm_09_duration_nominal_rescale() {
         })
     );
 
-    let hz3 = reg.allocate_id();
+    let hz3 = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(hz3, rat(3, 1), arbitrary("test")))
         .expect("root");
     assert_eq!(
@@ -504,11 +504,35 @@ fn tm_11_registration_at_the_id_ceiling_does_not_wrap() {
         reg.register(ClockDomain::root(top, rat(3, 1), arbitrary("test"))),
         Err(TimeError::LimitExceeded)
     );
-    let a = reg.allocate_id();
-    let b = reg.allocate_id();
+    let a = reg.allocate_id().unwrap();
+    let b = reg.allocate_id().unwrap();
     assert!(a.local < b.local, "still strictly increasing");
     assert_ne!(a, ClockDomainId::UTC);
     assert_ne!(a, ClockDomainId::HOST_MONOTONIC);
+}
+
+#[test]
+fn tm_11_sparse_high_ids_exhaust_without_reuse_or_partial_declarations() {
+    for high in [u32::MAX - 2, u32::MAX - 1] {
+        let reg = ClockRegistry::new();
+        let root = ClockDomainId::local(high);
+        reg.register(ClockDomain::root(root, rat(3, 1), arbitrary("test"))).unwrap();
+        if high == u32::MAX - 2 {
+            let last = reg.allocate_id().expect("one usable id remains");
+            assert_eq!(last, ClockDomainId::local(u32::MAX - 1));
+            reg.register(ClockDomain::derived(last, root, Rational::ONE, 0)).unwrap();
+        }
+        let domains = reg.domains();
+        for _ in 0..2 {
+            assert_eq!(reg.allocate_id(), Err(TimeError::LimitExceeded));
+        }
+        assert_eq!(reg.domains(), domains);
+        assert_eq!(reg.declare_sample_clock(
+            ResourceId::parse("radio/rx").unwrap(), root, Rational::ONE),
+            Err(TimeError::LimitExceeded));
+        assert!(reg.declared_sample_clocks().is_empty());
+        assert!(reg.sample_clock_records().is_empty());
+    }
 }
 
 #[test]
@@ -576,7 +600,7 @@ fn tm_11_reserved_domains_present() {
 #[test]
 fn tm_11_registry_allocates_monotonic_unique() {
     let reg = ClockRegistry::new();
-    let ids: Vec<_> = (0..3).map(|_| reg.allocate_id()).collect();
+    let ids: Vec<_> = (0..3).map(|_| reg.allocate_id().unwrap()).collect();
     assert!(ids.windows(2).all(|w| w[0].local < w[1].local));
     assert!(ids.iter().all(|id| id.node == NodeId::LOCAL));
     assert!(ids[0].local >= ClockDomainId::FIRST_ALLOCATABLE);
@@ -757,10 +781,10 @@ fn tm_21_duration_cmp_across_domains_is_exact() {
 #[test]
 fn tm_21_duration_cmp_survives_awkward_rates() {
     let reg = ClockRegistry::new();
-    let hz3 = reg.allocate_id();
+    let hz3 = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(hz3, rat(3, 1), arbitrary("test")))
         .expect("root");
-    let lte = reg.allocate_id();
+    let lte = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(
         lte,
         rat(30_720_000, 1),
@@ -790,10 +814,10 @@ fn tm_21_duration_cmp_survives_awkward_rates() {
 fn tm_21_duration_cmp_overflow_is_error() {
     let reg = ClockRegistry::new();
     let cap = 1u64 << 31;
-    let fast_root = reg.allocate_id();
+    let fast_root = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(fast_root, rat(cap, 1), arbitrary("test")))
         .expect("root");
-    let slow_root = reg.allocate_id();
+    let slow_root = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(slow_root, rat(1, cap), arbitrary("test")))
         .expect("root");
     let fast = derived(&reg, fast_root, 1, cap, 0); // nominal 2^62 / 1
@@ -970,7 +994,7 @@ fn tm_16_authority_wait_until_wakes() {
 fn tm_16d_wait_until_non_governed() {
     let (reg, root, auth) = sim_authority();
     let _ = root;
-    let other = reg.allocate_id();
+    let other = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(other, rat(MCLK, 1), arbitrary("other")))
         .expect("root");
     assert_eq!(
@@ -983,7 +1007,7 @@ fn tm_16d_wait_until_non_governed() {
 fn tm_16a_host_monotonic_always_governed() {
     let (reg, root) = registry_with_device_root();
     let device = ManualTimeAuthority::new(reg.clone(), root, &[], Pacing::Device).expect("auth");
-    let virt_root = reg.allocate_id();
+    let virt_root = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(
         virt_root,
         rat(MCLK, 1),
@@ -1027,14 +1051,14 @@ fn tm_16a1_host_monotonic_driven_only_in_simulation() {
 #[test]
 fn tm_16b_engine_governs_a_drifting_virtual_device() {
     let reg = Arc::new(ClockRegistry::new());
-    let primary = reg.allocate_id();
+    let primary = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(
         primary,
         rat(MCLK, 1),
         arbitrary("sim.run_start"),
     ))
     .expect("root");
-    let second = reg.allocate_id();
+    let second = reg.allocate_id().unwrap();
     // A second virtual device, drifting: a different rate and no exact relation.
     reg.register(ClockDomain::root(
         second,
@@ -1072,7 +1096,7 @@ fn tm_16b_engine_governs_a_drifting_virtual_device() {
 #[test]
 fn tm_16b_ungoverned_root_is_not_answered() {
     let (reg, root, auth) = sim_authority();
-    let foreign = reg.allocate_id();
+    let foreign = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(
         foreign,
         rat(MCLK, 1),
@@ -1115,7 +1139,7 @@ fn tm_12_domains_lists_every_registered_domain() {
     let reg = ClockRegistry::new();
     let ids: Vec<ClockDomainId> = reg.domains().iter().map(|d| d.id).collect();
     assert_eq!(ids, vec![ClockDomainId::UTC, ClockDomainId::HOST_MONOTONIC]);
-    let root = reg.allocate_id();
+    let root = reg.allocate_id().unwrap();
     reg.register(ClockDomain::root(root, rat(MCLK, 1), arbitrary("test")))
         .expect("root");
     let child = derived(&reg, root, 10, 1, 0);

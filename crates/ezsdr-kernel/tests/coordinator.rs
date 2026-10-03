@@ -722,7 +722,7 @@ fn kc_16_off_root_negative_and_overflowing_times_are_refused() {
         let rig = rig(ezsdr_kernel::module_api::Pacing::FreeRunning);
         let mut assembly = rig.assembly;
         let sample_root = if other_root {
-            let other = rig.clocks.allocate_id();
+            let other = rig.clocks.allocate_id().unwrap();
             rig.clocks
                 .register(ezsdr_kernel::time::ClockDomain::root(
                     other,
@@ -1043,7 +1043,7 @@ fn kc_29_advance_to_refuses_an_unrelated_time() {
         Box::new(TestProvider::new("radio", 2)),
     );
     let mut run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
-    let other = rig.clocks.allocate_id();
+    let other = rig.clocks.allocate_id().unwrap();
     rig.clocks
         .register(ezsdr_kernel::time::ClockDomain::root(
             other,
@@ -1517,7 +1517,7 @@ fn kc_24_a_burst_to_a_non_provider_target_is_refused() {
 fn kc_24_a_burst_time_on_an_unrelated_root_is_refused() {
     let probe = Probe::new();
     let mut rig = rig(ezsdr_kernel::module_api::Pacing::FreeRunning);
-    let other = rig.clocks.allocate_id();
+    let other = rig.clocks.allocate_id().unwrap();
     rig.clocks
         .register(ClockDomain::root(
             other,

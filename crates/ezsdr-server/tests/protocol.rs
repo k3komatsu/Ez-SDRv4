@@ -423,7 +423,7 @@ fn ea_12_time_and_events() {
 #[test]
 fn ea_12_durations_round_up() {
     let clocks = ClockRegistry::new();
-    let root = clocks.allocate_id();
+    let root = clocks.allocate_id().unwrap();
     clocks.register(ClockDomain::root(root, Rational::new(3, 1).unwrap(), EpochRef::Arbitrary { set_by: "test".to_owned() })).unwrap();
     let at = TimePoint::new(root, 0);
     assert_eq!(ezsdr_server::ticks(&clocks, at, 1), Some(1), "a nanosecond on a 3 Hz clock is one tick, rounded up");

@@ -155,7 +155,7 @@ struct Environment {
 impl Environment {
     fn new() -> Environment {
         let clocks = Arc::new(ClockRegistry::new());
-        let root = clocks.allocate_id();
+        let root = clocks.allocate_id().unwrap();
         clocks
             .register(ClockDomain::root(
                 root,
@@ -193,7 +193,7 @@ impl Environment {
         let changed_clock = clocks
             .register_sample_clock(&changed_handle, 58_000)
             .expect("changed sample clock registration");
-        let unrelated_root = clocks.allocate_id();
+        let unrelated_root = clocks.allocate_id().unwrap();
         clocks
             .register(ClockDomain::root(
                 unrelated_root,
