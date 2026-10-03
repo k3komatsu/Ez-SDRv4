@@ -4,7 +4,7 @@
 //! transmit side of a `cold` change, and reads the asynchronous reports (UR-21…UR-23,
 //! UR-25, UR-28).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration as Wall;
@@ -61,6 +61,11 @@ struct Switch {
     settings: Arc<ColdConfig>,
 }
 
+struct PendingReport {
+    target: TimePoint,
+    channels: BTreeSet<usize>,
+}
+
 pub(crate) struct Tx {
     core: Arc<Core>,
     cmds: Receiver<TxCmd>,
@@ -71,7 +76,7 @@ pub(crate) struct Tx {
     open: Option<Open>,
     tracker: Option<BurstTracker>,
     switch: Option<Switch>,
-    unacked: VecDeque<TimePoint>,
+    unacked: VecDeque<PendingReport>,
     /// The device burst is still open, its next sample this one: a held burst starting
     /// there continues it, without end-of-burst and start-of-burst between them, since
     /// the X300 drops a timed start at the tick its previous burst ended (UR-23;
@@ -137,6 +142,7 @@ impl Tx {
             }
             TxCmd::Stop => self.stop_now("UR-26: cancelled by Stop", true),
             TxCmd::Enable { clock, channels } => {
+                self.unacked.clear(); // The newly opened streamer has its own report queue.
                 self.clock = Some(clock);
                 self.channels = channels;
                 self.tracker = Some(BurstTracker::new(clock.domain));
@@ -163,6 +169,20 @@ impl Tx {
 
     fn forget(&self, held: &Held) {
         lock(&self.core.held).remove(&(held.domain, held.k));
+    }
+
+    fn remember_burst(&mut self, target: TimePoint) {
+        self.unacked.push_back(PendingReport { target, channels: (0..self.channels.max(1)).collect() });
+    }
+
+    /// Each channel's reports are ordered independently in UHD's shared queue.
+    fn reported_target(&mut self, channel: usize) -> Option<TimePoint> {
+        let index = self.unacked.iter().position(|pending| pending.channels.contains(&channel))?;
+        let pending = &mut self.unacked[index];
+        let target = pending.target;
+        pending.channels.remove(&channel);
+        if pending.channels.is_empty() { self.unacked.remove(index); }
+        Some(target)
     }
 
     /// One unit of work; false when there was nothing to do.
@@ -331,7 +351,7 @@ impl Tx {
             Ok(sent) => {
                 self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
                 if device_sob && sent > 0 {
-                    self.unacked.push_back(TimePoint::new(clock.domain, start));
+                    self.remember_burst(TimePoint::new(clock.domain, start));
                 }
                 return self.abandon(was_open || sent > 0);
             }
@@ -341,7 +361,7 @@ impl Tx {
                 // end-of-burst outside a burst costs one zero sample; Review Q, NB-Q1).
                 self.core.device_failed("tx_burst", &error);
                 if device_sob {
-                    self.unacked.push_back(TimePoint::new(clock.domain, start));
+                    self.remember_burst(TimePoint::new(clock.domain, start));
                 }
                 return self.abandon(true);
             }
@@ -366,7 +386,7 @@ impl Tx {
         };
         let open_record = first.then_some(open.held.open);
         if device_sob {
-            self.unacked.push_back(TimePoint::new(clock.domain, start));
+            self.remember_burst(TimePoint::new(clock.domain, start));
         }
         if first {
             self.continues_at = None;
@@ -593,7 +613,7 @@ impl Tx {
         self.tracker = None;
         if let Some(new) = switch.clock.filter(|_| !self.core.is_lost()) {
             let reopened = if switch.channels != self.channels {
-                self.core.device.tx_open(switch.channels)
+                self.core.device.tx_open(switch.channels).map(|()| self.unacked.clear())
             } else {
                 Ok(())
             };
@@ -637,7 +657,7 @@ impl Tx {
         };
         match report.code {
             TxCode::BurstAck => {
-                self.unacked.pop_front();
+                self.reported_target(report.channel);
             }
             TxCode::Underflow | TxCode::UnderflowInPacket | TxCode::SeqError | TxCode::SeqErrorInBurst => {
                 let cause = if matches!(report.code, TxCode::Underflow | TxCode::UnderflowInPacket) {
@@ -652,7 +672,7 @@ impl Tx {
                 }
             }
             TxCode::TimeError => {
-                let Some(target) = self.unacked.pop_front() else { return };
+                let Some(target) = self.reported_target(report.channel) else { return };
                 let late_by_ns = match (report.tick, self.clock) {
                     (Some(tick), Some(clock)) => self.core.ns(tick - clock.instant(target.ticks)),
                     _ => 0,
@@ -775,7 +795,7 @@ mod tests {
         // host deadline for the initial timed SOB (covered by UR-21 tests).
         device.tx_send(&[&burst.samples[0][..2_000]], None, true, false, std::time::Duration::from_secs(1)).unwrap();
         tx.open = Some(super::Open { held: burst, next: 2_000, first: false });
-        tx.unacked.push_back(TimePoint::new(clock.domain, 0));
+        tx.remember_burst(TimePoint::new(clock.domain, 0));
         std::thread::sleep(std::time::Duration::from_millis(60));
         time.advance_to(core.at(device.time_now().unwrap().max(core.now()))).unwrap();
         tx.reports(std::time::Duration::ZERO);
@@ -1018,6 +1038,72 @@ mod tests {
             settings: Arc::new(super::ColdConfig::new(e1, Settings::default())) });
         assert!(!tx.step());
         assert!(tx.switch.is_some());
+    }
+
+#[test]
+    fn ur_28_per_channel_ack_preserves_the_next_burst() {
+        let (core, _, _, events) = super::super::test_support::rig();
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core, cmds, Some(clock), 2);
+        let a = TimePoint::new(clock.domain, 10_000);
+        let b = TimePoint::new(clock.domain, 20_000);
+        tx.remember_burst(a); tx.remember_burst(b);
+        for channel in [0,1] {
+            tx.report(crate::device::TxReport { code: crate::device::TxCode::BurstAck, tick: Some(clock.instant(a.ticks)), channel });
+        }
+        tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: Some(clock.instant(b.ticks)+200), channel: 0 });
+        let emitted = events.drain();
+        eprintln!("events={emitted:?}");
+        assert!(emitted.iter().any(|e|e.kind.as_str()==ezsdr_radio::kinds::TIME_ERROR), "burst B TIME_ERROR must survive both ACKs of A");
+    }
+
+    #[test]
+    fn ur_28_channels_retire_in_independent_order() {
+        use crate::device::{TxCode, TxReport};
+        for channels in [1, 2] {
+            let (core, _, _, events) = super::super::test_support::rig();
+            let clock = core.register(Dir::Tx, 200, 0).unwrap();
+            let (_to_tx, cmds) = std::sync::mpsc::channel();
+            let mut tx = Tx::new(core, cmds, Some(clock), channels);
+            let a = TimePoint::new(clock.domain, 10_000);
+            let b = TimePoint::new(clock.domain, 20_000);
+            tx.remember_burst(a); tx.remember_burst(b);
+            tx.report(TxReport { code: TxCode::BurstAck, tick: None, channel: 9 });
+            assert_eq!(tx.unacked.len(), 2, "invalid channel must not consume a burst");
+            if channels == 2 {
+                // Channel 0 may finish B while channel 1 has not finished A.
+                for _ in 0..2 { tx.report(TxReport { code: TxCode::BurstAck, tick: None, channel: 0 }); }
+                assert_eq!(tx.unacked.len(), 2);
+            }
+            let channel = channels - 1;
+            for _ in 0..2 { tx.report(TxReport { code: TxCode::TimeError, tick: None, channel }); }
+            let errors = events.drain();
+            assert_eq!(errors.len(), 2);
+            assert_eq!(errors[0].payload["target"], serde_json::to_value(a).unwrap());
+            assert_eq!(errors[1].payload["target"], serde_json::to_value(b).unwrap());
+            assert!(errors.iter().all(|e| e.payload["late_by_ns"] == 0));
+            assert!(tx.unacked.is_empty());
+        }
+    }
+
+    #[test]
+    fn ur_28_reopened_streamer_drops_previous_correlations() {
+        let (core, device, _, _) = super::super::test_support::rig();
+        device.tx_open(1).unwrap();
+        let old = core.register(Dir::Tx, 200, 0).unwrap();
+        core.clocks.end(old.domain, core.at(20_000_000)).unwrap();
+        let new = core.register(Dir::Tx, 100, 30_000_000).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core, cmds, Some(old), 1);
+        tx.remember_burst(TimePoint::new(old.domain, 100));
+        tx.switch = Some(super::Switch { e1: 20_000_000, clock: Some(new), channels: 2,
+            settings: Arc::new(super::ColdConfig::new(new.origin, Settings { rate: Some(2e6), ..Settings::default() })) });
+        tx.do_switch();
+        assert!(tx.unacked.is_empty());
+        tx.remember_burst(TimePoint::new(new.domain, 100));
+        tx.command(TxCmd::Enable { clock: new, channels: 2 });
+        assert!(tx.unacked.is_empty());
     }
 
 }

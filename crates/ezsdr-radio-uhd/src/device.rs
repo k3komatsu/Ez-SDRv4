@@ -1005,6 +1005,7 @@ impl Device for FakeDevice {
         self.lost(&st)?;
         st.calls.push(format!("tx_open {channels}"));
         st.tx_channels = channels;
+        st.reports.clear();
         Ok(())
     }
 
@@ -1089,7 +1090,9 @@ impl Device for FakeDevice {
                     Some(t) if t < now || t <= st.tx_cursor => {
                         // The X300 reports a tick at or after the late start (Review N, N2).
                         let tick = Some(t.max(now));
-                        st.reports.push_back(TxReport { code: TxCode::TimeError, tick, channel: 0 });
+                        for channel in 0..st.tx_channels {
+                            st.reports.push_back(TxReport { code: TxCode::TimeError, tick, channel });
+                        }
                         st.tx_dropped = true;
                         st.tx_in_burst = false;
                         return Ok(n);
@@ -1123,7 +1126,9 @@ impl Device for FakeDevice {
             st.tx_cursor = start + n as i64 * ratio;
             if eob {
                 let tick = Some(st.tx_cursor);
-                st.reports.push_back(TxReport { code: TxCode::BurstAck, tick, channel: 0 });
+                for channel in 0..st.tx_channels {
+                    st.reports.push_back(TxReport { code: TxCode::BurstAck, tick, channel });
+                }
                 st.tx_in_burst = false;
             }
             st.tx_cursor
