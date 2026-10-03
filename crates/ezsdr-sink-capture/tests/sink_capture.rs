@@ -760,6 +760,60 @@ fn hd_13_partial_on_abort_and_on_an_unfinished_capture() {
 }
 
 #[test]
+fn hd_13_stop_preserves_trailing_drop_carry() {
+    for mode in [StopMode::Abort, StopMode::Orderly] {
+        let mut rig = Rig::with_link("trailing-carry", sample_count(100), BackPressure::DropOldest, 1);
+        rig.push_ramp(0, 2);
+        rig.step().expect("begin capture");
+        let overflow = ramp_block(&mut rig.pool, rig.env.sample_clock, 52, 52.0, 2,
+            BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(50));
+        assert_eq!(rig.link.publish(overflow), PublishOutcome::Accepted);
+        assert_eq!(rig.push_ramp(54, 2), PublishOutcome::DroppedOldest);
+        let artifacts = rig.stop(mode);
+        assert_eq!(artifacts.len(), 1);
+        assert!(artifacts[0].partial);
+        assert_eq!(artifacts[0].size_bytes, 16);
+        let map = &artifacts[0].continuity[0];
+        assert_eq!(map.end.ticks, 2);
+        assert_eq!(map.gaps.len(), 1);
+        assert_eq!(map.gaps[0].start.ticks, 2);
+        assert_eq!(map.gaps[0].len, 0);
+        assert_eq!(map.gaps[0].lost, Some(50));
+        assert_eq!(map.gaps[0].link_dropped, 1);
+        assert_eq!(map.gaps[0].cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
+        assert_eq!(rig.link.take_drop_carry().blocks, 0);
+        assert_eq!(meta_of(&artifacts[0]).unwrap()["global"]["ezsdr:gaps"], json!([
+            {"sample_start": 2, "global_index": 2, "len": 0, "lost": 50,
+             "cause": {"kind": "overflow_restart"}, "link_dropped": 1}
+        ]));
+    }
+}
+
+#[test]
+fn hd_11_targeted_stop_keeps_carry_on_the_finished_capture() {
+    let mut rig = Rig::with_link("stop-carry", sample_count(100), BackPressure::DropOldest, 1);
+    rig.push_ramp(0, 2);
+    rig.step().expect("begin capture");
+    let overflow = ramp_block(&mut rig.pool, rig.env.sample_clock, 52, 52.0, 2,
+        BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(50));
+    rig.link.publish(overflow);
+    assert_eq!(rig.push_ramp(54, 2), PublishOutcome::DroppedOldest);
+    rig.env.actions.push(Action::Stop { target: Some(ResourceId::parse("sink/rec").unwrap()) });
+    rig.env.actions.push(request(Value::Int(2), None));
+    rig.step().expect("Stop then a new capture request");
+    let artifacts = rig.stop(StopMode::Orderly);
+    assert_eq!(artifacts.len(), 2);
+    assert!(artifacts[0].partial);
+    assert_eq!(artifacts[0].continuity[0].gaps.len(), 1);
+    assert_eq!(artifacts[0].continuity[0].gaps[0].lost, Some(50));
+    assert_eq!(artifacts[0].continuity[0].gaps[0].link_dropped, 1);
+    assert!(!artifacts[1].partial);
+    assert!(artifacts[1].continuity[0].gaps.is_empty());
+    assert_ramp(&artifacts[1], 54, 2);
+    assert_eq!(rig.link.take_drop_carry().blocks, 0);
+}
+
+#[test]
 fn hd_11_stop_for_another_target_is_rejected() {
     let mut rig = Rig::new("stop-other-target", sample_count(8));
     rig.push_ramp(0, 4);

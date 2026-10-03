@@ -226,7 +226,9 @@ impl CaptureSink {
                 }) =>
             {
                 if self.queue.front().is_some_and(|capture| capture.started) {
-                    self.finish_front(true)?;
+                    let carry = self.link.as_ref()
+                        .map_or_else(DropCarry::default, |link| link.take_drop_carry());
+                    self.finish_front(true, carry)?;
                 }
                 // A discarded request is answered, so its client does not wait out its
                 // timeout (HD-11; Review I, P2-1).
@@ -311,7 +313,7 @@ impl CaptureSink {
                 .front()
                 .is_some_and(|capture| capture.contract.as_ref() == Some(&header.contract));
             if !same_contract {
-                self.finish_front(true)?;
+                self.finish_front(true, DropCarry::default())?;
                 continue;
             }
 
@@ -324,7 +326,7 @@ impl CaptureSink {
                 .saturating_sub(self.queue.front().expect("a capture is queued").written);
             let take = available.min(usize::try_from(needed).unwrap_or(usize::MAX));
             if take == 0 {
-                self.finish_front(false)?;
+                self.finish_front(false, DropCarry::default())?;
                 continue;
             }
             let overlap = sliced_header(&header, sample, take)?;
@@ -360,7 +362,7 @@ impl CaptureSink {
             capture.written = capture.written.saturating_add(take as u64);
             sample += take;
             if capture.written == capture.n {
-                self.finish_front(false)?;
+                self.finish_front(false, DropCarry::default())?;
             }
         }
         Ok(())
@@ -413,12 +415,12 @@ impl CaptureSink {
         Ok(())
     }
 
-    fn finish_front(&mut self, partial: bool) -> Result<(), ModuleError> {
+    fn finish_front(&mut self, partial: bool, carry: DropCarry) -> Result<(), ModuleError> {
         let Some(mut capture) = self.queue.pop_front() else {
             return Ok(());
         };
         if let Some((builder, _, _)) = capture.builder.take() {
-            capture.builders.push(builder.finish(DropCarry::default()));
+            capture.builders.push(builder.finish(carry));
         }
         if !capture.started {
             return Ok(());
@@ -593,7 +595,9 @@ impl Sink for CaptureSink {
 
     fn stop(&mut self, _mode: StopMode) -> Result<Vec<ArtifactRef>, ModuleError> {
         if self.queue.front().is_some_and(|capture| capture.started) {
-            self.finish_front(true)?;
+            let carry = self.link.as_ref()
+                .map_or_else(DropCarry::default, |link| link.take_drop_carry());
+            self.finish_front(true, carry)?;
         }
         self.queue.clear();
         Ok(std::mem::take(&mut self.done))
