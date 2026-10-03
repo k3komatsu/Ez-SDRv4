@@ -949,7 +949,7 @@ mod ffi_tests {
         let _test = lock(&TEST_LOCK);
         let device = dummy(3);
         let long = vec![[0.0, 0.0]; 100];
-        let short = vec![[0.0, 0.0]; 1];
+        let short = [[0.0, 0.0]; 1];
         let longer = vec![[0.0, 0.0]; 101];
         for samples in [vec![&long[..], &short[..], &long[..]],
                         vec![&long[..], &long[..], &short[..]],
