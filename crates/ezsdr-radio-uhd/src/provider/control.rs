@@ -192,9 +192,9 @@ impl Control {
                 } else if target == self.core.rx_id {
                     let _ = self.to_rx.send(RxCmd::Stop);
                 } else if target == self.core.id {
+                    self.cancel_held("Stop");
                     let _ = self.to_tx.send(TxCmd::Stop);
                     let _ = self.to_rx.send(RxCmd::Stop);
-                    self.cancel_held("Stop");
                 } else {
                     self.core.command_rejected("stop", "UR-26: the Stop target is not this device or its streams");
                 }
@@ -312,7 +312,12 @@ impl Control {
 
     fn cancel_held(&mut self, why: &str) {
         let at = self.core.at(self.core.now());
-        for ((e, _), timed) in std::mem::take(&mut self.held) {
+        for ((e, seq), timed) in std::mem::take(&mut self.held) {
+            let cold = self.pending_cold(timed.dir);
+            let mut updates = cold.as_ref().map(|cold| lock(&cold.updates));
+            if let Some(updates) = &mut updates { updates.remove(&(e, seq)); }
+            // Keep the projection locked until its cancellation is recorded, so an
+            // owner can never apply this held value after that record.
             lock(&self.core.rec).applied.push(json!({
                 "key": timed.key, "claimed": timed.value, "at": self.core.at(e), "cancelled": why, "cancelled_at": at,
             }));
@@ -761,6 +766,81 @@ mod tests {
         assert_eq!(cold.settings(&lock(&cold.updates)).gain, Some(5.0));
         cold.issued(&mut lock(&cold.updates), (100, 4), 101, Settings { freq: Some(1.1e9), ..Settings::default() });
         assert_eq!(cold.settings(&lock(&cold.updates)).freq, Some(1e9));
+    }
+
+    #[test]
+    fn ur_26_device_stop_removes_cancelled_timed_gain_from_switch() {
+        let (core, device, _, _) = crate::provider::test_support::rig();
+        let old = core.register(Dir::Rx, 200, 0).unwrap();
+        lock(&core.streams).rx = Some(old);
+        device.rx_open(1).unwrap();
+        let (to_tx, _tx) = std::sync::mpsc::channel();
+        let (to_rx, rx) = std::sync::mpsc::channel();
+        let mut config = core.description.defaults.clone();
+        config.insert(super::super::core::key("radio.rx.channels"), Value::Int(1));
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false);
+        let gain = super::super::core::key("radio.rx.gain_db");
+        control.book_timed(gain, Value::Num(3.0), Some(AbsoluteDeadline::new(core.at(core.ticks(1_040_000_000)))));
+        control.book_cold(super::super::core::key("radio.rx.sample_rate_hz"), Value::Num(2e6),
+            Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
+        control.book(Action::Stop { target: Some(core.id.clone()) });
+        assert!(control.held.is_empty());
+        assert!(lock(&core.rec).applied.iter().any(|r| r["key"] == "radio.rx.gain_db" && r["cancelled"] == "Stop"));
+        let RxCmd::Switch { settings, .. } = rx.try_recv().unwrap() else { panic!("Switch"); };
+        assert!(matches!(rx.try_recv().unwrap(), RxCmd::Stop));
+        settings.configure(&core, Dir::Rx, 1).unwrap();
+        eprintln!("cancelled gain is still in Switch: {:?}; device calls: {:?}", settings.settings(&lock(&settings.updates)).gain, device.calls());
+        assert_eq!(settings.settings(&lock(&settings.updates)).gain, Some(0.0), "device Stop must not leave a switch applying the timed gain just cancelled");
+    }
+
+    #[test]
+    fn ur_26_cancellation_preserves_issued_updates_in_both_directions() {
+        for dir in [Dir::Rx, Dir::Tx] {
+            for field in ["gain_db", "frequency_hz"] {
+                for before_switch in [false, true] {
+                    let (core, device, _, _) = crate::provider::test_support::rig();
+                    let clock = core.register(dir, 200, 0).unwrap();
+                    { let mut streams = lock(&core.streams);
+                        match dir { Dir::Rx => streams.rx = Some(clock), Dir::Tx => streams.tx = Some(clock) }
+                    }
+                    match dir { Dir::Rx => device.rx_open(1).unwrap(), Dir::Tx => device.tx_open(1).unwrap() }
+                    let (to_tx, tx) = std::sync::mpsc::channel();
+                    let (to_rx, rx) = std::sync::mpsc::channel();
+                    let mut config = core.description.defaults.clone();
+                    config.insert(super::super::core::key(&format!("radio.{}.channels", dir.name())), Value::Int(1));
+                    let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false);
+                    let key = super::super::core::key(&format!("radio.{}.{field}", dir.name()));
+                    let (issued, cancelled) = if field == "gain_db" { (1.0, 3.0) } else { (1.1e9, 1.2e9) };
+                    if before_switch {
+                        control.book_timed(key.clone(), Value::Num(issued), None);
+                        control.release();
+                        control.book_timed(key.clone(), Value::Num(cancelled), Some(AbsoluteDeadline::new(core.at(core.ticks(1_040_000_000)))));
+                    }
+                    control.book_cold(super::super::core::key(&format!("radio.{}.sample_rate_hz", dir.name())), Value::Num(2e6),
+                        Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
+                    if !before_switch {
+                        control.book_timed(key.clone(), Value::Num(issued), None);
+                        control.release();
+                        control.book_timed(key.clone(), Value::Num(cancelled), Some(AbsoluteDeadline::new(core.at(core.ticks(1_040_000_000)))));
+                    }
+                    // Stream Stop keeps timed commands; device Stop cancels only held ones.
+                    let target = match dir { Dir::Rx => core.rx_id.clone(), Dir::Tx => core.tx_id.clone() };
+                    control.book(Action::Stop { target: Some(target) });
+                    assert_eq!(control.held.len(), 1);
+                    control.book(Action::Stop { target: Some(core.id.clone()) });
+                    assert!(control.held.is_empty());
+                    let settings = match dir {
+                        Dir::Rx => match rx.try_recv().unwrap() { RxCmd::Switch { settings, .. } => settings, _ => panic!("switch") },
+                        Dir::Tx => match tx.try_recv().unwrap() { TxCmd::Switch { settings, .. } => settings, _ => panic!("switch") },
+                    };
+                    settings.configure(&core, dir, 1).unwrap();
+                    let projected = settings.settings(&lock(&settings.updates));
+                    assert_eq!(if field == "gain_db" { projected.gain } else { projected.freq }, Some(issued));
+                    assert_eq!(lock(&core.rec).applied.iter().filter(|r| r["key"] == key.as_str() && r["cancelled"] == "Stop").count(), 1);
+                    assert!(lock(&core.rec).applied.iter().any(|r| r["key"] == key.as_str() && r["claimed"] == issued && r["issued"] == true));
+                }
+            }
+        }
     }
 
 }
