@@ -357,16 +357,17 @@ impl EventCollector {
             .collect()
     }
 
-    /// True when the hot path dropped the body of a kind whose reaction is `stop` or
-    /// `abort`. Without this a `DEVICE_LOST` arriving during an event storm would be
+    /// The strongest pending reaction when the hot path dropped a stopping body.
+    /// An `abort` takes precedence over `stop`, regardless of kind-table order.
+    /// Without this a `DEVICE_LOST` arriving during an event storm would be
     /// discarded and the Run would continue on a device that is gone (RS-36). A
     /// queued body raises no flag: it is reacted to when it is drained (KC-31).
     pub fn escalation(&self) -> Option<(EventKind, Reaction)> {
-        self.escalate.iter().enumerate().find_map(|(i, f)| match f.load(Ordering::Relaxed) {
+        self.escalate.iter().enumerate().filter_map(|(i, f)| match f.load(Ordering::Relaxed) {
                 1 => Some((self.kinds[i].clone(), Reaction::Stop)),
                 2 => Some((self.kinds[i].clone(), Reaction::Abort)),
                 _ => None,
-            })
+            }).max_by_key(|(_, reaction)| *reaction == Reaction::Abort)
     }
 
     /// The reaction to one emission: the kind's Policy entry when it has one, and

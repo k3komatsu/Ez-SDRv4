@@ -3959,3 +3959,58 @@ fn kc_24_component_update_classes_belong_to_the_target() {
         assert!(run.finish().termination.cleanup_failures.is_empty());
     }
 }
+
+#[test]
+fn rs_36_a_dropped_stop_must_not_mask_a_dropped_abort() {
+    let probe = Probe::new();
+    let (mut spec, profile) = distinct_resource_docs(&["left", "right"]);
+    spec["policies"] = serde_json::json!({ "failure": { "LINK_BACKPRESSURE": "stop" } });
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    for (name, kind, severity) in [
+        (
+            "left",
+            "LINK_BACKPRESSURE",
+            ezsdr_kernel::event::Severity::Warning,
+        ),
+        (
+            "right",
+            "STEP_LIVELOCK",
+            ezsdr_kernel::event::Severity::Fatal,
+        ),
+    ] {
+        assembly.providers.insert(
+            Ident::parse(name).unwrap(),
+            Box::new(
+                SteppedProvider::new(name, TestProvider::new(name, 2), &probe)
+                    .emitting(kind, severity, 150)
+                    .flooding(ezsdr_kernel::coordinator::EVENT_RING_DEPTH)
+                    .with_wakeups(&[150]),
+            ),
+        );
+    }
+    let mut run = start_spec_run(&spec, &profile, assembly).unwrap();
+    let _ = run.advance_to(TimePoint::new(run.now().domain, 160));
+    let manifest = run.finish();
+    eprintln!(
+        "transitions: {:?}; termination: {:?}",
+        manifest.run.transitions, manifest.termination
+    );
+    for kind in ["LINK_BACKPRESSURE", "STEP_LIVELOCK"] {
+        assert!(
+            manifest
+                .events
+                .delivered
+                .iter()
+                .any(|e| e.kind.as_str() == "EVENTS_DROPPED" && e.payload["kind"] == kind)
+        );
+    }
+    assert!(
+        manifest.run.transitions.iter().any(|row| matches!(
+            row.state,
+            RunState::Stopping {
+                mode: ezsdr_kernel::run::CleanupMode::Abort
+            }
+        )),
+        "a fatal STEP_LIVELOCK dropped behind a Stop must still abort"
+    );
+}
