@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration as Wall, Instant};
 
 use ezsdr_kernel::event::{Action, Severity};
@@ -25,7 +25,7 @@ use serde_json::json;
 use super::core::{Core, lattice, lock};
 use super::rx::RxCmd;
 use super::tx::{Held, TxCmd};
-use crate::device::{Dir, Iq, Settings, decimation};
+use crate::device::{DeviceError, Dir, Iq, Settings, decimation};
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS, RELEASE_WINDOW_NS, RESTART_LEAD_NS};
 
 const POLL: Wall = Wall::from_millis(1);
@@ -38,6 +38,59 @@ struct Timed {
     value: f64,
 }
 
+impl Timed {
+    fn settings(&self) -> Settings {
+        if self.key.as_str().ends_with("frequency_hz") {
+            Settings { freq: Some(self.value), ..Settings::default() }
+        } else {
+            Settings { gain: Some(self.value), ..Settings::default() }
+        }
+    }
+}
+
+/// A cold switch's base configuration and timed updates, shared with its owner.
+/// Updates are projected in effective order at e2, even when admitted after booking.
+pub(crate) struct ColdConfig {
+    e2: i64,
+    base: Settings,
+    updates: Mutex<BTreeMap<(i64, u64), Settings>>,
+}
+
+impl ColdConfig {
+    pub fn new(e2: i64, base: Settings) -> Self {
+        Self { e2, base, updates: Mutex::new(BTreeMap::new()) }
+    }
+
+    fn book(&self, order: (i64, u64), settings: Settings) {
+        if order.0 <= self.e2 {
+            lock(&self.updates).insert(order, settings);
+        }
+    }
+
+    fn issued(&self, updates: &mut BTreeMap<(i64, u64), Settings>, order: (i64, u64), effective: i64, settings: Settings) {
+        updates.remove(&order);
+        if effective <= self.e2 {
+            updates.insert((effective, order.1), settings);
+        }
+    }
+
+    fn settings(&self, updates: &BTreeMap<(i64, u64), Settings>) -> Settings {
+        let mut settings = self.base.clone();
+        for update in updates.values() {
+            if let Some(freq) = update.freq { settings.freq = Some(freq); }
+            if let Some(gain) = update.gain { settings.gain = Some(gain); }
+        }
+        settings
+    }
+
+    pub fn configure(&self, core: &Core, dir: Dir, channels: usize) -> Result<i64, DeviceError> {
+        // Hold the snapshot lock across the call: an update cannot change the
+        // projection while an owner is configuring from it.
+        let updates = lock(&self.updates);
+        core.configure(dir, channels, &self.settings(&updates))
+    }
+}
+
 pub(crate) struct Control {
     pub core: Arc<Core>,
     pub actions: Arc<dyn ActionReceiver>,
@@ -46,6 +99,7 @@ pub(crate) struct Control {
     pub config: BTreeMap<Key, Value>,
     pub reference_monitored: bool,
     held: BTreeMap<(i64, u64), Timed>,
+    cold: [Option<Arc<ColdConfig>>; 2],
     released: Vec<i64>,
     seq: u64,
     clock_lost: bool,
@@ -83,6 +137,7 @@ impl Control {
             config,
             reference_monitored,
             held: BTreeMap::new(),
+            cold: [None, None],
             released: Vec::new(),
             seq: 0,
             clock_lost: false,
@@ -208,7 +263,9 @@ impl Control {
             return;
         }
         self.seq += 1;
-        self.held.insert((e, self.seq), Timed { key, dir, value: v });
+        let timed = Timed { key, dir, value: v };
+        if let Some(cold) = self.pending_cold(dir) { cold.book((e, self.seq), timed.settings()); }
+        self.held.insert((e, self.seq), timed);
     }
 
     /// Releases held commands within the release window, in effective order (UR-24).
@@ -220,7 +277,7 @@ impl Control {
         let window = self.core.ticks(RELEASE_WINDOW_NS);
         self.released.retain(|effective| *effective > now);
         while let Some(entry) = self.held.first_entry() {
-            let (e, _) = *entry.key();
+            let (e, seq) = *entry.key();
             if e - now > window {
                 break;
             }
@@ -231,11 +288,10 @@ impl Control {
                 // The device queue is in order: behind a later command it is late (UC-2).
                 self.late_command(Some(timed.key.clone()), e, effective);
             }
-            let settings = if timed.key.as_str().ends_with("frequency_hz") {
-                Settings { freq: Some(timed.value), ..Settings::default() }
-            } else {
-                Settings { gain: Some(timed.value), ..Settings::default() }
-            };
+            let settings = timed.settings();
+            let cold = self.pending_cold(timed.dir);
+            // Order a timed issuance and its projection atomically against configure.
+            let mut updates = cold.as_ref().map(|cold| lock(&cold.updates));
             for chan in 0..Core::channels(&self.config, timed.dir) {
                 if let Err(error) = self.core.device.apply(timed.dir, chan, &settings, Some(effective)) {
                     self.core.device_failed("update_parameter", &error);
@@ -243,6 +299,10 @@ impl Control {
                 }
                 self.released.push(effective);
             }
+            if let (Some(cold), Some(updates)) = (&cold, &mut updates) {
+                cold.issued(updates, (e, seq), effective, settings);
+            }
+            drop(updates);
             self.config.insert(timed.key.clone(), Value::Num(timed.value));
             lock(&self.core.rec).applied.push(json!({
                 "key": timed.key, "claimed": timed.value, "read_back": null, "at": self.core.at(effective), "issued": true,
@@ -359,7 +419,11 @@ impl Control {
                     None
                 };
                 self.config = candidate;
-                let settings = self.settings_at(dir, clock.map_or(e1, |c| c.origin));
+                let settings = Arc::new(ColdConfig::new(clock.map_or(e1, |c| c.origin), Core::settings(&self.config, dir)));
+                for (&order, timed) in &self.held {
+                    if timed.dir == dir { settings.book(order, timed.settings()); }
+                }
+                self.cold[dir as usize] = Some(settings.clone());
                 {
                     let mut streams = lock(&self.core.streams);
                     streams.switching[dir as usize] = true;
@@ -381,16 +445,11 @@ impl Control {
         }
     }
 
-    /// The direction's configuration in effect at `e2`: the configuration, and every
-    /// held command due by then; later ones stay held (UR-25; UC-2).
-    fn settings_at(&self, dir: Dir, e2: i64) -> Settings {
-        let mut config = self.config.clone();
-        for ((e, _), timed) in &self.held {
-            if *e <= e2 && timed.dir == dir {
-                config.insert(timed.key.clone(), Value::Num(timed.value));
-            }
+    fn pending_cold(&mut self, dir: Dir) -> Option<Arc<ColdConfig>> {
+        if !lock(&self.core.streams).switching[dir as usize] {
+            self.cold[dir as usize] = None;
         }
-        Core::settings(&config, dir)
+        self.cold[dir as usize].clone()
     }
 
     /// A change from 0 channels (UR-25; N-P0-1): uhd-control opens the streamer and
@@ -655,4 +714,53 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn ur_25_later_timed_update_survives_cold_switch() {
+        let mut observed = Vec::new();
+        for dir in [Dir::Rx, Dir::Tx] {
+            let (core, device, _, _) = crate::provider::test_support::rig();
+            let clock = core.register(dir, 200, 0).unwrap();
+            { let mut streams = lock(&core.streams);
+              match dir { Dir::Rx => streams.rx = Some(clock), Dir::Tx => streams.tx = Some(clock) }
+            }
+            match dir { Dir::Rx => device.rx_open(1).unwrap(), Dir::Tx => device.tx_open(1).unwrap() }
+            let (to_tx, tx) = std::sync::mpsc::channel();
+            let (to_rx, rx) = std::sync::mpsc::channel();
+            let mut config = core.description.defaults.clone();
+            config.insert(super::super::core::key(&format!("radio.{}.channels", dir.name())), Value::Int(1));
+            let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false);
+            control.book_cold(super::super::core::key(&format!("radio.{}.sample_rate_hz", dir.name())), Value::Num(2e6),
+                Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
+            let gain = super::super::core::key(&format!("radio.{}.gain_db", dir.name()));
+            control.book_timed(gain.clone(), Value::Num(3.0), None);
+            control.release();
+            assert_eq!(control.config[&gain], Value::Num(3.0));
+            assert!(lock(&core.rec).rejected.is_empty());
+            let settings = match dir {
+                Dir::Rx => match rx.try_recv().unwrap() { RxCmd::Switch { settings, .. } => settings, _ => panic!("switch") },
+                Dir::Tx => match tx.try_recv().unwrap() { TxCmd::Switch { settings, .. } => settings, _ => panic!("switch") },
+            };
+            settings.configure(&core, dir, 1).unwrap();
+            eprintln!("device calls: {:?}", device.calls());
+            observed.push((dir.name(), settings.settings(&lock(&settings.updates)).gain));
+        }
+        assert_eq!(observed, vec![("rx", Some(3.0)), ("tx", Some(3.0))], "both cold switches must preserve the later update due before e2");
+    }
+
+    #[test]
+    fn ur_25_switch_projects_timed_updates_in_effective_order() {
+        let cold = ColdConfig::new(100, Settings { gain: Some(0.0), freq: Some(1e9), ..Settings::default() });
+        cold.book((70, 1), Settings { gain: Some(7.0), ..Settings::default() });
+        cold.book((50, 2), Settings { gain: Some(5.0), ..Settings::default() });
+        cold.book((101, 3), Settings { gain: Some(9.0), freq: Some(2e9), ..Settings::default() });
+        cold.book((100, 4), Settings { freq: Some(1.1e9), ..Settings::default() });
+        assert_eq!(cold.settings(&lock(&cold.updates)).gain, Some(7.0));
+        assert_eq!(cold.settings(&lock(&cold.updates)).freq, Some(1.1e9));
+        // A command delayed by the device queue takes its actual effective order.
+        cold.issued(&mut lock(&cold.updates), (50, 2), 80, Settings { gain: Some(5.0), ..Settings::default() });
+        assert_eq!(cold.settings(&lock(&cold.updates)).gain, Some(5.0));
+        cold.issued(&mut lock(&cold.updates), (100, 4), 101, Settings { freq: Some(1.1e9), ..Settings::default() });
+        assert_eq!(cold.settings(&lock(&cold.updates)).freq, Some(1e9));
+    }
+
 }

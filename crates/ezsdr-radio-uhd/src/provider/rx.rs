@@ -16,15 +16,16 @@ use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::{AlignmentErrorPayload, LateCommandPayload, RxOverflowCause, RxOverflowPayload};
 use serde_json::json;
 
+use super::control::ColdConfig;
 use super::core::{Clock, Core, lattice, lock};
-use crate::device::{Dir, Iq, RxRecv, Settings};
+use crate::device::{Dir, Iq, RxRecv};
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS, RESTART_LEAD_NS};
 
 pub(crate) enum RxCmd {
     /// A stream enabled from 0 channels, already configured and started (UR-25).
     Enable { clock: Clock, channels: usize },
     /// A `cold` change: the old stream ends at `e1` (UR-25).
-    Switch { e1: i64, clock: Option<Clock>, channels: usize, settings: Settings },
+    Switch { e1: i64, clock: Option<Clock>, channels: usize, settings: Arc<ColdConfig> },
     /// `Stop` for `<id>/rx` or `<id>`: RM-16's tail (UR-26).
     Stop,
     /// `Provider::stop` began at `at`: the stream ends at `at` plus the tail under
@@ -81,7 +82,7 @@ struct Switch {
     channels: usize,
     /// The channel count before the change: the streamer is reopened only if it differs.
     from: usize,
-    settings: Settings,
+    settings: Arc<ColdConfig>,
     e1: i64,
 }
 
@@ -483,7 +484,7 @@ impl Rx {
         };
         // UR-25: the streamer is reopened when the channel count changed, and only then.
         let reopened = if switch.channels != switch.from { self.core.device.rx_open(switch.channels) } else { Ok(()) };
-        let configured = reopened.and_then(|()| self.core.configure(Dir::Rx, switch.channels, &switch.settings));
+        let configured = reopened.and_then(|()| switch.settings.configure(&self.core, Dir::Rx, switch.channels));
         let started = configured.and_then(|_| self.core.device.rx_start(new.origin));
         match started {
             Ok(()) => {

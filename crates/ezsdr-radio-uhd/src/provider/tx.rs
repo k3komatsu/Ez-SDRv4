@@ -20,8 +20,9 @@ use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::{TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload};
 use serde_json::json;
 
+use super::control::ColdConfig;
 use super::core::{Clock, Core, lock};
-use crate::device::{Dir, Iq, Settings, TxCode, TxReport};
+use crate::device::{Dir, Iq, TxCode, TxReport};
 use crate::profile::{DEVICE_LEAD_NS, IN_FLIGHT_WINDOW_NS};
 
 /// A burst uhd-control booked (UR-21).
@@ -42,7 +43,7 @@ pub(crate) enum TxCmd {
     /// A stream enabled from 0 channels, already configured (UR-25).
     Enable { clock: Clock, channels: usize },
     /// A `cold` change: the old stream ends at `e1` (UR-25).
-    Switch { e1: i64, clock: Option<Clock>, channels: usize, settings: Settings },
+    Switch { e1: i64, clock: Option<Clock>, channels: usize, settings: Arc<ColdConfig> },
     /// `Provider::stop` (UR-26).
     Shutdown,
 }
@@ -57,7 +58,7 @@ struct Switch {
     e1: i64,
     clock: Option<Clock>,
     channels: usize,
-    settings: Settings,
+    settings: Arc<ColdConfig>,
 }
 
 pub(crate) struct Tx {
@@ -592,7 +593,7 @@ impl Tx {
             } else {
                 Ok(())
             };
-            match reopened.and_then(|()| self.core.configure(Dir::Tx, switch.channels, &switch.settings)) {
+            match reopened.and_then(|()| switch.settings.configure(&self.core, Dir::Tx, switch.channels)) {
                 Ok(_) => {
                     self.clock = Some(new);
                     self.tracker = Some(BurstTracker::new(new.domain));
@@ -826,7 +827,7 @@ mod tests {
         lock(&core.held).insert((clock.domain, 17_000));
         tx.command(TxCmd::Burst(held(&clock, 17_000, 10_000, LatePolicy::SendAsapAndFlag)));
         tx.command(TxCmd::Switch { e1: core.ticks(20_000_000), clock: None,
-            channels: 0, settings: Settings::default() });
+            channels: 0, settings: Arc::new(super::ColdConfig::new(0, Settings::default())) });
         time.advance_to(core.at(core.ticks(19_000_000))).unwrap();
         assert!(tx.step());
         assert!(tx.open.is_none());
