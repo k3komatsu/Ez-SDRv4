@@ -804,6 +804,19 @@ fn ma_37_descriptor_structural_validation() {
     assert!(json["timing"].get("budget").is_some());
 }
 
+#[test]
+fn ma_37_a_non_host_budget_is_refused_at_the_document_boundary() {
+    let mut descriptor = serde_json::to_value(component("a")).expect("descriptor");
+    descriptor["timing"]["budget"] = serde_json::json!({
+        "duration": { "domain": { "node": 0, "local": 0 }, "ticks": 1_000 }
+    });
+    assert!(serde_json::from_value::<ComponentDescriptor>(descriptor.clone()).is_err());
+    let spec = serde_json::json!({
+        "version": 1, "graph": { "components": { "a": descriptor } }
+    });
+    assert!(ezsdr_kernel::spec::ExperimentSpec::from_json(&spec).is_err());
+}
+
 // ---------------------------------------------------------------- island admission
 
 fn island(components: &[&str], executor: &str) -> IslandDecl {

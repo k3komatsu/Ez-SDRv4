@@ -452,6 +452,21 @@ fn tm_15_budget_rejects_non_host_domain() {
     ));
 }
 
+#[test]
+fn tm_15_deserialized_budget_preserves_the_host_domain_constraint() {
+    let budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 1_000))
+        .expect("host budget");
+    let mut doc = serde_json::to_value(budget).expect("serialises");
+    let decoded: RelativeBudget = serde_json::from_value(doc.clone()).expect("host budget");
+    assert_eq!(decoded, budget);
+    assert_eq!(decoded.deadline_from(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 20)),
+        Ok(AbsoluteDeadline::new(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 1_020))));
+    for domain in [ClockDomainId::UTC, ClockDomainId::local(17)] {
+        doc["duration"]["domain"] = serde_json::to_value(domain).expect("domain");
+        assert!(serde_json::from_value::<RelativeBudget>(doc.clone()).is_err());
+    }
+}
+
 // ---------------------------------------------------------------- registry and SampleClocks
 
 #[test]

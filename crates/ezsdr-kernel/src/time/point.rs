@@ -223,10 +223,22 @@ pub struct UncertainTimePoint {
 /// consume them differ (Vision §19, decision T5).
 ///
 /// Rule: TM-15.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RelativeBudget {
     duration: Duration,
+}
+
+impl<'de> Deserialize<'de> for RelativeBudget {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Parts {
+            duration: Duration,
+        }
+        let parts = Parts::deserialize(deserializer)?;
+        RelativeBudget::new(parts.duration).map_err(serde::de::Error::custom)
+    }
 }
 
 impl RelativeBudget {
