@@ -253,8 +253,10 @@ impl Rx {
     fn recv_timeout(&self) -> Wall {
         let Some(stream) = self.stream.as_ref() else { return RECV_TIMEOUT };
         let Some(cut) = stream.cut else { return RECV_TIMEOUT };
-        let left = cut + quiet_span(&self.core, stream) - self.core.now();
-        Wall::from_nanos(self.core.ns(left.max(0)) as u64).clamp(Wall::from_millis(1), RECV_TIMEOUT)
+        let left = i128::from(cut) + i128::from(quiet_span(&self.core, stream)) - i128::from(self.core.now());
+        let ns = (left.max(0) * 1_000_000_000 / i128::from(self.core.mcr))
+            .clamp(1_000_000, RECV_TIMEOUT.as_nanos() as i128);
+        Wall::from_nanos(ns as u64)
     }
 
     fn stop_orderly(&mut self, tail: i64) {
@@ -289,7 +291,7 @@ impl Rx {
                 // delivering, however late, is waited for (Review N, B2).
                 let span = quiet_span(&self.core, stream);
                 let quiet = self.last_samples.elapsed() >= Wall::from_nanos(self.core.ns(span) as u64);
-                if let Some(cut) = stream.cut.filter(|cut| quiet && now >= cut + span) {
+                if let Some(cut) = stream.cut.filter(|cut| quiet && i128::from(now) >= i128::from(*cut) + i128::from(span)) {
                     // Silent past its cut: stopped all the same, never left streaming.
                     let stopped = stream.stopped;
                     self.stream = None;
@@ -297,7 +299,7 @@ impl Rx {
                         self.last_stop = stop_at_cut(&self.core, cut).or(self.last_stop);
                     }
                 } else if stream.cut.is_none_or(|cut| now < cut)
-                    && now > stream.start + self.core.mcr as i64
+                    && i128::from(now) > i128::from(stream.start) + i128::from(self.core.mcr)
                     && self.last_samples.elapsed() > Wall::from_secs(1)
                 {
                     self.core.device_lost("UR-29: the receive stream yielded nothing for 1 s");
@@ -325,7 +327,10 @@ impl Rx {
             }
             RxRecv::LateCommand => {
                 // UR-17: the device missed the timed start; the origin stays.
-                let restart = lattice(now + self.core.ticks(RESTART_LEAD_NS), stream.clock.n);
+                let restart = match lattice(i128::from(now) + i128::from(self.core.ticks(RESTART_LEAD_NS)), stream.clock.n) {
+                    Ok(restart) => restart,
+                    Err(error) => return self.core.command_rejected("start", &format!("UR-17: {error}")),
+                };
                 let payload = serde_json::to_value(LateCommandPayload {
                     key: None,
                     requested: self.core.at(stream.start),
@@ -576,4 +581,19 @@ mod tests {
         assert_eq!(stops[0]["at"], serde_json::to_value(core.at(cut)).unwrap());
         assert!(!device.calls().iter().any(|c| c.starts_with("rx_start ")));
     }
+    #[test]
+    fn ur_25_largest_aligned_cut_is_safe_in_rx_owner() {
+        let (core, _, _, _) = super::super::test_support::rig();
+        let old = core.register(Dir::Rx, 200, 0).unwrap();
+        let e1 = i64::MAX.div_euclid(old.n) * old.n;
+        let (_to_rx, cmds) = std::sync::mpsc::channel();
+        let mut rx = super::Rx::new(core.clone(), cmds, Some(old), 1, None);
+        rx.command(super::RxCmd::Switch { e1, clock: None, channels: 0,
+            settings: Arc::new(super::ColdConfig::new(e1, crate::device::Settings::default())) });
+        assert_eq!(rx.recv_len(), core.block_len);
+        assert_eq!(rx.recv_timeout(), super::RECV_TIMEOUT);
+        rx.receive(crate::device::RxRecv::Timeout);
+        assert!(rx.stream.is_some());
+    }
+
 }

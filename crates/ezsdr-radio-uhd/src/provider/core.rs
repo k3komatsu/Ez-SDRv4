@@ -9,7 +9,7 @@ use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::module_api::InputStore;
 use ezsdr_kernel::spec::{Key, Value};
 use ezsdr_kernel::stream::DataLink;
-use ezsdr_kernel::time::{ClockRegistry, Rational, TimeAuthority, TimePoint};
+use ezsdr_kernel::time::{ClockRegistry, Rational, TimeAuthority, TimePoint, TimeError};
 use ezsdr_radio::device::DeviceDescription;
 use ezsdr_radio::payloads::CommandRejectedPayload;
 use ezsdr_radio::{keys, kinds};
@@ -36,18 +36,21 @@ pub(crate) struct Clock {
 impl Clock {
     /// The root tick of sample `k`.
     pub fn instant(&self, k: i64) -> i64 {
-        self.origin + k * self.n
+        i64::try_from(i128::from(self.origin) + i128::from(k) * i128::from(self.n))
+            .expect("a representable stream instant")
     }
 
     /// The first sample at or after root tick `t`.
     pub fn at_or_after(&self, t: i64) -> i64 {
-        (t - self.origin + self.n - 1).div_euclid(self.n)
+        i64::try_from((i128::from(t) - i128::from(self.origin) + i128::from(self.n) - 1)
+            .div_euclid(i128::from(self.n))).expect("a representable sample index")
     }
 }
 
 /// RM-25: the first whole multiple of `n` at or after `t`.
-pub(crate) fn lattice(t: i64, n: i64) -> i64 {
-    (t + n - 1).div_euclid(n) * n
+pub(crate) fn lattice(t: i128, n: i64) -> Result<i64, TimeError> {
+    let n = i128::from(n);
+    i64::try_from((t + n - 1).div_euclid(n) * n).map_err(|_| TimeError::Overflow)
 }
 
 /// uhd-control's view of the two streams, which it books (UR-25).

@@ -395,7 +395,7 @@ impl Provider for UhdRadio {
             self.device.tx_open(*channels).map_err(|e| rejected(format!("UR-13: {e}")))?;
             // RM-25: the first lattice instant at or after the arm instant.
             let n = handle.root_ticks_per_tick.num() as i64;
-            let origin = lattice(a, n);
+            let origin = lattice(i128::from(a), n).map_err(|e| rejected(format!("UR-13: {e}")))?;
             let domain = core.clocks.register_sample_clock(handle, origin).map_err(|e| rejected(format!("UR-13: {e}")))?;
             let clock = Clock { domain, origin, n };
             prepared.tx_clock = Some(clock);

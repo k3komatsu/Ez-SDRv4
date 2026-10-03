@@ -385,8 +385,16 @@ impl Control {
                 if let Some(t) = requested.filter(|t| *t < now) {
                     self.late_command(Some(key.clone()), t, now);
                 }
+                let e = requested.unwrap_or(now).max(now);
+                let minimum = match dir {
+                    Dir::Tx => i128::from(e),
+                    Dir::Rx => i128::from(e).max(i128::from(now) + i128::from(self.core.ticks(RESTART_LEAD_NS))),
+                };
+                if let Err(error) = lattice(minimum, n) {
+                    return self.core.command_rejected("update_parameter", &format!("UR-25: {error}"));
+                }
                 self.config = candidate;
-                self.enable(dir, channels, n, requested.unwrap_or(now).max(now));
+                self.enable(dir, channels, n, e);
             }
             None => self.config = candidate,
             Some(old) => {
@@ -398,10 +406,13 @@ impl Control {
                 // sample in a packet that ends later; the restart lead's margin covers that
                 // (a packet is at most 5.1 ms on the X300; Review P, NB-4).
                 let in_progress = match dir {
-                    Dir::Rx => self.core.block_len.max(self.core.device.rx_packet_samples()) as i64 * old.n + self.core.ticks(DELIVERY_ALLOWANCE_NS),
+                    Dir::Rx => self.core.block_len.max(self.core.device.rx_packet_samples()) as i128 * i128::from(old.n) + i128::from(self.core.ticks(DELIVERY_ALLOWANCE_NS)),
                     Dir::Tx => 0,
                 };
-                let earliest = now + restart + in_progress;
+                let earliest = match i64::try_from(i128::from(now) + i128::from(restart) + in_progress) {
+                    Ok(earliest) => earliest,
+                    Err(_) => return self.core.command_rejected("update_parameter", "UR-25: time arithmetic overflow"),
+                };
                 let e = match requested {
                     Some(t) if t < earliest => {
                         self.late_command(Some(key.clone()), t, earliest);
@@ -410,12 +421,21 @@ impl Control {
                     Some(t) => t,
                     None => earliest,
                 };
-                let e1 = lattice(e, old.n);
+                // Preflight both boundaries before ending the old clock or booking a new one.
+                let boundaries = lattice(i128::from(e), old.n).and_then(|e1| {
+                    let e2 = if channels > 0 {
+                        Some(lattice(i128::from(e1) + i128::from(restart), n)?)
+                    } else { None };
+                    Ok((e1, e2))
+                });
+                let (e1, e2) = match boundaries {
+                    Ok(boundaries) => boundaries,
+                    Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-25: {error}")),
+                };
                 if let Err(error) = self.core.clocks.end(old.domain, self.core.at(e1)) {
                     return self.core.command_rejected("update_parameter", &format!("UR-25: {error}"));
                 }
-                let clock = if channels > 0 {
-                    let e2 = lattice(e1 + restart, n);
+                let clock = if let Some(e2) = e2 {
                     match self.core.register(dir, n, e2) {
                         Ok(clock) => Some(clock),
                         Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-25: {error}")),
@@ -472,9 +492,12 @@ impl Control {
         // RM-25: at or after both `e` and the end of the configuration; a receive stream
         // also a restart lead ahead, for its timed start (Review L, P0-3).
         let now = self.core.now();
-        let origin = match dir {
-            Dir::Tx => lattice(e.max(now), n),
-            Dir::Rx => lattice(e.max(now + self.core.ticks(RESTART_LEAD_NS)), n),
+        let origin = match lattice(match dir {
+            Dir::Tx => i128::from(e.max(now)),
+            Dir::Rx => i128::from(e).max(i128::from(now) + i128::from(self.core.ticks(RESTART_LEAD_NS))),
+        }, n) {
+            Ok(origin) => origin,
+            Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-25: {error}")),
         };
         let clock = match self.core.register(dir, n, origin) {
             Ok(clock) => clock,
@@ -841,6 +864,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ur_25_cold_deadline_overflow_is_rejected_without_panic() {
+        let aligned_max = i64::MAX.div_euclid(200) * 200;
+        for dir in [Dir::Rx, Dir::Tx] {
+            for (at, now) in [(i64::MAX, 0), (aligned_max, 0), (0, i64::MAX - 1)] {
+                let (mut core, device, _, _) = crate::provider::test_support::rig();
+                let time = Arc::new(ezsdr_kernel::time::ManualTimeAuthority::new(core.clocks.clone(), core.root, &[],
+                    ezsdr_kernel::module_api::Pacing::Device).unwrap());
+                Arc::get_mut(&mut core).unwrap().time = time.clone();
+                let old = core.register(dir, 200, 0).unwrap();
+                { let mut streams = lock(&core.streams);
+                    match dir { Dir::Rx => streams.rx = Some(old), Dir::Tx => streams.tx = Some(old) }
+                }
+                time.advance_to(core.at(now)).unwrap();
+                let (to_tx, tx) = std::sync::mpsc::channel();
+                let (to_rx, rx) = std::sync::mpsc::channel();
+                let mut config = core.description.defaults.clone();
+                config.insert(super::super::core::key(&format!("radio.{}.channels", dir.name())), Value::Int(1));
+                let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config.clone(), false);
+                control.book_cold(super::super::core::key(&format!("radio.{}.sample_rate_hz", dir.name())), Value::Num(2e6),
+                    Some(AbsoluteDeadline::new(core.at(at))));
+                assert_eq!(control.config, config);
+                assert_eq!(core.clocks.sample_clock_records().len(), 1);
+                assert_eq!(core.clocks.sample_clock_records()[0].ended_at, None);
+                assert!(lock(&core.rec).rejected.iter().any(|row| row["reason"].as_str().unwrap().contains("overflow")));
+                assert!(tx.try_recv().is_err()); assert!(rx.try_recv().is_err());
+                assert!(device.calls().is_empty());
+            }
+        }
+        assert_eq!(super::lattice(i128::from(aligned_max), 200).unwrap(), aligned_max);
+        assert_eq!(super::lattice(-201, 200).unwrap(), -200);
+        assert_eq!(super::lattice(i128::from(i64::MIN), 200).unwrap(), i64::MIN + 8);
+        // A cold disable needs e1 only, so the largest aligned instant remains valid.
+        let (core, _, _, _) = crate::provider::test_support::rig();
+        let old = core.register(Dir::Tx, 200, 0).unwrap();
+        lock(&core.streams).tx = Some(old);
+        let (to_tx, tx) = std::sync::mpsc::channel(); let (to_rx, _rx) = std::sync::mpsc::channel();
+        let mut config = core.description.defaults.clone();
+        config.insert(super::super::core::key("radio.tx.channels"), Value::Int(1));
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false);
+        control.book_cold(super::super::core::key("radio.tx.channels"), Value::Int(0),
+            Some(AbsoluteDeadline::new(core.at(aligned_max))));
+        assert_eq!(core.clocks.sample_clock_records()[0].ended_at, Some(core.at(aligned_max)));
+        assert!(matches!(tx.try_recv(), Ok(TxCmd::Switch { clock: None, .. })));
     }
 
 }

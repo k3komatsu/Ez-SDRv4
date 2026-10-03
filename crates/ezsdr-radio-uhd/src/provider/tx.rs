@@ -1006,4 +1006,18 @@ mod tests {
         assert_eq!(&device.calls()[before..], &["mark_lost"]);
     }
 
+    #[test]
+    fn ur_25_largest_aligned_cut_is_safe_in_tx_owner() {
+        let (core, _, _, _) = super::super::test_support::rig();
+        let old = core.register(Dir::Tx, 200, 0).unwrap();
+        let e1 = i64::MAX.div_euclid(old.n) * old.n;
+        assert_eq!(old.at_or_after(e1), e1 / old.n);
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core, cmds, Some(old), 1);
+        tx.command(TxCmd::Switch { e1, clock: None, channels: 0,
+            settings: Arc::new(super::ColdConfig::new(e1, Settings::default())) });
+        assert!(!tx.step());
+        assert!(tx.switch.is_some());
+    }
+
 }
