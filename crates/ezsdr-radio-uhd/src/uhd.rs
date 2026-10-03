@@ -273,6 +273,7 @@ pub fn find(args: &str) -> Result<Vec<String>, DeviceError> {
 
 struct RxStream {
     h: uhd_rx_streamer_handle,
+    call: Mutex<()>,
     md: uhd_rx_metadata_handle,
     /// The device's lost mark: a lost device's streamer is not freed (F4).
     lost: Arc<AtomicBool>,
@@ -283,6 +284,7 @@ struct RxStream {
 
 struct TxStream {
     h: uhd_tx_streamer_handle,
+    call: Mutex<()>,
     md: uhd_async_metadata_handle,
     /// As for `RxStream`.
     lost: Arc<AtomicBool>,
@@ -325,7 +327,7 @@ impl RxStream {
         let mut h: uhd_rx_streamer_handle = std::ptr::null_mut();
         // SAFETY: `h` is written by the call.
         unsafe { check("uhd_rx_streamer_make", uhd_rx_streamer_make(&mut h), true)? };
-        let mut stream = RxStream { h, md: std::ptr::null_mut(), lost, channels, spp: 0 };
+        let mut stream = RxStream { h, call: Mutex::new(()), md: std::ptr::null_mut(), lost, channels, spp: 0 };
         stream.spp = attach(stream.h)?;
         // SAFETY: the metadata handle is written into the value that frees it.
         unsafe { check("uhd_rx_metadata_make", uhd_rx_metadata_make(&mut stream.md), true)? };
@@ -339,7 +341,7 @@ impl TxStream {
         let mut h: uhd_tx_streamer_handle = std::ptr::null_mut();
         // SAFETY: `h` is written by the call.
         unsafe { check("uhd_tx_streamer_make", uhd_tx_streamer_make(&mut h), true)? };
-        let mut stream = TxStream { h, md: std::ptr::null_mut(), lost, channels };
+        let mut stream = TxStream { h, call: Mutex::new(()), md: std::ptr::null_mut(), lost, channels };
         attach(stream.h)?;
         // SAFETY: as above.
         unsafe { check("uhd_async_metadata_make", uhd_async_metadata_make(&mut stream.md), true)? };
@@ -358,8 +360,9 @@ pub fn streamer_lifecycle() -> Result<(), DeviceError> {
     Ok(())
 }
 
-// SAFETY (UR-3): a streamer is used by one owning thread at a time, and the Arc keeps
-// its handles alive until the last user drops it.
+// SAFETY (UR-3): every published streamer's native calls, metadata and error-text
+// access are serialized by its call mutex; the Arc keeps its handles alive.
+// Private construction and final drop have exclusive access to those handles.
 unsafe impl Send for RxStream {}
 unsafe impl Sync for RxStream {}
 unsafe impl Send for TxStream {}
@@ -378,7 +381,7 @@ pub struct UhdDevice {
 }
 
 // SAFETY (UR-3, INFERRED from UHD's documented thread safety of multi_usrp control
-// calls): every control call is made under `control`; streamers are owned as above.
+// calls): every control call is made under `control`; streamer access is locked as above.
 unsafe impl Send for UhdDevice {}
 unsafe impl Sync for UhdDevice {}
 
@@ -446,7 +449,8 @@ impl UhdDevice {
             time_spec_frac_secs: frac,
         };
         let _control = lock(&self.control);
-        // SAFETY: the streamer is held by the Arc for the call.
+        let _call = lock(&stream.call);
+        // SAFETY: the streamer is held by the Arc and its call lock.
         unsafe { check_rx(stream.h, "uhd_rx_streamer_issue_stream_cmd", uhd_rx_streamer_issue_stream_cmd(stream.h, &cmd)) }
     }
 }
@@ -771,6 +775,7 @@ impl Device for UhdDevice {
         let Some(stream) = lock(&self.rx).clone() else {
             return RxRecv::Failed(DeviceError::failed("UR-3: the receive streamer is not open"));
         };
+        let _call = lock(&stream.call);
         // ponytail: a fresh buffer per call, because the trait returns owned samples;
         // UR-32's reuse is Phase 8's copy-regression benchmark to settle.
         let mut buffers: Vec<Vec<Iq>> = vec![vec![[0.0; 2]; n]; stream.channels];
@@ -856,6 +861,7 @@ impl Device for UhdDevice {
         if samples.iter().any(|samples| samples.len() < n) {
             return Err(DeviceError::failed(format!("UR-3: a transmit channel buffer is shorter than {n} samples")));
         }
+        let _call = lock(&stream.call);
         let (full, frac) = at.map_or((0, 0.0), |t| to_time_spec(t, self.mcr));
         let mut pointers: Vec<*const c_void> = samples.iter().map(|s| s.as_ptr() as *const c_void).collect();
         let mut md: uhd_tx_metadata_handle = std::ptr::null_mut();
@@ -872,6 +878,7 @@ impl Device for UhdDevice {
 
     fn tx_async(&self, timeout: Duration) -> Option<TxReport> {
         let stream = lock(&self.tx).clone()?;
+        let _call = lock(&stream.call);
         let mut md = stream.md;
         let mut valid = false;
         // SAFETY: the metadata belongs to this streamer, which the Arc keeps.
@@ -912,20 +919,62 @@ impl Device for UhdDevice {
 }
 
 // Native-boundary regressions without a USRP. Only this unit-test executable
-// substitutes send; integration tests still link the real libuhd entry point.
+// substitutes streamer calls; integration tests still link real libuhd entry points.
 #[cfg(test)]
 mod ffi_tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::{Barrier, Condvar};
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
     static SEND_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static PROBE: AtomicBool = AtomicBool::new(false);
+    static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+    static MAX_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+    static ENTERED: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
+    fn native_entry() {
+        if !PROBE.load(Ordering::SeqCst) { return; }
+        let active = ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+        MAX_ACTIVE.fetch_max(active, Ordering::SeqCst);
+        let mut entered = lock(&ENTERED.0);
+        *entered += 1;
+        ENTERED.1.notify_all();
+        // A missing call lock allows both entries to rendezvous. With the lock,
+        // the first waits out the rendezvous, returns, then permits the second.
+        let _ = ENTERED.1.wait_timeout_while(entered, Duration::from_millis(500), |n| *n < 2)
+            .unwrap_or_else(|e| e.into_inner());
+        ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn pair(device: &Arc<UhdDevice>, a: fn(&UhdDevice), b: fn(&UhdDevice)) {
+        ACTIVE.store(0, Ordering::SeqCst);
+        MAX_ACTIVE.store(0, Ordering::SeqCst);
+        *lock(&ENTERED.0) = 0;
+        PROBE.store(true, Ordering::SeqCst);
+        let start = Barrier::new(3);
+        std::thread::scope(|scope| {
+            for call in [a, b] {
+                let start = &start;
+                scope.spawn(move || { start.wait(); call(device); });
+            }
+            start.wait();
+        });
+        PROBE.store(false, Ordering::SeqCst);
+        assert_eq!(*lock(&ENTERED.0), 2, "both calls entered the native boundary");
+        assert_eq!(MAX_ACTIVE.load(Ordering::SeqCst), 1, "safe shared methods must serialize same-streamer native calls");
+    }
+
+    fn send(device: &UhdDevice) {
+        device.tx_send(&[&[[0.0, 0.0]]], None, false, false, Duration::from_secs(1)).unwrap();
+    }
 
     #[unsafe(no_mangle)]
     extern "C" fn uhd_tx_streamer_send(
         _h: uhd_tx_streamer_handle, _buffs: *mut *const c_void,
         n: usize, _md: *mut uhd_tx_metadata_handle, _timeout: f64, sent: *mut usize,
     ) -> c_int {
+        native_entry();
         SEND_CALLS.fetch_add(1, Ordering::SeqCst);
         // SAFETY: tx_send supplies a live local output slot. Sample pointers and
         // dummy streamer handles are never read by this test replacement.
@@ -939,7 +988,7 @@ mod ffi_tests {
             usrp: std::ptr::null_mut(), args: "ffi-test-no-device".to_owned(), mcr: 200_000_000,
             control: Mutex::new(()), rx: Mutex::new(None),
             tx: Mutex::new(Some(Arc::new(TxStream {
-                h: std::ptr::null_mut(), md: std::ptr::null_mut(), channels, lost: lost.clone(),
+                h: std::ptr::null_mut(), call: Mutex::new(()), md: std::ptr::null_mut(), channels, lost: lost.clone(),
             }))), lost,
         })
     }
@@ -964,4 +1013,67 @@ mod ffi_tests {
         assert_eq!(device.tx_send(&[&[], &[], &[]], None, false, true, Duration::from_millis(1)).unwrap(), 0);
         assert!(device.tx_send(&[&long, &long], None, false, false, Duration::from_millis(1)).is_err());
     }
+    #[test]
+    fn uhd_safe_shared_device_serializes_send() {
+        let _test = lock(&TEST_LOCK);
+        pair(&dummy(1), send, send);
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn uhd_rx_streamer_recv(
+        _h: uhd_rx_streamer_handle, _buffs: *mut *mut c_void, _n: usize,
+        _md: *mut uhd_rx_metadata_handle, _timeout: f64, _one_packet: bool, received: *mut usize,
+    ) -> c_int {
+        native_entry();
+        // SAFETY: rx_recv supplies a live output slot. No sample pointers read.
+        unsafe { *received = 0; }
+        UHD_ERROR_NONE
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn uhd_rx_streamer_issue_stream_cmd(
+        _h: uhd_rx_streamer_handle, _cmd: *const uhd_stream_cmd_t,
+    ) -> c_int {
+        native_entry();
+        UHD_ERROR_NONE
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn uhd_tx_streamer_recv_async_msg(
+        _h: uhd_tx_streamer_handle, _md: *mut uhd_async_metadata_handle,
+        _timeout: f64, valid: *mut bool,
+    ) -> c_int {
+        native_entry();
+        // SAFETY: tx_async supplies a live output slot, and reads no metadata on false.
+        unsafe { *valid = false; }
+        UHD_ERROR_NONE
+    }
+
+    fn receive(device: &UhdDevice) {
+        assert!(matches!(device.rx_recv(1, Duration::from_secs(1)), RxRecv::Timeout));
+    }
+    fn start(device: &UhdDevice) { device.rx_start(0).unwrap(); }
+    fn report(device: &UhdDevice) { assert!(device.tx_async(Duration::from_secs(1)).is_none()); }
+
+    #[test]
+    fn uhd_safe_shared_device_serializes_receive_and_reports() {
+        let _test = lock(&TEST_LOCK);
+        let device = dummy(1);
+        let mut md = std::ptr::null_mut();
+        // SAFETY: made by real libuhd for rx_recv's metadata getters; the receive
+        // replacement never dereferences the dummy streamer or sample pointers.
+        unsafe { check("uhd_rx_metadata_make", uhd_rx_metadata_make(&mut md), true).unwrap(); }
+        *lock(&device.rx) = Some(Arc::new(RxStream {
+            h: std::ptr::null_mut(), call: Mutex::new(()), md,
+            channels: 1, spp: 1, lost: device.lost.clone(),
+        }));
+        pair(&device, receive, receive);
+        pair(&device, receive, start);
+        pair(&device, send, report);
+        pair(&device, report, report);
+        // SAFETY: every worker has joined; no further receive call uses this metadata.
+        unsafe { uhd_rx_metadata_free(&mut md); }
+        // Dummy handles are marked lost, so their Drop path never frees metadata again.
+    }
+
 }
