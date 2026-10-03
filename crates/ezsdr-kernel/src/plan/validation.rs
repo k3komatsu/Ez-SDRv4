@@ -284,6 +284,10 @@ pub(super) fn check_bindings(
     }
     for output in &spec.outputs {
         let name = &output.id;
+        // The coordinator uses this address for Sink events and Actions.
+        ResourceId::parse(&format!("sink/{name}")).map_err(|error| SpecError::Structural {
+            reason: format!("SB-22: output {name} has an invalid Sink address: {error}"),
+        })?;
         let binding = profile
             .bindings
             .get(name)

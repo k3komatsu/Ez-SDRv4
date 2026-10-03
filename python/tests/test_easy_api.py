@@ -153,6 +153,27 @@ class EasyApi(unittest.TestCase):
         self.assertEqual([c["seq"] for c in children], [r.entry["seq"] for r in results])
         self.assertEqual([c["run"] for c in children], [r.manifest["run"]["id"] for r in results])
 
+    def test_ea_05_oversized_sink_address_preserves_the_session(self) -> None:
+        with self.connect() as sdr:
+            name = "a" * 252
+            profile = copy.deepcopy(sdr.profile)
+            profile["bindings"][name] = profile["bindings"].pop("rec")
+            profile["bindings"][name].pop("feed", None)
+            for link in profile["placements"]["links"]:
+                if link["to"]["component"] == "rec":
+                    link["to"]["component"] = name
+            spec = {
+                "version": 1,
+                "requirements": {"vocabularies": [{"id": "radio", "major": 1}, {"id": "sink", "major": 1}]},
+                "resources": {"radio": {"kind": "radio.device", "requires": {}}},
+                "outputs": [{"id": name, "kind": "sink.capture", "params": {"sink.capture_samples": 1},
+                             "feed": {"port": {"component": "radio", "port": "rx"}, "policy": "drop_oldest", "capacity": 64}}],
+            }
+            result = sdr.run(spec, profile=profile, duration=0.001)
+            self.assertEqual(result.termination, {"kind": "failed", "stage": "validate"})
+            self.assertEqual(result.manifest["artifacts"], [])
+            self.assertEqual(sdr.rx.capture(1).shape, (1,), "parent Session is still usable")
+
     def test_v54_sleep_is_run_time(self) -> None:
         with self.connect() as sdr:
             before = sdr.now

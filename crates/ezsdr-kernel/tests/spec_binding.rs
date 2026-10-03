@@ -2056,6 +2056,29 @@ fn sb_17_capture_without_a_sink_refused() {
 }
 
 #[test]
+fn sb_22_output_ids_must_fit_their_sink_resource_address() {
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let sink = cf32_sink();
+    for len in [251, 252, 512] {
+        let name = "a".repeat(len);
+        let mut spec = minimal_spec();
+        spec.outputs.push(output(&name));
+        let mut profile = profile_binding(&["radio"]);
+        profile.bindings.insert(id(&name), bind("ezsdr.test.sink"));
+        let mut fx = Fixture::new();
+        fx.sinks.insert(id(&name), &sink);
+        let result = validate(&spec, &profile, &fx.inputs(&providers));
+        if len == 251 {
+            assert!(result.expect("256-byte Sink address is valid").is_admitted());
+        } else {
+            assert!(matches!(result, Err(SpecError::Structural { reason })
+                if reason.contains("Sink address") && reason.contains("too long")));
+        }
+    }
+}
+
+#[test]
 fn sb_17_the_sink_must_write_the_kind_and_consume_the_contract() {
     // MA-25 through SB-17: a bound Sink that serves the output's slot still has to write
     // the artifact kind the output asks for and consume what its source port carries.
