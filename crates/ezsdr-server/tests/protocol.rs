@@ -993,3 +993,12 @@ fn ea_17_a_capture_at_a_passed_instant_says_where_it_started() {
     assert!(first > at.ticks, "the first sample at {first}, asked {}", at.ticks);
     assert_eq!(artifact.continuity[0].end.ticks - artifact.continuity[0].first.ticks, 1_000, "the map names the samples it holds");
 }
+
+#[test]
+fn kc_23_sink_prefix_cannot_address_a_provider() {
+    let temp=TempDir::new("audit-target"); let (mut server,_)=connected(&temp.0);
+    let entry=submit(&mut server, SessionAction::SetParameter {
+        target:ResourceId::parse("sink/radio").unwrap(),key:Key::parse("radio.rx.gain_db").unwrap(),value:Value::Num(3.0)
+    },vec![]);
+    assert!(matches!(entry.outcome,Outcome::Rejected { .. }),"sink/radio is not a Sink output: {entry:?}");
+}

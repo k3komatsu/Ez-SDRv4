@@ -4014,3 +4014,22 @@ fn rs_36_a_dropped_stop_must_not_mask_a_dropped_abort() {
         "a fatal STEP_LIVELOCK dropped behind a Stop must still abort"
     );
 }
+
+#[test]
+fn kc_23_sink_prefix_refuses_non_sink_module_targets() {
+    for target in ["sink/radio", "sink/island_0", "sink/exec", "sink/c1", "sink/missing"] {
+        let (spec, profile) = executor_docs();
+        let probe = Probe::new();
+        let mut assembly = rig(Pacing::FreeRunning).assembly;
+        assembly.providers.insert(Ident::parse("radio").unwrap(),
+            Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)));
+        assembly.executors.insert(Ident::parse("exec").unwrap(),
+            Box::new(ProbeExecutor::new("x", &probe).submitting(Action::Stop {
+                target: Some(ezsdr_kernel::id::ResourceId::parse(target).unwrap()),
+            })));
+        let run = start_spec_run(&spec, &profile, assembly).unwrap();
+        assert!(probe.lines().iter().any(|line| line.starts_with("x:submit:err:ezsdr.target:KC-23:")),
+            "{target}: {:?}", probe.lines());
+        assert!(run.finish().termination.cleanup_failures.is_empty());
+    }
+}

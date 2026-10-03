@@ -1810,7 +1810,8 @@ pub(super) fn rewrite_spec_target(
     let first = segments.first().copied().unwrap_or_default();
     if first == "sink" {
         if let Some(output) = segments.get(1).and_then(|s| Ident::parse(s).ok()) {
-            if let Some(instance) = routing.fragment_of.get(&output).copied() {
+            if let Some(instance @ Inst::Sink(_)) = routing.fragment_of.get(&output).copied()
+                .filter(|_| shared.ctx.outputs.contains(&output)) {
                 return Ok((target.clone(), instance, output));
             }
         }
