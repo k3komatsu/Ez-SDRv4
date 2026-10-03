@@ -84,6 +84,11 @@ impl ClockRelation {
         if measurement_bound < 0 {
             return Err(TimeError::Overflow);
         }
+        // Validate before multiplication: a negative bound times zero produces
+        // negative zero, which the accumulated-error check accepts as zero.
+        if !self.drift_uncertainty.is_finite() || self.drift_uncertainty < 0.0 {
+            return Err(TimeError::Overflow);
+        }
         if t.try_cmp(self.valid.from)? == std::cmp::Ordering::Less {
             return Err(TimeError::OutsideValidity { at: t });
         }

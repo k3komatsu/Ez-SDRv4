@@ -1,4 +1,4 @@
-# Ez-SDR v4 — Handoff (2026-10-02)
+# Ez-SDR v4 — Handoff (2026-10-03)
 
 次のセッション（人間・AI どちらでも）が最初に読む現状メモ．設計の中身は書かない．どこに何があり，何が終わっていて，次に何をするかだけ．
 開発時の恒常的なルールは [AGENTS.md](AGENTS.md)．
@@ -506,6 +506,46 @@ H1–H5 remain unresolved; these fixes provide no new stress or hardware
 measurement and relax no timing envelope. Audit evidence is in
 `~/.cache/ezsdr-audits/2026-10-03-b0c8ce8-third/`; fix-validation and Sol review
 records are in `~/.cache/ezsdr-fixes/2026-10-03-third/`.
+
+**Fourth audit follow-up, 2026-10-03 (issues #19–#24)**
+
+The owner authorized sequential issue validation, repair, GPT-6.1 Sol review,
+commit, push and closure. Each issue was reproduced with a regression failing
+on its preceding implementation, then independently reviewed before its fix
+commit:
+
+| Issue | Fix | Commit |
+|---|---|---|
+| [#19](https://github.com/k3komatsu/Ez-SDRv4/issues/19) | Select dropped Abort over Stop without changing delivered-event cause order | `e2ee2b1` |
+| [#20](https://github.com/k3komatsu/Ez-SDRv4/issues/20) | Share cold configuration with RX/TX owners; project later timed updates through e2 in actual effective order | `a71ed96` |
+| [#21](https://github.com/k3komatsu/Ez-SDRv4/issues/21) | Remove cancelled held updates from cold projections; preserve issued updates and stream Stop semantics | `a13229b` |
+| [#22](https://github.com/k3komatsu/Ez-SDRv4/issues/22) | Refuse any TX channel slice shorter than the count sent to UHD before entering C | `7d38c1f` |
+| [#23](https://github.com/k3komatsu/Ez-SDRv4/issues/23) | Serialize public native calls and metadata/error-text access per streamer | `d4339f6` |
+| [#24](https://github.com/k3komatsu/Ez-SDRv4/issues/24) | Validate finite, nonnegative drift uncertainty before multiplying by elapsed ticks | this maintenance commit |
+
+All six reviews returned PASS. #22's initial push preceded checking a failed
+Clippy result: a test-only one-element Vec triggered `useless_vec`. This was
+corrected to an array in `7c124ad`, re-reviewed by Sol, and verified with feature
+Clippy before proceeding to #23. No production behavior changed in that follow-up.
+
+UR-25/UR-26 clarify shared cold projections and cancellation; UR-3 documents
+the enforced public native-call boundary. Public Rust interfaces, serialized
+types and frozen schemas remain unchanged. Native-boundary tests substitute
+streamer C entry points only in the unit-test executable, use no USRP and never
+read dummy streamer or sample pointers; separate UHD API integration tests
+still link real libuhd.
+
+Final software validation: **938 passed, 0 failed, 0 ignored** on both stable
+and Rust 1.85.0; Python **29 passed** on each of 3.9.6 and 3.13.15 against the
+freshly built server. Feature-enabled library tests, including the native
+boundary regressions: **19 passed** on both Rust toolchains; real UHD 4.10 API
+integration tests: **4 passed**. Workspace and UHD/server feature Clippy builds
+pass with `-D warnings` (all targets).
+
+Existing stress failures and hardware H1–H5 remain unresolved validation items.
+These fixes provide no new stress or hardware measurement and relax no timing
+envelope. Reproduction, validation and Sol review records are in
+`~/.cache/ezsdr-fixes/2026-10-03-fourth/`.
 
 **5. 決まったこと・owner の判断待ち**
 

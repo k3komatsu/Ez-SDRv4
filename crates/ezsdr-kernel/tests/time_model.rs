@@ -1214,3 +1214,29 @@ fn tm_02_deserialization_enforces_rational_invariants() {
         assert_eq!(serde_json::from_str::<Rational>(&json).unwrap(), rational);
     }
 }
+
+#[test]
+fn tm_14_drift_uncertainty_is_validated_before_zero_elapsed_multiplication() {
+    let (reg, root) = registry_with_device_root();
+    let slow = reg.allocate_id().unwrap();
+    reg.register(ClockDomain::root(slow, rat(1, 1), arbitrary("test.slow"))).unwrap();
+    for target in [ClockDomainId::UTC, slow] {
+        for bound in [-0.1, -1e-300, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.0, 0.0, 1e-8] {
+            let mut rel = device_to_utc(root, 0.0, bound);
+            rel.target = target;
+            rel.offset.domain = target;
+            rel.uncertainty.domain = target;
+            // At +1 device tick, rescaling to a 1 Hz target floors elapsed ticks to
+            // zero too. Input validity must not depend on that rounding or elapsed time.
+            for delta in [0, 1, MCLK as i64] {
+                let t = rel.measured_at.checked_add(Duration::new(root, delta)).unwrap();
+                let result = rel.convert(&reg, t);
+                if !bound.is_finite() || bound < 0.0 {
+                    assert_eq!(result, Err(TimeError::Overflow), "bound {bound:?}, target {target:?}, delta {delta}");
+                } else {
+                    assert!(result.unwrap().uncertainty.ticks >= 51);
+                }
+            }
+        }
+    }
+}
