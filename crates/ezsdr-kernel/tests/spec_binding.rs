@@ -4135,6 +4135,33 @@ fn sb_36_a_needs_key_may_not_collide_with_a_resource_name() {
 }
 
 #[test]
+fn sb_36_qualified_needs_keys_must_be_unique() {
+    let need = |count| SubResourceReq {
+        kind: ns("test.line"),
+        requires: [(key("test.count"), Constraint::Eq { value: Value::Int(count) })]
+            .into_iter()
+            .collect(),
+    };
+    let mut a = resource("test.device", &[]);
+    a.needs.insert(id("b_c"), need(2));
+    let mut ab = resource("test.device", &[]);
+    ab.needs.insert(id("c"), need(4));
+    let spec = spec_with([(id("a"), a), (id("a_b"), ab)].into_iter().collect());
+    let fx = Fixture::new();
+    let p1 = TestProvider::new("radio", 2);
+    let p2 = TestProvider::new("radio2", 4);
+    let providers: BTreeMap<Ident, &dyn Provider> = [
+        (id("a"), &p1 as &dyn Provider),
+        (id("a_b"), &p2 as &dyn Provider),
+    ].into_iter().collect();
+    let profile = distinct_instances(profile_binding(&["a", "a_b"]), &["a", "a_b"]);
+    let err = validate(&spec, &profile, &fx.inputs(&providers))
+        .expect_err("two qualified needs must not overwrite each other");
+    assert!(matches!(err, SpecError::DuplicateBindingName { name, sets }
+        if name == id("a_b_c") && sets == "a's need b_c and a_b's need c"));
+}
+
+#[test]
 fn sb_39_two_islands_on_one_executor_is_not_a_cycle() {
     // An affinity split is the ordinary reason for it, and the operator must not be
     // told there is a cycle in an unnamed set of fragments.

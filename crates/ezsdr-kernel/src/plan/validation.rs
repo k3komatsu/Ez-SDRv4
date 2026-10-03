@@ -216,16 +216,19 @@ pub(super) fn check_bindings(
             });
         }
     }
-    // SB-36 records a need under `<resource>_<need>`, and `matched` is one map, so a
-    // key equal to another resource's name silently overwrote the need's record —
-    // always the need's, because `X < X_need` orders the resource's insert second.
+    // SB-36's qualified need keys share `matched` with resources and other needs.
+    // Joining two Idents with `_` is not injective: a/b_c and a_b/c collide.
+    let mut matched_names: BTreeMap<Ident, String> = spec.resources.keys()
+        .map(|name| (name.clone(), "a resource".to_owned()))
+        .collect();
     for (name, req) in &spec.resources {
         for need in req.needs.keys() {
             let k = super::matching::need_key(name, need);
-            if spec.resources.contains_key(&k) {
+            let origin = format!("{name}'s need {need}");
+            if let Some(first) = matched_names.insert(k.clone(), origin.clone()) {
                 return Err(SpecError::DuplicateBindingName {
                     name: k,
-                    sets: format!("a resource and {name}'s need {need}"),
+                    sets: format!("{first} and {origin}"),
                 });
             }
         }
