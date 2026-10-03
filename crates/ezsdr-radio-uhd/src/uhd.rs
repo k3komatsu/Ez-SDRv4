@@ -853,6 +853,9 @@ impl Device for UhdDevice {
             return Err(DeviceError::failed(format!("UR-3: {} buffers for {} channels", samples.len(), stream.channels)));
         }
         let n = samples.first().map_or(0, |s| s.len());
+        if samples.iter().any(|samples| samples.len() < n) {
+            return Err(DeviceError::failed(format!("UR-3: a transmit channel buffer is shorter than {n} samples")));
+        }
         let (full, frac) = at.map_or((0, 0.0), |t| to_time_spec(t, self.mcr));
         let mut pointers: Vec<*const c_void> = samples.iter().map(|s| s.as_ptr() as *const c_void).collect();
         let mut md: uhd_tx_metadata_handle = std::ptr::null_mut();
@@ -905,5 +908,60 @@ impl Device for UhdDevice {
         // still holds its Arc (and never a lost device's, F4).
         lock(&self.rx).take();
         lock(&self.tx).take();
+    }
+}
+
+// Native-boundary regressions without a USRP. Only this unit-test executable
+// substitutes send; integration tests still link the real libuhd entry point.
+#[cfg(test)]
+mod ffi_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    static SEND_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[unsafe(no_mangle)]
+    extern "C" fn uhd_tx_streamer_send(
+        _h: uhd_tx_streamer_handle, _buffs: *mut *const c_void,
+        n: usize, _md: *mut uhd_tx_metadata_handle, _timeout: f64, sent: *mut usize,
+    ) -> c_int {
+        SEND_CALLS.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: tx_send supplies a live local output slot. Sample pointers and
+        // dummy streamer handles are never read by this test replacement.
+        unsafe { *sent = n; }
+        UHD_ERROR_NONE
+    }
+
+    fn dummy(channels: usize) -> Arc<UhdDevice> {
+        let lost = Arc::new(AtomicBool::new(true));
+        Arc::new(UhdDevice {
+            usrp: std::ptr::null_mut(), args: "ffi-test-no-device".to_owned(), mcr: 200_000_000,
+            control: Mutex::new(()), rx: Mutex::new(None),
+            tx: Mutex::new(Some(Arc::new(TxStream {
+                h: std::ptr::null_mut(), md: std::ptr::null_mut(), channels, lost: lost.clone(),
+            }))), lost,
+        })
+    }
+
+    #[test]
+    fn uhd_tx_send_refuses_short_channels_before_c() {
+        let _test = lock(&TEST_LOCK);
+        let device = dummy(3);
+        let long = vec![[0.0, 0.0]; 100];
+        let short = vec![[0.0, 0.0]; 1];
+        let longer = vec![[0.0, 0.0]; 101];
+        for samples in [vec![&long[..], &short[..], &long[..]],
+                        vec![&long[..], &long[..], &short[..]],
+                        vec![&long[..], &[][..], &long[..]]] {
+            SEND_CALLS.store(0, Ordering::SeqCst);
+            assert!(device.tx_send(&samples, None, false, false, Duration::from_millis(1)).is_err());
+            assert_eq!(SEND_CALLS.load(Ordering::SeqCst), 0, "short buffers must never reach C");
+        }
+        SEND_CALLS.store(0, Ordering::SeqCst);
+        assert_eq!(device.tx_send(&[&long, &long, &longer], None, true, true, Duration::from_millis(1)).unwrap(), 100);
+        assert_eq!(SEND_CALLS.load(Ordering::SeqCst), 1, "equal or longer buffers remain accepted");
+        assert_eq!(device.tx_send(&[&[], &[], &[]], None, false, true, Duration::from_millis(1)).unwrap(), 0);
+        assert!(device.tx_send(&[&long, &long], None, false, false, Duration::from_millis(1)).is_err());
     }
 }
