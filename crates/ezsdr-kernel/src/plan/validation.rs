@@ -593,7 +593,9 @@ pub(super) fn check_structure(
 /// Rule: SB-2, SB-6, MA-34.
 fn check_keys(spec: &ExperimentSpec, inputs: &CompileInputs<'_>) -> Result<(), SpecError> {
     for req in spec.resources.values() {
-        for (key, constraint) in &req.requires {
+        for (key, constraint) in req.requires.iter().chain(
+            req.needs.values().flat_map(|need| need.requires.iter()),
+        ) {
             if key.is_extension() {
                 // MA-34 writes `ext.<module-id>.<path>`, so the owner is a **registered**
                 // Module. Accepting any `ext.…` would make the escape hatch unowned: no

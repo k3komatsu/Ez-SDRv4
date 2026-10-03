@@ -6855,3 +6855,41 @@ fn ma_41_ezsdr_time_is_a_closed_set() {
         "absent means 0"
     );
 }
+
+#[test]
+fn sb_02_needs_constraints_are_checked_against_key_decl() {
+    let fx = Fixture::new();
+    let provider = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &provider);
+    let inputs = fx.inputs(&providers);
+    let profile = profile_binding(&["radio"]);
+    let clean = minimal_spec();
+    let admission = validate(&clean, &profile, &inputs).unwrap();
+    for (name, value, shape) in [
+        ("test.count", Value::Num(2.0), true),
+        ("test.undeclared", Value::Int(2), false),
+        ("ext.nobody.owns.this", Value::Int(2), false),
+        ("ext.ezsdr.test.providerx.count", Value::Int(2), false),
+    ] {
+        let mut spec = clean.clone();
+        spec.resources.get_mut(&id("radio")).unwrap().needs.insert(id("line"), SubResourceReq {
+            kind: ns("test.line"),
+            requires: [(key(name), Constraint::Eq { value })].into_iter().collect(),
+        });
+        let errors = [
+            validate(&spec, &profile, &inputs).unwrap_err(),
+            plan(&spec, &profile, &admission, &inputs, Vec::new()).unwrap_err(),
+        ];
+        for error in errors {
+            assert!(if shape { matches!(error, SpecError::KeyShape { .. }) }
+                else { matches!(error, SpecError::UnknownKeyPrefix { .. }) }, "{name}: {error:?}");
+        }
+    }
+    let mut valid = clean;
+    valid.resources.get_mut(&id("radio")).unwrap().needs.insert(id("line"), SubResourceReq {
+        kind: ns("test.line"),
+        requires: [(key("test.count"), Constraint::Eq { value: Value::Int(2) })].into_iter().collect(),
+    });
+    let admission = validate(&valid, &profile, &inputs).unwrap();
+    plan(&valid, &profile, &admission, &inputs, Vec::new()).unwrap();
+}
