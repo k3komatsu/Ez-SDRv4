@@ -82,6 +82,8 @@ pub struct MockRadio {
     tx_handle: Option<SampleClockHandle>,
     tx_domain: Option<ClockDomainId>,
     tx_origin: Option<i64>,
+    rx_cold_floor: Option<i64>,
+    tx_cold_floor: Option<i64>,
     rx: Option<Rx>,
     links: Vec<std::sync::Arc<dyn DataLink>>,
     pool: Option<HostPool>,
@@ -166,7 +168,7 @@ struct PendingUpdate {
 enum WorkKind {
     Fault { index: usize },
     HeldBurst { start: i64 },
-    Update,
+    Update { effective: i64 },
 }
 
 impl MockRadio {
@@ -284,6 +286,8 @@ impl MockRadio {
             tx_handle: None,
             tx_domain: None,
             tx_origin: None,
+            rx_cold_floor: None,
+            tx_cold_floor: None,
             rx: None,
             links: Vec::new(),
             pool: None,
@@ -369,6 +373,30 @@ impl MockRadio {
         if let Some(rx) = self.rx.as_mut() { rx.planned = Some(len); }
     }
 
+    /// RM-25: cold changes cut the old stream at e1, not at an off-lattice request.
+    fn cold_boundary(&self, key: &str, tick: i64) -> Result<i64, ModuleError> {
+        // A disabled stream still retains its last cut for pending cold updates.
+        let floor = if is_rx_cold_key(key) { self.rx_cold_floor }
+            else if is_tx_cold_key(key) { self.tx_cold_floor } else { None };
+        let tick = tick.max(floor.unwrap_or(i64::MIN));
+        let clock = if is_rx_cold_key(key) { self.rx.as_ref().map(|rx| (rx.ratio, rx.origin)) }
+            else if is_tx_cold_key(key) { self.tx_handle.as_ref().zip(self.tx_origin).map(|(handle, origin)| (handle.root_ticks_per_tick, origin)) }
+            else { None };
+        match clock {
+            Some((ratio, origin)) => lattice_at_or_after(tick.max(origin), ratio).ok_or_else(|| self.reject("MR-18: lattice overflow")),
+            None => Ok(tick),
+        }
+    }
+
+    fn cold_cut_tick(&self, receive: bool) -> Result<Option<i64>, ModuleError> {
+        self.updates.iter().filter(|(_, update)| if receive {
+            is_rx_cold_key(update.key.as_str())
+        } else { is_tx_cold_key(update.key.as_str()) }).try_fold(None, |earliest, ((tick, _), update)| {
+            let tick = self.cold_boundary(update.key.as_str(), *tick)?;
+            Ok(Some(earliest.map_or(tick, |old: i64| old.min(tick))))
+        })
+    }
+
     fn emit_rx_until(&mut self, until: i64) -> Result<bool, ModuleError> {
         let mut progressed = false;
         while let Some(rx) = self.rx.as_ref() {
@@ -379,7 +407,7 @@ impl MockRadio {
             let cut_tick = self.faults.iter()
                 .filter(|fault| !fault.resolved && matches!(fault.entry.fault, FaultKind::RxOverflow | FaultKind::RxSequenceError))
                 .map(|fault| fault.tick)
-                .chain(self.updates.iter().filter(|(_, update)| is_rx_cold_key(update.key.as_str())).map(|((tick, _), _)| *tick))
+                .chain(self.cold_cut_tick(true)?)
                 .min();
             let cut = cut_tick.map(|tick| time::k_at_or_after(origin, ratio, tick)
                 .ok_or_else(|| self.reject("MR-12: receive cut overflow"))).transpose()?;
@@ -567,7 +595,11 @@ impl MockRadio {
     fn schedule_wakeup(&mut self) -> Result<(), ModuleError> {
         let (Some(time), Some(root)) = (self.time.clone(), self.root) else { return Ok(()); };
         let now = time.now(root).map_err(|error| self.reject(format!("MR-14: {error}")))?.ticks;
-        let mut next = self.updates.keys().map(|(tick, _)| *tick).min();
+        let mut next = None;
+        for ((tick, _), update) in &self.updates {
+            let due = if update.class == UpdateClass::Cold { self.cold_boundary(update.key.as_str(), *tick)? } else { *tick };
+            next = Some(next.map_or(due, |next: i64| next.min(due)));
+        }
         if self.started {
             next = self.faults.iter().filter(|fault| !fault.resolved).map(|fault| fault.tick)
                 .chain(next).min();
@@ -578,7 +610,7 @@ impl MockRadio {
                 let ratio = rx.ratio;
                 let next_sample = rx.next;
                 let cut_tick = self.faults.iter().filter(|fault| !fault.resolved && matches!(fault.entry.fault, FaultKind::RxOverflow | FaultKind::RxSequenceError)).map(|fault| fault.tick)
-                    .chain(self.updates.iter().filter(|(_, update)| is_rx_cold_key(update.key.as_str())).map(|((tick, _), _)| *tick)).min();
+                    .chain(self.cold_cut_tick(true)?).min();
                 let cut = cut_tick.and_then(|tick| time::k_at_or_after(origin, ratio, tick));
                 if cut.is_none_or(|cut| cut > next_sample) { self.plan_rx_block(); }
                 if let Some(rx) = self.rx.as_ref() {
@@ -599,7 +631,7 @@ impl MockRadio {
                 open.start.saturating_add(((open.next - open.start) / open.len + 1).saturating_mul(open.len))
             } else { open.start.saturating_add(open.len) };
             let held_cut = self.held.keys().next().copied().unwrap_or(i64::MAX);
-            let cold_tick = self.updates.iter().filter(|(_, update)| is_tx_cold_key(update.key.as_str())).map(|((tick, _), _)| *tick).min();
+            let cold_tick = self.cold_cut_tick(false)?;
             let update_cut = cold_tick.and_then(|tick| time::k_at_or_after(origin, handle.root_ticks_per_tick, tick)).unwrap_or(i64::MAX);
             let cut = held_cut.min(update_cut);
             let stop = block_end.min(waveform_end).min(cut);
@@ -611,7 +643,7 @@ impl MockRadio {
             if let Some(start) = self.held.keys().next().copied() {
                 if let Some(tick) = time::v_of(origin, handle.root_ticks_per_tick, start) { next = Some(next.map_or(tick, |old| old.min(tick))); }
             }
-            if let Some(tick) = self.updates.iter().filter(|(_, update)| is_tx_cold_key(update.key.as_str())).map(|((tick, _), _)| *tick).min() {
+            if let Some(tick) = self.cold_cut_tick(false)? {
                 next = Some(next.map_or(tick, |old| old.min(tick)));
             }
         }
@@ -921,7 +953,7 @@ impl MockRadio {
                 open.start.saturating_add(((open.next - open.start) / open.len + 1).saturating_mul(open.len))
             } else { open.start.saturating_add(open.len) };
             let held_cut = self.held.keys().next().copied().unwrap_or(i64::MAX);
-            let cold_tick = self.updates.iter().filter(|(_, update)| is_tx_cold_key(update.key.as_str())).map(|((tick, _), _)| *tick).min();
+            let cold_tick = self.cold_cut_tick(false)?;
             let cold_cut = cold_tick.and_then(|tick| time::k_at_or_after(self.tx_origin.expect("tx origin"), handle.root_ticks_per_tick, tick)).unwrap_or(i64::MAX);
             let cut = held_cut.min(cold_cut).min(extra_cut.unwrap_or(i64::MAX));
             stop = stop.min(repeat_end).min(cut);
@@ -1052,8 +1084,8 @@ impl MockRadio {
         Ok(())
     }
 
-    fn apply_update(&mut self, tick: i64, order: u64) -> Result<(), ModuleError> {
-        let Some(update) = self.updates.remove(&(tick, order)) else { return Ok(()); };
+    fn apply_update(&mut self, tick: i64, effective: i64, order: u64) -> Result<(), ModuleError> {
+        let Some(update) = self.updates.remove(&(effective, order)) else { return Ok(()); };
         let mut candidate = self.config.clone();
         candidate.insert(update.key.clone(), update.value.clone());
         let constraints = candidate.iter().map(|(key, value)| (key.clone(), ezsdr_kernel::spec::Constraint::Eq { value: value.clone() })).collect();
@@ -1107,6 +1139,7 @@ impl MockRadio {
                 } else { self.rx = None; }
                 self.rx_handle = Some(handle);
             } else { self.rx = None; self.rx_handle = None; }
+            self.rx_cold_floor = Some(restart);
         } else if update.class == UpdateClass::Cold && is_tx_cold_key(update.key.as_str()) {
             self.stop_tx(tick, "MR-18: cancelled by a cold change", true)?;
             if let (Some(clocks), Some(domain), Some(old)) = (&self.clocks, self.tx_domain, &self.tx_handle) {
@@ -1132,6 +1165,7 @@ impl MockRadio {
                 self.tx_origin = None;
                 self.tx_tracker = None;
             }
+            self.tx_cold_floor = Some(restart);
         }
         Ok(())
     }
@@ -1433,6 +1467,8 @@ impl Provider for MockRadio {
         self.tx_handle = None;
         self.tx_domain = None;
         self.tx_origin = None;
+        self.rx_cold_floor = None;
+        self.tx_cold_floor = None;
         self.wakeup = None;
         self.held.clear();
         self.updates.clear();
@@ -1470,12 +1506,12 @@ impl Provider for MockRadio {
             }
         }
         loop {
-            let mut candidates: Vec<(i64, u64, WorkKind)> = if self.started {
+            let mut candidates: Vec<(i64, i64, u64, WorkKind)> = if self.started {
                 self.faults
                     .iter()
                     .enumerate()
                     .filter(|(_, fault)| !fault.resolved)
-                    .map(|(index, fault)| (fault.tick, fault.order, WorkKind::Fault { index }))
+                    .map(|(index, fault)| (fault.tick, fault.tick, fault.order, WorkKind::Fault { index }))
                     .collect()
             } else {
                 Vec::new()
@@ -1486,15 +1522,15 @@ impl Provider for MockRadio {
                     self.tx_handle.as_ref()?.root_ticks_per_tick,
                     *start,
                 )?;
-                Some((tick, burst.order, WorkKind::HeldBurst { start: *start }))
+                Some((tick, tick, burst.order, WorkKind::HeldBurst { start: *start }))
             }));
-            candidates.extend(
-                self.updates
-                    .keys()
-                    .map(|(tick, order)| (*tick, *order, WorkKind::Update)),
-            );
-            candidates.sort_by_key(|(tick, order, _)| (*tick, *order));
-            let Some((tick, order, kind)) = candidates.first().copied() else {
+            // Keep effective-instant ordering when cold updates share a rounded cut.
+            for ((effective, order), update) in &self.updates {
+                let due = if update.class == UpdateClass::Cold { self.cold_boundary(update.key.as_str(), *effective)? } else { *effective };
+                candidates.push((due, *effective, *order, WorkKind::Update { effective: *effective }));
+            }
+            candidates.sort_by_key(|(tick, effective, order, _)| (*tick, *effective, *order));
+            let Some((tick, _, order, kind)) = candidates.first().copied() else {
                 break;
             };
             if tick > u {
@@ -1529,7 +1565,7 @@ impl Provider for MockRadio {
                         });
                     }
                 }
-                WorkKind::Update => self.apply_update(tick, order)?,
+                WorkKind::Update { effective } => self.apply_update(tick, effective, order)?,
             }
             progressed = true;
         }

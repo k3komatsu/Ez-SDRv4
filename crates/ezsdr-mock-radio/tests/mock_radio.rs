@@ -1506,3 +1506,105 @@ fn mr_37_the_overflow_travels_the_hot_path() {
     assert_eq!(dropped.len(), 1);
     assert_eq!(dropped[0].payload, serde_json::json!({ "kind": ezsdr_radio::kinds::RX_OVERFLOW, "count": 1 }));
 }
+
+#[test]
+fn mr_18_fractional_cold_keeps_old_tail_to_e1() {
+    for (rate, requested, end, samples) in [
+        (3_000_000.0, 1_000_001, 1_001_000, 3003),
+        (7_000_000.0, 1_000_001, 1_001_000, 7007),
+        (3_000_000.0, 1_001_000, 1_001_000, 3003),
+    ] {
+        let mut h = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(rate)))],
+            &[], &[], Some((BackPressure::DropOldest, 64)));
+        h.arm_start(0).unwrap();
+        let old = h.clocks.sample_clock_records()[0].domain;
+        h.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0),
+            UpdateClass::Cold, Some(TimePoint::new(ROOT, requested))));
+        h.step(0).unwrap(); h.step(requested).unwrap();
+        if requested < end { assert_eq!(h.clocks.sample_clock_records()[0].ended_at, None); }
+        h.step(3_200_000).unwrap();
+        assert_eq!(h.clocks.sample_clock_records()[0].ended_at, Some(TimePoint::new(ROOT, end)));
+        let mut old_end = 0;
+        while let Some(block) = h.link.as_ref().unwrap().receive() {
+            if block.header().first_sample_time.domain == old {
+                old_end = block.header().first_sample_time.ticks + i64::from(block.header().len);
+            }
+        }
+        assert_eq!(old_end, samples, "old samples must be delivered to e1");
+    }
+}
+
+#[test]
+fn mr_18_fractional_cold_keeps_transmitted_tail_to_e1() {
+    let mut h = Harness::new("ideal", &[("radio.tx.channels", eq(Value::Int(1))),
+        ("radio.tx.sample_rate_hz", eq(Value::Num(3_000_000.0)))], &[], &[], None);
+    h.arm_start(0).unwrap();
+    let old = tx_domain(&h);
+    h.actions.push(tx_action(old, 0, 1000, true, LatePolicy::SendAsapAndFlag));
+    h.actions.push(update_action("radio.tx.sample_rate_hz", Value::Num(2_000_000.0),
+        UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_001))));
+    h.step(0).unwrap(); h.step(1_000_001).unwrap();
+    assert!(h.clocks.sample_clock_records().iter().find(|c| c.domain == old).unwrap().ended_at.is_none());
+    h.step(1_001_000).unwrap();
+    let records: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(
+        h.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.bursts").unwrap()].clone()).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].samples, 3003);
+    assert_eq!(records[0].target.domain, old);
+    assert_eq!(records[0].end, BurstEnd::Stop);
+    assert_eq!(h.clocks.sample_clock_records().iter().find(|c| c.domain == old).unwrap().ended_at,
+        Some(TimePoint::new(ROOT, 1_001_000)));
+}
+
+#[test]
+fn mr_18_rounded_cold_updates_keep_effective_instant_order() {
+    for (same_time, first_rate, second_rate) in [(false, 2_000_000.0, 1_000_000.0),
+        (false, 1_000_000.0, 2_000_000.0), (true, 2_000_000.0, 1_000_000.0)] {
+        let mut h = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(3_000_000.0)))],
+            &[], &[], Some((BackPressure::DropOldest, 64)));
+        h.arm_start(0).unwrap();
+        h.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(first_rate),
+            UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_500))));
+        h.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(second_rate),
+            UpdateClass::Cold, Some(TimePoint::new(ROOT, if same_time { 1_000_500 } else { 1_000_001 }))));
+        h.step(0).unwrap(); h.step(1_001_000).unwrap();
+        let instance = h.mock.instance();
+        let applied = &instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()];
+        let values: Vec<_> = applied.as_array().unwrap().iter().map(|row| row["value"].clone()).collect();
+        let expected = if same_time { vec![serde_json::json!(first_rate), serde_json::json!(second_rate)] }
+            else { vec![serde_json::json!(second_rate), serde_json::json!(first_rate)] };
+        assert_eq!(values, expected);
+        let times: Vec<TimePoint> = applied.as_array().unwrap().iter().map(|row| serde_json::from_value(row["at"].clone()).unwrap()).collect();
+        assert!(times.windows(2).all(|pair| pair[0].ticks <= pair[1].ticks));
+        for record in h.clocks.sample_clock_records() {
+            if let Some(end) = record.ended_at { assert!(end.ticks >= record.origin.ticks); }
+        }
+    }
+}
+
+#[test]
+fn mr_18_deferred_disable_enable_keeps_the_last_cut() {
+    for direction in ["rx", "tx"] {
+        let rate_key = format!("radio.{direction}.sample_rate_hz");
+        let channels_key = format!("radio.{direction}.channels");
+        let mut h = Harness::new("ideal", &[(rate_key.as_str(), eq(Value::Num(3_000_000.0))),
+            (channels_key.as_str(), eq(Value::Int(1)))], &[], &[], Some((BackPressure::DropOldest, 64)));
+        h.arm_start(0).unwrap();
+        let stream = rid(&format!("mock/{direction}"));
+        let old = h.clocks.sample_clock_records().into_iter().find(|record| record.stream == stream).unwrap().domain;
+        h.actions.push(update_action(&channels_key, Value::Int(1), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_500))));
+        h.actions.push(update_action(&channels_key, Value::Int(0), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_001))));
+        h.step(0).unwrap(); h.step(1_001_000).unwrap();
+        let records: Vec<_> = h.clocks.sample_clock_records().into_iter().filter(|record| record.stream == stream).collect();
+        assert_eq!(records.len(), 2);
+        let ended = records.iter().find(|record| record.domain == old).unwrap().ended_at.unwrap();
+        let started = records.iter().find(|record| record.domain != old).unwrap().origin;
+        assert_eq!(ended.ticks, 1_001_000);
+        assert!(started.ticks >= ended.ticks);
+        let instance = h.mock.instance();
+        let applied = &instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()];
+        assert_eq!(applied[0]["value"], 0); assert_eq!(applied[1]["value"], 1);
+        let times: Vec<TimePoint> = applied.as_array().unwrap().iter().map(|row| serde_json::from_value(row["at"].clone()).unwrap()).collect();
+        assert!(times.windows(2).all(|pair| pair[0].ticks <= pair[1].ticks));
+    }
+}

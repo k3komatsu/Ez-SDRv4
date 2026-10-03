@@ -860,8 +860,9 @@ fn mr_32_a_cold_transmit_change_ends_the_old_radiation() {
     let after = world.waveform(&[(0.0, 0.5)]);
     // RM-25: the new clock starts at 2 001 000, the lattice instant at or after the
     // change, so its sample 2 is the instant 2 002 000 (Phase 7, VE-4).
+    step(&world, &mut [&mut radio], 2_001_000);
     radio.push(burst(&radio, &world, after, 2, true));
-    step(&world, &mut [&mut radio], 2_000_500);
+    step(&world, &mut [&mut radio], 2_001_000);
     step(&world, &mut [&mut radio], 6_000_001);
     for (k, re, im) in radio.received(0) {
         let expected = match k {
@@ -1105,8 +1106,9 @@ fn mr_32_a_stop_after_a_cold_change_keeps_the_old_clock_s_radiation() {
     let samples = ramp(100);
     let third = world.waveform(&samples);
     // RM-25: the new clock starts at 2 001 000, so its sample 2 is 2 002 000 (VE-4).
+    run_to(&world, &mut [&mut a, &mut b], 2_001_000);
     a.push(burst(&a, &world, third, 2, false));
-    step(&world, &mut [&mut a, &mut b], 2_000_500);
+    step(&world, &mut [&mut a, &mut b], 2_001_000);
     run_to(&world, &mut [&mut a, &mut b], 2_002_249);
     a.push(Action::Stop { target: Some(rid("dev_a/tx")) });
     step(&world, &mut [&mut a, &mut b], 2_002_250);
