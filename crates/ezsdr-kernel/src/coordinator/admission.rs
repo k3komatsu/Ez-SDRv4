@@ -52,6 +52,15 @@ pub(super) fn admit_with(
             "KC-24: a Module ends a Run only with Abort",
         )]);
     }
+    // SB-4: every origin crosses this boundary before coercion or dispatch.
+    let values = match &action {
+        Action::UpdateParameter { key, value, .. } => value.check_nesting(key.as_str()),
+        Action::TxBurst { metadata: values, .. }
+        | Action::PeripheralCommand { params: values, .. } => values.iter()
+            .try_for_each(|(key, value)| value.check_nesting(key.as_str())),
+        _ => Ok(()),
+    };
+    values.map_err(|error| vec![violation("ezsdr.value", error.to_string())])?;
     let target = action.target().cloned();
     let (inst, fragment) = if let Some(target) = target {
         let (rewritten, inst, fragment) = super::pipeline::rewrite_spec_target(shared, &target)

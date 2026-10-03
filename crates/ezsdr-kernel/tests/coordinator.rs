@@ -4033,3 +4033,46 @@ fn kc_23_sink_prefix_refuses_non_sink_module_targets() {
         assert!(run.finish().termination.cleanup_failures.is_empty());
     }
 }
+
+#[test]
+fn sb_04_module_action_rejects_noncanonical_value_before_dispatch() {
+    let invalid = [
+        Value::Map(BTreeMap::from([("日本語".to_owned(), Value::Int(1))])),
+        Value::List(vec![Value::List(vec![Value::Int(1)])]),
+        Value::Map(BTreeMap::from([("nested".to_owned(), Value::Map(BTreeMap::new()))])),
+        Value::Num(f64::NAN), Value::Num(f64::INFINITY),
+        Value::List(vec![Value::Num(f64::NEG_INFINITY)]),
+        Value::Map(BTreeMap::from([("number".to_owned(), Value::Num(f64::INFINITY))])),
+    ];
+    for value in invalid {
+        let target = ezsdr_kernel::id::ResourceId::parse("radio").unwrap();
+        let key = Key::parse("test.gain").unwrap();
+        let actions = [
+            Action::UpdateParameter { target: target.clone(), key: key.clone(), value: value.clone(),
+                class: ezsdr_kernel::module_api::UpdateClass::HardwareTimed, at: None },
+            Action::PeripheralCommand { target: target.clone(), verb: Ident::parse("probe").unwrap(),
+                params: BTreeMap::from([(key.clone(), value.clone())]), at: None },
+            Action::TxBurst { target, waveform: input_ref().1, repeat: false,
+                at: ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)),
+                requested_at: None, late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+                metadata: BTreeMap::from([(key, value.clone())]) },
+        ];
+        for action in actions {
+            let (spec, profile) = executor_docs();
+            let probe = Probe::new();
+            let mut assembly = rig(Pacing::FreeRunning).assembly;
+            assembly.providers.insert(Ident::parse("radio").unwrap(),
+                Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)));
+            assembly.executors.insert(Ident::parse("exec").unwrap(),
+                Box::new(ProbeExecutor::new("x", &probe).submitting(action)));
+            let run = start_spec_run(&spec, &profile, assembly).unwrap();
+            assert!(probe.lines().iter().any(|line| line.starts_with("x:submit:err:ezsdr.value:")),
+                "{value:?}: {:?}", probe.lines());
+            assert!(!probe.lines().iter().any(|line| line.starts_with("p:action:")));
+            assert!(!run.effective()[&Ident::parse("radio").unwrap()].contains_key(&Key::parse("test.gain").unwrap()));
+            let manifest = run.finish();
+            assert!(manifest.termination.cleanup_failures.is_empty());
+            assert!(manifest.hash.is_some());
+        }
+    }
+}
