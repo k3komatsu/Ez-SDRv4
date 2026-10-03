@@ -393,6 +393,8 @@ struct Fake {
 pub struct FakeDevice {
     config: FakeConfig,
     state: Mutex<Fake>,
+    #[cfg(test)]
+    pub(crate) eob_error: Mutex<Option<DeviceError>>,
 }
 
 const OVERRUN_BEHIND: Duration = Duration::from_millis(100);
@@ -443,6 +445,8 @@ impl FakeDevice {
                 calls: Vec::new(),
             }),
             config,
+            #[cfg(test)]
+            eob_error: Mutex::new(None),
         }
     }
 
@@ -1012,6 +1016,10 @@ impl Device for FakeDevice {
         eob: bool,
         timeout: Duration,
     ) -> Result<usize, DeviceError> {
+        #[cfg(test)]
+        if eob {
+            if let Some(error) = self.eob_error.lock().unwrap().clone() { return Err(error); }
+        }
         if self.unreachable() {
             std::thread::sleep(timeout.min(Duration::from_millis(100)));
             return Ok(0);

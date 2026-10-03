@@ -167,6 +167,7 @@ impl Tx {
 
     /// One unit of work; false when there was nothing to do.
     fn step(&mut self) -> bool {
+        if self.core.is_lost() { return false; }
         let Some(clock) = self.clock else {
             if self.switch.is_some() {
                 self.do_switch();
@@ -425,12 +426,15 @@ impl Tx {
     /// Ends the open device burst: with the held last sample when there is one, else with
     /// an empty buffer, which UHD pads to one zero sample (a repeat stopped mid-waveform).
     fn close_device_burst(&self, tail: Option<Vec<Vec<Iq>>>) {
+        if self.core.is_lost() { return; }
         let empty: Vec<Iq> = Vec::new();
         let buffers: Vec<&[Iq]> = match &tail {
             Some(tail) => tail.iter().map(Vec::as_slice).collect(),
             None => vec![&empty; self.channels.max(1)],
         };
-        let _ = self.core.device.tx_send(&buffers, None, false, true, SEND_TIMEOUT);
+        if let Err(error) = self.core.device.tx_send(&buffers, None, false, true, SEND_TIMEOUT) {
+            self.core.device_failed("tx_burst", &error);
+        }
     }
 
     fn abandon(&mut self, device_open: bool) {
@@ -587,7 +591,7 @@ impl Tx {
         }
         self.clock = None;
         self.tracker = None;
-        if let Some(new) = switch.clock {
+        if let Some(new) = switch.clock.filter(|_| !self.core.is_lost()) {
             let reopened = if switch.channels != self.channels {
                 self.core.device.tx_open(switch.channels)
             } else {
@@ -613,7 +617,8 @@ impl Tx {
 
     /// UR-28: every report recorded; underflows and late bursts become events.
     fn reports(&mut self, timeout: Wall) {
-        while let Some(report) = self.core.device.tx_async(timeout) {
+        while !self.core.is_lost() {
+            let Some(report) = self.core.device.tx_async(timeout) else { break };
             self.report(report);
         }
     }
@@ -931,4 +936,74 @@ mod tests {
         });
         assert!(refused, "no TIME_ERROR {{ refused }}");
     }
+    #[test]
+    fn ur_29_eob_device_errors_are_escalated() {
+        for lost in [true, false] {
+            for tail in [None, Some(vec![vec![[0.25, 0.0]]])] {
+                let (core, device, _, events) = super::super::test_support::rig();
+                device.tx_open(1).unwrap();
+                let clock = core.register(Dir::Tx, 200, 0).unwrap();
+                let (_to_tx, cmds) = std::sync::mpsc::channel();
+                let tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+                *device.eob_error.lock().unwrap() = Some(crate::device::DeviceError {
+                    lost, message: "controlled EOB failure".to_owned(),
+                });
+                tx.close_device_burst(tail);
+                assert_eq!(core.is_lost(), lost, "EOB failure must reach UR-29");
+                let emitted = events.drain();
+                let expected = if lost { EventKind::DEVICE_LOST } else { ezsdr_radio::kinds::COMMAND_REJECTED };
+                assert_eq!(emitted.iter().filter(|event| event.kind.as_str() == expected).count(), 1);
+                if lost {
+                    tx.close_device_burst(None);
+                    assert!(events.drain().is_empty());
+                    assert_eq!(device.calls().iter().filter(|call| call.as_str() == "mark_lost").count(), 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ur_29_eob_loss_during_switch_stops_device_calls() {
+        let (core, device, _, _) = super::super::test_support::rig();
+        device.tx_open(1).unwrap();
+        let old = core.register(Dir::Tx, 200, 0).unwrap();
+        core.clocks.end(old.domain, core.at(20_000_000)).unwrap();
+        let new = core.register(Dir::Tx, 100, 30_000_000).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), cmds, Some(old), 1);
+        tx.continues_at = Some(100);
+        tx.tail = Some(vec![vec![[0.25, 0.0]]]);
+        tx.switch = Some(super::Switch { e1: 20_000_000, clock: Some(new), channels: 2,
+            settings: Arc::new(super::ColdConfig::new(new.origin, Settings { rate: Some(2e6), ..Settings::default() })) });
+        *device.eob_error.lock().unwrap() = Some(crate::device::DeviceError {
+            lost: true, message: "controlled EOB loss during switch".to_owned(),
+        });
+        let before = device.calls().len();
+        tx.do_switch();
+        tx.reports(std::time::Duration::ZERO);
+        assert!(core.is_lost());
+        assert_eq!(&device.calls()[before..], &["mark_lost"]);
+        assert!(tx.clock.is_none());
+    }
+
+    #[test]
+    fn ur_29_eob_loss_from_report_prevents_next_burst_send() {
+        let (core, device, _, _) = super::super::test_support::rig();
+        device.tx_open(1).unwrap();
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        tx.continues_at = Some(100);
+        tx.held.insert(3000, held(&clock, 3000, 10, LatePolicy::DropAndFlag));
+        *device.eob_error.lock().unwrap() = Some(crate::device::DeviceError {
+            lost: true, message: "controlled EOB loss after underflow".to_owned(),
+        });
+        let before = device.calls().len();
+        tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: None, channel: 0 });
+        assert!(core.is_lost());
+        assert!(!tx.step());
+        assert!(tx.held.contains_key(&3000));
+        assert_eq!(&device.calls()[before..], &["mark_lost"]);
+    }
+
 }
