@@ -1324,3 +1324,46 @@ fn hd_10_a_colliding_request_preserves_the_completed_recording() {
     assert_eq!(fs::read(meta_path).unwrap(), meta);
     assert!(rig.stop(StopMode::Abort).is_empty());
 }
+
+#[test]
+fn hd_10_contract_changes_keep_drop_carry_on_the_outgoing_capture() {
+    fn publish(rig: &mut Rig, contract: &str, domain: ClockDomainId,
+        first: i64, flags: BlockFlags, lost: Option<u64>) -> PublishOutcome {
+        let bps = if contract == "ezsdr.stream.cf32" { 8 } else { 4 };
+        let bytes = rig.pool.fill(2 * bps, |buf| buf.fill(0));
+        let header = BlockHeader { first_sample_time: TimePoint::new(domain, first), len: 2,
+            channels: 1, direction: Direction::Rx, valid: ChannelMask::full(1), flags, lost,
+            contract: DataContractId::parse(contract).unwrap() };
+        rig.link.publish(BlockRef::new(SampleBlock::new_host(header, HOST_MEMORY, bytes, bps as u32).unwrap()))
+    }
+    for (old, new) in [("ezsdr.stream.cf32", "ezsdr.stream.sc16"), ("ezsdr.stream.sc16", "ezsdr.stream.cf32")] {
+        for queued in [false, true] {
+            let mut rig = Rig::with_link("contract-carry", sample_count(100), BackPressure::DropOldest, 1);
+            let old_clock = rig.env.sample_clock;
+            publish(&mut rig, old, old_clock, 0, BlockFlags::NONE, None);
+            rig.step().unwrap();
+            if queued { rig.env.actions.push(request(Value::Int(2), None)); }
+            assert_eq!(publish(&mut rig, old, old_clock, 12,
+                BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(10)), PublishOutcome::Accepted);
+            let new_clock = rig.env.changed_clock;
+            assert_eq!(publish(&mut rig, new, new_clock, 0, BlockFlags::NONE, None), PublishOutcome::DroppedOldest);
+            rig.step().unwrap();
+            let artifacts = rig.stop(StopMode::Orderly);
+            assert_eq!(artifacts.len(), if queued { 2 } else { 1 });
+            assert!(artifacts[0].partial);
+            assert_eq!(artifacts[0].size_bytes, if old == "ezsdr.stream.cf32" { 16 } else { 8 });
+            let map = &artifacts[0].continuity[0];
+            assert_eq!(map.end.ticks, 2); assert_eq!(map.gaps.len(), 1);
+            assert_eq!(map.gaps[0].start.ticks, 2); assert_eq!(map.gaps[0].len, 0);
+            assert_eq!(map.gaps[0].lost, Some(10)); assert_eq!(map.gaps[0].link_dropped, 1);
+            assert_eq!(map.gaps[0].cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
+            if queued {
+                assert!(!artifacts[1].partial);
+                assert_eq!(artifacts[1].continuity[0].domain, new_clock);
+                assert!(artifacts[1].continuity[0].gaps.is_empty());
+                assert_eq!(artifacts[1].size_bytes, if new == "ezsdr.stream.cf32" { 16 } else { 8 });
+            }
+            assert_eq!(rig.link.take_drop_carry().blocks, 0);
+        }
+    }
+}

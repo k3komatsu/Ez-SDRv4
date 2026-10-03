@@ -313,7 +313,13 @@ impl CaptureSink {
                 .front()
                 .is_some_and(|capture| capture.contract.as_ref() == Some(&header.contract));
             if !same_contract {
-                self.finish_front(true, DropCarry::default())?;
+                let trailing_carry = if carry_pending {
+                    carry_pending = false;
+                    carry
+                } else {
+                    DropCarry::default()
+                };
+                self.finish_front(true, trailing_carry)?;
                 continue;
             }
 

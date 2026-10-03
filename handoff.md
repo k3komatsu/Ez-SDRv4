@@ -1,4 +1,4 @@
-# Ez-SDR v4 — Handoff (2026-10-03)
+# Ez-SDR v4 — Handoff (2026-10-04)
 
 次のセッション（人間・AI どちらでも）が最初に読む現状メモ．設計の中身は書かない．どこに何があり，何が終わっていて，次に何をするかだけ．
 開発時の恒常的なルールは [AGENTS.md](AGENTS.md)．
@@ -546,6 +546,55 @@ Existing stress failures and hardware H1–H5 remain unresolved validation items
 These fixes provide no new stress or hardware measurement and relax no timing
 envelope. Reproduction, validation and Sol review records are in
 `~/.cache/ezsdr-fixes/2026-10-03-fourth/`.
+
+**Fifth audit follow-up, 2026-10-04 (issues #25–#34)**
+
+The owner again authorized sequential validation, repair, GPT-6.1 Sol review,
+commit, push and closure. All ten issues were checked against accepted contracts
+and reproduced by a failing regression before repair.
+
+| Issue | Fix | Commit |
+|---|---|---|
+| [#25](https://github.com/k3komatsu/Ez-SDRv4/issues/25) | Validate sub-resource constraint declarations, types and extension ownership | `ea4acad` |
+| [#26](https://github.com/k3komatsu/Ez-SDRv4/issues/26) | Resolve sink targets only through declared outputs and Sink fragments | `6cc58a9` |
+| [#27](https://github.com/k3komatsu/Ez-SDRv4/issues/27) | Validate Action Values before coercion or dispatch | `4bd68ab` |
+| [#28](https://github.com/k3komatsu/Ez-SDRv4/issues/28) | Escalate EOB device errors and stop further TX calls after device loss | `7cb3547` |
+| [#29](https://github.com/k3komatsu/Ez-SDRv4/issues/29) | Check cold boundaries before mutation; widen near-limit owner arithmetic | `07924f5` |
+| [#30](https://github.com/k3komatsu/Ez-SDRv4/issues/30) | Correlate async TX reports independently per channel | `d9e02a7` |
+| [#31](https://github.com/k3komatsu/Ez-SDRv4/issues/31) | Convert delayed TX error targets through their original immutable clocks | `1fdc002` |
+| [#32](https://github.com/k3komatsu/Ez-SDRv4/issues/32) | Refuse unconvertible explicit update deadlines without side effects | `fa6942b` |
+| [#33](https://github.com/k3komatsu/Ez-SDRv4/issues/33) | Emit fractional-rate Mock tails through e1 and defer clock replacement | `e16915a` |
+| [#34](https://github.com/k3komatsu/Ez-SDRv4/issues/34) | Finish contract-changing captures with their pending drop provenance | this maintenance commit |
+
+Sol's review loops found additional paths in #28 (report handling followed by
+TX step after loss), #29 (an accepted near-limit boundary overflowing in its
+owners), and #33 (collapsed cold-update ordering, backward boundaries after a
+rate change, and disable/enable losing the boundary floor). Each was repaired
+and covered by regressions before its final PASS. #33's two existing channel
+tests now query the new clock at e1; their waveform, root-target and burst-record
+assertions are preserved. #34 covers both supported contract-change directions,
+with and without a subsequent capture request.
+
+UR-24/UR-28 and MR-18 clarify refusal, original-clock report correlation and
+old-tail timing. Public Rust interfaces, serialized types and frozen schemas
+remain unchanged. FakeDevice models normal ACK/time-error reports per TX
+channel; packet-level behavior still requires the recorded H1 hardware measurement.
+
+Final normal software validation: **959 passed, 0 failed, 0 ignored** on both
+stable and Rust 1.85.0. Python **29 passed** on each of 3.9.6 and 3.13.15 against
+the freshly built server. Feature-enabled UHD library tests: **31 passed** on
+both Rust toolchains; real UHD 4.10 API/link tests: **4 passed**. Workspace and
+UHD/server feature Clippy builds pass with `-D warnings` (all targets).
+
+A separate final-tree FakeDevice run with `--test-threads=128` had **102 passed,
+34 failed**. It exposed late booking, missing/extra samples and link-drop gaps;
+it is not a passing stress result. Host pacing pressure is consistent with the
+previous recorded failures (INFERRED), but this single probe does not establish
+absence of stress regressions. No timing envelope or assertion was relaxed.
+Hardware H1–H5 remain unmeasured in this session.
+
+Reproduction and validation logs, with the review-loop summary, are in
+`~/.cache/ezsdr-fixes/2026-10-04-fifth/`.
 
 **5. 決まったこと・owner の判断待ち**
 
