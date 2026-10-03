@@ -14,7 +14,7 @@ use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::module_api::{ActionReceiver, Requested, UpdateClass};
 use ezsdr_kernel::spec::{Constraint, Key, Value};
 use ezsdr_kernel::stream::{BurstOpen, LateOutcome};
-use ezsdr_kernel::time::{AbsoluteDeadline, Duration, TimePoint};
+use ezsdr_kernel::time::{AbsoluteDeadline, Duration, TimePoint, TimeError};
 use ezsdr_radio::payloads::{
     ClockLostPayload, ClockReference, CommandQueueFullPayload, LateCommandPayload, TimeErrorCause,
     TimeErrorOutcome, TimeErrorPayload,
@@ -208,15 +208,16 @@ impl Control {
         }
     }
 
-    fn ceil_root(&self, at: Option<AbsoluteDeadline>) -> Option<i64> {
-        let t = at?.time_point;
+    fn ceil_root(&self, at: Option<AbsoluteDeadline>) -> Result<Option<i64>, TimeError> {
+        let Some(t) = at.map(|deadline| deadline.time_point) else { return Ok(None); };
         if t.domain == self.core.root {
-            return Some(t.ticks);
+            return Ok(Some(t.ticks));
         }
-        self.core.clocks.convert(t, self.core.root).ok().map(|c| match c {
+        let ticks = match self.core.clocks.convert(t, self.core.root)? {
             ezsdr_kernel::time::Converted::Exact { point } => point.ticks,
-            ezsdr_kernel::time::Converted::Inexact { floor, .. } => floor.ticks + 1,
-        })
+            ezsdr_kernel::time::Converted::Inexact { floor, .. } => floor.ticks.checked_add(1).ok_or(TimeError::Overflow)?,
+        };
+        Ok(Some(ticks))
     }
 
     fn late_command(&self, key: Option<Key>, requested: i64, applied: i64) {
@@ -237,8 +238,14 @@ impl Control {
         };
         let dir = if key.as_str().starts_with("radio.rx.") { Dir::Rx } else { Dir::Tx };
         let now = self.core.now();
-        let earliest = now + self.core.ticks(DEVICE_LEAD_NS);
-        let e = match self.ceil_root(at) {
+        let requested = match self.ceil_root(at) {
+            Ok(requested) => requested,
+            Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-24: explicit deadline cannot be converted: {error}")),
+        };
+        let Some(earliest) = now.checked_add(self.core.ticks(DEVICE_LEAD_NS)) else {
+            return self.core.command_rejected("update_parameter", "UR-24: time arithmetic overflow");
+        };
+        let e = match requested {
             Some(requested) if requested < earliest => {
                 self.late_command(Some(key.clone()), requested, earliest);
                 earliest
@@ -375,7 +382,10 @@ impl Control {
             }
         };
         let now = self.core.now();
-        let requested = self.ceil_root(at);
+        let requested = match self.ceil_root(at) {
+            Ok(requested) => requested,
+            Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-25: explicit deadline cannot be converted: {error}")),
+        };
         match old {
             None if channels > 0 && lock(&self.core.streams).draining[dir as usize].is_some_and(|e1| now < e1) => {
                 // The old stream still runs to its e₁ (Review M, N-4).
@@ -910,6 +920,64 @@ mod tests {
             Some(AbsoluteDeadline::new(core.at(aligned_max))));
         assert_eq!(core.clocks.sample_clock_records()[0].ended_at, Some(core.at(aligned_max)));
         assert!(matches!(tx.try_recv(), Ok(TxCmd::Switch { clock: None, .. })));
+    }
+
+    #[test]
+    fn ur_24_invalid_explicit_deadline_is_not_asap() {
+        for dir in [Dir::Rx, Dir::Tx] {
+            for cold in [false, true] {
+                for channels in [0, 1] {
+                    for invalid in 0..3 {
+                        let (core, device, _, _) = crate::provider::test_support::rig();
+                        let old = core.register(dir, 200, 0).unwrap();
+                        if channels > 0 {
+                            let mut streams = lock(&core.streams);
+                            match dir { Dir::Rx => streams.rx = Some(old), Dir::Tx => streams.tx = Some(old) }
+                        }
+                        let at = match invalid {
+                            0 => TimePoint::new(ClockDomainId::HOST_MONOTONIC, 1_000_000_000),
+                            1 => TimePoint::new(ClockDomainId::local(999), 10),
+                            _ => TimePoint::new(old.domain, i64::MAX),
+                        };
+                        let (to_tx, tx) = std::sync::mpsc::channel(); let (to_rx, rx) = std::sync::mpsc::channel();
+                        let mut config = core.description.defaults.clone();
+                        config.insert(super::super::core::key(&format!("radio.{}.channels", dir.name())), Value::Int(channels));
+                        let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config.clone(), false);
+                        let name = format!("radio.{}.{}", dir.name(), if cold { "sample_rate_hz" } else { "gain_db" });
+                        if cold { control.book_cold(super::super::core::key(&name), Value::Num(2e6), Some(AbsoluteDeadline::new(at))); }
+                        else { control.book_timed(super::super::core::key(&name), Value::Num(3.0), Some(AbsoluteDeadline::new(at))); }
+                        assert!(control.held.is_empty()); assert_eq!(control.config, config);
+                        assert!(tx.try_recv().is_err()); assert!(rx.try_recv().is_err());
+                        assert_eq!(core.clocks.sample_clock_records().len(), 1);
+                        assert_eq!(core.clocks.sample_clock_records()[0].ended_at, None);
+                        assert!(device.calls().is_empty());
+                        assert!(lock(&core.rec).rejected.iter().any(|row| row["reason"].as_str().unwrap().contains("explicit deadline")));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ur_24_valid_deadlines_and_omission_preserve_their_meaning() {
+        use ezsdr_kernel::time::{ClockDomain, Rational};
+        for case in 0..3 {
+            let (core, _, _, _) = crate::provider::test_support::rig();
+            let derived = core.clocks.allocate_id().unwrap();
+            core.clocks.register(ClockDomain::derived(derived, core.root, Rational::new(2, 3).unwrap(), 0)).unwrap();
+            let (to_tx, _tx) = std::sync::mpsc::channel(); let (to_rx, _rx) = std::sync::mpsc::channel();
+            let mut config = core.description.defaults.clone();
+            config.insert(super::super::core::key("radio.tx.channels"), Value::Int(1));
+            let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false);
+            let (at, expected) = match case {
+                0 => (None, core.ticks(DEVICE_LEAD_NS)),
+                1 => (Some(AbsoluteDeadline::new(core.at(600_000))), 600_000),
+                _ => (Some(AbsoluteDeadline::new(TimePoint::new(derived, 900_001))), 600_001),
+            };
+            control.book_timed(super::super::core::key("radio.tx.gain_db"), Value::Num(3.0), at);
+            assert_eq!(control.held.keys().map(|order| order.0).collect::<Vec<_>>(), vec![expected]);
+            assert!(lock(&core.rec).rejected.is_empty());
+        }
     }
 
 }
