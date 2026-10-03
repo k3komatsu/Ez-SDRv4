@@ -673,9 +673,18 @@ impl Tx {
             }
             TxCode::TimeError => {
                 let Some(target) = self.reported_target(report.channel) else { return };
-                let late_by_ns = match (report.tick, self.clock) {
-                    (Some(tick), Some(clock)) => self.core.ns(tick - clock.instant(target.ticks)),
-                    _ => 0,
+                let late_by_ns = match report.tick {
+                    Some(tick) => {
+                        let start = match self.core.clocks.convert(target, self.core.root) {
+                            Ok(start) => start.floor().ticks,
+                            Err(error) => return self.core.command_rejected("tx_report", &format!("UR-28: {error}")),
+                        };
+                        match i64::try_from((i128::from(tick) - i128::from(start)) * 1_000_000_000 / i128::from(self.core.mcr)) {
+                            Ok(ns) => ns,
+                            Err(_) => return self.core.command_rejected("tx_report", "UR-28: lateness overflow"),
+                        }
+                    }
+                    None => 0,
                 };
                 self.time_error(TimeErrorOutcome::LateAtDevice, late_by_ns, target);
             }
@@ -1104,6 +1113,46 @@ mod tests {
         tx.remember_burst(TimePoint::new(new.domain, 100));
         tx.command(TxCmd::Enable { clock: new, channels: 2 });
         assert!(tx.unacked.is_empty());
+    }
+
+    #[test]
+    fn ur_28_delayed_time_error_uses_its_original_clock() {
+        for next_n in [Some(100), Some(200), None] {
+            let (core, device, _, events) = super::super::test_support::rig();
+            device.tx_open(2).unwrap();
+            let old = core.register(Dir::Tx, 200, 0).unwrap();
+            let target = TimePoint::new(old.domain, 10_000);
+            core.clocks.end(old.domain, core.at(20_000_000)).unwrap();
+            let new = next_n.map(|n| core.register(Dir::Tx, n, 30_000_000).unwrap());
+            let (_to_tx, cmds) = std::sync::mpsc::channel();
+            let mut tx = Tx::new(core.clone(), cmds, Some(old), 2);
+            tx.remember_burst(target);
+            tx.switch = Some(super::Switch { e1: 20_000_000, clock: new, channels: if new.is_some() { 2 } else { 0 },
+                settings: Arc::new(super::ColdConfig::new(new.map_or(20_000_000, |c| c.origin),
+                    Settings { rate: Some(if next_n == Some(100) { 2e6 } else { 1e6 }), ..Settings::default() })) });
+            tx.do_switch();
+            let next_target = new.map(|clock| TimePoint::new(clock.domain, 20_000));
+            if let Some(target) = next_target { tx.remember_burst(target); }
+            tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError,
+                tick: Some(old.instant(target.ticks) + 200), channel: 0 });
+            // The other channel's old error still has the old target after channel 0 advanced.
+            tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError,
+                tick: None, channel: 1 });
+            if let (Some(clock), Some(target)) = (new, next_target) {
+                tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError,
+                    tick: Some(clock.instant(target.ticks) + 400), channel: 0 });
+            }
+            let errors: Vec<_> = events.drain().into_iter()
+                .filter(|e| e.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+            assert_eq!(errors[0].payload["late_by_ns"], 1000);
+            assert_eq!(errors[0].payload["target"], serde_json::to_value(target).unwrap());
+            assert_eq!(errors[1].payload["late_by_ns"], 0);
+            assert_eq!(errors[1].payload["target"], serde_json::to_value(target).unwrap());
+            if let Some(target) = next_target {
+                assert_eq!(errors[2].payload["late_by_ns"], 2000);
+                assert_eq!(errors[2].payload["target"], serde_json::to_value(target).unwrap());
+            }
+        }
     }
 
 }
