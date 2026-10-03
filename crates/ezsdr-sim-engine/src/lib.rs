@@ -125,6 +125,9 @@ impl TimeAuthority for EngineTime {
     }
 
     fn cancel(&self, handle: ScheduleHandle) -> bool {
+        if handle.root != self.root {
+            return false;
+        }
         lock(&self.state)
             .pending
             .remove(&(handle.ticks, handle.seq))

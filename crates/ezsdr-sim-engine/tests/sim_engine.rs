@@ -186,6 +186,25 @@ fn se_10_time_authority_contract() {
 }
 
 #[test]
+fn se_10_cancel_does_not_remove_another_roots_callback() {
+    let clocks = Arc::new(ClockRegistry::new());
+    let a = SimEngine::new(clocks.clone()).unwrap();
+    let b = SimEngine::new(clocks).unwrap();
+    let fired = Arc::new(AtomicUsize::new(0));
+    let flag = fired.clone();
+    let foreign = a.time().schedule(TimePoint::new(a.root(), 10), Box::new(|_| {})).unwrap();
+    let own = b.time().schedule(TimePoint::new(b.root(), 10),
+        Box::new(move |_| { flag.fetch_add(1, Ordering::SeqCst); })).unwrap();
+    assert_ne!(foreign.root, own.root);
+    assert_eq!((foreign.ticks, foreign.seq), (own.ticks, own.seq));
+    assert!(!b.time().cancel(foreign));
+    assert_eq!(b.next_wakeup(), Some(TimePoint::new(b.root(), 10)));
+    assert_eq!(fired.load(Ordering::SeqCst), 1);
+    assert!(a.time().cancel(foreign), "the foreign callback was never removed");
+    assert!(!b.time().cancel(own), "the own callback already fired");
+}
+
+#[test]
 fn se_10_host_monotonic_advances_in_lockstep() {
     let (engine, _) = engine();
     let time = Authority::time(&engine);

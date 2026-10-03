@@ -317,6 +317,27 @@ fn ur_07_callbacks_run_outside_the_schedule_lock() {
 }
 
 #[test]
+fn ur_07_cancel_does_not_remove_another_roots_callback() {
+    let clocks = Arc::new(ClockRegistry::new());
+    let a = DeviceAuthority::new(fake(FakeConfig::default()), clocks.clone(), "internal", "internal", "fake-a").unwrap();
+    let b = DeviceAuthority::new(fake(FakeConfig::default()), clocks, "internal", "internal", "fake-b").unwrap();
+    let fired = Arc::new(Mutex::new(false));
+    let flag = fired.clone();
+    // KG-9 permits a past instant before any callback has fired. No host deadline
+    // is needed to test handle identity, and both queues get the same (tick, seq).
+    let foreign = a.time().schedule(TimePoint::new(a.root(), 0), Box::new(|_| {})).unwrap();
+    let own = b.time().schedule(TimePoint::new(b.root(), 0),
+        Box::new(move |_| { *flag.lock().unwrap() = true; })).unwrap();
+    assert_ne!(foreign.root, own.root);
+    assert_eq!((foreign.ticks, foreign.seq), (own.ticks, own.seq));
+    assert!(!b.time().cancel(foreign));
+    assert_eq!(b.next_wakeup(), Some(TimePoint::new(b.root(), 0)));
+    assert!(*fired.lock().unwrap());
+    assert!(a.time().cancel(foreign));
+    assert!(!b.time().cancel(own));
+}
+
+#[test]
 fn ur_07_cancel_wakes_a_waiting_next_wakeup() {
     // As above: without the wake, the waiter returns only when its nap ends.
     let (authority, _, root) = authority(FakeConfig::default(), "internal");

@@ -200,6 +200,9 @@ impl TimeAuthority for DeviceTime {
 
     /// MA-29 as KG-3 amends it: a cancel wakes a waiting `next_wakeup`.
     fn cancel(&self, h: ScheduleHandle) -> bool {
+        if h.root != self.root {
+            return false;
+        }
         let removed = lock(&self.schedule).pending.remove(&(h.ticks, h.seq)).is_some();
         self.changed.notify_all();
         removed
