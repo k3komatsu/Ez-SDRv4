@@ -155,8 +155,18 @@ pub(super) struct Context {
     pub(super) contracts: ContractRegistry,
     pub(super) clocks: Arc<ClockRegistry>,
     pub(super) host_clock: Arc<dyn HostClock>,
-    pub(super) declared_classes: BTreeMap<Key, crate::module_api::UpdateClass>,
+    pub(super) component_classes: BTreeMap<Ident, BTreeMap<Key, crate::module_api::UpdateClass>>,
     pub(super) outputs: BTreeSet<Ident>,
+}
+
+impl Context {
+    pub(super) fn component_classes_for(
+        &self,
+        target: &ResourceId,
+    ) -> Option<&BTreeMap<Key, crate::module_api::UpdateClass>> {
+        let component = Ident::parse(target.segments().next()?).ok()?;
+        self.component_classes.get(&component)
+    }
 }
 
 /// Set once, right after `plan()` succeeds (KC-13, KC-23).

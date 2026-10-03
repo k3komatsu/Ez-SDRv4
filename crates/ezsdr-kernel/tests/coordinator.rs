@@ -3917,3 +3917,45 @@ fn kc_12_prepare_report_ownership_is_checked_before_collecting() {
     assert!(lines.iter().any(|line| line == "rec:cleanup"));
     assert!(run.finish().termination.cleanup_failures.is_empty());
 }
+
+fn component_class_docs() -> (serde_json::Value, serde_json::Value) {
+    let (mut spec, mut profile) = executor_docs();
+    spec["graph"]["components"]["c1"]["params"] = serde_json::json!([{
+        "key": "test.gain", "schema": {"type": "number"}, "update_class": "cold", "default": 0.0
+    }]);
+    let mut c2 = spec["graph"]["components"]["c1"].clone();
+    c2["id"] = serde_json::json!("c2");
+    c2["params"][0]["update_class"] = serde_json::json!("hardware_timed");
+    spec["graph"]["components"]["c2"] = c2;
+    profile["placements"]["islands"][0]["components"] = serde_json::json!(["c1", "c2"]);
+    profile["placements"]["components"]["c2"] = profile["placements"]["components"]["c1"].clone();
+    (spec, profile)
+}
+
+#[test]
+fn kc_24_component_update_classes_belong_to_the_target() {
+    use ezsdr_kernel::module_api::UpdateClass::{Cold, HardwareTimed};
+    for (target, class, accepted) in [
+        ("c1", HardwareTimed, false), ("c1", Cold, true),
+        ("c2", Cold, false), ("c2", HardwareTimed, true),
+    ] {
+        let (spec, profile) = component_class_docs();
+        let probe = Probe::new();
+        let mut assembly = rig(Pacing::FreeRunning).assembly;
+        assembly.providers.insert(Ident::parse("radio").unwrap(),
+            Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)));
+        assembly.executors.insert(Ident::parse("exec").unwrap(),
+            Box::new(ProbeExecutor::new("x", &probe).submitting(Action::UpdateParameter {
+                target: ezsdr_kernel::id::ResourceId::parse(target).unwrap(),
+                key: Key::parse("test.gain").unwrap(), value: Value::Num(3.0), class, at: None,
+            })));
+        let run = start_spec_run(&spec, &profile, assembly).unwrap();
+        assert!(matches!(run.state(), RunState::Running {}));
+        let lines = probe.lines();
+        assert_eq!(lines.iter().any(|line| line.starts_with("x:submit:ok:")), accepted, "{lines:?}");
+        if !accepted {
+            assert!(lines.iter().any(|line| line.starts_with("x:submit:err:ezsdr.update_class:RS-52")));
+        }
+        assert!(run.finish().termination.cleanup_failures.is_empty());
+    }
+}

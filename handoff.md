@@ -466,6 +466,47 @@ audit evidence is in
 `~/.cache/ezsdr-audits/2026-10-03-b4c2934-independent/`; fix-validation and Sol
 review logs are in `~/.cache/ezsdr-fixes/2026-10-03-second/`.
 
+**Third audit follow-up, 2026-10-03 (issues #15–#18 and #5 residual)**
+
+The third independent audit checked `b0c8ce8` against the accepted contracts,
+all existing issues #1–#14, and the known stress/hardware limitations. Four new
+functional defects were reproduced and registered. The owner authorized the
+same sequential fix, GPT-6.1 Sol subagent review, commit and push procedure:
+
+| Issue | Fix | Commit |
+|---|---|---|
+| [#15](https://github.com/k3komatsu/Ez-SDRv4/issues/15) | Refuse collisions across resource and qualified need names before matching | `ddb30c0` |
+| [#16](https://github.com/k3komatsu/Ez-SDRv4/issues/16) | Validate derived Sink addresses before setup; preserve the parent Session on child validation failure | `f53efdf` |
+| [#17](https://github.com/k3komatsu/Ez-SDRv4/issues/17) | Require complete, unique lifecycle reports and verify ownership before merging | `691bc56` |
+| [#18](https://github.com/k3komatsu/Ez-SDRv4/issues/18) | Preserve pending link DropCarry in partial captures and SigMF metadata on lifecycle/targeted Stop | `9e47349` |
+| [#5](https://github.com/k3komatsu/Ez-SDRv4/issues/5) residual | Cache update classes per component and judge a Module update against its target's declaration | this maintenance commit |
+
+The #5 residual was not registered again: two components declaring the same
+key with different classes shared one map, allowing the later declaration to
+replace the target's. The fix keeps private per-component maps and passes only
+the target's declarations to admission/compilation. Provider and Sink keys
+continue to use their registered Vocabulary declarations. Public APIs and
+serialized schemas are unchanged. No client-component bug is claimed: current
+Sessions derive no graph components, and Spec Runs reject SessionAction submit
+with `NotSession`.
+
+All five fixes passed separate GPT-6.1 Sol reviews before commit. #16's Python
+regression initially expected an exception; it was corrected to assert the
+existing structured child `Failed { Validate }` result and successful parent
+capture, then passed re-review. The other four reviews required no changes.
+Each fix has a regression case observed failing on the previous implementation.
+
+Final software validation: **932 passed, 0 failed, 0 ignored** on both stable
+and Rust 1.85.0; Python **29 passed** on each of 3.9 and 3.13 against the freshly
+built server; UHD 4.10 API/link tests **4 passed**. Workspace and UHD/server
+feature Clippy builds pass with `-D warnings` (all targets).
+
+The recorded 128-thread stress failures (100/134 passed, 34 failed) and hardware
+H1–H5 remain unresolved; these fixes provide no new stress or hardware
+measurement and relax no timing envelope. Audit evidence is in
+`~/.cache/ezsdr-audits/2026-10-03-b0c8ce8-third/`; fix-validation and Sol review
+records are in `~/.cache/ezsdr-fixes/2026-10-03-third/`.
+
 **5. 決まったこと・owner の判断待ち**
 
 - 決定済み（2026-09-30）：実機は **X300 + OBX 1枚のループバック**（UBX 2 枚 → CBX 1枚 → OBX と変更．profile `x310-obx`，`x310-cbx` は予備），X300 は X310 の代わりで可，FPGA 書き換え承認．

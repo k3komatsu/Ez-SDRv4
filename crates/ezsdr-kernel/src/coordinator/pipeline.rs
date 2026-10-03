@@ -195,12 +195,12 @@ pub(super) fn assemble(
     };
     let machine = RunStateMachine::new(&*assembly.host_clock);
     let id = RunId::generate();
-    let declared_classes = spec
+    let component_classes = spec
         .graph
         .components
-        .values()
-        .flat_map(|component| component.params.iter())
-        .map(|param| (param.key.clone(), param.update_class))
+        .iter()
+        .map(|(name, component)| (name.clone(), component.params.iter()
+            .map(|param| (param.key.clone(), param.update_class)).collect()))
         .collect();
     let context = Context {
         kind,
@@ -216,7 +216,7 @@ pub(super) fn assemble(
         contracts: assembly.contracts,
         clocks: assembly.clocks,
         host_clock: assembly.host_clock,
-        declared_classes,
+        component_classes,
         outputs,
     };
     let shared = Arc::new(Shared {
@@ -1395,10 +1395,15 @@ pub(super) fn submit(
         Ok(earliest) => earliest,
         Err(violation) => return rejected(run, now, action, vec![violation]),
     };
+    let empty_classes = BTreeMap::new();
+    let declared_classes = match &action {
+        SessionAction::SetParameter { target, .. } => run.shared.ctx.component_classes_for(target),
+        _ => None,
+    }.unwrap_or(&empty_classes);
     let mut compiled = match crate::session::compile(
         &action,
         &run.shared.ctx.registry,
-        &run.shared.ctx.declared_classes,
+        declared_classes,
         &run.shared.ctx.outputs,
         earliest,
         waveform,

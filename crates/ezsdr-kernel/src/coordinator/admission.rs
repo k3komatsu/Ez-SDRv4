@@ -61,12 +61,16 @@ pub(super) fn admit_with(
     } else {
         (None, None)
     };
+    let empty_classes = BTreeMap::new();
+    let declared_classes = match (&action, inst) {
+        (Action::UpdateParameter { target, .. }, Some(Inst::Executor(_))) => {
+            shared.ctx.component_classes_for(target)
+        }
+        _ => None,
+    }.unwrap_or(&empty_classes);
     if let Action::UpdateParameter { key, class, .. } = &action {
         // SB-2: a component declaration cannot override a Provider/Sink key.
-        let declared = match inst {
-            Some(Inst::Executor(_)) => shared.ctx.declared_classes.get(key).copied(),
-            _ => None,
-        }
+        let declared = declared_classes.get(key).copied()
         .or_else(|| shared.ctx.registry.key_decl(key).ok().and_then(|d| d.update_class));
         match declared {
             Some(declared) if declared == *class => {}
@@ -241,7 +245,7 @@ pub(super) fn admit_with(
     let result = Admitter {
         checks: &shared.ctx.checks,
         environment: &shared.ctx.profile.environment,
-        declared_classes: &shared.ctx.declared_classes,
+        declared_classes,
         spec_coercion: &shared.ctx.spec.policies.coercion,
         registry: &shared.ctx.registry,
         is_session: shared.ctx.kind == crate::manifest::RunKind::Session,
