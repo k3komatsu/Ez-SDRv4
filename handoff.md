@@ -736,12 +736,15 @@ Follow-ups the reviews found (filed or fixed on 2026-10-07):
    or e₁). Filed as [#48](https://github.com/k3komatsu/Ez-SDRv4/issues/48).
 4. Phase 7's recorded mutations U45 and R04 had `old` text that no longer
    existed; they were stale before spec 20. `6d7bce8` re-spelled them against
-   the profile's leads, and both are killed again. Seventeen other recorded
-   rows still have `old` text that is missing at `642b8bd`; they are listed here
-   and not yet fixed:
+   the profile's leads, and both are killed again. The seventeen other stale
+   rows were re-spelled the same way:
    - Phase 3: M01–M03.
    - Phase 4: D11, D20.
    - Phase 7: U11, U23, R05, B15, B22, U40, B07, B11, B12, B25, B26, C03.
+
+   Each still disables its original rule and is killed by the test it names.
+   All 438 recorded rows now match exactly once. The Phase 3 and Phase 4 tools
+   copy with fresh timestamps into the shared review target (AGENTS.md §7).
 5. Ceilings recorded with VF-6. While every profile gives both leads one value,
    no test can tell the UHD Module reads its profile rather than a constant,
    nor tell the two leads apart. Phase 8 measures both leads (50 ms, INFERRED)

@@ -3,8 +3,8 @@
   "id": "M01",
   "name": "KB-1 empty store handed to Modules",
   "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
-  "old": "                inputs: self.store.clone(),",
-  "new": "                inputs: Arc::new(Mutex::new(BTreeMap::new())),",
+  "old": "                inputs: self.shared.store.clone(),",
+  "new": "                inputs: Arc::new(Mutex::new(BTreeMap::<ContentHash, Arc<[u8]>>::new())),",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kb_01"
@@ -13,8 +13,8 @@
   "id": "M02",
   "name": "KB-1 Session waveform not stored",
   "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
-  "old": "        lock(&run.store).entry(hash).or_insert_with(|| Arc::from(bytes));",
-  "new": "        let _ = &run.store;",
+  "old": "        lock(&run.shared.store).entry(hash).or_insert_with(|| Arc::from(bytes));",
+  "new": "        let _ = &run.shared.store;",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kb_01_a_provider_reads_a_session"
@@ -22,8 +22,8 @@
  {
   "name": "KB-1 prepare gets a snapshot of the store",
   "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
-  "old": "                inputs: self.store.clone(),",
-  "new": "                inputs: Arc::new(Mutex::new(lock(&self.store).clone())),",
+  "old": "                inputs: self.shared.store.clone(),",
+  "new": "                inputs: Arc::new(Mutex::new(lock(&self.shared.store).clone())),",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kb_01",

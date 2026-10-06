@@ -51,7 +51,10 @@ def prepare_scratch(root, scratch):
             return []
         return [name for name in names if name in IGNORED]
 
-    shutil.copytree(root, scratch, ignore=ignore)
+    # Fresh timestamps (shutil.copy, not copytree's default copy2): Cargo judges freshness
+    # by mtime, so a copy that keeps old timestamps reuses whatever another copy last built
+    # in the shared target directory, mutated builds included (Phase 5 Review F, P1-4).
+    shutil.copytree(root, scratch, ignore=ignore, copy_function=shutil.copy)
     open(os.path.join(scratch, MARKER), "w").close()
     return scratch
 
@@ -103,7 +106,8 @@ def main():
     mutations = json.load(open(sys.argv[1], encoding="utf-8"))
     selected = set(sys.argv[3:])
     scratch = prepare_scratch(root, os.path.abspath(sys.argv[2]))
-    env = dict(os.environ, CARGO_TARGET_DIR=os.path.join(scratch, "target"))
+    # Shared by every review copy (AGENTS.md §7); a per-scratch target cost ~2 GB each.
+    env = dict(os.environ, CARGO_TARGET_DIR=os.path.expanduser("~/.cache/cargo-target/Ez-SDRv4-review"))
     failures = 0
     for mutation in mutations:
         if selected and mutation["id"] not in selected:
