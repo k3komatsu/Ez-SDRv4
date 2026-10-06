@@ -525,7 +525,8 @@ impl MockRadio {
     fn apply_rx_fault(&mut self, index: usize) -> Result<(), ModuleError> {
         if self.faults[index].resolved { return Ok(()); }
         let entry = self.faults[index].entry.clone();
-        let Some(rx) = self.rx.as_ref() else {
+        // MR-20: a stream whose clock origin is still ahead (a cold replacement before e2) is not running.
+        let Some(rx) = self.rx.as_ref().filter(|rx| self.faults[index].tick >= rx.origin) else {
             self.faults[index].resolved = true;
             self.record_fault(index, 0);
             return Ok(());

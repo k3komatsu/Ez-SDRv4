@@ -1307,6 +1307,55 @@ fn mr_20_faults_fire_at_their_instants() {
 }
 
 #[test]
+fn mr_20_a_fault_between_cold_clocks_is_not_applied() {
+    // Old clock ends at e1 = 1 001 000, the replacement starts at e2 = 1 010 000; both faults
+    // fall in [e1, e2), where no receive stream runs, so neither touches the replacement clock.
+    for fault in ["rx_sequence_error", "rx_overflow"] {
+        let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_005_000, "fault": fault, "target": "radio" }]))];
+        let mut harness = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(3_000_000.0)))], &[], &env, Some((BackPressure::DropOldest, 64)));
+        harness.arm_start(0).unwrap();
+        harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(300_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_001))));
+        harness.step(0).unwrap();
+        harness.step(1_005_000).unwrap();
+        let faults = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.faults").unwrap()].clone();
+        assert_eq!(faults.as_array().unwrap().len(), 1, "{fault}");
+        assert_eq!(faults[0]["applied"], false, "{fault}");
+        assert_eq!(faults[0]["lost"], 0, "{fault}");
+        let domain = harness.clocks.sample_clock_records().last().unwrap().domain;
+        harness.step(20_000_000).unwrap();
+        assert_eq!(harness.events.drain().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0, "{fault}");
+        let mut first = None;
+        while let Some(block) = harness.link.as_ref().unwrap().receive() {
+            if block.header().first_sample_time.domain == domain && first.is_none() { first = Some(block.header().clone()); }
+        }
+        let first = first.expect("a replacement block");
+        assert_eq!(first.first_sample_time.ticks, 0, "{fault}");
+        assert_eq!(first.lost, None, "{fault}");
+        assert_eq!(first.flags, BlockFlags::NONE, "{fault}");
+    }
+
+    // A fault at e, ordered before the cold change (spec 09 §4), still meets the running old
+    // stream; when that change is refused as it applies, the old stream keeps its gap.
+    let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_001_000, "fault": "rx_sequence_error", "target": "radio" }]))];
+    let mut harness = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(3_000_000.0)))], &[], &env, Some((BackPressure::DropOldest, 64)));
+    harness.arm_start(0).unwrap();
+    harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(1e15), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_001_000))));
+    harness.step(0).unwrap();
+    harness.step(20_000_000).unwrap();
+    let faults = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.faults").unwrap()].clone();
+    assert_eq!(faults[0]["applied"], true);
+    assert_eq!(faults[0]["lost"], 2_000);
+    assert_eq!(harness.clocks.sample_clock_records().iter().filter(|record| record.stream == rid("mock/rx")).count(), 1);
+    let mut gap = None;
+    while let Some(block) = harness.link.as_ref().unwrap().receive() {
+        if block.header().lost.is_some() { gap = Some(block.header().clone()); }
+    }
+    let gap = gap.expect("the block after the sequence error");
+    assert_eq!((gap.first_sample_time.ticks, gap.lost), (5_003, Some(2_000)));
+    assert_eq!(gap.flags, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY);
+}
+
+#[test]
 fn mr_21_overrun_shape() {
     let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
     let mut harness = Harness::new("x310-like", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
