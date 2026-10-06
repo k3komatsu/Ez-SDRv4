@@ -1,5 +1,24 @@
 {
   "$defs": {
+    "ComponentPlacement": {
+      "additionalProperties": false,
+      "description": "Where a component runs (SB-25).",
+      "properties": {
+        "component": {
+          "$ref": "#/$defs/Ident",
+          "description": "The component (SB-25)."
+        },
+        "memory_domain": {
+          "$ref": "#/$defs/MemoryDomainId",
+          "description": "Which memory domain (MA-39)."
+        }
+      },
+      "required": [
+        "component",
+        "memory_domain"
+      ],
+      "type": "object"
+    },
     "Ident": {
       "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
       "type": "string"
@@ -7,6 +26,27 @@
     "IslandId": {
       "additionalProperties": false,
       "description": "Identifies a scheduling island (`05-module-api.md` MA-27).\n\nRule: MA-27, X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
+    "MemoryDomainId": {
+      "additionalProperties": false,
+      "description": "Identifies a memory domain a [`SampleBlock`](crate::stream::SampleBlock) lives in.\n\nRule: SC-6 (`02-stream-contract.md`), X7.",
       "properties": {
         "local": {
           "description": "Node-local ordinal, allocated by the owning registry.",
@@ -78,9 +118,9 @@
       ]
     },
     "components": {
-      "description": "The components placed on it (MA-38).",
+      "description": "The components placed on it, each with its memory domain (MA-38).",
       "items": {
-        "$ref": "#/$defs/Ident"
+        "$ref": "#/$defs/ComponentPlacement"
       },
       "type": "array"
     },

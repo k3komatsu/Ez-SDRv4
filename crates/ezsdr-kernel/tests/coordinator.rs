@@ -237,8 +237,8 @@ fn executor_docs() -> (serde_json::Value, serde_json::Value) {
         "module": { "id": "ezsdr.test.executor", "version": { "major": 1, "minor": 0, "patch": 0 } }
     });
     profile["placements"] = serde_json::json!({
-        "islands": [{ "id": { "node": 0, "local": 0 }, "executor": "exec", "components": ["c1"] }],
-        "components": { "c1": { "island": "island_0", "memory_domain": { "node": 0, "local": 0 } } }
+        "islands": [{ "id": { "node": 0, "local": 0 }, "executor": "exec",
+                      "components": [{ "component": "c1", "memory_domain": { "node": 0, "local": 0 } }] }]
     });
     (spec, profile)
 }
@@ -359,14 +359,14 @@ fn kc_11_an_island_gets_exactly_its_components() {
         "authority": "radio",
         "placements": {
             "islands": [
-                { "id": { "node": 0, "local": 0 }, "executor": "exec", "components": ["c1", "c2"] },
-                { "id": { "node": 0, "local": 1 }, "executor": "exec", "components": ["c3"] }
-            ],
-            "components": {
-                "c1": { "island": "island_0", "memory_domain": { "node": 0, "local": 0 } },
-                "c2": { "island": "island_0", "memory_domain": { "node": 0, "local": 0 } },
-                "c3": { "island": "island_1", "memory_domain": { "node": 0, "local": 0 } }
-            }
+                { "id": { "node": 0, "local": 0 }, "executor": "exec", "components": [
+                    { "component": "c1", "memory_domain": { "node": 0, "local": 0 } },
+                    { "component": "c2", "memory_domain": { "node": 0, "local": 0 } }
+                ] },
+                { "id": { "node": 0, "local": 1 }, "executor": "exec", "components": [
+                    { "component": "c3", "memory_domain": { "node": 0, "local": 0 } }
+                ] }
+            ]
         }
     });
     let probe = Probe::new();
@@ -2236,11 +2236,9 @@ fn kc_39_every_instance_is_stopped_before_it_is_cleaned_up() {
         "module": { "id": "ezsdr.test.executor", "version": { "major": 1, "minor": 0, "patch": 0 } }
     });
     profile["placements"]["islands"] = serde_json::json!([
-        { "id": { "node": 0, "local": 0 }, "executor": "exec", "components": ["c1"] }
+        { "id": { "node": 0, "local": 0 }, "executor": "exec",
+          "components": [{ "component": "c1", "memory_domain": { "node": 0, "local": 0 } }] }
     ]);
-    profile["placements"]["components"] = serde_json::json!({
-        "c1": { "island": "island_0", "memory_domain": { "node": 0, "local": 0 } }
-    });
     let probe = Probe::new();
     let mut assembly = output_assembly(&probe, None, None);
     assembly.executors.insert(
@@ -2679,11 +2677,9 @@ fn kc_08_an_executor_event_from_a_second_island_has_its_own_counter() {
         .as_array_mut()
         .unwrap()
         .push(serde_json::json!({
-            "id": { "node": 0, "local": 1 }, "executor": "exec", "components": ["c2"]
+            "id": { "node": 0, "local": 1 }, "executor": "exec",
+            "components": [{ "component": "c2", "memory_domain": { "node": 0, "local": 0 } }]
         }));
-    profile["placements"]["components"]["c2"] = serde_json::json!({
-        "island": "island_1", "memory_domain": { "node": 0, "local": 0 }
-    });
     let probe = Probe::new();
     let mut assembly = rig(Pacing::FreeRunning).assembly;
     assembly = with_provider(assembly, "radio", "radio");
@@ -3951,8 +3947,12 @@ fn component_class_docs() -> (serde_json::Value, serde_json::Value) {
     c2["id"] = serde_json::json!("c2");
     c2["params"][0]["update_class"] = serde_json::json!("hardware_timed");
     spec["graph"]["components"]["c2"] = c2;
-    profile["placements"]["islands"][0]["components"] = serde_json::json!(["c1", "c2"]);
-    profile["placements"]["components"]["c2"] = profile["placements"]["components"]["c1"].clone();
+    let mut c2_entry = profile["placements"]["islands"][0]["components"][0].clone();
+    c2_entry["component"] = serde_json::json!("c2");
+    profile["placements"]["islands"][0]["components"]
+        .as_array_mut()
+        .unwrap()
+        .push(c2_entry);
     (spec, profile)
 }
 

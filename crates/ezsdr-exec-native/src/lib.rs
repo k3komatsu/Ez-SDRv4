@@ -182,14 +182,14 @@ impl Executor for NativeExecutor {
         let source = ResourceId::parse(fragment.as_str())
             .map_err(|_| ModuleError::rejected("NX-4: the Island id makes no event source"))?;
         for link in &ctx.links {
-            if !island.components.contains(&link.component) {
+            if !island.components.iter().any(|entry| entry.component == link.component) {
                 return Err(ModuleError::rejected(format!(
                     "NX-4: a link end names {}, which is not in this Island",
                     link.component
                 )));
             }
         }
-        for id in &island.components {
+        for id in island.components.iter().map(|entry| &entry.component) {
             if self.components.contains_key(id) {
                 return Err(ModuleError::rejected(format!(
                     "NX-4: component {id} is placed twice on this Executor"

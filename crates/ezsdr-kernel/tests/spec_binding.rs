@@ -5,16 +5,15 @@ mod support;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ezsdr_kernel::binding::{
-    AdmissionCheckRegistry, BindingProfile, CheckStage, ComponentPlacement, LinkPlacement,
-    Placements, satisfies,
+    AdmissionCheckRegistry, BindingProfile, CheckStage, LinkPlacement, Placements, satisfies,
 };
 use ezsdr_kernel::contract::{ContractRegistry, PortRef};
 use ezsdr_kernel::event::ActionTemplate;
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, DataLinkId, IslandId, MemoryDomainId};
 use ezsdr_kernel::module_api::{
-    AuthorityDescriptor, ExecutorDescriptor, Factories, IslandDecl, ModuleRef, ModuleRegistry,
-    Pacing, Provider, Role, UpdateClass,
+    AuthorityDescriptor, ComponentPlacement, ExecutorDescriptor, Factories, IslandDecl, ModuleRef,
+    ModuleRegistry, Pacing, Provider, Role, UpdateClass,
 };
 use ezsdr_kernel::plan::{
     CompileInputs, DeclaredCost, PrepareReport, arm_order, coercion_policy,
@@ -471,6 +470,39 @@ fn sb_09_an_unknown_nested_field_is_refused() {
 }
 
 #[test]
+fn sb_25_an_island_states_each_component_and_its_memory_domain() {
+    // SB-25, MA-38 (spec 20, KH-2): an Island's entry `{ component, memory_domain }` is
+    // the one statement of where a component runs. The removed `placements.components`
+    // map and its `island` label are refused, never read and dropped (SB-9; invariant 39).
+    let doc = |placements: serde_json::Value| {
+        serde_json::json!({ "version": 1, "authority": "radio", "placements": placements })
+    };
+    let island = |entry: serde_json::Value| {
+        serde_json::json!({ "id": { "node": 0, "local": 0 }, "executor": "exec", "components": [entry] })
+    };
+    let entry = serde_json::json!({ "component": "c", "memory_domain": { "node": 0, "local": 0 } });
+    let parsed = BindingProfile::from_json(&doc(serde_json::json!({ "islands": [island(entry.clone())] })))
+        .expect("an Island's entry parses");
+    assert_eq!(parsed.placements.islands[0].components, [member("c")]);
+    let beside = doc(serde_json::json!({
+        "islands": [island(entry.clone())],
+        "components": { "c": { "island": "island_0", "memory_domain": { "node": 0, "local": 0 } } }
+    }));
+    let refused = BindingProfile::from_json(&beside);
+    assert!(
+        matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("unknown field `components`")),
+        "{refused:?}"
+    );
+    let mut labelled = entry;
+    labelled["island"] = serde_json::json!("island_0");
+    let refused = BindingProfile::from_json(&doc(serde_json::json!({ "islands": [island(labelled)] })));
+    assert!(
+        matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("unknown field `island`")),
+        "{refused:?}"
+    );
+}
+
+#[test]
 fn sb_14_compute_expression_refused() {
     // v3's CONSTANTS is an unknown top-level field (SB-9).
     assert!(matches!(
@@ -894,13 +926,10 @@ fn x7_non_local_ids_are_refused() {
         },
     });
     let mut placed = profile.clone();
-    placed.placements.components.insert(
-        id("c"),
-        ComponentPlacement {
-            island: id("io"),
-            memory_domain: far_domain,
-        },
-    );
+    placed.placements.islands[0].components = vec![ComponentPlacement {
+        component: id("c"),
+        memory_domain: far_domain,
+    }];
     let arms_far = TestProvider::new("radio", 2).arm_after(far("other"));
     let far_sink = TestSink::new(
         ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
@@ -2039,18 +2068,11 @@ fn sb_15_a_bound_resource_port_is_a_link_endpoint() {
         spec
     };
     let mut profile = profile_binding(&["radio", "line0"]);
-    profile.placements.components.insert(
-        id("proc"),
-        ComponentPlacement {
-            island: id("io"),
-            memory_domain: MemoryDomainId::local(0),
-        },
-    );
     bind_exec(&mut profile);
     profile.placements.islands.push(IslandDecl {
         id: IslandId::local(0),
         executor: id("exec"),
-        components: vec![id("proc")],
+        components: vec![member("proc")],
         affinity: None,
         rt_policy: None,
         batch: None,
@@ -2600,20 +2622,11 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
         capacity: 4,
     });
     let mut profile = profile_binding(&["radio"]);
-    for c in ["proc", "recorder"] {
-        profile.placements.components.insert(
-            id(c),
-            ComponentPlacement {
-                island: id("io"),
-                memory_domain: MemoryDomainId::local(0),
-            },
-        );
-    }
     bind_exec(&mut profile);
     profile.placements.islands.push(IslandDecl {
         id: IslandId::local(0),
         executor: id("exec"),
-        components: vec![id("proc"), id("recorder")],
+        components: vec![member("proc"), member("recorder")],
         affinity: None,
         rt_policy: None,
         batch: None,
@@ -2627,10 +2640,10 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
     // D83's one namespace lets two Islands name one Executor: that is sharing an
     // Executor instance (MA-38), not a collision.
     let mut shared = profile.clone();
-    shared.placements.islands[0].components = vec![id("proc")];
+    shared.placements.islands[0].components = vec![member("proc")];
     shared.placements.islands.push(IslandDecl {
         id: IslandId::local(1),
-        components: vec![id("recorder")],
+        components: vec![member("recorder")],
         ..shared.placements.islands[0].clone()
     });
     let planned = validate_then_plan(&spec, &shared, &fx.inputs(&providers), Vec::new());
@@ -2677,7 +2690,7 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
 
     // MA-39, through `plan()`: a component the Islands do not place is refused.
     let mut unplaced = profile.clone();
-    unplaced.placements.islands[0].components = vec![id("proc")];
+    unplaced.placements.islands[0].components = vec![member("proc")];
     assert!(matches!(
         validate_then_plan(&spec, &unplaced, &fx.inputs(&providers), Vec::new()),
         Err(SpecError::Structural { reason }) if reason.contains("exactly once")
@@ -4803,18 +4816,11 @@ fn sb_39_the_plan_records_the_contract_the_link_actually_carries() {
         capacity: 4,
     });
     let mut profile = profile_binding(&["radio", "line0"]);
-    profile.placements.components.insert(
-        id("src"),
-        ComponentPlacement {
-            island: id("io"),
-            memory_domain: MemoryDomainId::local(0),
-        },
-    );
     bind_exec(&mut profile);
     profile.placements.islands.push(IslandDecl {
         id: IslandId::local(0),
         executor: id("exec"),
-        components: vec![id("src")],
+        components: vec![member("src")],
         affinity: None,
         rt_policy: None,
         batch: None,
@@ -5229,20 +5235,11 @@ fn sb_15a_link_direction_is_checked() {
         spec
     };
     let mut profile = profile_binding(&["radio"]);
-    for c in ["src", "dst"] {
-        profile.placements.components.insert(
-            id(c),
-            ComponentPlacement {
-                island: id("io"),
-                memory_domain: MemoryDomainId::local(0),
-            },
-        );
-    }
     bind_exec(&mut profile);
     profile.placements.islands.push(IslandDecl {
         id: IslandId::local(0),
         executor: id("exec"),
-        components: vec![id("src"), id("dst")],
+        components: vec![member("src"), member("dst")],
         affinity: None,
         rt_policy: None,
         batch: None,
@@ -5291,18 +5288,11 @@ fn sb_15a_link_direction_is_checked() {
         capacity: 4,
     });
     let mut profile = profile_binding(&["radio", "line0"]);
-    profile.placements.components.insert(
-        id("dst"),
-        ComponentPlacement {
-            island: id("io"),
-            memory_domain: MemoryDomainId::local(0),
-        },
-    );
     bind_exec(&mut profile);
     profile.placements.islands.push(IslandDecl {
         id: IslandId::local(0),
         executor: id("exec"),
-        components: vec![id("dst")],
+        components: vec![member("dst")],
         affinity: None,
         rt_policy: None,
         batch: None,
@@ -5330,6 +5320,14 @@ fn bind(module: &str) -> ezsdr_kernel::binding::Binding {
         feed: None,
         selector: BTreeMap::new(),
         profile: None,
+    }
+}
+
+/// An Island's entry for `component`, in memory domain 0 (SB-25, MA-38).
+fn member(component: &str) -> ComponentPlacement {
+    ComponentPlacement {
+        component: id(component),
+        memory_domain: MemoryDomainId::local(0),
     }
 }
 

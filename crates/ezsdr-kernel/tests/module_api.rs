@@ -5,18 +5,18 @@ mod support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use ezsdr_kernel::binding::{ComponentPlacement, LinkPlacement, Placements};
+use ezsdr_kernel::binding::{LinkPlacement, Placements};
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection, PortRef};
 use ezsdr_kernel::event::{Action, EventCollector, EventKind};
 use ezsdr_kernel::id::{ClockDomainId, DataLinkId, IslandId, MemoryDomainId, RunId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
     ActionSubmitter, Authority, ComponentDescriptor, ComponentImpl, ComponentKind,
-    ComponentRequires, ComponentTiming, Deployment, Executor, ExecutorDescriptor, Factories,
-    IslandDecl, Link, LinkDescriptor, ModuleDescriptor, ModuleError, ModuleErrorKind, ModuleRef,
-    ModuleRegistry, ParamDecl, PrepareContext, Provider, Requested, Resource, Role, RtPolicy, Sink,
-    SinkDescriptor, StepOutcome, SteppedInstance, SteppedRef, StopMode, UpdateClass, Version,
-    VersionReq, step_until_quiescent,
+    ComponentPlacement, ComponentRequires, ComponentTiming, Deployment, Executor,
+    ExecutorDescriptor, Factories, IslandDecl, Link, LinkDescriptor, ModuleDescriptor, ModuleError,
+    ModuleErrorKind, ModuleRef, ModuleRegistry, ParamDecl, PrepareContext, Provider, Requested,
+    Resource, Role, RtPolicy, Sink, SinkDescriptor, StepOutcome, SteppedInstance, SteppedRef,
+    StopMode, UpdateClass, Version, VersionReq, step_until_quiescent,
 };
 use ezsdr_kernel::plan::{
     EdgeKind, GraphEdge, IslandContext, PrepareReport, admit_islands, check_cycles,
@@ -846,20 +846,22 @@ fn ma_37_a_non_host_budget_is_refused_at_the_document_boundary() {
 
 // ---------------------------------------------------------------- island admission
 
+/// An Island on `executor` whose entries put each of `components` in memory domain 0.
 fn island(components: &[&str], executor: &str) -> IslandDecl {
     IslandDecl {
         id: IslandId::local(0),
         executor: id(executor),
-        components: components.iter().map(|c| id(c)).collect(),
+        components: components.iter().map(|c| on(c, 0)).collect(),
         affinity: None,
         rt_policy: None,
         batch: None,
     }
 }
 
-fn placement(domain: u32) -> ComponentPlacement {
+/// An Island's entry: `component` in memory domain `domain` (SB-25, MA-38).
+fn on(component: &str, domain: u32) -> ComponentPlacement {
     ComponentPlacement {
-        island: id("io"),
+        component: id(component),
         memory_domain: MemoryDomainId::local(domain),
     }
 }
@@ -868,10 +870,6 @@ fn placement(domain: u32) -> ComponentPlacement {
 fn ma_39_island_admission() {
     let components: BTreeMap<Ident, ComponentDescriptor> =
         [(id("a"), component("a")), (id("b"), component("b"))]
-            .into_iter()
-            .collect();
-    let placements: BTreeMap<Ident, ComponentPlacement> =
-        [(id("a"), placement(0)), (id("b"), placement(0))]
             .into_iter()
             .collect();
     let executors: BTreeMap<Ident, ExecutorDescriptor> = [(
@@ -911,7 +909,6 @@ fn ma_39_island_admission() {
     let ctx = IslandContext {
         islands: &islands,
         components: &components,
-        placements: &placements,
         executors: &executors,
         links: &links,
         link_placements: &link_placements,
@@ -1073,13 +1070,13 @@ fn ma_39_island_admission() {
             .contains("impl_kinds")
     );
 
-    // 4. A memory domain the Executor cannot reach.
-    let far: BTreeMap<Ident, ComponentPlacement> =
-        [(id("a"), placement(9)), (id("b"), placement(0))]
-            .into_iter()
-            .collect();
+    // 4. A memory domain the Executor cannot reach, on `a`'s Island entry.
+    let far = vec![IslandDecl {
+        components: vec![on("a", 9), on("b", 0)],
+        ..island(&[], "exec")
+    }];
     let bad = IslandContext {
-        placements: &far,
+        islands: &far,
         ..ctx_clone(&ctx)
     };
     assert!(
@@ -1113,7 +1110,6 @@ fn ctx_clone<'a>(ctx: &IslandContext<'a>) -> IslandContext<'a> {
     IslandContext {
         islands: ctx.islands,
         components: ctx.components,
-        placements: ctx.placements,
         executors: ctx.executors,
         links: ctx.links,
         link_placements: ctx.link_placements,
@@ -1672,11 +1668,6 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
         [(id("a"), component("a")), (id("b"), component("b"))]
             .into_iter()
             .collect();
-    // `b` sits in memory domain 1, `a` in 0.
-    let placements: BTreeMap<Ident, ComponentPlacement> =
-        [(id("a"), placement(0)), (id("b"), placement(1))]
-            .into_iter()
-            .collect();
     let executors: BTreeMap<Ident, ExecutorDescriptor> = [(
         id("exec"),
         ExecutorDescriptor {
@@ -1700,7 +1691,11 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
         },
         BackPressure::Block,
     )];
-    let islands = vec![island(&["a", "b"], "exec")];
+    // `b` sits in memory domain 1, `a` in 0, as their Island's entries state.
+    let islands = vec![IslandDecl {
+        components: vec![on("a", 0), on("b", 1)],
+        ..island(&[], "exec")
+    }];
     let no_resources = BTreeSet::new();
 
     let selected = ModuleRef {
@@ -1725,7 +1720,6 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
     let ctx = IslandContext {
         islands: &islands,
         components: &components,
-        placements: &placements,
         executors: &executors,
         links: &none,
         link_placements: &link_placements,
@@ -1829,10 +1823,14 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
     // D77: the same holds when the two ends are in different Islands. Splitting the
     // pair across two Islands used to skip the `connects` check entirely.
     let split = vec![
-        island(&["a"], "exec"),
+        IslandDecl {
+            components: vec![on("a", 0)],
+            ..island(&[], "exec")
+        },
         IslandDecl {
             id: IslandId::local(1),
-            ..island(&["b"], "exec")
+            components: vec![on("b", 1)],
+            ..island(&[], "exec")
         },
     ];
     let unjoined = [(

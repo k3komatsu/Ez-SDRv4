@@ -645,11 +645,11 @@ fn check_local_ids(spec: &ExperimentSpec, profile: &BindingProfile) -> Result<()
             return Err(not_local(format!("island {}", island.id)));
         }
     }
-    for (name, placement) in &profile.placements.components {
-        if !placement.memory_domain.node.is_local() {
+    for entry in profile.placements.islands.iter().flat_map(|island| &island.components) {
+        if !entry.memory_domain.node.is_local() {
             return Err(not_local(format!(
-                "component {name}'s memory domain {}",
-                placement.memory_domain
+                "component {}'s memory domain {}",
+                entry.component, entry.memory_domain
             )));
         }
     }

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::binding::LinkPlacement;
 use crate::contract::PortRef;
-use crate::id::IslandId;
+use crate::id::{IslandId, MemoryDomainId};
 use crate::module_api::ModuleError;
 use crate::spec::Ident;
 
@@ -74,7 +74,7 @@ pub(super) fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> 
     // Every component placed exactly once.
     let mut placed: BTreeMap<&Ident, usize> = ctx.components.keys().map(|c| (c, 0)).collect();
     for island in ctx.islands {
-        for c in &island.components {
+        for c in island.components.iter().map(|entry| &entry.component) {
             match placed.get_mut(c) {
                 Some(n) => *n += 1,
                 None => {
@@ -99,7 +99,8 @@ pub(super) fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> 
                 island.id, island.executor
             ))
         })?;
-        for name in &island.components {
+        for entry in &island.components {
+            let name = &entry.component;
             let c = &ctx.components[name];
             if c.requires.executor_kind.as_str() != "any"
                 && c.requires.executor_kind != executor.kind
@@ -115,14 +116,11 @@ pub(super) fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> 
                     c.implementation.kind, island.executor
                 )));
             }
-            let placement = ctx
-                .placements
-                .get(name)
-                .ok_or_else(|| ModuleError::rejected(format!("MA-39: {name} has no placement")))?;
-            if !executor.memory_domains.contains(&placement.memory_domain) {
+            // The memory domain its Island states for it (SB-25, MA-39).
+            if !executor.memory_domains.contains(&entry.memory_domain) {
                 return Err(ModuleError::rejected(format!(
                     "MA-39: {name}'s memory domain {} is not among executor {}'s memory_domains",
-                    placement.memory_domain, island.executor
+                    entry.memory_domain, island.executor
                 )));
             }
             // An Island with an rt_policy requires a declared budget on every component.
@@ -142,7 +140,7 @@ pub(super) fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> 
             island
                 .components
                 .iter()
-                .map(move |component| (component, island.id))
+                .map(move |entry| (&entry.component, island.id))
         })
         .collect();
 
@@ -171,14 +169,21 @@ pub(super) fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> 
     // selected Link (SB-25) `connects` the pair, whether the ends are in one Island
     // or in two (D77).
     let is_resource = |r: &PortRef| ctx.resource_endpoints.contains(&r.component);
-    let placement_of = |r: &PortRef| ctx.placements.get(&r.component);
+    // Each component's memory domain is the one its Island's entry states (SB-25).
+    let domains: BTreeMap<&Ident, MemoryDomainId> = ctx
+        .islands
+        .iter()
+        .flat_map(|island| &island.components)
+        .map(|entry| (&entry.component, entry.memory_domain))
+        .collect();
+    let domain_of = |r: &PortRef| domains.get(&r.component).copied();
     // D81: a feed's consumer is the bound Sink, whose readable domains its descriptor
     // declares. A resource producer is skipped as for a graph link (D31).
     for (from, to, _policy) in ctx.feed_links {
         if is_resource(from) {
             continue;
         }
-        let fd = placement_of(from).ok_or_else(|| {
+        let fd = domain_of(from).ok_or_else(|| {
             ModuleError::rejected(format!(
                 "MA-39: feed {}:{} -> {} leaves an unplaced component",
                 from.component, from.port, to.component
@@ -190,19 +195,19 @@ pub(super) fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> 
                 to.component
             ))
         })?;
-        if sink.memory_domains.contains(&fd.memory_domain) {
+        if sink.memory_domains.contains(&fd) {
             continue;
         }
         let placement = selected[&(from, to)];
         let joined = ctx.links[&placement.link].connects.iter().any(|(a, b)| {
-            (*a == fd.memory_domain && sink.memory_domains.contains(b))
-                || (*b == fd.memory_domain && sink.memory_domains.contains(a))
+            (*a == fd && sink.memory_domains.contains(b))
+                || (*b == fd && sink.memory_domains.contains(a))
         });
         if !joined {
             return Err(ModuleError::rejected(format!(
                 "MA-39: {} is in memory domain {} and output {}'s Sink reads [{}]; selected Link Module {} {} does not connect them",
                 from.component,
-                fd.memory_domain,
+                fd,
                 to.component,
                 sink.memory_domains
                     .iter()
@@ -233,15 +238,12 @@ pub(super) fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> 
                 from.component, from.port, to.component, to.port
             )));
         };
-        let (fd, td) = (placement_of(from), placement_of(to));
+        let (fd, td) = (domain_of(from), domain_of(to));
         if let (Some(fd), Some(td)) = (fd, td) {
-            if fd.memory_domain == td.memory_domain {
+            if fd == td {
                 continue;
             }
-            let joined = descriptor.connects.iter().any(|pair| {
-                pair == &(fd.memory_domain, td.memory_domain)
-                    || pair == &(td.memory_domain, fd.memory_domain)
-            });
+            let joined = descriptor.connects.iter().any(|pair| pair == &(fd, td) || pair == &(td, fd));
             if !joined {
                 return Err(ModuleError::rejected(format!(
                     "MA-39: {} (island {}) and {} (island {}) are in different memory domains and selected Link Module {} {} does not connect them",

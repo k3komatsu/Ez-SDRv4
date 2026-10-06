@@ -15,7 +15,7 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, IslandId, MemoryDomainId, ResourceId, RunId};
 use ezsdr_kernel::module_api::{
     ActionReceiver, ActionSubmitter, AttachedPort, ComponentDescriptor, ComponentImpl,
-    ComponentKind, ComponentRequires, ComponentTiming, Endpoint, ExecutionClass, Executor,
+    ComponentKind, ComponentPlacement, ComponentRequires, ComponentTiming, Endpoint, ExecutionClass, Executor,
     Factories, IslandDecl, ModuleError, ModuleRegistry, Pacing, PrepareContext, StepOutcome,
     StopMode, UpdateClass,
 };
@@ -221,7 +221,10 @@ fn island(local: u32, components: &[&str]) -> IslandDecl {
     IslandDecl {
         id: IslandId::local(local),
         executor: id("exec"),
-        components: components.iter().map(|c| id(c)).collect(),
+        components: components
+            .iter()
+            .map(|c| ComponentPlacement { component: id(c), memory_domain: MemoryDomainId::local(0) })
+            .collect(),
         affinity: None,
         rt_policy: None,
         batch: None,

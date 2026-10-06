@@ -68,9 +68,9 @@
       "additionalProperties": false,
       "description": "Where a component runs (SB-25).",
       "properties": {
-        "island": {
+        "component": {
           "$ref": "#/$defs/Ident",
-          "description": "Which Island (SB-25)."
+          "description": "The component (SB-25)."
         },
         "memory_domain": {
           "$ref": "#/$defs/MemoryDomainId",
@@ -78,7 +78,7 @@
         }
       },
       "required": [
-        "island",
+        "component",
         "memory_domain"
       ],
       "type": "object"
@@ -113,9 +113,9 @@
           ]
         },
         "components": {
-          "description": "The components placed on it (MA-38).",
+          "description": "The components placed on it, each with its memory domain (MA-38).",
           "items": {
-            "$ref": "#/$defs/Ident"
+            "$ref": "#/$defs/ComponentPlacement"
           },
           "type": "array"
         },
@@ -243,16 +243,8 @@
     },
     "Placements": {
       "additionalProperties": false,
-      "description": "The Island declarations, the component assignment and the Link Module for each\ndata link — graph link or output feed. Every component of the Spec's graph\nappears in exactly one Island.\n\nRule: SB-25.",
+      "description": "The Island declarations — each listing the components it runs, each with its\nmemory domain — and the Link Module for each data link — graph link or output\nfeed. Every component of the Spec's graph appears in exactly one Island.\n\nRule: SB-25.",
       "properties": {
-        "components": {
-          "additionalProperties": {
-            "$ref": "#/$defs/ComponentPlacement"
-          },
-          "default": {},
-          "description": "Component name to placement (SB-25).",
-          "type": "object"
-        },
         "islands": {
           "default": [],
           "description": "The Islands (MA-38).",
@@ -449,7 +441,6 @@
     "placements": {
       "$ref": "#/$defs/Placements",
       "default": {
-        "components": {},
         "islands": [],
         "links": []
       },

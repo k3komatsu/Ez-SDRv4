@@ -166,8 +166,8 @@ pub fn ping_pong_profile(profile: &str, pinger: &str, responder_radio: &str, jit
         "bindings": bindings,
         "authority": "sim",
         "placements": {
-            "islands": [{ "id": { "node": 0, "local": 0 }, "executor": "exec", "components": ["responder"] }],
-            "components": { "responder": { "island": "island_0", "memory_domain": { "node": 0, "local": 0 } } },
+            "islands": [{ "id": { "node": 0, "local": 0 }, "executor": "exec",
+                          "components": [{ "component": "responder", "memory_domain": { "node": 0, "local": 0 } }] }],
             "links": [
                 { "link": link_module(), "from": { "component": pinger, "port": "rx" }, "to": { "component": "rec", "port": "in" } },
                 { "link": link_module(), "from": { "component": responder_radio, "port": "rx" }, "to": { "component": "responder", "port": "rx" } }

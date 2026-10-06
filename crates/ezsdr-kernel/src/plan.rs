@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::binding::{ComponentPlacement, LinkPlacement};
+use crate::binding::LinkPlacement;
 use crate::contract::PortRef;
 use crate::id::DataLinkId;
 use crate::module_api::{
@@ -158,12 +158,11 @@ pub fn apply_coercion(
 
 /// What an Island admission check needs to know about the Run (MA-39).
 pub struct IslandContext<'a> {
-    /// The Islands being admitted (MA-38).
+    /// The Islands being admitted, each listing its components with their memory
+    /// domains (MA-38, SB-25).
     pub islands: &'a [IslandDecl],
     /// Every component of the Spec's graph (SB-15).
     pub components: &'a BTreeMap<Ident, ComponentDescriptor>,
-    /// Where each component is placed (SB-25).
-    pub placements: &'a BTreeMap<Ident, ComponentPlacement>,
     /// The Executor instance behind each Island (MA-18).
     pub executors: &'a BTreeMap<Ident, ExecutorDescriptor>,
     /// The registered Link descriptors, keyed by Module id and version (MA-28).
@@ -192,8 +191,8 @@ pub struct IslandContext<'a> {
 /// Island admission.
 ///
 /// Checks: every component placed exactly once; `requires.executor_kind` is `any`
-/// or the Executor's kind, `impl.kind` is among its `impl_kinds`, and the
-/// placement's memory domain is among its `memory_domains`; every data link —
+/// or the Executor's kind, `impl.kind` is among its `impl_kinds`, and the memory
+/// domain its Island states for it is among its `memory_domains`; every data link —
 /// graph link or output feed — has exactly one `LinkPlacement` naming its ends, whose
 /// selected descriptor supports its policy and, when the two ends are placed in
 /// different memory domains, in one Island or in two, connects the pair; MA-22's

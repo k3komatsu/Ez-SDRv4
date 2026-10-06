@@ -190,7 +190,6 @@ pub(super) fn plan(
     super::islands::admit_islands(&IslandContext {
         islands: &profile.placements.islands,
         components: &spec.graph.components,
-        placements: &profile.placements.components,
         executors: &executors,
         links: inputs.registry.link_descriptors(),
         link_placements: &profile.placements.links,

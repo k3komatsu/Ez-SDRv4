@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::contract::PortRef;
-use crate::id::{MemoryDomainId, ResourceId};
+use crate::id::ResourceId;
 use crate::module_api::{IslandDecl, ModuleRef, ProfileRef};
 use crate::spec::{
     CapabilityValue, Coercion, Constraint, Ident, Key, KeyDecl, Namespace, RejectedConstraint,
@@ -58,19 +58,6 @@ pub struct Binding {
     pub feed: Option<crate::spec::SinkFeed>,
 }
 
-/// Where a component runs (SB-25).
-// SB-25a, which put the Sink's Module in this struct, is withdrawn: an output is bound
-// rather than placed (D17, D18). Kept out of the doc comment because that text is the
-// schema's `description` and OV-10 freezes it.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ComponentPlacement {
-    /// Which Island (SB-25).
-    pub island: Ident,
-    /// Which memory domain (MA-39).
-    pub memory_domain: MemoryDomainId,
-}
-
 /// Which versioned Link Module carries one data link, named by its two ends: a
 /// graph link's `from` and `to`, or an output's feed port and `{output id, "in"}`.
 /// Naming the ends rather than a position means reordering `graph.links` cannot
@@ -86,9 +73,9 @@ pub struct LinkPlacement {
     pub to: PortRef,
 }
 
-/// The Island declarations, the component assignment and the Link Module for each
-/// data link — graph link or output feed. Every component of the Spec's graph
-/// appears in exactly one Island.
+/// The Island declarations — each listing the components it runs, each with its
+/// memory domain — and the Link Module for each data link — graph link or output
+/// feed. Every component of the Spec's graph appears in exactly one Island.
 ///
 /// Rule: SB-25.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
@@ -97,9 +84,6 @@ pub struct Placements {
     /// The Islands (MA-38).
     #[serde(default)]
     pub islands: Vec<IslandDecl>,
-    /// Component name to placement (SB-25).
-    #[serde(default)]
-    pub components: BTreeMap<Ident, ComponentPlacement>,
     /// One placement per data link — every graph link and every output feed —
     /// each naming the link by its endpoints (SB-25, D76).
     #[serde(default)]

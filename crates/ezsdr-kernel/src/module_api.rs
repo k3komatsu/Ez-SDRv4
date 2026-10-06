@@ -898,6 +898,20 @@ pub struct VocabularyDescriptor {
     pub checks: Vec<Namespace>,
 }
 
+/// Where a component runs (SB-25).
+// SB-25a, which put the Sink's Module in this struct, is withdrawn: an output is bound
+// rather than placed (D17, D18). Kept out of the doc comment because that text is the
+// schema's `description`, which changes only with a `SCHEMA_CHANGELOG.md` entry
+// (OV-10, OV-12).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComponentPlacement {
+    /// The component (SB-25).
+    pub component: Ident,
+    /// Which memory domain (MA-39).
+    pub memory_domain: MemoryDomainId,
+}
+
 /// An Island declaration: an Executor instance, the components placed on it, and
 /// its optional affinity, real-time policy and preferred batch. Where it lives and
 /// the requirement that every component be placed exactly once are SB-13 and SB-25.
@@ -910,8 +924,8 @@ pub struct IslandDecl {
     pub id: IslandId,
     /// The Executor instance that runs it (MA-38).
     pub executor: Ident,
-    /// The components placed on it (MA-38).
-    pub components: Vec<Ident>,
+    /// The components placed on it, each with its memory domain (MA-38).
+    pub components: Vec<ComponentPlacement>,
     /// CPU affinity, when declared (MA-38).
     pub affinity: Option<Vec<u32>>,
     /// Real-time scheduling policy, when declared; MA-39 then requires a budget on

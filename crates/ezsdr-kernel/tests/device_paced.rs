@@ -238,8 +238,8 @@ fn executor_docs() -> (serde_json::Value, serde_json::Value) {
         "module": { "id": "ezsdr.test.executor", "version": { "major": 1, "minor": 0, "patch": 0 } }
     });
     profile["placements"] = serde_json::json!({
-        "islands": [{ "id": { "node": 0, "local": 0 }, "executor": "exec", "components": ["c1"] }],
-        "components": { "c1": { "island": "island_0", "memory_domain": { "node": 0, "local": 0 } } }
+        "islands": [{ "id": { "node": 0, "local": 0 }, "executor": "exec",
+                      "components": [{ "component": "c1", "memory_domain": { "node": 0, "local": 0 } }] }]
     });
     (spec, profile)
 }

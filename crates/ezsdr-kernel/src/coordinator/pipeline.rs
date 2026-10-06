@@ -793,14 +793,14 @@ impl RunHandle {
                 island
                     .components
                     .iter()
-                    .filter_map(|id| {
+                    .filter_map(|entry| {
                         self.shared
                             .ctx
                             .spec
                             .graph
                             .components
-                            .get(id)
-                            .map(|c| (id.clone(), c.clone()))
+                            .get(&entry.component)
+                            .map(|c| (entry.component.clone(), c.clone()))
                     })
                     .collect()
             });
@@ -1904,8 +1904,8 @@ fn build_routing(
                 serde_json::from_value::<crate::module_api::IslandDecl>(fragment.content.clone())
                     .ok()
                     .and_then(|island| {
-                        for component in island.components {
-                            island_of.insert(component, fragment.id.clone());
+                        for entry in island.components {
+                            island_of.insert(entry.component, fragment.id.clone());
                         }
                         shared
                             .executors

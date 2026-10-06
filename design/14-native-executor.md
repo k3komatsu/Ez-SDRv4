@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted at Gate X (owner, 2026-09-26, as recommended; [`plan/phase5/00-overview.md`](../plan/phase5/00-overview.md) §11) and moved here at Step X. Normative for `crates/ezsdr-exec-native`. Its record — the prototype, the reviews and the mutations — stays in [`plan/phase5/`](../plan/phase5). |
+| Status | Accepted at Gate X (owner, 2026-09-26, as recommended; [`plan/phase5/00-overview.md`](../plan/phase5/00-overview.md) §11) and moved here at Step X. Normative for `crates/ezsdr-exec-native`. Its record — the prototype, the reviews and the mutations — stays in [`plan/phase5/`](../plan/phase5). Amended by maintenance spec 20: KH-2 (NX-4; issue #39; [`plan/maintenance/20-amendments.md`](../plan/maintenance/20-amendments.md)). |
 | Scope | The Executor Module `ezsdr.exec.native` 1.0.0: its descriptors, how it loads a component by its `impl` identity, `prepare`, the stepping of its components, how it submits their Actions and handles refusals, the Actions addressed to it, `stop` and `cleanup`; and its component ABI (`Component`, `ComponentContext`, `Implementation`). |
 | Not in scope | Components that apply Actions (Phase 10). Threaded execution, RealtimeEmulation and hardware (KC-2; Phase 7 onwards). A component's processing time in virtual time (`plan/phase5/00-overview.md` R4; Phase 10). WASM and GPU Executors (Phase 11). Event edges (`plan/phase5/00-overview.md` §3). |
 | Crate | `crates/ezsdr-exec-native`, library `ezsdr_exec_native`. Depends on `ezsdr-kernel` and `serde_json`. Dev-dependency: `ezsdr-kernel` with `testing`. |
@@ -81,10 +81,10 @@ A `ComponentContext` carries no `ActionSubmitter`: a component's Actions go thro
 
 ### `prepare`
 
-- **NX-4** `prepare(island, ctx)`:
+- **NX-4** `prepare(island, ctx)`, which receives each component's memory domain with its Island — an entry of `island.components` is `{ component, memory_domain }` (MA-38; spec 20, KH-2; issue #39):
   1. `ctx.class` other than Simulation returns `Unsupported` ("NX-4: … runs the Simulation class only"): the components are stepped on the calling thread, as the Simulation class steps them; the device-paced classes step Executors on the data thread (MA-30's table as Phase 7's KG-2 amends it), which this Executor does not yet accept (Phase 7, Review L, NONBLOCKING 15).
-  2. Every `ctx.links` entry must name a component of `island.components`; one that does not is `Rejected`.
-  3. For each component of `island.components`, in the Island's order: a component this Executor already holds (from another Island) is `Rejected`; its descriptor is `ctx.components[id]`, and a missing one is `Rejected`; it is loaded (NX-3); `(implementation.make)()` builds it, and the Executor keeps it **before** calling its `prepare`, so that `stop` and `cleanup` reach a component whose `prepare` failed, as MA-7 has them reach every instance that reached `prepare`; its `prepare` receives a `ComponentContext` whose `descriptor` is the Spec's, whose `links` are exactly the `ctx.links` entries naming it, whose `source` is `island_<island.id.local>`, and whose other handles are `ctx`'s. A component's error is `prepare`'s error.
+  2. Every `ctx.links` entry must name the `component` of an entry of `island.components` (spec 20, KH-2; issue #39); one that does not is `Rejected`.
+  3. For the `component` of each entry of `island.components` (spec 20, KH-2; issue #39), in the Island's order: a component this Executor already holds (from another Island) is `Rejected`; its descriptor is `ctx.components[id]`, and a missing one is `Rejected`; it is loaded (NX-3); `(implementation.make)()` builds it, and the Executor keeps it **before** calling its `prepare`, so that `stop` and `cleanup` reach a component whose `prepare` failed, as MA-7 has them reach every instance that reached `prepare`; its `prepare` receives a `ComponentContext` whose `descriptor` is the Spec's, whose `links` are exactly the `ctx.links` entries naming it, whose `source` is `island_<island.id.local>`, and whose other handles are `ctx`'s. A component's error is `prepare`'s error.
   4. The Executor keeps `ctx.actions` and `ctx.actions_out` (MA-5a).
   5. It returns `PrepareReport { fragment: island_<island.id.local>, effective: {}, coercions: [], warnings: [] }`.
 

@@ -28,5 +28,45 @@
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
   "filter": "sb_30_the_check_sees_each_fragment_s_own_value"
+ },
+ {
+  "id": "H04",
+  "name": "Placements accepts unknown members (deny_unknown_fields removed)",
+  "file": "crates/ezsdr-kernel/src/binding.rs",
+  "old": "#[serde(deny_unknown_fields)]\npub struct Placements {",
+  "new": "pub struct Placements {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_25_an_island_states_each_component_and_its_memory_domain"
+ },
+ {
+  "id": "H05",
+  "name": "ComponentPlacement accepts unknown members (deny_unknown_fields removed)",
+  "file": "crates/ezsdr-kernel/src/module_api.rs",
+  "old": "#[serde(deny_unknown_fields)]\npub struct ComponentPlacement {",
+  "new": "pub struct ComponentPlacement {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_25_an_island_states_each_component_and_its_memory_domain"
+ },
+ {
+  "id": "H06",
+  "name": "MA-39 checks a fixed memory domain instead of the entry's",
+  "file": "crates/ezsdr-kernel/src/plan/islands.rs",
+  "old": "if !executor.memory_domains.contains(&entry.memory_domain) {",
+  "new": "if !executor.memory_domains.contains(&MemoryDomainId::local(0)) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_39_island_admission"
+ },
+ {
+  "id": "H07",
+  "name": "the links' check takes a fixed memory domain for every component",
+  "file": "crates/ezsdr-kernel/src/plan/islands.rs",
+  "old": ".map(|entry| (&entry.component, entry.memory_domain))",
+  "new": ".map(|entry| (&entry.component, MemoryDomainId::local(0)))",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link"
  }
 ]
