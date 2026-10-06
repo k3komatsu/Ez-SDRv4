@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted at Gate X (owner, 2026-09-27, as recommended; [`plan/phase6/00-overview.md`](../plan/phase6/00-overview.md) §11) and moved here at Step X. Normative for `crates/ezsdr-server` and `python/ezsdr`. Its record — the prototype, the reviews and the mutations — stays in [`plan/phase6/`](../plan/phase6/). |
+| Status | Accepted at Gate X (owner, 2026-09-27, as recommended; [`plan/phase6/00-overview.md`](../plan/phase6/00-overview.md) §11) and moved here at Step X. Normative for `crates/ezsdr-server` and `python/ezsdr`. Its record — the prototype, the reviews and the mutations — stays in [`plan/phase6/`](../plan/phase6/). Amended by maintenance spec 20: VF-4 (EA-9's default profile: `ezsdr.radio.mock` 1.4.0; issue #45; [`plan/maintenance/20-amendments.md`](../plan/maintenance/20-amendments.md)). |
 | Scope | The frontend that makes Vision §3's Easy API real: the server `ezsdr-server` 0.2.0 (a Rust binary that compiles the Modules in and runs one Session), the protocol `ezsdr.protocol` 1 between a client and the server, and the Python package `ezsdr` 0.2.0 (Phase 7 amended both: [`plan/phase7/19-amendments.md`](../plan/phase7/19-amendments.md) VE-5, VE-6). |
 | Not in scope | A remote listener, server-owned profiles and authentication (Phase 7); Session replay; a Spec builder; a CLI or MCP client ([`plan/phase6/00-overview.md`](../plan/phase6/00-overview.md) §3). |
 | Depends on | Specs 01–11 and 14 as amended; spec 17 ([`plan/phase6/17-amendments.md`](../plan/phase6/17-amendments.md)) (KF-1 `events`, KF-2 `wait_for`, KF-3 `run_child`, VD-1 `sink.CAPTURE_WRITTEN`). |
@@ -47,7 +47,7 @@ Rules are `EA-n`; decisions are `A1`…`A8` (§6).
   ```json
   { "version": 1,
     "bindings": {
-      "radio": { "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 2, "patch": 0 } },
+      "radio": { "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 4, "patch": 0 } },
                  "selector": { "id": "radio" },
                  "profile": { "name": "x310-like", "version": { "major": 1, "minor": 1, "patch": 0 } } },
       "rec":   { "module": { "id": "ezsdr.sink.capture", "version": { "major": 1, "minor": 2, "patch": 0 } },

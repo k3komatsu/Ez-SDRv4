@@ -1,4 +1,4 @@
-//! Ez-SDR v4 Module ezsdr.radio.mock 1.3.0 (design/09-mock-radio.md).
+//! Ez-SDR v4 Module ezsdr.radio.mock 1.4.0 (design/09-mock-radio.md).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -34,15 +34,15 @@ pub use profile::{Profile, ProfileKind};
 fn module_ref() -> ModuleRef {
     ModuleRef {
         id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"),
-        version: Version::new(1, 3, 0),
+        version: Version::new(1, 4, 0),
     }
 }
 
-/// The Module descriptor for `ezsdr.radio.mock` 1.3.0 (MR-1).
+/// The Module descriptor for `ezsdr.radio.mock` 1.4.0 (MR-1).
 pub fn descriptor() -> ModuleDescriptor {
     ModuleDescriptor {
         id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"),
-        version: Version::new(1, 3, 0),
+        version: Version::new(1, 4, 0),
         kernel_api: KERNEL_API,
         roles: vec![Role::Provider],
         // radio 1.3.0: RM-24's hot-path RX_OVERFLOW (MR-37), RM-26's description (VE-1).
@@ -54,7 +54,7 @@ pub fn descriptor() -> ModuleDescriptor {
             })
             .collect(),
         deployment: Deployment::InProcess {},
-        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 1.3.0")),
+        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 1.4.0")),
     }
 }
 
@@ -139,6 +139,19 @@ struct ScheduledFault {
     applied: bool,
     resolved: bool,
     order: u64,
+    /// A receive fault's loss, cut from its stream and not yet settled (MR-20a).
+    pending: Option<PendingLoss>,
+}
+
+/// What a receive fault cut from the stream in `domain`, from `kf` to `kg`, until the
+/// block that carries it or the stream's end settles it (MR-20a).
+#[derive(Clone, Copy)]
+struct PendingLoss {
+    domain: ClockDomainId,
+    kf: i64,
+    kg: i64,
+    cause: ezsdr_radio::payloads::RxOverflowCause,
+    gap_ns: i64,
 }
 
 struct HeldBurst {
@@ -448,6 +461,8 @@ impl MockRadio {
                 let samples = (stop - next) as u64;
                 self.add_stat("rx_blocks", 1);
                 self.add_stat("rx_samples", samples);
+                // MR-20a: this block carries every pending loss it is the first at or after.
+                self.settle_carried(domain, next)?;
             }
         }
         Ok(progressed)
@@ -553,10 +568,10 @@ impl MockRadio {
             FaultKind::RxSequenceError => (kf.saturating_add(i64::from(self.profile.block_len())), ezsdr_radio::payloads::RxOverflowCause::Sequence, 0),
             FaultKind::DeviceLost => (kf, ezsdr_radio::payloads::RxOverflowCause::Overrun, 0),
         };
-        let kg = end.map_or(kg, |end| kg.min(end));
-        let n = kg.saturating_sub(kf);
+        let cut = end.map_or(kg, |end| kg.min(end));
+        let n = cut.saturating_sub(kf);
         if let Some(rx) = self.rx.as_mut() {
-            rx.next = kg;
+            rx.next = cut;
             rx.planned = None;
             if n > 0 {
                 rx.flags = rx.flags | BlockFlags::GAP_BEFORE | match cause {
@@ -566,12 +581,60 @@ impl MockRadio {
                 rx.lost = Some(rx.lost.unwrap_or(0).saturating_add(n as u64));
             }
         }
-        self.faults[index].applied = true;
+        // MR-20a: the stream settles the loss, with the block that carries it or at its
+        // end; an end already set that comes before `kg` settles it now.
         self.faults[index].resolved = true;
-        let payload = ezsdr_radio::payloads::RxOverflowPayload { cause, lost: n as u64, restart_gap_ns: gap_ns };
-        self.emit_overflow(payload, TimePoint::new(domain, kf))?;
-        self.record_fault(index, n as u64);
+        self.faults[index].pending = Some(PendingLoss { domain, kf, kg, cause, gap_ns });
+        if let Some(end) = end.filter(|end| kg >= *end) {
+            self.settle_at_end(index, end);
+        }
         Ok(())
+    }
+
+    /// The pending losses of the stream in `domain`, in the order their faults fired.
+    fn pending_losses(&self, domain: ClockDomainId) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..self.faults.len())
+            .filter(|index| self.faults[*index].pending.is_some_and(|loss| loss.domain == domain))
+            .collect();
+        indices.sort_by_key(|index| (self.faults[*index].tick, self.faults[*index].order));
+        indices
+    }
+
+    /// MR-20a: the block published from sample `first` carries every pending loss whose
+    /// `kg` is at or before it: `RX_OVERFLOW` is emitted with it, at `kf` and with the
+    /// fault's own `kg − kf` (RM-17, RM-18, MR-37), and the fault is recorded applied.
+    fn settle_carried(&mut self, domain: ClockDomainId, first: i64) -> Result<(), ModuleError> {
+        for index in self.pending_losses(domain) {
+            let Some(loss) = self.faults[index].pending.filter(|loss| loss.kg <= first) else { continue };
+            self.faults[index].pending = None;
+            self.faults[index].applied = true;
+            let lost = loss.kg.saturating_sub(loss.kf) as u64;
+            let payload = ezsdr_radio::payloads::RxOverflowPayload { cause: loss.cause, lost, restart_gap_ns: loss.gap_ns };
+            self.emit_overflow(payload, TimePoint::new(loss.domain, loss.kf))?;
+            self.record_fault(index, lost);
+        }
+        Ok(())
+    }
+
+    /// MR-20a: a stream that ends at `ke`, the first sample at or after its end, settles a
+    /// pending loss no block carried, with no `RX_OVERFLOW`: applied with what the stream
+    /// lost before its end, or not applied when the cut fell at or after it.
+    fn settle_at_end(&mut self, index: usize, ke: i64) {
+        let Some(loss) = self.faults[index].pending.take() else { return };
+        let applied = loss.kf < ke;
+        self.faults[index].applied = applied;
+        let lost = if applied { loss.kg.min(ke).saturating_sub(loss.kf) as u64 } else { 0 };
+        self.record_fault(index, lost);
+    }
+
+    /// Settles every pending loss of the stream in `domain`, which ends at `ke`, when
+    /// `ended` says no block before `ke` will carry it (MR-20a).
+    fn settle_ending(&mut self, domain: ClockDomainId, ke: i64, ended: impl Fn(&PendingLoss) -> bool) {
+        for index in self.pending_losses(domain) {
+            if self.faults[index].pending.as_ref().is_some_and(&ended) {
+                self.settle_at_end(index, ke);
+            }
+        }
     }
 
     fn record_fault(&mut self, index: usize, lost: u64) {
@@ -786,6 +849,13 @@ impl MockRadio {
                 StopMode::Abort => rx.next,
                 StopMode::Orderly => time::k_at_or_after(rx.origin, rx.ratio, now.saturating_add(tail_ticks.unwrap_or(0))).unwrap_or(rx.next).max(rx.next),
             });
+        }
+        // MR-20a: the stream ends at the stop, after an orderly one's tail; a loss is settled
+        // now unless a block of that tail will still carry it.
+        if let Some(rx) = self.rx.as_ref() {
+            let (domain, next) = (rx.domain, rx.next);
+            let ke = time::k_at_or_after(rx.origin, rx.ratio, now.saturating_add(tail_ticks.unwrap_or(0))).unwrap_or(next);
+            self.settle_ending(domain, ke, |loss| mode == StopMode::Abort || loss.kg >= ke);
         }
         self.schedule_wakeup()
     }
@@ -1127,6 +1197,12 @@ impl MockRadio {
                     clocks.end(rx.domain, TimePoint::new(self.root.expect("root"), restart)).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
                 }
             }
+            // MR-20a: the old stream ends at e₁, so no block of it carries a loss still pending.
+            if let Some(rx) = self.rx.as_ref() {
+                let ke = time::k_at_or_after(rx.origin, rx.ratio, restart).unwrap_or(rx.next).min(rx.end.unwrap_or(i64::MAX));
+                let domain = rx.domain;
+                self.settle_ending(domain, ke, |_| true);
+            }
             let channels = self.effective_channels(ezsdr_radio::keys::RX_CHANNELS);
             if channels > 0 {
                 let handle = self.declare_sample_handle("rx", num_config(&self.config, ezsdr_radio::keys::RX_SAMPLE_RATE_HZ))?;
@@ -1305,7 +1381,7 @@ impl Provider for MockRadio {
         {
             let offset = i64::try_from(entry.at_ns).map_err(|_| self.reject("MR-20: fault offset overflow"))?;
             let tick = time::ns_to_v(&ctx.clocks, root, offset).map_err(|error| self.reject(format!("MR-20: {error}")))?;
-            faults.push(ScheduledFault { tick, entry, applied: false, resolved: false, order: order as u64 });
+            faults.push(ScheduledFault { tick, entry, applied: false, resolved: false, order: order as u64, pending: None });
         }
         let channel_mode = match ezsdr_sim::channel::read(&ctx.environment).map_err(|error| self.reject(format!("MR-7: {error}")))? {
             None => None,
@@ -1455,6 +1531,11 @@ impl Provider for MockRadio {
     fn cleanup(&mut self) {
         if self.root.is_some() {
             self.record_pending_faults();
+            // MR-20a: the stream ends here; no block carries a loss still pending.
+            if let Some(rx) = self.rx.as_ref() {
+                let (domain, ke) = (rx.domain, rx.end.unwrap_or(i64::MAX));
+                self.settle_ending(domain, ke, |_| true);
+            }
         }
         if let (Some(time), Some(handle)) = (&self.time, self.wakeup.take()) { time.cancel(handle); }
         self.started = false;

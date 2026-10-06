@@ -1,4 +1,4 @@
-//! Ez-SDR v4 Radio Model Vocabulary radio 1.3.0 (design/07-radio-model.md).
+//! Ez-SDR v4 Radio Model Vocabulary radio 1.4.0 (design/07-radio-model.md).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -231,11 +231,11 @@ fn radio_event_kinds() -> Vec<EventKindDecl> {
     .collect()
 }
 
-/// Describes the Radio Model Vocabulary `radio` 1.3.0 (RM-1).
+/// Describes the Radio Model Vocabulary `radio` 1.4.0 (RM-1).
 pub fn vocabulary() -> VocabularyDescriptor {
     VocabularyDescriptor {
         id: radio_namespace().clone(),
-        version: Version::new(1, 3, 0),
+        version: Version::new(1, 4, 0),
         prefix: radio_namespace().clone(),
         keys: radio_keys(),
         event_kinds: radio_event_kinds(),

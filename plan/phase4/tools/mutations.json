@@ -83,8 +83,8 @@
   "id": "D09",
   "name": "MR-37 the injected overflow on the control path",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        self.emit_overflow(payload, TimePoint::new(domain, kf))?;",
-  "new": "        self.emit_event(\"rx\", ezsdr_radio::kinds::RX_OVERFLOW, Severity::Warning, serde_json::to_value(payload).unwrap(), TimePoint::new(domain, kf))?;",
+  "old": "            self.emit_overflow(payload, TimePoint::new(loss.domain, loss.kf))?;",
+  "new": "            self.emit_event(\"rx\", ezsdr_radio::kinds::RX_OVERFLOW, Severity::Warning, serde_json::to_value(payload).unwrap(), TimePoint::new(loss.domain, loss.kf))?;",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_37_the_overflow_travels_the_hot_path"

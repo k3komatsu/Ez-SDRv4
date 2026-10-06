@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted at Gate X (owner, 2026-10-01: "終わったらmainへmergeしてください．そしてGate Xを受理します"; [`plan/phase7/00-overview.md`](../plan/phase7/00-overview.md) §11) and moved here at Step X. Normative for `crates/ezsdr-radio-uhd`. Its record — the design reviews J and K, the implementation reviews L–T, the bench session on an X300 + OBX and the design changes it caused — stays in [`plan/phase7/`](../plan/phase7/00-overview.md): [`design-notes.md`](../plan/phase7/design-notes.md) §6–§20, [`bench-results.md`](../plan/phase7/bench-results.md). Accepted at Gate P on 2026-09-27. |
-| Scope | One Module with two roles — a Radio Provider of the `radio` Vocabulary 1.3.0 and a device-paced Time Authority — for one USRP X310 with two UBX, one OBX or one CBX daughterboard per Run: its device boundary, its bridge to UHD, its profiles `x310-ubx`, `x310-obx` and `x310-cbx` 0.1.0, its Authority, its Provider's lifecycle, receive and transmit paths, parameter updates, events and Manifest sections, its test double `FakeDevice`, and its hardware tests. |
+| Status | Accepted at Gate X (owner, 2026-10-01: "終わったらmainへmergeしてください．そしてGate Xを受理します"; [`plan/phase7/00-overview.md`](../plan/phase7/00-overview.md) §11) and moved here at Step X. Normative for `crates/ezsdr-radio-uhd`. Its record — the design reviews J and K, the implementation reviews L–T, the bench session on an X300 + OBX and the design changes it caused — stays in [`plan/phase7/`](../plan/phase7/00-overview.md): [`design-notes.md`](../plan/phase7/design-notes.md) §6–§20, [`bench-results.md`](../plan/phase7/bench-results.md). Accepted at Gate P on 2026-09-27. Amended by maintenance spec 20: VF-4 (the Scope row and the `ur_01_…` row: `radio` 1.4.0, whose rules the Module already meets, UR-18 and UR-25; issue #45; [`plan/maintenance/20-amendments.md`](../plan/maintenance/20-amendments.md)). |
+| Scope | One Module with two roles — a Radio Provider of the `radio` Vocabulary 1.4.0 and a device-paced Time Authority — for one USRP X310 with two UBX, one OBX or one CBX daughterboard per Run: its device boundary, its bridge to UHD, its profiles `x310-ubx`, `x310-obx` and `x310-cbx` 0.1.0, its Authority, its Provider's lifecycle, receive and transmit paths, parameter updates, events and Manifest sections, its test double `FakeDevice`, and its hardware tests. |
 | Not in scope | A second device per Run; a USRP2 profile; RFNoC Replay, DDC/DUC and FFT capabilities; `extensions.uhd.*`; GPIO and Peripherals (Phase 9); a transmit port (Phase 10) ([`00-overview.md`](../plan/phase7/00-overview.md) §3). |
 | Crate | `crates/ezsdr-radio-uhd`, library `ezsdr_radio_uhd`. Depends on `ezsdr-kernel`, `ezsdr-radio`, `ezsdr-hostmem`, `serde_json`. Feature `uhd` (off by default) compiles `src/uhd.rs` and links `libuhd` (UR-35). |
 | Depends on | Specs 01–07, 09 (for the values it shares with MockRadio's `x310-like`), 10, and spec 19's KG-1…KG-14 and VE-1…VE-3. |
@@ -220,7 +220,7 @@ The Module's own constants, all INFERRED and measured at bench step B8, are: the
 
 | test | input | expected | rules |
 |---|---|---|---|
-| `ur_01_the_descriptor_registers` (unit) | `descriptor()` into a registry with `radio` 1.3.0 | registers with both roles; refused with `radio` 1.2.0 | UR-1 |
+| `ur_01_the_descriptor_registers` (unit) | `descriptor()` into a registry with `radio` 1.4.0 | registers with both roles; refused with `radio` 1.2.0 | UR-1, VF-4 |
 | `ur_02_device_is_object_safe_and_shared` (unit, compile time) | `Arc<dyn Device>` | compiles; `Send + Sync` | UR-2 |
 | `ur_03_time_specs_round_trip` (unit) | ticks 0, 1, 199 999 999, 200 000 000, 2^53, −1 at 200 MHz | each round-trips; −1 is `(-1, 0.999999995)` | UR-3, TM-20 |
 | `ur_04_open_without_the_feature_refuses` (unit, default build) | `open("addr=192.168.40.2")` | `Err` naming the feature | UR-4 |

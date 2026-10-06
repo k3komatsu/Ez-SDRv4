@@ -68,5 +68,55 @@
   "crate": "ezsdr-kernel",
   "test_bin": "module_api",
   "filter": "ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link"
+ },
+ {
+  "id": "F30",
+  "name": "a receive fault emits and records at once again",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        self.faults[index].pending = Some(PendingLoss { domain, kf, kg, cause, gap_ns });\n",
+  "new": "        self.faults[index].pending = Some(PendingLoss { domain, kf, kg, cause, gap_ns });\n        self.settle_carried(domain, kg)?;\n",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20a_the_overflow_comes_with_the_block_that_carries_it"
+ },
+ {
+  "id": "F31",
+  "name": "an ended stream records the whole k_g − k_f",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "let lost = if applied { loss.kg.min(ke).saturating_sub(loss.kf) as u64 } else { 0 };",
+  "new": "let lost = if applied { loss.kg.saturating_sub(loss.kf) as u64 } else { 0 };",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20a_a_stop_ends_the_loss"
+ },
+ {
+  "id": "F32",
+  "name": "an ended stream still emits RX_OVERFLOW",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        let lost = if applied { loss.kg.min(ke).saturating_sub(loss.kf) as u64 } else { 0 };\n",
+  "new": "        let lost = if applied { loss.kg.min(ke).saturating_sub(loss.kf) as u64 } else { 0 };\n        if applied { let _ = self.emit_overflow(ezsdr_radio::payloads::RxOverflowPayload { cause: loss.cause, lost, restart_gap_ns: loss.gap_ns }, TimePoint::new(loss.domain, loss.kf)); }\n",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20a_a_tail_fault_reports_only_what_its_stream_lost"
+ },
+ {
+  "id": "F33",
+  "name": "a cold switch does not settle the old stream's loss",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            // MR-20a: the old stream ends at e₁, so no block of it carries a loss still pending.\n            if let Some(rx) = self.rx.as_ref() {",
+  "new": "            // MR-20a: the old stream ends at e₁, so no block of it carries a loss still pending.\n            if let Some(rx) = self.rx.as_ref().filter(|_| false) {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20a_a_tail_fault_reports_only_what_its_stream_lost"
+ },
+ {
+  "id": "F34",
+  "name": "an orderly stop settles a loss its tail still carries",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "self.settle_ending(domain, ke, |loss| mode == StopMode::Abort || loss.kg >= ke);",
+  "new": "self.settle_ending(domain, ke, |_| true);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20a_a_stop_ends_the_loss"
  }
 ]

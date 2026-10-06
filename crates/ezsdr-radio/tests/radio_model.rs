@@ -81,7 +81,7 @@ fn rm_01_register_adds_the_descriptor_the_check_and_the_kinds() {
         .vocabulary(&Namespace::parse("radio").unwrap())
         .unwrap();
     assert_eq!(descriptor.id, Namespace::parse("radio").unwrap());
-    assert_eq!(descriptor.version, Version::new(1, 3, 0));
+    assert_eq!(descriptor.version, Version::new(1, 4, 0));
     assert_eq!(descriptor.prefix, Namespace::parse("radio").unwrap());
     assert_eq!(descriptor.checks, [Namespace::parse("radio.rf_envelope").unwrap()]);
 
