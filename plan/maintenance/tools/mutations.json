@@ -209,5 +209,66 @@
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_20_a_loss_ends_its_receive_stream_at_its_instant"
+ },
+ {
+  "id": "F35",
+  "name": "MockRadio ignores the profile's restart lead",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "let (restart_lead, start_lead) = (to_v(leads.restart_lead_ns)?, to_v(leads.start_lead_ns)?);",
+  "new": "let (restart_lead, start_lead) = (0, to_v(leads.start_lead_ns)?);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_18_a_cold_r"
+ },
+ {
+  "id": "F36",
+  "name": "MockRadio ignores the profile's start lead",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "let (restart_lead, start_lead) = (to_v(leads.restart_lead_ns)?, to_v(leads.start_lead_ns)?);",
+  "new": "let (restart_lead, start_lead) = (to_v(leads.restart_lead_ns)?, 0);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_18_a_receive_enable_from_zero_waits_the_start_lead"
+ },
+ {
+  "id": "F37",
+  "name": "MockRadio counts a receive enable's start lead from e instead of its receipt",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "update.received.checked_add(start_lead).map(|c| c.max(tick))",
+  "new": "tick.checked_add(start_lead).map(|c| c.max(tick))",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_18_a_receive_enable_from_zero_waits_the_start_lead"
+ },
+ {
+  "id": "F38",
+  "name": "the restart lead and the start lead swapped",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "let (restart_lead, start_lead) = (to_v(leads.restart_lead_ns)?, to_v(leads.start_lead_ns)?);",
+  "new": "let (restart_lead, start_lead) = (to_v(leads.start_lead_ns)?, to_v(leads.restart_lead_ns)?);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "",
+  "equivalent": "every profile gives the two leads one value (x310-like 50 ms each, ideal 0), so the swap moves no instant: VF-6's ceiling, testable once a profile gives them different values, such as Phase 8's measured ones. The empty filter runs every mock_radio test"
+ },
+ {
+  "id": "F39",
+  "name": "the receive origin anchored at booking, e + lead",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "Dir::Tx => i128::from(e.max(now)),\n            Dir::Rx => i128::from(e).max(i128::from(now) + i128::from(self.core.ticks(self.core.description.timing.start_lead_ns))),",
+  "new": "Dir::Tx => i128::from(e.max(now)),\n            Dir::Rx => i128::from(e) + i128::from(self.core.ticks(self.core.description.timing.start_lead_ns)),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuration"
+ },
+ {
+  "id": "F40",
+  "name": "no receive start lead, max(e, c)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "Dir::Tx => i128::from(e.max(now)),\n            Dir::Rx => i128::from(e).max(i128::from(now) + i128::from(self.core.ticks(self.core.description.timing.start_lead_ns))),",
+  "new": "Dir::Tx => i128::from(e.max(now)),\n            Dir::Rx => i128::from(e.max(now)),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuration"
  }
 ]

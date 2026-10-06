@@ -48,8 +48,8 @@ pub fn descriptor() -> ModuleDescriptor {
         version: Version::new(1, 4, 0),
         kernel_api: KERNEL_API,
         roles: vec![Role::Provider],
-        // radio 1.3.0: RM-24's hot-path RX_OVERFLOW (MR-37), RM-26's description (VE-1).
-        vocabularies: [("radio", Version::new(1, 3, 0)), ("sim", Version::new(1, 1, 0))]
+        // radio 1.4.0: the timing envelope's restart and start leads (RM-20, RM-25; spec 20, VF-6).
+        vocabularies: [("radio", Version::new(1, 4, 0)), ("sim", Version::new(1, 1, 0))]
             .into_iter()
             .map(|(id, version)| VocabularyRequirement {
                 id: Namespace::parse(id).expect("valid vocabulary"),
@@ -178,6 +178,9 @@ struct PendingUpdate {
     key: ezsdr_kernel::spec::Key,
     value: Value,
     class: UpdateClass,
+    /// When the update was received: MockRadio configures a stream then, so this is
+    /// RM-25's end of the configuration for a stream enabled from 0 channels (MR-18).
+    received: i64,
 }
 
 #[derive(Clone, Copy)]
@@ -195,15 +198,15 @@ impl MockRadio {
             return Err(reject("binding names a different Module version"));
         }
         let profile = match binding.profile.as_ref() {
-            Some(p) if p.version == Version::new(1, 1, 0) && p.name == "x310-like" => Profile {
+            Some(p) if p.version == Version::new(1, 2, 0) && p.name == "x310-like" => Profile {
                 kind: ProfileKind::X310Like,
                 n: 1,
             },
-            Some(p) if p.version == Version::new(1, 1, 0) && p.name == "ideal" => Profile {
+            Some(p) if p.version == Version::new(1, 2, 0) && p.name == "ideal" => Profile {
                 kind: ProfileKind::Ideal,
                 n: 1,
             },
-            _ => return Err(reject("profile must be x310-like or ideal 1.1.0")),
+            _ => return Err(reject("profile must be x310-like or ideal 1.2.0")),
         };
         if binding.feed.is_some() {
             return Err(reject("Provider binding cannot carry a feed"));
@@ -1178,7 +1181,7 @@ impl MockRadio {
         };
         let order = self.next_order;
         self.next_order = self.next_order.saturating_add(1);
-        self.updates.insert((tick, order), PendingUpdate { key, value, class });
+        self.updates.insert((tick, order), PendingUpdate { key, value, class, received: now });
         Ok(())
     }
 
@@ -1213,15 +1216,23 @@ impl MockRadio {
                 _ => {}
             }
         }
-        // e₁ when an old clock runs, e otherwise; the new clock starts at e₂, its own
-        // lattice's first instant at or after e₁, with a restart lead of zero (VE-4).
+        // e₁ when an old clock runs, e otherwise. The new clock starts on its own lattice:
+        // after an old clock, at the first instant at or after e₁ plus the profile's restart
+        // lead; from 0 channels, a receive stream at or after both e and the update's receipt
+        // plus the start lead, and a transmit stream at or after e (RM-25, MR-18; spec 20, VF-6).
         let mut restart = tick;
+        let mut old_ran = false;
+        let leads = self.profile.timing();
+        let to_v = |ns: i64| time::ns_to_v(self.clocks.as_ref().expect("clocks"), self.root.expect("root"), ns)
+            .map_err(|error| ModuleError::rejected(format!("MR-18: {error}")));
+        let (restart_lead, start_lead) = (to_v(leads.restart_lead_ns)?, to_v(leads.start_lead_ns)?);
         if update.class == UpdateClass::Cold && is_rx_cold_key(update.key.as_str()) {
             if let (Some(clocks), Some(rx)) = (&self.clocks, &self.rx) {
                 if clocks.is_registered(rx.domain) && clocks.get(rx.domain).is_ok_and(|domain| domain.ended_at.is_none()) {
                     // RM-25: e₁, the old clock's first lattice instant at or after e.
                     restart = lattice_at_or_after(tick, rx.ratio).ok_or_else(|| ModuleError::rejected("MR-18: lattice overflow"))?;
                     clocks.end(rx.domain, TimePoint::new(self.root.expect("root"), restart)).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
+                    old_ran = true;
                 }
             }
             // MR-20a: the old stream ends at e₁, so no block of it carries a loss still pending.
@@ -1234,8 +1245,8 @@ impl MockRadio {
             if channels > 0 {
                 let handle = self.declare_sample_handle("rx", num_config(&self.config, ezsdr_radio::keys::RX_SAMPLE_RATE_HZ))?;
                 if !self.links.is_empty() {
-                    // RM-25: e₂, the new lattice's first instant at or after e₁ (restart lead 0).
-                    let origin = lattice_at_or_after(restart, handle.root_ticks_per_tick).ok_or_else(|| ModuleError::rejected("MR-18: lattice overflow"))?;
+                    let start = if old_ran { restart.checked_add(restart_lead) } else { update.received.checked_add(start_lead).map(|c| c.max(tick)) };
+                    let origin = start.and_then(|start| lattice_at_or_after(start, handle.root_ticks_per_tick)).ok_or_else(|| ModuleError::rejected("MR-18: lattice overflow"))?;
                     let domain = self.clocks.as_ref().expect("clocks").register_sample_clock(&handle, origin).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
                     let channels = channels as u16;
                     self.rx = Some(Rx { handle: handle.clone(), domain, origin, ratio: handle.root_ticks_per_tick, channels, next: 0, planned: None, flags: BlockFlags::NONE, lost: None, end: None });
@@ -1250,12 +1261,14 @@ impl MockRadio {
                 if clocks.is_registered(domain) && clocks.get(domain).is_ok_and(|d| d.ended_at.is_none()) {
                     restart = lattice_at_or_after(tick, old.root_ticks_per_tick).ok_or_else(|| ModuleError::rejected("MR-18: lattice overflow"))?;
                     clocks.end(domain, TimePoint::new(self.root.expect("root"), restart)).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
+                    old_ran = true;
                 }
             }
             let channels = self.effective_channels(ezsdr_radio::keys::TX_CHANNELS);
             if channels > 0 {
                 let handle = self.declare_sample_handle("tx", num_config(&self.config, ezsdr_radio::keys::TX_SAMPLE_RATE_HZ))?;
-                let origin = lattice_at_or_after(restart, handle.root_ticks_per_tick).ok_or_else(|| ModuleError::rejected("MR-18: lattice overflow"))?;
+                let start = if old_ran { restart.checked_add(restart_lead) } else { Some(restart.max(update.received)) };
+                let origin = start.and_then(|start| lattice_at_or_after(start, handle.root_ticks_per_tick)).ok_or_else(|| ModuleError::rejected("MR-18: lattice overflow"))?;
                 let domain = self.clocks.as_ref().expect("clocks").register_sample_clock(&handle, origin).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
                 self.tx_origin = Some(origin);
                 self.tx_handle = Some(handle);

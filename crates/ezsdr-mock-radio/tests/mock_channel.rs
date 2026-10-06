@@ -112,7 +112,7 @@ fn prepare(world: &World, options: Options<'_>) -> Result<Radio, ModuleError> {
     for (name, value) in options.selector {
         selector.insert(Ident::parse(name).unwrap(), value.clone());
     }
-    let binding = Binding { module: module_ref(), selector, profile: Some(ProfileRef { name: options.profile.to_owned(), version: Version::new(1, 1, 0) }), feed: None };
+    let binding = Binding { module: module_ref(), selector, profile: Some(ProfileRef { name: options.profile.to_owned(), version: Version::new(1, 2, 0) }), feed: None };
     let mut mock = MockRadio::from_binding(&binding).unwrap();
     if options.medium {
         mock = mock.with_medium(world.medium.clone());

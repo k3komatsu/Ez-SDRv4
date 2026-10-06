@@ -294,6 +294,8 @@ impl DeviceDescription {
             (STOP_TAIL_NS, int(self.timing.stop_tail_ns)),
             (COMMAND_QUEUE_DEPTH, int(self.timing.command_queue_depth)),
             (OVERFLOW_RESTART_GAP_NS, int(self.timing.overflow_restart_gap_ns)),
+            (RESTART_LEAD_NS, int(self.timing.restart_lead_ns)),
+            (START_LEAD_NS, int(self.timing.start_lead_ns)),
             (RX_BYTES_PER_S, int(self.performance.rx_bytes_per_s)),
             (TX_BYTES_PER_S, int(self.performance.tx_bytes_per_s)),
             (WIRE_BYTES_PER_SAMPLE, int(self.performance.wire_bytes_per_sample)),

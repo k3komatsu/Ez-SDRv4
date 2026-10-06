@@ -76,7 +76,7 @@ fn binding(profile: &str) -> Binding {
     Binding {
         module: module_ref(),
         selector: BTreeMap::from([(Ident::parse("id").unwrap(), Value::Str("mock".to_owned()))]),
-        profile: Some(ProfileRef { name: profile.to_owned(), version: Version::new(1, 1, 0) }),
+        profile: Some(ProfileRef { name: profile.to_owned(), version: Version::new(1, 2, 0) }),
         feed: None,
     }
 }
@@ -269,7 +269,7 @@ fn mr_01_descriptor_registers() {
     assert_eq!(d.kernel_api, KERNEL_API);
     assert_eq!(d.roles, [Role::Provider]);
     let requirements: Vec<_> = d.vocabularies.iter().map(|v| (v.id.as_str().to_owned(), v.req.0)).collect();
-    assert_eq!(requirements, [("radio".to_owned(), Version::new(1, 3, 0)), ("sim".to_owned(), Version::new(1, 1, 0))]);
+    assert_eq!(requirements, [("radio".to_owned(), Version::new(1, 4, 0)), ("sim".to_owned(), Version::new(1, 1, 0))]);
     assert_eq!(d.impl_hash, Some(ezsdr_kernel::hash::ContentHash::of_bytes(b"ezsdr.radio.mock 1.4.0")));
 }
 
@@ -385,11 +385,15 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         } else {
             (0, 0, 0, i64::from(u32::MAX), 0, 1_i64 << 62, 8)
         };
+        // Profiles 1.2.0's restart and start leads (spec 20, VF-6).
+        let (restart_lead, start_lead) = if x310 { (50_000_000, 50_000_000) } else { (0, 0) };
         assert_eq!(capabilities[&key("radio.timing.min_timed_command_lead_ns")], one(Value::Int(lead)));
         assert_eq!(capabilities[&key("radio.timing.startup_latency_ns")], one(Value::Int(startup)));
         assert_eq!(capabilities[&key("radio.timing.stop_tail_ns")], one(Value::Int(tail)));
         assert_eq!(capabilities[&key("radio.timing.command_queue_depth")], one(Value::Int(depth)));
         assert_eq!(capabilities[&key("radio.timing.overflow_restart_gap_ns")], one(Value::Int(gap)));
+        assert_eq!(capabilities[&key("radio.timing.restart_lead_ns")], one(Value::Int(restart_lead)));
+        assert_eq!(capabilities[&key("radio.timing.start_lead_ns")], one(Value::Int(start_lead)));
         assert_eq!(capabilities[&key("radio.perf.rx_bytes_per_s")], one(Value::Int(bytes_per_s)));
         assert_eq!(capabilities[&key("radio.perf.tx_bytes_per_s")], one(Value::Int(bytes_per_s)));
         assert_eq!(capabilities[&key("radio.perf.wire_bytes_per_sample")], one(Value::Int(wire)));
@@ -403,7 +407,7 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
                 .map(|suffix| format!("ezsdr.radio.mock.mock.{suffix}"))
         );
         assert_eq!(envelope["profile"]["name"], name);
-        assert_eq!(envelope["profile"]["version"], serde_json::json!({ "major": 1, "minor": 1, "patch": 0 }));
+        assert_eq!(envelope["profile"]["version"], serde_json::json!({ "major": 1, "minor": 2, "patch": 0 }));
         let (tx_delay, rx_delay) = if name == "x310-like" { (45, 0) } else { (0, 0) };
         assert_eq!(capabilities[&key("radio.tx.path_delay_samples")], one(Value::Int(tx_delay)));
         assert_eq!(capabilities[&key("radio.rx.path_delay_samples")], one(Value::Int(rx_delay)));
@@ -412,6 +416,8 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert_eq!(envelope["timing"]["stop_tail_ns"], tail);
         assert_eq!(envelope["timing"]["command_queue_depth"], depth);
         assert_eq!(envelope["timing"]["overflow_restart_gap_ns"], gap);
+        assert_eq!(envelope["timing"]["restart_lead_ns"], restart_lead);
+        assert_eq!(envelope["timing"]["start_lead_ns"], start_lead);
         assert_eq!(envelope["performance"]["rx_bytes_per_s"], bytes_per_s);
         assert_eq!(envelope["performance"]["tx_bytes_per_s"], bytes_per_s);
         assert_eq!(envelope["performance"]["wire_bytes_per_sample"], wire);
@@ -940,11 +946,14 @@ fn mr_18_a_cold_rate_change_starts_a_new_sample_clock() {
     harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, effective))));
     harness.step(effective).unwrap();
     harness.link.as_ref().unwrap().queue.lock().unwrap().clear();
-    harness.step(effective + 999_501).unwrap();
+    // x310-like's restart lead: the new clock starts 50 ms after e₁ (RM-25, MR-18;
+    // spec 20, VF-6).
+    let restarted = effective + 50_000_000;
+    harness.step(restarted + 999_501).unwrap();
     let records = harness.clocks.sample_clock_records();
     assert_eq!(records[0].ended_at, Some(TimePoint::new(ROOT, effective)));
     let current = records.last().unwrap();
-    assert_eq!(current.origin, TimePoint::new(ROOT, effective));
+    assert_eq!(current.origin, TimePoint::new(ROOT, restarted));
     let first = harness.link.as_ref().unwrap().receive().unwrap();
     assert_ne!(first.header().first_sample_time.domain, old);
     assert_eq!(first.header().first_sample_time.ticks, 0);
@@ -963,7 +972,7 @@ fn mr_09_the_transmit_clock_starts_on_its_lattice() {
 
 #[test]
 fn mr_18_a_cold_change_starts_its_clock_on_the_lattice() {
-    // RM-25 with MockRadio's restart lead of zero: e₁ on the old lattice, e₂ on the new.
+    // RM-25 with `ideal`'s restart lead of zero: e₁ on the old lattice, e₂ on the new.
     for (from, to, e1, e2) in [(1_000_000.0, 20_000_000.0, 1_001_000, 1_001_000), (20_000_000.0, 1_000_000.0, 1_000_050, 1_001_000)] {
         let mut harness = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(from)))], &[], &[], Some((BackPressure::DropOldest, 64)));
         harness.arm_start(0).unwrap();
@@ -1000,14 +1009,37 @@ fn mr_18_a_cold_receive_change_before_t0_applies_at_t0() {
     harness.arm_start(t0).unwrap();
     harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, None));
     harness.step(0).unwrap();
-    harness.step(t0 + 999_501).unwrap();
+    // It applies at T0, where the old clock starts, so the new one waits x310-like's restart
+    // lead (RM-25, MR-18; spec 20, VF-6).
+    harness.step(t0 + 50_000_000 + 999_501).unwrap();
     let records = harness.clocks.sample_clock_records();
     assert!(records.iter().all(|record| record.origin.ticks >= t0), "a receive clock starts before T0: {records:?}");
+    assert_eq!(records.last().unwrap().origin, TimePoint::new(ROOT, t0 + 50_000_000));
     let applied = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()];
     assert_eq!(applied[0]["at"]["ticks"], t0);
     let first = harness.link.as_ref().unwrap().receive().unwrap();
     assert_eq!(first.header().first_sample_time.domain, records.last().unwrap().domain);
     assert_eq!(first.header().first_sample_time.ticks, 0);
+}
+
+#[test]
+fn mr_18_a_receive_enable_from_zero_waits_the_start_lead() {
+    // RM-25, MR-18 (spec 20, VF-6): a receive stream enabled from 0 channels starts at the
+    // first lattice instant at or after both `e` and the end of its configuration plus the
+    // profile's start lead; MockRadio's configuration ends when it receives the update.
+    for (profile, at, origin) in [
+        ("x310-like", None, 2_051_000_000),
+        ("x310-like", Some(2_101_000_000), 2_101_000_000),
+        ("ideal", None, 2_001_000_000),
+    ] {
+        let mut harness = Harness::new(profile, &[("radio.rx.channels", eq(Value::Int(0)))], &[], &[], Some((BackPressure::DropOldest, 8)));
+        harness.arm_start(2_000_000_000).unwrap();
+        harness.actions.push(update_action("radio.rx.channels", Value::Int(1), UpdateClass::Cold, at.map(|at| TimePoint::new(ROOT, at))));
+        harness.step(2_001_000_000).unwrap();
+        harness.step(2_200_000_000).unwrap();
+        let origins: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx")).map(|record| record.origin.ticks).collect();
+        assert_eq!(origins, [origin], "{profile} {at:?}");
+    }
 }
 
 #[test]
@@ -1050,7 +1082,9 @@ fn mr_18_a_scheduled_pair_is_checked_when_it_applies() {
     harness.actions.push(update_action("radio.rx.channels", Value::Int(1), UpdateClass::Cold, Some(TimePoint::new(ROOT, now + 10_000))));
     harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(200_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, now + 20_000))));
     harness.step(now).unwrap();
-    harness.step(now + 20_000).unwrap();
+    // The second change applies at the first one's new origin, x310-like's restart lead
+    // after its e₁ (RM-25; spec 20, VF-6).
+    harness.step(now + 100_000_000).unwrap();
     let rows = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()].as_array().unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["key"], "radio.rx.channels");
@@ -1069,7 +1103,7 @@ fn mr_18_a_scheduled_pair_is_checked_when_it_applies() {
     over.actions.push(update_action("radio.rx.channels", Value::Int(2), UpdateClass::Cold, Some(TimePoint::new(ROOT, now + 10_000))));
     over.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(200_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, now + 20_000))));
     over.step(now).unwrap();
-    over.step(now + 20_000).unwrap();
+    over.step(now + 100_000_000).unwrap();
     let applied = over.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()].as_array().unwrap();
     assert_eq!(applied.len(), 1);
     assert_eq!(applied[0]["key"], "radio.rx.channels");

@@ -65,6 +65,16 @@
           "format": "int64",
           "type": "integer"
         },
+        "restart_lead_ns": {
+          "description": "From a `cold` change's e₁ to its new clock's first sample (RM-20, RM-25).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "start_lead_ns": {
+          "description": "From the end of a receive stream's configuration to its first sample, for a stream\nenabled from 0 channels (RM-20, RM-25).",
+          "format": "int64",
+          "type": "integer"
+        },
         "startup_latency_ns": {
           "description": "Time from arm to stream start (RM-20).",
           "format": "int64",
@@ -81,7 +91,9 @@
         "startup_latency_ns",
         "stop_tail_ns",
         "command_queue_depth",
-        "overflow_restart_gap_ns"
+        "overflow_restart_gap_ns",
+        "restart_lead_ns",
+        "start_lead_ns"
       ],
       "type": "object"
     },

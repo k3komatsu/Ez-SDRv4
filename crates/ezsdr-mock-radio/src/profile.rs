@@ -33,7 +33,7 @@ impl Profile {
                 ProfileKind::Ideal => "ideal",
             }
             .to_owned(),
-            version: Version::new(1, 1, 0),
+            version: Version::new(1, 2, 0),
         }
     }
 
@@ -101,6 +101,10 @@ impl Profile {
                 stop_tail_ns: 1_000_000,
                 command_queue_depth: 16,
                 overflow_restart_gap_ns: 50_000_000,
+                // INFERRED, as spec 18 §3's UHD Module waits them; Phase 8 measures both
+                // (spec 20, VF-6).
+                restart_lead_ns: 50_000_000,
+                start_lead_ns: 50_000_000,
             },
             ProfileKind::Ideal => TimingEnvelope {
                 min_timed_command_lead_ns: 0,
@@ -108,6 +112,8 @@ impl Profile {
                 stop_tail_ns: 0,
                 command_queue_depth: i64::from(u32::MAX),
                 overflow_restart_gap_ns: 0,
+                restart_lead_ns: 0,
+                start_lead_ns: 0,
             },
         }
     }

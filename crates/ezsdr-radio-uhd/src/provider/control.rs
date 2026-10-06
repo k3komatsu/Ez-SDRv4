@@ -26,7 +26,7 @@ use super::core::{Core, lattice, lock};
 use super::rx::RxCmd;
 use super::tx::{Held, TxCmd};
 use crate::device::{DeviceError, Dir, Iq, Settings, decimation};
-use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS, RELEASE_WINDOW_NS, RESTART_LEAD_NS};
+use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS, RELEASE_WINDOW_NS};
 
 const POLL: Wall = Wall::from_millis(1);
 const CHECK: Wall = Wall::from_millis(500);
@@ -396,9 +396,11 @@ impl Control {
                     self.late_command(Some(key.clone()), t, now);
                 }
                 let e = requested.unwrap_or(now).max(now);
+                // A receive start waits the profile's start lead after its configuration,
+                // which ends no earlier than now (RM-25; spec 20, VF-6).
                 let minimum = match dir {
                     Dir::Tx => i128::from(e),
-                    Dir::Rx => i128::from(e).max(i128::from(now) + i128::from(self.core.ticks(RESTART_LEAD_NS))),
+                    Dir::Rx => i128::from(e).max(i128::from(now) + i128::from(self.core.ticks(self.core.description.timing.start_lead_ns))),
                 };
                 if let Err(error) = lattice(minimum, n) {
                     return self.core.command_rejected("update_parameter", &format!("UR-25: {error}"));
@@ -408,7 +410,7 @@ impl Control {
             }
             None => self.config = candidate,
             Some(old) => {
-                let restart = self.core.ticks(RESTART_LEAD_NS);
+                let restart = self.core.ticks(self.core.description.timing.restart_lead_ns);
                 // A receive stream's e₁ also waits for the receive call already in progress,
                 // which asks for a whole block and is not bounded by the cut: the longer of a
                 // block and a packet, plus the delivery of its last packet (Review O, O-B2).
@@ -500,11 +502,12 @@ impl Control {
             return self.core.device_failed("update_parameter", &error);
         }
         // RM-25: at or after both `e` and the end of the configuration; a receive stream
-        // also a restart lead ahead, for its timed start (Review L, P0-3).
+        // also the profile's start lead ahead, for its timed start (Review L, P0-3; spec 20,
+        // VF-6).
         let now = self.core.now();
         let origin = match lattice(match dir {
             Dir::Tx => i128::from(e.max(now)),
-            Dir::Rx => i128::from(e).max(i128::from(now) + i128::from(self.core.ticks(RESTART_LEAD_NS))),
+            Dir::Rx => i128::from(e).max(i128::from(now) + i128::from(self.core.ticks(self.core.description.timing.start_lead_ns))),
         }, n) {
             Ok(origin) => origin,
             Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-25: {error}")),
@@ -528,7 +531,7 @@ impl Control {
                 }
             }
         }
-        self.core.timing(json!({ "what": "enabled", "dir": dir.name(), "origin": origin, "channels": channels }));
+        self.core.timing(json!({ "what": "enabled", "dir": dir.name(), "e": e, "configured": now, "origin": origin, "channels": channels }));
         match dir {
             Dir::Rx => drop(self.to_rx.send(RxCmd::Enable { clock, channels })),
             Dir::Tx => drop(self.to_tx.send(TxCmd::Enable { clock, channels })),

@@ -43,7 +43,7 @@ fn ur_01_the_descriptor_registers() {
     registry.register(ezsdr_radio_uhd::descriptor(), ezsdr_radio_uhd::factories()).unwrap();
     let descriptor = registry.modules().find(|d| d.id.as_str() == "ezsdr.radio.uhd").unwrap();
     assert_eq!(descriptor.roles, [Role::Provider, Role::Authority]);
-    assert_eq!(descriptor.impl_hash, Some(ContentHash::of_bytes(b"ezsdr.radio.uhd 0.1.0")));
+    assert_eq!(descriptor.impl_hash, Some(ContentHash::of_bytes(b"ezsdr.radio.uhd 0.2.0")));
     let mut old = ModuleRegistry::new();
     let mut vocabulary = ezsdr_radio::vocabulary();
     vocabulary.version = ezsdr_kernel::module_api::Version::new(1, 2, 0);
@@ -94,7 +94,7 @@ fn ur_05_from_binding_refusals() {
     other.module.id = ezsdr_kernel::id::ModuleId::parse("ezsdr.radio.mock").unwrap();
     assert!(refuse(other, device.clone()).starts_with("UR-5:"));
     assert!(refuse(binding(ok.clone(), None), device.clone()).starts_with("UR-5:"));
-    let x310_like = json!({ "name": "x310-like", "version": { "major": 1, "minor": 1, "patch": 0 } });
+    let x310_like = json!({ "name": "x310-like", "version": { "major": 1, "minor": 2, "patch": 0 } });
     assert!(refuse(binding(ok.clone(), Some(x310_like)), device.clone()).starts_with("UR-5:"));
     let mut fed = binding(ok.clone(), Some(x310_ubx()));
     fed.feed = serde_json::from_value(json!({ "port": { "component": "radio", "port": "rx" }, "policy": "drop_oldest", "capacity": 4 })).unwrap();
@@ -110,11 +110,11 @@ fn ur_05_from_binding_refusals() {
 }
 
 fn x310_cbx() -> Json {
-    json!({ "name": "x310-cbx", "version": { "major": 0, "minor": 1, "patch": 0 } })
+    json!({ "name": "x310-cbx", "version": { "major": 0, "minor": 2, "patch": 0 } })
 }
 
 fn x310_obx() -> Json {
-    json!({ "name": "x310-obx", "version": { "major": 0, "minor": 1, "patch": 0 } })
+    json!({ "name": "x310-obx", "version": { "major": 0, "minor": 2, "patch": 0 } })
 }
 
 #[test]
@@ -1486,6 +1486,28 @@ fn ur_25_rx_channels_from_zero_starts_at_its_instant() {
     assert!(direct.device.calls().iter().any(|c| *c == format!("rx_start {origin}")), "{:?}", direct.device.calls());
     assert!(direct.of("radio.COMMAND_REJECTED").is_empty());
     let _ = direct.finish();
+}
+
+#[test]
+fn ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuration() {
+    // UR-25, RM-25 (spec 20, VF-6): a receive stream enabled from 0 channels starts at the
+    // first lattice instant at or after both `e` and `c`, the end of its configuration, plus
+    // the profile's start lead. The `enabled` row records `e` and `c` (UR-30), so the origin
+    // is checked exactly, whatever the load: one untimed `apply` takes 80 ms here.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let config = FakeConfig { apply_delay: Wall::from_millis(80), ..FakeConfig::default() };
+    let mut direct = Direct::with_links(config, &[("radio.rx.channels", Value::Int(0))], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)]);
+    direct.update("radio.rx.channels", Value::Int(1), Cold, None);
+    direct.settle(Wall::from_millis(300));
+    let instance = direct.finish();
+    let envelope = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.envelope").unwrap()];
+    let lead = envelope["timing"]["start_lead_ns"].as_i64().unwrap() * MCR / 1_000_000_000;
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
+    let row = timing.as_array().unwrap().iter().find(|r| r["what"] == "enabled" && r["dir"] == "rx").cloned().unwrap_or_else(|| panic!("{timing}"));
+    let (e, configured, origin) = (row["e"].as_i64().unwrap(), row["configured"].as_i64().unwrap(), row["origin"].as_i64().unwrap());
+    assert!(configured - e >= ms(80), "{row}");
+    // 200 root ticks per sample: 1 MS/s on the 200 MHz root.
+    assert_eq!(origin, (e.max(configured + lead) + 199) / 200 * 200, "{row}, lead {lead}");
 }
 
 #[test]

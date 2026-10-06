@@ -15,6 +15,12 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — spec 20 — the restart and start leads
+
+Still version 1: v4.0 has not frozen. Not additive: `radio/envelope`'s `timing` gains the
+required `restart_lead_ns` and `start_lead_ns` (spec 20, VF-6); an envelope written without
+them is refused for the missing members, not reinterpreted (invariant 39).
+
 ## v1 — spec 20 — the component placement
 
 Still version 1: v4.0 has not frozen. Not additive: `binding_profile`'s `placements` loses

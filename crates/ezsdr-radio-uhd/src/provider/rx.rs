@@ -19,7 +19,7 @@ use serde_json::json;
 use super::control::ColdConfig;
 use super::core::{Clock, Core, lattice, lock};
 use crate::device::{Dir, Iq, RxRecv};
-use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS, RESTART_LEAD_NS};
+use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
 
 pub(crate) enum RxCmd {
     /// A stream enabled from 0 channels, already configured and started (UR-25).
@@ -333,8 +333,9 @@ impl Rx {
                 }
             }
             RxRecv::LateCommand => {
-                // UR-17: the device missed the timed start; the origin stays.
-                let restart = match lattice(i128::from(now) + i128::from(self.core.ticks(RESTART_LEAD_NS)), stream.clock.n) {
+                // UR-17: the device missed the timed start; the origin stays. The new start
+                // waits the profile's start lead from now (spec 20, VF-6).
+                let restart = match lattice(i128::from(now) + i128::from(self.core.ticks(self.core.description.timing.start_lead_ns)), stream.clock.n) {
                     Ok(restart) => restart,
                     Err(error) => return self.core.command_rejected("start", &format!("UR-17: {error}")),
                 };

@@ -87,6 +87,12 @@ pub mod keys {
     pub const COMMAND_QUEUE_DEPTH: &str = "radio.timing.command_queue_depth";
     /// Receive restart gap after overrun in nanoseconds (RM-4).
     pub const OVERFLOW_RESTART_GAP_NS: &str = "radio.timing.overflow_restart_gap_ns";
+    /// Lead from a `cold` change's e₁ to its new clock's first sample, in nanoseconds
+    /// (RM-4, RM-25).
+    pub const RESTART_LEAD_NS: &str = "radio.timing.restart_lead_ns";
+    /// Lead from the end of a receive stream's configuration to its first sample, in
+    /// nanoseconds, for a stream enabled from 0 channels (RM-4, RM-25).
+    pub const START_LEAD_NS: &str = "radio.timing.start_lead_ns";
     /// Receive throughput limit in bytes per second (RM-4).
     pub const RX_BYTES_PER_S: &str = "radio.perf.rx_bytes_per_s";
     /// Transmit throughput limit in bytes per second (RM-4).
@@ -200,6 +206,8 @@ fn radio_keys() -> Vec<KeyDecl> {
         key_decl(keys::STOP_TAIL_NS, Int, false, Reject, None),
         key_decl(keys::COMMAND_QUEUE_DEPTH, Int, false, Reject, None),
         key_decl(keys::OVERFLOW_RESTART_GAP_NS, Int, false, Reject, None),
+        key_decl(keys::RESTART_LEAD_NS, Int, false, Reject, None),
+        key_decl(keys::START_LEAD_NS, Int, false, Reject, None),
         key_decl(keys::RX_BYTES_PER_S, Int, false, Reject, None),
         key_decl(keys::TX_BYTES_PER_S, Int, false, Reject, None),
         key_decl(keys::WIRE_BYTES_PER_SAMPLE, Int, false, Reject, None),
@@ -564,6 +572,11 @@ pub struct TimingEnvelope {
     pub command_queue_depth: i64,
     /// Receive restart gap after overrun (RM-20).
     pub overflow_restart_gap_ns: i64,
+    /// From a `cold` change's e₁ to its new clock's first sample (RM-20, RM-25).
+    pub restart_lead_ns: i64,
+    /// From the end of a receive stream's configuration to its first sample, for a stream
+    /// enabled from 0 channels (RM-20, RM-25).
+    pub start_lead_ns: i64,
 }
 
 /// Throughput values recorded in a radio Provider's Manifest (RM-20).

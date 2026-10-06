@@ -14,7 +14,7 @@ fn key(name: &str) -> Key {
 
 fn x310_like() -> DeviceDescription {
     DeviceDescription {
-        profile: ProfileRef { name: "x310-like".to_owned(), version: Version::new(1, 1, 0) },
+        profile: ProfileRef { name: "x310-like".to_owned(), version: Version::new(1, 2, 0) },
         rates: Grid::Values((1..=512).rev().map(|n| 200_000_000.0 / f64::from(n)).collect()),
         whole_hertz_rates: false,
         frequency: Grid::Step { lo: 10_000_000.0, hi: 6_000_000_000.0, step: 1.0 },
@@ -37,6 +37,8 @@ fn x310_like() -> DeviceDescription {
             stop_tail_ns: 1_000_000,
             command_queue_depth: 16,
             overflow_restart_gap_ns: 50_000_000,
+            restart_lead_ns: 50_000_000,
+            start_lead_ns: 50_000_000,
         },
         performance: PerformanceEnvelope {
             rx_bytes_per_s: 1_000_000_000,
@@ -87,6 +89,8 @@ fn mockradio_1_2_capabilities() -> BTreeMap<Key, CapabilityValue> {
         (keys::STOP_TAIL_NS, Value::Int(1_000_000)),
         (keys::COMMAND_QUEUE_DEPTH, Value::Int(16)),
         (keys::OVERFLOW_RESTART_GAP_NS, Value::Int(50_000_000)),
+        (keys::RESTART_LEAD_NS, Value::Int(50_000_000)),
+        (keys::START_LEAD_NS, Value::Int(50_000_000)),
         (keys::RX_BYTES_PER_S, Value::Int(1_000_000_000)),
         (keys::TX_BYTES_PER_S, Value::Int(1_000_000_000)),
         (keys::WIRE_BYTES_PER_SAMPLE, Value::Int(4)),

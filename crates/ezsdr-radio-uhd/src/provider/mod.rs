@@ -93,7 +93,7 @@ impl UhdRadio {
             return Err(rejected("UR-5: the binding names another Module"));
         }
         let Some(profile) = binding.profile.as_ref().and_then(Profile::from_ref) else {
-            return Err(rejected("UR-5: the profile must be x310-ubx 0.1.0 or x310-cbx 0.1.0"));
+            return Err(rejected("UR-5: the profile must be x310-ubx 0.2.0 or x310-cbx 0.2.0"));
         };
         if binding.feed.is_some() {
             return Err(rejected("UR-5: a Provider binding carries no feed"));
