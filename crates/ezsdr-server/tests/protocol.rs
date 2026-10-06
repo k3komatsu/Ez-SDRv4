@@ -446,6 +446,20 @@ fn ea_13_read_serves_only_reported_artifacts() {
 }
 
 #[test]
+fn ea_14_a_child_manifest_that_cannot_be_written_is_still_returned() {
+    let temp = TempDir::new("child-write");
+    let (mut server, _) = connected(&temp.0);
+    let dir = server.dir().unwrap().to_path_buf();
+    std::fs::create_dir(dir.join("child-0.manifest.json")).unwrap();
+    let Response::Ran { entry, manifest: Some(child), path: None } = ok(run_child(&mut server, receive_spec(1_000), None, Some(10_000_000))) else { panic!() };
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
+    let artifact = child.artifacts.iter().find(|artifact| artifact.id.as_str() == "rec").unwrap();
+    assert_eq!(read(&mut server, &artifact.uri).len(), 8_000, "its artifacts are still readable");
+    let (parent, _) = finish(&mut server);
+    assert_eq!(parent.action_log.len(), 1);
+}
+
+#[test]
 fn ea_14_run_child() {
     let temp = TempDir::new("child");
     let (mut server, now) = connected(&temp.0);

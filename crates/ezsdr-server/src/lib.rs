@@ -324,10 +324,9 @@ impl Server {
         let path = match &manifest {
             Some(manifest) => {
                 self.readable.extend(manifest.artifacts.iter().map(|artifact| artifact.uri.clone()));
-                match self.write_manifest(&format!("child-{}.manifest.json", entry.seq), manifest) {
-                    Ok(path) => Some(path),
-                    Err(error) => return fail(ErrorKind::Io, format!("EA-8: {error}")),
-                }
+                // The child has run and the log holds it: a Manifest that cannot be written
+                // is still returned, with no path (EA-14, as EA-15).
+                self.write_manifest(&format!("child-{}.manifest.json", entry.seq), manifest).ok()
             }
             None => None,
         };

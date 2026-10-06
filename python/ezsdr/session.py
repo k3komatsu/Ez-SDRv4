@@ -255,7 +255,7 @@ class Radio:
 class RunResult:
     """What ``Session.run`` returns: the Session's log entry and the child's Manifest."""
 
-    def __init__(self, session: "Session", entry: dict, manifest: dict, path: str):
+    def __init__(self, session: "Session", entry: dict, manifest: dict, path: Optional[str]):
         self._session = session
         self.entry = entry
         self.manifest = manifest
