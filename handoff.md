@@ -659,6 +659,7 @@ in `~/.cache/ezsdr-fixes/2026-10-06-sixth/`.
 
 **5. 決まったこと・owner の判断待ち**
 
+- 決定済み（owner，2026-10-06）：**v4 はリリース前なので，このソフトウェアにとって本当に長期的に有益なら，破壊的な仕様変更をしてよい．** 凍結前の schema（v4.0 はまだ凍結していない．OV-12），Python API，Vocabulary・Module の版，既存の fixture の変更も含む．互換性のコストを理由に，長期的に劣る案を選ばない．ただし規律は保つ：schema の差分は再生成して `schemas/SCHEMA_CHANGELOG.md` に記録する（OV-12），版を上げる，古い文書は移行するか拒否し，黙って読み替えない（不変条件 39）．spec 20（`plan/maintenance/20-amendments.md`）の判断はこの前提で行っている．
 - 決定済み（2026-09-30）：実機は **X300 + OBX 1枚のループバック**（UBX 2 枚 → CBX 1枚 → OBX と変更．profile `x310-obx`，`x310-cbx` は予備），X300 は X310 の代わりで可，FPGA 書き換え承認．
 - owner の判断待ち（Phase 8 で）：Phase 8 の Mock 比較で OBX 用の Mock profile を作るか（MockRadio の `x310-like` は UBX の値），`radio` 語彙に phase `random` を足すか（`x310-cbx` の制約，§10 の design-notes）．
 
