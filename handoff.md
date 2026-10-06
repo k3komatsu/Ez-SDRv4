@@ -660,6 +660,86 @@ envelope or assertion was relaxed. Hardware H1–H5 remain unmeasured.
 Reproduction, mutation and validation logs, with the review-loop summary, are
 in `~/.cache/ezsdr-fixes/2026-10-06-sixth/`.
 
+**Spec 20, 2026-10-06 to 10-07 (the sixth audit's design issues #39–#45)**
+
+Maintenance spec 20, [`plan/maintenance/20-amendments.md`](plan/maintenance/20-amendments.md),
+resolves the six `[spec]` issues of the sixth audit and the follow-up #45.
+
+- **Process.** A Claude Opus subagent drafted the spec, and five adversarial
+  Opus review rounds followed until a final PASS. Midway the owner set the
+  pre-release premise (AGENTS.md §6): breaking changes are allowed when they
+  are better in the long term.
+- **Decisions.** The owner accepted every item, the earlier decisions included
+  (*Owner decisions* in the spec).
+- **Implementation.** One Opus implementer and one Opus reviewer, one item at a
+  time, in the spec's order. Each commit closes its issue:
+
+| Item | Change | Commit |
+|---|---|---|
+| KH-1 ([#43](https://github.com/k3komatsu/Ez-SDRv4/issues/43)) | The merged effective configuration removed: per-fragment PrepareReports are the only record | `ea51966` |
+| KH-2 ([#39](https://github.com/k3komatsu/Ez-SDRv4/issues/39)) | Each Island lists `{ component, memory_domain }`; `placements.components` removed | `ae90496` |
+| VF-4 ([#45](https://github.com/k3komatsu/Ez-SDRv4/issues/45)) | A receive fault's loss is settled with the block that carries it (MR-20a); `radio` and `ezsdr.radio.mock` 1.4.0 | `d2f053d` |
+| VF-3 ([#44](https://github.com/k3komatsu/Ez-SDRv4/issues/44)) | A device loss is applied in the step's ordered loop and stops the device there; `v58_05` now 40 000 bytes (owner) | `9c1871d` |
+| VF-6 ([#41](https://github.com/k3komatsu/Ez-SDRv4/issues/41)) | `restart_lead_ns` and `start_lead_ns` in the timing envelope; MockRadio honours them; UHD reads them from its profiles (0.2.0) | `d0f0343` |
+| VF-1 ([#42](https://github.com/k3komatsu/Ez-SDRv4/issues/42)) | `capture` needs exactly one recorder on the receive port; package `ezsdr` 0.3.0 | `afe845c` |
+| VF-2 ([#40](https://github.com/k3komatsu/Ez-SDRv4/issues/40)) | Seconds read exactly; Session durations sent as the Kernel's `Duration`; `ezsdr.protocol` 2, `ezsdr-server` 0.3.0 | `de0f8cc` |
+| Vision issues | §11, §52, §54 and §13 | `847bc2d` |
+
+These changes are breaking:
+- A Manifest no longer carries `prepare.merged_effective`.
+- A BindingProfile states placement inside its Islands.
+- The new versions are `radio` 1.4.0, MockRadio 1.4.0 with profiles 1.2.0, and
+  `ezsdr.radio.uhd` 0.2.0 with profiles 0.2.0.
+- The protocol is 2, and the Python package refuses negative durations and
+  unsupported types.
+- The v1 schemas changed before the v4.0 freeze, each logged in
+  `schemas/SCHEMA_CHANGELOG.md`; old documents are refused, never
+  reinterpreted.
+- `kernel_surface` counts 291 public items.
+- Every Appendix A mutation is killed, except the two recorded as equivalent
+  (F24 with VF-4 in; F38 while both leads share one value). Earlier phases'
+  recorded mutations that the changes moved were re-spelled: Phase 4 D09,
+  Phase 6 P04 and P08, Phase 7 V06, V10, V11 and V13.
+
+**Final validation.**
+- Rust tests:
+  - Stable workspace: **979 passed, 0 failed**.
+  - Rust 1.85.0: **979 passed, 0 failed** with `--no-fail-fast`. A first fail-fast run stopped on the load-sensitive `rehearsal_b6_txrx_and_repeat`, which then passed alone 3 of 3.
+  - Feature-enabled UHD library tests: **33 passed** on both toolchains.
+  - Real UHD 4.10 API tests: **4 passed**.
+- Python: **34 passed** on each of 3.9.6 and 3.13.15.
+- Clippy, workspace and UHD/server features: clean.
+- Stress probe, FakeDevice with `--test-threads=128`: **103 passed, 35
+  failed**, with 7 `TIMING_PRECONDITION_UNMET` lines. That is the same host-load
+  pattern as before, not a passing stress result: against the sixth probe, 6
+  tests newly failed and 9 no longer did.
+- Load-sensitive FakeDevice tests also failed now and then during the items. The
+  failures were `rehearsal_b6_txrx_and_repeat`, `uhd_61_03_…` and several
+  `ur_2x_…` tests, on clean HEAD as well. Each passed when run alone.
+- Hardware H1–H5 remain unmeasured.
+- Logs are in `~/.cache/ezsdr-fixes/2026-10-06-spec20/` and
+  `~/.cache/ezsdr-fixes/2026-10-07-spec20-final/`.
+
+Open follow-ups the reviews found, not filed yet:
+
+1. MockRadio: a cold change whose e₁ falls inside an orderly Stop's tail records
+   a larger loss in the fault row than MR-20a's (the Manifest row only). The
+   spec's own settlement design shares this limit.
+2. MockRadio, older than spec 20: a receive stream ended by a Stop of
+   `<id>/rx` restarts on a later `stop(Orderly)` (it publishes again) or on a
+   cold change (a new clock), against MR-25. A lost device cannot restart this
+   way (VF-3).
+3. Spec: when a cold change's e₁ rounds onto a device loss's instant, only the
+   code's effective-instant tiebreak decides which comes first. §4 and MR-20's
+   "(instant, insertion)" do not say which instant of a cold change counts (e
+   or e₁).
+4. Phase 7's recorded mutations U45 and R04 have `old` text that no longer
+   exists. They were stale before spec 20.
+5. Ceilings recorded with VF-6. While every profile gives both leads one value,
+   no test can tell the UHD Module reads its profile rather than a constant,
+   nor tell the two leads apart. Phase 8 measures both leads (50 ms, INFERRED)
+   and the UHD Module's minimum booking delay before a cold change.
+
 **5. 決まったこと・owner の判断待ち**
 
 - 決定済み（owner，2026-10-06）：**v4 はリリース前なので，このソフトウェアにとって本当に長期的に有益なら，破壊的な仕様変更をしてよい．** 凍結前の schema（v4.0 はまだ凍結していない．OV-12），Python API，Vocabulary・Module の版，既存の fixture の変更も含む．互換性のコストを理由に，長期的に劣る案を選ばない．ただし規律は保つ：schema の差分は再生成して `schemas/SCHEMA_CHANGELOG.md` に記録する（OV-12），版を上げる，古い文書は移行するか拒否し，黙って読み替えない（不変条件 39）．spec 20（`plan/maintenance/20-amendments.md`）の判断はこの前提で行っている．
