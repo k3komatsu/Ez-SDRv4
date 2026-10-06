@@ -74,7 +74,9 @@ TimingEnvelope capabilities (RM-6)
 ├── radio.timing.startup_latency_ns
 ├── radio.timing.stop_tail_ns
 ├── radio.timing.command_queue_depth
-└── radio.timing.overflow_restart_gap_ns
+├── radio.timing.overflow_restart_gap_ns
+├── radio.timing.restart_lead_ns
+└── radio.timing.start_lead_ns
 ```
 
 The Radio Model Vocabulary defines coercion rules; supported grids, such as the values in `radio.rx.sample_rate_hz` and `radio.tx.sample_rate_hz`, are declared as capabilities. A Provider also exposes its command lead through the generic `ProviderInstance.min_command_lead`. The Kernel uses that field for Action admission and the pre-start `RejectAtPlan` check; it does not read `radio.timing.*` by name (KA-7).

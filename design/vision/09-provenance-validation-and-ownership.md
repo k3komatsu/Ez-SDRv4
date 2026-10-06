@@ -86,7 +86,7 @@ The Kernel does not interpret the envelope. The Radio Model registers an admissi
 
 ## What each step returns
 
-`validate()` returns the matched resources, the rejected constraints, the envelope violations, a coercion preview and warnings; `plan()` adds the fragments, links, dependency edges, the Authority, the derived ExecutionClass and the declared transfer costs; `prepare()` returns a PrepareReport per fragment and the merged effective configuration. All three are available to Python and to AI agents before any RF energy is emitted.
+`validate()` returns the matched resources, the rejected constraints, the envelope violations, a coercion preview and warnings; `plan()` adds the fragments, links, dependency edges, the Authority, the derived ExecutionClass and the declared transfer costs; `prepare()` returns a PrepareReport per fragment, and no merged view of them. Before any RF energy is emitted, `validate()`'s and `plan()`'s results reach their caller, and the per-fragment configuration `prepare()` yields reaches Python and AI agents through `run.effective()`; the reports are recorded in the Manifest (§11).
 
 Normative: [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-29…SB-31, SB-38, SB-39, SB-41; [design/04-run-and-session.md](../04-run-and-session.md), RS-17.
 
@@ -156,6 +156,8 @@ for snr in snrs:
 The Easy API and Experiment API must map to the same underlying Core semantics. The Easy API does so through Sessions (§3): every call is a typed Action in a Session Run's log, and `sdr.run(spec)` opens a child Run.
 
 The Python client provides `sdr.sleep(d)`, defined as `run.wait_until(now + d)` in the Run's time. On hardware it coincides with a wall-clock sleep; in simulation it is the only sleep that means anything. `time.sleep` is documented as wall-clock-only, and the client never uses it itself.
+
+Normative: [design/16-easy-api.md](../16-easy-api.md), EA-12 and EA-16 (how `d`, and every other argument in seconds, is read, rounded and sent).
 
 ---
 
