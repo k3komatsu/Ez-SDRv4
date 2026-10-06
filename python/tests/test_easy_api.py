@@ -464,6 +464,39 @@ class DurationRequests(unittest.TestCase):
         ])
 
 
+class RecorderChoice(unittest.TestCase):
+    """EA-17's recorder over a mocked connection, as ``DurationRequests`` builds one."""
+
+    def test_ea_17_capture_needs_exactly_one_recorder(self) -> None:
+        # EA-17 (spec 20, VF-1): exactly one binding fed from the radio's receive port, or
+        # an Error before any request; the helper never chooses among recorders.
+        def fed(component: str) -> dict:
+            return {"feed": {"port": {"component": component, "port": "rx"}, "policy": "drop_oldest", "capacity": 64}}
+        several = "EA-17: 2 recorders are fed from radio's receive port ['rec_a', 'rec_b']; submit sink.capture naming one"
+        none = "EA-17: no recorder is fed from radio's receive port in the Session's profile"
+        for bindings, error in [
+            ({"rec_b": fed("radio"), "rec_a": fed("radio")}, several),
+            ({"radio": {}, "rec": {"feed": None}}, none),
+            ({"rec_b": fed("other"), "rec_a": fed("radio")}, None),
+        ]:
+            with self.subTest(bindings=list(bindings)):
+                connection = Mock()
+                connection.call.return_value = ({"events": 0, "entry": {"outcome": {"kind": "admitted"}}}, b"")
+                sdr = ezsdr.Session(connection, {
+                    "run": "test", "dir": "", "profile": {"bindings": bindings}, "start_instant": {}, "now": {},
+                })
+                rx = ezsdr.session.Rx(sdr, "radio", "rx")
+                if error is None:
+                    self.assertEqual(rx.request(100).recorder, "rec_a")
+                    action = connection.call.call_args.args[0]["action"]
+                    self.assertEqual((action["ns"], action["verb"], action["target"]["path"]), ("sink", "capture", "rec_a"))
+                else:
+                    with self.assertRaises(ezsdr.Error) as raised:
+                        rx.request(100)
+                    self.assertEqual(str(raised.exception), error)
+                    connection.call.assert_not_called()
+
+
 class SampleValidity(unittest.TestCase):
     def test_samples_requires_full_validity_on_every_channel(self) -> None:
         domain = {"node": 0, "local": 7}

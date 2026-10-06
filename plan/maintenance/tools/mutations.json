@@ -270,5 +270,29 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuration"
+ },
+ {
+  "id": "F01",
+  "name": "_recorder returns the first of several matches",
+  "file": "python/ezsdr/session.py",
+  "old": "        if len(found) > 1:\n            raise Error(",
+  "new": "        if len(found) > 1:\n            return found[0]\n            raise Error(",
+  "python": "test_easy_api.RecorderChoice.test_ea_17_capture_needs_exactly_one_recorder"
+ },
+ {
+  "id": "F02",
+  "name": "_recorder returns the radio's own name when nothing matches",
+  "file": "python/ezsdr/session.py",
+  "old": "        if not found:\n            raise Error(",
+  "new": "        if not found:\n            return radio\n            raise Error(",
+  "python": "test_easy_api.RecorderChoice.test_ea_17_capture_needs_exactly_one_recorder"
+ },
+ {
+  "id": "F03",
+  "name": "the zero case's message advises naming a recorder",
+  "file": "python/ezsdr/session.py",
+  "old": "receive port in the Session's profile\")",
+  "new": "receive port in the Session's profile; submit sink.capture naming one\")",
+  "python": "test_easy_api.RecorderChoice.test_ea_17_capture_needs_exactly_one_recorder"
  }
 ]

@@ -412,12 +412,19 @@ class Session:
         return sorted(name for name, binding in self.profile["bindings"].items() if binding.get("feed"))
 
     def _recorder(self, radio: str) -> str:
-        """The binding whose feed starts at ``radio``'s receive port (EA-17)."""
+        """The one binding whose feed starts at ``radio``'s receive port (EA-17). With none
+        or several it raises before any request is sent: the helper never chooses among
+        recorders (spec 20, VF-1; issue #42)."""
+        found = []
         for name, binding in self.profile["bindings"].items():
             port = (binding.get("feed") or {}).get("port", {})
             if port.get("component") == radio and port.get("port") == "rx":
-                return name
-        raise Error(f"no recorder is fed from {radio}'s receive port in the Session's profile")
+                found.append(name)
+        if not found:
+            raise Error(f"EA-17: no recorder is fed from {radio}'s receive port in the Session's profile")
+        if len(found) > 1:
+            raise Error(f"EA-17: {len(found)} recorders are fed from {radio}'s receive port {sorted(found)}; submit sink.capture naming one")
+        return found[0]
 
     # -- artifacts and child Runs
 
