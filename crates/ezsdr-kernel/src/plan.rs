@@ -108,29 +108,6 @@ pub struct PrepareReport {
     pub warnings: Vec<Warning>,
 }
 
-/// Vision §11 says a report per fragment and §52 says "the PrepareReport"; both are
-/// produced, and the merged one is what `run.effective()` returns (SB-41).
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MergedPrepare {
-    /// One report per fragment, in dependency order (SB-41).
-    pub reports: Vec<PrepareReport>,
-    /// Every fragment's `effective`, merged (SB-41).
-    pub effective: BTreeMap<Key, Value>,
-}
-
-impl MergedPrepare {
-    /// Merges the reports in order; a later fragment's value wins for a key two
-    /// fragments both name, which the Kernel does not otherwise interpret (SB-41).
-    pub fn from_reports(reports: Vec<PrepareReport>) -> MergedPrepare {
-        let mut effective = BTreeMap::new();
-        for r in &reports {
-            effective.extend(r.effective.iter().map(|(k, v)| (k.clone(), v.clone())));
-        }
-        MergedPrepare { reports, effective }
-    }
-}
-
 /// Orders fragments by their dependency edges, breaking ties by `Ident` so that a
 /// plan is deterministic. A cycle is `ArmCycle`.
 ///
@@ -387,23 +364,25 @@ pub enum PrepareError {
     Violations(Vec<crate::binding::Violation>),
 }
 
-/// `prepare(plan, ctx)` calls each fragment in dependency order and collects one
-/// `PrepareReport` per fragment plus a merged effective configuration, then runs
-/// every registered admission check against that applied configuration — SB-30's
-/// second point, which exists because a coercion can move an applied value outside
-/// a limit the requested value respected. Any fragment's failure fails the whole
-/// transaction, and the Run moves to cleanup.
+/// `prepare(plan, ctx)` calls each fragment in plan order and collects one
+/// `PrepareReport` per fragment; this returns them in the order received, which is
+/// that order, and builds no merged configuration from them. It runs every registered
+/// admission check against the per-fragment configuration
+/// `{ report.fragment: report.effective }` — SB-30's second point, which exists
+/// because a coercion can move an applied value outside a limit the requested value
+/// respected. Any fragment's failure fails the whole transaction, and the Run moves
+/// to cleanup.
 ///
 /// The checks are run here rather than by the caller so that SB-30's second point
 /// cannot be forgotten.
 ///
-/// Rule: SB-30, SB-41, SB-42.
+/// Rule: SB-30, SB-41, SB-42 (spec 20, KH-1).
 pub fn collect_prepare(
     reports: Vec<Result<PrepareReport, ModuleError>>,
     spec: &ExperimentSpec,
     profile: &BindingProfile,
     inputs: &CompileInputs<'_>,
     admission: &AdmissionResult,
-) -> Result<MergedPrepare, PrepareError> {
+) -> Result<Vec<PrepareReport>, PrepareError> {
     prepare::collect_prepare(reports, spec, profile, inputs, admission)
 }

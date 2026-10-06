@@ -1,4 +1,4 @@
-//! Validates and merges Module prepare reports before the Run proceeds (SB-30, SB-41, SB-42).
+//! Validates Module prepare reports before the Run proceeds (SB-30, SB-41, SB-42).
 
 use std::cmp::Ordering::{Equal, Less};
 use std::collections::{BTreeMap, BTreeSet};
@@ -7,7 +7,7 @@ use crate::binding::{AdmissionResult, BindingProfile, CheckStage, Violation, sat
 use crate::module_api::ModuleError;
 use crate::spec::{CapabilityValue, Constraint, ExperimentSpec, Namespace, Value};
 
-use super::{CompileInputs, MergedPrepare, PrepareError, PrepareReport};
+use super::{CompileInputs, PrepareError, PrepareReport};
 
 pub(super) fn check_effective_narrows(
     declared: &CapabilityValue,
@@ -54,7 +54,7 @@ pub(super) fn collect_prepare(
     profile: &BindingProfile,
     inputs: &CompileInputs<'_>,
     admission: &AdmissionResult,
-) -> Result<MergedPrepare, PrepareError> {
+) -> Result<Vec<PrepareReport>, PrepareError> {
     let checks = inputs.checks;
     let environment = &profile.environment;
     let spec_coercion = &spec.policies.coercion;
@@ -169,10 +169,8 @@ pub(super) fn collect_prepare(
         }
         r.warnings.extend(warned);
     }
-    let merged = MergedPrepare::from_reports(ok);
     // SB-30's second point, per fragment (KA-4): each report's own `effective`.
-    let per_fragment: BTreeMap<crate::spec::Ident, BTreeMap<crate::spec::Key, Value>> = merged
-        .reports
+    let per_fragment: BTreeMap<crate::spec::Ident, BTreeMap<crate::spec::Key, Value>> = ok
         .iter()
         .map(|r| (r.fragment.clone(), r.effective.clone()))
         .collect();
@@ -199,13 +197,11 @@ pub(super) fn collect_prepare(
         let Some(node) = instance.tree.walk_iter().find(|n| n.id == *node_id) else {
             continue;
         };
-        // Each resource is judged by **its own** report, never by `merged.effective`:
-        // SB-41 says the merge lets a later fragment's value win for a key two
-        // fragments both name and that the Kernel does not interpret it. Reading the
-        // merge here interpreted it per resource against data that cannot tell two
-        // resources apart, so two channels asking their own line's declared rate
-        // refused each other. A Provider fragment's id is the resource name.
-        let report = merged.reports.iter().find(|r| r.fragment == *name)
+        // Each resource is judged by **its own** report: SB-41 builds no merged
+        // configuration, so a key two fragments name keeps both values, and two
+        // channels asking their own line's declared rate do not refuse each other
+        // (spec 20, KH-1). A Provider fragment's id is the resource name.
+        let report = ok.iter().find(|r| r.fragment == *name)
             .expect("SB-41 checked every lifecycle fragment's report");
         for (key, declared) in &node.capabilities {
             let Some(applied) = report.effective.get(key) else {
@@ -289,7 +285,7 @@ pub(super) fn collect_prepare(
         }
     }
     if violations.is_empty() {
-        Ok(merged)
+        Ok(ok)
     } else {
         Err(PrepareError::Violations(violations))
     }

@@ -53,7 +53,7 @@
 | test | workspace 684 件（1.85.0 / stable とも 0 failed，0 ignored）＋ Python 21 件（3.9 / 3.13）．Kernel package の内訳は Phase 5 時点で 456 件：`coordinator`(90) `spec_binding`(108) `stream_contract`(69) `run_session`(76) `time_model`(52) `module_api`(30) `run_doubles`(1) `hashing`(9) `kernel_surface`(15) `schema_freeze`(4) `event_hotpath`(1) `lib`(1) |
 | toolchain | Rust `1.85.0` (`4d91de4e4`, 2025-02-17)（MSRV）/ stable `1.98.1` (`48a229cea`, 2026-09-01)．`cargo +stable clippy --workspace --all-targets -- -D warnings` clean |
 | schemas | Kernel の `schemas/` 直下に 47 個の JSON Schema 2020-12，Vocabulary の `schemas/{radio,sim,sink}/` に 13 個，server の `schemas/server/` に 2 個，合計 62 個 + `SCHEMA_CHANGELOG.md`．`schema_freeze` が byte 単位で凍結．再生成は `EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze` |
-| kernel surface | `tests/kernel_surface_allow.txt` が公開 item の allow-list（= レビュー用チェックリスト，`module::name` で key 付け）．`cargo +stable test -p ezsdr-kernel --test kernel_surface ov_23b -- --nocapture` は **116 NEW / 292 public items**（Phase 3 の KB-1 で 1 つ増えてから変わっていない）．banned token は `tests/banned_tokens.txt`（識別子内も検出，`OV-23a` を書いた行だけ免除） |
+| kernel surface | `tests/kernel_surface_allow.txt` が公開 item の allow-list（= レビュー用チェックリスト，`module::name` で key 付け）．`cargo +stable test -p ezsdr-kernel --test kernel_surface ov_23b -- --nocapture` は **116 NEW / 291 public items**（Phase 3 の KB-1 で 292 になり，spec 20 KH-1 で `plan::MergedPrepare` を消して 291）．banned token は `tests/banned_tokens.txt`（識別子内も検出，`OV-23a` を書いた行だけ免除） |
 | mutation | 各 Phase の `plan/phaseN/tools/mutate.py` と `mutations.json`．Phase 5 は 29/29，Phase 6 は 70/70 killed（Phase 6 の tool は Python の carrier も走らせる）．コピーの作り方は AGENTS.md §7 |
 
 以下は Phase ごとの記録．
@@ -602,8 +602,11 @@ The owner authorized the same sequential validation, repair, review, commit,
 push and closure for the four implementation issues of the sixth audit. Under
 AGENTS.md §8 the independent reviewer was a Claude Opus 5.5 subagent instead of
 GPT-6.1 Sol. Each issue was reproduced by a regression failing on its preceding
-implementation before repair. The six `[spec]` issues #39–#44 of the same audit
-are design questions and remain open.
+implementation before repair. The six `[spec]` issues #39–#44 of the same audit,
+and the follow-up #45, are design questions: maintenance spec 20
+([`plan/maintenance/20-amendments.md`](plan/maintenance/20-amendments.md)), accepted
+by the owner on 2026-10-06, resolves them, and each item closes its issue in the
+commit that implements it.
 
 | Issue | Fix | Commit |
 |---|---|---|

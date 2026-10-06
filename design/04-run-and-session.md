@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted 2026-09-23 (Gate B; Phase 1 Step 5). Normative for `ezsdr-kernel::{run, session, event, policy, manifest, hash}`. Amended in Phase 2 by KA-4, KA-6, KA-7, KA-12, KA-13, KA-18, KA-19, KA-21, KA-22. Amended in Phase 3 by KB-1. Amended in Phase 5 by KE-2 (RS-44a) and KE-4 (RS-17; [`plan/phase5/15-amendments.md`](../plan/phase5/15-amendments.md)). Amended in Phase 7 by KG-3 (RS-6's step 3; [`plan/phase7/19-amendments.md`](../plan/phase7/19-amendments.md)). |
+| Status | Accepted 2026-09-23 (Gate B; Phase 1 Step 5). Normative for `ezsdr-kernel::{run, session, event, policy, manifest, hash}`. Amended in Phase 2 by KA-4, KA-6, KA-7, KA-12, KA-13, KA-18, KA-19, KA-21, KA-22. Amended in Phase 3 by KB-1. Amended in Phase 5 by KE-2 (RS-44a) and KE-4 (RS-17; [`plan/phase5/15-amendments.md`](../plan/phase5/15-amendments.md)). Amended in Phase 7 by KG-3 (RS-6's step 3; [`plan/phase7/19-amendments.md`](../plan/phase7/19-amendments.md)). Amended by maintenance spec 20: KH-1 (the Manifest diagram; issue #43; [`plan/maintenance/20-amendments.md`](../plan/maintenance/20-amendments.md)). |
 | Scope | The Run state machine and its cleanup algorithm; Session as a Run with an action log, and the admission every Action passes; the Lease; the closed Policy table and the registered event kinds; the event pipeline with its never-dropping counters; the Manifest envelope, its namespaced sections and the content hashing of both. |
 | Not in scope | The Radio Model's event payloads (Vocabulary, Phase 2) (committed by the Radio Model in Phase 2, RM-22); fault injection beyond the three kinds of spec 08 SE-3 (`rx_overflow`, `rx_sequence_error`, `device_lost`), which Phase 2 carries with the acceptance tests §58 #5 and #6 (Phase 4); the Python client surface (Phase 6); GraphEpoch, which stays future work while its prohibition is in force. |
 | Vision § covered | §3; §11's lifecycle; §14's ExecutionClass and fidelity vector as recorded values; §27's update classes and the ban on structural mutation; §29; §35's `DEVICE_LOST` as a Kernel policy; §50; §53; §54's mapping of the Easy API onto Sessions. |
@@ -201,7 +201,7 @@ The coordinator performs the steps as follows. **0** nothing: a child Run is cle
   ├── spec           { hash, body, original_version, original_hash }
   ├── binding        { hash, body including environment verbatim }
   ├── plan           { summary, placement as bound, transfer costs }
-  ├── prepare        { reports per fragment, merged effective }
+  ├── prepare        { reports per fragment, in plan order }
   ├── admission      { matched, rejected, violations, coercions }
   ├── modules        [{ id, version, impl_hash, profile }] and the Vocabulary versions in use
   ├── components     Map<Ident, impl_hash>

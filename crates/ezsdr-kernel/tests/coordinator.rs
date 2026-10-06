@@ -431,6 +431,30 @@ fn kc_12_a_prepare_failure_stops_the_loop_and_cleans_up_what_was_prepared() {
 }
 
 #[test]
+fn sb_41_the_reports_follow_plan_order() {
+    // SB-41, KC-12 (spec 20, KH-1): the Manifest lists the reports in the order the
+    // fragments were prepared, which is dependency order — `b` before `a` here,
+    // against Ident order.
+    let (spec, mut profile) = distinct_resource_docs(&["a", "b"]);
+    profile["environment"] =
+        serde_json::json!({ "ezsdr.arm_order": [{ "before": "b", "after": "a" }] });
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    for name in ["a", "b"] {
+        assembly = with_provider(assembly, name, name);
+    }
+    let manifest = start_spec_run(&spec, &profile, assembly)
+        .expect("entry creates a Run")
+        .finish();
+    let order: Vec<_> = manifest
+        .prepare
+        .reports
+        .iter()
+        .map(|report| report.fragment.as_str())
+        .collect();
+    assert_eq!(order, ["b", "a"]);
+}
+
+#[test]
 fn kc_13_arm_and_start_follow_instance_order_cleanup_reverses_it() {
     let (spec, profile) = distinct_resource_docs(&["a", "b", "c"]);
     let probe = Probe::new();

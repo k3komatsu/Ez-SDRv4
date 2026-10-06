@@ -1,0 +1,32 @@
+[
+ {
+  "id": "H01",
+  "name": "collect_prepare sorts the reports into Ident order",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "    if violations.is_empty() {\n        Ok(ok)",
+  "new": "    if violations.is_empty() {\n        ok.sort_by(|a, b| a.fragment.cmp(&b.fragment));\n        Ok(ok)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "sb_41_the_reports_follow_plan_order"
+ },
+ {
+  "id": "H02",
+  "name": "the Manifest lists the reports in Ident order",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "reports: self.reports.clone().unwrap_or_default(),",
+  "new": "reports: { let mut r = self.reports.clone().unwrap_or_default(); r.sort_by(|a, b| a.fragment.cmp(&b.fragment)); r },",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "sb_41_the_reports_follow_plan_order"
+ },
+ {
+  "id": "H03",
+  "name": "the prepare checks receive every report's effective, merged, under each fragment's id",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": ".map(|r| (r.fragment.clone(), r.effective.clone()))",
+  "new": ".map(|r| (r.fragment.clone(), ok.iter().flat_map(|o| o.effective.clone()).collect()))",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_30_the_check_sees_each_fragment_s_own_value"
+ }
+]

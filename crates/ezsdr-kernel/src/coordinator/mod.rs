@@ -17,7 +17,7 @@ use crate::hash::ContentHash;
 use crate::id::RunId;
 use crate::manifest::{ArtifactRef, Manifest, RunKind};
 use crate::module_api::{Authority, Executor, Link, ModuleRef, ModuleRegistry, Provider, Sink};
-use crate::plan::MergedPrepare;
+use crate::plan::PrepareReport;
 use crate::policy::EventKindRegistry;
 use crate::run::{Lease, RunState, Termination};
 use crate::session::{LogEntry, SessionAction, SessionLog};
@@ -107,7 +107,7 @@ pub struct RunHandle {
     agenda: Vec<(i64, usize, crate::event::Action)>,
     t0: Option<TimePoint>,
     admission: crate::binding::AdmissionResult,
-    merged: Option<MergedPrepare>,
+    reports: Option<Vec<PrepareReport>>,
     links_by_ref: BTreeMap<ModuleRef, Box<dyn Link>>,
     attached_links: BTreeMap<Ident, Vec<crate::module_api::AttachedPort>>,
     entry_failure: Option<String>,

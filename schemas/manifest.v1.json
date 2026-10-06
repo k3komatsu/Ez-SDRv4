@@ -1661,17 +1661,9 @@
       "additionalProperties": false,
       "description": "The `prepare` section (RS-38, SB-41).",
       "properties": {
-        "merged_effective": {
-          "additionalProperties": {
-            "$ref": "#/$defs/Value"
-          },
-          "default": {},
-          "description": "The merged effective configuration (SB-41).",
-          "type": "object"
-        },
         "reports": {
           "default": [],
-          "description": "One report per fragment (SB-41).",
+          "description": "One report per fragment, in plan order (SB-41).",
           "items": {
             "$ref": "#/$defs/PrepareReport"
           },
@@ -2937,10 +2929,9 @@
     "prepare": {
       "$ref": "#/$defs/PrepareSection",
       "default": {
-        "merged_effective": {},
         "reports": []
       },
-      "description": "The prepare reports and the merged effective configuration (SB-41)."
+      "description": "The prepare reports, one per fragment, in plan order (SB-41)."
     },
     "run": {
       "$ref": "#/$defs/RunSection",

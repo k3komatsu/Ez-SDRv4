@@ -269,7 +269,7 @@ pub(super) fn assemble(
         agenda: Vec::<(i64, usize, Action)>::new(),
         t0: None,
         admission: AdmissionResult::default(),
-        merged: None,
+        reports: None,
         links_by_ref: assembly.links,
         attached_links: BTreeMap::new(),
         entry_failure,
@@ -872,7 +872,7 @@ impl RunHandle {
                 )
             })
         });
-        let merged = match collected {
+        let reports = match collected {
             Err(()) => {
                 self.fail(
                     Stage::Prepare,
@@ -896,15 +896,14 @@ impl RunHandle {
                 self.fail(Stage::Prepare, format!("KC-12: {violations:?}"));
                 return false;
             }
-            Ok(Ok(merged)) => merged,
+            Ok(Ok(reports)) => reports,
         };
-        let configuration = merged
-            .reports
+        let configuration = reports
             .iter()
             .map(|r| (r.fragment.clone(), r.effective.clone()))
             .collect();
         *lock(&self.shared.configuration) = configuration;
-        self.merged = Some(merged);
+        self.reports = Some(reports);
         self.shared.move_to(RunState::Prepared {});
         true
     }

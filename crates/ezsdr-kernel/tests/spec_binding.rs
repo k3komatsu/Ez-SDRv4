@@ -17,7 +17,7 @@ use ezsdr_kernel::module_api::{
     Pacing, Provider, Role, UpdateClass,
 };
 use ezsdr_kernel::plan::{
-    CompileInputs, DeclaredCost, MergedPrepare, PrepareReport, arm_order, coercion_policy,
+    CompileInputs, DeclaredCost, PrepareReport, arm_order, coercion_policy,
     collect_prepare, plan, release_order, validate,
 };
 use ezsdr_kernel::policy::{EventKindRegistry, Reaction};
@@ -286,7 +286,7 @@ fn prepared(
     spec: &ExperimentSpec,
     profile: &ezsdr_kernel::binding::BindingProfile,
     providers: &BTreeMap<Ident, &dyn Provider>,
-) -> Result<ezsdr_kernel::plan::MergedPrepare, ezsdr_kernel::plan::PrepareError> {
+) -> Result<Vec<PrepareReport>, ezsdr_kernel::plan::PrepareError> {
     // The caller's own Spec, and the admission `validate` produced for it. Hard-coding
     // `minimal_spec()` here meant every caller had MA-12 and the Spec's constraints
     // checked against a Spec it had not written, which is how a P0 on the crate's
@@ -1237,11 +1237,11 @@ fn sb_41_a_resource_with_no_report_is_refused() {
         &fx.inputs(&providers),
         &admission,
     )
-    .expect("one report, merged");
+    .expect("one report, listed");
 }
 
 #[test]
-fn sb_41_duplicate_prepare_reports_are_refused_before_merging() {
+fn sb_41_duplicate_prepare_reports_are_refused() {
     let spec = minimal_spec();
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
@@ -1791,21 +1791,45 @@ fn sb_40_transfer_cost_is_declared() {
 }
 
 #[test]
-fn sb_41_prepare_report_per_fragment_and_merged() {
-    let report = |name: &str, k: Option<(&str, Value)>| PrepareReport {
+fn sb_41_prepare_reports_one_per_fragment() {
+    // SB-41 (spec 20, KH-1): the reports are `prepare`'s one result, listed in the
+    // order they were handed in, which the coordinator makes plan order. Handed in as
+    // c, a, b — not Ident order — they come back so, and the three values of the one
+    // key all three name are all kept: no merged map exists to lose two of them.
+    let names = ["a", "b", "c"];
+    let spec = spec_with(
+        names
+            .iter()
+            .map(|n| (id(n), resource("test.device", &[])))
+            .collect(),
+    );
+    let profile = distinct_instances(profile_binding(&names), &names);
+    let devices: Vec<TestProvider> = names
+        .iter()
+        .zip(1..)
+        .map(|(n, count)| TestProvider::new(n, count))
+        .collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = names
+        .iter()
+        .zip(&devices)
+        .map(|(n, p)| (id(n), p as &dyn Provider))
+        .collect();
+    let report = |name: &str, count: i64| PrepareReport {
         fragment: id(name),
-        effective: k.map(|(k, v)| (key(k), v)).into_iter().collect(),
+        effective: [(key("test.count"), Value::Int(count))].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
-    let merged = MergedPrepare::from_reports(vec![
-        report("a", Some(("test.count", Value::Int(2)))),
-        report("b", Some(("test.flag", Value::Bool(true)))),
-        report("c", None),
-    ]);
-    assert_eq!(merged.reports.len(), 3);
-    assert_eq!(merged.effective.len(), 2);
-    assert_eq!(merged.effective[&key("test.count")], Value::Int(2));
+    let handed = vec![report("c", 3), report("a", 1), report("b", 2)];
+    let reports = prepared(
+        handed.iter().cloned().map(Ok).collect(),
+        &Fixture::new(),
+        &spec,
+        &profile,
+        &providers,
+    )
+    .expect("one report per fragment");
+    assert_eq!(reports, handed);
 }
 
 #[test]
@@ -3200,7 +3224,7 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
     // warned about nothing.
     let mut as_session = Fixture::new();
     as_session.is_session = true;
-    let merged = prepared(
+    let reports = prepared(
         vec![Ok(coercing)],
         &as_session,
         &defaulted,
@@ -3209,12 +3233,12 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
     )
     .expect("a Session warns rather than refusing");
     assert_eq!(
-        merged.reports[0].warnings.len(),
+        reports[0].warnings.len(),
         1,
         "SB-46's warning is on the report"
     );
     assert_eq!(
-        merged.reports[0].coercions.len(),
+        reports[0].coercions.len(),
         1,
         "and the coercion is still recorded"
     );
@@ -3627,12 +3651,11 @@ fn ma_12_a_widening_effective_is_refused_at_prepare() {
 
 #[test]
 fn ma_12_two_resources_naming_one_key_do_not_refuse_each_other() {
-    // SB-41: the merge lets a later fragment's value win for a key two fragments both
-    // name, "which the Kernel does not otherwise interpret". Reading MA-12's re-match
-    // out of `merged.effective` interpreted it per resource against data that cannot
-    // tell two resources apart, so two channels each asking their own line's declared
-    // count refused each other — fail-closed, but the ordinary two-channel Spec was
-    // unrunnable. Each resource is judged by its own report.
+    // Two resources name one key, each asking its own line's declared count. Judged
+    // against one value of that key — what a merged map, keeping a later fragment's
+    // value, held — they refused each other: fail-closed, but the ordinary two-channel
+    // Spec was unrunnable. Each resource is judged by its own report, and each report
+    // keeps its own value (SB-41; spec 20, KH-1).
     let mut a = resource("test.line", &[]);
     a.requires.insert(
         key("test.count"),
@@ -3667,7 +3690,7 @@ fn ma_12_two_resources_naming_one_key_do_not_refuse_each_other() {
         warnings: Vec::new(),
     };
     // Each report states exactly what its own node declares.
-    let merged = collect_prepare(
+    let reports = collect_prepare(
         vec![Ok(report("a", 2)), Ok(report("b", 4))],
         &spec,
         &profile,
@@ -3675,10 +3698,12 @@ fn ma_12_two_resources_naming_one_key_do_not_refuse_each_other() {
         &admission,
     )
     .expect("two resources, each satisfied by its own node");
-    // The merge is still lossy, by SB-41's own rule — that is why the re-match must
-    // not read it.
-    assert_eq!(merged.effective[&key("test.count")], Value::Int(4));
-    assert_eq!(merged.reports.len(), 2);
+    // Both values of the one key are kept, each in its own fragment's report.
+    let counts: Vec<_> = reports
+        .iter()
+        .map(|r| (r.fragment.clone(), r.effective[&key("test.count")].clone()))
+        .collect();
+    assert_eq!(counts, [(id("a"), Value::Int(2)), (id("b"), Value::Int(4))]);
 
     // A widening in one report is still refused, and named against that resource.
     let failed = collect_prepare(
@@ -3854,7 +3879,7 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
         }],
         warnings: Vec::new(),
     };
-    let merged = collect_prepare(
+    let reports = collect_prepare(
         vec![Ok(report)],
         &spec,
         &profile,
@@ -3862,9 +3887,9 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
         &admission,
     )
     .expect("an accepted coercion is applied and recorded, not refused");
-    assert_eq!(merged.effective[&key("test.grid")], Value::Num(20.0));
+    assert_eq!(reports[0].effective[&key("test.grid")], Value::Num(20.0));
     assert_eq!(
-        merged.reports[0].coercions.len(),
+        reports[0].coercions.len(),
         1,
         "and it is in the PrepareReport"
     );
@@ -4519,9 +4544,9 @@ fn sb_44_a_coercion_is_charged_only_to_the_resource_it_was_computed_for() {
             warnings: Vec::new(),
         }),
     ];
-    let merged = collect_prepare(reports, &spec, &profile, &fx.inputs(&providers), &admission)
+    let reports = collect_prepare(reports, &spec, &profile, &fx.inputs(&providers), &admission)
         .expect("`b` applied what it asked for and is not charged with `a`'s coercion");
-    assert_eq!(merged.reports.len(), 2);
+    assert_eq!(reports.len(), 2);
 
     // The check is still live for the resource the preview *is* about: `a` applying
     // something other than the 20.0 `coerce` returned is SB-44's own refusal.

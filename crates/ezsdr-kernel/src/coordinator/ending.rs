@@ -144,13 +144,9 @@ impl RunHandle {
             }),
         };
         let plan = self.shared.routing().map(|routing| routing.plan.clone());
-        let prepare = self
-            .merged
-            .as_ref()
-            .map_or_else(PrepareSection::default, |merged| PrepareSection {
-                reports: merged.reports.clone(),
-                merged_effective: merged.effective.clone(),
-            });
+        let prepare = PrepareSection {
+            reports: self.reports.clone().unwrap_or_default(),
+        };
         let mut modules = Vec::new();
         let mut selected: Vec<(ModuleRef, Option<ProfileRef>)> = Vec::new();
         for binding in self.shared.ctx.profile.bindings.values() {

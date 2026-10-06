@@ -196,12 +196,9 @@ pub struct TerminationSection {
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareSection {
-    /// One report per fragment (SB-41).
+    /// One report per fragment, in plan order (SB-41).
     #[serde(default)]
     pub reports: Vec<PrepareReport>,
-    /// The merged effective configuration (SB-41).
-    #[serde(default)]
-    pub merged_effective: BTreeMap<crate::spec::Key, crate::spec::Value>,
 }
 
 /// A Kernel envelope with namespaced Module sections. The Kernel writes the
@@ -235,7 +232,7 @@ pub struct Manifest {
     pub binding: BindingSection,
     /// The plan as bound (RS-38).
     pub plan: Option<ExecutionPlan>,
-    /// The prepare reports and the merged effective configuration (SB-41).
+    /// The prepare reports, one per fragment, in plan order (SB-41).
     #[serde(default)]
     pub prepare: PrepareSection,
     /// What `validate()` matched, rejected and refused (SB-38).

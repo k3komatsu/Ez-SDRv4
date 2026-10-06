@@ -185,7 +185,6 @@ plan::Fragment = fragments
 plan::DeclaredCost = NEW: SB-40's declared transfer cost, which the Core reports and never optimises against.
 plan::PrepareError = NEW: SB-42's transaction failure and SB-30's prepare-stage refusal are two different outcomes, and collect_prepare must be able to report either.
 plan::PrepareReport = PrepareReport
-plan::MergedPrepare = PrepareReport
 plan::arm_order = dependency DAG
 plan::release_order = dependency DAG
 plan::collect_prepare = PrepareReport

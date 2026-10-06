@@ -87,8 +87,9 @@ class EasyApi(unittest.TestCase):
         continuity = artifact["continuity"][0]
         self.assertIn("ticks", continuity["first"])
         self.assertEqual(continuity["valid"], [[{"start": continuity["first"], "len": 3000}]])
-        # The effective configuration.
-        self.assertIn("radio.rx.sample_rate_hz", manifest["prepare"]["merged_effective"])
+        # The effective configuration, in the `radio` fragment's own report (SB-41).
+        (report,) = [r for r in manifest["prepare"]["reports"] if r["fragment"] == "radio"]
+        self.assertIn("radio.rx.sample_rate_hz", report["effective"])
 
     def test_v58_13_the_session_manifest_is_written_and_complete(self) -> None:
         with self.connect() as sdr:

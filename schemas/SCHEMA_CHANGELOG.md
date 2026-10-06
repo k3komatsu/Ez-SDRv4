@@ -15,6 +15,13 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — spec 20 — the prepare section
+
+Still version 1: v4.0 has not frozen. Not additive: `manifest`'s `PrepareSection` loses
+`merged_effective` (spec 20, KH-1); a Manifest that carries it is refused by
+`deny_unknown_fields`, not reinterpreted (invariant 39). `server/reply_frame` embeds the
+Manifest and changes with it.
+
 ## v1 — Phase 7 — what a device reports
 
 Still version 1: v4.0 has not frozen. No Kernel schema changed (`plan/phase7/00-overview.md`
