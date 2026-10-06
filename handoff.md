@@ -633,6 +633,7 @@ Open follow-ups the reviews found, outside these issues:
   ahead of the cold change, records a loss of samples that an accepted cold
   change later removes. The emitted `RX_OVERFLOW` then has no matching gap in
   any delivered block. Correct accounting would wait until the update applies.
+  Filed as [#45](https://github.com/k3komatsu/Ez-SDRv4/issues/45).
 - Server: the `Ran.path` doc comment and schema description could say
   "absent when it could not be written". In the EA-10 connect-failure path, a
   `manifest.json` that cannot be written loses that Manifest, as the spec
