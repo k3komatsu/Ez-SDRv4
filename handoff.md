@@ -596,6 +596,66 @@ Hardware H1–H5 remain unmeasured in this session.
 Reproduction and validation logs, with the review-loop summary, are in
 `~/.cache/ezsdr-fixes/2026-10-04-fifth/`.
 
+**Sixth audit follow-up, 2026-10-06 (issues #35–#38)**
+
+The owner authorized the same sequential validation, repair, review, commit,
+push and closure for the four implementation issues of the sixth audit. Under
+AGENTS.md §8 the independent reviewer was a Claude Opus 5.5 subagent instead of
+GPT-6.1 Sol. Each issue was reproduced by a regression failing on its preceding
+implementation before repair. The six `[spec]` issues #39–#44 of the same audit
+are design questions and remain open.
+
+| Issue | Fix | Commit |
+|---|---|---|
+| [#35](https://github.com/k3komatsu/Ez-SDRv4/issues/35) | Leave a Mock RX fault before the replacement clock's origin unapplied (MR-20) | `1c6d361` |
+| [#36](https://github.com/k3komatsu/Ez-SDRv4/issues/36) | Keep every distinct RX report until the next block: union of flags, one event each | `f6eb904` |
+| [#37](https://github.com/k3komatsu/Ez-SDRv4/issues/37) | `Device::tx_async` returns `Result`; a failed read is loss or a counted error, never "no report" | `fd33160` |
+| [#38](https://github.com/k3komatsu/Ez-SDRv4/issues/38) | Return a completed child's Manifest with no `path` when it cannot be written | `9141c16` |
+
+The review loops changed two fixes. For #35 a cold-cut clamp was withdrawn:
+a pending cold change can still be refused when it applies, and the old stream
+then keeps running. Same-instant ties keep spec 09 §4's `(instant, insertion)`
+order, so a fault at e1 still meets the old stream. Whether that order should
+change is #44's question. For #37, FakeDevice fails `tx_async` only while a
+transmit streamer is open, as `UhdDevice` makes no call without one. Otherwise
+`ur_29_a_lost_device_is_found_while_idle` would no longer exercise uhd-control's
+time read. #36 gained a published-block flag check after a mutation that kept
+only the last report survived the first test.
+
+UR-19, UR-28, UR-29, UR-30 and EA-14 state the new behaviour, and spec 18's
+trait listing shows the new `tx_async` signature. The public `Device` trait
+signature changed (only this crate implements it). `stats.tx_errors` is a new
+key. No serialized type or frozen schema changed.
+
+Open follow-ups the reviews found, outside these issues:
+
+- MockRadio: a fault after the old stream's last sample but before e1, or at e1
+  ahead of the cold change, records a loss of samples that an accepted cold
+  change later removes. The emitted `RX_OVERFLOW` then has no matching gap in
+  any delivered block. Correct accounting would wait until the update applies.
+- Server: the `Ran.path` doc comment and schema description could say
+  "absent when it could not be written". In the EA-10 connect-failure path, a
+  `manifest.json` that cannot be written loses that Manifest, as the spec
+  currently allows.
+
+Final normal software validation: **963 passed, 0 failed, 0 ignored** on both
+stable and Rust 1.85.0. Python **29 passed** on each of 3.9.6 and 3.13.15
+against the freshly built server. Feature-enabled UHD library tests: **33
+passed** on both Rust toolchains; real UHD 4.10 API/link tests: **4 passed**.
+Workspace and UHD/server feature Clippy builds pass with `-D warnings` (all
+targets).
+
+A separate final-tree FakeDevice run with `--test-threads=128` had **100
+passed, 37 failed**, with 5 `TIMING_PRECONDITION_UNMET` lines. Its failures are
+overrun and link-drop gaps and late bookings under host load. The failing set
+differs from the fifth probe's (8 newly failing, 5 no longer). Host pacing
+pressure is consistent with this (INFERRED), but one probe does not establish
+the absence of stress regressions; it is not a passing stress result. No timing
+envelope or assertion was relaxed. Hardware H1–H5 remain unmeasured.
+
+Reproduction, mutation and validation logs, with the review-loop summary, are
+in `~/.cache/ezsdr-fixes/2026-10-06-sixth/`.
+
 **5. 決まったこと・owner の判断待ち**
 
 - 決定済み（2026-09-30）：実機は **X300 + OBX 1枚のループバック**（UBX 2 枚 → CBX 1枚 → OBX と変更．profile `x310-obx`，`x310-cbx` は予備），X300 は X310 の代わりで可，FPGA 書き換え承認．
