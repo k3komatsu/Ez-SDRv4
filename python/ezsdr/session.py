@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+from decimal import Decimal
 from fractions import Fraction
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -45,8 +46,42 @@ def _rid(path: str) -> dict:
     return {"node": 0, "path": path}
 
 
-def _seconds_to_ns(seconds: float) -> int:
-    return max(0, math.ceil(seconds * 1e9))
+def _seconds(value: Any) -> Fraction:
+    """``value`` seconds as an exact rational (EA-16, *Seconds*): a binary float as the
+    shortest decimal that rounds to it in its own format, an integer, ``Decimal`` or
+    ``Fraction`` as its exact value. Another type raises ``TypeError``, a NaN or an infinity
+    ``ValueError`` (spec 20, VF-2; issue #40)."""
+    if isinstance(value, (bool, np.bool_, np.timedelta64)):
+        raise TypeError(f"seconds cannot be a {type(value).__name__}")
+    if isinstance(value, np.floating):
+        if not np.isfinite(value):
+            raise ValueError(f"seconds must be finite, not {value}")
+        return Fraction(np.format_float_positional(value, unique=True, trim="-"))
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"seconds must be finite, not {value}")
+        return Fraction(repr(float(value)))
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError(f"seconds must be finite, not {value}")
+        return Fraction(value)
+    if isinstance(value, Fraction):
+        return value
+    if isinstance(value, (int, np.integer)):
+        return Fraction(int(value))
+    raise TypeError(f"seconds must be a number, not {type(value).__name__}")
+
+
+def _count(value: Any, rate: Fraction, most: int) -> int:
+    """``ceil(s · rate)`` for a duration of ``value`` seconds (EA-16): a negative one, or one
+    whose count exceeds ``most``, raises ``ValueError``."""
+    s = _seconds(value)
+    if s < 0:
+        raise ValueError(f"a duration cannot be negative: {value} s")
+    count = math.ceil(s * rate)
+    if count > most:
+        raise ValueError(f"a duration of {value} s exceeds its field's {most}")
+    return count
 
 
 def _admitted(entry: dict) -> dict:
@@ -176,6 +211,9 @@ class Rx(_Side):
     def capture(self, n: int, at: Optional[dict] = None, timeout: Optional[float] = None) -> np.ndarray:
         """Captures ``n`` samples from this radio's recorder and returns them (EA-17).
         ``at`` is a ``TimePoint``; ``timeout`` is in seconds of Run time."""
+        if timeout is not None:
+            # Read before the request, which would otherwise be sent first (EA-16).
+            self._session._duration(timeout)
         return self.result(self.request(n, at), timeout)
 
     def request(self, n: int, at: Optional[dict] = None) -> CaptureRequest:
@@ -204,7 +242,7 @@ class Rx(_Side):
         if timeout is None:
             timeout = n / float(self.sample_rate) + 1.0
         source = _rid(f"sink/{handle.recorder}")
-        wait = {"within_ns": _seconds_to_ns(timeout)}
+        wait = {"within": self._session._duration(timeout)}
         while True:
             request = {"op": "wait_for", "kinds": [CAPTURE_WRITTEN, REQUEST_REJECTED], "from": start}
             result, _ = self._session._call({**request, **wait})
@@ -284,6 +322,9 @@ class Session:
         self.profile: dict = connected["profile"]
         self.start_instant: dict = connected["start_instant"]
         self._now: dict = connected["now"]
+        # The primary root and its nominal rate, on which a Duration's ticks count (EA-12).
+        self._root: dict = connected["now"]["domain"]
+        self._rate = Fraction(connected["root_rate"]["num"], connected["root_rate"]["den"])
         self._waited = 0
         # Capture requests admitted per recorder: the Sink's next request number (HD-16).
         self._captures: Dict[str, int] = {}
@@ -301,6 +342,11 @@ class Session:
     def _status(self) -> dict:
         return self._call({"op": "status"})[0]
 
+    def _duration(self, seconds: Any) -> dict:
+        """``seconds`` as a ``Duration`` on the primary root: ``ceil(s · root_rate)`` ticks,
+        at most 2⁶³ − 1 (EA-12, EA-16)."""
+        return {"domain": self._root, "ticks": _count(seconds, self._rate, 2**63 - 1)}
+
     # -- time and state
 
     @property
@@ -315,19 +361,18 @@ class Session:
 
     def after(self, seconds: float) -> dict:
         """The instant ``seconds`` after the Run's current one: ``now`` plus
-        ``ceil(seconds · root_rate)`` ticks, with ``seconds`` the decimal written
-        (``Fraction(repr(seconds))``, so ``0.001`` is exactly a thousandth) (EA-16, VE-6).
-        On a device-paced Session a capture meant to start at an instant names one ahead,
-        ``rx.capture(n, at=sdr.after(0.05))`` (EA-17)."""
-        status = self._status()
-        rate = Fraction(status["root_rate"]["num"], status["root_rate"]["den"])
-        now = status["now"]
-        return {**now, "ticks": now["ticks"] + math.ceil(Fraction(repr(seconds)) * rate)}
+        ``ceil(s · root_rate)`` ticks, with ``s`` read as EA-16's *Seconds* says before
+        ``status`` is asked (so ``0.001`` is exactly a thousandth); it may be negative
+        (EA-16, VE-6). On a device-paced Session a capture meant to start at an instant
+        names one ahead, ``rx.capture(n, at=sdr.after(0.05))`` (EA-17)."""
+        s = _seconds(seconds)
+        now = self._status()["now"]
+        return {**now, "ticks": now["ticks"] + math.ceil(s * self._rate)}
 
     def sleep(self, seconds: float) -> dict:
         """``run.wait_until(now + seconds)`` in the Run's time (Vision §54); never
         ``time.sleep``. Returns the instant the Run stands at (EA-16, VE-6)."""
-        return self._call({"op": "advance", "by_ns": _seconds_to_ns(seconds)})[0]["now"]
+        return self._call({"op": "advance", "by": self._duration(seconds)})[0]["now"]
 
     def wait_until(self, t: dict) -> dict:
         """Advances the Run to the ``TimePoint`` ``t`` (Vision §15) and returns the instant
@@ -338,7 +383,7 @@ class Session:
         """Waits, in Run time, for the next event of one of ``kinds`` that this method has not
         yet returned (Vision §15); returns it, or ``None`` after ``timeout`` seconds."""
         result, _ = self._call(
-            {"op": "wait_for", "kinds": list(kinds), "from": self._waited, "within_ns": _seconds_to_ns(timeout)}
+            {"op": "wait_for", "kinds": list(kinds), "from": self._waited, "within": self._duration(timeout)}
         )
         if result["index"] is None:
             return None
@@ -447,7 +492,7 @@ class Session:
         if profile is not None:
             request["profile"] = profile
         if duration is not None:
-            request["duration_ns"] = _seconds_to_ns(duration)
+            request["duration_ns"] = _count(duration, 10**9, 2**64 - 1)
         result, _ = self._call(request, b"".join(data for _, data in pairs))
         entry = _admitted(result["entry"])
         return RunResult(self, entry, result["manifest"], result["path"])

@@ -15,6 +15,13 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — spec 20 — Session durations as `Duration`
+
+Still version 1: v4.0 has not frozen. Not additive: `advance`'s `by_ns` and `wait_for`'s
+`within_ns` become `by` and `within`, the Kernel's `Duration` on the primary root, and
+`connected` gains `root_rate` (spec 20, VF-2); `ezsdr.protocol` 2 refuses a protocol-1 client
+at `hello`.
+
 ## v1 — spec 20 — the restart and start leads
 
 Still version 1: v4.0 has not frozen. Not additive: `radio/envelope`'s `timing` gains the

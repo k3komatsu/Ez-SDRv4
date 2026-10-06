@@ -2148,6 +2148,10 @@
             "profile": {
               "description": "The BindingProfile document the Session runs with."
             },
+            "root_rate": {
+              "$ref": "#/$defs/Rational",
+              "description": "The primary root's nominal rate in ticks per second, from which a client counts a\n`Duration`'s ticks (EA-10, EA-12)."
+            },
             "run": {
               "$ref": "#/$defs/RunId",
               "description": "The Run's id."
@@ -2164,7 +2168,8 @@
             "start_instant",
             "dir",
             "profile",
-            "effective"
+            "effective",
+            "root_rate"
           ],
           "type": "object"
         },

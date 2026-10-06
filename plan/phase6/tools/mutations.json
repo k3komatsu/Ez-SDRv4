@@ -295,8 +295,8 @@
   "id": "P04",
   "name": "EA-16 sleep converts seconds wrongly",
   "file": "python/ezsdr/session.py",
-  "old": "return max(0, math.ceil(seconds * 1e9))",
-  "new": "return max(0, math.ceil(seconds * 1e6))",
+  "old": "    count = math.ceil(s * rate)",
+  "new": "    count = math.ceil(s * rate / 1000)",
   "python": "test_easy_api.EasyApi.test_v54_sleep_is_run_time"
  },
  {
@@ -327,7 +327,7 @@
   "id": "P08",
   "name": "EA-16 run does not pass the duration",
   "file": "python/ezsdr/session.py",
-  "old": "            request[\"duration_ns\"] = _seconds_to_ns(duration)",
+  "old": "            request[\"duration_ns\"] = _count(duration, 10**9, 2**64 - 1)",
   "new": "            pass",
   "python": "test_easy_api.EasyApi.test_v54_a_sweep_of_child_runs"
  },

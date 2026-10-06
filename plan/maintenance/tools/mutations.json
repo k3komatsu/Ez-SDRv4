@@ -294,5 +294,165 @@
   "old": "receive port in the Session's profile\")",
   "new": "receive port in the Session's profile; submit sink.capture naming one\")",
   "python": "test_easy_api.RecorderChoice.test_ea_17_capture_needs_exactly_one_recorder"
+ },
+ {
+  "id": "F04",
+  "name": "a duration's count is computed as ceil(float(seconds) · rate) in binary floating point again",
+  "file": "python/ezsdr/session.py",
+  "old": "    count = math.ceil(s * rate)",
+  "new": "    count = math.ceil(float(value) * float(rate))",
+  "python": "test_easy_api.DurationRequests.test_ea_16_durations_go_as_root_durations"
+ },
+ {
+  "id": "F05",
+  "name": "a negative duration is clamped to 0 again",
+  "file": "python/ezsdr/session.py",
+  "old": "    s = _seconds(value)\n    if s < 0:",
+  "new": "    s = max(Fraction(0), _seconds(value))\n    if s < 0:",
+  "python": "test_easy_api.DurationRequests.test_ea_16_bad_seconds_fail_before_a_request"
+ },
+ {
+  "id": "F06",
+  "name": "the bound on a count is dropped",
+  "file": "python/ezsdr/session.py",
+  "old": "    if count > most:",
+  "new": "    if False:",
+  "python": "test_easy_api.DurationRequests.test_ea_16_bad_seconds_fail_before_a_request"
+ },
+ {
+  "id": "F07",
+  "name": "a duration is rounded down",
+  "file": "python/ezsdr/session.py",
+  "old": "    count = math.ceil(s * rate)",
+  "new": "    count = math.floor(s * rate)",
+  "python": "test_easy_api.DurationRequests.test_ea_16_durations_go_as_root_durations"
+ },
+ {
+  "id": "F08",
+  "name": "after reads Fraction(repr(seconds)) again",
+  "file": "python/ezsdr/session.py",
+  "old": "        s = _seconds(seconds)\n        now = self._status()[\"now\"]",
+  "new": "        s = Fraction(repr(seconds))\n        now = self._status()[\"now\"]",
+  "python": "test_easy_api.DurationRequests.test_ea_16_after_reads_the_decimal"
+ },
+ {
+  "id": "F09",
+  "name": "after asks status before it reads seconds",
+  "file": "python/ezsdr/session.py",
+  "old": "        s = _seconds(seconds)\n        now = self._status()[\"now\"]\n",
+  "new": "        now = self._status()[\"now\"]\n        s = _seconds(seconds)\n",
+  "python": "test_easy_api.DurationRequests.test_ea_16_bad_seconds_fail_before_a_request"
+ },
+ {
+  "id": "F10",
+  "name": "a value of another type is read as Fraction(str(value))",
+  "file": "python/ezsdr/session.py",
+  "old": "    raise TypeError(f\"seconds must be a number, not {type(value).__name__}\")",
+  "new": "    return Fraction(str(value))",
+  "python": "test_easy_api.DurationRequests.test_ea_16_bad_seconds_fail_before_a_request"
+ },
+ {
+  "id": "F11",
+  "name": "a bool is read as an int",
+  "file": "python/ezsdr/session.py",
+  "old": "    if isinstance(value, (bool, np.bool_, np.timedelta64)):",
+  "new": "    if isinstance(value, (np.bool_, np.timedelta64)):",
+  "python": "test_easy_api.DurationRequests.test_ea_16_bad_seconds_fail_before_a_request"
+ },
+ {
+  "id": "F12",
+  "name": "a numpy floating scalar is read through str",
+  "file": "python/ezsdr/session.py",
+  "old": "        return Fraction(np.format_float_positional(value, unique=True, trim=\"-\"))",
+  "new": "        return Fraction(str(value))",
+  "python": "test_easy_api.DurationRequests.test_ea_16_durations_go_as_root_durations"
+ },
+ {
+  "id": "F13",
+  "name": "a numpy floating scalar is read through float()",
+  "file": "python/ezsdr/session.py",
+  "old": "        return Fraction(np.format_float_positional(value, unique=True, trim=\"-\"))",
+  "new": "        return Fraction(repr(float(value)))",
+  "python": "test_easy_api.DurationRequests.test_ea_16_durations_go_as_root_durations"
+ },
+ {
+  "id": "F14",
+  "name": "the float clause comes first and reads Fraction(repr(value))",
+  "file": "python/ezsdr/session.py",
+  "old": "    if isinstance(value, np.floating):\n        if not np.isfinite(value):\n            raise ValueError(f\"seconds must be finite, not {value}\")\n        return Fraction(np.format_float_positional(value, unique=True, trim=\"-\"))\n    if isinstance(value, float):\n        if not math.isfinite(value):\n            raise ValueError(f\"seconds must be finite, not {value}\")\n        return Fraction(repr(float(value)))\n",
+  "new": "    if isinstance(value, float):\n        if not math.isfinite(value):\n            raise ValueError(f\"seconds must be finite, not {value}\")\n        return Fraction(repr(value))\n    if isinstance(value, np.floating):\n        if not np.isfinite(value):\n            raise ValueError(f\"seconds must be finite, not {value}\")\n        return Fraction(np.format_float_positional(value, unique=True, trim=\"-\"))\n",
+  "python": "test_easy_api.DurationRequests.test_ea_16_durations_go_as_root_durations"
+ },
+ {
+  "id": "F15",
+  "name": "capture leaves its timeout to result, after its request",
+  "file": "python/ezsdr/session.py",
+  "old": "        if timeout is not None:\n            # Read before the request, which would otherwise be sent first (EA-16).\n            self._session._duration(timeout)\n",
+  "new": "",
+  "python": "test_easy_api.DurationRequests.test_ea_16_bad_seconds_fail_before_a_request"
+ },
+ {
+  "id": "F16",
+  "name": "timedelta64 is not refused, and a numpy integer is read as Fraction(value)",
+  "file": "python/ezsdr/session.py",
+  "old": "    if isinstance(value, (bool, np.bool_, np.timedelta64)):",
+  "new": "    if isinstance(value, (bool, np.bool_)):",
+  "old2": "        return Fraction(int(value))",
+  "new2": "        return Fraction(value)",
+  "python": "test_easy_api.DurationRequests.test_ea_16_bad_seconds_fail_before_a_request"
+ },
+ {
+  "id": "F17",
+  "name": "sleep's Duration counts ticks at 10⁹ per second instead of the root rate",
+  "file": "python/ezsdr/session.py",
+  "old": "        return {\"domain\": self._root, \"ticks\": _count(seconds, self._rate, 2**63 - 1)}",
+  "new": "        return {\"domain\": self._root, \"ticks\": _count(seconds, 10**9, 2**63 - 1)}",
+  "python": "test_easy_api.DurationRequests.test_ea_16_sleep_reaches_after_on_any_root"
+ },
+ {
+  "id": "F18",
+  "name": "the server reads a Duration's ticks as protocol 1's unsigned nanoseconds and converts them",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "    if by.ticks < 0 {\n        return Err(ProtocolError::new(ErrorKind::Protocol, \"EA-12: a duration cannot be negative\"));\n    }\n    match now.ticks.checked_add(by.ticks) {",
+  "new": "    match ticks(&live.clocks, now, by.ticks as u64).and_then(|ticks| now.ticks.checked_add(ticks)) {",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_12_a_duration"
+ },
+ {
+  "id": "F19",
+  "name": "the server takes a Duration on any domain",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "    if by.domain != now.domain {",
+  "new": "    if by.domain != now.domain && false {",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_12_a_duration_counts_the_primary_root"
+ },
+ {
+  "id": "F20",
+  "name": "the server takes a negative Duration",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "    if by.ticks < 0 {",
+  "new": "    if by.ticks < 0 && false {",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_12_a_duration_counts_the_primary_root"
+ },
+ {
+  "id": "F41",
+  "name": "the client reads root_rate as num // den",
+  "file": "python/ezsdr/session.py",
+  "old": "        self._rate = Fraction(connected[\"root_rate\"][\"num\"], connected[\"root_rate\"][\"den\"])",
+  "new": "        self._rate = Fraction(connected[\"root_rate\"][\"num\"] // connected[\"root_rate\"][\"den\"])",
+  "python": "test_easy_api.DurationRequests.test_ea_16_a_rational_root_rate_is_read_exactly"
+ },
+ {
+  "id": "F42",
+  "name": "the client reads root_rate as a float, num / den",
+  "file": "python/ezsdr/session.py",
+  "old": "        self._rate = Fraction(connected[\"root_rate\"][\"num\"], connected[\"root_rate\"][\"den\"])",
+  "new": "        self._rate = connected[\"root_rate\"][\"num\"] / connected[\"root_rate\"][\"den\"]",
+  "python": "test_easy_api.DurationRequests.test_ea_16_a_rational_root_rate_is_read_exactly"
  }
 ]

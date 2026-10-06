@@ -1,5 +1,5 @@
-//! Ez-SDR v4 server `ezsdr-server` 0.2.0: the Runtime a client drives over
-//! `ezsdr.protocol` 1 (design/16-easy-api.md).
+//! Ez-SDR v4 server `ezsdr-server` 0.3.0: the Runtime a client drives over
+//! `ezsdr.protocol` 2 (design/16-easy-api.md).
 //!
 //! It compiles the Modules in (EA-7), runs one Session through the Kernel's
 //! `RunHandle` and answers one request at a time. It is a frontend, not a Module: it
@@ -24,7 +24,7 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::module_api::Pacing;
 use ezsdr_kernel::run::{Lease, RunState};
-use ezsdr_kernel::time::{ClockRegistry, TimePoint};
+use ezsdr_kernel::time::{ClockRegistry, Duration, TimePoint};
 
 pub use catalogue::{OpenDevice, assemble, default_profile};
 use protocol::{ErrorKind, ProtocolError, Reply, Request, Response, SUPPORTED};
@@ -155,8 +155,8 @@ impl Server {
                             Err(error) => run_error(error),
                         }
                     }
-                    Request::Advance { to, by_ns } => advance(live, to, by_ns),
-                    Request::WaitFor { kinds, from, within_ns, until } => wait_for(live, &kinds, from, within_ns, until),
+                    Request::Advance { to, by } => advance(live, to, by),
+                    Request::WaitFor { kinds, from, within, until } => wait_for(live, &kinds, from, within, until),
                     Request::Events { from } => {
                         let events = live.run.events(from);
                         Handled::ok(Response::Events { next: count(&live.run), events })
@@ -240,6 +240,7 @@ impl Server {
             dir: dir.to_string_lossy().into_owned(),
             profile: profile.clone(),
             effective: run.effective(),
+            root_rate: clocks.nominal_rate(run.now().domain).expect("the primary root is registered"),
         };
         self.live = Some(Live { run, clocks, profile, device_paced });
         Handled::ok(response)
@@ -425,17 +426,31 @@ pub fn ticks(clocks: &ClockRegistry, at: TimePoint, ns: u64) -> Option<i64> {
     i64::try_from(numerator.div_ceil(denominator)).ok()
 }
 
-fn advance(live: &mut Live, to: Option<TimePoint>, by_ns: Option<u64>) -> Handled {
-    let target = match (to, by_ns) {
+/// `now + by` for a `Duration` on the primary root, added without rounding (EA-12): one on
+/// another domain is `not_on_primary_root`, a negative one `protocol`, and a sum that is no
+/// instant `not_on_primary_root` (spec 20, VF-2; issue #40).
+fn later(live: &Live, by: Duration) -> Result<TimePoint, ProtocolError> {
+    let now = live.run.now();
+    if by.domain != now.domain {
+        return Err(ProtocolError::new(ErrorKind::NotOnPrimaryRoot, format!("EA-12: the duration counts ticks of {}, not of the primary root {}", by.domain, now.domain)));
+    }
+    if by.ticks < 0 {
+        return Err(ProtocolError::new(ErrorKind::Protocol, "EA-12: a duration cannot be negative"));
+    }
+    match now.ticks.checked_add(by.ticks) {
+        Some(ticks) => Ok(TimePoint::new(now.domain, ticks)),
+        None => Err(ProtocolError::new(ErrorKind::NotOnPrimaryRoot, "EA-12: the duration does not fit the Run's clock")),
+    }
+}
+
+fn advance(live: &mut Live, to: Option<TimePoint>, by: Option<Duration>) -> Handled {
+    let target = match (to, by) {
         (Some(to), None) => to,
-        (None, Some(ns)) => {
-            let now = live.run.now();
-            match ticks(&live.clocks, now, ns) {
-                Some(ticks) => TimePoint::new(now.domain, now.ticks.saturating_add(ticks)),
-                None => return fail(ErrorKind::NotOnPrimaryRoot, "EA-12: the duration does not fit the Run's clock"),
-            }
-        }
-        _ => return fail(ErrorKind::Protocol, "EA-4: advance takes exactly one of to and by_ns"),
+        (None, Some(by)) => match later(live, by) {
+            Ok(target) => target,
+            Err(error) => return Handled::error(error),
+        },
+        _ => return fail(ErrorKind::Protocol, "EA-4: advance takes exactly one of to and by"),
     };
     match live.run.advance_to(target) {
         Ok(()) => Handled::ok(Response::Advanced { now: live.run.now(), events: count(&live.run) }),
@@ -447,19 +462,16 @@ fn wait_for(
     live: &mut Live,
     kinds: &[ezsdr_kernel::event::EventKind],
     from: usize,
-    within_ns: Option<u64>,
+    within: Option<Duration>,
     until: Option<TimePoint>,
 ) -> Handled {
-    let horizon = match (within_ns, until) {
-        (Some(ns), None) => {
-            let now = live.run.now();
-            let Some(within) = ticks(&live.clocks, now, ns) else {
-                return fail(ErrorKind::NotOnPrimaryRoot, "EA-12: the duration does not fit the Run's clock");
-            };
-            TimePoint::new(now.domain, now.ticks.saturating_add(within))
-        }
+    let horizon = match (within, until) {
+        (Some(within), None) => match later(live, within) {
+            Ok(horizon) => horizon,
+            Err(error) => return Handled::error(error),
+        },
         (None, Some(until)) => until,
-        _ => return fail(ErrorKind::Protocol, "EA-4: wait_for takes exactly one of within_ns and until"),
+        _ => return fail(ErrorKind::Protocol, "EA-4: wait_for takes exactly one of within and until"),
     };
     match live.run.wait_for(kinds, from, horizon) {
         Ok(index) => Handled::ok(Response::Waited {

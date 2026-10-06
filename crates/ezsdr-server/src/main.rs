@@ -18,7 +18,7 @@ fn main() -> ExitCode {
                 None => return usage("--runs-dir needs a path"),
             },
             "--help" | "-h" => {
-                println!("ezsdr-server [--runs-dir <path>]: serves one Session over stdin/stdout (ezsdr.protocol 1)");
+                println!("ezsdr-server [--runs-dir <path>]: serves one Session over stdin/stdout (ezsdr.protocol 2)");
                 return ExitCode::SUCCESS;
             }
             other => return usage(&format!("unknown argument {other}")),

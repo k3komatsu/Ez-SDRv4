@@ -18,6 +18,8 @@ import sys
 import tempfile
 import time
 import unittest
+from decimal import Decimal
+from fractions import Fraction
 from unittest.mock import Mock
 from pathlib import Path
 
@@ -356,6 +358,14 @@ class EasyApi(unittest.TestCase):
         (artifact,) = sdr.manifest["artifacts"]
         self.assertEqual(artifact["continuity"][0]["first"]["ticks"], (at["ticks"] - t0) // 1000, "the capture starts at `after`'s instant")
 
+    def test_ea_16_sleep_reaches_the_instant_after_names(self) -> None:
+        # EA-16, EA-12 (spec 20, VF-2): one reading and one rounding, so `sleep(d)` stands where
+        # `after(d)` names from the same `now`; the float product put 0.0041 a tick later.
+        with self.connect() as sdr:
+            a = sdr.after(0.0041)
+            t = sdr.sleep(0.0041)
+        self.assertEqual(t, a)
+
     def test_ea_17_a_capture_across_a_rate_change_is_refused(self) -> None:
         with self.connect() as sdr:
             sdr.submit({
@@ -399,48 +409,103 @@ class EasyApi(unittest.TestCase):
 
 
 class DurationRequests(unittest.TestCase):
-    """Characterize seconds-to-nanoseconds at the four request boundaries (RF-001)."""
+    """Seconds as the package reads them, and the requests they become, over a mocked
+    connection (EA-16; spec 20, VF-2)."""
 
-    def session(self, reply: dict) -> ezsdr.Session:
+    ROOT = {"node": 0, "local": 1}
+
+    def session(self, reply: dict, rate: tuple = (1_000_000_000, 1)) -> ezsdr.Session:
         connection = Mock()
         connection.call.return_value = (reply, b"")
+        fed = {"feed": {"port": {"component": "radio", "port": "rx"}, "policy": "drop_oldest", "capacity": 64}}
+        at = {"domain": self.ROOT, "ticks": 0}
         return ezsdr.Session(connection, {
-            "run": "test", "dir": "", "profile": {}, "start_instant": {}, "now": {},
+            "run": "test", "dir": "", "profile": {"bindings": {"radio": {}, "rec": fed}},
+            "start_instant": at, "now": at, "root_rate": {"num": rate[0], "den": rate[1]},
         })
 
-    def callers(self, sdr: ezsdr.Session, seconds: float) -> dict:
+    def callers(self, sdr: ezsdr.Session, seconds: object) -> dict:
         handle = ezsdr.session.CaptureRequest("rec", 0, 1, 0, {})
+        rx = ezsdr.session.Rx(sdr, "radio", "rx")
         return {
             "sleep": lambda: sdr.sleep(seconds),
             "wait_for": lambda: sdr.wait_for(["test.EVENT"], seconds),
+            "result": lambda: rx.result(handle, seconds),
             "run": lambda: sdr.run({}, duration=seconds),
-            "capture": lambda: ezsdr.session.Rx(sdr, "radio", "rx").result(handle, seconds),
+            "capture": lambda: rx.capture(1, timeout=seconds),
+            "after": lambda: sdr.after(seconds),
         }
 
-    def test_durations_round_up_and_clamp_at_each_caller(self) -> None:
+    def test_ea_16_durations_go_as_root_durations(self) -> None:
+        # One exact reading and one rounding up, sent as ticks of the 1 GHz root (`run` as
+        # nanoseconds); the last two cases are read under numpy's legacy printing, where `str`
+        # would write 0.3 for the first.
         reply = {"now": {}, "index": None, "entry": {"outcome": {"kind": "admitted"}}, "manifest": {}, "path": ""}
-        for seconds, expected in [(-1.0, 0), (0.0, 0), (1e-12, 1), (1e-9, 1), (1.0000000001e-9, 2)]:
-            for caller, field in [("sleep", "by_ns"), ("wait_for", "within_ns"), ("run", "duration_ns"), ("capture", "within_ns")]:
-                with self.subTest(seconds=seconds, caller=caller):
+        cases = [
+            (0.0, 0, False), (1e-12, 1, False), (1e-9, 1, False), (1.0000000001e-9, 2, False),
+            (0.0041, 4_100_000, False), (np.float64(0.0041), 4_100_000, False),
+            (np.float32(0.001), 1_000_000, False), (np.float32(0.1), 100_000_000, False),
+            (np.int64(2), 2_000_000_000, False), (Fraction(1, 3), 333_333_334, False),
+            (Decimal("9223372036.854775807"), 2**63 - 1, False),
+            (np.float64(0.1) + np.float64(0.2), 300_000_001, True),
+            # Under legacy printing `repr(np.float64(0.1))` is 0.10000000000000001 on numpy 1
+            # and 2 alike; its own shortest decimal is 0.1.
+            (np.float64(0.1), 100_000_000, True),
+        ]
+        for seconds, expected, legacy in cases:
+            for caller, field in [("sleep", "by"), ("wait_for", "within"), ("result", "within"), ("run", "duration_ns")]:
+                with self.subTest(seconds=repr(seconds), caller=caller):
                     sdr = self.session(reply)
                     call = self.callers(sdr, seconds)[caller]
-                    if caller == "capture":
-                        with self.assertRaises(ezsdr.CaptureTimeout):
+                    with np.printoptions(legacy="1.13" if legacy else False):
+                        if caller == "result":
+                            with self.assertRaises(ezsdr.CaptureTimeout):
+                                call()
+                        else:
                             call()
-                    else:
-                        call()
                     sdr._connection.call.assert_called_once()
-                    request = sdr._connection.call.call_args.args[0]
-                    self.assertEqual(request[field], expected)
+                    sent = sdr._connection.call.call_args.args[0][field]
+                    self.assertEqual(sent, expected if caller == "run" else {"domain": self.ROOT, "ticks": expected})
 
-    def test_nonfinite_durations_fail_before_a_request(self) -> None:
-        for seconds, error in [(float("nan"), ValueError), (float("inf"), OverflowError), (-float("inf"), OverflowError), (1e308, OverflowError)]:
-            for caller in ["sleep", "wait_for", "run", "capture"]:
-                with self.subTest(seconds=seconds, caller=caller):
+    def test_ea_16_bad_seconds_fail_before_a_request(self) -> None:
+        # A value of another type, a non-finite or negative duration, and one past its field
+        # raise before anything is sent, `capture`'s timeout and `after` included.
+        six = ["sleep", "wait_for", "result", "run", "capture", "after"]
+        cases = [(value, TypeError, six) for value in ["1", True, np.bool_(True), np.timedelta64(1, "s")]]
+        cases += [(None, TypeError, ["sleep", "wait_for", "after"])]
+        cases += [(value, ValueError, six) for value in [float("nan"), float("inf"), -float("inf"), Decimal("NaN"), Decimal("-Infinity")]]
+        cases += [(value, ValueError, six[:5]) for value in [-1.0, -1e-12, 1e308]]
+        cases += [(Decimal("9223372036.854775808"), ValueError, ["sleep", "wait_for", "result", "capture"])]
+        cases += [(Decimal("18446744073.709551616"), ValueError, ["run"])]
+        for seconds, error, callers in cases:
+            for caller in callers:
+                with self.subTest(seconds=repr(seconds), caller=caller):
                     sdr = self.session({})
                     with self.assertRaises(error):
                         self.callers(sdr, seconds)[caller]()
                     sdr._connection.call.assert_not_called()
+
+    def test_ea_16_after_reads_the_decimal(self) -> None:
+        for seconds, ticks in [(0.0041, 4_100_000), (np.float64(0.0041), 4_100_000), (np.float32(0.0041), 4_100_000), (Decimal("0.0041"), 4_100_000), (-0.001, -1_000_000)]:
+            with self.subTest(seconds=repr(seconds)):
+                sdr = self.session({"now": {"domain": self.ROOT, "ticks": 0}})
+                self.assertEqual(sdr.after(seconds), {"domain": self.ROOT, "ticks": ticks})
+
+    def test_ea_16_sleep_reaches_after_on_any_root(self) -> None:
+        # 5.42e-9 s of a 184.32 MHz root is one tick; through 6 ns it would be two (issue #40).
+        sdr = self.session({"now": {"domain": self.ROOT, "ticks": 0}}, rate=(184_320_000, 1))
+        sdr.sleep(5.42e-9)
+        self.assertEqual(sdr._connection.call.call_args.args[0]["by"], {"domain": self.ROOT, "ticks": 1})
+        self.assertEqual(sdr.after(5.42e-9), {"domain": self.ROOT, "ticks": 1})
+
+    def test_ea_16_a_rational_root_rate_is_read_exactly(self) -> None:
+        # A root of 10⁹/3 ticks per second: `num // den` loses a tick at 1 s, a float rate at 10⁷ s.
+        for seconds, ticks in [(1, 333_333_334), (10_000_000, 3_333_333_333_333_334)]:
+            with self.subTest(seconds=seconds):
+                sdr = self.session({"now": {"domain": self.ROOT, "ticks": 0}}, rate=(1_000_000_000, 3))
+                sdr.sleep(seconds)
+                self.assertEqual(sdr._connection.call.call_args.args[0]["by"], {"domain": self.ROOT, "ticks": ticks})
+                self.assertEqual(sdr.after(seconds), {"domain": self.ROOT, "ticks": ticks})
 
     def test_a_child_without_duration_omits_the_field(self) -> None:
         sdr = self.session({"entry": {"outcome": {"kind": "admitted"}}, "manifest": {}, "path": ""})
@@ -459,7 +524,7 @@ class DurationRequests(unittest.TestCase):
             ezsdr.session.Rx(sdr, "radio", "rx").result(handle, 1e-12)
         requests = [call.args[0] for call in sdr._connection.call.call_args_list]
         self.assertEqual(requests, [
-            {"op": "wait_for", "kinds": [ezsdr.session.CAPTURE_WRITTEN, ezsdr.session.REQUEST_REJECTED], "from": 2, "within_ns": 1},
+            {"op": "wait_for", "kinds": [ezsdr.session.CAPTURE_WRITTEN, ezsdr.session.REQUEST_REJECTED], "from": 2, "within": {"domain": self.ROOT, "ticks": 1}},
             {"op": "wait_for", "kinds": [ezsdr.session.CAPTURE_WRITTEN, ezsdr.session.REQUEST_REJECTED], "from": 4, "until": horizon},
         ])
 
@@ -482,8 +547,10 @@ class RecorderChoice(unittest.TestCase):
             with self.subTest(bindings=list(bindings)):
                 connection = Mock()
                 connection.call.return_value = ({"events": 0, "entry": {"outcome": {"kind": "admitted"}}}, b"")
+                at = {"domain": {"node": 0, "local": 1}, "ticks": 0}
                 sdr = ezsdr.Session(connection, {
-                    "run": "test", "dir": "", "profile": {"bindings": bindings}, "start_instant": {}, "now": {},
+                    "run": "test", "dir": "", "profile": {"bindings": bindings}, "start_instant": at, "now": at,
+                    "root_rate": {"num": 1_000_000_000, "den": 1},
                 })
                 rx = ezsdr.session.Rx(sdr, "radio", "rx")
                 if error is None:

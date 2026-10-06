@@ -1,4 +1,4 @@
-//! The frames of `ezsdr.protocol` 1 (EA-2…EA-6).
+//! The frames of `ezsdr.protocol` 2 (EA-2…EA-6).
 
 use std::collections::BTreeMap;
 
@@ -8,12 +8,12 @@ use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::run::{Lease, RunState, Termination};
 use ezsdr_kernel::session::{LogEntry, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Value};
-use ezsdr_kernel::time::{Rational, TimePoint};
+use ezsdr_kernel::time::{Duration, Rational, TimePoint};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// The protocol versions this server speaks (EA-3).
-pub const SUPPORTED: [u32; 1] = [1];
+pub const SUPPORTED: [u32; 1] = [2];
 /// The longest header line a peer may send, in bytes (EA-2).
 pub const MAX_HEADER_BYTES: usize = 16 * 1024 * 1024;
 
@@ -66,14 +66,14 @@ pub enum Request {
         /// The action.
         action: SessionAction,
     },
-    /// Advances the Run to `to`, or by `by_ns` nanoseconds; exactly one is given (EA-12).
+    /// Advances the Run to `to`, or by `by`; exactly one is given (EA-12).
     Advance {
         /// An instant on the primary root or a domain related to it.
         #[serde(default)]
         to: Option<TimePoint>,
-        /// A duration in nanoseconds.
+        /// A duration on the primary root (EA-12).
         #[serde(default)]
-        by_ns: Option<u64>,
+        by: Option<Duration>,
     },
     /// Waits for an event of one of `kinds` at or after index `from` (EA-12, KC-29b).
     WaitFor {
@@ -81,12 +81,12 @@ pub enum Request {
         kinds: Vec<EventKind>,
         /// The first event index to consider.
         from: usize,
-        /// How long to wait, in nanoseconds of Run time; exactly one of `within_ns` and
-        /// `until` is given.
+        /// How long to wait, a duration on the primary root (EA-12); exactly one of `within`
+        /// and `until` is given.
         #[serde(default)]
-        within_ns: Option<u64>,
+        within: Option<Duration>,
         /// The instant to wait until, such as a previous reply's `horizon`, so that a client
-        /// that waits again keeps its deadline; exactly one of `within_ns` and `until` is given.
+        /// that waits again keeps its deadline; exactly one of `within` and `until` is given.
         #[serde(default)]
         until: Option<TimePoint>,
     },
@@ -157,6 +157,9 @@ pub enum Response {
         profile: serde_json::Value,
         /// The effective configuration (KC-27).
         effective: BTreeMap<Ident, BTreeMap<Key, Value>>,
+        /// The primary root's nominal rate in ticks per second, from which a client counts a
+        /// `Duration`'s ticks (EA-10, EA-12).
+        root_rate: Rational,
     },
     /// The logged entry, admitted or rejected (EA-11).
     Submitted {

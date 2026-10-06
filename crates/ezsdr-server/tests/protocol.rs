@@ -12,7 +12,7 @@ use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::run::{Stage, StopCause, Termination};
 use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
-use ezsdr_kernel::time::{ClockDomain, ClockRegistry, EpochRef, Rational, TimePoint};
+use ezsdr_kernel::time::{ClockDomain, ClockRegistry, Duration, EpochRef, Rational, TimePoint};
 use ezsdr_server::protocol::{ErrorKind, ProtocolError, Reply, ReplyFrame, Request, Response};
 use ezsdr_radio_uhd::{Device, FakeConfig, FakeDevice};
 use ezsdr_server::{Config, Exit, Handled, Server, serve};
@@ -55,7 +55,7 @@ fn err(handled: Handled) -> ProtocolError {
 
 fn greeted(dir: &Path) -> Server {
     let mut server = Server::new(config(dir));
-    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
     server
 }
 
@@ -98,10 +98,11 @@ fn ramp(len: usize) -> Vec<u8> {
 
 /// Captures `n` samples and returns the artifact's URI and the Run's time after the wait.
 fn capture_uri(server: &mut Server, n: i64) -> (String, TimePoint) {
-    let Response::Status { events, .. } = ok(server.handle(Request::Status {}, Vec::new())) else { panic!() };
+    let Response::Status { events, now, .. } = ok(server.handle(Request::Status {}, Vec::new())) else { panic!() };
     let entry = submit(server, capture(n), Vec::new());
     assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
-    let Response::Waited { event: Some(event), now, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: events, within_ns: Some(1_000_000_000), until: None }, Vec::new())) else { panic!("no capture") };
+    let within = Duration::new(now.domain, 1_000_000_000);
+    let Response::Waited { event: Some(event), now, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: events, within: Some(within), until: None }, Vec::new())) else { panic!("no capture") };
     (event.payload["artifact"]["uri"].as_str().unwrap().to_owned(), now)
 }
 
@@ -146,7 +147,7 @@ fn error_of(frame: &ReplyFrame) -> &ProtocolError {
     }
 }
 
-const HELLO: &str = "{\"request\":{\"op\":\"hello\",\"protocol\":1}}\n";
+const HELLO: &str = "{\"request\":{\"op\":\"hello\",\"protocol\":2}}\n";
 
 #[test]
 fn ea_02_framing() {
@@ -178,23 +179,23 @@ fn ea_02_framing() {
 fn ea_03_handshake() {
     let temp = TempDir::new("handshake");
     let mut server = Server::new(config(&temp.0));
-    let handled = server.handle(Request::Hello { protocol: 1 }, Vec::new());
+    let handled = server.handle(Request::Hello { protocol: 2 }, Vec::new());
     assert!(!handled.exit);
     let Response::Hello { protocol, server: name, kernel_api } = ok(handled) else { panic!() };
-    assert_eq!((protocol, name.as_str(), kernel_api.as_str()), (1, "ezsdr-server 0.2.0", "4.0.0"));
+    assert_eq!((protocol, name.as_str(), kernel_api.as_str()), (2, "ezsdr-server 0.3.0", "4.0.0"));
 
-    let handled = Server::new(config(&temp.0)).handle(Request::Hello { protocol: 2 }, Vec::new());
+    let handled = Server::new(config(&temp.0)).handle(Request::Hello { protocol: 1 }, Vec::new());
     assert!(handled.exit);
     let error = err(handled);
     assert_eq!(error.kind, ErrorKind::UnsupportedProtocol);
-    assert_eq!(error.supported, Some(vec![1]));
+    assert_eq!(error.supported, Some(vec![2]));
 
     let handled = Server::new(config(&temp.0)).handle(Request::Status {}, Vec::new());
     assert!(handled.exit);
     assert_eq!(err(handled).kind, ErrorKind::Protocol);
 
     // A first frame that does not decode ends the handshake as well (Review I, P1-B).
-    for first in ["{\"request\":{\"op\":\"nope\"}}\n", "{\"request\":{\"op\":\"hello\",\"protocol\":1,\"x\":1}}\n"] {
+    for first in ["{\"request\":{\"op\":\"nope\"}}\n", "{\"request\":{\"op\":\"hello\",\"protocol\":2,\"x\":1}}\n"] {
         let (frames, exit) = serve_bytes(&temp.0, format!("{first}{HELLO}").into_bytes());
         assert_eq!(exit, Exit::BadFrame, "{first}");
         assert_eq!(frames.len(), 1);
@@ -207,11 +208,11 @@ fn ea_04_requests() {
     let temp = TempDir::new("requests");
     let mut server = greeted(&temp.0);
     assert_eq!(err(server.handle(Request::Submit { action: set("radio.tx.channels", Value::Int(1)) }, Vec::new())).kind, ErrorKind::Protocol);
-    assert_eq!(err(server.handle(Request::Hello { protocol: 1 }, Vec::new())).kind, ErrorKind::Protocol);
+    assert_eq!(err(server.handle(Request::Hello { protocol: 2 }, Vec::new())).kind, ErrorKind::Protocol);
     ok(server.handle(Request::Connect { profile: None, lease: None }, Vec::new()));
     assert_eq!(err(server.handle(Request::Connect { profile: None, lease: None }, Vec::new())).kind, ErrorKind::Protocol);
     assert_eq!(err(server.handle(Request::Status {}, vec![1])).kind, ErrorKind::Protocol, "a request without a body refuses one");
-    assert_eq!(err(server.handle(Request::Advance { to: None, by_ns: None }, Vec::new())).kind, ErrorKind::Protocol);
+    assert_eq!(err(server.handle(Request::Advance { to: None, by: None }, Vec::new())).kind, ErrorKind::Protocol);
     finish(&mut server);
 }
 
@@ -220,7 +221,7 @@ fn ea_05_errors() {
     let temp = TempDir::new("errors");
     let (mut server, now) = connected(&temp.0);
     let unrelated = TimePoint::new(ezsdr_kernel::id::ClockDomainId::local(999), now.ticks + 10);
-    assert_eq!(err(server.handle(Request::Advance { to: Some(unrelated), by_ns: None }, Vec::new())).kind, ErrorKind::NotOnPrimaryRoot);
+    assert_eq!(err(server.handle(Request::Advance { to: Some(unrelated), by: None }, Vec::new())).kind, ErrorKind::NotOnPrimaryRoot);
     let deep = set("radio.tx.gain_db", Value::List(vec![Value::List(vec![Value::Int(1)])]));
     assert_eq!(err(server.handle(Request::Submit { action: deep }, Vec::new())).kind, ErrorKind::Malformed);
     let stop = submit(&mut server, SessionAction::Stop { target: None }, Vec::new());
@@ -324,7 +325,8 @@ fn ea_09_the_default_profile_loops_back() {
     let waveform = ramp(1_000);
     assert!(matches!(submit(&mut server, set("radio.tx.channels", Value::Int(1)), Vec::new()).outcome, Outcome::Admitted { .. }));
     assert!(matches!(submit(&mut server, repeat(), waveform.clone()).outcome, Outcome::Admitted { .. }));
-    server.handle(Request::Advance { to: None, by_ns: Some(5_000_000) }, Vec::new());
+    let (now, _, _) = status(&mut server);
+    server.handle(Request::Advance { to: None, by: Some(Duration::new(now.domain, 5_000_000)) }, Vec::new());
     let (uri, _) = capture_uri(&mut server, 3_000);
     let bytes = read(&mut server, &uri);
     assert_eq!(bytes.len(), 3_000 * 8);
@@ -392,13 +394,14 @@ fn ea_11_submit_returns_the_logged_entry() {
 fn ea_12_time_and_events() {
     let temp = TempDir::new("time");
     let (mut server, now) = connected(&temp.0);
-    let Response::Advanced { now: later, .. } = ok(server.handle(Request::Advance { to: None, by_ns: Some(1_000_000) }, Vec::new())) else { panic!() };
+    let root = status(&mut server).0.domain;
+    let Response::Advanced { now: later, .. } = ok(server.handle(Request::Advance { to: None, by: Some(Duration::new(root, 1_000_000)) }, Vec::new())) else { panic!() };
     assert_eq!(later.ticks - now.ticks, 1_000_000, "1 ms on a nanosecond root");
     // A wait that returns early echoes the horizon it would have stood at, not `now`
     // (Review I, P2-5).
     let Response::Status { events: before, now: asked, .. } = ok(server.handle(Request::Status {}, Vec::new())) else { panic!() };
     submit(&mut server, capture(500), Vec::new());
-    let Response::Waited { index: Some(_), now: early, horizon: far, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: before, within_ns: Some(1_000_000_000), until: None }, Vec::new())) else { panic!() };
+    let Response::Waited { index: Some(_), now: early, horizon: far, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: before, within: Some(Duration::new(root, 1_000_000_000)), until: None }, Vec::new())) else { panic!() };
     assert_eq!(far.ticks, asked.ticks + 1_000_000_000);
     assert!(early.ticks < far.ticks);
     let (uri, at) = capture_uri(&mut server, 2_000);
@@ -409,14 +412,14 @@ fn ea_12_time_and_events() {
     assert_eq!(events[index].time, at, "the wait ended at the round that delivered the event");
     let Response::Events { events: tail, .. } = ok(server.handle(Request::Events { from: index }, Vec::new())) else { panic!() };
     assert_eq!(tail[0], events[index]);
-    let Response::Waited { index: none, now: horizon, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: next, within_ns: Some(3_000_000), until: None }, Vec::new())) else { panic!() };
+    let Response::Waited { index: none, now: horizon, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: next, within: Some(Duration::new(root, 3_000_000)), until: None }, Vec::new())) else { panic!() };
     assert_eq!(none, None);
     assert_eq!(horizon.ticks, at.ticks + 3_000_000);
     // `until` keeps a deadline across waits: the reply's `horizon` is where it would stand.
     let deadline = TimePoint::new(horizon.domain, horizon.ticks + 2_000_000);
-    let Response::Waited { index: none, now: stood, horizon: echoed, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: next, within_ns: None, until: Some(deadline) }, Vec::new())) else { panic!() };
+    let Response::Waited { index: none, now: stood, horizon: echoed, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: next, within: None, until: Some(deadline) }, Vec::new())) else { panic!() };
     assert_eq!((none, stood, echoed), (None, deadline, deadline));
-    assert_eq!(err(server.handle(Request::WaitFor { kinds: vec![], from: 0, within_ns: Some(1), until: Some(deadline) }, Vec::new())).kind, ErrorKind::Protocol);
+    assert_eq!(err(server.handle(Request::WaitFor { kinds: vec![], from: 0, within: Some(Duration::new(root, 1)), until: Some(deadline) }, Vec::new())).kind, ErrorKind::Protocol);
     finish(&mut server);
 }
 
@@ -429,6 +432,26 @@ fn ea_12_durations_round_up() {
     assert_eq!(ezsdr_server::ticks(&clocks, at, 1), Some(1), "a nanosecond on a 3 Hz clock is one tick, rounded up");
     assert_eq!(ezsdr_server::ticks(&clocks, at, 1_000_000_000), Some(3));
     assert_eq!(ezsdr_server::ticks(&clocks, at, 0), Some(0));
+}
+
+#[test]
+fn ea_12_a_duration_counts_the_primary_root() {
+    // EA-12 (spec 20, VF-2): `by` and `within` are the Kernel's `Duration` on the Session's
+    // primary root, added to `now` without rounding; another domain and a negative count
+    // are refused, and the Run does not move.
+    let temp = TempDir::new("duration-root");
+    let (mut server, t0) = connected(&temp.0);
+    let elsewhere = Duration::new(ezsdr_kernel::id::ClockDomainId::local(999), 7);
+    let error = err(server.handle(Request::Advance { to: None, by: Some(elsewhere) }, Vec::new()));
+    assert_eq!(error.kind, ErrorKind::NotOnPrimaryRoot);
+    assert_eq!(error.message, format!("EA-12: the duration counts ticks of {}, not of the primary root {}", elsewhere.domain, t0.domain));
+    let backwards = Duration::new(t0.domain, -1);
+    assert_eq!(err(server.handle(Request::WaitFor { kinds: vec![written()], from: 0, within: Some(backwards), until: None }, Vec::new())).kind, ErrorKind::Protocol);
+    let error = err(server.handle(Request::Advance { to: None, by: Some(Duration::new(t0.domain, i64::MAX)) }, Vec::new()));
+    assert_eq!((error.kind, error.message.as_str()), (ErrorKind::NotOnPrimaryRoot, "EA-12: the duration does not fit the Run's clock"));
+    let Response::Advanced { now, .. } = ok(server.handle(Request::Advance { to: None, by: Some(Duration::new(t0.domain, 7)) }, Vec::new())) else { panic!() };
+    assert_eq!(now, TimePoint::new(t0.domain, t0.ticks + 7));
+    finish(&mut server);
 }
 
 #[test]
@@ -529,7 +552,7 @@ fn ea_binary_speaks_the_protocol() {
         let frame: ReplyFrame = serde_json::from_str(&line).unwrap();
         frame.reply
     };
-    assert!(matches!(ask(HELLO), Reply::Result(Response::Hello { protocol: 1, .. })));
+    assert!(matches!(ask(HELLO), Reply::Result(Response::Hello { protocol: 2, .. })));
     assert!(matches!(ask("{\"request\":{\"op\":\"connect\"}}\n"), Reply::Result(Response::Connected { .. })));
     let Reply::Result(Response::Finished { path: Some(path), .. }) = ask("{\"request\":{\"op\":\"finish\"}}\n") else { panic!() };
     assert!(Path::new(&path).starts_with(temp.0.canonicalize().unwrap()));
@@ -594,7 +617,7 @@ fn ea_15_every_exit_writes_the_manifest() {
     let written: Manifest = serde_json::from_str(&std::fs::read_to_string(session.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(written.termination.reason, Termination::Stopped { cause: StopCause::ClientDisconnect {} });
     let mut greeted = Server::new(config(&runs.0));
-    ok(greeted.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    ok(greeted.handle(Request::Hello { protocol: 2 }, Vec::new()));
     ok(greeted.handle(Request::Connect { profile: None, lease: None }, Vec::new()));
     let dir = greeted.dir().unwrap().to_path_buf();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -701,7 +724,7 @@ fn fake_server(dir: &Path) -> (Server, Arc<AtomicU64>) {
         Ok(Arc::new(FakeDevice::new(FakeConfig::default())) as Arc<dyn Device>)
     });
     let mut server = Server::new(Config { open_device: Some(open), ..config(dir) });
-    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
     (server, opened)
 }
 
@@ -716,13 +739,19 @@ fn status(server: &mut Server) -> (TimePoint, Rational, usize) {
     (now, root_rate, events)
 }
 
+/// `s` seconds as a `Duration` on the primary root, counted from its `root_rate` (EA-12).
+fn seconds(now: TimePoint, rate: Rational, s: u64) -> Duration {
+    Duration::new(now.domain, (s * rate.num()).div_ceil(rate.den()) as i64)
+}
+
 /// Captures `n` samples at `at` and returns the written artifact (EA-17).
 fn capture_at(server: &mut Server, n: i64, at: TimePoint) -> ezsdr_kernel::manifest::ArtifactRef {
-    let (_, _, events) = status(server);
+    let (now, rate, events) = status(server);
     let SessionAction::Vocabulary { ns, verb, target, params, .. } = capture(n) else { unreachable!() };
     let entry = submit(server, SessionAction::Vocabulary { ns, verb, target, at: Some(at), params }, Vec::new());
     assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
-    let Response::Waited { event: Some(event), .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: events, within_ns: Some(3_000_000_000), until: None }, Vec::new())) else { panic!("no capture") };
+    let within = seconds(now, rate, 3);
+    let Response::Waited { event: Some(event), .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: events, within: Some(within), until: None }, Vec::new())) else { panic!("no capture") };
     serde_json::from_value::<ezsdr_sink::CaptureWrittenPayload>(event.payload).unwrap().artifact
 }
 
@@ -736,6 +765,23 @@ fn first_on_root(manifest: &Manifest, artifact: &ezsdr_kernel::manifest::Artifac
 
 fn complex(bytes: &[u8]) -> Vec<(f32, f32)> {
     bytes.chunks_exact(8).map(|b| (f32::from_le_bytes(b[..4].try_into().unwrap()), f32::from_le_bytes(b[4..].try_into().unwrap()))).collect()
+}
+
+#[test]
+fn ea_12_a_duration_is_whole_root_ticks() {
+    // EA-12 (spec 20, VF-2): on the FakeDevice's 200 MHz root a `Duration` counts root
+    // ticks, not nanoseconds: 2 000 000 000 ticks are 10 s, so a wait that returns at once
+    // has its horizon at least 1 000 000 000 ticks after its `now` (as nanoseconds, 400 000 000).
+    let temp = TempDir::new("duration-ticks");
+    let (mut server, _) = fake_server(&temp.0);
+    let Response::Connected { now, root_rate, .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new())) else { panic!("connect") };
+    assert_eq!(root_rate, Rational::new(200_000_000, 1).unwrap());
+    let (at, _, _) = status(&mut server);
+    capture_at(&mut server, 100, TimePoint::new(at.domain, at.ticks + 20_000_000));
+    let within = Duration::new(now.domain, 2_000_000_000);
+    let Response::Waited { index: Some(_), now, horizon, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: 0, within: Some(within), until: None }, Vec::new())) else { panic!("the capture was delivered") };
+    assert!(horizon.ticks - now.ticks >= 1_000_000_000, "horizon {horizon}, now {now}");
+    finish(&mut server);
 }
 
 #[test]
@@ -784,7 +830,7 @@ fn ea_07_the_uhd_authority_takes_the_binding_s_sources() {
     let held = device.clone();
     let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| Ok(held.clone() as Arc<dyn Device>));
     let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
-    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
     let mut profile = uhd_profile(&temp.0);
     profile["bindings"]["radio"]["selector"]["time_source"] = json!("external");
     ok(server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new()));
@@ -809,7 +855,7 @@ fn ea_07_the_device_is_released_when_the_session_ends() {
         Ok(device as Arc<dyn Device>)
     });
     let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
-    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
     ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new()));
     assert!(matches!(submit(&mut server, set("radio.tx.channels", Value::Int(1)), Vec::new()).outcome, Outcome::Admitted { .. }));
     assert!(matches!(submit(&mut server, repeat(), ramp(1_000)).outcome, Outcome::Admitted { .. }));
@@ -828,7 +874,7 @@ fn unlocking_server(dir: &Path, unlocked: &'static [u64]) -> (Server, Arc<Atomic
         Ok(Arc::new(FakeDevice::new(FakeConfig { faults, ..FakeConfig::default() })) as Arc<dyn Device>)
     });
     let mut server = Server::new(Config { open_device: Some(open), ..config(dir) });
-    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
     (server, opened)
 }
 
@@ -882,10 +928,11 @@ fn ea_07_a_lost_device_ends_the_session_with_its_manifest() {
     let held = device.clone();
     let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| Ok(held.clone() as Arc<dyn Device>));
     let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
-    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
     let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new())) else { panic!("connect") };
     let lost = EventKind::parse(EventKind::DEVICE_LOST).unwrap();
-    let _ = server.handle(Request::WaitFor { kinds: vec![lost], from: 0, within_ns: Some(5_000_000_000), until: None }, Vec::new());
+    let (now, rate, _) = status(&mut server);
+    let _ = server.handle(Request::WaitFor { kinds: vec![lost], from: 0, within: Some(seconds(now, rate, 5)), until: None }, Vec::new());
     let (manifest, path) = finish(&mut server);
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: EventKind::parse(EventKind::DEVICE_LOST).unwrap() } });
     assert!(Path::new(&path).exists(), "{path}");
@@ -912,14 +959,14 @@ fn ea_09_the_configured_default_profile_is_used() {
     let path = temp.0.join("lab.json");
     std::fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
     let mut server = Server::new(Config { default_profile: Some(path), ..config(&temp.0) });
-    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
     let Response::Connected { profile: used, .. } = ok(server.handle(Request::Connect { profile: None, lease: None }, Vec::new())) else { panic!() };
     assert_eq!(used, profile);
     finish(&mut server);
 
     let missing = temp.0.join("missing.json");
     let mut server = Server::new(Config { default_profile: Some(missing.clone()), ..config(&temp.0) });
-    ok(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
     let error = err(server.handle(Request::Connect { profile: None, lease: None }, Vec::new()));
     assert_eq!(error.kind, ErrorKind::Refused);
     assert!(error.message.starts_with(&format!("EA-9: {}: ", missing.display())), "{}", error.message);

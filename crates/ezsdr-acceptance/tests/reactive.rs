@@ -360,7 +360,7 @@ fn v58_09_a_reactor_runs_in_a_child_run_of_a_session() {
         Reply::Result(response) => response,
         Reply::Error(error) => panic!("{error:?}"),
     };
-    result(server.handle(Request::Hello { protocol: 1 }, Vec::new()));
+    result(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
     let Response::Connected { run: session, .. } = result(server.handle(Request::Connect { profile: Some(session_profile), lease: None }, Vec::new())) else { panic!() };
     let inputs = vec![ping_bytes.len() as u64, pong_bytes.len() as u64];
     let request = Request::RunChild { spec, profile: Some(child_profile), inputs, duration_ns: Some(25_000_000) };

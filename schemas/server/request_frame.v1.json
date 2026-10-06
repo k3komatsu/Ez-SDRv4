@@ -25,6 +25,26 @@
       "description": "`sha256:<64 lowercase hex>`, matching `^sha256:[0-9a-f]{64}$`. The algorithm is\nnamed in the value so a later algorithm is an additive change (OV-14, SB-1).",
       "type": "string"
     },
+    "Duration": {
+      "additionalProperties": false,
+      "description": "An elapsed time: integer ticks in a named clock domain (TM-1, TM-4 decision T4).\n\nThe domain tag is what stops 1 000 ticks at 20 Msps being added to a 200 MHz\npoint as a silent factor-of-ten error.",
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/ClockDomainId",
+          "description": "The domain whose ticks `ticks` counts (TM-7)."
+        },
+        "ticks": {
+          "description": "Tick count; may be negative (TM-7).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "domain",
+        "ticks"
+      ],
+      "type": "object"
+    },
     "EventKind": {
       "description": "What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$`;\nthe Kernel owns the five of RS-28 and every other kind belongs to the Vocabulary or\nModule that emits it.\n\nRule: SB-1, RS-27.",
       "type": "string"
@@ -216,17 +236,19 @@
         },
         {
           "additionalProperties": false,
-          "description": "Advances the Run to `to`, or by `by_ns` nanoseconds; exactly one is given (EA-12).",
+          "description": "Advances the Run to `to`, or by `by`; exactly one is given (EA-12).",
           "properties": {
-            "by_ns": {
+            "by": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Duration"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "default": null,
-              "description": "A duration in nanoseconds.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
+              "description": "A duration on the primary root (EA-12)."
             },
             "op": {
               "const": "advance",
@@ -281,17 +303,19 @@
                 }
               ],
               "default": null,
-              "description": "The instant to wait until, such as a previous reply's `horizon`, so that a client\nthat waits again keeps its deadline; exactly one of `within_ns` and `until` is given."
+              "description": "The instant to wait until, such as a previous reply's `horizon`, so that a client\nthat waits again keeps its deadline; exactly one of `within` and `until` is given."
             },
-            "within_ns": {
+            "within": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Duration"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "default": null,
-              "description": "How long to wait, in nanoseconds of Run time; exactly one of `within_ns` and\n`until` is given.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
+              "description": "How long to wait, a duration on the primary root (EA-12); exactly one of `within`\nand `until` is given."
             }
           },
           "required": [

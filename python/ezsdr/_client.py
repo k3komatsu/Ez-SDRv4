@@ -1,4 +1,4 @@
-"""The server process and the frames of ezsdr.protocol 1 (spec 16 EA-2, EA-3, EA-5, A8)."""
+"""The server process and the frames of ezsdr.protocol 2 (spec 16 EA-2, EA-3, EA-5, A8)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from typing import Any, Optional, Tuple
 
-PROTOCOL = 1
+PROTOCOL = 2
 
 
 class Error(Exception):
