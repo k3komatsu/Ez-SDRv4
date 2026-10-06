@@ -720,21 +720,28 @@ These changes are breaking:
 - Logs are in `~/.cache/ezsdr-fixes/2026-10-06-spec20/` and
   `~/.cache/ezsdr-fixes/2026-10-07-spec20-final/`.
 
-Open follow-ups the reviews found, not filed yet:
+Follow-ups the reviews found (filed or fixed on 2026-10-07):
 
 1. MockRadio: a cold change whose e₁ falls inside an orderly Stop's tail records
    a larger loss in the fault row than MR-20a's (the Manifest row only). The
-   spec's own settlement design shares this limit.
+   spec's own settlement design shares this limit. Filed as
+   [#47](https://github.com/k3komatsu/Ez-SDRv4/issues/47).
 2. MockRadio, older than spec 20: a receive stream ended by a Stop of
    `<id>/rx` restarts on a later `stop(Orderly)` (it publishes again) or on a
    cold change (a new clock), against MR-25. A lost device cannot restart this
-   way (VF-3).
+   way (VF-3). Filed as [#46](https://github.com/k3komatsu/Ez-SDRv4/issues/46).
 3. Spec: when a cold change's e₁ rounds onto a device loss's instant, only the
    code's effective-instant tiebreak decides which comes first. §4 and MR-20's
    "(instant, insertion)" do not say which instant of a cold change counts (e
-   or e₁).
-4. Phase 7's recorded mutations U45 and R04 have `old` text that no longer
-   exists. They were stale before spec 20.
+   or e₁). Filed as [#48](https://github.com/k3komatsu/Ez-SDRv4/issues/48).
+4. Phase 7's recorded mutations U45 and R04 had `old` text that no longer
+   existed; they were stale before spec 20. `6d7bce8` re-spelled them against
+   the profile's leads, and both are killed again. Seventeen other recorded
+   rows still have `old` text that is missing at `642b8bd`; they are listed here
+   and not yet fixed:
+   - Phase 3: M01–M03.
+   - Phase 4: D11, D20.
+   - Phase 7: U11, U23, R05, B15, B22, U40, B07, B11, B12, B25, B26, C03.
 5. Ceilings recorded with VF-6. While every profile gives both leads one value,
    no test can tell the UHD Module reads its profile rather than a constant,
    nor tell the two leads apart. Phase 8 measures both leads (50 ms, INFERRED)
