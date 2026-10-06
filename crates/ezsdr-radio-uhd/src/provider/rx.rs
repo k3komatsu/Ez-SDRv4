@@ -37,7 +37,6 @@ pub(crate) enum RxCmd {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pending {
-    None,
     Overrun,
     Sequence,
     Alignment,
@@ -48,7 +47,8 @@ struct Stream {
     clock: Clock,
     channels: usize,
     expected: i64,
-    pending: Pending,
+    /// The distinct reports since the last block, in arrival order (UR-17…UR-19).
+    pending: Vec<Pending>,
     /// The timed start's instant: T0, or a change's `e₂` (UR-17).
     start: i64,
     /// Samples at or after this root tick are discarded, and the stream ends there: it is
@@ -68,11 +68,18 @@ impl Stream {
             clock,
             channels,
             expected: 0,
-            pending: Pending::None,
+            pending: Vec::new(),
             start: clock.origin,
             cut: None,
             stopped: false,
             not_before: not_before.unwrap_or(i64::MIN),
+        }
+    }
+
+    /// Keeps each distinct report until the next block; repeats of one kind coalesce.
+    fn report(&mut self, pending: Pending) {
+        if !self.pending.contains(&pending) {
+            self.pending.push(pending);
         }
     }
 }
@@ -306,14 +313,14 @@ impl Rx {
                 }
             }
             RxRecv::Overflow { out_of_sequence: false } => {
-                stream.pending = Pending::Overrun;
+                stream.report(Pending::Overrun);
                 self.core.stat("rx_overflows", 1);
             }
             RxRecv::Overflow { out_of_sequence: true } | RxRecv::BadPacket => {
-                stream.pending = Pending::Sequence;
+                stream.report(Pending::Sequence);
                 self.core.stat("rx_overflows", 1);
             }
-            RxRecv::Alignment => stream.pending = Pending::Alignment,
+            RxRecv::Alignment => stream.report(Pending::Alignment),
             RxRecv::LateCommand if stream.cut.is_some() => {
                 // A late start of a stream that is ending: stop it untimed, never restart
                 // it (Review M, P1-A).
@@ -337,7 +344,7 @@ impl Rx {
                     applied: self.core.at(restart),
                 })
                 .expect("a payload");
-                stream.pending = Pending::MissedStart;
+                stream.report(Pending::MissedStart);
                 self.core.emit(&self.core.rx_id, kinds::LATE_COMMAND, Severity::Warning, payload);
                 self.core.timing(json!({ "what": "rx_restart", "requested": stream.start, "at": restart }));
                 if let Err(error) = self.core.device.rx_start(restart) {
@@ -402,38 +409,47 @@ impl Rx {
         if len > 0 {
             let expected = stream.expected;
             let lost = (k > expected).then(|| (k - expected) as u64);
-            let pending = std::mem::replace(&mut stream.pending, Pending::None);
+            let pending = std::mem::take(&mut stream.pending);
             let mut flags = BlockFlags::NONE;
             if lost.is_some() {
-                flags = flags
-                    | BlockFlags::GAP_BEFORE
-                    | match pending {
-                        Pending::Overrun => BlockFlags::RESTARTED,
-                        Pending::MissedStart => BlockFlags::NONE,
-                        Pending::None | Pending::Sequence | Pending::Alignment => BlockFlags::SEQ_DISCONTINUITY,
-                    };
+                // Each report adds its flag; a jump no report announced is a sequence
+                // discontinuity (UR-18).
+                flags = flags | BlockFlags::GAP_BEFORE;
+                if pending.is_empty() {
+                    flags = flags | BlockFlags::SEQ_DISCONTINUITY;
+                }
+                for cause in &pending {
+                    flags = flags
+                        | match cause {
+                            Pending::Overrun => BlockFlags::RESTARTED,
+                            Pending::MissedStart => BlockFlags::NONE,
+                            Pending::Sequence | Pending::Alignment => BlockFlags::SEQ_DISCONTINUITY,
+                        };
+                }
             }
             let channels = stream.channels.max(1);
             stream.expected = k + len;
             let at = TimePoint::new(clock.domain, expected);
             let lost_n = lost.unwrap_or(0);
-            match pending {
-                Pending::Overrun | Pending::Sequence => {
-                    let payload = RxOverflowPayload {
-                        cause: if pending == Pending::Overrun { RxOverflowCause::Overrun } else { RxOverflowCause::Sequence },
-                        lost: lost_n,
-                        restart_gap_ns: if pending == Pending::Overrun { self.core.ns(lost_n as i64 * clock.n) } else { 0 },
-                    };
-                    // UR-20: the hot path, with RM-24's bytes.
-                    if let Err(error) = self.core.events.emit(self.core.overflow, at, Severity::Warning, &payload.to_hot()) {
-                        self.core.reject_note(json!({ "event_not_emitted": kinds::RX_OVERFLOW, "error": error.to_string() }));
+            for pending in pending {
+                match pending {
+                    Pending::Overrun | Pending::Sequence => {
+                        let payload = RxOverflowPayload {
+                            cause: if pending == Pending::Overrun { RxOverflowCause::Overrun } else { RxOverflowCause::Sequence },
+                            lost: lost_n,
+                            restart_gap_ns: if pending == Pending::Overrun { self.core.ns(lost_n as i64 * clock.n) } else { 0 },
+                        };
+                        // UR-20: the hot path, with RM-24's bytes.
+                        if let Err(error) = self.core.events.emit(self.core.overflow, at, Severity::Warning, &payload.to_hot()) {
+                            self.core.reject_note(json!({ "event_not_emitted": kinds::RX_OVERFLOW, "error": error.to_string() }));
+                        }
                     }
+                    Pending::Alignment => {
+                        let payload = serde_json::to_value(AlignmentErrorPayload { lost: lost_n }).expect("a payload");
+                        self.core.emit_at(&self.core.rx_id, kinds::ALIGNMENT_ERROR, Severity::Error, payload, at);
+                    }
+                    Pending::MissedStart => {}
                 }
-                Pending::Alignment => {
-                    let payload = serde_json::to_value(AlignmentErrorPayload { lost: lost_n }).expect("a payload");
-                    self.core.emit_at(&self.core.rx_id, kinds::ALIGNMENT_ERROR, Severity::Error, payload, at);
-                }
-                Pending::None | Pending::MissedStart => {}
             }
             let n = len as usize;
             let bytes = self.pool.fill(channels * n * 8, |buffer| {
@@ -542,6 +558,60 @@ fn stop_at_cut(core: &Core, cut: i64) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ur_19_reports_before_one_block_keep_each_kind() {
+        // Reports of different kinds before the next block: that block carries each one's flag
+        // and each one's event is emitted with its time jump; a repeated kind is one event
+        // (UR-17…UR-19). RX_OVERFLOW goes by the hot path, so only the set is compared.
+        use ezsdr_kernel::module_api::Link;
+        use ezsdr_kernel::stream::BackPressure;
+        let alignment = (kinds::ALIGNMENT_ERROR, BlockFlags::SEQ_DISCONTINUITY);
+        let sequence = (kinds::RX_OVERFLOW, BlockFlags::SEQ_DISCONTINUITY);
+        let overrun = (kinds::RX_OVERFLOW, BlockFlags::RESTARTED);
+        for (reports, expected) in [
+            (vec![RxRecv::Alignment], vec![alignment]),
+            (vec![RxRecv::Overflow { out_of_sequence: true }], vec![sequence]),
+            (vec![RxRecv::Alignment, RxRecv::Overflow { out_of_sequence: true }, RxRecv::Alignment], vec![alignment, sequence]),
+            (vec![RxRecv::Overflow { out_of_sequence: false }, RxRecv::Alignment], vec![overrun, alignment]),
+        ] {
+            let decl = ezsdr_kernel::stream::DataLinkDecl {
+                id: ezsdr_kernel::id::DataLinkId::local(0),
+                from: ezsdr_kernel::contract::PortRef { component: ezsdr_kernel::spec::Ident::parse("radio").unwrap(), port: ezsdr_kernel::spec::Ident::parse("rx").unwrap() },
+                to: ezsdr_kernel::contract::PortRef { component: ezsdr_kernel::spec::Ident::parse("rec").unwrap(), port: ezsdr_kernel::spec::Ident::parse("in").unwrap() },
+                contract: DataContractId::parse("ezsdr.stream.cf32").unwrap(),
+                policy: BackPressure::DropOldest,
+                capacity: 4,
+            };
+            let link = ezsdr_link_host::HostLinkModule::new().create(&decl).unwrap();
+            let (core, _, _, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+            let clock = core.register(Dir::Rx, 200, 0).unwrap();
+            let (_to_rx, cmds) = std::sync::mpsc::channel();
+            let mut rx = Rx::new(core.clone(), cmds, Some(clock), 2, None);
+            for report in reports {
+                rx.receive(report);
+            }
+            rx.receive(RxRecv::Samples { first_tick: clock.instant(2), samples: vec![vec![[0.0, 0.0]; 2]; 2] });
+            let block = link.receive().expect("the block after the reports");
+            let flags = expected.iter().fold(BlockFlags::GAP_BEFORE, |flags, (_, flag)| flags | *flag);
+            assert_eq!((block.header().flags, block.header().lost), (flags, Some(2)));
+            let got: Vec<_> = events.drain().into_iter()
+                .filter(|e| [kinds::ALIGNMENT_ERROR, kinds::RX_OVERFLOW].contains(&e.kind.as_str()))
+                .collect();
+            for event in &got {
+                let lost = match event.kind.as_str() {
+                    kinds::RX_OVERFLOW => RxOverflowPayload::from_payload(&event.payload).unwrap().lost,
+                    _ => event.payload["lost"].as_u64().unwrap(),
+                };
+                assert_eq!(lost, 2);
+            }
+            let mut got: Vec<_> = got.iter().map(|e| e.kind.as_str()).collect();
+            got.sort();
+            let mut expected: Vec<_> = expected.iter().map(|(kind, _)| *kind).collect();
+            expected.sort();
+            assert_eq!(got, expected);
+        }
+    }
 
     #[test]
     fn ur_26_a_late_start_after_abort_does_not_stop_again() {

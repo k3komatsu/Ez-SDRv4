@@ -10,6 +10,12 @@ use crate::device::{FakeConfig, FakeDevice};
 use super::core::Core;
 
 pub(super) fn rig() -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+    rig_with_links(Vec::new())
+}
+
+/// `rig` with the receive stream's links.
+pub(super) fn rig_with_links(links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>)
+    -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let clocks = Arc::new(ClockRegistry::new());
     let root = clocks.allocate_id().unwrap();
     clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(),
@@ -23,7 +29,7 @@ pub(super) fn rig() -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Ar
         kinds.kinds().into_iter().map(move |k| (ResourceId::parse(s).unwrap(), k))).collect();
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
     let core = Arc::new(Core::new(device.clone(), ResourceId::parse("usrp").unwrap(),
-        root, time.clone(), clocks, events.clone(), Arc::new(BTreeMap::new()), Vec::new(),
+        root, time.clone(), clocks, events.clone(), Arc::new(BTreeMap::new()), links,
         crate::profile::Profile::X310Ubx.description(2_000)));
     (core, device, time, events)
 }
