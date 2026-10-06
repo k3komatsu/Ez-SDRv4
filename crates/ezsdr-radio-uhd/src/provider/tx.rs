@@ -638,8 +638,21 @@ impl Tx {
     /// UR-28: every report recorded; underflows and late bursts become events.
     fn reports(&mut self, timeout: Wall) {
         while !self.core.is_lost() {
-            let Some(report) = self.core.device.tx_async(timeout) else { break };
-            self.report(report);
+            match self.core.device.tx_async(timeout) {
+                Ok(Some(report)) => self.report(report),
+                Ok(None) => break,
+                // UR-28: a failed read is the device's loss or a recorded error, never "no report".
+                Err(error) if error.lost => return self.core.device_lost(&error.message),
+                Err(error) => {
+                    // Counted, with the first one's text: a failing read repeats at the poll rate.
+                    let first = lock(&self.core.rec).stats.get("tx_errors").is_none_or(|n| *n == 0);
+                    self.core.stat("tx_errors", 1);
+                    if first {
+                        self.core.reject_note(json!({ "call": "tx_async", "error": error.message }));
+                    }
+                    break;
+                }
+            }
         }
     }
 

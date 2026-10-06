@@ -181,8 +181,9 @@ pub trait Device: Send + Sync {
         eob: bool,
         timeout: Duration,
     ) -> Result<usize, DeviceError>;
-    /// The next asynchronous transmit report, if one arrives within the timeout.
-    fn tx_async(&self, timeout: Duration) -> Option<TxReport>;
+    /// The next asynchronous transmit report, if one arrives within the timeout; a call
+    /// that fails is an error, not the absence of a report (UR-3).
+    fn tx_async(&self, timeout: Duration) -> Result<Option<TxReport>, DeviceError>;
     /// Frees both streamers; called only when no thread holds one (UR-16).
     fn close_streams(&self);
     /// The Provider has found the device gone (UR-29): from now on neither the device
@@ -258,6 +259,8 @@ pub enum FakeFault {
     Lost(Duration),
     /// `time_now` fails without the device being lost.
     TimeReadFails(Duration),
+    /// `tx_async` fails from this instant on, with this `lost` (UR-28).
+    TxAsyncFails(Duration, bool),
     /// `ref_locked` reports an unlocked reference.
     Unlocked(Duration),
     /// The `nth` untimed `apply` of the rate `claimed` (0-based) applies `applied`.
@@ -1152,9 +1155,21 @@ impl Device for FakeDevice {
         Ok(n)
     }
 
-    fn tx_async(&self, timeout: Duration) -> Option<TxReport> {
+    fn tx_async(&self, timeout: Duration) -> Result<Option<TxReport>, DeviceError> {
         {
             let mut st = self.lock();
+            // As on `UhdDevice`, no streamer means no call, and no call fails.
+            if st.tx_channels > 0 {
+                self.lost(&st)?;
+            }
+            let now = self.now(&st);
+            for fault in &self.config.faults {
+                if let FakeFault::TxAsyncFails(at, lost) = fault {
+                    if st.tx_channels > 0 && now >= self.ticks_of(*at) {
+                        return Err(DeviceError { lost: *lost, message: "fake: uhd_tx_streamer_recv_async_msg failed".to_owned() });
+                    }
+                }
+            }
             for (index, fault) in self.config.faults.iter().enumerate() {
                 if let FakeFault::TxReport(at, code) = fault {
                     if self.due(&st, index, *at) {
@@ -1177,13 +1192,13 @@ impl Device for FakeDevice {
             // TG-Q1).
             let due = st.reports.front().is_some_and(|r| r.code != TxCode::BurstAck || r.tick.is_none_or(|t| t <= now));
             if due {
-                return st.reports.pop_front();
+                return Ok(st.reports.pop_front());
             }
         }
         if !timeout.is_zero() {
             std::thread::sleep(timeout);
         }
-        None
+        Ok(None)
     }
 
     fn close_streams(&self) {

@@ -876,16 +876,17 @@ impl Device for UhdDevice {
         Ok(sent)
     }
 
-    fn tx_async(&self, timeout: Duration) -> Option<TxReport> {
-        let stream = lock(&self.tx).clone()?;
+    fn tx_async(&self, timeout: Duration) -> Result<Option<TxReport>, DeviceError> {
+        let Some(stream) = lock(&self.tx).clone() else { return Ok(None) };
         let _call = lock(&stream.call);
         let mut md = stream.md;
         let mut valid = false;
         // SAFETY: the metadata belongs to this streamer, which the Arc keeps.
         unsafe {
             let code = uhd_tx_streamer_recv_async_msg(stream.h, &mut md, timeout.as_secs_f64(), &mut valid);
-            if code != UHD_ERROR_NONE || !valid {
-                return None;
+            check_tx(stream.h, "uhd_tx_streamer_recv_async_msg", code)?;
+            if !valid {
+                return Ok(None);
             }
             let (mut event, mut channel, mut has, mut full, mut frac) = (0 as c_int, 0usize, false, 0i64, 0f64);
             uhd_async_metadata_event_code(md, &mut event);
@@ -902,7 +903,7 @@ impl Device for UhdDevice {
                 other => TxCode::Other(other),
             };
             let tick = if has { from_time_spec(full, frac, self.mcr).ok() } else { None };
-            Some(TxReport { code, tick, channel })
+            Ok(Some(TxReport { code, tick, channel }))
         }
     }
 
@@ -929,6 +930,7 @@ mod ffi_tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
     static SEND_CALLS: AtomicUsize = AtomicUsize::new(0);
     static PROBE: AtomicBool = AtomicBool::new(false);
+    static ASYNC_ERROR: AtomicBool = AtomicBool::new(false);
     static ACTIVE: AtomicUsize = AtomicUsize::new(0);
     static MAX_ACTIVE: AtomicUsize = AtomicUsize::new(0);
     static ENTERED: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
@@ -1046,14 +1048,37 @@ mod ffi_tests {
         native_entry();
         // SAFETY: tx_async supplies a live output slot, and reads no metadata on false.
         unsafe { *valid = false; }
+        if ASYNC_ERROR.load(Ordering::SeqCst) { UHD_ERROR_IO } else { UHD_ERROR_NONE }
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn uhd_tx_streamer_last_error(_h: uhd_tx_streamer_handle, buf: *mut c_char, len: usize) -> c_int {
+        let text = b"ffi test: async message failed\0";
+        // SAFETY: `text` reads the error into a buffer writable for `len` bytes.
+        unsafe { std::ptr::copy_nonoverlapping(text.as_ptr() as *const c_char, buf, text.len().min(len)); }
         UHD_ERROR_NONE
+    }
+
+    #[test]
+    fn uhd_tx_async_reports_a_failed_call_as_an_error() {
+        // UR-3: a failed recv_async_msg is a DeviceError with its text, not "no report".
+        let _test = lock(&TEST_LOCK);
+        let device = dummy(1);
+        assert!(device.tx_async(Duration::ZERO).unwrap().is_none());
+        ASYNC_ERROR.store(true, Ordering::SeqCst);
+        let error = device.tx_async(Duration::ZERO);
+        ASYNC_ERROR.store(false, Ordering::SeqCst);
+        let error = error.unwrap_err();
+        assert!(error.lost, "UHD_ERROR_IO is the device's loss");
+        assert!(error.message.starts_with("uhd_tx_streamer_recv_async_msg: UHD error"), "{}", error.message);
+        assert!(error.message.ends_with("ffi test: async message failed"), "{}", error.message);
     }
 
     fn receive(device: &UhdDevice) {
         assert!(matches!(device.rx_recv(1, Duration::from_secs(1)), RxRecv::Timeout));
     }
     fn start(device: &UhdDevice) { device.rx_start(0).unwrap(); }
-    fn report(device: &UhdDevice) { assert!(device.tx_async(Duration::from_secs(1)).is_none()); }
+    fn report(device: &UhdDevice) { assert!(device.tx_async(Duration::from_secs(1)).unwrap().is_none()); }
 
     #[test]
     fn uhd_safe_shared_device_serializes_receive_and_reports() {

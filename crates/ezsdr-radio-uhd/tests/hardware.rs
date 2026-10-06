@@ -412,7 +412,7 @@ fn hw_b8_raw_device_lead() {
     // and not reported late (below UR-21's 2 ms, which the Module never probes).
     let device = raw();
     raw_tx(&*device, 1e6, 1e9);
-    while device.tx_async(Wall::from_millis(10)).is_some() {}
+    while device.tx_async(Wall::from_millis(10)).unwrap().is_some() {}
     let wave = iq(&pn(100));
     for lead_us in [3_000i64, 2_000, 1_500, 1_000, 700, 500, 300, 200, 100, 50, 0] {
         let mut outcomes = Vec::new();
@@ -426,7 +426,7 @@ fn hw_b8_raw_device_lead() {
             let mut codes = Vec::new();
             let waited = Instant::now();
             while waited.elapsed() < Wall::from_millis(100) {
-                match device.tx_async(Wall::from_millis(20)) {
+                match device.tx_async(Wall::from_millis(20)).unwrap() {
                     Some(report) => {
                         codes.push(format!("{:?}", report.code));
                         if matches!(report.code, ezsdr_radio_uhd::TxCode::BurstAck) {
@@ -557,7 +557,7 @@ fn hw_b8_raw_timed_tune_phase() {
             device.rx_stop(None).unwrap();
             let _ = drain(&*device);
             let mut reports = Vec::new();
-            while let Some(report) = device.tx_async(Wall::from_millis(10)) {
+            while let Some(report) = device.tx_async(Wall::from_millis(10)).unwrap() {
                 reports.push(format!("{:?}", report.code));
             }
             let rms = (got.samples.iter().map(|(_, s)| f64::from(s[0] * s[0] + s[1] * s[1])).sum::<f64>() / got.samples.len().max(1) as f64).sqrt();
@@ -587,7 +587,7 @@ fn hw_b8_raw_in_flight_window() {
     // at most `window` of samples ahead of the device's time; does the device underflow?
     let device = raw();
     raw_tx(&*device, 2e6, 1e9);
-    while device.tx_async(Wall::from_millis(10)).is_some() {}
+    while device.tx_async(Wall::from_millis(10)).unwrap().is_some() {}
     let wave = iq(&pn(1_000));
     for window_us in [10_000u64, 5_000, 3_000, 2_000, 1_000, 500, 250] {
         let now = device.time_now().unwrap();
@@ -606,13 +606,13 @@ fn hw_b8_raw_in_flight_window() {
             }
             let at = (k == 0).then_some(start);
             device.tx_send(&[&wave], at, k == 0, k + 1 == buffers, Wall::from_millis(100)).unwrap();
-            while let Some(report) = device.tx_async(Wall::ZERO) {
+            while let Some(report) = device.tx_async(Wall::ZERO).unwrap() {
                 reports.push(report);
             }
         }
         let waited = Instant::now();
         while waited.elapsed() < Wall::from_millis(200) {
-            if let Some(report) = device.tx_async(Wall::from_millis(20)) {
+            if let Some(report) = device.tx_async(Wall::from_millis(20)).unwrap() {
                 reports.push(report);
             }
         }
@@ -806,7 +806,7 @@ fn hw_b8_raw_timed_retune() {
         let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|e| e >= start + 55 * TICKS_PER_MS));
         device.rx_stop(None).unwrap();
         let _ = drain(&*device);
-        while device.tx_async(Wall::from_millis(10)).is_some() {}
+        while device.tx_async(Wall::from_millis(10)).unwrap().is_some() {}
         // The tone's frequency over windows of 25 samples.
         let windows: Vec<(i64, f64)> = got.samples.chunks_exact(25).map(|w| {
             let (mut re, mut im) = (0.0f64, 0.0f64);
@@ -938,7 +938,7 @@ fn hw_b8_raw_burst_gap() {
     // without a late report (hw_b8_preemption saw late_at_device at gap 0)?
     let device = raw();
     raw_tx(&*device, 1e6, 1e9);
-    while device.tx_async(Wall::from_millis(10)).is_some() {}
+    while device.tx_async(Wall::from_millis(10)).unwrap().is_some() {}
     let (a, b) = (iq(&pn(1_000)), iq(&pn(100)));
     for gap in [0i64, 1, 2, 3, 5, 10, 20, 50, 100, 1_000] {
         let mut outcomes = Vec::new();
@@ -949,7 +949,7 @@ fn hw_b8_raw_burst_gap() {
             let mut codes = Vec::new();
             let waited = Instant::now();
             while waited.elapsed() < Wall::from_millis(150) {
-                if let Some(report) = device.tx_async(Wall::from_millis(20)) {
+                if let Some(report) = device.tx_async(Wall::from_millis(20)).unwrap() {
                     codes.push(format!("{:?}", report.code));
                 }
             }
@@ -1001,7 +1001,7 @@ fn hw_b8_raw_empty_eob_gap() {
     // last data buffer, as at bc0db98.
     let device = raw();
     raw_tx(&*device, 1e6, 1e9);
-    while device.tx_async(Wall::from_millis(10)).is_some() {}
+    while device.tx_async(Wall::from_millis(10)).unwrap().is_some() {}
     let (a, b) = (iq(&pn(1_000)), iq(&pn(100)));
     for empty_eob in [true, false] {
         for gap in [0i64, 1, 2, 3, 5] {
@@ -1024,7 +1024,7 @@ fn hw_b8_raw_empty_eob_gap() {
                 let mut codes = Vec::new();
                 let waited = Instant::now();
                 while waited.elapsed() < Wall::from_millis(150) {
-                    if let Some(report) = device.tx_async(Wall::from_millis(20)) {
+                    if let Some(report) = device.tx_async(Wall::from_millis(20)).unwrap() {
                         codes.push(format!("{:?}", report.code));
                     }
                 }

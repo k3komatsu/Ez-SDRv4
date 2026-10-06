@@ -1763,6 +1763,26 @@ fn ur_28_underflows_are_tx_underflow() {
 }
 
 #[test]
+fn ur_28_a_failed_report_read_is_not_an_empty_one() {
+    // A failing read is counted with its first text, never taken for "no report" (UR-3).
+    let (mut run, _, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::TxAsyncFails(Wall::from_millis(2_100), false)], ..FakeConfig::default() });
+    wait(&mut run, ms(200));
+    let manifest = run.finish();
+    assert!(section(&manifest, "stats")["tx_errors"].as_i64().unwrap() > 1, "the read failed repeatedly");
+    let notes: Vec<_> = section(&manifest, "rejected").as_array().unwrap().iter().filter(|r| r["call"] == "tx_async").cloned().collect();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0]["error"].as_str().unwrap().contains("recv_async_msg"), "{notes:?}");
+    assert!(events_of(&manifest, EventKind::DEVICE_LOST).is_empty());
+
+    // One that reports the device gone is UR-29's loss, though every other call succeeds.
+    let (mut run, _, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::TxAsyncFails(Wall::from_millis(2_100), true)], ..FakeConfig::default() });
+    let result = run.run_until_end(after(&run, ms(5_000)));
+    assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
+    let manifest = run.finish();
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: kind(EventKind::DEVICE_LOST) } });
+}
+
+#[test]
 fn ur_28_the_device_reports_a_late_burst() {
     // uhd-tx hands the start of burst over in time by its clock; the fake sees it 20 ms
     // later, past its time, and reports TimeError (VE-3's late_at_device).
@@ -1889,7 +1909,7 @@ fn ur_30_the_sections_are_written() {
         assert!(manifest.sections.contains_key(&Namespace::parse(&format!("ezsdr.radio.uhd.usrp.{suffix}")).unwrap()), "{suffix}");
     }
     let stats = section(&manifest, "stats");
-    for key in ["rx_blocks", "rx_samples", "rx_overflows", "rx_errors", "rx_off_lattice", "rx_overlapping", "link_drops_seen", "tx_bursts", "tx_samples"] {
+    for key in ["rx_blocks", "rx_samples", "rx_overflows", "rx_errors", "rx_off_lattice", "rx_overlapping", "link_drops_seen", "tx_bursts", "tx_samples", "tx_errors"] {
         assert!(stats[key].is_i64(), "{key}");
     }
     assert!(stats["rx_samples"].as_i64().unwrap() >= 1_000);
@@ -1938,7 +1958,7 @@ fn ur_33_scripted_faults_fire() {
         saw_overflow = matches!(device.rx_recv(1_000, Wall::from_millis(100)), ezsdr_radio_uhd::RxRecv::Overflow { out_of_sequence: false });
     }
     std::thread::sleep(Wall::from_millis(10));
-    assert_eq!(device.tx_async(Wall::ZERO).map(|r| r.code), Some(TxCode::Underflow));
+    assert_eq!(device.tx_async(Wall::ZERO).unwrap().map(|r| r.code), Some(TxCode::Underflow));
     std::thread::sleep(Wall::from_millis(200));
     assert!(device.time_now().unwrap_err().lost);
 }
@@ -1963,7 +1983,7 @@ fn ur_33_the_fake_device_keeps_the_devices_queues() {
     // A timed start before the queued samples' end is late and dropped.
     device.tx_send(&[&wave], Some(now + ms(10) + 1), true, true, Wall::from_secs(1)).unwrap();
     let mut codes = Vec::new();
-    while let Some(report) = device.tx_async(Wall::ZERO) {
+    while let Some(report) = device.tx_async(Wall::ZERO).unwrap() {
         codes.push(report.code);
     }
     assert!(codes.contains(&TxCode::TimeError), "{codes:?}");
@@ -2209,9 +2229,9 @@ fn ur_33_a_recv_cut_short_by_a_packet_s_timeout_returns_what_it_has() {
 fn reports_until(device: &FakeDevice, tick: i64) -> Vec<ezsdr_radio_uhd::TxReport> {
     let mut reports = Vec::new();
     while device.time_now().unwrap() <= tick + 200_000 {
-        reports.extend(device.tx_async(Wall::from_millis(1)));
+        reports.extend(device.tx_async(Wall::from_millis(1)).unwrap());
     }
-    reports.extend(std::iter::from_fn(|| device.tx_async(Wall::ZERO)));
+    reports.extend(std::iter::from_fn(|| device.tx_async(Wall::ZERO).unwrap()));
     reports
 }
 
@@ -2270,7 +2290,7 @@ fn ur_33_a_burst_that_runs_dry_underflows() {
     device.tx_send(&[&wave], Some(t0), true, false, Wall::from_secs(1)).unwrap();
     std::thread::sleep(Wall::from_millis(30));
     let mut codes = Vec::new();
-    while let Some(report) = device.tx_async(Wall::ZERO) {
+    while let Some(report) = device.tx_async(Wall::ZERO).unwrap() {
         codes.push(report.code);
     }
     assert!(codes.contains(&TxCode::Underflow), "{codes:?}");
@@ -2705,7 +2725,7 @@ fn ur_33_a_burst_s_acknowledgement_comes_once_its_end_has_played() {
     let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
     device.tx_send(&[&wave], Some(t0), true, true, Wall::from_secs(1)).unwrap();
     device.tx_send(&[&wave], Some(t0 + 100 * 200), true, true, Wall::from_secs(1)).unwrap();
-    assert!(device.tx_async(Wall::ZERO).is_none(), "an acknowledgement before the burst played");
+    assert!(device.tx_async(Wall::ZERO).unwrap().is_none(), "an acknowledgement before the burst played");
     let codes: Vec<_> = reports_until(&device, t0 + 100 * 200).into_iter().map(|r| r.code).collect();
     assert_eq!(codes.first(), Some(&TxCode::BurstAck), "{codes:?}");
     assert!(codes.contains(&TxCode::TimeError), "the second burst's report behind the first's: {codes:?}");
@@ -2849,7 +2869,7 @@ impl Device for Watched {
     fn rx_recv(&self, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(n, t) }
     fn tx_open(&self, c: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(c) }
     fn tx_send(&self, s: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, at, sob, eob, t) }
-    fn tx_async(&self, t: Wall) -> Option<ezsdr_radio_uhd::TxReport> { self.inner.tx_async(t) }
+    fn tx_async(&self, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(t) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
 }

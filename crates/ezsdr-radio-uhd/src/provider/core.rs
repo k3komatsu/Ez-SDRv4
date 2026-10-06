@@ -88,6 +88,7 @@ impl Default for Records {
             "link_drops_seen",
             "tx_bursts",
             "tx_samples",
+            "tx_errors",
         ]
         .into_iter()
         .map(|name| (name, 0))
