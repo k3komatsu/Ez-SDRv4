@@ -915,8 +915,8 @@
   "id": "U45",
   "name": "a change from 0 channels waits the restart lead",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "Dir::Tx => lattice(e.max(now), n),",
-  "new": "Dir::Tx => lattice(e.max(now) + self.core.ticks(RESTART_LEAD_NS), n),",
+  "old": "Dir::Tx => i128::from(e.max(now)),",
+  "new": "Dir::Tx => i128::from(e.max(now)) + i128::from(self.core.ticks(self.core.description.timing.restart_lead_ns)),",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_tx_channels_from_zero_transmits_the_next_burst_on_time"
@@ -965,8 +965,8 @@
   "id": "R04",
   "name": "a receive stream enabled from 0 ignores its instant (P0-3, L08)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "Dir::Rx => lattice(e.max(now + self.core.ticks(RESTART_LEAD_NS)), n),",
-  "new": "Dir::Rx => lattice(now + self.core.ticks(RESTART_LEAD_NS), n),",
+  "old": "Dir::Tx => i128::from(e.max(now)),\n            Dir::Rx => i128::from(e).max(i128::from(now) + i128::from(self.core.ticks(self.core.description.timing.start_lead_ns))),",
+  "new": "Dir::Tx => i128::from(e.max(now)),\n            Dir::Rx => i128::from(now) + i128::from(self.core.ticks(self.core.description.timing.start_lead_ns)),",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_rx_channels_from_zero_starts_at_its_instant"
