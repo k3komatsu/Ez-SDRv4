@@ -1421,8 +1421,8 @@ fn mr_20a_a_stop_ends_the_loss() {
         harness.arm_start(0).unwrap();
         harness.step(1_000_000).unwrap();
         if loss {
-            // Without VF-3 a loss is no stream end of its own: DEVICE_LOST's default
-            // `abort` (RS-28) stops the Run in the loss's round, at its instant.
+            // The loss ends the stream at its own instant (MR-20; spec 20, VF-3), where
+            // DEVICE_LOST's default `abort` (RS-28) also stops the Run.
             let error = harness.step(1_100_000).unwrap_err();
             assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
             harness.mock.stop(StopMode::Abort).unwrap();
@@ -1481,6 +1481,170 @@ fn mr_20a_the_overflow_comes_with_the_block_that_carries_it() {
     let headers = received(&harness);
     assert_eq!((headers[0].first_sample_time.ticks, headers[0].lost), (51_000, Some(50_000)));
     assert!(headers[1..].iter().all(|header| header.lost.is_none()));
+}
+
+/// The `rejected` rows, as `(action, reason, at)`, in the order written (MR-27).
+fn rejected_rows(harness: &Harness) -> Vec<(String, String, i64)> {
+    let rows = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.rejected").unwrap()];
+    rows.as_array().unwrap().iter()
+        .map(|row| (row["action"].as_str().unwrap().to_owned(), row["reason"].as_str().unwrap().to_owned(), row["at"]["ticks"].as_i64().unwrap()))
+        .collect()
+}
+
+fn device_lost_at(at_ns: i64) -> serde_json::Value {
+    serde_json::json!({ "at_ns": at_ns, "fault": "device_lost", "target": "radio" })
+}
+
+const LOST: &str = "MR-20: device lost";
+
+#[test]
+fn mr_20_a_lost_device_delivers_every_sample_before_the_loss() {
+    // MR-20 (spec 20, VF-3): the loss is a receive cut applied in the step's ordered loop,
+    // so the block in progress is delivered up to the first sample at or after it, and a
+    // block whose last sample comes before it is delivered in the losing step.
+    for (at, last) in [(1_000_000, 1_000), (1_999_001, 2_000)] {
+        let env = [("sim.faults", serde_json::json!([device_lost_at(at)]))];
+        let mut harness = Harness::new("ideal", &[], &[], &env, Some((BackPressure::DropOldest, 64)));
+        harness.arm_start(0).unwrap();
+        let error = harness.step(at).unwrap_err();
+        assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
+        let headers = received(&harness);
+        assert_eq!(headers.last().map(|header| header.first_sample_time.ticks + i64::from(header.len)), Some(last), "{at}");
+    }
+}
+
+#[test]
+fn mr_20_a_lost_device_transmits_nothing_after_the_loss() {
+    // MR-20, SE-4 (spec 20, VF-3): a lost device stops at its loss. A repeated burst open
+    // at the loss transmits up to it and no further, and nothing the Run does afterwards —
+    // Actions a continuing Policy dispatches, a later step, either `stop` mode — makes the
+    // device transmit or receive again.
+    for mode in [StopMode::Orderly, StopMode::Abort] {
+        let env = [("sim.faults", serde_json::json!([device_lost_at(1_000_000)]))];
+        let mut harness = Harness::new("ideal", &[("radio.tx.channels", eq(Value::Int(1)))], &[], &env, Some((BackPressure::DropOldest, 64)));
+        harness.arm_start(0).unwrap();
+        let tx = tx_domain(&harness);
+        harness.actions.push(tx_action(tx, 500, 1_000, true, LatePolicy::SendAsapAndFlag));
+        harness.step(500_000).unwrap();
+        let error = harness.step(1_000_000).unwrap_err();
+        assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
+        harness.actions.push(tx_action(tx, 3_000, 1_000, true, LatePolicy::SendAsapAndFlag));
+        harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, None));
+        harness.actions.push(Action::Stop { target: Some(rid("mock/rx")) });
+        harness.step(2_000_000).unwrap();
+        harness.auth.advance_to(TimePoint::new(ROOT, 5_000_000)).unwrap();
+        harness.mock.stop(mode).unwrap();
+        harness.step(10_000_000).unwrap();
+        let bursts = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.bursts").unwrap()];
+        let records: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(bursts.clone()).unwrap();
+        assert_eq!(records.iter().map(|record| record.samples).collect::<Vec<_>>(), [500], "{mode:?}");
+        let headers = received(&harness);
+        assert_eq!(headers.last().map(|header| header.first_sample_time.ticks + i64::from(header.len)), Some(1_000), "{mode:?}");
+        let actions: Vec<_> = rejected_rows(&harness).into_iter().map(|(action, reason, _)| (action, reason)).collect();
+        assert_eq!(actions, [("tx_burst", LOST), ("update_parameter", LOST), ("stop", LOST)].map(|(a, r)| (a.to_owned(), r.to_owned())), "{mode:?}");
+    }
+}
+
+#[test]
+fn mr_20_a_loss_cancels_what_it_left_pending() {
+    // MR-20, MR-27 (spec 20, VF-3): the loss cancels the burst and the command it left
+    // pending, at the loss and before any `stop`, recording each with the loss's reason and
+    // emitting no event for either.
+    let env = [("sim.faults", serde_json::json!([device_lost_at(2_000_000)]))];
+    let mut harness = Harness::new("ideal", &[("radio.tx.channels", eq(Value::Int(1)))], &[], &env, Some((BackPressure::DropOldest, 64)));
+    harness.arm_start(0).unwrap();
+    harness.actions.push(update_action("radio.rx.gain_db", Value::Num(3.0), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, 3_000_000))));
+    harness.actions.push(tx_action(tx_domain(&harness), 3_000, 1_000, false, LatePolicy::SendAsapAndFlag));
+    harness.step(1_000_000).unwrap();
+    assert!(rejected_rows(&harness).is_empty());
+    harness.step(2_000_000).unwrap_err();
+    assert_eq!(
+        rejected_rows(&harness),
+        [("tx_burst".to_owned(), LOST.to_owned(), 2_000_000), ("update_parameter".to_owned(), LOST.to_owned(), 2_000_000)]
+    );
+    assert!(harness.events.drain().is_empty());
+}
+
+#[test]
+fn mr_20_a_stop_received_in_the_losing_step_does_not_cancel_the_loss() {
+    // MR-20, SE-4 (spec 20, VF-3): the Actions of the step that applies a loss reach the
+    // device at or after it, so none is carried out — not even a device `Stop`, which
+    // would otherwise record the loss as unapplied before the loop reached it.
+    let env = [("sim.faults", serde_json::json!([device_lost_at(1_999_001)]))];
+    let mut harness = Harness::new("ideal", &[], &[], &env, Some((BackPressure::DropOldest, 64)));
+    harness.arm_start(0).unwrap();
+    harness.step(1_000_000).unwrap();
+    harness.actions.push(update_action("radio.rx.gain_db", Value::Num(3.0), UpdateClass::HardwareTimed, None));
+    harness.actions.push(Action::Stop { target: Some(rid("mock")) });
+    let error = harness.step(1_999_001).unwrap_err();
+    assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
+    assert!(harness.actions.actions.lock().unwrap().is_empty());
+    assert_eq!(fault_rows(&harness, "device_lost"), [(serde_json::json!(true), serde_json::json!(0))]);
+    let actions: Vec<_> = rejected_rows(&harness).into_iter().map(|(action, reason, _)| (action, reason)).collect();
+    assert_eq!(actions, [("update_parameter", LOST), ("stop", LOST)].map(|(a, r)| (a.to_owned(), r.to_owned())));
+    // No event for a refused Action, COMMAND_REJECTED included: the step's error reports the loss.
+    assert!(harness.events.drain().is_empty());
+}
+
+#[test]
+fn mr_20_an_action_after_the_losing_step_is_refused() {
+    // MR-20, MR-27, MA-30 (spec 20, VF-3): after the loss every Action that reaches the
+    // device is refused and recorded — one a continuing Policy dispatches in a later round,
+    // and one left queued for `stop`, as after a failure in the losing round.
+    let env = [("sim.faults", serde_json::json!([device_lost_at(1_000_000)]))];
+    let mut harness = Harness::new("ideal", &[], &[], &env, Some((BackPressure::DropOldest, 64)));
+    harness.arm_start(0).unwrap();
+    harness.step(1_000_000).unwrap_err();
+    harness.actions.push(update_action("radio.rx.gain_db", Value::Num(3.0), UpdateClass::HardwareTimed, None));
+    harness.step(2_000_000).unwrap();
+    assert!(harness.actions.actions.lock().unwrap().is_empty());
+    harness.actions.push(Action::Stop { target: Some(rid("mock")) });
+    harness.auth.advance_to(TimePoint::new(ROOT, 3_000_000)).unwrap();
+    harness.mock.stop(StopMode::Orderly).unwrap();
+    assert_eq!(
+        rejected_rows(&harness),
+        [("update_parameter".to_owned(), LOST.to_owned(), 2_000_000), ("stop".to_owned(), LOST.to_owned(), 3_000_000)]
+    );
+    assert!(harness.events.drain().is_empty());
+}
+
+#[test]
+fn mr_20_a_fault_at_a_loss_s_instant_removes_nothing() {
+    // MR-20, SE-4, MR-20a (spec 20, VF-3): the stream ends at the loss's instant, so a
+    // sequence error due there removes no sample, whichever side of the loss it is listed.
+    let sequence_error = serde_json::json!({ "at_ns": 1_000_000, "fault": "rx_sequence_error", "target": "radio" });
+    for loss_first in [false, true] {
+        let faults = if loss_first { [device_lost_at(1_000_000), sequence_error.clone()] } else { [sequence_error.clone(), device_lost_at(1_000_000)] };
+        let env = [("sim.faults", serde_json::Value::Array(faults.to_vec()))];
+        let mut harness = Harness::new("ideal", &[], &[], &env, Some((BackPressure::DropOldest, 64)));
+        harness.arm_start(0).unwrap();
+        let error = harness.step(1_000_000).unwrap_err();
+        assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
+        harness.mock.stop(StopMode::Abort).unwrap();
+        let headers = received(&harness);
+        assert_eq!(headers.iter().map(|header| (header.first_sample_time.ticks, header.len)).collect::<Vec<_>>(), [(0, 1_000)], "{loss_first}");
+        assert_eq!(fault_rows(&harness, "rx_sequence_error"), [(serde_json::json!(false), serde_json::json!(0))], "{loss_first}");
+        assert!(rx_overflows(&harness).is_empty(), "{loss_first}");
+        assert_eq!(fault_rows(&harness, "device_lost"), [(serde_json::json!(true), serde_json::json!(0))], "{loss_first}");
+    }
+}
+
+#[test]
+fn mr_20_a_loss_ends_its_receive_stream_at_its_instant() {
+    // MR-20, MR-20a (spec 20, VF-3): a sequence error at 1 ms whose loss is pending when
+    // the device is lost at 1.1 ms is settled at the loss, where the stream ends: 100
+    // samples, not the 1 000 that a stream ended by the `stop` at 2 ms would give.
+    let env = [("sim.faults", serde_json::json!([
+        { "at_ns": 1_000_000, "fault": "rx_sequence_error", "target": "radio" },
+        device_lost_at(1_100_000)
+    ]))];
+    let mut harness = Harness::new("ideal", &[], &[], &env, Some((BackPressure::DropOldest, 64)));
+    harness.arm_start(0).unwrap();
+    harness.step(1_000_000).unwrap();
+    harness.step(1_100_000).unwrap_err();
+    harness.auth.advance_to(TimePoint::new(ROOT, 2_000_000)).unwrap();
+    harness.mock.stop(StopMode::Orderly).unwrap();
+    assert_eq!(fault_rows(&harness, "rx_sequence_error"), [(serde_json::json!(true), serde_json::json!(100))]);
 }
 
 #[test]

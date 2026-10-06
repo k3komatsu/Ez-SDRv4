@@ -177,7 +177,8 @@ fn v58_05_device_lost_aborts_with_full_cleanup() {
     assert!(manifest.run.transitions.iter().any(|entry| entry.state == RunState::Stopping { mode: CleanupMode::Abort }));
     assert!(manifest.termination.cleanup_failures.is_empty());
     assert!(artifact(&manifest, "rec").partial);
-    assert_eq!(artifact(&manifest, "rec").size_bytes, 32_000);
+    // MR-20 (spec 20, VF-3): the loss at 5 ms publishes the block in progress up to it.
+    assert_eq!(artifact(&manifest, "rec").size_bytes, 40_000);
     assert!(manifest.hash.is_some());
 }
 

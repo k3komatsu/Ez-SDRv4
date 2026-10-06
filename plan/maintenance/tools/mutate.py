@@ -21,7 +21,9 @@ refused and nothing is deleted.
 
 Prints one line per mutation, `M01 <name>: killed`, or `SURVIVED`, `NOT FOUND`,
 `COMPILE ERROR`, `BASELINE FAILED`, and exits 1 unless every selected mutation is
-killed. Standard library only.
+killed. A mutation recorded as equivalent carries an `equivalent` field saying why no test
+can kill it in this tree; it must survive, and prints `equivalent (survived)` (spec 20,
+Appendix A: F24 once VF-4 is in). Standard library only.
 """
 import json
 import os
@@ -154,8 +156,14 @@ def main():
         if selected and mutation["id"] not in selected:
             continue
         outcome = run_one(scratch, env, mutation)
+        if "equivalent" in mutation:
+            # Recorded as equivalent: a kill means the record is wrong, not the code.
+            outcome = "equivalent (survived)" if outcome == "SURVIVED" else f"{outcome}, but recorded as equivalent"
+            failed = not outcome.startswith("equivalent")
+        else:
+            failed = not outcome.startswith("killed")
         print(f"{mutation['id']} {mutation['name']}: {outcome}", flush=True)
-        if not outcome.startswith("killed"):
+        if failed:
             failures += 1
     return 1 if failures else 0
 

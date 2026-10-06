@@ -31,6 +31,9 @@ use ezsdr_kernel::module_api::InputStore;
 pub use device::{DeviceModel, DeviceTimeError};
 pub use profile::{Profile, ProfileKind};
 
+/// The reason a lost device gives for everything it cancels or refuses (MR-20).
+const DEVICE_LOST: &str = "MR-20: device lost";
+
 fn module_ref() -> ModuleRef {
     ModuleRef {
         id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"),
@@ -417,8 +420,9 @@ impl MockRadio {
             let domain = rx.domain;
             let origin = rx.origin;
             let ratio = rx.ratio;
+            // Every fault cuts the receive stream, `device_lost` included (MR-20).
             let cut_tick = self.faults.iter()
-                .filter(|fault| !fault.resolved && matches!(fault.entry.fault, FaultKind::RxOverflow | FaultKind::RxSequenceError))
+                .filter(|fault| !fault.resolved)
                 .map(|fault| fault.tick)
                 .chain(self.cold_cut_tick(true)?)
                 .min();
@@ -673,7 +677,7 @@ impl MockRadio {
                 let origin = rx.origin;
                 let ratio = rx.ratio;
                 let next_sample = rx.next;
-                let cut_tick = self.faults.iter().filter(|fault| !fault.resolved && matches!(fault.entry.fault, FaultKind::RxOverflow | FaultKind::RxSequenceError)).map(|fault| fault.tick)
+                let cut_tick = self.faults.iter().filter(|fault| !fault.resolved).map(|fault| fault.tick)
                     .chain(self.cold_cut_tick(true)?).min();
                 let cut = cut_tick.and_then(|tick| time::k_at_or_after(origin, ratio, tick));
                 if cut.is_none_or(|cut| cut > next_sample) { self.plan_rx_block(); }
@@ -718,6 +722,15 @@ impl MockRadio {
             self.wakeup = Some(time.schedule(TimePoint::new(root, tick), Box::new(|_| {})).map_err(|error| self.reject(format!("MR-14: {error}")))?);
         }
         Ok(())
+    }
+
+    /// MR-20: refuses every Action queued for a lost device, recording each in `rejected`
+    /// with the loss's reason and emitting no event: the step's `DeviceLost` reports it.
+    fn refuse_actions(&mut self, at: i64) {
+        let Some(actions) = self.actions.clone() else { return };
+        while let Some(action) = actions.recv() {
+            self.record_rejected_action(Self::action_name(&action), DEVICE_LOST, at);
+        }
     }
 
     fn record_rejected_action(&mut self, action: &str, reason: &str, at: i64) {
@@ -836,6 +849,20 @@ impl MockRadio {
             if emit_command_rejected { self.reject_action_at("tx_burst", reason, now)?; }
             else { self.record_rejected_action("tx_burst", reason, now); }
         }
+        Ok(())
+    }
+
+    /// MR-25's `stop` at `now`, its cancellations recorded with `reason`; a loss runs its
+    /// `abort` body at the loss's instant with `DEVICE_LOST` (MR-20).
+    fn stop_at(&mut self, mode: StopMode, now: i64, reason: &str) -> Result<(), ModuleError> {
+        self.stop_tx(now, reason, false)?;
+        for _ in std::mem::take(&mut self.updates) {
+            self.record_rejected_action("update_parameter", reason, now);
+        }
+        self.record_pending_faults();
+        if let Some(handle) = self.wakeup.take() { if let Some(time) = &self.time { time.cancel(handle); } }
+        self.stop_rx(mode, now)?;
+        if mode == StopMode::Abort { self.started = false; }
         Ok(())
     }
 
@@ -1517,15 +1544,14 @@ impl Provider for MockRadio {
     fn stop(&mut self, mode: StopMode) -> Result<(), ModuleError> {
         let root = self.root.ok_or_else(|| self.reject("MR-25: not prepared"))?;
         let now = self.time.as_ref().expect("prepared time").now(root).map_err(|error| self.reject(format!("MR-25: {error}")))?.ticks;
-        self.stop_tx(now, "MR-25: cancelled by stop", false)?;
-        for _ in std::mem::take(&mut self.updates) {
-            self.record_rejected_action("update_parameter", "MR-25: cancelled by stop", now);
+        if self.device_lost_reported {
+            // MR-20: the device stopped at its loss, as an `abort` there, and `step` is gated
+            // from then on, so nothing is published after it whatever `stop` does; `stop`
+            // only refuses an Action still queued, having nothing left to stop.
+            self.refuse_actions(now);
+            return Ok(());
         }
-        self.record_pending_faults();
-        if let Some(handle) = self.wakeup.take() { if let Some(time) = &self.time { time.cancel(handle); } }
-        self.stop_rx(mode, now)?;
-        if mode == StopMode::Abort { self.started = false; }
-        Ok(())
+        self.stop_at(mode, now, "MR-25: cancelled by stop")
     }
 
     fn cleanup(&mut self) {
@@ -1568,20 +1594,21 @@ impl Provider for MockRadio {
 
     fn step(&mut self, until: TimePoint) -> Result<StepOutcome, ModuleError> {
         if !self.prepared { return Ok(StepOutcome { progressed: false }); }
-        if self.device_lost_reported { return Ok(StepOutcome { progressed: false }); }
         let root = self.root.ok_or_else(|| self.reject("MR-12: not prepared"))?;
         let u = time::to_v(self.clocks.as_ref().expect("prepared clocks"), root, until).map_err(|error| self.reject(format!("MR-12: {error}")))?;
-        if self.started {
-            if let Some(index) = self.faults.iter().position(|fault| !fault.resolved && fault.entry.fault == FaultKind::DeviceLost && fault.tick <= u) {
-                self.faults[index].applied = true;
-                self.faults[index].resolved = true;
-                self.record_fault(index, 0);
-                self.device_lost_reported = true;
-                return Err(ModuleError { kind: ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost, message: "MR-20: device lost".to_owned(), detail: serde_json::Value::Null });
-            }
+        if self.device_lost_reported {
+            // MR-20: a lost device carries out nothing; what reaches it is refused.
+            self.refuse_actions(u);
+            return Ok(StepOutcome { progressed: false });
         }
         let mut progressed = false;
-        if let Some(actions) = self.actions.clone() {
+        // MR-20: in the step that applies a loss, the Actions reach the device at `u`, at or
+        // after the loss, so none is carried out; the loss itself is applied below, in order.
+        let loss_due = self.started
+            && self.faults.iter().any(|fault| !fault.resolved && fault.entry.fault == FaultKind::DeviceLost && fault.tick <= u);
+        if loss_due {
+            self.refuse_actions(u);
+        } else if let Some(actions) = self.actions.clone() {
             while let Some(action) = actions.recv() {
                 self.handle_action(action, u)?;
                 progressed = true;
@@ -1623,18 +1650,19 @@ impl Provider for MockRadio {
                 let _ = self.emit_tx_until(tick, None)?;
             }
             match kind {
-                WorkKind::Fault { index } => {
-                    if matches!(
-                        self.faults[index].entry.fault,
-                        FaultKind::RxOverflow | FaultKind::RxSequenceError
-                    ) {
-                        self.apply_rx_fault(index)?;
-                    } else {
+                WorkKind::Fault { index } => match self.faults[index].entry.fault {
+                    FaultKind::RxOverflow | FaultKind::RxSequenceError => self.apply_rx_fault(index)?,
+                    FaultKind::DeviceLost => {
+                        // MR-20: the blocks before `f` are out, the loss being a receive cut;
+                        // the device stops at `f` as an `abort` would there, and the step fails.
                         self.faults[index].applied = true;
                         self.faults[index].resolved = true;
                         self.record_fault(index, 0);
+                        self.device_lost_reported = true;
+                        self.stop_at(StopMode::Abort, tick, DEVICE_LOST)?;
+                        return Err(ModuleError { kind: ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost, message: DEVICE_LOST.to_owned(), detail: serde_json::Value::Null });
                     }
-                }
+                },
                 WorkKind::HeldBurst { start } => {
                     if let Some(held) = self.held.remove(&start) {
                         self.open_tx = Some(OpenBurst {
