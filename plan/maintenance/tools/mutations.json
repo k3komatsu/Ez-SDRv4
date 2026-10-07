@@ -524,5 +524,17 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_stopped_stream_keeps_its_end"
+ },
+ {
+  "id": "G61",
+  "name": "VG-1: uhd-rx's abort writes its rx_stop row when it no longer holds the stream",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                            self.core.timing(json!({ \"what\": \"rx_stop\", \"at\": at, \"until\": cut, \"mode\": \"Abort\" }));\n",
+  "new": "",
+  "old2": "                        if let Some(stream) = self.stream.as_mut() {\n                            // A cut already set",
+  "new2": "                        self.core.timing(json!({ \"what\": \"rx_stop\", \"at\": at, \"until\": self.stream.as_ref().and_then(|stream| stream.cut).map_or(at, |set| set.min(at)), \"mode\": \"Abort\" }));\n                        if let Some(stream) = self.stream.as_mut() {\n                            // A cut already set",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stopped_stream_keeps_its_end"
  }
 ]

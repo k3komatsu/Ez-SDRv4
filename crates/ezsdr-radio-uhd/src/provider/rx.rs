@@ -661,7 +661,9 @@ mod tests {
         // A cut already set — a `Stop`'s at 0, at sample 1 000 with the 1 ms tail, or a
         // switch's `e₁` there — is kept when `Provider::stop`'s cut from 5 ms comes, under
         // `orderly` as under `abort`, and an abort's cut at 0.5 ms, earlier, replaces it: an end
-        // moves only earlier (UR-26, UR-25, RM-16; spec 21, VG-1; issue #46).
+        // moves only earlier (UR-26, UR-25, RM-16; spec 21, VG-1; issue #46). An abort that comes
+        // after the samples reached the `Stop`'s cut, uhd-rx having dropped the stream, records
+        // nothing ("ended Stop").
         use ezsdr_kernel::module_api::Link;
         use ezsdr_kernel::stream::BackPressure;
         for (first, mode, at_ns, end) in [
@@ -669,6 +671,7 @@ mod tests {
             ("Stop", StopMode::Abort, 5_000_000, 1_000),
             ("switch", StopMode::Abort, 5_000_000, 1_000),
             ("Stop", StopMode::Abort, 500_000, 500),
+            ("ended Stop", StopMode::Abort, 5_000_000, 1_000),
         ] {
             let decl = ezsdr_kernel::stream::DataLinkDecl {
                 id: ezsdr_kernel::id::DataLinkId::local(0),
@@ -684,21 +687,29 @@ mod tests {
             let clock = core.register(Dir::Rx, 200, 0).unwrap();
             let (_to_rx, cmds) = std::sync::mpsc::channel();
             let mut rx = Rx::new(core.clone(), cmds, Some(clock), 1, None);
-            if first == "Stop" {
-                rx.command(RxCmd::Stop);
-            } else {
+            if first == "switch" {
                 let e1 = clock.instant(1_000);
                 rx.command(RxCmd::Switch { e1, clock: None, channels: 0,
                     settings: Arc::new(ColdConfig::new(e1, crate::device::Settings::default())) });
+            } else {
+                rx.command(RxCmd::Stop);
+            }
+            let samples = || RxRecv::Samples { first_tick: clock.instant(0), samples: vec![vec![[0.0, 0.0]; 6_000]] };
+            if first == "ended Stop" {
+                rx.receive(samples());
+                assert!(rx.stream.is_none(), "the stream ended at its cut");
             }
             let at = core.ticks(at_ns);
             time.advance_to(core.at(at)).unwrap();
             rx.command(RxCmd::Cut { at, mode });
             let case = format!("{first}, then {mode:?} at {at_ns} ns");
-            // An abort stops the device at once, untimed (UR-26), whichever cut it keeps.
+            // By the abort the device is stopped, untimed (UR-26): at the abort, whichever cut it
+            // keeps, or already when the samples reached the `Stop`'s cut.
             let stopped = device.calls().iter().filter(|c| *c == "rx_stop now").count();
             assert_eq!(stopped, usize::from(mode == StopMode::Abort), "{case}");
-            rx.receive(RxRecv::Samples { first_tick: clock.instant(0), samples: vec![vec![[0.0, 0.0]; 6_000]] });
+            if first != "ended Stop" {
+                rx.receive(samples());
+            }
             let mut blocks = Vec::new();
             while let Some(block) = link.receive() {
                 blocks.push((block.header().first_sample_time.ticks, block.header().len));
@@ -707,13 +718,14 @@ mod tests {
             assert_eq!(device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count(), 1, "{case}");
             assert_eq!(lock(&core.rec).applied.iter().filter(|r| r["key"] == "rx_stop").count(), 1, "{case}");
             // Each `rx_stop` row's `until` is the cut set then: the `Stop`'s, and the abort's the
-            // earlier of that and its own instant, never a later one.
+            // earlier of that and its own instant, never a later one; none for a stream uhd-rx
+            // no longer holds.
             let kept = clock.instant(i64::from(end));
             let mut rows = Vec::new();
-            if first == "Stop" {
+            if first != "switch" {
                 rows.push((0, clock.instant(1_000)));
             }
-            if mode == StopMode::Abort {
+            if mode == StopMode::Abort && first != "ended Stop" {
                 rows.push((at, kept));
             }
             let recorded: Vec<_> = lock(&core.rec).timing.iter().filter(|r| r["what"] == "rx_stop")
