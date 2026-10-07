@@ -750,7 +750,7 @@ Follow-ups the reviews found (filed or fixed on 2026-10-07):
    nor tell the two leads apart. Phase 8 measures both leads (50 ms, INFERRED)
    and the UHD Module's minimum booking delay before a cold change.
 
-**Specs 21 and 22, 2026-10-07 (#46; the timing simplification) — step 1 実装中（2026-10-07 に再開）**
+**Specs 21 and 22, 2026-10-07 (#46; the timing simplification) — step 1 完了（`8699baf`），次は step 2**
 
 - **Spec 21**（[`plan/maintenance/21-amendments.md`](plan/maintenance/21-amendments.md)，#46）．Opus の作成と4回の反論レビュー（最終 PASS）のあと owner が受理（`fbbfa62`）．
   - **VG-1 は実装済み**：受信の終わりは早める方向にしか動かない．commit は `029f48a`，`f2b9c7d`（uhd-rx の abort は保持中の stream にだけ cut と行を書く），`7b6f376`（落ちた stream への abort のテスト）．`radio` 1.5.0，`ezsdr.radio.mock` 1.5.0，`ezsdr.radio.uhd` 0.3.0．mutation G01–G04，G58–G61 はすべて kill．
@@ -774,7 +774,8 @@ Follow-ups the reviews found (filed or fixed on 2026-10-07):
     - DA-3：spec ごとに書き直し，`rules.py` と文単位のレビューで抜けを確かめる．
     - DA-4：`plan/` はそのまま記録として残す．
     - DA-5：UC は spec 05 だけに置く．11 は 08 に統合する．監査と再レビューは `design/archive/` へ移す．
-- **次にすること**：spec 22 の *Implementation order* の step 1．`ezsdr_radio::timeline` と，VH-8 の最初の2層（timeline と MockRadio，timeline と uhd-control rig）を作る．既存の動作は変えない．進め方は従来どおり，Opus の実装役と Opus のレビュー役が1段階ずつ進め，PASS したら commit・push する．step 2（MockRadio と UHD を一緒に書き換える．`radio` 2.0.0）で #46–#50，#52，#53，#57，#58 が閉じる見込み．記録済みの mutation は約 67 行の書き直しが要る見込み．
+- **Step 1 完了（`8699baf`，Opus レビュー3回で PASS）**：`ezsdr_radio::timeline::plan`（cut と delivered はその区間のサンプル番号，ほかは root tick）と VH-8 の第1・2層（各1 000系列）．今の挙動と一致する class/field だけ assert し，残りは表示する（`DIVERGENT`，`FRACTIONAL_TX`．step 2 で空にする）．mutation J01–J06b（spec の H01–H06b．H は spec 20 が使用済み．step 2 の H07–H11 は J07–J11）．レビューで出た owner 判断：先に届いた `cold` 変更より前には効かせない（両方向，spec 22 VH-2 に追記）．レビューで見つかった issue：#61（UHD：0 チャネルへの変更の予約で，その前の timed 更新が適用されないまま issued と記録される），#62（MockRadio が UHD の装置キューの順番どおりの release を模擬しない）．
+- **次にすること**：spec 22 step 2（MockRadio と UHD を timeline に載せる．`radio` 2.0.0．#46–#50，#52，#53，#57，#58 を閉じ，#61 と #62 も扱う）．その前に，閉じた issue に `mech:` を付ける Opus の分類を1回行う（下の「Issue の概念別分析」）．
 - **既知の問題**：Python の `test_v54_sleep_is_run_time` が，この host では毎回 10 秒の上限をわずかに超えて落ちる（10.1〜12.9 秒）．HEAD から build した server でも同じなので，変更が原因ではない（VG-1 のレビューで VERIFIED）．FakeDevice の負荷に弱いテスト（`rehearsal_b6_…`，`uhd_61_03_…`，`ur_21_…`，`ur_2x_…`）も今までどおり．#60 で対処する予定．
 - **ログ**：`~/.cache/ezsdr-fixes/2026-10-07-spec21/`（`vg1-*`，`vg1b-*`，`vg1c-*`）．
 
@@ -930,7 +931,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-- **最優先（2026-10-07 時点）**：spec 22 の実装．step 1 を Opus の実装役が作業中（§4 の「Specs 21 and 22」）．そのあと，下の「次に危なそうな概念」の上位から設計メモを書くか owner に諮る．
+- **最優先（2026-10-07 時点）**：spec 22 の実装．step 1 完了，次は `mech:` の分類と step 2（§4 の「Specs 21 and 22」）．そのあと，下の「次に危なそうな概念」の上位から設計メモを書くか owner に諮る．
 0. **Phase 7 後の保守の残課題**（§4「Phase 7 後の保守」の表）：production の 1–2 と fake の 3 は owner の判断，6 は Phase 8 の bench 計画へ．
 1. **Phase 8（Mock ↔ X310 parity）の計画**（owner の依頼待ち）：Phase 7 は 2026-10-01 にクローズ済み（merge，実機セッション，Gate X，Step X）．Phase 8 へ送ったものは §4「Phase 7 のクローズ」，Phase 8 inputs は [plan/phase7/00-overview.md](plan/phase7/00-overview.md) §3．実機を使う前に X300 を戻してもらい `uhd_usrp_probe` で確認する．
 2. **v4.0 凍結前にすること**：`Endpoint::EventIn` / `EventOut` の形（event edge は Phase 10），`ParamDecl.update_class` を optional にすること（以上 Phase 5 Gate X），Manifest の `spec.source`（Spec builder のソースハッシュ，Phase 6 Gate X，KF-4）．
