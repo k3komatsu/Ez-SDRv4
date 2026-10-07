@@ -286,7 +286,7 @@ fn hw_b9_usrp2_probe() {
     let device = usrp();
     println!("B9 USRP2 describe: {}", serde_json::to_string_pretty(&device.describe()).unwrap());
     let binding = serde_json::from_value(serde_json::json!({
-        "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 3, "patch": 0 } },
+        "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
         "profile": profile_of(&*device).profile_ref(),
         "selector": { "args": args() }
     }))
@@ -1042,9 +1042,10 @@ fn hw_b8_raw_empty_eob_gap() {
 fn hw_b8_cold_change_timing_at_the_extremes() {
     // Review O, O-B2 on the bench, at the rates' extremes (the owner: "100kspsでも200Mspsでも
     // 大丈夫？" — 390 625 S/s is the X300's lowest): a receive `cold` change, booked at four
-    // phases of the receive call in progress, must put e₁ past that call (50 ms + the old
-    // stream's longer of block and packet + 3 ms) and switch before e₂, with no
-    // LATE_COMMAND. No capture (200 Msps is 1.6 GB/s of cf32): the Manifest's timing.
+    // phases of the receive call in progress, must put the new segment's origin past that
+    // call and the start lead (the old stream's longer of block and packet, 3 ms and 50 ms;
+    // RM-25's ready instant) and begin it before its origin, with no LATE_COMMAND. No capture
+    // (200 Msps is 1.6 GB/s of cf32): the Manifest's timing.
     for (from, to, block_len) in [(200e6, 100e6, None), (390_625.0, 400_000.0, Some(100u32)), (390_625.0, 2e6, Some(65_536))] {
         for phase in 0..4i64 {
             let dir = TempDir::new();
@@ -1061,25 +1062,25 @@ fn hw_b8_cold_change_timing_at_the_extremes() {
             let manifest = run.finish();
             let timing = section(&manifest, "timing").as_array().unwrap().clone();
             let change = timing.iter().rfind(|r| r["what"] == "cold_change").cloned().unwrap();
-            let switch = timing.iter().rfind(|r| r["what"] == "rx_switch").cloned().unwrap();
-            let stop = timing.iter().find(|r| r["what"] == "rx_stop_untimed" && r["cut"] == change["e1"]).cloned();
-            let (booked, e1, e2) = (change["booked_at"].as_i64().unwrap(), change["e1"].as_i64().unwrap(), change["e2"].as_i64().unwrap());
+            let segment = timing.iter().rfind(|r| r["what"] == "rx_segment").cloned().unwrap();
+            let (booked, e, origin) = (change["booked_at"].as_i64().unwrap(), change["e"].as_i64().unwrap(), segment["origin"].as_i64().unwrap());
+            let stop = timing.iter().find(|r| r["what"] == "rx_stop_untimed" && r["cut"].as_i64().is_some_and(|cut| cut >= e)).cloned();
             let n_old = (200e6 / from) as i64;
             let block = block_len.unwrap_or(2_000).max(packet as u32) as i64;
-            let floor = booked + ms(50) + block * n_old + ms(3);
+            let floor = e + block * n_old + ms(3) + ms(50);
             let late = events_of(&manifest, "radio.LATE_COMMAND");
             println!(
-                "B8 cold {from} → {to} S/s, block_len {block_len:?}, packet {packet}, phase {phase}: {:?}; e₁ − booking {:.3} ms (floor {:.3} ms); untimed stop {:?} ms after e₁; switch {:.3} ms before e₂; LATE_COMMAND {}; stats {}",
+                "B8 cold {from} → {to} S/s, block_len {block_len:?}, packet {packet}, phase {phase}: {:?}; origin − booking {:.3} ms (floor {:.3} ms); untimed stop {:?} ms after the cut; begun {:.3} ms before the origin; LATE_COMMAND {}; stats {}",
                 entry.outcome,
-                (e1 - booked) as f64 / TICKS_PER_MS as f64,
+                (origin - booked) as f64 / TICKS_PER_MS as f64,
                 (floor - booked) as f64 / TICKS_PER_MS as f64,
-                stop.map(|s| (s["at"].as_i64().unwrap() - e1) as f64 / TICKS_PER_MS as f64),
-                (e2 - switch["at"].as_i64().unwrap()) as f64 / TICKS_PER_MS as f64,
+                stop.map(|s| (s["at"].as_i64().unwrap() - e) as f64 / TICKS_PER_MS as f64),
+                (origin - segment["at"].as_i64().unwrap()) as f64 / TICKS_PER_MS as f64,
                 late.len(),
                 section(&manifest, "stats")
             );
-            assert!(e1 >= floor, "e₁ not past the call in progress");
-            assert!(switch["at"].as_i64().unwrap() < e2, "switched after e₂");
+            assert!(origin >= floor, "the origin not past the call in progress and the lead");
+            assert!(segment["at"].as_i64().unwrap() < origin, "begun after its origin");
             assert!(late.is_empty(), "{late:?}");
         }
     }

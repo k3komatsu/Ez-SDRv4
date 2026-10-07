@@ -138,7 +138,7 @@ fn v58_03_the_seed_changes_block_boundaries_not_data() {
     let eight = run_seed(8);
     assert_eq!(artifact(&seven, "rec").hash, artifact(&eight, "rec").hash);
     assert_eq!(section(&seven, "ezsdr.radio.mock.mock.stats")["rx_blocks"], 12);
-    assert_eq!(section(&eight, "ezsdr.radio.mock.mock.stats")["rx_blocks"], 11);
+    assert_eq!(section(&eight, "ezsdr.radio.mock.mock.stats")["rx_blocks"], 10);
 }
 
 #[test]
@@ -299,15 +299,19 @@ fn v58_11_short_lead_burst_is_a_time_error() {
     let (bytes, _) = experiments::waveform(1_000);
     run.submit(SessionAction::SetParameter { target: ResourceId::parse("radio").unwrap(), key: Key::parse("radio.tx.channels").unwrap(), value: Value::Int(1) }, None).unwrap();
     run.submit(SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: ResourceId::parse("radio/tx").unwrap(), at: Some(TimePoint::new(clock, T0 + 2_000_000)), params: Default::default() }, Some(&bytes)).unwrap();
-    let manifest = end_session(run, clock, T0 + 10_000_000);
+    let manifest = end_session(run, clock, T0 + 60_000_000);
+    // The new transmit clock starts x310-like's start lead after the change, at T0 + 51 ms
+    // (RM-25); the burst for T0 + 2 ms is its sample −49 000, before that origin, so it is
+    // late by 49 ms and starts at the origin (RM-15).
     let events: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].payload["cause"], "late");
     assert_eq!(events[0].payload["outcome"], "send_asap");
-    assert_eq!(events[0].payload["late_by_ns"], 1_000_000);
-    assert_eq!(events[0].payload["target"]["ticks"], 1_000);
+    assert_eq!(events[0].payload["late_by_ns"], 49_000_000);
+    assert_eq!(events[0].payload["target"]["ticks"], -49_000);
     let burst: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(section(&manifest, "ezsdr.radio.mock.mock.bursts")[0].clone()).unwrap();
-    assert_eq!(burst.late_by.unwrap().ticks, 1_000_000);
+    assert_eq!(burst.late_by.unwrap().ticks, 49_000_000);
+    assert_eq!(burst.target.ticks, 0);
 }
 
 #[test]
@@ -368,7 +372,8 @@ fn v58_13_session_manifest_has_log_waveform_and_capture() {
     let c = run.submit(SessionAction::Vocabulary { ns: Namespace::parse("sink").unwrap(), verb: Ident::parse("capture").unwrap(), target: ResourceId::parse("rec").unwrap(), at: None, params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::Int(5_000))]) }, None).unwrap();
     assert_eq!([a.seq, b.seq, c.seq], [0, 1, 2]);
     assert!([a, b, c].iter().all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
-    let manifest = end_session(run, clock, T0 + 20_000_000);
+    // Past the new transmit clock's origin, a start lead after the enable (RM-25).
+    let manifest = end_session(run, clock, T0 + 60_000_000);
     assert_eq!(manifest.action_log.len(), 3);
     assert_eq!(manifest.inputs.len(), 1);
     assert_eq!(artifact(&manifest, "rec_0").size_bytes, 40_000);

@@ -10,7 +10,7 @@ mod test_support;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -32,7 +32,7 @@ use ezsdr_radio::payloads::LateCommandPayload;
 use ezsdr_radio::{keys, kinds};
 use serde_json::{Value as Json, json};
 
-use self::core::{Clock, Core, lattice, lock};
+use self::core::{Clock, Core, lock};
 use self::control::Control;
 use self::rx::{Rx, RxCmd};
 use self::tx::{Tx, TxCmd};
@@ -55,12 +55,11 @@ struct Prepared {
     config: BTreeMap<Key, Value>,
     rx: Option<(SampleClockHandle, usize)>,
     tx: Option<(SampleClockHandle, usize)>,
-    rx_clock: Option<Clock>,
     tx_clock: Option<Clock>,
 }
 
 struct Running {
-    stop: Arc<AtomicBool>,
+    stop: control::StopRequest,
     to_tx: Sender<TxCmd>,
     to_rx: Sender<RxCmd>,
     threads: Vec<(&'static str, JoinHandle<()>)>,
@@ -93,7 +92,7 @@ impl UhdRadio {
             return Err(rejected("UR-5: the binding names another Module"));
         }
         let Some(profile) = binding.profile.as_ref().and_then(Profile::from_ref) else {
-            return Err(rejected("UR-5: the profile must be x310-ubx 0.2.0 or x310-cbx 0.2.0"));
+            return Err(rejected("UR-5: the profile must be x310-ubx, x310-obx or x310-cbx 0.3.0"));
         };
         if binding.feed.is_some() {
             return Err(rejected("UR-5: a Provider binding carries no feed"));
@@ -368,7 +367,7 @@ impl Provider for UhdRadio {
             handles[slot] = Some((handle, channels));
         }
         let [rx, tx] = handles;
-        self.prepared = Some(Prepared { core, actions: ctx.actions, config: config.clone(), rx, tx, rx_clock: None, tx_clock: None });
+        self.prepared = Some(Prepared { core, actions: ctx.actions, config: config.clone(), rx, tx, tx_clock: None });
         Ok(PrepareReport { fragment: f.id.clone(), effective: config, coercions: report.coercions, warnings: Vec::new() })
     }
 
@@ -395,13 +394,10 @@ impl Provider for UhdRadio {
             self.device.tx_open(*channels).map_err(|e| rejected(format!("UR-13: {e}")))?;
             // RM-25: the first lattice instant at or after the arm instant.
             let n = handle.root_ticks_per_tick.num() as i64;
-            let origin = lattice(i128::from(a), n).map_err(|e| rejected(format!("UR-13: {e}")))?;
+            let origin = ezsdr_radio::timeline::lattice(a, handle.root_ticks_per_tick).map_err(|e| rejected(format!("UR-13: {e}")))?;
             let domain = core.clocks.register_sample_clock(handle, origin).map_err(|e| rejected(format!("UR-13: {e}")))?;
             let clock = Clock { domain, origin, n };
             prepared.tx_clock = Some(clock);
-            let mut streams = lock(&core.streams);
-            streams.tx = Some(clock);
-            streams.tx_channels = *channels;
         }
         core.timing(json!({ "what": "arm", "at": a, "start_up_until": s }));
         Ok(())
@@ -438,31 +434,28 @@ impl Provider for UhdRadio {
                 core.description.timing.startup_latency_ns
             )));
         }
-        let mut rx_clock = None;
-        let mut rx_channels = 0;
-        if let Some((handle, channels)) = rx.filter(|_| !core.links.is_empty()) {
-            let n = handle.root_ticks_per_tick.num() as i64;
-            let domain = core.clocks.register_sample_clock(&handle, t0).map_err(|e| rejected(format!("UR-15: {e}")))?;
-            let clock = Clock { domain, origin: t0, n };
+        // RM-25, UR-15: the receive stream's first segment starts at T0, its clock registered
+        // by uhd-rx at its first block.
+        let first = rx.filter(|_| !core.links.is_empty());
+        if first.is_some() {
             self.device.rx_start(t0).map_err(|e| rejected(format!("UR-15: {e}")))?;
-            lock(&core.streams).rx = Some(clock);
-            rx_clock = Some(clock);
-            rx_channels = channels;
         }
-        if let Some(prepared) = self.prepared.as_mut() {
-            prepared.rx_clock = rx_clock;
-        }
+        let start = control::Start {
+            t0,
+            rx: first.as_ref().map(|(handle, channels)| (*channels, handle.root_ticks_per_tick.num() as i64)),
+            tx: tx_clock.map(|clock| (clock, tx_channels)),
+        };
         core.timing(json!({ "what": "start", "t0": t0, "lead_ns": core.ns(t0 - now) }));
         let (to_tx, from_control_tx) = mpsc::channel();
         let (to_rx, from_control_rx) = mpsc::channel();
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = control::StopRequest::default();
         self.running = Some(Running { stop: stop.clone(), to_tx: to_tx.clone(), to_rx: to_rx.clone(), threads: Vec::new() });
         // uhd-rx and uhd-tx start whether or not their direction has a stream (UR-15).
-        let rx = Rx::new(core.clone(), from_control_rx, rx_clock, rx_channels, self.rx_stall);
+        let rx = Rx::new(core.clone(), from_control_rx, first.map(|(handle, channels)| (handle, channels, t0)), self.rx_stall);
         self.spawn(&core, "uhd-rx", move || rx.run())?;
         let tx = Tx::new(core.clone(), from_control_tx, tx_clock, tx_channels);
         self.spawn(&core, "uhd-tx", move || tx.run())?;
-        let control = Control::new(core.clone(), actions, to_tx, to_rx, config, self.clock_source != "internal");
+        let control = Control::new(core.clone(), actions, to_tx, to_rx, config, self.clock_source != "internal", start);
         self.spawn(&core, "uhd-control", move || control.run(stop))?;
         Ok(())
     }
@@ -478,11 +471,12 @@ impl Provider for UhdRadio {
             return Ok(());
         };
         let at = core.now();
-        // uhd-rx learns the stop instant now, so that its tail is counted from it and not
-        // from when the transmit side has finished (RM-16; Review L, NONBLOCKING 9).
+        // uhd-rx learns of the stop now: it begins no segment, and under `abort` ends the
+        // stream at once (RM-16; Review L, NONBLOCKING 9).
         let _ = to_rx.send(RxCmd::Cut { at, mode });
-        // uhd-control first: it cancels the held timed commands as it ends.
-        stop.store(true, Ordering::Release);
+        // uhd-control first: it cancels the held timed commands and books the streams' end at
+        // the stop instant (VH-2).
+        *lock(&stop) = Some((at, mode));
         self.join(&core, "uhd-control");
         // Transmit before receive (RM-16).
         let _ = to_tx.send(TxCmd::Shutdown);

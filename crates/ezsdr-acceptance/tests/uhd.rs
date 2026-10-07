@@ -216,6 +216,9 @@ fn uhd_61_01_repeat_is_continuous_across_the_wrap() {
 fn uhd_61_02_capture_starts_at_the_requested_sample_index() {
     let temp = rig::TempDir::new("uhd-61-02");
     let mut run = uhd_session(&temp);
+    // The receive SampleClock is registered at its first block (RM-25, UR-17).
+    let first_block = TimePoint::new(run.now().domain, run.now().ticks + 10 * MS);
+    run.advance_to(first_block).unwrap();
     let rx = run.sample_clocks().into_iter().find(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).expect("the receive SampleClock");
     let n = rx.root_ticks_per_tick.num() as i64;
     // A sample index 100 ms ahead of the Run's time (v3's capture at a sample index).

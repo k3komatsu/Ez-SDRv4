@@ -43,10 +43,11 @@ fn ur_01_the_descriptor_registers() {
     registry.register(ezsdr_radio_uhd::descriptor(), ezsdr_radio_uhd::factories()).unwrap();
     let descriptor = registry.modules().find(|d| d.id.as_str() == "ezsdr.radio.uhd").unwrap();
     assert_eq!(descriptor.roles, [Role::Provider, Role::Authority]);
-    assert_eq!(descriptor.impl_hash, Some(ContentHash::of_bytes(b"ezsdr.radio.uhd 0.3.0")));
+    assert_eq!(descriptor.impl_hash, Some(ContentHash::of_bytes(b"ezsdr.radio.uhd 0.4.0")));
+    assert_eq!(descriptor.version, ezsdr_kernel::module_api::Version::new(0, 4, 0));
     let mut old = ModuleRegistry::new();
     let mut vocabulary = ezsdr_radio::vocabulary();
-    vocabulary.version = ezsdr_kernel::module_api::Version::new(1, 2, 0);
+    vocabulary.version = ezsdr_kernel::module_api::Version::new(1, 5, 0);
     old.register_vocabulary(vocabulary).unwrap();
     assert!(old.register(ezsdr_radio_uhd::descriptor(), ezsdr_radio_uhd::factories()).is_err());
 }
@@ -94,7 +95,7 @@ fn ur_05_from_binding_refusals() {
     other.module.id = ezsdr_kernel::id::ModuleId::parse("ezsdr.radio.mock").unwrap();
     assert!(refuse(other, device.clone()).starts_with("UR-5:"));
     assert!(refuse(binding(ok.clone(), None), device.clone()).starts_with("UR-5:"));
-    let x310_like = json!({ "name": "x310-like", "version": { "major": 1, "minor": 2, "patch": 0 } });
+    let x310_like = json!({ "name": "x310-like", "version": { "major": 2, "minor": 0, "patch": 0 } });
     assert!(refuse(binding(ok.clone(), Some(x310_like)), device.clone()).starts_with("UR-5:"));
     let mut fed = binding(ok.clone(), Some(x310_ubx()));
     fed.feed = serde_json::from_value(json!({ "port": { "component": "radio", "port": "rx" }, "policy": "drop_oldest", "capacity": 4 })).unwrap();
@@ -110,11 +111,11 @@ fn ur_05_from_binding_refusals() {
 }
 
 fn x310_cbx() -> Json {
-    json!({ "name": "x310-cbx", "version": { "major": 0, "minor": 2, "patch": 0 } })
+    json!({ "name": "x310-cbx", "version": { "major": 0, "minor": 3, "patch": 0 } })
 }
 
 fn x310_obx() -> Json {
-    json!({ "name": "x310-obx", "version": { "major": 0, "minor": 2, "patch": 0 } })
+    json!({ "name": "x310-obx", "version": { "major": 0, "minor": 3, "patch": 0 } })
 }
 
 #[test]
@@ -939,6 +940,7 @@ fn tx_session(config: FakeConfig) -> (RunHandle, Arc<FakeDevice>, TempDir) {
     let mut run = session(&profile(&dir, json!({}), json!({}), true), device.clone());
     past_t0(&mut run, ms(1));
     assert!(admitted(&run.submit(set("radio.tx.channels", Value::Int(1)), None).unwrap()));
+    past_tx_origin(&mut run);
     (run, device, dir)
 }
 
@@ -993,7 +995,9 @@ fn ur_21_a_burst_before_start_up_is_refused() {
     let dir = TempDir::new();
     let mut run = session(&profile(&dir, json!({}), json!({}), true), fake(FakeConfig::default()));
     assert!(admitted(&run.submit(set("radio.tx.channels", Value::Int(1)), None).unwrap()));
-    let _ = send(&mut run, "send", None, &tone(10));
+    // On the new clock, after its origin, the start lead after the change (RM-25), and
+    // before the device's start-up.
+    let _ = send(&mut run, "send", Some(ms(60)), &tone(10));
     let manifest = run.finish();
     assert!(rejections(&manifest).iter().any(|r| r.starts_with("UR-21: the burst begins before the device's start-up")), "{:?}", rejections(&manifest));
 }
@@ -1322,14 +1326,17 @@ fn ur_24_a_released_command_is_not_recalled_by_stop() {
 
 #[test]
 fn ur_24_stop_cancels_held_commands() {
+    // RM-16, UR-26 (spec 22, VH-6): a `Stop` of the device cancels no held timed command —
+    // the one for 5 ms after it is issued —, and `Provider::stop` cancels those still held.
     let dir = TempDir::new();
     let device = fake(FakeConfig::default());
     let mut spec = receive_spec(1, 1e6, 1e9, None);
-    spec["schedule"] = json!([{
-        "at": { "clock": "radio", "offset_ticks": 1_000_000 },
+    let update = |offset: i64, value: f64| json!({
+        "at": { "clock": "radio", "offset_ticks": offset },
         "action": { "kind": "update_parameter", "target": serde_json::to_value(ResourceId::parse("radio").unwrap()).unwrap(),
-                    "key": "radio.rx.frequency_hz", "value": 2.3e9, "class": "hardware_timed" }
-    }, {
+                    "key": "radio.rx.frequency_hz", "value": value, "class": "hardware_timed" }
+    });
+    spec["schedule"] = json!([update(1_000_000, 2.3e9), update(10_000_000_000, 2.2e9), {
         "at": { "clock": "radio", "offset_ticks": 10_000 },
         "action": { "kind": "stop", "target": serde_json::to_value(ResourceId::parse("radio").unwrap()).unwrap() }
     }]);
@@ -1337,8 +1344,11 @@ fn ur_24_stop_cancels_held_commands() {
     let t0 = run.start_instant().unwrap();
     run.advance_to(TimePoint::new(t0.domain, t0.ticks + ms(1_100))).unwrap();
     let manifest = run.finish();
-    assert!(calls(&device, "apply rx 0 rate=- freq=2300000000").is_empty(), "{:?}", device.calls());
-    assert!(section(&manifest, "applied").as_array().unwrap().iter().any(|r| r["cancelled"] == "Stop"));
+    assert_eq!(calls(&device, "apply rx 0 rate=- freq=2300000000").len(), 1, "{:?}", device.calls());
+    assert!(calls(&device, "apply rx 0 rate=- freq=2200000000").is_empty(), "{:?}", device.calls());
+    let applied = section(&manifest, "applied").as_array().unwrap().clone();
+    assert!(applied.iter().all(|r| r["cancelled"] != "Stop"), "{applied:?}");
+    assert!(applied.iter().any(|r| r["cancelled"] == "Provider::stop" && r["claimed"] == 2.2e9), "{applied:?}");
 }
 
 #[test]
@@ -1363,7 +1373,7 @@ fn ur_25_a_cold_rate_change_starts_a_new_clock_on_its_lattice() {
     assert!(e2 - e1 >= ms(50));
     let capture = capture_of(&manifest, "rec");
     assert_eq!(capture.continuity.len(), 2, "{:?}", capture.continuity);
-    assert!(capture.continuity.iter().all(|m| m.gaps.is_empty()));
+    assert!(capture.continuity.iter().all(|m| m.gaps.is_empty()), "{:?} {:?} {}", capture.continuity, clocks, section(&manifest, "timing"));
 }
 
 #[test]
@@ -1423,7 +1433,9 @@ fn ur_25_a_cold_receive_change_delivers_every_sample_before_e1() {
 fn ur_25_a_stream_silent_before_e1_switches_before_e2() {
     // design-notes §11 F2: a stream that stops yielding before e₁ is ended within a block
     // of e₁, not at uhd-rx's next 100 ms receive timeout, so that the timed start at e₂
-    // is on time. The fake falls silent 105 ms before e₁: its timeouts come 100 ms apart.
+    // is on time. The fake falls silent 130 ms before e₁: 100 ms timeouts would come about
+    // 30 ms before the cut and 70 ms after it, past e₂ (the cut, one receive call, the
+    // allowance and the start lead: about 55 ms).
     use ezsdr_kernel::module_api::UpdateClass::Cold;
     // Direct starts its Run ~2 s after the fake's time zero (the start-up lead).
     let silent = ms(2_300);
@@ -1433,7 +1445,7 @@ fn ur_25_a_stream_silent_before_e1_switches_before_e2() {
         vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)],
     );
     assert!(direct.now() < silent - ms(150), "the Run started late: {}", direct.now());
-    direct.update("radio.rx.sample_rate_hz", Value::Num(2e6), Cold, Some(silent + ms(105)));
+    direct.update("radio.rx.sample_rate_hz", Value::Num(2e6), Cold, Some(silent + ms(130)));
     let until = silent + ms(300) - direct.now();
     direct.settle(Wall::from_nanos((until * 5) as u64));
     let late = direct.of("radio.LATE_COMMAND");
@@ -1442,8 +1454,8 @@ fn ur_25_a_stream_silent_before_e1_switches_before_e2() {
     assert!(direct.device.min_recv_timeout() >= Wall::from_millis(1), "{:?}", direct.device.min_recv_timeout());
     let instance = direct.finish();
     let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
-    let switch = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_switch").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
-    let e2 = switch["e2"].as_i64().unwrap();
+    let switch = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_segment").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
+    let e2 = switch["origin"].as_i64().unwrap();
     assert!(switch["at"].as_i64().unwrap() < e2, "switched after e₂: {switch}");
     // Stopped untimed and recorded, before the new stream's start.
     let calls = direct_calls;
@@ -1479,11 +1491,13 @@ fn ur_25_rx_channels_from_zero_starts_at_its_instant() {
     let at = direct.now() + ms(300);
     direct.update("radio.rx.channels", Value::Int(1), Cold, Some(at));
     direct.settle(Wall::from_millis(30));
-    let records: Vec<_> = direct.clocks.sample_clock_records().into_iter().filter(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).collect();
-    assert_eq!(records.len(), 1, "{records:?}");
-    let origin = records[0].origin.ticks;
+    // The timed start is issued once configured; the clock is registered at the first block.
+    let start = direct.device.calls().into_iter().rev().find(|c| c.starts_with("rx_start ")).unwrap_or_else(|| panic!("{:?}", direct.device.calls()));
+    let origin: i64 = start["rx_start ".len()..].parse().unwrap();
     assert!(origin >= at && origin < at + 200, "origin {origin}, asked {at}");
-    assert!(direct.device.calls().iter().any(|c| *c == format!("rx_start {origin}")), "{:?}", direct.device.calls());
+    direct.settle(Wall::from_millis(400));
+    let records: Vec<_> = direct.clocks.sample_clock_records().into_iter().filter(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).collect();
+    assert_eq!(records.iter().map(|r| r.origin.ticks).collect::<Vec<_>>(), [origin], "{records:?}");
     assert!(direct.of("radio.COMMAND_REJECTED").is_empty());
     let _ = direct.finish();
 }
@@ -1503,8 +1517,9 @@ fn ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuratio
     let envelope = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.envelope").unwrap()];
     let lead = envelope["timing"]["start_lead_ns"].as_i64().unwrap() * MCR / 1_000_000_000;
     let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
-    let row = timing.as_array().unwrap().iter().find(|r| r["what"] == "enabled" && r["dir"] == "rx").cloned().unwrap_or_else(|| panic!("{timing}"));
-    let (e, configured, origin) = (row["e"].as_i64().unwrap(), row["configured"].as_i64().unwrap(), row["origin"].as_i64().unwrap());
+    let row = timing.as_array().unwrap().iter().find(|r| r["what"] == "cold_change").cloned().unwrap_or_else(|| panic!("{timing}"));
+    let segment = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_segment").cloned().unwrap_or_else(|| panic!("{timing}"));
+    let (e, configured, origin) = (row["e"].as_i64().unwrap(), row["ready"].as_i64().unwrap(), segment["origin"].as_i64().unwrap());
     assert!(configured - e >= ms(80), "{row}");
     // 200 root ticks per sample: 1 MS/s on the 200 MHz root.
     assert_eq!(origin, (e.max(configured + lead) + 199) / 200 * 200, "{row}, lead {lead}");
@@ -1561,6 +1576,7 @@ fn ur_25_enabling_tx_applies_the_configuration() {
     assert!(admitted(&run.submit(set("radio.tx.channels", Value::Int(1)), None).unwrap()));
     let calls = device.calls();
     assert!(calls.iter().any(|c| c.starts_with("apply tx 0 rate=1000000 freq=2400000000 gain=5 antenna=TX/RX at=-")), "{calls:?}");
+    past_tx_origin(&mut run);
     let wave = tone(1_000);
     let _ = send(&mut run, "start_repeat", Some(ms(20)), &wave);
     wait(&mut run, ms(40));
@@ -1612,12 +1628,18 @@ fn ur_25_a_rate_the_device_does_not_apply_at_the_switch_is_rejected() {
     wait(&mut run, ms(300));
     let manifest = run.finish();
     assert!(rejections(&manifest).iter().any(|r| r.starts_with("UR-12: the device applied 19900000 S/s")), "{:?}", rejections(&manifest));
-    let new = manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).nth(1).unwrap();
-    assert_eq!(new.ended_at, Some(new.origin));
+    // RM-25 (spec 22, VH-2): the refused change halts the stream: it has no segment, so no
+    // clock, and nothing starts again until the next change or `start_rx`.
+    let clocks: Vec<_> = manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).collect();
+    assert_eq!(clocks.len(), 1, "{clocks:?}");
+    assert!(clocks[0].ended_at.is_some());
+    assert_eq!(events_of(&manifest, "radio.COMMAND_REJECTED").len(), 1);
 }
 
 #[test]
 fn ur_26_stop_actions() {
+    // UR-26: a `Stop` of the transmit stream ends its burst, of the receive stream cuts it at
+    // its booking, of the device does both, and of another target is refused.
     let (mut run, _, _dir) = tx_session(FakeConfig::default());
     let _ = send(&mut run, "start_repeat", Some(ms(10)), &tone(100));
     wait(&mut run, ms(30));
@@ -1629,7 +1651,7 @@ fn ur_26_stop_actions() {
     wait(&mut run, ms(20));
     let manifest = run.finish();
     assert_eq!(bursts(&manifest)[0].end, BurstEnd::Stop);
-    assert!(section(&manifest, "timing").as_array().unwrap().iter().any(|r| r["what"] == "rx_stop"));
+    assert!(section(&manifest, "applied").as_array().unwrap().iter().any(|r| r["key"] == "rx_stop"));
     assert!(rejections(&manifest).iter().any(|r| r.starts_with("UR-26: the Stop target is not this device")), "{:?}", rejections(&manifest));
 }
 
@@ -1643,19 +1665,20 @@ fn capture_end_and_stop(manifest: &Manifest) -> (i64, i64) {
 }
 
 #[test]
-fn ur_26_orderly_stop_delivers_the_tail_abort_does_not() {
-    // Orderly: samples up to the stop instant plus stop_tail_ns reach the capture.
+fn ur_26_orderly_stop_ends_at_its_instant_abort_at_once() {
+    // RM-16 (spec 22, VH-3): orderly, the samples up to the stop instant reach the capture,
+    // with no tail — up to the first sample not yet delivered when uhd-rx learns of it, a
+    // receive call later at most.
     let dir = TempDir::new();
     let mut run = spec_run(&receive_spec(1, 1e6, 1e9, Some(10_000_000)), &profile(&dir, json!({}), json!({}), false), fake(FakeConfig::default()), BTreeMap::new());
     past_t0(&mut run, ms(100));
     let manifest = run.finish();
     let (end, stop) = capture_end_and_stop(&manifest);
-    assert!(end >= stop, "the tail after the stop was delivered: end {end}, stop {stop}");
-    // uhd-rx's own stop instant: the capture runs on for stop_tail_ns (1 ms) after it.
-    let rx_stop = section(&manifest, "timing").as_array().unwrap().iter().find(|r| r["what"] == "rx_stop").unwrap()["at"].as_i64().unwrap();
-    assert!(end + 200 >= rx_stop + ms(1), "the 1 ms tail: end {end}, uhd-rx stopped at {rx_stop}");
-    // …counted from the stop instant, not from when uhd-rx got to it (Review M, N-6).
-    assert!(end <= stop + ms(1) + 200, "the tail ends 1 ms after the stop instant: end {end}, stop {stop}");
+    assert!(end >= stop, "every sample before the stop was delivered: end {end}, stop {stop}");
+    // Counted from the stop instant, not from when uhd-rx got to it (Review M, N-6).
+    let rx_stop = section(&manifest, "timing").as_array().unwrap().iter().find(|r| r["what"] == "rx_stop").unwrap();
+    assert_eq!(rx_stop["at"].as_i64().unwrap(), stop, "{rx_stop}");
+    assert!(end <= stop + 2_000 * 200 + 200, "no tail: end {end}, stop {stop}");
     // Abort (CLOCK_LOST's default): nothing after the stop.
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::Unlocked(Wall::from_millis(2_200))], ..FakeConfig::default() });
@@ -1667,11 +1690,48 @@ fn ur_26_orderly_stop_delivers_the_tail_abort_does_not() {
 }
 
 #[test]
+fn ur_26_a_stop_cuts_at_its_booking() {
+    // RM-16, UR-25 (spec 22, VH-3): a `Stop` of the receive stream cuts it at the first sample
+    // at or after the instant uhd-control books it — no tail, not the end of the receive call
+    // in progress — so no sample at or after that instant is published; at 1 MS/s with 2 000-
+    // sample blocks, and at 390.625 kS/s with blocks of 65 536 (168 ms) as well.
+    for (rate, block_len) in [(1e6, 2_000), (390_625.0, 65_536)] {
+        let port = attached(ezsdr_kernel::stream::BackPressure::DropOldest);
+        let Endpoint::StreamOut(link) = &port.endpoint else { unreachable!() };
+        let link = link.clone();
+        let mut direct = Direct::build(bench_link(2), &[("radio.rx.sample_rate_hz", Value::Num(rate))], vec![port], json!({ "block_len": block_len }));
+        direct.settle(Wall::from_millis(250));
+        let before = direct.now();
+        direct.push(Action::Stop { target: Some(ResourceId::parse("usrp/rx").unwrap()) });
+        direct.settle(Wall::from_millis(400));
+        let mut end = 0;
+        while let Some(block) = link.receive() {
+            end = end.max(block.header().first_sample_time.ticks + i64::from(block.header().len));
+        }
+        let instance = direct.finish();
+        let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.applied").unwrap()];
+        let row = applied.as_array().unwrap().iter().find(|r| r["key"] == "rx_stop").cloned().unwrap_or_else(|| panic!("{applied}"));
+        let cut = row["at"]["ticks"].as_i64().unwrap();
+        let n = (MCR as f64 / rate) as i64;
+        assert!(cut >= before && cut <= before + ms(5) + n, "rate {rate}: cut at {cut}, booked from {before}");
+        let origin = direct_origin(&instance);
+        assert!(origin + end * n <= cut, "rate {rate}: published up to {}, cut at {cut}", origin + end * n);
+    }
+}
+
+/// The first receive clock's origin, T0, from the `timing` section's `start` row.
+fn direct_origin(instance: &ezsdr_kernel::module_api::ProviderInstance) -> i64 {
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
+    timing.as_array().unwrap().iter().find(|r| r["what"] == "start").unwrap()["t0"].as_i64().unwrap()
+}
+
+#[test]
 fn ur_26_an_abort_publishes_nothing_after_the_stop_instant() {
-    // RM-16: under abort the receive stream ends at the stop instant, with no tail
-    // (Review L, L12). The link keeps the newest blocks (drop-oldest). Blocks of 20 ms,
-    // so that uhd-rx is almost surely inside a receive wait when the stop begins, and
-    // the block it then receives straddles the stop instant.
+    // RM-16: under abort the receive stream ends at the first sample not yet delivered
+    // when uhd-rx learns of the stop (Review L, L12). The link keeps the newest blocks
+    // (drop-oldest). Blocks of 20 ms, so that uhd-rx is almost surely inside a receive wait
+    // when the stop begins, and the block it then receives, straddling the stop instant,
+    // is discarded whole.
     let port = attached(ezsdr_kernel::stream::BackPressure::DropOldest);
     let Endpoint::StreamOut(link) = &port.endpoint else { unreachable!() };
     let link = link.clone();
@@ -1689,7 +1749,7 @@ fn ur_26_an_abort_publishes_nothing_after_the_stop_instant() {
     let stop = timing.as_array().unwrap().iter().find(|r| r["what"] == "stop").unwrap()["at"].as_i64().unwrap();
     let origin = direct.clocks.sample_clock_records().iter().find(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).unwrap().origin.ticks;
     let end = origin + end.expect("blocks were published") * 200;
-    assert!(end <= stop + 200, "published up to {end}, stopped at {stop}");
+    assert!(end < stop, "published up to {end}, stopped at {stop}");
     // One stop, recorded once: not again when the tail reaches the cut (Review N, N4).
     let calls = direct.device.calls();
     assert_eq!(calls.iter().filter(|c| c.starts_with("rx_stop")).count(), 1, "{calls:?}");
@@ -1717,20 +1777,6 @@ fn ur_26_an_orderly_stop_does_not_restart_the_stream() {
     let instance = direct.radio.instance().clone();
     let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
     assert!(timing.as_array().unwrap().iter().all(|r| r["what"] != "rx_stop_late"), "{timing}");
-}
-
-#[test]
-fn ur_25_enabling_a_draining_stream_is_refused() {
-    // 1 → 0 → 1 receive channels inside the restart lead: the old stream still runs to its
-    // e₁, so the enable is refused rather than opening a second stream (Review M, N-4).
-    let dir = TempDir::new();
-    let mut run = session(&profile(&dir, json!({}), json!({}), true), fake(FakeConfig::default()));
-    past_t0(&mut run, ms(1));
-    assert!(admitted(&run.submit(set("radio.rx.channels", Value::Int(0)), None).unwrap()));
-    assert!(admitted(&run.submit(set("radio.rx.channels", Value::Int(1)), None).unwrap()));
-    wait(&mut run, ms(100));
-    let manifest = run.finish();
-    assert!(rejections(&manifest).iter().any(|r| r.starts_with("UR-25: the stream changed to 0 channels is still draining")), "{:?}", rejections(&manifest));
 }
 
 #[test]
@@ -2376,6 +2422,10 @@ fn captures_across_cold_changes(config: FakeConfig, selector: Json, rates: [f64;
         problems.push(format!("a receive wait of {:?}", device.min_recv_timeout()));
     }
     for artifact in manifest.artifacts.iter().filter(|a| a.id.as_str().starts_with("rec")) {
+        // Each capture begins before its change, so it holds both clocks' samples.
+        if artifact.continuity.len() < 2 {
+            problems.push(format!("{}: the samples of one clock only: {:?}", artifact.id, artifact.continuity));
+        }
         let data = read_capture(artifact, 1).remove(0);
         let mut at = 0usize;
         for (m, map) in artifact.continuity.iter().enumerate() {
@@ -2638,12 +2688,15 @@ fn ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time() {
         let late = direct.of("radio.LATE_COMMAND");
         let instance = direct.finish();
         let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
-        let switch = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_switch").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
-        // UR-25's floor: 50 ms + the longer of a block and a packet + 3 ms (Review Q, TG-Q3).
+        let switch = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_segment").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
+        // UR-25's ready instant (spec 22, VH-4): the new origin is at least the cut, at the
+        // booking, plus the longer of a block and a packet at the old rate, 3 ms and the
+        // start lead (Review Q, TG-Q3).
         let booked = timing.as_array().unwrap().iter().find(|r| r["what"] == "cold_change").cloned().unwrap();
         let floor = ms(50) + block_len.max(packet) as i64 * 512 + ms(3);
-        assert!(booked["e1"].as_i64().unwrap() - booked["booked_at"].as_i64().unwrap() >= floor, "block {block_len} packet {packet}: {booked}");
-        assert!(switch["at"].as_i64().unwrap() < switch["e2"].as_i64().unwrap(), "block {block_len} packet {packet} phase {phase}: switched after e₂: {switch}");
+        let origin = switch["origin"].as_i64().unwrap();
+        assert!(origin - booked["booked_at"].as_i64().unwrap() >= floor, "block {block_len} packet {packet}: {booked} {switch}");
+        assert!(switch["at"].as_i64().unwrap() < origin, "block {block_len} packet {packet} phase {phase}: switched after e₂: {switch}");
         assert!(late.is_empty(), "block {block_len} packet {packet} phase {phase}: {late:?}");
     }
 }

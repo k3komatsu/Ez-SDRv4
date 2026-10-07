@@ -131,7 +131,7 @@ fn v61_04_pps_source_is_armed_first_and_streams_align() {
     });
     let spec = json!({
         "version": 1,
-        "requirements": { "vocabularies": [{ "id": "radio", "major": 1 }, { "id": "sink", "major": 1 }] },
+        "requirements": { "vocabularies": [{ "id": "radio", "major": 2 }, { "id": "sink", "major": 1 }] },
         "resources": { "pps": radio_resource.clone(), "follow": radio_resource },
         "outputs": [output("rec_pps", "pps"), output("rec", "follow")],
         "policies": {},

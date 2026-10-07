@@ -1,28 +1,29 @@
 //! uhd-control (UR-14): drains the `ActionReceiver` with MA-14b's loop, books each
-//! Action and hands device work to its owner, releases held timed commands, and
-//! every 500 ms checks the reference and reads the device's time. It never waits
-//! for a device instant.
+//! Action — a stream's commands on its timeline, whose plan it hands to the stream's owner —
+//! releases held timed commands, and every 500 ms checks the reference and reads the
+//! device's time. It never waits for a device instant.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as Wall, Instant};
 
 use ezsdr_kernel::event::{Action, Severity};
 use ezsdr_kernel::id::ClockDomainId;
-use ezsdr_kernel::module_api::{ActionReceiver, Requested, UpdateClass};
+use ezsdr_kernel::module_api::{ActionReceiver, Requested, StopMode, UpdateClass};
 use ezsdr_kernel::spec::{Constraint, Key, Value};
-use ezsdr_kernel::stream::{BurstOpen, LateOutcome};
-use ezsdr_kernel::time::{AbsoluteDeadline, Duration, TimePoint, TimeError};
+use ezsdr_kernel::stream::{BurstOpen, Direction, LateOutcome};
+use ezsdr_kernel::time::{AbsoluteDeadline, Duration, Rational, TimePoint, TimeError};
 use ezsdr_radio::payloads::{
     ClockLostPayload, ClockReference, CommandQueueFullPayload, LateCommandPayload, TimeErrorCause,
     TimeErrorOutcome, TimeErrorPayload,
 };
+use ezsdr_radio::timeline::{self, Config, Item, Kind, Line, Segment};
 use ezsdr_radio::{keys, kinds};
 use serde_json::json;
 
-use super::core::{Core, lattice, lock};
+use super::core::{Clock, Core, lock};
 use super::rx::RxCmd;
 use super::tx::{Held, TxCmd};
 use crate::device::{DeviceError, Dir, Iq, Settings, decimation};
@@ -48,28 +49,29 @@ impl Timed {
     }
 }
 
-/// A cold switch's base configuration and timed updates, shared with its owner.
-/// Updates are projected in effective order at e2, even when admitted after booking.
+/// A segment's base configuration and timed updates, shared with its owner: the
+/// configuration in effect at its origin (UC-2's projection, UR-17). Updates are
+/// projected in effective order, even when admitted after booking.
 pub(crate) struct ColdConfig {
-    e2: i64,
+    origin: i64,
     base: Settings,
     updates: Mutex<BTreeMap<(i64, u64), Settings>>,
 }
 
 impl ColdConfig {
-    pub fn new(e2: i64, base: Settings) -> Self {
-        Self { e2, base, updates: Mutex::new(BTreeMap::new()) }
+    pub fn new(origin: i64, base: Settings) -> Self {
+        Self { origin, base, updates: Mutex::new(BTreeMap::new()) }
     }
 
     fn book(&self, order: (i64, u64), settings: Settings) {
-        if order.0 <= self.e2 {
+        if order.0 <= self.origin {
             lock(&self.updates).insert(order, settings);
         }
     }
 
     fn issued(&self, updates: &mut BTreeMap<(i64, u64), Settings>, order: (i64, u64), effective: i64, settings: Settings) {
         updates.remove(&order);
-        if effective <= self.e2 {
+        if effective <= self.origin {
             updates.insert((effective, order.1), settings);
         }
     }
@@ -91,15 +93,60 @@ impl ColdConfig {
     }
 }
 
+/// A planned segment as uhd-control hands it to the stream's owner (UR-25).
+#[derive(Clone)]
+pub(crate) struct Planned {
+    pub segment: Segment,
+    /// The configuration in effect at its origin.
+    pub settings: Arc<ColdConfig>,
+    /// uhd-control opened the streamer and configured the direction for it: an enable from no
+    /// stream (UR-25).
+    pub configured: bool,
+    /// Its transmit clock, registered when it was booked (KC-21a); a receive clock is
+    /// registered by uhd-rx at its first block.
+    pub clock: Option<Clock>,
+}
+
+impl Planned {
+    pub fn channels(&self) -> usize {
+        usize::from(self.segment.config.channels)
+    }
+
+    /// Root ticks per sample.
+    pub fn n(&self) -> i64 {
+        self.segment.config.ratio.num() as i64
+    }
+}
+
+/// A stream's plan, by direction.
+pub(crate) type Plan = Arc<Vec<Planned>>;
+
+/// `Provider::stop`'s instant and mode, once it has begun (UR-26).
+pub(crate) type StopRequest = Arc<Mutex<Option<(i64, StopMode)>>>;
+
 pub(crate) struct Control {
     pub core: Arc<Core>,
     pub actions: Arc<dyn ActionReceiver>,
     pub to_tx: Sender<TxCmd>,
     pub to_rx: Sender<RxCmd>,
+    /// The configuration at the Run's start, with every `hardware_timed` value issued or, for
+    /// a direction with no channel, recorded since (UR-24).
     pub config: BTreeMap<Key, Value>,
     pub reference_monitored: bool,
+    /// The booked `cold` values, by effective instant and arrival (UC-2).
+    colds: BTreeMap<(i64, u64), (Key, Value)>,
     held: BTreeMap<(i64, u64), Timed>,
-    cold: [Option<Arc<ColdConfig>>; 2],
+    /// Per direction, the stream's timeline (RM-26); none for a receive side with no link.
+    lines: [Option<Line>; 2],
+    /// Per direction, each planned segment uhd-control has handed over, by the command that
+    /// began it (`None`: the first).
+    // ponytail: kept for the whole Run, as the timeline's items are; pruned with them.
+    planned: [Vec<(Option<u64>, Planned)>; 2],
+    /// The transmit clocks registered, in the order of the transmit plan's segments, and
+    /// whether each has ended (RM-25).
+    tx_clocks: Vec<(Clock, bool)>,
+    /// A loss or `Provider::stop` has been booked: nothing more is.
+    ended: bool,
     released: Vec<i64>,
     seq: u64,
     clock_lost: bool,
@@ -120,6 +167,14 @@ fn number(value: &Value) -> Option<f64> {
     }
 }
 
+/// The streams at the Run's start (UR-15): the receive stream's first segment at T0, when
+/// it has a channel and a link, and the transmit clock registered at `arm`.
+pub(crate) struct Start {
+    pub t0: i64,
+    pub rx: Option<(usize, i64)>,
+    pub tx: Option<(Clock, usize)>,
+}
+
 impl Control {
     pub fn new(
         core: Arc<Core>,
@@ -128,26 +183,65 @@ impl Control {
         to_rx: Sender<RxCmd>,
         config: BTreeMap<Key, Value>,
         reference_monitored: bool,
+        start: Start,
     ) -> Control {
-        Control {
+        // RM-25, VH-4: this Module's terms — the start lead, and, for a receive segment after
+        // a cut, the receive call in progress there and the delivery allowance (UR-25).
+        let lead = core.ticks(core.description.timing.start_lead_ns);
+        let call = core.block_len.max(core.device.rx_packet_samples()) as i64;
+        let allowance = core.ticks(DELIVERY_ALLOWANCE_NS);
+        let line = |direction: Direction, origin: i64, channels: usize, n: i64| Line::new(timeline::Stream {
+            direction,
+            origin,
+            config: Config { channels: channels as u16, ratio: Rational::new(n.max(1) as u64, 1).expect("a positive ratio") },
+            lead,
+            call,
+            allowance,
+        });
+        let n = |dir: Dir| {
+            let rate = Core::settings(&config, dir).rate.unwrap_or(0.0);
+            decimation(core.mcr, rate).map_or(1, |n| n as i64)
+        };
+        let rx = (!core.links.is_empty()).then(|| {
+            let (channels, n) = start.rx.unwrap_or((0, n(Dir::Rx)));
+            line(Direction::Rx, start.t0, channels, n)
+        });
+        let tx = match start.tx {
+            Some((clock, channels)) => line(Direction::Tx, clock.origin, channels, clock.n),
+            None => line(Direction::Tx, 0, 0, n(Dir::Tx)),
+        };
+        let tx_clocks = start.tx.map(|(clock, _)| (clock, false)).into_iter().collect();
+        lock(&core.streams).idle = [start.rx.is_none(), start.tx.is_none()];
+        let mut control = Control {
             core,
             actions,
             to_tx,
             to_rx,
             config,
             reference_monitored,
+            colds: BTreeMap::new(),
             held: BTreeMap::new(),
-            cold: [None, None],
+            lines: [rx, Some(tx)],
+            planned: [Vec::new(), Vec::new()],
+            tx_clocks,
+            ended: false,
             released: Vec::new(),
             seq: 0,
             clock_lost: false,
             failing_since: None,
-        }
+        };
+        control.hand(Dir::Rx);
+        control.hand(Dir::Tx);
+        control
     }
 
-    pub fn run(mut self, stop: Arc<AtomicBool>) {
+    pub fn run(mut self, stop: StopRequest) {
         let mut last_check = Instant::now();
-        while !stop.load(Ordering::Acquire) {
+        loop {
+            let requested = *lock(&stop);
+            if let Some((at, mode)) = requested {
+                return self.finish(at, mode);
+            }
             // MA-14b: each Action is booked before the next `recv()`.
             while let Some(action) = self.actions.recv() {
                 if !self.core.is_lost() {
@@ -162,10 +256,16 @@ impl Control {
             }
             std::thread::sleep(POLL);
         }
-        self.cancel_held("Provider::stop");
     }
 
-    fn book(&mut self, action: Action) {
+    /// UR-26: `Provider::stop` at `at` drops every pending command but one already handed to
+    /// the device, and ends the streams there; a transmit clock it orphans ends at its origin.
+    fn finish(&mut self, at: i64, mode: StopMode) {
+        self.cancel_held("Provider::stop");
+        self.end(at, mode == StopMode::Abort, false);
+    }
+
+    pub(super) fn book(&mut self, action: Action) {
         match action {
             Action::TxBurst { target, waveform, repeat, at, requested_at, late_policy, metadata } => {
                 self.book_burst(target, waveform, repeat, at, requested_at, late_policy, metadata.is_empty());
@@ -186,26 +286,46 @@ impl Control {
                     self.core.command_rejected("update_parameter", &format!("UR-26: {name} is not updated at runtime by this Provider"));
                 }
             }
+            // RM-16, UR-26: a `Stop` cancels no update; on receive it cuts at its booking, on
+            // transmit it ends the bursts, not the clock.
             Action::Stop { target: Some(target) } => {
-                if target == self.core.tx_id {
+                let device = target == self.core.id;
+                if !device && target != self.core.tx_id && target != self.core.rx_id {
+                    return self.core.command_rejected("stop", "UR-26: the Stop target is not this device or its streams");
+                }
+                if device || target == self.core.tx_id {
                     let _ = self.to_tx.send(TxCmd::Stop);
-                } else if target == self.core.rx_id {
-                    let _ = self.to_rx.send(RxCmd::Stop);
-                } else if target == self.core.id {
-                    self.cancel_held("Stop");
-                    let _ = self.to_tx.send(TxCmd::Stop);
-                    let _ = self.to_rx.send(RxCmd::Stop);
-                } else {
-                    self.core.command_rejected("stop", "UR-26: the Stop target is not this device or its streams");
+                }
+                if device || target == self.core.rx_id {
+                    let (seq, now) = (self.next_seq(), self.core.now());
+                    let _ = self.book_item(Dir::Rx, Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop }, false);
                 }
             }
             Action::Stop { target: None } | Action::Abort { .. } => {}
             Action::SetTimer { .. } => self.core.command_rejected("set_timer", "UR-26: not supported by this Provider"),
+            // RM-12, RM-21: `start_rx` turns the receive stream on at its `at`, or at its booking
+            // if that is later; it is never late.
+            Action::PeripheralCommand { target, verb, params, at }
+                if verb.as_str() == ezsdr_radio::START_RX && target == self.core.rx_id && params.is_empty() =>
+            {
+                let requested = match self.ceil_root(at) {
+                    Ok(requested) => requested,
+                    Err(error) => return self.core.command_rejected("peripheral_command", &format!("UR-26: start_rx's instant cannot be converted: {error}")),
+                };
+                let (seq, now) = (self.next_seq(), self.core.now());
+                let (e, _) = timeline::command_instant(self.lines[Dir::Rx as usize].as_ref(), requested, now, seq, false);
+                let _ = self.book_item(Dir::Rx, Item { e, seq, ready: now, delivered: None, refused: false, kind: Kind::Start }, false);
+            }
             Action::PeripheralCommand { .. } => {
                 self.core.command_rejected("peripheral_command", "UR-26: not supported by this Provider")
             }
             Action::Emit { .. } => self.core.command_rejected("emit", "UR-26: not supported by this Provider"),
         }
+    }
+
+    fn next_seq(&mut self) -> u64 {
+        self.seq += 1;
+        self.seq
     }
 
     fn ceil_root(&self, at: Option<AbsoluteDeadline>) -> Result<Option<i64>, TimeError> {
@@ -228,6 +348,21 @@ impl Control {
         })
         .expect("a payload");
         self.core.emit(&self.core.id, kinds::LATE_COMMAND, Severity::Warning, payload);
+    }
+
+    /// The configuration in force at `t`: the one at the Run's start with the timed values
+    /// issued and the `cold` changes effective by `t` (UC-2; #61).
+    fn config_at(&self, t: i64) -> BTreeMap<Key, Value> {
+        let mut config = self.config.clone();
+        for (key, value) in self.colds.range(..=(t, u64::MAX)).map(|(_, change)| change) {
+            config.insert(key.clone(), value.clone());
+        }
+        config
+    }
+
+    /// The channel count of `dir` in force at `t`.
+    fn channels_at(&self, dir: Dir, t: i64) -> usize {
+        Core::channels(&self.config_at(t), dir)
     }
 
     // ------------------------------------------------------------ UR-24
@@ -253,33 +388,35 @@ impl Control {
             Some(requested) => requested,
             None => earliest,
         };
-        if Core::channels(&self.config, dir) == 0 {
-            // No channel: recorded in the configuration; enabling applies it (UR-24).
-            self.config.insert(key.clone(), value);
-            lock(&self.core.rec).applied.push(json!({ "key": key, "claimed": v, "read_back": null, "at": self.core.at(e), "note": "no channel" }));
-            return;
-        }
         self.released.retain(|effective| *effective > now);
         let depth = self.core.description.timing.command_queue_depth as usize;
         // The device queue holds one command per channel (Review L, NONBLOCKING 6).
-        let pending: usize = self.held.values().map(|t| Core::channels(&self.config, t.dir)).sum::<usize>() + self.released.len();
-        if pending + Core::channels(&self.config, dir) > depth {
+        let pending: usize = self.held.iter().map(|((e, _), t)| self.channels_at(t.dir, *e)).sum::<usize>() + self.released.len();
+        if pending + self.channels_at(dir, e) > depth {
             let payload = serde_json::to_value(CommandQueueFullPayload { key: key.clone(), depth: depth as i64 }).expect("a payload");
             self.core.emit(&self.core.id, kinds::COMMAND_QUEUE_FULL, Severity::Error, payload);
             self.core.reject_note(json!({ "action": "update_parameter", "reason": "UR-24: the command queue is full", "key": key }));
             return;
         }
-        self.seq += 1;
+        let seq = self.next_seq();
         let timed = Timed { key, dir, value: v };
-        if let Some(cold) = self.pending_cold(dir) { cold.book((e, self.seq), timed.settings()); }
-        self.held.insert((e, self.seq), timed);
+        for (_, planned) in &self.planned[dir as usize] {
+            planned.settings.book((e, seq), timed.settings());
+        }
+        self.held.insert((e, seq), timed);
     }
 
-    /// Releases held commands within the release window, in effective order (UR-24).
-    fn release(&mut self) {
+    /// Releases held commands within the release window, in effective order, each on the
+    /// channels in force at its own instant; one for a direction with no channel then is
+    /// recorded in the configuration, and enabling the direction applies it (UR-24; #61).
+    pub(super) fn release(&mut self) {
         if self.core.is_lost() {
+            if let Some(at) = self.core.lost_at() {
+                self.end(at, false, true);
+            }
             return;
         }
+        self.refusals();
         let now = self.core.now();
         let window = self.core.ticks(RELEASE_WINDOW_NS);
         self.released.retain(|effective| *effective > now);
@@ -289,6 +426,11 @@ impl Control {
                 break;
             }
             let timed = entry.remove();
+            if self.channels_at(timed.dir, e) == 0 {
+                self.config.insert(timed.key.clone(), Value::Num(timed.value));
+                lock(&self.core.rec).applied.push(json!({ "key": timed.key, "claimed": timed.value, "read_back": null, "at": self.core.at(e), "note": "no channel" }));
+                continue;
+            }
             let latest = self.released.iter().copied().max();
             let effective = latest.map_or(e, |latest| latest.max(e));
             if effective > e {
@@ -296,18 +438,19 @@ impl Control {
                 self.late_command(Some(timed.key.clone()), e, effective);
             }
             let settings = timed.settings();
-            let cold = self.pending_cold(timed.dir);
-            // Order a timed issuance and its projection atomically against configure.
-            let mut updates = cold.as_ref().map(|cold| lock(&cold.updates));
-            for chan in 0..Core::channels(&self.config, timed.dir) {
+            let channels = self.channels_at(timed.dir, effective);
+            let projections: Vec<Arc<ColdConfig>> = self.planned[timed.dir as usize].iter().map(|(_, planned)| planned.settings.clone()).collect();
+            // Order a timed issuance and its projections atomically against configure.
+            let mut updates: Vec<_> = projections.iter().map(|cold| lock(&cold.updates)).collect();
+            for chan in 0..channels {
                 if let Err(error) = self.core.device.apply(timed.dir, chan, &settings, Some(effective)) {
                     self.core.device_failed("update_parameter", &error);
                     return;
                 }
                 self.released.push(effective);
             }
-            if let (Some(cold), Some(updates)) = (&cold, &mut updates) {
-                cold.issued(updates, (e, seq), effective, settings);
+            for (cold, updates) in projections.iter().zip(updates.iter_mut()) {
+                cold.issued(updates, (e, seq), effective, settings.clone());
             }
             drop(updates);
             self.config.insert(timed.key.clone(), Value::Num(timed.value));
@@ -320,11 +463,11 @@ impl Control {
     fn cancel_held(&mut self, why: &str) {
         let at = self.core.at(self.core.now());
         for ((e, seq), timed) in std::mem::take(&mut self.held) {
-            let cold = self.pending_cold(timed.dir);
-            let mut updates = cold.as_ref().map(|cold| lock(&cold.updates));
-            if let Some(updates) = &mut updates { updates.remove(&(e, seq)); }
-            // Keep the projection locked until its cancellation is recorded, so an
-            // owner can never apply this held value after that record.
+            let projections: Vec<Arc<ColdConfig>> = self.planned[timed.dir as usize].iter().map(|(_, planned)| planned.settings.clone()).collect();
+            let mut updates: Vec<_> = projections.iter().map(|cold| lock(&cold.updates)).collect();
+            for updates in &mut updates { updates.remove(&(e, seq)); }
+            // Keep the projections locked until the cancellation is recorded, so an owner can
+            // never apply this held value after that record.
             lock(&self.core.rec).applied.push(json!({
                 "key": timed.key, "claimed": timed.value, "at": self.core.at(e), "cancelled": why, "cancelled_at": at,
             }));
@@ -333,21 +476,19 @@ impl Control {
 
     // ------------------------------------------------------------ UR-25
 
+    /// UR-25: a `cold` update is booked when uhd-control takes it: its effective instant,
+    /// `coerce` over the configuration projected there, and the stream's plan from the
+    /// timeline, handed to the stream's owner.
     fn book_cold(&mut self, key: Key, value: Value, at: Option<AbsoluteDeadline>) {
         let dir = if key.as_str().starts_with("radio.rx.") { Dir::Rx } else { Dir::Tx };
-        {
-            let streams = lock(&self.core.streams);
-            if streams.switching[dir as usize] {
-                let disabled = match dir { Dir::Rx => streams.rx, Dir::Tx => streams.tx }.is_none();
-                drop(streams);
-                return self.core.command_rejected("update_parameter", if disabled {
-                    "UR-25: the stream changed to 0 channels is still draining; wait for its pending cold change"
-                } else {
-                    "UR-25: a cold change is still pending for this direction"
-                });
-            }
-        }
-        let mut candidate = self.config.clone();
+        let now = self.core.now();
+        let requested = match self.ceil_root(at) {
+            Ok(requested) => requested,
+            Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-25: explicit deadline cannot be converted: {error}")),
+        };
+        let seq = self.next_seq();
+        let (e, late) = timeline::command_instant(self.lines[dir as usize].as_ref(), requested, now, seq, true);
+        let mut candidate = self.config_at(e);
         candidate.insert(key.clone(), value.clone());
         let request = Requested {
             resource: self.core.id.clone(),
@@ -361,180 +502,156 @@ impl Control {
             return self.core.command_rejected("update_parameter", &rejected.reason);
         }
         let value = report.applied.get(&key).cloned().unwrap_or(value);
-        candidate.insert(key.clone(), value);
+        candidate.insert(key.clone(), value.clone());
         let channels = Core::channels(&candidate, dir);
         let rate = Core::settings(&candidate, dir).rate.unwrap_or(0.0);
-        let n = if channels > 0 {
-            match decimation(self.core.mcr, rate) {
-                Some(n) => n as i64,
-                None => {
-                    return self.core.command_rejected("update_parameter", &format!("UR-12: {rate} S/s is no decimation 1…512 of {} Hz", self.core.mcr));
-                }
-            }
-        } else {
-            0
+        let n = match decimation(self.core.mcr, rate) {
+            Some(n) => n as i64,
+            None if channels == 0 => 0,
+            None => return self.core.command_rejected("update_parameter", &format!("UR-12: {rate} S/s is no decimation 1…512 of {} Hz", self.core.mcr)),
         };
-        let old = {
-            let streams = lock(&self.core.streams);
-            match dir {
-                Dir::Rx => streams.rx,
-                Dir::Tx => streams.tx,
-            }
-        };
-        let now = self.core.now();
-        let requested = match self.ceil_root(at) {
-            Ok(requested) => requested,
-            Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-25: explicit deadline cannot be converted: {error}")),
-        };
-        match old {
-            None if channels > 0 && lock(&self.core.streams).draining[dir as usize].is_some_and(|e1| now < e1) => {
-                // The old stream still runs to its e₁ (Review M, N-4).
-                self.core.command_rejected("update_parameter", "UR-25: the stream changed to 0 channels is still draining; enable it after its e₁");
-            }
-            None if channels > 0 && (dir == Dir::Tx || !self.core.links.is_empty()) => {
-                if let Some(t) = requested.filter(|t| *t < now) {
-                    self.late_command(Some(key.clone()), t, now);
-                }
-                let e = requested.unwrap_or(now).max(now);
-                // A receive start waits the profile's start lead after its configuration,
-                // which ends no earlier than now (RM-25; spec 20, VF-6).
-                let minimum = match dir {
-                    Dir::Tx => i128::from(e),
-                    Dir::Rx => i128::from(e).max(i128::from(now) + i128::from(self.core.ticks(self.core.description.timing.start_lead_ns))),
-                };
-                if let Err(error) = lattice(minimum, n) {
-                    return self.core.command_rejected("update_parameter", &format!("UR-25: {error}"));
-                }
-                self.config = candidate;
-                self.enable(dir, channels, n, e);
-            }
-            None => self.config = candidate,
-            Some(old) => {
-                let restart = self.core.ticks(self.core.description.timing.restart_lead_ns);
-                // A receive stream's e₁ also waits for the receive call already in progress,
-                // which asks for a whole block and is not bounded by the cut: the longer of a
-                // block and a packet, plus the delivery of its last packet (Review O, O-B2).
-                // The call can end up to one packet more after it began, its block's last
-                // sample in a packet that ends later; the restart lead's margin covers that
-                // (a packet is at most 5.1 ms on the X300; Review P, NB-4).
-                let in_progress = match dir {
-                    Dir::Rx => self.core.block_len.max(self.core.device.rx_packet_samples()) as i128 * i128::from(old.n) + i128::from(self.core.ticks(DELIVERY_ALLOWANCE_NS)),
-                    Dir::Tx => 0,
-                };
-                let earliest = match i64::try_from(i128::from(now) + i128::from(restart) + in_progress) {
-                    Ok(earliest) => earliest,
-                    Err(_) => return self.core.command_rejected("update_parameter", "UR-25: time arithmetic overflow"),
-                };
-                let e = match requested {
-                    Some(t) if t < earliest => {
-                        self.late_command(Some(key.clone()), t, earliest);
-                        earliest
-                    }
-                    Some(t) => t,
-                    None => earliest,
-                };
-                // Preflight both boundaries before ending the old clock or booking a new one.
-                let boundaries = lattice(i128::from(e), old.n).and_then(|e1| {
-                    let e2 = if channels > 0 {
-                        Some(lattice(i128::from(e1) + i128::from(restart), n)?)
-                    } else { None };
-                    Ok((e1, e2))
-                });
-                let (e1, e2) = match boundaries {
-                    Ok(boundaries) => boundaries,
-                    Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-25: {error}")),
-                };
-                if let Err(error) = self.core.clocks.end(old.domain, self.core.at(e1)) {
-                    return self.core.command_rejected("update_parameter", &format!("UR-25: {error}"));
-                }
-                let clock = if let Some(e2) = e2 {
-                    match self.core.register(dir, n, e2) {
-                        Ok(clock) => Some(clock),
-                        Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-25: {error}")),
-                    }
-                } else {
-                    None
-                };
-                self.config = candidate;
-                let settings = Arc::new(ColdConfig::new(clock.map_or(e1, |c| c.origin), Core::settings(&self.config, dir)));
-                for (&order, timed) in &self.held {
-                    if timed.dir == dir { settings.book(order, timed.settings()); }
-                }
-                self.cold[dir as usize] = Some(settings.clone());
-                {
-                    let mut streams = lock(&self.core.streams);
-                    streams.switching[dir as usize] = true;
-                    streams.draining[dir as usize] = clock.is_none().then_some(e1);
-                    match dir {
-                        Dir::Rx => streams.rx = clock,
-                        Dir::Tx => {
-                            streams.tx = clock;
-                            streams.tx_channels = channels;
-                        }
-                    }
-                }
-                self.core.timing(json!({ "what": "cold_change", "key": key, "e1": e1, "e2": clock.map(|c| c.origin), "booked_at": now }));
-                match dir {
-                    Dir::Rx => drop(self.to_rx.send(RxCmd::Switch { e1, clock, channels, settings })),
-                    Dir::Tx => drop(self.to_tx.send(TxCmd::Switch { e1, clock, channels, settings })),
-                }
-            }
+        if late {
+            self.late_command(Some(key.clone()), requested.unwrap_or(now), e);
         }
-    }
-
-    fn pending_cold(&mut self, dir: Dir) -> Option<Arc<ColdConfig>> {
-        if !lock(&self.core.streams).switching[dir as usize] {
-            self.cold[dir as usize] = None;
-        }
-        self.cold[dir as usize].clone()
-    }
-
-    /// A change from 0 channels (UR-25; N-P0-1): uhd-control opens the streamer and
-    /// configures the direction itself, then registers the clock and hands over.
-    fn enable(&mut self, dir: Dir, channels: usize, n: i64, e: i64) {
-        let opened = match dir {
-            Dir::Rx => self.core.device.rx_open(channels),
-            Dir::Tx => self.core.device.tx_open(channels),
+        let Some(old) = self.lines[dir as usize].as_ref().map(|line| line.stream.config) else {
+            // A receive side with no link has no stream: the change only takes its value.
+            self.colds.insert((e, seq), (key, value));
+            return;
         };
-        let settings = Core::settings(&self.config, dir);
-        let configured = opened.and_then(|()| self.core.configure(dir, channels, &settings));
-        if let Err(error) = configured {
-            return self.core.device_failed("update_parameter", &error);
-        }
-        // RM-25: at or after both `e` and the end of the configuration; a receive stream
-        // also the profile's start lead ahead, for its timed start (Review L, P0-3; spec 20,
-        // VF-6).
-        let now = self.core.now();
-        let origin = match lattice(match dir {
-            Dir::Tx => i128::from(e.max(now)),
-            Dir::Rx => i128::from(e).max(i128::from(now) + i128::from(self.core.ticks(self.core.description.timing.start_lead_ns))),
-        }, n) {
-            Ok(origin) => origin,
-            Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-25: {error}")),
-        };
-        let clock = match self.core.register(dir, n, origin) {
-            Ok(clock) => clock,
-            Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-25: {error}")),
-        };
-        if dir == Dir::Rx {
-            if let Err(error) = self.core.device.rx_start(origin) {
+        let ratio = if n > 0 { Rational::new(n as u64, 1).expect("a decimation") } else { old.ratio };
+        // RM-25, VH-4: an enable from no stream — its owner idle, nothing planned to run —
+        // is configured by uhd-control itself, which opens the streamer, and is ready when
+        // that configuration ends; any other change by the owner at the cut (UR-17, UR-23).
+        let idle = lock(&self.core.streams).idle[dir as usize];
+        let from_none = channels > 0 && idle && self.lines[dir as usize].as_ref().is_some_and(|line| line.plan.iter().all(|segment| segment.cut.is_some()));
+        let mut ready = now;
+        if from_none {
+            let opened = match dir {
+                Dir::Rx => self.core.device.rx_open(channels),
+                Dir::Tx => self.core.device.tx_open(channels),
+            };
+            // The configuration in effect at `e`, the timed updates held for it included (UC-2).
+            let mut settings = Core::settings(&candidate, dir);
+            for timed in self.held.range(..=(e, u64::MAX)).map(|(_, timed)| timed).filter(|timed| timed.dir == dir) {
+                let update = timed.settings();
+                settings.freq = update.freq.or(settings.freq);
+                settings.gain = update.gain.or(settings.gain);
+            }
+            if let Err(error) = opened.and_then(|()| self.core.configure(dir, channels, &settings)) {
                 return self.core.device_failed("update_parameter", &error);
             }
+            ready = self.core.now();
         }
-        {
-            let mut streams = lock(&self.core.streams);
-            match dir {
-                Dir::Rx => streams.rx = Some(clock),
-                Dir::Tx => {
-                    streams.tx = Some(clock);
-                    streams.tx_channels = channels;
-                }
+        let config = Config { channels: channels as u16, ratio };
+        self.colds.insert((e, seq), (key.clone(), value));
+        if self.book_item(dir, Item { e, seq, ready, delivered: None, refused: false, kind: Kind::Cold(config) }, from_none) {
+            self.core.timing(json!({ "what": "cold_change", "key": key, "e": e, "booked_at": now, "ready": ready }));
+        } else {
+            self.colds.remove(&(e, seq));
+        }
+    }
+
+    /// Books a command or a fault on a stream's timeline, and hands the owner its plan;
+    /// false when its plan cannot be represented, which refuses it.
+    fn book_item(&mut self, dir: Dir, item: Item, configured: bool) -> bool {
+        let Some(line) = self.lines[dir as usize].as_mut() else { return false };
+        if let Err(error) = line.book(item) {
+            line.items.pop();
+            if let Ok(plan) = timeline::plan(&line.stream, &line.items) {
+                line.plan = plan;
+            }
+            self.core.command_rejected("update_parameter", &format!("RM-26: {error}"));
+            return false;
+        }
+        if configured {
+            // The configuration is the segment's; the owner only starts it.
+            let settings = Arc::new(ColdConfig::new(i64::MIN, Settings::default()));
+            let segment = line.plan.iter().rev().find(|segment| segment.by == Some(item.seq)).copied();
+            if let Some(segment) = segment {
+                let planned = Planned { segment, settings, configured: true, clock: None };
+                self.planned[dir as usize].push((Some(item.seq), planned));
             }
         }
-        self.core.timing(json!({ "what": "enabled", "dir": dir.name(), "e": e, "configured": now, "origin": origin, "channels": channels }));
+        self.hand(dir);
+        true
+    }
+
+    /// The owner's plan: every planned segment with its configuration, its transmit clock
+    /// registered and its predecessor ended as the plan says (RM-25, VH-2).
+    fn hand(&mut self, dir: Dir) {
+        let Some(plan) = self.lines[dir as usize].as_ref().map(|line| line.plan.clone()) else { return };
+        let mut planned = Vec::with_capacity(plan.len());
+        for (index, segment) in plan.iter().enumerate() {
+            let known = self.planned[dir as usize].iter().position(|(by, _)| *by == segment.by);
+            let mut entry = match known {
+                Some(at) => self.planned[dir as usize][at].1.clone(),
+                None => {
+                    let settings = Arc::new(ColdConfig::new(segment.origin, Core::settings(&self.config_at(segment.origin), dir)));
+                    for (&order, timed) in self.held.iter().filter(|(_, timed)| timed.dir == dir) {
+                        settings.book(order, timed.settings());
+                    }
+                    let entry = Planned { segment: *segment, settings, configured: false, clock: None };
+                    self.planned[dir as usize].push((segment.by, entry.clone()));
+                    entry
+                }
+            };
+            entry.segment = *segment;
+            if dir == Dir::Tx {
+                match self.tx_clock(index, segment) {
+                    Ok(clock) => entry.clock = Some(clock),
+                    Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-25: {error}")),
+                }
+            }
+            planned.push(entry);
+        }
+        let planned = Arc::new(planned);
         match dir {
-            Dir::Rx => drop(self.to_rx.send(RxCmd::Enable { clock, channels })),
-            Dir::Tx => drop(self.to_tx.send(TxCmd::Enable { clock, channels })),
+            Dir::Rx => drop(self.to_rx.send(RxCmd::Plan(planned))),
+            Dir::Tx => drop(self.to_tx.send(TxCmd::Plan(planned))),
+        }
+    }
+
+    /// The transmit plan's segment `index`: its clock, registered when its change is booked,
+    /// and ended at its cut once the plan has one (RM-25, VH-2).
+    fn tx_clock(&mut self, index: usize, segment: &Segment) -> Result<Clock, String> {
+        if index == self.tx_clocks.len() {
+            let clock = self.core.register(Dir::Tx, segment.config.ratio.num() as i64, segment.origin)?;
+            self.tx_clocks.push((clock, false));
+        }
+        let (clock, ended) = &mut self.tx_clocks[index];
+        if let Some(cut) = segment.cut.filter(|_| !*ended) {
+            self.core.clocks.end(clock.domain, self.core.at(clock.instant(cut))).map_err(|e| e.to_string())?;
+            *ended = true;
+        }
+        Ok(*clock)
+    }
+
+    /// RM-25, VH-2: a segment whose configuration the owner's device refused halts its
+    /// stream: its command is refused and the plan made again.
+    fn refusals(&mut self) {
+        let refused = std::mem::take(&mut lock(&self.core.streams).refused);
+        for (dir, seq) in refused {
+            let Some(line) = self.lines[dir as usize].as_mut() else { continue };
+            for item in line.items.iter_mut().filter(|item| item.seq == seq) {
+                item.refused = true;
+            }
+            if let Ok(plan) = timeline::plan(&line.stream, &line.items) {
+                line.plan = plan;
+            }
+            self.hand(dir);
+        }
+    }
+
+    /// RM-16, VH-2: a loss or `Provider::stop` at `at` ends both streams; nothing is booked
+    /// after it, and a transmit clock it orphans ends at its origin.
+    fn end(&mut self, at: i64, abort: bool, lost: bool) {
+        if std::mem::replace(&mut self.ended, true) {
+            return;
+        }
+        // A loss counts as received with the faults, at the Run's start (RM-25).
+        let seq = if lost { 0 } else { self.next_seq() };
+        for dir in [Dir::Rx, Dir::Tx] {
+            let _ = self.book_item(dir, Item { e: at, seq, ready: at, delivered: None, refused: false, kind: Kind::End { abort } }, false);
         }
     }
 
@@ -552,13 +669,12 @@ impl Control {
         metadata_empty: bool,
     ) {
         let reject = |reason: &str| self.core.command_rejected("tx_burst", reason);
-        let (clock, channels) = {
-            let streams = lock(&self.core.streams);
-            (streams.tx, streams.tx_channels)
-        };
-        let Some(clock) = clock.filter(|_| channels > 0) else {
+        // KC-21a: the last transmit clock registered, while its segment has not ended.
+        let last = self.lines[Dir::Tx as usize].as_ref().and_then(|line| line.plan.last()).filter(|segment| segment.cut.is_none());
+        let Some(((clock, _), channels)) = self.tx_clocks.last().zip(last.map(|segment| usize::from(segment.config.channels))) else {
             return reject("UR-21: no transmit channel is configured");
         };
+        let clock = *clock;
         if target != self.core.tx_id {
             return reject("UR-21: the target is not this device's transmit stream");
         }
@@ -592,7 +708,7 @@ impl Control {
         }
         // RM-14 on the device lead, RM-15's origin bound (VE-2; N-P0-1).
         let lead = self.core.ticks(DEVICE_LEAD_NS);
-        let now = self.core.now().max(clock.origin - lead);
+        let now = timeline::decided_at(self.core.now(), clock.origin, lead);
         let now_k = clock.at_or_after(now);
         let decided = late_policy.decide(
             &self.core.clocks,
@@ -698,97 +814,157 @@ mod differential;
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc::{Receiver, channel};
+
     use super::*;
+    use super::super::core::key;
     use crate::device::Device;
+    use ezsdr_kernel::stream::{BackPressure, BlockRef, DataLink, DropCarry, PublishOutcome};
+
     struct NoActions;
     impl ActionReceiver for NoActions {
         fn recv(&self) -> Option<Action> { None }
     }
 
+    /// A receive link that takes nothing, so that the receive side has a stream.
+    struct NoLink;
+    impl DataLink for NoLink {
+        fn publish(&self, _block: BlockRef) -> PublishOutcome { PublishOutcome::Accepted }
+        fn receive(&self) -> Option<BlockRef> { None }
+        fn drops(&self) -> u64 { 0 }
+        fn take_drop_carry(&self) -> DropCarry { DropCarry::default() }
+        fn policy(&self) -> BackPressure { BackPressure::DropOldest }
+    }
+
+    fn rig() -> (Arc<Core>, Arc<crate::device::FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>) {
+        let (core, device, time, _) = crate::provider::test_support::rig_with_links(vec![Arc::new(NoLink)]);
+        (core, device, time)
+    }
+
+    /// uhd-control with one channel at 1 MS/s on each direction in `on` from 0, the owners'
+    /// first plans taken.
+    fn control(core: &Arc<Core>, on: &[Dir]) -> (Control, Receiver<TxCmd>, Receiver<RxCmd>) {
+        let (to_tx, tx) = channel();
+        let (to_rx, rx) = channel();
+        let mut config = core.description.defaults.clone();
+        let mut start = Start { t0: 0, rx: None, tx: None };
+        for dir in on {
+            config.insert(key(&format!("radio.{}.channels", dir.name())), Value::Int(1));
+            match dir {
+                Dir::Rx => start.rx = Some((1, 200)),
+                Dir::Tx => start.tx = Some((core.register(Dir::Tx, 200, 0).unwrap(), 1)),
+            }
+        }
+        let control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false, start);
+        while tx.try_recv().is_ok() {}
+        while rx.try_recv().is_ok() {}
+        (control, tx, rx)
+    }
+
+    fn plan_of(dir: Dir, tx: &Receiver<TxCmd>, rx: &Receiver<RxCmd>) -> Plan {
+        let plans: Vec<Plan> = match dir {
+            Dir::Rx => rx.try_iter().filter_map(|cmd| match cmd { RxCmd::Plan(plan) => Some(plan), _ => None }).collect(),
+            Dir::Tx => tx.try_iter().filter_map(|cmd| match cmd { TxCmd::Plan(plan) => Some(plan), _ => None }).collect(),
+        };
+        plans.last().cloned().expect("a plan")
+    }
+
     #[test]
     fn ur_14_booking_does_not_wait_for_a_future_cold_switch() {
-        let (core, device, _, _) = crate::provider::test_support::rig();
-        let clock = core.register(Dir::Rx, 200, 0).unwrap();
-        lock(&core.streams).rx = Some(clock);
-        device.rx_open(1).unwrap();
-        let (to_tx, _tx) = std::sync::mpsc::channel();
-        let (to_rx, rx) = std::sync::mpsc::channel();
-        let mut config = core.description.defaults.clone();
-        config.insert(super::super::core::key("radio.rx.channels"), Value::Int(1));
-        let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false);
-        control.book_cold(super::super::core::key("radio.rx.sample_rate_hz"), Value::Num(2e6),
-            Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
-        control.book_timed(super::super::core::key("radio.rx.gain_db"), Value::Num(3.0), None);
-        control.release();
+        let (core, _, _) = rig();
+        let (mut control, tx, rx) = control(&core, &[Dir::Rx]);
+        // On its own thread, so that a booking that waited for the device instant, which
+        // never comes on this clock, fails the test instead of hanging it (UR-14).
+        let (done, finished) = channel();
+        let at = core.at(core.ticks(1_000_000_000));
+        let booking = std::thread::spawn(move || {
+            control.book_cold(key("radio.rx.sample_rate_hz"), Value::Num(2e6), Some(AbsoluteDeadline::new(at)));
+            control.book_timed(key("radio.rx.gain_db"), Value::Num(3.0), None);
+            control.release();
+            let _ = done.send(());
+        });
+        assert!(finished.recv_timeout(Wall::from_secs(10)).is_ok(), "uhd-control waited for a device instant");
+        booking.join().unwrap();
         assert_eq!(core.now(), 0, "booking never advanced to the future device instant");
-        assert!(matches!(rx.try_recv().unwrap(), RxCmd::Switch { e1, .. } if e1 == core.ticks(1_000_000_000)));
+        // The plan cuts the stream at 1 s's sample (1 000 000 at 1 MS/s) and starts the next
+        // segment after the receive call there, 3 ms and the start lead (RM-25).
+        let plan = plan_of(Dir::Rx, &tx, &rx);
+        assert_eq!(plan[0].segment.cut, Some(1_000_000));
+        assert_eq!(plan[1].segment.origin, core.ticks(1_055_000_000));
         assert!(lock(&core.rec).applied.iter().any(|r|
             r["key"] == "radio.rx.gain_db" && r["issued"] == true && r["at"]["ticks"] == core.ticks(2_000_000)));
         assert!(lock(&core.rec).rejected.is_empty());
     }
 
     #[test]
-    fn ur_25_overlapping_cold_changes_are_refused_before_bookkeeping() {
-        for dir in [Dir::Rx, Dir::Tx] {
-            let (core, _, time, _) = crate::provider::test_support::rig();
-            let clock = core.register(dir, 200, 0).unwrap();
-            { let mut streams = lock(&core.streams);
-                match dir { Dir::Rx => streams.rx = Some(clock), Dir::Tx => streams.tx = Some(clock) }
-            }
-            let (to_tx, tx) = std::sync::mpsc::channel();
-            let (to_rx, rx) = std::sync::mpsc::channel();
-            let mut config = core.description.defaults.clone();
-            config.insert(super::super::core::key(&format!("radio.{}.channels", dir.name())), Value::Int(1));
-            let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false);
-            let key = super::super::core::key(&format!("radio.{}.sample_rate_hz", dir.name()));
-            control.book_cold(key.clone(), Value::Num(2e6), None);
-            let records = core.clocks.sample_clock_records();
-            assert_eq!(records.len(), 2);
-            assert!(lock(&core.streams).switching[dir as usize]);
-            control.book_cold(key.clone(), Value::Num(4e6), None);
-            // Even after e2, completion is the owner's, not an inference from now.
-            time.advance_to(core.at(records[1].origin.ticks + core.ticks(1_000_000))).unwrap();
-            control.book_cold(key.clone(), Value::Num(4e6), None);
-            assert_eq!(core.clocks.sample_clock_records(), records);
-            assert_eq!(control.config[&key], Value::Num(2e6));
-            assert_eq!(lock(&core.rec).rejected.len(), 2);
-            match dir {
-                Dir::Rx => { assert!(matches!(rx.try_recv().unwrap(), RxCmd::Switch { .. })); assert!(rx.try_recv().is_err()); }
-                Dir::Tx => { assert!(matches!(tx.try_recv().unwrap(), TxCmd::Switch { .. })); assert!(tx.try_recv().is_err()); }
-            }
-        }
+    fn ur_25_a_refused_change_is_planned_again_without_its_segment() {
+        // RM-25: when the owner's device refuses a segment, uhd-control books its change as
+        // refused and hands a plan without that segment.
+        let (core, _, _) = rig();
+        let (mut control, tx, rx) = control(&core, &[Dir::Rx]);
+        let ms = |n: i64| AbsoluteDeadline::new(core.at(core.ticks(n * 1_000_000)));
+        control.book_cold(key("radio.rx.sample_rate_hz"), Value::Num(2e6), Some(ms(100)));
+        control.book_cold(key("radio.rx.sample_rate_hz"), Value::Num(1e6), Some(ms(300)));
+        let before = plan_of(Dir::Rx, &tx, &rx);
+        assert_eq!(before.len(), 3);
+        let by = before[1].segment.by.unwrap();
+        lock(&core.streams).refused.push((Dir::Rx, by));
+        control.release();
+        let after = plan_of(Dir::Rx, &tx, &rx);
+        assert_eq!(after.len(), 2);
+        assert!(after.iter().all(|planned| planned.segment.by != Some(by)));
     }
+
+    #[test]
+    fn ur_25_a_cold_change_that_arrives_after_a_later_one_follows_it() {
+        // RM-25, VH-2: a `cold` change never takes effect before one of its stream booked
+        // earlier: it takes that one's instant, after it in the plan, and is late (UC-2).
+        let (core, _, _, events) = crate::provider::test_support::rig_with_links(vec![Arc::new(NoLink)]);
+        let (mut control, tx, rx) = control(&core, &[Dir::Rx]);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        control.book_cold(key("radio.rx.sample_rate_hz"), Value::Num(2e6), Some(AbsoluteDeadline::new(core.at(ms(300)))));
+        control.book_cold(key("radio.rx.sample_rate_hz"), Value::Num(1e6), Some(AbsoluteDeadline::new(core.at(ms(100)))));
+        let late: Vec<_> = events.drain().into_iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).collect();
+        assert_eq!(late.len(), 1);
+        assert_eq!((late[0].payload["requested"]["ticks"].as_i64(), late[0].payload["applied"]["ticks"].as_i64()), (Some(ms(100)), Some(ms(300))));
+        let plan = plan_of(Dir::Rx, &tx, &rx);
+        assert_eq!(plan.iter().map(|planned| planned.segment.by).collect::<Vec<_>>(), [None, Some(2)]);
+    }
+
+    #[test]
+    fn ur_26_an_orderly_stop_cuts_at_its_instant() {
+        // RM-16, UR-26 (Review M, N-6): `Provider::stop`'s cut is booked at the stop instant,
+        // not at the instant uhd-control learns of it: under `orderly` the first sample at or
+        // after it.
+        let (core, _, time) = rig();
+        let (mut control, tx, rx) = control(&core, &[Dir::Rx]);
+        time.advance_to(core.at(core.ticks(8_000_000))).unwrap();
+        control.finish(core.ticks(5_000_000), StopMode::Orderly);
+        assert_eq!(plan_of(Dir::Rx, &tx, &rx)[0].segment.cut, Some(5_000));
+    }
+
     #[test]
     fn ur_25_later_timed_update_survives_cold_switch() {
+        // UC-2, UR-25: the configuration of the segment a change begins holds the timed update
+        // due before its origin, booked after the change.
         let mut observed = Vec::new();
         for dir in [Dir::Rx, Dir::Tx] {
-            let (core, device, _, _) = crate::provider::test_support::rig();
-            let clock = core.register(dir, 200, 0).unwrap();
-            { let mut streams = lock(&core.streams);
-              match dir { Dir::Rx => streams.rx = Some(clock), Dir::Tx => streams.tx = Some(clock) }
-            }
+            let (core, device, _) = rig();
             match dir { Dir::Rx => device.rx_open(1).unwrap(), Dir::Tx => device.tx_open(1).unwrap() }
-            let (to_tx, tx) = std::sync::mpsc::channel();
-            let (to_rx, rx) = std::sync::mpsc::channel();
-            let mut config = core.description.defaults.clone();
-            config.insert(super::super::core::key(&format!("radio.{}.channels", dir.name())), Value::Int(1));
-            let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false);
-            control.book_cold(super::super::core::key(&format!("radio.{}.sample_rate_hz", dir.name())), Value::Num(2e6),
+            let (mut control, tx, rx) = control(&core, &[dir]);
+            control.book_cold(key(&format!("radio.{}.sample_rate_hz", dir.name())), Value::Num(2e6),
                 Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
-            let gain = super::super::core::key(&format!("radio.{}.gain_db", dir.name()));
+            let gain = key(&format!("radio.{}.gain_db", dir.name()));
             control.book_timed(gain.clone(), Value::Num(3.0), None);
             control.release();
             assert_eq!(control.config[&gain], Value::Num(3.0));
             assert!(lock(&core.rec).rejected.is_empty());
-            let settings = match dir {
-                Dir::Rx => match rx.try_recv().unwrap() { RxCmd::Switch { settings, .. } => settings, _ => panic!("switch") },
-                Dir::Tx => match tx.try_recv().unwrap() { TxCmd::Switch { settings, .. } => settings, _ => panic!("switch") },
-            };
+            let plan = plan_of(dir, &tx, &rx);
+            let settings = plan[1].settings.clone();
             settings.configure(&core, dir, 1).unwrap();
-            eprintln!("device calls: {:?}", device.calls());
             observed.push((dir.name(), settings.settings(&lock(&settings.updates)).gain));
         }
-        assert_eq!(observed, vec![("rx", Some(3.0)), ("tx", Some(3.0))], "both cold switches must preserve the later update due before e2");
+        assert_eq!(observed, vec![("rx", Some(3.0)), ("tx", Some(3.0))], "both cold switches must preserve the later update due before the new origin");
     }
 
     #[test]
@@ -808,77 +984,26 @@ mod tests {
     }
 
     #[test]
-    fn ur_26_device_stop_removes_cancelled_timed_gain_from_switch() {
-        let (core, device, _, _) = crate::provider::test_support::rig();
-        let old = core.register(Dir::Rx, 200, 0).unwrap();
-        lock(&core.streams).rx = Some(old);
-        device.rx_open(1).unwrap();
-        let (to_tx, _tx) = std::sync::mpsc::channel();
-        let (to_rx, rx) = std::sync::mpsc::channel();
-        let mut config = core.description.defaults.clone();
-        config.insert(super::super::core::key("radio.rx.channels"), Value::Int(1));
-        let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false);
-        let gain = super::super::core::key("radio.rx.gain_db");
-        control.book_timed(gain, Value::Num(3.0), Some(AbsoluteDeadline::new(core.at(core.ticks(1_040_000_000)))));
-        control.book_cold(super::super::core::key("radio.rx.sample_rate_hz"), Value::Num(2e6),
-            Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
-        control.book(Action::Stop { target: Some(core.id.clone()) });
-        assert!(control.held.is_empty());
-        assert!(lock(&core.rec).applied.iter().any(|r| r["key"] == "radio.rx.gain_db" && r["cancelled"] == "Stop"));
-        let RxCmd::Switch { settings, .. } = rx.try_recv().unwrap() else { panic!("Switch"); };
-        assert!(matches!(rx.try_recv().unwrap(), RxCmd::Stop));
-        settings.configure(&core, Dir::Rx, 1).unwrap();
-        eprintln!("cancelled gain is still in Switch: {:?}; device calls: {:?}", settings.settings(&lock(&settings.updates)).gain, device.calls());
-        assert_eq!(settings.settings(&lock(&settings.updates)).gain, Some(0.0), "device Stop must not leave a switch applying the timed gain just cancelled");
-    }
-
-    #[test]
-    fn ur_26_cancellation_preserves_issued_updates_in_both_directions() {
-        for dir in [Dir::Rx, Dir::Tx] {
-            for field in ["gain_db", "frequency_hz"] {
-                for before_switch in [false, true] {
-                    let (core, device, _, _) = crate::provider::test_support::rig();
-                    let clock = core.register(dir, 200, 0).unwrap();
-                    { let mut streams = lock(&core.streams);
-                        match dir { Dir::Rx => streams.rx = Some(clock), Dir::Tx => streams.tx = Some(clock) }
-                    }
-                    match dir { Dir::Rx => device.rx_open(1).unwrap(), Dir::Tx => device.tx_open(1).unwrap() }
-                    let (to_tx, tx) = std::sync::mpsc::channel();
-                    let (to_rx, rx) = std::sync::mpsc::channel();
-                    let mut config = core.description.defaults.clone();
-                    config.insert(super::super::core::key(&format!("radio.{}.channels", dir.name())), Value::Int(1));
-                    let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false);
-                    let key = super::super::core::key(&format!("radio.{}.{field}", dir.name()));
-                    let (issued, cancelled) = if field == "gain_db" { (1.0, 3.0) } else { (1.1e9, 1.2e9) };
-                    if before_switch {
-                        control.book_timed(key.clone(), Value::Num(issued), None);
-                        control.release();
-                        control.book_timed(key.clone(), Value::Num(cancelled), Some(AbsoluteDeadline::new(core.at(core.ticks(1_040_000_000)))));
-                    }
-                    control.book_cold(super::super::core::key(&format!("radio.{}.sample_rate_hz", dir.name())), Value::Num(2e6),
-                        Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
-                    if !before_switch {
-                        control.book_timed(key.clone(), Value::Num(issued), None);
-                        control.release();
-                        control.book_timed(key.clone(), Value::Num(cancelled), Some(AbsoluteDeadline::new(core.at(core.ticks(1_040_000_000)))));
-                    }
-                    // Stream Stop keeps timed commands; device Stop cancels only held ones.
-                    let target = match dir { Dir::Rx => core.rx_id.clone(), Dir::Tx => core.tx_id.clone() };
-                    control.book(Action::Stop { target: Some(target) });
-                    assert_eq!(control.held.len(), 1);
-                    control.book(Action::Stop { target: Some(core.id.clone()) });
-                    assert!(control.held.is_empty());
-                    let settings = match dir {
-                        Dir::Rx => match rx.try_recv().unwrap() { RxCmd::Switch { settings, .. } => settings, _ => panic!("switch") },
-                        Dir::Tx => match tx.try_recv().unwrap() { TxCmd::Switch { settings, .. } => settings, _ => panic!("switch") },
-                    };
-                    settings.configure(&core, dir, 1).unwrap();
-                    let projected = settings.settings(&lock(&settings.updates));
-                    assert_eq!(if field == "gain_db" { projected.gain } else { projected.freq }, Some(issued));
-                    assert_eq!(lock(&core.rec).applied.iter().filter(|r| r["key"] == key.as_str() && r["cancelled"] == "Stop").count(), 1);
-                    assert!(lock(&core.rec).applied.iter().any(|r| r["key"] == key.as_str() && r["claimed"] == issued && r["issued"] == true));
-                }
-            }
+    fn ur_26_a_stop_cancels_no_update() {
+        // RM-16, UR-26 (spec 22, VH-6): a `Stop` of a stream or of the device cancels no held
+        // timed command, and the projection of a segment booked after it keeps it; only
+        // `Provider::stop` drops what is held.
+        for target in ["usrp/rx", "usrp/tx", "usrp"] {
+            let (core, device, _) = rig();
+            device.tx_open(1).unwrap();
+            let (mut control, tx, rx) = control(&core, &[Dir::Rx, Dir::Tx]);
+            let gain = key("radio.tx.gain_db");
+            control.book_timed(gain.clone(), Value::Num(3.0), Some(AbsoluteDeadline::new(core.at(core.ticks(1_040_000_000)))));
+            control.book(Action::Stop { target: Some(ezsdr_kernel::id::ResourceId::parse(target).unwrap()) });
+            control.book_cold(key("radio.tx.sample_rate_hz"), Value::Num(2e6), Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
+            assert_eq!(control.held.len(), 1, "{target}");
+            assert!(!lock(&core.rec).applied.iter().any(|r| r.get("cancelled").is_some()), "{target}");
+            let plan = plan_of(Dir::Tx, &tx, &rx);
+            let settings = plan[1].settings.clone();
+            assert_eq!(settings.settings(&lock(&settings.updates)).gain, Some(3.0), "{target}");
+            control.cancel_held("Provider::stop");
+            assert!(control.held.is_empty());
+            assert_eq!(lock(&core.rec).applied.iter().filter(|r| r["cancelled"] == "Provider::stop").count(), 1, "{target}");
         }
     }
 
@@ -887,75 +1012,59 @@ mod tests {
         let aligned_max = i64::MAX.div_euclid(200) * 200;
         for dir in [Dir::Rx, Dir::Tx] {
             for (at, now) in [(i64::MAX, 0), (aligned_max, 0), (0, i64::MAX - 1)] {
-                let (mut core, device, _, _) = crate::provider::test_support::rig();
+                let (mut core, device, _) = rig();
                 let time = Arc::new(ezsdr_kernel::time::ManualTimeAuthority::new(core.clocks.clone(), core.root, &[],
                     ezsdr_kernel::module_api::Pacing::Device).unwrap());
                 Arc::get_mut(&mut core).unwrap().time = time.clone();
-                let old = core.register(dir, 200, 0).unwrap();
-                { let mut streams = lock(&core.streams);
-                    match dir { Dir::Rx => streams.rx = Some(old), Dir::Tx => streams.tx = Some(old) }
-                }
+                let (mut control, tx, rx) = control(&core, &[dir]);
                 time.advance_to(core.at(now)).unwrap();
-                let (to_tx, tx) = std::sync::mpsc::channel();
-                let (to_rx, rx) = std::sync::mpsc::channel();
-                let mut config = core.description.defaults.clone();
-                config.insert(super::super::core::key(&format!("radio.{}.channels", dir.name())), Value::Int(1));
-                let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config.clone(), false);
-                control.book_cold(super::super::core::key(&format!("radio.{}.sample_rate_hz", dir.name())), Value::Num(2e6),
+                let config = control.config_at(i64::MAX);
+                let records = core.clocks.sample_clock_records();
+                control.book_cold(key(&format!("radio.{}.sample_rate_hz", dir.name())), Value::Num(2e6),
                     Some(AbsoluteDeadline::new(core.at(at))));
-                assert_eq!(control.config, config);
-                assert_eq!(core.clocks.sample_clock_records().len(), 1);
-                assert_eq!(core.clocks.sample_clock_records()[0].ended_at, None);
-                assert!(lock(&core.rec).rejected.iter().any(|row| row["reason"].as_str().unwrap().contains("overflow")));
+                assert_eq!(control.config_at(i64::MAX), config);
+                assert_eq!(core.clocks.sample_clock_records(), records);
+                assert!(lock(&core.rec).rejected.iter().any(|row| row["reason"].as_str().unwrap().contains("verflow")), "{:?}", lock(&core.rec).rejected);
                 assert!(tx.try_recv().is_err()); assert!(rx.try_recv().is_err());
                 assert!(device.calls().is_empty());
             }
         }
-        assert_eq!(super::lattice(i128::from(aligned_max), 200).unwrap(), aligned_max);
-        assert_eq!(super::lattice(-201, 200).unwrap(), -200);
-        assert_eq!(super::lattice(i128::from(i64::MIN), 200).unwrap(), i64::MIN + 8);
-        // A cold disable needs e1 only, so the largest aligned instant remains valid.
-        let (core, _, _, _) = crate::provider::test_support::rig();
-        let old = core.register(Dir::Tx, 200, 0).unwrap();
-        lock(&core.streams).tx = Some(old);
-        let (to_tx, tx) = std::sync::mpsc::channel(); let (to_rx, _rx) = std::sync::mpsc::channel();
-        let mut config = core.description.defaults.clone();
-        config.insert(super::super::core::key("radio.tx.channels"), Value::Int(1));
-        let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false);
-        control.book_cold(super::super::core::key("radio.tx.channels"), Value::Int(0),
-            Some(AbsoluteDeadline::new(core.at(aligned_max))));
+        let n = Rational::new(200, 1).unwrap();
+        assert_eq!(timeline::lattice(aligned_max, n).unwrap(), aligned_max);
+        assert_eq!(timeline::lattice(-201, n).unwrap(), -200);
+        assert_eq!(timeline::lattice(i64::MIN, n).unwrap(), i64::MIN + 8);
+        // A cold disable needs its cut only, so the largest aligned instant remains valid.
+        let (core, _, _) = rig();
+        let (mut control, tx, rx) = control(&core, &[Dir::Tx]);
+        control.book_cold(key("radio.tx.channels"), Value::Int(0), Some(AbsoluteDeadline::new(core.at(aligned_max))));
         assert_eq!(core.clocks.sample_clock_records()[0].ended_at, Some(core.at(aligned_max)));
-        assert!(matches!(tx.try_recv(), Ok(TxCmd::Switch { clock: None, .. })));
+        let plan = plan_of(Dir::Tx, &tx, &rx);
+        assert_eq!(plan.len(), 1);
     }
 
     #[test]
     fn ur_24_invalid_explicit_deadline_is_not_asap() {
         for dir in [Dir::Rx, Dir::Tx] {
             for cold in [false, true] {
-                for channels in [0, 1] {
+                for on in [false, true] {
                     for invalid in 0..3 {
-                        let (core, device, _, _) = crate::provider::test_support::rig();
+                        let (core, device, _) = rig();
+                        let dirs = [dir];
+                        let (mut control, tx, rx) = control(&core, if on { &dirs[..] } else { &[] });
                         let old = core.register(dir, 200, 0).unwrap();
-                        if channels > 0 {
-                            let mut streams = lock(&core.streams);
-                            match dir { Dir::Rx => streams.rx = Some(old), Dir::Tx => streams.tx = Some(old) }
-                        }
+                        let records = core.clocks.sample_clock_records();
                         let at = match invalid {
                             0 => TimePoint::new(ClockDomainId::HOST_MONOTONIC, 1_000_000_000),
                             1 => TimePoint::new(ClockDomainId::local(999), 10),
                             _ => TimePoint::new(old.domain, i64::MAX),
                         };
-                        let (to_tx, tx) = std::sync::mpsc::channel(); let (to_rx, rx) = std::sync::mpsc::channel();
-                        let mut config = core.description.defaults.clone();
-                        config.insert(super::super::core::key(&format!("radio.{}.channels", dir.name())), Value::Int(channels));
-                        let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config.clone(), false);
+                        let config = control.config_at(i64::MAX);
                         let name = format!("radio.{}.{}", dir.name(), if cold { "sample_rate_hz" } else { "gain_db" });
-                        if cold { control.book_cold(super::super::core::key(&name), Value::Num(2e6), Some(AbsoluteDeadline::new(at))); }
-                        else { control.book_timed(super::super::core::key(&name), Value::Num(3.0), Some(AbsoluteDeadline::new(at))); }
-                        assert!(control.held.is_empty()); assert_eq!(control.config, config);
+                        if cold { control.book_cold(key(&name), Value::Num(2e6), Some(AbsoluteDeadline::new(at))); }
+                        else { control.book_timed(key(&name), Value::Num(3.0), Some(AbsoluteDeadline::new(at))); }
+                        assert!(control.held.is_empty()); assert_eq!(control.config_at(i64::MAX), config);
                         assert!(tx.try_recv().is_err()); assert!(rx.try_recv().is_err());
-                        assert_eq!(core.clocks.sample_clock_records().len(), 1);
-                        assert_eq!(core.clocks.sample_clock_records()[0].ended_at, None);
+                        assert_eq!(core.clocks.sample_clock_records(), records);
                         assert!(device.calls().is_empty());
                         assert!(lock(&core.rec).rejected.iter().any(|row| row["reason"].as_str().unwrap().contains("explicit deadline")));
                     }
@@ -968,22 +1077,40 @@ mod tests {
     fn ur_24_valid_deadlines_and_omission_preserve_their_meaning() {
         use ezsdr_kernel::time::{ClockDomain, Rational};
         for case in 0..3 {
-            let (core, _, _, _) = crate::provider::test_support::rig();
+            let (core, _, _) = rig();
             let derived = core.clocks.allocate_id().unwrap();
             core.clocks.register(ClockDomain::derived(derived, core.root, Rational::new(2, 3).unwrap(), 0)).unwrap();
-            let (to_tx, _tx) = std::sync::mpsc::channel(); let (to_rx, _rx) = std::sync::mpsc::channel();
-            let mut config = core.description.defaults.clone();
-            config.insert(super::super::core::key("radio.tx.channels"), Value::Int(1));
-            let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false);
+            let (mut control, _tx, _rx) = control(&core, &[Dir::Tx]);
             let (at, expected) = match case {
                 0 => (None, core.ticks(DEVICE_LEAD_NS)),
                 1 => (Some(AbsoluteDeadline::new(core.at(600_000))), 600_000),
                 _ => (Some(AbsoluteDeadline::new(TimePoint::new(derived, 900_001))), 600_001),
             };
-            control.book_timed(super::super::core::key("radio.tx.gain_db"), Value::Num(3.0), at);
+            control.book_timed(key("radio.tx.gain_db"), Value::Num(3.0), at);
             assert_eq!(control.held.keys().map(|order| order.0).collect::<Vec<_>>(), vec![expected]);
             assert!(lock(&core.rec).rejected.is_empty());
         }
     }
 
+    #[test]
+    fn ur_24_a_timed_update_acts_on_the_configuration_in_force_at_its_instant() {
+        // #61: a timed update due before a booked change to 0 channels is issued on the
+        // channel in force at its own instant, and one due after it is recorded, at its
+        // instant, as having no channel; same-instant updates keep their arrival order (UC-2).
+        let (core, device, time) = rig();
+        device.tx_open(1).unwrap();
+        let (mut control, _tx, _rx) = control(&core, &[Dir::Tx]);
+        control.book_cold(key("radio.tx.channels"), Value::Int(0), Some(AbsoluteDeadline::new(core.at(core.ticks(100_000_000)))));
+        for (ms, gain) in [(50, 1.0), (50, 2.0), (150, 4.0)] {
+            control.book_timed(key("radio.tx.gain_db"), Value::Num(gain), Some(AbsoluteDeadline::new(core.at(core.ticks(ms * 1_000_000)))));
+        }
+        time.advance_to(core.at(core.ticks(60_000_000))).unwrap();
+        control.release();
+        time.advance_to(core.at(core.ticks(160_000_000))).unwrap();
+        control.release();
+        let rows: Vec<_> = lock(&core.rec).applied.iter().filter(|r| r["key"] == "radio.tx.gain_db")
+            .map(|r| (r["claimed"].as_f64().unwrap(), r["issued"] == true, r["note"] == "no channel")).collect();
+        assert_eq!(rows, [(1.0, true, false), (2.0, true, false), (4.0, false, true)]);
+        assert_eq!(device.calls().iter().filter(|call| call.starts_with("apply tx")).count(), 2, "{:?}", device.calls());
+    }
 }

@@ -282,7 +282,7 @@ fn ea_07_a_profile_naming_an_unknown_module_is_refused() {
 fn receive_spec(n: i64) -> serde_json::Value {
     json!({
         "version": 1,
-        "requirements": { "vocabularies": [{ "id": "radio", "major": 1 }, { "id": "sink", "major": 1 }] },
+        "requirements": { "vocabularies": [{ "id": "radio", "major": 2 }, { "id": "sink", "major": 1 }] },
         "resources": { "radio": { "kind": "radio.device", "requires": {
             "radio.rx.channels": { "kind": "eq", "value": 1 },
             "radio.rx.sample_rate_hz": { "kind": "eq", "value": 1.0e6 }
@@ -325,8 +325,10 @@ fn ea_09_the_default_profile_loops_back() {
     let waveform = ramp(1_000);
     assert!(matches!(submit(&mut server, set("radio.tx.channels", Value::Int(1)), Vec::new()).outcome, Outcome::Admitted { .. }));
     assert!(matches!(submit(&mut server, repeat(), waveform.clone()).outcome, Outcome::Admitted { .. }));
+    // The transmit clock the enable starts begins `x310-like`'s 50 ms start lead later, and
+    // the repeat there (RM-15, RM-25).
     let (now, _, _) = status(&mut server);
-    server.handle(Request::Advance { to: None, by: Some(Duration::new(now.domain, 5_000_000)) }, Vec::new());
+    server.handle(Request::Advance { to: None, by: Some(Duration::new(now.domain, 60_000_000)) }, Vec::new());
     let (uri, _) = capture_uri(&mut server, 3_000);
     let bytes = read(&mut server, &uri);
     assert_eq!(bytes.len(), 3_000 * 8);
@@ -691,8 +693,8 @@ fn uhd_profile(dir: &Path) -> serde_json::Value {
         "version": 1,
         "bindings": {
             "radio": {
-                "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 3, "patch": 0 } },
-                "profile": { "name": "x310-ubx", "version": { "major": 0, "minor": 2, "patch": 0 } },
+                "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
+                "profile": { "name": "x310-ubx", "version": { "major": 0, "minor": 3, "patch": 0 } },
                 "selector": { "args": "addr=192.0.2.1" }
             },
             "rec": {
@@ -1007,8 +1009,10 @@ fn ea_09_the_binary_reads_ezsdr_profile() {
 fn ea_12_status_carries_the_root_rate() {
     let temp = TempDir::new("root-rate");
     let (mut server, _) = connected(&temp.0);
-    let (_, rate, _) = status(&mut server);
+    let (now, rate, _) = status(&mut server);
     assert_eq!(rate, Rational::new(1_000_000_000, 1).unwrap());
+    // Past the receive stream's first sample, so that the Run has a SampleClock at another rate.
+    let _ = server.handle(Request::WaitFor { kinds: vec![written()], from: 0, within: Some(Duration::new(now.domain, 3_000_000)), until: None }, Vec::new());
     let Reply::Result(response) = server.handle(Request::Status {}, Vec::new()).reply else { panic!() };
     assert_eq!(serde_json::to_value(response).unwrap()["root_rate"], json!({ "num": 1_000_000_000u64, "den": 1 }));
     finish(&mut server);

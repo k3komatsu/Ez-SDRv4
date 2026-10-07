@@ -156,20 +156,26 @@ impl Sequence {
     }
 
     /// Every operation and fault, sorted by effective instant and arrival. A `cold` update
-    /// takes effect at `at`, or at its receipt when absent or past; a `hardware_timed`
-    /// one at `at`, or at its receipt plus the lead when absent or earlier (MR-18, UR-24,
-    /// UR-25); a `Stop` and a `start_rx` at their receipt.
+    /// takes effect at `at`, or at its receipt when absent or past, and never before a `cold`
+    /// update of its stream received earlier (VH-2); a `hardware_timed` one at `at`, or at
+    /// its receipt plus the lead when absent or earlier (MR-18, UR-24, UR-25); a `Stop` and a
+    /// `start_rx` at their receipt.
     pub fn schedule(&self, terms: &Terms) -> Vec<Entry> {
         let mut entries: Vec<Entry> = self.faults.iter().enumerate().map(|(index, (at, _))| {
             let e = terms.t0 + terms.ticks(*at);
             Entry { e, seq: index as u64, receipt: e, event: Event::Fault(index) }
         }).collect();
+        let mut floor = [i64::MIN; 2];
         for (index, (round, op)) in self.ops().enumerate() {
             let receipt = terms.t0 + terms.ticks(round);
             let at = |at_ns: &Option<i64>| at_ns.map(|ns| terms.t0 + terms.ticks(ns));
             let e = match op {
                 Op::Stop { .. } | Op::StartRx => receipt,
-                Op::Cold { at_ns, .. } => at(at_ns).unwrap_or(receipt).max(receipt),
+                Op::Cold { direction, at_ns, .. } => {
+                    let floor = &mut floor[usize::from(*direction == Direction::Tx)];
+                    *floor = at(at_ns).unwrap_or(receipt).max(receipt).max(*floor);
+                    *floor
+                }
                 Op::Timed { at_ns, .. } => at(at_ns).unwrap_or(i64::MIN).max(receipt + terms.timed_lead),
             };
             entries.push(Entry { e, seq: (self.faults.len() + index) as u64, receipt, event: Event::Op(index) });

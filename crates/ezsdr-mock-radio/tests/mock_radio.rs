@@ -24,7 +24,7 @@ use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload};
 const ROOT: ClockDomainId = ClockDomainId::local(7);
 
 fn module_ref() -> ModuleRef {
-    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 5, 0) }
+    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(2, 0, 0) }
 }
 
 fn waveform(samples: usize) -> ArtifactRef {
@@ -76,7 +76,7 @@ fn binding(profile: &str) -> Binding {
     Binding {
         module: module_ref(),
         selector: BTreeMap::from([(Ident::parse("id").unwrap(), Value::Str("mock".to_owned()))]),
-        profile: Some(ProfileRef { name: profile.to_owned(), version: Version::new(1, 2, 0) }),
+        profile: Some(ProfileRef { name: profile.to_owned(), version: Version::new(2, 0, 0) }),
         feed: None,
     }
 }
@@ -265,12 +265,12 @@ fn mr_01_descriptor_registers() {
     registry.register(descriptor(), Factories { provider: true, ..Factories::default() }).unwrap();
     let d = descriptor();
     assert_eq!(d.id.as_str(), "ezsdr.radio.mock");
-    assert_eq!(d.version, Version::new(1, 5, 0));
+    assert_eq!(d.version, Version::new(2, 0, 0));
     assert_eq!(d.kernel_api, KERNEL_API);
     assert_eq!(d.roles, [Role::Provider]);
     let requirements: Vec<_> = d.vocabularies.iter().map(|v| (v.id.as_str().to_owned(), v.req.0)).collect();
-    assert_eq!(requirements, [("radio".to_owned(), Version::new(1, 4, 0)), ("sim".to_owned(), Version::new(1, 1, 0))]);
-    assert_eq!(d.impl_hash, Some(ezsdr_kernel::hash::ContentHash::of_bytes(b"ezsdr.radio.mock 1.5.0")));
+    assert_eq!(requirements, [("radio".to_owned(), Version::new(2, 0, 0)), ("sim".to_owned(), Version::new(1, 1, 0))]);
+    assert_eq!(d.impl_hash, Some(ezsdr_kernel::hash::ContentHash::of_bytes(b"ezsdr.radio.mock 2.0.0")));
 }
 
 #[test]
@@ -380,19 +380,18 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert_eq!(capabilities[&key("radio.tx.repeat_align_samples")], one(Value::Int(if x310 { 2 } else { 1 })));
         assert_eq!(capabilities[&key("radio.rx.block_len")], one(Value::Int(2_000)));
         let envelope = &radio.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.envelope").unwrap()];
-        let (lead, startup, tail, depth, gap, bytes_per_s, wire) = if x310 {
-            (2_000_000, 2_000_000_000, 1_000_000, 16, 50_000_000, 1_000_000_000, 4)
+        let (lead, startup, depth, gap, bytes_per_s, wire) = if x310 {
+            (2_000_000, 2_000_000_000, 16, 50_000_000, 1_000_000_000, 4)
         } else {
-            (0, 0, 0, i64::from(u32::MAX), 0, 1_i64 << 62, 8)
+            (0, 0, i64::from(u32::MAX), 0, 1_i64 << 62, 8)
         };
-        // Profiles 1.2.0's restart and start leads (spec 20, VF-6).
-        let (restart_lead, start_lead) = if x310 { (50_000_000, 50_000_000) } else { (0, 0) };
+        // Profiles 2.0.0's one start lead (RM-25; spec 22, VH-4).
+        let start_lead = if x310 { 50_000_000 } else { 0 };
         assert_eq!(capabilities[&key("radio.timing.min_timed_command_lead_ns")], one(Value::Int(lead)));
         assert_eq!(capabilities[&key("radio.timing.startup_latency_ns")], one(Value::Int(startup)));
-        assert_eq!(capabilities[&key("radio.timing.stop_tail_ns")], one(Value::Int(tail)));
         assert_eq!(capabilities[&key("radio.timing.command_queue_depth")], one(Value::Int(depth)));
         assert_eq!(capabilities[&key("radio.timing.overflow_restart_gap_ns")], one(Value::Int(gap)));
-        assert_eq!(capabilities[&key("radio.timing.restart_lead_ns")], one(Value::Int(restart_lead)));
+        assert!(!capabilities.contains_key(&key("radio.timing.stop_tail_ns")) && !capabilities.contains_key(&key("radio.timing.restart_lead_ns")));
         assert_eq!(capabilities[&key("radio.timing.start_lead_ns")], one(Value::Int(start_lead)));
         assert_eq!(capabilities[&key("radio.perf.rx_bytes_per_s")], one(Value::Int(bytes_per_s)));
         assert_eq!(capabilities[&key("radio.perf.tx_bytes_per_s")], one(Value::Int(bytes_per_s)));
@@ -407,16 +406,15 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
                 .map(|suffix| format!("ezsdr.radio.mock.mock.{suffix}"))
         );
         assert_eq!(envelope["profile"]["name"], name);
-        assert_eq!(envelope["profile"]["version"], serde_json::json!({ "major": 1, "minor": 2, "patch": 0 }));
+        assert_eq!(envelope["profile"]["version"], serde_json::json!({ "major": 2, "minor": 0, "patch": 0 }));
         let (tx_delay, rx_delay) = if name == "x310-like" { (45, 0) } else { (0, 0) };
         assert_eq!(capabilities[&key("radio.tx.path_delay_samples")], one(Value::Int(tx_delay)));
         assert_eq!(capabilities[&key("radio.rx.path_delay_samples")], one(Value::Int(rx_delay)));
         assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], lead);
         assert_eq!(envelope["timing"]["startup_latency_ns"], startup);
-        assert_eq!(envelope["timing"]["stop_tail_ns"], tail);
         assert_eq!(envelope["timing"]["command_queue_depth"], depth);
         assert_eq!(envelope["timing"]["overflow_restart_gap_ns"], gap);
-        assert_eq!(envelope["timing"]["restart_lead_ns"], restart_lead);
+        assert!(envelope["timing"].get("stop_tail_ns").is_none() && envelope["timing"].get("restart_lead_ns").is_none());
         assert_eq!(envelope["timing"]["start_lead_ns"], start_lead);
         assert_eq!(envelope["performance"]["rx_bytes_per_s"], bytes_per_s);
         assert_eq!(envelope["performance"]["tx_bytes_per_s"], bytes_per_s);
@@ -614,10 +612,12 @@ fn mr_11_start_cases() {
     assert_eq!(late.source, rid("mock"));
     assert_eq!(late.time, TimePoint::new(ROOT, 0));
     harness.mock.start(Some(TimePoint::new(ROOT, 2_000_000_000))).unwrap();
+    // RM-25: the receive segment begins at T0, its SampleClock registered at its first sample.
+    assert!(harness.clocks.sample_clock_records().iter().all(|record| record.stream != rid("mock/rx")));
+    harness.step(2_001_999_000).unwrap();
     let clocks = harness.clocks.sample_clock_records();
     assert_eq!(clocks.iter().find(|record| record.stream == rid("mock/rx")).unwrap().origin, TimePoint::new(ROOT, 2_000_000_000));
     assert_eq!(clocks.iter().find(|record| record.stream == rid("mock/tx")).unwrap().origin, TimePoint::new(ROOT, 0));
-    harness.step(2_001_999_000).unwrap();
     while let Some(block) = harness.link.as_ref().unwrap().receive() {
         assert!(!block.header().flags.contains(BlockFlags::LATE));
     }
@@ -841,6 +841,40 @@ fn mr_16_repeat_is_contiguous_across_wraps() {
 }
 
 #[test]
+fn mr_17_a_burst_before_its_clock_s_origin_is_late() {
+    // RM-15: a burst whose target precedes its transmit clock's origin is decided a lead
+    // before that origin, so it is late, and under `send_asap` it starts at the origin with a
+    // TIME_ERROR — on a clock an enable from 0 channels starts, as on one a rate change starts.
+    for enable in [true, false] {
+        let mut h = Harness::new("x310-like", &[("radio.tx.channels", eq(Value::Int(i64::from(!enable))))], &[], &[], None);
+        h.arm_start(2_000_000_000).unwrap();
+        h.step(2_001_000_000).unwrap();
+        h.actions.push(if enable {
+            update_action("radio.tx.channels", Value::Int(1), UpdateClass::Cold, None)
+        } else {
+            update_action("radio.tx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, None)
+        });
+        h.step(2_001_000_000).unwrap();
+        let clock = h.clocks.sample_clock_records().into_iter().rev().find(|record| record.stream == rid("mock/tx")).unwrap();
+        let n = clock.root_ticks_per_tick.num() as i64;
+        let target = (2_002_000_000 - clock.origin.ticks) / n;
+        assert!(target < 0, "{enable}: the clock begins a start lead after the change");
+        h.actions.push(tx_action(clock.domain, target, 1_000, false, LatePolicy::SendAsapAndFlag));
+        h.step(2_001_000_000).unwrap();
+        let events = h.events.drain();
+        let late: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+        assert_eq!(late.len(), 1, "{enable}");
+        assert_eq!(late[0].payload["outcome"], "send_asap", "{enable}");
+        assert_eq!(late[0].payload["late_by_ns"], clock.origin.ticks - 2_002_000_000, "{enable}");
+        h.step(clock.origin.ticks + 1_000 * n).unwrap();
+        let record: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(
+            h.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.bursts").unwrap()][0].clone()).unwrap();
+        assert_eq!(record.target, TimePoint::new(clock.domain, 0), "{enable}");
+        assert_eq!(record.samples, 1_000, "{enable}");
+    }
+}
+
+#[test]
 fn mr_17_late_policy_outcomes() {
     for (policy, outcome, transmitted) in [
         (LatePolicy::SendAsapAndFlag, "send_asap", true),
@@ -919,10 +953,10 @@ fn mr_18_hardware_timed_updates() {
 
 #[test]
 fn mr_25_a_stream_stop_keeps_the_pending_commands() {
-    // RM-16, MR-25: a `Stop` for `<device>/tx` or `<device>/rx` cancels no pending timed command
-    // (one may be for the other direction); `Stop` for the device cancels them all
+    // RM-16, MR-25: a `Stop` cancels no pending update, whatever its target; only `stop`
+    // drops what is pending (spec 22, VH-6).
     let now = 2_001_000_000;
-    for (target, applied) in [("mock/tx", 2), ("mock/rx", 2), ("mock", 0)] {
+    for (target, applied) in [("mock/tx", 2), ("mock/rx", 2), ("mock", 2)] {
         let mut harness = Harness::new("x310-like", &[], &[], &[], None);
         harness.arm_start(2_000_000_000).unwrap();
         harness.step(now).unwrap();
@@ -940,17 +974,17 @@ fn mr_25_a_stream_stop_keeps_the_pending_commands() {
 fn mr_18_a_cold_rate_change_starts_a_new_sample_clock() {
     let mut harness = Harness::new("x310-like", &[], &[], &[], Some((BackPressure::DropOldest, 8)));
     harness.arm_start(2_000_000_000).unwrap();
-    harness.step(2_000_000_000).unwrap();
-    let old = harness.clocks.sample_clock_records()[0].domain;
+    harness.step(2_000_000_001).unwrap();
+    let old = harness.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/rx")).unwrap().domain;
     let effective = 2_004_000_000;
     harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, effective))));
     harness.step(effective).unwrap();
     harness.link.as_ref().unwrap().queue.lock().unwrap().clear();
-    // x310-like's restart lead: the new clock starts 50 ms after e₁ (RM-25, MR-18;
-    // spec 20, VF-6).
-    let restarted = effective + 50_000_000;
+    // x310-like's ready instant and start lead: the new clock starts 50 ms after the receive
+    // call in progress at the cut (2 000 samples, 2 ms) and 3 ms (RM-25, MR-18; spec 22, VH-4).
+    let restarted = effective + 55_000_000;
     harness.step(restarted + 999_501).unwrap();
-    let records = harness.clocks.sample_clock_records();
+    let records: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx")).collect();
     assert_eq!(records[0].ended_at, Some(TimePoint::new(ROOT, effective)));
     let current = records.last().unwrap();
     assert_eq!(current.origin, TimePoint::new(ROOT, restarted));
@@ -976,12 +1010,12 @@ fn mr_18_a_cold_change_starts_its_clock_on_the_lattice() {
     for (from, to, e1, e2) in [(1_000_000.0, 20_000_000.0, 1_001_000, 1_001_000), (20_000_000.0, 1_000_000.0, 1_000_050, 1_001_000)] {
         let mut harness = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(from)))], &[], &[], Some((BackPressure::DropOldest, 64)));
         harness.arm_start(0).unwrap();
-        let old = harness.clocks.sample_clock_records()[0].domain;
         harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(to), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_037))));
         harness.step(0).unwrap();
         harness.step(1_000_037).unwrap();
         harness.step(3_200_000).unwrap();
         let records = harness.clocks.sample_clock_records();
+        let old = records[0].domain;
         assert_eq!(records[0].ended_at, Some(TimePoint::new(ROOT, e1)), "{from} -> {to}");
         let new = records.last().unwrap();
         assert_eq!(new.origin, TimePoint::new(ROOT, e2), "{from} -> {to}");
@@ -1009,12 +1043,13 @@ fn mr_18_a_cold_receive_change_before_t0_applies_at_t0() {
     harness.arm_start(t0).unwrap();
     harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, None));
     harness.step(0).unwrap();
-    // It applies at T0, where the old clock starts, so the new one waits x310-like's restart
-    // lead (RM-25, MR-18; spec 20, VF-6).
-    harness.step(t0 + 50_000_000 + 999_501).unwrap();
+    // It applies at T0, where the first segment starts, so that segment has no sample and no
+    // clock, and the new one waits x310-like's receive call, 3 ms and start lead (RM-25,
+    // MR-18; spec 22, VH-4).
+    harness.step(t0 + 55_000_000 + 999_501).unwrap();
     let records = harness.clocks.sample_clock_records();
-    assert!(records.iter().all(|record| record.origin.ticks >= t0), "a receive clock starts before T0: {records:?}");
-    assert_eq!(records.last().unwrap().origin, TimePoint::new(ROOT, t0 + 50_000_000));
+    assert_eq!(records.len(), 1, "one receive clock: {records:?}");
+    assert_eq!(records.last().unwrap().origin, TimePoint::new(ROOT, t0 + 55_000_000));
     let applied = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()];
     assert_eq!(applied[0]["at"]["ticks"], t0);
     let first = harness.link.as_ref().unwrap().receive().unwrap();
@@ -1067,6 +1102,25 @@ fn mr_18_a_cold_transmit_change_replaces_the_tracker() {
     assert_eq!(records[1].samples, 3_000);
     assert_eq!(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.rejected").unwrap()].as_array().unwrap().len(), 0);
 
+}
+
+#[test]
+fn mr_18_a_burst_on_a_later_clock_survives_an_earlier_switch() {
+    // MR-16, MR-18 (KC-21a): a burst booked on the clock of the second of two booked changes
+    // stays booked across the first one's switch, and plays on its own clock.
+    let mut h = tx_harness("ideal");
+    h.arm_start(0).unwrap();
+    h.actions.push(update_action("radio.tx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_000))));
+    h.actions.push(update_action("radio.tx.sample_rate_hz", Value::Num(4_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, 2_000_000))));
+    h.step(0).unwrap();
+    let last = tx_domain(&h);
+    h.actions.push(tx_action(last, 100, 1_000, false, LatePolicy::SendAsapAndFlag));
+    h.step(0).unwrap();
+    h.step(3_000_000).unwrap();
+    let instance = h.mock.instance();
+    let records: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.bursts").unwrap()].clone()).unwrap();
+    assert_eq!(records.iter().map(|r| (r.target, r.samples)).collect::<Vec<_>>(), [(TimePoint::new(last, 100), 1_000)]);
+    assert_eq!(instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.rejected").unwrap()].as_array().unwrap().len(), 0);
 }
 
 #[test]
@@ -1162,10 +1216,10 @@ fn mr_19_backpressure_is_an_overrun() {
 #[test]
 fn mr_09_same_tick_work_keeps_insertion_order() {
     // The fault was inserted at prepare, before the two cold updates and the burst, so it
-    // meets the old stream, which ends at e₁ = k_f: no sample is lost to it, and it is
-    // recorded unapplied with no RX_OVERFLOW (MR-20a; spec 20, VF-4). Ordered after the
-    // updates it would meet the new stream and be applied there; reversing the updates
-    // would leave RX off. TX still plays the held burst at the same tick.
+    // meets the old stream still running: its row records the block it removed, and no
+    // RX_OVERFLOW comes, since the stream ends at k_f and no block carries the loss
+    // (RM-17, MR-20; spec 22, VH-5). The updates apply in the order received; reversing
+    // them would leave RX off. TX still plays the held burst at the same tick.
     let env = [(
         "sim.faults",
         serde_json::json!([
@@ -1201,8 +1255,8 @@ fn mr_09_same_tick_work_keeps_insertion_order() {
     let instance = harness.mock.instance();
     let faults = &instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.faults").unwrap()];
     assert_eq!(faults.as_array().unwrap().len(), 1);
-    assert_eq!(faults[0]["applied"], false);
-    assert_eq!(faults[0]["lost"], 0);
+    assert_eq!(faults[0]["applied"], true);
+    assert_eq!(faults[0]["lost"], 2_000);
     assert_eq!(harness.events.drain().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0);
     let applied = &instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()];
     assert_eq!(applied.as_array().unwrap().len(), 2);
@@ -1232,8 +1286,8 @@ fn mr_20_faults_fire_at_their_instants() {
     harness.arm_start(2_000_000_000).unwrap();
     harness.step(2_001_000_000).unwrap();
     harness.step(2_002_000_000).unwrap();
-    // MR-20a: the overrun's event and row come with the block at 51 000, which carries its
-    // loss, not at the fault (spec 20, VF-4).
+    // RM-17: the overrun's event comes with the block at 51 000, which carries its loss, and
+    // its row was written when it fired (MR-20; spec 22, VH-5).
     harness.step(2_053_000_000).unwrap();
     let events = harness.events.drain();
     assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 1);
@@ -1309,11 +1363,13 @@ fn mr_20_faults_fire_at_their_instants() {
         .find(|handle| handle.stream == rid("mock/rx")).unwrap();
     failed_start.clocks.register_sample_clock(&rx_handle, 0).unwrap();
     failed_start.mock.arm().unwrap();
-    let error = failed_start.mock.start(Some(TimePoint::new(ROOT, 5_000_000_000))).unwrap_err();
+    // RM-25: the receive clock is registered at its first sample, so the clash is found then.
+    failed_start.mock.start(Some(TimePoint::new(ROOT, 5_000_000_000))).unwrap();
+    let error = failed_start.step(5_000_000_001).unwrap_err();
     assert!(error.message.contains("already registered"));
-    failed_start.mock.stop(StopMode::Abort).unwrap();
+    failed_start.mock.cleanup();
     let faults = &failed_start.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.faults").unwrap()];
-    assert_eq!(faults[0]["at"], serde_json::to_value(TimePoint::new(ROOT, 10_000_000)).unwrap());
+    assert_eq!(faults[0]["at"], serde_json::to_value(TimePoint::new(ROOT, 5_010_000_000)).unwrap());
 
     let stopped_rx_env = [
         ("sim.faults", serde_json::json!([{ "at_ns": 3_000_000, "fault": "rx_overflow", "target": "radio" }]))
@@ -1338,13 +1394,13 @@ fn mr_20_faults_fire_at_their_instants() {
     tail_fault.actions.push(Action::Stop { target: Some(rid("mock/rx")) });
     tail_fault.step(2_001_000_000).unwrap();
     tail_fault.step(2_001_500_000).unwrap();
+    // RM-16: the `Stop` cuts at its instant, with no tail, so the overrun after it finds no
+    // stream running and is recorded unapplied (MR-20; spec 22, VH-3, VH-5).
     let faults = &tail_fault.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.faults").unwrap()];
-    assert_eq!(faults[0]["applied"], true);
-    assert_eq!(faults[0]["lost"], 500);
+    assert_eq!(faults[0]["applied"], false);
+    assert_eq!(faults[0]["lost"], 0);
     let stats = &tail_fault.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.stats").unwrap()];
-    assert_eq!(stats["rx_samples"], 1_500);
-    // MR-20a: the stop's tail ends the stream at 2 000, before k_g = 51 500, so no block
-    // carries the loss and no RX_OVERFLOW is emitted for it (spec 20, VF-4).
+    assert_eq!(stats["rx_samples"], 1_000);
     assert_eq!(tail_fault.events.drain().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0);
 }
 
@@ -1417,85 +1473,11 @@ fn received(harness: &Harness) -> Vec<BlockHeader> {
 }
 
 #[test]
-fn mr_20a_a_tail_fault_reports_only_what_its_stream_lost() {
-    // Issue #45: a sequence error at the tail of a 3 MS/s stream that a cold change to
-    // 300 kS/s ends at e₁ = 1 001 000, the old clock's sample 3 003. The stream ends before
-    // the block that would carry the loss, so it reports only what it lost before its end,
-    // with no RX_OVERFLOW (MR-20a; spec 20, VF-4).
-    for (fault_at, change_at, applied, lost) in [
-        (1_000_800, 1_000_001, false, 0), // k_f = 3 003 = k_e
-        (1_000_500, 1_000_001, true, 1),  // k_f = 3 002, one sample before k_e
-        (1_001_000, 1_001_000, false, 0), // the fault at e₁, ordered before the change
-    ] {
-        let env = [("sim.faults", serde_json::json!([{ "at_ns": fault_at, "fault": "rx_sequence_error", "target": "radio" }]))];
-        let mut harness = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(3_000_000.0)))], &[], &env, Some((BackPressure::DropOldest, 64)));
-        harness.arm_start(0).unwrap();
-        harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(300_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, change_at))));
-        harness.step(0).unwrap();
-        harness.step(20_000_000).unwrap();
-        assert_eq!(fault_rows(&harness, "rx_sequence_error"), [(serde_json::json!(applied), serde_json::json!(lost))], "{fault_at}");
-        assert!(rx_overflows(&harness).is_empty(), "{fault_at}");
-        let headers = received(&harness);
-        assert!(headers.len() > 2, "{fault_at}");
-        assert!(headers.iter().all(|header| header.lost.is_none()), "{fault_at}: {headers:?}");
-    }
-}
-
-#[test]
-fn mr_20a_a_stop_ends_the_loss() {
-    // A sequence error at 1 ms cuts the stream at k_f = 1 000 and would lose 2 000 samples;
-    // a stop of the stream at 1.1 ms (ideal: no tail) ends it at k_e = 1 100 first, so the
-    // fault removed 100 samples, which no block carries (MR-20a; spec 20, VF-4).
-    let seq_at_1ms = serde_json::json!({ "at_ns": 1_000_000, "fault": "rx_sequence_error", "target": "radio" });
-    for loss in [false, true] {
-        let mut faults = vec![seq_at_1ms.clone()];
-        if loss { faults.push(serde_json::json!({ "at_ns": 1_100_000, "fault": "device_lost", "target": "radio" })); }
-        let env = [("sim.faults", serde_json::Value::Array(faults))];
-        let mut harness = Harness::new("ideal", &[], &[], &env, Some((BackPressure::DropOldest, 64)));
-        harness.arm_start(0).unwrap();
-        harness.step(1_000_000).unwrap();
-        if loss {
-            // The loss ends the stream at its own instant (MR-20; spec 20, VF-3), where
-            // DEVICE_LOST's default `abort` (RS-28) also stops the Run.
-            let error = harness.step(1_100_000).unwrap_err();
-            assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
-            harness.mock.stop(StopMode::Abort).unwrap();
-        } else {
-            harness.actions.push(Action::Stop { target: Some(rid("mock/rx")) });
-            harness.step(1_100_000).unwrap();
-            harness.step(10_000_000).unwrap();
-        }
-        assert_eq!(fault_rows(&harness, "rx_sequence_error"), [(serde_json::json!(true), serde_json::json!(100))], "loss: {loss}");
-        assert!(rx_overflows(&harness).is_empty(), "loss: {loss}");
-        let last = received(&harness).pop().unwrap();
-        assert_eq!(last.first_sample_time.ticks + i64::from(last.len), 1_000, "loss: {loss}");
-    }
-
-    // x310-like: the Stop at 2.5 ms has a 1 ms tail, which reaches k_g = 3 000, so the
-    // tail's block [3 000, 3 500) carries the loss and the overflow comes with it.
-    let env = [("sim.faults", serde_json::json!([seq_at_1ms]))];
-    let mut harness = Harness::new("x310-like", &[], &[], &env, Some((BackPressure::DropOldest, 64)));
-    harness.arm_start(2_000_000_000).unwrap();
-    harness.step(2_001_000_000).unwrap();
-    harness.actions.push(Action::Stop { target: Some(rid("mock/rx")) });
-    harness.step(2_002_500_000).unwrap();
-    harness.step(2_010_000_000).unwrap();
-    let rx_domain = harness.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/rx")).unwrap().domain;
-    assert_eq!(
-        rx_overflows(&harness),
-        [(TimePoint::new(rx_domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: 2_000, restart_gap_ns: 0 })]
-    );
-    assert_eq!(fault_rows(&harness, "rx_sequence_error"), [(serde_json::json!(true), serde_json::json!(2_000))]);
-    let last = received(&harness).pop().unwrap();
-    assert_eq!((last.first_sample_time.ticks, last.len, last.lost), (3_000, 500, Some(2_000)));
-    assert_eq!(last.flags, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY);
-}
-
-#[test]
 fn mr_20a_the_overflow_comes_with_the_block_that_carries_it() {
-    // An overrun at 1 ms on x310-like at 1 MS/s loses 50 000 samples (a 50 ms restart gap):
-    // its RX_OVERFLOW and its row wait for the block at 51 000, which carries the loss, as
-    // a USRP reports an overflow with the next packet (UR-18; MR-20a, MR-37; spec 20, VF-4).
+    // RM-17: an overrun at 1 ms on x310-like at 1 MS/s loses 50 000 samples (a 50 ms restart
+    // gap): its RX_OVERFLOW waits for the block at 51 000, which carries the loss, as a USRP
+    // reports an overflow with the next packet (UR-18, MR-37); its row is written when it
+    // fires (MR-20; spec 22, VH-5).
     let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
     let mut harness = Harness::new("x310-like", &[], &[], &env, Some((BackPressure::DropOldest, 16)));
     harness.arm_start(2_000_000_000).unwrap();
@@ -1503,7 +1485,7 @@ fn mr_20a_the_overflow_comes_with_the_block_that_carries_it() {
     let headers = received(&harness);
     assert_eq!(headers.iter().map(|header| (header.first_sample_time.ticks, header.len)).collect::<Vec<_>>(), [(0, 1_000)]);
     assert!(rx_overflows(&harness).is_empty());
-    assert!(fault_rows(&harness, "rx_overflow").is_empty());
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(50_000))]);
 
     harness.step(2_060_000_000).unwrap();
     let rx_domain = harness.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/rx")).unwrap().domain;
@@ -1536,7 +1518,7 @@ fn mr_20_a_lost_device_delivers_every_sample_before_the_loss() {
     // MR-20 (spec 20, VF-3): the loss is a receive cut applied in the step's ordered loop,
     // so the block in progress is delivered up to the first sample at or after it, and a
     // block whose last sample comes before it is delivered in the losing step.
-    for (at, last) in [(1_000_000, 1_000), (1_999_001, 2_000)] {
+    for (at, last) in [(1_000_000, 1_000), (1_500_000, 1_500), (1_999_001, 2_000)] {
         let env = [("sim.faults", serde_json::json!([device_lost_at(at)]))];
         let mut harness = Harness::new("ideal", &[], &[], &env, Some((BackPressure::DropOldest, 64)));
         harness.arm_start(0).unwrap();
@@ -1644,8 +1626,10 @@ fn mr_20_an_action_after_the_losing_step_is_refused() {
 
 #[test]
 fn mr_20_a_fault_at_a_loss_s_instant_removes_nothing() {
-    // MR-20, SE-4, MR-20a (spec 20, VF-3): the stream ends at the loss's instant, so a
-    // sequence error due there removes no sample, whichever side of the loss it is listed.
+    // MR-20, SE-4 (spec 20, VF-3): the stream ends at the loss's instant, so a sequence
+    // error due there removes no delivered sample, whichever side of the loss it is listed;
+    // listed first it fires and records what it injected, listed after the loss it does not
+    // fire (spec 22, VH-5).
     let sequence_error = serde_json::json!({ "at_ns": 1_000_000, "fault": "rx_sequence_error", "target": "radio" });
     for loss_first in [false, true] {
         let faults = if loss_first { [device_lost_at(1_000_000), sequence_error.clone()] } else { [sequence_error.clone(), device_lost_at(1_000_000)] };
@@ -1657,7 +1641,8 @@ fn mr_20_a_fault_at_a_loss_s_instant_removes_nothing() {
         harness.mock.stop(StopMode::Abort).unwrap();
         let headers = received(&harness);
         assert_eq!(headers.iter().map(|header| (header.first_sample_time.ticks, header.len)).collect::<Vec<_>>(), [(0, 1_000)], "{loss_first}");
-        assert_eq!(fault_rows(&harness, "rx_sequence_error"), [(serde_json::json!(false), serde_json::json!(0))], "{loss_first}");
+        let row = if loss_first { (serde_json::json!(false), serde_json::json!(0)) } else { (serde_json::json!(true), serde_json::json!(2_000)) };
+        assert_eq!(fault_rows(&harness, "rx_sequence_error"), [row], "{loss_first}");
         assert!(rx_overflows(&harness).is_empty(), "{loss_first}");
         assert_eq!(fault_rows(&harness, "device_lost"), [(serde_json::json!(true), serde_json::json!(0))], "{loss_first}");
     }
@@ -1665,9 +1650,9 @@ fn mr_20_a_fault_at_a_loss_s_instant_removes_nothing() {
 
 #[test]
 fn mr_20_a_loss_ends_its_receive_stream_at_its_instant() {
-    // MR-20, MR-20a (spec 20, VF-3): a sequence error at 1 ms whose loss is pending when
-    // the device is lost at 1.1 ms is settled at the loss, where the stream ends: 100
-    // samples, not the 1 000 that a stream ended by the `stop` at 2 ms would give.
+    // MR-20 (spec 20, VF-3; spec 22, VH-1): the device lost at 1.1 ms ends the receive
+    // stream and its SampleClock there, after a sequence error at 1 ms whose row, written
+    // when it fired, keeps the block it injected (VH-5); the `stop` at 2 ms changes neither.
     let env = [("sim.faults", serde_json::json!([
         { "at_ns": 1_000_000, "fault": "rx_sequence_error", "target": "radio" },
         device_lost_at(1_100_000)
@@ -1678,7 +1663,10 @@ fn mr_20_a_loss_ends_its_receive_stream_at_its_instant() {
     harness.step(1_100_000).unwrap_err();
     harness.auth.advance_to(TimePoint::new(ROOT, 2_000_000)).unwrap();
     harness.mock.stop(StopMode::Orderly).unwrap();
-    assert_eq!(fault_rows(&harness, "rx_sequence_error"), [(serde_json::json!(true), serde_json::json!(100))]);
+    assert_eq!(fault_rows(&harness, "rx_sequence_error"), [(serde_json::json!(true), serde_json::json!(2_000))]);
+    let clocks: Vec<_> = harness.clocks.sample_clock_records().into_iter().map(|record| (record.origin.ticks, record.ended_at.map(|end| end.ticks))).collect();
+    assert_eq!(clocks, [(0, Some(1_100_000))]);
+    assert_eq!(received(&harness).iter().map(|header| (header.first_sample_time.ticks, header.len)).collect::<Vec<_>>(), [(0, 1_000)]);
 }
 
 #[test]
@@ -1717,6 +1705,76 @@ fn mr_21_overrun_shape() {
     let faults = overlap.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.faults").unwrap()].clone();
     let rows: Vec<_> = faults.as_array().unwrap().iter().map(|row| (row["applied"].clone(), row["lost"].clone())).collect();
     assert_eq!(rows, [(serde_json::json!(true), serde_json::json!(50_000)), (serde_json::json!(true), serde_json::json!(9_000))]);
+
+    // The row is what the overrun injected, `k_g − k_f`, written when it fires and never
+    // revised: a cut booked for 20 ms, before `k_g`, leaves it 50 000 (VH-5).
+    let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
+    let mut cut = Harness::new("x310-like", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
+    cut.arm_start(2_000_000_000).unwrap();
+    cut.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, 2_020_000_000))));
+    cut.step(2_000_000_000).unwrap();
+    cut.step(2_100_000_000).unwrap();
+    assert_eq!(fault_rows(&cut, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(50_000))]);
+    assert!(rx_overflows(&cut).is_empty(), "no block carries the loss");
+}
+
+#[test]
+fn mr_25_a_stop_cuts_at_its_instant() {
+    // RM-16, MR-25 (spec 22, VH-3): a `Stop` of the stream or of the device, and `stop`,
+    // end the receive stream at the first sample at or after the instant MockRadio handles
+    // them: every sample before it is delivered, none at or after it, and the SampleClock
+    // ends there — on `ideal` at 1 MS/s, and on `x310-like` at 390.625 kS/s, whose 2 000-sample
+    // blocks last 5.12 ms (2 560 root ticks a sample).
+    for (profile, rate, period, t0) in [("ideal", 1_000_000.0, 1_000, 0), ("x310-like", 390_625.0, 2_560, 2_000_000_000)] {
+        for how in ["mock/rx", "mock", "stop"] {
+            let mut h = Harness::new(profile, &[("radio.rx.sample_rate_hz", eq(Value::Num(rate)))], &[], &[], Some((BackPressure::DropOldest, 64)));
+            h.arm_start(t0).unwrap();
+            let at = t0 + 7_777_777;
+            h.step(at).unwrap();
+            if how == "stop" {
+                h.mock.stop(StopMode::Orderly).unwrap();
+            } else {
+                h.actions.push(Action::Stop { target: Some(rid(how)) });
+                h.step(at).unwrap();
+            }
+            h.step(at + 50_000_000).unwrap();
+            let cut = (7_777_777 + period - 1) / period;
+            let blocks = received(&h);
+            let end = blocks.last().map(|header| header.first_sample_time.ticks + i64::from(header.len));
+            assert_eq!(end, Some(cut), "{profile}, {how}");
+            let clocks: Vec<_> = h.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx"))
+                .map(|record| (record.origin.ticks, record.ended_at.map(|end| end.ticks))).collect();
+            assert_eq!(clocks, [(t0, Some(t0 + cut * period))], "{profile}, {how}");
+        }
+    }
+}
+
+#[test]
+fn mr_29_start_rx_is_the_one_peripheral_command() {
+    // MR-29, RM-12: after a `Stop` of `mock/rx`, `start_rx` on `mock/tx`, on `mock` or with a
+    // param is refused; on `mock/rx` it starts the stream again on a new clock, at its instant
+    // on `ideal`, and a second one on a running stream changes nothing (RM-21, RM-25).
+    let mut h = Harness::new("ideal", &[], &[], &[], Some((BackPressure::DropOldest, 64)));
+    h.arm_start(0).unwrap();
+    h.actions.push(Action::Stop { target: Some(rid("mock/rx")) });
+    h.step(1_000_000).unwrap();
+    let start = |target: &str, params: BTreeMap<Key, Value>| Action::PeripheralCommand { target: rid(target), verb: Ident::parse("start_rx").unwrap(), params, at: None };
+    h.actions.push(start("mock/tx", BTreeMap::new()));
+    h.actions.push(start("mock", BTreeMap::new()));
+    h.actions.push(start("mock/rx", BTreeMap::from([(key("radio.now"), Value::Bool(true))])));
+    h.step(2_000_000).unwrap();
+    let rejected = rejected_rows(&h);
+    assert_eq!(rejected.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(), ["peripheral_command"; 3]);
+    assert_eq!(h.events.drain().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 3);
+    h.actions.push(start("mock/rx", BTreeMap::new()));
+    h.step(3_000_000).unwrap();
+    h.actions.push(start("mock/rx", BTreeMap::new()));
+    h.step(4_000_000).unwrap();
+    h.step(10_000_000).unwrap();
+    let clocks: Vec<_> = h.clocks.sample_clock_records().into_iter().map(|record| (record.origin.ticks, record.ended_at.map(|end| end.ticks))).collect();
+    assert_eq!(clocks, [(0, Some(1_000_000)), (3_000_000, None)]);
+    let first_new = received(&h).into_iter().find(|header| header.first_sample_time.domain != h.clocks.sample_clock_records()[0].domain).unwrap();
+    assert_eq!((first_new.first_sample_time.ticks, first_new.flags), (0, BlockFlags::NONE));
 }
 
 #[test]
@@ -1753,7 +1811,9 @@ fn mr_24_a_bypassing_provider_gets_time_error() {
 }
 
 #[test]
-fn mr_25_orderly_stop_delivers_the_tail_abort_does_not() {
+fn mr_25_orderly_stop_ends_at_its_instant_abort_at_once() {
+    // RM-16, MR-25: an orderly stop delivers every sample before its instant and none at or
+    // after it, with no tail (spec 22, VH-3); an abort delivers nothing more.
     let mut orderly = Harness::new("x310-like", &[], &[], &[], Some((BackPressure::DropOldest, 16)));
     orderly.arm_start(2_000_000_000).unwrap();
     orderly.step(2_001_999_000).unwrap();
@@ -1763,7 +1823,9 @@ fn mr_25_orderly_stop_delivers_the_tail_abort_does_not() {
     let mut blocks = Vec::new();
     while let Some(block) = orderly.link.as_ref().unwrap().receive() { blocks.push(block); }
     let last = blocks.last().unwrap().header();
-    assert_eq!(2_000_000_000 + (last.first_sample_time.ticks + i64::from(last.len) - 1) * 1_000, stop + 999_000);
+    assert_eq!(2_000_000_000 + (last.first_sample_time.ticks + i64::from(last.len) - 1) * 1_000, stop - 1_000);
+    let ended = orderly.clocks.sample_clock_records()[0].ended_at;
+    assert_eq!(ended, Some(TimePoint::new(ROOT, stop)));
 
     let mut abort = Harness::new("x310-like", &[], &[], &[], Some((BackPressure::DropOldest, 16)));
     abort.arm_start(2_000_000_000).unwrap();
@@ -1779,9 +1841,9 @@ fn mr_25_orderly_stop_delivers_the_tail_abort_does_not() {
 #[test]
 fn mr_25_a_stopped_stream_keeps_its_end() {
     // A receive stream's end moves only earlier (RM-16, MR-25; spec 21, VG-1; issue #46).
-    // A `Stop` of `mock/rx` at T0 + 1 ms ends the stream at sample 1 000 (`ideal`, no tail)
-    // or 2 000 (`x310-like`, a 1 ms tail); a later stop at T0 + 5 ms keeps that end.
-    for (profile, t0, end) in [("ideal", 0, 1_000), ("x310-like", 2_000_000_000, 2_000)] {
+    // A `Stop` of `mock/rx` at T0 + 1 ms ends the stream and its clock at sample 1 000; a
+    // later stop at T0 + 5 ms keeps that end (spec 22, VH-1).
+    for (profile, t0, end) in [("ideal", 0, 1_000), ("x310-like", 2_000_000_000, 1_000)] {
         for later in ["stop(Orderly)", "mock/rx", "mock"] {
             let mut harness = Harness::new(profile, &[], &[], &[], Some((BackPressure::DropOldest, 64)));
             harness.arm_start(t0).unwrap();
@@ -1797,11 +1859,13 @@ fn mr_25_a_stopped_stream_keeps_its_end() {
             harness.step(t0 + 10_000_000).unwrap();
             let last = received(&harness).pop().unwrap();
             assert_eq!(last.first_sample_time.ticks + i64::from(last.len), end, "{profile}, then {later}");
+            let clocks: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx"))
+                .map(|record| (record.origin.ticks, record.ended_at.map(|end| end.ticks))).collect();
+            assert_eq!(clocks, [(t0, Some(t0 + 1_000_000))], "{profile}, then {later}");
         }
     }
 
-    // An abort inside the `Stop`'s tail still ends the stream at once: no block at all, where
-    // the tail's block [0, 2 000) would be published only at T0 + 1.999 001 ms.
+    // An abort after the `Stop` keeps its end too.
     let mut harness = Harness::new("x310-like", &[], &[], &[], Some((BackPressure::DropOldest, 64)));
     harness.arm_start(2_000_000_000).unwrap();
     harness.actions.push(Action::Stop { target: Some(rid("mock/rx")) });
@@ -1809,7 +1873,7 @@ fn mr_25_a_stopped_stream_keeps_its_end() {
     harness.step(2_001_500_000).unwrap();
     harness.mock.stop(StopMode::Abort).unwrap();
     harness.step(2_010_000_000).unwrap();
-    assert!(received(&harness).is_empty());
+    assert_eq!(received(&harness).iter().map(|header| (header.first_sample_time.ticks, header.len)).collect::<Vec<_>>(), [(0, 1_000)]);
 }
 
 #[test]
@@ -1928,20 +1992,21 @@ fn mr_37_the_overflow_travels_the_hot_path() {
 }
 
 #[test]
-fn mr_18_fractional_cold_keeps_old_tail_to_e1() {
+fn mr_18_a_fractional_receive_cut_is_the_first_sample_at_or_after_e() {
+    // RM-16: the old stream delivers every sample before `e` and ends at the first at or
+    // after it, its clock ending at that sample's instant rounded up (MR-7).
     for (rate, requested, end, samples) in [
-        (3_000_000.0, 1_000_001, 1_001_000, 3003),
-        (7_000_000.0, 1_000_001, 1_001_000, 7007),
+        (3_000_000.0, 1_000_001, 1_000_334, 3001),
+        (7_000_000.0, 1_000_001, 1_000_143, 7001),
         (3_000_000.0, 1_001_000, 1_001_000, 3003),
     ] {
         let mut h = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(rate)))],
             &[], &[], Some((BackPressure::DropOldest, 64)));
         h.arm_start(0).unwrap();
-        let old = h.clocks.sample_clock_records()[0].domain;
         h.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0),
             UpdateClass::Cold, Some(TimePoint::new(ROOT, requested))));
         h.step(0).unwrap(); h.step(requested).unwrap();
-        if requested < end { assert_eq!(h.clocks.sample_clock_records()[0].ended_at, None); }
+        let old = h.clocks.sample_clock_records()[0].domain;
         h.step(3_200_000).unwrap();
         assert_eq!(h.clocks.sample_clock_records()[0].ended_at, Some(TimePoint::new(ROOT, end)));
         let mut old_end = 0;
@@ -1950,12 +2015,14 @@ fn mr_18_fractional_cold_keeps_old_tail_to_e1() {
                 old_end = block.header().first_sample_time.ticks + i64::from(block.header().len);
             }
         }
-        assert_eq!(old_end, samples, "old samples must be delivered to e1");
+        assert_eq!(old_end, samples, "old samples must be delivered up to e");
     }
 }
 
 #[test]
-fn mr_18_fractional_cold_keeps_transmitted_tail_to_e1() {
+fn mr_18_a_fractional_transmit_cut_is_the_first_sample_at_or_after_e() {
+    // RM-16, RM-25: the change, booked at 0, ends the old transmit clock then at its cut, the
+    // first sample at or after `e` (3 001, at 1 000 334), and the burst plays up to it.
     let mut h = Harness::new("ideal", &[("radio.tx.channels", eq(Value::Int(1))),
         ("radio.tx.sample_rate_hz", eq(Value::Num(3_000_000.0)))], &[], &[], None);
     h.arm_start(0).unwrap();
@@ -1963,21 +2030,23 @@ fn mr_18_fractional_cold_keeps_transmitted_tail_to_e1() {
     h.actions.push(tx_action(old, 0, 1000, true, LatePolicy::SendAsapAndFlag));
     h.actions.push(update_action("radio.tx.sample_rate_hz", Value::Num(2_000_000.0),
         UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_001))));
-    h.step(0).unwrap(); h.step(1_000_001).unwrap();
-    assert!(h.clocks.sample_clock_records().iter().find(|c| c.domain == old).unwrap().ended_at.is_none());
+    h.step(0).unwrap();
+    assert_eq!(h.clocks.sample_clock_records().iter().find(|c| c.domain == old).unwrap().ended_at,
+        Some(TimePoint::new(ROOT, 1_000_334)));
+    h.step(1_000_001).unwrap();
     h.step(1_001_000).unwrap();
     let records: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(
         h.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.bursts").unwrap()].clone()).unwrap();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].samples, 3003);
+    assert_eq!(records[0].samples, 3001);
     assert_eq!(records[0].target.domain, old);
     assert_eq!(records[0].end, BurstEnd::Stop);
-    assert_eq!(h.clocks.sample_clock_records().iter().find(|c| c.domain == old).unwrap().ended_at,
-        Some(TimePoint::new(ROOT, 1_001_000)));
 }
 
 #[test]
-fn mr_18_rounded_cold_updates_keep_effective_instant_order() {
+fn mr_18_a_cold_change_that_arrives_after_a_later_one_follows_it() {
+    // VH-2, RM-25: a `cold` change never takes effect before one of its stream received
+    // earlier: the second takes the first's instant, after it, and is late.
     for (same_time, first_rate, second_rate) in [(false, 2_000_000.0, 1_000_000.0),
         (false, 1_000_000.0, 2_000_000.0), (true, 2_000_000.0, 1_000_000.0)] {
         let mut h = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(3_000_000.0)))],
@@ -1990,12 +2059,10 @@ fn mr_18_rounded_cold_updates_keep_effective_instant_order() {
         h.step(0).unwrap(); h.step(1_001_000).unwrap();
         let instance = h.mock.instance();
         let applied = &instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()];
-        let values: Vec<_> = applied.as_array().unwrap().iter().map(|row| row["value"].clone()).collect();
-        let expected = if same_time { vec![serde_json::json!(first_rate), serde_json::json!(second_rate)] }
-            else { vec![serde_json::json!(second_rate), serde_json::json!(first_rate)] };
-        assert_eq!(values, expected);
-        let times: Vec<TimePoint> = applied.as_array().unwrap().iter().map(|row| serde_json::from_value(row["at"].clone()).unwrap()).collect();
-        assert!(times.windows(2).all(|pair| pair[0].ticks <= pair[1].ticks));
+        let rows: Vec<_> = applied.as_array().unwrap().iter().map(|row| (row["value"].clone(), row["at"]["ticks"].clone())).collect();
+        assert_eq!(rows, [(serde_json::json!(first_rate), serde_json::json!(1_000_500)), (serde_json::json!(second_rate), serde_json::json!(1_000_500))]);
+        let late = h.events.drain().into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).count();
+        assert_eq!(late, usize::from(!same_time));
         for record in h.clocks.sample_clock_records() {
             if let Some(end) = record.ended_at { assert!(end.ticks >= record.origin.ticks); }
         }
@@ -2003,7 +2070,11 @@ fn mr_18_rounded_cold_updates_keep_effective_instant_order() {
 }
 
 #[test]
-fn mr_18_deferred_disable_enable_keeps_the_last_cut() {
+fn mr_18_a_disable_that_arrives_after_a_later_change_follows_it() {
+    // VH-2: a change to 0 channels received after one for a later instant takes that instant,
+    // after it: the stream ends at the first one's cut, and the first one's segment ends at
+    // its origin — with no clock on receive, and its transmit clock, registered at booking,
+    // ended there (RM-25).
     for direction in ["rx", "tx"] {
         let rate_key = format!("radio.{direction}.sample_rate_hz");
         let channels_key = format!("radio.{direction}.channels");
@@ -2011,20 +2082,16 @@ fn mr_18_deferred_disable_enable_keeps_the_last_cut() {
             (channels_key.as_str(), eq(Value::Int(1)))], &[], &[], Some((BackPressure::DropOldest, 64)));
         h.arm_start(0).unwrap();
         let stream = rid(&format!("mock/{direction}"));
-        let old = h.clocks.sample_clock_records().into_iter().find(|record| record.stream == stream).unwrap().domain;
         h.actions.push(update_action(&channels_key, Value::Int(1), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_500))));
         h.actions.push(update_action(&channels_key, Value::Int(0), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_001))));
         h.step(0).unwrap(); h.step(1_001_000).unwrap();
-        let records: Vec<_> = h.clocks.sample_clock_records().into_iter().filter(|record| record.stream == stream).collect();
-        assert_eq!(records.len(), 2);
-        let ended = records.iter().find(|record| record.domain == old).unwrap().ended_at.unwrap();
-        let started = records.iter().find(|record| record.domain != old).unwrap().origin;
-        assert_eq!(ended.ticks, 1_001_000);
-        assert!(started.ticks >= ended.ticks);
+        let records: Vec<_> = h.clocks.sample_clock_records().into_iter().filter(|record| record.stream == stream)
+            .map(|record| (record.origin.ticks, record.ended_at.map(|end| end.ticks))).collect();
+        let expected: &[(i64, Option<i64>)] = if direction == "rx" { &[(0, Some(1_000_667))] } else { &[(0, Some(1_000_667)), (1_001_000, Some(1_001_000))] };
+        assert_eq!(records, expected, "{direction}");
         let instance = h.mock.instance();
         let applied = &instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()];
-        assert_eq!(applied[0]["value"], 0); assert_eq!(applied[1]["value"], 1);
-        let times: Vec<TimePoint> = applied.as_array().unwrap().iter().map(|row| serde_json::from_value(row["at"].clone()).unwrap()).collect();
-        assert!(times.windows(2).all(|pair| pair[0].ticks <= pair[1].ticks));
+        let rows: Vec<_> = applied.as_array().unwrap().iter().map(|row| (row["value"].clone(), row["at"]["ticks"].clone())).collect();
+        assert_eq!(rows, [(serde_json::json!(1), serde_json::json!(1_000_500)), (serde_json::json!(0), serde_json::json!(1_000_500))], "{direction}");
     }
 }

@@ -15,6 +15,21 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — spec 22 — one stream timeline
+
+Still version 1: v4.0 has not frozen (OV-12). The Radio Model Vocabulary is `radio` 2.0.0.
+
+- `radio/envelope`: `timing` loses `stop_tail_ns` and `restart_lead_ns` (spec 22, VH-3,
+  VH-4): a stream has no stop tail, and one start lead, `start_lead_ns`, counts from a
+  stream's previous cut and from the instant its Provider is ready, its description changed
+  with it. Not additive: an envelope written with either member is refused by
+  `deny_unknown_fields`, not reinterpreted (invariant 39); the profiles that wrote them,
+  MockRadio's 1.2.0 and the UHD Module's 0.2.0, are refused by their Modules (MR-2, UR-5).
+- `action`, `action_template`, `component_descriptor`, `experiment_spec` and
+  `vocabulary_descriptor`: the description of `UpdateClass::Cold` says a `cold` update
+  restarts the function only if it was running (UC-3, TM-13c; spec 22, KJ-1). Descriptions
+  only; no shape changes.
+
 ## v1 — spec 20 — Session durations as `Duration`
 
 Still version 1: v4.0 has not frozen. Not additive: `advance`'s `by_ns` and `wait_for`'s

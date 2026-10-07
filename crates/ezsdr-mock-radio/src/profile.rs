@@ -33,7 +33,7 @@ impl Profile {
                 ProfileKind::Ideal => "ideal",
             }
             .to_owned(),
-            version: Version::new(1, 2, 0),
+            version: Version::new(2, 0, 0),
         }
     }
 
@@ -73,6 +73,25 @@ impl Profile {
         2_000
     }
 
+    /// One receive call, in samples, for RM-25's ready instant after a cut: on `x310-like`
+    /// the longer of `block_len` and the X300's packet of 1 996 samples (UHD's
+    /// `max_num_samps` at MTU 9000), as the UHD Module's; none on `ideal`, ready at receipt
+    /// (MR-3, MR-18; spec 22, VH-4).
+    pub(crate) fn rx_call_samples(self) -> i64 {
+        match self.kind {
+            ProfileKind::X310Like => i64::from(self.block_len()).max(1_996),
+            ProfileKind::Ideal => 0,
+        }
+    }
+
+    /// The delivery allowance after that call, in nanoseconds (MR-3).
+    pub(crate) fn delivery_allowance_ns(self) -> i64 {
+        match self.kind {
+            ProfileKind::X310Like => 3_000_000,
+            ProfileKind::Ideal => 0,
+        }
+    }
+
     /// The transmit path delay in transmit samples: srsRAN's X300 time advance for
     /// `x310-like` (INFERRED), none for `ideal` (MR-3, RM-23).
     pub(crate) fn tx_path_delay_samples(self) -> i64 {
@@ -98,21 +117,16 @@ impl Profile {
             ProfileKind::X310Like => TimingEnvelope {
                 min_timed_command_lead_ns: 2_000_000,
                 startup_latency_ns: 2_000_000_000,
-                stop_tail_ns: 1_000_000,
                 command_queue_depth: 16,
                 overflow_restart_gap_ns: 50_000_000,
-                // INFERRED, as spec 18 §3's UHD Module waits them; Phase 8 measures both
-                // (spec 20, VF-6).
-                restart_lead_ns: 50_000_000,
+                // INFERRED, as spec 18 §3's UHD Module waits it; Phase 8 measures it.
                 start_lead_ns: 50_000_000,
             },
             ProfileKind::Ideal => TimingEnvelope {
                 min_timed_command_lead_ns: 0,
                 startup_latency_ns: 0,
-                stop_tail_ns: 0,
                 command_queue_depth: i64::from(u32::MAX),
                 overflow_restart_gap_ns: 0,
-                restart_lead_ns: 0,
                 start_lead_ns: 0,
             },
         }

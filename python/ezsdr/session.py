@@ -189,7 +189,10 @@ class _Side:
     channels = _param("channels")
 
     def stop(self) -> dict:
-        """Submits ``Stop`` for this side's stream."""
+        """Submits ``Stop`` for this side's stream: after ``rx.stop()`` or ``stop("<radio>")``
+        the receive stream stays stopped through every parameter change until ``rx.start()``,
+        and after ``tx.stop()`` or ``stop("<radio>")`` the next ``repeat`` transmits (RM-16,
+        RM-21; EA-16)."""
         return self._session.stop(f"{self._radio}/{self._direction}")
 
 
@@ -207,6 +210,25 @@ class CaptureRequest:
 
 class Rx(_Side):
     """A radio's receive side."""
+
+    def start(self, at: Optional[dict] = None) -> dict:
+        """Submits ``radio.start_rx`` on this radio's receive stream with ``at``, a
+        ``TimePoint`` as ``capture`` takes — without one, the Session's current instant, so
+        that the start takes effect when the radio receives it — and raises ``Rejected`` if
+        the entry is rejected; returns the entry. A receive stream ``stop()`` ended runs again
+        from then, on a new SampleClock that begins the radio's start lead later with the
+        configuration then in force; on a running stream it changes nothing. Calls act in
+        the order made: ``stop()`` then ``start()`` restarts the stream, ``start()`` then
+        ``stop()`` leaves it stopped (RM-12, RM-21; EA-16)."""
+        action = {
+            "kind": "vocabulary",
+            "ns": "radio",
+            "verb": "start_rx",
+            "target": _rid(f"{self._radio}/rx"),
+            "at": at if at is not None else self._session.now,
+            "params": {},
+        }
+        return _admitted(self._session.submit(action))
 
     def capture(self, n: int, at: Optional[dict] = None, timeout: Optional[float] = None) -> np.ndarray:
         """Captures ``n`` samples from this radio's recorder and returns them (EA-17).

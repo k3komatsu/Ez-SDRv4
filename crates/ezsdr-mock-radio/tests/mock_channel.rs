@@ -30,7 +30,7 @@ fn key(name: &str) -> Key { Key::parse(name).unwrap() }
 fn eq(value: Value) -> Constraint { Constraint::Eq { value } }
 
 fn module_ref() -> ModuleRef {
-    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 5, 0) }
+    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(2, 0, 0) }
 }
 
 #[derive(Default)]
@@ -112,7 +112,7 @@ fn prepare(world: &World, options: Options<'_>) -> Result<Radio, ModuleError> {
     for (name, value) in options.selector {
         selector.insert(Ident::parse(name).unwrap(), value.clone());
     }
-    let binding = Binding { module: module_ref(), selector, profile: Some(ProfileRef { name: options.profile.to_owned(), version: Version::new(1, 2, 0) }), feed: None };
+    let binding = Binding { module: module_ref(), selector, profile: Some(ProfileRef { name: options.profile.to_owned(), version: Version::new(2, 0, 0) }), feed: None };
     let mut mock = MockRadio::from_binding(&binding).unwrap();
     if options.medium {
         mock = mock.with_medium(world.medium.clone());

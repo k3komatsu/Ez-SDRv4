@@ -436,7 +436,7 @@ The two guards matter. Without `closed_by_stream_gap` every stream gap would als
 
 ## 11. Deferred
 
-Block pools and real Link Modules (a single-producer single-consumer ring, shared memory). The MockRadio device model: `TIME_ERROR` emulation, length jitter, the stop tail, overflow injection. TimingEnvelope values and therefore the source of `min_lead`. The host-loop versus device-memory implementation of `repeat` and its capability constraints. A transmit-as-radiated monitor port for self-interference cancellation. The SigMF writer. The `pdu.*` and `tensor.*` contracts. The payload schemas of the event kinds named here (`RX_OVERFLOW`, `TX_UNDERFLOW`, `TX_DISCONTINUITY`, `TIME_ERROR`, `ALIGNMENT_ERROR`, `LINK_BACKPRESSURE`), which belong to spec 04. The planner hooks that apply SC-21 and SC-27's plan-time rule, which belong to specs 03 and 05. Taint conventions for Processors whose mapping is not one-to-one.
+Block pools and real Link Modules (a single-producer single-consumer ring, shared memory). The MockRadio device model: `TIME_ERROR` emulation, length jitter, overflow injection. TimingEnvelope values and therefore the source of `min_lead`. The host-loop versus device-memory implementation of `repeat` and its capability constraints. A transmit-as-radiated monitor port for self-interference cancellation. The SigMF writer. The `pdu.*` and `tensor.*` contracts. The payload schemas of the event kinds named here (`RX_OVERFLOW`, `TX_UNDERFLOW`, `TX_DISCONTINUITY`, `TIME_ERROR`, `ALIGNMENT_ERROR`, `LINK_BACKPRESSURE`), which belong to spec 04. The planner hooks that apply SC-21 and SC-27's plan-time rule, which belong to specs 03 and 05. Taint conventions for Processors whose mapping is not one-to-one.
 
 ---
 

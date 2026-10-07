@@ -84,6 +84,8 @@ pub struct Segment {
     pub cut: Option<i64>,
     /// The configuration it runs.
     pub config: Config,
+    /// The arrival order of the command that began it; none for the stream's first segment.
+    pub by: Option<u64>,
 }
 
 impl Segment {
@@ -102,30 +104,127 @@ impl Segment {
     }
 }
 
-/// The segments of one stream, in order (RM-16, RM-21, RM-25). Items take effect in the
-/// order of their effective instants and, at one instant, of their arrival. A receive
-/// segment cut with no sample has no SampleClock and is left out; a transmit one is kept,
-/// since its clock was registered when its change was booked.
+/// One stream's commands and faults, and their plan, as a Provider books them (RM-26).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Line {
+    /// The stream's initial state and its Provider's terms.
+    pub stream: Stream,
+    /// Every command and fault booked, in the order booked.
+    pub items: Vec<Item>,
+    /// Their plan.
+    pub plan: Vec<Segment>,
+}
+
+impl Line {
+    /// A stream with nothing booked: its first segment, if it has a channel.
+    pub fn new(stream: Stream) -> Line {
+        let first = Segment { origin: stream.origin, cut: None, config: stream.config, by: None };
+        Line { plan: (stream.config.channels > 0).then_some(first).into_iter().collect(), stream, items: Vec::new() }
+    }
+
+    /// Books a command or fault and plans the stream again; returns its effective instant.
+    // ponytail: the items stay for the whole Run and each booking plans from its start, so a
+    // Run's booking cost grows with its commands; prune the items wholly before the last
+    // recorded cut, planning from that state, when a Run books thousands of them.
+    pub fn book(&mut self, item: Item) -> Result<i64, TimeError> {
+        self.items.push(item);
+        self.plan = plan(&self.stream, &self.items)?;
+        Ok(effective(&self.items, &item))
+    }
+
+    /// The planned segment from `origin` with `config`: a receive segment cut at its origin is
+    /// not planned, and another may begin there.
+    pub fn segment(&self, origin: i64, config: Config) -> Option<Segment> {
+        self.plan.iter().find(|segment| segment.origin == origin && segment.config == config).copied()
+    }
+
+    /// That segment as the items in effect before `(t, seq)` have made it (RM-25): what has
+    /// happened by `t`, a fault received with `seq` coming before an item at `t` received later.
+    pub fn made(&self, origin: i64, config: Config, t: i64, seq: u64) -> Result<Option<Segment>, TimeError> {
+        let made: Vec<Item> = self.items.iter().filter(|item| (effective(&self.items, item), item.seq) < (t, seq)).copied().collect();
+        Ok(plan(&self.stream, &made)?.into_iter().find(|segment| segment.origin == origin && segment.config == config))
+    }
+}
+
+/// The instant a command takes effect at (RM-25, VH-2): a `cold` change never before a
+/// `cold` change of its stream that arrived earlier, its own effective instant floored at
+/// that change's, so that at one instant the two keep their order of arrival; a Provider
+/// applies it late, as UC-2 applies a timed update late. Other items take effect at their own.
+pub fn effective(items: &[Item], item: &Item) -> i64 {
+    let cold = |item: &Item| matches!(item.kind, Kind::Cold(_));
+    if !cold(item) {
+        return item.e;
+    }
+    items.iter().filter(|earlier| cold(earlier) && earlier.seq < item.seq).fold(item.e, |e, earlier| e.max(earlier.e))
+}
+
+/// When a command received at `now` with the requested instant `at` takes effect on its
+/// stream (RM-25, VH-2): `at`, or `now` when it is absent or past; on receive never before
+/// the stream's start; and a `cold` change never before one of its stream received earlier.
+/// The flag says whether that is later than `at` asked, which makes a `cold` change late
+/// (UC-2). `line` is the stream's, if it has one.
+pub fn command_instant(line: Option<&Line>, at: Option<i64>, now: i64, seq: u64, cold: bool) -> (i64, bool) {
+    let asked = at.unwrap_or(now);
+    let floor = line.filter(|line| line.stream.direction == Direction::Rx).map_or(i64::MIN, |line| line.stream.origin);
+    let base = asked.max(now).max(floor);
+    let e = match line.filter(|_| cold) {
+        Some(line) => effective(&line.items, &Item { e: base, seq, ready: now, delivered: None, refused: false, kind: Kind::Cold(line.stream.config) }),
+        None => base,
+    };
+    (e, asked < now || e > base)
+}
+
+/// RM-15: the instant a burst on a transmit clock with origin `origin` is decided at: `now`,
+/// or, before that clock begins, `lead` before its origin, so that a burst decided on time
+/// never starts before the origin and one that would is late.
+pub fn decided_at(now: i64, origin: i64, lead: i64) -> i64 {
+    now.max(origin.saturating_sub(lead))
+}
+
+/// RM-25: the first lattice instant of `ratio` at or after `t`, a whole multiple of its
+/// numerator in lowest terms.
+pub fn lattice(t: i64, ratio: Rational) -> Result<i64, TimeError> {
+    let (num, _) = parts(ratio);
+    narrow(ceil_div(i128::from(t), num) * num)
+}
+
+/// The segments of one stream, in order (RM-16, RM-21, RM-25). Items take effect at their
+/// [`effective`] instants, in that order and, at one instant, in the order of their arrival.
+/// A receive segment cut with no sample has no SampleClock and is left out; a transmit one is
+/// kept, since its clock was registered when its change was booked. For the same reason a
+/// transmit clock's record stands once booked (VH-2): after a loss or `Provider::stop` at `f`,
+/// the changes booked before `f` keep their cuts and the clock they began after `f` ends at
+/// its origin; a refused change's clock ends at its origin unless a change booked before the
+/// refusal, at the refused change's instant, already cut it.
 pub fn plan(stream: &Stream, items: &[Item]) -> Result<Vec<Segment>, TimeError> {
-    let mut order: Vec<&Item> = items.iter().collect();
+    let mut order: Vec<Item> = items.iter().map(|item| Item { e: effective(items, item), ..*item }).collect();
     order.sort_by_key(|item| (item.e, item.seq));
     let receive = stream.direction == Direction::Rx;
     let mut planner = Planner { stream, receive, running: None, previous: None, out: Vec::new() };
     let mut config = stream.config;
-    planner.running = (config.channels > 0).then_some(Segment { origin: stream.origin, cut: None, config });
+    planner.running = (config.channels > 0).then_some(Segment { origin: stream.origin, cut: None, config, by: None });
     // RM-21: a receive stream is on from the Run's start; a refusal halts either stream
     // until its next `cold` change or `start_rx`.
     let (mut on, mut halted) = (true, false);
-    for item in order {
+    // Transmit only: the instant of a loss or `Provider::stop`, and of a refusal whose clock
+    // is still to end at its origin; an item booked at or after either is planned after it.
+    let (mut ended, mut refusal) = (None::<i64>, None::<i64>);
+    for item in &order {
+        if refusal.is_some_and(|refused| item.ready >= refused) {
+            planner.end_at_origin()?;
+            refusal = None;
+        }
+        if ended.is_some_and(|end| item.ready >= end) {
+            continue;
+        }
         match item.kind {
-            Kind::End { abort } => {
-                // RM-16, RM-21: on transmit it ends the bursts, not the clock, but a clock
-                // booked for a segment not yet begun is orphaned and ends at its origin (VH-2).
-                if receive || planner.running.is_some_and(|segment| segment.origin >= item.e) {
-                    planner.cut(item, abort)?;
-                }
+            // RM-16, RM-21: receive ends at its cut, and nothing after it takes effect; on
+            // transmit it ends the bursts, not the clock.
+            Kind::End { abort } if receive => {
+                planner.cut(item, abort)?;
                 break;
             }
+            Kind::End { .. } => ended = ended.or(Some(item.e)),
             Kind::Stop if receive && on => {
                 on = false;
                 planner.cut(item, false)?;
@@ -140,22 +239,26 @@ pub fn plan(stream: &Stream, items: &[Item]) -> Result<Vec<Segment>, TimeError> 
             Kind::Stop | Kind::Start => {}
             Kind::Cold(next) => {
                 planner.cut(item, false)?;
+                refusal = None;
                 config = next;
-                let refused = item.refused;
-                halted = refused;
+                halted = item.refused;
                 if on && config.channels > 0 {
                     let segment = planner.begin(item, config)?;
-                    if !refused {
+                    // RM-25: a refused change has no receive segment; the transmit clock
+                    // registered for it ends at its origin.
+                    if !item.refused || !receive {
                         planner.running = Some(segment);
-                    } else if !receive {
-                        // RM-25: the transmit clock registered for a refused change ends at
-                        // its origin.
-                        planner.running = Some(segment);
-                        planner.cut(&Item { e: segment.origin, delivered: None, ..*item }, false)?;
+                    }
+                    if item.refused && !receive {
+                        refusal = Some(item.e);
                     }
                 }
             }
         }
+    }
+    if refusal.is_some() || planner.running.zip(ended).is_some_and(|(segment, end)| segment.origin >= end) {
+        // VH-2: a transmit clock orphaned by a loss, `Provider::stop` or a refusal.
+        planner.end_at_origin()?;
     }
     let mut out = planner.out;
     out.extend(planner.running);
@@ -189,6 +292,13 @@ impl Planner<'_> {
         Ok(())
     }
 
+    /// Ends the running segment at its origin, with no sample (VH-2).
+    fn end_at_origin(&mut self) -> Result<(), TimeError> {
+        let Some(segment) = self.running else { return Ok(()) };
+        let item = Item { e: segment.origin, seq: 0, ready: segment.origin, delivered: None, refused: false, kind: Kind::Stop };
+        self.cut(&item, false)
+    }
+
     /// RM-25's start rule: the first lattice instant at or after the item's effective
     /// instant, the previous cut plus the lead, and the ready instant plus the lead. After a
     /// cut, a receive segment is ready no earlier than that cut plus one receive call at the
@@ -208,7 +318,7 @@ impl Planner<'_> {
         }
         earliest = earliest.max(ready + lead);
         let (num, _) = parts(config.ratio);
-        Ok(Segment { origin: narrow(ceil_div(earliest, num) * num)?, cut: None, config })
+        Ok(Segment { origin: narrow(ceil_div(earliest, num) * num)?, cut: None, config, by: Some(item.seq) })
     }
 }
 

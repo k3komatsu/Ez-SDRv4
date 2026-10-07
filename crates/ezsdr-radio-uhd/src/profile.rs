@@ -1,4 +1,4 @@
-//! The profiles `x310-ubx`, `x310-obx` and `x310-cbx` 0.2.0 (UR-9) and the Module's own
+//! The profiles `x310-ubx`, `x310-obx` and `x310-cbx` 0.3.0 (UR-9) and the Module's own
 //! constants (§3).
 
 use ezsdr_kernel::module_api::{ProfileRef, Version};
@@ -24,11 +24,11 @@ pub const CBX_DEFAULT_FREQUENCY_HZ: f64 = 2_450_000_000.0;
 /// A profile of this Module: one X310 and the front ends it carries (UR-9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
-    /// `x310-ubx` 0.2.0: two UBX.
+    /// `x310-ubx` 0.3.0: two UBX.
     X310Ubx,
-    /// `x310-obx` 0.2.0: one OBX, in slot A (the bench's).
+    /// `x310-obx` 0.3.0: one OBX, in slot A (the bench's).
     X310Obx,
-    /// `x310-cbx` 0.2.0: one CBX, in slot A.
+    /// `x310-cbx` 0.3.0: one CBX, in slot A.
     X310Cbx,
 }
 
@@ -47,11 +47,11 @@ impl Profile {
         }
     }
 
-    /// The name at version 0.2.0.
+    /// The name at version 0.3.0.
     pub fn profile_ref(self) -> ProfileRef {
         ProfileRef {
             name: self.name().to_owned(),
-            version: Version::new(0, 2, 0),
+            version: Version::new(0, 3, 0),
         }
     }
 
@@ -113,13 +113,11 @@ fn x310(profile: Profile, lowest_hz: f64, highest_hz: f64, max_channels: i64, bl
         timing: TimingEnvelope {
             min_timed_command_lead_ns: DEVICE_LEAD_NS + DELIVERY_ALLOWANCE_NS,
             startup_latency_ns: 2_000_000_000,
-            stop_tail_ns: 1_000_000,
             command_queue_depth: 16,
             overflow_restart_gap_ns: 50_000_000,
-            // §3's restart lead and start lead, INFERRED: the bench's raw restarts began on
-            // the requested tick at leads down to 1 ms in 19 of 21 rows (B8), so 50 ms is a
-            // margin whose values Phase 8 measures (spec 20, VF-6).
-            restart_lead_ns: 50_000_000,
+            // §3's start lead, INFERRED: the bench's raw restarts began on the requested tick
+            // at leads down to 1 ms in 19 of 21 rows (B8), so 50 ms is a margin whose value
+            // Phase 8 measures (spec 20, VF-6; spec 22, VH-4).
             start_lead_ns: 50_000_000,
         },
         performance: PerformanceEnvelope {

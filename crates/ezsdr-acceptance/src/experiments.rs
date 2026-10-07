@@ -29,7 +29,7 @@ pub fn receive(channels: i64, rate_hz: f64, frequency_hz: f64, capture: Option<i
     }
     json!({
         "version": 1,
-        "requirements": { "vocabularies": [{ "id": "radio", "major": 1 }, { "id": "sink", "major": 1 }] },
+        "requirements": { "vocabularies": [{ "id": "radio", "major": 2 }, { "id": "sink", "major": 1 }] },
         "resources": {
             "radio": {
                 "kind": "radio.device",
@@ -139,7 +139,7 @@ pub fn link(tx: &str, rx: &str, rate_hz: f64, waveform: &ArtifactRef, offset_tic
     let target = ResourceId::parse(&format!("{tx}/tx")).expect("valid resource id");
     json!({
         "version": 1,
-        "requirements": { "vocabularies": [{ "id": "radio", "major": 1 }, { "id": "sink", "major": 1 }] },
+        "requirements": { "vocabularies": [{ "id": "radio", "major": 2 }, { "id": "sink", "major": 1 }] },
         "resources": resources,
         "outputs": [{
             "id": "rec",
@@ -200,7 +200,7 @@ pub fn ping_pong(
     let ping_target = ResourceId::parse(&format!("{pinger}/tx")).expect("valid resource id");
     json!({
         "version": 1,
-        "requirements": { "vocabularies": [{ "id": "radio", "major": 1 }, { "id": "sink", "major": 1 }] },
+        "requirements": { "vocabularies": [{ "id": "radio", "major": 2 }, { "id": "sink", "major": 1 }] },
         "resources": resources,
         "inputs": [pong],
         "graph": {

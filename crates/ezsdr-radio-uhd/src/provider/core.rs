@@ -9,7 +9,7 @@ use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::module_api::InputStore;
 use ezsdr_kernel::spec::{Key, Value};
 use ezsdr_kernel::stream::DataLink;
-use ezsdr_kernel::time::{ClockRegistry, Rational, TimeAuthority, TimePoint, TimeError};
+use ezsdr_kernel::time::{ClockRegistry, Rational, TimeAuthority, TimePoint};
 use ezsdr_radio::device::DeviceDescription;
 use ezsdr_radio::payloads::CommandRejectedPayload;
 use ezsdr_radio::{keys, kinds};
@@ -47,22 +47,14 @@ impl Clock {
     }
 }
 
-/// RM-25: the first whole multiple of `n` at or after `t`.
-pub(crate) fn lattice(t: i128, n: i64) -> Result<i64, TimeError> {
-    let n = i128::from(n);
-    i64::try_from((t + n - 1).div_euclid(n) * n).map_err(|_| TimeError::Overflow)
-}
-
-/// uhd-control's view of the two streams, which it books (UR-25).
+/// What the threads share of the two streams (UR-25).
 #[derive(Default)]
 pub(crate) struct Streams {
-    pub rx: Option<Clock>,
-    pub tx: Option<Clock>,
-    pub tx_channels: usize,
-    /// Per direction, the `e₁` a stream changed to 0 channels drains to (UR-25).
-    pub draining: [Option<i64>; 2],
-    /// A booked cold change until its streamer owner finishes the switch.
-    pub switching: [bool; 2],
+    /// Per direction, the owner has no stream and nothing planned to begin (UR-25).
+    pub idle: [bool; 2],
+    /// The segments whose configuration the owner's device refused, by direction and the
+    /// arrival order of the command that began them, for uhd-control to plan again (RM-25).
+    pub refused: Vec<(Dir, u64)>,
 }
 
 /// Everything the threads record; written to the sections at `cleanup` (UR-30).
@@ -127,6 +119,8 @@ pub(crate) struct Core {
     /// `S`, the end of the device's start-up (UR-13).
     pub start_up: AtomicI64,
     lost: AtomicBool,
+    /// When the device was found lost.
+    lost_at: AtomicI64,
 }
 
 impl Core {
@@ -165,6 +159,7 @@ impl Core {
             held: Mutex::new(BTreeSet::new()),
             start_up: AtomicI64::new(i64::MIN),
             lost: AtomicBool::new(false),
+            lost_at: AtomicI64::new(i64::MAX),
         }
     }
 
@@ -189,6 +184,11 @@ impl Core {
 
     pub fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Acquire)
+    }
+
+    /// The instant the device was found lost, once it is.
+    pub fn lost_at(&self) -> Option<i64> {
+        Some(self.lost_at.load(Ordering::Acquire)).filter(|at| *at != i64::MAX)
     }
 
     pub fn stat(&self, name: &'static str, n: i64) {
@@ -234,6 +234,7 @@ impl Core {
         if self.lost.swap(true, Ordering::AcqRel) {
             return;
         }
+        self.lost_at.store(self.now(), Ordering::Release);
         // Before anything can free it: a lost device is never freed (F4).
         self.device.mark_lost();
         self.timing(json!({ "what": "device_lost", "message": message, "at": self.now() }));

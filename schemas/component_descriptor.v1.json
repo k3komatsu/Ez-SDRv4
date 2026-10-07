@@ -257,7 +257,7 @@
       "oneOf": [
         {
           "const": "cold",
-          "description": "The target stops the affected function, applies the value and restarts it; a\nstream continues on a new SampleClock (UC-3, TM-13c).",
+          "description": "The target stops the affected function, applies the value and, if the function was\nrunning, starts it again; a stream so restarted continues on a new SampleClock (UC-3,\nTM-13c).",
           "type": "string"
         },
         {

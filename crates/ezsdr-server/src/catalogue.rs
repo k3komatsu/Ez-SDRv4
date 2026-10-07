@@ -203,9 +203,9 @@ pub fn default_profile(dir: &str) -> serde_json::Value {
         "version": 1,
         "bindings": {
             "radio": {
-                "module": { "id": RADIO, "version": { "major": 1, "minor": 5, "patch": 0 } },
+                "module": { "id": RADIO, "version": { "major": 2, "minor": 0, "patch": 0 } },
                 "selector": { "id": "radio" },
-                "profile": { "name": "x310-like", "version": { "major": 1, "minor": 2, "patch": 0 } }
+                "profile": { "name": "x310-like", "version": { "major": 2, "minor": 0, "patch": 0 } }
             },
             "rec": {
                 "module": { "id": SINK, "version": { "major": 1, "minor": 2, "patch": 0 } },

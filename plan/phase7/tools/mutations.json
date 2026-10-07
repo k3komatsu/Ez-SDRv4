@@ -387,7 +387,7 @@
   "id": "V05",
   "name": "the transmit origin at A again",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "let origin = lattice_at_or_after(now, handle.root_ticks_per_tick).ok_or_else(|| self.reject(\"MR-9: lattice overflow\"))?;",
+  "old": "let origin = timeline::lattice(now, ratio).map_err(|error| self.reject(format!(\"MR-9: {error}\")))?;",
   "new": "let origin = now;",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
@@ -396,9 +396,9 @@
  {
   "id": "V06",
   "name": "the cold origin at e again",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "\n                    let origin = start.and_then(|start| lattice_at_or_after(start, handle.root_ticks_per_tick)).ok_or_else(|| ModuleError::rejected(\"MR-18: lattice overflow\"))?;",
-  "new": "\n                    let origin = tick;",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "Ok(Segment { origin: narrow(ceil_div(earliest, num) * num)?,",
+  "new": "Ok(Segment { origin: narrow(earliest)?,",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_18_a_cold_change_starts_its_clock_on_the_lattice"
@@ -458,16 +458,6 @@
   "crate": "ezsdr-server",
   "test_bin": "protocol",
   "filter": "ea_12_status_carries_the_root_rate"
- },
- {
-  "id": "V13",
-  "name": "the new clock starts at e1 instead of e2",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "\n                    let origin = start.and_then(|start| lattice_at_or_after(start, handle.root_ticks_per_tick)).ok_or_else(|| ModuleError::rejected(\"MR-18: lattice overflow\"))?;",
-  "new": "\n                    let origin = restart;",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_18_a_cold_change_starts_its_clock_on_the_lattice"
  },
  {
   "id": "U01",
@@ -575,7 +565,7 @@
   "id": "U11",
   "name": "the transmit clock registered at A",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "let origin = lattice(i128::from(a), n).map_err(|e| rejected(format!(\"UR-13: {e}\")))?;",
+  "old": "let origin = ezsdr_radio::timeline::lattice(a, handle.root_ticks_per_tick).map_err(|e| rejected(format!(\"UR-13: {e}\")))?;",
   "new": "let origin = a;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
@@ -635,8 +625,8 @@
   "id": "U17",
   "name": "the repeat not ended at the next burst's start",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "            let held_cut = self.held.keys().next().copied();\n            self.send(clock, held_cut, e1_k);\n            return true;\n        }\n        if let Some(c) = self.continues_at",
-  "new": "            let held_cut = self.held.keys().next().copied().filter(|_| !self.open.as_ref().is_some_and(|o| o.held.repeat));\n            self.send(clock, held_cut, e1_k);\n            return true;\n        }\n        if let Some(c) = self.continues_at",
+  "old": "            let held_cut = self.held.keys().next().copied();\n            self.send(clock, held_cut, cut_k);\n            return true;\n        }\n        if let Some(c) = self.continues_at",
+  "new": "            let held_cut = self.held.keys().next().copied().filter(|_| !self.open.as_ref().is_some_and(|o| o.held.repeat));\n            self.send(clock, held_cut, cut_k);\n            return true;\n        }\n        if let Some(c) = self.continues_at",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_23_a_burst_ends_at_the_next_bursts_start"
@@ -665,8 +655,8 @@
   "id": "U20",
   "name": "the command queue not counted",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "if pending + Core::channels(&self.config, dir) > depth {",
-  "new": "if false && pending + Core::channels(&self.config, dir) > depth {",
+  "old": "if pending + self.channels_at(dir, e) > depth {",
+  "new": "if false && pending + self.channels_at(dir, e) > depth {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_24_hardware_timed_updates"
@@ -683,10 +673,10 @@
  },
  {
   "id": "U22",
-  "name": "a cold change's clock published to the transmit path only at the switch",
+  "name": "a cold change's clock not taken for bookings at receipt",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                        Dir::Tx => {\n                            streams.tx = clock;\n                            streams.tx_channels = channels;\n                        }",
-  "new": "                        Dir::Tx => {}",
+  "old": "let Some(((clock, _), channels)) = self.tx_clocks.last().zip(",
+  "new": "let Some(((clock, _), channels)) = self.tx_clocks.first().zip(",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_rate_change_admits_a_burst_on_the_new_clock"
@@ -694,9 +684,9 @@
  {
   "id": "U23",
   "name": "e2 not on the new lattice",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "Some(lattice(i128::from(e1) + i128::from(restart), n)?)",
-  "new": "Some(e1 + restart + 1)",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "Ok(Segment { origin: narrow(ceil_div(earliest, num) * num)?,",
+  "new": "Ok(Segment { origin: narrow(ceil_div(earliest, num) * num + 1)?,",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_cold_rate_change_starts_a_new_clock_on_its_lattice"
@@ -716,10 +706,12 @@
   "name": "an alignment error flags one channel",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
   "old": "                valid: ChannelMask::full(channels as u16),",
-  "new": "                valid: if pending == Pending::Alignment { ChannelMask::full(1) } else { ChannelMask::full(channels as u16) },",
+  "new": "                valid: if alignment { ChannelMask::full(1) } else { ChannelMask::full(channels as u16) },",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_19_an_alignment_error_is_a_whole_stream_gap"
+  "filter": "ur_19_an_alignment_error_is_a_whole_stream_gap",
+  "old2": "            for pending in pending {\n",
+  "new2": "            let alignment = pending.contains(&Pending::Alignment);\n            for pending in pending {\n"
  },
  {
   "id": "U26",
@@ -783,13 +775,13 @@
  },
  {
   "id": "U32",
-  "name": "orderly stop discards the tail",
+  "name": "orderly stop cuts at the first sample not yet delivered, as abort does",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "StopMode::Orderly => self.stop_at(at, at + tail),",
-  "new": "StopMode::Orderly => self.stop_at(at, at + 0 * tail),",
+  "old": "if let Some(stream) = self.stream.as_mut().filter(|_| mode == StopMode::Abort) {",
+  "new": "if let Some(stream) = self.stream.as_mut().filter(|_| true) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_26_orderly_stop_delivers_the_tail_abort_does_not"
+  "filter": "ur_26_orderly_stop_ends_at_its_instant_abort_at_once"
  },
  {
   "id": "U33",
@@ -843,10 +835,10 @@
  },
  {
   "id": "U38",
-  "name": "Stop <id> does not cancel held commands",
+  "name": "Provider::stop does not cancel held commands",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                    self.cancel_held(\"Stop\");\n",
-  "new": "",
+  "old": "        self.cancel_held(\"Provider::stop\");\n        self.end(at, mode == StopMode::Abort, false);",
+  "new": "        self.end(at, mode == StopMode::Abort, false);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_24_stop_cancels_held_commands"
@@ -855,8 +847,8 @@
   "id": "U39",
   "name": "enabling a direction opens the streamer without configuring it",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "let configured = opened.and_then(|()| self.core.configure(dir, channels, &settings));",
-  "new": "let configured = { let _ = &settings; opened };",
+  "old": "if let Err(error) = opened.and_then(|()| self.core.configure(dir, channels, &settings)) {",
+  "new": "if let Err(error) = { let _ = &settings; opened } {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_enabling_tx_applies_the_configuration"
@@ -865,21 +857,21 @@
   "id": "U40",
   "name": "a rate mismatch at the switch accepted",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "let configured = reopened.and_then(|()| switch.settings.configure(&self.core, Dir::Rx, switch.channels));",
-  "new": "let configured = reopened.and_then(|()| switch.settings.configure(&self.core, Dir::Rx, switch.channels).or(Ok(0)));",
+  "old": "reopened.and_then(|()| next.settings.configure(&self.core, Dir::Rx, channels).map(|_| ()))",
+  "new": "reopened.and_then(|()| next.settings.configure(&self.core, Dir::Rx, channels).map(|_| ()).or(Ok(())))",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_rate_the_device_does_not_apply_at_the_switch_is_rejected"
  },
  {
   "id": "U41",
-  "name": "the cold switch waited for on uhd-control",
+  "name": "uhd-control waits for the plan's last origin before handing it to the owner",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                match dir {\n                    Dir::Rx => drop(self.to_rx.send(RxCmd::Switch",
-  "new": "                while self.core.now() < e1 {\n                    std::thread::sleep(POLL);\n                }\n                match dir {\n                    Dir::Rx => drop(self.to_rx.send(RxCmd::Switch",
+  "old": "        let planned = Arc::new(planned);\n",
+  "new": "        while plan.last().is_some_and(|segment| self.core.now() < segment.origin) {\n            std::thread::sleep(POLL);\n        }\n        let planned = Arc::new(planned);\n",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_14_the_control_thread_never_waits_for_a_device_instant"
+  "test_bin": "lib",
+  "filter": "ur_14_booking_does_not_wait_for_a_future_cold_switch"
  },
  {
   "id": "U42",
@@ -912,21 +904,11 @@
   "filter": "ur_21_a_burst_inside_the_in_flight_window_is_late"
  },
  {
-  "id": "U45",
-  "name": "a change from 0 channels waits the restart lead",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "Dir::Tx => i128::from(e.max(now)),",
-  "new": "Dir::Tx => i128::from(e.max(now)) + i128::from(self.core.ticks(self.core.description.timing.restart_lead_ns)),",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_tx_channels_from_zero_transmits_the_next_burst_on_time"
- },
- {
   "id": "U46",
   "name": "a burst before its clock's origin accepted as OnTime",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "let now = self.core.now().max(clock.origin - lead);",
-  "new": "let now = self.core.now().min(clock.origin - lead);",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "    now.max(origin.saturating_sub(lead))",
+  "new": "    now.min(origin.saturating_sub(lead))",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_21_a_burst_before_its_clock_s_origin_is_late"
@@ -963,10 +945,10 @@
  },
  {
   "id": "R04",
-  "name": "a receive stream enabled from 0 ignores its instant (P0-3, L08)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "Dir::Tx => i128::from(e.max(now)),\n            Dir::Rx => i128::from(e).max(i128::from(now) + i128::from(self.core.ticks(self.core.description.timing.start_lead_ns))),",
-  "new": "Dir::Tx => i128::from(e.max(now)),\n            Dir::Rx => i128::from(now) + i128::from(self.core.ticks(self.core.description.timing.start_lead_ns)),",
+  "name": "a cold change takes effect at its booking, ignoring its instant (P0-3, L08)",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "    let asked = at.unwrap_or(now);",
+  "new": "    let asked = now;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_rx_channels_from_zero_starts_at_its_instant"
@@ -975,8 +957,8 @@
   "id": "R05",
   "name": "the switch ignores held commands due by e2 (L09)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "if timed.dir == dir { settings.book(order, timed.settings()); }",
-  "new": "if false && timed.dir == dir { settings.book(order, timed.settings()); }",
+  "old": "for (&order, timed) in self.held.iter().filter(|(_, timed)| timed.dir == dir) {\n                        settings.book(order, timed.settings());",
+  "new": "for (&order, timed) in self.held.iter().filter(|(_, timed)| false && timed.dir == dir) {\n                        settings.book(order, timed.settings());",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_the_switch_applies_the_configuration_in_effect_at_e2"
@@ -1005,11 +987,11 @@
   "id": "R08",
   "name": "an abort delivers the orderly tail (L12)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "                self.stopping = true;\n                match mode {",
-  "new": "                self.stopping = true;\n                let _ = mode;\n                match StopMode::Orderly {",
+  "old": "if let Some(stream) = self.stream.as_mut().filter(|_| mode == StopMode::Abort) {",
+  "new": "if let Some(stream) = self.stream.as_mut().filter(|_| false) {",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_26_an_abort_publishes_nothing_after_the_stop_instant"
+  "test_bin": "lib",
+  "filter": "ur_26_a_stopped_stream_keeps_its_end"
  },
  {
   "id": "R09",
@@ -1043,13 +1025,13 @@
  },
  {
   "id": "R12",
-  "name": "a timed receive stop handed to the device at e1 again (P1-1; design-notes §11 F1)",
+  "name": "a planned receive cut handed to the device as a timed stop (P1-1; design-notes §11 F1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "                        stream.cut = Some(e1);\n",
-  "new": "                        stream.cut = Some(e1);\n                        let _ = self.core.device.rx_stop(Some(e1));\n",
+  "old": "                    let cut = stream.clock.instant(cut.max(stream.expected));\n                    stream.cut_at(cut);\n",
+  "new": "                    let cut = stream.clock.instant(cut.max(stream.expected));\n                    stream.cut_at(cut);\n                    let _ = self.core.device.rx_stop(Some(cut));\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_25_a_cold_receive_change_delivers_every_sample_before_e1"
+  "filter": "ur_25_the_old_stream_is_stopped_untimed_at_e1"
  },
  {
   "id": "R13",
@@ -1063,10 +1045,10 @@
  },
  {
   "id": "R14",
-  "name": "the receive streamer reopened on every switch (P1-3)",
+  "name": "the receive streamer reopened at every segment (P1-3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "let reopened = if switch.channels != switch.from {",
-  "new": "let reopened = if switch.channels == switch.channels {",
+  "old": "let reopened = if channels != self.opened {",
+  "new": "let reopened = if channels == channels {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_the_old_stream_is_stopped_untimed_at_e1"
@@ -1085,7 +1067,7 @@
   "id": "R16",
   "name": "a stop that arrived during a receive wait does not cut its block (NONBLOCKING 9)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "            // A stop that arrived during the wait cuts this block too (RM-16).\n            self.poll();\n",
+  "old": "            // A cut that arrived during the wait cuts this block too (RM-16).\n            self.poll();\n",
   "new": "",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
@@ -1093,29 +1075,19 @@
  },
  {
   "id": "R19",
-  "name": "the orderly tail counted from when uhd-rx reaches the stop (Review M, N-6)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "StopMode::Orderly => self.stop_at(at, at + tail),",
-  "new": "StopMode::Orderly => self.stop_at(at, self.core.now() + tail),",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_26_orderly_stop_delivers_the_tail_abort_does_not"
- },
- {
-  "id": "R20",
-  "name": "a draining stream enabled again (Review M, N-4)",
+  "name": "the orderly cut counted from when uhd-control learns of the stop (Review M, N-6)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "None if channels > 0 && lock(&self.core.streams).draining[dir as usize].is_some_and(|e1| now < e1) => {",
-  "new": "None if false && channels > 0 => {",
+  "old": "        self.end(at, mode == StopMode::Abort, false);",
+  "new": "        self.end(self.core.now(), mode == StopMode::Abort, false);",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_enabling_a_draining_stream_is_refused"
+  "test_bin": "lib",
+  "filter": "ur_26_an_orderly_stop_cuts_at_its_instant"
  },
  {
   "id": "R21",
   "name": "UR-24's depth counted one per update again (Review M, N-7)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "if pending + Core::channels(&self.config, dir) > depth {",
+  "old": "if pending + self.channels_at(dir, e) > depth {",
   "new": "if self.held.len() + self.released.len() + 1 > depth + 0 * pending {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
@@ -1215,8 +1187,8 @@
   "id": "B02",
   "name": "a stream silent past its cut left without its stop record (§11 F1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "                    if !stopped {\n                        self.last_stop = stop_at_cut(&self.core, cut).or(self.last_stop);\n                    }\n",
-  "new": "                    let _ = (stopped, cut);\n",
+  "old": "                    if !stream.stopped {\n                        self.last_stop = stop_at_cut(&self.core, cut).or(self.last_stop);\n                    }\n                    self.finish();\n",
+  "new": "                    let _ = cut;\n                    self.finish();\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_stream_silent_before_e1_switches_before_e2"
@@ -1245,11 +1217,11 @@
   "id": "B05",
   "name": "the receive request not bounded by the cut (Review N, B1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "self.core.device.rx_recv(self.recv_len(), self.recv_timeout())",
-  "new": "self.core.device.rx_recv(self.core.block_len, self.recv_timeout())",
+  "old": "(stream.clock.at_or_after(cut) - stream.expected).clamp(1, block as i64) as usize",
+  "new": "{ let _ = (cut, stream.expected); block }",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time"
+  "test_bin": "lib",
+  "filter": "ur_17_a_request_ends_at_the_pending_cut"
  },
  {
   "id": "B06",
@@ -1305,8 +1277,8 @@
   "id": "B11",
   "name": "an abort's stop issued again at the cut (Review N, N4)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "                                    stream.stopped = true;\n                                    self.last_stop = Some(issued);",
-  "new": "                                    stream.stopped = false;\n                                    self.last_stop = Some(issued);",
+  "old": "                            stream.stopped = true;\n                            self.last_stop = Some(issued);\n",
+  "new": "                            stream.stopped = false;\n                            self.last_stop = Some(issued);\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_26_an_abort_publishes_nothing_after_the_stop_instant"
@@ -1345,8 +1317,8 @@
   "id": "B15",
   "name": "a receive cold change's e₁ not past the call in progress (Review O, O-B2)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "let earliest = match i64::try_from(i128::from(now) + i128::from(restart) + in_progress) {",
-  "new": "let earliest = match i64::try_from(i128::from(now) + i128::from(restart) + in_progress * 0) {",
+  "old": "        let call = core.block_len.max(core.device.rx_packet_samples()) as i64;\n",
+  "new": "        let call = 0;\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time"
@@ -1417,8 +1389,8 @@
   "id": "B22",
   "name": "O-B2's bound without the packet term (Review Q, TG-Q3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "Dir::Rx => self.core.block_len.max(self.core.device.rx_packet_samples()) as i128 * i128::from(old.n)",
-  "new": "Dir::Rx => self.core.block_len as i128 * i128::from(old.n)",
+  "old": "        let call = core.block_len.max(core.device.rx_packet_samples()) as i64;\n",
+  "new": "        let call = core.block_len as i64;\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time"

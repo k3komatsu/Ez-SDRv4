@@ -313,10 +313,11 @@ impl Component for Counting {
 
 #[test]
 fn ke_03_a_decision_after_the_stop_is_not_an_abort() {
-    // The PING starts at 25 960 µs and the Run is stopped at 25 990 µs: the pinger radiates
-    // 30 samples, which reach the responder from receive sample 26 006, in a block it is
-    // handed only in the orderly drain (KA-12). Dispatch is frozen by then, admit() refuses
-    // the PONG with ezsdr.dispatch, and that refusal must not become an abort (KE-3, NX-6).
+    // The PING starts at 25 960 µs and the Run is stopped at 26 040 µs: the pinger radiates
+    // 80 samples, which reach the responder from receive sample 26 006, in the block the
+    // orderly stop ends at its instant, [26 000, 26 040), handed only in the drain (KA-12;
+    // RM-16). Dispatch is frozen by then, admit() refuses the PONG with ezsdr.dispatch, and
+    // that refusal must not become an abort (KE-3, NX-6).
     let counting = Implementation {
         id: responder::IMPL_ID.to_owned(),
         hash: responder::impl_hash(),
@@ -324,7 +325,7 @@ fn ke_03_a_decision_after_the_stop_is_not_an_abort() {
     };
     let (manifest, _) = ping_pong(
         &rig::TempDir::new("ke-03-drain"),
-        Ping { pings: &[25_960], stop_at: Some(T0 + 25_990_000), implementation: Some(counting), ..Ping::default() },
+        Ping { pings: &[25_960], stop_at: Some(T0 + 26_040_000), implementation: Some(counting), ..Ping::default() },
     );
     // The responder did decide — in the drain, the one place it heard the PING — and the
     // refusal left the stop clean (Review F, P2-6: without the count the test would pass
@@ -332,7 +333,7 @@ fn ke_03_a_decision_after_the_stop_is_not_an_abort() {
     assert_eq!(DECIDED.load(Ordering::SeqCst), 1);
     clean_stop(&manifest);
     let pinged = bursts(&manifest, "dev_a");
-    assert_eq!((pinged.len(), pinged[0].samples), (1, 30), "{pinged:?}");
+    assert_eq!((pinged.len(), pinged[0].samples), (1, 80), "{pinged:?}");
     assert!(section(&manifest, "ezsdr.radio.mock.dev_b.stats")["rx_samples"].as_u64().unwrap() > 26_006, "the PING's first sample was delivered");
     assert!(bursts(&manifest, "dev_b").is_empty());
 }

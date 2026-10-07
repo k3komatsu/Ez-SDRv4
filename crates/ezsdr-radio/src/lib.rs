@@ -1,4 +1,4 @@
-//! Ez-SDR v4 Radio Model Vocabulary radio 1.5.0 (design/07-radio-model.md).
+//! Ez-SDR v4 Radio Model Vocabulary radio 2.0.0 (design/07-radio-model.md).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -33,6 +33,9 @@ pub const RX_STREAM_KIND: &str = "radio.rx_stream";
 pub const TX_STREAM_KIND: &str = "radio.tx_stream";
 /// The RF safety envelope section (RM-19).
 pub const RF_ENVELOPE_SECTION: &str = "radio.rf_envelope";
+/// The verb that starts a receive stream again after a `Stop`: a `PeripheralCommand` on
+/// `<device>/rx` with no params (RM-12, RM-21).
+pub const START_RX: &str = "start_rx";
 
 /// Radio Model keys declared by RM-4.
 pub mod keys {
@@ -82,17 +85,12 @@ pub mod keys {
     pub const MIN_TIMED_COMMAND_LEAD_NS: &str = "radio.timing.min_timed_command_lead_ns";
     /// Startup latency in nanoseconds (RM-4).
     pub const STARTUP_LATENCY_NS: &str = "radio.timing.startup_latency_ns";
-    /// Receive tail after orderly stop in nanoseconds (RM-4).
-    pub const STOP_TAIL_NS: &str = "radio.timing.stop_tail_ns";
     /// Device timed-command queue depth (RM-4).
     pub const COMMAND_QUEUE_DEPTH: &str = "radio.timing.command_queue_depth";
     /// Receive restart gap after overrun in nanoseconds (RM-4).
     pub const OVERFLOW_RESTART_GAP_NS: &str = "radio.timing.overflow_restart_gap_ns";
-    /// Lead from a `cold` change's e₁ to its new clock's first sample, in nanoseconds
-    /// (RM-4, RM-25).
-    pub const RESTART_LEAD_NS: &str = "radio.timing.restart_lead_ns";
-    /// Lead from the end of a receive stream's configuration to its first sample, in
-    /// nanoseconds, for a stream enabled from 0 channels (RM-4, RM-25).
+    /// Lead from a stream's previous cut, and from the instant its Provider is ready for it,
+    /// to a new segment's first sample, in nanoseconds (RM-4, RM-25).
     pub const START_LEAD_NS: &str = "radio.timing.start_lead_ns";
     /// Receive throughput limit in bytes per second (RM-4).
     pub const RX_BYTES_PER_S: &str = "radio.perf.rx_bytes_per_s";
@@ -204,10 +202,8 @@ fn radio_keys() -> Vec<KeyDecl> {
         key_decl(keys::RX_BLOCK_LEN, Int, false, Reject, None),
         key_decl(keys::MIN_TIMED_COMMAND_LEAD_NS, Int, false, Reject, None),
         key_decl(keys::STARTUP_LATENCY_NS, Int, false, Reject, None),
-        key_decl(keys::STOP_TAIL_NS, Int, false, Reject, None),
         key_decl(keys::COMMAND_QUEUE_DEPTH, Int, false, Reject, None),
         key_decl(keys::OVERFLOW_RESTART_GAP_NS, Int, false, Reject, None),
-        key_decl(keys::RESTART_LEAD_NS, Int, false, Reject, None),
         key_decl(keys::START_LEAD_NS, Int, false, Reject, None),
         key_decl(keys::RX_BYTES_PER_S, Int, false, Reject, None),
         key_decl(keys::TX_BYTES_PER_S, Int, false, Reject, None),
@@ -240,11 +236,11 @@ fn radio_event_kinds() -> Vec<EventKindDecl> {
     .collect()
 }
 
-/// Describes the Radio Model Vocabulary `radio` 1.5.0 (RM-1).
+/// Describes the Radio Model Vocabulary `radio` 2.0.0 (RM-1).
 pub fn vocabulary() -> VocabularyDescriptor {
     VocabularyDescriptor {
         id: radio_namespace().clone(),
-        version: Version::new(1, 5, 0),
+        version: Version::new(2, 0, 0),
         prefix: radio_namespace().clone(),
         keys: radio_keys(),
         event_kinds: radio_event_kinds(),
@@ -262,6 +258,10 @@ pub fn vocabulary() -> VocabularyDescriptor {
                     repeat: false,
                     late_policy: LatePolicy::DropAndFlag,
                 },
+            },
+            VerbDecl {
+                verb: Ident::parse(START_RX).expect("a valid Session verb"),
+                compiles_to: CompileRule::PeripheralCommand {},
             },
         ],
         checks: vec![rf_envelope_namespace().clone()],
@@ -567,16 +567,12 @@ pub struct TimingEnvelope {
     pub min_timed_command_lead_ns: i64,
     /// Time from arm to stream start (RM-20).
     pub startup_latency_ns: i64,
-    /// Receive tail after orderly stop (RM-20).
-    pub stop_tail_ns: i64,
     /// Timed-command queue capacity (RM-20).
     pub command_queue_depth: i64,
     /// Receive restart gap after overrun (RM-20).
     pub overflow_restart_gap_ns: i64,
-    /// From a `cold` change's e₁ to its new clock's first sample (RM-20, RM-25).
-    pub restart_lead_ns: i64,
-    /// From the end of a receive stream's configuration to its first sample, for a stream
-    /// enabled from 0 channels (RM-20, RM-25).
+    /// From a stream's previous cut, and from the instant its Provider is ready for it, to a
+    /// new segment's first sample (RM-20, RM-25).
     pub start_lead_ns: i64,
 }
 

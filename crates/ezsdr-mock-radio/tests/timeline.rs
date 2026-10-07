@@ -32,43 +32,16 @@ const T0: i64 = 2_000_000_000;
 const HORIZON: i64 = T0 + 1_000_000_000;
 const MS: i64 = 1_000_000;
 
-/// Today's divergences from the timeline, by profile and class: these fields are printed,
-/// and every other field of every class is asserted. Step 2 empties the list.
-const DIVERGENT: &[(&str, Class, &[&str])] = &[
-    // MR-18 records a cold change at its cut `e₁`, or at an earlier change's cut, not at `e`;
-    // on `x310-like` a transmit enable from 0 channels starts without the lead after the
-    // previous cut (VH-4).
-    ("ideal", Class::TxCold, &["cold"]),
-    ("x310-like", Class::TxCold, &["tx_clocks", "cold"]),
-    ("ideal", Class::Fault, &["cold"]),
-    ("x310-like", Class::Fault, &["tx_clocks", "cold"]),
-    // Receive clocks with no sample (#53); a fault's row settled at a cut (MR-20a, #47); on
-    // `x310-like` a restart without the call in progress (VH-4, #49).
-    ("ideal", Class::RxCold, &["rx_clocks", "blocks", "cold", "faults"]),
-    ("x310-like", Class::RxCold, &["rx_clocks", "tx_clocks", "blocks", "cold", "faults"]),
-    // A `Stop` ends no clock and a later change restarts the stream (#46), after a tail on
-    // `x310-like` (#50); a device `Stop` cancels the pending updates and faults (VH-6); a loss
-    // ends no receive clock (VH-1) and settles a fault at its instant unapplied (MR-20a);
-    // `start_rx` is refused (MR-29).
-    ("ideal", Class::Stop, &STREAM),
-    ("x310-like", Class::Stop, &STREAM),
-    ("ideal", Class::Loss, &STREAM),
-    ("x310-like", Class::Loss, &STREAM),
-    ("ideal", Class::StartRx, &STREAM),
-    ("x310-like", Class::StartRx, &STREAM),
-];
-
-/// Every field but `error`.
-const STREAM: [&str; 7] = ["rx_clocks", "tx_clocks", "blocks", "cold", "timed", "rejected", "faults"];
+/// Divergences from the timeline still printed, by profile and class; every other field
+/// of every class is asserted.
+const DIVERGENT: &[(&str, Class, &[&str])] = &[];
 
 fn divergent(profile: &str, class: Class) -> &'static [&'static str] {
     DIVERGENT.iter().find(|(p, c, _)| *p == profile && *c == class).map_or(&[], |(_, _, fields)| fields)
 }
 
-/// Printed as well for a sequence holding a 3 MS/s transmit change: at 1 000/3 ticks a sample
-/// MockRadio cuts at `e₁`, the lattice instant, not at the first sample at or after `e`
-/// (RM-16). Step 2 empties it too.
-const FRACTIONAL_TX: &[&str] = &["tx_clocks"];
+/// Fields printed as well for a sequence holding a 3 MS/s transmit change.
+const FRACTIONAL_TX: &[&str] = &[];
 
 fn fractional_tx(sequence: &Sequence) -> bool {
     sequence.ops().any(|(_, op)| matches!(op, Op::Cold { direction: Direction::Tx, change: Change::Rate(3_000_000), .. }))
@@ -91,6 +64,23 @@ struct Record {
 }
 
 impl Record {
+    /// Prints each differing field, a list from its first difference on.
+    fn show(&self, observed: &Record) {
+        fn from<T: std::fmt::Debug + PartialEq>(name: &str, a: &[T], b: &[T]) {
+            if a != b {
+                let first = a.iter().zip(b).position(|(a, b)| a != b).unwrap_or(a.len().min(b.len())).saturating_sub(1);
+                eprintln!("{name} from {first} (lengths {}, {}):\n  expected {:?}\n  observed {:?}", a.len(), b.len(), &a[first.min(a.len())..(first + 4).min(a.len())], &b[first.min(b.len())..(first + 4).min(b.len())]);
+            }
+        }
+        from("rx_clocks", &self.rx_clocks, &observed.rx_clocks);
+        from("tx_clocks", &self.tx_clocks, &observed.tx_clocks);
+        from("blocks", &self.blocks, &observed.blocks);
+        from("cold", &self.cold, &observed.cold);
+        from("timed", &self.timed, &observed.timed);
+        from("faults", &self.faults, &observed.faults);
+        eprintln!("rejected {} {}, error {:?} {:?}", self.rejected, observed.rejected, self.error, observed.error);
+    }
+
     fn diverged(&self, other: &Record) -> Vec<&'static str> {
         [
             ("rx_clocks", self.rx_clocks == other.rx_clocks),
@@ -127,6 +117,7 @@ fn rm_26_the_timeline_against_mockradio() {
     // `EZSDR_TIMELINE_SEED=<seed>` prints that sequence's two records side by side.
     let shown: Option<u64> = std::env::var("EZSDR_TIMELINE_SEED").ok().and_then(|seed| seed.parse().ok());
     let mut summary: BTreeMap<(&str, Class), (usize, Divergences)> = BTreeMap::new();
+    let mut failed = Vec::new();
     for seed in 0..1_000 {
         // 3 MS/s, 1 000/3 ticks a sample, is an `ideal` rate only.
         let (profile, rates) = if seed % 2 == 0 { ("ideal", &generator::FRACTIONAL_RATES[..]) } else { ("x310-like", &generator::RATES[..]) };
@@ -135,12 +126,15 @@ fn rm_26_the_timeline_against_mockradio() {
         let observed = run(profile, &sequence);
         let diverged = observed.diverged(&expected);
         if shown == Some(seed) {
-            eprintln!("seed {seed}, {profile}: {sequence:?}\nexpected {expected:?}\nobserved {observed:?}");
+            eprintln!("seed {seed}, {profile}: {sequence:?}");
+            expected.show(&observed);
         }
         let printed = |field: &&str| divergent(profile, sequence.class).contains(field)
             || (fractional_tx(&sequence) && FRACTIONAL_TX.contains(field));
         let gated: Vec<_> = diverged.iter().filter(|field| !printed(field)).collect();
-        assert!(gated.is_empty(), "seed {seed}, {profile}, {:?}: {gated:?} differ (EZSDR_TIMELINE_SEED={seed} shows them)", sequence.class);
+        if !gated.is_empty() {
+            failed.push(format!("seed {seed}, {profile}, {:?}: {gated:?}", sequence.class));
+        }
         let (count, fields) = summary.entry((profile, sequence.class)).or_default();
         *count += 1;
         for field in diverged {
@@ -153,6 +147,7 @@ fn rm_26_the_timeline_against_mockradio() {
         let equal: Vec<_> = divergent(profile, *class).iter().filter(|field| !fields.contains_key(*field)).collect();
         eprintln!("layer 1, {profile}, {class:?}: {count} sequences; printed {fields:?}; listed but equal {equal:?}");
     }
+    assert!(failed.is_empty(), "{} sequences differ (EZSDR_TIMELINE_SEED=<seed> shows one), the first: {:#?}", failed.len(), &failed[..failed.len().min(20)]);
 }
 
 /// The timeline's account of a sequence on `profile`, with MR-18's `applied` rows, MR-20's
@@ -315,11 +310,11 @@ fn rid(name: &str) -> ResourceId {
 /// Runs a sequence on MockRadio 1.5.0: each round's Actions are stepped at its instant,
 /// then the Run is stepped to the horizon.
 fn run(profile: &str, sequence: &Sequence) -> Record {
-    let module = ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 5, 0) };
+    let module = ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(2, 0, 0) };
     let binding = Binding {
         module: module.clone(),
         selector: BTreeMap::from([(Ident::parse("id").unwrap(), Value::Str("mock".to_owned()))]),
-        profile: Some(ProfileRef { name: profile.to_owned(), version: Version::new(1, 2, 0) }),
+        profile: Some(ProfileRef { name: profile.to_owned(), version: Version::new(2, 0, 0) }),
         feed: None,
     };
     let mut mock = MockRadio::from_binding(&binding).unwrap();

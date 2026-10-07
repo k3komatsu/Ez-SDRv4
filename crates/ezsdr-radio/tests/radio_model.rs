@@ -81,7 +81,7 @@ fn rm_01_register_adds_the_descriptor_the_check_and_the_kinds() {
         .vocabulary(&Namespace::parse("radio").unwrap())
         .unwrap();
     assert_eq!(descriptor.id, Namespace::parse("radio").unwrap());
-    assert_eq!(descriptor.version, Version::new(1, 5, 0));
+    assert_eq!(descriptor.version, Version::new(2, 0, 0));
     assert_eq!(descriptor.prefix, Namespace::parse("radio").unwrap());
     assert_eq!(descriptor.checks, [Namespace::parse("radio.rf_envelope").unwrap()]);
 
@@ -111,7 +111,7 @@ fn rm_01_register_twice_is_refused() {
     ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
     assert!(ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).is_err());
 
-    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 33);
+    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 31);
     assert_eq!(kinds.kinds().len(), 9);
     assert_eq!(
         checks
@@ -161,10 +161,8 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
         ("radio.rx.block_len", int, false, reject, none),
         ("radio.timing.min_timed_command_lead_ns", int, false, reject, none),
         ("radio.timing.startup_latency_ns", int, false, reject, none),
-        ("radio.timing.stop_tail_ns", int, false, reject, none),
         ("radio.timing.command_queue_depth", int, false, reject, none),
         ("radio.timing.overflow_restart_gap_ns", int, false, reject, none),
-        ("radio.timing.restart_lead_ns", int, false, reject, none),
         ("radio.timing.start_lead_ns", int, false, reject, none),
         ("radio.perf.rx_bytes_per_s", int, false, reject, none),
         ("radio.perf.tx_bytes_per_s", int, false, reject, none),
@@ -234,9 +232,9 @@ fn rm_10_the_kinds_are_registered_under_radio_with_their_defaults() {
 }
 
 #[test]
-fn rm_12_the_verbs_compile_to_bursts() {
+fn rm_12_the_verbs_compile_as_declared() {
     let descriptor = ezsdr_radio::vocabulary();
-    assert_eq!(descriptor.verbs.len(), 2);
+    assert_eq!(descriptor.verbs.len(), 3);
     assert_eq!(descriptor.verbs[0].verb.as_str(), "start_repeat");
     assert!(matches!(
         descriptor.verbs[0].compiles_to,
@@ -253,10 +251,13 @@ fn rm_12_the_verbs_compile_to_bursts() {
             late_policy: LatePolicy::DropAndFlag
         }
     ));
+    // RM-12, RM-21: `start_rx` turns a receive stream on again after a `Stop`.
+    assert_eq!(descriptor.verbs[2].verb.as_str(), "start_rx");
+    assert_eq!(descriptor.verbs[2].compiles_to, CompileRule::PeripheralCommand {});
 
     let mut registry = ModuleRegistry::new();
     registry.register_vocabulary(descriptor).unwrap();
-    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().verbs.len(), 2);
+    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().verbs.len(), 3);
 }
 
 #[test]

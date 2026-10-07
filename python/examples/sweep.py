@@ -7,7 +7,7 @@ def build_experiment(gain_db):
     """A fully expanded ExperimentSpec: receive 10 000 samples at the given gain."""
     return {
         "version": 1,
-        "requirements": {"vocabularies": [{"id": "radio", "major": 1}, {"id": "sink", "major": 1}]},
+        "requirements": {"vocabularies": [{"id": "radio", "major": 2}, {"id": "sink", "major": 1}]},
         "resources": {
             "radio": {
                 "kind": "radio.device",

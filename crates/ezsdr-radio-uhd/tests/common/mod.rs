@@ -62,11 +62,11 @@ impl Drop for TempDir {
 }
 
 pub fn uhd_module() -> Json {
-    json!({ "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 3, "patch": 0 } })
+    json!({ "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } })
 }
 
 pub fn x310_ubx() -> Json {
-    json!({ "name": "x310-ubx", "version": { "major": 0, "minor": 2, "patch": 0 } })
+    json!({ "name": "x310-ubx", "version": { "major": 0, "minor": 3, "patch": 0 } })
 }
 
 /// The profile of the device's front ends: `x310-obx` on an OBX (the bench, bench.md),
@@ -154,7 +154,7 @@ pub fn receive_spec(channels: i64, rate: f64, frequency: f64, capture: Option<i6
     }
     json!({
         "version": 1,
-        "requirements": { "vocabularies": [{ "id": "radio", "major": 1 }, { "id": "sink", "major": 1 }] },
+        "requirements": { "vocabularies": [{ "id": "radio", "major": 2 }, { "id": "sink", "major": 1 }] },
         "resources": { "radio": { "kind": "radio.device", "requires": {
             "radio.rx.channels": { "kind": "eq", "value": channels },
             "radio.rx.sample_rate_hz": { "kind": "eq", "value": rate },
@@ -287,6 +287,13 @@ pub fn after(run: &RunHandle, ticks: i64) -> TimePoint {
 pub fn past_t0(run: &mut RunHandle, extra: i64) {
     let t0 = run.start_instant().unwrap();
     run.advance_to(TimePoint::new(t0.domain, t0.ticks + extra)).unwrap();
+}
+
+/// Advances past the origin of the transmit clock a change from 0 channels registered,
+/// the start lead after it (RM-25; spec 22, VH-4), so that a burst sent then is on time.
+pub fn past_tx_origin(run: &mut RunHandle) {
+    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.path == "usrp/tx" && r.ended_at.is_none()).expect("a transmit clock");
+    let _ = run.advance_to(TimePoint::new(clock.origin.domain, clock.origin.ticks + ms(1)));
 }
 
 pub fn wait(run: &mut RunHandle, ticks: i64) {
@@ -600,6 +607,7 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
     let mut run = session(&bench_profile(&*device, &dir, json!({}), envelope, true), device);
     past_t0(&mut run, ms(1));
     assert!(admitted(&run.submit(set("radio.tx.channels", Value::Int(1)), None).unwrap()));
+    past_tx_origin(&mut run);
     let wave = pn(1_000);
     let (bytes, _) = waveform_of(&wave);
     assert!(admitted(&run.submit(verb("start_repeat", "radio/tx", None, &[]), Some(&bytes)).unwrap()));

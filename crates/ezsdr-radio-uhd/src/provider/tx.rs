@@ -20,7 +20,7 @@ use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::{TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload};
 use serde_json::json;
 
-use super::control::ColdConfig;
+use super::control::{Plan, Planned};
 use super::core::{Clock, Core, lock};
 use crate::device::{Dir, Iq, TxCode, TxReport};
 use crate::profile::{DEVICE_LEAD_NS, IN_FLIGHT_WINDOW_NS};
@@ -38,12 +38,10 @@ pub(crate) struct Held {
 
 pub(crate) enum TxCmd {
     Burst(Held),
-    /// `Stop` for `<id>/tx` or `<id>` (UR-26).
+    /// `Stop` for `<id>/tx` or `<id>`: it ends the bursts, not the clock (RM-16, UR-26).
     Stop,
-    /// A stream enabled from 0 channels, already configured (UR-25).
-    Enable { clock: Clock, channels: usize },
-    /// A `cold` change: the old stream ends at `e1` (UR-25).
-    Switch { e1: i64, clock: Option<Clock>, channels: usize, settings: Arc<ColdConfig> },
+    /// The transmit plan uhd-control booked: every segment with its clock (UR-25).
+    Plan(Plan),
     /// `Provider::stop` (UR-26).
     Shutdown,
 }
@@ -54,11 +52,11 @@ struct Open {
     first: bool,
 }
 
+/// The current clock's cut and the segment after it, which becomes current there (UR-25).
 struct Switch {
-    e1: i64,
-    clock: Option<Clock>,
-    channels: usize,
-    settings: Arc<ColdConfig>,
+    /// The root tick of the current clock's cut.
+    cut: i64,
+    to: Option<Planned>,
 }
 
 struct PendingReport {
@@ -76,6 +74,10 @@ pub(crate) struct Tx {
     open: Option<Open>,
     tracker: Option<BurstTracker>,
     switch: Option<Switch>,
+    /// The transmit plan, and the index in it of the current segment, or of the next one
+    /// to begin while there is no clock.
+    plan: Plan,
+    at: usize,
     unacked: VecDeque<PendingReport>,
     /// The device burst is still open, its next sample this one: a held burst starting
     /// there continues it, without end-of-burst and start-of-burst between them, since
@@ -104,6 +106,8 @@ impl Tx {
             later: Vec::new(),
             open: None,
             switch: None,
+            plan: Arc::new(Vec::new()),
+            at: 0,
             unacked: VecDeque::new(),
             continues_at: None,
             tail: None,
@@ -141,25 +145,36 @@ impl Tx {
                 }
             }
             TxCmd::Stop => self.stop_now("UR-26: cancelled by Stop", true),
-            TxCmd::Enable { clock, channels } => {
-                self.unacked.clear(); // The newly opened streamer has its own report queue.
-                self.clock = Some(clock);
-                self.channels = channels;
-                self.tracker = Some(BurstTracker::new(clock.domain));
-                self.adopt_later();
-            }
-            TxCmd::Switch { e1, clock, channels, settings } => {
-                self.switch = Some(Switch { e1, clock, channels, settings });
+            TxCmd::Plan(plan) => {
+                self.plan = plan;
+                self.retarget();
             }
             TxCmd::Shutdown => unreachable!("handled by run"),
         }
     }
 
+    /// UR-25: the plan's cut of the current clock, and the segment after it; with no clock,
+    /// the next segment, which begins at once.
+    fn retarget(&mut self) {
+        self.switch = match self.clock {
+            Some(clock) => self.plan.get(self.at).and_then(|current| current.segment.cut)
+                .map(|cut| Switch { cut: clock.instant(cut), to: self.plan.get(self.at + 1).cloned() }),
+            None => self.plan.get(self.at).cloned().map(|to| Switch { cut: i64::MIN, to: Some(to) }),
+        };
+        lock(&self.core.streams).idle[Dir::Tx as usize] = self.clock.is_none() && self.switch.is_none();
+    }
+
+    /// UR-25: at a switch, the bursts booked on the new clock are held; those on a clock still
+    /// to come stay booked, and those on one the switch passed, or that ends at its origin,
+    /// are cancelled.
     fn adopt_later(&mut self) {
         let domain = self.clock.map(|c| c.domain);
+        let next = self.at + usize::from(self.clock.is_some());
         for held in std::mem::take(&mut self.later) {
             if Some(held.domain) == domain {
                 self.held.insert(held.k, held);
+            } else if self.plan.iter().skip(next).any(|p| p.clock.is_some_and(|c| c.domain == held.domain) && p.segment.cut != Some(0)) {
+                self.later.push(held);
             } else {
                 self.forget(&held);
                 self.core.command_rejected("tx_burst", "UR-25: its transmit clock was never started");
@@ -197,10 +212,10 @@ impl Tx {
         };
         let now = self.core.now();
         let window = self.core.ticks(IN_FLIGHT_WINDOW_NS);
-        let e1_k = self.switch.as_ref().map(|s| clock.at_or_after(s.e1));
+        let cut_k = self.switch.as_ref().map(|s| clock.at_or_after(s.cut));
         if self.open.is_none() {
-            if let Some(e1) = self.switch.as_ref().map(|s| s.e1) {
-                if now >= e1 {
+            if let Some(cut) = self.switch.as_ref().map(|s| s.cut) {
+                if now >= cut {
                     self.do_switch();
                     return true;
                 }
@@ -213,12 +228,12 @@ impl Tx {
                 return true;
             }
             if let Some(&h) = self.held.keys().next() {
-                if h <= next && e1_k.is_none_or(|e1| h < e1) {
+                if h <= next && cut_k.is_none_or(|cut| h < cut) {
                     self.preempt(clock, h, next);
                     return true;
                 }
             }
-            if e1_k.is_some_and(|e1| next >= e1) {
+            if cut_k.is_some_and(|cut| next >= cut) {
                 self.end_open(true);
                 return true;
             }
@@ -226,7 +241,7 @@ impl Tx {
                 return false;
             }
             let held_cut = self.held.keys().next().copied();
-            self.send(clock, held_cut, e1_k);
+            self.send(clock, held_cut, cut_k);
             return true;
         }
         if let Some(c) = self.continues_at {
@@ -236,8 +251,8 @@ impl Tx {
                 return true;
             }
             match self.held.keys().next() {
-                // Not across e₁: there the device burst ends (Review O, N-4).
-                Some(&k) if k == c && e1_k.is_none_or(|e1| c < e1) => {}
+                // Not across the cut: there the device burst ends (Review O, N-4).
+                Some(&k) if k == c && cut_k.is_none_or(|cut| c < cut) => {}
                 // Another burst is next, not the continuation: end the device burst first.
                 Some(_) => {
                     self.end_open(true);
@@ -253,7 +268,7 @@ impl Tx {
             }
         }
         if let Some(&k) = self.held.keys().next() {
-            if e1_k.is_some_and(|e1| k >= e1) {
+            if cut_k.is_some_and(|cut| k >= cut) {
                 return false;
             }
             if clock.instant(k) - now < window {
@@ -266,7 +281,7 @@ impl Tx {
                     let Some(held) = self.dispatch_start(clock, held) else { return true };
                     held
                 };
-                if e1_k.is_some_and(|e1| held.k >= e1) {
+                if cut_k.is_some_and(|cut| held.k >= cut) {
                     // A late-policy move cannot send on the old clock past its cut.
                     // The pending switch will cancel this old-clock reservation.
                     self.held.insert(held.k, held);
@@ -279,7 +294,7 @@ impl Tx {
                 let next = held.k;
                 self.open = Some(Open { held, next, first: true });
                 let held_cut = self.held.keys().next().copied();
-                self.send(clock, held_cut, e1_k);
+                self.send(clock, held_cut, cut_k);
                 return true;
             }
         }
@@ -300,7 +315,7 @@ impl Tx {
         }
         let count = count.max(1);
         let ends_waveform = !open.held.repeat && offset + count == len;
-        let ends_at_held = held_cut.is_some_and(|h| open.next + count == h) && switch_cut.is_none_or(|e1| h_lt(held_cut, e1));
+        let ends_at_held = held_cut.is_some_and(|h| open.next + count == h) && switch_cut.is_none_or(|cut| h_lt(held_cut, cut));
         let eob = ends_waveform || ends_at_held;
         let slices: Vec<&[Iq]> = open.held.samples.iter().map(|ch| &ch[offset as usize..(offset + count) as usize]).collect();
         let first = open.first;
@@ -483,7 +498,7 @@ impl Tx {
     /// UR-21: booking's verdict can expire before the first device hand-over.
     fn dispatch_start(&self, clock: Clock, mut held: Held) -> Option<Held> {
         let lead = self.core.ticks(DEVICE_LEAD_NS);
-        let now = clock.at_or_after(self.core.now().max(clock.origin - lead));
+        let now = clock.at_or_after(ezsdr_radio::timeline::decided_at(self.core.now(), clock.origin, lead));
         let outcome = held.policy.decide(&self.core.clocks,
             TimePoint::new(clock.domain, held.k), TimePoint::new(clock.domain, now),
             Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS));
@@ -601,7 +616,11 @@ impl Tx {
         }
     }
 
-    /// The transmit side of a `cold` change, at `e1` (UR-25).
+    /// The transmit side of a `cold` change, at the old clock's cut (UR-25): the open burst
+    /// ends, the old clock's held bursts are cancelled, and the next segment becomes current —
+    /// its streamer reopened when its channel count changed and the direction configured,
+    /// unless uhd-control did both for an enable from no stream. A configuration the device
+    /// refuses halts the stream (RM-25).
     fn do_switch(&mut self) {
         let Some(switch) = self.switch.take() else { return };
         self.end_open(true);
@@ -609,30 +628,36 @@ impl Tx {
             self.forget(&held);
             self.core.command_rejected("tx_burst", "cancelled by a cold change");
         }
-        self.clock = None;
+        if self.clock.take().is_some() {
+            self.at += 1;
+        }
         self.tracker = None;
-        if let Some(new) = switch.clock.filter(|_| !self.core.is_lost()) {
-            let reopened = if switch.channels != self.channels {
-                self.core.device.tx_open(switch.channels).map(|()| self.unacked.clear())
+        if let Some(to) = switch.to.filter(|_| !self.core.is_lost()) {
+            let reopened = if to.configured || to.channels() != self.channels {
+                let opened = if to.configured { Ok(()) } else { self.core.device.tx_open(to.channels()) };
+                opened.map(|()| self.unacked.clear())
             } else {
                 Ok(())
             };
-            match reopened.and_then(|()| switch.settings.configure(&self.core, Dir::Tx, switch.channels)) {
-                Ok(_) => {
-                    self.clock = Some(new);
-                    self.tracker = Some(BurstTracker::new(new.domain));
+            let configured = reopened.and_then(|()| if to.configured { Ok(()) } else { to.settings.configure(&self.core, Dir::Tx, to.channels()).map(|_| ()) });
+            self.channels = to.channels();
+            match configured {
+                Ok(()) => {
+                    self.clock = to.clock;
+                    self.tracker = to.clock.map(|clock| BurstTracker::new(clock.domain));
                 }
                 Err(error) => {
-                    let _ = self.core.clocks.end(new.domain, self.core.at(new.origin));
-                    lock(&self.core.streams).tx = None;
+                    if let Some(by) = to.segment.by {
+                        lock(&self.core.streams).refused.push((Dir::Tx, by));
+                    }
+                    self.at += 1;
                     self.core.device_failed("update_parameter", &error);
                 }
             }
+            self.core.timing(json!({ "what": "tx_switch", "cut": switch.cut, "origin": to.segment.origin, "at": self.core.now() }));
         }
-        self.channels = switch.channels;
-        self.core.timing(json!({ "what": "tx_switch", "e1": switch.e1, "e2": switch.clock.map(|c| c.origin), "at": self.core.now() }));
         self.adopt_later();
-        lock(&self.core.streams).switching[Dir::Tx as usize] = false;
+        self.retarget();
     }
 
     /// UR-28: every report recorded; underflows and late bursts become events.
@@ -717,8 +742,8 @@ impl Tx {
     }
 }
 
-fn h_lt(held_cut: Option<i64>, e1: i64) -> bool {
-    held_cut.is_some_and(|h| h < e1)
+fn h_lt(held_cut: Option<i64>, cut: i64) -> bool {
+    held_cut.is_some_and(|h| h < cut)
 }
 
 #[cfg(test)]
@@ -752,6 +777,23 @@ mod tests {
             policy,
             target: TimePoint::new(clock.domain, k),
         }
+    }
+
+    /// A switch at `cut` to the segment of `clock`, `channels` channels configured with
+    /// `settings`, or to no stream (UR-25).
+    fn switch(cut: i64, clock: Option<super::Clock>, channels: usize, settings: Settings) -> super::Switch {
+        let to = clock.map(|clock| super::Planned {
+            segment: ezsdr_radio::timeline::Segment {
+                origin: clock.origin,
+                cut: None,
+                config: ezsdr_radio::timeline::Config { channels: channels as u16, ratio: ezsdr_kernel::time::Rational::new(clock.n as u64, 1).unwrap() },
+                by: Some(1),
+            },
+            settings: Arc::new(super::super::control::ColdConfig::new(clock.origin, settings)),
+            configured: false,
+            clock: Some(clock),
+        });
+        super::Switch { cut, to }
     }
 
     #[test]
@@ -865,6 +907,53 @@ mod tests {
     }
 
     #[test]
+    fn ur_25_a_burst_on_a_later_clock_survives_an_earlier_switch() {
+        // UR-25 (KC-21a): at a switch, a burst booked on a clock the plan starts later stays
+        // booked, and is held once its clock is current; a refused switch cancels only its
+        // own clock's bursts.
+        for refused in [false, true] {
+            let (core, device, _, _) = super::super::test_support::rig();
+            device.tx_open(1).unwrap();
+            let s = |n: i64| core.ticks(n * 1_000_000_000);
+            let c0 = core.register(Dir::Tx, 200, 0).unwrap();
+            let c1 = core.register(Dir::Tx, 100, s(1)).unwrap();
+            let c2 = core.register(Dir::Tx, 200, s(2)).unwrap();
+            let planned = |clock: super::Clock, cut: Option<i64>, rate: f64| super::Planned {
+                segment: ezsdr_radio::timeline::Segment {
+                    origin: clock.origin,
+                    cut,
+                    config: ezsdr_radio::timeline::Config { channels: 1, ratio: ezsdr_kernel::time::Rational::new(clock.n as u64, 1).unwrap() },
+                    by: Some(clock.origin as u64),
+                },
+                settings: Arc::new(super::super::control::ColdConfig::new(clock.origin, Settings { rate: Some(rate), ..Settings::default() })),
+                configured: false,
+                clock: Some(clock),
+            };
+            let (_to_tx, cmds) = std::sync::mpsc::channel();
+            let mut tx = Tx::new(core.clone(), cmds, Some(c0), 1);
+            let c1_rate = if refused { 3.3e6 } else { 2e6 };
+            tx.command(TxCmd::Plan(Arc::new(vec![planned(c0, Some(1_000_000), 1e6), planned(c1, Some(2_000_000), c1_rate), planned(c2, None, 1e6)])));
+            for clock in [c1, c2] {
+                lock(&core.held).insert((clock.domain, 100));
+                tx.command(TxCmd::Burst(held(&clock, 100, 10, LatePolicy::SendAsapAndFlag)));
+            }
+            tx.do_switch();
+            let case = format!("refused {refused}");
+            assert_eq!(tx.clock, (!refused).then_some(c1), "{case}");
+            assert_eq!(tx.later.iter().map(|h| h.domain).collect::<Vec<_>>(), [c2.domain], "{case}");
+            assert_eq!(tx.held.len(), usize::from(!refused), "{case}");
+            assert_eq!(lock(&core.rec).rejected.iter().filter(|r| r["action"] == "tx_burst").count(), usize::from(refused), "{case}");
+            let reported: &[(Dir, u64)] = if refused { &[(Dir::Tx, c1.origin as u64)] } else { &[] };
+            assert_eq!(lock(&core.streams).refused, reported, "{case}");
+            tx.held.clear();
+            tx.do_switch();
+            assert_eq!(tx.clock, Some(c2), "{case}");
+            assert!(tx.later.is_empty(), "{case}");
+            assert_eq!(tx.held.len(), 1, "{case}");
+        }
+    }
+
+    #[test]
     fn ur_21_first_dispatch_cannot_move_past_a_cold_switch() {
         let (core, device, time, _) = super::super::test_support::rig();
         device.tx_open(1).unwrap();
@@ -873,8 +962,7 @@ mod tests {
         let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
         lock(&core.held).insert((clock.domain, 17_000));
         tx.command(TxCmd::Burst(held(&clock, 17_000, 10_000, LatePolicy::SendAsapAndFlag)));
-        tx.command(TxCmd::Switch { e1: core.ticks(20_000_000), clock: None,
-            channels: 0, settings: Arc::new(super::ColdConfig::new(0, Settings::default())) });
+        tx.switch = Some(switch(core.ticks(20_000_000), None, 0, Settings::default()));
         time.advance_to(core.at(core.ticks(19_000_000))).unwrap();
         assert!(tx.step());
         assert!(tx.open.is_none());
@@ -1015,8 +1103,7 @@ mod tests {
         let mut tx = Tx::new(core.clone(), cmds, Some(old), 1);
         tx.continues_at = Some(100);
         tx.tail = Some(vec![vec![[0.25, 0.0]]]);
-        tx.switch = Some(super::Switch { e1: 20_000_000, clock: Some(new), channels: 2,
-            settings: Arc::new(super::ColdConfig::new(new.origin, Settings { rate: Some(2e6), ..Settings::default() })) });
+        tx.switch = Some(switch(20_000_000, Some(new), 2, Settings { rate: Some(2e6), ..Settings::default() }));
         *device.eob_error.lock().unwrap() = Some(crate::device::DeviceError {
             lost: true, message: "controlled EOB loss during switch".to_owned(),
         });
@@ -1052,12 +1139,11 @@ mod tests {
     fn ur_25_largest_aligned_cut_is_safe_in_tx_owner() {
         let (core, _, _, _) = super::super::test_support::rig();
         let old = core.register(Dir::Tx, 200, 0).unwrap();
-        let e1 = i64::MAX.div_euclid(old.n) * old.n;
-        assert_eq!(old.at_or_after(e1), e1 / old.n);
+        let cut = i64::MAX.div_euclid(old.n) * old.n;
+        assert_eq!(old.at_or_after(cut), cut / old.n);
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core, cmds, Some(old), 1);
-        tx.command(TxCmd::Switch { e1, clock: None, channels: 0,
-            settings: Arc::new(super::ColdConfig::new(e1, Settings::default())) });
+        tx.switch = Some(switch(cut, None, 0, Settings::default()));
         assert!(!tx.step());
         assert!(tx.switch.is_some());
     }
@@ -1119,12 +1205,16 @@ mod tests {
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core, cmds, Some(old), 1);
         tx.remember_burst(TimePoint::new(old.domain, 100));
-        tx.switch = Some(super::Switch { e1: 20_000_000, clock: Some(new), channels: 2,
-            settings: Arc::new(super::ColdConfig::new(new.origin, Settings { rate: Some(2e6), ..Settings::default() })) });
+        tx.switch = Some(switch(20_000_000, Some(new), 2, Settings { rate: Some(2e6), ..Settings::default() }));
         tx.do_switch();
         assert!(tx.unacked.is_empty());
         tx.remember_burst(TimePoint::new(new.domain, 100));
-        tx.command(TxCmd::Enable { clock: new, channels: 2 });
+        // A segment uhd-control enabled from no stream comes on a streamer it opened anew.
+        let mut enabled = switch(i64::MIN, Some(new), 2, Settings::default());
+        enabled.to.as_mut().unwrap().configured = true;
+        tx.clock = None;
+        tx.switch = Some(enabled);
+        tx.do_switch();
         assert!(tx.unacked.is_empty());
     }
 
@@ -1140,9 +1230,8 @@ mod tests {
             let (_to_tx, cmds) = std::sync::mpsc::channel();
             let mut tx = Tx::new(core.clone(), cmds, Some(old), 2);
             tx.remember_burst(target);
-            tx.switch = Some(super::Switch { e1: 20_000_000, clock: new, channels: if new.is_some() { 2 } else { 0 },
-                settings: Arc::new(super::ColdConfig::new(new.map_or(20_000_000, |c| c.origin),
-                    Settings { rate: Some(if next_n == Some(100) { 2e6 } else { 1e6 }), ..Settings::default() })) });
+            tx.switch = Some(switch(20_000_000, new, if new.is_some() { 2 } else { 0 },
+                Settings { rate: Some(if next_n == Some(100) { 2e6 } else { 1e6 }), ..Settings::default() }));
             tx.do_switch();
             let next_target = new.map(|clock| TimePoint::new(clock.domain, 20_000));
             if let Some(target) = next_target { tx.remember_burst(target); }

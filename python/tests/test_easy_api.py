@@ -69,7 +69,9 @@ class EasyApi(unittest.TestCase):
         x = ramp()
         with self.connect() as sdr:
             sdr.tx.repeat(x)
-            sdr.sleep(0.005)
+            # The transmit clock the enable starts begins the profile's 50 ms start lead
+            # later, and the repeat with it (RM-15, RM-25).
+            sdr.sleep(0.06)
             y = sdr.rx.capture(3000)
         self.assertEqual((y.shape, y.dtype), ((3000,), np.complex64))
         _, phasor = rotation(y, x)
@@ -135,7 +137,7 @@ class EasyApi(unittest.TestCase):
     def test_v54_a_sweep_of_child_runs(self) -> None:
         spec = {
             "version": 1,
-            "requirements": {"vocabularies": [{"id": "radio", "major": 1}, {"id": "sink", "major": 1}]},
+            "requirements": {"vocabularies": [{"id": "radio", "major": 2}, {"id": "sink", "major": 1}]},
             "resources": {"radio": {"kind": "radio.device", "requires": {}}},
             "outputs": [{
                 "id": "rec", "kind": "sink.capture", "params": {"sink.capture_samples": 1000},
@@ -167,7 +169,7 @@ class EasyApi(unittest.TestCase):
                     link["to"]["component"] = name
             spec = {
                 "version": 1,
-                "requirements": {"vocabularies": [{"id": "radio", "major": 1}, {"id": "sink", "major": 1}]},
+                "requirements": {"vocabularies": [{"id": "radio", "major": 2}, {"id": "sink", "major": 1}]},
                 "resources": {"radio": {"kind": "radio.device", "requires": {}}},
                 "outputs": [{"id": name, "kind": "sink.capture", "params": {"sink.capture_samples": 1},
                              "feed": {"port": {"component": "radio", "port": "rx"}, "policy": "drop_oldest", "capacity": 64}}],
@@ -379,6 +381,46 @@ class EasyApi(unittest.TestCase):
             self.assertEqual(len(artifact["continuity"]), 2)
             with self.assertRaises(ezsdr.Error):
                 ezsdr.samples(sdr.read(artifact), artifact)
+
+    def test_ea_16_rx_stop_then_start(self) -> None:
+        # EA-16, RM-12, RM-21 (spec 22, VH-1, VH-6): after rx.stop() a change starts nothing;
+        # rx.start() starts the stream again on a new SampleClock at the configuration in
+        # force; calls act in the order made.
+        with self.connect() as sdr:
+            sdr.rx.stop()
+            sdr.sleep(0.002)
+            sdr.rx.sample_rate = 2e6
+            sdr.sleep(0.06)
+            with self.assertRaises(ezsdr.CaptureTimeout):
+                sdr.rx.capture(1000, timeout=0.2)
+            sdr.rx.start()
+            self.assertEqual(len(sdr.rx.capture(1000)), 1000)
+            sdr.rx.stop()
+            sdr.sleep(0.01)
+            at = sdr.after(0.02)
+            sdr.rx.start(at=at)
+            self.assertEqual(len(sdr.rx.capture(1000)), 1000)
+            sdr.rx.sample_rate = 1e6
+            self.assertEqual(len(sdr.rx.capture(1000)), 1000)
+            sdr.rx.start()
+            sdr.rx.stop()
+            sdr.sleep(0.1)
+            with self.assertRaises(ezsdr.CaptureTimeout):
+                sdr.rx.capture(1000, timeout=0.2)
+            sdr.rx.stop()
+            sdr.rx.start()
+            self.assertEqual(len(sdr.rx.capture(1000)), 1000)
+            self.assertEqual(len(sdr.effective["radio"]), 10)
+        # The first segment, stopped at T0 before its first sample, has no clock (RM-25); the
+        # four others end at their cuts, the last at the Session's close.
+        clocks = [c for c in sdr.manifest["clocks"]["sample_clocks"] if c["stream"]["path"] == "radio/rx"]
+        self.assertEqual(len(clocks), 4, clocks)
+        self.assertTrue(all(c.get("ended_at") is not None for c in clocks), clocks)
+        self.assertEqual([c["root_ticks_per_tick"]["num"] for c in clocks], [500, 500, 1000, 1000], clocks)
+        # The start, received 20 ms before its `at`, is ready then: its clock begins the start
+        # lead after its receipt, the later of that and `at` (RM-25).
+        lead, received = 50_000_000, at["ticks"] - 20_000_000
+        self.assertLessEqual(abs(clocks[1]["origin"]["ticks"] - max(at["ticks"], received + lead)), 500, (clocks, at))
 
     def test_ea_16_repeat_sets_the_channel_count_only_when_it_differs(self) -> None:
         with self.connect() as sdr:

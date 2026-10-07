@@ -34,10 +34,8 @@ fn x310_like() -> DeviceDescription {
         timing: TimingEnvelope {
             min_timed_command_lead_ns: 2_000_000,
             startup_latency_ns: 2_000_000_000,
-            stop_tail_ns: 1_000_000,
             command_queue_depth: 16,
             overflow_restart_gap_ns: 50_000_000,
-            restart_lead_ns: 50_000_000,
             start_lead_ns: 50_000_000,
         },
         performance: PerformanceEnvelope {
@@ -86,10 +84,8 @@ fn mockradio_1_2_capabilities() -> BTreeMap<Key, CapabilityValue> {
         (keys::RX_BLOCK_LEN, Value::Int(2_000)),
         (keys::MIN_TIMED_COMMAND_LEAD_NS, Value::Int(2_000_000)),
         (keys::STARTUP_LATENCY_NS, Value::Int(2_000_000_000)),
-        (keys::STOP_TAIL_NS, Value::Int(1_000_000)),
         (keys::COMMAND_QUEUE_DEPTH, Value::Int(16)),
         (keys::OVERFLOW_RESTART_GAP_NS, Value::Int(50_000_000)),
-        (keys::RESTART_LEAD_NS, Value::Int(50_000_000)),
         (keys::START_LEAD_NS, Value::Int(50_000_000)),
         (keys::RX_BYTES_PER_S, Value::Int(1_000_000_000)),
         (keys::TX_BYTES_PER_S, Value::Int(1_000_000_000)),

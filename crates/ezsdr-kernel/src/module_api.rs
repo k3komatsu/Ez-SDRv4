@@ -408,8 +408,9 @@ impl Fidelity {
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateClass {
-    /// The target stops the affected function, applies the value and restarts it; a
-    /// stream continues on a new SampleClock (UC-3, TM-13c).
+    /// The target stops the affected function, applies the value and, if the function was
+    /// running, starts it again; a stream so restarted continues on a new SampleClock (UC-3,
+    /// TM-13c).
     Cold,
     /// Applied from the first block or sample boundary at or after the effective
     /// instant; no block mixes the old and new value (UC-4).

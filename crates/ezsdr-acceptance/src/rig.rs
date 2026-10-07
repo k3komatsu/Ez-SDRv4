@@ -79,9 +79,9 @@ fn profile_document(profile: &str, selector: JsonValue, dir: &Path, environment:
         "version": 1,
         "bindings": {
             "radio": {
-                "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 5, "patch": 0 } },
+                "module": { "id": "ezsdr.radio.mock", "version": { "major": 2, "minor": 0, "patch": 0 } },
                 "selector": selector,
-                "profile": { "name": profile, "version": { "major": 1, "minor": 2, "patch": 0 } }
+                "profile": { "name": profile, "version": { "major": 2, "minor": 0, "patch": 0 } }
             },
             "rec": recorder(dir, session.then_some("radio")),
             "sim": {
@@ -116,9 +116,9 @@ pub fn link_session_profile(profile: &str, tx: &str, rx: &str, dir: &Path, envir
 
 fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path, environment: JsonValue, session: bool) -> JsonValue {
     let radio = |id: String, jitter: bool| json!({
-        "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 5, "patch": 0 } },
+        "module": { "id": "ezsdr.radio.mock", "version": { "major": 2, "minor": 0, "patch": 0 } },
         "selector": { "id": id, "block_len_jitter": jitter },
-        "profile": { "name": profile, "version": { "major": 1, "minor": 2, "patch": 0 } }
+        "profile": { "name": profile, "version": { "major": 2, "minor": 0, "patch": 0 } }
     });
     let mut bindings = serde_json::Map::new();
     bindings.insert(tx.to_owned(), radio("dev_tx".to_owned(), false));
@@ -145,9 +145,9 @@ fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path,
 /// rig's time section). `jitter` turns on the responder radio's block-length jitter.
 pub fn ping_pong_profile(profile: &str, pinger: &str, responder_radio: &str, jitter: bool, dir: &Path, environment: JsonValue) -> JsonValue {
     let radio = |id: String, jitter: bool| json!({
-        "module": { "id": "ezsdr.radio.mock", "version": { "major": 1, "minor": 5, "patch": 0 } },
+        "module": { "id": "ezsdr.radio.mock", "version": { "major": 2, "minor": 0, "patch": 0 } },
         "selector": { "id": id, "block_len_jitter": jitter },
-        "profile": { "name": profile, "version": { "major": 1, "minor": 2, "patch": 0 } }
+        "profile": { "name": profile, "version": { "major": 2, "minor": 0, "patch": 0 } }
     });
     let mut bindings = serde_json::Map::new();
     bindings.insert(pinger.to_owned(), radio(format!("dev_{pinger}"), false));
@@ -197,8 +197,8 @@ pub fn uhd_profile(dir: &Path, session: bool, environment: JsonValue) -> JsonVal
         "version": 1,
         "bindings": {
             "radio": {
-                "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 3, "patch": 0 } },
-                "profile": { "name": "x310-ubx", "version": { "major": 0, "minor": 2, "patch": 0 } },
+                "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
+                "profile": { "name": "x310-ubx", "version": { "major": 0, "minor": 3, "patch": 0 } },
                 "selector": { "args": "addr=192.0.2.1", "id": "usrp" }
             },
             "rec": recorder(dir, session.then_some("radio"))

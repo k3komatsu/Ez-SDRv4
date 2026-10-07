@@ -113,6 +113,9 @@ fn rm_26_the_timeline_cases() {
 
     // The transmit side: a Stop ends bursts, not the clock; a change booked early still
     // waits the lead after its cut; an empty transmit clock is kept, ended at its origin.
+    case("a transmit enable from no stream waits the lead after it is ready (VH-4)", &stream(Direction::Tx, 0),
+        &[item(1_000 * MS, 0, 1_020 * MS, Kind::Cold(config(1, 1_000_000)))],
+        &[(1_070 * MS, None)]);
     case("a transmit Stop ends no clock", &tx, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop)], &[(0, None)]);
     case("transmit 0 channels and back, booked early, starts a lead after the cut", &tx,
         &[item(1_000 * MS, 0, 100 * MS, Kind::Cold(config(0, 1_000_000))),
@@ -165,9 +168,36 @@ fn rm_26_the_timeline_cases() {
     case("a loss ends a running transmit stream's bursts, not its clock", &tx,
         &[item(1_000 * MS, 0, 0, Kind::End { abort: false }), item(1_500 * MS, 1, 1_500 * MS, fast)], &[(0, None)]);
 
+    // VH-2: a `cold` change never takes effect before an earlier-arrived one of its stream,
+    // its instant floored at that one's and, at it, after it, on both directions.
+    let early = |e: i64, seq: u64, ready: i64, kind: Kind| item(e, seq, ready, kind);
+    let late = [early(2_000 * MS, 0, 500 * MS, fast), early(1_000 * MS, 1, 600 * MS, Kind::Cold(config(1, 1_000_000)))];
+    assert_eq!(ezsdr_radio::timeline::effective(&late, &late[1]), 2_000 * MS);
+    assert_eq!(ezsdr_radio::timeline::effective(&late, &late[0]), 2_000 * MS);
+    case("a receive change that arrives after a later one follows it", &rx, &late,
+        &[(0, Some(2_000 * MS)), (2_100 * MS, None)]);
+    case("a transmit change that arrives after a later one follows it", &tx, &late,
+        &[(0, Some(2_000 * MS)), (2_050 * MS, Some(2_050 * MS)), (2_100 * MS, None)]);
+    assert_eq!(plan(&rx, &late).unwrap()[1].config, config(1, 1_000_000), "the later-arrived change is in force");
+    assert_eq!(ezsdr_radio::timeline::effective(&late, &item(1_000 * MS, 2, 700 * MS, Kind::Stop)), 1_000 * MS, "a Stop is not floored");
+
+    // VH-2: a transmit clock is recorded at booking, so a loss before a change booked ahead of
+    // it keeps that change's cut and ends its clock at its origin; receive ends at the loss.
+    let booked = [item(1_000 * MS, 1, 500 * MS, fast), item(800 * MS, 0, 0, Kind::End { abort: false })];
+    case("a loss before a booked transmit change keeps its cut", &tx, &booked,
+        &[(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS))]);
+    case("a loss before a booked receive change ends the stream at the loss", &rx, &booked, &[(0, Some(800 * MS))]);
+    // A refused transmit change whose clock a change booked before the refusal already cut
+    // keeps that cut.
+    case("a transmit change booked before a refusal keeps its cut of the refused clock", &tx,
+        &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(1_100 * MS, 1, 600 * MS, Kind::Cold(config(1, 1_000_000)))],
+        &[(0, Some(1_000 * MS)), (1_050 * MS, Some(1_100 * MS)), (1_150 * MS, None)]);
+
     // The configuration a segment runs is its change's.
     let planned = plan(&rx, &[item(1_000 * MS, 0, 900 * MS, fast)]).unwrap();
     assert_eq!(planned[1].config, config(1, 2_000_000));
+    // Each segment names the command that began it; the first, none.
+    assert_eq!(planned.iter().map(|segment| segment.by).collect::<Vec<_>>(), [None, Some(0)]);
 }
 
 /// VH-8 on the timeline alone, `start_rx` and refusals included: on every generated
@@ -219,7 +249,7 @@ fn check(stream: &Stream, planned: &[Segment], seed: u64) {
             let cut = previous.cut.expect("a cut before the next segment");
             let mut earliest = previous.instant(cut).unwrap() + stream.lead;
             if receive {
-                let call = Segment { origin: 0, cut: None, config: previous.config }.instant(stream.call).unwrap();
+                let call = Segment { origin: 0, cut: None, config: previous.config, by: None }.instant(stream.call).unwrap();
                 earliest += call + stream.allowance;
             }
             assert!(segment.origin >= earliest, "{at}");
