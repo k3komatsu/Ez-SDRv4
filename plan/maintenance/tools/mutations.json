@@ -479,7 +479,7 @@
   "id": "G03",
   "name": "VG-1: uhd-rx's abort cut replaces an earlier cut, a Stop's or a switch's (today's code)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "let cut = self.stream.as_ref().and_then(|stream| stream.cut).map_or(at, |set| set.min(at));",
+  "old": "let cut = stream.cut.map_or(at, |set| set.min(at));",
   "new": "let cut = at;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -491,6 +491,36 @@
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
   "old": "            if stream.cut.is_some_and(|c| c <= cut) {\n                return;\n            }\n            stream.cut = Some(stream.cut.map_or(cut, |c| c.min(cut)));\n",
   "new": "            stream.cut = Some(cut);\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stopped_stream_keeps_its_end"
+ },
+ {
+  "id": "G58",
+  "name": "VG-1: uhd-rx's abort keeps the first cut set, even when its own is earlier",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let cut = stream.cut.map_or(at, |set| set.min(at));",
+  "new": "let cut = stream.cut.unwrap_or(at);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stopped_stream_keeps_its_end"
+ },
+ {
+  "id": "G59",
+  "name": "VG-1: uhd-rx's abort records its own instant as the rx_stop row's until",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "\"until\": cut, \"mode\": \"Abort\"",
+  "new": "\"until\": at, \"mode\": \"Abort\"",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stopped_stream_keeps_its_end"
+ },
+ {
+  "id": "G60",
+  "name": "VG-1: uhd-rx's abort leaves the stop to the samples that reach the cut",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                            if !stream.stopped {\n                                if let Some(issued) = stop_at_cut(&self.core, cut) {",
+  "new": "                            if false {\n                                if let Some(issued) = stop_at_cut(&self.core, cut) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_stopped_stream_keeps_its_end"

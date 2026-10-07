@@ -69,7 +69,7 @@ The three texts name the same ends in each Provider's terms: a `Stop` on both; a
 
 **Code.**
 - `crates/ezsdr-mock-radio/src/lib.rs`: `stop_rx` (`:872-891`) sets `rx.end` to the earlier of the end already set and the new one (`:877-882`; one line). MR-20a's settlement there (`:885-889`) stays: a loss the `Stop` left pending has its `k_g` before the `Stop`'s end, so a later orderly stop settles none of them, and an abort settles them at its own instant, as today (VERIFIED: #47's fault rows are the same with and without the change; *#47 after this spec*).
-- `crates/ezsdr-radio-uhd/src/provider/rx.rs`: `RxCmd::Cut` under `abort` (`:215-226`) takes the earlier of the cut already set and `at`, records it as the `rx_stop` row's `until`, and issues the untimed stop for it. `stop_at` (`:275-286`) and the switch (`:198-207`) already keep the earlier cut.
+- `crates/ezsdr-radio-uhd/src/provider/rx.rs`: `RxCmd::Cut` under `abort` (`:215-226`), when uhd-rx holds the stream, takes the earlier of the cut already set and `at`, records it as the `rx_stop` row's `until`, and issues the untimed stop for it. `stop_at` (`:275-286`) and the switch (`:198-207`) already keep the earlier cut.
 
 Three lines in all.
 
@@ -78,7 +78,7 @@ Three lines in all.
 | test | input | expected | rules |
 |---|---|---|---|
 | `mr_25_a_stopped_stream_keeps_its_end` (`crates/ezsdr-mock-radio/tests/mock_radio.rs`) | `ideal` (T0 = 0) and `x310-like` (T0 = 2 s), 1 MS/s: a `Stop` of `mock/rx` at T0 + 1 ms; then, each in a fresh harness, at T0 + 5 ms: `stop(Orderly)`; a second `Stop` of `mock/rx`; a `Stop` of `mock`; stepped to T0 + 10 ms. Then on `x310-like`: the same `Stop`, and `stop(Abort)` at T0 + 1.5 ms, inside its tail | the last block ends at sample 1 000 (`ideal`) and 2 000 (`x310-like`), the `Stop`'s end, each time; after the abort no block at all (the tail's block `[0, 2 000)` would be published only at T0 + 1.999 001 ms) | MR-25, RM-16 |
-| `ur_26_a_stopped_stream_keeps_its_end` (unit, `src/provider/rx.rs`) | uhd-rx alone on the test rig, 1 MS/s on the 200 MHz root: a `Stop` at 0 (its cut at sample 1 000); then `Provider::stop`'s cut from 5 ms, `orderly` and then, in a fresh rig, `abort`; and, in a third rig, a switch to 0 channels with `e₁` at sample 1 000 and then the abort's cut; each time 6 000 samples then arrive in one packet | each time the one block `[0, 1 000)` and one `rx_stop` | UR-26, UR-25, RM-16 |
+| `ur_26_a_stopped_stream_keeps_its_end` (unit, `src/provider/rx.rs`) | uhd-rx alone on the test rig, 1 MS/s on the 200 MHz root: a `Stop` at 0 (its cut at sample 1 000); then `Provider::stop`'s cut from 5 ms, `orderly` and then, in a fresh rig, `abort`; and, in a third rig, a switch to 0 channels with `e₁` at sample 1 000 and then the abort's cut; and, in a fourth, the `Stop` and then the abort's cut at 0.5 ms; each time 6 000 samples then arrive in one packet | the one block `[0, 1 000)` the first three times and `[0, 500)` the fourth, and one `rx_stop` each time — under `abort` issued untimed at the abort — and each `rx_stop` row's `until` the cut set then, the abort's the earlier of the cut already set and its own | UR-26, UR-25, RM-16 |
 
 Existing tests: none changes (Evidence).
 
@@ -365,7 +365,7 @@ None. Vision §27 already describes the bracket KI-1 makes explicit — "v3's pr
 
 ## Appendix A — Mutations
 
-Each row names a mutation and the test that must kill it (GZ-6). They are run with `plan/maintenance/tools/mutate.py` over `plan/maintenance/tools/mutations.json`, which the implementation extends from this table. Every row was run with that tool in a copy of `3ccd68d` carrying the prototypes of VG-1, VG-2 and KI-1 and the tests above, and every mutation was killed. No recorded mutation of an earlier phase or of spec 20 needs re-spelling (VG-1's Evidence). Not covered by a mutation: uhd-control's deciding the due starts before it books an Action (`book`), which differs from its 1 ms poll only for an Action that arrives within that poll of a start's `e`, and which a wall-clock FakeDevice test cannot pin; and `stop_at`'s silence for a decided start at a device loss, #48's case. G57, added after the review, was run with its test on a copy carrying the UHD Module's part of the prototype, rebuilt from *Code*.
+Each row names a mutation and the test that must kill it (GZ-6). They are run with `plan/maintenance/tools/mutate.py` over `plan/maintenance/tools/mutations.json`, which the implementation extends from this table. Every row was run with that tool in a copy of `3ccd68d` carrying the prototypes of VG-1, VG-2 and KI-1 and the tests above, and every mutation was killed. No recorded mutation of an earlier phase or of spec 20 needs re-spelling (VG-1's Evidence). Not covered by a mutation: uhd-control's deciding the due starts before it books an Action (`book`), which differs from its 1 ms poll only for an Action that arrives within that poll of a start's `e`, and which a wall-clock FakeDevice test cannot pin; and `stop_at`'s silence for a decided start at a device loss, #48's case. G57, added after the review, was run with its test on a copy carrying the UHD Module's part of the prototype, rebuilt from *Code*. G58–G60, added after VG-1's review with the fourth case and the record checks of `ur_26_a_stopped_stream_keeps_its_end`, were run on VG-1's implementation.
 
 | id | file | mutation | killed by |
 |---|---|---|---|
@@ -373,6 +373,9 @@ Each row names a mutation and the test that must kill it (GZ-6). They are run wi
 | G02 | `crates/ezsdr-mock-radio/src/lib.rs` | VG-1: `stop_rx` keeps the later of two ends | `mr_25_a_stopped_stream_keeps_its_end` |
 | G03 | `crates/ezsdr-radio-uhd/src/provider/rx.rs` | VG-1: uhd-rx's abort cut replaces an earlier cut, a `Stop`'s or a switch's (today's code) | `ur_26_a_stopped_stream_keeps_its_end` |
 | G04 | `crates/ezsdr-radio-uhd/src/provider/rx.rs` | VG-1: uhd-rx's orderly `stop_at` moves a cut already set later | `ur_26_a_stopped_stream_keeps_its_end` |
+| G58 | `crates/ezsdr-radio-uhd/src/provider/rx.rs` | VG-1: uhd-rx's abort keeps the first cut set, even when its own is earlier | `ur_26_a_stopped_stream_keeps_its_end` (the abort at 0.5 ms) |
+| G59 | `crates/ezsdr-radio-uhd/src/provider/rx.rs` | VG-1: uhd-rx's abort records its own instant as the `rx_stop` row's `until` | `ur_26_a_stopped_stream_keeps_its_end` (the `rx_stop` rows) |
+| G60 | `crates/ezsdr-radio-uhd/src/provider/rx.rs` | VG-1: uhd-rx's abort leaves the stop to the samples that reach the cut | `ur_26_a_stopped_stream_keeps_its_end` (the stop issued at the abort) |
 | G05 | `crates/ezsdr-mock-radio/src/lib.rs` | VG-2: the receive `cold` path restarts a stopped stream (today's code) | `mr_25_a_stopped_receive_stream_is_not_restarted` |
 | G06 | `crates/ezsdr-mock-radio/src/lib.rs` | VG-2: a change to a stopped stream leaves its tail running past `e₁` | `mr_25_a_stopped_receive_stream_is_not_restarted` (the change for T0 + 1.5 ms on `x310-like`) |
 | G07 | `crates/ezsdr-mock-radio/src/lib.rs` | VG-2: a change to a stopped stream leaves its clock running | `mr_25_a_stopped_receive_stream_is_not_restarted` |
