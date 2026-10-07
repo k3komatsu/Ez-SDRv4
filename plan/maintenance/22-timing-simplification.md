@@ -236,8 +236,8 @@ UC-3 restarts a function only if it was running, and the Vocabulary places the e
 
 1. #51.
 2. Phase 8 measures `start_lead_ns` and the ready term. If the enable and the restart differ, a second lead can return.
-3. A FakeDevice on manual time with an idle handshake (VH-8).
-4. A fault kind for a device read-back refusal, as a device fault class like an overrun. To be filed as an issue.
+3. [#60](https://github.com/k3komatsu/Ez-SDRv4/issues/60): a FakeDevice on manual time with an idle handshake (VH-8).
+4. [#59](https://github.com/k3komatsu/Ez-SDRv4/issues/59): a fault kind for a device read-back refusal, as a device fault class like an overrun.
 5. MockRadio's enable from 0 channels is earlier than the UHD Module's by the UHD Module's configuration time. This dates from spec 20's VF-6, and goes with #49.
 
 ## Vision issues
