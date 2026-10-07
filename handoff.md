@@ -780,7 +780,7 @@ Follow-ups the reviews found (filed or fixed on 2026-10-07):
 
 **Issue の概念別分析と，次に危なそうな概念（2026-10-07）**
 
-AGENTS.md §6 の「同じ概念で3件目のバグが出たら設計を疑う」ルールを，過去の issue #1–#60 に当てはめた．Issue の題名だけから分類したので，すべて INFERRED．レビュー指摘（`plan/` の Review A–U など）はまだ数えていない．ラベルは `concept:stream-timing` だけ作成済み（26件，spec 22 で対処中）．ほかの概念は，3件目の修正に着手する前にラベルを作り，設計メモを書く．
+AGENTS.md §6 の「同じ概念で3件目のバグが出たら設計を疑う」ルールを，過去の issue #1–#60 に当てはめた．Issue の題名だけから分類したので，すべて INFERRED．レビュー指摘（`plan/` の Review A–U など）はまだ数えていない．表の6概念すべてにラベルを付けた：`concept:validation-bypass`，`concept:uhd-async-reports`，`concept:capture-provenance`，`concept:time-arithmetic`，`concept:id-collisions`，`concept:stop-escalation`（Review U の race は issue ではないので2件）．このほか `concept:stream-timing`（26件，spec 22 で対処中）がある．新しい bug の issue には該当するラベルを付け，同じラベルの件数が3件以上なら，修正の前に設計メモを書く．
 
 | 順 | 概念 | issue | 疑わしい設計（未調査） |
 |---|---|---|---|
