@@ -285,10 +285,12 @@ class Rx(_Side):
 class Tx(_Side):
     """A radio's transmit side."""
 
-    def repeat(self, x: Any) -> dict:
-        """Transmits ``x`` repeatedly from the next instant the radio allows: sets
-        ``radio.tx.channels`` to its channel count when it differs, then submits
-        ``radio.start_repeat`` with its bytes (EA-16)."""
+    def repeat(self, x: Any, at: Optional[dict] = None) -> dict:
+        """Transmits ``x`` repeatedly: sets ``radio.tx.channels`` to its channel count when
+        it differs, then submits ``radio.start_repeat`` with its bytes (EA-16). ``at`` is a
+        ``TimePoint``, as ``capture`` takes, at which the first sample goes out — on a
+        device whose time a PPS set, a whole second of its root is a PPS edge (UR-7);
+        without one, the next instant the radio allows."""
         channels, data = _cf32(x)
         if self.channels != channels:
             self.channels = channels
@@ -297,7 +299,7 @@ class Tx(_Side):
             "ns": "radio",
             "verb": "start_repeat",
             "target": _rid(f"{self._radio}/tx"),
-            "at": None,
+            "at": at,
             "params": {},
         }
         return _admitted(self._session.submit(action, data))

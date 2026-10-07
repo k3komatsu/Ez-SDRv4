@@ -339,6 +339,22 @@ class EasyApi(unittest.TestCase):
         (artifact,) = sdr.manifest["artifacts"]
         self.assertEqual(artifact["continuity"][0]["first"]["ticks"], (at["ticks"] - t0) // 1000, "the first sample at `at`, 1 Msps from T0")
 
+    def test_ea_16_repeat_at_an_instant(self) -> None:
+        x = ramp()
+        with self.connect() as sdr:
+            at = sdr.after(0.2)
+            entry = sdr.tx.repeat(x, at=at)
+            y = sdr.rx.capture(3000, at=dict(at, ticks=at["ticks"] - 1_000_000))
+        self.assertEqual(entry["action"]["at"], at)
+        # Silence until `at`, then the waveform from its first sample (1 Msps on a 1 GHz root),
+        # after `x310-like`'s 45-sample transmit path delay (MR-3, RM-23); on time, so no TIME_ERROR.
+        start = 1000 + 45
+        np.testing.assert_allclose(y[:start], 0, atol=1e-6)
+        offset, _ = rotation(y[start:], x)
+        self.assertEqual(offset, 0)
+        counts = {c["kind"]: c["count"] for c in sdr.manifest["events"]["counters"] if c["source"]["path"] == "radio"}
+        self.assertEqual(counts["radio.TIME_ERROR"], 0)
+
     # -- Phase 7, VE-6
 
     def test_sleep_returns_the_instant(self) -> None:
