@@ -604,6 +604,16 @@ impl Control {
             }
             planned.push(entry);
         }
+        // VH-2: a clock registered for a change the plan no longer has — one booked after
+        // `Provider::stop`'s instant — ends at its origin.
+        if dir == Dir::Tx {
+            for (clock, ended) in self.tx_clocks.iter_mut().skip(plan.len()).filter(|(_, ended)| !*ended) {
+                if let Err(error) = self.core.clocks.end(clock.domain, self.core.at(clock.origin)) {
+                    self.core.reject_note(json!({ "clock_not_ended": error.to_string() }));
+                }
+                *ended = true;
+            }
+        }
         let planned = Arc::new(planned);
         match dir {
             Dir::Rx => drop(self.to_rx.send(RxCmd::Plan(planned))),
@@ -941,6 +951,21 @@ mod tests {
         time.advance_to(core.at(core.ticks(8_000_000))).unwrap();
         control.finish(core.ticks(5_000_000), StopMode::Orderly);
         assert_eq!(plan_of(Dir::Rx, &tx, &rx)[0].segment.cut, Some(5_000));
+    }
+
+    #[test]
+    fn ur_26_a_change_booked_after_the_stop_instant_ends_its_clock() {
+        // VH-2, UR-26: a transmit change uhd-control books after `Provider::stop`'s instant but
+        // before it sees the stop leaves the plan at the stop, and the clock it registered
+        // ends at its origin: no transmit clock stays open.
+        let (core, _, time) = rig();
+        let (mut control, _tx, _rx) = control(&core, &[Dir::Tx]);
+        time.advance_to(core.at(core.ticks(10_000_000))).unwrap();
+        control.book_cold(key("radio.tx.sample_rate_hz"), Value::Num(2e6), None);
+        control.finish(core.ticks(5_000_000), StopMode::Orderly);
+        let clocks: Vec<_> = core.clocks.sample_clock_records().iter().map(|r| (r.origin.ticks, r.ended_at.map(|end| end.ticks))).collect();
+        assert_eq!(clocks.len(), 2, "{clocks:?}");
+        assert_eq!(clocks[1], (clocks[1].0, Some(clocks[1].0)), "{clocks:?}");
     }
 
     #[test]

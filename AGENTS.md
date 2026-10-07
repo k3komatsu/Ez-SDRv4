@@ -85,14 +85,21 @@ Vision §67: Phase 1 Kernel semantic model → Phase 2 Radio Model + Simulation 
 
 Applies only when the agent working in this repo is Claude (Claude Code). Not applicable to Codex or other agents reading this file — they have their own subagent mechanics.
 
-**Model selection.** The split is by what the subagent has to do, not by topic or which tool it uses:
+The rules below are defaults, not a lookup table (owner, 2026-10-08). Deviate when the task calls for it, and say why in one line when you do. The exceptions are Fable and parallelism, which need the user's word.
 
-- **Mechanical investigation → Sonnet at medium effort.** Grep/find, locating a definition or citation, pulling quotes from `v3/`, UHD docs or the Vision, checking whether a file/section/claim exists, summarizing a document. The output is a fact, not a conclusion — always Sonnet, no exceptions.
-- **Anything requiring judgment → Opus at max effort.** Design/architecture review, VERIFIED vs INFERRED calls (§6), evaluating whether a claim or design decision is sound, drafting or editing design documents, recommendations, adversarial critique. The output is a conclusion, not just a fact — always Opus, no exceptions.
-- **Never launch Fable as a subagent.** The one exception is when the user asks for it in that session: a **second
-  opinion on a judgment Opus has already made**, where the point is that the reviewer is a different model family.
-  Never the first pass, never mechanical work, and the report names the model that produced it.
+**Whether to delegate at all** (owner, 2026-10-07). The tier table says which model a subagent gets, not that work must leave the main session; when the main session already runs the right model, it does judgment work itself. Delegate only: a review whose value is independence (an implementer and a separate reviewer); a large implementation that would flood the main context; and reading-heavy investigations whose answer is a fact. Analysis and decisions made with the owner, and small or medium investigations, stay in the main session, so it can answer follow-up questions from what it read rather than relaying a report. Saving main context is a reason to delegate only when what comes back is a fact: heavy reading that ends in a judgment (classifying issues, say) stays in the main session and relies on auto-compaction.
 
-**Whether to delegate at all** (owner, 2026-10-07). The model rules above say which model a subagent gets, not that work must leave the main session; when the main session already runs the right model, it does judgment work itself. Delegate only: a review whose value is independence (an implementer and a separate reviewer); a large implementation that would flood the main context; and mechanical searches. Analysis and decisions made with the owner, and small or medium investigations, stay in the main session, so it can answer follow-up questions from what it read rather than relaying a report.
+**Fact or judgment picks the tier**, not the topic or the tool. A fact (where X is defined, every caller of Y, whether §N exists) can go to a cheap tier; a conclusion (is this sound, VERIFIED or INFERRED, what should we do) goes to Opus.
+
+**Evidence.** A delegated investigation returns `path:line` or a URL for every finding. A negative result ("not found") carries the exact search it ran, so the main session can rerun it; a missed hit is the cheap tiers' typical failure.
+
+| Tier | Character | Use it for (examples here) | Launch |
+|---|---|---|---|
+| Haiku | Cheapest and fastest; misses things more often | Reading-heavy fact-finding: every caller of a Kernel type, where UHD sets a value, the matching lines of a long test or log output, whether each `§N` / `v3/...` citation in a file resolves. Bulk edits whose correctness a machine check settles (rename, fixture or `mutations.json` update, then `cargo test`). | `haiku-scout` (read-only); bulk edits: `general-purpose`, `model: haiku` |
+| Sonnet | Solid coding and reading at moderate cost | Implementation bounded by an accepted spec and its tests; reading external docs or UHD C++ source to answer a factual question. Interpreting a Kernel contract or the Stream Contract is judgment and stays with Opus; Opus reviews what Sonnet writes. | `sonnet-researcher` (research); implementation: `general-purpose`, `model: sonnet` |
+| Opus | Strongest judgment in normal use | Independent review, design and architecture critique, VERIFIED vs INFERRED calls (§6), drafting or editing design documents, recommendations, adversarial critique. | `general-purpose`, `model: opus`, effort `max` |
+| Fable | A different model family; the most expensive | Never by default. Only when the user asks for it in that session: a **second opinion on a judgment Opus has already made**. Never the first pass, never mechanical work; the report names the model that produced it. | `model: fable` |
+
+Relative cost: Haiku ≪ Sonnet < Opus < Fable. The table names tiers, not versions; an alias resolves to the newest model of its tier that the installed Claude Code knows, and an old Claude Code silently maps it to an older one (2026-10-08: 2.1.292 mapped `haiku` to Haiku 4.5). After a model release, check with a subagent that only reports the model ID from its system prompt. The built-in `Explore` agent runs on the main session's model (Opus); use `haiku-scout` for searches instead. The agent definitions live in `~/.claude/agents/`.
 
 **Parallelism.** Default to exactly one subagent at a time. Launching more than one in parallel requires the user's explicit permission first — ask before fanning out, every time; do not fan out and explain afterward.

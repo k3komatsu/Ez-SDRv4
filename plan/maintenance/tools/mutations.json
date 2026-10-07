@@ -684,5 +684,25 @@
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_17_a_burst_before_its_clock_s_origin_is_late"
+ },
+ {
+  "id": "J21",
+  "name": "VH-2 (spec 22, re-review): a transmit clock registered for a change booked after Provider::stop's instant stays open",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "for (clock, ended) in self.tx_clocks.iter_mut().skip(plan.len()).filter(|(_, ended)| !*ended) {",
+  "new": "for (clock, ended) in self.tx_clocks.iter_mut().skip(usize::MAX).filter(|(_, ended)| !*ended) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_change_booked_after_the_stop_instant_ends_its_clock"
+ },
+ {
+  "id": "J22",
+  "name": "RM-16 (spec 22, re-review): uhd-rx's orderly shutdown with no booked stop leaves the stream uncut",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                    if stream.cut.is_none() {\n",
+  "new": "                    if false && stream.cut.is_none() {\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_an_orderly_shutdown_without_a_booked_stop_cuts_at_the_stop"
  }
 ]

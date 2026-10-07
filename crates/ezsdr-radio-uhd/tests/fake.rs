@@ -1629,10 +1629,12 @@ fn ur_25_a_rate_the_device_does_not_apply_at_the_switch_is_rejected() {
     let manifest = run.finish();
     assert!(rejections(&manifest).iter().any(|r| r.starts_with("UR-12: the device applied 19900000 S/s")), "{:?}", rejections(&manifest));
     // RM-25 (spec 22, VH-2): the refused change halts the stream: it has no segment, so no
-    // clock, and nothing starts again until the next change or `start_rx`.
+    // clock at 20 MS/s (10 root ticks a sample), and nothing starts again until the next change
+    // or `start_rx`. The first segment has a clock if it delivered a sample before its cut,
+    // which under load it may not.
     let clocks: Vec<_> = manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).collect();
-    assert_eq!(clocks.len(), 1, "{clocks:?}");
-    assert!(clocks[0].ended_at.is_some());
+    assert!(clocks.len() <= 1, "{clocks:?}");
+    assert!(clocks.iter().all(|r| r.root_ticks_per_tick.num() != 10 && r.ended_at.is_some()), "{clocks:?}");
     assert_eq!(events_of(&manifest, "radio.COMMAND_REJECTED").len(), 1);
 }
 

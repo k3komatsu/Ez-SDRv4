@@ -227,6 +227,14 @@ impl Rx {
             RxCmd::Shutdown(mode) => {
                 self.exit = true;
                 self.command(RxCmd::Cut { at: self.core.now(), mode });
+                // RM-16: a stream uhd-control left without a cut — it did not book the stop —
+                // ends at the first sample at or after the stop instant.
+                self.follow();
+                if let (Some((at, _)), Some(stream)) = (self.stopping, self.stream.as_mut()) {
+                    if stream.cut.is_none() {
+                        stream.cut_at(stream.clock.instant(stream.clock.at_or_after(at).max(stream.expected)));
+                    }
+                }
                 if mode == StopMode::Abort && self.stream.is_some() {
                     self.finish();
                 }
@@ -787,6 +795,26 @@ mod tests {
             assert!(rx.stream.is_none(), "dropped {dropped}");
             assert_eq!(clocks(&core), [(0, Some(clock.instant(3_000)))], "dropped {dropped}");
         }
+    }
+
+    #[test]
+    fn ur_26_an_orderly_shutdown_without_a_booked_stop_cuts_at_the_stop() {
+        // UR-26, RM-16: at `Provider::stop(orderly)`, a stream whose plan carries no cut —
+        // uhd-control did not book the stop — ends at the first sample at or after the stop
+        // instant.
+        let link = link();
+        let (core, _, time, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        rx.command(plan(&[(0, None, None)]));
+        rx.follow();
+        rx.receive(samples(clock.instant(0), 300));
+        time.advance_to(core.at(core.ticks(8_000_000))).unwrap();
+        rx.command(RxCmd::Cut { at: core.ticks(5_000_000), mode: StopMode::Orderly });
+        rx.command(RxCmd::Shutdown(StopMode::Orderly));
+        rx.receive(samples(clock.instant(300), 10_000));
+        let end: i64 = received(&link).iter().map(|(_, _, len)| i64::from(*len)).sum();
+        assert_eq!(end, 5_000);
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(5_000)))]);
     }
 
     #[test]
