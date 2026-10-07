@@ -750,7 +750,7 @@ Follow-ups the reviews found (filed or fixed on 2026-10-07):
    nor tell the two leads apart. Phase 8 measures both leads (50 ms, INFERRED)
    and the UHD Module's minimum booking delay before a cold change.
 
-**Specs 21 and 22, 2026-10-07 (#46; the timing simplification) — 一旦停止中**
+**Specs 21 and 22, 2026-10-07 (#46; the timing simplification) — step 1 実装中（2026-10-07 に再開）**
 
 - **Spec 21**（[`plan/maintenance/21-amendments.md`](plan/maintenance/21-amendments.md)，#46）．Opus の作成と4回の反論レビュー（最終 PASS）のあと owner が受理（`fbbfa62`）．
   - **VG-1 は実装済み**：受信の終わりは早める方向にしか動かない．commit は `029f48a`，`f2b9c7d`（uhd-rx の abort は保持中の stream にだけ cut と行を書く），`7b6f376`（落ちた stream への abort のテスト）．`radio` 1.5.0，`ezsdr.radio.mock` 1.5.0，`ezsdr.radio.uhd` 0.3.0．mutation G01–G04，G58–G61 はすべて kill．
@@ -777,6 +777,23 @@ Follow-ups the reviews found (filed or fixed on 2026-10-07):
 - **次にすること**：spec 22 の *Implementation order* の step 1．`ezsdr_radio::timeline` と，VH-8 の最初の2層（timeline と MockRadio，timeline と uhd-control rig）を作る．既存の動作は変えない．進め方は従来どおり，Opus の実装役と Opus のレビュー役が1段階ずつ進め，PASS したら commit・push する．step 2（MockRadio と UHD を一緒に書き換える．`radio` 2.0.0）で #46–#50，#52，#53，#57，#58 が閉じる見込み．記録済みの mutation は約 67 行の書き直しが要る見込み．
 - **既知の問題**：Python の `test_v54_sleep_is_run_time` が，この host では毎回 10 秒の上限をわずかに超えて落ちる（10.1〜12.9 秒）．HEAD から build した server でも同じなので，変更が原因ではない（VG-1 のレビューで VERIFIED）．FakeDevice の負荷に弱いテスト（`rehearsal_b6_…`，`uhd_61_03_…`，`ur_21_…`，`ur_2x_…`）も今までどおり．#60 で対処する予定．
 - **ログ**：`~/.cache/ezsdr-fixes/2026-10-07-spec21/`（`vg1-*`，`vg1b-*`，`vg1c-*`）．
+
+**Issue の概念別分析と，次に危なそうな概念（2026-10-07）**
+
+AGENTS.md §6 の「同じ概念で3件目のバグが出たら設計を疑う」ルールを，過去の issue #1–#60 に当てはめた．Issue の題名だけから分類したので，すべて INFERRED．レビュー指摘（`plan/` の Review A–U など）はまだ数えていない．ラベルは `concept:stream-timing` だけ作成済み（26件，spec 22 で対処中）．ほかの概念は，3件目の修正に着手する前にラベルを作り，設計メモを書く．
+
+| 順 | 概念 | issue | 疑わしい設計（未調査） |
+|---|---|---|---|
+| 1 | **検証の迂回**：deserialize や admission の経路が，型や宣言の不変条件を通らない | #2, #5, #7, #11, #13, #17, #24, #25, #26, #27, #43 | 検証が「生成時」「deserialize 時」「admission 時」「fragment ごと」に分かれている．Kernel は v4.0 で凍結されるため，凍結前に「検証済みの型は1つのコンストラクタからしか作れない」（serde は `try_from` 経由）という形にそろえられないかを確かめたい．件数が最多で，凍結後の修正費用も最大． |
+| 2 | **UHD の非同期報告とエラー経路**：エラーが消える，上書きされる，別の burst に付く | #8, #28, #30, #36, #37, #51（#6, #31 も関連） | 報告とエラーの経路が，型ではなく queue と flag で組み立てられている．Phase 8 の Mock ↔ X310 parity でエラーの報告の仕方まで比べるときに再燃しそう．MockRadio と UHD Module が報告の規則を二重に実装している疑い（timing と同じ構図）． |
+| 3 | **capture と drop の来歴**：stop や contract の変更，recorder の選択で来歴や artifact が欠ける | #1, #18, #34, #38, #42, #54 | 「区間の境界で状態を持ち越す」という，timing と同じ形．spec 22 の VH-1（区間を閉じる）と考え方を合わせられるか．RS-14 の recorder 選択の規則も，文章が実装より広い． |
+| 4 | **時刻の算術と変換**：overflow，負の境界，丸め，単位の換算 | #2, #7, #24, #29, #32, #40 | 境界の検査が呼び出し側に散らばっている．checked な演算を時刻型の中に閉じ込めて，呼び出し側から生の i64 を消せないか．1 と重なる部分もある． |
+| 5 | **ID と名前の衝突**：生成した ID の衝突，qualified name の衝突，長さの上限 | #1, #14, #15, #16, #26 | 名前空間の規則が各所に分かれている．ID の生成と検証を1か所に集められるか． |
+| 6 | **Kernel の Stop・abort の escalation と取消** | #12, #19，Review U の race | まだ3件の境界上．凍結前の Kernel なので，4件目が出る前に状態遷移を1か所の表で持てるか見ておく価値がある． |
+
+対象外にしたもの：UHD FFI の安全性（#22, #23．2件で独立），テスト基盤（#10, #60），spec の表記（#39, #55）．
+
+**次の手**：spec 22 の step 2 まで終わったら，owner に1と2のどちらを先に設計メモにするかを諮る．推奨は1．Kernel の凍結前でないと直せないため．2 は Phase 8 の計画と一緒に扱うのがよい．
 
 **5. 決まったこと・owner の判断待ち**
 
@@ -913,7 +930,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-- **最優先（2026-10-07 時点，owner の指示で一旦停止中）**：spec 22 の実装 step 1 から再開する（§4 の「Specs 21 and 22」）．
+- **最優先（2026-10-07 時点）**：spec 22 の実装．step 1 を Opus の実装役が作業中（§4 の「Specs 21 and 22」）．そのあと，下の「次に危なそうな概念」の上位から設計メモを書くか owner に諮る．
 0. **Phase 7 後の保守の残課題**（§4「Phase 7 後の保守」の表）：production の 1–2 と fake の 3 は owner の判断，6 は Phase 8 の bench 計画へ．
 1. **Phase 8（Mock ↔ X310 parity）の計画**（owner の依頼待ち）：Phase 7 は 2026-10-01 にクローズ済み（merge，実機セッション，Gate X，Step X）．Phase 8 へ送ったものは §4「Phase 7 のクローズ」，Phase 8 inputs は [plan/phase7/00-overview.md](plan/phase7/00-overview.md) §3．実機を使う前に X300 を戻してもらい `uhd_usrp_probe` で確認する．
 2. **v4.0 凍結前にすること**：`Endpoint::EventIn` / `EventOut` の形（event edge は Phase 10），`ParamDecl.update_class` を optional にすること（以上 Phase 5 Gate X），Manifest の `spec.source`（Spec builder のソースハッシュ，Phase 6 Gate X，KF-4）．
