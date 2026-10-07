@@ -775,26 +775,16 @@ Follow-ups the reviews found (filed or fixed on 2026-10-07):
     - DA-4：`plan/` はそのまま記録として残す．
     - DA-5：UC は spec 05 だけに置く．11 は 08 に統合する．監査と再レビューは `design/archive/` へ移す．
 - **Step 1 完了（`8699baf`，Opus レビュー3回で PASS）**：`ezsdr_radio::timeline::plan`（cut と delivered はその区間のサンプル番号，ほかは root tick）と VH-8 の第1・2層（各1 000系列）．今の挙動と一致する class/field だけ assert し，残りは表示する（`DIVERGENT`，`FRACTIONAL_TX`．step 2 で空にする）．mutation J01–J06b（spec の H01–H06b．H は spec 20 が使用済み．step 2 の H07–H11 は J07–J11）．レビューで出た owner 判断：先に届いた `cold` 変更より前には効かせない（両方向，spec 22 VH-2 に追記）．レビューで見つかった issue：#61（UHD：0 チャネルへの変更の予約で，その前の timed 更新が適用されないまま issued と記録される），#62（MockRadio が UHD の装置キューの順番どおりの release を模擬しない）．
-- **次にすること**：spec 22 step 2（MockRadio と UHD を timeline に載せる．`radio` 2.0.0．#46–#50，#52，#53，#57，#58 を閉じ，#61 と #62 も扱う）．その前に，閉じた issue に `mech:` を付ける Opus の分類を1回行う（下の「Issue の概念別分析」）．
+- **次にすること**：spec 22 step 2（MockRadio と UHD を timeline に載せる．`radio` 2.0.0．#46–#50，#52，#53，#57，#58 を閉じ，#61 と #62 も扱う）．`mech:` の分類は済み（下の「失敗機構の分類」）．#51 は報告規則の設計メモまで保留．
 - **既知の問題**：Python の `test_v54_sleep_is_run_time` が，この host では毎回 10 秒の上限をわずかに超えて落ちる（10.1〜12.9 秒）．HEAD から build した server でも同じなので，変更が原因ではない（VG-1 のレビューで VERIFIED）．FakeDevice の負荷に弱いテスト（`rehearsal_b6_…`，`uhd_61_03_…`，`ur_21_…`，`ur_2x_…`）も今までどおり．#60 で対処する予定．
 - **ログ**：`~/.cache/ezsdr-fixes/2026-10-07-spec21/`（`vg1-*`，`vg1b-*`，`vg1c-*`）．
 
-**Issue の概念別分析と，次に危なそうな概念（2026-10-07）**
+**失敗機構の分類（2026-10-07）** — 一覧は [`plan/maintenance/failure-mechanisms.md`](plan/maintenance/failure-mechanisms.md)
 
-AGENTS.md §6 の three strikes ルールの準備として，過去の issue #1–#60 に当てはめた．Issue の題名だけから分類したので，すべて INFERRED．レビュー指摘（`plan/` の Review A–U など）はまだ数えていない．**この分析は題名からの領域分けで，three strikes の単位ではない**（owner，2026-10-07：数えるのは同じ症状や領域ではなく，同じ設計上の失敗機構）．そのため `concept:` ラベルは `area:` に改名した：`area:stream-timing`（26件），`area:validation-bypass`，`area:uhd-async-reports`，`area:capture-provenance`，`area:time-arithmetic`，`area:id-collisions`，`area:stop-escalation`．機構は `mech:<name>` で付ける（AGENTS.md §6）．**未着手**：閉じた issue と修正 commit を Opus が1回読み，機構を決めて `mech:` を付ける（spec 22 step 1 のレビューのあと．サブエージェントは1つずつ）．題名から推測した，領域をまたぐ機構の候補（INFERRED）：保留中の状態を境目（cold switch，Stop，contract の変更）で持ち越して上書き・破棄する（#3, 9, 18, 20, 21, 34, 36），個体ではなく queue の順番や位置で対応づける（#12, 30, 31），決まりを型ではなく経路ごとに守らせる（#2, 5, 7, 11, 24–27），同じ規則を二重に実装する（timing の大半，#51）．下の表の順位は，その分類のあとで見直す．
-
-| 順 | 概念 | issue | 疑わしい設計（未調査） |
-|---|---|---|---|
-| 1 | **検証の迂回**：deserialize や admission の経路が，型や宣言の不変条件を通らない | #2, #5, #7, #11, #13, #17, #24, #25, #26, #27, #43 | 検証が「生成時」「deserialize 時」「admission 時」「fragment ごと」に分かれている．Kernel は v4.0 で凍結されるため，凍結前に「検証済みの型は1つのコンストラクタからしか作れない」（serde は `try_from` 経由）という形にそろえられないかを確かめたい．件数が最多で，凍結後の修正費用も最大． |
-| 2 | **UHD の非同期報告とエラー経路**：エラーが消える，上書きされる，別の burst に付く | #8, #28, #30, #36, #37, #51（#6, #31 も関連） | 報告とエラーの経路が，型ではなく queue と flag で組み立てられている．Phase 8 の Mock ↔ X310 parity でエラーの報告の仕方まで比べるときに再燃しそう．MockRadio と UHD Module が報告の規則を二重に実装している疑い（timing と同じ構図）． |
-| 3 | **capture と drop の来歴**：stop や contract の変更，recorder の選択で来歴や artifact が欠ける | #1, #18, #34, #38, #42, #54 | 「区間の境界で状態を持ち越す」という，timing と同じ形．spec 22 の VH-1（区間を閉じる）と考え方を合わせられるか．RS-14 の recorder 選択の規則も，文章が実装より広い． |
-| 4 | **時刻の算術と変換**：overflow，負の境界，丸め，単位の換算 | #2, #7, #24, #29, #32, #40 | 境界の検査が呼び出し側に散らばっている．checked な演算を時刻型の中に閉じ込めて，呼び出し側から生の i64 を消せないか．1 と重なる部分もある． |
-| 5 | **ID と名前の衝突**：生成した ID の衝突，qualified name の衝突，長さの上限 | #1, #14, #15, #16, #26 | 名前空間の規則が各所に分かれている．ID の生成と検証を1か所に集められるか． |
-| 6 | **Kernel の Stop・abort の escalation と取消** | #12, #19，Review U の race | まだ3件の境界上．凍結前の Kernel なので，4件目が出る前に状態遷移を1か所の表で持てるか見ておく価値がある． |
-
-対象外にしたもの：UHD FFI の安全性（#22, #23．2件で独立），テスト基盤（#10, #60），spec の表記（#39, #55）．
-
-**次の手**：spec 22 の step 2 まで終わったら，owner に1と2のどちらを先に設計メモにするかを諮る．推奨は1．Kernel の凍結前でないと直せないため．2 は Phase 8 の計画と一緒に扱うのがよい．
+AGENTS.md §6 の three strikes は，症状や領域ではなく設計上の失敗機構で数える．#1–#62 を本文と修正 commit から 11 機構に分類した（Opus，修正 commit 3件で照合）．`mech:` ラベルと理由のコメントを各 issue に付け，題名から誤って付けた `area:` ラベル8件を外した．
+- **3件以上で未修正の bug を抱える機構**：`planned-state-read-as-actual`（12件），`radio-rule-implemented-twice`（9件），`stream-lifecycle-scattered`（7件）．設計メモは spec 22（VH-1〜VH-5，VH-7）が兼ねるので step 2 を進めてよい．**ただし #51 は保留**：イベントの報告規則（cancel 時に何を emit するか）も「1か所で実装」に含めるかを決めてから直す．
+- **閉じた issue だけで3件以上の機構**：`invariant-outside-type`，`failure-collapsed-into-value`，`fact-stated-twice-in-spec`，`string-composed-identity`，`correlation-by-partial-key`，`pending-provenance-collapsed`，`admission-per-origin`．次の bug が1件出たら修正の前に設計メモが要る．修正の多くは見張りを足しただけで機構は残っている．
+- **次の手**：spec 22 step 2 の後，v4.0 の Kernel 凍結前に `invariant-outside-type` と `admission-per-origin` を先回りで設計メモにするかを owner に諮る（推奨：する．凍結後は直せない）．
 
 **5. 決まったこと・owner の判断待ち**
 
@@ -931,7 +921,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-- **最優先（2026-10-07 時点）**：spec 22 の実装．step 1 完了，次は `mech:` の分類と step 2（§4 の「Specs 21 and 22」）．そのあと，下の「次に危なそうな概念」の上位から設計メモを書くか owner に諮る．
+- **最優先（2026-10-07 時点）**：spec 22 の実装．step 1 完了，次は step 2（§4 の「Specs 21 and 22」）．そのあと，下の「次に危なそうな概念」の上位から設計メモを書くか owner に諮る．
 0. **Phase 7 後の保守の残課題**（§4「Phase 7 後の保守」の表）：production の 1–2 と fake の 3 は owner の判断，6 は Phase 8 の bench 計画へ．
 1. **Phase 8（Mock ↔ X310 parity）の計画**（owner の依頼待ち）：Phase 7 は 2026-10-01 にクローズ済み（merge，実機セッション，Gate X，Step X）．Phase 8 へ送ったものは §4「Phase 7 のクローズ」，Phase 8 inputs は [plan/phase7/00-overview.md](plan/phase7/00-overview.md) §3．実機を使う前に X300 を戻してもらい `uhd_usrp_probe` で確認する．
 2. **v4.0 凍結前にすること**：`Endpoint::EventIn` / `EventOut` の形（event edge は Phase 10），`ParamDecl.update_class` を optional にすること（以上 Phase 5 Gate X），Manifest の `spec.source`（Spec builder のソースハッシュ，Phase 6 Gate X，KF-4）．
