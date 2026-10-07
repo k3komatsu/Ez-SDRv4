@@ -93,4 +93,6 @@ Applies only when the agent working in this repo is Claude (Claude Code). Not ap
   opinion on a judgment Opus has already made**, where the point is that the reviewer is a different model family.
   Never the first pass, never mechanical work, and the report names the model that produced it.
 
+**Whether to delegate at all** (owner, 2026-10-07). The model rules above say which model a subagent gets, not that work must leave the main session; when the main session already runs the right model, it does judgment work itself. Delegate only: a review whose value is independence (an implementer and a separate reviewer); a large implementation that would flood the main context; and mechanical searches. Analysis and decisions made with the owner, and small or medium investigations, stay in the main session, so it can answer follow-up questions from what it read rather than relaying a report.
+
 **Parallelism.** Default to exactly one subagent at a time. Launching more than one in parallel requires the user's explicit permission first — ask before fanning out, every time; do not fan out and explain afterward.
