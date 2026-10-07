@@ -16,12 +16,18 @@ pub(super) fn rig() -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Ar
 /// `rig` with the receive stream's links.
 pub(super) fn rig_with_links(links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>)
     -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+    rig_with(FakeConfig::default(), links)
+}
+
+/// `rig_with_links` on a FakeDevice of `config`.
+pub(super) fn rig_with(config: FakeConfig, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>)
+    -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let clocks = Arc::new(ClockRegistry::new());
     let root = clocks.allocate_id().unwrap();
     clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(),
         EpochRef::Arbitrary { set_by: "uhd.test".to_owned() })).unwrap();
     let time = Arc::new(ManualTimeAuthority::new(clocks.clone(), root, &[], Pacing::FreeRunning).unwrap());
-    let device = Arc::new(FakeDevice::new(FakeConfig::default()));
+    let device = Arc::new(FakeDevice::new(config));
     let mut kinds = EventKindRegistry::with_kernel_kinds();
     ezsdr_radio::register(&mut ModuleRegistry::new(),
         &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();

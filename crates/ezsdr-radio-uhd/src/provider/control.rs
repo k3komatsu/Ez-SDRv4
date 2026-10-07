@@ -694,6 +694,9 @@ impl Control {
 }
 
 #[cfg(test)]
+mod differential;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::device::Device;

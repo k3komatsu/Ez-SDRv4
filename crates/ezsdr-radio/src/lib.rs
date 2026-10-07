@@ -21,6 +21,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub mod device;
+pub mod timeline;
 
 /// The Radio Model Vocabulary id and key prefix (RM-1).
 pub const VOCABULARY: &str = "radio";

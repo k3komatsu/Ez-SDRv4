@@ -403,6 +403,8 @@ The stream rules live only in 07 through DA-1, not through a merge.
 
 H01–H04 were killed on the prototype (VERIFIED). H05 on the prototype was equivalent, because `end` already floors at the origin, and the redundant line was removed.
 
+`mutations.json` spells these rows J01–J06b, since H01–H07 there are spec 20's; step 2 records H07–H11 as J07–J11. The `ur_25_…` killers named for H06 and H06a are step-2 tests; in step 1 `rm_26_the_timeline_cases` kills both.
+
 **New tests.**
 - `rm_26_the_timeline_cases`: the prototype's 11 cases, plus the ready term, the transmit side, a refusal replanned, and a loss after a booked transmit change.
 - `mr_25_a_stop_cuts_at_its_instant` and `ur_26_a_stop_cuts_at_its_booking`: no sample at or after the handling instant, at `block_len` 65 536 and 390.6 kS/s as well.

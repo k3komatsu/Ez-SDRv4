@@ -536,5 +536,85 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_stopped_stream_keeps_its_end"
+ },
+ {
+  "id": "J01",
+  "name": "VH-7 (spec 22, H01): the timeline keeps a receive segment with no sample",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        if cut > 0 || !self.receive {",
+  "new": "        if true {",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_the_timeline_cases"
+ },
+ {
+  "id": "J02",
+  "name": "VH-4 (spec 22, H02): the start rule drops the previous cut plus the lead",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "            earliest = earliest.max(cut + lead);\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_the_timeline_cases"
+ },
+ {
+  "id": "J03",
+  "name": "VH-6 (spec 22, H03): the timeline orders by arrival only",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "    order.sort_by_key(|item| (item.e, item.seq));",
+  "new": "    order.sort_by_key(|item| item.seq);",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_the_timeline_cases"
+ },
+ {
+  "id": "J04",
+  "name": "VH-6 (spec 22, H04): start_rx acts on a stream that is on",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "            Kind::Start if receive && (!on || halted) => {",
+  "new": "            Kind::Start if receive => {",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_the_timeline_cases"
+ },
+ {
+  "id": "J05",
+  "name": "VH-3 (spec 22, H05): a cut is not floored at its segment's origin",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "narrow(ceil_div(ticks, num).max(0))",
+  "new": "narrow(ceil_div(ticks, num))",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_the_timeline_cases"
+ },
+ {
+  "id": "J06",
+  "name": "VH-4 (spec 22, H06): the ready instant drops the receive call in progress",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                ready = ready.max(cut + ceil_div(call, den) + i128::from(self.stream.allowance));\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_the_timeline_cases"
+ },
+ {
+  "id": "J06a",
+  "name": "VH-2 (spec 22, H06a): a refused change is kept in the plan",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                let refused = item.refused;",
+  "new": "                let refused = false;",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_the_timeline_cases"
+ },
+ {
+  "id": "J06b",
+  "name": "VH-2 (spec 22, H06b): an orphaned transmit clock is not ended at its origin",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                if receive || planner.running.is_some_and(|segment| segment.origin >= item.e) {",
+  "new": "                if receive {",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_the_timeline_cases"
  }
 ]
