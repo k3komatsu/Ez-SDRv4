@@ -24,7 +24,7 @@ use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload};
 const ROOT: ClockDomainId = ClockDomainId::local(7);
 
 fn module_ref() -> ModuleRef {
-    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 4, 0) }
+    ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(1, 5, 0) }
 }
 
 fn waveform(samples: usize) -> ArtifactRef {
@@ -265,12 +265,12 @@ fn mr_01_descriptor_registers() {
     registry.register(descriptor(), Factories { provider: true, ..Factories::default() }).unwrap();
     let d = descriptor();
     assert_eq!(d.id.as_str(), "ezsdr.radio.mock");
-    assert_eq!(d.version, Version::new(1, 4, 0));
+    assert_eq!(d.version, Version::new(1, 5, 0));
     assert_eq!(d.kernel_api, KERNEL_API);
     assert_eq!(d.roles, [Role::Provider]);
     let requirements: Vec<_> = d.vocabularies.iter().map(|v| (v.id.as_str().to_owned(), v.req.0)).collect();
     assert_eq!(requirements, [("radio".to_owned(), Version::new(1, 4, 0)), ("sim".to_owned(), Version::new(1, 1, 0))]);
-    assert_eq!(d.impl_hash, Some(ezsdr_kernel::hash::ContentHash::of_bytes(b"ezsdr.radio.mock 1.4.0")));
+    assert_eq!(d.impl_hash, Some(ezsdr_kernel::hash::ContentHash::of_bytes(b"ezsdr.radio.mock 1.5.0")));
 }
 
 #[test]
@@ -1774,6 +1774,42 @@ fn mr_25_orderly_stop_delivers_the_tail_abort_does_not() {
     while let Some(block) = abort.link.as_ref().unwrap().receive() { after_abort.push(block); }
     assert_eq!(after_abort.len(), 1);
     assert_eq!(after_abort[0].header().first_sample_time.ticks, 0);
+}
+
+#[test]
+fn mr_25_a_stopped_stream_keeps_its_end() {
+    // A receive stream's end moves only earlier (RM-16, MR-25; spec 21, VG-1; issue #46).
+    // A `Stop` of `mock/rx` at T0 + 1 ms ends the stream at sample 1 000 (`ideal`, no tail)
+    // or 2 000 (`x310-like`, a 1 ms tail); a later stop at T0 + 5 ms keeps that end.
+    for (profile, t0, end) in [("ideal", 0, 1_000), ("x310-like", 2_000_000_000, 2_000)] {
+        for later in ["stop(Orderly)", "mock/rx", "mock"] {
+            let mut harness = Harness::new(profile, &[], &[], &[], Some((BackPressure::DropOldest, 64)));
+            harness.arm_start(t0).unwrap();
+            harness.actions.push(Action::Stop { target: Some(rid("mock/rx")) });
+            harness.step(t0 + 1_000_000).unwrap();
+            harness.step(t0 + 5_000_000).unwrap();
+            if later == "stop(Orderly)" {
+                harness.mock.stop(StopMode::Orderly).unwrap();
+            } else {
+                harness.actions.push(Action::Stop { target: Some(rid(later)) });
+                harness.step(t0 + 5_000_000).unwrap();
+            }
+            harness.step(t0 + 10_000_000).unwrap();
+            let last = received(&harness).pop().unwrap();
+            assert_eq!(last.first_sample_time.ticks + i64::from(last.len), end, "{profile}, then {later}");
+        }
+    }
+
+    // An abort inside the `Stop`'s tail still ends the stream at once: no block at all, where
+    // the tail's block [0, 2 000) would be published only at T0 + 1.999 001 ms.
+    let mut harness = Harness::new("x310-like", &[], &[], &[], Some((BackPressure::DropOldest, 64)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.actions.push(Action::Stop { target: Some(rid("mock/rx")) });
+    harness.step(2_001_000_000).unwrap();
+    harness.step(2_001_500_000).unwrap();
+    harness.mock.stop(StopMode::Abort).unwrap();
+    harness.step(2_010_000_000).unwrap();
+    assert!(received(&harness).is_empty());
 }
 
 #[test]

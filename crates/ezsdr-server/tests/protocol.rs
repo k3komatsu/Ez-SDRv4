@@ -691,7 +691,7 @@ fn uhd_profile(dir: &Path) -> serde_json::Value {
         "version": 1,
         "bindings": {
             "radio": {
-                "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 2, "patch": 0 } },
+                "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 3, "patch": 0 } },
                 "profile": { "name": "x310-ubx", "version": { "major": 0, "minor": 2, "patch": 0 } },
                 "selector": { "args": "addr=192.0.2.1" }
             },

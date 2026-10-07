@@ -62,7 +62,7 @@ impl Drop for TempDir {
 }
 
 pub fn uhd_module() -> Json {
-    json!({ "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 2, "patch": 0 } })
+    json!({ "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 3, "patch": 0 } })
 }
 
 pub fn x310_ubx() -> Json {

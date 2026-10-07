@@ -1,4 +1,4 @@
-//! Ez-SDR v4 Module ezsdr.radio.mock 1.4.0 (design/09-mock-radio.md).
+//! Ez-SDR v4 Module ezsdr.radio.mock 1.5.0 (design/09-mock-radio.md).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -37,15 +37,15 @@ const DEVICE_LOST: &str = "MR-20: device lost";
 fn module_ref() -> ModuleRef {
     ModuleRef {
         id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"),
-        version: Version::new(1, 4, 0),
+        version: Version::new(1, 5, 0),
     }
 }
 
-/// The Module descriptor for `ezsdr.radio.mock` 1.4.0 (MR-1).
+/// The Module descriptor for `ezsdr.radio.mock` 1.5.0 (MR-1).
 pub fn descriptor() -> ModuleDescriptor {
     ModuleDescriptor {
         id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"),
-        version: Version::new(1, 4, 0),
+        version: Version::new(1, 5, 0),
         kernel_api: KERNEL_API,
         roles: vec![Role::Provider],
         // radio 1.4.0: the timing envelope's restart and start leads (RM-20, RM-25; spec 20, VF-6).
@@ -57,7 +57,7 @@ pub fn descriptor() -> ModuleDescriptor {
             })
             .collect(),
         deployment: Deployment::InProcess {},
-        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 1.4.0")),
+        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 1.5.0")),
     }
 }
 
@@ -875,10 +875,13 @@ impl MockRadio {
                 .map_err(|error| ModuleError::rejected(format!("MR-25: {error}")))?)
         } else { None };
         if let Some(rx) = self.rx.as_mut() {
-            rx.end = Some(match mode {
+            let end = match mode {
                 StopMode::Abort => rx.next,
                 StopMode::Orderly => time::k_at_or_after(rx.origin, rx.ratio, now.saturating_add(tail_ticks.unwrap_or(0))).unwrap_or(rx.next).max(rx.next),
-            });
+            };
+            // An end moves only earlier: a later stop never extends a stream that has an end
+            // (RM-16; spec 21, VG-1; issue #46).
+            rx.end = Some(rx.end.map_or(end, |set| set.min(end)));
         }
         // MR-20a: the stream ends at the stop, after an orderly one's tail; a loss is settled
         // now unless a block of that tail will still carry it.

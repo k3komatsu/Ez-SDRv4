@@ -213,11 +213,14 @@ impl Rx {
                 match mode {
                     StopMode::Orderly => self.stop_at(at, at + tail),
                     StopMode::Abort => {
-                        self.core.timing(json!({ "what": "rx_stop", "at": at, "until": at, "mode": "Abort" }));
+                        // A cut already set — a `Stop`'s or a switch's `e₁` — stays if it is
+                        // earlier: an end moves only earlier (RM-16; spec 21, VG-1; issue #46).
+                        let cut = self.stream.as_ref().and_then(|stream| stream.cut).map_or(at, |set| set.min(at));
+                        self.core.timing(json!({ "what": "rx_stop", "at": at, "until": cut, "mode": "Abort" }));
                         if let Some(stream) = self.stream.as_mut() {
-                            stream.cut = Some(at);
+                            stream.cut = Some(cut);
                             if !stream.stopped {
-                                if let Some(issued) = stop_at_cut(&self.core, at) {
+                                if let Some(issued) = stop_at_cut(&self.core, cut) {
                                     stream.stopped = true;
                                     self.last_stop = Some(issued);
                                 }
@@ -652,6 +655,51 @@ mod tests {
         assert_eq!(stops[0]["at"], serde_json::to_value(core.at(cut)).unwrap());
         assert!(!device.calls().iter().any(|c| c.starts_with("rx_start ")));
     }
+
+    #[test]
+    fn ur_26_a_stopped_stream_keeps_its_end() {
+        // A cut already set — a `Stop`'s at 0, at sample 1 000 with the 1 ms tail, or a
+        // switch's `e₁` there — is kept when `Provider::stop`'s cut from 5 ms comes, under
+        // `orderly` as under `abort`: an end moves only earlier (UR-26, UR-25, RM-16; spec 21,
+        // VG-1; issue #46).
+        use ezsdr_kernel::module_api::Link;
+        use ezsdr_kernel::stream::BackPressure;
+        for (first, mode) in [("Stop", StopMode::Orderly), ("Stop", StopMode::Abort), ("switch", StopMode::Abort)] {
+            let decl = ezsdr_kernel::stream::DataLinkDecl {
+                id: ezsdr_kernel::id::DataLinkId::local(0),
+                from: ezsdr_kernel::contract::PortRef { component: ezsdr_kernel::spec::Ident::parse("radio").unwrap(), port: ezsdr_kernel::spec::Ident::parse("rx").unwrap() },
+                to: ezsdr_kernel::contract::PortRef { component: ezsdr_kernel::spec::Ident::parse("rec").unwrap(), port: ezsdr_kernel::spec::Ident::parse("in").unwrap() },
+                contract: DataContractId::parse("ezsdr.stream.cf32").unwrap(),
+                policy: BackPressure::DropOldest,
+                capacity: 4,
+            };
+            let link = ezsdr_link_host::HostLinkModule::new().create(&decl).unwrap();
+            let (core, device, time, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
+            // 1 MS/s on the 200 MHz root.
+            let clock = core.register(Dir::Rx, 200, 0).unwrap();
+            let (_to_rx, cmds) = std::sync::mpsc::channel();
+            let mut rx = Rx::new(core.clone(), cmds, Some(clock), 1, None);
+            if first == "Stop" {
+                rx.command(RxCmd::Stop);
+            } else {
+                let e1 = clock.instant(1_000);
+                rx.command(RxCmd::Switch { e1, clock: None, channels: 0,
+                    settings: Arc::new(ColdConfig::new(e1, crate::device::Settings::default())) });
+            }
+            let at = core.ticks(5_000_000);
+            time.advance_to(core.at(at)).unwrap();
+            rx.command(RxCmd::Cut { at, mode });
+            rx.receive(RxRecv::Samples { first_tick: clock.instant(0), samples: vec![vec![[0.0, 0.0]; 6_000]] });
+            let mut blocks = Vec::new();
+            while let Some(block) = link.receive() {
+                blocks.push((block.header().first_sample_time.ticks, block.header().len));
+            }
+            assert_eq!(blocks, [(0, 1_000)], "{first}, then {mode:?}");
+            assert_eq!(device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count(), 1, "{first}, then {mode:?}");
+            assert_eq!(lock(&core.rec).applied.iter().filter(|r| r["key"] == "rx_stop").count(), 1, "{first}, then {mode:?}");
+        }
+    }
+
     #[test]
     fn ur_25_largest_aligned_cut_is_safe_in_rx_owner() {
         let (core, _, _, _) = super::super::test_support::rig();

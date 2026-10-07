@@ -286,7 +286,7 @@ fn hw_b9_usrp2_probe() {
     let device = usrp();
     println!("B9 USRP2 describe: {}", serde_json::to_string_pretty(&device.describe()).unwrap());
     let binding = serde_json::from_value(serde_json::json!({
-        "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 2, "patch": 0 } },
+        "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 3, "patch": 0 } },
         "profile": profile_of(&*device).profile_ref(),
         "selector": { "args": args() }
     }))

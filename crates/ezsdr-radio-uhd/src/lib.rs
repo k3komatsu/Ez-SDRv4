@@ -1,4 +1,4 @@
-//! Ez-SDR v4 Module `ezsdr.radio.uhd` 0.2.0 (design/18-uhd-radio.md): a Radio
+//! Ez-SDR v4 Module `ezsdr.radio.uhd` 0.3.0 (design/18-uhd-radio.md): a Radio
 //! Provider and a device-paced Time Authority for one USRP X310 per Run, on UHD's own
 //! C API. Everything but [`open`]'s device runs on [`FakeDevice`] without hardware.
 #![deny(unsafe_code)]
@@ -31,11 +31,11 @@ pub use provider::UhdRadio;
 #[cfg(feature = "uhd")]
 pub use uhd::{UhdDevice, find as uhd_find, kept_count as uhd_kept_count, streamer_lifecycle as uhd_streamer_lifecycle, struct_sizes as uhd_struct_sizes};
 
-/// `ezsdr.radio.uhd` 0.2.0 (UR-1).
+/// `ezsdr.radio.uhd` 0.3.0 (UR-1).
 pub fn module_ref() -> ModuleRef {
     ModuleRef {
         id: ModuleId::parse("ezsdr.radio.uhd").expect("a valid Module id"),
-        version: Version::new(0, 2, 0),
+        version: Version::new(0, 3, 0),
     }
 }
 
@@ -52,7 +52,7 @@ pub fn descriptor() -> ModuleDescriptor {
             req: VersionReq(Version::new(1, 4, 0)),
         }],
         deployment: Deployment::InProcess {},
-        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.uhd 0.2.0")),
+        impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.uhd 0.3.0")),
     }
 }
 

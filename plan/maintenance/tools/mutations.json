@@ -454,5 +454,45 @@
   "old": "        self._rate = Fraction(connected[\"root_rate\"][\"num\"], connected[\"root_rate\"][\"den\"])",
   "new": "        self._rate = connected[\"root_rate\"][\"num\"] / connected[\"root_rate\"][\"den\"]",
   "python": "test_easy_api.DurationRequests.test_ea_16_a_rational_root_rate_is_read_exactly"
+ },
+ {
+  "id": "G01",
+  "name": "VG-1: stop_rx sets the end without keeping an earlier one (today's code)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            rx.end = Some(rx.end.map_or(end, |set| set.min(end)));\n",
+  "new": "            rx.end = Some(end);\n",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_25_a_stopped_stream_keeps_its_end"
+ },
+ {
+  "id": "G02",
+  "name": "VG-1: stop_rx keeps the later of two ends",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            rx.end = Some(rx.end.map_or(end, |set| set.min(end)));\n",
+  "new": "            rx.end = Some(rx.end.map_or(end, |set| set.max(end)));\n",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_25_a_stopped_stream_keeps_its_end"
+ },
+ {
+  "id": "G03",
+  "name": "VG-1: uhd-rx's abort cut replaces an earlier cut, a Stop's or a switch's (today's code)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let cut = self.stream.as_ref().and_then(|stream| stream.cut).map_or(at, |set| set.min(at));",
+  "new": "let cut = at;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stopped_stream_keeps_its_end"
+ },
+ {
+  "id": "G04",
+  "name": "VG-1: uhd-rx's orderly stop_at moves a cut already set later",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "            if stream.cut.is_some_and(|c| c <= cut) {\n                return;\n            }\n            stream.cut = Some(stream.cut.map_or(cut, |c| c.min(cut)));\n",
+  "new": "            stream.cut = Some(cut);\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stopped_stream_keeps_its_end"
  }
 ]

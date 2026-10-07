@@ -43,7 +43,7 @@ fn ur_01_the_descriptor_registers() {
     registry.register(ezsdr_radio_uhd::descriptor(), ezsdr_radio_uhd::factories()).unwrap();
     let descriptor = registry.modules().find(|d| d.id.as_str() == "ezsdr.radio.uhd").unwrap();
     assert_eq!(descriptor.roles, [Role::Provider, Role::Authority]);
-    assert_eq!(descriptor.impl_hash, Some(ContentHash::of_bytes(b"ezsdr.radio.uhd 0.2.0")));
+    assert_eq!(descriptor.impl_hash, Some(ContentHash::of_bytes(b"ezsdr.radio.uhd 0.3.0")));
     let mut old = ModuleRegistry::new();
     let mut vocabulary = ezsdr_radio::vocabulary();
     vocabulary.version = ezsdr_kernel::module_api::Version::new(1, 2, 0);
