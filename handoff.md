@@ -780,7 +780,7 @@ Follow-ups the reviews found (filed or fixed on 2026-10-07):
 
 **Issue の概念別分析と，次に危なそうな概念（2026-10-07）**
 
-AGENTS.md §6 の「同じ概念で3件目のバグが出たら設計を疑う」ルールを，過去の issue #1–#60 に当てはめた．Issue の題名だけから分類したので，すべて INFERRED．レビュー指摘（`plan/` の Review A–U など）はまだ数えていない．表の6概念すべてにラベルを付けた：`concept:validation-bypass`，`concept:uhd-async-reports`，`concept:capture-provenance`，`concept:time-arithmetic`，`concept:id-collisions`，`concept:stop-escalation`（Review U の race は issue ではないので2件）．このほか `concept:stream-timing`（26件，spec 22 で対処中）がある．新しい bug の issue には該当するラベルを付け，同じラベルの件数が3件以上なら，修正の前に設計メモを書く．
+AGENTS.md §6 の three strikes ルールの準備として，過去の issue #1–#60 に当てはめた．Issue の題名だけから分類したので，すべて INFERRED．レビュー指摘（`plan/` の Review A–U など）はまだ数えていない．**この分析は題名からの領域分けで，three strikes の単位ではない**（owner，2026-10-07：数えるのは同じ症状や領域ではなく，同じ設計上の失敗機構）．そのため `concept:` ラベルは `area:` に改名した：`area:stream-timing`（26件），`area:validation-bypass`，`area:uhd-async-reports`，`area:capture-provenance`，`area:time-arithmetic`，`area:id-collisions`，`area:stop-escalation`．機構は `mech:<name>` で付ける（AGENTS.md §6）．**未着手**：閉じた issue と修正 commit を Opus が1回読み，機構を決めて `mech:` を付ける（spec 22 step 1 のレビューのあと．サブエージェントは1つずつ）．題名から推測した，領域をまたぐ機構の候補（INFERRED）：保留中の状態を境目（cold switch，Stop，contract の変更）で持ち越して上書き・破棄する（#3, 9, 18, 20, 21, 34, 36），個体ではなく queue の順番や位置で対応づける（#12, 30, 31），決まりを型ではなく経路ごとに守らせる（#2, 5, 7, 11, 24–27），同じ規則を二重に実装する（timing の大半，#51）．下の表の順位は，その分類のあとで見直す．
 
 | 順 | 概念 | issue | 疑わしい設計（未調査） |
 |---|---|---|---|
