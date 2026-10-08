@@ -750,7 +750,7 @@ Follow-ups the reviews found (filed or fixed on 2026-10-07):
    nor tell the two leads apart. Phase 8 measures both leads (50 ms, INFERRED)
    and the UHD Module's minimum booking delay before a cold change.
 
-**Specs 21 and 22, 2026-10-07〜08 (#46; the timing simplification) — step 1・2 完了，次は step 3**
+**Specs 21 and 22, 2026-10-07〜08 (#46; the timing simplification) — step 1・2・3 完了**
 
 - **Spec 21**（[`plan/maintenance/21-amendments.md`](plan/maintenance/21-amendments.md)，#46）．Opus の作成と4回の反論レビュー（最終 PASS）のあと owner が受理（`fbbfa62`）．
   - **VG-1 は実装済み**：受信の終わりは早める方向にしか動かない．commit は `029f48a`，`f2b9c7d`（uhd-rx の abort は保持中の stream にだけ cut と行を書く），`7b6f376`（落ちた stream への abort のテスト）．`radio` 1.5.0，`ezsdr.radio.mock` 1.5.0，`ezsdr.radio.uhd` 0.3.0．mutation G01–G04，G58–G61 はすべて kill．
@@ -782,7 +782,8 @@ Follow-ups the reviews found (filed or fixed on 2026-10-07):
   - **owner 決定（2026-10-08，「簡素化しましょう」）**：設計メモ 23（[`plan/maintenance/23-one-line-per-stream.md`](plan/maintenance/23-one-line-per-stream.md)）の A を受理：UHD Module は方向ごとに1つの `Line` をロックで共有し，出来事を知ったスレッドが自分で予約する（Plan/Cut メッセージ，拒否リスト，待機，ポーリングを削除）．#63 の刈り込みも一緒に．受信 clock の登録は両 Provider とも最初に publish したブロックで行う．UR-17 の受信要求長の上限（`recv_len`）も削除（owner，2026-10-08）．step 3 の commit と，asap・`EpochRef::Pps`・`next_pps()` の実装の後に実施．
   - **step 3 の後にすること（owner 了承，2026-10-08）**：UHD 側の「装置の拒否がスレッドをまたいで戻る往復」で bug が4件（step 2 の B1，step 3 の修正2・3，step 3 の B1）出た．three strikes に当たるので，局所修正を止めて設計メモを書く（例：受信のレート変更の確定と再計画を uhd-rx 自身に持たせて往復をなくす）．比較して owner に推奨を出す．
   - 追加 issue：#63（timeline の items と uhd-control の plan が Run の間ずっと増え，予約ごとに全体を計画し直す）．
-- **次にすること**：step 2 レビューの軽微な指摘4件の修正（`Provider::stop` 後に送信 clock が開いたまま残る狭い窓，uhd-rx の orderly shutdown の自前 cut，MR-18 の「link があるとき」，負荷で落ちるテストの assert）．そのあと step 3（VH-8 の第3層と FakeDevice の smoke set，#60）．#51 は報告規則の設計メモまで保留．
+- **Step 3 完了（`1a85a11`，Opus レビュー2回で PASS）**：VH-8 の第3層（uhd-rx を手動時刻の rig で1ターンずつ動かし，scripted X3x0 を相手に1 000系列．計画遅延0〜2 ms，ブロック2 000/65 536）．uhd-rx の bug 5件を発見・修正（空の計画で切らない，拒否待ちが古い計画で終わる，拒否された区間を開始済みと数える，orderly stop が計画到着まで切らない，loss が古い cut で終わる）．FakeDevice テスト138→125．mutation J23–J31 追加，J22 引退．全リスト：maintenance 82/82，phase3–6 全 kill，phase7 168/170（既知の G09，U15）．全リストの最終実行は sim02/sim03 の docker で（AGENTS.md §7）．
+- **次にすること**：(1) RS-19 の asap 解決を送信先 clock の origin に合わせる，`EpochRef::Pps`，`Session.next_pps()`，spec 18 U12 の更新（Phase 8b）．(2) 設計メモ 23（`Line` の共有，受信 clock 登録の統一，UR-17 の上限削除，#63）．#51 は報告規則の設計メモまで保留．
 - **既知の問題**：Python の `test_v54_sleep_is_run_time` が，この host では毎回 10 秒の上限をわずかに超えて落ちる（10.1〜12.9 秒）．HEAD から build した server でも同じなので，変更が原因ではない（VG-1 のレビューで VERIFIED）．FakeDevice の負荷に弱いテスト（`rehearsal_b6_…`，`uhd_61_03_…`，`ur_21_…`，`ur_2x_…`）も今までどおり．#60 で対処する予定．
 - **ログ**：`~/.cache/ezsdr-fixes/2026-10-07-spec21/`（`vg1-*`，`vg1b-*`，`vg1c-*`）．
 
@@ -928,7 +929,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-- **最優先（2026-10-08 時点）**：spec 22 の実装．step 1・2 完了，次は step 2 の軽微な修正と step 3（§4 の「Specs 21 and 22」）．owner の判断待ち2件（最初の `tx.repeat` の TIME_ERROR，UR-17）がある．そのあと失敗機構の先回りの設計メモ（`invariant-outside-type`，`admission-per-origin`）を owner に諮る．
+- **最優先（2026-10-08 時点）**：spec 22 の step 1–3 完了．次は asap・`EpochRef::Pps`・`next_pps()`，その次に設計メモ 23 の簡素化（§4 の「Specs 21 and 22」）．owner の判断待ち2件（最初の `tx.repeat` の TIME_ERROR，UR-17）がある．そのあと失敗機構の先回りの設計メモ（`invariant-outside-type`，`admission-per-origin`）を owner に諮る．
 0. **Phase 7 後の保守の残課題**（§4「Phase 7 後の保守」の表）：production の 1–2 と fake の 3 は owner の判断，6 は Phase 8 の bench 計画へ．
 1. **Phase 8（Mock ↔ X310 parity）の計画**（owner の依頼待ち．その次は **Phase 8b 複数台対応**：10 MHz + PPS で揃えた複数の USRP の同時開始．owner 決定 2026-10-08，Vision §67．Phase 9 の Packet/PDU より前．Python の `Session.aligned(at)` は `ea6e7bb` で先に追加済み）：Phase 7 は 2026-10-01 にクローズ済み（merge，実機セッション，Gate X，Step X）．Phase 8 へ送ったものは §4「Phase 7 のクローズ」，Phase 8 inputs は [plan/phase7/00-overview.md](plan/phase7/00-overview.md) §3．実機を使う前に X300 を戻してもらい `uhd_usrp_probe` で確認する．
 2. **v4.0 凍結前にすること**：`Endpoint::EventIn` / `EventOut` の形（event edge は Phase 10），`ParamDecl.update_class` を optional にすること（以上 Phase 5 Gate X），Manifest の `spec.source`（Spec builder のソースハッシュ，Phase 6 Gate X，KF-4）．
