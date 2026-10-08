@@ -83,3 +83,7 @@ A decision record and its implementation would form one step, with:
 ## Also decided: one receive-clock registration rule
 
 MockRadio registers a receive clock once its segment's first sample instant has passed; uhd-rx registers it at its first block. They disagree when a loss or an abort comes before the first block. The owner chose one rule (2026-10-08): both register a receive clock at the first block they publish. RM-25 states it once, and the Phase 8 parity test needs no special case. It lands with A.
+
+## Also decided: UR-17's bounded receive request goes
+
+uhd-rx asks the device for no more than up to a pending cut (`recv_len`). Since VH-4's ready term budgets one whole receive call plus 3 ms after every cut, the bound moves no instant, and samples past a cut are discarded either way. The owner removed it (2026-10-08); it goes with A, which rewrites uhd-rx, with `recv_len`, its test `ur_17_a_request_ends_at_the_pending_cut` and its mutation row B05.
