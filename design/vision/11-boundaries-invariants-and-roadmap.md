@@ -317,6 +317,9 @@ Native UHD Provider
 Phase 8
 Mock → X310 parity test
 
+Phase 8b
+Multi-device: several USRPs on one 10 MHz + PPS reference, time set at one PPS edge, aligned start
+
 Phase 9
 Packet/PDU + TUN/TAP
 
@@ -328,6 +331,8 @@ WASM / GPU / RFNoC-backed radio capabilities / advanced peripherals / distribute
 ```
 
 The exact version numbers are not fixed.
+
+Phase 8b follows the parity test because aligning several devices builds on one device's measured timing, and it precedes Phase 9 because it is v3's working multi-device behaviour (§61, behaviour 4), not new function. It brings the Authority that sets every device's time at one PPS edge, the relations of a second device's root (§15), and the coherence a Provider declares (§25).
 
 The architectural order is more important than the release numbering.
 

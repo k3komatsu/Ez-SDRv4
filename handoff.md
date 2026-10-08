@@ -928,7 +928,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 - **最優先（2026-10-08 時点）**：spec 22 の実装．step 1・2 完了，次は step 2 の軽微な修正と step 3（§4 の「Specs 21 and 22」）．owner の判断待ち2件（最初の `tx.repeat` の TIME_ERROR，UR-17）がある．そのあと失敗機構の先回りの設計メモ（`invariant-outside-type`，`admission-per-origin`）を owner に諮る．
 0. **Phase 7 後の保守の残課題**（§4「Phase 7 後の保守」の表）：production の 1–2 と fake の 3 は owner の判断，6 は Phase 8 の bench 計画へ．
-1. **Phase 8（Mock ↔ X310 parity）の計画**（owner の依頼待ち）：Phase 7 は 2026-10-01 にクローズ済み（merge，実機セッション，Gate X，Step X）．Phase 8 へ送ったものは §4「Phase 7 のクローズ」，Phase 8 inputs は [plan/phase7/00-overview.md](plan/phase7/00-overview.md) §3．実機を使う前に X300 を戻してもらい `uhd_usrp_probe` で確認する．
+1. **Phase 8（Mock ↔ X310 parity）の計画**（owner の依頼待ち．その次は **Phase 8b 複数台対応**：10 MHz + PPS で揃えた複数の USRP の同時開始．owner 決定 2026-10-08，Vision §67．Phase 9 の Packet/PDU より前．Python の `Session.aligned(at)` は `ea6e7bb` で先に追加済み）：Phase 7 は 2026-10-01 にクローズ済み（merge，実機セッション，Gate X，Step X）．Phase 8 へ送ったものは §4「Phase 7 のクローズ」，Phase 8 inputs は [plan/phase7/00-overview.md](plan/phase7/00-overview.md) §3．実機を使う前に X300 を戻してもらい `uhd_usrp_probe` で確認する．
 2. **v4.0 凍結前にすること**：`Endpoint::EventIn` / `EventOut` の形（event edge は Phase 10），`ParamDecl.update_class` を optional にすること（以上 Phase 5 Gate X），Manifest の `spec.source`（Spec builder のソースハッシュ，Phase 6 Gate X，KF-4）．
 3. **Session replay と artifact store**：Phase 7 のあと frontend で（Phase 6 Gate X）．
 4. **Phase 10 へ持ち越すもの**（Phase 5）：event edge，component parameter を適用する Executor（UC-2…UC-6，MA-24），component の処理時間（budget）を仮想時間で課すこと，component parameter key の MA-34 検査，MA-30 の Action latency．
