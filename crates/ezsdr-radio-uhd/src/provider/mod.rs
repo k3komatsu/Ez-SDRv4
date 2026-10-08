@@ -7,6 +7,10 @@ mod rx;
 mod tx;
 #[cfg(test)]
 mod test_support;
+/// VH-8's seeded sequences (spec 22), shared with the other crates' tests by path.
+#[cfg(test)]
+#[path = "../../../ezsdr-radio/tests/generator/mod.rs"]
+mod generator;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};

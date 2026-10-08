@@ -23,8 +23,7 @@ use super::super::rx::RxCmd;
 use crate::device::{Device, Dir, FakeConfig};
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS, RELEASE_WINDOW_NS};
 
-#[path = "../../../../ezsdr-radio/tests/generator/mod.rs"]
-mod generator;
+use super::super::generator;
 
 /// T0, 2 s on the 200 MHz root.
 const T0: i64 = 400_000_000;
@@ -237,7 +236,7 @@ fn run(sequence: &Sequence) -> Record {
         }
         control.release();
         while from_tx.try_recv().is_ok() {}
-        if let Some(latest) = from_rx.try_iter().filter_map(|cmd| match cmd { RxCmd::Plan(plan) => Some(plan), _ => None }).last() {
+        if let Some(latest) = from_rx.try_iter().filter_map(|cmd| match cmd { RxCmd::Plan(plan, _) => Some(plan), _ => None }).last() {
             plan = latest;
         }
         for planned in plan.iter().filter(|planned| planned.segment.origin < now) {

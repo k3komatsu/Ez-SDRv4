@@ -10,9 +10,13 @@ The library's controlled-clock tests prove booking order, cold-change exclusion,
 first-dispatch late policies, underflow recovery and RX stop idempotence without
 requiring millisecond host wake-ups. The deliberate starvation test primes an
 untimed fake burst before starving it, so its setup has no timed-start deadline.
+Spec 22's VH-8 layers 2 and 3 (`rm_26_the_timeline_against_uhd_control`,
+`rm_26_the_timeline_against_uhd_rx`) compare uhd-control's booking and uhd-rx's
+carrying out of a plan with `ezsdr_radio::timeline` on 1 000 seeded sequences
+each, on the same controlled clock.
 
-`fake.rs` also exercises the complete coordinator and the bench rehearsals with
-a wall-clock FakeDevice. Its clock advances while the host is descheduled, as a
+`fake.rs` is a smoke set: it exercises the complete coordinator and the bench
+rehearsals with a wall-clock FakeDevice. Its clock advances while the host is descheduled, as a
 device's does. Exact capture indices and uninterrupted loopback require on-time
 stream starts and no overflow/underflow. A loaded host may miss the 3 ms delivery
 allowance, 2 ms device lead or held-tail deadline. The fake's clock and hardware

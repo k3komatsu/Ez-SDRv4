@@ -261,8 +261,21 @@ impl Control {
     /// UR-26: `Provider::stop` at `at` drops every pending command but one already handed to
     /// the device, and ends the streams there; a transmit clock it orphans ends at its origin.
     fn finish(&mut self, at: i64, mode: StopMode) {
+        // A refusal reported since the last poll, so that the plan recorded below has no
+        // segment that never ran (RM-25).
+        self.refusals();
         self.cancel_held("Provider::stop");
         self.end(at, mode == StopMode::Abort, false);
+        // UR-30: the plans the streams were carried out by, each segment's origin and end.
+        let plan = |dir: Dir| -> Vec<_> {
+            self.lines[dir as usize].iter().flat_map(|line| &line.plan).map(|segment| json!({
+                "origin": segment.origin,
+                "end": segment.cut.and_then(|cut| segment.instant(cut).ok()),
+                "channels": segment.config.channels,
+                "ticks_per_sample": [segment.config.ratio.num(), segment.config.ratio.den()],
+            })).collect()
+        };
+        self.core.timing(json!({ "what": "plan", "rx": plan(Dir::Rx), "tx": plan(Dir::Tx) }));
     }
 
     pub(super) fn book(&mut self, action: Action) {
@@ -616,7 +629,10 @@ impl Control {
         }
         let planned = Arc::new(planned);
         match dir {
-            Dir::Rx => drop(self.to_rx.send(RxCmd::Plan(planned))),
+            Dir::Rx => {
+                let refused = self.lines[dir as usize].iter().flat_map(|line| &line.items).filter(|item| item.refused).map(|item| item.seq).collect();
+                drop(self.to_rx.send(RxCmd::Plan(planned, refused)))
+            }
             Dir::Tx => drop(self.to_tx.send(TxCmd::Plan(planned))),
         }
     }
@@ -873,7 +889,7 @@ mod tests {
 
     fn plan_of(dir: Dir, tx: &Receiver<TxCmd>, rx: &Receiver<RxCmd>) -> Plan {
         let plans: Vec<Plan> = match dir {
-            Dir::Rx => rx.try_iter().filter_map(|cmd| match cmd { RxCmd::Plan(plan) => Some(plan), _ => None }).collect(),
+            Dir::Rx => rx.try_iter().filter_map(|cmd| match cmd { RxCmd::Plan(plan, _) => Some(plan), _ => None }).collect(),
             Dir::Tx => tx.try_iter().filter_map(|cmd| match cmd { TxCmd::Plan(plan) => Some(plan), _ => None }).collect(),
         };
         plans.last().cloned().expect("a plan")
@@ -909,7 +925,8 @@ mod tests {
     #[test]
     fn ur_25_a_refused_change_is_planned_again_without_its_segment() {
         // RM-25: when the owner's device refuses a segment, uhd-control books its change as
-        // refused and hands a plan without that segment.
+        // refused and hands a plan without that segment, naming the refused change, so that
+        // uhd-rx knows the plan was made knowing of the refusal.
         let (core, _, _) = rig();
         let (mut control, tx, rx) = control(&core, &[Dir::Rx]);
         let ms = |n: i64| AbsoluteDeadline::new(core.at(core.ticks(n * 1_000_000)));
@@ -920,9 +937,30 @@ mod tests {
         let by = before[1].segment.by.unwrap();
         lock(&core.streams).refused.push((Dir::Rx, by));
         control.release();
-        let after = plan_of(Dir::Rx, &tx, &rx);
+        let (after, refused) = rx.try_iter().filter_map(|cmd| match cmd { RxCmd::Plan(plan, refused) => Some((plan, refused)), _ => None }).last().expect("a plan");
         assert_eq!(after.len(), 2);
         assert!(after.iter().all(|planned| planned.segment.by != Some(by)));
+        assert_eq!(refused, [by]);
+    }
+
+    #[test]
+    fn ur_30_the_recorded_plan_has_no_refused_segment() {
+        // UR-30, RM-25: a refusal reported before `Provider::stop` that uhd-control has not yet
+        // polled is booked before the plan is recorded, which has no segment for it.
+        let (core, _, time) = rig();
+        let (mut control, _tx, _rx) = control(&core, &[Dir::Rx]);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        control.book_cold(key("radio.rx.sample_rate_hz"), Value::Num(2e6), Some(AbsoluteDeadline::new(core.at(ms(100)))));
+        control.book_cold(key("radio.rx.sample_rate_hz"), Value::Num(1e6), Some(AbsoluteDeadline::new(core.at(ms(300)))));
+        let refused = control.lines[Dir::Rx as usize].as_ref().unwrap().plan[1].by.unwrap();
+        lock(&core.streams).refused.push((Dir::Rx, refused));
+        time.advance_to(core.at(ms(500))).unwrap();
+        control.finish(ms(500), StopMode::Orderly);
+        let rec = lock(&core.rec);
+        let row = rec.timing.iter().find(|r| r["what"] == "plan").expect("the plan row");
+        let segments: Vec<(i64, i64)> = row["rx"].as_array().unwrap().iter().map(|s| (s["origin"].as_i64().unwrap(), s["ticks_per_sample"][0].as_i64().unwrap())).collect();
+        // The first segment and the second change's, at 1 MS/s; none at the refused 2 MS/s.
+        assert_eq!(segments, [(0, 200), (ms(300), 200)], "{row}");
     }
 
     #[test]

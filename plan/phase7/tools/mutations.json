@@ -687,9 +687,9 @@
   "file": "crates/ezsdr-radio/src/timeline.rs",
   "old": "Ok(Segment { origin: narrow(ceil_div(earliest, num) * num)?,",
   "new": "Ok(Segment { origin: narrow(ceil_div(earliest, num) * num + 1)?,",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_a_cold_rate_change_starts_a_new_clock_on_its_lattice"
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_the_timeline_cases"
  },
  {
   "id": "U24",
@@ -698,8 +698,8 @@
   "old": "Pending::Overrun => BlockFlags::RESTARTED,",
   "new": "Pending::Overrun => BlockFlags::SEQ_DISCONTINUITY,",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_18_an_overrun_is_rm_17s_gap"
+  "test_bin": "lib",
+  "filter": "ur_19_reports_before_one_block_keep_each_kind"
  },
  {
   "id": "U25",
@@ -708,8 +708,8 @@
   "old": "                valid: ChannelMask::full(channels as u16),",
   "new": "                valid: if alignment { ChannelMask::full(1) } else { ChannelMask::full(channels as u16) },",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_19_an_alignment_error_is_a_whole_stream_gap",
+  "test_bin": "lib",
+  "filter": "ur_19_reports_before_one_block_keep_each_kind",
   "old2": "            for pending in pending {\n",
   "new2": "            let alignment = pending.contains(&Pending::Alignment);\n            for pending in pending {\n"
  },
@@ -720,8 +720,8 @@
   "old": "if let Err(error) = self.core.events.emit(self.core.overflow, at, Severity::Warning, &payload.to_hot()) {",
   "new": "if let Err(error) = self.core.events.emit_control(ezsdr_kernel::event::Event { source: self.core.rx_id.clone(), time: at, severity: Severity::Warning, kind: ezsdr_kernel::event::EventKind::parse(kinds::RX_OVERFLOW).expect(\"a kind\"), payload: serde_json::to_value(&payload).expect(\"a payload\") }) {",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_20_rx_overflow_is_emitted_on_the_hot_path"
+  "test_bin": "lib",
+  "filter": "ur_19_reports_before_one_block_keep_each_kind"
  },
  {
   "id": "U27",
@@ -780,8 +780,8 @@
   "old": "if let Some(stream) = self.stream.as_mut().filter(|_| mode == StopMode::Abort) {",
   "new": "if let Some(stream) = self.stream.as_mut().filter(|_| true) {",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_26_orderly_stop_ends_at_its_instant_abort_at_once"
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
  },
  {
   "id": "U33",
@@ -860,8 +860,8 @@
   "old": "reopened.and_then(|()| next.settings.configure(&self.core, Dir::Rx, channels).map(|_| ()))",
   "new": "reopened.and_then(|()| next.settings.configure(&self.core, Dir::Rx, channels).map(|_| ()).or(Ok(())))",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_a_rate_the_device_does_not_apply_at_the_switch_is_rejected"
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
  },
  {
   "id": "U41",
@@ -1030,8 +1030,8 @@
   "old": "                    let cut = stream.clock.instant(cut.max(stream.expected));\n                    stream.cut_at(cut);\n",
   "new": "                    let cut = stream.clock.instant(cut.max(stream.expected));\n                    stream.cut_at(cut);\n                    let _ = self.core.device.rx_stop(Some(cut));\n",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_the_old_stream_is_stopped_untimed_at_e1"
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
  },
  {
   "id": "R13",
@@ -1040,8 +1040,8 @@
   "old": "                if !stream.stopped {\n                    stream.stopped = true;\n                    self.last_stop = stop_at_cut(&self.core, cut).or(self.last_stop);\n                }\n                len = (cut_k - k).max(0);",
   "new": "                len = (cut_k - k).max(0);",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_the_old_stream_is_stopped_untimed_at_e1"
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
  },
  {
   "id": "R14",
@@ -1050,8 +1050,8 @@
   "old": "let reopened = if channels != self.opened {",
   "new": "let reopened = if channels == channels {",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_the_old_stream_is_stopped_untimed_at_e1"
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
  },
  {
   "id": "R15",
@@ -1067,11 +1067,11 @@
   "id": "R16",
   "name": "a stop that arrived during a receive wait does not cut its block (NONBLOCKING 9)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "            // A cut that arrived during the wait cuts this block too (RM-16).\n            self.poll();\n",
+  "old": "        // A cut that arrived during the wait cuts this block too (RM-16).\n        self.poll();\n",
   "new": "",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_26_an_abort_publishes_nothing_after_the_stop_instant"
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
  },
  {
   "id": "R19",
