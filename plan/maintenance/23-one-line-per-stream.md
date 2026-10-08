@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Proposed**, awaiting the owner. A design note under AGENTS.md §6's three-strikes rule, written by the orchestrator (Claude Opus) on 2026-10-08 after spec 22 step 3. No code changes until accepted. |
+| Status | **Accepted** by the owner on 2026-10-08 as recommended (A), with the receive-clock registration on both Providers at the first published block (below): "簡素化しましょう". A design note under AGENTS.md §6's three-strikes rule, written by the orchestrator (Claude Opus) after spec 22 step 3; not yet implemented. |
 | Mechanism | The refusal round trip between uhd-control and uhd-rx: `planned-state-read-as-actual` and `correlation-by-partial-key` ([failure-mechanisms.md](failure-mechanisms.md)). |
 | Scope | `crates/ezsdr-radio-uhd/src/provider/{control,rx,tx,mod}.rs` and VH-8's layer 3. No change to `ezsdr_radio::timeline`, to MockRadio or to any rule in `design/`. |
 
@@ -79,3 +79,7 @@ A decision record and its implementation would form one step, with:
 - the touched mutation rows during the fix rounds and the full lists once at the end (AGENTS.md §7).
 
 #63, pruning `Line.items`, goes with it.
+
+## Also decided: one receive-clock registration rule
+
+MockRadio registers a receive clock once its segment's first sample instant has passed; uhd-rx registers it at its first block. They disagree when a loss or an abort comes before the first block. The owner chose one rule (2026-10-08): both register a receive clock at the first block they publish. RM-25 states it once, and the Phase 8 parity test needs no special case. It lands with A.
