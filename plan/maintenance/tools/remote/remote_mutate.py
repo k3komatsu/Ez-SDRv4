@@ -41,7 +41,7 @@ def main():
     shards = {slot: ids[k::len(slots)] for k, slot in enumerate(slots)}
     tag = f"{name}-{int(time.time())}"
     for host in {h for h, _ in hosts}:
-        run(*SSH, host, f"mkdir -p {REMOTE}/src {REMOTE}/out")
+        run(*SSH, host, f"mkdir -p {REMOTE}/src {REMOTE}/out && chmod 777 {REMOTE}/out")  # the container runs as its own user
         run("rsync", "-a", "--delete", "-e", " ".join(SSH), *[f"--exclude={e}" for e in EXCLUDES], "./", f"{host}:{REMOTE}/src/")
         run(*SSH, host, f"docker build -q -t {REMOTE} {REMOTE}/src/plan/maintenance/tools/remote >/dev/null")
     for (host, i), chunk in shards.items():
