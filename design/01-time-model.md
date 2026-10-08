@@ -57,7 +57,8 @@ NodeId              unsigned 32-bit; LOCAL = 0, the only value in v4.0 (§49)
 ClockDomainId       { node: NodeId, local: unsigned 32-bit }
                     reserved local ids: 0 = utc, 1 = host.monotonic (both Root, tick_rate 1 000 000 000 / 1)
 Rational            { num: unsigned 64-bit, den: unsigned 64-bit }   num > 0, den > 0, gcd(num, den) = 1
-EpochRef            Utc1970 | Arbitrary { set_by: string }           e.g. "uhd.set_time_unknown_pps", "sim.run_start"
+EpochRef            Utc1970 | Arbitrary { set_by: string }           e.g. "uhd.set_time_now", "sim.run_start"
+                    | Pps { set_by: string }                   tick zero is the PPS edge set_by names, e.g. "uhd.set_time_unknown_pps"
 ClockDomain         { id: ClockDomainId,
                       kind: Root    { tick_rate: Rational, epoch: EpochRef }
                           | Derived { root: ClockDomainId, root_ticks_per_tick: Rational,
@@ -125,7 +126,7 @@ impl ManualTimeAuthority { pub fn advance_to(&self, t: TimePoint) -> Result<usiz
 
 - **TM-1** A `TimePoint` is a pair of a `ClockDomainId` and a signed 64-bit tick count. No Kernel type stores a time or a duration as floating-point seconds. (Vision §15, invariant 32.) *Checked: the type definitions and `ov_22_schema_freeze`, which byte-compares the generated schema of every time document — `time_point`, `duration`, `clock_domain`, `clock_relation`, `relative_budget`, `absolute_deadline`, `sample_clock_record` — against the committed one, so a float field added to any of them is a diff. This annotation named `kernel_surface`, which has no field-type scan at all; a time type with **no** committed schema is therefore carried by nothing (exit-review finding).*
 - **TM-2** A `Rational` has `num > 0` and `den > 0`, is stored reduced by the greatest common divisor, and compares structurally. Constructing one with a zero component fails with `InvalidRational`. Multiplication, division and comparison are evaluated with 128-bit intermediates; a reduced result whose numerator or denominator exceeds 64 bits fails with `Overflow`. Nothing wraps, saturates or panics.
-- **TM-3** A `ClockDomain` is either `Root`, carrying a tick rate and an epoch reference, or `Derived`, carrying its root's id, the exact number of root ticks per one of its own ticks, and an origin expressed in root ticks. A `Derived` domain names a `Root` directly: registration refuses a `Derived` domain whose root is unknown or is itself `Derived`, and refuses with `LimitExceeded` any `root_ticks_per_tick`, or any `Root`'s `tick_rate`, whose numerator or denominator exceeds 2^31. The cap on a `Root`'s rate is what bounds TM-21's cross-product: without it a rate of 2^40 / (2^40 − 1) is legal under TM-2 and the product reaches 2^190, so a wrapped comparison in a release build would answer "on time" for a late burst.
+- **TM-3** A `ClockDomain` is either `Root`, carrying a tick rate and an epoch reference — `Utc1970`, `Arbitrary { set_by }` (tick zero is whatever `set_by` set), or `Pps { set_by }` (tick zero is the PPS edge at which `set_by` set the time; a later whole second of the root is a PPS edge only while the root's oscillator is locked to the PPS's reference) —, or `Derived`, carrying its root's id, the exact number of root ticks per one of its own ticks, and an origin expressed in root ticks. A `Derived` domain names a `Root` directly: registration refuses a `Derived` domain whose root is unknown or is itself `Derived`, and refuses with `LimitExceeded` any `root_ticks_per_tick`, or any `Root`'s `tick_rate`, whose numerator or denominator exceeds 2^31. The cap on a `Root`'s rate is what bounds TM-21's cross-product: without it a rate of 2^40 / (2^40 − 1) is legal under TM-2 and the product reaches 2^190, so a wrapped comparison in a release build would answer "on time" for a late burst.
 - **TM-4** Two domains are **exactly related** if and only if they have the same root, where a `Root` is its own root. For such a pair the conversion is
   `t_to = ((o_from − o_to) · d_from + t_from · n_from) · d_to / (d_from · n_to)`,
   evaluated with checked 128-bit integers, where `n`/`d` are the numerator and denominator of `root_ticks_per_tick` and `o` the origin (a `Root` has `o = 0`, `n = d = 1`). The result is `Exact` when the division leaves no remainder, and otherwise `Inexact`, whose `floor` is the largest tick at or before the true instant and whose `remainder` is the leftover fraction of one target tick. `try_exact` returns `Inexact` as an error.
@@ -234,6 +235,7 @@ The growth term is the point of TM-14. One second after the measurement it adds 
 | `tm_04_sibling_20_25_msps_inexact` | origins 0, t_A = 7 | `Inexact { 8, 3/4 }`; `try_exact` gives `Inexact` | TM-4 |
 | `tm_04_disjoint_grids_never_exact` | o_A = 1e9+3, o_B = 1e9, t_A in 0..1000 | every result inexact | TM-4 |
 | `tm_08_conversion_overflow_is_error` | t = 2^62 with ratio 2^31/1 in both directions | `Overflow`, no panic | TM-8 |
+| `tm_03_a_pps_epoch_is_its_own_kind` | `{ kind: pps, set_by }`; `{ kind: arbitrary, set_by: "uhd.set_time_unknown_pps" }` | `Pps`, serialised back as `pps`; the second stays `Arbitrary` | TM-3 |
 | `tm_03_registration_limits` | ratio 2^31+1; a derived domain of a derived domain; an unknown root | `LimitExceeded`, error, `UnknownDomain` | TM-3, TM-12 |
 | `tm_06_cross_domain_cmp_is_error` | `try_cmp` and `checked_sub` across domains, then within one | `DomainMismatch`, then success | TM-6 |
 | `tm_07_duration_add_checks_domain` | `t_A + d_B`, then `t_A + d_A` | error, then success | TM-7 |
@@ -305,3 +307,4 @@ The Simulation Engine, including `step(until)` over Islands and the wall-clock p
 | date | rules | change | record |
 |---|---|---|---|
 | 2026-10-07 | TM-13c | a `cold` change starts a new SampleClock only for a running stream | [spec 22](../plan/maintenance/22-timing-simplification.md) |
+| 2026-10-08 | TM-3 | `EpochRef` gains `Pps { set_by }`: tick zero is a PPS edge; `Arbitrary` keeps its meaning (invariant 39) | owner decision, 2026-10-08 |

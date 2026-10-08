@@ -15,6 +15,19 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — a PPS epoch (`EpochRef::Pps`, `Session.next_pps`)
+
+Still version 1: v4.0 has not frozen (OV-12). Server `ezsdr-server` 0.5.0, protocol `ezsdr.protocol` 2.
+
+- `clock_domain`, `manifest` and `server/reply_frame`: `EpochRef` gains `pps { set_by }`, a root whose tick zero is
+  the PPS edge `set_by` names (TM-3); the UHD Authority registers it when its time source is not internal (UR-7).
+  Additive: a document with `arbitrary` stays valid and keeps its meaning (invariant 39) — a root a PPS set before
+  this change reads `arbitrary { set_by: "ezsdr.radio.uhd.set_time_unknown_pps:…" }` and is not reinterpreted as a
+  PPS edge. `arbitrary`'s description names `uhd.set_time_now` as its example instead.
+- `server/reply_frame`: the `connected` reply gains `root_epoch`, the primary root's `EpochRef` (EA-10), from which
+  `Session.next_pps` finds a PPS edge (EA-16). A required field; a client that reads the schema refuses a reply
+  without it, and the package refuses `next_pps` when it is absent.
+
 ## v1 — the receive alignment instant (`Rx.next_at`)
 
 Still version 1: v4.0 has not frozen (OV-12). Server `ezsdr-server` 0.4.0, protocol `ezsdr.protocol` 2.

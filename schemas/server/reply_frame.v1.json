@@ -921,7 +921,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "Tick zero is whatever set it; the string names the mechanism, for example\n`uhd.set_time_unknown_pps` or `sim.run_start` (Vision §15, §50; OV-23a: a\nnamed example, not a Kernel dependency).",
+          "description": "Tick zero is whatever set it; the string names the mechanism, for example\n`uhd.set_time_now` or `sim.run_start` (Vision §15, §50; OV-23a: a\nnamed example, not a Kernel dependency).",
           "properties": {
             "kind": {
               "const": "arbitrary",
@@ -929,6 +929,25 @@
             },
             "set_by": {
               "description": "Namespaced name of whatever established the epoch.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "set_by"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Tick zero is the PPS edge at which `set_by` set the time (TM-3); a later whole\nsecond of the root is a PPS edge only while the root is locked to the PPS's reference.",
+          "properties": {
+            "kind": {
+              "const": "pps",
+              "type": "string"
+            },
+            "set_by": {
+              "description": "Namespaced name of whatever set the time at that edge.",
               "type": "string"
             }
           },
@@ -2148,6 +2167,10 @@
             "profile": {
               "description": "The BindingProfile document the Session runs with."
             },
+            "root_epoch": {
+              "$ref": "#/$defs/EpochRef",
+              "description": "What the primary root's tick zero is (TM-3), from which a client finds a PPS\nedge when it is `pps` (EA-10, EA-16)."
+            },
             "root_rate": {
               "$ref": "#/$defs/Rational",
               "description": "The primary root's nominal rate in ticks per second, from which a client counts a\n`Duration`'s ticks (EA-10, EA-12)."
@@ -2169,7 +2192,8 @@
             "dir",
             "profile",
             "effective",
-            "root_rate"
+            "root_rate",
+            "root_epoch"
           ],
           "type": "object"
         },

@@ -57,7 +57,7 @@ def main():
             time.sleep(20)
     outcomes = {}
     for host in {h for h, _ in hosts}:
-        out = run(*SSH, host, f"cat {REMOTE}/out/{tag}-*.log", capture_output=True).stdout
+        out = run(*SSH, host, f"cat {REMOTE}/out/{tag}-*.log 2>/dev/null || true", capture_output=True).stdout
         print(out, end="")
         for line in out.splitlines():
             if m := re.match(r"(\S+) .*: (killed|SURVIVED|NOT FOUND|COMPILE ERROR|BASELINE FAILED)", line):

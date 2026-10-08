@@ -349,6 +349,8 @@ pub struct SteppedProvider {
     pub step_gate: Option<Arc<(Mutex<bool>, Condvar)>>,
     pub inputs: Option<Arc<dyn ezsdr_kernel::module_api::InputStore>>,
     pub settle_fidelity: Option<ezsdr_kernel::module_api::Fidelity>,
+    /// How far after `arm`'s instant the clocks registered there begin.
+    pub arm_origin_after: i64,
 }
 
 impl SteppedProvider {
@@ -387,6 +389,7 @@ impl SteppedProvider {
             step_gate: None,
             inputs: None,
             settle_fidelity: None,
+            arm_origin_after: 0,
         }
     }
 
@@ -424,6 +427,12 @@ impl SteppedProvider {
     /// Registers the named declared clock at `arm`.
     pub fn registering_at_arm(mut self, stream: &str) -> SteppedProvider {
         self.register_at_arm.push(stream.to_owned());
+        self
+    }
+
+    /// Makes the clocks registered at `arm` begin `ticks` primary-root ticks later.
+    pub fn with_arm_origin_after(mut self, ticks: i64) -> SteppedProvider {
+        self.arm_origin_after = ticks;
         self
     }
 
@@ -666,7 +675,8 @@ impl Provider for SteppedProvider {
         let origin = time
             .now(time.primary_root())
             .map_err(|e| ModuleError::rejected(format!("test: {e}")))?
-            .ticks;
+            .ticks
+            + self.arm_origin_after;
         for stream in &self.register_at_arm {
             let stream_id = ResourceId::parse(stream)
                 .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;

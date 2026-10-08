@@ -173,6 +173,17 @@ fn tm_08_conversion_overflow_is_error() {
 }
 
 #[test]
+fn tm_03_a_pps_epoch_is_its_own_kind() {
+    // TM-3: `pps` names a PPS edge; an `arbitrary` document keeps its meaning even when its
+    // `set_by` names a PPS mechanism (invariant 39).
+    let pps: EpochRef = serde_json::from_value(serde_json::json!({ "kind": "pps", "set_by": "uhd.set_time_unknown_pps" })).unwrap();
+    assert_eq!(pps, EpochRef::Pps { set_by: "uhd.set_time_unknown_pps".to_owned() });
+    assert_eq!(serde_json::to_value(&pps).unwrap()["kind"], "pps");
+    let old: EpochRef = serde_json::from_value(serde_json::json!({ "kind": "arbitrary", "set_by": "uhd.set_time_unknown_pps" })).unwrap();
+    assert_eq!(old, arbitrary("uhd.set_time_unknown_pps"));
+}
+
+#[test]
 fn tm_03_registration_limits() {
     let (reg, root) = registry_with_device_root();
     let over = (1u64 << 31) + 1;

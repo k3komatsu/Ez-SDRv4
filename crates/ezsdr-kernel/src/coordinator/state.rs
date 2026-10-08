@@ -377,6 +377,20 @@ impl Shared {
         self.routing.get()
     }
 
+    /// The stream's latest registered clock that has not ended: the one a burst
+    /// admitted next targets (SC-23, KC-21a, RS-19).
+    pub(super) fn running_clock(
+        &self,
+        stream: &ResourceId,
+    ) -> Option<crate::time::SampleClockRecord> {
+        self.ctx
+            .clocks
+            .sample_clock_records()
+            .into_iter()
+            .rev()
+            .find(|record| record.stream == *stream && record.ended_at.is_none())
+    }
+
     /// HardwareInLoop or Hardware: an Authority whose pacing is `Device` (KC-2).
     pub(super) fn device_paced(&self) -> bool {
         self.routing().is_some_and(|routing| {

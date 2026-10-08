@@ -1,4 +1,4 @@
-//! Ez-SDR v4 server `ezsdr-server` 0.4.0: the Runtime a client drives over
+//! Ez-SDR v4 server `ezsdr-server` 0.5.0: the Runtime a client drives over
 //! `ezsdr.protocol` 2 (design/16-easy-api.md).
 //!
 //! It compiles the Modules in (EA-7), runs one Session through the Kernel's
@@ -24,7 +24,7 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::module_api::Pacing;
 use ezsdr_kernel::run::{Lease, RunState};
-use ezsdr_kernel::time::{ClockRegistry, Duration, TimePoint};
+use ezsdr_kernel::time::{ClockDomainKind, ClockRegistry, Duration, TimePoint};
 
 pub use catalogue::{OpenDevice, assemble, default_profile};
 use protocol::{ErrorKind, ProtocolError, Reply, Request, Response, SUPPORTED};
@@ -242,6 +242,10 @@ impl Server {
             profile: profile.clone(),
             effective: run.effective(),
             root_rate: clocks.nominal_rate(run.now().domain).expect("the primary root is registered"),
+            root_epoch: match clocks.get(run.now().domain).map(|domain| domain.kind) {
+                Ok(ClockDomainKind::Root { epoch, .. }) => epoch,
+                _ => unreachable!("the primary root is a registered Root (KC-3)"),
+            },
         };
         self.live = Some(Live { run, clocks, profile, device_paced });
         Handled::ok(response)

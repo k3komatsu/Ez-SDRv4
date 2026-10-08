@@ -318,9 +318,9 @@ class Tx(_Side):
         """Transmits ``x`` repeatedly: sets ``radio.tx.channels`` to its channel count when
         it differs, then submits ``radio.start_repeat`` with its bytes (EA-16). ``at`` is a
         ``TimePoint``, as ``capture`` takes, at which the first sample goes out — on a
-        device whose time a PPS set, a whole second of its root is a PPS edge (UR-7);
-        without one, ``aligned``'s instant inside its block, else the next instant the
-        radio allows."""
+        device whose time a PPS set and whose clock is locked to its reference, a whole
+        second of its root is a PPS edge (UR-7); without one, ``aligned``'s instant inside
+        its block, else the next instant the radio allows."""
         channels, data = _cf32(x)
         if self.channels != channels:
             self.channels = channels
@@ -379,6 +379,8 @@ class Session:
         # The primary root and its nominal rate, on which a Duration's ticks count (EA-12).
         self._root: dict = connected["now"]["domain"]
         self._rate = Fraction(connected["root_rate"]["num"], connected["root_rate"]["den"])
+        # What the primary root's tick zero is, the Kernel's EpochRef (TM-3, EA-10).
+        self._epoch: Optional[dict] = connected.get("root_epoch")
         self._waited = 0
         # Capture requests admitted per recorder: the Sink's next request number (HD-16).
         self._captures: Dict[str, int] = {}
@@ -439,6 +441,23 @@ class Session:
         s = _seconds(seconds)
         now = self._status()["now"]
         return {**now, "ticks": now["ticks"] + math.ceil(s * self._rate)}
+
+    def next_pps(self, k: int = 1, ahead: Any = 0.05) -> dict:
+        """The ``k``-th PPS edge at least ``ahead`` seconds after the Run's current instant, as
+        a ``TimePoint`` on the primary root (EA-16): the root's tick zero is a PPS edge when its
+        epoch is ``pps`` (a USRP whose time source is not internal, UR-7), and a later whole second
+        is one while the device's clock source is locked to the PPS's reference (otherwise it
+        drifts by the oscillator's error). Raises ``Error`` when the epoch is not ``pps`` (an internal time source,
+        a simulation) or a second is not a whole number of root ticks."""
+        if int(k) != k or k < 1:
+            raise Error(f"EA-16: next_pps needs k ≥ 1, not {k}")
+        if (self._epoch or {}).get("kind") != "pps":
+            raise Error(f"EA-16: the primary root's tick zero is no PPS edge (epoch {self._epoch})")
+        if self._rate.denominator != 1:
+            raise Error(f"EA-16: a second is not a whole number of root ticks at {self._rate} ticks/s")
+        second = self._rate.numerator
+        earliest = self._duration(ahead)["ticks"] + self._status()["now"]["ticks"]
+        return {"domain": self._root, "ticks": (-(-earliest // second) + int(k) - 1) * second}
 
     def sleep(self, seconds: float) -> dict:
         """``run.wait_until(now + seconds)`` in the Run's time (Vision §54); never

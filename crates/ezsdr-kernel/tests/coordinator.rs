@@ -1925,6 +1925,61 @@ fn kc_28_an_untimed_burst_is_admitted_at_now_plus_lead() {
 }
 
 #[test]
+fn kc_28_an_untimed_burst_is_not_admitted_before_its_clock_s_origin() {
+    // RS-19: the target stream's clock begins at T0 + 5 ms, after now + the 2 ms lead,
+    // so "as soon as possible" is that origin, its tick 0, and the coercion records it.
+    untimed_burst_lands_at_its_clock_s_origin(Some(2_000_000));
+}
+
+#[test]
+fn kc_28_an_untimed_burst_waits_for_its_clock_s_origin_without_a_provider_lead() {
+    // RS-19: the origin applies to a Provider that declares no min_command_lead too.
+    untimed_burst_lands_at_its_clock_s_origin(None);
+}
+
+fn untimed_burst_lands_at_its_clock_s_origin(lead_ns: Option<i64>) {
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    let mut provider = TestProvider::new("radio", 2);
+    if let Some(lead_ns) = lead_ns {
+        provider = provider.with_min_command_lead(Duration::new(
+            ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC,
+            lead_ns,
+        ));
+    }
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(
+            SteppedProvider::new("p", provider, &probe)
+                .declaring("radio/tx", 1, 1)
+                .registering_at_arm("radio/tx")
+                .with_arm_origin_after(5_000_000),
+        ),
+    );
+    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let entry = run
+        .submit(
+            SessionAction::Vocabulary {
+                ns: ns("test"),
+                verb: Ident::parse("start_repeat").unwrap(),
+                target: ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap(),
+                at: None,
+                params: BTreeMap::new(),
+            },
+            Some(&[0u8; 80]),
+        )
+        .unwrap();
+    assert!(
+        matches!(entry.outcome, Outcome::Admitted { ref coercions, .. }
+        if coercions.iter().any(|c| c.key == Key::parse("ezsdr.action.at").unwrap()
+            && c.applied == Value::Int(5_000_000))),
+        "{entry:?}"
+    );
+    assert!(probe.lines().iter().any(|line| line == "p:burst_at:0"), "{:?}", probe.lines());
+    let _ = run.finish();
+}
+
+#[test]
 fn kc_36_detached_lease_expiry_ends_the_run() {
     let mut rig = rig(ezsdr_kernel::module_api::Pacing::FreeRunning);
     let lease = Lease::detached(5000, false, "tok", &*rig.host).unwrap();

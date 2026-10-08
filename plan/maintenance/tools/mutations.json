@@ -784,5 +784,125 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_29_a_loss_ends_the_stream_at_its_instant"
+ },
+ {
+  "id": "J32",
+  "name": "RS-19 (owner, 2026-10-08): an untimed action is admitted before its target stream's clock origin again",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "        ticks = ticks.max(origin.ticks);\n",
+  "new": "        let _ = origin;\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_28_an_untimed_burst_is_not_admitted_before_its_clock_s_origin"
+ },
+ {
+  "id": "J33",
+  "name": "RS-19 (owner, 2026-10-08): on MockRadio a Session's first untimed repeat after an enable is late again",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "        ticks = ticks.max(origin.ticks);\n",
+  "new": "        let _ = origin;\n",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "v58",
+  "filter": "v58_13_session_manifest_has_log_waveform_and_capture"
+ },
+ {
+  "id": "J34",
+  "name": "RS-19 (owner, 2026-10-08): on the UHD Module an untimed burst after a cold transmit change is late again",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "        ticks = ticks.max(origin.ticks);\n",
+  "new": "        let _ = origin;\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_21_an_untimed_burst_after_a_cold_change_is_on_time_at_its_clock_s_origin"
+ },
+ {
+  "id": "J35",
+  "name": "UR-7, TM-3 (owner, 2026-10-08): a PPS-set root is registered with an arbitrary epoch again",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "        EpochRef::Pps { set_by: format!(\"ezsdr.radio.uhd.set_time_unknown_pps:{args}\") }",
+  "new": "        EpochRef::Arbitrary { set_by: format!(\"ezsdr.radio.uhd.set_time_unknown_pps:{args}\") }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_the_root_s_epoch_is_the_pps_edge_with_an_external_source"
+ },
+ {
+  "id": "J36",
+  "name": "UR-6 (owner, 2026-10-08): the Provider refuses its own PPS-set root",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "crate::authority::epoch(false, &self.args), crate::authority::epoch(true, &self.args)]",
+  "new": "crate::authority::epoch(false, &self.args), crate::authority::epoch(false, &self.args)]",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_07_the_uhd_authority_takes_the_binding_s_sources"
+ },
+ {
+  "id": "J37",
+  "name": "EA-10 (owner, 2026-10-08): connected names another epoch than the primary root's",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "                Ok(ClockDomainKind::Root { epoch, .. }) => epoch,",
+  "new": "                Ok(ClockDomainKind::Root { .. }) => ezsdr_kernel::time::EpochRef::Utc1970 {},",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_07_the_uhd_authority_takes_the_binding_s_sources"
+ },
+ {
+  "id": "J38",
+  "name": "EA-16 (owner, 2026-10-08): next_pps rounds down to a whole second before the earliest instant",
+  "file": "python/ezsdr/session.py",
+  "old": "(-(-earliest // second) + int(k) - 1) * second",
+  "new": "(earliest // second + int(k) - 1) * second",
+  "python": "test_easy_api.DurationRequests.test_ea_16_next_pps_counts_whole_seconds_of_a_pps_root"
+ },
+ {
+  "id": "J39",
+  "name": "EA-16 (owner, 2026-10-08): next_pps counts k from zero",
+  "file": "python/ezsdr/session.py",
+  "old": "(-(-earliest // second) + int(k) - 1) * second",
+  "new": "(-(-earliest // second) + int(k)) * second",
+  "python": "test_easy_api.DurationRequests.test_ea_16_next_pps_counts_whole_seconds_of_a_pps_root"
+ },
+ {
+  "id": "J40",
+  "name": "EA-16 (owner, 2026-10-08): next_pps ignores ahead",
+  "file": "python/ezsdr/session.py",
+  "old": "        earliest = self._duration(ahead)[\"ticks\"] + self._status()[\"now\"][\"ticks\"]",
+  "new": "        earliest = self._status()[\"now\"][\"ticks\"]",
+  "python": "test_easy_api.DurationRequests.test_ea_16_next_pps_counts_whole_seconds_of_a_pps_root"
+ },
+ {
+  "id": "J41",
+  "name": "EA-16 (owner, 2026-10-08): next_pps answers on a root no PPS set",
+  "file": "python/ezsdr/session.py",
+  "old": "        if (self._epoch or {}).get(\"kind\") != \"pps\":",
+  "new": "        if False:",
+  "python": "test_easy_api.DurationRequests.test_ea_16_next_pps_refuses_a_root_that_no_pps_set"
+ },
+ {
+  "id": "J42",
+  "name": "EA-16 (owner, 2026-10-08): next_pps answers on a root whose second is not a whole number of ticks",
+  "file": "python/ezsdr/session.py",
+  "old": "        if self._rate.denominator != 1:\n            raise Error(f\"EA-16: a second",
+  "new": "        if False:\n            raise Error(f\"EA-16: a second",
+  "python": "test_easy_api.DurationRequests.test_ea_16_next_pps_refuses_a_root_that_no_pps_set"
+ },
+ {
+  "id": "J43",
+  "name": "RS-19 (owner, 2026-10-08; review round 1): the clock origin floors only a Provider that declares a lead",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "    if let Some(record) = shared.running_clock(&stream) {\n",
+  "new": "    if let (Some(record), Some(_)) = (shared.running_clock(&stream), shared.providers[index].lead) {\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_28_an_untimed_burst_waits_for_its_clock_s_origin_without_a_provider_lead"
+ },
+ {
+  "id": "J44",
+  "name": "UR-6 (PPS epoch review): the Provider accepts any PPS-set root, another device's included",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "        if !epoch.is_some_and(|e| own.contains(&e)) {",
+  "new": "        if !epoch.is_some_and(|e| own.contains(&e) || matches!(e, ezsdr_kernel::time::EpochRef::Pps { .. })) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_06_the_provider_refuses_another_root"
  }
 ]

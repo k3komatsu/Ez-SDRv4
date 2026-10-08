@@ -23,10 +23,16 @@ pub enum EpochRef {
     /// Tick zero is 1970-01-01T00:00:00Z.
     Utc1970 {},
     /// Tick zero is whatever set it; the string names the mechanism, for example
-    /// `uhd.set_time_unknown_pps` or `sim.run_start` (Vision §15, §50; OV-23a: a
+    /// `uhd.set_time_now` or `sim.run_start` (Vision §15, §50; OV-23a: a
     /// named example, not a Kernel dependency).
     Arbitrary {
         /// Namespaced name of whatever established the epoch.
+        set_by: String,
+    },
+    /// Tick zero is the PPS edge at which `set_by` set the time (TM-3); a later whole
+    /// second of the root is a PPS edge only while the root is locked to the PPS's reference.
+    Pps {
+        /// Namespaced name of whatever set the time at that edge.
         set_by: String,
     },
 }

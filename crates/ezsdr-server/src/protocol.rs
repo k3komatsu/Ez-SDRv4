@@ -8,7 +8,7 @@ use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::run::{Lease, RunState, Termination};
 use ezsdr_kernel::session::{LogEntry, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Value};
-use ezsdr_kernel::time::{Duration, Rational, SampleClockRecord, TimePoint};
+use ezsdr_kernel::time::{Duration, EpochRef, Rational, SampleClockRecord, TimePoint};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -160,6 +160,9 @@ pub enum Response {
         /// The primary root's nominal rate in ticks per second, from which a client counts a
         /// `Duration`'s ticks (EA-10, EA-12).
         root_rate: Rational,
+        /// What the primary root's tick zero is (TM-3), from which a client finds a PPS
+        /// edge when it is `pps` (EA-10, EA-16).
+        root_epoch: EpochRef,
     },
     /// The logged entry, admitted or rejected (EA-11).
     Submitted {

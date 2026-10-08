@@ -483,7 +483,7 @@ Allow-list lines (PO-5), in `tests/kernel_surface_allow.txt` under a new heading
 - **KC-28** `RunHandle::submit(action, waveform)` on a Session, at the current instant `now`:
   1. refuses with `Ended` after cleanup, `NotSession` on a Spec Run, and `Malformed` when `SessionLog::check_entry(now, &action)` fails (RS-15: it takes no sequence number);
   2. a `waveform` is ingested with `manifest::ingest_input(input_<k>, ezsdr.input, "mem:<hash>", bytes)` (k counts from 0), stored in the input store, and recorded once in `Manifest.inputs` (RS-44a);
-  3. `session::compile(&action, registry, declared_classes, outputs, earliest, waveform_ref)`, where `declared_classes` are the Spec components' `params` and `earliest` is RS-19's (KA-7) for the Action's target — `now` for a verb compiling to an `UpdateParameter`, which targets a Sink, and `now + min_command_lead` of the rewritten target's instance otherwise;
+  3. `session::compile(&action, registry, declared_classes, outputs, earliest, waveform_ref)`, where `declared_classes` are the Spec components' `params` and `earliest` is RS-19's (KA-7) for the Action's target — `now` for a verb compiling to an `UpdateParameter`, which targets a Sink, and otherwise `now + min_command_lead` of the rewritten target's instance or the origin of the rewritten target stream's running clock, whichever is later;
   4. each compiled Action passes KC-24; if any is refused, none is dispatched and the entry is `Rejected` with every violation;
   5. a `ControlOp`: `StopRun` and `Release` end the Run `Stopped { client }` (KC-33), and `Release` also sets `lease.released`; `Adopt { token }` calls `Lease::adopt(token, "client")` and `Renew` calls `Lease::renew(host_clock)`, logging `AdoptRejected` or `LeaseNotRenewable` as a rejection with the violation check `ezsdr.lease`; `RunChild` is refused (KC-37). An admitted control operation's entry is `Admitted { coercions: [], warnings: [], dispatched: [] }`;
   6. if the entry is admitted, its Actions are dispatched (KC-25) in compiled order, which assigns their ids; then the entry is appended with `SessionLog::append` (dense sequence, RS-15) as `Admitted { coercions: every coercion of steps 3 and 4 in order, warnings: every warning, dispatched: those ids }` or `Rejected { violations }` (`check_entry` in step 1 guarantees the append cannot fail); then KC-21's round runs; an end request then runs cleanup (KC-38) before `submit` returns. `submit` returns `Ok(entry)` for an admitted and for a rejected entry; `Err` is only step 1's three refusals.
@@ -607,6 +607,8 @@ In `crates/ezsdr-kernel/tests/coordinator.rs` unless named. Each is described by
 | `kc_28_a_malformed_action_takes_no_sequence_number` | a value map with a non-ASCII key | `Err(Malformed)`; the next entry has `seq` 0 | KC-28, RS-15 |
 | `kc_28_a_waveform_is_an_input_before_admission` | `start_repeat` with 800 bytes | `inputs` holds one ref with `size_bytes` 800 and `mem:` uri; the `TxBurst` carries it | KC-28, RS-44a |
 | `kc_28_an_untimed_burst_is_admitted_at_now_plus_lead` | `start_repeat` with no `at`, lead 2 ms | the `TxBurst.at` is now + 2 ms on the TX grid; the entry's coercion records it | KC-28, RS-19, KA-7 |
+| `kc_28_an_untimed_burst_is_not_admitted_before_its_clock_s_origin` | `start_repeat` with no `at`, lead 2 ms, the transmit clock's origin 5 ms after now | the `TxBurst.at` is the clock's tick 0; the coercion records 5 ms | KC-28, RS-19 |
+| `kc_28_an_untimed_burst_waits_for_its_clock_s_origin_without_a_provider_lead` | as above, with no `min_command_lead` declared | the same: the origin applies without a lead | KC-28, RS-19 |
 | `kc_28_stop_run_ends_the_session` | `SessionAction::Stop { target: None }` | the entry is `Admitted`; `Stopped { client }` | KC-28, KC-33 |
 | `kc_29_advance_to_refuses_an_unrelated_time` | `advance_to` a time on another root | `Err(NotOnPrimaryRoot)` | KC-29 |
 | `kc_35_connect_refuses_an_invalid_lease` | `connect` with `Lease { mode: Detached { ttl_ms: 0, .. }, .. }` | `Err(SpecError::Structural)` naming RS-21; no Run | KC-35, RS-21 |
@@ -656,3 +658,4 @@ The threaded driver for RealtimeEmulation, HardwareInLoop and Hardware. Child Ru
 | date | rules | change | record |
 |---|---|---|---|
 | 2026-10-07 | UC-1…UC-6 | §10 points to spec 05 §5, the update classes' one home | [spec 22](../plan/maintenance/22-timing-simplification.md) |
+| 2026-10-08 | KC-28 | step 3's `earliest` is not before the origin of the target stream's running clock (RS-19) | owner decision, 2026-10-08 |

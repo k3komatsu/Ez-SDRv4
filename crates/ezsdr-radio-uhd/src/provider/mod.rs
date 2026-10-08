@@ -30,7 +30,7 @@ use ezsdr_kernel::module_api::{
 use ezsdr_kernel::plan::{Fragment, PrepareReport};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::BackPressure;
-use ezsdr_kernel::time::{Duration, EpochRef, SampleClockHandle, TimePoint};
+use ezsdr_kernel::time::{Duration, SampleClockHandle, TimePoint};
 use ezsdr_radio::device::DeviceDescription;
 use ezsdr_radio::payloads::LateCommandPayload;
 use ezsdr_radio::{keys, kinds};
@@ -308,13 +308,10 @@ impl Provider for UhdRadio {
         // UR-6: the primary root is this device's.
         let root = ctx.time.primary_root();
         let epoch = match ctx.clocks.get(root).map(|d| d.kind) {
-            Ok(ezsdr_kernel::time::ClockDomainKind::Root { epoch: EpochRef::Arbitrary { set_by }, .. }) => Some(set_by),
+            Ok(ezsdr_kernel::time::ClockDomainKind::Root { epoch, .. }) => Some(epoch),
             _ => None,
         };
-        let own = [
-            format!("ezsdr.radio.uhd.set_time_now:{}", self.args),
-            format!("ezsdr.radio.uhd.set_time_unknown_pps:{}", self.args),
-        ];
+        let own = [crate::authority::epoch(false, &self.args), crate::authority::epoch(true, &self.args)];
         if !epoch.is_some_and(|e| own.contains(&e)) {
             return Err(rejected("UR-6: the primary root is not this device's; bind the Authority to the radio's own binding"));
         }

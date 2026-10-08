@@ -1699,25 +1699,37 @@ fn session_earliest(
     let Some(target) = target else {
         return Ok(now);
     };
-    let Ok((_, Inst::Provider(index), _)) = rewrite_spec_target(shared, target) else {
+    let Ok((stream, Inst::Provider(index), _)) = rewrite_spec_target(shared, target) else {
         return Ok(now);
     };
-    let Some(lead) = shared.providers[index].lead else {
-        return Ok(now);
-    };
-    let ticks =
-        super::state::ceil_rescale(&shared.ctx.clocks, lead, shared.primary).map_err(|error| {
+    let mut ticks = now.ticks;
+    if let Some(lead) = shared.providers[index].lead {
+        let lead = super::state::ceil_rescale(&shared.ctx.clocks, lead, shared.primary)
+            .map_err(|error| {
+                violation(
+                    "ezsdr.time",
+                    format!("KC-28: cannot resolve Provider lead: {error}"),
+                )
+            })?;
+        ticks = ticks.checked_add(lead).ok_or_else(|| {
             violation(
                 "ezsdr.time",
-                format!("KC-28: cannot resolve Provider lead: {error}"),
+                "KC-28: Provider lead overflows the primary root",
             )
         })?;
-    let ticks = now.ticks.checked_add(ticks).ok_or_else(|| {
-        violation(
-            "ezsdr.time",
-            "KC-28: Provider lead overflows the primary root",
-        )
-    })?;
+    }
+    // RS-19: an instant before the origin of the clock the target's next burst lands
+    // in does not exist in that clock, so "as soon as possible" is not before it.
+    if let Some(record) = shared.running_clock(&stream) {
+        let origin = super::state::ceil_convert(&shared.ctx.clocks, record.origin, shared.primary)
+            .map_err(|error| {
+                violation(
+                    "ezsdr.time",
+                    format!("RS-19: cannot resolve {stream}'s clock origin: {error}"),
+                )
+            })?;
+        ticks = ticks.max(origin.ticks);
+    }
     Ok(TimePoint::new(shared.primary, ticks))
 }
 

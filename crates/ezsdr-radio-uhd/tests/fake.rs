@@ -179,12 +179,15 @@ fn ur_09_x310_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz() {
 
 #[test]
 fn ur_06_the_provider_refuses_another_root() {
-    let dir = TempDir::new();
-    let profile = profile(&dir, json!({ "authority_args": "addr=10.0.0.9" }), json!({}), false);
-    let run = start_spec_run(&receive_spec(1, 1e6, 1e9, None), &profile, assembly(&profile, fake(FakeConfig::default()), BTreeMap::new(), |r| r)).unwrap();
-    assert_eq!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare } });
-    let manifest = run.finish();
-    assert!(failure(&manifest).contains("UR-6: the primary root is not this device's"), "{}", failure(&manifest));
+    // Another device's root, whether its time was set at once or at a PPS edge (UR-7).
+    for time_source in ["internal", "external"] {
+        let dir = TempDir::new();
+        let profile = profile(&dir, json!({ "authority_args": "addr=10.0.0.9", "time_source": time_source }), json!({}), false);
+        let run = start_spec_run(&receive_spec(1, 1e6, 1e9, None), &profile, assembly(&profile, fake(FakeConfig::default()), BTreeMap::new(), |r| r)).unwrap();
+        assert_eq!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare } }, "{time_source}");
+        let manifest = run.finish();
+        assert!(failure(&manifest).contains("UR-6: the primary root is not this device's"), "{time_source}: {}", failure(&manifest));
+    }
 }
 
 // ---------------------------------------------------------------- the Authority (UR-7, UR-8)
@@ -265,6 +268,20 @@ fn ur_07_the_time_is_set_at_the_next_pps_with_an_external_source() {
     let sources = calls.iter().position(|c| c == "set_sources internal external").unwrap();
     let zero = calls.iter().position(|c| c == "set_time_zero pps").unwrap();
     assert!(sources < zero, "{calls:?}");
+}
+
+#[test]
+fn ur_07_the_root_s_epoch_is_the_pps_edge_with_an_external_source() {
+    // UR-6, UR-7, TM-3: the epoch names how the device's time was set.
+    for (time_source, epoch) in [
+        ("external", ezsdr_kernel::time::EpochRef::Pps { set_by: format!("ezsdr.radio.uhd.set_time_unknown_pps:{ARGS}") }),
+        ("internal", ezsdr_kernel::time::EpochRef::Arbitrary { set_by: format!("ezsdr.radio.uhd.set_time_now:{ARGS}") }),
+    ] {
+        let clocks = Arc::new(ClockRegistry::new());
+        let authority = DeviceAuthority::new(fake(FakeConfig::default()), clocks.clone(), "internal", time_source, ARGS).unwrap();
+        let kind = clocks.get(authority.root()).unwrap().kind;
+        assert!(matches!(kind, ezsdr_kernel::time::ClockDomainKind::Root { epoch: ref e, .. } if *e == epoch), "{time_source}: {kind:?}");
+    }
 }
 
 #[test]
@@ -998,9 +1015,11 @@ fn ur_21_a_burst_inside_the_in_flight_window_is_late() {
 
 #[test]
 fn ur_21_a_burst_before_its_clock_s_origin_is_late() {
+    // An explicit `at` 5 ms ahead lies before the new transmit clock's origin, a start lead
+    // after the cold change (RM-14, RM-15).
     let (mut run, device, _dir) = tx_session(FakeConfig::default());
     assert!(admitted(&run.submit(set("radio.tx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
-    let entry = send(&mut run, "start_repeat", None, &tone(200));
+    let entry = send(&mut run, "start_repeat", Some(ms(5)), &tone(200));
     assert!(admitted(&entry), "{entry:?}");
     wait(&mut run, ms(300));
     let manifest = run.finish();
@@ -1010,6 +1029,23 @@ fn ur_21_a_burst_before_its_clock_s_origin_is_late() {
     let record = &bursts(&manifest)[0];
     assert_eq!(record.target.ticks, 0, "moved to the new clock's origin {e2}");
     assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError"), "{:?}", device.calls());
+}
+
+#[test]
+fn ur_21_an_untimed_burst_after_a_cold_change_is_on_time_at_its_clock_s_origin() {
+    // RS-19: with no `at`, the burst is admitted at the new transmit clock's origin, which
+    // uhd-control registered before the Kernel's KC-21a wait returned (UR-25), so it is on time.
+    let (mut run, _device, _dir) = tx_session(FakeConfig::default());
+    assert!(admitted(&run.submit(set("radio.tx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
+    let entry = send(&mut run, "start_repeat", None, &tone(200));
+    assert!(admitted(&entry), "{entry:?}");
+    wait(&mut run, ms(300));
+    let manifest = run.finish();
+    assert_eq!(time_errors(&manifest), []);
+    // At the origin, tick 0, unless host load let more than the start lead less the device
+    // lead pass before admission (#60's class); either way not before it and not late.
+    let record = &bursts(&manifest)[0];
+    assert!(record.target.ticks >= 0 && record.late_by.is_none(), "{record:?}");
 }
 
 #[test]

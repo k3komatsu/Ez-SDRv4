@@ -380,6 +380,10 @@ fn v58_13_session_manifest_has_log_waveform_and_capture() {
     let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "ezsdr.radio.mock.mock.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1);
     assert_eq!(bursts[0].end, ezsdr_kernel::stream::BurstEnd::Stop);
+    // RS-19: the untimed repeat is admitted at the new clock's origin, not before it, so it
+    // starts there on time.
+    assert_eq!((bursts[0].target.ticks, bursts[0].late_by), (0, None));
+    assert!(!manifest.events.delivered.iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR));
 }
 
 #[test]

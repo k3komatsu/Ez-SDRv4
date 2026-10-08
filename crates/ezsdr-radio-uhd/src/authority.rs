@@ -218,6 +218,16 @@ pub struct DeviceAuthority {
     clock: Option<(ClockStop, JoinHandle<()>)>,
 }
 
+/// UR-6, UR-7: the epoch of the root a device's time sets: its PPS edge when the time
+/// source is not internal, the moment of setting otherwise.
+pub(crate) fn epoch(pps: bool, args: &str) -> EpochRef {
+    if pps {
+        EpochRef::Pps { set_by: format!("ezsdr.radio.uhd.set_time_unknown_pps:{args}") }
+    } else {
+        EpochRef::Arbitrary { set_by: format!("ezsdr.radio.uhd.set_time_now:{args}") }
+    }
+}
+
 impl DeviceAuthority {
     /// Sets the reference sources (the clock source first), zeroes the device's time
     /// (at the next PPS when `time_source` is not `internal`), registers the master
@@ -243,13 +253,8 @@ impl DeviceAuthority {
         let mcr = device.master_clock_rate();
         let rate = Rational::new(mcr, 1).map_err(|e| format!("UR-7: {e}"))?;
         let root = clocks.allocate_id().map_err(|e| format!("UR-7: {e}"))?;
-        let set_by = if pps { "set_time_unknown_pps" } else { "set_time_now" };
         clocks
-            .register(ClockDomain::root(
-                root,
-                rate,
-                EpochRef::Arbitrary { set_by: format!("ezsdr.radio.uhd.{set_by}:{args}") },
-            ))
+            .register(ClockDomain::root(root, rate, epoch(pps, args)))
             .map_err(|e| format!("UR-7: {e}"))?;
         let built = Instant::now();
         let utc = || {

@@ -70,13 +70,14 @@ class EasyApi(unittest.TestCase):
         with self.connect() as sdr:
             sdr.tx.repeat(x)
             # The transmit clock the enable starts begins the profile's 50 ms start lead
-            # later, and the repeat with it (RM-15, RM-25).
+            # later, and the untimed repeat there, on time (RS-19, RM-25).
             sdr.sleep(0.06)
             y = sdr.rx.capture(3000)
         self.assertEqual((y.shape, y.dtype), ((3000,), np.complex64))
         _, phasor = rotation(y, x)
         self.assertAlmostEqual(abs(phasor), 1.0, places=5)
         manifest = sdr.manifest
+        self.assertEqual([e for e in manifest["events"]["delivered"] if e["kind"] == "radio.TIME_ERROR"], [])
         # The action log: every call, in order.
         log = manifest["action_log"]
         self.assertEqual([entry["seq"] for entry in log], [0, 1, 2])
@@ -404,6 +405,14 @@ class EasyApi(unittest.TestCase):
             self.assertEqual(sdr.wait_until(later), later)
             self.assertEqual(sdr.now, later)
 
+    def test_ea_16_next_pps_is_refused_in_simulation(self) -> None:
+        # The default profile's simulated root has an `arbitrary` epoch, which `connected`
+        # names (EA-10): its tick zero is no PPS edge.
+        with self.connect() as sdr:
+            self.assertEqual(sdr._epoch["kind"], "arbitrary")
+            with self.assertRaises(ezsdr.Error):
+                sdr.next_pps()
+
     def test_after_names_an_instant_ahead(self) -> None:
         with self.connect() as sdr:
             at = sdr.after(0.001)
@@ -511,15 +520,18 @@ class DurationRequests(unittest.TestCase):
 
     ROOT = {"node": 0, "local": 1}
 
-    def session(self, reply: dict, rate: tuple = (1_000_000_000, 1)) -> ezsdr.Session:
+    def session(self, reply: dict, rate: tuple = (1_000_000_000, 1), epoch: dict = None) -> ezsdr.Session:
         connection = Mock()
         connection.call.return_value = (reply, b"")
         fed = {"feed": {"port": {"component": "radio", "port": "rx"}, "policy": "drop_oldest", "capacity": 64}}
         at = {"domain": self.ROOT, "ticks": 0}
-        return ezsdr.Session(connection, {
+        connected = {
             "run": "test", "dir": "", "profile": {"bindings": {"radio": {}, "rec": fed}},
             "start_instant": at, "now": at, "root_rate": {"num": rate[0], "den": rate[1]},
-        })
+        }
+        if epoch is not None:
+            connected["root_epoch"] = epoch
+        return ezsdr.Session(connection, connected)
 
     def callers(self, sdr: ezsdr.Session, seconds: object) -> dict:
         handle = ezsdr.session.CaptureRequest("rec", 0, 1, 0, {})
@@ -617,6 +629,30 @@ class DurationRequests(unittest.TestCase):
         clock["origin"]["ticks"] = 200
         with self.assertRaises(ezsdr.Error):
             rx.next_at({"domain": self.ROOT, "ticks": 100}, 10)
+
+    PPS = {"kind": "pps", "set_by": "ezsdr.radio.uhd.set_time_unknown_pps:addr=192.0.2.1"}
+
+    def test_ea_16_next_pps_counts_whole_seconds_of_a_pps_root(self) -> None:
+        # A 200 MHz root whose tick zero is a PPS edge: now 3.97 s; the edge at least `ahead`
+        # after it, inclusive, then k − 1 seconds later.
+        for now_s, k, ahead, edge_s in [(Fraction(397, 100), 1, 0.05, 5), (Fraction(397, 100), 3, 0.05, 7),
+                                        (Fraction(397, 100), 1, 0.02, 4), (Fraction(395, 100), 1, 0.05, 4)]:
+            with self.subTest(now=now_s, k=k, ahead=ahead):
+                sdr = self.session({"now": {"domain": self.ROOT, "ticks": int(now_s * 200_000_000)}}, rate=(200_000_000, 1), epoch=self.PPS)
+                self.assertEqual(sdr.next_pps(k, ahead=ahead), {"domain": self.ROOT, "ticks": edge_s * 200_000_000})
+
+    def test_ea_16_next_pps_refuses_a_root_that_no_pps_set(self) -> None:
+        # Refused before a request: no epoch, an epoch not set by a PPS, a second that is not a
+        # whole number of ticks, and a k that is not a positive integer (EA-16).
+        arbitrary = {"kind": "arbitrary", "set_by": "ezsdr.sim.virtual"}
+        for epoch, rate, k in [(None, (200_000_000, 1), 1), (arbitrary, (200_000_000, 1), 1),
+                               (self.PPS, (1_000_000_000, 3), 1), (self.PPS, (200_000_000, 1), 0),
+                               (self.PPS, (200_000_000, 1), 1.5)]:
+            with self.subTest(epoch=epoch, rate=rate, k=k):
+                sdr = self.session({"now": {"domain": self.ROOT, "ticks": 0}}, rate=rate, epoch=epoch)
+                with self.assertRaises(ezsdr.Error):
+                    sdr.next_pps(k)
+                sdr._connection.call.assert_not_called()
 
     def test_a_child_without_duration_omits_the_field(self) -> None:
         sdr = self.session({"entry": {"outcome": {"kind": "admitted"}}, "manifest": {}, "path": ""})

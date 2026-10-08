@@ -115,14 +115,7 @@ pub(super) fn admit_with(
                 format!("SC-23: {} is not a Provider stream", target.path),
             )]);
         };
-        let record = shared
-            .ctx
-            .clocks
-            .sample_clock_records()
-            .into_iter()
-            .rev()
-            .find(|record| record.stream == *target && record.ended_at.is_none());
-        let Some(record) = record else {
+        let Some(record) = shared.running_clock(target) else {
             return Err(vec![violation(
                 "ezsdr.target",
                 format!("SC-23: {target} has no running transmit SampleClock"),

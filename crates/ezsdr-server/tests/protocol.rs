@@ -182,7 +182,7 @@ fn ea_03_handshake() {
     let handled = server.handle(Request::Hello { protocol: 2 }, Vec::new());
     assert!(!handled.exit);
     let Response::Hello { protocol, server: name, kernel_api } = ok(handled) else { panic!() };
-    assert_eq!((protocol, name.as_str(), kernel_api.as_str()), (2, "ezsdr-server 0.4.0", "4.0.0"));
+    assert_eq!((protocol, name.as_str(), kernel_api.as_str()), (2, "ezsdr-server 0.5.0", "4.0.0"));
 
     let handled = Server::new(config(&temp.0)).handle(Request::Hello { protocol: 1 }, Vec::new());
     assert!(handled.exit);
@@ -326,7 +326,7 @@ fn ea_09_the_default_profile_loops_back() {
     assert!(matches!(submit(&mut server, set("radio.tx.channels", Value::Int(1)), Vec::new()).outcome, Outcome::Admitted { .. }));
     assert!(matches!(submit(&mut server, repeat(), waveform.clone()).outcome, Outcome::Admitted { .. }));
     // The transmit clock the enable starts begins `x310-like`'s 50 ms start lead later, and
-    // the repeat there (RM-15, RM-25).
+    // the untimed repeat there, on time (RS-19, RM-25).
     let (now, _, _) = status(&mut server);
     server.handle(Request::Advance { to: None, by: Some(Duration::new(now.domain, 60_000_000)) }, Vec::new());
     let (uri, _) = capture_uri(&mut server, 3_000);
@@ -349,16 +349,19 @@ fn ea_09_the_default_profile_loops_back() {
         let r = ratio((*sample, sent[(offset + index) % 1_000]));
         assert!((r.0 - phasor.0).abs() < 1e-4 && (r.1 - phasor.1).abs() < 1e-4, "captured sample {index}");
     }
-    finish(&mut server);
+    let (manifest, _) = finish(&mut server);
+    assert!(!manifest.events.delivered.iter().any(|event| event.kind.as_str() == "radio.TIME_ERROR"));
 }
 
 #[test]
 fn ea_10_connect_stands_at_t0() {
     let temp = TempDir::new("t0");
     let mut server = greeted(&temp.0);
-    let Response::Connected { now, start_instant, dir, profile, .. } = ok(server.handle(Request::Connect { profile: None, lease: None }, Vec::new())) else { panic!() };
+    let Response::Connected { now, start_instant, dir, profile, root_epoch, .. } = ok(server.handle(Request::Connect { profile: None, lease: None }, Vec::new())) else { panic!() };
     assert_eq!(now, start_instant);
     assert_eq!(now.ticks, 2_000_000_000, "x310-like's 2 s start lead on a nanosecond root");
+    // The simulated root's epoch is no PPS edge (EA-10).
+    assert!(matches!(root_epoch, ezsdr_kernel::time::EpochRef::Arbitrary { .. }), "{root_epoch:?}");
     assert_eq!(profile, ezsdr_server::default_profile(&dir));
     finish(&mut server);
 }
@@ -835,7 +838,9 @@ fn ea_07_the_uhd_authority_takes_the_binding_s_sources() {
     ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
     let mut profile = uhd_profile(&temp.0);
     profile["bindings"]["radio"]["selector"]["time_source"] = json!("external");
-    ok(server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new()));
+    // UR-6 accepts the Authority's own PPS-set root, and `connected` names its epoch (EA-10).
+    let Response::Connected { root_epoch, .. } = ok(server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new())) else { panic!() };
+    assert_eq!(root_epoch, ezsdr_kernel::time::EpochRef::Pps { set_by: "ezsdr.radio.uhd.set_time_unknown_pps:addr=192.0.2.1".to_owned() });
     let calls = device.calls();
     assert!(calls.iter().any(|c| c == "set_sources internal external"), "{calls:?}");
     assert!(calls.iter().any(|c| c == "set_time_zero pps"), "{calls:?}");
