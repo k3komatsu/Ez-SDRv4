@@ -783,7 +783,8 @@ Follow-ups the reviews found (filed or fixed on 2026-10-07):
   - **step 3 の後にすること（owner 了承，2026-10-08）**：UHD 側の「装置の拒否がスレッドをまたいで戻る往復」で bug が4件（step 2 の B1，step 3 の修正2・3，step 3 の B1）出た．three strikes に当たるので，局所修正を止めて設計メモを書く（例：受信のレート変更の確定と再計画を uhd-rx 自身に持たせて往復をなくす）．比較して owner に推奨を出す．
   - 追加 issue：#63（timeline の items と uhd-control の plan が Run の間ずっと増え，予約ごとに全体を計画し直す）．
 - **Step 3 完了（`1a85a11`，Opus レビュー2回で PASS）**：VH-8 の第3層（uhd-rx を手動時刻の rig で1ターンずつ動かし，scripted X3x0 を相手に1 000系列．計画遅延0〜2 ms，ブロック2 000/65 536）．uhd-rx の bug 5件を発見・修正（空の計画で切らない，拒否待ちが古い計画で終わる，拒否された区間を開始済みと数える，orderly stop が計画到着まで切らない，loss が古い cut で終わる）．FakeDevice テスト138→125．mutation J23–J31 追加，J22 引退．全リスト：maintenance 82/82，phase3–6 全 kill，phase7 168/170（既知の G09，U15）．全リストの最終実行は sim02/sim03 の docker で（AGENTS.md §7）．
-- **次にすること**：(1) RS-19 の asap 解決を送信先 clock の origin に合わせる，`EpochRef::Pps`，`Session.next_pps()`，spec 18 U12 の更新（Phase 8b）．(2) 設計メモ 23（`Line` の共有，受信 clock 登録の統一，UR-17 の上限削除，#63）．#51 は報告規則の設計メモまで保留．
+- **asap と PPS 完了（`0c3015a`，Opus レビュー2回で PASS）**：RS-19 の asap は対象 stream の最新の未終了 SampleClock の origin より前にならない（最初の `tx.repeat` の偽の TIME_ERROR が消えた）．Kernel の `EpochRef::Pps`，server の `root_epoch`（0.5.0），`Session.next_pps(k)`（ezsdr 0.8.0），U12 を Phase 8b に．mutation 全リスト（sim02/sim03）：maintenance 95/95，phase3–6 全 kill，phase7 168/170（既知）．**owner の判断待ち**：`time_source` external で `clock_source` internal のとき，tick 0 は PPS エッジだがその後の秒は内部発振器でずれる．推奨は `clock_source` も external/gpsdo のときだけ `Pps` で登録すること．
+- **次にすること**：設計メモ 23（`Line` の共有，受信 clock 登録の統一，UR-17 の上限削除，#63）．#51 は報告規則の設計メモまで保留．
 - **既知の問題**：Python の `test_v54_sleep_is_run_time` が，この host では毎回 10 秒の上限をわずかに超えて落ちる（10.1〜12.9 秒）．HEAD から build した server でも同じなので，変更が原因ではない（VG-1 のレビューで VERIFIED）．FakeDevice の負荷に弱いテスト（`rehearsal_b6_…`，`uhd_61_03_…`，`ur_21_…`，`ur_2x_…`）も今までどおり．#60 で対処する予定．
 - **ログ**：`~/.cache/ezsdr-fixes/2026-10-07-spec21/`（`vg1-*`，`vg1b-*`，`vg1c-*`）．
 
