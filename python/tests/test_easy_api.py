@@ -355,6 +355,27 @@ class EasyApi(unittest.TestCase):
         counts = {c["kind"]: c["count"] for c in sdr.manifest["events"]["counters"] if c["source"]["path"] == "radio"}
         self.assertEqual(counts["radio.TIME_ERROR"], 0)
 
+    def test_ea_16_aligned_gives_its_calls_one_instant(self) -> None:
+        x = ramp()
+        with self.connect() as sdr:
+            at = sdr.after(0.2)
+            with sdr.aligned(at):
+                sent = sdr.tx.repeat(x)
+                request = sdr.rx.request(3000)
+                with self.assertRaises(ezsdr.Error):
+                    sdr.rx.capture(10)
+                with self.assertRaises(ezsdr.Error):
+                    with sdr.aligned(at):
+                        pass
+            y = sdr.rx.result(request)
+            later = sdr.tx.repeat(x)
+        self.assertEqual((sent["action"]["at"], request.entry["action"]["at"]), (at, at))
+        self.assertIsNone(later["action"]["at"], "the block's instant ends with it")
+        # Both begin at `at`: the waveform's first sample after the 45-sample path delay.
+        np.testing.assert_allclose(y[:45], 0, atol=1e-6)
+        offset, _ = rotation(y[45:], x)
+        self.assertEqual(offset, 0)
+
     # -- Phase 7, VE-6
 
     def test_sleep_returns_the_instant(self) -> None:

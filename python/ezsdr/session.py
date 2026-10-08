@@ -12,9 +12,10 @@ import hashlib
 import json
 import math
 import os
+from contextlib import contextmanager
 from decimal import Decimal
 from fractions import Fraction
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -225,7 +226,7 @@ class Rx(_Side):
             "ns": "radio",
             "verb": "start_rx",
             "target": _rid(f"{self._radio}/rx"),
-            "at": at if at is not None else self._session.now,
+            "at": at if at is not None else self._session._aligned or self._session.now,
             "params": {},
         }
         return _admitted(self._session.submit(action))
@@ -233,6 +234,8 @@ class Rx(_Side):
     def capture(self, n: int, at: Optional[dict] = None, timeout: Optional[float] = None) -> np.ndarray:
         """Captures ``n`` samples from this radio's recorder and returns them (EA-17).
         ``at`` is a ``TimePoint``; ``timeout`` is in seconds of Run time."""
+        if self._session._aligned is not None:
+            raise Error("EA-16: capture waits, so it is refused inside aligned; use request, and result after the block")
         if timeout is not None:
             # Read before the request, which would otherwise be sent first (EA-16).
             self._session._duration(timeout)
@@ -251,7 +254,7 @@ class Rx(_Side):
             "ns": "sink",
             "verb": "capture",
             "target": _rid(recorder),
-            "at": at,
+            "at": at if at is not None else self._session._aligned,
             "params": {"sink.capture_samples": int(n)},
         }
         entry = _admitted(self._session.submit(action))
@@ -290,7 +293,8 @@ class Tx(_Side):
         it differs, then submits ``radio.start_repeat`` with its bytes (EA-16). ``at`` is a
         ``TimePoint``, as ``capture`` takes, at which the first sample goes out — on a
         device whose time a PPS set, a whole second of its root is a PPS edge (UR-7);
-        without one, the next instant the radio allows."""
+        without one, ``aligned``'s instant inside its block, else the next instant the
+        radio allows."""
         channels, data = _cf32(x)
         if self.channels != channels:
             self.channels = channels
@@ -299,7 +303,7 @@ class Tx(_Side):
             "ns": "radio",
             "verb": "start_repeat",
             "target": _rid(f"{self._radio}/tx"),
-            "at": at,
+            "at": at if at is not None else self._session._aligned,
             "params": {},
         }
         return _admitted(self._session.submit(action, data))
@@ -352,6 +356,8 @@ class Session:
         self._waited = 0
         # Capture requests admitted per recorder: the Sink's next request number (HD-16).
         self._captures: Dict[str, int] = {}
+        # The instant `aligned` gives the timed calls in its block (EA-16).
+        self._aligned: Optional[dict] = None
         self.manifest: Optional[dict] = None
         self.manifest_path: Optional[str] = None
 
@@ -382,6 +388,21 @@ class Session:
     def effective(self) -> Dict[str, Dict[str, Any]]:
         """The effective configuration per fragment: what the Kernel admitted (KC-27)."""
         return self._status()["effective"]
+
+    @contextmanager
+    def aligned(self, at: dict) -> Iterator[dict]:
+        """Within the block, ``tx.repeat``, ``rx.start`` and ``rx.request`` of every radio
+        that are given no ``at`` take this one, so that what they start begins at the same
+        instant (EA-16): ``with sdr.aligned(at): tx1.repeat(x1); tx2.repeat(x2);
+        r = rx1.request(n)``, then ``rx1.result(r)`` after it. ``capture``, which waits, is
+        refused inside the block: the Run's time would pass ``at`` before the calls after it."""
+        if self._aligned is not None:
+            raise Error("EA-16: aligned blocks do not nest")
+        self._aligned = at
+        try:
+            yield at
+        finally:
+            self._aligned = None
 
     def after(self, seconds: float) -> dict:
         """The instant ``seconds`` after the Run's current one: ``now`` plus
