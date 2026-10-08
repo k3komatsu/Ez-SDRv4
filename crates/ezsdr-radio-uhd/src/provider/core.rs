@@ -6,15 +6,17 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use ezsdr_kernel::event::{Event, EventHandle, EventKind, EventSink, Severity};
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
-use ezsdr_kernel::module_api::InputStore;
+use ezsdr_kernel::module_api::{InputStore, StopMode};
 use ezsdr_kernel::spec::{Key, Value};
 use ezsdr_kernel::stream::DataLink;
 use ezsdr_kernel::time::{ClockRegistry, Rational, TimeAuthority, TimePoint};
 use ezsdr_radio::device::DeviceDescription;
 use ezsdr_radio::payloads::CommandRejectedPayload;
+use ezsdr_radio::timeline::{self, Config, Item, Kind, Line};
 use ezsdr_radio::{keys, kinds};
 use serde_json::{Value as Json, json};
 
+use super::control::{ColdConfig, Planned};
 use crate::device::{Device, DeviceError, Dir, Settings, decimation};
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -47,14 +49,162 @@ impl Clock {
     }
 }
 
-/// What the threads share of the two streams (UR-25).
+/// Each stream's planned state, once, shared by uhd-control, uhd-rx and uhd-tx and booked by
+/// whichever learns an event (maintenance note 23): uhd-control the commands, uhd-rx and
+/// uhd-tx a configuration their device refused, the thread that finds the device lost the
+/// loss, and `Provider::stop` the streams' end. Lock order: a segment configuration's
+/// `updates`, then this, then `rec`; never held across a device call.
 #[derive(Default)]
 pub(crate) struct Streams {
+    /// Per direction, the stream's timeline (RM-26); none for a receive side with no link.
+    pub lines: [Option<Line>; 2],
+    /// Per direction, the configuration each segment begins with, by the command that began
+    /// it, and whether uhd-control configured it itself, for an enable from no stream (UR-25).
+    pub configs: [BTreeMap<u64, (Arc<ColdConfig>, bool)>; 2],
+    /// The transmit clocks registered, in the order of the transmit plan's segments, and
+    /// whether each has ended (RM-25).
+    pub tx_clocks: Vec<(Clock, bool)>,
+    /// The arrival order of the last command booked (RM-25).
+    pub seq: u64,
+    /// The streams' end — a loss or `Provider::stop` — has been booked, once; a command booked
+    /// after it takes no effect, by the timeline's `End` rule.
+    pub ended: bool,
+    /// `Provider::stop`'s instant and mode, once it has begun (UR-26).
+    pub stop: Option<(i64, StopMode)>,
+    /// uhd-rx's segment, as its origin and configuration, and the first sample of it not yet
+    /// delivered: RM-16's floor, which reaches the plan as `Item.delivered`.
+    pub delivered: Option<(i64, Config, i64)>,
     /// Per direction, the owner has no stream and nothing planned to begin (UR-25).
     pub idle: [bool; 2],
-    /// The segments whose configuration the owner's device refused, by direction and the
-    /// arrival order of the command that began them, for uhd-control to plan again (RM-25).
-    pub refused: Vec<(Dir, u64)>,
+    /// Counts the changes of the plans, for uhd-tx to read its own again.
+    pub version: u64,
+}
+
+impl Streams {
+    pub fn next_seq(&mut self) -> u64 {
+        self.seq += 1;
+        self.seq
+    }
+
+    /// Books a command or fault on a stream's timeline; the end of the receive stream with the
+    /// first sample uhd-rx has not delivered of the segment it cuts (RM-16). False when there is
+    /// no stream, or when its plan cannot be represented, which refuses it.
+    pub fn book(&mut self, core: &Core, dir: Dir, mut item: Item) -> bool {
+        let delivered = self.delivered;
+        let Some(line) = self.lines[dir as usize].as_mut() else { return false };
+        if dir == Dir::Rx && matches!(item.kind, Kind::End { .. }) {
+            let cuts = |origin, config| line.made(origin, config, item.e, item.seq).ok().flatten().is_some_and(|s| s.cut.is_none());
+            item.delivered = item.delivered.or(delivered.filter(|(origin, config, _)| cuts(*origin, *config)).map(|(_, _, k)| k));
+        }
+        if let Err(error) = line.book(item) {
+            core.command_rejected("update_parameter", &format!("RM-26: {error}"));
+            return false;
+        }
+        self.changed(core, dir);
+        true
+    }
+
+    /// RM-25, VH-2: the device refused the configuration of the segment command `seq` began;
+    /// the command is booked as refused, which halts the stream. False when it is no longer
+    /// booked.
+    pub fn refuse(&mut self, core: &Core, dir: Dir, seq: u64) -> bool {
+        let Some(line) = self.lines[dir as usize].as_mut() else { return false };
+        match line.refuse(seq) {
+            Ok(refused) => {
+                self.changed(core, dir);
+                refused
+            }
+            Err(error) => {
+                core.command_rejected("update_parameter", &format!("RM-26: {error}"));
+                false
+            }
+        }
+    }
+
+    /// RM-16, VH-2: a loss or `Provider::stop` at `at` ends both streams, once; a loss counts
+    /// as received with the faults, at the Run's start (RM-25).
+    pub fn end(&mut self, core: &Core, at: i64, abort: bool, lost: bool) {
+        if std::mem::replace(&mut self.ended, true) {
+            return;
+        }
+        let seq = if lost { 0 } else { self.next_seq() };
+        for dir in [Dir::Rx, Dir::Tx] {
+            self.book(core, dir, Item { e: at, seq, ready: at, delivered: None, refused: false, kind: Kind::End { abort } });
+        }
+    }
+
+    /// #63: once its owner has ended the segment command `by` began, the items before that
+    /// command are pruned: nothing booked later takes effect before it, and no command before
+    /// it can be refused any more.
+    pub fn prune(&mut self, dir: Dir, by: Option<u64>) {
+        let Some(line) = self.lines[dir as usize].as_mut() else { return };
+        let Some(e) = by.and_then(|by| line.items.iter().find(|item| item.seq == by)).map(|item| timeline::effective(&line.items, item)) else { return };
+        line.prune(e);
+        let kept: Vec<u64> = line.items.iter().map(|item| item.seq).collect();
+        self.configs[dir as usize].retain(|seq, _| kept.contains(seq));
+    }
+
+    /// The plan of `dir`, each segment with its configuration and its transmit clock.
+    pub fn planned(&self, dir: Dir) -> Vec<Planned> {
+        let Some(line) = self.lines[dir as usize].as_ref() else { return Vec::new() };
+        line.plan.iter().enumerate().map(|(index, segment)| {
+            let config = segment.by.and_then(|by| self.configs[dir as usize].get(&by));
+            Planned {
+                segment: *segment,
+                settings: config.map(|(settings, _)| settings.clone()),
+                configured: config.is_some_and(|(_, configured)| *configured),
+                clock: (dir == Dir::Tx).then(|| self.tx_clocks.get(index).map(|(clock, _)| *clock)).flatten(),
+            }
+        }).collect()
+    }
+
+    /// A plan changed: the transmit clocks follow it (RM-25, VH-2).
+    fn changed(&mut self, core: &Core, dir: Dir) {
+        self.version += 1;
+        if dir == Dir::Tx {
+            if let Err(error) = self.reconcile(core) {
+                core.command_rejected("update_parameter", &format!("UR-25: {error}"));
+            }
+        }
+    }
+
+    /// Each transmit segment's clock, registered when its change is booked and ended at its
+    /// cut once the plan has one; a clock registered for a change the plan no longer has — one
+    /// booked after `Provider::stop`'s instant — ends at its origin (KC-21a, VH-2).
+    fn reconcile(&mut self, core: &Core) -> Result<(), String> {
+        let plan = self.lines[Dir::Tx as usize].as_ref().map_or_else(Vec::new, |line| line.plan.clone());
+        for (index, segment) in plan.iter().enumerate() {
+            if index == self.tx_clocks.len() {
+                let clock = core.register(Dir::Tx, segment.config.ratio.num() as i64, segment.origin)?;
+                self.tx_clocks.push((clock, false));
+            }
+            let (clock, ended) = &mut self.tx_clocks[index];
+            if let Some(cut) = segment.cut.filter(|_| !*ended) {
+                core.clocks.end(clock.domain, core.at(clock.instant(cut))).map_err(|e| e.to_string())?;
+                *ended = true;
+            }
+        }
+        for (clock, ended) in self.tx_clocks.iter_mut().skip(plan.len()).filter(|(_, ended)| !*ended) {
+            if let Err(error) = core.clocks.end(clock.domain, core.at(clock.origin)) {
+                core.reject_note(json!({ "clock_not_ended": error.to_string() }));
+            }
+            *ended = true;
+        }
+        Ok(())
+    }
+
+    /// UR-30: the plans the streams were carried out by, each segment's origin and end.
+    pub fn record(&self) -> Json {
+        let plan = |dir: Dir| -> Vec<Json> {
+            self.lines[dir as usize].iter().flat_map(|line| &line.plan).map(|segment| json!({
+                "origin": segment.origin,
+                "end": segment.cut.and_then(|cut| segment.instant(cut).ok()),
+                "channels": segment.config.channels,
+                "ticks_per_sample": [segment.config.ratio.num(), segment.config.ratio.den()],
+            })).collect()
+        };
+        json!({ "what": "plan", "rx": plan(Dir::Rx), "tx": plan(Dir::Tx) })
+    }
 }
 
 /// Everything the threads record; written to the sections at `cleanup` (UR-30).
@@ -119,8 +269,6 @@ pub(crate) struct Core {
     /// `S`, the end of the device's start-up (UR-13).
     pub start_up: AtomicI64,
     lost: AtomicBool,
-    /// When the device was found lost.
-    lost_at: AtomicI64,
 }
 
 impl Core {
@@ -159,7 +307,6 @@ impl Core {
             held: Mutex::new(BTreeSet::new()),
             start_up: AtomicI64::new(i64::MIN),
             lost: AtomicBool::new(false),
-            lost_at: AtomicI64::new(i64::MAX),
         }
     }
 
@@ -184,11 +331,6 @@ impl Core {
 
     pub fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Acquire)
-    }
-
-    /// The instant the device was found lost, once it is.
-    pub fn lost_at(&self) -> Option<i64> {
-        Some(self.lost_at.load(Ordering::Acquire)).filter(|at| *at != i64::MAX)
     }
 
     pub fn stat(&self, name: &'static str, n: i64) {
@@ -229,12 +371,17 @@ impl Core {
         self.emit(&self.id, kinds::COMMAND_REJECTED, Severity::Error, payload);
     }
 
-    /// MA-9a: `DEVICE_LOST`, once, from this Provider; then no thread uses the device.
+    /// MA-9a: `DEVICE_LOST`, once, from this Provider; then no thread uses the device. The
+    /// thread that finds the loss books it on both streams, before any thread can see the
+    /// device lost (RM-16).
     pub fn device_lost(&self, message: &str) {
-        if self.lost.swap(true, Ordering::AcqRel) {
+        let mut streams = lock(&self.streams);
+        if self.lost.load(Ordering::Acquire) {
             return;
         }
-        self.lost_at.store(self.now(), Ordering::Release);
+        streams.end(self, self.now(), false, true);
+        self.lost.store(true, Ordering::Release);
+        drop(streams);
         // Before anything can free it: a lost device is never freed (F4).
         self.device.mark_lost();
         self.timing(json!({ "what": "device_lost", "message": message, "at": self.now() }));

@@ -132,7 +132,7 @@ struct Selector {
 /// The receive segment being delivered (RM-21).
 struct Rx {
     handle: SampleClockHandle,
-    /// Its SampleClock, registered at its first sample (RM-25).
+    /// Its SampleClock, registered at the first block published (RM-25).
     domain: Option<ClockDomainId>,
     origin: i64,
     ratio: Rational,
@@ -416,10 +416,6 @@ impl MockRadio {
             if cut.is_some_and(|cut| cut <= next) {
                 self.rx_settle(until)?;
                 break;
-            }
-            if until > origin {
-                // RM-25: past its origin the segment has its first sample.
-                self.rx_register()?;
             }
             // Every fault cuts the block in progress at its instant (MR-20).
             let fault = self.faults.iter().filter(|fault| !fault.resolved).map(|fault| fault.tick).min();
@@ -825,7 +821,7 @@ impl MockRadio {
         line.segment(rx.origin, rx.config()).map_or(Some(0), |segment| segment.cut)
     }
 
-    /// RM-25: the receive segment's SampleClock, registered at its first sample.
+    /// RM-25: the receive segment's SampleClock, registered at the first block published.
     fn rx_register(&mut self) -> Result<ClockDomainId, ModuleError> {
         let clocks = self.clocks.clone().expect("prepared clocks");
         let rx = self.rx.as_mut().expect("a receive stream");
@@ -836,8 +832,8 @@ impl MockRadio {
     }
 
     /// RM-16, RM-25: once the items in effect by `t` cut the receive segment, its
-    /// SampleClock ends at the cut's instant; a segment cut at its origin has none, and
-    /// another may begin there in its place.
+    /// SampleClock, if it has published a block, ends at the cut's instant; a segment cut at
+    /// its origin has none, and another may begin there in its place.
     fn rx_settle(&mut self, t: i64) -> Result<(), ModuleError> {
         let Some((origin, config, ended)) = self.rx.as_ref().map(|rx| (rx.origin, rx.config(), rx.ended)) else { return Ok(()) };
         let Some(line) = self.rx_line.as_ref() else { return Ok(()) };
@@ -847,10 +843,11 @@ impl MockRadio {
                 self.rx_from = origin;
             }
             Some(Segment { cut: Some(cut), .. }) if !ended => {
-                let domain = self.rx_register()?;
-                let at = time::v_of(origin, config.ratio, cut).ok_or_else(|| self.reject("MR-12: receive cut overflow"))?;
-                self.clocks.as_ref().expect("prepared clocks").end(domain, TimePoint::new(self.root.expect("prepared root"), at))
-                    .map_err(|error| ModuleError::rejected(format!("MR-12: {error}")))?;
+                if let Some(domain) = self.rx.as_ref().and_then(|rx| rx.domain) {
+                    let at = time::v_of(origin, config.ratio, cut).ok_or_else(|| self.reject("MR-12: receive cut overflow"))?;
+                    self.clocks.as_ref().expect("prepared clocks").end(domain, TimePoint::new(self.root.expect("prepared root"), at))
+                        .map_err(|error| ModuleError::rejected(format!("MR-12: {error}")))?;
+                }
                 if let Some(rx) = self.rx.as_mut() { rx.ended = true; }
             }
             Some(_) => {}
@@ -1709,7 +1706,7 @@ impl Provider for MockRadio {
             target.checked_add(*offset).ok_or_else(|| ModuleError::rejected("MR-20: fault time overflow"))
         }).collect::<Result<_, _>>()?;
         // RM-21, RM-25: a receive stream with a link runs from T0, its first segment's clock
-        // registered at its first sample.
+        // registered at its first block.
         if !self.links.is_empty() {
             let line = self.line(Direction::Rx, target, &self.config)?;
             let first = line.plan.first().copied();

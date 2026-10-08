@@ -5,7 +5,7 @@ mod generator;
 
 use ezsdr_kernel::stream::Direction;
 use ezsdr_kernel::time::Rational;
-use ezsdr_radio::timeline::{Config, Item, Kind, Segment, Stream, plan};
+use ezsdr_radio::timeline::{Config, Item, Kind, Line, Segment, Stream, plan};
 use generator::{CLASSES, Terms};
 
 /// Root ticks per millisecond on the 1 GHz root.
@@ -226,6 +226,100 @@ fn rm_26_generated_sequences_keep_the_timeline_invariants() {
     }
     assert_eq!(seen.into_iter().collect::<Vec<_>>(), CLASSES, "every class is generated");
     assert!(fractional > 0, "a generated segment runs at a fractional ratio");
+}
+
+/// #63: a line that prunes the items before each booking's receipt plans every generated
+/// sequence as one that keeps them all, after every booking and every refusal.
+#[test]
+fn rm_26_a_pruned_line_plans_as_one_that_keeps_every_item() {
+    let mut pruned_any = 0;
+    for seed in 0..1_000 {
+        let sequence = generator::sequence(seed, &generator::FRACTIONAL_RATES);
+        for direction in [Direction::Rx, Direction::Tx] {
+            let stream = Stream { origin: 2_000 * MS, call: 2_000, allowance: 3 * MS, ..stream(direction, 1) };
+            let terms = Terms { t0: 2_000 * MS, root_hz: 1_000_000_000, timed_lead: 2 * MS, stream };
+            let mut items = sequence.items(&terms);
+            // As a Provider books them: in the order received.
+            items.sort_by_key(|item| (item.ready, item.seq));
+            let (mut full, mut pruned) = (Line::new(stream), Line::new(stream));
+            for item in items {
+                // Everything booked from now on takes effect at or after its receipt.
+                let before = pruned.items.len();
+                pruned.prune(item.ready);
+                pruned_any += before - pruned.items.len();
+                full.book(item).unwrap();
+                pruned.book(item).unwrap();
+                // Every fifth change or start refused once booked (VH-2).
+                if item.seq % 5 == 4 && matches!(item.kind, Kind::Cold(_) | Kind::Start) {
+                    assert!(full.refuse(item.seq).unwrap() && pruned.refuse(item.seq).unwrap());
+                }
+                assert_eq!(pruned.plan, full.plan, "seed {seed}, {direction:?}, after item {}", item.seq);
+            }
+        }
+    }
+    assert!(pruned_any > 0, "some item is pruned");
+}
+
+/// #63: an item that takes effect at the prune instant is kept, so that one booked later at
+/// that instant, received earlier, still takes effect before it: a start received first and
+/// booked after a `Stop` at the same instant does not restart the stream.
+#[test]
+fn rm_26_a_line_pruned_at_an_item_s_instant_keeps_it() {
+    let rx = stream(Direction::Rx, 1);
+    let (mut full, mut pruned) = (Line::new(rx), Line::new(rx));
+    let stop = item(1_000 * MS, 1, 500 * MS, Kind::Stop);
+    let start = item(1_000 * MS, 0, 1_000 * MS, Kind::Start);
+    full.book(stop).unwrap();
+    pruned.book(stop).unwrap();
+    pruned.prune(1_000 * MS);
+    full.book(start).unwrap();
+    pruned.book(start).unwrap();
+    assert_eq!(pruned.plan, full.plan);
+    assert_eq!(full.plan.len(), 1, "no restart: {:?}", full.plan);
+}
+
+/// #63: pruning folds items in the order of their effective instants: a `cold` change received
+/// after another but requested before it takes effect at the earlier one's instant (RM-25).
+#[test]
+fn rm_26_pruning_folds_a_cold_change_floored_at_an_earlier_one() {
+    for direction in [Direction::Rx, Direction::Tx] {
+        let (mut full, mut pruned) = (Line::new(stream(direction, 1)), Line::new(stream(direction, 1)));
+        for booked in [item(500 * MS, 1, 0, Kind::Cold(config(1, 2_000_000))), item(300 * MS, 2, 100 * MS, Kind::Cold(config(1, 500_000)))] {
+            full.book(booked).unwrap();
+            pruned.book(booked).unwrap();
+        }
+        pruned.prune(900 * MS);
+        let last = item(1_000 * MS, 3, 900 * MS, Kind::Cold(config(1, 1_000_000)));
+        full.book(last).unwrap();
+        pruned.book(last).unwrap();
+        assert_eq!(pruned.plan, full.plan, "{direction:?}");
+    }
+}
+
+/// RM-26: a booking whose plan cannot be represented leaves the line as it was.
+#[test]
+fn rm_26_a_refused_booking_leaves_the_line() {
+    let mut line = Line::new(stream(Direction::Rx, 1));
+    line.book(item(1_000 * MS, 1, 1_000 * MS, Kind::Stop)).unwrap();
+    let before = line.clone();
+    assert!(line.book(item(i64::MAX - 1, 2, 1_000 * MS, Kind::Start)).is_err());
+    assert_eq!(line, before);
+}
+
+/// #63: over a long Run the items a line keeps stay few, whatever it has booked.
+#[test]
+fn rm_26_a_pruned_line_keeps_few_items() {
+    for direction in [Direction::Rx, Direction::Tx] {
+        let mut line = Line::new(stream(direction, 1));
+        for n in 0..10_000_i64 {
+            let now = n * 300 * MS;
+            line.prune(now);
+            let rate = if n % 2 == 0 { 2_000_000 } else { 1_000_000 };
+            line.book(item(now + 100 * MS, n as u64, now, Kind::Cold(config(1, rate)))).unwrap();
+            assert!(line.items.len() <= 2, "{direction:?}: {} items after {n} bookings", line.items.len());
+        }
+        assert_eq!(line.plan.len(), 10_001, "{direction:?}: every segment stays in the plan");
+    }
 }
 
 fn check(stream: &Stream, planned: &[Segment], seed: u64) {

@@ -19,7 +19,6 @@ use ezsdr_kernel::id::ClockDomainId;
 
 use super::Control;
 use super::super::core::{key, lock};
-use super::super::rx::RxCmd;
 use crate::device::{Device, Dir, FakeConfig};
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS, RELEASE_WINDOW_NS};
 
@@ -195,17 +194,15 @@ fn run(sequence: &Sequence) -> Record {
     device.rx_open(1).unwrap();
     device.tx_open(1).unwrap();
     let (to_tx, from_tx) = channel();
-    let (to_rx, from_rx) = channel();
     let mut config = core.description.defaults.clone();
     config.insert(key("radio.tx.channels"), Value::Int(1));
     let start = super::Start { t0: T0, rx: Some((1, 200)), tx: Some((tx, 1)) };
-    let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, to_rx, config, false, start);
+    let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, config, false, start);
     let ticks = |ns: i64| ns / 5;
     let at = |ns: Option<i64>| ns.map(|ns| AbsoluteDeadline::new(core.at(T0 + ticks(ns))));
     let loss = sequence.faults.iter().filter(|(_, fault)| *fault == Fault::Loss).map(|(ns, _)| T0 + ticks(*ns)).min();
     let mut rounds = sequence.rounds.iter().peekable();
     // The idealized uhd-rx: each planned segment's clock, once registered, and whether ended.
-    let mut plan: super::Plan = Arc::new(Vec::new());
     let mut receive: Vec<(i64, ezsdr_radio::timeline::Config, ClockDomainId, bool)> = Vec::new();
     let mut now = T0;
     loop {
@@ -236,11 +233,8 @@ fn run(sequence: &Sequence) -> Record {
         }
         control.release();
         while from_tx.try_recv().is_ok() {}
-        if let Some(latest) = from_rx.try_iter().filter_map(|cmd| match cmd { RxCmd::Plan(plan, _) => Some(plan), _ => None }).last() {
-            plan = latest;
-        }
-        for planned in plan.iter().filter(|planned| planned.segment.origin < now) {
-            let segment = planned.segment;
+        let plan = lock(&core.streams).lines[Dir::Rx as usize].as_ref().map(|line| line.plan.clone()).unwrap_or_default();
+        for segment in plan.into_iter().filter(|segment| segment.origin < now) {
             let index = match receive.iter().position(|(origin, config, _, _)| *origin == segment.origin && *config == segment.config) {
                 Some(index) => index,
                 None => {

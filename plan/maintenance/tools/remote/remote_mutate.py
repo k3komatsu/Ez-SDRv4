@@ -60,11 +60,12 @@ def main():
         out = run(*SSH, host, f"cat {REMOTE}/out/{tag}-*.log 2>/dev/null || true", capture_output=True).stdout
         print(out, end="")
         for line in out.splitlines():
-            if m := re.match(r"(\S+) .*: (killed|SURVIVED|NOT FOUND|COMPILE ERROR|BASELINE FAILED)", line):
+            if m := re.match(r"(\S+) .*: (killed|equivalent \(survived\)|SURVIVED|NOT FOUND|COMPILE ERROR|BASELINE FAILED)", line):
                 outcomes[m[1]] = m[2]
     missing = [i for i in ids if i not in outcomes]
-    bad = sorted(i for i, o in outcomes.items() if o != "killed") + missing
-    print(f"{sum(o == 'killed' for o in outcomes.values())}/{len(ids)} killed; not killed or missing: {bad}")
+    passed = ("killed", "equivalent (survived)")  # a recorded equivalent must survive (mutate.py)
+    bad = sorted(i for i, o in outcomes.items() if o not in passed) + missing
+    print(f"{sum(o in passed for o in outcomes.values())}/{len(ids)} passed; not passed or missing: {bad}")
     return 1 if bad else 0
 
 

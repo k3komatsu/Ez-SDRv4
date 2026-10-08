@@ -675,8 +675,8 @@
   "id": "U22",
   "name": "a cold change's clock not taken for bookings at receipt",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "let Some(((clock, _), channels)) = self.tx_clocks.last().zip(",
-  "new": "let Some(((clock, _), channels)) = self.tx_clocks.first().zip(",
+  "old": "streams.tx_clocks.last().map(|(clock, _)| *clock).zip(",
+  "new": "streams.tx_clocks.first().map(|(clock, _)| *clock).zip(",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_rate_change_admits_a_burst_on_the_new_clock"
@@ -777,8 +777,8 @@
   "id": "U32",
   "name": "orderly stop cuts at the first sample not yet delivered, as abort does",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "if let Some(stream) = self.stream.as_mut().filter(|_| mode == StopMode::Abort) {",
-  "new": "if let Some(stream) = self.stream.as_mut().filter(|_| true) {",
+  "old": "        if mode == StopMode::Abort {\n            // RM-16: an abort ends",
+  "new": "        if true {\n            // RM-16: an abort ends",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"
@@ -837,8 +837,8 @@
   "id": "U38",
   "name": "Provider::stop does not cancel held commands",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "        self.cancel_held(\"Provider::stop\");\n        self.end(at, mode == StopMode::Abort, false);",
-  "new": "        self.end(at, mode == StopMode::Abort, false);",
+  "old": "        self.cancel_held(\"Provider::stop\");\n        let plan = lock(&self.core.streams).record();",
+  "new": "        let plan = lock(&self.core.streams).record();",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_24_stop_cancels_held_commands"
@@ -857,18 +857,18 @@
   "id": "U40",
   "name": "a rate mismatch at the switch accepted",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "reopened.and_then(|()| next.settings.configure(&self.core, Dir::Rx, channels).map(|_| ()))",
-  "new": "reopened.and_then(|()| next.settings.configure(&self.core, Dir::Rx, channels).map(|_| ()).or(Ok(())))",
+  "old": "reopened.and_then(|()| next.configure(&self.core, Dir::Rx).map(|_| ()))",
+  "new": "reopened.and_then(|()| next.configure(&self.core, Dir::Rx).map(|_| ()).or(Ok(())))",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"
  },
  {
   "id": "U41",
-  "name": "uhd-control waits for the plan's last origin before handing it to the owner",
+  "name": "uhd-control waits for the plan's last origin before a booking returns",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "        let planned = Arc::new(planned);\n",
-  "new": "        while plan.last().is_some_and(|segment| self.core.now() < segment.origin) {\n            std::thread::sleep(POLL);\n        }\n        let planned = Arc::new(planned);\n",
+  "old": "            self.colds.insert((e, seq), (key.clone(), value));\n            self.core.timing(json!({ \"what\": \"cold_change\"",
+  "new": "            while streams.lines[dir as usize].as_ref().and_then(|line| line.plan.last()).is_some_and(|segment| self.core.now() < segment.origin) {\n                std::thread::sleep(POLL);\n            }\n            self.colds.insert((e, seq), (key.clone(), value));\n            self.core.timing(json!({ \"what\": \"cold_change\"",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_14_booking_does_not_wait_for_a_future_cold_switch"
@@ -957,8 +957,8 @@
   "id": "R05",
   "name": "the switch ignores held commands due by e2 (L09)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "for (&order, timed) in self.held.iter().filter(|(_, timed)| timed.dir == dir) {\n                        settings.book(order, timed.settings());",
-  "new": "for (&order, timed) in self.held.iter().filter(|(_, timed)| false && timed.dir == dir) {\n                        settings.book(order, timed.settings());",
+  "old": "        for (&order, timed) in self.held.iter().filter(|(_, timed)| timed.dir == dir) {\n            config.book(order, timed.settings());",
+  "new": "        for (&order, timed) in self.held.iter().filter(|(_, timed)| false && timed.dir == dir) {\n            config.book(order, timed.settings());",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_the_switch_applies_the_configuration_in_effect_at_e2"
@@ -985,13 +985,13 @@
  },
  {
   "id": "R08",
-  "name": "an abort delivers the orderly tail (L12)",
+  "name": "an abort delivers the orderly tail (L12); note 23 round 2: uhd-rx's own abort, its command channel gone (Provider::stop(abort)'s cut is J55's)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "if let Some(stream) = self.stream.as_mut().filter(|_| mode == StopMode::Abort) {",
-  "new": "if let Some(stream) = self.stream.as_mut().filter(|_| false) {",
+  "old": "                stream.cut_at(stream.clock.instant(stream.expected));\n                if !stream.stopped {",
+  "new": "                if !stream.stopped {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_26_a_stopped_stream_keeps_its_end"
+  "filter": "ur_26_uhd_rx_aborts_when_its_provider_is_gone"
  },
  {
   "id": "R09",
@@ -1027,8 +1027,8 @@
   "id": "R12",
   "name": "a planned receive cut handed to the device as a timed stop (P1-1; design-notes §11 F1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "                    let cut = stream.clock.instant(cut.max(stream.expected));\n                    stream.cut_at(cut);\n",
-  "new": "                    let cut = stream.clock.instant(cut.max(stream.expected));\n                    stream.cut_at(cut);\n                    let _ = self.core.device.rx_stop(Some(cut));\n",
+  "old": "        let Some(stream) = self.stream.as_mut() else { return };\n        stream.follow(&lock(&self.core.streams));\n",
+  "new": "        let Some(stream) = self.stream.as_mut() else { return };\n        stream.follow(&lock(&self.core.streams));\n        if let Some(cut) = stream.cut { let _ = self.core.device.rx_stop(Some(cut)); }\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"
@@ -1037,8 +1037,8 @@
   "id": "R13",
   "name": "UR-25's untimed stop at the cut removed (P1-3; §11 F1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "                if !stream.stopped {\n                    stream.stopped = true;\n                    self.last_stop = stop_at_cut(&self.core, cut).or(self.last_stop);\n                }\n                len = (cut_k - k).max(0);",
-  "new": "                len = (cut_k - k).max(0);",
+  "old": "        if let Some(cut) = stream.cut.filter(|_| ended && !stream.stopped) {\n            // UR-25: the samples reached the cut, so the stream is stopped untimed now.\n            stream.stopped = true;\n            self.last_stop = stop_at_cut(&self.core, cut).or(self.last_stop);\n        }\n",
+  "new": "",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"
@@ -1055,33 +1055,13 @@
  },
  {
   "id": "R15",
-  "name": "uhd-rx learns the stop instant only at its shutdown (NONBLOCKING 9)",
+  "name": "Provider::stop books no end of the streams: an orderly stop leaves the last receive segment uncut (NONBLOCKING 9; note 23; round 2: an abort's own cut no longer needs it)",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "        let _ = to_rx.send(RxCmd::Cut { at, mode });\n",
+  "old": "            streams.end(&core, at, mode == StopMode::Abort, false);\n",
   "new": "",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_26_an_abort_publishes_nothing_after_the_stop_instant"
- },
- {
-  "id": "R16",
-  "name": "a stop that arrived during a receive wait does not cut its block (NONBLOCKING 9)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        // A cut that arrived during the wait cuts this block too (RM-16).\n        self.poll();\n",
-  "new": "",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "rm_26_the_timeline_against_uhd_rx"
- },
- {
-  "id": "R19",
-  "name": "the orderly cut counted from when uhd-control learns of the stop (Review M, N-6)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "        self.end(at, mode == StopMode::Abort, false);",
-  "new": "        self.end(self.core.now(), mode == StopMode::Abort, false);",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_26_an_orderly_stop_cuts_at_its_instant"
+  "filter": "ur_25_a_receive_session_follows_its_recorded_plan"
  },
  {
   "id": "R21",
@@ -1272,16 +1252,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_23_a_stop_while_the_device_burst_waits_for_a_continuation_ends_it"
- },
- {
-  "id": "B11",
-  "name": "an abort's stop issued again at the cut (Review N, N4)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "                            stream.stopped = true;\n                            self.last_stop = Some(issued);\n",
-  "new": "                            stream.stopped = false;\n                            self.last_stop = Some(issued);\n",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_26_an_abort_publishes_nothing_after_the_stop_instant"
  },
  {
   "id": "B12",

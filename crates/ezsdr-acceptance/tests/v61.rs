@@ -41,7 +41,8 @@ fn v61_02_capture_starts_at_the_requested_sample_index() {
     );
     let mut run = session_run(&temp, &profile);
     let clock = root(&run);
-    run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
+    // RM-25: the receive clock is registered with the first block, published at 2 ms.
+    run.advance_to(TimePoint::new(clock, T0 + 3_000_000)).unwrap();
     let rx_clock = run
         .sample_clocks()
         .into_iter()

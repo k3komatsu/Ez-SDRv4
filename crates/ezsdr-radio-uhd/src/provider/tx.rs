@@ -20,7 +20,7 @@ use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::{TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload};
 use serde_json::json;
 
-use super::control::{Plan, Planned};
+use super::control::Planned;
 use super::core::{Clock, Core, lock};
 use crate::device::{Dir, Iq, TxCode, TxReport};
 use crate::profile::{DEVICE_LEAD_NS, IN_FLIGHT_WINDOW_NS};
@@ -40,8 +40,6 @@ pub(crate) enum TxCmd {
     Burst(Held),
     /// `Stop` for `<id>/tx` or `<id>`: it ends the bursts, not the clock (RM-16, UR-26).
     Stop,
-    /// The transmit plan uhd-control booked: every segment with its clock (UR-25).
-    Plan(Plan),
     /// `Provider::stop` (UR-26).
     Shutdown,
 }
@@ -74,9 +72,10 @@ pub(crate) struct Tx {
     open: Option<Open>,
     tracker: Option<BurstTracker>,
     switch: Option<Switch>,
-    /// The transmit plan, and the index in it of the current segment, or of the next one
-    /// to begin while there is no clock.
-    plan: Plan,
+    /// The transmit plan as last read, the version it was read at, and the index in it of the
+    /// current segment, or of the next one to begin while there is no clock.
+    plan: Vec<Planned>,
+    version: Option<u64>,
     at: usize,
     unacked: VecDeque<PendingReport>,
     /// The device burst is still open, its next sample this one: a held burst starting
@@ -106,7 +105,8 @@ impl Tx {
             later: Vec::new(),
             open: None,
             switch: None,
-            plan: Arc::new(Vec::new()),
+            plan: Vec::new(),
+            version: None,
             at: 0,
             unacked: VecDeque::new(),
             continues_at: None,
@@ -127,6 +127,7 @@ impl Tx {
                 std::thread::sleep(Wall::from_millis(1));
                 continue;
             }
+            self.read(None);
             self.reports(Wall::ZERO);
             if !self.step() {
                 std::thread::sleep(IDLE);
@@ -145,12 +146,24 @@ impl Tx {
                 }
             }
             TxCmd::Stop => self.stop_now("UR-26: cancelled by Stop", true),
-            TxCmd::Plan(plan) => {
-                self.plan = plan;
-                self.retarget();
-            }
             TxCmd::Shutdown => unreachable!("handled by run"),
         }
+    }
+
+    /// Reads the transmit plan it shares with uhd-control again, when it has changed (UR-25),
+    /// pruning first the items before the command that began the segment `passed` (#63).
+    fn read(&mut self, passed: Option<Option<u64>>) {
+        let core = self.core.clone();
+        let mut streams = lock(&core.streams);
+        if let Some(by) = passed {
+            streams.prune(Dir::Tx, by);
+        } else if self.version == Some(streams.version) {
+            return;
+        }
+        self.version = Some(streams.version);
+        self.plan = streams.planned(Dir::Tx);
+        self.retarget();
+        streams.idle[Dir::Tx as usize] = self.clock.is_none() && self.switch.is_none();
     }
 
     /// UR-25: the plan's cut of the current clock, and the segment after it; with no clock,
@@ -161,7 +174,6 @@ impl Tx {
                 .map(|cut| Switch { cut: clock.instant(cut), to: self.plan.get(self.at + 1).cloned() }),
             None => self.plan.get(self.at).cloned().map(|to| Switch { cut: i64::MIN, to: Some(to) }),
         };
-        lock(&self.core.streams).idle[Dir::Tx as usize] = self.clock.is_none() && self.switch.is_none();
     }
 
     /// UR-25: at a switch, the bursts booked on the new clock are held; those on a clock still
@@ -628,7 +640,8 @@ impl Tx {
             self.forget(&held);
             self.core.command_rejected("tx_burst", "cancelled by a cold change");
         }
-        if self.clock.take().is_some() {
+        let passed = self.clock.take().map(|_| self.plan.get(self.at).and_then(|planned| planned.segment.by));
+        if passed.is_some() {
             self.at += 1;
         }
         self.tracker = None;
@@ -639,7 +652,7 @@ impl Tx {
             } else {
                 Ok(())
             };
-            let configured = reopened.and_then(|()| if to.configured { Ok(()) } else { to.settings.configure(&self.core, Dir::Tx, to.channels()).map(|_| ()) });
+            let configured = reopened.and_then(|()| if to.configured { Ok(()) } else { to.configure(&self.core, Dir::Tx).map(|_| ()) });
             self.channels = to.channels();
             match configured {
                 Ok(()) => {
@@ -647,8 +660,9 @@ impl Tx {
                     self.tracker = to.clock.map(|clock| BurstTracker::new(clock.domain));
                 }
                 Err(error) => {
+                    // RM-25: the refusal halts the stream, booked by uhd-tx itself.
                     if let Some(by) = to.segment.by {
-                        lock(&self.core.streams).refused.push((Dir::Tx, by));
+                        lock(&self.core.streams).refuse(&self.core, Dir::Tx, by);
                     }
                     self.at += 1;
                     self.core.device_failed("update_parameter", &error);
@@ -657,7 +671,8 @@ impl Tx {
             self.core.timing(json!({ "what": "tx_switch", "cut": switch.cut, "origin": to.segment.origin, "at": self.core.now() }));
         }
         self.adopt_later();
-        self.retarget();
+        // #63: the segment switched from has ended.
+        self.read(Some(passed.flatten()));
     }
 
     /// UR-28: every report recorded; underflows and late bursts become events.
@@ -789,7 +804,7 @@ mod tests {
                 config: ezsdr_radio::timeline::Config { channels: channels as u16, ratio: ezsdr_kernel::time::Rational::new(clock.n as u64, 1).unwrap() },
                 by: Some(1),
             },
-            settings: Arc::new(super::super::control::ColdConfig::new(clock.origin, settings)),
+            settings: Some(Arc::new(super::super::control::ColdConfig::new(settings))),
             configured: false,
             clock: Some(clock),
         });
@@ -907,32 +922,86 @@ mod tests {
     }
 
     #[test]
+    fn ur_25_uhd_tx_reads_the_plan_again_when_it_changes() {
+        // UR-25: a transmit change booked after uhd-tx read the plan reaches it at its next
+        // read: the switch at the plan's cut, to the clock the booking registered.
+        use ezsdr_radio::timeline::{Config, Item, Kind, Line, Stream};
+        let (core, device, _, _) = super::super::test_support::rig();
+        device.tx_open(1).unwrap();
+        let c0 = core.register(Dir::Tx, 200, 0).unwrap();
+        let config = |n: u64| Config { channels: 1, ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
+        {
+            let mut streams = lock(&core.streams);
+            streams.tx_clocks = vec![(c0, false)];
+            let lead = core.ticks(core.description.timing.start_lead_ns);
+            streams.lines[Dir::Tx as usize] = Some(Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
+        }
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), cmds, Some(c0), 1);
+        tx.read(None);
+        assert!(tx.switch.is_none());
+        let e = core.ticks(1_000_000_000);
+        {
+            let mut streams = lock(&core.streams);
+            streams.configs[Dir::Tx as usize].insert(1, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
+            assert!(streams.book(&core, Dir::Tx, Item { e, seq: 1, ready: 0, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
+        }
+        let c1 = lock(&core.streams).tx_clocks[1].0;
+        tx.read(None);
+        let switch = tx.switch.as_ref().expect("a switch");
+        assert_eq!(switch.cut, e);
+        assert_eq!(switch.to.as_ref().and_then(|to| to.clock), Some(c1));
+    }
+
+    #[test]
+    fn ur_23_a_refused_transmit_change_ends_its_clock_at_its_origin() {
+        // UR-23, VH-2: when the owner books a transmit change as refused, the clock its booking
+        // registered ends at its origin at once, with no later booking needed.
+        use ezsdr_radio::timeline::{Config, Item, Kind, Line, Stream};
+        let (core, device, _, _) = super::super::test_support::rig();
+        device.tx_open(1).unwrap();
+        let c0 = core.register(Dir::Tx, 200, 0).unwrap();
+        let config = |n: u64| Config { channels: 1, ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
+        let mut streams = lock(&core.streams);
+        streams.tx_clocks = vec![(c0, false)];
+        let lead = core.ticks(core.description.timing.start_lead_ns);
+        streams.lines[Dir::Tx as usize] = Some(Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
+        streams.configs[Dir::Tx as usize].insert(1, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
+        assert!(streams.book(&core, Dir::Tx, Item { e: core.ticks(1_000_000_000), seq: 1, ready: 0, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
+        let c1 = streams.tx_clocks[1].0;
+        assert!(streams.refuse(&core, Dir::Tx, 1));
+        drop(streams);
+        let ended = core.clocks.sample_clock_records().into_iter().find(|r| r.domain == c1.domain).and_then(|r| r.ended_at).map(|t| t.ticks);
+        assert_eq!(ended, Some(c1.origin));
+    }
+
+    #[test]
     fn ur_25_a_burst_on_a_later_clock_survives_an_earlier_switch() {
         // UR-25 (KC-21a): at a switch, a burst booked on a clock the plan starts later stays
-        // booked, and is held once its clock is current; a refused switch cancels only its
-        // own clock's bursts.
+        // booked, and is held once its clock is current; a refused switch, which uhd-tx books
+        // itself, cancels only its own clock's bursts.
+        use ezsdr_radio::timeline::{Config, Item, Kind, Line, Stream};
         for refused in [false, true] {
-            let (core, device, _, _) = super::super::test_support::rig();
+            let faults = if refused { vec![crate::device::FakeFault::WrongRate { claimed: 2e6, applied: 2e6 - 1_000.0, nth: 0 }] } else { Vec::new() };
+            let (core, device, _, _) = super::super::test_support::rig_with(FakeConfig { faults, ..FakeConfig::default() }, Vec::new());
             device.tx_open(1).unwrap();
             let s = |n: i64| core.ticks(n * 1_000_000_000);
             let c0 = core.register(Dir::Tx, 200, 0).unwrap();
-            let c1 = core.register(Dir::Tx, 100, s(1)).unwrap();
-            let c2 = core.register(Dir::Tx, 200, s(2)).unwrap();
-            let planned = |clock: super::Clock, cut: Option<i64>, rate: f64| super::Planned {
-                segment: ezsdr_radio::timeline::Segment {
-                    origin: clock.origin,
-                    cut,
-                    config: ezsdr_radio::timeline::Config { channels: 1, ratio: ezsdr_kernel::time::Rational::new(clock.n as u64, 1).unwrap() },
-                    by: Some(clock.origin as u64),
-                },
-                settings: Arc::new(super::super::control::ColdConfig::new(clock.origin, Settings { rate: Some(rate), ..Settings::default() })),
-                configured: false,
-                clock: Some(clock),
-            };
+            let config = |n: u64| Config { channels: 1, ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
+            {
+                let mut streams = lock(&core.streams);
+                streams.tx_clocks = vec![(c0, false)];
+                let lead = core.ticks(core.description.timing.start_lead_ns);
+                streams.lines[Dir::Tx as usize] = Some(Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
+                for (seq, e, n) in [(1, s(1), 100), (2, s(2), 200), (3, s(3), 100)] {
+                    streams.configs[Dir::Tx as usize].insert(seq, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
+                    assert!(streams.book(&core, Dir::Tx, Item { e, seq, ready: 0, delivered: None, refused: false, kind: Kind::Cold(config(n)) }));
+                }
+            }
+            let (c1, c2) = { let streams = lock(&core.streams); (streams.tx_clocks[1].0, streams.tx_clocks[2].0) };
             let (_to_tx, cmds) = std::sync::mpsc::channel();
             let mut tx = Tx::new(core.clone(), cmds, Some(c0), 1);
-            let c1_rate = if refused { 3.3e6 } else { 2e6 };
-            tx.command(TxCmd::Plan(Arc::new(vec![planned(c0, Some(1_000_000), 1e6), planned(c1, Some(2_000_000), c1_rate), planned(c2, None, 1e6)])));
+            tx.read(None);
             for clock in [c1, c2] {
                 lock(&core.held).insert((clock.domain, 100));
                 tx.command(TxCmd::Burst(held(&clock, 100, 10, LatePolicy::SendAsapAndFlag)));
@@ -943,13 +1012,18 @@ mod tests {
             assert_eq!(tx.later.iter().map(|h| h.domain).collect::<Vec<_>>(), [c2.domain], "{case}");
             assert_eq!(tx.held.len(), usize::from(!refused), "{case}");
             assert_eq!(lock(&core.rec).rejected.iter().filter(|r| r["action"] == "tx_burst").count(), usize::from(refused), "{case}");
-            let reported: &[(Dir, u64)] = if refused { &[(Dir::Tx, c1.origin as u64)] } else { &[] };
-            assert_eq!(lock(&core.streams).refused, reported, "{case}");
+            let booked = lock(&core.streams).lines[Dir::Tx as usize].as_ref().unwrap().items.iter().filter(|item| item.refused).map(|item| item.seq).collect::<Vec<_>>();
+            assert_eq!(booked, if refused { vec![1] } else { Vec::new() }, "{case}");
             tx.held.clear();
             tx.do_switch();
             assert_eq!(tx.clock, Some(c2), "{case}");
             assert!(tx.later.is_empty(), "{case}");
             assert_eq!(tx.held.len(), 1, "{case}");
+            // #63: switching from the second change's clock prunes the first change.
+            tx.held.clear();
+            tx.do_switch();
+            let items: Vec<u64> = lock(&core.streams).lines[Dir::Tx as usize].as_ref().unwrap().items.iter().map(|item| item.seq).collect();
+            assert_eq!(items, [2, 3], "{case}");
         }
     }
 

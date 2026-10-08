@@ -63,7 +63,6 @@ struct Prepared {
 }
 
 struct Running {
-    stop: control::StopRequest,
     to_tx: Sender<TxCmd>,
     to_rx: Sender<RxCmd>,
     threads: Vec<(&'static str, JoinHandle<()>)>,
@@ -449,15 +448,15 @@ impl Provider for UhdRadio {
         core.timing(json!({ "what": "start", "t0": t0, "lead_ns": core.ns(t0 - now) }));
         let (to_tx, from_control_tx) = mpsc::channel();
         let (to_rx, from_control_rx) = mpsc::channel();
-        let stop = control::StopRequest::default();
-        self.running = Some(Running { stop: stop.clone(), to_tx: to_tx.clone(), to_rx: to_rx.clone(), threads: Vec::new() });
+        self.running = Some(Running { to_tx: to_tx.clone(), to_rx, threads: Vec::new() });
+        // The streams' timelines first, which uhd-rx and uhd-tx read from their first turn.
+        let control = Control::new(core.clone(), actions, to_tx, config, self.clock_source != "internal", start);
         // uhd-rx and uhd-tx start whether or not their direction has a stream (UR-15).
         let rx = Rx::new(core.clone(), from_control_rx, first.map(|(handle, channels)| (handle, channels, t0)), self.rx_stall);
         self.spawn(&core, "uhd-rx", move || rx.run())?;
         let tx = Tx::new(core.clone(), from_control_tx, tx_clock, tx_channels);
         self.spawn(&core, "uhd-tx", move || tx.run())?;
-        let control = Control::new(core.clone(), actions, to_tx, to_rx, config, self.clock_source != "internal", start);
-        self.spawn(&core, "uhd-control", move || control.run(stop))?;
+        self.spawn(&core, "uhd-control", move || control.run())?;
         Ok(())
     }
 
@@ -468,16 +467,19 @@ impl Provider for UhdRadio {
         let Some(core) = self.prepared.as_ref().map(|p| p.core.clone()) else {
             return Ok(());
         };
-        let Some((stop, to_tx, to_rx)) = self.running.as_ref().map(|r| (r.stop.clone(), r.to_tx.clone(), r.to_rx.clone())) else {
+        let Some((to_tx, to_rx)) = self.running.as_ref().map(|r| (r.to_tx.clone(), r.to_rx.clone())) else {
             return Ok(());
         };
-        let at = core.now();
-        // uhd-rx learns of the stop now: it begins no segment, and under `abort` ends the
-        // stream at once (RM-16; Review L, NONBLOCKING 9).
-        let _ = to_rx.send(RxCmd::Cut { at, mode });
-        // uhd-control first: it cancels the held timed commands and books the streams' end at
-        // the stop instant (VH-2).
-        *lock(&stop) = Some((at, mode));
+        // RM-16, VH-2: the streams end at the stop instant, booked at once, which uhd-rx and
+        // uhd-tx read at their next turn; then uhd-control cancels the held timed commands and
+        // records the plans.
+        let at = {
+            let mut streams = lock(&core.streams);
+            let at = core.now();
+            streams.stop = Some((at, mode));
+            streams.end(&core, at, mode == StopMode::Abort, false);
+            at
+        };
         self.join(&core, "uhd-control");
         // Transmit before receive (RM-16).
         let _ = to_tx.send(TxCmd::Shutdown);

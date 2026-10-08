@@ -411,7 +411,8 @@
   "new": "        self.cut = Some(cut);\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_26_a_stopped_stream_keeps_its_end"
+  "filter": "ur_26_a_stopped_stream_keeps_its_end",
+  "equivalent": "note 23: uhd-rx reads each segment's cut from the one plan, where it only moves earlier; the floor never takes it past a cut already taken, since nothing past that is delivered; and an abort's or a loss's own cut ends the stream at once. So no later cut replaces an earlier one; ur_26_a_stopped_stream_keeps_its_end and G04, G58 pin that an end moves only earlier."
  },
  {
   "id": "G04",
@@ -434,42 +435,20 @@
   "filter": "ur_26_a_stopped_stream_keeps_its_end"
  },
  {
-  "id": "G59",
-  "name": "VG-1: uhd-rx's stop records its own instant as the rx_stop row's until",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "\"until\": cut, \"mode\": format!(\"{mode:?}\")",
-  "new": "\"until\": at, \"mode\": format!(\"{mode:?}\")",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_26_a_stopped_stream_keeps_its_end"
- },
- {
   "id": "G60",
-  "name": "VG-1: uhd-rx's abort leaves the stop to the samples that reach the cut",
+  "name": "VG-1: uhd-rx's shutdown under abort does not stop a segment it has not ended (note 23 round 2: one whose queued start's origin has not passed)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "                    if !stream.stopped {\n                        if let Some(issued) = stop_at_cut(&self.core, stream.cut.expect(\"set above\")) {",
-  "new": "                    if false {\n                        if let Some(issued) = stop_at_cut(&self.core, stream.cut.expect(\"set above\")) {",
+  "old": "                if !stream.stopped {\n                    stream.stopped = true;\n                    self.last_stop = stop_at_cut(&self.core, stream.cut.expect(\"set above\"))",
+  "new": "                if false {\n                    stream.stopped = true;\n                    self.last_stop = stop_at_cut(&self.core, stream.cut.expect(\"set above\"))",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_26_a_stopped_stream_keeps_its_end"
- },
- {
-  "id": "G61",
-  "name": "VG-1: uhd-rx writes Provider::stop's rx_stop row before the stream ends",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        if let (Some((at, mode)), Some(cut)) = (self.stopping, stream.cut) {\n            self.core.timing(json!({ \"what\": \"rx_stop\", \"at\": at, \"until\": cut, \"mode\": format!(\"{mode:?}\") }));\n        }\n",
-  "new": "",
-  "old2": "                self.stopping = Some((at, mode));\n",
-  "new2": "                self.stopping = Some((at, mode));\n                self.core.timing(json!({ \"what\": \"rx_stop\", \"at\": at, \"until\": self.stream.as_ref().and_then(|stream| stream.cut).unwrap_or(at), \"mode\": format!(\"{mode:?}\") }));\n",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_26_a_stopped_stream_keeps_its_end"
+  "filter": "ur_26_an_abort_stops_a_queued_start_at_shutdown"
  },
  {
   "id": "J01",
   "name": "VH-7 (spec 22, H01): the timeline keeps a receive segment with no sample",
   "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "        if cut > 0 || !self.receive {",
+  "old": "        if cut > 0 || stream.direction != Direction::Rx {",
   "new": "        if true {",
   "crate": "ezsdr-radio",
   "test_bin": "timeline",
@@ -499,8 +478,8 @@
   "id": "J04",
   "name": "VH-6 (spec 22, H04): start_rx acts on a stream that is on",
   "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "            Kind::Start if receive && (!on || halted) => {",
-  "new": "            Kind::Start if receive => {",
+  "old": "                Kind::Start if receive && (!self.on || self.halted) => {",
+  "new": "                Kind::Start if receive => {",
   "crate": "ezsdr-radio",
   "test_bin": "timeline",
   "filter": "rm_26_the_timeline_cases"
@@ -519,7 +498,7 @@
   "id": "J06",
   "name": "VH-4 (spec 22, H06): the ready instant drops the receive call in progress",
   "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "                ready = ready.max(cut + ceil_div(call, den) + i128::from(self.stream.allowance));\n",
+  "old": "                ready = ready.max(cut + ceil_div(call, den) + i128::from(stream.allowance));\n",
   "new": "",
   "crate": "ezsdr-radio",
   "test_bin": "timeline",
@@ -539,8 +518,8 @@
   "id": "J06b",
   "name": "VH-2 (spec 22, H06b): an orphaned transmit clock is not ended at its origin",
   "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "    if refusal.is_some() || planner.running.zip(ended).is_some_and(|(segment, end)| segment.origin >= end) {\n",
-  "new": "    if refusal.is_some() {\n",
+  "old": "        if self.refusal.is_some() || self.running.zip(self.ended).is_some_and(|(segment, end)| segment.origin >= end) {",
+  "new": "        if self.refusal.is_some() {",
   "crate": "ezsdr-radio",
   "test_bin": "timeline",
   "filter": "rm_26_the_timeline_cases"
@@ -549,8 +528,8 @@
   "id": "J07",
   "name": "VH-6 (spec 22, H07): a Stop does not end the receive clock",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                self.clocks.as_ref().expect(\"prepared clocks\").end(domain, TimePoint::new(self.root.expect(\"prepared root\"), at))\n                    .map_err(|error| ModuleError::rejected(format!(\"MR-12: {error}\")))?;\n",
-  "new": "                let _ = (domain, at);\n",
+  "old": "                    self.clocks.as_ref().expect(\"prepared clocks\").end(domain, TimePoint::new(self.root.expect(\"prepared root\"), at))\n                        .map_err(|error| ModuleError::rejected(format!(\"MR-12: {error}\")))?;\n",
+  "new": "                    let _ = (domain, at);\n",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_25_a_stopped_stream_keeps_its_end"
@@ -576,16 +555,6 @@
   "filter": "ur_25_a_second_change_follows_the_first"
  },
  {
-  "id": "J10",
-  "name": "VH-4 (spec 22, H10): uhd-rx starts a segment after Provider::stop began",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "let Some(next) = next.filter(|_| self.stopping.is_none()) else {",
-  "new": "let Some(next) = next else {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_26_no_segment_begins_once_provider_stop_has_begun"
- },
- {
   "id": "J11",
   "name": "VH-6 (spec 22, H11): a device Stop cancels held timed updates",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
@@ -600,7 +569,7 @@
   "name": "VH-4 (spec 22, review R1): a transmit segment does not wait the lead after its ready instant",
   "file": "crates/ezsdr-radio/src/timeline.rs",
   "old": "        earliest = earliest.max(ready + lead);",
-  "new": "        if self.receive { earliest = earliest.max(ready + lead); }",
+  "new": "        if stream.direction == Direction::Rx { earliest = earliest.max(ready + lead); }",
   "crate": "ezsdr-radio",
   "test_bin": "timeline",
   "filter": "rm_26_the_timeline_cases"
@@ -609,38 +578,38 @@
   "id": "J13",
   "name": "RM-16 (spec 22, review R4): uhd-rx's planned cut not floored at the first sample not yet delivered",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "let cut = stream.clock.instant(cut.max(stream.expected));",
-  "new": "let cut = stream.clock.instant(cut);",
+  "old": "self.cut_at(self.clock.instant(cut.max(self.expected)));",
+  "new": "self.cut_at(self.clock.instant(cut));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_17_a_cut_is_never_before_what_was_delivered"
  },
  {
   "id": "J14",
-  "name": "RM-25 (spec 22, review R5): a refused change is not booked as refused",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                item.refused = true;\n",
+  "name": "RM-25 (spec 22, review R5; note 23): a refused change is not booked as refused",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        items[index].refused = true;\n",
   "new": "",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_25_a_refused_change_is_planned_again_without_its_segment"
+  "filter": "ur_25_a_refused_segment_is_booked_by_uhd_rx"
  },
  {
   "id": "J15",
-  "name": "RM-25 (spec 22, review R6): uhd-rx's refusal not reported to uhd-control",
+  "name": "RM-25 (spec 22, review R6; note 23): uhd-rx does not book the refusal of its device",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "                lock(&self.core.streams).refused.push((Dir::Rx, by));\n",
-  "new": "",
+  "old": "let refused = next.segment.by.is_some_and(|by| lock(&self.core.streams).refuse(&self.core, Dir::Rx, by));",
+  "new": "let refused = false;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_25_a_refused_segment_waits_for_the_plan_made_without_it"
+  "filter": "ur_25_a_refused_segment_is_booked_by_uhd_rx"
  },
  {
   "id": "J16",
-  "name": "RM-25 (spec 22, review R11): uhd-tx's refusal not reported to uhd-control",
+  "name": "RM-25 (spec 22, review R11; note 23): uhd-tx does not book the refusal of its device",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "                        lock(&self.core.streams).refused.push((Dir::Tx, by));\n",
-  "new": "",
+  "old": "                        lock(&self.core.streams).refuse(&self.core, Dir::Tx, by);\n",
+  "new": "                        let _ = by;\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_25_a_burst_on_a_later_clock_survives_an_earlier_switch"
@@ -654,16 +623,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_25_a_cold_change_that_arrives_after_a_later_one_follows_it"
- },
- {
-  "id": "J18",
-  "name": "RM-25 (spec 22, review B1): uhd-rx carries out the plan its device refused",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "if !self.known.contains(&by) {",
-  "new": "if false && !self.known.contains(&by) {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_25_a_refused_segment_waits_for_the_plan_made_without_it"
  },
  {
   "id": "J19",
@@ -688,7 +647,7 @@
  {
   "id": "J21",
   "name": "VH-2 (spec 22, re-review): a transmit clock registered for a change booked after Provider::stop's instant stays open",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
   "old": "for (clock, ended) in self.tx_clocks.iter_mut().skip(plan.len()).filter(|(_, ended)| !*ended) {",
   "new": "for (clock, ended) in self.tx_clocks.iter_mut().skip(usize::MAX).filter(|(_, ended)| !*ended) {",
   "crate": "ezsdr-radio-uhd",
@@ -697,93 +656,23 @@
  },
  {
   "id": "J23",
-  "name": "RM-16, UR-17 (spec 22, step 3): a stream the plan no longer has goes on when the plan is empty",
+  "name": "RM-16, UR-17 (spec 22, step 3; note 23): a stream the plan no longer has goes on",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "None if self.handed => stream.cut_at(",
-  "new": "None if !self.plan.is_empty() => stream.cut_at(",
+  "old": "planned.map_or(Some(0), |segment| segment.cut)",
+  "new": "planned.and_then(|segment| segment.cut)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_17_a_cut_is_never_before_what_was_delivered"
  },
  {
-  "id": "J24",
-  "name": "RM-25 (spec 22, step 3): uhd-rx ends its refusal wait on a plan that lacks the refused segment for another reason",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "if !self.known.contains(&by) {",
-  "new": "if self.plan.iter().any(|planned| planned.segment.by == Some(by)) {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_25_a_refused_segment_waits_for_the_plan_made_without_it"
- },
- {
   "id": "J25",
-  "name": "RM-25 (spec 22, step 3): a refused segment counts as begun, so a replanned segment before its origin is skipped",
+  "name": "RM-25 (spec 22, step 3; note 23): a refused segment counts as begun, so a replanned segment at its origin is skipped",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "            self.from = from;\n",
-  "new": "",
+  "old": "            if !refused {\n                self.from = origin.saturating_add(1);\n            }\n",
+  "new": "            let _ = refused;\n            self.from = origin.saturating_add(1);\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_25_a_refused_segment_waits_for_the_plan_made_without_it"
- },
- {
-  "id": "J26",
-  "name": "RM-16, UR-26 (spec 22, step 3): an orderly Provider::stop cuts nothing until uhd-control's plan arrives",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "if let Some(stream) = self.stream.as_mut().filter(|_| mode == StopMode::Orderly) {",
-  "new": "if let Some(stream) = self.stream.as_mut().filter(|_| false) {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_26_an_orderly_stop_cuts_before_its_plan_arrives"
- },
- {
-  "id": "J27",
-  "name": "RM-25 (spec 22, step 3 review B1): uhd-control's receive plan names no refused command",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": ".filter(|item| item.refused).map(|item| item.seq).collect();",
-  "new": ".filter(|item| false && item.refused).map(|item| item.seq).collect();",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_25_a_refused_change_is_planned_again_without_its_segment"
- },
- {
-  "id": "J28",
-  "name": "UR-30, RM-25 (spec 22, step 3 review): the recorded plan made before the refusals reported are booked",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "        self.refusals();\n        self.cancel_held(\"Provider::stop\");",
-  "new": "        self.cancel_held(\"Provider::stop\");",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_30_the_recorded_plan_has_no_refused_segment"
- },
- {
-  "id": "J29",
-  "name": "RM-16, UR-29 (spec 22, step 3 review): a loss ends the stream at a later cut its plan already had",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "                stream.cut_at(stream.clock.instant(stream.clock.at_or_after(at).max(stream.expected)));\n                self.finish();",
-  "new": "                let _ = at;\n                self.finish();",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_29_a_loss_ends_the_stream_at_its_instant"
- },
- {
-  "id": "J30",
-  "name": "RM-16, UR-29 (spec 22, step 3 review): a loss noticed late ends the stream where uhd-rx notices it",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "                stream.cut_at(stream.clock.instant(stream.clock.at_or_after(at).max(stream.expected)));\n                self.finish();",
-  "new": "                let _ = at;\n                stream.cut_at(stream.clock.instant(stream.clock.at_or_after(self.core.now()).max(stream.expected)));\n                self.finish();",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_29_a_loss_ends_the_stream_at_its_instant"
- },
- {
-  "id": "J31",
-  "name": "RM-16, UR-29 (spec 22, step 3 review): a loss's cut is not floored at what was delivered",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "                stream.cut_at(stream.clock.instant(stream.clock.at_or_after(at).max(stream.expected)));\n                self.finish();",
-  "new": "                stream.cut_at(stream.clock.instant(stream.clock.at_or_after(at)));\n                self.finish();",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_29_a_loss_ends_the_stream_at_its_instant"
+  "filter": "ur_25_a_refused_segment_is_booked_by_uhd_rx"
  },
  {
   "id": "J32",
@@ -904,5 +793,186 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_06_the_provider_refuses_another_root"
+ },
+ {
+  "id": "J45",
+  "name": "note 23: uhd-rx waits for samples past a cut at or before what it delivered, so an abort does not end the stream at once",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "        let done = stream.cut.is_some_and(",
+  "new": "        let done = false && stream.cut.is_some_and(",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stopped_stream_keeps_its_end"
+ },
+ {
+  "id": "J46",
+  "name": "note 23: a loss and Provider::stop are booked without the first sample uhd-rx has not delivered",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "            item.delivered = item.delivered.or(delivered.filter(|(origin, config, _)| cuts(*origin, *config)).map(|(_, _, k)| k));\n",
+  "new": "            let _ = (delivered, cuts);\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_ends_the_stream_at_its_instant"
+ },
+ {
+  "id": "J47",
+  "name": "note 23: the thread that finds the device lost does not book the loss",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "        streams.end(self, self.now(), false, true);\n",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_ends_the_stream_at_its_instant"
+ },
+ {
+  "id": "J48",
+  "name": "#63 (note 23): pruned items are dropped without folding them into the state the stream is planned from",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        self.start.replay(&self.stream, &order).expect(\"the plan made these cuts already\");\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_a_pruned_line_plans_as_one_that_keeps_every_item"
+ },
+ {
+  "id": "J49",
+  "name": "#63 (note 23): uhd-rx does not prune when a segment ends",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "        streams.prune(Dir::Rx, by);\n",
+  "new": "        let _ = by;\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_an_ended_segment_prunes_the_items_before_it"
+ },
+ {
+  "id": "J50",
+  "name": "#63 (note 23): uhd-tx does not prune at a switch",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "            streams.prune(Dir::Tx, by);\n",
+  "new": "            let _ = by;\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_25_a_burst_on_a_later_clock_survives_an_earlier_switch"
+ },
+ {
+  "id": "J51",
+  "name": "#63 (note 23): pruning keeps the configurations of pruned commands",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "        self.configs[dir as usize].retain(|seq, _| kept.contains(seq));\n",
+  "new": "        let _ = kept;\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_an_ended_segment_prunes_the_items_before_it"
+ },
+ {
+  "id": "J52",
+  "name": "note 23: a cut booked while a receive call waits does not cut its block (R16's rule, now samples' own read of the plan)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "            let mut streams = lock(&self.core.streams);\n            stream.follow(&streams);\n",
+  "new": "            let mut streams = lock(&self.core.streams);\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
+ },
+ {
+  "id": "J53",
+  "name": "note 23 round 3: uhd-rx does not read the plan when it ends a stream, so a loss or Provider::stop's end booked by another thread after its turn read the plan (during a receive call's wait, or before it saw the device lost) ends the stream and its clock at a stale cut, or never",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "        stream.follow(&streams);\n        if let (None, Some(cut)) = (&stream.handle, stream.cut) {",
+  "new": "        if let (None, Some(cut)) = (&stream.handle, stream.cut) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_"
+ },
+ {
+  "id": "J54",
+  "name": "note 23 round 2: an end takes uhd-rx's first undelivered sample whether or not uhd-rx's segment still runs at the end",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "delivered.filter(|(origin, config, _)| cuts(*origin, *config))",
+  "new": "delivered.filter(|_| { let _ = &cuts; true })",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_an_end_takes_delivered_only_from_the_segment_it_cuts"
+ },
+ {
+  "id": "J55",
+  "name": "note 23 round 2: uhd-rx does not cut at once at Provider::stop(abort) a segment still being delivered up to an earlier cut",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "        if matches!(streams.stop, Some((_, StopMode::Abort))) {\n",
+  "new": "        if false && matches!(streams.stop, Some((_, StopMode::Abort))) {\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stopped_stream_keeps_its_end"
+ },
+ {
+  "id": "J56",
+  "name": "#63: pruning also folds the items that take effect exactly at the prune instant",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "order.iter().position(|item| item.e >= before)",
+  "new": "order.iter().position(|item| item.e > before)",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_a_line_pruned_at_an_item_s_instant_keeps_it"
+ },
+ {
+  "id": "J57",
+  "name": "RM-26: a booking whose plan cannot be represented stays in the line",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                self.items.pop();\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_a_refused_booking_leaves_the_line"
+ },
+ {
+  "id": "J58",
+  "name": "note 23 round 2: the device is taken as lost before its loss is booked",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "        streams.end(self, self.now(), false, true);\n        self.lost.store(true, Ordering::Release);\n",
+  "new": "        self.lost.store(true, Ordering::Release);\n        streams.end(self, self.now(), false, true);\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "provider::",
+  "equivalent": "note 23 round 2: both happen under the plans' lock, and every thread that acts on the loss's cut after it sees the flag reads the plan under that lock (uhd-rx's finish(), pinned by J53), so it waits until both are done; no test can order them."
+ },
+ {
+  "id": "J59",
+  "name": "note 23 round 3: uhd-tx never reads the shared transmit plan again after its first read",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        } else if self.version == Some(streams.version) {\n",
+  "new": "        } else if self.version.is_some() {\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_25_uhd_tx_reads_the_plan_again_when_it_changes"
+ },
+ {
+  "id": "J60",
+  "name": "note 23 round 3: a loss is booked in arrival order, not with the faults at the Run's start (RM-25)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "        let seq = if lost { 0 } else { self.next_seq() };\n",
+  "new": "        let seq = { let _ = lost; self.next_seq() };\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_takes_effect_before_a_change_at_its_instant"
+ },
+ {
+  "id": "J61",
+  "name": "#63 (note 23 round 3): pruning folds items in the order of their requested instants, not their effective ones",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        let mut order = sorted(&self.items);\n        let kept",
+  "new": "        let mut order = self.items.clone();\n        order.sort_by_key(|item| (item.e, item.seq));\n        let kept",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_pruning_folds_a_cold_change_floored_at_an_earlier_one"
+ },
+ {
+  "id": "J62",
+  "name": "UR-23, VH-2 (note 23 review, Z03): a transmit change booked as refused does not end its clock until a later booking",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "            Ok(refused) => {\n                self.changed(core, dir);\n                refused\n            }",
+  "new": "            Ok(refused) => {\n                refused\n            }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_23_a_refused_transmit_change_ends_its_clock_at_its_origin"
  }
 ]

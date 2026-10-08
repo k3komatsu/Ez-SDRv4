@@ -1565,7 +1565,7 @@ fn ur_25_a_receive_session_follows_its_recorded_plan() {
     // streamer and the device's commands — carries out the plan uhd-control records: after two
     // `cold` rate changes, a `Stop`, `start_rx` and the Run's stop, the plan has four segments,
     // in order and apart, and every SampleClock is one of them, in order, ended at its cut — or,
-    // when uhd-rx had delivered past that cut before the plan reached it, at the first sample it
+    // when uhd-rx had delivered past a `Stop`'s cut before it was booked, at the first sample it
     // had not (RM-16's floor) —, the end its stop row records; the stream is stopped untimed;
     // one streamer. Under load a segment may get no clock: its start missed (UR-17's restart)
     // with no sample before its cut, which is allowed, so the test holds whatever the load.

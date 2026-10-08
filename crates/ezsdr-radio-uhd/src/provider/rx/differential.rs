@@ -1,17 +1,19 @@
 //! VH-8's third layer (spec 22): uhd-rx carrying out the plans `ezsdr_radio::timeline` makes
 //! of generated sequences, on synthetic packets and the `ManualTimeAuthority` rig, against
-//! those plans and RM-16's floor. uhd-control does not run: the harness books each command at
-//! its receipt as uhd-control does, and hands uhd-rx the plan, which reaches it a seeded
-//! latency later. A scripted device stands for the X3x0's
-//! receive side: a timed start queued, an untimed stop at once with what it produced before
-//! still delivered, a queued start that a stop does not cancel (#56), one packet a request,
-//! delivered at the instant after its last sample plus a latency, and the sequence's
-//! overruns, sequence errors and loss. It moves the rig's time while a receive call waits,
-//! booking on the way, so that a plan can arrive during a wait. Every field is gated.
+//! those plans and RM-16's floor. uhd-control does not run: the harness books each command
+//! into the receive timeline uhd-rx shares, as uhd-control does, a seeded latency after its
+//! receipt (maintenance note 23); uhd-rx books its refusals, the thread that finds the device
+//! lost the loss, and `Provider::stop` the stream's end, at once. A scripted device stands for
+//! the X3x0's receive side: a timed start queued, an untimed stop at once with what it
+//! produced before still delivered, a queued start that a stop does not cancel (#56), one
+//! packet a request, delivered at the instant after its last sample plus a latency, and the
+//! sequence's overruns, sequence errors and loss. It moves the rig's time while a receive call
+//! waits, booking on the way, so that a booking can come during a wait. Every field is gated.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
+
 use std::time::Duration as Wall;
 
 use ezsdr_kernel::id::ClockDomainId;
@@ -23,8 +25,8 @@ use ezsdr_radio::timeline::{Config, Item, Kind, Line, Segment, Stream, plan};
 use generator::{Change, Fault, Op, Sequence, Terms};
 
 use super::{Rx, RxCmd, Turn};
-use super::super::control::{ColdConfig, Planned};
-use super::super::core::lock;
+use super::super::control::ColdConfig;
+use super::super::core::{Core, lock};
 use crate::device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, FakeFault, Iq, RxRecv, Settings, TxReport};
 use crate::profile::DELIVERY_ALLOWANCE_NS;
 
@@ -48,8 +50,8 @@ fn draw(seed: u64, salt: u64, n: u64) -> u64 {
     (z ^ (z >> 31)) % n
 }
 
-/// What layer 3 adds to a sequence: the packets' latency, the plans' latency from uhd-control
-/// to uhd-rx, `block_len` (the scripted device's packet is the request), `Provider::stop`, a
+/// What layer 3 adds to a sequence: the packets' latency, uhd-control's latency from a
+/// command's receipt to its booking, `block_len` (the scripted device's packet is the request), `Provider::stop`, a
 /// rate the device refuses once (UR-12), and the horizon the rig runs to.
 #[derive(Clone, Copy, Debug)]
 struct Extra {
@@ -126,9 +128,10 @@ fn rm_26_the_timeline_against_uhd_rx() {
             ("orderly stop", extra.stop.is_some_and(|(_, mode)| mode == StopMode::Orderly) && !observed.lost),
             ("loss", observed.lost),
             ("fault", observed.blocks.iter().any(|(_, (_, _, flags, _))| *flags != BlockFlags::NONE)),
-            ("plan during a wait", observed.straddled),
+            ("booking during a wait", observed.straddled),
             ("a cut floored at what was delivered", floored),
             ("block_len 65 536", extra.block == 65_536),
+            ("items pruned", observed.pruned),
         ] {
             *seen.entry(what).or_default() += usize::from(counted);
         }
@@ -142,7 +145,7 @@ fn rm_26_the_timeline_against_uhd_rx() {
 
 /// What uhd-rx left: the receive clocks as `(origin, ended)`, its blocks by clock, the
 /// device's receive calls as `(instant, call)`, its `rx_stop` rows as `(at, issued)`, the
-/// refusals uhd-rx reported, and what the scripted device found wrong as it happened.
+/// refusals uhd-rx booked, and what the scripted device found wrong as it happened.
 #[derive(Debug, Default)]
 struct Observed {
     clocks: Vec<(i64, Option<i64>)>,
@@ -160,8 +163,10 @@ struct Observed {
     streaming: bool,
     /// Timed starts of segments the plan dropped before their origin (VH-6).
     dropped: usize,
-    /// A plan reached uhd-rx while a receive call waited for the packet it returned.
+    /// A command was booked while a receive call waited for the packet it returned.
     straddled: bool,
+    /// uhd-rx pruned the timeline's items (#63).
+    pruned: bool,
     violations: Vec<String>,
 }
 
@@ -172,11 +177,12 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
     let mut problems = observed.violations.clone();
     let items = sequence.items(&terms);
     let loss = items.iter().find(|item| matches!(item.kind, Kind::End { .. })).map(|item| item.e);
-    // What uhd-control books: every command until a loss, or until `Provider::stop` and its
-    // end of the stream; a refused change marked as such (RM-25).
+    // What is booked: every command received before `Provider::stop`, and its end of the
+    // stream, and booked before a loss, and the loss; a refused change marked as such (RM-25).
     let stop = extra.stop.filter(|(at, _)| loss.is_none_or(|loss| *at < loss));
     let mut booked: Vec<Item> = items.iter()
         .filter(|item| stop.is_none_or(|(at, _)| item.ready <= at && !matches!(item.kind, Kind::End { .. })))
+        .filter(|item| matches!(item.kind, Kind::End { .. }) || loss.is_none_or(|loss| item.ready + extra.lag < loss))
         .map(|item| Item { refused: observed.refused.contains(&item.seq), ..*item })
         .collect();
     if let Some((at, mode)) = stop {
@@ -189,9 +195,9 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
     let mut plans = vec![(i64::MIN, line.plan.clone())];
     for item in &booked {
         line.book(*item).unwrap();
-        // uhd-rx follows the last of the plans that reach it at one instant; it learns of
-        // `Provider::stop` at its instant (`RxCmd::Cut`).
-        let arrival = if item.seq == STOP_SEQ { item.ready } else { item.ready + extra.lag };
+        // uhd-rx follows the last of the plans booked at one instant; a loss and
+        // `Provider::stop` are booked at their instants.
+        let arrival = if matches!(item.kind, Kind::End { .. }) { item.ready } else { item.ready + extra.lag };
         if plans.last().is_some_and(|(t, _)| *t == arrival) {
             plans.pop();
         }
@@ -217,7 +223,7 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
     for hits in &mut hits {
         hits.sort_by_key(|(f, _)| *f);
     }
-    // RM-16's floor: a plan reaches uhd-rx `lag` after its booking, and the cut uhd-rx takes is
+    // RM-16's floor: a command is booked `lag` after its receipt, and the cut uhd-rx takes is
     // the plan's — at its origin for a segment it has begun that the plan no longer has — but
     // never before the first sample it had delivered then; an end moves only earlier. When
     // uhd-rx begins a segment is its own affair: the device's log says (its timed start).
@@ -409,18 +415,14 @@ impl DataLink for Headers {
 
 /// What happens at an instant, besides the device's packets.
 enum Ev {
-    /// uhd-control books a command and hands uhd-rx the plan.
+    /// uhd-control books a command received `lag` earlier.
     Book(Item),
     /// The device is lost.
     Loss,
-    /// `Provider::stop`: the cut to uhd-rx, the stream's end booked, the shutdown (UR-26).
+    /// `Provider::stop`: the stream's end booked (UR-26).
     Stop(StopMode),
-    /// uhd-control's poll after uhd-rx reported refusals: their changes refused, the plan
-    /// made again (RM-25).
-    Replan(Vec<u64>),
-    /// What uhd-control sent reaches uhd-rx's queue, `lag` after it was sent: with a plan, the
-    /// plan as uhd-rx then has it, and whether it is the one made knowing of a refusal.
-    Deliver(RxCmd, Option<Vec<Segment>>, bool),
+    /// `Provider::stop`'s shutdown reaches uhd-rx, `lag` later.
+    Shutdown(StopMode),
 }
 
 /// A stream the scripted device runs: started at `origin`, `n` root ticks a sample, its next
@@ -441,14 +443,13 @@ struct World {
     events: BTreeMap<(i64, u64), Ev>,
     order: u64,
     to_rx: Sender<RxCmd>,
-    line: Line,
-    /// Commands are booked: no loss and no `Provider::stop` yet.
-    booking: bool,
-    /// The plans handed to uhd-rx.
-    sent: Vec<Vec<Segment>>,
-    /// The commands whose segments uhd-rx reported refused.
+    core: Option<Arc<Core>>,
+    /// `Provider::stop`'s instant, once it has begun: commands received after it are not booked.
+    stopped: Option<i64>,
+    /// How many commands were booked.
+    booked: usize,
+    /// The commands whose segments uhd-rx booked refused.
     refused: Vec<u64>,
-    replanning: bool,
     abort: bool,
     rate: f64,
     runs: VecDeque<Run>,
@@ -497,65 +498,39 @@ impl World {
     }
 
     fn fire(&mut self, ev: Ev) {
+        let core = self.core.clone().expect("the rig's core");
         match ev {
-            Ev::Book(item) if self.booking => {
-                self.line.book(item).unwrap();
-                self.hand();
+            // A loss stops time, so nothing is booked after it.
+            Ev::Book(item) if self.stopped.is_none_or(|at| item.ready <= at) => {
+                let mut streams = lock(&core.streams);
+                if matches!(item.kind, Kind::Cold(_) | Kind::Start) {
+                    streams.configs[Dir::Rx as usize].insert(item.seq, (Arc::new(ColdConfig::new(Settings::default())), false));
+                }
+                assert!(streams.book(&core, Dir::Rx, item), "booked");
+                self.booked += 1;
             }
             Ev::Loss => self.lost = true,
-            Ev::Stop(mode) if self.booking => {
-                self.booking = false;
+            Ev::Stop(mode) if self.stopped.is_none() => {
+                self.stopped = Some(self.now);
                 self.abort = mode == StopMode::Abort;
-                let at = self.now;
-                // `Provider::stop` tells uhd-rx itself, at once; uhd-control's plan follows.
-                self.fire(Ev::Deliver(RxCmd::Cut { at, mode }, None, false));
-                self.line.book(Item { e: at, seq: STOP_SEQ, ready: at, delivered: None, refused: false, kind: Kind::End { abort: self.abort } }).unwrap();
-                self.hand();
-                self.send(RxCmd::Shutdown(mode), None, false);
-            }
-            Ev::Replan(seqs) if self.booking => {
-                for item in self.line.items.iter_mut().filter(|item| seqs.contains(&item.seq)) {
-                    item.refused = true;
+                // As `Provider::stop` books the end, with `STOP_SEQ` its arrival order.
+                let mut streams = lock(&core.streams);
+                streams.seq = STOP_SEQ - 1;
+                streams.stop = Some((self.now, mode));
+                streams.end(&core, self.now, self.abort, false);
+                drop(streams);
+                if self.lag == 0 {
+                    self.fire(Ev::Shutdown(mode));
+                } else {
+                    let at = self.now + self.lag;
+                    self.at(at, Ev::Shutdown(mode));
                 }
-                self.line.plan = plan(&self.line.stream, &self.line.items).unwrap();
-                self.hand_replanned(true);
             }
-            Ev::Deliver(cmd, plan, replanned) => {
-                if let Some(plan) = plan {
-                    self.sent.push(plan);
-                }
-                self.replanning &= !replanned;
-                let _ = self.to_rx.send(cmd);
+            Ev::Shutdown(mode) => {
+                let _ = self.to_rx.send(RxCmd::Shutdown(mode));
             }
-            Ev::Book(_) | Ev::Stop(_) | Ev::Replan(_) => {}
+            Ev::Book(_) | Ev::Stop(_) => {}
         }
-    }
-
-    /// Sends uhd-rx a command, which reaches it `lag` later.
-    fn send(&mut self, cmd: RxCmd, plan: Option<Vec<Segment>>, replanned: bool) {
-        if self.lag == 0 {
-            self.fire(Ev::Deliver(cmd, plan, replanned));
-        } else {
-            let at = self.now + self.lag;
-            self.at(at, Ev::Deliver(cmd, plan, replanned));
-        }
-    }
-
-    /// The plan, as uhd-control hands it: each segment with its configuration (UR-25).
-    fn hand(&mut self) {
-        self.hand_replanned(false);
-    }
-
-    fn hand_replanned(&mut self, replanned: bool) {
-        let planned = self.line.plan.iter().map(|segment| Planned {
-            segment: *segment,
-            settings: Arc::new(ColdConfig::new(segment.origin, Settings { rate: Some(rate_of(segment.config)), ..Settings::default() })),
-            configured: false,
-            clock: None,
-        }).collect();
-        let refused = self.line.items.iter().filter(|item| item.refused).map(|item| item.seq).collect();
-        let plan = self.line.plan.clone();
-        self.send(RxCmd::Plan(Arc::new(planned), refused), Some(plan), replanned);
     }
 
     fn call(&mut self, call: String) {
@@ -609,7 +584,8 @@ impl Device for Scripted {
         }
         world.call(format!("rx_start {at}"));
         let now = world.now;
-        let planned = world.sent.last().and_then(|plan| plan.iter().find(|segment| segment.origin == at)).copied();
+        let core = world.core.clone().expect("the rig's core");
+        let planned = lock(&core.streams).lines[Dir::Rx as usize].as_ref().and_then(|line| line.plan.iter().find(|segment| segment.origin == at).copied());
         let mut problems = Vec::new();
         if at <= now {
             problems.push(format!("rx_start {at} at {now}: not ahead of its origin"));
@@ -618,9 +594,6 @@ impl Device for Scripted {
             Some(segment) if (rate_of(segment.config) - world.rate).abs() > 0.5 => problems.push(format!("rx_start {at}: the device runs {} S/s, the plan {}", world.rate, rate_of(segment.config))),
             Some(_) => {}
             None => problems.push(format!("rx_start {at}: no segment of the plan uhd-rx has begins there")),
-        }
-        if world.replanning {
-            problems.push(format!("rx_start {at}: before the plan made without the refused segment"));
         }
         world.violations.extend(problems);
         let n = (200e6 / world.rate).round() as i64;
@@ -713,11 +686,11 @@ impl Device for Scripted {
             world.done = true;
             return RxRecv::Timeout;
         }
-        let plans = world.sent.len();
+        let booked = world.booked;
         if !world.advance(ready) {
             return gone();
         }
-        world.straddled |= world.sent.len() > plans;
+        world.straddled |= world.booked > booked;
         world.runs[0].next = origin + stop * step;
         let channels = world.calls.iter().rev().find_map(|(_, call)| call.strip_prefix("rx_open ")).map_or(1, |c| c.parse().unwrap());
         let samples: Vec<Vec<Iq>> = vec![vec![[0.0, 0.0]; (stop - k) as usize]; channels];
@@ -733,9 +706,9 @@ impl Device for Scripted {
     fn mark_lost(&self) { self.inner.mark_lost() }
 }
 
-/// Runs a sequence's receive plans on uhd-rx: each command booked at its receipt, the loss
-/// booked when uhd-rx or uhd-control finds the device lost, a refusal replanned at
-/// uhd-control's next poll, a millisecond on (UR-14), `Provider::stop` at `extra`'s instant.
+/// Runs a sequence's receive plans on uhd-rx: each command booked `lag` after its receipt, the
+/// loss booked by whichever finds the device lost, a refusal by uhd-rx, `Provider::stop` at
+/// `extra`'s instant.
 fn run(sequence: &Sequence, extra: &Extra) -> Observed {
     let terms = terms(extra.block);
     let link = Arc::new(Headers::default());
@@ -749,11 +722,10 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
         events: BTreeMap::new(),
         order: 0,
         to_rx,
-        line: Line::new(terms.stream),
-        booking: true,
-        sent: Vec::new(),
+        core: None,
+        stopped: None,
+        booked: 0,
         refused: Vec::new(),
-        replanning: false,
         abort: false,
         rate: 1e6,
         runs: VecDeque::new(),
@@ -772,10 +744,13 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
     let (core, time, events) = super::super::test_support::rig_on(device.clone(), vec![link.clone()], extra.block as u32);
     let items = sequence.items(&terms);
     let loss = items.iter().find(|item| matches!(item.kind, Kind::End { .. })).copied();
+    // `start` shares the stream's timeline from T0 (UR-15).
+    lock(&core.streams).lines[Dir::Rx as usize] = Some(Line::new(terms.stream));
     {
         let mut w = lock(&world);
         w.time = Some(time);
         w.root = core.root;
+        w.core = Some(core.clone());
         w.set_now(T0 - MS);
         // At one instant a loss comes first, then the commands in their order, then
         // `Provider::stop`.
@@ -784,21 +759,15 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
         }
         let mut booked: Vec<Item> = items.iter().filter(|item| !matches!(item.kind, Kind::End { .. })).copied().collect();
         booked.sort_by_key(|item| (item.ready, item.seq));
+        let lag = w.lag;
         for item in booked {
-            w.at(item.ready, Ev::Book(item));
+            w.at(item.ready + lag, Ev::Book(item));
         }
         if let Some((at, mode)) = extra.stop {
             w.at(at, Ev::Stop(mode));
         }
     }
-    // `prepare` opened the streamer for one channel, `start` started it at T0 (UR-15), and
-    // uhd-control handed uhd-rx its first plan, which it has before T0.
-    {
-        let mut w = lock(&world);
-        let lag = std::mem::replace(&mut w.lag, 0);
-        w.hand();
-        w.lag = lag;
-    }
+    // `prepare` opened the streamer for one channel, `start` started it at T0 (UR-15).
     device.rx_open(1).unwrap();
     device.rx_start(T0).unwrap();
     let handle = core.clocks.declare_sample_clock(core.id.child("rx").unwrap(), core.root, Rational::new(200, 1).unwrap()).unwrap();
@@ -806,29 +775,18 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
     for turn in 0.. {
         assert!(turn < 1_000_000, "uhd-rx makes no progress");
         let next = rx.turn();
-        // uhd-control's part between uhd-rx's turns: a loss found and booked, refusals.
+        // uhd-control's part between uhd-rx's turns: a loss it finds on its own.
         let mut w = lock(&world);
         if w.lost && !core.is_lost() {
             drop(w);
             core.device_lost("VH-8: the sequence's loss");
             w = lock(&world);
         }
-        if core.is_lost() && w.booking {
-            w.booking = false;
-            match loss {
-                Some(loss) if core.lost_at() == Some(loss.e) => {
-                    w.line.book(loss).unwrap();
-                    w.hand();
-                }
-                _ => w.violations.push(format!("lost at {:?}, not at the sequence's loss", core.lost_at())),
-            }
-        }
-        let refused: Vec<u64> = std::mem::take(&mut lock(&core.streams).refused).into_iter().map(|(_, seq)| seq).collect();
-        if !refused.is_empty() {
-            w.refused.extend(&refused);
-            w.replanning = true;
-            let at = w.now + MS;
-            w.at(at, Ev::Replan(refused));
+        {
+            let streams = lock(&core.streams);
+            let line = streams.lines[Dir::Rx as usize].as_ref().expect("the receive timeline");
+            let refused: Vec<u64> = line.items.iter().filter(|item| item.refused && !w.refused.contains(&item.seq)).map(|item| item.seq).collect();
+            w.refused.extend(refused);
         }
         if w.done || next == Turn::Exit {
             break;
@@ -852,7 +810,12 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
     let rx_clocks: Vec<_> = records.iter().filter(|r| r.stream == core.rx_id).collect();
     let headers = lock(&link.0);
     let rec = lock(&core.rec);
-    let final_plan = w.sent.last().cloned().unwrap_or_default();
+    let final_plan = lock(&core.streams).lines[Dir::Rx as usize].as_ref().map(|line| line.plan.clone()).unwrap_or_default();
+    let lost_at = rec.timing.iter().find(|row| row["what"] == "device_lost").and_then(|row| row["at"].as_i64());
+    let mut violations = w.violations.clone();
+    if lost_at != loss.filter(|_| core.is_lost()).map(|loss| loss.e) {
+        violations.push(format!("lost at {lost_at:?}, not at the sequence's loss"));
+    }
     Observed {
         clocks: rx_clocks.iter().map(|r| (r.origin.ticks, r.ended_at.map(|t| t.ticks))).collect(),
         blocks: headers.iter().map(|h| {
@@ -869,7 +832,8 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
         streaming: !w.lost && w.runs.iter().any(|run| run.end.is_none()),
         dropped: w.calls.iter().filter_map(|(_, call)| call.strip_prefix("rx_start ")).filter(|at| !final_plan.iter().any(|s| s.origin.to_string() == *at)).count(),
         straddled: w.straddled,
+        pruned: lock(&core.streams).lines[Dir::Rx as usize].as_ref().is_some_and(|line| line.items.len() < w.booked),
         calls: w.calls.clone(),
-        violations: w.violations.clone(),
+        violations,
     }
 }

@@ -612,9 +612,12 @@ fn mr_11_start_cases() {
     assert_eq!(late.source, rid("mock"));
     assert_eq!(late.time, TimePoint::new(ROOT, 0));
     harness.mock.start(Some(TimePoint::new(ROOT, 2_000_000_000))).unwrap();
-    // RM-25: the receive segment begins at T0, its SampleClock registered at its first sample.
+    // RM-25: the receive segment begins at T0, its SampleClock registered at its first block,
+    // published once its last sample, at 2 ms, has passed.
     assert!(harness.clocks.sample_clock_records().iter().all(|record| record.stream != rid("mock/rx")));
     harness.step(2_001_999_000).unwrap();
+    assert!(harness.clocks.sample_clock_records().iter().all(|record| record.stream != rid("mock/rx")));
+    harness.step(2_002_000_001).unwrap();
     let clocks = harness.clocks.sample_clock_records();
     assert_eq!(clocks.iter().find(|record| record.stream == rid("mock/rx")).unwrap().origin, TimePoint::new(ROOT, 2_000_000_000));
     assert_eq!(clocks.iter().find(|record| record.stream == rid("mock/tx")).unwrap().origin, TimePoint::new(ROOT, 0));
@@ -974,7 +977,7 @@ fn mr_25_a_stream_stop_keeps_the_pending_commands() {
 fn mr_18_a_cold_rate_change_starts_a_new_sample_clock() {
     let mut harness = Harness::new("x310-like", &[], &[], &[], Some((BackPressure::DropOldest, 8)));
     harness.arm_start(2_000_000_000).unwrap();
-    harness.step(2_000_000_001).unwrap();
+    harness.step(2_002_000_001).unwrap();
     let old = harness.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/rx")).unwrap().domain;
     let effective = 2_004_000_000;
     harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, effective))));
@@ -1363,9 +1366,9 @@ fn mr_20_faults_fire_at_their_instants() {
         .find(|handle| handle.stream == rid("mock/rx")).unwrap();
     failed_start.clocks.register_sample_clock(&rx_handle, 0).unwrap();
     failed_start.mock.arm().unwrap();
-    // RM-25: the receive clock is registered at its first sample, so the clash is found then.
+    // RM-25: the receive clock is registered at its first block, so the clash is found then.
     failed_start.mock.start(Some(TimePoint::new(ROOT, 5_000_000_000))).unwrap();
-    let error = failed_start.step(5_000_000_001).unwrap_err();
+    let error = failed_start.step(5_004_000_001).unwrap_err();
     assert!(error.message.contains("already registered"));
     failed_start.mock.cleanup();
     let faults = &failed_start.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.faults").unwrap()];

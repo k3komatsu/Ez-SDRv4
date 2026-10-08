@@ -1,6 +1,6 @@
-//! uhd-rx: owns the receive streamer. It carries out the receive plan uhd-control hands it
-//! — each segment configured, started at its origin, its clock registered at its first
-//! block and ended at its cut — and turns `rx_recv` results into Stream Contract blocks on
+//! uhd-rx: owns the receive streamer. It carries out the receive plan it shares with
+//! uhd-control — each segment configured, started at its origin, its clock registered at its
+//! first block and ended at its cut — and turns `rx_recv` results into Stream Contract blocks on
 //! every attached link, gaps into flags and losses into events (UR-17…UR-20, UR-25, UR-26,
 //! UR-29).
 
@@ -19,20 +19,13 @@ use ezsdr_radio::payloads::{AlignmentErrorPayload, LateCommandPayload, RxOverflo
 use ezsdr_radio::timeline::Config;
 use serde_json::json;
 
-use super::control::{Plan, Planned};
-use super::core::{Clock, Core, lock};
+use super::control::Planned;
+use super::core::{Clock, Core, Streams, lock};
 use crate::device::{Dir, Iq, RxRecv};
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
 
 pub(crate) enum RxCmd {
-    /// The receive plan uhd-control booked: every segment with its configuration (UR-25), and
-    /// the commands it made the plan knowing were refused (RM-25).
-    Plan(Plan, Vec<u64>),
-    /// `Provider::stop` began at `at`: no segment begins any more, and under `abort` the
-    /// stream ends at once, at the first sample not yet delivered; under `orderly` at the first
-    /// sample at or after `at`, the cut uhd-control books there (RM-16, UR-26).
-    Cut { at: i64, mode: StopMode },
-    /// `Provider::stop` (UR-26).
+    /// `Provider::stop`, which has booked the stream's end (UR-26).
     Shutdown(StopMode),
 }
 
@@ -104,15 +97,28 @@ impl Stream {
     fn cut_at(&mut self, cut: i64) {
         self.cut = Some(self.cut.map_or(cut, |set| set.min(cut)));
     }
+
+    /// UR-17: the stream takes its cut from the plan, never before the first sample it has
+    /// not delivered; one the plan no longer has was cut at its origin before its first
+    /// sample, and its timed start may be queued, so it is stopped untimed only after that
+    /// origin, what arrives discarded (UR-17; #56). Once `Provider::stop(abort)` has begun,
+    /// the stream ends at the first sample not yet delivered, a segment still being delivered
+    /// up to an earlier cut included (RM-16).
+    fn follow(&mut self, streams: &Streams) {
+        let planned = streams.lines[Dir::Rx as usize].as_ref().and_then(|line| line.segment(self.clock.origin, self.config));
+        if let Some(cut) = planned.map_or(Some(0), |segment| segment.cut) {
+            self.cut_at(self.clock.instant(cut.max(self.expected)));
+        }
+        if matches!(streams.stop, Some((_, StopMode::Abort))) {
+            self.cut_at(self.clock.instant(self.expected));
+        }
+    }
 }
 
 pub(crate) struct Rx {
     core: Arc<Core>,
     cmds: Receiver<RxCmd>,
     stream: Option<Stream>,
-    plan: Plan,
-    /// uhd-control has handed a plan: a stream it does not have was cut at its origin.
-    handed: bool,
     /// The earliest origin of a planned segment not yet begun.
     from: i64,
     /// The channel count the streamer is open for.
@@ -124,14 +130,6 @@ pub(crate) struct Rx {
     first: bool,
     first_block: Option<Instant>,
     exit: bool,
-    /// `Provider::stop` has begun, at this instant and in this mode: no segment begins any
-    /// more (UR-25; Review M, N-1).
-    stopping: Option<(i64, StopMode)>,
-    /// The command whose segment the device refused: nothing begins until a plan made
-    /// knowing it arrives (RM-25).
-    refused: Option<u64>,
-    /// The refused commands the last plan was made knowing.
-    known: Vec<u64>,
     /// When the last untimed stop was issued: the next stream drops what precedes it.
     last_stop: Option<i64>,
 }
@@ -147,12 +145,11 @@ impl Rx {
             let clock = Clock { domain: handle.id, origin: t0, n: handle.root_ticks_per_tick.num() as i64 };
             Stream::new(clock, handle, channels, None)
         });
+        lock(&core.streams).delivered = stream.as_ref().map(|stream| (stream.clock.origin, stream.config, 0));
         Rx {
             from: stream.as_ref().map_or(i64::MIN, |stream| stream.clock.origin + 1),
             opened: channels,
             stream,
-            plan: Arc::new(Vec::new()),
-            handed: false,
             core,
             cmds,
             pool,
@@ -162,14 +159,11 @@ impl Rx {
             first: true,
             first_block: None,
             exit: false,
-            stopping: None,
-            refused: None,
-            known: Vec::new(),
             last_stop: None,
         }
     }
 
-    /// Carries out every command that has arrived.
+    /// Carries out every command that has arrived, and follows the plan.
     fn poll(&mut self) {
         loop {
             match self.cmds.try_recv() {
@@ -182,6 +176,22 @@ impl Rx {
             }
         }
         self.follow();
+    }
+
+    /// RM-16, UR-17: the stream takes its cut from the plan; one cut at or before the first
+    /// sample not yet delivered, once its origin has passed, has nothing more to deliver and
+    /// is stopped and ended now — an abort's, or a `Stop` of a stream delivered past it.
+    fn follow(&mut self) {
+        let Some(stream) = self.stream.as_mut() else { return };
+        stream.follow(&lock(&self.core.streams));
+        let done = stream.cut.is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;
+        if done {
+            if !stream.stopped {
+                stream.stopped = true;
+                self.last_stop = stop_at_cut(&self.core, stream.cut.expect("a cut")).or(self.last_stop);
+            }
+            self.finish();
+        }
     }
 
     pub fn run(mut self) {
@@ -202,13 +212,8 @@ impl Rx {
             return Turn::Exit;
         }
         if self.core.is_lost() {
-            // RM-16: the stream and its clock end at the loss's cut — the first sample at or
-            // after the instant the device was found lost, never before the first not yet
-            // delivered —, the one uhd-control's plan books, which may not have come yet.
-            if let (Some(stream), Some(at)) = (self.stream.as_mut(), self.core.lost_at()) {
-                stream.cut_at(stream.clock.instant(stream.clock.at_or_after(at).max(stream.expected)));
-                self.finish();
-            }
+            // RM-16: the stream and its clock end at the loss's cut (`finish` reads the plan).
+            self.finish();
             return if self.exit { Turn::Exit } else { Turn::Idle };
         }
         if self.stream.is_none() {
@@ -223,106 +228,61 @@ impl Rx {
                 std::thread::sleep(duration);
             }
         }
+        // A cut booked during the wait cuts this block too: `samples` reads the plan (RM-16).
         let result = self.core.device.rx_recv(self.recv_len(), self.recv_timeout());
-        // A cut that arrived during the wait cuts this block too (RM-16).
-        self.poll();
         self.receive(result);
         Turn::Busy
     }
 
     fn command(&mut self, cmd: RxCmd) {
-        match cmd {
-            RxCmd::Plan(plan, known) => (self.plan, self.known, self.handed) = (plan, known, true),
-            RxCmd::Cut { at, mode } => {
-                if self.stopping.is_some() {
-                    return;
-                }
-                self.stopping = Some((at, mode));
-                // RM-16: under `orderly` the stream ends at the first sample at or after the stop
-                // instant, never before the first not yet delivered — the cut uhd-control books,
-                // taken now so that nothing after it is published while that plan is on its way.
-                if let Some(stream) = self.stream.as_mut().filter(|_| mode == StopMode::Orderly) {
-                    stream.cut_at(stream.clock.instant(stream.clock.at_or_after(at).max(stream.expected)));
-                }
-                // RM-16: under `abort` the stream ends at the first sample not yet delivered.
-                if let Some(stream) = self.stream.as_mut().filter(|_| mode == StopMode::Abort) {
-                    stream.cut_at(stream.clock.instant(stream.expected));
-                    if !stream.stopped {
-                        if let Some(issued) = stop_at_cut(&self.core, stream.cut.expect("set above")) {
-                            stream.stopped = true;
-                            self.last_stop = Some(issued);
-                        }
-                    }
+        let RxCmd::Shutdown(mode) = cmd;
+        self.exit = true;
+        if mode == StopMode::Abort {
+            // RM-16: an abort ends the stream uhd-rx has at the first sample not yet delivered,
+            // a segment still being delivered up to an earlier cut included.
+            self.follow();
+            if let Some(stream) = self.stream.as_mut() {
+                stream.cut_at(stream.clock.instant(stream.expected));
+                if !stream.stopped {
+                    stream.stopped = true;
+                    self.last_stop = stop_at_cut(&self.core, stream.cut.expect("set above")).or(self.last_stop);
                 }
             }
-            RxCmd::Shutdown(mode) => {
-                self.exit = true;
-                // The stop's cut, if no `Cut` came first (RM-16).
-                self.command(RxCmd::Cut { at: self.core.now(), mode });
-                if mode == StopMode::Abort && self.stream.is_some() {
-                    self.finish();
-                }
-            }
-        }
-    }
-
-    /// UR-17: the stream being delivered takes its cut from the plan, never before the first
-    /// sample it has not delivered; one the plan no longer has was cut at its origin before
-    /// its first sample, and its timed start may be queued, so it is stopped untimed only
-    /// after that origin, what arrives discarded (UR-17; #56).
-    fn follow(&mut self) {
-        let Some(stream) = self.stream.as_mut() else { return };
-        let planned = self.plan.iter().find(|planned| planned.segment.origin == stream.clock.origin && planned.segment.config == stream.config);
-        match planned {
-            Some(planned) => {
-                if let Some(cut) = planned.segment.cut {
-                    let cut = stream.clock.instant(cut.max(stream.expected));
-                    stream.cut_at(cut);
-                }
-            }
-            None if self.handed => stream.cut_at(stream.clock.instant(stream.expected)),
-            None => {}
+            self.finish();
         }
     }
 
     /// RM-25, UR-17: the next planned segment begins: the streamer reopened if its channel
     /// count changed, the direction configured with the configuration in effect at its
     /// origin — unless uhd-control did both for an enable from no stream — and a timed start
-    /// issued there. A configuration the device refuses halts the stream (RM-25).
+    /// issued there. A configuration the device refuses halts the stream: uhd-rx books the
+    /// refusal, and the plan it then reads may begin the next segment earlier (RM-25).
     fn begin(&mut self) -> bool {
-        // A plan made before uhd-control knew of the refusal may lack the segment for another
-        // reason, and place the next one as if the refused one had run (RM-25).
-        if let Some(by) = self.refused {
-            if !self.known.contains(&by) {
-                return false;
-            }
-            self.refused = None;
-        }
-        let next: Option<Planned> = self.plan.iter().find(|planned| planned.segment.origin >= self.from).cloned();
-        let Some(next) = next.filter(|_| self.stopping.is_none()) else {
-            lock(&self.core.streams).idle[Dir::Rx as usize] = true;
-            return false;
+        let next: Option<Planned> = {
+            let mut streams = lock(&self.core.streams);
+            let next = streams.planned(Dir::Rx).into_iter().find(|planned| planned.segment.origin >= self.from);
+            streams.idle[Dir::Rx as usize] = next.is_none();
+            next
         };
-        lock(&self.core.streams).idle[Dir::Rx as usize] = false;
+        let Some(next) = next else { return false };
         let (origin, channels) = (next.segment.origin, next.channels());
-        let from = std::mem::replace(&mut self.from, origin.saturating_add(1));
         let configured = if next.configured {
             Ok(())
         } else {
             let reopened = if channels != self.opened { self.core.device.rx_open(channels) } else { Ok(()) };
-            reopened.and_then(|()| next.settings.configure(&self.core, Dir::Rx, channels).map(|_| ()))
+            reopened.and_then(|()| next.configure(&self.core, Dir::Rx).map(|_| ()))
         };
         if let Err(error) = configured {
-            // Not begun: the plan made without it may begin the next segment earlier.
-            self.from = from;
-            if let Some(by) = next.segment.by {
-                lock(&self.core.streams).refused.push((Dir::Rx, by));
-                self.refused = Some(by);
+            // Not begun. A refusal the plan cannot take — its command pruned — skips the segment.
+            let refused = next.segment.by.is_some_and(|by| lock(&self.core.streams).refuse(&self.core, Dir::Rx, by));
+            if !refused {
+                self.from = origin.saturating_add(1);
             }
             self.opened = 0;
             self.core.device_failed("update_parameter", &error);
             return true;
         }
+        self.from = origin.saturating_add(1);
         self.opened = channels;
         if let Err(error) = self.core.device.rx_start(origin) {
             self.core.device_failed("update_parameter", &error);
@@ -335,6 +295,7 @@ impl Rx {
                 let clock = Clock { domain: handle.id, origin, n: next.n() };
                 self.pool = HostPool::new(self.core.block_len * channels.max(1) * 8);
                 self.stream = Some(Stream::new(clock, handle, channels, self.last_stop.take()));
+                lock(&self.core.streams).delivered = Some((origin, next.segment.config, 0));
                 self.last_samples = Instant::now();
                 self.follow();
             }
@@ -344,18 +305,22 @@ impl Rx {
         true
     }
 
-    /// The stream ends: its clock, if it has one, ends at its cut (RM-16, UR-17), and
-    /// `Provider::stop`'s cut is recorded.
+    /// The stream ends: its clock, if it has one, ends at its cut (RM-16, UR-17), and the
+    /// items before the command that began it are pruned (#63). The cut is read from the
+    /// plan here, since another thread may have booked an earlier one — a loss, or
+    /// `Provider::stop`'s end — after this turn read it, while a receive call waited.
     fn finish(&mut self) {
-        let Some(stream) = self.stream.take() else { return };
-        if let (Some((at, mode)), Some(cut)) = (self.stopping, stream.cut) {
-            self.core.timing(json!({ "what": "rx_stop", "at": at, "until": cut, "mode": format!("{mode:?}") }));
-        }
+        let Some(mut stream) = self.stream.take() else { return };
+        let mut streams = lock(&self.core.streams);
+        stream.follow(&streams);
         if let (None, Some(cut)) = (&stream.handle, stream.cut) {
             if let Err(error) = self.core.clocks.end(stream.clock.domain, self.core.at(cut)) {
                 self.core.reject_note(json!({ "clock_not_ended": error.to_string() }));
             }
         }
+        streams.delivered = None;
+        let by = streams.lines[Dir::Rx as usize].as_ref().and_then(|line| line.segment(stream.clock.origin, stream.config)).and_then(|segment| segment.by);
+        streams.prune(Dir::Rx, by);
     }
 
     /// How many samples to ask `rx_recv` for: while a cut is pending, no more than up to
@@ -471,17 +436,23 @@ impl Rx {
         let mut k = (offset + clock.n / 2).div_euclid(clock.n);
         let mut len = samples.first().map_or(0, Vec::len) as i64;
         let mut ended = false;
-        if let Some(cut) = stream.cut {
-            let cut_k = clock.at_or_after(cut);
-            if k + len >= cut_k {
-                // UR-25: the samples reached the cut, so the stream is stopped untimed now.
-                if !stream.stopped {
-                    stream.stopped = true;
-                    self.last_stop = stop_at_cut(&self.core, cut).or(self.last_stop);
-                }
+        {
+            // The cut and what this block delivers are read and written together, so that a
+            // `Stop` booked after them cuts after the block (RM-16's floor, `Item.delivered`).
+            let mut streams = lock(&self.core.streams);
+            stream.follow(&streams);
+            if let Some(cut_k) = stream.cut.map(|cut| clock.at_or_after(cut)).filter(|cut_k| k + len >= *cut_k) {
                 len = (cut_k - k).max(0);
                 ended = true;
             }
+            if k + len > stream.expected {
+                streams.delivered = Some((clock.origin, stream.config, k + len));
+            }
+        }
+        if let Some(cut) = stream.cut.filter(|_| ended && !stream.stopped) {
+            // UR-25: the samples reached the cut, so the stream is stopped untimed now.
+            stream.stopped = true;
+            self.last_stop = stop_at_cut(&self.core, cut).or(self.last_stop);
         }
         if k < stream.expected {
             let trim = stream.expected - k;
@@ -635,7 +606,7 @@ mod tests {
     use super::super::control::ColdConfig;
     use ezsdr_kernel::module_api::Link;
     use ezsdr_kernel::stream::BackPressure;
-    use ezsdr_radio::timeline::Segment;
+    use ezsdr_radio::timeline::{Item, Kind, Line, Segment};
 
     fn link() -> Arc<dyn ezsdr_kernel::stream::DataLink> {
         let decl = ezsdr_kernel::stream::DataLinkDecl {
@@ -649,25 +620,48 @@ mod tests {
         ezsdr_link_host::HostLinkModule::new().create(&decl).unwrap()
     }
 
-    /// uhd-rx with the stream T0 started at 0, `channels` at 1 MS/s on the 200 MHz root.
+    /// uhd-rx with the stream T0 started at 0, `channels` at 1 MS/s on the 200 MHz root, and
+    /// its timeline with this Module's terms.
     fn rx(core: &Arc<Core>, channels: usize) -> (Rx, Clock) {
         let stream = core.id.child("rx").unwrap();
         let handle = core.clocks.declare_sample_clock(stream, core.root, Rational::new(200, 1).unwrap()).unwrap();
         let clock = Clock { domain: handle.id, origin: 0, n: 200 };
-        let (_to_rx, cmds) = std::sync::mpsc::channel();
+        let config = Config { channels: channels as u16, ratio: Rational::new(200, 1).unwrap() };
+        lock(&core.streams).lines[Dir::Rx as usize] = Some(Line::new(ezsdr_radio::timeline::Stream {
+            direction: Direction::Rx,
+            origin: 0,
+            config,
+            lead: core.ticks(core.description.timing.start_lead_ns),
+            call: core.block_len as i64,
+            allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
+        }));
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        // No `Provider::stop` comes unless a test sends it.
+        std::mem::forget(to_rx);
         core.device.rx_open(channels).unwrap();
         (Rx::new(core.clone(), cmds, Some((handle, channels, 0)), None), clock)
     }
 
-    /// A plan of receive segments at 1 MS/s, one channel, each `(origin, cut, by)`.
-    fn plan(segments: &[(i64, Option<i64>, Option<u64>)]) -> RxCmd {
+    /// The receive plan set to segments at 1 MS/s, one channel, each `(origin, cut, by)`,
+    /// as bookings would have left it.
+    fn plan(core: &Core, segments: &[(i64, Option<i64>, Option<u64>)]) {
         let config = Config { channels: 1, ratio: Rational::new(200, 1).unwrap() };
-        RxCmd::Plan(Arc::new(segments.iter().map(|&(origin, cut, by)| Planned {
-            segment: Segment { origin, cut, config, by },
-            settings: Arc::new(ColdConfig::new(origin, crate::device::Settings { rate: Some(1e6), ..crate::device::Settings::default() })),
-            configured: false,
-            clock: None,
-        }).collect()), Vec::new())
+        let mut streams = lock(&core.streams);
+        for by in segments.iter().filter_map(|(_, _, by)| *by) {
+            streams.configs[Dir::Rx as usize].insert(by, (Arc::new(ColdConfig::new(crate::device::Settings::default())), false));
+        }
+        streams.lines[Dir::Rx as usize].as_mut().unwrap().plan = segments.iter().map(|&(origin, cut, by)| Segment { origin, cut, config, by }).collect();
+    }
+
+    /// Books a receive command as uhd-control does, its segment's configuration with it.
+    fn book(core: &Core, e: i64, seq: u64, kind: Kind) {
+        let mut streams = lock(&core.streams);
+        streams.configs[Dir::Rx as usize].insert(seq, (Arc::new(ColdConfig::new(crate::device::Settings::default())), false));
+        assert!(streams.book(core, Dir::Rx, Item { e, seq, ready: 0, delivered: None, refused: false, kind }));
+    }
+
+    fn rate(rate: u64) -> Kind {
+        Kind::Cold(Config { channels: 1, ratio: Rational::new(200_000_000 / rate, 1).unwrap() })
     }
 
     fn samples(first_tick: i64, n: usize) -> RxRecv {
@@ -754,9 +748,10 @@ mod tests {
     fn ur_26_a_late_start_after_abort_does_not_stop_again() {
         let (core, device, _, _) = super::super::test_support::rig();
         let (mut rx, _) = rx(&core, 1);
-        rx.command(RxCmd::Cut { at: 0, mode: StopMode::Abort });
+        lock(&core.streams).end(&core, 0, true, false);
+        rx.poll();
         rx.receive(RxRecv::LateCommand);
-        rx.command(RxCmd::Cut { at: 0, mode: StopMode::Abort });
+        lock(&core.streams).end(&core, 0, true, false);
         rx.command(RxCmd::Shutdown(StopMode::Abort));
         assert_eq!(device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count(), 1);
         assert_eq!(lock(&core.rec).applied.iter().filter(|r| r["key"] == "rx_stop").count(), 1);
@@ -765,65 +760,62 @@ mod tests {
 
     #[test]
     fn ur_26_a_late_start_during_orderly_stop_is_recorded_once() {
-        let (core, device, time, _) = super::super::test_support::rig();
+        let (core, device, _, _) = super::super::test_support::rig();
         let (mut rx, _) = rx(&core, 1);
-        rx.command(RxCmd::Cut { at: 0, mode: StopMode::Orderly });
-        // uhd-control's plan with the stop's cut, at sample 0 (RM-16).
-        rx.command(plan(&[(0, Some(0), None)]));
-        rx.follow();
-        let cut = rx.stream.as_ref().unwrap().cut.unwrap();
+        // `Provider::stop(orderly)` at 0: the stream is cut at sample 0 (RM-16).
+        lock(&core.streams).end(&core, 0, false, false);
+        rx.poll();
         rx.receive(RxRecv::LateCommand);
         rx.receive(RxRecv::LateCommand);
-        assert!(rx.stream.as_ref().unwrap().stopped);
-        time.advance_to(core.at(cut + core.ticks(20_000_000))).unwrap();
-        rx.last_samples = Instant::now() - Wall::from_secs(1);
-        rx.receive(RxRecv::Timeout);
         rx.command(RxCmd::Shutdown(StopMode::Abort));
         assert!(rx.stream.is_none());
         assert_eq!(device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count(), 1);
         let rec = lock(&core.rec);
         let stops: Vec<_> = rec.applied.iter().filter(|r| r["key"] == "rx_stop").collect();
         assert_eq!(stops.len(), 1);
-        assert_eq!(stops[0]["at"], serde_json::to_value(core.at(cut)).unwrap());
+        assert_eq!(stops[0]["at"], serde_json::to_value(core.at(0)).unwrap());
         assert!(!device.calls().iter().any(|c| c.starts_with("rx_start ")));
     }
 
     #[test]
     fn ur_26_a_stopped_stream_keeps_its_end() {
-        // RM-16, UR-26 (spec 21, VG-1; spec 22, VH-1): a cut from the plan — a `Stop`'s at sample
-        // 1 000 — is kept when `Provider::stop` comes at 5 ms, under `orderly` as under `abort`
-        // once 1 000 samples are delivered, and an abort with fewer delivered ends the stream
-        // there, earlier: an end moves only earlier. The clock ends at the stream's end.
-        for (mode, delivered, end) in [
-            (StopMode::Orderly, 300, 1_000),
-            (StopMode::Abort, 1_000, 1_000),
-            (StopMode::Abort, 300, 300),
+        // RM-16, UR-26 (spec 21, VG-1; spec 22, VH-1): a `Stop` at 1 ms cuts the stream at
+        // sample 1 000; `Provider::stop` from 5 ms keeps that end under `orderly`, and under
+        // `abort` once 1 000 samples are delivered, while an abort with fewer delivered ends
+        // the stream there, earlier: an end moves only earlier. With no `Stop` before it, an
+        // abort ends the stream at the first sample not yet delivered as soon as uhd-rx reads
+        // it, a stream already cut later included. The clock ends at the stream's end; the
+        // device is stopped once.
+        for (mode, delivered, end, stop) in [
+            (StopMode::Orderly, 300, 1_000, true),
+            (StopMode::Abort, 1_000, 1_000, true),
+            (StopMode::Abort, 300, 300, true),
+            (StopMode::Abort, 300, 300, false),
         ] {
             let link = link();
             let (core, device, time, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
             let (mut rx, clock) = rx(&core, 1);
-            rx.command(plan(&[(0, Some(1_000), None)]));
-            rx.follow();
+            if stop {
+                book(&core, core.ticks(1_000_000), 1, Kind::Stop);
+            }
             rx.receive(samples(clock.instant(0), delivered as usize));
             time.advance_to(core.at(core.ticks(5_000_000))).unwrap();
-            rx.command(RxCmd::Cut { at: core.ticks(5_000_000), mode });
-            // As the run loop's poll does after each command: the plan's later cut leaves the
-            // abort's earlier one.
-            rx.follow();
-            let case = format!("{mode:?}, {delivered} delivered");
-            // An abort stops the device at once (VG-1).
+            {
+                // As `Provider::stop` books it.
+                let mut streams = lock(&core.streams);
+                streams.stop = Some((core.ticks(5_000_000), mode));
+                streams.end(&core, core.ticks(5_000_000), mode == StopMode::Abort, false);
+            }
+            rx.poll();
+            let case = format!("{mode:?}, {delivered} delivered, a Stop before: {stop}");
             if mode == StopMode::Abort {
+                assert!(rx.stream.is_none(), "{case}: ended as soon as uhd-rx reads the abort");
                 assert_eq!(device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count(), 1, "{case}");
             }
+            rx.command(RxCmd::Shutdown(mode));
             if delivered < 1_000 {
                 rx.receive(samples(clock.instant(delivered), 6_000));
             }
-            // The stop's row, written as the stream ends; none for one that had ended at its
-            // cut already.
-            let rows: Vec<_> = lock(&core.rec).timing.iter().filter(|r| r["what"] == "rx_stop")
-                .map(|r| (r["at"].as_i64().unwrap(), r["until"].as_i64().unwrap())).collect();
-            let expected: Vec<(i64, i64)> = if delivered == 1_000 { Vec::new() } else { vec![(core.ticks(5_000_000), clock.instant(end))] };
-            assert_eq!(rows, expected, "{case}");
             let blocks: i64 = received(&link).iter().map(|(_, _, len)| i64::from(*len)).sum();
             assert_eq!(blocks, end, "{case}");
             assert!(rx.stream.is_none(), "{case}");
@@ -842,15 +834,13 @@ mod tests {
             let link = link();
             let (core, _, _, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
             let (mut rx, clock) = rx(&core, 1);
-            rx.command(plan(&[(0, None, None)]));
-            rx.follow();
             rx.receive(samples(clock.instant(0), 3_000));
-            rx.command(match case {
-                "cut" => plan(&[(0, Some(1_000), None)]),
-                "dropped" => plan(&[(core.ticks(500_000_000), None, Some(9))]),
-                _ => plan(&[]),
-            });
-            rx.follow();
+            match case {
+                "cut" => plan(&core, &[(0, Some(1_000), None)]),
+                "dropped" => plan(&core, &[(core.ticks(500_000_000), None, Some(9))]),
+                _ => plan(&core, &[]),
+            }
+            rx.poll();
             rx.receive(samples(clock.instant(3_000), 1_000));
             assert!(rx.stream.is_none(), "{case}");
             assert_eq!(clocks(&core), [(0, Some(clock.instant(3_000)))], "{case}");
@@ -858,39 +848,18 @@ mod tests {
     }
 
     #[test]
-    fn ur_26_an_orderly_shutdown_without_a_booked_stop_cuts_at_the_stop() {
-        // UR-26, RM-16: at `Provider::stop(orderly)`, a stream whose plan carries no cut —
-        // uhd-control did not book the stop — ends at the first sample at or after the stop
-        // instant.
+    fn ur_26_uhd_rx_follows_the_stop_it_reads() {
+        // RM-16, UR-26: `Provider::stop(orderly)` from 5 ms books the stream's end, which
+        // uhd-rx reads at its next turn: what arrives is published only up to 5 ms's sample,
+        // and a later stop instant does not move the stream's end.
         let link = link();
         let (core, _, time, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
         let (mut rx, clock) = rx(&core, 1);
-        rx.command(plan(&[(0, None, None)]));
-        rx.follow();
         rx.receive(samples(clock.instant(0), 300));
         time.advance_to(core.at(core.ticks(8_000_000))).unwrap();
-        rx.command(RxCmd::Cut { at: core.ticks(5_000_000), mode: StopMode::Orderly });
-        rx.command(RxCmd::Shutdown(StopMode::Orderly));
-        rx.receive(samples(clock.instant(300), 10_000));
-        let end: i64 = received(&link).iter().map(|(_, _, len)| i64::from(*len)).sum();
-        assert_eq!(end, 5_000);
-        assert_eq!(clocks(&core), [(0, Some(clock.instant(5_000)))]);
-    }
-
-    #[test]
-    fn ur_26_an_orderly_stop_cuts_before_its_plan_arrives() {
-        // RM-16, UR-26: `Provider::stop(orderly)` from 5 ms reaches uhd-rx before uhd-control's
-        // plan with its cut; what arrives meanwhile is published only up to 5 ms's sample, and a
-        // later stop instant does not move the stream's end.
-        let link = link();
-        let (core, _, time, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
-        let (mut rx, clock) = rx(&core, 1);
-        rx.command(plan(&[(0, None, None)]));
-        rx.follow();
-        rx.receive(samples(clock.instant(0), 300));
-        time.advance_to(core.at(core.ticks(8_000_000))).unwrap();
-        rx.command(RxCmd::Cut { at: core.ticks(5_000_000), mode: StopMode::Orderly });
-        rx.command(RxCmd::Cut { at: core.ticks(7_000_000), mode: StopMode::Orderly });
+        lock(&core.streams).end(&core, core.ticks(5_000_000), false, false);
+        lock(&core.streams).end(&core, core.ticks(7_000_000), false, false);
+        rx.poll();
         rx.receive(samples(clock.instant(300), 10_000));
         let end: i64 = received(&link).iter().map(|(_, _, len)| i64::from(*len)).sum();
         assert_eq!(end, 5_000);
@@ -899,19 +868,16 @@ mod tests {
 
     #[test]
     fn ur_29_a_loss_ends_the_stream_at_its_instant() {
-        // RM-16, UR-29: once the device is found lost, uhd-rx ends the stream at the loss's
-        // sample — not at a later cut its plan already had, nor at the instant uhd-rx notices —,
-        // before uhd-control's plan with the loss's cut arrives, and never before what it
-        // delivered: lost at 5 ms and noticed at 7 ms, the end is 5 ms's sample; lost at 2 ms
-        // with 3 000 samples delivered, it is sample 3 000.
+        // RM-16, UR-29: the thread that finds the device lost books the loss with the first
+        // sample uhd-rx has not delivered, and uhd-rx ends the stream at the loss's sample —
+        // not at a later cut its plan already had —, never before what it delivered: lost at
+        // 5 ms and noticed by uhd-rx at 7 ms, the end is 5 ms's sample; lost at 2 ms with 3 000
+        // samples delivered, it is sample 3 000.
         for (lost, expected) in [(5_000_000, 5_000), (2_000_000, 3_000)] {
             let link = link();
             let (core, _, time, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
-            let handle = core.clocks.declare_sample_clock(core.id.child("rx").unwrap(), core.root, Rational::new(200, 1).unwrap()).unwrap();
-            let clock = Clock { domain: handle.id, origin: 0, n: 200 };
-            let (to_rx, cmds) = std::sync::mpsc::channel();
-            let mut rx = Rx::new(core.clone(), cmds, Some((handle, 1, 0)), None);
-            to_rx.send(plan(&[(0, Some(10_000), None)])).unwrap();
+            let (mut rx, clock) = rx(&core, 1);
+            book(&core, core.ticks(10_000_000), 1, rate(2_000_000));
             rx.poll();
             rx.receive(samples(clock.instant(0), 3_000));
             time.advance_to(core.at(core.ticks(lost))).unwrap();
@@ -920,7 +886,138 @@ mod tests {
             assert_eq!(rx.turn(), Turn::Idle);
             assert!(rx.stream.is_none());
             assert_eq!(clocks(&core), [(0, Some(clock.instant(expected)))], "lost at {lost}");
+            assert_eq!(lock(&core.streams).planned(Dir::Rx)[0].segment.cut, Some(expected), "the plan's cut, lost at {lost}");
         }
+    }
+
+    #[test]
+    fn ur_29_a_loss_found_after_uhd_rx_read_the_plan_ends_the_stream() {
+        // RM-16, UR-29: a loss another thread finds after uhd-rx's turn read the plan — the
+        // plan with no cut, or with a later one — still ends the stream and its clock at the
+        // loss's sample: uhd-rx reads the plan again when it sees the device lost.
+        for later_cut in [false, true] {
+            let link = link();
+            let (core, _, time, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
+            let (mut rx, clock) = rx(&core, 1);
+            if later_cut {
+                book(&core, core.ticks(10_000_000), 1, rate(2_000_000));
+            }
+            rx.poll();
+            rx.receive(samples(clock.instant(0), 3_000));
+            time.advance_to(core.at(core.ticks(5_000_000))).unwrap();
+            core.device_lost("test");
+            rx.finish();
+            assert!(rx.stream.is_none());
+            assert_eq!(clocks(&core), [(0, Some(clock.instant(5_000)))], "a later cut: {later_cut}");
+        }
+    }
+
+    #[test]
+    fn ur_29_a_silent_stream_ends_at_a_cut_booked_during_its_wait() {
+        // RM-16, UR-29: a loss, or `Provider::stop`'s orderly end, booked by another thread
+        // while uhd-rx waits in a receive call ends a stream that has gone silent at the
+        // plan's cut, not at the later one its turn read: `finish` reads the plan.
+        for lost in [true, false] {
+            let (core, _, time, _) = super::super::test_support::rig_with_links(vec![link()]);
+            let (mut rx, clock) = rx(&core, 1);
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            book(&core, ms(10), 1, rate(2_000_000));
+            rx.receive(samples(clock.instant(0), 3_000));
+            rx.poll();
+            time.advance_to(core.at(ms(5))).unwrap();
+            if lost {
+                core.device_lost("test");
+            } else {
+                let mut streams = lock(&core.streams);
+                streams.stop = Some((ms(5), StopMode::Orderly));
+                streams.end(&core, ms(5), false, false);
+            }
+            time.advance_to(core.at(ms(50))).unwrap();
+            rx.last_samples = Instant::now() - Wall::from_secs(1);
+            rx.receive(RxRecv::Timeout);
+            assert!(rx.stream.is_none(), "lost: {lost}");
+            let cut = lock(&core.streams).planned(Dir::Rx)[0].segment.cut;
+            assert_eq!(cut, Some(5_000), "lost: {lost}");
+            assert_eq!(clocks(&core), [(0, Some(clock.instant(5_000)))], "lost: {lost}");
+        }
+    }
+
+    #[test]
+    fn ur_29_a_loss_takes_effect_before_a_change_at_its_instant() {
+        // RM-25: a loss counts as received with the faults, at the Run's start: a change booked
+        // earlier at the loss's instant takes effect after it, so the loss cuts the running
+        // segment, floored at the first sample uhd-rx has not delivered (RM-16), and the
+        // change's cut never applies.
+        let (core, _, time, _) = super::super::test_support::rig_with_links(vec![link()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        rx.receive(samples(clock.instant(0), 12_000));
+        book(&core, ms(10), 1, rate(2_000_000));
+        time.advance_to(core.at(ms(10))).unwrap();
+        core.device_lost("test");
+        let planned: Vec<_> = lock(&core.streams).planned(Dir::Rx).iter().map(|p| (p.segment.origin, p.segment.cut)).collect();
+        assert_eq!(planned, [(0, Some(12_000))]);
+    }
+
+    #[test]
+    fn ur_26_an_end_takes_delivered_only_from_the_segment_it_cuts() {
+        // RM-16: an end carries the first sample uhd-rx has not delivered only when uhd-rx's
+        // segment still runs at the end. A change at 10 ms cuts the stream at sample 10 000;
+        // an abort at 12 ms, with 9 000 delivered, leaves that cut and plans no segment after
+        // it — not the next segment cut at the previous one's sample index.
+        let (core, _, time, _) = super::super::test_support::rig_with_links(vec![link()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        book(&core, ms(10), 1, rate(2_000_000));
+        rx.poll();
+        rx.receive(samples(clock.instant(0), 9_000));
+        time.advance_to(core.at(ms(12))).unwrap();
+        lock(&core.streams).end(&core, ms(12), true, false);
+        let planned: Vec<_> = lock(&core.streams).planned(Dir::Rx).iter().map(|p| (p.segment.origin, p.segment.cut)).collect();
+        assert_eq!(planned, [(0, Some(10_000))]);
+    }
+
+    #[test]
+    fn ur_26_an_abort_stops_a_queued_start_at_shutdown() {
+        // UR-26, RM-16: under `abort`, a segment whose timed start uhd-rx has queued and whose
+        // origin has not passed is not stopped when uhd-rx reads the abort (#56), but at its
+        // shutdown, once, before uhd-rx exits; it has no sample, so no clock.
+        let (core, device, time, _) = super::super::test_support::rig_with_links(vec![link()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        plan(&core, &[(0, Some(10_000), None), (ms(65), None, Some(1))]);
+        rx.poll();
+        rx.receive(samples(0, 10_000));
+        assert!(rx.begin());
+        time.advance_to(core.at(ms(20))).unwrap();
+        {
+            let mut streams = lock(&core.streams);
+            streams.stop = Some((ms(20), StopMode::Abort));
+            streams.end(&core, ms(20), true, false);
+        }
+        rx.poll();
+        let stops = || device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count();
+        assert_eq!(stops(), 1, "only the first stream's stop yet");
+        rx.command(RxCmd::Shutdown(StopMode::Abort));
+        assert!(rx.stream.is_none());
+        assert_eq!(stops(), 2);
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(10_000)))]);
+    }
+
+    #[test]
+    fn ur_26_uhd_rx_aborts_when_its_provider_is_gone() {
+        // RM-16: with its command channel gone and no `Provider::stop` booked, uhd-rx aborts:
+        // the stream ends at the first sample not yet delivered, its clock there, stopped once.
+        let (core, device, _, _) = super::super::test_support::rig_with_links(vec![link()]);
+        let (mut rx, clock) = rx(&core, 1);
+        rx.receive(samples(clock.instant(0), 300));
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        drop(to_rx);
+        rx.cmds = cmds;
+        rx.poll();
+        assert!(rx.exit && rx.stream.is_none());
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(300)))]);
+        assert_eq!(device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count(), 1);
     }
 
     #[test]
@@ -928,8 +1025,8 @@ mod tests {
         // UR-17: uhd-rx asks the device for no more than up to a pending cut.
         let (core, _, _, _) = super::super::test_support::rig_with_links(vec![link()]);
         let (mut rx, clock) = rx(&core, 1);
-        rx.command(plan(&[(0, Some(1_000), None)]));
-        rx.follow();
+        plan(&core, &[(0, Some(1_000), None)]);
+        rx.poll();
         assert_eq!(rx.recv_len(), 1_000.min(core.block_len));
         rx.receive(samples(clock.instant(0), 300));
         assert_eq!(rx.recv_len(), 700.min(core.block_len));
@@ -939,8 +1036,8 @@ mod tests {
     fn ur_25_largest_aligned_cut_is_safe_in_rx_owner() {
         let (core, _, _, _) = super::super::test_support::rig();
         let (mut rx, _) = rx(&core, 1);
-        rx.command(plan(&[(0, Some(i64::MAX.div_euclid(200)), None)]));
-        rx.follow();
+        plan(&core, &[(0, Some(i64::MAX.div_euclid(200)), None)]);
+        rx.poll();
         assert_eq!(rx.recv_len(), core.block_len);
         assert_eq!(rx.recv_timeout(), super::RECV_TIMEOUT);
         rx.receive(crate::device::RxRecv::Timeout);
@@ -951,26 +1048,25 @@ mod tests {
     fn ur_25_a_second_change_follows_the_first() {
         // RM-25 (spec 22, VH-2): a second change before the first's origin replaces the
         // first's segment, which has no sample, so no clock: uhd-rx registers a clock at its
-        // first block, whether the second plan comes before or after it began the first.
+        // first block, whether the second change comes before or after it began the first.
         for began in [false, true] {
             let link = link();
             let (core, _, time, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
             let (mut rx, clock) = rx(&core, 1);
             let ms = |n: i64| core.ticks(n * 1_000_000);
-            rx.command(plan(&[(0, Some(10_000), None), (ms(65), None, Some(1))]));
-            rx.follow();
+            plan(&core, &[(0, Some(10_000), None), (ms(65), None, Some(1))]);
+            rx.poll();
             rx.receive(samples(0, 10_000));
             assert!(rx.stream.is_none());
-            let second = plan(&[(0, Some(10_000), None), (ms(115), None, Some(2))]);
             if began {
                 assert!(rx.begin());
-                rx.command(second);
-                rx.follow();
+                plan(&core, &[(0, Some(10_000), None), (ms(115), None, Some(2))]);
+                rx.poll();
                 time.advance_to(core.at(ms(70))).unwrap();
                 rx.receive(samples(ms(65), 1_000));
                 assert!(rx.stream.is_none(), "the first's segment ends at its origin");
             } else {
-                rx.command(second);
+                plan(&core, &[(0, Some(10_000), None), (ms(115), None, Some(2))]);
             }
             assert!(rx.begin());
             rx.receive(samples(ms(115), 1_000));
@@ -981,45 +1077,64 @@ mod tests {
     }
 
     #[test]
-    fn ur_25_a_refused_segment_waits_for_the_plan_made_without_it() {
-        // RM-25: once the device refuses a segment's configuration, uhd-rx begins nothing until
-        // uhd-control's plan made knowing of the refusal arrives — not a plan that lacks the
-        // segment for another reason —, and then begins its next segment, which may begin
-        // earlier than the refused one would have.
-        let (core, device, _, _) = super::super::test_support::rig_with_links(vec![link()]);
+    fn ur_25_a_refused_segment_is_booked_by_uhd_rx() {
+        // RM-25: when the device refuses a segment's configuration, uhd-rx books the change as
+        // refused itself, which halts the stream, and reads the plan made so at once: a
+        // `start_rx` that was a no-op resumes the stream, at the refused segment's own origin,
+        // which the refusal does not count as begun.
+        let refuse = crate::device::FakeFault::WrongRate { claimed: 2e6, applied: 2e6 - 1_000.0, nth: 0 };
+        let (core, device, _, _) = super::super::test_support::rig_with(crate::device::FakeConfig { faults: vec![refuse], ..Default::default() }, vec![link()]);
         let (mut rx, _) = rx(&core, 1);
         let ms = |n: i64| core.ticks(n * 1_000_000);
-        let planned = |origin: i64, cut: Option<i64>, by: Option<u64>, rate: f64| Planned {
-            segment: Segment { origin, cut, config: Config { channels: 1, ratio: Rational::new(200, 1).unwrap() }, by },
-            settings: Arc::new(ColdConfig::new(origin, crate::device::Settings { rate: Some(rate), ..crate::device::Settings::default() })),
-            configured: false,
-            clock: None,
-        };
-        rx.command(RxCmd::Plan(Arc::new(vec![planned(0, Some(10_000), None, 1e6), planned(ms(65), Some(189_000), Some(1), 3.3e6), planned(ms(254), None, Some(2), 1e6)]), Vec::new()));
-        rx.follow();
+        book(&core, ms(10), 1, rate(2_000_000));
+        book(&core, ms(20), 2, Kind::Start);
+        assert_eq!(lock(&core.streams).planned(Dir::Rx).iter().map(|p| (p.segment.origin, p.segment.by)).collect::<Vec<_>>(), [(0, None), (ms(65), Some(1))]);
+        rx.poll();
         rx.receive(samples(0, 10_000));
         assert!(rx.stream.is_none());
         assert!(rx.begin());
-        assert_eq!(lock(&core.streams).refused, [(Dir::Rx, 1)]);
-        assert!(!rx.begin(), "the refused plan is not carried out");
-        rx.command(RxCmd::Plan(Arc::new(vec![planned(0, Some(10_000), None, 1e6), planned(ms(300), None, Some(3), 1e6)]), Vec::new()));
-        assert!(!rx.begin(), "a plan made before uhd-control knew of the refusal is not carried out");
-        rx.command(RxCmd::Plan(Arc::new(vec![planned(0, Some(10_000), None, 1e6), planned(ms(60), None, Some(2), 1e6)]), vec![1]));
+        assert!(lock(&core.streams).lines[Dir::Rx as usize].as_ref().unwrap().items.iter().any(|item| item.seq == 1 && item.refused));
         assert!(rx.begin());
         let starts: Vec<_> = device.calls().into_iter().filter(|c| c.starts_with("rx_start ")).collect();
-        assert_eq!(starts, [format!("rx_start {}", ms(60))]);
+        assert_eq!(starts, [format!("rx_start {}", ms(65))]);
+        assert_eq!(rx.stream.as_ref().map(|stream| stream.config.ratio.num()), Some(100), "the refused rate is the stream's (KC-27)");
+    }
+
+    #[test]
+    fn ur_17_an_ended_segment_prunes_the_items_before_it() {
+        // #63: when uhd-rx ends a segment, the timeline's items before the command that began
+        // it are pruned, with their segments' configurations: after a change at 10 ms, one at
+        // 200 ms and a `Stop` at 300 ms, the first change goes once the second's segment ends.
+        let (core, _, _, _) = super::super::test_support::rig_with_links(vec![link()]);
+        let (mut rx, _) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        book(&core, ms(10), 1, rate(2_000_000));
+        book(&core, ms(200), 2, rate(1_000_000));
+        book(&core, ms(300), 3, Kind::Stop);
+        rx.poll();
+        rx.receive(samples(0, 10_000));
+        for (origin, len) in [(ms(65), 270_000), (ms(254), 46_000)] {
+            assert!(rx.begin());
+            rx.receive(samples(origin, len));
+            assert!(rx.stream.is_none(), "the segment from {origin} ends at its cut");
+        }
+        let streams = lock(&core.streams);
+        let items: Vec<u64> = streams.lines[Dir::Rx as usize].as_ref().unwrap().items.iter().map(|item| item.seq).collect();
+        assert_eq!(items, [2, 3]);
+        assert_eq!(streams.configs[Dir::Rx as usize].keys().copied().collect::<Vec<_>>(), [2, 3]);
+        assert_eq!(streams.planned(Dir::Rx).len(), 3, "every segment stays in the plan");
     }
 
     #[test]
     fn ur_26_no_segment_begins_once_provider_stop_has_begun() {
-        // UR-25, UR-26 (spec 22, VH-4; #58): once `Provider::stop` has begun, uhd-rx starts no
-        // planned segment, the one a change booked before it included.
+        // UR-25, UR-26 (spec 22, VH-4; #58): `Provider::stop` ends the stream in the plan, so
+        // uhd-rx starts no planned segment after it, the one a change booked before it included.
         let (core, device, _, _) = super::super::test_support::rig_with_links(vec![link()]);
         let (mut rx, _) = rx(&core, 1);
         let ms = |n: i64| core.ticks(n * 1_000_000);
-        rx.command(plan(&[(0, Some(10_000), None), (ms(65), None, Some(1))]));
-        rx.follow();
-        rx.command(RxCmd::Cut { at: ms(5), mode: StopMode::Orderly });
+        book(&core, ms(10), 1, rate(2_000_000));
+        lock(&core.streams).end(&core, ms(5), false, false);
+        rx.poll();
         rx.receive(samples(0, 10_000));
         assert!(rx.stream.is_none());
         assert!(!rx.begin());
@@ -1037,15 +1152,15 @@ mod tests {
             let (core, device, time, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
             let (mut rx, _) = rx(&core, 1);
             let ms = |n: i64| core.ticks(n * 1_000_000);
-            rx.command(plan(&[(0, Some(10_000), None), (ms(65), None, Some(1))]));
-            rx.follow();
+            plan(&core, &[(0, Some(10_000), None), (ms(65), None, Some(1))]);
+            rx.poll();
             rx.receive(samples(0, 10_000));
             assert!(rx.begin());
             assert!(device.calls().contains(&format!("rx_start {}", ms(65))));
             // The `Stop` at 20 ms cuts the planned segment at its origin: the plan drops it.
             time.advance_to(core.at(ms(20))).unwrap();
-            rx.command(plan(&[(0, Some(10_000), None)]));
-            rx.follow();
+            plan(&core, &[(0, Some(10_000), None)]);
+            rx.poll();
             assert_eq!(device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count(), 1, "only the first stream's stop yet");
             time.advance_to(core.at(ms(80))).unwrap();
             if silent {

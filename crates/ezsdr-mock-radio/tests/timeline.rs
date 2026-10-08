@@ -159,7 +159,6 @@ fn expect(profile: &str, sequence: &Sequence) -> Record {
     let rx_items = sequence.items(&rx);
     let segments = plan(&rx.stream, &rx_items).unwrap();
     let mut record = Record {
-        rx_clocks: clocks(&segments),
         tx_clocks: clocks(&plan(&tx.stream, &sequence.items(&tx)).unwrap()),
         ..Record::default()
     };
@@ -200,9 +199,16 @@ fn expect(profile: &str, sequence: &Sequence) -> Record {
         }
         rows.push((entry, kind, running));
     }
+    // RM-25: a receive segment's SampleClock is registered at its first block, so one that
+    // publishes none has none.
     let mut injected = BTreeMap::new();
     for (index, segment) in segments.iter().enumerate() {
-        receive(index, segment, &hits[index], gap, &mut record.blocks, &mut injected);
+        let mut blocks = Vec::new();
+        receive(record.rx_clocks.len(), segment, &hits[index], gap, &mut blocks, &mut injected);
+        if !blocks.is_empty() {
+            record.rx_clocks.extend(clocks(std::slice::from_ref(segment)));
+            record.blocks.extend(blocks);
+        }
     }
     record.faults = rows.into_iter().map(|(entry, kind, running): (&Entry, Fault, bool)| {
         let lost = if running { injected.get(&entry.seq).copied().unwrap_or(0) } else { 0 };
