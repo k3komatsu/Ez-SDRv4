@@ -537,8 +537,8 @@
   "id": "P13",
   "name": "EA-17 capture drops at",
   "file": "python/ezsdr/session.py",
-  "old": "            \"at\": at,",
-  "new": "            \"at\": None,",
+  "old": "            \"at\": at if at is not None else self._session._aligned,\n            \"params\": {\"sink.capture_samples\"",
+  "new": "            \"at\": None,\n            \"params\": {\"sink.capture_samples\"",
   "python": "test_easy_api.EasyApi.test_ea_17_capture_at_an_instant"
  },
  {
