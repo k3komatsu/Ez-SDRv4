@@ -8,7 +8,7 @@ use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::run::{Lease, RunState, Termination};
 use ezsdr_kernel::session::{LogEntry, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Value};
-use ezsdr_kernel::time::{Duration, Rational, TimePoint};
+use ezsdr_kernel::time::{Duration, Rational, SampleClockRecord, TimePoint};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -211,6 +211,9 @@ pub enum Response {
         effective: BTreeMap<Ident, BTreeMap<Key, Value>>,
         /// The number of events delivered so far.
         events: usize,
+        /// The SampleClocks registered so far, in registration order (TM-13a), from which a
+        /// client places an instant on a stream's samples (EA-16, `Rx.next_at`).
+        sample_clocks: Vec<SampleClockRecord>,
     },
     /// The artifact's bytes follow (EA-13).
     Read {

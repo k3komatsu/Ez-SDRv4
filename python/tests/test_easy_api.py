@@ -376,6 +376,24 @@ class EasyApi(unittest.TestCase):
         offset, _ = rotation(y[45:], x)
         self.assertEqual(offset, 0)
 
+    def test_ea_16_next_at_finds_the_waveform_s_start_again(self) -> None:
+        x = ramp()
+        with self.connect() as sdr:
+            at0 = sdr.after(0.2)
+            with sdr.aligned(at0):
+                sdr.tx.repeat(x)
+            before = sdr.sleep(0.3713)
+            at = sdr.rx.next_at(at0, len(x))
+            y = sdr.rx.capture(len(x), at=at)
+            sdr.rx.stop()
+            with self.assertRaises(ezsdr.Error):
+                sdr.rx.next_at(at0, len(x))
+        self.assertEqual((at["ticks"] - at0["ticks"]) % (len(x) * 1000), 0, "whole periods of 1 000 samples, 1 000 ticks each")
+        self.assertGreaterEqual(at["ticks"], before["ticks"] + 50_000_000, "at least 50 ms ahead")
+        # The waveform's start, 45 samples later after the path delay.
+        offset, _ = rotation(y, x)
+        self.assertEqual(offset, len(x) - 45)
+
     # -- Phase 7, VE-6
 
     def test_sleep_returns_the_instant(self) -> None:
@@ -585,6 +603,20 @@ class DurationRequests(unittest.TestCase):
                 sdr.sleep(seconds)
                 self.assertEqual(sdr._connection.call.call_args.args[0]["by"], {"domain": self.ROOT, "ticks": ticks})
                 self.assertEqual(sdr.after(seconds), {"domain": self.ROOT, "ticks": ticks})
+
+    def test_ea_16_next_at_counts_samples_at_a_fractional_rate(self) -> None:
+        # 3 MS/s on a 1 GHz root: 1 000/3 ticks a sample, origin at tick 7. A start at tick 100
+        # is sample 1; now + 50 ms is tick 50 010 000, first reached by sample 150 030. Periods
+        # of 10 samples from sample 1 give sample 150 031, at tick 7 + ceil(150 031 · 1 000/3).
+        clock = {"stream": {"node": 0, "path": "radio/rx"}, "root_ticks_per_tick": {"num": 1000, "den": 3},
+                 "origin": {"domain": self.ROOT, "ticks": 7}, "ended_at": None}
+        sdr = self.session({"now": {"domain": self.ROOT, "ticks": 10_000}, "sample_clocks": [clock]})
+        rx = ezsdr.session.Rx(sdr, "radio", "rx")
+        at = rx.next_at({"domain": self.ROOT, "ticks": 100}, 10)
+        self.assertEqual(at, {"domain": self.ROOT, "ticks": 50_010_341})
+        clock["origin"]["ticks"] = 200
+        with self.assertRaises(ezsdr.Error):
+            rx.next_at({"domain": self.ROOT, "ticks": 100}, 10)
 
     def test_a_child_without_duration_omits_the_field(self) -> None:
         sdr = self.session({"entry": {"outcome": {"kind": "admitted"}}, "manifest": {}, "path": ""})

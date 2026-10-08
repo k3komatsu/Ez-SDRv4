@@ -2346,6 +2346,13 @@
               "$ref": "#/$defs/RunId",
               "description": "The Run's id."
             },
+            "sample_clocks": {
+              "description": "The SampleClocks registered so far, in registration order (TM-13a), from which a\nclient places an instant on a stream's samples (EA-16, `Rx.next_at`).",
+              "items": {
+                "$ref": "#/$defs/SampleClockRecord"
+              },
+              "type": "array"
+            },
             "state": {
               "$ref": "#/$defs/RunState",
               "description": "Its lifecycle state."
@@ -2358,7 +2365,8 @@
             "now",
             "root_rate",
             "effective",
-            "events"
+            "events",
+            "sample_clocks"
           ],
           "type": "object"
         },

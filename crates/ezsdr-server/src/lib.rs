@@ -1,4 +1,4 @@
-//! Ez-SDR v4 server `ezsdr-server` 0.3.0: the Runtime a client drives over
+//! Ez-SDR v4 server `ezsdr-server` 0.4.0: the Runtime a client drives over
 //! `ezsdr.protocol` 2 (design/16-easy-api.md).
 //!
 //! It compiles the Modules in (EA-7), runs one Session through the Kernel's
@@ -168,6 +168,7 @@ impl Server {
                         root_rate: live.clocks.nominal_rate(live.run.now().domain).expect("the primary root is registered"),
                         effective: live.run.effective(),
                         events: count(&live.run),
+                        sample_clocks: live.clocks.sample_clock_records(),
                     }),
                     Request::Read { uri } => return self.read(&uri),
                     Request::RunChild { spec, profile, inputs, duration_ns } => {

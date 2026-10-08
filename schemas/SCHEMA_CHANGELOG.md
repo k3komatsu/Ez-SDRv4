@@ -15,6 +15,14 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
+## v1 — the receive alignment instant (`Rx.next_at`)
+
+Still version 1: v4.0 has not frozen (OV-12). Server `ezsdr-server` 0.4.0, protocol `ezsdr.protocol` 2.
+
+- `server/reply_frame`: the `status` reply gains `sample_clocks`, the Kernel's `SampleClockRecord` list (TM-13a), so that
+  a client places an instant on a stream's samples (EA-12, EA-16). A required field: a reply without it is refused by a
+  client that reads the schema, and the package reads it only in `Rx.next_at`.
+
 ## v1 — spec 22 — one stream timeline
 
 Still version 1: v4.0 has not frozen (OV-12). The Radio Model Vocabulary is `radio` 2.0.0.

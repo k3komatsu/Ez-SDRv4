@@ -231,6 +231,32 @@ class Rx(_Side):
         }
         return _admitted(self._session.submit(action))
 
+    def next_at(self, start: dict, period: int, ahead: Any = 0.05) -> dict:
+        """The first instant ``start`` plus a whole number of ``period`` receive samples that
+        is at least ``ahead`` seconds after the Run's current instant, as a ``TimePoint`` on
+        the primary root — where a capture of a waveform repeated from ``start`` begins at its
+        first sample again (v3's ``alignSize``; EA-16). It counts on the receive SampleClock
+        in force, so it is exact at any rate, and raises ``Error`` when that clock is not the
+        one ``start`` fell on (a rate change or a ``stop()`` since) or the stream is stopped."""
+        if int(period) <= 0:
+            raise Error(f"EA-16: next_at needs a positive period, not {period}")
+        if start.get("domain") != self._session._root:
+            raise Error("EA-16: next_at needs a start on the primary root, as after() names")
+        ahead = self._session._duration(ahead)["ticks"]
+        status = self._session._status()
+        clocks = [c for c in status["sample_clocks"] if c["stream"]["path"] == f"{self._radio}/rx"]
+        if not clocks:
+            raise Error(f"EA-16: {self._radio}/rx has no SampleClock yet")
+        clock = clocks[-1]
+        origin = clock["origin"]["ticks"]
+        if clock["ended_at"] is not None or origin > start["ticks"]:
+            raise Error(f"EA-16: {self._radio}/rx is not on the SampleClock it ran at start (stopped, or its rate changed since)")
+        per = Fraction(clock["root_ticks_per_tick"]["num"], clock["root_ticks_per_tick"]["den"])
+        first = math.ceil((start["ticks"] - origin) / per)
+        earliest = math.ceil((status["now"]["ticks"] + ahead - origin) / per)
+        index = first + max(0, math.ceil(Fraction(earliest - first, int(period)))) * int(period)
+        return {"domain": start["domain"], "ticks": origin + math.ceil(index * per)}
+
     def capture(self, n: int, at: Optional[dict] = None, timeout: Optional[float] = None) -> np.ndarray:
         """Captures ``n`` samples from this radio's recorder and returns them (EA-17).
         ``at`` is a ``TimePoint``; ``timeout`` is in seconds of Run time."""

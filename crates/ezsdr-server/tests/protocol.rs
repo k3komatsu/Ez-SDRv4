@@ -182,7 +182,7 @@ fn ea_03_handshake() {
     let handled = server.handle(Request::Hello { protocol: 2 }, Vec::new());
     assert!(!handled.exit);
     let Response::Hello { protocol, server: name, kernel_api } = ok(handled) else { panic!() };
-    assert_eq!((protocol, name.as_str(), kernel_api.as_str()), (2, "ezsdr-server 0.3.0", "4.0.0"));
+    assert_eq!((protocol, name.as_str(), kernel_api.as_str()), (2, "ezsdr-server 0.4.0", "4.0.0"));
 
     let handled = Server::new(config(&temp.0)).handle(Request::Hello { protocol: 1 }, Vec::new());
     assert!(handled.exit);
