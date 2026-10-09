@@ -935,7 +935,18 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 - **最優先（2026-10-09 時点）**：spec 22 の step 1–3，asap と PPS，設計メモ 23 まで完了．owner の判断待ち3件（§4 の「Specs 21 and 22」）．owner の判断待ち2件（最初の `tx.repeat` の TIME_ERROR，UR-17）がある．そのあと失敗機構の先回りの設計メモ（`invariant-outside-type`，`admission-per-origin`）を owner に諮る．
 0. **Phase 7 後の保守の残課題**（§4「Phase 7 後の保守」の表）：production の 1–2 と fake の 3 は owner の判断，6 は Phase 8 の bench 計画へ．
 1. **Phase 8（Mock ↔ X310 parity）の計画**（owner の依頼待ち．その次は **Phase 8b 複数台対応**：10 MHz + PPS で揃えた複数の USRP の同時開始．owner 決定 2026-10-08，Vision §67．Phase 9 の Packet/PDU より前．Python の `Session.aligned(at)` は `ea6e7bb` で先に追加済み）：Phase 7 は 2026-10-01 にクローズ済み（merge，実機セッション，Gate X，Step X）．Phase 8 へ送ったものは §4「Phase 7 のクローズ」，Phase 8 inputs は [plan/phase7/00-overview.md](plan/phase7/00-overview.md) §3．実機を使う前に X300 を戻してもらい `uhd_usrp_probe` で確認する．
-2. **v4.0 凍結前にすること**：`Endpoint::EventIn` / `EventOut` の形（event edge は Phase 10），`ParamDecl.update_class` を optional にすること（以上 Phase 5 Gate X），Manifest の `spec.source`（Spec builder のソースハッシュ，Phase 6 Gate X，KF-4）．
+2. **v4.0 凍結のチェックリスト（唯一の一覧，owner 2026-10-09）**：凍結レビューはこの全項目が済んでから．詳細と根拠は [`plan/maintenance/24-prefreeze-audit.md`](plan/maintenance/24-prefreeze-audit.md)（47件，9項目）．順番どおりに進める．
+   - [ ] 項目5：凍結の仕組み（文書ごとの版番号と MigrationRegistry，ハッシュの基準を正規化した再シリアライズに，description を不変性の対象外に）— spec 24
+   - [ ] 実在の bug：F19（2つ目以降の fault が消える，KC-30）と F21（cleanup 中の mark が artifact に届かない，RS-30）
+   - [ ] 項目1：不変条件を型に（private フィールド，検証付き constructor と Deserialize，`Value` を構造的に1段）— 独立 spec（§6 の設計メモから）
+   - [ ] 項目2：役割付きの ID（Target，EventSource，`matched`/`needs`，PrepareReport，ActionId を受信側へ，#54）— 独立 spec
+   - [ ] 項目3：受け入れ判定を1本に（KC-24 を唯一の順序に，`update_class` の二重宣言を削除，`ParamDecl.update_class` を optional に）— 独立 spec
+   - [ ] 項目4：Manifest の失敗・来歴の記録（`Termination` に理由，型付きセクション，Kernel のイベント種別を名前空間へ）— spec 24
+   - [ ] 項目6：Stream Contract の訂正（DropCarry，遅れた受信開始，ALIGNMENT）— spec 24
+   - [ ] 項目7：未使用の欄と誤名の削除（`EventIn`/`EventOut` 削除，#55 の改名，`spec.source` の追加，KF-4）— spec 24
+   - [ ] 項目8：spec 01〜06 から古い規範の写しを削除（spec 22 DA-3 の続き）
+   - [ ] MA-16a の公開 API 許可リスト（`kernel_surface_allow.txt`）の見直し
+   - [ ] Kernel API を 4.0.0 に，`SCHEMA_CHANGELOG.md` の見出しを凍結後の形式に切り替え
 3. **Session replay と artifact store**：Phase 7 のあと frontend で（Phase 6 Gate X）．
 4. **Phase 10 へ持ち越すもの**（Phase 5）：event edge，component parameter を適用する Executor（UC-2…UC-6，MA-24），component の処理時間（budget）を仮想時間で課すこと，component parameter key の MA-34 検査，MA-30 の Action latency．
 5. **Phase 7 へ持ち越したもの**（Phase 4 Gate X；Phase 7 の設計で全件に行き先あり，00-overview §8）：K3 の修正（TX model と一緒に），spike の K2・K5・K6・K8・K11，MA-8 の Kernel 側強制，UHD の `ERROR_CODE_ALIGNMENT` は部分 channel を返さない（VERIFIED）ので SC-31a の per-channel `ALIGNMENT` に producer がないかもしれないこと．詳細は [plan/phase4/00-overview.md](plan/phase4/00-overview.md) §3．
