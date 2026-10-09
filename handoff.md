@@ -941,7 +941,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
    - [ ] 項目1：不変条件を型に（private フィールド，検証付き constructor と Deserialize，`Value` を構造的に1段）— 独立 spec（§6 の設計メモから）
    - [ ] 項目2：役割付きの ID（Target，EventSource，`matched`/`needs`，PrepareReport，ActionId を受信側へ，#54）— 独立 spec
    - [ ] 項目3：受け入れ判定を1本に（KC-24 を唯一の順序に，`update_class` の二重宣言を削除，`ParamDecl.update_class` を optional に）— 独立 spec
-   - [ ] 項目4：Manifest の失敗・来歴の記録（`Termination` に理由，型付きセクション，Kernel のイベント種別を名前空間へ）— spec 24
+   - [ ] 項目4（決定済み，削除・統合・改名のみ）：`Termination` に理由と `also`，`ezsdr.failure`/`ezsdr.links`/`ezsdr.children` を型付きの欄へ統合，EVENTS_DROPPED の時刻と source，`execution_class` を Option，Kernel のイベント種別を `ezsdr.` へ，タグを `kind` に統一，Lease の記録は `{mode, released}`，RS-6 の手順名 — spec 24
    - [ ] 項目6：Stream Contract の訂正（DropCarry，遅れた受信開始，ALIGNMENT）— spec 24
    - [ ] 項目7：未使用の欄と誤名の削除（`EventIn`/`EventOut` 削除，#55 の改名，`spec.source` の追加，KF-4）— spec 24
    - [ ] 項目8：spec 01〜06 から古い規範の写しを削除（spec 22 DA-3 の続き）
