@@ -932,7 +932,12 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-- **最優先（2026-10-09 時点）**：spec 22 の step 1–3，asap と PPS，設計メモ 23 まで完了．owner の判断待ち3件（§4 の「Specs 21 and 22」）．owner の判断待ち2件（最初の `tx.repeat` の TIME_ERROR，UR-17）がある．そのあと失敗機構の先回りの設計メモ（`invariant-outside-type`，`admission-per-origin`）を owner に諮る．
+- **最優先（2026-10-09 夜，compact 前の記録）**：
+  - **作業ツリーに未 commit の変更あり**：#64（拒否で止まった方向は timed 解放でチャネル0）と `Pps` は両基準が external/gpsdo のときだけ，の実装．Workflow `halt-and-pps`（task `whgpqc8vx`，run `wf_592046b2-852`）が実装→独立 Opus レビューを回している最中．スクリプト：`~/.claude/projects/-Users-komatsu-work-Ez-SDRv4/0d8e3205-ba93-4fdf-9891-82eb2f3f44c1/workflows/scripts/halt-and-pps-wf_592046b2-852.js`．結果の確認方法：その run の `journal.jsonl`（`…/subagents/workflows/wf_592046b2-852/journal.jsonl`）．PASS なら sim02/sim03 で全 mutation リスト → commit（`Closes #64`）．`schemas/SCHEMA_CHANGELOG.md` の冒頭の注記（版管理しない，owner 2026-10-09）は自分が書いたもので，この commit に一緒に入れる．**版は上げない**（AGENTS.md §6）．
+  - **その後の順番**（v4.0 凍結チェックリスト，§「次にすること」の 2.）：#65・#66 の修正（note 25 の方針）→ spec 24（監査項目 5・4・6・7）→ 項目1（1a→1b）→ 項目2 → 項目3 → 項目8 → 凍結レビュー．決定はすべて [`plan/maintenance/24-prefreeze-audit.md`](plan/maintenance/24-prefreeze-audit.md) の Owner decisions 表（これが決定記録．別に spec 本文を起こさない）．
+  - **進め方**：段階ごとに Workflow（実装 1 → 独立 Opus レビュー → 修正，最大3回）．同じ作業ツリーを2つの Workflow で同時に触らない．修正の回は触った mutation 行だけ，段階の最後に全リストを sim02/sim03 で（AGENTS.md §7）．
+  - **sim02/sim03 への接続**：Claude Code の bg セッションはローカルネットワークに出られない（Claude Code の既知の不具合，#74378/#95444 系；この Mac は #95444 の UUID 衝突を確認済み）．owner が端末で `ssh -N -L 2202:localhost:22 sim02 &` と `ssh -N -L 2203:localhost:22 sim03 &` を張り，こちらは次の内容の ssh 設定を `REMOTE_SSH="ssh -F <file> -o BatchMode=yes"` で渡す（scratchpad の `ssh_tunnels.conf`）：`Host sim02t / HostName localhost / Port 2202 / User komatsu / IdentityFile ~/.ssh/id_ed25519 / HostKeyAlias sim02.comm.ee.tut.ac.jp`，sim03t は Port 2203 と sim03 の別名．Bash は `dangerouslyDisableSandbox: true` が要る．
+  - **owner の方針（2026-10-09，memory と AGENTS.md に記録済み）**：研究用なので大げさにしない（小さい案を推奨に），利用者ゼロなので破壊的変更は自由・版管理しない，簡素化は続けるがテスト・レビュー・mutation で制御を保つ．削除・統合・改名・型付けの簡素化を好む．
 0. **Phase 7 後の保守の残課題**（§4「Phase 7 後の保守」の表）：production の 1–2 と fake の 3 は owner の判断，6 は Phase 8 の bench 計画へ．
 1. **Phase 8（Mock ↔ X310 parity）の計画**（owner の依頼待ち．その次は **Phase 8b 複数台対応**：10 MHz + PPS で揃えた複数の USRP の同時開始．owner 決定 2026-10-08，Vision §67．Phase 9 の Packet/PDU より前．Python の `Session.aligned(at)` は `ea6e7bb` で先に追加済み）：Phase 7 は 2026-10-01 にクローズ済み（merge，実機セッション，Gate X，Step X）．Phase 8 へ送ったものは §4「Phase 7 のクローズ」，Phase 8 inputs は [plan/phase7/00-overview.md](plan/phase7/00-overview.md) §3．実機を使う前に X300 を戻してもらい `uhd_usrp_probe` で確認する．
 2. **v4.0 凍結のチェックリスト（唯一の一覧，owner 2026-10-09）**：凍結レビューはこの全項目が済んでから．詳細と根拠は [`plan/maintenance/24-prefreeze-audit.md`](plan/maintenance/24-prefreeze-audit.md)（47件，9項目）．順番どおりに進める．
