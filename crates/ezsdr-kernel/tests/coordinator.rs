@@ -2205,6 +2205,86 @@ fn kc_31_mark_artifact_marks_only_artifacts_open_then() {
 }
 
 #[test]
+fn kc_30_a_panic_after_a_device_lost_in_one_round_fails_the_run() {
+    // #65 (note 25): a DeviceLost first in the round's fault list does not hide a later
+    // panic. The Policy lets the lost device continue, so only the panic ends the Run.
+    let (mut spec, profile) = output_docs();
+    spec["policies"] = serde_json::json!({ "failure": { "DEVICE_LOST": "continue" } });
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).device_lost_at(0)),
+    );
+    assembly.sinks.insert(
+        Ident::parse("rec").unwrap(),
+        Box::new(RecordingSink::new("rec", &probe).panicking_step_at(0)),
+    );
+    assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe)));
+    let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
+    assert_eq!(manifest.termination.reason, Termination::Failed { stage: Stage::Run });
+    let reason = failure(&manifest)["reason"].as_str().unwrap();
+    assert!(reason.starts_with("KC-30: rec: a Module panicked"), "{reason}");
+    let lost = ezsdr_kernel::event::EventKind::parse("DEVICE_LOST").unwrap();
+    let radio = ezsdr_kernel::id::ResourceId::parse("radio").unwrap();
+    assert!(manifest.events.delivered.iter().any(|e| e.kind == lost && e.source == radio));
+}
+
+/// #66 (note 25): a warning a Provider emits from `stop` is still queued when cleanup
+/// reaches step 6 — no round drains after it — and must still mark the artifact open
+/// at its instant (RS-30, KC-42).
+fn mark_emitted_while_stopping(abort: bool) -> ezsdr_kernel::manifest::Manifest {
+    let (mut spec, profile) = output_docs();
+    spec["policies"] = serde_json::json!({ "failure": { "test.custom": "mark_artifact" } });
+    let probe = Probe::new();
+    let mut provider = SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
+        .emitting_in_stop("test.custom", ezsdr_kernel::event::Severity::Warning)
+        .with_wakeups(&[150]);
+    if abort {
+        provider = provider.device_lost_at(150);
+    }
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(provider));
+    assembly.sinks.insert(
+        Ident::parse("rec").unwrap(),
+        Box::new(RecordingSink::new("rec", &probe).returning_spans(&[(100, 200), (300, 400)])),
+    );
+    assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe)));
+    let mut run = start_spec_run(&spec, &profile, assembly).unwrap();
+    let _ = run.advance_to(TimePoint::new(run.now().domain, 160));
+    let manifest = run.finish();
+    let stopping = manifest.run.transitions.iter().find_map(|row| match row.state {
+        RunState::Stopping { mode } => Some(mode),
+        _ => None,
+    });
+    let mode = if abort {
+        ezsdr_kernel::run::CleanupMode::Abort
+    } else {
+        ezsdr_kernel::run::CleanupMode::Orderly
+    };
+    assert_eq!(stopping, Some(mode));
+    manifest
+}
+
+fn assert_marked_at(manifest: &ezsdr_kernel::manifest::Manifest, ticks: i64) {
+    let kind = ezsdr_kernel::event::EventKind::parse("test.custom").unwrap();
+    assert_eq!(manifest.artifacts[0].marks.len(), 1, "{:?}", manifest.artifacts);
+    assert_eq!(manifest.artifacts[0].marks[0].kind, kind);
+    assert_eq!(manifest.artifacts[0].marks[0].time.ticks, ticks);
+    assert!(manifest.artifacts[1].marks.is_empty());
+}
+
+#[test]
+fn kc_42_a_mark_delivered_during_an_orderly_cleanup_reaches_the_artifact() {
+    assert_marked_at(&mark_emitted_while_stopping(false), 160);
+}
+
+#[test]
+fn kc_42_a_mark_delivered_during_an_abort_cleanup_reaches_the_artifact() {
+    assert_marked_at(&mark_emitted_while_stopping(true), 150);
+}
+
+#[test]
 fn rs_36_a_dropped_stopping_body_ends_the_run() {
     // Review U, TG-U1: the ring filled by one step, then a hot-path `DEVICE_LOST` whose
     // body is dropped. Only the escalation flag can end the Run (RS-36, KC-31).
@@ -3344,7 +3424,7 @@ fn kd_01_a_device_lost_is_not_reported_as_a_step_livelock() {
 /// still reported as `DEVICE_LOST` (Phase 4 Review D, P1-1).
 #[test]
 fn kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides() {
-    let run = |p_lost: bool| {
+    let run = |p_lost: bool, q_lost: bool| {
         let (spec, profile) = distinct_resource_docs(&["p", "q"]);
         let probe = Probe::new();
         let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
@@ -3353,7 +3433,7 @@ fn kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides(
             if lost { double.device_lost_at(0) } else { double.step_error_at(0) }
         };
         assembly.providers.insert(Ident::parse("p").unwrap(), Box::new(provider("p", p_lost)));
-        assembly.providers.insert(Ident::parse("q").unwrap(), Box::new(provider("q", true)));
+        assembly.providers.insert(Ident::parse("q").unwrap(), Box::new(provider("q", q_lost)));
         start_spec_run(&spec, &profile, assembly).unwrap().finish()
     };
     let lost_sources = |manifest: &ezsdr_kernel::manifest::Manifest| -> Vec<String> {
@@ -3365,13 +3445,13 @@ fn kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides(
 
     // `p` sorts first and returns an ordinary error: the Run fails on it, and `q`'s
     // lost device, found in the same round, is still delivered.
-    let failed = run(false);
+    let failed = run(false, true);
     assert_eq!(failed.termination.reason, Termination::Failed { stage: Stage::Run });
     assert!(failure(&failed)["reason"].as_str().unwrap().starts_with("KC-30: p: "), "{}", failure(&failed));
     assert_eq!(lost_sources(&failed).len(), 1);
 
     // Both lose their device: the Run stops on DEVICE_LOST and both are reported.
-    let both = run(true);
+    let both = run(true, true);
     assert_eq!(
         both.termination.reason,
         Termination::Stopped { cause: StopCause::Policy { kind: ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::DEVICE_LOST).unwrap() } }
@@ -3379,6 +3459,12 @@ fn kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides(
     let mut sources = lost_sources(&both);
     sources.dedup();
     assert_eq!(sources.len(), 2, "one DEVICE_LOST per device: {sources:?}");
+
+    // Both fail with an ordinary error: each requests the end, and the first, `p`'s,
+    // fixes it (KC-30 handles each failure; KC-32 keeps the first end; #65).
+    let errors = run(false, false);
+    assert_eq!(errors.termination.reason, Termination::Failed { stage: Stage::Run });
+    assert!(failure(&errors)["reason"].as_str().unwrap().starts_with("KC-30: p: "), "{}", failure(&errors));
 }
 
 // ---------------------------------------------------------------- Phase 5 amendments (KE)

@@ -934,19 +934,19 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 - **最優先（2026-10-09）**：
   - **#64 と `Pps` の条件は commit 済み**（2026-10-09，`Closes #64`）：拒否で止まった方向は timed 解放でチャネル0（効く瞬間で1回だけ判定），`Pps` は時刻源とクロック源の両方が internal でないときだけ．独立 Opus レビュー2回目で PASS，全 mutation リスト（494行）を sim02/sim03 で全 kill．
-  - **その後の順番**（v4.0 凍結チェックリスト，§「次にすること」の 2.）：#65・#66 の修正（note 25 の方針）→ spec 24（監査項目 5・4・6・7）→ 項目1（1a→1b）→ 項目2 → 項目3 → 項目8 → 凍結レビュー．決定はすべて [`plan/maintenance/24-prefreeze-audit.md`](plan/maintenance/24-prefreeze-audit.md) の Owner decisions 表（これが決定記録．別に spec 本文を起こさない）．
-  - **進め方**：段階ごとに Workflow（実装 1 → 独立 Opus レビュー → 修正，最大3回）．同じ作業ツリーを2つの Workflow で同時に触らない．修正の回は触った mutation 行だけ，段階の最後に全リストを sim02/sim03 で（AGENTS.md §7）．
+  - **その後の順番**（v4.0 凍結チェックリスト，§「次にすること」の 2.）：（#65・#66 は commit 済み）spec 24（監査項目 5・4・6・7，項目ごとに1 Workflow）→ 項目1＝spec 26（1a→1b）→ 項目2＝spec 27（2a→2b）→ 項目3 → 項目8 → 凍結レビュー．決定はすべて [`plan/maintenance/24-prefreeze-audit.md`](plan/maintenance/24-prefreeze-audit.md) の Owner decisions 表（これが決定記録．別に spec 本文を起こさない）．
+  - **進め方**：段階ごとに Workflow（実装 1 → 独立 Opus レビュー → 修正，最大3回）．機械的な一括書き換えは Haiku 5.5 を crate ごとに並列で使ってよい（owner 2026-10-09）．同じ作業ツリーを2つの Workflow で同時に触らない．修正の回は触った mutation 行だけ，段階の最後に全リストを sim02/sim03 で（AGENTS.md §7）．
   - **sim02/sim03 への接続**：Claude Code の bg セッションはローカルネットワークに出られない（Claude Code の既知の不具合，#74378/#95444 系；この Mac は #95444 の UUID 衝突を確認済み）．owner が端末で `ssh -N -L 2202:localhost:22 sim02 &` と `ssh -N -L 2203:localhost:22 sim03 &` を張り，こちらは次の内容の ssh 設定を `REMOTE_SSH="ssh -F <file> -o BatchMode=yes"` で渡す（scratchpad の `ssh_tunnels.conf`）：`Host sim02t / HostName localhost / Port 2202 / User komatsu / IdentityFile ~/.ssh/id_ed25519 / HostKeyAlias sim02.comm.ee.tut.ac.jp`，sim03t は Port 2203 と sim03 の別名．Bash は `dangerouslyDisableSandbox: true` が要る．
   - **owner の方針（2026-10-09，memory と AGENTS.md に記録済み）**：研究用なので大げさにしない（小さい案を推奨に），利用者ゼロなので破壊的変更は自由・版管理しない，簡素化は続けるがテスト・レビュー・mutation で制御を保つ．削除・統合・改名・型付けの簡素化を好む．
 0. **Phase 7 後の保守の残課題**（§4「Phase 7 後の保守」の表）：production の 1–2 と fake の 3 は owner の判断，6 は Phase 8 の bench 計画へ．
 1. **Phase 8（Mock ↔ X310 parity）の計画**（owner の依頼待ち．その次は **Phase 8b 複数台対応**：10 MHz + PPS で揃えた複数の USRP の同時開始．owner 決定 2026-10-08，Vision §67．Phase 9 の Packet/PDU より前．Python の `Session.aligned(at)` は `ea6e7bb` で先に追加済み）：Phase 7 は 2026-10-01 にクローズ済み（merge，実機セッション，Gate X，Step X）．Phase 8 へ送ったものは §4「Phase 7 のクローズ」，Phase 8 inputs は [plan/phase7/00-overview.md](plan/phase7/00-overview.md) §3．実機を使う前に X300 を戻してもらい `uhd_usrp_probe` で確認する．
 2. **v4.0 凍結のチェックリスト（唯一の一覧，owner 2026-10-09）**：凍結レビューはこの全項目が済んでから．詳細と根拠は [`plan/maintenance/24-prefreeze-audit.md`](plan/maintenance/24-prefreeze-audit.md)（47件，9項目）．順番どおりに進める．
    - [ ] 項目5（決定済み，簡素版）：未使用の MigrationRegistry と移行の来歴（SB-48/49）は削除，文書ごとの受け付ける版は凍結時に，ハッシュは parse 後に既定値込みで再シリアライズした形から，description/title は不変性の対象外にして1回掃除，F42 は見送り — spec 24
-   - [ ] 実在の bug：F19（2つ目以降の fault が消える，KC-30）と F21（cleanup 中の mark が artifact に届かない，RS-30）
+   - [x] 実在の bug：F19（2つ目以降の fault が消える，KC-30）と F21（cleanup 中の mark が artifact に届かない，RS-30）
    - [ ] 項目1（決定済み，設計メモ＝[spec 26](plan/maintenance/26-invariants-in-types.md) 受理）：不変条件を型に（private フィールド，検証付き constructor と Deserialize，`TimePoint` は `ticks_in` のみ，`Value` を構造的に1段，散らばった検査を削除）— 独立 spec（§6 の設計メモから，1a→1b）
    - [ ] 項目2（決定済み，設計メモ＝[spec 27](plan/maintenance/27-role-typed-identities.md) 受理，判断1〜4）：役割付きの型（Target，EventSource，`matched`/`needs`，PrepareReport の `fragment` 削除，`recv()` が `{id, action}`，artifact を出力ごとに，`undelivered`，#54）— 独立 spec（設計メモから）
    - [ ] 項目3（決定済み）：受け入れ判定を1本に（KC-24 を唯一の順序に，template と CompileRule から `class` を削除，`ParamDecl.update_class` を optional に，キーの位置を1つのイテレータで，schedule も component を宛先に，SB-30 から need を除く，ASCII キー，component のキーは ParamDecl で宣言すれば持ち主は component，Module のイベントの発信元がその root の内側かを collector で1回検査（spec 27 判断4））— 独立 spec（項目2の後）
-   - [ ] 項目4（決定済み，削除・統合・改名のみ）：`Termination` に理由と `also`，`ezsdr.failure`/`ezsdr.links`/`ezsdr.children` を型付きの欄へ統合，EVENTS_DROPPED の時刻と source，`execution_class` を Option，Kernel のイベント種別を `ezsdr.` へ，タグを `kind` に統一，Lease の記録は `{mode, released}`，RS-6 の手順名 — spec 24
+   - [ ] 項目4（決定済み，削除・統合・改名のみ）：`Termination` に理由と `also`，`ezsdr.failure`/`ezsdr.links`/`ezsdr.children` を型付きの欄へ統合，EVENTS_DROPPED の時刻と source，`execution_class` を Option，Kernel のイベント種別を `ezsdr.` へ，タグを `kind` に統一，Lease の記録は `{mode, released}`，RS-6 の手順名；`also` には同じ round で Policy の反応（DEVICE_LOST→stop など）が別の失敗に上書きされた場合も記録する（#65 レビュー） — spec 24
    - [ ] 項目6（決定済み）：DropCarry をブロックと一緒に返す，遅れた受信開始の表し方を1つに（LATE は送信専用），ALIGNMENT を stream gap の修飾子に（SC-31a と `ChannelGap.cause` 削除）— spec 24
    - [ ] 項目7（決定済み）：未使用の7欄を削除，`EventIn`/`EventOut` 削除と `Endpoint` を non_exhaustive に，`PeripheralCommand` → `Command`（#55），`spec.source` を今追加（KF-4），`min_command_lead` の説明を MA-10 に — spec 24
    - [ ] 項目8：spec 01〜06 から古い規範の写しを削除（spec 22 DA-3 の続き）

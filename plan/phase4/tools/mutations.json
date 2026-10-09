@@ -223,8 +223,8 @@
   "id": "D23",
   "name": "KD-1 only the first failure of a round is reported",
   "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
-  "old": "        for (index, (inst, failure)) in failures.iter().enumerate() {",
-  "new": "        for (index, (inst, failure)) in failures.iter().enumerate().take(1) {",
+  "old": "    for (inst, error) in faults {",
+  "new": "    for (inst, error) in faults.iter().take(1) {",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides"
@@ -233,8 +233,8 @@
   "id": "D24",
   "name": "KD-1 only the first failure of a round is reported, end to end",
   "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
-  "old": "        for (index, (inst, failure)) in failures.iter().enumerate() {",
-  "new": "        for (index, (inst, failure)) in failures.iter().enumerate().take(1) {",
+  "old": "    for (inst, error) in faults {",
+  "new": "    for (inst, error) in faults.iter().take(1) {",
   "crate": "ezsdr-acceptance",
   "test_bin": "v58",
   "filter": "kd_01_a_faulted_round_does_not_depend_on_fragment_names"

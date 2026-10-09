@@ -286,12 +286,12 @@
         },
         {
           "const": "finalise_artifacts",
-          "description": "6. Finalise artifacts, marking as partial anything still open (RS-6, RS-44).",
+          "description": "6. Flush the event path, then finalise artifacts, marking as partial anything\n   still open (RS-6, RS-30, RS-44).",
           "type": "string"
         },
         {
           "const": "flush_events",
-          "description": "7. Flush the event path and collect the counters (RS-6, RS-35).",
+          "description": "7. Drain the event path again and collect the counters (RS-6, RS-35).",
           "type": "string"
         },
         {

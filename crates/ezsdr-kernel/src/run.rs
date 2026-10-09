@@ -462,9 +462,10 @@ pub enum CleanupStep {
     CancelPeripherals,
     /// 5. Restore baseline state, in reverse dependency order (RS-8).
     RestoreBaseline,
-    /// 6. Finalise artifacts, marking as partial anything still open (RS-6, RS-44).
+    /// 6. Flush the event path, then finalise artifacts, marking as partial anything
+    ///    still open (RS-6, RS-30, RS-44).
     FinaliseArtifacts,
-    /// 7. Flush the event path and collect the counters (RS-6, RS-35).
+    /// 7. Drain the event path again and collect the counters (RS-6, RS-35).
     FlushEvents,
     /// 8. Release the Lease and write the Manifest (RS-6, RS-11).
     ReleaseAndWriteManifest,

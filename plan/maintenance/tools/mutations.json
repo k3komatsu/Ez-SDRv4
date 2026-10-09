@@ -1064,5 +1064,53 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_24_a_late_update_halted_before_it_can_act_has_no_channel"
+ },
+ {
+  "id": "J72",
+  "name": "#65 (note 25): KC-30 in a round lets only the first fault end the Run, so a panic after a DeviceLost is dropped",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "    for (inst, error) in faults {\n        if error.kind == ModuleErrorKind::DeviceLost {",
+  "new": "    for (index, (inst, error)) in faults.iter().enumerate() {\n        if error.kind == ModuleErrorKind::DeviceLost {",
+  "old2": "        } else {\n            ended |= super::ending::request(",
+  "new2": "        } else if index == 0 {\n            ended |= super::ending::request(",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_30_a_panic_after_a_device_lost_in_one_round_fails_the_run"
+ },
+ {
+  "id": "J73",
+  "name": "#65 (note 25): KC-30 in the data thread's pass lets only the first fault end the Run, so a panic after a DeviceLost is dropped",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "    for (inst, error) in faults {\n        if error.kind == ModuleErrorKind::DeviceLost {",
+  "new": "    for (index, (inst, error)) in faults.iter().enumerate() {\n        if error.kind == ModuleErrorKind::DeviceLost {",
+  "old2": "        } else {\n            ended |= super::ending::request(",
+  "new2": "        } else if index == 0 {\n            ended |= super::ending::request(",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_30_a_panic_after_a_device_lost_in_one_pass_fails_the_run"
+ },
+ {
+  "id": "J74",
+  "name": "#66 (note 25): cleanup step 6 finalises the artifacts before the last drain, so a mark delivered during an orderly cleanup never reaches them",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                super::stepping::drain_and_react(&self.shared);\n                let marks",
+  "new": "                let marks",
+  "old2": "            CleanupStep::FlushEvents => {\n",
+  "new2": "            CleanupStep::FlushEvents => {\n                super::stepping::drain_and_react(&self.shared);\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_42_a_mark_delivered_during_an_orderly_cleanup_reaches_the_artifact"
+ },
+ {
+  "id": "J75",
+  "name": "#66 (note 25): cleanup step 6 finalises the artifacts before the last drain, so a mark delivered during an abort cleanup never reaches them",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                super::stepping::drain_and_react(&self.shared);\n                let marks",
+  "new": "                let marks",
+  "old2": "            CleanupStep::FlushEvents => {\n",
+  "new2": "            CleanupStep::FlushEvents => {\n                super::stepping::drain_and_react(&self.shared);\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_42_a_mark_delivered_during_an_abort_cleanup_reaches_the_artifact"
  }
 ]

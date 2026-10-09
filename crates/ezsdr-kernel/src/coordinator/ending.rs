@@ -420,6 +420,10 @@ impl CleanupOps for Ops {
             | CleanupStep::CancelPeripherals
             | CleanupStep::ReleaseAndWriteManifest => Ok(()),
             CleanupStep::FinaliseArtifacts => {
+                // The event path's last drain, so that a mark delivered by it — an
+                // event emitted after the last round's drain or while the instances
+                // stopped — reaches the artifacts (RS-30; note 25, #66).
+                super::stepping::drain_and_react(&self.shared);
                 let marks = lock(&self.shared.marks).clone();
                 let mut artifacts = lock(&self.shared.artifacts);
                 for artifact in artifacts.iter_mut() {
@@ -599,6 +603,8 @@ impl CleanupOps for Ops {
                 result
             }
             CleanupStep::FlushEvents => {
+                // Drained again next to the snapshot, so that an event a thread RS-8a gave up
+                // on emits during step 6 is delivered, not only counted (RS-35).
                 super::stepping::drain_and_react(&self.shared);
                 if let Some(collector) = self.shared.collector.get() {
                     *lock(&self.shared.counters) = Some(collector.counters());

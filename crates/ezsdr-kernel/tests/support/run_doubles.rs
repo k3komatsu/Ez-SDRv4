@@ -322,6 +322,8 @@ pub struct SteppedProvider {
     pub declare: Vec<(String, u64, u64)>,
     pub register_at_arm: Vec<String>,
     pub emit: Option<(EventKind, Severity, i64)>,
+    /// One control-path event emitted from `stop`, at the stop instant (#66).
+    pub stop_emit: Option<(EventKind, Severity)>,
     pub panic_in_step: bool,
     pub device_lost_at: Option<i64>,
     pub step_error_at: Option<i64>,
@@ -364,6 +366,7 @@ impl SteppedProvider {
             declare: Vec::new(),
             register_at_arm: Vec::new(),
             emit: None,
+            stop_emit: None,
             panic_in_step: false,
             device_lost_at: None,
             step_error_at: None,
@@ -443,6 +446,12 @@ impl SteppedProvider {
             severity,
             at,
         ));
+        self
+    }
+
+    /// Emits one control-path event from `stop`, at the stop instant (#66).
+    pub fn emitting_in_stop(mut self, kind: &str, severity: Severity) -> SteppedProvider {
+        self.stop_emit = Some((EventKind::parse(kind).expect("the test event kind is valid"), severity));
         self
     }
 
@@ -852,6 +861,20 @@ impl Provider for SteppedProvider {
                 .ticks,
         );
         self.next_publish = None;
+        if let Some((kind, severity)) = self.stop_emit.take() {
+            let event = Event {
+                source: self.instance().id.clone(),
+                time: TimePoint::new(time.primary_root(), self.stopped_at.expect("just set")),
+                severity,
+                kind,
+                payload: serde_json::json!({}),
+            };
+            self.events
+                .as_ref()
+                .ok_or_else(|| ModuleError::rejected("test: no event sink"))?
+                .emit_control(event)
+                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+        }
         if mode == StopMode::Orderly && self.tail_blocks > 0 {
             let next = self
                 .stopped_at
@@ -891,6 +914,8 @@ pub struct RecordingSink {
     pub always_progress: bool,
     /// The first step at or after this primary-root tick fails with this kind.
     pub fail_step: Option<(i64, ModuleErrorKind)>,
+    /// The first step at or after this primary-root tick panics (#65).
+    pub panic_step: Option<i64>,
 }
 
 impl RecordingSink {
@@ -917,6 +942,7 @@ impl RecordingSink {
             record_threads: false,
             always_progress: false,
             fail_step: None,
+            panic_step: None,
         }
     }
 
@@ -935,6 +961,12 @@ impl RecordingSink {
     /// Fails the first step at or after `tick` with an error of `kind` (spec 19 §0).
     pub fn failing_step_at(mut self, tick: i64, kind: ModuleErrorKind) -> RecordingSink {
         self.fail_step = Some((tick, kind));
+        self
+    }
+
+    /// Panics in the first step at or after `tick`, once (#65).
+    pub fn panicking_step_at(mut self, tick: i64) -> RecordingSink {
+        self.panic_step = Some(tick);
         self
     }
 
@@ -1013,6 +1045,10 @@ impl Sink for RecordingSink {
                     detail: serde_json::Value::Null,
                 });
             }
+        }
+        if self.panic_step.is_some_and(|tick| until.ticks >= tick) {
+            self.panic_step = None;
+            panic!("test: panic in sink step");
         }
         let mut progressed = self.always_progress;
         for link in &self.ins {

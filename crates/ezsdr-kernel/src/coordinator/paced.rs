@@ -124,15 +124,7 @@ fn pass(shared: &Shared, failed: &mut BTreeSet<Inst>) -> (bool, bool, usize) {
             }
         }
     }
-    // KC-30 as a round does it: the first failure decides, every lost device is reported.
-    let mut requested = false;
-    for (index, (inst, error)) in faults.iter().enumerate() {
-        if error.kind == ModuleErrorKind::DeviceLost {
-            super::pipeline::emit_device_lost(shared, *inst, error);
-        } else if index == 0 {
-            requested |= super::stepping::fail_run(shared, *inst, &error.message);
-        }
-    }
+    let requested = super::stepping::apply_faults(shared, &faults);
     let (delivered, reacted) = super::stepping::drain_and_react(shared);
     (progressed, requested || reacted, delivered)
 }

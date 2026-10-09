@@ -717,6 +717,39 @@ fn kg_03_a_step_done_early_is_not_repeated() {
 }
 
 #[test]
+fn kc_30_a_panic_after_a_device_lost_in_one_pass_fails_the_run() {
+    // #65 (note 25): the data thread's pass applies KC-30 as a round does. `rec` loses
+    // its device and `rec2` panics at one instant; the Policy lets the lost device
+    // continue, so only the panic ends the Run.
+    let probe = Probe::new();
+    let (mut spec, mut profile) = output_docs(64);
+    spec["policies"] = serde_json::json!({ "failure": { "DEVICE_LOST": "continue" } });
+    let mut second = spec["outputs"][0].clone();
+    second["id"] = serde_json::json!("rec2");
+    spec["outputs"].as_array_mut().unwrap().push(second);
+    profile["bindings"]["rec2"] = profile["bindings"]["rec"].clone();
+    let mut link = profile["placements"]["links"][0].clone();
+    link["to"]["component"] = serde_json::json!("rec2");
+    profile["placements"]["links"].as_array_mut().unwrap().push(link);
+    let at = 20_000_000;
+    let mut assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe));
+    assembly.sinks.insert(
+        Ident::parse("rec2").unwrap(),
+        Box::new(RecordingSink::new("rec2", &probe).panicking_step_at(at)),
+    );
+    let sink_double = RecordingSink::new("rec", &probe).failing_step_at(at, ModuleErrorKind::DeviceLost);
+    let run = start_spec_run(&spec, &profile, sink(assembly, sink_double, &probe)).unwrap();
+    running(&run);
+    assert!(probe.wait_for("radio:stop", Wall::from_secs(1)));
+    let manifest = manifest_of(run);
+    assert_eq!(manifest.termination.reason, Termination::Failed { stage: Stage::Run });
+    assert!(failure(&manifest).starts_with("KC-30: rec2: a Module panicked"), "{}", failure(&manifest));
+    let lost = kind(EventKind::DEVICE_LOST);
+    let rec = ResourceId::parse("sink/rec").unwrap();
+    assert!(manifest.events.delivered.iter().any(|e| e.kind == lost && e.source == rec));
+}
+
+#[test]
 fn kg_03_step_3_runs_a_final_round_over_the_sinks() {
     let probe = Probe::new();
     let (spec, profile) = output_docs(64);

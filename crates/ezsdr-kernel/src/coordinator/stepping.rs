@@ -194,32 +194,31 @@ pub(super) fn round(shared: &Shared, at: TimePoint, cleaning: bool) {
         )
     };
     if result.is_err() {
-        // The first failure decides the termination, as before KD-1. Every later
-        // `DeviceLost` of the same round is still reported: KD-1 steps the instances
-        // after a failure, so a second lost device is now found and must not vanish
-        // (Phase 4 Review D, P1-1). A later failure of another kind is not recorded
-        // here; its Run is already ending.
-        let failures = std::mem::take(&mut *lock(&fault.0));
-        for (index, (inst, failure)) in failures.iter().enumerate() {
-            if failure.kind == ModuleErrorKind::DeviceLost {
-                super::pipeline::emit_device_lost(shared, *inst, failure);
-            } else if index == 0 {
-                fail_run(shared, *inst, &failure.message);
-            }
-        }
+        apply_faults(shared, &std::mem::take(&mut *lock(&fault.0)));
     }
     drain_and_react(shared);
 }
 
-/// Returns whether this request set the Run's end (KC-46b).
-pub(super) fn fail_run(shared: &Shared, inst: Inst, reason: &str) -> bool {
-    let full = format!("KC-30: {}: {reason}", shared.first_fragment(inst));
-    super::ending::request(
-        shared,
-        Termination::Failed { stage: Stage::Run },
-        CleanupMode::Abort,
-        Some(full),
-    )
+/// KC-30 over one round's or one pass's step failures, the one copy both drivers call
+/// (note 25, #65). Each failure is handled on its own terms, whatever came before it in
+/// the list: a `DeviceLost` is emitted for KC-31's Policy, and any other error or a
+/// panic requests `Failed { run }` (KC-32 keeps the first end). Returns whether a
+/// request set the Run's end (KC-46b).
+pub(super) fn apply_faults(shared: &Shared, faults: &[(Inst, ModuleError)]) -> bool {
+    let mut ended = false;
+    for (inst, error) in faults {
+        if error.kind == ModuleErrorKind::DeviceLost {
+            super::pipeline::emit_device_lost(shared, *inst, error);
+        } else {
+            ended |= super::ending::request(
+                shared,
+                Termination::Failed { stage: Stage::Run },
+                CleanupMode::Abort,
+                Some(format!("KC-30: {}: {}", shared.first_fragment(*inst), error.message)),
+            );
+        }
+    }
+    ended
 }
 
 /// Drains the collector and applies the Policy under the `delivered` lock, so that two
