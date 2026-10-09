@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Draft for the owner**, written by the orchestrator (Claude Opus) on 2026-10-09. It implements the owner's decision on audit item 1 ([24-prefreeze-audit.md](24-prefreeze-audit.md), Owner decisions, "item 1"; findings F1, F2, F3, F4, F5, F10, F32) and opens with the design note AGENTS.md §6 asks for. Nothing here is implemented yet. |
+| Status | **Accepted** by the owner on 2026-10-09 ("いいです．これで進めてください"), including the own-domain test of §2. Written by the orchestrator (Claude Opus) on 2026-10-09. It implements the owner's decision on audit item 1 ([24-prefreeze-audit.md](24-prefreeze-audit.md), Owner decisions, "item 1"; findings F1, F2, F3, F4, F5, F10, F32) and opens with the design note AGENTS.md §6 asks for. Not implemented yet; it lands after spec 24. |
 | Mechanism | `invariant-outside-type`, six bugs: #2, #7, #11, #22, #23, #24 ([failure-mechanisms.md](failure-mechanisms.md)). The audit found seven more places of the same shape. |
 | Stages | **1a** ids and time, then **1b** `Value`. Each stage is one implementation step: implement, independent review, mutation gate, commit. The tree is green after each. |
 | Versions | None bumped, no SCHEMA_CHANGELOG entry (AGENTS.md §6). 1b regenerates the schemas that embed `Value`. |
