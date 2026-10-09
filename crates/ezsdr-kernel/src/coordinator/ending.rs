@@ -4,12 +4,12 @@ use std::sync::atomic::Ordering;
 
 use crate::hash::ContentHash;
 use crate::manifest::{
-    ClocksSection, EventsSection, Manifest, ModuleEntry, PrepareSection, RunSection,
+    ClocksSection, EventsSection, LinkRecord, Manifest, ModuleEntry, PrepareSection, RunSection,
     TerminationSection,
 };
 use crate::module_api::{Fidelity, ModuleRef, ProfileRef, Provider, StopMode};
 use crate::run::{
-    CleanupFailure, CleanupMode, CleanupOps, CleanupStep, RunState, Stage, StopCause, Termination,
+    CleanupFailure, CleanupMode, CleanupOps, CleanupStep, RunState, StopCause, Termination,
     run_cleanup,
 };
 use crate::spec::{Ident, Namespace};
@@ -132,16 +132,13 @@ impl RunHandle {
             id: self.shared.ctx.id.clone(),
             kind: self.shared.ctx.kind,
             parent: self.parent.clone(),
-            execution_class: self
-                .shared
-                .routing()
-                .map(|routing| routing.plan.class)
-                .unwrap_or(crate::module_api::ExecutionClass::Simulation),
+            execution_class: self.shared.routing().map(|routing| routing.plan.class),
             fidelity,
             transitions: lock(&self.shared.machine).transitions().to_vec(),
             deterministic: self.shared.routing().is_some_and(|routing| {
                 routing.plan.class == crate::module_api::ExecutionClass::Simulation
             }),
+            children: self.children.clone(),
         };
         let plan = self.shared.routing().map(|routing| routing.plan.clone());
         let prepare = PrepareSection {
@@ -199,41 +196,19 @@ impl RunHandle {
             .iter()
             .map(|(name, component)| (name.clone(), component.implementation.hash.clone()))
             .collect();
-        let mut sections = BTreeMap::new();
-        let links = lock(&self.shared.links);
-        let drops = lock(&self.shared.link_drops);
-        let link_sections: Vec<_> = links
-            .iter()
-            .enumerate()
-            .map(|(i, (decl, _))| {
-                serde_json::json!({
-                    "link": decl.id,
-                    "from": decl.from,
-                    "to": decl.to,
-                    "drops": drops.get(i).copied(),
+        let links = {
+            // `links` before `link_drops`, the order step 6 takes them in.
+            let links = lock(&self.shared.links);
+            let drops = lock(&self.shared.link_drops);
+            links
+                .iter()
+                .enumerate()
+                .map(|(i, (decl, _))| LinkRecord {
+                    link: decl.id,
+                    drops: drops.get(i).copied(),
                 })
-            })
-            .collect();
-        sections.insert(
-            Namespace::parse("ezsdr.links").expect("a valid section name"),
-            serde_json::Value::Array(link_sections),
-        );
-        if !self.children.is_empty() {
-            sections.insert(
-                Namespace::parse("ezsdr.children").expect("a valid section name"),
-                serde_json::Value::Array(self.children.clone()),
-            );
-        }
-        if let Termination::Failed { stage } = &termination {
-            if let Some((failure_stage, reason)) = lock(&self.shared.failure).as_ref() {
-                if failure_stage == stage {
-                    sections.insert(
-                        Namespace::parse("ezsdr.failure").expect("a valid section name"),
-                        serde_json::json!({ "stage": stage_name(*stage), "reason": reason }),
-                    );
-                }
-            }
-        }
+                .collect()
+        };
         let relations = self.relations(&mut manifest_failures);
         cleanup_failures.extend(lock(&self.shared.cleanup_failures).clone());
         cleanup_failures.extend(manifest_failures);
@@ -257,6 +232,7 @@ impl RunHandle {
                 relations,
                 sample_clocks: self.shared.ctx.clocks.sample_clock_records(),
             },
+            links,
             events: EventsSection {
                 counters: lock(&self.shared.counters)
                     .clone()
@@ -264,7 +240,7 @@ impl RunHandle {
                     .unwrap_or_default(),
                 delivered: lock(&self.shared.delivered).clone(),
             },
-            lease: self.lease.clone(),
+            lease: self.lease.record(),
             action_log: self.log.entries().to_vec(),
             termination: TerminationSection {
                 reason: termination,
@@ -274,7 +250,7 @@ impl RunHandle {
                 also: lock(&self.shared.also).clone(),
             },
             artifacts: lock(&self.shared.artifacts).clone(),
-            sections,
+            sections: BTreeMap::new(),
             hash: None,
         };
         for (owner, fragment, entries) in module_sections {
@@ -337,42 +313,34 @@ pub(super) fn finish(run: &mut RunHandle) {
                 cause: StopCause::Client {},
             },
             CleanupMode::Orderly,
-            None,
         );
         run.cleanup();
     }
 }
 
-/// Requests the Run's end; returns whether this request set it (KC-46b).
-pub(super) fn request(
-    shared: &Shared,
-    termination: Termination,
-    mode: CleanupMode,
-    reason: Option<String>,
-) -> bool {
+/// Requests the Run's end; returns whether this request set it (KC-46b). The first
+/// request fixes the Termination (KC-32); a later one is recorded in `also` when it
+/// escalates `orderly` to `abort`, is a failure, or is a Policy reaction — the
+/// reactions and failures an earlier end overrode — once each; a later completion or
+/// client, disconnect or expiry stop that does not escalate says nothing new and is
+/// dropped (RS-10).
+pub(super) fn request(shared: &Shared, termination: Termination, mode: CleanupMode) -> bool {
     let mut end = lock(&shared.end);
-    match end.as_mut() {
-        None => {
-            if let (Termination::Failed { stage }, Some(reason)) = (&termination, reason) {
-                *lock(&shared.failure) = Some((*stage, reason));
-            }
-            *end = Some(super::state::EndRequest { termination, mode });
-            return true;
-        }
-        Some(current) if current.mode == CleanupMode::Orderly && mode == CleanupMode::Abort => {
-            current.mode = CleanupMode::Abort;
-            let additional = match termination {
-                Termination::Stopped { cause } => Some(cause),
-                Termination::Failed { .. } => Some(StopCause::Abort {
-                    cause: reason.unwrap_or_else(|| "a later failure escalated cleanup".to_owned()),
-                }),
-                Termination::Completed {} => None,
-            };
-            if let Some(additional) = additional {
-                lock(&shared.also).push(additional);
-            }
-        }
-        Some(_) => {}
+    let Some(current) = end.as_mut() else {
+        *end = Some(super::state::EndRequest { termination, mode });
+        return true;
+    };
+    let escalates = current.mode == CleanupMode::Orderly && mode == CleanupMode::Abort;
+    if escalates {
+        current.mode = CleanupMode::Abort;
+    }
+    let overridden = matches!(
+        termination,
+        Termination::Failed { .. } | Termination::Stopped { cause: StopCause::Policy { .. } }
+    );
+    let mut also = lock(&shared.also);
+    if (escalates || overridden) && current.termination != termination && !also.contains(&termination) {
+        also.push(termination);
     }
     false
 }
@@ -410,15 +378,13 @@ impl CleanupOps for Ops {
         fragment: Option<&Ident>,
         _mode: CleanupMode,
     ) -> Result<(), crate::module_api::ModuleError> {
-        if (step as u8) > (CleanupStep::StopRx as u8)
-            || (step == CleanupStep::StopRx && self.shared.drained.load(Ordering::Acquire))
+        if (step as u8) > (CleanupStep::DrainAndStopConsumers as u8)
+            || (step == CleanupStep::DrainAndStopConsumers && self.shared.drained.load(Ordering::Acquire))
         {
             self.shared.closing.store(true, Ordering::Release);
         }
         match step {
-            CleanupStep::Children
-            | CleanupStep::CancelPeripherals
-            | CleanupStep::ReleaseAndWriteManifest => Ok(()),
+            CleanupStep::ReleaseAndWriteManifest => Ok(()),
             CleanupStep::FinaliseArtifacts => {
                 // The event path's last drain, so that a mark delivered by it — an
                 // event emitted after the last round's drain or while the instances
@@ -485,12 +451,18 @@ impl CleanupOps for Ops {
                 }
                 let wake = lock(&self.shared.wake_handle).take();
                 let pending: Vec<_> = lock(&self.shared.scheduled).drain(..).chain(wake).collect();
-                for handle in pending {
-                    if self.shared.cancel(handle).is_err() {
-                        return Err(crate::module_api::ModuleError::rejected(
-                            "KC-30: a Module panicked during cleanup: Authority cancel()",
-                        ));
-                    }
+                // Every handle is tried: `scheduled` is already drained, so stopping at
+                // one panic would leave the rest neither cancelled nor kept. The panics
+                // are reported together (F25).
+                let total = pending.len();
+                let panicked = pending
+                    .into_iter()
+                    .filter(|handle| self.shared.cancel(*handle).is_err())
+                    .count();
+                if panicked > 0 {
+                    return Err(crate::module_api::ModuleError::rejected(format!(
+                        "KC-30: a Module panicked during cleanup: Authority cancel(), {panicked} of {total} handles"
+                    )));
                 }
                 Ok(())
             }
@@ -502,20 +474,20 @@ impl CleanupOps for Ops {
                 if !done.insert((step as u8, instance)) {
                     return Ok(());
                 }
-                let stop_rx = (CleanupStep::StopRx as u8, instance);
+                let stop_consumer = (CleanupStep::DrainAndStopConsumers as u8, instance);
                 let needs_stop = matches!(instance, Inst::Sink(_) | Inst::Executor(_))
-                    && !done.contains(&stop_rx);
+                    && !done.contains(&stop_consumer);
                 let Some(mut guard) = slot_lock(&self.shared, instance) else {
                     return Err(crate::module_api::ModuleError::rejected(
                         "KC-39: the instance is still held by an abandoned cleanup step",
                     ));
                 };
                 if needs_stop {
-                    done.insert(stop_rx);
+                    done.insert(stop_consumer);
                 }
                 drop(done);
                 let stop_error = if needs_stop {
-                    match contain(|| guard.stop_rx(current_stop_mode(&self.shared))) {
+                    match contain(|| guard.stop_consumer(current_stop_mode(&self.shared))) {
                         Ok(artifacts) => {
                             lock(&self.shared.artifacts).extend(artifacts);
                             None
@@ -537,7 +509,7 @@ impl CleanupOps for Ops {
                     (Ok(()), None) => Ok(()),
                 }
             }
-            CleanupStep::StopTx => {
+            CleanupStep::StopProviders => {
                 let Some(instance) = self.routed(fragment) else {
                     return Ok(());
                 };
@@ -562,7 +534,7 @@ impl CleanupOps for Ops {
                 }
                 result
             }
-            CleanupStep::StopRx => {
+            CleanupStep::DrainAndStopConsumers => {
                 let drain_owner = super::stepping::drain_cleanup(&self.shared);
                 if drain_owner && self.shared.closing.load(Ordering::Acquire) {
                     return Ok(());
@@ -594,7 +566,7 @@ impl CleanupOps for Ops {
                 };
                 done.insert((step as u8, instance));
                 drop(done);
-                let result = contain(|| guard.stop_rx(mode)).map(|artifacts| {
+                let result = contain(|| guard.stop_consumer(mode)).map(|artifacts| {
                     lock(&self.shared.artifacts).extend(artifacts);
                 });
                 if let Err(error) = &result {
@@ -604,7 +576,7 @@ impl CleanupOps for Ops {
             }
             CleanupStep::FlushEvents => {
                 // Drained again next to the snapshot, so that an event a thread RS-8a gave up
-                // on emits during step 6 is delivered, not only counted (RS-35).
+                // on emits during step 5 is delivered, not only counted (RS-35).
                 super::stepping::drain_and_react(&self.shared);
                 if let Some(collector) = self.shared.collector.get() {
                     *lock(&self.shared.counters) = Some(collector.counters());
@@ -633,7 +605,7 @@ enum CleanupGuard<'a> {
 }
 
 impl CleanupGuard<'_> {
-    fn stop_rx(
+    fn stop_consumer(
         &mut self,
         mode: StopMode,
     ) -> Result<Vec<crate::manifest::ArtifactRef>, crate::module_api::ModuleError> {
@@ -658,15 +630,5 @@ fn slot_lock(shared: &Shared, instance: Inst) -> Option<CleanupGuard<'_>> {
         Inst::Provider(i) => try_slot(&shared.providers[i].object).map(CleanupGuard::Provider),
         Inst::Sink(i) => try_slot(&shared.sinks[i].object).map(CleanupGuard::Sink),
         Inst::Executor(i) => try_slot(&shared.executors[i].object).map(CleanupGuard::Executor),
-    }
-}
-
-fn stage_name(stage: Stage) -> &'static str {
-    match stage {
-        Stage::Validate => "validate",
-        Stage::Plan => "plan",
-        Stage::Prepare => "prepare",
-        Stage::Arm => "arm",
-        Stage::Run => "run",
     }
 }

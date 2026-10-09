@@ -42,9 +42,8 @@ pub(super) fn start_data_thread(shared: &Arc<Shared>) {
         Err(error) => {
             super::ending::request(
                 shared,
-                Termination::Failed { stage: crate::run::Stage::Run },
+                Termination::Failed { stage: crate::run::Stage::Run, reason: format!("KC-46: the data thread could not start: {error}") },
                 CleanupMode::Abort,
-                Some(format!("KC-46: the data thread could not start: {error}")),
             );
         }
     }
@@ -80,7 +79,6 @@ fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
                 &shared,
                 Termination::Stopped { cause: StopCause::LeaseExpiry {} },
                 CleanupMode::Orderly,
-                None,
             );
         }
         if requested && !shared.stopped_early.swap(true, Ordering::AcqRel) {
@@ -160,7 +158,7 @@ fn stop_early(shared: &Arc<Shared>) {
     record(CleanupStep::FreezeDispatch, None);
     if let Some(routing) = shared.routing() {
         for fragment in &routing.reverse {
-            record(CleanupStep::StopTx, Some(fragment));
+            record(CleanupStep::StopProviders, Some(fragment));
         }
     }
     wake(shared, true);
@@ -213,13 +211,12 @@ pub(super) fn wait_finished(shared: &Shared, dispatched: &[(Inst, u64)]) {
             if remaining.is_zero() {
                 super::ending::request(
                     shared,
-                    Termination::Failed { stage: crate::run::Stage::Run },
-                    CleanupMode::Abort,
-                    Some(format!(
+                    Termination::Failed { stage: crate::run::Stage::Run, reason: format!(
                         "KC-21a: {} did not finish its Actions within {} ms",
                         shared.first_fragment(inst),
                         DEFAULT_HOST_BUDGET_NS / 1_000_000
-                    )),
+                    ) },
+                    CleanupMode::Abort,
                 );
                 return;
             }

@@ -138,7 +138,7 @@
       "type": "object"
     },
     "EventKind": {
-      "description": "What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$`;\nthe Kernel owns the five of RS-28 and every other kind belongs to the Vocabulary or\nModule that emits it.\n\nRule: SB-1, RS-27.",
+      "description": "What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$`:\nevery kind is namespaced. The Kernel owns the five of RS-28, under `ezsdr.`, and\nevery other kind belongs to the Vocabulary or Module that emits it.\n\nRule: SB-1, RS-27.",
       "type": "string"
     },
     "Gap": {

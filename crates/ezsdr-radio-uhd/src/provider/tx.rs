@@ -837,7 +837,7 @@ mod tests {
             tx.stop_now("test stop", false);
             assert_eq!(device.calls(), sent, "no payload or second EOB after abandonment");
             assert_eq!(lock(&core.rec).bursts[0]["end"], "stop");
-            assert!(events.drain().iter().any(|e| e.kind == EventKind::parse(ezsdr_radio::kinds::TX_UNDERFLOW).unwrap()));
+            assert!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().any(|e| e.kind == EventKind::parse(ezsdr_radio::kinds::TX_UNDERFLOW).unwrap()));
         }
     }
 
@@ -906,7 +906,7 @@ mod tests {
             assert!(!tx.step(), "still outside the in-flight window");
             time.advance_to(core.at(core.ticks(40_000_000))).unwrap();
             assert!(tx.step());
-            let events = events.drain();
+            let events = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
             assert!(events.iter().any(|e| e.payload["outcome"] == expected));
             if policy == LatePolicy::SendAsapAndFlag {
                 let open = tx.open.as_ref().unwrap();
@@ -1060,7 +1060,7 @@ mod tests {
         assert!(tx.step());
         assert_eq!(tx.open.as_ref().unwrap().held.k, 20_000);
         assert!(tx.open.as_ref().unwrap().held.open.late.is_none());
-        assert!(events.drain().is_empty());
+        assert!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).is_empty());
         assert!(device.calls().iter().any(|c| c.contains("at=4000000 sob=true")));
     }
 
@@ -1079,7 +1079,7 @@ mod tests {
         assert!(tx.step());
         assert!(tx.open.is_none());
         assert!(tx.held.contains_key(&42_000));
-        assert!(events.drain().iter().any(|e| e.payload["outcome"] == "refused"));
+        assert!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().any(|e| e.payload["outcome"] == "refused"));
         assert!(!device.calls().iter().any(|call| call.starts_with("tx_send ")));
     }
 
@@ -1135,7 +1135,7 @@ mod tests {
         assert_eq!(tx.held.len(), 1, "B is not held: {:?}", tx.held.keys().collect::<Vec<_>>());
         let reasons: Vec<String> = lock(&core.rec).rejected.iter().filter_map(|r| r["reason"].as_str().map(str::to_owned)).collect();
         assert!(reasons.iter().any(|r| r == "UR-21: the moved start is a held burst's"), "{reasons:?}");
-        let refused = events.drain().into_iter().any(|e| {
+        let refused = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().any(|e| {
             e.kind == EventKind::parse(ezsdr_radio::kinds::TIME_ERROR).unwrap() && e.payload["outcome"] == "refused"
         });
         assert!(refused, "no TIME_ERROR {{ refused }}");
@@ -1154,12 +1154,12 @@ mod tests {
                 });
                 tx.close_device_burst(tail);
                 assert_eq!(core.is_lost(), lost, "EOB failure must reach UR-29");
-                let emitted = events.drain();
+                let emitted = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
                 let expected = if lost { EventKind::DEVICE_LOST } else { ezsdr_radio::kinds::COMMAND_REJECTED };
                 assert_eq!(emitted.iter().filter(|event| event.kind.as_str() == expected).count(), 1);
                 if lost {
                     tx.close_device_burst(None);
-                    assert!(events.drain().is_empty());
+                    assert!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).is_empty());
                     assert_eq!(device.calls().iter().filter(|call| call.as_str() == "mark_lost").count(), 1);
                 }
             }
@@ -1235,7 +1235,7 @@ mod tests {
             tx.report(crate::device::TxReport { code: crate::device::TxCode::BurstAck, tick: Some(clock.instant(a.ticks)), channel });
         }
         tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: Some(clock.instant(b.ticks)+200), channel: 0 });
-        let emitted = events.drain();
+        let emitted = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
         eprintln!("events={emitted:?}");
         assert!(emitted.iter().any(|e|e.kind.as_str()==ezsdr_radio::kinds::TIME_ERROR), "burst B TIME_ERROR must survive both ACKs of A");
     }
@@ -1260,7 +1260,7 @@ mod tests {
             }
             let channel = channels - 1;
             for _ in 0..2 { tx.report(TxReport { code: TxCode::TimeError, tick: None, channel }); }
-            let errors = events.drain();
+            let errors = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
             assert_eq!(errors.len(), 2);
             assert_eq!(errors[0].payload["target"], serde_json::to_value(a).unwrap());
             assert_eq!(errors[1].payload["target"], serde_json::to_value(b).unwrap());
@@ -1318,7 +1318,7 @@ mod tests {
                 tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError,
                     tick: Some(clock.instant(target.ticks) + 400), channel: 0 });
             }
-            let errors: Vec<_> = events.drain().into_iter()
+            let errors: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
                 .filter(|e| e.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
             assert_eq!(errors[0].payload["late_by_ns"], 1000);
             assert_eq!(errors[0].payload["target"], serde_json::to_value(target).unwrap());

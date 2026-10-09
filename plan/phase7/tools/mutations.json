@@ -103,7 +103,7 @@
  },
  {
   "id": "G11",
-  "name": "StopTx (the data thread's included) not recorded as done",
+  "name": "StopProviders (the data thread's included) not recorded as done",
   "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
   "old": "                done.insert((step as u8, instance));\n                drop(done);\n                let mode = current_stop_mode(&self.shared);\n                let result = {",
   "new": "                drop(done);\n                let mode = current_stop_mode(&self.shared);\n                let result = {",

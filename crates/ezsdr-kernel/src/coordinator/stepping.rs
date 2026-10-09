@@ -212,9 +212,8 @@ pub(super) fn apply_faults(shared: &Shared, faults: &[(Inst, ModuleError)]) -> b
         } else {
             ended |= super::ending::request(
                 shared,
-                Termination::Failed { stage: Stage::Run },
+                Termination::Failed { stage: Stage::Run, reason: format!("KC-30: {}: {}", shared.first_fragment(*inst), error.message) },
                 CleanupMode::Abort,
-                Some(format!("KC-30: {}: {}", shared.first_fragment(*inst), error.message)),
             );
         }
     }
@@ -231,9 +230,12 @@ pub(super) fn drain_and_react(shared: &Shared) -> (usize, bool) {
     let Some(policy) = shared.policy.get() else {
         return (0, false);
     };
+    // RS-35: the drain's own EVENTS_DROPPED is stamped now, read before the lock
+    // because `now()` is a Module call that may request an end.
+    let at = shared.now();
     let mut delivered = lock(&shared.delivered);
     let mut ended = false;
-    let events = collector.drain();
+    let events = collector.drain(at);
     for event in &events {
         let reaction = policy.reaction_for_event(&event.kind, event.severity);
         if reaction == Reaction::MarkArtifact {
@@ -248,11 +250,10 @@ pub(super) fn drain_and_react(shared: &Shared) -> (usize, bool) {
             shared,
             Termination::Stopped {
                 cause: StopCause::Policy {
-                    kind: event.kind.clone(),
+                    event: event.kind.clone(),
                 },
             },
             mode,
-            None,
         );
     }
     let count = events.len();
@@ -265,20 +266,19 @@ pub(super) fn drain_and_react(shared: &Shared) -> (usize, bool) {
         ended |= super::ending::request(
             shared,
             Termination::Stopped {
-                cause: StopCause::Policy { kind },
+                cause: StopCause::Policy { event: kind },
             },
             mode,
-            None,
         );
     }
     (count, ended)
 }
 
 /// KC-22's livelock event at `at`: source `kernel`, severity `fatal`, payload
-/// `{ "wakeups": … }` through `emit_control` (RS-27, RS-28). The two loops that
-/// count `next_wakeup` results at one instant report it here rather than each
-/// spelling the Event; `step_until_quiescent`'s own `STEP_LIVELOCK` carries
-/// `{ "rounds": … }` (MA-30) and is not this one.
+/// `{ "rounds": … }` through `emit_control` (RS-27, RS-28), the one payload
+/// `step_until_quiescent`'s own `STEP_LIVELOCK` carries too (MA-30): each
+/// `next_wakeup` result at one instant is a round. The two loops that count them
+/// report it here rather than each spelling the Event.
 fn emit_livelock(shared: &Shared, at: TimePoint) {
     let Some(collector) = shared.collector.get() else {
         return;
@@ -288,7 +288,7 @@ fn emit_livelock(shared: &Shared, at: TimePoint) {
         time: at,
         severity: crate::event::Severity::Fatal,
         kind: EventKind::parse(EventKind::STEP_LIVELOCK).expect("Kernel event kind"),
-        payload: serde_json::json!({ "wakeups": crate::module_api::STEP_ROUND_CAP }),
+        payload: serde_json::json!({ "rounds": crate::module_api::STEP_ROUND_CAP }),
     });
 }
 
@@ -327,9 +327,19 @@ pub(super) fn drain_cleanup(shared: &Shared) -> bool {
         if interrupted() {
             break;
         }
-        let wakeup = contain_all(|| shared.authority.next_wakeup())
-            .ok()
-            .flatten();
+        // A panic here fails the Run as it does in `run_loop`, rather than reading as
+        // "no wakeup" and ending the drain unrecorded (F25).
+        let Ok(wakeup) = contain_all(|| shared.authority.next_wakeup()) else {
+            super::ending::request(
+                shared,
+                Termination::Failed {
+                    stage: Stage::Run,
+                    reason: "KC-30: authority panicked during next_wakeup".to_owned(),
+                },
+                CleanupMode::Abort,
+            );
+            break;
+        };
         if interrupted() {
             break;
         }
@@ -364,9 +374,8 @@ impl RunHandle {
                 Err(()) => {
                     super::ending::request(
                         &self.shared,
-                        Termination::Failed { stage: Stage::Run },
+                        Termination::Failed { stage: Stage::Run, reason: "KC-30: authority panicked during next_wakeup".to_owned() },
                         CleanupMode::Abort,
-                        Some("KC-30: authority panicked during next_wakeup".to_owned()),
                     );
                     return;
                 }
@@ -378,7 +387,6 @@ impl RunHandle {
                         &self.shared,
                         Termination::Completed {},
                         CleanupMode::Orderly,
-                        None,
                     );
                 }
                 return;
@@ -408,9 +416,8 @@ impl RunHandle {
                     let reason = format!("KC-22: STEP_LIVELOCK at {}; time cannot advance", at);
                     super::ending::request(
                         &self.shared,
-                        Termination::Failed { stage: Stage::Run },
+                        Termination::Failed { stage: Stage::Run, reason },
                         CleanupMode::Abort,
-                        Some(reason),
                     );
                 }
                 continue;
@@ -444,7 +451,6 @@ impl RunHandle {
                     &self.shared,
                     Termination::Completed {},
                     CleanupMode::Orderly,
-                    None,
                 );
                 break;
             }
@@ -456,9 +462,8 @@ impl RunHandle {
                 Err(violations) => {
                     super::ending::request(
                         &self.shared,
-                        Termination::Failed { stage: Stage::Run },
+                        Termination::Failed { stage: Stage::Run, reason: format!("KC-17: agenda entry {index}: {violations:?}") },
                         CleanupMode::Abort,
-                        Some(format!("KC-17: agenda entry {index}: {violations:?}")),
                     );
                     break;
                 }
@@ -495,9 +500,8 @@ impl RunHandle {
             Err(super::state::TimeScheduleError::Panicked) => {
                 super::ending::request(
                     &self.shared,
-                    Termination::Failed { stage: Stage::Run },
+                    Termination::Failed { stage: Stage::Run, reason: "KC-30: a Module panicked during run: Authority schedule()".to_owned() },
                     CleanupMode::Abort,
-                    Some("KC-30: a Module panicked during run: Authority schedule()".to_owned()),
                 );
                 self.settle();
                 return self.ended_result();
@@ -513,9 +517,8 @@ impl RunHandle {
             if self.shared.cancel(handle).is_err() {
                 super::ending::request(
                     &self.shared,
-                    Termination::Failed { stage: Stage::Run },
+                    Termination::Failed { stage: Stage::Run, reason: "KC-30: a Module panicked during run: Authority cancel()".to_owned() },
                     CleanupMode::Abort,
-                    Some("KC-30: a Module panicked during run: Authority cancel()".to_owned()),
                 );
             }
         }

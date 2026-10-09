@@ -824,7 +824,7 @@ mod tests {
         let ms = |n: i64| core.ticks(n * 1_000_000);
         control.book_cold(key("radio.rx.sample_rate_hz"), Value::Num(2e6), Some(AbsoluteDeadline::new(core.at(ms(300)))));
         control.book_cold(key("radio.rx.sample_rate_hz"), Value::Num(1e6), Some(AbsoluteDeadline::new(core.at(ms(100)))));
-        let late: Vec<_> = events.drain().into_iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).collect();
+        let late: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).collect();
         assert_eq!(late.len(), 1);
         assert_eq!((late[0].payload["requested"]["ticks"].as_i64(), late[0].payload["applied"]["ticks"].as_i64()), (Some(ms(100)), Some(ms(300))));
         let plan = plan_of(&core, Dir::Rx);

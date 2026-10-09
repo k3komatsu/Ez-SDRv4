@@ -201,6 +201,38 @@
       ],
       "type": "object"
     },
+    "ChildRecord": {
+      "additionalProperties": false,
+      "description": "One child Run a Session created (RS-25a).",
+      "properties": {
+        "manifest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentHash"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The child's Manifest hash; absent when it could not be sealed (RS-46)."
+        },
+        "run": {
+          "$ref": "#/$defs/RunId",
+          "description": "The child's id (RS-1)."
+        },
+        "seq": {
+          "description": "The `RunChild` entry of the parent's action log (RS-15).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq",
+        "run"
+      ],
+      "type": "object"
+    },
     "CleanupFailure": {
       "additionalProperties": false,
       "description": "A cleanup step that failed or timed out. Every step is attempted even when an\nearlier one failed; each failure is recorded and the sequence continues (RS-6).",
@@ -252,51 +284,41 @@
       ]
     },
     "CleanupStep": {
-      "description": "The nine ordered steps of RS-6, not the unordered list of Vision §53.",
+      "description": "The seven ordered steps of RS-6, each named for what it does, not the unordered\nlist of Vision §53.",
       "oneOf": [
         {
-          "const": "children",
-          "description": "0. Clean up child Runs, each by this same algorithm (RS-6, RS-25).",
-          "type": "string"
-        },
-        {
           "const": "freeze_dispatch",
-          "description": "1. Freeze dispatch and cancel every pending burst and timer. This precedes\n   stopping TX: a burst still queued when TX stops will reopen it on a\n   device that honours timed commands (RS-7).",
+          "description": "1. Freeze dispatch and cancel every pending burst and timer. This precedes\n   stopping the Providers: a burst still queued when a transmitter stops will\n   reopen it on a device that honours timed commands (RS-7).",
           "type": "string"
         },
         {
-          "const": "stop_tx",
-          "description": "2. Stop TX on every Provider, in reverse dependency order (RS-8).",
+          "const": "stop_providers",
+          "description": "2. Stop every Provider, in reverse dependency order (RS-8).",
           "type": "string"
         },
         {
-          "const": "stop_rx",
-          "description": "3. Stop RX on every Provider, in reverse dependency order (RS-8).",
-          "type": "string"
-        },
-        {
-          "const": "cancel_peripherals",
-          "description": "4. Cancel outstanding Peripheral operations (RS-6).",
+          "const": "drain_and_stop_consumers",
+          "description": "3. Drain the stepped instances under `orderly`, then stop every Executor and\n   Sink, in reverse dependency order (RS-8, RS-9).",
           "type": "string"
         },
         {
           "const": "restore_baseline",
-          "description": "5. Restore baseline state, in reverse dependency order (RS-8).",
+          "description": "4. Restore baseline state, in reverse dependency order (RS-8).",
           "type": "string"
         },
         {
           "const": "finalise_artifacts",
-          "description": "6. Flush the event path, then finalise artifacts, marking as partial anything\n   still open (RS-6, RS-30, RS-44).",
+          "description": "5. Drain the event path, then finalise artifacts, marking as partial anything\n   still open (RS-6, RS-30, RS-44).",
           "type": "string"
         },
         {
           "const": "flush_events",
-          "description": "7. Drain the event path again and collect the counters (RS-6, RS-35).",
+          "description": "6. Drain the event path again and collect the counters (RS-6, RS-35).",
           "type": "string"
         },
         {
           "const": "release_and_write_manifest",
-          "description": "8. Release the Lease and write the Manifest (RS-6, RS-11).",
+          "description": "7. Release the Lease and write the Manifest (RS-6, RS-11).",
           "type": "string"
         }
       ]
@@ -993,7 +1015,7 @@
       "type": "object"
     },
     "EventKind": {
-      "description": "What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$`;\nthe Kernel owns the five of RS-28 and every other kind belongs to the Vocabulary or\nModule that emits it.\n\nRule: SB-1, RS-27.",
+      "description": "What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$`:\nevery kind is namespaced. The Kernel owns the five of RS-28, under `ezsdr.`, and\nevery other kind belongs to the Vocabulary or Module that emits it.\n\nRule: SB-1, RS-27.",
       "type": "string"
     },
     "EventsSection": {
@@ -1335,55 +1357,6 @@
       "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the `KeyDecl` and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
       "type": "string"
     },
-    "Lease": {
-      "additionalProperties": false,
-      "description": "Who holds a Run, and for how long (RS-21…RS-25).",
-      "properties": {
-        "adoptions": {
-          "description": "How many times it has been adopted (RS-24).",
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "expires_at_host": {
-          "description": "When it expires, on the host monotonic clock (RS-22).",
-          "format": "uint64",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "holder": {
-          "description": "Who holds it now, uninterpreted by the Kernel (RS-24).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "mode": {
-          "$ref": "#/$defs/LeaseMode",
-          "description": "Attached or Detached (RS-21)."
-        },
-        "released": {
-          "description": "Whether it has been released (RS-6, step 8).",
-          "type": "boolean"
-        },
-        "token": {
-          "description": "Issued at grant for a Detached Lease; only `Adopt { token }` reclaims it\n(RS-24, decision R5).",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "mode",
-        "adoptions",
-        "released"
-      ],
-      "type": "object"
-    },
     "LeaseMode": {
       "description": "Whether a Run survives its client's disconnection (RS-21).",
       "oneOf": [
@@ -1428,6 +1401,48 @@
           "type": "object"
         }
       ]
+    },
+    "LeaseRecord": {
+      "additionalProperties": false,
+      "description": "What the Manifest records of a Lease: its mode and whether it was released. The\ntoken and the expiry deadline are runtime state only: the token is the credential\nadoption checks (R5), and the deadline is a host monotonic instant with no\nmeaning outside the process (RS-22).\n\nRule: RS-38.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/LeaseMode",
+          "description": "Attached or Detached (RS-21)."
+        },
+        "released": {
+          "description": "Whether it has been released (RS-6, `release_and_write_manifest`).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "mode",
+        "released"
+      ],
+      "type": "object"
+    },
+    "LinkRecord": {
+      "additionalProperties": false,
+      "description": "One DataLink the Run created, with what it dropped; its endpoints are its entry\nin `plan.links` (RS-38, SC-20a).",
+      "properties": {
+        "drops": {
+          "description": "How many blocks it dropped; absent when cleanup never read it (RS-6).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "link": {
+          "$ref": "#/$defs/DataLinkId",
+          "description": "Which link (SC-19)."
+        }
+      },
+      "required": [
+        "link"
+      ],
+      "type": "object"
     },
     "LogEntry": {
       "additionalProperties": false,
@@ -1896,13 +1911,28 @@
       "additionalProperties": false,
       "description": "The `run` section of the envelope (RS-38).",
       "properties": {
+        "children": {
+          "default": [],
+          "description": "The child Runs this Session created, in creation order (RS-25a).",
+          "items": {
+            "$ref": "#/$defs/ChildRecord"
+          },
+          "type": "array"
+        },
         "deterministic": {
           "description": "May be claimed only for the Simulation class with a recorded seed (RS-42).",
           "type": "boolean"
         },
         "execution_class": {
-          "$ref": "#/$defs/ExecutionClass",
-          "description": "Fixed at binding resolution and never changed during the Run (RS-42)."
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionClass"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Fixed at binding resolution and never changed during the Run; absent when no\nplan was built, since the plan derives it (RS-42)."
         },
         "fidelity": {
           "$ref": "#/$defs/Fidelity",
@@ -1938,7 +1968,6 @@
       "required": [
         "id",
         "kind",
-        "execution_class",
         "fidelity",
         "transitions",
         "deterministic"
@@ -1952,13 +1981,13 @@
           "additionalProperties": false,
           "description": "Nothing has happened yet.",
           "properties": {
-            "state": {
+            "kind": {
               "const": "created",
               "type": "string"
             }
           },
           "required": [
-            "state"
+            "kind"
           ],
           "type": "object"
         },
@@ -1966,13 +1995,13 @@
           "additionalProperties": false,
           "description": "`validate()` passed (SB-38).",
           "properties": {
-            "state": {
+            "kind": {
               "const": "validated",
               "type": "string"
             }
           },
           "required": [
-            "state"
+            "kind"
           ],
           "type": "object"
         },
@@ -1980,13 +2009,13 @@
           "additionalProperties": false,
           "description": "`plan()` passed (SB-39).",
           "properties": {
-            "state": {
+            "kind": {
               "const": "planned",
               "type": "string"
             }
           },
           "required": [
-            "state"
+            "kind"
           ],
           "type": "object"
         },
@@ -1994,13 +2023,13 @@
           "additionalProperties": false,
           "description": "Every fragment prepared (SB-41).",
           "properties": {
-            "state": {
+            "kind": {
               "const": "prepared",
               "type": "string"
             }
           },
           "required": [
-            "state"
+            "kind"
           ],
           "type": "object"
         },
@@ -2008,13 +2037,13 @@
           "additionalProperties": false,
           "description": "Everything armed (SB-43).",
           "properties": {
-            "state": {
+            "kind": {
               "const": "armed",
               "type": "string"
             }
           },
           "required": [
-            "state"
+            "kind"
           ],
           "type": "object"
         },
@@ -2022,13 +2051,13 @@
           "additionalProperties": false,
           "description": "Live.",
           "properties": {
-            "state": {
+            "kind": {
               "const": "running",
               "type": "string"
             }
           },
           "required": [
-            "state"
+            "kind"
           ],
           "type": "object"
         },
@@ -2036,17 +2065,17 @@
           "additionalProperties": false,
           "description": "Cleanup is under way (RS-6).",
           "properties": {
+            "kind": {
+              "const": "stopping",
+              "type": "string"
+            },
             "mode": {
               "$ref": "#/$defs/CleanupMode",
               "description": "Whether the tail is delivered (RS-9)."
-            },
-            "state": {
-              "const": "stopping",
-              "type": "string"
             }
           },
           "required": [
-            "state",
+            "kind",
             "mode"
           ],
           "type": "object"
@@ -2055,7 +2084,7 @@
           "additionalProperties": false,
           "description": "Cleanup finished; a Manifest was written (RS-11).",
           "properties": {
-            "state": {
+            "kind": {
               "const": "cleaned_up",
               "type": "string"
             },
@@ -2065,7 +2094,7 @@
             }
           },
           "required": [
-            "state",
+            "kind",
             "termination"
           ],
           "type": "object"
@@ -2406,13 +2435,13 @@
           "additionalProperties": false,
           "description": "The client asked (RS-3).",
           "properties": {
-            "reason": {
+            "kind": {
               "const": "client",
               "type": "string"
             }
           },
           "required": [
-            "reason"
+            "kind"
           ],
           "type": "object"
         },
@@ -2420,13 +2449,13 @@
           "additionalProperties": false,
           "description": "An `Attached` Lease's client went away (RS-23).",
           "properties": {
-            "reason": {
+            "kind": {
               "const": "client_disconnect",
               "type": "string"
             }
           },
           "required": [
-            "reason"
+            "kind"
           ],
           "type": "object"
         },
@@ -2434,13 +2463,13 @@
           "additionalProperties": false,
           "description": "A `Detached` Lease's TTL ran out (RS-23).",
           "properties": {
-            "reason": {
+            "kind": {
               "const": "lease_expiry",
               "type": "string"
             }
           },
           "required": [
-            "reason"
+            "kind"
           ],
           "type": "object"
         },
@@ -2448,18 +2477,18 @@
           "additionalProperties": false,
           "description": "The Policy table reacted to an event (RS-26).",
           "properties": {
-            "kind": {
+            "event": {
               "$ref": "#/$defs/EventKind",
-              "description": "Which kind triggered it."
+              "description": "Which event kind triggered it."
             },
-            "reason": {
+            "kind": {
               "const": "policy",
               "type": "string"
             }
           },
           "required": [
-            "reason",
-            "kind"
+            "kind",
+            "event"
           ],
           "type": "object"
         },
@@ -2467,18 +2496,18 @@
           "additionalProperties": false,
           "description": "Something aborted the Run (RS-9).",
           "properties": {
-            "cause": {
-              "description": "Why, uninterpreted.",
+            "kind": {
+              "const": "abort",
               "type": "string"
             },
-            "reason": {
-              "const": "abort",
+            "message": {
+              "description": "Why, uninterpreted.",
               "type": "string"
             }
           },
           "required": [
-            "reason",
-            "cause"
+            "kind",
+            "message"
           ],
           "type": "object"
         }
@@ -2528,6 +2557,10 @@
               "const": "failed",
               "type": "string"
             },
+            "reason": {
+              "description": "Why: a string beginning with the rule that refused (KC-7).",
+              "type": "string"
+            },
             "stage": {
               "$ref": "#/$defs/Stage",
               "description": "Which one."
@@ -2535,7 +2568,8 @@
           },
           "required": [
             "kind",
-            "stage"
+            "stage",
+            "reason"
           ],
           "type": "object"
         }
@@ -2547,9 +2581,9 @@
       "properties": {
         "also": {
           "default": [],
-          "description": "An abort raised while an orderly stop was in progress is recorded here\nalongside the original cause (RS-10).",
+          "description": "Every later end request that escalated the mode, failed or was a Policy\nreaction, in request order, beside the first (RS-10, KC-32).",
           "items": {
-            "$ref": "#/$defs/StopCause"
+            "$ref": "#/$defs/Termination"
           },
           "type": "array"
         },
@@ -2892,8 +2926,16 @@
       "type": "array"
     },
     "lease": {
-      "$ref": "#/$defs/Lease",
+      "$ref": "#/$defs/LeaseRecord",
       "description": "How the Run was held (RS-21)."
+    },
+    "links": {
+      "default": [],
+      "description": "Every DataLink the Run created, in `plan.links` order (RS-38).",
+      "items": {
+        "$ref": "#/$defs/LinkRecord"
+      },
+      "type": "array"
     },
     "modules": {
       "default": [],

@@ -242,7 +242,7 @@ impl Value {
                 // OV-15's canonicaliser refuses a non-ASCII object key, and a `Value`
                 // reaches the sealed Manifest through paths that pass no `from_json`:
                 // a Session `SetParameter`, an Action's `params` or `metadata`. Left
-                // to hashing time it failed at cleanup step 8, after the Run had
+                // to hashing time it failed at cleanup step 7, after the Run had
                 // transmitted — a Run with no Manifest, against RS-11.
                 if let Some(bad) = items.keys().find(|k| !k.as_str().is_ascii()) {
                     return Err(SpecError::KeyShape {
@@ -889,7 +889,7 @@ impl std::error::Error for SpecError {}
 /// code units and this profile does not implement that ordering. Nothing refused it
 /// at **ingestion**, so a Spec carrying `{"ρ": 1}` in an opaque section validated,
 /// planned, armed and transmitted, and `Manifest::seal()` then failed at cleanup
-/// step 8 — a Run that radiated and produced no Manifest, against RS-11. Refusing it
+/// step 7 — a Run that radiated and produced no Manifest, against RS-11. Refusing it
 /// here is what keeps that impossible.
 ///
 /// Rule: OV-15, OV-16, RS-11, SB-9.

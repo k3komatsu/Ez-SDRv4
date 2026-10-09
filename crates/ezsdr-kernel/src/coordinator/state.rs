@@ -15,7 +15,7 @@ use crate::module_api::{
 use crate::plan::ExecutionPlan;
 use crate::policy::{EventKindRegistry, Policy};
 use crate::run::{
-    CleanupFailure, CleanupMode, HostClock, RunState, RunStateMachine, Stage, StopCause,
+    CleanupFailure, CleanupMode, HostClock, RunState, RunStateMachine, Stage,
     Termination,
 };
 use crate::spec::{ExperimentSpec, Ident, Key, Namespace, Value};
@@ -200,8 +200,7 @@ pub(super) struct Shared {
     pub(super) delivered: Mutex<Vec<Event>>,
     pub(super) marks: Mutex<Vec<(EventKind, TimePoint)>>,
     pub(super) end: Mutex<Option<EndRequest>>,
-    pub(super) also: Mutex<Vec<StopCause>>,
-    pub(super) failure: Mutex<Option<(Stage, String)>>,
+    pub(super) also: Mutex<Vec<Termination>>,
     pub(super) artifacts: Mutex<Vec<ArtifactRef>>,
     pub(super) links: Mutex<Vec<(DataLinkDecl, Arc<dyn crate::stream::DataLink>)>>,
     pub(super) link_drops: Mutex<Vec<u64>>,
@@ -345,9 +344,8 @@ impl Shared {
                 };
                 super::ending::request(
                     self,
-                    Termination::Failed { stage },
+                    Termination::Failed { stage, reason: reason.to_owned() },
                     CleanupMode::Abort,
-                    Some(reason.to_owned()),
                 );
             }
         }

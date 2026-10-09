@@ -1537,7 +1537,7 @@ fn ma_30_a_failure_beats_the_step_livelock_cap() {
         .expect_err("the failure is returned");
     assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
     assert!(
-        events.drain().iter().all(|e| e.kind.as_str() != EventKind::STEP_LIVELOCK),
+        events.drain(until).iter().all(|e| e.kind.as_str() != EventKind::STEP_LIVELOCK),
         "no STEP_LIVELOCK is emitted over a failure"
     );
 }
@@ -1571,12 +1571,13 @@ fn ma_30_stepping_livelock_cap() {
     // RS-27 registers STEP_LIVELOCK as a kind the Kernel emits from its own
     // stepping loop, so it must be delivered, and the Policy aborts on it when it is
     // (KC-31; RS-36's flag is for dropped bodies only: design-notes §21).
-    let drained = events.drain();
-    assert!(
-        drained
-            .iter()
-            .any(|e| e.kind.as_str() == EventKind::STEP_LIVELOCK)
-    );
+    let drained = events.drain(until);
+    let livelock = drained
+        .iter()
+        .find(|e| e.kind.as_str() == EventKind::STEP_LIVELOCK)
+        .expect("delivered");
+    // One payload for every STEP_LIVELOCK, the coordinator's included (KC-22, MA-30).
+    assert_eq!(livelock.payload, serde_json::json!({ "rounds": ezsdr_kernel::module_api::STEP_ROUND_CAP }));
     let policy = EventKindRegistry::with_kernel_kinds().compile(&BTreeMap::new()).expect("compiles");
     assert_eq!(
         policy.reaction_for_event(&EventKind::parse(EventKind::STEP_LIVELOCK).unwrap(), ezsdr_kernel::event::Severity::Fatal),

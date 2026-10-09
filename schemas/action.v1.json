@@ -242,7 +242,7 @@
       "type": "object"
     },
     "EventKind": {
-      "description": "What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$`;\nthe Kernel owns the five of RS-28 and every other kind belongs to the Vocabulary or\nModule that emits it.\n\nRule: SB-1, RS-27.",
+      "description": "What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$`:\nevery kind is namespaced. The Kernel owns the five of RS-28, under `ezsdr.`, and\nevery other kind belongs to the Vocabulary or Module that emits it.\n\nRule: SB-1, RS-27.",
       "type": "string"
     },
     "Gap": {
@@ -512,13 +512,13 @@
           "additionalProperties": false,
           "description": "The client asked (RS-3).",
           "properties": {
-            "reason": {
+            "kind": {
               "const": "client",
               "type": "string"
             }
           },
           "required": [
-            "reason"
+            "kind"
           ],
           "type": "object"
         },
@@ -526,13 +526,13 @@
           "additionalProperties": false,
           "description": "An `Attached` Lease's client went away (RS-23).",
           "properties": {
-            "reason": {
+            "kind": {
               "const": "client_disconnect",
               "type": "string"
             }
           },
           "required": [
-            "reason"
+            "kind"
           ],
           "type": "object"
         },
@@ -540,13 +540,13 @@
           "additionalProperties": false,
           "description": "A `Detached` Lease's TTL ran out (RS-23).",
           "properties": {
-            "reason": {
+            "kind": {
               "const": "lease_expiry",
               "type": "string"
             }
           },
           "required": [
-            "reason"
+            "kind"
           ],
           "type": "object"
         },
@@ -554,18 +554,18 @@
           "additionalProperties": false,
           "description": "The Policy table reacted to an event (RS-26).",
           "properties": {
-            "kind": {
+            "event": {
               "$ref": "#/$defs/EventKind",
-              "description": "Which kind triggered it."
+              "description": "Which event kind triggered it."
             },
-            "reason": {
+            "kind": {
               "const": "policy",
               "type": "string"
             }
           },
           "required": [
-            "reason",
-            "kind"
+            "kind",
+            "event"
           ],
           "type": "object"
         },
@@ -573,18 +573,18 @@
           "additionalProperties": false,
           "description": "Something aborted the Run (RS-9).",
           "properties": {
-            "cause": {
-              "description": "Why, uninterpreted.",
+            "kind": {
+              "const": "abort",
               "type": "string"
             },
-            "reason": {
-              "const": "abort",
+            "message": {
+              "description": "Why, uninterpreted.",
               "type": "string"
             }
           },
           "required": [
-            "reason",
-            "cause"
+            "kind",
+            "message"
           ],
           "type": "object"
         }

@@ -360,7 +360,10 @@ pub fn captured(mut run: RunHandle) -> Manifest {
 }
 
 pub fn failure(manifest: &Manifest) -> String {
-    manifest.sections.get(&Namespace::parse("ezsdr.failure").unwrap()).map_or(String::new(), |f| f["reason"].as_str().unwrap_or_default().to_owned())
+    match &manifest.termination.reason {
+        ezsdr_kernel::run::Termination::Failed { reason, .. } => reason.clone(),
+        _ => String::new(),
+    }
 }
 
 pub fn verb(verb: &str, target: &str, at: Option<TimePoint>, params: &[(&str, Value)]) -> SessionAction {

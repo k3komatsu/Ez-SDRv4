@@ -706,7 +706,7 @@ mod tests {
             let flags = expected.iter().fold(BlockFlags::GAP_BEFORE | unannounced, |flags, (_, flag)| flags | *flag);
             assert_eq!((block.header().flags, block.header().lost), (flags, Some(2)));
             assert_eq!(block.header().valid, ezsdr_kernel::stream::ChannelMask::full(2), "a whole-stream gap");
-            let got: Vec<_> = events.drain().into_iter()
+            let got: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
                 .filter(|e| [kinds::ALIGNMENT_ERROR, kinds::RX_OVERFLOW].contains(&e.kind.as_str()))
                 .collect();
             for event in &got {

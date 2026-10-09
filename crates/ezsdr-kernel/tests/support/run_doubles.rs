@@ -125,6 +125,7 @@ pub struct SimAuthority {
     next_wakeup_probe: Option<Probe>,
     next_wakeup_calls: Arc<AtomicUsize>,
     next_wakeup_after_gate_returned: AtomicBool,
+    panic_next_wakeup: bool,
 }
 
 impl SimAuthority {
@@ -168,6 +169,7 @@ impl SimAuthority {
                 next_wakeup_probe: None,
                 next_wakeup_calls: Arc::new(AtomicUsize::new(0)),
                 next_wakeup_after_gate_returned: AtomicBool::new(false),
+                panic_next_wakeup: false,
             },
             root,
         )
@@ -203,13 +205,20 @@ impl SimAuthority {
         self
     }
 
+    /// Makes its `next_wakeup` panic (KC-30).
+    pub fn panicking_next_wakeup(mut self) -> SimAuthority {
+        self.panic_next_wakeup = true;
+        self
+    }
+
     /// Makes its `TimeAuthority::schedule` implementation panic (KC-30).
     pub fn panicking_schedule(mut self) -> SimAuthority {
         self.panic_schedule = true;
         self
     }
 
-    /// Makes its `TimeAuthority::cancel` implementation panic (KC-30).
+    /// Makes its `TimeAuthority::cancel` implementation panic on every call but the
+    /// first (KC-30).
     pub fn panicking_cancel(mut self) -> SimAuthority {
         self.panic_cancel = true;
         self
@@ -231,6 +240,7 @@ impl Authority for SimAuthority {
                 panic_schedule: self.panic_schedule,
                 panic_cancel: self.panic_cancel,
                 now_calls: self.now_calls.clone(),
+                cancel_calls: AtomicUsize::new(0),
             })
         } else {
             self.inner.clone()
@@ -238,6 +248,9 @@ impl Authority for SimAuthority {
     }
 
     fn next_wakeup(&self) -> Option<TimePoint> {
+        if self.panic_next_wakeup {
+            panic!("test: panic in Authority::next_wakeup");
+        }
         if let Some(gate) = &self.next_wakeup_gate {
             let (released, changed) = &**gate;
             let mut released = released.lock().unwrap_or_else(|e| e.into_inner());
@@ -273,6 +286,7 @@ struct FaultingTime {
     panic_schedule: bool,
     panic_cancel: bool,
     now_calls: Arc<AtomicUsize>,
+    cancel_calls: AtomicUsize,
 }
 
 impl TimeAuthority for FaultingTime {
@@ -306,7 +320,9 @@ impl TimeAuthority for FaultingTime {
         self.inner.schedule(t, f)
     }
     fn cancel(&self, handle: ScheduleHandle) -> bool {
-        if self.panic_cancel {
+        // The first cancel succeeds, every later one panics: a freeze that stops at
+        // its first handle, or reports only several panics, then reports none.
+        if self.panic_cancel && self.cancel_calls.fetch_add(1, Ordering::SeqCst) > 0 {
             panic!("test: panic in TimeAuthority::cancel");
         }
         self.inner.cancel(handle)
@@ -622,7 +638,7 @@ impl Provider for SteppedProvider {
         if let Some(cause) = self.prepare_abort.take() {
             ctx.actions_out
                 .submit(Action::Abort {
-                    cause: StopCause::Abort { cause },
+                    cause: StopCause::Abort { message: cause },
                 })
                 .map_err(|violations| {
                     ModuleError::rejected(format!("test: Abort refused: {violations:?}"))
@@ -1121,6 +1137,7 @@ pub struct ProbeExecutor {
     pub out: Option<Arc<dyn ActionSubmitter>>,
     pub submitted: bool,
     submit_at: Option<i64>,
+    abort_in_stop: Option<String>,
     pub event: Option<(ResourceId, EventKind, Severity)>,
     events: Option<Arc<dyn EventSink>>,
     event_emitted: bool,
@@ -1140,6 +1157,7 @@ impl ProbeExecutor {
             out: None,
             submitted: false,
             submit_at: None,
+            abort_in_stop: None,
             event: None,
             events: None,
             event_emitted: false,
@@ -1168,6 +1186,12 @@ impl ProbeExecutor {
     pub fn submitting_at(mut self, tick: i64, action: Action) -> ProbeExecutor {
         self.submit = Some(action);
         self.submit_at = Some(tick);
+        self
+    }
+
+    /// Submits `Abort` from an orderly `stop`, escalating the cleanup (KC-32).
+    pub fn aborting_in_orderly_stop(mut self, message: &str) -> ProbeExecutor {
+        self.abort_in_stop = Some(message.to_owned());
         self
     }
 
@@ -1271,6 +1295,13 @@ impl Executor for ProbeExecutor {
 
     fn stop(&mut self, mode: StopMode) -> Result<(), ModuleError> {
         self.record(format!("stop:{mode:?}"));
+        if mode == StopMode::Orderly {
+            if let (Some(message), Some(out)) = (self.abort_in_stop.take(), &self.out) {
+                let _ = out.submit(Action::Abort {
+                    cause: StopCause::Abort { message },
+                });
+            }
+        }
         Ok(())
     }
 

@@ -142,11 +142,11 @@ fn rs_03_failure_at_each_stage_reaches_cleanup() {
         }
         run.begin_stopping(CleanupMode::Abort, None, &clock)
             .expect("failure aborts");
-        run.finish(Termination::Failed { stage }, None, &clock)
+        run.finish(Termination::Failed { stage, reason: "a test failure".to_owned() }, None, &clock)
             .expect("cleans up");
         assert!(matches!(
             run.state(),
-            RunState::CleanedUp { termination: Termination::Failed { stage: s } } if *s == stage
+            RunState::CleanedUp { termination: Termination::Failed { stage: s, .. } } if *s == stage
         ));
     }
     // A cancellation before `Running` stops orderly with `Stopped{client}`, from every
@@ -204,7 +204,7 @@ fn rs_27_a_second_declaration_of_one_kind_is_refused() {
 fn rs_11_cleanup_reaches_the_manifest_step_with_nothing_prepared() {
     // `run_cleanup` cannot observe a failure stage; what differs between stages is
     // how much was prepared, and a `validate` failure leaves nothing. With no
-    // fragments, in either mode, step 8 is still reached and is still the last
+    // fragments, in either mode, step 7 is still reached and is still the last
     // step run. Failing and wedged steps are RS-6's and RS-8a's tests (D70).
     for mode in [CleanupMode::Orderly, CleanupMode::Abort] {
         let cleanup = Arc::new(RecordingCleanup::new());
@@ -217,7 +217,7 @@ fn rs_11_cleanup_reaches_the_manifest_step_with_nothing_prepared() {
         assert_eq!(
             cleanup.steps().last(),
             Some(&CleanupStep::ReleaseAndWriteManifest),
-            "step 8 is reached with nothing prepared under {mode:?}"
+            "step 7 is reached with nothing prepared under {mode:?}"
         );
         assert!(
             outcome
@@ -264,7 +264,7 @@ fn rs_06_cleanup_order_orderly() {
     let out = run_cleanup(ops.clone(), &release(), CleanupMode::Orderly, &|| None);
     assert!(out.failures.is_empty());
     let steps: Vec<CleanupStep> = ops.steps().into_iter().collect();
-    // Exactly the nine steps of RS-6, with the three per-fragment ones repeated.
+    // Exactly the seven steps of RS-6, with the three per-fragment ones repeated.
     let distinct: Vec<CleanupStep> = {
         let mut v = Vec::new();
         for s in &steps {
@@ -276,6 +276,20 @@ fn rs_06_cleanup_order_orderly() {
     };
     assert_eq!(distinct, ezsdr_kernel::run::CLEANUP_STEPS.to_vec());
     assert!(out.modes.iter().all(|(_, m)| *m == CleanupMode::Orderly));
+    // Each step is named for what the coordinator does in it; the Manifest records
+    // these names in `cleanup_failures` (RS-6).
+    assert_eq!(
+        serde_json::to_value(ezsdr_kernel::run::CLEANUP_STEPS).unwrap(),
+        serde_json::json!([
+            "freeze_dispatch",
+            "stop_providers",
+            "drain_and_stop_consumers",
+            "restore_baseline",
+            "finalise_artifacts",
+            "flush_events",
+            "release_and_write_manifest"
+        ])
+    );
 }
 
 #[test]
@@ -292,7 +306,7 @@ fn rs_06_cleanup_order_abort() {
 
 #[test]
 fn rs_06_cleanup_step_failure_continues() {
-    let ops = Arc::new(RecordingCleanup::new().failing_at(CleanupStep::StopRx));
+    let ops = Arc::new(RecordingCleanup::new().failing_at(CleanupStep::DrainAndStopConsumers));
     let out = run_cleanup(ops.clone(), &release(), CleanupMode::Orderly, &|| None);
     // Every step is attempted even when an earlier one failed.
     assert!(ops.steps().contains(&CleanupStep::ReleaseAndWriteManifest));
@@ -304,7 +318,7 @@ fn rs_06_cleanup_step_failure_continues() {
     assert!(
         out.failures
             .iter()
-            .all(|f| f.step == CleanupStep::StopRx && !f.timed_out)
+            .all(|f| f.step == CleanupStep::DrainAndStopConsumers && !f.timed_out)
     );
 }
 
@@ -317,12 +331,12 @@ fn rs_07_pending_burst_cancelled_before_tx_stop() {
         .iter()
         .position(|s| *s == CleanupStep::FreezeDispatch)
         .expect("present");
-    let stop_tx = steps
+    let stop_providers = steps
         .iter()
-        .position(|s| *s == CleanupStep::StopTx)
+        .position(|s| *s == CleanupStep::StopProviders)
         .expect("present");
     assert!(
-        freeze < stop_tx,
+        freeze < stop_providers,
         "the dispatch freeze precedes stopping TX (RS-7)"
     );
 }
@@ -331,14 +345,14 @@ fn rs_07_pending_burst_cancelled_before_tx_stop() {
 fn rs_08_cleanup_runs_in_reverse_dependency_order() {
     let ops = Arc::new(RecordingCleanup::new());
     run_cleanup(ops.clone(), &release(), CleanupMode::Orderly, &|| None);
-    let stop_tx: Vec<Ident> = ops
+    let stop_providers: Vec<Ident> = ops
         .entries()
         .into_iter()
-        .filter(|(s, _, _)| *s == CleanupStep::StopTx)
+        .filter(|(s, _, _)| *s == CleanupStep::StopProviders)
         .filter_map(|(_, f, _)| f)
         .collect();
     assert_eq!(
-        stop_tx,
+        stop_providers,
         release(),
         "the device armed first is released last"
     );
@@ -359,31 +373,32 @@ fn rs_10_abort_during_orderly_escalates() {
     };
     let out = run_cleanup(ops.clone(), &release(), CleanupMode::Orderly, &escalate);
     assert_eq!(out.modes[0].1, CleanupMode::Orderly);
-    assert_eq!(out.modes.last().expect("nine steps").1, CleanupMode::Abort);
+    assert_eq!(out.modes.last().expect("seven steps").1, CleanupMode::Abort);
     // Both causes are recorded in the termination.
     let mut section = termination_fixture(Termination::Stopped {
         cause: StopCause::Client {},
     });
-    section.also.push(StopCause::Abort {
-        cause: "policy".to_owned(),
+    section.also.push(Termination::Stopped {
+        cause: StopCause::Abort {
+            message: "policy".to_owned(),
+        },
     });
     assert_eq!(section.also.len(), 1);
 }
 
 #[test]
 fn rs_8a_wedged_cleanup_step_times_out() {
-    let ops = Arc::new(RecordingCleanup::new().wedged_at(CleanupStep::StopRx));
+    let ops = Arc::new(RecordingCleanup::new().wedged_at(CleanupStep::DrainAndStopConsumers));
     let out = run_cleanup(ops.clone(), &[id("a")], CleanupMode::Orderly, &|| None);
     assert_eq!(out.failures.len(), 1);
     assert!(
         out.failures[0].timed_out,
         "the step is abandoned and recorded as a timeout"
     );
-    // Steps 4 to 8 still run, so a Manifest is written for exactly the failure that
+    // Steps 4 to 7 still run, so a Manifest is written for exactly the failure that
     // most needs recording.
     let steps = ops.steps();
     for later in [
-        CleanupStep::CancelPeripherals,
         CleanupStep::RestoreBaseline,
         CleanupStep::FinaliseArtifacts,
         CleanupStep::FlushEvents,
@@ -493,7 +508,7 @@ fn rs_36_an_unforeseen_source_does_not_silence_the_abort() {
     let c = collector(8, &policy, &[(rid("radio"), fatal.clone())]);
     let h = c.resolve(&rid("radio2"), &fatal);
     c.emit(h, t(0), Severity::Fatal, &[]).expect("emits");
-    let drained = c.drain();
+    let drained = c.drain(t(9));
     assert!(drained.iter().any(|e| e.kind == fatal), "the delivered body keeps its kind");
     assert_eq!(policy.reaction_for_event(&fatal, Severity::Fatal), Reaction::Abort);
     // Dropped (the ring full), the escalation flag keeps the kind (RS-36).
@@ -529,7 +544,7 @@ fn rs_36_a_delivered_body_raises_no_escalation_flag() {
     })
     .expect("emits");
     assert!(c.escalation().is_none(), "a control-path body raises no flag");
-    assert_eq!(c.drain().iter().filter(|e| e.kind == fatal).count(), 2);
+    assert_eq!(c.drain(t(9)).iter().filter(|e| e.kind == fatal).count(), 2);
 }
 
 #[test]
@@ -597,19 +612,6 @@ fn rs_24_adopt_requires_the_token() {
     assert!(lease.renew(&clock).is_ok());
 }
 
-#[test]
-fn rs_25_child_inherits_the_lease() {
-    // A child Run has no Lease of its own, and the parent's expiry ends it first:
-    // step 0 of RS-6 is the children.
-    let ops = Arc::new(RecordingCleanup::new());
-    run_cleanup(ops.clone(), &release(), CleanupMode::Orderly, &|| None);
-    assert_eq!(ops.steps().first(), Some(&CleanupStep::Children));
-    // RS-25's other half — "a child Run inherits its parent's Lease and may not
-    // declare its own" — has no Kernel seam in Phase 1, because there is no child-Run
-    // type until the coordinator exists (Phase 2). Recorded as finding D28 rather
-    // than asserted against a clone.
-}
-
 // ---------------------------------------------------------------- policy and events
 
 fn collector(ring: usize, policy: &Policy, pairs: &[(ResourceId, EventKind)]) -> EventCollector {
@@ -653,7 +655,7 @@ fn rs_28_policy_defaults_table() {
         "ALIGNMENT_ERROR",
     ] {
         assert!(
-            kinds.get(&k(radio)).is_none(),
+            kinds.get(&k(&format!("ezsdr.{radio}"))).is_none(),
             "{radio} is the Radio Model's, not the Kernel's"
         );
     }
@@ -698,7 +700,7 @@ fn rs_26_policy_override_from_spec() {
 
     // An unregistered kind in the table is refused (SB-18).
     let bad: BTreeMap<EventKind, Reaction> = [(
-        EventKind::parse("RX_OVERFLOWS").expect("parses"),
+        EventKind::parse("test.RX_OVERFLOWS").expect("parses"),
         Reaction::Stop,
     )]
     .into_iter()
@@ -725,7 +727,7 @@ fn rs_33_counters_exact_under_drop() {
         .find(|r| r.source == source && r.kind == kind)
         .expect("present");
     assert_eq!(row.count, 30_000, "the counter never drops");
-    let drained = c.drain();
+    let drained = c.drain(t(9));
     let bodies = drained.iter().filter(|e| e.kind == kind).count();
     assert_eq!(bodies, 8, "the ring held eight");
     let dropped: Vec<&Event> = drained
@@ -734,6 +736,9 @@ fn rs_33_counters_exact_under_drop() {
         .collect();
     assert_eq!(dropped.len(), 1);
     assert_eq!(dropped[0].payload["count"], serde_json::json!(29_992));
+    // RS-35: stamped at the drain's instant, with the Kernel as its source.
+    assert_eq!(dropped[0].time, t(9));
+    assert_eq!(dropped[0].source, rid("kernel"));
     // RS-35's invariant: the counter equals the delivered bodies plus the drops.
     assert_eq!(row.count, bodies as u64 + 29_992);
 }
@@ -748,7 +753,7 @@ fn rs_35_dropped_counts_are_deltas() {
     for _ in 0..11 {
         c.emit(h, t(0), Severity::Info, &[]).expect("emits");
     }
-    let first = c.drain();
+    let first = c.drain(t(9));
     let n = |events: &[Event]| -> u64 {
         events
             .iter()
@@ -760,7 +765,7 @@ fn rs_35_dropped_counts_are_deltas() {
     for _ in 0..6 {
         c.emit(h, t(0), Severity::Info, &[]).expect("emits");
     }
-    let second = c.drain();
+    let second = c.drain(t(9));
     assert_eq!(n(&second), 5, "a delta, not a running total");
 }
 
@@ -775,7 +780,7 @@ fn rs_35_dropped_events_never_enter_the_ring() {
         for _ in 0..100 {
             c.emit(h, t(round), Severity::Info, &[]).expect("emits");
         }
-        let drained = c.drain();
+        let drained = c.drain(t(9));
         let bodies = drained.iter().filter(|e| e.kind == kind).count() as u64;
         let dropped: u64 = drained
             .iter()
@@ -803,7 +808,7 @@ fn rs_35_the_dropped_events_meta_event_is_itself_counted() {
     for _ in 0..5 {
         c.emit(h, t(0), Severity::Info, &[]).expect("emits");
     }
-    let drained = c.drain();
+    let drained = c.drain(t(9));
     let delivered = drained
         .iter()
         .filter(|e| e.kind.as_str() == EventKind::EVENTS_DROPPED)
@@ -832,6 +837,7 @@ fn rs_33_unforeseen_pair_uses_the_fallback_row() {
     let counters: Vec<CounterRow> = c.counters();
     let fallback = counters.last().expect("the fallback row is last");
     assert_eq!(fallback.count, 1);
+    assert_eq!(fallback.kind.as_str(), "ezsdr.unforeseen");
     assert_eq!(
         fallback.source.path, "unforeseen",
         "one fallback row, not one per source"
@@ -867,9 +873,9 @@ fn rs_33_duplicate_pairs_share_one_counter_row() {
 }
 
 #[test]
-fn rs_33_planned_fallback_source_shares_its_meta_counter_row() {
+fn rs_33_planned_kernel_source_shares_its_meta_counter_row() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = rid("unforeseen");
+    let source = rid("kernel");
     let kind = EventKind::parse(EventKind::EVENTS_DROPPED).expect("parses");
     let c = collector(8, &policy, &[(source.clone(), kind.clone())]);
 
@@ -879,14 +885,14 @@ fn rs_33_planned_fallback_source_shares_its_meta_counter_row() {
             .filter(|row| row.source == source && row.kind == kind)
             .count(),
         1,
-        "the planned and fallback source indices identify the same row"
+        "the planned and the collector's own kernel row are the same row"
     );
 }
 
 #[test]
-fn rs_33_drain_uses_the_planned_fallback_source_for_meta_events() {
+fn rs_33_drain_uses_the_planned_kernel_source_for_meta_events() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = rid("unforeseen");
+    let source = rid("kernel");
     let kind = EventKind::parse("test.custom").expect("parses");
     let c = collector(1, &policy, &[(source.clone(), kind.clone())]);
     let handle = c.resolve(&source, &kind);
@@ -895,7 +901,7 @@ fn rs_33_drain_uses_the_planned_fallback_source_for_meta_events() {
     }
 
     let dropped_kind = EventKind::parse(EventKind::EVENTS_DROPPED).expect("parses");
-    let drained = c.drain();
+    let drained = c.drain(t(9));
     assert_eq!(
         drained
             .iter()
@@ -907,7 +913,7 @@ fn rs_33_drain_uses_the_planned_fallback_source_for_meta_events() {
         .counters()
         .into_iter()
         .find(|row| row.source == source && row.kind == dropped_kind)
-        .expect("the planned fallback source has a meta-event counter");
+        .expect("the planned kernel source has a meta-event counter");
     assert_eq!(dropped_row.count, 1);
 }
 
@@ -1809,10 +1815,11 @@ fn manifest_fixture(reason: Termination) -> Manifest {
             id: RunId::from_string("local:1:2-0".to_owned()),
             kind: RunKind::Session,
             parent: None,
-            execution_class: ExecutionClass::Simulation,
+            execution_class: Some(ExecutionClass::Simulation),
             fidelity: Fidelity::NONE,
             transitions: Vec::new(),
             deterministic: false,
+            children: Vec::new(),
         },
         policy: None,
         spec: SpecSection {
@@ -1831,8 +1838,9 @@ fn manifest_fixture(reason: Termination) -> Manifest {
         components: BTreeMap::new(),
         inputs: Vec::new(),
         clocks: ClocksSection::default(),
+        links: Vec::new(),
         events: EventsSection::default(),
-        lease: Lease::attached(),
+        lease: Lease::attached().record(),
         action_log: Vec::new(),
         termination: termination_fixture(reason),
         artifacts: Vec::new(),
@@ -1867,6 +1875,7 @@ fn rs_11_manifest_for_every_terminal_run() {
         },
         Termination::Failed {
             stage: Stage::Validate,
+            reason: "SB-38: refused".to_owned(),
         },
     ] {
         let mut m = manifest_fixture(reason.clone());
@@ -1879,6 +1888,7 @@ fn rs_11_manifest_for_every_terminal_run() {
     // read as "continue for every kind" (RS-1, §65 #39).
     let mut refused = manifest_fixture(Termination::Failed {
         stage: Stage::Validate,
+        reason: "SB-18: an unknown kind".to_owned(),
     });
     refused.seal().expect("seals without a Policy");
     let json = serde_json::to_value(&refused).expect("serialises");
@@ -1992,14 +2002,14 @@ fn rs_32_a_fabricated_event_handle_does_not_panic_the_kernel() {
     // drain the fabricated kind would have panicked in completes.
     let good = c.resolve(&rid("radio"), &kind);
     assert!(c.emit(good, t(2), Severity::Info, &[]).is_ok());
-    assert_eq!(c.drain().len(), 1, "one delivered body, and no panic");
+    assert_eq!(c.drain(t(9)).len(), 1, "one delivered body, and no panic");
 }
 
 #[test]
 fn rs_39_a_module_section_with_a_non_ascii_key_is_refused() {
     // `sections` is the path RS-39 and RS-43 design for untrusted Module content and
     // it passes no `from_json`, so OV-15's ASCII key rule was never applied to it:
-    // `seal()` then failed at cleanup step 8, after the Run had transmitted (SB-9a,
+    // `seal()` then failed at cleanup step 7, after the Run had transmitted (SB-9a,
     // RS-11).
     let mut m = manifest_fixture(Termination::Completed {});
     assert!(matches!(
@@ -2130,7 +2140,7 @@ fn rs_41_fidelity_is_the_weakest() {
 #[test]
 fn rs_42_determinism_only_in_simulation() {
     let mut m = manifest_fixture(Termination::Completed {});
-    m.run.execution_class = ExecutionClass::RealtimeEmulation;
+    m.run.execution_class = Some(ExecutionClass::RealtimeEmulation);
     m.run.deterministic = true; // a caller claims it anyway
     m.seal().expect("seals");
     assert!(
@@ -2139,7 +2149,7 @@ fn rs_42_determinism_only_in_simulation() {
     );
 
     let mut sim = manifest_fixture(Termination::Completed {});
-    sim.run.execution_class = ExecutionClass::Simulation;
+    sim.run.execution_class = Some(ExecutionClass::Simulation);
     sim.run.deterministic = true;
     sim.seal().expect("seals");
     assert!(sim.run.deterministic, "the Simulation class may claim it");

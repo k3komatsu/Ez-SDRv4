@@ -186,7 +186,7 @@ impl Radio {
         self.mock.instance().sections[&Namespace::parse(&format!("ezsdr.radio.mock.{}.{name}", self.id)).unwrap()].clone()
     }
 
-    fn drain_events(&self) -> Vec<Event> { self.events.drain() }
+    fn drain_events(&self) -> Vec<Event> { self.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)) }
 }
 
 fn burst(radio: &Radio, world: &World, waveform: ArtifactRef, at: i64, repeat: bool) -> Action {

@@ -704,7 +704,7 @@ fn hd_11_an_unexpected_action_is_rejected() {
     let mut rig = Rig::new("unexpected-action", BTreeMap::new());
     rig.env.actions.push(tx_burst());
     assert!(rig.step().expect("unexpected Action is an event"));
-    let events = rig.env.events.drain();
+    let events = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].source, ResourceId::parse("sink/rec").expect("event source"));
     assert_eq!(events[0].kind.as_str(), REQUEST_REJECTED);
@@ -726,7 +726,7 @@ fn hd_14_a_bad_capture_value_is_an_event_not_a_failure() {
     rig.push_ramp(0, 10);
     assert!(rig.step().expect("unrelated time is rejected and valid request runs"));
     // Phase 6, VD-1: the served request is announced too (HD-16); the three refusals remain.
-    let events: Vec<_> = rig.env.events.drain().into_iter().filter(|event| event.kind.as_str() != CAPTURE_WRITTEN).collect();
+    let events: Vec<_> = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() != CAPTURE_WRITTEN).collect();
     assert_eq!(events.len(), 3);
     assert!(events.iter().all(|event| event.kind.as_str() == REQUEST_REJECTED));
     assert!(events.iter().all(|event| {
@@ -820,7 +820,7 @@ fn hd_11_stop_for_another_target_is_rejected() {
     rig.step().expect("start partial capture");
     rig.env.actions.push(Action::Stop { target: Some(ResourceId::parse("radio").expect("radio target")) });
     assert!(rig.step().expect("wrong-target Stop is rejected as an event"));
-    let events = rig.env.events.drain();
+    let events = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].kind.as_str(), REQUEST_REJECTED);
     assert_eq!(events[0].payload["action"], "stop");
@@ -845,7 +845,7 @@ fn hd_11_stop_for_own_target_finishes_the_capture() {
     });
     assert!(rig.step().expect("own Stop finishes the capture"));
     // Phase 6, VD-1: the only event is the partial capture's announcement (HD-16).
-    let events = rig.env.events.drain();
+    let events = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(events.iter().map(|event| event.kind.as_str()).collect::<Vec<_>>(), [CAPTURE_WRITTEN]);
 
     let artifacts = rig.stop(StopMode::Orderly);
@@ -1227,10 +1227,10 @@ fn hd_16_a_written_capture_is_announced() {
     rig.env.actions.push(request(Value::Int(1_000), None));
     rig.push_ramp(0, 600);
     rig.step().expect("the capture starts");
-    assert!(rig.env.events.drain().is_empty(), "nothing is announced before the capture is recorded");
+    assert!(rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).is_empty(), "nothing is announced before the capture is recorded");
     rig.push_ramp(600, 600);
     rig.step().expect("the capture completes");
-    let first = rig.env.events.drain();
+    let first = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].kind.as_str(), CAPTURE_WRITTEN);
     assert_eq!(first[0].source, ResourceId::parse("sink/rec").expect("event source"));
@@ -1245,7 +1245,7 @@ fn hd_16_a_written_capture_is_announced() {
     rig.step().expect("the second capture starts");
     rig.env.actions.push(Action::Stop { target: Some(ResourceId::parse("sink/rec").expect("Sink target")) });
     rig.step().expect("the Stop finishes it");
-    let second = rig.env.events.drain();
+    let second = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].kind.as_str(), CAPTURE_WRITTEN);
     let partial: ezsdr_sink::CaptureWrittenPayload = serde_json::from_value(second[0].payload.clone()).expect("payload");
@@ -1270,7 +1270,7 @@ fn hd_16_every_capture_request_is_numbered() {
     rig.env.actions.push(tx_burst());
     rig.push_ramp(4, 10);
     rig.step().expect("the requests are handled");
-    let numbers: Vec<(String, serde_json::Value)> = rig.env.events.drain().iter().map(|event| (event.kind.as_str().to_owned(), event.payload["request"].clone())).collect();
+    let numbers: Vec<(String, serde_json::Value)> = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().map(|event| (event.kind.as_str().to_owned(), event.payload["request"].clone())).collect();
     assert_eq!(numbers, vec![
         (CAPTURE_WRITTEN.to_owned(), json!(null)),
         (REQUEST_REJECTED.to_owned(), json!(0)),
@@ -1292,7 +1292,7 @@ fn hd_16_a_discarded_request_is_answered() {
     rig.step().expect("the first request starts");
     rig.env.actions.push(Action::Stop { target: Some(ResourceId::parse("sink/rec").expect("Sink target")) });
     rig.step().expect("the Stop");
-    let answers: Vec<(String, serde_json::Value)> = rig.env.events.drain().iter().map(|event| (event.kind.as_str().to_owned(), event.payload["request"].clone())).collect();
+    let answers: Vec<(String, serde_json::Value)> = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().map(|event| (event.kind.as_str().to_owned(), event.payload["request"].clone())).collect();
     assert_eq!(answers, vec![(CAPTURE_WRITTEN.to_owned(), json!(0)), (REQUEST_REJECTED.to_owned(), json!(1))]);
 }
 

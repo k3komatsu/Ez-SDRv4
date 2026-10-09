@@ -104,8 +104,12 @@ fn with_provider(mut assembly: Assembly, name: &str, path: &str) -> Assembly {
     assembly
 }
 
-fn failure(manifest: &ezsdr_kernel::manifest::Manifest) -> &serde_json::Value {
-    &manifest.sections[&ns("ezsdr.failure")]
+/// The reason of a Run that ended `Failed` (KC-7).
+fn failure(manifest: &ezsdr_kernel::manifest::Manifest) -> &str {
+    match &manifest.termination.reason {
+        Termination::Failed { reason, .. } => reason,
+        other => panic!("the Run did not fail: {other:?}"),
+    }
 }
 
 fn distinct_resource_docs(names: &[&str]) -> (serde_json::Value, serde_json::Value) {
@@ -299,13 +303,11 @@ fn kc_10_link_descriptor_must_equal_the_registered_one() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed { stage: Stage::Plan }
+            termination: Termination::Failed { stage: Stage::Plan, .. }
         }
     ));
     assert!(
-        failure(&run.finish())["reason"]
-            .as_str()
-            .unwrap()
+        failure(&run.finish())
             .starts_with("KC-10: MA-27a")
     );
 }
@@ -333,7 +335,7 @@ fn kc_10_both_ends_are_attached() {
     );
     assert!(probe.lines().iter().any(|line| line == "rec:block:100"));
     assert!(probe.lines().iter().any(|line| line == "rec:block:200"));
-    assert_eq!(manifest.sections[&ns("ezsdr.links")][0]["drops"], 0);
+    assert_eq!(manifest.links[0].drops, Some(0));
 }
 
 #[test]
@@ -412,9 +414,7 @@ fn kc_12_a_prepare_failure_stops_the_loop_and_cleans_up_what_was_prepared() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed {
-                stage: Stage::Prepare
-            }
+            termination: Termination::Failed { stage: Stage::Prepare, .. }
         }
     ));
     let _ = run.finish();
@@ -552,21 +552,17 @@ fn kc_09_an_input_must_be_supplied_and_match_its_hash() {
     assert!(matches!(
         missing.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed { stage: Stage::Plan }
+            termination: Termination::Failed { stage: Stage::Plan, .. }
         }
     ));
     assert!(
-        failure(&missing.finish())["reason"]
-            .as_str()
-            .unwrap()
+        failure(&missing.finish())
             .starts_with("KC-9: ")
     );
 
     let bad_bytes = run_case(valid.clone(), Some(vec![1u8; 80]));
     assert!(
-        failure(&bad_bytes.finish())["reason"]
-            .as_str()
-            .unwrap()
+        failure(&bad_bytes.finish())
             .starts_with("KC-9: ")
     );
 
@@ -574,9 +570,7 @@ fn kc_09_an_input_must_be_supplied_and_match_its_hash() {
     bad_size_ref.size_bytes = 81;
     let bad_size = run_case(bad_size_ref, Some(bytes.clone()));
     assert!(
-        failure(&bad_size.finish())["reason"]
-            .as_str()
-            .unwrap()
+        failure(&bad_size.finish())
             .starts_with("KC-9: ")
     );
 
@@ -584,9 +578,7 @@ fn kc_09_an_input_must_be_supplied_and_match_its_hash() {
     bad_uri_ref.uri = "http://x".to_owned();
     let bad_uri = run_case(bad_uri_ref, Some(bytes.clone()));
     assert!(
-        failure(&bad_uri.finish())["reason"]
-            .as_str()
-            .unwrap()
+        failure(&bad_uri.finish())
             .starts_with("KC-9: ")
     );
 
@@ -594,7 +586,7 @@ fn kc_09_an_input_must_be_supplied_and_match_its_hash() {
     let manifest = good.finish();
     assert!(!matches!(
         manifest.termination.reason,
-        Termination::Failed { stage: Stage::Plan }
+        Termination::Failed { stage: Stage::Plan, .. }
     ));
     assert!(manifest.inputs.contains(&valid));
 }
@@ -615,7 +607,7 @@ fn kc_14_an_arm_failure_is_failed_arm() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed { stage: Stage::Arm }
+            termination: Termination::Failed { stage: Stage::Arm, .. }
         }
     ));
     let _ = run.finish();
@@ -639,7 +631,7 @@ fn kc_18_a_start_failure_is_failed_arm() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed { stage: Stage::Arm }
+            termination: Termination::Failed { stage: Stage::Arm, .. }
         }
     ));
     let manifest = run.finish();
@@ -704,7 +696,7 @@ fn kc_16_a_spec_time_resolves_on_the_target_stream() {
     assert!(probe.lines().iter().any(|line| line == "p:burst_at:10"));
     assert!(!matches!(
         manifest.termination.reason,
-        Termination::Failed { stage: Stage::Arm }
+        Termination::Failed { stage: Stage::Arm, .. }
     ));
 }
 
@@ -731,12 +723,10 @@ fn kc_16_an_ambiguous_spec_time_is_refused() {
     let manifest = run.finish();
     assert!(matches!(
         manifest.termination.reason,
-        Termination::Failed { stage: Stage::Arm }
+        Termination::Failed { stage: Stage::Arm, .. }
     ));
     assert!(
-        failure(&manifest)["reason"]
-            .as_str()
-            .unwrap()
+        failure(&manifest)
             .starts_with("KC-16: entry 0: ambiguous")
     );
 }
@@ -783,23 +773,17 @@ fn kc_16_off_root_negative_and_overflowing_times_are_refused() {
     };
     let (off_root, _) = run_case(1, 1, true);
     assert!(
-        failure(&off_root)["reason"]
-            .as_str()
-            .unwrap()
+        failure(&off_root)
             .contains("not on the primary root")
     );
     let (negative, _) = run_case(-1, 1, false);
     assert!(
-        failure(&negative)["reason"]
-            .as_str()
-            .unwrap()
+        failure(&negative)
             .contains("negative offset")
     );
     let (overflow, _) = run_case(i64::MAX, 2, false);
     assert!(
-        failure(&overflow)["reason"]
-            .as_str()
-            .unwrap()
+        failure(&overflow)
             .contains("overflow")
     );
 }
@@ -865,12 +849,10 @@ fn kc_19_a_reject_at_plan_burst_with_a_short_lead_is_refused() {
     let manifest = run.finish();
     assert!(matches!(
         manifest.termination.reason,
-        Termination::Failed { stage: Stage::Arm }
+        Termination::Failed { stage: Stage::Arm, .. }
     ));
     assert!(
-        failure(&manifest)["reason"]
-            .as_str()
-            .unwrap()
+        failure(&manifest)
             .starts_with("KC-19: SC-27")
     );
 }
@@ -921,7 +903,9 @@ fn kc_22_a_same_instant_wakeup_loop_is_step_livelock() {
             .events
             .delivered
             .iter()
-            .any(|event| event.kind.as_str() == "STEP_LIVELOCK" && event.source.path == "kernel")
+            .any(|event| event.kind.as_str() == "ezsdr.STEP_LIVELOCK"
+                && event.source.path == "kernel"
+                && event.payload == serde_json::json!({ "rounds": ezsdr_kernel::module_api::STEP_ROUND_CAP }))
     );
     assert!(manifest.run.transitions.iter().any(|t| matches!(
         t.state,
@@ -934,7 +918,7 @@ fn kc_22_a_same_instant_wakeup_loop_is_step_livelock() {
 #[test]
 fn kc_22_a_downgraded_livelock_still_ends_the_run() {
     let mut spec = spec_one();
-    spec["policies"] = serde_json::json!({ "failure": { "STEP_LIVELOCK": "continue" } });
+    spec["policies"] = serde_json::json!({ "failure": { "ezsdr.STEP_LIVELOCK": "continue" } });
     let probe = Probe::new();
     let rig = rig(ezsdr_kernel::module_api::Pacing::FreeRunning);
     let mut assembly = rig.assembly;
@@ -949,12 +933,10 @@ fn kc_22_a_downgraded_livelock_still_ends_the_run() {
     let manifest = run.finish();
     assert!(matches!(
         manifest.termination.reason,
-        Termination::Failed { stage: Stage::Run }
+        Termination::Failed { stage: Stage::Run, .. }
     ));
     assert!(
-        failure(&manifest)["reason"]
-            .as_str()
-            .unwrap()
+        failure(&manifest)
             .starts_with("KC-22")
     );
     assert!(manifest.run.transitions.iter().any(|t| matches!(
@@ -1109,9 +1091,7 @@ fn kc_01_a_validate_failure_still_writes_a_manifest() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed {
-                stage: Stage::Validate
-            }
+            termination: Termination::Failed { stage: Stage::Validate, .. }
         }
     ));
     let manifest = run.finish();
@@ -1130,13 +1110,11 @@ fn kc_01_a_validate_failure_still_writes_a_manifest() {
                 mode: ezsdr_kernel::run::CleanupMode::Abort
             },
             RunState::CleanedUp {
-                termination: Termination::Failed {
-                    stage: Stage::Validate
-                }
+                termination: manifest.termination.reason.clone()
             },
         ]
     );
-    assert_eq!(failure(&manifest)["stage"], "validate");
+    assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Validate, .. }));
 }
 
 #[test]
@@ -1151,11 +1129,11 @@ fn kc_01_a_validate_failure_records_its_reason() {
     .expect("entry creates a Run");
     let manifest = run.finish();
     assert!(
-        !failure(&manifest)["reason"]
-            .as_str()
-            .unwrap_or_default()
-            .is_empty()
+        !failure(&manifest).is_empty()
     );
+    // No plan was built, so the class is unknown and absent, not a made-up one (KC-45).
+    assert_eq!(manifest.run.execution_class, None);
+    assert!(!manifest.run.deterministic);
     assert_eq!(manifest.run.transitions[0].at, None);
     assert!(
         manifest
@@ -1189,19 +1167,17 @@ fn kc_02_a_wall_paced_authority_is_refused() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed { stage: Stage::Plan }
+            termination: Termination::Failed { stage: Stage::Plan, .. }
         }
     ));
     let manifest = run.finish();
     assert!(
-        failure(&manifest)["reason"]
-            .as_str()
-            .unwrap()
+        failure(&manifest)
             .starts_with("KC-2: RealtimeEmulation")
     );
     assert_eq!(
         manifest.run.execution_class,
-        ezsdr_kernel::module_api::ExecutionClass::RealtimeEmulation
+        Some(ezsdr_kernel::module_api::ExecutionClass::RealtimeEmulation)
     );
     assert!(manifest.plan.is_some());
 }
@@ -1237,15 +1213,11 @@ fn kc_04_two_objects_for_one_description_are_refused() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed {
-                stage: Stage::Validate
-            }
+            termination: Termination::Failed { stage: Stage::Validate, .. }
         }
     ));
     assert!(
-        failure(&run.finish())["reason"]
-            .as_str()
-            .unwrap()
+        failure(&run.finish())
             .starts_with("KC-4: ")
     );
 }
@@ -1276,15 +1248,11 @@ fn kc_04_an_object_under_no_resource_is_refused() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed {
-                stage: Stage::Validate
-            }
+            termination: Termination::Failed { stage: Stage::Validate, .. }
         }
     ));
     assert!(
-        failure(&run.finish())["reason"]
-            .as_str()
-            .unwrap()
+        failure(&run.finish())
             .contains("nobody")
     );
 }
@@ -1400,12 +1368,10 @@ fn kc_17_scheduled_updates_are_admitted_cumulatively() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed { stage: Stage::Arm }
+            termination: Termination::Failed { stage: Stage::Arm, .. }
         }
     ));
-    let reason = failure(&run.finish())["reason"]
-        .as_str()
-        .unwrap()
+    let reason = failure(&run.finish())
         .to_owned();
     assert!(reason.starts_with("KC-17: entry 1"));
     assert!(reason.contains("test.limits"));
@@ -1646,13 +1612,13 @@ fn kc_24_a_module_abort_ends_the_run() {
         Ident::parse("exec").unwrap(),
         Box::new(ProbeExecutor::new("x", &probe).submitting(Action::Abort {
             cause: StopCause::Abort {
-                cause: "test".to_owned(),
+                message: "test".to_owned(),
             },
         })),
     );
     let run = start_spec_run(&spec, &profile, assembly).expect("entry creates a Run");
     assert!(matches!(run.state(), RunState::CleanedUp {
-        termination: Termination::Stopped { cause: StopCause::Abort { cause } }
+        termination: Termination::Stopped { cause: StopCause::Abort { message: cause } }
     } if cause == "test"));
     assert!(run.finish().termination.cleanup_failures.is_empty());
 }
@@ -1799,13 +1765,11 @@ fn rs_17_a_scheduled_rate_change_under_reject_is_refused() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed { stage: Stage::Arm }
+            termination: Termination::Failed { stage: Stage::Arm, .. }
         }
     ));
     assert!(
-        failure(&run.finish())["reason"]
-            .as_str()
-            .unwrap()
+        failure(&run.finish())
             .contains("SB-46")
     );
 }
@@ -2142,14 +2106,12 @@ fn kc_30_a_panicking_module_fails_the_run_not_the_process() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed { stage: Stage::Run }
+            termination: Termination::Failed { stage: Stage::Run, .. }
         }
     ));
     let manifest = run.finish();
     assert!(
-        failure(&manifest)["reason"]
-            .as_str()
-            .unwrap()
+        failure(&manifest)
             .starts_with("KC-30: radio: a Module panicked")
     );
     assert!(manifest.hash.is_some());
@@ -2166,16 +2128,12 @@ fn kc_30_a_panic_in_coerce_fails_validate() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed {
-                stage: Stage::Validate
-            }
+            termination: Termination::Failed { stage: Stage::Validate, .. }
         }
     ));
     let manifest = run.finish();
     assert!(
-        failure(&manifest)["reason"]
-            .as_str()
-            .unwrap()
+        failure(&manifest)
             .starts_with("KC-30: a Module panicked during validate")
     );
     assert!(manifest.termination.cleanup_failures.is_empty());
@@ -2193,7 +2151,7 @@ fn kc_30_device_lost_is_the_kernel_event_and_aborts() {
     );
     let run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
     let manifest = run.finish();
-    let kind = ezsdr_kernel::event::EventKind::parse("DEVICE_LOST").unwrap();
+    let kind = ezsdr_kernel::event::EventKind::parse("ezsdr.DEVICE_LOST").unwrap();
     let source = ezsdr_kernel::id::ResourceId::parse("radio").unwrap();
     assert!(
         manifest
@@ -2212,7 +2170,7 @@ fn kc_30_device_lost_is_the_kernel_event_and_aborts() {
             .any(|row| row.source == source && row.kind == kind && row.count == 1)
     );
     assert!(matches!(manifest.termination.reason, Termination::Stopped {
-        cause: StopCause::Policy { kind: event_kind }
+        cause: StopCause::Policy { event: event_kind }
     } if event_kind == kind));
     assert!(manifest.run.transitions.iter().any(|row| matches!(
         row.state,
@@ -2261,7 +2219,7 @@ fn kc_30_a_panic_after_a_device_lost_in_one_round_fails_the_run() {
     // #65 (note 25): a DeviceLost first in the round's fault list does not hide a later
     // panic. The Policy lets the lost device continue, so only the panic ends the Run.
     let (mut spec, profile) = output_docs();
-    spec["policies"] = serde_json::json!({ "failure": { "DEVICE_LOST": "continue" } });
+    spec["policies"] = serde_json::json!({ "failure": { "ezsdr.DEVICE_LOST": "continue" } });
     let probe = Probe::new();
     let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
     assembly.providers.insert(
@@ -2274,16 +2232,129 @@ fn kc_30_a_panic_after_a_device_lost_in_one_round_fails_the_run() {
     );
     assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe)));
     let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
-    assert_eq!(manifest.termination.reason, Termination::Failed { stage: Stage::Run });
-    let reason = failure(&manifest)["reason"].as_str().unwrap();
+    assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Run, .. }));
+    let reason = failure(&manifest);
     assert!(reason.starts_with("KC-30: rec: a Module panicked"), "{reason}");
-    let lost = ezsdr_kernel::event::EventKind::parse("DEVICE_LOST").unwrap();
+    let lost = ezsdr_kernel::event::EventKind::parse("ezsdr.DEVICE_LOST").unwrap();
     let radio = ezsdr_kernel::id::ResourceId::parse("radio").unwrap();
     assert!(manifest.events.delivered.iter().any(|e| e.kind == lost && e.source == radio));
 }
 
+#[test]
+fn kc_32_a_policy_reaction_a_failure_overrode_is_recorded_in_also() {
+    // Review of #65: the Policy stops on the lost device, but a panic in the same round
+    // ends the Run Failed first (KC-32 keeps the first end); the overridden reaction
+    // is recorded beside it, once, not dropped.
+    let (mut spec, profile) = output_docs();
+    spec["policies"] = serde_json::json!({ "failure": { "ezsdr.DEVICE_LOST": "stop" } });
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).device_lost_at(0)),
+    );
+    assembly.sinks.insert(
+        Ident::parse("rec").unwrap(),
+        Box::new(RecordingSink::new("rec", &probe).panicking_step_at(0)),
+    );
+    assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe)));
+    let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
+    assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Run, .. }));
+    assert_eq!(
+        manifest.termination.also,
+        vec![Termination::Stopped {
+            cause: StopCause::Policy {
+                event: ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::DEVICE_LOST).unwrap(),
+            },
+        }]
+    );
+}
+
+#[test]
+fn kc_32_a_repeated_reaction_is_recorded_once() {
+    // The Run fails first; its Provider then emits the same `stop` kind again from
+    // `stop`. Each overridden reaction is recorded once, not once per event (KC-32).
+    let (mut spec, profile) = output_docs();
+    spec["policies"] = serde_json::json!({ "failure": { "test.custom": "stop" } });
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(
+            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
+                .emitting("test.custom", ezsdr_kernel::event::Severity::Warning, 0)
+                .emitting_in_stop("test.custom", ezsdr_kernel::event::Severity::Warning),
+        ),
+    );
+    assembly.sinks.insert(
+        Ident::parse("rec").unwrap(),
+        Box::new(RecordingSink::new("rec", &probe).panicking_step_at(0)),
+    );
+    assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe)));
+    let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
+    let custom = ezsdr_kernel::event::EventKind::parse("test.custom").unwrap();
+    assert_eq!(manifest.events.delivered.iter().filter(|e| e.kind == custom).count(), 2);
+    assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Run, .. }));
+    assert_eq!(
+        manifest.termination.also,
+        vec![Termination::Stopped { cause: StopCause::Policy { event: custom } }]
+    );
+}
+
+#[test]
+fn kc_32_a_later_failure_is_recorded_in_also() {
+    // Two instances fail in one round: the first fixes the Termination with its
+    // reason, the second is recorded in `also` with its own (KC-30, KC-32).
+    let (spec, profile) = output_docs();
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).panicking_in_step()),
+    );
+    assembly.sinks.insert(
+        Ident::parse("rec").unwrap(),
+        Box::new(RecordingSink::new("rec", &probe).panicking_step_at(0)),
+    );
+    assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe)));
+    let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
+    assert!(failure(&manifest).starts_with("KC-30: radio: "), "{}", failure(&manifest));
+    let [Termination::Failed { stage: Stage::Run, reason }] = manifest.termination.also.as_slice() else {
+        panic!("one later failure: {:?}", manifest.termination.also);
+    };
+    assert!(reason.starts_with("KC-30: rec: a Module panicked"), "{reason}");
+}
+
+#[test]
+fn kc_30_a_next_wakeup_panic_in_the_cleanup_drain_is_recorded() {
+    // F25 (a): the orderly cleanup drain records an Authority panic in `next_wakeup` as
+    // `run_loop` does, rather than reading it as "no wakeup"; the Run's first end
+    // stands, and the failure escalates cleanup, so the Sink stops in abort mode
+    // (KC-32, RS-6 step 3, RS-10).
+    let (spec, profile) = output_docs();
+    let probe = Probe::new();
+    let mut assembly = rig_with_faulting_time(SimAuthority::panicking_next_wakeup).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)),
+    );
+    assembly.sinks.insert(Ident::parse("rec").unwrap(), Box::new(RecordingSink::new("rec", &probe)));
+    assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe)));
+    let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
+    assert_eq!(
+        manifest.termination.also,
+        vec![Termination::Failed {
+            stage: Stage::Run,
+            reason: "KC-30: authority panicked during next_wakeup".to_owned(),
+        }]
+    );
+    let lines = probe.lines();
+    assert!(lines.iter().any(|line| line == "rec:stop:Abort"), "{lines:?}");
+}
+
 /// #66 (note 25): a warning a Provider emits from `stop` is still queued when cleanup
-/// reaches step 6 — no round drains after it — and must still mark the artifact open
+/// reaches step 5 — no round drains after it — and must still mark the artifact open
 /// at its instant (RS-30, KC-42).
 fn mark_emitted_while_stopping(abort: bool) -> ezsdr_kernel::manifest::Manifest {
     let (mut spec, profile) = output_docs();
@@ -2346,19 +2417,24 @@ fn rs_36_a_dropped_stopping_body_ends_the_run() {
         Ident::parse("radio").unwrap(),
         Box::new(
             SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
-                .emitting("DEVICE_LOST", ezsdr_kernel::event::Severity::Fatal, 150)
+                .emitting("ezsdr.DEVICE_LOST", ezsdr_kernel::event::Severity::Fatal, 150)
                 .flooding(ezsdr_kernel::coordinator::EVENT_RING_DEPTH)
                 .with_wakeups(&[150]),
         ),
     );
     let mut run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
-    let _ = run.advance_to(TimePoint::new(run.now().domain, 160));
+    let root = run.now().domain;
+    let _ = run.advance_to(TimePoint::new(root, 160));
     let manifest = run.finish();
-    let kind = ezsdr_kernel::event::EventKind::parse("DEVICE_LOST").unwrap();
+    let kind = ezsdr_kernel::event::EventKind::parse("ezsdr.DEVICE_LOST").unwrap();
     let source = ezsdr_kernel::id::ResourceId::parse("radio").unwrap();
     assert!(!manifest.events.delivered.iter().any(|event| event.kind == kind));
-    assert!(manifest.events.delivered.iter().any(|event| event.kind.as_str() == "EVENTS_DROPPED"
-        && event.payload == serde_json::json!({ "kind": "DEVICE_LOST", "count": 1 })));
+    // RS-35: the meta-event is stamped at the drain after the round at 150, on the
+    // primary root, with the Kernel as its source.
+    assert!(manifest.events.delivered.iter().any(|event| event.kind.as_str() == "ezsdr.EVENTS_DROPPED"
+        && event.payload == serde_json::json!({ "kind": "ezsdr.DEVICE_LOST", "count": 1 })
+        && event.time == TimePoint::new(root, 150)
+        && event.source.path == "kernel"), "{:?}", manifest.events.delivered);
     assert!(
         manifest
             .events
@@ -2367,7 +2443,7 @@ fn rs_36_a_dropped_stopping_body_ends_the_run() {
             .any(|row| row.source == source && row.kind == kind && row.count == 1)
     );
     assert!(matches!(manifest.termination.reason, Termination::Stopped {
-        cause: StopCause::Policy { kind: event_kind }
+        cause: StopCause::Policy { event: event_kind }
     } if event_kind == kind));
     assert!(manifest.run.transitions.iter().any(|row| matches!(
         row.state,
@@ -2405,11 +2481,64 @@ fn kc_32_an_abort_during_orderly_escalates_and_is_recorded() {
     ));
     assert_eq!(
         manifest.termination.also,
-        vec![StopCause::Policy {
-            kind: ezsdr_kernel::event::EventKind::parse("DEVICE_LOST").unwrap(),
+        vec![Termination::Stopped {
+            cause: StopCause::Policy {
+                event: ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::DEVICE_LOST).unwrap(),
+            }
         }]
     );
     assert!(probe.lines().iter().any(|line| line == "p:cleanup"));
+}
+
+#[test]
+fn kc_32_a_module_abort_during_an_orderly_cleanup_escalates_and_is_recorded() {
+    // The client stops the Run; an Executor then submits `Abort` from its orderly
+    // `stop`. The abort escalates the cleanup and is recorded in `also` (KC-32, RS-10).
+    let (spec, profile) = executor_docs();
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)),
+    );
+    assembly.executors.insert(
+        Ident::parse("exec").unwrap(),
+        Box::new(ProbeExecutor::new("x", &probe).aborting_in_orderly_stop("late")),
+    );
+    let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
+    assert_eq!(
+        manifest.termination.also,
+        vec![Termination::Stopped { cause: StopCause::Abort { message: "late".to_owned() } }]
+    );
+}
+
+#[test]
+fn kc_32_a_reaction_equal_to_the_first_end_is_not_recorded() {
+    // The Policy's `stop` reaction ends the Run; the Provider emits the same kind again
+    // from `stop`. A request equal to the Termination says nothing new (KC-32).
+    let (mut spec, profile) = output_docs();
+    spec["policies"] = serde_json::json!({ "failure": { "test.custom": "stop" } });
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(
+            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
+                .emitting("test.custom", ezsdr_kernel::event::Severity::Warning, 0)
+                .emitting_in_stop("test.custom", ezsdr_kernel::event::Severity::Warning),
+        ),
+    );
+    assembly.sinks.insert(Ident::parse("rec").unwrap(), Box::new(RecordingSink::new("rec", &probe)));
+    assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe)));
+    let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
+    let custom = ezsdr_kernel::event::EventKind::parse("test.custom").unwrap();
+    assert_eq!(manifest.events.delivered.iter().filter(|e| e.kind == custom).count(), 2);
+    assert_eq!(
+        manifest.termination.reason,
+        Termination::Stopped { cause: StopCause::Policy { event: custom } }
+    );
+    assert!(manifest.termination.also.is_empty(), "{:?}", manifest.termination.also);
 }
 
 #[test]
@@ -2473,7 +2602,7 @@ fn kc_41_a_failing_sink_stop_is_a_cleanup_failure() {
             .cleanup_failures
             .iter()
             .any(
-                |failure| failure.step == ezsdr_kernel::run::CleanupStep::StopRx
+                |failure| failure.step == ezsdr_kernel::run::CleanupStep::DrainAndStopConsumers
                     && failure.fragment.as_ref() == Some(&Ident::parse("rec").unwrap())
             )
     );
@@ -2498,7 +2627,7 @@ fn kc_44_a_wedged_step_does_not_prevent_the_manifest() {
             .cleanup_failures
             .iter()
             .any(
-                |failure| failure.step == ezsdr_kernel::run::CleanupStep::StopTx
+                |failure| failure.step == ezsdr_kernel::run::CleanupStep::StopProviders
                     && failure.timed_out
             )
     );
@@ -2571,7 +2700,7 @@ fn kc_44_a_wedged_provider_stop_does_not_block_other_cleanup() {
             .cleanup_failures
             .iter()
             .any(
-                |failure| failure.step == ezsdr_kernel::run::CleanupStep::StopTx
+                |failure| failure.step == ezsdr_kernel::run::CleanupStep::StopProviders
                     && failure.fragment.as_ref() == Some(&Ident::parse("radio").unwrap())
                     && failure.timed_out
             )
@@ -2624,7 +2753,7 @@ fn kc_45_manifest_fields() {
     assert_eq!(manifest.run.id, id);
     assert_eq!(
         manifest.run.execution_class,
-        ezsdr_kernel::module_api::ExecutionClass::Simulation
+        Some(ezsdr_kernel::module_api::ExecutionClass::Simulation)
     );
     assert!(manifest.run.deterministic);
     assert_eq!(
@@ -2633,11 +2762,11 @@ fn kc_45_manifest_fields() {
     );
     assert!(manifest.events.counters.iter().any(|row| row.source
         == ezsdr_kernel::id::ResourceId::parse("sink/rec").unwrap()
-        && row.kind == ezsdr_kernel::event::EventKind::parse("DEVICE_LOST").unwrap()
+        && row.kind == ezsdr_kernel::event::EventKind::parse("ezsdr.DEVICE_LOST").unwrap()
         && row.count == 0));
     assert!(manifest.events.counters.iter().any(|row| row.source
         == ezsdr_kernel::id::ResourceId::parse("kernel").unwrap()
-        && row.kind == ezsdr_kernel::event::EventKind::parse("STEP_LIVELOCK").unwrap()
+        && row.kind == ezsdr_kernel::event::EventKind::parse("ezsdr.STEP_LIVELOCK").unwrap()
         && row.count == 0));
     assert!(manifest.policy.is_some() && manifest.plan.is_some());
     assert_eq!(manifest.prepare.reports.len(), 2);
@@ -2653,19 +2782,25 @@ fn kc_45_manifest_fields() {
         manifest.vocabularies[&ns("test")],
         ezsdr_kernel::module_api::Version::new(1, 0, 0)
     );
+    // One typed record per created link, naming its `plan.links` entry, which holds
+    // its endpoints; the Kernel writes no `ezsdr.*` section of its own (KC-45).
+    let plan = manifest.plan.as_ref().unwrap();
     assert_eq!(
-        manifest.sections[&ns("ezsdr.links")]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
+        manifest.links,
+        vec![ezsdr_kernel::manifest::LinkRecord { link: plan.links[0].id, drops: Some(0) }]
     );
-    let link = &manifest.sections[&ns("ezsdr.links")][0];
-    assert!(link["link"]["node"].is_number());
-    assert!(link["link"]["local"].is_number());
-    assert_eq!(link["from"], serde_json::json!({"component": "radio", "port": "rx"}));
-    assert_eq!(link["to"], serde_json::json!({"component": "rec", "port": "in"}));
-    assert_eq!(link["drops"], 0);
+    assert_eq!(serde_json::to_value(&plan.links[0].from).unwrap(), serde_json::json!({"component": "radio", "port": "rx"}));
+    assert!(
+        manifest.sections.keys().all(|section| !section.as_str().starts_with("ezsdr.")
+            || section.as_str().starts_with("ezsdr.test.")),
+        "{:?}",
+        manifest.sections.keys().collect::<Vec<_>>()
+    );
+    // The Lease is recorded as its mode and release, with no token and no deadline.
+    assert_eq!(
+        serde_json::to_value(manifest.lease).unwrap(),
+        serde_json::json!({ "mode": { "kind": "attached" }, "released": true })
+    );
     assert_eq!(
         manifest.sections[&ns("ezsdr.test.provider.details")]["samples"],
         1
@@ -2691,11 +2826,9 @@ fn ka_18_nonzero_link_drops_reach_the_manifest() {
     );
     let run = start_spec_run(&spec, &profile, assembly).expect("entry creates a Run");
     let manifest = run.finish();
-    let links = manifest.sections[&ns("ezsdr.links")].as_array().unwrap();
-    assert_eq!(links.len(), 1);
-    assert_eq!(links[0]["from"], serde_json::json!({"component": "radio", "port": "rx"}));
-    assert_eq!(links[0]["to"], serde_json::json!({"component": "rec", "port": "in"}));
-    assert_eq!(links[0]["drops"], 1);
+    assert_eq!(manifest.links.len(), 1);
+    assert_eq!(manifest.links[0].link, manifest.plan.as_ref().unwrap().links[0].id);
+    assert_eq!(manifest.links[0].drops, Some(1));
 }
 
 #[test]
@@ -2843,12 +2976,10 @@ fn kc_30_a_panicking_link_descriptor_fails_plan_without_unwinding() {
     let manifest = run.finish();
     assert!(matches!(
         manifest.termination.reason,
-        Termination::Failed { stage: Stage::Plan }
+        Termination::Failed { stage: Stage::Plan, .. }
     ));
     assert!(
-        failure(&manifest)["reason"]
-            .as_str()
-            .unwrap()
+        failure(&manifest)
             .starts_with("KC-30: a Module panicked during plan")
     );
 }
@@ -2930,7 +3061,7 @@ fn kc_24_a_prepare_abort_stops_before_arm_and_start() {
     );
     let run = start_spec_run(&spec, &profile, assembly).unwrap();
     assert!(matches!(run.state(), RunState::CleanedUp {
-        termination: Termination::Stopped { cause: StopCause::Abort { ref cause } }
+        termination: Termination::Stopped { cause: StopCause::Abort { message: ref cause } }
     } if cause == "prepare requested abort"));
     let lines = probe.lines();
     assert!(!lines.iter().any(|line| line == "rec:prepare:rec"));
@@ -2995,7 +3126,7 @@ fn ka_18_a_failed_link_drop_snapshot_is_unknown_not_zero() {
         Box::new(TestLinkModule::new(&probe).panicking_drops()),
     );
     let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
-    assert!(manifest.sections[&ns("ezsdr.links")][0]["drops"].is_null());
+    assert_eq!(manifest.links[0].drops, None);
     assert!(
         manifest
             .termination
@@ -3026,7 +3157,7 @@ fn ka_12_an_abandoned_drain_does_not_stop_a_sink_after_cleanup() {
             .cleanup_failures
             .iter()
             .any(
-                |failure| failure.step == ezsdr_kernel::run::CleanupStep::StopRx
+                |failure| failure.step == ezsdr_kernel::run::CleanupStep::DrainAndStopConsumers
                     && failure.timed_out
             )
     );
@@ -3100,7 +3231,7 @@ fn ka_12_an_abandoned_wakeup_drain_stops_the_sink_before_cleanup() {
             .cleanup_failures
             .iter()
             .any(
-                |failure| failure.step == ezsdr_kernel::run::CleanupStep::StopRx
+                |failure| failure.step == ezsdr_kernel::run::CleanupStep::DrainAndStopConsumers
                     && failure.timed_out
             )
     );
@@ -3108,14 +3239,14 @@ fn ka_12_an_abandoned_wakeup_drain_stops_the_sink_before_cleanup() {
     let stop = lines
         .iter()
         .position(|line| line == "rec:stop:Orderly")
-        .unwrap_or_else(|| panic!("fallback StopRx was skipped: {lines:?}"));
+        .unwrap_or_else(|| panic!("fallback drain_and_stop_consumers was skipped: {lines:?}"));
     let cleanup = lines
         .iter()
         .position(|line| line == "rec:cleanup")
         .unwrap_or_else(|| panic!("Sink cleanup was skipped: {lines:?}"));
     assert!(
         stop < cleanup,
-        "fallback StopRx must precede cleanup: {lines:?}"
+        "fallback drain_and_stop_consumers must precede cleanup: {lines:?}"
     );
     assert_eq!(
         lines
@@ -3168,13 +3299,11 @@ fn kc_30_a_panicking_time_now_fails_validate_without_unwinding() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed {
-                stage: Stage::Validate
-            }
+            termination: Termination::Failed { stage: Stage::Validate, .. }
         }
     ));
     let manifest = run.finish();
-    let reason = failure(&manifest)["reason"].as_str().unwrap();
+    let reason = failure(&manifest);
     assert!(
         reason.starts_with("KC-30: a Module panicked during now()"),
         "{reason}"
@@ -3206,14 +3335,12 @@ fn kc_30_a_panicking_time_now_during_arm_does_not_start_modules() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed { stage: Stage::Arm }
+            termination: Termination::Failed { stage: Stage::Arm, .. }
         }
     ));
     let manifest = run.finish();
     assert!(
-        failure(&manifest)["reason"]
-            .as_str()
-            .unwrap()
+        failure(&manifest)
             .starts_with("KC-30: a Module panicked during now()")
     );
     assert!(probe.lines().iter().any(|line| line == "p:arm"));
@@ -3248,44 +3375,61 @@ fn kc_30_a_panicking_time_schedule_fails_arm_without_unwinding() {
     let manifest = run.finish();
     assert!(matches!(
         manifest.termination.reason,
-        Termination::Failed { stage: Stage::Arm }
+        Termination::Failed { stage: Stage::Arm, .. }
     ));
     assert!(
-        failure(&manifest)["reason"]
-            .as_str()
-            .unwrap()
+        failure(&manifest)
             .starts_with("KC-30: a Module panicked during arm: Authority schedule()",)
     );
 }
 
 #[test]
 fn kc_30_a_panicking_time_cancel_is_a_cleanup_failure() {
-    let mut spec = spec_one();
-    add_schedule(
-        &mut spec,
-        "radio",
-        100,
-        serde_json::json!({ "kind": "stop", "target": null }),
-    );
-    let rig = rig_with_faulting_time(SimAuthority::panicking_cancel);
-    let mut assembly = rig.assembly;
-    assembly.providers.insert(
-        Ident::parse("radio").unwrap(),
-        Box::new(
-            SteppedProvider::new("p", TestProvider::new("radio", 2), &Probe::new())
-                .declaring("radio/rx", 10, 1)
-                .registering_at_arm("radio/rx"),
-        ),
-    );
-    let manifest = start_spec_run(&spec, &profile_one(), assembly)
-        .unwrap()
-        .finish();
-    assert!(manifest.termination.cleanup_failures.iter().any(|failure| {
-        failure.step == ezsdr_kernel::run::CleanupStep::FreezeDispatch
-            && failure
-                .reason
-                .starts_with("KC-30: a Module panicked during cleanup: Authority cancel()")
-    }));
+    // KC-30: a panicking cancel is a cleanup failure. F25 (b): the double's first
+    // cancel succeeds and every later one panics. With two handles one panic is
+    // reported; with three, the handle after a panicking one is still tried.
+    let freeze_failures = |handles: i64| {
+        let mut spec = spec_one();
+        add_schedule(
+            &mut spec,
+            "radio",
+            100,
+            serde_json::json!({ "kind": "stop", "target": null }),
+        );
+        for i in 1..handles {
+            let mut item = spec["schedule"][0].clone();
+            item["at"]["offset_ticks"] = serde_json::json!(100 * (i + 1));
+            spec["schedule"].as_array_mut().unwrap().push(item);
+        }
+        let rig = rig_with_faulting_time(SimAuthority::panicking_cancel);
+        let mut assembly = rig.assembly;
+        assembly.providers.insert(
+            Ident::parse("radio").unwrap(),
+            Box::new(
+                SteppedProvider::new("p", TestProvider::new("radio", 2), &Probe::new())
+                    .declaring("radio/rx", 10, 1)
+                    .registering_at_arm("radio/rx"),
+            ),
+        );
+        let manifest = start_spec_run(&spec, &profile_one(), assembly)
+            .unwrap()
+            .finish();
+        manifest
+            .termination
+            .cleanup_failures
+            .into_iter()
+            .filter(|failure| failure.step == ezsdr_kernel::run::CleanupStep::FreezeDispatch)
+            .map(|failure| failure.reason)
+            .collect::<Vec<_>>()
+    };
+    for (handles, counted) in [(2, "1 of 2"), (3, "2 of 3")] {
+        assert_eq!(
+            freeze_failures(handles),
+            [format!(
+                "KC-30: a Module panicked during cleanup: Authority cancel(), {counted} handles"
+            )]
+        );
+    }
 }
 
 // ---------------------------------------------------------------- Phase 3 amendments (KB)
@@ -3465,7 +3609,7 @@ fn kd_01_a_device_lost_is_not_reported_as_a_step_livelock() {
     let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
     assert_eq!(
         manifest.termination.reason,
-        Termination::Stopped { cause: StopCause::Policy { kind: ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::DEVICE_LOST).expect("kind") } },
+        Termination::Stopped { cause: StopCause::Policy { event: ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::DEVICE_LOST).expect("kind") } },
         "a device_lost must not be reported as the Kernel's own STEP_LIVELOCK"
     );
     assert!(manifest.events.delivered.iter().all(|e| e.kind.as_str() != ezsdr_kernel::event::EventKind::STEP_LIVELOCK));
@@ -3498,15 +3642,15 @@ fn kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides(
     // `p` sorts first and returns an ordinary error: the Run fails on it, and `q`'s
     // lost device, found in the same round, is still delivered.
     let failed = run(false, true);
-    assert_eq!(failed.termination.reason, Termination::Failed { stage: Stage::Run });
-    assert!(failure(&failed)["reason"].as_str().unwrap().starts_with("KC-30: p: "), "{}", failure(&failed));
+    assert!(matches!(failed.termination.reason, Termination::Failed { stage: Stage::Run, .. }));
+    assert!(failure(&failed).starts_with("KC-30: p: "), "{}", failure(&failed));
     assert_eq!(lost_sources(&failed).len(), 1);
 
     // Both lose their device: the Run stops on DEVICE_LOST and both are reported.
     let both = run(true, true);
     assert_eq!(
         both.termination.reason,
-        Termination::Stopped { cause: StopCause::Policy { kind: ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::DEVICE_LOST).unwrap() } }
+        Termination::Stopped { cause: StopCause::Policy { event: ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::DEVICE_LOST).unwrap() } }
     );
     let mut sources = lost_sources(&both);
     sources.dedup();
@@ -3515,8 +3659,8 @@ fn kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides(
     // Both fail with an ordinary error: each requests the end, and the first, `p`'s,
     // fixes it (KC-30 handles each failure; KC-32 keeps the first end; #65).
     let errors = run(false, false);
-    assert_eq!(errors.termination.reason, Termination::Failed { stage: Stage::Run });
-    assert!(failure(&errors)["reason"].as_str().unwrap().starts_with("KC-30: p: "), "{}", failure(&errors));
+    assert!(matches!(errors.termination.reason, Termination::Failed { stage: Stage::Run, .. }));
+    assert!(failure(&errors).starts_with("KC-30: p: "), "{}", failure(&errors));
 }
 
 // ---------------------------------------------------------------- Phase 5 amendments (KE)
@@ -3576,8 +3720,8 @@ fn ke_01_a_declared_input_is_verified_as_a_scheduled_one_is() {
     let (bytes, valid) = input_ref();
     let plan_failure = |listed: ezsdr_kernel::manifest::ArtifactRef, stored: Option<Vec<u8>>| {
         let (_, manifest) = ke_run(std::slice::from_ref(&listed), listed.clone(), stored);
-        assert_eq!(manifest.termination.reason, Termination::Failed { stage: Stage::Plan });
-        failure(&manifest)["reason"].as_str().unwrap().to_owned()
+        assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Plan, .. }));
+        failure(&manifest).to_owned()
     };
     let absent = plan_failure(valid.clone(), None);
     assert!(absent.starts_with("KC-9: input 0: no bytes were supplied"), "{absent}");
@@ -3628,8 +3772,8 @@ fn ke_01_a_declared_input_is_verified_as_a_scheduled_one_is() {
         assembly.inputs.insert(namesake.hash.clone(), other_bytes);
         start_spec_run(&spec, &profile, assembly).unwrap().finish()
     };
-    assert_eq!(twice.termination.reason, Termination::Failed { stage: Stage::Plan });
-    let reason = failure(&twice)["reason"].as_str().unwrap();
+    assert!(matches!(twice.termination.reason, Termination::Failed { stage: Stage::Plan, .. }));
+    let reason = failure(&twice);
     assert!(reason.starts_with("KC-9: input 0: another input is also called waveform"), "{reason}");
     // A listed input and a scheduled waveform of one name and two hashes: the same refusal
     // (Review G, G-3: the rule compares every input, listed or scheduled).
@@ -3647,8 +3791,8 @@ fn ke_01_a_declared_input_is_verified_as_a_scheduled_one_is() {
         assembly.inputs.insert(namesake.hash.clone(), vec![1u8; 80]);
         start_spec_run(&spec, &profile_one(), assembly).unwrap().finish()
     };
-    assert_eq!(listed_and_scheduled.termination.reason, Termination::Failed { stage: Stage::Plan });
-    let reason = failure(&listed_and_scheduled)["reason"].as_str().unwrap();
+    assert!(matches!(listed_and_scheduled.termination.reason, Termination::Failed { stage: Stage::Plan, .. }));
+    let reason = failure(&listed_and_scheduled);
     assert!(reason.starts_with("KC-9: input 0: another input is also called waveform"), "{reason}");
 
     // Listed and scheduled: one input, recorded once, listed first.
@@ -3663,7 +3807,7 @@ fn ke_01_a_declared_input_is_verified_as_a_scheduled_one_is() {
     let mut assembly = with_provider(rig(Pacing::FreeRunning).assembly, "radio", "radio");
     assembly.inputs.insert(valid.hash.clone(), bytes);
     let manifest = start_spec_run(&spec, &profile_one(), assembly).unwrap().finish();
-    assert_ne!(manifest.termination.reason, Termination::Failed { stage: Stage::Plan });
+    assert!(!matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Plan, .. }));
     assert_eq!(manifest.inputs, vec![valid]);
 }
 
@@ -3813,7 +3957,7 @@ fn kf_03_a_child_run_is_admitted_logged_run_and_recorded() {
     assert_eq!(manifest.run.parent, None);
     assert_eq!(manifest.action_log[0], entry);
     assert_eq!(
-        manifest.sections[&ns("ezsdr.children")],
+        serde_json::to_value(&manifest.run.children).unwrap(),
         serde_json::json!([{ "seq": entry.seq, "run": child.run.id, "manifest": child.hash }])
     );
 }
@@ -3880,7 +4024,7 @@ fn kf_03_rs_25a_refusals() {
                 assert_eq!(violations[0].check, ns("ezsdr.run_child"));
                 assert!(violations[0].reason.starts_with(reason), "{} does not start with {reason}", violations[0].reason);
                 assert!(child.is_none());
-                assert!(!manifest.sections.contains_key(&ns("ezsdr.children")));
+                assert!(manifest.run.children.is_empty());
                 // A document is named by its parsed hash, or by the hash of what was sent
                 // when it does not parse (RS-45).
                 let spec_hash = match ExperimentSpec::from_json(&spec) {
@@ -3913,7 +4057,7 @@ fn kf_03_a_child_inherits_the_lease() {
     let (_, child) = run.run_child(&spec_one(), &profile_one(), child_assembly(), &mut drive_to(100)).unwrap();
     let child = child.unwrap();
     assert!(matches!(child.lease.mode, LeaseMode::Detached { .. }), "the child holds its parent's Lease, not an Attached one of its own");
-    assert_eq!(child.lease.token.as_deref(), Some("tok"));
+    assert_eq!(child.lease.mode, LeaseMode::Detached { ttl_ms: 5000, renewable: true });
     let _ = run.finish();
 }
 
@@ -4038,7 +4182,7 @@ fn kf_03_children_are_recorded_in_order() {
     assert_eq!((first.seq, second.seq), (1, 2));
     let manifest = run.finish();
     assert_eq!(
-        manifest.sections[&ns("ezsdr.children")],
+        serde_json::to_value(&manifest.run.children).unwrap(),
         serde_json::json!([
             { "seq": 1, "run": one.as_ref().unwrap().run.id, "manifest": one.unwrap().hash },
             { "seq": 2, "run": two.as_ref().unwrap().run.id, "manifest": two.unwrap().hash }
@@ -4084,7 +4228,7 @@ fn kf_03_the_parents_checks_judge_the_child() {
     assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
     let child = child.unwrap();
     assert!(matches!(child.termination.reason, Termination::Failed { .. }), "{:?}", child.termination.reason);
-    assert!(serde_json::to_string(&child.sections[&ns("ezsdr.failure")]).unwrap().contains("exceeds the declared ceiling"));
+    assert!(failure(&child).contains("exceeds the declared ceiling"), "{}", failure(&child));
     let _ = run.finish();
 }
 
@@ -4112,7 +4256,7 @@ fn kc_12_a_misnamed_prepare_report_is_refused_before_start() {
     assembly.sinks.insert(Ident::parse("rec").unwrap(), Box::new(MisnamedPrepareSink(RecordingSink::new("rec", &probe), Ident::parse("radio").unwrap())));
     let run = start_spec_run(&spec, &profile, assembly).unwrap();
     assert!(matches!(run.state(), RunState::CleanedUp {
-        termination: Termination::Failed { stage: Stage::Prepare }
+        termination: Termination::Failed { stage: Stage::Prepare, .. }
     }));
     assert!(!probe.lines().iter().any(|line| line.contains(":start")));
     let manifest = run.finish();
@@ -4139,7 +4283,7 @@ fn kc_12_prepare_report_ownership_is_checked_before_collecting() {
     }
     let run = start_spec_run(&spec, &profile, assembly).unwrap();
     assert!(matches!(run.state(), RunState::CleanedUp {
-        termination: Termination::Failed { stage: Stage::Prepare }
+        termination: Termination::Failed { stage: Stage::Prepare, .. }
     }));
     let lines = probe.lines();
     assert!(!lines.iter().any(|line| line.contains("rec2:prepare") || line.contains(":start")));
@@ -4197,17 +4341,17 @@ fn kc_24_component_update_classes_belong_to_the_target() {
 fn rs_36_a_dropped_stop_must_not_mask_a_dropped_abort() {
     let probe = Probe::new();
     let (mut spec, profile) = distinct_resource_docs(&["left", "right"]);
-    spec["policies"] = serde_json::json!({ "failure": { "LINK_BACKPRESSURE": "stop" } });
+    spec["policies"] = serde_json::json!({ "failure": { "ezsdr.LINK_BACKPRESSURE": "stop" } });
     let mut assembly = rig(Pacing::FreeRunning).assembly;
     for (name, kind, severity) in [
         (
             "left",
-            "LINK_BACKPRESSURE",
+            "ezsdr.LINK_BACKPRESSURE",
             ezsdr_kernel::event::Severity::Warning,
         ),
         (
             "right",
-            "STEP_LIVELOCK",
+            "ezsdr.STEP_LIVELOCK",
             ezsdr_kernel::event::Severity::Fatal,
         ),
     ] {
@@ -4228,13 +4372,13 @@ fn rs_36_a_dropped_stop_must_not_mask_a_dropped_abort() {
         "transitions: {:?}; termination: {:?}",
         manifest.run.transitions, manifest.termination
     );
-    for kind in ["LINK_BACKPRESSURE", "STEP_LIVELOCK"] {
+    for kind in ["ezsdr.LINK_BACKPRESSURE", "ezsdr.STEP_LIVELOCK"] {
         assert!(
             manifest
                 .events
                 .delivered
                 .iter()
-                .any(|e| e.kind.as_str() == "EVENTS_DROPPED" && e.payload["kind"] == kind)
+                .any(|e| e.kind.as_str() == "ezsdr.EVENTS_DROPPED" && e.payload["kind"] == kind)
         );
     }
     assert!(

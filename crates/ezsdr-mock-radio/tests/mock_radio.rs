@@ -606,7 +606,7 @@ fn mr_11_start_cases() {
     let mut harness = Harness::new("x310-like", &constraints, &[], &[], Some((BackPressure::DropOldest, 8)));
     harness.mock.arm().unwrap();
     assert!(harness.mock.start(Some(TimePoint::new(ROOT, 1_999_999_999))).unwrap_err().message.contains("ezsdr.time.start_lead_ns"));
-    let early = harness.events.drain();
+    let early = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(early.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).count(), 1);
     let late = early.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).unwrap();
     assert_eq!(late.source, rid("mock"));
@@ -804,7 +804,7 @@ fn mr_16_burst_refusals() {
     let rejected = &moved_duplicate.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.rejected").unwrap()];
     assert_eq!(rejected.as_array().unwrap().len(), 1);
     assert!(rejected[0]["reason"].as_str().unwrap().contains("held burst already has this start"));
-    let events = moved_duplicate.events.drain();
+    let events = moved_duplicate.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).count(), 1);
     let refused = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).unwrap();
     assert_eq!(refused.payload["outcome"], "refused");
@@ -864,7 +864,7 @@ fn mr_17_a_burst_before_its_clock_s_origin_is_late() {
         assert!(target < 0, "{enable}: the clock begins a start lead after the change");
         h.actions.push(tx_action(clock.domain, target, 1_000, false, LatePolicy::SendAsapAndFlag));
         h.step(2_001_000_000).unwrap();
-        let events = h.events.drain();
+        let events = h.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
         let late: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
         assert_eq!(late.len(), 1, "{enable}");
         assert_eq!(late[0].payload["outcome"], "send_asap", "{enable}");
@@ -890,7 +890,7 @@ fn mr_17_late_policy_outcomes() {
         harness.step(2_010_000_000).unwrap();
         harness.actions.push(tx_action(domain, 2_011_000, 1_000, false, policy));
         harness.step(2_010_000_000).unwrap();
-        let events = harness.events.drain();
+        let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
         let late = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).unwrap();
         assert_eq!(late.payload["outcome"], outcome);
         assert_eq!(late.payload["late_by_ns"], 1_000_000);
@@ -933,7 +933,7 @@ fn mr_18_hardware_timed_updates() {
     assert_eq!(rows[2]["at"]["ticks"], now + 5_000_000);
     assert_eq!(rows[1]["value"], 2.4e9);
     assert_eq!(rows[2]["key"], "radio.tx.frequency_hz");
-    assert_eq!(harness.events.drain().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).count(), 1);
+    assert_eq!(harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).count(), 1);
 
     let mut full = Harness::new("x310-like", &[], &[], &[], None);
     full.mock.arm().unwrap();
@@ -943,7 +943,7 @@ fn mr_18_hardware_timed_updates() {
     }
     full.actions.push(update_action("radio.rx.frequency_hz", Value::Num(2.1e9), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, 0))));
     full.step(0).unwrap();
-    let events = full.events.drain();
+    let events = full.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_QUEUE_FULL).count(), 1);
     assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).count(), 0);
     let full_event = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_QUEUE_FULL).unwrap();
@@ -1167,7 +1167,7 @@ fn mr_18_a_scheduled_pair_is_checked_when_it_applies() {
     let rejected = over.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.rejected").unwrap()].as_array().unwrap();
     assert_eq!(rejected.len(), 1);
     assert!(rejected[0]["reason"].as_str().unwrap().starts_with("MR-18:"));
-    assert_eq!(over.events.drain().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 1);
+    assert_eq!(over.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 1);
 }
 
 #[test]
@@ -1185,7 +1185,7 @@ fn mr_19_backpressure_is_an_overrun() {
     assert!(restarted.header().flags.contains(ezsdr_kernel::stream::BlockFlags::RESTARTED));
     assert_eq!(restarted.header().lost, Some(50_000));
     assert_eq!(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.stats").unwrap()]["rx_blocks"], 2);
-    let events = harness.events.drain();
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     let overflows: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
     assert_eq!(overflows.len(), 1);
     // MR-37: the back-pressure overrun travels the hot path too, as RM-24's bytes.
@@ -1260,7 +1260,7 @@ fn mr_09_same_tick_work_keeps_insertion_order() {
     assert_eq!(faults.as_array().unwrap().len(), 1);
     assert_eq!(faults[0]["applied"], true);
     assert_eq!(faults[0]["lost"], 2_000);
-    assert_eq!(harness.events.drain().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0);
+    assert_eq!(harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0);
     let applied = &instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()];
     assert_eq!(applied.as_array().unwrap().len(), 2);
     assert_eq!(applied[0]["value"], 0);
@@ -1292,7 +1292,7 @@ fn mr_20_faults_fire_at_their_instants() {
     // RM-17: the overrun's event comes with the block at 51 000, which carries its loss, and
     // its row was written when it fired (MR-20; spec 22, VH-5).
     harness.step(2_053_000_000).unwrap();
-    let events = harness.events.drain();
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 1);
     let overflow = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).unwrap();
     let rx_domain = harness.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/rx")).unwrap().domain;
@@ -1387,7 +1387,7 @@ fn mr_20_faults_fire_at_their_instants() {
     assert_eq!(faults.as_array().unwrap().len(), 1);
     assert_eq!(faults[0]["applied"], false);
     assert_eq!(faults[0]["lost"], 0);
-    assert_eq!(stopped_rx.events.drain().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0);
+    assert_eq!(stopped_rx.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0);
 
     let tail_fault_env = [
         ("sim.faults", serde_json::json!([{ "at_ns": 1_500_000, "fault": "rx_overflow", "target": "radio" }]))
@@ -1404,7 +1404,7 @@ fn mr_20_faults_fire_at_their_instants() {
     assert_eq!(faults[0]["lost"], 0);
     let stats = &tail_fault.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.stats").unwrap()];
     assert_eq!(stats["rx_samples"], 1_000);
-    assert_eq!(tail_fault.events.drain().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0);
+    assert_eq!(tail_fault.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0);
 }
 
 #[test]
@@ -1424,7 +1424,7 @@ fn mr_20_a_fault_between_cold_clocks_is_not_applied() {
         assert_eq!(faults[0]["lost"], 0, "{fault}");
         let domain = harness.clocks.sample_clock_records().last().unwrap().domain;
         harness.step(20_000_000).unwrap();
-        assert_eq!(harness.events.drain().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0, "{fault}");
+        assert_eq!(harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0, "{fault}");
         let mut first = None;
         while let Some(block) = harness.link.as_ref().unwrap().receive() {
             if block.header().first_sample_time.domain == domain && first.is_none() { first = Some(block.header().clone()); }
@@ -1457,7 +1457,7 @@ fn mr_20_a_fault_between_cold_clocks_is_not_applied() {
 }
 
 fn rx_overflows(harness: &Harness) -> Vec<(TimePoint, RxOverflowPayload)> {
-    harness.events.drain().into_iter()
+    harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
         .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW)
         .map(|event| (event.time, RxOverflowPayload::from_payload(&event.payload).unwrap()))
         .collect()
@@ -1581,7 +1581,7 @@ fn mr_20_a_loss_cancels_what_it_left_pending() {
         rejected_rows(&harness),
         [("tx_burst".to_owned(), LOST.to_owned(), 2_000_000), ("update_parameter".to_owned(), LOST.to_owned(), 2_000_000)]
     );
-    assert!(harness.events.drain().is_empty());
+    assert!(harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).is_empty());
 }
 
 #[test]
@@ -1602,7 +1602,7 @@ fn mr_20_a_stop_received_in_the_losing_step_does_not_cancel_the_loss() {
     let actions: Vec<_> = rejected_rows(&harness).into_iter().map(|(action, reason, _)| (action, reason)).collect();
     assert_eq!(actions, [("update_parameter", LOST), ("stop", LOST)].map(|(a, r)| (a.to_owned(), r.to_owned())));
     // No event for a refused Action, COMMAND_REJECTED included: the step's error reports the loss.
-    assert!(harness.events.drain().is_empty());
+    assert!(harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).is_empty());
 }
 
 #[test]
@@ -1624,7 +1624,7 @@ fn mr_20_an_action_after_the_losing_step_is_refused() {
         rejected_rows(&harness),
         [("update_parameter".to_owned(), LOST.to_owned(), 2_000_000), ("stop".to_owned(), LOST.to_owned(), 3_000_000)]
     );
-    assert!(harness.events.drain().is_empty());
+    assert!(harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).is_empty());
 }
 
 #[test]
@@ -1700,7 +1700,7 @@ fn mr_21_overrun_shape() {
     assert_eq!(restarted.lost, Some(59_000));
     assert!(restarted.flags.contains(BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED));
     // One block carries both losses; each fault settles its own share with it (MR-20a).
-    let overflows: Vec<_> = overlap.events.drain().into_iter()
+    let overflows: Vec<_> = overlap.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
         .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW)
         .map(|event| (event.time.ticks, RxOverflowPayload::from_payload(&event.payload).unwrap().lost))
         .collect();
@@ -1768,7 +1768,7 @@ fn mr_29_start_rx_is_the_one_peripheral_command() {
     h.step(2_000_000).unwrap();
     let rejected = rejected_rows(&h);
     assert_eq!(rejected.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(), ["peripheral_command"; 3]);
-    assert_eq!(h.events.drain().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 3);
+    assert_eq!(h.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 3);
     h.actions.push(start("mock/rx", BTreeMap::new()));
     h.step(3_000_000).unwrap();
     h.actions.push(start("mock/rx", BTreeMap::new()));
@@ -1915,7 +1915,7 @@ fn mr_25_rx_stop_leaves_transmit_running_and_stop_records_an_unstarted_burst() {
     assert_eq!(rejected.as_array().unwrap().len(), 1);
     assert!(rejected[0]["reason"].as_str().unwrap().contains("cancelled by stop"));
     assert_eq!(unstarted.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.bursts").unwrap()].as_array().unwrap().len(), 0);
-    assert_eq!(unstarted.events.drain().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 0);
+    assert_eq!(unstarted.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 0);
 }
 
 #[test]
@@ -1938,7 +1938,7 @@ fn mr_29_other_actions_are_command_rejected() {
     assert_eq!(rejected.as_array().unwrap().len(), 2);
     assert_eq!(rejected[0]["action"], "set_timer");
     assert_eq!(rejected[1]["action"], "peripheral_command");
-    let events = harness.events.drain();
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     let rejected_events: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
     assert_eq!(rejected_events.len(), 2);
     assert!(rejected_events.iter().all(|event| event.source == rid("mock") && event.time == TimePoint::new(ROOT, 1)));
@@ -1955,7 +1955,7 @@ fn mr_30_two_mocks_one_seed_identical_output() {
     let b: Vec<_> = std::iter::from_fn(|| right.link.as_ref().unwrap().receive()).map(|b| b.header().clone()).collect();
     assert_eq!(a, b);
     assert_eq!(left.mock.instance().sections, right.mock.instance().sections);
-    assert_eq!(left.events.drain(), right.events.drain());
+    assert_eq!(left.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)), right.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)));
 }
 
 #[test]
@@ -1980,7 +1980,7 @@ fn mr_37_the_overflow_travels_the_hot_path() {
         .find(|row| row.source == rid("mock/rx") && row.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW)
         .unwrap().count;
     assert_eq!(counted, 2);
-    let events = harness.events.drain();
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     let delivered: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
     assert_eq!(delivered.len(), 1);
     assert_eq!(delivered[0].severity, ezsdr_kernel::event::Severity::Warning, "RM-10's severity");
@@ -2064,7 +2064,7 @@ fn mr_18_a_cold_change_that_arrives_after_a_later_one_follows_it() {
         let applied = &instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()];
         let rows: Vec<_> = applied.as_array().unwrap().iter().map(|row| (row["value"].clone(), row["at"]["ticks"].clone())).collect();
         assert_eq!(rows, [(serde_json::json!(first_rate), serde_json::json!(1_000_500)), (serde_json::json!(second_rate), serde_json::json!(1_000_500))]);
-        let late = h.events.drain().into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).count();
+        let late = h.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).count();
         assert_eq!(late, usize::from(!same_time));
         for record in h.clocks.sample_clock_records() {
             if let Some(end) = record.ended_at { assert!(end.ticks >= record.origin.ticks); }

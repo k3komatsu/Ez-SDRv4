@@ -115,7 +115,7 @@ pub struct RunHandle {
     same_count: usize,
     manifest: Option<Manifest>,
     parent: Option<RunId>,
-    children: Vec<serde_json::Value>,
+    children: Vec<crate::manifest::ChildRecord>,
 }
 
 /// Parses and starts a Spec Run; parse and hash refusals create no Run (KC-1, KC-5).
@@ -285,7 +285,6 @@ impl RunHandle {
                 &self.shared,
                 crate::run::Termination::Stopped { cause },
                 crate::run::CleanupMode::Orderly,
-                None,
             );
             self.settle();
         }
@@ -300,7 +299,6 @@ impl RunHandle {
                     cause: crate::run::StopCause::LeaseExpiry {},
                 },
                 crate::run::CleanupMode::Orderly,
-                None,
             );
             self.settle();
         }

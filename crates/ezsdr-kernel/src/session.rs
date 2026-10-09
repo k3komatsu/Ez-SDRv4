@@ -445,7 +445,7 @@ pub fn compile(
     // SB-9a: a `Value` reaches the sealed Manifest through the action log and through
     // an Action's `params`, neither of which passes a `from_json`, so OV-15's ASCII
     // key rule and SB-4's nesting rule are checked where the value enters. Left to
-    // hashing time, `seal()` failed at cleanup step 8 after the Run had transmitted.
+    // hashing time, `seal()` failed at cleanup step 7 after the Run had transmitted.
     if let Err(e) = action.check_values() {
         return Err(reject("ezsdr.value", e.to_string()));
     }

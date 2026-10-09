@@ -380,9 +380,9 @@ fn ea_10_a_failed_connect_writes_its_manifest() {
     assert!(handled.exit);
     let error = err(handled);
     assert_eq!(error.kind, ErrorKind::Ended);
-    assert_eq!(error.termination, Some(Termination::Failed { stage: Stage::Prepare }));
+    assert!(matches!(error.termination, Some(Termination::Failed { stage: Stage::Prepare, .. })));
     let written: Manifest = serde_json::from_str(&std::fs::read_to_string(server.dir().unwrap().join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(written.termination.reason, Termination::Failed { stage: Stage::Prepare });
+    assert!(matches!(written.termination.reason, Termination::Failed { stage: Stage::Prepare, .. }));
 }
 
 #[test]
@@ -497,7 +497,7 @@ fn ea_14_run_child() {
     // The derived profile: the Session's without `feed`, which a Spec Run refuses (SB-22g).
     let Response::Ran { entry, manifest: Some(child), .. } = ok(run_child(&mut server, receive_spec(1_000), None, Some(10_000_000))) else { panic!() };
     assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
-    assert_eq!(child.termination.reason, Termination::Stopped { cause: StopCause::Client {} }, "{:?}", child.sections.get(&Namespace::parse("ezsdr.failure").unwrap()));
+    assert_eq!(child.termination.reason, Termination::Stopped { cause: StopCause::Client {} }, "{:?}", child.termination.reason);
     let artifact = child.artifacts.iter().find(|artifact| artifact.id.as_str() == "rec").unwrap();
     assert_eq!(artifact.size_bytes, 8_000);
     assert_eq!(read(&mut server, &artifact.uri).len(), 8_000, "a child's artifact is readable");
@@ -522,7 +522,7 @@ fn ea_14_run_child() {
     assert_eq!(violations[0].check, Namespace::parse("ezsdr.run_child").unwrap());
 
     let (manifest, _) = finish(&mut server);
-    assert_eq!(manifest.sections[&Namespace::parse("ezsdr.children").unwrap()].as_array().unwrap().len(), 2);
+    assert_eq!(manifest.run.children.len(), 2);
 }
 
 #[test]
@@ -826,7 +826,7 @@ fn ea_07_a_session_on_the_fake_device() {
         assert_eq!(*sample, sent[(offset + index) % 1_000], "captured sample {index}");
     }
     let (manifest, _) = finish(&mut server);
-    assert_eq!(manifest.run.execution_class, ezsdr_kernel::module_api::ExecutionClass::HardwareInLoop);
+    assert_eq!(manifest.run.execution_class, Some(ezsdr_kernel::module_api::ExecutionClass::HardwareInLoop));
 }
 
 #[test]
@@ -950,7 +950,7 @@ fn ea_07_a_lost_device_ends_the_session_with_its_manifest() {
     let (now, rate, _) = status(&mut server);
     let _ = server.handle(Request::WaitFor { kinds: vec![lost], from: 0, within: Some(seconds(now, rate, 5)), until: None }, Vec::new());
     let (manifest, path) = finish(&mut server);
-    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: EventKind::parse(EventKind::DEVICE_LOST).unwrap() } });
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: EventKind::parse(EventKind::DEVICE_LOST).unwrap() } });
     assert!(Path::new(&path).exists(), "{path}");
     assert!(device.calls().iter().any(|c| c == "mark_lost"), "{:?}", device.calls());
 }

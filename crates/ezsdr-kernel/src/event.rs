@@ -35,9 +35,9 @@ pub enum Severity {
     Fatal,
 }
 
-/// What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)*$`;
-/// the Kernel owns the five of RS-28 and every other kind belongs to the Vocabulary or
-/// Module that emits it.
+/// What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$`:
+/// every kind is namespaced. The Kernel owns the five of RS-28, under `ezsdr.`, and
+/// every other kind belongs to the Vocabulary or Module that emits it.
 ///
 /// Rule: SB-1, RS-27.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema,
@@ -53,20 +53,23 @@ impl<'de> Deserialize<'de> for EventKind {
 
 impl EventKind {
     /// The Kernel's own drain reports dropped bodies with this kind (RS-35).
-    pub const EVENTS_DROPPED: &'static str = "EVENTS_DROPPED";
+    pub const EVENTS_DROPPED: &'static str = "ezsdr.EVENTS_DROPPED";
     /// A DataLink policy refused or discarded a block (SC-20a).
-    pub const LINK_BACKPRESSURE: &'static str = "LINK_BACKPRESSURE";
+    pub const LINK_BACKPRESSURE: &'static str = "ezsdr.LINK_BACKPRESSURE";
     /// A `RelativeBudget` the Kernel defines was exceeded (TM-15).
-    pub const PROCESSOR_DEADLINE_MISS: &'static str = "PROCESSOR_DEADLINE_MISS";
+    pub const PROCESSOR_DEADLINE_MISS: &'static str = "ezsdr.PROCESSOR_DEADLINE_MISS";
     /// Vision §35 states in as many words that this is a Kernel policy (RS-27).
-    pub const DEVICE_LOST: &'static str = "DEVICE_LOST";
+    pub const DEVICE_LOST: &'static str = "ezsdr.DEVICE_LOST";
     /// The stepping loop failed to quiesce (MA-30).
-    pub const STEP_LIVELOCK: &'static str = "STEP_LIVELOCK";
+    pub const STEP_LIVELOCK: &'static str = "ezsdr.STEP_LIVELOCK";
+    /// RS-33's fallback row reports every unforeseen kind under this one.
+    pub const UNFORESEEN: &'static str = "ezsdr.unforeseen";
 
-    /// Parses a kind. Segments are `[A-Za-z][A-Za-z0-9_]*`, which admits both the
-    /// Kernel's `EVENTS_DROPPED` and a Vocabulary's `test.custom` (RS-27).
+    /// Parses a kind: at least two `.`-separated segments, each
+    /// `[A-Za-z][A-Za-z0-9_]*`, such as the Kernel's `ezsdr.EVENTS_DROPPED` and a
+    /// Vocabulary's `test.custom` (RS-27).
     pub fn parse(s: &str) -> Result<EventKind, RunError> {
-        let ok = !s.is_empty()
+        let ok = s.contains('.')
             && s.split('.').all(|seg| {
                 let mut chars = seg.chars();
                 matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
@@ -256,17 +259,28 @@ impl EventCollector {
             }
         }
         // RS-33: one fallback row, not one per source, which would be unbounded
-        // when a Module mislabels its source.
-        let fallback = ResourceId::parse("unforeseen").expect("a valid literal path");
-        let fallback_source = match source_index.entry(fallback.clone()) {
-            Entry::Vacant(entry) => {
-                let index = sources.len();
-                sources.push(fallback);
-                entry.insert(index);
-                index
+        // when a Module mislabels its source. RS-35's meta-event always exists, so
+        // its source, kind and row always exist too: without the row the drain's own
+        // `EVENTS_DROPPED` bodies would land on the fallback row, which reports a
+        // different kind, and RS-35's invariant would read as violated for exactly
+        // the kind that exists to keep it true (RS-33, RS-38).
+        let mut source_of = |source: &str| {
+            let source = ResourceId::parse(source).expect("a valid literal path");
+            match source_index.entry(source.clone()) {
+                Entry::Vacant(entry) => {
+                    sources.push(source);
+                    *entry.insert(sources.len() - 1)
+                }
+                Entry::Occupied(entry) => *entry.get(),
             }
-            Entry::Occupied(entry) => *entry.get(),
         };
+        let fallback_source = source_of("unforeseen");
+        let kernel_source = source_of(crate::coordinator::KERNEL_SOURCE);
+        let dropped_kind = EventKind(EventKind::EVENTS_DROPPED.to_owned());
+        let dropped_row_kind = *kind_index.entry(dropped_kind.clone()).or_insert_with(|| {
+            kind_list.push(dropped_kind);
+            kind_list.len() - 1
+        });
 
         let mut index = BTreeMap::new();
         let mut resolved = Vec::new();
@@ -277,21 +291,12 @@ impl EventCollector {
                 resolved.push(pair);
             }
         }
-        // RS-35's meta-event always exists, so its row always exists: without it the
-        // drain's own `EVENTS_DROPPED` bodies would land on the fallback row, which
-        // reports a different kind, and RS-35's invariant would read as violated for
-        // exactly the kind that exists to keep it true (RS-33, RS-38).
-        if let Some(ki) = kind_index
-            .get(&EventKind(EventKind::EVENTS_DROPPED.to_owned()))
-            .copied()
-        {
-            index.entry((fallback_source, ki)).or_insert_with(|| {
-                resolved.push((fallback_source, ki));
-                resolved.len() - 1
-            });
-        }
+        index.entry((kernel_source, dropped_row_kind)).or_insert_with(|| {
+            resolved.push((kernel_source, dropped_row_kind));
+            resolved.len() - 1
+        });
         let fallback_kind = kind_list.len();
-        let unforeseen_kind = EventKind("unforeseen".to_owned());
+        let unforeseen_kind = EventKind(EventKind::UNFORESEEN.to_owned());
         kind_index
             .entry(unforeseen_kind.clone())
             .or_insert(fallback_kind);
@@ -394,16 +399,16 @@ impl EventCollector {
         }
     }
 
-    /// Drains the ring. Returns the delivered bodies followed by one
+    /// Drains the ring at `at`. Returns the delivered bodies followed by one
     /// `EVENTS_DROPPED` per kind that dropped since the last drain, carrying the
-    /// delta rather than a running total.
+    /// delta rather than a running total, stamped `at` with source `kernel`.
     ///
     /// Those are produced on the control path and never enter the ring: an
     /// `EVENTS_DROPPED` that could itself be dropped would break, under load and
     /// non-deterministically, the very invariant it exists to preserve.
     ///
     /// Rule: RS-34, RS-35.
-    pub fn drain(&self) -> Vec<Event> {
+    pub fn drain(&self, at: TimePoint) -> Vec<Event> {
         let records: Vec<EventRecord> = {
             let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
             let n = ring.len;
@@ -441,13 +446,13 @@ impl EventCollector {
             if count > 0 {
                 // RS-35's invariant is stated "for every kind", so the meta-event is
                 // counted like any other body it is delivered beside (RS-33, RS-38).
-                let fallback_source = self.pairs.last().expect("fallback counter exists").0;
-                let source = self.sources[fallback_source].clone();
+                let source = ResourceId::parse(crate::coordinator::KERNEL_SOURCE)
+                    .expect("a valid literal path");
                 let handle = self.resolve(&source, &dropped_kind);
                 self.counts[handle.row as usize].fetch_add(1, Ordering::Relaxed);
                 out.push(Event {
                     source,
-                    time: TimePoint::new(crate::id::ClockDomainId::HOST_MONOTONIC, 0),
+                    time: at,
                     severity: Severity::Warning,
                     kind: dropped_kind.clone(),
                     payload: serde_json::json!({

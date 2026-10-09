@@ -122,7 +122,8 @@ pub(super) fn plan(
     // SB-24: an Authority that is a slot of its own gets a fragment of role
     // Authority. It has no lifecycle (MA-2), so this is a record: it is how the
     // Module and version that chose the ExecutionClass reach the plan and the
-    // Manifest (D92, D98).
+    // Manifest (D92, D98), through `instance`. Its content is empty: the selector is
+    // the binding's, in the profile, and nothing reads it here (pre-freeze item 4).
     // ponytail: no ordering edges; whether Providers arm after it is TM-16a/MA-30's
     // Phase 2 call, plan content rather than schema.
     if !spec.resources.contains_key(&authority) {
@@ -131,7 +132,7 @@ pub(super) fn plan(
             id: authority.clone(),
             instance: binding.module.clone(),
             role: Role::Authority,
-            content: serde_json::json!({ "selector": binding.selector }),
+            content: serde_json::Value::Null,
             after: Vec::new(),
         });
     }

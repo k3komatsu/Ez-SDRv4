@@ -375,5 +375,5 @@ fn v58_09_a_reactor_runs_in_a_child_run_of_a_session() {
     let capture = rig::read_capture(artifact(&child, "rec"), 1).remove(0);
     assert_eq!(heard(&capture), Some(15_092));
     let Response::Finished { manifest, .. } = result(server.handle(Request::Finish {}, Vec::new())) else { panic!() };
-    assert_eq!(manifest.sections[&ezsdr_kernel::spec::Namespace::parse("ezsdr.children").unwrap()].as_array().unwrap().len(), 1);
+    assert_eq!(manifest.run.children.len(), 1);
 }

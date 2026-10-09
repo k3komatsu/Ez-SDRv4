@@ -152,10 +152,10 @@ class EasyApi(unittest.TestCase):
                 child["resources"]["radio"]["requires"]["radio.rx.gain_db"] = {"kind": "eq", "value": gain}
                 result = sdr.run(child, duration=0.01)
                 self.assertEqual(result.manifest["run"]["parent"], sdr.run_id)
-                self.assertEqual(result.termination, {"kind": "stopped", "cause": {"reason": "client"}})
+                self.assertEqual(result.termination, {"kind": "stopped", "cause": {"kind": "client"}})
                 self.assertEqual(result.capture("rec").shape, (1000,))
                 results.append(result)
-        children = sdr.manifest["sections"]["ezsdr.children"]
+        children = sdr.manifest["run"]["children"]
         self.assertEqual([c["seq"] for c in children], [r.entry["seq"] for r in results])
         self.assertEqual([c["run"] for c in children], [r.manifest["run"]["id"] for r in results])
 
@@ -176,7 +176,8 @@ class EasyApi(unittest.TestCase):
                              "feed": {"port": {"component": "radio", "port": "rx"}, "policy": "drop_oldest", "capacity": 64}}],
             }
             result = sdr.run(spec, profile=profile, duration=0.001)
-            self.assertEqual(result.termination, {"kind": "failed", "stage": "validate"})
+            self.assertEqual((result.termination["kind"], result.termination["stage"]), ("failed", "validate"))
+            self.assertTrue(result.termination["reason"], result.termination)
             self.assertEqual(result.manifest["artifacts"], [])
             self.assertEqual(sdr.rx.capture(1).shape, (1,), "parent Session is still usable")
 
@@ -257,8 +258,8 @@ class EasyApi(unittest.TestCase):
             sdr.stop()
             with self.assertRaises(ezsdr.RunEnded) as ended:
                 sdr.rx.gain = 1
-            self.assertEqual(ended.exception.termination, {"kind": "stopped", "cause": {"reason": "client"}})
-        self.assertEqual(sdr.manifest["termination"]["reason"], {"kind": "stopped", "cause": {"reason": "client"}})
+            self.assertEqual(ended.exception.termination, {"kind": "stopped", "cause": {"kind": "client"}})
+        self.assertEqual(sdr.manifest["termination"]["reason"], {"kind": "stopped", "cause": {"kind": "client"}})
 
     def test_ea_17_each_capture_gets_its_own_samples(self) -> None:
         # The recorder numbers its requests, and a capture waits for its own (Review H, P0-2).
@@ -499,7 +500,7 @@ class EasyApi(unittest.TestCase):
         sdr._connection._process.stdin.flush()
         sdr._connection._process.wait(timeout=30)
         manifest = sdr.close()
-        self.assertEqual(manifest["termination"]["reason"], {"kind": "stopped", "cause": {"reason": "client_disconnect"}})
+        self.assertEqual(manifest["termination"]["reason"], {"kind": "stopped", "cause": {"kind": "client_disconnect"}})
         self.assertEqual(Path(sdr.manifest_path), Path(sdr.dir) / "manifest.json")
 
     # -- EA-19

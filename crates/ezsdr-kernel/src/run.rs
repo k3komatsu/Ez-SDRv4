@@ -43,7 +43,7 @@ pub enum Stage {
 /// Why a Run stopped (RS-3, RS-23, RS-26).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[serde(tag = "reason", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StopCause {
     /// The client asked (RS-3).
     Client {},
@@ -53,13 +53,13 @@ pub enum StopCause {
     LeaseExpiry {},
     /// The Policy table reacted to an event (RS-26).
     Policy {
-        /// Which kind triggered it.
-        kind: EventKind,
+        /// Which event kind triggered it.
+        event: EventKind,
     },
     /// Something aborted the Run (RS-9).
     Abort {
         /// Why, uninterpreted.
-        cause: String,
+        message: String,
     },
 }
 
@@ -83,13 +83,15 @@ pub enum Termination {
     Failed {
         /// Which one.
         stage: Stage,
+        /// Why: a string beginning with the rule that refused (KC-7).
+        reason: String,
     },
 }
 
 /// The eight states of a Run (RS-2).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunState {
     /// Nothing has happened yet.
     Created {},
@@ -324,7 +326,22 @@ pub struct Lease {
     pub expires_at_host: Option<u64>,
     /// How many times it has been adopted (RS-24).
     pub adoptions: u32,
-    /// Whether it has been released (RS-6, step 8).
+    /// Whether it has been released (RS-6, `release_and_write_manifest`).
+    pub released: bool,
+}
+
+/// What the Manifest records of a Lease: its mode and whether it was released. The
+/// token and the expiry deadline are runtime state only: the token is the credential
+/// adoption checks (R5), and the deadline is a host monotonic instant with no
+/// meaning outside the process (RS-22).
+///
+/// Rule: RS-38.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseRecord {
+    /// Attached or Detached (RS-21).
+    pub mode: LeaseMode,
+    /// Whether it has been released (RS-6, `release_and_write_manifest`).
     pub released: bool,
 }
 
@@ -335,6 +352,11 @@ impl Default for Lease {
 }
 
 impl Lease {
+    /// The Manifest's record of this Lease (RS-38).
+    pub fn record(&self) -> LeaseRecord {
+        LeaseRecord { mode: self.mode, released: self.released }
+    }
+
     /// The default: the Run ends when its client disconnects (RS-21).
     pub fn attached() -> Lease {
         Lease {
@@ -443,41 +465,37 @@ impl Lease {
 
 // ---------------------------------------------------------------- cleanup
 
-/// The nine ordered steps of RS-6, not the unordered list of Vision §53.
+/// The seven ordered steps of RS-6, each named for what it does, not the unordered
+/// list of Vision §53.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum CleanupStep {
-    /// 0. Clean up child Runs, each by this same algorithm (RS-6, RS-25).
-    Children,
     /// 1. Freeze dispatch and cancel every pending burst and timer. This precedes
-    ///    stopping TX: a burst still queued when TX stops will reopen it on a
-    ///    device that honours timed commands (RS-7).
+    ///    stopping the Providers: a burst still queued when a transmitter stops will
+    ///    reopen it on a device that honours timed commands (RS-7).
     FreezeDispatch,
-    /// 2. Stop TX on every Provider, in reverse dependency order (RS-8).
-    StopTx,
-    /// 3. Stop RX on every Provider, in reverse dependency order (RS-8).
-    StopRx,
-    /// 4. Cancel outstanding Peripheral operations (RS-6).
-    CancelPeripherals,
-    /// 5. Restore baseline state, in reverse dependency order (RS-8).
+    /// 2. Stop every Provider, in reverse dependency order (RS-8).
+    StopProviders,
+    /// 3. Drain the stepped instances under `orderly`, then stop every Executor and
+    ///    Sink, in reverse dependency order (RS-8, RS-9).
+    DrainAndStopConsumers,
+    /// 4. Restore baseline state, in reverse dependency order (RS-8).
     RestoreBaseline,
-    /// 6. Flush the event path, then finalise artifacts, marking as partial anything
+    /// 5. Drain the event path, then finalise artifacts, marking as partial anything
     ///    still open (RS-6, RS-30, RS-44).
     FinaliseArtifacts,
-    /// 7. Drain the event path again and collect the counters (RS-6, RS-35).
+    /// 6. Drain the event path again and collect the counters (RS-6, RS-35).
     FlushEvents,
-    /// 8. Release the Lease and write the Manifest (RS-6, RS-11).
+    /// 7. Release the Lease and write the Manifest (RS-6, RS-11).
     ReleaseAndWriteManifest,
 }
 
-/// The nine steps in order (RS-6).
-pub const CLEANUP_STEPS: [CleanupStep; 9] = [
-    CleanupStep::Children,
+/// The seven steps in order (RS-6).
+pub const CLEANUP_STEPS: [CleanupStep; 7] = [
     CleanupStep::FreezeDispatch,
-    CleanupStep::StopTx,
-    CleanupStep::StopRx,
-    CleanupStep::CancelPeripherals,
+    CleanupStep::StopProviders,
+    CleanupStep::DrainAndStopConsumers,
     CleanupStep::RestoreBaseline,
     CleanupStep::FinaliseArtifacts,
     CleanupStep::FlushEvents,
@@ -488,7 +506,10 @@ impl CleanupStep {
     /// The three steps that run per fragment, in reverse dependency order: the
     /// device that was armed first is released last (RS-8).
     pub fn is_per_fragment(self) -> bool {
-        matches!(self, CleanupStep::StopTx | CleanupStep::StopRx | CleanupStep::RestoreBaseline)
+        matches!(
+            self,
+            CleanupStep::StopProviders | CleanupStep::DrainAndStopConsumers | CleanupStep::RestoreBaseline
+        )
     }
 }
 
@@ -546,13 +567,13 @@ pub struct CleanupOutcome {
     pub modes: Vec<(CleanupStep, CleanupMode)>,
 }
 
-/// Runs RS-6's nine steps.
+/// Runs RS-6's seven steps.
 ///
 /// `reverse_order` is the inverse of SB-39's arm order, and is used for the three
 /// per-fragment steps. Every step is attempted even when an earlier one failed.
 /// Each step runs under a deadline; one that exceeds it is abandoned, recorded as a
 /// timeout, and the sequence continues — without that, a single wedged peripheral
-/// stops cleanup before step 8, so no Manifest is written for exactly the failure
+/// stops cleanup before the Manifest step, so no Manifest is written for exactly the failure
 /// that most needs recording.
 ///
 /// ponytail: an abandoned step's thread is left running, because an in-process call
@@ -691,7 +712,7 @@ impl RunStateMachine {
     }
 
     /// A failure at any stage moves the Run to `Stopping { abort }` with
-    /// `Failed { stage }`; a cancellation before `Running` moves it to
+    /// `Failed { stage, reason }`; a cancellation before `Running` moves it to
     /// `Stopping { orderly }` (RS-3).
     pub fn begin_stopping(
         &mut self,

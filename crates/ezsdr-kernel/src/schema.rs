@@ -106,7 +106,7 @@ pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     "action_template"       => crate::event::ActionTemplate,
     "event"                 => crate::event::Event,
     "log_entry"             => crate::session::LogEntry,
-    "lease"                 => crate::run::Lease,
+    "lease"                 => crate::run::LeaseRecord,
     "policy"                => crate::policy::Policy,
     "stop_cause"            => crate::run::StopCause,
     "artifact_ref"          => crate::manifest::ArtifactRef,

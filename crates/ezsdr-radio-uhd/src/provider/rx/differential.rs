@@ -826,7 +826,7 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
         refused: w.refused.clone(),
         refusable: extra.refuse.map_or(0, |rate| device.inner.calls().iter().filter(|c| c.starts_with(&format!("apply rx 0 rate={rate} "))).count()),
         rejected: rec.rejected.len(),
-        late: events.drain().iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).count(),
+        late: events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).count(),
         lost: core.is_lost(),
         abort: w.abort,
         streaming: !w.lost && w.runs.iter().any(|run| run.end.is_none()),

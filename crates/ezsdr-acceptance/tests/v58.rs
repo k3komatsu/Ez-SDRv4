@@ -164,7 +164,7 @@ fn v58_04_mock_events_reach_counters_policy_and_manifest() {
     let run = spec_run(&temp, &stopped, &profile, BTreeMap::new());
     let clock = root(&run);
     let manifest = finish_at(run, clock, T0 + 160_000_000);
-    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: EventKind::parse("radio.RX_OVERFLOW").unwrap() } });
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: EventKind::parse("radio.RX_OVERFLOW").unwrap() } });
     assert!(manifest.run.transitions.iter().any(|entry| entry.state == RunState::Stopping { mode: CleanupMode::Orderly }));
 }
 
@@ -173,7 +173,7 @@ fn v58_05_device_lost_aborts_with_full_cleanup() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
     let faults = json!({ "sim.faults": [{ "at_ns": 5_000_000, "fault": "device_lost", "target": "radio" }] });
     let manifest = complete(&spec, "x310-like", json!({ "id": "mock" }), faults, "v58-05", 10_000_000);
-    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: EventKind::parse(EventKind::DEVICE_LOST).unwrap() } });
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: EventKind::parse(EventKind::DEVICE_LOST).unwrap() } });
     assert!(manifest.run.transitions.iter().any(|entry| entry.state == RunState::Stopping { mode: CleanupMode::Abort }));
     assert!(manifest.termination.cleanup_failures.is_empty());
     assert!(artifact(&manifest, "rec").partial);
@@ -276,7 +276,8 @@ fn v58_07_manifest_records_every_input_and_output() {
     }
     for vocabulary in ["radio", "sim", "sink"] { assert!(manifest.vocabularies.keys().any(|id| id.as_str() == vocabulary)); }
     for stream in ["mock/rx", "mock/tx"] { assert!(manifest.clocks.sample_clocks.iter().any(|clock| clock.stream.path == stream)); }
-    for name in ["ezsdr.links", "ezsdr.radio.mock.mock.envelope", "ezsdr.radio.mock.mock.bursts", "ezsdr.radio.mock.mock.faults", "ezsdr.radio.mock.mock.rejected", "ezsdr.radio.mock.mock.stats", "ezsdr.radio.mock.mock.applied"] {
+    assert_eq!(manifest.links.len(), manifest.plan.as_ref().unwrap().links.len());
+    for name in ["ezsdr.radio.mock.mock.envelope", "ezsdr.radio.mock.mock.bursts", "ezsdr.radio.mock.mock.faults", "ezsdr.radio.mock.mock.rejected", "ezsdr.radio.mock.mock.stats", "ezsdr.radio.mock.mock.applied"] {
         assert!(manifest.sections.contains_key(&ezsdr_kernel::spec::Namespace::parse(name).unwrap()), "missing section {name}");
         // MR-27: a MockRadio section is under its instance's own id, so a Run with two
         // Mocks keeps both sets; the unqualified name must be gone.
@@ -336,7 +337,7 @@ fn v58_11_19_5_msps_is_coerced_to_20() {
     let refused_spec = experiments::receive(1, 19.5e6, 1.0e9, Some(1_000));
     let run = spec_run(&temp, &refused_spec, &profile, BTreeMap::new());
     let refused = run.finish();
-    assert_eq!(refused.termination.reason, Termination::Failed { stage: Stage::Validate });
+    assert!(matches!(refused.termination.reason, Termination::Failed { stage: Stage::Validate, .. }));
 }
 
 #[test]
@@ -346,7 +347,7 @@ fn v58_11_beyond_the_performance_envelope_is_rejected_at_validate() {
     let profile = rig::spec_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
     let run = spec_run(&temp, &spec, &profile, BTreeMap::new());
     let manifest = run.finish();
-    assert_eq!(manifest.termination.reason, Termination::Failed { stage: Stage::Validate });
+    assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Validate, .. }));
     let rejected = manifest.admission.rejected.iter().find(|item| item.key.as_str() == "radio.rx.sample_rate_hz").unwrap();
     assert!(rejected.reason.starts_with("RM-7"));
 }
@@ -611,7 +612,7 @@ fn kd_01_a_faulted_round_does_not_depend_on_fragment_names() {
         let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
         let clock = root(&run);
         let manifest = finish_at(run, clock, T0 + 25_000_000);
-        assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: EventKind::parse(EventKind::DEVICE_LOST).unwrap() } });
+        assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: EventKind::parse(EventKind::DEVICE_LOST).unwrap() } });
         let stats = section(&manifest, "ezsdr.radio.mock.dev_rx.stats");
         (stats["rx_blocks"].clone(), stats["rx_samples"].clone())
     };

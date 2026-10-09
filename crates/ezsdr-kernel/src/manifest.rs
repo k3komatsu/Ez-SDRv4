@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 use crate::binding::{AdmissionResult, BindingProfile};
 use crate::event::{CounterRow, Event, EventKind};
 use crate::hash::{ContentHash, HashError};
-use crate::id::RunId;
+use crate::id::{DataLinkId, RunId};
 use crate::module_api::{ExecutionClass, Fidelity, ModuleRef, ProfileRef, Version};
 use crate::plan::{ExecutionPlan, PrepareReport};
 use crate::policy::Policy;
-use crate::run::{CleanupFailure, Lease, StopCause, Termination, TransitionRecord};
+use crate::run::{CleanupFailure, LeaseRecord, Termination, TransitionRecord};
 use crate::spec::{ExperimentSpec, Ident, Namespace};
 use crate::stream::ContinuityMap;
 use crate::time::{ClockDomain, ClockRelation, SampleClockRecord, TimePoint};
@@ -64,14 +64,41 @@ pub struct RunSection {
     pub kind: RunKind,
     /// The parent Run, for a child (RS-25).
     pub parent: Option<RunId>,
-    /// Fixed at binding resolution and never changed during the Run (RS-42).
-    pub execution_class: ExecutionClass,
+    /// Fixed at binding resolution and never changed during the Run; absent when no
+    /// plan was built, since the plan derives it (RS-42).
+    pub execution_class: Option<ExecutionClass>,
     /// The weakest value per aspect over the bound Providers (RS-41, MA-42).
     pub fidelity: Fidelity,
     /// Every state transition, with its runtime instant and host UTC time (RS-5).
     pub transitions: Vec<TransitionRecord>,
     /// May be claimed only for the Simulation class with a recorded seed (RS-42).
     pub deterministic: bool,
+    /// The child Runs this Session created, in creation order (RS-25a).
+    #[serde(default)]
+    pub children: Vec<ChildRecord>,
+}
+
+/// One child Run a Session created (RS-25a).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChildRecord {
+    /// The `RunChild` entry of the parent's action log (RS-15).
+    pub seq: u32,
+    /// The child's id (RS-1).
+    pub run: RunId,
+    /// The child's Manifest hash; absent when it could not be sealed (RS-46).
+    pub manifest: Option<ContentHash>,
+}
+
+/// One DataLink the Run created, with what it dropped; its endpoints are its entry
+/// in `plan.links` (RS-38, SC-20a).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LinkRecord {
+    /// Which link (SC-19).
+    pub link: DataLinkId,
+    /// How many blocks it dropped; absent when cleanup never read it (RS-6).
+    pub drops: Option<u64>,
 }
 
 /// What kind of Run this is (RS-1, RS-12).
@@ -185,10 +212,10 @@ pub struct TerminationSection {
     /// one failed (RS-6, RS-8a).
     #[serde(default)]
     pub cleanup_failures: Vec<CleanupFailure>,
-    /// An abort raised while an orderly stop was in progress is recorded here
-    /// alongside the original cause (RS-10).
+    /// Every later end request that escalated the mode, failed or was a Policy
+    /// reaction, in request order, beside the first (RS-10, KC-32).
     #[serde(default)]
-    pub also: Vec<StopCause>,
+    pub also: Vec<Termination>,
 }
 
 /// The `prepare` section (RS-38, SB-41).
@@ -256,8 +283,11 @@ pub struct Manifest {
     /// Counters and delivered bodies (RS-33).
     #[serde(default)]
     pub events: EventsSection,
+    /// Every DataLink the Run created, in `plan.links` order (RS-38).
+    #[serde(default)]
+    pub links: Vec<LinkRecord>,
     /// How the Run was held (RS-21).
-    pub lease: Lease,
+    pub lease: LeaseRecord,
     /// The Session action log; absent for a Spec Run (RS-15).
     #[serde(default)]
     pub action_log: Vec<crate::session::LogEntry>,
@@ -344,7 +374,8 @@ impl Manifest {
         // Manifest is the artifact the claim lands in, so this is where it is
         // enforced rather than trusted.
         self.run.deterministic =
-            self.run.deterministic && self.run.execution_class.may_claim_determinism();
+            self.run.deterministic
+                && self.run.execution_class.is_some_and(|class| class.may_claim_determinism());
         // Computed into a local and stored only on success: clearing the field first
         // left a previously sealed Manifest with `hash: None` when the re-seal failed,
         // so a Manifest that had a valid hash lost it (RS-46).
@@ -377,7 +408,7 @@ impl Manifest {
         }
         // `sections` is the path RS-39 and RS-43 design for untrusted Module content
         // and it passes no `from_json`, so OV-15's ASCII key rule is checked here.
-        // Left to hashing time, `seal()` failed at cleanup step 8 — a Run that had
+        // Left to hashing time, `seal()` failed at cleanup step 7 — a Run that had
         // already transmitted and produced no Manifest, against RS-11 (SB-9a).
         crate::spec::check_ascii_keys(&content).map_err(|e| crate::run::RunError::SectionKeyNotAscii { key: e.to_string() })?;
         self.sections.insert(section, content);

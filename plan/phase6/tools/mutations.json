@@ -121,10 +121,10 @@
  },
  {
   "id": "F13",
-  "name": "KC-45 ezsdr.children not written",
+  "name": "KC-45 run.children not written",
   "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
-  "old": "        if !self.children.is_empty() {",
-  "new": "        if false && !self.children.is_empty() {",
+  "old": "            children: self.children.clone(),",
+  "new": "            children: Vec::new(),",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kf_03_a_child_run_is_admitted_logged_run_and_recorded"
@@ -363,10 +363,10 @@
  },
  {
   "id": "G04",
-  "name": "KC-45 ezsdr.children records seq 0",
+  "name": "KC-45 run.children records seq 0",
   "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
-  "old": "\"seq\": entry.seq,",
-  "new": "\"seq\": 0,",
+  "old": "        seq: entry.seq,",
+  "new": "        seq: 0,",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kf_03_children_are_recorded_in_order"

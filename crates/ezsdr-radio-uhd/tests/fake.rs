@@ -185,7 +185,7 @@ fn ur_06_the_provider_refuses_another_root() {
         let dir = TempDir::new();
         let profile = profile(&dir, json!({ "authority_args": "addr=10.0.0.9", "clock_source": clock_source, "time_source": time_source }), json!({}), false);
         let run = start_spec_run(&receive_spec(1, 1e6, 1e9, None), &profile, assembly(&profile, fake(FakeConfig::default()), BTreeMap::new(), |r| r)).unwrap();
-        assert_eq!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare } }, "{clock_source} {time_source}");
+        assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare, .. } }), "{clock_source} {time_source}");
         let manifest = run.finish();
         assert!(failure(&manifest).contains("UR-6: the primary root is not this device's"), "{clock_source} {time_source}: {}", failure(&manifest));
     }
@@ -618,12 +618,12 @@ impl Direct {
 
     fn settle(&mut self, wall: Wall) -> Vec<Event> {
         std::thread::sleep(wall);
-        self.delivered.extend(self.events.drain());
+        self.delivered.extend(self.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)));
         self.delivered.clone()
     }
 
     fn of(&mut self, name: &str) -> Vec<Event> {
-        self.delivered.extend(self.events.drain());
+        self.delivered.extend(self.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)));
         self.delivered.iter().filter(|e| e.kind == kind(name)).cloned().collect()
     }
 
@@ -672,7 +672,7 @@ fn ur_12_a_rate_the_device_does_not_apply_is_refused() {
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::WrongRate { claimed: 20e6, applied: 19.9e6, nth: 0 }], ..FakeConfig::default() });
     let run = spec_run(&receive_spec(1, 20e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
-    assert_eq!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare } });
+    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare, .. } }));
     let manifest = run.finish();
     assert!(failure(&manifest).contains("UR-12: the device applied 19900000 S/s for the claimed 20000000"), "{}", failure(&manifest));
 }
@@ -710,7 +710,7 @@ fn ur_13_arm_cases() {
     let dir = TempDir::new();
     let unlocked = fake(FakeConfig { faults: vec![FakeFault::Unlocked(Wall::ZERO)], ..FakeConfig::default() });
     let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({ "clock_source": "external" }), json!({}), false), unlocked, BTreeMap::new());
-    assert_eq!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm } });
+    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }));
     assert!(failure(&run.finish()).contains("UR-13: the external reference is not locked"));
     let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({ "clock_source": "external" }), json!({}), false), fake(FakeConfig::default()), BTreeMap::new());
     running(&run);
@@ -759,7 +759,7 @@ fn ur_15_start_cases() {
     let dir = TempDir::new();
     let early = profile(&dir, json!({}), json!({ "ezsdr.time": { "class": "hardware_in_loop", "start_lead_ns": 1_000_000_000u64 } }), false);
     let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &early, fake(FakeConfig::default()), BTreeMap::new());
-    assert_eq!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm } });
+    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }));
     let manifest = run.finish();
     assert!(failure(&manifest).contains("UR-15: the start at"), "{}", failure(&manifest));
     assert_eq!(events_of(&manifest, "radio.LATE_COMMAND").len(), 1);
@@ -797,7 +797,7 @@ fn ur_16_a_panicking_thread_is_a_lost_device() {
     let result = run.run_until_end(after(&run, ms(5_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
     let manifest = run.finish();
-    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: kind(EventKind::DEVICE_LOST) } });
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
     assert!(section(&manifest, "rejected").as_array().unwrap().iter().any(|r| r["thread"] == "uhd-rx"));
     assert_marked_lost_before_closed(&device);
 }
@@ -1651,7 +1651,7 @@ fn ur_27_a_lost_reference_is_clock_lost() {
     let result = run.run_until_end(after(&run, ms(5_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
     let manifest = run.finish();
-    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: kind("radio.CLOCK_LOST") } });
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind("radio.CLOCK_LOST") } });
     assert_eq!(events_of(&manifest, "radio.CLOCK_LOST")[0].payload, json!({ "reference": "frequency" }));
 }
 
@@ -1687,7 +1687,7 @@ fn ur_28_a_failed_report_read_is_not_an_empty_one() {
     let result = run.run_until_end(after(&run, ms(5_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
     let manifest = run.finish();
-    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: kind(EventKind::DEVICE_LOST) } });
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
 }
 
 #[test]
@@ -1713,7 +1713,7 @@ fn ur_29_a_lost_device_aborts_the_run() {
     let result = run.run_until_end(after(&run, ms(5_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
     let manifest = run.finish();
-    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { kind: kind(EventKind::DEVICE_LOST) } });
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
     assert_eq!(events_of(&manifest, EventKind::DEVICE_LOST)[0].source, ResourceId::parse("usrp").unwrap());
     assert_marked_lost_before_closed(&device);
 }
@@ -1827,7 +1827,7 @@ fn ur_30_the_sections_are_written() {
 fn ur_31_fidelity_follows_the_device() {
     let (manifest, _dir) = receive_run(FakeConfig::default(), 1, 1_000);
     assert_eq!(manifest.run.fidelity, ezsdr_kernel::module_api::Fidelity::NONE);
-    assert_eq!(manifest.run.execution_class, ExecutionClass::HardwareInLoop);
+    assert_eq!(manifest.run.execution_class, Some(ExecutionClass::HardwareInLoop));
 }
 
 // ---------------------------------------------------------------- the fake (UR-33)

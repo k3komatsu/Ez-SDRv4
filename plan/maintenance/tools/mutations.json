@@ -1232,5 +1232,245 @@
   "crate": "ezsdr-kernel",
   "test_bin": "schema_freeze",
   "filter": "ov_12_a_description_or_title_is_not_the_shape"
+ },
+ {
+  "id": "J88",
+  "name": "KC-32: a later failure is not recorded in also",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "        Termination::Failed { .. } | Termination::Stopped { cause: StopCause::Policy { .. } }",
+  "new": "        Termination::Stopped { cause: StopCause::Policy { .. } }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_32_a_later_failure_is_recorded_in_also"
+ },
+ {
+  "id": "J89",
+  "name": "KC-32: a Policy reaction a failure overrode is not recorded in also",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "        Termination::Failed { .. } | Termination::Stopped { cause: StopCause::Policy { .. } }",
+  "new": "        Termination::Failed { .. }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_32_a_policy_reaction_a_failure_overrode_is_recorded_in_also"
+ },
+ {
+  "id": "J90",
+  "name": "KC-7: a stage failure loses its reason",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "            crate::run::Termination::Failed { stage, reason },",
+  "new": "            crate::run::Termination::Failed { stage, reason: { let _ = reason; String::new() } },",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_01_a_validate_failure_records_its_reason"
+ },
+ {
+  "id": "J91",
+  "name": "RS-35: EVENTS_DROPPED stamped at host_monotonic 0, not at the drain",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "                    time: at,",
+  "new": "                    time: TimePoint::new(crate::id::ClockDomainId::HOST_MONOTONIC, 0),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_33_counters_exact_under_drop"
+ },
+ {
+  "id": "J92",
+  "name": "RS-35: EVENTS_DROPPED sourced unforeseen, not kernel",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "                let source = ResourceId::parse(crate::coordinator::KERNEL_SOURCE)",
+  "new": "                let source = ResourceId::parse(\"unforeseen\")",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_33_counters_exact_under_drop"
+ },
+ {
+  "id": "J93",
+  "name": "RS-35: the coordinator drains at no instant",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "    let at = shared.now();\n",
+  "new": "    let at = TimePoint::new(crate::id::ClockDomainId::HOST_MONOTONIC, 0);\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "rs_36_a_dropped_stopping_body_ends_the_run"
+ },
+ {
+  "id": "J94",
+  "name": "F25 (a): a next_wakeup panic in the cleanup drain reads as no wakeup",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "            super::ending::request(\n                shared,\n                Termination::Failed {\n                    stage: Stage::Run,\n                    reason: \"KC-30: authority panicked during next_wakeup\".to_owned(),\n                },\n                CleanupMode::Abort,\n            );\n            break;",
+  "new": "            break;",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_30_a_next_wakeup_panic_in_the_cleanup_drain_is_recorded"
+ },
+ {
+  "id": "J95",
+  "name": "F25 (b): the dispatch freeze tries only the first handle",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": ".filter(|handle| self.shared.cancel(*handle).is_err())",
+  "new": ".take(1).filter(|handle| self.shared.cancel(*handle).is_err())",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_30_a_panicking_time_cancel_is_a_cleanup_failure"
+ },
+ {
+  "id": "J96",
+  "name": "KC-45: execution_class made up as Simulation without a plan",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "            execution_class: self.shared.routing().map(|routing| routing.plan.class),",
+  "new": "            execution_class: Some(self.shared.routing().map_or(crate::module_api::ExecutionClass::Simulation, |routing| routing.plan.class)),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_01_a_validate_failure_records_its_reason"
+ },
+ {
+  "id": "J97",
+  "name": "KA-18: a link record loses its drops",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                    drops: drops.get(i).copied(),",
+  "new": "                    drops: drops.get(i).map(|_| 0),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "ka_18_nonzero_link_drops_reach_the_manifest"
+ },
+ {
+  "id": "J98",
+  "name": "RS-27: an EventKind without a dot parses",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "        let ok = s.contains('.')",
+  "new": "        let ok = !s.is_empty()",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_01_every_name_grammar_is_enforced_at_the_document_boundary"
+ },
+ {
+  "id": "J99",
+  "name": "KC-22: the coordinator's STEP_LIVELOCK keeps its own payload",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "        payload: serde_json::json!({ \"rounds\": crate::module_api::STEP_ROUND_CAP }),",
+  "new": "        payload: serde_json::json!({ \"wakeups\": crate::module_api::STEP_ROUND_CAP }),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_22_a_same_instant_wakeup_loop_is_step_livelock"
+ },
+ {
+  "id": "J100",
+  "name": "RS-38: the Lease record says unreleased",
+  "file": "crates/ezsdr-kernel/src/run.rs",
+  "old": "        LeaseRecord { mode: self.mode, released: self.released }",
+  "new": "        LeaseRecord { mode: self.mode, released: false }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_45_manifest_fields"
+ },
+ {
+  "id": "J101",
+  "name": "RS-6: a cleanup step keeps its radio name",
+  "file": "crates/ezsdr-kernel/src/run.rs",
+  "old": "    /// 2. Stop every Provider, in reverse dependency order (RS-8).\n    StopProviders,",
+  "new": "    /// 2. Stop every Provider, in reverse dependency order (RS-8).\n    #[serde(rename = \"stop_tx\")]\n    StopProviders,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_06_cleanup_order_orderly"
+ },
+ {
+  "id": "J102",
+  "name": "OV-13: StopCause tagged reason again",
+  "file": "crates/ezsdr-kernel/src/run.rs",
+  "old": "#[serde(tag = \"kind\", rename_all = \"snake_case\")]\npub enum StopCause {",
+  "new": "#[serde(tag = \"reason\", rename_all = \"snake_case\")]\npub enum StopCause {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "schema_freeze",
+  "filter": "ov_22_schema_freeze"
+ },
+ {
+  "id": "J103",
+  "name": "OV-13: RunState tagged state again",
+  "file": "crates/ezsdr-kernel/src/run.rs",
+  "old": "#[serde(tag = \"kind\", rename_all = \"snake_case\")]\npub enum RunState {",
+  "new": "#[serde(tag = \"state\", rename_all = \"snake_case\")]\npub enum RunState {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "schema_freeze",
+  "filter": "ov_22_schema_freeze"
+ },
+ {
+  "id": "J104",
+  "name": "SB-24: the Authority fragment repeats its selector, un-namespaced",
+  "file": "crates/ezsdr-kernel/src/plan/compile.rs",
+  "old": "            role: Role::Authority,\n            content: serde_json::Value::Null,",
+  "new": "            role: Role::Authority,\n            content: serde_json::json!({ \"selector\": binding.selector }),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_24_authority_is_named_and_rides_or_stands_alone"
+ },
+ {
+  "id": "J105",
+  "name": "KC-32: an overridden reaction is recorded once per event",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "    if (escalates || overridden) && current.termination != termination && !also.contains(&termination) {",
+  "new": "    if (escalates || overridden) && current.termination != termination {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_32_a_repeated_reaction_is_recorded_once"
+ },
+ {
+  "id": "J106",
+  "name": "KC-32: an escalating request is not recorded in also",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "    if (escalates || overridden) && current.termination != termination && !also.contains(&termination) {",
+  "new": "    if overridden && current.termination != termination && !also.contains(&termination) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_32_a_module_abort_during_an_orderly_cleanup_escalates_and_is_recorded"
+ },
+ {
+  "id": "J107",
+  "name": "KC-32: a reaction equal to the Termination is recorded again",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "    if (escalates || overridden) && current.termination != termination && !also.contains(&termination) {",
+  "new": "    if (escalates || overridden) && !also.contains(&termination) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_32_a_reaction_equal_to_the_first_end_is_not_recorded"
+ },
+ {
+  "id": "J108",
+  "name": "RS-6 step 3: a next_wakeup panic in the cleanup drain does not escalate to abort",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "                    reason: \"KC-30: authority panicked during next_wakeup\".to_owned(),\n                },\n                CleanupMode::Abort,",
+  "new": "                    reason: \"KC-30: authority panicked during next_wakeup\".to_owned(),\n                },\n                CleanupMode::Orderly,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_30_a_next_wakeup_panic_in_the_cleanup_drain_is_recorded"
+ },
+ {
+  "id": "J109",
+  "name": "RS-27: the fallback kind is un-namespaced",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "\"ezsdr.unforeseen\"",
+  "new": "\"unforeseen\"",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_33_unforeseen_pair_uses_the_fallback_row"
+ },
+ {
+  "id": "J110",
+  "name": "KC-32: a later non-escalating client stop is recorded in also",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "        Termination::Failed { .. } | Termination::Stopped { cause: StopCause::Policy { .. } }\n    );",
+  "new": "        Termination::Failed { .. } | Termination::Stopped { .. }\n    );",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_32_a_disconnect_after_a_policy_stop_is_dropped"
+ },
+ {
+  "id": "J111",
+  "name": "F25 (b): the dispatch freeze stops at the first panicking cancel",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": ".filter(|handle| self.shared.cancel(*handle).is_err())\n                    .count();",
+  "new": ".find(|handle| self.shared.cancel(*handle).is_err())\n                    .map_or(0, |_| 1usize);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_30_a_panicking_time_cancel_is_a_cleanup_failure"
  }
 ]

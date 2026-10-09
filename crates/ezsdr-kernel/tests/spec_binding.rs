@@ -2195,7 +2195,7 @@ fn sb_20_extensions_reach_the_manifest_verbatim() {
 fn sb_18_unregistered_event_kind_refused() {
     let mut spec = minimal_spec();
     spec.policies.failure.insert(
-        ezsdr_kernel::event::EventKind::parse("RX_OVERFLOWS").expect("parses"),
+        ezsdr_kernel::event::EventKind::parse("test.RX_OVERFLOWS").expect("parses"),
         Reaction::Stop,
     );
     let fx = Fixture::new();
@@ -3241,7 +3241,7 @@ fn ma_41_a_declared_time_class_that_disagrees_is_refused() {
 fn ov_16_a_non_ascii_key_is_refused_at_ingestion() {
     // OV-15's canonicaliser refuses a non-ASCII object key, and nothing refused one
     // at ingestion: a Spec carrying one in an opaque section validated, planned,
-    // armed and transmitted, and `Manifest::seal()` then failed at cleanup step 8 —
+    // armed and transmitted, and `Manifest::seal()` then failed at cleanup step 7 —
     // a Run that radiated and produced no Manifest, against RS-11.
     let doc = serde_json::json!({
         "version": 1,
@@ -5410,8 +5410,8 @@ fn sb_01_every_name_grammar_is_enforced_at_the_document_boundary() {
         |s| ModuleId::parse(s).is_ok(),
     );
     agrees::<EventKind>(
-        &["EVENTS_DROPPED", "test.custom"],
-        &["9 bad", "a..b", "", "a-b"],
+        &["ezsdr.EVENTS_DROPPED", "test.custom"],
+        &["9 bad", "a..b", "", "a-b", "EVENTS_DROPPED"],
         |s| EventKind::parse(s).is_ok(),
     );
     agrees::<DataContractId>(
@@ -6280,7 +6280,8 @@ fn sb_24_authority_is_named_and_rides_or_stands_alone() {
         .find(|f| f.id == id("sim"))
         .expect("the Authority's own fragment");
     assert_eq!((fragment.role, &fragment.instance), (Role::Authority, &sim));
-    assert_eq!(fragment.content, serde_json::json!({ "selector": {} }));
+    // No content: the Module and version are its `instance`, the selector its binding's.
+    assert_eq!(fragment.content, serde_json::Value::Null);
     // Two Authority-capable resources: the one `authority` names decides the class.
     let mut two_spec = spec.clone();
     two_spec

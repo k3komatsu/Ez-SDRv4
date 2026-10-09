@@ -48,51 +48,21 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Who holds a Run, and for how long (RS-21…RS-25).",
+  "description": "What the Manifest records of a Lease: its mode and whether it was released. The\ntoken and the expiry deadline are runtime state only: the token is the credential\nadoption checks (R5), and the deadline is a host monotonic instant with no\nmeaning outside the process (RS-22).\n\nRule: RS-38.",
   "properties": {
-    "adoptions": {
-      "description": "How many times it has been adopted (RS-24).",
-      "format": "uint32",
-      "minimum": 0,
-      "type": "integer"
-    },
-    "expires_at_host": {
-      "description": "When it expires, on the host monotonic clock (RS-22).",
-      "format": "uint64",
-      "minimum": 0,
-      "type": [
-        "integer",
-        "null"
-      ]
-    },
-    "holder": {
-      "description": "Who holds it now, uninterpreted by the Kernel (RS-24).",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "mode": {
       "$ref": "#/$defs/LeaseMode",
       "description": "Attached or Detached (RS-21)."
     },
     "released": {
-      "description": "Whether it has been released (RS-6, step 8).",
+      "description": "Whether it has been released (RS-6, `release_and_write_manifest`).",
       "type": "boolean"
-    },
-    "token": {
-      "description": "Issued at grant for a Detached Lease; only `Adopt { token }` reclaims it\n(RS-24, decision R5).",
-      "type": [
-        "string",
-        "null"
-      ]
     }
   },
   "required": [
     "mode",
-    "adoptions",
     "released"
   ],
-  "title": "Lease",
+  "title": "LeaseRecord",
   "type": "object"
 }

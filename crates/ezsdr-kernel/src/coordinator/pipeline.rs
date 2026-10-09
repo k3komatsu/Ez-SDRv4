@@ -239,7 +239,6 @@ pub(super) fn assemble(
         marks: Mutex::new(Vec::new()),
         end: Mutex::new(None),
         also: Mutex::new(Vec::new()),
-        failure: Mutex::new(None),
         artifacts: Mutex::new(Vec::new()),
         links: Mutex::new(Vec::new()),
         link_drops: Mutex::new(Vec::new()),
@@ -1287,9 +1286,8 @@ impl RunHandle {
     fn fail(&self, stage: Stage, reason: String) {
         super::ending::request(
             &self.shared,
-            crate::run::Termination::Failed { stage },
+            crate::run::Termination::Failed { stage, reason },
             crate::run::CleanupMode::Abort,
-            Some(reason),
         );
     }
 }
@@ -1540,7 +1538,7 @@ pub(super) fn submit(
     let entry = run.log.entries().last().expect("entry appended").clone();
 
     if let Some((termination, mode)) = end_after_admission {
-        super::ending::request(&run.shared, termination, mode, None);
+        super::ending::request(&run.shared, termination, mode);
     } else {
         super::stepping::round(&run.shared, now, false);
         run.check_lease();
@@ -1612,11 +1610,11 @@ pub(super) fn run_child(
     .map_err(|error| super::RunHandleError::Malformed { error })?;
     drive(&mut child);
     let manifest = child.finish();
-    run.children.push(serde_json::json!({
-        "seq": entry.seq,
-        "run": manifest.run.id,
-        "manifest": manifest.hash,
-    }));
+    run.children.push(crate::manifest::ChildRecord {
+        seq: entry.seq,
+        run: manifest.run.id.clone(),
+        manifest: manifest.hash.clone(),
+    });
     run.check_lease();
     run.settle();
     Ok((entry, Some(manifest)))
@@ -1771,7 +1769,6 @@ impl ActionSubmitter for Submitter {
                 &shared,
                 crate::run::Termination::Stopped { cause },
                 crate::run::CleanupMode::Abort,
-                None,
             );
             return Ok(ActionId(0));
         }

@@ -118,7 +118,7 @@ fn uhd_59_one_spec_mock_and_uhd_profiles() {
     assert_eq!(mock.spec.body, uhd.spec.body);
     assert!(modules(&mock).contains(&"ezsdr.radio.mock"));
     assert!(modules(&uhd).contains(&"ezsdr.radio.uhd"));
-    assert_eq!(uhd.run.execution_class, ezsdr_kernel::module_api::ExecutionClass::HardwareInLoop);
+    assert_eq!(uhd.run.execution_class, Some(ezsdr_kernel::module_api::ExecutionClass::HardwareInLoop));
     for manifest in [&mock, &uhd] {
         assert_eq!(artifact(manifest, "rec").size_bytes, 80_000, "10 000 cf32 samples");
     }

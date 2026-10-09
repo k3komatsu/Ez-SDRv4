@@ -135,11 +135,12 @@ fn manifest_of(run: RunHandle) -> Manifest {
     run.finish()
 }
 
+/// The reason of a Run that ended `Failed` (KC-7), or nothing.
 fn failure(manifest: &Manifest) -> String {
-    manifest.sections[&ns("ezsdr.failure")]["reason"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned()
+    match &manifest.termination.reason {
+        Termination::Failed { reason, .. } => reason.clone(),
+        _ => String::new(),
+    }
 }
 
 fn running(run: &RunHandle) {
@@ -177,7 +178,7 @@ fn kg_01_a_device_paced_run_reaches_running() {
     let run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
     running(&run);
     let manifest = manifest_of(run);
-    assert_eq!(manifest.run.execution_class, ExecutionClass::HardwareInLoop);
+    assert_eq!(manifest.run.execution_class, Some(ExecutionClass::HardwareInLoop));
     assert!(!manifest.run.deterministic);
     let calls: Vec<_> = probe
         .with_prefix("radio:")
@@ -196,7 +197,7 @@ fn kg_01_the_hardware_class_reaches_running() {
     let assembly = provider(rig.assembly, "radio", ThreadedProvider::new("radio", "radio", &probe));
     let run = start_spec_run(&spec_one(), &profile, assembly).unwrap();
     running(&run);
-    assert_eq!(manifest_of(run).run.execution_class, ExecutionClass::Hardware);
+    assert_eq!(manifest_of(run).run.execution_class, Some(ExecutionClass::Hardware));
 }
 
 #[test]
@@ -209,9 +210,8 @@ fn kg_01_a_stepped_provider_is_refused_in_a_device_paced_class() {
         SteppedProvider::new("p", TestProvider::new("radio", 2), &probe),
     );
     let run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
-    assert_eq!(
-        run.state(),
-        RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Plan } }
+    assert!(
+        matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Plan, .. } })
     );
     let manifest = manifest_of(run);
     assert!(failure(&manifest).starts_with("KC-2a: radio is a stepped Provider"), "{}", failure(&manifest));
@@ -264,9 +264,8 @@ fn kg_01_an_island_with_an_rt_policy_is_refused() {
             Box::new(support::ProbeExecutor::new("x", &probe)),
         );
         let run = start_spec_run(&spec, &profile, assembly).unwrap();
-        assert_eq!(
-            run.state(),
-            RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Plan } },
+        assert!(
+            matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Plan, .. } }),
             "{field}"
         );
         let reason = failure(&manifest_of(run));
@@ -301,7 +300,7 @@ fn kg_02_the_data_thread_drains_a_sink_while_no_call_runs() {
     let second = count(&probe, "rec:block:");
     assert!(second >= first + 50, "{first} then {second}");
     let manifest = manifest_of(run);
-    assert_eq!(manifest.sections[&ns("ezsdr.links")][0]["drops"], 0);
+    assert_eq!(manifest.links[0].drops, Some(0));
 }
 
 #[test]
@@ -377,7 +376,7 @@ fn kg_02_a_failed_sink_is_not_stepped_again() {
     let probe = Probe::new();
     let rig = paced();
     let (mut spec, profile) = output_docs(64);
-    spec["policies"] = serde_json::json!({ "failure": { "DEVICE_LOST": "continue" } });
+    spec["policies"] = serde_json::json!({ "failure": { "ezsdr.DEVICE_LOST": "continue" } });
     let assembly = provider(rig.assembly, "radio", ThreadedProvider::new("radio", "radio", &probe));
     let at = 20_000_000 + Instant::now().elapsed().as_nanos() as i64;
     let sink_double = RecordingSink::new("rec", &probe).failing_step_at(at, ModuleErrorKind::DeviceLost);
@@ -488,7 +487,7 @@ fn kg_02_the_first_delivered_stopping_event_is_the_termination_cause() {
             .clone();
         assert_eq!(
             manifest.termination.reason,
-            Termination::Stopped { cause: StopCause::Policy { kind: first } }
+            Termination::Stopped { cause: StopCause::Policy { event: first } }
         );
     }
 }
@@ -646,7 +645,7 @@ fn kg_03_a_fatal_event_stops_the_providers_without_a_client_call() {
     let manifest = manifest_of(run);
     assert_eq!(
         manifest.termination.reason,
-        Termination::Stopped { cause: StopCause::Policy { kind: kind(EventKind::DEVICE_LOST) } }
+        Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } }
     );
     assert_eq!(count(&probe, "radio:stop"), 1);
 }
@@ -667,9 +666,26 @@ fn kc_29_an_end_the_data_thread_requested_is_cleaned_up_at_the_next_call() {
     let begun = Instant::now();
     let result = run.advance_to(after(&run, Wall::from_secs(5)));
     assert!(begun.elapsed() < Wall::from_secs(1), "{:?}", begun.elapsed());
-    let termination = Termination::Stopped { cause: StopCause::Policy { kind: lost } };
+    let termination = Termination::Stopped { cause: StopCause::Policy { event: lost } };
     assert_eq!(result, Err(RunHandleError::Ended { termination: termination.clone() }));
     assert_eq!(run.state(), RunState::CleanedUp { termination });
+}
+
+#[test]
+fn kc_32_a_disconnect_after_a_policy_stop_is_dropped() {
+    // KC-32: a client stop that does not escalate says nothing the first end does not.
+    // The data thread ends the Run through the Policy; a disconnect before the next
+    // call requests a different Termination, which is dropped, not recorded in `also`.
+    let probe = Probe::new();
+    let mut run = lost_device_session(&probe);
+    assert!(probe.wait_for("radio:stop", Wall::from_millis(500)));
+    run.disconnect();
+    let manifest = manifest_of(run);
+    assert_eq!(
+        manifest.termination.reason,
+        Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } }
+    );
+    assert!(manifest.termination.also.is_empty(), "{:?}", manifest.termination.also);
 }
 
 #[test]
@@ -704,13 +720,13 @@ fn kg_03_a_step_done_early_is_not_repeated() {
     assert!(probe.wait_for("radio:stop", Wall::from_secs(1)));
     assert!(probe.wait_for("other:stop", Wall::from_secs(1)));
     let manifest = manifest_of(run);
-    assert_eq!(manifest.termination.reason, Termination::Failed { stage: Stage::Run });
+    assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Run, .. }));
     for name in ["radio", "other"] {
         assert_eq!(count(&probe, &format!("{name}:stop")), 1, "{name}");
         assert_eq!(count(&probe, &format!("{name}:cleanup")), 1, "{name}");
     }
     assert!(
-        !manifest.termination.cleanup_failures.iter().any(|f| f.step == CleanupStep::StopTx),
+        !manifest.termination.cleanup_failures.iter().any(|f| f.step == CleanupStep::StopProviders),
         "{:?}",
         manifest.termination.cleanup_failures
     );
@@ -723,7 +739,7 @@ fn kc_30_a_panic_after_a_device_lost_in_one_pass_fails_the_run() {
     // continue, so only the panic ends the Run.
     let probe = Probe::new();
     let (mut spec, mut profile) = output_docs(64);
-    spec["policies"] = serde_json::json!({ "failure": { "DEVICE_LOST": "continue" } });
+    spec["policies"] = serde_json::json!({ "failure": { "ezsdr.DEVICE_LOST": "continue" } });
     let mut second = spec["outputs"][0].clone();
     second["id"] = serde_json::json!("rec2");
     spec["outputs"].as_array_mut().unwrap().push(second);
@@ -742,7 +758,7 @@ fn kc_30_a_panic_after_a_device_lost_in_one_pass_fails_the_run() {
     running(&run);
     assert!(probe.wait_for("radio:stop", Wall::from_secs(1)));
     let manifest = manifest_of(run);
-    assert_eq!(manifest.termination.reason, Termination::Failed { stage: Stage::Run });
+    assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Run, .. }));
     assert!(failure(&manifest).starts_with("KC-30: rec2: a Module panicked"), "{}", failure(&manifest));
     let lost = kind(EventKind::DEVICE_LOST);
     let rec = ResourceId::parse("sink/rec").unwrap();
@@ -966,7 +982,7 @@ fn kg_04_a_provider_that_never_finishes_fails_the_run() {
     let waited = begun.elapsed();
     assert!(waited >= Wall::from_millis(4_500) && waited < Wall::from_secs(10), "{waited:?}");
     let manifest = manifest_of(run);
-    assert_eq!(manifest.termination.reason, Termination::Failed { stage: Stage::Run });
+    assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Run, .. }));
     assert!(failure(&manifest).starts_with("KC-21a: radio did not finish"), "{}", failure(&manifest));
 }
 
@@ -991,7 +1007,7 @@ fn kc_21a_an_end_requested_during_the_wait_ends_it() {
     let manifest = manifest_of(run);
     assert_eq!(
         manifest.termination.reason,
-        Termination::Stopped { cause: StopCause::Policy { kind: kind(EventKind::DEVICE_LOST) } }
+        Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } }
     );
 }
 
@@ -1179,9 +1195,8 @@ fn kg_06_a_prepare_that_hangs_fails_the_run_within_its_budget() {
     let begun = Instant::now();
     let run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
     assert!(begun.elapsed() < Wall::from_secs(12), "{:?}", begun.elapsed());
-    assert_eq!(
-        run.state(),
-        RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare } }
+    assert!(
+        matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare, .. } })
     );
     let manifest = manifest_of(run);
     assert!(failure(&manifest).starts_with("KC-12a: prepare of radio"), "{}", failure(&manifest));
@@ -1207,9 +1222,8 @@ fn kg_06_an_arm_that_hangs_fails_the_run_within_its_budget() {
     let begun = Instant::now();
     let run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
     assert!(begun.elapsed() < Wall::from_secs(12), "{:?}", begun.elapsed());
-    assert_eq!(
-        run.state(),
-        RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm } }
+    assert!(
+        matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } })
     );
     let manifest = manifest_of(run);
     assert!(failure(&manifest).starts_with("KC-12a: arm of radio"), "{}", failure(&manifest));
@@ -1280,9 +1294,8 @@ fn kc_15_an_overflow_of_l_or_of_t0_fails_arm() {
     // i64::MAX.
     let t0 = armed_at(&[("radio/a", cap)], i64::MAX - cap as i64 + 8, 1_000);
     for (name, run) in [("L", l), ("T0", t0)] {
-        assert_eq!(
-            run.state(),
-            RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm } },
+        assert!(
+            matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }),
             "{name}"
         );
         assert_eq!(failure(&manifest_of(run)), "KC-15: overflow", "{name}");
@@ -1353,7 +1366,7 @@ fn kg_10_a_device_lost_from_a_provider_thread_aborts_the_run() {
     assert_eq!(
         result,
         Err(RunHandleError::Ended {
-            termination: Termination::Stopped { cause: StopCause::Policy { kind: lost.clone() } }
+            termination: Termination::Stopped { cause: StopCause::Policy { event: lost.clone() } }
         })
     );
     let manifest = manifest_of(run);
@@ -1491,7 +1504,7 @@ fn kc_45_an_authority_whose_relations_panic_records_none_and_says_so() {
         ThreadedProvider::new("radio", "radio", &probe),
     );
     let manifest = manifest_of(start_spec_run(&spec_one(), &profile_one(), assembly).unwrap());
-    assert_eq!(manifest.run.execution_class, ExecutionClass::HardwareInLoop);
+    assert_eq!(manifest.run.execution_class, Some(ExecutionClass::HardwareInLoop));
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
     assert!(manifest.clocks.relations.is_empty());
     assert_eq!(tm_18_failures(&manifest), ["TM-18: the Authority published no relation of its root to utc"]);
