@@ -938,7 +938,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 2. **v4.0 凍結のチェックリスト（唯一の一覧，owner 2026-10-09）**：凍結レビューはこの全項目が済んでから．詳細と根拠は [`plan/maintenance/24-prefreeze-audit.md`](plan/maintenance/24-prefreeze-audit.md)（47件，9項目）．順番どおりに進める．
    - [ ] 項目5（決定済み，簡素版）：未使用の MigrationRegistry と移行の来歴（SB-48/49）は削除，文書ごとの受け付ける版は凍結時に，ハッシュは parse 後に既定値込みで再シリアライズした形から，description/title は不変性の対象外にして1回掃除，F42 は見送り — spec 24
    - [ ] 実在の bug：F19（2つ目以降の fault が消える，KC-30）と F21（cleanup 中の mark が artifact に届かない，RS-30）
-   - [ ] 項目1：不変条件を型に（private フィールド，検証付き constructor と Deserialize，`Value` を構造的に1段）— 独立 spec（§6 の設計メモから）
+   - [ ] 項目1（決定済み）：不変条件を型に（private フィールド，検証付き constructor と Deserialize，`TimePoint` は `ticks_in` のみ，`Value` を構造的に1段，散らばった検査を削除）— 独立 spec（§6 の設計メモから，1a→1b）
    - [ ] 項目2：役割付きの ID（Target，EventSource，`matched`/`needs`，PrepareReport，ActionId を受信側へ，#54）— 独立 spec
    - [ ] 項目3：受け入れ判定を1本に（KC-24 を唯一の順序に，`update_class` の二重宣言を削除，`ParamDecl.update_class` を optional に）— 独立 spec
    - [ ] 項目4（決定済み，削除・統合・改名のみ）：`Termination` に理由と `also`，`ezsdr.failure`/`ezsdr.links`/`ezsdr.children` を型付きの欄へ統合，EVENTS_DROPPED の時刻と source，`execution_class` を Option，Kernel のイベント種別を `ezsdr.` へ，タグを `kind` に統一，Lease の記録は `{mode, released}`，RS-6 の手順名 — spec 24
