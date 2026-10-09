@@ -20,4 +20,6 @@ First classified on 2026-10-07 over issues #1–#62 from their bodies and fix co
 
 Review findings since the first classification (not issues; counted for the rule): spec 22 steps 2–3 found five bugs in the UHD Module's refusal round trip between uhd-control and uhd-rx — `planned-state-read-as-actual` and `correlation-by-partial-key`, from one cause, the stream's plan held twice. Design note: [23-one-line-per-stream.md](23-one-line-per-stream.md) (accepted and implemented, 2026-10-08). They also found an empty plan that cut nothing (`stream-lifecycle-scattered`) and an orderly cut computed both in the timeline and in uhd-rx (`radio-rule-implemented-twice`).
 
+Open bugs since: #64 (`planned-state-read-as-actual`, owner decision recorded on the issue), #65 (`failure-collapsed-into-value`) and #66 (`pending-provenance-collapsed`); the notes for #65 and #66 are [25-fault-and-mark-notes.md](25-fault-and-mark-notes.md).
+
 Unclassified: #4 and #13 (one-off bugs); #40, #42 and #48 (spec gaps); #54, #55, #56, #59, #60 and #62 (not defects, or decisions).
