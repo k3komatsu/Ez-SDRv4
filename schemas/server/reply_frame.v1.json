@@ -134,7 +134,7 @@
       "oneOf": [
         {
           "const": "block",
-          "description": "Publishing returns [`PublishOutcome::Full`] and nothing is ever dropped.\nThe name is the Vision's; the policy produces back-pressure through a\nrefusal the producer must honour, not through a parked thread (SC-20a).",
+          "description": "Publishing is refused as full and nothing is ever dropped.\nThe name is the Vision's; the policy produces back-pressure through a\nrefusal the producer must honour, not through a parked thread (SC-20a).",
           "type": "string"
         },
         {
@@ -151,10 +151,10 @@
     },
     "BindingSection": {
       "additionalProperties": false,
-      "description": "The `binding` section: the BindingProfile body including its `environment`,\nrecorded verbatim (RS-38, SB-27).",
+      "description": "The `binding` section: the BindingProfile, `environment` included, as parsed and\nre-serialised canonically from the parsed document (RS-38, RS-45, SB-27).",
       "properties": {
         "body": {
-          "description": "The body, environment included, byte for byte (SB-27, RS-43)."
+          "description": "The body, environment included (SB-27, RS-43)."
         },
         "hash": {
           "$ref": "#/$defs/ContentHash",
@@ -333,7 +333,7 @@
     },
     "ClockDomainId": {
       "additionalProperties": false,
-      "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
+      "description": "Identifies a `ClockDomain`.\n\nRule: TM-11 (`01-time-model.md`), X7.",
       "properties": {
         "local": {
           "description": "Node-local ordinal, allocated by the owning registry.",
@@ -343,7 +343,7 @@
         },
         "node": {
           "$ref": "#/$defs/NodeId",
-          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+          "description": "Owning node; `0`, the local node, throughout v4.0 (X7)."
         }
       },
       "required": [
@@ -369,7 +369,7 @@
             },
             "tick_rate": {
               "$ref": "#/$defs/Rational",
-              "description": "Ticks per second; neither term may exceed [`RATIO_TERM_CAP`] (TM-3)."
+              "description": "Ticks per second; neither term may exceed 2^31 (TM-3)."
             }
           },
           "required": [
@@ -398,7 +398,7 @@
             },
             "root_ticks_per_tick": {
               "$ref": "#/$defs/Rational",
-              "description": "Root ticks per one tick here; neither term may exceed [`RATIO_TERM_CAP`] (TM-3)."
+              "description": "Root ticks per one tick here; neither term may exceed 2^31 (TM-3)."
             }
           },
           "required": [
@@ -817,7 +817,7 @@
     },
     "DataLinkId": {
       "additionalProperties": false,
-      "description": "Identifies a [`DataLink`](crate::stream::DataLinkDecl) instance.\n\nRule: SC-18 (`02-stream-contract.md`), X7.",
+      "description": "Identifies a data link instance (`DataLinkDecl`).\n\nRule: SC-18 (`02-stream-contract.md`), X7.",
       "properties": {
         "local": {
           "description": "Node-local ordinal, allocated by the owning registry.",
@@ -827,7 +827,7 @@
         },
         "node": {
           "$ref": "#/$defs/NodeId",
-          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+          "description": "Owning node; `0`, the local node, throughout v4.0 (X7)."
         }
       },
       "required": [
@@ -838,7 +838,7 @@
     },
     "DeclaredCost": {
       "additionalProperties": false,
-      "description": "A number the Link Module declares, not a measurement. The Core reports it and\nnever uses it to choose a placement; Phase 1 neither measures nor optimises.\n\nRule: SB-40. Vision §20, §31, §63.",
+      "description": "A number the Link Module declares, not a measurement. The Core reports it and\nnever uses it to choose a placement; the Core neither measures nor optimises.\n\nRule: SB-40. Vision §20, §31, §63.",
       "properties": {
         "cost": {
           "description": "The Link Module's own number, uninterpreted by the Kernel (SB-40).",
@@ -979,17 +979,17 @@
         },
         {
           "const": "malformed",
-          "description": "`RunHandleError::Malformed`.",
+          "description": "A Session action the Run refused as malformed (RS-15).",
           "type": "string"
         },
         {
           "const": "ended",
-          "description": "`RunHandleError::Ended`.",
+          "description": "The Run has already been cleaned up.",
           "type": "string"
         },
         {
           "const": "not_on_primary_root",
-          "description": "`RunHandleError::NotOnPrimaryRoot`.",
+          "description": "An instant the Authority's primary root cannot place (KC-29).",
           "type": "string"
         },
         {
@@ -1065,7 +1065,7 @@
       "type": "object"
     },
     "ExecutionClass": {
-      "description": "What kind of Run this is, derived from the environment and cross-checked against\nthe Authority's [`Pacing`]; a class that was merely declared could lie.\n\nRule: MA-41, RS-42. Vision §14.",
+      "description": "What kind of Run this is, derived from the environment and cross-checked against\nthe Authority's `Pacing`; a class that was merely declared could lie.\n\nRule: MA-41, RS-42. Vision §14.",
       "oneOf": [
         {
           "const": "simulation",
@@ -1377,7 +1377,7 @@
       "type": "string"
     },
     "Key": {
-      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the `KeyDecl` and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
       "type": "string"
     },
     "Lease": {
@@ -1507,7 +1507,7 @@
     },
     "Manifest": {
       "additionalProperties": false,
-      "description": "A Kernel envelope with namespaced Module sections. The Kernel writes the\nenvelope; each Module writes its own section; no Provider-specific field ever\nrequires a Kernel change.\n\nThe Vision's §50 listed \"random seeds\" and an optional environment capture among\nthe envelope's contents before Step 5; neither is an envelope field here. The Kernel owns no\nrandom number generator, so a seed is something the environment declared, and\nthe environment is already recorded verbatim under `binding.body`; the\nenvironment capture has no Kernel-defined content at all, so it belongs under\n`sections` as `ezsdr.capture` (RS-43).\n\nRule: RS-38…RS-47. Vision §50, Finding 19.",
+      "description": "A Kernel envelope with namespaced Module sections. The Kernel writes the\nenvelope; each Module writes its own section; no Provider-specific field ever\nrequires a Kernel change.\n\nThe Vision's §50 listed \"random seeds\" and an optional environment capture among\nthe envelope's contents before Step 5; neither is an envelope field here. The Kernel owns no\nrandom number generator, so a seed is something the environment declared, and\nthe environment is already recorded under `binding.body`; the\nenvironment capture has no Kernel-defined content at all, so it belongs under\n`sections` as `ezsdr.capture` (RS-43).\n\nRule: RS-38…RS-47. Vision §50, Finding 19.",
       "properties": {
         "action_log": {
           "default": [],
@@ -1637,14 +1637,14 @@
         },
         "spec": {
           "$ref": "#/$defs/SpecSection",
-          "description": "The Spec after migration, with its hashes (RS-38, SB-49)."
+          "description": "The Spec as parsed, with its hash (RS-38, RS-45)."
         },
         "termination": {
           "$ref": "#/$defs/TerminationSection",
           "description": "How it ended (RS-3)."
         },
         "version": {
-          "description": "Mandatory document major, as on every other Kernel document; Phase 1 supports\nexactly `{1}` and [`crate::spec::check_version`] is what refuses another\n(RS-38, SB-47, SB-48). Vision §10 requires it of the Manifest by name.",
+          "description": "Mandatory document major, as on every other Kernel document; this build\nsupports exactly `{1}` and refuses another (RS-38, SB-47). Vision §10\nrequires it of the Manifest by name.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -1728,11 +1728,11 @@
       "type": "object"
     },
     "Namespace": {
-      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "description": "A dotted sequence of `Ident`s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
       "type": "string"
     },
     "NodeId": {
-      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
+      "description": "A node in the (future) multi-host deployment. `0` (the local node) is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
@@ -1901,7 +1901,7 @@
     },
     "PreviewedCoercion": {
       "additionalProperties": false,
-      "description": "A coercion the Kernel previewed by calling one Provider's `coerce`, together with\nthe Spec resource whose request produced it.\n\nA `Coercion` names a key and two values and nothing else, because a Provider\nanswers about the request it was handed. The Kernel's own record has to say more:\ntwo resources may constrain one key on two different devices, and one of them\ncoercing says nothing about the other. Keyed on the key alone, `prepare`'s SB-44\ncheck charged one resource's coercion to every resource naming that key and\nrefused a value `coerce` was never asked about — so the resource name is part of\nthe record, as it already is in [`RejectedConstraint`].\n\nRule: SB-7, SB-38, SB-44.",
+      "description": "A coercion the Kernel previewed by calling one Provider's `coerce`, together with\nthe Spec resource whose request produced it.\n\nA `Coercion` names a key and two values and nothing else, because a Provider\nanswers about the request it was handed. The Kernel's own record has to say more:\ntwo resources may constrain one key on two different devices, and one of them\ncoercing says nothing about the other. Keyed on the key alone, `prepare`'s SB-44\ncheck charged one resource's coercion to every resource naming that key and\nrefused a value `coerce` was never asked about — so the resource name is part of\nthe record, as it already is in `RejectedConstraint`.\n\nRule: SB-7, SB-38, SB-44.",
       "properties": {
         "coercion": {
           "$ref": "#/$defs/Coercion",
@@ -2091,7 +2091,7 @@
       "properties": {
         "node": {
           "$ref": "#/$defs/NodeId",
-          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+          "description": "Owning node; `0`, the local node, throughout v4.0 (X7)."
         },
         "path": {
           "description": "Slash-joined path through the composite resource tree (SB-34).",
@@ -2801,7 +2801,7 @@
       "type": "object"
     },
     "SessionAction": {
-      "description": "The Session action envelope: a closed set, and **not** the Kernel Action set.\n\nThe Kernel's Actions are what a Reactor emits into the real-time path, while a\nlease operation or a recorder request is a control-path act with no real-time\nmeaning. Each Session Action compiles to zero or more Kernel Actions, or to a\nLease or Run operation.\n\nOnly the lifecycle verbs are the Kernel's; a domain verb is\n[`SessionAction::Vocabulary`], and the Vocabulary that registers the verb\ndeclares how it compiles. The Vision's §3 log sketch named `StartRepeat` and\n`Capture` directly before Step 5; here they are `radio.start_repeat` and `sink.capture`,\nbecause a Kernel that enumerated them would need a new variant for the first\nperipheral sweep or calibration verb.\n\nRule: RS-13, RS-13a, decision R3.",
+      "description": "The Session action envelope: a closed set, and **not** the Kernel Action set.\n\nThe Kernel's Actions are what a Reactor emits into the real-time path, while a\nlease operation or a recorder request is a control-path act with no real-time\nmeaning. Each Session Action compiles to zero or more Kernel Actions, or to a\nLease or Run operation.\n\nOnly the lifecycle verbs are the Kernel's; a domain verb is\na `vocabulary` Session action, and the Vocabulary that registers the verb\ndeclares how it compiles. The Vision's §3 log sketch named `StartRepeat` and\n`Capture` directly before Step 5; here they are `radio.start_repeat` and `sink.capture`,\nbecause a Kernel that enumerated them would need a new variant for the first\nperipheral sweep or calibration verb.\n\nRule: RS-13, RS-13a, decision R3.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -3010,34 +3010,14 @@
     },
     "SpecSection": {
       "additionalProperties": false,
-      "description": "The `spec` section: the body after migration, its hash, and — when it was\nmigrated — the original version and hash (RS-38, SB-49).",
+      "description": "The `spec` section: the Spec as parsed and re-serialised with every default\nwritten out, and its hash (RS-38, RS-45).",
       "properties": {
         "body": {
-          "description": "The body itself (RS-38)."
+          "description": "The body itself (RS-38, RS-45)."
         },
         "hash": {
           "$ref": "#/$defs/ContentHash",
-          "description": "The hash of the body after migration (RS-45)."
-        },
-        "original_hash": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ContentHash"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Its hash before migration (SB-49)."
-        },
-        "original_version": {
-          "description": "The version the document declared before migration (SB-49).",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "description": "The hash of the body (RS-45)."
         }
       },
       "required": [
@@ -3338,7 +3318,7 @@
     },
     "Validity": {
       "additionalProperties": false,
-      "description": "The window over which a [`ClockRelation`] may be applied (TM-14).",
+      "description": "The window over which a `ClockRelation` may be applied (TM-14).",
       "properties": {
         "from": {
           "$ref": "#/$defs/TimePoint",

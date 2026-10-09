@@ -76,7 +76,7 @@ impl fmt::Display for Version {
     }
 }
 
-/// A caret requirement over a [`Version`] (MA-33).
+/// A caret requirement over a `Version` (MA-33).
 #[derive(
     Clone,
     Copy,
@@ -159,7 +159,7 @@ impl Role {
 }
 
 /// How a Module is deployed. `Plugin` names a deployment, never a role, and is
-/// reserved: Phase 1 refuses it as `Unsupported` (MA-1, MA-32, MA-46).
+/// reserved: the Kernel refuses it as `Unsupported` (MA-1, MA-32, MA-46).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -177,7 +177,7 @@ pub enum Deployment {
 // ---------------------------------------------------------------- class and fidelity
 
 /// How a Time Authority paces its primary root; cross-checked against the derived
-/// [`ExecutionClass`] by MA-41 (MA-29, TM-16a1).
+/// `ExecutionClass` by MA-41 (MA-29, TM-16a1).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
@@ -205,7 +205,7 @@ pub enum RfPath {
 }
 
 /// What kind of Run this is, derived from the environment and cross-checked against
-/// the Authority's [`Pacing`]; a class that was merely declared could lie.
+/// the Authority's `Pacing`; a class that was merely declared could lie.
 ///
 /// Rule: MA-41, RS-42. Vision §14.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -949,7 +949,7 @@ pub struct RtPolicy {
 // ---------------------------------------------------------------- errors and handles
 
 /// The five error kinds a Module may report. A fault crosses the boundary only as a
-/// [`ModuleError`]: no panic crosses a trait boundary, and a foreign exception is
+/// `ModuleError`: no panic crosses a trait boundary, and a foreign exception is
 /// translated to a status (Vision §35).
 ///
 /// Rule: MA-9.

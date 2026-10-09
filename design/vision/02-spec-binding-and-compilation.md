@@ -120,7 +120,7 @@ Thus:
        bindings + env      bindings + env
 ```
 
-The Manifest records the environment part of the BindingProfile verbatim.
+The Manifest records the environment part of the BindingProfile.
 
 Backend-specific requirements remain possible through explicit namespaced extensions.
 
@@ -206,9 +206,9 @@ Placement, MemoryDomains and DataLink choices are stated explicitly in the Bindi
 
 ## Schema-first and versioned
 
-Every Kernel document type has a JSON Schema generated from its Rust definition and committed; the committed file, not the Rust source, is the contract, and a freeze test fails on any drift. The same schema serves the Rust runtime, the Python client, out-of-process Plugins and WASM components (v3 had one hand-written binary protocol per controller). ExperimentSpec, BindingProfile and Manifest carry a mandatory integer `version`: an unsupported one is refused with a message naming the supported versions and never read under newer defaults, a migration is a registered function from one major to the next, and the Manifest records the original version and hash. v3 accumulated three configuration formats and a chain of converters; v4 states the policy before the first schema exists.
+Every Kernel document type has a JSON Schema generated from its Rust definition and committed; the committed file, not the Rust source, is the contract, and a freeze test fails on any drift. The same schema serves the Rust runtime, the Python client, out-of-process Plugins and WASM components (v3 had one hand-written binary protocol per controller). ExperimentSpec, BindingProfile and Manifest carry a mandatory integer `version`: an unsupported one is refused with a message naming the supported versions and never read under newer defaults, and a later major refuses an older document unless a migration for it is written (invariant 39). v3 accumulated three configuration formats and a chain of converters; v4 states the policy before the first schema exists.
 
-Normative: [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-9, SB-10, SB-21, SB-47…SB-49; schema technology in [plan/phase1/00-overview.md](../../plan/phase1/00-overview.md) X2 and OV-10…OV-17.
+Normative: [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-9, SB-10, SB-21, SB-47; schema technology in [plan/phase1/00-overview.md](../../plan/phase1/00-overview.md) X2 and OV-10…OV-17.
 
 ---
 

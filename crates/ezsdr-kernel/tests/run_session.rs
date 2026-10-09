@@ -1818,8 +1818,6 @@ fn manifest_fixture(reason: Termination) -> Manifest {
         spec: SpecSection {
             hash: ContentHash::of(&spec).expect("hashes"),
             body: serde_json::to_value(&spec).expect("serialises"),
-            original_version: None,
-            original_hash: None,
         },
         binding: BindingSection {
             hash: ContentHash::of(&profile).expect("hashes"),
@@ -1885,24 +1883,6 @@ fn rs_11_manifest_for_every_terminal_run() {
     refused.seal().expect("seals without a Policy");
     let json = serde_json::to_value(&refused).expect("serialises");
     assert!(json["policy"].is_null(), "{}", json["policy"]);
-}
-
-#[test]
-fn rs_45_hash_equal_for_equal_inputs() {
-    let text_a = r#"{"version":1,"resources":{},"extensions":{}}"#;
-    let text_b = "  { \"extensions\" : { } ,\n  \"resources\" : { } , \"version\" : 1 }  ";
-    let a = ExperimentSpec::from_json(&serde_json::from_str(text_a).expect("parses"))
-        .expect("validates");
-    let b = ExperimentSpec::from_json(&serde_json::from_str(text_b).expect("parses"))
-        .expect("validates");
-    assert_eq!(
-        ContentHash::of(&a).expect("hashes"),
-        ContentHash::of(&b).expect("hashes")
-    );
-
-    let mut ma = manifest_fixture(Termination::Completed {});
-    let mut mb = manifest_fixture(Termination::Completed {});
-    assert_eq!(ma.seal().expect("seals"), mb.seal().expect("seals"));
 }
 
 #[test]

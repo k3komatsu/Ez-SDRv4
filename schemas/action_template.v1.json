@@ -112,7 +112,7 @@
     },
     "ClockDomainId": {
       "additionalProperties": false,
-      "description": "Identifies a [`ClockDomain`](crate::time::ClockDomain).\n\nRule: TM-11 (`01-time-model.md`), X7.",
+      "description": "Identifies a `ClockDomain`.\n\nRule: TM-11 (`01-time-model.md`), X7.",
       "properties": {
         "local": {
           "description": "Node-local ordinal, allocated by the owning registry.",
@@ -122,7 +122,7 @@
         },
         "node": {
           "$ref": "#/$defs/NodeId",
-          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+          "description": "Owning node; `0`, the local node, throughout v4.0 (X7)."
         }
       },
       "required": [
@@ -355,7 +355,7 @@
       "type": "string"
     },
     "Key": {
-      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the `KeyDecl` and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
       "type": "string"
     },
     "LatePolicy": {
@@ -379,11 +379,11 @@
       ]
     },
     "Namespace": {
-      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "description": "A dotted sequence of `Ident`s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
       "type": "string"
     },
     "NodeId": {
-      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
+      "description": "A node in the (future) multi-host deployment. `0` (the local node) is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
@@ -394,7 +394,7 @@
       "properties": {
         "node": {
           "$ref": "#/$defs/NodeId",
-          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+          "description": "Owning node; `0`, the local node, throughout v4.0 (X7)."
         },
         "path": {
           "description": "Slash-joined path through the composite resource tree (SB-34).",
@@ -512,11 +512,11 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "An Action as a Spec schedules it: the Action without its time field.\n\nA Spec cannot name a `ClockDomainId`, because domains are allocated at `prepare`\n(SB-16, TM-13a), and every timed Action names one through its\n[`AbsoluteDeadline`]. `arm` resolves the entry's `SpecTime` and substitutes it.\nWithout the split, `ExperimentSpec.schedule` could hold no timed Action at all,\nwhich is the one thing it exists for.\n\nRule: RS-49a.",
+  "description": "An Action as a Spec schedules it: the Action without its time field.\n\nA Spec cannot name a `ClockDomainId`, because domains are allocated at `prepare`\n(SB-16, TM-13a), and every timed Action names one through its\n`AbsoluteDeadline`. `arm` resolves the entry's `SpecTime` and substitutes it.\nWithout the split, `ExperimentSpec.schedule` could hold no timed Action at all,\nwhich is the one thing it exists for.\n\nRule: RS-49a.",
   "oneOf": [
     {
       "additionalProperties": false,
-      "description": "[`Action::TxBurst`] without `at` (RS-49a).",
+      "description": "The `tx_burst` Action without `at` (RS-49a).",
       "properties": {
         "kind": {
           "const": "tx_burst",
@@ -558,7 +558,7 @@
     },
     {
       "additionalProperties": false,
-      "description": "[`Action::SetTimer`] without `at` (RS-49a).",
+      "description": "The `set_timer` Action without `at` (RS-49a).",
       "properties": {
         "kind": {
           "const": "set_timer",
@@ -584,7 +584,7 @@
     },
     {
       "additionalProperties": false,
-      "description": "[`Action::UpdateParameter`] without `at`; `arm` substitutes the resolved\ndeadline, so a scheduled parameter change takes effect at the instant the\nSpec named (RS-49a).",
+      "description": "The `update_parameter` Action without `at`; `arm` substitutes the resolved\ndeadline, so a scheduled parameter change takes effect at the instant the\nSpec named (RS-49a).",
       "properties": {
         "class": {
           "$ref": "#/$defs/UpdateClass",
@@ -618,7 +618,7 @@
     },
     {
       "additionalProperties": false,
-      "description": "[`Action::PeripheralCommand`] without `at` (RS-49a).",
+      "description": "The `peripheral_command` Action without `at` (RS-49a).",
       "properties": {
         "kind": {
           "const": "peripheral_command",
@@ -650,7 +650,7 @@
     },
     {
       "additionalProperties": false,
-      "description": "[`Action::Stop`], which carries no time (RS-49a).",
+      "description": "The `stop` Action, which carries no time (RS-49a).",
       "properties": {
         "kind": {
           "const": "stop",

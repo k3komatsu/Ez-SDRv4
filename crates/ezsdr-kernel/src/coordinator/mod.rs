@@ -137,18 +137,7 @@ fn start_spec(
 ) -> Result<RunHandle, SpecError> {
     let spec = ExperimentSpec::from_json(spec_doc)?;
     let profile = BindingProfile::from_json(profile_doc)?;
-    let spec_section =
-        crate::manifest::SpecSection::migrated(spec_doc.clone(), spec_doc).map_err(|e| {
-            SpecError::Structural {
-                reason: format!("KC-1: {e}"),
-            }
-        })?;
-    let binding_section = crate::manifest::BindingSection {
-        hash: ContentHash::of_value(profile_doc).map_err(|e| SpecError::Structural {
-            reason: format!("KC-1: {e}"),
-        })?,
-        body: profile_doc.clone(),
-    };
+    let (spec_section, binding_section) = sections(&spec, &profile)?;
     let mut run = pipeline::assemble(
         RunKind::Spec,
         spec,
@@ -191,19 +180,7 @@ pub fn connect(
         reason: "KC-30: a Module panicked during validate".to_owned(),
     })??;
     drop((providers, sinks));
-    let spec_doc = serde_json::to_value(&spec).map_err(|e| SpecError::Structural {
-        reason: format!("KC-1: {e}"),
-    })?;
-    let spec_section = crate::manifest::SpecSection::migrated(spec_doc.clone(), &spec_doc)
-        .map_err(|e| SpecError::Structural {
-            reason: format!("KC-1: {e}"),
-        })?;
-    let binding_section = crate::manifest::BindingSection {
-        hash: ContentHash::of_value(profile_doc).map_err(|e| SpecError::Structural {
-            reason: format!("KC-1: {e}"),
-        })?,
-        body: profile_doc.clone(),
-    };
+    let (spec_section, binding_section) = sections(&spec, &profile)?;
     let mut run = pipeline::assemble(
         RunKind::Session,
         spec,
@@ -216,6 +193,20 @@ pub fn connect(
     run.pipeline();
     run.settle();
     Ok(run)
+}
+
+/// The Manifest's `spec` and `binding` sections of the parsed documents (KC-45, RS-45).
+fn sections(
+    spec: &ExperimentSpec,
+    profile: &BindingProfile,
+) -> Result<(crate::manifest::SpecSection, crate::manifest::BindingSection), SpecError> {
+    let structural = |e: crate::hash::HashError| SpecError::Structural {
+        reason: format!("KC-1: {e}"),
+    };
+    Ok((
+        crate::manifest::SpecSection::of(spec).map_err(structural)?,
+        crate::manifest::BindingSection::of(profile).map_err(structural)?,
+    ))
 }
 
 impl RunHandle {

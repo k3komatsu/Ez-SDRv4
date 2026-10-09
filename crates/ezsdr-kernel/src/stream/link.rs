@@ -12,7 +12,7 @@ use crate::id::DataLinkId;
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum BackPressure {
-    /// Publishing returns [`PublishOutcome::Full`] and nothing is ever dropped.
+    /// Publishing is refused as full and nothing is ever dropped.
     /// The name is the Vision's; the policy produces back-pressure through a
     /// refusal the producer must honour, not through a parked thread (SC-20a).
     Block,

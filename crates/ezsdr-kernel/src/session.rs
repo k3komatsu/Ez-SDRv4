@@ -26,7 +26,7 @@ use crate::time::{AbsoluteDeadline, TimePoint};
 /// Lease or Run operation.
 ///
 /// Only the lifecycle verbs are the Kernel's; a domain verb is
-/// [`SessionAction::Vocabulary`], and the Vocabulary that registers the verb
+/// a `vocabulary` Session action, and the Vocabulary that registers the verb
 /// declares how it compiles. The Vision's §3 log sketch named `StartRepeat` and
 /// `Capture` directly before Step 5; here they are `radio.start_repeat` and `sink.capture`,
 /// because a Kernel that enumerated them would need a new variant for the first

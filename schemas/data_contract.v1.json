@@ -25,7 +25,7 @@
           "type": "boolean"
         }
       ],
-      "description": "An attribute value in a [`DataContract`]. The Kernel stores these and never\ninterprets them, which is what keeps it from becoming a type system (SC-2).\n\nCarries no tag (OV-13's carve-out): an attribute value is the scalar an author\nwrote, not a two-field object wrapping it."
+      "description": "An attribute value in a `DataContract`. The Kernel stores these and never\ninterprets them, which is what keeps it from becoming a type system (SC-2).\n\nCarries no tag (OV-13's carve-out): an attribute value is the scalar an author\nwrote, not a two-field object wrapping it."
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

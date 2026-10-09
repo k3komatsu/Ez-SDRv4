@@ -566,7 +566,7 @@ pub struct ActionId(pub u64);
 /// The closed Kernel Action set: what a Reactor emits into the real-time path.
 /// Adding a member is a Kernel major.
 ///
-/// Every timed Action names its instant with an [`AbsoluteDeadline`], which Vision
+/// Every timed Action names its instant with an `AbsoluteDeadline`, which Vision
 /// §19 defines for exactly this and which TM-15 made a distinct type so that
 /// envelope checks have one thing to compare.
 ///
@@ -620,7 +620,7 @@ pub enum Action {
         /// Absent means the first instant the class permits, which is what a bare
         /// `sdr.rx.gain = 20` asks for (Vision §3). Optional for every class,
         /// including `hardware_timed`: a class cannot make the field mandatory,
-        /// because `SessionAction::SetParameter` carries no time to put in it
+        /// because the `set_parameter` Session action carries no time to put in it
         /// (RS-49, RS-19, RS-14).
         at: Option<AbsoluteDeadline>,
     },
@@ -679,7 +679,7 @@ impl Action {
 ///
 /// A Spec cannot name a `ClockDomainId`, because domains are allocated at `prepare`
 /// (SB-16, TM-13a), and every timed Action names one through its
-/// [`AbsoluteDeadline`]. `arm` resolves the entry's `SpecTime` and substitutes it.
+/// `AbsoluteDeadline`. `arm` resolves the entry's `SpecTime` and substitutes it.
 /// Without the split, `ExperimentSpec.schedule` could hold no timed Action at all,
 /// which is the one thing it exists for.
 ///
@@ -688,7 +688,7 @@ impl Action {
 #[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ActionTemplate {
-    /// [`Action::TxBurst`] without `at` (RS-49a).
+    /// The `tx_burst` Action without `at` (RS-49a).
     TxBurst {
         /// The transmit stream.
         target: ResourceId,
@@ -702,14 +702,14 @@ pub enum ActionTemplate {
         #[serde(default)]
         metadata: BTreeMap<Key, Value>,
     },
-    /// [`Action::SetTimer`] without `at` (RS-49a).
+    /// The `set_timer` Action without `at` (RS-49a).
     SetTimer {
         /// Whose timer.
         target: ResourceId,
         /// The caller's token.
         token: u64,
     },
-    /// [`Action::UpdateParameter`] without `at`; `arm` substitutes the resolved
+    /// The `update_parameter` Action without `at`; `arm` substitutes the resolved
     /// deadline, so a scheduled parameter change takes effect at the instant the
     /// Spec named (RS-49a).
     UpdateParameter {
@@ -722,7 +722,7 @@ pub enum ActionTemplate {
         /// The declared update class.
         class: UpdateClass,
     },
-    /// [`Action::PeripheralCommand`] without `at` (RS-49a).
+    /// The `peripheral_command` Action without `at` (RS-49a).
     PeripheralCommand {
         /// Whose peripheral.
         target: ResourceId,
@@ -732,7 +732,7 @@ pub enum ActionTemplate {
         #[serde(default)]
         params: BTreeMap<Key, Value>,
     },
-    /// [`Action::Stop`], which carries no time (RS-49a).
+    /// The `stop` Action, which carries no time (RS-49a).
     Stop {
         /// The resource, or the Run when absent.
         target: Option<ResourceId>,

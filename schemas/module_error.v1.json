@@ -1,7 +1,7 @@
 {
   "$defs": {
     "ModuleErrorKind": {
-      "description": "The five error kinds a Module may report. A fault crosses the boundary only as a\n[`ModuleError`]: no panic crosses a trait boundary, and a foreign exception is\ntranslated to a status (Vision §35).\n\nRule: MA-9.",
+      "description": "The five error kinds a Module may report. A fault crosses the boundary only as a\n`ModuleError`: no panic crosses a trait boundary, and a foreign exception is\ntranslated to a status (Vision §35).\n\nRule: MA-9.",
       "oneOf": [
         {
           "const": "rejected",

@@ -1,5 +1,5 @@
 //! Identifiers, values, constraints and the ExperimentSpec envelope —
-//! `03-spec-and-binding.md` SB-1…SB-20, SB-47…SB-49 (Vision §8, §9, §10).
+//! `03-spec-and-binding.md` SB-1…SB-20, SB-47 (Vision §8, §9, §10).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -23,7 +23,7 @@ use crate::stream::BackPressure;
 #[serde(transparent)]
 pub struct Ident(String);
 
-/// A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,
+/// A dotted sequence of `Ident`s owned by a Vocabulary or a Module,
 /// matching `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`.
 ///
 /// Rule: SB-1.
@@ -36,7 +36,7 @@ pub struct Namespace(String);
 /// matches `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$` and an Extension key
 /// `^ext(\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.
 ///
-/// The Kernel checks the prefix and the value's shape against the [`KeyDecl`] and
+/// The Kernel checks the prefix and the value's shape against the `KeyDecl` and
 /// never interprets the meaning (audit Finding 7).
 ///
 /// Rule: SB-1, SB-2, MA-34.
@@ -190,17 +190,17 @@ pub enum Value {
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum ValueKind {
-    /// [`Value::Bool`].
+    /// A boolean.
     Bool,
-    /// [`Value::Int`].
+    /// An integer.
     Int,
-    /// [`Value::Num`].
+    /// A float.
     Num,
-    /// [`Value::Str`].
+    /// A string.
     Str,
-    /// [`Value::List`].
+    /// A list of scalars.
     List,
-    /// [`Value::Map`].
+    /// A map of scalars.
     Map,
 }
 
@@ -671,7 +671,7 @@ pub struct ScheduleEntry {
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExperimentSpec {
-    /// Mandatory positive integer; Phase 1 supports exactly `{1}` (SB-10, SB-47).
+    /// Mandatory positive integer; this build supports exactly `{1}` (SB-10, SB-47).
     pub version: u32,
     /// The Vocabulary majors the keys belong to (SB-11).
     #[serde(default)]
@@ -1049,64 +1049,5 @@ impl ExperimentSpec {
             }
         }
         Ok(())
-    }
-}
-
-/// A migration from one major version to the next, registered per document type.
-///
-/// Phase 1 registers none, because only version 1 exists; the refusal path and the
-/// registration point both exist and are tested, so that adding version 2 is a
-/// migration rather than a redesign.
-///
-/// Rule: SB-48.
-pub type Migration = fn(serde_json::Value) -> Result<serde_json::Value, SpecError>;
-
-/// The migrations registered for one document type (SB-48, SB-49).
-#[derive(Default)]
-pub struct MigrationRegistry {
-    steps: BTreeMap<u32, Migration>,
-}
-
-impl MigrationRegistry {
-    /// An empty registry, which is what Phase 1 ships (SB-48).
-    pub fn new() -> MigrationRegistry {
-        MigrationRegistry::default()
-    }
-
-    /// Registers the step from `from` to `from + 1` (SB-48).
-    pub fn register(&mut self, from: u32, step: Migration) {
-        self.steps.insert(from, step);
-    }
-
-    /// Migrates a document up to the newest supported version, or refuses it.
-    /// Returns the migrated body and the original version, which the Manifest
-    /// records beside the compiled one (SB-48, SB-49).
-    pub fn migrate(
-        &self,
-        doc: serde_json::Value) -> Result<(serde_json::Value, u32), SpecError> {
-        let newest = *SUPPORTED_VERSIONS.iter().max().expect("at least one supported version");
-        let original = doc
-            .get("version")
-            .and_then(|v| v.as_u64())
-            .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
-            .ok_or_else(|| SpecError::UnknownField { path: "version".to_owned(),
-            })?;
-        let mut at = original;
-        let mut doc = doc;
-        while at < newest {
-            let step = self.steps.get(&at).ok_or(SpecError::UnsupportedVersion {
-                found: original,
-                supported: SUPPORTED_VERSIONS.to_vec(),
-            })?;
-            doc = step(doc)?;
-            at += 1;
-        }
-        if at != newest {
-            return Err(SpecError::UnsupportedVersion {
-                found: original,
-                supported: SUPPORTED_VERSIONS.to_vec(),
-            });
-        }
-        Ok((doc, original))
     }
 }

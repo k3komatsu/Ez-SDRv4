@@ -5,7 +5,7 @@
       "oneOf": [
         {
           "const": "block",
-          "description": "Publishing returns [`PublishOutcome::Full`] and nothing is ever dropped.\nThe name is the Vision's; the policy produces back-pressure through a\nrefusal the producer must honour, not through a parked thread (SC-20a).",
+          "description": "Publishing is refused as full and nothing is ever dropped.\nThe name is the Vision's; the policy produces back-pressure through a\nrefusal the producer must honour, not through a parked thread (SC-20a).",
           "type": "string"
         },
         {
@@ -26,7 +26,7 @@
     },
     "DataLinkId": {
       "additionalProperties": false,
-      "description": "Identifies a [`DataLink`](crate::stream::DataLinkDecl) instance.\n\nRule: SC-18 (`02-stream-contract.md`), X7.",
+      "description": "Identifies a data link instance (`DataLinkDecl`).\n\nRule: SC-18 (`02-stream-contract.md`), X7.",
       "properties": {
         "local": {
           "description": "Node-local ordinal, allocated by the owning registry.",
@@ -36,7 +36,7 @@
         },
         "node": {
           "$ref": "#/$defs/NodeId",
-          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+          "description": "Owning node; `0`, the local node, throughout v4.0 (X7)."
         }
       },
       "required": [
@@ -50,7 +50,7 @@
       "type": "string"
     },
     "NodeId": {
-      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
+      "description": "A node in the (future) multi-host deployment. `0` (the local node) is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"

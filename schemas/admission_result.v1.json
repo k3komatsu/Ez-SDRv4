@@ -168,22 +168,22 @@
       "type": "string"
     },
     "Key": {
-      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the `KeyDecl` and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
       "type": "string"
     },
     "Namespace": {
-      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "description": "A dotted sequence of `Ident`s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
       "type": "string"
     },
     "NodeId": {
-      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
+      "description": "A node in the (future) multi-host deployment. `0` (the local node) is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
     },
     "PreviewedCoercion": {
       "additionalProperties": false,
-      "description": "A coercion the Kernel previewed by calling one Provider's `coerce`, together with\nthe Spec resource whose request produced it.\n\nA `Coercion` names a key and two values and nothing else, because a Provider\nanswers about the request it was handed. The Kernel's own record has to say more:\ntwo resources may constrain one key on two different devices, and one of them\ncoercing says nothing about the other. Keyed on the key alone, `prepare`'s SB-44\ncheck charged one resource's coercion to every resource naming that key and\nrefused a value `coerce` was never asked about — so the resource name is part of\nthe record, as it already is in [`RejectedConstraint`].\n\nRule: SB-7, SB-38, SB-44.",
+      "description": "A coercion the Kernel previewed by calling one Provider's `coerce`, together with\nthe Spec resource whose request produced it.\n\nA `Coercion` names a key and two values and nothing else, because a Provider\nanswers about the request it was handed. The Kernel's own record has to say more:\ntwo resources may constrain one key on two different devices, and one of them\ncoercing says nothing about the other. Keyed on the key alone, `prepare`'s SB-44\ncheck charged one resource's coercion to every resource naming that key and\nrefused a value `coerce` was never asked about — so the resource name is part of\nthe record, as it already is in `RejectedConstraint`.\n\nRule: SB-7, SB-38, SB-44.",
       "properties": {
         "coercion": {
           "$ref": "#/$defs/Coercion",
@@ -235,7 +235,7 @@
       "properties": {
         "node": {
           "$ref": "#/$defs/NodeId",
-          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+          "description": "Owning node; `0`, the local node, throughout v4.0 (X7)."
         },
         "path": {
           "description": "Slash-joined path through the composite resource tree (SB-34).",

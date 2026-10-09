@@ -135,7 +135,7 @@
       ]
     },
     "NodeId": {
-      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
+      "description": "A node in the (future) multi-host deployment. `0` (the local node) is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
@@ -146,7 +146,7 @@
       "properties": {
         "node": {
           "$ref": "#/$defs/NodeId",
-          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+          "description": "Owning node; `0`, the local node, throughout v4.0 (X7)."
         },
         "path": {
           "description": "Slash-joined path through the composite resource tree (SB-34).",

@@ -123,3 +123,46 @@ pub fn render(schema: &serde_json::Value) -> String {
     s.push('\n');
     s
 }
+
+/// How a committed schema differs from the regenerated one, or `None` when they are
+/// byte-identical (OV-10). A difference only in `description` or `title` is not a
+/// change of shape, so after the freeze it is a correction of the v1 file rather
+/// than a new major (OV-12).
+pub fn drift(committed: &str, rendered: &str) -> Option<&'static str> {
+    if committed == rendered {
+        return None;
+    }
+    let shape = |text: &str| {
+        let mut schema = serde_json::from_str::<serde_json::Value>(text).ok()?;
+        strip_annotations(&mut schema);
+        Some(schema)
+    };
+    match (shape(committed), shape(rendered)) {
+        (Some(a), Some(b)) if a == b => Some("in a description or title only"),
+        _ => Some("in shape, which after the freeze is a new major (OV-12)"),
+    }
+}
+
+/// Removes every `description` and `title` keyword, and nothing a schema's data
+/// names so: a property called `description` and a default holding one stay.
+fn strip_annotations(schema: &mut serde_json::Value) {
+    match schema {
+        serde_json::Value::Object(map) => {
+            map.remove("description");
+            map.remove("title");
+            for (keyword, value) in map.iter_mut() {
+                match keyword.as_str() {
+                    "default" | "const" | "enum" | "examples" => {}
+                    "properties" | "patternProperties" | "$defs" => {
+                        if let serde_json::Value::Object(named) = value {
+                            named.values_mut().for_each(strip_annotations);
+                        }
+                    }
+                    _ => strip_annotations(value),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_annotations),
+        _ => {}
+    }
+}

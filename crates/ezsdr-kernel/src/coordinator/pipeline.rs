@@ -1563,9 +1563,19 @@ pub(super) fn run_child(
             reason: format!("KC-37a: {error}"),
         },
     };
+    // A document is hashed as parsed (RS-45), so the entry names the child's
+    // Manifest hashes; one that does not parse is hashed as sent, and refused below.
     let action = SessionAction::RunChild {
-        spec_hash: ContentHash::of_value(spec_doc).map_err(malformed)?,
-        binding_hash: ContentHash::of_value(profile_doc).map_err(malformed)?,
+        spec_hash: match ExperimentSpec::from_json(spec_doc) {
+            Ok(spec) => ContentHash::of(&spec),
+            Err(_) => ContentHash::of_value(spec_doc),
+        }
+        .map_err(malformed)?,
+        binding_hash: match BindingProfile::from_json(profile_doc) {
+            Ok(profile) => ContentHash::of(&profile),
+            Err(_) => ContentHash::of_value(profile_doc),
+        }
+        .map_err(malformed)?,
     };
     run.log
         .check_entry(&now, &action)
@@ -1590,8 +1600,8 @@ pub(super) fn run_child(
     // parent's checks, whatever the caller's Assembly holds (Phase 6 Review H, P1-2).
     assembly.host_clock = run.shared.ctx.host_clock.clone();
     assembly.checks = run.shared.ctx.checks.clone();
-    // The documents parsed in `child_refusal`, so a refusal here is a hash or migration
-    // failure of a document that parsed; it cannot happen for a document that hashed above.
+    // The documents parsed in `child_refusal`, so a refusal here is a hash failure of
+    // a document that parsed; it cannot happen for a document that hashed above.
     let mut child = super::start_spec(
         spec_doc,
         profile_doc,

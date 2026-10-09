@@ -189,7 +189,7 @@ pub struct BurstRecord {
     pub samples: u64,
     /// Complete repetitions of the waveform, `samples / waveform_len` (SC-26, SC-29a).
     pub wraps: u32,
-    /// Lateness, from [`LatePolicy::decide`] (SC-27, SC-29a).
+    /// Lateness, as the burst's late policy decided it (SC-27, SC-29a).
     pub late_by: Option<Duration>,
     /// How it ended (SC-28).
     pub end: BurstEnd,

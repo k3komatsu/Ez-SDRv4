@@ -22,7 +22,7 @@ use ezsdr_kernel::plan::{
 use ezsdr_kernel::policy::{EventKindRegistry, Reaction};
 use ezsdr_kernel::spec::{
     CapabilityValue, CoercionPolicy, Constraint, ExperimentSpec, Ident, Key, KeyDecl,
-    MigrationRegistry, Namespace, ResourceReq, ScheduleEntry, SpecError, SpecTime, SubResourceReq,
+    Namespace, ResourceReq, ScheduleEntry, SpecError, SpecTime, SubResourceReq,
     Value, ValueKind,
 };
 use ezsdr_kernel::stream::{BackPressure, LatePolicy};
@@ -337,54 +337,6 @@ fn sb_47_version_two_refused_by_name() {
             supported: vec![1]
         })
     );
-}
-
-#[test]
-fn sb_48_migration_point_exists() {
-    let mut reg = MigrationRegistry::new();
-    reg.register(0, |mut doc| {
-        doc["version"] = serde_json::json!(1);
-        Ok(doc)
-    });
-    let doc = serde_json::json!({ "version": 0, "resources": {} });
-    let (migrated, original) = reg.migrate(doc.clone()).expect("migrates");
-    assert_eq!(
-        original, 0,
-        "the Manifest records the original version (SB-49)"
-    );
-    assert_eq!(migrated["version"], serde_json::json!(1));
-    assert!(ExperimentSpec::from_json(&migrated).is_ok());
-    let section = ezsdr_kernel::manifest::SpecSection::migrated(migrated.clone(), &doc)
-        .expect("hashes both document forms");
-    assert_eq!(
-        section.hash,
-        ContentHash::of(&migrated).expect("hashes migrated body")
-    );
-    assert_eq!(section.original_version, Some(0));
-    assert_eq!(
-        section.original_hash,
-        Some(ContentHash::of(&doc).expect("hashes original body"))
-    );
-
-    // A document already at the current version passes through `migrate` unchanged,
-    // and SB-49 records provenance only "when a document was migrated".
-    let current = serde_json::json!({ "version": 1, "resources": {} });
-    let (unchanged, _) = reg
-        .migrate(current.clone())
-        .expect("current version passes");
-    let section = ezsdr_kernel::manifest::SpecSection::migrated(unchanged, &current)
-        .expect("hashes the body");
-    assert_eq!(
-        (section.original_version, section.original_hash),
-        (None, None)
-    );
-
-    // With no step registered, a version 0 document is refused, never reinterpreted.
-    let empty = MigrationRegistry::new();
-    assert!(matches!(
-        empty.migrate(serde_json::json!({ "version": 0 })),
-        Err(SpecError::UnsupportedVersion { found: 0, .. })
-    ));
 }
 
 #[test]
@@ -2233,13 +2185,9 @@ fn sb_20_extensions_reach_the_manifest_verbatim() {
     let content = serde_json::json!({ "nested": { "a": [1, 2, 3] }, "s": "opaque" });
     let mut spec = minimal_spec();
     spec.extensions.insert(ns("vendor.thing"), content.clone());
-    let body = serde_json::to_value(&spec).expect("serialises");
-    let section =
-        ezsdr_kernel::manifest::SpecSection::migrated(body.clone(), &body).expect("hashes");
+    let section = ezsdr_kernel::manifest::SpecSection::of(&spec).expect("hashes");
     assert_eq!(section.body["extensions"]["vendor.thing"], content);
-    let bare = serde_json::to_value(minimal_spec()).expect("serialises");
-    let without =
-        ezsdr_kernel::manifest::SpecSection::migrated(bare.clone(), &bare).expect("hashes");
+    let without = ezsdr_kernel::manifest::SpecSection::of(&minimal_spec()).expect("hashes");
     assert_ne!(section.hash, without.hash, "the hash covers the extension");
 }
 

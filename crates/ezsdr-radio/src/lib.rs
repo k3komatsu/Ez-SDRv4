@@ -635,7 +635,7 @@ pub mod payloads {
     /// `RX_OVERFLOW`'s payload as a Manifest holds it when a Provider emitted it on the
     /// hot path: the Kernel's drain turns the record's bytes into this array (RS-34).
     /// Its schema gives a Manifest reader the shape; RM-24 gives the layout, which only
-    /// [`RxOverflowPayload::from_payload`] interprets.
+    /// the Radio Model's own reader interprets.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(transparent)]
     pub struct RxOverflowHotPayload(pub [u8; RX_OVERFLOW_HOT_BYTES]);
@@ -778,7 +778,7 @@ pub mod payloads {
     #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct LateCommandPayload {
-        /// The changed key, or `None` for a stream start (RM-22).
+        /// The changed key, or null for a stream start (RM-22).
         pub key: Option<Key>,
         /// The requested instant (RM-22).
         pub requested: TimePoint,

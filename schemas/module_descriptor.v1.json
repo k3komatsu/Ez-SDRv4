@@ -5,7 +5,7 @@
       "type": "string"
     },
     "Deployment": {
-      "description": "How a Module is deployed. `Plugin` names a deployment, never a role, and is\nreserved: Phase 1 refuses it as `Unsupported` (MA-1, MA-32, MA-46).",
+      "description": "How a Module is deployed. `Plugin` names a deployment, never a role, and is\nreserved: the Kernel refuses it as `Unsupported` (MA-1, MA-32, MA-46).",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -47,7 +47,7 @@
       "type": "string"
     },
     "Namespace": {
-      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "description": "A dotted sequence of `Ident`s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
       "type": "string"
     },
     "Role": {
@@ -112,7 +112,7 @@
     },
     "VersionReq": {
       "$ref": "#/$defs/Version",
-      "description": "A caret requirement over a [`Version`] (MA-33)."
+      "description": "A caret requirement over a `Version` (MA-33)."
     },
     "VocabularyRequirement": {
       "additionalProperties": false,

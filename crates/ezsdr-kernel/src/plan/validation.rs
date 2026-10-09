@@ -441,7 +441,7 @@ pub(super) fn check_bindings(
 
     // SB-22d / D89: a binding that fills no slot is read by no check — its Module
     // reference could be an unregistered version and still reach the Manifest, which
-    // records the profile verbatim (RS-38). Last, so that a misspelt output binding is
+    // records the profile (RS-38). Last, so that a misspelt output binding is
     // `UnboundOutput` and a stray `feed` is SB-22g's.
     if let Some(name) = profile.bindings.keys().find(|n| {
         !spec.resources.contains_key(*n)

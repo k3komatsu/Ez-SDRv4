@@ -134,7 +134,7 @@
       "type": "string"
     },
     "Key": {
-      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the [`KeyDecl`] and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the `KeyDecl` and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
       "type": "string"
     },
     "KeyDecl": {
@@ -199,7 +199,7 @@
       ]
     },
     "Namespace": {
-      "description": "A dotted sequence of [`Ident`]s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
+      "description": "A dotted sequence of `Ident`s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
       "type": "string"
     },
     "Reaction": {
@@ -287,32 +287,32 @@
       "oneOf": [
         {
           "const": "bool",
-          "description": "[`Value::Bool`].",
+          "description": "A boolean.",
           "type": "string"
         },
         {
           "const": "int",
-          "description": "[`Value::Int`].",
+          "description": "An integer.",
           "type": "string"
         },
         {
           "const": "num",
-          "description": "[`Value::Num`].",
+          "description": "A float.",
           "type": "string"
         },
         {
           "const": "str",
-          "description": "[`Value::Str`].",
+          "description": "A string.",
           "type": "string"
         },
         {
           "const": "list",
-          "description": "[`Value::List`].",
+          "description": "A list of scalars.",
           "type": "string"
         },
         {
           "const": "map",
-          "description": "[`Value::Map`].",
+          "description": "A map of scalars.",
           "type": "string"
         }
       ]

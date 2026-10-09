@@ -257,8 +257,11 @@ fn ea_06_schema_freeze() {
             continue;
         }
         match std::fs::read_to_string(&path) {
-            Ok(committed) if committed == rendered => {}
-            Ok(_) => stale.push(format!("{name}: differs from the committed schema")),
+            Ok(committed) => {
+                if let Some(how) = ezsdr_kernel::schema::drift(&committed, &rendered) {
+                    stale.push(format!("{name}: differs from the committed schema {how}"));
+                }
+            }
             Err(_) => stale.push(format!("{name}: no committed schema at {}", path.display())),
         }
     }

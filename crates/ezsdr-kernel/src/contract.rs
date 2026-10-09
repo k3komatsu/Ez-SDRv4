@@ -56,7 +56,7 @@ impl fmt::Display for DataContractId {
     }
 }
 
-/// An attribute value in a [`DataContract`]. The Kernel stores these and never
+/// An attribute value in a `DataContract`. The Kernel stores these and never
 /// interprets them, which is what keeps it from becoming a type system (SC-2).
 ///
 /// Carries no tag (OV-13's carve-out): an attribute value is the scalar an author
@@ -135,7 +135,7 @@ impl DataContract {
     }
 }
 
-/// Which way samples flow through a [`Port`] (SC-1).
+/// Which way samples flow through a `Port` (SC-1).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]

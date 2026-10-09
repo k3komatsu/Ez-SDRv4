@@ -5,7 +5,7 @@
       "oneOf": [
         {
           "const": "block",
-          "description": "Publishing returns [`PublishOutcome::Full`] and nothing is ever dropped.\nThe name is the Vision's; the policy produces back-pressure through a\nrefusal the producer must honour, not through a parked thread (SC-20a).",
+          "description": "Publishing is refused as full and nothing is ever dropped.\nThe name is the Vision's; the policy produces back-pressure through a\nrefusal the producer must honour, not through a parked thread (SC-20a).",
           "type": "string"
         },
         {
@@ -67,7 +67,7 @@
     },
     "DataLinkId": {
       "additionalProperties": false,
-      "description": "Identifies a [`DataLink`](crate::stream::DataLinkDecl) instance.\n\nRule: SC-18 (`02-stream-contract.md`), X7.",
+      "description": "Identifies a data link instance (`DataLinkDecl`).\n\nRule: SC-18 (`02-stream-contract.md`), X7.",
       "properties": {
         "local": {
           "description": "Node-local ordinal, allocated by the owning registry.",
@@ -77,7 +77,7 @@
         },
         "node": {
           "$ref": "#/$defs/NodeId",
-          "description": "Owning node; `NodeId::LOCAL` throughout v4.0 (X7)."
+          "description": "Owning node; `0`, the local node, throughout v4.0 (X7)."
         }
       },
       "required": [
@@ -88,7 +88,7 @@
     },
     "DeclaredCost": {
       "additionalProperties": false,
-      "description": "A number the Link Module declares, not a measurement. The Core reports it and\nnever uses it to choose a placement; Phase 1 neither measures nor optimises.\n\nRule: SB-40. Vision §20, §31, §63.",
+      "description": "A number the Link Module declares, not a measurement. The Core reports it and\nnever uses it to choose a placement; the Core neither measures nor optimises.\n\nRule: SB-40. Vision §20, §31, §63.",
       "properties": {
         "cost": {
           "description": "The Link Module's own number, uninterpreted by the Kernel (SB-40).",
@@ -108,7 +108,7 @@
       "type": "object"
     },
     "ExecutionClass": {
-      "description": "What kind of Run this is, derived from the environment and cross-checked against\nthe Authority's [`Pacing`]; a class that was merely declared could lie.\n\nRule: MA-41, RS-42. Vision §14.",
+      "description": "What kind of Run this is, derived from the environment and cross-checked against\nthe Authority's `Pacing`; a class that was merely declared could lie.\n\nRule: MA-41, RS-42. Vision §14.",
       "oneOf": [
         {
           "const": "simulation",
@@ -196,7 +196,7 @@
       "type": "object"
     },
     "NodeId": {
-      "description": "A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
+      "description": "A node in the (future) multi-host deployment. `0` (the local node) is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"

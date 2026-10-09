@@ -481,8 +481,9 @@ fn ov_23b_kernel_growth_is_the_new_count() {
     // Phase 7's exit criterion 6 and GZ-2 name the counts themselves (116 NEW: of 292): a
     // change to the Kernel's public surface updates them here, with its reason. 291: spec
     // 20's KH-1 removed `plan::MergedPrepare`, an audit §13 item (`PrepareReport`), so
-    // the NEW: count stays 116.
-    assert_eq!((new.len(), total), (116, 291), "OV-23b, GZ-2: the Kernel's public surface changed");
+    // the NEW: count stays 116. 290: pre-freeze item 5 removed `spec::Migration` and
+    // `spec::MigrationRegistry` and added `schema::drift` (OV-12), none of them NEW:.
+    assert_eq!((new.len(), total), (116, 290), "OV-23b, GZ-2: the Kernel's public surface changed");
 }
 
 #[test]

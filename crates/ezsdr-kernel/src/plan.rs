@@ -56,7 +56,7 @@ pub struct Fragment {
 }
 
 /// A number the Link Module declares, not a measurement. The Core reports it and
-/// never uses it to choose a placement; Phase 1 neither measures nor optimises.
+/// never uses it to choose a placement; the Core neither measures nor optimises.
 ///
 /// Rule: SB-40. Vision §20, §31, §63.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]

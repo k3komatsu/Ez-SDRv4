@@ -88,7 +88,7 @@ struct Capture {
     builders: Vec<ContinuityMap>,
     builder: Option<(ContinuityBuilder, ClockDomainId, u16)>,
     started: bool,
-    /// The request's number (HD-16); `None` for the output's own capture.
+    /// The request's number (HD-16); null for the output's own capture.
     request: Option<u64>,
 }
 

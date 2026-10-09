@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::binding::AdmissionResult;
+use crate::binding::{AdmissionResult, BindingProfile};
 use crate::event::{CounterRow, Event, EventKind};
 use crate::hash::{ContentHash, HashError};
 use crate::id::RunId;
@@ -13,7 +13,7 @@ use crate::module_api::{ExecutionClass, Fidelity, ModuleRef, ProfileRef, Version
 use crate::plan::{ExecutionPlan, PrepareReport};
 use crate::policy::Policy;
 use crate::run::{CleanupFailure, Lease, StopCause, Termination, TransitionRecord};
-use crate::spec::{Ident, Namespace};
+use crate::spec::{ExperimentSpec, Ident, Namespace};
 use crate::stream::ContinuityMap;
 use crate::time::{ClockDomain, ClockRelation, SampleClockRecord, TimePoint};
 
@@ -85,51 +85,50 @@ pub enum RunKind {
     Session,
 }
 
-/// The `spec` section: the body after migration, its hash, and — when it was
-/// migrated — the original version and hash (RS-38, SB-49).
+/// The `spec` section: the Spec as parsed and re-serialised with every default
+/// written out, and its hash (RS-38, RS-45).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SpecSection {
-    /// The hash of the body after migration (RS-45).
+    /// The hash of the body (RS-45).
     pub hash: ContentHash,
-    /// The body itself (RS-38).
+    /// The body itself (RS-38, RS-45).
     pub body: serde_json::Value,
-    /// The version the document declared before migration (SB-49).
-    pub original_version: Option<u32>,
-    /// Its hash before migration (SB-49).
-    pub original_hash: Option<ContentHash>,
 }
 
 impl SpecSection {
-    /// Builds the Manifest section from the document as submitted and the body
-    /// after migration. The original version and hash are recorded only when the
-    /// two declare different versions, i.e. when a migration actually ran (SB-49,
-    /// RS-38); the version is read from the document, so it cannot disagree with it.
-    pub fn migrated(
-        body: serde_json::Value,
-        original_body: &serde_json::Value,
-    ) -> Result<SpecSection, HashError> {
-        let was_migrated = original_body.get("version") != body.get("version");
-        Ok(SpecSection {
-            hash: ContentHash::of(&body)?,
-            original_version: was_migrated
-                .then(|| original_body.get("version")?.as_u64()?.try_into().ok())
-                .flatten(),
-            original_hash: was_migrated.then(|| ContentHash::of(original_body)).transpose()?,
-            body,
-        })
+    /// The section of a parsed Spec (RS-45).
+    pub fn of(spec: &ExperimentSpec) -> Result<SpecSection, HashError> {
+        let (hash, body) = canonical(spec)?;
+        Ok(SpecSection { hash, body })
     }
 }
 
-/// The `binding` section: the BindingProfile body including its `environment`,
-/// recorded verbatim (RS-38, SB-27).
+/// The `binding` section: the BindingProfile, `environment` included, as parsed and
+/// re-serialised canonically from the parsed document (RS-38, RS-45, SB-27).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BindingSection {
     /// The hash of the body (RS-45).
     pub hash: ContentHash,
-    /// The body, environment included, byte for byte (SB-27, RS-43).
+    /// The body, environment included (SB-27, RS-43).
     pub body: serde_json::Value,
+}
+
+impl BindingSection {
+    /// The section of a parsed BindingProfile (RS-45).
+    pub fn of(profile: &BindingProfile) -> Result<BindingSection, HashError> {
+        let (hash, body) = canonical(profile)?;
+        Ok(BindingSection { hash, body })
+    }
+}
+
+/// A parsed document's hash and body: one document has one identity whatever
+/// optional members its author spelled (RS-45).
+fn canonical<T: Serialize>(doc: &T) -> Result<(ContentHash, serde_json::Value), HashError> {
+    let hash = ContentHash::of(doc)?;
+    let body = serde_json::to_value(doc).expect("ContentHash::of serialised it");
+    Ok((hash, body))
 }
 
 /// One Module the Run used (RS-38).
@@ -208,7 +207,7 @@ pub struct PrepareSection {
 /// The Vision's §50 listed "random seeds" and an optional environment capture among
 /// the envelope's contents before Step 5; neither is an envelope field here. The Kernel owns no
 /// random number generator, so a seed is something the environment declared, and
-/// the environment is already recorded verbatim under `binding.body`; the
+/// the environment is already recorded under `binding.body`; the
 /// environment capture has no Kernel-defined content at all, so it belongs under
 /// `sections` as `ezsdr.capture` (RS-43).
 ///
@@ -216,9 +215,9 @@ pub struct PrepareSection {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
-    /// Mandatory document major, as on every other Kernel document; Phase 1 supports
-    /// exactly `{1}` and [`crate::spec::check_version`] is what refuses another
-    /// (RS-38, SB-47, SB-48). Vision §10 requires it of the Manifest by name.
+    /// Mandatory document major, as on every other Kernel document; this build
+    /// supports exactly `{1}` and refuses another (RS-38, SB-47). Vision §10
+    /// requires it of the Manifest by name.
     pub version: u32,
     /// Identity, class, fidelity and the transition sequence (RS-38).
     pub run: RunSection,
@@ -226,7 +225,7 @@ pub struct Manifest {
     /// failed before its Policy compiled, as `plan` is absent when it failed before
     /// `plan()` (RS-1, RS-3, RS-26, RS-38).
     pub policy: Option<Policy>,
-    /// The Spec after migration, with its hashes (RS-38, SB-49).
+    /// The Spec as parsed, with its hash (RS-38, RS-45).
     pub spec: SpecSection,
     /// The BindingProfile, environment included (RS-38, SB-27).
     pub binding: BindingSection,
@@ -329,7 +328,7 @@ impl Manifest {
     /// written by a future major deserialised happily and SB-47's
     /// migrate-or-refuse had nothing to act on.
     ///
-    /// Rule: RS-38, SB-47, SB-48.
+    /// Rule: RS-38, SB-47.
     pub fn from_json(doc: &serde_json::Value) -> Result<Manifest, crate::spec::SpecError> {
         crate::spec::check_version(doc)?;
         crate::spec::check_ascii_keys(doc)?;

@@ -219,7 +219,7 @@ pub struct UncertainTimePoint {
 
 /// A processing budget measured from a work item's arrival, in `host.monotonic`.
 ///
-/// Distinct from [`AbsoluteDeadline`] with no common supertype: the checks that
+/// Distinct from `AbsoluteDeadline` with no common supertype: the checks that
 /// consume them differ (Vision §19, decision T5).
 ///
 /// Rule: TM-15.

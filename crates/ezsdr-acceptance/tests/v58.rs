@@ -285,8 +285,11 @@ fn v58_07_manifest_records_every_input_and_output() {
             assert!(!manifest.sections.contains_key(&ezsdr_kernel::spec::Namespace::parse(&unqualified).unwrap()), "{unqualified} must not exist");
         }
     }
-    assert_eq!(manifest.spec.body, spec);
-    assert_eq!(manifest.binding.body, profile);
+    // The documents as parsed, with every default written out (RS-45).
+    let spec = ezsdr_kernel::spec::ExperimentSpec::from_json(&spec).unwrap();
+    let profile = ezsdr_kernel::binding::BindingProfile::from_json(&profile).unwrap();
+    assert_eq!(manifest.spec.body, serde_json::to_value(spec).unwrap());
+    assert_eq!(manifest.binding.body, serde_json::to_value(profile).unwrap());
 }
 
 #[test]

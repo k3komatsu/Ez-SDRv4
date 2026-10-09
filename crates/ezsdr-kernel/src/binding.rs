@@ -99,7 +99,7 @@ pub struct Placements {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BindingProfile {
-    /// Mandatory positive integer; Phase 1 supports exactly `{1}` (SB-21, SB-47).
+    /// Mandatory positive integer; this build supports exactly `{1}` (SB-21, SB-47).
     pub version: u32,
     /// Binding name to Binding: exactly one entry per role slot the two documents
     /// name, and no other (SB-22b, SB-22d, D89).
@@ -111,7 +111,7 @@ pub struct BindingProfile {
     /// Islands, components and links (SB-25).
     #[serde(default)]
     pub placements: Placements,
-    /// Namespaced opaque content, recorded verbatim in the Manifest (SB-26, SB-27).
+    /// Namespaced opaque content, recorded in the Manifest as parsed (SB-26, SB-27, RS-45).
     #[serde(default)]
     pub environment: BTreeMap<Namespace, serde_json::Value>,
 }
@@ -414,7 +414,7 @@ impl AdmissionCheckRegistry {
 
     /// Runs every check whose section is present in `environment` and whose stages
     /// include `stage`. A section with no registered check is informational and is
-    /// still recorded verbatim (SB-30, SB-31).
+    /// still recorded (SB-30, SB-31).
     pub fn run(
         &self,
         environment: &BTreeMap<Namespace, serde_json::Value>,
@@ -444,7 +444,7 @@ impl AdmissionCheckRegistry {
 /// coercing says nothing about the other. Keyed on the key alone, `prepare`'s SB-44
 /// check charged one resource's coercion to every resource naming that key and
 /// refused a value `coerce` was never asked about — so the resource name is part of
-/// the record, as it already is in [`RejectedConstraint`].
+/// the record, as it already is in `RejectedConstraint`.
 ///
 /// Rule: SB-7, SB-38, SB-44.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]

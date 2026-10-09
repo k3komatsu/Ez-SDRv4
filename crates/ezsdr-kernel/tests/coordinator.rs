@@ -12,7 +12,8 @@ use ezsdr_kernel::manifest::RunKind;
 use ezsdr_kernel::module_api::Pacing;
 use ezsdr_kernel::run::{Lease, LeaseMode, RunState, Stage, StopCause, Termination};
 use ezsdr_kernel::session::{Outcome, SessionAction};
-use ezsdr_kernel::spec::{Ident, Key, SpecError, Value};
+use ezsdr_kernel::binding::BindingProfile;
+use ezsdr_kernel::spec::{ExperimentSpec, Ident, Key, SpecError, Value};
 use ezsdr_kernel::time::{
     ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority, Rational, TimePoint,
 };
@@ -1289,7 +1290,7 @@ fn kc_04_an_object_under_no_resource_is_refused() {
 }
 
 #[test]
-fn kc_45_the_documents_are_recorded_verbatim() {
+fn kc_45_the_documents_are_recorded_as_parsed() {
     let spec = spec_one();
     let profile = profile_one();
     let run = start_spec_run(
@@ -1299,13 +1300,64 @@ fn kc_45_the_documents_are_recorded_verbatim() {
     )
     .expect("entry creates a Run");
     let manifest = run.finish();
-    assert_eq!(manifest.spec.body, spec);
-    assert_eq!(manifest.binding.body, profile);
-    assert_eq!(
-        manifest.binding.hash,
-        ContentHash::of_value(&manifest.binding.body).unwrap()
-    );
+    let parsed_spec = ExperimentSpec::from_json(&spec).unwrap();
+    let parsed_profile = BindingProfile::from_json(&profile).unwrap();
+    assert_eq!(manifest.spec.body, serde_json::to_value(&parsed_spec).unwrap());
+    assert_eq!(manifest.binding.body, serde_json::to_value(&parsed_profile).unwrap());
+    assert_eq!(manifest.spec.hash, ContentHash::of_value(&manifest.spec.body).unwrap());
+    assert_eq!(manifest.binding.hash, ContentHash::of_value(&manifest.binding.body).unwrap());
     assert_eq!(manifest.run.kind, RunKind::Spec);
+}
+
+#[test]
+fn rs_45_hash_equal_for_equal_inputs() {
+    // One document spelled twice — its defaults omitted, then written out in another
+    // key order with whitespace — is one Spec and one profile, with one hash each.
+    let spelled_spec = serde_json::from_str(
+        r#"{ "extensions": {}, "graph": { "components": {}, "links": [] },
+             "schedule": [], "outputs": [], "inputs": [], "version": 1,
+             "policies": { "failure": {}, "coercion": {} },
+             "requirements": { "vocabularies": [{ "id": "test", "major": 1 }] },
+             "resources": { "radio": { "kind": "test.device",
+                 "requires": { "test.count": { "kind": "eq", "value": 2 } } } } }"#,
+    )
+    .unwrap();
+    let spelled_profile = serde_json::from_str(
+        r#"{ "environment": {}, "version": 1, "authority": "radio",
+             "bindings": { "radio": { "selector": {},
+                 "module": { "id": "ezsdr.test.provider",
+                             "version": { "major": 1, "minor": 0, "patch": 0 } } } } }"#,
+    )
+    .unwrap();
+    let manifest = |spec: &serde_json::Value, profile: &serde_json::Value| {
+        start_spec_run(
+            spec,
+            profile,
+            with_provider(rig(Pacing::FreeRunning).assembly, "radio", "radio"),
+        )
+        .expect("entry creates a Run")
+        .finish()
+    };
+    let terse = manifest(&spec_one(), &profile_one());
+    let spelled = manifest(&spelled_spec, &spelled_profile);
+    assert_ne!(spelled_spec, spec_one(), "the fixture spells what the other omits");
+    assert_ne!(spelled_profile, profile_one(), "the fixture spells what the other omits");
+    assert_eq!((&terse.spec.hash, &terse.spec.body), (&spelled.spec.hash, &spelled.spec.body));
+    assert_eq!(
+        (&terse.binding.hash, &terse.binding.body),
+        (&spelled.binding.hash, &spelled.binding.body)
+    );
+    // A Session records its profile the same way (`connect`).
+    for profile in [profile_one(), spelled_profile] {
+        let session = connect(
+            &profile,
+            with_provider(rig(Pacing::FreeRunning).assembly, "radio", "radio"),
+            Lease::attached(),
+        )
+        .expect("valid Session entry")
+        .finish();
+        assert_eq!((&session.binding.hash, &session.binding.body), (&terse.binding.hash, &terse.binding.body));
+    }
 }
 
 #[test]
@@ -3744,14 +3796,15 @@ fn kf_03_a_child_run_is_admitted_logged_run_and_recorded() {
     let (entry, child) = run.run_child(&spec_one(), &profile_one(), child_assembly(), &mut drive).unwrap();
     assert!(drove, "the caller drives the child");
     assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
+    let child = child.expect("an admitted child returns its Manifest");
+    // The entry names the documents by the hashes the child's Manifest records (RS-45).
     assert_eq!(
         entry.action,
         SessionAction::RunChild {
-            spec_hash: ContentHash::of_value(&spec_one()).unwrap(),
-            binding_hash: ContentHash::of_value(&profile_one()).unwrap(),
+            spec_hash: child.spec.hash.clone(),
+            binding_hash: child.binding.hash.clone(),
         }
     );
-    let child = child.expect("an admitted child returns its Manifest");
     assert_eq!(child.run.parent, Some(parent.clone()));
     assert_eq!(child.run.kind, RunKind::Spec);
     assert!(child.hash.is_some());
@@ -3809,6 +3862,7 @@ fn kf_03_rs_25a_refusals() {
         (spec_one(), dropped, Some("RS-25a: section test.limits")),
         (spec_one(), changed, Some("RS-25a: section test.limits")),
         (serde_json::json!({ "version": 1, "resources": 3 }), parent_profile.clone(), Some("RS-25a: the child's Spec")),
+        (spec_one(), serde_json::json!({ "version": 1, "bindings": 3 }), Some("RS-25a: the child's profile")),
         (spec_one(), unchecked, None),
         (spec_one(), planned, None),
         (spec_one(), prepared, None),
@@ -3827,6 +3881,20 @@ fn kf_03_rs_25a_refusals() {
                 assert!(violations[0].reason.starts_with(reason), "{} does not start with {reason}", violations[0].reason);
                 assert!(child.is_none());
                 assert!(!manifest.sections.contains_key(&ns("ezsdr.children")));
+                // A document is named by its parsed hash, or by the hash of what was sent
+                // when it does not parse (RS-45).
+                let spec_hash = match ExperimentSpec::from_json(&spec) {
+                    Ok(parsed) => ContentHash::of(&parsed),
+                    Err(_) => ContentHash::of_value(&spec),
+                };
+                let binding_hash = match BindingProfile::from_json(&profile) {
+                    Ok(parsed) => ContentHash::of(&parsed),
+                    Err(_) => ContentHash::of_value(&profile),
+                };
+                assert_eq!(
+                    entry.action,
+                    SessionAction::RunChild { spec_hash: spec_hash.unwrap(), binding_hash: binding_hash.unwrap() }
+                );
             }
             None => {
                 assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);

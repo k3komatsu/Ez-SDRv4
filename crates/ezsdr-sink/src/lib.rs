@@ -108,7 +108,7 @@ pub struct CaptureWrittenPayload {
     /// The recorded capture, as the Sink's `stop` will return it (HD-16).
     pub artifact: ezsdr_kernel::manifest::ArtifactRef,
     /// The number of the capture request it served, counting from 0 every capture request
-    /// the Sink received, accepted or not; `None` for the output's own capture (HD-16).
+    /// the Sink received, accepted or not; null for the output's own capture (HD-16).
     /// A client that submitted the `k`-th request waits for `request: k` (Phase 6, Review
     /// H, P0-2).
     #[serde(default, skip_serializing_if = "Option::is_none")]

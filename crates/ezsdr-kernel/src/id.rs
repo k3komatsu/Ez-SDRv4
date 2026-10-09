@@ -10,7 +10,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// A node in the (future) multi-host deployment. `LOCAL` is the only legal value in v4.0.
+/// A node in the (future) multi-host deployment. `0` (the local node) is the only legal value in v4.0.
 ///
 /// Rule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema)]
@@ -88,7 +88,7 @@ impl fmt::Display for NodeId {
     }
 }
 
-/// Identifies a [`ClockDomain`](crate::time::ClockDomain).
+/// Identifies a `ClockDomain`.
 ///
 /// Rule: TM-11 (`01-time-model.md`), X7.
 #[derive(
@@ -97,13 +97,13 @@ impl fmt::Display for NodeId {
 )]
 #[serde(deny_unknown_fields)]
 pub struct ClockDomainId {
-    /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
+    /// Owning node; `0`, the local node, throughout v4.0 (X7).
     pub node: NodeId,
     /// Node-local ordinal, allocated by the owning registry.
     pub local: u32,
 }
 
-/// Identifies a memory domain a [`SampleBlock`](crate::stream::SampleBlock) lives in.
+/// Identifies a memory domain a sample block lives in.
 ///
 /// Rule: SC-6 (`02-stream-contract.md`), X7.
 #[derive(
@@ -112,7 +112,7 @@ pub struct ClockDomainId {
 )]
 #[serde(deny_unknown_fields)]
 pub struct MemoryDomainId {
-    /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
+    /// Owning node; `0`, the local node, throughout v4.0 (X7).
     pub node: NodeId,
     /// Node-local ordinal, allocated by the owning registry.
     pub local: u32,
@@ -127,13 +127,13 @@ pub struct MemoryDomainId {
 )]
 #[serde(deny_unknown_fields)]
 pub struct IslandId {
-    /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
+    /// Owning node; `0`, the local node, throughout v4.0 (X7).
     pub node: NodeId,
     /// Node-local ordinal, allocated by the owning registry.
     pub local: u32,
 }
 
-/// Identifies a [`DataLink`](crate::stream::DataLinkDecl) instance.
+/// Identifies a data link instance (`DataLinkDecl`).
 ///
 /// Rule: SC-18 (`02-stream-contract.md`), X7.
 #[derive(
@@ -142,7 +142,7 @@ pub struct IslandId {
 )]
 #[serde(deny_unknown_fields)]
 pub struct DataLinkId {
-    /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
+    /// Owning node; `0`, the local node, throughout v4.0 (X7).
     pub node: NodeId,
     /// Node-local ordinal, allocated by the owning registry.
     pub local: u32,
@@ -225,7 +225,7 @@ impl ClockDomainId {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceId {
-    /// Owning node; `NodeId::LOCAL` throughout v4.0 (X7).
+    /// Owning node; `0`, the local node, throughout v4.0 (X7).
     pub node: NodeId,
     /// Slash-joined path through the composite resource tree (SB-34).
     pub path: String,

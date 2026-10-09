@@ -1112,5 +1112,125 @@
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kc_42_a_mark_delivered_during_an_abort_cleanup_reaches_the_artifact"
+ },
+ {
+  "id": "J76",
+  "name": "audit item 5 (OV-12): a `title` is kept when shapes are compared, so a corrected title reads as a change of shape",
+  "file": "crates/ezsdr-kernel/src/schema.rs",
+  "old": "            map.remove(\"title\");\n",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "schema_freeze",
+  "filter": "ov_12_a_description_or_title_is_not_the_shape"
+ },
+ {
+  "id": "J77",
+  "name": "audit item 5 (OV-12): `properties` is stripped as a schema, so removing a property named `description` reads as an annotation edit",
+  "file": "crates/ezsdr-kernel/src/schema.rs",
+  "old": "                    \"properties\" | \"patternProperties\" | \"$defs\" => {",
+  "new": "                    \"patternProperties\" | \"$defs\" => {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "schema_freeze",
+  "filter": "ov_12_a_description_or_title_is_not_the_shape"
+ },
+ {
+  "id": "J78",
+  "name": "audit item 5 (OV-12): a `default` is stripped as a schema, so its data member named `description` reads as an annotation",
+  "file": "crates/ezsdr-kernel/src/schema.rs",
+  "old": "                    \"default\" | \"const\" | \"enum\" | \"examples\" => {}",
+  "new": "                    \"const\" | \"enum\" | \"examples\" => {}",
+  "crate": "ezsdr-kernel",
+  "test_bin": "schema_freeze",
+  "filter": "ov_12_a_description_or_title_is_not_the_shape"
+ },
+ {
+  "id": "J79",
+  "name": "audit item 5 (RS-45): a Spec Run's `spec.hash` is taken over the Spec as submitted, so one Spec spelled two ways has two hashes",
+  "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
+  "old": "    let profile = BindingProfile::from_json(profile_doc)?;\n    let (spec_section, binding_section) = sections(&spec, &profile)?;\n",
+  "new": "    let profile = BindingProfile::from_json(profile_doc)?;\n    let (mut spec_section, binding_section) = sections(&spec, &profile)?;\n    spec_section.hash = ContentHash::of_value(spec_doc).unwrap();\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "rs_45_hash_equal_for_equal_inputs"
+ },
+ {
+  "id": "J80",
+  "name": "audit item 5 (RS-45): a Spec Run's `binding.hash` is taken over the profile as submitted, so one profile spelled two ways has two hashes",
+  "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
+  "old": "    let profile = BindingProfile::from_json(profile_doc)?;\n    let (spec_section, binding_section) = sections(&spec, &profile)?;\n",
+  "new": "    let profile = BindingProfile::from_json(profile_doc)?;\n    let (spec_section, mut binding_section) = sections(&spec, &profile)?;\n    binding_section.hash = ContentHash::of_value(profile_doc).unwrap();\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "rs_45_hash_equal_for_equal_inputs"
+ },
+ {
+  "id": "J81",
+  "name": "audit item 5 (RS-45, KC-37a): a `RunChild` entry's `spec_hash` is taken over the Spec as sent, not the hash its child's Manifest records",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "            Ok(spec) => ContentHash::of(&spec),",
+  "new": "            Ok(_) => ContentHash::of_value(spec_doc),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kf_03_a_child_run_is_admitted_logged_run_and_recorded"
+ },
+ {
+  "id": "J82",
+  "name": "audit item 5 (RS-45, KC-37a): a `RunChild` entry's `binding_hash` is taken over the profile as sent, not the hash its child's Manifest records",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "            Ok(profile) => ContentHash::of(&profile),",
+  "new": "            Ok(_) => ContentHash::of_value(profile_doc),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kf_03_a_child_run_is_admitted_logged_run_and_recorded"
+ },
+ {
+  "id": "J83",
+  "name": "audit item 5 (RS-45): a Session (`connect`) records and hashes its profile as sent, not as parsed",
+  "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
+  "old": "    drop((providers, sinks));\n    let (spec_section, binding_section) = sections(&spec, &profile)?;\n",
+  "new": "    drop((providers, sinks));\n    let (spec_section, mut binding_section) = sections(&spec, &profile)?;\n    binding_section.body = profile_doc.clone();\n    binding_section.hash = crate::hash::ContentHash::of_value(profile_doc).unwrap();\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "rs_45_hash_equal_for_equal_inputs"
+ },
+ {
+  "id": "J84",
+  "name": "audit item 5 (RS-45, KC-37a): a `RunChild` entry names a Spec that does not parse by some other hash than that of the text sent",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "            Err(_) => ContentHash::of_value(spec_doc),",
+  "new": "            Err(_) => ContentHash::of_value(&serde_json::Value::Null),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kf_03_rs_25a_refusals"
+ },
+ {
+  "id": "J85",
+  "name": "audit item 5 (OV-12): annotations inside an array (`oneOf`, `anyOf`) are kept when shapes are compared",
+  "file": "crates/ezsdr-kernel/src/schema.rs",
+  "old": "        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_annotations),",
+  "new": "        serde_json::Value::Array(_) => {}",
+  "crate": "ezsdr-kernel",
+  "test_bin": "schema_freeze",
+  "filter": "ov_12_a_description_or_title_is_not_the_shape"
+ },
+ {
+  "id": "J86",
+  "name": "audit item 5 (RS-45, KC-37a): a `RunChild` entry names a profile that does not parse by some other hash than that of the text sent",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "            Err(_) => ContentHash::of_value(profile_doc),",
+  "new": "            Err(_) => ContentHash::of_value(&serde_json::Value::Null),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kf_03_rs_25a_refusals"
+ },
+ {
+  "id": "J87",
+  "name": "audit item 5 (OV-12): a `description` is kept when shapes are compared, so a corrected description reads as a change of shape",
+  "file": "crates/ezsdr-kernel/src/schema.rs",
+  "old": "            map.remove(\"description\");\n",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "schema_freeze",
+  "filter": "ov_12_a_description_or_title_is_not_the_shape"
  }
 ]

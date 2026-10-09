@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "`RX_OVERFLOW`'s payload as a Manifest holds it when a Provider emitted it on the\nhot path: the Kernel's drain turns the record's bytes into this array (RS-34).\nIts schema gives a Manifest reader the shape; RM-24 gives the layout, which only\n[`RxOverflowPayload::from_payload`] interprets.",
+  "description": "`RX_OVERFLOW`'s payload as a Manifest holds it when a Provider emitted it on the\nhot path: the Kernel's drain turns the record's bytes into this array (RS-34).\nIts schema gives a Manifest reader the shape; RM-24 gives the layout, which only\nthe Radio Model's own reader interprets.",
   "items": {
     "format": "uint8",
     "maximum": 255,

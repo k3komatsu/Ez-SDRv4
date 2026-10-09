@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::{ClockRegistry, Duration, Rescaled, TimeError, TimePoint, UncertainTimePoint};
 use crate::id::ClockDomainId;
 
-/// The window over which a [`ClockRelation`] may be applied (TM-14).
+/// The window over which a `ClockRelation` may be applied (TM-14).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Validity {

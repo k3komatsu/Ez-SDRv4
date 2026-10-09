@@ -46,7 +46,7 @@ pub enum EpochRef {
 pub enum ClockDomainKind {
     /// A timekeeper: a tick rate and what tick zero means.
     Root {
-        /// Ticks per second; neither term may exceed [`RATIO_TERM_CAP`] (TM-3).
+        /// Ticks per second; neither term may exceed 2^31 (TM-3).
         tick_rate: Rational,
         /// What tick zero is anchored to.
         epoch: EpochRef,
@@ -55,7 +55,7 @@ pub enum ClockDomainKind {
     Derived {
         /// The `Root` this divides; refused if unknown or itself `Derived` (TM-3).
         root: ClockDomainId,
-        /// Root ticks per one tick here; neither term may exceed [`RATIO_TERM_CAP`] (TM-3).
+        /// Root ticks per one tick here; neither term may exceed 2^31 (TM-3).
         root_ticks_per_tick: Rational,
         /// This domain's tick zero, expressed in root ticks (decision T2).
         origin: i64,
