@@ -4,6 +4,13 @@
 |---|---|
 | Status | **Audit record, not a decision.** Read-only audit requested by the owner on 2026-10-09 ("Kernelを凍結する前に，問題になりそうな仕様を直したりリファクタリングしましょう"). Seven angles found 47 findings over the Kernel's code, schemas and specs 01–06; one adversarial verifier per angle checked each (46 VERIFIED, 1 INFERRED); a synthesiser grouped them into nine items. Run as a Claude Opus workflow. The owner decides each item; accepted items become maintenance specs. |
 
+## Owner decisions
+
+| date | item | decision |
+|---|---|---|
+| 2026-10-09 | packaging, order, item 9 | Accepted as recommended: spec 24 for items 5, 4, 6, 7; separate specs for 1, 2, 3; item 8 under spec 22's DA-3; item 9 is handoff's single checklist; #65 and #66 (F19, F21) fixed first, after note 25. |
+| 2026-10-09 | item 5 | Accepted, **lean** (owner: "このプロジェクトは研究用なので大げさにならないように"): each document type checks its own supported versions and refuses any other (invariant 39 allows refusing); the unused MigrationRegistry and the migration provenance it promised (SB-48, SB-49) are deleted rather than wired, so a later v2 simply refuses v1 and drops its schema file; hashes are taken over the parsed document re-serialised with defaults written out (OV-16, RS-45, SB-27 wording); schema immutability covers the schema without `description`/`title`, followed by one sweep removing Rust paths and "Phase 1" from descriptions; F42 (`propertyNames`) dropped. |
+
 ## Synthesis
 
 
