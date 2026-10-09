@@ -2,9 +2,10 @@
 
 | Field | Value |
 |---|---|
-| Status | **Draft for the owner**, written by the orchestrator (Claude Opus) on 2026-10-09. It implements the owner's decision on audit item 2 ([24-prefreeze-audit.md](24-prefreeze-audit.md), Owner decisions, "item 2"; findings F13, F14, F15, F16, F17 (#54), F18, F24, F25 f, F39's source half) and opens with the design note AGENTS.md §6 asks for. Not implemented. It lands after spec 24 and spec 26, and before item 3, which builds on the typed targets. |
+| Status | **Accepted** by the owner on 2026-10-09, with judgments 1–4 below. Written by the orchestrator (Claude Opus) on 2026-10-09. It implements the owner's decision on audit item 2 ([24-prefreeze-audit.md](24-prefreeze-audit.md), Owner decisions, "item 2"; findings F13, F14, F15, F16, F17 (#54), F18, F24, F25 f, F39's source half) and opens with the design note AGENTS.md §6 asks for. Not implemented. It lands after spec 24 and spec 26, and before item 3, which builds on the typed targets. |
 | Mechanisms | **`string-composed-identity`**, four bugs: #1, #15, #16, #26. **`correlation-by-partial-key`**, four bugs: #12, #17, #30, #31. See [failure-mechanisms.md](failure-mechanisms.md). |
 | Stages | **2a** addresses (one per mechanism), then **2b** correlation. Each stage goes through implementation, independent review, the mutation gate and a commit, and leaves the tree green. |
+| Owner decisions | 2026-10-09, judgment 1 ("判断1はOKです"): a Provider receives the resolved node path as `Dispatched.node` beside the authored target (§2, What a Module receives). Judgment 2 ("判断2もOKです"): a Module's Abort is admitted and logged with a real ActionId (§3). Judgment 3 ("これも判断として妥当です"): a string target is always a resource; other roles through `Target.output(...)` and `Target.component(...)` (§2, Python), the class name chosen because `output` alone is too generic (owner's concern); a `/` operator was considered and rejected, since an output or a component has no sub-path. Judgment 4 ("これも推奨を採用します"): the check that a Module's event source lies within its root goes to item 3 (§5). |
 | Versions | None are bumped and no SCHEMA_CHANGELOG entry is written (AGENTS.md §6). Both stages regenerate schemas. |
 
 ## 1. Design note (AGENTS.md §6)
@@ -71,7 +72,7 @@ The same habit appears in two more places:
 
 **`matched` and `needs`.** `matched: {<resource>: ResourceId}` holds resources only. `needs: {<resource>: {<need>: ResourceId}}` holds the need resolutions. Deleted: `need_key`, SB-36's collision refusal, SB-T1's need-key row, and the guard in `links.rs`. SB-39's check walks the nested map.
 
-**Python.** The wire carries the typed forms. The Easy API keeps its user-facing arguments, the radio and recorder names, and builds the typed target itself. The low-level `set_parameter` and `stop` take the typed target dict, with helpers `resource(name, path="")`, `output(name)` and `component(name)`. The Python client stops parsing `sink/` prefixes.
+**Python.** The wire carries the typed forms. The Easy API keeps its user-facing arguments, the radio and recorder names, and builds the typed target itself. `Session.set` and `Session.stop` take a typed target or a string, and a string always means a resource target (`"radio/rx"` → `{resource: radio, path: rx}`). Other roles are built through one class named after the Kernel type: `Target.resource(name, path="")`, `Target.output(name)` and `Target.component(name)`. There is no generic top-level `output()`, and an Easy API recorder is documented as an output. The Python client stops parsing `sink/` prefixes.
 
 **Spec text and schemas.**
 - design/03: SB-16, SB-22a, SB-22h deleted, SB-36, SB-39, SB-T1.
@@ -150,7 +151,7 @@ Splitting it into 2a and 2b keeps each step reviewable. 2a changes what things a
 
 ## 5. Not in this spec
 
-- **A check that a Module's event source lies within its root.** Today the shared collector takes any source from any Module. With typed sources and the root known, this is one check at the collector. It is a question of admission, so it is offered to item 3 instead of being added here.
+- **A check that a Module's event source lies within its root.** Today the shared collector takes any source from any Module. With typed sources and the root known, this is one check at the collector. It is a question of admission, so it goes to item 3 (owner, judgment 4).
 - **The Kernel's event kinds under `ezsdr.`:** item 4, spec 24.
 - **`Fragment.content` typing and `key_decl`:** F25 c and d, under items 4 and 3.
 - **A uniqueness rule for artifact ids:** not adopted.
