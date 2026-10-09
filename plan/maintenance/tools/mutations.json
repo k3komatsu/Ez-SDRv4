@@ -706,20 +706,20 @@
  },
  {
   "id": "J35",
-  "name": "UR-7, TM-3 (owner, 2026-10-08): a PPS-set root is registered with an arbitrary epoch again",
+  "name": "UR-7, TM-3 (owner, 2026-10-08): a PPS root with a locked clock is registered with an arbitrary epoch again",
   "file": "crates/ezsdr-radio-uhd/src/authority.rs",
-  "old": "        EpochRef::Pps { set_by: format!(\"ezsdr.radio.uhd.set_time_unknown_pps:{args}\") }",
-  "new": "        EpochRef::Arbitrary { set_by: format!(\"ezsdr.radio.uhd.set_time_unknown_pps:{args}\") }",
+  "old": "    if clock_source == \"internal\" { EpochRef::Arbitrary { set_by } } else { EpochRef::Pps { set_by } }",
+  "new": "    if clock_source == \"internal\" { EpochRef::Arbitrary { set_by } } else { EpochRef::Arbitrary { set_by } }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_07_the_root_s_epoch_is_the_pps_edge_with_an_external_source"
+  "filter": "ur_07_the_root_s_epoch_is_the_pps_edge_with_external_sources"
  },
  {
   "id": "J36",
-  "name": "UR-6 (owner, 2026-10-08): the Provider refuses its own PPS-set root",
+  "name": "UR-6 (owner, 2026-10-08; 2026-10-09): the Provider expects another epoch than its own Authority registers for its sources",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "crate::authority::epoch(false, &self.args), crate::authority::epoch(true, &self.args)]",
-  "new": "crate::authority::epoch(false, &self.args), crate::authority::epoch(false, &self.args)]",
+  "old": "        let epoch = crate::authority::epoch(&clock_source, &source(\"time_source\")?, &args);",
+  "new": "        let epoch = crate::authority::epoch(\"internal\", &source(\"time_source\")?, &args);",
   "crate": "ezsdr-server",
   "test_bin": "protocol",
   "filter": "ea_07_the_uhd_authority_takes_the_binding_s_sources"
@@ -788,8 +788,8 @@
   "id": "J44",
   "name": "UR-6 (PPS epoch review): the Provider accepts any PPS-set root, another device's included",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "        if !epoch.is_some_and(|e| own.contains(&e)) {",
-  "new": "        if !epoch.is_some_and(|e| own.contains(&e) || matches!(e, ezsdr_kernel::time::EpochRef::Pps { .. })) {",
+  "old": "        if epoch.as_ref() != Some(&self.epoch) {",
+  "new": "        if epoch.as_ref() != Some(&self.epoch) && !matches!(epoch, Some(ezsdr_kernel::time::EpochRef::Pps { .. })) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_06_the_provider_refuses_another_root"
@@ -974,5 +974,95 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_a_refused_transmit_change_ends_its_clock_at_its_origin"
+ },
+ {
+  "id": "J63",
+  "name": "UR-7, TM-3 (owner, 2026-10-09): a PPS-set root with an internal clock is registered as a PPS epoch",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "    if clock_source == \"internal\" { EpochRef::Arbitrary { set_by } } else",
+  "new": "    if false { EpochRef::Arbitrary { set_by } } else",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_the_root_s_epoch_is_the_pps_edge_with_external_sources"
+ },
+ {
+  "id": "J64",
+  "name": "#64 (owner, 2026-10-09): a direction halted by a refusal keeps its channels for a timed update",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "        if lock(&self.core.streams).lines[dir as usize].as_ref().is_some_and(|line| line.halted(t)) {",
+  "new": "        if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_a_direction_halted_by_a_refusal_has_no_channel"
+ },
+ {
+  "id": "J65",
+  "name": "#64 (owner, 2026-10-09): a stream counts as halted by its whole line, not by what is in effect at the instant",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "sorted(&self.items).into_iter().filter(|item| item.e <= t).collect();",
+  "new": "sorted(&self.items).into_iter().filter(|item| item.e <= i64::MAX).collect();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_a_direction_halted_by_a_refusal_has_no_channel"
+ },
+ {
+  "id": "J66",
+  "name": "UR-6 (review round 1, 2026-10-09): the Provider expects the epoch of a locked clock whatever its clock source",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "        let epoch = crate::authority::epoch(&clock_source, &source(\"time_source\")?, &args);",
+  "new": "        let epoch = crate::authority::epoch(\"external\", &source(\"time_source\")?, &args);",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_07_the_uhd_authority_takes_the_binding_s_sources"
+ },
+ {
+  "id": "J67",
+  "name": "UR-7, TM-3 (review round 1, 2026-10-09): only an external clock counts as locked, a GPSDO not",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "    if clock_source == \"internal\" { EpochRef::Arbitrary { set_by } } else",
+  "new": "    if clock_source != \"external\" { EpochRef::Arbitrary { set_by } } else",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_07_the_root_s_epoch_is_the_pps_edge_with_external_sources"
+ },
+ {
+  "id": "J68",
+  "name": "#64 (review round 1, 2026-10-09): a held command for a halted direction counts its channels against the queue depth",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "self.held.iter().map(|((e, _), t)| self.channels_at(t.dir, *e))",
+  "new": "self.held.iter().map(|((e, _), t)| Core::channels(&self.config_at(*e), t.dir))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_a_halted_direction_fills_no_queue_slot"
+ },
+ {
+  "id": "J69",
+  "name": "#64 (review round 1, 2026-10-09): a new command for a halted direction counts its channels against the queue depth",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "        if pending + self.channels_at(dir, e) > depth {",
+  "new": "        if pending + Core::channels(&self.config_at(e), dir) > depth {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_a_halted_direction_fills_no_queue_slot"
+ },
+ {
+  "id": "J70",
+  "name": "#64 (review round 1, 2026-10-09): a refusal at the command's own instant does not halt it yet",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "sorted(&self.items).into_iter().filter(|item| item.e <= t).collect();",
+  "new": "sorted(&self.items).into_iter().filter(|item| item.e < t).collect();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_a_halted_direction_fills_no_queue_slot"
+ },
+ {
+  "id": "J71",
+  "name": "#64 (review round 2, 2026-10-09): a late update is judged at its own instant, not where it acts",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "let channels = self.channels_at(timed.dir, effective);",
+  "new": "let channels = self.channels_at(timed.dir, e);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_a_late_update_halted_before_it_can_act_has_no_channel"
  }
 ]

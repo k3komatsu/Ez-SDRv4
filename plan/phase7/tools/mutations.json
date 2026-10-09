@@ -483,8 +483,8 @@
   "id": "U03",
   "name": "UR-6's root check removed",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "if !epoch.is_some_and(|e| own.contains(&e)) {",
-  "new": "if false && !epoch.is_some_and(|e| own.contains(&e)) {",
+  "old": "if epoch.as_ref() != Some(&self.epoch) {",
+  "new": "if false && epoch.as_ref() != Some(&self.epoch) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_06_the_provider_refuses_another_root"
@@ -528,8 +528,8 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_07_the_time_is_set_at_the_next_pps_with_an_external_source",
-  "old2": "        device.set_time_zero(pps).map_err(|e| format!(\"UR-7: {e}\"))?;",
-  "new2": ""
+  "old2": "        device.set_time_zero(time_source != \"internal\").map_err(|e| format!(\"UR-7: {e}\"))?;\n        let mcr",
+  "new2": "        let mcr"
  },
  {
   "id": "U08",

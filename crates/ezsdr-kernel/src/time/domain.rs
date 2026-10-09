@@ -29,8 +29,8 @@ pub enum EpochRef {
         /// Namespaced name of whatever established the epoch.
         set_by: String,
     },
-    /// Tick zero is the PPS edge at which `set_by` set the time (TM-3); a later whole
-    /// second of the root is a PPS edge only while the root is locked to the PPS's reference.
+    /// Tick zero is the PPS edge at which `set_by` set the time, and the root is locked to
+    /// the PPS's reference, so every whole second of the root is a PPS edge (TM-3).
     Pps {
         /// Namespaced name of whatever set the time at that edge.
         set_by: String,

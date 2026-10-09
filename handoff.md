@@ -932,8 +932,8 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-- **最優先（2026-10-09 夜，compact 前の記録）**：
-  - **作業ツリーに未 commit の変更あり**：#64（拒否で止まった方向は timed 解放でチャネル0）と `Pps` は両基準が external/gpsdo のときだけ，の実装．Workflow `halt-and-pps`（task `whgpqc8vx`，run `wf_592046b2-852`）が実装→独立 Opus レビューを回している最中．スクリプト：`~/.claude/projects/-Users-komatsu-work-Ez-SDRv4/0d8e3205-ba93-4fdf-9891-82eb2f3f44c1/workflows/scripts/halt-and-pps-wf_592046b2-852.js`．結果の確認方法：その run の `journal.jsonl`（`…/subagents/workflows/wf_592046b2-852/journal.jsonl`）．PASS なら sim02/sim03 で全 mutation リスト → commit（`Closes #64`）．`schemas/SCHEMA_CHANGELOG.md` の冒頭の注記（版管理しない，owner 2026-10-09）は自分が書いたもので，この commit に一緒に入れる．**版は上げない**（AGENTS.md §6）．
+- **最優先（2026-10-09）**：
+  - **#64 と `Pps` の条件は commit 済み**（2026-10-09，`Closes #64`）：拒否で止まった方向は timed 解放でチャネル0（効く瞬間で1回だけ判定），`Pps` は時刻源とクロック源の両方が internal でないときだけ．独立 Opus レビュー2回目で PASS，全 mutation リスト（494行）を sim02/sim03 で全 kill．
   - **その後の順番**（v4.0 凍結チェックリスト，§「次にすること」の 2.）：#65・#66 の修正（note 25 の方針）→ spec 24（監査項目 5・4・6・7）→ 項目1（1a→1b）→ 項目2 → 項目3 → 項目8 → 凍結レビュー．決定はすべて [`plan/maintenance/24-prefreeze-audit.md`](plan/maintenance/24-prefreeze-audit.md) の Owner decisions 表（これが決定記録．別に spec 本文を起こさない）．
   - **進め方**：段階ごとに Workflow（実装 1 → 独立 Opus レビュー → 修正，最大3回）．同じ作業ツリーを2つの Workflow で同時に触らない．修正の回は触った mutation 行だけ，段階の最後に全リストを sim02/sim03 で（AGENTS.md §7）．
   - **sim02/sim03 への接続**：Claude Code の bg セッションはローカルネットワークに出られない（Claude Code の既知の不具合，#74378/#95444 系；この Mac は #95444 の UUID 衝突を確認済み）．owner が端末で `ssh -N -L 2202:localhost:22 sim02 &` と `ssh -N -L 2203:localhost:22 sim03 &` を張り，こちらは次の内容の ssh 設定を `REMOTE_SSH="ssh -F <file> -o BatchMode=yes"` で渡す（scratchpad の `ssh_tunnels.conf`）：`Host sim02t / HostName localhost / Port 2202 / User komatsu / IdentityFile ~/.ssh/id_ed25519 / HostKeyAlias sim02.comm.ee.tut.ac.jp`，sim03t は Port 2203 と sim03 の別名．Bash は `dangerouslyDisableSandbox: true` が要る．

@@ -317,10 +317,9 @@ class Tx(_Side):
     def repeat(self, x: Any, at: Optional[dict] = None) -> dict:
         """Transmits ``x`` repeatedly: sets ``radio.tx.channels`` to its channel count when
         it differs, then submits ``radio.start_repeat`` with its bytes (EA-16). ``at`` is a
-        ``TimePoint``, as ``capture`` takes, at which the first sample goes out — on a
-        device whose time a PPS set and whose clock is locked to its reference, a whole
-        second of its root is a PPS edge (UR-7); without one, ``aligned``'s instant inside
-        its block, else the next instant the radio allows."""
+        ``TimePoint``, as ``capture`` takes, at which the first sample goes out — a whole
+        second of a root whose epoch is ``pps`` is a PPS edge (UR-7, ``next_pps``); without
+        one, ``aligned``'s instant inside its block, else the next instant the radio allows."""
         channels, data = _cf32(x)
         if self.channels != channels:
             self.channels = channels
@@ -444,15 +443,14 @@ class Session:
 
     def next_pps(self, k: int = 1, ahead: Any = 0.05) -> dict:
         """The ``k``-th PPS edge at least ``ahead`` seconds after the Run's current instant, as
-        a ``TimePoint`` on the primary root (EA-16): the root's tick zero is a PPS edge when its
-        epoch is ``pps`` (a USRP whose time source is not internal, UR-7), and a later whole second
-        is one while the device's clock source is locked to the PPS's reference (otherwise it
-        drifts by the oscillator's error). Raises ``Error`` when the epoch is not ``pps`` (an internal time source,
-        a simulation) or a second is not a whole number of root ticks."""
+        a ``TimePoint`` on the primary root (EA-16): every whole second of the root is a PPS edge
+        when its epoch is ``pps`` (a USRP whose time and clock sources are both not internal,
+        UR-7). Raises ``Error`` when the epoch is not ``pps`` (an internal source, a simulation)
+        or a second is not a whole number of root ticks."""
         if int(k) != k or k < 1:
             raise Error(f"EA-16: next_pps needs k ≥ 1, not {k}")
         if (self._epoch or {}).get("kind") != "pps":
-            raise Error(f"EA-16: the primary root's tick zero is no PPS edge (epoch {self._epoch})")
+            raise Error(f"EA-16: the primary root is not a PPS root (epoch {self._epoch})")
         if self._rate.denominator != 1:
             raise Error(f"EA-16: a second is not a whole number of root ticks at {self._rate} ticks/s")
         second = self._rate.numerator

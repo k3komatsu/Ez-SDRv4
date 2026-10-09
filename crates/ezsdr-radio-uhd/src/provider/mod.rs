@@ -73,8 +73,9 @@ pub struct UhdRadio {
     instance: ProviderInstance,
     section_id: Ident,
     device: Arc<dyn Device>,
-    args: String,
     clock_source: String,
+    /// The epoch of the root its own Authority registers (UR-6).
+    epoch: ezsdr_kernel::time::EpochRef,
     description: DeviceDescription,
     rx_stall: Option<(Wall, Wall)>,
     /// The first open's error when the device was opened again on it (UR-7's reopen).
@@ -123,7 +124,7 @@ impl UhdRadio {
             }
         };
         let clock_source = source("clock_source")?;
-        source("time_source")?;
+        let epoch = crate::authority::epoch(&clock_source, &source("time_source")?, &args);
         if get("reopen_on_unlock").is_some_and(|v| !matches!(v, Value::Bool(_))) {
             return Err(rejected("UR-5: selector `reopen_on_unlock` must be a Bool"));
         }
@@ -185,8 +186,8 @@ impl UhdRadio {
             instance,
             section_id,
             device,
-            args,
             clock_source,
+            epoch,
             description,
             rx_stall: None,
             reopened: None,
@@ -310,8 +311,7 @@ impl Provider for UhdRadio {
             Ok(ezsdr_kernel::time::ClockDomainKind::Root { epoch, .. }) => Some(epoch),
             _ => None,
         };
-        let own = [crate::authority::epoch(false, &self.args), crate::authority::epoch(true, &self.args)];
-        if !epoch.is_some_and(|e| own.contains(&e)) {
+        if epoch.as_ref() != Some(&self.epoch) {
             return Err(rejected("UR-6: the primary root is not this device's; bind the Authority to the radio's own binding"));
         }
         let mut config = self.description.defaults.clone();

@@ -176,6 +176,15 @@ impl Line {
         Ok(self.replan(&made)?.into_iter().find(|segment| segment.origin == origin && segment.config == config))
     }
 
+    /// RM-25: a refusal in effect by `t` has halted the stream, and no `cold` change or
+    /// `start_rx` has started it again by then; a pruned refusal counts (#64).
+    pub fn halted(&self, t: i64) -> bool {
+        let mut state = self.start.clone();
+        let made: Vec<Item> = sorted(&self.items).into_iter().filter(|item| item.e <= t).collect();
+        state.replay(&self.stream, &made).expect("the plan made these cuts already");
+        state.halted
+    }
+
     fn replan(&self, items: &[Item]) -> Result<Vec<Segment>, TimeError> {
         let mut state = self.start.clone();
         state.replay(&self.stream, &sorted(items))?;

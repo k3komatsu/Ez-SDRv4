@@ -11,7 +11,7 @@ Regenerate with:
 EZSDR_UPDATE_SCHEMAS=1 cargo test --test schema_freeze
 ```
 
-Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committed
+Until the v4.0 freeze no entries are written (owner, 2026-10-09: no users, so git history is the record; AGENTS.md §6). At the freeze this file restarts, and from then on any schema diff requires an entry (OV-12). After the v4.0 freeze a committed
 `*.v1.json` is immutable: a change creates `*.v2.json` plus a migration or a refusal
 (Vision §10, OV-12, SB-47, SB-48).
 
@@ -20,7 +20,10 @@ Any schema diff requires an entry below (OV-12). After the v4.0 freeze a committ
 Still version 1: v4.0 has not frozen (OV-12). Server `ezsdr-server` 0.5.0, protocol `ezsdr.protocol` 2.
 
 - `clock_domain`, `manifest` and `server/reply_frame`: `EpochRef` gains `pps { set_by }`, a root whose tick zero is
-  the PPS edge `set_by` names (TM-3); the UHD Authority registers it when its time source is not internal (UR-7).
+  the PPS edge `set_by` names and which is locked to the PPS's reference, so that every whole second of it is a PPS
+  edge (TM-3); the UHD Authority registers it when its time and clock sources are both not internal, and
+  `arbitrary { set_by: "ezsdr.radio.uhd.set_time_unknown_pps:…" }` when only its time source is (UR-7; amended
+  2026-10-09, owner: before, a PPS-set root with an internal clock was `pps` too, and only its tick zero an edge).
   Additive: a document with `arbitrary` stays valid and keeps its meaning (invariant 39) — a root a PPS set before
   this change reads `arbitrary { set_by: "ezsdr.radio.uhd.set_time_unknown_pps:…" }` and is not reinterpreted as a
   PPS edge. `arbitrary`'s description names `uhd.set_time_now` as its example instead.

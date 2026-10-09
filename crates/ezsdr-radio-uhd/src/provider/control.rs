@@ -359,8 +359,11 @@ impl Control {
         config
     }
 
-    /// The channel count of `dir` in force at `t`.
+    /// The channel count of `dir` in force at `t`: none while a refusal halts it (RM-25, #64).
     fn channels_at(&self, dir: Dir, t: i64) -> usize {
+        if lock(&self.core.streams).lines[dir as usize].as_ref().is_some_and(|line| line.halted(t)) {
+            return 0;
+        }
         Core::channels(&self.config_at(t), dir)
     }
 
@@ -406,8 +409,9 @@ impl Control {
     }
 
     /// Releases held commands within the release window, in effective order, each on the
-    /// channels in force at its own instant; one for a direction with no channel then is
-    /// recorded in the configuration, and enabling the direction applies it (UR-24; #61).
+    /// channels in force at its own instant; one for a direction with no channel then, or
+    /// halted by a refusal, is recorded in the configuration, and enabling the direction
+    /// applies it (UR-24; #61, #64).
     pub(super) fn release(&mut self) {
         if self.core.is_lost() {
             return;
@@ -421,19 +425,21 @@ impl Control {
                 break;
             }
             let timed = entry.remove();
-            if self.channels_at(timed.dir, e) == 0 {
+            let latest = self.released.iter().copied().max();
+            let effective = latest.map_or(e, |latest| latest.max(e));
+            // With no channel when the queue lets it act (none configured, or halted by a
+            // refusal), it is recorded only, and the enable applies it.
+            let channels = self.channels_at(timed.dir, effective);
+            if channels == 0 {
                 self.config.insert(timed.key.clone(), Value::Num(timed.value));
                 lock(&self.core.rec).applied.push(json!({ "key": timed.key, "claimed": timed.value, "read_back": null, "at": self.core.at(e), "note": "no channel" }));
                 continue;
             }
-            let latest = self.released.iter().copied().max();
-            let effective = latest.map_or(e, |latest| latest.max(e));
             if effective > e {
                 // The device queue is in order: behind a later command it is late (UC-2).
                 self.late_command(Some(timed.key.clone()), e, effective);
             }
             let settings = timed.settings();
-            let channels = self.channels_at(timed.dir, effective);
             let projections = self.projections(timed.dir);
             // Order a timed issuance and its projections atomically against configure.
             let mut updates: Vec<_> = projections.iter().map(|cold| lock(&cold.updates)).collect();
@@ -1027,5 +1033,100 @@ mod tests {
             .map(|r| (r["claimed"].as_f64().unwrap(), r["issued"] == true, r["note"] == "no channel")).collect();
         assert_eq!(rows, [(1.0, true, false), (2.0, true, false), (4.0, false, true)]);
         assert_eq!(device.calls().iter().filter(|call| call.starts_with("apply tx")).count(), 2, "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_24_a_direction_halted_by_a_refusal_has_no_channel() {
+        // #64, RM-25: a refused change stays the configuration of record, but the direction it
+        // halts has no channel for a timed update due before the enable that starts it again:
+        // the update is recorded, applies nothing, and that enable's segment applies it. A
+        // direction a `Stop` turned off is not halted: its update is issued.
+        for (dir, halt, enable) in [(Dir::Rx, true, "cold"), (Dir::Rx, true, "start_rx"), (Dir::Tx, true, "cold"), (Dir::Rx, false, "start_rx")] {
+            let case = format!("{} halt={halt} {enable}", dir.name());
+            let (core, device, time) = rig();
+            match dir { Dir::Rx => device.rx_open(1).unwrap(), Dir::Tx => device.tx_open(1).unwrap() }
+            let (mut control, _tx) = control(&core, &[dir]);
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+            let rate = key(&format!("radio.{}.sample_rate_hz", dir.name()));
+            let gain = key(&format!("radio.{}.gain_db", dir.name()));
+            if halt {
+                control.book_cold(rate.clone(), Value::Num(2e6), at(100));
+                let refused = plan_of(&core, dir)[1].segment.by.unwrap();
+                assert!(lock(&core.streams).refuse(&core, dir, refused), "{case}");
+            } else {
+                control.book(Action::Stop { target: Some(core.rx_id.clone()) });
+            }
+            control.book_timed(gain.clone(), Value::Num(3.0), at(200));
+            match enable {
+                "cold" => control.book_cold(rate.clone(), Value::Num(1e6), at(300)),
+                _ => control.book(Action::PeripheralCommand {
+                    target: core.rx_id.clone(),
+                    verb: ezsdr_kernel::spec::Ident::parse(ezsdr_radio::START_RX).unwrap(),
+                    params: BTreeMap::new(),
+                    at: at(300),
+                }),
+            }
+            time.advance_to(core.at(ms(199))).unwrap();
+            control.release();
+            let applied = device.calls().iter().filter(|call| call.starts_with(&format!("apply {}", dir.name())) && call.contains("gain=3")).count();
+            assert_eq!(applied, usize::from(!halt), "{case}: {:?}", device.calls());
+            assert!(lock(&core.rec).applied.iter().any(|r| r["key"] == gain.as_str() && (r["note"] == "no channel") == halt), "{case}");
+            assert_eq!(control.config[&gain], Value::Num(3.0), "{case}");
+            if halt {
+                assert_eq!(control.config_at(ms(200))[&rate], Value::Num(2e6), "{case}: the refused value is of record");
+            }
+            let planned = plan_of(&core, dir).pop().unwrap();
+            assert!(planned.segment.origin >= ms(300), "{case}");
+            let settings = planned.settings.unwrap();
+            assert_eq!(settings.settings(&lock(&settings.updates), planned.segment.origin).gain, Some(3.0), "{case}");
+        }
+    }
+
+    #[test]
+    fn ur_24_a_halted_direction_fills_no_queue_slot() {
+        // #64, UR-24: an update for a direction halted by a refusal — from the refusal's own
+        // instant on — counts no channel against the queue depth, neither as the new command
+        // nor while held, so a full queue still takes it.
+        let (core, device, _time) = rig();
+        device.rx_open(1).unwrap();
+        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let gain = key("radio.rx.gain_db");
+        control.book_cold(key("radio.rx.sample_rate_hz"), Value::Num(2e6), Some(AbsoluteDeadline::new(core.at(ms(100)))));
+        let refused = plan_of(&core, Dir::Rx)[1].segment.by.unwrap();
+        assert!(lock(&core.streams).refuse(&core, Dir::Rx, refused));
+        for i in 0..core.description.timing.command_queue_depth {
+            control.book_timed(gain.clone(), Value::Num(1.0), Some(AbsoluteDeadline::new(core.at(ms(50) + i))));
+        }
+        for t in [ms(100), ms(200)] {
+            control.book_timed(gain.clone(), Value::Num(2.0), Some(AbsoluteDeadline::new(core.at(t))));
+        }
+        assert!(lock(&core.rec).rejected.is_empty(), "{:?}", lock(&core.rec).rejected);
+        assert_eq!(control.held.len(), core.description.timing.command_queue_depth as usize + 2);
+    }
+
+    #[test]
+    fn ur_24_a_late_update_halted_before_it_can_act_has_no_channel() {
+        // #64, UR-24: an update late behind a released one acts at that one's instant; a refusal
+        // between its own instant and then leaves it no channel, so it is recorded, not issued.
+        let (core, device, time) = rig();
+        device.rx_open(1).unwrap();
+        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        let us = |n: i64| core.ticks(n * 1_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(us(n))));
+        let gain = key("radio.rx.gain_db");
+        control.book_cold(key("radio.rx.sample_rate_hz"), Value::Num(2e6), at(300_000));
+        let refused = plan_of(&core, Dir::Rx)[1].segment.by.unwrap();
+        control.book_timed(gain.clone(), Value::Num(1.0), at(300_000));
+        time.advance_to(core.at(us(297_500))).unwrap();
+        control.release();
+        assert!(lock(&core.streams).refuse(&core, Dir::Rx, refused));
+        control.book_timed(gain.clone(), Value::Num(2.0), at(299_600));
+        control.release();
+        let rows: Vec<_> = lock(&core.rec).applied.iter().filter(|r| r["key"] == "radio.rx.gain_db")
+            .map(|r| (r["claimed"].as_f64().unwrap(), r["issued"] == true, r["note"] == "no channel")).collect();
+        assert_eq!(rows, [(1.0, true, false), (2.0, false, true)]);
+        assert!(!device.calls().iter().any(|call| call.starts_with("apply rx") && call.contains("gain=2")), "{:?}", device.calls());
     }
 }

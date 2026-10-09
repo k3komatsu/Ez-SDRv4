@@ -218,14 +218,16 @@ pub struct DeviceAuthority {
     clock: Option<(ClockStop, JoinHandle<()>)>,
 }
 
-/// UR-6, UR-7: the epoch of the root a device's time sets: its PPS edge when the time
-/// source is not internal, the moment of setting otherwise.
-pub(crate) fn epoch(pps: bool, args: &str) -> EpochRef {
-    if pps {
-        EpochRef::Pps { set_by: format!("ezsdr.radio.uhd.set_time_unknown_pps:{args}") }
-    } else {
-        EpochRef::Arbitrary { set_by: format!("ezsdr.radio.uhd.set_time_now:{args}") }
+/// UR-6, UR-7: the epoch of the root a device's time sets, its `set_by` naming how: its PPS
+/// edge when both sources are not internal, so that every whole second of the root is a PPS
+/// edge; otherwise arbitrary, set at a PPS edge when the time source is not internal and at
+/// once when it is.
+pub(crate) fn epoch(clock_source: &str, time_source: &str, args: &str) -> EpochRef {
+    if time_source == "internal" {
+        return EpochRef::Arbitrary { set_by: format!("ezsdr.radio.uhd.set_time_now:{args}") };
     }
+    let set_by = format!("ezsdr.radio.uhd.set_time_unknown_pps:{args}");
+    if clock_source == "internal" { EpochRef::Arbitrary { set_by } } else { EpochRef::Pps { set_by } }
 }
 
 impl DeviceAuthority {
@@ -248,13 +250,12 @@ impl DeviceAuthority {
                 format!("UR-7: {e}")
             }
         })?;
-        let pps = time_source != "internal";
-        device.set_time_zero(pps).map_err(|e| format!("UR-7: {e}"))?;
+        device.set_time_zero(time_source != "internal").map_err(|e| format!("UR-7: {e}"))?;
         let mcr = device.master_clock_rate();
         let rate = Rational::new(mcr, 1).map_err(|e| format!("UR-7: {e}"))?;
         let root = clocks.allocate_id().map_err(|e| format!("UR-7: {e}"))?;
         clocks
-            .register(ClockDomain::root(root, rate, epoch(pps, args)))
+            .register(ClockDomain::root(root, rate, epoch(clock_source, time_source, args)))
             .map_err(|e| format!("UR-7: {e}"))?;
         let built = Instant::now();
         let utc = || {

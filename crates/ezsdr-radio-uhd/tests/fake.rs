@@ -26,7 +26,7 @@ use ezsdr_kernel::run::{RunState, Stage, StopCause, Termination};
 use ezsdr_kernel::session::SessionAction;
 use ezsdr_kernel::spec::{Constraint, Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::{BurstEnd, DataLinkDecl};
-use ezsdr_kernel::time::{ClockRegistry, Duration, RelativeBudget, TimePoint};
+use ezsdr_kernel::time::{ClockRegistry, Duration, EpochRef, RelativeBudget, TimePoint};
 use ezsdr_radio::payloads::{TimeErrorOutcome, TimeErrorPayload};
 use ezsdr_radio_uhd::{Device, DeviceAuthority, FakeConfig, FakeDevice, FakeFault, TxCode, UhdRadio};
 use serde_json::{Value as Json, json};
@@ -179,14 +179,15 @@ fn ur_09_x310_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz() {
 
 #[test]
 fn ur_06_the_provider_refuses_another_root() {
-    // Another device's root, whether its time was set at once or at a PPS edge (UR-7).
-    for time_source in ["internal", "external"] {
+    // Another device's root, whether its time was set at once or at a PPS edge, with its
+    // clock internal or locked (UR-7).
+    for (clock_source, time_source) in [("internal", "internal"), ("internal", "external"), ("external", "external")] {
         let dir = TempDir::new();
-        let profile = profile(&dir, json!({ "authority_args": "addr=10.0.0.9", "time_source": time_source }), json!({}), false);
+        let profile = profile(&dir, json!({ "authority_args": "addr=10.0.0.9", "clock_source": clock_source, "time_source": time_source }), json!({}), false);
         let run = start_spec_run(&receive_spec(1, 1e6, 1e9, None), &profile, assembly(&profile, fake(FakeConfig::default()), BTreeMap::new(), |r| r)).unwrap();
-        assert_eq!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare } }, "{time_source}");
+        assert_eq!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare } }, "{clock_source} {time_source}");
         let manifest = run.finish();
-        assert!(failure(&manifest).contains("UR-6: the primary root is not this device's"), "{time_source}: {}", failure(&manifest));
+        assert!(failure(&manifest).contains("UR-6: the primary root is not this device's"), "{clock_source} {time_source}: {}", failure(&manifest));
     }
 }
 
@@ -271,16 +272,22 @@ fn ur_07_the_time_is_set_at_the_next_pps_with_an_external_source() {
 }
 
 #[test]
-fn ur_07_the_root_s_epoch_is_the_pps_edge_with_an_external_source() {
-    // UR-6, UR-7, TM-3: the epoch names how the device's time was set.
-    for (time_source, epoch) in [
-        ("external", ezsdr_kernel::time::EpochRef::Pps { set_by: format!("ezsdr.radio.uhd.set_time_unknown_pps:{ARGS}") }),
-        ("internal", ezsdr_kernel::time::EpochRef::Arbitrary { set_by: format!("ezsdr.radio.uhd.set_time_now:{ARGS}") }),
+fn ur_07_the_root_s_epoch_is_the_pps_edge_with_external_sources() {
+    // UR-6, UR-7, TM-3: the epoch is a PPS edge only when both sources are not internal (a
+    // GPSDO locks as an external reference does), so that every whole second of the root is
+    // one; `set_by` names how the time was set.
+    let (now, pps) = (format!("ezsdr.radio.uhd.set_time_now:{ARGS}"), format!("ezsdr.radio.uhd.set_time_unknown_pps:{ARGS}"));
+    for (clock_source, time_source, epoch) in [
+        ("external", "external", EpochRef::Pps { set_by: pps.clone() }),
+        ("gpsdo", "gpsdo", EpochRef::Pps { set_by: pps.clone() }),
+        ("internal", "external", EpochRef::Arbitrary { set_by: pps.clone() }),
+        ("external", "internal", EpochRef::Arbitrary { set_by: now.clone() }),
+        ("internal", "internal", EpochRef::Arbitrary { set_by: now.clone() }),
     ] {
         let clocks = Arc::new(ClockRegistry::new());
-        let authority = DeviceAuthority::new(fake(FakeConfig::default()), clocks.clone(), "internal", time_source, ARGS).unwrap();
+        let authority = DeviceAuthority::new(fake(FakeConfig::default()), clocks.clone(), clock_source, time_source, ARGS).unwrap();
         let kind = clocks.get(authority.root()).unwrap().kind;
-        assert!(matches!(kind, ezsdr_kernel::time::ClockDomainKind::Root { epoch: ref e, .. } if *e == epoch), "{time_source}: {kind:?}");
+        assert!(matches!(kind, ezsdr_kernel::time::ClockDomainKind::Root { epoch: ref e, .. } if *e == epoch), "{clock_source} {time_source}: {kind:?}");
     }
 }
 
