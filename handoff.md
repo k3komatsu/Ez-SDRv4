@@ -943,7 +943,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
    - [ ] 項目3：受け入れ判定を1本に（KC-24 を唯一の順序に，`update_class` の二重宣言を削除，`ParamDecl.update_class` を optional に）— 独立 spec
    - [ ] 項目4（決定済み，削除・統合・改名のみ）：`Termination` に理由と `also`，`ezsdr.failure`/`ezsdr.links`/`ezsdr.children` を型付きの欄へ統合，EVENTS_DROPPED の時刻と source，`execution_class` を Option，Kernel のイベント種別を `ezsdr.` へ，タグを `kind` に統一，Lease の記録は `{mode, released}`，RS-6 の手順名 — spec 24
    - [ ] 項目6（決定済み）：DropCarry をブロックと一緒に返す，遅れた受信開始の表し方を1つに（LATE は送信専用），ALIGNMENT を stream gap の修飾子に（SC-31a と `ChannelGap.cause` 削除）— spec 24
-   - [ ] 項目7：未使用の欄と誤名の削除（`EventIn`/`EventOut` 削除，#55 の改名，`spec.source` の追加，KF-4）— spec 24
+   - [ ] 項目7（決定済み）：未使用の7欄を削除，`EventIn`/`EventOut` 削除と `Endpoint` を non_exhaustive に，`PeripheralCommand` → `Command`（#55），`spec.source` を今追加（KF-4），`min_command_lead` の説明を MA-10 に — spec 24
    - [ ] 項目8：spec 01〜06 から古い規範の写しを削除（spec 22 DA-3 の続き）
    - [ ] MA-16a の公開 API 許可リスト（`kernel_surface_allow.txt`）の見直し
    - [ ] Kernel API を 4.0.0 に，`SCHEMA_CHANGELOG.md` の見出しを凍結後の形式に切り替え
