@@ -1519,8 +1519,8 @@
   "id": "J116",
   "name": "item 6 (F45, SC-13): a first block's GAP_BEFORE is not counted back from its first sample",
   "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
-  "old": "None if h.flags.contains(BlockFlags::GAP_BEFORE) => {",
-  "new": "None if false && h.flags.contains(BlockFlags::GAP_BEFORE) => {",
+  "old": "None if h.flags.contains(BlockFlags::GAP_BEFORE) && carried.is_empty() => {",
+  "new": "None if false && h.flags.contains(BlockFlags::GAP_BEFORE) && carried.is_empty() => {",
   "crate": "ezsdr-kernel",
   "test_bin": "stream_contract",
   "filter": "sc_13_a_first_block_gap_is_recorded"
@@ -1616,16 +1616,6 @@
   "filter": "sc_30b_a_first_block_s_carry_is_recorded_at_it"
  },
  {
-  "id": "J126",
-  "name": "item 6 (F20, SC-13): a first block's gap counts back from the carry's lost too",
-  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
-  "old": "let back = i64::try_from(h.lost.unwrap_or(0))",
-  "new": "let back = i64::try_from(lost.unwrap_or(0))",
-  "crate": "ezsdr-kernel",
-  "test_bin": "stream_contract",
-  "filter": "sc_30b_a_first_block_s_carry_is_recorded_at_it"
- },
- {
   "id": "J127",
   "name": "item 6 (F46, SC-31): ALIGNMENT takes precedence over SEQ_DISCONTINUITY",
   "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
@@ -1684,5 +1674,15 @@
   "crate": "ezsdr-kernel",
   "test_bin": "stream_contract",
   "filter": "sc_30c_trailing_carry_with_a_known_lost_stays_zero_extent"
+ },
+ {
+  "id": "J134",
+  "name": "SC-30b: a first block's carry still counts the gap back from the block's own lost",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "None if h.flags.contains(BlockFlags::GAP_BEFORE) && carried.is_empty() => {",
+  "new": "None if h.flags.contains(BlockFlags::GAP_BEFORE) => {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_30b_a_first_block_s_carry_is_recorded_at_it"
  }
 ]

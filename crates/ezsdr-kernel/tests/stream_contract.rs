@@ -1936,8 +1936,9 @@ fn sc_30b_a_first_block_s_carry_is_recorded_at_it() {
     );
     assert_eq!(map.first, t(100));
 
-    // With a first-block gap, the carry folds into it; the gap still counts back from
-    // the delivered block's own `lost`.
+    // With a first-block gap too: the dropped blocks leave the origin unknown, so the
+    // gap is zero-extent at the block and keeps what is known, as a trailing carry's
+    // does (SC-30c).
     let mut b = builder(1, false);
     let mut h = header(t(40), 100, 1);
     h.flags = BlockFlags::GAP_BEFORE;
@@ -1947,7 +1948,20 @@ fn sc_30b_a_first_block_s_carry_is_recorded_at_it() {
     let map = b.finish(DropCarry::default());
     assert_eq!(
         map.gaps,
-        [Gap { start: t(30), len: 10, lost: Some(15), cause: GapCause::Stream {}, link_dropped: 2 }]
+        [Gap { start: t(40), len: 0, lost: Some(15), cause: GapCause::Stream {}, link_dropped: 2 }]
     );
-    assert_eq!(map.first, t(30));
+    assert_eq!(map.first, t(40));
+
+    // Without a first-block gap, a carry with a known count keeps it the same way.
+    let mut b = builder(1, false);
+    b.push(
+        &header(t(40), 100, 1),
+        DropCarry { flags: BlockFlags::GAP_BEFORE, lost: Some(5), blocks: 1 },
+    )
+    .expect("accepted");
+    let map = b.finish(DropCarry::default());
+    assert_eq!(
+        map.gaps,
+        [Gap { start: t(40), len: 0, lost: Some(5), cause: GapCause::Stream {}, link_dropped: 1 }]
+    );
 }

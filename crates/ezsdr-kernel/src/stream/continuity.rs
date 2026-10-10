@@ -187,6 +187,7 @@ impl ContinuityBuilder {
         // SC-30b: the carry's flags and counts merge into this block's.
         let carried = self.pending_carry;
         let flags = h.flags | carried.flags;
+        let first = self.expected_next.is_none();
         let lost = match (h.lost, carried.lost) {
             (None, None) => None,
             (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
@@ -194,11 +195,11 @@ impl ContinuityBuilder {
         let t = h.first_sample_time;
         let end = h.end_time()?;
         // SC-13: on the first block, `GAP_BEFORE` counts its `lost` back from its first
-        // sample, so the gap is recorded there as at any other block (SC-30).
-        let first = self.expected_next.is_none();
+        // sample, so the gap is recorded there as at any other block (SC-30) — unless
+        // blocks dropped before it leave the stream's origin unknown (SC-30b).
         let expected = match self.expected_next {
             Some(expected) => expected,
-            None if h.flags.contains(BlockFlags::GAP_BEFORE) => {
+            None if h.flags.contains(BlockFlags::GAP_BEFORE) && carried.is_empty() => {
                 let back = i64::try_from(h.lost.unwrap_or(0)).map_err(|_| TimeError::Overflow)?;
                 TimePoint::new(self.domain, t.ticks.checked_sub(back).ok_or(TimeError::Overflow)?)
             }
@@ -222,8 +223,7 @@ impl ContinuityBuilder {
                 if !h.flags.contains(BlockFlags::GAP_BEFORE) && !(first && !carried.is_empty()) => {}
             // A jump; a first block's `GAP_BEFORE` whose `lost` is absent, recorded as a
             // zero-extent gap at the block (SC-13); or a first block's carry, recorded
-            // as a zero-extent gap at the block or folded into its `GAP_BEFORE` gap
-            // (SC-30b).
+            // as a zero-extent gap at the block that keeps the known counts (SC-30b).
             _ => {
                 let jump = t.checked_sub(expected)?.ticks as u64;
                 if !flags.contains(BlockFlags::GAP_BEFORE) && self.lossless {
