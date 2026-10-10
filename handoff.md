@@ -932,8 +932,12 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 ### 次にすること
 
-- **最優先（2026-10-09）**：
-  - **#64 と `Pps` の条件は commit 済み**（2026-10-09，`Closes #64`）：拒否で止まった方向は timed 解放でチャネル0（効く瞬間で1回だけ判定），`Pps` は時刻源とクロック源の両方が internal でないときだけ．独立 Opus レビュー2回目で PASS，全 mutation リスト（494行）を sim02/sim03 で全 kill．
+- **最優先（2026-10-10，compact 前の記録）**：
+  - **commit 済み（2026-10-09〜10）**：#64 と `Pps` の条件（`84df09e`），spec 26・27 の受理（`db4f383`〜`e42329f`），#65・#66（`25a0e9d`），spec 24 項目5（`5d000ec`），項目4（`6ebcba9`）．どれも独立 Opus レビュー＋全 mutation リスト（既知の生き残り G09・U15 のみ）を通した．
+  - **作業ツリーに未 commit の変更あり＝項目6（Stream Contract）**：Workflow `prefreeze-item`（task `wi07gd86c`，run `wf_8cd99428-344`）が実装→独立レビュー中．台本：`~/.claude/projects/-Users-komatsu-work-Ez-SDRv4/0d8e3205-ba93-4fdf-9891-82eb2f3f44c1/workflows/scripts/prefreeze-item-wf_dcbd27d0-5ba.js`（args `{HEAD, ITEM, TASK, CONTINUE}`；CONTINUE=true で途中の変更を引き継ぐ）．結果は `…/subagents/workflows/wf_8cd99428-344/journal.jsonl`．PASS（または3回目の修正を自分で確認）→ 全 mutation（下の run_all）→ 全テスト・clippy・Python → commit → チェックリストに印．
+  - **項目6の commit の直後にすること（owner 承認 2026-10-10）**：spec 06 の KC-32 を「原理1文（最初の終了が伝えていない情報を持つ後続の要求だけを `also` に記録する：失敗，Policy の反応，cleanup の abort への格上げ）→ 3つの場合 → 重複除外」の順に書き直す．文面と Changes 行だけ，コードは触らない．背景：項目4のレビュー3回の FAIL はどれもテスト不足で，バグではない（three strikes には数えない）と owner と確認済み．
+  - **次の項目7**：同じ台本で `ITEM: "7"`．決定は監査記録の Owner decisions 表．その後 spec 26（1a→1b）→ spec 27（2a→2b，判断1〜4を含む）→ 項目3（spec 27 判断4の発信元検査を含む）→ 項目8 → 凍結レビュー．
+  - **mutation の全リスト**：`for l in maintenance phase3 phase4 phase5 phase6 phase7; do REMOTE_SSH="ssh -o BatchMode=yes" python3 plan/maintenance/tools/remote/remote_mutate.py $l sim02:6,sim03:6; done`（リストは順番に1つずつ；同時に流すとリモートの `ezsdr-mut/` を取り合う）．約 15〜20 分．G16 は「timeout で kill」が正常．
   - **その後の順番**（v4.0 凍結チェックリスト，§「次にすること」の 2.）：（#65・#66 は commit 済み）spec 24（監査項目 5・4・6・7，項目ごとに1 Workflow）→ 項目1＝spec 26（1a→1b）→ 項目2＝spec 27（2a→2b）→ 項目3 → 項目8 → 凍結レビュー．決定はすべて [`plan/maintenance/24-prefreeze-audit.md`](plan/maintenance/24-prefreeze-audit.md) の Owner decisions 表（これが決定記録．別に spec 本文を起こさない）．
   - **進め方**：段階ごとに Workflow（実装 1 → 独立 Opus レビュー → 修正，最大3回）．機械的な一括書き換えは Haiku 5.5 を crate ごとに並列で使ってよい（owner 2026-10-09）．同じ作業ツリーを2つの Workflow で同時に触らない．修正の回は触った mutation 行だけ，段階の最後に全リストを sim02/sim03 で（AGENTS.md §7）．
   - **sim02/sim03 への接続**：Claude Code の bg セッションから LAN には直接出られない（macOS の Local Network 権限，#95444 系）ことがあるが，owner の `~/.ssh/config` が直接つながらないときだけ `ydev` を踏み台にする（`Match … exec`，トンネル不要，owner 2026-10-09）：`REMOTE_SSH="ssh -o BatchMode=yes" python3 plan/maintenance/tools/remote/remote_mutate.py <list> sim02:6,sim03:6`．Bash は `dangerouslyDisableSandbox: true` が要る．
