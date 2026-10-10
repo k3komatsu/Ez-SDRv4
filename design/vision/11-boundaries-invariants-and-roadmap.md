@@ -88,7 +88,7 @@ The architecture should permit these, but the first implementation does not need
 ```text
 RT-WASM
 GPU processing
-RFNoC-backed radio capabilities (Replay repeat, DDC/DUC rates, device FFT)
+device FFT on a device whose FPGA image has no FFT block
 full IEEE 802.11 PHY/MAC
 GraphEpoch atomic reconfiguration
 AF_XDP / DPDK
@@ -320,19 +320,23 @@ Mock → X310 parity test
 Phase 8b
 Multi-device: several USRPs on one 10 MHz + PPS reference, time set at one PPS edge, aligned start
 
-Phase 9
-Packet/PDU + TUN/TAP
+Phase 8c
+RFNoC-backed radio capabilities: Replay repeat, DDC/DUC rates, device FFT where the device's FPGA image has the block
 
 Phase 10
-Processor/Reactor execution engines
+Processor/Reactor execution engines, with a minimal non-sample (PDU) data path
+
+v4.0: the Kernel freezes
 
 Phase 11+
-WASM / GPU / RFNoC-backed radio capabilities / advanced peripherals / distributed execution
+Packet/PDU + TUN/TAP (formerly Phase 9) / WASM / GPU / advanced peripherals / distributed execution
 ```
 
 The exact version numbers are not fixed.
 
-Phase 8b follows the parity test because aligning several devices builds on one device's measured timing, and it precedes Phase 9 because it is v3's working multi-device behaviour (§61, behaviour 4), not new function. It brings the Authority that sets every device's time at one PPS edge, the relations of a second device's root (§15), and the coherence a Provider declares (§25).
+Phase 8b follows the parity test because aligning several devices builds on one device's measured timing, and it precedes the phases after it because it is v3's working multi-device behaviour (§61, behaviour 4), not new function. It brings the Authority that sets every device's time at one PPS edge, one Provider instance spanning the devices (§8, SB-23), and the coherence a Provider declares (§25).
+
+The Kernel freezes after Phase 10, once the phases that exercise it have run on it: 8b the time model across devices, 8c a Provider hiding device-side functions behind capabilities (§35) together with device memory, and 10 the Module API together with a non-sample data path. Packet/PDU and TUN/TAP, formerly Phase 9, follow the freeze as the first workload built from Vocabulary and Modules alone; Phase 10 keeps its number.
 
 The architectural order is more important than the release numbering.
 
