@@ -172,6 +172,7 @@ pub fn assemble(
         authority: authority.expect("the authority's binding was built above"),
         links,
         inputs,
+        spec_source: None,
     })
 }
 
@@ -194,6 +195,7 @@ pub fn empty_assembly() -> Assembly {
         authority: Box::new(ezsdr_sim_engine::SimEngine::new(clocks).expect("a fresh registry takes a root")),
         links: BTreeMap::new(),
         inputs: BTreeMap::new(),
+        spec_source: None,
     }
 }
 

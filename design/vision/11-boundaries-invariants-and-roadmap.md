@@ -243,7 +243,7 @@ RX measurement
  ↓
 Beam Reactor
  ↓
-PeripheralCommand
+Command
  ↓
 Mock Smart Antenna / Real Smart Antenna
 ```

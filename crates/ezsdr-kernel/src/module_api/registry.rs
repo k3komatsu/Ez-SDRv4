@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use crate::spec::{Ident, Key, KeyDecl, Namespace};
 
 use super::{
-    CompileRule, Deployment, Factories, KERNEL_API, LinkDescriptor, ModuleDescriptor, ModuleError,
-    ModuleErrorKind, ModuleRef, ModuleRegistry, Role, VerbDecl, VocabularyDescriptor,
+    CompileRule, Factories, KERNEL_API, LinkDescriptor, ModuleDescriptor, ModuleError,
+    ModuleRef, ModuleRegistry, Role, VerbDecl, VocabularyDescriptor,
 };
 
 impl Factories {
@@ -73,8 +73,7 @@ impl ModuleRegistry {
 
     /// Registers a Module. Fails when `kernel_api.major` differs from the Kernel's;
     /// a declared Vocabulary is absent or incompatible; a role has no factory or a
-    /// factory no role; `(id, version)` is already registered; or `deployment` is
-    /// `Plugin`, which is `Unsupported` in Phase 1.
+    /// factory no role; or `(id, version)` is already registered.
     ///
     /// Rule: MA-31, MA-32.
     pub fn register(
@@ -82,14 +81,6 @@ impl ModuleRegistry {
         d: ModuleDescriptor,
         factories: Factories,
     ) -> Result<(), ModuleError> {
-        if let Deployment::Plugin { .. } = d.deployment {
-            return Err(ModuleError {
-                kind: ModuleErrorKind::Unsupported,
-                message: "MA-32: deployment `Plugin` is reserved and unsupported in Phase 1"
-                    .to_owned(),
-                detail: serde_json::Value::Null,
-            });
-        }
         if d.kernel_api.major != KERNEL_API.major {
             return Err(ModuleError::rejected(format!(
                 "MA-32: kernel_api major {} does not match the Kernel's {}",

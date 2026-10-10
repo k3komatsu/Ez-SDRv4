@@ -73,10 +73,10 @@
         },
         {
           "additionalProperties": false,
-          "description": "To a `PeripheralCommand` carrying the verb (RS-14).",
+          "description": "To a `Command` carrying the verb (RS-14).",
           "properties": {
             "kind": {
-              "const": "peripheral_command",
+              "const": "command",
               "type": "string"
             }
           },

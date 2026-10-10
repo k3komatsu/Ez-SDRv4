@@ -613,10 +613,10 @@
     },
     {
       "additionalProperties": false,
-      "description": "The `peripheral_command` Action without `at` (RS-49a).",
+      "description": "The `command` Action without `at` (RS-49a).",
       "properties": {
         "kind": {
-          "const": "peripheral_command",
+          "const": "command",
           "type": "string"
         },
         "params": {
@@ -629,7 +629,7 @@
         },
         "target": {
           "$ref": "#/$defs/ResourceId",
-          "description": "Whose peripheral."
+          "description": "Whose verb."
         },
         "verb": {
           "$ref": "#/$defs/Ident",

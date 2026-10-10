@@ -10,7 +10,7 @@
         },
         {
           "const": "unsupported",
-          "description": "The Module does not implement this at all; `deployment: Plugin` is one (MA-32).",
+          "description": "The Module does not implement this at all (MA-9).",
           "type": "string"
         },
         {

@@ -56,7 +56,7 @@ pub(super) fn admit_with(
     let values = match &action {
         Action::UpdateParameter { key, value, .. } => value.check_nesting(key.as_str()),
         Action::TxBurst { metadata: values, .. }
-        | Action::PeripheralCommand { params: values, .. } => values.iter()
+        | Action::Command { params: values, .. } => values.iter()
             .try_for_each(|(key, value)| value.check_nesting(key.as_str())),
         _ => Ok(()),
     };

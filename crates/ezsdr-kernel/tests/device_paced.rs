@@ -47,6 +47,7 @@ fn assembly_with(authority: Box<dyn ezsdr_kernel::module_api::Authority>, clocks
         authority,
         links: BTreeMap::new(),
         inputs: BTreeMap::new(),
+        spec_source: None,
     }
 }
 

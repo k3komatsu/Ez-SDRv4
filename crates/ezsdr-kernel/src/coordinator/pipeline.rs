@@ -394,7 +394,6 @@ impl RunHandle {
                     &self.shared.ctx.profile,
                     &self.admission,
                     inputs,
-                    Vec::new(),
                 )
             })
         }) {
@@ -1874,7 +1873,7 @@ pub(super) fn rewrite_action(action: &Action, target: ResourceId) -> Action {
         Action::TxBurst { target: t, .. }
         | Action::SetTimer { target: t, .. }
         | Action::UpdateParameter { target: t, .. }
-        | Action::PeripheralCommand { target: t, .. }
+        | Action::Command { target: t, .. }
         | Action::Emit { target: t, .. } => *t = target,
         Action::Stop { target: Some(t) } => *t = target,
         Action::Stop { target: None } | Action::Abort { .. } => {}

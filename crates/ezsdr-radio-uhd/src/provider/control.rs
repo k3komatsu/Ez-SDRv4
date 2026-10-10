@@ -291,12 +291,12 @@ impl Control {
             Action::SetTimer { .. } => self.core.command_rejected("set_timer", "UR-26: not supported by this Provider"),
             // RM-12, RM-21: `start_rx` turns the receive stream on at its `at`, or at its booking
             // if that is later; it is never late.
-            Action::PeripheralCommand { target, verb, params, at }
+            Action::Command { target, verb, params, at }
                 if verb.as_str() == ezsdr_radio::START_RX && target == self.core.rx_id && params.is_empty() =>
             {
                 let requested = match self.ceil_root(at) {
                     Ok(requested) => requested,
-                    Err(error) => return self.core.command_rejected("peripheral_command", &format!("UR-26: start_rx's instant cannot be converted: {error}")),
+                    Err(error) => return self.core.command_rejected("command", &format!("UR-26: start_rx's instant cannot be converted: {error}")),
                 };
                 let config = self.segment_config(Dir::Rx);
                 let mut streams = lock(&self.core.streams);
@@ -305,8 +305,8 @@ impl Control {
                 streams.configs[Dir::Rx as usize].insert(seq, (config, false));
                 streams.book(&self.core, Dir::Rx, Item { e, seq, ready: now, delivered: None, refused: false, kind: Kind::Start });
             }
-            Action::PeripheralCommand { .. } => {
-                self.core.command_rejected("peripheral_command", "UR-26: not supported by this Provider")
+            Action::Command { .. } => {
+                self.core.command_rejected("command", "UR-26: not supported by this Provider")
             }
             Action::Emit { .. } => self.core.command_rejected("emit", "UR-26: not supported by this Provider"),
         }
@@ -1060,7 +1060,7 @@ mod tests {
             control.book_timed(gain.clone(), Value::Num(3.0), at(200));
             match enable {
                 "cold" => control.book_cold(rate.clone(), Value::Num(1e6), at(300)),
-                _ => control.book(Action::PeripheralCommand {
+                _ => control.book(Action::Command {
                     target: core.rx_id.clone(),
                     verb: ezsdr_kernel::spec::Ident::parse(ezsdr_radio::START_RX).unwrap(),
                     params: BTreeMap::new(),

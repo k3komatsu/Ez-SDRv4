@@ -1403,10 +1403,10 @@ fn rs_19_vocabulary_action_carries_a_time() {
     let compiled =
         compile(&timed, &reg, &declared_classes(), &placed(), t(0), None).expect("compiles");
     match &compiled.actions[0] {
-        Action::PeripheralCommand { at: Some(at), .. } => {
+        Action::Command { at: Some(at), .. } => {
             assert_eq!(*at, AbsoluteDeadline::new(t(900)));
         }
-        other => panic!("expected a timed PeripheralCommand, got {other:?}"),
+        other => panic!("expected a timed Command, got {other:?}"),
     }
     assert!(
         compiled.coercions.is_empty(),
@@ -1730,7 +1730,7 @@ fn rs_48_action_set_is_closed_and_schematised() {
             class: UpdateClass::BlockBoundary,
             at: Some(AbsoluteDeadline::new(t(30))),
         },
-        Action::PeripheralCommand {
+        Action::Command {
             target: rid("radio"),
             verb: id("sweep"),
             params: BTreeMap::new(),
@@ -1825,6 +1825,7 @@ fn manifest_fixture(reason: Termination) -> Manifest {
         spec: SpecSection {
             hash: ContentHash::of(&spec).expect("hashes"),
             body: serde_json::to_value(&spec).expect("serialises"),
+            source: None,
         },
         binding: BindingSection {
             hash: ContentHash::of(&profile).expect("hashes"),

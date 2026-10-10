@@ -86,7 +86,7 @@ The Kernel does not interpret the envelope. The Radio Model registers an admissi
 
 ## What each step returns
 
-`validate()` returns the matched resources, the rejected constraints, the envelope violations, a coercion preview and warnings; `plan()` adds the fragments, links, dependency edges, the Authority, the derived ExecutionClass and the declared transfer costs; `prepare()` returns a PrepareReport per fragment, and no merged view of them. Before any RF energy is emitted, `validate()`'s and `plan()`'s results reach their caller, and the per-fragment configuration `prepare()` yields reaches Python and AI agents through `run.effective()`; the reports are recorded in the Manifest (§11).
+`validate()` returns the matched resources, the rejected constraints, the envelope violations, a coercion preview and warnings; `plan()` adds the fragments, links, dependency edges, the Authority and the derived ExecutionClass; `prepare()` returns a PrepareReport per fragment, and no merged view of them. Before any RF energy is emitted, `validate()`'s and `plan()`'s results reach their caller, and the per-fragment configuration `prepare()` yields reaches Python and AI agents through `run.effective()`; the reports are recorded in the Manifest (§11).
 
 Normative: [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-29…SB-31, SB-38, SB-39, SB-41; [design/04-run-and-session.md](../04-run-and-session.md), RS-17.
 

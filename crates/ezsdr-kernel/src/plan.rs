@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::binding::LinkPlacement;
 use crate::contract::PortRef;
-use crate::id::DataLinkId;
 use crate::module_api::{
     ComponentDescriptor, ExecutionClass, ExecutorDescriptor, IslandDecl, LinkDescriptor,
     ModuleError, ModuleRef, Role, SinkDescriptor,
@@ -55,19 +54,6 @@ pub struct Fragment {
     pub after: Vec<Ident>,
 }
 
-/// A number the Link Module declares, not a measurement. The Core reports it and
-/// never uses it to choose a placement; the Core neither measures nor optimises.
-///
-/// Rule: SB-40. Vision §20, §31, §63.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct DeclaredCost {
-    /// Which link (SC-19).
-    pub link: DataLinkId,
-    /// The Link Module's own number, uninterpreted by the Kernel (SB-40).
-    pub cost: u64,
-}
-
 /// What `plan(spec, binding)` produces (SB-39).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -84,9 +70,6 @@ pub struct ExecutionPlan {
     /// Derived from the environment and cross-checked against the Authority's
     /// pacing (MA-41, SB-39).
     pub class: ExecutionClass,
-    /// Declared, never measured (SB-40).
-    #[serde(default)]
-    pub transfer_costs: Vec<DeclaredCost>,
 }
 
 /// What one fragment's `prepare` returned (SB-41, MA-12).
@@ -319,8 +302,7 @@ pub fn validate(
 }
 
 /// `plan(spec, binding)` adds the fragments, the DataLink declarations, the
-/// dependency edges, the Authority, the derived ExecutionClass and the declared
-/// transfer costs.
+/// dependency edges, the Authority and the derived ExecutionClass.
 ///
 /// Dependency edges come from the explicit `ezsdr.arm_order` section and from each
 /// Provider instance's declared `arm_after`, which is how the device that sources
@@ -336,15 +318,14 @@ pub fn validate(
 /// alone, and MA-12's rule that a report's coercions equal what `coerce` returned
 /// for the same request has no request to be about (SB-39, SB-44, MA-12).
 ///
-/// Rule: SB-39, SB-40, SB-44, MA-12, MA-41.
+/// Rule: SB-39, SB-44, MA-12, MA-41.
 pub fn plan(
     spec: &ExperimentSpec,
     profile: &BindingProfile,
     admission: &AdmissionResult,
     inputs: &CompileInputs<'_>,
-    transfer_costs: Vec<DeclaredCost>,
 ) -> Result<ExecutionPlan, SpecError> {
-    compile::plan(spec, profile, admission, inputs, transfer_costs)
+    compile::plan(spec, profile, admission, inputs)
 }
 
 /// Why `prepare` failed (SB-30, SB-42).

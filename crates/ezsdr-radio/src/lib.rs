@@ -33,7 +33,7 @@ pub const RX_STREAM_KIND: &str = "radio.rx_stream";
 pub const TX_STREAM_KIND: &str = "radio.tx_stream";
 /// The RF safety envelope section (RM-19).
 pub const RF_ENVELOPE_SECTION: &str = "radio.rf_envelope";
-/// The verb that starts a receive stream again after a `Stop`: a `PeripheralCommand` on
+/// The verb that starts a receive stream again after a `Stop`: a `Command` on
 /// `<device>/rx` with no params (RM-12, RM-21).
 pub const START_RX: &str = "start_rx";
 
@@ -261,7 +261,7 @@ pub fn vocabulary() -> VocabularyDescriptor {
             },
             VerbDecl {
                 verb: Ident::parse(START_RX).expect("a valid Session verb"),
-                compiles_to: CompileRule::PeripheralCommand {},
+                compiles_to: CompileRule::Command {},
             },
         ],
         checks: vec![rf_envelope_namespace().clone()],

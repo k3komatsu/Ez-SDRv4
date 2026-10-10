@@ -779,6 +779,15 @@ fn hd_11_an_unexpected_action_is_rejected() {
     assert_eq!(events[0].kind.as_str(), REQUEST_REJECTED);
     assert_eq!(events[0].payload["action"], "tx_burst");
     assert!(events[0].payload["reason"].as_str().unwrap().starts_with("HD-14"));
+    rig.env.actions.push(Action::Command {
+        target: ResourceId::parse("sink/rec").expect("command target"),
+        verb: ident("start_rx"),
+        params: BTreeMap::new(),
+        at: None,
+    });
+    assert!(rig.step().expect("unexpected Command is an event"));
+    let events = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+    assert_eq!(events[0].payload["action"], "command");
 }
 
 #[test]

@@ -217,8 +217,8 @@ pub fn ping_pong(
                         param("ext.ezsdr.exec.native.ping.waveform", json!(pong.hash)),
                         param("ext.ezsdr.exec.native.ping.late_policy", json!(late_policy))
                     ],
-                    "timing": { "stateful": true },
-                    "requires": { "executor_kind": "ezsdr.exec.native", "memory_bytes": null },
+                    "timing": {},
+                    "requires": { "executor_kind": "ezsdr.exec.native" },
                     "impl": { "kind": "ezsdr.impl.native", "id": implementation.0, "hash": implementation.1 }
                 }
             },

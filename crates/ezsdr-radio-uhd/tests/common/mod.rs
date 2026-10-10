@@ -257,6 +257,7 @@ pub fn assembly(profile_doc: &Json, device: Arc<dyn Device>, inputs: BTreeMap<Co
         authority: Box::new(authority),
         links,
         inputs,
+        spec_source: None,
     }
 }
 

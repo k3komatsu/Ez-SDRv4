@@ -212,7 +212,7 @@ fn component(name: &str) -> ComponentDescriptor {
         ports: vec![Port { name: id("rx"), direction: PortDirection::In, contract: DataContractId::parse("ezsdr.stream.cf32").unwrap() }],
         params: Vec::new(),
         timing: ComponentTiming::default(),
-        requires: ComponentRequires { executor_kind: Namespace::parse("ezsdr.exec.native").unwrap(), memory_bytes: None },
+        requires: ComponentRequires { executor_kind: Namespace::parse("ezsdr.exec.native").unwrap() },
         implementation: ComponentImpl { kind: Namespace::parse("ezsdr.impl.native").unwrap(), id: SCRIPTED.to_owned(), hash: scripted_hash() },
     }
 }
@@ -227,7 +227,6 @@ fn island(local: u32, components: &[&str]) -> IslandDecl {
             .collect(),
         affinity: None,
         rt_policy: None,
-        batch: None,
     }
 }
 

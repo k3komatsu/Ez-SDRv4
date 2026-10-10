@@ -2,8 +2,8 @@
 //!
 //! Three orthogonal axes: the **unit** (a Module: a crate or a process), the
 //! **role** (Provider, Executor, Sink, Link, Authority) and the **deployment**
-//! (InProcess, or the reserved Plugin). One Module may hold several roles;
-//! `Plugin` names a deployment and never a role (MA-1).
+//! (InProcess, the only one so far). One Module may hold several roles; a
+//! deployment is never a role (MA-1).
 //!
 //! The execution ABI is the Executor's: the Kernel defines no `work` or `process`
 //! signature and never inspects `impl` beyond its identity (MA-21).
@@ -158,8 +158,8 @@ impl Role {
     }
 }
 
-/// How a Module is deployed. `Plugin` names a deployment, never a role, and is
-/// reserved: the Kernel refuses it as `Unsupported` (MA-1, MA-32, MA-46).
+/// How a Module is deployed. A deployment is never a role; an out-of-process one
+/// arrives with its protocol, not as a reserved variant (MA-1, MA-46).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -167,11 +167,6 @@ pub enum Deployment {
     /// A Rust trait, compiled in. Rust has no stable ABI, so this is the default
     /// and out-of-process is the Plugin path (Vision §62).
     InProcess {},
-    /// Out-of-process, a typed protocol; reserved (MA-32, MA-46).
-    Plugin {
-        /// The protocol version.
-        protocol: Version,
-    },
 }
 
 // ---------------------------------------------------------------- class and fidelity
@@ -453,12 +448,6 @@ pub struct ComponentTiming {
     /// The processing budget. A descriptor never carries an `AbsoluteDeadline`:
     /// they are distinct types (TM-15) and distinct schema definitions (MA-37).
     pub budget: Option<RelativeBudget>,
-    /// A hint at the block size the component prefers (MA-36).
-    pub preferred_batch: Option<u32>,
-    /// Whether it carries state across blocks (MA-36).
-    pub stateful: bool,
-    /// How many instances may run in parallel (MA-36).
-    pub parallelism: Option<u32>,
 }
 
 /// What a component requires of its Executor. Requirements only: the placement
@@ -469,8 +458,6 @@ pub struct ComponentRequires {
     /// The Executor kind, or `any`, which SB-1's `Namespace` grammar also spells (MA-36,
     /// MA-39).
     pub executor_kind: Namespace,
-    /// Working memory, when it needs a declared amount (MA-36).
-    pub memory_bytes: Option<u64>,
 }
 
 /// How a component's code is identified. The Kernel never inspects `impl` beyond
@@ -630,13 +617,11 @@ pub struct ProviderInstance {
     /// sources PPS is armed first (SB-39).
     #[serde(default)]
     pub arm_after: Vec<ResourceId>,
-    // MA-10 as KG-8 amends it: the lead is counted from the coordinator's dispatch, the
-    // time the instance takes to receive the Action included; a Provider that is not
-    // stepped states the delivery allowance this includes. The doc text below is part
-    // of the frozen `provider_instance` schema (GZ-2), so the amendment lives here.
-    /// The least lead this instance needs between receiving a timed Action and that
-    /// Action's instant, in `host.monotonic`; absent means zero. The only envelope
-    /// value the Kernel reads (MA-10, RS-19, KA-7).
+    /// The least lead this instance needs from the coordinator's dispatch of a timed
+    /// Action to that Action's instant, the time the instance takes to receive it
+    /// included, in `host.monotonic`; absent means zero. A Provider that is not
+    /// stepped states the delivery allowance this includes. The only envelope value
+    /// the Kernel reads (MA-10, RS-19).
     #[serde(default)]
     pub min_command_lead: Option<crate::time::Duration>,
     /// Namespaced Manifest content (RS-38, RS-39).
@@ -815,7 +800,7 @@ pub struct ModuleDescriptor {
     /// The Vocabularies it speaks (MA-32, MA-34).
     #[serde(default)]
     pub vocabularies: Vec<VocabularyRequirement>,
-    /// InProcess, or the reserved Plugin (MA-32).
+    /// How it is deployed (MA-1).
     pub deployment: Deployment,
     /// Its code's content hash, which the Manifest records (RS-45).
     pub impl_hash: Option<ContentHash>,
@@ -864,8 +849,8 @@ pub enum CompileRule {
         /// (OV-21). A Vocabulary wanting both behaviours declares two verbs.
         late_policy: crate::stream::LatePolicy,
     },
-    /// To a `PeripheralCommand` carrying the verb (RS-14).
-    PeripheralCommand {},
+    /// To a `Command` carrying the verb (RS-14).
+    Command {},
     /// To nothing: the verb is recorded in the log and dispatches no Action (RS-13).
     None {},
 }
@@ -914,7 +899,7 @@ pub struct ComponentPlacement {
 }
 
 /// An Island declaration: an Executor instance, the components placed on it, and
-/// its optional affinity, real-time policy and preferred batch. Where it lives and
+/// its optional affinity and real-time policy. Where it lives and
 /// the requirement that every component be placed exactly once are SB-13 and SB-25.
 ///
 /// Rule: MA-38.
@@ -932,8 +917,6 @@ pub struct IslandDecl {
     /// Real-time scheduling policy, when declared; MA-39 then requires a budget on
     /// every component (MA-38).
     pub rt_policy: Option<RtPolicy>,
-    /// Preferred batch size (MA-38).
-    pub batch: Option<u32>,
 }
 
 /// A real-time scheduling policy (MA-38).
@@ -959,7 +942,7 @@ pub struct RtPolicy {
 pub enum ModuleErrorKind {
     /// The request was well formed and refused.
     Rejected,
-    /// The Module does not implement this at all; `deployment: Plugin` is one (MA-32).
+    /// The Module does not implement this at all (MA-9).
     Unsupported,
     /// The call did not finish inside `PrepareContext.host_budget` (MA-8).
     Timeout,
@@ -1010,16 +993,15 @@ pub struct StepOutcome {
 }
 
 /// One attached end of a declared link, handed over at `prepare` (SC-19, MA-27).
+/// Non-exhaustive, so an event queue's end, with its handle, can join it without
+/// breaking a Module's match (MA-28).
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum Endpoint {
     /// The consuming end of a stream link.
     StreamIn(Arc<dyn DataLink>),
     /// The producing end of a stream link.
     StreamOut(Arc<dyn DataLink>),
-    /// The consuming end of an event queue; a Kernel handle, not a Link product (MA-28).
-    EventIn,
-    /// The producing end of an event queue (MA-28).
-    EventOut,
 }
 
 /// A link end bound to one of the component's ports (MA-27).

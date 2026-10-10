@@ -215,7 +215,7 @@ fn run(sequence: &Sequence) -> Record {
                 if !core.is_lost() {
                     control.book(match *op {
                         Op::Stop { device } => Action::Stop { target: Some(if device { core.id.clone() } else { core.rx_id.clone() }) },
-                        Op::StartRx => Action::PeripheralCommand { target: core.rx_id.clone(), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None },
+                        Op::StartRx => Action::Command { target: core.rx_id.clone(), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None },
                         Op::Cold { direction, change, at_ns } => {
                             let (name, value) = match change {
                                 Change::Channels(n) => ("channels", Value::Int(i64::from(n))),

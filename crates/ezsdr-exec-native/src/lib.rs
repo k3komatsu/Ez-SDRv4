@@ -321,7 +321,7 @@ fn action_name(action: &Action) -> &'static str {
         Action::TxBurst { .. } => "TxBurst",
         Action::SetTimer { .. } => "SetTimer",
         Action::UpdateParameter { .. } => "UpdateParameter",
-        Action::PeripheralCommand { .. } => "PeripheralCommand",
+        Action::Command { .. } => "Command",
         Action::Emit { .. } => "Emit",
         Action::Stop { .. } => "Stop",
         Action::Abort { .. } => "Abort",

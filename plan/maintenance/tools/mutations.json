@@ -1147,8 +1147,8 @@
   "id": "J79",
   "name": "audit item 5 (RS-45): a Spec Run's `spec.hash` is taken over the Spec as submitted, so one Spec spelled two ways has two hashes",
   "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
-  "old": "    let profile = BindingProfile::from_json(profile_doc)?;\n    let (spec_section, binding_section) = sections(&spec, &profile)?;\n",
-  "new": "    let profile = BindingProfile::from_json(profile_doc)?;\n    let (mut spec_section, binding_section) = sections(&spec, &profile)?;\n    spec_section.hash = ContentHash::of_value(spec_doc).unwrap();\n",
+  "old": "    let profile = BindingProfile::from_json(profile_doc)?;\n    let (spec_section, binding_section) = sections(&spec, &profile, assembly.spec_source.clone())?;\n",
+  "new": "    let profile = BindingProfile::from_json(profile_doc)?;\n    let (mut spec_section, binding_section) = sections(&spec, &profile, assembly.spec_source.clone())?;\n    spec_section.hash = ContentHash::of_value(spec_doc).unwrap();\n",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "rs_45_hash_equal_for_equal_inputs"
@@ -1157,8 +1157,8 @@
   "id": "J80",
   "name": "audit item 5 (RS-45): a Spec Run's `binding.hash` is taken over the profile as submitted, so one profile spelled two ways has two hashes",
   "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
-  "old": "    let profile = BindingProfile::from_json(profile_doc)?;\n    let (spec_section, binding_section) = sections(&spec, &profile)?;\n",
-  "new": "    let profile = BindingProfile::from_json(profile_doc)?;\n    let (spec_section, mut binding_section) = sections(&spec, &profile)?;\n    binding_section.hash = ContentHash::of_value(profile_doc).unwrap();\n",
+  "old": "    let profile = BindingProfile::from_json(profile_doc)?;\n    let (spec_section, binding_section) = sections(&spec, &profile, assembly.spec_source.clone())?;\n",
+  "new": "    let profile = BindingProfile::from_json(profile_doc)?;\n    let (spec_section, mut binding_section) = sections(&spec, &profile, assembly.spec_source.clone())?;\n    binding_section.hash = ContentHash::of_value(profile_doc).unwrap();\n",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "rs_45_hash_equal_for_equal_inputs"
@@ -1187,8 +1187,8 @@
   "id": "J83",
   "name": "audit item 5 (RS-45): a Session (`connect`) records and hashes its profile as sent, not as parsed",
   "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
-  "old": "    drop((providers, sinks));\n    let (spec_section, binding_section) = sections(&spec, &profile)?;\n",
-  "new": "    drop((providers, sinks));\n    let (spec_section, mut binding_section) = sections(&spec, &profile)?;\n    binding_section.body = profile_doc.clone();\n    binding_section.hash = crate::hash::ContentHash::of_value(profile_doc).unwrap();\n",
+  "old": "    drop((providers, sinks));\n    let (spec_section, binding_section) = sections(&spec, &profile, assembly.spec_source.clone())?;\n",
+  "new": "    drop((providers, sinks));\n    let (spec_section, mut binding_section) = sections(&spec, &profile, assembly.spec_source.clone())?;\n    binding_section.body = profile_doc.clone();\n    binding_section.hash = crate::hash::ContentHash::of_value(profile_doc).unwrap();\n",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "rs_45_hash_equal_for_equal_inputs"
@@ -1684,5 +1684,75 @@
   "crate": "ezsdr-kernel",
   "test_bin": "stream_contract",
   "filter": "sc_30b_a_first_block_s_carry_is_recorded_at_it"
+ },
+ {
+  "id": "J135",
+  "name": "item 7 (RS-38): the caller's source hash is dropped, so `spec.source` is never recorded",
+  "file": "crates/ezsdr-kernel/src/manifest.rs",
+  "old": "        Ok(SpecSection { hash, body, source })",
+  "new": "        Ok(SpecSection { hash, body, source: None })",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "rs_38_spec_source_is_recorded_outside_the_spec_hash"
+ },
+ {
+  "id": "J136",
+  "name": "item 7 (RS-38, RS-45): `spec.hash` covers the source hash, so two builders of one Spec give two Spec hashes",
+  "file": "crates/ezsdr-kernel/src/manifest.rs",
+  "old": "        Ok(SpecSection { hash, body, source })",
+  "new": "        Ok(SpecSection { hash: ContentHash::of(&(spec, &source))?, body, source })",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "rs_38_spec_source_is_recorded_outside_the_spec_hash"
+ },
+ {
+  "id": "J137",
+  "name": "item 7 (SB-40): the plan accepts a field it does not have, so a `transfer_costs` member is silently dropped",
+  "file": "crates/ezsdr-kernel/src/plan.rs",
+  "old": "#[serde(deny_unknown_fields)]\npub struct ExecutionPlan {",
+  "new": "pub struct ExecutionPlan {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_40_the_plan_carries_no_transfer_costs"
+ },
+ {
+  "id": "J138",
+  "name": "item 7 (MA-32): a reserved Plugin deployment is back, so a descriptor naming one parses",
+  "file": "crates/ezsdr-kernel/src/module_api.rs",
+  "old": "    InProcess {},\n}",
+  "new": "    InProcess {},\n    Plugin { protocol: Version },\n}",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_32_registry_refusals"
+ },
+ {
+  "id": "J139",
+  "name": "item 7 (RS-38): `connect` drops the caller's source hash, so a Session's `spec.source` is never recorded",
+  "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
+  "old": "    drop((providers, sinks));\n    let (spec_section, binding_section) = sections(&spec, &profile, assembly.spec_source.clone())?;\n",
+  "new": "    drop((providers, sinks));\n    let (spec_section, binding_section) = sections(&spec, &profile, None)?;\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "rs_38_spec_source_is_recorded_outside_the_spec_hash"
+ },
+ {
+  "id": "J140",
+  "name": "item 7 (HD-14): the capture Sink refuses a Command under its old action name `peripheral_command`",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "        Action::Command { .. } => \"command\",",
+  "new": "        Action::Command { .. } => \"peripheral_command\",",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_11_an_unexpected_action_is_rejected"
+ },
+ {
+  "id": "J141",
+  "name": "item 7 (UR-26): the UHD Provider refuses a Command it does not serve under its old action name `peripheral_command`",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "self.core.command_rejected(\"command\", \"UR-26: not supported by this Provider\")",
+  "new": "self.core.command_rejected(\"peripheral_command\", \"UR-26: not supported by this Provider\")",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_stop_actions"
  }
 ]

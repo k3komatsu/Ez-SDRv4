@@ -853,27 +853,6 @@
       ],
       "type": "object"
     },
-    "DeclaredCost": {
-      "additionalProperties": false,
-      "description": "A number the Link Module declares, not a measurement. The Core reports it and\nnever uses it to choose a placement; the Core neither measures nor optimises.\n\nRule: SB-40. Vision §20, §31, §63.",
-      "properties": {
-        "cost": {
-          "description": "The Link Module's own number, uninterpreted by the Kernel (SB-40).",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "link": {
-          "$ref": "#/$defs/DataLinkId",
-          "description": "Which link (SC-19)."
-        }
-      },
-      "required": [
-        "link",
-        "cost"
-      ],
-      "type": "object"
-    },
     "Duration": {
       "additionalProperties": false,
       "description": "An elapsed time: integer ticks in a named clock domain (TM-1, TM-4 decision T4).\n\nThe domain tag is what stops 1 000 ticks at 20 Msps being added to a 200 MHz\npoint as a silent factor-of-ten error.",
@@ -1101,14 +1080,6 @@
           "description": "The DataLink declarations: the graph's links, then the output feeds, numbered\non from them (SC-19, MA-27a, D75).",
           "items": {
             "$ref": "#/$defs/DataLinkDecl"
-          },
-          "type": "array"
-        },
-        "transfer_costs": {
-          "default": [],
-          "description": "Declared, never measured (SB-40).",
-          "items": {
-            "$ref": "#/$defs/DeclaredCost"
           },
           "type": "array"
         }
@@ -2377,7 +2348,7 @@
     },
     "SpecSection": {
       "additionalProperties": false,
-      "description": "The `spec` section: the Spec as parsed and re-serialised with every default\nwritten out, and its hash (RS-38, RS-45).",
+      "description": "The `spec` section: the Spec as parsed and re-serialised with every default\nwritten out, its hash, and the source hash its caller supplied (RS-38, RS-45).",
       "properties": {
         "body": {
           "description": "The body itself (RS-38, RS-45)."
@@ -2385,6 +2356,17 @@
         "hash": {
           "$ref": "#/$defs/ContentHash",
           "description": "The hash of the body (RS-45)."
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentHash"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The hash of the code that generated the Spec, as `Assembly.spec_source`\nsupplied it: opaque, never read by the Kernel, and outside `hash` (SB-14,\nRS-38)."
         }
       },
       "required": [

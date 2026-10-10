@@ -1522,8 +1522,12 @@ fn ur_26_stop_actions() {
         assert!(admitted(&entry), "{target}: {entry:?}");
         wait(&mut run, ms(5));
     }
+    // A Command this Provider does not serve (`start_rx` of the transmit stream) is refused
+    // under the action name `command`.
+    let _ = run.submit(verb("start_rx", "radio/tx", None, &[]), None).unwrap();
     wait(&mut run, ms(20));
     let manifest = run.finish();
+    assert!(section(&manifest, "rejected").as_array().unwrap().iter().any(|r| r["action"] == "command"));
     assert_eq!(bursts(&manifest)[0].end, BurstEnd::Stop);
     assert!(section(&manifest, "applied").as_array().unwrap().iter().any(|r| r["key"] == "rx_stop"));
     assert!(rejections(&manifest).iter().any(|r| r.starts_with("UR-26: the Stop target is not this device")), "{:?}", rejections(&manifest));

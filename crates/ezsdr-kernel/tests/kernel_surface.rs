@@ -485,7 +485,8 @@ fn ov_23b_kernel_growth_is_the_new_count() {
     // `spec::MigrationRegistry` and added `schema::drift` (OV-12), none of them NEW:.
     // 293: pre-freeze item 4 added the Manifest's typed records `run::LeaseRecord`,
     // `manifest::LinkRecord` and `manifest::ChildRecord` (Manifest envelope), none NEW:.
-    assert_eq!((new.len(), total), (116, 293), "OV-23b, GZ-2: the Kernel's public surface changed");
+    // 115 of 292: pre-freeze item 7 removed `plan::DeclaredCost` (SB-40), a NEW: item.
+    assert_eq!((new.len(), total), (115, 292), "OV-23b, GZ-2: the Kernel's public surface changed");
 }
 
 #[test]

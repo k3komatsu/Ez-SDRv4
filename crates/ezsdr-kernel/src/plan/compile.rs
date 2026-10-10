@@ -11,7 +11,7 @@ use crate::module_api::{
 use crate::spec::{ExperimentSpec, Ident, SpecError};
 use crate::stream::{BackPressure, DataLinkDecl};
 
-use super::{CompileInputs, DeclaredCost, ExecutionPlan, Fragment, IslandContext};
+use super::{CompileInputs, ExecutionPlan, Fragment, IslandContext};
 
 /// A Provider fragment's content: the binding's selector, plus the request the
 /// matcher resolved for the Spec resource of the same name. `requested` is absent
@@ -49,7 +49,6 @@ pub(super) fn plan(
     profile: &BindingProfile,
     admission: &AdmissionResult,
     inputs: &CompileInputs<'_>,
-    transfer_costs: Vec<DeclaredCost>,
 ) -> Result<ExecutionPlan, SpecError> {
     super::validation::check_structure(spec, profile, inputs)?;
     // SB-30's first point: "A non-empty violation list fails the stage, and nothing
@@ -255,7 +254,6 @@ pub(super) fn plan(
         deps: edges,
         authority,
         class,
-        transfer_costs,
     })
 }
 

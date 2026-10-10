@@ -14,7 +14,7 @@ use ezsdr_kernel::module_api::{
     ActionSubmitter, Authority, ComponentDescriptor, ComponentImpl, ComponentKind,
     ComponentPlacement, ComponentRequires, ComponentTiming, Deployment, Executor,
     ExecutorDescriptor, Factories, IslandDecl, Link, LinkDescriptor, ModuleDescriptor, ModuleError,
-    ModuleErrorKind, ModuleRef, ModuleRegistry, ParamDecl, PrepareContext, Provider, Requested,
+    ModuleRef, ModuleRegistry, ParamDecl, PrepareContext, Provider, Requested,
     Resource, Role, RtPolicy, Sink, SinkDescriptor, StepOutcome, SteppedInstance, SteppedRef,
     StopMode, UpdateClass, Version, VersionReq, step_until_quiescent,
 };
@@ -140,21 +140,11 @@ fn ma_32_registry_refusals() {
         .expect_err("major mismatch");
     assert!(err.message.contains("kernel_api major"), "{err}");
 
-    // `deployment: Plugin` is Unsupported in Phase 1.
-    let mut d = descriptor();
-    d.deployment = Deployment::Plugin {
-        protocol: Version::new(1, 0, 0),
-    };
-    let err = reg
-        .register(
-            d,
-            Factories {
-                provider: true,
-                ..Factories::default()
-            },
-        )
-        .expect_err("Plugin is reserved");
-    assert_eq!(err.kind, ModuleErrorKind::Unsupported);
+    // No reserved Plugin deployment: a descriptor naming one does not parse (MA-32).
+    let protocol = serde_json::json!({ "major": 1, "minor": 0, "patch": 0 });
+    serde_json::from_value::<Version>(protocol.clone()).expect("a well-formed version");
+    serde_json::from_value::<Deployment>(serde_json::json!({ "kind": "plugin", "protocol": protocol }))
+        .expect_err("no Plugin deployment");
 
     // A role with no factory, and a factory with no role.
     let err = reg
@@ -791,7 +781,6 @@ fn component(name: &str) -> ComponentDescriptor {
         timing: ComponentTiming::default(),
         requires: ComponentRequires {
             executor_kind: ns("any"),
-            memory_bytes: None,
         },
         implementation: ComponentImpl {
             kind: ns("test.impl"),
@@ -854,7 +843,6 @@ fn island(components: &[&str], executor: &str) -> IslandDecl {
         components: components.iter().map(|c| on(c, 0)).collect(),
         affinity: None,
         rt_policy: None,
-        batch: None,
     }
 }
 

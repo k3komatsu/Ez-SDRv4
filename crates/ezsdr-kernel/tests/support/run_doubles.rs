@@ -594,7 +594,7 @@ impl SteppedProvider {
                 Action::TxBurst { .. } => "TxBurst",
                 Action::SetTimer { .. } => "SetTimer",
                 Action::UpdateParameter { .. } => "UpdateParameter",
-                Action::PeripheralCommand { .. } => "PeripheralCommand",
+                Action::Command { .. } => "Command",
                 Action::Emit { .. } => "Emit",
                 Action::Stop { .. } => "Stop",
                 Action::Abort { .. } => "Abort",
@@ -658,8 +658,7 @@ impl Provider for SteppedProvider {
             let (direction, link) = match &attached.endpoint {
                 Endpoint::StreamIn(_) => ("in", None),
                 Endpoint::StreamOut(link) => ("out", Some(link.clone())),
-                Endpoint::EventIn => ("in", None),
-                Endpoint::EventOut => ("out", None),
+                _ => unreachable!("only stream ends exist"),
             };
             if let Some(link) = link {
                 self.outs.push(link);
@@ -1017,8 +1016,7 @@ impl Sink for RecordingSink {
             let (direction, link) = match &attached.endpoint {
                 Endpoint::StreamIn(link) => ("in", Some(link.clone())),
                 Endpoint::StreamOut(_) => ("out", None),
-                Endpoint::EventIn => ("in", None),
-                Endpoint::EventOut => ("out", None),
+                _ => unreachable!("only stream ends exist"),
             };
             if let Some(link) = link {
                 self.ins.push(link);

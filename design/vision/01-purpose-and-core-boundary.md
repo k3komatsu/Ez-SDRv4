@@ -176,7 +176,7 @@ ClockDomain / TimePoint / Duration /      integer ticks at a rational rate (§15
 Deadline / ClockRelation / TimeAuthority
 SampleBlock / BufferRef / MemoryDomain    the Stream Contract (§23)
 DataContract registry / Port / DataLink   identity and compatibility only
-Event envelope / counters / Action set    TxBurst, SetTimer, UpdateParameter, PeripheralCommand,
+Event envelope / counters / Action set    TxBurst, SetTimer, UpdateParameter, Command,
                                           Emit, Stop, Abort; Policy
 Capability / Constraint matching          generic, schema-driven; keys are defined by Vocabulary
 Composite Resource tree                   Device → sub-resources (§8)
@@ -289,7 +289,7 @@ Peripheral Model
     └── Mock Peripheral Provider
 ```
 
-Module, role and deployment are three orthogonal axes. There are exactly five roles — Provider (a Resource Model: Radio, Peripheral, Endpoint, Simulation), Executor (a processing engine), Sink (Artifacts), Link (a DataLink) and Authority (the Time Authority, §15) — with one trait each and no shared lifecycle supertrait. A Module declares its roles in its ModuleDescriptor and may hold several: the UHD Module is a Radio Provider, a GPIO Provider and an Authority (its timekeeper); the `sim-engine` Module is an Authority. Deployment is in-process (compiled in) or Plugin; "Plugin" names a deployment form, not a role. Peripheral Modules are Plugins by default because vendor SDKs run outside the Core process (§62); the Plugin variant is fixed in the schemas now and refused at registration until a Plugin host exists.
+Module, role and deployment are three orthogonal axes. There are exactly five roles — Provider (a Resource Model: Radio, Peripheral, Endpoint, Simulation), Executor (a processing engine), Sink (Artifacts), Link (a DataLink) and Authority (the Time Authority, §15) — with one trait each and no shared lifecycle supertrait. A Module declares its roles in its ModuleDescriptor and may hold several: the UHD Module is a Radio Provider, a GPIO Provider and an Authority (its timekeeper); the `sim-engine` Module is an Authority. Deployment is in-process (compiled in), the only kind so far; "Plugin" names a deployment form, not a role. Peripheral Modules are expected to be Plugins because vendor SDKs run outside the Core process (§62); the Plugin deployment is added with its protocol, not reserved in the schemas now (MA-46).
 
 Normative: [design/05-module-api.md](../05-module-api.md), rules MA-1…MA-3, MA-32, MA-46.
 
@@ -325,7 +325,7 @@ Similarly:
 
 ```text
 Beam Reactor
-      │ PeripheralCommand
+      │ Command
       ▼
 Peripheral Port
       │

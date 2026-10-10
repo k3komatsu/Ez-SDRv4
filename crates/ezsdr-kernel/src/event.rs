@@ -629,9 +629,10 @@ pub enum Action {
         /// (RS-49, RS-19, RS-14).
         at: Option<AbsoluteDeadline>,
     },
-    /// A Vocabulary-defined peripheral operation (RS-49).
-    PeripheralCommand {
-        /// Whose peripheral (RS-49).
+    /// A Vocabulary-defined verb sent to any target: a radio stream, a peripheral
+    /// (RS-49).
+    Command {
+        /// Whose verb (RS-49).
         target: ResourceId,
         /// The verb, defined by its Vocabulary (RS-13a).
         verb: Ident,
@@ -672,7 +673,7 @@ impl Action {
             Action::TxBurst { target, .. }
             | Action::SetTimer { target, .. }
             | Action::UpdateParameter { target, .. }
-            | Action::PeripheralCommand { target, .. }
+            | Action::Command { target, .. }
             | Action::Emit { target, .. } => Some(target),
             Action::Stop { target } => target.as_ref(),
             Action::Abort { .. } => None,
@@ -727,9 +728,9 @@ pub enum ActionTemplate {
         /// The declared update class.
         class: UpdateClass,
     },
-    /// The `peripheral_command` Action without `at` (RS-49a).
-    PeripheralCommand {
-        /// Whose peripheral.
+    /// The `command` Action without `at` (RS-49a).
+    Command {
+        /// Whose verb.
         target: ResourceId,
         /// The verb.
         verb: Ident,
@@ -762,8 +763,8 @@ impl ActionTemplate {
             ActionTemplate::UpdateParameter { target, key, value, class,
             } => Action::UpdateParameter { target, key, value, class, at: Some(at),
             },
-            ActionTemplate::PeripheralCommand { target, verb, params,
-            } => Action::PeripheralCommand { target, verb, params, at: Some(at),
+            ActionTemplate::Command { target, verb, params,
+            } => Action::Command { target, verb, params, at: Some(at),
             },
             ActionTemplate::Stop { target } => Action::Stop { target },
         }
@@ -776,7 +777,7 @@ impl ActionTemplate {
             ActionTemplate::TxBurst { target, .. }
             | ActionTemplate::SetTimer { target, .. }
             | ActionTemplate::UpdateParameter { target, .. }
-            | ActionTemplate::PeripheralCommand { target, .. } => Some(target),
+            | ActionTemplate::Command { target, .. } => Some(target),
             ActionTemplate::Stop { target } => target.as_ref(),
         }
     }
@@ -788,7 +789,7 @@ impl ActionTemplate {
             ActionTemplate::TxBurst { .. }
                 | ActionTemplate::SetTimer { .. }
                 | ActionTemplate::UpdateParameter { .. }
-                | ActionTemplate::PeripheralCommand { .. }
+                | ActionTemplate::Command { .. }
         )
     }
 }

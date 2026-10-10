@@ -253,7 +253,7 @@ fn rm_12_the_verbs_compile_as_declared() {
     ));
     // RM-12, RM-21: `start_rx` turns a receive stream on again after a `Stop`.
     assert_eq!(descriptor.verbs[2].verb.as_str(), "start_rx");
-    assert_eq!(descriptor.verbs[2].compiles_to, CompileRule::PeripheralCommand {});
+    assert_eq!(descriptor.verbs[2].compiles_to, CompileRule::Command {});
 
     let mut registry = ModuleRegistry::new();
     registry.register_vocabulary(descriptor).unwrap();

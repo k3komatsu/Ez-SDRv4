@@ -50,6 +50,7 @@ fn rig(pacing: Pacing) -> Rig {
         authority: Box::new(authority),
         links: BTreeMap::new(),
         inputs: BTreeMap::new(),
+        spec_source: None,
     };
     Rig {
         clocks,
@@ -1326,6 +1327,32 @@ fn rs_45_hash_equal_for_equal_inputs() {
         .finish();
         assert_eq!((&session.binding.hash, &session.binding.body), (&terse.binding.hash, &terse.binding.body));
     }
+}
+
+#[test]
+fn rs_38_spec_source_is_recorded_outside_the_spec_hash() {
+    // The caller's source hash is recorded as given and changes neither the Spec's
+    // hash nor its body: two builders that produce one Spec give one Spec hash.
+    let source = ContentHash::of_value(&serde_json::json!("builder.py")).unwrap();
+    let manifest = |spec_source: Option<ContentHash>| {
+        let mut assembly = with_provider(rig(Pacing::FreeRunning).assembly, "radio", "radio");
+        assembly.spec_source = spec_source;
+        start_spec_run(&spec_one(), &profile_one(), assembly)
+            .expect("entry creates a Run")
+            .finish()
+    };
+    let with = manifest(Some(source.clone()));
+    let without = manifest(None);
+    assert_eq!(with.spec.source, Some(source.clone()));
+    assert_eq!(without.spec.source, None);
+    assert_eq!((&with.spec.hash, &with.spec.body), (&without.spec.hash, &without.spec.body));
+    assert_eq!(with.spec.hash, ContentHash::of_value(&with.spec.body).unwrap());
+    // A Session records the caller's value too, as opaque provenance.
+    let mut assembly = with_provider(rig(Pacing::FreeRunning).assembly, "radio", "radio");
+    assembly.spec_source = Some(source.clone());
+    let mut session = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    session.disconnect();
+    assert_eq!(session.finish().spec.source, Some(source));
 }
 
 #[test]
@@ -4427,7 +4454,7 @@ fn sb_04_module_action_rejects_noncanonical_value_before_dispatch() {
         let actions = [
             Action::UpdateParameter { target: target.clone(), key: key.clone(), value: value.clone(),
                 class: ezsdr_kernel::module_api::UpdateClass::HardwareTimed, at: None },
-            Action::PeripheralCommand { target: target.clone(), verb: Ident::parse("probe").unwrap(),
+            Action::Command { target: target.clone(), verb: Ident::parse("probe").unwrap(),
                 params: BTreeMap::from([(key.clone(), value.clone())]), at: None },
             Action::TxBurst { target, waveform: input_ref().1, repeat: false,
                 at: ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)),

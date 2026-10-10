@@ -16,7 +16,7 @@ use ezsdr_kernel::module_api::{
     ModuleRegistry, Pacing, Provider, Role, UpdateClass,
 };
 use ezsdr_kernel::plan::{
-    CompileInputs, DeclaredCost, PrepareReport, arm_order, coercion_policy,
+    CompileInputs, PrepareReport, arm_order, coercion_policy,
     collect_prepare, plan, release_order, validate,
 };
 use ezsdr_kernel::policy::{EventKindRegistry, Reaction};
@@ -299,10 +299,9 @@ fn validate_then_plan(
     spec: &ExperimentSpec,
     profile: &ezsdr_kernel::binding::BindingProfile,
     inputs: &ezsdr_kernel::plan::CompileInputs<'_>,
-    costs: Vec<DeclaredCost>,
 ) -> Result<ezsdr_kernel::plan::ExecutionPlan, SpecError> {
     let admission = validate(spec, profile, inputs)?;
-    plan(spec, profile, &admission, inputs, costs)
+    plan(spec, profile, &admission, inputs)
 }
 
 // ---------------------------------------------------------------- envelope
@@ -833,7 +832,6 @@ fn x7_non_local_ids_are_refused() {
         components: Vec::new(),
         affinity: None,
         rt_policy: None,
-        batch: None,
     };
     profile.placements.islands = vec![island(0), island(7)];
     let refused = validate(&spec, &profile, &fx.inputs(&providers));
@@ -1122,7 +1120,6 @@ fn sb_39_the_guard_covers_every_matched_entry() {
         &profile,
         &admission,
         &fx.inputs(&providers),
-        Vec::new(),
     )
     .expect("this Run's");
     let report = || PrepareReport {
@@ -1161,7 +1158,6 @@ fn sb_39_the_guard_covers_every_matched_entry() {
             &profile,
             &stale,
             &fx.inputs(&providers),
-            Vec::new(),
         ));
         assert!(
             reason.contains("SB-39") && reason.contains(want),
@@ -1678,7 +1674,7 @@ fn sb_39_arm_after_from_the_provider_declaration() {
     );
     let _ = &spec;
     let plan =
-        validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new()).expect("plans");
+        validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
     let names: Vec<&str> = plan.fragments.iter().map(|f| f.id.as_str()).collect();
     assert_eq!(names, vec!["pps", "slave"]);
     assert!(plan.deps.contains(&(id("pps"), id("slave"))));
@@ -1706,7 +1702,7 @@ fn sb_39_arm_after_resolves_a_shared_instance_to_its_first_resource_name() {
     let profile = distinct_instances(profile_binding(&["a", "b", "c"]), &["c"]);
     let fx = Fixture::new();
     let plan =
-        validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new()).expect("plans");
+        validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
 
     assert_eq!(plan.deps, vec![(id("a"), id("c"))]);
 }
@@ -1730,7 +1726,7 @@ fn sb_39_a_provider_fragment_carries_the_matched_request() {
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let built =
-        validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new()).expect("plans");
+        validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
 
     let fragment = built
         .fragments
@@ -1754,21 +1750,19 @@ fn sb_39_a_provider_fragment_carries_the_matched_request() {
 }
 
 #[test]
-fn sb_40_transfer_cost_is_declared() {
+fn sb_40_the_plan_carries_no_transfer_costs() {
+    // The Core neither measures nor uses transfer costs, so the plan has no field for
+    // one: a plan document naming `transfer_costs` does not parse.
     let spec = minimal_spec();
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    let cost = DeclaredCost {
-        link: DataLinkId::local(0),
-        cost: 4_200,
-    };
-    let plan = validate_then_plan(&spec, &profile, &fx.inputs(&providers), vec![cost.clone()])
-        .expect("plans");
-    assert_eq!(plan.transfer_costs, vec![cost]);
-    // No placement changed: the Core reports the number and never optimises.
-    assert!(plan.fragments.iter().all(|f| f.role == Role::Provider));
+    let plan = validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
+    let mut doc = serde_json::to_value(&plan).expect("serialises");
+    serde_json::from_value::<ezsdr_kernel::plan::ExecutionPlan>(doc.clone()).expect("round-trips");
+    doc["transfer_costs"] = serde_json::json!([]);
+    serde_json::from_value::<ezsdr_kernel::plan::ExecutionPlan>(doc).expect_err("no such field");
 }
 
 #[test]
@@ -2027,7 +2021,6 @@ fn sb_15_a_bound_resource_port_is_a_link_endpoint() {
         components: vec![member("proc")],
         affinity: None,
         rt_policy: None,
-        batch: None,
     });
     select_test_links(&link_into(&sc16), &mut profile);
     let fx = Fixture::new();
@@ -2044,7 +2037,6 @@ fn sb_15_a_bound_resource_port_is_a_link_endpoint() {
         &link_into(&sc16),
         &profile,
         &fx.inputs(&providers),
-        Vec::new(),
     );
     assert!(
         planned.is_ok(),
@@ -2185,9 +2177,9 @@ fn sb_20_extensions_reach_the_manifest_verbatim() {
     let content = serde_json::json!({ "nested": { "a": [1, 2, 3] }, "s": "opaque" });
     let mut spec = minimal_spec();
     spec.extensions.insert(ns("vendor.thing"), content.clone());
-    let section = ezsdr_kernel::manifest::SpecSection::of(&spec).expect("hashes");
+    let section = ezsdr_kernel::manifest::SpecSection::of(&spec, None).expect("hashes");
     assert_eq!(section.body["extensions"]["vendor.thing"], content);
-    let without = ezsdr_kernel::manifest::SpecSection::of(&minimal_spec()).expect("hashes");
+    let without = ezsdr_kernel::manifest::SpecSection::of(&minimal_spec(), None).expect("hashes");
     assert_ne!(section.hash, without.hash, "the hash covers the extension");
 }
 
@@ -2320,7 +2312,7 @@ fn rs_12_a_session_compiles_through_the_whole_pipeline() {
     select_test_links(&spec, &mut profile);
     let result = validate(&spec, &profile, &fx.inputs(&providers)).expect("a Session validates");
     assert!(result.is_admitted());
-    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new())
+    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers))
         .expect("a Session plans");
     // MA-25, MA-30: the Sink is its own fragment, prepared and stepped in its own
     // right, and never a component inside an Island.
@@ -2416,7 +2408,7 @@ fn rs_12_a_multi_role_module_is_bound_once_per_role() {
         [&id("rec")]
     );
     select_test_links(&spec, &mut profile);
-    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new())
+    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers))
         .expect("the Session plans with one fragment per role");
     assert!(
         built
@@ -2491,7 +2483,6 @@ fn rs_12_a_multi_role_module_is_bound_once_per_role() {
         components: Vec::new(),
         affinity: None,
         rt_policy: None,
-        batch: None,
     });
     let no_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = BTreeMap::new();
     let spec = ezsdr_kernel::session::implicit_spec(&fpga, &fx.registry, &providers2, &no_sinks)
@@ -2577,12 +2568,11 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
         components: vec![member("proc"), member("recorder")],
         affinity: None,
         rt_policy: None,
-        batch: None,
     });
     select_test_links(&spec, &mut profile);
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    let planned = validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new());
+    let planned = validate_then_plan(&spec, &profile, &fx.inputs(&providers));
     assert!(planned.is_ok(), "{planned:?}");
 
     // D83's one namespace lets two Islands name one Executor: that is sharing an
@@ -2594,7 +2584,7 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
         components: vec![member("recorder")],
         ..shared.placements.islands[0].clone()
     });
-    let planned = validate_then_plan(&spec, &shared, &fx.inputs(&providers), Vec::new());
+    let planned = validate_then_plan(&spec, &shared, &fx.inputs(&providers));
     assert!(planned.is_ok_and(|p| {
         p.fragments
             .iter()
@@ -2640,7 +2630,7 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
     let mut unplaced = profile.clone();
     unplaced.placements.islands[0].components = vec![member("proc")];
     assert!(matches!(
-        validate_then_plan(&spec, &unplaced, &fx.inputs(&providers), Vec::new()),
+        validate_then_plan(&spec, &unplaced, &fx.inputs(&providers)),
         Err(SpecError::Structural { reason }) if reason.contains("exactly once")
     ));
 
@@ -2680,7 +2670,7 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
     );
     let mut fx2 = Fixture::new();
     fx2.sinks = sinks;
-    let refused = validate_then_plan(&blocking, &bound_sink, &fx2.inputs(&providers), Vec::new());
+    let refused = validate_then_plan(&blocking, &bound_sink, &fx2.inputs(&providers));
     assert!(
         matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("SC-21")),
         "{refused:?}"
@@ -2692,7 +2682,7 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
     dropping.outputs[0].feed.policy = BackPressure::DropOldest;
     let mut placed = bound_sink.clone();
     select_test_links(&dropping, &mut placed);
-    let built = validate_then_plan(&dropping, &placed, &fx2.inputs(&providers), Vec::new())
+    let built = validate_then_plan(&dropping, &placed, &fx2.inputs(&providers))
         .expect("graph link and feed both placed");
     let ids: Vec<_> = built
         .links
@@ -2724,7 +2714,7 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
     )]
     .into_iter()
     .collect();
-    let refused = validate_then_plan(&dropping, &placed, &fx3.inputs(&providers), Vec::new());
+    let refused = validate_then_plan(&dropping, &placed, &fx3.inputs(&providers));
     assert!(
         matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("its Sink instance is ezsdr.test.sink 1.1.0")),
         "{refused:?}"
@@ -2738,7 +2728,6 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
         &placed,
         &admission,
         &fx3.inputs(&providers),
-        Vec::new(),
     );
     assert!(
         matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("its Sink instance is ezsdr.test.sink 1.1.0")),
@@ -2771,7 +2760,6 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
             &component_feed,
             &component_placed,
             &fx5.inputs(&providers),
-            Vec::new(),
         );
         match planned {
             Ok(_) => assert!(admitted, "a Sink reading domain {domain} must be refused"),
@@ -2810,7 +2798,6 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
         &placed,
         &admission,
         &fx6.inputs(&providers),
-        Vec::new(),
     );
     assert!(
         matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("MA-25: output capture0's Sink declares no memory domain")),
@@ -2822,7 +2809,7 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
         .expect("exec")
         .memory_domains
         .clear();
-    let refused = validate_then_plan(&spec, &profile, &fx7.inputs(&providers), Vec::new());
+    let refused = validate_then_plan(&spec, &profile, &fx7.inputs(&providers));
     assert!(
         matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("MA-18: executor exec declares no memory domain")),
         "{refused:?}"
@@ -2830,7 +2817,7 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
 
     let mut fx4 = Fixture::new();
     fx4.executors.get_mut(&id("exec")).expect("exec").module = v11("ezsdr.test.executor");
-    let refused = validate_then_plan(&spec, &profile, &fx4.inputs(&providers), Vec::new());
+    let refused = validate_then_plan(&spec, &profile, &fx4.inputs(&providers));
     assert!(
         matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("its Executor instance is ezsdr.test.executor 1.1.0")),
         "{refused:?}"
@@ -2851,7 +2838,7 @@ fn ma_41_an_unparseable_rf_path_is_refused_not_defaulted() {
         serde_json::json!({ "path": "over_the_air " }),
     );
     assert!(matches!(
-        validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new()),
+        validate_then_plan(&spec, &profile, &fx.inputs(&providers)),
         Err(SpecError::Structural { reason }) if reason.contains("ezsdr.rf_path")
     ));
     // The correct spelling is refused for the right reason instead (MA-41's table).
@@ -2860,7 +2847,7 @@ fn ma_41_an_unparseable_rf_path_is_refused_not_defaulted() {
         serde_json::json!({ "path": "over_the_air" }),
     );
     assert!(matches!(
-        validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new()),
+        validate_then_plan(&spec, &profile, &fx.inputs(&providers)),
         Err(SpecError::Structural { reason }) if reason.contains("MA-41")
     ));
 }
@@ -3220,7 +3207,7 @@ fn ma_41_a_declared_time_class_that_disagrees_is_refused() {
     let providers = one_provider("radio", &p);
     // The Authority is free-running and `ezsdr.rf_path` is absent, so the derived
     // class is Simulation; the declaration says Hardware.
-    let err = validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new())
+    let err = validate_then_plan(&spec, &profile, &fx.inputs(&providers))
         .expect_err("a declared class that disagrees is refused");
     assert!(
         matches!(&err, SpecError::Structural { reason }
@@ -3232,9 +3219,9 @@ fn ma_41_a_declared_time_class_that_disagrees_is_refused() {
         ns("ezsdr.time"),
         serde_json::json!({ "class": "simulation" }),
     );
-    assert!(validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new()).is_ok());
+    assert!(validate_then_plan(&spec, &profile, &fx.inputs(&providers)).is_ok());
     profile.environment.remove(&ns("ezsdr.time"));
-    assert!(validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new()).is_ok());
+    assert!(validate_then_plan(&spec, &profile, &fx.inputs(&providers)).is_ok());
 }
 
 #[test]
@@ -3303,7 +3290,6 @@ fn sb_30_a_validate_violation_refuses_the_plan() {
         &profile,
         &admission,
         &fx.inputs(&providers),
-        Vec::new(),
     )
     .expect_err("SB-30: nothing transmits after a violation");
     assert!(matches!(refused, SpecError::Violation(_)), "{refused:?}");
@@ -3701,7 +3687,6 @@ fn sb_39_plan_refuses_an_admission_result_from_another_spec() {
         &profile,
         &ezsdr_kernel::binding::AdmissionResult::default(),
         &fx.inputs(&providers),
-        Vec::new(),
     )
     .expect_err("an empty result is not this Run's");
     assert!(
@@ -3710,7 +3695,7 @@ fn sb_39_plan_refuses_an_admission_result_from_another_spec() {
     );
     // The real pipeline's result plans, and its fragment carries the request.
     let built =
-        validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new()).expect("plans");
+        validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
     assert!(built.fragments[0].content.get("requested").is_some());
 }
 
@@ -4357,7 +4342,7 @@ fn sb_13_an_opaque_parameter_schema_is_not_a_placement() {
                 "update_class": "block_boundary",
                 "default": true
             }],
-            "requires": { "executor_kind": "any", "memory_bytes": null },
+            "requires": { "executor_kind": "any" },
             "impl": { "kind": "test.impl", "id": "proc", "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
         } } }
     });
@@ -4630,7 +4615,6 @@ fn ma_41_an_absent_or_non_string_class_is_refused() {
             &profile,
             &admission,
             &fx.inputs(&providers),
-            Vec::new(),
         )
         .expect_err("MA-41 refuses it rather than deriving a class");
         assert!(
@@ -4647,7 +4631,6 @@ fn ma_41_an_absent_or_non_string_class_is_refused() {
         &profile,
         &admission,
         &fx.inputs(&providers),
-        Vec::new(),
     )
     .expect("no ezsdr.time section is not a declaration to disagree with");
 }
@@ -4703,7 +4686,6 @@ fn sb_39_a_malformed_arm_order_entry_is_refused() {
         &profile,
         &admission,
         &fx2.inputs(&providers),
-        Vec::new(),
     )
     .expect("plans");
     assert_eq!(
@@ -4725,7 +4707,6 @@ fn sb_39_a_malformed_arm_order_entry_is_refused() {
             &profile,
             &admission,
             &fx2.inputs(&providers),
-            Vec::new(),
         )
         .expect_err("a malformed entry is refused, not dropped");
         assert!(
@@ -4771,7 +4752,6 @@ fn sb_39_the_plan_records_the_contract_the_link_actually_carries() {
         components: vec![member("src")],
         affinity: None,
         rt_policy: None,
-        batch: None,
     });
     select_test_links(&spec, &mut profile);
     let fx = Fixture::new();
@@ -4788,7 +4768,6 @@ fn sb_39_the_plan_records_the_contract_the_link_actually_carries() {
         &profile,
         &admission,
         &fx.inputs(&providers),
-        Vec::new(),
     )
     .expect("plans");
     assert_eq!(plan.links.len(), 1);
@@ -5190,7 +5169,6 @@ fn sb_15a_link_direction_is_checked() {
         components: vec![member("src"), member("dst")],
         affinity: None,
         rt_policy: None,
-        batch: None,
     });
     let valid_link = linked(("src", "out"), ("dst", "in"));
     select_test_links(&valid_link, &mut profile);
@@ -5243,7 +5221,6 @@ fn sb_15a_link_direction_is_checked() {
         components: vec![member("dst")],
         affinity: None,
         rt_policy: None,
-        batch: None,
     });
     let providers: BTreeMap<Ident, &dyn Provider> = [
         (id("radio"), &p as &dyn Provider),
@@ -5287,7 +5264,6 @@ fn island(local: u32, executor: &str) -> IslandDecl {
         components: Vec::new(),
         affinity: None,
         rt_policy: None,
-        batch: None,
     }
 }
 
@@ -5548,7 +5524,7 @@ fn sb_22_the_runtime_is_read_only_under_slot_names() {
     ]
     .into_iter()
     .collect();
-    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new())
+    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers))
         .expect("nothing supplied under `ghost` is read");
     assert_eq!(roles_of(&built).keys().collect::<Vec<_>>(), ["radio"]);
     // The same object under a slot's name is read, and refused.
@@ -5564,7 +5540,7 @@ fn sb_22_the_runtime_is_read_only_under_slot_names() {
     ]
     .into_iter()
     .collect();
-    let built = validate_then_plan(&spec, &profile, &fx.inputs(&with_spare), Vec::new())
+    let built = validate_then_plan(&spec, &profile, &fx.inputs(&with_spare))
         .expect("no edge to a non-slot");
     assert!(built.deps.is_empty(), "{:?}", built.deps);
     // A link endpoint resolves against resource slots only: a need key is in `matched`
@@ -5640,7 +5616,7 @@ fn sb_22b_spec_run_slots() {
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let built =
-        validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new()).expect("plans");
+        validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
     let want: BTreeMap<String, Role> = [
         ("island_0", Role::Executor),
         ("island_1", Role::Executor),
@@ -5661,7 +5637,7 @@ fn sb_22b_spec_run_slots() {
     profile.bindings.remove(&id("sim"));
     profile.authority = id("radio");
     let built =
-        validate_then_plan(&spec, &profile, &fx.inputs(&providers), Vec::new()).expect("plans");
+        validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
     assert!(built.fragments.iter().all(|f| f.role != Role::Authority));
     assert_eq!(built.authority, id("radio"));
 }
@@ -5719,7 +5695,7 @@ fn sb_22c_session_derivation_table() {
     );
     let mut planned = profile.clone();
     select_test_links(&spec, &mut planned);
-    let built = validate_then_plan(&spec, &planned, &fx.inputs(&providers), Vec::new())
+    let built = validate_then_plan(&spec, &planned, &fx.inputs(&providers))
         .expect("the Session plans");
     let want: BTreeMap<String, Role> = [
         ("island_0", Role::Executor),
@@ -5773,10 +5749,10 @@ fn sb_22c_session_derivation_table() {
         [&id("clock"), &id("radio")]
     );
     let built =
-        validate_then_plan(&session, &clocked, &fx2.inputs(&both), Vec::new()).expect("plans");
+        validate_then_plan(&session, &clocked, &fx2.inputs(&both)).expect("plans");
     assert_eq!(roles_of(&built).get("clock"), Some(&Role::Provider));
     fx2.is_session = false;
-    let built = validate_then_plan(&minimal_spec(), &clocked, &fx2.inputs(&both), Vec::new())
+    let built = validate_then_plan(&minimal_spec(), &clocked, &fx2.inputs(&both))
         .expect("plans");
     assert_eq!(roles_of(&built).get("clock"), Some(&Role::Authority));
 
@@ -6096,7 +6072,6 @@ fn sb_22f_the_runtime_supplies_each_slot_at_its_version() {
             &with_output,
             &rec,
             &fx.inputs(&providers),
-            Vec::new(),
         ));
         assert!(reason.contains(want), "{want}: {reason}");
     }
@@ -6104,7 +6079,7 @@ fn sb_22f_the_runtime_supplies_each_slot_at_its_version() {
     fx_sink.sinks = [(id("rec"), &good_sink as &dyn ezsdr_kernel::module_api::Sink)]
         .into_iter()
         .collect();
-    validate_then_plan(&with_output, &rec, &fx_sink.inputs(&providers), Vec::new())
+    validate_then_plan(&with_output, &rec, &fx_sink.inputs(&providers))
         .expect("the right Sink plans");
 
     // An Executor.
@@ -6158,7 +6133,7 @@ fn sb_22f_the_runtime_supplies_each_slot_at_its_version() {
         },
     );
     own.authority = id("sim");
-    validate_then_plan(&spec, &own, &fx_sim.inputs(&providers), Vec::new())
+    validate_then_plan(&spec, &own, &fx_sim.inputs(&providers))
         .expect("its own version plans");
     fx_sim
         .authorities
@@ -6250,7 +6225,6 @@ fn sb_24_authority_is_named_and_rides_or_stands_alone() {
         &spec,
         &profile_binding(&["radio"]),
         &fx.inputs(&providers),
-        Vec::new(),
     )
     .expect("plans");
     assert_eq!(built.authority, id("radio"));
@@ -6273,7 +6247,7 @@ fn sb_24_authority_is_named_and_rides_or_stands_alone() {
     );
     own.authority = id("sim");
     let built =
-        validate_then_plan(&spec, &own, &fx_sim.inputs(&providers), Vec::new()).expect("plans");
+        validate_then_plan(&spec, &own, &fx_sim.inputs(&providers)).expect("plans");
     let fragment = built
         .fragments
         .iter()
@@ -6305,7 +6279,7 @@ fn sb_24_authority_is_named_and_rides_or_stands_alone() {
             pacing: Pacing::WallPaced,
         },
     );
-    let built = validate_then_plan(&two_spec, &two, &fx2.inputs(&both), Vec::new()).expect("plans");
+    let built = validate_then_plan(&two_spec, &two, &fx2.inputs(&both)).expect("plans");
     assert_eq!(built.authority, id("other"));
     assert_eq!(
         built.class,
@@ -6332,8 +6306,7 @@ fn sb_39_plan_reruns_the_structural_checks_and_refuses_a_stale_admission() {
             &spec,
             &extra,
             &admission,
-            &fx.inputs(&providers),
-            Vec::new()
+            &fx.inputs(&providers)
         ))
         .contains("SB-22d: binding spare plays no role")
     );
@@ -6366,7 +6339,6 @@ fn sb_39_plan_reruns_the_structural_checks_and_refuses_a_stale_admission() {
             &clean,
             &admission,
             &fx.inputs(&providers),
-            Vec::new(),
         ));
         assert!(reason.contains(want), "{key_name}: {reason}");
     }
@@ -6399,8 +6371,7 @@ fn sb_39_plan_reruns_the_structural_checks_and_refuses_a_stale_admission() {
             &gridded,
             &limited,
             &gridded_admission,
-            &limited_fx.inputs(&providers),
-            Vec::new()
+            &limited_fx.inputs(&providers)
         ))
         .contains("exceeds the declared ceiling")
     );
@@ -6418,8 +6389,7 @@ fn sb_39_plan_reruns_the_structural_checks_and_refuses_a_stale_admission() {
             &spec,
             &far,
             &admission,
-            &fx.inputs(&providers),
-            Vec::new()
+            &fx.inputs(&providers)
         ))
         .contains("X7: island")
     );
@@ -6451,7 +6421,6 @@ fn sb_39_plan_reruns_the_structural_checks_and_refuses_a_stale_admission() {
         &rec,
         &admission,
         &fx_rec.inputs(&providers),
-        Vec::new(),
     ));
     assert!(
         reason.contains("SB-17: output rec names source port radio:nowhere"),
@@ -6464,7 +6433,6 @@ fn sb_39_plan_reruns_the_structural_checks_and_refuses_a_stale_admission() {
         &clean,
         &admission,
         &fx.inputs(&moved),
-        Vec::new(),
     ));
     assert!(
         reason.contains("SB-39") && reason.contains("is not one its bound instance declares"),
@@ -6800,7 +6768,6 @@ fn ma_41_ezsdr_time_is_a_closed_set() {
             &profile,
             &admission,
             &fx.inputs(&providers),
-            Vec::new(),
         )
     };
     plan_with(serde_json::json!({ "class": "simulation", "start_lead_ns": 5 })).expect("plans");
@@ -6850,7 +6817,7 @@ fn sb_02_needs_constraints_are_checked_against_key_decl() {
         });
         let errors = [
             validate(&spec, &profile, &inputs).unwrap_err(),
-            plan(&spec, &profile, &admission, &inputs, Vec::new()).unwrap_err(),
+            plan(&spec, &profile, &admission, &inputs).unwrap_err(),
         ];
         for error in errors {
             assert!(if shape { matches!(error, SpecError::KeyShape { .. }) }
@@ -6863,5 +6830,5 @@ fn sb_02_needs_constraints_are_checked_against_key_decl() {
         requires: [(key("test.count"), Constraint::Eq { value: Value::Int(2) })].into_iter().collect(),
     });
     let admission = validate(&valid, &profile, &inputs).unwrap();
-    plan(&valid, &profile, &admission, &inputs, Vec::new()).unwrap();
+    plan(&valid, &profile, &admission, &inputs).unwrap();
 }

@@ -583,8 +583,8 @@ pub fn compile(
                         metadata: params.clone(),
                     });
                 }
-                CompileRule::PeripheralCommand {} => {
-                    out.actions.push(Action::PeripheralCommand {
+                CompileRule::Command {} => {
+                    out.actions.push(Action::Command {
                         target: target.clone(),
                         verb: verb.clone(),
                         params: params.clone(),

@@ -629,7 +629,7 @@ fn action_kind(action: &Action) -> &'static str {
         Action::TxBurst { .. } => "tx_burst",
         Action::SetTimer { .. } => "set_timer",
         Action::UpdateParameter { .. } => "update_parameter",
-        Action::PeripheralCommand { .. } => "peripheral_command",
+        Action::Command { .. } => "command",
         Action::Emit { .. } => "emit",
         Action::Stop { .. } => "stop",
         Action::Abort { .. } => "abort",

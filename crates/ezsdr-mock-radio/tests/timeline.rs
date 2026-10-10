@@ -378,7 +378,7 @@ fn run(profile: &str, sequence: &Sequence) -> Record {
             let mut queue = actions.0.lock().unwrap();
             queue.push_back(match *op {
                 Op::Stop { device } => Action::Stop { target: Some(rid(if device { "mock" } else { "mock/rx" })) },
-                Op::StartRx => Action::PeripheralCommand { target: rid("mock/rx"), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None },
+                Op::StartRx => Action::Command { target: rid("mock/rx"), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None },
                 Op::Cold { direction, change, at_ns } => {
                     let (name, value) = match change {
                         Change::Channels(n) => ("channels", Value::Int(i64::from(n))),

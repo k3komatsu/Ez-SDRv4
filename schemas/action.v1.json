@@ -807,7 +807,7 @@
     },
     {
       "additionalProperties": false,
-      "description": "A Vocabulary-defined peripheral operation (RS-49).",
+      "description": "A Vocabulary-defined verb sent to any target: a radio stream, a peripheral\n(RS-49).",
       "properties": {
         "at": {
           "anyOf": [
@@ -821,7 +821,7 @@
           "description": "When, if it is timed (RS-49)."
         },
         "kind": {
-          "const": "peripheral_command",
+          "const": "command",
           "type": "string"
         },
         "params": {
@@ -834,7 +834,7 @@
         },
         "target": {
           "$ref": "#/$defs/ResourceId",
-          "description": "Whose peripheral (RS-49)."
+          "description": "Whose verb (RS-49)."
         },
         "verb": {
           "$ref": "#/$defs/Ident",

@@ -734,7 +734,7 @@ impl MockRadio {
             Action::TxBurst { .. } => "tx_burst",
             Action::SetTimer { .. } => "set_timer",
             Action::UpdateParameter { .. } => "update_parameter",
-            Action::PeripheralCommand { .. } => "peripheral_command",
+            Action::Command { .. } => "command",
             Action::Emit { .. } => "emit",
             Action::Stop { .. } => "stop",
             Action::Abort { .. } => "abort",
@@ -1039,10 +1039,10 @@ impl MockRadio {
             }
             // RM-12, RM-21: `start_rx` turns the receive stream on at its `at`, or at its
             // receipt if that is later, never before T0; it is never late.
-            Action::PeripheralCommand { target, verb, params, at } if verb.as_str() == ezsdr_radio::START_RX && target == rx && params.is_empty() => {
+            Action::Command { target, verb, params, at } if verb.as_str() == ezsdr_radio::START_RX && target == rx && params.is_empty() => {
                 let requested = match at.map(|at| time::to_v(self.clocks.as_ref().expect("prepared clocks"), self.root.expect("prepared root"), at.time_point)).transpose() {
                     Ok(requested) => requested,
-                    Err(error) => return self.reject_action_at("peripheral_command", &format!("MR-29: start_rx's instant cannot be converted: {error}"), now),
+                    Err(error) => return self.reject_action_at("command", &format!("MR-29: start_rx's instant cannot be converted: {error}"), now),
                 };
                 let seq = self.arrival();
                 let (e, _) = timeline::command_instant(self.rx_line.as_ref(), requested, now, seq, false);

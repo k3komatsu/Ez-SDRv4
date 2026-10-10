@@ -1746,7 +1746,7 @@ fn mr_25_a_stop_cuts_at_its_instant() {
 }
 
 #[test]
-fn mr_29_start_rx_is_the_one_peripheral_command() {
+fn mr_29_start_rx_is_the_one_command() {
     // MR-29, RM-12: after a `Stop` of `mock/rx`, `start_rx` on `mock/tx`, on `mock` or with a
     // param is refused; on `mock/rx` it starts the stream again on a new clock, at its instant
     // on `ideal`, and a second one on a running stream changes nothing (RM-21, RM-25).
@@ -1754,13 +1754,13 @@ fn mr_29_start_rx_is_the_one_peripheral_command() {
     h.arm_start(0).unwrap();
     h.actions.push(Action::Stop { target: Some(rid("mock/rx")) });
     h.step(1_000_000).unwrap();
-    let start = |target: &str, params: BTreeMap<Key, Value>| Action::PeripheralCommand { target: rid(target), verb: Ident::parse("start_rx").unwrap(), params, at: None };
+    let start = |target: &str, params: BTreeMap<Key, Value>| Action::Command { target: rid(target), verb: Ident::parse("start_rx").unwrap(), params, at: None };
     h.actions.push(start("mock/tx", BTreeMap::new()));
     h.actions.push(start("mock", BTreeMap::new()));
     h.actions.push(start("mock/rx", BTreeMap::from([(key("radio.now"), Value::Bool(true))])));
     h.step(2_000_000).unwrap();
     let rejected = rejected_rows(&h);
-    assert_eq!(rejected.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(), ["peripheral_command"; 3]);
+    assert_eq!(rejected.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(), ["command"; 3]);
     assert_eq!(h.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 3);
     h.actions.push(start("mock/rx", BTreeMap::new()));
     h.step(3_000_000).unwrap();
@@ -1925,12 +1925,12 @@ fn mr_29_other_actions_are_command_rejected() {
     let mut harness = Harness::new("ideal", &[], &[], &[], None);
     harness.arm_start(0).unwrap();
     harness.actions.push(Action::SetTimer { target: rid("mock"), at: ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(ROOT, 1)), token: 3 });
-    harness.actions.push(Action::PeripheralCommand { target: rid("mock"), verb: Ident::parse("start_repeat").unwrap(), params: BTreeMap::new(), at: None });
+    harness.actions.push(Action::Command { target: rid("mock"), verb: Ident::parse("start_repeat").unwrap(), params: BTreeMap::new(), at: None });
     harness.step(1).unwrap();
     let rejected = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.rejected").unwrap()];
     assert_eq!(rejected.as_array().unwrap().len(), 2);
     assert_eq!(rejected[0]["action"], "set_timer");
-    assert_eq!(rejected[1]["action"], "peripheral_command");
+    assert_eq!(rejected[1]["action"], "command");
     let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     let rejected_events: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
     assert_eq!(rejected_events.len(), 2);

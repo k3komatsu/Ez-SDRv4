@@ -85,7 +85,7 @@ Examples:
 - IBFD control logic,
 - smart-antenna controller.
 
-A Reactor's actions are the closed Kernel Action set — `TxBurst`, `SetTimer`, `UpdateParameter`, `PeripheralCommand`, `Emit`, `Stop`, `Abort` — and adding one is a Kernel major ([design/04-run-and-session.md](../04-run-and-session.md), rules RS-48…RS-52).
+A Reactor's actions are the closed Kernel Action set — `TxBurst`, `SetTimer`, `UpdateParameter`, `Command`, `Emit`, `Stop`, `Abort` — and adding one is a Kernel major ([design/04-run-and-session.md](../04-run-and-session.md), rules RS-48…RS-52).
 
 The Core defines these concepts.
 
@@ -97,7 +97,7 @@ Normative: [design/14-native-executor.md](../14-native-executor.md) (the first, 
 
 The Kernel owns the **descriptor** of a component and the **vocabulary** it speaks, not the way it is called:
 
-A ComponentDescriptor declares its kind (Processor or Reactor), its ports (§21), its params each with an update class (§27), its timing (budget, preferred batch, statefulness, parallelism), its requirements — never a placement — and the identity and hash of its implementation ([design/05-module-api.md](../05-module-api.md) §4, rules MA-36, MA-37).
+A ComponentDescriptor declares its kind (Processor or Reactor), its ports (§21), its params each with an update class (§27), its timing (a processing budget), its requirements — never a placement — and the identity and hash of its implementation ([design/05-module-api.md](../05-module-api.md) §4, rules MA-36, MA-37).
 
 The execution ABI — how a native, WASM or GPU component is invoked, how buffers are handed to it — belongs to each Executor (§20). Executors interoperate through DataLinks carrying `SampleBlock`s and through Event/Action queues, never through a shared call signature. This keeps the Kernel out of the block-API business that GNU Radio carries in its core and lets a GPU batch executor and a WASM block executor coexist without a lowest common denominator.
 
@@ -107,7 +107,7 @@ A Reactor that receives a decoded packet and schedules a TxBurst forms a cycle t
 
 ## Two kinds of deadline
 
-There are two kinds of deadline, and they are distinct types. A RelativeBudget is a processing time per block, measured from block arrival; it is always in `host.monotonic`, because a static descriptor cannot name a domain created at `prepare`, and a missed one is the Kernel event `PROCESSOR_DEADLINE_MISS`, handled by the Policy table. An AbsoluteDeadline is a TxBurst or PeripheralCommand target in a device ClockDomain — for a TxBurst, the transmit stream's SampleClock — and a missed one follows the burst's late policy (§22). Admission compares budgets with block periods exactly across domains; envelope checks compare absolute deadlines.
+There are two kinds of deadline, and they are distinct types. A RelativeBudget is a processing time per block, measured from block arrival; it is always in `host.monotonic`, because a static descriptor cannot name a domain created at `prepare`, and a missed one is the Kernel event `PROCESSOR_DEADLINE_MISS`, handled by the Policy table. An AbsoluteDeadline is a TxBurst or Command target in a device ClockDomain — for a TxBurst, the transmit stream's SampleClock — and a missed one follows the burst's late policy (§22). Admission compares budgets with block periods exactly across domains; envelope checks compare absolute deadlines.
 
 Normative: [design/01-time-model.md](../01-time-model.md), rules TM-15, TM-21; [design/04-run-and-session.md](../04-run-and-session.md), rules RS-27, RS-49, RS-51; [design/02-stream-contract.md](../02-stream-contract.md), SC-23.
 

@@ -151,7 +151,7 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
             },
             VerbDecl {
                 verb: id("sweep"),
-                compiles_to: CompileRule::PeripheralCommand {},
+                compiles_to: CompileRule::Command {},
             },
         ],
         checks: vec![ns("test.limits")],
@@ -987,7 +987,6 @@ pub fn recorder_component(contract: DataContractId) -> ComponentDescriptor {
         timing: ComponentTiming::default(),
         requires: ComponentRequires {
             executor_kind: ns("any"),
-            memory_bytes: None,
         },
         implementation: ComponentImpl {
             kind: ns("test.impl"),

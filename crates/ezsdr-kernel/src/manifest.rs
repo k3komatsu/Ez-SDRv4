@@ -113,7 +113,7 @@ pub enum RunKind {
 }
 
 /// The `spec` section: the Spec as parsed and re-serialised with every default
-/// written out, and its hash (RS-38, RS-45).
+/// written out, its hash, and the source hash its caller supplied (RS-38, RS-45).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SpecSection {
@@ -121,13 +121,18 @@ pub struct SpecSection {
     pub hash: ContentHash,
     /// The body itself (RS-38, RS-45).
     pub body: serde_json::Value,
+    /// The hash of the code that generated the Spec, as `Assembly.spec_source`
+    /// supplied it: opaque, never read by the Kernel, and outside `hash` (SB-14,
+    /// RS-38).
+    pub source: Option<ContentHash>,
 }
 
 impl SpecSection {
-    /// The section of a parsed Spec (RS-45).
-    pub fn of(spec: &ExperimentSpec) -> Result<SpecSection, HashError> {
+    /// The section of a parsed Spec, with the caller's source hash beside the
+    /// Spec's own (RS-45, SB-14).
+    pub fn of(spec: &ExperimentSpec, source: Option<ContentHash>) -> Result<SpecSection, HashError> {
         let (hash, body) = canonical(spec)?;
-        Ok(SpecSection { hash, body })
+        Ok(SpecSection { hash, body, source })
     }
 }
 

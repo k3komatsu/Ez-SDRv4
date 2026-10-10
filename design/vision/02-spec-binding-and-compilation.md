@@ -202,7 +202,7 @@ Three principles follow:
 
 ## The compiler is a validator, not an optimiser
 
-Placement, MemoryDomains and DataLink choices are stated explicitly in the BindingProfile's `placements` section. The ExperimentSpec states only requirements (`requires: { executor_kind, memory_bytes }`, with the budget in `timing`); it never names an Executor or a MemoryDomain, because a Spec that did could not be promoted to a host without that Executor (invariants 6, 8, 29). The Core checks that the stated arrangement is feasible and rejects what is not. It never searches for a better arrangement. GNU Radio 4 places components in explicit port domains with explicit conversion blocks, and NVIDIA Aerial's GPU pipeline is laid out by hand; neither runs an optimiser, and Ez-SDR will not either until a concrete experiment proves one necessary (§63).
+Placement, MemoryDomains and DataLink choices are stated explicitly in the BindingProfile's `placements` section. The ExperimentSpec states only requirements (`requires: { executor_kind }`, with the budget in `timing`); it never names an Executor or a MemoryDomain, because a Spec that did could not be promoted to a host without that Executor (invariants 6, 8, 29). The Core checks that the stated arrangement is feasible and rejects what is not. It never searches for a better arrangement. GNU Radio 4 places components in explicit port domains with explicit conversion blocks, and NVIDIA Aerial's GPU pipeline is laid out by hand; neither runs an optimiser, and Ez-SDR will not either until a concrete experiment proves one necessary (§63).
 
 ## Schema-first and versioned
 

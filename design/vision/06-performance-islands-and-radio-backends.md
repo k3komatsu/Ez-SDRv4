@@ -35,10 +35,10 @@ compute placement
 +
 memory placement
 +
-transfer reachability and cost
+transfer reachability
 ```
 
-A GPU Processor that requires repeated host/device copies may be worse than a CPU implementation. The Core reports that cost in `plan()`; it does not move the Processor for you (§20).
+A GPU Processor that requires repeated host/device copies may be worse than a CPU implementation. The Core neither measures nor uses that cost, and it does not move the Processor for you: the placement is the one the BindingProfile states (§20).
 
 The Core must not hard-code one ring-buffer implementation. Module contracts exchange `BufferRef` handles tagged with a `MemoryDomain` (§23), never raw host slices, so that a ring, a pinned-memory pool, a GPU buffer or WASM linear memory can back the same contract.
 
@@ -59,7 +59,6 @@ RT Island
   detector → sync → decoder
   CPU affinity
   RT policy
-  batch size
   deadline budget
 
 GPU Island
@@ -72,11 +71,10 @@ A Module should be able to declare execution characteristics such as:
 
 ```text
 expected / maximum processing time
-preferred batch size
 deadline
-parallelism
-statefulness
 ```
+
+Batch size, parallelism and statefulness join that list when an Executor reads them: a declared field that nothing reads would take its meaning from documents written before it had one (invariant 39).
 
 The Runtime performs admission checks before RUN (§10).
 
@@ -84,7 +82,7 @@ The exact scheduling algorithm is not fixed by this Vision.
 
 ## Driving model per ExecutionClass
 
-An Island is declared in the BindingProfile — an Executor binding, the components placed on it, optional affinity, real-time policy and batch size — and admission checks it without creating, merging or moving one. Every stepped instance implements `step(until)`, which consumes and emits everything at or before `until`, nothing after, and never blocks. The Kernel coordinator owns the loop on one logical thread: the Authority's `next_wakeup` sets the instant, and `step` runs over every stepped instance in a fixed order (Providers, then Executors, then Sinks, each by instance id) until none progresses; the Simulation Engine decides the instants, and the fixed order keeps determinism independent of assembly order. In the Simulation class every stepped Provider, Executor and Sink is stepped, and each deterministic Link operation applies its declared drop-class policy in virtual time (Phase 2); in RealtimeEmulation stepped Providers are wall-paced while Executors and Sinks run on threads; in HardwareInLoop and Hardware, Islands run on real threads with their declared affinity and RT policy. Without this, "deterministic runs reproduce with a seed" (§58) is a wish: threads and lossy Probe links make event order a coin toss.
+An Island is declared in the BindingProfile — an Executor binding, the components placed on it, optional affinity and real-time policy — and admission checks it without creating, merging or moving one. Every stepped instance implements `step(until)`, which consumes and emits everything at or before `until`, nothing after, and never blocks. The Kernel coordinator owns the loop on one logical thread: the Authority's `next_wakeup` sets the instant, and `step` runs over every stepped instance in a fixed order (Providers, then Executors, then Sinks, each by instance id) until none progresses; the Simulation Engine decides the instants, and the fixed order keeps determinism independent of assembly order. In the Simulation class every stepped Provider, Executor and Sink is stepped, and each deterministic Link operation applies its declared drop-class policy in virtual time (Phase 2); in RealtimeEmulation stepped Providers are wall-paced while Executors and Sinks run on threads; in HardwareInLoop and Hardware, Islands run on real threads with their declared affinity and RT policy. Without this, "deterministic runs reproduce with a seed" (§58) is a wish: threads and lossy Probe links make event order a coin toss.
 
 Normative: [design/05-module-api.md](../05-module-api.md), rules MA-20, MA-22, MA-30, MA-38…MA-40; [design/06-kernel-coordinator.md](../06-kernel-coordinator.md), KC-46 (the data thread of the device-paced classes).
 

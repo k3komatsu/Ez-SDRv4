@@ -107,10 +107,10 @@
         },
         {
           "additionalProperties": false,
-          "description": "The `peripheral_command` Action without `at` (RS-49a).",
+          "description": "The `command` Action without `at` (RS-49a).",
           "properties": {
             "kind": {
-              "const": "peripheral_command",
+              "const": "command",
               "type": "string"
             },
             "params": {
@@ -123,7 +123,7 @@
             },
             "target": {
               "$ref": "#/$defs/ResourceId",
-              "description": "Whose peripheral."
+              "description": "Whose verb."
             },
             "verb": {
               "$ref": "#/$defs/Ident",
@@ -368,10 +368,7 @@
         "timing": {
           "$ref": "#/$defs/ComponentTiming",
           "default": {
-            "budget": null,
-            "parallelism": null,
-            "preferred_batch": null,
-            "stateful": false
+            "budget": null
           },
           "description": "Its timing declaration (MA-36)."
         }
@@ -431,15 +428,6 @@
         "executor_kind": {
           "$ref": "#/$defs/Namespace",
           "description": "The Executor kind, or `any`, which SB-1's `Namespace` grammar also spells (MA-36,\nMA-39)."
-        },
-        "memory_bytes": {
-          "description": "Working memory, when it needs a declared amount (MA-36).",
-          "format": "uint64",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
         }
       },
       "required": [
@@ -461,33 +449,8 @@
             }
           ],
           "description": "The processing budget. A descriptor never carries an `AbsoluteDeadline`:\nthey are distinct types (TM-15) and distinct schema definitions (MA-37)."
-        },
-        "parallelism": {
-          "description": "How many instances may run in parallel (MA-36).",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "preferred_batch": {
-          "description": "A hint at the block size the component prefers (MA-36).",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "stateful": {
-          "description": "Whether it carries state across blocks (MA-36).",
-          "type": "boolean"
         }
       },
-      "required": [
-        "stateful"
-      ],
       "type": "object"
     },
     "Constraint": {

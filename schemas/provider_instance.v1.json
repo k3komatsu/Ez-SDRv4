@@ -512,7 +512,7 @@
         }
       ],
       "default": null,
-      "description": "The least lead this instance needs between receiving a timed Action and that\nAction's instant, in `host.monotonic`; absent means zero. The only envelope\nvalue the Kernel reads (MA-10, RS-19, KA-7)."
+      "description": "The least lead this instance needs from the coordinator's dispatch of a timed\nAction to that Action's instant, the time the instance takes to receive it\nincluded, in `host.monotonic`; absent means zero. A Provider that is not\nstepped states the delivery allowance this includes. The only envelope value\nthe Kernel reads (MA-10, RS-19)."
     },
     "module": {
       "$ref": "#/$defs/ModuleRef",

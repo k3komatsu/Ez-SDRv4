@@ -61,6 +61,9 @@ pub struct Assembly {
     pub links: BTreeMap<ModuleRef, Box<dyn Link>>,
     /// Input bytes keyed by content hash (KC-9).
     pub inputs: BTreeMap<ContentHash, Vec<u8>>,
+    /// The hash of the code that generated the Spec, when the caller has one; the
+    /// Manifest records it as `spec.source` and nothing reads it (SB-14, RS-38).
+    pub spec_source: Option<ContentHash>,
 }
 
 /// Refusals from the live Run control API (RS-15, RS-18, KC-28).
@@ -137,7 +140,7 @@ fn start_spec(
 ) -> Result<RunHandle, SpecError> {
     let spec = ExperimentSpec::from_json(spec_doc)?;
     let profile = BindingProfile::from_json(profile_doc)?;
-    let (spec_section, binding_section) = sections(&spec, &profile)?;
+    let (spec_section, binding_section) = sections(&spec, &profile, assembly.spec_source.clone())?;
     let mut run = pipeline::assemble(
         RunKind::Spec,
         spec,
@@ -180,7 +183,7 @@ pub fn connect(
         reason: "KC-30: a Module panicked during validate".to_owned(),
     })??;
     drop((providers, sinks));
-    let (spec_section, binding_section) = sections(&spec, &profile)?;
+    let (spec_section, binding_section) = sections(&spec, &profile, assembly.spec_source.clone())?;
     let mut run = pipeline::assemble(
         RunKind::Session,
         spec,
@@ -199,12 +202,13 @@ pub fn connect(
 fn sections(
     spec: &ExperimentSpec,
     profile: &BindingProfile,
+    source: Option<ContentHash>,
 ) -> Result<(crate::manifest::SpecSection, crate::manifest::BindingSection), SpecError> {
     let structural = |e: crate::hash::HashError| SpecError::Structural {
         reason: format!("KC-1: {e}"),
     };
     Ok((
-        crate::manifest::SpecSection::of(spec).map_err(structural)?,
+        crate::manifest::SpecSection::of(spec, source).map_err(structural)?,
         crate::manifest::BindingSection::of(profile).map_err(structural)?,
     ))
 }

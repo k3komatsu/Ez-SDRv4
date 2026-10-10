@@ -86,27 +86,6 @@
       ],
       "type": "object"
     },
-    "DeclaredCost": {
-      "additionalProperties": false,
-      "description": "A number the Link Module declares, not a measurement. The Core reports it and\nnever uses it to choose a placement; the Core neither measures nor optimises.\n\nRule: SB-40. Vision §20, §31, §63.",
-      "properties": {
-        "cost": {
-          "description": "The Link Module's own number, uninterpreted by the Kernel (SB-40).",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "link": {
-          "$ref": "#/$defs/DataLinkId",
-          "description": "Which link (SC-19)."
-        }
-      },
-      "required": [
-        "link",
-        "cost"
-      ],
-      "type": "object"
-    },
     "ExecutionClass": {
       "description": "What kind of Run this is, derived from the environment and cross-checked against\nthe Authority's `Pacing`; a class that was merely declared could lie.\n\nRule: MA-41, RS-42. Vision §14.",
       "oneOf": [
@@ -321,14 +300,6 @@
       "description": "The DataLink declarations: the graph's links, then the output feeds, numbered\non from them (SC-19, MA-27a, D75).",
       "items": {
         "$ref": "#/$defs/DataLinkDecl"
-      },
-      "type": "array"
-    },
-    "transfer_costs": {
-      "default": [],
-      "description": "Declared, never measured (SB-40).",
-      "items": {
-        "$ref": "#/$defs/DeclaredCost"
       },
       "type": "array"
     }

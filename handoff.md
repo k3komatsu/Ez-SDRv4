@@ -934,9 +934,9 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 
 - **最優先（2026-10-10，compact 前の記録）**：
   - **commit 済み（2026-10-09〜10）**：#64 と `Pps` の条件（`84df09e`），spec 26・27 の受理（`db4f383`〜`e42329f`），#65・#66（`25a0e9d`），spec 24 項目5（`5d000ec`），項目4（`6ebcba9`）．どれも独立 Opus レビュー＋全 mutation リスト（既知の生き残り G09・U15 のみ）を通した．
-  - **項目6（Stream Contract）commit 済み**：独立 Opus レビュー3回目で PASS，全 mutation（既知の G09・U15 のみ生き残り）．続き：KC-32 の書き直し（下），最初のブロックの carry を「長さゼロ・`lost` 不明」の gap に（owner OK 2026-10-10；SC-13 の lost ≤ 飛び を守る），項目7．ワークフロー台本：`~/.claude/projects/-Users-komatsu-work-Ez-SDRv4/0d8e3205-ba93-4fdf-9891-82eb2f3f44c1/workflows/scripts/prefreeze-item-wf_dcbd27d0-5ba.js`（args `{HEAD, ITEM, TASK, CONTINUE}`）．
+  - **項目6（`092263a`），KC-32 書き直し（`8fbf676`），最初のブロックの carry（`ceabaea`：長さゼロで `lost` を残す，SC-30c と同じ規則；owner 2026-10-10）commit 済み**．**項目7 commit 済み**（独立 Opus レビュー PASS，全 mutation は既知の G09・U15 のみ）．未決：`ModuleDescriptor.deployment`（値が `InProcess` だけ）を型ごと消すか（おすすめ，owner に確認中）．次は spec 26 の 1a．台本：`~/.claude/projects/-Users-komatsu-work-Ez-SDRv4/0d8e3205-ba93-4fdf-9891-82eb2f3f44c1/workflows/scripts/prefreeze-item-wf_dcbd27d0-5ba.js`（args `{HEAD, ITEM, TASK, CONTINUE}`）．注意：zsh では `$ids` が単語分割されないので，mutation の ID は直接並べる．
   - **項目6の commit の直後にすること（owner 承認 2026-10-10）**：spec 06 の KC-32 を「原理1文（最初の終了が伝えていない情報を持つ後続の要求だけを `also` に記録する：失敗，Policy の反応，cleanup の abort への格上げ）→ 3つの場合 → 重複除外」の順に書き直す．文面と Changes 行だけ，コードは触らない．背景：項目4のレビュー3回の FAIL はどれもテスト不足で，バグではない（three strikes には数えない）と owner と確認済み．
-  - **次の項目7**：同じ台本で `ITEM: "7"`．決定は監査記録の Owner decisions 表．その後 spec 26（1a→1b）→ spec 27（2a→2b，判断1〜4を含む）→ 項目3（spec 27 判断4の発信元検査を含む）→ 項目8 → 凍結レビュー．
+  - **次**：spec 26（1a→1b）→ spec 27（2a→2b，判断1〜4を含む）→ 項目3（spec 27 判断4の発信元検査を含む）→ 項目8 → 凍結レビュー．
   - **mutation の全リスト**：`for l in maintenance phase3 phase4 phase5 phase6 phase7; do REMOTE_SSH="ssh -o BatchMode=yes" python3 plan/maintenance/tools/remote/remote_mutate.py $l sim02:6,sim03:6; done`（リストは順番に1つずつ；同時に流すとリモートの `ezsdr-mut/` を取り合う）．約 15〜20 分．G16 は「timeout で kill」が正常．
   - **その後の順番**（v4.0 凍結チェックリスト，§「次にすること」の 2.）：（#65・#66 は commit 済み）spec 24（監査項目 5・4・6・7，項目ごとに1 Workflow）→ 項目1＝spec 26（1a→1b）→ 項目2＝spec 27（2a→2b）→ 項目3 → 項目8 → 凍結レビュー．決定はすべて [`plan/maintenance/24-prefreeze-audit.md`](plan/maintenance/24-prefreeze-audit.md) の Owner decisions 表（これが決定記録．別に spec 本文を起こさない）．
   - **進め方**：段階ごとに Workflow（実装 1 → 独立 Opus レビュー → 修正，最大3回）．機械的な一括書き換えは Haiku 5.5 を crate ごとに並列で使ってよい（owner 2026-10-09）．同じ作業ツリーを2つの Workflow で同時に触らない．修正の回は触った mutation 行だけ，段階の最後に全リストを sim02/sim03 で（AGENTS.md §7）．
@@ -952,7 +952,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
    - [ ] 項目3（決定済み）：受け入れ判定を1本に（KC-24 を唯一の順序に，template と CompileRule から `class` を削除，`ParamDecl.update_class` を optional に，キーの位置を1つのイテレータで，schedule も component を宛先に，SB-30 から need を除く，ASCII キー，component のキーは ParamDecl で宣言すれば持ち主は component，Module のイベントの発信元がその root の内側かを collector で1回検査（spec 27 判断4））— 独立 spec（項目2の後）
    - [x] 項目4（決定済み，削除・統合・改名のみ）：`Termination` に理由と `also`，`ezsdr.failure`/`ezsdr.links`/`ezsdr.children` を型付きの欄へ統合，EVENTS_DROPPED の時刻と source，`execution_class` を Option，Kernel のイベント種別を `ezsdr.` へ，タグを `kind` に統一，Lease の記録は `{mode, released}`，RS-6 の手順名；`also` には同じ round で Policy の反応（DEVICE_LOST→stop など）が別の失敗に上書きされた場合も記録する（#65 レビュー） — spec 24
    - [x] 項目6（決定済み）：DropCarry をブロックと一緒に返す，遅れた受信開始の表し方を1つに（LATE は送信専用），ALIGNMENT を stream gap の修飾子に（SC-31a と `ChannelGap.cause` 削除）— spec 24
-   - [ ] 項目7（決定済み）：未使用の7欄を削除，`EventIn`/`EventOut` 削除と `Endpoint` を non_exhaustive に，`PeripheralCommand` → `Command`（#55），`spec.source` を今追加（KF-4），`min_command_lead` の説明を MA-10 に — spec 24
+   - [x] 項目7（決定済み）：未使用の7欄を削除，`EventIn`/`EventOut` 削除と `Endpoint` を non_exhaustive に，`PeripheralCommand` → `Command`（#55），`spec.source` を今追加（KF-4），`min_command_lead` の説明を MA-10 に — spec 24
    - [ ] 項目8：spec 01〜06 から古い規範の写しを削除（spec 22 DA-3 の続き）
    - [ ] MA-16a の公開 API 許可リスト（`kernel_surface_allow.txt`）の見直し
    - [ ] Kernel API を 4.0.0 に，`SCHEMA_CHANGELOG.md` の見出しを凍結後の形式に切り替え

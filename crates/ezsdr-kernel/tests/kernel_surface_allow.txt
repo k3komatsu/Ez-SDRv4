@@ -179,7 +179,6 @@ binding::PreviewedCoercion = NEW: SB-44's coercion preview with the resource it 
 # --- lifecycle and the plan (audit §13 `lifecycle`) --------------------------
 plan::ExecutionPlan = ExecutionPlan
 plan::Fragment = fragments
-plan::DeclaredCost = NEW: SB-40's declared transfer cost, which the Core reports and never optimises against.
 plan::PrepareError = NEW: SB-42's transaction failure and SB-30's prepare-stage refusal are two different outcomes, and collect_prepare must be able to report either.
 plan::PrepareReport = PrepareReport
 plan::arm_order = dependency DAG
@@ -279,7 +278,7 @@ module_api::Executor = Executor
 module_api::Sink = Sink
 module_api::Link = Link role
 module_api::Authority = TimeAuthority
-module_api::Deployment = NEW: MA-1's third axis; `Plugin` is reserved so a Plugin protocol later needs no Kernel change.
+module_api::Deployment = NEW: MA-1's third axis; InProcess is its only value until a Plugin protocol is designed.
 module_api::ModuleDescriptor = ModuleId+version
 module_api::ModuleRef = ModuleId+version
 module_api::ProfileRef = NEW: SB-22's declared profile name and version, which Vision §59 bumps on measurement.
