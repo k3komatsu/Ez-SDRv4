@@ -268,8 +268,10 @@ pub(super) fn ceil_rescale(
     to: ClockDomainId,
 ) -> Result<i64, TimeError> {
     Ok(match clocks.rescale(d, to)? {
-        Rescaled::Exact { duration } => duration.ticks,
-        Rescaled::Inexact { floor, .. } => floor.ticks.checked_add(1).ok_or(TimeError::Overflow)?,
+        Rescaled::Exact { duration } => duration.ticks_in(to)?,
+        Rescaled::Inexact { floor, .. } => {
+            floor.ticks_in(to)?.checked_add(1).ok_or(TimeError::Overflow)?
+        }
     })
 }
 
@@ -279,13 +281,13 @@ pub(super) fn ceil_convert(
     t: TimePoint,
     to: ClockDomainId,
 ) -> Result<TimePoint, TimeError> {
-    if t.domain == to {
+    if t.domain() == to {
         return Ok(t);
     }
     Ok(match clocks.convert(t, to)? {
         Converted::Exact { point } => point,
         Converted::Inexact { floor, .. } => {
-            TimePoint::new(to, floor.ticks.checked_add(1).ok_or(TimeError::Overflow)?)
+            TimePoint::new(to, floor.ticks_in(to)?.checked_add(1).ok_or(TimeError::Overflow)?)
         }
     })
 }
@@ -311,15 +313,21 @@ pub(super) fn manifest_failure(
 
 impl Shared {
     pub(super) fn now(&self) -> TimePoint {
+        TimePoint::new(self.primary, self.now_ticks())
+    }
+
+    /// [`now`](Self::now) as a tick count of the primary root, the only domain it reads in.
+    pub(super) fn now_ticks(&self) -> i64 {
         match contain_all(|| self.time.now(self.primary)) {
-            Ok(Ok(now)) if now.domain == self.primary => {
-                self.last_now
-                    .store(now.ticks, std::sync::atomic::Ordering::Release);
-                now
-            }
-            Ok(Ok(_)) => self.time_failure(
-                "KC-30: the Authority time handle returned a time outside its primary root",
-            ),
+            Ok(Ok(now)) => match now.ticks_in(self.primary) {
+                Ok(ticks) => {
+                    self.last_now.store(ticks, std::sync::atomic::Ordering::Release);
+                    ticks
+                }
+                Err(_) => self.time_failure(
+                    "KC-30: the Authority time handle returned a time outside its primary root",
+                ),
+            },
             Ok(Err(error)) => self.time_failure(&format!(
                 "KC-30: the Authority time handle failed during now(): {error}"
             )),
@@ -327,7 +335,7 @@ impl Shared {
         }
     }
 
-    fn time_failure(&self, reason: &str) -> TimePoint {
+    fn time_failure(&self, reason: &str) -> i64 {
         let state = lock(&self.machine).state().clone();
         match state {
             RunState::Stopping { .. } | RunState::CleanedUp { .. } => {
@@ -349,10 +357,7 @@ impl Shared {
                 );
             }
         }
-        TimePoint::new(
-            self.primary,
-            self.last_now.load(std::sync::atomic::Ordering::Acquire),
-        )
+        self.last_now.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(super) fn schedule(
@@ -472,14 +477,14 @@ impl TimeAuthority for FailedTime {
         }
     }
     fn wait_until(&self, time: TimePoint) -> Result<(), TimeError> {
-        Err(TimeError::NotGoverned { id: time.domain })
+        Err(TimeError::NotGoverned { id: time.domain() })
     }
     fn schedule(
         &self,
         time: TimePoint,
         _f: Box<dyn FnOnce(TimePoint) + Send>,
     ) -> Result<ScheduleHandle, TimeError> {
-        Err(TimeError::NotGoverned { id: time.domain })
+        Err(TimeError::NotGoverned { id: time.domain() })
     }
     fn cancel(&self, _handle: ScheduleHandle) -> bool {
         false

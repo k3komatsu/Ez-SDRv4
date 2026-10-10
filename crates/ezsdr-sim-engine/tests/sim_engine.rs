@@ -222,7 +222,7 @@ fn se_10_host_monotonic_advances_in_lockstep() {
         .unwrap();
     engine.next_wakeup();
     assert_eq!(
-        time.now(ClockDomainId::HOST_MONOTONIC).unwrap().ticks,
+        time.now(ClockDomainId::HOST_MONOTONIC).unwrap().ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap(),
         1_000_000
     );
 }
@@ -237,7 +237,7 @@ fn se_11_next_wakeup_order_ties_and_cap() {
     let late_log = log.clone();
     time.schedule(
         TimePoint::new(root, 30),
-        Box::new(move |at| late_log.lock().unwrap_or_else(|e| e.into_inner()).push((at.ticks, "late"))),
+        Box::new(move |at| late_log.lock().unwrap_or_else(|e| e.into_inner()).push((at.ticks_in(at.domain()).unwrap(), "late"))),
     )
     .unwrap();
     let first_log = log.clone();
@@ -246,12 +246,12 @@ fn se_11_next_wakeup_order_ties_and_cap() {
     time.schedule(
         TimePoint::new(root, 10),
         Box::new(move |at| {
-            first_log.lock().unwrap_or_else(|e| e.into_inner()).push((at.ticks, "first"));
+            first_log.lock().unwrap_or_else(|e| e.into_inner()).push((at.ticks_in(at.domain()).unwrap(), "first"));
             nested_time
                 .schedule(
                     at,
                     Box::new(move |nested_at| {
-                        nested_log.lock().unwrap_or_else(|e| e.into_inner()).push((nested_at.ticks, "nested"));
+                        nested_log.lock().unwrap_or_else(|e| e.into_inner()).push((nested_at.ticks_in(nested_at.domain()).unwrap(), "nested"));
                     }),
                 )
                 .unwrap();
@@ -261,7 +261,7 @@ fn se_11_next_wakeup_order_ties_and_cap() {
     let second_log = log.clone();
     time.schedule(
         TimePoint::new(root, 10),
-        Box::new(move |at| second_log.lock().unwrap_or_else(|e| e.into_inner()).push((at.ticks, "second"))),
+        Box::new(move |at| second_log.lock().unwrap_or_else(|e| e.into_inner()).push((at.ticks_in(at.domain()).unwrap(), "second"))),
     )
     .unwrap();
 
@@ -323,7 +323,7 @@ fn se_13_two_engines_fed_the_same_schedule_fire_identically() {
             time.schedule(
                 TimePoint::new(root, tick),
                 Box::new(move |at| {
-                    log.lock().unwrap_or_else(|e| e.into_inner()).push((at.ticks, sequence));
+                    log.lock().unwrap_or_else(|e| e.into_inner()).push((at.ticks_in(at.domain()).unwrap(), sequence));
                 }),
             )
             .unwrap();

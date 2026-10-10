@@ -10,7 +10,7 @@ mod matching;
 mod prepare;
 mod validation;
 
-pub(crate) use validation::{binding_description, check_rid, not_registered, require_role};
+pub(crate) use validation::{binding_description, not_registered, require_role};
 
 use std::collections::{BTreeMap, BTreeSet};
 

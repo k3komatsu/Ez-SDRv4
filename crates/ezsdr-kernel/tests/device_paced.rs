@@ -19,7 +19,7 @@ use ezsdr_kernel::policy::{EventKindDecl, EventKindRegistry, Reaction};
 use ezsdr_kernel::run::{CleanupStep, Lease, RunState, Stage, StopCause, SystemHostClock, Termination};
 use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
-use ezsdr_kernel::time::{ClockRegistry, TimePoint};
+use ezsdr_kernel::time::{ClockRegistry, Duration, TimePoint};
 use support::{
     Probe, RecordingSink, SimAuthority, SteppedProvider, TestLinkModule, TestProvider,
     ThreadedProvider, WallAuthority, mref, ns, run_checks, run_kinds, run_registry,
@@ -150,7 +150,7 @@ fn running(run: &RunHandle) {
 
 fn after(run: &RunHandle, wall: Wall) -> TimePoint {
     let now = run.now();
-    TimePoint::new(now.domain, now.ticks + wall.as_nanos() as i64)
+    now.checked_add(Duration::new(now.domain(), wall.as_nanos() as i64)).unwrap()
 }
 
 fn count(probe: &Probe, prefix: &str) -> usize {
@@ -415,7 +415,8 @@ fn kg_02_wait_for_returns_when_the_data_thread_delivers() {
     let found = run.wait_for(&[kind("test.MARK")], 0, horizon).unwrap();
     assert!(found.is_some());
     assert!(begun.elapsed() < Wall::from_secs(1), "{:?}", begun.elapsed());
-    assert!(run.now().ticks < horizon.ticks - 3_000_000_000);
+    let root = horizon.domain();
+    assert!(run.now().ticks_in(root).unwrap() < horizon.ticks_in(root).unwrap() - 3_000_000_000);
     let _ = manifest_of(run);
 }
 
@@ -930,7 +931,7 @@ fn kg_04_every_action_of_one_call_is_finished() {
     let mut run = start_spec_run(&spec, &profile, sink(assembly, RecordingSink::new("rec", &probe), &probe)).unwrap();
     running(&run);
     let t0 = run.start_instant().unwrap();
-    run.advance_to(TimePoint::new(t0.domain, t0.ticks + 1)).unwrap();
+    run.advance_to(t0.checked_add(Duration::new(t0.domain(), 1)).unwrap()).unwrap();
     assert_eq!(count(&probe, "radio:finished:UpdateParameter"), 2, "{:?}", probe.lines());
     let _ = manifest_of(run);
 }
@@ -1268,7 +1269,8 @@ fn armed_at(declare: &[(&str, u64)], now: i64, lead: u64) -> RunHandle {
 fn t0_after(declare: &[(&str, u64)], lead: u64) -> i64 {
     let run = armed_at(declare, 7, lead);
     running(&run);
-    let t0 = run.start_instant().unwrap().ticks;
+    let t0 = run.start_instant().unwrap();
+    let t0 = t0.ticks_in(run.now().domain()).unwrap();
     let _ = manifest_of(run);
     t0
 }
@@ -1312,7 +1314,7 @@ fn tm_16c_a_paced_callback_sees_now_at_or_after_its_instant() {
     use ezsdr_kernel::module_api::Authority;
     let time = authority.time();
     let read = Arc::new(Mutex::new(None));
-    let at = TimePoint::new(root, time.now(root).unwrap().ticks + 5_000_000);
+    let at = TimePoint::new(root, time.now(root).unwrap().ticks_in(root).unwrap() + 5_000_000);
     let (time_in, read_in) = (time.clone(), read.clone());
     time.schedule(
         at,
@@ -1324,7 +1326,7 @@ fn tm_16c_a_paced_callback_sees_now_at_or_after_its_instant() {
     .unwrap();
     assert_eq!(authority.next_wakeup(), Some(at));
     let seen = read.lock().unwrap().expect("the callback ran");
-    assert!(seen.ticks >= at.ticks + 2_000_000, "{seen:?} {at:?}");
+    assert!(seen.ticks_in(root).unwrap() >= at.ticks_in(root).unwrap() + 2_000_000, "{seen:?} {at:?}");
 }
 
 #[test]
@@ -1337,12 +1339,12 @@ fn tm_16c_a_paced_authority_accepts_an_instant_already_passed() {
     time.schedule(fired, Box::new(|_| {})).unwrap();
     assert_eq!(authority.next_wakeup(), Some(fired));
     std::thread::sleep(Wall::from_millis(6));
-    let passed = TimePoint::new(root, time.now(root).unwrap().ticks - 1_000_000);
+    let passed = TimePoint::new(root, time.now(root).unwrap().ticks_in(root).unwrap() - 1_000_000);
     time.schedule(passed, Box::new(|_| {})).expect("an instant already passed is accepted");
     let begun = Instant::now();
     assert_eq!(authority.next_wakeup(), Some(passed));
     assert!(begun.elapsed() < Wall::from_millis(5));
-    let before = TimePoint::new(root, fired.ticks - 1);
+    let before = TimePoint::new(root, fired.ticks_in(root).unwrap() - 1);
     assert!(matches!(
         time.schedule(before, Box::new(|_| {})),
         Err(ezsdr_kernel::time::TimeError::InPast { .. })
@@ -1395,10 +1397,10 @@ fn kg_11_a_device_paced_run_records_its_root_s_relations() {
     let manifest = manifest_of(start_spec_run(&spec_one(), &profile_one(), assembly).unwrap());
     assert_eq!(manifest.clocks.relations, relations);
     assert_eq!(
-        relations.iter().map(|r| r.target).collect::<Vec<_>>(),
+        relations.iter().map(|r| r.target()).collect::<Vec<_>>(),
         [ClockDomainId::HOST_MONOTONIC, ClockDomainId::UTC]
     );
-    assert!(relations.iter().all(|r| r.source == rig.root));
+    assert!(relations.iter().all(|r| r.source() == rig.root));
 }
 
 /// A Simulation Authority that would publish relations (KA-16's negative case).
@@ -1459,8 +1461,20 @@ fn kg_11_a_device_paced_run_without_a_utc_relation_says_so() {
     assert!(manifest.clocks.relations.is_empty());
     assert_eq!(tm_18_failures(&manifest), ["TM-18: the Authority published no relation of its root to utc"]);
 
-    let mut foreign = paced().relations[1].clone();
-    foreign.source = ClockDomainId::HOST_MONOTONIC;
+    let utc = paced().relations[1].clone();
+    let host = ClockDomainId::HOST_MONOTONIC;
+    let foreign = ezsdr_kernel::time::ClockRelation::new(
+        host,
+        utc.target(),
+        TimePoint::new(host, 0),
+        utc.offset(),
+        utc.drift(),
+        utc.drift_uncertainty(),
+        utc.uncertainty(),
+        utc.method().to_owned(),
+        ezsdr_kernel::time::Validity { from: TimePoint::new(host, 0), to: None },
+    )
+    .unwrap();
     let rig = paced_with(|a| a.with_relations(vec![foreign]));
     let assembly = provider(rig.assembly, "radio", ThreadedProvider::new("radio", "radio", &probe));
     let manifest = manifest_of(start_spec_run(&spec_one(), &profile_one(), assembly).unwrap());

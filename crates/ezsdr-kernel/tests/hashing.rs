@@ -4,7 +4,7 @@ use ezsdr_kernel::contract::Scalar;
 use ezsdr_kernel::hash::{ContentHash, HashError, canonical_json};
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::spec::Value;
-use ezsdr_kernel::time::{ClockRelation, Duration, TimePoint, Validity};
+use ezsdr_kernel::time::{ClockRelation, Duration, TimeError, TimePoint, Validity};
 use serde_json::json;
 
 fn canon(v: serde_json::Value) -> String {
@@ -50,28 +50,30 @@ fn ov_15_non_finite_is_rejected_not_null() {
     // `serde_json` maps a non-finite float to `null` while building the `Value`, so
     // by the time the canonicaliser runs the information is gone. Left unguarded, a
     // NaN drift hashes identically to a drift that was never measured — in the one
-    // Manifest field OV-15a exists to protect. The guard therefore sits at
-    // serialisation time, and `of` reports it as `NonFiniteNumber`.
-    let relation = |drift: f64| ClockRelation {
-        source: ClockDomainId::local(2),
-        target: ClockDomainId::UTC,
-        measured_at: TimePoint::new(ClockDomainId::local(2), 0),
-        offset: TimePoint::new(ClockDomainId::UTC, 0),
-        drift,
-        drift_uncertainty: 0.0,
-        uncertainty: Duration::new(ClockDomainId::UTC, 1),
-        method: "test.poll".to_owned(),
-        valid: Validity { from: TimePoint::new(ClockDomainId::local(2), 0), to: None },
+    // Manifest field OV-15a exists to protect. `ClockRelation::new` refuses one, and
+    // the scalar fields are guarded at serialisation time, where `of` reports it as
+    // `NonFiniteNumber`.
+    let relation = |drift: f64| {
+        ClockRelation::new(
+            ClockDomainId::local(2),
+            ClockDomainId::UTC,
+            TimePoint::new(ClockDomainId::local(2), 0),
+            TimePoint::new(ClockDomainId::UTC, 0),
+            drift,
+            0.0,
+            Duration::new(ClockDomainId::UTC, 1),
+            "test.poll".to_owned(),
+            Validity { from: TimePoint::new(ClockDomainId::local(2), 0), to: None },
+        )
     };
-    assert_eq!(ContentHash::of(&relation(f64::NAN)), Err(HashError::NonFiniteNumber));
-    assert_eq!(ContentHash::of(&relation(f64::INFINITY)), Err(HashError::NonFiniteNumber));
-    assert_eq!(ContentHash::of(&relation(f64::NEG_INFINITY)), Err(HashError::NonFiniteNumber));
-    assert!(ContentHash::of(&relation(1e-6)).is_ok());
+    // A non-finite drift is no relation at all (TM-14), so it never reaches a hash.
+    for drift in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(relation(drift), Err(TimeError::Malformed { field: "drift", .. })));
+    }
+    let hash = |drift| ContentHash::of(&relation(drift).expect("finite"));
+    assert!(hash(1e-6).is_ok());
     // Two finite drifts one ulp apart must not collide either.
-    assert_ne!(
-        ContentHash::of(&relation(1e-6)),
-        ContentHash::of(&relation(1.0000000000000002e-6))
-    );
+    assert_ne!(hash(1e-6), hash(1.0000000000000002e-6));
 
     // The same guard covers the other two Kernel-owned float document fields:
     // `Scalar::Float` (SC-2) and `Value::Num` (SB-4), which reaches the sealed

@@ -140,7 +140,7 @@ fn heard(capture: &[(f32, f32)]) -> Option<usize> {
 
 /// A burst record without its clock domains, whose local ids depend on allocation order.
 fn decision(record: &BurstRecord) -> (i64, Option<i64>, Option<i64>, u64, u32) {
-    (record.target.ticks, record.requested_target.map(|t| t.ticks), record.late_by.map(|d| d.ticks), record.samples, record.blocks)
+    (record.target.ticks_in(record.target.domain()).unwrap(), record.requested_target.map(|t| t.ticks_in(t.domain()).unwrap()), record.late_by.map(|d| d.ticks_in(d.domain()).unwrap()), record.samples, record.blocks)
 }
 
 fn clean_stop(manifest: &Manifest) {
@@ -159,7 +159,7 @@ fn v58_09_a_reactor_answers_a_ping_with_a_timed_pong() {
     // 15 046 = 10 046 + 5 000, on time, not moved.
     let answered = bursts(&manifest, "dev_b");
     assert_eq!(answered.len(), 1, "{answered:?}");
-    assert_eq!(answered[0].target.ticks, TX_AT_T0 + 15_046);
+    assert_eq!(answered[0].target.ticks_in(answered[0].target.domain()).unwrap(), TX_AT_T0 + 15_046);
     assert_eq!(answered[0].requested_target, None);
     assert_eq!(answered[0].late_by, None);
     assert_eq!(answered[0].samples, 500);
@@ -191,7 +191,7 @@ fn v58_09_every_ping_gets_one_pong() {
     let (manifest, capture) = ping_pong(&rig::TempDir::new("v58-09-two"), Ping { pings: &[10_000, 12_500], ..Ping::default() });
     clean_stop(&manifest);
     let answered = bursts(&manifest, "dev_b");
-    assert_eq!(answered.iter().map(|b| b.target.ticks - TX_AT_T0).collect::<Vec<_>>(), vec![15_046, 17_546]);
+    assert_eq!(answered.iter().map(|b| b.target.ticks_in(b.target.domain()).unwrap() - TX_AT_T0).collect::<Vec<_>>(), vec![15_046, 17_546]);
     assert!(answered.iter().all(|b| b.end == ezsdr_kernel::stream::BurstEnd::Eob && b.samples == 500), "{answered:?}");
     let loud: Vec<usize> = capture.iter().enumerate().filter(|(_, s)| **s != (0.0, 0.0)).map(|(k, _)| k).collect();
     assert_eq!(loud.len(), 1_000);
@@ -222,9 +222,9 @@ fn v58_09_a_pong_short_of_the_lead_is_late_as_on_hardware() {
     let (moved, capture) = late("send_asap_and_flag", 1_000_000, "v58-09-asap");
     let sent = bursts(&moved, "dev_b");
     assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0].target.ticks, TX_AT_T0 + 14_000);
-    assert_eq!(sent[0].requested_target.map(|t| t.ticks), Some(TX_AT_T0 + 11_046));
-    assert_eq!(sent[0].late_by.map(|d| d.ticks), Some(2_954_000));
+    assert_eq!(sent[0].target.ticks_in(sent[0].target.domain()).unwrap(), TX_AT_T0 + 14_000);
+    assert_eq!(sent[0].requested_target.map(|t| t.ticks_in(t.domain()).unwrap()), Some(TX_AT_T0 + 11_046));
+    assert_eq!(sent[0].late_by.map(|d| d.ticks_in(d.domain()).unwrap()), Some(2_954_000));
     assert_eq!(time_errors(&moved)[0]["outcome"], json!("send_asap"));
     assert_eq!(heard(&capture), Some(14_046));
 

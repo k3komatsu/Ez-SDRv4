@@ -356,7 +356,7 @@ impl MockRadio {
     }
 
     fn selector_id(&self) -> &str {
-        self.instance.id.path.as_str()
+        self.instance.id.path()
     }
 
     fn effective_channels(&self, key: &str) -> i64 {
@@ -397,7 +397,7 @@ impl MockRadio {
             return;
         }
         if let Some(rx) = self.rx.as_ref() {
-            debug_assert_eq!(rx.handle.root_ticks_per_tick, rx.ratio);
+            debug_assert_eq!(rx.handle.root_ticks_per_tick(), rx.ratio);
         }
         let len = if self.selector.block_len_jitter {
             let jitter = self.rng.as_mut().map(|rng| rng.below(u64::from(self.profile.block_len() * 2))).unwrap_or(0);
@@ -602,7 +602,7 @@ impl MockRadio {
 
     fn schedule_wakeup(&mut self) -> Result<(), ModuleError> {
         let (Some(time), Some(root)) = (self.time.clone(), self.root) else { return Ok(()); };
-        let now = time.now(root).map_err(|error| self.reject(format!("MR-14: {error}")))?.ticks;
+        let now = time.now(root).and_then(|t| t.ticks_in(root)).map_err(|error| self.reject(format!("MR-14: {error}")))?;
         let mut next: Option<i64> = None;
         let mut wake = |tick: i64| next = Some(next.map_or(tick, |next| next.min(tick)));
         for (tick, _) in self.updates.keys() { wake(*tick); }
@@ -635,13 +635,13 @@ impl MockRadio {
             let cut = held_cut.min(self.tx_cut().unwrap_or(i64::MAX));
             let stop = block_end.min(waveform_end).min(cut);
             if stop > open.next {
-                if let Some(tick) = time::v_after(origin, handle.root_ticks_per_tick, stop - 1) { wake(tick); }
+                if let Some(tick) = time::v_after(origin, handle.root_ticks_per_tick(), stop - 1) { wake(tick); }
             }
         }
         if let Some(clock) = self.tx_now() {
             let (handle, origin) = (&clock.handle, clock.origin);
             if let Some(start) = self.held.keys().next().copied() {
-                if let Some(tick) = time::v_of(origin, handle.root_ticks_per_tick, start) { wake(tick); }
+                if let Some(tick) = time::v_of(origin, handle.root_ticks_per_tick(), start) { wake(tick); }
             }
         }
         let wanted = next.filter(|tick| *tick > now);
@@ -741,10 +741,10 @@ impl MockRadio {
         }
     }
 
-    fn emit_late_burst(&self, late_by: Duration, target: TimePoint, tx_domain: ClockDomainId, now_tx: TimePoint, outcome: ezsdr_radio::payloads::TimeErrorOutcome) -> Result<(), ModuleError> {
-        let late_by_ns = time::to_ns(self.clocks.as_ref().expect("prepared clocks"), late_by).unwrap_or(late_by.ticks);
+    fn emit_late_burst(&self, late_by: Duration, target: TimePoint, now_tx: TimePoint, outcome: ezsdr_radio::payloads::TimeErrorOutcome) -> Result<(), ModuleError> {
+        let late_by_ns = time::to_ns(self.clocks.as_ref().expect("prepared clocks"), late_by).unwrap_or(i64::MAX);
         let payload = serde_json::to_value(ezsdr_radio::payloads::TimeErrorPayload { cause: ezsdr_radio::payloads::TimeErrorCause::Late, outcome, late_by_ns, target }).expect("time error payload");
-        self.emit_event("tx", ezsdr_radio::kinds::TIME_ERROR, Severity::Error, payload, TimePoint::new(tx_domain, now_tx.ticks))
+        self.emit_event("tx", ezsdr_radio::kinds::TIME_ERROR, Severity::Error, payload, now_tx)
     }
 
     fn record_update(&mut self, key: &ezsdr_kernel::spec::Key, value: &Value, at: i64) {
@@ -757,7 +757,7 @@ impl MockRadio {
     }
 
     fn stop_tx(&mut self, now: i64, reason: &str, emit_command_rejected: bool) -> Result<(), ModuleError> {
-        if let Some((ratio, origin)) = self.tx_now().map(|clock| (clock.handle.root_ticks_per_tick, clock.origin)) {
+        if let Some((ratio, origin)) = self.tx_now().map(|clock| (clock.handle.root_ticks_per_tick(), clock.origin)) {
             if let Some(cut) = time::k_at_or_after(origin, ratio, now) {
                 self.transmit_until_cut(now, cut)?;
                 self.cut_segments(cut);
@@ -926,7 +926,7 @@ impl MockRadio {
             }
             let clock = &mut self.tx_clocks[index];
             if let Some(cut) = segment.cut.filter(|_| !clock.ended) {
-                let at = time::v_of(clock.origin, clock.handle.root_ticks_per_tick, cut).ok_or_else(|| ModuleError::rejected("MR-18: transmit cut overflow"))?;
+                let at = time::v_of(clock.origin, clock.handle.root_ticks_per_tick(), cut).ok_or_else(|| ModuleError::rejected("MR-18: transmit cut overflow"))?;
                 clocks.end(clock.domain, TimePoint::new(root, at)).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
                 clock.ended = true;
             }
@@ -942,7 +942,7 @@ impl MockRadio {
         self.tx_tracker = self.tx_now().map(|clock| BurstTracker::new(clock.domain));
         self.tx_device = DeviceModel::new();
         let later = std::mem::take(&mut self.tx_later);
-        let now = self.time.as_ref().and_then(|time| time.now(self.root?).ok()).map_or(0, |now| now.ticks);
+        let now = self.root.zip(self.time.as_ref()).and_then(|(root, time)| time.now(root).and_then(|t| t.ticks_in(root)).ok()).unwrap_or(0);
         for (index, held) in later {
             if Some(index) == to {
                 self.held.insert(held.start, held);
@@ -958,7 +958,7 @@ impl MockRadio {
 
     /// Cancels the bursts booked on a transmit clock not yet current (RM-16, MR-25).
     fn cancel_later(&mut self, reason: &str, emit: bool) -> Result<(), ModuleError> {
-        let now = self.time.as_ref().and_then(|time| time.now(self.root?).ok()).map_or(0, |now| now.ticks);
+        let now = self.root.zip(self.time.as_ref()).and_then(|(root, time)| time.now(root).and_then(|t| t.ticks_in(root)).ok()).unwrap_or(0);
         for (index, held) in std::mem::take(&mut self.tx_later) {
             self.forget_later(index, held.start);
             if emit { self.reject_action_at("tx_burst", reason, now)?; } else { self.record_rejected_action("tx_burst", reason, now); }
@@ -1073,7 +1073,7 @@ impl MockRadio {
         let root = self.root.expect("prepared root");
         let tx_id = self.instance.id.child("tx").expect("tx id");
         // The burst's clock: the current one, or one a booked change starts (KC-21a, RM-25).
-        let clock = self.tx_clocks.iter().position(|clock| clock.domain == at.time_point.domain)
+        let clock = self.tx_clocks.iter().position(|clock| clock.domain == at.time_point.domain())
             .filter(|index| self.tx_cur.is_none_or(|current| *index >= current))
             .filter(|index| Some(*index) == self.tx_cur || self.tx_line.as_ref().and_then(|line| line.plan.get(*index)).is_some_and(|segment| segment.cut.is_none_or(|cut| cut > 0)));
         let Some(index) = clock else {
@@ -1117,7 +1117,7 @@ impl MockRadio {
         };
         let (ratio, origin, tx_domain) = {
             let clock = &self.tx_clocks[index];
-            (clock.handle.root_ticks_per_tick, clock.origin, clock.domain)
+            (clock.handle.root_ticks_per_tick(), clock.origin, clock.domain)
         };
         let clocks = self.clocks.as_ref().expect("prepared clocks");
         let lead = time::ns_to_v(clocks, root, self.profile.timing().min_timed_command_lead_ns).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
@@ -1126,7 +1126,7 @@ impl MockRadio {
         let now_tx = clocks.convert(TimePoint::new(root, now), tx_domain).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?.floor();
         let decided_tx = match clocks.convert(TimePoint::new(root, decided), tx_domain).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))? {
             ezsdr_kernel::time::Converted::Exact { point } => point,
-            ezsdr_kernel::time::Converted::Inexact { floor, .. } => TimePoint::new(floor.domain, floor.ticks.saturating_add(1)),
+            ezsdr_kernel::time::Converted::Inexact { floor, .. } => floor.checked_add(Duration::new(tx_domain, 1)).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?,
         };
         let policy = late_policy.decide(
             clocks,
@@ -1134,7 +1134,7 @@ impl MockRadio {
             decided_tx,
             Duration::new(ClockDomainId::HOST_MONOTONIC, self.profile.timing().min_timed_command_lead_ns),
         ).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
-        let mut start = at.time_point.ticks;
+        let mut start = at.time_point.ticks_in(tx_domain).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
         let mut requested = requested_at.map(|deadline| deadline.time_point);
         let mut send_asap_late_by = None;
         match policy {
@@ -1146,12 +1146,12 @@ impl MockRadio {
                 send_asap_late_by = Some(late_by);
             }
             LateOutcome::Drop { late_by } => {
-                self.emit_late_burst(late_by, at.time_point, tx_domain, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::Drop)?;
+                self.emit_late_burst(late_by, at.time_point, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::Drop)?;
                 self.record_rejected_action("tx_burst", "MR-17: the late policy dropped the burst", now);
                 return Ok(());
             }
             LateOutcome::PlanViolation { late_by } => {
-                self.emit_late_burst(late_by, at.time_point, tx_domain, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::PlanViolation)?;
+                self.emit_late_burst(late_by, at.time_point, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::PlanViolation)?;
                 self.record_rejected_action("tx_burst", "MR-17: the planned burst arrived late", now);
                 return Ok(());
             }
@@ -1168,13 +1168,13 @@ impl MockRadio {
         };
         if let Some(reason) = refusal {
             if let Some(late_by) = send_asap_late_by {
-                self.emit_late_burst(late_by, at.time_point, tx_domain, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::Refused)?;
+                self.emit_late_burst(late_by, at.time_point, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::Refused)?;
             }
             self.reject_action_at("tx_burst", reason, now)?;
             return Ok(());
         }
         if let Some(late_by) = send_asap_late_by {
-            self.emit_late_burst(late_by, at.time_point, tx_domain, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::SendAsap)?;
+            self.emit_late_burst(late_by, at.time_point, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::SendAsap)?;
         }
         let waveform_len = u32::try_from(length).map_err(|_| ModuleError::rejected("MR-16: waveform length exceeds u32"))?;
         if let (Some(mode), Some((samples, clipped))) = (&self.channel, decoded) {
@@ -1215,7 +1215,7 @@ impl MockRadio {
     fn emit_tx_until(&mut self, until: i64, extra_cut: Option<i64>) -> Result<bool, ModuleError> {
         let mut progressed = false;
         while let Some(open) = self.open_tx.as_ref() {
-            let Some((ratio, origin, domain)) = self.tx_now().map(|clock| (clock.handle.root_ticks_per_tick, clock.origin, clock.domain)) else { break; };
+            let Some((ratio, origin, domain)) = self.tx_now().map(|clock| (clock.handle.root_ticks_per_tick(), clock.origin, clock.domain)) else { break; };
             let mut stop = open.next.saturating_add(i64::from(self.profile.block_len()));
             let repeat_end = if open.repeat {
                 open.start.saturating_add(((open.next - open.start) / open.len + 1).saturating_mul(open.len))
@@ -1425,7 +1425,7 @@ impl MockRadio {
             }
             candidates.extend(self.held.iter().filter_map(|(start, burst)| {
                 let clock = self.tx_now()?;
-                let tick = time::v_of(clock.origin, clock.handle.root_ticks_per_tick, *start)?;
+                let tick = time::v_of(clock.origin, clock.handle.root_ticks_per_tick(), *start)?;
                 Some((tick, 1, burst.order, WorkKind::HeldBurst { start: *start }))
             }));
             candidates.extend(self.updates.keys().map(|(effective, order)| (*effective, 1, *order, WorkKind::Update { effective: *effective })));
@@ -1670,7 +1670,7 @@ impl Provider for MockRadio {
         let root = self.root.expect("prepared root");
         let time = self.time.as_ref().expect("prepared time");
         let clocks = self.clocks.clone().expect("prepared clocks");
-        let now = time.now(root).map_err(|error| self.reject(format!("MR-9: {error}")))?.ticks;
+        let now = time.now(root).and_then(|t| t.ticks_in(root)).map_err(|error| self.reject(format!("MR-9: {error}")))?;
         let latency = self.profile.timing().startup_latency_ns;
         self.sync_end = Some(now.checked_add(time::ns_to_v(&clocks, root, latency).map_err(|error| self.reject(format!("MR-9: {error}")))?).ok_or_else(|| self.reject("MR-9: synchronisation time overflow"))?);
         // RM-25: the transmit stream from the first lattice instant at or after the arm
@@ -1694,7 +1694,7 @@ impl Provider for MockRadio {
         let root = self.root.expect("prepared root");
         let clocks = self.clocks.as_ref().expect("prepared clocks");
         let time = self.time.as_ref().expect("prepared time").clone();
-        let now = time.now(root).map_err(|error| self.reject(format!("MR-11: {error}")))?.ticks;
+        let now = time.now(root).and_then(|t| t.ticks_in(root)).map_err(|error| self.reject(format!("MR-11: {error}")))?;
         let target = match at { Some(at) => time::to_v(clocks, root, at).map_err(|error| self.reject(format!("MR-11: {error}")))?, None => now };
         let sync_end = self.sync_end.unwrap_or(now);
         if target < sync_end {
@@ -1734,7 +1734,7 @@ impl Provider for MockRadio {
 
     fn stop(&mut self, mode: StopMode) -> Result<(), ModuleError> {
         let root = self.root.ok_or_else(|| self.reject("MR-25: not prepared"))?;
-        let now = self.time.as_ref().expect("prepared time").now(root).map_err(|error| self.reject(format!("MR-25: {error}")))?.ticks;
+        let now = self.time.as_ref().expect("prepared time").now(root).and_then(|t| t.ticks_in(root)).map_err(|error| self.reject(format!("MR-25: {error}")))?;
         // What is due by now first, the stop then at now (RM-16, RM-25).
         if self.started && !self.device_lost_reported {
             match self.advance(now) {

@@ -329,12 +329,13 @@ impl Control {
 
     fn ceil_root(&self, at: Option<AbsoluteDeadline>) -> Result<Option<i64>, TimeError> {
         let Some(t) = at.map(|deadline| deadline.time_point) else { return Ok(None); };
-        if t.domain == self.core.root {
-            return Ok(Some(t.ticks));
+        let root = self.core.root;
+        if let Ok(ticks) = t.ticks_in(root) {
+            return Ok(Some(ticks));
         }
-        let ticks = match self.core.clocks.convert(t, self.core.root)? {
-            ezsdr_kernel::time::Converted::Exact { point } => point.ticks,
-            ezsdr_kernel::time::Converted::Inexact { floor, .. } => floor.ticks.checked_add(1).ok_or(TimeError::Overflow)?,
+        let ticks = match self.core.clocks.convert(t, root)? {
+            ezsdr_kernel::time::Converted::Exact { point } => point.ticks_in(root)?,
+            ezsdr_kernel::time::Converted::Inexact { floor, .. } => floor.ticks_in(root)?.checked_add(1).ok_or(TimeError::Overflow)?,
         };
         Ok(Some(ticks))
     }
@@ -584,7 +585,7 @@ impl Control {
         if target != self.core.tx_id {
             return reject("UR-21: the target is not this device's transmit stream");
         }
-        if at.time_point.domain != clock.domain {
+        if at.time_point.domain() != clock.domain {
             return reject("UR-21: the start is not on the current transmit SampleClock");
         }
         let unit = 8 * channels as u64;
@@ -626,13 +627,16 @@ impl Control {
             Ok(outcome) => outcome,
             Err(error) => return reject(&format!("UR-21: {error}")),
         };
-        let mut start = at.time_point.ticks;
+        let mut start = match at.time_point.ticks_in(clock.domain) {
+            Ok(k) => k,
+            Err(error) => return reject(&format!("UR-21: {error}")),
+        };
         let mut requested = requested_at.map(|d| d.time_point);
         let time_error = |outcome: TimeErrorOutcome, late_by: Duration| {
             let payload = serde_json::to_value(TimeErrorPayload {
                 cause: TimeErrorCause::Late,
                 outcome,
-                late_by_ns: late_by.ticks,
+                late_by_ns: late_by.ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap_or(i64::MAX),
                 target: at.time_point,
             })
             .expect("a payload");
@@ -857,7 +861,7 @@ mod tests {
         time.advance_to(core.at(core.ticks(10_000_000))).unwrap();
         control.book_cold(key("radio.tx.sample_rate_hz"), Value::Num(2e6), None);
         lock(&core.streams).end(&core, core.ticks(5_000_000), false, false);
-        let clocks: Vec<_> = core.clocks.sample_clock_records().iter().map(|r| (r.origin.ticks, r.ended_at.map(|end| end.ticks))).collect();
+        let clocks: Vec<_> = core.clocks.sample_clock_records().iter().map(|r| (r.origin.ticks_in(r.root).unwrap(), r.ended_at.map(|end| end.ticks_in(r.root).unwrap()))).collect();
         assert_eq!(clocks.len(), 2, "{clocks:?}");
         assert_eq!(clocks[1], (clocks[1].0, Some(clocks[1].0)), "{clocks:?}");
     }

@@ -319,7 +319,7 @@ fn kc_10_both_ends_are_attached() {
     let probe = Probe::new();
     let mut run = start_spec_run(&spec, &profile, output_assembly(&probe, Some(100), None))
         .expect("entry creates a Run");
-    run.advance_to(ezsdr_kernel::time::TimePoint::new(run.now().domain, 250))
+    run.advance_to(ezsdr_kernel::time::TimePoint::new(run.now().domain(), 250))
         .expect("advances");
     let manifest = run.finish();
     assert!(
@@ -509,7 +509,7 @@ fn kc_15_t0_is_arm_end_plus_the_lead() {
     assert_eq!(
         run.start_instant(),
         Some(ezsdr_kernel::time::TimePoint::new(
-            run.now().domain,
+            run.now().domain(),
             2_000_000
         ))
     );
@@ -659,12 +659,13 @@ fn ma_05a_a_module_keeps_its_handles_after_prepare() {
     );
     let mut run =
         start_spec_run(&spec_one(), &profile_one(), assembly).expect("entry creates a Run");
-    run.advance_to(ezsdr_kernel::time::TimePoint::new(run.now().domain, 60))
+    let root = run.now().domain();
+    run.advance_to(ezsdr_kernel::time::TimePoint::new(root, 60))
         .expect("advances");
     let manifest = run.finish();
     assert!(manifest.events.delivered.iter().any(|event| {
         event.kind == ezsdr_kernel::event::EventKind::parse("test.custom").unwrap()
-            && event.time.ticks == 50
+            && event.time == ezsdr_kernel::time::TimePoint::new(root, 50)
     }));
     assert!(probe.lines().iter().any(|line| line == "p:step:50"));
     assert!(probe.lines().iter().any(|line| line == "p:now:50"));
@@ -905,7 +906,7 @@ fn kc_22_a_same_instant_wakeup_loop_is_step_livelock() {
             .delivered
             .iter()
             .any(|event| event.kind.as_str() == "ezsdr.STEP_LIVELOCK"
-                && event.source.path == "kernel"
+                && event.source.path() == "kernel"
                 && event.payload == serde_json::json!({ "rounds": ezsdr_kernel::module_api::STEP_ROUND_CAP }))
     );
     assert!(manifest.run.transitions.iter().any(|t| matches!(
@@ -1676,7 +1677,7 @@ fn kc_21_an_action_is_seen_at_its_admission_instant() {
         TestProvider::new("radio", 2),
         &probe,
     )));
-    let root = run.now().domain;
+    let root = run.now().domain();
     run.advance_to(TimePoint::new(root, 500)).unwrap();
     let entry = run
         .submit(
@@ -2230,14 +2231,15 @@ fn kc_31_mark_artifact_marks_only_artifacts_open_then() {
         Box::new(TestLinkModule::new(&probe)),
     );
     let mut run = start_spec_run(&spec, &profile, assembly).unwrap();
-    run.advance_to(TimePoint::new(run.now().domain, 160))
+    run.advance_to(TimePoint::new(run.now().domain(), 160))
         .unwrap();
     let manifest = run.finish();
     let kind = ezsdr_kernel::event::EventKind::parse("test.custom").unwrap();
     assert_eq!(manifest.artifacts[0].id, Ident::parse("rec_0").unwrap());
     assert_eq!(manifest.artifacts[0].marks.len(), 1);
     assert_eq!(manifest.artifacts[0].marks[0].kind, kind);
-    assert_eq!(manifest.artifacts[0].marks[0].time.ticks, 150);
+    let t = manifest.artifacts[0].marks[0].time;
+    assert_eq!(t.ticks_in(t.domain()).unwrap(), 150);
     assert!(manifest.artifacts[1].marks.is_empty());
 }
 
@@ -2401,7 +2403,7 @@ fn mark_emitted_while_stopping(abort: bool) -> ezsdr_kernel::manifest::Manifest 
     );
     assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe)));
     let mut run = start_spec_run(&spec, &profile, assembly).unwrap();
-    let _ = run.advance_to(TimePoint::new(run.now().domain, 160));
+    let _ = run.advance_to(TimePoint::new(run.now().domain(), 160));
     let manifest = run.finish();
     let stopping = manifest.run.transitions.iter().find_map(|row| match row.state {
         RunState::Stopping { mode } => Some(mode),
@@ -2420,7 +2422,8 @@ fn assert_marked_at(manifest: &ezsdr_kernel::manifest::Manifest, ticks: i64) {
     let kind = ezsdr_kernel::event::EventKind::parse("test.custom").unwrap();
     assert_eq!(manifest.artifacts[0].marks.len(), 1, "{:?}", manifest.artifacts);
     assert_eq!(manifest.artifacts[0].marks[0].kind, kind);
-    assert_eq!(manifest.artifacts[0].marks[0].time.ticks, ticks);
+    let t = manifest.artifacts[0].marks[0].time;
+    assert_eq!(t.ticks_in(t.domain()).unwrap(), ticks);
     assert!(manifest.artifacts[1].marks.is_empty());
 }
 
@@ -2450,7 +2453,7 @@ fn rs_36_a_dropped_stopping_body_ends_the_run() {
         ),
     );
     let mut run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
-    let root = run.now().domain;
+    let root = run.now().domain();
     let _ = run.advance_to(TimePoint::new(root, 160));
     let manifest = run.finish();
     let kind = ezsdr_kernel::event::EventKind::parse("ezsdr.DEVICE_LOST").unwrap();
@@ -2461,7 +2464,7 @@ fn rs_36_a_dropped_stopping_body_ends_the_run() {
     assert!(manifest.events.delivered.iter().any(|event| event.kind.as_str() == "ezsdr.EVENTS_DROPPED"
         && event.payload == serde_json::json!({ "kind": "ezsdr.DEVICE_LOST", "count": 1 })
         && event.time == TimePoint::new(root, 150)
-        && event.source.path == "kernel"), "{:?}", manifest.events.delivered);
+        && event.source.path() == "kernel"), "{:?}", manifest.events.delivered);
     assert!(
         manifest
             .events
@@ -2772,7 +2775,7 @@ fn kc_45_manifest_fields() {
     );
     let mut run = start_spec_run(&spec, &profile, assembly).unwrap();
     let id = run.id();
-    run.advance_to(TimePoint::new(run.now().domain, 350))
+    run.advance_to(TimePoint::new(run.now().domain(), 350))
         .unwrap();
     let manifest = run.finish();
     assert_eq!(manifest.run.kind, ezsdr_kernel::manifest::RunKind::Spec);
@@ -3042,7 +3045,7 @@ fn kc_08_an_executor_event_from_a_second_island_has_its_own_counter() {
             .events
             .counters
             .iter()
-            .any(|row| row.source.path.as_str() == "island_1"
+            .any(|row| row.source.path() == "island_1"
                 && row.kind.as_str() == "test.custom"
                 && row.count == 1),
         "counters: {:?}; delivered: {:?}",
@@ -3054,7 +3057,7 @@ fn kc_08_an_executor_event_from_a_second_island_has_its_own_counter() {
             .events
             .counters
             .iter()
-            .any(|row| row.source.path.as_str() == "unforeseen"
+            .any(|row| row.source.path() == "unforeseen"
                 && row.kind.as_str() == "test.custom"
                 && row.count > 0)
     );
@@ -3662,7 +3665,7 @@ fn kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides(
     let lost_sources = |manifest: &ezsdr_kernel::manifest::Manifest| -> Vec<String> {
         manifest.events.delivered.iter()
             .filter(|e| e.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST)
-            .map(|e| e.source.path.clone())
+            .map(|e| e.source.path().to_owned())
             .collect()
     };
 
@@ -3882,12 +3885,12 @@ fn custom() -> ezsdr_kernel::event::EventKind {
 #[test]
 fn kf_01_the_delivered_events_are_readable_during_the_run() {
     let mut run = emitting_session(Some(50), &[50]);
-    let root = run.now().domain;
+    let root = run.now().domain();
     assert!(run.events(0).is_empty());
     run.advance_to(TimePoint::new(root, 60)).unwrap();
     let events = run.events(0);
     let index = events.iter().position(|event| event.kind == custom()).expect("the event is readable before the Run ends");
-    assert_eq!(events[index].time.ticks, 50);
+    assert_eq!(events[index].time, TimePoint::new(root, 50));
     assert_eq!(run.events(index), events[index..].to_vec(), "`from` skips the earlier events");
     assert!(run.events(events.len()).is_empty());
     assert!(run.events(99).is_empty());
@@ -3903,27 +3906,27 @@ fn kf_01_the_delivered_events_are_readable_during_the_run() {
 #[test]
 fn kf_02_wait_for_returns_at_the_round_that_delivered() {
     let mut run = emitting_session(Some(5_000), &[3_000, 5_000]);
-    let root = run.now().domain;
+    let root = run.now().domain();
     let found = run.wait_for(&[custom()], 0, TimePoint::new(root, 10_000)).unwrap();
     let index = found.expect("the event arrived before the horizon");
     assert_eq!(run.events(index)[0].kind, custom());
-    assert_eq!(run.now().ticks, 5_000, "the Run stands at the round that delivered the event");
+    assert_eq!(run.now().ticks_in(root).unwrap(), 5_000, "the Run stands at the round that delivered the event");
     let _ = run.finish();
 
     // A kind that never comes: the emitted `test.custom` does not match.
     let mut run = emitting_session(Some(5_000), &[3_000, 5_000]);
     let lost = ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::DEVICE_LOST).unwrap();
     assert_eq!(run.wait_for(&[lost], 0, TimePoint::new(root, 10_000)).unwrap(), None);
-    assert_eq!(run.now().ticks, 10_000);
+    assert_eq!(run.now().ticks_in(root).unwrap(), 10_000);
     let _ = run.finish();
 }
 
 #[test]
 fn kf_02_wait_for_stands_at_its_horizon() {
     let mut run = emitting_session(None, &[3_000]);
-    let root = run.now().domain;
+    let root = run.now().domain();
     assert_eq!(run.wait_for(&[custom()], 0, TimePoint::new(root, 7_000)).unwrap(), None);
-    assert_eq!(run.now().ticks, 7_000, "no match: the Run stands at the horizon");
+    assert_eq!(run.now().ticks_in(root).unwrap(), 7_000, "no match: the Run stands at the horizon");
     assert!(matches!(run.state(), RunState::Running {}));
     let _ = run.finish();
 }
@@ -3931,13 +3934,13 @@ fn kf_02_wait_for_stands_at_its_horizon() {
 #[test]
 fn kf_02_wait_for_finds_an_event_already_delivered() {
     let mut run = emitting_session(Some(50), &[50]);
-    let root = run.now().domain;
+    let root = run.now().domain();
     run.advance_to(TimePoint::new(root, 60)).unwrap();
     let index = run.events(0).iter().position(|event| event.kind == custom()).unwrap();
     assert_eq!(run.wait_for(&[custom()], index, TimePoint::new(root, 1_000)).unwrap(), Some(index));
-    assert_eq!(run.now().ticks, 60, "an event already delivered runs no round");
+    assert_eq!(run.now().ticks_in(root).unwrap(), 60, "an event already delivered runs no round");
     assert_eq!(run.wait_for(&[custom()], index + 1, TimePoint::new(root, 1_000)).unwrap(), None);
-    assert_eq!(run.now().ticks, 1_000);
+    assert_eq!(run.now().ticks_in(root).unwrap(), 1_000);
     let _ = run.finish();
 }
 
@@ -3948,7 +3951,7 @@ fn child_assembly() -> Assembly {
 
 fn drive_to(ticks: i64) -> impl FnMut(&mut ezsdr_kernel::coordinator::RunHandle) {
     move |child| {
-        let root = child.now().domain;
+        let root = child.now().domain();
         let _ = child.run_until_end(TimePoint::new(root, ticks));
     }
 }
@@ -4150,12 +4153,12 @@ fn two_emitters(at_a: i64, at_b: i64, probe: &Probe) -> ezsdr_kernel::coordinato
 fn kf_02_wait_for_returns_the_first_match_and_withdraws_its_horizon() {
     let probe = Probe::new();
     let mut run = two_emitters(3_000, 5_000, &probe);
-    let root = run.now().domain;
+    let root = run.now().domain();
     let index = run.wait_for(&[custom()], 0, TimePoint::new(root, 8_000)).unwrap().expect("a match");
-    assert_eq!(run.events(index)[0].time.ticks, 3_000, "the first match, not a later one");
-    assert_eq!(run.now().ticks, 3_000);
+    assert_eq!(run.events(index)[0].time, TimePoint::new(root, 3_000), "the first match, not a later one");
+    assert_eq!(run.now().ticks_in(root).unwrap(), 3_000);
     let second = run.wait_for(&[custom()], index + 1, TimePoint::new(root, 8_000)).unwrap().expect("the second match");
-    assert_eq!(run.events(second)[0].time.ticks, 5_000);
+    assert_eq!(run.events(second)[0].time, TimePoint::new(root, 5_000));
     // The early returns withdrew their no-op at 8 000: no round runs there later
     // (Phase 6 Review H, P1-3).
     run.advance_to(TimePoint::new(root, 10_000)).unwrap();
@@ -4170,9 +4173,9 @@ fn kf_02_wait_for_returns_the_first_match_and_withdraws_its_horizon() {
 #[test]
 fn kf_02_wait_for_with_no_kinds_is_advance_to() {
     let mut run = emitting_session(Some(50), &[50]);
-    let root = run.now().domain;
+    let root = run.now().domain();
     assert_eq!(run.wait_for(&[], 0, TimePoint::new(root, 7_000)).unwrap(), None);
-    assert_eq!(run.now().ticks, 7_000);
+    assert_eq!(run.now().ticks_in(root).unwrap(), 7_000);
     let _ = run.finish();
 }
 
@@ -4180,7 +4183,7 @@ fn kf_02_wait_for_with_no_kinds_is_advance_to() {
 fn kf_02_wait_for_answers_ended_first() {
     // KC-29's prologue comes before the already-delivered answer (Phase 6 Review H, P0-5).
     let mut run = emitting_session(Some(50), &[50]);
-    let root = run.now().domain;
+    let root = run.now().domain();
     run.advance_to(TimePoint::new(root, 60)).unwrap();
     run.submit(SessionAction::Stop { target: None }, None).unwrap();
     assert!(matches!(run.wait_for(&[custom()], 0, TimePoint::new(root, 1_000)), Err(ezsdr_kernel::coordinator::RunHandleError::Ended { .. })));
@@ -4393,7 +4396,7 @@ fn rs_36_a_dropped_stop_must_not_mask_a_dropped_abort() {
         );
     }
     let mut run = start_spec_run(&spec, &profile, assembly).unwrap();
-    let _ = run.advance_to(TimePoint::new(run.now().domain, 160));
+    let _ = run.advance_to(TimePoint::new(run.now().domain(), 160));
     let manifest = run.finish();
     eprintln!(
         "transitions: {:?}; termination: {:?}",

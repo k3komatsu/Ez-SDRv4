@@ -152,16 +152,35 @@ pub struct SampleClockRecord {
 ///
 /// TM-13a allocates both at `prepare`, from the effective post-coercion rate;
 /// TM-13b and TM-13e fix the origin later, at the first sample or at `arm`.
+/// Only [`ClockRegistry::declare_sample_clock`] produces one.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SampleClockHandle {
+    id: ClockDomainId,
+    root: ClockDomainId,
+    root_ticks_per_tick: Rational,
+    stream: ResourceId,
+}
+
+impl SampleClockHandle {
     /// The allocated domain id (TM-13a).
-    pub id: ClockDomainId,
+    pub fn id(&self) -> ClockDomainId {
+        self.id
+    }
+
     /// The root this clock will divide (TM-13a).
-    pub root: ClockDomainId,
+    pub fn root(&self) -> ClockDomainId {
+        self.root
+    }
+
     /// Root ticks per sample (TM-13a).
-    pub root_ticks_per_tick: Rational,
+    pub fn root_ticks_per_tick(&self) -> Rational {
+        self.root_ticks_per_tick
+    }
+
     /// The stream that owns the clock (TM-13a).
-    pub stream: ResourceId,
+    pub fn stream(&self) -> &ResourceId {
+        &self.stream
+    }
 }
 
 struct Inner {
@@ -234,11 +253,12 @@ impl ClockRegistry {
 
     /// Registers a domain. Fails with `DuplicateDomain` on a known id, `UnknownDomain`
     /// when a `Derived` domain's root is not registered, `Unrelated` when that root is
-    /// itself `Derived`, and `LimitExceeded` when a ratio or rate term exceeds
-    /// [`RATIO_TERM_CAP`] (TM-3, TM-12).
+    /// itself `Derived`, `LimitExceeded` when a ratio or rate term exceeds
+    /// [`RATIO_TERM_CAP`], and `Stopped` when the domain is already ended: [`end`](Self::end)
+    /// is the only way to end one (TM-3, TM-11, TM-12).
     pub fn register(&self, domain: ClockDomain) -> Result<(), TimeError> {
-        if !domain.id.node.is_local() {
-            return Err(TimeError::UnknownDomain { id: domain.id });
+        if domain.ended_at.is_some() {
+            return Err(TimeError::Stopped);
         }
         if domain.id.local == u32::MAX {
             // TM-11: the top id is reserved as the allocation-exhaustion sentinel.
@@ -339,12 +359,6 @@ impl ClockRegistry {
     ) -> Result<SampleClockHandle, TimeError> {
         if root_ticks_per_tick.exceeds(RATIO_TERM_CAP) {
             return Err(TimeError::LimitExceeded);
-        }
-        // X7 / D91: the record reaches the Manifest's `clocks.sample_clocks`, whose
-        // deserialiser refuses a non-local node; recording one would write a Manifest
-        // the Kernel cannot read back. Refused as `register` refuses a domain.
-        if !stream.node.is_local() {
-            return Err(TimeError::UnknownDomain { id: root });
         }
         match self.get(root)?.kind {
             ClockDomainKind::Root { .. } => {}

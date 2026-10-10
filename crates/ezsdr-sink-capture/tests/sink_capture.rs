@@ -570,7 +570,7 @@ fn hd_10_capture_of_n_samples_across_jittered_blocks() {
     assert_ramp(&artifacts[0], 123, 5_000);
     assert_eq!(artifacts[0].continuity.len(), 1);
     assert_eq!(artifacts[0].continuity[0].valid[0].len(), 1);
-    assert_eq!(artifacts[0].continuity[0].valid[0][0].start.ticks, 123);
+    assert_eq!(artifacts[0].continuity[0].valid[0][0].start.ticks_in(rig.env.sample_clock).unwrap(), 123);
     assert_eq!(artifacts[0].continuity[0].valid[0][0].len, 5_000);
 }
 
@@ -722,9 +722,9 @@ fn hd_10_a_capture_keeps_of_a_leading_gap_only_what_follows_its_start() {
     rig.step().expect("one block");
     let artifacts = rig.stop(StopMode::Orderly);
     let map = &artifacts[0].continuity[0];
-    assert_eq!(map.first.ticks, 30);
+    assert_eq!(map.first.ticks_in(rig.env.sample_clock).unwrap(), 30);
     assert_eq!(map.gaps.len(), 1);
-    assert_eq!((map.gaps[0].start.ticks, map.gaps[0].len, map.gaps[0].lost), (30, 10, Some(10)));
+    assert_eq!((map.gaps[0].start.ticks_in(rig.env.sample_clock).unwrap(), map.gaps[0].len, map.gaps[0].lost), (30, 10, Some(10)));
     assert_eq!(map.gaps[0].cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
 
     // With no start instant the capture begins at its first delivered sample.
@@ -734,7 +734,7 @@ fn hd_10_a_capture_keeps_of_a_leading_gap_only_what_follows_its_start() {
     rig.step().expect("one block");
     let artifacts = rig.stop(StopMode::Orderly);
     let map = &artifacts[0].continuity[0];
-    assert_eq!((map.first.ticks, map.gaps.len()), (40, 0));
+    assert_eq!((map.first.ticks_in(rig.env.sample_clock).unwrap(), map.gaps.len()), (40, 0));
 
     // A start instant at the block's first sample keeps none of the gap either.
     let mut rig = Rig::new("leading-gap-at-start", BTreeMap::new());
@@ -744,7 +744,7 @@ fn hd_10_a_capture_keeps_of_a_leading_gap_only_what_follows_its_start() {
     rig.link.publish(block);
     rig.step().expect("one block");
     let map = &rig.stop(StopMode::Orderly)[0].continuity[0];
-    assert_eq!((map.first.ticks, map.gaps.len()), (40, 0));
+    assert_eq!((map.first.ticks_in(rig.env.sample_clock).unwrap(), map.gaps.len()), (40, 0));
     let at = AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 30));
 
     // An unknown `lost` is clipped the same way: kept as a zero-extent gap at a block
@@ -759,13 +759,13 @@ fn hd_10_a_capture_keeps_of_a_leading_gap_only_what_follows_its_start() {
     rig.link.publish(block);
     rig.step().expect("one block");
     let map = &rig.stop(StopMode::Orderly)[0].continuity[0];
-    assert_eq!((map.first.ticks, map.gaps.len(), map.gaps[0].len, map.gaps[0].lost), (40, 1, 0, None));
+    assert_eq!((map.first.ticks_in(rig.env.sample_clock).unwrap(), map.gaps.len(), map.gaps[0].len, map.gaps[0].lost), (40, 1, 0, None));
     let mut rig = Rig::new("leading-gap-unknown-own", sample_count(10));
     let block = unknown(&mut rig);
     rig.link.publish(block);
     rig.step().expect("one block");
     let map = &rig.stop(StopMode::Orderly)[0].continuity[0];
-    assert_eq!((map.first.ticks, map.gaps.len()), (40, 0));
+    assert_eq!((map.first.ticks_in(rig.env.sample_clock).unwrap(), map.gaps.len()), (40, 0));
 }
 
 #[test]
@@ -852,9 +852,9 @@ fn hd_13_stop_preserves_trailing_drop_carry() {
         assert!(artifacts[0].partial);
         assert_eq!(artifacts[0].size_bytes, 16);
         let map = &artifacts[0].continuity[0];
-        assert_eq!(map.end.ticks, 2);
+        assert_eq!(map.end.ticks_in(rig.env.sample_clock).unwrap(), 2);
         assert_eq!(map.gaps.len(), 1);
-        assert_eq!(map.gaps[0].start.ticks, 2);
+        assert_eq!(map.gaps[0].start.ticks_in(rig.env.sample_clock).unwrap(), 2);
         assert_eq!(map.gaps[0].len, 0);
         assert_eq!(map.gaps[0].lost, Some(50));
         assert_eq!(map.gaps[0].link_dropped, 1);
@@ -1431,8 +1431,8 @@ fn hd_10_contract_changes_keep_drop_carry_on_the_outgoing_capture() {
             assert!(artifacts[0].partial);
             assert_eq!(artifacts[0].size_bytes, if old == "ezsdr.stream.cf32" { 16 } else { 8 });
             let map = &artifacts[0].continuity[0];
-            assert_eq!(map.end.ticks, 2); assert_eq!(map.gaps.len(), 1);
-            assert_eq!(map.gaps[0].start.ticks, 2); assert_eq!(map.gaps[0].len, 0);
+            assert_eq!(map.end.ticks_in(old_clock).unwrap(), 2); assert_eq!(map.gaps.len(), 1);
+            assert_eq!(map.gaps[0].start.ticks_in(old_clock).unwrap(), 2); assert_eq!(map.gaps[0].len, 0);
             assert_eq!(map.gaps[0].lost, Some(10)); assert_eq!(map.gaps[0].link_dropped, 1);
             assert_eq!(map.gaps[0].cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
             if queued {

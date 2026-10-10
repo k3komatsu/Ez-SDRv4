@@ -176,7 +176,7 @@ pub(super) fn wake(shared: &Shared, unconditional: bool) {
     let clear = move |_| {
         let _ = pending.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);
     };
-    let at = TimePoint::new(shared.primary, shared.now().ticks);
+    let at = shared.now();
     // Held across `schedule`, so that a concurrent FreezeDispatch cancels this wake
     // rather than miss it (RS-6 step 1; Review L, NONBLOCKING 1).
     let mut slot = lock(&shared.wake_handle);

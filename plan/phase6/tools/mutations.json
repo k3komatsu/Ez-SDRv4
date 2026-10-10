@@ -194,7 +194,7 @@
   "name": "EA-10 connect does not advance to T0",
   "file": "crates/ezsdr-server/src/lib.rs",
   "old": "let _ = run.advance_to(t0);",
-  "new": "let _ = run.advance_to(TimePoint::new(t0.domain, 0));",
+  "new": "let _ = run.advance_to(TimePoint::new(t0.domain(), 0));",
   "crate": "ezsdr-server",
   "test_bin": "protocol",
   "filter": "ea_10_connect_stands_at_t0"
@@ -385,8 +385,8 @@
   "id": "G06",
   "name": "KC-29b the early return keeps its horizon",
   "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
-  "old": "        if live && self.shared.now().ticks < t.ticks {",
-  "new": "        if false && live && self.shared.now().ticks < t.ticks {",
+  "old": "        if live && self.shared.now().try_cmp(t).is_ok_and(|o| o.is_lt()) {",
+  "new": "        if false && live && self.shared.now().try_cmp(t).is_ok_and(|o| o.is_lt()) {",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kf_02_wait_for_returns_the_first_match_and_withdraws_its_horizon"
@@ -496,7 +496,7 @@
   "name": "EA-12 until ignored",
   "file": "crates/ezsdr-server/src/lib.rs",
   "old": "        (None, Some(until)) => until,",
-  "new": "        (None, Some(until)) => TimePoint::new(until.domain, until.ticks + 1),",
+  "new": "        (None, Some(until)) => TimePoint::new(until.domain(), until.ticks_in(until.domain()).unwrap() + 1),",
   "crate": "ezsdr-server",
   "test_bin": "protocol",
   "filter": "ea_12_time_and_events"

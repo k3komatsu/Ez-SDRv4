@@ -162,7 +162,7 @@ impl BlockHeader {
     /// Time just past the block's last sample: `first_sample_time + len`, checked (SC-12).
     pub fn end_time(&self) -> Result<TimePoint, TimeError> {
         self.first_sample_time.checked_add(Duration::new(
-            self.first_sample_time.domain,
+            self.first_sample_time.domain(),
             self.len.into(),
         ))
     }

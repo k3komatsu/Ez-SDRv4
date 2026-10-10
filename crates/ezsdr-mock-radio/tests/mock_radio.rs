@@ -330,7 +330,7 @@ fn mr_02_the_tree_has_the_radio_model_shape() {
     let instance = radio.instance();
     assert_eq!(instance.id, rid("mock"));
     assert_eq!(instance.tree.kind.as_str(), "radio.device");
-    assert_eq!(instance.tree.children.iter().map(|child| child.id.path.as_str()).collect::<Vec<_>>(), ["mock/rx", "mock/tx"]);
+    assert_eq!(instance.tree.children.iter().map(|child| child.id.path()).collect::<Vec<_>>(), ["mock/rx", "mock/tx"]);
     assert_eq!(instance.tree.children.iter().map(|child| child.kind.as_str()).collect::<Vec<_>>(), ["radio.rx_stream", "radio.tx_stream"]);
     assert!(instance.tree.children.iter().all(|child| child.capabilities.is_empty() && child.ports.is_empty() && child.children.is_empty() && !child.shareable));
     assert_eq!(instance.tree.ports.len(), 1);
@@ -424,7 +424,7 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
 fn mr_04_instance() {
     let radio = MockRadio::from_binding(&binding("x310-like")).unwrap();
     assert!(radio.instance().driving.stepped);
-    assert_eq!(radio.instance().min_command_lead.unwrap().ticks, 2_000_000);
+    assert_eq!(radio.instance().min_command_lead.unwrap().ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap(), 2_000_000);
     assert_eq!(radio.instance().arm_after, Vec::<ResourceId>::new());
     let ideal = MockRadio::from_binding(&binding("ideal")).unwrap();
     assert!(ideal.instance().min_command_lead.is_none());
@@ -489,8 +489,8 @@ fn mr_07_prepare_cases() {
     let harness = Harness::new("x310-like", &[("radio.tx.channels", eq(Value::Int(1)))], &[], &[], None);
     let handles = harness.clocks.declared_sample_clocks();
     assert_eq!(handles.len(), 2);
-    assert_eq!(handles[0].root_ticks_per_tick, Rational::new(1000, 1).unwrap());
-    assert_eq!(handles[1].root_ticks_per_tick, Rational::new(1000, 1).unwrap());
+    assert_eq!(handles[0].root_ticks_per_tick(), Rational::new(1000, 1).unwrap());
+    assert_eq!(handles[1].root_ticks_per_tick(), Rational::new(1000, 1).unwrap());
 
     let mut second = Harness::new("ideal", &[], &[], &[], None);
     let context = PrepareContext {
@@ -620,9 +620,9 @@ fn mr_11_start_cases() {
     assert_eq!(clocks.iter().find(|record| record.stream == rid("mock/tx")).unwrap().origin, TimePoint::new(ROOT, 0));
     let mut no_link = Harness::new("x310-like", &[("radio.tx.channels", eq(Value::Int(1)))], &[], &[], None);
     no_link.mock.arm().unwrap();
-    assert_eq!(no_link.clocks.sample_clock_records().iter().map(|record| record.stream.path.as_str()).collect::<Vec<_>>(), ["mock/tx"]);
+    assert_eq!(no_link.clocks.sample_clock_records().iter().map(|record| record.stream.path()).collect::<Vec<_>>(), ["mock/tx"]);
     no_link.mock.start(Some(TimePoint::new(ROOT, 2_000_000_000))).unwrap();
-    assert_eq!(no_link.clocks.sample_clock_records().iter().map(|record| record.stream.path.as_str()).collect::<Vec<_>>(), ["mock/tx"]);
+    assert_eq!(no_link.clocks.sample_clock_records().iter().map(|record| record.stream.path()).collect::<Vec<_>>(), ["mock/tx"]);
 }
 
 #[test]
@@ -634,7 +634,7 @@ fn mr_12_block_lengths() {
     let mut starts = Vec::new();
     while let Some((block, _)) = harness.link.as_ref().unwrap().receive() {
         sizes.push(block.header().len);
-        starts.push(block.header().first_sample_time.ticks);
+        starts.push(block.header().first_sample_time.ticks_in(block.header().first_sample_time.domain()).unwrap());
     }
     assert!(!sizes.is_empty());
     assert!(sizes.iter().all(|size| (1..=4000).contains(size)));
@@ -678,7 +678,7 @@ fn mr_12_jitter_draws_belong_to_blocks_after_a_receive_cut() {
     assert_eq!(blocks.len(), 3);
     assert_eq!(i64::from(blocks[0].header().len), first_len);
     assert_eq!(i64::from(blocks[1].header().len), 3_500 - first_len);
-    assert_eq!(blocks[2].header().first_sample_time.ticks, 53_500);
+    assert_eq!(blocks[2].header().first_sample_time.ticks_in(blocks[2].header().first_sample_time.domain()).unwrap(), 53_500);
     assert_eq!(i64::from(blocks[2].header().len), third_len);
 }
 
@@ -802,7 +802,7 @@ fn mr_16_burst_refusals() {
     let refused = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).unwrap();
     assert_eq!(refused.payload["outcome"], "refused");
     assert_eq!(refused.source, rid("mock/tx"));
-    assert_eq!(refused.time.domain, domain);
+    assert_eq!(refused.time.domain(), domain);
     assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 1);
 }
 
@@ -853,7 +853,7 @@ fn mr_17_a_burst_before_its_clock_s_origin_is_late() {
         h.step(2_001_000_000).unwrap();
         let clock = h.clocks.sample_clock_records().into_iter().rev().find(|record| record.stream == rid("mock/tx")).unwrap();
         let n = clock.root_ticks_per_tick.num() as i64;
-        let target = (2_002_000_000 - clock.origin.ticks) / n;
+        let target = (2_002_000_000 - clock.origin.ticks_in(ROOT).unwrap()) / n;
         assert!(target < 0, "{enable}: the clock begins a start lead after the change");
         h.actions.push(tx_action(clock.domain, target, 1_000, false, LatePolicy::SendAsapAndFlag));
         h.step(2_001_000_000).unwrap();
@@ -861,8 +861,8 @@ fn mr_17_a_burst_before_its_clock_s_origin_is_late() {
         let late: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
         assert_eq!(late.len(), 1, "{enable}");
         assert_eq!(late[0].payload["outcome"], "send_asap", "{enable}");
-        assert_eq!(late[0].payload["late_by_ns"], clock.origin.ticks - 2_002_000_000, "{enable}");
-        h.step(clock.origin.ticks + 1_000 * n).unwrap();
+        assert_eq!(late[0].payload["late_by_ns"], clock.origin.ticks_in(ROOT).unwrap() - 2_002_000_000, "{enable}");
+        h.step(clock.origin.ticks_in(ROOT).unwrap() + 1_000 * n).unwrap();
         let record: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(
             h.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.bursts").unwrap()][0].clone()).unwrap();
         assert_eq!(record.target, TimePoint::new(clock.domain, 0), "{enable}");
@@ -896,7 +896,7 @@ fn mr_17_late_policy_outcomes() {
             let record: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(
                 harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.bursts").unwrap()][0].clone(),
             ).unwrap();
-            assert_eq!(record.late_by.unwrap().ticks, 1_000_000);
+            assert_eq!(record.late_by.unwrap().ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap(), 1_000_000);
             assert_eq!(record.samples, 1_000);
         } else {
             assert!(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.bursts").unwrap()].as_array().unwrap().is_empty());
@@ -985,8 +985,8 @@ fn mr_18_a_cold_rate_change_starts_a_new_sample_clock() {
     let current = records.last().unwrap();
     assert_eq!(current.origin, TimePoint::new(ROOT, restarted));
     let first = harness.link.as_ref().unwrap().receive().unwrap().0;
-    assert_ne!(first.header().first_sample_time.domain, old);
-    assert_eq!(first.header().first_sample_time.ticks, 0);
+    assert_ne!(first.header().first_sample_time.domain(), old);
+    assert_eq!(first.header().first_sample_time.ticks_in(first.header().first_sample_time.domain()).unwrap(), 0);
     assert!(!first.header().flags.contains(BlockFlags::GAP_BEFORE));
 }
 
@@ -1019,15 +1019,15 @@ fn mr_18_a_cold_change_starts_its_clock_on_the_lattice() {
         let mut first_new = None;
         while let Some((block, _)) = harness.link.as_ref().unwrap().receive() {
             let header = block.header().clone();
-            if header.first_sample_time.domain == old {
-                assert!((header.first_sample_time.ticks + i64::from(header.len)) * old_ratio <= e1, "an old block past e₁");
+            if header.first_sample_time.domain() == old {
+                assert!((header.first_sample_time.ticks_in(old).unwrap() + i64::from(header.len)) * old_ratio <= e1, "an old block past e₁");
             } else if first_new.is_none() {
                 first_new = Some(header);
             }
         }
         let first_new = first_new.expect("the new clock delivered");
-        assert_eq!(first_new.first_sample_time.domain, new.domain);
-        assert_eq!(first_new.first_sample_time.ticks, 0);
+        assert_eq!(first_new.first_sample_time.domain(), new.domain);
+        assert_eq!(first_new.first_sample_time.ticks_in(new.domain).unwrap(), 0);
         assert!(!first_new.flags.contains(BlockFlags::GAP_BEFORE));
     }
 }
@@ -1049,8 +1049,8 @@ fn mr_18_a_cold_receive_change_before_t0_applies_at_t0() {
     let applied = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()];
     assert_eq!(applied[0]["at"]["ticks"], t0);
     let first = harness.link.as_ref().unwrap().receive().unwrap().0;
-    assert_eq!(first.header().first_sample_time.domain, records.last().unwrap().domain);
-    assert_eq!(first.header().first_sample_time.ticks, 0);
+    assert_eq!(first.header().first_sample_time.domain(), records.last().unwrap().domain);
+    assert_eq!(first.header().first_sample_time.ticks_in(first.header().first_sample_time.domain()).unwrap(), 0);
 }
 
 #[test]
@@ -1068,7 +1068,7 @@ fn mr_18_a_receive_enable_from_zero_waits_the_start_lead() {
         harness.actions.push(update_action("radio.rx.channels", Value::Int(1), UpdateClass::Cold, at.map(|at| TimePoint::new(ROOT, at))));
         harness.step(2_001_000_000).unwrap();
         harness.step(2_200_000_000).unwrap();
-        let origins: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx")).map(|record| record.origin.ticks).collect();
+        let origins: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx")).map(|record| record.origin.ticks_in(ROOT).unwrap()).collect();
         assert_eq!(origins, [origin], "{profile} {at:?}");
     }
 }
@@ -1170,10 +1170,10 @@ fn mr_19_backpressure_is_an_overrun() {
     harness.step(2_001_999_001).unwrap();
     harness.step(2_003_999_001).unwrap();
     let first = harness.link.as_ref().unwrap().receive().unwrap().0;
-    assert_eq!(first.header().first_sample_time.ticks, 0);
+    assert_eq!(first.header().first_sample_time.ticks_in(first.header().first_sample_time.domain()).unwrap(), 0);
     harness.step(2_053_999_001).unwrap();
     let restarted = harness.link.as_ref().unwrap().receive().unwrap().0;
-    assert_eq!(restarted.header().first_sample_time.ticks, 52_000);
+    assert_eq!(restarted.header().first_sample_time.ticks_in(restarted.header().first_sample_time.domain()).unwrap(), 52_000);
     assert!(restarted.header().flags.contains(BlockFlags::GAP_BEFORE));
     assert!(restarted.header().flags.contains(ezsdr_kernel::stream::BlockFlags::RESTARTED));
     assert_eq!(restarted.header().lost, Some(50_000));
@@ -1202,10 +1202,11 @@ fn mr_19_backpressure_is_an_overrun() {
     let start = 2_000_000_002;
     fractional.arm_start(start).unwrap();
     fractional.step(start + 4_000_000).unwrap();
-    assert_eq!(fractional.link.as_ref().unwrap().receive().unwrap().0.header().first_sample_time.ticks, 0);
+    let first = fractional.link.as_ref().unwrap().receive().unwrap().0;
+    assert_eq!(first.header().first_sample_time.ticks_in(first.header().first_sample_time.domain()).unwrap(), 0);
     fractional.step(start + 54_001_000).unwrap();
     let restarted = fractional.link.as_ref().unwrap().receive().unwrap().0;
-    assert_eq!(restarted.header().first_sample_time.ticks, 52_001);
+    assert_eq!(restarted.header().first_sample_time.ticks_in(restarted.header().first_sample_time.domain()).unwrap(), 52_001);
     assert_eq!(restarted.header().lost, Some(50_001));
 }
 
@@ -1247,7 +1248,7 @@ fn mr_09_same_tick_work_keeps_insertion_order() {
         LatePolicy::SendAsapAndFlag,
     ));
     harness.step(2_000_000_000).unwrap();
-    harness.step(at.ticks + 2_000_000).unwrap();
+    harness.step(at.ticks_in(ROOT).unwrap() + 2_000_000).unwrap();
     let instance = harness.mock.instance();
     let faults = &instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.faults").unwrap()];
     assert_eq!(faults.as_array().unwrap().len(), 1);
@@ -1258,13 +1259,13 @@ fn mr_09_same_tick_work_keeps_insertion_order() {
     assert_eq!(applied.as_array().unwrap().len(), 2);
     assert_eq!(applied[0]["value"], 0);
     assert_eq!(applied[1]["value"], 1);
-    assert_eq!(applied[0]["at"]["ticks"], at.ticks);
-    assert_eq!(applied[1]["at"]["ticks"], at.ticks);
+    assert_eq!(applied[0]["at"]["ticks"], at.ticks_in(ROOT).unwrap());
+    assert_eq!(applied[1]["at"]["ticks"], at.ticks_in(ROOT).unwrap());
     let bursts = &instance.sections[&Namespace::parse("ezsdr.radio.mock.mock.bursts").unwrap()];
     let records: Vec<ezsdr_kernel::stream::BurstRecord> =
         serde_json::from_value(bursts.clone()).unwrap();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].target.ticks, 2_005_000);
+    assert_eq!(records[0].target.ticks_in(records[0].target.domain()).unwrap(), 2_005_000);
     assert_eq!(records[0].samples, 2);
     assert!(harness.link.as_ref().unwrap().queued() > 0);
 }
@@ -1356,7 +1357,7 @@ fn mr_20_faults_fire_at_their_instants() {
         "rx",
     ).unwrap();
     let rx_handle = failed_start.clocks.declared_sample_clocks().into_iter()
-        .find(|handle| handle.stream == rid("mock/rx")).unwrap();
+        .find(|handle| *handle.stream() == rid("mock/rx")).unwrap();
     failed_start.clocks.register_sample_clock(&rx_handle, 0).unwrap();
     failed_start.mock.arm().unwrap();
     // RM-25: the receive clock is registered at its first block, so the clash is found then.
@@ -1420,10 +1421,10 @@ fn mr_20_a_fault_between_cold_clocks_is_not_applied() {
         assert_eq!(harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0, "{fault}");
         let mut first = None;
         while let Some((block, _)) = harness.link.as_ref().unwrap().receive() {
-            if block.header().first_sample_time.domain == domain && first.is_none() { first = Some(block.header().clone()); }
+            if block.header().first_sample_time.domain() == domain && first.is_none() { first = Some(block.header().clone()); }
         }
         let first = first.expect("a replacement block");
-        assert_eq!(first.first_sample_time.ticks, 0, "{fault}");
+        assert_eq!(first.first_sample_time.ticks_in(domain).unwrap(), 0, "{fault}");
         assert_eq!(first.lost, None, "{fault}");
         assert_eq!(first.flags, BlockFlags::NONE, "{fault}");
     }
@@ -1445,7 +1446,7 @@ fn mr_20_a_fault_between_cold_clocks_is_not_applied() {
         if block.header().lost.is_some() { gap = Some(block.header().clone()); }
     }
     let gap = gap.expect("the block after the sequence error");
-    assert_eq!((gap.first_sample_time.ticks, gap.lost), (5_003, Some(2_000)));
+    assert_eq!((gap.first_sample_time.ticks_in(gap.first_sample_time.domain()).unwrap(), gap.lost), (5_003, Some(2_000)));
     assert_eq!(gap.flags, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY);
 }
 
@@ -1479,7 +1480,7 @@ fn mr_20a_the_overflow_comes_with_the_block_that_carries_it() {
     harness.arm_start(2_000_000_000).unwrap();
     harness.step(2_002_000_000).unwrap();
     let headers = received(&harness);
-    assert_eq!(headers.iter().map(|header| (header.first_sample_time.ticks, header.len)).collect::<Vec<_>>(), [(0, 1_000)]);
+    assert_eq!(headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect::<Vec<_>>(), [(0, 1_000)]);
     assert!(rx_overflows(&harness).is_empty());
     assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(50_000))]);
 
@@ -1491,7 +1492,7 @@ fn mr_20a_the_overflow_comes_with_the_block_that_carries_it() {
     );
     assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(50_000))]);
     let headers = received(&harness);
-    assert_eq!((headers[0].first_sample_time.ticks, headers[0].lost), (51_000, Some(50_000)));
+    assert_eq!((headers[0].first_sample_time.ticks_in(headers[0].first_sample_time.domain()).unwrap(), headers[0].lost), (51_000, Some(50_000)));
     assert!(headers[1..].iter().all(|header| header.lost.is_none()));
 }
 
@@ -1521,7 +1522,7 @@ fn mr_20_a_lost_device_delivers_every_sample_before_the_loss() {
         let error = harness.step(at).unwrap_err();
         assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
         let headers = received(&harness);
-        assert_eq!(headers.last().map(|header| header.first_sample_time.ticks + i64::from(header.len)), Some(last), "{at}");
+        assert_eq!(headers.last().map(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() + i64::from(header.len)), Some(last), "{at}");
     }
 }
 
@@ -1551,7 +1552,7 @@ fn mr_20_a_lost_device_transmits_nothing_after_the_loss() {
         let records: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(bursts.clone()).unwrap();
         assert_eq!(records.iter().map(|record| record.samples).collect::<Vec<_>>(), [500], "{mode:?}");
         let headers = received(&harness);
-        assert_eq!(headers.last().map(|header| header.first_sample_time.ticks + i64::from(header.len)), Some(1_000), "{mode:?}");
+        assert_eq!(headers.last().map(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() + i64::from(header.len)), Some(1_000), "{mode:?}");
         let actions: Vec<_> = rejected_rows(&harness).into_iter().map(|(action, reason, _)| (action, reason)).collect();
         assert_eq!(actions, [("tx_burst", LOST), ("update_parameter", LOST), ("stop", LOST)].map(|(a, r)| (a.to_owned(), r.to_owned())), "{mode:?}");
     }
@@ -1636,7 +1637,7 @@ fn mr_20_a_fault_at_a_loss_s_instant_removes_nothing() {
         assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
         harness.mock.stop(StopMode::Abort).unwrap();
         let headers = received(&harness);
-        assert_eq!(headers.iter().map(|header| (header.first_sample_time.ticks, header.len)).collect::<Vec<_>>(), [(0, 1_000)], "{loss_first}");
+        assert_eq!(headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect::<Vec<_>>(), [(0, 1_000)], "{loss_first}");
         let row = if loss_first { (serde_json::json!(false), serde_json::json!(0)) } else { (serde_json::json!(true), serde_json::json!(2_000)) };
         assert_eq!(fault_rows(&harness, "rx_sequence_error"), [row], "{loss_first}");
         assert!(rx_overflows(&harness).is_empty(), "{loss_first}");
@@ -1660,9 +1661,9 @@ fn mr_20_a_loss_ends_its_receive_stream_at_its_instant() {
     harness.auth.advance_to(TimePoint::new(ROOT, 2_000_000)).unwrap();
     harness.mock.stop(StopMode::Orderly).unwrap();
     assert_eq!(fault_rows(&harness, "rx_sequence_error"), [(serde_json::json!(true), serde_json::json!(2_000))]);
-    let clocks: Vec<_> = harness.clocks.sample_clock_records().into_iter().map(|record| (record.origin.ticks, record.ended_at.map(|end| end.ticks))).collect();
+    let clocks: Vec<_> = harness.clocks.sample_clock_records().into_iter().map(|record| (record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap()))).collect();
     assert_eq!(clocks, [(0, Some(1_100_000))]);
-    assert_eq!(received(&harness).iter().map(|header| (header.first_sample_time.ticks, header.len)).collect::<Vec<_>>(), [(0, 1_000)]);
+    assert_eq!(received(&harness).iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect::<Vec<_>>(), [(0, 1_000)]);
 }
 
 #[test]
@@ -1673,12 +1674,12 @@ fn mr_21_overrun_shape() {
     harness.step(2_052_999_001).unwrap();
     let mut headers = Vec::new();
     while let Some((block, _)) = harness.link.as_ref().unwrap().receive() { headers.push(block.header().clone()); }
-    let restarted = headers.iter().find(|header| header.first_sample_time.ticks == 51_000).unwrap();
+    let restarted = headers.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == 51_000).unwrap();
     assert_eq!(restarted.lost, Some(50_000));
     assert!(restarted.flags.contains(BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED));
     assert!(!restarted.flags.contains(BlockFlags::SEQ_DISCONTINUITY));
-    let previous = headers.iter().find(|header| header.first_sample_time.ticks == 0).unwrap();
-    assert_eq!(restarted.first_sample_time.ticks - (previous.first_sample_time.ticks + i64::from(previous.len)), 50_000);
+    let previous = headers.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == 0).unwrap();
+    assert_eq!(restarted.first_sample_time.ticks_in(restarted.first_sample_time.domain()).unwrap() - (previous.first_sample_time.ticks_in(previous.first_sample_time.domain()).unwrap() + i64::from(previous.len)), 50_000);
 
     let env = [("sim.faults", serde_json::json!([
         { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
@@ -1689,13 +1690,13 @@ fn mr_21_overrun_shape() {
     overlap.step(2_062_999_001).unwrap();
     let mut headers = Vec::new();
     while let Some((block, _)) = overlap.link.as_ref().unwrap().receive() { headers.push(block.header().clone()); }
-    let restarted = headers.iter().find(|header| header.first_sample_time.ticks == 60_000).unwrap();
+    let restarted = headers.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == 60_000).unwrap();
     assert_eq!(restarted.lost, Some(59_000));
     assert!(restarted.flags.contains(BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED));
     // One block carries both losses; each fault settles its own share with it (MR-20a).
     let overflows: Vec<_> = overlap.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
         .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW)
-        .map(|event| (event.time.ticks, RxOverflowPayload::from_payload(&event.payload).unwrap().lost))
+        .map(|event| (event.time.ticks_in(event.time.domain()).unwrap(), RxOverflowPayload::from_payload(&event.payload).unwrap().lost))
         .collect();
     assert_eq!(overflows, [(1_000, 50_000), (51_000, 9_000)]);
     let faults = overlap.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.faults").unwrap()].clone();
@@ -1736,10 +1737,10 @@ fn mr_25_a_stop_cuts_at_its_instant() {
             h.step(at + 50_000_000).unwrap();
             let cut = (7_777_777 + period - 1) / period;
             let blocks = received(&h);
-            let end = blocks.last().map(|header| header.first_sample_time.ticks + i64::from(header.len));
+            let end = blocks.last().map(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() + i64::from(header.len));
             assert_eq!(end, Some(cut), "{profile}, {how}");
             let clocks: Vec<_> = h.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx"))
-                .map(|record| (record.origin.ticks, record.ended_at.map(|end| end.ticks))).collect();
+                .map(|record| (record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap()))).collect();
             assert_eq!(clocks, [(t0, Some(t0 + cut * period))], "{profile}, {how}");
         }
     }
@@ -1767,10 +1768,10 @@ fn mr_29_start_rx_is_the_one_command() {
     h.actions.push(start("mock/rx", BTreeMap::new()));
     h.step(4_000_000).unwrap();
     h.step(10_000_000).unwrap();
-    let clocks: Vec<_> = h.clocks.sample_clock_records().into_iter().map(|record| (record.origin.ticks, record.ended_at.map(|end| end.ticks))).collect();
+    let clocks: Vec<_> = h.clocks.sample_clock_records().into_iter().map(|record| (record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap()))).collect();
     assert_eq!(clocks, [(0, Some(1_000_000)), (3_000_000, None)]);
-    let first_new = received(&h).into_iter().find(|header| header.first_sample_time.domain != h.clocks.sample_clock_records()[0].domain).unwrap();
-    assert_eq!((first_new.first_sample_time.ticks, first_new.flags), (0, BlockFlags::NONE));
+    let first_new = received(&h).into_iter().find(|header| header.first_sample_time.domain() != h.clocks.sample_clock_records()[0].domain).unwrap();
+    assert_eq!((first_new.first_sample_time.ticks_in(first_new.first_sample_time.domain()).unwrap(), first_new.flags), (0, BlockFlags::NONE));
 }
 
 #[test]
@@ -1781,7 +1782,7 @@ fn mr_22_sequence_error_shape() {
     harness.step(4_999_001).unwrap();
     let mut headers = Vec::new();
     while let Some((block, _)) = harness.link.as_ref().unwrap().receive() { headers.push(block.header().clone()); }
-    let restarted = headers.iter().find(|header| header.first_sample_time.ticks == 3000).unwrap();
+    let restarted = headers.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == 3000).unwrap();
     assert_eq!(restarted.lost, Some(2_000));
     assert!(restarted.flags.contains(BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY));
     assert!(!restarted.flags.contains(BlockFlags::RESTARTED));
@@ -1819,7 +1820,7 @@ fn mr_25_orderly_stop_ends_at_its_instant_abort_at_once() {
     let mut blocks = Vec::new();
     while let Some((block, _)) = orderly.link.as_ref().unwrap().receive() { blocks.push(block); }
     let last = blocks.last().unwrap().header();
-    assert_eq!(2_000_000_000 + (last.first_sample_time.ticks + i64::from(last.len) - 1) * 1_000, stop - 1_000);
+    assert_eq!(2_000_000_000 + (last.first_sample_time.ticks_in(last.first_sample_time.domain()).unwrap() + i64::from(last.len) - 1) * 1_000, stop - 1_000);
     let ended = orderly.clocks.sample_clock_records()[0].ended_at;
     assert_eq!(ended, Some(TimePoint::new(ROOT, stop)));
 
@@ -1831,7 +1832,7 @@ fn mr_25_orderly_stop_ends_at_its_instant_abort_at_once() {
     let mut after_abort = Vec::new();
     while let Some((block, _)) = abort.link.as_ref().unwrap().receive() { after_abort.push(block); }
     assert_eq!(after_abort.len(), 1);
-    assert_eq!(after_abort[0].header().first_sample_time.ticks, 0);
+    assert_eq!(after_abort[0].header().first_sample_time.ticks_in(after_abort[0].header().first_sample_time.domain()).unwrap(), 0);
 }
 
 #[test]
@@ -1854,9 +1855,9 @@ fn mr_25_a_stopped_stream_keeps_its_end() {
             }
             harness.step(t0 + 10_000_000).unwrap();
             let last = received(&harness).pop().unwrap();
-            assert_eq!(last.first_sample_time.ticks + i64::from(last.len), end, "{profile}, then {later}");
+            assert_eq!(last.first_sample_time.ticks_in(last.first_sample_time.domain()).unwrap() + i64::from(last.len), end, "{profile}, then {later}");
             let clocks: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx"))
-                .map(|record| (record.origin.ticks, record.ended_at.map(|end| end.ticks))).collect();
+                .map(|record| (record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap()))).collect();
             assert_eq!(clocks, [(t0, Some(t0 + 1_000_000))], "{profile}, then {later}");
         }
     }
@@ -1869,7 +1870,7 @@ fn mr_25_a_stopped_stream_keeps_its_end() {
     harness.step(2_001_500_000).unwrap();
     harness.mock.stop(StopMode::Abort).unwrap();
     harness.step(2_010_000_000).unwrap();
-    assert_eq!(received(&harness).iter().map(|header| (header.first_sample_time.ticks, header.len)).collect::<Vec<_>>(), [(0, 1_000)]);
+    assert_eq!(received(&harness).iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect::<Vec<_>>(), [(0, 1_000)]);
 }
 
 #[test]
@@ -1888,7 +1889,7 @@ fn mr_25_rx_stop_leaves_transmit_running_and_stop_records_an_unstarted_burst() {
 
     let now = 2_002_000_000;
     let now_tx = harness.clocks.convert(TimePoint::new(ROOT, now), domain).unwrap().floor();
-    harness.actions.push(tx_action(domain, now_tx.ticks + 4_000, 1_000, false, LatePolicy::SendAsapAndFlag));
+    harness.actions.push(tx_action(domain, now_tx.ticks_in(domain).unwrap() + 4_000, 1_000, false, LatePolicy::SendAsapAndFlag));
     harness.step(now).unwrap();
     harness.step(now + 6_000_000).unwrap();
     let stats = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.stats").unwrap()];
@@ -2007,8 +2008,8 @@ fn mr_18_a_fractional_receive_cut_is_the_first_sample_at_or_after_e() {
         assert_eq!(h.clocks.sample_clock_records()[0].ended_at, Some(TimePoint::new(ROOT, end)));
         let mut old_end = 0;
         while let Some((block, _)) = h.link.as_ref().unwrap().receive() {
-            if block.header().first_sample_time.domain == old {
-                old_end = block.header().first_sample_time.ticks + i64::from(block.header().len);
+            if block.header().first_sample_time.domain() == old {
+                old_end = block.header().first_sample_time.ticks_in(old).unwrap() + i64::from(block.header().len);
             }
         }
         assert_eq!(old_end, samples, "old samples must be delivered up to e");
@@ -2035,7 +2036,7 @@ fn mr_18_a_fractional_transmit_cut_is_the_first_sample_at_or_after_e() {
         h.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.bursts").unwrap()].clone()).unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].samples, 3001);
-    assert_eq!(records[0].target.domain, old);
+    assert_eq!(records[0].target.domain(), old);
     assert_eq!(records[0].end, BurstEnd::Stop);
 }
 
@@ -2060,7 +2061,7 @@ fn mr_18_a_cold_change_that_arrives_after_a_later_one_follows_it() {
         let late = h.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).count();
         assert_eq!(late, usize::from(!same_time));
         for record in h.clocks.sample_clock_records() {
-            if let Some(end) = record.ended_at { assert!(end.ticks >= record.origin.ticks); }
+            if let Some(end) = record.ended_at { assert!(end.ticks_in(ROOT).unwrap() >= record.origin.ticks_in(ROOT).unwrap()); }
         }
     }
 }
@@ -2082,7 +2083,7 @@ fn mr_18_a_disable_that_arrives_after_a_later_change_follows_it() {
         h.actions.push(update_action(&channels_key, Value::Int(0), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_001))));
         h.step(0).unwrap(); h.step(1_001_000).unwrap();
         let records: Vec<_> = h.clocks.sample_clock_records().into_iter().filter(|record| record.stream == stream)
-            .map(|record| (record.origin.ticks, record.ended_at.map(|end| end.ticks))).collect();
+            .map(|record| (record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap()))).collect();
         let expected: &[(i64, Option<i64>)] = if direction == "rx" { &[(0, Some(1_000_667))] } else { &[(0, Some(1_000_667)), (1_001_000, Some(1_001_000))] };
         assert_eq!(records, expected, "{direction}");
         let instance = h.mock.instance();

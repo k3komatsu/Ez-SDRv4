@@ -312,7 +312,7 @@ impl Core {
 
     /// The current instant on the primary root.
     pub fn now(&self) -> i64 {
-        self.time.now(self.root).map(|t| t.ticks).unwrap_or(i64::MIN)
+        self.time.now(self.root).and_then(|t| t.ticks_in(self.root)).unwrap_or(i64::MIN)
     }
 
     pub fn at(&self, ticks: i64) -> TimePoint {

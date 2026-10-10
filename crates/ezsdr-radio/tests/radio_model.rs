@@ -423,10 +423,7 @@ where
 
 #[test]
 fn rm_22_payloads_round_trip() {
-    let target = TimePoint {
-        domain: ClockDomainId::local(2),
-        ticks: 123,
-    };
+    let target = TimePoint::new(ClockDomainId::local(2), 123);
     let target_json = serde_json::to_value(target).unwrap();
     assert_payload_round_trip(
         RxOverflowPayload {
@@ -454,7 +451,7 @@ fn rm_22_payloads_round_trip() {
         LateCommandPayload {
             key: None,
             requested: target,
-            applied: TimePoint { ticks: 124, ..target },
+            applied: TimePoint::new(ClockDomainId::local(2), 124),
         },
         json!({
             "key": null,

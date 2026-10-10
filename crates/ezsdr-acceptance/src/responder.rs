@@ -152,7 +152,10 @@ impl Component for PingResponder {
                     continue;
                 }
                 if self.quiet >= self.rearm {
-                    out.push(self.answer(TimePoint::new(first.domain, first.ticks + k as i64))?);
+                    let heard = first
+                        .checked_add(Duration::new(first.domain(), k as i64))
+                        .map_err(|error| ModuleError::rejected(format!("responder: {error}")))?;
+                    out.push(self.answer(heard)?);
                 }
                 self.quiet = 0;
             }
@@ -170,18 +173,23 @@ impl PingResponder {
     /// The PONG at `heard` plus the turnaround, both in the receive SampleClock.
     fn answer(&self, heard: TimePoint) -> Result<Action, ModuleError> {
         let clocks = self.clocks.as_ref().expect("prepared");
+        let rejected = |error| ModuleError::rejected(format!("responder: {error}"));
+        let clock = heard.domain();
         let turnaround = clocks
-            .rescale(Duration::new(ClockDomainId::HOST_MONOTONIC, self.turnaround_ns), heard.domain)
-            .map_err(|error| ModuleError::rejected(format!("responder: {error}")))?;
-        let ticks = match turnaround {
-            ezsdr_kernel::time::Rescaled::Exact { duration } => duration.ticks,
-            ezsdr_kernel::time::Rescaled::Inexact { floor, .. } => floor.ticks + 1,
+            .rescale(Duration::new(ClockDomainId::HOST_MONOTONIC, self.turnaround_ns), clock)
+            .map_err(rejected)?;
+        let turnaround = match turnaround {
+            ezsdr_kernel::time::Rescaled::Exact { duration } => duration,
+            ezsdr_kernel::time::Rescaled::Inexact { floor, .. } => {
+                floor.checked_add(Duration::new(clock, 1)).map_err(rejected)?
+            }
         };
+        let at = heard.checked_add(turnaround).map_err(rejected)?;
         Ok(Action::TxBurst {
             target: self.target.clone().expect("prepared"),
             waveform: self.waveform.clone().expect("prepared"),
             repeat: false,
-            at: AbsoluteDeadline::new(TimePoint::new(heard.domain, heard.ticks + ticks)),
+            at: AbsoluteDeadline::new(at),
             requested_at: None,
             late_policy: self.late_policy.expect("prepared"),
             metadata: Default::default(),

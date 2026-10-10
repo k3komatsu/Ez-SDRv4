@@ -74,7 +74,7 @@ impl Component for Scripted {
     fn prepare(&mut self, ctx: ComponentContext) -> Result<(), ModuleError> {
         self.id = ctx.descriptor.id.to_string();
         let ports: Vec<String> = ctx.links.iter().map(|l| format!("{}.{}", l.component, l.port)).collect();
-        record(format!("prepare:{}:links={}:source={}", self.id, ports.join(","), ctx.source.path));
+        record(format!("prepare:{}:links={}:source={}", self.id, ports.join(","), ctx.source.path()));
         if SCRIPT.with(|s| s.borrow().failing_prepare.contains(&self.id)) {
             return Err(ModuleError::rejected(format!("test: {} fails its prepare", self.id)));
         }
@@ -82,7 +82,7 @@ impl Component for Scripted {
     }
 
     fn step(&mut self, until: TimePoint, out: &mut Vec<Action>) -> Result<StepOutcome, ModuleError> {
-        record(format!("step:{}@{}", self.id, until.ticks));
+        record(format!("step:{}@{}", self.id, until.ticks_in(until.domain()).unwrap()));
         let next = SCRIPT.with(|s| s.borrow_mut().steps.get_mut(&self.id).and_then(VecDeque::pop_front));
         let (actions, progressed) = next.unwrap_or_default();
         out.extend(actions);
@@ -127,7 +127,7 @@ struct Submitter {
 
 impl ActionSubmitter for Submitter {
     fn submit(&self, action: Action) -> Result<ActionId, Vec<Violation>> {
-        record(format!("submit:{}", action.target().map_or_else(String::new, |t| t.path.clone())));
+        record(format!("submit:{}", action.target().map_or_else(String::new, |t| t.path().to_owned())));
         self.submitted.lock().unwrap().push(action);
         self.answers.lock().unwrap().pop_front().unwrap_or(Ok(ActionId(1)))
     }

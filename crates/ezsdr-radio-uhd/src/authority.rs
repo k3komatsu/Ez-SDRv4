@@ -111,13 +111,13 @@ impl DeviceTime {
 
     /// `t` as a root tick, exactly (TM-16c: a firing may not round).
     fn root_tick(&self, t: TimePoint) -> Result<i64, TimeError> {
-        if t.domain == self.root {
-            return Ok(t.ticks);
+        if let Ok(ticks) = t.ticks_in(self.root) {
+            return Ok(ticks);
         }
-        if t.domain == ClockDomainId::HOST_MONOTONIC {
+        if let Ok(host_ns) = t.ticks_in(ClockDomainId::HOST_MONOTONIC) {
             let anchor = *lock(&self.anchor);
             let anchor_ns = anchor.host.saturating_duration_since(self.built).as_nanos() as i128;
-            let delta = t.ticks as i128 - anchor_ns;
+            let delta = host_ns as i128 - anchor_ns;
             let scaled = delta * self.mcr as i128;
             let floor = anchor.device + scaled.div_euclid(1_000_000_000) as i64;
             if scaled.rem_euclid(1_000_000_000) != 0 {
@@ -125,10 +125,10 @@ impl DeviceTime {
             }
             return Ok(floor);
         }
-        if !self.governs(t.domain) {
-            return Err(TimeError::NotGoverned { id: t.domain });
+        if !self.governs(t.domain()) {
+            return Err(TimeError::NotGoverned { id: t.domain() });
         }
-        Ok(self.clocks.conversion(t.domain, self.root)?.try_exact(t)?.ticks)
+        self.clocks.conversion(t.domain(), self.root)?.try_exact(t)?.ticks_in(self.root)
     }
 
     /// Waits up to one nap for `target`, woken by `schedule` and `cancel`.
@@ -270,26 +270,29 @@ impl DeviceAuthority {
         let ns = |i: Instant| i.duration_since(built).as_nanos() as i64;
         let (mb, ma) = (ns(mono_before), ns(mono_after));
         let measured = TimePoint::new(root, device_tick);
-        let relation = |target, offset: i64, uncertainty: i64, drift_uncertainty: f64, method: &str| ClockRelation {
-            source: root,
-            target,
-            measured_at: measured,
-            offset: TimePoint::new(target, offset),
-            drift: 0.0,
-            drift_uncertainty,
-            uncertainty: ezsdr_kernel::time::Duration::new(target, uncertainty.max(0)),
-            method: method.to_owned(),
-            valid: Validity { from: measured, to: None },
+        let relation = |target, offset: i64, uncertainty: i64, drift_uncertainty: f64, method: &str| {
+            ClockRelation::new(
+                root,
+                target,
+                measured,
+                TimePoint::new(target, offset),
+                0.0,
+                drift_uncertainty,
+                ezsdr_kernel::time::Duration::new(target, uncertainty.max(0)),
+                method.to_owned(),
+                Validity { from: measured, to: None },
+            )
+            .map_err(|e| format!("UR-8: {e}"))
         };
         let relations = vec![
-            relation(ClockDomainId::HOST_MONOTONIC, mb + (ma - mb) / 2, ma - mb, 1e-4, "ezsdr.radio.uhd.host_bracket"),
+            relation(ClockDomainId::HOST_MONOTONIC, mb + (ma - mb) / 2, ma - mb, 1e-4, "ezsdr.radio.uhd.host_bracket")?,
             relation(
                 ClockDomainId::UTC,
                 utc_before + (utc_after - utc_before) / 2,
                 utc_after - utc_before,
                 1e-5,
                 "ezsdr.radio.uhd.host_utc_bracket",
-            ),
+            )?,
         ];
         let time = Arc::new(DeviceTime {
             device,

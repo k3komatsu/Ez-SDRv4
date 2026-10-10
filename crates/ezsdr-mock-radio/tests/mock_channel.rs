@@ -174,7 +174,7 @@ impl Radio {
             let bytes = block.host_bytes().unwrap();
             for index in 0..header.len as usize {
                 let (re, im) = ezsdr_hostmem::read_cf32(bytes, header.len as usize, channel, index);
-                out.push((header.first_sample_time.ticks + index as i64, re, im));
+                out.push((header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() + index as i64, re, im));
             }
         }
         out
@@ -250,8 +250,8 @@ fn ordered(world: &World, a: &mut Radio, b: &mut Radio, tick: i64, a_first: bool
 /// Steps the radios at every due wakeup up to and including `until`, as MA-30's loop does.
 fn run_to(world: &World, radios: &mut [&mut Radio], until: i64) {
     while let Some(due) = world.auth.next_due() {
-        if due.ticks > until { break; }
-        step(world, radios, due.ticks);
+        if due.ticks_in(ROOT).unwrap() > until { break; }
+        step(world, radios, due.ticks_in(ROOT).unwrap());
     }
 }
 
@@ -529,9 +529,9 @@ fn mr_34_a_a_timed_tune_reaches_every_transmit_channel() {
     let blocks: Vec<_> = std::iter::from_fn(|| radio.link.receive().map(|(b, _)| b)).collect();
     let read = |k: i64, channel: usize| {
         let block = blocks.iter().find(|b| {
-            b.header().first_sample_time.ticks <= k && k < b.header().first_sample_time.ticks + i64::from(b.header().len)
+            b.header().first_sample_time.ticks_in(b.header().first_sample_time.domain()).unwrap() <= k && k < b.header().first_sample_time.ticks_in(b.header().first_sample_time.domain()).unwrap() + i64::from(b.header().len)
         }).unwrap();
-        let index = (k - block.header().first_sample_time.ticks) as usize;
+        let index = (k - block.header().first_sample_time.ticks_in(block.header().first_sample_time.domain()).unwrap()) as usize;
         ezsdr_hostmem::read_cf32(block.host_bytes().unwrap(), block.header().len as usize, channel, index)
     };
     for channel in 0..2 {
@@ -689,8 +689,8 @@ fn mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant() {
     let Phases { rx, tx, rx_timed, tx_timed } = phases(1, "mock");
     let blocks: Vec<_> = std::iter::from_fn(|| radio.link.receive().map(|(b, _)| b)).collect();
     let check = |k: i64, channel: usize, expected: f64| {
-        let block = blocks.iter().find(|b| b.header().first_sample_time.ticks <= k && k < b.header().first_sample_time.ticks + i64::from(b.header().len)).unwrap();
-        let index = (k - block.header().first_sample_time.ticks) as usize;
+        let block = blocks.iter().find(|b| b.header().first_sample_time.ticks_in(b.header().first_sample_time.domain()).unwrap() <= k && k < b.header().first_sample_time.ticks_in(b.header().first_sample_time.domain()).unwrap() + i64::from(b.header().len)).unwrap();
+        let index = (k - block.header().first_sample_time.ticks_in(block.header().first_sample_time.domain()).unwrap()) as usize;
         let (re, im) = ezsdr_hostmem::read_cf32(block.host_bytes().unwrap(), block.header().len as usize, channel, index);
         let (want_re, want_im) = (0.5 * expected.cos(), 0.5 * expected.sin());
         assert!((f64::from(re) - want_re).abs() < 1e-6 && (f64::from(im) - want_im).abs() < 1e-6, "k {k} channel {channel}: ({re}, {im}) vs ({want_re}, {want_im})");
@@ -893,10 +893,10 @@ fn mr_35_a_cold_receive_change_samples_the_field_on_the_new_clock() {
         let header = block.header().clone();
         let bytes = block.host_bytes().unwrap();
         for index in 0..header.len as usize {
-            let k = header.first_sample_time.ticks + index as i64;
+            let k = header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() + index as i64;
             let (re, im) = ezsdr_hostmem::read_cf32(bytes, header.len as usize, 0, index);
-            let j = if header.first_sample_time.domain == first_domain { checked.0 += 1; k } else { checked.1 += 1; 1_000 + k / 2 };
-            assert_eq!((re, im), samples[j as usize], "clock {:?} sample {k}", header.first_sample_time.domain);
+            let j = if header.first_sample_time.domain() == first_domain { checked.0 += 1; k } else { checked.1 += 1; 1_000 + k / 2 };
+            assert_eq!((re, im), samples[j as usize], "clock {:?} sample {k}", header.first_sample_time.domain());
         }
     }
     assert_eq!(checked, (1_000, 6_000));
@@ -971,14 +971,14 @@ fn ch_09_a_burst_starting_between_rounds_survives_a_stop_in_either_order() {
         a.push(burst(&a, &world, second, 1_999, true));
         ordered(&world, &mut a, &mut b, 0, a_first);
         while let Some(due) = world.auth.next_due() {
-            if due.ticks >= 666_334 { break; }
-            ordered(&world, &mut a, &mut b, due.ticks, a_first);
+            if due.ticks_in(ROOT).unwrap() >= 666_334 { break; }
+            ordered(&world, &mut a, &mut b, due.ticks_in(ROOT).unwrap(), a_first);
         }
         a.push(Action::Stop { target: Some(rid("dev_a/tx")) });
         ordered(&world, &mut a, &mut b, 666_334, a_first);
         while let Some(due) = world.auth.next_due() {
-            if due.ticks > 2_000_001 { break; }
-            ordered(&world, &mut a, &mut b, due.ticks, a_first);
+            if due.ticks_in(ROOT).unwrap() > 2_000_001 { break; }
+            ordered(&world, &mut a, &mut b, due.ticks_in(ROOT).unwrap(), a_first);
         }
         ordered(&world, &mut a, &mut b, 2_000_001, a_first);
         (b.received(0), records(&a))

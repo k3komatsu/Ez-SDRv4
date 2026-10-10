@@ -395,7 +395,7 @@ fn run(profile: &str, sequence: &Sequence) -> Record {
     }
     step(&mut mock, HORIZON);
     let records = clocks.sample_clock_records();
-    let clocks_of = |stream: &str| records.iter().filter(|r| r.stream == rid(stream)).map(|r| (r.origin.ticks, r.ended_at.map(|t| t.ticks))).collect();
+    let clocks_of = |stream: &str| records.iter().filter(|r| r.stream == rid(stream)).map(|r| (r.origin.ticks_in(ROOT).unwrap(), r.ended_at.map(|t| t.ticks_in(ROOT).unwrap()))).collect();
     let domains: Vec<_> = records.iter().filter(|r| r.stream == rid("mock/rx")).map(|r| r.domain).collect();
     let section = |name: &str| mock.instance().sections[&Namespace::parse(&format!("ezsdr.radio.mock.mock.{name}")).unwrap()].clone();
     let rows = |name: &str| section(name).as_array().unwrap().clone();
@@ -404,8 +404,8 @@ fn run(profile: &str, sequence: &Sequence) -> Record {
         rx_clocks: clocks_of("mock/rx"),
         tx_clocks: clocks_of("mock/tx"),
         blocks: link.0.lock().unwrap().iter().map(|h| {
-            let clock = domains.iter().position(|d| *d == h.first_sample_time.domain).unwrap();
-            (clock, h.first_sample_time.ticks, h.len, h.flags, h.lost)
+            let clock = domains.iter().position(|d| *d == h.first_sample_time.domain()).unwrap();
+            (clock, h.first_sample_time.ticks_in(h.first_sample_time.domain()).unwrap(), h.len, h.flags, h.lost)
         }).collect(),
         cold: applied.iter().filter(|r| !r.0.ends_with("gain_db")).cloned().collect(),
         timed: applied.into_iter().filter(|r| r.0.ends_with("gain_db")).collect(),

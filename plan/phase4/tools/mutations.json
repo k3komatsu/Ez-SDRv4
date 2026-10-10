@@ -163,8 +163,8 @@
   "id": "D17",
   "name": "HD-15 no channel annotations",
   "file": "crates/ezsdr-sink-capture/src/sigmf.rs",
-  "old": "        .map(|g| Ok((file_index(g.start.ticks)?, g)))",
-  "new": "        .take(0)\n        .map(|g| Ok((file_index(g.start.ticks)?, g)))",
+  "old": "        .map(|g| Ok((file_index(tick(g.start)?)?, g)))",
+  "new": "        .take(0)\n        .map(|g| Ok((file_index(tick(g.start)?)?, g)))",
   "crate": "ezsdr-sink-capture",
   "test_bin": "sink_capture",
   "filter": "hd_15_channel_validity"
@@ -263,8 +263,8 @@
   "id": "D27",
   "name": "HD-15 an empty run gets a capture segment",
   "file": "crates/ezsdr-sink-capture/src/sigmf.rs",
-  "old": "    if i128::from(map.end.ticks) > run_start {",
-  "new": "    if i128::from(map.end.ticks) >= run_start {",
+  "old": "    if i128::from(tick(map.end)?) > run_start {",
+  "new": "    if i128::from(tick(map.end)?) >= run_start {",
   "crate": "ezsdr-sink-capture",
   "test_bin": "sink_capture",
   "filter": "hd_15_gap_fields_carry_the_continuity_causes"

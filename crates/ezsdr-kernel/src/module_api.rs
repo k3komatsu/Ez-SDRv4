@@ -510,7 +510,7 @@ pub enum ComponentKind {
 
 impl ComponentDescriptor {
     /// Structural validation: unique port names, registered contract ids, update
-    /// classes from the closed set, a finite budget, an `impl.hash` present.
+    /// classes from the closed set, an `impl.hash` present.
     ///
     /// Rule: MA-37.
     pub fn validate(&self, contracts: &[DataContractId]) -> Result<(), ModuleError> {
@@ -536,13 +536,7 @@ impl ComponentDescriptor {
         // `ContentHash` only exists parsed, so both arrive as a deserialisation
         // refusal at the JSON boundary, which is where a non-Rust producer sends
         // them. `ma_37_update_class_and_hash_are_refused_at_the_boundary` covers it.
-        if let Some(b) = self.timing.budget {
-            if b.duration().ticks <= 0 {
-                return Err(reject(
-                    "MA-37: a declared budget must be finite and positive".to_owned(),
-                ));
-            }
-        }
+        // A positive budget is `RelativeBudget`'s own rule (TM-15).
         Ok(())
     }
 }

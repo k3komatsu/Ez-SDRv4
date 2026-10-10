@@ -123,9 +123,9 @@ fn hd_05_policies() {
         PublishOutcome::Full
     );
     assert_eq!(block_policy.drops(), 0, "Block never discards or records a drop");
-    assert_eq!(block_policy.receive().unwrap().0.first_sample_time().ticks, 0);
+    assert_eq!(block_policy.receive().unwrap().0.first_sample_time().ticks_in(ClockDomainId::local(7)).unwrap(), 0);
     assert_eq!(block_policy.publish(retry), PublishOutcome::Accepted);
-    assert_eq!(block_policy.receive().unwrap().0.first_sample_time().ticks, 10);
+    assert_eq!(block_policy.receive().unwrap().0.first_sample_time().ticks_in(ClockDomainId::local(7)).unwrap(), 10);
 
     let oldest = HostLinkModule::new()
         .create(&declaration(BackPressure::DropOldest, 1))
@@ -140,7 +140,7 @@ fn hd_05_policies() {
         PublishOutcome::DroppedOldest
     );
     let (kept, carry) = oldest.receive().unwrap();
-    assert_eq!(kept.first_sample_time().ticks, 200);
+    assert_eq!(kept.first_sample_time().ticks_in(ClockDomainId::local(7)).unwrap(), 200);
     assert!(carry.flags.contains(BlockFlags::GAP_BEFORE));
     assert!(carry.flags.contains(BlockFlags::RESTARTED));
     assert_eq!(carry.lost, Some(150));
@@ -173,8 +173,8 @@ fn hd_05_policies() {
             PublishOutcome::DroppedNewest
         ]
     );
-    assert_eq!(newest.receive().unwrap().0.first_sample_time().ticks, 0);
-    assert_eq!(newest.receive().unwrap().0.first_sample_time().ticks, 10);
+    assert_eq!(newest.receive().unwrap().0.first_sample_time().ticks_in(ClockDomainId::local(7)).unwrap(), 0);
+    assert_eq!(newest.receive().unwrap().0.first_sample_time().ticks_in(ClockDomainId::local(7)).unwrap(), 10);
     assert_eq!(newest.drops(), 1);
     assert_eq!(newest.take_drop_carry().blocks, 1);
 
@@ -192,10 +192,10 @@ fn hd_05_a_carry_belongs_to_the_block_after_the_drop() {
     newest.publish(block(400, BlockFlags::NONE, None));
     newest.publish(block(500, BlockFlags::NONE, None));
     let (head, carry) = newest.receive().unwrap();
-    assert_eq!((head.first_sample_time().ticks, carry.is_empty()), (300, true));
+    assert_eq!((head.first_sample_time().ticks_in(ClockDomainId::local(7)).unwrap(), carry.is_empty()), (300, true));
     newest.publish(block(600, BlockFlags::NONE, None));
     let (next, carry) = newest.receive().unwrap();
-    assert_eq!((next.first_sample_time().ticks, carry.blocks), (600, 2));
+    assert_eq!((next.first_sample_time().ticks_in(ClockDomainId::local(7)).unwrap(), carry.blocks), (600, 2));
     assert!(newest.take_drop_carry().is_empty());
 
     // DropOldest: the evicted block's carry goes to the block after it, not the newest.
@@ -206,9 +206,9 @@ fn hd_05_a_carry_belongs_to_the_block_after_the_drop() {
         oldest.publish(block(at, BlockFlags::NONE, None));
     }
     let (first, carry) = oldest.receive().unwrap();
-    assert_eq!((first.first_sample_time().ticks, carry.blocks), (10, 1));
+    assert_eq!((first.first_sample_time().ticks_in(ClockDomainId::local(7)).unwrap(), carry.blocks), (10, 1));
     let (second, carry) = oldest.receive().unwrap();
-    assert_eq!((second.first_sample_time().ticks, carry.blocks), (20, 0));
+    assert_eq!((second.first_sample_time().ticks_in(ClockDomainId::local(7)).unwrap(), carry.blocks), (20, 0));
 
     // A recording that ends takes everything dropped after the last received block,
     // queued blocks' carries included, and they are not delivered again.

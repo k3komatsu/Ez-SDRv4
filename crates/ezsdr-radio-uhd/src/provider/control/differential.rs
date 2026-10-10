@@ -256,7 +256,7 @@ fn run(sequence: &Sequence) -> Record {
         now = [Some(now + MS), next_round, loss.filter(|loss| *loss > now)].into_iter().flatten().min().unwrap();
     }
     let records = core.clocks.sample_clock_records();
-    let clocks_of = |stream| records.iter().filter(|r| r.stream == stream).map(|r| (r.origin.ticks, r.ended_at.map(|t| t.ticks))).collect();
+    let clocks_of = |stream| records.iter().filter(|r| r.stream == stream).map(|r| (r.origin.ticks_in(r.root).unwrap(), r.ended_at.map(|t| t.ticks_in(r.root).unwrap()))).collect();
     let rec = lock(&core.rec);
     Record {
         rx_clocks: clocks_of(core.rx_id.clone()),

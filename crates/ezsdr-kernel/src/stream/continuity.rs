@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{BlockFlags, BlockHeader, DropCarry, StreamError};
 use crate::id::ClockDomainId;
-use crate::time::{TimeError, TimePoint};
+use crate::time::{Duration, TimeError, TimePoint};
 
 /// What the **stream** lost. A closed, derived set (SC-31, decision S16).
 ///
@@ -130,6 +130,13 @@ pub struct ContinuityBuilder {
     channel_gaps: Vec<ChannelGap>,
 }
 
+/// Ticks from `start` to `end` in `domain`, 0 when `end` is not later (SC-31d).
+fn span(domain: ClockDomainId, start: TimePoint, end: TimePoint) -> u64 {
+    end.checked_sub(start)
+        .and_then(|d| d.ticks_in(domain))
+        .map_or(0, |n| n.max(0) as u64)
+}
+
 /// The cause a flag set and a `lost` count imply, `Mixed` aside (SC-31).
 fn cause_from_flags(flags: BlockFlags, lost: Option<u64>) -> GapCause {
     if !flags.contains(BlockFlags::GAP_BEFORE) {
@@ -177,9 +184,9 @@ impl ContinuityBuilder {
     /// Rule: SC-12, SC-13, SC-14, SC-30, SC-30a, SC-30b, SC-30c, SC-31, SC-31d.
     pub fn push(&mut self, h: &BlockHeader, carry: DropCarry) -> Result<(), StreamError> {
         self.pending_carry.merge(carry);
-        if h.first_sample_time.domain != self.domain {
+        if h.first_sample_time.domain() != self.domain {
             // SC-30: a rate change starts a new SampleClock (TM-13c), not a gap.
-            return Err(StreamError::DomainChanged { from: self.domain, to: h.first_sample_time.domain });
+            return Err(StreamError::DomainChanged { from: self.domain, to: h.first_sample_time.domain() });
         }
         if h.channels != self.channels {
             return Err(StreamError::ChannelsChanged { from: self.channels, to: h.channels });
@@ -201,7 +208,7 @@ impl ContinuityBuilder {
             Some(expected) => expected,
             None if h.flags.contains(BlockFlags::GAP_BEFORE) && carried.is_empty() => {
                 let back = i64::try_from(h.lost.unwrap_or(0)).map_err(|_| TimeError::Overflow)?;
-                TimePoint::new(self.domain, t.ticks.checked_sub(back).ok_or(TimeError::Overflow)?)
+                t.checked_sub_duration(Duration::new(self.domain, back))?
             }
             None => t,
         };
@@ -225,7 +232,7 @@ impl ContinuityBuilder {
             // zero-extent gap at the block (SC-13); or a first block's carry, recorded
             // as a zero-extent gap at the block that keeps the known counts (SC-30b).
             _ => {
-                let jump = t.checked_sub(expected)?.ticks as u64;
+                let jump = t.checked_sub(expected)?.ticks_in(self.domain)? as u64;
                 if !flags.contains(BlockFlags::GAP_BEFORE) && self.lossless {
                     return Err(StreamError::JumpWithoutGapFlag);
                 }
@@ -261,15 +268,15 @@ impl ContinuityBuilder {
             if h.valid.is_set(c) {
                 if let Some(start) = self.pending[i].take() {
                     // SC-31d: the break's extent is known now that the channel is back.
-                    let len = t.ticks.saturating_sub(start.ticks).max(0) as u64;
+                    let len = span(self.domain, start, t);
                     self.channel_gaps.push(ChannelGap { channel: c, start, len });
                 }
                 match self.open[i].as_mut() {
-                    Some(seg) => seg.len = end.ticks.saturating_sub(seg.start.ticks).max(0) as u64,
+                    Some(seg) => seg.len = span(self.domain, seg.start, end),
                     None => self.open[i] = Some(Segment { start: t, len: h.len as u64 }),
                 }
             } else if let Some(seg) = self.open[i].take() {
-                let at = TimePoint::new(self.domain, seg.start.ticks.saturating_add(seg.len as i64));
+                let at = seg.start.checked_add(Duration::new(self.domain, seg.len as i64))?;
                 self.valid[i].push(seg);
                 self.pending[i] = Some(at);
             } else if was_valid.is_set(c) {
@@ -298,7 +305,7 @@ impl ContinuityBuilder {
         for c in 0..self.channels {
             let i = c as usize;
             if let Some(start) = self.pending[i].take() {
-                let len = at.ticks.saturating_sub(start.ticks).max(0) as u64;
+                let len = span(self.domain, start, at);
                 self.channel_gaps.push(ChannelGap { channel: c, start, len });
             }
         }
@@ -340,7 +347,7 @@ impl ContinuityBuilder {
         for c in 0..self.channels {
             let i = c as usize;
             if let Some(start) = self.pending[i].take() {
-                let len = end.ticks.saturating_sub(start.ticks).max(0) as u64;
+                let len = span(self.domain, start, end);
                 self.channel_gaps.push(ChannelGap { channel: c, start, len });
             }
             if let Some(seg) = self.open[i].take() {

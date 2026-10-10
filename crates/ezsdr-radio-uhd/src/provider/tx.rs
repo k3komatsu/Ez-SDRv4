@@ -501,7 +501,9 @@ impl Tx {
         }
     }
 
-    fn time_error(&self, outcome: TimeErrorOutcome, late_by_ns: i64, target: TimePoint) {
+    fn time_error(&self, outcome: TimeErrorOutcome, late_by: Duration, target: TimePoint) {
+        // SC-27's late_by is a host.monotonic duration, so its ticks are nanoseconds.
+        let late_by_ns = late_by.ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap_or(i64::MAX);
         let payload = serde_json::to_value(TimeErrorPayload { cause: TimeErrorCause::Late, outcome, late_by_ns, target })
             .expect("a payload");
         self.core.emit(&self.core.tx_id, kinds::TIME_ERROR, Severity::Error, payload);
@@ -522,7 +524,7 @@ impl Tx {
                 if reservations.contains(&(held.domain, start)) {
                     reservations.remove(&(held.domain, held.k));
                     drop(reservations);
-                    self.time_error(TimeErrorOutcome::Refused, late_by.ticks, held.target);
+                    self.time_error(TimeErrorOutcome::Refused, late_by, held.target);
                     self.core.command_rejected("tx_burst", "UR-21: the moved start is a held burst's");
                     return None;
                 }
@@ -532,18 +534,18 @@ impl Tx {
                 held.k = start;
                 held.open.late = Some(late);
                 held.open.requested_target = held.open.requested_target.or(Some(held.target));
-                self.time_error(TimeErrorOutcome::SendAsap, late_by.ticks, held.target);
+                self.time_error(TimeErrorOutcome::SendAsap, late_by, held.target);
                 Some(held)
             }
             Ok(LateOutcome::Drop { late_by }) => {
                 self.forget(&held);
-                self.time_error(TimeErrorOutcome::Drop, late_by.ticks, held.target);
+                self.time_error(TimeErrorOutcome::Drop, late_by, held.target);
                 self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-21: the late policy dropped the burst" }));
                 None
             }
             Ok(LateOutcome::PlanViolation { late_by }) => {
                 self.forget(&held);
-                self.time_error(TimeErrorOutcome::PlanViolation, late_by.ticks, held.target);
+                self.time_error(TimeErrorOutcome::PlanViolation, late_by, held.target);
                 self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-21: the planned burst arrived late" }));
                 None
             }
@@ -574,25 +576,25 @@ impl Tx {
                     if reservations.contains(&(held.domain, next)) {
                         reservations.remove(&(held.domain, held.k));
                         drop(reservations);
-                        self.time_error(TimeErrorOutcome::Refused, late_by.ticks, held.target);
+                        self.time_error(TimeErrorOutcome::Refused, late_by, held.target);
                         return self.core.command_rejected("tx_burst", "UR-21: the moved start is a held burst's");
                     }
                     reservations.remove(&(held.domain, held.k));
                     reservations.insert((held.domain, next));
                     drop(reservations);
-                    self.time_error(TimeErrorOutcome::SendAsap, late_by.ticks, held.target);
+                    self.time_error(TimeErrorOutcome::SendAsap, late_by, held.target);
                     held.k = next;
                     held.open.late = Some(late);
                     held.open.requested_target = held.open.requested_target.or(Some(held.target));
                 }
                 Ok(LateOutcome::Drop { late_by }) => {
                     self.forget(&held);
-                    self.time_error(TimeErrorOutcome::Drop, late_by.ticks, held.target);
+                    self.time_error(TimeErrorOutcome::Drop, late_by, held.target);
                     return self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-21: the late policy dropped the burst" }));
                 }
                 Ok(LateOutcome::PlanViolation { late_by }) => {
                     self.forget(&held);
-                    self.time_error(TimeErrorOutcome::PlanViolation, late_by.ticks, held.target);
+                    self.time_error(TimeErrorOutcome::PlanViolation, late_by, held.target);
                     return self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-21: the planned burst arrived late" }));
                 }
                 Err(error) => {
@@ -728,8 +730,9 @@ impl Tx {
                 let Some(target) = self.reported_target(report.channel) else { return };
                 let late_by_ns = match report.tick {
                     Some(tick) => {
-                        let start = match self.core.clocks.convert(target, self.core.root) {
-                            Ok(start) => start.floor().ticks,
+                        let root = self.core.root;
+                        let start = match self.core.clocks.convert(target, root).and_then(|c| c.floor().ticks_in(root)) {
+                            Ok(start) => start,
                             Err(error) => return self.core.command_rejected("tx_report", &format!("UR-28: {error}")),
                         };
                         match i64::try_from((i128::from(tick) - i128::from(start)) * 1_000_000_000 / i128::from(self.core.mcr)) {
@@ -739,7 +742,7 @@ impl Tx {
                     }
                     None => 0,
                 };
-                self.time_error(TimeErrorOutcome::LateAtDevice, late_by_ns, target);
+                self.time_error(TimeErrorOutcome::LateAtDevice, Duration::new(ClockDomainId::HOST_MONOTONIC, late_by_ns), target);
             }
             TxCode::Other(_) => {}
         }
@@ -971,7 +974,7 @@ mod tests {
         let c1 = streams.tx_clocks[1].0;
         assert!(streams.refuse(&core, Dir::Tx, 1));
         drop(streams);
-        let ended = core.clocks.sample_clock_records().into_iter().find(|r| r.domain == c1.domain).and_then(|r| r.ended_at).map(|t| t.ticks);
+        let ended = core.clocks.sample_clock_records().into_iter().find(|r| r.domain == c1.domain).and_then(|r| r.ended_at.map(|t| t.ticks_in(r.root).unwrap()));
         assert_eq!(ended, Some(c1.origin));
     }
 
@@ -1232,9 +1235,9 @@ mod tests {
         let b = TimePoint::new(clock.domain, 20_000);
         tx.remember_burst(a); tx.remember_burst(b);
         for channel in [0,1] {
-            tx.report(crate::device::TxReport { code: crate::device::TxCode::BurstAck, tick: Some(clock.instant(a.ticks)), channel });
+            tx.report(crate::device::TxReport { code: crate::device::TxCode::BurstAck, tick: Some(clock.instant(a.ticks_in(clock.domain).unwrap())), channel });
         }
-        tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: Some(clock.instant(b.ticks)+200), channel: 0 });
+        tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: Some(clock.instant(b.ticks_in(clock.domain).unwrap())+200), channel: 0 });
         let emitted = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
         eprintln!("events={emitted:?}");
         assert!(emitted.iter().any(|e|e.kind.as_str()==ezsdr_radio::kinds::TIME_ERROR), "burst B TIME_ERROR must survive both ACKs of A");
@@ -1310,13 +1313,13 @@ mod tests {
             let next_target = new.map(|clock| TimePoint::new(clock.domain, 20_000));
             if let Some(target) = next_target { tx.remember_burst(target); }
             tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError,
-                tick: Some(old.instant(target.ticks) + 200), channel: 0 });
+                tick: Some(old.instant(target.ticks_in(old.domain).unwrap()) + 200), channel: 0 });
             // The other channel's old error still has the old target after channel 0 advanced.
             tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError,
                 tick: None, channel: 1 });
             if let (Some(clock), Some(target)) = (new, next_target) {
                 tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError,
-                    tick: Some(clock.instant(target.ticks) + 400), channel: 0 });
+                    tick: Some(clock.instant(target.ticks_in(clock.domain).unwrap()) + 400), channel: 0 });
             }
             let errors: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
                 .filter(|e| e.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();

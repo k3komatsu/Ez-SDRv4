@@ -970,10 +970,10 @@ impl RunHandle {
         // the least common multiple of their ratios' numerators at or after now + lead.
         let mut lattice: u64 = 1;
         for clock in self.shared.ctx.clocks.declared_sample_clocks() {
-            if clock.root != self.shared.primary {
+            if clock.root() != self.shared.primary {
                 continue;
             }
-            let n = clock.root_ticks_per_tick.num();
+            let n = clock.root_ticks_per_tick().num();
             let Some(l) = (lattice / gcd(lattice, n)).checked_mul(n) else {
                 self.fail(Stage::Arm, "KC-15: overflow".to_owned());
                 return false;
@@ -982,8 +982,7 @@ impl RunHandle {
         }
         let t0 = self
             .shared
-            .now()
-            .ticks
+            .now_ticks()
             .checked_add(lead_ticks)
             .zip(i64::try_from(lattice).ok())
             .and_then(|(earliest, l)| {
@@ -999,7 +998,11 @@ impl RunHandle {
     }
 
     fn resolve_schedule(&mut self) -> Option<Vec<(usize, Inst, Ident, Action)>> {
-        let t0 = self.t0.expect("T0 calculated after arm");
+        let t0 = self
+            .t0
+            .expect("T0 calculated after arm")
+            .ticks_in(self.shared.primary)
+            .expect("T0 is a primary-root instant (KC-15)");
         let entries = self.shared.ctx.spec.schedule.clone();
         let mut resolved = Vec::with_capacity(entries.len());
         for (i, entry) in entries.into_iter().enumerate() {
@@ -1031,12 +1034,12 @@ impl RunHandle {
                 .clocks
                 .declared_sample_clocks()
                 .into_iter()
-                .filter(|clock| clock.stream.is_within(node))
+                .filter(|clock| clock.stream().is_within(node))
                 .collect();
             let clock = if let Some(target) = rewritten.as_ref().map(|(target, _, _)| target) {
                 streams
                     .iter()
-                    .find(|clock| &clock.stream == target)
+                    .find(|clock| clock.stream() == target)
                     .cloned()
             } else {
                 None
@@ -1045,7 +1048,7 @@ impl RunHandle {
                 let first = streams.first()?;
                 streams
                     .iter()
-                    .all(|clock| clock.root_ticks_per_tick == first.root_ticks_per_tick)
+                    .all(|clock| clock.root_ticks_per_tick() == first.root_ticks_per_tick())
                     .then_some(first.clone())
             });
             let Some(clock) = clock else {
@@ -1060,7 +1063,7 @@ impl RunHandle {
                 self.fail(Stage::Arm, format!("KC-16: entry {i}: {reason}"));
                 return None;
             };
-            if clock.root != self.shared.primary {
+            if clock.root() != self.shared.primary {
                 self.fail(
                     Stage::Arm,
                     format!("KC-16: entry {i}: the stream clock is not on the primary root"),
@@ -1072,12 +1075,12 @@ impl RunHandle {
                 return None;
             }
             let product = (entry.at.offset_ticks as i128)
-                .checked_mul(clock.root_ticks_per_tick.num() as i128);
+                .checked_mul(clock.root_ticks_per_tick().num() as i128);
             let Some(product) = product else {
                 self.fail(Stage::Arm, format!("KC-16: entry {i}: overflow"));
                 return None;
             };
-            let denominator = clock.root_ticks_per_tick.den() as i128;
+            let denominator = clock.root_ticks_per_tick().den() as i128;
             let Some(rounded) = product
                 .checked_add(denominator - 1)
                 .map(|v| v / denominator)
@@ -1085,7 +1088,7 @@ impl RunHandle {
                 self.fail(Stage::Arm, format!("KC-16: entry {i}: overflow"));
                 return None;
             };
-            let Some(instant) = (t0.ticks as i128)
+            let Some(instant) = (t0 as i128)
                 .checked_add(rounded)
                 .filter(|v| *v >= i64::MIN as i128 && *v <= i64::MAX as i128)
                 .map(|v| v as i64)
@@ -1096,7 +1099,7 @@ impl RunHandle {
             resolved.push((instant, i, template, rewritten));
         }
         resolved.sort_by_key(|(instant, index, _, _)| (*instant, *index));
-        let now = self.shared.now();
+        let now = self.shared.now_ticks();
         let mut batch = Vec::new();
         for (instant, index, template, rewritten) in resolved {
             let timed = template.is_timed();
@@ -1121,13 +1124,13 @@ impl RunHandle {
                                 .unwrap_or(Duration::new(ClockDomainId::HOST_MONOTONIC, 0));
                             let ahead = Duration::new(
                                 self.shared.primary,
-                                instant.saturating_sub(now.ticks),
+                                instant.saturating_sub(now),
                             );
                             match self.shared.ctx.clocks.compare_durations(ahead, lead) {
                                 Ok(std::cmp::Ordering::Less) => {
                                     self.fail(Stage::Arm, format!(
                                         "KC-19: SC-27: entry {index}'s burst is {} ticks ahead, shorter than its target's min_command_lead",
-                                        instant.saturating_sub(now.ticks),
+                                        instant.saturating_sub(now),
                                     ));
                                     return None;
                                 }
@@ -1361,7 +1364,7 @@ pub(super) fn submit(
 ) -> Result<crate::session::LogEntry, super::RunHandleError> {
     let now = run.shared.now();
     run.log
-        .check_entry(&now, &action)
+        .check_entry(&action)
         .map_err(|error| super::RunHandleError::Malformed { error })?;
     let log_action = action.clone();
 
@@ -1575,7 +1578,7 @@ pub(super) fn run_child(
         .map_err(malformed)?,
     };
     run.log
-        .check_entry(&now, &action)
+        .check_entry(&action)
         .map_err(|error| super::RunHandleError::Malformed { error })?;
     if let Some(reason) = child_refusal(run, spec_doc, profile_doc, &assembly) {
         let entry = rejected(run, now, action, vec![violation("ezsdr.run_child", reason)])?;
@@ -1709,7 +1712,9 @@ fn session_earliest(
     let Ok((stream, Inst::Provider(index), _)) = rewrite_spec_target(shared, target) else {
         return Ok(now);
     };
-    let mut ticks = now.ticks;
+    let mut ticks = now.ticks_in(shared.primary).map_err(|error| {
+        violation("ezsdr.time", format!("KC-28: the Run's now is not in the primary root: {error}"))
+    })?;
     if let Some(lead) = shared.providers[index].lead {
         let lead = super::state::ceil_rescale(&shared.ctx.clocks, lead, shared.primary)
             .map_err(|error| {
@@ -1735,7 +1740,10 @@ fn session_earliest(
                     format!("RS-19: cannot resolve {stream}'s clock origin: {error}"),
                 )
             })?;
-        ticks = ticks.max(origin.ticks);
+        let origin = origin.ticks_in(shared.primary).map_err(|error| {
+            violation("ezsdr.time", format!("RS-19: {stream}'s clock origin: {error}"))
+        })?;
+        ticks = ticks.max(origin);
     }
     Ok(TimePoint::new(shared.primary, ticks))
 }
@@ -1844,9 +1852,9 @@ pub(super) fn rewrite_spec_target(
                 .collect::<Vec<_>>()
                 .join("/");
             let path = if suffix.is_empty() {
-                node.path.clone()
+                node.path().to_owned()
             } else {
-                format!("{}/{suffix}", node.path)
+                format!("{}/{suffix}", node.path())
             };
             let rewritten = ResourceId::parse(&path)
                 .map_err(|_| format!("KC-23: {target} names no resource, output or component"))?;

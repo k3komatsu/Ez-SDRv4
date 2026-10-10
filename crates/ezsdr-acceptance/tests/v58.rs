@@ -48,7 +48,7 @@ fn v58_02_ten_virtual_seconds_run_faster_than_wall_clock() {
     let began = std::time::Instant::now();
     run.run_until_end(ezsdr_kernel::time::TimePoint::new(clock, T0 + 10_000_000_000)).unwrap();
     assert!(began.elapsed().as_secs() < 10);
-    assert!(run.now().ticks >= T0 + 10_000_000_000);
+    assert!(run.now().ticks_in(run.now().domain()).unwrap() >= T0 + 10_000_000_000);
     let manifest = run.finish();
     let stats = section(&manifest, "ezsdr.radio.mock.mock.stats");
     let samples = stats["rx_samples"].as_u64().unwrap();
@@ -147,7 +147,7 @@ fn v58_04_mock_events_reach_counters_policy_and_manifest() {
     let faults = json!({ "sim.faults": [{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }] });
     let manifest = complete(&spec, "x310-like", json!({ "id": "mock" }), faults.clone(), "v58-04", 160_000_000);
     let rows = &manifest.events.counters;
-    assert_eq!(rows.iter().find(|row| row.source.path == "mock/rx" && row.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).unwrap().count, 1);
+    assert_eq!(rows.iter().find(|row| row.source.path() == "mock/rx" && row.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).unwrap().count, 1);
     let events: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
     assert_eq!(events.len(), 1);
     // MR-37: the Mock raises it on the hot path, as a device's sample path would, so the
@@ -192,7 +192,7 @@ fn v58_06_injected_overflow_is_a_uhd_overflow() {
     assert_eq!(capture.continuity[0].gaps.len(), 1);
     let gap = &capture.continuity[0].gaps[0];
     assert_eq!(gap.cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
-    assert_eq!(gap.start.ticks, 1_000);
+    assert_eq!(gap.start.ticks_in(gap.start.domain()).unwrap(), 1_000);
     assert_eq!(gap.len, 50_000);
     assert_eq!(gap.lost, Some(50_000));
     assert_eq!(gap.link_dropped, 0);
@@ -240,7 +240,7 @@ fn v58_06_sequence_error_is_seq_discontinuity() {
     let gaps = &artifact(&manifest, "rec").continuity[0].gaps;
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].cause, ezsdr_kernel::stream::GapCause::SequenceError {});
-    assert_eq!(gaps[0].start.ticks, 1_000);
+    assert_eq!(gaps[0].start.ticks_in(gaps[0].start.domain()).unwrap(), 1_000);
     assert_eq!(gaps[0].len, 2_000);
     assert_eq!(gaps[0].lost, Some(2_000));
 }
@@ -255,7 +255,7 @@ fn v58_06_overflows_inside_a_gap_extend_the_recorded_loss() {
     let manifest = complete(&spec, "x310-like", json!({ "id": "mock" }), faults, "v58-06-overlap", 160_000_000);
     let gap = &artifact(&manifest, "rec").continuity[0].gaps[0];
     assert_eq!(gap.cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
-    assert_eq!(gap.start.ticks, 1_000);
+    assert_eq!(gap.start.ticks_in(gap.start.domain()).unwrap(), 1_000);
     assert_eq!(gap.len, 59_000);
     assert_eq!(gap.lost, Some(59_000));
 }
@@ -275,7 +275,7 @@ fn v58_07_manifest_records_every_input_and_output() {
         assert!(support::modules(&manifest).contains(&module));
     }
     for vocabulary in ["radio", "sim", "sink"] { assert!(manifest.vocabularies.keys().any(|id| id.as_str() == vocabulary)); }
-    for stream in ["mock/rx", "mock/tx"] { assert!(manifest.clocks.sample_clocks.iter().any(|clock| clock.stream.path == stream)); }
+    for stream in ["mock/rx", "mock/tx"] { assert!(manifest.clocks.sample_clocks.iter().any(|clock| clock.stream.path() == stream)); }
     assert_eq!(manifest.links.len(), manifest.plan.as_ref().unwrap().links.len());
     for name in ["ezsdr.radio.mock.mock.envelope", "ezsdr.radio.mock.mock.bursts", "ezsdr.radio.mock.mock.faults", "ezsdr.radio.mock.mock.rejected", "ezsdr.radio.mock.mock.stats", "ezsdr.radio.mock.mock.applied"] {
         assert!(manifest.sections.contains_key(&ezsdr_kernel::spec::Namespace::parse(name).unwrap()), "missing section {name}");
@@ -314,8 +314,8 @@ fn v58_11_short_lead_burst_is_a_time_error() {
     assert_eq!(events[0].payload["late_by_ns"], 49_000_000);
     assert_eq!(events[0].payload["target"]["ticks"], -49_000);
     let burst: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(section(&manifest, "ezsdr.radio.mock.mock.bursts")[0].clone()).unwrap();
-    assert_eq!(burst.late_by.unwrap().ticks, 49_000_000);
-    assert_eq!(burst.target.ticks, 0);
+    assert_eq!(burst.late_by.unwrap().ticks_in(burst.late_by.unwrap().domain()).unwrap(), 49_000_000);
+    assert_eq!(burst.target.ticks_in(burst.target.domain()).unwrap(), 0);
 }
 
 #[test]
@@ -331,7 +331,7 @@ fn v58_11_19_5_msps_is_coerced_to_20() {
     assert_eq!(preview.coercion.requested, Value::Num(19.5e6));
     assert_eq!(preview.coercion.applied, Value::Num(20.0e6));
     assert_eq!(manifest.prepare.reports[0].effective[&Key::parse("radio.rx.sample_rate_hz").unwrap()], Value::Num(20.0e6));
-    let rx = manifest.clocks.sample_clocks.iter().find(|clock| clock.stream.path == "mock/rx").unwrap();
+    let rx = manifest.clocks.sample_clocks.iter().find(|clock| clock.stream.path() == "mock/rx").unwrap();
     assert_eq!((rx.nominal_rate.num(), rx.nominal_rate.den()), (20_000_000, 1));
 
     let refused_spec = experiments::receive(1, 19.5e6, 1.0e9, Some(1_000));
@@ -386,7 +386,7 @@ fn v58_13_session_manifest_has_log_waveform_and_capture() {
     assert_eq!(bursts[0].end, ezsdr_kernel::stream::BurstEnd::Stop);
     // RS-19: the untimed repeat is admitted at the new clock's origin, not before it, so it
     // starts there on time.
-    assert_eq!((bursts[0].target.ticks, bursts[0].late_by), (0, None));
+    assert_eq!((bursts[0].target.ticks_in(bursts[0].target.domain()).unwrap(), bursts[0].late_by), (0, None));
     assert!(!manifest.events.delivered.iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR));
 }
 
@@ -420,9 +420,9 @@ fn v58_13_a_session_stop_of_the_recorder_keeps_a_partial_capture() {
     // The Stop finished the recording capture with what it held — samples 1 000 to
     // 9 999, delivered before T0 + 10 ms — and the Sink went on to serve the next one.
     assert!(stopped.partial);
-    assert_eq!((stopped.continuity[0].first.ticks, stopped.continuity[0].end.ticks, stopped.size_bytes), (1_000, 10_000, 72_000));
+    assert_eq!((stopped.continuity[0].first.ticks_in(stopped.continuity[0].first.domain()).unwrap(), stopped.continuity[0].end.ticks_in(stopped.continuity[0].end.domain()).unwrap(), stopped.size_bytes), (1_000, 10_000, 72_000));
     assert!(!later.partial);
-    assert_eq!((later.continuity[0].first.ticks, later.size_bytes), (11_000, 8_000));
+    assert_eq!((later.continuity[0].first.ticks_in(later.continuity[0].first.domain()).unwrap(), later.size_bytes), (11_000, 8_000));
     assert_eq!(manifest.action_log.len(), 3);
     // HD-15: the partial capture is a Recording too, and says it is partial.
     let data = stopped.uri.strip_prefix("file://").unwrap();
@@ -638,7 +638,7 @@ fn kd_01_a_faulted_round_does_not_depend_on_fragment_names() {
         let manifest = finish_at(run, clock, T0 + 25_000_000);
         let mut lost: Vec<_> = manifest.events.delivered.iter()
             .filter(|event| event.kind.as_str() == EventKind::DEVICE_LOST)
-            .map(|event| event.source.path.clone())
+            .map(|event| event.source.path())
             .collect();
         lost.sort();
         assert_eq!(lost, ["dev_rx", "dev_tx"], "tx {tx}, rx {rx}");
@@ -659,18 +659,18 @@ fn kg_07_a_burst_at_t0_plus_n_samples_is_exact() {
         environment["ezsdr.time"] = json!({ "class": "simulation", "start_lead_ns": start_lead_ns });
         let profile = rig::link_profile("ideal", "a", "b", false, &temp.0, environment);
         let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
-        let t0 = run.start_instant().unwrap().ticks;
+        let t0 = run.start_instant().unwrap().ticks_in(run.start_instant().unwrap().domain()).unwrap();
         let clock = root(&run);
         let manifest = finish_at(run, clock, T0 + 25_000_000);
         let capture = rig::read_capture(artifact(&manifest, "rec"), 1).remove(0);
         let first = capture.iter().position(|sample| *sample != (0.0, 0.0)).unwrap();
         let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "ezsdr.radio.mock.dev_tx.bursts").clone()).unwrap();
         let burst = &bursts[0];
-        let tx = manifest.clocks.sample_clocks.iter().find(|record| record.domain == burst.target.domain).unwrap();
+        let tx = manifest.clocks.sample_clocks.iter().find(|record| record.domain == burst.target.domain()).unwrap();
         let ratio = tx.root_ticks_per_tick;
         assert_eq!(ratio.den(), 1);
-        assert_eq!(tx.origin.ticks % ratio.num() as i64, 0, "the transmit origin is on its lattice");
-        let target = tx.origin.ticks + burst.target.ticks * ratio.num() as i64;
+        assert_eq!(tx.origin.ticks_in(tx.origin.domain()).unwrap() % ratio.num() as i64, 0, "the transmit origin is on its lattice");
+        let target = tx.origin.ticks_in(tx.origin.domain()).unwrap() + burst.target.ticks_in(burst.target.domain()).unwrap() * ratio.num() as i64;
         (first, target - t0, burst.requested_target.is_some(), burst.late_by.is_some())
     };
     for lead in [2_000_000_000, 2_000_000_500] {
@@ -755,7 +755,7 @@ fn v58_08_a_session_hears_a_burst_from_its_first_sample_in_either_instance_order
         assert!(entries.iter().chain([&burst, &stop]).all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
         let manifest = end_session(run, clock, T0 + 8_000_000);
         let capture = artifact(&manifest, "rec_0");
-        (capture.continuity[0].first.ticks, rig::read_capture(capture, 1).remove(0))
+        (capture.continuity[0].first.ticks_in(capture.continuity[0].first.domain()).unwrap(), rig::read_capture(capture, 1).remove(0))
     };
     let (first_a, capture_a) = run("a");
     let (first_z, capture_z) = run("z");
@@ -787,7 +787,7 @@ fn v57_a_software_loopback_session_captures_what_it_transmits() {
     assert!(entries.iter().all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
     let manifest = end_session(run, clock, T0 + 20_000_000);
     let capture = artifact(&manifest, "rec_0");
-    let first = capture.continuity[0].first.ticks;
+    let first = capture.continuity[0].first.ticks_in(capture.continuity[0].first.domain()).unwrap();
     let received = rig::read_capture(capture, 1).remove(0);
     assert_eq!(received.len(), 5_000);
     for (index, sample) in received.iter().enumerate() {

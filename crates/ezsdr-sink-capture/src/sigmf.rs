@@ -26,15 +26,20 @@ pub fn sigmf_meta(
         SC16_CONTRACT => "ci16_le",
         other => return Err(format!("HD-15: contract {other} has no SigMF datatype")),
     };
-    let first = i128::from(map.first.ticks);
-    let gap_end =
-        |gap: &ezsdr_kernel::stream::Gap| i128::from(gap.start.ticks) + i128::from(gap.len);
+    // Every instant of the map is in the map's own SampleClock (SC-12).
+    let tick = |t: ezsdr_kernel::time::TimePoint| {
+        t.ticks_in(map.domain).map_err(|e| format!("HD-15: {e}"))
+    };
+    let first = i128::from(tick(map.first)?);
+    let gap_end = |gap: &ezsdr_kernel::stream::Gap| -> Result<i128, String> {
+        Ok(i128::from(tick(gap.start)?) + i128::from(gap.len))
+    };
     let file_index = |tick: i64| -> Result<u64, String> {
         let tick = i128::from(tick);
         let skipped: i128 = map
             .gaps
             .iter()
-            .filter(|gap| gap_end(gap) <= tick)
+            .filter(|gap| gap_end(gap).is_ok_and(|end| end <= tick))
             .map(|gap| i128::from(gap.len))
             .sum();
         u64::try_from(tick - first - skipped)
@@ -47,26 +52,26 @@ pub fn sigmf_meta(
     };
 
     let mut captures = Vec::new();
-    let mut run_start = i128::from(map.first.ticks);
+    let mut run_start = first;
     for gap in &map.gaps {
-        if i128::from(gap.start.ticks) > run_start {
+        if i128::from(tick(gap.start)?) > run_start {
             captures.push(segment(run_start as i64)?);
         }
-        run_start = gap_end(gap);
+        run_start = gap_end(gap)?;
     }
-    if i128::from(map.end.ticks) > run_start {
+    if i128::from(tick(map.end)?) > run_start {
         captures.push(segment(run_start as i64)?);
     }
     let gaps = map
         .gaps
         .iter()
         .map(|gap| {
-            let after = i64::try_from(gap_end(gap)).map_err(|_| {
+            let after = i64::try_from(gap_end(gap)?).map_err(|_| {
                 format!("HD-15: a gap of {} samples leaves the tick range", gap.len)
             })?;
             Ok(serde_json::json!({
                 "sample_start": file_index(after)?,
-                "global_index": gap.start.ticks,
+                "global_index": tick(gap.start)?,
                 "len": gap.len,
                 "lost": gap.lost,
                 "cause": gap.cause,
@@ -80,14 +85,14 @@ pub fn sigmf_meta(
         .map(|segments| {
             segments
                 .iter()
-                .map(|s| Ok(serde_json::json!({ "sample_start": file_index(s.start.ticks)?, "sample_count": s.len })))
+                .map(|s| Ok(serde_json::json!({ "sample_start": file_index(tick(s.start)?)?, "sample_count": s.len })))
                 .collect::<Result<Vec<_>, String>>()
         })
         .collect::<Result<Vec<_>, String>>()?;
     let mut channel_gaps = map
         .channel_gaps
         .iter()
-        .map(|g| Ok((file_index(g.start.ticks)?, g)))
+        .map(|g| Ok((file_index(tick(g.start)?)?, g)))
         .collect::<Result<Vec<_>, String>>()?;
     // The builder emits a channel's break when it closes, so a short break on a high
     // channel can precede a long one below it; SigMF requires start order.

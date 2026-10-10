@@ -112,7 +112,7 @@ pub(super) fn admit_with(
         let (Some(Inst::Provider(_)), Some(_)) = (inst, fragment.as_ref()) else {
             return Err(vec![violation(
                 "ezsdr.target",
-                format!("SC-23: {} is not a Provider stream", target.path),
+                format!("SC-23: {} is not a Provider stream", target.path()),
             )]);
         };
         let Some(record) = shared.running_clock(target) else {

@@ -645,9 +645,12 @@ fn lower_tick(
     let Some(at) = at else {
         return Ok(None);
     };
-    Ok(Some(match clocks.convert(at.time_point, header.first_sample_time.domain)? {
-        Converted::Exact { point } => point.ticks,
-        Converted::Inexact { floor, .. } => floor.ticks.checked_add(1).ok_or(TimeError::Overflow)?,
+    let clock = header.first_sample_time.domain();
+    Ok(Some(match clocks.convert(at.time_point, clock)? {
+        Converted::Exact { point } => point.ticks_in(clock)?,
+        Converted::Inexact { floor, .. } => {
+            floor.ticks_in(clock)?.checked_add(1).ok_or(TimeError::Overflow)?
+        }
     }))
 }
 
@@ -657,7 +660,9 @@ fn sample_at_or_after(from: usize, header: &BlockHeader, lower: Option<i64>) -> 
     let Some(lower) = lower else {
         return Some(from);
     };
-    let relative = i128::from(lower) - i128::from(header.first_sample_time.ticks);
+    let t = header.first_sample_time;
+    let first = t.ticks_in(t.domain()).ok()?; // own domain: HD-10 reads in the block's SampleClock
+    let relative = i128::from(lower) - i128::from(first);
     if relative >= i128::from(header.len) {
         return None;
     }
@@ -674,7 +679,9 @@ fn clip_leading_gap(header: &mut BlockHeader, lower: Option<i64>) {
     if !header.flags.contains(BlockFlags::GAP_BEFORE) {
         return;
     }
-    let inside = lower.map_or(0, |lower| header.first_sample_time.ticks.saturating_sub(lower).max(0) as u64);
+    let t = header.first_sample_time;
+    let first = t.ticks_in(t.domain()).unwrap_or_default(); // own domain: HD-10 reads in the block's SampleClock
+    let inside = lower.map_or(0, |lower| first.saturating_sub(lower).max(0) as u64);
     if inside > 0 {
         header.lost = header.lost.map(|lost| lost.min(inside));
         return;
@@ -689,7 +696,7 @@ fn sliced_header(header: &BlockHeader, from: usize, len: usize) -> Result<BlockH
         .map_err(|error| ModuleError::rejected(format!("HD-10: sample offset is invalid: {error}")))?;
     let first_sample_time = header
         .first_sample_time
-        .checked_add(Duration::new(header.first_sample_time.domain, offset))
+        .checked_add(Duration::new(header.first_sample_time.domain(), offset))
         .map_err(|error| ModuleError::rejected(format!("HD-10: sample time is invalid: {error}")))?;
     let len = u32::try_from(len)
         .map_err(|error| ModuleError::rejected(format!("HD-10: overlap length is invalid: {error}")))?;
@@ -711,7 +718,7 @@ fn push_continuity(
     carry: DropCarry,
 ) -> Result<(), ModuleError> {
     if capture.builder.is_none() {
-        let domain = header.first_sample_time.domain;
+        let domain = header.first_sample_time.domain();
         let channels = header.channels;
         capture.builder = Some((ContinuityBuilder::new(domain, channels, false), domain, channels));
     }
@@ -727,7 +734,7 @@ fn push_continuity(
             // SC-30c: the rejected push left its carry with the outgoing builder.
             let (previous, _, _) = capture.builder.take().expect("a continuity builder exists");
             capture.builders.push(previous.finish(DropCarry::default()));
-            let domain = header.first_sample_time.domain;
+            let domain = header.first_sample_time.domain();
             let channels = header.channels;
             let mut next = ContinuityBuilder::new(domain, channels, false);
             next.push(header, DropCarry::default())

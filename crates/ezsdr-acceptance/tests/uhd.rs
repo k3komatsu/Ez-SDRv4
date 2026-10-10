@@ -42,14 +42,14 @@ fn uhd_session(temp: &rig::TempDir) -> RunHandle {
     let profile = rig::uhd_profile(&temp.0, true, envelope());
     let mut run = coordinator::connect(&profile, rig::assemble_on(&profile, BTreeMap::new(), fake()), Lease::attached()).expect("Session connects");
     let t0 = run.start_instant().expect("a start instant");
-    run.advance_to(TimePoint::new(t0.domain, t0.ticks + MS)).unwrap();
+    run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + MS)).unwrap();
     run
 }
 
 /// Runs a Spec Run for `ms` after T0, in the device's time, and finishes it.
 fn finish_after(mut run: RunHandle, ms: i64) -> Manifest {
     let t0 = run.start_instant().expect("a start instant");
-    let _ = run.run_until_end(TimePoint::new(t0.domain, t0.ticks + ms * MS));
+    let _ = run.run_until_end(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + ms * MS));
     run.finish()
 }
 
@@ -60,7 +60,7 @@ fn written() -> EventKind {
 /// Waits up to three seconds of the device's time for the next capture the Session writes.
 fn wait_capture(run: &mut RunHandle, from: usize) {
     let now = run.now();
-    let found = run.wait_for(&[written()], from, TimePoint::new(now.domain, now.ticks + 3_000 * MS)).unwrap();
+    let found = run.wait_for(&[written()], from, TimePoint::new(now.domain(), now.ticks_in(now.domain()).unwrap() + 3_000 * MS)).unwrap();
     assert!(found.is_some(), "no capture was written");
 }
 
@@ -132,7 +132,7 @@ fn uhd_59_receive_capture_starts_at_the_requested_index() {
     let temp = rig::TempDir::new("uhd-59-index");
     let manifest = finish_after(uhd_spec_run(&temp, &spec, BTreeMap::new()), 100);
     let map = &capture_artifact(&manifest).continuity[0];
-    assert_eq!((map.first.ticks, map.end.ticks), (50_000, 60_000));
+    assert_eq!((map.first.ticks_in(map.first.domain()).unwrap(), map.end.ticks_in(map.end.domain()).unwrap()), (50_000, 60_000));
 }
 
 #[test]
@@ -147,9 +147,9 @@ fn uhd_59_a_scheduled_burst_is_recorded() {
     let bursts: Vec<BurstRecord> = serde_json::from_value(section(&manifest, "ezsdr.radio.uhd.usrp.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1, "{bursts:?}");
     assert_eq!(bursts[0].samples, 1_000);
-    let clock = manifest.clocks.sample_clocks.iter().find(|r| r.domain == bursts[0].target.domain).expect("the burst's SampleClock");
+    let clock = manifest.clocks.sample_clocks.iter().find(|r| r.domain == bursts[0].target.domain()).expect("the burst's SampleClock");
     let n = clock.root_ticks_per_tick.num() as i64;
-    assert_eq!(clock.origin.ticks + bursts[0].target.ticks * n, t0.ticks + 5_000 * n, "5 000 samples after T0");
+    assert_eq!(clock.origin.ticks_in(clock.origin.domain()).unwrap() + bursts[0].target.ticks_in(bursts[0].target.domain()).unwrap() * n, t0.ticks_in(t0.domain()).unwrap() + 5_000 * n, "5 000 samples after T0");
     assert!(!manifest.events.delivered.iter().any(|e| e.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR));
 }
 
@@ -184,7 +184,7 @@ fn uhd_57_the_session_loopback_captures_what_it_transmits() {
     let from = run.events(0).len();
     let now = run.now();
     // Ahead of the Run's time, past the repeat's restart lead (EA-17, UR-25).
-    admitted(&mut run, capture(3_000, Some(TimePoint::new(now.domain, now.ticks + 100 * MS))), None);
+    admitted(&mut run, capture(3_000, Some(TimePoint::new(now.domain(), now.ticks_in(now.domain()).unwrap() + 100 * MS))), None);
     wait_capture(&mut run, from);
     let manifest = run.finish();
     let captured = samples(capture_artifact(&manifest));
@@ -217,18 +217,18 @@ fn uhd_61_02_capture_starts_at_the_requested_sample_index() {
     let temp = rig::TempDir::new("uhd-61-02");
     let mut run = uhd_session(&temp);
     // The receive SampleClock is registered at its first block (RM-25, UR-17).
-    let first_block = TimePoint::new(run.now().domain, run.now().ticks + 10 * MS);
+    let first_block = TimePoint::new(run.now().domain(), run.now().ticks_in(run.now().domain()).unwrap() + 10 * MS);
     run.advance_to(first_block).unwrap();
     let rx = run.sample_clocks().into_iter().find(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).expect("the receive SampleClock");
     let n = rx.root_ticks_per_tick.num() as i64;
     // A sample index 100 ms ahead of the Run's time (v3's capture at a sample index).
-    let index = (run.now().ticks - rx.origin.ticks) / n + 100_000;
+    let index = (run.now().ticks_in(run.now().domain()).unwrap() - rx.origin.ticks_in(rx.origin.domain()).unwrap()) / n + 100_000;
     let from = run.events(0).len();
     admitted(&mut run, capture(100, Some(TimePoint::new(rx.domain, index))), None);
     wait_capture(&mut run, from);
     let manifest = run.finish();
     let map = &capture_artifact(&manifest).continuity[0];
-    assert_eq!((map.first.ticks, map.end.ticks), (index, index + 100));
+    assert_eq!((map.first.ticks_in(map.first.domain()).unwrap(), map.end.ticks_in(map.end.domain()).unwrap()), (index, index + 100));
 }
 
 #[test]
@@ -240,6 +240,6 @@ fn uhd_61_03_timed_start_of_tx_and_capture() {
     let manifest = finish_after(uhd_spec_run(&temp, &spec, BTreeMap::from([(waveform.hash, bytes)])), 50);
     // The burst and the capture both start at sample 5 000 after T0: the capture is the burst.
     let capture = capture_artifact(&manifest);
-    assert_eq!(capture.continuity[0].valid[0][0].start.ticks, 5_000);
+    assert_eq!(capture.continuity[0].valid[0][0].start.ticks_in(capture.continuity[0].valid[0][0].start.domain()).unwrap(), 5_000);
     assert_eq!(samples(capture), wave);
 }

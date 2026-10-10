@@ -47,8 +47,8 @@ pub(crate) fn ns_to_v(
     ns: i64,
 ) -> Result<i64, TimeError> {
     match clocks.rescale(Duration::new(ClockDomainId::HOST_MONOTONIC, ns), v)? {
-        Rescaled::Exact { duration } => Ok(duration.ticks),
-        Rescaled::Inexact { floor, .. } => floor.ticks.checked_add(1).ok_or(TimeError::Overflow),
+        Rescaled::Exact { duration } => duration.ticks_in(v),
+        Rescaled::Inexact { floor, .. } => floor.ticks_in(v)?.checked_add(1).ok_or(TimeError::Overflow),
     }
 }
 
@@ -58,20 +58,21 @@ pub(crate) fn to_v(
     v: ClockDomainId,
     time: TimePoint,
 ) -> Result<i64, TimeError> {
-    if time.domain == v {
-        return Ok(time.ticks);
+    if let Ok(ticks) = time.ticks_in(v) {
+        return Ok(ticks);
     }
     match clocks.convert(time, v)? {
-        Converted::Exact { point } => Ok(point.ticks),
-        Converted::Inexact { floor, .. } => floor.ticks.checked_add(1).ok_or(TimeError::Overflow),
+        Converted::Exact { point } => point.ticks_in(v),
+        Converted::Inexact { floor, .. } => floor.ticks_in(v)?.checked_add(1).ok_or(TimeError::Overflow),
     }
 }
 
 /// Converts a duration to host nanoseconds, rounding an inexact result up (MR-17).
 pub(crate) fn to_ns(clocks: &ClockRegistry, duration: Duration) -> Result<i64, TimeError> {
-    match clocks.rescale(duration, ClockDomainId::HOST_MONOTONIC)? {
-        Rescaled::Exact { duration } => Ok(duration.ticks),
-        Rescaled::Inexact { floor, .. } => floor.ticks.checked_add(1).ok_or(TimeError::Overflow),
+    let host = ClockDomainId::HOST_MONOTONIC;
+    match clocks.rescale(duration, host)? {
+        Rescaled::Exact { duration } => duration.ticks_in(host),
+        Rescaled::Inexact { floor, .. } => floor.ticks_in(host)?.checked_add(1).ok_or(TimeError::Overflow),
     }
 }
 

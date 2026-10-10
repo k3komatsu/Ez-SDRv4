@@ -817,10 +817,10 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
         violations.push(format!("lost at {lost_at:?}, not at the sequence's loss"));
     }
     Observed {
-        clocks: rx_clocks.iter().map(|r| (r.origin.ticks, r.ended_at.map(|t| t.ticks))).collect(),
+        clocks: rx_clocks.iter().map(|r| (r.origin.ticks_in(r.root).unwrap(), r.ended_at.map(|t| t.ticks_in(r.root).unwrap()))).collect(),
         blocks: headers.iter().map(|h| {
-            let clock = rx_clocks.iter().position(|r| r.domain == h.first_sample_time.domain).expect("a block on a receive clock");
-            (clock, (h.first_sample_time.ticks, h.len, h.flags, h.lost))
+            let clock = rx_clocks.iter().position(|r| r.domain == h.first_sample_time.domain()).expect("a block on a receive clock");
+            (clock, (h.first_sample_time.ticks_in(rx_clocks[clock].domain).unwrap(), h.len, h.flags, h.lost))
         }).collect(),
         stops: rec.applied.iter().filter(|r| r["key"] == "rx_stop").map(|r| (r["at"]["ticks"].as_i64().unwrap(), r["issued"]["ticks"].as_i64().unwrap())).collect(),
         refused: w.refused.clone(),

@@ -281,20 +281,20 @@ pub fn running(run: &RunHandle) {
 
 pub fn after(run: &RunHandle, ticks: i64) -> TimePoint {
     let now = run.now();
-    TimePoint::new(now.domain, now.ticks + ticks)
+    TimePoint::new(now.domain(), now.ticks_in(now.domain()).unwrap() + ticks)
 }
 
 /// Advances past T0, so that a Session's streams run (UR-15's start-up).
 pub fn past_t0(run: &mut RunHandle, extra: i64) {
     let t0 = run.start_instant().unwrap();
-    run.advance_to(TimePoint::new(t0.domain, t0.ticks + extra)).unwrap();
+    run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + extra)).unwrap();
 }
 
 /// Advances past the origin of the transmit clock a change from 0 channels registered,
 /// the start lead after it (RM-25; spec 22, VH-4), so that a burst sent then is on time.
 pub fn past_tx_origin(run: &mut RunHandle) {
-    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.path == "usrp/tx" && r.ended_at.is_none()).expect("a transmit clock");
-    let _ = run.advance_to(TimePoint::new(clock.origin.domain, clock.origin.ticks + ms(1)));
+    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.path() == "usrp/tx" && r.ended_at.is_none()).expect("a transmit clock");
+    let _ = run.advance_to(TimePoint::new(clock.origin.domain(), clock.origin.ticks_in(clock.root).unwrap() + ms(1)));
 }
 
 pub fn wait(run: &mut RunHandle, ticks: i64) {
@@ -394,7 +394,7 @@ pub fn calls(device: &FakeDevice, prefix: &str) -> Vec<String> {
 }
 
 pub fn tx_clock_origin(manifest: &Manifest, nth: usize) -> i64 {
-    manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/tx").unwrap()).nth(nth).unwrap().origin.ticks
+    manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/tx").unwrap()).nth(nth).unwrap().origin.ticks_in(manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/tx").unwrap()).nth(nth).unwrap().root).unwrap()
 }
 
 
@@ -497,7 +497,7 @@ pub fn rehearse_receive_at_t0(device: Arc<dyn Device>) -> Manifest {
     require_stream_timing(&manifest, "B3 receive at T0", false);
     assert!(matches!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} }), "{:?}", manifest.termination);
     let map = &capture_of(&manifest, "rec").continuity[0];
-    assert_eq!(map.first.ticks, 0, "the capture starts at receive sample 0");
+    assert_eq!(map.first.ticks_in(map.domain).unwrap(), 0, "the capture starts at receive sample 0");
     assert!(map.gaps.is_empty(), "{:?}", map.gaps);
     let first = section(&manifest, "timing").as_array().unwrap().iter().find(|r| r["what"] == "first_rx_block").cloned().unwrap();
     assert_eq!(first["index"], 0);
@@ -518,8 +518,8 @@ pub fn rehearse_capture_at_a_sample_index(device: Arc<dyn Device>) -> Manifest {
     let manifest = captured(spec_run(&spec, &bench_profile(&*device, &dir, json!({}), json!({}), false), device, BTreeMap::new()));
     require_stream_timing(&manifest, "B4 capture at an index", false);
     let map = &capture_of(&manifest, "rec").continuity[0];
-    assert_eq!(map.first.ticks, 50_000);
-    assert_eq!(map.end.ticks, 60_000);
+    assert_eq!(map.first.ticks_in(map.domain).unwrap(), 50_000);
+    assert_eq!(map.end.ticks_in(map.domain).unwrap(), 60_000);
     manifest
 }
 
@@ -654,5 +654,5 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
 
 pub fn after_ticks(run: &RunHandle, ticks: i64) -> TimePoint {
     let now = run.now();
-    TimePoint::new(now.domain, now.ticks + ticks)
+    TimePoint::new(now.domain(), now.ticks_in(now.domain()).unwrap() + ticks)
 }

@@ -67,7 +67,7 @@ fn hw_b2_authority() {
     let (time, root) = (authority.time(), authority.root());
     let mut late = Vec::new();
     for _ in 0..100 {
-        let at = TimePoint::new(root, time.now(root).unwrap().ticks + 2_000_000);
+        let at = TimePoint::new(root, time.now(root).unwrap().ticks_in(root).unwrap() + 2_000_000);
         time.schedule(at, Box::new(|_| {})).unwrap();
         let begun = Instant::now();
         authority.next_wakeup().unwrap();
@@ -80,9 +80,9 @@ fn hw_b2_authority() {
     println!("B2 relations: {}", serde_json::to_string_pretty(&relations).unwrap());
     assert_eq!(relations.len(), 2);
     let begun = Instant::now();
-    let (ours, theirs) = (time.now(root).unwrap().ticks, device.time_now().unwrap());
+    let (ours, theirs) = (time.now(root).unwrap().ticks_in(root).unwrap(), device.time_now().unwrap());
     std::thread::sleep(Wall::from_secs(10));
-    let drift = (time.now(root).unwrap().ticks - ours) - (device.time_now().unwrap() - theirs);
+    let drift = (time.now(root).unwrap().ticks_in(root).unwrap() - ours) - (device.time_now().unwrap() - theirs);
     println!("B2 anchor drift over {:?}: {drift} ticks", begun.elapsed());
 }
 
@@ -126,13 +126,13 @@ fn hw_b5_overflow() {
                     map.gaps.len(),
                     drops.len(),
                     drops.iter().map(|g| g.len).sum::<u64>(),
-                    drops.first().map(|g| g.start.ticks),
-                    drops.last().map(|g| g.start.ticks + g.len as i64)
+                    drops.first().map(|g| g.start.ticks_in(map.domain).unwrap()),
+                    drops.last().map(|g| g.start.ticks_in(map.domain).unwrap() + g.len as i64)
                 );
                 for gap in map.gaps.iter().filter(|g| g.cause != ezsdr_kernel::stream::GapCause::LinkDrop {}) {
-                    println!("B5 gap {:?} at receive sample {} for {} samples ({} ms at 10 Msps), lost {:?}", gap.cause, gap.start.ticks, gap.len, gap.len as f64 / 1e4, gap.lost);
+                    println!("B5 gap {:?} at receive sample {} for {} samples ({} ms at 10 Msps), lost {:?}", gap.cause, gap.start.ticks_in(map.domain).unwrap(), gap.len, gap.len as f64 / 1e4, gap.lost);
                 }
-                println!("B5 capture {} … {}, {} valid segment(s)", map.first.ticks, map.end.ticks, map.valid[0].len());
+                println!("B5 capture {} … {}, {} valid segment(s)", map.first.ticks_in(map.domain).unwrap(), map.end.ticks_in(map.domain).unwrap(), map.valid[0].len());
                 println!("B5 timing {}", section(&manifest, "timing"));
                 println!("B5 sample clocks: {:?}", manifest.clocks.sample_clocks);
                 for event in events_of(&manifest, "radio.RX_OVERFLOW") {
@@ -174,7 +174,7 @@ fn hw_b8_leads() {
         assert!(admitted(&run.submit(set("radio.tx.channels", ezsdr_kernel::spec::Value::Int(1)), None).unwrap()));
         let (bytes, _) = waveform_of(&pn(100));
         let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
-        let at = TimePoint::new(clock.domain, (run.now().ticks + lead_us * 200 - clock.origin.ticks).div_euclid(200) + 1);
+        let at = TimePoint::new(clock.domain, (run.now().ticks_in(clock.root).unwrap() + lead_us * 200 - clock.origin.ticks_in(clock.root).unwrap()).div_euclid(200) + 1);
         let _ = run.submit(verb("send", "radio/tx", Some(at), &[]), Some(&bytes));
         wait(&mut run, ms(100));
         let manifest = run.finish();
@@ -256,8 +256,8 @@ fn hw_b9_unplug_and_reopen() {
 fn lost_utc(manifest: &ezsdr_kernel::manifest::Manifest) -> String {
     let Some(event) = events_of(manifest, ezsdr_kernel::event::EventKind::DEVICE_LOST).into_iter().next() else { return "-".to_owned() };
     let utc = ezsdr_kernel::id::ClockDomainId::UTC;
-    match manifest.clocks.relations.iter().find(|r| r.source == event.time.domain && r.target == utc) {
-        Some(r) => format!("{:.3}", (r.offset.ticks + (event.time.ticks - r.measured_at.ticks) * 5) as f64 / 1e9),
+    match manifest.clocks.relations.iter().find(|r| r.source() == event.time.domain() && r.target() == utc) {
+        Some(r) => format!("{:.3}", (r.offset().ticks_in(r.offset().domain()).unwrap() + (event.time.ticks_in(event.time.domain()).unwrap() - r.measured_at().ticks_in(r.measured_at().domain()).unwrap()) * 5) as f64 / 1e9),
         None => "- (no relation to UTC)".to_owned(),
     }
 }
@@ -687,11 +687,11 @@ fn cold_change_capture(from: f64, to: f64, block_len: Option<u32>) {
     }
     let clocks: Vec<_> = manifest.clocks.sample_clocks.iter().filter(|r| r.stream.to_string().ends_with("usrp/rx")).collect();
     let (old, new) = (clocks[clocks.len() - 2], clocks[clocks.len() - 1]);
-    let e1_k = (old.ended_at.unwrap().ticks - old.origin.ticks) / old.root_ticks_per_tick.num() as i64;
+    let e1_k = (old.ended_at.unwrap().ticks_in(old.root).unwrap() - old.origin.ticks_in(old.root).unwrap()) / old.root_ticks_per_tick.num() as i64;
     assert_eq!(artifact.continuity.len(), 2, "{:?}", artifact.continuity);
-    assert_eq!(artifact.continuity[0].end.ticks, e1_k, "the old clock's samples end at e₁");
+    assert_eq!(artifact.continuity[0].end.ticks_in(artifact.continuity[0].domain).unwrap(), e1_k, "the old clock's samples end at e₁");
     assert_eq!(artifact.continuity[1].domain, new.domain);
-    assert_eq!(artifact.continuity[1].first.ticks, 0, "the new clock's samples begin at e₂");
+    assert_eq!(artifact.continuity[1].first.ticks_in(artifact.continuity[1].domain).unwrap(), 0, "the new clock's samples begin at e₂");
     assert!(artifact.continuity.iter().all(|m| m.gaps.is_empty()));
     assert!(late.is_empty(), "{late:?}");
 }
@@ -702,7 +702,7 @@ fn cold_change_capture(from: f64, to: f64, block_len: Option<u32>) {
 fn tx_at(run: &ezsdr_kernel::coordinator::RunHandle, lead: i64) -> TimePoint {
     let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
     let n = clock.root_ticks_per_tick.num() as i64;
-    TimePoint::new(clock.domain, (run.now().ticks + lead - clock.origin.ticks + n - 1).div_euclid(n))
+    TimePoint::new(clock.domain, (run.now().ticks_in(clock.root).unwrap() + lead - clock.origin.ticks_in(clock.root).unwrap() + n - 1).div_euclid(n))
 }
 
 fn tx_session(device: Arc<dyn Device>, dir: &TempDir) -> ezsdr_kernel::coordinator::RunHandle {
@@ -716,7 +716,7 @@ fn tx_session(device: Arc<dyn Device>, dir: &TempDir) -> ezsdr_kernel::coordinat
 /// The receive SampleClock's origin (root ticks) and root ticks a sample.
 fn rx_clock(manifest: &ezsdr_kernel::manifest::Manifest) -> (i64, i64) {
     let clock = manifest.clocks.sample_clocks.iter().find(|r| r.stream.to_string().ends_with("usrp/rx")).unwrap();
-    (clock.origin.ticks, clock.root_ticks_per_tick.num() as i64)
+    (clock.origin.ticks_in(clock.root).unwrap(), clock.root_ticks_per_tick.num() as i64)
 }
 
 #[test]
@@ -731,14 +731,14 @@ fn hw_b8_stop_end() {
         assert!(admitted(&run.submit(verb("start_repeat", "radio/tx", None, &[]), Some(&bytes)).unwrap()));
         let at = after_ticks(&run, ms(20));
         assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::Int(100_000))]), None).unwrap()));
-        let _ = run.advance_to(TimePoint::new(at.domain, at.ticks + ms(50)));
+        let _ = run.advance_to(TimePoint::new(at.domain(), at.ticks_in(at.domain()).unwrap() + ms(50)));
         let s = run.now();
         let _ = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap()) }, None);
         let horizon = after_ticks(&run, ms(3_000));
         let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
         let manifest = run.finish();
         let artifact = capture_of(&manifest, "rec");
-        let first = artifact.continuity[0].first.ticks;
+        let first = artifact.continuity[0].first.ticks_in(artifact.continuity[0].domain).unwrap();
         let samples = read_capture(&artifact, 1).remove(0);
         let power: Vec<f32> = samples.chunks(100).map(|c| c.iter().map(|(re, im)| re * re + im * im).sum::<f32>() / c.len() as f32).collect();
         let steady = power[..20].iter().sum::<f32>() / 20.0;
@@ -748,12 +748,12 @@ fn hw_b8_stop_end() {
         let heard_until = origin + (first + (last as i64 + 1) * 100 - 44) * per;
         println!(
             "B8 stop end, trial {trial}: Stop submitted at root {}; the loop heard the repeat until root {heard_until} ({:+.3} ms from the Stop); steady power {steady:.2e}, after {:.2e}; bursts {}",
-            s.ticks,
-            (heard_until - s.ticks) as f64 / TICKS_PER_MS as f64,
+            s.ticks_in(s.domain()).unwrap(),
+            (heard_until - s.ticks_in(s.domain()).unwrap()) as f64 / TICKS_PER_MS as f64,
             power[last + 2..].iter().sum::<f32>() / (power.len() - last - 2).max(1) as f32,
             section(&manifest, "bursts")
         );
-        println!("B8 stop end, trial {trial}: tx clocks {:?}", manifest.clocks.sample_clocks.iter().filter(|r| r.stream.to_string().ends_with("usrp/tx")).map(|r| (r.origin.ticks, r.root_ticks_per_tick.num())).collect::<Vec<_>>());
+        println!("B8 stop end, trial {trial}: tx clocks {:?}", manifest.clocks.sample_clocks.iter().filter(|r| r.stream.to_string().ends_with("usrp/tx")).map(|r| (r.origin.ticks_in(r.root).unwrap(), r.root_ticks_per_tick.num())).collect::<Vec<_>>());
     }
 }
 
@@ -774,7 +774,7 @@ fn hw_b8_preemption() {
         wait(&mut run, ms(100));
         let manifest = run.finish();
         println!("B8 preempt lead {lead_ms} ms: {:?}; TIME_ERROR {:?}", entry.outcome, events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>());
-        println!("B8 preempt lead {lead_ms} ms: asked {}; bursts {}", at.ticks, section(&manifest, "bursts"));
+        println!("B8 preempt lead {lead_ms} ms: asked {}; bursts {}", at.ticks_in(at.domain()).unwrap(), section(&manifest, "bursts"));
     }
 }
 
@@ -921,10 +921,10 @@ fn hw_b2_drift_60s() {
     let authority = DeviceAuthority::new(device.clone(), Arc::new(ClockRegistry::new()), "internal", "internal", &args()).unwrap();
     let (time, root) = (authority.time(), authority.root());
     let begun = Instant::now();
-    let (ours, theirs) = (time.now(root).unwrap().ticks, device.time_now().unwrap());
+    let (ours, theirs) = (time.now(root).unwrap().ticks_in(root).unwrap(), device.time_now().unwrap());
     for step in 1..=6 {
         std::thread::sleep(Wall::from_secs(10));
-        let (a, b) = (time.now(root).unwrap().ticks - ours, device.time_now().unwrap() - theirs);
+        let (a, b) = (time.now(root).unwrap().ticks_in(root).unwrap() - ours, device.time_now().unwrap() - theirs);
         println!("B2 drift after {:?}: host-derived {a} ticks, device {b} ticks, difference {} ticks ({:.2} ppm)", begun.elapsed(), a - b, (a - b) as f64 / b as f64 * 1e6);
         let _ = step;
     }
@@ -973,17 +973,17 @@ fn hw_b8_burst_at_a_sent_burst_s_end() {
         let (first, _) = waveform_of(&pn(30_000));
         assert!(admitted(&run.submit(verb("send", "radio/tx", Some(a), &[]), Some(&first)).unwrap()));
         let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
-        let a_end = clock.origin.ticks + (a.ticks + 30_000) * clock.root_ticks_per_tick.num() as i64;
-        while run.now().ticks < a_end - ms(8) {
+        let a_end = clock.origin.ticks_in(clock.root).unwrap() + (a.ticks_in(clock.domain).unwrap() + 30_000) * clock.root_ticks_per_tick.num() as i64;
+        while run.now().ticks_in(clock.root).unwrap() < a_end - ms(8) {
             wait(&mut run, ms(1) / 4);
         }
-        let b = TimePoint::new(a.domain, a.ticks + 30_000);
+        let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_000);
         let (second, _) = waveform_of(&pn(1_000));
         let entry = run.submit(verb("send", "radio/tx", Some(b), &[]), Some(&second)).unwrap();
         wait(&mut run, ms(60));
         let manifest = run.finish();
         println!("B8 burst at a sent burst's end, trial {trial}: {:?}; {} ms before A's end; TIME_ERROR {:?}; async {}; bursts {}",
-            entry.outcome, (a_end - entry.time.ticks) as f64 / TICKS_PER_MS as f64,
+            entry.outcome, (a_end - entry.time.ticks_in(entry.time.domain()).unwrap()) as f64 / TICKS_PER_MS as f64,
             events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>(),
             section(&manifest, "async"), section(&manifest, "bursts"));
         assert!(events_of(&manifest, "radio.TIME_ERROR").is_empty());
@@ -1100,13 +1100,13 @@ fn hw_b8_burst_one_sample_after_a_burst() {
         let (first, _) = waveform_of(&pn(30_000));
         assert!(admitted(&run.submit(verb("send", "radio/tx", Some(a), &[]), Some(&first)).unwrap()));
         let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
-        let a_end = clock.origin.ticks + (a.ticks + 30_000) * clock.root_ticks_per_tick.num() as i64;
+        let a_end = clock.origin.ticks_in(clock.root).unwrap() + (a.ticks_in(clock.domain).unwrap() + 30_000) * clock.root_ticks_per_tick.num() as i64;
         if late_booking {
-            while run.now().ticks < a_end - ms(8) {
+            while run.now().ticks_in(clock.root).unwrap() < a_end - ms(8) {
                 wait(&mut run, ms(1) / 4);
             }
         }
-        let b = TimePoint::new(a.domain, a.ticks + 30_001);
+        let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_001);
         let (second, _) = waveform_of(&pn(1_000));
         let entry = run.submit(verb("send", "radio/tx", Some(b), &[]), Some(&second)).unwrap();
         wait(&mut run, ms(80));

@@ -815,134 +815,8 @@ fn x7_non_local_ids_are_refused() {
         matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("X7: v4.0 accepts only node 0")),
         "{refused:?}"
     );
-    // Built in Rust, it reaches `validate`, which refuses it by X7's name — not as
-    // D85's "Island fragment id declared twice", which `{0,0}` beside `{7,0}` gave.
-    let spec = minimal_spec();
-    let fx = Fixture::new();
-    let p = TestProvider::new("radio", 2);
-    let providers = one_provider("radio", &p);
-    let mut profile = profile_binding(&["radio"]);
-    bind_exec(&mut profile);
-    let island = |node: u32| IslandDecl {
-        id: IslandId {
-            node: ezsdr_kernel::id::NodeId(node),
-            local: 0,
-        },
-        executor: id("exec"),
-        components: Vec::new(),
-        affinity: None,
-        rt_policy: None,
-    };
-    profile.placements.islands = vec![island(0), island(7)];
-    let refused = validate(&spec, &profile, &fx.inputs(&providers));
-    assert!(
-        matches!(&refused, Err(SpecError::Structural { reason }) if reason.starts_with("X7: island")),
-        "{refused:?}"
-    );
-    // And a descriptor the runtime hands in is checked the same way.
-    let mut fx2 = Fixture::new();
-    fx2.executors
-        .get_mut(&id("exec"))
-        .expect("exec")
-        .memory_domains = vec![MemoryDomainId {
-        node: ezsdr_kernel::id::NodeId(3),
-        local: 0,
-    }];
-    profile.placements.islands = vec![island(0)];
-    let refused = validate(&spec, &profile, &fx2.inputs(&providers));
-    assert!(
-        matches!(&refused, Err(SpecError::Structural { reason }) if reason.starts_with("X7: executor exec's memory domain")),
-        "{refused:?}"
-    );
-    // Every other Rust-value route `check_local_ids` covers, one at a time; each
-    // passed `validate` before and produced a Spec, plan or Manifest the Kernel's own
-    // deserialiser would then refuse.
-    let far = |path: &str| ezsdr_kernel::id::ResourceId {
-        node: ezsdr_kernel::id::NodeId(9),
-        path: path.to_owned(),
-    };
-    let far_domain = MemoryDomainId {
-        node: ezsdr_kernel::id::NodeId(9),
-        local: 0,
-    };
-    let mut scheduled = spec.clone();
-    scheduled.schedule.push(ScheduleEntry {
-        at: SpecTime {
-            clock: id("radio"),
-            offset_ticks: 0,
-        },
-        action: ezsdr_kernel::event::ActionTemplate::Stop {
-            target: Some(far("radio")),
-        },
-    });
-    let mut placed = profile.clone();
-    placed.placements.islands[0].components = vec![ComponentPlacement {
-        component: id("c"),
-        memory_domain: far_domain,
-    }];
-    let arms_far = TestProvider::new("radio", 2).arm_after(far("other"));
-    let far_sink = TestSink::new(
-        ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
-    )
-    .reading(vec![far_domain]);
-    let mut fx_sink = Fixture::new();
-    fx_sink.sinks = [(id("rec"), &far_sink as &dyn ezsdr_kernel::module_api::Sink)]
-        .into_iter()
-        .collect();
-    let mut fx_auth = Fixture::new();
-    for a in fx_auth.authorities.values_mut() {
-        a.governs.push(ezsdr_kernel::id::ClockDomainId {
-            node: ezsdr_kernel::id::NodeId(9),
-            local: 0,
-        });
-    }
-    // A Sink is read under its output's name only (SB-22), so the far Sink needs a slot.
-    let mut with_rec = spec.clone();
-    with_rec.outputs.push(output("rec"));
-    let mut rec_profile = profile.clone();
-    rec_profile
-        .bindings
-        .insert(id("rec"), bind("ezsdr.test.sink"));
-    let arms_providers = one_provider("radio", &arms_far);
-    let far_id = TestProvider::new("radio", 2).with_instance_id(far("radio"));
-    let far_node = TestProvider::new("radio", 2).with_line_id(0, far("radio/0"));
-    let far_node_providers = one_provider("radio", &far_node);
-    let far_id_providers = one_provider("radio", &far_id);
-    for (route, refused) in [
-        (
-            "the instance bound to radio has id node9:radio",
-            validate(&spec, &profile, &fx.inputs(&far_id_providers)),
-        ),
-        (
-            "the instance bound to radio declares node node9:radio/0",
-            validate(&spec, &profile, &fx.inputs(&far_node_providers)),
-        ),
-        (
-            "scheduled Action target",
-            validate(&scheduled, &profile, &fx.inputs(&providers)),
-        ),
-        (
-            "component c's memory domain",
-            validate(&spec, &placed, &fx.inputs(&providers)),
-        ),
-        (
-            "arms after",
-            validate(&spec, &profile, &fx.inputs(&arms_providers)),
-        ),
-        (
-            "output rec's Sink memory domain",
-            validate(&with_rec, &rec_profile, &fx_sink.inputs(&providers)),
-        ),
-        (
-            "governed domain",
-            validate(&spec, &profile, &fx_auth.inputs(&providers)),
-        ),
-    ] {
-        assert!(
-            matches!(&refused, Err(SpecError::Structural { reason }) if reason.starts_with("X7:") && reason.contains(route)),
-            "{route}: {refused:?}"
-        );
-    }
+    // A Rust caller cannot build one: `NodeId`'s field is private, so `LOCAL` and this
+    // deserialiser are its only values, and `validate` needs no X7 check of its own.
 }
 
 #[test]
@@ -1364,7 +1238,7 @@ fn sb_36_needs_resolves_across_instances() {
         &["peripheral", "radio"],
     );
     let result = validate(&across, &profile, &fx.inputs(&both)).expect("validates");
-    assert_eq!(result.matched[&id("peripheral_line")].path, "radio/0");
+    assert_eq!(result.matched[&id("peripheral_line")].path(), "radio/0");
     // But not onto an instance that was handed in under a name no resource binds: it
     // would never be prepared, armed or stopped (SB-22).
     let mut lone = across.clone();
@@ -1923,7 +1797,7 @@ fn sb_16_spec_time_resolves_at_arm() {
     match action {
         ezsdr_kernel::event::Action::TxBurst { at, .. } => {
             assert_eq!(at, deadline);
-            assert_eq!(at.time_point.domain, sample_clock);
+            assert_eq!(at.time_point.domain(), sample_clock);
         }
         other => panic!("expected a TxBurst, got {other:?}"),
     }
@@ -4408,9 +4282,9 @@ fn sb_05_constraint_values_are_scalars() {
 fn sb_03_resource_path_addresses_a_sub_resource() {
     let root = rid("radio");
     let channel = root.child("rx").expect("valid").child("0").expect("valid");
-    assert_eq!(channel.path, "radio/rx/0");
+    assert_eq!(channel.path(), "radio/rx/0");
     assert!(channel.is_within(&root));
-    assert_eq!(channel.parent().expect("has one").path, "radio/rx");
+    assert_eq!(channel.parent().expect("has one").path(), "radio/rx");
     assert_eq!(channel.segments().count(), 3);
     assert!(ezsdr_kernel::id::ResourceId::parse("radio//0").is_err());
     assert!(ezsdr_kernel::id::ResourceId::parse("radio/ rx").is_err());
@@ -5359,7 +5233,7 @@ fn sb_01_every_name_grammar_is_enforced_at_the_document_boundary() {
     }
     use ezsdr_kernel::contract::DataContractId;
     use ezsdr_kernel::event::EventKind;
-    use ezsdr_kernel::id::{ModuleId, NodeId, ResourceId};
+    use ezsdr_kernel::id::{ModuleId, ResourceId};
     let long = "a".repeat(257);
     let hex = "0".repeat(64);
     let good_hash = format!("sha256:{hex}");
@@ -5427,42 +5301,8 @@ fn sb_01_every_name_grammar_is_enforced_at_the_document_boundary() {
     }]);
     assert!(refusal(ExperimentSpec::from_json(&doc)).contains("SB-1"));
 
-    // A `ResourceId` handed in as a Rust value is checked by `validate`, because its
-    // fields are public: a tree with a node `rx 0` would otherwise reach a Manifest the
-    // Kernel's own deserialiser refuses — D91's class of defect, for the grammar.
-    let fx = Fixture::new();
-    let bad = TestProvider::new("radio", 2).with_instance_id(ResourceId {
-        node: NodeId::LOCAL,
-        path: "rx 0".to_owned(),
-    });
-    let providers = one_provider("radio", &bad);
-    let reason = refusal(validate(
-        &minimal_spec(),
-        &profile_binding(&["radio"]),
-        &fx.inputs(&providers),
-    ));
-    assert!(
-        reason.contains("SB-1: the instance bound to radio has id"),
-        "{reason}"
-    );
-    // And a node of its tree, which is where a Provider declares most of its paths.
-    let bad_node = TestProvider::new("radio", 2).with_line_id(
-        0,
-        ResourceId {
-            node: NodeId::LOCAL,
-            path: "rx 0".to_owned(),
-        },
-    );
-    let providers = one_provider("radio", &bad_node);
-    let reason = refusal(validate(
-        &minimal_spec(),
-        &profile_binding(&["radio"]),
-        &fx.inputs(&providers),
-    ));
-    assert!(
-        reason.contains("SB-1: the instance bound to radio declares node"),
-        "{reason}"
-    );
+    // A Rust caller cannot build an unparsed `ResourceId`: its fields are private and
+    // `parse`, `child` and `parent` are its only constructors (SB-1).
 }
 
 #[test]
@@ -5471,7 +5311,7 @@ fn sb_22_the_runtime_is_read_only_under_slot_names() {
     // The X7 sweep, SB-3's path check and the `sink` reservation used to walk every entry
     // handed in, so an unused descriptor could refuse a Run, while the need search had
     // already been restricted to the resource slots (finding D96).
-    use ezsdr_kernel::id::{NodeId, ResourceId};
+    use ezsdr_kernel::id::ResourceId;
     let spec = minimal_spec();
     let profile = profile_binding(&["radio"]);
     let mut fx = Fixture::new();
@@ -5489,17 +5329,11 @@ fn sb_22_the_runtime_is_read_only_under_slot_names() {
         id("ghost"),
         AuthorityDescriptor {
             module: mref("ezsdr.nobody"),
-            governs: vec![ClockDomainId {
-                node: NodeId(9),
-                local: 0,
-            }],
+            governs: vec![ClockDomainId::local(9)],
             pacing: Pacing::FreeRunning,
         },
     );
-    let ghost_sink = cf32_sink().reading(vec![MemoryDomainId {
-        node: NodeId(9),
-        local: 0,
-    }]);
+    let ghost_sink = cf32_sink().reading(Vec::new());
     fx.sinks = [(
         id("ghost"),
         &ghost_sink as &dyn ezsdr_kernel::module_api::Sink,
@@ -5507,13 +5341,10 @@ fn sb_22_the_runtime_is_read_only_under_slot_names() {
     .into_iter()
     .collect();
     let radio = TestProvider::new("radio", 2);
-    // Non-local, rooted at the reserved `sink` segment, and another Module version:
-    // every check that reads an instance would refuse it.
+    // Rooted at the reserved `sink` segment, and another Module version: every
+    // check that reads an instance would refuse it.
     let ghost = TestProvider::new("sink", 2)
-        .with_instance_id(ResourceId {
-            node: NodeId(9),
-            path: "sink".to_owned(),
-        })
+        .with_instance_id(ResourceId::parse("sink").expect("a path"))
         .with_module(ModuleRef {
             id: mid("ezsdr.test.provider"),
             version: ezsdr_kernel::module_api::Version::new(7, 0, 0),
@@ -6374,24 +6205,6 @@ fn sb_39_plan_reruns_the_structural_checks_and_refuses_a_stale_admission() {
             &limited_fx.inputs(&providers)
         ))
         .contains("exceeds the declared ceiling")
-    );
-    let mut far = clean.clone();
-    bind_exec(&mut far);
-    far.placements.islands.push(IslandDecl {
-        id: IslandId {
-            node: ezsdr_kernel::id::NodeId(7),
-            local: 0,
-        },
-        ..island(0, "exec")
-    });
-    assert!(
-        refusal(plan(
-            &spec,
-            &far,
-            &admission,
-            &fx.inputs(&providers)
-        ))
-        .contains("X7: island")
     );
     // A stale result: matched against one instance and planned against another whose
     // tree does not declare the node. "Every resource has a matched node" held, so the

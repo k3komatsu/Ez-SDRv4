@@ -633,7 +633,7 @@ fn ma_10_sub_resource_binding() {
     assert_eq!(
         nodes
             .iter()
-            .map(|node| node.id.path.as_str())
+            .map(|node| node.id.path())
             .collect::<Vec<_>>(),
         ["radio", "radio/0", "radio/1"],
         "the iterator preserves depth-first pre-order"
@@ -670,7 +670,7 @@ fn ma_10_resource_walk_is_depth_first_preorder() {
     assert_eq!(
         tree.walk()
             .iter()
-            .map(|node| node.id.path.as_str())
+            .map(|node| node.id.path())
             .collect::<Vec<_>>(),
         ["root", "root/a", "root/a/x", "root/b"]
     );
@@ -806,13 +806,13 @@ fn ma_37_descriptor_structural_validation() {
         "unregistered contract"
     );
 
-    let mut budget = component("a");
-    budget.timing.budget =
-        Some(RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 0)).expect("host"));
-    assert!(
-        budget.validate(&contracts).is_err(),
-        "a budget must be finite and positive"
-    );
+    // A positive budget is `RelativeBudget`'s own rule (TM-15), so a descriptor
+    // cannot carry another one; a zero budget in a document is refused there.
+    let mut zero = serde_json::to_value(component("a")).expect("serialises");
+    zero["timing"]["budget"] = serde_json::json!({
+        "duration": { "domain": ClockDomainId::HOST_MONOTONIC, "ticks": 0 }
+    });
+    assert!(serde_json::from_value::<ComponentDescriptor>(zero).is_err());
 
     // A descriptor never carries an AbsoluteDeadline: they are distinct types, and
     // the budget field will not hold one.

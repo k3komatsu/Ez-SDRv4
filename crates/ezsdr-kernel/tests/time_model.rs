@@ -317,8 +317,37 @@ fn tm_09_duration_nominal_rescale() {
 
 // ---------------------------------------------------------------- relations
 
-fn device_to_utc(dev: ClockDomainId, drift: f64, drift_uncertainty: f64) -> ClockRelation {
-    ClockRelation {
+/// `ClockRelation::new`'s arguments, so that a test can change one before building.
+#[derive(Clone)]
+struct Rel {
+    source: ClockDomainId,
+    target: ClockDomainId,
+    measured_at: TimePoint,
+    offset: TimePoint,
+    drift: f64,
+    drift_uncertainty: f64,
+    uncertainty: Duration,
+    valid: Validity,
+}
+
+impl Rel {
+    fn build(self) -> Result<ClockRelation, TimeError> {
+        ClockRelation::new(
+            self.source,
+            self.target,
+            self.measured_at,
+            self.offset,
+            self.drift,
+            self.drift_uncertainty,
+            self.uncertainty,
+            "test.poll".to_owned(),
+            self.valid,
+        )
+    }
+}
+
+fn device_to_utc_parts(dev: ClockDomainId, drift: f64, drift_uncertainty: f64) -> Rel {
+    Rel {
         source: dev,
         target: ClockDomainId::UTC,
         measured_at: TimePoint::new(dev, 200_000_000),
@@ -326,11 +355,85 @@ fn device_to_utc(dev: ClockDomainId, drift: f64, drift_uncertainty: f64) -> Cloc
         drift,
         drift_uncertainty,
         uncertainty: Duration::new(ClockDomainId::UTC, 50),
-        method: "test.poll".to_owned(),
         valid: Validity {
             from: TimePoint::new(dev, 0),
             to: Some(TimePoint::new(dev, 1 << 40)),
         },
+    }
+}
+
+fn device_to_utc(dev: ClockDomainId, drift: f64, drift_uncertainty: f64) -> ClockRelation {
+    device_to_utc_parts(dev, drift, drift_uncertainty).build().expect("a well-formed relation")
+}
+
+fn malformed(field: &'static str, why: &'static str) -> Result<ClockRelation, TimeError> {
+    Err(TimeError::Malformed { field, why })
+}
+
+#[test]
+fn tm_14_new_refuses_each_malformed_field_by_name() {
+    let (_reg, dev) = registry_with_device_root();
+    let utc = ClockDomainId::UTC;
+    let good = device_to_utc_parts(dev, 1e-6, 1e-8);
+    let with = |f: &dyn Fn(&mut Rel)| {
+        let mut rel = good.clone();
+        f(&mut rel);
+        rel.build()
+    };
+    let not_source = "is not in the source domain";
+    let not_target = "is not in the target domain";
+    let cases: Vec<(Result<ClockRelation, TimeError>, Result<ClockRelation, TimeError>)> = vec![
+        (with(&|r| r.measured_at = TimePoint::new(utc, 0)), malformed("measured_at", not_source)),
+        (with(&|r| r.valid.from = TimePoint::new(utc, 0)), malformed("valid.from", not_source)),
+        (with(&|r| r.valid.to = Some(TimePoint::new(utc, 0))), malformed("valid.to", not_source)),
+        (with(&|r| r.offset = TimePoint::new(dev, 0)), malformed("offset", not_target)),
+        (with(&|r| r.uncertainty = Duration::new(dev, 50)), malformed("uncertainty", not_target)),
+        (with(&|r| r.uncertainty = Duration::new(utc, -1)), malformed("uncertainty", "is negative")),
+        (with(&|r| r.drift = f64::NAN), malformed("drift", "is not finite")),
+        (with(&|r| r.drift = f64::INFINITY), malformed("drift", "is not finite")),
+        (with(&|r| r.drift = f64::NEG_INFINITY), malformed("drift", "is not finite")),
+        (with(&|r| r.drift_uncertainty = f64::NAN), malformed("drift_uncertainty", "is not finite")),
+        (with(&|r| r.drift_uncertainty = f64::INFINITY), malformed("drift_uncertainty", "is not finite")),
+        (with(&|r| r.drift_uncertainty = -1e-12), malformed("drift_uncertainty", "is negative")),
+        (
+            with(&|r| r.valid = Validity { from: TimePoint::new(dev, 10), to: Some(TimePoint::new(dev, 9)) }),
+            malformed("valid.to", "precedes valid.from"),
+        ),
+    ];
+    for (i, (got, want)) in cases.into_iter().enumerate() {
+        assert_eq!(got, want, "case {i}");
+    }
+    // The boundaries are accepted: zero bounds, a negative zero, and a one-instant window.
+    assert!(with(&|r| r.uncertainty = Duration::new(utc, 0)).is_ok());
+    assert!(with(&|r| r.drift_uncertainty = -0.0).is_ok());
+    assert!(with(&|r| r.valid = Validity { from: TimePoint::new(dev, 9), to: Some(TimePoint::new(dev, 9)) }).is_ok());
+    assert!(with(&|r| r.valid.to = None).is_ok());
+}
+
+#[test]
+fn tm_14_deserialising_goes_through_new() {
+    let (_reg, dev) = registry_with_device_root();
+    let good = serde_json::to_value(device_to_utc(dev, 1e-6, 1e-8)).expect("serialises");
+    let back: ClockRelation = serde_json::from_value(good.clone()).expect("a well-formed relation");
+    assert_eq!(back, device_to_utc(dev, 1e-6, 1e-8));
+    let utc = serde_json::to_value(ClockDomainId::UTC).unwrap();
+    let devj = serde_json::to_value(dev).unwrap();
+    // JSON carries no NaN or infinity, so the non-finite cases are `new`'s alone.
+    let cases = [
+        ("`measured_at` is not in the source domain", "/measured_at/domain", utc.clone()),
+        ("`valid.from` is not in the source domain", "/valid/from/domain", utc.clone()),
+        ("`valid.to` is not in the source domain", "/valid/to/domain", utc),
+        ("`offset` is not in the target domain", "/offset/domain", devj.clone()),
+        ("`uncertainty` is not in the target domain", "/uncertainty/domain", devj),
+        ("`uncertainty` is negative", "/uncertainty/ticks", (-1).into()),
+        ("`drift_uncertainty` is negative", "/drift_uncertainty", (-1e-9).into()),
+        ("`valid.to` precedes valid.from", "/valid/to/ticks", (-1).into()),
+    ];
+    for (want, at, value) in cases {
+        let mut doc = good.clone();
+        *doc.pointer_mut(at).expect(at) = value;
+        let err = serde_json::from_value::<ClockRelation>(doc).expect_err(want).to_string();
+        assert!(err.contains(want), "{err:?} does not name {want:?}");
     }
 }
 
@@ -342,26 +445,27 @@ fn tm_14_relation_converts_with_uncertainty() {
         .convert(&reg, TimePoint::new(root, 400_000_000))
         .expect("inside validity");
     assert_eq!(
-        got.nominal,
+        got.nominal(),
         TimePoint::new(ClockDomainId::UTC, 1_700_000_001_000_001_000)
     );
-    assert_eq!(got.uncertainty, Duration::new(ClockDomainId::UTC, 61));
+    assert_eq!(got.uncertainty(), Duration::new(ClockDomainId::UTC, 61));
 }
 
 #[test]
 fn tm_14_relation_refuses_negative_measurement_bounds() {
     let (reg, root) = registry_with_device_root();
     for ticks in [-100, -1, 0, 50] {
-        let mut rel = device_to_utc(root, 0.0, 1e-8);
-        rel.uncertainty = Duration::new(ClockDomainId::UTC, ticks);
-        // Test both the measurement and an instant whose drift error masks -1.
+        let mut parts = device_to_utc_parts(root, 0.0, 1e-8);
+        parts.uncertainty = Duration::new(ClockDomainId::UTC, ticks);
+        let rel = parts.build();
+        if ticks < 0 {
+            assert_eq!(rel, malformed("uncertainty", "is negative"));
+            continue;
+        }
+        // Both the measurement and an instant whose drift error would mask -1.
         for at in [200_000_000, 400_000_000] {
-            let result = rel.convert(&reg, TimePoint::new(root, at));
-            if ticks < 0 {
-                assert_eq!(result, Err(TimeError::Overflow));
-            } else {
-                assert!(result.unwrap().uncertainty.ticks > ticks);
-            }
+            let got = rel.as_ref().unwrap().convert(&reg, TimePoint::new(root, at)).unwrap();
+            assert!(got.uncertainty().ticks_in(ClockDomainId::UTC).unwrap() > ticks);
         }
     }
 }
@@ -391,11 +495,11 @@ fn tm_14_uncertainty_grows_with_elapsed_time() {
     let got = rel.convert(&reg, t).expect("inside validity");
     // 600e9 ns * 1e-8 = 6000 ns, plus the stored 50 ns and the rounding tick.
     assert_eq!(
-        got.uncertainty,
+        got.uncertainty(),
         Duration::new(ClockDomainId::UTC, 50 + 6_000 + 1)
     );
     assert!(
-        got.uncertainty.ticks > 5_000,
+        got.uncertainty().ticks_in(ClockDomainId::UTC).unwrap() > 5_000,
         "the bound must grow, not stay near 51 ns"
     );
 }
@@ -410,8 +514,8 @@ fn tm_14_zero_drift_uncertainty_is_constant() {
     let far = rel
         .convert(&reg, TimePoint::new(root, 200_000_000 + 600 * 200_000_000))
         .expect("valid");
-    assert_eq!(near.uncertainty, Duration::new(ClockDomainId::UTC, 51));
-    assert_eq!(far.uncertainty, near.uncertainty);
+    assert_eq!(near.uncertainty(), Duration::new(ClockDomainId::UTC, 51));
+    assert_eq!(far.uncertainty(), near.uncertainty());
 }
 
 // ---------------------------------------------------------------- deadlines
@@ -478,6 +582,112 @@ fn tm_15_deserialized_budget_preserves_the_host_domain_constraint() {
     }
 }
 
+#[test]
+fn tm_15_budget_must_be_positive() {
+    let host = ClockDomainId::HOST_MONOTONIC;
+    let refused = Err(TimeError::Malformed { field: "duration", why: "is not positive" });
+    for ticks in [0, -1, i64::MIN] {
+        assert_eq!(RelativeBudget::new(Duration::new(host, ticks)), refused, "{ticks} ticks");
+        let doc = serde_json::json!({ "duration": Duration::new(host, ticks) });
+        let err = serde_json::from_value::<RelativeBudget>(doc).expect_err("not positive");
+        assert!(err.to_string().contains("`duration` is not positive"), "{err}");
+    }
+    assert!(RelativeBudget::new(Duration::new(host, 1)).is_ok());
+}
+
+/// Every place `x.ticks_in(x.domain())` appears in a crate's `src/`, outside the time
+/// model itself, on a line without `// own domain: <why>` (TM-6, T3).
+fn own_domain_reads(text: &str) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    let mut hits = Vec::new();
+    let mut from = 0;
+    while let Some(i) = text[from..].find(".ticks_in(").map(|i| i + from) {
+        from = i + 1;
+        // The receiver: back over identifiers, dots, balanced brackets, and the
+        // whitespace of a `.` continuation.
+        let mut j = i;
+        let mut depth = 0;
+        while j > 0 {
+            let c = bytes[j - 1] as char;
+            match c {
+                ')' | ']' => depth += 1,
+                '(' | '[' if depth > 0 => depth -= 1,
+                _ if depth > 0 => {}
+                c if c.is_alphanumeric() || c == '_' || c == '.' => {}
+                c if c.is_whitespace() && text[j - 1..].trim_start().starts_with('.') => {}
+                _ => break,
+            }
+            j -= 1;
+        }
+        // The argument: up to the matching `)`.
+        let start = i + ".ticks_in(".len();
+        let mut depth = 1;
+        let mut k = start;
+        while k < bytes.len() && depth > 0 {
+            match bytes[k] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            k += 1;
+        }
+        let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let receiver = squash(&text[j..i]);
+        let argument = squash(&text[start..k.saturating_sub(1)]);
+        let line_start = text[..i].rfind('\n').map_or(0, |n| n + 1);
+        let line_end = text[i..].find('\n').map_or(text.len(), |n| n + i);
+        let marked = text[line_start..line_end].contains("// own domain: ");
+        if !receiver.is_empty() && argument == format!("{receiver}.domain()") && !marked {
+            hits.push(text[..i].matches('\n').count() + 1);
+        }
+    }
+    hits
+}
+
+#[test]
+fn tm_06_the_own_domain_detector_sees_the_pattern() {
+    assert_eq!(own_domain_reads("let t = x.ticks_in(x.domain());"), vec![1]);
+    assert_eq!(own_domain_reads("\nh.first.ticks_in( h.first.domain() )?"), vec![2]);
+    assert_eq!(own_domain_reads("now().ticks_in(now().domain())"), vec![1]);
+    assert_eq!(own_domain_reads("self.a\n    .ticks_in(self.a.domain())"), vec![2]);
+    assert!(own_domain_reads("x.ticks_in(root)").is_empty());
+    assert!(own_domain_reads("x.ticks_in(y.domain())").is_empty());
+    assert!(own_domain_reads("x.ticks_in(x.domain()); // own domain: a reason").is_empty());
+}
+
+#[test]
+fn tm_06_no_crate_reads_ticks_in_their_own_domain() {
+    // TM-6 and T3: a reader names the domain it expects; reading it off the value
+    // makes the check a ritual (issue #31). `time/` is the model itself.
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut files = Vec::new();
+    let mut dirs: Vec<_> = std::fs::read_dir(&crates)
+        .unwrap()
+        .map(|e| e.unwrap().path().join("src"))
+        .filter(|p| p.is_dir())
+        .collect();
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    let time_dir = crates.join("ezsdr-kernel").join("src").join("time");
+    let mut found = Vec::new();
+    for path in files.iter().filter(|p| !p.starts_with(&time_dir)) {
+        let text = std::fs::read_to_string(path).unwrap();
+        for line in own_domain_reads(&text) {
+            found.push(format!("{}:{line}", path.display()));
+        }
+    }
+    assert!(files.len() > 50, "the scan found the crates' sources");
+    assert!(found.is_empty(), "TM-6: ticks read in their own domain: {found:#?}");
+}
+
 // ---------------------------------------------------------------- registry and SampleClocks
 
 #[test]
@@ -486,18 +696,20 @@ fn tm_08_relation_rounding_does_not_saturate_at_two_to_the_63() {
     // 2^63 through and the cast then saturates to `i64::MAX` — a silently wrong
     // instant where TM-2 and TM-8 require an error.
     let (reg, root) = registry_with_device_root();
-    let mut rel = device_to_utc(root, 9_223_372_036_854_775_808.0, 0.0);
-    rel.offset = TimePoint::new(ClockDomainId::UTC, -100);
-    rel.measured_at = TimePoint::new(root, 0);
-    rel.uncertainty = Duration::new(ClockDomainId::UTC, 0);
+    let mut parts = device_to_utc_parts(root, 9_223_372_036_854_775_808.0, 0.0);
+    parts.offset = TimePoint::new(ClockDomainId::UTC, -100);
+    parts.measured_at = TimePoint::new(root, 0);
+    parts.uncertainty = Duration::new(ClockDomainId::UTC, 0);
+    let rel = parts.build().unwrap();
     assert_eq!(
         rel.convert(&reg, TimePoint::new(root, 1)),
         Err(TimeError::Overflow)
     );
 
     // The uncertainty term has the same boundary.
-    let mut rel = device_to_utc(root, 0.0, 9_223_372_036_854_775_808.0);
-    rel.measured_at = TimePoint::new(root, 0);
+    let mut parts = device_to_utc_parts(root, 0.0, 9_223_372_036_854_775_808.0);
+    parts.measured_at = TimePoint::new(root, 0);
+    let rel = parts.build().unwrap();
     assert_eq!(
         rel.convert(&reg, TimePoint::new(root, 1)),
         Err(TimeError::Overflow)
@@ -559,7 +771,7 @@ fn tm_16a_host_monotonic_accepts_a_callback_in_every_class() {
         let now = auth.now(host).expect("always governed");
         assert!(
             auth.schedule(
-                TimePoint::new(host, now.ticks + 1_000_000_000),
+                TimePoint::new(host, now.ticks_in(host).unwrap() + 1_000_000_000),
                 Box::new(|_| ())
             )
             .is_ok(),
@@ -577,7 +789,7 @@ fn tm_16c_schedule_and_now_agree_on_host_monotonic() {
     let (reg, root) = registry_with_device_root();
     let auth = ManualTimeAuthority::new(reg, root, &[], Pacing::Device).expect("authority");
     std::thread::sleep(std::time::Duration::from_millis(5));
-    let now = auth.now(host).expect("always governed").ticks;
+    let now = auth.now(host).expect("always governed").ticks_in(host).unwrap();
     assert!(now > 0, "the real clock has moved");
     assert!(matches!(
         auth.schedule(TimePoint::new(host, 0), Box::new(|_| ())),
@@ -618,6 +830,20 @@ fn tm_11_registry_allocates_monotonic_unique() {
 }
 
 #[test]
+fn tm_12_register_refuses_an_ended_domain() {
+    // TM-11 / TM-12: `end` is the only way to end a domain, so a domain handed in
+    // already ended is refused and the registry does not learn it.
+    let (reg, root) = registry_with_device_root();
+    let id = reg.allocate_id().unwrap();
+    let mut domain = ClockDomain::derived(id, root, rat(10, 1), 0);
+    domain.ended_at = Some(TimePoint::new(root, 5));
+    assert_eq!(reg.register(domain.clone()), Err(TimeError::Stopped));
+    assert!(!reg.is_registered(id));
+    domain.ended_at = None;
+    assert_eq!(reg.register(domain), Ok(()));
+}
+
+#[test]
 fn tm_12_duplicate_registration_is_error() {
     let (reg, root) = registry_with_device_root();
     assert_eq!(
@@ -633,18 +859,11 @@ fn tm_13a_sample_clock_declared_before_its_origin_exists() {
         .declare_sample_clock(stream("dev0/rx/0"), root, rat(10, 1))
         .expect("declared at prepare");
     // TM-13a: the id and the ratio exist now; the origin does not.
-    assert!(!reg.is_registered(handle.id));
-    assert_eq!(handle.root_ticks_per_tick, rat(10, 1));
-    // X7 / D91: a stream on another node is refused, because the record would reach
-    // a Manifest the Kernel's own deserialiser refuses.
-    let far = ezsdr_kernel::id::ResourceId {
-        node: ezsdr_kernel::id::NodeId(9),
-        path: "dev0/rx/0".to_owned(),
-    };
-    assert!(reg.declare_sample_clock(far, root, rat(10, 1)).is_err());
+    assert!(!reg.is_registered(handle.id()));
+    assert_eq!(handle.root_ticks_per_tick(), rat(10, 1));
     reg.register_sample_clock(&handle, 1_000_000_003)
         .expect("registered before the first block");
-    assert_eq!(reg.nominal_rate(handle.id), Ok(rat(20_000_000, 1)));
+    assert_eq!(reg.nominal_rate(handle.id()), Ok(rat(20_000_000, 1)));
     // A SampleClock hangs off a Root; naming a Derived domain is `NotARoot`.
     let not_a_root = derived(&reg, root, 10, 1, 0);
     assert_eq!(
@@ -703,29 +922,29 @@ fn tm_13c_sample_clock_new_id_on_rate_change() {
     reg.register_sample_clock(&a, 0).expect("registered");
 
     // A cold rate change: end the current clock and allocate a new id.
-    reg.end(a.id, TimePoint::new(root, 500)).expect("ends once");
+    reg.end(a.id(), TimePoint::new(root, 500)).expect("ends once");
     let b = reg
         .declare_sample_clock(s, root, rat(8, 1))
         .expect("declared");
     reg.register_sample_clock(&b, 500).expect("registered");
 
-    assert_ne!(a.id, b.id);
+    assert_ne!(a.id(), b.id());
     assert_eq!(
-        reg.get(a.id).expect("a").ended_at,
+        reg.get(a.id()).expect("a").ended_at,
         Some(TimePoint::new(root, 500))
     );
-    assert_eq!(reg.get(b.id).expect("b").ended_at, None);
+    assert_eq!(reg.get(b.id()).expect("b").ended_at, None);
     assert_eq!(
-        reg.end(a.id, TimePoint::new(root, 600)),
+        reg.end(a.id(), TimePoint::new(root, 600)),
         Err(TimeError::Stopped)
     );
 
     let records = reg.sample_clock_records();
     assert_eq!(records.len(), 2);
-    assert_eq!(records[0].domain, a.id);
+    assert_eq!(records[0].domain, a.id());
     assert_eq!(records[0].ended_at, Some(TimePoint::new(root, 500)));
     assert_eq!(records[0].origin, TimePoint::new(root, 0));
-    assert_eq!(records[1].domain, b.id);
+    assert_eq!(records[1].domain, b.id());
     assert_eq!(records[1].origin, TimePoint::new(root, 500));
     assert_eq!(records[1].nominal_rate, rat(25_000_000, 1));
 }
@@ -738,8 +957,8 @@ fn tm_13e_tx_origin_fixed_at_arm() {
         .expect("declared at prepare");
     // TM-13e: prepare precedes arm, so no origin exists yet; a plan-time admission
     // check compares leads only, which needs the nominal rate and not the origin.
-    assert!(!reg.is_registered(handle.id));
-    assert_eq!(handle.root_ticks_per_tick, rat(10, 1));
+    assert!(!reg.is_registered(handle.id()));
+    assert_eq!(handle.root_ticks_per_tick(), rat(10, 1));
 
     let arm_anchor = 4_000_000_000;
     let domain = reg
@@ -858,8 +1077,8 @@ fn tm_16_authority_order_and_now() {
         auth.schedule(
             TimePoint::new(root, at),
             Box::new(move |fired| {
-                let now = auth2.now(root).expect("governed").ticks;
-                log.lock().expect("lock").push((fired.ticks, now));
+                let now = auth2.now(root).expect("governed").ticks_in(root).unwrap();
+                log.lock().expect("lock").push((fired.ticks_in(root).unwrap(), now));
             }),
         )
         .expect("scheduled at or after now");
@@ -882,12 +1101,12 @@ fn tm_17_authority_nested_schedule() {
         auth.schedule(
             TimePoint::new(root, 10),
             Box::new(move |t| {
-                log.lock().expect("lock").push(t.ticks);
+                log.lock().expect("lock").push(t.ticks_in(root).unwrap());
                 let log = log.clone();
                 inner
                     .schedule(
                         TimePoint::new(root, 20),
-                        Box::new(move |t| log.lock().expect("lock").push(t.ticks)),
+                        Box::new(move |t| log.lock().expect("lock").push(t.ticks_in(root).unwrap())),
                     )
                     .expect("scheduled from inside a callback");
                 drop(weak);
@@ -899,7 +1118,7 @@ fn tm_17_authority_nested_schedule() {
         let log = log.clone();
         auth.schedule(
             TimePoint::new(root, 30),
-            Box::new(move |t| log.lock().expect("lock").push(t.ticks)),
+            Box::new(move |t| log.lock().expect("lock").push(t.ticks_in(root).unwrap())),
         )
         .expect("scheduled");
     }
@@ -943,7 +1162,7 @@ fn tm_17b_advance_to_zero_delay_cap() {
         let again = auth.clone();
         let _ = auth.schedule(
             TimePoint::new(root, at),
-            Box::new(move |t| respawn(again, root, t.ticks)),
+            Box::new(move |t| respawn(again, root, t.ticks_in(root).unwrap())),
         );
     }
     respawn(auth.clone(), root, 10);
@@ -1051,7 +1270,8 @@ fn tm_16a1_host_monotonic_driven_only_in_simulation() {
     let host = rt
         .now(ClockDomainId::HOST_MONOTONIC)
         .expect("always governed")
-        .ticks;
+        .ticks_in(ClockDomainId::HOST_MONOTONIC)
+        .unwrap();
     assert!(
         host < 1_000_000_000,
         "wall-paced host.monotonic tracks the real clock, got {host}"
@@ -1089,7 +1309,7 @@ fn tm_16b_engine_governs_a_drifting_virtual_device() {
             let log = log.clone();
             auth.schedule(
                 TimePoint::new(second, at),
-                Box::new(move |t| log.lock().expect("lock").push(t.ticks)),
+                Box::new(move |t| log.lock().expect("lock").push(t.ticks_in(second).unwrap())),
             )
             .expect("schedules on the second root");
         }
@@ -1122,7 +1342,7 @@ fn tm_16b_ungoverned_root_is_not_answered() {
 
     // Governance settles who advances a clock, not what arithmetic is exact: the
     // relation still converts (TM-16b1).
-    let rel = ClockRelation {
+    let rel = Rel {
         source: foreign,
         target: root,
         measured_at: TimePoint::new(foreign, 0),
@@ -1130,16 +1350,17 @@ fn tm_16b_ungoverned_root_is_not_answered() {
         drift: 0.0,
         drift_uncertainty: 0.0,
         uncertainty: Duration::new(root, 2),
-        method: "test.poll".to_owned(),
         valid: Validity {
             from: TimePoint::new(foreign, 0),
             to: None,
         },
-    };
+    }
+    .build()
+    .unwrap();
     let got = rel
         .convert(&reg, TimePoint::new(foreign, 400))
         .expect("converts");
-    assert_eq!(got.nominal, TimePoint::new(root, 1_400));
+    assert_eq!(got.nominal(), TimePoint::new(root, 1_400));
 }
 
 // ---------------------------------------------------------------- Phase 2 amendments
@@ -1186,7 +1407,7 @@ fn tm_13a_declared_clocks_are_listed_before_registration() {
     );
     let records = reg.sample_clock_records();
     assert_eq!(records.len(), 1, "only the registered one has a record");
-    assert_eq!(records[0].domain, tx.id);
+    assert_eq!(records[0].domain, tx.id());
 }
 
 #[test]
@@ -1233,20 +1454,25 @@ fn tm_14_drift_uncertainty_is_validated_before_zero_elapsed_multiplication() {
     reg.register(ClockDomain::root(slow, rat(1, 1), arbitrary("test.slow"))).unwrap();
     for target in [ClockDomainId::UTC, slow] {
         for bound in [-0.1, -1e-300, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.0, 0.0, 1e-8] {
-            let mut rel = device_to_utc(root, 0.0, bound);
-            rel.target = target;
-            rel.offset.domain = target;
-            rel.uncertainty.domain = target;
-            // At +1 device tick, rescaling to a 1 Hz target floors elapsed ticks to
-            // zero too. Input validity must not depend on that rounding or elapsed time.
-            for delta in [0, 1, MCLK as i64] {
-                let t = rel.measured_at.checked_add(Duration::new(root, delta)).unwrap();
-                let result = rel.convert(&reg, t);
-                if !bound.is_finite() || bound < 0.0 {
-                    assert_eq!(result, Err(TimeError::Overflow), "bound {bound:?}, target {target:?}, delta {delta}");
-                } else {
-                    assert!(result.unwrap().uncertainty.ticks >= 51);
+            let mut parts = device_to_utc_parts(root, 0.0, bound);
+            parts.target = target;
+            parts.offset = TimePoint::new(target, 1_700_000_000_000_000_000);
+            parts.uncertainty = Duration::new(target, 50);
+            // `new` refuses the bound itself, so no later rounding or elapsed time can
+            // hide its sign: at +1 device tick a 1 Hz target floors elapsed ticks to zero.
+            let rel = match parts.build() {
+                Err(e) => {
+                    assert!(!bound.is_finite() || bound < 0.0, "bound {bound:?}: {e}");
+                    assert!(matches!(e, TimeError::Malformed { field: "drift_uncertainty", .. }));
+                    continue;
                 }
+                Ok(rel) => rel,
+            };
+            assert!(bound.is_finite() && bound >= 0.0, "bound {bound:?} accepted");
+            for delta in [0, 1, MCLK as i64] {
+                let t = rel.measured_at().checked_add(Duration::new(root, delta)).unwrap();
+                let got = rel.convert(&reg, t).unwrap();
+                assert!(got.uncertainty().ticks_in(target).unwrap() >= 51, "target {target:?}, delta {delta}");
             }
         }
     }

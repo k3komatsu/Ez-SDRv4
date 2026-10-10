@@ -16,26 +16,29 @@ use crate::id::ClockDomainId;
 /// model exists to prevent (decision T3).
 ///
 /// Rule: TM-1, TM-6.
+// The fields are private: outside `time/` the integer is read only through
+// `ticks_in`, which names the domain the reader expects (TM-6, T3).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TimePoint {
     /// The domain whose ticks `ticks` counts (TM-1).
-    pub domain: ClockDomainId,
+    pub(super) domain: ClockDomainId,
     /// Tick count relative to the domain's origin; a sample index in a SampleClock (TM-10).
-    pub ticks: i64,
+    pub(super) ticks: i64,
 }
 
 /// An elapsed time: integer ticks in a named clock domain (TM-1, TM-4 decision T4).
 ///
 /// The domain tag is what stops 1 000 ticks at 20 Msps being added to a 200 MHz
 /// point as a silent factor-of-ten error.
+// Private fields, read like a `TimePoint`'s (TM-6).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Duration {
     /// The domain whose ticks `ticks` counts (TM-7).
-    pub domain: ClockDomainId,
+    pub(super) domain: ClockDomainId,
     /// Tick count; may be negative (TM-7).
-    pub ticks: i64,
+    pub(super) ticks: i64,
 }
 
 /// The result of converting a [`TimePoint`] between two exactly related domains (TM-4).
@@ -114,6 +117,11 @@ impl TimePoint {
         TimePoint { domain, ticks }
     }
 
+    /// The domain whose ticks this point counts (TM-1).
+    pub const fn domain(self) -> ClockDomainId {
+        self.domain
+    }
+
     /// Orders two instants of one domain; `DomainMismatch` across domains (TM-6).
     pub fn try_cmp(self, other: TimePoint) -> Result<Ordering, TimeError> {
         self.same_domain(other)?;
@@ -176,6 +184,11 @@ impl Duration {
         Duration { domain, ticks }
     }
 
+    /// The domain whose ticks this duration counts (TM-7).
+    pub const fn domain(self) -> ClockDomainId {
+        self.domain
+    }
+
     /// Orders two durations of one domain; across domains use
     /// [`ClockRegistry::compare_durations`](crate::time::ClockRegistry::compare_durations),
     /// which is exact (TM-21).
@@ -208,13 +221,23 @@ impl Duration {
 }
 
 /// An instant known only to within a bound, the only result of crossing roots (TM-5, TM-14).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
+/// Built only by [`ClockRelation::convert`](super::ClockRelation::convert).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct UncertainTimePoint {
-    /// The best estimate of the instant.
-    pub nominal: TimePoint,
-    /// The one-sided bound, in the same domain as `nominal`.
-    pub uncertainty: Duration,
+    pub(super) nominal: TimePoint,
+    pub(super) uncertainty: Duration,
+}
+
+impl UncertainTimePoint {
+    /// The best estimate of the instant (TM-14).
+    pub fn nominal(self) -> TimePoint {
+        self.nominal
+    }
+
+    /// The one-sided bound, non-negative and in the domain of `nominal` (TM-14).
+    pub fn uncertainty(self) -> Duration {
+        self.uncertainty
+    }
 }
 
 /// A processing budget measured from a work item's arrival, in `host.monotonic`.
@@ -242,14 +265,17 @@ impl<'de> Deserialize<'de> for RelativeBudget {
 }
 
 impl RelativeBudget {
-    /// Builds a budget; the duration must be in `host.monotonic`, the domain in which
-    /// an Executor measures elapsed processing time (TM-15).
+    /// Builds a budget; the duration must be positive and in `host.monotonic`, the
+    /// domain in which an Executor measures elapsed processing time (TM-15).
     pub fn new(duration: Duration) -> Result<RelativeBudget, TimeError> {
         if duration.domain != ClockDomainId::HOST_MONOTONIC {
             return Err(TimeError::DomainMismatch {
                 expected: ClockDomainId::HOST_MONOTONIC,
                 found: duration.domain,
             });
+        }
+        if duration.ticks <= 0 {
+            return Err(TimeError::Malformed { field: "duration", why: "is not positive" });
         }
         Ok(RelativeBudget { duration })
     }

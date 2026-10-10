@@ -173,8 +173,8 @@
   "id": "E18",
   "name": "the responder answers at the block's first sample, not the PING's",
   "file": "crates/ezsdr-acceptance/src/responder.rs",
-  "old": "out.push(self.answer(TimePoint::new(first.domain, first.ticks + k as i64))?);",
-  "new": "out.push(self.answer(TimePoint::new(first.domain, first.ticks))?);",
+  "old": ".checked_add(Duration::new(first.domain(), k as i64))",
+  "new": ".checked_add(Duration::new(first.domain(), 0))",
   "crate": "ezsdr-acceptance",
   "test_bin": "reactive",
   "filter": "v58_12_a_reactor_answers_whatever_the_block_lengths"
@@ -253,8 +253,8 @@
   "id": "E26",
   "name": "the responder rounds a turnaround down",
   "file": "crates/ezsdr-acceptance/src/responder.rs",
-  "old": "ezsdr_kernel::time::Rescaled::Inexact { floor, .. } => floor.ticks + 1,",
-  "new": "ezsdr_kernel::time::Rescaled::Inexact { floor, .. } => floor.ticks,",
+  "old": "floor.checked_add(Duration::new(clock, 1)).map_err(rejected)?",
+  "new": "floor",
   "crate": "ezsdr-acceptance",
   "test_bin": "reactive",
   "filter": "v58_09_a_pong_short_of_the_lead_is_late_as_on_hardware"

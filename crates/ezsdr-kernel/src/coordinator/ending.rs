@@ -284,7 +284,7 @@ impl RunHandle {
         let published = contain_all(|| self.shared.authority.relations()).unwrap_or_default();
         let (kept, foreign): (Vec<_>, Vec<_>) = published
             .into_iter()
-            .partition(|relation| relation.source == self.shared.primary);
+            .partition(|relation| relation.source() == self.shared.primary);
         for _ in foreign {
             failures.push(manifest_failure(
                 None,
@@ -293,7 +293,7 @@ impl RunHandle {
         }
         if !kept
             .iter()
-            .any(|relation| relation.target == crate::id::ClockDomainId::UTC)
+            .any(|relation| relation.target() == crate::id::ClockDomainId::UTC)
         {
             failures.push(manifest_failure(
                 None,
@@ -419,7 +419,8 @@ impl CleanupOps for Ops {
                                 match self.shared.ctx.clocks.convert(*time, self.shared.primary) {
                                     Ok(at) => {
                                         let at = at.floor();
-                                        at.ticks >= start.ticks && at.ticks < end.ticks
+                                        at.try_cmp(*start).is_ok_and(|o| o.is_ge())
+                                            && at.try_cmp(*end).is_ok_and(|o| o.is_lt())
                                     }
                                     Err(_) => true,
                                 }

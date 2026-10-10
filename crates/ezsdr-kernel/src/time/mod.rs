@@ -36,7 +36,7 @@ use crate::id::ClockDomainId;
 /// Why a time operation was refused. Nothing in this module wraps, saturates or
 /// panics: every failure is one of these (TM-2, TM-8).
 ///
-/// Rule: TM-2, TM-4…TM-8, TM-12, TM-14, TM-16.
+/// Rule: TM-2, TM-4…TM-8, TM-12, TM-14, TM-15, TM-16.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TimeError {
     /// Two operands named different domains, and the operation is same-domain only (TM-6, TM-7).
@@ -100,6 +100,14 @@ pub enum TimeError {
     },
     /// The domain or Authority has already stopped (TM-12, TM-13c).
     Stopped,
+    /// A value breaks its type's shape: `field` names the part, `why` the rule it
+    /// breaks (TM-14's `ClockRelation`, TM-15's budget).
+    Malformed {
+        /// The offending field.
+        field: &'static str,
+        /// What is wrong with it.
+        why: &'static str,
+    },
 }
 
 impl fmt::Display for TimeError {
@@ -124,6 +132,7 @@ impl fmt::Display for TimeError {
             TimeError::LimitExceeded => f.write_str("a declared limit was exceeded"),
             TimeError::InPast { now, requested } => write!(f, "{requested} precedes now ({now})"),
             TimeError::Stopped => f.write_str("the clock domain or authority has stopped"),
+            TimeError::Malformed { field, why } => write!(f, "`{field}` {why}"),
         }
     }
 }

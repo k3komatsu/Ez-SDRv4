@@ -235,8 +235,8 @@ pub(super) fn check_bindings(
     }
 
     // One slot at a time: bound (SB-22d), to a Module holding its role (SB-22e), with
-    // the object the runtime supplies naming the binding's version and carrying only
-    // local, well-formed ids (SB-22f) — role before instance, as SB-22c orders it.
+    // the object the runtime supplies naming the binding's version (SB-22f) — role
+    // before instance, as SB-22c orders it.
     let version = |name: &Ident, what: &str, bound: &ModuleRef, reported: &ModuleRef| {
         if bound == reported {
             return Ok(());
@@ -256,23 +256,10 @@ pub(super) fn check_bindings(
         require_role(registry, name, &binding.module, Role::Provider)?;
         let instance = super::supplied(inputs.providers, name, "Provider instance")?.instance();
         version(name, "Provider instance", &binding.module, &instance.module)?;
-        check_rid(
-            &format!("the instance bound to {name} has id"),
-            &instance.id,
-        )?;
-        for n in instance.tree.walk_iter() {
-            check_rid(
-                &format!("the instance bound to {name} declares node"),
-                &n.id,
-            )?;
-        }
-        for a in &instance.arm_after {
-            check_rid(&format!("the instance bound to {name} arms after"), a)?;
-        }
         // SB-22f (KA-7): the one envelope value the Kernel reads is in host.monotonic
         // and not negative.
         if let Some(lead) = instance.min_command_lead {
-            if lead.domain != crate::id::ClockDomainId::HOST_MONOTONIC || lead.ticks < 0 {
+            if !lead.ticks_in(crate::id::ClockDomainId::HOST_MONOTONIC).is_ok_and(|t| t >= 0) {
                 return Err(SpecError::Structural {
                     reason: format!(
                         "SB-22f: the instance bound to {name} declares a min_command_lead of \
@@ -306,9 +293,6 @@ pub(super) fn check_bindings(
                 ),
             });
         }
-        if let Some(m) = d.memory_domains.iter().find(|m| !m.node.is_local()) {
-            return Err(not_local(format!("output {name}'s Sink memory domain {m}")));
-        }
     }
     for name in &executors {
         let binding = profile.bindings.get(*name).ok_or_else(|| SpecError::Structural {
@@ -324,9 +308,6 @@ pub(super) fn check_bindings(
                 reason: format!("MA-18: executor {name} declares no memory domain it can reach"),
             });
         }
-        if let Some(m) = d.memory_domains.iter().find(|m| !m.node.is_local()) {
-            return Err(not_local(format!("executor {name}'s memory domain {m}")));
-        }
     }
     // SB-24: `authority` names a binding whose Module holds Authority — a resource the
     // Authority rides on as much as a slot of its own — and whose supplied descriptor
@@ -340,11 +321,6 @@ pub(super) fn check_bindings(
     require_role(registry, authority, &binding.module, Role::Authority)?;
     let a = super::supplied(inputs.authorities, authority, "AuthorityDescriptor")?;
     version(authority, "Authority", &binding.module, &a.module)?;
-    if let Some(d) = a.governs.iter().find(|d| !d.node.is_local()) {
-        return Err(not_local(format!(
-            "Authority {authority}'s governed domain {d}"
-        )));
-    }
 
     // SB-22g: on a Spec Run no binding carries `feed`, since `outputs[]` declares each
     // feed; on a Session a binding carries one exactly when it fills a Sink slot, and
@@ -458,7 +434,7 @@ pub(super) fn check_bindings(
 
 /// `validate()`'s structural checks, which `plan()` runs again (SB-39, D99): the
 /// Spec's keys and Vocabulary majors (SB-2, SB-11), its failure policy (SB-18), the
-/// ids a document carries as Rust values (X7, SB-1), the binding model (SB-22…SB-22h,
+/// binding model (SB-22…SB-22h,
 /// SB-24), the schedule (SB-16, RS-52) and the component descriptors (MA-37). None of
 /// them calls a Provider's `coerce`, so running them twice changes nothing.
 ///
@@ -499,7 +475,6 @@ pub(super) fn check_structure(
                 reason: format!("SB-18: event kind {kind} is not registered"),
             })?;
     }
-    check_local_ids(spec, profile)?;
     check_bindings(spec, profile, inputs)?;
     // SB-16: a `SpecTime` is "a resource name plus an offset in **that resource's**
     // stream clock", so the name must be one the Spec declares. Nothing read
@@ -628,40 +603,6 @@ fn check_keys(spec: &ExperimentSpec, inputs: &CompileInputs<'_>) -> Result<(), S
     Ok(())
 }
 
-/// X7 and SB-1 for the ids a document carries that a Rust caller can build unparsed —
-/// scheduled Action targets, Island ids and component memory domains. The ids the
-/// runtime supplies are checked with the slot they belong to (SB-22f); an id read
-/// from a document is refused by its deserialiser (D91, D95).
-///
-/// Rule: X7, SB-1.
-fn check_local_ids(spec: &ExperimentSpec, profile: &BindingProfile) -> Result<(), SpecError> {
-    for entry in &spec.schedule {
-        if let Some(t) = entry.action.target() {
-            check_rid("scheduled Action target", t)?;
-        }
-    }
-    for island in &profile.placements.islands {
-        if !island.id.node.is_local() {
-            return Err(not_local(format!("island {}", island.id)));
-        }
-    }
-    for entry in profile.placements.islands.iter().flat_map(|island| &island.components) {
-        if !entry.memory_domain.node.is_local() {
-            return Err(not_local(format!(
-                "component {}'s memory domain {}",
-                entry.component, entry.memory_domain
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn not_local(what: String) -> SpecError {
-    SpecError::Structural {
-        reason: format!("X7: {what} is not on the local node"),
-    }
-}
-
 /// A binding's description `(module, selector, profile)`, which is an instance's
 /// identity (SB-3): two bindings with equal descriptions name one instance. Shared by
 /// `validate` and the coordinator's grouping (KC-4), so the two cannot disagree.
@@ -674,23 +615,6 @@ pub(crate) fn binding_description(binding: &crate::binding::Binding) -> (ModuleR
             serde_json::to_string(&binding.profile).unwrap_or_default()
         ),
     )
-}
-
-/// A `ResourceId` handed in as a Rust value: on the local node (X7) and with a path of
-/// SB-1's grammar, because its fields are public and a Rust caller can build one
-/// unparsed — which would reach a Manifest the Kernel's own deserialiser refuses.
-///
-/// Rule: X7, SB-1.
-pub(crate) fn check_rid(what: &str, id: &ResourceId) -> Result<(), SpecError> {
-    if !id.node.is_local() {
-        return Err(not_local(format!("{what} {id}")));
-    }
-    if ResourceId::parse(&id.path).is_err() {
-        return Err(SpecError::Structural {
-            reason: format!("SB-1: {what} {id} is not a path of SB-1's grammar"),
-        });
-    }
-    Ok(())
 }
 
 /// SB-22e: the registered Module a binding names holds `role`. A version that is not

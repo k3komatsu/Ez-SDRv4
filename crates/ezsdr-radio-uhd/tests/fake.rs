@@ -206,11 +206,11 @@ fn ur_07_the_authority_paces_to_the_device() {
     let (authority, _, root) = authority(FakeConfig::default(), "internal");
     let time = authority.time();
     let begun = Instant::now();
-    let at = TimePoint::new(root, time.now(root).unwrap().ticks + ms(30));
+    let at = TimePoint::new(root, time.now(root).unwrap().ticks_in(root).unwrap() + ms(30));
     time.schedule(at, Box::new(|_| {})).unwrap();
     assert_eq!(authority.next_wakeup(), Some(at));
     assert!(begun.elapsed() >= Wall::from_millis(29), "{:?}", begun.elapsed());
-    assert!(time.now(root).unwrap().ticks >= at.ticks);
+    assert!(time.now(root).unwrap().ticks_in(root).unwrap() >= at.ticks_in(root).unwrap());
 }
 
 #[test]
@@ -223,10 +223,10 @@ fn ur_07_schedule_wakes_a_waiting_next_wakeup() {
     let time = authority.time();
     let mut late = Vec::new();
     for _ in 0..20 {
-        let far = time.schedule(TimePoint::new(root, time.now(root).unwrap().ticks + ms(1_000)), Box::new(|_| {})).unwrap();
+        let far = time.schedule(TimePoint::new(root, time.now(root).unwrap().ticks_in(root).unwrap() + ms(1_000)), Box::new(|_| {})).unwrap();
         let waiter = { let a = authority.clone(); std::thread::spawn(move || (a.next_wakeup(), Instant::now())) };
         std::thread::sleep(Wall::from_millis(7));
-        let near = TimePoint::new(root, time.now(root).unwrap().ticks + ms(1));
+        let near = TimePoint::new(root, time.now(root).unwrap().ticks_in(root).unwrap() + ms(1));
         let due = Instant::now() + Wall::from_millis(1);
         time.schedule(near, Box::new(|_| {})).unwrap();
         let (woke, at) = waiter.join().unwrap();
@@ -242,10 +242,10 @@ fn ur_07_schedule_wakes_a_waiting_next_wakeup() {
 fn ur_07_now_is_monotonic_across_a_reanchor() {
     let (authority, _, root) = authority(FakeConfig { faults: vec![FakeFault::StepBack(Wall::from_millis(50), 200)], ..FakeConfig::default() }, "internal");
     let time = authority.time();
-    let mut last = time.now(root).unwrap().ticks;
+    let mut last = time.now(root).unwrap().ticks_in(root).unwrap();
     let until = Instant::now() + Wall::from_millis(400);
     while Instant::now() < until {
-        let now = time.now(root).unwrap().ticks;
+        let now = time.now(root).unwrap().ticks_in(root).unwrap();
         assert!(now >= last, "{now} < {last}");
         last = now;
     }
@@ -299,13 +299,13 @@ fn ur_07_schedule_accepts_an_instant_already_passed() {
     time.schedule(fired, Box::new(|_| {})).unwrap();
     assert_eq!(authority.next_wakeup(), Some(fired));
     std::thread::sleep(Wall::from_millis(6));
-    let passed = TimePoint::new(root, time.now(root).unwrap().ticks - ms(1));
+    let passed = TimePoint::new(root, time.now(root).unwrap().ticks_in(root).unwrap() - ms(1));
     time.schedule(passed, Box::new(|_| {})).unwrap();
     let begun = Instant::now();
     assert_eq!(authority.next_wakeup(), Some(passed));
     assert!(begun.elapsed() < Wall::from_millis(10));
     assert!(matches!(
-        time.schedule(TimePoint::new(root, fired.ticks - 1), Box::new(|_| {})),
+        time.schedule(TimePoint::new(root, fired.ticks_in(root).unwrap() - 1), Box::new(|_| {})),
         Err(ezsdr_kernel::time::TimeError::InPast { .. })
     ));
 }
@@ -318,7 +318,7 @@ fn ur_07_callbacks_run_outside_the_schedule_lock() {
     // fails the test in seconds instead of hanging it.
     let (authority, _device, root) = authority(FakeConfig::default(), "internal");
     let time = authority.time();
-    let t = TimePoint::new(root, time.now(root).unwrap().ticks + ms(20));
+    let t = TimePoint::new(root, time.now(root).unwrap().ticks_in(root).unwrap() + ms(20));
     let fired = Arc::new(Mutex::new(Vec::new()));
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let (inner, log) = (time.clone(), fired.clone());
@@ -334,7 +334,7 @@ fn ur_07_callbacks_run_outside_the_schedule_lock() {
     std::thread::spawn(move || done_tx.send(authority.next_wakeup()).unwrap());
     started_rx.recv_timeout(Wall::from_secs(3)).expect("the first callback ran");
     let begun = Instant::now();
-    time.schedule(TimePoint::new(root, t.ticks + ms(1_000)), Box::new(|_| {})).unwrap();
+    time.schedule(TimePoint::new(root, t.ticks_in(root).unwrap() + ms(1_000)), Box::new(|_| {})).unwrap();
     assert!(begun.elapsed() < Wall::from_millis(100), "schedule waited {:?} for the running callback", begun.elapsed());
     let woke = done_rx.recv_timeout(Wall::from_secs(3)).expect("next_wakeup returned");
     assert_eq!(woke, Some(t));
@@ -370,7 +370,7 @@ fn ur_07_cancel_wakes_a_waiting_next_wakeup() {
     let time = authority.time();
     let mut late = Vec::new();
     for _ in 0..20 {
-        let handle = time.schedule(TimePoint::new(root, time.now(root).unwrap().ticks + ms(1_000)), Box::new(|_| {})).unwrap();
+        let handle = time.schedule(TimePoint::new(root, time.now(root).unwrap().ticks_in(root).unwrap() + ms(1_000)), Box::new(|_| {})).unwrap();
         let waiter = { let a = authority.clone(); std::thread::spawn(move || (a.next_wakeup(), Instant::now())) };
         std::thread::sleep(Wall::from_millis(7));
         let begun = Instant::now();
@@ -388,7 +388,7 @@ fn ur_07_now_tracks_the_device_while_no_call_runs() {
     let (authority, device, root) = authority(FakeConfig { drift_ppm: 100.0, ..FakeConfig::default() }, "internal");
     let time = authority.time();
     std::thread::sleep(Wall::from_secs(2));
-    let ours = time.now(root).unwrap().ticks;
+    let ours = time.now(root).unwrap().ticks_in(root).unwrap();
     let theirs = device.time_now().unwrap();
     assert!((ours - theirs).abs() < 20_000, "{} ticks apart", ours - theirs);
 }
@@ -397,13 +397,13 @@ fn ur_07_now_tracks_the_device_while_no_call_runs() {
 fn ur_08_the_relations_bracket_a_device_read() {
     let (authority, _, root) = authority(FakeConfig::default(), "internal");
     let relations = authority.relations();
-    assert_eq!(relations.iter().map(|r| r.target).collect::<Vec<_>>(), [ClockDomainId::HOST_MONOTONIC, ClockDomainId::UTC]);
+    assert_eq!(relations.iter().map(|r| r.target()).collect::<Vec<_>>(), [ClockDomainId::HOST_MONOTONIC, ClockDomainId::UTC]);
     for relation in &relations {
-        assert_eq!(relation.source, root);
-        assert!(relation.uncertainty.ticks >= 0 && relation.uncertainty.ticks <= 10_000_000);
+        assert_eq!(relation.source(), root);
+        assert!(relation.uncertainty().ticks_in(relation.uncertainty().domain()).unwrap() >= 0 && relation.uncertainty().ticks_in(relation.uncertainty().domain()).unwrap() <= 10_000_000);
     }
-    assert_eq!(relations[0].method, "ezsdr.radio.uhd.host_bracket");
-    assert_eq!(relations[1].method, "ezsdr.radio.uhd.host_utc_bracket");
+    assert_eq!(relations[0].method(), "ezsdr.radio.uhd.host_bracket");
+    assert_eq!(relations[1].method(), "ezsdr.radio.uhd.host_utc_bracket");
 }
 
 // ---------------------------------------------------------------- the profile and the instance (UR-9…UR-11)
@@ -592,14 +592,14 @@ impl Direct {
         let mut radio = UhdRadio::from_binding(&binding(keys, Some(x310_ubx())), device.clone()).unwrap();
         radio.prepare(&fragment, ctx).unwrap();
         radio.arm().unwrap();
-        let t0 = time.now(root).unwrap().ticks + ms(2_000) + ms(1);
+        let t0 = time.now(root).unwrap().ticks_in(root).unwrap() + ms(2_000) + ms(1);
         radio.start(Some(TimePoint::new(root, t0))).unwrap();
         time.wait_until(TimePoint::new(root, t0 + ms(1))).unwrap();
         Direct { radio, device, queue, events, time, root, clocks, delivered: Vec::new(), _authority: authority }
     }
 
     fn now(&self) -> i64 {
-        self.time.now(self.root).unwrap().ticks
+        self.time.now(self.root).unwrap().ticks_in(self.root).unwrap()
     }
 
     fn push(&self, action: Action) {
@@ -776,7 +776,7 @@ fn ur_15_every_clock_starts_on_its_lattice() {
     let manifest = captured(spec_run(&spec, &odd, fake(FakeConfig::default()), BTreeMap::new()));
     assert_eq!(manifest.clocks.sample_clocks.len(), 2);
     for record in &manifest.clocks.sample_clocks {
-        assert_eq!(record.origin.ticks % 200, 0, "{record:?}");
+        assert_eq!(record.origin.ticks_in(record.root).unwrap() % 200, 0, "{record:?}");
     }
 }
 
@@ -843,9 +843,9 @@ fn ur_17_blocks_carry_the_device_timestamps() {
     let (manifest, _dir) = receive_run(FakeConfig::default(), 1, 10_000);
     let capture = capture_of(&manifest, "rec");
     let map = &capture.continuity[0];
-    assert_eq!(map.first.ticks, 0);
+    assert_eq!(map.first.ticks_in(map.domain).unwrap(), 0);
     assert!(map.gaps.is_empty(), "{:?}", map.gaps);
-    let origin = manifest.clocks.sample_clocks[0].origin.ticks;
+    let origin = manifest.clocks.sample_clocks[0].origin.ticks_in(manifest.clocks.sample_clocks[0].root).unwrap();
     let samples = read_capture(&capture, 1).remove(0);
     assert_eq!(samples.len(), 10_000);
     for (k, (re, _)) in samples.iter().enumerate() {
@@ -860,13 +860,13 @@ fn ur_17_a_missed_start_restarts_with_a_gap() {
     let late = events_of(&manifest, "radio.LATE_COMMAND");
     assert_eq!(late.len(), 1, "{late:?}");
     let payload: ezsdr_radio::payloads::LateCommandPayload = serde_json::from_value(late[0].payload.clone()).unwrap();
-    let t0 = manifest.clocks.sample_clocks[0].origin.ticks;
-    assert_eq!(payload.requested.ticks, t0);
-    assert!(payload.applied.ticks - t0 >= ms(50) && payload.applied.ticks % 200 == 0, "{payload:?}");
+    let t0 = manifest.clocks.sample_clocks[0].origin.ticks_in(manifest.clocks.sample_clocks[0].root).unwrap();
+    assert_eq!(payload.requested.ticks_in(payload.requested.domain()).unwrap(), t0);
+    assert!(payload.applied.ticks_in(payload.applied.domain()).unwrap() - t0 >= ms(50) && payload.applied.ticks_in(payload.applied.domain()).unwrap() % 200 == 0, "{payload:?}");
     // TM-13b as KG-14 amends it: the origin stays T0, so the first sample the capture
     // holds is at the restart's index, after the first block's GAP_BEFORE.
     let map = &capture_of(&manifest, "rec").continuity[0];
-    assert_eq!(map.first.ticks, (payload.applied.ticks - t0) / 200);
+    assert_eq!(map.first.ticks_in(map.domain).unwrap(), (payload.applied.ticks_in(payload.applied.domain()).unwrap() - t0) / 200);
 }
 
 #[test]
@@ -915,7 +915,7 @@ fn tx_session(config: FakeConfig) -> (RunHandle, Arc<FakeDevice>, TempDir) {
 fn tx_at(run: &RunHandle, lead: i64) -> TimePoint {
     let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
     let n = clock.root_ticks_per_tick.num() as i64;
-    TimePoint::new(clock.domain, (run.now().ticks + lead - clock.origin.ticks + n - 1).div_euclid(n))
+    TimePoint::new(clock.domain, (run.now().ticks_in(clock.root).unwrap() + lead - clock.origin.ticks_in(clock.root).unwrap() + n - 1).div_euclid(n))
 }
 
 fn send_at(run: &mut RunHandle, verb_name: &str, at: Option<TimePoint>, samples: &[(f32, f32)]) -> ezsdr_kernel::session::LogEntry {
@@ -1034,7 +1034,7 @@ fn ur_21_a_burst_before_its_clock_s_origin_is_late() {
     assert_eq!(errors.iter().map(|p| p.outcome).collect::<Vec<_>>(), [TimeErrorOutcome::SendAsap]);
     let e2 = tx_clock_origin(&manifest, 1);
     let record = &bursts(&manifest)[0];
-    assert_eq!(record.target.ticks, 0, "moved to the new clock's origin {e2}");
+    assert_eq!(record.target.ticks_in(record.target.domain()).unwrap(), 0, "moved to the new clock's origin {e2}");
     assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError"), "{:?}", device.calls());
 }
 
@@ -1052,7 +1052,7 @@ fn ur_21_an_untimed_burst_after_a_cold_change_is_on_time_at_its_clock_s_origin()
     // At the origin, tick 0, unless host load let more than the start lead less the device
     // lead pass before admission (#60's class); either way not before it and not late.
     let record = &bursts(&manifest)[0];
-    assert!(record.target.ticks >= 0 && record.late_by.is_none(), "{record:?}");
+    assert!(record.target.ticks_in(record.target.domain()).unwrap() >= 0 && record.late_by.is_none(), "{record:?}");
 }
 
 #[test]
@@ -1121,7 +1121,7 @@ fn ur_23_a_burst_ends_at_the_next_bursts_start() {
     let manifest = run.finish();
     let records = bursts(&manifest);
     assert_eq!(records.len(), 2, "{records:?}");
-    assert_eq!(records[0].target.ticks + records[0].samples as i64, records[1].target.ticks);
+    assert_eq!(records[0].target.ticks_in(records[0].target.domain()).unwrap() + records[0].samples as i64, records[1].target.ticks_in(records[1].target.domain()).unwrap());
     assert!(records[1].late_by.is_none());
     assert!(time_errors(&manifest).is_empty());
     assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError"), "{:?}", device.calls());
@@ -1150,14 +1150,14 @@ fn ur_23_a_stop_ends_the_burst_within_the_in_flight_window() {
     let (mut run, _, _dir) = tx_session(FakeConfig::default());
     let _ = send(&mut run, "start_repeat", Some(ms(10)), &tone(1_000));
     wait(&mut run, ms(60));
-    let stop_at = run.now().ticks;
+    let stop_at = run.now().ticks_in(run.now().domain()).unwrap();
     let _ = run.submit(SessionAction::Stop { target: Some(ResourceId::parse("radio/tx").unwrap()) }, None);
     wait(&mut run, ms(40));
     let manifest = run.finish();
     let record = &bursts(&manifest)[0];
     assert_eq!(record.end, BurstEnd::Stop);
     let origin = tx_clock_origin(&manifest, 0);
-    let end = origin + (record.target.ticks + record.samples as i64) * 200;
+    let end = origin + (record.target.ticks_in(record.target.domain()).unwrap() + record.samples as i64) * 200;
     assert!(end <= stop_at + ms(10) + ms(20), "ends {} ms after the stop", (end - stop_at) / ms(1));
 }
 
@@ -1300,7 +1300,7 @@ fn ur_24_a_released_command_is_not_recalled_by_stop() {
     }]);
     let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
     let t0 = run.start_instant().unwrap();
-    run.advance_to(TimePoint::new(t0.domain, t0.ticks + ms(100))).unwrap();
+    run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + ms(100))).unwrap();
     let manifest = run.finish();
     let applied = calls(&device, "apply rx 0 rate=- freq=2300000000");
     assert_eq!(applied.len(), 1, "{:?}", device.calls());
@@ -1328,7 +1328,7 @@ fn ur_24_stop_cancels_held_commands() {
     }]);
     let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
     let t0 = run.start_instant().unwrap();
-    run.advance_to(TimePoint::new(t0.domain, t0.ticks + ms(1_100))).unwrap();
+    run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + ms(1_100))).unwrap();
     let manifest = run.finish();
     assert_eq!(calls(&device, "apply rx 0 rate=- freq=2300000000").len(), 1, "{:?}", device.calls());
     assert!(calls(&device, "apply rx 0 rate=- freq=2200000000").is_empty(), "{:?}", device.calls());
@@ -1408,7 +1408,7 @@ fn ur_25_rx_channels_from_zero_starts_at_its_instant() {
     assert!(origin >= at && origin < at + 200, "origin {origin}, asked {at}");
     direct.settle(Wall::from_millis(400));
     let records: Vec<_> = direct.clocks.sample_clock_records().into_iter().filter(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).collect();
-    assert_eq!(records.iter().map(|r| r.origin.ticks).collect::<Vec<_>>(), [origin], "{records:?}");
+    assert_eq!(records.iter().map(|r| r.origin.ticks_in(r.root).unwrap()).collect::<Vec<_>>(), [origin], "{records:?}");
     assert!(direct.of("radio.COMMAND_REJECTED").is_empty());
     let _ = direct.finish();
 }
@@ -1494,7 +1494,7 @@ fn ur_25_a_rate_change_admits_a_burst_on_the_new_clock() {
     let manifest = run.finish();
     assert!(events_of(&manifest, "radio.COMMAND_REJECTED").is_empty(), "{:?}", events_of(&manifest, "radio.COMMAND_REJECTED"));
     let new = manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/tx").unwrap()).nth(1).expect("the new transmit clock");
-    assert!(bursts(&manifest).iter().any(|b| b.target.domain == new.domain), "{:?}", bursts(&manifest));
+    assert!(bursts(&manifest).iter().any(|b| b.target.domain() == new.domain), "{:?}", bursts(&manifest));
 }
 
 #[test]
@@ -1553,13 +1553,13 @@ fn ur_26_an_abort_publishes_nothing_after_the_stop_instant() {
     let mut end = None;
     while let Some((block, _)) = link.receive() {
         let header = block.header();
-        end = Some(header.first_sample_time.ticks + i64::from(header.len));
+        end = Some(header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() + i64::from(header.len));
     }
     direct.radio.cleanup();
     let instance = direct.radio.instance().clone();
     let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
     let stop = timing.as_array().unwrap().iter().find(|r| r["what"] == "stop").unwrap()["at"].as_i64().unwrap();
-    let origin = direct.clocks.sample_clock_records().iter().find(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).unwrap().origin.ticks;
+    let origin = direct.clocks.sample_clock_records().iter().find(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).unwrap().origin.ticks_in(direct.clocks.sample_clock_records().iter().find(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).unwrap().root).unwrap();
     let end = origin + end.expect("blocks were published") * 200;
     assert!(end < stop, "published up to {end}, stopped at {stop}");
     // One stop, recorded once: not again when the tail reaches the cut (Review N, N4).
@@ -1604,7 +1604,7 @@ fn ur_25_a_receive_session_follows_its_recorded_plan() {
     }
     assert!(segments[3].1.is_some(), "the Run's stop ends the last: {plan}");
     let clocks: Vec<(i64, Option<i64>)> = manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/rx").unwrap())
-        .map(|r| (r.origin.ticks, r.ended_at.map(|t| t.ticks))).collect();
+        .map(|r| (r.origin.ticks_in(r.root).unwrap(), r.ended_at.map(|t| t.ticks_in(r.root).unwrap()))).collect();
     let stops: Vec<i64> = section(&manifest, "applied").as_array().unwrap().iter().filter(|r| r["key"] == "rx_stop").filter_map(|r| r["at"]["ticks"].as_i64()).collect();
     assert!(!clocks.is_empty(), "{timing:?}");
     let mut next = 0;
@@ -1735,7 +1735,7 @@ fn ur_29_a_silent_stream_is_a_lost_device() {
     let lost = &events_of(&manifest, EventKind::DEVICE_LOST)[0];
     assert!(lost.payload["message"].as_str().unwrap().contains("UR-29"));
     // Within 1 to 2 s of the silence, which begins 2.1 s after the time was set (L14).
-    let after_silence = lost.time.ticks - ms(2_100);
+    let after_silence = lost.time.ticks_in(lost.time.domain()).unwrap() - ms(2_100);
     assert!(after_silence >= ms(1_000) && after_silence <= ms(2_000), "{} ms", after_silence / ms(1));
     assert_marked_lost_before_closed(&device);
 }
@@ -1760,7 +1760,7 @@ fn ur_29_a_dead_link_that_fails_without_lost_is_a_lost_device() {
     assert_eq!(lost.len(), 1, "{lost:?}");
     assert!(lost[0].payload["message"].as_str().unwrap().contains("UR-29: the device time reads have failed for 1 s"), "{lost:?}");
     // Within 2 s of the link's death (the reads every 500 ms; 100 ms each on the fake).
-    let after_death = lost[0].time.ticks - ms(2_500);
+    let after_death = lost[0].time.ticks_in(lost[0].time.domain()).unwrap() - ms(2_500);
     assert!((ms(1_000)..=ms(2_000)).contains(&after_death), "{} ms", after_death / ms(1));
     assert_marked_lost_before_closed(&device);
 }
@@ -2276,16 +2276,16 @@ fn captures_across_cold_changes(config: FakeConfig, selector: Json, rates: [f64;
             let clock = clocks.iter().find(|c| c.domain == map.domain).unwrap();
             let n = clock.root_ticks_per_tick.num() as i64;
             if m == 0 && artifact.continuity.len() > 1 {
-                let e1 = (clock.ended_at.unwrap().ticks - clock.origin.ticks) / n;
-                if map.end.ticks != e1 {
-                    problems.push(format!("{}: the old clock's samples end at {} for e₁ {e1}", artifact.id, map.end.ticks));
+                let e1 = (clock.ended_at.unwrap().ticks_in(clock.root).unwrap() - clock.origin.ticks_in(clock.root).unwrap()) / n;
+                if map.end.ticks_in(map.domain).unwrap() != e1 {
+                    problems.push(format!("{}: the old clock's samples end at {} for e₁ {e1}", artifact.id, map.end.ticks_in(map.domain).unwrap()));
                 }
             }
             // A missed start's gap leads the map (SC-13); the samples begin after it.
-            let first = map.valid[0].first().map_or(map.end.ticks, |s| s.start.ticks);
-            let len = (map.end.ticks - first) as usize;
+            let first = map.valid[0].first().map_or(map.end.ticks_in(map.domain).unwrap(), |s| s.start.ticks_in(map.domain).unwrap());
+            let len = (map.end.ticks_in(map.domain).unwrap() - first) as usize;
             for i in 0..len {
-                let tick = clock.origin.ticks + (first + i as i64) * n;
+                let tick = clock.origin.ticks_in(clock.root).unwrap() + (first + i as i64) * n;
                 let ramp = ((tick / n).rem_euclid(65_536)) as f32 / 65_536.0;
                 if data[at + i].0 != ramp {
                     problems.push(format!("{}: map {m} sample {} is {}, its clock's ramp {ramp}", artifact.id, first + i as i64, data[at + i].0));
@@ -2331,11 +2331,11 @@ fn ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it() {
         let a = tx_at(&run, ms(40));
         let _ = send_at(&mut run, "send", Some(a), &tone(30_000));
         let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
-        let a_end = clock.origin.ticks + (a.ticks + 30_000) * clock.root_ticks_per_tick.num() as i64;
-        while run.now().ticks < a_end - ms(8) {
+        let a_end = clock.origin.ticks_in(clock.root).unwrap() + (a.ticks_in(clock.domain).unwrap() + 30_000) * clock.root_ticks_per_tick.num() as i64;
+        while run.now().ticks_in(clock.root).unwrap() < a_end - ms(8) {
             wait(&mut run, ms(1) / 4);
         }
-        let b = TimePoint::new(a.domain, a.ticks + 30_000);
+        let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_000);
         let second: Vec<(f32, f32)> = (0..1_000).map(|i| (-0.25 - i as f32 / 4_000.0, 0.125)).collect();
         let entry = send_at(&mut run, "send", Some(b), &second);
         wait(&mut run, ms(40));
@@ -2349,7 +2349,7 @@ fn ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it() {
             assert_eq!(handed, 31_000, "{:?}", calls(&device, "tx_send"));
             // And in order: the first's held last sample ahead of the second's first, the
             // two waveforms end to end on the device (Review P, TG-1).
-            let a_root = clock.origin.ticks + a.ticks * clock.root_ticks_per_tick.num() as i64;
+            let a_root = clock.origin.ticks_in(clock.root).unwrap() + a.ticks_in(clock.domain).unwrap() * clock.root_ticks_per_tick.num() as i64;
             let whole: Vec<Option<[f32; 2]>> = tone(30_000).iter().chain(&second).map(|&(i, q)| Some([i, q])).collect();
             assert!(device.transmitted(a_root, 31_000) == whole, "{:?}", calls(&device, "tx_send"));
         }
@@ -2368,8 +2368,8 @@ fn ur_23_a_stop_while_the_device_burst_waits_for_a_continuation_ends_it() {
     let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
     assert!(admitted(&entry), "{entry:?}");
     let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
-    let a_end = clock.origin.ticks + (a.ticks + 30_000) * clock.root_ticks_per_tick.num() as i64;
-    while run.now().ticks < a_end - ms(7) {
+    let a_end = clock.origin.ticks_in(clock.root).unwrap() + (a.ticks_in(clock.domain).unwrap() + 30_000) * clock.root_ticks_per_tick.num() as i64;
+    while run.now().ticks_in(clock.root).unwrap() < a_end - ms(7) {
         wait(&mut run, ms(1) / 4);
     }
     let _ = run.submit(SessionAction::Stop { target: Some(ResourceId::parse("radio/tx").unwrap()) }, None);
@@ -2445,14 +2445,14 @@ fn ur_23_a_burst_one_sample_after_a_burst_is_played() {
             assert!(admitted(&entry), "{entry:?}");
             let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
             let n = clock.root_ticks_per_tick.num() as i64;
-            let a_root = clock.origin.ticks + a.ticks * n;
+            let a_root = clock.origin.ticks_in(clock.root).unwrap() + a.ticks_in(clock.domain).unwrap() * n;
             let a_end = a_root + 30_000 * n;
             if late_booking {
-                while run.now().ticks < a_end - ms(8) {
+                while run.now().ticks_in(clock.root).unwrap() < a_end - ms(8) {
                     wait(&mut run, ms(1) / 4);
                 }
             }
-            let b = TimePoint::new(a.domain, a.ticks + 30_001);
+            let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_001);
             let entry = send_at(&mut run, "send", Some(b), &tone(1_000));
             assert!(admitted(&entry), "{entry:?}");
             wait(&mut run, ms(80));
@@ -2597,7 +2597,7 @@ fn ur_23_a_one_sample_burst_booked_ahead_starts_at_its_time() {
     let entry = send_at(&mut run, "send", Some(a), &[(0.5, -0.25)]);
     assert!(admitted(&entry), "{entry:?}");
     let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
-    let a_root = clock.origin.ticks + a.ticks * clock.root_ticks_per_tick.num() as i64;
+    let a_root = clock.origin.ticks_in(clock.root).unwrap() + a.ticks_in(clock.domain).unwrap() * clock.root_ticks_per_tick.num() as i64;
     wait(&mut run, ms(60));
     let manifest = run.finish();
     assert_eq!(device.transmitted(a_root, 1), vec![Some([0.5, -0.25])], "{:?}", calls(&device, "tx_send"));
@@ -2621,7 +2621,7 @@ fn ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took() {
         let entry = send_at(&mut run, "send", Some(a), &wave);
         assert!(admitted(&entry), "{entry:?}");
         let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
-        let a_root = clock.origin.ticks + a.ticks * clock.root_ticks_per_tick.num() as i64;
+        let a_root = clock.origin.ticks_in(clock.root).unwrap() + a.ticks_in(clock.domain).unwrap() * clock.root_ticks_per_tick.num() as i64;
         wait(&mut run, ms(60));
         let manifest = run.finish();
         let sends = calls(&device, "tx_send");
@@ -2665,11 +2665,11 @@ fn ur_22_a_first_send_cut_short_keeps_the_reports_paired() {
         let entry = send_at(&mut run, "send", Some(a), &tone(1_000));
         assert!(admitted(&entry), "{entry:?}");
         let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
-        let a_root = clock.origin.ticks + a.ticks * clock.root_ticks_per_tick.num() as i64;
-        while run.now().ticks < a_root - ms(8) {
+        let a_root = clock.origin.ticks_in(clock.root).unwrap() + a.ticks_in(clock.domain).unwrap() * clock.root_ticks_per_tick.num() as i64;
+        while run.now().ticks_in(clock.root).unwrap() < a_root - ms(8) {
             wait(&mut run, ms(1) / 4);
         }
-        let b = TimePoint::new(a.domain, a.ticks + 500);
+        let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 500);
         let entry = send_at(&mut run, "send", Some(b), &tone(1_000));
         assert!(admitted(&entry), "{entry:?}");
         wait(&mut run, ms(60));
@@ -2695,12 +2695,12 @@ fn ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned() {
         let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
         assert!(admitted(&entry), "{entry:?}");
         let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
-        let a_root = clock.origin.ticks + a.ticks * clock.root_ticks_per_tick.num() as i64;
+        let a_root = clock.origin.ticks_in(clock.root).unwrap() + a.ticks_in(clock.domain).unwrap() * clock.root_ticks_per_tick.num() as i64;
         let a_end = a_root + 30_000 * clock.root_ticks_per_tick.num() as i64;
-        while run.now().ticks < a_end - ms(8) {
+        while run.now().ticks_in(clock.root).unwrap() < a_end - ms(8) {
             wait(&mut run, ms(1) / 4);
         }
-        let entry = send_at(&mut run, "send", Some(TimePoint::new(a.domain, a.ticks + 30_000)), &[(-0.5, 0.5); 1_000]);
+        let entry = send_at(&mut run, "send", Some(TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_000)), &[(-0.5, 0.5); 1_000]);
         assert!(admitted(&entry), "{entry:?}");
         wait(&mut run, ms(40));
         let manifest = run.finish();
@@ -2727,12 +2727,12 @@ fn ur_23_a_continuation_s_first_send_that_takes_nothing_ends_the_device_burst() 
     let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
     assert!(admitted(&entry), "{entry:?}");
     let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx").unwrap() && r.ended_at.is_none()).unwrap();
-    let a_root = clock.origin.ticks + a.ticks * clock.root_ticks_per_tick.num() as i64;
+    let a_root = clock.origin.ticks_in(clock.root).unwrap() + a.ticks_in(clock.domain).unwrap() * clock.root_ticks_per_tick.num() as i64;
     let a_end = a_root + 30_000 * clock.root_ticks_per_tick.num() as i64;
-    while run.now().ticks < a_end - ms(8) {
+    while run.now().ticks_in(clock.root).unwrap() < a_end - ms(8) {
         wait(&mut run, ms(1) / 4);
     }
-    let entry = send_at(&mut run, "send", Some(TimePoint::new(a.domain, a.ticks + 30_000)), &tone(1_000));
+    let entry = send_at(&mut run, "send", Some(TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_000)), &tone(1_000));
     assert!(admitted(&entry), "{entry:?}");
     wait(&mut run, ms(40));
     let manifest = run.finish();

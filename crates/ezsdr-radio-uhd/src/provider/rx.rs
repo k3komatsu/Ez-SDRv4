@@ -142,7 +142,7 @@ impl Rx {
         let channels = first.as_ref().map_or(0, |(_, channels, _)| *channels);
         let pool = HostPool::new(core.block_len * channels.max(1) * 8);
         let stream = first.map(|(handle, channels, t0)| {
-            let clock = Clock { domain: handle.id, origin: t0, n: handle.root_ticks_per_tick.num() as i64 };
+            let clock = Clock { domain: handle.id(), origin: t0, n: handle.root_ticks_per_tick().num() as i64 };
             Stream::new(clock, handle, channels, None)
         });
         lock(&core.streams).delivered = stream.as_ref().map(|stream| (stream.clock.origin, stream.config, 0));
@@ -292,7 +292,7 @@ impl Rx {
             .and_then(|stream| self.core.clocks.declare_sample_clock(stream, self.core.root, next.segment.config.ratio).map_err(|e| e.to_string()));
         match declared {
             Ok(handle) => {
-                let clock = Clock { domain: handle.id, origin, n: next.n() };
+                let clock = Clock { domain: handle.id(), origin, n: next.n() };
                 self.pool = HostPool::new(self.core.block_len * channels.max(1) * 8);
                 self.stream = Some(Stream::new(clock, handle, channels, self.last_stop.take()));
                 lock(&self.core.streams).delivered = Some((origin, next.segment.config, 0));
@@ -626,7 +626,7 @@ mod tests {
     fn rx(core: &Arc<Core>, channels: usize) -> (Rx, Clock) {
         let stream = core.id.child("rx").unwrap();
         let handle = core.clocks.declare_sample_clock(stream, core.root, Rational::new(200, 1).unwrap()).unwrap();
-        let clock = Clock { domain: handle.id, origin: 0, n: 200 };
+        let clock = Clock { domain: handle.id(), origin: 0, n: 200 };
         let config = Config { channels: channels as u16, ratio: Rational::new(200, 1).unwrap() };
         lock(&core.streams).lines[Dir::Rx as usize] = Some(Line::new(ezsdr_radio::timeline::Stream {
             direction: Direction::Rx,
@@ -670,13 +670,16 @@ mod tests {
     }
 
     fn received(link: &Arc<dyn ezsdr_kernel::stream::DataLink>) -> Vec<(ClockDomainId, i64, u32)> {
-        std::iter::from_fn(|| link.receive().map(|(b, _)| b)).map(|block| (block.header().first_sample_time.domain, block.header().first_sample_time.ticks, block.header().len)).collect()
+        std::iter::from_fn(|| link.receive().map(|(b, _)| b)).map(|block| {
+            let t = block.header().first_sample_time;
+            (t.domain(), t.ticks_in(t.domain()).unwrap(), block.header().len) // own domain: each block's clock is returned beside its ticks
+        }).collect()
     }
 
     use ezsdr_kernel::id::ClockDomainId;
 
     fn clocks(core: &Core) -> Vec<(i64, Option<i64>)> {
-        core.clocks.sample_clock_records().iter().map(|record| (record.origin.ticks, record.ended_at.map(|end| end.ticks))).collect()
+        core.clocks.sample_clock_records().iter().map(|record| (record.origin.ticks_in(record.root).unwrap(), record.ended_at.map(|end| end.ticks_in(record.root).unwrap()))).collect()
     }
 
     #[test]
@@ -740,7 +743,7 @@ mod tests {
             rx.receive(samples(clock.instant(first), n));
         }
         let blocks: Vec<_> = std::iter::from_fn(|| link.receive().map(|(b, _)| b))
-            .map(|block| (block.header().first_sample_time.ticks, block.header().len, block.header().flags, block.header().lost)).collect();
+            .map(|block| (block.header().first_sample_time.ticks_in(clock.domain).unwrap(), block.header().len, block.header().flags, block.header().lost)).collect();
         assert_eq!(blocks, [(0, 2_000, BlockFlags::NONE, None), (2_000, 1_000, BlockFlags::NONE, None), (3_000, 1_000, BlockFlags::NONE, None)]);
         assert_eq!(lock(&core.rec).stats["rx_overlapping"], 2);
     }

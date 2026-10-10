@@ -393,8 +393,8 @@ impl Provider for UhdRadio {
         if let Some((handle, channels)) = &prepared.tx {
             self.device.tx_open(*channels).map_err(|e| rejected(format!("UR-13: {e}")))?;
             // RM-25: the first lattice instant at or after the arm instant.
-            let n = handle.root_ticks_per_tick.num() as i64;
-            let origin = ezsdr_radio::timeline::lattice(a, handle.root_ticks_per_tick).map_err(|e| rejected(format!("UR-13: {e}")))?;
+            let n = handle.root_ticks_per_tick().num() as i64;
+            let origin = ezsdr_radio::timeline::lattice(a, handle.root_ticks_per_tick()).map_err(|e| rejected(format!("UR-13: {e}")))?;
             let domain = core.clocks.register_sample_clock(handle, origin).map_err(|e| rejected(format!("UR-13: {e}")))?;
             let clock = Clock { domain, origin, n };
             prepared.tx_clock = Some(clock);
@@ -418,11 +418,14 @@ impl Provider for UhdRadio {
         let now = core.now();
         let t0 = match at {
             None => now,
-            Some(t) if t.domain == core.root => t.ticks,
-            Some(t) => match core.clocks.convert(t, core.root).map_err(|e| rejected(format!("UR-15: {e}")))? {
-                ezsdr_kernel::time::Converted::Exact { point } => point.ticks,
-                ezsdr_kernel::time::Converted::Inexact { floor, .. } => floor.ticks + 1,
-            },
+            Some(t) => {
+                let root_tick = match core.clocks.convert(t, core.root) {
+                    Ok(ezsdr_kernel::time::Converted::Exact { point }) => point.ticks_in(core.root),
+                    Ok(ezsdr_kernel::time::Converted::Inexact { floor, .. }) => floor.ticks_in(core.root).map(|k| k + 1),
+                    Err(e) => Err(e),
+                };
+                root_tick.map_err(|e| rejected(format!("UR-15: {e}")))?
+            }
         };
         let s = core.start_up.load(Ordering::Acquire);
         if t0 < s {
@@ -442,7 +445,7 @@ impl Provider for UhdRadio {
         }
         let start = control::Start {
             t0,
-            rx: first.as_ref().map(|(handle, channels)| (*channels, handle.root_ticks_per_tick.num() as i64)),
+            rx: first.as_ref().map(|(handle, channels)| (*channels, handle.root_ticks_per_tick().num() as i64)),
             tx: tx_clock.map(|clock| (clock, tx_channels)),
         };
         core.timing(json!({ "what": "start", "t0": t0, "lead_ns": core.ns(t0 - now) }));

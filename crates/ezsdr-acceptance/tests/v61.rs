@@ -87,9 +87,9 @@ fn v61_03_timed_start_of_tx_and_capture() {
     let bursts: Vec<ezsdr_kernel::stream::BurstRecord> =
         serde_json::from_value(section(&manifest, "ezsdr.radio.mock.mock.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1);
-    assert_eq!(bursts[0].target.ticks, 2_005_000);
+    assert_eq!(bursts[0].target.ticks_in(bursts[0].target.domain()).unwrap(), 2_005_000);
     let capture = artifact(&manifest, "rec_0");
-    assert_eq!(capture.continuity[0].valid[0][0].start.ticks, 5_000);
+    assert_eq!(capture.continuity[0].valid[0][0].start.ticks_in(capture.continuity[0].valid[0][0].start.domain()).unwrap(), 5_000);
 }
 
 #[test]

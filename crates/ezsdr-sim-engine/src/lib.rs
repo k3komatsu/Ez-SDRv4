@@ -44,16 +44,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl EngineTime {
     fn root_tick(&self, point: TimePoint, round_up: bool) -> Result<i64, TimeError> {
-        if !self.governs(point.domain) {
-            return Err(TimeError::NotGoverned { id: point.domain });
+        if !self.governs(point.domain()) {
+            return Err(TimeError::NotGoverned { id: point.domain() });
         }
-        if point.domain == self.root || point.domain == ClockDomainId::HOST_MONOTONIC {
-            return Ok(point.ticks);
+        // host.monotonic is driven as the root's own ticks (TM-16a1).
+        if let Ok(ticks) = point
+            .ticks_in(self.root)
+            .or_else(|_| point.ticks_in(ClockDomainId::HOST_MONOTONIC))
+        {
+            return Ok(ticks);
         }
         match self.clocks.convert(point, self.root)? {
-            Converted::Exact { point } => Ok(point.ticks),
+            Converted::Exact { point } => point.ticks_in(self.root),
             Converted::Inexact { floor, .. } if round_up => {
-                floor.ticks.checked_add(1).ok_or(TimeError::Overflow)
+                floor.ticks_in(self.root)?.checked_add(1).ok_or(TimeError::Overflow)
             }
             Converted::Inexact { floor, .. } => Err(TimeError::Inexact { floor }),
         }

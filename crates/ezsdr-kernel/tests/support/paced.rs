@@ -55,13 +55,14 @@ impl WallTime {
     }
 
     fn root_ticks(&self, t: TimePoint) -> Result<i64, TimeError> {
-        if t.domain == self.root || t.domain == ClockDomainId::HOST_MONOTONIC {
-            return Ok(t.ticks);
+        // host.monotonic counts the same nanoseconds as the root (spec 19 §0).
+        if let Ok(ticks) = t.ticks_in(self.root).or_else(|_| t.ticks_in(ClockDomainId::HOST_MONOTONIC)) {
+            return Ok(ticks);
         }
-        if !self.governs(t.domain) {
-            return Err(TimeError::NotGoverned { id: t.domain });
+        if !self.governs(t.domain()) {
+            return Err(TimeError::NotGoverned { id: t.domain() });
         }
-        Ok(self.registry.conversion(t.domain, self.root)?.try_exact(t)?.ticks)
+        self.registry.conversion(t.domain(), self.root)?.try_exact(t)?.ticks_in(self.root)
     }
 }
 
@@ -177,19 +178,19 @@ impl WallAuthority {
         let before = utc();
         let measured = time.elapsed();
         let after = utc();
-        let relation = |target, offset, uncertainty, drift_uncertainty, method: &str| ClockRelation {
-            source: root,
-            target,
-            measured_at: TimePoint::new(root, measured),
-            offset: TimePoint::new(target, offset),
-            drift: 0.0,
-            drift_uncertainty,
-            uncertainty: ezsdr_kernel::time::Duration::new(target, uncertainty),
-            method: method.to_owned(),
-            valid: ezsdr_kernel::time::Validity {
-                from: TimePoint::new(root, measured),
-                to: None,
-            },
+        let relation = |target, offset, uncertainty, drift_uncertainty, method: &str| {
+            ClockRelation::new(
+                root,
+                target,
+                TimePoint::new(root, measured),
+                TimePoint::new(target, offset),
+                0.0,
+                drift_uncertainty,
+                ezsdr_kernel::time::Duration::new(target, uncertainty),
+                method.to_owned(),
+                ezsdr_kernel::time::Validity { from: TimePoint::new(root, measured), to: None },
+            )
+            .expect("a well-formed relation")
         };
         let relations = vec![
             relation(ClockDomainId::HOST_MONOTONIC, measured, 0, 0.0, "test.wall"),
@@ -347,7 +348,7 @@ impl ThreadedCtx {
                     .clocks
                     .declare_sample_clock(stream, self.time.primary_root(), ratio)
                     .expect("a fresh clock");
-                let now = self.now().ticks;
+                let now = self.now().ticks_in(self.time.primary_root()).unwrap();
                 let origin = (now + n - 1) / n * n;
                 self.clocks
                     .register_sample_clock(&handle, origin)
@@ -546,12 +547,12 @@ impl Provider for ThreadedProvider {
             .ok_or_else(|| ModuleError::rejected("test: not prepared"))?;
         if let (Some(handle), Some(t0)) = (&self.rx_clock, at) {
             ctx.clocks
-                .register_sample_clock(handle, t0.ticks)
+                .register_sample_clock(handle, t0.ticks_in(handle.root()).map_err(|e| ModuleError::rejected(format!("test: {e}")))?)
                 .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
         }
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        let publish = self.publish.zip(self.rx_clock.as_ref().map(|h| h.id));
+        let publish = self.publish.zip(self.rx_clock.as_ref().map(|h| h.id()));
         let marks = self.marks.clone();
         let lost_after = self.lost_after;
         let loss = self.loss.clone();
@@ -636,7 +637,7 @@ impl Provider for ThreadedProvider {
         }
         if let (Some((block_len, _)), Some(handle)) = (self.publish, &self.rx_clock) {
             for _ in 0..self.stop_tail {
-                publish_block(&ctx, handle.id, block_len, &self.next_index);
+                publish_block(&ctx, handle.id(), block_len, &self.next_index);
                 self.record("tail");
             }
         }

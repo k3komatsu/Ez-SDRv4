@@ -37,12 +37,12 @@ pub fn admit_burst_target(
     target: TimePoint,
     tx_domain: ClockDomainId,
 ) -> Result<AdmittedTarget, StreamError> {
-    if target.domain == tx_domain {
+    if target.domain() == tx_domain {
         return Ok(AdmittedTarget { target, requested_target: None,
         });
     }
     // SC-23b: `Unrelated` propagates out of `conversion`, which is the refusal.
-    match registry.conversion(target.domain, tx_domain)?.apply(target)? {
+    match registry.conversion(target.domain(), tx_domain)?.apply(target)? {
         Converted::Exact { point } => Ok(AdmittedTarget { target: point, requested_target: None,
         }),
         Converted::Inexact { floor, .. } => {
@@ -129,7 +129,7 @@ impl LatePolicy {
         let lead_host = registry.rescale(lead, host)?.floor();
         let late_by = Duration::new(
             host,
-            min_lead_ticks.checked_sub(lead_host.ticks).ok_or(TimeError::Overflow)?,
+            min_lead_ticks.checked_sub(lead_host.ticks_in(host)?).ok_or(TimeError::Overflow)?,
         );
         Ok(match self {
             LatePolicy::RejectAtPlan => LateOutcome::PlanViolation { late_by },
@@ -324,10 +324,10 @@ impl BurstTracker {
         h: &BlockHeader,
         open: Option<BurstOpen>,
     ) -> Result<BurstStep, StreamError> {
-        if h.first_sample_time.domain != self.domain {
+        if h.first_sample_time.domain() != self.domain {
             return Err(StreamError::Time(TimeError::DomainMismatch {
                 expected: self.domain,
-                found: h.first_sample_time.domain,
+                found: h.first_sample_time.domain(),
             }));
         }
         let sob = h.flags.contains(BlockFlags::START_OF_BURST);

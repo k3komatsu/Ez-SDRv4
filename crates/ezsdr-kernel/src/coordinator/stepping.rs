@@ -429,7 +429,7 @@ impl RunHandle {
                 return;
             }
             if let Some(horizon) = until {
-                if at.domain != horizon.domain || at.ticks >= horizon.ticks {
+                if !at.try_cmp(horizon).is_ok_and(|o| o.is_lt()) {
                     return;
                 }
             }
@@ -438,10 +438,12 @@ impl RunHandle {
 
     fn dispatch_agenda(&mut self, at: TimePoint) {
         self.agenda.sort_by_key(|(tick, index, _)| (*tick, *index));
+        // The agenda holds primary-root instants; a round in another root reaches none.
+        let now = at.ticks_in(self.shared.primary);
         let count = self
             .agenda
             .iter()
-            .take_while(|(tick, _, _)| *tick <= at.ticks)
+            .take_while(|(tick, _, _)| now.is_ok_and(|now| *tick <= now))
             .count();
         let due: Vec<_> = self.agenda.drain(..count).collect();
         let mut dispatched = Vec::new();
@@ -489,7 +491,7 @@ impl RunHandle {
         self.ensure_live()?;
         let t = super::state::ceil_convert(&self.shared.ctx.clocks, target, self.shared.primary)
             .map_err(|_| super::RunHandleError::NotOnPrimaryRoot { t: target })?;
-        if t.ticks <= self.shared.now().ticks {
+        if t.try_cmp(self.shared.now()).is_ok_and(|o| o.is_le()) {
             return Ok(());
         }
         let handle = match self.shared.schedule(t, Box::new(|_| {})) {
@@ -512,7 +514,7 @@ impl RunHandle {
         // Returned early at `stop`: the no-op at `t` is withdrawn, so no later round runs
         // at an instant an earlier wait's horizon chose (KC-29b; Phase 6 Review H, P1-3).
         let live = lock(&self.shared.end).is_none() && matches!(self.state(), RunState::Running {});
-        if live && self.shared.now().ticks < t.ticks {
+        if live && self.shared.now().try_cmp(t).is_ok_and(|o| o.is_lt()) {
             lock(&self.shared.scheduled).retain(|pending| *pending != handle);
             if self.shared.cancel(handle).is_err() {
                 super::ending::request(

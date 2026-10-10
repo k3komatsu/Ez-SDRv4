@@ -592,8 +592,8 @@
  {
   "name": "MR-17 TIME_ERROR time rounded up",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "emit_late_burst(late_by, at.time_point, tx_domain, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::Drop)",
-  "new": "emit_late_burst(late_by, at.time_point, tx_domain, decided_tx, ezsdr_radio::payloads::TimeErrorOutcome::Drop)",
+  "old": "emit_late_burst(late_by, at.time_point, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::Drop)",
+  "new": "emit_late_burst(late_by, at.time_point, decided_tx, ezsdr_radio::payloads::TimeErrorOutcome::Drop)",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "",
@@ -794,7 +794,7 @@
   "name": "MR-16 the open-burst refusal is judged on the target before MR-17 moves it",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
   "old": "} else if current && self.open_tx.as_ref().is_some_and(|open| start <= open.next) {",
-  "new": "} else if current && self.open_tx.as_ref().is_some_and(|open| at.time_point.ticks <= open.next) {",
+  "new": "} else if current && self.open_tx.as_ref().is_some_and(|open| at.time_point.ticks_in(tx_domain).is_ok_and(|k| k <= open.next)) {",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_16_a_burst_at_or_before"

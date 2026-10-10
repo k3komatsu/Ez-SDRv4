@@ -2,9 +2,9 @@
 //!
 //! Every Kernel identifier that could ever name something on another host is a
 //! `{node, local}` pair, and `ResourceId` is a `{node, path}` pair because a resource
-//! is a composite tree (`03-spec-and-binding.md` SB-33). v4.0 refuses any id whose
-//! `node` is not [`NodeId::LOCAL`]: [`NodeId`]'s deserialiser refuses it in every
-//! document, and `validate()` refuses it in the ids handed in as Rust values (D91).
+//! is a composite tree (`03-spec-and-binding.md` SB-33). v4.0 has no id whose
+//! `node` is not [`NodeId::LOCAL`]: [`NodeId`]'s field is private, so `LOCAL` and the
+//! deserialiser, which refuses any other node, are its only values (D91).
 
 use std::fmt;
 
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// Rule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
-pub struct NodeId(pub u32);
+pub struct NodeId(u32);
 
 /// X7 at the document boundary (D91): every id in every document embeds a `NodeId`,
 /// so refusing a non-local node here covers them all. The schema stays `uint32`, so
@@ -58,11 +58,11 @@ impl<'de> Deserialize<'de> for ResourceId {
             path: String,
         }
         let raw = Raw::deserialize(d)?;
-        let mut id = ResourceId::parse(&raw.path).map_err(|e| {
+        // `parse` builds a LOCAL id, which is the only node `raw.node` can hold.
+        debug_assert_eq!(raw.node, NodeId::LOCAL);
+        ResourceId::parse(&raw.path).map_err(|e| {
             serde::de::Error::custom(format!("SB-1: resource path {:?}: {e}", raw.path))
-        })?;
-        id.node = raw.node;
-        Ok(id)
+        })
     }
 }
 
@@ -73,18 +73,13 @@ impl<'de> Deserialize<'de> for ModuleId {
 }
 
 impl NodeId {
-    /// The only node id v4.0 accepts (X7).
+    /// The only node id v4.0 has (X7).
     pub const LOCAL: NodeId = NodeId(0);
-
-    /// True when this id is one v4.0 accepts (X7).
-    pub fn is_local(self) -> bool {
-        self == NodeId::LOCAL
-    }
 }
 
 impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_local() { f.write_str("local") } else { write!(f, "node{}", self.0) }
+        f.write_str("local")
     }
 }
 
@@ -222,13 +217,15 @@ impl ClockDomainId {
 /// addressable (`00-overview.md` "Where these specs depart from the Vision").
 ///
 /// Rule: SB-1, SB-3, SB-33, SB-34 (`03-spec-and-binding.md`), X7.
+// The fields are private: `parse`, `child`, `parent` and the deserialiser, which
+// goes through `parse`, are the only ways to build one (SB-1).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceId {
     /// Owning node; `0`, the local node, throughout v4.0 (X7).
-    pub node: NodeId,
+    node: NodeId,
     /// Slash-joined path through the composite resource tree (SB-34).
-    pub path: String,
+    path: String,
 }
 
 /// Why a [`ResourceId`] path was refused (SB-34).
@@ -283,6 +280,16 @@ impl ResourceId {
             return Err(ResourceIdError::TooLong);
         }
         Ok(ResourceId { node: NodeId::LOCAL, path: path.to_owned() })
+    }
+
+    /// The owning node, [`NodeId::LOCAL`] throughout v4.0 (X7).
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+
+    /// The slash-joined path (SB-34).
+    pub fn path(&self) -> &str {
+        &self.path
     }
 
     /// The path split into its segments (SB-34).

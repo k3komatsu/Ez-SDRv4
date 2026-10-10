@@ -101,7 +101,7 @@ fn capture_uri(server: &mut Server, n: i64) -> (String, TimePoint) {
     let Response::Status { events, now, .. } = ok(server.handle(Request::Status {}, Vec::new())) else { panic!() };
     let entry = submit(server, capture(n), Vec::new());
     assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
-    let within = Duration::new(now.domain, 1_000_000_000);
+    let within = Duration::new(now.domain(), 1_000_000_000);
     let Response::Waited { event: Some(event), now, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: events, within: Some(within), until: None }, Vec::new())) else { panic!("no capture") };
     (event.payload["artifact"]["uri"].as_str().unwrap().to_owned(), now)
 }
@@ -220,7 +220,7 @@ fn ea_04_requests() {
 fn ea_05_errors() {
     let temp = TempDir::new("errors");
     let (mut server, now) = connected(&temp.0);
-    let unrelated = TimePoint::new(ezsdr_kernel::id::ClockDomainId::local(999), now.ticks + 10);
+    let unrelated = TimePoint::new(ezsdr_kernel::id::ClockDomainId::local(999), now.ticks_in(now.domain()).unwrap() + 10);
     assert_eq!(err(server.handle(Request::Advance { to: Some(unrelated), by: None }, Vec::new())).kind, ErrorKind::NotOnPrimaryRoot);
     let deep = set("radio.tx.gain_db", Value::List(vec![Value::List(vec![Value::Int(1)])]));
     assert_eq!(err(server.handle(Request::Submit { action: deep }, Vec::new())).kind, ErrorKind::Malformed);
@@ -331,7 +331,7 @@ fn ea_09_the_default_profile_loops_back() {
     // The transmit clock the enable starts begins `x310-like`'s 50 ms start lead later, and
     // the untimed repeat there, on time (RS-19, RM-25).
     let (now, _, _) = status(&mut server);
-    server.handle(Request::Advance { to: None, by: Some(Duration::new(now.domain, 60_000_000)) }, Vec::new());
+    server.handle(Request::Advance { to: None, by: Some(Duration::new(now.domain(), 60_000_000)) }, Vec::new());
     let (uri, _) = capture_uri(&mut server, 3_000);
     let bytes = read(&mut server, &uri);
     assert_eq!(bytes.len(), 3_000 * 8);
@@ -362,7 +362,7 @@ fn ea_10_connect_stands_at_t0() {
     let mut server = greeted(&temp.0);
     let Response::Connected { now, start_instant, dir, profile, root_epoch, .. } = ok(server.handle(Request::Connect { profile: None, lease: None }, Vec::new())) else { panic!() };
     assert_eq!(now, start_instant);
-    assert_eq!(now.ticks, 2_000_000_000, "x310-like's 2 s start lead on a nanosecond root");
+    assert_eq!(now.ticks_in(now.domain()).unwrap(), 2_000_000_000, "x310-like's 2 s start lead on a nanosecond root");
     // The simulated root's epoch is no PPS edge (EA-10).
     assert!(matches!(root_epoch, ezsdr_kernel::time::EpochRef::Arbitrary { .. }), "{root_epoch:?}");
     assert_eq!(profile, ezsdr_server::default_profile(&dir));
@@ -402,16 +402,16 @@ fn ea_11_submit_returns_the_logged_entry() {
 fn ea_12_time_and_events() {
     let temp = TempDir::new("time");
     let (mut server, now) = connected(&temp.0);
-    let root = status(&mut server).0.domain;
+    let root = status(&mut server).0.domain();
     let Response::Advanced { now: later, .. } = ok(server.handle(Request::Advance { to: None, by: Some(Duration::new(root, 1_000_000)) }, Vec::new())) else { panic!() };
-    assert_eq!(later.ticks - now.ticks, 1_000_000, "1 ms on a nanosecond root");
+    assert_eq!(later.ticks_in(later.domain()).unwrap() - now.ticks_in(now.domain()).unwrap(), 1_000_000, "1 ms on a nanosecond root");
     // A wait that returns early echoes the horizon it would have stood at, not `now`
     // (Review I, P2-5).
     let Response::Status { events: before, now: asked, .. } = ok(server.handle(Request::Status {}, Vec::new())) else { panic!() };
     submit(&mut server, capture(500), Vec::new());
     let Response::Waited { index: Some(_), now: early, horizon: far, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: before, within: Some(Duration::new(root, 1_000_000_000)), until: None }, Vec::new())) else { panic!() };
-    assert_eq!(far.ticks, asked.ticks + 1_000_000_000);
-    assert!(early.ticks < far.ticks);
+    assert_eq!(far.ticks_in(far.domain()).unwrap(), asked.ticks_in(asked.domain()).unwrap() + 1_000_000_000);
+    assert!(early.ticks_in(early.domain()).unwrap() < far.ticks_in(far.domain()).unwrap());
     let (uri, at) = capture_uri(&mut server, 2_000);
     let Response::Events { events, next } = ok(server.handle(Request::Events { from: 0 }, Vec::new())) else { panic!() };
     let index = events.iter().rposition(|event| event.kind == written()).unwrap();
@@ -422,9 +422,9 @@ fn ea_12_time_and_events() {
     assert_eq!(tail[0], events[index]);
     let Response::Waited { index: none, now: horizon, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: next, within: Some(Duration::new(root, 3_000_000)), until: None }, Vec::new())) else { panic!() };
     assert_eq!(none, None);
-    assert_eq!(horizon.ticks, at.ticks + 3_000_000);
+    assert_eq!(horizon.ticks_in(horizon.domain()).unwrap(), at.ticks_in(at.domain()).unwrap() + 3_000_000);
     // `until` keeps a deadline across waits: the reply's `horizon` is where it would stand.
-    let deadline = TimePoint::new(horizon.domain, horizon.ticks + 2_000_000);
+    let deadline = TimePoint::new(horizon.domain(), horizon.ticks_in(horizon.domain()).unwrap() + 2_000_000);
     let Response::Waited { index: none, now: stood, horizon: echoed, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: next, within: None, until: Some(deadline) }, Vec::new())) else { panic!() };
     assert_eq!((none, stood, echoed), (None, deadline, deadline));
     assert_eq!(err(server.handle(Request::WaitFor { kinds: vec![], from: 0, within: Some(Duration::new(root, 1)), until: Some(deadline) }, Vec::new())).kind, ErrorKind::Protocol);
@@ -452,13 +452,13 @@ fn ea_12_a_duration_counts_the_primary_root() {
     let elsewhere = Duration::new(ezsdr_kernel::id::ClockDomainId::local(999), 7);
     let error = err(server.handle(Request::Advance { to: None, by: Some(elsewhere) }, Vec::new()));
     assert_eq!(error.kind, ErrorKind::NotOnPrimaryRoot);
-    assert_eq!(error.message, format!("EA-12: the duration counts ticks of {}, not of the primary root {}", elsewhere.domain, t0.domain));
-    let backwards = Duration::new(t0.domain, -1);
+    assert_eq!(error.message, format!("EA-12: the duration counts ticks of {}, not of the primary root {}", elsewhere.domain(), t0.domain()));
+    let backwards = Duration::new(t0.domain(), -1);
     assert_eq!(err(server.handle(Request::WaitFor { kinds: vec![written()], from: 0, within: Some(backwards), until: None }, Vec::new())).kind, ErrorKind::Protocol);
-    let error = err(server.handle(Request::Advance { to: None, by: Some(Duration::new(t0.domain, i64::MAX)) }, Vec::new()));
+    let error = err(server.handle(Request::Advance { to: None, by: Some(Duration::new(t0.domain(), i64::MAX)) }, Vec::new()));
     assert_eq!((error.kind, error.message.as_str()), (ErrorKind::NotOnPrimaryRoot, "EA-12: the duration does not fit the Run's clock"));
-    let Response::Advanced { now, .. } = ok(server.handle(Request::Advance { to: None, by: Some(Duration::new(t0.domain, 7)) }, Vec::new())) else { panic!() };
-    assert_eq!(now, TimePoint::new(t0.domain, t0.ticks + 7));
+    let Response::Advanced { now, .. } = ok(server.handle(Request::Advance { to: None, by: Some(Duration::new(t0.domain(), 7)) }, Vec::new())) else { panic!() };
+    assert_eq!(now, TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + 7));
     finish(&mut server);
 }
 
@@ -749,7 +749,7 @@ fn status(server: &mut Server) -> (TimePoint, Rational, usize) {
 
 /// `s` seconds as a `Duration` on the primary root, counted from its `root_rate` (EA-12).
 fn seconds(now: TimePoint, rate: Rational, s: u64) -> Duration {
-    Duration::new(now.domain, (s * rate.num()).div_ceil(rate.den()) as i64)
+    Duration::new(now.domain(), (s * rate.num()).div_ceil(rate.den()) as i64)
 }
 
 /// Captures `n` samples at `at` and returns the written artifact (EA-17).
@@ -768,7 +768,7 @@ fn first_on_root(manifest: &Manifest, artifact: &ezsdr_kernel::manifest::Artifac
     let map = &artifact.continuity[0];
     let clock = manifest.clocks.sample_clocks.iter().find(|record| record.domain == map.domain).expect("the capture's SampleClock");
     assert_eq!(clock.root_ticks_per_tick.den(), 1);
-    clock.origin.ticks + map.first.ticks * clock.root_ticks_per_tick.num() as i64
+    clock.origin.ticks_in(clock.origin.domain()).unwrap() + map.first.ticks_in(map.first.domain()).unwrap() * clock.root_ticks_per_tick.num() as i64
 }
 
 fn complex(bytes: &[u8]) -> Vec<(f32, f32)> {
@@ -785,10 +785,10 @@ fn ea_12_a_duration_is_whole_root_ticks() {
     let Response::Connected { now, root_rate, .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new())) else { panic!("connect") };
     assert_eq!(root_rate, Rational::new(200_000_000, 1).unwrap());
     let (at, _, _) = status(&mut server);
-    capture_at(&mut server, 100, TimePoint::new(at.domain, at.ticks + 20_000_000));
-    let within = Duration::new(now.domain, 2_000_000_000);
+    capture_at(&mut server, 100, TimePoint::new(at.domain(), at.ticks_in(at.domain()).unwrap() + 20_000_000));
+    let within = Duration::new(now.domain(), 2_000_000_000);
     let Response::Waited { index: Some(_), now, horizon, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: 0, within: Some(within), until: None }, Vec::new())) else { panic!("the capture was delivered") };
-    assert!(horizon.ticks - now.ticks >= 1_000_000_000, "horizon {horizon}, now {now}");
+    assert!(horizon.ticks_in(horizon.domain()).unwrap() - now.ticks_in(now.domain()).unwrap() >= 1_000_000_000, "horizon {horizon}, now {now}");
     finish(&mut server);
 }
 
@@ -816,7 +816,7 @@ fn ea_07_a_session_on_the_fake_device() {
     assert!(matches!(submit(&mut server, repeat(), wave.clone()).outcome, Outcome::Admitted { .. }));
     let (now, _, _) = status(&mut server);
     // The repeat starts within a restart lead (50 ms); a capture 100 ms ahead is inside it.
-    let artifact = capture_at(&mut server, 3_000, TimePoint::new(now.domain, now.ticks + 20_000_000));
+    let artifact = capture_at(&mut server, 3_000, TimePoint::new(now.domain(), now.ticks_in(now.domain()).unwrap() + 20_000_000));
     let captured = complex(&read(&mut server, &artifact.uri));
     let sent = complex(&wave);
     assert_eq!(captured.len(), 3_000);
@@ -1026,7 +1026,7 @@ fn ea_12_status_carries_the_root_rate() {
     let (now, rate, _) = status(&mut server);
     assert_eq!(rate, Rational::new(1_000_000_000, 1).unwrap());
     // Past the receive stream's first sample, so that the Run has a SampleClock at another rate.
-    let _ = server.handle(Request::WaitFor { kinds: vec![written()], from: 0, within: Some(Duration::new(now.domain, 3_000_000)), until: None }, Vec::new());
+    let _ = server.handle(Request::WaitFor { kinds: vec![written()], from: 0, within: Some(Duration::new(now.domain(), 3_000_000)), until: None }, Vec::new());
     let Reply::Result(response) = server.handle(Request::Status {}, Vec::new()).reply else { panic!() };
     assert_eq!(serde_json::to_value(response).unwrap()["root_rate"], json!({ "num": 1_000_000_000u64, "den": 1 }));
     finish(&mut server);
@@ -1050,12 +1050,12 @@ fn ea_17_a_capture_ahead_starts_at_its_instant() {
     let (now, rate, _) = status(&mut server);
     // 50 ms of the root, from its rate: a client's `after(0.05)` (VE-6).
     let ahead = i64::try_from((50 * u128::from(rate.num())).div_ceil(1_000 * u128::from(rate.den()))).unwrap();
-    let at = TimePoint::new(now.domain, now.ticks + ahead);
+    let at = TimePoint::new(now.domain(), now.ticks_in(now.domain()).unwrap() + ahead);
     let artifact = capture_at(&mut server, 1_000, at);
     let (manifest, _) = finish(&mut server);
     let first = first_on_root(&manifest, &artifact);
     let n = manifest.clocks.sample_clocks.iter().find(|r| r.domain == artifact.continuity[0].domain).unwrap().root_ticks_per_tick.num() as i64;
-    assert!(first >= at.ticks && first < at.ticks + n, "the first sample at {first}, asked {}", at.ticks);
+    assert!(first >= at.ticks_in(at.domain()).unwrap() && first < at.ticks_in(at.domain()).unwrap() + n, "the first sample at {first}, asked {}", at.ticks_in(at.domain()).unwrap());
 }
 
 #[test]
@@ -1064,13 +1064,13 @@ fn ea_17_a_capture_at_a_passed_instant_says_where_it_started() {
     let (mut server, _) = fake_session(&temp.0);
     let (now, rate, _) = status(&mut server);
     let back = i64::try_from((20 * u128::from(rate.num())).div_ceil(1_000 * u128::from(rate.den()))).unwrap();
-    let at = TimePoint::new(now.domain, now.ticks - back);
+    let at = TimePoint::new(now.domain(), now.ticks_in(now.domain()).unwrap() - back);
     let artifact = capture_at(&mut server, 1_000, at);
     let (manifest, _) = finish(&mut server);
     let first = first_on_root(&manifest, &artifact);
     // The samples at `at` were delivered before the request arrived: it starts later.
-    assert!(first > at.ticks, "the first sample at {first}, asked {}", at.ticks);
-    assert_eq!(artifact.continuity[0].end.ticks - artifact.continuity[0].first.ticks, 1_000, "the map names the samples it holds");
+    assert!(first > at.ticks_in(at.domain()).unwrap(), "the first sample at {first}, asked {}", at.ticks_in(at.domain()).unwrap());
+    assert_eq!(artifact.continuity[0].end.ticks_in(artifact.continuity[0].end.domain()).unwrap() - artifact.continuity[0].first.ticks_in(artifact.continuity[0].first.domain()).unwrap(), 1_000, "the map names the samples it holds");
 }
 
 #[test]

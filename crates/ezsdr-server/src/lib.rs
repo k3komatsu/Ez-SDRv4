@@ -165,7 +165,7 @@ impl Server {
                         run: live.run.id(),
                         state: live.run.state(),
                         now: live.run.now(),
-                        root_rate: live.clocks.nominal_rate(live.run.now().domain).expect("the primary root is registered"),
+                        root_rate: live.clocks.nominal_rate(live.run.now().domain()).expect("the primary root is registered"),
                         effective: live.run.effective(),
                         events: count(&live.run),
                         sample_clocks: live.clocks.sample_clock_records(),
@@ -241,8 +241,8 @@ impl Server {
             dir: dir.to_string_lossy().into_owned(),
             profile: profile.clone(),
             effective: run.effective(),
-            root_rate: clocks.nominal_rate(run.now().domain).expect("the primary root is registered"),
-            root_epoch: match clocks.get(run.now().domain).map(|domain| domain.kind) {
+            root_rate: clocks.nominal_rate(run.now().domain()).expect("the primary root is registered"),
+            root_epoch: match clocks.get(run.now().domain()).map(|domain| domain.kind) {
                 Ok(ClockDomainKind::Root { epoch, .. }) => epoch,
                 _ => unreachable!("the primary root is a registered Root (KC-3)"),
             },
@@ -316,10 +316,12 @@ impl Server {
             };
             let horizon = match duration_ns {
                 Some(ns) => match ticks(&clocks, t0, ns) {
-                    Some(ticks) => TimePoint::new(t0.domain, t0.ticks.saturating_add(ticks)),
+                    Some(ticks) => t0
+                        .checked_add(Duration::new(t0.domain(), ticks))
+                        .unwrap_or(TimePoint::new(t0.domain(), i64::MAX)),
                     None => return,
                 },
-                None => TimePoint::new(t0.domain, i64::MAX),
+                None => TimePoint::new(t0.domain(), i64::MAX),
             };
             let _ = child.run_until_end(horizon);
         };
@@ -425,7 +427,7 @@ fn run_error(error: RunHandleError) -> Handled {
 
 /// Nanoseconds as ticks of `at`'s domain, rounded up (EA-12).
 pub fn ticks(clocks: &ClockRegistry, at: TimePoint, ns: u64) -> Option<i64> {
-    let rate = clocks.nominal_rate(at.domain).ok()?;
+    let rate = clocks.nominal_rate(at.domain()).ok()?;
     let numerator = u128::from(ns) * u128::from(rate.num());
     let denominator = u128::from(rate.den()) * 1_000_000_000;
     i64::try_from(numerator.div_ceil(denominator)).ok()
@@ -436,15 +438,15 @@ pub fn ticks(clocks: &ClockRegistry, at: TimePoint, ns: u64) -> Option<i64> {
 /// instant `not_on_primary_root` (spec 20, VF-2; issue #40).
 fn later(live: &Live, by: Duration) -> Result<TimePoint, ProtocolError> {
     let now = live.run.now();
-    if by.domain != now.domain {
-        return Err(ProtocolError::new(ErrorKind::NotOnPrimaryRoot, format!("EA-12: the duration counts ticks of {}, not of the primary root {}", by.domain, now.domain)));
-    }
-    if by.ticks < 0 {
+    let Ok(by_ticks) = by.ticks_in(now.domain()) else {
+        return Err(ProtocolError::new(ErrorKind::NotOnPrimaryRoot, format!("EA-12: the duration counts ticks of {}, not of the primary root {}", by.domain(), now.domain())));
+    };
+    if by_ticks < 0 {
         return Err(ProtocolError::new(ErrorKind::Protocol, "EA-12: a duration cannot be negative"));
     }
-    match now.ticks.checked_add(by.ticks) {
-        Some(ticks) => Ok(TimePoint::new(now.domain, ticks)),
-        None => Err(ProtocolError::new(ErrorKind::NotOnPrimaryRoot, "EA-12: the duration does not fit the Run's clock")),
+    match now.checked_add(by) {
+        Ok(t) => Ok(t),
+        Err(_) => Err(ProtocolError::new(ErrorKind::NotOnPrimaryRoot, "EA-12: the duration does not fit the Run's clock")),
     }
 }
 

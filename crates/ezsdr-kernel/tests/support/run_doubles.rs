@@ -566,14 +566,15 @@ impl SteppedProvider {
         let domain = self
             .handles
             .first()
-            .filter(|handle| clocks.is_registered(handle.id))
-            .map(|handle| handle.id)
+            .filter(|handle| clocks.is_registered(handle.id()))
+            .map(|handle| handle.id())
             .unwrap_or(primary);
-        let sample = block(header(TimePoint::new(domain, until.ticks), 10, 1));
+        let u = until.ticks_in(primary).expect("a primary-root instant");
+        let sample = block(header(TimePoint::new(domain, u), 10, 1));
         for link in &self.outs {
             let _ = link.publish(sample.clone());
         }
-        self.record(format!("published:{}", until.ticks));
+        self.record(format!("published:{u}"));
         Ok(())
     }
 
@@ -588,7 +589,7 @@ impl SteppedProvider {
         for action in pending {
             let target = action
                 .target()
-                .map(|target| target.path.clone())
+                .map(|target| target.path().to_owned())
                 .unwrap_or_else(|| "-".to_owned());
             let variant = match &action {
                 Action::TxBurst { .. } => "TxBurst",
@@ -599,14 +600,15 @@ impl SteppedProvider {
                 Action::Stop { .. } => "Stop",
                 Action::Abort { .. } => "Abort",
             };
-            self.record(format!("action:{variant}:{target}@{}", until.ticks));
+            self.record(format!("action:{variant}:{target}@{}", until.ticks_in(until.domain()).unwrap()));
             match action {
                 Action::UpdateParameter { key, value, .. } => {
                     let value = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned());
                     self.record(format!("update:{key}={value}"));
                 }
                 Action::TxBurst { at, waveform, .. } => {
-                    self.record(format!("burst_at:{}", at.time_point.ticks));
+                    let t = at.time_point;
+                    self.record(format!("burst_at:{}", t.ticks_in(t.domain()).unwrap()));
                     let found = self
                         .inputs
                         .as_ref()
@@ -698,8 +700,8 @@ impl Provider for SteppedProvider {
         };
         let origin = time
             .now(time.primary_root())
+            .and_then(|t| t.ticks_in(time.primary_root()))
             .map_err(|e| ModuleError::rejected(format!("test: {e}")))?
-            .ticks
             + self.arm_origin_after;
         for stream in &self.register_at_arm {
             let stream_id = ResourceId::parse(stream)
@@ -707,7 +709,7 @@ impl Provider for SteppedProvider {
             let handles: Vec<_> = self
                 .handles
                 .iter()
-                .filter(|h| h.stream == stream_id)
+                .filter(|h| *h.stream() == stream_id)
                 .collect();
             if handles.is_empty() {
                 return Err(ModuleError::rejected(format!(
@@ -726,7 +728,7 @@ impl Provider for SteppedProvider {
     fn start(&mut self, at: Option<TimePoint>) -> Result<(), ModuleError> {
         self.record(format!(
             "start:{}",
-            at.map(|t| t.ticks.to_string())
+            at.map(|t| t.ticks_in(t.domain()).unwrap().to_string())
                 .unwrap_or_else(|| "none".to_owned())
         ));
         self.inner.fail_if(FailAt::Start)?;
@@ -740,8 +742,8 @@ impl Provider for SteppedProvider {
                 .ok_or_else(|| ModuleError::rejected("test: no time handle"))?;
             let now = time
                 .now(time.primary_root())
-                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?
-                .ticks;
+                .and_then(|t| t.ticks_in(time.primary_root()))
+                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
             let next = now
                 .checked_add(interval)
                 .ok_or_else(|| ModuleError::rejected("test: publish time overflow"))?;
@@ -752,8 +754,10 @@ impl Provider for SteppedProvider {
     }
 
     fn step(&mut self, until: TimePoint) -> Result<StepOutcome, ModuleError> {
-        self.record(format!("step:{}", until.ticks));
-        if self.block_step_at == Some(until.ticks) {
+        let primary = self.time.as_ref().map(|time| time.primary_root());
+        let u = primary.and_then(|p| until.ticks_in(p).ok()).expect("a primary-root step");
+        self.record(format!("step:{u}"));
+        if self.block_step_at == Some(u) {
             if let Some(gate) = &self.step_gate {
                 let (released, changed) = &**gate;
                 let mut released = released.lock().unwrap_or_else(|e| e.into_inner());
@@ -762,7 +766,7 @@ impl Provider for SteppedProvider {
                 }
             }
             self.block_step_at = None;
-            self.record(format!("released_step:{}", until.ticks));
+            self.record(format!("released_step:{u}"));
         }
         let now = self
             .time
@@ -770,7 +774,7 @@ impl Provider for SteppedProvider {
             .ok_or_else(|| ModuleError::rejected("test: no time handle"))?
             .now(self.time.as_ref().expect("checked above").primary_root())
             .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
-        self.record(format!("now:{}", now.ticks));
+        self.record(format!("now:{}", now.ticks_in(primary.expect("checked above")).unwrap()));
         if self.lost_reported {
             return Ok(StepOutcome { progressed: false });
         }
@@ -778,7 +782,7 @@ impl Provider for SteppedProvider {
         if self.panic_in_step {
             panic!("test: panic in step");
         }
-        if !self.lost_reported && self.device_lost_at.is_some_and(|t| until.ticks >= t) {
+        if !self.lost_reported && self.device_lost_at.is_some_and(|t| u >= t) {
             self.lost_reported = true;
             return Err(ModuleError {
                 kind: ModuleErrorKind::DeviceLost,
@@ -786,13 +790,13 @@ impl Provider for SteppedProvider {
                 detail: serde_json::Value::Null,
             });
         }
-        if self.step_error_at.is_some_and(|t| until.ticks >= t) {
+        if self.step_error_at.is_some_and(|t| u >= t) {
             self.step_error_at = None;
             return Err(ModuleError::rejected("test: step error"));
         }
         if !self.emitted {
             if let Some((kind, severity, at)) = &self.emit {
-                if until.ticks >= *at {
+                if u >= *at {
                     let event = Event {
                         source: self.instance().id.clone(),
                         time: until,
@@ -824,26 +828,24 @@ impl Provider for SteppedProvider {
                 }
             }
         }
-        if self.stopped_at.is_none() && self.next_publish == Some(until.ticks) {
+        if self.stopped_at.is_none() && self.next_publish == Some(u) {
             self.publish(until)?;
             progressed = true;
             if let Some(interval) = self.publish_every {
-                let next = until
-                    .ticks
+                let next = u
                     .checked_add(interval)
                     .ok_or_else(|| ModuleError::rejected("test: publish time overflow"))?;
                 self.next_publish = Some(next);
                 self.schedule_noop(next)?;
             }
         }
-        if self.stopped_at.is_some() && self.tail_blocks > 0 && self.next_tail == Some(until.ticks)
+        if self.stopped_at.is_some() && self.tail_blocks > 0 && self.next_tail == Some(u)
         {
             self.publish(until)?;
             progressed = true;
             self.tail_blocks -= 1;
             if self.tail_blocks > 0 {
-                let next = until
-                    .ticks
+                let next = u
                     .checked_add(10)
                     .ok_or_else(|| ModuleError::rejected("test: tail time overflow"))?;
                 self.next_tail = Some(next);
@@ -853,7 +855,7 @@ impl Provider for SteppedProvider {
             }
         }
         if self.reschedule_forever {
-            self.schedule_noop(until.ticks)?;
+            self.schedule_noop(u)?;
         }
         Ok(StepOutcome { progressed })
     }
@@ -872,8 +874,8 @@ impl Provider for SteppedProvider {
             .ok_or_else(|| ModuleError::rejected("test: no time handle"))?;
         self.stopped_at = Some(
             time.now(time.primary_root())
-                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?
-                .ticks,
+                .and_then(|t| t.ticks_in(time.primary_root()))
+                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?,
         );
         self.next_publish = None;
         if let Some((kind, severity)) = self.stop_emit.take() {
@@ -1045,13 +1047,14 @@ impl Sink for RecordingSink {
     }
 
     fn step(&mut self, until: TimePoint) -> Result<StepOutcome, ModuleError> {
-        self.record(format!("step:{}", until.ticks));
+        let u = self.primary.and_then(|p| until.ticks_in(p).ok()).expect("a primary-root step");
+        self.record(format!("step:{u}"));
         if self.record_threads {
             let thread = std::thread::current();
             self.record(format!("step_on:{:?}:{}", thread.id(), thread.name().unwrap_or("-")));
         }
         if let Some((tick, kind)) = self.fail_step {
-            if until.ticks >= tick {
+            if u >= tick {
                 self.fail_step = None;
                 return Err(ModuleError {
                     kind,
@@ -1060,7 +1063,7 @@ impl Sink for RecordingSink {
                 });
             }
         }
-        if self.panic_step.is_some_and(|tick| until.ticks >= tick) {
+        if self.panic_step.is_some_and(|tick| u >= tick) {
             self.panic_step = None;
             panic!("test: panic in sink step");
         }
@@ -1068,7 +1071,8 @@ impl Sink for RecordingSink {
         for link in &self.ins {
             while let Some((block, _)) = link.receive() {
                 let header = block.header().clone();
-                self.record(format!("block:{}", header.first_sample_time.ticks));
+                let t = header.first_sample_time;
+                self.record(format!("block:{}", t.ticks_in(t.domain()).unwrap()));
                 self.received.push(header);
                 progressed = true;
             }
@@ -1247,7 +1251,9 @@ impl Executor for ProbeExecutor {
     }
 
     fn step(&mut self, until: TimePoint) -> Result<StepOutcome, ModuleError> {
-        self.record(format!("step:{}", until.ticks));
+        // The probe records the instant it was handed, in that instant's own domain.
+        let u = until.ticks_in(until.domain()).unwrap();
+        self.record(format!("step:{u}"));
         if !self.event_emitted {
             if let Some((source, kind, severity)) = &self.event {
                 self.events
@@ -1266,7 +1272,7 @@ impl Executor for ProbeExecutor {
         }
         let due = !self.submitted
             && self.submit.is_some()
-            && self.submit_at.is_none_or(|tick| until.ticks >= tick);
+            && self.submit_at.is_none_or(|tick| u >= tick);
         if due {
             let action = self.submit.take().expect("checked above");
             let out = self
