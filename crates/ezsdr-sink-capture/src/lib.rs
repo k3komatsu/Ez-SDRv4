@@ -14,9 +14,9 @@ use std::sync::Arc;
 use ezsdr_hostmem::interleave;
 use ezsdr_kernel::binding::Binding;
 use ezsdr_kernel::contract::DataContractId;
-use ezsdr_kernel::event::{Action, Event, EventKind, EventSink, Severity};
+use ezsdr_kernel::event::{Action, Event, EventKind, EventSink, EventSource, Severity, Target};
 use ezsdr_kernel::hash::ContentHash;
-use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId, RunId};
+use ezsdr_kernel::id::{ClockDomainId, ModuleId, RunId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
     ActionReceiver, Endpoint, KERNEL_API, ModuleDescriptor, ModuleError, ModuleRef,
@@ -114,6 +114,8 @@ pub struct CaptureSink {
     dir: PathBuf,
     descriptor: SinkDescriptor,
     output: Option<Ident>,
+    /// The event source the Kernel handed this instance (KC-8).
+    source: Option<EventSource>,
     run: Option<RunId>,
     clocks: Option<Arc<ClockRegistry>>,
     time: Option<Arc<dyn TimeAuthority>>,
@@ -157,6 +159,7 @@ impl CaptureSink {
             dir,
             descriptor: sink_descriptor(),
             output: None,
+            source: None,
             run: None,
             clocks: None,
             time: None,
@@ -175,18 +178,15 @@ impl CaptureSink {
     }
 
     fn event_for_rejection(&self, action: &str, reason: String, request: Option<u64>) {
-        let (Some(events), Some(time), Some(output)) = (&self.events, &self.time, &self.output) else {
+        let (Some(events), Some(time), Some(source)) = (&self.events, &self.time, &self.source) else {
             return;
         };
         let root = time.primary_root();
         let Ok(now) = time.now(root) else {
             return;
         };
-        let Ok(source) = ezsdr_kernel::id::ResourceId::parse(&format!("sink/{output}")) else {
-            return;
-        };
         let event = Event {
-            source,
+            source: source.clone(),
             time: now,
             severity: Severity::Warning,
             kind: EventKind::parse(REQUEST_REJECTED).expect("a valid Sink event kind"),
@@ -219,10 +219,8 @@ impl CaptureSink {
                     ),
                 }
             }
-            Action::Stop { target: Some(target) }
-                if self.output.as_ref().is_some_and(|output| {
-                    ResourceId::parse(&format!("sink/{output}")).is_ok_and(|sink_target| target == sink_target)
-                }) =>
+            Action::Stop { target: Some(Target::Output { output }) }
+                if self.output.as_ref() == Some(&output) =>
             {
                 if self.queue.front().is_some_and(|capture| capture.started) {
                     let carry = self.link.as_ref()
@@ -480,17 +478,14 @@ impl CaptureSink {
 
     /// HD-16: `sink.CAPTURE_WRITTEN` with the artifact just recorded and its request's number.
     fn announce(&self, artifact: ArtifactRef, request: Option<u64>) {
-        let (Some(events), Some(time), Some(output)) = (&self.events, &self.time, &self.output) else {
+        let (Some(events), Some(time), Some(source)) = (&self.events, &self.time, &self.source) else {
             return;
         };
         let Ok(now) = time.now(time.primary_root()) else {
             return;
         };
-        let Ok(source) = ezsdr_kernel::id::ResourceId::parse(&format!("sink/{output}")) else {
-            return;
-        };
         let _ = events.emit_control(Event {
-            source,
+            source: source.clone(),
             time: now,
             severity: Severity::Info,
             kind: EventKind::parse(CAPTURE_WRITTEN).expect("a valid Sink event kind"),
@@ -553,6 +548,7 @@ impl Sink for CaptureSink {
             .map_err(|error| ModuleError::rejected(format!("HD-9: cannot create capture directory: {error}")))?;
 
         self.output = Some(request.id.clone());
+        self.source = Some(ctx.source);
         self.run = Some(ctx.run);
         self.clocks = Some(ctx.clocks);
         self.time = Some(ctx.time);
@@ -586,7 +582,7 @@ impl Sink for CaptureSink {
     fn step(&mut self, _until: TimePoint) -> Result<StepOutcome, ModuleError> {
         let mut progressed = false;
         if let Some(actions) = self.actions.clone() {
-            while let Some(action) = actions.recv() {
+            while let Some((action, _)) = actions.recv() {
                 progressed = true;
                 self.handle_action(action)?;
             }
@@ -620,6 +616,7 @@ impl Sink for CaptureSink {
         self.clocks = None;
         self.run = None;
         self.output = None;
+        self.source = None;
     }
 }
 

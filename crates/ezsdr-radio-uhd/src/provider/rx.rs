@@ -714,7 +714,7 @@ mod tests {
                 .filter(|e| [kinds::ALIGNMENT_ERROR, kinds::RX_OVERFLOW].contains(&e.kind.as_str()))
                 .collect();
             for event in &got {
-                assert_eq!(event.source, core.rx_id);
+                assert_eq!(event.source, ezsdr_kernel::event::EventSource::Node { node: core.rx_id.clone() });
                 let lost = match event.kind.as_str() {
                     kinds::RX_OVERFLOW => {
                         assert!(event.payload.is_array(), "the hot path's bytes: {}", event.payload);

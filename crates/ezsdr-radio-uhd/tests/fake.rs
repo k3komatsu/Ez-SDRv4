@@ -13,7 +13,7 @@ use std::time::{Duration as Wall, Instant};
 
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, Binding};
 use ezsdr_kernel::coordinator::{RunHandle, RunHandleError, start_spec_run};
-use ezsdr_kernel::event::{Action, ActionId, Event, EventCollector, EventKind};
+use ezsdr_kernel::event::{Action, ActionId, Event, EventCollector, EventKind, EventSource};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ResourceId, RunId};
 use ezsdr_kernel::manifest::Manifest;
@@ -101,9 +101,11 @@ fn ur_05_from_binding_refusals() {
     let mut fed = binding(ok.clone(), Some(x310_ubx()));
     fed.feed = serde_json::from_value(json!({ "port": { "component": "radio", "port": "rx" }, "policy": "drop_oldest", "capacity": 4 })).unwrap();
     assert!(refuse(fed, device.clone()).starts_with("UR-5:"));
-    for selector in [json!({ "args": ARGS, "fake": true }), json!({ "args": ARGS, "block_len": 0 }), json!({ "args": ARGS, "clock_source": "atomic" }), json!({})] {
+    for selector in [json!({ "args": ARGS, "fake": true }), json!({ "args": ARGS, "block_len": 0 }), json!({ "args": ARGS, "clock_source": "atomic" }), json!({ "args": ARGS, "id": "a/b" }), json!({ "args": ARGS, "id": "" }), json!({})] {
         assert!(refuse(binding(selector.clone(), Some(x310_ubx())), device.clone()).starts_with("UR-5:"), "{selector}");
     }
+    // The id is only a node path now (sections are filed by source, RS-39): any one segment.
+    assert!(UhdRadio::from_binding(&binding(json!({ "args": ARGS, "id": "Dev-1.a" }), Some(x310_ubx())), device.clone()).is_ok());
     let slow = fake(FakeConfig { master_clock_rate: 184_320_000, ..FakeConfig::default() });
     assert_eq!(
         refuse(binding(ok, Some(x310_ubx())), slow),
@@ -427,11 +429,11 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(capability("radio.rx.block_len"), one(Scalar::from(2_000)));
     assert_eq!(capability("radio.perf.wire_bytes_per_sample"), one(Scalar::from(4)));
     assert_eq!(capability("radio.tx.path_delay_samples"), one(Scalar::from(45)));
-    let envelope = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.envelope").unwrap()];
+    let envelope = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.envelope").unwrap()];
     assert_eq!(envelope["profile"]["name"], "x310-ubx");
     assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], 5_000_000);
     assert_eq!(envelope["performance"]["rx_bytes_per_s"], 1_000_000_000);
-    assert_eq!(instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.device").unwrap()]["fake"], true);
+    assert_eq!(instance.sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()]["fake"], true);
 }
 
 #[test]
@@ -466,7 +468,7 @@ fn ur_11_coerce_is_the_descriptions() {
 
 struct NoActions;
 impl ActionReceiver for NoActions {
-    fn recv(&self) -> Option<Action> {
+    fn recv(&self) -> Option<(Action, Option<ResourceId>)> {
         None
     }
 }
@@ -484,21 +486,24 @@ fn direct_prepare(radio: &mut UhdRadio, device: Arc<FakeDevice>, class: Executio
     let mut registry = ModuleRegistry::new();
     let (mut checks, mut kinds) = (AdmissionCheckRegistry::new(), EventKindRegistry::with_kernel_kinds());
     ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
-    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (ResourceId::parse(s).unwrap(), k))).collect();
+    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 1024, &Policy::default()));
-    let ctx = PrepareContext {
-        run: RunId::from_string("unit".to_owned()),
-        class,
-        time: authority.time(),
-        clocks,
-        events,
-        actions: Arc::new(NoActions),
-        actions_out: Arc::new(NoSubmit),
-        environment: Arc::new(BTreeMap::new()),
-        inputs: Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new()),
-        links,
-        components: BTreeMap::new(),
-        host_budget: RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap(),
+    let ctx = {
+        let mut ctx = PrepareContext::testing(
+            EventSource::Node { node: ResourceId::parse("usrp").unwrap() },
+            authority.time(),
+            clocks,
+            events,
+            Arc::new(NoActions),
+            Arc::new(NoSubmit),
+        );
+        ctx.run = RunId::from_string("unit".to_owned());
+        ctx.class = class;
+        ctx.environment = Arc::new(BTreeMap::new());
+        ctx.inputs = Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new());
+        ctx.links = links;
+        ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
+        ctx
     };
     let fragment = Fragment {
         id: Ident::parse("radio").unwrap(),
@@ -520,15 +525,16 @@ fn attached(policy: ezsdr_kernel::stream::BackPressure) -> AttachedPort {
         capacity: 4,
     };
     let link = ezsdr_link_host::HostLinkModule::new().create(&decl).unwrap();
-    AttachedPort { component: Ident::parse("radio").unwrap(), port: Ident::parse("rx").unwrap(), endpoint: Endpoint::StreamOut(link) }
+    AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse("rx").unwrap(), Endpoint::StreamOut(link))
 }
 
 /// A queue the test pushes Actions into, as the coordinator dispatches them.
 #[derive(Default)]
 struct Pushed(Mutex<std::collections::VecDeque<Action>>);
 impl ActionReceiver for Pushed {
-    fn recv(&self) -> Option<Action> {
-        self.0.lock().unwrap().pop_front()
+    // The coordinator's resolution (KC-23): every test Action is the device's.
+    fn recv(&self) -> Option<(Action, Option<ResourceId>)> {
+        self.0.lock().unwrap().pop_front().map(|action| (action, Some(ResourceId::parse("usrp").unwrap())))
     }
 }
 
@@ -564,22 +570,25 @@ impl Direct {
         let mut registry = ModuleRegistry::new();
         let (mut checks, mut kinds) = (AdmissionCheckRegistry::new(), EventKindRegistry::with_kernel_kinds());
         ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
-        let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (ResourceId::parse(s).unwrap(), k))).collect();
+        let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
         let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
         let queue = Arc::new(Pushed::default());
-        let ctx = PrepareContext {
-            run: RunId::from_string("direct".to_owned()),
-            class: ExecutionClass::HardwareInLoop,
-            time: time.clone(),
-            clocks: clocks.clone(),
-            events: events.clone(),
-            actions: queue.clone(),
-            actions_out: Arc::new(NoSubmit),
-            environment: Arc::new(BTreeMap::new()),
-            inputs: Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new()),
-            links,
-            components: BTreeMap::new(),
-            host_budget: RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap(),
+        let ctx = {
+            let mut ctx = PrepareContext::testing(
+                EventSource::Node { node: ResourceId::parse("usrp").unwrap() },
+                time.clone(),
+                clocks.clone(),
+                events.clone(),
+                queue.clone(),
+                Arc::new(NoSubmit),
+            );
+            ctx.run = RunId::from_string("direct".to_owned());
+            ctx.class = ExecutionClass::HardwareInLoop;
+            ctx.environment = Arc::new(BTreeMap::new());
+            ctx.inputs = Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new());
+            ctx.links = links;
+            ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
+            ctx
         };
         let fragment = Fragment {
             id: Ident::parse("radio").unwrap(),
@@ -609,7 +618,7 @@ impl Direct {
 
     fn update(&self, key: &str, value: Value, class: ezsdr_kernel::module_api::UpdateClass, at: Option<i64>) {
         self.push(Action::UpdateParameter {
-            target: ResourceId::parse("usrp").unwrap(),
+            target: resource("radio"),
             key: Key::parse(key).unwrap(),
             value,
             class,
@@ -921,7 +930,7 @@ fn tx_at(run: &RunHandle, lead: i64) -> TimePoint {
 
 fn send_at(run: &mut RunHandle, verb_name: &str, at: Option<TimePoint>, samples: &[(f32, f32)]) -> ezsdr_kernel::session::LogEntry {
     let (bytes, _) = waveform_of(samples);
-    run.submit(verb(verb_name, "radio/tx", at, &[]), Some(&bytes)).unwrap()
+    run.submit(verb(verb_name, resource("radio/tx"), at, &[]), Some(&bytes)).unwrap()
 }
 
 fn send(run: &mut RunHandle, verb_name: &str, lead: Option<i64>, samples: &[(f32, f32)]) -> ezsdr_kernel::session::LogEntry {
@@ -942,7 +951,7 @@ fn ur_21_txburst_refusals() {
     let (mut run, _, _dir) = tx_session(FakeConfig::default());
     // Not a multiple of 8 · channels.
     let odd = vec![0u8; 12];
-    let _ = run.submit(verb("send", "radio/tx", None, &[]), Some(&odd)).unwrap();
+    let _ = run.submit(verb("send", resource("radio/tx"), None, &[]), Some(&odd)).unwrap();
     // A non-finite component.
     let _ = send(&mut run, "send", Some(ms(20)), &[(f32::NAN, 0.0)]);
     // A start equal to a held burst's.
@@ -976,7 +985,7 @@ fn ur_21_late_policies_on_the_device_lead() {
     let _ = send(&mut run, "send", Some(ms(1)), &tone(10));
     let _ = send(&mut run, "start_repeat", Some(ms(1) / 2), &tone(10));
     wait(&mut run, ms(50));
-    let _ = run.submit(SessionAction::Stop { target: Some(ResourceId::parse("radio/tx").unwrap()) }, None);
+    let _ = run.submit(SessionAction::Stop { target: Some(resource("radio/tx")) }, None);
     wait(&mut run, ms(20));
     // On time with a margin that survives the test binary's parallel load (Review M,
     // P1-B); the device lead's own boundary is the bench's to measure (B8).
@@ -1068,7 +1077,7 @@ fn ur_22_repeat_is_continuous_across_the_wrap() {
         spec["outputs"][0]["params"] = json!({});
         spec["schedule"].as_array_mut().unwrap().push(json!({
             "at": { "clock": "radio", "offset_ticks": 1_000 },
-            "action": { "kind": "update_parameter", "target": serde_json::to_value(ResourceId::parse("sink/rec").unwrap()).unwrap(),
+            "action": { "kind": "update_parameter", "target": serde_json::to_value(output("rec")).unwrap(),
                         "key": "sink.capture_samples", "value": 4_000, "class": "block_boundary" }
         }));
         spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(waveform.hash.clone(), bytes)]))
@@ -1152,7 +1161,7 @@ fn ur_23_a_stop_ends_the_burst_within_the_in_flight_window() {
     let _ = send(&mut run, "start_repeat", Some(ms(10)), &tone(1_000));
     wait(&mut run, ms(60));
     let stop_at = run.now().ticks_in(run.now().domain()).unwrap();
-    let _ = run.submit(SessionAction::Stop { target: Some(ResourceId::parse("radio/tx").unwrap()) }, None);
+    let _ = run.submit(SessionAction::Stop { target: Some(resource("radio/tx")) }, None);
     wait(&mut run, ms(40));
     let manifest = run.finish();
     let record = &bursts(&manifest)[0];
@@ -1290,7 +1299,7 @@ fn ur_24_a_released_command_is_not_recalled_by_stop() {
     // recalled: it is applied at its `e`, and recorded in `applied` as issued, not cancelled.
     let dir = TempDir::new();
     let device = fake(FakeConfig::default());
-    let radio = serde_json::to_value(ResourceId::parse("radio").unwrap()).unwrap();
+    let radio = serde_json::to_value(resource("radio")).unwrap();
     let mut spec = receive_spec(1, 1e6, 1e9, None);
     spec["schedule"] = json!([{
         "at": { "clock": "radio", "offset_ticks": 20_000 },
@@ -1320,12 +1329,12 @@ fn ur_24_stop_cancels_held_commands() {
     let mut spec = receive_spec(1, 1e6, 1e9, None);
     let update = |offset: i64, value: f64| json!({
         "at": { "clock": "radio", "offset_ticks": offset },
-        "action": { "kind": "update_parameter", "target": serde_json::to_value(ResourceId::parse("radio").unwrap()).unwrap(),
+        "action": { "kind": "update_parameter", "target": serde_json::to_value(resource("radio")).unwrap(),
                     "key": "radio.rx.frequency_hz", "value": value, "class": "hardware_timed" }
     });
     spec["schedule"] = json!([update(1_000_000, 2.3e9), update(10_000_000_000, 2.2e9), {
         "at": { "clock": "radio", "offset_ticks": 10_000 },
-        "action": { "kind": "stop", "target": serde_json::to_value(ResourceId::parse("radio").unwrap()).unwrap() }
+        "action": { "kind": "stop", "target": serde_json::to_value(resource("radio")).unwrap() }
     }]);
     let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
     let t0 = run.start_instant().unwrap();
@@ -1365,7 +1374,7 @@ fn ur_25_a_stream_silent_before_e1_switches_before_e2() {
     // The bounded wait never goes under 1 ms (UHD truncates the timeout to whole ms).
     assert!(direct.device.min_recv_timeout() >= Wall::from_millis(1), "{:?}", direct.device.min_recv_timeout());
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
     let switch = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_segment").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
     let e2 = switch["origin"].as_i64().unwrap();
     assert!(switch["at"].as_i64().unwrap() < e2, "switched after e₂: {switch}");
@@ -1374,7 +1383,7 @@ fn ur_25_a_stream_silent_before_e1_switches_before_e2() {
     let stop = calls.iter().position(|c| c == "rx_stop now").unwrap_or_else(|| panic!("{calls:?}"));
     let start = calls.iter().position(|c| *c == format!("rx_start {e2}")).unwrap_or_else(|| panic!("{calls:?}"));
     assert!(stop < start, "{calls:?}");
-    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.applied").unwrap()];
+    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
     assert!(applied.as_array().unwrap().iter().any(|r| r["key"] == "rx_stop"), "{applied}");
     assert!(late.is_empty(), "{late:?}");
 }
@@ -1426,9 +1435,9 @@ fn ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuratio
     direct.update("radio.rx.channels", Value::from(1), Cold, None);
     direct.settle(Wall::from_millis(300));
     let instance = direct.finish();
-    let envelope = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.envelope").unwrap()];
+    let envelope = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.envelope").unwrap()];
     let lead = envelope["timing"]["start_lead_ns"].as_i64().unwrap() * MCR / 1_000_000_000;
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
     let row = timing.as_array().unwrap().iter().find(|r| r["what"] == "cold_change").cloned().unwrap_or_else(|| panic!("{timing}"));
     let segment = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_segment").cloned().unwrap_or_else(|| panic!("{timing}"));
     let (e, configured, origin) = (row["e"].as_i64().unwrap(), row["ready"].as_i64().unwrap(), segment["origin"].as_i64().unwrap());
@@ -1473,7 +1482,7 @@ fn ur_25_enabling_tx_applies_the_configuration() {
     let _ = send(&mut run, "start_repeat", Some(ms(20)), &wave);
     wait(&mut run, ms(40));
     let capture_at = after(&run, ms(5));
-    assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(capture_at), &[("sink.capture_samples", Value::from(2_000))]), None).unwrap()));
+    assert!(admitted(&run.submit(verb("capture", output("rec"), Some(capture_at), &[("sink.capture_samples", Value::from(2_000))]), None).unwrap()));
     let horizon = after(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     let manifest = run.finish();
@@ -1519,13 +1528,13 @@ fn ur_26_stop_actions() {
     let _ = send(&mut run, "start_repeat", Some(ms(10)), &tone(100));
     wait(&mut run, ms(30));
     for target in ["radio/tx", "radio/rx", "radio", "radio/gpio"] {
-        let entry = run.submit(SessionAction::Stop { target: Some(ResourceId::parse(target).unwrap()) }, None).unwrap();
+        let entry = run.submit(SessionAction::Stop { target: Some(resource(target)) }, None).unwrap();
         assert!(admitted(&entry), "{target}: {entry:?}");
         wait(&mut run, ms(5));
     }
     // A Command this Provider does not serve (`start_rx` of the transmit stream) is refused
     // under the action name `command`.
-    let _ = run.submit(verb("start_rx", "radio/tx", None, &[]), None).unwrap();
+    let _ = run.submit(verb("start_rx", resource("radio/tx"), None, &[]), None).unwrap();
     wait(&mut run, ms(20));
     let manifest = run.finish();
     assert!(section(&manifest, "rejected").as_array().unwrap().iter().any(|r| r["action"] == "command"));
@@ -1558,7 +1567,7 @@ fn ur_26_an_abort_publishes_nothing_after_the_stop_instant() {
     }
     direct.radio.cleanup();
     let instance = direct.radio.instance().clone();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
     let stop = timing.as_array().unwrap().iter().find(|r| r["what"] == "stop").unwrap()["at"].as_i64().unwrap();
     let origin = direct.clocks.sample_clock_records().iter().find(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).unwrap().origin.ticks_in(direct.clocks.sample_clock_records().iter().find(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).unwrap().root).unwrap();
     let end = origin + end.expect("blocks were published") * 200;
@@ -1566,7 +1575,7 @@ fn ur_26_an_abort_publishes_nothing_after_the_stop_instant() {
     // One stop, recorded once: not again when the tail reaches the cut (Review N, N4).
     let calls = direct.device.calls();
     assert_eq!(calls.iter().filter(|c| c.starts_with("rx_stop")).count(), 1, "{calls:?}");
-    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.applied").unwrap()];
+    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
     assert_eq!(applied.as_array().unwrap().iter().filter(|r| r["key"] == "rx_stop").count(), 1, "{applied}");
 }
 
@@ -1589,9 +1598,9 @@ fn ur_25_a_receive_session_follows_its_recorded_plan() {
     past_t0(&mut run, ms(1));
     assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::num(2e6).unwrap()), None).unwrap()));
     wait(&mut run, ms(100));
-    assert!(admitted(&run.submit(SessionAction::Stop { target: Some(ResourceId::parse("radio/rx").unwrap()) }, None).unwrap()));
+    assert!(admitted(&run.submit(SessionAction::Stop { target: Some(resource("radio/rx")) }, None).unwrap()));
     wait(&mut run, ms(20));
-    assert!(admitted(&run.submit(verb("start_rx", "radio/rx", None, &[]), None).unwrap()));
+    assert!(admitted(&run.submit(verb("start_rx", resource("radio/rx"), None, &[]), None).unwrap()));
     wait(&mut run, ms(100));
     assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::num(1e6).unwrap()), None).unwrap()));
     wait(&mut run, ms(150));
@@ -1719,7 +1728,7 @@ fn ur_29_a_lost_device_aborts_the_run() {
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
     let manifest = run.finish();
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
-    assert_eq!(events_of(&manifest, EventKind::DEVICE_LOST)[0].source, ResourceId::parse("usrp").unwrap());
+    assert_eq!(events_of(&manifest, EventKind::DEVICE_LOST)[0].source, usrp());
     assert_marked_lost_before_closed(&device);
 }
 
@@ -1819,7 +1828,7 @@ fn ur_29_a_lost_device_is_found_while_idle() {
 fn ur_30_the_sections_are_written() {
     let (manifest, _dir) = receive_run(FakeConfig::default(), 1, 1_000);
     for suffix in ["device", "envelope", "applied", "bursts", "async", "rejected", "timing", "stats"] {
-        assert!(manifest.sections.contains_key(&Namespace::parse(&format!("ezsdr.radio.uhd.usrp.{suffix}")).unwrap()), "{suffix}");
+        assert!(manifest.section(&usrp(), &format!("ezsdr.radio.uhd.{suffix}")).is_some(), "{suffix}");
     }
     let stats = section(&manifest, "stats");
     for key in ["rx_blocks", "rx_samples", "rx_overflows", "rx_errors", "rx_off_lattice", "rx_overlapping", "link_drops_seen", "tx_bursts", "tx_samples", "tx_errors"] {
@@ -2253,7 +2262,7 @@ fn captures_across_cold_changes(config: FakeConfig, selector: Json, rates: [f64;
     for i in 0..changes {
         let capture_at = after(&run, ms(10));
         let n = (rates[i % 2] * 0.12) as i64 + (rates[(i + 1) % 2] * 0.08) as i64;
-        assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(capture_at), &[("sink.capture_samples", Value::from(n))]), None).unwrap()));
+        assert!(admitted(&run.submit(verb("capture", output("rec"), Some(capture_at), &[("sink.capture_samples", Value::from(n))]), None).unwrap()));
         wait(&mut run, ms(60));
         assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::num(rates[(i + 1) % 2]).unwrap()), None).unwrap()));
         let horizon = after(&run, ms(3_000));
@@ -2373,7 +2382,7 @@ fn ur_23_a_stop_while_the_device_burst_waits_for_a_continuation_ends_it() {
     while run.now().ticks_in(clock.root).unwrap() < a_end - ms(7) {
         wait(&mut run, ms(1) / 4);
     }
-    let _ = run.submit(SessionAction::Stop { target: Some(ResourceId::parse("radio/tx").unwrap()) }, None);
+    let _ = run.submit(SessionAction::Stop { target: Some(resource("radio/tx")) }, None);
     wait(&mut run, ms(40));
     let manifest = run.finish();
     assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
@@ -2534,7 +2543,7 @@ fn ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time() {
         direct.settle(Wall::from_millis(600));
         let late = direct.of("radio.LATE_COMMAND");
         let instance = direct.finish();
-        let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
+        let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
         let switch = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_segment").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
         // UR-25's ready instant (spec 22, VH-4): the new origin is at least the cut, at the
         // booking, plus the longer of a block and a packet at the old rate, 3 ms and the
@@ -2570,11 +2579,11 @@ fn ur_23_two_bursts_back_to_back_loop_back_whole() {
         &two,
     );
     let mut spec = with_tx(receive_spec(1, 1e6, 1e9, None), 1e6);
-    let target = serde_json::to_value(ResourceId::parse("radio/tx").unwrap()).unwrap();
+    let target = serde_json::to_value(resource("radio/tx")).unwrap();
     spec["schedule"] = json!([
         { "at": { "clock": "radio", "offset_ticks": 10_000 }, "action": { "kind": "tx_burst", "target": target, "waveform": a, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } },
         { "at": { "clock": "radio", "offset_ticks": 11_000 }, "action": { "kind": "tx_burst", "target": target, "waveform": b, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } },
-        { "at": { "clock": "radio", "offset_ticks": 10_000 }, "action": { "kind": "update_parameter", "target": serde_json::to_value(ResourceId::parse("sink/rec").unwrap()).unwrap(),
+        { "at": { "clock": "radio", "offset_ticks": 10_000 }, "action": { "kind": "update_parameter", "target": serde_json::to_value(output("rec")).unwrap(),
                     "key": "sink.capture_samples", "value": 1_500, "class": "block_boundary" } }
     ]);
     let inputs = BTreeMap::from([(a.hash.clone(), one), (b.hash.clone(), two)]);

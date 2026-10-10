@@ -227,9 +227,9 @@ impl Control {
                 return self.finish();
             }
             // MA-14b: each Action is booked before the next `recv()`.
-            while let Some(action) = self.actions.recv() {
+            while let Some((action, node)) = self.actions.recv() {
                 if !self.core.is_lost() {
-                    self.book(action);
+                    self.book(action, node);
                 }
                 self.release();
             }
@@ -250,14 +250,17 @@ impl Control {
         self.core.timing(plan);
     }
 
-    pub(super) fn book(&mut self, action: Action) {
+    /// `node` is what the Kernel resolved the target to (KC-23), which is what a
+    /// Provider matches on.
+    pub(super) fn book(&mut self, action: Action, node: Option<ezsdr_kernel::id::ResourceId>) {
+        let node = node.as_ref();
         match action {
-            Action::TxBurst { target, waveform, repeat, at, requested_at, late_policy, metadata } => {
-                self.book_burst(target, waveform, repeat, at, requested_at, late_policy, metadata.is_empty());
+            Action::TxBurst { waveform, repeat, at, requested_at, late_policy, metadata, .. } => {
+                self.book_burst(node, waveform, repeat, at, requested_at, late_policy, metadata.is_empty());
             }
-            Action::UpdateParameter { target, key, value, class, at } => {
+            Action::UpdateParameter { key, value, class, at, .. } => {
                 let name = key.as_str();
-                if target != self.core.id {
+                if node != Some(&self.core.id) {
                     self.core.command_rejected("update_parameter", "UR-26: the target is not this device");
                 } else if class == UpdateClass::HardwareTimed
                     && matches!(name, keys::RX_FREQUENCY_HZ | keys::TX_FREQUENCY_HZ | keys::RX_GAIN_DB | keys::TX_GAIN_DB)
@@ -273,15 +276,15 @@ impl Control {
             }
             // RM-16, UR-26: a `Stop` cancels no update; on receive it cuts at its booking, on
             // transmit it ends the bursts, not the clock.
-            Action::Stop { target: Some(target) } => {
-                let device = target == self.core.id;
-                if !device && target != self.core.tx_id && target != self.core.rx_id {
+            Action::Stop { target: Some(_) } => {
+                let device = node == Some(&self.core.id);
+                if !device && node != Some(&self.core.tx_id) && node != Some(&self.core.rx_id) {
                     return self.core.command_rejected("stop", "UR-26: the Stop target is not this device or its streams");
                 }
-                if device || target == self.core.tx_id {
+                if device || node == Some(&self.core.tx_id) {
                     let _ = self.to_tx.send(TxCmd::Stop);
                 }
-                if device || target == self.core.rx_id {
+                if device || node == Some(&self.core.rx_id) {
                     let mut streams = lock(&self.core.streams);
                     let (seq, now) = (streams.next_seq(), self.core.now());
                     streams.book(&self.core, Dir::Rx, Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop });
@@ -291,8 +294,8 @@ impl Control {
             Action::SetTimer { .. } => self.core.command_rejected("set_timer", "UR-26: not supported by this Provider"),
             // RM-12, RM-21: `start_rx` turns the receive stream on at its `at`, or at its booking
             // if that is later; it is never late.
-            Action::Command { target, verb, params, at }
-                if verb.as_str() == ezsdr_radio::START_RX && target == self.core.rx_id && params.is_empty() =>
+            Action::Command { verb, params, at, .. }
+                if verb.as_str() == ezsdr_radio::START_RX && node == Some(&self.core.rx_id) && params.is_empty() =>
             {
                 let requested = match self.ceil_root(at) {
                     Ok(requested) => requested,
@@ -564,7 +567,7 @@ impl Control {
     #[allow(clippy::too_many_arguments)]
     fn book_burst(
         &mut self,
-        target: ezsdr_kernel::id::ResourceId,
+        node: Option<&ezsdr_kernel::id::ResourceId>,
         waveform: ezsdr_kernel::manifest::ArtifactRef,
         repeat: bool,
         at: AbsoluteDeadline,
@@ -582,7 +585,7 @@ impl Control {
         let Some((clock, channels)) = current else {
             return reject("UR-21: no transmit channel is configured");
         };
-        if target != self.core.tx_id {
+        if node != Some(&self.core.tx_id) {
             return reject("UR-21: the target is not this device's transmit stream");
         }
         if at.time_point.domain() != clock.domain {
@@ -733,7 +736,7 @@ mod tests {
 
     struct NoActions;
     impl ActionReceiver for NoActions {
-        fn recv(&self) -> Option<Action> { None }
+        fn recv(&self) -> Option<(Action, Option<ezsdr_kernel::id::ResourceId>)> { None }
     }
 
     /// A receive link that takes nothing, so that the receive side has a stream.
@@ -917,7 +920,8 @@ mod tests {
             let (mut control, _tx) = control(&core, &[Dir::Rx, Dir::Tx]);
             let gain = key("radio.tx.gain_db");
             control.book_timed(gain.clone(), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(1_040_000_000)))));
-            control.book(Action::Stop { target: Some(ezsdr_kernel::id::ResourceId::parse(target).unwrap()) });
+            let node = ezsdr_kernel::id::ResourceId::parse(target).unwrap();
+            control.book(Action::Stop { target: Some(super::super::test_support::target_of(&node)) }, Some(node));
             control.book_cold(key("radio.tx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
             assert_eq!(control.held.len(), 1, "{target}");
             assert!(!lock(&core.rec).applied.iter().any(|r| r.get("cancelled").is_some()), "{target}");
@@ -1059,17 +1063,17 @@ mod tests {
                 let refused = plan_of(&core, dir)[1].segment.by.unwrap();
                 assert!(lock(&core.streams).refuse(&core, dir, refused), "{case}");
             } else {
-                control.book(Action::Stop { target: Some(core.rx_id.clone()) });
+                control.book(Action::Stop { target: Some(super::super::test_support::target_of(&core.rx_id)) }, Some(core.rx_id.clone()));
             }
             control.book_timed(gain.clone(), Value::num(3.0).unwrap(), at(200));
             match enable {
                 "cold" => control.book_cold(rate.clone(), Value::num(1e6).unwrap(), at(300)),
                 _ => control.book(Action::Command {
-                    target: core.rx_id.clone(),
+                    target: super::super::test_support::target_of(&core.rx_id),
                     verb: ezsdr_kernel::spec::Ident::parse(ezsdr_radio::START_RX).unwrap(),
                     params: BTreeMap::new(),
                     at: at(300),
-                }),
+                }, Some(core.rx_id.clone())),
             }
             time.advance_to(core.at(ms(199))).unwrap();
             control.release();

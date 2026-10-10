@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use ezsdr_kernel::binding::{LinkPlacement, Placements};
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection, PortRef};
 use ezsdr_kernel::event::{Action, EventCollector, EventKind};
-use ezsdr_kernel::id::{ClockDomainId, DataLinkId, IslandId, MemoryDomainId, RunId};
+use ezsdr_kernel::id::{ClockDomainId, DataLinkId, IslandId, MemoryDomainId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
     ActionSubmitter, Authority, ComponentDescriptor, ComponentImpl, ComponentKind,
@@ -374,24 +374,17 @@ impl Harness {
     }
 
     fn ctx(&self) -> PrepareContext {
-        PrepareContext {
-            run: RunId::generate(),
-            class: ezsdr_kernel::module_api::ExecutionClass::Simulation,
-            time: self.authority.clone(),
-            clocks: self.clocks.clone(),
-            events: self.events.clone(),
-            actions: self.actions.clone(),
-            actions_out: self.submitter.clone(),
-            environment: Arc::new(BTreeMap::new()),
-            inputs: Arc::new(BTreeMap::<ezsdr_kernel::hash::ContentHash, Arc<[u8]>>::new()),
-            links: Vec::new(),
-            components: BTreeMap::new(),
-            host_budget: RelativeBudget::new(Duration::new(
-                ClockDomainId::HOST_MONOTONIC,
-                1_000_000,
-            ))
-            .expect("host.monotonic"),
-        }
+        let mut ctx = PrepareContext::testing(
+            support::node_source("radio"),
+            self.authority.clone(),
+            self.clocks.clone(),
+            self.events.clone(),
+            self.actions.clone(),
+            self.submitter.clone(),
+        );
+        ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 1_000_000))
+            .expect("host.monotonic");
+        ctx
     }
 }
 
@@ -682,7 +675,7 @@ fn ma_14_actions_arrive_only_after_admission() {
     // An Action rejected by an admission check never reaches the Module.
     let submitter = TestSubmitter::new().with_ceiling(20.0);
     let rejected = Action::TxBurst {
-        target: rid("radio/tx/0"),
+        target: support::target("radio/tx/0"),
         waveform: ArtifactRef {
             id: id("wave"),
             kind: ns("test.waveform"),
@@ -713,7 +706,7 @@ fn ma_14_actions_arrive_only_after_admission() {
 fn ma_14a_reactor_emits_through_admit() {
     let submitter = TestSubmitter::new().with_ceiling(20.0);
     let burst = |grid: f64| Action::TxBurst {
-        target: rid("radio/tx/0"),
+        target: support::target("radio/tx/0"),
         waveform: ArtifactRef {
             id: id("wave"),
             kind: ns("test.waveform"),
@@ -1392,7 +1385,7 @@ fn ma_30_stepping_order_and_quiescence() {
     ];
     let until = TimePoint::new(ClockDomainId::HOST_MONOTONIC, 100);
     let events = collector();
-    let rounds = step_until_quiescent(&mut instances, until, &events, &rid("coordinator"))
+    let rounds = step_until_quiescent(&mut instances, until, &events)
         .expect("quiesces");
     let seen = log.lock().expect("lock").clone();
     assert_eq!(
@@ -1473,7 +1466,7 @@ fn ma_30_a_step_error_finishes_the_round() {
         }
         let until = TimePoint::new(ClockDomainId::HOST_MONOTONIC, 100);
         let events = collector();
-        let result = step_until_quiescent(&mut instances, until, &events, &rid("coordinator"));
+        let result = step_until_quiescent(&mut instances, until, &events);
         let seen = log.lock().expect("lock").clone();
         let count = |entry: &str| seen.iter().filter(|e| e.as_str() == entry).count();
         (result, count("provider:m"), count("sink:s"), seen.iter().filter(|e| e.starts_with("failing:")).count())
@@ -1502,7 +1495,7 @@ fn ma_30_a_second_failure_does_not_replace_the_first() {
     ];
     let until = TimePoint::new(ClockDomainId::HOST_MONOTONIC, 100);
     let events = collector();
-    let error = step_until_quiescent(&mut instances, until, &events, &rid("coordinator"))
+    let error = step_until_quiescent(&mut instances, until, &events)
         .expect_err("both fail");
     assert_eq!(error.message, "a lost its device");
     assert_eq!(log.lock().expect("lock").len(), 2, "each failing instance is stepped once");
@@ -1522,7 +1515,7 @@ fn ma_30_a_failure_beats_the_step_livelock_cap() {
     ];
     let until = TimePoint::new(ClockDomainId::HOST_MONOTONIC, 100);
     let events = collector();
-    let error = step_until_quiescent(&mut instances, until, &events, &rid("coordinator"))
+    let error = step_until_quiescent(&mut instances, until, &events)
         .expect_err("the failure is returned");
     assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
     assert!(
@@ -1549,7 +1542,7 @@ fn ma_30_stepping_livelock_cap() {
     ];
     let until = TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0);
     let events = collector();
-    let err = step_until_quiescent(&mut instances, until, &events, &rid("coordinator"))
+    let err = step_until_quiescent(&mut instances, until, &events)
         .expect_err("STEP_LIVELOCK, not a hang");
     assert!(err.message.contains("stepping rounds"), "{err}");
     assert_eq!(

@@ -960,22 +960,16 @@ fn sb_36_two_needs_of_the_same_name_do_not_collapse() {
     .collect();
     let two = distinct_instances(profile_binding(&["a", "b"]), &["a", "b"]);
     let result = validate(&spec, &two, &fx.inputs(&providers)).expect("validates");
-    assert_eq!(
-        result.matched.len(),
-        4,
-        "two bindings and two needs, not three entries"
-    );
-    assert!(result.matched.contains_key(&id("a_clk")));
-    assert!(result.matched.contains_key(&id("b_clk")));
-    // And each need consumed its own line, rather than both resolving to one.
-    assert_ne!(result.matched[&id("a_clk")], result.matched[&id("b_clk")]);
+    assert_eq!(result.matched.len(), 2, "resources only");
+    // SB-36: each need is filed under its own resource, and each consumed its own line.
+    assert_ne!(result.needs[&id("a")][&id("clk")], result.needs[&id("b")][&id("clk")]);
 }
 
 #[test]
 fn sb_39_the_guard_covers_every_matched_entry() {
-    // SB-39's guard over `matched` as a whole, since the Manifest records all of it
-    // (SB-38): each need's entry is present and names a node of an instance this Spec
-    // binds, and no key is neither a resource nor a need (D107).
+    // SB-39's guard over `matched` and `needs` as wholes, since the Manifest records
+    // both (SB-38): each need's entry is present and names a node of an instance this
+    // Spec binds, no `matched` key is not a resource and no `needs` entry not a need (D107).
     let mut req = resource("test.device", &[]);
     req.needs.insert(
         id("line"),
@@ -1003,29 +997,42 @@ fn sb_39_the_guard_covers_every_matched_entry() {
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
-    let tampered = |edit: &dyn Fn(&mut BTreeMap<Ident, ezsdr_kernel::id::ResourceId>)| {
+    let tampered = |edit: &dyn Fn(&mut ezsdr_kernel::binding::AdmissionResult)| {
         let mut a = admission.clone();
-        edit(&mut a.matched);
+        edit(&mut a);
         a
     };
+    // SB-39 walks `needs` resource by resource, need by need.
     for (stale, want) in [
         (
-            tampered(&|m| {
-                m.remove(&id("peripheral_line"));
+            tampered(&|a| {
+                a.needs.get_mut(&id("peripheral")).unwrap().remove(&id("line"));
             }),
             "peripheral's need line has no matched node",
         ),
         (
-            tampered(&|m| {
-                m.insert(id("peripheral_line"), rid("elsewhere/0"));
+            tampered(&|a| {
+                a.needs.get_mut(&id("peripheral")).unwrap().insert(id("line"), rid("elsewhere/0"));
             }),
             "which no instance bound to this Spec's resources declares",
         ),
         (
-            tampered(&|m| {
-                m.insert(id("spare"), rid("radio/1"));
+            tampered(&|a| {
+                a.needs.get_mut(&id("peripheral")).unwrap().insert(id("spare"), rid("radio/1"));
             }),
-            "spare is neither a resource nor a need of this Spec",
+            "spare is not a need of peripheral",
+        ),
+        (
+            tampered(&|a| {
+                a.matched.insert(id("spare"), rid("radio/1"));
+            }),
+            "spare is not a resource of this Spec",
+        ),
+        (
+            tampered(&|a| {
+                a.needs.insert(id("spare"), BTreeMap::new());
+            }),
+            "spare is not a resource of this Spec",
         ),
     ] {
         let reason = refusal(plan(
@@ -1171,9 +1178,10 @@ fn sb_36_needs_resolves_across_instances() {
         &fx.inputs(&providers),
     )
     .expect("validates");
-    // SB-36 records the resolution in `matched`, keyed `<resource>_<need>` so that
-    // two resources' needs of the same name do not collapse.
-    assert_eq!(result.matched[&id("peripheral_line")], rid("radio/0"));
+    // SB-36 records the resolution in `needs`, under its resource; `matched` holds
+    // resources only.
+    assert_eq!(result.needs[&id("peripheral")][&id("line")], rid("radio/0"));
+    assert_eq!(result.matched.keys().collect::<Vec<_>>(), [&id("peripheral")]);
 
     // An unresolvable `needs` fails validate.
     let mut req = resource("test.device", &[]);
@@ -1239,7 +1247,7 @@ fn sb_36_needs_resolves_across_instances() {
         &["peripheral", "radio"],
     );
     let result = validate(&across, &profile, &fx.inputs(&both)).expect("validates");
-    assert_eq!(result.matched[&id("peripheral_line")].path(), "radio/0");
+    assert_eq!(result.needs[&id("peripheral")][&id("line")].path(), "radio/0");
     // But not onto an instance that was handed in under a name no resource binds: it
     // would never be prepared, armed or stopped (SB-22).
     let mut lone = across.clone();
@@ -1727,7 +1735,7 @@ fn sb_42_fragment_failure_fails_the_transaction() {
 fn sb_16_spec_time_resolves_at_arm() {
     // A schedule entry holding a TxBurst template at offset 1000 in a 20 Msps stream.
     let template = ActionTemplate::TxBurst {
-        target: rid("radio/tx/0"),
+        target: support::target("radio/tx/0"),
         waveform: ezsdr_kernel::manifest::ArtifactRef {
             id: id("wave"),
             kind: ns("test.waveform"),
@@ -1787,6 +1795,35 @@ fn sb_16_spec_time_resolves_at_arm() {
         matches!(&err, SpecError::Structural { reason } if reason.contains("SB-16")),
         "{err:?}"
     );
+
+    // SB-16: the target names something the Spec declares **in its role**: an
+    // undeclared output, any component, and a resource path outside the grammar are
+    // each refused.
+    use ezsdr_kernel::event::Target;
+    for target in [
+        Target::Output { output: id("missing") },
+        Target::Component { component: id("proc") },
+        Target::Resource { resource: id("radio"), path: "a//b".to_owned() },
+    ] {
+        let mut bad = minimal_spec();
+        bad.graph.components.insert(
+            id("proc"),
+            support::source_component(
+                ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
+            ),
+        );
+        bad.schedule.push(ScheduleEntry {
+            at: SpecTime { clock: id("radio"), offset_ticks: 0 },
+            action: ActionTemplate::Stop { target: Some(target.clone()) },
+        });
+        let err = validate(&bad, &profile_binding(&["radio"]), &fx.inputs(&providers))
+            .expect_err("the target names nothing in its role");
+        assert!(
+            matches!(&err, SpecError::Structural { reason }
+                if reason.contains("SB-16") && reason.contains("names no resource or output")),
+            "{target}: {err:?}"
+        );
+    }
 
     // RS-49a: `resolve` substitutes a deadline into the template. Computing that
     // deadline from the `SpecTime` is `arm`'s job, and there is no Kernel `arm` in
@@ -1973,7 +2010,9 @@ fn sb_17_capture_without_a_sink_refused() {
 }
 
 #[test]
-fn sb_22_output_ids_must_fit_their_sink_resource_address() {
+fn sb_22_an_output_id_needs_no_derived_address() {
+    // A Sink's source is `{output}`, so no `sink/<output>` address has to fit a
+    // ResourceId's 256 bytes: a long output id is an output id like any other (#16).
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let sink = cf32_sink();
@@ -1986,12 +2025,7 @@ fn sb_22_output_ids_must_fit_their_sink_resource_address() {
         let mut fx = Fixture::new();
         fx.sinks.insert(id(&name), &sink);
         let result = validate(&spec, &profile, &fx.inputs(&providers));
-        if len == 251 {
-            assert!(result.expect("256-byte Sink address is valid").is_admitted());
-        } else {
-            assert!(matches!(result, Err(SpecError::Structural { reason })
-                if reason.contains("Sink address") && reason.contains("too long")));
-        }
+        assert!(result.expect("validates").is_admitted(), "{len}");
     }
 }
 
@@ -3319,21 +3353,21 @@ fn sb_22a_one_namespace_refuses_a_collision() {
             "{sets}: {err:?}"
         );
     }
+    // No name is reserved for a role: a target and a source carry their role (SB-22a).
     let named_sink = spec_with(
         [(id("sink"), resource("test.device", &[]))]
             .into_iter()
             .collect(),
     );
-    let err = validate(
+    let mut fx_sink = Fixture::new();
+    let authority = fx_sink.authorities[&id("radio")].clone();
+    fx_sink.authorities.insert(id("sink"), authority);
+    validate(
         &named_sink,
         &profile_binding(&["sink"]),
-        &fx.inputs(&one_provider("sink", &p)),
+        &fx_sink.inputs(&one_provider("sink", &p)),
     )
-    .expect_err("`sink` is reserved");
-    assert!(
-        matches!(&err, SpecError::DuplicateBindingName { name, sets } if name.as_str() == "sink" && sets.contains("reserved")),
-        "{err:?}"
-    );
+    .expect("`sink` is a resource name like any other");
 }
 
 #[test]
@@ -3599,46 +3633,21 @@ fn sb_39_plan_refuses_an_admission_result_from_another_spec() {
 }
 
 #[test]
-fn sb_22h_the_sink_path_segment_is_reserved() {
-    // The `sink/` prefix only separates the two namespaces if a Provider may not
-    // declare a node under it: `ResourceId::parse("sink/rec")` is a legal node path,
-    // so a Provider named `sink` still collided with a bound Sink's address.
+fn sb_3_no_provider_node_path_is_reserved() {
+    // A source carries its role, so a Provider may name its nodes as it likes: under
+    // `sink/`, `kernel/`, `unforeseen` or `island_<n>` alike (SB-22h deleted).
     let spec = spec_with(
         [(id("radio"), resource("test.device", &[]))]
             .into_iter()
             .collect(),
     );
     let fx = Fixture::new();
-    let p = TestProvider::new("sink", 2);
-    let providers = one_provider("radio", &p);
-    let err = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers))
-        .expect_err("`sink` is reserved");
-    assert!(
-        matches!(&err, SpecError::Structural { reason } if reason.contains("reserved")),
-        "{err:?}"
-    );
-    // KA-14: `kernel`, `unforeseen` and every `island_<n>` are reserved the same way,
-    // at any depth of the first segment's subtree.
-    for root in [
-        "kernel",
-        "unforeseen",
-        "kernel/x",
-        "island_0",
-        "island_12/x",
-    ] {
+    for root in ["sink", "kernel", "unforeseen", "kernel/x", "island_0", "island_12/x"] {
         let p = TestProvider::new(root, 2);
         let providers = one_provider("radio", &p);
-        let err = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers))
-            .expect_err("reserved");
-        assert!(
-            matches!(&err, SpecError::Structural { reason } if reason.contains("reserved")),
-            "{root}: {err:?}"
-        );
+        validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers))
+            .unwrap_or_else(|err| panic!("{root}: {err:?}"));
     }
-    // Any other root is fine.
-    let ok = TestProvider::new("radio", 2);
-    let providers = one_provider("radio", &ok);
-    assert!(validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).is_ok());
 }
 
 #[test]
@@ -4036,12 +4045,9 @@ fn sb_02_an_ext_key_parses_for_every_module_id_grammar() {
 }
 
 #[test]
-fn sb_36_a_needs_key_may_not_collide_with_a_resource_name() {
-    // SB-36 records a need under `<resource>_<need>` in the one `matched` map, so a
-    // key equal to another resource's name overwrote it — always the need's record,
-    // since `X < X_need` puts the resource's insert second. The Manifest then
-    // reported a resolution that never happened, and `matched` is load-bearing for
-    // port resolution now (SB-15), not merely a record.
+fn sb_36_a_need_and_a_resource_of_one_joined_name_do_not_collide() {
+    // `needs` is filed by resource, then by need, so `a`'s need `b` and a resource
+    // `a_b` are two entries in two maps, not one key `a_b`.
     let mut a = resource("test.device", &[]);
     a.needs.insert(
         id("b"),
@@ -4063,20 +4069,16 @@ fn sb_36_a_needs_key_may_not_collide_with_a_resource_name() {
     ]
     .into_iter()
     .collect();
-    let err = validate(
-        &spec,
-        &profile_binding(&["a", "a_b"]),
-        &fx.inputs(&providers),
-    )
-    .expect_err("the need's key collides with a resource name");
-    assert!(
-        matches!(&err, SpecError::DuplicateBindingName { name, .. } if *name == id("a_b")),
-        "{err:?}"
-    );
+    let result = validate(&spec, &profile_binding(&["a", "a_b"]), &fx.inputs(&providers))
+        .expect("validates");
+    assert!(result.matched.contains_key(&id("a_b")));
+    assert!(result.needs[&id("a")].contains_key(&id("b")));
 }
 
 #[test]
-fn sb_36_qualified_needs_keys_must_be_unique() {
+fn sb_36_needs_whose_joined_names_are_equal_do_not_collide() {
+    // `a`/`b_c` and `a_b`/`c` joined to one `a_b_c` before needs were filed by
+    // resource; now each resolves under its own resource.
     let need = |count| SubResourceReq {
         kind: ns("test.line"),
         requires: [(key("test.count"), Constraint::Eq { value: Scalar::from(count) })]
@@ -4096,10 +4098,9 @@ fn sb_36_qualified_needs_keys_must_be_unique() {
         (id("a_b"), &p2 as &dyn Provider),
     ].into_iter().collect();
     let profile = distinct_instances(profile_binding(&["a", "a_b"]), &["a", "a_b"]);
-    let err = validate(&spec, &profile, &fx.inputs(&providers))
-        .expect_err("two qualified needs must not overwrite each other");
-    assert!(matches!(err, SpecError::DuplicateBindingName { name, sets }
-        if name == id("a_b_c") && sets == "a's need b_c and a_b's need c"));
+    let result = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
+    assert_ne!(result.needs[&id("a")][&id("b_c")], result.needs[&id("a_b")][&id("c")]);
+    plan(&spec, &profile, &result, &fx.inputs(&providers)).expect("SB-39 walks both");
 }
 
 #[test]
@@ -4279,7 +4280,7 @@ fn sb_04_a_nested_value_is_refused_by_every_deserialiser() {
     spec.schedule.push(ScheduleEntry {
         at: SpecTime { clock: id("radio"), offset_ticks: 0 },
         action: ActionTemplate::UpdateParameter {
-            target: rid("radio"),
+            target: support::target("radio"),
             key: key("test.gain"),
             value: Value::from(1),
             class: UpdateClass::HardwareTimed,
@@ -4290,7 +4291,7 @@ fn sb_04_a_nested_value_is_refused_by_every_deserialiser() {
     profile.bindings.get_mut(&id("radio")).unwrap().selector.insert(id("x"), Value::from(1));
     let profile = serde_json::to_value(&profile).unwrap();
     let action = serde_json::to_value(ezsdr_kernel::event::Action::UpdateParameter {
-        target: rid("radio"),
+        target: support::target("radio"),
         key: key("test.gain"),
         value: Value::from(1),
         class: UpdateClass::HardwareTimed,
@@ -5020,7 +5021,7 @@ fn rs_52_a_scheduled_update_states_the_declared_class() {
                 offset_ticks: 0,
             },
             action: ActionTemplate::UpdateParameter {
-                target: rid("radio"),
+                target: support::target("radio"),
                 key: key(key_name),
                 value: Value::from(1),
                 class,

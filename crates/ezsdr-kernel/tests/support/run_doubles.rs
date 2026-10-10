@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use ezsdr_kernel::binding::AdmissionCheckRegistry;
-use ezsdr_kernel::event::{Action, Event, EventKind, EventSink, Severity};
+use ezsdr_kernel::event::{Action, Event, EventKind, EventSink, EventSource, Severity};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, MemoryDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::manifest::ArtifactRef;
@@ -350,6 +350,8 @@ pub struct SteppedProvider {
     pub time: Option<Arc<dyn TimeAuthority>>,
     pub clocks: Option<Arc<ezsdr_kernel::time::ClockRegistry>>,
     pub events: Option<Arc<dyn EventSink>>,
+    /// The event source root `prepare`'s context named (KC-8).
+    pub source: Option<EventSource>,
     pub actions: Option<Arc<dyn ActionReceiver>>,
     pub outs: Vec<Arc<dyn DataLink>>,
     pub handles: Vec<SampleClockHandle>,
@@ -393,6 +395,7 @@ impl SteppedProvider {
             time: None,
             clocks: None,
             events: None,
+            source: None,
             actions: None,
             outs: Vec::new(),
             handles: Vec::new(),
@@ -581,16 +584,18 @@ impl SteppedProvider {
     fn drain_actions(&self, until: TimePoint) -> bool {
         let mut pending = Vec::new();
         if let Some(actions) = &self.actions {
-            while let Some(action) = actions.recv() {
-                pending.push(action);
+            while let Some(received) = actions.recv() {
+                pending.push(received);
             }
         }
         let progressed = !pending.is_empty();
-        for action in pending {
-            let target = action
-                .target()
-                .map(|target| target.path().to_owned())
-                .unwrap_or_else(|| "-".to_owned());
+        for (action, node) in pending {
+            // A Provider's resolved node, else the authored target (KC-23).
+            let target = match (&node, action.target()) {
+                (Some(node), _) => node.path().to_owned(),
+                (None, Some(target)) => target.to_string(),
+                (None, None) => "-".to_owned(),
+            };
             let variant = match &action {
                 Action::TxBurst { .. } => "TxBurst",
                 Action::SetTimer { .. } => "SetTimer",
@@ -649,6 +654,9 @@ impl Provider for SteppedProvider {
         self.time = Some(ctx.time.clone());
         self.clocks = Some(ctx.clocks.clone());
         self.events = Some(ctx.events.clone());
+        // `source:<name>:<source>`, outside the `<name>:` lines exact sequences read.
+        self.probe.record(format!("source:{}:{}", self.name, ctx.source));
+        self.source = Some(ctx.source.clone());
         self.actions = Some(ctx.actions.clone());
         self.inputs = Some(ctx.inputs.clone());
         if let Some(fidelity) = self.settle_fidelity {
@@ -798,7 +806,7 @@ impl Provider for SteppedProvider {
             if let Some((kind, severity, at)) = &self.emit {
                 if u >= *at {
                     let event = Event {
-                        source: self.instance().id.clone(),
+                        source: self.source.clone().expect("prepared"),
                         time: until,
                         severity: *severity,
                         kind: kind.clone(),
@@ -880,7 +888,7 @@ impl Provider for SteppedProvider {
         self.next_publish = None;
         if let Some((kind, severity)) = self.stop_emit.take() {
             let event = Event {
-                source: self.instance().id.clone(),
+                source: self.source.clone().expect("prepared"),
                 time: TimePoint::new(time.primary_root(), self.stopped_at.expect("just set")),
                 severity,
                 kind,
@@ -933,6 +941,7 @@ pub struct RecordingSink {
     pub fail_step: Option<(i64, ModuleErrorKind)>,
     /// The first step at or after this primary-root tick panics (#65).
     pub panic_step: Option<i64>,
+    actions: Option<Arc<dyn ActionReceiver>>,
 }
 
 impl RecordingSink {
@@ -960,6 +969,7 @@ impl RecordingSink {
             always_progress: false,
             fail_step: None,
             panic_step: None,
+            actions: None,
         }
     }
 
@@ -1013,6 +1023,8 @@ impl Sink for RecordingSink {
     fn prepare(&mut self, f: &Fragment, ctx: PrepareContext) -> Result<PrepareReport, ModuleError> {
         self.record(format!("prepare:{}", f.id));
         self.primary = Some(ctx.time.primary_root());
+        self.probe.record(format!("source:{}:{}", self.name, ctx.source));
+        self.actions = Some(ctx.actions.clone());
         self.ins.clear();
         for attached in &ctx.links {
             let (direction, link) = match &attached.endpoint {
@@ -1067,7 +1079,7 @@ impl Sink for RecordingSink {
             self.panic_step = None;
             panic!("test: panic in sink step");
         }
-        let mut progressed = self.always_progress;
+        let mut progressed = self.always_progress | record_actions(&self.probe, &self.name, &self.actions);
         for link in &self.ins {
             while let Some((block, _)) = link.receive() {
                 let header = block.header().clone();
@@ -1140,8 +1152,9 @@ pub struct ProbeExecutor {
     pub submitted: bool,
     submit_at: Option<i64>,
     abort_in_stop: Option<String>,
-    pub event: Option<(ResourceId, EventKind, Severity)>,
+    pub event: Option<(EventSource, EventKind, Severity)>,
     events: Option<Arc<dyn EventSink>>,
+    actions: Option<Arc<dyn ActionReceiver>>,
     event_emitted: bool,
     coercion_counter_snapshot: Option<(Arc<AtomicU64>, Arc<AtomicU64>)>,
 }
@@ -1162,6 +1175,7 @@ impl ProbeExecutor {
             abort_in_stop: None,
             event: None,
             events: None,
+            actions: None,
             event_emitted: false,
             coercion_counter_snapshot: None,
         }
@@ -1198,9 +1212,9 @@ impl ProbeExecutor {
     }
 
     /// Emits once from a caller-selected source during its first step (KC-8).
-    pub fn emitting_from(mut self, source: &str, kind: &str, severity: Severity) -> ProbeExecutor {
+    pub fn emitting_from(mut self, source: EventSource, kind: &str, severity: Severity) -> ProbeExecutor {
         self.event = Some((
-            ResourceId::parse(source).expect("test event source is valid"),
+            source,
             EventKind::parse(kind).expect("test event kind is valid"),
             severity,
         ));
@@ -1232,6 +1246,8 @@ impl Executor for ProbeExecutor {
         self.record(format!("prepare:island_{}:{names}", island.id.local));
         self.out = Some(ctx.actions_out.clone());
         self.events = Some(ctx.events.clone());
+        self.actions = Some(ctx.actions.clone());
+        self.probe.record(format!("source:{}:{}", self.name, ctx.source));
         Ok(PrepareReport {
             fragment: id(&format!("island_{}", island.id.local)),
             effective: BTreeMap::new(),
@@ -1294,7 +1310,8 @@ impl Executor for ProbeExecutor {
             }
             self.submitted = true;
         }
-        Ok(StepOutcome { progressed: due })
+        let received = record_actions(&self.probe, &self.name, &self.actions);
+        Ok(StepOutcome { progressed: due || received })
     }
 
     fn stop(&mut self, mode: StopMode) -> Result<(), ModuleError> {
@@ -1313,6 +1330,18 @@ impl Executor for ProbeExecutor {
         self.record("cleanup");
         self.out = None;
     }
+}
+
+/// Records `<name>:action:<target>` for every Action a Sink or Executor received, by
+/// its authored target (KC-23 hands those no node).
+fn record_actions(probe: &Probe, name: &str, actions: &Option<Arc<dyn ActionReceiver>>) -> bool {
+    let mut received = false;
+    while let Some((action, _)) = actions.as_ref().and_then(|actions| actions.recv()) {
+        let target = action.target().map_or_else(|| "-".to_owned(), ToString::to_string);
+        probe.record(format!("{name}:action:{target}"));
+        received = true;
+    }
+    received
 }
 
 /// A Link Module backed by the Phase 1 in-memory DataLink.
@@ -1454,7 +1483,8 @@ pub fn run_checks(with_limits: bool) -> AdmissionCheckRegistry {
     checks
 }
 
-/// The fixture registry with `test.grid` and `test.flag` classed as Cold.
+/// The fixture registry with `test.grid` and `test.flag` classed as Cold, and a
+/// `test.capture` key of the BlockBoundary class its `capture` verb states (RS-52).
 pub fn run_registry_classed() -> ezsdr_kernel::module_api::ModuleRegistry {
     let mut vocabulary = test_vocabulary();
     for declaration in &mut vocabulary.keys {
@@ -1462,6 +1492,13 @@ pub fn run_registry_classed() -> ezsdr_kernel::module_api::ModuleRegistry {
             declaration.update_class = Some(UpdateClass::Cold);
         }
     }
+    vocabulary.keys.push(ezsdr_kernel::spec::KeyDecl {
+        key: ezsdr_kernel::spec::Key::parse("test.capture").expect("a valid key"),
+        kind: ezsdr_kernel::spec::ValueKind::Bool,
+        coercible: false,
+        coercion_default: ezsdr_kernel::spec::CoercionPolicy::Reject,
+        update_class: Some(UpdateClass::BlockBoundary),
+    });
     fixture_registry(vocabulary)
 }
 

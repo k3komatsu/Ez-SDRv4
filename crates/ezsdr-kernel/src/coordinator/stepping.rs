@@ -186,12 +186,7 @@ pub(super) fn round(shared: &Shared, at: TimePoint, cleaning: bool) {
                 inner: SteppedRef::Sink(watch),
             });
         }
-        crate::module_api::step_until_quiescent(
-            &mut instances,
-            at,
-            &**collector,
-            &super::state::kernel_source(),
-        )
+        crate::module_api::step_until_quiescent(&mut instances, at, &**collector)
     };
     if result.is_err() {
         apply_faults(shared, &std::mem::take(&mut *lock(&fault.0)));
@@ -284,7 +279,7 @@ fn emit_livelock(shared: &Shared, at: TimePoint) {
         return;
     };
     let _ = collector.emit_control(Event {
-        source: super::state::kernel_source(),
+        source: crate::event::EventSource::Kernel,
         time: at,
         severity: crate::event::Severity::Fatal,
         kind: EventKind::parse(EventKind::STEP_LIVELOCK).expect("Kernel event kind"),

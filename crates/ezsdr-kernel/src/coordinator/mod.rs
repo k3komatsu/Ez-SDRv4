@@ -26,8 +26,6 @@ use crate::time::{ClockRegistry, SampleClockRecord, TimePoint};
 
 use state::Shared;
 
-/// The coordinator's reserved event source (KA-14).
-pub const KERNEL_SOURCE: &str = "kernel";
 /// The bounded event ring allocated for each Run (KC-8, RS-34).
 pub const EVENT_RING_DEPTH: usize = 4096;
 /// The prepare and arm time budget in host monotonic nanoseconds (KC-11, MA-8).
@@ -36,6 +34,8 @@ pub const DEFAULT_HOST_BUDGET_NS: i64 = 5_000_000_000;
 pub const DRAIN_WAKEUP_CAP: usize = 1_000_000;
 
 /// The registries, clocks and Module instances supplied for one Run (KC-4).
+/// Non-exhaustive: built by [`Assembly::new`], every other field assigned.
+#[non_exhaustive]
 pub struct Assembly {
     /// Modules, Vocabularies and Link descriptors (KC-4, KC-6).
     pub registry: ModuleRegistry,
@@ -64,6 +64,29 @@ pub struct Assembly {
     /// The hash of the code that generated the Spec, when the caller has one; the
     /// Manifest records it as `spec.source` and nothing reads it (SB-14, RS-38).
     pub spec_source: Option<ContentHash>,
+}
+
+impl Assembly {
+    /// An Assembly of the Authority and the registry it registered its roots in, with
+    /// the standard contracts, the Kernel's event kinds, the system host clock and
+    /// nothing else; the runtime assigns the rest (KC-4).
+    pub fn new(authority: Box<dyn Authority>, clocks: Arc<ClockRegistry>) -> Assembly {
+        Assembly {
+            registry: ModuleRegistry::new(),
+            checks: AdmissionCheckRegistry::new(),
+            kinds: EventKindRegistry::with_kernel_kinds(),
+            contracts: ContractRegistry::with_standard_contracts(),
+            clocks,
+            host_clock: Arc::new(crate::run::SystemHostClock::new()),
+            providers: BTreeMap::new(),
+            executors: BTreeMap::new(),
+            sinks: BTreeMap::new(),
+            authority,
+            links: BTreeMap::new(),
+            inputs: BTreeMap::new(),
+            spec_source: None,
+        }
+    }
 }
 
 /// Refusals from the live Run control API (RS-15, RS-18, KC-28).

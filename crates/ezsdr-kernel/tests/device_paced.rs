@@ -9,10 +9,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration as Wall, Instant};
 
 use ezsdr_kernel::binding::{AdmissionCheck, AdmissionCheckRegistry, CheckStage, Violation};
-use ezsdr_kernel::contract::ContractRegistry;
 use ezsdr_kernel::coordinator::{Assembly, RunHandle, RunHandleError, connect, start_spec_run};
 use ezsdr_kernel::event::{Action, EventKind};
-use ezsdr_kernel::id::{ClockDomainId, ResourceId};
+use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::module_api::{ExecutionClass, ModuleErrorKind, Pacing, Provider, UpdateClass};
 use ezsdr_kernel::policy::{EventKindDecl, EventKindRegistry, Reaction};
@@ -34,21 +33,11 @@ struct Paced {
 }
 
 fn assembly_with(authority: Box<dyn ezsdr_kernel::module_api::Authority>, clocks: Arc<ClockRegistry>) -> Assembly {
-    Assembly {
-        registry: run_registry(),
-        checks: run_checks(false),
-        kinds: run_kinds(),
-        contracts: ContractRegistry::with_standard_contracts(),
-        clocks,
-        host_clock: Arc::new(SystemHostClock::new()),
-        providers: BTreeMap::new(),
-        executors: BTreeMap::new(),
-        sinks: BTreeMap::new(),
-        authority,
-        links: BTreeMap::new(),
-        inputs: BTreeMap::new(),
-        spec_source: None,
-    }
+    let mut assembly = Assembly::new(authority, clocks);
+    assembly.registry = run_registry();
+    assembly.checks = run_checks(false);
+    assembly.kinds = run_kinds();
+    assembly
 }
 
 fn paced_with(adjust: impl FnOnce(WallAuthority) -> WallAuthority) -> Paced {
@@ -388,7 +377,7 @@ fn kg_02_a_failed_sink_is_not_stepped_again() {
     std::thread::sleep(Wall::from_millis(100));
     assert_eq!(count(&probe, "rec:step:"), first, "stepped again after its failure");
     let lost = kind(EventKind::DEVICE_LOST);
-    let sink_source = ResourceId::parse("sink/rec").unwrap();
+    let sink_source = ezsdr_kernel::event::EventSource::Output { output: Ident::parse("rec").unwrap() };
     let reports = run.events(0).into_iter().filter(|e| e.kind == lost && e.source == sink_source).count();
     assert_eq!(reports, 1);
     running(&run);
@@ -663,7 +652,7 @@ fn kc_29_an_end_the_data_thread_requested_is_cleaned_up_at_the_next_call() {
     std::thread::sleep(Wall::from_millis(50));
     running(&run);
     let lost = kind(EventKind::DEVICE_LOST);
-    let radio = ResourceId::parse("radio").unwrap();
+    let radio = support::node_source("radio");
     assert!(run.events(0).iter().any(|e| e.kind == lost && e.source == radio), "{:?}", run.events(0));
     let begun = Instant::now();
     let result = run.advance_to(after(&run, Wall::from_secs(5)));
@@ -763,7 +752,7 @@ fn kc_30_a_panic_after_a_device_lost_in_one_pass_fails_the_run() {
     assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Run, .. }));
     assert!(failure(&manifest).starts_with("KC-30: rec2: a Module panicked"), "{}", failure(&manifest));
     let lost = kind(EventKind::DEVICE_LOST);
-    let rec = ResourceId::parse("sink/rec").unwrap();
+    let rec = ezsdr_kernel::event::EventSource::Output { output: Ident::parse("rec").unwrap() };
     assert!(manifest.events.delivered.iter().any(|e| e.kind == lost && e.source == rec));
 }
 
@@ -884,7 +873,7 @@ fn kg_03_dropping_a_live_device_paced_handle_cleans_up() {
 
 fn gain(value: f64) -> SessionAction {
     SessionAction::SetParameter {
-        target: ResourceId::parse("radio").unwrap(),
+        target: support::target("radio"),
         key: Key::parse("test.gain").unwrap(),
         value: Value::num(value).unwrap(),
     }
@@ -915,7 +904,7 @@ fn kg_04_every_action_of_one_call_is_finished() {
     // that dispatched them returns only when both are finished (Review L, P1-5).
     let probe = Probe::new();
     let (mut spec, profile) = output_docs(64);
-    let radio = serde_json::to_value(ResourceId::parse("radio").unwrap()).unwrap();
+    let radio = serde_json::to_value(support::target("radio")).unwrap();
     let entry = |value: f64| serde_json::json!({
         "at": { "clock": "radio", "offset_ticks": 0 },
         "action": { "kind": "update_parameter", "target": radio, "key": "test.gain", "value": value, "class": "hardware_timed" }
@@ -945,7 +934,7 @@ fn kg_04_the_next_admission_sees_the_state_the_previous_action_made() {
         let clock = run
             .submit(
                 SessionAction::SetParameter {
-                    target: ResourceId::parse("radio").unwrap(),
+                    target: support::target("radio"),
                     key: Key::parse("test.tx_clock").unwrap(),
                     value: Value::from(10),
                 },
@@ -958,7 +947,7 @@ fn kg_04_the_next_admission_sees_the_state_the_previous_action_made() {
                 SessionAction::Vocabulary {
                     ns: ns("test"),
                     verb: Ident::parse("start_repeat").unwrap(),
-                    target: ResourceId::parse("radio/tx").unwrap(),
+                    target: support::target("radio/tx"),
                     at: None,
                     params: BTreeMap::new(),
                 },
@@ -1026,7 +1015,7 @@ fn kc_21a_a_module_s_own_submission_is_not_waited_for() {
         ThreadedProvider::new("radio", "radio", &probe).never_finishing(),
     );
     let action = Action::UpdateParameter {
-        target: ResourceId::parse("radio").unwrap(),
+        target: support::target("radio"),
         key: Key::parse("test.gain").unwrap(),
         value: Value::num(3.0).unwrap(),
         class: UpdateClass::HardwareTimed,
@@ -1382,7 +1371,7 @@ fn kg_10_a_device_lost_from_a_provider_thread_aborts_the_run() {
         "{:?}",
         manifest.run.transitions
     );
-    let radio = ResourceId::parse("radio").unwrap();
+    let radio = support::node_source("radio");
     assert!(manifest.events.delivered.iter().any(|e| e.kind == lost && e.source == radio));
 }
 

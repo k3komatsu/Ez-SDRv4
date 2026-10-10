@@ -376,7 +376,18 @@
         "$ref": "#/$defs/ResourceId"
       },
       "default": {},
-      "description": "Spec resource name — and `needs` name — to the resolved `ResourceId` (SB-36).",
+      "description": "Spec resource name to the node it was matched to (SB-34).",
+      "type": "object"
+    },
+    "needs": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "$ref": "#/$defs/ResourceId"
+        },
+        "type": "object"
+      },
+      "default": {},
+      "description": "Spec resource name to its needs, each need's name to the node it resolved to\n(SB-36).",
       "type": "object"
     },
     "rejected": {

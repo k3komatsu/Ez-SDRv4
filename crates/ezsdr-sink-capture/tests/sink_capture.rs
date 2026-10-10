@@ -7,12 +7,12 @@ use std::sync::{Arc, Mutex};
 use ezsdr_hostmem::{write_cf32, HostPool, HOST_MEMORY};
 use ezsdr_kernel::binding::{Binding, Violation};
 use ezsdr_kernel::contract::{DataContractId, PortRef};
-use ezsdr_kernel::event::{Action, ActionId, EventCollector, EventKind};
+use ezsdr_kernel::event::{Action, ActionId, EventCollector, EventKind, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
-use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId, RunId};
+use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
-    ActionReceiver, ActionSubmitter, AttachedPort, Endpoint, ExecutionClass,
+    ActionReceiver, ActionSubmitter, AttachedPort, Endpoint,
     ModuleError, ModuleRef, Pacing, Sink, StopMode, UpdateClass, Version, VersionReq,
     VocabularyRequirement, KERNEL_API,
 };
@@ -25,7 +25,7 @@ use ezsdr_kernel::stream::{
 };
 use ezsdr_kernel::time::{
     AbsoluteDeadline, ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational,
-    RelativeBudget, TimePoint,
+    TimePoint,
 };
 use ezsdr_sink::{CAPTURE_ARTIFACT_KIND, CAPTURE_SAMPLES, CAPTURE_WRITTEN, REQUEST_REJECTED};
 use ezsdr_sink_capture::{descriptor, sigmf_meta, sink_descriptor, CaptureSink};
@@ -134,8 +134,8 @@ impl ActionQueue {
 }
 
 impl ActionReceiver for ActionQueue {
-    fn recv(&self) -> Option<Action> {
-        self.0.lock().expect("action lock").pop_front()
+    fn recv(&self) -> Option<(Action, Option<ResourceId>)> {
+        self.0.lock().expect("action lock").pop_front().map(|action| (action, None))
     }
 }
 
@@ -210,7 +210,7 @@ impl Environment {
                 },
             ))
             .expect("unrelated root registration");
-        let source = ResourceId::parse("sink/rec").expect("Sink event source");
+        let source = source();
         let kind = EventKind::parse(REQUEST_REJECTED).expect("Sink event kind");
         let events = Arc::new(EventCollector::new(
             &[(source, kind)],
@@ -232,24 +232,16 @@ impl Environment {
     }
 
     fn context(&self, links: Vec<AttachedPort>) -> ezsdr_kernel::module_api::PrepareContext {
-        ezsdr_kernel::module_api::PrepareContext {
-            run: RunId::from_string("run:test".to_owned()),
-            class: ExecutionClass::Simulation,
-            time: self.time.clone(),
-            clocks: self.clocks.clone(),
-            events: self.events.clone(),
-            actions: self.actions.clone(),
-            actions_out: self.submitter.clone(),
-            environment: Arc::new(BTreeMap::new()),
-            inputs: Arc::new(BTreeMap::<ezsdr_kernel::hash::ContentHash, Arc<[u8]>>::new()),
-            links,
-            components: BTreeMap::new(),
-            host_budget: RelativeBudget::new(ezsdr_kernel::time::Duration::new(
-                ClockDomainId::HOST_MONOTONIC,
-                1_000_000,
-            ))
-            .expect("host budget"),
-        }
+        let mut ctx = ezsdr_kernel::module_api::PrepareContext::testing(
+            source(),
+            self.time.clone(),
+            self.clocks.clone(),
+            self.events.clone(),
+            self.actions.clone(),
+            self.submitter.clone(),
+        );
+        ctx.links = links;
+        ctx
     }
 }
 
@@ -369,11 +361,17 @@ fn fragment(params: BTreeMap<Key, Value>) -> Fragment {
 }
 
 fn attached(component: &str, port: &str, endpoint: Endpoint) -> AttachedPort {
-    AttachedPort {
-        component: ident(component),
-        port: ident(port),
-        endpoint,
-    }
+    AttachedPort::new(ident(component), ident(port), endpoint)
+}
+
+/// The source the context gives the Sink. It is not `rec`, the fragment's id, so a
+/// Sink that formatted its own source from its output would be seen (KC-8).
+fn source() -> EventSource {
+    EventSource::Output { output: ident("given") }
+}
+
+fn own() -> Option<Target> {
+    Some(Target::Output { output: ident("rec") })
 }
 
 fn sample_count(count: i64) -> BTreeMap<Key, Value> {
@@ -382,7 +380,7 @@ fn sample_count(count: i64) -> BTreeMap<Key, Value> {
 
 fn request(n: Value, at: Option<AbsoluteDeadline>) -> Action {
     Action::UpdateParameter {
-        target: ResourceId::parse("sink/rec").expect("target"),
+        target: Target::Output { output: ident("rec") },
         key: key(CAPTURE_SAMPLES),
         value: n,
         class: UpdateClass::BlockBoundary,
@@ -443,7 +441,7 @@ fn assert_ramp(artifact: &ArtifactRef, first: usize, count: usize) {
 
 fn tx_burst() -> Action {
     Action::TxBurst {
-        target: ResourceId::parse("dev/tx").expect("TX target"),
+        target: Target::Resource { resource: ident("dev"), path: "tx".to_owned() },
         waveform: ArtifactRef {
             id: ident("wave"),
             kind: Namespace::parse("test.waveform").expect("waveform kind"),
@@ -774,12 +772,12 @@ fn hd_11_an_unexpected_action_is_rejected() {
     assert!(rig.step().expect("unexpected Action is an event"));
     let events = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].source, ResourceId::parse("sink/rec").expect("event source"));
+    assert_eq!(events[0].source, source());
     assert_eq!(events[0].kind.as_str(), REQUEST_REJECTED);
     assert_eq!(events[0].payload["action"], "tx_burst");
     assert!(events[0].payload["reason"].as_str().unwrap().starts_with("HD-14"));
     rig.env.actions.push(Action::Command {
-        target: ResourceId::parse("sink/rec").expect("command target"),
+        target: Target::Output { output: ident("rec") },
         verb: ident("start_rx"),
         params: BTreeMap::new(),
         at: None,
@@ -875,7 +873,7 @@ fn hd_11_targeted_stop_keeps_carry_on_the_finished_capture() {
         BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(50));
     rig.link.publish(overflow);
     assert_eq!(rig.push_ramp(54, 2), PublishOutcome::DroppedOldest);
-    rig.env.actions.push(Action::Stop { target: Some(ResourceId::parse("sink/rec").unwrap()) });
+    rig.env.actions.push(Action::Stop { target: own() });
     rig.env.actions.push(request(Value::from(2), None));
     rig.step().expect("Stop then a new capture request");
     let artifacts = rig.stop(StopMode::Orderly);
@@ -895,13 +893,16 @@ fn hd_11_stop_for_another_target_is_rejected() {
     let mut rig = Rig::new("stop-other-target", sample_count(8));
     rig.push_ramp(0, 4);
     rig.step().expect("start partial capture");
-    rig.env.actions.push(Action::Stop { target: Some(ResourceId::parse("radio").expect("radio target")) });
+    rig.env.actions.push(Action::Stop { target: Some(Target::Resource { resource: ident("radio"), path: String::new() }) });
+    rig.env.actions.push(Action::Stop { target: Some(Target::Output { output: ident("other") }) });
     assert!(rig.step().expect("wrong-target Stop is rejected as an event"));
     let events = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].kind.as_str(), REQUEST_REJECTED);
-    assert_eq!(events[0].payload["action"], "stop");
-    assert!(events[0].payload["reason"].as_str().unwrap().starts_with("HD-14"));
+    assert_eq!(events.len(), 2, "a resource's Stop and another output's Stop");
+    for event in &events {
+        assert_eq!(event.kind.as_str(), REQUEST_REJECTED);
+        assert_eq!(event.payload["action"], "stop");
+        assert!(event.payload["reason"].as_str().unwrap().starts_with("HD-14"));
+    }
 
     rig.push_ramp(4, 4);
     rig.step().expect("capture continues after unrelated Stop");
@@ -918,7 +919,7 @@ fn hd_11_stop_for_own_target_finishes_the_capture() {
     rig.push_ramp(0, 4);
     rig.step().expect("start partial capture");
     rig.env.actions.push(Action::Stop {
-        target: Some(ResourceId::parse("sink/rec").expect("Sink target")),
+        target: own(),
     });
     assert!(rig.step().expect("own Stop finishes the capture"));
     // Phase 6, VD-1: the only event is the partial capture's announcement (HD-16).
@@ -939,7 +940,7 @@ fn hd_11_a_stop_discards_unstarted_requests_and_later_ones_are_served() {
     rig.step().expect("start the own capture");
     rig.env.actions.push(request(Value::from(3), None));
     rig.env.actions.push(Action::Stop {
-        target: Some(ResourceId::parse("sink/rec").expect("Sink target")),
+        target: own(),
     });
     rig.step().expect("the Stop finishes the own capture");
     rig.env.actions.push(request(Value::from(2), None));
@@ -1310,7 +1311,7 @@ fn hd_16_a_written_capture_is_announced() {
     let first = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].kind.as_str(), CAPTURE_WRITTEN);
-    assert_eq!(first[0].source, ResourceId::parse("sink/rec").expect("event source"));
+    assert_eq!(first[0].source, source());
     let announced: ezsdr_sink::CaptureWrittenPayload = serde_json::from_value(first[0].payload.clone()).expect("the payload is a CaptureWrittenPayload");
     assert_eq!(announced.request, Some(0), "the first capture request the Sink received");
     let path = PathBuf::from(announced.artifact.uri.strip_prefix("file://").expect("a file URI"));
@@ -1320,7 +1321,7 @@ fn hd_16_a_written_capture_is_announced() {
     rig.env.actions.push(request(Value::from(1_000), None));
     rig.push_ramp(1_200, 300);
     rig.step().expect("the second capture starts");
-    rig.env.actions.push(Action::Stop { target: Some(ResourceId::parse("sink/rec").expect("Sink target")) });
+    rig.env.actions.push(Action::Stop { target: own() });
     rig.step().expect("the Stop finishes it");
     let second = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(second.len(), 1);
@@ -1367,7 +1368,7 @@ fn hd_16_a_discarded_request_is_answered() {
     rig.env.actions.push(request(Value::from(3), None));
     rig.push_ramp(0, 4);
     rig.step().expect("the first request starts");
-    rig.env.actions.push(Action::Stop { target: Some(ResourceId::parse("sink/rec").expect("Sink target")) });
+    rig.env.actions.push(Action::Stop { target: own() });
     rig.step().expect("the Stop");
     let answers: Vec<(String, serde_json::Value)> = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().map(|event| (event.kind.as_str().to_owned(), event.payload["request"].clone())).collect();
     assert_eq!(answers, vec![(CAPTURE_WRITTEN.to_owned(), json!(0)), (REQUEST_REJECTED.to_owned(), json!(1))]);

@@ -2,13 +2,11 @@
 
 mod support;
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ezsdr_kernel::event::EventCollector;
-use ezsdr_kernel::id::RunId;
 use ezsdr_kernel::module_api::{
-    Authority, ExecutionClass, Pacing, PrepareContext, Provider, StopMode,
+    Authority, Pacing, PrepareContext, Provider, StopMode,
 };
 use ezsdr_kernel::plan::Fragment;
 use ezsdr_kernel::policy::Policy;
@@ -32,20 +30,8 @@ fn ma_44_the_run_doubles_record_their_calls() {
         1_000_000_000,
     ))
     .expect("a host-monotonic test budget");
-    let context = PrepareContext {
-        run: RunId::from_string("test-run".to_owned()),
-        class: ExecutionClass::Simulation,
-        time,
-        clocks,
-        events,
-        actions: queue,
-        actions_out: submitter,
-        environment: Arc::new(BTreeMap::new()),
-        inputs: Arc::new(BTreeMap::<ezsdr_kernel::hash::ContentHash, Arc<[u8]>>::new()),
-        links: Vec::new(),
-        components: BTreeMap::new(),
-        host_budget,
-    };
+    let mut context = PrepareContext::testing(support::node_source("radio"), time, clocks, events, queue, submitter);
+    context.host_budget = host_budget;
     let fragment = Fragment {
         id: id("radio"),
         instance: mref("ezsdr.test.provider"),
@@ -66,6 +52,7 @@ fn ma_44_the_run_doubles_record_their_calls() {
         probe.lines(),
         [
             "p:prepare:radio",
+            "source:p:node radio",
             "p:arm",
             "p:start:0",
             "p:step:0",

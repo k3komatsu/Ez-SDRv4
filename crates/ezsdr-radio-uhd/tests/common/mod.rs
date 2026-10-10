@@ -12,7 +12,7 @@ use std::time::{Duration as Wall, Instant};
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, Binding, BindingProfile};
 use ezsdr_kernel::contract::ContractRegistry;
 use ezsdr_kernel::coordinator::{Assembly, RunHandle, RunHandleError, connect, start_spec_run};
-use ezsdr_kernel::event::{Action, ActionId, Event, EventCollector, EventKind};
+use ezsdr_kernel::event::{Action, ActionId, Event, EventCollector, EventKind, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ResourceId, RunId};
 use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
@@ -178,7 +178,7 @@ pub fn with_burst(mut spec: Json, waveform: &ArtifactRef, repeat: bool, late: &s
         "at": { "clock": "radio", "offset_ticks": offset },
         "action": {
             "kind": "tx_burst",
-            "target": serde_json::to_value(ResourceId::parse("radio/tx").unwrap()).unwrap(),
+            "target": serde_json::to_value(resource("radio/tx")).unwrap(),
             "waveform": waveform, "repeat": repeat, "late_policy": late, "metadata": {}
         }
     }]);
@@ -245,21 +245,15 @@ pub fn assembly(profile_doc: &Json, device: Arc<dyn Device>, inputs: BTreeMap<Co
     for placement in &profile.placements.links {
         links.insert(placement.link.clone(), Box::new(ezsdr_link_host::HostLinkModule::new()) as Box<dyn Link>);
     }
-    Assembly {
-        registry,
-        checks,
-        kinds,
-        contracts: ContractRegistry::with_standard_contracts(),
-        clocks,
-        host_clock: Arc::new(ezsdr_kernel::run::SystemHostClock::new()),
-        providers,
-        executors: BTreeMap::new(),
-        sinks,
-        authority: Box::new(authority),
-        links,
-        inputs,
-        spec_source: None,
-    }
+    let mut assembly = Assembly::new(Box::new(authority), clocks);
+    assembly.registry = registry;
+    assembly.checks = checks;
+    assembly.kinds = kinds;
+    assembly.providers = providers;
+    assembly.sinks = sinks;
+    assembly.links = links;
+    assembly.inputs = inputs;
+    assembly
 }
 
 pub fn fake(config: FakeConfig) -> Arc<FakeDevice> {
@@ -332,7 +326,7 @@ pub fn require_stream_timing(manifest: &Manifest, trial: &str, tx: bool) {
 }
 
 pub fn section<'a>(manifest: &'a Manifest, suffix: &str) -> &'a Json {
-    &manifest.sections[&Namespace::parse(&format!("ezsdr.radio.uhd.usrp.{suffix}")).unwrap()]
+    manifest.section(&usrp(), &format!("ezsdr.radio.uhd.{suffix}")).unwrap_or_else(|| panic!("no section {suffix}"))
 }
 
 pub fn capture_of(manifest: &Manifest, id: &str) -> ArtifactRef {
@@ -368,18 +362,34 @@ pub fn failure(manifest: &Manifest) -> String {
     }
 }
 
-pub fn verb(verb: &str, target: &str, at: Option<TimePoint>, params: &[(&str, Value)]) -> SessionAction {
+/// The UHD instance's source: its node (KC-8), under which its sections are filed (RS-39).
+pub fn usrp() -> EventSource {
+    EventSource::Node { node: ResourceId::parse("usrp").unwrap() }
+}
+
+/// A resource target, `<resource>[/<path>]` (KC-23).
+pub fn resource(path: &str) -> Target {
+    let (resource, path) = path.split_once('/').unwrap_or((path, ""));
+    Target::Resource { resource: Ident::parse(resource).unwrap(), path: path.to_owned() }
+}
+
+/// An output target (KC-23).
+pub fn output(name: &str) -> Target {
+    Target::Output { output: Ident::parse(name).unwrap() }
+}
+
+pub fn verb(verb: &str, target: Target, at: Option<TimePoint>, params: &[(&str, Value)]) -> SessionAction {
     SessionAction::Vocabulary {
         ns: Namespace::parse(if verb == "capture" { "sink" } else { "radio" }).unwrap(),
         verb: Ident::parse(verb).unwrap(),
-        target: ResourceId::parse(target).unwrap(),
+        target,
         at,
         params: params.iter().map(|(k, v)| (Key::parse(k).unwrap(), v.clone())).collect(),
     }
 }
 
 pub fn set(key: &str, value: Value) -> SessionAction {
-    SessionAction::SetParameter { target: ResourceId::parse("radio").unwrap(), key: Key::parse(key).unwrap(), value }
+    SessionAction::SetParameter { target: resource("radio"), key: Key::parse(key).unwrap(), value }
 }
 
 pub fn admitted(entry: &ezsdr_kernel::session::LogEntry) -> bool {
@@ -513,7 +523,7 @@ pub fn rehearse_capture_at_a_sample_index(device: Arc<dyn Device>) -> Manifest {
     let mut spec = receive_spec(1, 1e6, bench_hz(&*device), None);
     spec["schedule"] = json!([{
         "at": { "clock": "radio", "offset_ticks": 50_000 },
-        "action": { "kind": "update_parameter", "target": serde_json::to_value(ResourceId::parse("sink/rec").unwrap()).unwrap(),
+        "action": { "kind": "update_parameter", "target": serde_json::to_value(output("rec")).unwrap(),
                     "key": "sink.capture_samples", "value": 10_000, "class": "block_boundary" }
     }]);
     let manifest = captured(spec_run(&spec, &bench_profile(&*device, &dir, json!({}), json!({}), false), device, BTreeMap::new()));
@@ -552,7 +562,7 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
     let capture = |spec: &mut Json, offset: i64, n: i64| {
         spec["schedule"].as_array_mut().unwrap().push(json!({
             "at": { "clock": "radio", "offset_ticks": offset },
-            "action": { "kind": "update_parameter", "target": serde_json::to_value(ResourceId::parse("sink/rec").unwrap()).unwrap(),
+            "action": { "kind": "update_parameter", "target": serde_json::to_value(output("rec")).unwrap(),
                         "key": "sink.capture_samples", "value": n, "class": "block_boundary" }
         }));
     };
@@ -615,9 +625,9 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
     past_tx_origin(&mut run);
     let wave = pn(1_000);
     let (bytes, _) = waveform_of(&wave);
-    assert!(admitted(&run.submit(verb("start_repeat", "radio/tx", None, &[]), Some(&bytes)).unwrap()));
+    assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx"), None, &[]), Some(&bytes)).unwrap()));
     let at = after_ticks(&run, ms(50));
-    assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(at), &[("sink.capture_samples", Value::from(5_000))]), None).unwrap()));
+    assert!(admitted(&run.submit(verb("capture", output("rec"), Some(at), &[("sink.capture_samples", Value::from(5_000))]), None).unwrap()));
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     let refused = run.submit(set("radio.tx.frequency_hz", Value::num(hz + 100e6).unwrap()), None).unwrap();

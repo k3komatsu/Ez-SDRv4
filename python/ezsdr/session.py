@@ -43,8 +43,31 @@ class CaptureTimeout(Error):
     """No capture was written within the timeout, in Run time."""
 
 
-def _rid(path: str) -> dict:
-    return {"node": 0, "path": path}
+class Target:
+    """What an action addresses, as the Kernel's ``Target`` document (KC-23, EA-16): a
+    resource with a sub-path below it, an output (a recorder) or a graph component. A
+    plain string passed to ``Session.set`` or ``Session.stop`` is always a resource
+    target, ``"radio/rx"`` being ``Target.resource("radio", "rx")``."""
+
+    @staticmethod
+    def resource(name: str, path: str = "") -> dict:
+        return {"kind": "resource", "resource": name, "path": path}
+
+    @staticmethod
+    def output(name: str) -> dict:
+        return {"kind": "output", "output": name}
+
+    @staticmethod
+    def component(name: str) -> dict:
+        return {"kind": "component", "component": name}
+
+
+def _target(target: Any) -> dict:
+    """A ``Target`` document, or a string as a resource target (EA-16)."""
+    if isinstance(target, str):
+        name, _, path = target.partition("/")
+        return Target.resource(name, path)
+    return target
 
 
 def _seconds(value: Any) -> Fraction:
@@ -194,7 +217,7 @@ class _Side:
         the receive stream stays stopped through every parameter change until ``rx.start()``,
         and after ``tx.stop()`` or ``stop("<radio>")`` the next ``repeat`` transmits (RM-16,
         RM-21; EA-16)."""
-        return self._session.stop(f"{self._radio}/{self._direction}")
+        return self._session.stop(Target.resource(self._radio, self._direction))
 
 
 class CaptureRequest:
@@ -225,7 +248,7 @@ class Rx(_Side):
             "kind": "vocabulary",
             "ns": "radio",
             "verb": "start_rx",
-            "target": _rid(f"{self._radio}/rx"),
+            "target": Target.resource(self._radio, "rx"),
             "at": at if at is not None else self._session._aligned or self._session.now,
             "params": {},
         }
@@ -279,7 +302,7 @@ class Rx(_Side):
             "kind": "vocabulary",
             "ns": "sink",
             "verb": "capture",
-            "target": _rid(recorder),
+            "target": Target.output(recorder),
             "at": at if at is not None else self._session._aligned,
             "params": {"sink.capture_samples": int(n)},
         }
@@ -292,7 +315,7 @@ class Rx(_Side):
         n, number, entry, start = handle.n, handle.number, handle.entry, handle._start
         if timeout is None:
             timeout = n / float(self.sample_rate) + 1.0
-        source = _rid(f"sink/{handle.recorder}")
+        source = {"kind": "output", "output": handle.recorder}
         wait = {"within": self._session._duration(timeout)}
         while True:
             request = {"op": "wait_for", "kinds": [CAPTURE_WRITTEN, REQUEST_REJECTED], "from": start}
@@ -327,7 +350,7 @@ class Tx(_Side):
             "kind": "vocabulary",
             "ns": "radio",
             "verb": "start_repeat",
-            "target": _rid(f"{self._radio}/tx"),
+            "target": Target.resource(self._radio, "tx"),
             "at": at if at is not None else self._session._aligned,
             "params": {},
         }
@@ -487,35 +510,25 @@ class Session:
     def submit(self, action: dict, waveform: Optional[bytes] = None) -> dict:
         """Submits any ``SessionAction`` document and returns its log entry, admitted or rejected."""
         entry = self._call({"op": "submit", "action": action}, waveform or b"")[0]["entry"]
-        recorder = self._capture_recorder(action) if entry["outcome"]["kind"] == "admitted" else None
-        if recorder is not None:
-            # One admitted capture request is one request the recorder numbers (HD-16).
+        target = action.get("target") or {}
+        capture = (action.get("kind"), action.get("ns"), action.get("verb")) == ("vocabulary", "sink", "capture") or (
+            action.get("kind") == "set_parameter" and action.get("key") == "sink.capture_samples"
+        )
+        if entry["outcome"]["kind"] == "admitted" and capture and target.get("kind") == "output":
+            # One admitted capture request is one request its recorder numbers (HD-16).
+            recorder = target["output"]
             self._captures[recorder] = self._captures.get(recorder, 0) + 1
         return entry
 
-    def _capture_recorder(self, action: dict) -> Optional[str]:
-        """The recorder an admitted action hands a capture request to, as the Kernel routes
-        it (RS-14): a ``sink.capture`` goes to the only recorder when one is bound, or else to
-        the one its target names; a ``SetParameter`` of ``sink.capture_samples`` to the
-        recorder ``sink/<recorder>`` names (Review I, P0-A)."""
-        recorders = self.recorders()
-        path = (action.get("target") or {}).get("path", "")
-        named = path[len("sink/"):] if path.startswith("sink/") else path
-        if action.get("kind") == "vocabulary" and (action.get("ns"), action.get("verb")) == ("sink", "capture"):
-            if len(recorders) == 1:
-                return recorders[0]
-            return named if named in recorders else None
-        if action.get("kind") == "set_parameter" and action.get("key") == "sink.capture_samples":
-            return named if named in recorders else None
-        return None
+    def set(self, target: Any, key: str, value: Any) -> dict:
+        """``SetParameter`` of ``target``, a ``Target`` or a resource string; raises
+        ``Rejected`` if the Kernel rejects it."""
+        return _admitted(self.submit({"kind": "set_parameter", "target": _target(target), "key": key, "value": value}))
 
-    def set(self, target: str, key: str, value: Any) -> dict:
-        """``SetParameter``; raises ``Rejected`` if the Kernel rejects it."""
-        return _admitted(self.submit({"kind": "set_parameter", "target": _rid(target), "key": key, "value": value}))
-
-    def stop(self, target: Optional[str] = None) -> dict:
-        """``Stop``: of ``target``, or of the Session itself when it is ``None``."""
-        return _admitted(self.submit({"kind": "stop", "target": None if target is None else _rid(target)}))
+    def stop(self, target: Any = None) -> dict:
+        """``Stop``: of ``target``, a ``Target`` or a resource string, or of the Session
+        itself when it is ``None``."""
+        return _admitted(self.submit({"kind": "stop", "target": None if target is None else _target(target)}))
 
     # -- radios
 
@@ -539,10 +552,6 @@ class Session:
     @property
     def tx(self) -> Tx:
         return self.radio().tx
-
-    def recorders(self) -> List[str]:
-        """The bindings of the Session's profile that record a feed."""
-        return sorted(name for name, binding in self.profile["bindings"].items() if binding.get("feed"))
 
     def _recorder(self, radio: str) -> str:
         """The one binding whose feed starts at ``radio``'s receive port (EA-17). With none

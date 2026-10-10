@@ -122,7 +122,8 @@ impl RunHandle {
                             }
                             continue;
                         };
-                        module_sections.push((owner, first, sections));
+                        let source = self.shared.source_root(Inst::Provider(i), &first);
+                        module_sections.push((owner, first, source, sections));
                     }
                 },
             }
@@ -250,12 +251,12 @@ impl RunHandle {
                 also: lock(&self.shared.also).clone(),
             },
             artifacts: lock(&self.shared.artifacts).clone(),
-            sections: BTreeMap::new(),
+            sections: Vec::new(),
             hash: None,
         };
-        for (owner, fragment, entries) in module_sections {
+        for (owner, fragment, source, entries) in module_sections {
             for (section, value) in entries {
-                if let Err(error) = manifest.write_section(&owner, section, value) {
+                if let Err(error) = manifest.write_section(&owner, source.clone(), section, value) {
                     manifest
                         .termination
                         .cleanup_failures

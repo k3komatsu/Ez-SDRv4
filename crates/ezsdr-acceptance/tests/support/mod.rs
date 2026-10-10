@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use ezsdr_acceptance::rig::{self, TempDir};
 use ezsdr_kernel::coordinator::{self, RunHandle, RunHandleError};
+use ezsdr_kernel::event::{EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::manifest::Manifest;
@@ -40,8 +41,25 @@ pub fn end_session(mut run: RunHandle, root: ClockDomainId, tick: i64) -> Manife
     run.finish()
 }
 
-pub fn section<'a>(manifest: &'a Manifest, name: &str) -> &'a Value {
-    &manifest.sections[&ezsdr_kernel::spec::Namespace::parse(name).unwrap()]
+/// The section `name` the instance whose node is `node` wrote (RS-39).
+pub fn section<'a>(manifest: &'a Manifest, node: &str, name: &str) -> &'a Value {
+    manifest.section(&source(node), name).unwrap_or_else(|| panic!("no section {name} from {node}"))
+}
+
+/// A Provider node's event source (KC-8).
+pub fn source(node: &str) -> EventSource {
+    EventSource::Node { node: ezsdr_kernel::id::ResourceId::parse(node).unwrap() }
+}
+
+/// A resource target, `<resource>[/<path>]` (KC-23).
+pub fn resource(path: &str) -> Target {
+    let (resource, path) = path.split_once('/').unwrap_or((path, ""));
+    Target::Resource { resource: ezsdr_kernel::spec::Ident::parse(resource).unwrap(), path: path.to_owned() }
+}
+
+/// An output target (KC-23).
+pub fn output(name: &str) -> Target {
+    Target::Output { output: ezsdr_kernel::spec::Ident::parse(name).unwrap() }
 }
 
 pub fn artifact<'a>(manifest: &'a Manifest, id: &str) -> &'a ezsdr_kernel::manifest::ArtifactRef {

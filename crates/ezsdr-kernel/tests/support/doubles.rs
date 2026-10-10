@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use ezsdr_kernel::binding::{AdmissionCheck, CheckStage, Violation};
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection};
-use ezsdr_kernel::event::{Action, ActionId, EventKind};
+use ezsdr_kernel::event::{Action, ActionId, EventKind, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, MemoryDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::manifest::ArtifactRef;
@@ -37,6 +37,17 @@ pub fn id(s: &str) -> Ident {
 }
 
 /// Parses a [`Namespace`] from a literal known to be well formed.
+/// A resource target written `<resource>[/<path>]` (KC-23).
+pub fn target(s: &str) -> Target {
+    let (resource, path) = s.split_once('/').unwrap_or((s, ""));
+    Target::Resource { resource: id(resource), path: path.to_owned() }
+}
+
+/// A Provider node's event source (KC-8).
+pub fn node_source(s: &str) -> EventSource {
+    EventSource::Node { node: ResourceId::parse(s).expect("valid node path") }
+}
+
 pub fn ns(s: &str) -> Namespace {
     Namespace::parse(s).expect("a well-formed Namespace literal")
 }
@@ -1064,12 +1075,12 @@ impl QueueReceiver {
 }
 
 impl ActionReceiver for QueueReceiver {
-    fn recv(&self) -> Option<Action> {
+    fn recv(&self) -> Option<(Action, Option<ResourceId>)> {
         let mut q = self.queue.lock().expect("lock");
         if q.is_empty() {
             None
         } else {
-            Some(q.remove(0))
+            Some((q.remove(0), None))
         }
     }
 }

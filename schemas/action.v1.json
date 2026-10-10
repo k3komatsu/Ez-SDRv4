@@ -219,8 +219,8 @@
           "description": "How bad (RS-29)."
         },
         "source": {
-          "$ref": "#/$defs/ResourceId",
-          "description": "Which resource it came from (RS-31)."
+          "$ref": "#/$defs/EventSource",
+          "description": "Where it came from (RS-31)."
         },
         "time": {
           "$ref": "#/$defs/TimePoint",
@@ -239,6 +239,96 @@
     "EventKind": {
       "description": "What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$`:\nevery kind is namespaced. The Kernel owns the five of RS-28, under `ezsdr.`, and\nevery other kind belongs to the Vocabulary or Module that emits it.\n\nRule: SB-1, RS-27.",
       "type": "string"
+    },
+    "EventSource": {
+      "description": "Where an event, a counter row or a Manifest section comes from, tagged by role, so\nthat no role is read off a path segment and no name is reserved for one.\n\nRule: RS-31, KC-8.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A node of a Provider's resource tree: its root or a node below it (RS-31).",
+          "properties": {
+            "kind": {
+              "const": "node",
+              "type": "string"
+            },
+            "node": {
+              "$ref": "#/$defs/ResourceId",
+              "description": "The node (SB-33)."
+            }
+          },
+          "required": [
+            "kind",
+            "node"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A bound Sink, by the output it fills (SB-17).",
+          "properties": {
+            "kind": {
+              "const": "output",
+              "type": "string"
+            },
+            "output": {
+              "$ref": "#/$defs/Ident",
+              "description": "The output id."
+            }
+          },
+          "required": [
+            "kind",
+            "output"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An Executor, by the Island it runs (MA-38).",
+          "properties": {
+            "island": {
+              "$ref": "#/$defs/IslandId",
+              "description": "The Island."
+            },
+            "kind": {
+              "const": "island",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "island"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The Kernel itself (RS-35, KC-22).",
+          "properties": {
+            "kind": {
+              "const": "kernel",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "RS-33's fallback row for a pair the plan did not foresee.",
+          "properties": {
+            "kind": {
+              "const": "unforeseen",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "Finite": {
       "description": "A finite 64-bit float: NaN and the infinities are refused, so OV-15's\ncanonicaliser never meets one.\n\nRule: SB-4, OV-15.",
@@ -400,6 +490,27 @@
     "Ident": {
       "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
       "type": "string"
+    },
+    "IslandId": {
+      "additionalProperties": false,
+      "description": "Identifies a scheduling island (`05-module-api.md` MA-27).\n\nRule: MA-27, X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `0`, the local node, throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
     },
     "Key": {
       "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the `KeyDecl` and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
@@ -612,6 +723,73 @@
         }
       ]
     },
+    "Target": {
+      "description": "What an Action addresses, in the Spec's own names and tagged by role: a resource\nwith a sub-path below it, an output, or a graph component. The Kernel resolves it\nper role (KC-23); a name the Spec does not declare in that role is refused.\n\nRule: RS-49, KC-23, SB-16.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A Spec resource, or a node below its matched node.",
+          "properties": {
+            "kind": {
+              "const": "resource",
+              "type": "string"
+            },
+            "path": {
+              "default": "",
+              "description": "The sub-path below the matched node, in SB-1's segment grammar; empty\nnames the matched node itself.",
+              "type": "string"
+            },
+            "resource": {
+              "$ref": "#/$defs/Ident",
+              "description": "The Spec resource name."
+            }
+          },
+          "required": [
+            "kind",
+            "resource"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An output's bound Sink.",
+          "properties": {
+            "kind": {
+              "const": "output",
+              "type": "string"
+            },
+            "output": {
+              "$ref": "#/$defs/Ident",
+              "description": "The output id."
+            }
+          },
+          "required": [
+            "kind",
+            "output"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A graph component, reached through the Island that lists it.",
+          "properties": {
+            "component": {
+              "$ref": "#/$defs/Ident",
+              "description": "The component name."
+            },
+            "kind": {
+              "const": "component",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "component"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "TimePoint": {
       "additionalProperties": false,
       "description": "An instant: integer ticks in a named clock domain. Never floating-point seconds.\n\nThere is deliberately no `PartialOrd`: two points of different domains cannot be\ncompared at all, and `a < b` silently answering `false` is the bug class this\nmodel exists to prevent (decision T3).\n\nRule: TM-1, TM-6.",
@@ -724,7 +902,7 @@
           "description": "What was asked for, when SC-23a advanced it onto the sample grid (RS-51)."
         },
         "target": {
-          "$ref": "#/$defs/ResourceId",
+          "$ref": "#/$defs/Target",
           "description": "The transmit stream (RS-49)."
         },
         "waveform": {
@@ -755,7 +933,7 @@
           "type": "string"
         },
         "target": {
-          "$ref": "#/$defs/ResourceId",
+          "$ref": "#/$defs/Target",
           "description": "Whose timer (RS-49)."
         },
         "token": {
@@ -801,7 +979,7 @@
           "type": "string"
         },
         "target": {
-          "$ref": "#/$defs/ResourceId",
+          "$ref": "#/$defs/Target",
           "description": "Whose parameter (RS-49)."
         },
         "value": {
@@ -846,7 +1024,7 @@
           "type": "object"
         },
         "target": {
-          "$ref": "#/$defs/ResourceId",
+          "$ref": "#/$defs/Target",
           "description": "Whose verb (RS-49)."
         },
         "verb": {
@@ -874,7 +1052,7 @@
           "type": "string"
         },
         "target": {
-          "$ref": "#/$defs/ResourceId",
+          "$ref": "#/$defs/Target",
           "description": "Whose event (RS-49)."
         }
       },
@@ -896,7 +1074,7 @@
         "target": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ResourceId"
+              "$ref": "#/$defs/Target"
             },
             {
               "type": "null"

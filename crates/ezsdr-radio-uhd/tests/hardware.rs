@@ -175,7 +175,7 @@ fn hw_b8_leads() {
         let (bytes, _) = waveform_of(&pn(100));
         let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
         let at = TimePoint::new(clock.domain, (run.now().ticks_in(clock.root).unwrap() + lead_us * 200 - clock.origin.ticks_in(clock.root).unwrap()).div_euclid(200) + 1);
-        let _ = run.submit(verb("send", "radio/tx", Some(at), &[]), Some(&bytes));
+        let _ = run.submit(verb("send", resource("radio/tx"), Some(at), &[]), Some(&bytes));
         wait(&mut run, ms(100));
         let manifest = run.finish();
         println!("B8 lead {lead_us} µs: TIME_ERROR {:?}", events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>());
@@ -663,7 +663,7 @@ fn cold_change_capture(from: f64, to: f64, block_len: Option<u32>) {
     }
     let at = after_ticks(&run, ms(20));
     let n = (from * 0.12) as i64 + (to * 0.1) as i64;
-    assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(n))]), None).unwrap()));
+    assert!(admitted(&run.submit(verb("capture", output("rec"), Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(n))]), None).unwrap()));
     wait(&mut run, ms(60));
     let booked = run.now();
     let entry = run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::num(to).unwrap()), None).unwrap();
@@ -728,12 +728,12 @@ fn hw_b8_stop_end() {
         let dir = TempDir::new();
         let mut run = tx_session(usrp(), &dir);
         let (bytes, _) = waveform_of(&pn(1_000));
-        assert!(admitted(&run.submit(verb("start_repeat", "radio/tx", None, &[]), Some(&bytes)).unwrap()));
+        assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx"), None, &[]), Some(&bytes)).unwrap()));
         let at = after_ticks(&run, ms(20));
-        assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(100_000))]), None).unwrap()));
+        assert!(admitted(&run.submit(verb("capture", output("rec"), Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(100_000))]), None).unwrap()));
         let _ = run.advance_to(TimePoint::new(at.domain(), at.ticks_in(at.domain()).unwrap() + ms(50)));
         let s = run.now();
-        let _ = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap()) }, None);
+        let _ = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/tx")) }, None);
         let horizon = after_ticks(&run, ms(3_000));
         let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
         let manifest = run.finish();
@@ -766,11 +766,11 @@ fn hw_b8_preemption() {
         let dir = TempDir::new();
         let mut run = tx_session(usrp(), &dir);
         let (repeat, _) = waveform_of(&pn(1_000));
-        assert!(admitted(&run.submit(verb("start_repeat", "radio/tx", None, &[]), Some(&repeat)).unwrap()));
+        assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx"), None, &[]), Some(&repeat)).unwrap()));
         wait(&mut run, ms(100));
         let (burst, _) = waveform_of(&pn(100));
         let at = tx_at(&run, ms(lead_ms));
-        let entry = run.submit(verb("send", "radio/tx", Some(at), &[]), Some(&burst)).unwrap();
+        let entry = run.submit(verb("send", resource("radio/tx"), Some(at), &[]), Some(&burst)).unwrap();
         wait(&mut run, ms(100));
         let manifest = run.finish();
         println!("B8 preempt lead {lead_ms} ms: {:?}; TIME_ERROR {:?}", entry.outcome, events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>());
@@ -866,7 +866,7 @@ fn hw_b6_delay_by_rate() {
         let mut spec = with_burst(with_tx(receive_spec(1, rate, bench_hz(&*device), None), rate), &waveform, false, "drop_and_flag", 10_000);
         spec["schedule"].as_array_mut().unwrap().push(serde_json::json!({
             "at": { "clock": "radio", "offset_ticks": 10_000 },
-            "action": { "kind": "update_parameter", "target": serde_json::to_value(ezsdr_kernel::id::ResourceId::parse("sink/rec").unwrap()).unwrap(),
+            "action": { "kind": "update_parameter", "target": serde_json::to_value(output("rec")).unwrap(),
                         "key": "sink.capture_samples", "value": 5_000, "class": "block_boundary" }
         }));
         let inputs = std::collections::BTreeMap::from([(waveform.hash.clone(), bytes.clone())]);
@@ -971,7 +971,7 @@ fn hw_b8_burst_at_a_sent_burst_s_end() {
         wait(&mut run, ms(1));
         let a = tx_at(&run, ms(40));
         let (first, _) = waveform_of(&pn(30_000));
-        assert!(admitted(&run.submit(verb("send", "radio/tx", Some(a), &[]), Some(&first)).unwrap()));
+        assert!(admitted(&run.submit(verb("send", resource("radio/tx"), Some(a), &[]), Some(&first)).unwrap()));
         let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
         let a_end = clock.origin.ticks_in(clock.root).unwrap() + (a.ticks_in(clock.domain).unwrap() + 30_000) * clock.root_ticks_per_tick.num() as i64;
         while run.now().ticks_in(clock.root).unwrap() < a_end - ms(8) {
@@ -979,7 +979,7 @@ fn hw_b8_burst_at_a_sent_burst_s_end() {
         }
         let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_000);
         let (second, _) = waveform_of(&pn(1_000));
-        let entry = run.submit(verb("send", "radio/tx", Some(b), &[]), Some(&second)).unwrap();
+        let entry = run.submit(verb("send", resource("radio/tx"), Some(b), &[]), Some(&second)).unwrap();
         wait(&mut run, ms(60));
         let manifest = run.finish();
         println!("B8 burst at a sent burst's end, trial {trial}: {:?}; {} ms before A's end; TIME_ERROR {:?}; async {}; bursts {}",
@@ -1098,7 +1098,7 @@ fn hw_b8_burst_one_sample_after_a_burst() {
         wait(&mut run, ms(1));
         let a = tx_at(&run, ms(40));
         let (first, _) = waveform_of(&pn(30_000));
-        assert!(admitted(&run.submit(verb("send", "radio/tx", Some(a), &[]), Some(&first)).unwrap()));
+        assert!(admitted(&run.submit(verb("send", resource("radio/tx"), Some(a), &[]), Some(&first)).unwrap()));
         let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
         let a_end = clock.origin.ticks_in(clock.root).unwrap() + (a.ticks_in(clock.domain).unwrap() + 30_000) * clock.root_ticks_per_tick.num() as i64;
         if late_booking {
@@ -1108,7 +1108,7 @@ fn hw_b8_burst_one_sample_after_a_burst() {
         }
         let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_001);
         let (second, _) = waveform_of(&pn(1_000));
-        let entry = run.submit(verb("send", "radio/tx", Some(b), &[]), Some(&second)).unwrap();
+        let entry = run.submit(verb("send", resource("radio/tx"), Some(b), &[]), Some(&second)).unwrap();
         wait(&mut run, ms(80));
         let manifest = run.finish();
         println!("B8 burst one sample after a burst, booked late {late_booking}: {:?}; TIME_ERROR {:?}; async {}; bursts {}",

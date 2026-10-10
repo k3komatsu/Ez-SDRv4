@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::binding::{self, AdmissionResult, BindingProfile, Violation};
 use crate::event::{
-    Action, ActionId, ActionTemplate, Event, EventCollector, EventKind, EventSink, Severity,
+    Action, ActionId, ActionTemplate, Event, EventCollector, EventKind, EventSink, EventSource,
+    Severity, Target,
 };
 use crate::hash::ContentHash;
 use crate::id::{ClockDomainId, ResourceId, RunId};
@@ -25,7 +26,7 @@ use super::state::{
     Context, ExecutorSlot, FailedTime, Inst, ProviderSlot, Queue, Routing, Shared, SinkSlot,
     TimeScheduleError, contain, contain_all, lock,
 };
-use super::{Assembly, DEFAULT_HOST_BUDGET_NS, EVENT_RING_DEPTH, KERNEL_SOURCE, RunHandle};
+use super::{Assembly, DEFAULT_HOST_BUDGET_NS, EVENT_RING_DEPTH, RunHandle};
 
 pub(super) fn assemble(
     kind: RunKind,
@@ -657,10 +658,10 @@ impl RunHandle {
             let kinds = module_event_kinds(&self.shared, &slot.module);
             for node in instance.tree.walk() {
                 for kind in &kinds {
-                    pairs.insert((node.id.clone(), kind.clone()));
+                    pairs.insert((EventSource::Node { node: node.id.clone() }, kind.clone()));
                 }
             }
-            pairs.insert((instance.id, device_lost.clone()));
+            pairs.insert((EventSource::Node { node: instance.id }, device_lost.clone()));
         }
         for slot in &self.shared.sinks {
             let module = self
@@ -673,8 +674,7 @@ impl RunHandle {
             let Some(module) = module else {
                 continue;
             };
-            let source = ResourceId::parse(&format!("sink/{}", slot.output))
-                .expect("validated Sink event source");
+            let source = EventSource::Output { output: slot.output.clone() };
             for kind in module_event_kinds(&self.shared, module) {
                 pairs.insert((source.clone(), kind));
             }
@@ -700,22 +700,18 @@ impl RunHandle {
             let Some(module) = module else {
                 continue;
             };
-            let source =
-                ResourceId::parse(fragment.id.as_str()).expect("validated Island event source");
+            let source = self.shared.source_root(Inst::Executor(i), &fragment.id);
             for kind in module_event_kinds(&self.shared, module) {
                 pairs.insert((source.clone(), kind));
             }
         }
         for (i, _) in self.shared.executors.iter().enumerate() {
-            let source = ResourceId::parse(self.shared.first_fragment(Inst::Executor(i)).as_str())
-                .expect("validated Island event source");
+            let instance = Inst::Executor(i);
+            let source = self.shared.source_root(instance, &self.shared.first_fragment(instance));
             pairs.insert((source, device_lost.clone()));
         }
         for kind in kernel_kinds {
-            pairs.insert((
-                ResourceId::parse(KERNEL_SOURCE).expect("Kernel source"),
-                kind,
-            ));
+            pairs.insert((EventSource::Kernel, kind));
         }
         let pairs: Vec<_> = pairs.into_iter().collect();
         let Some(policy) = self.shared.policy.get() else {
@@ -804,6 +800,7 @@ impl RunHandle {
             });
             let context = PrepareContext {
                 run: self.shared.ctx.id.clone(),
+                source: self.shared.source_root(instance, &fragment.id),
                 class: plan_class,
                 time: self.shared.time.clone(),
                 clocks: self.shared.ctx.clocks.clone(),
@@ -1036,14 +1033,10 @@ impl RunHandle {
                 .into_iter()
                 .filter(|clock| clock.stream().is_within(node))
                 .collect();
-            let clock = if let Some(target) = rewritten.as_ref().map(|(target, _, _)| target) {
-                streams
-                    .iter()
-                    .find(|clock| clock.stream() == target)
-                    .cloned()
-            } else {
-                None
-            };
+            let clock = rewritten
+                .as_ref()
+                .and_then(|(node, _, _)| node.as_ref())
+                .and_then(|node| streams.iter().find(|clock| clock.stream() == node).cloned());
             let clock = clock.or_else(|| {
                 let first = streams.first()?;
                 streams
@@ -1403,7 +1396,6 @@ pub(super) fn submit(
         &action,
         &run.shared.ctx.registry,
         declared_classes,
-        &run.shared.ctx.outputs,
         earliest,
         waveform,
     ) {
@@ -1688,16 +1680,6 @@ fn session_earliest(
     action: &SessionAction,
     now: TimePoint,
 ) -> Result<TimePoint, Violation> {
-    if let SessionAction::Vocabulary { ns, verb, .. } = action {
-        if shared.ctx.registry.verb(ns, verb).is_some_and(|decl| {
-            matches!(
-                decl.compiles_to,
-                crate::module_api::CompileRule::UpdateParameter { .. }
-            )
-        }) {
-            return Ok(now);
-        }
-    }
     let target = match action {
         SessionAction::SetParameter { target, .. } | SessionAction::Vocabulary { target, .. } => {
             Some(target)
@@ -1711,7 +1693,7 @@ fn session_earliest(
     let Some(target) = target else {
         return Ok(now);
     };
-    let Ok((stream, Inst::Provider(index), _)) = rewrite_spec_target(shared, target) else {
+    let Ok((Some(stream), Inst::Provider(index), _)) = resolve_target(shared, target) else {
         return Ok(now);
     };
     let mut ticks = now.ticks_in(shared.primary).map_err(|error| {
@@ -1819,76 +1801,47 @@ fn fragment_owner(shared: &Shared, component: &Ident) -> Option<Ident> {
 fn rewrite_template(
     shared: &Shared,
     template: &ActionTemplate,
-) -> Result<Option<(ResourceId, Inst, Ident)>, String> {
-    let target = template.target().cloned();
-    let Some(target) = target else {
-        return Ok(None);
-    };
-    let (rewritten, instance, fragment) = rewrite_spec_target(shared, &target)?;
-    Ok(Some((rewritten, instance, fragment)))
+) -> Result<Option<(Option<ResourceId>, Inst, Ident)>, String> {
+    template.target().map(|target| resolve_target(shared, target)).transpose()
 }
 
-pub(super) fn rewrite_spec_target(
+/// KC-23: resolves a Spec-relative target in its own role — a resource to its matched
+/// node plus the sub-path, an output to its Sink, a component to the Island that lists
+/// it — and returns the node (for a resource), the instance and the fragment. A name
+/// the Spec does not declare in that role is refused.
+pub(super) fn resolve_target(
     shared: &Shared,
-    target: &ResourceId,
-) -> Result<(ResourceId, Inst, Ident), String> {
+    target: &Target,
+) -> Result<(Option<ResourceId>, Inst, Ident), String> {
     let routing = shared.routing().expect("plan was installed");
-    let segments: Vec<_> = target.segments().collect();
-    let first = segments.first().copied().unwrap_or_default();
-    if first == "sink" {
-        if let Some(output) = segments.get(1).and_then(|s| Ident::parse(s).ok()) {
-            if let Some(instance @ Inst::Sink(_)) = routing.fragment_of.get(&output).copied()
-                .filter(|_| shared.ctx.outputs.contains(&output)) {
-                return Ok((target.clone(), instance, output));
-            }
-        }
-    } else if let Ok(resource) = Ident::parse(first) {
-        if let (Some(node), Some(instance)) = (
-            routing.matched.get(&resource),
-            routing.fragment_of.get(&resource).copied(),
-        ) {
-            let suffix = segments
-                .iter()
-                .skip(1)
-                .copied()
-                .collect::<Vec<_>>()
-                .join("/");
-            let path = if suffix.is_empty() {
-                node.path().to_owned()
-            } else {
-                format!("{}/{suffix}", node.path())
+    let refused = || format!("KC-23: {target} is not declared by this Spec");
+    match target {
+        Target::Resource { resource, path } => {
+            let (Some(node), Some(instance @ Inst::Provider(_))) = (
+                routing.matched.get(resource),
+                routing.fragment_of.get(resource).copied(),
+            ) else {
+                return Err(refused());
             };
-            let rewritten = ResourceId::parse(&path)
-                .map_err(|_| format!("KC-23: {target} names no resource, output or component"))?;
-            return Ok((rewritten, instance, resource));
+            let node = if path.is_empty() {
+                node.clone()
+            } else {
+                ResourceId::parse(&format!("{}/{path}", node.path()))
+                    .map_err(|error| format!("KC-23: {target}: {error}"))?
+            };
+            Ok((Some(node), instance, resource.clone()))
+        }
+        Target::Output { output } => match routing.fragment_of.get(output).copied() {
+            Some(instance @ Inst::Sink(_)) => Ok((None, instance, output.clone())),
+            _ => Err(refused()),
+        },
+        // Only a placed graph component is in `island_of`; a Sink is keyed by its output id.
+        Target::Component { component } => {
+            let fragment = routing.island_of.get(component).ok_or_else(refused)?;
+            let instance = routing.fragment_of.get(fragment).copied().ok_or_else(refused)?;
+            Ok((None, instance, fragment.clone()))
         }
     }
-    if let Ok(component) = Ident::parse(first) {
-        if shared.ctx.spec.graph.components.contains_key(&component) {
-            if let Some(fragment) = routing.island_of.get(&component) {
-                if let Some(instance) = routing.fragment_of.get(fragment).copied() {
-                    return Ok((target.clone(), instance, fragment.clone()));
-                }
-            }
-        }
-    }
-    Err(format!(
-        "KC-23: {target} names no resource, output or component"
-    ))
-}
-
-pub(super) fn rewrite_action(action: &Action, target: ResourceId) -> Action {
-    let mut action = action.clone();
-    match &mut action {
-        Action::TxBurst { target: t, .. }
-        | Action::SetTimer { target: t, .. }
-        | Action::UpdateParameter { target: t, .. }
-        | Action::Command { target: t, .. }
-        | Action::Emit { target: t, .. } => *t = target,
-        Action::Stop { target: Some(t) } => *t = target,
-        Action::Stop { target: None } | Action::Abort { .. } => {}
-    }
-    action
 }
 
 pub(super) fn emit_device_lost(shared: &Shared, instance: Inst, error: &ModuleError) {
@@ -1899,7 +1852,7 @@ pub(super) fn emit_device_lost(shared: &Shared, instance: Inst, error: &ModuleEr
         return;
     };
     let _ = collector.emit_control(Event {
-        source: shared.source_root(instance),
+        source: shared.source_root(instance, &shared.first_fragment(instance)),
         time: shared.now(),
         severity: Severity::Fatal,
         kind: EventKind::parse(EventKind::DEVICE_LOST).expect("Kernel event kind"),
@@ -1916,6 +1869,7 @@ fn build_routing(
     let mut first_fragment = BTreeMap::new();
     let mut order = Vec::new();
     let mut island_of = BTreeMap::new();
+    let mut islands = BTreeMap::new();
     for fragment in &plan.fragments {
         let instance = match fragment.role {
             crate::module_api::Role::Provider => shared
@@ -1932,6 +1886,7 @@ fn build_routing(
                 serde_json::from_value::<crate::module_api::IslandDecl>(fragment.content.clone())
                     .ok()
                     .and_then(|island| {
+                        islands.insert(fragment.id.clone(), island.id);
                         for entry in island.components {
                             island_of.insert(entry.component, fragment.id.clone());
                         }
@@ -1960,6 +1915,7 @@ fn build_routing(
         first_fragment,
         order,
         island_of,
+        islands,
         reverse,
     }
 }

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use ezsdr_kernel::event::EventKind;
+use ezsdr_kernel::event::{EventKind, EventSource, Target};
 use ezsdr_kernel::id::ResourceId;
 use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::run::{Stage, StopCause, Termination};
@@ -73,16 +73,20 @@ fn submit(server: &mut Server, action: SessionAction, body: Vec<u8>) -> ezsdr_ke
     }
 }
 
+fn resource(name: &str, path: &str) -> Target {
+    Target::Resource { resource: Ident::parse(name).unwrap(), path: path.to_owned() }
+}
+
 fn set(key: &str, value: Value) -> SessionAction {
-    SessionAction::SetParameter { target: ResourceId::parse("radio").unwrap(), key: Key::parse(key).unwrap(), value }
+    SessionAction::SetParameter { target: resource("radio", ""), key: Key::parse(key).unwrap(), value }
 }
 
 fn repeat() -> SessionAction {
-    SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: ResourceId::parse("radio/tx").unwrap(), at: None, params: BTreeMap::new() }
+    SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio", "tx"), at: None, params: BTreeMap::new() }
 }
 
 fn capture(n: i64) -> SessionAction {
-    SessionAction::Vocabulary { ns: Namespace::parse("sink").unwrap(), verb: Ident::parse("capture").unwrap(), target: ResourceId::parse("rec").unwrap(), at: None, params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(n))]) }
+    SessionAction::Vocabulary { ns: Namespace::parse("sink").unwrap(), verb: Ident::parse("capture").unwrap(), target: Target::Output { output: Ident::parse("rec").unwrap() }, at: None, params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(n))]) }
 }
 
 fn written() -> EventKind {
@@ -664,7 +668,7 @@ fn ea_14_refusals_before_a_child_runs() {
     assert_eq!(refuse(&mut server, receive_spec(10), vec![3], Some(1_000_000), vec![0; 4]).kind, ErrorKind::Protocol);
     // A targeted Stop does not end a Run: without a duration it is refused (KC-33).
     let mut targeted = receive_spec(10);
-    targeted["schedule"] = json!([{ "at": { "clock": "radio", "offset_ticks": 5_000 }, "action": { "kind": "stop", "target": { "node": 0, "path": "radio/tx" } } }]);
+    targeted["schedule"] = json!([{ "at": { "clock": "radio", "offset_ticks": 5_000 }, "action": { "kind": "stop", "target": { "kind": "resource", "resource": "radio", "path": "tx" } } }]);
     assert!(refuse(&mut server, targeted, Vec::new(), None, Vec::new()).message.starts_with("EA-14: a child Run needs duration_ns"));
     // A duration that does not fit the child's clock (Review H, P2-3).
     assert_eq!(refuse(&mut server, receive_spec(10), Vec::new(), Some(u64::MAX), Vec::new()).message, "EA-14: duration_ns does not fit the child's clock");
@@ -918,7 +922,8 @@ fn ea_07_a_reference_that_locks_on_the_reopen_connects() {
     let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new())) else { panic!("connect") };
     assert_eq!(opened.load(Ordering::SeqCst), 2);
     let (manifest, _) = finish(&mut server);
-    let timing = &manifest.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.timing").unwrap()];
+    let usrp = EventSource::Node { node: ResourceId::parse("usrp").unwrap() };
+    let timing = manifest.section(&usrp, "ezsdr.radio.uhd.timing").expect("the UHD timing section");
     let reopened = timing.as_array().unwrap().iter().find(|r| r["what"] == "reopened_on_unlock").unwrap_or_else(|| panic!("{timing}"));
     assert!(reopened["first_error"].as_str().unwrap().starts_with("UR-7: the reference clock did not lock"), "{reopened}");
 }
@@ -1075,10 +1080,14 @@ fn ea_17_a_capture_at_a_passed_instant_says_where_it_started() {
 }
 
 #[test]
-fn kc_23_sink_prefix_cannot_address_a_provider() {
-    let temp=TempDir::new("audit-target"); let (mut server,_)=connected(&temp.0);
-    let entry=submit(&mut server, SessionAction::SetParameter {
-        target:ResourceId::parse("sink/radio").unwrap(),key:Key::parse("radio.rx.gain_db").unwrap(),value:Value::num(3.0).unwrap()
-    },vec![]);
-    assert!(matches!(entry.outcome,Outcome::Rejected { .. }),"sink/radio is not a Sink output: {entry:?}");
+fn kc_23_an_output_target_cannot_address_a_provider() {
+    let temp = TempDir::new("audit-target");
+    let (mut server, _) = connected(&temp.0);
+    let entry = submit(&mut server, SessionAction::SetParameter {
+        target: Target::Output { output: Ident::parse("radio").unwrap() },
+        key: Key::parse("radio.rx.gain_db").unwrap(),
+        value: Value::num(3.0).unwrap(),
+    }, vec![]);
+    assert!(matches!(entry.outcome, Outcome::Rejected { ref violations }
+        if violations.iter().any(|v| v.reason.starts_with("KC-23: output radio"))), "radio is not an output: {entry:?}");
 }

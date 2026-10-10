@@ -460,9 +460,13 @@ pub struct PreviewedCoercion {
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdmissionResult {
-    /// Spec resource name — and `needs` name — to the resolved `ResourceId` (SB-36).
+    /// Spec resource name to the node it was matched to (SB-34).
     #[serde(default)]
     pub matched: BTreeMap<Ident, ResourceId>,
+    /// Spec resource name to its needs, each need's name to the node it resolved to
+    /// (SB-36).
+    #[serde(default)]
+    pub needs: BTreeMap<Ident, BTreeMap<Ident, ResourceId>>,
     /// Constraints the bound instance could not satisfy (SB-38).
     #[serde(default)]
     pub rejected: Vec<RejectedConstraint>,

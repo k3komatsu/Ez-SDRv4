@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::binding::{
     AdmissionResult, BindingProfile, CheckStage, Violation, check_constraint_kind,
 };
+use crate::event::Target;
 use crate::id::ResourceId;
 use crate::module_api::{ModuleRef, ModuleRegistry, Role};
 use crate::spec::{Constraint, ExperimentSpec, Ident, Key, Namespace, SpecError, Value};
@@ -97,13 +98,12 @@ pub(super) fn validate(
                     constraint: format!("needs {}", need.kind),
                 })?;
             taken.insert(resolved.id.clone(), need_name.clone());
-            // SB-36 records the resolution in `matched`, and a need's name is
-            // scoped to its resource: SB-36's own example calls one `gpio`, which
-            // two peripherals would share. Qualified so that two do not collapse.
-            out.matched.insert(
-                super::matching::need_key(name, need_name),
-                resolved.id.clone(),
-            );
+            // SB-36: a need's name is scoped to its resource, so the resolution is
+            // filed under both.
+            out.needs
+                .entry(name.clone())
+                .or_default()
+                .insert(need_name.clone(), resolved.id.clone());
         }
     }
 
@@ -139,11 +139,11 @@ pub(super) fn validate(
     Ok(out)
 }
 
-/// The binding model over the slots the two documents name (SB-22…SB-22h, SB-24,
+/// The binding model over the slots the two documents name (SB-22…SB-22g, SB-24,
 /// tables SB-T1…SB-T3). The runtime's maps are read under slot names only, through
 /// [`supplied`](super::supplied); an entry under any other name is never looked at (SB-22).
 ///
-/// Rule: SB-22, SB-22a…SB-22h, SB-24, SB-3, SB-36.
+/// Rule: SB-22, SB-22a…SB-22g, SB-24, SB-3.
 pub(super) fn check_bindings(
     spec: &ExperimentSpec,
     profile: &BindingProfile,
@@ -194,14 +194,6 @@ pub(super) fn check_bindings(
         .chain(island_ids.iter().map(|n| (n, "an Island fragment id")))
         .chain(own_authority.map(|a| (a, "the `authority` binding")));
     for (name, set) in sets {
-        // SB-16 reads a target's first segment `sink` as a Sink's address, so a name
-        // `sink` is one a target could never reach (SB-22a, SB-22h).
-        if name.as_str() == "sink" {
-            return Err(SpecError::DuplicateBindingName {
-                name: name.clone(),
-                sets: format!("{set} and the reserved Sink-address segment"),
-            });
-        }
         if let Some(first) = names.insert(name, set) {
             if first == "an Island executor" && set == first {
                 continue;
@@ -216,24 +208,6 @@ pub(super) fn check_bindings(
             });
         }
     }
-    // SB-36's qualified need keys share `matched` with resources and other needs.
-    // Joining two Idents with `_` is not injective: a/b_c and a_b/c collide.
-    let mut matched_names: BTreeMap<Ident, String> = spec.resources.keys()
-        .map(|name| (name.clone(), "a resource".to_owned()))
-        .collect();
-    for (name, req) in &spec.resources {
-        for need in req.needs.keys() {
-            let k = super::matching::need_key(name, need);
-            let origin = format!("{name}'s need {need}");
-            if let Some(first) = matched_names.insert(k.clone(), origin.clone()) {
-                return Err(SpecError::DuplicateBindingName {
-                    name: k,
-                    sets: format!("{first} and {origin}"),
-                });
-            }
-        }
-    }
-
     // One slot at a time: bound (SB-22d), to a Module holding its role (SB-22e), with
     // the object the runtime supplies naming the binding's version (SB-22f) — role
     // before instance, as SB-22c orders it.
@@ -271,10 +245,6 @@ pub(super) fn check_bindings(
     }
     for output in &spec.outputs {
         let name = &output.id;
-        // The coordinator uses this address for Sink events and Actions.
-        ResourceId::parse(&format!("sink/{name}")).map_err(|error| SpecError::Structural {
-            reason: format!("SB-22: output {name} has an invalid Sink address: {error}"),
-        })?;
         let binding = profile
             .bindings
             .get(name)
@@ -348,30 +318,6 @@ pub(super) fn check_bindings(
         }
     }
 
-    // SB-22h reserves the first path segment `sink` for a bound Sink's address, so a
-    // Provider may not declare a node under it: without this the `sink/` prefix only
-    // narrowed the collision from "any output id" to "a Provider that names a node
-    // `sink`" — `ResourceId::parse("sink/rec")` is a legal Provider node path.
-    for name in spec.resources.keys() {
-        let instance = super::supplied(inputs.providers, name, "Provider instance")?.instance();
-        if let Some(clash) = instance.tree.walk_iter().find(|n| {
-            // SB-22h (KA-14): also `kernel`, the Kernel's own event source, and
-            // `unforeseen`, RS-33's fallback row, and every `island_<n>`, an
-            // Executor's event source (KC-8).
-            n.id.segments().next().is_some_and(|s| {
-                matches!(s, "sink" | "kernel" | "unforeseen") || s.starts_with("island_")
-            })
-        }) {
-            return Err(SpecError::Structural {
-                reason: format!(
-                    "SB-22h: instance bound to {name} declares node {}, and the first path \
-                     segments `sink`, `kernel`, `unforeseen` and `island_<n>` are reserved",
-                    clash.id
-                ),
-            });
-        }
-    }
-
     // SB-3: a `ResourceId` carries no instance qualification, so two bound instances
     // declaring one node path are one address — for the matcher's `taken` set, for
     // `arm_after` resolution and for `Event.source` attribution alike. Identity is the
@@ -434,7 +380,7 @@ pub(super) fn check_bindings(
 
 /// `validate()`'s structural checks, which `plan()` runs again (SB-39, D99): the
 /// Spec's keys and Vocabulary majors (SB-2, SB-11), its failure policy (SB-18), the
-/// binding model (SB-22…SB-22h,
+/// binding model (SB-22…SB-22g,
 /// SB-24), the schedule (SB-16, RS-52) and the component descriptors (MA-37). None of
 /// them calls a Provider's `coerce`, so running them twice changes nothing.
 ///
@@ -499,10 +445,8 @@ pub(super) fn check_structure(
             // "This is where a **Provider** parameter's class is declared, and the
             // only place it can be … whose parameters are Vocabulary keys and never a
             // `ComponentDescriptor`'s `params`." A schedule entry's target is a Spec
-            // resource or `sink/<output id>` by SB-16, checked just below, so it is
-            // never a component: consulting `graph.components` first let an unrelated
-            // component's parameter list supply a class for a Provider key that
-            // declares none, and shadow the declared class of one that does.
+            // resource or an output by SB-16, checked just below, so it is never a
+            // component.
             let declared = inputs
                 .registry
                 .key_decl(key)
@@ -526,19 +470,18 @@ pub(super) fn check_structure(
                 Some(_) => {}
             }
         }
-        // SB-16: a Spec's target is **Spec-relative** — its first segment names a Spec
-        // resource, or the target is `sink/<output id>` — so that one Spec runs on Mock
-        // and on hardware (§59, §61) without naming a device's own node tree. `arm`
-        // rewrites it through `admission.matched`, as it resolves the `SpecTime`.
+        // SB-16: a Spec's target is **Spec-relative** — a resource or an output this
+        // Spec declares, by its role — so that one Spec runs on Mock and on hardware
+        // (§59, §61) without naming a device's own node tree. `arm` resolves it
+        // through `admission.matched`, as it resolves the `SpecTime`.
         if let Some(target) = entry.action.target() {
-            let first = target.segments().next().unwrap_or_default();
-            let known = if first == "sink" {
-                target
-                    .segments()
-                    .nth(1)
-                    .is_some_and(|o| spec.outputs.iter().any(|x| x.id.as_str() == o))
-            } else {
-                Ident::parse(first).is_ok_and(|n| spec.resources.contains_key(&n))
+            let known = match target {
+                Target::Resource { resource, path } => {
+                    spec.resources.contains_key(resource)
+                        && (path.is_empty() || ResourceId::parse(path).is_ok())
+                }
+                Target::Output { output } => spec.outputs.iter().any(|o| &o.id == output),
+                Target::Component { .. } => false,
             };
             if !known {
                 return Err(SpecError::Structural {
@@ -661,12 +604,12 @@ pub(crate) fn not_registered(name: &Ident, module: &ModuleRef) -> SpecError {
 }
 
 /// SB-39's guard: an `AdmissionResult` is this Run's only if `matched` holds exactly
-/// this Spec's resources and needs, each resource's node is one its bound instance
-/// declares, and each need's node is one an instance bound to a resource of this Spec
-/// declares (SB-36). "Admitted" alone is satisfied by an empty result, and a stale one
-/// names nodes of an instance this profile no longer binds (D99). The Manifest records
-/// the whole `matched` (SB-38), so an entry `plan()` does not read is still checked
-/// (D107).
+/// this Spec's resources and `needs` exactly their needs, each resource's node is one
+/// its bound instance declares, and each need's node is one an instance bound to a
+/// resource of this Spec declares (SB-36). "Admitted" alone is satisfied by an empty
+/// result, and a stale one names nodes of an instance this profile no longer binds
+/// (D99). The Manifest records the whole result (SB-38), so an entry `plan()` does not
+/// read is still checked (D107).
 ///
 /// Rule: SB-39, SB-36, SB-30.
 pub(super) fn admission_is_this_runs(
@@ -681,7 +624,6 @@ pub(super) fn admission_is_this_runs(
             .is_some_and(|p| p.instance().tree.walk_iter().any(|n| n.id == *node))
     };
     let not_this_runs = |why: String| format!("this `AdmissionResult` is not this Run's: {why}");
-    let mut expected = BTreeSet::new();
     for (name, req) in &spec.resources {
         let Some(node) = admission.matched.get(name) else {
             return Err(not_this_runs(format!("{name} has no matched node")));
@@ -691,10 +633,9 @@ pub(super) fn admission_is_this_runs(
                 "{name}'s matched node {node} is not one its bound instance declares"
             )));
         }
-        expected.insert(name.clone());
+        let resolved = admission.needs.get(name);
         for need in req.needs.keys() {
-            let key = super::matching::need_key(name, need);
-            let Some(node) = admission.matched.get(&key) else {
+            let Some(node) = resolved.and_then(|needs| needs.get(need)) else {
                 return Err(not_this_runs(format!(
                     "{name}'s need {need} has no matched node"
                 )));
@@ -705,13 +646,22 @@ pub(super) fn admission_is_this_runs(
                      Spec's resources declares"
                 )));
             }
-            expected.insert(key);
+        }
+        if let Some(extra) = resolved
+            .into_iter()
+            .flat_map(|needs| needs.keys())
+            .find(|need| !req.needs.contains_key(*need))
+        {
+            return Err(not_this_runs(format!("{extra} is not a need of {name}")));
         }
     }
-    if let Some(extra) = admission.matched.keys().find(|k| !expected.contains(*k)) {
-        return Err(not_this_runs(format!(
-            "{extra} is neither a resource nor a need of this Spec"
-        )));
+    if let Some(extra) = admission
+        .matched
+        .keys()
+        .chain(admission.needs.keys())
+        .find(|k| !spec.resources.contains_key(*k))
+    {
+        return Err(not_this_runs(format!("{extra} is not a resource of this Spec")));
     }
     Ok(())
 }

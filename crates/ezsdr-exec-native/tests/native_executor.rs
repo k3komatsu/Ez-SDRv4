@@ -10,9 +10,9 @@ use ezsdr_exec_native::{
 };
 use ezsdr_kernel::binding::Violation;
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection};
-use ezsdr_kernel::event::{Action, ActionId, Event, EventHandle, EventKind, EventSink, Severity};
+use ezsdr_kernel::event::{Action, ActionId, Event, EventHandle, EventKind, EventSink, EventSource, Severity, Target};
 use ezsdr_kernel::hash::ContentHash;
-use ezsdr_kernel::id::{ClockDomainId, IslandId, MemoryDomainId, ResourceId, RunId};
+use ezsdr_kernel::id::{ClockDomainId, IslandId, MemoryDomainId, ResourceId};
 use ezsdr_kernel::module_api::{
     ActionReceiver, ActionSubmitter, AttachedPort, ComponentDescriptor, ComponentImpl,
     ComponentKind, ComponentPlacement, ComponentRequires, ComponentTiming, Endpoint, ExecutionClass, Executor,
@@ -74,7 +74,7 @@ impl Component for Scripted {
     fn prepare(&mut self, ctx: ComponentContext) -> Result<(), ModuleError> {
         self.id = ctx.descriptor.id.to_string();
         let ports: Vec<String> = ctx.links.iter().map(|l| format!("{}.{}", l.component, l.port)).collect();
-        record(format!("prepare:{}:links={}:source={}", self.id, ports.join(","), ctx.source.path()));
+        record(format!("prepare:{}:links={}:source={}", self.id, ports.join(","), ctx.source));
         if SCRIPT.with(|s| s.borrow().failing_prepare.contains(&self.id)) {
             return Err(ModuleError::rejected(format!("test: {} fails its prepare", self.id)));
         }
@@ -112,8 +112,8 @@ fn scripted() -> Implementation {
 struct Queue(Mutex<VecDeque<Action>>);
 
 impl ActionReceiver for Queue {
-    fn recv(&self) -> Option<Action> {
-        self.0.lock().unwrap().pop_front()
+    fn recv(&self) -> Option<(Action, Option<ResourceId>)> {
+        self.0.lock().unwrap().pop_front().map(|action| (action, None))
     }
 }
 
@@ -127,7 +127,7 @@ struct Submitter {
 
 impl ActionSubmitter for Submitter {
     fn submit(&self, action: Action) -> Result<ActionId, Vec<Violation>> {
-        record(format!("submit:{}", action.target().map_or_else(String::new, |t| t.path().to_owned())));
+        record(format!("submit:{}", action.target().map_or_else(String::new, ToString::to_string)));
         self.submitted.lock().unwrap().push(action);
         self.answers.lock().unwrap().pop_front().unwrap_or(Ok(ActionId(1)))
     }
@@ -136,7 +136,7 @@ impl ActionSubmitter for Submitter {
 struct NullEvents;
 
 impl EventSink for NullEvents {
-    fn resolve(&self, _source: &ResourceId, _kind: &EventKind) -> EventHandle {
+    fn resolve(&self, _source: &EventSource, _kind: &EventKind) -> EventHandle {
         EventHandle { row: 0, kind: 0 }
     }
     fn emit(&self, _handle: EventHandle, _time: TimePoint, _severity: Severity, _payload: &[u8]) -> Result<(), RunError> {
@@ -183,21 +183,16 @@ impl Harness {
         Harness { clocks, time, actions: Arc::new(Queue::default()), out: Arc::new(Submitter::default()) }
     }
 
-    fn ctx(&self, class: ExecutionClass, links: Vec<AttachedPort>, components: &[ComponentDescriptor]) -> PrepareContext {
-        PrepareContext {
-            run: RunId::from_string("test-run".to_owned()),
-            class,
-            time: self.time.clone(),
-            clocks: self.clocks.clone(),
-            events: Arc::new(NullEvents),
-            actions: self.actions.clone(),
-            actions_out: self.out.clone(),
-            environment: Arc::new(BTreeMap::new()),
-            inputs: Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new()),
-            links,
-            components: components.iter().map(|c| (c.id.clone(), c.clone())).collect(),
-            host_budget: RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap(),
-        }
+    /// A context for Island `island`, whose source is deliberately not that Island's:
+    /// an Executor uses the source it is given and formats none (KC-8).
+    fn ctx(&self, island: u32, class: ExecutionClass, links: Vec<AttachedPort>, components: &[ComponentDescriptor]) -> PrepareContext {
+        let source = EventSource::Island { island: IslandId::local(island + 100) };
+        let mut ctx = PrepareContext::testing(source, self.time.clone(), self.clocks.clone(), Arc::new(NullEvents), self.actions.clone(), self.out.clone());
+        ctx.class = class;
+        ctx.links = links;
+        ctx.components = components.iter().map(|c| (c.id.clone(), c.clone())).collect();
+        ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
+        ctx
     }
 
     fn answer(&self, answer: Result<ActionId, Vec<Violation>>) {
@@ -231,7 +226,7 @@ fn island(local: u32, components: &[&str]) -> IslandDecl {
 }
 
 fn link_end(component: &str) -> AttachedPort {
-    AttachedPort { component: id(component), port: id("rx"), endpoint: Endpoint::StreamIn(Arc::new(NullLink)) }
+    AttachedPort::new(id(component), id("rx"), Endpoint::StreamIn(Arc::new(NullLink)))
 }
 
 fn at(ticks: i64) -> TimePoint {
@@ -239,7 +234,8 @@ fn at(ticks: i64) -> TimePoint {
 }
 
 fn stop_action(target: &str) -> Action {
-    Action::Stop { target: Some(ResourceId::parse(target).unwrap()) }
+    let (resource, path) = target.split_once('/').unwrap_or((target, ""));
+    Action::Stop { target: Some(Target::Resource { resource: id(resource), path: path.to_owned() }) }
 }
 
 fn refusal(check: &str, reason: &str) -> Violation {
@@ -250,7 +246,7 @@ fn prepared(h: &Harness, components: &[&str]) -> NativeExecutor {
     let mut executor = NativeExecutor::new(vec![scripted()]).unwrap();
     let descriptors: Vec<_> = components.iter().map(|c| component(c)).collect();
     executor
-        .prepare(&island(0, components), h.ctx(ExecutionClass::Simulation, components.iter().map(|c| link_end(c)).collect(), &descriptors))
+        .prepare(&island(0, components), h.ctx(0, ExecutionClass::Simulation, components.iter().map(|c| link_end(c)).collect(), &descriptors))
         .unwrap();
     executor
 }
@@ -282,7 +278,7 @@ fn nx_03_a_component_is_loaded_by_its_impl_identity() {
     let refused = |descriptor: ComponentDescriptor| {
         let mut executor = NativeExecutor::new(vec![scripted()]).unwrap();
         let error = executor
-            .prepare(&island(0, &["c"]), h.ctx(ExecutionClass::Simulation, Vec::new(), &[descriptor]))
+            .prepare(&island(0, &["c"]), h.ctx(0, ExecutionClass::Simulation, Vec::new(), &[descriptor]))
             .unwrap_err();
         assert!(error.message.starts_with("NX-3: component c "), "{}", error.message);
         error.message
@@ -302,7 +298,7 @@ fn nx_03_a_component_is_loaded_by_its_impl_identity() {
     assert!(duplicate.message.starts_with("NX-3: two implementations"), "{}", duplicate.message);
 
     let _ = prepared(&h, &["c"]);
-    assert_eq!(log(), vec!["prepare:c:links=c.rx:source=island_0"]);
+    assert_eq!(log(), vec!["prepare:c:links=c.rx:source=island 100"]);
 }
 
 #[test]
@@ -310,13 +306,13 @@ fn nx_04_prepare_cases() {
     let h = Harness::new();
     let mut executor = NativeExecutor::new(vec![scripted()]).unwrap();
     let other_class = executor
-        .prepare(&island(0, &["a"]), h.ctx(ExecutionClass::RealtimeEmulation, Vec::new(), &[component("a")]))
+        .prepare(&island(0, &["a"]), h.ctx(0, ExecutionClass::RealtimeEmulation, Vec::new(), &[component("a")]))
         .unwrap_err();
     assert_eq!(other_class.kind, ezsdr_kernel::module_api::ModuleErrorKind::Unsupported);
     assert!(other_class.message.starts_with("NX-4:"), "{}", other_class.message);
 
     let foreign = executor
-        .prepare(&island(0, &["a"]), h.ctx(ExecutionClass::Simulation, vec![link_end("z")], &[component("a")]))
+        .prepare(&island(0, &["a"]), h.ctx(0, ExecutionClass::Simulation, vec![link_end("z")], &[component("a")]))
         .unwrap_err();
     assert!(foreign.message.contains("z, which is not in this Island"), "{}", foreign.message);
     assert!(log().is_empty());
@@ -325,22 +321,22 @@ fn nx_04_prepare_cases() {
     // own Island's source, and each Island reports its own fragment.
     let mut executor = NativeExecutor::new(vec![scripted()]).unwrap();
     let first = executor
-        .prepare(&island(3, &["a", "b"]), h.ctx(ExecutionClass::Simulation, vec![link_end("a"), link_end("b"), link_end("b")], &[component("a"), component("b")]))
+        .prepare(&island(3, &["a", "b"]), h.ctx(3, ExecutionClass::Simulation, vec![link_end("a"), link_end("b"), link_end("b")], &[component("a"), component("b")]))
         .unwrap();
     let second = executor
-        .prepare(&island(4, &["c"]), h.ctx(ExecutionClass::Simulation, vec![link_end("c")], &[component("c")]))
+        .prepare(&island(4, &["c"]), h.ctx(4, ExecutionClass::Simulation, vec![link_end("c")], &[component("c")]))
         .unwrap();
     assert_eq!(first.fragment.as_str(), "island_3");
     assert_eq!(second.fragment.as_str(), "island_4");
     assert!(first.effective.is_empty() && first.coercions.is_empty() && first.warnings.is_empty());
     assert_eq!(log(), vec![
-        "prepare:a:links=a.rx:source=island_3",
-        "prepare:b:links=b.rx,b.rx:source=island_3",
-        "prepare:c:links=c.rx:source=island_4",
+        "prepare:a:links=a.rx:source=island 103",
+        "prepare:b:links=b.rx,b.rx:source=island 103",
+        "prepare:c:links=c.rx:source=island 104",
     ]);
 
     let twice = executor
-        .prepare(&island(5, &["a"]), h.ctx(ExecutionClass::Simulation, Vec::new(), &[component("a")]))
+        .prepare(&island(5, &["a"]), h.ctx(5, ExecutionClass::Simulation, Vec::new(), &[component("a")]))
         .unwrap_err();
     assert!(twice.message.contains("component a is placed twice"), "{}", twice.message);
 
@@ -350,11 +346,11 @@ fn nx_04_prepare_cases() {
     SCRIPT.with(|s| s.borrow_mut().failing_prepare.push("f".to_owned()));
     let mut executor = NativeExecutor::new(vec![scripted()]).unwrap();
     let failed = executor
-        .prepare(&island(0, &["f"]), h.ctx(ExecutionClass::Simulation, Vec::new(), &[component("f")]))
+        .prepare(&island(0, &["f"]), h.ctx(0, ExecutionClass::Simulation, Vec::new(), &[component("f")]))
         .unwrap_err();
     assert_eq!(failed.message, "test: f fails its prepare");
     executor.cleanup();
-    assert_eq!(log(), vec!["prepare:f:links=:source=island_0", "cleanup:f"]);
+    assert_eq!(log(), vec!["prepare:f:links=:source=island 100", "cleanup:f"]);
 }
 
 #[test]
@@ -367,7 +363,7 @@ fn nx_05_components_step_in_id_order_and_their_actions_follow_each_step() {
     let first = executor.step(at(10)).unwrap();
     assert!(first.progressed, "a pushed Action alone is progress (MA-20)");
     let steps: Vec<_> = log().into_iter().filter(|l| l.starts_with("step:") || l.starts_with("submit:")).collect();
-    assert_eq!(steps, vec!["step:a@10", "submit:radio_a/tx", "step:b@10", "submit:radio_b/tx"]);
+    assert_eq!(steps, vec!["step:a@10", "submit:resource radio_a/tx", "step:b@10", "submit:resource radio_b/tx"]);
 
     let second = executor.step(at(20)).unwrap();
     assert!(!second.progressed, "nothing consumed, nothing pushed");
@@ -411,14 +407,14 @@ fn nx_07_an_action_addressed_to_the_executor_fails_the_step() {
     let h = Harness::new();
     let mut executor = prepared(&h, &["a"]);
     h.actions.0.lock().unwrap().push_back(Action::UpdateParameter {
-        target: ResourceId::parse("a").unwrap(),
+        target: Target::Component { component: id("a") },
         key: Key::parse("ext.ezsdr.exec.native.x").unwrap(),
         value: Value::from(1),
         class: UpdateClass::Cold,
         at: None,
     });
     let error = executor.step(at(10)).unwrap_err();
-    assert_eq!(error.message, "NX-7: ezsdr.exec.native 1.0.0 applies no Action, and UpdateParameter for local:a reached it");
+    assert_eq!(error.message, "NX-7: ezsdr.exec.native 1.0.0 applies no Action, and UpdateParameter for component a reached it");
     assert!(!log().iter().any(|l| l.starts_with("step:")), "no component is stepped: {:?}", log());
 }
 

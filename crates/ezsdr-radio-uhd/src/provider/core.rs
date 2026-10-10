@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use ezsdr_kernel::event::{Event, EventHandle, EventKind, EventSink, Severity};
+use ezsdr_kernel::event::{Event, EventHandle, EventKind, EventSink, EventSource, Severity};
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::module_api::{InputStore, StopMode};
 use ezsdr_kernel::spec::{Key, Scalar, Value};
@@ -286,7 +286,7 @@ impl Core {
     ) -> Core {
         let rx_id = id.child("rx").expect("a valid stream id");
         let tx_id = id.child("tx").expect("a valid stream id");
-        let overflow = events.resolve(&rx_id, &EventKind::parse(kinds::RX_OVERFLOW).expect("a radio kind"));
+        let overflow = events.resolve(&EventSource::Node { node: rx_id.clone() }, &EventKind::parse(kinds::RX_OVERFLOW).expect("a radio kind"));
         Core {
             mcr: device.master_clock_rate(),
             block_len: description.block_len as usize,
@@ -348,7 +348,7 @@ impl Core {
     /// A control-path event from `source` at `time` (RM-11, UR-20).
     pub fn emit_at(&self, source: &ResourceId, kind: &str, severity: Severity, payload: Json, time: TimePoint) {
         let event = Event {
-            source: source.clone(),
+            source: EventSource::Node { node: source.clone() },
             time,
             severity,
             kind: EventKind::parse(kind).expect("a radio kind"),

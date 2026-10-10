@@ -4,9 +4,8 @@ use ezsdr_kernel::spec::Scalar;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ezsdr_kernel::contract::ContractRegistry;
 use ezsdr_kernel::coordinator::{Assembly, connect, start_spec_run};
-use ezsdr_kernel::event::Action;
+use ezsdr_kernel::event::{Action, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::manifest::RunKind;
@@ -38,21 +37,11 @@ fn rig(pacing: Pacing) -> Rig {
     let (authority, root) = SimAuthority::new(&clocks, mref("ezsdr.test.provider"), pacing);
     let manual = authority.manual();
     let host = Arc::new(FakeHostClock::new());
-    let assembly = Assembly {
-        registry: run_registry(),
-        checks: run_checks(false),
-        kinds: run_kinds(),
-        contracts: ContractRegistry::with_standard_contracts(),
-        clocks: clocks.clone(),
-        host_clock: host.clone(),
-        providers: BTreeMap::new(),
-        executors: BTreeMap::new(),
-        sinks: BTreeMap::new(),
-        authority: Box::new(authority),
-        links: BTreeMap::new(),
-        inputs: BTreeMap::new(),
-        spec_source: None,
-    };
+    let mut assembly = Assembly::new(Box::new(authority), clocks.clone());
+    assembly.registry = run_registry();
+    assembly.checks = run_checks(false);
+    assembly.kinds = run_kinds();
+    assembly.host_clock = host.clone();
     Rig {
         clocks,
         root,
@@ -213,7 +202,7 @@ fn tx_template(
 ) -> serde_json::Value {
     serde_json::json!({
         "kind": "tx_burst",
-        "target": serde_json::to_value(ezsdr_kernel::id::ResourceId::parse(target).unwrap()).unwrap(),
+        "target": serde_json::to_value(support::target(target)).unwrap(),
         "waveform": waveform,
         "repeat": false,
         "late_policy": late,
@@ -523,7 +512,7 @@ fn kc_09_an_input_must_be_supplied_and_match_its_hash() {
     fn scheduled(ref_: &ezsdr_kernel::manifest::ArtifactRef) -> serde_json::Value {
         let mut spec = spec_one();
         let target =
-            serde_json::to_value(ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap()).unwrap();
+            serde_json::to_value(support::target("radio/tx")).unwrap();
         spec["schedule"] = serde_json::json!([{
             "at": { "clock": "radio", "offset_ticks": 0 },
             "action": { "kind": "tx_burst", "target": target, "waveform": ref_,
@@ -907,7 +896,7 @@ fn kc_22_a_same_instant_wakeup_loop_is_step_livelock() {
             .delivered
             .iter()
             .any(|event| event.kind.as_str() == "ezsdr.STEP_LIVELOCK"
-                && event.source.path() == "kernel"
+                && event.source == EventSource::Kernel
                 && event.payload == serde_json::json!({ "rounds": ezsdr_kernel::module_api::STEP_ROUND_CAP }))
     );
     assert!(manifest.run.transitions.iter().any(|t| matches!(
@@ -961,7 +950,7 @@ fn kc_23_targets_are_rewritten_through_matched() {
     });
     spec["schedule"] = serde_json::json!([{
         "at": { "clock": "radio", "offset_ticks": 0 },
-        "action": { "kind": "update_parameter", "target": serde_json::to_value(ezsdr_kernel::id::ResourceId::parse("radio/x").unwrap()).unwrap(),
+        "action": { "kind": "update_parameter", "target": serde_json::to_value(support::target("radio/x")).unwrap(),
             "key": "test.gain", "value": 3.0, "class": "hardware_timed" }
     }]);
     let probe = Probe::new();
@@ -1367,7 +1356,7 @@ fn kc_17_scheduled_updates_are_admitted_cumulatively() {
     spec["resources"]["radio"]["requires"]["test.flag"] =
         serde_json::json!({ "kind": "eq", "value": false });
     let radio =
-        serde_json::to_value(ezsdr_kernel::id::ResourceId::parse("radio").unwrap()).unwrap();
+        serde_json::to_value(support::target("radio")).unwrap();
     let first = serde_json::json!({
         "at": { "clock": "radio", "offset_ticks": 10 }, "action": {
             "kind": "update_parameter", "target": radio, "key": "test.grid", "value": 40.0, "class": "cold"
@@ -1439,7 +1428,7 @@ fn kc_24_a_burst_needs_a_transmit_sample_clock() {
             SessionAction::Vocabulary {
                 ns: ns("test"),
                 verb: Ident::parse("start_repeat").unwrap(),
-                target: ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap(),
+                target: support::target("radio/tx"),
                 at: None,
                 params: BTreeMap::new(),
             },
@@ -1468,7 +1457,7 @@ fn kc_24_a_module_reject_at_plan_burst_is_refused() {
     assembly.executors.insert(
         Ident::parse("exec").unwrap(),
         Box::new(ProbeExecutor::new("x", &probe).submitting(Action::TxBurst {
-            target: ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap(),
+            target: support::target("radio/tx"),
             waveform,
             repeat: false,
             at: ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(
@@ -1505,7 +1494,7 @@ fn kc_24_a_module_action_during_cleanup_is_refused() {
         Box::new(ProbeExecutor::new("x", &probe).submitting_at(
             10,
             Action::SetTimer {
-                target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
+                target: support::target("radio"),
                 at: ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(primary, 20)),
                 token: 1,
             },
@@ -1569,7 +1558,7 @@ fn kc_24_a_burst_to_a_non_provider_target_is_refused() {
             SessionAction::Vocabulary {
                 ns: ns("test"),
                 verb: Ident::parse("start_repeat").unwrap(),
-                target: ezsdr_kernel::id::ResourceId::parse("sink/rec").unwrap(),
+                target: Target::Output { output: Ident::parse("rec").unwrap() },
                 at: None,
                 params: BTreeMap::new(),
             },
@@ -1578,7 +1567,7 @@ fn kc_24_a_burst_to_a_non_provider_target_is_refused() {
         .expect("well-formed Action is logged");
     assert!(
         matches!(entry.outcome, Outcome::Rejected { ref violations }
-        if violations.iter().any(|v| v.reason.starts_with("SC-23: sink/rec is not a Provider stream"))),
+        if violations.iter().any(|v| v.reason.starts_with("SC-23: output rec is not a Provider stream"))),
         "{entry:?}"
     );
     let _ = run.finish();
@@ -1612,7 +1601,7 @@ fn kc_24_a_burst_time_on_an_unrelated_root_is_refused() {
             SessionAction::Vocabulary {
                 ns: ns("test"),
                 verb: Ident::parse("start_repeat").unwrap(),
-                target: ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap(),
+                target: support::target("radio/tx"),
                 at: Some(TimePoint::new(other, 5)),
                 params: BTreeMap::new(),
             },
@@ -1658,7 +1647,7 @@ fn kc_23_an_unknown_target_is_refused() {
     let entry = run
         .submit(
             SessionAction::SetParameter {
-                target: ezsdr_kernel::id::ResourceId::parse("nothing").unwrap(),
+                target: support::target("nothing"),
                 key: Key::parse("test.gain").unwrap(),
                 value: Value::num(1.0).unwrap(),
             },
@@ -1683,7 +1672,7 @@ fn kc_21_an_action_is_seen_at_its_admission_instant() {
     let entry = run
         .submit(
             SessionAction::SetParameter {
-                target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
+                target: support::target("radio"),
                 key: Key::parse("test.gain").unwrap(),
                 value: Value::num(1.0).unwrap(),
             },
@@ -1711,7 +1700,7 @@ fn kc_25_an_admitted_update_changes_the_configuration() {
     let entry = run
         .submit(
             SessionAction::SetParameter {
-                target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
+                target: support::target("radio"),
                 key: Key::parse("test.gain").unwrap(),
                 value: Value::num(3.0).unwrap(),
             },
@@ -1749,7 +1738,7 @@ fn rs_17_a_session_rate_change_is_coerced_by_its_provider() {
     let entry = run
         .submit(
             SessionAction::SetParameter {
-                target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
+                target: support::target("radio"),
                 key: Key::parse("test.grid").unwrap(),
                 value: Value::num(19.5).unwrap(),
             },
@@ -1773,7 +1762,7 @@ fn rs_17_a_session_rate_change_is_coerced_by_its_provider() {
 fn rs_17_a_scheduled_rate_change_under_reject_is_refused() {
     let mut spec = spec_one();
     let radio =
-        serde_json::to_value(ezsdr_kernel::id::ResourceId::parse("radio").unwrap()).unwrap();
+        serde_json::to_value(support::target("radio")).unwrap();
     spec["schedule"] = serde_json::json!([{
         "at": { "clock": "radio", "offset_ticks": 0 }, "action": {
             "kind": "update_parameter", "target": radio, "key": "test.grid", "value": 19.5, "class": "cold"
@@ -1819,7 +1808,7 @@ fn rs_17_a_session_change_beyond_a_joint_limit_is_refused() {
     let entry = run
         .submit(
             SessionAction::SetParameter {
-                target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
+                target: support::target("radio"),
                 key: Key::parse("test.grid").unwrap(),
                 value: Value::num(40.0).unwrap(),
             },
@@ -1839,7 +1828,7 @@ fn kc_26_a_provider_that_applies_nothing_is_refused() {
     let entry = run
         .submit(
             SessionAction::SetParameter {
-                target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
+                target: support::target("radio"),
                 key: Key::parse("test.gain").unwrap(),
                 value: Value::num(1.0).unwrap(),
             },
@@ -1860,7 +1849,7 @@ fn sb_05_a_provider_parameter_update_is_a_scalar() {
     let entry = run
         .submit(
             SessionAction::SetParameter {
-                target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
+                target: support::target("radio"),
                 key: Key::parse("test.gain").unwrap(),
                 value: Value::List(vec![Scalar::from(1)]),
             },
@@ -1883,7 +1872,7 @@ fn kc_28_a_malformed_action_takes_no_sequence_number() {
     assert!(matches!(
         run.submit(
             SessionAction::SetParameter {
-                target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
+                target: support::target("radio"),
                 key: Key::parse("test.gain").unwrap(),
                 value: bad_value,
             },
@@ -1894,7 +1883,7 @@ fn kc_28_a_malformed_action_takes_no_sequence_number() {
     let entry = run
         .submit(
             SessionAction::SetParameter {
-                target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
+                target: support::target("radio"),
                 key: Key::parse("test.gain").unwrap(),
                 value: Value::num(1.0).unwrap(),
             },
@@ -1925,7 +1914,7 @@ fn kc_28_a_waveform_is_an_input_before_admission() {
             SessionAction::Vocabulary {
                 ns: ns("test"),
                 verb: Ident::parse("start_repeat").unwrap(),
-                target: ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap(),
+                target: support::target("radio/tx"),
                 at: None,
                 params: BTreeMap::new(),
             },
@@ -1970,7 +1959,7 @@ fn kc_28_an_untimed_burst_is_admitted_at_now_plus_lead() {
             SessionAction::Vocabulary {
                 ns: ns("test"),
                 verb: Ident::parse("start_repeat").unwrap(),
-                target: ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap(),
+                target: support::target("radio/tx"),
                 at: None,
                 params: BTreeMap::new(),
             },
@@ -1987,6 +1976,47 @@ fn kc_28_an_untimed_burst_is_admitted_at_now_plus_lead() {
             .lines()
             .iter()
             .any(|line| line == "p:burst_at:2000000")
+    );
+    let _ = run.finish();
+}
+
+#[test]
+fn kc_28_an_untimed_update_verb_to_a_resource_waits_for_the_provider_lead() {
+    // #54: a verb compiles to the target it names, so an `UpdateParameter` verb naming a
+    // resource is admitted no earlier than its Provider's lead, as `SetParameter` is.
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.registry = run_registry_classed();
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new(
+            "p",
+            TestProvider::new("radio", 2).with_min_command_lead(Duration::new(
+                ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC,
+                2_000_000,
+            )),
+            &probe,
+        )),
+    );
+    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let entry = run
+        .submit(
+            SessionAction::Vocabulary {
+                ns: ns("test"),
+                verb: Ident::parse("capture").unwrap(),
+                target: support::target("radio"),
+                at: None,
+                params: [(Key::parse("test.capture").unwrap(), Value::Scalar(Scalar::Bool(true)))].into_iter().collect(),
+            },
+            None,
+        )
+        .unwrap();
+    assert!(
+        matches!(entry.outcome, Outcome::Admitted { ref coercions, .. }
+        if coercions.iter().any(|c| c.key == Key::parse("ezsdr.action.at").unwrap()
+            && c.applied == Value::Scalar(Scalar::Int(2_000_000)))),
+        "{:?}",
+        entry.outcome
     );
     let _ = run.finish();
 }
@@ -2029,7 +2059,7 @@ fn untimed_burst_lands_at_its_clock_s_origin(lead_ns: Option<i64>) {
             SessionAction::Vocabulary {
                 ns: ns("test"),
                 verb: Ident::parse("start_repeat").unwrap(),
-                target: ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap(),
+                target: support::target("radio/tx"),
                 at: None,
                 params: BTreeMap::new(),
             },
@@ -2203,7 +2233,7 @@ fn kc_30_device_lost_is_the_kernel_event_and_aborts() {
     let run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
     let manifest = run.finish();
     let kind = ezsdr_kernel::event::EventKind::parse("ezsdr.DEVICE_LOST").unwrap();
-    let source = ezsdr_kernel::id::ResourceId::parse("radio").unwrap();
+    let source = support::node_source("radio");
     assert!(
         manifest
             .events
@@ -2288,7 +2318,7 @@ fn kc_30_a_panic_after_a_device_lost_in_one_round_fails_the_run() {
     let reason = failure(&manifest);
     assert!(reason.starts_with("KC-30: rec: a Module panicked"), "{reason}");
     let lost = ezsdr_kernel::event::EventKind::parse("ezsdr.DEVICE_LOST").unwrap();
-    let radio = ezsdr_kernel::id::ResourceId::parse("radio").unwrap();
+    let radio = support::node_source("radio");
     assert!(manifest.events.delivered.iter().any(|e| e.kind == lost && e.source == radio));
 }
 
@@ -2480,14 +2510,14 @@ fn rs_36_a_dropped_stopping_body_ends_the_run() {
     let _ = run.advance_to(TimePoint::new(root, 160));
     let manifest = run.finish();
     let kind = ezsdr_kernel::event::EventKind::parse("ezsdr.DEVICE_LOST").unwrap();
-    let source = ezsdr_kernel::id::ResourceId::parse("radio").unwrap();
+    let source = support::node_source("radio");
     assert!(!manifest.events.delivered.iter().any(|event| event.kind == kind));
     // RS-35: the meta-event is stamped at the drain after the round at 150, on the
     // primary root, with the Kernel as its source.
     assert!(manifest.events.delivered.iter().any(|event| event.kind.as_str() == "ezsdr.EVENTS_DROPPED"
         && event.payload == serde_json::json!({ "kind": "ezsdr.DEVICE_LOST", "count": 1 })
         && event.time == TimePoint::new(root, 150)
-        && event.source.path() == "kernel"), "{:?}", manifest.events.delivered);
+        && event.source == EventSource::Kernel), "{:?}", manifest.events.delivered);
     assert!(
         manifest
             .events
@@ -2814,11 +2844,11 @@ fn kc_45_manifest_fields() {
         ezsdr_kernel::module_api::EnvelopeFidelity::Envelope
     );
     assert!(manifest.events.counters.iter().any(|row| row.source
-        == ezsdr_kernel::id::ResourceId::parse("sink/rec").unwrap()
+        == EventSource::Output { output: Ident::parse("rec").unwrap() }
         && row.kind == ezsdr_kernel::event::EventKind::parse("ezsdr.DEVICE_LOST").unwrap()
         && row.count == 0));
     assert!(manifest.events.counters.iter().any(|row| row.source
-        == ezsdr_kernel::id::ResourceId::parse("kernel").unwrap()
+        == EventSource::Kernel
         && row.kind == ezsdr_kernel::event::EventKind::parse("ezsdr.STEP_LIVELOCK").unwrap()
         && row.count == 0));
     assert!(manifest.policy.is_some() && manifest.plan.is_some());
@@ -2844,10 +2874,10 @@ fn kc_45_manifest_fields() {
     );
     assert_eq!(serde_json::to_value(&plan.links[0].from).unwrap(), serde_json::json!({"component": "radio", "port": "rx"}));
     assert!(
-        manifest.sections.keys().all(|section| !section.as_str().starts_with("ezsdr.")
-            || section.as_str().starts_with("ezsdr.test.")),
+        manifest.sections.iter().all(|section| !section.name.as_str().starts_with("ezsdr.")
+            || section.name.as_str().starts_with("ezsdr.test.")),
         "{:?}",
-        manifest.sections.keys().collect::<Vec<_>>()
+        manifest.sections
     );
     // The Lease is recorded as its mode and release, with no token and no deadline.
     assert_eq!(
@@ -2855,7 +2885,7 @@ fn kc_45_manifest_fields() {
         serde_json::json!({ "mode": { "kind": "attached" }, "released": true })
     );
     assert_eq!(
-        manifest.sections[&ns("ezsdr.test.provider.details")]["samples"],
+        manifest.section(&support::node_source("radio"), "ezsdr.test.provider.details").unwrap()["samples"],
         1
     );
     assert!(manifest.lease.released);
@@ -2919,7 +2949,7 @@ fn kc_45_a_provider_section_outside_its_namespace_is_a_cleanup_failure() {
     let manifest = start_spec_run(&spec_one(), &profile_one(), assembly)
         .unwrap()
         .finish();
-    assert!(!manifest.sections.contains_key(&ns("other.ns")));
+    assert!(manifest.sections.iter().all(|section| section.name.as_str() != "other.ns"));
     assert!(
         manifest
             .termination
@@ -2940,7 +2970,7 @@ fn kc_24_a_module_update_is_not_coerced_by_the_kernel() {
     let coerce_calls = provider.coerce_calls.clone();
     let coerce_calls_at_submit = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
     let action = Action::UpdateParameter {
-        target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
+        target: support::target("radio"),
         key: Key::parse("test.gain").unwrap(),
         value: Value::num(3.0).unwrap(),
         class: ezsdr_kernel::module_api::UpdateClass::HardwareTimed,
@@ -2998,7 +3028,7 @@ fn kc_24_a_module_update_must_state_its_providers_declared_class() {
         }
         let probe = Probe::new();
         let action = Action::UpdateParameter {
-            target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
+            target: support::target("radio"),
             key: Key::parse("test.gain").unwrap(),
             value: Value::num(3.0).unwrap(),
             class: ezsdr_kernel::module_api::UpdateClass::Cold,
@@ -3051,13 +3081,16 @@ fn kc_08_an_executor_event_from_a_second_island_has_its_own_counter() {
             "id": { "node": 0, "local": 1 }, "executor": "exec",
             "components": [{ "component": "c2", "memory_domain": { "node": 0, "local": 0 } }]
         }));
+    let island_1 = EventSource::Island {
+        island: ezsdr_kernel::id::IslandId { node: ezsdr_kernel::id::NodeId::LOCAL, local: 1 },
+    };
     let probe = Probe::new();
     let mut assembly = rig(Pacing::FreeRunning).assembly;
     assembly = with_provider(assembly, "radio", "radio");
     assembly.executors.insert(
         Ident::parse("exec").unwrap(),
         Box::new(ProbeExecutor::new("x", &probe).emitting_from(
-            "island_1",
+            island_1.clone(),
             "test.custom",
             ezsdr_kernel::event::Severity::Info,
         )),
@@ -3068,7 +3101,7 @@ fn kc_08_an_executor_event_from_a_second_island_has_its_own_counter() {
             .events
             .counters
             .iter()
-            .any(|row| row.source.path() == "island_1"
+            .any(|row| row.source == island_1
                 && row.kind.as_str() == "test.custom"
                 && row.count == 1),
         "counters: {:?}; delivered: {:?}",
@@ -3080,7 +3113,7 @@ fn kc_08_an_executor_event_from_a_second_island_has_its_own_counter() {
             .events
             .counters
             .iter()
-            .any(|row| row.source.path() == "unforeseen"
+            .any(|row| row.source == EventSource::Unforeseen
                 && row.kind.as_str() == "test.custom"
                 && row.count > 0)
     );
@@ -3534,7 +3567,7 @@ fn kb_01_a_provider_reads_a_session_waveform_by_hash() {
             SessionAction::Vocabulary {
                 ns: ns("test"),
                 verb: Ident::parse("start_repeat").unwrap(),
-                target: ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap(),
+                target: support::target("radio/tx"),
                 at: None,
                 params: BTreeMap::new(),
             },
@@ -3568,7 +3601,7 @@ fn kb_01_b_the_store_keeps_no_unverified_entry() {
             SessionAction::Vocabulary {
                 ns: ns("test"),
                 verb: Ident::parse("start_repeat").unwrap(),
-                target: ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap(),
+                target: support::target("radio/tx"),
                 at: None,
                 params: BTreeMap::new(),
             },
@@ -3688,7 +3721,7 @@ fn kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides(
     let lost_sources = |manifest: &ezsdr_kernel::manifest::Manifest| -> Vec<String> {
         manifest.events.delivered.iter()
             .filter(|e| e.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST)
-            .map(|e| e.source.path().to_owned())
+            .map(|e| e.source.to_string())
             .collect()
     };
 
@@ -3744,7 +3777,7 @@ fn ke_run(
     assembly.executors.insert(
         Ident::parse("exec").unwrap(),
         Box::new(ProbeExecutor::new("x", &probe).submitting(Action::TxBurst {
-            target: ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap(),
+            target: support::target("radio/tx"),
             waveform: burst,
             repeat: false,
             at: ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(root, 10)),
@@ -3833,7 +3866,7 @@ fn ke_01_a_declared_input_is_verified_as_a_scheduled_one_is() {
     let listed_and_scheduled = {
         let mut spec = spec_one();
         spec["inputs"] = serde_json::json!([valid]);
-        let target = serde_json::to_value(ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap()).unwrap();
+        let target = serde_json::to_value(support::target("radio/tx")).unwrap();
         spec["schedule"] = serde_json::json!([{
             "at": { "clock": "radio", "offset_ticks": 0 },
             "action": { "kind": "tx_burst", "target": target, "waveform": namesake,
@@ -3851,7 +3884,7 @@ fn ke_01_a_declared_input_is_verified_as_a_scheduled_one_is() {
     // Listed and scheduled: one input, recorded once, listed first.
     let mut spec = spec_one();
     spec["inputs"] = serde_json::json!([valid]);
-    let target = serde_json::to_value(ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap()).unwrap();
+    let target = serde_json::to_value(support::target("radio/tx")).unwrap();
     spec["schedule"] = serde_json::json!([{
         "at": { "clock": "radio", "offset_ticks": 0 },
         "action": { "kind": "tx_burst", "target": target, "waveform": valid,
@@ -4229,7 +4262,7 @@ fn kf_02_wait_for_answers_ended_first() {
 #[test]
 fn kf_03_children_are_recorded_in_order() {
     let mut run = session_with_provider(Box::new(TestProvider::new("radio", 2)));
-    run.submit(SessionAction::SetParameter { target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(), key: Key::parse("test.count").unwrap(), value: Value::from(2) }, None).unwrap();
+    run.submit(SessionAction::SetParameter { target: support::target("radio"), key: Key::parse("test.count").unwrap(), value: Value::from(2) }, None).unwrap();
     let (first, one) = run.run_child(&spec_one(), &profile_one(), child_assembly(), &mut drive_to(100)).unwrap();
     let (second, two) = run.run_child(&spec_one(), &profile_one(), child_assembly(), &mut drive_to(100)).unwrap();
     assert_eq!((first.seq, second.seq), (1, 2));
@@ -4376,7 +4409,7 @@ fn kc_24_component_update_classes_belong_to_the_target() {
             Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)));
         assembly.executors.insert(Ident::parse("exec").unwrap(),
             Box::new(ProbeExecutor::new("x", &probe).submitting(Action::UpdateParameter {
-                target: ezsdr_kernel::id::ResourceId::parse(target).unwrap(),
+                target: Target::Component { component: Ident::parse(target).unwrap() },
                 key: Key::parse("test.gain").unwrap(), value: Value::num(3.0).unwrap(), class, at: None,
             })));
         let run = start_spec_run(&spec, &profile, assembly).unwrap();
@@ -4445,22 +4478,129 @@ fn rs_36_a_dropped_stop_must_not_mask_a_dropped_abort() {
     );
 }
 
+/// A resource `radio`, two outputs `rec` and `rec2`, and a component `c1` on `exec`.
+fn role_docs() -> (serde_json::Value, serde_json::Value) {
+    let (mut spec, mut profile) = output_docs();
+    let (executor_spec, executor_profile) = executor_docs();
+    let mut second = spec["outputs"][0].clone();
+    second["id"] = serde_json::json!("rec2");
+    spec["outputs"].as_array_mut().unwrap().push(second);
+    spec["graph"] = executor_spec["graph"].clone();
+    profile["bindings"]["rec2"] = profile["bindings"]["rec"].clone();
+    profile["bindings"]["exec"] = executor_profile["bindings"]["exec"].clone();
+    profile["placements"]["islands"] = executor_profile["placements"]["islands"].clone();
+    let mut second_link = profile["placements"]["links"][0].clone();
+    second_link["to"]["component"] = serde_json::json!("rec2");
+    profile["placements"]["links"].as_array_mut().unwrap().push(second_link);
+    (spec, profile)
+}
+
+/// Runs `role_docs` with an Executor that submits a `Command` to `target`.
+fn command_to(target: Target) -> Vec<String> {
+    let (spec, profile) = role_docs();
+    let probe = Probe::new();
+    let mut assembly = output_assembly(&probe, None, None);
+    assembly.sinks.insert(Ident::parse("rec2").unwrap(), Box::new(RecordingSink::new("rec2", &probe)));
+    assembly.executors.insert(Ident::parse("exec").unwrap(),
+        Box::new(ProbeExecutor::new("x", &probe).submitting(Action::Command {
+            target, verb: Ident::parse("probe").unwrap(), params: BTreeMap::new(), at: None,
+        })));
+    let run = start_spec_run(&spec, &profile, assembly).unwrap();
+    assert!(run.finish().termination.cleanup_failures.is_empty());
+    probe.lines()
+}
+
 #[test]
-fn kc_23_sink_prefix_refuses_non_sink_module_targets() {
-    for target in ["sink/radio", "sink/island_0", "sink/exec", "sink/c1", "sink/missing"] {
-        let (spec, profile) = executor_docs();
-        let probe = Probe::new();
-        let mut assembly = rig(Pacing::FreeRunning).assembly;
-        assembly.providers.insert(Ident::parse("radio").unwrap(),
-            Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)));
-        assembly.executors.insert(Ident::parse("exec").unwrap(),
-            Box::new(ProbeExecutor::new("x", &probe).submitting(Action::Stop {
-                target: Some(ezsdr_kernel::id::ResourceId::parse(target).unwrap()),
-            })));
-        let run = start_spec_run(&spec, &profile, assembly).unwrap();
-        assert!(probe.lines().iter().any(|line| line.starts_with("x:submit:err:ezsdr.target:KC-23:")),
-            "{target}: {:?}", probe.lines());
-        assert!(run.finish().termination.cleanup_failures.is_empty());
+fn kc_08_each_instance_is_given_its_source_root() {
+    // A Provider's node, a Sink's output, an Executor's Island (KC-8); each Sink its
+    // own output, though both are one Module.
+    let lines = command_to(Target::Output { output: Ident::parse("rec").unwrap() });
+    let mut sources = lines.iter().filter(|line| line.starts_with("source:")).collect::<Vec<_>>();
+    sources.sort();
+    assert_eq!(sources, ["source:p:node radio", "source:rec2:output rec2", "source:rec:output rec", "source:x:island 0"]);
+}
+
+#[test]
+fn kc_45_two_instances_writing_one_section_name_both_keep_it() {
+    // Decision 2: a section is filed under its writer's source, so one name written by
+    // two instances of one Module is two sections, not an overwrite.
+    let (spec, profile) = distinct_resource_docs(&["a", "b"]);
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    for (name, samples) in [("a", 1), ("b", 2)] {
+        assembly.providers.insert(Ident::parse(name).unwrap(), Box::new(TestProvider::new(name, 2)
+            .with_section("ezsdr.test.provider.details", serde_json::json!({ "samples": samples }))));
+    }
+    let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
+    assert_eq!(manifest.sections.len(), 2, "{:?}", manifest.sections);
+    for (name, samples) in [("a", 1), ("b", 2)] {
+        let content = manifest.section(&support::node_source(name), "ezsdr.test.provider.details");
+        assert_eq!(content, Some(&serde_json::json!({ "samples": samples })), "{name}");
+    }
+}
+
+#[test]
+fn rs_14_a_capture_reaches_the_output_it_names_with_two_sinks_bound() {
+    // #54: the verb compiles to the target it names; the Kernel chooses no recorder, so
+    // with two bound a capture to `{output: rec2}` reaches `rec2` and only it.
+    let (_, mut profile) = output_docs();
+    for name in ["rec", "rec2"] {
+        profile["bindings"][name] = serde_json::json!({
+            "module": { "id": "ezsdr.test.sink", "version": { "major": 1, "minor": 0, "patch": 0 } },
+            "feed": { "port": { "component": "radio", "port": "rx" }, "policy": "drop_oldest", "capacity": 4 }
+        });
+    }
+    let mut second_link = profile["placements"]["links"][0].clone();
+    second_link["to"]["component"] = serde_json::json!("rec2");
+    profile["placements"]["links"].as_array_mut().unwrap().push(second_link);
+    let probe = Probe::new();
+    let mut assembly = output_assembly(&probe, None, None);
+    assembly.registry = run_registry_classed();
+    assembly.sinks.insert(Ident::parse("rec2").unwrap(), Box::new(RecordingSink::new("rec2", &probe)));
+    let mut run = connect(&profile, assembly, Lease::attached()).expect("Session profile is valid");
+    assert!(matches!(run.state(), RunState::Running {}), "{:?}", run.state());
+    let entry = run.submit(SessionAction::Vocabulary {
+        ns: ns("test"),
+        verb: Ident::parse("capture").unwrap(),
+        target: Target::Output { output: Ident::parse("rec2").unwrap() },
+        at: None,
+        params: BTreeMap::from([(Key::parse("test.capture").unwrap(), Value::from(true))]),
+    }, None).unwrap();
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{entry:?}");
+    let _ = run.finish();
+    let lines = probe.lines();
+    assert!(lines.iter().any(|line| line == "rec2:action:output rec2"), "{lines:?}");
+    assert!(!lines.iter().any(|line| line.starts_with("rec:action:") || line.starts_with("p:action:")), "{lines:?}");
+}
+
+#[test]
+fn kc_23_a_target_reaches_the_instance_of_its_role() {
+    let resource = |name: &str| Target::Resource { resource: Ident::parse(name).unwrap(), path: String::new() };
+    let output = |name: &str| Target::Output { output: Ident::parse(name).unwrap() };
+    let component = |name: &str| Target::Component { component: Ident::parse(name).unwrap() };
+    let received = |lines: &[String], prefix: &str| lines.iter().filter(|line| line.starts_with(prefix)).count();
+    // Each role reaches its own instance, and only that one; with two Sinks bound,
+    // `{output: rec2}` reaches `rec2` (#54).
+    for (target, receiver) in [
+        (resource("radio"), "p:action:Command:"),
+        (output("rec2"), "rec2:action:output rec2"),
+        (output("rec"), "rec:action:output rec"),
+        (component("c1"), "x:action:component c1"),
+    ] {
+        let lines = command_to(target.clone());
+        let all = ["p:action:", "rec:action:", "rec2:action:", "x:action:"]
+            .iter().map(|prefix| received(&lines, prefix)).sum::<usize>();
+        assert_eq!((received(&lines, receiver), all), (1, 1), "{target}: {lines:?}");
+    }
+    // A name the Spec declares in another role, or not at all, is refused.
+    for target in [
+        output("radio"), component("radio"), resource("rec"), component("rec"),
+        resource("c1"), output("c1"), output("exec"), resource("missing"), output("missing"),
+        component("missing"),
+    ] {
+        let lines = command_to(target.clone());
+        assert!(lines.iter().any(|line| line.starts_with("x:submit:err:ezsdr.target:KC-23:")),
+            "{target}: {lines:?}");
+        assert!(!lines.iter().any(|line| line.contains(":action:")), "{target}: {lines:?}");
     }
 }
 
@@ -4470,7 +4610,7 @@ fn sb_09a_module_action_rejects_a_non_ascii_map_key_before_dispatch() {
     // key is the one rule the type does not hold.
     {
         let value = Value::Map(BTreeMap::from([("日本語".to_owned(), Scalar::from(1))]));
-        let target = ezsdr_kernel::id::ResourceId::parse("radio").unwrap();
+        let target = support::target("radio");
         let key = Key::parse("test.gain").unwrap();
         let actions = [
             Action::UpdateParameter { target: target.clone(), key: key.clone(), value: value.clone(),

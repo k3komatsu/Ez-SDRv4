@@ -301,16 +301,41 @@ pub struct Manifest {
     /// The artifacts it produced (RS-44).
     #[serde(default)]
     pub artifacts: Vec<ArtifactRef>,
-    /// Namespaced Module sections, including `ezsdr.capture` when the profile asks
-    /// (RS-38, RS-39, RS-43).
+    /// Namespaced Module sections, each filed under the source root of the instance
+    /// that wrote it, including `ezsdr.capture` when the profile asks (RS-38, RS-39,
+    /// RS-43).
     #[serde(default)]
-    pub sections: BTreeMap<Namespace, serde_json::Value>,
+    pub sections: Vec<ModuleSection>,
     /// The Manifest's own hash, computed over the Manifest with this field removed
     /// and stored beside it, never inside the hashed body. Skipped when absent, so
     /// that the hashed text does not carry `"hash": null` — a consumer implementing
     /// RS-46 as written would otherwise compute a different digest (RS-46, OV-17).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<ContentHash>,
+}
+
+/// One Module section of the Manifest. The Kernel fills `source` with the writing
+/// instance's source root, so two instances of one Module writing one name keep both
+/// sections and no Module puts its own id in a name (RS-39).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModuleSection {
+    /// The instance that wrote it (RS-39, KC-8).
+    pub source: crate::event::EventSource,
+    /// The section's name, under its Module's namespace (RS-39).
+    pub name: Namespace,
+    /// Its content, which the Module defines (RS-39).
+    pub content: serde_json::Value,
+}
+
+impl Manifest {
+    /// The content of section `name` written by the instance `source` (RS-39).
+    pub fn section(&self, source: &crate::event::EventSource, name: &str) -> Option<&serde_json::Value> {
+        self.sections
+            .iter()
+            .find(|s| &s.source == source && s.name.as_str() == name)
+            .map(|s| &s.content)
+    }
 }
 
 /// `mark_artifact` records the kind and time against every artifact open at that
@@ -403,6 +428,7 @@ impl Manifest {
     pub fn write_section(
         &mut self,
         owner: &Namespace,
+        source: crate::event::EventSource,
         section: Namespace,
         content: serde_json::Value,
     ) -> Result<(), crate::run::RunError> {
@@ -416,7 +442,7 @@ impl Manifest {
         // Left to hashing time, `seal()` failed at cleanup step 7 — a Run that had
         // already transmitted and produced no Manifest, against RS-11 (SB-9a).
         crate::spec::check_ascii_keys(&content).map_err(|e| crate::run::RunError::SectionKeyNotAscii { key: e.to_string() })?;
-        self.sections.insert(section, content);
+        self.sections.push(ModuleSection { source, name: section, content });
         Ok(())
     }
 }

@@ -619,8 +619,8 @@
   "id": "P17",
   "name": "EA-17 a rejected capture is counted",
   "file": "python/ezsdr/session.py",
-  "old": "        recorder = self._capture_recorder(action) if entry[\"outcome\"][\"kind\"] == \"admitted\" else None",
-  "new": "        recorder = self._capture_recorder(action)",
+  "old": "        if entry[\"outcome\"][\"kind\"] == \"admitted\" and capture and target.get(\"kind\") == \"output\":",
+  "new": "        if capture and target.get(\"kind\") == \"output\":",
   "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples"
  },
  {
@@ -632,18 +632,10 @@
   "python": "test_easy_api.EasyApi.test_ea_17_a_capture_keeps_its_first_deadline"
  },
  {
-  "id": "P19",
-  "name": "EA-17 a capture counted by its target path",
-  "file": "python/ezsdr/session.py",
-  "old": "            if len(recorders) == 1:\n                return recorders[0]\n",
-  "new": "",
-  "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples"
- },
- {
   "id": "P20",
   "name": "EA-17 a SetParameter request not counted",
   "file": "python/ezsdr/session.py",
-  "old": "        if action.get(\"kind\") == \"set_parameter\" and action.get(\"key\") == \"sink.capture_samples\":\n            return named if named in recorders else None\n",
+  "old": " or (\n            action.get(\"kind\") == \"set_parameter\" and action.get(\"key\") == \"sink.capture_samples\"\n        )",
   "new": "",
   "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples"
  },

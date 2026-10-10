@@ -20,7 +20,7 @@ use ezsdr_kernel::stream::BurstRecord;
 use ezsdr_kernel::time::TimePoint;
 use ezsdr_radio_uhd::{Device, FakeConfig, FakeDevice};
 use serde_json::{json, Value as Json};
-use support::{artifact, finish_at, modules, root, section, spec_run, T0};
+use support::{artifact, finish_at, modules, root, section, spec_run, T0, output, resource};
 
 /// Root ticks per millisecond: the X310's 200 MHz master clock (UR-7).
 const MS: i64 = 200_000;
@@ -68,14 +68,14 @@ fn capture(n: i64, at: Option<TimePoint>) -> SessionAction {
     SessionAction::Vocabulary {
         ns: Namespace::parse("sink").unwrap(),
         verb: Ident::parse("capture").unwrap(),
-        target: ResourceId::parse("rec").unwrap(),
+        target: output("rec"),
         at,
         params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(n))]),
     }
 }
 
 fn set(key: &str, value: Value) -> SessionAction {
-    SessionAction::SetParameter { target: ResourceId::parse("radio").unwrap(), key: Key::parse(key).unwrap(), value }
+    SessionAction::SetParameter { target: resource("radio"), key: Key::parse(key).unwrap(), value }
 }
 
 fn admitted(run: &mut RunHandle, action: SessionAction, waveform: Option<&[u8]>) {
@@ -144,7 +144,7 @@ fn uhd_59_a_scheduled_burst_is_recorded() {
     let run = uhd_spec_run(&temp, &spec, BTreeMap::from([(waveform.hash, bytes)]));
     let t0 = run.start_instant().unwrap();
     let manifest = finish_after(run, 50);
-    let bursts: Vec<BurstRecord> = serde_json::from_value(section(&manifest, "ezsdr.radio.uhd.usrp.bursts").clone()).unwrap();
+    let bursts: Vec<BurstRecord> = serde_json::from_value(section(&manifest, "usrp", "ezsdr.radio.uhd.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1, "{bursts:?}");
     assert_eq!(bursts[0].samples, 1_000);
     let clock = manifest.clocks.sample_clocks.iter().find(|r| r.domain == bursts[0].target.domain()).expect("the burst's SampleClock");
@@ -176,7 +176,7 @@ fn uhd_57_the_session_loopback_captures_what_it_transmits() {
     let repeat = SessionAction::Vocabulary {
         ns: Namespace::parse("radio").unwrap(),
         verb: Ident::parse("start_repeat").unwrap(),
-        target: ResourceId::parse("radio/tx").unwrap(),
+        target: resource("radio/tx"),
         at: None,
         params: BTreeMap::new(),
     };

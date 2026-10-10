@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::binding::Violation;
 use crate::contract::{DataContractId, Port};
-use crate::event::{Action, ActionId, EventSink};
+use crate::event::{Action, ActionId, EventSink, EventSource};
 use crate::hash::ContentHash;
 use crate::id::{ClockDomainId, IslandId, MemoryDomainId, ModuleId, ResourceId, RunId};
 use crate::manifest::ArtifactRef;
@@ -985,8 +985,10 @@ pub enum Endpoint {
     StreamOut(Arc<dyn DataLink>),
 }
 
-/// A link end bound to one of the component's ports (MA-27).
+/// A link end bound to one of the component's ports (MA-27). Non-exhaustive, so a
+/// field can join it without breaking a Module.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct AttachedPort {
     /// Which component or resource the port belongs to (MA-27, KA-15).
     pub component: Ident,
@@ -996,10 +998,21 @@ pub struct AttachedPort {
     pub endpoint: Endpoint,
 }
 
+impl AttachedPort {
+    /// A link end, as the Kernel attaches one; for a Module's own tests (MA-27).
+    #[cfg(feature = "testing")]
+    pub fn new(component: Ident, port: Ident, endpoint: Endpoint) -> AttachedPort {
+        AttachedPort { component, port, endpoint }
+    }
+}
+
 /// Where a Module receives Actions. They arrive only after Kernel admission (MA-14).
 pub trait ActionReceiver: Send + Sync {
-    /// The next admitted Action for this Module, if any (MA-14).
-    fn recv(&self) -> Option<Action>;
+    /// The next admitted Action for this Module, if any, with the node its
+    /// `{resource}` target was resolved to: what a Provider matches on (KC-23). The
+    /// Action keeps its authored target; the node is `None` for any other target
+    /// (MA-14).
+    fn recv(&self) -> Option<(Action, Option<ResourceId>)>;
 }
 
 /// Where a Module **emits** an Action: it is submitted to `admit()` rather than to
@@ -1046,9 +1059,15 @@ impl InputStore for std::sync::Mutex<BTreeMap<ContentHash, Arc<[u8]>>> {
 
 /// What a Module is handed at `prepare`. Every handle is shared, so a Module may keep
 /// it and use it from `prepare` through `cleanup` (MA-5a, MA-6, MA-46).
+/// Non-exhaustive, so a field can join it without breaking a Module.
+#[non_exhaustive]
 pub struct PrepareContext {
     /// Which Run (RS-1).
     pub run: RunId,
+    /// This instance's event source root: a Provider's root node, a Sink's output,
+    /// an Executor's Island. A Provider names its sub-nodes below it; no Module
+    /// formats a source of its own (RS-31, KC-8).
+    pub source: EventSource,
     /// Which class, derived and cross-checked (MA-41).
     pub class: ExecutionClass,
     /// The Run's single source of "now" (TM-16a).
@@ -1075,6 +1094,41 @@ pub struct PrepareContext {
     /// The bound on `prepare` and `arm`; a Module that cannot finish returns
     /// `Timeout` (MA-8).
     pub host_budget: RelativeBudget,
+}
+
+impl PrepareContext {
+    /// A context for a Module's own tests: run `test-run`, the Simulation class, no
+    /// environment, inputs, links or components, and a five-second host budget. The
+    /// fields stay assignable (MA-5).
+    #[cfg(feature = "testing")]
+    pub fn testing(
+        source: EventSource,
+        time: Arc<dyn TimeAuthority>,
+        clocks: Arc<crate::time::ClockRegistry>,
+        events: Arc<dyn EventSink>,
+        actions: Arc<dyn ActionReceiver>,
+        actions_out: Arc<dyn ActionSubmitter>,
+    ) -> PrepareContext {
+        PrepareContext {
+            run: RunId::from_string("test-run".to_owned()),
+            source,
+            class: ExecutionClass::Simulation,
+            time,
+            clocks,
+            events,
+            actions,
+            actions_out,
+            environment: Arc::new(BTreeMap::new()),
+            inputs: Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new()),
+            links: Vec::new(),
+            components: BTreeMap::new(),
+            host_budget: RelativeBudget::new(crate::time::Duration::new(
+                ClockDomainId::HOST_MONOTONIC,
+                crate::coordinator::DEFAULT_HOST_BUDGET_NS,
+            ))
+            .expect("a positive budget"),
+        }
+    }
 }
 
 /// Why a Run is stopping, as it reaches a Module (MA-13, RS-9).
@@ -1268,7 +1322,6 @@ pub fn step_until_quiescent(
     instances: &mut [SteppedInstance<'_>],
     until: TimePoint,
     events: &dyn EventSink,
-    coordinator: &ResourceId,
 ) -> Result<usize, ModuleError> {
     instances.sort_by(|a, b| {
         (a.inner.role().step_rank(), a.id.as_str())
@@ -1310,7 +1363,7 @@ pub fn step_until_quiescent(
     let kind = crate::event::EventKind::parse(crate::event::EventKind::STEP_LIVELOCK)
         .expect("a Kernel kind is well formed");
     let _ = events.emit_control(crate::event::Event {
-        source: coordinator.clone(),
+        source: EventSource::Kernel,
         time: until,
         severity: crate::event::Severity::Fatal,
         kind,

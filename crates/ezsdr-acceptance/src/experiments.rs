@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 
 use ezsdr_kernel::hash::ContentHash;
-use ezsdr_kernel::id::ResourceId;
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::spec::{Ident, Namespace};
 use serde_json::{json, Value};
@@ -63,7 +62,7 @@ pub fn transmit(
         "at": { "clock": "radio", "offset_ticks": offset_ticks },
         "action": {
             "kind": "tx_burst",
-            "target": serde_json::to_value(ResourceId::parse("radio/tx").expect("valid resource id")).expect("resource id serializes"),
+            "target": { "kind": "resource", "resource": "radio", "path": "tx" },
             "waveform": waveform,
             "repeat": repeat,
             "late_policy": late_policy,
@@ -83,7 +82,7 @@ pub fn with_timed_capture(spec: Value, samples: i64, offset_ticks: i64) -> Value
             "at": { "clock": "radio", "offset_ticks": offset_ticks },
             "action": {
                 "kind": "update_parameter",
-                "target": serde_json::to_value(ResourceId::parse("sink/rec").expect("valid resource id")).expect("resource id serializes"),
+                "target": { "kind": "output", "output": "rec" },
                 "key": "sink.capture_samples",
                 "value": samples,
                 "class": "block_boundary"
@@ -136,7 +135,7 @@ pub fn link(tx: &str, rx: &str, rate_hz: f64, waveform: &ArtifactRef, offset_tic
             "radio.rx.frequency_hz": { "kind": "eq", "value": 1.0e9 }
         }
     }));
-    let target = ResourceId::parse(&format!("{tx}/tx")).expect("valid resource id");
+    let target = json!({ "kind": "resource", "resource": tx, "path": "tx" });
     json!({
         "version": 1,
         "requirements": { "vocabularies": [{ "id": "radio", "major": 2 }, { "id": "sink", "major": 1 }] },
@@ -151,7 +150,7 @@ pub fn link(tx: &str, rx: &str, rate_hz: f64, waveform: &ArtifactRef, offset_tic
             "at": { "clock": tx, "offset_ticks": offset_ticks },
             "action": {
                 "kind": "tx_burst",
-                "target": serde_json::to_value(target).expect("resource id serializes"),
+                "target": target,
                 "waveform": waveform,
                 "repeat": false,
                 "late_policy": "send_asap_and_flag",
@@ -197,7 +196,7 @@ pub fn ping_pong(
     resources.insert(pinger.to_owned(), radio());
     resources.insert(responder_radio.to_owned(), radio());
     let param = |key: &str, default: Value| json!({ "key": key, "schema": {}, "update_class": "cold", "default": default });
-    let ping_target = ResourceId::parse(&format!("{pinger}/tx")).expect("valid resource id");
+    let ping_target = json!({ "kind": "resource", "resource": pinger, "path": "tx" });
     json!({
         "version": 1,
         "requirements": { "vocabularies": [{ "id": "radio", "major": 2 }, { "id": "sink", "major": 1 }] },
@@ -239,7 +238,7 @@ pub fn ping_pong(
             "at": { "clock": pinger, "offset_ticks": offset_ticks },
             "action": {
                 "kind": "tx_burst",
-                "target": serde_json::to_value(ping_target).expect("resource id serializes"),
+                "target": ping_target,
                 "waveform": ping,
                 "repeat": false,
                 "late_policy": "send_asap_and_flag",

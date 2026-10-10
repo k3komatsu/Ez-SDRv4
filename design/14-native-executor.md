@@ -49,7 +49,7 @@ pub struct ComponentContext {
     pub events: Arc<dyn EventSink>,
     pub inputs: Arc<dyn InputStore>,
     pub links: Vec<AttachedPort>,            // this component's link ends only
-    pub source: ResourceId,                  // island_<n>, the Island's event source (KC-8)
+    pub source: EventSource,                 // the Island's source root, as the Kernel gives it (KC-8)
 }
 
 #[derive(Clone)]
@@ -84,7 +84,7 @@ A `ComponentContext` carries no `ActionSubmitter`: a component's Actions go thro
 - **NX-4** `prepare(island, ctx)`, which receives each component's memory domain with its Island — an entry of `island.components` is `{ component, memory_domain }` (MA-38; spec 20, KH-2; issue #39):
   1. `ctx.class` other than Simulation returns `Unsupported` ("NX-4: … runs the Simulation class only"): the components are stepped on the calling thread, as the Simulation class steps them; the device-paced classes step Executors on the data thread (MA-30's table as Phase 7's KG-2 amends it), which this Executor does not yet accept (Phase 7, Review L, NONBLOCKING 15).
   2. Every `ctx.links` entry must name the `component` of an entry of `island.components` (spec 20, KH-2; issue #39); one that does not is `Rejected`.
-  3. For the `component` of each entry of `island.components` (spec 20, KH-2; issue #39), in the Island's order: a component this Executor already holds (from another Island) is `Rejected`; its descriptor is `ctx.components[id]`, and a missing one is `Rejected`; it is loaded (NX-3); `(implementation.make)()` builds it, and the Executor keeps it **before** calling its `prepare`, so that `stop` and `cleanup` reach a component whose `prepare` failed, as MA-7 has them reach every instance that reached `prepare`; its `prepare` receives a `ComponentContext` whose `descriptor` is the Spec's, whose `links` are exactly the `ctx.links` entries naming it, whose `source` is `island_<island.id.local>`, and whose other handles are `ctx`'s. A component's error is `prepare`'s error.
+  3. For the `component` of each entry of `island.components` (spec 20, KH-2; issue #39), in the Island's order: a component this Executor already holds (from another Island) is `Rejected`; its descriptor is `ctx.components[id]`, and a missing one is `Rejected`; it is loaded (NX-3); `(implementation.make)()` builds it, and the Executor keeps it **before** calling its `prepare`, so that `stop` and `cleanup` reach a component whose `prepare` failed, as MA-7 has them reach every instance that reached `prepare`; its `prepare` receives a `ComponentContext` whose `descriptor` is the Spec's, whose `links` are exactly the `ctx.links` entries naming it, whose `source` is `ctx.source` (the Kernel gives an Executor `{island}`, KC-8), and whose other handles are `ctx`'s. A component's error is `prepare`'s error.
   4. The Executor keeps `ctx.actions` and `ctx.actions_out` (MA-5a).
   5. It returns `PrepareReport { fragment: island_<island.id.local>, effective: {}, coercions: [], warnings: [] }`.
 
@@ -120,7 +120,7 @@ In `crates/ezsdr-exec-native/tests/native_executor.rs`, with a harness in the st
 |---|---|---|
 | `nx_01_descriptor_registers` | NX-1's descriptor registers with the Executor factory; NX-2's descriptor, and `NativeExecutor::descriptor()` returns it | NX-1, NX-2 |
 | `nx_03_a_component_is_loaded_by_its_impl_identity` | an unknown `impl.id`, a wrong `impl.hash`, a wrong `impl.kind` each refused naming the component, and nothing built; a duplicate id refused by `new`; the right identity built and its `prepare` called with its descriptor's id, its link end and its Island's source | NX-3, MA-19b |
-| `nx_04_prepare_cases` | a RealtimeEmulation class `Unsupported`; a link end naming a component outside the Island refused; a component on two Islands refused; each component sees only its own link ends and the source `island_<n>`; two Islands on one Executor each report their own fragment; a component whose `prepare` fails fails the Island's `prepare` and is cleaned up | NX-4, MA-7 |
+| `nx_04_prepare_cases` | a RealtimeEmulation class `Unsupported`; a link end naming a component outside the Island refused; a component on two Islands refused; each component sees only its own link ends and the source its context gave; two Islands on one Executor each report their own fragment; a component whose `prepare` fails fails the Island's `prepare` and is cleaned up | NX-4, MA-7 |
 | `nx_05_components_step_in_id_order_and_their_actions_follow_each_step` | components `b` and `a` registered in that order step `a` then `b`; `a`'s Actions are submitted before `b` is stepped; `progressed` is true when only an Action was pushed and false when nothing happened | NX-5, MA-20 |
 | `nx_06_a_refusal_because_the_run_is_ending_is_not_a_failure` | refusals with `ezsdr.dispatch` and with `ezsdr.run_state` leave the step `Ok` | NX-6, KE-3 |
 | `nx_06_any_other_refusal_fails_the_step` | a refusal with `ezsdr.target`, one with `ezsdr.dispatch` and `ezsdr.input` together, and one naming no check, fail the step with a message naming the component, the Action kind and each check | NX-6 |
@@ -145,3 +145,9 @@ The end-to-end carriers, which run this Executor with the responder through the 
 ## 9. Deferred
 
 Applying Actions to components, including updates of component parameters under their classes (Phase 10). A component's processing time charged in virtual time (Phase 10). Threads, and the classes other than Simulation (Phase 7 onwards). Event edges and their queue (Phase 10). A Manifest section of an Executor's own (when one needs it).
+
+## Changes
+
+| date | rules | change | record |
+|---|---|---|---|
+| 2026-10-10 | NX-4, §4 | `ComponentContext.source` is the `EventSource` the Kernel hands the Executor (`{island}`), not a `ResourceId` formatted from the Island id; the fragment id `island_<n>` is unchanged | [spec 27](../plan/maintenance/27-role-typed-identities.md) §2 |

@@ -9,7 +9,7 @@ use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::TimePoint;
 use serde_json::json;
-use support::{artifact, finish_at, root, section, session_run, spec_run, T0};
+use support::{artifact, finish_at, root, section, session_run, spec_run, T0, output};
 
 #[test]
 fn v61_01_repeat_is_continuous_across_the_wrap() {
@@ -21,10 +21,10 @@ fn v61_01_repeat_is_continuous_across_the_wrap() {
     let clock = root(&run);
     let manifest = finish_at(run, clock, T0 + 15_000_000);
 
-    let stats = section(&manifest, "ezsdr.radio.mock.mock.stats");
+    let stats = section(&manifest, "mock", "ezsdr.radio.mock.stats");
     let tx_blocks = stats["tx_blocks"].as_u64().expect("transmit block count");
     let bursts: Vec<ezsdr_kernel::stream::BurstRecord> =
-        serde_json::from_value(section(&manifest, "ezsdr.radio.mock.mock.bursts").clone()).unwrap();
+        serde_json::from_value(section(&manifest, "mock", "ezsdr.radio.mock.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1);
     assert_eq!(bursts[0].samples, tx_blocks * 1_000);
     assert_eq!(bursts[0].blocks, u32::try_from(tx_blocks).unwrap());
@@ -53,7 +53,7 @@ fn v61_02_capture_starts_at_the_requested_sample_index() {
             SessionAction::Vocabulary {
                 ns: Namespace::parse("sink").unwrap(),
                 verb: Ident::parse("capture").unwrap(),
-                target: ResourceId::parse("rec").unwrap(),
+                target: output("rec"),
                 at: Some(TimePoint::new(rx_clock.domain, 12_345)),
                 params: BTreeMap::from([(
                     Key::parse("sink.capture_samples").unwrap(),
@@ -85,7 +85,7 @@ fn v61_03_timed_start_of_tx_and_capture() {
     let manifest = finish_at(run, clock, T0 + 10_000_000);
 
     let bursts: Vec<ezsdr_kernel::stream::BurstRecord> =
-        serde_json::from_value(section(&manifest, "ezsdr.radio.mock.mock.bursts").clone()).unwrap();
+        serde_json::from_value(section(&manifest, "mock", "ezsdr.radio.mock.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1);
     assert_eq!(bursts[0].target.ticks_in(bursts[0].target.domain()).unwrap(), 2_005_000);
     let capture = artifact(&manifest, "rec_0");

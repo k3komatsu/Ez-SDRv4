@@ -12,9 +12,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ezsdr_kernel::event::{Action, EventSink};
+use ezsdr_kernel::event::{Action, EventSink, EventSource};
 use ezsdr_kernel::hash::ContentHash;
-use ezsdr_kernel::id::{MemoryDomainId, ModuleId, ResourceId};
+use ezsdr_kernel::id::{MemoryDomainId, ModuleId};
 use ezsdr_kernel::module_api::{
     ActionReceiver, ActionSubmitter, AttachedPort, ComponentDescriptor,
     ExecutionClass, Executor, ExecutorDescriptor, InputStore, IslandDecl, KERNEL_API,
@@ -107,8 +107,8 @@ pub struct ComponentContext {
     pub inputs: Arc<dyn InputStore>,
     /// The link ends bound to this component's ports (MA-27).
     pub links: Vec<AttachedPort>,
-    /// The Island's event source root, `island_<n>` (KC-8, KC-30).
-    pub source: ResourceId,
+    /// The Island's event source, as the Kernel handed it to the Executor (KC-8, KC-30).
+    pub source: EventSource,
 }
 
 /// A compiled-in component implementation, found by the `impl.id` a descriptor names
@@ -178,8 +178,7 @@ impl Executor for NativeExecutor {
         }
         let fragment = Ident::parse(&format!("island_{}", island.id.local))
             .map_err(|_| ModuleError::rejected("NX-4: the Island id makes no fragment name"))?;
-        let source = ResourceId::parse(fragment.as_str())
-            .map_err(|_| ModuleError::rejected("NX-4: the Island id makes no event source"))?;
+        let source = ctx.source.clone();
         for link in &ctx.links {
             if !island.components.iter().any(|entry| entry.component == link.component) {
                 return Err(ModuleError::rejected(format!(
@@ -232,7 +231,7 @@ impl Executor for NativeExecutor {
 
     fn step(&mut self, until: TimePoint) -> Result<StepOutcome, ModuleError> {
         if let Some(actions) = &self.actions {
-            if let Some(action) = actions.recv() {
+            if let Some((action, _)) = actions.recv() {
                 return Err(ModuleError::rejected(format!(
                     "NX-7: ezsdr.exec.native 1.0.0 applies no Action, and {} for {} reached it",
                     action_name(&action),

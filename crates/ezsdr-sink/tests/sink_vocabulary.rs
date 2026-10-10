@@ -1,10 +1,10 @@
 use ezsdr_kernel::spec::Scalar;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use ezsdr_kernel::binding::AdmissionCheckRegistry;
-use ezsdr_kernel::event::{Action, EventKind, Severity};
-use ezsdr_kernel::id::{ClockDomainId, ResourceId};
+use ezsdr_kernel::event::{Action, EventKind, Severity, Target};
+use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::module_api::{CompileRule, ModuleRegistry, UpdateClass, Version};
 use ezsdr_kernel::policy::{EventKindRegistry, Reaction};
 use ezsdr_kernel::session::SessionAction;
@@ -62,7 +62,7 @@ fn hd_06_vocabulary() {
     let action = SessionAction::Vocabulary {
         ns: Namespace::parse("sink").unwrap(),
         verb: Ident::parse("capture").unwrap(),
-        target: ResourceId::parse("rec").unwrap(),
+        target: Target::Output { output: Ident::parse("rec").unwrap() },
         at: None,
         params: [
             (Key::parse("sink.capture_samples").unwrap(), Value::from(1000)),
@@ -70,12 +70,10 @@ fn hd_06_vocabulary() {
         .into_iter()
         .collect(),
     };
-    let sinks: BTreeSet<Ident> = [Ident::parse("rec").unwrap()].into_iter().collect();
     let compiled = ezsdr_kernel::session::compile(
         &action,
         &registry,
         &BTreeMap::new(),
-        &sinks,
         TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0),
         None,
     )
@@ -84,7 +82,7 @@ fn hd_06_vocabulary() {
     assert!(matches!(
         &compiled.actions[0],
         Action::UpdateParameter { target, key, value: Value::Scalar(Scalar::Int(1000)), class, .. }
-            if target == &ResourceId::parse("sink/rec").unwrap()
+            if target == &Target::Output { output: Ident::parse("rec").unwrap() }
                 && key.as_str() == "sink.capture_samples"
                 && *class == UpdateClass::BlockBoundary
     ));

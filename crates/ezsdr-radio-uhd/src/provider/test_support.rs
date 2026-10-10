@@ -1,7 +1,7 @@
 //! A controlled Provider clock for command-order tests without host deadlines.
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use ezsdr_kernel::event::EventCollector;
+use ezsdr_kernel::event::{EventCollector, EventSource, Target};
 use ezsdr_kernel::id::ResourceId;
 use ezsdr_kernel::module_api::{ModuleRegistry, Pacing};
 use ezsdr_kernel::policy::{EventKindRegistry, Policy};
@@ -39,10 +39,17 @@ pub(super) fn rig_on(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::s
     ezsdr_radio::register(&mut ModuleRegistry::new(),
         &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
     let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx"].iter().flat_map(|s|
-        kinds.kinds().into_iter().map(move |k| (ResourceId::parse(s).unwrap(), k))).collect();
+        kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
     let core = Arc::new(Core::new(device, ResourceId::parse("usrp").unwrap(),
         root, time.clone(), clocks, events.clone(), Arc::new(BTreeMap::new()), links,
         crate::profile::Profile::X310Ubx.description(block_len)));
     (core, time, events)
+}
+
+/// A target the Kernel would resolve to `node` (KC-23): its first segment as the resource
+/// and the rest as the path. A Provider matches on the node it is handed, not on this.
+pub(super) fn target_of(node: &ResourceId) -> Target {
+    let (resource, path) = node.path().split_once('/').unwrap_or((node.path(), ""));
+    Target::Resource { resource: ezsdr_kernel::spec::Ident::parse(resource).unwrap(), path: path.to_owned() }
 }

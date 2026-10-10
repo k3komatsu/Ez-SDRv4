@@ -28,7 +28,7 @@
               "type": "boolean"
             },
             "target": {
-              "$ref": "#/$defs/ResourceId",
+              "$ref": "#/$defs/Target",
               "description": "The transmit stream."
             },
             "waveform": {
@@ -54,7 +54,7 @@
               "type": "string"
             },
             "target": {
-              "$ref": "#/$defs/ResourceId",
+              "$ref": "#/$defs/Target",
               "description": "Whose timer."
             },
             "token": {
@@ -88,7 +88,7 @@
               "type": "string"
             },
             "target": {
-              "$ref": "#/$defs/ResourceId",
+              "$ref": "#/$defs/Target",
               "description": "Whose parameter."
             },
             "value": {
@@ -122,7 +122,7 @@
               "type": "object"
             },
             "target": {
-              "$ref": "#/$defs/ResourceId",
+              "$ref": "#/$defs/Target",
               "description": "Whose verb."
             },
             "verb": {
@@ -148,7 +148,7 @@
             "target": {
               "anyOf": [
                 {
-                  "$ref": "#/$defs/ResourceId"
+                  "$ref": "#/$defs/Target"
                 },
                 {
                   "type": "null"
@@ -1075,25 +1075,6 @@
       },
       "type": "object"
     },
-    "ResourceId": {
-      "additionalProperties": false,
-      "description": "Names a resource, or a sub-resource, inside the composite tree a Provider declares.\n\nThe path is a non-empty sequence of segments matching\n`^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+){0,15}$`, at most 256 bytes; `dev0/rx/0` names\nchannel 0 of the receive sub-tree of `dev0`. Vision §49 asks only for the node qualification; the\npath replaces §49's flat `local` because a channel or a timekeeper must be\naddressable (`00-overview.md` \"Where these specs depart from the Vision\").\n\nRule: SB-1, SB-3, SB-33, SB-34 (`03-spec-and-binding.md`), X7.",
-      "properties": {
-        "node": {
-          "$ref": "#/$defs/NodeId",
-          "description": "Owning node; `0`, the local node, throughout v4.0 (X7)."
-        },
-        "path": {
-          "description": "Slash-joined path through the composite resource tree (SB-34).",
-          "type": "string"
-        }
-      },
-      "required": [
-        "node",
-        "path"
-      ],
-      "type": "object"
-    },
     "ResourceReq": {
       "additionalProperties": false,
       "description": "What a Spec requires of one resource, and nothing about how it is met.\n\nDirection-asymmetric requests are expressed as distinct keys under the\nVocabulary's prefix — `radio.rx.channels`, `radio.tx.channels` — not as a single\ncount. The Kernel does not know that `rx` means anything; the flattening is what\nkeeps it generic while still expressing the asymmetry re-review R1 required.\n\nRule: SB-12, decision B2.",
@@ -1305,6 +1286,73 @@
         "kind"
       ],
       "type": "object"
+    },
+    "Target": {
+      "description": "What an Action addresses, in the Spec's own names and tagged by role: a resource\nwith a sub-path below it, an output, or a graph component. The Kernel resolves it\nper role (KC-23); a name the Spec does not declare in that role is refused.\n\nRule: RS-49, KC-23, SB-16.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A Spec resource, or a node below its matched node.",
+          "properties": {
+            "kind": {
+              "const": "resource",
+              "type": "string"
+            },
+            "path": {
+              "default": "",
+              "description": "The sub-path below the matched node, in SB-1's segment grammar; empty\nnames the matched node itself.",
+              "type": "string"
+            },
+            "resource": {
+              "$ref": "#/$defs/Ident",
+              "description": "The Spec resource name."
+            }
+          },
+          "required": [
+            "kind",
+            "resource"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An output's bound Sink.",
+          "properties": {
+            "kind": {
+              "const": "output",
+              "type": "string"
+            },
+            "output": {
+              "$ref": "#/$defs/Ident",
+              "description": "The output id."
+            }
+          },
+          "required": [
+            "kind",
+            "output"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A graph component, reached through the Island that lists it.",
+          "properties": {
+            "component": {
+              "$ref": "#/$defs/Ident",
+              "description": "The component name."
+            },
+            "kind": {
+              "const": "component",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "component"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "TimePoint": {
       "additionalProperties": false,

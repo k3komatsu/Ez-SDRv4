@@ -218,13 +218,10 @@ pub(super) fn endpoint_port(
     // SB-15: "a resource port is one the **bound node** declares". Searching the
     // whole instance would accept a port some other sub-resource declares and would
     // check SC-3 against that node's contract — a link the Kernel calls compatible
-    // and the hardware will not honour. Only a resource slot's Provider is read
-    // (SB-22); `matched` also holds need keys, which are not endpoints.
-    if !spec.resources.contains_key(name) {
-        return None;
-    }
-    let provider = inputs.providers.get(name)?;
+    // and the hardware will not honour. `matched` holds resources only, so only a
+    // resource slot's Provider is read (SB-22).
     let bound = matched.get(name)?;
+    let provider = inputs.providers.get(name)?;
     provider
         .instance()
         .tree

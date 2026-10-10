@@ -16,7 +16,6 @@ use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::policy::{EventKindRegistry, Reaction};
 use ezsdr_kernel::run::RunError;
 use ezsdr_kernel::time::TimePoint;
-use support::rid;
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 static COUNTING: AtomicBool = AtomicBool::new(false);
@@ -50,7 +49,7 @@ static ALLOCATOR: Counting = Counting;
 fn rs_32_emit_allocates_nothing() {
     let kinds = EventKindRegistry::with_kernel_kinds();
     let policy = kinds.compile(&BTreeMap::new()).expect("compiles");
-    let source = rid("radio");
+    let source = support::node_source("radio");
     let kind = EventKind::parse(EventKind::LINK_BACKPRESSURE).expect("parses");
     // A ring deep enough that the drop path is not the only one exercised.
     let c = EventCollector::new(

@@ -558,8 +558,8 @@
   "id": "J11",
   "name": "VH-6 (spec 22, H11): a device Stop cancels held timed updates",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                if device || target == self.core.tx_id {\n                    let _ = self.to_tx.send(TxCmd::Stop);\n",
-  "new": "                if device || target == self.core.tx_id {\n                    self.cancel_held(\"Stop\");\n                    let _ = self.to_tx.send(TxCmd::Stop);\n",
+  "old": "                if device || node == Some(&self.core.tx_id) {\n                    let _ = self.to_tx.send(TxCmd::Stop);\n",
+  "new": "                if device || node == Some(&self.core.tx_id) {\n                    self.cancel_held(\"Stop\");\n                    let _ = self.to_tx.send(TxCmd::Stop);\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_stop_cancels_no_update"
@@ -1277,8 +1277,8 @@
   "id": "J92",
   "name": "RS-35: EVENTS_DROPPED sourced unforeseen, not kernel",
   "file": "crates/ezsdr-kernel/src/event.rs",
-  "old": "                let source = ResourceId::parse(crate::coordinator::KERNEL_SOURCE)",
-  "new": "                let source = ResourceId::parse(\"unforeseen\")",
+  "old": "                let source = EventSource::Kernel;\n                let handle = self.resolve(&source, &dropped_kind);",
+  "new": "                let source = EventSource::Unforeseen;\n                let handle = self.resolve(&source, &dropped_kind);",
   "crate": "ezsdr-kernel",
   "test_bin": "run_session",
   "filter": "rs_33_counters_exact_under_drop"
@@ -1945,5 +1945,204 @@
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
   "filter": "ma_12_a_widening_effective_is_refused_at_prepare"
+ },
+ {
+  "id": "J161",
+  "name": "KC-23 (spec 27 §2): an {output} target resolves to any instance, not only a Sink",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "            Some(instance @ Inst::Sink(_)) => Ok((None, instance, output.clone())),",
+  "new": "            Some(instance) => Ok((None, instance, output.clone())),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_23_a_target_reaches_the_instance_of_its_role"
+ },
+ {
+  "id": "J162",
+  "name": "KC-23 (spec 27 §2): a {component} target falls back to a fragment of that name",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "            let fragment = routing.island_of.get(component).ok_or_else(refused)?;",
+  "new": "            let fragment = routing.island_of.get(component).unwrap_or(component);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_23_a_target_reaches_the_instance_of_its_role"
+ },
+ {
+  "id": "J163",
+  "name": "KC-23 (spec 27 §2): a {resource} target's path is dropped",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "            let node = if path.is_empty() {",
+  "new": "            let node = if true {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_23_targets_are_rewritten_through_matched"
+ },
+ {
+  "id": "J164",
+  "name": "KC-8 (spec 27 §2): a Provider is given the kernel source, not its node",
+  "file": "crates/ezsdr-kernel/src/coordinator/state.rs",
+  "old": "            Inst::Provider(n) => EventSource::Node { node: self.providers[n].id.clone() },",
+  "new": "            Inst::Provider(_) => EventSource::Kernel,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_08_each_instance_is_given_its_source_root"
+ },
+ {
+  "id": "J165",
+  "name": "KC-8 (spec 27 §2): a Sink is given the fallback source, not its output",
+  "file": "crates/ezsdr-kernel/src/coordinator/state.rs",
+  "old": "            Inst::Sink(n) => EventSource::Output { output: self.sinks[n].output.clone() },",
+  "new": "            Inst::Sink(_) => EventSource::Unforeseen,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_08_each_instance_is_given_its_source_root"
+ },
+ {
+  "id": "J166",
+  "name": "KC-8 (spec 27 §2): an Executor is given the kernel source, not its Island",
+  "file": "crates/ezsdr-kernel/src/coordinator/state.rs",
+  "old": "                .map_or(EventSource::Unforeseen, |island| EventSource::Island { island: *island }),",
+  "new": "                .map_or(EventSource::Unforeseen, |_| EventSource::Kernel),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_08_each_instance_is_given_its_source_root"
+ },
+ {
+  "id": "J167",
+  "name": "MA-5 (spec 27 §2): prepare hands every instance the kernel source",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "                source: self.shared.source_root(instance, &fragment.id),",
+  "new": "                source: crate::event::EventSource::Kernel,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_08_each_instance_is_given_its_source_root"
+ },
+ {
+  "id": "J168",
+  "name": "SB-39 (spec 27 §2): a need missing from `needs` passes the guard",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "            let Some(node) = resolved.and_then(|needs| needs.get(need)) else {\n                return Err(not_this_runs(format!(\n                    \"{name}'s need {need} has no matched node\"\n                )));\n            };",
+  "new": "            let Some(node) = resolved.and_then(|needs| needs.get(need)) else {\n                continue;\n            };",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_39_the_guard_covers_every_matched_entry"
+ },
+ {
+  "id": "J169",
+  "name": "SB-39 (spec 27 §2): an extra need under a resource passes the guard",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "            .find(|need| !req.needs.contains_key(*need))",
+  "new": "            .find(|_| false)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_39_the_guard_covers_every_matched_entry"
+ },
+ {
+  "id": "J170",
+  "name": "SB-39 (spec 27 §2): a `needs` key that is no resource passes the guard",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "        .chain(admission.needs.keys())",
+  "new": "        .chain(admission.matched.keys())",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_39_the_guard_covers_every_matched_entry"
+ },
+ {
+  "id": "J171",
+  "name": "RS-39 (decision 2): a section overwrites another instance's section of the same name",
+  "file": "crates/ezsdr-kernel/src/manifest.rs",
+  "old": "        self.sections.push(ModuleSection { source, name: section, content });",
+  "new": "        self.sections.retain(|written| written.name != section);\n        self.sections.push(ModuleSection { source, name: section, content });",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_45_two_instances_writing_one_section_name_both_keep_it"
+ },
+ {
+  "id": "J172",
+  "name": "RS-39 (decision 2): every Provider's sections are filed under the first Provider's source",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                        let source = self.shared.source_root(Inst::Provider(i), &first);",
+  "new": "                        let source = self.shared.source_root(Inst::Provider(0), &first);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_45_two_instances_writing_one_section_name_both_keep_it"
+ },
+ {
+  "id": "J173",
+  "name": "RS-19 (#54): an UpdateParameter verb is admitted at now whatever it names, ignoring a Provider's lead",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "    let target = match action {\n        SessionAction::SetParameter { target, .. } | SessionAction::Vocabulary { target, .. } => {",
+  "new": "    if let SessionAction::Vocabulary { ns, verb, .. } = action {\n        if shared.ctx.registry.verb(ns, verb).is_some_and(|decl| matches!(decl.compiles_to, crate::module_api::CompileRule::UpdateParameter { .. })) {\n            return Ok(now);\n        }\n    }\n    let target = match action {\n        SessionAction::SetParameter { target, .. } | SessionAction::Vocabulary { target, .. } => {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_28_an_untimed_update_verb_to_a_resource_waits_for_the_provider_lead"
+ },
+ {
+  "id": "J174",
+  "name": "UR-5 (decision 2): a multi-segment `id` is accepted now no section name checks it",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "            .filter(|resource| resource.segments().count() == 1)\n            .ok_or_else(|| rejected(\"UR-5: selector `id` must be one resource segment\"))?;",
+  "new": "            .ok_or_else(|| rejected(\"UR-5: selector `id` must be one resource segment\"))?;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_05_from_binding_refusals"
+ },
+ {
+  "id": "J175",
+  "name": "MR-10 (spec 27 §2): MockRadio emits under its own id, not the context's source",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        self.source_root = Some(source_root);",
+  "new": "        let _ = source_root;\n        self.source_root = Some(self.instance.id.clone());",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_10_events_carry_the_source_the_context_gave"
+ },
+ {
+  "id": "J176",
+  "name": "EA-17 (#54; was phase 6's P19): a capture naming a resource is counted for the recorder",
+  "file": "python/ezsdr/session.py",
+  "old": "        if entry[\"outcome\"][\"kind\"] == \"admitted\" and capture and target.get(\"kind\") == \"output\":\n            # One admitted capture request is one request its recorder numbers (HD-16).\n            recorder = target[\"output\"]",
+  "new": "        if entry[\"outcome\"][\"kind\"] == \"admitted\" and capture:\n            # One admitted capture request is one request its recorder numbers (HD-16).\n            recorder = target.get(\"output\", \"rec\")",
+  "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples",
+  "equivalent": "#54: a capture naming a resource compiles to that resource, and no radio declares sink.capture_samples (RS-17 refuses it, as test_ea_17_each_capture_gets_its_own_samples asserts), so no admitted capture reaches the client with a target other than an output; the guard only keeps a Provider or component that did declare the key from being counted for a recorder."
+ },
+ {
+  "id": "J177",
+  "name": "SB-16 (spec 27 §2): a schedule entry naming an undeclared output validates",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "                Target::Output { output } => spec.outputs.iter().any(|o| &o.id == output),",
+  "new": "                Target::Output { .. } => true,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_16_spec_time_resolves_at_arm"
+ },
+ {
+  "id": "J178",
+  "name": "SB-16 (spec 27 §2): a schedule entry naming a component validates",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "                Target::Component { .. } => false,",
+  "new": "                Target::Component { .. } => true,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_16_spec_time_resolves_at_arm"
+ },
+ {
+  "id": "J179",
+  "name": "SB-16 (spec 27 §2): a schedule target's resource path is not held to the ResourceId grammar",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "                        && (path.is_empty() || ResourceId::parse(path).is_ok())",
+  "new": "                        && (path.is_empty() || !path.is_empty())",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_16_spec_time_resolves_at_arm"
+ },
+ {
+  "id": "J180",
+  "name": "HD-11 (spec 27 §2): a Sink acts on a Stop naming any output",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "                if self.output.as_ref() == Some(&output) =>",
+  "new": "                if self.output.is_some() || output.as_str().is_empty() =>",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_11_stop_for_another_target_is_rejected"
  }
 ]

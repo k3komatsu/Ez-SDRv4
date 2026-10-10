@@ -225,10 +225,3 @@ pub(super) fn match_constraints(
     out.warnings.extend(report.warnings);
     Ok(())
 }
-
-/// SB-36's key for a need in `matched`: `<resource>_<need>`.
-///
-/// Rule: SB-36.
-pub(super) fn need_key(resource: &Ident, need: &Ident) -> Ident {
-    Ident::parse(&format!("{resource}_{need}")).expect("two Idents joined by `_` are an Ident")
-}

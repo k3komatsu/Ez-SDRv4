@@ -5,8 +5,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, TryLockError};
 
 use crate::binding::{AdmissionCheckRegistry, BindingProfile};
 use crate::contract::ContractRegistry;
-use crate::event::{Action, Event, EventCollector, EventKind};
-use crate::id::{ClockDomainId, ResourceId, RunId};
+use crate::event::{Action, Event, EventCollector, EventKind, EventSource, Target};
+use crate::id::{ClockDomainId, IslandId, ResourceId, RunId};
 use crate::manifest::{ArtifactRef, BindingSection, RunKind, SpecSection};
 use crate::module_api::{
     ActionReceiver, Authority, Executor, ExecutorDescriptor, ModuleError, ModuleErrorKind,
@@ -37,7 +37,7 @@ pub(super) struct Queue {
 
 #[derive(Default)]
 struct QueueState {
-    actions: VecDeque<Action>,
+    actions: VecDeque<(Action, Option<ResourceId>)>,
     pushed: u64,
     taken: u64,
     finished: u64,
@@ -53,9 +53,9 @@ impl Queue {
 
     /// Queues one Action and returns how many have been pushed, which is what the
     /// instance must have finished for this one to be done (KC-21a).
-    pub(super) fn push(&self, action: Action) -> u64 {
+    pub(super) fn push(&self, action: Action, node: Option<ResourceId>) -> u64 {
         let mut state = lock(&self.state);
-        state.actions.push_back(action);
+        state.actions.push_back((action, node));
         state.pushed += 1;
         self.changed.notify_all();
         state.pushed
@@ -83,7 +83,7 @@ impl Queue {
 
 impl ActionReceiver for Queue {
     /// MA-14b: calling `recv` again is what says the Actions taken so far are done.
-    fn recv(&self) -> Option<Action> {
+    fn recv(&self) -> Option<(Action, Option<ResourceId>)> {
         let mut state = lock(&self.state);
         state.finished = state.taken;
         let action = state.actions.pop_front();
@@ -162,10 +162,12 @@ pub(super) struct Context {
 impl Context {
     pub(super) fn component_classes_for(
         &self,
-        target: &ResourceId,
+        target: &Target,
     ) -> Option<&BTreeMap<Key, crate::module_api::UpdateClass>> {
-        let component = Ident::parse(target.segments().next()?).ok()?;
-        self.component_classes.get(&component)
+        match target {
+            Target::Component { component } => self.component_classes.get(component),
+            _ => None,
+        }
     }
 }
 
@@ -177,6 +179,8 @@ pub(super) struct Routing {
     pub(super) first_fragment: BTreeMap<Inst, Ident>,
     pub(super) order: Vec<Inst>,
     pub(super) island_of: BTreeMap<Ident, Ident>,
+    /// An Island fragment's id to its Island, an Executor's event source (KC-8).
+    pub(super) islands: BTreeMap<Ident, IslandId>,
     pub(super) reverse: Vec<Ident>,
 }
 
@@ -290,10 +294,6 @@ pub(super) fn ceil_convert(
             TimePoint::new(to, floor.ticks_in(to)?.checked_add(1).ok_or(TimeError::Overflow)?)
         }
     })
-}
-
-pub(super) fn kernel_source() -> ResourceId {
-    ResourceId::parse(super::KERNEL_SOURCE).expect("a valid literal")
 }
 
 /// A cleanup failure of the Manifest step, which is every failure the coordinator
@@ -413,15 +413,17 @@ impl Shared {
         }
     }
 
-    pub(super) fn source_root(&self, i: Inst) -> ResourceId {
+    /// The event source root the Kernel hands an instance for `fragment` and files its
+    /// Manifest sections under: a Provider's root node, a Sink's output, an
+    /// Executor's Island (KC-8, RS-39).
+    pub(super) fn source_root(&self, i: Inst, fragment: &Ident) -> EventSource {
         match i {
-            Inst::Provider(n) => self.providers[n].id.clone(),
-            Inst::Sink(n) => ResourceId::parse(&format!("sink/{}", self.sinks[n].output))
-                .expect("a valid Sink source"),
-            Inst::Executor(_) => {
-                let fragment = self.first_fragment(i);
-                ResourceId::parse(fragment.as_str()).expect("a valid Island source")
-            }
+            Inst::Provider(n) => EventSource::Node { node: self.providers[n].id.clone() },
+            Inst::Sink(n) => EventSource::Output { output: self.sinks[n].output.clone() },
+            Inst::Executor(_) => self
+                .routing()
+                .and_then(|routing| routing.islands.get(fragment))
+                .map_or(EventSource::Unforeseen, |island| EventSource::Island { island: *island }),
         }
     }
 

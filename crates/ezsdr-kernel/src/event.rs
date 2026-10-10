@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::ResourceId;
+use crate::id::{IslandId, ResourceId};
 use crate::manifest::ArtifactRef;
 use crate::module_api::UpdateClass;
 use crate::policy::{Policy, Reaction};
@@ -111,6 +111,92 @@ impl fmt::Display for EventKind {
     }
 }
 
+/// Where an event, a counter row or a Manifest section comes from, tagged by role, so
+/// that no role is read off a path segment and no name is reserved for one.
+///
+/// Rule: RS-31, KC-8.
+#[derive(
+    Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EventSource {
+    /// A node of a Provider's resource tree: its root or a node below it (RS-31).
+    Node {
+        /// The node (SB-33).
+        node: ResourceId,
+    },
+    /// A bound Sink, by the output it fills (SB-17).
+    Output {
+        /// The output id.
+        output: Ident,
+    },
+    /// An Executor, by the Island it runs (MA-38).
+    Island {
+        /// The Island.
+        island: IslandId,
+    },
+    /// The Kernel itself (RS-35, KC-22).
+    Kernel,
+    /// RS-33's fallback row for a pair the plan did not foresee.
+    Unforeseen,
+}
+
+impl fmt::Display for EventSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EventSource::Node { node } => write!(f, "node {}", node.path()),
+            EventSource::Output { output } => write!(f, "output {output}"),
+            EventSource::Island { island } => write!(f, "island {}", island.local),
+            EventSource::Kernel => f.write_str("kernel"),
+            EventSource::Unforeseen => f.write_str("unforeseen"),
+        }
+    }
+}
+
+/// What an Action addresses, in the Spec's own names and tagged by role: a resource
+/// with a sub-path below it, an output, or a graph component. The Kernel resolves it
+/// per role (KC-23); a name the Spec does not declare in that role is refused.
+///
+/// Rule: RS-49, KC-23, SB-16.
+#[derive(
+    Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Target {
+    /// A Spec resource, or a node below its matched node.
+    Resource {
+        /// The Spec resource name.
+        resource: Ident,
+        /// The sub-path below the matched node, in SB-1's segment grammar; empty
+        /// names the matched node itself.
+        #[serde(default)]
+        path: String,
+    },
+    /// An output's bound Sink.
+    Output {
+        /// The output id.
+        output: Ident,
+    },
+    /// A graph component, reached through the Island that lists it.
+    Component {
+        /// The component name.
+        component: Ident,
+    },
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Target::Resource { resource, path } if path.is_empty() => write!(f, "resource {resource}"),
+            Target::Resource { resource, path } => write!(f, "resource {resource}/{path}"),
+            Target::Output { output } => write!(f, "output {output}"),
+            Target::Component { component } => write!(f, "component {component}"),
+        }
+    }
+}
+
 /// The control-path form of an event: a source, a `TimePoint` in a named domain, a
 /// severity, a kind and a schema-versioned payload (Vision §29).
 ///
@@ -118,8 +204,8 @@ impl fmt::Display for EventKind {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Event {
-    /// Which resource it came from (RS-31).
-    pub source: ResourceId,
+    /// Where it came from (RS-31).
+    pub source: EventSource,
     /// When, in a named domain (TM-1).
     pub time: TimePoint,
     /// How bad (RS-29).
@@ -161,8 +247,8 @@ pub struct EventRecord {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CounterRow {
-    /// Which resource, or the fallback row's placeholder (RS-33).
-    pub source: ResourceId,
+    /// Where from, or RS-33's fallback row (RS-33).
+    pub source: EventSource,
     /// Which kind (RS-33).
     pub kind: EventKind,
     /// How many were emitted, whether or not the body survived (RS-33).
@@ -183,7 +269,7 @@ pub struct EventHandle {
 /// without a Kernel change (MA-6, MA-46).
 pub trait EventSink: Send + Sync {
     /// Pre-resolves a `(source, kind)` pair. Control path only (RS-33).
-    fn resolve(&self, source: &ResourceId, kind: &EventKind) -> EventHandle;
+    fn resolve(&self, source: &EventSource, kind: &EventKind) -> EventHandle;
     /// Emits on the hot path: counts, then queues the body if the ring has room.
     /// Allocates nothing. A payload above [`HOT_PAYLOAD_BYTES`] is
     /// `PayloadTooLarge` (RS-32, RS-33, RS-34).
@@ -214,8 +300,8 @@ struct Ring {
 ///
 /// Rule: RS-32…RS-36.
 pub struct EventCollector {
-    sources: Vec<ResourceId>,
-    source_index: BTreeMap<ResourceId, usize>,
+    sources: Vec<EventSource>,
+    source_index: BTreeMap<EventSource, usize>,
     kinds: Vec<EventKind>,
     kind_index: BTreeMap<EventKind, usize>,
     /// `(row, kind)` → counter index; the last row is the fallback (RS-33).
@@ -236,12 +322,12 @@ impl EventCollector {
     ///
     /// Rule: RS-33, RS-34.
     pub fn new(
-        pairs: &[(ResourceId, EventKind)],
+        pairs: &[(EventSource, EventKind)],
         kinds: &[EventKind],
         ring_depth: usize,
         policy: &Policy,
     ) -> EventCollector {
-        let mut sources: Vec<ResourceId> = Vec::new();
+        let mut sources: Vec<EventSource> = Vec::new();
         let mut source_index = BTreeMap::new();
         let mut kind_list: Vec<EventKind> = kinds.to_vec();
         let mut kind_index = BTreeMap::new();
@@ -264,8 +350,7 @@ impl EventCollector {
         // `EVENTS_DROPPED` bodies would land on the fallback row, which reports a
         // different kind, and RS-35's invariant would read as violated for exactly
         // the kind that exists to keep it true (RS-33, RS-38).
-        let mut source_of = |source: &str| {
-            let source = ResourceId::parse(source).expect("a valid literal path");
+        let mut source_of = |source: EventSource| {
             match source_index.entry(source.clone()) {
                 Entry::Vacant(entry) => {
                     sources.push(source);
@@ -274,8 +359,8 @@ impl EventCollector {
                 Entry::Occupied(entry) => *entry.get(),
             }
         };
-        let fallback_source = source_of("unforeseen");
-        let kernel_source = source_of(crate::coordinator::KERNEL_SOURCE);
+        let fallback_source = source_of(EventSource::Unforeseen);
+        let kernel_source = source_of(EventSource::Kernel);
         let dropped_kind = EventKind(EventKind::EVENTS_DROPPED.to_owned());
         let dropped_row_kind = *kind_index.entry(dropped_kind.clone()).or_insert_with(|| {
             kind_list.push(dropped_kind);
@@ -446,8 +531,7 @@ impl EventCollector {
             if count > 0 {
                 // RS-35's invariant is stated "for every kind", so the meta-event is
                 // counted like any other body it is delivered beside (RS-33, RS-38).
-                let source = ResourceId::parse(crate::coordinator::KERNEL_SOURCE)
-                    .expect("a valid literal path");
+                let source = EventSource::Kernel;
                 let handle = self.resolve(&source, &dropped_kind);
                 self.counts[handle.row as usize].fetch_add(1, Ordering::Relaxed);
                 out.push(Event {
@@ -482,7 +566,7 @@ impl EventCollector {
 }
 
 impl EventSink for EventCollector {
-    fn resolve(&self, source: &ResourceId, kind: &EventKind) -> EventHandle {
+    fn resolve(&self, source: &EventSource, kind: &EventKind) -> EventHandle {
         let si = self.source_index.get(source).copied();
         let ki = self.kind_index.get(kind).copied();
         let fallback_row = (self.pairs.len() - 1) as u32;
@@ -586,7 +670,7 @@ pub enum Action {
     /// Phase 2 settles it (RS-49).
     TxBurst {
         /// The transmit stream (RS-49).
-        target: ResourceId,
+        target: Target,
         /// The samples, by reference; never the bytes (RS-44).
         waveform: ArtifactRef,
         /// Whether the waveform repeats (SC-26).
@@ -604,7 +688,7 @@ pub enum Action {
     /// Wake at an instant (RS-49).
     SetTimer {
         /// Whose timer (RS-49).
-        target: ResourceId,
+        target: Target,
         /// When (RS-49).
         at: AbsoluteDeadline,
         /// The caller's token, returned with the wake-up (RS-49).
@@ -613,7 +697,7 @@ pub enum Action {
     /// Change a declared parameter under its declared update class (RS-52, Vision §27).
     UpdateParameter {
         /// Whose parameter (RS-49).
-        target: ResourceId,
+        target: Target,
         /// Which parameter (SB-2).
         key: Key,
         /// Its new value (SB-4).
@@ -633,7 +717,7 @@ pub enum Action {
     /// (RS-49).
     Command {
         /// Whose verb (RS-49).
-        target: ResourceId,
+        target: Target,
         /// The verb, defined by its Vocabulary (RS-13a).
         verb: Ident,
         /// Its parameters (SB-4).
@@ -645,7 +729,7 @@ pub enum Action {
     /// Produce an event (RS-31).
     Emit {
         /// Whose event (RS-49).
-        target: ResourceId,
+        target: Target,
         /// The event itself (RS-31).
         event: Event,
     },
@@ -653,7 +737,7 @@ pub enum Action {
     /// §3 uses the word for both, so the ambiguity is resolved in the type (RS-50).
     Stop {
         /// The resource, or the Run when absent (RS-50).
-        target: Option<ResourceId>,
+        target: Option<Target>,
     },
     /// End the Run immediately (RS-49).
     Abort {
@@ -667,8 +751,8 @@ impl Action {
     /// eighth cannot be added without the rule being revisited (RS-48).
     pub const MEMBERS: usize = 7;
 
-    /// The resource an Action addresses; `Abort` addresses the Run (RS-49).
-    pub fn target(&self) -> Option<&ResourceId> {
+    /// What an Action addresses; `Abort` addresses the Run (RS-49).
+    pub fn target(&self) -> Option<&Target> {
         match self {
             Action::TxBurst { target, .. }
             | Action::SetTimer { target, .. }
@@ -697,7 +781,7 @@ pub enum ActionTemplate {
     /// The `tx_burst` Action without `at` (RS-49a).
     TxBurst {
         /// The transmit stream.
-        target: ResourceId,
+        target: Target,
         /// The samples, by reference.
         waveform: ArtifactRef,
         /// Whether the waveform repeats.
@@ -711,7 +795,7 @@ pub enum ActionTemplate {
     /// The `set_timer` Action without `at` (RS-49a).
     SetTimer {
         /// Whose timer.
-        target: ResourceId,
+        target: Target,
         /// The caller's token.
         token: u64,
     },
@@ -720,7 +804,7 @@ pub enum ActionTemplate {
     /// Spec named (RS-49a).
     UpdateParameter {
         /// Whose parameter.
-        target: ResourceId,
+        target: Target,
         /// Which parameter.
         key: Key,
         /// Its new value.
@@ -731,7 +815,7 @@ pub enum ActionTemplate {
     /// The `command` Action without `at` (RS-49a).
     Command {
         /// Whose verb.
-        target: ResourceId,
+        target: Target,
         /// The verb.
         verb: Ident,
         /// Its parameters.
@@ -741,7 +825,7 @@ pub enum ActionTemplate {
     /// The `stop` Action, which carries no time (RS-49a).
     Stop {
         /// The resource, or the Run when absent.
-        target: Option<ResourceId>,
+        target: Option<Target>,
     },
 }
 
@@ -770,9 +854,9 @@ impl ActionTemplate {
         }
     }
 
-    /// The resource a scheduled Action addresses, which SB-16 requires to name a
-    /// resource or an output the Spec itself declares (RS-49a, SB-16).
-    pub fn target(&self) -> Option<&ResourceId> {
+    /// What a scheduled Action addresses, which SB-16 requires to be declared by
+    /// the Spec itself in its role (RS-49a, SB-16).
+    pub fn target(&self) -> Option<&Target> {
         match self {
             ActionTemplate::TxBurst { target, .. }
             | ActionTemplate::SetTimer { target, .. }

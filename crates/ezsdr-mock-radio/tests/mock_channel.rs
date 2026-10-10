@@ -6,12 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, Binding, Violation};
-use ezsdr_kernel::event::{Action, ActionId, Event, EventCollector};
+use ezsdr_kernel::event::{Action, ActionId, Event, EventCollector, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId, RunId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
-    ActionReceiver, ActionSubmitter, AttachedPort, Endpoint, ExecutionClass, ModuleError, ModuleRef,
+    ActionReceiver, ActionSubmitter, AttachedPort, Endpoint, ModuleError, ModuleRef,
     Pacing, PrepareContext, ProfileRef, Provider, Requested, RfFidelity, Role, UpdateClass, Version,
 };
 use ezsdr_kernel::plan::Fragment;
@@ -27,6 +27,22 @@ use serde_json::json;
 const ROOT: ClockDomainId = ClockDomainId::local(7);
 
 fn rid(name: &str) -> ResourceId { ResourceId::parse(name).unwrap() }
+
+/// A resource target written as the node path the test resolves it to: the double plays
+/// KC-23 with `matched` the identity, `<resource>[/<path>]` (spec 27).
+fn tgt(path: &str) -> Target {
+    let (resource, rest) = path.split_once('/').unwrap_or((path, ""));
+    Target::Resource { resource: Ident::parse(resource).unwrap(), path: rest.to_owned() }
+}
+
+/// The node KC-23 resolves a test target to: the same path.
+fn node_of(action: &Action) -> Option<ResourceId> {
+    match action.target()? {
+        Target::Resource { resource, path } if path.is_empty() => Some(ResourceId::parse(resource.as_str()).unwrap()),
+        Target::Resource { resource, path } => Some(ResourceId::parse(&format!("{resource}/{path}")).unwrap()),
+        _ => None,
+    }
+}
 fn key(name: &str) -> Key { Key::parse(name).unwrap() }
 fn eq(value: Scalar) -> Constraint { Constraint::Eq { value } }
 
@@ -37,7 +53,7 @@ fn module_ref() -> ModuleRef {
 #[derive(Default)]
 struct Queue(Mutex<VecDeque<Action>>);
 impl ActionReceiver for Queue {
-    fn recv(&self) -> Option<Action> { self.0.lock().unwrap().pop_front() }
+    fn recv(&self) -> Option<(Action, Option<ResourceId>)> { self.0.lock().unwrap().pop_front().map(|action| { let node = node_of(&action); (action, node) }) }
 }
 
 struct Accepting;
@@ -125,25 +141,27 @@ fn prepare(world: &World, options: Options<'_>) -> Result<Radio, ModuleError> {
     ezsdr_sim::register(&mut registry, &mut checks, &mut kinds).unwrap();
     let event_kinds = kinds.kinds();
     let id = options.id.to_owned();
-    let pairs: Vec<_> = [rid(&id), rid(&format!("{id}/rx")), rid(&format!("{id}/tx"))].into_iter()
+    let pairs: Vec<_> = [rid(&id), rid(&format!("{id}/rx")), rid(&format!("{id}/tx"))].into_iter().map(|node| EventSource::Node { node })
         .flat_map(|source| event_kinds.iter().cloned().map(move |kind| (source.clone(), kind)))
         .collect();
     let events = Arc::new(EventCollector::new(&pairs, &event_kinds, 4096, &Policy::default()));
     let actions = Arc::new(Queue::default());
     let link = Arc::new(Sink::default());
-    let ctx = PrepareContext {
-        run: RunId::from_string("mock-channel".to_owned()),
-        class: ExecutionClass::Simulation,
-        time: world.auth.clone(),
-        clocks: world.clocks.clone(),
-        events: events.clone(),
-        actions: actions.clone(),
-        actions_out: Arc::new(Accepting),
-        environment: world.environment.clone(),
-        inputs: world.inputs.clone(),
-        links: vec![AttachedPort { component: Ident::parse(options.fragment).unwrap(), port: Ident::parse("rx").unwrap(), endpoint: Endpoint::StreamOut(link.clone()) }],
-        components: BTreeMap::new(),
-        host_budget: RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap(),
+    let ctx = {
+        let mut ctx = PrepareContext::testing(
+            EventSource::Node { node: rid(&id) },
+            world.auth.clone(),
+            world.clocks.clone(),
+            events.clone(),
+            actions.clone(),
+            Arc::new(Accepting),
+        );
+        ctx.run = RunId::from_string("mock-channel".to_owned());
+        ctx.environment = world.environment.clone();
+        ctx.inputs = world.inputs.clone();
+        ctx.links = vec![AttachedPort::new(Ident::parse(options.fragment).unwrap(), Ident::parse("rx").unwrap(), Endpoint::StreamOut(link.clone()))];
+        ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
+        ctx
     };
     let requested = Requested {
         resource: rid(&id),
@@ -184,7 +202,7 @@ impl Radio {
     fn section(&self, name: &str) -> serde_json::Value {
         // MR-27: every section name carries this instance's own id, so two Mocks in one
         // Run do not overwrite each other's records.
-        self.mock.instance().sections[&Namespace::parse(&format!("ezsdr.radio.mock.{}.{name}", self.id)).unwrap()].clone()
+        self.mock.instance().sections[&Namespace::parse(&format!("ezsdr.radio.mock.{name}")).unwrap()].clone()
     }
 
     fn drain_events(&self) -> Vec<Event> { self.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)) }
@@ -192,7 +210,7 @@ impl Radio {
 
 fn burst(radio: &Radio, world: &World, waveform: ArtifactRef, at: i64, repeat: bool) -> Action {
     Action::TxBurst {
-        target: rid(&format!("{}/tx", radio.id)),
+        target: tgt(&format!("{}/tx", radio.id)),
         waveform,
         repeat,
         at: AbsoluteDeadline::new(TimePoint::new(radio.tx_domain(world), at)),
@@ -203,7 +221,7 @@ fn burst(radio: &Radio, world: &World, waveform: ArtifactRef, at: i64, repeat: b
 }
 
 fn update(radio: &Radio, name: &str, value: Value, at: i64) -> Action {
-    Action::UpdateParameter { target: rid(&radio.id), key: key(name), value, class: UpdateClass::HardwareTimed, at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, at))) }
+    Action::UpdateParameter { target: tgt(&radio.id), key: key(name), value, class: UpdateClass::HardwareTimed, at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, at))) }
 }
 
 fn step(world: &World, radios: &mut [&mut Radio], tick: i64) {
@@ -594,7 +612,7 @@ fn mr_25_a_stopped_burst_transmits_every_sample_before_the_stop() {
         let held = world.waveform(&[(0.75, 0.75)]);
         radio.push(burst(&radio, &world, held, 4_000, true));
         step(&world, &mut [&mut radio], 2_000_001);
-        radio.push(Action::Stop { target: Some(rid("mock/tx")) });
+        radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
         step(&world, &mut [&mut radio], 2_500_500);
         step(&world, &mut [&mut radio], 6_000_001);
         let records: Vec<BurstRecord> = serde_json::from_value(radio.section("bursts")).unwrap();
@@ -811,7 +829,7 @@ fn ch_09_the_receive_output_does_not_depend_on_the_stepping_order() {
         a.push(burst(&a, &world, waveform, 1_999, false));
         order(&world, &mut a, &mut b, 1_999_000);
         order(&world, &mut a, &mut b, 1_999_001);
-        a.push(Action::Stop { target: Some(rid("dev_a/tx")) });
+        a.push(Action::Stop { target: Some(tgt("dev_a/tx")) });
         order(&world, &mut a, &mut b, 2_000_500);
         order(&world, &mut a, &mut b, 6_000_001);
         (b.received(0), samples)
@@ -856,7 +874,7 @@ fn mr_32_a_cold_transmit_change_ends_the_old_radiation() {
     let before = world.waveform(&[(0.5, 0.0)]);
     radio.push(burst(&radio, &world, before, 0, true));
     step(&world, &mut [&mut radio], 0);
-    radio.push(Action::UpdateParameter { target: rid("mock"), key: key("radio.tx.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: None });
+    radio.push(Action::UpdateParameter { target: tgt("mock"), key: key("radio.tx.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: None });
     step(&world, &mut [&mut radio], 2_000_500);
     let after = world.waveform(&[(0.0, 0.5)]);
     // RM-25: the new clock starts at 2 001 000, the lattice instant at or after the
@@ -885,7 +903,7 @@ fn mr_35_a_cold_receive_change_samples_the_field_on_the_new_clock() {
     let waveform = world.waveform(&samples);
     radio.push(burst(&radio, &world, waveform, 0, false));
     step(&world, &mut [&mut radio], 0);
-    radio.push(Action::UpdateParameter { target: rid("mock"), key: key("radio.rx.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: None });
+    radio.push(Action::UpdateParameter { target: tgt("mock"), key: key("radio.rx.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: None });
     step(&world, &mut [&mut radio], 1_000_000);
     step(&world, &mut [&mut radio], 4_000_001);
     let first_domain = world.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/rx")).unwrap().domain;
@@ -919,16 +937,16 @@ fn mr_25_a_stop_at_a_held_burst_s_start_silences_the_transmitter() {
         let (tick, reason) = match end {
             End::StopBefore => {
                 run_to(&world, &mut [&mut radio], 3_999_499);
-                radio.push(Action::Stop { target: Some(rid("mock/tx")) });
+                radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
                 (3_999_500, "cancelled by stop")
             }
             End::StopInTheRound => {
                 run_to(&world, &mut [&mut radio], 3_999_999);
-                radio.push(Action::Stop { target: Some(rid("mock/tx")) });
+                radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
                 (4_000_000, "cancelled by stop")
             }
             End::ColdChange => {
-                radio.push(Action::UpdateParameter { target: rid("mock"), key: key("radio.tx.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, 3_999_500))) });
+                radio.push(Action::UpdateParameter { target: tgt("mock"), key: key("radio.tx.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, 3_999_500))) });
                 run_to(&world, &mut [&mut radio], 3_999_499);
                 (3_999_500, "cancelled by a cold change")
             }
@@ -975,7 +993,7 @@ fn ch_09_a_burst_starting_between_rounds_survives_a_stop_in_either_order() {
             if due.ticks_in(ROOT).unwrap() >= 666_334 { break; }
             ordered(&world, &mut a, &mut b, due.ticks_in(ROOT).unwrap(), a_first);
         }
-        a.push(Action::Stop { target: Some(rid("dev_a/tx")) });
+        a.push(Action::Stop { target: Some(tgt("dev_a/tx")) });
         ordered(&world, &mut a, &mut b, 666_334, a_first);
         while let Some(due) = world.auth.next_due() {
             if due.ticks_in(ROOT).unwrap() > 2_000_001 { break; }
@@ -1009,7 +1027,7 @@ fn mr_32_a_two_channel_waveform_is_channel_interleaved() {
     let interleaved: Vec<(f32, f32)> = (0..2_000).flat_map(|n| [((n + 1) as f32 / 4096.0, 0.0), (0.0, (n + 1) as f32 / 4096.0)]).collect();
     let waveform = world.waveform(&interleaved);
     radio.push(Action::TxBurst {
-        target: rid("mock/tx"),
+        target: tgt("mock/tx"),
         waveform,
         repeat: false,
         at: AbsoluteDeadline::new(TimePoint::new(radio.tx_domain(&world), 0)),
@@ -1039,7 +1057,7 @@ fn mr_25_a_stop_on_a_sample_instant_does_not_transmit_that_sample() {
     radio.push(burst(&radio, &world, waveform, 0, true));
     step(&world, &mut [&mut radio], 0);
     step(&world, &mut [&mut radio], 2_000_001);
-    radio.push(Action::Stop { target: Some(rid("mock/tx")) });
+    radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
     step(&world, &mut [&mut radio], 2_500_000);
     step(&world, &mut [&mut radio], 4_000_001);
     assert_eq!(records(&radio)[0].samples, 2_500, "sample 2 500 is at the stop instant 2 500 000 and is not transmitted");
@@ -1102,7 +1120,7 @@ fn mr_32_a_stop_after_a_cold_change_keeps_the_old_clock_s_radiation() {
     a.push(burst(&a, &world, first, 0, true));
     a.push(burst(&a, &world, second, 1_500, true));
     step(&world, &mut [&mut a, &mut b], 0);
-    a.push(Action::UpdateParameter { target: rid("dev_a"), key: key("radio.tx.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, 2_000_500))) });
+    a.push(Action::UpdateParameter { target: tgt("dev_a"), key: key("radio.tx.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, 2_000_500))) });
     run_to(&world, &mut [&mut a, &mut b], 2_000_500);
     let samples = ramp(100);
     let third = world.waveform(&samples);
@@ -1111,7 +1129,7 @@ fn mr_32_a_stop_after_a_cold_change_keeps_the_old_clock_s_radiation() {
     a.push(burst(&a, &world, third, 2, false));
     step(&world, &mut [&mut a, &mut b], 2_001_000);
     run_to(&world, &mut [&mut a, &mut b], 2_002_249);
-    a.push(Action::Stop { target: Some(rid("dev_a/tx")) });
+    a.push(Action::Stop { target: Some(tgt("dev_a/tx")) });
     step(&world, &mut [&mut a, &mut b], 2_002_250);
     run_to(&world, &mut [&mut a, &mut b], 6_000_001);
     step(&world, &mut [&mut a, &mut b], 6_000_001);
@@ -1154,7 +1172,7 @@ fn mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused() {
         let second = world.waveform(&[(0.0, 0.5)]);
         radio.push(burst(&radio, &world, second, 1_000, true));
         step(&world, &mut [&mut radio], 1_000_000);
-        radio.push(Action::Stop { target: Some(rid("mock/tx")) });
+        radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
         step(&world, &mut [&mut radio], 3_000_500);
         step(&world, &mut [&mut radio], 6_000_001);
         assert_eq!(radio.section("rejected")[0]["reason"], refused);
@@ -1178,7 +1196,7 @@ fn mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused() {
     radio.push(burst(&radio, &world, third, 1_002, true));
     step(&world, &mut [&mut radio], 1_000_001);
     run_to(&world, &mut [&mut radio], 1_500_000);
-    radio.push(Action::Stop { target: Some(rid("mock/tx")) });
+    radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
     step(&world, &mut [&mut radio], 1_500_500);
     run_to(&world, &mut [&mut radio], 3_000_001);
     assert_eq!(radio.section("rejected").as_array().unwrap().len(), 1);
@@ -1208,7 +1226,7 @@ fn mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused() {
     let second = world.waveform(&[(0.0, 0.5)]);
     radio.push(burst(&radio, &world, second, 500, true));
     step(&world, &mut [&mut radio], 1_000_500);
-    radio.push(Action::Stop { target: Some(rid("mock/tx")) });
+    radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
     step(&world, &mut [&mut radio], 3_000_500);
     step(&world, &mut [&mut radio], 6_000_001);
     assert_eq!(radio.section("rejected"), json!([]));
@@ -1242,7 +1260,7 @@ fn mr_15_a_transmit_block_is_emitted_only_after_its_last_sample() {
     for (environment, medium) in [(loopback(None), true), (json!({}), false)] {
         // a stop: the burst transmits samples 0 … 998, is recorded with 999 and radiates 999
         let (world, mut radio) = first_pass(environment.clone(), medium, &samples, true);
-        radio.push(Action::Stop { target: Some(rid("mock/tx")) });
+        radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
         step(&world, &mut [&mut radio], 999_000);
         run_to(&world, &mut [&mut radio], 3_000_001);
         step(&world, &mut [&mut radio], 3_000_001);
@@ -1261,7 +1279,7 @@ fn mr_15_a_transmit_block_is_emitted_only_after_its_last_sample() {
         radio.push(burst(&radio, &world, second, 999, true));
         step(&world, &mut [&mut radio], 999_000);
         run_to(&world, &mut [&mut radio], 1_500_000);
-        radio.push(Action::Stop { target: Some(rid("mock/tx")) });
+        radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
         step(&world, &mut [&mut radio], 1_500_500);
         run_to(&world, &mut [&mut radio], 3_000_001);
         step(&world, &mut [&mut radio], 3_000_001);
@@ -1291,7 +1309,7 @@ fn mr_25_a_stop_transmits_every_held_burst_before_it() {
         a.push(burst(&a, &world, fourth, 3_000, true));
         ordered(&world, &mut a, &mut b, 0, a_first);
         ordered(&world, &mut a, &mut b, 1_000_000, a_first);
-        a.push(Action::Stop { target: Some(rid("dev_a/tx")) });
+        a.push(Action::Stop { target: Some(tgt("dev_a/tx")) });
         ordered(&world, &mut a, &mut b, 3_200_500, a_first);
         ordered(&world, &mut a, &mut b, 8_000_001, a_first);
         let summary: Vec<_> = records(&a).iter().map(|record| (record.samples, record.end)).collect();

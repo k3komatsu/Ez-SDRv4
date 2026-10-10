@@ -11,7 +11,10 @@ use crate::time::AbsoluteDeadline;
 use super::state::{Inst, Origin, Shared, contain, lock};
 
 pub(super) struct AdmittedAction {
+    /// As authored: the log and every record read in the Spec's own names (KC-23).
     pub(super) action: Action,
+    /// The node a `{resource}` target was resolved to, which a Provider matches on.
+    pub(super) node: Option<crate::id::ResourceId>,
     pub(super) inst: Inst,
     pub(super) fragment: Ident,
     pub(super) coercions: Vec<Coercion>,
@@ -61,14 +64,13 @@ pub(super) fn admit_with(
         _ => Ok(()),
     };
     values.map_err(|error| vec![violation("ezsdr.value", error.to_string())])?;
-    let target = action.target().cloned();
-    let (inst, fragment) = if let Some(target) = target {
-        let (rewritten, inst, fragment) = super::pipeline::rewrite_spec_target(shared, &target)
-            .map_err(|reason| vec![violation("ezsdr.target", reason)])?;
-        action = super::pipeline::rewrite_action(&action, rewritten);
-        (Some(inst), Some(fragment))
-    } else {
-        (None, None)
+    let (node, inst, fragment) = match action.target() {
+        Some(target) => {
+            let (node, inst, fragment) = super::pipeline::resolve_target(shared, target)
+                .map_err(|reason| vec![violation("ezsdr.target", reason)])?;
+            (node, Some(inst), Some(fragment))
+        }
+        None => (None, None, None),
     };
     let empty_classes = BTreeMap::new();
     let declared_classes = match (&action, inst) {
@@ -109,13 +111,13 @@ pub(super) fn admit_with(
                 "KC-19: SC-27: RejectAtPlan needs a statically known target",
             )]);
         }
-        let (Some(Inst::Provider(_)), Some(_)) = (inst, fragment.as_ref()) else {
+        let (Some(Inst::Provider(_)), Some(node)) = (inst, node.as_ref()) else {
             return Err(vec![violation(
                 "ezsdr.target",
-                format!("SC-23: {} is not a Provider stream", target.path()),
+                format!("SC-23: {target} is not a Provider stream"),
             )]);
         };
-        let Some(record) = shared.running_clock(target) else {
+        let Some(record) = shared.running_clock(node) else {
             return Err(vec![violation(
                 "ezsdr.target",
                 format!("SC-23: {target} has no running transmit SampleClock"),
@@ -259,6 +261,7 @@ pub(super) fn admit_with(
     };
     Ok(AdmittedAction {
         action,
+        node,
         inst,
         fragment,
         coercions: result.coercions,
@@ -276,7 +279,7 @@ pub(super) fn dispatch(shared: &Shared, admitted: AdmittedAction) -> (ActionId, 
             .or_default()
             .insert(key.clone(), value.clone());
     }
-    let pushed = shared.queue(admitted.inst).push(admitted.action);
+    let pushed = shared.queue(admitted.inst).push(admitted.action, admitted.node);
     (id, (admitted.inst, pushed))
 }
 

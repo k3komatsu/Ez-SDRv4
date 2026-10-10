@@ -18,9 +18,9 @@
 use std::sync::Arc;
 
 use ezsdr_exec_native::{Component, ComponentContext, Implementation};
-use ezsdr_kernel::event::Action;
+use ezsdr_kernel::event::{Action, Target};
 use ezsdr_kernel::hash::ContentHash;
-use ezsdr_kernel::id::{ClockDomainId, ResourceId};
+use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{Endpoint, ModuleError, StepOutcome};
 use ezsdr_kernel::spec::{Ident, Namespace, Scalar, Value};
@@ -48,7 +48,7 @@ pub mod params {
     pub const TURNAROUND_NS: &str = "ext.ezsdr.exec.native.ping.turnaround_ns";
     /// Quiet samples after which the next PING is answered (int).
     pub const REARM_SAMPLES: &str = "ext.ezsdr.exec.native.ping.rearm_samples";
-    /// The transmit stream, Spec-relative (str).
+    /// The transmit stream as a resource target, `<resource>/<path>` (str).
     pub const TARGET: &str = "ext.ezsdr.exec.native.ping.target";
     /// The PONG waveform's content hash, one of the Spec's inputs (str).
     pub const WAVEFORM: &str = "ext.ezsdr.exec.native.ping.waveform";
@@ -63,7 +63,7 @@ struct PingResponder {
     threshold: f64,
     turnaround_ns: i64,
     rearm: u64,
-    target: Option<ResourceId>,
+    target: Option<Target>,
     waveform: Option<ArtifactRef>,
     late_policy: Option<LatePolicy>,
     /// Quiet samples seen since the last loud one; the responder answers only once this
@@ -102,7 +102,9 @@ impl Component for PingResponder {
         self.turnaround_ns = *turnaround;
         self.rearm = *rearm as u64;
         self.quiet = self.rearm;
-        self.target = Some(ResourceId::parse(target).map_err(|_| wrong(params::TARGET))?);
+        let (resource, path) = target.split_once('/').unwrap_or((target, ""));
+        let resource = Ident::parse(resource).map_err(|_| wrong(params::TARGET))?;
+        self.target = Some(Target::Resource { resource, path: path.to_owned() });
         self.late_policy = Some(match policy.as_str() {
             "send_asap_and_flag" => LatePolicy::SendAsapAndFlag,
             "drop_and_flag" => LatePolicy::DropAndFlag,

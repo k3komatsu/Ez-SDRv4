@@ -6,9 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::binding::{AdmissionCheckRegistry, BindingProfile, CheckStage, Violation};
-use crate::event::{Action, ActionId};
+use crate::event::{Action, ActionId, Target};
 use crate::hash::ContentHash;
-use crate::id::ResourceId;
 use crate::module_api::{CompileRule, ModuleRegistry, Role, UpdateClass};
 use crate::plan::{apply_coercion, coercion_policy};
 use crate::run::RunError;
@@ -40,7 +39,7 @@ pub enum SessionAction {
     /// Generic over a namespaced key and value (RS-13a).
     SetParameter {
         /// Whose parameter.
-        target: ResourceId,
+        target: Target,
         /// Which parameter (SB-2).
         key: Key,
         /// Its new value (SB-4).
@@ -52,8 +51,8 @@ pub enum SessionAction {
         ns: Namespace,
         /// The verb.
         verb: Ident,
-        /// Whose resource.
-        target: ResourceId,
+        /// What the verb addresses: a resource, or an output for a recorder's verb.
+        target: Target,
         /// When. A Kernel field, not a param: SB-4 caps a `Value` at one level of
         /// nesting and a `TimePoint` is two, so a time could not travel inside
         /// `params` at all (RS-19).
@@ -65,7 +64,7 @@ pub enum SessionAction {
     /// With a target it stops that resource; without one it stops the Run (RS-50).
     Stop {
         /// The resource, or the Run when absent.
-        target: Option<ResourceId>,
+        target: Option<Target>,
     },
     /// Give up the Lease (RS-14).
     Release {},
@@ -398,7 +397,6 @@ pub fn compile(
     action: &SessionAction,
     registry: &ModuleRegistry,
     declared_classes: &BTreeMap<Key, UpdateClass>,
-    sinks: &BTreeSet<Ident>,
     earliest: TimePoint,
     waveform: Option<crate::manifest::ArtifactRef>,
 ) -> Result<Compiled, Vec<Violation>> {
@@ -470,46 +468,9 @@ pub fn compile(
             };
             match &decl.compiles_to {
                 CompileRule::UpdateParameter { key, class } => {
-                    // RS-14: "refused when it bound none". A capture has nowhere to
-                    // go unless the profile bound a recorder, and it is rejected
-                    // rather than silently buffered on the host.
-                    if sinks.is_empty() {
-                        return Err(reject(
-                            "ezsdr.placement",
-                            format!(
-                                "RS-14: {ns}.{verb} needs a recorder the profile bound, and it bound none"
-                            ),
-                        ));
-                    }
-                    // RS-14: the update targets the **Sink**, not the radio. A bound
-                    // Sink is addressed as its output id, because `SinkDescriptor`
-                    // carries no id of its own (SB-22; finding D17).
-                    let recorder = if sinks.len() == 1 {
-                        sinks.iter().next().expect("exactly one").clone()
-                    } else {
-                        let named = Ident::parse(target.path()).ok();
-                        match named.filter(|n| sinks.contains(n)) {
-                            Some(n) => n,
-                            None => {
-                                return Err(reject(
-                                    "ezsdr.placement",
-                                    format!(
-                                        "RS-14: {ns}.{verb} must name one of the {} bound recorders",
-                                        sinks.len()
-                                    ),
-                                ));
-                            }
-                        }
-                    };
-                    // A Provider's tree node ids are the Provider's own declaration
-                    // and are unconstrained relative to binding names, so minting a
-                    // Sink's address from the bare output id let the two namespaces
-                    // overlap: `TestProvider::new("rec", …)` and a Sink bound as
-                    // `rec` produced one `ResourceId` meaning two things, which no
-                    // dispatcher can route and no `Event.source` can attribute. The
-                    // `sink/` prefix keeps them disjoint by construction (SB-22).
-                    let recorder = ResourceId::parse(&format!("sink/{recorder}"))
-                        .map_err(|e| reject("ezsdr.placement", format!("RS-14: {e}")))?;
+                    // RS-14: the update goes to the target the verb names, like every
+                    // other target; `sink.capture` names its recorder's output, and
+                    // KC-23 refuses an output the Spec does not declare.
                     // RS-14, RS-19: `sink.capture` compiles to a **timed**
                     // UpdateParameter. `at` is either the instant the caller named
                     // or `earliest`, recorded above as a coercion; dropping it here
@@ -526,7 +487,7 @@ pub fn compile(
                         )
                     })?;
                     out.actions.push(Action::UpdateParameter {
-                        target: recorder,
+                        target: target.clone(),
                         key: key.clone(),
                         value,
                         class: *class,

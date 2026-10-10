@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use ezsdr_kernel::event::{Action, Event, EventKind, EventSink, Severity};
+use ezsdr_kernel::event::{Action, Event, EventKind, EventSink, EventSource, Severity};
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::module_api::{
     ActionReceiver, Authority, AuthorityDescriptor, CoerceReport, Endpoint, ModuleError,
@@ -288,6 +288,7 @@ impl Authority for WallAuthority {
 struct ThreadedCtx {
     name: String,
     id: ResourceId,
+    source: EventSource,
     probe: Probe,
     time: Arc<dyn TimeAuthority>,
     clocks: Arc<ClockRegistry>,
@@ -312,7 +313,7 @@ impl ThreadedCtx {
 
     fn emit(&self, kind: &str, severity: Severity, payload: serde_json::Value) {
         let _ = self.events.emit_control(Event {
-            source: self.id.clone(),
+            source: self.source.clone(),
             time: self.now(),
             severity,
             kind: EventKind::parse(kind).expect("a valid test kind"),
@@ -518,6 +519,7 @@ impl Provider for ThreadedProvider {
         self.ctx = Some(Arc::new(ThreadedCtx {
             name: self.name.clone(),
             id,
+            source: ctx.source.clone(),
             probe: self.probe.clone(),
             time: ctx.time.clone(),
             clocks: ctx.clocks.clone(),
@@ -565,7 +567,7 @@ impl Provider for ThreadedProvider {
             let mut took_one = false;
             while !flag.load(Ordering::Acquire) {
                 if !(ctx.never_finishing && took_one) {
-                    while let Some(action) = ctx.actions.recv() {
+                    while let Some((action, _)) = ctx.actions.recv() {
                         ctx.handle(action);
                         took_one = true;
                         if ctx.never_finishing {
@@ -617,7 +619,7 @@ impl Provider for ThreadedProvider {
         if let Some(d) = self.drain_after_stop {
             let until = std::time::Instant::now() + d;
             while std::time::Instant::now() < until {
-                while let Some(action) = ctx.actions.recv() {
+                while let Some((action, _)) = ctx.actions.recv() {
                     ctx.handle(action);
                 }
                 // A spin, not a sleep: a push after the freeze is cleared again by the

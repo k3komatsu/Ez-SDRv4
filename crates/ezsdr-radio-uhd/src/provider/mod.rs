@@ -21,7 +21,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration as Wall, Instant};
 
 use ezsdr_kernel::binding::Binding;
-use ezsdr_kernel::event::Severity;
+use ezsdr_kernel::event::{EventSource, Severity};
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::module_api::{
     ActionReceiver, CoerceReport, Driving, Endpoint, ExecutionClass, ModuleError,
@@ -47,8 +47,9 @@ fn rejected(message: impl Into<String>) -> ModuleError {
     ModuleError::rejected(message)
 }
 
-fn section(id: &Ident, suffix: &str) -> Namespace {
-    Namespace::parse(&format!("ezsdr.radio.uhd.{id}.{suffix}")).expect("a section name")
+/// `ezsdr.radio.uhd.<suffix>`; the Kernel files it under the instance's source root (RS-39).
+fn section(suffix: &str) -> Namespace {
+    Namespace::parse(&format!("ezsdr.radio.uhd.{suffix}")).expect("a section name")
 }
 
 const JOIN_BOUND: Wall = Wall::from_secs(1);
@@ -71,7 +72,6 @@ struct Running {
 /// The UHD Radio Provider (spec 18).
 pub struct UhdRadio {
     instance: ProviderInstance,
-    section_id: Ident,
     device: Arc<dyn Device>,
     clock_source: String,
     /// The epoch of the root its own Authority registers (UR-6).
@@ -113,8 +113,10 @@ impl UhdRadio {
         };
         let args = string("args")?.ok_or_else(|| rejected("UR-5: the selector needs `args`"))?;
         let id = string("id")?.unwrap_or_else(|| "usrp".to_owned());
-        let section_id = Ident::parse(&id).map_err(|_| rejected("UR-5: selector `id` must match ^[a-z][a-z0-9_]*$"))?;
-        let resource = ResourceId::parse(&id).map_err(|_| rejected("UR-5: selector `id` must be one resource segment"))?;
+        let resource = ResourceId::parse(&id)
+            .ok()
+            .filter(|resource| resource.segments().count() == 1)
+            .ok_or_else(|| rejected("UR-5: selector `id` must be one resource segment"))?;
         let source = |name: &str| -> Result<String, ModuleError> {
             let value = string(name)?.unwrap_or_else(|| "internal".to_owned());
             if ["internal", "external", "gpsdo"].contains(&value.as_str()) {
@@ -168,8 +170,8 @@ impl UhdRadio {
             object.insert("args".to_owned(), json!(args));
         }
         let mut sections = BTreeMap::new();
-        sections.insert(section(&section_id, "device"), describe);
-        sections.insert(section(&section_id, "envelope"), serde_json::to_value(description.envelope()).expect("an envelope"));
+        sections.insert(section("device"), describe);
+        sections.insert(section("envelope"), serde_json::to_value(description.envelope()).expect("an envelope"));
         let timing = description.timing;
         let instance = ProviderInstance {
             id: resource.clone(),
@@ -184,7 +186,6 @@ impl UhdRadio {
         };
         Ok(UhdRadio {
             instance,
-            section_id,
             device,
             clock_source,
             epoch,
@@ -257,10 +258,9 @@ impl UhdRadio {
 
     fn write_sections(&mut self, core: &Core) {
         let rec = lock(&core.rec);
-        let id = self.section_id.clone();
         let sections = &mut self.instance.sections;
         let mut put = |suffix: &str, value: Json| {
-            sections.insert(section(&id, suffix), value);
+            sections.insert(section(suffix), value);
         };
         put("applied", Json::Array(rec.applied.clone()));
         put("bursts", Json::Array(rec.bursts.clone()));
@@ -338,9 +338,13 @@ impl Provider for UhdRadio {
                 _ => return Err(rejected("UR-12: only a StreamOut link on this fragment's rx port may be attached")),
             }
         }
+        // KC-8: the Kernel names this instance's source root; its streams are below it.
+        let EventSource::Node { node: source_root } = ctx.source else {
+            return Err(rejected("KC-8: a Provider's event source root is a node"));
+        };
         let core = Arc::new(Core::new(
             self.device.clone(),
-            self.instance.id.clone(),
+            source_root,
             root,
             ctx.time.clone(),
             ctx.clocks.clone(),

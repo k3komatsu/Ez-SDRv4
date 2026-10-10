@@ -64,7 +64,7 @@
   "name": "the pass steps a Sink with the Kernel's step_until_quiescent",
   "file": "crates/ezsdr-kernel/src/coordinator/paced.rs",
   "old": "        Inst::Sink(i) => {\n            let mut guard = lock(&shared.sinks[i].object);\n            contain(|| guard.step(t))\n        }",
-  "new": "        Inst::Sink(i) => {\n            let mut guard = lock(&shared.sinks[i].object);\n            let collector = shared.collector.get().expect(\"a collector\").clone();\n            let mut instances = [crate::module_api::SteppedInstance { id: shared.first_fragment(inst), inner: crate::module_api::SteppedRef::Sink(&mut **guard) }];\n            crate::module_api::step_until_quiescent(&mut instances, t, &*collector, &super::state::kernel_source()).map(|_| StepOutcome { progressed: false })\n        }",
+  "new": "        Inst::Sink(i) => {\n            let mut guard = lock(&shared.sinks[i].object);\n            let collector = shared.collector.get().expect(\"a collector\").clone();\n            let mut instances = [crate::module_api::SteppedInstance { id: shared.first_fragment(inst), inner: crate::module_api::SteppedRef::Sink(&mut **guard) }];\n            crate::module_api::step_until_quiescent(&mut instances, t, &*collector).map(|_| StepOutcome { progressed: false })\n        }",
   "crate": "ezsdr-kernel",
   "test_bin": "device_paced",
   "filter": "kg_02_a_sink_that_always_progresses_does_not_livelock"
@@ -585,8 +585,8 @@
   "id": "U13",
   "name": "uhd-control takes the next Action before finishing the current",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "            while let Some(action) = self.actions.recv() {\n                if !self.core.is_lost() {\n                    self.book(action);\n                }\n                self.release();\n            }",
-  "new": "            let mut taken = Vec::new();\n            while let Some(action) = self.actions.recv() {\n                taken.push(action);\n            }\n            for action in taken {\n                if !self.core.is_lost() {\n                    self.book(action);\n                }\n                self.release();\n            }",
+  "old": "            while let Some((action, node)) = self.actions.recv() {\n                if !self.core.is_lost() {\n                    self.book(action, node);\n                }\n                self.release();\n            }",
+  "new": "            let mut taken = Vec::new();\n            while let Some(pair) = self.actions.recv() {\n                taken.push(pair);\n            }\n            for (action, node) in taken {\n                if !self.core.is_lost() {\n                    self.book(action, node);\n                }\n                self.release();\n            }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_14_actions_are_finished_before_the_next_recv"
@@ -718,7 +718,7 @@
   "name": "RX_OVERFLOW emitted with emit_control",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
   "old": "if let Err(error) = self.core.events.emit(self.core.overflow, at, Severity::Warning, &payload.to_hot()) {",
-  "new": "if let Err(error) = self.core.events.emit_control(ezsdr_kernel::event::Event { source: self.core.rx_id.clone(), time: at, severity: Severity::Warning, kind: ezsdr_kernel::event::EventKind::parse(kinds::RX_OVERFLOW).expect(\"a kind\"), payload: serde_json::to_value(&payload).expect(\"a payload\") }) {",
+  "new": "if let Err(error) = self.core.events.emit_control(ezsdr_kernel::event::Event { source: ezsdr_kernel::event::EventSource::Node { node: self.core.rx_id.clone() }, time: at, severity: Severity::Warning, kind: ezsdr_kernel::event::EventKind::parse(kinds::RX_OVERFLOW).expect(\"a kind\"), payload: serde_json::to_value(&payload).expect(\"a payload\") }) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_19_reports_before_one_block_keep_each_kind"

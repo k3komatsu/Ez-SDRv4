@@ -8,11 +8,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, Binding, Violation};
-use ezsdr_kernel::event::{Action, ActionId, EventCollector};
+use ezsdr_kernel::event::{Action, ActionId, EventCollector, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId, RunId};
 use ezsdr_kernel::module_api::{
-    ActionReceiver, ActionSubmitter, AttachedPort, Endpoint, ExecutionClass, ModuleErrorKind, ModuleRef, Pacing,
+    ActionReceiver, ActionSubmitter, AttachedPort, Endpoint, ModuleErrorKind, ModuleRef, Pacing,
     PrepareContext, ProfileRef, Provider, Requested, Role, UpdateClass, Version,
 };
 use ezsdr_kernel::plan::Fragment;
@@ -279,8 +279,11 @@ fn name(fault: Fault) -> &'static str {
 struct Queue(Mutex<VecDeque<Action>>);
 
 impl ActionReceiver for Queue {
-    fn recv(&self) -> Option<Action> {
-        self.0.lock().unwrap().pop_front()
+    fn recv(&self) -> Option<(Action, Option<ResourceId>)> {
+        self.0.lock().unwrap().pop_front().map(|action| {
+            let node = node_of(&action);
+            (action, node)
+        })
     }
 }
 
@@ -314,6 +317,26 @@ fn rid(name: &str) -> ResourceId {
     ResourceId::parse(name).unwrap()
 }
 
+/// A resource target written as the node path the test resolves it to: the double plays
+/// KC-23 with `matched` the identity, `<resource>[/<path>]` (spec 27).
+fn tgt(path: &str) -> Target {
+    let (resource, rest) = path.split_once('/').unwrap_or((path, ""));
+    Target::Resource { resource: Ident::parse(resource).unwrap(), path: rest.to_owned() }
+}
+
+/// The node KC-23 resolves a test target to: the same path.
+fn node_of(action: &Action) -> Option<ResourceId> {
+    match action.target()? {
+        Target::Resource { resource, path } if path.is_empty() => Some(ResourceId::parse(resource.as_str()).unwrap()),
+        Target::Resource { resource, path } => Some(ResourceId::parse(&format!("{resource}/{path}")).unwrap()),
+        _ => None,
+    }
+}
+
+fn node_src(path: &str) -> EventSource {
+    EventSource::Node { node: ResourceId::parse(path).unwrap() }
+}
+
 /// Runs a sequence on MockRadio 1.5.0: each round's Actions are stepped at its instant,
 /// then the Run is stepped to the horizon.
 fn run(profile: &str, sequence: &Sequence) -> Record {
@@ -334,26 +357,28 @@ fn run(profile: &str, sequence: &Sequence) -> Record {
     ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
     ezsdr_sim::register(&mut registry, &mut checks, &mut kinds).unwrap();
     let all = kinds.kinds();
-    let pairs: Vec<_> = ["mock", "mock/rx", "mock/tx"].iter().flat_map(|s| all.iter().map(move |k| (rid(s), k.clone()))).collect();
+    let pairs: Vec<_> = ["mock", "mock/rx", "mock/tx"].iter().flat_map(|s| all.iter().map(move |k| (node_src(s), k.clone()))).collect();
     let events = Arc::new(EventCollector::new(&pairs, &all, 4096, &Policy::default()));
     let actions = Arc::new(Queue::default());
     let link = Arc::new(Headers::default());
     let faults: Vec<_> = sequence.faults.iter().map(|(at, fault)| serde_json::json!({ "at_ns": at, "fault": name(*fault), "target": "radio" })).collect();
     let constraints = [("radio.rx.channels", Scalar::from(1)), ("radio.tx.channels", Scalar::from(1))]
         .map(|(name, value)| (key(name), Constraint::Eq { value }));
-    let ctx = PrepareContext {
-        run: RunId::from_string("timeline".to_owned()),
-        class: ExecutionClass::Simulation,
-        time: auth.clone(),
-        clocks: clocks.clone(),
-        events,
-        actions: actions.clone(),
-        actions_out: Arc::new(NoSubmitter),
-        environment: Arc::new(BTreeMap::from([(Namespace::parse("sim.faults").unwrap(), serde_json::json!(faults))])),
-        inputs: Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new()),
-        links: vec![AttachedPort { component: Ident::parse("radio").unwrap(), port: Ident::parse("rx").unwrap(), endpoint: Endpoint::StreamOut(link.clone()) }],
-        components: BTreeMap::new(),
-        host_budget: RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap(),
+    let ctx = {
+        let mut ctx = PrepareContext::testing(
+            EventSource::Node { node: rid("mock") },
+            auth.clone(),
+            clocks.clone(),
+            events,
+            actions.clone(),
+            Arc::new(NoSubmitter),
+        );
+        ctx.run = RunId::from_string("timeline".to_owned());
+        ctx.environment = Arc::new(BTreeMap::from([(Namespace::parse("sim.faults").unwrap(), serde_json::json!(faults))]));
+        ctx.inputs = Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new());
+        ctx.links = vec![AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse("rx").unwrap(), Endpoint::StreamOut(link.clone()))];
+        ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
+        ctx
     };
     let fragment = Fragment {
         id: Ident::parse("radio").unwrap(),
@@ -378,17 +403,17 @@ fn run(profile: &str, sequence: &Sequence) -> Record {
         for op in ops {
             let mut queue = actions.0.lock().unwrap();
             queue.push_back(match *op {
-                Op::Stop { device } => Action::Stop { target: Some(rid(if device { "mock" } else { "mock/rx" })) },
-                Op::StartRx => Action::Command { target: rid("mock/rx"), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None },
+                Op::Stop { device } => Action::Stop { target: Some(tgt(if device { "mock" } else { "mock/rx" })) },
+                Op::StartRx => Action::Command { target: tgt("mock/rx"), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None },
                 Op::Cold { direction, change, at_ns } => {
                     let (name, value) = match change {
                         Change::Channels(n) => ("channels", Value::from(i64::from(n))),
                         Change::Rate(rate) => ("sample_rate_hz", Value::num(rate as f64).unwrap()),
                     };
-                    Action::UpdateParameter { target: rid("mock"), key: key(&format!("radio.{}.{name}", side(direction))), value, class: UpdateClass::Cold, at: at(at_ns) }
+                    Action::UpdateParameter { target: tgt("mock"), key: key(&format!("radio.{}.{name}", side(direction))), value, class: UpdateClass::Cold, at: at(at_ns) }
                 }
                 Op::Timed { direction, gain_db, at_ns } => Action::UpdateParameter {
-                    target: rid("mock"), key: key(&format!("radio.{}.gain_db", side(direction))), value: Value::num(gain_db).unwrap(), class: UpdateClass::HardwareTimed, at: at(at_ns),
+                    target: tgt("mock"), key: key(&format!("radio.{}.gain_db", side(direction))), value: Value::num(gain_db).unwrap(), class: UpdateClass::HardwareTimed, at: at(at_ns),
                 },
             });
         }
@@ -398,7 +423,7 @@ fn run(profile: &str, sequence: &Sequence) -> Record {
     let records = clocks.sample_clock_records();
     let clocks_of = |stream: &str| records.iter().filter(|r| r.stream == rid(stream)).map(|r| (r.origin.ticks_in(ROOT).unwrap(), r.ended_at.map(|t| t.ticks_in(ROOT).unwrap()))).collect();
     let domains: Vec<_> = records.iter().filter(|r| r.stream == rid("mock/rx")).map(|r| r.domain).collect();
-    let section = |name: &str| mock.instance().sections[&Namespace::parse(&format!("ezsdr.radio.mock.mock.{name}")).unwrap()].clone();
+    let section = |name: &str| mock.instance().sections[&Namespace::parse(&format!("ezsdr.radio.mock.{name}")).unwrap()].clone();
     let rows = |name: &str| section(name).as_array().unwrap().clone();
     let applied: Vec<_> = rows("applied").iter().map(|r| (r["key"].as_str().unwrap().to_owned(), r["value"].as_f64().unwrap(), r["at"]["ticks"].as_i64().unwrap())).collect();
     Record {

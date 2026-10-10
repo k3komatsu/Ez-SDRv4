@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use ezsdr_exec_native::{Implementation, NativeExecutor};
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, BindingProfile};
-use ezsdr_kernel::contract::ContractRegistry;
 use ezsdr_kernel::coordinator::Assembly;
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::module_api::{Authority, Executor, Factories, Link, ModuleRef, ModuleRegistry, Provider, Sink};
@@ -159,21 +158,16 @@ pub fn assemble(
         }
         links.insert(module, Box::new(ezsdr_link_host::HostLinkModule::new()));
     }
-    Ok(Assembly {
-        registry,
-        checks,
-        kinds,
-        contracts: ContractRegistry::with_standard_contracts(),
-        clocks,
-        host_clock: Arc::new(ezsdr_kernel::run::SystemHostClock::new()),
-        providers,
-        executors,
-        sinks,
-        authority: authority.expect("the authority's binding was built above"),
-        links,
-        inputs,
-        spec_source: None,
-    })
+    let mut assembly = Assembly::new(authority.expect("the authority's binding was built above"), clocks);
+    assembly.registry = registry;
+    assembly.checks = checks;
+    assembly.kinds = kinds;
+    assembly.providers = providers;
+    assembly.executors = executors;
+    assembly.sinks = sinks;
+    assembly.links = links;
+    assembly.inputs = inputs;
+    Ok(assembly)
 }
 
 /// The Assembly a device-paced Session hands `run_child`: no Provider, Sink, Executor
@@ -182,21 +176,7 @@ pub fn assemble(
 /// Assembly must hold one.
 pub fn empty_assembly() -> Assembly {
     let clocks = Arc::new(ClockRegistry::new());
-    Assembly {
-        registry: ModuleRegistry::new(),
-        checks: AdmissionCheckRegistry::new(),
-        kinds: EventKindRegistry::with_kernel_kinds(),
-        contracts: ContractRegistry::with_standard_contracts(),
-        clocks: clocks.clone(),
-        host_clock: Arc::new(ezsdr_kernel::run::SystemHostClock::new()),
-        providers: BTreeMap::new(),
-        executors: BTreeMap::new(),
-        sinks: BTreeMap::new(),
-        authority: Box::new(ezsdr_sim_engine::SimEngine::new(clocks).expect("a fresh registry takes a root")),
-        links: BTreeMap::new(),
-        inputs: BTreeMap::new(),
-        spec_source: None,
-    }
+    Assembly::new(Box::new(ezsdr_sim_engine::SimEngine::new(clocks.clone()).expect("a fresh registry takes a root")), clocks)
 }
 
 /// The BindingProfile `connect` uses when the client names none (EA-9).

@@ -127,7 +127,7 @@ fn ping_pong(temp: &rig::TempDir, ping: Ping<'_>) -> (Manifest, Vec<(f32, f32)>)
 }
 
 fn bursts(manifest: &Manifest, device: &str) -> Vec<BurstRecord> {
-    serde_json::from_value(section(manifest, &format!("ezsdr.radio.mock.{device}.bursts")).clone()).unwrap()
+    serde_json::from_value(section(manifest, device, "ezsdr.radio.mock.bursts").clone()).unwrap()
 }
 
 fn time_errors(manifest: &Manifest) -> Vec<serde_json::Value> {
@@ -215,7 +215,7 @@ fn v58_09_a_pong_short_of_the_lead_is_late_as_on_hardware() {
     assert_eq!((errors[0]["cause"].as_str(), errors[0]["outcome"].as_str()), (Some("late"), Some("drop")));
     assert_eq!(errors[0]["late_by_ns"], json!(2_954_000));
     assert_eq!(errors[0]["target"]["ticks"], json!(TX_AT_T0 + 11_046));
-    assert_eq!(section(&dropped, "ezsdr.radio.mock.dev_b.rejected")[0]["reason"], json!("MR-17: the late policy dropped the burst"));
+    assert_eq!(section(&dropped, "dev_b", "ezsdr.radio.mock.rejected")[0]["reason"], json!("MR-17: the late policy dropped the burst"));
     assert_eq!(heard(&capture), None);
 
     // The same under send_asap_and_flag: sent at 14 000, both targets recorded (SC-28).
@@ -277,7 +277,7 @@ fn v58_12_a_reactor_answers_whatever_the_block_lengths() {
     assert_eq!(bursts(&plain, "dev_b").iter().map(decision).collect::<Vec<_>>(), bursts(&jittered, "dev_b").iter().map(decision).collect::<Vec<_>>());
     assert_eq!(plain_capture, jittered_capture);
     // … and the blocks really differed, or the equality proves nothing.
-    let blocks = |manifest: &Manifest| section(manifest, "ezsdr.radio.mock.dev_b.stats")["rx_blocks"].clone();
+    let blocks = |manifest: &Manifest| section(manifest, "dev_b", "ezsdr.radio.mock.stats")["rx_blocks"].clone();
     assert_ne!(blocks(&plain), blocks(&jittered));
 
     // A PING that straddles a block boundary is one PING, whatever seed: at 11 500 its
@@ -334,7 +334,7 @@ fn ke_03_a_decision_after_the_stop_is_not_an_abort() {
     clean_stop(&manifest);
     let pinged = bursts(&manifest, "dev_a");
     assert_eq!((pinged.len(), pinged[0].samples), (1, 80), "{pinged:?}");
-    assert!(section(&manifest, "ezsdr.radio.mock.dev_b.stats")["rx_samples"].as_u64().unwrap() > 26_006, "the PING's first sample was delivered");
+    assert!(section(&manifest, "dev_b", "ezsdr.radio.mock.stats")["rx_samples"].as_u64().unwrap() > 26_006, "the PING's first sample was delivered");
     assert!(bursts(&manifest, "dev_b").is_empty());
 }
 

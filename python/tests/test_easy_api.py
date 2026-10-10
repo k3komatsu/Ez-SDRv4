@@ -159,7 +159,9 @@ class EasyApi(unittest.TestCase):
         self.assertEqual([c["seq"] for c in children], [r.entry["seq"] for r in results])
         self.assertEqual([c["run"] for c in children], [r.manifest["run"]["id"] for r in results])
 
-    def test_ea_05_oversized_sink_address_preserves_the_session(self) -> None:
+    def test_ea_05_a_failed_child_preserves_the_session(self) -> None:
+        # An output id needs no derived address (SB-22), so this long one is valid; its
+        # capture file's name is not, and the child fails while running (HD-10).
         with self.connect() as sdr:
             name = "a" * 252
             profile = copy.deepcopy(sdr.profile)
@@ -176,7 +178,7 @@ class EasyApi(unittest.TestCase):
                              "feed": {"port": {"component": "radio", "port": "rx"}, "policy": "drop_oldest", "capacity": 64}}],
             }
             result = sdr.run(spec, profile=profile, duration=0.001)
-            self.assertEqual((result.termination["kind"], result.termination["stage"]), ("failed", "validate"))
+            self.assertEqual((result.termination["kind"], result.termination["stage"]), ("failed", "run"))
             self.assertTrue(result.termination["reason"], result.termination)
             self.assertEqual(result.manifest["artifacts"], [])
             self.assertEqual(sdr.rx.capture(1).shape, (1,), "parent Session is still usable")
@@ -239,7 +241,7 @@ class EasyApi(unittest.TestCase):
     def test_ea_16_events_and_wait_for(self) -> None:
         with self.connect() as sdr:
             entry = sdr.submit({
-                "kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"node": 0, "path": "rec"},
+                "kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"kind": "output", "output": "rec"},
                 "at": None, "params": {"sink.capture_samples": 500},
             })
             self.assertEqual(entry["outcome"]["kind"], "admitted")
@@ -270,21 +272,21 @@ class EasyApi(unittest.TestCase):
                 sdr.rx.capture(1_000_000, timeout=0.001)
             self.assertEqual(sdr.rx.capture(100, timeout=3.0).shape, (100,), "not the timed-out request's million")
             raw = sdr.submit({
-                "kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"node": 0, "path": "rec"},
+                "kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"kind": "output", "output": "rec"},
                 "at": None, "params": {"sink.capture_samples": 777},
             })
             self.assertEqual(raw["outcome"]["kind"], "admitted")
             self.assertEqual(sdr.rx.capture(100).shape, (100,), "not the raw request's 777")
-            # The Kernel routes a capture to the only recorder whatever its target names, and a
-            # SetParameter of sink.capture_samples on sink/rec is a request too; a capture the
-            # Kernel rejects reaches no recorder (Review I, P0-A, P1-D).
-            for action in (
-                {"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"node": 0, "path": "radio/rx"}, "at": None, "params": {"sink.capture_samples": 333}},
-                {"kind": "set_parameter", "target": {"node": 0, "path": "sink/rec"}, "key": "sink.capture_samples", "value": 555},
+            # A SetParameter of sink.capture_samples on the output is a request too; a capture
+            # naming a resource goes to that resource, which refuses the key, and takes no
+            # number (#54; RS-14, RS-17).
+            for action, outcome in (
+                ({"kind": "set_parameter", "target": {"kind": "output", "output": "rec"}, "key": "sink.capture_samples", "value": 555}, "admitted"),
+                ({"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"kind": "resource", "resource": "radio", "path": "rx"}, "at": None, "params": {"sink.capture_samples": 333}}, "rejected"),
             ):
-                self.assertEqual(sdr.submit(action)["outcome"]["kind"], "admitted")
+                self.assertEqual(sdr.submit(action)["outcome"]["kind"], outcome)
                 self.assertEqual(sdr.rx.capture(100).shape, (100,), f"not {action['kind']}'s request")
-            rejected = sdr.submit({"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"node": 0, "path": "rec"}, "at": None, "params": {}})
+            rejected = sdr.submit({"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"kind": "output", "output": "rec"}, "at": None, "params": {}})
             self.assertEqual(rejected["outcome"]["kind"], "rejected")
             self.assertEqual(sdr.rx.capture(100).shape, (100,), "a rejected capture takes no number")
 
@@ -293,7 +295,7 @@ class EasyApi(unittest.TestCase):
         # P2-5; Review I, P1-D): the raw 10 000-sample request is written at ~10 ms, this
         # capture's at ~16 ms, and 12 ms is the whole budget.
         with self.connect() as sdr:
-            sdr.submit({"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"node": 0, "path": "rec"}, "at": None, "params": {"sink.capture_samples": 10_000}})
+            sdr.submit({"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"kind": "output", "output": "rec"}, "at": None, "params": {"sink.capture_samples": 10_000}})
             with self.assertRaises(ezsdr.CaptureTimeout):
                 sdr.rx.capture(5000, timeout=0.012)
             written = [e for e in sdr.events() if e["kind"] == ezsdr.session.CAPTURE_WRITTEN]
@@ -354,7 +356,7 @@ class EasyApi(unittest.TestCase):
         np.testing.assert_allclose(y[:start], 0, atol=1e-6)
         offset, _ = rotation(y[start:], x)
         self.assertEqual(offset, 0)
-        counts = {c["kind"]: c["count"] for c in sdr.manifest["events"]["counters"] if c["source"]["path"] == "radio"}
+        counts = {c["kind"]: c["count"] for c in sdr.manifest["events"]["counters"] if c["source"] == {"kind": "node", "node": {"node": 0, "path": "radio"}}}
         self.assertEqual(counts["radio.TIME_ERROR"], 0)
 
     def test_ea_16_aligned_gives_its_calls_one_instant(self) -> None:
@@ -436,7 +438,7 @@ class EasyApi(unittest.TestCase):
     def test_ea_17_a_capture_across_a_rate_change_is_refused(self) -> None:
         with self.connect() as sdr:
             sdr.submit({
-                "kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"node": 0, "path": "rec"},
+                "kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"kind": "output", "output": "rec"},
                 "at": None, "params": {"sink.capture_samples": 20_000},
             })
             sdr.sleep(0.005)
@@ -664,7 +666,7 @@ class DurationRequests(unittest.TestCase):
         sdr = self.session({})
         horizon = {"domain": {"node": 0, "path": "clock"}, "ticks": 12}
         sdr._connection.call.side_effect = [
-            ({"index": 3, "horizon": horizon, "event": {"source": {"node": 0, "path": "sink/other"}, "payload": {"request": 0}}}, b""),
+            ({"index": 3, "horizon": horizon, "event": {"source": {"kind": "output", "output": "other"}, "payload": {"request": 0}}}, b""),
             ({"index": None}, b""),
         ]
         handle = ezsdr.session.CaptureRequest("rec", 0, 1, 2, {})
@@ -675,6 +677,28 @@ class DurationRequests(unittest.TestCase):
             {"op": "wait_for", "kinds": [ezsdr.session.CAPTURE_WRITTEN, ezsdr.session.REQUEST_REJECTED], "from": 2, "within": {"domain": self.ROOT, "ticks": 1}},
             {"op": "wait_for", "kinds": [ezsdr.session.CAPTURE_WRITTEN, ezsdr.session.REQUEST_REJECTED], "from": 4, "until": horizon},
         ])
+
+
+class Targets(unittest.TestCase):
+    """The typed targets the wire carries (KC-23, EA-16; spec 27)."""
+
+    def test_ea_16_set_and_stop_take_a_target_or_a_resource_string(self) -> None:
+        self.assertEqual(ezsdr.Target.resource("radio", "rx"), {"kind": "resource", "resource": "radio", "path": "rx"})
+        self.assertEqual(ezsdr.Target.output("rec"), {"kind": "output", "output": "rec"})
+        self.assertEqual(ezsdr.Target.component("c1"), {"kind": "component", "component": "c1"})
+        sdr = DurationRequests.session(DurationRequests(), {"entry": {"outcome": {"kind": "admitted"}}})
+        sent = lambda: sdr._connection.call.call_args.args[0]["action"]["target"]
+        # A string is always a resource target, never a role read from a prefix.
+        for string, target in [("radio", ezsdr.Target.resource("radio")), ("radio/rx", ezsdr.Target.resource("radio", "rx")),
+                               ("sink/rec", ezsdr.Target.resource("sink", "rec"))]:
+            sdr.set(string, "radio.rx.gain_db", 1.0)
+            self.assertEqual(sent(), target)
+            sdr.stop(string)
+            self.assertEqual(sent(), target)
+        sdr.stop(ezsdr.Target.output("rec"))
+        self.assertEqual(sent(), {"kind": "output", "output": "rec"})
+        sdr.stop()
+        self.assertIsNone(sent())
 
 
 class RecorderChoice(unittest.TestCase):
@@ -704,7 +728,7 @@ class RecorderChoice(unittest.TestCase):
                 if error is None:
                     self.assertEqual(rx.request(100).recorder, "rec_a")
                     action = connection.call.call_args.args[0]["action"]
-                    self.assertEqual((action["ns"], action["verb"], action["target"]["path"]), ("sink", "capture", "rec_a"))
+                    self.assertEqual((action["ns"], action["verb"], action["target"]), ("sink", "capture", {"kind": "output", "output": "rec_a"}))
                 else:
                     with self.assertRaises(ezsdr.Error) as raised:
                         rx.request(100)

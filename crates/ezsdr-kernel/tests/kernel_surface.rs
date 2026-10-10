@@ -490,7 +490,10 @@ fn ov_23b_kernel_growth_is_the_new_count() {
     // 115 of 292: pre-freeze item 1b moved the one scalar type to `spec::Scalar` and
     // added `spec::Finite` (SB-4), both NEW:. 114 of 291: with every Kernel float a
     // `Finite`, `hash::serialize_finite_f64` (a NEW: item) had no caller left.
-    assert_eq!((new.len(), total), (114, 291), "OV-23b, GZ-2: the Kernel's public surface changed");
+    // 113 of 293: pre-freeze item 2a typed targets and sources: `event::Target` (Action
+    // set), `event::EventSource` (Event envelope) and `manifest::ModuleSection`
+    // (Manifest envelope) were added, and `coordinator::KERNEL_SOURCE` (NEW:) removed.
+    assert_eq!((new.len(), total), (113, 293), "OV-23b, GZ-2: the Kernel's public surface changed");
 }
 
 #[test]

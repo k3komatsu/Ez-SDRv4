@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, BindingProfile, CheckStage, Placements};
 use ezsdr_kernel::event::{
-    Action, ActionTemplate, CounterRow, Event, EventCollector, EventKind, EventSink, Severity,
+    Action, ActionTemplate, CounterRow, Event, EventCollector, EventKind, EventSink, EventSource,
+    Severity, Target,
 };
 use ezsdr_kernel::hash::ContentHash;
-use ezsdr_kernel::id::{ClockDomainId, ResourceId, RunId};
+use ezsdr_kernel::id::{ClockDomainId, RunId};
 use ezsdr_kernel::manifest::{
     ArtifactRef, BindingSection, ClocksSection, EventsSection, Manifest, PrepareSection, RunKind,
     RunSection, SpecSection, TerminationSection, ingest_input, mark_open_artifacts,
@@ -32,7 +33,7 @@ use ezsdr_kernel::stream::{BlockFlags, ContinuityBuilder, DropCarry, LatePolicy}
 use ezsdr_kernel::time::{AbsoluteDeadline, TimePoint};
 use support::{
     FakeHostClock, RecordingCleanup, TestLimitsCheck, TestProvider, TestSink, id, key, mref, ns,
-    rid, some_hash, test_provider_descriptor, test_sink_descriptor, test_vocabulary,
+    some_hash, test_provider_descriptor, test_sink_descriptor, test_vocabulary,
 };
 
 fn t(ticks: i64) -> TimePoint {
@@ -505,15 +506,15 @@ fn rs_36_an_unforeseen_source_does_not_silence_the_abort() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
     let fatal = EventKind::parse(EventKind::DEVICE_LOST).expect("parses");
     // Delivered, the body keeps its kind, and the Policy aborts on it (KC-31).
-    let c = collector(8, &policy, &[(rid("radio"), fatal.clone())]);
-    let h = c.resolve(&rid("radio2"), &fatal);
+    let c = collector(8, &policy, &[(support::node_source("radio"), fatal.clone())]);
+    let h = c.resolve(&support::node_source("radio2"), &fatal);
     c.emit(h, t(0), Severity::Fatal, &[]).expect("emits");
     let drained = c.drain(t(9));
     assert!(drained.iter().any(|e| e.kind == fatal), "the delivered body keeps its kind");
     assert_eq!(policy.reaction_for_event(&fatal, Severity::Fatal), Reaction::Abort);
     // Dropped (the ring full), the escalation flag keeps the kind (RS-36).
-    let c = collector(1, &policy, &[(rid("radio"), fatal.clone())]);
-    let h = c.resolve(&rid("radio2"), &fatal);
+    let c = collector(1, &policy, &[(support::node_source("radio"), fatal.clone())]);
+    let h = c.resolve(&support::node_source("radio2"), &fatal);
     c.emit(h, t(0), Severity::Fatal, &[]).expect("emits");
     c.emit(h, t(1), Severity::Fatal, &[]).expect("emits");
     assert_eq!(
@@ -531,12 +532,12 @@ fn rs_36_a_delivered_body_raises_no_escalation_flag() {
     // body arrived. Only a dropped body raises one.
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
     let fatal = EventKind::parse(EventKind::DEVICE_LOST).expect("parses");
-    let c = collector(8, &policy, &[(rid("radio"), fatal.clone())]);
-    let h = c.resolve(&rid("radio"), &fatal);
+    let c = collector(8, &policy, &[(support::node_source("radio"), fatal.clone())]);
+    let h = c.resolve(&support::node_source("radio"), &fatal);
     c.emit(h, t(0), Severity::Fatal, &[]).expect("emits");
     assert!(c.escalation().is_none(), "a queued hot-path body raises no flag");
     c.emit_control(ezsdr_kernel::event::Event {
-        source: rid("radio"),
+        source: support::node_source("radio"),
         time: t(1),
         severity: Severity::Fatal,
         kind: fatal.clone(),
@@ -556,9 +557,9 @@ fn rs_29_an_unregistered_fatal_kind_escalates() {
     let c = collector(
         8,
         &policy,
-        &[(rid("radio"), EventKind::parse("test.custom").expect("k"))],
+        &[(support::node_source("radio"), EventKind::parse("test.custom").expect("k"))],
     );
-    let h = c.resolve(&rid("radio"), &unknown);
+    let h = c.resolve(&support::node_source("radio"), &unknown);
     assert_eq!(policy.reaction_for_event(&unknown, Severity::Fatal), Reaction::Abort);
     // A dropped body of it escalates (RS-36; a ring of 8, filled first).
     for _ in 0..9 {
@@ -570,9 +571,9 @@ fn rs_29_an_unregistered_fatal_kind_escalates() {
     let c = collector(
         8,
         &policy,
-        &[(rid("radio"), EventKind::parse("test.custom").expect("k"))],
+        &[(support::node_source("radio"), EventKind::parse("test.custom").expect("k"))],
     );
-    let h = c.resolve(&rid("radio"), &unknown);
+    let h = c.resolve(&support::node_source("radio"), &unknown);
     c.emit(h, t(0), Severity::Info, &[]).expect("emits");
     assert!(c.escalation().is_none());
 }
@@ -614,7 +615,7 @@ fn rs_24_adopt_requires_the_token() {
 
 // ---------------------------------------------------------------- policy and events
 
-fn collector(ring: usize, policy: &Policy, pairs: &[(ResourceId, EventKind)]) -> EventCollector {
+fn collector(ring: usize, policy: &Policy, pairs: &[(EventSource, EventKind)]) -> EventCollector {
     let kinds: Vec<EventKind> = policy.table.keys().cloned().collect();
     EventCollector::new(pairs, &kinds, ring, policy)
 }
@@ -714,7 +715,7 @@ fn rs_26_policy_override_from_spec() {
 #[test]
 fn rs_33_counters_exact_under_drop() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = rid("radio");
+    let source = support::node_source("radio");
     let kind = EventKind::parse("test.custom").expect("parses");
     let c = collector(8, &policy, &[(source.clone(), kind.clone())]);
     let h = c.resolve(&source, &kind);
@@ -738,7 +739,7 @@ fn rs_33_counters_exact_under_drop() {
     assert_eq!(dropped[0].payload["count"], serde_json::json!(29_992));
     // RS-35: stamped at the drain's instant, with the Kernel as its source.
     assert_eq!(dropped[0].time, t(9));
-    assert_eq!(dropped[0].source, rid("kernel"));
+    assert_eq!(dropped[0].source, EventSource::Kernel);
     // RS-35's invariant: the counter equals the delivered bodies plus the drops.
     assert_eq!(row.count, bodies as u64 + 29_992);
 }
@@ -746,7 +747,7 @@ fn rs_33_counters_exact_under_drop() {
 #[test]
 fn rs_35_dropped_counts_are_deltas() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = rid("radio");
+    let source = support::node_source("radio");
     let kind = EventKind::parse("test.custom").expect("parses");
     let c = collector(1, &policy, &[(source.clone(), kind.clone())]);
     let h = c.resolve(&source, &kind);
@@ -772,7 +773,7 @@ fn rs_35_dropped_counts_are_deltas() {
 #[test]
 fn rs_35_dropped_events_never_enter_the_ring() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = rid("radio");
+    let source = support::node_source("radio");
     let kind = EventKind::parse("test.custom").expect("parses");
     let c = collector(4, &policy, &[(source.clone(), kind.clone())]);
     let h = c.resolve(&source, &kind);
@@ -801,7 +802,7 @@ fn rs_35_the_dropped_events_meta_event_is_itself_counted() {
     // RS-35's invariant is stated "for every kind", and RS-38 invites a reader to
     // compare `events.counters` with `events.delivered`.
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = rid("radio");
+    let source = support::node_source("radio");
     let kind = EventKind::parse("test.custom").expect("parses");
     let c = collector(1, &policy, &[(source.clone(), kind.clone())]);
     let h = c.resolve(&source, &kind);
@@ -829,17 +830,17 @@ fn rs_35_the_dropped_events_meta_event_is_itself_counted() {
 #[test]
 fn rs_33_unforeseen_pair_uses_the_fallback_row() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let known = rid("radio");
+    let known = support::node_source("radio");
     let kind = EventKind::parse("test.custom").expect("parses");
     let c = collector(8, &policy, &[(known.clone(), kind.clone())]);
-    let h = c.resolve(&rid("nowhere"), &kind);
+    let h = c.resolve(&support::node_source("nowhere"), &kind);
     c.emit(h, t(0), Severity::Info, &[]).expect("emits");
     let counters: Vec<CounterRow> = c.counters();
     let fallback = counters.last().expect("the fallback row is last");
     assert_eq!(fallback.count, 1);
     assert_eq!(fallback.kind.as_str(), "ezsdr.unforeseen");
     assert_eq!(
-        fallback.source.path(), "unforeseen",
+        fallback.source, EventSource::Unforeseen,
         "one fallback row, not one per source"
     );
 }
@@ -847,7 +848,7 @@ fn rs_33_unforeseen_pair_uses_the_fallback_row() {
 #[test]
 fn rs_33_duplicate_pairs_share_one_counter_row() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = rid("radio");
+    let source = support::node_source("radio");
     let kind = EventKind::parse("test.custom").expect("parses");
     let pairs = [
         (source.clone(), kind.clone()),
@@ -875,7 +876,7 @@ fn rs_33_duplicate_pairs_share_one_counter_row() {
 #[test]
 fn rs_33_planned_kernel_source_shares_its_meta_counter_row() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = rid("kernel");
+    let source = EventSource::Kernel;
     let kind = EventKind::parse(EventKind::EVENTS_DROPPED).expect("parses");
     let c = collector(8, &policy, &[(source.clone(), kind.clone())]);
 
@@ -892,7 +893,7 @@ fn rs_33_planned_kernel_source_shares_its_meta_counter_row() {
 #[test]
 fn rs_33_drain_uses_the_planned_kernel_source_for_meta_events() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = rid("kernel");
+    let source = EventSource::Kernel;
     let kind = EventKind::parse("test.custom").expect("parses");
     let c = collector(1, &policy, &[(source.clone(), kind.clone())]);
     let handle = c.resolve(&source, &kind);
@@ -920,7 +921,7 @@ fn rs_33_drain_uses_the_planned_kernel_source_for_meta_events() {
 #[test]
 fn rs_33_duplicate_declared_kinds_resolve_to_the_first_index() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = rid("radio");
+    let source = support::node_source("radio");
     let kind = EventKind::parse("test.custom").expect("parses");
     let declared_kinds = [kind.clone(), kind.clone()];
     let c = EventCollector::new(
@@ -946,7 +947,7 @@ fn rs_33_duplicate_declared_kinds_resolve_to_the_first_index() {
 #[test]
 fn rs_36_abort_survives_a_drop() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = rid("radio");
+    let source = support::node_source("radio");
     let noise = EventKind::parse("test.custom").expect("parses");
     let fatal = EventKind::parse(EventKind::DEVICE_LOST).expect("parses");
     let c = collector(
@@ -982,11 +983,11 @@ fn rs_38_counters_include_zero_rows() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
     let pairs = [
         (
-            rid("radio"),
+            support::node_source("radio"),
             EventKind::parse("test.custom").expect("parses"),
         ),
         (
-            rid("radio"),
+            support::node_source("radio"),
             EventKind::parse(EventKind::DEVICE_LOST).expect("parses"),
         ),
     ];
@@ -1068,11 +1069,6 @@ fn bound(p: &TestProvider) -> BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Pro
         .collect()
 }
 
-/// The recorders the profile bound, which RS-14 refuses a capture without.
-fn placed() -> std::collections::BTreeSet<Ident> {
-    [id("recorder")].into_iter().collect()
-}
-
 /// A recorder whose contract matches the `rx` port the test tree declares (SC-3).
 fn test_sink() -> TestSink {
     TestSink::new(
@@ -1133,14 +1129,14 @@ fn rs_12_bare_connect_then_capture_succeeds() {
     let action = SessionAction::Vocabulary {
         ns: ns("test"),
         verb: id("capture"),
-        target: rid("radio"),
+        target: support::target("radio"),
         at: Some(t(100)),
         params: [(key("test.capture"), Value::from(true))]
             .into_iter()
             .collect(),
     };
     let compiled =
-        compile(&action, &reg, &declared_classes(), &placed(), t(0), None).expect("compiles");
+        compile(&action, &reg, &declared_classes(), t(0), None).expect("compiles");
     assert_eq!(compiled.actions.len(), 1);
     assert!(matches!(
         compiled.actions[0],
@@ -1151,17 +1147,18 @@ fn rs_12_bare_connect_then_capture_succeeds() {
 #[test]
 fn rs_14_capture_compiles_to_update_parameter() {
     let reg = registry();
+    let recorder = Target::Output { output: id("recorder") };
     let action = SessionAction::Vocabulary {
         ns: ns("test"),
         verb: id("capture"),
-        target: rid("radio"),
+        target: recorder.clone(),
         at: Some(t(100)),
         params: [(key("test.capture"), Value::from(true))]
             .into_iter()
             .collect(),
     };
     let compiled =
-        compile(&action, &reg, &declared_classes(), &placed(), t(0), None).expect("compiles");
+        compile(&action, &reg, &declared_classes(), t(0), None).expect("compiles");
     match &compiled.actions[0] {
         Action::UpdateParameter {
             target,
@@ -1170,17 +1167,9 @@ fn rs_14_capture_compiles_to_update_parameter() {
             at,
             ..
         } => {
-            // RS-14: the update targets the **Sink**, addressed under the reserved
-            // `sink/` prefix, not the radio the action named. The prefix keeps the
-            // address disjoint from a Provider's own tree node ids, which are the
-            // Provider's declaration and could otherwise collide with a binding name
-            // (findings D17, P1-5).
-            assert_eq!(*target, rid("sink/recorder"));
-            assert_ne!(
-                *target,
-                rid("recorder"),
-                "a bare output id is a Provider's namespace"
-            );
+            // RS-14 (#54): the update goes to the target the verb names, a recorder's
+            // output; the Kernel chooses no recorder of its own.
+            assert_eq!(*target, recorder);
             assert_eq!(*k, key("test.capture"));
             assert_eq!(*class, UpdateClass::BlockBoundary);
             // RS-14, RS-19: a capture compiles to a *timed* UpdateParameter. This
@@ -1190,45 +1179,16 @@ fn rs_14_capture_compiles_to_update_parameter() {
         }
         other => panic!("expected an UpdateParameter, got {other:?}"),
     }
-}
-
-#[test]
-fn rs_14_capture_without_recorder_rejected() {
-    let reg = registry();
-    let mut profile = session_profile();
-    profile.bindings.remove(&id("recorder"));
-    let provider = TestProvider::new("radio", 2);
-    let spec =
-        implicit_spec(&profile, &reg, &bound(&provider), &sinks(&test_sink())).expect("builds");
-    assert!(spec.outputs.is_empty(), "no recorder was bound");
-
-    let capture = SessionAction::Vocabulary {
+    // A verb naming a resource compiles to that resource: no implicit recorder.
+    let named_radio = SessionAction::Vocabulary {
         ns: ns("test"),
         verb: id("capture"),
-        target: rid("radio"),
+        target: Target::Resource { resource: id("radio"), path: String::new() },
         at: Some(t(100)),
-        params: [(key("test.capture"), Value::from(true))]
-            .into_iter()
-            .collect(),
+        params: [(key("test.capture"), Value::from(true))].into_iter().collect(),
     };
-    // RS-14: refused when the profile bound no recorder, rather than silently
-    // buffered on the host.
-    let violations = compile(
-        &capture,
-        &reg,
-        &declared_classes(),
-        &Default::default(),
-        t(0),
-        None,
-    )
-    .expect_err("no recorder bound");
-    assert!(
-        violations[0].reason.contains("bound none"),
-        "{:?}",
-        violations[0]
-    );
-    // The same verb against a profile that did bind one compiles.
-    assert!(compile(&capture, &reg, &declared_classes(), &placed(), t(0), None).is_ok());
+    let compiled = compile(&named_radio, &reg, &declared_classes(), t(0), None).expect("compiles");
+    assert!(matches!(&compiled.actions[0], Action::UpdateParameter { target: Target::Resource { .. }, .. }));
 }
 
 #[test]
@@ -1237,11 +1197,11 @@ fn rs_13a_unknown_vocabulary_verb_rejected() {
     let action = SessionAction::Vocabulary {
         ns: ns("radio"),
         verb: id("start_repeat"),
-        target: rid("radio"),
+        target: support::target("radio"),
         at: None,
         params: BTreeMap::new(),
     };
-    let violations = compile(&action, &reg, &declared_classes(), &placed(), t(0), None)
+    let violations = compile(&action, &reg, &declared_classes(), t(0), None)
         .expect_err("no loaded Vocabulary claims it");
     assert!(violations[0].reason.contains("radio.start_repeat"));
 }
@@ -1254,12 +1214,12 @@ fn rs_17_provider_parameter_class_comes_from_its_key_decl() {
     // Easy API's first parameter change was rejected as undeclared (finding D33).
     let reg = registry();
     let gain = SessionAction::SetParameter {
-        target: rid("radio"),
+        target: support::target("radio"),
         key: key("test.gain"),
         value: Value::num(20.0).unwrap(),
     };
     // Nothing in the caller's map: the class comes from the KeyDecl alone.
-    let compiled = compile(&gain, &reg, &BTreeMap::new(), &placed(), t(0), None).expect("compiles");
+    let compiled = compile(&gain, &reg, &BTreeMap::new(), t(0), None).expect("compiles");
     assert!(matches!(
         &compiled.actions[0],
         Action::UpdateParameter {
@@ -1298,11 +1258,11 @@ fn rs_17_provider_parameter_class_comes_from_its_key_decl() {
     // A key whose KeyDecl declares no class is still not changeable during a Run,
     // so the absent value means "not changeable" and not "any class" (RS-17).
     let flag = SessionAction::SetParameter {
-        target: rid("radio"),
+        target: support::target("radio"),
         key: key("test.flag"),
         value: Value::from(true),
     };
-    assert!(compile(&flag, &reg, &BTreeMap::new(), &placed(), t(0), None).is_err());
+    assert!(compile(&flag, &reg, &BTreeMap::new(), t(0), None).is_err());
 }
 
 #[test]
@@ -1311,7 +1271,7 @@ fn rs_19_capture_asap_records_applied_time() {
     let action = SessionAction::Vocabulary {
         ns: ns("test"),
         verb: id("capture"),
-        target: rid("radio"),
+        target: support::target("radio"),
         at: None,
         // RS-14: the value is the action's own; the Kernel supplies no default (D46).
         params: [(key("test.capture"), Value::from(true))]
@@ -1322,7 +1282,6 @@ fn rs_19_capture_asap_records_applied_time() {
         &action,
         &reg,
         &declared_classes(),
-        &placed(),
         t(4_242),
         None,
     )
@@ -1343,14 +1302,14 @@ fn rs_49_update_parameter_carries_its_instant() {
     let asap = SessionAction::Vocabulary {
         ns: ns("test"),
         verb: id("capture"),
-        target: rid("radio"),
+        target: support::target("radio"),
         at: None,
         params: [(key("test.capture"), Value::from(true))]
             .into_iter()
             .collect(),
     };
     let compiled =
-        compile(&asap, &reg, &declared_classes(), &placed(), t(4_242), None).expect("compiles");
+        compile(&asap, &reg, &declared_classes(), t(4_242), None).expect("compiles");
     assert!(matches!(
         &compiled.actions[0],
         Action::UpdateParameter { at: Some(at), .. } if *at == AbsoluteDeadline::new(t(4_242))
@@ -1360,12 +1319,12 @@ fn rs_49_update_parameter_carries_its_instant() {
     // Action with none and records no coercion — and is *not* refused, which a
     // mandatory `at` would have done to Vision §3's `sdr.rx.gain = 20`.
     let bare = SessionAction::SetParameter {
-        target: rid("radio"),
+        target: support::target("radio"),
         key: key("test.flag"),
         value: Value::from(true),
     };
     let compiled =
-        compile(&bare, &reg, &declared_classes(), &placed(), t(7), None).expect("compiles");
+        compile(&bare, &reg, &declared_classes(), t(7), None).expect("compiles");
     assert!(matches!(
         &compiled.actions[0],
         Action::UpdateParameter { at: None, .. }
@@ -1378,7 +1337,7 @@ fn rs_49_update_parameter_carries_its_instant() {
     // RS-49a: a scheduled parameter change is timed, so `arm` substitutes the
     // instant the Spec named rather than applying it at `arm`.
     let template = ActionTemplate::UpdateParameter {
-        target: rid("radio"),
+        target: support::target("radio"),
         key: key("test.flag"),
         value: Value::from(true),
         class: UpdateClass::BlockBoundary,
@@ -1396,12 +1355,12 @@ fn rs_19_vocabulary_action_carries_a_time() {
     let timed = SessionAction::Vocabulary {
         ns: ns("test"),
         verb: id("sweep"),
-        target: rid("radio"),
+        target: support::target("radio"),
         at: Some(t(900)),
         params: BTreeMap::new(),
     };
     let compiled =
-        compile(&timed, &reg, &declared_classes(), &placed(), t(0), None).expect("compiles");
+        compile(&timed, &reg, &declared_classes(), t(0), None).expect("compiles");
     match &compiled.actions[0] {
         Action::Command { at: Some(at), .. } => {
             assert_eq!(*at, AbsoluteDeadline::new(t(900)));
@@ -1459,11 +1418,10 @@ fn rs_50_stop_with_and_without_a_target() {
     let reg = registry();
     let with = compile(
         &SessionAction::Stop {
-            target: Some(rid("radio")),
+            target: Some(support::target("radio")),
         },
         &reg,
         &declared_classes(),
-        &placed(),
         t(0),
         None,
     )
@@ -1475,7 +1433,6 @@ fn rs_50_stop_with_and_without_a_target() {
         &SessionAction::Stop { target: None },
         &reg,
         &declared_classes(),
-        &placed(),
         t(0),
         None,
     )
@@ -1526,7 +1483,7 @@ fn rs_16_rejected_action_not_dispatched() {
     log.append(
         t(0),
         SessionAction::SetParameter {
-            target: rid("radio"),
+            target: support::target("radio"),
             key: key("test.grid"),
             value: Value::num(40.0).unwrap(),
         },
@@ -1566,11 +1523,11 @@ fn rs_17_undeclared_update_class_rejected() {
 
     // Compilation refuses it too, so an Executor never receives one.
     let action = SessionAction::SetParameter {
-        target: rid("radio"),
+        target: support::target("radio"),
         key: key("test.flag"),
         value: Value::from(true),
     };
-    assert!(compile(&action, &reg, &BTreeMap::new(), &placed(), t(0), None).is_err());
+    assert!(compile(&action, &reg, &BTreeMap::new(), t(0), None).is_err());
 }
 
 #[test]
@@ -1612,7 +1569,7 @@ fn rs_44a_waveform_ingested_before_admission() {
     let action = SessionAction::Vocabulary {
         ns: ns("test"),
         verb: id("start_repeat"),
-        target: rid("radio"),
+        target: support::target("radio"),
         at: Some(t(10)),
         params: BTreeMap::new(),
     };
@@ -1620,7 +1577,6 @@ fn rs_44a_waveform_ingested_before_admission() {
         &action,
         &reg,
         &declared_classes(),
-        &placed(),
         t(0),
         Some(waveform.clone()),
     )
@@ -1637,7 +1593,7 @@ fn rs_44a_waveform_ingested_before_admission() {
         other => panic!("expected a TxBurst, got {other:?}"),
     }
     // An Action whose ArtifactRef resolves to nothing is rejected.
-    assert!(compile(&action, &reg, &declared_classes(), &placed(), t(0), None).is_err());
+    assert!(compile(&action, &reg, &declared_classes(), t(0), None).is_err());
 }
 
 // ---------------------------------------------------------------- the Kernel Action set
@@ -1646,7 +1602,7 @@ fn rs_44a_waveform_ingested_before_admission() {
 fn rs_48_action_set_is_closed_and_schematised() {
     let actions = vec![
         Action::TxBurst {
-            target: rid("radio/tx/0"),
+            target: support::target("radio/tx/0"),
             waveform: artifact("wave"),
             repeat: true,
             at: AbsoluteDeadline::new(t(10)),
@@ -1655,27 +1611,27 @@ fn rs_48_action_set_is_closed_and_schematised() {
             metadata: BTreeMap::new(),
         },
         Action::SetTimer {
-            target: rid("radio"),
+            target: support::target("radio"),
             at: AbsoluteDeadline::new(t(20)),
             token: 7,
         },
         Action::UpdateParameter {
-            target: rid("radio"),
+            target: support::target("radio"),
             key: key("test.flag"),
             value: Value::from(true),
             class: UpdateClass::BlockBoundary,
             at: Some(AbsoluteDeadline::new(t(30))),
         },
         Action::Command {
-            target: rid("radio"),
+            target: support::target("radio"),
             verb: id("sweep"),
             params: BTreeMap::new(),
             at: None,
         },
         Action::Emit {
-            target: rid("radio"),
+            target: support::target("radio"),
             event: Event {
-                source: rid("radio"),
+                source: support::node_source("radio"),
                 time: t(1),
                 severity: Severity::Info,
                 kind: EventKind::parse("test.custom").expect("parses"),
@@ -1703,7 +1659,7 @@ fn rs_48_action_set_is_closed_and_schematised() {
     }
     // A Spec's scheduled Action is a template, with no time field (RS-49a).
     let template = ActionTemplate::SetTimer {
-        target: rid("radio"),
+        target: support::target("radio"),
         token: 7,
     };
     let json = serde_json::to_value(&template).expect("serialises");
@@ -1781,7 +1737,7 @@ fn manifest_fixture(reason: Termination) -> Manifest {
         action_log: Vec::new(),
         termination: termination_fixture(reason),
         artifacts: Vec::new(),
-        sections: BTreeMap::new(),
+        sections: Vec::new(),
         hash: None,
     }
 }
@@ -1857,14 +1813,15 @@ fn rs_39_section_namespace_enforced() {
     let mut m = manifest_fixture(Termination::Completed {});
     assert!(
         m.write_section(
-            &ns("ezsdr.test"),
+            &ns("ezsdr.test"), support::node_source("radio"),
             ns("ezsdr.test.bursts"),
             serde_json::json!([])
         )
         .is_ok()
     );
     assert_eq!(
-        m.write_section(&ns("ezsdr.test"), ns("vendor.other"), serde_json::json!({})),
+        m.write_section(
+            &ns("ezsdr.test"), support::node_source("radio"), ns("vendor.other"), serde_json::json!({})),
         Err(RunError::SectionNamespaceForbidden {
             ns: "ezsdr.test".to_owned()
         })
@@ -1911,7 +1868,7 @@ fn rs_32_a_fabricated_event_handle_does_not_panic_the_kernel() {
     // handles, not about any `u32` a Module writes (MA-9).
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
     let kind = EventKind::parse("test.custom").expect("parses");
-    let c = collector(8, &policy, &[(rid("radio"), kind.clone())]);
+    let c = collector(8, &policy, &[(support::node_source("radio"), kind.clone())]);
     // Both `u32`s, not one: checking only `row` let the fabricated `kind` into the
     // ring and moved the panic into the coordinator's `drain`, which indexes `kinds`
     // with it — away from the Module that caused it.
@@ -1937,7 +1894,7 @@ fn rs_32_a_fabricated_event_handle_does_not_panic_the_kernel() {
     }
     // A real handle still works, so the guard did not break the hot path, and the
     // drain the fabricated kind would have panicked in completes.
-    let good = c.resolve(&rid("radio"), &kind);
+    let good = c.resolve(&support::node_source("radio"), &kind);
     assert!(c.emit(good, t(2), Severity::Info, &[]).is_ok());
     assert_eq!(c.drain(t(9)).len(), 1, "one delivered body, and no panic");
 }
@@ -1951,7 +1908,7 @@ fn rs_39_a_module_section_with_a_non_ascii_key_is_refused() {
     let mut m = manifest_fixture(Termination::Completed {});
     assert!(matches!(
         m.write_section(
-            &ns("test"),
+            &ns("test"), support::node_source("radio"),
             ns("test.envelope"),
             serde_json::json!({ "\u{3c1}": 1 })
         ),
@@ -1959,7 +1916,7 @@ fn rs_39_a_module_section_with_a_non_ascii_key_is_refused() {
     ));
     // An ASCII key is written, and the Manifest still seals.
     m.write_section(
-        &ns("test"),
+            &ns("test"), support::node_source("radio"),
         ns("test.envelope"),
         serde_json::json!({ "rho": 1 }),
     )
@@ -1976,11 +1933,11 @@ fn rs_13a_a_session_value_with_a_non_ascii_key_is_refused_at_compile() {
     let bad: Value =
         serde_json::from_value(serde_json::json!({ "\u{3c1}": 1 })).expect("deserialises");
     let action = SessionAction::SetParameter {
-        target: rid("radio"),
+        target: support::target("radio"),
         key: key("test.flag"),
         value: bad.clone(),
     };
-    let violations = compile(&action, &reg, &declared_classes(), &placed(), t(0), None)
+    let violations = compile(&action, &reg, &declared_classes(), t(0), None)
         .expect_err("refused before it can be logged");
     assert!(
         violations[0].reason.contains("non-ASCII"),
@@ -1992,11 +1949,11 @@ fn rs_13a_a_session_value_with_a_non_ascii_key_is_refused_at_compile() {
     let vocab = SessionAction::Vocabulary {
         ns: ns("test"),
         verb: id("capture"),
-        target: rid("radio"),
+        target: support::target("radio"),
         at: Some(t(1)),
         params: [(key("test.capture"), bad)].into_iter().collect(),
     };
-    assert!(compile(&vocab, &reg, &declared_classes(), &placed(), t(0), None).is_err());
+    assert!(compile(&vocab, &reg, &declared_classes(), t(0), None).is_err());
 }
 
 #[test]
@@ -2180,7 +2137,7 @@ fn rs_49a_scheduled_action_is_a_template() {
     // Action names one through its `AbsoluteDeadline` — so the template carries no
     // time at all and `arm` substitutes the deadline it resolved from the `SpecTime`.
     let template = ActionTemplate::TxBurst {
-        target: ResourceId::parse("radio/tx/0").expect("a valid path"),
+        target: support::target("radio/tx/0"),
         waveform: artifact("wave"),
         repeat: false,
         late_policy: LatePolicy::SendAsapAndFlag,
@@ -2201,7 +2158,7 @@ fn rs_49a_scheduled_action_is_a_template() {
     );
     assert_eq!(
         template.target().map(|r| r.to_string()),
-        Some("local:radio/tx/0".to_owned())
+        Some("resource radio/tx/0".to_owned())
     );
 
     // And what `arm` does with it: substitute the resolved deadline, producing the
@@ -2236,11 +2193,11 @@ fn rs_14_the_kernel_supplies_no_vocabulary_value_or_late_policy() {
     let without = SessionAction::Vocabulary {
         ns: ns("test"),
         verb: id("capture"),
-        target: rid("radio"),
+        target: support::target("radio"),
         at: Some(t(100)),
         params: BTreeMap::new(),
     };
-    let violations = compile(&without, &reg, &declared_classes(), &placed(), t(0), None)
+    let violations = compile(&without, &reg, &declared_classes(), t(0), None)
         .expect_err("no value, and the Kernel invents none");
     assert!(
         violations
@@ -2253,7 +2210,7 @@ fn rs_14_the_kernel_supplies_no_vocabulary_value_or_late_policy() {
     let burst = SessionAction::Vocabulary {
         ns: ns("test"),
         verb: id("start_repeat"),
-        target: rid("radio"),
+        target: support::target("radio"),
         at: Some(t(100)),
         params: BTreeMap::new(),
     };
@@ -2261,7 +2218,6 @@ fn rs_14_the_kernel_supplies_no_vocabulary_value_or_late_policy() {
         &burst,
         &reg,
         &declared_classes(),
-        &placed(),
         t(0),
         Some(artifact("wave")),
     )
@@ -2339,7 +2295,7 @@ fn rs_13_every_session_action_compiles_to_its_kernel_form() {
         (SessionAction::Stop { target: None }, ControlOp::StopRun),
     ];
     for (action, want) in cases {
-        let compiled = compile(&action, &reg, &declared_classes(), &placed(), t(0), None)
+        let compiled = compile(&action, &reg, &declared_classes(), t(0), None)
             .unwrap_or_else(|v| panic!("{action:?} compiles: {v:?}"));
         assert_eq!(compiled.control.as_ref(), Some(&want), "{action:?}");
         assert!(
@@ -2353,11 +2309,10 @@ fn rs_13_every_session_action_compiles_to_its_kernel_form() {
     // an Action and not a control op.
     let compiled = compile(
         &SessionAction::Stop {
-            target: Some(rid("radio")),
+            target: Some(support::target("radio")),
         },
         &reg,
         &declared_classes(),
-        &placed(),
         t(0),
         None,
     )

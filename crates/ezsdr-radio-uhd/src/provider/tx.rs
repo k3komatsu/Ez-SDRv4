@@ -1099,7 +1099,7 @@ mod tests {
         let mut kinds = EventKindRegistry::with_kernel_kinds();
         ezsdr_radio::register(&mut ezsdr_kernel::module_api::ModuleRegistry::new(), &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
         let usrp = ResourceId::parse("usrp").unwrap();
-        let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (ResourceId::parse(s).unwrap(), k))).collect();
+        let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (ezsdr_kernel::event::EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
         let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
         let inputs: Arc<BTreeMap<ContentHash, Arc<[u8]>>> = Arc::new(BTreeMap::new());
         let core = Arc::new(Core::new(

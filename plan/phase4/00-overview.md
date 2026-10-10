@@ -130,7 +130,7 @@ OV-1…OV-23b, PO-1…PO-12 and Phase 3's lessons bind Phase 4. The rules below 
 | 5 | Fault injection triggers cleanup and policy | `v58_05_*` unchanged; the coordinator's `kd_01_a_device_lost_is_not_reported_as_a_step_livelock` and `kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides` (Kernel crate) | fault kinds with their mechanisms (§3) |
 | 6 | Gaps equal a UHD overflow | `v58_06_injected_overflow_is_a_uhd_overflow` (the payload decoded through RM-24) | Phase 8 re-measures |
 | 7 | Runs record Spec, Binding, plan, events, artifacts | `v51_an_overflowed_capture_is_a_sigmf_recording` (the capture's `.sigmf-meta` has two capture segments around the overflow's gap, with `core:global_index` jumping by the gap) | — |
-| 13 | Sessions leave provenance | `v58_13_a_session_stop_of_the_recorder_keeps_a_partial_capture` (a Kernel-routed `Stop(sink/rec)` mid-capture gives a partial artifact, a Recording marked `ezsdr:partial`, and a later `capture` is served) | Python (Phase 6) |
+| 13 | Sessions leave provenance | `v58_13_a_session_stop_of_the_recorder_keeps_a_partial_capture` (a Kernel-routed `Stop({output: rec})` mid-capture gives a partial artifact, a Recording marked `ezsdr:partial`, and a later `capture` is served) | Python (Phase 6) |
 | — | (a ceiling, not a §58 row) | `k3_an_off_grid_start_lead_moves_a_burst_to_the_next_transmit_sample` pins the spike's K3 as Simulation shows it (§3) | Phase 7, or the owner's decision |
 
 ### Earlier deferrals → Phase 4

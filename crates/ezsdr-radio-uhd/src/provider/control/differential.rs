@@ -13,6 +13,7 @@ use ezsdr_kernel::spec::{Ident, Value};
 use ezsdr_kernel::stream::{BackPressure, BlockRef, DataLink, Direction, DropCarry, PublishOutcome};
 use ezsdr_kernel::time::{AbsoluteDeadline, Rational};
 use ezsdr_radio::timeline::{Config, Stream, plan};
+use super::super::test_support::target_of;
 use generator::{Change, Class, Entry, Event, Fault, Op, Sequence, Terms};
 
 use ezsdr_kernel::id::ClockDomainId;
@@ -166,7 +167,7 @@ fn side(direction: Direction) -> &'static str {
 
 struct NoActions;
 impl ActionReceiver for NoActions {
-    fn recv(&self) -> Option<Action> {
+    fn recv(&self) -> Option<(Action, Option<ezsdr_kernel::id::ResourceId>)> {
         None
     }
 }
@@ -213,20 +214,25 @@ fn run(sequence: &Sequence) -> Record {
         while let Some((_, ops)) = rounds.next_if(|(round, _)| T0 + ticks(*round) <= now) {
             for op in ops {
                 if !core.is_lost() {
-                    control.book(match *op {
-                        Op::Stop { device } => Action::Stop { target: Some(if device { core.id.clone() } else { core.rx_id.clone() }) },
-                        Op::StartRx => Action::Command { target: core.rx_id.clone(), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None },
+                    // The node each Action is resolved to (KC-23); its target only names it.
+                    let (action, node) = match *op {
+                        Op::Stop { device } => {
+                            let node = if device { core.id.clone() } else { core.rx_id.clone() };
+                            (Action::Stop { target: Some(target_of(&node)) }, node)
+                        }
+                        Op::StartRx => (Action::Command { target: target_of(&core.rx_id), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None }, core.rx_id.clone()),
                         Op::Cold { direction, change, at_ns } => {
                             let (name, value) = match change {
                                 Change::Channels(n) => ("channels", Value::from(i64::from(n))),
                                 Change::Rate(rate) => ("sample_rate_hz", Value::num(rate as f64).unwrap()),
                             };
-                            Action::UpdateParameter { target: core.id.clone(), key: key(&format!("radio.{}.{name}", side(direction))), value, class: UpdateClass::Cold, at: at(at_ns) }
+                            (Action::UpdateParameter { target: target_of(&core.id), key: key(&format!("radio.{}.{name}", side(direction))), value, class: UpdateClass::Cold, at: at(at_ns) }, core.id.clone())
                         }
-                        Op::Timed { direction, gain_db, at_ns } => Action::UpdateParameter {
-                            target: core.id.clone(), key: key(&format!("radio.{}.gain_db", side(direction))), value: Value::num(gain_db).unwrap(), class: UpdateClass::HardwareTimed, at: at(at_ns),
-                        },
-                    });
+                        Op::Timed { direction, gain_db, at_ns } => (Action::UpdateParameter {
+                            target: target_of(&core.id), key: key(&format!("radio.{}.gain_db", side(direction))), value: Value::num(gain_db).unwrap(), class: UpdateClass::HardwareTimed, at: at(at_ns),
+                        }, core.id.clone()),
+                    };
+                    control.book(action, Some(node));
                 }
                 control.release();
             }

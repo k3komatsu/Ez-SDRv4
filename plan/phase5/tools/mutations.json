@@ -153,8 +153,8 @@
   "id": "E16",
   "name": "NX-7 an Action in the queue is ignored",
   "file": "crates/ezsdr-exec-native/src/lib.rs",
-  "old": "            if let Some(action) = actions.recv() {",
-  "new": "            if let Some(action) = actions.recv().filter(|_| false) {",
+  "old": "            if let Some((action, _)) = actions.recv() {",
+  "new": "            if let Some((action, _)) = actions.recv().filter(|_| false) {",
   "crate": "ezsdr-exec-native",
   "test_bin": "native_executor",
   "filter": "nx_07_an_action_addressed_to_the_executor_fails_the_step"

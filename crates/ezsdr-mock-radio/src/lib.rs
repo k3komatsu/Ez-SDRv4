@@ -10,7 +10,7 @@ mod device;
 use std::collections::BTreeMap;
 
 use ezsdr_kernel::binding::Binding;
-use ezsdr_kernel::event::{Action, Event, EventHandle, EventKind, EventSink, Severity};
+use ezsdr_kernel::event::{Action, Event, EventHandle, EventKind, EventSink, EventSource, Severity};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::module_api::{
@@ -63,9 +63,9 @@ pub fn descriptor() -> ModuleDescriptor {
 /// Deterministic in-process radio Provider (MR-1…MR-30).
 pub struct MockRadio {
     instance: ProviderInstance,
-    /// The selector's `id` as a legal section-name segment, validated in `from_binding`
-    /// (MR-2), which every one of this instance's six section names carries (MR-27).
-    section_id: Ident,
+    /// The root node of this instance's event sources, as `prepare`'s context names it
+    /// (KC-8); sub-nodes are named below it.
+    source_root: Option<ResourceId>,
     profile: Profile,
     config: BTreeMap<ezsdr_kernel::spec::Key, Value>,
     prepare_called: bool,
@@ -242,14 +242,6 @@ impl MockRadio {
                 .ok_or_else(|| reject("selector `id` must be one resource path segment"))?,
             Some(_) => return Err(reject("selector `id` must be a string")),
         };
-        // The id becomes a segment of this instance's six Manifest section names (MR-27), so
-        // it must be a legal one: a `ResourceId` segment also admits upper case, `-` and `.`,
-        // which a namespace does not (SB-1). Refused here rather than panicked on later.
-        let section_id = id
-            .segments()
-            .next()
-            .and_then(|segment| Ident::parse(segment).ok())
-            .ok_or_else(|| reject("selector `id` must match ^[a-z][a-z0-9_]*$, the shape of a section name segment"))?;
         let n = match selector_value("instances") {
             None => 1,
             Some(Value::Scalar(Scalar::Int(n))) if (1..=4).contains(n) => *n as u32,
@@ -280,12 +272,12 @@ impl MockRadio {
         let profile = Profile { kind: profile.kind, n };
         let timing = profile.timing();
         let mut sections = BTreeMap::new();
-        sections.insert(section(&section_id, "envelope"), serde_json::to_value(profile.envelope()).expect("serializable envelope"));
-        sections.insert(section(&section_id, "bursts"), serde_json::json!([]));
-        sections.insert(section(&section_id, "faults"), serde_json::json!([]));
-        sections.insert(section(&section_id, "rejected"), serde_json::json!([]));
-        sections.insert(section(&section_id, "stats"), serde_json::json!({"rx_blocks": 0, "rx_samples": 0, "tx_blocks": 0, "rx_clipped": 0, "tx_clipped": 0}));
-        sections.insert(section(&section_id, "applied"), serde_json::json!([]));
+        sections.insert(section("envelope"), serde_json::to_value(profile.envelope()).expect("serializable envelope"));
+        sections.insert(section("bursts"), serde_json::json!([]));
+        sections.insert(section("faults"), serde_json::json!([]));
+        sections.insert(section("rejected"), serde_json::json!([]));
+        sections.insert(section("stats"), serde_json::json!({"rx_blocks": 0, "rx_samples": 0, "tx_blocks": 0, "rx_clipped": 0, "tx_clipped": 0}));
+        sections.insert(section("applied"), serde_json::json!([]));
         let instance = ProviderInstance {
             id: id.clone(),
             module: module_ref(),
@@ -301,7 +293,7 @@ impl MockRadio {
         };
         Ok(MockRadio {
             instance,
-            section_id,
+            source_root: None,
             profile,
             config: ezsdr_radio::device::DeviceDescription::x310_defaults(),
             prepare_called: false,
@@ -363,10 +355,10 @@ impl MockRadio {
     }
 
     fn emit_event(&self, suffix: &str, kind: &str, severity: Severity, payload: serde_json::Value, at: TimePoint) -> Result<(), ModuleError> {
-        let (Some(events), Some(_root)) = (&self.events, self.root) else { return Ok(()); };
-        let source = if suffix.is_empty() { self.instance.id.clone() } else { self.instance.id.child(suffix).unwrap_or_else(|_| self.instance.id.clone()) };
+        let (Some(events), Some(_root), Some(root)) = (&self.events, self.root, &self.source_root) else { return Ok(()); };
+        let node = if suffix.is_empty() { root.clone() } else { root.child(suffix).unwrap_or_else(|_| root.clone()) };
         let event = Event {
-            source,
+            source: EventSource::Node { node },
             time: at,
             severity,
             kind: EventKind::parse(kind).expect("declared radio event kind"),
@@ -585,7 +577,7 @@ impl MockRadio {
         struct Record { at: TimePoint, fault: FaultKind, applied: bool, lost: u64 }
         let fault = &self.faults[index];
         let record = Record { at: TimePoint::new(self.root.expect("prepared root"), fault.tick), fault: fault.entry.fault, applied: fault.applied, lost };
-        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section(&self.section_id, "faults")) {
+        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("faults")) {
             rows.push(serde_json::to_value(record).expect("fault section row"));
         }
     }
@@ -656,7 +648,7 @@ impl MockRadio {
     /// with the loss's reason and emitting no event: the step's `DeviceLost` reports it.
     fn refuse_actions(&mut self, at: i64) {
         let Some(actions) = self.actions.clone() else { return };
-        while let Some(action) = actions.recv() {
+        while let Some((action, _)) = actions.recv() {
             self.record_rejected_action(Self::action_name(&action), DEVICE_LOST, at);
         }
     }
@@ -665,7 +657,7 @@ impl MockRadio {
         #[derive(serde::Serialize)]
         struct Rejected { action: String, reason: String, at: TimePoint }
         let time = TimePoint::new(self.root.expect("prepared root"), at);
-        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section(&self.section_id, "rejected")) {
+        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("rejected")) {
             rows.push(serde_json::to_value(Rejected { action: action.to_owned(), reason: reason.to_owned(), at: time }).expect("rejection section row"));
         }
     }
@@ -678,14 +670,14 @@ impl MockRadio {
     }
 
     fn record_burst(&mut self, record: BurstRecord) {
-        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section(&self.section_id, "bursts")) {
+        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("bursts")) {
             rows.push(serde_json::to_value(record).expect("burst record"));
         }
     }
 
     fn add_stat(&mut self, name: &str, n: u64) {
         if n == 0 { return; }
-        if let Some(serde_json::Value::Object(stats)) = self.instance.sections.get_mut(&section(&self.section_id, "stats")) {
+        if let Some(serde_json::Value::Object(stats)) = self.instance.sections.get_mut(&section("stats")) {
             let total = stats.get(name).and_then(serde_json::Value::as_u64).unwrap_or(0);
             stats.insert(name.to_owned(), serde_json::json!(total + n));
         }
@@ -750,7 +742,7 @@ impl MockRadio {
         #[derive(serde::Serialize)]
         struct Applied<'a> { key: &'a ezsdr_kernel::spec::Key, value: &'a Value, at: TimePoint }
         let row = Applied { key, value, at: TimePoint::new(self.root.expect("root"), at) };
-        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section(&self.section_id, "applied")) {
+        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("applied")) {
             rows.push(serde_json::to_value(row).expect("applied row"));
         }
     }
@@ -1014,23 +1006,26 @@ impl MockRadio {
         }))
     }
 
-    fn handle_action(&mut self, action: Action, now: i64) -> Result<(), ModuleError> {
+    /// `node` is what the Kernel resolved the target to (KC-23), which is what a
+    /// Provider matches on.
+    fn handle_action(&mut self, action: Action, node: Option<ResourceId>, now: i64) -> Result<(), ModuleError> {
         let (rx, tx) = (self.instance.id.child("rx").expect("rx id"), self.instance.id.child("tx").expect("tx id"));
+        let node = node.as_ref();
         match action {
-            action @ Action::TxBurst { .. } => self.handle_tx_burst(action, now),
-            Action::UpdateParameter { target, key, value, class, at } => self.handle_update(target, key, value, class, at, now),
+            action @ Action::TxBurst { .. } => self.handle_tx_burst(action, node, now),
+            Action::UpdateParameter { key, value, class, at, .. } => self.handle_update(node, key, value, class, at, now),
             // RM-16, MR-25: a `Stop` of the device or of a stream cancels no update; on
             // receive it is a cut at its instant, on transmit it ends the bursts.
             Action::Stop { target } => {
-                let device = target.is_none() || target.as_ref() == Some(&self.instance.id);
-                if !device && target.as_ref() != Some(&rx) && target.as_ref() != Some(&tx) {
+                let device = target.is_none() || node == Some(&self.instance.id);
+                if !device && node != Some(&rx) && node != Some(&tx) {
                     return self.reject_action_at("stop", "MR-25: Stop target is not this device or its stream", now);
                 }
-                if device || target.as_ref() == Some(&tx) {
+                if device || node == Some(&tx) {
                     self.stop_tx(now, "MR-25: cancelled by stop", false)?;
                     self.cancel_later("MR-25: cancelled by stop", false)?;
                 }
-                if device || target.as_ref() == Some(&rx) {
+                if device || node == Some(&rx) {
                     let seq = self.arrival();
                     self.book_rx(Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop })?;
                 }
@@ -1038,7 +1033,7 @@ impl MockRadio {
             }
             // RM-12, RM-21: `start_rx` turns the receive stream on at its `at`, or at its
             // receipt if that is later, never before T0; it is never late.
-            Action::Command { target, verb, params, at } if verb.as_str() == ezsdr_radio::START_RX && target == rx && params.is_empty() => {
+            Action::Command { verb, params, at, .. } if verb.as_str() == ezsdr_radio::START_RX && node == Some(&rx) && params.is_empty() => {
                 let requested = match at.map(|at| time::to_v(self.clocks.as_ref().expect("prepared clocks"), self.root.expect("prepared root"), at.time_point)).transpose() {
                     Ok(requested) => requested,
                     Err(error) => return self.reject_action_at("command", &format!("MR-29: start_rx's instant cannot be converted: {error}"), now),
@@ -1063,8 +1058,8 @@ impl MockRadio {
         order
     }
 
-    fn handle_tx_burst(&mut self, action: Action, now: i64) -> Result<(), ModuleError> {
-        let Action::TxBurst { target, waveform, repeat, at, requested_at, late_policy, metadata } = action else {
+    fn handle_tx_burst(&mut self, action: Action, node: Option<&ResourceId>, now: i64) -> Result<(), ModuleError> {
+        let Action::TxBurst { waveform, repeat, at, requested_at, late_policy, metadata, .. } = action else {
             unreachable!("only TxBurst is dispatched to handle_tx_burst")
         };
         let size_bytes = waveform.size_bytes;
@@ -1087,7 +1082,7 @@ impl MockRadio {
             self.tx_line.as_ref().map_or(0, |line| i64::from(line.plan[index].config.channels))
         };
         let unit = channels.max(0) as u64 * 8;
-        if target != tx_id || channels <= 0 || size_bytes == 0 || unit == 0 || size_bytes % unit != 0 || !metadata_empty {
+        if node != Some(&tx_id) || channels <= 0 || size_bytes == 0 || unit == 0 || size_bytes % unit != 0 || !metadata_empty {
             self.reject_action_at("tx_burst", "MR-16: target, clock, waveform size, channel count or metadata is invalid", now)?;
             return Ok(());
         }
@@ -1291,8 +1286,8 @@ impl MockRadio {
         Ok(progressed)
     }
 
-    fn handle_update(&mut self, target: ResourceId, key: ezsdr_kernel::spec::Key, value: Value, class: UpdateClass, at: Option<AbsoluteDeadline>, now: i64) -> Result<(), ModuleError> {
-        if target != self.instance.id || !ezsdr_radio::keys::CONFIGURATION.contains(&key.as_str()) || key.as_str().ends_with(".antenna") {
+    fn handle_update(&mut self, node: Option<&ResourceId>, key: ezsdr_kernel::spec::Key, value: Value, class: UpdateClass, at: Option<AbsoluteDeadline>, now: i64) -> Result<(), ModuleError> {
+        if node != Some(&self.instance.id) || !ezsdr_radio::keys::CONFIGURATION.contains(&key.as_str()) || key.as_str().ends_with(".antenna") {
             self.reject_action_at("update_parameter", "MR-18: target or configuration key is not updateable", now)?;
             return Ok(());
         }
@@ -1509,13 +1504,10 @@ fn is_hardware_key(key: &str) -> bool {
         | ezsdr_radio::keys::RX_GAIN_DB | ezsdr_radio::keys::TX_GAIN_DB)
 }
 
-/// One MockRadio instance's own six Manifest sections, named
-/// `ezsdr.radio.mock.<instance id>.<suffix>`. The instance id is in the name because
-/// `Manifest::write_section` inserts: two instances of this Module in one Run would
-/// otherwise overwrite each other's records and only the last one written would survive,
-/// which is a silent loss of SC-28's burst records (MR-27, RS-39, KC-45).
-fn section(instance: &Ident, suffix: &str) -> Namespace {
-    Namespace::parse(&format!("ezsdr.radio.mock.{instance}.{suffix}")).expect("module section")
+/// One of a MockRadio instance's six Manifest sections, `ezsdr.radio.mock.<suffix>`; the
+/// Kernel files it under the instance's source root (MR-27, RS-39).
+fn section(suffix: &str) -> Namespace {
+    Namespace::parse(&format!("ezsdr.radio.mock.{suffix}")).expect("module section")
 }
 
 impl Provider for MockRadio {
@@ -1641,9 +1633,13 @@ impl Provider for MockRadio {
         self.clocks = Some(ctx.clocks);
         self.time = Some(ctx.time);
         // MR-37: `resolve` is control-path only (RS-33), so the handle is taken here.
-        let rx_node = self.instance.id.child("rx").map_err(|error| self.reject(format!("MR-37: {error}")))?;
+        let EventSource::Node { node: source_root } = ctx.source else {
+            return Err(self.reject("KC-8: a Provider's event source root is a node"));
+        };
+        let rx_node = source_root.child("rx").map_err(|error| self.reject(format!("MR-37: {error}")))?;
         let overflow = EventKind::parse(ezsdr_radio::kinds::RX_OVERFLOW).expect("declared radio event kind");
-        self.overflow_handle = Some(ctx.events.resolve(&rx_node, &overflow));
+        self.overflow_handle = Some(ctx.events.resolve(&EventSource::Node { node: rx_node }, &overflow));
+        self.source_root = Some(source_root);
         self.events = Some(ctx.events);
         self.actions = Some(ctx.actions);
         self.rx_handle = rx_handle;
@@ -1781,6 +1777,7 @@ impl Provider for MockRadio {
         self.clocks = None;
         self.time = None;
         self.events = None;
+        self.source_root = None;
         self.overflow_handle = None;
         self.root = None;
         self.channel = None;
@@ -1804,8 +1801,8 @@ impl Provider for MockRadio {
         if loss_due {
             self.refuse_actions(u);
         } else if let Some(actions) = self.actions.clone() {
-            while let Some(action) = actions.recv() {
-                self.handle_action(action, u)?;
+            while let Some((action, node)) = actions.recv() {
+                self.handle_action(action, node, u)?;
                 progressed = true;
             }
         }
