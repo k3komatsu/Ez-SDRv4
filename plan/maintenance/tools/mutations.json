@@ -1884,5 +1884,66 @@
   "crate": "ezsdr-kernel",
   "test_bin": "module_api",
   "filter": "ma_32_registry_refusals"
+ },
+ {
+  "id": "J155",
+  "name": "SB-4: Finite::new accepts NaN and the infinities",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "x.is_finite().then_some(Finite(x))",
+  "new": "Some(Finite(x))",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_04_a_number_is_finite"
+ },
+ {
+  "id": "J156",
+  "name": "SB-3: a selector that fails to serialise becomes an empty binding description",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "serde_json::to_string(&binding.selector).map_err(json)?,",
+  "new": "serde_json::to_string(&binding.selector).unwrap_or_default(),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_03_two_instances_may_not_declare_one_node_path",
+  "equivalent": "spec 26 §3: a selector maps Idents to Values, whose floats are Finite, so serialising it cannot fail and no test can reach the fallback; the `?` keeps a failure from ever becoming an identity (F2 d); compile.rs's two `?` in provider_content are the same case"
+ },
+ {
+  "id": "J157",
+  "name": "SB-5: a list Provider parameter update is offered to coerce as Eq(0)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "let Some(requested) = value.as_scalar().cloned() else {",
+  "new": "let Some(requested) = value.as_scalar().cloned().or(Some(crate::spec::Scalar::Int(0))) else {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "sb_05_a_provider_parameter_update_is_a_scalar"
+ },
+ {
+  "id": "J158",
+  "name": "SB-6: a Num compared with an Int takes the Int's order unreversed",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "(Scalar::Num(a), Scalar::Int(b)) => Some(cmp_int_num(*b, *a).reverse()),",
+  "new": "(Scalar::Num(a), Scalar::Int(b)) => Some(cmp_int_num(*b, *a)),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_6_equality_is_exact_and_the_matcher_agrees"
+ },
+ {
+  "id": "J159",
+  "name": "MA-12: a list `effective` value passes the narrowing check",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "None => Err(ModuleError::rejected(\"MA-12: a capability's `effective` value is a scalar\".to_owned())),",
+  "new": "None => Ok(()),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "ma_12_a_widening_effective_is_refused_at_prepare"
+ },
+ {
+  "id": "J160",
+  "name": "MA-12: a list `effective` value passes the re-match",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "let satisfied = applied.as_scalar().is_some_and(|value| {",
+  "new": "let satisfied = applied.as_scalar().is_none_or(|value| {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "ma_12_a_widening_effective_is_refused_at_prepare"
  }
 ]

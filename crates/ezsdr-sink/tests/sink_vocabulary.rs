@@ -1,3 +1,4 @@
+use ezsdr_kernel::spec::Scalar;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -64,7 +65,7 @@ fn hd_06_vocabulary() {
         target: ResourceId::parse("rec").unwrap(),
         at: None,
         params: [
-            (Key::parse("sink.capture_samples").unwrap(), Value::Int(1000)),
+            (Key::parse("sink.capture_samples").unwrap(), Value::from(1000)),
         ]
         .into_iter()
         .collect(),
@@ -82,7 +83,7 @@ fn hd_06_vocabulary() {
     assert_eq!(compiled.actions.len(), 1);
     assert!(matches!(
         &compiled.actions[0],
-        Action::UpdateParameter { target, key, value: Value::Int(1000), class, .. }
+        Action::UpdateParameter { target, key, value: Value::Scalar(Scalar::Int(1000)), class, .. }
             if target == &ResourceId::parse("sink/rec").unwrap()
                 && key.as_str() == "sink.capture_samples"
                 && *class == UpdateClass::BlockBoundary

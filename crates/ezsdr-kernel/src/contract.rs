@@ -6,6 +6,7 @@ use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
+use crate::spec::Scalar;
 use crate::stream::StreamError;
 
 /// A namespaced contract id matching `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`,
@@ -56,60 +57,6 @@ impl fmt::Display for DataContractId {
     }
 }
 
-/// An attribute value in a `DataContract`. The Kernel stores these and never
-/// interprets them, which is what keeps it from becoming a type system (SC-2).
-///
-/// Carries no tag (OV-13's carve-out): an attribute value is the scalar an author
-/// wrote, not a two-field object wrapping it.
-#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(untagged)]
-pub enum Scalar {
-    /// A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).
-    Int(i64),
-    /// A 64-bit float, written per RFC 8785's number rule; a non-finite one is
-    /// refused rather than written as `null` (OV-15).
-    Float(#[serde(serialize_with = "crate::hash::serialize_finite_f64")] f64),
-    /// A string.
-    Str(String),
-    /// A boolean.
-    Bool(bool),
-}
-
-/// Numeric equality crosses `Int` and `Float`, because `1` and `1.0` are one value
-/// under SB-6 and share one canonical form and one hash under OV-15a (finding D24).
-/// Without it an attribute an author wrote as `1` would not match the same contract
-/// re-registered from a Rust literal `1.0`, and SC-4's "identical re-registration is
-/// a no-op" would report a conflict.
-///
-/// Rule: SC-2, SB-6, OV-15a.
-impl PartialEq for Scalar {
-    fn eq(&self, other: &Scalar) -> bool {
-        match (self, other) {
-            (Scalar::Int(a), Scalar::Int(b)) => a == b,
-            (Scalar::Float(a), Scalar::Float(b)) => a == b,
-            // Compared exactly, never through `as f64`: above 2^53 that cast made
-            // two values with different canonical forms and different hashes
-            // compare equal, so `ContractRegistry::register` took a genuinely
-            // different definition for an idempotent re-registration and discarded
-            // it without a diagnostic (SC-2). It also made equality non-transitive.
-            // Equal iff the two share one canonical form under OV-15. Below 2^53
-            // every integer is uniquely representable as an `f64`, so no shorter
-            // decimal round-trips to it and the integer profile's exact decimal and
-            // `ecmascript_number`'s shortest round-trip agree. At or above it they
-            // diverge: `i64::MIN` and -2^63 are the same number and `try_from`
-            // succeeds, but the canonicaliser writes `-9223372036854775808` and
-            // `-9223372036854776000`, so accepting them as equal let SC-2 take a
-            // genuinely different definition for a re-registration again.
-            (Scalar::Int(a), Scalar::Float(b)) | (Scalar::Float(b), Scalar::Int(a)) => {
-                crate::spec::cmp_int_num(*a, *b) == Some(std::cmp::Ordering::Equal)
-            }
-            (Scalar::Str(a), Scalar::Str(b)) => a == b,
-            (Scalar::Bool(a), Scalar::Bool(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
 /// A registered data contract: an id, a fixed attribute map, and the set of
 /// producer contracts it accepts without conversion.
 ///
@@ -119,7 +66,9 @@ impl PartialEq for Scalar {
 pub struct DataContract {
     /// The namespaced id; identity is the id, not the shape (decision S7).
     pub id: DataContractId,
-    /// Attributes fixed at registration, for example `bytes_per_sample` (SC-4).
+    /// Attributes fixed at registration, for example `bytes_per_sample`. The Kernel
+    /// stores these and never interprets them, which is what keeps it from becoming
+    /// a type system (SC-2, SC-4).
     pub attributes: BTreeMap<String, Scalar>,
     /// Producer contracts this one accepts unconverted; empty at v4.0 (SC-3, SC-8).
     pub compatible_from: BTreeSet<DataContractId>,
@@ -271,8 +220,8 @@ pub fn standard_contracts() -> Vec<DataContract> {
             id: id("ezsdr.stream.cf32"),
             attributes: attrs(&[
                 ("bytes_per_sample", Scalar::Int(8)),
-                ("full_scale", Scalar::Float(1.0)),
-                ("layout", Scalar::Str("planar".to_owned())),
+                ("full_scale", Scalar::try_from(1.0).expect("finite")),
+                ("layout", Scalar::from("planar")),
             ]),
             compatible_from: BTreeSet::new(),
         },
@@ -280,8 +229,8 @@ pub fn standard_contracts() -> Vec<DataContract> {
             id: id("ezsdr.stream.sc16"),
             attributes: attrs(&[
                 ("bytes_per_sample", Scalar::Int(4)),
-                ("full_scale", Scalar::Float(32767.0)),
-                ("layout", Scalar::Str("planar".to_owned())),
+                ("full_scale", Scalar::try_from(32767.0).expect("finite")),
+                ("layout", Scalar::from("planar")),
             ]),
             compatible_from: BTreeSet::new(),
         },

@@ -70,7 +70,7 @@ fn capture(n: i64, at: Option<TimePoint>) -> SessionAction {
         verb: Ident::parse("capture").unwrap(),
         target: ResourceId::parse("rec").unwrap(),
         at,
-        params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::Int(n))]),
+        params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(n))]),
     }
 }
 
@@ -157,11 +157,11 @@ fn uhd_59_a_scheduled_burst_is_recorded() {
 fn uhd_59_a_session_retune_outside_the_rf_envelope_is_rejected() {
     let temp = rig::TempDir::new("uhd-59-rf");
     let mut run = uhd_session(&temp);
-    admitted(&mut run, set("radio.tx.channels", Value::Int(1)), None);
-    let entry = run.submit(set("radio.tx.frequency_hz", Value::Num(2.4e9)), None).unwrap();
+    admitted(&mut run, set("radio.tx.channels", Value::from(1)), None);
+    let entry = run.submit(set("radio.tx.frequency_hz", Value::num(2.4e9).unwrap()), None).unwrap();
     let Outcome::Rejected { violations } = &entry.outcome else { panic!("outside the band was admitted") };
     assert!(violations.iter().any(|v| v.check.as_str() == "radio.rf_envelope" && v.key.as_ref().is_some_and(|k| k.as_str() == "radio.tx.frequency_hz")));
-    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("radio.tx.frequency_hz").unwrap()], Value::Num(1.0e9));
+    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("radio.tx.frequency_hz").unwrap()], Value::num(1.0e9).unwrap());
     let manifest = run.finish();
     assert!(manifest.action_log.iter().any(|logged| logged.seq == entry.seq && matches!(logged.outcome, Outcome::Rejected { .. })), "the rejection is logged");
 }
@@ -172,7 +172,7 @@ fn uhd_57_the_session_loopback_captures_what_it_transmits() {
     let mut run = uhd_session(&temp);
     let wave = pn(1_000);
     let (bytes, _) = experiments::waveform_of(&wave);
-    admitted(&mut run, set("radio.tx.channels", Value::Int(1)), None);
+    admitted(&mut run, set("radio.tx.channels", Value::from(1)), None);
     let repeat = SessionAction::Vocabulary {
         ns: Namespace::parse("radio").unwrap(),
         verb: Ident::parse("start_repeat").unwrap(),

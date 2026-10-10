@@ -14,7 +14,7 @@ use ezsdr_kernel::module_api::{
 };
 use ezsdr_kernel::policy::{EventKindDecl, EventKindRegistry, Reaction};
 use ezsdr_kernel::spec::{
-    CoercionPolicy, Ident, Key, KeyDecl, Namespace, Value, ValueKind,
+    CoercionPolicy, Ident, Key, KeyDecl, Namespace, Scalar, Value, ValueKind,
 };
 use ezsdr_kernel::stream::LatePolicy;
 use schemars::JsonSchema;
@@ -501,8 +501,8 @@ fn number(
     let key = Key::parse(name).expect("a declared Radio Model key is valid");
     match configuration.get(&key) {
         None => None,
-        Some(Value::Int(value)) => Some(*value as f64),
-        Some(Value::Num(value)) => Some(*value),
+        Some(Value::Scalar(Scalar::Int(value))) => Some(*value as f64),
+        Some(Value::Scalar(Scalar::Num(value))) => Some(value.get()),
         Some(_) => {
             push_fragment_violation(
                 violations,
@@ -527,7 +527,7 @@ fn string<'a>(
     let key = Key::parse(name).expect("a declared Radio Model key is valid");
     match configuration.get(&key) {
         None => None,
-        Some(Value::Str(value)) => Some(value),
+        Some(Value::Scalar(Scalar::Str(value))) => Some(value),
         Some(_) => {
             push_fragment_violation(
                 violations,

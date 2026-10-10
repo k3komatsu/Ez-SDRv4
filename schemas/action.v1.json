@@ -240,6 +240,11 @@
       "description": "What kind of event this is, matching `^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$`:\nevery kind is namespaced. The Kernel owns the five of RS-28, under `ezsdr.`, and\nevery other kind belongs to the Vocabulary or Module that emits it.\n\nRule: SB-1, RS-27.",
       "type": "string"
     },
+    "Finite": {
+      "description": "A finite 64-bit float: NaN and the infinities are refused, so OV-15's\ncanonicaliser never meets one.\n\nRule: SB-4, OV-15.",
+      "format": "double",
+      "type": "number"
+    },
     "Gap": {
       "additionalProperties": false,
       "description": "An interval of missing samples in the stream (SC-30, Vision §28).",
@@ -449,6 +454,28 @@
       ],
       "type": "object"
     },
+    "Scalar": {
+      "anyOf": [
+        {
+          "description": "A boolean.",
+          "type": "boolean"
+        },
+        {
+          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "$ref": "#/$defs/Finite",
+          "description": "A finite float (OV-15)."
+        },
+        {
+          "description": "A string.",
+          "type": "string"
+        }
+      ],
+      "description": "The one scalar type: a `Value`'s scalar, a constraint's and a capability's value,\nand a `DataContract` attribute (SB-4, SB-5, SC-2).\n\nCarries no tag (OV-13's carve-out): a scalar is the value an author wrote, not a\ntwo-field object wrapping it.\n\nRule: SB-4, SB-6, SC-2."
+    },
     "Segment": {
       "additionalProperties": false,
       "description": "A contiguous run of valid samples on one channel (SC-30).",
@@ -633,39 +660,25 @@
     "Value": {
       "anyOf": [
         {
-          "description": "A boolean.",
-          "type": "boolean"
+          "$ref": "#/$defs/Scalar",
+          "description": "A scalar."
         },
         {
-          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
-          "format": "int64",
-          "type": "integer"
-        },
-        {
-          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
-          "format": "double",
-          "type": "number"
-        },
-        {
-          "description": "A string.",
-          "type": "string"
-        },
-        {
-          "description": "A list of scalars; nesting deeper is refused (SB-4).",
+          "description": "A list of scalars.",
           "items": {
-            "$ref": "#/$defs/Value"
+            "$ref": "#/$defs/Scalar"
           },
           "type": "array"
         },
         {
           "additionalProperties": {
-            "$ref": "#/$defs/Value"
+            "$ref": "#/$defs/Scalar"
           },
-          "description": "A map of scalars; nesting deeper is refused (SB-4).",
+          "description": "A map of scalars; its keys are ASCII (SB-9a).",
           "type": "object"
         }
       ],
-      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+      "description": "A scalar, or a list or map of scalars. One level is the type: nothing deeper can\nbe built or parsed.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

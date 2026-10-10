@@ -22,7 +22,7 @@ fn provider_content(
     binding: &Binding,
     spec: &ExperimentSpec,
     admission: &AdmissionResult,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, SpecError> {
     let requested = admission.matched.get(name).map(|node| Requested {
         resource: node.clone(),
         constraints: spec
@@ -31,17 +31,13 @@ fn provider_content(
             .map(|r| r.requires.clone())
             .unwrap_or_default(),
     });
+    let json = |e: serde_json::Error| SpecError::Structural { reason: format!("SB-39: {name}'s fragment: {e}") };
     let mut out = serde_json::Map::new();
-    out.insert(
-        "selector".to_owned(),
-        serde_json::to_value(&binding.selector).unwrap_or(serde_json::Value::Null),
-    );
+    out.insert("selector".to_owned(), serde_json::to_value(&binding.selector).map_err(json)?);
     if let Some(r) = requested {
-        if let Ok(v) = serde_json::to_value(&r) {
-            out.insert("requested".to_owned(), v);
-        }
+        out.insert("requested".to_owned(), serde_json::to_value(&r).map_err(json)?);
     }
-    serde_json::Value::Object(out)
+    Ok(serde_json::Value::Object(out))
 }
 
 pub(super) fn plan(
@@ -114,7 +110,7 @@ pub(super) fn plan(
             id: name.clone(),
             instance: binding.module.clone(),
             role: Role::Provider,
-            content: provider_content(name, binding, spec, admission),
+            content: provider_content(name, binding, spec, admission)?,
             after,
         });
     }

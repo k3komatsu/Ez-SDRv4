@@ -29,7 +29,7 @@ pub(super) fn requested_violations(
         requires
             .iter()
             .filter_map(|(k, c)| match c {
-                Constraint::Eq { value } => Some((k.clone(), value.clone())),
+                Constraint::Eq { value } => Some((k.clone(), Value::Scalar(value.clone()))),
                 _ => None,
             })
             .collect()
@@ -387,7 +387,7 @@ pub(super) fn check_bindings(
         .filter(|(n, _)| spec.resources.contains_key(*n))
     {
         let instance = super::supplied(inputs.providers, name, "Provider instance")?.instance();
-        let description = binding_description(binding);
+        let description = binding_description(binding)?;
         if let Some((first, first_id)) = by_description.insert(description, (name, &instance.id)) {
             if *first_id != instance.id {
                 return Err(SpecError::Structural {
@@ -606,15 +606,18 @@ fn check_keys(spec: &ExperimentSpec, inputs: &CompileInputs<'_>) -> Result<(), S
 /// A binding's description `(module, selector, profile)`, which is an instance's
 /// identity (SB-3): two bindings with equal descriptions name one instance. Shared by
 /// `validate` and the coordinator's grouping (KC-4), so the two cannot disagree.
-pub(crate) fn binding_description(binding: &crate::binding::Binding) -> (ModuleRef, String) {
-    (
+pub(crate) fn binding_description(
+    binding: &crate::binding::Binding,
+) -> Result<(ModuleRef, String), SpecError> {
+    let json = |e: serde_json::Error| SpecError::Structural { reason: format!("SB-3: a binding description: {e}") };
+    Ok((
         binding.module.clone(),
         format!(
             "{}|{}",
-            serde_json::to_string(&binding.selector).unwrap_or_default(),
-            serde_json::to_string(&binding.profile).unwrap_or_default()
+            serde_json::to_string(&binding.selector).map_err(json)?,
+            serde_json::to_string(&binding.profile).map_err(json)?
         ),
-    )
+    ))
 }
 
 /// SB-22e: the registered Module a binding names holds `role`. A version that is not

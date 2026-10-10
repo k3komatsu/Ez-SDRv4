@@ -195,7 +195,7 @@ fn run(sequence: &Sequence) -> Record {
     device.tx_open(1).unwrap();
     let (to_tx, from_tx) = channel();
     let mut config = core.description.defaults.clone();
-    config.insert(key("radio.tx.channels"), Value::Int(1));
+    config.insert(key("radio.tx.channels"), Value::from(1));
     let start = super::Start { t0: T0, rx: Some((1, 200)), tx: Some((tx, 1)) };
     let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, config, false, start);
     let ticks = |ns: i64| ns / 5;
@@ -218,13 +218,13 @@ fn run(sequence: &Sequence) -> Record {
                         Op::StartRx => Action::Command { target: core.rx_id.clone(), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None },
                         Op::Cold { direction, change, at_ns } => {
                             let (name, value) = match change {
-                                Change::Channels(n) => ("channels", Value::Int(i64::from(n))),
-                                Change::Rate(rate) => ("sample_rate_hz", Value::Num(rate as f64)),
+                                Change::Channels(n) => ("channels", Value::from(i64::from(n))),
+                                Change::Rate(rate) => ("sample_rate_hz", Value::num(rate as f64).unwrap()),
                             };
                             Action::UpdateParameter { target: core.id.clone(), key: key(&format!("radio.{}.{name}", side(direction))), value, class: UpdateClass::Cold, at: at(at_ns) }
                         }
                         Op::Timed { direction, gain_db, at_ns } => Action::UpdateParameter {
-                            target: core.id.clone(), key: key(&format!("radio.{}.gain_db", side(direction))), value: Value::Num(gain_db), class: UpdateClass::HardwareTimed, at: at(at_ns),
+                            target: core.id.clone(), key: key(&format!("radio.{}.gain_db", side(direction))), value: Value::num(gain_db).unwrap(), class: UpdateClass::HardwareTimed, at: at(at_ns),
                         },
                     });
                 }

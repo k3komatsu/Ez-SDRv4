@@ -413,7 +413,7 @@ fn nx_07_an_action_addressed_to_the_executor_fails_the_step() {
     h.actions.0.lock().unwrap().push_back(Action::UpdateParameter {
         target: ResourceId::parse("a").unwrap(),
         key: Key::parse("ext.ezsdr.exec.native.x").unwrap(),
-        value: Value::Int(1),
+        value: Value::from(1),
         class: UpdateClass::Cold,
         at: None,
     });

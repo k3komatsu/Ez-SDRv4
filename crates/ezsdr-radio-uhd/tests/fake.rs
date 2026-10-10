@@ -6,6 +6,7 @@
 
 mod common;
 
+use ezsdr_kernel::spec::Scalar;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as Wall, Instant};
@@ -124,10 +125,10 @@ fn ur_09_x310_obx_is_one_channel_from_10_mhz_to_8_4_ghz_defaulting_to_1_ghz() {
     let capability = |name: &str| radio.instance().tree.capabilities[&Key::parse(name).unwrap()].clone();
     let range = |min, max| ezsdr_kernel::spec::CapabilityValue::Range { min, max };
     for dir in ["rx", "tx"] {
-        assert_eq!(capability(&format!("radio.{dir}.frequency_hz")), range(Value::Num(1e7), Value::Num(8.4e9)));
-        assert_eq!(capability(&format!("radio.{dir}.channels")), range(Value::Int(0), Value::Int(1)));
+        assert_eq!(capability(&format!("radio.{dir}.frequency_hz")), range(Scalar::try_from(1e7).unwrap(), Scalar::try_from(8.4e9).unwrap()));
+        assert_eq!(capability(&format!("radio.{dir}.channels")), range(Scalar::from(0), Scalar::from(1)));
     }
-    assert_eq!(capability("radio.phase_behavior_on_retune"), ezsdr_kernel::spec::CapabilityValue::One { value: Value::Str("random_unless_timed_tune".to_owned()) });
+    assert_eq!(capability("radio.phase_behavior_on_retune"), ezsdr_kernel::spec::CapabilityValue::One { value: Scalar::from("random_unless_timed_tune".to_owned()) });
     assert_eq!(radio.instance().profile.as_ref().unwrap().name, "x310-obx");
     let dir = TempDir::new();
     let mut doc = profile(&dir, json!({}), json!({}), true);
@@ -163,8 +164,8 @@ fn ur_09_x310_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz() {
     let capability = |name: &str| radio.instance().tree.capabilities[&Key::parse(name).unwrap()].clone();
     let range = |min, max| ezsdr_kernel::spec::CapabilityValue::Range { min, max };
     for dir in ["rx", "tx"] {
-        assert_eq!(capability(&format!("radio.{dir}.frequency_hz")), range(Value::Num(1.2e9), Value::Num(6e9)));
-        assert_eq!(capability(&format!("radio.{dir}.channels")), range(Value::Int(0), Value::Int(1)));
+        assert_eq!(capability(&format!("radio.{dir}.frequency_hz")), range(Scalar::try_from(1.2e9).unwrap(), Scalar::try_from(6e9).unwrap()));
+        assert_eq!(capability(&format!("radio.{dir}.channels")), range(Scalar::from(0), Scalar::from(1)));
     }
     // A Session that sets no frequency tunes to the default, inside the CBX's range.
     let dir = TempDir::new();
@@ -417,15 +418,15 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     let radio = provider();
     let instance = radio.instance();
     let capability = |name: &str| instance.tree.capabilities[&Key::parse(name).unwrap()].clone();
-    let one = |v: Value| ezsdr_kernel::spec::CapabilityValue::One { value: v };
-    assert_eq!(capability("radio.timing.min_timed_command_lead_ns"), one(Value::Int(5_000_000)));
-    assert_eq!(capability("radio.timing.startup_latency_ns"), one(Value::Int(2_000_000_000)));
-    assert_eq!(capability("radio.timing.command_queue_depth"), one(Value::Int(16)));
-    assert_eq!(capability("radio.tx.repeat_max_samples"), one(Value::Int(4_294_967_295)));
-    assert_eq!(capability("radio.tx.repeat_align_samples"), one(Value::Int(1)));
-    assert_eq!(capability("radio.rx.block_len"), one(Value::Int(2_000)));
-    assert_eq!(capability("radio.perf.wire_bytes_per_sample"), one(Value::Int(4)));
-    assert_eq!(capability("radio.tx.path_delay_samples"), one(Value::Int(45)));
+    let one = |v: Scalar| ezsdr_kernel::spec::CapabilityValue::One { value: v };
+    assert_eq!(capability("radio.timing.min_timed_command_lead_ns"), one(Scalar::from(5_000_000)));
+    assert_eq!(capability("radio.timing.startup_latency_ns"), one(Scalar::from(2_000_000_000)));
+    assert_eq!(capability("radio.timing.command_queue_depth"), one(Scalar::from(16)));
+    assert_eq!(capability("radio.tx.repeat_max_samples"), one(Scalar::from(4_294_967_295)));
+    assert_eq!(capability("radio.tx.repeat_align_samples"), one(Scalar::from(1)));
+    assert_eq!(capability("radio.rx.block_len"), one(Scalar::from(2_000)));
+    assert_eq!(capability("radio.perf.wire_bytes_per_sample"), one(Scalar::from(4)));
+    assert_eq!(capability("radio.tx.path_delay_samples"), one(Scalar::from(45)));
     let envelope = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.envelope").unwrap()];
     assert_eq!(envelope["profile"]["name"], "x310-ubx");
     assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], 5_000_000);
@@ -444,7 +445,7 @@ fn ur_10_instance() {
     assert_eq!(instance.id, ResourceId::parse("usrp").unwrap());
 }
 
-fn request(pairs: &[(&str, Value)]) -> ezsdr_kernel::module_api::Requested {
+fn request(pairs: &[(&str, Scalar)]) -> ezsdr_kernel::module_api::Requested {
     ezsdr_kernel::module_api::Requested {
         resource: ResourceId::parse("usrp").unwrap(),
         constraints: pairs.iter().map(|(k, v)| (Key::parse(k).unwrap(), Constraint::Eq { value: v.clone() })).collect(),
@@ -454,11 +455,11 @@ fn request(pairs: &[(&str, Value)]) -> ezsdr_kernel::module_api::Requested {
 #[test]
 fn ur_11_coerce_is_the_descriptions() {
     let radio = provider();
-    let report = radio.coerce(&request(&[("radio.rx.sample_rate_hz", Value::Num(19.5e6))])).unwrap();
-    assert_eq!(report.applied[&Key::parse("radio.rx.sample_rate_hz").unwrap()], Value::Num(20e6));
+    let report = radio.coerce(&request(&[("radio.rx.sample_rate_hz", Scalar::try_from(19.5e6).unwrap())])).unwrap();
+    assert_eq!(report.applied[&Key::parse("radio.rx.sample_rate_hz").unwrap()], Value::num(20e6).unwrap());
     assert_eq!(report.coercions.len(), 1);
-    assert!(!radio.coerce(&request(&[("radio.rx.frequency_hz", Value::Num(7e9))])).unwrap().rejected.is_empty());
-    assert!(!radio.coerce(&request(&[("radio.rx.channels", Value::Int(4))])).unwrap().rejected.is_empty());
+    assert!(!radio.coerce(&request(&[("radio.rx.frequency_hz", Scalar::try_from(7e9).unwrap())])).unwrap().rejected.is_empty());
+    assert!(!radio.coerce(&request(&[("radio.rx.channels", Scalar::from(4))])).unwrap().rejected.is_empty());
 }
 
 // ---------------------------------------------------------------- prepare, arm, start (UR-12…UR-16)
@@ -477,7 +478,7 @@ impl ActionSubmitter for NoSubmit {
 }
 
 /// A unit `prepare` of the UHD Provider with a hand-built context.
-fn direct_prepare(radio: &mut UhdRadio, device: Arc<FakeDevice>, class: ExecutionClass, links: Vec<AttachedPort>, constraints: &[(&str, Value)]) -> Result<(), ezsdr_kernel::module_api::ModuleError> {
+fn direct_prepare(radio: &mut UhdRadio, device: Arc<FakeDevice>, class: ExecutionClass, links: Vec<AttachedPort>, constraints: &[(&str, Scalar)]) -> Result<(), ezsdr_kernel::module_api::ModuleError> {
     let clocks = Arc::new(ClockRegistry::new());
     let authority = DeviceAuthority::new(device, clocks.clone(), "internal", "internal", ARGS).unwrap();
     let mut registry = ModuleRegistry::new();
@@ -546,16 +547,16 @@ struct Direct {
 }
 
 impl Direct {
-    fn new(config: FakeConfig, constraints: &[(&str, Value)]) -> Direct {
+    fn new(config: FakeConfig, constraints: &[(&str, Scalar)]) -> Direct {
         Direct::with_links(config, constraints, Vec::new())
     }
 
-    fn with_links(config: FakeConfig, constraints: &[(&str, Value)], links: Vec<AttachedPort>) -> Direct {
+    fn with_links(config: FakeConfig, constraints: &[(&str, Scalar)], links: Vec<AttachedPort>) -> Direct {
         Direct::build(config, constraints, links, json!({}))
     }
 
     /// With selector keys beside `args` (UR-5).
-    fn build(config: FakeConfig, constraints: &[(&str, Value)], links: Vec<AttachedPort>, selector: Json) -> Direct {
+    fn build(config: FakeConfig, constraints: &[(&str, Scalar)], links: Vec<AttachedPort>, selector: Json) -> Direct {
         let device = fake(config);
         let clocks = Arc::new(ClockRegistry::new());
         let authority = DeviceAuthority::new(device.clone(), clocks.clone(), "internal", "internal", ARGS).unwrap();
@@ -649,7 +650,7 @@ fn ur_12_prepare_refusals() {
     let block = direct_prepare(&mut radio, device.clone(), ExecutionClass::HardwareInLoop, vec![attached(ezsdr_kernel::stream::BackPressure::Block)], &[]).unwrap_err();
     assert!(block.message.contains("Block"), "{}", block.message);
     let mut radio = provider();
-    let three = direct_prepare(&mut radio, device, ExecutionClass::HardwareInLoop, Vec::new(), &[("radio.rx.channels", Value::Int(3))]).unwrap_err();
+    let three = direct_prepare(&mut radio, device, ExecutionClass::HardwareInLoop, Vec::new(), &[("radio.rx.channels", Scalar::from(3))]).unwrap_err();
     assert_eq!(three.kind, ModuleErrorKind::Rejected);
 }
 
@@ -697,7 +698,7 @@ fn ur_12_every_advertised_rate_is_accepted() {
     let dir = TempDir::new();
     let mut run = session(&profile(&dir, json!({}), json!({}), true), fake(FakeConfig::default()));
     past_t0(&mut run, ms(1));
-    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::Num(200e6 / 7.0)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::num(200e6 / 7.0).unwrap()), None).unwrap()));
     wait(&mut run, ms(200));
     let manifest = run.finish();
     assert!(rejections(&manifest).is_empty(), "{:?}", rejections(&manifest));
@@ -727,7 +728,7 @@ fn ur_14_actions_are_finished_before_the_next_recv() {
     let device = fake(FakeConfig { apply_delay: Wall::from_millis(20), ..FakeConfig::default() });
     let mut run = session(&profile(&dir, json!({}), json!({}), true), device.clone());
     past_t0(&mut run, ms(1));
-    let entry = run.submit(set("radio.tx.channels", Value::Int(1)), None).unwrap();
+    let entry = run.submit(set("radio.tx.channels", Value::from(1)), None).unwrap();
     assert!(admitted(&entry), "{entry:?}");
     assert!(!calls(&device, "apply tx").is_empty(), "{:?}", device.calls());
     let tx = ResourceId::parse("usrp/tx").unwrap();
@@ -743,8 +744,8 @@ fn ur_14_the_control_thread_never_waits_for_a_device_instant() {
     past_t0(&mut run, ms(1));
     // The switch is a restart lead (50 ms) away; booking it and the next Action takes
     // uhd-control a few milliseconds, and KC-21a returns each call when it has booked.
-    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
-    assert!(admitted(&run.submit(set("radio.rx.gain_db", Value::Num(3.0)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::num(2e6).unwrap()), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.rx.gain_db", Value::num(3.0).unwrap()), None).unwrap()));
     // Command ordering is proved with a controlled clock by the library's
     // ur_14_booking_does_not_wait_for_a_future_cold_switch. A wall-time upper
     // bound here would also measure whether the host scheduled these threads.
@@ -906,7 +907,7 @@ fn tx_session(config: FakeConfig) -> (RunHandle, Arc<FakeDevice>, TempDir) {
     let device = fake(config);
     let mut run = session(&profile(&dir, json!({}), json!({}), true), device.clone());
     past_t0(&mut run, ms(1));
-    assert!(admitted(&run.submit(set("radio.tx.channels", Value::Int(1)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.tx.channels", Value::from(1)), None).unwrap()));
     past_tx_origin(&mut run);
     (run, device, dir)
 }
@@ -961,7 +962,7 @@ fn ur_21_txburst_refusals() {
 fn ur_21_a_burst_before_start_up_is_refused() {
     let dir = TempDir::new();
     let mut run = session(&profile(&dir, json!({}), json!({}), true), fake(FakeConfig::default()));
-    assert!(admitted(&run.submit(set("radio.tx.channels", Value::Int(1)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.tx.channels", Value::from(1)), None).unwrap()));
     // On the new clock, after its origin, the start lead after the change (RM-25), and
     // before the device's start-up.
     let _ = send(&mut run, "send", Some(ms(60)), &tone(10));
@@ -1025,7 +1026,7 @@ fn ur_21_a_burst_before_its_clock_s_origin_is_late() {
     // An explicit `at` 5 ms ahead lies before the new transmit clock's origin, a start lead
     // after the cold change (RM-14, RM-15).
     let (mut run, device, _dir) = tx_session(FakeConfig::default());
-    assert!(admitted(&run.submit(set("radio.tx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.tx.sample_rate_hz", Value::num(2e6).unwrap()), None).unwrap()));
     let entry = send(&mut run, "start_repeat", Some(ms(5)), &tone(200));
     assert!(admitted(&entry), "{entry:?}");
     wait(&mut run, ms(300));
@@ -1043,7 +1044,7 @@ fn ur_21_an_untimed_burst_after_a_cold_change_is_on_time_at_its_clock_s_origin()
     // RS-19: with no `at`, the burst is admitted at the new transmit clock's origin, which
     // uhd-control registered before the Kernel's KC-21a wait returned (UR-25), so it is on time.
     let (mut run, _device, _dir) = tx_session(FakeConfig::default());
-    assert!(admitted(&run.submit(set("radio.tx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.tx.sample_rate_hz", Value::num(2e6).unwrap()), None).unwrap()));
     let entry = send(&mut run, "start_repeat", None, &tone(200));
     assert!(admitted(&entry), "{entry:?}");
     wait(&mut run, ms(300));
@@ -1173,7 +1174,7 @@ fn ur_24_an_untimed_retune_is_on_time_after_its_delivery() {
     let mut run = session(&profile(&dir, json!({}), json!({}), true), fake(FakeConfig::default()));
     past_t0(&mut run, ms(1));
     for i in 0..10 {
-        assert!(admitted(&run.submit(set("radio.rx.frequency_hz", Value::Num(1e9 + f64::from(i))), None).unwrap()));
+        assert!(admitted(&run.submit(set("radio.rx.frequency_hz", Value::num(1e9 + f64::from(i)).unwrap()), None).unwrap()));
         wait(&mut run, ms(5));
     }
     assert_eq!(late_commands(&run.finish()), 0);
@@ -1182,11 +1183,11 @@ fn ur_24_an_untimed_retune_is_on_time_after_its_delivery() {
 #[test]
 fn ur_24_hardware_timed_updates() {
     use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
-    let mut direct = Direct::new(FakeConfig { command_queue: 64, ..FakeConfig::default() }, &[("radio.tx.channels", Value::Int(1))]);
+    let mut direct = Direct::new(FakeConfig { command_queue: 64, ..FakeConfig::default() }, &[("radio.tx.channels", Scalar::from(1))]);
     let now = direct.now();
     // 1 ms ahead is inside the 2 ms device lead: late (UC-6 as KG-8 amends it).
-    direct.update("radio.rx.frequency_hz", Value::Num(2.1e9), HardwareTimed, Some(now + ms(1)));
-    direct.update("radio.tx.gain_db", Value::Num(3.0), HardwareTimed, Some(now + ms(40)));
+    direct.update("radio.rx.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(now + ms(1)));
+    direct.update("radio.tx.gain_db", Value::num(3.0).unwrap(), HardwareTimed, Some(now + ms(40)));
     direct.settle(Wall::from_millis(80));
     let late = direct.of("radio.LATE_COMMAND");
     assert_eq!(late.len(), 1, "{late:?}");
@@ -1202,7 +1203,7 @@ fn ur_24_hardware_timed_updates() {
     // 17 pending: the 17th is refused (UR-24's depth 16).
     let far = direct.now() + ms(5_000);
     for i in 0..17 {
-        direct.update("radio.rx.gain_db", Value::Num(f64::from(i % 30)), HardwareTimed, Some(far + i64::from(i)));
+        direct.update("radio.rx.gain_db", Value::num(f64::from(i % 30)).unwrap(), HardwareTimed, Some(far + i64::from(i)));
     }
     direct.settle(Wall::from_millis(30));
     let full = direct.of("radio.COMMAND_QUEUE_FULL");
@@ -1218,8 +1219,8 @@ fn ur_24_a_far_future_update_does_not_delay_a_nearer_one() {
     use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
     let mut direct = Direct::new(FakeConfig::default(), &[]);
     let now = direct.now();
-    direct.update("radio.rx.frequency_hz", Value::Num(2.1e9), HardwareTimed, Some(now + ms(500)));
-    direct.update("radio.rx.frequency_hz", Value::Num(2.2e9), HardwareTimed, Some(now + ms(20)));
+    direct.update("radio.rx.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(now + ms(500)));
+    direct.update("radio.rx.frequency_hz", Value::num(2.2e9).unwrap(), HardwareTimed, Some(now + ms(20)));
     direct.settle(Wall::from_millis(80));
     let applied: Vec<(i64, i64)> = direct
         .device
@@ -1249,7 +1250,7 @@ fn ur_24_the_device_queue_order_is_the_effective_order() {
         let mut direct = Direct::new(FakeConfig::default(), &[]);
         let now = direct.now();
         for (i, us) in [2_900i64, 2_600, 2_300].into_iter().enumerate() {
-            direct.update("radio.rx.frequency_hz", Value::Num(2.0e9 + i as f64 * 1e6), HardwareTimed, Some(now + us * 200));
+            direct.update("radio.rx.frequency_hz", Value::num(2.0e9 + i as f64 * 1e6).unwrap(), HardwareTimed, Some(now + us * 200));
         }
         direct.settle(Wall::from_millis(30));
         let ats: Vec<i64> = direct
@@ -1274,8 +1275,8 @@ fn ur_25_the_switch_applies_the_configuration_in_effect_at_e2() {
     use ezsdr_kernel::module_api::UpdateClass::{Cold, HardwareTimed};
     let mut direct = Direct::with_links(FakeConfig::default(), &[], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)]);
     let now = direct.now();
-    direct.update("radio.rx.frequency_hz", Value::Num(2.1e9), HardwareTimed, Some(now + ms(320)));
-    direct.update("radio.rx.sample_rate_hz", Value::Num(2e6), Cold, Some(now + ms(300)));
+    direct.update("radio.rx.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(now + ms(320)));
+    direct.update("radio.rx.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(now + ms(300)));
     direct.settle(Wall::from_millis(450));
     let calls = direct.device.calls();
     assert!(calls.iter().any(|c| c.starts_with("apply rx 0 rate=2000000 freq=2100000000") && c.ends_with("at=-")), "{calls:?}");
@@ -1356,7 +1357,7 @@ fn ur_25_a_stream_silent_before_e1_switches_before_e2() {
         vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)],
     );
     assert!(direct.now() < silent - ms(150), "the Run started late: {}", direct.now());
-    direct.update("radio.rx.sample_rate_hz", Value::Num(2e6), Cold, Some(silent + ms(130)));
+    direct.update("radio.rx.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(silent + ms(130)));
     let until = silent + ms(300) - direct.now();
     direct.settle(Wall::from_nanos((until * 5) as u64));
     let late = direct.of("radio.LATE_COMMAND");
@@ -1398,9 +1399,9 @@ fn ur_25_tx_channels_from_zero_transmits_the_next_burst_on_time() {
 fn ur_25_rx_channels_from_zero_starts_at_its_instant() {
     // RM-25: a stream enabled from 0 channels starts at or after its effective instant.
     use ezsdr_kernel::module_api::UpdateClass::Cold;
-    let mut direct = Direct::with_links(FakeConfig::default(), &[("radio.rx.channels", Value::Int(0))], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)]);
+    let mut direct = Direct::with_links(FakeConfig::default(), &[("radio.rx.channels", Scalar::from(0))], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)]);
     let at = direct.now() + ms(300);
-    direct.update("radio.rx.channels", Value::Int(1), Cold, Some(at));
+    direct.update("radio.rx.channels", Value::from(1), Cold, Some(at));
     direct.settle(Wall::from_millis(30));
     // The timed start is issued once configured; the clock is registered at the first block.
     let start = direct.device.calls().into_iter().rev().find(|c| c.starts_with("rx_start ")).unwrap_or_else(|| panic!("{:?}", direct.device.calls()));
@@ -1421,8 +1422,8 @@ fn ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuratio
     // is checked exactly, whatever the load: one untimed `apply` takes 80 ms here.
     use ezsdr_kernel::module_api::UpdateClass::Cold;
     let config = FakeConfig { apply_delay: Wall::from_millis(80), ..FakeConfig::default() };
-    let mut direct = Direct::with_links(config, &[("radio.rx.channels", Value::Int(0))], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)]);
-    direct.update("radio.rx.channels", Value::Int(1), Cold, None);
+    let mut direct = Direct::with_links(config, &[("radio.rx.channels", Scalar::from(0))], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)]);
+    direct.update("radio.rx.channels", Value::from(1), Cold, None);
     direct.settle(Wall::from_millis(300));
     let instance = direct.finish();
     let envelope = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.usrp.envelope").unwrap()];
@@ -1440,10 +1441,10 @@ fn ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuratio
 #[test]
 fn ur_25_a_cold_change_the_envelope_refuses_changes_nothing() {
     use ezsdr_kernel::module_api::UpdateClass::Cold;
-    let mut direct = Direct::new(FakeConfig::default(), &[("radio.rx.channels", Value::Int(2))]);
+    let mut direct = Direct::new(FakeConfig::default(), &[("radio.rx.channels", Scalar::from(2))]);
     let before = direct.device.calls().len();
     // Two channels at 200 Msps need 1.6 GB/s on a 1 GB/s link (RM-7).
-    direct.update("radio.rx.sample_rate_hz", Value::Num(200e6), Cold, None);
+    direct.update("radio.rx.sample_rate_hz", Value::num(200e6).unwrap(), Cold, None);
     direct.settle(Wall::from_millis(30));
     let rejected = direct.of("radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1);
@@ -1460,11 +1461,11 @@ fn ur_25_enabling_tx_applies_the_configuration() {
     spec_profile["environment"]["radio.rf_envelope"] = json!({ "allowed_bands": [{ "lo_hz": 1e8, "hi_hz": 5e9 }] });
     let mut run = session(&spec_profile, device.clone());
     past_t0(&mut run, ms(1));
-    assert!(admitted(&run.submit(set("radio.tx.frequency_hz", Value::Num(2.4e9)), None).unwrap()));
-    assert!(admitted(&run.submit(set("radio.tx.gain_db", Value::Num(5.0)), None).unwrap()));
-    assert!(admitted(&run.submit(set("radio.rx.frequency_hz", Value::Num(2.4e9)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.tx.frequency_hz", Value::num(2.4e9).unwrap()), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.tx.gain_db", Value::num(5.0).unwrap()), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.rx.frequency_hz", Value::num(2.4e9).unwrap()), None).unwrap()));
     wait(&mut run, ms(20));
-    assert!(admitted(&run.submit(set("radio.tx.channels", Value::Int(1)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.tx.channels", Value::from(1)), None).unwrap()));
     let calls = device.calls();
     assert!(calls.iter().any(|c| c.starts_with("apply tx 0 rate=1000000 freq=2400000000 gain=5 antenna=TX/RX at=-")), "{calls:?}");
     past_tx_origin(&mut run);
@@ -1472,7 +1473,7 @@ fn ur_25_enabling_tx_applies_the_configuration() {
     let _ = send(&mut run, "start_repeat", Some(ms(20)), &wave);
     wait(&mut run, ms(40));
     let capture_at = after(&run, ms(5));
-    assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(capture_at), &[("sink.capture_samples", Value::Int(2_000))]), None).unwrap()));
+    assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(capture_at), &[("sink.capture_samples", Value::from(2_000))]), None).unwrap()));
     let horizon = after(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     let manifest = run.finish();
@@ -1486,7 +1487,7 @@ fn ur_25_enabling_tx_applies_the_configuration() {
 #[test]
 fn ur_25_a_rate_change_admits_a_burst_on_the_new_clock() {
     let (mut run, _, _dir) = tx_session(FakeConfig::default());
-    assert!(admitted(&run.submit(set("radio.tx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.tx.sample_rate_hz", Value::num(2e6).unwrap()), None).unwrap()));
     let entry = send(&mut run, "start_repeat", None, &tone(100));
     assert!(admitted(&entry), "{entry:?}");
     // Booked before the switch (50 ms after receipt), transmitted after it on the new clock.
@@ -1502,7 +1503,7 @@ fn ur_25_a_cold_transmit_change_cancels_the_held_bursts() {
     // UR-25: bursts held on the old clock are refused with COMMAND_REJECTED (Review L, L11).
     let (mut run, _, _dir) = tx_session(FakeConfig::default());
     let _ = send(&mut run, "send", Some(ms(300)), &tone(100));
-    assert!(admitted(&run.submit(set("radio.tx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.tx.sample_rate_hz", Value::num(2e6).unwrap()), None).unwrap()));
     wait(&mut run, ms(150));
     let manifest = run.finish();
     let reasons: Vec<_> = events_of(&manifest, "radio.COMMAND_REJECTED").iter().map(|e| e.payload["reason"].clone()).collect();
@@ -1586,13 +1587,13 @@ fn ur_25_a_receive_session_follows_its_recorded_plan() {
     let device = fake(FakeConfig::default());
     let mut run = session(&profile(&dir, json!({}), json!({}), true), device.clone());
     past_t0(&mut run, ms(1));
-    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::Num(2e6)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::num(2e6).unwrap()), None).unwrap()));
     wait(&mut run, ms(100));
     assert!(admitted(&run.submit(SessionAction::Stop { target: Some(ResourceId::parse("radio/rx").unwrap()) }, None).unwrap()));
     wait(&mut run, ms(20));
     assert!(admitted(&run.submit(verb("start_rx", "radio/rx", None, &[]), None).unwrap()));
     wait(&mut run, ms(100));
-    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::Num(1e6)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::num(1e6).unwrap()), None).unwrap()));
     wait(&mut run, ms(150));
     let manifest = run.finish();
     let timing = section(&manifest, "timing").as_array().unwrap().clone();
@@ -1628,10 +1629,10 @@ fn ur_24_the_queue_counts_a_command_per_channel() {
     // UR-24's 16 device commands, one per channel: with two receive channels the 9th
     // update is refused (Review M, N-7).
     use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
-    let mut direct = Direct::new(FakeConfig { command_queue: 64, ..FakeConfig::default() }, &[("radio.rx.channels", Value::Int(2))]);
+    let mut direct = Direct::new(FakeConfig { command_queue: 64, ..FakeConfig::default() }, &[("radio.rx.channels", Scalar::from(2))]);
     let far = direct.now() + ms(5_000);
     for i in 0..9 {
-        direct.update("radio.rx.gain_db", Value::Num(f64::from(i)), HardwareTimed, Some(far + i64::from(i)));
+        direct.update("radio.rx.gain_db", Value::num(f64::from(i)).unwrap(), HardwareTimed, Some(far + i64::from(i)));
     }
     direct.settle(Wall::from_millis(30));
     assert_eq!(direct.of("radio.COMMAND_QUEUE_FULL").len(), 1);
@@ -2247,14 +2248,14 @@ fn captures_across_cold_changes(config: FakeConfig, selector: Json, rates: [f64;
     let device = fake(config);
     let mut run = session(&profile(&dir, selector, json!({}), true), device.clone());
     past_t0(&mut run, ms(1));
-    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::Num(rates[0])), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::num(rates[0]).unwrap()), None).unwrap()));
     wait(&mut run, ms(200));
     for i in 0..changes {
         let capture_at = after(&run, ms(10));
         let n = (rates[i % 2] * 0.12) as i64 + (rates[(i + 1) % 2] * 0.08) as i64;
-        assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(capture_at), &[("sink.capture_samples", Value::Int(n))]), None).unwrap()));
+        assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(capture_at), &[("sink.capture_samples", Value::from(n))]), None).unwrap()));
         wait(&mut run, ms(60));
-        assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::Num(rates[(i + 1) % 2])), None).unwrap()));
+        assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::num(rates[(i + 1) % 2]).unwrap()), None).unwrap()));
         let horizon = after(&run, ms(3_000));
         let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], i, horizon);
     }
@@ -2417,7 +2418,7 @@ fn ur_29_a_stream_silent_before_a_far_cut_is_a_lost_device() {
         vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)],
     );
     let now = direct.now();
-    direct.update("radio.rx.sample_rate_hz", Value::Num(2e6), Cold, Some(now + ms(5_000)));
+    direct.update("radio.rx.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(now + ms(5_000)));
     direct.settle(Wall::from_millis(2_000));
     let lost = direct.of(EventKind::DEVICE_LOST);
     let _ = direct.finish();
@@ -2527,9 +2528,9 @@ fn ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time() {
     for (block_len, packet, step_ms, phase) in cases.into_iter().flat_map(|(b, k, s)| (0..6).map(move |p| (b, k, s, p))) {
         let port = attached(ezsdr_kernel::stream::BackPressure::DropOldest);
         let config = FakeConfig { rx_packet: Some(packet), ..bench_link(2) };
-        let mut direct = Direct::build(config, &[("radio.rx.sample_rate_hz", Value::Num(390_625.0))], vec![port], json!({ "block_len": block_len }));
+        let mut direct = Direct::build(config, &[("radio.rx.sample_rate_hz", Scalar::try_from(390_625.0).unwrap())], vec![port], json!({ "block_len": block_len }));
         direct.settle(Wall::from_millis(200 + phase * step_ms));
-        direct.update("radio.rx.sample_rate_hz", Value::Num(2e6), Cold, None);
+        direct.update("radio.rx.sample_rate_hz", Value::num(2e6).unwrap(), Cold, None);
         direct.settle(Wall::from_millis(600));
         let late = direct.of("radio.LATE_COMMAND");
         let instance = direct.finish();

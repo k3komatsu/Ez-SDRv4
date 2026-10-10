@@ -2,6 +2,7 @@
 
 mod support;
 
+use ezsdr_kernel::spec::Scalar;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ezsdr_kernel::binding::{
@@ -130,7 +131,7 @@ fn distinct_instances(mut p: BindingProfile, names: &[&str]) -> BindingProfile {
     for n in names {
         if let Some(b) = p.bindings.get_mut(&id(n)) {
             b.selector
-                .insert(id("instance"), Value::Str((*n).to_owned()));
+                .insert(id("instance"), Value::from((*n).to_owned()));
         }
     }
     p
@@ -527,7 +528,7 @@ fn sb_02_unknown_key_prefix_refused() {
                 &[(
                     "radio.rx.channels",
                     Constraint::Eq {
-                        value: Value::Int(2),
+                        value: Scalar::from(2),
                     },
                 )],
             ),
@@ -553,18 +554,18 @@ fn sb_02_unknown_key_prefix_refused() {
 #[test]
 fn sb_06_constraint_match_table() {
     let one = CapabilityValue::One {
-        value: Value::Int(4),
+        value: Scalar::from(4),
     };
     let range = CapabilityValue::Range {
-        min: Value::Int(2),
-        max: Value::Int(8),
+        min: Scalar::from(2),
+        max: Scalar::from(8),
     };
     let any = CapabilityValue::AnyOf {
-        values: vec![Value::Int(1), Value::Int(4), Value::Int(9)],
+        values: vec![Scalar::from(1), Scalar::from(4), Scalar::from(9)],
     };
 
     let eq4 = Constraint::Eq {
-        value: Value::Int(4),
+        value: Scalar::from(4),
     };
     assert_eq!(satisfies(&eq4, &one), Ok(true));
     assert_eq!(satisfies(&eq4, &range), Ok(true));
@@ -572,7 +573,7 @@ fn sb_06_constraint_match_table() {
     assert_eq!(
         satisfies(
             &Constraint::Eq {
-                value: Value::Int(5)
+                value: Scalar::from(5)
             },
             &one
         ),
@@ -581,7 +582,7 @@ fn sb_06_constraint_match_table() {
     assert_eq!(
         satisfies(
             &Constraint::Eq {
-                value: Value::Int(5)
+                value: Scalar::from(5)
             },
             &any
         ),
@@ -589,20 +590,20 @@ fn sb_06_constraint_match_table() {
     );
 
     let r = Constraint::Range {
-        min: Some(Value::Int(3)),
-        max: Some(Value::Int(5)),
+        min: Some(Scalar::from(3)),
+        max: Some(Scalar::from(5)),
     };
     assert_eq!(satisfies(&r, &one), Ok(true));
     assert_eq!(satisfies(&r, &range), Ok(true), "overlapping ranges");
     assert_eq!(satisfies(&r, &any), Ok(true));
     let disjoint = Constraint::Range {
-        min: Some(Value::Int(20)),
-        max: Some(Value::Int(30)),
+        min: Some(Scalar::from(20)),
+        max: Some(Scalar::from(30)),
     };
     assert_eq!(satisfies(&disjoint, &range), Ok(false));
 
     let set = Constraint::Set {
-        values: vec![Value::Int(4), Value::Int(100)],
+        values: vec![Scalar::from(4), Scalar::from(100)],
     };
     assert_eq!(satisfies(&set, &one), Ok(true));
     assert_eq!(satisfies(&set, &range), Ok(true));
@@ -610,7 +611,7 @@ fn sb_06_constraint_match_table() {
     assert_eq!(
         satisfies(
             &Constraint::Set {
-                values: vec![Value::Int(100)]
+                values: vec![Scalar::from(100)]
             },
             &one
         ),
@@ -620,7 +621,7 @@ fn sb_06_constraint_match_table() {
     assert_eq!(
         satisfies(
             &Constraint::Min {
-                value: Value::Int(4)
+                value: Scalar::from(4)
             },
             &one
         ),
@@ -629,7 +630,7 @@ fn sb_06_constraint_match_table() {
     assert_eq!(
         satisfies(
             &Constraint::Min {
-                value: Value::Int(9)
+                value: Scalar::from(9)
             },
             &range
         ),
@@ -638,7 +639,7 @@ fn sb_06_constraint_match_table() {
     assert_eq!(
         satisfies(
             &Constraint::Min {
-                value: Value::Int(8)
+                value: Scalar::from(8)
             },
             &any
         ),
@@ -647,7 +648,7 @@ fn sb_06_constraint_match_table() {
     assert_eq!(
         satisfies(
             &Constraint::Max {
-                value: Value::Int(4)
+                value: Scalar::from(4)
             },
             &one
         ),
@@ -656,7 +657,7 @@ fn sb_06_constraint_match_table() {
     assert_eq!(
         satisfies(
             &Constraint::Max {
-                value: Value::Int(1)
+                value: Scalar::from(1)
             },
             &range
         ),
@@ -665,7 +666,7 @@ fn sb_06_constraint_match_table() {
     assert_eq!(
         satisfies(
             &Constraint::Max {
-                value: Value::Int(1)
+                value: Scalar::from(1)
             },
             &any
         ),
@@ -688,7 +689,7 @@ fn sb_06_key_shape_mismatch() {
         ezsdr_kernel::binding::check_constraint_kind(
             &decl,
             &Constraint::Eq {
-                value: Value::Int(1)
+                value: Scalar::Int(1)
             }
         ),
         Err(SpecError::KeyShape { .. })
@@ -697,7 +698,7 @@ fn sb_06_key_shape_mismatch() {
         ezsdr_kernel::binding::check_constraint_kind(
             &decl,
             &Constraint::Eq {
-                value: Value::Bool(true)
+                value: Scalar::from(true)
             }
         )
         .is_ok()
@@ -714,7 +715,7 @@ fn sb_07_coercible_key_consults_provider() {
                 &[(
                     "test.grid",
                     Constraint::Eq {
-                        value: Value::Num(19.5),
+                        value: Scalar::try_from(19.5).unwrap(),
                     },
                 )],
             ),
@@ -735,7 +736,7 @@ fn sb_07_coercible_key_consults_provider() {
     assert_eq!(result.coercions_preview.len(), 1);
     assert_eq!(
         result.coercions_preview[0].coercion.applied,
-        Value::Num(20.0)
+        Value::num(20.0).unwrap()
     );
 }
 
@@ -749,7 +750,7 @@ fn sb_07_non_coercible_key_fails_directly() {
                 &[(
                     "test.count",
                     Constraint::Eq {
-                        value: Value::Int(9),
+                        value: Scalar::from(9),
                     },
                 )],
             ),
@@ -831,7 +832,7 @@ fn sb_35_no_single_instance() {
             &[(
                 "test.count",
                 Constraint::Min {
-                    value: Value::Int(4),
+                    value: Scalar::from(4),
                 },
             )],
         )
@@ -857,7 +858,7 @@ fn sb_35_no_single_instance() {
         ezsdr_kernel::binding::Binding {
             module: mref("ezsdr.test.provider"),
             feed: None,
-            selector: [(id("instance"), Value::Str("radio2".to_owned()))]
+            selector: [(id("instance"), Value::from("radio2".to_owned()))]
                 .into_iter()
                 .collect(),
             profile: None,
@@ -881,7 +882,7 @@ fn sb_34_sub_resource_binding() {
                 &[(
                     "test.count",
                     Constraint::Eq {
-                        value: Value::Int(2),
+                        value: Scalar::from(2),
                     },
                 )],
             ),
@@ -933,7 +934,7 @@ fn sb_36_two_needs_of_the_same_name_do_not_collapse() {
         requires: [(
             key("test.count"),
             Constraint::Eq {
-                value: Value::Int(2),
+                value: Scalar::from(2),
             },
         )]
         .into_iter()
@@ -1101,7 +1102,7 @@ fn sb_41_duplicate_prepare_reports_are_refused() {
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).unwrap();
     let report = |count| Ok(PrepareReport {
         fragment: id("radio"),
-        effective: [(key("test.count"), Value::Int(count))].into_iter().collect(),
+        effective: [(key("test.count"), Value::from(count))].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     });
@@ -1153,7 +1154,7 @@ fn sb_36_needs_resolves_across_instances() {
             requires: [(
                 key("test.count"),
                 Constraint::Eq {
-                    value: Value::Int(2),
+                    value: Scalar::from(2),
                 },
             )]
             .into_iter()
@@ -1183,7 +1184,7 @@ fn sb_36_needs_resolves_across_instances() {
             requires: [(
                 key("test.count"),
                 Constraint::Eq {
-                    value: Value::Int(99),
+                    value: Scalar::from(99),
                 },
             )]
             .into_iter()
@@ -1210,7 +1211,7 @@ fn sb_36_needs_resolves_across_instances() {
             requires: [(
                 key("test.count"),
                 Constraint::Eq {
-                    value: Value::Int(5),
+                    value: Scalar::from(5),
                 },
             )]
             .into_iter()
@@ -1264,7 +1265,7 @@ fn sb_37_matching_follows_binding() {
                 &[(
                     "test.count",
                     Constraint::Eq {
-                        value: Value::Int(8),
+                        value: Scalar::from(8),
                     },
                 )],
             ),
@@ -1312,7 +1313,7 @@ fn sb_30_admission_check_runs_at_three_points() {
         r.requires.insert(
             key("test.grid"),
             Constraint::Eq {
-                value: Value::Num(v),
+                value: Scalar::try_from(v).unwrap(),
             },
         );
         let mut spec = spec_with([(id("radio"), r)].into_iter().collect());
@@ -1347,11 +1348,11 @@ fn sb_30_admission_check_runs_at_three_points() {
     );
     let report = PrepareReport {
         fragment: id("radio"),
-        effective: [(key("test.grid"), Value::Num(20.0))].into_iter().collect(),
+        effective: [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect(),
         coercions: vec![ezsdr_kernel::spec::Coercion {
             key: key("test.grid"),
-            requested: Value::Num(19.5),
-            applied: Value::Num(20.0),
+            requested: Value::num(19.5).unwrap(),
+            applied: Value::num(20.0).unwrap(),
             reason: "snapped to a multiple of 20".to_owned(),
         }],
         warnings: Vec::new(),
@@ -1387,7 +1388,7 @@ fn sb_30_admission_check_runs_at_three_points() {
         is_session: true,
     };
     let proposed: BTreeMap<Key, Value> =
-        [(key("test.grid"), Value::Num(30.0))].into_iter().collect();
+        [(key("test.grid"), Value::num(30.0).unwrap())].into_iter().collect();
     let violations = admitter
         .admit(
             &BTreeMap::new(),
@@ -1397,7 +1398,7 @@ fn sb_30_admission_check_runs_at_three_points() {
         )
         .expect_err("the runtime point ran the check");
     assert_eq!(violations[0].check, ns("test.limits"));
-    assert_eq!(violations[0].requested, Some(Value::Num(30.0)));
+    assert_eq!(violations[0].requested, Some(Value::num(30.0).unwrap()));
 }
 
 #[test]
@@ -1591,7 +1592,7 @@ fn sb_39_a_provider_fragment_carries_the_matched_request() {
     req.requires.insert(
         key("test.count"),
         Constraint::Eq {
-            value: Value::Int(2),
+            value: Scalar::from(2),
         },
     );
     let spec = spec_with([(id("radio"), req)].into_iter().collect());
@@ -1618,7 +1619,7 @@ fn sb_39_a_provider_fragment_carries_the_matched_request() {
     assert_eq!(
         requested.constraints.get(&key("test.count")),
         Some(&Constraint::Eq {
-            value: Value::Int(2)
+            value: Scalar::from(2)
         })
     );
 }
@@ -1665,7 +1666,7 @@ fn sb_41_prepare_reports_one_per_fragment() {
         .collect();
     let report = |name: &str, count: i64| PrepareReport {
         fragment: id(name),
-        effective: [(key("test.count"), Value::Int(count))].into_iter().collect(),
+        effective: [(key("test.count"), Value::from(count))].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
@@ -2851,7 +2852,7 @@ fn sb_34_binds_the_sub_resource_that_can_satisfy_the_request() {
                 &[(
                     "test.count",
                     Constraint::Eq {
-                        value: Value::Int(8),
+                        value: Scalar::from(8),
                     },
                 )],
             ),
@@ -2880,7 +2881,7 @@ fn sb_46_validate_applies_the_coercion_policy() {
                 &[(
                     "test.grid",
                     Constraint::Eq {
-                        value: Value::Num(19.5),
+                        value: Scalar::try_from(19.5).unwrap(),
                     },
                 )],
             ),
@@ -2948,7 +2949,7 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
             .insert(
                 key("test.grid"),
                 Constraint::Eq {
-                    value: Value::Num(requested),
+                    value: Scalar::try_from(requested).unwrap(),
                 },
             );
         spec.policies
@@ -2958,13 +2959,13 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
     };
     let coerced = |requested: f64, applied: f64| PrepareReport {
         fragment: id("radio"),
-        effective: [(key("test.grid"), Value::Num(applied))]
+        effective: [(key("test.grid"), Value::num(applied).unwrap())]
             .into_iter()
             .collect(),
         coercions: vec![ezsdr_kernel::spec::Coercion {
             key: key("test.grid"),
-            requested: Value::Num(requested),
-            applied: Value::Num(applied),
+            requested: Value::num(requested).unwrap(),
+            applied: Value::num(applied).unwrap(),
             reason: "snapped".to_owned(),
         }],
         warnings: Vec::new(),
@@ -2998,8 +2999,8 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
         effective: BTreeMap::new(),
         coercions: vec![ezsdr_kernel::spec::Coercion {
             key: key("test.grid"),
-            requested: Value::Num(19.5),
-            applied: Value::Num(20.0),
+            requested: Value::num(19.5).unwrap(),
+            applied: Value::num(20.0).unwrap(),
             reason: "snapped".to_owned(),
         }],
         warnings: Vec::new(),
@@ -3024,7 +3025,7 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
         .insert(
             key("test.grid"),
             Constraint::Eq {
-                value: Value::Num(20.0),
+                value: Scalar::try_from(20.0).unwrap(),
             },
         );
     let failed = prepared(
@@ -3137,7 +3138,7 @@ fn sb_30_a_validate_violation_refuses_the_plan() {
     req.requires.insert(
         key("test.grid"),
         Constraint::Eq {
-            value: Value::Num(500.0),
+            value: Scalar::try_from(500.0).unwrap(),
         },
     );
     let spec = spec_with([(id("radio"), req)].into_iter().collect());
@@ -3348,7 +3349,7 @@ fn sb_02_an_ext_key_reaches_the_capability_match() {
     req.requires.insert(
         ext.clone(),
         Constraint::Eq {
-            value: Value::Int(1),
+            value: Scalar::from(1),
         },
     );
     let spec = spec_with([(id("radio"), req)].into_iter().collect());
@@ -3414,7 +3415,7 @@ fn ma_12_a_widening_effective_is_refused_at_prepare() {
     req.requires.insert(
         key("test.count"),
         Constraint::Eq {
-            value: Value::Int(2),
+            value: Scalar::from(2),
         },
     );
     let spec = spec_with([(id("radio"), req)].into_iter().collect());
@@ -3427,7 +3428,7 @@ fn ma_12_a_widening_effective_is_refused_at_prepare() {
     // The node declares `test.count` as exactly 2; a report claiming 7 widens it.
     let widened = PrepareReport {
         fragment: id("radio"),
-        effective: [(key("test.count"), Value::Int(7))].into_iter().collect(),
+        effective: [(key("test.count"), Value::from(7))].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
@@ -3451,10 +3452,34 @@ fn ma_12_a_widening_effective_is_refused_at_prepare() {
         "{v:?}"
     );
 
+    // A list is no capability value at all: both halves refuse it, rather than reading
+    // its element (spec 26 §3).
+    let listed = PrepareReport {
+        fragment: id("radio"),
+        effective: [(key("test.count"), Value::List(vec![Scalar::from(2)]))]
+            .into_iter()
+            .collect(),
+        coercions: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let failed = collect_prepare(
+        vec![Ok(listed)],
+        &spec,
+        &profile,
+        &fx.inputs(&providers),
+        &admission,
+    )
+    .expect_err("a list is refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else {
+        panic!("{failed:?}")
+    };
+    assert!(v.iter().any(|x| x.reason.contains("is a scalar")), "{v:?}");
+    assert!(v.iter().any(|x| x.reason.contains("MA-12 (re-match)")), "{v:?}");
+
     // The declared value itself passes both.
     let exact = PrepareReport {
         fragment: id("radio"),
-        effective: [(key("test.count"), Value::Int(2))].into_iter().collect(),
+        effective: [(key("test.count"), Value::from(2))].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
@@ -3481,14 +3506,14 @@ fn ma_12_two_resources_naming_one_key_do_not_refuse_each_other() {
     a.requires.insert(
         key("test.count"),
         Constraint::Eq {
-            value: Value::Int(2),
+            value: Scalar::from(2),
         },
     );
     let mut b = resource("test.line", &[]);
     b.requires.insert(
         key("test.count"),
         Constraint::Eq {
-            value: Value::Int(4),
+            value: Scalar::from(4),
         },
     );
     let spec = spec_with([(id("a"), a), (id("b"), b)].into_iter().collect());
@@ -3506,7 +3531,7 @@ fn ma_12_two_resources_naming_one_key_do_not_refuse_each_other() {
 
     let report = |name: &str, n: i64| PrepareReport {
         fragment: id(name),
-        effective: [(key("test.count"), Value::Int(n))].into_iter().collect(),
+        effective: [(key("test.count"), Value::from(n))].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
@@ -3524,7 +3549,7 @@ fn ma_12_two_resources_naming_one_key_do_not_refuse_each_other() {
         .iter()
         .map(|r| (r.fragment.clone(), r.effective[&key("test.count")].clone()))
         .collect();
-    assert_eq!(counts, [(id("a"), Value::Int(2)), (id("b"), Value::Int(4))]);
+    assert_eq!(counts, [(id("a"), Value::from(2)), (id("b"), Value::from(4))]);
 
     // A widening in one report is still refused, and named against that resource.
     let failed = collect_prepare(
@@ -3625,7 +3650,7 @@ fn sb_02_an_ext_key_needs_a_registered_owner() {
     req.requires.insert(
         Key::parse("ext.nobody.owns.this").expect("parses"),
         Constraint::Eq {
-            value: Value::Int(1),
+            value: Scalar::from(1),
         },
     );
     let spec = spec_with([(id("radio"), req)].into_iter().collect());
@@ -3646,15 +3671,11 @@ fn ov_15_a_non_ascii_key_inside_a_value_map_is_refused() {
     // the sealed Manifest through paths that pass none of them — a Session
     // `SetParameter`, an Action's `params` or `metadata` — so the check belongs where
     // every map is walked (RS-11, OV-15).
-    let ascii = Value::Map(
-        [("rho".to_owned(), Value::Int(1))]
-            .into_iter()
-            .collect::<BTreeMap<String, Value>>(),
-    );
-    assert!(ascii.check_nesting("x").is_ok(), "an ASCII key is fine");
+    let ascii = Value::Map(BTreeMap::from([("rho".to_owned(), Scalar::from(1))]));
+    assert!(ascii.check_ascii_keys("x").is_ok(), "an ASCII key is fine");
     let from_json: Value =
         serde_json::from_value(serde_json::json!({ "\u{3c1}": 1 })).expect("deserialises");
-    let err = from_json.check_nesting("params").expect_err("refused");
+    let err = from_json.check_ascii_keys("params").expect_err("refused");
     assert!(
         matches!(&err, SpecError::KeyShape { found, .. } if found.contains("non-ASCII")),
         "{err:?}"
@@ -3672,7 +3693,7 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
     req.requires.insert(
         key("test.grid"),
         Constraint::Eq {
-            value: Value::Num(19.5),
+            value: Scalar::try_from(19.5).unwrap(),
         },
     );
     let mut spec = spec_with([(id("radio"), req)].into_iter().collect());
@@ -3690,11 +3711,11 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
     // The Provider replays `coerce`, which SB-44 and MA-12 oblige it to do.
     let report = PrepareReport {
         fragment: id("radio"),
-        effective: [(key("test.grid"), Value::Num(20.0))].into_iter().collect(),
+        effective: [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect(),
         coercions: vec![ezsdr_kernel::spec::Coercion {
             key: key("test.grid"),
-            requested: Value::Num(19.5),
-            applied: Value::Num(20.0),
+            requested: Value::num(19.5).unwrap(),
+            applied: Value::num(20.0).unwrap(),
             reason: "snapped to a multiple of 20".to_owned(),
         }],
         warnings: Vec::new(),
@@ -3707,7 +3728,7 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
         &admission,
     )
     .expect("an accepted coercion is applied and recorded, not refused");
-    assert_eq!(reports[0].effective[&key("test.grid")], Value::Num(20.0));
+    assert_eq!(reports[0].effective[&key("test.grid")], Value::num(20.0).unwrap());
     assert_eq!(
         reports[0].coercions.len(),
         1,
@@ -3719,11 +3740,11 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
     // preview, so naming a key in `coercions` is not a self-issued exemption.
     let disagreeing = PrepareReport {
         fragment: id("radio"),
-        effective: [(key("test.grid"), Value::Num(40.0))].into_iter().collect(),
+        effective: [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect(),
         coercions: vec![ezsdr_kernel::spec::Coercion {
             key: key("test.grid"),
-            requested: Value::Num(19.5),
-            applied: Value::Num(20.0),
+            requested: Value::num(19.5).unwrap(),
+            applied: Value::num(20.0).unwrap(),
             reason: "claims 20 and applies 40".to_owned(),
         }],
         warnings: Vec::new(),
@@ -3747,7 +3768,7 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
     counted.requires.insert(
         key("test.count"),
         Constraint::Eq {
-            value: Value::Int(2),
+            value: Scalar::from(2),
         },
     );
     let count_spec = spec_with([(id("radio"), counted)].into_iter().collect());
@@ -3759,7 +3780,7 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
     );
     let undeclared = PrepareReport {
         fragment: id("radio"),
-        effective: [(key("test.count"), Value::Int(9))].into_iter().collect(),
+        effective: [(key("test.count"), Value::from(9))].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
@@ -3795,13 +3816,13 @@ fn sb_07_coerce_is_called_once_with_the_whole_request() {
     req.requires.insert(
         key("test.grid"),
         Constraint::Eq {
-            value: Value::Num(19.5),
+            value: Scalar::try_from(19.5).unwrap(),
         },
     );
     req.requires.insert(
         key("test.count"),
         Constraint::Eq {
-            value: Value::Int(2),
+            value: Scalar::from(2),
         },
     );
     let mut spec = spec_with([(id("radio"), req)].into_iter().collect());
@@ -3852,7 +3873,7 @@ fn sb_44_a_provider_may_not_exempt_a_key_by_declaring_a_coercion() {
     req.requires.insert(
         key("test.grid"),
         Constraint::Eq {
-            value: Value::Num(19.5),
+            value: Scalar::try_from(19.5).unwrap(),
         },
     );
     let mut spec = spec_with([(id("radio"), req)].into_iter().collect());
@@ -3867,13 +3888,13 @@ fn sb_44_a_provider_may_not_exempt_a_key_by_declaring_a_coercion() {
     );
     let lying = PrepareReport {
         fragment: id("radio"),
-        effective: [(key("test.grid"), Value::Num(100.0))]
+        effective: [(key("test.grid"), Value::num(100.0).unwrap())]
             .into_iter()
             .collect(),
         coercions: vec![ezsdr_kernel::spec::Coercion {
             key: key("test.grid"),
-            requested: Value::Num(19.5),
-            applied: Value::Num(20.0),
+            requested: Value::num(19.5).unwrap(),
+            applied: Value::num(20.0).unwrap(),
             reason: "documents 20 and applies 100".to_owned(),
         }],
         warnings: Vec::new(),
@@ -3898,7 +3919,7 @@ fn sb_44_a_provider_may_not_exempt_a_key_by_declaring_a_coercion() {
     direct.requires.insert(
         key("test.grid"),
         Constraint::Eq {
-            value: Value::Num(20.0),
+            value: Scalar::try_from(20.0).unwrap(),
         },
     );
     let mut spec = spec_with([(id("radio"), direct)].into_iter().collect());
@@ -3912,13 +3933,13 @@ fn sb_44_a_provider_may_not_exempt_a_key_by_declaring_a_coercion() {
     );
     let invented = PrepareReport {
         fragment: id("radio"),
-        effective: [(key("test.grid"), Value::Num(100.0))]
+        effective: [(key("test.grid"), Value::num(100.0).unwrap())]
             .into_iter()
             .collect(),
         coercions: vec![ezsdr_kernel::spec::Coercion {
             key: key("test.grid"),
-            requested: Value::Num(20.0),
-            applied: Value::Num(100.0),
+            requested: Value::num(20.0).unwrap(),
+            applied: Value::num(100.0).unwrap(),
             reason: "invented at prepare".to_owned(),
         }],
         warnings: Vec::new(),
@@ -4058,7 +4079,7 @@ fn sb_36_a_needs_key_may_not_collide_with_a_resource_name() {
 fn sb_36_qualified_needs_keys_must_be_unique() {
     let need = |count| SubResourceReq {
         kind: ns("test.line"),
-        requires: [(key("test.count"), Constraint::Eq { value: Value::Int(count) })]
+        requires: [(key("test.count"), Constraint::Eq { value: Scalar::from(count) })]
             .into_iter()
             .collect(),
     };
@@ -4102,22 +4123,22 @@ fn sb_06_a_capability_of_the_wrong_kind_is_key_shape_in_every_cell() {
     // SB-6: "a mismatch is `KeyShape`" — including the Range x Range cell, which is
     // the one that could report a malformed capability as merely unsatisfiable.
     let wrong = CapabilityValue::Range {
-        min: Value::Str("a".into()),
-        max: Value::Str("z".into()),
+        min: Scalar::from("a"),
+        max: Scalar::from("z"),
     };
     for c in [
         Constraint::Eq {
-            value: Value::Int(1),
+            value: Scalar::from(1),
         },
         Constraint::Range {
-            min: Some(Value::Int(1)),
-            max: Some(Value::Int(2)),
+            min: Some(Scalar::from(1)),
+            max: Some(Scalar::from(2)),
         },
         Constraint::Min {
-            value: Value::Int(1),
+            value: Scalar::from(1),
         },
         Constraint::Max {
-            value: Value::Int(1),
+            value: Scalar::from(1),
         },
     ] {
         assert!(
@@ -4130,7 +4151,7 @@ fn sb_06_a_capability_of_the_wrong_kind_is_key_shape_in_every_cell() {
 #[test]
 fn sb_06_any_of_checks_later_values_after_a_match() {
     let capability_any = || CapabilityValue::AnyOf {
-        values: vec![Value::Int(1), Value::Str("wrong kind".to_owned())],
+        values: vec![Scalar::from(1), Scalar::from("wrong kind".to_owned())],
     };
     let malformed_after_match = |constraint: Constraint, capability: CapabilityValue| {
         assert!(matches!(
@@ -4141,59 +4162,59 @@ fn sb_06_any_of_checks_later_values_after_a_match() {
 
     malformed_after_match(
         Constraint::Eq {
-            value: Value::Int(1),
+            value: Scalar::from(1),
         },
         capability_any(),
     );
     malformed_after_match(
         Constraint::Range {
-            min: Some(Value::Int(0)),
-            max: Some(Value::Int(2)),
+            min: Some(Scalar::from(0)),
+            max: Some(Scalar::from(2)),
         },
         capability_any(),
     );
     malformed_after_match(
         Constraint::Min {
-            value: Value::Int(1),
+            value: Scalar::from(1),
         },
         capability_any(),
     );
     malformed_after_match(
         Constraint::Max {
-            value: Value::Int(1),
+            value: Scalar::from(1),
         },
         capability_any(),
     );
     malformed_after_match(
         Constraint::Set {
-            values: vec![Value::Int(1), Value::Str("wrong kind".to_owned())],
+            values: vec![Scalar::from(1), Scalar::from("wrong kind".to_owned())],
         },
         CapabilityValue::One {
-            value: Value::Int(1),
+            value: Scalar::from(1),
         },
     );
     malformed_after_match(
         Constraint::Set {
-            values: vec![Value::Int(1), Value::Str("wrong kind".to_owned())],
+            values: vec![Scalar::from(1), Scalar::from("wrong kind".to_owned())],
         },
         CapabilityValue::Range {
-            min: Value::Int(0),
-            max: Value::Int(2),
+            min: Scalar::from(0),
+            max: Scalar::from(2),
         },
     );
     // Here the outer Set fold must continue after the first set value matches.
     malformed_after_match(
         Constraint::Set {
-            values: vec![Value::Int(1), Value::Str("wrong kind".to_owned())],
+            values: vec![Scalar::from(1), Scalar::from("wrong kind".to_owned())],
         },
         CapabilityValue::AnyOf {
-            values: vec![Value::Int(1)],
+            values: vec![Scalar::from(1)],
         },
     );
     // Here the inner AnyOf fold must continue after its first capability matches.
     malformed_after_match(
         Constraint::Set {
-            values: vec![Value::Int(1)],
+            values: vec![Scalar::from(1)],
         },
         capability_any(),
     );
@@ -4232,50 +4253,124 @@ fn sb_13_an_opaque_parameter_schema_is_not_a_placement() {
     ));
 }
 
+/// `doc` with `value` written at `pointer`.
+fn with_at(doc: &serde_json::Value, pointer: &str, value: serde_json::Value) -> serde_json::Value {
+    let mut doc = doc.clone();
+    *doc.pointer_mut(pointer).expect("the fixture has the slot") = value;
+    doc
+}
+
 #[test]
-fn sb_04_value_nesting_is_one_level() {
-    let flat = Value::List(vec![Value::Int(1), Value::Str("a".into())]);
-    assert!(flat.check_nesting("test.list").is_ok());
-    let nested = Value::List(vec![Value::List(vec![Value::Int(1)])]);
-    assert!(matches!(
-        nested.check_nesting("test.list"),
-        Err(SpecError::KeyShape { .. })
-    ));
-    let nested_map = Value::Map(
-        [("a".to_owned(), Value::Map(BTreeMap::new()))]
-            .into_iter()
-            .collect(),
-    );
-    assert!(matches!(
-        nested_map.check_nesting("test.map"),
-        Err(SpecError::KeyShape { .. })
-    ));
+fn sb_04_a_nested_value_is_refused_by_every_deserialiser() {
+    // One level is the type (SB-4): nothing deeper can be parsed, at any slot of any
+    // document that carries a `Value`, and nothing deeper can be built in Rust.
+    use serde_json::json;
+    let nested = [json!([[1]]), json!([{ "a": 1 }]), json!({ "a": [1] }), json!({ "a": { "b": 1 } })];
+    let flat = [json!(1), json!(1.5), json!("x"), json!(true), json!([1, "a"]), json!({ "a": 1 })];
+    for v in &flat {
+        let value: Value = serde_json::from_value(v.clone()).expect("one level is a Value");
+        assert_eq!(serde_json::to_value(&value).unwrap(), *v, "the JSON is unchanged");
+    }
+    for v in &nested {
+        assert!(serde_json::from_value::<Value>(v.clone()).is_err(), "{v}");
+    }
+
+    let mut spec = minimal_spec();
+    spec.schedule.push(ScheduleEntry {
+        at: SpecTime { clock: id("radio"), offset_ticks: 0 },
+        action: ActionTemplate::UpdateParameter {
+            target: rid("radio"),
+            key: key("test.gain"),
+            value: Value::from(1),
+            class: UpdateClass::HardwareTimed,
+        },
+    });
+    let spec = serde_json::to_value(&spec).unwrap();
+    let mut profile = profile_binding(&["radio"]);
+    profile.bindings.get_mut(&id("radio")).unwrap().selector.insert(id("x"), Value::from(1));
+    let profile = serde_json::to_value(&profile).unwrap();
+    let action = serde_json::to_value(ezsdr_kernel::event::Action::UpdateParameter {
+        target: rid("radio"),
+        key: key("test.gain"),
+        value: Value::from(1),
+        class: UpdateClass::HardwareTimed,
+        at: None,
+    })
+    .unwrap();
+    let param = serde_json::to_value(ezsdr_kernel::module_api::ParamDecl {
+        key: key("test.gain"),
+        schema: json!({}),
+        update_class: UpdateClass::Cold,
+        default: Value::from(1),
+    })
+    .unwrap();
+    type Parses = fn(&serde_json::Value) -> bool;
+    let documents: [(&str, &serde_json::Value, &str, Parses); 4] = [
+        ("schedule entry", &spec, "/schedule/0/action/value", |d| ExperimentSpec::from_json(d).is_ok()),
+        ("selector", &profile, "/bindings/radio/selector/x", |d| BindingProfile::from_json(d).is_ok()),
+        ("action", &action, "/value", |d| {
+            serde_json::from_value::<ezsdr_kernel::event::Action>(d.clone()).is_ok()
+        }),
+        ("param default", &param, "/default", |d| {
+            serde_json::from_value::<ezsdr_kernel::module_api::ParamDecl>(d.clone()).is_ok()
+        }),
+    ];
+    for (name, doc, slot, parses) in documents {
+        for v in &flat {
+            assert!(parses(&with_at(doc, slot, v.clone())), "{name}: {v}");
+        }
+        for v in &nested {
+            assert!(!parses(&with_at(doc, slot, v.clone())), "{name}: {v}");
+        }
+    }
+}
+
+#[test]
+fn sb_04_a_number_is_finite() {
+    // `Finite::new` is the only way to a float scalar, deserialising included, so a
+    // non-finite number cannot exist inside a `Value` (SB-4, OV-15).
+    use ezsdr_kernel::spec::Finite;
+    use serde::Deserialize;
+    for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(Finite::new(x).is_none(), "{x}");
+        assert!(Value::num(x).is_none(), "{x}");
+        assert!(Scalar::try_from(x).is_err(), "{x}");
+        let de = serde::de::value::F64Deserializer::<serde::de::value::Error>::new(x);
+        assert!(Finite::deserialize(de).is_err(), "{x}");
+    }
+    assert_eq!(Finite::new(1.5).map(Finite::get), Some(1.5));
+    assert_eq!(Value::num(-0.0), Some(Value::Scalar(Scalar::try_from(0.0).unwrap())));
 }
 
 #[test]
 fn sb_05_constraint_values_are_scalars() {
-    let mut spec = spec_with(
-        [(
-            id("radio"),
-            resource(
-                "test.device",
-                &[(
-                    "test.count",
-                    Constraint::Eq {
-                        value: Value::List(vec![Value::Int(1)]),
-                    },
-                )],
+    // A constraint or a capability over a list or a map cannot be parsed (SB-5).
+    use serde_json::json;
+    let spec = serde_json::to_value(minimal_spec()).unwrap();
+    let slot = "/resources/radio/requires/test.count";
+    ExperimentSpec::from_json(&with_at(&spec, slot, json!({ "kind": "eq", "value": 2 })))
+        .expect("a scalar constraint");
+    for constraint in [
+        json!({ "kind": "eq", "value": [1] }),
+        json!({ "kind": "min", "value": { "a": 1 } }),
+        json!({ "kind": "range", "min": [1] }),
+        json!({ "kind": "set", "values": [[1]] }),
+    ] {
+        assert!(
+            matches!(
+                ExperimentSpec::from_json(&with_at(&spec, slot, constraint.clone())),
+                Err(SpecError::Structural { .. })
             ),
-        )]
-        .into_iter()
-        .collect(),
-    );
-    spec.version = 1;
-    let doc = serde_json::to_value(&spec).expect("serialises");
-    assert!(matches!(
-        ExperimentSpec::from_json(&doc),
-        Err(SpecError::KeyShape { .. })
-    ));
+            "{constraint}"
+        );
+    }
+    for capability in [
+        json!({ "kind": "one", "value": [1] }),
+        json!({ "kind": "range", "min": { "a": 1 }, "max": 2 }),
+        json!({ "kind": "any_of", "values": [[1]] }),
+    ] {
+        assert!(serde_json::from_value::<CapabilityValue>(capability.clone()).is_err(), "{capability}");
+    }
 }
 
 #[test]
@@ -4310,14 +4405,14 @@ fn sb_44_a_coercion_is_charged_only_to_the_resource_it_was_computed_for() {
     a.requires.insert(
         key("test.grid"),
         Constraint::Eq {
-            value: Value::Num(19.5),
+            value: Scalar::try_from(19.5).unwrap(),
         },
     );
     let mut b = resource("test.device", &[]);
     b.requires.insert(
         key("test.grid"),
         Constraint::Eq {
-            value: Value::Num(40.0),
+            value: Scalar::try_from(40.0).unwrap(),
         },
     );
     let mut spec = spec_with([(id("a"), a), (id("b"), b)].into_iter().collect());
@@ -4348,18 +4443,18 @@ fn sb_44_a_coercion_is_charged_only_to_the_resource_it_was_computed_for() {
     let reports = vec![
         Ok(PrepareReport {
             fragment: id("a"),
-            effective: [(key("test.grid"), Value::Num(20.0))].into_iter().collect(),
+            effective: [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect(),
             coercions: vec![ezsdr_kernel::spec::Coercion {
                 key: key("test.grid"),
-                requested: Value::Num(19.5),
-                applied: Value::Num(20.0),
+                requested: Value::num(19.5).unwrap(),
+                applied: Value::num(20.0).unwrap(),
                 reason: "snapped to a multiple of 20".to_owned(),
             }],
             warnings: Vec::new(),
         }),
         Ok(PrepareReport {
             fragment: id("b"),
-            effective: [(key("test.grid"), Value::Num(40.0))].into_iter().collect(),
+            effective: [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect(),
             coercions: Vec::new(),
             warnings: Vec::new(),
         }),
@@ -4373,20 +4468,20 @@ fn sb_44_a_coercion_is_charged_only_to_the_resource_it_was_computed_for() {
     let disagreeing = vec![
         Ok(PrepareReport {
             fragment: id("a"),
-            effective: [(key("test.grid"), Value::Num(100.0))]
+            effective: [(key("test.grid"), Value::num(100.0).unwrap())]
                 .into_iter()
                 .collect(),
             coercions: vec![ezsdr_kernel::spec::Coercion {
                 key: key("test.grid"),
-                requested: Value::Num(19.5),
-                applied: Value::Num(20.0),
+                requested: Value::num(19.5).unwrap(),
+                applied: Value::num(20.0).unwrap(),
                 reason: "claims 20 and applies 100".to_owned(),
             }],
             warnings: Vec::new(),
         }),
         Ok(PrepareReport {
             fragment: id("b"),
-            effective: [(key("test.grid"), Value::Num(40.0))].into_iter().collect(),
+            effective: [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect(),
             coercions: Vec::new(),
             warnings: Vec::new(),
         }),
@@ -4670,7 +4765,7 @@ fn sb_44_a_coercion_of_an_unrequested_key_is_refused_at_validate() {
         .insert(
             key("test.grid"),
             Constraint::Eq {
-                value: Value::Num(19.5),
+                value: Scalar::try_from(19.5).unwrap(),
             },
         );
     let profile = profile_binding(&["radio"]);
@@ -4726,7 +4821,7 @@ fn sb_30_prepare_refuses_an_admission_result_from_another_spec() {
     req.requires.insert(
         key("test.grid"),
         Constraint::Eq {
-            value: Value::Num(40.0),
+            value: Scalar::try_from(40.0).unwrap(),
         },
     );
     let spec = spec_with([(id("radio"), req)].into_iter().collect());
@@ -4737,7 +4832,7 @@ fn sb_30_prepare_refuses_an_admission_result_from_another_spec() {
     let report = || PrepareReport {
         fragment: id("radio"),
         // A value the Spec never asked for and the node does not declare.
-        effective: [(key("test.grid"), Value::Num(999.0))]
+        effective: [(key("test.grid"), Value::num(999.0).unwrap())]
             .into_iter()
             .collect(),
         coercions: Vec::new(),
@@ -4804,8 +4899,9 @@ fn sb_6_equality_is_exact_and_the_matcher_agrees() {
             .expect("finite")
     };
     for &(i, f, want) in cases {
-        let (a, b) = (Value::Int(i), Value::Num(f));
-        assert_eq!(a == b, want, "Value {i} vs {f}");
+        let (a, b) = (Scalar::from(i), Scalar::try_from(f).unwrap());
+        assert_eq!(a == b, want, "Scalar {i} vs {f}");
+        assert_eq!(Value::from(a.clone()) == Value::from(b.clone()), want, "Value {i} vs {f}");
         assert_eq!(
             satisfies(
                 &Constraint::Eq { value: b.clone() },
@@ -4830,33 +4926,45 @@ fn sb_6_equality_is_exact_and_the_matcher_agrees() {
             want,
             "Range[{f},{f}] against a declared {i}"
         );
-        assert_eq!(
-            ezsdr_kernel::contract::Scalar::Int(i) == ezsdr_kernel::contract::Scalar::Float(f),
-            want,
-            "Scalar {i} vs {f}"
-        );
+    }
+
+    // The order across kinds, in both directions: an `Int` bound against a `Num` and
+    // a `Num` bound against an `Int`.
+    let num = |x: f64| Scalar::try_from(x).unwrap();
+    let range = |lo: Scalar, hi: Scalar| Constraint::Range {
+        min: Some(lo),
+        max: Some(hi),
+    };
+    for (constraint, value, want) in [
+        (range(Scalar::from(1), Scalar::from(3)), num(2.5), true),
+        (range(Scalar::from(3), Scalar::from(4)), num(2.5), false),
+        (range(num(1.5), num(2.5)), Scalar::from(2), true),
+        (range(num(2.5), num(3.5)), Scalar::from(2), false),
+    ] {
+        let declared = CapabilityValue::One { value };
+        assert_eq!(satisfies(&constraint, &declared).expect("both are numbers"), want);
     }
 
     // OV-15a's coincidence, stated as the fact it is rather than as the criterion:
     // one value has one hash while |v| <= 2^53, and above it may not.
     assert_eq!(
-        written(&Value::Int(1)),
-        written(&Value::Num(1.0)),
+        written(&Value::from(1)),
+        written(&Value::num(1.0).unwrap()),
         "one value, one hash"
     );
     assert_eq!(
-        written(&Value::Int(10_000_000_000_000_000)),
-        written(&Value::Num(1e16)),
+        written(&Value::from(10_000_000_000_000_000)),
+        written(&Value::num(1e16).unwrap()),
         "and above 2^53 the forms may still agree"
     );
     assert_ne!(
-        written(&Value::Int(two60)),
-        written(&Value::Num(two60 as f64)),
+        written(&Value::from(two60)),
+        written(&Value::num(two60 as f64).unwrap()),
         "but they need not: one value, two documents"
     );
     assert_eq!(
-        written(&Value::Int(shortest_naming_two60)),
-        written(&Value::Num(two60 as f64)),
+        written(&Value::from(shortest_naming_two60)),
+        written(&Value::num(two60 as f64).unwrap()),
         "and one document may name two values, which is why the form is not the criterion"
     );
 }
@@ -4914,7 +5022,7 @@ fn rs_52_a_scheduled_update_states_the_declared_class() {
             action: ActionTemplate::UpdateParameter {
                 target: rid("radio"),
                 key: key(key_name),
-                value: Value::Int(1),
+                value: Value::from(1),
                 class,
             },
         });
@@ -4960,7 +5068,7 @@ fn rs_52_a_scheduled_update_states_the_declared_class() {
         );
         c.params[0].key = key(key_name);
         c.params[0].update_class = param;
-        c.params[0].default = Value::Num(0.0);
+        c.params[0].default = Value::num(0.0).unwrap();
         c.params[0].schema = serde_json::json!({ "type": "number" });
         spec.graph.components.insert(id("proc"), c);
         spec
@@ -6153,7 +6261,7 @@ fn sb_39_plan_reruns_the_structural_checks_and_refuses_a_stale_admission() {
         (
             "test.flag",
             Constraint::Eq {
-                value: Value::Int(3),
+                value: Scalar::from(3),
             },
             "KeyShape",
         ),
@@ -6188,7 +6296,7 @@ fn sb_39_plan_reruns_the_structural_checks_and_refuses_a_stale_admission() {
         .insert(
             key("test.grid"),
             Constraint::Eq {
-                value: Value::Num(40.0),
+                value: Scalar::try_from(40.0).unwrap(),
             },
         );
     let gridded_admission = validate(&gridded, &clean, &limited_fx.inputs(&providers))
@@ -6293,7 +6401,7 @@ fn sb_30_the_check_sees_each_fragment_s_own_value() {
             &[(
                 "test.grid",
                 Constraint::Eq {
-                    value: Value::Num(v),
+                    value: Scalar::try_from(v).unwrap(),
                 },
             )],
         )
@@ -6316,7 +6424,7 @@ fn sb_30_the_check_sees_each_fragment_s_own_value() {
     let mut profile = distinct_instances(profile_binding(&["a", "b"]), &["a", "b"]);
     profile.environment = env.clone();
     let names_a = |v: &[ezsdr_kernel::binding::Violation]| {
-        v.len() == 1 && v[0].reason.starts_with("a: ") && v[0].requested == Some(Value::Num(40.0))
+        v.len() == 1 && v[0].reason.starts_with("a: ") && v[0].requested == Some(Value::num(40.0).unwrap())
     };
 
     // 1. validate: one entry per resource, holding its `Eq` constraints' values.
@@ -6344,7 +6452,7 @@ fn sb_30_the_check_sees_each_fragment_s_own_value() {
                 requires: [(
                     key("test.grid"),
                     Constraint::Eq {
-                        value: Value::Num(40.0),
+                        value: Scalar::try_from(40.0).unwrap(),
                     },
                 )]
                 .into_iter()
@@ -6378,7 +6486,7 @@ fn sb_30_the_check_sees_each_fragment_s_own_value() {
     assert!(admission.is_admitted(), "{admission:?}");
     let report = |f: &str, v: f64| PrepareReport {
         fragment: id(f),
-        effective: [(key("test.grid"), Value::Num(v))].into_iter().collect(),
+        effective: [(key("test.grid"), Value::num(v).unwrap())].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
@@ -6416,18 +6524,18 @@ fn sb_30_the_check_sees_each_fragment_s_own_value() {
     let current: BTreeMap<Ident, BTreeMap<Key, Value>> = [
         (
             id("a"),
-            [(key("test.grid"), Value::Num(20.0))].into_iter().collect(),
+            [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect(),
         ),
         (
             id("b"),
-            [(key("test.grid"), Value::Num(20.0))].into_iter().collect(),
+            [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect(),
         ),
     ]
     .into_iter()
     .collect();
     let proposed: BTreeMap<Ident, BTreeMap<Key, Value>> = [(
         id("a"),
-        [(key("test.grid"), Value::Num(40.0))].into_iter().collect(),
+        [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect(),
     )]
     .into_iter()
     .collect();
@@ -6452,13 +6560,13 @@ fn sb_07_coerce_refuses_a_combination() {
                         (
                             "test.count",
                             Constraint::Eq {
-                                value: Value::Int(2),
+                                value: Scalar::from(2),
                             },
                         ),
                         (
                             "test.grid",
                             Constraint::Eq {
-                                value: Value::Num(grid),
+                                value: Scalar::try_from(grid).unwrap(),
                             },
                         ),
                     ],
@@ -6511,7 +6619,7 @@ fn sb_07_a_stray_rejection_is_a_violation() {
                 &[(
                     "test.count",
                     Constraint::Eq {
-                        value: Value::Int(2),
+                        value: Scalar::from(2),
                     },
                 )],
             ),
@@ -6618,10 +6726,10 @@ fn sb_02_needs_constraints_are_checked_against_key_decl() {
     let clean = minimal_spec();
     let admission = validate(&clean, &profile, &inputs).unwrap();
     for (name, value, shape) in [
-        ("test.count", Value::Num(2.0), true),
-        ("test.undeclared", Value::Int(2), false),
-        ("ext.nobody.owns.this", Value::Int(2), false),
-        ("ext.ezsdr.test.providerx.count", Value::Int(2), false),
+        ("test.count", Scalar::try_from(2.0).unwrap(), true),
+        ("test.undeclared", Scalar::from(2), false),
+        ("ext.nobody.owns.this", Scalar::from(2), false),
+        ("ext.ezsdr.test.providerx.count", Scalar::from(2), false),
     ] {
         let mut spec = clean.clone();
         spec.resources.get_mut(&id("radio")).unwrap().needs.insert(id("line"), SubResourceReq {
@@ -6640,7 +6748,7 @@ fn sb_02_needs_constraints_are_checked_against_key_decl() {
     let mut valid = clean;
     valid.resources.get_mut(&id("radio")).unwrap().needs.insert(id("line"), SubResourceReq {
         kind: ns("test.line"),
-        requires: [(key("test.count"), Constraint::Eq { value: Value::Int(2) })].into_iter().collect(),
+        requires: [(key("test.count"), Constraint::Eq { value: Scalar::from(2) })].into_iter().collect(),
     });
     let admission = validate(&valid, &profile, &inputs).unwrap();
     plan(&valid, &profile, &admission, &inputs).unwrap();

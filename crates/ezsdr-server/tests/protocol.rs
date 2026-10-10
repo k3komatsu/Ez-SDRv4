@@ -1,5 +1,6 @@
 //! Spec 16's server tests (design/16-easy-api.md §5).
 
+use ezsdr_kernel::spec::Scalar;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -81,7 +82,7 @@ fn repeat() -> SessionAction {
 }
 
 fn capture(n: i64) -> SessionAction {
-    SessionAction::Vocabulary { ns: Namespace::parse("sink").unwrap(), verb: Ident::parse("capture").unwrap(), target: ResourceId::parse("rec").unwrap(), at: None, params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::Int(n))]) }
+    SessionAction::Vocabulary { ns: Namespace::parse("sink").unwrap(), verb: Ident::parse("capture").unwrap(), target: ResourceId::parse("rec").unwrap(), at: None, params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(n))]) }
 }
 
 fn written() -> EventKind {
@@ -207,7 +208,7 @@ fn ea_03_handshake() {
 fn ea_04_requests() {
     let temp = TempDir::new("requests");
     let mut server = greeted(&temp.0);
-    assert_eq!(err(server.handle(Request::Submit { action: set("radio.tx.channels", Value::Int(1)) }, Vec::new())).kind, ErrorKind::Protocol);
+    assert_eq!(err(server.handle(Request::Submit { action: set("radio.tx.channels", Value::from(1)) }, Vec::new())).kind, ErrorKind::Protocol);
     assert_eq!(err(server.handle(Request::Hello { protocol: 2 }, Vec::new())).kind, ErrorKind::Protocol);
     ok(server.handle(Request::Connect { profile: None, lease: None }, Vec::new()));
     assert_eq!(err(server.handle(Request::Connect { profile: None, lease: None }, Vec::new())).kind, ErrorKind::Protocol);
@@ -222,11 +223,11 @@ fn ea_05_errors() {
     let (mut server, now) = connected(&temp.0);
     let unrelated = TimePoint::new(ezsdr_kernel::id::ClockDomainId::local(999), now.ticks_in(now.domain()).unwrap() + 10);
     assert_eq!(err(server.handle(Request::Advance { to: Some(unrelated), by: None }, Vec::new())).kind, ErrorKind::NotOnPrimaryRoot);
-    let deep = set("radio.tx.gain_db", Value::List(vec![Value::List(vec![Value::Int(1)])]));
-    assert_eq!(err(server.handle(Request::Submit { action: deep }, Vec::new())).kind, ErrorKind::Malformed);
+    let non_ascii = set("radio.tx.gain_db", Value::Map(std::collections::BTreeMap::from([("é".to_owned(), Scalar::from(1))])));
+    assert_eq!(err(server.handle(Request::Submit { action: non_ascii }, Vec::new())).kind, ErrorKind::Malformed);
     let stop = submit(&mut server, SessionAction::Stop { target: None }, Vec::new());
     assert!(matches!(stop.outcome, Outcome::Admitted { .. }));
-    let ended = err(server.handle(Request::Submit { action: set("radio.tx.channels", Value::Int(1)) }, Vec::new()));
+    let ended = err(server.handle(Request::Submit { action: set("radio.tx.channels", Value::Scalar(Scalar::Int(1))) }, Vec::new()));
     assert_eq!(ended.kind, ErrorKind::Ended);
     assert_eq!(ended.termination, Some(Termination::Stopped { cause: StopCause::Client {} }));
     let (manifest, _) = finish(&mut server);
@@ -326,7 +327,7 @@ fn ea_09_the_default_profile_loops_back() {
     let temp = TempDir::new("loopback");
     let (mut server, _) = connected(&temp.0);
     let waveform = ramp(1_000);
-    assert!(matches!(submit(&mut server, set("radio.tx.channels", Value::Int(1)), Vec::new()).outcome, Outcome::Admitted { .. }));
+    assert!(matches!(submit(&mut server, set("radio.tx.channels", Value::Scalar(Scalar::Int(1))), Vec::new()).outcome, Outcome::Admitted { .. }));
     assert!(matches!(submit(&mut server, repeat(), waveform.clone()).outcome, Outcome::Admitted { .. }));
     // The transmit clock the enable starts begins `x310-like`'s 50 ms start lead later, and
     // the untimed repeat there, on time (RS-19, RM-25).
@@ -389,8 +390,8 @@ fn ea_10_a_failed_connect_writes_its_manifest() {
 fn ea_11_submit_returns_the_logged_entry() {
     let temp = TempDir::new("submit");
     let (mut server, _) = connected(&temp.0);
-    let admitted = submit(&mut server, set("radio.tx.channels", Value::Int(1)), Vec::new());
-    let rejected = submit(&mut server, set("radio.rx.sample_rate_hz", Value::Num(1.0e12)), Vec::new());
+    let admitted = submit(&mut server, set("radio.tx.channels", Value::from(1)), Vec::new());
+    let rejected = submit(&mut server, set("radio.rx.sample_rate_hz", Value::num(1.0e12).unwrap()), Vec::new());
     assert!(matches!(admitted.outcome, Outcome::Admitted { .. }));
     assert!(matches!(rejected.outcome, Outcome::Rejected { .. }), "a rejection is a result, not an error");
     assert_eq!((admitted.seq, rejected.seq), (0, 1));
@@ -812,7 +813,7 @@ fn ea_07_a_session_on_the_fake_device() {
     let (mut server, opened) = fake_session(&temp.0);
     assert_eq!(opened.load(Ordering::SeqCst), 1);
     let wave: Vec<u8> = ramp(1_000);
-    assert!(matches!(submit(&mut server, set("radio.tx.channels", Value::Int(1)), Vec::new()).outcome, Outcome::Admitted { .. }));
+    assert!(matches!(submit(&mut server, set("radio.tx.channels", Value::Scalar(Scalar::Int(1))), Vec::new()).outcome, Outcome::Admitted { .. }));
     assert!(matches!(submit(&mut server, repeat(), wave.clone()).outcome, Outcome::Admitted { .. }));
     let (now, _, _) = status(&mut server);
     // The repeat starts within a restart lead (50 ms); a capture 100 ms ahead is inside it.
@@ -873,7 +874,7 @@ fn ea_07_the_device_is_released_when_the_session_ends() {
     let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
     ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
     ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new()));
-    assert!(matches!(submit(&mut server, set("radio.tx.channels", Value::Int(1)), Vec::new()).outcome, Outcome::Admitted { .. }));
+    assert!(matches!(submit(&mut server, set("radio.tx.channels", Value::Scalar(Scalar::Int(1))), Vec::new()).outcome, Outcome::Admitted { .. }));
     assert!(matches!(submit(&mut server, repeat(), ramp(1_000)).outcome, Outcome::Admitted { .. }));
     finish(&mut server);
     assert!(made.lock().unwrap().upgrade().is_none(), "a thread still holds the device after the Session ended");
@@ -1077,7 +1078,7 @@ fn ea_17_a_capture_at_a_passed_instant_says_where_it_started() {
 fn kc_23_sink_prefix_cannot_address_a_provider() {
     let temp=TempDir::new("audit-target"); let (mut server,_)=connected(&temp.0);
     let entry=submit(&mut server, SessionAction::SetParameter {
-        target:ResourceId::parse("sink/radio").unwrap(),key:Key::parse("radio.rx.gain_db").unwrap(),value:Value::Num(3.0)
+        target:ResourceId::parse("sink/radio").unwrap(),key:Key::parse("radio.rx.gain_db").unwrap(),value:Value::num(3.0).unwrap()
     },vec![]);
     assert!(matches!(entry.outcome,Outcome::Rejected { .. }),"sink/radio is not a Sink output: {entry:?}");
 }

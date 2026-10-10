@@ -54,9 +54,10 @@ id::RunId = RunId
 spec::Ident = NEW: SB-1's in-document name; §13 names ids but not the grammar a document's own names obey.
 spec::Namespace = NEW: SB-1's dotted prefix, the unit a Vocabulary or Module owns; §13 assumes it without naming it.
 spec::Key = NEW: SB-2's `<prefix><path>`; §13's matching line says "schema-driven" without naming the key type.
-spec::Value = NEW: SB-4's one-level scalar tree, the only value form a document may carry.
+spec::Value = NEW: SB-4's scalar, or list or map of scalars, the only value form a document may carry.
+spec::Scalar = NEW: the one scalar type of SB-4's values, SB-5's constraints and SC-2's DataContract attributes; §13 names neither.
+spec::Finite = NEW: SB-4's finite float, so a non-finite number cannot exist inside a value (OV-15).
 spec::ValueKind = NEW: the declared shape a KeyDecl fixes, so SB-6's comparisons stay within one kind.
-contract::Scalar = NEW: SC-2's DataContract attribute value; §13's `data` line names the registry, not its attribute type.
 
 # --- time (audit §13 `time`) -------------------------------------------------
 time::rational::Rational = Rational
@@ -256,7 +257,6 @@ manifest::ArtifactMark = NEW: RS-30's record of a `mark_artifact` reaction again
 hash::ContentHash = content hashes
 hash::HashError = NEW: the refusal set of OV-15's canonicaliser.
 hash::canonical_json = content hashes
-hash::serialize_finite_f64 = NEW: OV-15 binds Vocabulary documents too, and a Vocabulary crate with a float field cannot refuse a non-finite one without this guard.
 manifest::RunSection = Manifest envelope
 manifest::RunKind = NEW: RS-12 distinguishes a Session's implicit Spec from a Spec Run in the envelope.
 manifest::SpecSection = Manifest envelope

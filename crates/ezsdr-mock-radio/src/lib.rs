@@ -19,7 +19,7 @@ use ezsdr_kernel::module_api::{
     Requested, StopMode, Version, VersionReq, VocabularyRequirement,
 };
 use ezsdr_kernel::plan::{Fragment, PrepareReport};
-use ezsdr_kernel::spec::{Ident, Namespace, Value};
+use ezsdr_kernel::spec::{Ident, Namespace, Scalar, Value};
 use ezsdr_kernel::stream::{BackPressure, BlockFlags, BlockHeader, BurstOpen, BurstRecord, BurstStep, BurstTracker, ChannelMask, DataLink, Direction, LateOutcome, PublishOutcome, SampleBlock};
 use ezsdr_kernel::time::{AbsoluteDeadline, ClockRegistry, Duration, Rational, SampleClockHandle, ScheduleHandle, TimeAuthority, TimePoint};
 use ezsdr_kernel::module_api::UpdateClass;
@@ -236,7 +236,7 @@ impl MockRadio {
         let selector_value = |name: &str| binding.selector.get(&Ident::parse(name).expect("selector key"));
         let id = match selector_value("id") {
             None => ResourceId::parse("mock").expect("default resource id"),
-            Some(Value::Str(raw)) => ResourceId::parse(raw)
+            Some(Value::Scalar(Scalar::Str(raw))) => ResourceId::parse(raw)
                 .ok()
                 .filter(|id| id.segments().count() == 1)
                 .ok_or_else(|| reject("selector `id` must be one resource path segment"))?,
@@ -252,17 +252,17 @@ impl MockRadio {
             .ok_or_else(|| reject("selector `id` must match ^[a-z][a-z0-9_]*$, the shape of a section name segment"))?;
         let n = match selector_value("instances") {
             None => 1,
-            Some(Value::Int(n)) if (1..=4).contains(n) => *n as u32,
+            Some(Value::Scalar(Scalar::Int(n))) if (1..=4).contains(n) => *n as u32,
             _ => return Err(reject("selector `instances` must be an Int in 1..=4")),
         };
         let block_len_jitter = match selector_value("block_len_jitter") {
             None => false,
-            Some(Value::Bool(value)) => *value,
+            Some(Value::Scalar(Scalar::Bool(value))) => *value,
             _ => return Err(reject("selector `block_len_jitter` must be a Bool")),
         };
         let rx_test_pattern = match selector_value("rx_test_pattern") {
             None => "zero".to_owned(),
-            Some(Value::Str(value)) if value == "zero" || value == "ramp" => value.clone(),
+            Some(Value::Scalar(Scalar::Str(value))) if value == "zero" || value == "ramp" => value.clone(),
             _ => return Err(reject("selector `rx_test_pattern` must be `zero` or `ramp`")),
         };
         let arm_after = match selector_value("arm_after") {
@@ -270,7 +270,7 @@ impl MockRadio {
             Some(Value::List(values)) => values
                 .iter()
                 .map(|value| match value {
-                    Value::Str(raw) => ResourceId::parse(raw)
+                    Scalar::Str(raw) => ResourceId::parse(raw)
                         .map_err(|_| reject("selector `arm_after` contains an invalid resource id")),
                     _ => Err(reject("selector `arm_after` must contain resource path strings")),
                 })
@@ -1343,7 +1343,7 @@ impl MockRadio {
         // MR-18, RM-7: `coerce` over the configuration projected to `e`; a refusal changes nothing.
         let mut candidate = self.projected(tick, order);
         candidate.insert(key.clone(), value.clone());
-        let constraints = candidate.iter().map(|(key, value)| (key.clone(), ezsdr_kernel::spec::Constraint::Eq { value: value.clone() })).collect();
+        let constraints = candidate.iter().filter_map(|(key, value)| Some((key.clone(), ezsdr_kernel::spec::Constraint::Eq { value: value.as_scalar()?.clone() }))).collect();
         let requested = Requested { resource: self.instance.id.clone(), constraints };
         let report = self.profile.description().coerce(&self.instance.id, &requested).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
         if let Some(rejected) = report.rejected.first() {
@@ -1385,7 +1385,7 @@ impl MockRadio {
         let Some(update) = self.updates.remove(&(effective, order)) else { return Ok(()); };
         self.config.insert(update.key.clone(), update.value.clone());
         self.record_update(&update.key, &update.value, tick);
-        if let (Some(mode), Some(value)) = (self.channel.as_mut(), match &update.value { Value::Num(v) => Some(*v), Value::Int(v) => Some(*v as f64), _ => None }) {
+        if let (Some(mode), Some(value)) = (self.channel.as_mut(), match update.value.as_scalar() { Some(Scalar::Num(v)) => Some(v.get()), Some(Scalar::Int(v)) => Some(*v as f64), _ => None }) {
             match update.key.as_str() {
                 ezsdr_radio::keys::TX_GAIN_DB => mode.tx.plan().gain_db.set(tick, value),
                 ezsdr_radio::keys::TX_FREQUENCY_HZ => {
@@ -1487,12 +1487,12 @@ fn rm26(error: ezsdr_kernel::time::TimeError) -> ModuleError {
 
 fn int_config(config: &BTreeMap<ezsdr_kernel::spec::Key, Value>, name: &str) -> i64 {
     let key = ezsdr_kernel::spec::Key::parse(name).expect("radio key");
-    match config.get(&key) { Some(Value::Int(value)) => *value, _ => 0 }
+    match config.get(&key).and_then(Value::as_scalar) { Some(Scalar::Int(value)) => *value, _ => 0 }
 }
 
 fn num_config(config: &BTreeMap<ezsdr_kernel::spec::Key, Value>, name: &str) -> f64 {
     let key = ezsdr_kernel::spec::Key::parse(name).expect("radio key");
-    match config.get(&key) { Some(Value::Num(value)) => *value, Some(Value::Int(value)) => *value as f64, _ => 0.0 }
+    match config.get(&key).and_then(Value::as_scalar) { Some(Scalar::Num(value)) => value.get(), Some(Scalar::Int(value)) => *value as f64, _ => 0.0 }
 }
 
 fn is_rx_cold_key(key: &str) -> bool {

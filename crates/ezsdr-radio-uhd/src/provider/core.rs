@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use ezsdr_kernel::event::{Event, EventHandle, EventKind, EventSink, Severity};
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::module_api::{InputStore, StopMode};
-use ezsdr_kernel::spec::{Key, Value};
+use ezsdr_kernel::spec::{Key, Scalar, Value};
 use ezsdr_kernel::stream::DataLink;
 use ezsdr_kernel::time::{ClockRegistry, Rational, TimeAuthority, TimePoint};
 use ezsdr_radio::device::DeviceDescription;
@@ -405,8 +405,8 @@ impl Core {
     /// A direction's full configuration from a configuration map (UR-12).
     pub fn settings(config: &BTreeMap<Key, Value>, dir: Dir) -> Settings {
         let number = |name: &str| match config.get(&key(&format!("radio.{}.{name}", dir.name()))) {
-            Some(Value::Num(v)) => Some(*v),
-            Some(Value::Int(v)) => Some(*v as f64),
+            Some(Value::Scalar(Scalar::Num(v))) => Some(v.get()),
+            Some(Value::Scalar(Scalar::Int(v))) => Some(*v as f64),
             _ => None,
         };
         Settings {
@@ -414,7 +414,7 @@ impl Core {
             freq: number("frequency_hz"),
             gain: number("gain_db"),
             antenna: match config.get(&key(&format!("radio.{}.antenna", dir.name()))) {
-                Some(Value::Str(s)) => Some(s.clone()),
+                Some(Value::Scalar(Scalar::Str(s))) => Some(s.clone()),
                 _ => None,
             },
         }
@@ -426,7 +426,7 @@ impl Core {
             Dir::Tx => keys::TX_CHANNELS,
         };
         match config.get(&key(name)) {
-            Some(Value::Int(n)) if *n > 0 => *n as usize,
+            Some(Value::Scalar(Scalar::Int(n))) if *n > 0 => *n as usize,
             _ => 0,
         }
     }

@@ -23,7 +23,7 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{Endpoint, ModuleError, StepOutcome};
-use ezsdr_kernel::spec::{Ident, Namespace, Value};
+use ezsdr_kernel::spec::{Ident, Namespace, Scalar, Value};
 use ezsdr_kernel::stream::{DataLink, LatePolicy};
 use ezsdr_kernel::time::{AbsoluteDeadline, ClockRegistry, Duration, TimePoint};
 
@@ -87,15 +87,15 @@ fn wrong(key: &str) -> ModuleError {
 impl Component for PingResponder {
     fn prepare(&mut self, ctx: ComponentContext) -> Result<(), ModuleError> {
         self.threshold = match param(&ctx, params::THRESHOLD)? {
-            Value::Num(v) => *v,
-            Value::Int(v) => *v as f64,
+            Value::Scalar(Scalar::Num(v)) => v.get(),
+            Value::Scalar(Scalar::Int(v)) => *v as f64,
             _ => return Err(wrong(params::THRESHOLD)),
         };
-        let Value::Int(turnaround) = param(&ctx, params::TURNAROUND_NS)? else { return Err(wrong(params::TURNAROUND_NS)) };
-        let Value::Int(rearm) = param(&ctx, params::REARM_SAMPLES)? else { return Err(wrong(params::REARM_SAMPLES)) };
-        let Value::Str(target) = param(&ctx, params::TARGET)? else { return Err(wrong(params::TARGET)) };
-        let Value::Str(hash) = param(&ctx, params::WAVEFORM)? else { return Err(wrong(params::WAVEFORM)) };
-        let Value::Str(policy) = param(&ctx, params::LATE_POLICY)? else { return Err(wrong(params::LATE_POLICY)) };
+        let Value::Scalar(Scalar::Int(turnaround)) = param(&ctx, params::TURNAROUND_NS)? else { return Err(wrong(params::TURNAROUND_NS)) };
+        let Value::Scalar(Scalar::Int(rearm)) = param(&ctx, params::REARM_SAMPLES)? else { return Err(wrong(params::REARM_SAMPLES)) };
+        let Value::Scalar(Scalar::Str(target)) = param(&ctx, params::TARGET)? else { return Err(wrong(params::TARGET)) };
+        let Value::Scalar(Scalar::Str(hash)) = param(&ctx, params::WAVEFORM)? else { return Err(wrong(params::WAVEFORM)) };
+        let Value::Scalar(Scalar::Str(policy)) = param(&ctx, params::LATE_POLICY)? else { return Err(wrong(params::LATE_POLICY)) };
         if *turnaround < 0 || *rearm < 1 {
             return Err(ModuleError::rejected("responder: turnaround must be ≥ 0 and rearm ≥ 1"));
         }

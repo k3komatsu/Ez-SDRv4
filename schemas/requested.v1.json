@@ -1,7 +1,7 @@
 {
   "$defs": {
     "Constraint": {
-      "description": "What a Spec requires of a key. Its value is a scalar: a constraint over a list\nor a map is refused, because the matcher would then need the Vocabulary's\nsemantics to compare them.\n\nRule: SB-5, decision B1.",
+      "description": "What a Spec requires of a key. Its value is a [`Scalar`]: a constraint over a\nlist or a map cannot be written, because the matcher would then need the\nVocabulary's semantics to compare them.\n\nRule: SB-5, decision B1.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -12,7 +12,7 @@
               "type": "string"
             },
             "value": {
-              "$ref": "#/$defs/Value",
+              "$ref": "#/$defs/Scalar",
               "description": "The value."
             }
           },
@@ -33,7 +33,7 @@
             "max": {
               "anyOf": [
                 {
-                  "$ref": "#/$defs/Value"
+                  "$ref": "#/$defs/Scalar"
                 },
                 {
                   "type": "null"
@@ -44,7 +44,7 @@
             "min": {
               "anyOf": [
                 {
-                  "$ref": "#/$defs/Value"
+                  "$ref": "#/$defs/Scalar"
                 },
                 {
                   "type": "null"
@@ -69,7 +69,7 @@
             "values": {
               "description": "The permitted values.",
               "items": {
-                "$ref": "#/$defs/Value"
+                "$ref": "#/$defs/Scalar"
               },
               "type": "array"
             }
@@ -89,7 +89,7 @@
               "type": "string"
             },
             "value": {
-              "$ref": "#/$defs/Value",
+              "$ref": "#/$defs/Scalar",
               "description": "The lower bound."
             }
           },
@@ -108,7 +108,7 @@
               "type": "string"
             },
             "value": {
-              "$ref": "#/$defs/Value",
+              "$ref": "#/$defs/Scalar",
               "description": "The upper bound."
             }
           },
@@ -133,6 +133,11 @@
           "type": "object"
         }
       ]
+    },
+    "Finite": {
+      "description": "A finite 64-bit float: NaN and the infinities are refused, so OV-15's\ncanonicaliser never meets one.\n\nRule: SB-4, OV-15.",
+      "format": "double",
+      "type": "number"
     },
     "NodeId": {
       "description": "A node in the (future) multi-host deployment. `0` (the local node) is the only legal value in v4.0.\n\nRule: X7 (`00-overview.md`); it qualifies every id of TM-11, SC-6, SB-3 and MA-38.",
@@ -159,7 +164,7 @@
       ],
       "type": "object"
     },
-    "Value": {
+    "Scalar": {
       "anyOf": [
         {
           "description": "A boolean.",
@@ -171,30 +176,15 @@
           "type": "integer"
         },
         {
-          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
-          "format": "double",
-          "type": "number"
+          "$ref": "#/$defs/Finite",
+          "description": "A finite float (OV-15)."
         },
         {
           "description": "A string.",
           "type": "string"
-        },
-        {
-          "description": "A list of scalars; nesting deeper is refused (SB-4).",
-          "items": {
-            "$ref": "#/$defs/Value"
-          },
-          "type": "array"
-        },
-        {
-          "additionalProperties": {
-            "$ref": "#/$defs/Value"
-          },
-          "description": "A map of scalars; nesting deeper is refused (SB-4).",
-          "type": "object"
         }
       ],
-      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+      "description": "The one scalar type: a `Value`'s scalar, a constraint's and a capability's value,\nand a `DataContract` attribute (SB-4, SB-5, SC-2).\n\nCarries no tag (OV-13's carve-out): a scalar is the value an author wrote, not a\ntwo-field object wrapping it.\n\nRule: SB-4, SB-6, SC-2."
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

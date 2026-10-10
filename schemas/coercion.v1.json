@@ -1,10 +1,15 @@
 {
   "$defs": {
+    "Finite": {
+      "description": "A finite 64-bit float: NaN and the infinities are refused, so OV-15's\ncanonicaliser never meets one.\n\nRule: SB-4, OV-15.",
+      "format": "double",
+      "type": "number"
+    },
     "Key": {
       "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the `KeyDecl` and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
       "type": "string"
     },
-    "Value": {
+    "Scalar": {
       "anyOf": [
         {
           "description": "A boolean.",
@@ -16,30 +21,38 @@
           "type": "integer"
         },
         {
-          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
-          "format": "double",
-          "type": "number"
+          "$ref": "#/$defs/Finite",
+          "description": "A finite float (OV-15)."
         },
         {
           "description": "A string.",
           "type": "string"
+        }
+      ],
+      "description": "The one scalar type: a `Value`'s scalar, a constraint's and a capability's value,\nand a `DataContract` attribute (SB-4, SB-5, SC-2).\n\nCarries no tag (OV-13's carve-out): a scalar is the value an author wrote, not a\ntwo-field object wrapping it.\n\nRule: SB-4, SB-6, SC-2."
+    },
+    "Value": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Scalar",
+          "description": "A scalar."
         },
         {
-          "description": "A list of scalars; nesting deeper is refused (SB-4).",
+          "description": "A list of scalars.",
           "items": {
-            "$ref": "#/$defs/Value"
+            "$ref": "#/$defs/Scalar"
           },
           "type": "array"
         },
         {
           "additionalProperties": {
-            "$ref": "#/$defs/Value"
+            "$ref": "#/$defs/Scalar"
           },
-          "description": "A map of scalars; nesting deeper is refused (SB-4).",
+          "description": "A map of scalars; its keys are ASCII (SB-9a).",
           "type": "object"
         }
       ],
-      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+      "description": "A scalar, or a list or map of scalars. One level is the type: nothing deeper can\nbe built or parsed.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

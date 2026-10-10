@@ -1135,7 +1135,7 @@ fn rs_12_bare_connect_then_capture_succeeds() {
         verb: id("capture"),
         target: rid("radio"),
         at: Some(t(100)),
-        params: [(key("test.capture"), Value::Bool(true))]
+        params: [(key("test.capture"), Value::from(true))]
             .into_iter()
             .collect(),
     };
@@ -1156,7 +1156,7 @@ fn rs_14_capture_compiles_to_update_parameter() {
         verb: id("capture"),
         target: rid("radio"),
         at: Some(t(100)),
-        params: [(key("test.capture"), Value::Bool(true))]
+        params: [(key("test.capture"), Value::from(true))]
             .into_iter()
             .collect(),
     };
@@ -1207,7 +1207,7 @@ fn rs_14_capture_without_recorder_rejected() {
         verb: id("capture"),
         target: rid("radio"),
         at: Some(t(100)),
-        params: [(key("test.capture"), Value::Bool(true))]
+        params: [(key("test.capture"), Value::from(true))]
             .into_iter()
             .collect(),
     };
@@ -1256,7 +1256,7 @@ fn rs_17_provider_parameter_class_comes_from_its_key_decl() {
     let gain = SessionAction::SetParameter {
         target: rid("radio"),
         key: key("test.gain"),
-        value: Value::Num(20.0),
+        value: Value::num(20.0).unwrap(),
     };
     // Nothing in the caller's map: the class comes from the KeyDecl alone.
     let compiled = compile(&gain, &reg, &BTreeMap::new(), &placed(), t(0), None).expect("compiles");
@@ -1283,7 +1283,7 @@ fn rs_17_provider_parameter_class_comes_from_its_key_decl() {
         is_session: true,
     };
     let proposed: BTreeMap<Key, Value> =
-        [(key("test.gain"), Value::Num(20.0))].into_iter().collect();
+        [(key("test.gain"), Value::num(20.0).unwrap())].into_iter().collect();
     assert!(
         admitter
             .admit(
@@ -1300,7 +1300,7 @@ fn rs_17_provider_parameter_class_comes_from_its_key_decl() {
     let flag = SessionAction::SetParameter {
         target: rid("radio"),
         key: key("test.flag"),
-        value: Value::Bool(true),
+        value: Value::from(true),
     };
     assert!(compile(&flag, &reg, &BTreeMap::new(), &placed(), t(0), None).is_err());
 }
@@ -1314,7 +1314,7 @@ fn rs_19_capture_asap_records_applied_time() {
         target: rid("radio"),
         at: None,
         // RS-14: the value is the action's own; the Kernel supplies no default (D46).
-        params: [(key("test.capture"), Value::Bool(true))]
+        params: [(key("test.capture"), Value::from(true))]
             .into_iter()
             .collect(),
     };
@@ -1330,9 +1330,9 @@ fn rs_19_capture_asap_records_applied_time() {
     assert_eq!(compiled.coercions.len(), 1);
     assert_eq!(
         compiled.coercions[0].requested,
-        Value::Str("asap".to_owned())
+        Value::from("asap".to_owned())
     );
-    assert_eq!(compiled.coercions[0].applied, Value::Int(4_242));
+    assert_eq!(compiled.coercions[0].applied, Value::from(4_242));
 }
 
 #[test]
@@ -1345,7 +1345,7 @@ fn rs_49_update_parameter_carries_its_instant() {
         verb: id("capture"),
         target: rid("radio"),
         at: None,
-        params: [(key("test.capture"), Value::Bool(true))]
+        params: [(key("test.capture"), Value::from(true))]
             .into_iter()
             .collect(),
     };
@@ -1362,7 +1362,7 @@ fn rs_49_update_parameter_carries_its_instant() {
     let bare = SessionAction::SetParameter {
         target: rid("radio"),
         key: key("test.flag"),
-        value: Value::Bool(true),
+        value: Value::from(true),
     };
     let compiled =
         compile(&bare, &reg, &declared_classes(), &placed(), t(7), None).expect("compiles");
@@ -1380,7 +1380,7 @@ fn rs_49_update_parameter_carries_its_instant() {
     let template = ActionTemplate::UpdateParameter {
         target: rid("radio"),
         key: key("test.flag"),
-        value: Value::Bool(true),
+        value: Value::from(true),
         class: UpdateClass::BlockBoundary,
     };
     assert!(template.is_timed());
@@ -1506,7 +1506,7 @@ fn rs_16_rejected_action_not_dispatched() {
         is_session: true,
     };
     let proposed: BTreeMap<Key, Value> =
-        [(key("test.grid"), Value::Num(40.0))].into_iter().collect();
+        [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect();
     let violations = admitter
         .admit(
             &BTreeMap::new(),
@@ -1528,7 +1528,7 @@ fn rs_16_rejected_action_not_dispatched() {
         SessionAction::SetParameter {
             target: rid("radio"),
             key: key("test.grid"),
-            value: Value::Num(40.0),
+            value: Value::num(40.0).unwrap(),
         },
         Outcome::Rejected { violations },
     )
@@ -1551,7 +1551,7 @@ fn rs_17_undeclared_update_class_rejected() {
         registry: &reg,
         is_session: true,
     };
-    let proposed: BTreeMap<Key, Value> = [(key("test.flag"), Value::Bool(true))]
+    let proposed: BTreeMap<Key, Value> = [(key("test.flag"), Value::from(true))]
         .into_iter()
         .collect();
     let violations = admitter
@@ -1568,7 +1568,7 @@ fn rs_17_undeclared_update_class_rejected() {
     let action = SessionAction::SetParameter {
         target: rid("radio"),
         key: key("test.flag"),
-        value: Value::Bool(true),
+        value: Value::from(true),
     };
     assert!(compile(&action, &reg, &BTreeMap::new(), &placed(), t(0), None).is_err());
 }
@@ -1662,7 +1662,7 @@ fn rs_48_action_set_is_closed_and_schematised() {
         Action::UpdateParameter {
             target: rid("radio"),
             key: key("test.flag"),
-            value: Value::Bool(true),
+            value: Value::from(true),
             class: UpdateClass::BlockBoundary,
             at: Some(AbsoluteDeadline::new(t(30))),
         },
@@ -2049,6 +2049,28 @@ fn rs_38_manifest_carries_its_mandatory_version() {
     let back = Manifest::from_json(&doc).expect("a v1 Manifest reads");
     assert_eq!(back.version, 1);
     assert_eq!(back.hash, m.hash);
+}
+
+#[test]
+fn sb_04_a_manifest_refuses_a_nested_value() {
+    // The Manifest carries `Value`s in its prepare reports, coercions and action log;
+    // one level is the type there too (SB-4), so a stored Manifest with a nested value
+    // is refused rather than read.
+    let mut m = manifest_fixture(Termination::Completed {});
+    m.prepare.reports.push(ezsdr_kernel::plan::PrepareReport {
+        fragment: Ident::parse("radio").unwrap(),
+        effective: BTreeMap::from([(Key::parse("test.count").unwrap(), Value::from(1))]),
+        coercions: Vec::new(),
+        warnings: Vec::new(),
+    });
+    let doc = serde_json::to_value(&m).expect("serialises");
+    Manifest::from_json(&doc).expect("a flat value reads");
+    let slot = "/prepare/reports/0/effective/test.count";
+    for nested in [serde_json::json!([[1]]), serde_json::json!({ "a": { "b": 1 } })] {
+        let mut bad = doc.clone();
+        *bad.pointer_mut(slot).expect("the slot") = nested.clone();
+        assert!(Manifest::from_json(&bad).is_err(), "{nested}");
+    }
 }
 
 #[test]

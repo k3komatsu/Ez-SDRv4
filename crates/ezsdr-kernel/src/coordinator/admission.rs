@@ -52,12 +52,12 @@ pub(super) fn admit_with(
             "KC-24: a Module ends a Run only with Abort",
         )]);
     }
-    // SB-4: every origin crosses this boundary before coercion or dispatch.
+    // SB-9a: every origin crosses this boundary before coercion or dispatch.
     let values = match &action {
-        Action::UpdateParameter { key, value, .. } => value.check_nesting(key.as_str()),
+        Action::UpdateParameter { key, value, .. } => value.check_ascii_keys(key.as_str()),
         Action::TxBurst { metadata: values, .. }
         | Action::Command { params: values, .. } => values.iter()
-            .try_for_each(|(key, value)| value.check_nesting(key.as_str())),
+            .try_for_each(|(key, value)| value.check_ascii_keys(key.as_str())),
         _ => Ok(()),
     };
     values.map_err(|error| vec![violation("ezsdr.value", error.to_string())])?;
@@ -165,23 +165,21 @@ pub(super) fn admit_with(
             let current = configuration.get(fragment).cloned().unwrap_or_default();
             let mut constraints: BTreeMap<Key, Constraint> = current
                 .iter()
-                .filter(|(_, value)| value.is_scalar())
-                .map(|(key, value)| {
-                    (
-                        key.clone(),
-                        Constraint::Eq {
-                            value: value.clone(),
-                        },
-                    )
+                .filter_map(|(key, value)| {
+                    let value = value.as_scalar()?.clone();
+                    Some((key.clone(), Constraint::Eq { value }))
                 })
                 .collect();
             let requested_value = value.clone();
-            constraints.insert(
-                key.clone(),
-                Constraint::Eq {
-                    value: requested_value.clone(),
-                },
-            );
+            // A Provider parameter is offered to `coerce` as an `Eq` constraint, whose
+            // value is a scalar (SB-5).
+            let Some(requested) = value.as_scalar().cloned() else {
+                return Err(vec![violation(
+                    "ezsdr.value",
+                    format!("SB-5: {key} is a Provider parameter, whose value is a scalar"),
+                )]);
+            };
+            constraints.insert(key.clone(), Constraint::Eq { value: requested });
             let Some(resource) = shared
                 .routing()
                 .and_then(|routing| routing.matched.get(fragment))

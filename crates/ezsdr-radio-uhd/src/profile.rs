@@ -79,7 +79,7 @@ impl Profile {
             Profile::X310Cbx => {
                 let mut description = x310(self, 1_200_000_000.0, 6_000_000_000.0, 1, block_len);
                 for key in [keys::RX_FREQUENCY_HZ, keys::TX_FREQUENCY_HZ] {
-                    description.defaults.insert(Key::parse(key).expect("a radio key"), Value::Num(CBX_DEFAULT_FREQUENCY_HZ));
+                    description.defaults.insert(Key::parse(key).expect("a radio key"), Value::num(CBX_DEFAULT_FREQUENCY_HZ).expect("a finite default"));
                 }
                 description
             }

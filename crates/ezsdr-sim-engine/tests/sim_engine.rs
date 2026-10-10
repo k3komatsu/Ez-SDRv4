@@ -94,7 +94,7 @@ fn se_09_the_virtual_root_is_registered() {
     assert_eq!(from_binding.root(), ClockDomainId::local(2));
 
     let mut selector = binding();
-    selector.selector.insert(Ident::parse("extra").unwrap(), Value::Bool(true));
+    selector.selector.insert(Ident::parse("extra").unwrap(), Value::from(true));
     assert!(SimEngine::from_binding(&selector, Arc::new(ClockRegistry::new()))
         .err()
         .unwrap()

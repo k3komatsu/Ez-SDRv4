@@ -59,10 +59,10 @@ fn base_rf_envelope() -> JsonValue {
 
 fn tx_values(channels: i64, frequency_hz: f64, gain_db: f64) -> Vec<(&'static str, Value)> {
     vec![
-        (keys::TX_CHANNELS, Value::Int(channels)),
-        (keys::TX_FREQUENCY_HZ, Value::Num(frequency_hz)),
-        (keys::TX_GAIN_DB, Value::Num(gain_db)),
-        (keys::TX_ANTENNA, Value::Str("TX/RX".to_owned())),
+        (keys::TX_CHANNELS, Value::from(channels)),
+        (keys::TX_FREQUENCY_HZ, Value::num(frequency_hz).unwrap()),
+        (keys::TX_GAIN_DB, Value::num(gain_db).unwrap()),
+        (keys::TX_ANTENNA, Value::from("TX/RX".to_owned())),
     ]
 }
 
@@ -306,7 +306,7 @@ fn rm_19_rf_envelope_cases() {
     assert_eq!(violations[0].key.as_ref().unwrap().as_str(), keys::TX_CHANNELS);
 
     let mut bad_tx_antenna = tx_values(1, 2_450_000_000.0, 10.0);
-    bad_tx_antenna[3].1 = Value::Str("J1".to_owned());
+    bad_tx_antenna[3].1 = Value::from("J1".to_owned());
     let bad_tx_antenna = radio_configuration(&bad_tx_antenna);
     let violations = run_check(base_rf_envelope(), &bad_tx_antenna, &empty, CheckStage::Validate);
     assert_eq!(violations.len(), 1);
@@ -315,7 +315,7 @@ fn rm_19_rf_envelope_cases() {
     let disabled_tx = radio_configuration(&tx_values(0, 2_600_000_000.0, 25.0));
     assert!(run_check(base_rf_envelope(), &disabled_tx, &empty, CheckStage::Validate).is_empty());
 
-    let bad_rx_antenna = radio_configuration(&[(keys::RX_ANTENNA, Value::Str("J1".to_owned()))]);
+    let bad_rx_antenna = radio_configuration(&[(keys::RX_ANTENNA, Value::from("J1".to_owned()))]);
     let violations = run_check(base_rf_envelope(), &bad_rx_antenna, &empty, CheckStage::Validate);
     assert_eq!(violations.len(), 1);
     assert_eq!(violations[0].key.as_ref().unwrap().as_str(), keys::RX_ANTENNA);
@@ -359,7 +359,7 @@ fn rm_19_a_malformed_section_is_one_violation() {
 #[test]
 fn rm_19_the_proposed_value_is_judged() {
     let effective = radio_configuration(&tx_values(1, 2_450_000_000.0, 10.0));
-    let proposed = radio_configuration(&[(keys::TX_FREQUENCY_HZ, Value::Num(2_600_000_000.0))]);
+    let proposed = radio_configuration(&[(keys::TX_FREQUENCY_HZ, Value::num(2_600_000_000.0).unwrap())]);
     let violations = run_check(base_rf_envelope(), &effective, &proposed, CheckStage::Runtime);
     assert_eq!(violations.len(), 1);
     assert_eq!(violations[0].key.as_ref().unwrap().as_str(), keys::TX_FREQUENCY_HZ);

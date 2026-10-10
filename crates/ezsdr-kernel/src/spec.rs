@@ -159,30 +159,71 @@ macro_rules! display_newtype {
 }
 display_newtype!(Ident, Namespace, Key);
 
-/// A scalar, or a list or map of scalars nested at most one level.
+/// A finite 64-bit float: NaN and the infinities are refused, so OV-15's
+/// canonicaliser never meets one.
+///
+/// Rule: SB-4, OV-15.
+// The field is private and `new` is the only way in, deserialising included.
+#[derive(Clone, Copy, PartialEq, PartialOrd, Debug, Serialize, schemars::JsonSchema)]
+#[serde(transparent)]
+pub struct Finite(f64);
+
+impl Finite {
+    /// `x`, unless it is NaN or an infinity (SB-4).
+    pub fn new(x: f64) -> Option<Finite> {
+        x.is_finite().then_some(Finite(x))
+    }
+
+    /// The float (SB-4).
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Finite {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Finite::new(f64::deserialize(d)?)
+            .ok_or_else(|| serde::de::Error::custom("SB-4: a number must be finite"))
+    }
+}
+
+/// The one scalar type: a `Value`'s scalar, a constraint's and a capability's value,
+/// and a `DataContract` attribute (SB-4, SB-5, SC-2).
+///
+/// Carries no tag (OV-13's carve-out): a scalar is the value an author wrote, not a
+/// two-field object wrapping it.
+///
+/// Rule: SB-4, SB-6, SC-2.
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum Scalar {
+    /// A boolean.
+    Bool(bool),
+    /// A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).
+    Int(i64),
+    /// A finite float (OV-15).
+    Num(Finite),
+    /// A string.
+    Str(String),
+}
+
+/// A scalar, or a list or map of scalars. One level is the type: nothing deeper can
+/// be built or parsed.
 ///
 /// A Spec is data, not a document tree: one level is what a structured parameter
 /// such as a capture request needs, and more invites the schema-inside-a-schema
 /// that Vision §9 rejects.
 ///
 /// Rule: SB-4.
-#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Value {
-    /// A boolean.
-    Bool(bool),
-    /// A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).
-    Int(i64),
-    /// A finite float; a non-finite one is refused rather than written as `null`,
-    /// because a `Value` reaches the sealed Manifest through `prepare.effective`,
-    /// the coercion records and the action log (OV-15, X9).
-    Num(#[serde(serialize_with = "crate::hash::serialize_finite_f64")] f64),
-    /// A string.
-    Str(String),
-    /// A list of scalars; nesting deeper is refused (SB-4).
-    List(Vec<Value>),
-    /// A map of scalars; nesting deeper is refused (SB-4).
-    Map(BTreeMap<String, Value>),
+    /// A scalar.
+    Scalar(Scalar),
+    /// A list of scalars.
+    List(Vec<Scalar>),
+    /// A map of scalars; its keys are ASCII (SB-9a).
+    Map(BTreeMap<String, Scalar>),
 }
 
 /// The declared shape of a key's value (SB-2, MA-34).
@@ -204,110 +245,140 @@ pub enum ValueKind {
     Map,
 }
 
-impl Value {
-    /// True for the four scalar variants; a constraint's value must be one (SB-5).
-    pub fn is_scalar(&self) -> bool {
-        matches!(self, Value::Bool(_) | Value::Int(_) | Value::Num(_) | Value::Str(_))
+impl Scalar {
+    /// The declared shape this scalar has (SB-2).
+    pub fn kind(&self) -> ValueKind {
+        match self {
+            Scalar::Bool(_) => ValueKind::Bool,
+            Scalar::Int(_) => ValueKind::Int,
+            Scalar::Num(_) => ValueKind::Num,
+            Scalar::Str(_) => ValueKind::Str,
+        }
     }
+}
 
+impl Value {
     /// The declared shape this value has (SB-2).
     pub fn kind(&self) -> ValueKind {
         match self {
-            Value::Bool(_) => ValueKind::Bool,
-            Value::Int(_) => ValueKind::Int,
-            Value::Num(_) => ValueKind::Num,
-            Value::Str(_) => ValueKind::Str,
+            Value::Scalar(s) => s.kind(),
             Value::List(_) => ValueKind::List,
             Value::Map(_) => ValueKind::Map,
         }
     }
 
-    /// Refuses nesting beyond one level, and any non-finite float (SB-4, OV-15).
-    pub fn check_nesting(&self, path: &str) -> Result<(), SpecError> {
+    /// The scalar, if this value is one (SB-4).
+    pub fn as_scalar(&self) -> Option<&Scalar> {
         match self {
-            Value::Num(x) if !x.is_finite() => Err(SpecError::KeyShape { key: path.to_owned(), expected: "finite number".into(), found: "non-finite".into(),
-            }),
-            Value::List(items) => {
-                if !items.iter().all(Value::is_scalar) {
-                    return Err(SpecError::KeyShape {
-                        key: path.to_owned(),
-                        expected: "a list of scalars".into(),
-                        found: "nested list or map".into(),
-                    });
-                }
-                // Recursed, so that a non-finite float inside a list is refused too.
-                items.iter().try_for_each(|v| v.check_nesting(path))
-            }
-            Value::Map(items) => {
-                // OV-15's canonicaliser refuses a non-ASCII object key, and a `Value`
-                // reaches the sealed Manifest through paths that pass no `from_json`:
-                // a Session `SetParameter`, an Action's `params` or `metadata`. Left
-                // to hashing time it failed at cleanup step 7, after the Run had
-                // transmitted — a Run with no Manifest, against RS-11.
-                if let Some(bad) = items.keys().find(|k| !k.as_str().is_ascii()) {
-                    return Err(SpecError::KeyShape {
-                        key: format!("{path}.{bad}"),
-                        expected: "an ASCII key, which OV-15 canonicalises".into(),
-                        found: "a non-ASCII key".into(),
-                    });
-                }
-                if !items.values().all(Value::is_scalar) {
-                    return Err(SpecError::KeyShape {
-                        key: path.to_owned(),
-                        expected: "a map of scalars".into(),
-                        found: "nested list or map".into(),
-                    });
-                }
-                items.values().try_for_each(|v| v.check_nesting(path))
-            }
-            _ => Ok(()),
+            Value::Scalar(s) => Some(s),
+            _ => None,
         }
     }
 
-    /// Orders two scalars of one kind; `None` across kinds, which is `KeyShape` (SB-6).
-    pub fn partial_cmp_scalar(&self, other: &Value) -> Option<std::cmp::Ordering> {
+    /// A float value, unless `x` is NaN or an infinity (SB-4).
+    pub fn num(x: f64) -> Option<Value> {
+        Finite::new(x).map(|x| Value::Scalar(Scalar::Num(x)))
+    }
+
+    /// Refuses a map key that is not ASCII (SB-9a): a `Value` reaches the sealed
+    /// Manifest through paths that pass no `from_json` — a Session `SetParameter`, an
+    /// Action's `params` or `metadata` — and OV-15's canonicaliser refuses such a key,
+    /// at cleanup step 7, after the Run had transmitted (RS-11).
+    pub fn check_ascii_keys(&self, path: &str) -> Result<(), SpecError> {
+        match self {
+            Value::Map(items) => match items.keys().find(|k| !k.is_ascii()) {
+                Some(bad) => Err(SpecError::KeyShape {
+                    key: format!("{path}.{bad}"),
+                    expected: "an ASCII key, which OV-15 canonicalises".into(),
+                    found: "a non-ASCII key".into(),
+                }),
+                None => Ok(()),
+            },
+            _ => Ok(()),
+        }
+    }
+}
+
+impl From<i64> for Scalar {
+    fn from(x: i64) -> Scalar {
+        Scalar::Int(x)
+    }
+}
+
+impl From<bool> for Scalar {
+    fn from(x: bool) -> Scalar {
+        Scalar::Bool(x)
+    }
+}
+
+impl From<&str> for Scalar {
+    fn from(x: &str) -> Scalar {
+        Scalar::Str(x.to_owned())
+    }
+}
+
+impl From<String> for Scalar {
+    fn from(x: String) -> Scalar {
+        Scalar::Str(x)
+    }
+}
+
+impl<T: Into<Scalar>> From<T> for Value {
+    fn from(x: T) -> Value {
+        Value::Scalar(x.into())
+    }
+}
+
+impl TryFrom<f64> for Scalar {
+    type Error = ();
+    fn try_from(x: f64) -> Result<Scalar, ()> {
+        Finite::new(x).map(Scalar::Num).ok_or(())
+    }
+}
+
+impl TryFrom<f64> for Value {
+    type Error = ();
+    fn try_from(x: f64) -> Result<Value, ()> {
+        Value::num(x).ok_or(())
+    }
+}
+
+/// Equality crosses `Int` and `Num` exactly: two scalars are one value iff they are
+/// numerically equal, the `Equal` case of the one order [`cmp_int_num`] defines, so
+/// `PartialEq`, SB-6's `Eq`, `Set`, `Range`, `Min`, `Max` and SC-2's "identical" all
+/// decide by one relation and cannot disagree (finding D24, D50). `1` and `1.0` are
+/// one value and share one canonical form and one hash under OV-15a.
+///
+/// Rule: SB-6, SC-2, OV-15, OV-15a.
+impl PartialEq for Scalar {
+    fn eq(&self, other: &Scalar) -> bool {
+        self.partial_cmp(other) == Some(std::cmp::Ordering::Equal)
+    }
+}
+
+/// Orders two scalars of one kind, and an `Int` against a `Num` exactly; `None` across
+/// other kinds, which SB-6 reports as `KeyShape`.
+///
+/// Rule: SB-6.
+impl PartialOrd for Scalar {
+    fn partial_cmp(&self, other: &Scalar) -> Option<std::cmp::Ordering> {
         match (self, other) {
-            (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
-            (Value::Num(a), Value::Num(b)) => a.partial_cmp(b),
-            // Exactly, in 128-bit arithmetic: `as f64` is the cast SC-2 removed from
-            // `Scalar` for the same reason, and SB-6's `Eq`, `Range`, `Min` and `Max`
-            // all pass through here, so a capability match above 2^53 was inexact.
-            (Value::Int(a), Value::Num(b)) => cmp_int_num(*a, *b),
-            (Value::Num(a), Value::Int(b)) => cmp_int_num(*b, *a).map(|o| o.reverse()),
-            (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
-            (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
+            (Scalar::Int(a), Scalar::Int(b)) => Some(a.cmp(b)),
+            (Scalar::Num(a), Scalar::Num(b)) => a.partial_cmp(b),
+            // Exactly, in 128-bit arithmetic, never through `as f64`: above 2^53 that
+            // cast made two different numbers equal and equality non-transitive, so
+            // `ContractRegistry::register` took a different definition for an
+            // identical re-registration (SC-2) and a capability match was inexact.
+            (Scalar::Int(a), Scalar::Num(b)) => Some(cmp_int_num(*a, *b)),
+            (Scalar::Num(a), Scalar::Int(b)) => Some(cmp_int_num(*b, *a).reverse()),
+            (Scalar::Str(a), Scalar::Str(b)) => Some(a.cmp(b)),
+            (Scalar::Bool(a), Scalar::Bool(b)) => Some(a.cmp(b)),
             _ => None,
         }
     }
 }
 
-/// Equality crosses `Int` and `Num` exactly, as `Scalar`'s does (SC-2): two values are
-/// equal iff they share one canonical form under OV-15, which holds while the float is
-/// integral and its magnitude is at most 2^53. OV-15 already gives this document family
-/// one notion of "same value" — one canonical form, one hash — so a second notion here
-/// would be a defect and not a choice, and SB-6's comparison would disagree with the
-/// hash for exactly the values the derive got wrong.
-///
-/// Rule: SB-4, SB-6, OV-15, OV-15a.
-impl PartialEq for Value {
-    fn eq(&self, other: &Value) -> bool {
-        match (self, other) {
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Num(a), Value::Num(b)) => a == b,
-            (Value::Int(a), Value::Num(b)) | (Value::Num(b), Value::Int(a)) => {
-                cmp_int_num(*a, *b) == Some(std::cmp::Ordering::Equal)
-            }
-            (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::List(a), Value::List(b)) => a == b,
-            (Value::Map(a), Value::Map(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
-/// Orders an integer against a float without rounding either. A non-finite float is
-/// unordered, which is what `None` means to SB-6.
+/// Orders an integer against a float without rounding either.
 ///
 /// This is the **one** relation SB-6 names: `Eq`, `Set`, `Range`, `Min`, `Max` and
 /// SC-2's "identical" all decide by it, and `PartialEq` agrees with it by
@@ -319,31 +390,29 @@ impl PartialEq for Value {
 /// re-registration of the other, which is SC-2's own named harm (finding D50).
 ///
 /// Rule: SB-6, OV-15.
-pub(crate) fn cmp_int_num(a: i64, b: f64) -> Option<std::cmp::Ordering> {
-    if !b.is_finite() {
-        return None;
-    }
+fn cmp_int_num(a: i64, b: Finite) -> std::cmp::Ordering {
+    let b = b.get();
     let floor = b.floor();
     // `floor` is integral and finite; outside `i64` the comparison is decided by sign.
     if floor >= 9_223_372_036_854_775_808.0 {
-        return Some(std::cmp::Ordering::Less);
+        return std::cmp::Ordering::Less;
     }
     if floor < -9_223_372_036_854_775_808.0 {
-        return Some(std::cmp::Ordering::Greater);
+        return std::cmp::Ordering::Greater;
     }
     let whole = floor as i64;
-    Some(a.cmp(&whole).then(if b == floor {
+    a.cmp(&whole).then(if b == floor {
         std::cmp::Ordering::Equal
     } else {
         // `b` sits strictly between `whole` and `whole + 1`, so any integer equal to
         // `whole` is below it.
         std::cmp::Ordering::Less
-    }))
+    })
 }
 
-/// What a Spec requires of a key. Its value is a scalar: a constraint over a list
-/// or a map is refused, because the matcher would then need the Vocabulary's
-/// semantics to compare them.
+/// What a Spec requires of a key. Its value is a [`Scalar`]: a constraint over a
+/// list or a map cannot be written, because the matcher would then need the
+/// Vocabulary's semantics to compare them.
 ///
 /// Rule: SB-5, decision B1.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -353,37 +422,37 @@ pub enum Constraint {
     /// Exactly this value.
     Eq {
         /// The value.
-        value: Value,
+        value: Scalar,
     },
     /// Within these bounds, either of which may be absent.
     Range {
         /// Lower bound, inclusive.
-        min: Option<Value>,
+        min: Option<Scalar>,
         /// Upper bound, inclusive.
-        max: Option<Value>,
+        max: Option<Scalar>,
     },
     /// Any of these values.
     Set {
         /// The permitted values.
-        values: Vec<Value>,
+        values: Vec<Scalar>,
     },
     /// At least this value.
     Min {
         /// The lower bound.
-        value: Value,
+        value: Scalar,
     },
     /// At most this value.
     Max {
         /// The upper bound.
-        value: Value,
+        value: Scalar,
     },
     /// The key is declared at all.
     Present {},
 }
 
 impl Constraint {
-    /// Every scalar this constraint mentions; SB-5 requires them all to be scalars.
-    pub fn values(&self) -> Vec<&Value> {
+    /// Every scalar this constraint mentions (SB-5).
+    pub fn values(&self) -> Vec<&Scalar> {
         match self {
             Constraint::Eq { value } | Constraint::Min { value } | Constraint::Max { value } => {
                 vec![value]
@@ -405,19 +474,19 @@ pub enum CapabilityValue {
     /// Exactly this value.
     One {
         /// The value.
-        value: Value,
+        value: Scalar,
     },
     /// A continuous range, inclusive.
     Range {
         /// Lower bound.
-        min: Value,
+        min: Scalar,
         /// Upper bound.
-        max: Value,
+        max: Scalar,
     },
     /// A discrete set.
     AnyOf {
         /// The declared values.
-        values: Vec<Value>,
+        values: Vec<Scalar>,
     },
 }
 
@@ -979,7 +1048,7 @@ pub fn check_no_placement(doc: &serde_json::Value) -> Result<(), SpecError> {
 impl ExperimentSpec {
     /// Parses and validates a Spec envelope: the version (SB-10, SB-47), the closed
     /// top-level set (SB-9), the placement and environment scan (SB-13), and then
-    /// the shapes.
+    /// the shapes, which the types hold (SB-4, SB-5).
     ///
     /// v3's `CONSTANTS` and `!COMPUTE(...)` are refused here — by SB-9 as unknown
     /// fields and by SB-4 as values that are not scalars. There is no evaluation
@@ -989,38 +1058,9 @@ impl ExperimentSpec {
         check_top_level(doc, SPEC_TOP_LEVEL)?;
         check_no_placement(doc)?;
         check_ascii_keys(doc)?;
-        let spec: ExperimentSpec = serde_json::from_value(doc.clone())
+        serde_json::from_value(doc.clone())
             .map_err(|e| SpecError::Structural { reason: format!("SB-9: {e}"),
-            })?;
-        spec.check_shapes()?;
-        Ok(spec)
-    }
-
-    /// The value and constraint shape rules (SB-4, SB-5).
-    fn check_shapes(&self) -> Result<(), SpecError> {
-        for (name, r) in &self.resources {
-            // `needs[].requires` is a constraint map like any other (SB-36).
-            let constraints = r.requires.iter().chain(r.needs.values().flat_map(|n| n.requires.iter()));
-            for (key, c) in constraints {
-                for v in c.values() {
-                    if !v.is_scalar() {
-                        return Err(SpecError::KeyShape {
-                            key: key.to_string(),
-                            expected: "a scalar".into(),
-                            found: "a list or map".into(),
-                        });
-                    }
-                    v.check_nesting(key.as_str())?;
-                }
-            }
-            let _ = name;
-        }
-        for o in &self.outputs {
-            for (key, v) in &o.params {
-                v.check_nesting(key.as_str())?;
-            }
-        }
-        Ok(())
+            })
     }
 
     /// Refuses a key whose prefix belongs to no Vocabulary this Spec declares in

@@ -1,5 +1,6 @@
 mod support;
 
+use ezsdr_kernel::spec::Scalar;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -1659,7 +1660,7 @@ fn kc_23_an_unknown_target_is_refused() {
             SessionAction::SetParameter {
                 target: ezsdr_kernel::id::ResourceId::parse("nothing").unwrap(),
                 key: Key::parse("test.gain").unwrap(),
-                value: Value::Num(1.0),
+                value: Value::num(1.0).unwrap(),
             },
             None,
         )
@@ -1684,7 +1685,7 @@ fn kc_21_an_action_is_seen_at_its_admission_instant() {
             SessionAction::SetParameter {
                 target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
                 key: Key::parse("test.gain").unwrap(),
-                value: Value::Num(1.0),
+                value: Value::num(1.0).unwrap(),
             },
             None,
         )
@@ -1712,7 +1713,7 @@ fn kc_25_an_admitted_update_changes_the_configuration() {
             SessionAction::SetParameter {
                 target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
                 key: Key::parse("test.gain").unwrap(),
-                value: Value::Num(3.0),
+                value: Value::num(3.0).unwrap(),
             },
             None,
         )
@@ -1720,7 +1721,7 @@ fn kc_25_an_admitted_update_changes_the_configuration() {
     assert!(matches!(entry.outcome, Outcome::Admitted { dispatched, .. } if dispatched.len() == 1));
     assert_eq!(
         run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("test.gain").unwrap()],
-        Value::Num(3.0)
+        Value::num(3.0).unwrap()
     );
     assert!(
         probe
@@ -1750,14 +1751,14 @@ fn rs_17_a_session_rate_change_is_coerced_by_its_provider() {
             SessionAction::SetParameter {
                 target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
                 key: Key::parse("test.grid").unwrap(),
-                value: Value::Num(19.5),
+                value: Value::num(19.5).unwrap(),
             },
             None,
         )
         .unwrap();
     assert!(
         matches!(entry.outcome, Outcome::Admitted { ref coercions, .. }
-        if coercions.iter().any(|c| c.requested == Value::Num(19.5) && c.applied == Value::Num(20.0)))
+        if coercions.iter().any(|c| c.requested == Value::num(19.5).unwrap() && c.applied == Value::num(20.0).unwrap()))
     );
     assert!(
         probe
@@ -1811,7 +1812,7 @@ fn rs_17_a_session_change_beyond_a_joint_limit_is_refused() {
         Box::new(
             TestProvider::new("radio", 2)
                 .with_joint_limit(50.0)
-                .with_effective("test.count", Value::Int(2)),
+                .with_effective("test.count", Value::from(2)),
         ),
     );
     let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
@@ -1820,7 +1821,7 @@ fn rs_17_a_session_change_beyond_a_joint_limit_is_refused() {
             SessionAction::SetParameter {
                 target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
                 key: Key::parse("test.grid").unwrap(),
-                value: Value::Num(40.0),
+                value: Value::num(40.0).unwrap(),
             },
             None,
         )
@@ -1840,7 +1841,7 @@ fn kc_26_a_provider_that_applies_nothing_is_refused() {
             SessionAction::SetParameter {
                 target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
                 key: Key::parse("test.gain").unwrap(),
-                value: Value::Num(1.0),
+                value: Value::num(1.0).unwrap(),
             },
             None,
         )
@@ -1851,11 +1852,33 @@ fn kc_26_a_provider_that_applies_nothing_is_refused() {
 }
 
 #[test]
+fn sb_05_a_provider_parameter_update_is_a_scalar() {
+    // A Provider parameter's change is offered to `coerce` as an `Eq` constraint,
+    // whose value is a scalar (SB-5): a list is refused before `coerce`, never
+    // dropped or coerced into one.
+    let mut run = session_with_provider(Box::new(TestProvider::new("radio", 2)));
+    let entry = run
+        .submit(
+            SessionAction::SetParameter {
+                target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
+                key: Key::parse("test.gain").unwrap(),
+                value: Value::List(vec![Scalar::from(1)]),
+            },
+            None,
+        )
+        .unwrap();
+    assert!(matches!(entry.outcome, Outcome::Rejected { ref violations }
+        if violations.iter().any(|v| v.check == ns("ezsdr.value") && v.reason.contains("SB-5"))),
+        "{:?}", entry.outcome);
+    let _ = run.finish();
+}
+
+#[test]
 fn kc_28_a_malformed_action_takes_no_sequence_number() {
     let mut run = session_with_provider(Box::new(TestProvider::new("radio", 2)));
     let bad_value = Value::Map(BTreeMap::from([(
         "nonascii-é".to_owned(),
-        Value::Bool(true),
+        Scalar::from(true),
     )]));
     assert!(matches!(
         run.submit(
@@ -1873,7 +1896,7 @@ fn kc_28_a_malformed_action_takes_no_sequence_number() {
             SessionAction::SetParameter {
                 target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
                 key: Key::parse("test.gain").unwrap(),
-                value: Value::Num(1.0),
+                value: Value::num(1.0).unwrap(),
             },
             None,
         )
@@ -1957,7 +1980,7 @@ fn kc_28_an_untimed_burst_is_admitted_at_now_plus_lead() {
     assert!(
         matches!(entry.outcome, Outcome::Admitted { ref coercions, .. }
         if coercions.iter().any(|c| c.key == Key::parse("ezsdr.action.at").unwrap()
-            && c.applied == Value::Int(2_000_000)))
+            && c.applied == Value::Scalar(Scalar::Int(2_000_000))))
     );
     assert!(
         probe
@@ -2016,7 +2039,7 @@ fn untimed_burst_lands_at_its_clock_s_origin(lead_ns: Option<i64>) {
     assert!(
         matches!(entry.outcome, Outcome::Admitted { ref coercions, .. }
         if coercions.iter().any(|c| c.key == Key::parse("ezsdr.action.at").unwrap()
-            && c.applied == Value::Int(5_000_000))),
+            && c.applied == Value::Scalar(Scalar::Int(5_000_000)))),
         "{entry:?}"
     );
     assert!(probe.lines().iter().any(|line| line == "p:burst_at:0"), "{:?}", probe.lines());
@@ -2919,7 +2942,7 @@ fn kc_24_a_module_update_is_not_coerced_by_the_kernel() {
     let action = Action::UpdateParameter {
         target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
         key: Key::parse("test.gain").unwrap(),
-        value: Value::Num(3.0),
+        value: Value::num(3.0).unwrap(),
         class: ezsdr_kernel::module_api::UpdateClass::HardwareTimed,
         at: None,
     };
@@ -2977,7 +3000,7 @@ fn kc_24_a_module_update_must_state_its_providers_declared_class() {
         let action = Action::UpdateParameter {
             target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
             key: Key::parse("test.gain").unwrap(),
-            value: Value::Num(3.0),
+            value: Value::num(3.0).unwrap(),
             class: ezsdr_kernel::module_api::UpdateClass::Cold,
             at: None,
         };
@@ -4206,7 +4229,7 @@ fn kf_02_wait_for_answers_ended_first() {
 #[test]
 fn kf_03_children_are_recorded_in_order() {
     let mut run = session_with_provider(Box::new(TestProvider::new("radio", 2)));
-    run.submit(SessionAction::SetParameter { target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(), key: Key::parse("test.count").unwrap(), value: Value::Int(2) }, None).unwrap();
+    run.submit(SessionAction::SetParameter { target: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(), key: Key::parse("test.count").unwrap(), value: Value::from(2) }, None).unwrap();
     let (first, one) = run.run_child(&spec_one(), &profile_one(), child_assembly(), &mut drive_to(100)).unwrap();
     let (second, two) = run.run_child(&spec_one(), &profile_one(), child_assembly(), &mut drive_to(100)).unwrap();
     assert_eq!((first.seq, second.seq), (1, 2));
@@ -4253,7 +4276,7 @@ fn kf_03_the_parents_checks_judge_the_child() {
     assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
     let mut run = connect(&profile, assembly, Lease::attached()).unwrap();
     let mut child_assembly = rig(Pacing::FreeRunning).assembly;
-    child_assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2).with_effective("test.grid", Value::Num(5.0))));
+    child_assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2).with_effective("test.grid", Value::num(5.0).unwrap())));
     let (entry, child) = run.run_child(&spec_one(), &profile, child_assembly, &mut drive_to(100)).unwrap();
     assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
     let child = child.unwrap();
@@ -4269,7 +4292,7 @@ impl ezsdr_kernel::module_api::Sink for MisnamedPrepareSink {
         -> Result<ezsdr_kernel::plan::PrepareReport, ezsdr_kernel::module_api::ModuleError> {
         let mut report = self.0.prepare(f, ctx)?;
         report.fragment = self.1.clone();
-        report.effective.insert(Key::parse("test.count").unwrap(), Value::Int(99));
+        report.effective.insert(Key::parse("test.count").unwrap(), Value::from(99));
         Ok(report)
     }
     fn arm(&mut self) -> Result<(), ezsdr_kernel::module_api::ModuleError> { self.0.arm() }
@@ -4354,7 +4377,7 @@ fn kc_24_component_update_classes_belong_to_the_target() {
         assembly.executors.insert(Ident::parse("exec").unwrap(),
             Box::new(ProbeExecutor::new("x", &probe).submitting(Action::UpdateParameter {
                 target: ezsdr_kernel::id::ResourceId::parse(target).unwrap(),
-                key: Key::parse("test.gain").unwrap(), value: Value::Num(3.0), class, at: None,
+                key: Key::parse("test.gain").unwrap(), value: Value::num(3.0).unwrap(), class, at: None,
             })));
         let run = start_spec_run(&spec, &profile, assembly).unwrap();
         assert!(matches!(run.state(), RunState::Running {}));
@@ -4442,16 +4465,11 @@ fn kc_23_sink_prefix_refuses_non_sink_module_targets() {
 }
 
 #[test]
-fn sb_04_module_action_rejects_noncanonical_value_before_dispatch() {
-    let invalid = [
-        Value::Map(BTreeMap::from([("日本語".to_owned(), Value::Int(1))])),
-        Value::List(vec![Value::List(vec![Value::Int(1)])]),
-        Value::Map(BTreeMap::from([("nested".to_owned(), Value::Map(BTreeMap::new()))])),
-        Value::Num(f64::NAN), Value::Num(f64::INFINITY),
-        Value::List(vec![Value::Num(f64::NEG_INFINITY)]),
-        Value::Map(BTreeMap::from([("number".to_owned(), Value::Num(f64::INFINITY))])),
-    ];
-    for value in invalid {
+fn sb_09a_module_action_rejects_a_non_ascii_map_key_before_dispatch() {
+    // Nesting and a non-finite number cannot be built at all (SB-4); a non-ASCII map
+    // key is the one rule the type does not hold.
+    {
+        let value = Value::Map(BTreeMap::from([("日本語".to_owned(), Scalar::from(1))]));
         let target = ezsdr_kernel::id::ResourceId::parse("radio").unwrap();
         let key = Key::parse("test.gain").unwrap();
         let actions = [

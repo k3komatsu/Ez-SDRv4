@@ -68,39 +68,11 @@ impl<'de> Deserialize<'de> for ContentHash {
     }
 }
 
-/// The marker [`serialize_finite_f64`] puts in its error so that [`ContentHash::of`]
-/// can report [`HashError::NonFiniteNumber`] rather than a generic failure (OV-15).
-const NON_FINITE_MARKER: &str = "ezsdr:non-finite";
-
-/// Serialises a float, refusing a non-finite one.
-///
-/// The guard has to live here rather than in the canonicaliser: `serde_json` maps a
-/// non-finite `f64` to `null` while building the `Value`, so by the time
-/// [`canonical_json`] sees it the information is gone and a NaN drift would hash
-/// identically to a drift that was never measured — in the one Manifest field
-/// OV-15a exists to protect. Every Kernel-owned float document field uses it
-/// through `#[serde(serialize_with = ...)]`.
-///
-/// Rule: OV-15.
-pub fn serialize_finite_f64<S: serde::Serializer>(x: &f64, s: S) -> Result<S::Ok, S::Error> {
-    if !x.is_finite() {
-        return Err(serde::ser::Error::custom(format!(
-            "{NON_FINITE_MARKER}: OV-15 rejects a non-finite number rather than writing `null`"
-        )));
-    }
-    s.serialize_f64(*x)
-}
-
 impl ContentHash {
     /// The hash of a document's canonical form (OV-15, OV-16).
     pub fn of<T: Serialize>(value: &T) -> Result<ContentHash, HashError> {
-        let v = serde_json::to_value(value).map_err(|e| {
-            let message = e.to_string();
-            if message.contains(NON_FINITE_MARKER) {
-                HashError::NonFiniteNumber
-            } else {
-                HashError::NotSerialisable { message }
-            }
+        let v = serde_json::to_value(value).map_err(|e| HashError::NotSerialisable {
+            message: e.to_string(),
         })?;
         ContentHash::of_value(&v)
     }

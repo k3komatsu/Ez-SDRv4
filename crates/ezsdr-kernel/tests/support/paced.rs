@@ -337,7 +337,7 @@ impl ThreadedCtx {
         }
         if let Action::UpdateParameter {
             key,
-            value: ezsdr_kernel::spec::Value::Int(n),
+            value: ezsdr_kernel::spec::Value::Scalar(ezsdr_kernel::spec::Scalar::Int(n)),
             ..
         } = &action
         {

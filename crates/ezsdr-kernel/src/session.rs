@@ -127,10 +127,10 @@ pub struct LogEntry {
 }
 
 impl SessionAction {
-    /// SB-4's nesting and OV-15's ASCII keys, over every `Value` this Action carries.
-    /// A `Value` reaches the sealed Manifest through the action log and through an
-    /// Action's `params`, neither of which passes a `from_json`, so a document that
-    /// fails this is not an Action at all (SB-4, SB-9a, RS-11, RS-15).
+    /// OV-15's ASCII keys, over every `Value` this Action carries. A `Value` reaches
+    /// the sealed Manifest through the action log and through an Action's `params`,
+    /// neither of which passes a `from_json`, so a document that fails this is not an
+    /// Action at all (SB-9a, RS-11, RS-15).
     pub fn check_values(&self) -> Result<(), SpecError> {
         let carried: Vec<(&Key, &Value)> = match self {
             SessionAction::SetParameter { key, value, .. } => vec![(key, value)],
@@ -139,7 +139,7 @@ impl SessionAction {
         };
         carried
             .into_iter()
-            .try_for_each(|(k, v)| v.check_nesting(k.as_str()))
+            .try_for_each(|(k, v)| v.check_ascii_keys(k.as_str()))
     }
 }
 
@@ -460,8 +460,8 @@ pub fn compile(
                     let ticks = earliest.ticks_in(earliest.domain()).unwrap_or_default(); // own domain: RS-19 records the caller's instant
                     out.coercions.push(Coercion {
                         key: Key::parse("ezsdr.action.at").expect("a valid literal"),
-                        requested: Value::Str("asap".to_owned()),
-                        applied: Value::Int(ticks),
+                        requested: Value::from("asap"),
+                        applied: Value::from(ticks),
                         reason: "RS-19: admitted at the earliest instant the envelope allows"
                             .to_owned(),
                     });

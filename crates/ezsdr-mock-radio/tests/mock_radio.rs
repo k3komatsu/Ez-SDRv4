@@ -1,3 +1,4 @@
+use ezsdr_kernel::spec::Scalar;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -65,7 +66,7 @@ fn update_action(name: &str, value: Value, class: UpdateClass, at: Option<TimePo
 }
 
 fn tx_harness(profile: &str) -> Harness {
-    Harness::new(profile, &[("radio.tx.channels", eq(Value::Int(1)))], &[], &[], None)
+    Harness::new(profile, &[("radio.tx.channels", eq(Scalar::from(1)))], &[], &[], None)
 }
 
 fn tx_domain(harness: &Harness) -> ClockDomainId {
@@ -75,7 +76,7 @@ fn tx_domain(harness: &Harness) -> ClockDomainId {
 fn binding(profile: &str) -> Binding {
     Binding {
         module: module_ref(),
-        selector: BTreeMap::from([(Ident::parse("id").unwrap(), Value::Str("mock".to_owned()))]),
+        selector: BTreeMap::from([(Ident::parse("id").unwrap(), Value::from("mock".to_owned()))]),
         profile: Some(ProfileRef { name: profile.to_owned(), version: Version::new(2, 0, 0) }),
         feed: None,
     }
@@ -91,7 +92,7 @@ fn request(constraints: &[(&str, Constraint)]) -> Requested {
     }
 }
 
-fn eq(value: Value) -> Constraint { Constraint::Eq { value } }
+fn eq(value: Scalar) -> Constraint { Constraint::Eq { value } }
 
 #[derive(Default)]
 struct Queue {
@@ -281,27 +282,27 @@ fn mr_02_from_binding_refusals() {
     b = binding("not-a-profile");
     assert!(MockRadio::from_binding(&b).err().unwrap().message.starts_with("MR-2: "));
     b = binding("ideal");
-    b.selector.insert(Ident::parse("id").unwrap(), Value::Str("a/b".to_owned()));
+    b.selector.insert(Ident::parse("id").unwrap(), Value::from("a/b".to_owned()));
     assert!(MockRadio::from_binding(&b).err().unwrap().message.starts_with("MR-2: "));
     // MR-2: the id becomes a section-name segment (MR-27), so a legal resource path
     // segment that is not a legal one is refused rather than panicked on later
     for id in ["Dev", "dev-rx", "dev.rx", "9dev", ""] {
         b = binding("ideal");
-        b.selector.insert(Ident::parse("id").unwrap(), Value::Str(id.to_owned()));
+        b.selector.insert(Ident::parse("id").unwrap(), Value::from(id.to_owned()));
         let err = MockRadio::from_binding(&b).err().unwrap_or_else(|| panic!("{id:?} must be refused"));
         assert!(err.message.starts_with("MR-2: "), "{id:?}: {err}");
     }
     b = binding("ideal");
-    b.selector.insert(Ident::parse("instances").unwrap(), Value::Int(0));
+    b.selector.insert(Ident::parse("instances").unwrap(), Value::from(0));
     assert!(MockRadio::from_binding(&b).err().unwrap().message.starts_with("MR-2: "));
     b = binding("ideal");
-    b.selector.insert(Ident::parse("block_len_jitter").unwrap(), Value::Str("yes".to_owned()));
+    b.selector.insert(Ident::parse("block_len_jitter").unwrap(), Value::from("yes".to_owned()));
     assert!(MockRadio::from_binding(&b).err().unwrap().message.starts_with("MR-2: "));
     b = binding("ideal");
-    b.selector.insert(Ident::parse("rx_test_pattern").unwrap(), Value::Str("noise".to_owned()));
+    b.selector.insert(Ident::parse("rx_test_pattern").unwrap(), Value::from("noise".to_owned()));
     assert!(MockRadio::from_binding(&b).err().unwrap().message.starts_with("MR-2: "));
     b = binding("ideal");
-    b.selector.insert(Ident::parse("unknown").unwrap(), Value::Bool(false));
+    b.selector.insert(Ident::parse("unknown").unwrap(), Value::from(false));
     assert!(MockRadio::from_binding(&b).err().unwrap().message.starts_with("MR-2: "));
     b = binding("ideal");
     b.feed = Some(ezsdr_kernel::spec::SinkFeed {
@@ -311,7 +312,7 @@ fn mr_02_from_binding_refusals() {
     });
     assert!(MockRadio::from_binding(&b).err().unwrap().message.starts_with("MR-2: "));
     b = binding("ideal");
-    b.selector.insert(Ident::parse("arm_after").unwrap(), Value::List(vec![Value::Int(4)]));
+    b.selector.insert(Ident::parse("arm_after").unwrap(), Value::List(vec![Scalar::from(4)]));
     assert!(MockRadio::from_binding(&b).err().unwrap().message.starts_with("MR-2: "));
 
     b = binding("x310-like");
@@ -319,13 +320,13 @@ fn mr_02_from_binding_refusals() {
     let defaults = MockRadio::from_binding(&b).unwrap();
     assert_eq!(defaults.instance().id, rid("mock"));
     assert_eq!(defaults.instance().arm_after, Vec::<ResourceId>::new());
-    assert_eq!(defaults.instance().tree.capabilities[&key("radio.rx.channels")], ezsdr_kernel::spec::CapabilityValue::Range { min: Value::Int(0), max: Value::Int(2) });
+    assert_eq!(defaults.instance().tree.capabilities[&key("radio.rx.channels")], ezsdr_kernel::spec::CapabilityValue::Range { min: Scalar::from(0), max: Scalar::from(2) });
 }
 
 #[test]
 fn mr_02_the_tree_has_the_radio_model_shape() {
     let mut b = binding("x310-like");
-    b.selector.insert(Ident::parse("instances").unwrap(), Value::Int(2));
+    b.selector.insert(Ident::parse("instances").unwrap(), Value::from(2));
     let radio = MockRadio::from_binding(&b).unwrap();
     let instance = radio.instance();
     assert_eq!(instance.id, rid("mock"));
@@ -338,8 +339,8 @@ fn mr_02_the_tree_has_the_radio_model_shape() {
     assert_eq!(instance.tree.ports[0].direction, ezsdr_kernel::contract::PortDirection::Out);
     assert_eq!(instance.tree.ports[0].contract.as_str(), "ezsdr.stream.cf32");
     assert!(!instance.tree.shareable);
-    assert_eq!(instance.tree.capabilities[&key("radio.rx.channels")], ezsdr_kernel::spec::CapabilityValue::Range { min: Value::Int(0), max: Value::Int(4) });
-    assert_eq!(instance.tree.capabilities[&key("radio.perf.rx_bytes_per_s")], ezsdr_kernel::spec::CapabilityValue::One { value: Value::Int(2_000_000_000) });
+    assert_eq!(instance.tree.capabilities[&key("radio.rx.channels")], ezsdr_kernel::spec::CapabilityValue::Range { min: Scalar::from(0), max: Scalar::from(4) });
+    assert_eq!(instance.tree.capabilities[&key("radio.perf.rx_bytes_per_s")], ezsdr_kernel::spec::CapabilityValue::One { value: Scalar::from(2_000_000_000) });
 }
 
 #[test]
@@ -354,28 +355,28 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         let frequency = if x310 { (10_000_000.0, 6_000_000_000.0, 1.0) } else { (0.0, 1.0e12, 0.0) };
         let gain = if x310 { (0.0, 31.5, 0.5) } else { (-200.0, 200.0, 0.0) };
         for direction in ["rx", "tx"] {
-            assert_eq!(capabilities[&key(&format!("radio.{direction}.channels"))], range(Value::Int(0), Value::Int(max_channels)));
+            assert_eq!(capabilities[&key(&format!("radio.{direction}.channels"))], range(Scalar::from(0), Scalar::from(max_channels)));
             let rates = &capabilities[&key(&format!("radio.{direction}.sample_rate_hz"))];
             if x310 {
-                let expected: Vec<_> = (1..=512).map(|n| Value::Num(200_000_000.0 / f64::from(n))).collect();
+                let expected: Vec<_> = (1..=512).map(|n| Scalar::try_from(200_000_000.0 / f64::from(n)).unwrap()).collect();
                 assert_eq!(*rates, ezsdr_kernel::spec::CapabilityValue::AnyOf { values: expected });
             } else {
-                assert_eq!(*rates, range(Value::Num(1.0), Value::Num(1_000_000_000.0)));
+                assert_eq!(*rates, range(Scalar::try_from(1.0).unwrap(), Scalar::try_from(1_000_000_000.0).unwrap()));
             }
-            assert_eq!(capabilities[&key(&format!("radio.{direction}.frequency_hz"))], range(Value::Num(frequency.0), Value::Num(frequency.1)));
-            assert_eq!(capabilities[&key(&format!("radio.{direction}.frequency_step_hz"))], one(Value::Num(frequency.2)));
-            assert_eq!(capabilities[&key(&format!("radio.{direction}.gain_db"))], range(Value::Num(gain.0), Value::Num(gain.1)));
-            assert_eq!(capabilities[&key(&format!("radio.{direction}.gain_step_db"))], one(Value::Num(gain.2)));
+            assert_eq!(capabilities[&key(&format!("radio.{direction}.frequency_hz"))], range(Scalar::try_from(frequency.0).unwrap(), Scalar::try_from(frequency.1).unwrap()));
+            assert_eq!(capabilities[&key(&format!("radio.{direction}.frequency_step_hz"))], one(Scalar::try_from(frequency.2).unwrap()));
+            assert_eq!(capabilities[&key(&format!("radio.{direction}.gain_db"))], range(Scalar::try_from(gain.0).unwrap(), Scalar::try_from(gain.1).unwrap()));
+            assert_eq!(capabilities[&key(&format!("radio.{direction}.gain_step_db"))], one(Scalar::try_from(gain.2).unwrap()));
         }
-        assert_eq!(capabilities[&key("radio.rx.antenna")], ezsdr_kernel::spec::CapabilityValue::AnyOf { values: ["RX2", "TX/RX"].into_iter().map(|value| Value::Str(value.to_owned())).collect() });
-        assert_eq!(capabilities[&key("radio.tx.antenna")], ezsdr_kernel::spec::CapabilityValue::AnyOf { values: vec![Value::Str("TX/RX".to_owned())] });
+        assert_eq!(capabilities[&key("radio.rx.antenna")], ezsdr_kernel::spec::CapabilityValue::AnyOf { values: ["RX2", "TX/RX"].into_iter().map(Scalar::from).collect() });
+        assert_eq!(capabilities[&key("radio.tx.antenna")], ezsdr_kernel::spec::CapabilityValue::AnyOf { values: vec![Scalar::from("TX/RX".to_owned())] });
         for name in ["radio.rx.coherent", "radio.full_duplex", "radio.hardware_time"] {
-            assert_eq!(capabilities[&key(name)], one(Value::Bool(true)));
+            assert_eq!(capabilities[&key(name)], one(Scalar::from(true)));
         }
-        assert_eq!(capabilities[&key("radio.phase_behavior_on_retune")], one(Value::Str(expected.to_owned())));
-        assert_eq!(capabilities[&key("radio.tx.repeat_max_samples")], one(Value::Int(if x310 { 268_435_456 } else { i64::from(u32::MAX) })));
-        assert_eq!(capabilities[&key("radio.tx.repeat_align_samples")], one(Value::Int(if x310 { 2 } else { 1 })));
-        assert_eq!(capabilities[&key("radio.rx.block_len")], one(Value::Int(2_000)));
+        assert_eq!(capabilities[&key("radio.phase_behavior_on_retune")], one(Scalar::from(expected.to_owned())));
+        assert_eq!(capabilities[&key("radio.tx.repeat_max_samples")], one(Scalar::from(if x310 { 268_435_456 } else { i64::from(u32::MAX) })));
+        assert_eq!(capabilities[&key("radio.tx.repeat_align_samples")], one(Scalar::from(if x310 { 2 } else { 1 })));
+        assert_eq!(capabilities[&key("radio.rx.block_len")], one(Scalar::from(2_000)));
         let envelope = &radio.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.envelope").unwrap()];
         let (lead, startup, depth, gap, bytes_per_s, wire) = if x310 {
             (2_000_000, 2_000_000_000, 16, 50_000_000, 1_000_000_000, 4)
@@ -384,15 +385,15 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         };
         // Profiles 2.0.0's one start lead (RM-25; spec 22, VH-4).
         let start_lead = if x310 { 50_000_000 } else { 0 };
-        assert_eq!(capabilities[&key("radio.timing.min_timed_command_lead_ns")], one(Value::Int(lead)));
-        assert_eq!(capabilities[&key("radio.timing.startup_latency_ns")], one(Value::Int(startup)));
-        assert_eq!(capabilities[&key("radio.timing.command_queue_depth")], one(Value::Int(depth)));
-        assert_eq!(capabilities[&key("radio.timing.overflow_restart_gap_ns")], one(Value::Int(gap)));
+        assert_eq!(capabilities[&key("radio.timing.min_timed_command_lead_ns")], one(Scalar::from(lead)));
+        assert_eq!(capabilities[&key("radio.timing.startup_latency_ns")], one(Scalar::from(startup)));
+        assert_eq!(capabilities[&key("radio.timing.command_queue_depth")], one(Scalar::from(depth)));
+        assert_eq!(capabilities[&key("radio.timing.overflow_restart_gap_ns")], one(Scalar::from(gap)));
         assert!(!capabilities.contains_key(&key("radio.timing.stop_tail_ns")) && !capabilities.contains_key(&key("radio.timing.restart_lead_ns")));
-        assert_eq!(capabilities[&key("radio.timing.start_lead_ns")], one(Value::Int(start_lead)));
-        assert_eq!(capabilities[&key("radio.perf.rx_bytes_per_s")], one(Value::Int(bytes_per_s)));
-        assert_eq!(capabilities[&key("radio.perf.tx_bytes_per_s")], one(Value::Int(bytes_per_s)));
-        assert_eq!(capabilities[&key("radio.perf.wire_bytes_per_sample")], one(Value::Int(wire)));
+        assert_eq!(capabilities[&key("radio.timing.start_lead_ns")], one(Scalar::from(start_lead)));
+        assert_eq!(capabilities[&key("radio.perf.rx_bytes_per_s")], one(Scalar::from(bytes_per_s)));
+        assert_eq!(capabilities[&key("radio.perf.tx_bytes_per_s")], one(Scalar::from(bytes_per_s)));
+        assert_eq!(capabilities[&key("radio.perf.wire_bytes_per_sample")], one(Scalar::from(wire)));
         // MR-27: the six sections are named after this instance's own id, so two Mocks in
         // one Run cannot overwrite each other's records. The set is exactly these six, and
         // `sections` is a `BTreeMap`, so they come out in `Namespace` order.
@@ -405,8 +406,8 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert_eq!(envelope["profile"]["name"], name);
         assert_eq!(envelope["profile"]["version"], serde_json::json!({ "major": 2, "minor": 0, "patch": 0 }));
         let (tx_delay, rx_delay) = if name == "x310-like" { (45, 0) } else { (0, 0) };
-        assert_eq!(capabilities[&key("radio.tx.path_delay_samples")], one(Value::Int(tx_delay)));
-        assert_eq!(capabilities[&key("radio.rx.path_delay_samples")], one(Value::Int(rx_delay)));
+        assert_eq!(capabilities[&key("radio.tx.path_delay_samples")], one(Scalar::from(tx_delay)));
+        assert_eq!(capabilities[&key("radio.rx.path_delay_samples")], one(Scalar::from(rx_delay)));
         assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], lead);
         assert_eq!(envelope["timing"]["startup_latency_ns"], startup);
         assert_eq!(envelope["timing"]["command_queue_depth"], depth);
@@ -434,41 +435,41 @@ fn mr_04_instance() {
 fn mr_06_coerce_cases() {
     let radio = MockRadio::from_binding(&binding("x310-like")).unwrap();
     let report = radio.coerce(&request(&[
-        ("radio.rx.sample_rate_hz", Constraint::Min { value: Value::Num(1_100_000.0) }),
-        ("radio.rx.gain_db", eq(Value::Num(1.1))),
-        ("radio.rx.antenna", Constraint::Set { values: vec![Value::Str("TX/RX".to_owned()), Value::Str("RX2".to_owned())] }),
+        ("radio.rx.sample_rate_hz", Constraint::Min { value: Scalar::try_from(1_100_000.0).unwrap() }),
+        ("radio.rx.gain_db", eq(Scalar::try_from(1.1).unwrap())),
+        ("radio.rx.antenna", Constraint::Set { values: vec![Scalar::from("TX/RX".to_owned()), Scalar::from("RX2".to_owned())] }),
     ])).unwrap();
-    assert_eq!(report.applied[&key("radio.rx.sample_rate_hz")], Value::Num(200_000_000.0 / 181.0));
-    assert_eq!(report.applied[&key("radio.rx.gain_db")], Value::Num(1.0));
-    assert_eq!(report.applied[&key("radio.rx.antenna")], Value::Str("TX/RX".to_owned()));
+    assert_eq!(report.applied[&key("radio.rx.sample_rate_hz")], Value::num(200_000_000.0 / 181.0).unwrap());
+    assert_eq!(report.applied[&key("radio.rx.gain_db")], Value::num(1.0).unwrap());
+    assert_eq!(report.applied[&key("radio.rx.antenna")], Value::from("TX/RX".to_owned()));
     assert_eq!(report.coercions.len(), 1);
     let rejected = radio.coerce(&request(&[
-        ("radio.tx.channels", eq(Value::Int(2))),
-        ("radio.tx.sample_rate_hz", eq(Value::Num(200_000_000.0))),
+        ("radio.tx.channels", eq(Scalar::from(2))),
+        ("radio.tx.sample_rate_hz", eq(Scalar::try_from(200_000_000.0).unwrap())),
     ])).unwrap();
     assert_eq!(rejected.rejected.len(), 1);
     assert_eq!(rejected.rejected[0].key, key("radio.tx.sample_rate_hz"));
     assert!(rejected.rejected[0].reason.starts_with("RM-7:"));
 
-    let out_of_range = radio.coerce(&request(&[("radio.rx.frequency_hz", eq(Value::Num(7.0e9)))] )).unwrap();
+    let out_of_range = radio.coerce(&request(&[("radio.rx.frequency_hz", eq(Scalar::try_from(7.0e9).unwrap()))] )).unwrap();
     assert!(!out_of_range.applied.contains_key(&key("radio.rx.frequency_hz")));
     assert_eq!(out_of_range.rejected.len(), 1);
     assert!(out_of_range.rejected[0].reason.starts_with("RM-8: 7000000000"));
 
-    let tie = radio.coerce(&request(&[("radio.rx.gain_db", eq(Value::Num(20.25)))] )).unwrap();
-    assert_eq!(tie.applied[&key("radio.rx.gain_db")], Value::Num(20.0));
+    let tie = radio.coerce(&request(&[("radio.rx.gain_db", eq(Scalar::try_from(20.25).unwrap()))] )).unwrap();
+    assert_eq!(tie.applied[&key("radio.rx.gain_db")], Value::num(20.0).unwrap());
 
     let ideal = MockRadio::from_binding(&binding("ideal")).unwrap();
-    let integer_rate = ideal.coerce(&request(&[("radio.rx.sample_rate_hz", eq(Value::Num(19_500_000.0)))] )).unwrap();
-    assert_eq!(integer_rate.applied[&key("radio.rx.sample_rate_hz")], Value::Num(19_500_000.0));
-    let fractional_rate = ideal.coerce(&request(&[("radio.rx.sample_rate_hz", eq(Value::Num(1_000_000.0 / 3.0)))] )).unwrap();
+    let integer_rate = ideal.coerce(&request(&[("radio.rx.sample_rate_hz", eq(Scalar::try_from(19_500_000.0).unwrap()))] )).unwrap();
+    assert_eq!(integer_rate.applied[&key("radio.rx.sample_rate_hz")], Value::num(19_500_000.0).unwrap());
+    let fractional_rate = ideal.coerce(&request(&[("radio.rx.sample_rate_hz", eq(Scalar::try_from(1_000_000.0 / 3.0).unwrap()))] )).unwrap();
     assert_eq!(fractional_rate.rejected.len(), 1);
-    let bad_antenna = radio.coerce(&request(&[("radio.rx.antenna", eq(Value::Str("J1".to_owned())))] )).unwrap();
+    let bad_antenna = radio.coerce(&request(&[("radio.rx.antenna", eq(Scalar::from("J1".to_owned())))] )).unwrap();
     assert_eq!(bad_antenna.rejected.len(), 1);
 
     let rx_over_budget = radio.coerce(&request(&[
-        ("radio.rx.channels", eq(Value::Int(2))),
-        ("radio.rx.sample_rate_hz", eq(Value::Num(200_000_000.0))),
+        ("radio.rx.channels", eq(Scalar::from(2))),
+        ("radio.rx.sample_rate_hz", eq(Scalar::try_from(200_000_000.0).unwrap())),
     ])).unwrap();
     assert_eq!(rx_over_budget.rejected.len(), 1);
     assert_eq!(rx_over_budget.rejected[0].key, key("radio.rx.sample_rate_hz"));
@@ -477,7 +478,7 @@ fn mr_06_coerce_cases() {
 #[test]
 fn mr_06_coerce_is_pure() {
     let radio = MockRadio::from_binding(&binding("ideal")).unwrap();
-    let req = request(&[("radio.rx.frequency_hz", eq(Value::Num(2_400_000_000.0)))]);
+    let req = request(&[("radio.rx.frequency_hz", eq(Scalar::try_from(2_400_000_000.0).unwrap()))]);
     let first = radio.coerce(&req).unwrap();
     let second = radio.coerce(&req).unwrap();
     assert_eq!(first, second);
@@ -486,7 +487,7 @@ fn mr_06_coerce_is_pure() {
 
 #[test]
 fn mr_07_prepare_cases() {
-    let harness = Harness::new("x310-like", &[("radio.tx.channels", eq(Value::Int(1)))], &[], &[], None);
+    let harness = Harness::new("x310-like", &[("radio.tx.channels", eq(Scalar::from(1)))], &[], &[], None);
     let handles = harness.clocks.declared_sample_clocks();
     assert_eq!(handles.len(), 2);
     assert_eq!(handles[0].root_ticks_per_tick(), Rational::new(1000, 1).unwrap());
@@ -511,7 +512,7 @@ fn mr_07_prepare_cases() {
         id: Ident::parse("radio").unwrap(),
         instance: module_ref(),
         role: Role::Provider,
-        content: serde_json::json!({ "selector": {}, "requested": request(&[("radio.rx.channels", eq(Value::Int(0))), ("radio.tx.channels", eq(Value::Int(0)))]) }),
+        content: serde_json::json!({ "selector": {}, "requested": request(&[("radio.rx.channels", eq(Scalar::from(0))), ("radio.tx.channels", eq(Scalar::from(0)))]) }),
         after: Vec::new(),
     };
     let result = second.mock.prepare(&fragment, context);
@@ -538,25 +539,25 @@ fn mr_07_prepare_cases() {
 
     let Err(error) = Harness::new_with_options(
         "x310-like",
-        &[("radio.rx.channels", eq(Value::Int(2))), ("radio.rx.sample_rate_hz", eq(Value::Num(200_000_000.0)))],
+        &[("radio.rx.channels", eq(Scalar::from(2))), ("radio.rx.sample_rate_hz", eq(Scalar::try_from(200_000_000.0).unwrap()))],
         &[], &[], None, ExecutionClass::Simulation, Rational::new(1_000_000_000, 1).unwrap(), 0, "rx",
     ) else { panic!("a rejected Requested was prepared") };
     assert!(error.message.starts_with("MR-7: rejected requests:"));
 
     let Err(error) = Harness::new_with_options(
-        "ideal", &[("radio.rx.channels", eq(Value::Int(1)))], &[], &[], None,
+        "ideal", &[("radio.rx.channels", eq(Scalar::from(1)))], &[], &[], None,
         ExecutionClass::Simulation, Rational::new(3, 2).unwrap(), 0, "rx",
     ) else { panic!("a non-integer root was accepted") };
     assert!(error.message.contains("primary root rate is not an integer"));
 
     let Err(error) = Harness::new_with_options(
-        "ideal", &[("radio.rx.channels", eq(Value::Int(1)))], &[], &[], Some((BackPressure::DropOldest, 1)),
+        "ideal", &[("radio.rx.channels", eq(Scalar::from(1)))], &[], &[], Some((BackPressure::DropOldest, 1)),
         ExecutionClass::Simulation, Rational::new(1_000_000_000, 1).unwrap(), 0, "tx",
     ) else { panic!("a non-rx endpoint was accepted") };
     assert!(error.message.contains("only this fragment's rx port"));
 
     let Err(error) = Harness::new_with_options(
-        "ideal", &[("radio.rx.channels", eq(Value::Int(1)))], &[], &[], Some((BackPressure::Block, 1)),
+        "ideal", &[("radio.rx.channels", eq(Scalar::from(1)))], &[], &[], Some((BackPressure::Block, 1)),
         ExecutionClass::Simulation, Rational::new(1_000_000_000, 1).unwrap(), 1, "rx",
     ) else { panic!("multiple Block links were accepted") };
     assert!(error.message.contains("multiple rx links cannot use Block"));
@@ -568,10 +569,10 @@ fn mr_07_prepare_cases() {
 
 #[test]
 fn mr_07_prepare_reports_the_coercions_coerce_reported() {
-    let h = Harness::new("x310-like", &[("radio.rx.sample_rate_hz", eq(Value::Num(19_500_000.0)))], &[], &[], None);
+    let h = Harness::new("x310-like", &[("radio.rx.sample_rate_hz", eq(Scalar::try_from(19_500_000.0).unwrap()))], &[], &[], None);
     let radio = MockRadio::from_binding(&binding("x310-like")).unwrap();
-    let report = radio.coerce(&request(&[("radio.rx.sample_rate_hz", eq(Value::Num(19_500_000.0)))] )).unwrap();
-    assert_eq!(report.applied[&key("radio.rx.sample_rate_hz")], Value::Num(20_000_000.0));
+    let report = radio.coerce(&request(&[("radio.rx.sample_rate_hz", eq(Scalar::try_from(19_500_000.0).unwrap()))] )).unwrap();
+    assert_eq!(report.applied[&key("radio.rx.sample_rate_hz")], Value::num(20_000_000.0).unwrap());
     assert_eq!(h.prepare_coercions, report.coercions);
 }
 
@@ -584,22 +585,22 @@ fn mr_08_effective_holds_exactly_the_ten_configuration_keys() {
     assert_eq!(expected_keys.len(), 10);
     assert_eq!(actual_keys, expected_keys);
     assert_eq!(effective, &BTreeMap::from([
-        (key(ezsdr_radio::keys::RX_CHANNELS), Value::Int(1)),
-        (key(ezsdr_radio::keys::TX_CHANNELS), Value::Int(0)),
-        (key(ezsdr_radio::keys::RX_SAMPLE_RATE_HZ), Value::Num(1_000_000.0)),
-        (key(ezsdr_radio::keys::TX_SAMPLE_RATE_HZ), Value::Num(1_000_000.0)),
-        (key(ezsdr_radio::keys::RX_FREQUENCY_HZ), Value::Num(1_000_000_000.0)),
-        (key(ezsdr_radio::keys::TX_FREQUENCY_HZ), Value::Num(1_000_000_000.0)),
-        (key(ezsdr_radio::keys::RX_GAIN_DB), Value::Num(0.0)),
-        (key(ezsdr_radio::keys::TX_GAIN_DB), Value::Num(0.0)),
-        (key(ezsdr_radio::keys::RX_ANTENNA), Value::Str("RX2".to_owned())),
-        (key(ezsdr_radio::keys::TX_ANTENNA), Value::Str("TX/RX".to_owned())),
+        (key(ezsdr_radio::keys::RX_CHANNELS), Value::from(1)),
+        (key(ezsdr_radio::keys::TX_CHANNELS), Value::from(0)),
+        (key(ezsdr_radio::keys::RX_SAMPLE_RATE_HZ), Value::num(1_000_000.0).unwrap()),
+        (key(ezsdr_radio::keys::TX_SAMPLE_RATE_HZ), Value::num(1_000_000.0).unwrap()),
+        (key(ezsdr_radio::keys::RX_FREQUENCY_HZ), Value::num(1_000_000_000.0).unwrap()),
+        (key(ezsdr_radio::keys::TX_FREQUENCY_HZ), Value::num(1_000_000_000.0).unwrap()),
+        (key(ezsdr_radio::keys::RX_GAIN_DB), Value::num(0.0).unwrap()),
+        (key(ezsdr_radio::keys::TX_GAIN_DB), Value::num(0.0).unwrap()),
+        (key(ezsdr_radio::keys::RX_ANTENNA), Value::from("RX2".to_owned())),
+        (key(ezsdr_radio::keys::TX_ANTENNA), Value::from("TX/RX".to_owned())),
     ]));
 }
 
 #[test]
 fn mr_11_start_cases() {
-    let constraints = [("radio.tx.channels", eq(Value::Int(1)))];
+    let constraints = [("radio.tx.channels", eq(Scalar::from(1)))];
     let mut harness = Harness::new("x310-like", &constraints, &[], &[], Some((BackPressure::DropOldest, 8)));
     harness.mock.arm().unwrap();
     assert!(harness.mock.start(Some(TimePoint::new(ROOT, 1_999_999_999))).unwrap_err().message.contains("ezsdr.time.start_lead_ns"));
@@ -618,7 +619,7 @@ fn mr_11_start_cases() {
     let clocks = harness.clocks.sample_clock_records();
     assert_eq!(clocks.iter().find(|record| record.stream == rid("mock/rx")).unwrap().origin, TimePoint::new(ROOT, 2_000_000_000));
     assert_eq!(clocks.iter().find(|record| record.stream == rid("mock/tx")).unwrap().origin, TimePoint::new(ROOT, 0));
-    let mut no_link = Harness::new("x310-like", &[("radio.tx.channels", eq(Value::Int(1)))], &[], &[], None);
+    let mut no_link = Harness::new("x310-like", &[("radio.tx.channels", eq(Scalar::from(1)))], &[], &[], None);
     no_link.mock.arm().unwrap();
     assert_eq!(no_link.clocks.sample_clock_records().iter().map(|record| record.stream.path()).collect::<Vec<_>>(), ["mock/tx"]);
     no_link.mock.start(Some(TimePoint::new(ROOT, 2_000_000_000))).unwrap();
@@ -627,7 +628,7 @@ fn mr_11_start_cases() {
 
 #[test]
 fn mr_12_block_lengths() {
-    let mut harness = Harness::new("ideal", &[], &[("block_len_jitter", Value::Bool(true))], &[], Some((BackPressure::DropOldest, 64)));
+    let mut harness = Harness::new("ideal", &[], &[("block_len_jitter", Value::from(true))], &[], Some((BackPressure::DropOldest, 64)));
     harness.arm_start(0).unwrap();
     harness.step(25_000_000).unwrap();
     let mut sizes = Vec::new();
@@ -651,7 +652,7 @@ fn mr_12_block_lengths() {
     assert!(!plain_sizes.is_empty());
     assert!(plain_sizes.iter().all(|size| *size == 2000));
 
-    let mut other_seed = Harness::new("ideal", &[], &[("block_len_jitter", Value::Bool(true))], &[("sim.seed", serde_json::json!(8))], Some((BackPressure::DropOldest, 64)));
+    let mut other_seed = Harness::new("ideal", &[], &[("block_len_jitter", Value::from(true))], &[("sim.seed", serde_json::json!(8))], Some((BackPressure::DropOldest, 64)));
     other_seed.arm_start(0).unwrap();
     other_seed.step(25_000_000).unwrap();
     let other_sizes: Vec<_> = std::iter::from_fn(|| other_seed.link.as_ref().unwrap().receive().map(|(b, _)| b)).map(|block| block.header().len).collect();
@@ -664,7 +665,7 @@ fn mr_12_jitter_draws_belong_to_blocks_after_a_receive_cut() {
         ("sim.seed", serde_json::json!(7)),
         ("sim.faults", serde_json::json!([{ "at_ns": 3_500_000, "fault": "rx_overflow", "target": "radio" }]))
     ];
-    let selector = [("block_len_jitter", Value::Bool(true))];
+    let selector = [("block_len_jitter", Value::from(true))];
     let mut harness = Harness::new("x310-like", &[], &selector, &env, Some((BackPressure::DropOldest, 8)));
     harness.arm_start(2_000_000_000).unwrap();
     harness.step(2_003_500_000).unwrap();
@@ -684,7 +685,7 @@ fn mr_12_jitter_draws_belong_to_blocks_after_a_receive_cut() {
 
 #[test]
 fn mr_13_ramp_values() {
-    let mut harness = Harness::new("ideal", &[("radio.rx.channels", eq(Value::Int(2)))], &[("rx_test_pattern", Value::Str("ramp".to_owned()))], &[], Some((BackPressure::DropOldest, 4)));
+    let mut harness = Harness::new("ideal", &[("radio.rx.channels", eq(Scalar::from(2)))], &[("rx_test_pattern", Value::from("ramp".to_owned()))], &[], Some((BackPressure::DropOldest, 4)));
     harness.arm_start(0).unwrap();
     harness.step(1_999_001).unwrap();
     let block = harness.link.as_ref().unwrap().receive().unwrap().0;
@@ -702,7 +703,7 @@ fn mr_13_ramp_values() {
     assert_eq!(f32_at(16_008), 1.0 / 65536.0);
     assert_eq!(f32_at(16_012), 1.0 / 64.0);
 
-    let mut zero = Harness::new("ideal", &[("radio.rx.channels", eq(Value::Int(2)))], &[], &[], Some((BackPressure::DropOldest, 4)));
+    let mut zero = Harness::new("ideal", &[("radio.rx.channels", eq(Scalar::from(2)))], &[], &[], Some((BackPressure::DropOldest, 4)));
     zero.arm_start(0).unwrap();
     zero.step(1_999_001).unwrap();
     let block = zero.link.as_ref().unwrap().receive().unwrap().0;
@@ -744,7 +745,7 @@ fn mr_16_burst_refusals() {
     harness.actions.push(bad_size);
     harness.actions.push(tx_action(domain, 2_010_000, 1, true, LatePolicy::SendAsapAndFlag));
     let mut metadata = tx_action(domain, 2_010_000, 2, false, LatePolicy::SendAsapAndFlag);
-    if let Action::TxBurst { metadata, .. } = &mut metadata { metadata.insert(key("test.tag"), Value::Bool(true)); }
+    if let Action::TxBurst { metadata, .. } = &mut metadata { metadata.insert(key("test.tag"), Value::from(true)); }
     harness.actions.push(metadata);
     let mut too_long = tx_action(domain, 2_010_000, 1, false, LatePolicy::SendAsapAndFlag);
     if let Action::TxBurst { waveform, repeat, .. } = &mut too_long {
@@ -842,13 +843,13 @@ fn mr_17_a_burst_before_its_clock_s_origin_is_late() {
     // before that origin, so it is late, and under `send_asap` it starts at the origin with a
     // TIME_ERROR — on a clock an enable from 0 channels starts, as on one a rate change starts.
     for enable in [true, false] {
-        let mut h = Harness::new("x310-like", &[("radio.tx.channels", eq(Value::Int(i64::from(!enable))))], &[], &[], None);
+        let mut h = Harness::new("x310-like", &[("radio.tx.channels", eq(Scalar::from(i64::from(!enable))))], &[], &[], None);
         h.arm_start(2_000_000_000).unwrap();
         h.step(2_001_000_000).unwrap();
         h.actions.push(if enable {
-            update_action("radio.tx.channels", Value::Int(1), UpdateClass::Cold, None)
+            update_action("radio.tx.channels", Value::from(1), UpdateClass::Cold, None)
         } else {
-            update_action("radio.tx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, None)
+            update_action("radio.tx.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, None)
         });
         h.step(2_001_000_000).unwrap();
         let clock = h.clocks.sample_clock_records().into_iter().rev().find(|record| record.stream == rid("mock/tx")).unwrap();
@@ -913,9 +914,9 @@ fn mr_18_hardware_timed_updates() {
     harness.arm_start(2_000_000_000).unwrap();
     harness.step(2_001_000_000).unwrap();
     let now = 2_001_000_000;
-    harness.actions.push(update_action("radio.rx.frequency_hz", Value::Num(2.4e9), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, now + 5_000_000))));
-    harness.actions.push(update_action("radio.rx.frequency_hz", Value::Num(2.5e9), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, now + 1_000_000))));
-    harness.actions.push(update_action("radio.tx.frequency_hz", Value::Num(2.6e9), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, now + 5_000_000))));
+    harness.actions.push(update_action("radio.rx.frequency_hz", Value::num(2.4e9).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, now + 5_000_000))));
+    harness.actions.push(update_action("radio.rx.frequency_hz", Value::num(2.5e9).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, now + 1_000_000))));
+    harness.actions.push(update_action("radio.tx.frequency_hz", Value::num(2.6e9).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, now + 5_000_000))));
     harness.step(now).unwrap();
     harness.step(now + 5_000_000).unwrap();
     let applied = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()];
@@ -932,9 +933,9 @@ fn mr_18_hardware_timed_updates() {
     full.mock.arm().unwrap();
     full.step(0).unwrap();
     for i in 0..16 {
-        full.actions.push(update_action("radio.rx.frequency_hz", Value::Num(2.0e9 + i as f64), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, 10_000_000_000 + i))));
+        full.actions.push(update_action("radio.rx.frequency_hz", Value::num(2.0e9 + i as f64).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, 10_000_000_000 + i))));
     }
-    full.actions.push(update_action("radio.rx.frequency_hz", Value::Num(2.1e9), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, 0))));
+    full.actions.push(update_action("radio.rx.frequency_hz", Value::num(2.1e9).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, 0))));
     full.step(0).unwrap();
     let events = full.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_QUEUE_FULL).count(), 1);
@@ -956,8 +957,8 @@ fn mr_25_a_stream_stop_keeps_the_pending_commands() {
         let mut harness = Harness::new("x310-like", &[], &[], &[], None);
         harness.arm_start(2_000_000_000).unwrap();
         harness.step(now).unwrap();
-        harness.actions.push(update_action("radio.rx.frequency_hz", Value::Num(2.4e9), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, now + 5_000_000))));
-        harness.actions.push(update_action("radio.tx.frequency_hz", Value::Num(2.6e9), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, now + 5_000_000))));
+        harness.actions.push(update_action("radio.rx.frequency_hz", Value::num(2.4e9).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, now + 5_000_000))));
+        harness.actions.push(update_action("radio.tx.frequency_hz", Value::num(2.6e9).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, now + 5_000_000))));
         harness.actions.push(Action::Stop { target: Some(rid(target)) });
         harness.step(now).unwrap();
         harness.step(now + 5_000_000).unwrap();
@@ -973,7 +974,7 @@ fn mr_18_a_cold_rate_change_starts_a_new_sample_clock() {
     harness.step(2_002_000_001).unwrap();
     let old = harness.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/rx")).unwrap().domain;
     let effective = 2_004_000_000;
-    harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, effective))));
+    harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(TimePoint::new(ROOT, effective))));
     harness.step(effective).unwrap();
     harness.link.as_ref().unwrap().queue.lock().unwrap().clear();
     // x310-like's ready instant and start lead: the new clock starts 50 ms after the receive
@@ -1004,9 +1005,9 @@ fn mr_09_the_transmit_clock_starts_on_its_lattice() {
 fn mr_18_a_cold_change_starts_its_clock_on_the_lattice() {
     // RM-25 with `ideal`'s restart lead of zero: e₁ on the old lattice, e₂ on the new.
     for (from, to, e1, e2) in [(1_000_000.0, 20_000_000.0, 1_001_000, 1_001_000), (20_000_000.0, 1_000_000.0, 1_000_050, 1_001_000)] {
-        let mut harness = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(from)))], &[], &[], Some((BackPressure::DropOldest, 64)));
+        let mut harness = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Scalar::try_from(from).unwrap()))], &[], &[], Some((BackPressure::DropOldest, 64)));
         harness.arm_start(0).unwrap();
-        harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(to), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_037))));
+        harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::num(to).unwrap(), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_037))));
         harness.step(0).unwrap();
         harness.step(1_000_037).unwrap();
         harness.step(3_200_000).unwrap();
@@ -1037,7 +1038,7 @@ fn mr_18_a_cold_receive_change_before_t0_applies_at_t0() {
     let mut harness = Harness::new("x310-like", &[], &[], &[], Some((BackPressure::DropOldest, 8)));
     let t0 = 2_000_000_000;
     harness.arm_start(t0).unwrap();
-    harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, None));
+    harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, None));
     harness.step(0).unwrap();
     // It applies at T0, where the first segment starts, so that segment has no sample and no
     // clock, and the new one waits x310-like's receive call, 3 ms and start lead (RM-25,
@@ -1063,9 +1064,9 @@ fn mr_18_a_receive_enable_from_zero_waits_the_start_lead() {
         ("x310-like", Some(2_101_000_000), 2_101_000_000),
         ("ideal", None, 2_001_000_000),
     ] {
-        let mut harness = Harness::new(profile, &[("radio.rx.channels", eq(Value::Int(0)))], &[], &[], Some((BackPressure::DropOldest, 8)));
+        let mut harness = Harness::new(profile, &[("radio.rx.channels", eq(Scalar::from(0)))], &[], &[], Some((BackPressure::DropOldest, 8)));
         harness.arm_start(2_000_000_000).unwrap();
-        harness.actions.push(update_action("radio.rx.channels", Value::Int(1), UpdateClass::Cold, at.map(|at| TimePoint::new(ROOT, at))));
+        harness.actions.push(update_action("radio.rx.channels", Value::from(1), UpdateClass::Cold, at.map(|at| TimePoint::new(ROOT, at))));
         harness.step(2_001_000_000).unwrap();
         harness.step(2_200_000_000).unwrap();
         let origins: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx")).map(|record| record.origin.ticks_in(ROOT).unwrap()).collect();
@@ -1081,7 +1082,7 @@ fn mr_18_a_cold_transmit_change_replaces_the_tracker() {
     harness.actions.push(tx_action(old, 0, 1_000, true, LatePolicy::SendAsapAndFlag));
     harness.step(0).unwrap();
     harness.step(1_999_000).unwrap();
-    harness.actions.push(update_action("radio.tx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, None));
+    harness.actions.push(update_action("radio.tx.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, None));
     harness.step(2_000_000).unwrap();
     let records = harness.clocks.sample_clock_records();
     assert_eq!(records[0].ended_at, Some(TimePoint::new(ROOT, 2_000_000)));
@@ -1106,8 +1107,8 @@ fn mr_18_a_burst_on_a_later_clock_survives_an_earlier_switch() {
     // stays booked across the first one's switch, and plays on its own clock.
     let mut h = tx_harness("ideal");
     h.arm_start(0).unwrap();
-    h.actions.push(update_action("radio.tx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_000))));
-    h.actions.push(update_action("radio.tx.sample_rate_hz", Value::Num(4_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, 2_000_000))));
+    h.actions.push(update_action("radio.tx.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_000))));
+    h.actions.push(update_action("radio.tx.sample_rate_hz", Value::num(4_000_000.0).unwrap(), UpdateClass::Cold, Some(TimePoint::new(ROOT, 2_000_000))));
     h.step(0).unwrap();
     let last = tx_domain(&h);
     h.actions.push(tx_action(last, 100, 1_000, false, LatePolicy::SendAsapAndFlag));
@@ -1122,15 +1123,15 @@ fn mr_18_a_burst_on_a_later_clock_survives_an_earlier_switch() {
 #[test]
 fn mr_18_a_scheduled_pair_is_checked_when_it_applies() {
     let constraints = [
-        ("radio.rx.channels", eq(Value::Int(2))),
-        ("radio.rx.sample_rate_hz", eq(Value::Num(100_000_000.0))),
+        ("radio.rx.channels", eq(Scalar::from(2))),
+        ("radio.rx.sample_rate_hz", eq(Scalar::try_from(100_000_000.0).unwrap())),
     ];
     let mut harness = Harness::new("x310-like", &constraints, &[], &[], Some((BackPressure::DropOldest, 1)));
     harness.arm_start(2_000_000_000).unwrap();
     let now = 2_001_000_000;
     harness.step(now).unwrap();
-    harness.actions.push(update_action("radio.rx.channels", Value::Int(1), UpdateClass::Cold, Some(TimePoint::new(ROOT, now + 10_000))));
-    harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(200_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, now + 20_000))));
+    harness.actions.push(update_action("radio.rx.channels", Value::from(1), UpdateClass::Cold, Some(TimePoint::new(ROOT, now + 10_000))));
+    harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::num(200_000_000.0).unwrap(), UpdateClass::Cold, Some(TimePoint::new(ROOT, now + 20_000))));
     harness.step(now).unwrap();
     // The second change applies at the first one's new origin, x310-like's restart lead
     // after its e₁ (RM-25; spec 20, VF-6).
@@ -1143,15 +1144,15 @@ fn mr_18_a_scheduled_pair_is_checked_when_it_applies() {
     assert_eq!(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.rejected").unwrap()].as_array().unwrap().len(), 0);
 
     let constraints = [
-        ("radio.rx.channels", eq(Value::Int(1))),
-        ("radio.rx.sample_rate_hz", eq(Value::Num(100_000_000.0))),
+        ("radio.rx.channels", eq(Scalar::from(1))),
+        ("radio.rx.sample_rate_hz", eq(Scalar::try_from(100_000_000.0).unwrap())),
     ];
     let mut over = Harness::new("x310-like", &constraints, &[], &[], Some((BackPressure::DropOldest, 1)));
     over.arm_start(2_000_000_000).unwrap();
     let now = 2_001_000_000;
     over.step(now).unwrap();
-    over.actions.push(update_action("radio.rx.channels", Value::Int(2), UpdateClass::Cold, Some(TimePoint::new(ROOT, now + 10_000))));
-    over.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(200_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, now + 20_000))));
+    over.actions.push(update_action("radio.rx.channels", Value::from(2), UpdateClass::Cold, Some(TimePoint::new(ROOT, now + 10_000))));
+    over.actions.push(update_action("radio.rx.sample_rate_hz", Value::num(200_000_000.0).unwrap(), UpdateClass::Cold, Some(TimePoint::new(ROOT, now + 20_000))));
     over.step(now).unwrap();
     over.step(now + 100_000_000).unwrap();
     let applied = over.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()].as_array().unwrap();
@@ -1225,7 +1226,7 @@ fn mr_09_same_tick_work_keeps_insertion_order() {
     )];
     let mut harness = Harness::new(
         "x310-like",
-        &[("radio.tx.channels", eq(Value::Int(1)))],
+        &[("radio.tx.channels", eq(Scalar::from(1)))],
         &[],
         &env,
         Some((BackPressure::DropOldest, 16)),
@@ -1235,7 +1236,7 @@ fn mr_09_same_tick_work_keeps_insertion_order() {
     for channels in [0, 1] {
         harness.actions.push(update_action(
             "radio.rx.channels",
-            Value::Int(channels),
+            Value::from(channels),
             UpdateClass::Cold,
             Some(at),
         ));
@@ -1304,7 +1305,7 @@ fn mr_20_faults_fire_at_their_instants() {
     assert_eq!(faults[1]["lost"], 0);
 
     let no_stream_env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
-    let mut no_stream = Harness::new("x310-like", &[("radio.rx.channels", eq(Value::Int(0)))], &[], &no_stream_env, None);
+    let mut no_stream = Harness::new("x310-like", &[("radio.rx.channels", eq(Scalar::from(0)))], &[], &no_stream_env, None);
     no_stream.arm_start(2_000_000_000).unwrap();
     no_stream.step(2_001_000_000).unwrap();
     let faults = &no_stream.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.faults").unwrap()];
@@ -1407,9 +1408,9 @@ fn mr_20_a_fault_between_cold_clocks_is_not_applied() {
     // fall in [e1, e2), where no receive stream runs, so neither touches the replacement clock.
     for fault in ["rx_sequence_error", "rx_overflow"] {
         let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_005_000, "fault": fault, "target": "radio" }]))];
-        let mut harness = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(3_000_000.0)))], &[], &env, Some((BackPressure::DropOldest, 64)));
+        let mut harness = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Scalar::try_from(3_000_000.0).unwrap()))], &[], &env, Some((BackPressure::DropOldest, 64)));
         harness.arm_start(0).unwrap();
-        harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(300_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_001))));
+        harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::num(300_000.0).unwrap(), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_001))));
         harness.step(0).unwrap();
         harness.step(1_005_000).unwrap();
         let faults = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.faults").unwrap()].clone();
@@ -1432,9 +1433,9 @@ fn mr_20_a_fault_between_cold_clocks_is_not_applied() {
     // A fault at e, ordered before the cold change (spec 09 §4), still meets the running old
     // stream; when that change is refused as it applies, the old stream keeps its gap.
     let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_001_000, "fault": "rx_sequence_error", "target": "radio" }]))];
-    let mut harness = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(3_000_000.0)))], &[], &env, Some((BackPressure::DropOldest, 64)));
+    let mut harness = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Scalar::try_from(3_000_000.0).unwrap()))], &[], &env, Some((BackPressure::DropOldest, 64)));
     harness.arm_start(0).unwrap();
-    harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(1e15), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_001_000))));
+    harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::num(1e15).unwrap(), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_001_000))));
     harness.step(0).unwrap();
     harness.step(20_000_000).unwrap();
     let faults = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.faults").unwrap()].clone();
@@ -1534,7 +1535,7 @@ fn mr_20_a_lost_device_transmits_nothing_after_the_loss() {
     // device transmit or receive again.
     for mode in [StopMode::Orderly, StopMode::Abort] {
         let env = [("sim.faults", serde_json::json!([device_lost_at(1_000_000)]))];
-        let mut harness = Harness::new("ideal", &[("radio.tx.channels", eq(Value::Int(1)))], &[], &env, Some((BackPressure::DropOldest, 64)));
+        let mut harness = Harness::new("ideal", &[("radio.tx.channels", eq(Scalar::from(1)))], &[], &env, Some((BackPressure::DropOldest, 64)));
         harness.arm_start(0).unwrap();
         let tx = tx_domain(&harness);
         harness.actions.push(tx_action(tx, 500, 1_000, true, LatePolicy::SendAsapAndFlag));
@@ -1542,7 +1543,7 @@ fn mr_20_a_lost_device_transmits_nothing_after_the_loss() {
         let error = harness.step(1_000_000).unwrap_err();
         assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
         harness.actions.push(tx_action(tx, 3_000, 1_000, true, LatePolicy::SendAsapAndFlag));
-        harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, None));
+        harness.actions.push(update_action("radio.rx.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, None));
         harness.actions.push(Action::Stop { target: Some(rid("mock/rx")) });
         harness.step(2_000_000).unwrap();
         harness.auth.advance_to(TimePoint::new(ROOT, 5_000_000)).unwrap();
@@ -1564,9 +1565,9 @@ fn mr_20_a_loss_cancels_what_it_left_pending() {
     // pending, at the loss and before any `stop`, recording each with the loss's reason and
     // emitting no event for either.
     let env = [("sim.faults", serde_json::json!([device_lost_at(2_000_000)]))];
-    let mut harness = Harness::new("ideal", &[("radio.tx.channels", eq(Value::Int(1)))], &[], &env, Some((BackPressure::DropOldest, 64)));
+    let mut harness = Harness::new("ideal", &[("radio.tx.channels", eq(Scalar::from(1)))], &[], &env, Some((BackPressure::DropOldest, 64)));
     harness.arm_start(0).unwrap();
-    harness.actions.push(update_action("radio.rx.gain_db", Value::Num(3.0), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, 3_000_000))));
+    harness.actions.push(update_action("radio.rx.gain_db", Value::num(3.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, 3_000_000))));
     harness.actions.push(tx_action(tx_domain(&harness), 3_000, 1_000, false, LatePolicy::SendAsapAndFlag));
     harness.step(1_000_000).unwrap();
     assert!(rejected_rows(&harness).is_empty());
@@ -1587,7 +1588,7 @@ fn mr_20_a_stop_received_in_the_losing_step_does_not_cancel_the_loss() {
     let mut harness = Harness::new("ideal", &[], &[], &env, Some((BackPressure::DropOldest, 64)));
     harness.arm_start(0).unwrap();
     harness.step(1_000_000).unwrap();
-    harness.actions.push(update_action("radio.rx.gain_db", Value::Num(3.0), UpdateClass::HardwareTimed, None));
+    harness.actions.push(update_action("radio.rx.gain_db", Value::num(3.0).unwrap(), UpdateClass::HardwareTimed, None));
     harness.actions.push(Action::Stop { target: Some(rid("mock")) });
     let error = harness.step(1_999_001).unwrap_err();
     assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
@@ -1608,7 +1609,7 @@ fn mr_20_an_action_after_the_losing_step_is_refused() {
     let mut harness = Harness::new("ideal", &[], &[], &env, Some((BackPressure::DropOldest, 64)));
     harness.arm_start(0).unwrap();
     harness.step(1_000_000).unwrap_err();
-    harness.actions.push(update_action("radio.rx.gain_db", Value::Num(3.0), UpdateClass::HardwareTimed, None));
+    harness.actions.push(update_action("radio.rx.gain_db", Value::num(3.0).unwrap(), UpdateClass::HardwareTimed, None));
     harness.step(2_000_000).unwrap();
     assert!(harness.actions.actions.lock().unwrap().is_empty());
     harness.actions.push(Action::Stop { target: Some(rid("mock")) });
@@ -1708,7 +1709,7 @@ fn mr_21_overrun_shape() {
     let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
     let mut cut = Harness::new("x310-like", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
     cut.arm_start(2_000_000_000).unwrap();
-    cut.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0), UpdateClass::Cold, Some(TimePoint::new(ROOT, 2_020_000_000))));
+    cut.actions.push(update_action("radio.rx.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(TimePoint::new(ROOT, 2_020_000_000))));
     cut.step(2_000_000_000).unwrap();
     cut.step(2_100_000_000).unwrap();
     assert_eq!(fault_rows(&cut, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(50_000))]);
@@ -1724,7 +1725,7 @@ fn mr_25_a_stop_cuts_at_its_instant() {
     // blocks last 5.12 ms (2 560 root ticks a sample).
     for (profile, rate, period, t0) in [("ideal", 1_000_000.0, 1_000, 0), ("x310-like", 390_625.0, 2_560, 2_000_000_000)] {
         for how in ["mock/rx", "mock", "stop"] {
-            let mut h = Harness::new(profile, &[("radio.rx.sample_rate_hz", eq(Value::Num(rate)))], &[], &[], Some((BackPressure::DropOldest, 64)));
+            let mut h = Harness::new(profile, &[("radio.rx.sample_rate_hz", eq(Scalar::try_from(rate).unwrap()))], &[], &[], Some((BackPressure::DropOldest, 64)));
             h.arm_start(t0).unwrap();
             let at = t0 + 7_777_777;
             h.step(at).unwrap();
@@ -1758,7 +1759,7 @@ fn mr_29_start_rx_is_the_one_command() {
     let start = |target: &str, params: BTreeMap<Key, Value>| Action::Command { target: rid(target), verb: Ident::parse("start_rx").unwrap(), params, at: None };
     h.actions.push(start("mock/tx", BTreeMap::new()));
     h.actions.push(start("mock", BTreeMap::new()));
-    h.actions.push(start("mock/rx", BTreeMap::from([(key("radio.now"), Value::Bool(true))])));
+    h.actions.push(start("mock/rx", BTreeMap::from([(key("radio.now"), Value::from(true))])));
     h.step(2_000_000).unwrap();
     let rejected = rejected_rows(&h);
     assert_eq!(rejected.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(), ["command"; 3]);
@@ -1876,8 +1877,8 @@ fn mr_25_a_stopped_stream_keeps_its_end() {
 #[test]
 fn mr_25_rx_stop_leaves_transmit_running_and_stop_records_an_unstarted_burst() {
     let constraints = [
-        ("radio.rx.channels", eq(Value::Int(1))),
-        ("radio.tx.channels", eq(Value::Int(1))),
+        ("radio.rx.channels", eq(Scalar::from(1))),
+        ("radio.tx.channels", eq(Scalar::from(1))),
     ];
     let mut harness = Harness::new("x310-like", &constraints, &[], &[], Some((BackPressure::DropOldest, 16)));
     harness.arm_start(2_000_000_000).unwrap();
@@ -1940,7 +1941,7 @@ fn mr_29_other_actions_are_command_rejected() {
 
 #[test]
 fn mr_30_two_mocks_one_seed_identical_output() {
-    let selector = [("block_len_jitter", Value::Bool(true)), ("rx_test_pattern", Value::Str("ramp".to_owned()))];
+    let selector = [("block_len_jitter", Value::from(true)), ("rx_test_pattern", Value::from("ramp".to_owned()))];
     let mut left = Harness::new("ideal", &[], &selector, &[("sim.seed", serde_json::json!(7))], Some((BackPressure::DropOldest, 32)));
     let mut right = Harness::new("ideal", &[], &selector, &[("sim.seed", serde_json::json!(7))], Some((BackPressure::DropOldest, 32)));
     left.arm_start(0).unwrap(); right.arm_start(0).unwrap();
@@ -1997,10 +1998,10 @@ fn mr_18_a_fractional_receive_cut_is_the_first_sample_at_or_after_e() {
         (7_000_000.0, 1_000_001, 1_000_143, 7001),
         (3_000_000.0, 1_001_000, 1_001_000, 3003),
     ] {
-        let mut h = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(rate)))],
+        let mut h = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Scalar::try_from(rate).unwrap()))],
             &[], &[], Some((BackPressure::DropOldest, 64)));
         h.arm_start(0).unwrap();
-        h.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(2_000_000.0),
+        h.actions.push(update_action("radio.rx.sample_rate_hz", Value::num(2_000_000.0).unwrap(),
             UpdateClass::Cold, Some(TimePoint::new(ROOT, requested))));
         h.step(0).unwrap(); h.step(requested).unwrap();
         let old = h.clocks.sample_clock_records()[0].domain;
@@ -2020,12 +2021,12 @@ fn mr_18_a_fractional_receive_cut_is_the_first_sample_at_or_after_e() {
 fn mr_18_a_fractional_transmit_cut_is_the_first_sample_at_or_after_e() {
     // RM-16, RM-25: the change, booked at 0, ends the old transmit clock then at its cut, the
     // first sample at or after `e` (3 001, at 1 000 334), and the burst plays up to it.
-    let mut h = Harness::new("ideal", &[("radio.tx.channels", eq(Value::Int(1))),
-        ("radio.tx.sample_rate_hz", eq(Value::Num(3_000_000.0)))], &[], &[], None);
+    let mut h = Harness::new("ideal", &[("radio.tx.channels", eq(Scalar::from(1))),
+        ("radio.tx.sample_rate_hz", eq(Scalar::try_from(3_000_000.0).unwrap()))], &[], &[], None);
     h.arm_start(0).unwrap();
     let old = tx_domain(&h);
     h.actions.push(tx_action(old, 0, 1000, true, LatePolicy::SendAsapAndFlag));
-    h.actions.push(update_action("radio.tx.sample_rate_hz", Value::Num(2_000_000.0),
+    h.actions.push(update_action("radio.tx.sample_rate_hz", Value::num(2_000_000.0).unwrap(),
         UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_001))));
     h.step(0).unwrap();
     assert_eq!(h.clocks.sample_clock_records().iter().find(|c| c.domain == old).unwrap().ended_at,
@@ -2046,12 +2047,12 @@ fn mr_18_a_cold_change_that_arrives_after_a_later_one_follows_it() {
     // earlier: the second takes the first's instant, after it, and is late.
     for (same_time, first_rate, second_rate) in [(false, 2_000_000.0, 1_000_000.0),
         (false, 1_000_000.0, 2_000_000.0), (true, 2_000_000.0, 1_000_000.0)] {
-        let mut h = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Value::Num(3_000_000.0)))],
+        let mut h = Harness::new("ideal", &[("radio.rx.sample_rate_hz", eq(Scalar::try_from(3_000_000.0).unwrap()))],
             &[], &[], Some((BackPressure::DropOldest, 64)));
         h.arm_start(0).unwrap();
-        h.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(first_rate),
+        h.actions.push(update_action("radio.rx.sample_rate_hz", Value::num(first_rate).unwrap(),
             UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_500))));
-        h.actions.push(update_action("radio.rx.sample_rate_hz", Value::Num(second_rate),
+        h.actions.push(update_action("radio.rx.sample_rate_hz", Value::num(second_rate).unwrap(),
             UpdateClass::Cold, Some(TimePoint::new(ROOT, if same_time { 1_000_500 } else { 1_000_001 }))));
         h.step(0).unwrap(); h.step(1_001_000).unwrap();
         let instance = h.mock.instance();
@@ -2075,12 +2076,12 @@ fn mr_18_a_disable_that_arrives_after_a_later_change_follows_it() {
     for direction in ["rx", "tx"] {
         let rate_key = format!("radio.{direction}.sample_rate_hz");
         let channels_key = format!("radio.{direction}.channels");
-        let mut h = Harness::new("ideal", &[(rate_key.as_str(), eq(Value::Num(3_000_000.0))),
-            (channels_key.as_str(), eq(Value::Int(1)))], &[], &[], Some((BackPressure::DropOldest, 64)));
+        let mut h = Harness::new("ideal", &[(rate_key.as_str(), eq(Scalar::try_from(3_000_000.0).unwrap())),
+            (channels_key.as_str(), eq(Scalar::from(1)))], &[], &[], Some((BackPressure::DropOldest, 64)));
         h.arm_start(0).unwrap();
         let stream = rid(&format!("mock/{direction}"));
-        h.actions.push(update_action(&channels_key, Value::Int(1), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_500))));
-        h.actions.push(update_action(&channels_key, Value::Int(0), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_001))));
+        h.actions.push(update_action(&channels_key, Value::from(1), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_500))));
+        h.actions.push(update_action(&channels_key, Value::from(0), UpdateClass::Cold, Some(TimePoint::new(ROOT, 1_000_001))));
         h.step(0).unwrap(); h.step(1_001_000).unwrap();
         let records: Vec<_> = h.clocks.sample_clock_records().into_iter().filter(|record| record.stream == stream)
             .map(|record| (record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap()))).collect();

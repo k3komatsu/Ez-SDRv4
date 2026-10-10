@@ -487,6 +487,9 @@ fn ov_23b_kernel_growth_is_the_new_count() {
     // `manifest::LinkRecord` and `manifest::ChildRecord` (Manifest envelope), none NEW:.
     // 115 of 292: pre-freeze item 7 removed `plan::DeclaredCost` (SB-40), a NEW: item.
     // 114 of 291: it also removed `module_api::Deployment` (MA-46), a NEW: item.
+    // 115 of 292: pre-freeze item 1b moved the one scalar type to `spec::Scalar` and
+    // added `spec::Finite` (SB-4), both NEW:. 114 of 291: with every Kernel float a
+    // `Finite`, `hash::serialize_finite_f64` (a NEW: item) had no caller left.
     assert_eq!((new.len(), total), (114, 291), "OV-23b, GZ-2: the Kernel's public surface changed");
 }
 

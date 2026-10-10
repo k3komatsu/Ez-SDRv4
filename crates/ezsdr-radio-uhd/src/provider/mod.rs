@@ -28,7 +28,7 @@ use ezsdr_kernel::module_api::{
     ModuleErrorKind, PrepareContext, Provider, ProviderInstance, Requested, Role, StopMode,
 };
 use ezsdr_kernel::plan::{Fragment, PrepareReport};
-use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
+use ezsdr_kernel::spec::{Ident, Key, Namespace, Scalar, Value};
 use ezsdr_kernel::stream::BackPressure;
 use ezsdr_kernel::time::{Duration, SampleClockHandle, TimePoint};
 use ezsdr_radio::device::DeviceDescription;
@@ -108,7 +108,7 @@ impl UhdRadio {
         let get = |name: &str| binding.selector.get(&Ident::parse(name).expect("a selector key"));
         let string = |name: &str| match get(name) {
             None => Ok(None),
-            Some(Value::Str(s)) => Ok(Some(s.clone())),
+            Some(Value::Scalar(Scalar::Str(s))) => Ok(Some(s.clone())),
             Some(_) => Err(rejected(format!("UR-5: selector `{name}` must be a string"))),
         };
         let args = string("args")?.ok_or_else(|| rejected("UR-5: the selector needs `args`"))?;
@@ -125,12 +125,12 @@ impl UhdRadio {
         };
         let clock_source = source("clock_source")?;
         let epoch = crate::authority::epoch(&clock_source, &source("time_source")?, &args);
-        if get("reopen_on_unlock").is_some_and(|v| !matches!(v, Value::Bool(_))) {
+        if get("reopen_on_unlock").is_some_and(|v| !matches!(v, Value::Scalar(Scalar::Bool(_)))) {
             return Err(rejected("UR-5: selector `reopen_on_unlock` must be a Bool"));
         }
         let block_len = match get("block_len") {
             None => profile::DEFAULT_BLOCK_LEN,
-            Some(Value::Int(n)) if (1..=65_536).contains(n) => *n as u32,
+            Some(Value::Scalar(Scalar::Int(n))) if (1..=65_536).contains(n) => *n as u32,
             Some(_) => return Err(rejected("UR-5: selector `block_len` must be an Int in 1..=65536")),
         };
         let mcr = device.master_clock_rate();

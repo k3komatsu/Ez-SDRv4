@@ -2,6 +2,7 @@
 //! server's catalogue assembles one, on any `Device` (spec 18 §6, UR-34).
 #![allow(dead_code, unused_imports)]
 
+use ezsdr_kernel::spec::Scalar;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -92,7 +93,7 @@ pub fn one_cbx() -> FakeConfig {
 /// profile, so a Session that sets none (B7) stays inside the RF envelope around it.
 pub fn bench_hz(device: &dyn Device) -> f64 {
     match profile_of(device).description(2_000).defaults[&Key::parse(ezsdr_radio::keys::RX_FREQUENCY_HZ).unwrap()] {
-        Value::Num(hz) => hz,
+        Value::Scalar(ezsdr_kernel::spec::Scalar::Num(hz)) => hz.get(),
         ref other => panic!("a default frequency, not {other:?}"),
     }
 }
@@ -222,11 +223,11 @@ pub fn assembly(profile_doc: &Json, device: Arc<dyn Device>, inputs: BTreeMap<Co
     let clocks = Arc::new(ClockRegistry::new());
     let radio = &profile.bindings[&Ident::parse("radio").unwrap()];
     let selector = |name: &str| match radio.selector.get(&Ident::parse(name).unwrap()) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Scalar(Scalar::Str(s))) => s.clone(),
         _ => "internal".to_owned(),
     };
     let authority_args = match profile.bindings[&profile.authority].selector.get(&Ident::parse("authority_args").unwrap()) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Scalar(Scalar::Str(s))) => s.clone(),
         _ => selector("args"),
     };
     let authority = DeviceAuthority::new(device.clone(), clocks.clone(), &selector("clock_source"), &selector("time_source"), &authority_args).unwrap();
@@ -610,16 +611,16 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
     let envelope = bench_envelope(&*device);
     let mut run = session(&bench_profile(&*device, &dir, json!({}), envelope, true), device);
     past_t0(&mut run, ms(1));
-    assert!(admitted(&run.submit(set("radio.tx.channels", Value::Int(1)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.tx.channels", Value::from(1)), None).unwrap()));
     past_tx_origin(&mut run);
     let wave = pn(1_000);
     let (bytes, _) = waveform_of(&wave);
     assert!(admitted(&run.submit(verb("start_repeat", "radio/tx", None, &[]), Some(&bytes)).unwrap()));
     let at = after_ticks(&run, ms(50));
-    assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(at), &[("sink.capture_samples", Value::Int(5_000))]), None).unwrap()));
+    assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(at), &[("sink.capture_samples", Value::from(5_000))]), None).unwrap()));
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
-    let refused = run.submit(set("radio.tx.frequency_hz", Value::Num(hz + 100e6)), None).unwrap();
+    let refused = run.submit(set("radio.tx.frequency_hz", Value::num(hz + 100e6).unwrap()), None).unwrap();
     assert!(matches!(&refused.outcome, Outcome::Rejected { violations } if violations.iter().any(|v| v.check.as_str() == "radio.rf_envelope")), "{refused:?}");
     if !exact {
         println!("B7 refused: {:?}", refused.outcome);

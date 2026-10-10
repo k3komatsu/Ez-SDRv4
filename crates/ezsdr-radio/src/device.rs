@@ -10,7 +10,7 @@ use ezsdr_kernel::id::ResourceId;
 use ezsdr_kernel::module_api::{
     CoerceReport, ModuleError, ProfileRef, RejectedRequest, Requested, Resource,
 };
-use ezsdr_kernel::spec::{CapabilityValue, Coercion, Constraint, Ident, Key, Namespace, Value};
+use ezsdr_kernel::spec::{CapabilityValue, Coercion, Constraint, Ident, Key, Namespace, Scalar, Value};
 
 use crate::{PerformanceEnvelope, RadioEnvelope, TimingEnvelope, keys};
 
@@ -215,16 +215,16 @@ impl DeviceDescription {
     pub fn x310_defaults() -> BTreeMap<Key, Value> {
         use keys::*;
         BTreeMap::from([
-            (key(RX_CHANNELS), Value::Int(1)),
-            (key(TX_CHANNELS), Value::Int(0)),
-            (key(RX_SAMPLE_RATE_HZ), Value::Num(1_000_000.0)),
-            (key(TX_SAMPLE_RATE_HZ), Value::Num(1_000_000.0)),
-            (key(RX_FREQUENCY_HZ), Value::Num(1_000_000_000.0)),
-            (key(TX_FREQUENCY_HZ), Value::Num(1_000_000_000.0)),
-            (key(RX_GAIN_DB), Value::Num(0.0)),
-            (key(TX_GAIN_DB), Value::Num(0.0)),
-            (key(RX_ANTENNA), Value::Str("RX2".to_owned())),
-            (key(TX_ANTENNA), Value::Str("TX/RX".to_owned())),
+            (key(RX_CHANNELS), Value::from(1)),
+            (key(TX_CHANNELS), Value::from(0)),
+            (key(RX_SAMPLE_RATE_HZ), Value::from(num(1_000_000.0))),
+            (key(TX_SAMPLE_RATE_HZ), Value::from(num(1_000_000.0))),
+            (key(RX_FREQUENCY_HZ), Value::from(num(1_000_000_000.0))),
+            (key(TX_FREQUENCY_HZ), Value::from(num(1_000_000_000.0))),
+            (key(RX_GAIN_DB), Value::from(num(0.0))),
+            (key(TX_GAIN_DB), Value::from(num(0.0))),
+            (key(RX_ANTENNA), Value::from("RX2")),
+            (key(TX_ANTENNA), Value::from("TX/RX")),
         ])
     }
 
@@ -244,45 +244,45 @@ impl DeviceDescription {
         let range = |min, max| CapabilityValue::Range { min, max };
         let one = |value| CapabilityValue::One { value };
         let names = |names: &[String]| CapabilityValue::AnyOf {
-            values: names.iter().map(|name| Value::Str(name.clone())).collect(),
+            values: names.iter().map(|name| Scalar::from(name.as_str())).collect(),
         };
         for direction in ["rx", "tx"] {
             capabilities.insert(
                 key(&format!("radio.{direction}.channels")),
-                range(Value::Int(0), Value::Int(self.max_channels)),
+                range(Scalar::Int(0), Scalar::Int(self.max_channels)),
             );
             let rates = match &self.rates {
                 Grid::Values(values) => CapabilityValue::AnyOf {
-                    values: values.iter().rev().map(|rate| Value::Num(*rate)).collect(),
+                    values: values.iter().rev().map(|rate| num(*rate)).collect(),
                 },
-                grid => range(Value::Num(grid.min()), Value::Num(grid.max())),
+                grid => range(num(grid.min()), num(grid.max())),
             };
             capabilities.insert(key(&format!("radio.{direction}.sample_rate_hz")), rates);
             capabilities.insert(
                 key(&format!("radio.{direction}.frequency_hz")),
-                range(Value::Num(self.frequency.min()), Value::Num(self.frequency.max())),
+                range(num(self.frequency.min()), num(self.frequency.max())),
             );
             capabilities.insert(
                 key(&format!("radio.{direction}.gain_db")),
-                range(Value::Num(self.gain.min()), Value::Num(self.gain.max())),
+                range(num(self.gain.min()), num(self.gain.max())),
             );
             capabilities.insert(
                 key(&format!("radio.{direction}.frequency_step_hz")),
-                one(Value::Num(self.frequency.step())),
+                one(num(self.frequency.step())),
             );
             capabilities.insert(
                 key(&format!("radio.{direction}.gain_step_db")),
-                one(Value::Num(self.gain.step())),
+                one(num(self.gain.step())),
             );
         }
         capabilities.insert(key(RX_ANTENNA), names(&self.rx_antennas));
         capabilities.insert(key(TX_ANTENNA), names(&self.tx_antennas));
-        let int = |n: i64| Value::Int(n);
+        let int = Scalar::Int;
         for (name, value) in [
-            (RX_COHERENT, Value::Bool(self.coherent)),
-            (FULL_DUPLEX, Value::Bool(self.full_duplex)),
-            (HARDWARE_TIME, Value::Bool(self.hardware_time)),
-            (PHASE_BEHAVIOR_ON_RETUNE, Value::Str(self.phase_behavior_on_retune.clone())),
+            (RX_COHERENT, Scalar::Bool(self.coherent)),
+            (FULL_DUPLEX, Scalar::Bool(self.full_duplex)),
+            (HARDWARE_TIME, Scalar::Bool(self.hardware_time)),
+            (PHASE_BEHAVIOR_ON_RETUNE, Scalar::from(self.phase_behavior_on_retune.as_str())),
             (
                 TX_REPEAT_MAX_SAMPLES,
                 int(i64::try_from(self.repeat_max_samples).expect("a profile limit fits i64")),
@@ -355,7 +355,7 @@ impl DeviceDescription {
                 match satisfies(constraint, capability) {
                     Ok(true) => {
                         if let CapabilityValue::One { value } = capability {
-                            report.applied.insert(key.clone(), value.clone());
+                            report.applied.insert(key.clone(), Value::from(value.clone()));
                         }
                     }
                     _ => report.rejected.push(rejected(
@@ -407,11 +407,11 @@ impl DeviceDescription {
         ] {
             let channels_key = Key::parse(&format!("radio.{direction}.channels")).expect("radio key");
             let rate_key = Key::parse(&format!("radio.{direction}.sample_rate_hz")).expect("radio key");
-            let channels = match effective.get(&channels_key) {
-                Some(Value::Int(value)) => *value as f64,
+            let channels = match effective.get(&channels_key).and_then(Value::as_scalar) {
+                Some(Scalar::Int(value)) => *value as f64,
                 _ => 0.0,
             };
-            let rate = effective.get(&rate_key).and_then(number).unwrap_or(0.0);
+            let rate = effective.get(&rate_key).and_then(Value::as_scalar).and_then(number).unwrap_or(0.0);
             let need = channels * rate * self.performance.wire_bytes_per_sample as f64;
             let cap = bytes_per_second as f64;
             if need > cap {
@@ -446,12 +446,17 @@ fn rejected(key: &Key, requested: &Constraint, reason: String) -> RejectedReques
     }
 }
 
-fn number(value: &Value) -> Option<f64> {
+fn number(value: &Scalar) -> Option<f64> {
     match value {
-        Value::Int(value) => Some(*value as f64),
-        Value::Num(value) if value.is_finite() => Some(*value),
+        Scalar::Int(value) => Some(*value as f64),
+        Scalar::Num(value) => Some(value.get()),
         _ => None,
     }
+}
+
+/// A profile's number, which a JSON document cannot make non-finite.
+fn num(x: f64) -> Scalar {
+    Scalar::try_from(x).expect("a profile number is finite")
 }
 
 fn coerce_numeric(
@@ -498,16 +503,17 @@ fn coerce_numeric(
             .filter_map(number)
             .find(|value| grid.contains(*value))
             .ok_or_else(|| format!("RM-8: no grid value satisfies {constraint:?}"))?,
-        Constraint::Present {} => number(default.ok_or_else(|| "RM-5: no default".to_owned())?)
+        Constraint::Present {} => default.ok_or_else(|| "RM-5: no default".to_owned())?
+            .as_scalar().and_then(number)
             .ok_or_else(|| "RM-5: numeric default is invalid".to_owned())?,
     };
-    let applied = Value::Num(value);
+    let applied = Value::from(num(value));
     let coercion = requested_eq.and_then(|requested| {
         number(requested)
             .filter(|requested| *requested != value)
             .map(|_| Coercion {
                 key: key.clone(),
-                requested: requested.clone(),
+                requested: Value::from(requested.clone()),
                 applied: applied.clone(),
                 reason: "RM-8: nearest grid value".to_owned(),
             })
@@ -522,16 +528,16 @@ fn coerce_channels(
 ) -> Result<(Value, Option<Coercion>), String> {
     let grid = Grid::Integer { lo: 0, hi: max };
     let number = match constraint {
-        Constraint::Eq { value: Value::Int(value) }
-        | Constraint::Min { value: Value::Int(value) }
-        | Constraint::Max { value: Value::Int(value) } => *value as f64,
+        Constraint::Eq { value: Scalar::Int(value) }
+        | Constraint::Min { value: Scalar::Int(value) }
+        | Constraint::Max { value: Scalar::Int(value) } => *value as f64,
         Constraint::Range { min, max: upper_bound } => {
             let lower = min.as_ref().map(int_value).transpose()?.unwrap_or(0) as f64;
             let upper = upper_bound.as_ref().map(int_value).transpose()?.unwrap_or(max) as f64;
             let Some(value) = grid.at_or_above(lower).filter(|value| *value <= upper) else {
                 return Err(format!("RM-8: no channel count satisfies {constraint:?}"));
             };
-            return Ok((Value::Int(value as i64), None));
+            return Ok((Value::from(value as i64), None));
         }
         Constraint::Set { values } => {
             let Some(value) = values
@@ -541,7 +547,7 @@ fn coerce_channels(
             else {
                 return Err(format!("RM-8: no channel count satisfies {constraint:?}"));
             };
-            return Ok((Value::Int(value), None));
+            return Ok((Value::from(value), None));
         }
         Constraint::Present {} => return Ok((default.cloned().ok_or("RM-5: no default")?, None)),
         _ => return Err("RM-4: channel count must be an integer".to_owned()),
@@ -554,12 +560,12 @@ fn coerce_channels(
     }
     .filter(|value| value.fract() == 0.0)
     .ok_or_else(|| format!("RM-8: channel count is outside 0..={max}"))?;
-    Ok((Value::Int(selected as i64), None))
+    Ok((Value::from(selected as i64), None))
 }
 
-fn int_value(value: &Value) -> Result<i64, String> {
+fn int_value(value: &Scalar) -> Result<i64, String> {
     match value {
-        Value::Int(value) => Ok(*value),
+        Scalar::Int(value) => Ok(*value),
         _ => Err("RM-4: channel count must be an integer".to_owned()),
     }
 }
@@ -571,26 +577,26 @@ fn coerce_antenna(
 ) -> Result<(Value, Option<Coercion>), String> {
     let known = |name: &str| allowed.iter().any(|allowed| allowed == name);
     match constraint {
-        Constraint::Eq { value: Value::Str(value) } if known(value) => {
-            Ok((Value::Str(value.clone()), None))
+        Constraint::Eq { value: Scalar::Str(value) } if known(value) => {
+            Ok((Value::from(value.as_str()), None))
         }
         Constraint::Set { values } => values
             .iter()
             .find_map(|value| match value {
-                Value::Str(value) if known(value) => Some(Value::Str(value.clone())),
+                Scalar::Str(value) if known(value) => Some(Value::from(value.as_str())),
                 _ => None,
             })
             .map(|value| (value, None))
             .ok_or_else(|| "RM-8: no requested antenna is available".to_owned()),
         Constraint::Present {} => Ok((default.cloned().ok_or("RM-5: no default")?, None)),
-        Constraint::Eq { value: Value::Str(value) } => {
+        Constraint::Eq { value: Scalar::Str(value) } => {
             Err(format!("RM-8: {value} is not an antenna of this device"))
         }
         _ => Err("RM-4: antenna must be a supported string".to_owned()),
     }
 }
 
-fn bound(value: Option<&Value>, default: f64) -> Result<f64, String> {
+fn bound(value: Option<&Scalar>, default: f64) -> Result<f64, String> {
     match value {
         None => Ok(default),
         Some(value) => number(value).ok_or_else(|| "RM-4: numeric bound needs a number".to_owned()),

@@ -46,10 +46,10 @@ pub(super) fn assemble(
     let mut groups: BTreeMap<(ModuleRef, String), Vec<Ident>> = BTreeMap::new();
     for name in spec.resources.keys() {
         if let Some(binding) = profile.bindings.get(name) {
-            groups
-                .entry(crate::plan::binding_description(binding))
-                .or_default()
-                .push(name.clone());
+            match crate::plan::binding_description(binding) {
+                Ok(description) => groups.entry(description).or_default().push(name.clone()),
+                Err(error) => fail_entry(error.to_string()),
+            }
         }
     }
     let mut providers = Vec::new();
@@ -1646,26 +1646,28 @@ fn child_refusal(
         Err(error) => return Some(format!("RS-25a: the child's profile: {error}")),
     };
     let parent = &run.shared.ctx.profile;
-    let held: BTreeSet<_> = parent
+    let described = |profile: &BindingProfile, name: &Ident| {
+        profile.bindings.get(name).map(crate::plan::binding_description).transpose()
+    };
+    let held: Result<BTreeSet<_>, _> = parent
         .bindings
         .values()
         .map(crate::plan::binding_description)
         .collect();
+    let held = match held {
+        Ok(held) => held,
+        Err(error) => return Some(format!("RS-25a: the parent's profile: {error}")),
+    };
     for name in assembly.providers.keys() {
-        let binds_held = child
-            .bindings
-            .get(name)
-            .is_some_and(|binding| held.contains(&crate::plan::binding_description(binding)));
+        let binds_held = match described(&child, name) {
+            Ok(description) => description.is_some_and(|description| held.contains(&description)),
+            Err(error) => return Some(format!("RS-25a: the child's profile: {error}")),
+        };
         if !binds_held {
             return Some(format!("RS-25a: {name} binds an instance its parent does not"));
         }
     }
-    let authority = |profile: &BindingProfile| {
-        profile
-            .bindings
-            .get(&profile.authority)
-            .map(crate::plan::binding_description)
-    };
+    let authority = |profile: &BindingProfile| described(profile, &profile.authority).ok().flatten();
     if authority(&child).is_none() || authority(&child) != authority(parent) {
         return Some("RS-25a: the Authority is not bound as its parent's is".to_owned());
     }

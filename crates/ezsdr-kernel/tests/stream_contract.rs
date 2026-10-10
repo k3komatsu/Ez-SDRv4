@@ -2,10 +2,11 @@
 
 mod support;
 
+use ezsdr_kernel::spec::Scalar;
 use std::sync::Arc;
 
 use ezsdr_kernel::contract::{
-    ContractRegistry, DataContract, DataContractId, PortRef, Scalar, standard_contracts,
+    ContractRegistry, DataContract, DataContractId, PortRef, standard_contracts,
 };
 use ezsdr_kernel::id::{ClockDomainId, DataLinkId, MemoryDomainId, NodeId, ResourceId};
 use ezsdr_kernel::stream::{
@@ -55,7 +56,7 @@ fn t(ticks: i64) -> TimePoint {
 
 #[test]
 fn sc_02_scalar_equality_is_exact_across_int_and_float() {
-    use ezsdr_kernel::contract::{DataContract, DataContractId, Scalar};
+    use ezsdr_kernel::contract::{DataContract, DataContractId};
     // OV-15a accepts that `20` and `20.0` are one value with one canonical form and
     // one hash. It does **not** accept that two values with *different* canonical
     // forms compare equal: comparing through `as f64` made 2^53+1 equal to 2^53, so
@@ -64,23 +65,23 @@ fn sc_02_scalar_equality_is_exact_across_int_and_float() {
     // it with no diagnostic. Equality was also not transitive.
     assert_eq!(
         Scalar::Int(20),
-        Scalar::Float(20.0),
+        Scalar::try_from(20.0).unwrap(),
         "OV-15a's accepted case"
     );
-    assert_ne!(Scalar::Int(20), Scalar::Float(20.5));
+    assert_ne!(Scalar::Int(20), Scalar::try_from(20.5).unwrap());
     assert_ne!(
         Scalar::Int(9_007_199_254_740_993),
-        Scalar::Float(9_007_199_254_740_992.0),
+        Scalar::try_from(9_007_199_254_740_992.0).unwrap(),
         "2^53+1 is not 2^53"
     );
     assert_eq!(
         Scalar::Int(9_007_199_254_740_992),
-        Scalar::Float(9_007_199_254_740_992.0)
+        Scalar::try_from(9_007_199_254_740_992.0).unwrap()
     );
     // Nothing panics at the edges.
-    assert_ne!(Scalar::Int(1), Scalar::Float(1e30));
-    assert_ne!(Scalar::Int(0), Scalar::Float(f64::NAN));
-    assert_ne!(Scalar::Int(0), Scalar::Float(f64::INFINITY));
+    assert_ne!(Scalar::Int(1), Scalar::try_from(1e30).unwrap());
+    // And a non-finite float is no scalar at all (SB-4).
+    assert!(Scalar::try_from(f64::NAN).is_err() && Scalar::try_from(f64::INFINITY).is_err());
 
     // The rule, not a list of cases: two `Scalar`s are equal **iff** they are the
     // same number, compared exactly. Canonical form is *document* identity and is a
@@ -106,7 +107,7 @@ fn sc_02_scalar_equality_is_exact_across_int_and_float() {
         ),
     ];
     for (a, b, want) in vectors {
-        let (si, sf) = (Scalar::Int(a), Scalar::Float(b));
+        let (si, sf) = (Scalar::Int(a), Scalar::try_from(b).unwrap());
         assert_eq!(si == sf, want, "Int({a}) vs Float({b})");
         // OV-15a's coincidence, which holds while |v| <= 2^53 and not above it.
         let one_form = ezsdr_kernel::hash::ContentHash::of(&si).ok()
@@ -128,7 +129,7 @@ fn sc_02_scalar_equality_is_exact_across_int_and_float() {
     reg.register(of(Scalar::Int(9_007_199_254_740_993)))
         .expect("first");
     assert!(
-        reg.register(of(Scalar::Float(9_007_199_254_740_992.0)))
+        reg.register(of(Scalar::try_from(9_007_199_254_740_992.0).unwrap()))
             .is_err(),
         "a different definition under an existing id fails"
     );
@@ -145,7 +146,7 @@ fn sc_04_standard_contracts_fixture() {
         cf32.attributes.get("bytes_per_sample"),
         Some(&Scalar::Int(8))
     );
-    assert_eq!(cf32.attributes.get("full_scale"), Some(&Scalar::Float(1.0)));
+    assert_eq!(cf32.attributes.get("full_scale"), Some(&Scalar::try_from(1.0).unwrap()));
     assert_eq!(
         cf32.attributes.get("layout"),
         Some(&Scalar::Str("planar".to_owned()))
@@ -162,7 +163,7 @@ fn sc_04_standard_contracts_fixture() {
     );
     assert_eq!(
         sc16.attributes.get("full_scale"),
-        Some(&Scalar::Float(32767.0))
+        Some(&Scalar::try_from(32767.0).unwrap())
     );
     assert!(sc16.compatible_from.is_empty());
 }
@@ -177,7 +178,7 @@ fn sc_02_contract_registry_conflict() {
         "an identical re-registration is a no-op"
     );
     c.attributes
-        .insert("full_scale".to_owned(), Scalar::Float(2.0));
+        .insert("full_scale".to_owned(), Scalar::try_from(2.0).unwrap());
     assert!(reg.register(c).is_err());
 }
 

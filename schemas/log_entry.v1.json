@@ -60,6 +60,11 @@
       "description": "`sha256:<64 lowercase hex>`, matching `^sha256:[0-9a-f]{64}$`. The algorithm is\nnamed in the value so a later algorithm is an additive change (OV-14, SB-1).",
       "type": "string"
     },
+    "Finite": {
+      "description": "A finite 64-bit float: NaN and the infinities are refused, so OV-15's\ncanonicaliser never meets one.\n\nRule: SB-4, OV-15.",
+      "format": "double",
+      "type": "number"
+    },
     "Ident": {
       "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
       "type": "string"
@@ -161,6 +166,28 @@
         "path"
       ],
       "type": "object"
+    },
+    "Scalar": {
+      "anyOf": [
+        {
+          "description": "A boolean.",
+          "type": "boolean"
+        },
+        {
+          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "$ref": "#/$defs/Finite",
+          "description": "A finite float (OV-15)."
+        },
+        {
+          "description": "A string.",
+          "type": "string"
+        }
+      ],
+      "description": "The one scalar type: a `Value`'s scalar, a constraint's and a capability's value,\nand a `DataContract` attribute (SB-4, SB-5, SC-2).\n\nCarries no tag (OV-13's carve-out): a scalar is the value an author wrote, not a\ntwo-field object wrapping it.\n\nRule: SB-4, SB-6, SC-2."
     },
     "SessionAction": {
       "description": "The Session action envelope: a closed set, and **not** the Kernel Action set.\n\nThe Kernel's Actions are what a Reactor emits into the real-time path, while a\nlease operation or a recorder request is a control-path act with no real-time\nmeaning. Each Session Action compiles to zero or more Kernel Actions, or to a\nLease or Run operation.\n\nOnly the lifecycle verbs are the Kernel's; a domain verb is\na `vocabulary` Session action, and the Vocabulary that registers the verb\ndeclares how it compiles. The Vision's §3 log sketch named `StartRepeat` and\n`Capture` directly before Step 5; here they are `radio.start_repeat` and `sink.capture`,\nbecause a Kernel that enumerated them would need a new variant for the first\nperipheral sweep or calibration verb.\n\nRule: RS-13, RS-13a, decision R3.",
@@ -363,39 +390,25 @@
     "Value": {
       "anyOf": [
         {
-          "description": "A boolean.",
-          "type": "boolean"
+          "$ref": "#/$defs/Scalar",
+          "description": "A scalar."
         },
         {
-          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
-          "format": "int64",
-          "type": "integer"
-        },
-        {
-          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
-          "format": "double",
-          "type": "number"
-        },
-        {
-          "description": "A string.",
-          "type": "string"
-        },
-        {
-          "description": "A list of scalars; nesting deeper is refused (SB-4).",
+          "description": "A list of scalars.",
           "items": {
-            "$ref": "#/$defs/Value"
+            "$ref": "#/$defs/Scalar"
           },
           "type": "array"
         },
         {
           "additionalProperties": {
-            "$ref": "#/$defs/Value"
+            "$ref": "#/$defs/Scalar"
           },
-          "description": "A map of scalars; nesting deeper is refused (SB-4).",
+          "description": "A map of scalars; its keys are ASCII (SB-9a).",
           "type": "object"
         }
       ],
-      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+      "description": "A scalar, or a list or map of scalars. One level is the type: nothing deeper can\nbe built or parsed.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
     },
     "Violation": {
       "additionalProperties": false,

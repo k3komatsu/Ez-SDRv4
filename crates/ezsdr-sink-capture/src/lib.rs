@@ -24,7 +24,7 @@ use ezsdr_kernel::module_api::{
     VocabularyRequirement,
 };
 use ezsdr_kernel::plan::{Fragment, PrepareReport};
-use ezsdr_kernel::spec::{Ident, Key, Namespace, OutputReq, Value};
+use ezsdr_kernel::spec::{Ident, Key, Namespace, OutputReq, Scalar, Value};
 use ezsdr_kernel::stream::{
     BlockFlags, BlockHeader, ContinuityBuilder, ContinuityMap, DataLink, DropCarry, StreamError,
 };
@@ -146,7 +146,7 @@ impl CaptureSink {
             ));
         }
         let dir = match binding.selector.get(&Ident::parse("dir").expect("a valid selector key")) {
-            Some(Value::Str(dir)) => PathBuf::from(dir),
+            Some(Value::Scalar(Scalar::Str(dir))) => PathBuf::from(dir),
             _ => {
                 return Err(ModuleError::rejected(
                     "HD-8: selector must contain exactly the `dir` string",
@@ -208,7 +208,7 @@ impl CaptureSink {
                 let request = self.received;
                 self.received += 1;
                 match value {
-                    Value::Int(n) if n >= 1 => {
+                    Value::Scalar(Scalar::Int(n)) if n >= 1 => {
                         self.queue
                             .push_back(Capture::new(None, n as u64, at, Some(request)));
                     }
@@ -515,7 +515,7 @@ impl Sink for CaptureSink {
                 .params
                 .get(&Key::parse(CAPTURE_SAMPLES).expect("a valid Sink key"))
             {
-                Some(Value::Int(n)) if *n >= 1 => Some(*n as u64),
+                Some(Value::Scalar(Scalar::Int(n))) if *n >= 1 => Some(*n as u64),
                 Some(_) => {
                     return Err(ModuleError::rejected(
                         "HD-9: sink.capture_samples must be a positive Int",

@@ -12,7 +12,7 @@
               "type": "string"
             },
             "value": {
-              "$ref": "#/$defs/Value",
+              "$ref": "#/$defs/Scalar",
               "description": "The value."
             }
           },
@@ -31,11 +31,11 @@
               "type": "string"
             },
             "max": {
-              "$ref": "#/$defs/Value",
+              "$ref": "#/$defs/Scalar",
               "description": "Upper bound."
             },
             "min": {
-              "$ref": "#/$defs/Value",
+              "$ref": "#/$defs/Scalar",
               "description": "Lower bound."
             }
           },
@@ -57,7 +57,7 @@
             "values": {
               "description": "The declared values.",
               "items": {
-                "$ref": "#/$defs/Value"
+                "$ref": "#/$defs/Scalar"
               },
               "type": "array"
             }
@@ -69,6 +69,11 @@
           "type": "object"
         }
       ]
+    },
+    "Finite": {
+      "description": "A finite 64-bit float: NaN and the infinities are refused, so OV-15's\ncanonicaliser never meets one.\n\nRule: SB-4, OV-15.",
+      "format": "double",
+      "type": "number"
     },
     "MemoryDomainId": {
       "additionalProperties": false,
@@ -124,7 +129,7 @@
       "minimum": 0,
       "type": "integer"
     },
-    "Value": {
+    "Scalar": {
       "anyOf": [
         {
           "description": "A boolean.",
@@ -136,30 +141,15 @@
           "type": "integer"
         },
         {
-          "description": "A finite float; a non-finite one is refused rather than written as `null`,\nbecause a `Value` reaches the sealed Manifest through `prepare.effective`,\nthe coercion records and the action log (OV-15, X9).",
-          "format": "double",
-          "type": "number"
+          "$ref": "#/$defs/Finite",
+          "description": "A finite float (OV-15)."
         },
         {
           "description": "A string.",
           "type": "string"
-        },
-        {
-          "description": "A list of scalars; nesting deeper is refused (SB-4).",
-          "items": {
-            "$ref": "#/$defs/Value"
-          },
-          "type": "array"
-        },
-        {
-          "additionalProperties": {
-            "$ref": "#/$defs/Value"
-          },
-          "description": "A map of scalars; nesting deeper is refused (SB-4).",
-          "type": "object"
         }
       ],
-      "description": "A scalar, or a list or map of scalars nested at most one level.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+      "description": "The one scalar type: a `Value`'s scalar, a constraint's and a capability's value,\nand a `DataContract` attribute (SB-4, SB-5, SC-2).\n\nCarries no tag (OV-13's carve-out): a scalar is the value an author wrote, not a\ntwo-field object wrapping it.\n\nRule: SB-4, SB-6, SC-2."
     },
     "Version": {
       "additionalProperties": false,

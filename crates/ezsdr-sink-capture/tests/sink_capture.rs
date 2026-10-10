@@ -325,10 +325,10 @@ fn binding(dir: &Path, extra_selector: bool, profile: Option<ezsdr_kernel::modul
     let descriptor = descriptor();
     let mut selector = BTreeMap::from([(
         ident("dir"),
-        Value::Str(dir.to_string_lossy().into_owned()),
+        Value::from(dir.to_string_lossy().into_owned()),
     )]);
     if extra_selector {
-        selector.insert(ident("unused"), Value::Int(1));
+        selector.insert(ident("unused"), Value::from(1));
     }
     Binding {
         module: ModuleRef {
@@ -377,7 +377,7 @@ fn attached(component: &str, port: &str, endpoint: Endpoint) -> AttachedPort {
 }
 
 fn sample_count(count: i64) -> BTreeMap<Key, Value> {
-    BTreeMap::from([(key(CAPTURE_SAMPLES), Value::Int(count))])
+    BTreeMap::from([(key(CAPTURE_SAMPLES), Value::from(count))])
 }
 
 fn request(n: Value, at: Option<AbsoluteDeadline>) -> Action {
@@ -534,7 +534,7 @@ fn hd_09_prepare_cases() {
         .expect("valid binding");
     assert!(unknown
         .prepare(
-            &fragment(BTreeMap::from([(key("other.key"), Value::Int(1))])),
+            &fragment(BTreeMap::from([(key("other.key"), Value::from(1))])),
             env.context(vec![one.clone()]),
         )
         .is_err());
@@ -553,7 +553,7 @@ fn hd_09_prepare_cases() {
 fn hd_10_capture_of_n_samples_across_jittered_blocks() {
     let mut rig = Rig::new("jittered", BTreeMap::new());
     let at = AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 123));
-    rig.env.actions.push(request(Value::Int(5_000), Some(at)));
+    rig.env.actions.push(request(Value::from(5_000), Some(at)));
     let lengths = [1_u32, 7, 1_999, 3, 1_024, 67, 3_000, 3_899];
     let mut first = 0_i64;
     for len in lengths {
@@ -627,11 +627,11 @@ fn hd_10_a_capture_spans_a_gap_and_a_clock_change() {
 fn hd_10_session_requests_are_sequential() {
     let mut rig = Rig::new("sequential", BTreeMap::new());
     rig.env.actions.push(request(
-        Value::Int(100),
+        Value::from(100),
         Some(AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 100))),
     ));
     rig.env.actions.push(request(
-        Value::Int(100),
+        Value::from(100),
         Some(AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 150))),
     ));
     rig.push_ramp(0, 500);
@@ -646,7 +646,7 @@ fn hd_10_session_requests_are_sequential() {
 fn hd_10_the_own_capture_comes_first() {
     let mut rig = Rig::new("own-first", sample_count(50));
     rig.env.actions.push(request(
-        Value::Int(20),
+        Value::from(20),
         Some(AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 0))),
     ));
     rig.push_ramp(0, 100);
@@ -715,7 +715,7 @@ fn hd_10_a_capture_keeps_of_a_leading_gap_only_what_follows_its_start() {
     };
     let mut rig = Rig::new("leading-gap-at", BTreeMap::new());
     let at = AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 30));
-    rig.env.actions.push(request(Value::Int(10), Some(at)));
+    rig.env.actions.push(request(Value::from(10), Some(at)));
     let block = gap(&mut rig);
     rig.link.publish(block);
     rig.step().expect("one block");
@@ -738,7 +738,7 @@ fn hd_10_a_capture_keeps_of_a_leading_gap_only_what_follows_its_start() {
     // A start instant at the block's first sample keeps none of the gap either.
     let mut rig = Rig::new("leading-gap-at-start", BTreeMap::new());
     let at = AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 40));
-    rig.env.actions.push(request(Value::Int(10), Some(at)));
+    rig.env.actions.push(request(Value::from(10), Some(at)));
     let block = gap(&mut rig);
     rig.link.publish(block);
     rig.step().expect("one block");
@@ -753,7 +753,7 @@ fn hd_10_a_capture_keeps_of_a_leading_gap_only_what_follows_its_start() {
         ramp_block(&mut rig.pool, rig.env.sample_clock, 40, 40.0, 10, flags, None)
     };
     let mut rig = Rig::new("leading-gap-unknown-at", BTreeMap::new());
-    rig.env.actions.push(request(Value::Int(10), Some(at)));
+    rig.env.actions.push(request(Value::from(10), Some(at)));
     let block = unknown(&mut rig);
     rig.link.publish(block);
     rig.step().expect("one block");
@@ -792,14 +792,14 @@ fn hd_11_an_unexpected_action_is_rejected() {
 #[test]
 fn hd_14_a_bad_capture_value_is_an_event_not_a_failure() {
     let mut rig = Rig::new("bad-capture-values", BTreeMap::new());
-    rig.env.actions.push(request(Value::Int(0), None));
-    rig.env.actions.push(request(Value::Num(5.0), None));
+    rig.env.actions.push(request(Value::from(0), None));
+    rig.env.actions.push(request(Value::num(5.0).unwrap(), None));
     assert!(rig.step().expect("bad values are rejected events"));
     rig.env.actions.push(request(
-        Value::Int(5),
+        Value::from(5),
         Some(AbsoluteDeadline::new(TimePoint::new(rig.env.unrelated_root, 0))),
     ));
-    rig.env.actions.push(request(Value::Int(10), None));
+    rig.env.actions.push(request(Value::from(10), None));
     rig.push_ramp(0, 10);
     assert!(rig.step().expect("unrelated time is rejected and valid request runs"));
     // Phase 6, VD-1: the served request is announced too (HD-16); the three refusals remain.
@@ -820,7 +820,7 @@ fn hd_14_a_bad_capture_value_is_an_event_not_a_failure() {
 fn hd_13_partial_on_abort_and_on_an_unfinished_capture() {
     let mut aborted = Rig::new("partial-abort", sample_count(5_000));
     aborted.push_ramp(0, 4_000);
-    aborted.env.actions.push(request(Value::Int(100), None));
+    aborted.env.actions.push(request(Value::from(100), None));
     aborted.step().expect("partial samples");
     let artifacts = aborted.stop(StopMode::Abort);
     assert_eq!(artifacts.len(), 1);
@@ -876,7 +876,7 @@ fn hd_11_targeted_stop_keeps_carry_on_the_finished_capture() {
     rig.link.publish(overflow);
     assert_eq!(rig.push_ramp(54, 2), PublishOutcome::DroppedOldest);
     rig.env.actions.push(Action::Stop { target: Some(ResourceId::parse("sink/rec").unwrap()) });
-    rig.env.actions.push(request(Value::Int(2), None));
+    rig.env.actions.push(request(Value::from(2), None));
     rig.step().expect("Stop then a new capture request");
     let artifacts = rig.stop(StopMode::Orderly);
     assert_eq!(artifacts.len(), 2);
@@ -937,12 +937,12 @@ fn hd_11_a_stop_discards_unstarted_requests_and_later_ones_are_served() {
     let mut rig = Rig::new("stop-discards-queue", sample_count(8));
     rig.push_ramp(0, 4);
     rig.step().expect("start the own capture");
-    rig.env.actions.push(request(Value::Int(3), None));
+    rig.env.actions.push(request(Value::from(3), None));
     rig.env.actions.push(Action::Stop {
         target: Some(ResourceId::parse("sink/rec").expect("Sink target")),
     });
     rig.step().expect("the Stop finishes the own capture");
-    rig.env.actions.push(request(Value::Int(2), None));
+    rig.env.actions.push(request(Value::from(2), None));
     rig.push_ramp(4, 6);
     rig.step().expect("a request after the Stop is served");
 
@@ -1301,7 +1301,7 @@ fn hd_15_an_sc16_capture_is_ci16_le() {
 #[test]
 fn hd_16_a_written_capture_is_announced() {
     let mut rig = Rig::new("capture-written", BTreeMap::new());
-    rig.env.actions.push(request(Value::Int(1_000), None));
+    rig.env.actions.push(request(Value::from(1_000), None));
     rig.push_ramp(0, 600);
     rig.step().expect("the capture starts");
     assert!(rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).is_empty(), "nothing is announced before the capture is recorded");
@@ -1317,7 +1317,7 @@ fn hd_16_a_written_capture_is_announced() {
     assert!(path.with_extension("sigmf-meta").exists(), "the metadata is written before the announcement");
 
     // A second request, finished partial by a Stop for the Sink (HD-11).
-    rig.env.actions.push(request(Value::Int(1_000), None));
+    rig.env.actions.push(request(Value::from(1_000), None));
     rig.push_ramp(1_200, 300);
     rig.step().expect("the second capture starts");
     rig.env.actions.push(Action::Stop { target: Some(ResourceId::parse("sink/rec").expect("Sink target")) });
@@ -1340,10 +1340,10 @@ fn hd_16_every_capture_request_is_numbered() {
     let mut rig = Rig::new("numbered", sample_count(4));
     rig.push_ramp(0, 4);
     rig.step().expect("the own capture completes");
-    rig.env.actions.push(request(Value::Int(0), None));
-    rig.env.actions.push(request(Value::Num(5.0), None));
-    rig.env.actions.push(request(Value::Int(5), Some(AbsoluteDeadline::new(TimePoint::new(rig.env.unrelated_root, 0)))));
-    rig.env.actions.push(request(Value::Int(3), None));
+    rig.env.actions.push(request(Value::from(0), None));
+    rig.env.actions.push(request(Value::num(5.0).unwrap(), None));
+    rig.env.actions.push(request(Value::from(5), Some(AbsoluteDeadline::new(TimePoint::new(rig.env.unrelated_root, 0)))));
+    rig.env.actions.push(request(Value::from(3), None));
     rig.env.actions.push(tx_burst());
     rig.push_ramp(4, 10);
     rig.step().expect("the requests are handled");
@@ -1363,8 +1363,8 @@ fn hd_16_a_discarded_request_is_answered() {
     // A Stop for the Sink discards the requests that have not started; each is answered
     // with its number, so a client does not wait out its timeout (Review I, P2-1).
     let mut rig = Rig::new("discarded", BTreeMap::new());
-    rig.env.actions.push(request(Value::Int(8), None));
-    rig.env.actions.push(request(Value::Int(3), None));
+    rig.env.actions.push(request(Value::from(8), None));
+    rig.env.actions.push(request(Value::from(3), None));
     rig.push_ramp(0, 4);
     rig.step().expect("the first request starts");
     rig.env.actions.push(Action::Stop { target: Some(ResourceId::parse("sink/rec").expect("Sink target")) });
@@ -1393,7 +1393,7 @@ fn hd_10_a_colliding_request_preserves_the_completed_recording() {
     let meta_path = path.with_extension("sigmf-meta");
     let meta = fs::read(&meta_path).unwrap();
 
-    rig.env.actions.push(request(Value::Int(3), None));
+    rig.env.actions.push(request(Value::from(3), None));
     rig.push_ramp(2, 3);
     assert!(rig.step().unwrap_err().message.contains("cannot create"));
     assert_eq!(fs::read(path).unwrap(), data);
@@ -1419,7 +1419,7 @@ fn hd_10_contract_changes_keep_drop_carry_on_the_outgoing_capture() {
             let old_clock = rig.env.sample_clock;
             publish(&mut rig, old, old_clock, 0, BlockFlags::NONE, None);
             rig.step().unwrap();
-            if queued { rig.env.actions.push(request(Value::Int(2), None)); }
+            if queued { rig.env.actions.push(request(Value::from(2), None)); }
             assert_eq!(publish(&mut rig, old, old_clock, 12,
                 BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(10)), PublishOutcome::Accepted);
             let new_clock = rig.env.changed_clock;

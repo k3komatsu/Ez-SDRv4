@@ -11,13 +11,13 @@ use crate::id::ResourceId;
 use crate::module_api::{IslandDecl, ModuleRef, ProfileRef};
 use crate::spec::{
     CapabilityValue, Coercion, Constraint, Ident, Key, KeyDecl, Namespace, RejectedConstraint,
-    SpecError, Value, ValueKind, Warning, check_top_level, check_version,
+    Scalar, SpecError, Value, ValueKind, Warning, check_top_level, check_version,
 };
 
 /// Tests every candidate so a later kind mismatch is not hidden by an earlier hit (SB-6).
 fn any_evaluating_all<'a>(
-    mut values: impl Iterator<Item = &'a Value>,
-    mut predicate: impl FnMut(&Value) -> Result<bool, SpecError>,
+    mut values: impl Iterator<Item = &'a Scalar>,
+    mut predicate: impl FnMut(&Scalar) -> Result<bool, SpecError>,
 ) -> Result<bool, SpecError> {
     values.try_fold(false, |found, value| Ok(predicate(value)? | found))
 }
@@ -204,8 +204,8 @@ pub fn start_lead_ns(
 /// Rule: SB-6.
 pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecError> {
     use std::cmp::Ordering::*;
-    let cmp = |a: &Value, b: &Value| -> Result<std::cmp::Ordering, SpecError> {
-        a.partial_cmp_scalar(b).ok_or_else(|| SpecError::KeyShape {
+    let cmp = |a: &Scalar, b: &Scalar| -> Result<std::cmp::Ordering, SpecError> {
+        a.partial_cmp(b).ok_or_else(|| SpecError::KeyShape {
             key: String::new(),
             expected: format!("{:?}", a.kind()),
             found: format!("{:?}", b.kind()),
@@ -218,8 +218,8 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
     // a float's canonical text is the shortest decimal that names the `f64` and not the
     // number's exact decimal (finding D50). The kind check still runs through `cmp`,
     // because a capability declared in the wrong kind is malformed rather than unequal.
-    let same = |a: &Value, b: &Value| -> Result<bool, SpecError> { Ok(cmp(a, b)? == Equal) };
-    let within = |v: &Value, lo: Option<&Value>, hi: Option<&Value>| -> Result<bool, SpecError> {
+    let same = |a: &Scalar, b: &Scalar| -> Result<bool, SpecError> { Ok(cmp(a, b)? == Equal) };
+    let within = |v: &Scalar, lo: Option<&Scalar>, hi: Option<&Scalar>| -> Result<bool, SpecError> {
         if let Some(lo) = lo {
             if cmp(v, lo)? == Less {
                 return Ok(false);
@@ -304,8 +304,6 @@ pub fn check_constraint_kind(decl: &KeyDecl, c: &Constraint) -> Result<(), SpecE
                 | (ValueKind::Num, ValueKind::Num | ValueKind::Int)
                 | (ValueKind::Str, ValueKind::Str)
                 | (ValueKind::Bool, ValueKind::Bool)
-                | (ValueKind::List, ValueKind::List)
-                | (ValueKind::Map, ValueKind::Map)
         );
         if !ok {
             return Err(SpecError::KeyShape {

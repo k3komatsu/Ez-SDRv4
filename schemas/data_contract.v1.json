@@ -4,28 +4,32 @@
       "description": "A namespaced contract id matching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`,\nfor example `ezsdr.stream.cf32`.\n\nRule: SB-1, SC-2.",
       "type": "string"
     },
+    "Finite": {
+      "description": "A finite 64-bit float: NaN and the infinities are refused, so OV-15's\ncanonicaliser never meets one.\n\nRule: SB-4, OV-15.",
+      "format": "double",
+      "type": "number"
+    },
     "Scalar": {
       "anyOf": [
+        {
+          "description": "A boolean.",
+          "type": "boolean"
+        },
         {
           "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
           "format": "int64",
           "type": "integer"
         },
         {
-          "description": "A 64-bit float, written per RFC 8785's number rule; a non-finite one is\nrefused rather than written as `null` (OV-15).",
-          "format": "double",
-          "type": "number"
+          "$ref": "#/$defs/Finite",
+          "description": "A finite float (OV-15)."
         },
         {
           "description": "A string.",
           "type": "string"
-        },
-        {
-          "description": "A boolean.",
-          "type": "boolean"
         }
       ],
-      "description": "An attribute value in a `DataContract`. The Kernel stores these and never\ninterprets them, which is what keeps it from becoming a type system (SC-2).\n\nCarries no tag (OV-13's carve-out): an attribute value is the scalar an author\nwrote, not a two-field object wrapping it."
+      "description": "The one scalar type: a `Value`'s scalar, a constraint's and a capability's value,\nand a `DataContract` attribute (SB-4, SB-5, SC-2).\n\nCarries no tag (OV-13's carve-out): a scalar is the value an author wrote, not a\ntwo-field object wrapping it.\n\nRule: SB-4, SB-6, SC-2."
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -36,7 +40,7 @@
       "additionalProperties": {
         "$ref": "#/$defs/Scalar"
       },
-      "description": "Attributes fixed at registration, for example `bytes_per_sample` (SC-4).",
+      "description": "Attributes fixed at registration, for example `bytes_per_sample`. The Kernel\nstores these and never interprets them, which is what keeps it from becoming\na type system (SC-2, SC-4).",
       "type": "object"
     },
     "compatible_from": {

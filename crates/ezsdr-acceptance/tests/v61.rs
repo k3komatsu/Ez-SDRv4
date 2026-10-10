@@ -57,7 +57,7 @@ fn v61_02_capture_starts_at_the_requested_sample_index() {
                 at: Some(TimePoint::new(rx_clock.domain, 12_345)),
                 params: BTreeMap::from([(
                     Key::parse("sink.capture_samples").unwrap(),
-                    Value::Int(100),
+                    Value::from(100),
                 )]),
             },
             None,

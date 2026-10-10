@@ -3,6 +3,7 @@
 //! and prints every other divergence, which lists today's issues mechanically; step 2
 //! gates every class.
 
+use ezsdr_kernel::spec::Scalar;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -319,7 +320,7 @@ fn run(profile: &str, sequence: &Sequence) -> Record {
     let module = ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(2, 0, 0) };
     let binding = Binding {
         module: module.clone(),
-        selector: BTreeMap::from([(Ident::parse("id").unwrap(), Value::Str("mock".to_owned()))]),
+        selector: BTreeMap::from([(Ident::parse("id").unwrap(), Value::from("mock".to_owned()))]),
         profile: Some(ProfileRef { name: profile.to_owned(), version: Version::new(2, 0, 0) }),
         feed: None,
     };
@@ -338,7 +339,7 @@ fn run(profile: &str, sequence: &Sequence) -> Record {
     let actions = Arc::new(Queue::default());
     let link = Arc::new(Headers::default());
     let faults: Vec<_> = sequence.faults.iter().map(|(at, fault)| serde_json::json!({ "at_ns": at, "fault": name(*fault), "target": "radio" })).collect();
-    let constraints = [("radio.rx.channels", Value::Int(1)), ("radio.tx.channels", Value::Int(1))]
+    let constraints = [("radio.rx.channels", Scalar::from(1)), ("radio.tx.channels", Scalar::from(1))]
         .map(|(name, value)| (key(name), Constraint::Eq { value }));
     let ctx = PrepareContext {
         run: RunId::from_string("timeline".to_owned()),
@@ -381,13 +382,13 @@ fn run(profile: &str, sequence: &Sequence) -> Record {
                 Op::StartRx => Action::Command { target: rid("mock/rx"), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None },
                 Op::Cold { direction, change, at_ns } => {
                     let (name, value) = match change {
-                        Change::Channels(n) => ("channels", Value::Int(i64::from(n))),
-                        Change::Rate(rate) => ("sample_rate_hz", Value::Num(rate as f64)),
+                        Change::Channels(n) => ("channels", Value::from(i64::from(n))),
+                        Change::Rate(rate) => ("sample_rate_hz", Value::num(rate as f64).unwrap()),
                     };
                     Action::UpdateParameter { target: rid("mock"), key: key(&format!("radio.{}.{name}", side(direction))), value, class: UpdateClass::Cold, at: at(at_ns) }
                 }
                 Op::Timed { direction, gain_db, at_ns } => Action::UpdateParameter {
-                    target: rid("mock"), key: key(&format!("radio.{}.gain_db", side(direction))), value: Value::Num(gain_db), class: UpdateClass::HardwareTimed, at: at(at_ns),
+                    target: rid("mock"), key: key(&format!("radio.{}.gain_db", side(direction))), value: Value::num(gain_db).unwrap(), class: UpdateClass::HardwareTimed, at: at(at_ns),
                 },
             });
         }

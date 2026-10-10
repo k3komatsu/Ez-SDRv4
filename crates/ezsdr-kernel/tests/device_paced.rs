@@ -886,7 +886,7 @@ fn gain(value: f64) -> SessionAction {
     SessionAction::SetParameter {
         target: ResourceId::parse("radio").unwrap(),
         key: Key::parse("test.gain").unwrap(),
-        value: Value::Num(value),
+        value: Value::num(value).unwrap(),
     }
 }
 
@@ -947,7 +947,7 @@ fn kg_04_the_next_admission_sees_the_state_the_previous_action_made() {
                 SessionAction::SetParameter {
                     target: ResourceId::parse("radio").unwrap(),
                     key: Key::parse("test.tx_clock").unwrap(),
-                    value: Value::Int(10),
+                    value: Value::from(10),
                 },
                 None,
             )
@@ -1028,7 +1028,7 @@ fn kc_21a_a_module_s_own_submission_is_not_waited_for() {
     let action = Action::UpdateParameter {
         target: ResourceId::parse("radio").unwrap(),
         key: Key::parse("test.gain").unwrap(),
-        value: Value::Num(3.0),
+        value: Value::num(3.0).unwrap(),
         class: UpdateClass::HardwareTimed,
         at: None,
     };

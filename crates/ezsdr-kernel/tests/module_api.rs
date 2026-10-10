@@ -2,6 +2,7 @@
 
 mod support;
 
+use ezsdr_kernel::spec::Scalar;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
@@ -427,7 +428,7 @@ fn ma_11_coerce_is_pure() {
         constraints: [(
             key("test.grid"),
             Constraint::Eq {
-                value: Value::Num(19.5),
+                value: Scalar::try_from(19.5).unwrap(),
             },
         )]
         .into_iter()
@@ -439,7 +440,7 @@ fn ma_11_coerce_is_pure() {
         a, b,
         "two calls with the same request return identical reports"
     );
-    assert_eq!(a.applied[&key("test.grid")], Value::Num(20.0));
+    assert_eq!(a.applied[&key("test.grid")], Value::num(20.0).unwrap());
 }
 
 #[test]
@@ -450,7 +451,7 @@ fn ma_12_prepare_matches_coerce() {
         constraints: [(
             key("test.grid"),
             Constraint::Eq {
-                value: Value::Num(19.5),
+                value: Scalar::try_from(19.5).unwrap(),
             },
         )]
         .into_iter()
@@ -490,7 +491,7 @@ fn ma_12_prepare_that_disagrees_with_coerce_is_visible() {
         constraints: [(
             key("test.grid"),
             Constraint::Eq {
-                value: Value::Num(19.5),
+                value: Scalar::try_from(19.5).unwrap(),
             },
         )]
         .into_iter()
@@ -514,52 +515,52 @@ fn ma_12_prepare_that_disagrees_with_coerce_is_visible() {
 
 #[test]
 fn ma_12_discrete_capabilities_do_not_cover_a_ranges_interior() {
-    let declared = CapabilityValue::AnyOf { values: vec![Value::Int(1), Value::Int(3)] };
-    let widened = CapabilityValue::Range { min: Value::Int(1), max: Value::Int(3) };
-    let interior = Constraint::Eq { value: Value::Int(2) };
+    let declared = CapabilityValue::AnyOf { values: vec![Scalar::from(1), Scalar::from(3)] };
+    let widened = CapabilityValue::Range { min: Scalar::from(1), max: Scalar::from(3) };
+    let interior = Constraint::Eq { value: Scalar::from(2) };
     assert!(!ezsdr_kernel::binding::satisfies(&interior, &declared).unwrap());
     assert!(ezsdr_kernel::binding::satisfies(&interior, &widened).unwrap());
     assert!(check_effective_narrows(&declared, &widened).is_err());
 
     // Int bounds still permit fractional Num values under SB-6.
-    let adjacent = CapabilityValue::AnyOf { values: vec![Value::Int(1), Value::Int(2)] };
-    let range = CapabilityValue::Range { min: Value::Int(1), max: Value::Int(2) };
+    let adjacent = CapabilityValue::AnyOf { values: vec![Scalar::from(1), Scalar::from(2)] };
+    let range = CapabilityValue::Range { min: Scalar::from(1), max: Scalar::from(2) };
     assert!(check_effective_narrows(&adjacent, &range).is_err());
 
-    let singleton = CapabilityValue::Range { min: Value::Int(3), max: Value::Num(3.0) };
+    let singleton = CapabilityValue::Range { min: Scalar::from(3), max: Scalar::try_from(3.0).unwrap() };
     assert!(check_effective_narrows(&declared, &singleton).is_ok());
-    assert!(check_effective_narrows(&CapabilityValue::One { value: Value::Num(3.0) }, &singleton).is_ok());
+    assert!(check_effective_narrows(&CapabilityValue::One { value: Scalar::try_from(3.0).unwrap() }, &singleton).is_ok());
 
-    let booleans = CapabilityValue::AnyOf { values: vec![Value::Bool(false), Value::Bool(true)] };
-    let both = CapabilityValue::Range { min: Value::Bool(false), max: Value::Bool(true) };
+    let booleans = CapabilityValue::AnyOf { values: vec![Scalar::from(false), Scalar::from(true)] };
+    let both = CapabilityValue::Range { min: Scalar::from(false), max: Scalar::from(true) };
     assert!(check_effective_narrows(&booleans, &both).is_ok());
-    assert!(check_effective_narrows(&CapabilityValue::One { value: Value::Bool(false) }, &both).is_err());
-    let reversed = CapabilityValue::Range { min: Value::Int(3), max: Value::Int(1) };
-    let ordered = CapabilityValue::Range { min: Value::Int(1), max: Value::Int(3) };
+    assert!(check_effective_narrows(&CapabilityValue::One { value: Scalar::from(false) }, &both).is_err());
+    let reversed = CapabilityValue::Range { min: Scalar::from(3), max: Scalar::from(1) };
+    let ordered = CapabilityValue::Range { min: Scalar::from(1), max: Scalar::from(3) };
     assert!(check_effective_narrows(&ordered, &reversed).is_err());
 }
 
 #[test]
 fn ma_12_narrowing_triggers_readmission() {
     let declared = CapabilityValue::Range {
-        min: Value::Int(1),
-        max: Value::Int(8),
+        min: Scalar::from(1),
+        max: Scalar::from(8),
     };
     // Narrowing is allowed.
     let narrowed = CapabilityValue::Range {
-        min: Value::Int(2),
-        max: Value::Int(4),
+        min: Scalar::from(2),
+        max: Scalar::from(4),
     };
     assert!(check_effective_narrows(&declared, &narrowed).is_ok());
     // Widening is refused.
     let widened = CapabilityValue::Range {
-        min: Value::Int(1),
-        max: Value::Int(16),
+        min: Scalar::from(1),
+        max: Scalar::from(16),
     };
     assert!(check_effective_narrows(&declared, &widened).is_err());
     // Re-admission over the narrowed `effective` fails the Spec's own constraint.
     let asked = Constraint::Eq {
-        value: Value::Int(8),
+        value: Scalar::from(8),
     };
     assert_eq!(
         ezsdr_kernel::binding::satisfies(&asked, &declared),
@@ -696,7 +697,7 @@ fn ma_14_actions_arrive_only_after_admission() {
         at: AbsoluteDeadline::new(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 10)),
         requested_at: None,
         late_policy: LatePolicy::SendAsapAndFlag,
-        metadata: [(key("test.grid"), Value::Num(40.0))].into_iter().collect(),
+        metadata: [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect(),
     };
     assert!(submitter.submit(rejected).is_err());
     // The submitter this test *did* submit to is the carrier: the rejected Action did
@@ -727,7 +728,7 @@ fn ma_14a_reactor_emits_through_admit() {
         at: AbsoluteDeadline::new(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 10)),
         requested_at: None,
         late_policy: LatePolicy::SendAsapAndFlag,
-        metadata: [(key("test.grid"), Value::Num(grid))].into_iter().collect(),
+        metadata: [(key("test.grid"), Value::num(grid).unwrap())].into_iter().collect(),
     };
     // Inside the envelope: admitted and dispatched.
     assert!(submitter.submit(burst(10.0)).is_ok());
@@ -776,7 +777,7 @@ fn component(name: &str) -> ComponentDescriptor {
             key: key("test.flag"),
             schema: serde_json::json!({ "type": "boolean" }),
             update_class: UpdateClass::BlockBoundary,
-            default: Value::Bool(false),
+            default: Value::from(false),
         }],
         timing: ComponentTiming::default(),
         requires: ComponentRequires {

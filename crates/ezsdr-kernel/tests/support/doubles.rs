@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+use ezsdr_kernel::spec::Scalar;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -221,14 +222,14 @@ impl AdmissionCheck for TestLimitsCheck {
             }
             if gate
                 .as_ref()
-                .is_some_and(|gate| !matches!(merged.get(gate), Some(Value::Bool(true))))
+                .is_some_and(|gate| !matches!(merged.get(gate), Some(Value::Scalar(Scalar::Bool(true)))))
             {
                 continue;
             }
             for (k, v) in merged.iter().filter(|(k, _)| k.as_str() == "test.grid") {
                 let n = match v {
-                    Value::Num(n) => *n,
-                    Value::Int(i) => *i as f64,
+                    Value::Scalar(Scalar::Num(n)) => n.get(),
+                    Value::Scalar(Scalar::Int(i)) => *i as f64,
                     _ => continue,
                 };
                 if n > ceiling {
@@ -313,7 +314,7 @@ impl TestProvider {
             capabilities: [(
                 key("test.count"),
                 CapabilityValue::One {
-                    value: Value::Int(count),
+                    value: Scalar::from(count),
                 },
             )]
             .into_iter()
@@ -356,7 +357,7 @@ impl TestProvider {
                         (
                             key("test.count"),
                             CapabilityValue::One {
-                                value: Value::Int(count),
+                                value: Scalar::from(count),
                             },
                         ),
                         // A grid is a discrete set: a declared continuous range
@@ -365,13 +366,13 @@ impl TestProvider {
                         (
                             key("test.grid"),
                             CapabilityValue::AnyOf {
-                                values: vec![Value::Num(20.0), Value::Num(40.0), Value::Num(100.0)],
+                                values: vec![Scalar::try_from(20.0).unwrap(), Scalar::try_from(40.0).unwrap(), Scalar::try_from(100.0).unwrap()],
                             },
                         ),
                         (
                             key("test.flag"),
                             CapabilityValue::AnyOf {
-                                values: vec![Value::Bool(true), Value::Bool(false)],
+                                values: vec![Scalar::from(true), Scalar::from(false)],
                             },
                         ),
                     ]
@@ -427,7 +428,7 @@ impl TestProvider {
             child.capabilities.insert(
                 key("test.count"),
                 CapabilityValue::One {
-                    value: Value::Int(n),
+                    value: Scalar::from(n),
                 },
             );
         }
@@ -448,7 +449,7 @@ impl TestProvider {
             line.capabilities.insert(
                 key("test.grid"),
                 CapabilityValue::AnyOf {
-                    values: vec![Value::Num(20.0), Value::Num(40.0), Value::Num(100.0)],
+                    values: vec![Scalar::try_from(20.0).unwrap(), Scalar::try_from(40.0).unwrap(), Scalar::try_from(100.0).unwrap()],
                 },
             );
         }
@@ -598,8 +599,8 @@ impl Provider for TestProvider {
         if self.stray_coercion {
             report.coercions.push(Coercion {
                 key: key("test.flag"),
-                requested: Value::Bool(false),
-                applied: Value::Bool(true),
+                requested: Value::from(false),
+                applied: Value::from(true),
                 reason: "a key the request does not name".to_owned(),
             });
         }
@@ -607,25 +608,26 @@ impl Provider for TestProvider {
             let Constraint::Eq { value: v } = c else {
                 continue;
             };
-            if let (true, Some(step), Value::Num(x)) = (k.as_str() == "test.grid", self.grid, v) {
+            if let (true, Some(step), Scalar::Num(x)) = (k.as_str() == "test.grid", self.grid, v) {
+                let x = x.get();
                 let snapped = (x / step).round() * step;
-                report.applied.insert(k.clone(), Value::Num(snapped));
+                report.applied.insert(k.clone(), Value::num(snapped).unwrap());
                 if (snapped - x).abs() > f64::EPSILON {
                     report.coercions.push(Coercion {
                         key: k.clone(),
-                        requested: v.clone(),
-                        applied: Value::Num(snapped),
+                        requested: v.clone().into(),
+                        applied: Value::num(snapped).unwrap(),
                         reason: format!("snapped to a multiple of {step}"),
                     });
                 }
                 continue;
             }
-            report.applied.insert(k.clone(), v.clone());
+            report.applied.insert(k.clone(), v.clone().into());
         }
         if let Some(limit) = self.joint_limit {
             let number = |k: &str| match report.applied.get(&key(k)) {
-                Some(Value::Num(x)) => Some(*x),
-                Some(Value::Int(i)) => Some(*i as f64),
+                Some(Value::Scalar(Scalar::Num(x))) => Some(x.get()),
+                Some(Value::Scalar(Scalar::Int(i))) => Some(*i as f64),
                 _ => None,
             };
             if let (Some(count), Some(grid)) = (number("test.count"), number("test.grid")) {
@@ -978,7 +980,7 @@ pub fn recorder_component(contract: DataContractId) -> ComponentDescriptor {
             key: key("test.capture"),
             schema: serde_json::json!({ "type": "boolean" }),
             update_class: UpdateClass::BlockBoundary,
-            default: Value::Bool(false),
+            default: Value::from(false),
         }],
         timing: ComponentTiming::default(),
         requires: ComponentRequires {
@@ -1110,8 +1112,8 @@ impl ActionSubmitter for TestSubmitter {
     fn submit(&self, action: Action) -> Result<ActionId, Vec<Violation>> {
         if let (Some(ceiling), Action::TxBurst { metadata, .. }) = (self.ceiling, &action) {
             let asked = metadata.get(&key("test.grid")).and_then(|v| match v {
-                Value::Num(n) => Some(*n),
-                Value::Int(i) => Some(*i as f64),
+                Value::Scalar(Scalar::Num(n)) => Some(n.get()),
+                Value::Scalar(Scalar::Int(i)) => Some(*i as f64),
                 _ => None,
             });
             if asked.is_some_and(|n| n > ceiling) {

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::binding::{AdmissionResult, BindingProfile, CheckStage, Violation, satisfies};
 use crate::module_api::ModuleError;
-use crate::spec::{CapabilityValue, Constraint, ExperimentSpec, Namespace, Value};
+use crate::spec::{CapabilityValue, Constraint, ExperimentSpec, Namespace, Scalar, Value};
 
 use super::{CompileInputs, PrepareError, PrepareReport};
 
@@ -13,7 +13,7 @@ pub(super) fn check_effective_narrows(
     declared: &CapabilityValue,
     effective: &CapabilityValue,
 ) -> Result<(), ModuleError> {
-    let within = |value: &Value| {
+    let within = |value: &Scalar| {
         satisfies(
             &Constraint::Eq {
                 value: value.clone(),
@@ -26,7 +26,7 @@ pub(super) fn check_effective_narrows(
         CapabilityValue::One { value } => within(value),
         CapabilityValue::AnyOf { values } => values.iter().all(within),
         CapabilityValue::Range { min, max } => {
-            let order = min.partial_cmp_scalar(max);
+            let order = min.partial_cmp(max);
             // Endpoints prove containment in another range, not in a discrete set.
             // Singletons and booleans have no untested interior values.
             // ponytail: other finite intervals (adjacent strings or floats) are
@@ -36,7 +36,7 @@ pub(super) fn check_effective_narrows(
                 && matches!(order, Some(Less | Equal))
                 && (matches!(declared, CapabilityValue::Range { .. })
                     || order == Some(Equal)
-                    || matches!((min, max), (Value::Bool(_), Value::Bool(_))))
+                    || matches!((min, max), (Scalar::Bool(_), Scalar::Bool(_))))
         }
     };
     if narrows {
@@ -207,10 +207,11 @@ pub(super) fn collect_prepare(
             let Some(applied) = report.effective.get(key) else {
                 continue;
             };
-            let effective = CapabilityValue::One {
-                value: applied.clone(),
+            let narrows = match applied.as_scalar() {
+                Some(value) => check_effective_narrows(declared, &CapabilityValue::One { value: value.clone() }),
+                None => Err(ModuleError::rejected("MA-12: a capability's `effective` value is a scalar".to_owned())),
             };
-            if let Err(e) = check_effective_narrows(declared, &effective) {
+            if let Err(e) = narrows {
                 violations.push(Violation {
                     check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
                     key: Some(key.clone()),
@@ -268,10 +269,10 @@ pub(super) fn collect_prepare(
             let Some(applied) = report.effective.get(key) else {
                 continue;
             };
-            let effective = CapabilityValue::One {
-                value: applied.clone(),
-            };
-            if !satisfies(constraint, &effective).unwrap_or(false) {
+            let satisfied = applied.as_scalar().is_some_and(|value| {
+                satisfies(constraint, &CapabilityValue::One { value: value.clone() }).unwrap_or(false)
+            });
+            if !satisfied {
                 violations.push(Violation {
                     check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
                     key: Some(key.clone()),

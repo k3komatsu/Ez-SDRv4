@@ -10,7 +10,7 @@ use ezsdr_kernel::coordinator::Assembly;
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::module_api::{Authority, Executor, Factories, Link, ModuleRef, ModuleRegistry, Provider, Sink};
 use ezsdr_kernel::policy::EventKindRegistry;
-use ezsdr_kernel::spec::{Ident, Value};
+use ezsdr_kernel::spec::{Ident, Scalar, Value};
 use ezsdr_kernel::time::ClockRegistry;
 
 const RADIO: &str = "ezsdr.radio.mock";
@@ -109,16 +109,16 @@ pub fn assemble(
             }
             UHD => {
                 let selector = |key: &str| match binding.selector.get(&Ident::parse(key).expect("a selector key")) {
-                    Some(Value::Str(value)) => value.clone(),
+                    Some(Value::Scalar(Scalar::Str(value))) => value.clone(),
                     _ => "internal".to_owned(),
                 };
-                let Some(Value::Str(args)) = binding.selector.get(&Ident::parse("args").expect("a selector key")) else {
+                let Some(Value::Scalar(Scalar::Str(args))) = binding.selector.get(&Ident::parse("args").expect("a selector key")) else {
                     return Err(format!("EA-7: {name}: UR-5: the selector needs `args`"));
                 };
                 // UR-7's reopen (design-notes §18): an Authority refused because the X300's
                 // reference PLL did not lock is built again once on a new open of the device,
                 // unless the binding's `reopen_on_unlock` is false; a second refusal stands.
-                let reopen = !matches!(binding.selector.get(&Ident::parse("reopen_on_unlock").expect("a selector key")), Some(Value::Bool(false)));
+                let reopen = !matches!(binding.selector.get(&Ident::parse("reopen_on_unlock").expect("a selector key")), Some(Value::Scalar(Scalar::Bool(false))));
                 let mut first_error: Option<String> = None;
                 loop {
                     let device = match open_device {

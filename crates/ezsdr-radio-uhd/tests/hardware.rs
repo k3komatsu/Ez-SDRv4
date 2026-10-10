@@ -171,7 +171,7 @@ fn hw_b8_leads() {
         let envelope = bench_envelope(&*device);
         let mut run = session(&bench_profile(&*device, &dir, serde_json::json!({}), envelope, true), device);
         past_t0(&mut run, ms(1));
-        assert!(admitted(&run.submit(set("radio.tx.channels", ezsdr_kernel::spec::Value::Int(1)), None).unwrap()));
+        assert!(admitted(&run.submit(set("radio.tx.channels", ezsdr_kernel::spec::Value::from(1)), None).unwrap()));
         let (bytes, _) = waveform_of(&pn(100));
         let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
         let at = TimePoint::new(clock.domain, (run.now().ticks_in(clock.root).unwrap() + lead_us * 200 - clock.origin.ticks_in(clock.root).unwrap()).div_euclid(200) + 1);
@@ -210,7 +210,7 @@ fn hw_b9_unplug_transmit_only() {
     // reads touch the device (UR-29's 500 ms read).
     let dir = TempDir::new();
     let mut run = tx_session(usrp(), &dir);
-    let off = run.submit(set("radio.rx.channels", ezsdr_kernel::spec::Value::Int(0)), None).unwrap();
+    let off = run.submit(set("radio.rx.channels", ezsdr_kernel::spec::Value::from(0)), None).unwrap();
     println!("B9 transmit only: radio.rx.channels 0: {:?}", off.outcome);
     println!("B9: unplug the cable now (transmit-only Session; up to 300 s); started at UTC {:.3}", utc_now());
     let ended = until_not_running(&mut run, 300);
@@ -658,15 +658,15 @@ fn cold_change_capture(from: f64, to: f64, block_len: Option<u32>) {
     let mut run = session(&bench_profile(&*device, &dir, selector, serde_json::json!({}), true), device);
     past_t0(&mut run, ms(100));
     if from != 1e6 {
-        assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::Num(from)), None).unwrap()));
+        assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::num(from).unwrap()), None).unwrap()));
         wait(&mut run, ms(300));
     }
     let at = after_ticks(&run, ms(20));
     let n = (from * 0.12) as i64 + (to * 0.1) as i64;
-    assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::Int(n))]), None).unwrap()));
+    assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(n))]), None).unwrap()));
     wait(&mut run, ms(60));
     let booked = run.now();
-    let entry = run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::Num(to)), None).unwrap();
+    let entry = run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::num(to).unwrap()), None).unwrap();
     println!("B8 cold {from} → {to} S/s, block_len {block_len:?}: capture asked at {at:?}; rate change submitted at {booked:?}: {:?}", entry.outcome);
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
@@ -709,7 +709,7 @@ fn tx_session(device: Arc<dyn Device>, dir: &TempDir) -> ezsdr_kernel::coordinat
     let envelope = bench_envelope(&*device);
     let mut run = session(&bench_profile(&*device, dir, serde_json::json!({}), envelope, true), device);
     past_t0(&mut run, ms(1));
-    assert!(admitted(&run.submit(set("radio.tx.channels", ezsdr_kernel::spec::Value::Int(1)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.tx.channels", ezsdr_kernel::spec::Value::from(1)), None).unwrap()));
     run
 }
 
@@ -730,7 +730,7 @@ fn hw_b8_stop_end() {
         let (bytes, _) = waveform_of(&pn(1_000));
         assert!(admitted(&run.submit(verb("start_repeat", "radio/tx", None, &[]), Some(&bytes)).unwrap()));
         let at = after_ticks(&run, ms(20));
-        assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::Int(100_000))]), None).unwrap()));
+        assert!(admitted(&run.submit(verb("capture", "sink/rec", Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(100_000))]), None).unwrap()));
         let _ = run.advance_to(TimePoint::new(at.domain(), at.ticks_in(at.domain()).unwrap() + ms(50)));
         let s = run.now();
         let _ = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(ezsdr_kernel::id::ResourceId::parse("radio/tx").unwrap()) }, None);
@@ -904,7 +904,7 @@ fn hw_b9_transmit_only_session() {
     // nothing sent, the receiver off if the Session allows it; no false DEVICE_LOST.
     let dir = TempDir::new();
     let mut run = tx_session(usrp(), &dir);
-    let off = run.submit(set("radio.rx.channels", ezsdr_kernel::spec::Value::Int(0)), None).unwrap();
+    let off = run.submit(set("radio.rx.channels", ezsdr_kernel::spec::Value::from(0)), None).unwrap();
     println!("B9 transmit only: radio.rx.channels 0: {:?}", off.outcome);
     wait(&mut run, ms(60_000));
     let manifest = run.finish();
@@ -1054,10 +1054,10 @@ fn hw_b8_cold_change_timing_at_the_extremes() {
             let selector = block_len.map_or(serde_json::json!({}), |n| serde_json::json!({ "block_len": n }));
             let mut run = session(&bench_profile(&*device, &dir, selector, serde_json::json!({}), true), device.clone());
             past_t0(&mut run, ms(100));
-            assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::Num(from)), None).unwrap()));
+            assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::num(from).unwrap()), None).unwrap()));
             wait(&mut run, ms(300 + phase * 37));
             let packet = spp(&*device);
-            let entry = run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::Num(to)), None).unwrap();
+            let entry = run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::num(to).unwrap()), None).unwrap();
             wait(&mut run, ms(500));
             let manifest = run.finish();
             let timing = section(&manifest, "timing").as_array().unwrap().clone();

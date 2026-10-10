@@ -1,6 +1,5 @@
 //! Phase 1 tests for `00-overview.md` §7: canonical JSON and content hashes.
 
-use ezsdr_kernel::contract::Scalar;
 use ezsdr_kernel::hash::{ContentHash, HashError, canonical_json};
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::spec::Value;
@@ -51,8 +50,7 @@ fn ov_15_non_finite_is_rejected_not_null() {
     // by the time the canonicaliser runs the information is gone. Left unguarded, a
     // NaN drift hashes identically to a drift that was never measured — in the one
     // Manifest field OV-15a exists to protect. `ClockRelation::new` refuses one, and
-    // the scalar fields are guarded at serialisation time, where `of` reports it as
-    // `NonFiniteNumber`.
+    // `Finite::new` refuses one for a scalar.
     let relation = |drift: f64| {
         ClockRelation::new(
             ClockDomainId::local(2),
@@ -75,26 +73,13 @@ fn ov_15_non_finite_is_rejected_not_null() {
     // Two finite drifts one ulp apart must not collide either.
     assert_ne!(hash(1e-6), hash(1.0000000000000002e-6));
 
-    // The same guard covers the other two Kernel-owned float document fields:
-    // `Scalar::Float` (SC-2) and `Value::Num` (SB-4), which reaches the sealed
-    // Manifest through `prepare.effective`, the coercion records and the action log.
-    let scalar = |x: f64| Scalar::Float(x);
-    assert_eq!(ContentHash::of(&scalar(f64::NAN)), Err(HashError::NonFiniteNumber));
-    assert!(ContentHash::of(&scalar(0.5)).is_ok());
-
-    assert_eq!(ContentHash::of(&Value::Num(f64::NAN)), Err(HashError::NonFiniteNumber));
-    assert_eq!(ContentHash::of(&Value::Num(f64::INFINITY)), Err(HashError::NonFiniteNumber));
-    assert!(ContentHash::of(&Value::Num(1.5)).is_ok());
-    // NaN and +inf must not share a hash with each other or with a genuine `null`.
+    // The Kernel's other float, `Scalar::Num` (SB-4, SC-2), is finite by
+    // construction: a non-finite one cannot be built, so it never reaches a hash.
+    assert!(Value::num(f64::NAN).is_none());
+    assert!(ContentHash::of(&Value::num(1.5).unwrap()).is_ok());
     assert_ne!(
-        ContentHash::of(&Value::Num(1.5)).expect("hashes"),
-        ContentHash::of(&Value::Num(2.5)).expect("hashes")
-    );
-    // Inside a list too, which the shape check now recurses into (SB-4).
-    assert!(Value::List(vec![Value::Num(f64::NAN)]).check_nesting("test.list").is_err());
-    assert_eq!(
-        ContentHash::of(&Value::List(vec![Value::Num(f64::NAN)])),
-        Err(HashError::NonFiniteNumber)
+        ContentHash::of(&Value::num(1.5).unwrap()).expect("hashes"),
+        ContentHash::of(&Value::num(2.5).unwrap()).expect("hashes")
     );
 
     // `serde_json::Number` still cannot hold one, so `canonical_json` never sees it.
