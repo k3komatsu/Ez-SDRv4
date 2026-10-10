@@ -12,7 +12,7 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId, RunId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
-    ActionReceiver, ActionSubmitter, AttachedPort, Deployment, Endpoint, ExecutionClass,
+    ActionReceiver, ActionSubmitter, AttachedPort, Endpoint, ExecutionClass,
     ModuleError, ModuleRef, Pacing, Sink, StopMode, UpdateClass, Version, VersionReq,
     VocabularyRequirement, KERNEL_API,
 };
@@ -469,7 +469,6 @@ fn hd_07_descriptor() {
     assert_eq!(module.version, Version::new(1, 2, 0));
     assert_eq!(module.kernel_api, KERNEL_API);
     assert_eq!(module.roles, vec![ezsdr_kernel::module_api::Role::Sink]);
-    assert_eq!(module.deployment, Deployment::InProcess {});
     assert_eq!(
         module.impl_hash,
         Some(ContentHash::of_bytes(b"ezsdr.sink.capture 1.2.0"))

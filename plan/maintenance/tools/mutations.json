@@ -1716,16 +1716,6 @@
   "filter": "sb_40_the_plan_carries_no_transfer_costs"
  },
  {
-  "id": "J138",
-  "name": "item 7 (MA-32): a reserved Plugin deployment is back, so a descriptor naming one parses",
-  "file": "crates/ezsdr-kernel/src/module_api.rs",
-  "old": "    InProcess {},\n}",
-  "new": "    InProcess {},\n    Plugin { protocol: Version },\n}",
-  "crate": "ezsdr-kernel",
-  "test_bin": "module_api",
-  "filter": "ma_32_registry_refusals"
- },
- {
   "id": "J139",
   "name": "item 7 (RS-38): `connect` drops the caller's source hash, so a Session's `spec.source` is never recorded",
   "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
@@ -1884,5 +1874,15 @@
   "crate": "ezsdr-kernel",
   "test_bin": "time_model",
   "filter": "tm_06_no_crate_reads_ticks_in_their_own_domain"
+ },
+ {
+  "id": "J138",
+  "name": "MA-32: ModuleDescriptor accepts unknown members, so a descriptor naming a deployment parses",
+  "file": "crates/ezsdr-kernel/src/module_api.rs",
+  "old": "#[serde(deny_unknown_fields)]\npub struct ModuleDescriptor {",
+  "new": "pub struct ModuleDescriptor {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_32_registry_refusals"
  }
 ]

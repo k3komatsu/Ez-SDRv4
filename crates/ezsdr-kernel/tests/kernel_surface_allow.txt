@@ -278,7 +278,6 @@ module_api::Executor = Executor
 module_api::Sink = Sink
 module_api::Link = Link role
 module_api::Authority = TimeAuthority
-module_api::Deployment = NEW: MA-1's third axis; InProcess is its only value until a Plugin protocol is designed.
 module_api::ModuleDescriptor = ModuleId+version
 module_api::ModuleRef = ModuleId+version
 module_api::ProfileRef = NEW: SB-22's declared profile name and version, which Vision §59 bumps on measurement.

@@ -4,7 +4,7 @@ use ezsdr_kernel::contract::{DataContractId, PortRef};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, DataLinkId, MemoryDomainId, ModuleId};
 use ezsdr_kernel::module_api::{
-    Deployment, Factories, KERNEL_API, Link, ModuleRef, ModuleRegistry, Role, Version,
+    Factories, KERNEL_API, Link, ModuleRef, ModuleRegistry, Role, Version,
 };
 use ezsdr_kernel::spec::{Ident, Namespace};
 use ezsdr_kernel::stream::{
@@ -67,7 +67,6 @@ fn hd_04_descriptor_and_create() {
     assert_eq!(module_descriptor.kernel_api, KERNEL_API);
     assert_eq!(module_descriptor.roles, [Role::Link]);
     assert!(module_descriptor.vocabularies.is_empty());
-    assert_eq!(module_descriptor.deployment, Deployment::InProcess {});
     assert_eq!(
         module_descriptor.impl_hash,
         Some(ContentHash::of_bytes(b"ezsdr.link.host 1.0.0"))

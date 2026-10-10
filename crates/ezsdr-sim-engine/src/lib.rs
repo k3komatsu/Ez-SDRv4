@@ -9,7 +9,7 @@ use ezsdr_kernel::binding::Binding;
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId};
 use ezsdr_kernel::module_api::{
-    Authority, AuthorityDescriptor, Deployment, KERNEL_API, ModuleDescriptor, ModuleError,
+    Authority, AuthorityDescriptor, KERNEL_API, ModuleDescriptor, ModuleError,
     ModuleRef, Pacing, Role, Version, VersionReq, VocabularyRequirement,
 };
 use ezsdr_kernel::spec::Namespace;
@@ -163,7 +163,6 @@ pub fn descriptor() -> ModuleDescriptor {
             id: Namespace::parse("sim").expect("a valid Vocabulary namespace"),
             req: VersionReq(Version::new(1, 0, 0)),
         }],
-        deployment: Deployment::InProcess {},
         impl_hash: Some(ContentHash::of_bytes(b"ezsdr.sim-engine 1.0.0")),
     }
 }

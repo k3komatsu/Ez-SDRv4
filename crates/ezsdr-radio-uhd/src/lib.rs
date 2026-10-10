@@ -17,7 +17,7 @@ use std::sync::Arc;
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ModuleId;
 use ezsdr_kernel::module_api::{
-    Deployment, Factories, KERNEL_API, ModuleDescriptor, ModuleRef, Role, Version, VersionReq, VocabularyRequirement,
+    Factories, KERNEL_API, ModuleDescriptor, ModuleRef, Role, Version, VersionReq, VocabularyRequirement,
 };
 use ezsdr_kernel::spec::Namespace;
 
@@ -51,7 +51,6 @@ pub fn descriptor() -> ModuleDescriptor {
             id: Namespace::parse(ezsdr_radio::VOCABULARY).expect("the radio namespace"),
             req: VersionReq(Version::new(2, 0, 0)),
         }],
-        deployment: Deployment::InProcess {},
         impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.uhd 0.4.0")),
     }
 }

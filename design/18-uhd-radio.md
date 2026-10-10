@@ -59,7 +59,7 @@ The Module's own constants, all INFERRED and measured at bench step B8, are: the
 
 ### Identity and the device boundary
 
-- **UR-1** The Module is `ModuleDescriptor { id: ezsdr.radio.uhd, version: 0.4.0, kernel_api: 4.0.0, roles: [Provider, Authority], vocabularies: [{ radio, ^2.0.0 }], deployment: InProcess, impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.uhd 0.4.0")) }` (spec 20, VF-6: 0.2.0 and `radio ^1.4.0`, for the profiles' restart and start leads; issue #41; spec 21, VG-1: 0.3.0, for a receive stream's end that moves only earlier (UR-26), its requirement and profiles unchanged; issue #46), returned by `ezsdr_radio_uhd::descriptor()`; `module_ref()` returns its `{ id, version }`. A runtime registers it with `Factories { provider: true, authority: true }`. *Checked by `ur_01_the_descriptor_registers`.*
+- **UR-1** The Module is `ModuleDescriptor { id: ezsdr.radio.uhd, version: 0.4.0, kernel_api: 4.0.0, roles: [Provider, Authority], vocabularies: [{ radio, ^2.0.0 }], impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.uhd 0.4.0")) }` (spec 20, VF-6: 0.2.0 and `radio ^1.4.0`, for the profiles' restart and start leads; issue #41; spec 21, VG-1: 0.3.0, for a receive stream's end that moves only earlier (UR-26), its requirement and profiles unchanged; issue #46), returned by `ezsdr_radio_uhd::descriptor()`; `module_ref()` returns its `{ id, version }`. A runtime registers it with `Factories { provider: true, authority: true }`. *Checked by `ur_01_the_descriptor_registers`.*
 - **UR-2** Everything the Provider and the Authority do to a device goes through the object-safe trait `ezsdr_radio_uhd::Device: Send + Sync`, whose methods are exactly:
 
   ```rust

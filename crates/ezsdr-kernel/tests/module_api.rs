@@ -12,7 +12,7 @@ use ezsdr_kernel::id::{ClockDomainId, DataLinkId, IslandId, MemoryDomainId, RunI
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
     ActionSubmitter, Authority, ComponentDescriptor, ComponentImpl, ComponentKind,
-    ComponentPlacement, ComponentRequires, ComponentTiming, Deployment, Executor,
+    ComponentPlacement, ComponentRequires, ComponentTiming, Executor,
     ExecutorDescriptor, Factories, IslandDecl, Link, LinkDescriptor, ModuleDescriptor, ModuleError,
     ModuleRef, ModuleRegistry, ParamDecl, PrepareContext, Provider, Requested,
     Resource, Role, RtPolicy, Sink, SinkDescriptor, StepOutcome, SteppedInstance, SteppedRef,
@@ -140,11 +140,11 @@ fn ma_32_registry_refusals() {
         .expect_err("major mismatch");
     assert!(err.message.contains("kernel_api major"), "{err}");
 
-    // No reserved Plugin deployment: a descriptor naming one does not parse (MA-32).
-    let protocol = serde_json::json!({ "major": 1, "minor": 0, "patch": 0 });
-    serde_json::from_value::<Version>(protocol.clone()).expect("a well-formed version");
-    serde_json::from_value::<Deployment>(serde_json::json!({ "kind": "plugin", "protocol": protocol }))
-        .expect_err("no Plugin deployment");
+    // No deployment is declared: a descriptor naming one does not parse (MA-32).
+    let mut named = serde_json::to_value(descriptor()).expect("serialises");
+    serde_json::from_value::<ModuleDescriptor>(named.clone()).expect("the descriptor parses");
+    named["deployment"] = serde_json::json!({ "kind": "plugin" });
+    serde_json::from_value::<ModuleDescriptor>(named).expect_err("no deployment field");
 
     // A role with no factory, and a factory with no role.
     let err = reg

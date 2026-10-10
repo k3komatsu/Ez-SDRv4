@@ -28,7 +28,7 @@ The FaultInjector of Vision §13 is not a Module here. A Module cannot call anot
 
 ## 3. The Simulation Engine Module
 
-- **SE-8** The Module is `ModuleDescriptor { id: ezsdr.sim-engine, version: 1.0.0, kernel_api: 4.0.0, roles: [Authority], vocabularies: [{ id: sim, req: ^1.0.0 }], deployment: InProcess, impl_hash: Some(ContentHash::of_bytes(b"ezsdr.sim-engine 1.0.0")) }`, returned by `ezsdr_sim_engine::descriptor()`. *Ceiling: `impl_hash` names the release, not the build; a build hash is later work.* *Checked by `se_08_descriptor_registers`.*
+- **SE-8** The Module is `ModuleDescriptor { id: ezsdr.sim-engine, version: 1.0.0, kernel_api: 4.0.0, roles: [Authority], vocabularies: [{ id: sim, req: ^1.0.0 }], impl_hash: Some(ContentHash::of_bytes(b"ezsdr.sim-engine 1.0.0")) }`, returned by `ezsdr_sim_engine::descriptor()`. *Ceiling: `impl_hash` names the release, not the build; a build hash is later work.* *Checked by `se_08_descriptor_registers`.*
 - **SE-9** `SimEngine::new(clocks: Arc<ClockRegistry>) -> Result<SimEngine, TimeError>` allocates one id and registers the virtual root `V = Root { tick_rate: 1_000_000_000/1, epoch: Arbitrary { set_by: "sim.run_start" } }`. `SimEngine::from_binding(binding, clocks) -> Result<SimEngine, ModuleError>` refuses a binding whose `module` is not SE-8's, whose `selector` is not empty or whose `profile` is present, and otherwise calls `new`. Its `AuthorityDescriptor` is `{ module: ezsdr.sim-engine 1.0.0, governs: [V, host.monotonic], pacing: FreeRunning }` (TM-16a). *Checked by `se_09_the_virtual_root_is_registered`.*
 - **SE-10** The Engine's `TimeAuthority` (returned by `Authority::time()`, one shared object):
   - `primary_root()` is `V`; `pacing()` is `FreeRunning`;

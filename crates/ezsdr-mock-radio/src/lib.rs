@@ -14,7 +14,7 @@ use ezsdr_kernel::event::{Action, Event, EventHandle, EventKind, EventSink, Seve
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::module_api::{
-    ActionReceiver, CoerceReport, Deployment, Driving, Endpoint, ExecutionClass, KERNEL_API, ModuleDescriptor,
+    ActionReceiver, CoerceReport, Driving, Endpoint, ExecutionClass, KERNEL_API, ModuleDescriptor,
     ModuleError, ModuleRef, PrepareContext, Provider, ProviderInstance, Role, StepOutcome,
     Requested, StopMode, Version, VersionReq, VocabularyRequirement,
 };
@@ -56,7 +56,6 @@ pub fn descriptor() -> ModuleDescriptor {
                 req: VersionReq(version),
             })
             .collect(),
-        deployment: Deployment::InProcess {},
         impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.mock 2.0.0")),
     }
 }

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{MemoryDomainId, ModuleId};
 use ezsdr_kernel::module_api::{
-    Deployment, KERNEL_API, Link, LinkDescriptor, ModuleDescriptor, ModuleError, ModuleRef,
+    KERNEL_API, Link, LinkDescriptor, ModuleDescriptor, ModuleError, ModuleRef,
     Role, Version,
 };
 use ezsdr_kernel::stream::{
@@ -31,7 +31,6 @@ pub fn descriptor() -> ModuleDescriptor {
         kernel_api: KERNEL_API,
         roles: vec![Role::Link],
         vocabularies: Vec::new(),
-        deployment: Deployment::InProcess {},
         impl_hash: Some(ContentHash::of_bytes(b"ezsdr.link.host 1.0.0")),
     }
 }

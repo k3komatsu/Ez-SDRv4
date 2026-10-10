@@ -2,8 +2,8 @@
 //!
 //! Three orthogonal axes: the **unit** (a Module: a crate or a process), the
 //! **role** (Provider, Executor, Sink, Link, Authority) and the **deployment**
-//! (InProcess, the only one so far). One Module may hold several roles; a
-//! deployment is never a role (MA-1).
+//! (in-process, the only one so far, so the descriptor names none). One Module may
+//! hold several roles; a deployment is never a role (MA-1).
 //!
 //! The execution ABI is the Executor's: the Kernel defines no `work` or `process`
 //! signature and never inspects `impl` beyond its identity (MA-21).
@@ -156,17 +156,6 @@ impl Role {
             Role::Authority => 4,
         }
     }
-}
-
-/// How a Module is deployed. A deployment is never a role; an out-of-process one
-/// arrives with its protocol, not as a reserved variant (MA-1, MA-46).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Deployment {
-    /// A Rust trait, compiled in. Rust has no stable ABI, so this is the default
-    /// and out-of-process is the Plugin path (Vision §62).
-    InProcess {},
 }
 
 // ---------------------------------------------------------------- class and fidelity
@@ -794,8 +783,6 @@ pub struct ModuleDescriptor {
     /// The Vocabularies it speaks (MA-32, MA-34).
     #[serde(default)]
     pub vocabularies: Vec<VocabularyRequirement>,
-    /// How it is deployed (MA-1).
-    pub deployment: Deployment,
     /// Its code's content hash, which the Manifest records (RS-45).
     pub impl_hash: Option<ContentHash>,
 }

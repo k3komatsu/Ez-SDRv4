@@ -16,7 +16,7 @@ use ezsdr_kernel::event::{Action, EventSink};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{MemoryDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::module_api::{
-    ActionReceiver, ActionSubmitter, AttachedPort, ComponentDescriptor, Deployment,
+    ActionReceiver, ActionSubmitter, AttachedPort, ComponentDescriptor,
     ExecutionClass, Executor, ExecutorDescriptor, InputStore, IslandDecl, KERNEL_API,
     ModuleDescriptor, ModuleError, ModuleErrorKind, ModuleRef, PrepareContext, Role,
     StepOutcome, StopMode, Version,
@@ -51,7 +51,6 @@ pub fn descriptor() -> ModuleDescriptor {
         kernel_api: KERNEL_API,
         roles: vec![Role::Executor],
         vocabularies: Vec::new(),
-        deployment: Deployment::InProcess {},
         impl_hash: Some(ContentHash::of_bytes(b"ezsdr.exec.native 1.0.0")),
     }
 }

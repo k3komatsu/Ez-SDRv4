@@ -72,7 +72,7 @@ A `ComponentContext` carries no `ActionSubmitter`: a component's Actions go thro
 
 ### Identity
 
-- **NX-1** The Module is `ModuleDescriptor { id: ezsdr.exec.native, version: 1.0.0, kernel_api: 4.0.0, roles: [Executor], vocabularies: [], deployment: InProcess, impl_hash: Some(ContentHash::of_bytes(b"ezsdr.exec.native 1.0.0")) }`, returned by `ezsdr_exec_native::descriptor()`. It declares no Vocabulary: it has no keys, no event kinds and no verbs of its own. *Checked by `nx_01_descriptor_registers`.*
+- **NX-1** The Module is `ModuleDescriptor { id: ezsdr.exec.native, version: 1.0.0, kernel_api: 4.0.0, roles: [Executor], vocabularies: [], impl_hash: Some(ContentHash::of_bytes(b"ezsdr.exec.native 1.0.0")) }`, returned by `ezsdr_exec_native::descriptor()`. It declares no Vocabulary: it has no keys, no event kinds and no verbs of its own. *Checked by `nx_01_descriptor_registers`.*
 - **NX-2** `executor_descriptor()` is `ExecutorDescriptor { module: { ezsdr.exec.native, 1.0.0 }, kind: ezsdr.exec.native, memory_domains: [HOST_MEMORY] (MemoryDomainId::local(0), HD-1), impl_kinds: [ezsdr.impl.native], capabilities: {} }`, and `NativeExecutor::descriptor()` returns it. Admission reads the kind, the domains and the implementation kinds (MA-18, MA-39). *Checked by `nx_01_descriptor_registers`.*
 
 ### Loading

@@ -19,7 +19,7 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId, RunId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
-    ActionReceiver, Deployment, Endpoint, KERNEL_API, ModuleDescriptor, ModuleError, ModuleRef,
+    ActionReceiver, Endpoint, KERNEL_API, ModuleDescriptor, ModuleError, ModuleRef,
     Role, Sink, SinkDescriptor, StepOutcome, StopMode, Version, VersionReq,
     VocabularyRequirement,
 };
@@ -58,7 +58,6 @@ pub fn descriptor() -> ModuleDescriptor {
             id: Namespace::parse("sink").expect("a valid Vocabulary namespace"),
             req: VersionReq(Version::new(1, 1, 0)),
         }],
-        deployment: Deployment::InProcess {},
         impl_hash: Some(ContentHash::of_bytes(b"ezsdr.sink.capture 1.2.0")),
     }
 }

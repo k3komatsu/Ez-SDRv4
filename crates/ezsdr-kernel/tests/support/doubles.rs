@@ -15,7 +15,7 @@ use ezsdr_kernel::id::{ClockDomainId, MemoryDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
     ActionReceiver, ActionSubmitter, CoerceReport, CompileRule, ComponentDescriptor, ComponentImpl,
-    ComponentKind, ComponentRequires, ComponentTiming, Deployment, Driving, Executor,
+    ComponentKind, ComponentRequires, ComponentTiming, Driving, Executor,
     ExecutorDescriptor, Fidelity, IslandDecl, LinkDescriptor, ModuleDescriptor, ModuleError,
     ModuleErrorKind, ModuleRef, ParamDecl, PrepareContext, Provider, ProviderInstance,
     RejectedRequest, Requested, Resource, Role, Sink, SinkDescriptor, StepOutcome, StopMode,
@@ -718,7 +718,6 @@ pub fn test_provider_descriptor() -> ModuleDescriptor {
             id: ns("test"),
             req: ezsdr_kernel::module_api::VersionReq(Version::new(1, 0, 0)),
         }],
-        deployment: Deployment::InProcess {},
         impl_hash: Some(some_hash("ezsdr.test.provider")),
     }
 }
@@ -916,7 +915,6 @@ pub fn test_sink_descriptor() -> ModuleDescriptor {
         kernel_api: Version::new(4, 0, 0),
         roles: vec![Role::Sink],
         vocabularies: Vec::new(),
-        deployment: Deployment::InProcess {},
         impl_hash: Some(some_hash("ezsdr.test.sink")),
     }
 }
@@ -932,7 +930,6 @@ pub fn test_executor_descriptor() -> ModuleDescriptor {
             id: ns("test"),
             req: ezsdr_kernel::module_api::VersionReq(Version::new(1, 0, 0)),
         }],
-        deployment: Deployment::InProcess {},
         impl_hash: Some(some_hash("ezsdr.test.executor")),
     }
 }
@@ -945,7 +942,6 @@ pub fn test_link_module_descriptor() -> ModuleDescriptor {
         kernel_api: Version::new(4, 0, 0),
         roles: vec![Role::Link],
         vocabularies: Vec::new(),
-        deployment: Deployment::InProcess {},
         impl_hash: Some(some_hash("ezsdr.test.link")),
     }
 }

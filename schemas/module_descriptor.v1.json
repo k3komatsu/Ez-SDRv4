@@ -4,25 +4,6 @@
       "description": "`sha256:<64 lowercase hex>`, matching `^sha256:[0-9a-f]{64}$`. The algorithm is\nnamed in the value so a later algorithm is an additive change (OV-14, SB-1).",
       "type": "string"
     },
-    "Deployment": {
-      "description": "How a Module is deployed. A deployment is never a role; an out-of-process one\narrives with its protocol, not as a reserved variant (MA-1, MA-46).",
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "description": "A Rust trait, compiled in. Rust has no stable ABI, so this is the default\nand out-of-process is the Plugin path (Vision §62).",
-          "properties": {
-            "kind": {
-              "const": "in_process",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        }
-      ]
-    },
     "ModuleId": {
       "description": "Names a Module implementation in the registry, matching\n`^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$`, at most 256 bytes.\n\nThe reverse-DNS-ish namespaced form (`ezsdr.test.provider`) is what keeps two\nvendors' Modules from colliding; the Kernel checks the shape, not the authority.\n\nRule: SB-1, MA-31.",
       "type": "string"
@@ -119,10 +100,6 @@
   "additionalProperties": false,
   "description": "What a Module ships (MA-31).",
   "properties": {
-    "deployment": {
-      "$ref": "#/$defs/Deployment",
-      "description": "How it is deployed (MA-1)."
-    },
     "id": {
       "$ref": "#/$defs/ModuleId",
       "description": "The Module (SB-1, MA-31)."
@@ -166,8 +143,7 @@
     "id",
     "version",
     "kernel_api",
-    "roles",
-    "deployment"
+    "roles"
   ],
   "title": "ModuleDescriptor",
   "type": "object"

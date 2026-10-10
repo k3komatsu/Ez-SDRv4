@@ -36,11 +36,12 @@ axis 2  role         Provider      implements a Resource Model
                      Sink          writes Artifacts
                      Link          implements a DataLink
                      Authority     implements the Time Authority
-axis 3  deployment   InProcess     a Rust trait, compiled in; the only deployment so far
+axis 3  deployment   in-process    a Rust trait, compiled in; the only deployment so far, so a
+                                   descriptor declares none
 
 One Module may hold several roles. The UHD Module is a Radio Provider, a GPIO Provider and an
 Authority; the sim-engine Module is an Authority. A deployment is never a role: an out-of-process
-Plugin will be one, added with its protocol (MA-46).
+Plugin will be one, added with its protocol and the descriptor field that names it (MA-46).
 ```
 
 ## 4. Types
@@ -50,11 +51,10 @@ ModuleId          SB-1's ModuleId grammar (table SB-T0), e.g. ezsdr.radio.mock
 Version           { major, minor, patch }                release-only; no pre-release tags (SB decision B7)
 VersionReq        a caret requirement over a Version
 Role              Provider | Executor | Sink | Link | Authority
-Deployment        InProcess
 
 ModuleDescriptor  { id: ModuleId, version: Version, kernel_api: Version, roles: [Role],
                     vocabularies: [{ id: Namespace, req: VersionReq }],
-                    deployment: Deployment, impl_hash: optional ContentHash }
+                    impl_hash: optional ContentHash }
 VocabularyDescriptor { id: Namespace, version: Version, prefix: Namespace, keys: [KeyDecl],
                        event_kinds: [{ kind: EventKind, default: Reaction, severity: Severity }],
                        verbs: [{ verb: Ident, compiles_to: CompileRule }],
@@ -231,7 +231,7 @@ pub trait Provider: Send {
 ### Descriptors and the registry
 
 - **MA-31** Every Module ships a `ModuleDescriptor`, and its `roles` must match the factories it registers.
-- **MA-32** Registration fails when: `kernel_api.major` differs from the Kernel's; a declared Vocabulary is absent or incompatible; a role has no factory or a factory no role; or `(id, version)` is already registered. `Deployment` has no Plugin variant to refuse: a descriptor naming one does not parse. Registration is explicit in the runtime's assembly code; there is no link-time registration crate, whose order is opaque and whose failures are silent.
+- **MA-32** Registration fails when: `kernel_api.major` differs from the Kernel's; a declared Vocabulary is absent or incompatible; a role has no factory or a factory no role; or `(id, version)` is already registered. A descriptor declares no deployment, so one naming any does not parse. Registration is explicit in the runtime's assembly code; there is no link-time registration crate, whose order is opaque and whose failures are silent.
 - **MA-33** Compatibility is the caret rule: a requirement `^a.b.c` is satisfied by a registered `x.y.z` when `a == x` and, for `a > 0`, `(y, z) >= (b, c)`, or for `a == 0`, `y == b` and `z >= c`. The Kernel compares ids and versions and never interprets a key.
 - **MA-34** Every capability, constraint and parameter key is `<vocabulary prefix><path>` or `ext.<module-id>.<path>`. The Kernel refuses a key whose prefix belongs to no Vocabulary the declaring Module declares, naming the prefix, and validates the value's shape against the `KeyDecl`. It never interprets the meaning (SB-2, audit Finding 7).
 - **MA-35** A `VocabularyDescriptor` carries what the Kernel is obliged to enforce on that Vocabulary's behalf but never interprets: its `KeyDecl`s, each with the shape, the coercion default and the optional update class of one key (SB-2, RS-17), its event kinds with their default reactions and severities (RS-27, RS-28), its Session verbs and how each compiles (RS-13a), and its admission checks (SB-29). Each of those four is a place where an earlier draft had put Vocabulary content in the Kernel.
@@ -261,7 +261,7 @@ pub trait Provider: Send {
 
 - **MA-44** The Phase 1 test-double Provider lives in `tests/support/` and is never shipped. It declares a `test` Vocabulary at version 1.0.0 with the keys `test.count`, `test.grid` (coercible, snapping to an injectable grid, defaulting to `reject`) and `test.flag`; a two-level tree of a device with two `test.line` sub-resources; `fidelity` all `none`; `driving.stepped` false; a recorded call log; an injectable failure phase; the `test.custom` event **kind**, declared by the Vocabulary; and a drain of its action queue. The double generates no Events: Phase 1's event tests drive `EventCollector` directly, and this list used to claim "an event generator" that `tests/support/doubles.rs` does not have (exit-review finding). It uses no radio word, which is how the matcher is proven generic (OV-21). It has no time model, no blocks and no envelope: that boundary is exactly where Phase 2's MockRadio begins.
 - **MA-45** Phase 1 also ships a recording `TestExecutor` of about twenty lines, which performs no processing. Without it MA-19, MA-20, MA-30 and MA-39 have no runtime test until Phase 2, and the stepping loop is the one mechanism on which Vision §58 #3 depends.
-- **MA-46** What is fixed now so that a Plugin protocol later needs no Kernel change: the schemas of `ModuleDescriptor`, `VocabularyDescriptor`, `ProviderInstance` and `Resource`, the four other role descriptors, `ComponentDescriptor`, `IslandDecl`, `Fragment`, `Requested`, `PrepareReport`, `CoerceReport`, `ModuleError`, `StopMode`, `StepOutcome`, `ArtifactRef`, `ExecutionClass`, `Fidelity` and `ClockRelation` — the last since a role-trait signature carries it (`Authority::relations`, MA-29), its schema committed since Phase 1 (`schemas/clock_relation.v1.json`) (Phase 7, KG-11; Review J, P1-9) — which includes every document type a role-trait signature carries (MA-6) — together with spec 04's `Event` and Action schemas (`StopCause` among them, on `Abort`); and rule MA-6. The Plugin deployment itself is not reserved: it is added with its protocol, whose shape a reserved variant could only guess. A Plugin host is then one Module implementing a role trait by proxy, with the handles becoming streams: an `EventSink` an event stream, an `ActionReceiver` an inbound action stream, an **`ActionSubmitter` an outbound request-and-response stream** carrying the admission result back, an `Endpoint` a shared-memory Link, the `TimeAuthority` a request and response, the `ClockRegistry` a request and response, the `InputStore` a request and response (Phase 3, KB-1), and the `environment` a document sent once at `prepare`. The submitter has to be in this list: adding a way to emit an Action after v4.0 would be a Kernel major, and a Plugin host built to this mapping without one could host a Provider but never a Reactor.
+- **MA-46** What is fixed now so that a Plugin protocol later needs no Kernel change: the schemas of `ModuleDescriptor`, `VocabularyDescriptor`, `ProviderInstance` and `Resource`, the four other role descriptors, `ComponentDescriptor`, `IslandDecl`, `Fragment`, `Requested`, `PrepareReport`, `CoerceReport`, `ModuleError`, `StopMode`, `StepOutcome`, `ArtifactRef`, `ExecutionClass`, `Fidelity` and `ClockRelation` — the last since a role-trait signature carries it (`Authority::relations`, MA-29), its schema committed since Phase 1 (`schemas/clock_relation.v1.json`) (Phase 7, KG-11; Review J, P1-9) — which includes every document type a role-trait signature carries (MA-6) — together with spec 04's `Event` and Action schemas (`StopCause` among them, on `Abort`); and rule MA-6. The Plugin deployment itself is not reserved: it is added with its protocol, whose shape a reserved field or variant could only guess. A Plugin host is then one Module implementing a role trait by proxy, with the handles becoming streams: an `EventSink` an event stream, an `ActionReceiver` an inbound action stream, an **`ActionSubmitter` an outbound request-and-response stream** carrying the admission result back, an `Endpoint` a shared-memory Link, the `TimeAuthority` a request and response, the `ClockRegistry` a request and response, the `InputStore` a request and response (Phase 3, KB-1), and the `environment` a document sent once at `prepare`. The submitter has to be in this list: adding a way to emit an Action after v4.0 would be a Kernel major, and a Plugin host built to this mapping without one could host a Provider but never a Reactor.
 
 ## 6. Decisions
 
@@ -287,7 +287,7 @@ pub trait Provider: Send {
 | `ma_05_traits_are_object_safe_and_send` | `Box<dyn Provider + Send>` and the other four, at compile time | compiles | MA-5 |
 | `ma_06_signature_types_are_documents` | a compile-time bound requiring the Plugin-boundary document types to be serialisable with a schema | compiles | MA-46, MA-6 |
 | `ma_06_role_signatures_name_only_documents_and_handles` (`kernel_surface.rs`) | every role-trait signature in `src/`; then synthetic signatures with a slice, a closure, `impl Trait` and an unlisted type | the first passes, each listed document type is a document at compile time and has a registered schema; the rest are refused | MA-6, MA-46 |
-| `ma_32_registry_refusals` | a missing Vocabulary; an incompatible one; a `kernel_api` major mismatch; a role with no factory; a duplicate `(id, version)`; a `deployment` of kind `plugin` | refused in each case, naming the cause; the Plugin deployment does not parse | MA-31, MA-32 |
+| `ma_32_registry_refusals` | a missing Vocabulary; an incompatible one; a `kernel_api` major mismatch; a role with no factory; a duplicate `(id, version)`; a descriptor naming a `deployment` | refused in each case, naming the cause; a descriptor naming a deployment does not parse | MA-31, MA-32 |
 | `ma_33_caret_table` | requirements and registrations either side of 1.0 | the table of MA-33 exactly | MA-33 |
 | `ma_34_key_prefix_refused` | a key whose prefix belongs to an undeclared Vocabulary | refused, naming the prefix | MA-34, SB-2 |
 | `ma_11_coerce_is_pure` | the same request twice, with no hardware present | identical reports | MA-11 |
@@ -360,3 +360,4 @@ The Radio Model's traits and keys, and the contents of `TimingEnvelope` and `Per
 | 2026-10-09 | MA-30 | the coordinator handles every failure of a round on its own terms (KC-30), so a failure after a `DeviceLost` in the same round is no longer dropped (checked by spec 06's `kc_30_a_panic_after_a_device_lost_in_one_round_fails_the_run`, and by `kd_01_every_lost_device_of_a_round_is_reported_and_the_first_failure_decides`, which now also has two ordinary errors in one round) | [note 25](../plan/maintenance/25-fault-and-mark-notes.md), #65 |
 | 2026-10-10 | MA-1, MA-10, MA-32, MA-36, MA-38, MA-46, §3, §4 | deleted the fields no rule gave a meaning and nothing read: `ComponentDescriptor.timing`'s `preferred_batch`, `stateful` and `parallelism`, `requires.memory_bytes` and `IslandDecl.batch`; deleted the reserved `Deployment::Plugin` (a Plugin arrives with its protocol); deleted `Endpoint::EventIn` and `EventOut`, which carried no handle, and made `Endpoint` non-exhaustive; the Action `PeripheralCommand` and `CompileRule::PeripheralCommand` are `Command` (#55); `min_command_lead`'s doc comment and schema text say "from dispatching", and §4's `ProviderInstance` lists the field | [audit item 7](../plan/maintenance/24-prefreeze-audit.md), owner decision 2026-10-09 |
 | 2026-10-10 | MA-37 | the budget check is deleted: a `RelativeBudget` is positive by construction and by deserialisation (TM-15) | [spec 26](../plan/maintenance/26-invariants-in-types.md) §2, audit item 1 |
+| 2026-10-10 | MA-1, MA-32, MA-46, §3, §4 | `ModuleDescriptor.deployment` and `Deployment` are deleted: with in-process the only deployment, the field carried nothing; a Plugin deployment adds it with its protocol | [audit item 7](../plan/maintenance/24-prefreeze-audit.md) (F47's alternative), owner decision 2026-10-10 |
