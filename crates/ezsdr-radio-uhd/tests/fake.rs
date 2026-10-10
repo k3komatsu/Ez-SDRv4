@@ -1547,7 +1547,7 @@ fn ur_26_an_abort_publishes_nothing_after_the_stop_instant() {
     direct.settle(Wall::from_millis(50));
     direct.radio.stop(ezsdr_kernel::module_api::StopMode::Abort).unwrap();
     let mut end = None;
-    while let Some(block) = link.receive() {
+    while let Some((block, _)) = link.receive() {
         let header = block.header();
         end = Some(header.first_sample_time.ticks + i64::from(header.len));
     }
@@ -2277,12 +2277,14 @@ fn captures_across_cold_changes(config: FakeConfig, selector: Json, rates: [f64;
                     problems.push(format!("{}: the old clock's samples end at {} for e₁ {e1}", artifact.id, map.end.ticks));
                 }
             }
-            let len = (map.end.ticks - map.first.ticks) as usize;
+            // A missed start's gap leads the map (SC-13); the samples begin after it.
+            let first = map.valid[0].first().map_or(map.end.ticks, |s| s.start.ticks);
+            let len = (map.end.ticks - first) as usize;
             for i in 0..len {
-                let tick = clock.origin.ticks + (map.first.ticks + i as i64) * n;
+                let tick = clock.origin.ticks + (first + i as i64) * n;
                 let ramp = ((tick / n).rem_euclid(65_536)) as f32 / 65_536.0;
                 if data[at + i].0 != ramp {
-                    problems.push(format!("{}: map {m} sample {} is {}, its clock's ramp {ramp}", artifact.id, map.first.ticks + i as i64, data[at + i].0));
+                    problems.push(format!("{}: map {m} sample {} is {}, its clock's ramp {ramp}", artifact.id, first + i as i64, data[at + i].0));
                     break;
                 }
             }

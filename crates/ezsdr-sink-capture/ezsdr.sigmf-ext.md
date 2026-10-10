@@ -31,6 +31,5 @@ One annotation per interval in which one channel was invalid while the stream co
 | Field | Type | Description |
 |---|---|---|
 | `ezsdr:channel` | integer | The channel. |
-| `ezsdr:cause` | object | `{ "kind": "alignment" }` when the device reported a multi-channel alignment failure, `{ "kind": "stream" }` otherwise. |
 
 A channel that was never valid in the Recording has no annotation; its `ezsdr:valid` array is empty.

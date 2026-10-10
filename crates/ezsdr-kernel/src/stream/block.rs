@@ -88,8 +88,7 @@ impl BlockFlags {
     pub const SEQ_DISCONTINUITY: BlockFlags = BlockFlags(0x0002);
     /// The gap is a stream restart, as a UHD overflow produces (SC-13, SC-18, OV-23a).
     pub const RESTARTED: BlockFlags = BlockFlags(0x0004);
-    /// On receive: the stream started later than the requested time; set on the
-    /// first block of the stream only (SC-16a, decision S19).
+    /// Transmit only: a receive block carrying it is refused (SC-16a).
     pub const LATE: BlockFlags = BlockFlags(0x0008);
     /// Derived by the constructor: `valid` is not the full mask (SC-10, decision S3).
     pub const PARTIAL_CHANNELS: BlockFlags = BlockFlags(0x0010);
@@ -97,7 +96,7 @@ impl BlockFlags {
     pub const START_OF_BURST: BlockFlags = BlockFlags(0x0020);
     /// Closes a transmit burst (SC-24).
     pub const END_OF_BURST: BlockFlags = BlockFlags(0x0040);
-    /// A multi-channel alignment failure; the cause of a per-channel break (SC-31a).
+    /// The gap is samples the device discarded to keep its channels aligned (SC-13, SC-31).
     pub const ALIGNMENT: BlockFlags = BlockFlags(0x0080);
     /// Bits 8–15, which must be zero (SC-10).
     pub const RESERVED: BlockFlags = BlockFlags(0xFF00);
@@ -217,7 +216,7 @@ impl SampleBlock {
     /// publishing four channels of 2 000 samples over a buffer sized for two
     /// produces a consumer-side panic or a garbage read rather than a Kernel error.
     ///
-    /// Rule: SC-10, SC-10a, SC-14, SC-16.
+    /// Rule: SC-10, SC-10a, SC-14, SC-16, SC-16a.
     pub fn new(
         header: BlockHeader,
         buffer: BufferRef,
@@ -254,10 +253,10 @@ impl SampleBlock {
             }
             _ => {}
         }
-        if f.intersects(BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY)
+        if f.intersects(BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY | BlockFlags::ALIGNMENT)
             && !f.contains(BlockFlags::GAP_BEFORE)
         {
-            return Err(bad("RESTARTED or SEQ_DISCONTINUITY implies GAP_BEFORE"));
+            return Err(bad("RESTARTED, SEQ_DISCONTINUITY or ALIGNMENT implies GAP_BEFORE"));
         }
         if f.intersects(BlockFlags::START_OF_BURST | BlockFlags::END_OF_BURST)
             && f.intersects(
@@ -276,6 +275,10 @@ impl SampleBlock {
                 return Err(bad(
                     "a receive block must not carry START_OF_BURST or END_OF_BURST",
                 ));
+            }
+            // SC-16a: a late receive start is a first block's gap (SC-13), never LATE.
+            Direction::Rx if f.contains(BlockFlags::LATE) => {
+                return Err(bad("a receive block must not carry LATE"));
             }
             Direction::Tx
                 if f.intersects(

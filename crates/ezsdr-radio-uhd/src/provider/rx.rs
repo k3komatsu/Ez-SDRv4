@@ -493,7 +493,8 @@ impl Rx {
                         | match cause {
                             Pending::Overrun => BlockFlags::RESTARTED,
                             Pending::MissedStart => BlockFlags::NONE,
-                            Pending::Sequence | Pending::Alignment => BlockFlags::SEQ_DISCONTINUITY,
+                            Pending::Sequence => BlockFlags::SEQ_DISCONTINUITY,
+                            Pending::Alignment => BlockFlags::ALIGNMENT,
                         };
                 }
             }
@@ -669,7 +670,7 @@ mod tests {
     }
 
     fn received(link: &Arc<dyn ezsdr_kernel::stream::DataLink>) -> Vec<(ClockDomainId, i64, u32)> {
-        std::iter::from_fn(|| link.receive()).map(|block| (block.header().first_sample_time.domain, block.header().first_sample_time.ticks, block.header().len)).collect()
+        std::iter::from_fn(|| link.receive().map(|(b, _)| b)).map(|block| (block.header().first_sample_time.domain, block.header().first_sample_time.ticks, block.header().len)).collect()
     }
 
     use ezsdr_kernel::id::ClockDomainId;
@@ -684,7 +685,7 @@ mod tests {
         // on every channel, and each one's event is emitted with its time jump; a repeated kind
         // is one event; a jump no report announced is a sequence discontinuity with no event
         // (UR-17…UR-19). RX_OVERFLOW goes by the hot path (UR-20), so only the set is compared.
-        let alignment = (kinds::ALIGNMENT_ERROR, BlockFlags::SEQ_DISCONTINUITY);
+        let alignment = (kinds::ALIGNMENT_ERROR, BlockFlags::ALIGNMENT);
         let sequence = (kinds::RX_OVERFLOW, BlockFlags::SEQ_DISCONTINUITY);
         let overrun = (kinds::RX_OVERFLOW, BlockFlags::RESTARTED);
         for (reports, expected) in [
@@ -701,7 +702,7 @@ mod tests {
                 rx.receive(report);
             }
             rx.receive(RxRecv::Samples { first_tick: clock.instant(2), samples: vec![vec![[0.0, 0.0]; 2]; 2] });
-            let block = link.receive().expect("the block after the reports");
+            let block = link.receive().expect("the block after the reports").0;
             let unannounced = if expected.is_empty() { BlockFlags::SEQ_DISCONTINUITY } else { BlockFlags::NONE };
             let flags = expected.iter().fold(BlockFlags::GAP_BEFORE | unannounced, |flags, (_, flag)| flags | *flag);
             assert_eq!((block.header().flags, block.header().lost), (flags, Some(2)));
@@ -738,7 +739,7 @@ mod tests {
         for (first, n) in [(0, 2_000), (0, 2_000), (1_000, 2_000), (3_000, 1_000)] {
             rx.receive(samples(clock.instant(first), n));
         }
-        let blocks: Vec<_> = std::iter::from_fn(|| link.receive())
+        let blocks: Vec<_> = std::iter::from_fn(|| link.receive().map(|(b, _)| b))
             .map(|block| (block.header().first_sample_time.ticks, block.header().len, block.header().flags, block.header().lost)).collect();
         assert_eq!(blocks, [(0, 2_000, BlockFlags::NONE, None), (2_000, 1_000, BlockFlags::NONE, None), (3_000, 1_000, BlockFlags::NONE, None)]);
         assert_eq!(lock(&core.rec).stats["rx_overlapping"], 2);

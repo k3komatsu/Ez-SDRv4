@@ -1472,5 +1472,217 @@
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kc_30_a_panicking_time_cancel_is_a_cleanup_failure"
+ },
+ {
+  "id": "J112",
+  "name": "item 6 (F20): an evicted block's carry goes to the newest block, not the one after it",
+  "file": "crates/ezsdr-link-host/src/lib.rs",
+  "old": "queue.front_mut().map_or(&mut *tail, |(_, next)| next).merge(carry);",
+  "new": "tail.merge(carry);",
+  "crate": "ezsdr-link-host",
+  "test_bin": "link_host",
+  "filter": "hd_05_a_carry_belongs_to_the_block_after_the_drop"
+ },
+ {
+  "id": "J113",
+  "name": "item 6 (F20): take_drop_carry leaves the queued blocks' carries",
+  "file": "crates/ezsdr-link-host/src/lib.rs",
+  "old": "for (_, queued) in queue.iter_mut() {",
+  "new": "for (_, queued) in queue.iter_mut().take(0) {",
+  "crate": "ezsdr-link-host",
+  "test_bin": "link_host",
+  "filter": "hd_05_a_carry_belongs_to_the_block_after_the_drop"
+ },
+ {
+  "id": "J114",
+  "name": "item 6 (F20, SC-30c): a push rejected by a channel-count change drops its carry",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "        self.pending_carry.merge(carry);\n        if h.first_sample_time.domain != self.domain {",
+  "new": "        if h.first_sample_time.domain != self.domain {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_30c_carry_survives_a_rejected_push",
+  "old2": "            return Err(StreamError::ChannelsChanged { from: self.channels, to: h.channels });\n        }",
+  "new2": "            return Err(StreamError::ChannelsChanged { from: self.channels, to: h.channels });\n        }\n        self.pending_carry.merge(carry);"
+ },
+ {
+  "id": "J115",
+  "name": "item 6 (F20, SC-30c): a push rejected with JumpWithoutGapFlag drops the carries",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "                    return Err(StreamError::JumpWithoutGapFlag);",
+  "new": "                    self.pending_carry = DropCarry::default();\n                    return Err(StreamError::JumpWithoutGapFlag);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_30c_a_rejected_push_keeps_both_carries"
+ },
+ {
+  "id": "J116",
+  "name": "item 6 (F45, SC-13): a first block's GAP_BEFORE is not counted back from its first sample",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "None if h.flags.contains(BlockFlags::GAP_BEFORE) => {",
+  "new": "None if false && h.flags.contains(BlockFlags::GAP_BEFORE) => {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_13_a_first_block_gap_is_recorded"
+ },
+ {
+  "id": "J117",
+  "name": "item 6 (F45, SC-30): the map begins at the first delivered sample, not at the leading gap",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "self.first.get_or_insert(expected);",
+  "new": "self.first.get_or_insert(t);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_13_a_first_block_gap_is_recorded"
+ },
+ {
+  "id": "J118",
+  "name": "item 6 (F45, SC-13): a first block's GAP_BEFORE with lost absent is GapFlagWithoutJump",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "std::cmp::Ordering::Equal if !first && h.flags.contains(BlockFlags::GAP_BEFORE) => {",
+  "new": "std::cmp::Ordering::Equal if h.flags.contains(BlockFlags::GAP_BEFORE) => {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_13_a_first_block_gap_is_recorded"
+ },
+ {
+  "id": "J119",
+  "name": "item 6 (F45, HD-10): a capture's leading gap is not clipped to its start",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "header.lost = header.lost.map(|lost| lost.min(inside));",
+  "new": "header.lost = header.lost.map(|lost| lost);",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_10_a_capture_keeps_of_a_leading_gap_only_what_follows_its_start"
+ },
+ {
+  "id": "J120",
+  "name": "item 6 (F45, HD-10): a capture with no start instant keeps its first block's gap",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "let inside = lower.map_or(0, |lower|",
+  "new": "let inside = lower.map_or(u64::MAX, |lower|",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_10_a_capture_keeps_of_a_leading_gap_only_what_follows_its_start"
+ },
+ {
+  "id": "J121",
+  "name": "item 6 (F46, SC-31): ALIGNMENT does not yield GapCause::Alignment",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "    } else if flags.contains(BlockFlags::ALIGNMENT) {",
+  "new": "    } else if false && flags.contains(BlockFlags::ALIGNMENT) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_31_alignment_qualifies_a_stream_gap"
+ },
+ {
+  "id": "J122",
+  "name": "item 6 (F46, UR-19): an alignment error flagged SEQ_DISCONTINUITY",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "Pending::Alignment => BlockFlags::ALIGNMENT,",
+  "new": "Pending::Alignment => BlockFlags::SEQ_DISCONTINUITY,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_19_reports_before_one_block_keep_each_kind"
+ },
+ {
+  "id": "J123",
+  "name": "item 6 (F46, SC-10): ALIGNMENT without GAP_BEFORE accepted",
+  "file": "crates/ezsdr-kernel/src/stream/block.rs",
+  "old": "if f.intersects(BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY | BlockFlags::ALIGNMENT)",
+  "new": "if f.intersects(BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_10_block_flag_implications"
+ },
+ {
+  "id": "J124",
+  "name": "item 6 (F45, SC-16a): a receive block carrying LATE accepted",
+  "file": "crates/ezsdr-kernel/src/stream/block.rs",
+  "old": "Direction::Rx if f.contains(BlockFlags::LATE) => {",
+  "new": "Direction::Rx if false && f.contains(BlockFlags::LATE) => {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_16_direction_flags_rejected"
+ },
+ {
+  "id": "J125",
+  "name": "item 6 (F20, SC-30b): a first block's carry is held for a later gap",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "if !h.flags.contains(BlockFlags::GAP_BEFORE) && !(first && !carried.is_empty()) => {}",
+  "new": "if !h.flags.contains(BlockFlags::GAP_BEFORE) => {}",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_30b_a_first_block_s_carry_is_recorded_at_it"
+ },
+ {
+  "id": "J126",
+  "name": "item 6 (F20, SC-13): a first block's gap counts back from the carry's lost too",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "let back = i64::try_from(h.lost.unwrap_or(0))",
+  "new": "let back = i64::try_from(lost.unwrap_or(0))",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_30b_a_first_block_s_carry_is_recorded_at_it"
+ },
+ {
+  "id": "J127",
+  "name": "item 6 (F46, SC-31): ALIGNMENT takes precedence over SEQ_DISCONTINUITY",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "    } else if flags.contains(BlockFlags::SEQ_DISCONTINUITY) {\n        GapCause::SequenceError {}\n    } else if flags.contains(BlockFlags::ALIGNMENT) {\n        GapCause::Alignment {}\n",
+  "new": "    } else if flags.contains(BlockFlags::ALIGNMENT) {\n        GapCause::Alignment {}\n    } else if flags.contains(BlockFlags::SEQ_DISCONTINUITY) {\n        GapCause::SequenceError {}\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_31_alignment_qualifies_a_stream_gap"
+ },
+ {
+  "id": "J128",
+  "name": "item 6 (F45, HD-10): a capture with no start instant keeps a first block's unknown gap",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "    if inside > 0 {\n        header.lost = header.lost.map",
+  "new": "    if inside > 0 || header.lost.is_none() {\n        header.lost = header.lost.map",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_10_a_capture_keeps_of_a_leading_gap_only_what_follows_its_start"
+ },
+ {
+  "id": "J129",
+  "name": "item 6 (F45, HD-10): a capture timed at its first block's start keeps that block's gap",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "    if inside > 0 {\n",
+  "new": "    if inside > 0 || lower.is_some() {\n",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_10_a_capture_keeps_of_a_leading_gap_only_what_follows_its_start"
+ },
+ {
+  "id": "J130",
+  "name": "item 6 (F20, SC-30c): an overlapping push drops its carry",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "                return Err(StreamError::TimeOverlap { expected, got: t });",
+  "new": "                self.pending_carry = DropCarry::default();\n                return Err(StreamError::TimeOverlap { expected, got: t });",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_30c_a_rejected_push_keeps_both_carries"
+ },
+ {
+  "id": "J131",
+  "name": "item 6 (SC-20b): merging two carries keeps only the later count",
+  "file": "crates/ezsdr-kernel/src/stream/link.rs",
+  "old": "            self.lost = Some(self.lost.unwrap_or(0).saturating_add(n));",
+  "new": "            self.lost = Some(n);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_30b_a_held_carry_keeps_its_flags_and_lost_count"
+ },
+ {
+  "id": "J132",
+  "name": "item 6 (SC-30c): a trailing carry's known count is ignored for its cause",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "                cause: cause_from_flags(carry.flags, carry.lost),",
+  "new": "                cause: cause_from_flags(carry.flags, None),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_30c_trailing_carry_with_a_known_lost_stays_zero_extent"
  }
 ]

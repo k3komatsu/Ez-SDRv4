@@ -85,7 +85,7 @@ DataLinkDecl     { id: DataLinkId, from: PortRef, to: PortRef, contract: DataCon
                    policy: BackPressure, capacity: unsigned 32-bit ≥ 1 }
 PublishOutcome   Accepted | DroppedOldest | DroppedNewest | Full
 DropCarry        { flags: BlockFlags, lost: optional unsigned 64-bit, blocks: unsigned 32-bit }
-                 what a drop-class link accumulated from the blocks it discarded; cleared when read
+                 what a drop-class link discarded between two delivered blocks (SC-20b)
 
 LatePolicy       RejectAtPlan | SendAsapAndFlag | DropAndFlag
 LateOutcome      OnTime | SendAsap { late_by: Duration } | Drop { late_by: Duration }
@@ -109,7 +109,7 @@ Gap              { start: TimePoint, len: unsigned 64-bit, lost: optional unsign
                  link_dropped is a block count, not a sample count: the samples the link lost are
                  jump − lost, and are unrecoverable when lost is absent. That is a real limit of
                  what a dropped header can tell us, not an omission.
-ChannelGap       { channel: unsigned 16-bit, start: TimePoint, len: unsigned 64-bit, cause: GapCause }
+ChannelGap       { channel: unsigned 16-bit, start: TimePoint, len: unsigned 64-bit }
 Segment          { start: TimePoint, len: unsigned 64-bit }
 ContinuityMap    { domain: ClockDomainId, channels, valid: per channel a list of Segment,
                    gaps: list of Gap, channel_gaps: list of ChannelGap,
@@ -139,9 +139,9 @@ pub type BlockRef = std::sync::Arc<SampleBlock>;
 pub trait HostMemoryAccess { fn map_host<'a>(&self, b: &'a BlockRef) -> Option<&'a [u8]>; }
 pub trait DataLink: Send + Sync {
     fn publish(&self, b: BlockRef) -> PublishOutcome;
-    fn receive(&self) -> Option<BlockRef>;
+    fn receive(&self) -> Option<(BlockRef, DropCarry)>;   // SC-20b: with what was dropped just before it
     fn drops(&self) -> u64;              // a never-dropping counter, read by the event collector
-    fn take_drop_carry(&self) -> DropCarry;   // SC-20a: what the dropped blocks were carrying
+    fn take_drop_carry(&self) -> DropCarry;   // SC-20b: everything dropped after the last receive
     fn policy(&self) -> BackPressure;
 }
 pub struct BurstTracker { /* domain, open burst */ }
@@ -158,7 +158,7 @@ impl LatePolicy {
 pub struct ContinuityBuilder { /* domain, lossless flag, expected_next, open segments, gaps */ }
 impl ContinuityBuilder {
     pub fn push(&mut self, h: &BlockHeader, carry: DropCarry)
-        -> Result<(), (StreamError, DropCarry)>;      // SC-30c returns the carry on rejection
+        -> Result<(), StreamError>;      // SC-30c: a rejected push keeps the carry
     pub fn finish(self, carry: DropCarry) -> ContinuityMap;
 }
 ```
@@ -182,15 +182,15 @@ impl ContinuityBuilder {
 
 ### Blocks (Vision §23 rules 1–4)
 
-- **SC-10** The constructor enforces, and rejects with `InvalidBlock` otherwise: `len ≥ 1`; `1 ≤ channels ≤ 64`; no bit of `valid` set at or above `channels`; reserved flag bits zero; `lost` present only together with `GAP_BEFORE` and at least 1; `RESTARTED` or `SEQ_DISCONTINUITY` implies `GAP_BEFORE`; `START_OF_BURST` and `END_OF_BURST` never together with `GAP_BEFORE`, `RESTARTED` or `SEQ_DISCONTINUITY`; and the direction rules of SC-16. `PARTIAL_CHANNELS` is derived by the constructor from the mask, and passing it as input is an error. *Checked: `SampleBlock::new`.*
+- **SC-10** The constructor enforces, and rejects with `InvalidBlock` otherwise: `len ≥ 1`; `1 ≤ channels ≤ 64`; no bit of `valid` set at or above `channels`; reserved flag bits zero; `lost` present only together with `GAP_BEFORE` and at least 1; `RESTARTED`, `SEQ_DISCONTINUITY` or `ALIGNMENT` implies `GAP_BEFORE`; `START_OF_BURST` and `END_OF_BURST` never together with `GAP_BEFORE`, `RESTARTED` or `SEQ_DISCONTINUITY`; and the direction rules of SC-16 and SC-16a. `PARTIAL_CHANNELS` is derived by the constructor from the mask, and passing it as input is an error. *Checked: `SampleBlock::new`.*
 - **SC-10a** The constructor also enforces `buffer.len_bytes ≥ channels · len · bytes_per_sample`, where `bytes_per_sample` is passed in from the producing Port's DataContract. Without it the one invariant that prevents an out-of-bounds read is unchecked: SC-4 fixes the planar layout, so a Provider that publishes four channels of 2 000 samples over a buffer sized for two produces a consumer-side panic or a garbage read rather than a Kernel error, and `map_host` hands back a correctly sized slice that hides it. *Checked: `SampleBlock::new`.*
 - **SC-11** A block is immutable once published: the type has no mutation interface and is shared by reference. Fan-out to N consumers is N links carrying the same reference; nothing is copied.
 - **SC-12** Time is monotonic within one SampleClock. On a lossless path, for consecutive blocks either the next block's first sample time equals the previous block's end, or it is later and `GAP_BEFORE` is set. Earlier than the previous block's end is a contract violation (`TimeOverlap`). A block whose domain differs from its predecessor's is a rate change (spec 01, TM-13c), not a gap. Gaps are never filled, with zeros or with repeated data.
-- **SC-13** `GAP_BEFORE` is set if and only if, as far as the producer knows, samples are missing between the previous block's end and this block's first sample. `lost` carries the count when known and is absent when unknown. When known, `lost` equals the time jump on a lossless path and is at most the jump behind a drop-class link, where the difference is link loss. `RESTARTED` qualifies the gap as a stream restart, `SEQ_DISCONTINUITY` as transport sequence loss. Every v4.0 producer is timestamped and therefore always knows `lost`. *Checked in Phase 2 by `mr_21_overrun_shape` (MR-21) and `mr_22_sequence_error_shape` (MR-22).*
+- **SC-13** `GAP_BEFORE` is set if and only if, as far as the producer knows, samples are missing between the previous block's end and this block's first sample — on a stream's first block, between the stream's origin and its first sample, as a late receive start has it (RM-25). `lost` carries the count when known and is absent when unknown. When known, `lost` equals the time jump on a lossless path, on a first block its first sample's index, and is at most the jump behind a drop-class link, where the difference is link loss. `RESTARTED` qualifies the gap as a stream restart, `SEQ_DISCONTINUITY` as transport sequence loss, `ALIGNMENT` as samples the device discarded to keep its channels aligned. Every v4.0 producer is timestamped and therefore always knows `lost`. *Checked in Phase 2 by `mr_21_overrun_shape` (MR-21) and `mr_22_sequence_error_shape` (MR-22); `sc_13_a_first_block_gap_is_recorded`; `ur_17_a_missed_start_restarts_with_a_gap` and `ur_19_reports_before_one_block_keep_each_kind` (spec 18).*
 - **SC-14** Validity is per channel and constant within a block: a change of validity is a block boundary, and the producer splits. `PARTIAL_CHANNELS` is set exactly when `valid` is not the full mask for `channels`.
 - **SC-15** Block length is not guaranteed. A consumer must not assume a fixed length, a minimum, or an alignment. *Checked in Phase 2 by `mr_12_block_lengths` (MR-12) and `hd_10_capture_of_n_samples_across_jittered_blocks` (HD-12).*
 - **SC-16** A block carries its `direction`, taken from the producing Port. A receive block must not carry `START_OF_BURST` or `END_OF_BURST`; a transmit block must not carry `GAP_BEFORE`, `RESTARTED` or `SEQ_DISCONTINUITY`, because a jump in transmit time is a discontinuity (SC-24) and never a flagged gap. These are constructor checks under SC-10, not conventions: without the field nothing can detect a receive Provider that sets a start-of-burst flag by copying a transmit code path, and the block reaches the capture unremarked. *Checked: `SampleBlock::new`.*
-- **SC-16a** On a receive stream `LATE` means that the stream started later than the requested time, and the producer sets it on the first block of the stream only. A stateless constructor cannot check this. *Checked in Phase 2 by `mr_11_start_cases` (MR-11); an early start is refused, so MockRadio never emits a late first block.*
+- **SC-16a** `LATE` is a transmit flag: a receive block carrying it is refused under SC-10. A receive stream that starts late carries SC-13's first-block gap. *Checked: `SampleBlock::new`, `sc_16_direction_flags_rejected`.*
 - **SC-17** Flag bit positions are fixed by this document, so that an Executor mapping input blocks to output blocks one-to-one can propagate flags unchanged by default. Propagation for a mapping that is not one-to-one is a documented Processor convention, not a Kernel type. (Vision §28; audit F28.)
 - **SC-18** How an overflow appears. A UHD overflow — zero samples returned, the stream restarting about 50 ms later — appears as the next block carrying `GAP_BEFORE` and `RESTARTED`, with `lost` equal to the time jump, and with that jump equal to the restart gap. A sequence error appears as `GAP_BEFORE` and `SEQ_DISCONTINUITY` without `RESTARTED`. Zero-length blocks are never published. An injected fault must produce identical flags and jump. *Checked in Phase 2 by `mr_21_overrun_shape` (MR-21), `mr_22_sequence_error_shape` (MR-22), and `v58_06_injected_overflow_is_a_uhd_overflow` (MR-21).*
 
@@ -199,7 +199,7 @@ impl ContinuityBuilder {
 - **SC-19** Every DataLink is declared with a policy and a capacity in blocks. There is no default policy.
 - **SC-20** Under `Block`, publishing returns `Full` when the capacity is reached, and nothing is ever dropped. Under `DropOldest`, the oldest queued block is evicted and the outcome says so. Under `DropNewest`, the new block is refused and the outcome says so. A drop-class link never returns `Full`. The link's drop count is a never-dropping counter, incremented on every drop and readable by the event collector (Vision §29). The coordinator reads every created link's `drops()` at cleanup step 6 (`flush_events`), before any link is dropped, and records a typed `{ link, drops }` per link in the Manifest's `links`, whose endpoints are the link's entry in `plan.links` (KC-45) (Phase 2, KA-18). *Checked in Phase 2 by `kc_45_manifest_fields` (Manifest link id, endpoints and zero count), `ka_18_nonzero_link_drops_reach_the_manifest` (nonzero propagation) and `ka_18_a_failed_link_drop_snapshot_is_unknown_not_zero` (unknown snapshot) (KA-18).*
 - **SC-20a** `publish` never parks. `Block` names the back-pressure the policy produces, not a blocking call: a step-driven Island cannot afford a parking publish, and a `PublishOutcome` that could never be observed would be dead. A producer that receives `Full` **must not** discard the block silently; it retries on its next turn, or it stops and emits the typed `LINK_BACKPRESSURE` event for the Run's Policy table to act on. This is what makes SC-21 necessary: the stall a drop-class Sink link prevents is not a parked producer but a producer that keeps retrying because its Sink never drains. *Checked: the in-memory link and a producer-side test; the event kind is spec 04's.*
-- **SC-20b** A drop-class link accumulates what it discarded into a `DropCarry`: the union of the dropped blocks' `GAP_BEFORE`, `RESTARTED`, `SEQ_DISCONTINUITY` and `ALIGNMENT` flags, the sum of the `lost` counts that were present, and how many blocks were dropped. The carry is cleared when read; what a consumer does with one whose push is rejected is SC-30c's rule. Without the carry, a hardware overflow whose block is then evicted by the lossy link in front of a recorder is re-derived as a plain link drop, and the Manifest attributes a device overflow to host-side loss with the lost count thrown away although it was known — v3's failure (§2) reappearing one layer up. *Checked: the in-memory link.*
+- **SC-20b** A drop-class link accumulates what it discards between two delivered blocks into a `DropCarry`: the union of the dropped blocks' `GAP_BEFORE`, `RESTARTED`, `SEQ_DISCONTINUITY` and `ALIGNMENT` flags, the sum of the `lost` counts that were present, and how many blocks were dropped. `receive` returns each block with the carry of what was dropped immediately before it in stream order; `take_drop_carry` returns, and clears from the link, everything dropped after the last block `receive` returned, queued blocks' carries included. Without the carry, a hardware overflow whose block is then evicted by the lossy link in front of a recorder is re-derived as a plain link drop, and the Manifest attributes a device overflow to host-side loss with the lost count thrown away although it was known — v3's failure (§2) reappearing one layer up. *Checked: `sc_20b_drop_carry_preserves_attribution` (the test link) and `hd_05_a_carry_belongs_to_the_block_after_the_drop` (spec 10's HostLink).*
 - **SC-21** A link whose consumer port belongs to a Sink-role Module must be drop-class; `validate()` rejects `Block` there, because observation must never stall the real-time path. The predicate is a Kernel function, called by the planner (specs 03 and 05). (Vision §30, invariant 21.)
 - **SC-22** Fan-out is N links sharing block references (SC-11). A Probe is a drop-class link feeding a recorder Sink, and is not a Kernel concept. (Vision §30; audit F29.)
 
@@ -219,16 +219,16 @@ impl ContinuityBuilder {
 
 ### Derivation (Vision §23's closing paragraph, §28)
 
-- **SC-30** `ContinuityMap` and the per-channel validity it contains are derived by the Kernel's continuity builder from block headers alone, and never assembled by hand. There is one map per SampleClock: a block in another domain ends the map with `DomainChanged`, and the Sink starts a new builder. The builder is told whether its path is lossless; on a lossless path a jump without `GAP_BEFORE` is a contract violation, and on a drop-class path it is a link-drop gap.
+- **SC-30** `ContinuityMap` and the per-channel validity it contains are derived by the Kernel's continuity builder from block headers alone, and never assembled by hand. There is one map per SampleClock: a block in another domain ends the map with `DomainChanged`, and the Sink starts a new builder. The builder is told whether its path is lossless; on a lossless path a jump without `GAP_BEFORE` is a contract violation, and on a drop-class path it is a link-drop gap. A first block carrying `GAP_BEFORE` is recorded with a `Gap` from `lost` samples before it (zero-extent at the block when `lost` is absent), and the map's `first` is that gap's start (SC-13). *Checked: `sc_13_a_first_block_gap_is_recorded`.*
 - **SC-30a** A block whose `channels` differs from the builder's ends the map with `ChannelsChanged`, exactly as a domain change does. Otherwise the per-channel loop runs over the new block's channel count and any channel above it keeps an open segment that `finish()` closes at the last block's end, so the map would claim a channel was valid through an interval in which the stream did not carry it.
-- **SC-30b** A consumer behind a drop-class link reads the link's `DropCarry` (SC-20b) before pushing the next header and passes it to the builder, which merges its flags into the block's for the purpose of deriving a cause, sums the `lost` counts that are present, and records the dropped block count in the gap's `link_dropped`. Merging the counts is the point: in the case SC-20b exists for, the evicted block held the `lost` and the delivered block holds none, so a rule that dropped the count when either side lacked one would discard exactly the number it was written to preserve. *Checked: `ContinuityBuilder`.*
-- **SC-30c** A carry that no delivered block follows is recorded by `finish` as a zero-extent `Gap` at `expected_next` — its `len` is 0 because the extent of what followed the last delivered block is unknown, not because nothing was lost; `lost` and the block count carry what is known — carrying the cause derived from its flags, its `lost` where present, and its block count; the map's `end` does not move, because no sample after the last delivered one is accounted for. A push rejected by SC-30 or SC-30a returns the carry to the consumer, which gives it to the **outgoing** builder's `finish` rather than to the new one: those samples belong to the domain and channel count that just ended. Handing it to the new builder would lose it outright, since a first push has no previous block and therefore no gap to merge into. *Checked: `ContinuityBuilder`.*
-- **SC-31** `GapCause` is a closed, derived set describing what the **stream** lost: `OverflowRestart` from `RESTARTED`; `SequenceError` from `SEQ_DISCONTINUITY`; `Stream` from `GAP_BEFORE` alone; `LinkDrop` from a jump with no gap flag on a lossy path; `Mixed` from `GAP_BEFORE` with `lost` less than the jump on a lossy path and no carry to explain the difference; `Unknown` from `GAP_BEFORE` with `lost` absent; `Alignment` from a per-channel break (SC-31a). What the **link** lost is the separate `link_dropped` count, not a cause, so a device overflow inside an interval that also lost a block to the link is still reported as `OverflowRestart` with its sample count, beside a link-drop count of one. Collapsing the two into a single cause was the first draft's rule and it lost the device's own diagnosis. *Checked: `ContinuityBuilder`.*
-- **SC-31a** A channel that loses validity while the stream continues produces a `ChannelGap` with a cause, not merely a hole between two `Segment`s. Vision §28 requires a capture to describe a multi-channel alignment failure, and a hole alone is indistinguishable from a channel that was never enabled over that interval. The cause is `Alignment` when the block that dropped the channel carries the `ALIGNMENT` flag, and `Stream` otherwise. Without that flag the `Alignment` variant would be unreachable, because nothing else in a block header distinguishes an alignment failure from an intentionally disabled channel. The event kind `ALIGNMENT_ERROR` that accompanies it is spec 04's to define (Vision §29). *Checked: `sc_31a_channel_gap_carries_a_cause` for the derivation — a channel dropped on a block carrying `ALIGNMENT` yields `ChannelGap{cause: Alignment}` and the same sequence without the flag yields `Stream`. Setting the flag is a **producer obligation**: the Kernel cannot know whether a channel was dropped for alignment, and `SampleBlock::new` — which this annotation used to name — carries no `ALIGNMENT` logic and no test reaches it with the flag (exit-review finding).*
+- **SC-30b** A consumer behind a drop-class link passes the `DropCarry` that `receive` returned with a block (SC-20b) to the builder with that block's header; the builder merges its flags into the block's for the purpose of deriving a cause, sums the `lost` counts that are present, and records the dropped block count in the gap's `link_dropped`. A carry pushed with a stream's first block is recorded at that block: in its `GAP_BEFORE` gap when it has one, otherwise in a zero-extent `Gap` at its first sample, never in a later gap. Merging the counts is the point: in the case SC-20b exists for, the evicted block held the `lost` and the delivered block holds none, so a rule that dropped the count when either side lacked one would discard exactly the number it was written to preserve. *Checked: `ContinuityBuilder`, `sc_30b_a_first_block_s_carry_is_recorded_at_it`.*
+- **SC-30c** A carry that no delivered block follows is recorded by `finish` as a zero-extent `Gap` at `expected_next` — its `len` is 0 because the extent of what followed the last delivered block is unknown, not because nothing was lost; `lost` and the block count carry what is known — carrying the cause derived from its flags, its `lost` where present, and its block count; the map's `end` does not move, because no sample after the last delivered one is accounted for. A consumer whose recording ends passes `take_drop_carry` to `finish`. A rejected push keeps its carry in the builder, whose `finish` records it: after a rejection by SC-30 or SC-30a those samples belong to the domain and channel count that just ended, and the consumer finishes that builder with an empty carry. *Checked: `sc_30c_carry_survives_a_rejected_push`, `sc_30c_a_rejected_push_keeps_both_carries`.*
+- **SC-31** `GapCause` is a closed, derived set describing what the **stream** lost: `OverflowRestart` from `RESTARTED`; `SequenceError` from `SEQ_DISCONTINUITY`; `Stream` from `GAP_BEFORE` alone; `LinkDrop` from a jump with no gap flag on a lossy path; `Mixed` from `GAP_BEFORE` with `lost` less than the jump on a lossy path and no carry to explain the difference; `Unknown` from `GAP_BEFORE` with `lost` absent; `Alignment` from `ALIGNMENT`. Of the qualifiers, `RESTARTED` takes precedence over `SEQ_DISCONTINUITY`, which takes precedence over `ALIGNMENT`. What the **link** lost is the separate `link_dropped` count, not a cause, so a device overflow inside an interval that also lost a block to the link is still reported as `OverflowRestart` with its sample count, beside a link-drop count of one. Collapsing the two into a single cause was the first draft's rule and it lost the device's own diagnosis. *Checked: `ContinuityBuilder`, `sc_31_alignment_qualifies_a_stream_gap`.*
+- **SC-31a** *Withdrawn.* A `ChannelGap` carries no cause: an alignment failure discards samples on every channel, a stream gap qualified by `ALIGNMENT` (SC-13, SC-31; spec 18 UR-19).
 - **SC-31b** A per-channel break caused by a **stream** gap produces no `ChannelGap`. The stream `Gap` already covers those samples for every channel, and emitting both would report one overflow on a four-channel stream as one `Gap` plus four duplicates of it, which a SigMF export (SC-32) would then write as four channel annotations for one gap. *Checked: `ContinuityBuilder`.*
-- **SC-31c** A channel that was valid somewhere in the map and is invalid at its end produces a `ChannelGap` running to the map's end. A channel that fails and never returns is the usual outcome of an alignment error, and a builder that emitted a break only when a channel came back would describe that capture as though the channel had simply ended. A channel that was never valid produces nothing, because never enabled is not a gap. *Checked: `ContinuityBuilder`.*
-- **SC-31d** A channel's break is held as a pending close and emitted only when its extent is known: when the channel returns, when a stream gap ends it early, or at `finish`. A break that coincides with a stream gap is recorded from the gap's end, not from the channel's last valid sample, because the samples before the gap were lost by the stream and are already in its `Gap`. Emitting at the moment of the break instead would either double-count those samples against the channel or, when the stream gap closed the channel's segment first, lose the break entirely. *Checked: `ContinuityBuilder`.*
-- **SC-32** A SigMF export maps each run of delivered samples between stream gaps — the stream's valid segments — to a capture segment with `core:sample_start` and `core:global_index`, and carries the gaps and per-channel validity in an `ezsdr` extension namespace, since no existing SigMF extension covers validity; a SigMF capture segment belongs to the whole Recording, so a channel's own breaks are annotations, not segments (Phase 4, VC-3: the text said "each valid segment", which read per channel contradicts HD-15). *Checked in Phase 4 by `hd_15_a_capture_is_a_sigmf_recording` and `hd_15_channel_validity_and_its_causes`: the capture Sink writes every capture as a SigMF Recording (spec 10 HD-15; Phase 4, VC-3).*
+- **SC-31c** A channel that was valid somewhere in the map and is invalid at its end produces a `ChannelGap` running to the map's end; a builder that emitted a break only when a channel came back would describe that capture as though the channel had simply ended. A channel that was never valid produces nothing, because never enabled is not a gap. *Checked: `ContinuityBuilder`.*
+- **SC-31d** A channel that loses validity while the stream continues produces a `ChannelGap`, not merely a hole between two `Segment`s, which is indistinguishable from a channel never enabled over that interval. A channel's break is held as a pending close and emitted only when its extent is known: when the channel returns, when a stream gap ends it early, or at `finish`. A break that coincides with a stream gap is recorded from the gap's end, not from the channel's last valid sample, because the samples before the gap were lost by the stream and are already in its `Gap`. Emitting at the moment of the break instead would either double-count those samples against the channel or, when the stream gap closed the channel's segment first, lose the break entirely. *Checked: `ContinuityBuilder`, `sc_31d_a_channel_break_is_a_channel_gap`.*
+- **SC-32** A SigMF export maps each run of delivered samples between stream gaps — the stream's valid segments — to a capture segment with `core:sample_start` and `core:global_index`, and carries the gaps and per-channel validity in an `ezsdr` extension namespace, since no existing SigMF extension covers validity; a SigMF capture segment belongs to the whole Recording, so a channel's own breaks are annotations, not segments (Phase 4, VC-3: the text said "each valid segment", which read per channel contradicts HD-15). *Checked in Phase 4 by `hd_15_a_capture_is_a_sigmf_recording` and `hd_15_channel_validity`: the capture Sink writes every capture as a SigMF Recording (spec 10 HD-15; Phase 4, VC-3).*
 
 ## 6. Algorithms
 
@@ -248,55 +248,55 @@ impl ContinuityBuilder {
 **Continuity derivation** (SC-30).
 
 ```text
-push(h, carry):                            -- carry is the link's DropCarry, empty on a lossless path
+push(h, carry):                            -- carry is what receive returned with h, empty on a lossless path
+  pending_carry += carry                                                  -- SC-30c: kept if rejected
   if h.domain ≠ domain            -> DomainChanged
   if h.channels ≠ channels        -> ChannelsChanged                      -- SC-30a
-  flags = h.flags OR carry.flags                                          -- SC-30b
-  lost  = sum of whichever of h.lost and carry.lost are present            -- absent only if neither is
-  if expected_next is Some(E):
-     if h.t < E                   -> TimeOverlap
-     if h.t = E and GAP_BEFORE in flags -> GapFlagWithoutJump
-     if h.t > E:
-        jump = h.t − E                                                    -- checked; overflow -> Time(..)
-        if GAP_BEFORE not in flags:
-           lossless ? JumpWithoutGapFlag
-                    : gaps.push(Gap{ E, jump, none, LinkDrop, carry.blocks })
-        else:
-           cause = RESTARTED          in flags ? OverflowRestart
-                 : SEQ_DISCONTINUITY  in flags ? SequenceError
-                 : lost is none                ? Unknown
-                 : (lost < jump and carry.blocks = 0 and not lossless) ? Mixed{ lost }
-                 : Stream
-           gaps.push(Gap{ E, jump, lost, cause, carry.blocks })
-        for each channel with a pending close at s with cause k:          -- SC-31d
-           channel_gaps.push(ChannelGap{ c, s, E − s, k }); clear it      -- it ends where the stream gap begins
-        close every open segment at E
+  flags = h.flags OR pending_carry.flags                                  -- SC-30b
+  lost  = sum of whichever of h.lost and pending_carry.lost are present   -- absent only if neither is
+  E = expected_next, or on the first block h.t − (h.lost or 0) if GAP_BEFORE in h.flags, else h.t  -- SC-13
+  if h.t < E                      -> TimeOverlap
+  if h.t = E and GAP_BEFORE in h.flags and not the first block -> GapFlagWithoutJump
+  if h.t > E, or h.t = E and (GAP_BEFORE in h.flags or (first block and pending_carry not empty)):  -- SC-13, SC-30b
+     jump = h.t − E                                                       -- checked; overflow -> Time(..)
+     if GAP_BEFORE not in flags and lossless -> JumpWithoutGapFlag
+     cause = GAP_BEFORE not in flags ? LinkDrop
+           : RESTARTED          in flags ? OverflowRestart
+           : SEQ_DISCONTINUITY  in flags ? SequenceError
+           : ALIGNMENT          in flags ? Alignment
+           : lost is none                ? Unknown
+           : (lost < jump and pending_carry.blocks = 0 and not lossless) ? Mixed{ lost }
+           : Stream
+     gaps.push(Gap{ E, jump, lost, cause, pending_carry.blocks }); pending_carry = empty
+     for each channel with a pending close at s:                          -- SC-31d
+        channel_gaps.push(ChannelGap{ c, s, E − s }); clear it            -- it ends where the stream gap begins
+     close every open segment at E
   was_valid = the previous pushed block's mask         (empty before the first push)
   for each channel c in 0..h.channels:
      if valid bit c is set:
-        if a pending close at s with cause k exists for c:                -- SC-31a
-           channel_gaps.push(ChannelGap{ c, s, h.t − s, k }); clear it
+        if a pending close at s exists for c:                             -- SC-31d
+           channel_gaps.push(ChannelGap{ c, s, h.t − s }); clear it
         open a segment at h.t if none is open, then extend it to h.t + len
      else:
-        k = ALIGNMENT in h.flags ? Alignment : Stream                     -- the block that DROPS c
-        if a segment is open for c: close it and record a pending close at its end with cause k
-        else if c was set in was_valid: record a pending close at h.t with cause k   -- SC-31d
-        else: nothing — a channel that was never valid has no gap        -- SC-31a
-  expected_next = h.t + len
+        if a segment is open for c: close it and record a pending close at its end
+        else if c was set in was_valid: record a pending close at h.t   -- SC-31d
+        else: nothing — a channel that was never valid has no gap        -- SC-31c
+  first = E on the first block; expected_next = h.t + len
 
 finish(carry):
-  if carry.blocks > 0:                                                    -- SC-30c
+  carry += pending_carry
+  if carry is not empty:                                                  -- SC-30c
      gaps.push(Gap{ expected_next, 0, carry.lost,
                     cause-from-carry.flags, carry.blocks })               -- end does not move
-  for each channel with a pending close at s with cause k:                -- SC-31c
-     channel_gaps.push(ChannelGap{ c, s, end − s, k })
+  for each channel with a pending close at s:                             -- SC-31c
+     channel_gaps.push(ChannelGap{ c, s, end − s })
   close every open segment
   return ContinuityMap{ domain, channels, valid, gaps, channel_gaps, first, end }
 ```
 
 The pending-close record is what makes the two guards work. A channel's break is remembered, never emitted at the moment it happens, so the emission can span the right interval: it is flushed when the channel returns, when a stream gap ends it early, or at `finish`. Without the flush in the stream-gap branch a channel that dropped before an overflow and returned after it would report the whole span, overflow included, as its own fault; without the `was_valid` clause a channel lost *at* an overflow, whose segment the gap already closed, would leave no record at all and its data would appear to have simply ended.
 
-The two guards matter. Without `closed_by_stream_gap` every stream gap would also emit one `ChannelGap` per valid channel over the same samples, so one overflow on a four-channel stream would report one `Gap` and four duplicates of it. Without the `finish` clause a channel that fails and never returns — the usual outcome of a UHD alignment error — would produce no `ChannelGap` at all, which is the case Vision §28 names.
+The two guards matter. Without `closed_by_stream_gap` every stream gap would also emit one `ChannelGap` per valid channel over the same samples, so one overflow on a four-channel stream would report one `Gap` and four duplicates of it. Without the `finish` clause a channel that fails and never returns would produce no `ChannelGap` at all.
 
 ## 7. Decisions
 
@@ -320,7 +320,7 @@ The two guards matter. Without `closed_by_stream_gap` every stream gap would als
 | S16 | `GapCause` | A closed derived set | A free-form string | none |
 | S17 | Flag bit positions | Fixed in this document | An ordering that exists only in the Rust source | none |
 | S18 | Is `SampleBlock` a document? | No: no schema and no version. The records (`ContinuityMap`, `BurstRecord`, `DataLinkDecl`, `DataContract`) are documents | Versioning the block header (it never leaves the process) | none |
-| S19 | What `LATE` means on receive | The first block of a stream that started after its requested time | Leaving it undefined, as the Vision does | none |
+| S19 | What `LATE` means on receive | Nothing: a receive block carrying it is refused (SC-16a), and a late start is SC-13's first-block gap | The first block of a stream that started after its requested time (a second encoding of what SC-13 already carries, with no producer) | none |
 
 ## 8. Phase 1 tests
 
@@ -331,9 +331,9 @@ The two guards matter. Without `closed_by_stream_gap` every stream gap would als
 | `sc_06_memory_domain_id_is_node_qualified` | `MemoryDomainId::local(7)` | node is `NodeId::LOCAL`; local ordinal is 7 | SC-6, X7 |
 | `sc_07_unsafe_code_remains_forbidden` | removal of `#![forbid(unsafe_code)]` from `src/lib.rs` | `kernel_surface` fails | SC-7, OV-23 |
 | `sc_10a_block_rejects_undersized_buffer` | 4 channels of 2 000 samples at 8 bytes with a buffer of 32 000 bytes, then 64 000 | `InvalidBlock`, then accepted | SC-10a |
-| `sc_16_direction_flags_rejected` | a receive block with a start of burst; a transmit block with `GAP_BEFORE` | `InvalidBlock` in both | SC-16, SC-10 |
+| `sc_16_direction_flags_rejected` | a receive block with a start of burst; a transmit block with `GAP_BEFORE`; a transmit, then a receive block with `LATE` | `InvalidBlock`; `InvalidBlock`; accepted, then `InvalidBlock` | SC-16, SC-16a, SC-10 |
 | `sc_10_block_partial_channels_derived` | two channels with mask 0b01, then 0b11; then the flag as input | set, clear, then error | SC-10, SC-14 |
-| `sc_10_block_flag_implications` | `RESTARTED` without `GAP_BEFORE`; `lost` without `GAP_BEFORE`; a start of burst with `GAP_BEFORE` | error in each case | SC-10, SC-16 |
+| `sc_10_block_flag_implications` | `RESTARTED` without `GAP_BEFORE`; `ALIGNMENT` without, then with `GAP_BEFORE`; `lost` without `GAP_BEFORE`; a start of burst with `GAP_BEFORE` | error in each case but `ALIGNMENT` with `GAP_BEFORE` | SC-10, SC-16 |
 | `sc_11_block_fanout_shares_reference` | one block reference into two links | both receives yield the same pointer, strong count 3 | SC-11, SC-22 |
 | `sc_03_contract_identity_or_compat` | cf32 to cf32; cf32 to sc16; a fixture whose `compatible_from` holds Y, in both directions | accepted; `Incompatible`; accepted; `Incompatible` | SC-3 |
 | `sc_02_contract_registry_conflict` | register cf32 twice identically, then with a different full scale | accepted, then error | SC-2 |
@@ -349,12 +349,14 @@ The two guards matter. Without `closed_by_stream_gap` every stream gap would als
 | `sc_14_continuity_per_channel_segments` | two channels, masks 0b11, 0b01, 0b11 | channel 0 one segment, channel 1 two segments split at the change | SC-14, SC-30 |
 | `sc_30_continuity_domain_change_ends_map` | a block in SampleClock B after one in A | `DomainChanged` | SC-30, TM-13c |
 | `sc_30a_channel_count_change_ends_map` | a 2-channel block after a 4-channel one | `ChannelsChanged`, and no segment left open for channels 2 and 3 | SC-30a |
-| `sc_31a_channel_gap_carries_a_cause` | 4 channels, channel 2 dropped from the mask on a block carrying `ALIGNMENT`, then restored | one `ChannelGap` for channel 2 with cause `Alignment`; the same sequence without the flag gives cause `Stream` | SC-31a |
+| `sc_31d_a_channel_break_is_a_channel_gap` | 4 channels, channel 2 dropped from the mask, then restored | one `ChannelGap{2, 100, 100}` | SC-31d |
+| `sc_31_alignment_qualifies_a_stream_gap` | a jump of 150 with `GAP_BEFORE｜ALIGNMENT` and lost 150 on 2 channels; `ALIGNMENT` with `SEQ_DISCONTINUITY`, then with `RESTARTED` | one `Gap` at 100 of length 150, cause `Alignment`; no `ChannelGap`; `SequenceError`; `OverflowRestart` | SC-31, SC-13 |
+| `sc_13_a_first_block_gap_is_recorded` | a first block at 40 with `GAP_BEFORE` and lost 40; then with `lost` absent | a `Gap` 0→40, cause `Stream`, `first` 0; then a zero-extent `Gap` at 40, cause `Unknown` | SC-13, SC-30 |
 | `sc_31b_stream_gap_emits_no_channel_gaps` | 4 valid channels across an overflow gap | one `Gap`, zero `ChannelGap`s | SC-31b |
 | `sc_31c_channel_that_never_returns` | channel 2 dropped and never restored before `finish` | one `ChannelGap` for channel 2 running to the map's end | SC-31c |
 | `sc_31c_channel_lost_at_the_overflow` | 4 channels to t=200, then t=350 with `GAP_BEFORE｜RESTARTED` and channel 2 cleared, never restored | one `Gap` 200→350, and one `ChannelGap` for channel 2 from 350 to the end | SC-31c, SC-31d |
-| `sc_31d_break_across_a_stream_gap_is_split` | channel 2 dropped at 100 on `ALIGNMENT`, a stream gap 200→350, channel 2 restored at 350 | `ChannelGap{2, 100, 100, Alignment}` only; the gap's 150 samples are not charged to channel 2 | SC-31d |
-| `sc_31a_never_valid_channel_has_no_gap` | channel 3 never set in any mask | no `ChannelGap` for channel 3 | SC-31a, SC-31c |
+| `sc_31d_break_across_a_stream_gap_is_split` | channel 2 dropped at 100, a stream gap 200→350, channel 2 restored at 350 | `ChannelGap{2, 100, 100}` only; the gap's 150 samples are not charged to channel 2 | SC-31d |
+| `sc_31c_never_valid_channel_has_no_gap` | channel 3 never set in any mask | no `ChannelGap` for channel 3 | SC-31c |
 | `sc_30_continuity_jump_overflow_is_time_error` | a block whose time makes the jump computation overflow | `StreamError::Time(Overflow)`, not a panic | SC-30 |
 | `sc_24_burst_sob_eob_basic` | start at 1000 len 100, then 1100 len 50, then 1150 len 10 with end | `Started`, `Continued`, `Ended` with 160 samples; state idle | SC-24, SC-28 |
 | `sc_24_burst_single_block` | start and end on one block | `Started` then `Ended` | SC-24 |
@@ -372,14 +374,15 @@ The two guards matter. Without `closed_by_stream_gap` every stream gap would als
 | `sc_20_link_drop_oldest` | capacity 2, three publishes | receives the second and third, drop count 1 | SC-20 |
 | `sc_20_link_drop_newest` | capacity 2, three publishes | receives the first and second, drop count 1 | SC-20 |
 | `sc_20a_full_is_not_a_silent_drop` | a producer double that receives `Full`, then retries | the block is delivered on the retry; nothing is lost; a producer that drops instead is caught by the double's assertion | SC-20a |
-| `sc_20b_drop_carry_preserves_attribution` | a `DropOldest` link at capacity; the evicted block carries `GAP_BEFORE｜RESTARTED` with lost 150 | the carry reports both flags and 150; it is cleared on read; two further drops carry the union of their flags and lost 12 | SC-20b |
+| `sc_20b_drop_carry_preserves_attribution` | a `DropOldest` link at capacity; the evicted block carries `GAP_BEFORE｜RESTARTED` with lost 150 | the next received block's carry reports both flags and 150, and none trails it; two further drops carry the union of their flags and lost 12 | SC-20b |
 | `sc_30b_carry_merges_into_next_gap` | that carry pushed with a clean following header | one gap: cause `OverflowRestart`, `lost` 150, `link_dropped` 1 — not `LinkDrop` with no count | SC-30b, SC-31 |
 | `sc_30b_a_carry_on_a_contiguous_block_is_not_discarded` | two blocks refused, the delivered block contiguous, a later jump | one gap with `link_dropped` 3 — the held count plus the one at the jump | SC-30b |
 | `sc_30b_a_carry_held_across_a_contiguous_block_reaches_the_trailing_gap` | the same, with no later jump | a zero-extent trailing gap with the held count, not a map that claims none | SC-30b, SC-30c |
 | `sc_30b_a_held_carry_keeps_its_flags_and_lost_count` | a carry with `GAP_BEFORE \| RESTARTED`, `lost` 150 and one block, delivered contiguously | the next gap's cause is `OverflowRestart` with `lost` 150; the contiguous push is **accepted**, because the carried `GAP_BEFORE` is a dropped block's claim and not this block's | SC-30b, SC-13 |
-| `sc_30b_a_rejected_push_does_not_destroy_the_held_carry` | a held carry, then a push rejected with `JumpWithoutGapFlag` | the caller gets its own carry back and the builder still holds its own, which reaches `finish` | SC-30b, SC-30c |
+| `sc_30b_a_first_block_s_carry_is_recorded_at_it` | a first block at 100 with a carry of 3 blocks, then a jump with `GAP_BEFORE｜RESTARTED`; a first block at 40 with `GAP_BEFORE`, lost 10 and a carry of 2 blocks with lost 5 | a zero-extent `LinkDrop` gap at 100 with `link_dropped` 3, and the later gap with `link_dropped` 0; one gap 30→40 with `lost` 15 and `link_dropped` 2 | SC-30b, SC-13 |
+| `sc_30c_a_rejected_push_keeps_both_carries` | a held carry of 2 blocks, then a push carrying 1 block rejected with `JumpWithoutGapFlag`; then a push carrying 1 block rejected with `TimeOverlap` | `finish` records one gap with `link_dropped` 3; then one gap with `link_dropped` 1 | SC-30b, SC-30c |
 | `sc_31_mixed_requires_that_no_carry_explains_the_shortfall` | a held block, then a jump of 400 with `lost` 150 and an empty carry | cause `Stream`, not `Mixed`: a gap reporting `link_dropped` 1 cannot also claim nothing explains the shortfall | SC-31, SC-30b |
-| `sc_30c_carry_survives_a_rejected_push` | a carry read, then a push rejected by a channel-count change | the carry is returned with the error and lands in the outgoing map's `finish`, not the new one | SC-30c, SC-30a |
+| `sc_30c_carry_survives_a_rejected_push` | a carry pushed with a block rejected by a channel-count change | the builder keeps it, and the outgoing map's `finish` records it | SC-30c, SC-30a |
 | `sc_30c_trailing_carry_is_zero_extent` | a carry at `finish` with `lost` absent | a `Gap` at `expected_next` of length 0 with the block count; `end` unchanged | SC-30c |
 | `sc_21_sink_links_must_be_drop_class` | a Sink consumer with `Block`, then with `DropOldest` | rejected, then accepted | SC-21 |
 | `sc_23a_tx_target_advances_to_next_sample` | a target at root tick 70 with ratio 8, then at 40 | advanced to sample 9 with `requested_target` recorded; accepted as sample 5 unchanged | SC-23a, TM-4 |
@@ -412,7 +415,7 @@ The two guards matter. Without `closed_by_stream_gap` every stream gap would als
 | §23 TX rule 4: `repeat` | SC-26 |
 | §23 TX rule 5: record what was transmitted | SC-28 |
 | §28 ContinuityMap, validity, Gap, taint as a convention | SC-17, SC-30, SC-30a, SC-30b, SC-31 |
-| §28 "multi-channel alignment failure" as a describable outcome | SC-31a |
+| §28 "multi-channel alignment failure" as a describable outcome | SC-13, SC-31 (`Alignment`), SC-31d |
 | §30 a Probe is a lossy link plus a Sink | SC-21, SC-22 |
 | §31 MemoryDomain and BufferRef | SC-6, SC-7 |
 | §34 the wire format is not a contract | SC-5 |
@@ -423,14 +426,14 @@ The two guards matter. Without `closed_by_stream_gap` every stream gap would als
 
 1. **§23 TX rule 1 contradicts §58 #15.** TX rule 1 says the Provider closes the burst, emits a discontinuity and starts a new burst, while §58 #15 says an unclosed burst followed by a timed block yields a `TIME_ERROR` on Mock and hardware alike. Both are wanted, at different layers: the Kernel tracker never lets the device see that sequence (SC-24), and the Mock's device model must still emulate `TIME_ERROR` for a Provider that bypasses the tracker (decision S12). §58 #15's first clause tests the device model, not the Stream Contract path. The Vision wording should say which layer it means.
 2. **§23 RX rule 1 leaves an unknown `lost` half-defined.** It allows `lost` to be absent, but does not say what time the next block then carries; a monotonic time cannot be both exact and unknown. Resolved by requiring timestamped producers at v4.0 (SC-13) and reserving the absent case for a future producer. The attribution of loss behind a drop-class link is why the field must travel with the block at all.
-3. **§23 lists `LATE` among the flags** with neither a side nor a meaning. Defined in SC-16 and decision S19.
+3. **§23 lists `LATE` among the flags** with neither a side nor a meaning. Transmit-only (SC-16a, decision S19).
 4. **§23 shows one buffer for N channels with no layout**, while UHD delivers one buffer per channel. Resolved by making the layout a contract attribute (SC-4).
 5. **§28's `Gap.cause` has no defined value set.** Closed in SC-31.
 6. **§22 puts a burst target "in the radio's ClockDomain" while §23 rule 7 puts block times in the stream's SampleClock.** These are different domains, the device root and the sample grid. SC-23 chooses the SampleClock; SC-23a converts an exactly related target with `apply` and advances it to the next sample instant when inexact, and SC-23b refuses an unrelated one on TM-5's grounds.
 7. **§23 RX rule 5's "the real-time path performs no allocation" is untestable in Phase 1**, because no real-time path exists yet. Recorded as a producer rule (SC-9) whose test is the Phase 2 and Phase 8 copy-regression benchmarks.
 8. **§22's `TxBurst.format` and channel list versus a block's contract and channel count.** Mapping a burst's channels onto a stream's channels is Radio Model vocabulary (Phase 2). Noted, not decided here.
 9. **§23 rule 8 names the policy `block` but the Vision never says whether `publish` parks.** A parking publish cannot be called from a step-driven Island (§32), and a non-parking one makes the name a misnomer. SC-20a keeps the Vision's word and fixes the semantics: the policy produces back-pressure through a refusal the producer must honour, not through a parked thread. §23 rule 8's wording should say so.
-10. **§28 requires a capture to describe a "multi-channel alignment failure" but §23 gives no way to carry the cause of a per-channel break.** Resolved by `ChannelGap` and `GapCause::Alignment` (SC-31a). The matching event kind `ALIGNMENT_ERROR` is in §29's list but appears in no §23 rule.
+10. **§28 requires a capture to describe a "multi-channel alignment failure" but §23 gives no way to carry the cause of a per-channel break.** Resolved by `ChannelGap` (SC-31d) and the stream-gap qualifier `ALIGNMENT`, which yields `GapCause::Alignment` (SC-31). The matching event kind `ALIGNMENT_ERROR` is in §29's list but appears in no §23 rule.
 11. **Neither §23 nor §30 says what a drop-class link does with the flags of the blocks it drops.** Since §23 rule 8 puts recorders as well as probes behind drop-class links, silently losing a dropped block's `RESTARTED` and its lost count would misattribute a device overflow in the very artifact §50 asks to be honest. Resolved by the `DropCarry` of SC-20b.
 12. **§5 and §31 model `MemoryDomain` as a Core concept with a growing set of kinds.** SC-6 keeps the node-qualified `MemoryDomainId` in Core and leaves host, pinned, GPU and future kinds to Vocabularies; Core compares identities and does not interpret kinds or plan transfers (S6, Vision §63). Correct both Vision sections together at Step 5 (§12).
 
@@ -454,3 +457,4 @@ On the Kernel surface: `ContinuityMap`, `Gap`, `ChannelGap`, `Segment`, `GapCaus
 | date | rules | change | record |
 |---|---|---|---|
 | 2026-10-09 | SC-20 | the drop counts are recorded as the Manifest's typed `links` (`{ link, drops }`, endpoints in `plan.links`), read at step 6 (`flush_events`), instead of the section `ezsdr.links` (checked by `kc_45_manifest_fields` and `ka_18_nonzero_link_drops_reach_the_manifest`) | [audit item 4](../plan/maintenance/24-prefreeze-audit.md), owner decision 2026-10-09 |
+| 2026-10-10 | SC-10, SC-13, SC-16a, SC-20b, SC-30, SC-30b, SC-30c, SC-31, SC-31a, SC-31c, SC-31d | `receive` returns each block with the carry dropped just before it, and `take_drop_carry` everything dropped after the last receive; a rejected push keeps its carry; a first block's carry is recorded at that block; a first block's `GAP_BEFORE` is recorded as a gap from the stream's origin; `LATE` is transmit-only; `ALIGNMENT` qualifies a stream gap as `Alignment`, and `ChannelGap` has no cause (SC-31a withdrawn) | [audit item 6](../plan/maintenance/24-prefreeze-audit.md), owner decision 2026-10-09 |

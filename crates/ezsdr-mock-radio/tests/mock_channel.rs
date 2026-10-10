@@ -51,7 +51,7 @@ struct Sink {
 }
 impl DataLink for Sink {
     fn publish(&self, block: BlockRef) -> PublishOutcome { self.queue.lock().unwrap().push_back(block); PublishOutcome::Accepted }
-    fn receive(&self) -> Option<BlockRef> { self.queue.lock().unwrap().pop_front() }
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> { self.queue.lock().unwrap().pop_front().map(|b| (b, DropCarry::default())) }
     fn drops(&self) -> u64 { self.drops.load(Ordering::Relaxed) }
     fn take_drop_carry(&self) -> DropCarry { DropCarry::default() }
     fn policy(&self) -> BackPressure { BackPressure::DropOldest }
@@ -169,7 +169,7 @@ impl Radio {
     /// Every received sample of channel `channel`, by sample index, in arrival order.
     fn received(&self, channel: usize) -> Vec<(i64, f32, f32)> {
         let mut out = Vec::new();
-        while let Some(block) = self.link.receive() {
+        while let Some((block, _)) = self.link.receive() {
             let header = block.header().clone();
             let bytes = block.host_bytes().unwrap();
             for index in 0..header.len as usize {
@@ -526,7 +526,7 @@ fn mr_34_a_a_timed_tune_reaches_every_transmit_channel() {
     // sample 2 004 000, reaches the transmitted sample at k = 4 045. Only the transmit
     // direction is retuned, so the receive phase stays at rx[0] throughout.
     let (before, after) = (3_000, 5_000);
-    let blocks: Vec<_> = std::iter::from_fn(|| radio.link.receive()).collect();
+    let blocks: Vec<_> = std::iter::from_fn(|| radio.link.receive().map(|(b, _)| b)).collect();
     let read = |k: i64, channel: usize| {
         let block = blocks.iter().find(|b| {
             b.header().first_sample_time.ticks <= k && k < b.header().first_sample_time.ticks + i64::from(b.header().len)
@@ -687,7 +687,7 @@ fn mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant() {
     step(&world, &mut [&mut radio], t0);
     step(&world, &mut [&mut radio], t0 + 10_000_001);
     let Phases { rx, tx, rx_timed, tx_timed } = phases(1, "mock");
-    let blocks: Vec<_> = std::iter::from_fn(|| radio.link.receive()).collect();
+    let blocks: Vec<_> = std::iter::from_fn(|| radio.link.receive().map(|(b, _)| b)).collect();
     let check = |k: i64, channel: usize, expected: f64| {
         let block = blocks.iter().find(|b| b.header().first_sample_time.ticks <= k && k < b.header().first_sample_time.ticks + i64::from(b.header().len)).unwrap();
         let index = (k - block.header().first_sample_time.ticks) as usize;
@@ -889,7 +889,7 @@ fn mr_35_a_cold_receive_change_samples_the_field_on_the_new_clock() {
     step(&world, &mut [&mut radio], 4_000_001);
     let first_domain = world.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/rx")).unwrap().domain;
     let mut checked = (0, 0);
-    while let Some(block) = radio.link.receive() {
+    while let Some((block, _)) = radio.link.receive() {
         let header = block.header().clone();
         let bytes = block.host_bytes().unwrap();
         for index in 0..header.len as usize {
@@ -1018,7 +1018,7 @@ fn mr_32_a_two_channel_waveform_is_channel_interleaved() {
     });
     step(&world, &mut [&mut radio], 0);
     step(&world, &mut [&mut radio], 2_000_001);
-    let blocks: Vec<_> = std::iter::from_fn(|| radio.link.receive()).collect();
+    let blocks: Vec<_> = std::iter::from_fn(|| radio.link.receive().map(|(b, _)| b)).collect();
     assert_eq!(blocks.len(), 1);
     let block = &blocks[0];
     for index in 0..2_000usize {

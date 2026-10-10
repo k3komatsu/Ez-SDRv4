@@ -167,7 +167,7 @@
   "new": "        .take(0)\n        .map(|g| Ok((file_index(g.start.ticks)?, g)))",
   "crate": "ezsdr-sink-capture",
   "test_bin": "sink_capture",
-  "filter": "hd_15_channel_validity_and_its_causes"
+  "filter": "hd_15_channel_validity"
  },
  {
   "id": "D18",

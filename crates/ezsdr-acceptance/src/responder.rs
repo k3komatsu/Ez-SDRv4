@@ -136,7 +136,7 @@ impl Component for PingResponder {
     fn step(&mut self, _until: TimePoint, out: &mut Vec<Action>) -> Result<StepOutcome, ModuleError> {
         let Some(link) = self.link.clone() else { return Ok(StepOutcome { progressed: false }) };
         let mut progressed = false;
-        while let Some(block) = link.receive() {
+        while let Some((block, _)) = link.receive() {
             progressed = true;
             let header = block.header();
             let bytes = block.host_bytes().ok_or_else(|| ModuleError::rejected("responder: a block is not in host memory"))?;

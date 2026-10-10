@@ -68,7 +68,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "A per-channel break on a block carrying `ALIGNMENT` (SC-31a).",
+          "description": "`ALIGNMENT`: samples the device discarded to keep its channels aligned (SC-31).",
           "properties": {
             "kind": {
               "const": "alignment",

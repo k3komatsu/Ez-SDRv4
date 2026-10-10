@@ -54,12 +54,12 @@ impl Drop for TempDir {
     }
 }
 
+/// SC-20b's link, as HostLink implements it (this crate may not depend on that Module).
 struct TestLink {
     policy: BackPressure,
     capacity: usize,
-    queue: Mutex<VecDeque<BlockRef>>,
+    queue: Mutex<(VecDeque<(BlockRef, DropCarry)>, DropCarry)>,
     drops: AtomicU64,
-    carry: Mutex<DropCarry>,
 }
 
 impl TestLink {
@@ -67,41 +67,42 @@ impl TestLink {
         TestLink {
             policy,
             capacity: capacity.max(1),
-            queue: Mutex::new(VecDeque::new()),
+            queue: Mutex::new((VecDeque::new(), DropCarry::default())),
             drops: AtomicU64::new(0),
-            carry: Mutex::new(DropCarry::default()),
         }
-    }
-
-    fn record_drop(&self, block: &BlockRef) {
-        self.drops.fetch_add(1, Ordering::Relaxed);
-        self.carry.lock().expect("carry lock").absorb(block);
     }
 }
 
 impl DataLink for TestLink {
     fn publish(&self, block: BlockRef) -> PublishOutcome {
-        let mut queue = self.queue.lock().expect("queue lock");
-        if queue.len() < self.capacity {
-            queue.push_back(block);
-            return PublishOutcome::Accepted;
-        }
-        match self.policy {
-            BackPressure::Block => PublishOutcome::Full,
-            BackPressure::DropOldest => {
-                self.record_drop(&queue.pop_front().expect("queue is full"));
-                queue.push_back(block);
+        let mut guard = self.queue.lock().expect("queue lock");
+        let (queue, tail) = &mut *guard;
+        let outcome = match (queue.len() < self.capacity, self.policy) {
+            (true, _) => PublishOutcome::Accepted,
+            (false, BackPressure::Block) => return PublishOutcome::Full,
+            (false, BackPressure::DropOldest) => {
+                let (evicted, mut carry) = queue.pop_front().expect("queue is full");
+                carry.absorb(&evicted);
+                queue.front_mut().map_or(&mut *tail, |(_, next)| next).merge(carry);
                 PublishOutcome::DroppedOldest
             }
-            BackPressure::DropNewest => {
-                self.record_drop(&block);
+            (false, BackPressure::DropNewest) => {
+                tail.absorb(&block);
                 PublishOutcome::DroppedNewest
             }
+        };
+        if outcome != PublishOutcome::Accepted {
+            self.drops.fetch_add(1, Ordering::Relaxed);
         }
+        if outcome != PublishOutcome::DroppedNewest {
+            let carry = std::mem::take(tail);
+            queue.push_back((block, carry));
+        }
+        outcome
     }
 
-    fn receive(&self) -> Option<BlockRef> {
-        self.queue.lock().expect("queue lock").pop_front()
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> {
+        self.queue.lock().expect("queue lock").0.pop_front()
     }
 
     fn drops(&self) -> u64 {
@@ -109,7 +110,13 @@ impl DataLink for TestLink {
     }
 
     fn take_drop_carry(&self) -> DropCarry {
-        std::mem::take(&mut *self.carry.lock().expect("carry lock"))
+        let mut guard = self.queue.lock().expect("queue lock");
+        let (queue, tail) = &mut *guard;
+        let mut carry = std::mem::take(tail);
+        for (_, queued) in queue.iter_mut() {
+            carry.merge(std::mem::take(queued));
+        }
+        carry
     }
 
     fn policy(&self) -> BackPressure {
@@ -700,6 +707,68 @@ fn hd_10_the_carry_attributes_a_dropped_overflow() {
 }
 
 #[test]
+fn hd_10_a_capture_keeps_of_a_leading_gap_only_what_follows_its_start() {
+    // SC-13: a first block's GAP_BEFORE counts back from its first sample; a capture
+    // keeps of it only the samples at or after its own start instant.
+    let gap = |rig: &mut Rig| {
+        let flags = BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED;
+        ramp_block(&mut rig.pool, rig.env.sample_clock, 40, 40.0, 10, flags, Some(40))
+    };
+    let mut rig = Rig::new("leading-gap-at", BTreeMap::new());
+    let at = AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 30));
+    rig.env.actions.push(request(Value::Int(10), Some(at)));
+    let block = gap(&mut rig);
+    rig.link.publish(block);
+    rig.step().expect("one block");
+    let artifacts = rig.stop(StopMode::Orderly);
+    let map = &artifacts[0].continuity[0];
+    assert_eq!(map.first.ticks, 30);
+    assert_eq!(map.gaps.len(), 1);
+    assert_eq!((map.gaps[0].start.ticks, map.gaps[0].len, map.gaps[0].lost), (30, 10, Some(10)));
+    assert_eq!(map.gaps[0].cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
+
+    // With no start instant the capture begins at its first delivered sample.
+    let mut rig = Rig::new("leading-gap-own", sample_count(10));
+    let block = gap(&mut rig);
+    rig.link.publish(block);
+    rig.step().expect("one block");
+    let artifacts = rig.stop(StopMode::Orderly);
+    let map = &artifacts[0].continuity[0];
+    assert_eq!((map.first.ticks, map.gaps.len()), (40, 0));
+
+    // A start instant at the block's first sample keeps none of the gap either.
+    let mut rig = Rig::new("leading-gap-at-start", BTreeMap::new());
+    let at = AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 40));
+    rig.env.actions.push(request(Value::Int(10), Some(at)));
+    let block = gap(&mut rig);
+    rig.link.publish(block);
+    rig.step().expect("one block");
+    let map = &rig.stop(StopMode::Orderly)[0].continuity[0];
+    assert_eq!((map.first.ticks, map.gaps.len()), (40, 0));
+    let at = AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 30));
+
+    // An unknown `lost` is clipped the same way: kept as a zero-extent gap at a block
+    // after the start instant, cleared with no start instant.
+    let unknown = |rig: &mut Rig| {
+        let flags = BlockFlags::GAP_BEFORE;
+        ramp_block(&mut rig.pool, rig.env.sample_clock, 40, 40.0, 10, flags, None)
+    };
+    let mut rig = Rig::new("leading-gap-unknown-at", BTreeMap::new());
+    rig.env.actions.push(request(Value::Int(10), Some(at)));
+    let block = unknown(&mut rig);
+    rig.link.publish(block);
+    rig.step().expect("one block");
+    let map = &rig.stop(StopMode::Orderly)[0].continuity[0];
+    assert_eq!((map.first.ticks, map.gaps.len(), map.gaps[0].len, map.gaps[0].lost), (40, 1, 0, None));
+    let mut rig = Rig::new("leading-gap-unknown-own", sample_count(10));
+    let block = unknown(&mut rig);
+    rig.link.publish(block);
+    rig.step().expect("one block");
+    let map = &rig.stop(StopMode::Orderly)[0].continuity[0];
+    assert_eq!((map.first.ticks, map.gaps.len()), (40, 0));
+}
+
+#[test]
 fn hd_11_an_unexpected_action_is_rejected() {
     let mut rig = Rig::new("unexpected-action", BTreeMap::new());
     rig.env.actions.push(tx_burst());
@@ -979,14 +1048,14 @@ fn hd_15_a_capture_is_a_sigmf_recording() {
 }
 
 #[test]
-fn hd_15_channel_validity_and_its_causes() {
+fn hd_15_channel_validity() {
     let mut rig = Rig::new("sigmf-channels", sample_count(40));
     let full = ChannelMask::full(2);
     let only_first = ChannelMask::from_bits(0b01);
     let domain = rig.env.sample_clock;
     for (first, valid, flags) in [
         (0, full, BlockFlags::NONE),
-        (10, only_first, BlockFlags::ALIGNMENT),
+        (10, only_first, BlockFlags::NONE),
         (20, full, BlockFlags::NONE),
         (30, only_first, BlockFlags::NONE),
     ] {
@@ -1001,13 +1070,13 @@ fn hd_15_channel_validity_and_its_causes() {
         [{ "sample_start": 0, "sample_count": 40 }],
         [{ "sample_start": 0, "sample_count": 10 }, { "sample_start": 20, "sample_count": 10 }]
     ]));
-    // SC-31a: the block that dropped the channel says why; SC-31c: a channel still
-    // invalid at the end has a break running to the end.
+    // SC-31d: one annotation per break; SC-31c: a channel still invalid at the end has
+    // a break running to the end.
     assert_eq!(meta["annotations"], json!([
         { "core:sample_start": 10, "core:sample_count": 10, "core:label": "invalid channel",
-          "ezsdr:channel": 1, "ezsdr:cause": { "kind": "alignment" } },
+          "ezsdr:channel": 1 },
         { "core:sample_start": 30, "core:sample_count": 10, "core:label": "invalid channel",
-          "ezsdr:channel": 1, "ezsdr:cause": { "kind": "stream" } }
+          "ezsdr:channel": 1 }
     ]));
     assert_eq!(meta["captures"], json!([{ "core:sample_start": 0, "core:global_index": 0 }]));
 }

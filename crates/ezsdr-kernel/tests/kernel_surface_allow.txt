@@ -120,7 +120,7 @@ stream::continuity::ContinuityMap = NEW: SC-30's derived record of what a stream
 stream::continuity::ContinuityBuilder = NEW: SC-30's derivation, so that no Sink assembles continuity by hand.
 stream::continuity::Gap = NEW: SC-31's interval of missing samples, with the cause the stream itself reported.
 stream::continuity::GapCause = NEW: SC-31's closed derived cause set, which Vision §28 leaves undefined.
-stream::continuity::ChannelGap = NEW: SC-31a's per-channel break with a cause, which Vision §28 requires and §23 cannot express.
+stream::continuity::ChannelGap = NEW: SC-31d's per-channel break, which Vision §28 requires and §23 cannot express.
 stream::continuity::Segment = NEW: SC-30's run of valid samples on one channel.
 
 # --- matching (audit §13 `matching`) -----------------------------------------

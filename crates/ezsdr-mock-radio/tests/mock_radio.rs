@@ -116,14 +116,12 @@ struct MemLink {
     capacity: usize,
     queue: Mutex<VecDeque<BlockRef>>,
     drops: AtomicU64,
-    carry: Mutex<DropCarry>,
 }
 
 impl MemLink {
     fn new(policy: BackPressure, capacity: usize) -> Self {
-        Self { policy, capacity, queue: Mutex::new(VecDeque::new()), drops: AtomicU64::new(0), carry: Mutex::new(DropCarry::default()) }
+        Self { policy, capacity, queue: Mutex::new(VecDeque::new()), drops: AtomicU64::new(0) }
     }
-    fn receive(&self) -> Option<BlockRef> { self.queue.lock().unwrap().pop_front() }
     fn queued(&self) -> usize { self.queue.lock().unwrap().len() }
 }
 
@@ -134,22 +132,21 @@ impl DataLink for MemLink {
         match self.policy {
             BackPressure::Block => PublishOutcome::Full,
             BackPressure::DropOldest => {
-                let old = queue.pop_front().unwrap();
+                queue.pop_front();
                 self.drops.fetch_add(1, Ordering::Relaxed);
-                self.carry.lock().unwrap().absorb(&old);
                 queue.push_back(block);
                 PublishOutcome::DroppedOldest
             }
             BackPressure::DropNewest => {
                 self.drops.fetch_add(1, Ordering::Relaxed);
-                self.carry.lock().unwrap().absorb(&block);
                 PublishOutcome::DroppedNewest
             }
         }
     }
-    fn receive(&self) -> Option<BlockRef> { MemLink::receive(self) }
+    // No test here reads a carry, so none is kept (SC-20b is HostLink's).
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> { self.queue.lock().unwrap().pop_front().map(|b| (b, DropCarry::default())) }
     fn drops(&self) -> u64 { self.drops.load(Ordering::Relaxed) }
-    fn take_drop_carry(&self) -> DropCarry { std::mem::take(&mut *self.carry.lock().unwrap()) }
+    fn take_drop_carry(&self) -> DropCarry { DropCarry::default() }
     fn policy(&self) -> BackPressure { self.policy }
 }
 
@@ -621,10 +618,6 @@ fn mr_11_start_cases() {
     let clocks = harness.clocks.sample_clock_records();
     assert_eq!(clocks.iter().find(|record| record.stream == rid("mock/rx")).unwrap().origin, TimePoint::new(ROOT, 2_000_000_000));
     assert_eq!(clocks.iter().find(|record| record.stream == rid("mock/tx")).unwrap().origin, TimePoint::new(ROOT, 0));
-    while let Some(block) = harness.link.as_ref().unwrap().receive() {
-        assert!(!block.header().flags.contains(BlockFlags::LATE));
-    }
-
     let mut no_link = Harness::new("x310-like", &[("radio.tx.channels", eq(Value::Int(1)))], &[], &[], None);
     no_link.mock.arm().unwrap();
     assert_eq!(no_link.clocks.sample_clock_records().iter().map(|record| record.stream.path.as_str()).collect::<Vec<_>>(), ["mock/tx"]);
@@ -639,7 +632,7 @@ fn mr_12_block_lengths() {
     harness.step(25_000_000).unwrap();
     let mut sizes = Vec::new();
     let mut starts = Vec::new();
-    while let Some(block) = harness.link.as_ref().unwrap().receive() {
+    while let Some((block, _)) = harness.link.as_ref().unwrap().receive() {
         sizes.push(block.header().len);
         starts.push(block.header().first_sample_time.ticks);
     }
@@ -654,14 +647,14 @@ fn mr_12_block_lengths() {
     let mut plain = Harness::new("ideal", &[], &[], &[], Some((BackPressure::DropOldest, 64)));
     plain.arm_start(0).unwrap();
     plain.step(25_000_000).unwrap();
-    let plain_sizes: Vec<_> = std::iter::from_fn(|| plain.link.as_ref().unwrap().receive()).map(|block| block.header().len).collect();
+    let plain_sizes: Vec<_> = std::iter::from_fn(|| plain.link.as_ref().unwrap().receive().map(|(b, _)| b)).map(|block| block.header().len).collect();
     assert!(!plain_sizes.is_empty());
     assert!(plain_sizes.iter().all(|size| *size == 2000));
 
     let mut other_seed = Harness::new("ideal", &[], &[("block_len_jitter", Value::Bool(true))], &[("sim.seed", serde_json::json!(8))], Some((BackPressure::DropOldest, 64)));
     other_seed.arm_start(0).unwrap();
     other_seed.step(25_000_000).unwrap();
-    let other_sizes: Vec<_> = std::iter::from_fn(|| other_seed.link.as_ref().unwrap().receive()).map(|block| block.header().len).collect();
+    let other_sizes: Vec<_> = std::iter::from_fn(|| other_seed.link.as_ref().unwrap().receive().map(|(b, _)| b)).map(|block| block.header().len).collect();
     assert_ne!(sizes, other_sizes);
 }
 
@@ -676,7 +669,7 @@ fn mr_12_jitter_draws_belong_to_blocks_after_a_receive_cut() {
     harness.arm_start(2_000_000_000).unwrap();
     harness.step(2_003_500_000).unwrap();
     harness.step(2_056_000_000).unwrap();
-    let blocks: Vec<_> = std::iter::from_fn(|| harness.link.as_ref().unwrap().receive()).collect();
+    let blocks: Vec<_> = std::iter::from_fn(|| harness.link.as_ref().unwrap().receive().map(|(b, _)| b)).collect();
     let mut rng = ezsdr_sim::SimRng::new(7, "mock/rx");
     let first_len = 1 + rng.below(4_000) as i64;
     let second_len = 1 + rng.below(4_000) as i64;
@@ -694,7 +687,7 @@ fn mr_13_ramp_values() {
     let mut harness = Harness::new("ideal", &[("radio.rx.channels", eq(Value::Int(2)))], &[("rx_test_pattern", Value::Str("ramp".to_owned()))], &[], Some((BackPressure::DropOldest, 4)));
     harness.arm_start(0).unwrap();
     harness.step(1_999_001).unwrap();
-    let block = harness.link.as_ref().unwrap().receive().unwrap();
+    let block = harness.link.as_ref().unwrap().receive().unwrap().0;
     assert_eq!(block.buffer().memory_domain, ezsdr_hostmem::HOST_MEMORY);
     let bytes = block.host_bytes().unwrap();
     let f32_at = |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
@@ -712,7 +705,7 @@ fn mr_13_ramp_values() {
     let mut zero = Harness::new("ideal", &[("radio.rx.channels", eq(Value::Int(2)))], &[], &[], Some((BackPressure::DropOldest, 4)));
     zero.arm_start(0).unwrap();
     zero.step(1_999_001).unwrap();
-    let block = zero.link.as_ref().unwrap().receive().unwrap();
+    let block = zero.link.as_ref().unwrap().receive().unwrap().0;
     assert_eq!(block.buffer().memory_domain, ezsdr_hostmem::HOST_MEMORY);
     assert!(block.host_bytes().unwrap().iter().all(|byte| *byte == 0));
 }
@@ -733,7 +726,7 @@ fn mr_14_blocks_appear_when_their_last_sample_has_occurred() {
     assert_eq!(harness.link.as_ref().unwrap().queued(), 0);
     assert_eq!(harness.auth.advance_to(TimePoint::new(ROOT, 1_999_001)).unwrap(), 1);
     harness.mock.step(TimePoint::new(ROOT, 1_999_001)).unwrap();
-    assert_eq!(harness.link.as_ref().unwrap().receive().unwrap().header().len, 2000);
+    assert_eq!(harness.link.as_ref().unwrap().receive().unwrap().0.header().len, 2000);
     assert_eq!(harness.auth.next_due(), Some(TimePoint::new(ROOT, 3_999_001)));
 }
 
@@ -991,7 +984,7 @@ fn mr_18_a_cold_rate_change_starts_a_new_sample_clock() {
     assert_eq!(records[0].ended_at, Some(TimePoint::new(ROOT, effective)));
     let current = records.last().unwrap();
     assert_eq!(current.origin, TimePoint::new(ROOT, restarted));
-    let first = harness.link.as_ref().unwrap().receive().unwrap();
+    let first = harness.link.as_ref().unwrap().receive().unwrap().0;
     assert_ne!(first.header().first_sample_time.domain, old);
     assert_eq!(first.header().first_sample_time.ticks, 0);
     assert!(!first.header().flags.contains(BlockFlags::GAP_BEFORE));
@@ -1024,7 +1017,7 @@ fn mr_18_a_cold_change_starts_its_clock_on_the_lattice() {
         assert_eq!(new.origin, TimePoint::new(ROOT, e2), "{from} -> {to}");
         let old_ratio = records[0].root_ticks_per_tick.num() as i64;
         let mut first_new = None;
-        while let Some(block) = harness.link.as_ref().unwrap().receive() {
+        while let Some((block, _)) = harness.link.as_ref().unwrap().receive() {
             let header = block.header().clone();
             if header.first_sample_time.domain == old {
                 assert!((header.first_sample_time.ticks + i64::from(header.len)) * old_ratio <= e1, "an old block past e₁");
@@ -1055,7 +1048,7 @@ fn mr_18_a_cold_receive_change_before_t0_applies_at_t0() {
     assert_eq!(records.last().unwrap().origin, TimePoint::new(ROOT, t0 + 55_000_000));
     let applied = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.mock.applied").unwrap()];
     assert_eq!(applied[0]["at"]["ticks"], t0);
-    let first = harness.link.as_ref().unwrap().receive().unwrap();
+    let first = harness.link.as_ref().unwrap().receive().unwrap().0;
     assert_eq!(first.header().first_sample_time.domain, records.last().unwrap().domain);
     assert_eq!(first.header().first_sample_time.ticks, 0);
 }
@@ -1176,10 +1169,10 @@ fn mr_19_backpressure_is_an_overrun() {
     harness.arm_start(2_000_000_000).unwrap();
     harness.step(2_001_999_001).unwrap();
     harness.step(2_003_999_001).unwrap();
-    let first = harness.link.as_ref().unwrap().receive().unwrap();
+    let first = harness.link.as_ref().unwrap().receive().unwrap().0;
     assert_eq!(first.header().first_sample_time.ticks, 0);
     harness.step(2_053_999_001).unwrap();
-    let restarted = harness.link.as_ref().unwrap().receive().unwrap();
+    let restarted = harness.link.as_ref().unwrap().receive().unwrap().0;
     assert_eq!(restarted.header().first_sample_time.ticks, 52_000);
     assert!(restarted.header().flags.contains(BlockFlags::GAP_BEFORE));
     assert!(restarted.header().flags.contains(ezsdr_kernel::stream::BlockFlags::RESTARTED));
@@ -1209,9 +1202,9 @@ fn mr_19_backpressure_is_an_overrun() {
     let start = 2_000_000_002;
     fractional.arm_start(start).unwrap();
     fractional.step(start + 4_000_000).unwrap();
-    assert_eq!(fractional.link.as_ref().unwrap().receive().unwrap().header().first_sample_time.ticks, 0);
+    assert_eq!(fractional.link.as_ref().unwrap().receive().unwrap().0.header().first_sample_time.ticks, 0);
     fractional.step(start + 54_001_000).unwrap();
-    let restarted = fractional.link.as_ref().unwrap().receive().unwrap();
+    let restarted = fractional.link.as_ref().unwrap().receive().unwrap().0;
     assert_eq!(restarted.header().first_sample_time.ticks, 52_001);
     assert_eq!(restarted.header().lost, Some(50_001));
 }
@@ -1426,7 +1419,7 @@ fn mr_20_a_fault_between_cold_clocks_is_not_applied() {
         harness.step(20_000_000).unwrap();
         assert_eq!(harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0, "{fault}");
         let mut first = None;
-        while let Some(block) = harness.link.as_ref().unwrap().receive() {
+        while let Some((block, _)) = harness.link.as_ref().unwrap().receive() {
             if block.header().first_sample_time.domain == domain && first.is_none() { first = Some(block.header().clone()); }
         }
         let first = first.expect("a replacement block");
@@ -1448,7 +1441,7 @@ fn mr_20_a_fault_between_cold_clocks_is_not_applied() {
     assert_eq!(faults[0]["lost"], 2_000);
     assert_eq!(harness.clocks.sample_clock_records().iter().filter(|record| record.stream == rid("mock/rx")).count(), 1);
     let mut gap = None;
-    while let Some(block) = harness.link.as_ref().unwrap().receive() {
+    while let Some((block, _)) = harness.link.as_ref().unwrap().receive() {
         if block.header().lost.is_some() { gap = Some(block.header().clone()); }
     }
     let gap = gap.expect("the block after the sequence error");
@@ -1471,7 +1464,7 @@ fn fault_rows(harness: &Harness, kind: &str) -> Vec<(serde_json::Value, serde_js
 
 fn received(harness: &Harness) -> Vec<BlockHeader> {
     let mut headers = Vec::new();
-    while let Some(block) = harness.link.as_ref().unwrap().receive() { headers.push(block.header().clone()); }
+    while let Some((block, _)) = harness.link.as_ref().unwrap().receive() { headers.push(block.header().clone()); }
     headers
 }
 
@@ -1679,7 +1672,7 @@ fn mr_21_overrun_shape() {
     harness.arm_start(2_000_000_000).unwrap();
     harness.step(2_052_999_001).unwrap();
     let mut headers = Vec::new();
-    while let Some(block) = harness.link.as_ref().unwrap().receive() { headers.push(block.header().clone()); }
+    while let Some((block, _)) = harness.link.as_ref().unwrap().receive() { headers.push(block.header().clone()); }
     let restarted = headers.iter().find(|header| header.first_sample_time.ticks == 51_000).unwrap();
     assert_eq!(restarted.lost, Some(50_000));
     assert!(restarted.flags.contains(BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED));
@@ -1695,7 +1688,7 @@ fn mr_21_overrun_shape() {
     overlap.arm_start(2_000_000_000).unwrap();
     overlap.step(2_062_999_001).unwrap();
     let mut headers = Vec::new();
-    while let Some(block) = overlap.link.as_ref().unwrap().receive() { headers.push(block.header().clone()); }
+    while let Some((block, _)) = overlap.link.as_ref().unwrap().receive() { headers.push(block.header().clone()); }
     let restarted = headers.iter().find(|header| header.first_sample_time.ticks == 60_000).unwrap();
     assert_eq!(restarted.lost, Some(59_000));
     assert!(restarted.flags.contains(BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED));
@@ -1787,7 +1780,7 @@ fn mr_22_sequence_error_shape() {
     harness.arm_start(0).unwrap();
     harness.step(4_999_001).unwrap();
     let mut headers = Vec::new();
-    while let Some(block) = harness.link.as_ref().unwrap().receive() { headers.push(block.header().clone()); }
+    while let Some((block, _)) = harness.link.as_ref().unwrap().receive() { headers.push(block.header().clone()); }
     let restarted = headers.iter().find(|header| header.first_sample_time.ticks == 3000).unwrap();
     assert_eq!(restarted.lost, Some(2_000));
     assert!(restarted.flags.contains(BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY));
@@ -1824,7 +1817,7 @@ fn mr_25_orderly_stop_ends_at_its_instant_abort_at_once() {
     orderly.mock.stop(StopMode::Orderly).unwrap();
     orderly.step(stop + 999_001).unwrap();
     let mut blocks = Vec::new();
-    while let Some(block) = orderly.link.as_ref().unwrap().receive() { blocks.push(block); }
+    while let Some((block, _)) = orderly.link.as_ref().unwrap().receive() { blocks.push(block); }
     let last = blocks.last().unwrap().header();
     assert_eq!(2_000_000_000 + (last.first_sample_time.ticks + i64::from(last.len) - 1) * 1_000, stop - 1_000);
     let ended = orderly.clocks.sample_clock_records()[0].ended_at;
@@ -1836,7 +1829,7 @@ fn mr_25_orderly_stop_ends_at_its_instant_abort_at_once() {
     abort.mock.stop(StopMode::Abort).unwrap();
     abort.step(2_010_000_000).unwrap();
     let mut after_abort = Vec::new();
-    while let Some(block) = abort.link.as_ref().unwrap().receive() { after_abort.push(block); }
+    while let Some((block, _)) = abort.link.as_ref().unwrap().receive() { after_abort.push(block); }
     assert_eq!(after_abort.len(), 1);
     assert_eq!(after_abort[0].header().first_sample_time.ticks, 0);
 }
@@ -1951,8 +1944,8 @@ fn mr_30_two_mocks_one_seed_identical_output() {
     let mut right = Harness::new("ideal", &[], &selector, &[("sim.seed", serde_json::json!(7))], Some((BackPressure::DropOldest, 32)));
     left.arm_start(0).unwrap(); right.arm_start(0).unwrap();
     left.step(25_000_000).unwrap(); right.step(25_000_000).unwrap();
-    let a: Vec<_> = std::iter::from_fn(|| left.link.as_ref().unwrap().receive()).map(|b| b.header().clone()).collect();
-    let b: Vec<_> = std::iter::from_fn(|| right.link.as_ref().unwrap().receive()).map(|b| b.header().clone()).collect();
+    let a: Vec<_> = std::iter::from_fn(|| left.link.as_ref().unwrap().receive().map(|(b, _)| b)).map(|b| b.header().clone()).collect();
+    let b: Vec<_> = std::iter::from_fn(|| right.link.as_ref().unwrap().receive().map(|(b, _)| b)).map(|b| b.header().clone()).collect();
     assert_eq!(a, b);
     assert_eq!(left.mock.instance().sections, right.mock.instance().sections);
     assert_eq!(left.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)), right.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)));
@@ -2013,7 +2006,7 @@ fn mr_18_a_fractional_receive_cut_is_the_first_sample_at_or_after_e() {
         h.step(3_200_000).unwrap();
         assert_eq!(h.clocks.sample_clock_records()[0].ended_at, Some(TimePoint::new(ROOT, end)));
         let mut old_end = 0;
-        while let Some(block) = h.link.as_ref().unwrap().receive() {
+        while let Some((block, _)) = h.link.as_ref().unwrap().receive() {
             if block.header().first_sample_time.domain == old {
                 old_end = block.header().first_sample_time.ticks + i64::from(block.header().len);
             }

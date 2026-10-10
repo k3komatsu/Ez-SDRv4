@@ -273,7 +273,7 @@ The numbered rules below are cited by number; each is now stated by the rules it
 | Rule | Headline | Normative |
 |---|---|---|
 | RX 1 | Time is monotonic within one SampleClock; a gap is a time jump plus `GAP_BEFORE`, never filled | SC-12, SC-13 |
-| RX 2 | Validity is per channel and constant within a block | SC-14, SC-31a |
+| RX 2 | Validity is per channel and constant within a block | SC-14, SC-31d |
 | RX 3 | Block length is not guaranteed | SC-15 |
 | RX 4 | The full-scale convention is a contract attribute | SC-4 |
 | RX 5 | Immutable, reference-counted, pool-allocated; fan-out shares the reference; no allocation on the real-time path | SC-9, SC-11, SC-22 |

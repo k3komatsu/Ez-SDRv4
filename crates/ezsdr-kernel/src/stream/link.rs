@@ -64,7 +64,8 @@ pub enum PublishOutcome {
     Full,
 }
 
-/// What a drop-class link accumulated from the blocks it discarded; cleared when read.
+/// What a drop-class link accumulated from the blocks it discarded between two
+/// delivered blocks (SC-20b).
 ///
 /// Without the carry, a hardware overflow whose block is then evicted by the lossy
 /// link in front of a recorder is re-derived as a plain link drop, and the Manifest
@@ -100,11 +101,21 @@ impl DropCarry {
     /// Folds one dropped block into the carry (SC-20b).
     pub fn absorb(&mut self, dropped: &BlockRef) {
         let h = dropped.header();
-        self.flags = self.flags | BlockFlags(h.flags.0 & DropCarry::CARRIED_FLAGS.0);
-        if let Some(n) = h.lost {
+        self.merge(DropCarry {
+            flags: BlockFlags(h.flags.0 & DropCarry::CARRIED_FLAGS.0),
+            lost: h.lost,
+            blocks: 1,
+        });
+    }
+
+    /// Folds another carry in: flags united, `lost` counts summed where present,
+    /// block counts added (SC-20b).
+    pub fn merge(&mut self, other: DropCarry) {
+        self.flags = self.flags | other.flags;
+        if let Some(n) = other.lost {
             self.lost = Some(self.lost.unwrap_or(0).saturating_add(n));
         }
-        self.blocks = self.blocks.saturating_add(1);
+        self.blocks = self.blocks.saturating_add(other.blocks);
     }
 }
 
@@ -116,12 +127,15 @@ impl DropCarry {
 pub trait DataLink: Send + Sync {
     /// Queues a block, reporting what happened. Never parks (SC-20, SC-20a).
     fn publish(&self, b: BlockRef) -> PublishOutcome;
-    /// The next queued block, if any (SC-20).
-    fn receive(&self) -> Option<BlockRef>;
+    /// The next queued block, if any, with what was dropped immediately before it in
+    /// stream order (SC-20, SC-20b).
+    fn receive(&self) -> Option<(BlockRef, DropCarry)>;
     /// A never-dropping counter, incremented on every drop and read by the event
     /// collector (SC-20, Vision §29).
     fn drops(&self) -> u64;
-    /// What the dropped blocks were carrying; cleared by this call (SC-20b).
+    /// Everything dropped after the last block `receive` returned, queued blocks'
+    /// carries included, which a recording that ends now records as its trailing
+    /// carry; cleared by this call (SC-20b, SC-30c).
     fn take_drop_carry(&self) -> DropCarry;
     /// The declared policy (SC-19).
     fn policy(&self) -> BackPressure;

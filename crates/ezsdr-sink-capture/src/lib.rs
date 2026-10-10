@@ -254,15 +254,10 @@ impl CaptureSink {
         Ok(())
     }
 
-    fn process_block(&mut self, block: &ezsdr_kernel::stream::BlockRef) -> Result<(), ModuleError> {
-        let taken_carry = self
-            .link
-            .as_ref()
-            .expect("prepare installs the input Link")
-            .take_drop_carry();
+    fn process_block(&mut self, block: &ezsdr_kernel::stream::BlockRef, carry: DropCarry) -> Result<(), ModuleError> {
         let recording_before_block = self.queue.front().is_some_and(|capture| capture.started);
         let carry = if recording_before_block {
-            taken_carry
+            carry
         } else {
             DropCarry::default()
         };
@@ -282,6 +277,9 @@ impl CaptureSink {
             .expect("prepare installs the ClockRegistry")
             .clone();
         let mut carry_pending = recording_before_block;
+        // A capture that starts in this block: the lower bound its leading gap is
+        // clipped to (HD-10).
+        let mut starting: Option<Option<i64>> = None;
         let mut sample = 0_usize;
         while sample < header.len as usize {
             let Some(at) = self.queue.front().map(|capture| capture.at) else {
@@ -289,8 +287,8 @@ impl CaptureSink {
             };
             let is_started = self.queue.front().is_some_and(|capture| capture.started);
             if !is_started {
-                let start = match sample_at_or_after(sample, &header, at, &clocks) {
-                    Ok(start) => start,
+                let lower = match lower_tick(&header, at, &clocks) {
+                    Ok(lower) => lower,
                     Err(error) => {
                         let request = self.queue.pop_front().and_then(|capture| capture.request);
                         self.event_for_rejection(
@@ -301,10 +299,11 @@ impl CaptureSink {
                         continue;
                     }
                 };
-                let Some(start) = start else {
+                let Some(start) = sample_at_or_after(sample, &header, lower) else {
                     break;
                 };
                 sample = start;
+                starting = Some(lower);
                 self.start_front(bps, header.contract.clone())?;
             }
 
@@ -335,7 +334,10 @@ impl CaptureSink {
                 self.finish_front(false, DropCarry::default())?;
                 continue;
             }
-            let overlap = sliced_header(&header, sample, take)?;
+            let mut overlap = sliced_header(&header, sample, take)?;
+            if let Some(lower) = starting.take() {
+                clip_leading_gap(&mut overlap, lower);
+            }
             let push_carry = if carry_pending {
                 carry_pending = false;
                 carry
@@ -591,9 +593,9 @@ impl Sink for CaptureSink {
             }
         }
         if let Some(link) = self.link.clone() {
-            while let Some(block) = link.receive() {
+            while let Some((block, carry)) = link.receive() {
                 progressed = true;
-                self.process_block(&block)?;
+                self.process_block(&block, carry)?;
             }
         }
         Ok(StepOutcome { progressed })
@@ -634,29 +636,52 @@ fn action_kind(action: &Action) -> &'static str {
     }
 }
 
-fn sample_at_or_after(
-    from: usize,
+/// `at` in the block's SampleClock, rounded up (HD-10).
+fn lower_tick(
     header: &BlockHeader,
     at: Option<AbsoluteDeadline>,
     clocks: &ClockRegistry,
-) -> Result<Option<usize>, TimeError> {
-    // HD-10: requests are served in queue order from the current sample, so the end
-    // of the capture before this one is already a lower bound; only `at` adds one.
+) -> Result<Option<i64>, TimeError> {
     let Some(at) = at else {
-        return Ok(Some(from));
+        return Ok(None);
     };
-    let lower_tick = match clocks.convert(at.time_point, header.first_sample_time.domain)? {
+    Ok(Some(match clocks.convert(at.time_point, header.first_sample_time.domain)? {
         Converted::Exact { point } => point.ticks,
         Converted::Inexact { floor, .. } => floor.ticks.checked_add(1).ok_or(TimeError::Overflow)?,
+    }))
+}
+
+fn sample_at_or_after(from: usize, header: &BlockHeader, lower: Option<i64>) -> Option<usize> {
+    // HD-10: requests are served in queue order from the current sample, so the end
+    // of the capture before this one is already a lower bound; only `at` adds one.
+    let Some(lower) = lower else {
+        return Some(from);
     };
-    let relative = i128::from(lower_tick) - i128::from(header.first_sample_time.ticks);
+    let relative = i128::from(lower) - i128::from(header.first_sample_time.ticks);
     if relative >= i128::from(header.len) {
-        return Ok(None);
+        return None;
     }
     if relative <= from as i128 {
-        return Ok(Some(from));
+        return Some(from);
     }
-    Ok(Some(relative as usize))
+    Some(relative as usize)
+}
+
+/// A capture's first header keeps of its leading gap only the samples at or after
+/// the capture's start instant `lower`, none without one or when the block starts at
+/// it; an unknown `lost` stays unknown (HD-10, SC-13).
+fn clip_leading_gap(header: &mut BlockHeader, lower: Option<i64>) {
+    if !header.flags.contains(BlockFlags::GAP_BEFORE) {
+        return;
+    }
+    let inside = lower.map_or(0, |lower| header.first_sample_time.ticks.saturating_sub(lower).max(0) as u64);
+    if inside > 0 {
+        header.lost = header.lost.map(|lost| lost.min(inside));
+        return;
+    }
+    let gap = BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY | BlockFlags::ALIGNMENT;
+    header.flags = BlockFlags::from_bits(header.flags.bits() & !gap.bits());
+    header.lost = None;
 }
 
 fn sliced_header(header: &BlockHeader, from: usize, len: usize) -> Result<BlockHeader, ModuleError> {
@@ -698,17 +723,18 @@ fn push_continuity(
         .push(header, carry);
     match pushed {
         Ok(()) => Ok(()),
-        Err((StreamError::DomainChanged { .. } | StreamError::ChannelsChanged { .. }, carry)) => {
+        Err(StreamError::DomainChanged { .. } | StreamError::ChannelsChanged { .. }) => {
+            // SC-30c: the rejected push left its carry with the outgoing builder.
             let (previous, _, _) = capture.builder.take().expect("a continuity builder exists");
-            capture.builders.push(previous.finish(carry));
+            capture.builders.push(previous.finish(DropCarry::default()));
             let domain = header.first_sample_time.domain;
             let channels = header.channels;
             let mut next = ContinuityBuilder::new(domain, channels, false);
             next.push(header, DropCarry::default())
-                .map_err(|(error, _)| ModuleError::rejected(format!("HD-10: continuity: {error}")))?;
+                .map_err(|error| ModuleError::rejected(format!("HD-10: continuity: {error}")))?;
             capture.builder = Some((next, domain, channels));
             Ok(())
         }
-        Err((error, _)) => Err(ModuleError::rejected(format!("HD-10: continuity: {error}"))),
+        Err(error) => Err(ModuleError::rejected(format!("HD-10: continuity: {error}"))),
     }
 }

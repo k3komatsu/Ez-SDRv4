@@ -2191,14 +2191,14 @@ fn rs_40_capture_across_a_rate_change() {
     first
         .push(&header(a, 0), DropCarry::default())
         .expect("accepted");
-    let (err, carry) = first
+    let err = first
         .push(&header(b, 0), DropCarry::default())
         .expect_err("the rate change ends the map");
     assert!(matches!(
         err,
         ezsdr_kernel::stream::StreamError::DomainChanged { .. }
     ));
-    let map_a = first.finish(carry);
+    let map_a = first.finish(DropCarry::default());
 
     let mut second = ContinuityBuilder::new(b, 1, true);
     second

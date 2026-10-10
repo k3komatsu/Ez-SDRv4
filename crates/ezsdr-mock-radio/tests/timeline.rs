@@ -299,7 +299,7 @@ impl DataLink for Headers {
         self.0.lock().unwrap().push(block.header().clone());
         PublishOutcome::Accepted
     }
-    fn receive(&self) -> Option<BlockRef> { None }
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> { None }
     fn drops(&self) -> u64 { 0 }
     fn take_drop_carry(&self) -> DropCarry { DropCarry::default() }
     fn policy(&self) -> BackPressure { BackPressure::DropOldest }

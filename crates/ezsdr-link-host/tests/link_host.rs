@@ -123,9 +123,9 @@ fn hd_05_policies() {
         PublishOutcome::Full
     );
     assert_eq!(block_policy.drops(), 0, "Block never discards or records a drop");
-    assert_eq!(block_policy.receive().unwrap().first_sample_time().ticks, 0);
+    assert_eq!(block_policy.receive().unwrap().0.first_sample_time().ticks, 0);
     assert_eq!(block_policy.publish(retry), PublishOutcome::Accepted);
-    assert_eq!(block_policy.receive().unwrap().first_sample_time().ticks, 10);
+    assert_eq!(block_policy.receive().unwrap().0.first_sample_time().ticks, 10);
 
     let oldest = HostLinkModule::new()
         .create(&declaration(BackPressure::DropOldest, 1))
@@ -139,13 +139,13 @@ fn hd_05_policies() {
         oldest.publish(block(200, BlockFlags::NONE, None)),
         PublishOutcome::DroppedOldest
     );
-    assert_eq!(oldest.receive().unwrap().first_sample_time().ticks, 200);
-    let carry = oldest.take_drop_carry();
+    let (kept, carry) = oldest.receive().unwrap();
+    assert_eq!(kept.first_sample_time().ticks, 200);
     assert!(carry.flags.contains(BlockFlags::GAP_BEFORE));
     assert!(carry.flags.contains(BlockFlags::RESTARTED));
     assert_eq!(carry.lost, Some(150));
     assert_eq!(carry.blocks, 1);
-    assert!(oldest.take_drop_carry().is_empty(), "taking the carry clears it");
+    assert!(oldest.take_drop_carry().is_empty(), "the carry went with its block");
     assert_eq!(oldest.drops(), 1, "the drop counter does not reset with the carry");
 
     let first_gap = BlockFlags::GAP_BEFORE;
@@ -153,7 +153,7 @@ fn hd_05_policies() {
     assert_eq!(oldest.publish(block(300, first_gap, Some(7))), PublishOutcome::Accepted);
     assert_eq!(oldest.publish(block(400, second_gap, Some(5))), PublishOutcome::DroppedOldest);
     assert_eq!(oldest.publish(block(500, BlockFlags::NONE, None)), PublishOutcome::DroppedOldest);
-    let carry = oldest.take_drop_carry();
+    let (_, carry) = oldest.receive().unwrap();
     assert_eq!(
         carry.flags,
         BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY
@@ -173,9 +173,48 @@ fn hd_05_policies() {
             PublishOutcome::DroppedNewest
         ]
     );
-    assert_eq!(newest.receive().unwrap().first_sample_time().ticks, 0);
-    assert_eq!(newest.receive().unwrap().first_sample_time().ticks, 10);
+    assert_eq!(newest.receive().unwrap().0.first_sample_time().ticks, 0);
+    assert_eq!(newest.receive().unwrap().0.first_sample_time().ticks, 10);
     assert_eq!(newest.drops(), 1);
     assert_eq!(newest.take_drop_carry().blocks, 1);
 
+}
+
+#[test]
+fn hd_05_a_carry_belongs_to_the_block_after_the_drop() {
+    // SC-20b: `receive` returns each block with what was dropped immediately before
+    // it. DropNewest: the queued head keeps its own gap, and the blocks refused after
+    // it go with the next accepted block.
+    let newest = HostLinkModule::new()
+        .create(&declaration(BackPressure::DropNewest, 1))
+        .unwrap();
+    newest.publish(block(300, BlockFlags::GAP_BEFORE, Some(100)));
+    newest.publish(block(400, BlockFlags::NONE, None));
+    newest.publish(block(500, BlockFlags::NONE, None));
+    let (head, carry) = newest.receive().unwrap();
+    assert_eq!((head.first_sample_time().ticks, carry.is_empty()), (300, true));
+    newest.publish(block(600, BlockFlags::NONE, None));
+    let (next, carry) = newest.receive().unwrap();
+    assert_eq!((next.first_sample_time().ticks, carry.blocks), (600, 2));
+    assert!(newest.take_drop_carry().is_empty());
+
+    // DropOldest: the evicted block's carry goes to the block after it, not the newest.
+    let oldest = HostLinkModule::new()
+        .create(&declaration(BackPressure::DropOldest, 2))
+        .unwrap();
+    for at in [0, 10, 20] {
+        oldest.publish(block(at, BlockFlags::NONE, None));
+    }
+    let (first, carry) = oldest.receive().unwrap();
+    assert_eq!((first.first_sample_time().ticks, carry.blocks), (10, 1));
+    let (second, carry) = oldest.receive().unwrap();
+    assert_eq!((second.first_sample_time().ticks, carry.blocks), (20, 0));
+
+    // A recording that ends takes everything dropped after the last received block,
+    // queued blocks' carries included, and they are not delivered again.
+    for at in [30, 40, 50] {
+        oldest.publish(block(at, BlockFlags::NONE, None));
+    }
+    assert_eq!(oldest.take_drop_carry().blocks, 1);
+    assert!(oldest.receive().unwrap().1.is_empty());
 }

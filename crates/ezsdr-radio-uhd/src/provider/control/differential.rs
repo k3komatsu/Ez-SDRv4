@@ -175,7 +175,7 @@ impl ActionReceiver for NoActions {
 struct NoLink;
 impl DataLink for NoLink {
     fn publish(&self, _block: BlockRef) -> PublishOutcome { PublishOutcome::Accepted }
-    fn receive(&self) -> Option<BlockRef> { None }
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> { None }
     fn drops(&self) -> u64 { 0 }
     fn take_drop_carry(&self) -> DropCarry { DropCarry::default() }
     fn policy(&self) -> BackPressure { BackPressure::DropOldest }

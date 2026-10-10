@@ -83,9 +83,10 @@ pub fn block(h: BlockHeader) -> BlockRef {
 pub struct MemLink {
     policy: BackPressure,
     capacity: usize,
-    queue: Mutex<VecDeque<BlockRef>>,
+    /// Each block with what was dropped just before it, and what was dropped after
+    /// the last queued block (SC-20b).
+    queue: Mutex<(VecDeque<(BlockRef, DropCarry)>, DropCarry)>,
     drops: AtomicU64,
-    carry: Mutex<DropCarry>,
 }
 
 impl MemLink {
@@ -96,43 +97,43 @@ impl MemLink {
             // SC-19 puts a capacity of at least 1 on every declared link; the double
             // clamps rather than panicking if a test hands it 0.
             capacity: (capacity as usize).max(1),
-            queue: Mutex::new(VecDeque::new()),
+            queue: Mutex::new((VecDeque::new(), DropCarry::default())),
             drops: AtomicU64::new(0),
-            carry: Mutex::new(DropCarry::default()),
         }
-    }
-
-    fn record_drop(&self, dropped: &BlockRef) {
-        self.drops.fetch_add(1, Ordering::Relaxed);
-        self.carry.lock().expect("lock").absorb(dropped);
     }
 }
 
 impl DataLink for MemLink {
     fn publish(&self, b: BlockRef) -> PublishOutcome {
-        let mut q = self.queue.lock().expect("lock");
-        if q.len() < self.capacity {
-            q.push_back(b);
-            return PublishOutcome::Accepted;
-        }
-        match self.policy {
+        let mut guard = self.queue.lock().expect("lock");
+        let (q, tail) = &mut *guard;
+        let outcome = match (q.len() < self.capacity, self.policy) {
+            (true, _) => PublishOutcome::Accepted,
             // SC-20a: the producer still owns the block; nothing is discarded.
-            BackPressure::Block => PublishOutcome::Full,
-            BackPressure::DropOldest => {
-                let evicted = q.pop_front().expect("at capacity");
-                self.record_drop(&evicted);
-                q.push_back(b);
+            (false, BackPressure::Block) => return PublishOutcome::Full,
+            (false, BackPressure::DropOldest) => {
+                let (evicted, mut carry) = q.pop_front().expect("at capacity");
+                carry.absorb(&evicted);
+                q.front_mut().map_or(&mut *tail, |(_, next)| next).merge(carry);
                 PublishOutcome::DroppedOldest
             }
-            BackPressure::DropNewest => {
-                self.record_drop(&b);
+            (false, BackPressure::DropNewest) => {
+                tail.absorb(&b);
                 PublishOutcome::DroppedNewest
             }
+        };
+        if outcome != PublishOutcome::Accepted {
+            self.drops.fetch_add(1, Ordering::Relaxed);
         }
+        if outcome != PublishOutcome::DroppedNewest {
+            let carry = std::mem::take(tail);
+            q.push_back((b, carry));
+        }
+        outcome
     }
 
-    fn receive(&self) -> Option<BlockRef> {
-        self.queue.lock().expect("lock").pop_front()
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> {
+        self.queue.lock().expect("lock").0.pop_front()
     }
 
     fn drops(&self) -> u64 {
@@ -140,7 +141,13 @@ impl DataLink for MemLink {
     }
 
     fn take_drop_carry(&self) -> DropCarry {
-        std::mem::take(&mut *self.carry.lock().expect("lock"))
+        let mut guard = self.queue.lock().expect("lock");
+        let (q, tail) = &mut *guard;
+        let mut carry = std::mem::take(tail);
+        for (_, queued) in q.iter_mut() {
+            carry.merge(std::mem::take(queued));
+        }
+        carry
     }
 
     fn policy(&self) -> BackPressure {

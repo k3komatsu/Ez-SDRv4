@@ -21,14 +21,10 @@
     },
     "ChannelGap": {
       "additionalProperties": false,
-      "description": "A channel that lost validity while the stream continued (SC-31a).\n\nVision §28 requires a capture to describe a multi-channel alignment failure, and\na hole between two segments alone is indistinguishable from a channel that was\nnever enabled over that interval.",
+      "description": "A channel that lost validity while the stream continued (SC-31d).",
       "properties": {
-        "cause": {
-          "$ref": "#/$defs/GapCause",
-          "description": "`Alignment` when the block that dropped the channel carried `ALIGNMENT`,\n`Stream` otherwise (SC-31a)."
-        },
         "channel": {
-          "description": "Which channel (SC-31a).",
+          "description": "Which channel (SC-31d).",
           "format": "uint16",
           "maximum": 65535,
           "minimum": 0,
@@ -48,8 +44,7 @@
       "required": [
         "channel",
         "start",
-        "len",
-        "cause"
+        "len"
       ],
       "type": "object"
     },
@@ -83,7 +78,7 @@
       "description": "What a stream carried, per SampleClock. There is one map per SampleClock: a\nblock in another domain ends the map, and the Sink starts a new builder (SC-30).",
       "properties": {
         "channel_gaps": {
-          "description": "Per-channel breaks, in order (SC-31a).",
+          "description": "Per-channel breaks, in order (SC-31d).",
           "items": {
             "$ref": "#/$defs/ChannelGap"
           },
@@ -106,7 +101,7 @@
         },
         "first": {
           "$ref": "#/$defs/TimePoint",
-          "description": "First sample the map accounts for (SC-30)."
+          "description": "First sample the map accounts for: a first block's leading gap included (SC-30)."
         },
         "gaps": {
           "description": "Stream gaps, in order (SC-31).",
@@ -230,7 +225,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "A per-channel break on a block carrying `ALIGNMENT` (SC-31a).",
+          "description": "`ALIGNMENT`: samples the device discarded to keep its channels aligned (SC-31).",
           "properties": {
             "kind": {
               "const": "alignment",

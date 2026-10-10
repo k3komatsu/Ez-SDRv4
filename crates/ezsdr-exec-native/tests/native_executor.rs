@@ -153,7 +153,7 @@ impl DataLink for NullLink {
     fn publish(&self, _b: BlockRef) -> PublishOutcome {
         PublishOutcome::Accepted
     }
-    fn receive(&self) -> Option<BlockRef> {
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> {
         None
     }
     fn drops(&self) -> u64 {

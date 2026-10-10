@@ -10,8 +10,8 @@ use ezsdr_kernel::contract::{
 use ezsdr_kernel::id::{ClockDomainId, DataLinkId, MemoryDomainId, NodeId, ResourceId};
 use ezsdr_kernel::stream::{
     BackPressure, BlockFlags, BlockHeader, BufferRef, BurstEnd, BurstOpen, BurstState, BurstStep,
-    BurstTracker, ChannelMask, ContinuityBuilder, DataLink, DataLinkDecl, Direction, DropCarry,
-    GapCause, LateOutcome, LatePolicy, PublishOutcome, SampleBlock, Segment, StreamError,
+    BurstTracker, ChannelGap, ChannelMask, ContinuityBuilder, DataLink, DataLinkDecl, Direction,
+    DropCarry, Gap, GapCause, LateOutcome, LatePolicy, PublishOutcome, SampleBlock, Segment, StreamError,
     admit_burst_target, check_sink_link,
 };
 use ezsdr_kernel::time::{
@@ -289,7 +289,17 @@ fn sc_16_direction_flags_rejected() {
     tx.direction = Direction::Tx;
     tx.flags = BlockFlags::GAP_BEFORE;
     assert!(matches!(
-        SampleBlock::new(tx, buf, CF32_BPS),
+        SampleBlock::new(tx.clone(), buf, CF32_BPS),
+        Err(StreamError::InvalidBlock { .. })
+    ));
+
+    // SC-16a: LATE is transmit-only.
+    tx.flags = BlockFlags::LATE;
+    SampleBlock::new(tx, buf, CF32_BPS).expect("a transmit block may carry LATE");
+    let mut rx = header(t(0), 10, 1);
+    rx.flags = BlockFlags::LATE;
+    assert!(matches!(
+        SampleBlock::new(rx, buf, CF32_BPS),
         Err(StreamError::InvalidBlock { .. })
     ));
 }
@@ -323,6 +333,16 @@ fn sc_10_block_flag_implications() {
         SampleBlock::new(h, buf, CF32_BPS),
         Err(StreamError::InvalidBlock { .. })
     ));
+
+    // ALIGNMENT qualifies a gap, so it implies GAP_BEFORE.
+    let mut h = header(t(0), 10, 1);
+    h.flags = BlockFlags::ALIGNMENT;
+    assert!(matches!(
+        SampleBlock::new(h.clone(), buf, CF32_BPS),
+        Err(StreamError::InvalidBlock { .. })
+    ));
+    h.flags = BlockFlags::ALIGNMENT | BlockFlags::GAP_BEFORE;
+    SampleBlock::new(h, buf, CF32_BPS).expect("an alignment gap");
 
     let mut h = header(t(0), 10, 1);
     h.lost = Some(5);
@@ -422,8 +442,8 @@ fn sc_11_block_fanout_shares_reference() {
     let c = MemLink::new(BackPressure::Block, 4);
     assert_eq!(a.publish(b.clone()), PublishOutcome::Accepted);
     assert_eq!(c.publish(b.clone()), PublishOutcome::Accepted);
-    let ra = a.receive().expect("queued");
-    let rc = c.receive().expect("queued");
+    let ra = a.receive().expect("queued").0;
+    let rc = c.receive().expect("queued").0;
     assert!(
         Arc::ptr_eq(&ra, &rc),
         "fan-out shares one reference; nothing is copied"
@@ -495,8 +515,8 @@ fn sc_20_link_drop_oldest() {
             PublishOutcome::DroppedOldest
         ]
     );
-    assert_eq!(link.receive().expect("queued").first_sample_time(), t(10));
-    assert_eq!(link.receive().expect("queued").first_sample_time(), t(20));
+    assert_eq!(link.receive().expect("queued").0.first_sample_time(), t(10));
+    assert_eq!(link.receive().expect("queued").0.first_sample_time(), t(20));
     assert_eq!(link.drops(), 1);
 }
 
@@ -514,8 +534,8 @@ fn sc_20_link_drop_newest() {
             PublishOutcome::DroppedNewest
         ]
     );
-    assert_eq!(link.receive().expect("queued").first_sample_time(), t(0));
-    assert_eq!(link.receive().expect("queued").first_sample_time(), t(10));
+    assert_eq!(link.receive().expect("queued").0.first_sample_time(), t(0));
+    assert_eq!(link.receive().expect("queued").0.first_sample_time(), t(10));
     assert_eq!(link.drops(), 1);
 }
 
@@ -536,7 +556,7 @@ fn sc_20a_full_is_not_a_silent_drop() {
     assert_eq!(producer.retry(&link), Some(PublishOutcome::Accepted));
     assert_eq!(
         link.receive()
-            .expect("the retried block")
+            .expect("the retried block").0
             .first_sample_time(),
         t(10)
     );
@@ -554,19 +574,16 @@ fn sc_20b_drop_carry_preserves_attribution() {
     link.publish(block(h));
     link.publish(block(header(t(200), 10, 1)));
 
-    let carry = link.take_drop_carry();
+    // The carry comes with the block the drop preceded.
+    let (_, carry) = link.receive().expect("the block the first drop kept");
     assert!(carry.flags.contains(BlockFlags::GAP_BEFORE));
     assert!(carry.flags.contains(BlockFlags::RESTARTED));
     assert_eq!(carry.lost, Some(150));
     assert_eq!(carry.blocks, 1);
-    assert!(
-        link.take_drop_carry().is_empty(),
-        "the carry is cleared when read"
-    );
+    assert!(link.take_drop_carry().is_empty(), "no carry trails the last block");
     assert_eq!(link.drops(), 1, "the drop counter never resets");
 
     // Two real drops into one carry: the flags are the union, the lost counts the sum.
-    link.receive().expect("the block the first drop kept");
     let mut first = header(t(300), 10, 1);
     first.flags = BlockFlags::GAP_BEFORE;
     first.lost = Some(7);
@@ -577,7 +594,7 @@ fn sc_20b_drop_carry_preserves_attribution() {
     for h in [first, second, header(t(500), 10, 1)] {
         link.publish(block(h));
     }
-    let carry = link.take_drop_carry();
+    let (_, carry) = link.receive().expect("the last block");
     assert_eq!(
         carry.flags,
         BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY
@@ -1206,7 +1223,7 @@ fn sc_13_continuity_gap_flag_without_jump() {
     h.lost = Some(1);
     assert!(matches!(
         b.push(&h, DropCarry::default()),
-        Err((StreamError::GapFlagWithoutJump, _))
+        Err(StreamError::GapFlagWithoutJump)
     ));
 }
 
@@ -1216,7 +1233,7 @@ fn sc_30_continuity_jump_without_flag() {
     push(&mut lossless, header(t(0), 100, 1));
     assert!(matches!(
         lossless.push(&header(t(500), 100, 1), DropCarry::default()),
-        Err((StreamError::JumpWithoutGapFlag, _))
+        Err(StreamError::JumpWithoutGapFlag)
     ));
 
     let mut lossy = builder(1, false);
@@ -1234,7 +1251,7 @@ fn sc_12_continuity_overlap_is_error() {
     push(&mut b, header(t(0), 200, 1));
     assert!(matches!(
         b.push(&header(t(150), 100, 1), DropCarry::default()),
-        Err((StreamError::TimeOverlap { .. }, _))
+        Err(StreamError::TimeOverlap { .. })
     ));
 }
 
@@ -1314,7 +1331,7 @@ fn sc_30_continuity_domain_change_ends_map() {
     let h = header(TimePoint::new(ClockDomainId::local(8), 100), 100, 1);
     assert!(matches!(
         b.push(&h, DropCarry::default()),
-        Err((StreamError::DomainChanged { .. }, _))
+        Err(StreamError::DomainChanged { .. })
     ));
 }
 
@@ -1324,7 +1341,7 @@ fn sc_30a_channel_count_change_ends_map() {
     push(&mut b, header(t(0), 100, 4));
     assert!(matches!(
         b.push(&header(t(100), 100, 2), DropCarry::default()),
-        Err((StreamError::ChannelsChanged { from: 4, to: 2 }, _))
+        Err(StreamError::ChannelsChanged { from: 4, to: 2 })
     ));
     let map = b.finish(DropCarry::default());
     assert_eq!(map.channels, 4);
@@ -1341,26 +1358,77 @@ fn sc_30a_channel_count_change_ends_map() {
 }
 
 #[test]
-fn sc_31a_channel_gap_carries_a_cause() {
-    let run = |flags: BlockFlags| {
-        let mut b = builder(4, true);
-        push(&mut b, header(t(0), 100, 4));
-        let mut h = header(t(100), 100, 4);
-        h.valid = ChannelMask::from_bits(0b1011);
-        h.flags = flags;
-        push(&mut b, h);
-        push(&mut b, header(t(200), 100, 4));
-        b.finish(DropCarry::default()).channel_gaps
-    };
-    let gaps = run(BlockFlags::ALIGNMENT);
-    assert_eq!(gaps.len(), 1);
-    assert_eq!(gaps[0].channel, 2);
-    assert_eq!((gaps[0].start, gaps[0].len), (t(100), 100));
-    assert_eq!(gaps[0].cause, GapCause::Alignment {});
+fn sc_31d_a_channel_break_is_a_channel_gap() {
+    let mut b = builder(4, true);
+    push(&mut b, header(t(0), 100, 4));
+    let mut h = header(t(100), 100, 4);
+    h.valid = ChannelMask::from_bits(0b1011);
+    push(&mut b, h);
+    push(&mut b, header(t(200), 100, 4));
+    let gaps = b.finish(DropCarry::default()).channel_gaps;
+    assert_eq!(gaps, [ChannelGap { channel: 2, start: t(100), len: 100 }]);
+}
 
-    let gaps = run(BlockFlags::NONE);
-    assert_eq!(gaps.len(), 1);
-    assert_eq!(gaps[0].cause, GapCause::Stream {});
+#[test]
+fn sc_31_alignment_qualifies_a_stream_gap() {
+    // ALIGNMENT is a stream-gap qualifier like RESTARTED and SEQ_DISCONTINUITY: UHD
+    // discards whole packets on every channel to keep them aligned (UR-19).
+    let mut b = builder(2, true);
+    push(&mut b, header(t(0), 100, 2));
+    let mut h = header(t(250), 100, 2);
+    h.flags = BlockFlags::GAP_BEFORE | BlockFlags::ALIGNMENT;
+    h.lost = Some(150);
+    push(&mut b, h);
+    let map = b.finish(DropCarry::default());
+    assert_eq!(map.gaps.len(), 1);
+    assert_eq!(map.gaps[0].cause, GapCause::Alignment {});
+    assert_eq!((map.gaps[0].start, map.gaps[0].len, map.gaps[0].lost), (t(100), 150, Some(150)));
+    assert!(map.channel_gaps.is_empty(), "a stream gap, not a per-channel break");
+
+    // Precedence: RESTARTED over SEQ_DISCONTINUITY over ALIGNMENT (UR-19 keeps every
+    // report kind before one block).
+    for (qualifier, cause) in [
+        (BlockFlags::SEQ_DISCONTINUITY, GapCause::SequenceError {}),
+        (BlockFlags::RESTARTED, GapCause::OverflowRestart {}),
+    ] {
+        let mut b = builder(2, true);
+        push(&mut b, header(t(0), 100, 2));
+        let mut h = header(t(250), 100, 2);
+        h.flags = BlockFlags::GAP_BEFORE | BlockFlags::ALIGNMENT | qualifier;
+        h.lost = Some(150);
+        push(&mut b, h);
+        assert_eq!(b.finish(DropCarry::default()).gaps[0].cause, cause);
+    }
+}
+
+#[test]
+fn sc_13_a_first_block_gap_is_recorded() {
+    // A first block's GAP_BEFORE counts its `lost` back from its first sample, as a
+    // late receive start (RM-25) has it: the map begins at the gap's start.
+    let mut b = builder(1, true);
+    let mut h = header(t(40), 100, 1);
+    h.flags = BlockFlags::GAP_BEFORE;
+    h.lost = Some(40);
+    push(&mut b, h);
+    let map = b.finish(DropCarry::default());
+    assert_eq!(
+        map.gaps,
+        [Gap { start: t(0), len: 40, lost: Some(40), cause: GapCause::Stream {}, link_dropped: 0 }]
+    );
+    assert_eq!((map.first, map.end), (t(0), t(140)));
+    assert_eq!(map.valid[0], [Segment { start: t(40), len: 100 }]);
+
+    // With `lost` unknown, the gap is zero-extent at the block, cause Unknown.
+    let mut b = builder(1, true);
+    let mut h = header(t(40), 100, 1);
+    h.flags = BlockFlags::GAP_BEFORE;
+    push(&mut b, h);
+    let map = b.finish(DropCarry::default());
+    assert_eq!(
+        map.gaps,
+        [Gap { start: t(40), len: 0, lost: None, cause: GapCause::Unknown {}, link_dropped: 0 }]
+    );
+    assert_eq!(map.first, t(40));
 }
 
 #[test]
@@ -1423,7 +1491,6 @@ fn sc_31d_break_across_a_stream_gap_is_split() {
     push(&mut b, header(t(0), 100, 4));
     let mut h = header(t(100), 100, 4);
     h.valid = ChannelMask::from_bits(0b1011);
-    h.flags = BlockFlags::ALIGNMENT;
     push(&mut b, h);
     let mut h = header(t(350), 100, 4);
     h.flags = BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED;
@@ -1440,11 +1507,10 @@ fn sc_31d_break_across_a_stream_gap_is_split() {
         (2, t(100), 100),
         "the gap's 150 samples are not charged to channel 2"
     );
-    assert_eq!(map.channel_gaps[0].cause, GapCause::Alignment {});
 }
 
 #[test]
-fn sc_31a_never_valid_channel_has_no_gap() {
+fn sc_31c_never_valid_channel_has_no_gap() {
     let mut b = builder(4, true);
     let mut h = header(t(0), 100, 4);
     h.valid = ChannelMask::from_bits(0b0111);
@@ -1472,7 +1538,7 @@ fn sc_30_continuity_jump_overflow_is_time_error() {
     assert!(h.end_time().is_ok(), "the block's own end is representable");
     assert!(matches!(
         b.push(&h, DropCarry::default()),
-        Err((StreamError::Time(TimeError::Overflow), _))
+        Err(StreamError::Time(TimeError::Overflow))
     ));
 
     // A header whose own end overflows is refused too, by the same error.
@@ -1483,7 +1549,7 @@ fn sc_30_continuity_jump_overflow_is_time_error() {
     h.lost = Some(1);
     assert!(matches!(
         b.push(&h, DropCarry::default()),
-        Err((StreamError::Time(TimeError::Overflow), _))
+        Err(StreamError::Time(TimeError::Overflow))
     ));
 }
 
@@ -1517,14 +1583,13 @@ fn sc_30c_carry_survives_a_rejected_push() {
         lost: Some(7),
         blocks: 2,
     };
-    let (err, returned) = b
+    let err = b
         .push(&header(t(100), 100, 2), carry)
         .expect_err("channel count changed");
     assert!(matches!(err, StreamError::ChannelsChanged { .. }));
-    assert_eq!(returned, carry, "the carry comes back to the consumer");
 
-    // It lands in the OUTGOING map's finish, not the new builder's.
-    let map = b.finish(returned);
+    // The builder kept it, so it lands in the OUTGOING map's finish.
+    let map = b.finish(DropCarry::default());
     assert_eq!(map.gaps.len(), 1);
     assert_eq!(map.gaps[0].start, t(100));
     assert_eq!(map.gaps[0].link_dropped, 2);
@@ -1567,6 +1632,16 @@ fn sc_30c_trailing_carry_with_a_known_lost_stays_zero_extent() {
     assert_eq!(map.gaps[0].lost, Some(150), "the count is still carried");
     assert_eq!(map.gaps[0].cause, GapCause::OverflowRestart {});
     assert_eq!(map.end, t(100), "end does not move");
+
+    // Without a qualifier, the known count is what makes the cause `Stream`.
+    let mut b = builder(1, false);
+    push(&mut b, header(t(0), 100, 1));
+    let map = b.finish(DropCarry {
+        flags: BlockFlags::GAP_BEFORE,
+        lost: Some(150),
+        blocks: 1,
+    });
+    assert_eq!(map.gaps[0].cause, GapCause::Stream {});
 }
 
 #[test]
@@ -1596,7 +1671,7 @@ fn sc_13_tm_13c_rate_change_is_a_new_domain_not_a_gap() {
     let mut b = ContinuityBuilder::new(a, 1, true);
     b.push(&header(TimePoint::new(a, 0), 50, 1), DropCarry::default())
         .expect("accepted");
-    let (err, _) = b
+    let err = b
         .push(
             &header(TimePoint::new(bdom, 0), 50, 1),
             DropCarry::default(),
@@ -1736,6 +1811,23 @@ fn sc_30b_a_held_carry_keeps_its_flags_and_lost_count() {
     assert_eq!(map.gaps[0].cause, GapCause::OverflowRestart {});
     assert_eq!(map.gaps[0].lost, Some(150));
     assert_eq!(map.gaps[0].link_dropped, 1);
+
+    // A held carry and the jump's own carry: the counts sum (SC-20b).
+    let mut b = builder(1, false);
+    push(&mut b, header(t(0), 100, 1));
+    b.push(&header(t(100), 100, 1), held).expect("accepted");
+    b.push(
+        &header(t(400), 100, 1),
+        DropCarry {
+            flags: BlockFlags::GAP_BEFORE,
+            lost: Some(12),
+            blocks: 1,
+        },
+    )
+    .expect("accepted");
+    let map = b.finish(DropCarry::default());
+    assert_eq!(map.gaps[0].lost, Some(162));
+    assert_eq!(map.gaps[0].link_dropped, 2);
 }
 
 #[test]
@@ -1787,12 +1879,9 @@ fn sc_31_mixed_requires_that_no_carry_explains_the_shortfall() {
 }
 
 #[test]
-fn sc_30b_a_rejected_push_does_not_destroy_the_held_carry() {
-    // A rejected push returns the **caller's** carry, so the consumer can hand it to
-    // the outgoing builder's `finish` (SC-30c). What it must not do is drop what the
-    // builder is already holding: that is the builder's own state, not the caller's,
-    // and nothing would return it. Seven error paths leave `push`, and the count was
-    // cleared before one of them.
+fn sc_30c_a_rejected_push_keeps_both_carries() {
+    // A rejected push keeps the carry it was given, beside what the builder already
+    // held, for `finish` (SC-30c).
     let mut b = builder(1, true); // lossless: the path that returns JumpWithoutGapFlag
     push(&mut b, header(t(0), 100, 1));
     b.push(
@@ -1803,19 +1892,62 @@ fn sc_30b_a_rejected_push_does_not_destroy_the_held_carry() {
         },
     )
     .expect("a contiguous block is accepted");
-    let (err, returned) = b
-        .push(&header(t(500), 100, 1), DropCarry::default())
+    let err = b
+        .push(
+            &header(t(500), 100, 1),
+            DropCarry { blocks: 1, ..DropCarry::default() },
+        )
         .expect_err("a jump with no GAP_BEFORE on a lossless path is refused");
     assert!(matches!(err, StreamError::JumpWithoutGapFlag));
+    let map = b.finish(DropCarry::default());
+    assert_eq!(map.gaps.len(), 1);
+    assert_eq!(map.gaps[0].link_dropped, 3, "the held 2 and the rejected push's 1");
+
+    // An overlapping block is refused the same way and keeps its carry too.
+    let mut b = builder(1, false);
+    push(&mut b, header(t(0), 100, 1));
+    let err = b
+        .push(&header(t(50), 100, 1), DropCarry { blocks: 1, ..DropCarry::default() })
+        .expect_err("an overlapping block is refused");
+    assert!(matches!(err, StreamError::TimeOverlap { .. }));
+    let map = b.finish(DropCarry::default());
+    assert_eq!((map.gaps.len(), map.gaps[0].link_dropped), (1, 1));
+}
+
+#[test]
+fn sc_30b_a_first_block_s_carry_is_recorded_at_it() {
+    // Blocks dropped before a stream's first delivered block are recorded at that
+    // block, never in a later, unrelated gap (SC-30b).
+    let mut b = builder(1, false);
+    b.push(&header(t(100), 100, 1), DropCarry { blocks: 3, ..DropCarry::default() })
+        .expect("a first block with a carry is accepted");
+    push(&mut b, header(t(200), 100, 1));
+    let mut h = header(t(400), 100, 1);
+    h.flags = BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED;
+    h.lost = Some(100);
+    push(&mut b, h);
+    let map = b.finish(DropCarry::default());
     assert_eq!(
-        returned.blocks, 0,
-        "the caller gets its own carry back, which was empty"
+        map.gaps,
+        [
+            Gap { start: t(100), len: 0, lost: None, cause: GapCause::LinkDrop {}, link_dropped: 3 },
+            Gap { start: t(300), len: 100, lost: Some(100), cause: GapCause::OverflowRestart {}, link_dropped: 0 },
+        ]
     );
-    let map = b.finish(returned);
+    assert_eq!(map.first, t(100));
+
+    // With a first-block gap, the carry folds into it; the gap still counts back from
+    // the delivered block's own `lost`.
+    let mut b = builder(1, false);
+    let mut h = header(t(40), 100, 1);
+    h.flags = BlockFlags::GAP_BEFORE;
+    h.lost = Some(10);
+    b.push(&h, DropCarry { blocks: 2, lost: Some(5), ..DropCarry::default() })
+        .expect("accepted");
+    let map = b.finish(DropCarry::default());
     assert_eq!(
-        map.gaps.len(),
-        1,
-        "and what the builder held is still the builder's"
+        map.gaps,
+        [Gap { start: t(30), len: 10, lost: Some(15), cause: GapCause::Stream {}, link_dropped: 2 }]
     );
-    assert_eq!(map.gaps[0].link_dropped, 2);
+    assert_eq!(map.first, t(30));
 }

@@ -93,9 +93,10 @@ impl Link for HostLinkModule {
 pub struct HostLink {
     policy: BackPressure,
     capacity: usize,
-    queue: Mutex<VecDeque<BlockRef>>,
+    /// Each block with what was dropped immediately before it, and what was dropped
+    /// after the last queued block (SC-20b).
+    queue: Mutex<(VecDeque<(BlockRef, DropCarry)>, DropCarry)>,
     drops: AtomicU64,
-    carry: Mutex<DropCarry>,
 }
 
 impl HostLink {
@@ -103,15 +104,9 @@ impl HostLink {
         HostLink {
             policy,
             capacity,
-            queue: Mutex::new(VecDeque::new()),
+            queue: Mutex::new((VecDeque::new(), DropCarry::default())),
             drops: AtomicU64::new(0),
-            carry: Mutex::new(DropCarry::default()),
         }
-    }
-
-    fn record_drop(&self, dropped: &BlockRef) {
-        self.drops.fetch_add(1, Ordering::Relaxed);
-        lock_unpoisoned(&self.carry).absorb(dropped);
     }
 }
 
@@ -121,28 +116,35 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl DataLink for HostLink {
     fn publish(&self, block: BlockRef) -> PublishOutcome {
-        let mut queue = lock_unpoisoned(&self.queue);
-        if queue.len() < self.capacity {
-            queue.push_back(block);
-            return PublishOutcome::Accepted;
-        }
-        match self.policy {
-            BackPressure::Block => PublishOutcome::Full,
-            BackPressure::DropOldest => {
-                let evicted = queue.pop_front().expect("the queue is at capacity");
-                self.record_drop(&evicted);
-                queue.push_back(block);
+        let mut guard = lock_unpoisoned(&self.queue);
+        let (queue, tail) = &mut *guard;
+        let outcome = match (queue.len() < self.capacity, self.policy) {
+            (true, _) => PublishOutcome::Accepted,
+            (false, BackPressure::Block) => return PublishOutcome::Full,
+            (false, BackPressure::DropOldest) => {
+                // SC-20b: the evicted block and its carry belong to the block after it.
+                let (evicted, mut carry) = queue.pop_front().expect("the queue is at capacity");
+                carry.absorb(&evicted);
+                queue.front_mut().map_or(&mut *tail, |(_, next)| next).merge(carry);
                 PublishOutcome::DroppedOldest
             }
-            BackPressure::DropNewest => {
-                self.record_drop(&block);
+            (false, BackPressure::DropNewest) => {
+                tail.absorb(&block);
                 PublishOutcome::DroppedNewest
             }
+        };
+        if outcome != PublishOutcome::Accepted {
+            self.drops.fetch_add(1, Ordering::Relaxed);
         }
+        if outcome != PublishOutcome::DroppedNewest {
+            let carry = std::mem::take(tail);
+            queue.push_back((block, carry));
+        }
+        outcome
     }
 
-    fn receive(&self) -> Option<BlockRef> {
-        lock_unpoisoned(&self.queue).pop_front()
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> {
+        lock_unpoisoned(&self.queue).0.pop_front()
     }
 
     fn drops(&self) -> u64 {
@@ -150,7 +152,13 @@ impl DataLink for HostLink {
     }
 
     fn take_drop_carry(&self) -> DropCarry {
-        std::mem::take(&mut *lock_unpoisoned(&self.carry))
+        let mut guard = lock_unpoisoned(&self.queue);
+        let (queue, tail) = &mut *guard;
+        let mut carry = std::mem::take(tail);
+        for (_, queued) in queue.iter_mut() {
+            carry.merge(std::mem::take(queued));
+        }
+        carry
     }
 
     fn policy(&self) -> BackPressure {

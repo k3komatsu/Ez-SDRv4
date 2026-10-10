@@ -100,7 +100,6 @@ pub fn sigmf_meta(
                 "core:sample_count": g.len,
                 "core:label": "invalid channel",
                 "ezsdr:channel": g.channel,
-                "ezsdr:cause": g.cause,
             })
         })
         .collect();

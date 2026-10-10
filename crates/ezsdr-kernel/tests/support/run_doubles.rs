@@ -1068,7 +1068,7 @@ impl Sink for RecordingSink {
         }
         let mut progressed = self.always_progress;
         for link in &self.ins {
-            while let Some(block) = link.receive() {
+            while let Some((block, _)) = link.receive() {
                 let header = block.header().clone();
                 self.record(format!("block:{}", header.first_sample_time.ticks));
                 self.received.push(header);
@@ -1390,7 +1390,7 @@ impl DataLink for PanickingDropsLink {
     fn publish(&self, block: BlockRef) -> PublishOutcome {
         self.0.publish(block)
     }
-    fn receive(&self) -> Option<BlockRef> {
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> {
         self.0.receive()
     }
     fn drops(&self) -> u64 {
