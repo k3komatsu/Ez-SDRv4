@@ -34,10 +34,6 @@
       "format": "double",
       "type": "number"
     },
-    "Ident": {
-      "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
-      "type": "string"
-    },
     "Key": {
       "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the `KeyDecl` and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
       "type": "string"
@@ -113,7 +109,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "What one fragment's `prepare` returned (SB-41, MA-12).",
+  "description": "What one fragment's `prepare` returned (SB-41, MA-12). It names no fragment: the\nKernel files it under the fragment it invoked (SB-41).",
   "properties": {
     "coercions": {
       "default": [],
@@ -131,10 +127,6 @@
       "description": "The applied configuration. `effective` may narrow a declared capability and\nmust not widen one (MA-12).",
       "type": "object"
     },
-    "fragment": {
-      "$ref": "#/$defs/Ident",
-      "description": "Which fragment (SB-41)."
-    },
     "warnings": {
       "default": [],
       "description": "Non-fatal notes (SB-41).",
@@ -144,9 +136,6 @@
       "type": "array"
     }
   },
-  "required": [
-    "fragment"
-  ],
   "title": "PrepareReport",
   "type": "object"
 }

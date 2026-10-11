@@ -189,7 +189,7 @@ impl Tx {
                 self.later.push(held);
             } else {
                 self.forget(&held);
-                self.core.command_rejected("tx_burst", "UR-25: its transmit clock was never started");
+                self.core.command_rejected(None, "tx_burst", "UR-25: its transmit clock was never started");
             }
         }
     }
@@ -358,7 +358,7 @@ impl Tx {
                         return self.abandon(true);
                     }
                     Err(error) => {
-                        self.core.device_failed("tx_burst", &error);
+                        self.core.device_failed(None, "tx_burst", &error);
                         return self.abandon(true);
                     }
                 }
@@ -386,7 +386,7 @@ impl Tx {
                 // Whether UHD sent packets before the error is unknown: a start that may have
                 // gone is taken as a device burst begun, ended and counted for its report (an
                 // end-of-burst outside a burst costs one zero sample; Review Q, NB-Q1).
-                self.core.device_failed("tx_burst", &error);
+                self.core.device_failed(None, "tx_burst", &error);
                 if device_sob {
                     self.remember_burst(TimePoint::new(clock.domain, start));
                 }
@@ -480,7 +480,7 @@ impl Tx {
             None => vec![&empty; self.channels.max(1)],
         };
         if let Err(error) = self.core.device.tx_send(&buffers, None, false, true, SEND_TIMEOUT) {
-            self.core.device_failed("tx_burst", &error);
+            self.core.device_failed(None, "tx_burst", &error);
         }
     }
 
@@ -525,7 +525,7 @@ impl Tx {
                     reservations.remove(&(held.domain, held.k));
                     drop(reservations);
                     self.time_error(TimeErrorOutcome::Refused, late_by, held.target);
-                    self.core.command_rejected("tx_burst", "UR-21: the moved start is a held burst's");
+                    self.core.command_rejected(None, "tx_burst", "UR-21: the moved start is a held burst's");
                     return None;
                 }
                 reservations.remove(&(held.domain, held.k));
@@ -551,7 +551,7 @@ impl Tx {
             }
             Err(error) => {
                 self.forget(&held);
-                self.core.command_rejected("tx_burst", &format!("UR-21: {error}"));
+                self.core.command_rejected(None, "tx_burst", &format!("UR-21: {error}"));
                 None
             }
         }
@@ -577,7 +577,7 @@ impl Tx {
                         reservations.remove(&(held.domain, held.k));
                         drop(reservations);
                         self.time_error(TimeErrorOutcome::Refused, late_by, held.target);
-                        return self.core.command_rejected("tx_burst", "UR-21: the moved start is a held burst's");
+                        return self.core.command_rejected(None, "tx_burst", "UR-21: the moved start is a held burst's");
                     }
                     reservations.remove(&(held.domain, held.k));
                     reservations.insert((held.domain, next));
@@ -599,7 +599,7 @@ impl Tx {
                 }
                 Err(error) => {
                     self.forget(&held);
-                    return self.core.command_rejected("tx_burst", &format!("UR-21: {error}"));
+                    return self.core.command_rejected(None, "tx_burst", &format!("UR-21: {error}"));
                 }
             }
         }
@@ -623,7 +623,7 @@ impl Tx {
         for held in held {
             self.forget(&held);
             if emit {
-                self.core.command_rejected("tx_burst", reason);
+                self.core.command_rejected(None, "tx_burst", reason);
             } else {
                 self.core.reject_note(json!({ "action": "tx_burst", "reason": reason }));
             }
@@ -640,7 +640,7 @@ impl Tx {
         self.end_open(true);
         for (_, held) in std::mem::take(&mut self.held) {
             self.forget(&held);
-            self.core.command_rejected("tx_burst", "cancelled by a cold change");
+            self.core.command_rejected(None, "tx_burst", "cancelled by a cold change");
         }
         let passed = self.clock.take().map(|_| self.plan.get(self.at).and_then(|planned| planned.segment.by));
         if passed.is_some() {
@@ -667,7 +667,7 @@ impl Tx {
                         lock(&self.core.streams).refuse(&self.core, Dir::Tx, by);
                     }
                     self.at += 1;
-                    self.core.device_failed("update_parameter", &error);
+                    self.core.device_failed(None, "update_parameter", &error);
                 }
             }
             self.core.timing(json!({ "what": "tx_switch", "cut": switch.cut, "origin": to.segment.origin, "at": self.core.now() }));
@@ -733,11 +733,11 @@ impl Tx {
                         let root = self.core.root;
                         let start = match self.core.clocks.convert(target, root).and_then(|c| c.floor().ticks_in(root)) {
                             Ok(start) => start,
-                            Err(error) => return self.core.command_rejected("tx_report", &format!("UR-28: {error}")),
+                            Err(error) => return self.core.command_rejected(None, "tx_report", &format!("UR-28: {error}")),
                         };
                         match i64::try_from((i128::from(tick) - i128::from(start)) * 1_000_000_000 / i128::from(self.core.mcr)) {
                             Ok(ns) => ns,
-                            Err(_) => return self.core.command_rejected("tx_report", "UR-28: lateness overflow"),
+                            Err(_) => return self.core.command_rejected(None, "tx_report", "UR-28: lateness overflow"),
                         }
                     }
                     None => 0,

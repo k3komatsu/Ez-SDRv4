@@ -88,12 +88,12 @@ class EasyApi(unittest.TestCase):
         self.assertEqual([item["hash"] for item in manifest["inputs"]], [digest])
         self.assertEqual(ezsdr.waveform(x)[0]["hash"], digest)
         # The capture's first sample time and validity flags.
-        (artifact,) = manifest["artifacts"]
+        (artifact,) = manifest["artifacts"]["rec"]
         continuity = artifact["continuity"][0]
         self.assertIn("ticks", continuity["first"])
         self.assertEqual(continuity["valid"], [[{"start": continuity["first"], "len": 3000}]])
         # The effective configuration, in the `radio` fragment's own report (SB-41).
-        (report,) = [r for r in manifest["prepare"]["reports"] if r["fragment"] == "radio"]
+        report = manifest["prepare"]["reports"]["radio"]
         self.assertIn("radio.rx.sample_rate_hz", report["effective"])
 
     def test_v58_13_the_session_manifest_is_written_and_complete(self) -> None:
@@ -180,7 +180,7 @@ class EasyApi(unittest.TestCase):
             result = sdr.run(spec, profile=profile, duration=0.001)
             self.assertEqual((result.termination["kind"], result.termination["stage"]), ("failed", "run"))
             self.assertTrue(result.termination["reason"], result.termination)
-            self.assertEqual(result.manifest["artifacts"], [])
+            self.assertEqual(result.manifest["artifacts"], {})
             self.assertEqual(sdr.rx.capture(1).shape, (1,), "parent Session is still usable")
 
     def test_v54_sleep_is_run_time(self) -> None:
@@ -264,7 +264,8 @@ class EasyApi(unittest.TestCase):
         self.assertEqual(sdr.manifest["termination"]["reason"], {"kind": "stopped", "cause": {"kind": "client"}})
 
     def test_ea_17_each_capture_gets_its_own_samples(self) -> None:
-        # The recorder numbers its requests, and a capture waits for its own (Review H, P0-2).
+        # The recorder's answer names the Action it answers, and a capture waits for its own
+        # (Review H, P0-2; spec 27 §3).
         with self.connect() as sdr:
             self.assertEqual(sdr.rx.capture(100).shape, (100,))
             self.assertEqual(sdr.rx.capture(200).shape, (200,))
@@ -278,8 +279,8 @@ class EasyApi(unittest.TestCase):
             self.assertEqual(raw["outcome"]["kind"], "admitted")
             self.assertEqual(sdr.rx.capture(100).shape, (100,), "not the raw request's 777")
             # A SetParameter of sink.capture_samples on the output is a request too; a capture
-            # naming a resource goes to that resource, which refuses the key, and takes no
-            # number (#54; RS-14, RS-17).
+            # naming a resource goes to that resource, which refuses the key (#54; RS-14,
+            # RS-17).
             for action, outcome in (
                 ({"kind": "set_parameter", "target": {"kind": "output", "output": "rec"}, "key": "sink.capture_samples", "value": 555}, "admitted"),
                 ({"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"kind": "resource", "resource": "radio", "path": "rx"}, "at": None, "params": {"sink.capture_samples": 333}}, "rejected"),
@@ -288,18 +289,18 @@ class EasyApi(unittest.TestCase):
                 self.assertEqual(sdr.rx.capture(100).shape, (100,), f"not {action['kind']}'s request")
             rejected = sdr.submit({"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"kind": "output", "output": "rec"}, "at": None, "params": {}})
             self.assertEqual(rejected["outcome"]["kind"], "rejected")
-            self.assertEqual(sdr.rx.capture(100).shape, (100,), "a rejected capture takes no number")
+            self.assertEqual(sdr.rx.capture(100).shape, (100,), "after a rejected capture")
 
     def test_ea_17_a_capture_keeps_its_first_deadline(self) -> None:
         # Another request's announcement inside the timeout does not restart it (Review H,
         # P2-5; Review I, P1-D): the raw 10 000-sample request is written at ~10 ms, this
         # capture's at ~16 ms, and 12 ms is the whole budget.
         with self.connect() as sdr:
-            sdr.submit({"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"kind": "output", "output": "rec"}, "at": None, "params": {"sink.capture_samples": 10_000}})
+            raw = sdr.submit({"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"kind": "output", "output": "rec"}, "at": None, "params": {"sink.capture_samples": 10_000}})
             with self.assertRaises(ezsdr.CaptureTimeout):
                 sdr.rx.capture(5000, timeout=0.012)
             written = [e for e in sdr.events() if e["kind"] == ezsdr.session.CAPTURE_WRITTEN]
-            self.assertEqual([e["payload"]["request"] for e in written], [0], "the foreign announcement came inside the timeout")
+            self.assertEqual([e["payload"]["action"] for e in written], raw["outcome"]["dispatched"], "the foreign announcement came inside the timeout")
 
     def test_ea_17_a_capture_across_a_gap_is_refused(self) -> None:
         # §23: a gap is a flag and a time jump, which one array would hide (Review I, P1-C).
@@ -318,13 +319,13 @@ class EasyApi(unittest.TestCase):
             sdr.tx.repeat(ramp())
             sdr.sleep(0.005)
             first, second = sdr.rx.request(1000), sdr.rx.request(1500)
-            self.assertEqual((first.number, second.number), (0, 1))
+            self.assertNotEqual(first.entry["outcome"]["dispatched"], second.entry["outcome"]["dispatched"])
             b = sdr.rx.result(second)
             a = sdr.rx.result(first)
             self.assertEqual((a.shape, b.shape), ((1000,), (1500,)))
             # One continuous stretch of the repeated waveform across the boundary.
             rotation(np.concatenate([a, b]), ramp())
-        spans = [(c["first"]["ticks"], c["end"]["ticks"]) for c in (art["continuity"][0] for art in sdr.manifest["artifacts"])]
+        spans = [(c["first"]["ticks"], c["end"]["ticks"]) for c in (art["continuity"][0] for art in sdr.manifest["artifacts"]["rec"])]
         self.assertEqual(spans[0][1], spans[1][0], "the second capture starts where the first ends")
 
     def test_ea_17_a_capture_the_recorder_refuses_raises(self) -> None:
@@ -340,7 +341,7 @@ class EasyApi(unittest.TestCase):
             at["ticks"] += 5_000_000
             sdr.rx.capture(1000, at=at)
             t0 = sdr.start_instant["ticks"]
-        (artifact,) = sdr.manifest["artifacts"]
+        (artifact,) = sdr.manifest["artifacts"]["rec"]
         self.assertEqual(artifact["continuity"][0]["first"]["ticks"], (at["ticks"] - t0) // 1000, "the first sample at `at`, 1 Msps from T0")
 
     def test_ea_16_repeat_at_an_instant(self) -> None:
@@ -424,7 +425,7 @@ class EasyApi(unittest.TestCase):
             self.assertEqual(tiny["ticks"], sdr.now["ticks"] + 2, "the ceiling of 1.5 ticks")
             sdr.rx.capture(1000, at=at)
             t0 = sdr.start_instant["ticks"]
-        (artifact,) = sdr.manifest["artifacts"]
+        (artifact,) = sdr.manifest["artifacts"]["rec"]
         self.assertEqual(artifact["continuity"][0]["first"]["ticks"], (at["ticks"] - t0) // 1000, "the capture starts at `after`'s instant")
 
     def test_ea_16_sleep_reaches_the_instant_after_names(self) -> None:
@@ -537,7 +538,7 @@ class DurationRequests(unittest.TestCase):
         return ezsdr.Session(connection, connected)
 
     def callers(self, sdr: ezsdr.Session, seconds: object) -> dict:
-        handle = ezsdr.session.CaptureRequest("rec", 0, 1, 0, {})
+        handle = ezsdr.session.CaptureRequest("rec", 0, 1, {"outcome": {"kind": "admitted", "dispatched": []}})
         rx = ezsdr.session.Rx(sdr, "radio", "rx")
         return {
             "sleep": lambda: sdr.sleep(seconds),
@@ -663,13 +664,15 @@ class DurationRequests(unittest.TestCase):
         self.assertEqual(sdr._connection.call.call_args.args[0], {"op": "run_child", "spec": {}, "inputs": []})
 
     def test_capture_waits_again_with_the_first_horizon(self) -> None:
+        # The first answer is another requester's, a Reactor's say (action 4): it is skipped,
+        # not counted, and the wait goes on for this request's own (HD-16).
         sdr = self.session({})
         horizon = {"domain": {"node": 0, "path": "clock"}, "ticks": 12}
         sdr._connection.call.side_effect = [
-            ({"index": 3, "horizon": horizon, "event": {"source": {"kind": "output", "output": "other"}, "payload": {"request": 0}}}, b""),
+            ({"index": 3, "horizon": horizon, "event": {"source": {"kind": "output", "output": "rec"}, "payload": {"action": 4}}}, b""),
             ({"index": None}, b""),
         ]
-        handle = ezsdr.session.CaptureRequest("rec", 0, 1, 2, {})
+        handle = ezsdr.session.CaptureRequest("rec", 1, 2, {"outcome": {"kind": "admitted", "dispatched": [5]}})
         with self.assertRaises(ezsdr.CaptureTimeout):
             ezsdr.session.Rx(sdr, "radio", "rx").result(handle, 1e-12)
         requests = [call.args[0] for call in sdr._connection.call.call_args_list]
@@ -734,6 +737,17 @@ class RecorderChoice(unittest.TestCase):
                         rx.request(100)
                     self.assertEqual(str(raised.exception), error)
                     connection.call.assert_not_called()
+
+
+class ChildCapture(unittest.TestCase):
+    def test_run_result_capture_is_the_output_s_own_capture(self) -> None:
+        # HD-10: the output's own capture has the output's id; a Reactor's request under
+        # the same output (`capture_<n>`) is not it, so the call raises without reading.
+        session = Mock()
+        manifest = {"artifacts": {"rec": [{"id": "capture_7", "kind": "sink.capture"}]}}
+        with self.assertRaises(ezsdr.Error):
+            ezsdr.session.RunResult(session, {}, manifest, None).capture("rec")
+        session.read.assert_not_called()
 
 
 class SampleValidity(unittest.TestCase):

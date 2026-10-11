@@ -1006,13 +1006,34 @@ impl AttachedPort {
     }
 }
 
+/// One admitted Action as its Module receives it (MA-14). Non-exhaustive, so a field
+/// can join it without breaking a Module.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Dispatched {
+    /// The id the Kernel gave it at dispatch, which an event answering it carries
+    /// (KC-24, MA-14).
+    pub id: ActionId,
+    /// The Action, with its authored target (KC-23).
+    pub action: Action,
+    /// The node a `{resource}` target was resolved to, which is what a Provider
+    /// matches on; absent for any other target (KC-23).
+    pub node: Option<ResourceId>,
+}
+
+impl Dispatched {
+    /// An Action as the Kernel dispatches one; for a Module's own tests (MA-14).
+    #[cfg(feature = "testing")]
+    pub fn new(id: ActionId, action: Action, node: Option<ResourceId>) -> Dispatched {
+        Dispatched { id, action, node }
+    }
+}
+
 /// Where a Module receives Actions. They arrive only after Kernel admission (MA-14).
 pub trait ActionReceiver: Send + Sync {
-    /// The next admitted Action for this Module, if any, with the node its
-    /// `{resource}` target was resolved to: what a Provider matches on (KC-23). The
-    /// Action keeps its authored target; the node is `None` for any other target
-    /// (MA-14).
-    fn recv(&self) -> Option<(Action, Option<ResourceId>)>;
+    /// The next admitted Action for this Module, if any (MA-14).
+    fn recv(&self) -> Option<Dispatched>;
 }
 
 /// Where a Module **emits** an Action: it is submitted to `admit()` rather than to

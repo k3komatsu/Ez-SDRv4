@@ -11,7 +11,7 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, MemoryDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
-    ActionReceiver, ActionSubmitter, Authority, AuthorityDescriptor, CoerceReport, Endpoint,
+    ActionReceiver, Dispatched, ActionSubmitter, Authority, AuthorityDescriptor, CoerceReport, Endpoint,
     Executor, ExecutorDescriptor, Factories, IslandDecl, Link, LinkDescriptor, ModuleError,
     ModuleErrorKind, ModuleRef, ModuleRegistry, Pacing, PrepareContext, Provider, ProviderInstance,
     Sink, SinkDescriptor, StepOutcome, StopMode, UpdateClass, VocabularyDescriptor,
@@ -589,7 +589,7 @@ impl SteppedProvider {
             }
         }
         let progressed = !pending.is_empty();
-        for (action, node) in pending {
+        for Dispatched { action, node, .. } in pending {
             // A Provider's resolved node, else the authored target (KC-23).
             let target = match (&node, action.target()) {
                 (Some(node), _) => node.path().to_owned(),
@@ -941,6 +941,8 @@ pub struct RecordingSink {
     pub fail_step: Option<(i64, ModuleErrorKind)>,
     /// The first step at or after this primary-root tick panics (#65).
     pub panic_step: Option<i64>,
+    /// Never calls `recv()` (RS-16's discarded Sink Action).
+    pub deaf: bool,
     actions: Option<Arc<dyn ActionReceiver>>,
 }
 
@@ -969,8 +971,15 @@ impl RecordingSink {
             always_progress: false,
             fail_step: None,
             panic_step: None,
+            deaf: false,
             actions: None,
         }
+    }
+
+    /// Never calls `recv()`, so whatever is dispatched to it stays queued.
+    pub fn deaf(mut self) -> RecordingSink {
+        self.deaf = true;
+        self
     }
 
     /// Records the thread each step runs on (spec 19 §0).
@@ -1024,7 +1033,7 @@ impl Sink for RecordingSink {
         self.record(format!("prepare:{}", f.id));
         self.primary = Some(ctx.time.primary_root());
         self.probe.record(format!("source:{}:{}", self.name, ctx.source));
-        self.actions = Some(ctx.actions.clone());
+        self.actions = (!self.deaf).then(|| ctx.actions.clone());
         self.ins.clear();
         for attached in &ctx.links {
             let (direction, link) = match &attached.endpoint {
@@ -1041,7 +1050,6 @@ impl Sink for RecordingSink {
             ));
         }
         Ok(PrepareReport {
-            fragment: f.id.clone(),
             effective: BTreeMap::new(),
             coercions: Vec::new(),
             warnings: Vec::new(),
@@ -1148,6 +1156,7 @@ pub struct ProbeExecutor {
     pub descriptor: ExecutorDescriptor,
     pub probe: Probe,
     pub submit: Option<Action>,
+    then: Option<Action>,
     pub out: Option<Arc<dyn ActionSubmitter>>,
     pub submitted: bool,
     submit_at: Option<i64>,
@@ -1157,6 +1166,8 @@ pub struct ProbeExecutor {
     actions: Option<Arc<dyn ActionReceiver>>,
     event_emitted: bool,
     coercion_counter_snapshot: Option<(Arc<AtomicU64>, Arc<AtomicU64>)>,
+    /// Never calls `recv()` (RS-16's discarded Executor Action).
+    deaf: bool,
 }
 
 impl ProbeExecutor {
@@ -1169,6 +1180,7 @@ impl ProbeExecutor {
                 .clone(),
             probe: probe.clone(),
             submit: None,
+            then: None,
             out: None,
             submitted: false,
             submit_at: None,
@@ -1178,13 +1190,26 @@ impl ProbeExecutor {
             actions: None,
             event_emitted: false,
             coercion_counter_snapshot: None,
+            deaf: false,
         }
+    }
+
+    /// Never calls `recv()`, so whatever is dispatched to it stays queued.
+    pub fn deaf(mut self) -> ProbeExecutor {
+        self.deaf = true;
+        self
     }
 
     /// Submits the Action on its first step.
     pub fn submitting(mut self, action: Action) -> ProbeExecutor {
         self.submit = Some(action);
         self.submit_at = None;
+        self
+    }
+
+    /// Submits a second Action right after the first, in the same step.
+    pub fn then_submitting(mut self, action: Action) -> ProbeExecutor {
+        self.then = Some(action);
         self
     }
 
@@ -1249,7 +1274,6 @@ impl Executor for ProbeExecutor {
         self.actions = Some(ctx.actions.clone());
         self.probe.record(format!("source:{}:{}", self.name, ctx.source));
         Ok(PrepareReport {
-            fragment: id(&format!("island_{}", island.id.local)),
             effective: BTreeMap::new(),
             coercions: Vec::new(),
             warnings: Vec::new(),
@@ -1298,19 +1322,21 @@ impl Executor for ProbeExecutor {
             if let Some((counter, snapshot)) = &self.coercion_counter_snapshot {
                 snapshot.store(counter.load(Ordering::SeqCst), Ordering::SeqCst);
             }
-            match out.submit(action) {
-                Ok(id) => self.record(format!("submit:ok:{}", id.0)),
-                Err(violations) => {
-                    if let Some(first) = violations.first() {
-                        self.record(format!("submit:err:{}:{}", first.check, first.reason));
-                    } else {
-                        self.record("submit:err:unknown:no violation detail");
+            for action in std::iter::once(action).chain(self.then.take()) {
+                match out.submit(action) {
+                    Ok(id) => self.record(format!("submit:ok:{}", id.0)),
+                    Err(violations) => {
+                        if let Some(first) = violations.first() {
+                            self.record(format!("submit:err:{}:{}", first.check, first.reason));
+                        } else {
+                            self.record("submit:err:unknown:no violation detail");
+                        }
                     }
                 }
             }
             self.submitted = true;
         }
-        let received = record_actions(&self.probe, &self.name, &self.actions);
+        let received = !self.deaf && record_actions(&self.probe, &self.name, &self.actions);
         Ok(StepOutcome { progressed: due || received })
     }
 
@@ -1336,7 +1362,7 @@ impl Executor for ProbeExecutor {
 /// its authored target (KC-23 hands those no node).
 fn record_actions(probe: &Probe, name: &str, actions: &Option<Arc<dyn ActionReceiver>>) -> bool {
     let mut received = false;
-    while let Some((action, _)) = actions.as_ref().and_then(|actions| actions.recv()) {
+    while let Some(Dispatched { action, .. }) = actions.as_ref().and_then(|actions| actions.recv()) {
         let target = action.target().map_or_else(|| "-".to_owned(), ToString::to_string);
         probe.record(format!("{name}:action:{target}"));
         received = true;

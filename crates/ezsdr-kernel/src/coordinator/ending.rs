@@ -249,6 +249,7 @@ impl RunHandle {
                 host_utc_nanos: termination_host_utc,
                 cleanup_failures,
                 also: lock(&self.shared.also).clone(),
+                undelivered: lock(&self.shared.undelivered).clone(),
             },
             artifacts: lock(&self.shared.artifacts).clone(),
             sections: Vec::new(),
@@ -393,7 +394,7 @@ impl CleanupOps for Ops {
                 super::stepping::drain_and_react(&self.shared);
                 let marks = lock(&self.shared.marks).clone();
                 let mut artifacts = lock(&self.shared.artifacts);
-                for artifact in artifacts.iter_mut() {
+                for artifact in artifacts.values_mut().flatten() {
                     let span = artifact
                         .continuity
                         .first()
@@ -442,15 +443,14 @@ impl CleanupOps for Ops {
                 // KC-24a: no Action admitted before the freeze is dispatched after it.
                 let _admission = lock(&self.shared.admission);
                 self.shared.frozen.store(true, Ordering::Release);
-                for slot in &self.shared.providers {
-                    slot.queue.clear();
-                }
-                for slot in &self.shared.sinks {
-                    slot.queue.clear();
-                }
-                for slot in &self.shared.executors {
-                    slot.queue.clear();
-                }
+                // RS-16: what the queues held was admitted and never delivered.
+                let mut undelivered: Vec<_> = self.shared.providers.iter().map(|slot| &slot.queue)
+                    .chain(self.shared.sinks.iter().map(|slot| &slot.queue))
+                    .chain(self.shared.executors.iter().map(|slot| &slot.queue))
+                    .flat_map(|queue| queue.clear())
+                    .collect();
+                undelivered.sort();
+                lock(&self.shared.undelivered).extend(undelivered);
                 let wake = lock(&self.shared.wake_handle).take();
                 let pending: Vec<_> = lock(&self.shared.scheduled).drain(..).chain(wake).collect();
                 // Every handle is tried: `scheduled` is already drained, so stopping at
@@ -491,7 +491,7 @@ impl CleanupOps for Ops {
                 let stop_error = if needs_stop {
                     match contain(|| guard.stop_consumer(current_stop_mode(&self.shared))) {
                         Ok(artifacts) => {
-                            lock(&self.shared.artifacts).extend(artifacts);
+                            keep_artifacts(&self.shared, instance, artifacts);
                             None
                         }
                         Err(error) => {
@@ -568,9 +568,8 @@ impl CleanupOps for Ops {
                 };
                 done.insert((step as u8, instance));
                 drop(done);
-                let result = contain(|| guard.stop_consumer(mode)).map(|artifacts| {
-                    lock(&self.shared.artifacts).extend(artifacts);
-                });
+                let result = contain(|| guard.stop_consumer(mode))
+                    .map(|artifacts| keep_artifacts(&self.shared, instance, artifacts));
                 if let Err(error) = &result {
                     super::pipeline::emit_device_lost(&self.shared, instance, error);
                 }
@@ -589,6 +588,18 @@ impl CleanupOps for Ops {
                     .collect();
                 Ok(())
             }
+        }
+    }
+}
+
+/// RS-38: a Sink's artifacts are filed under its output; only a Sink returns any.
+fn keep_artifacts(shared: &Shared, instance: Inst, artifacts: Vec<crate::manifest::ArtifactRef>) {
+    if let Inst::Sink(i) = instance {
+        if !artifacts.is_empty() {
+            lock(&shared.artifacts)
+                .entry(shared.sinks[i].output.clone())
+                .or_default()
+                .extend(artifacts);
         }
     }
 }

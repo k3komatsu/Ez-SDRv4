@@ -125,7 +125,7 @@ impl DataLink for TestLink {
 }
 
 #[derive(Default)]
-struct ActionQueue(Mutex<VecDeque<Action>>);
+struct ActionQueue(Mutex<VecDeque<Action>>, std::sync::atomic::AtomicU64);
 
 impl ActionQueue {
     fn push(&self, action: Action) {
@@ -134,8 +134,10 @@ impl ActionQueue {
 }
 
 impl ActionReceiver for ActionQueue {
-    fn recv(&self) -> Option<(Action, Option<ResourceId>)> {
-        self.0.lock().expect("action lock").pop_front().map(|action| (action, None))
+    /// Ids count from 1, as the Kernel's do (KC-24).
+    fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> {
+        let id = || ActionId(self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1);
+        self.0.lock().expect("action lock").pop_front().map(|action| ezsdr_kernel::module_api::Dispatched::new(id(), action, None))
     }
 }
 
@@ -562,7 +564,7 @@ fn hd_10_capture_of_n_samples_across_jittered_blocks() {
     assert_eq!(first, 10_000);
     let artifacts = rig.stop(StopMode::Orderly);
     assert_eq!(artifacts.len(), 1);
-    assert_eq!(artifacts[0].id, ident("rec_0"));
+    assert_eq!(artifacts[0].id, ident("capture_1"));
     assert!(!artifacts[0].partial);
     assert_ramp(&artifacts[0], 123, 5_000);
     assert_eq!(artifacts[0].continuity.len(), 1);
@@ -635,7 +637,7 @@ fn hd_10_session_requests_are_sequential() {
     rig.push_ramp(0, 500);
     rig.step().expect("step succeeds");
     let artifacts = rig.stop(StopMode::Orderly);
-    assert_eq!(artifacts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["rec_0", "rec_1"]);
+    assert_eq!(artifacts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["capture_1", "capture_2"]);
     assert_ramp(&artifacts[0], 100, 100);
     assert_ramp(&artifacts[1], 200, 100);
 }
@@ -650,7 +652,7 @@ fn hd_10_the_own_capture_comes_first() {
     rig.push_ramp(0, 100);
     rig.step().expect("step succeeds");
     let artifacts = rig.stop(StopMode::Orderly);
-    assert_eq!(artifacts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["rec", "rec_0"]);
+    assert_eq!(artifacts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["rec", "capture_1"]);
     assert_ramp(&artifacts[0], 0, 50);
     assert_ramp(&artifacts[1], 50, 20);
 }
@@ -774,7 +776,7 @@ fn hd_11_an_unexpected_action_is_rejected() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].source, source());
     assert_eq!(events[0].kind.as_str(), REQUEST_REJECTED);
-    assert_eq!(events[0].payload["action"], "tx_burst");
+    assert_eq!(events[0].payload["kind"], "tx_burst");
     assert!(events[0].payload["reason"].as_str().unwrap().starts_with("HD-14"));
     rig.env.actions.push(Action::Command {
         target: Target::Output { output: ident("rec") },
@@ -784,7 +786,7 @@ fn hd_11_an_unexpected_action_is_rejected() {
     });
     assert!(rig.step().expect("unexpected Command is an event"));
     let events = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
-    assert_eq!(events[0].payload["action"], "command");
+    assert_eq!(events[0].payload["kind"], "command");
 }
 
 #[test]
@@ -805,12 +807,12 @@ fn hd_14_a_bad_capture_value_is_an_event_not_a_failure() {
     assert_eq!(events.len(), 3);
     assert!(events.iter().all(|event| event.kind.as_str() == REQUEST_REJECTED));
     assert!(events.iter().all(|event| {
-        event.payload["action"] == "update_parameter"
+        event.payload["kind"] == "update_parameter"
             && event.payload["reason"].as_str().unwrap().starts_with("HD-14")
     }));
     let artifacts = rig.stop(StopMode::Orderly);
     assert_eq!(artifacts.len(), 1);
-    assert_eq!(artifacts[0].id, ident("rec_0"));
+    assert_eq!(artifacts[0].id, ident("capture_4"));
     assert_ramp(&artifacts[0], 0, 10);
 }
 
@@ -900,7 +902,7 @@ fn hd_11_stop_for_another_target_is_rejected() {
     assert_eq!(events.len(), 2, "a resource's Stop and another output's Stop");
     for event in &events {
         assert_eq!(event.kind.as_str(), REQUEST_REJECTED);
-        assert_eq!(event.payload["action"], "stop");
+        assert_eq!(event.payload["kind"], "stop");
         assert!(event.payload["reason"].as_str().unwrap().starts_with("HD-14"));
     }
 
@@ -948,7 +950,7 @@ fn hd_11_a_stop_discards_unstarted_requests_and_later_ones_are_served() {
     rig.step().expect("a request after the Stop is served");
 
     let artifacts = rig.stop(StopMode::Orderly);
-    assert_eq!(artifacts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["rec", "rec_0"]);
+    assert_eq!(artifacts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["rec", "capture_3"]);
     assert!(artifacts[0].partial);
     assert_ramp(&artifacts[0], 0, 4);
     assert!(!artifacts[1].partial);
@@ -1313,7 +1315,7 @@ fn hd_16_a_written_capture_is_announced() {
     assert_eq!(first[0].kind.as_str(), CAPTURE_WRITTEN);
     assert_eq!(first[0].source, source());
     let announced: ezsdr_sink::CaptureWrittenPayload = serde_json::from_value(first[0].payload.clone()).expect("the payload is a CaptureWrittenPayload");
-    assert_eq!(announced.request, Some(0), "the first capture request the Sink received");
+    assert_eq!(announced.action, Some(ActionId(1)), "the request it served");
     let path = PathBuf::from(announced.artifact.uri.strip_prefix("file://").expect("a file URI"));
     assert!(path.with_extension("sigmf-meta").exists(), "the metadata is written before the announcement");
 
@@ -1328,16 +1330,16 @@ fn hd_16_a_written_capture_is_announced() {
     assert_eq!(second[0].kind.as_str(), CAPTURE_WRITTEN);
     let partial: ezsdr_sink::CaptureWrittenPayload = serde_json::from_value(second[0].payload.clone()).expect("payload");
     assert!(partial.artifact.partial);
-    assert_eq!(partial.request, Some(1));
+    assert_eq!(partial.action, Some(ActionId(2)));
 
     let artifacts = rig.stop(StopMode::Orderly);
     assert_eq!(artifacts, vec![announced.artifact, partial.artifact], "each announcement is the artifact stop returns");
 }
 
 #[test]
-fn hd_16_every_capture_request_is_numbered() {
-    // Refused or served, each capture request takes the next number, and the output's own
-    // capture has none; a client waits for its own (Phase 6 Review H, P0-2).
+fn hd_16_every_answer_names_its_action() {
+    // Refused or served, each answer carries the ActionId of the Action it answers, and the
+    // output's own capture has none; a client waits for its own (spec 27 §3).
     let mut rig = Rig::new("numbered", sample_count(4));
     rig.push_ramp(0, 4);
     rig.step().expect("the own capture completes");
@@ -1348,21 +1350,42 @@ fn hd_16_every_capture_request_is_numbered() {
     rig.env.actions.push(tx_burst());
     rig.push_ramp(4, 10);
     rig.step().expect("the requests are handled");
-    let numbers: Vec<(String, serde_json::Value)> = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().map(|event| (event.kind.as_str().to_owned(), event.payload["request"].clone())).collect();
+    let numbers: Vec<(String, serde_json::Value)> = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().map(|event| (event.kind.as_str().to_owned(), event.payload["action"].clone())).collect();
     assert_eq!(numbers, vec![
         (CAPTURE_WRITTEN.to_owned(), json!(null)),
-        (REQUEST_REJECTED.to_owned(), json!(0)),
         (REQUEST_REJECTED.to_owned(), json!(1)),
-        (REQUEST_REJECTED.to_owned(), json!(null)),
         (REQUEST_REJECTED.to_owned(), json!(2)),
-        (CAPTURE_WRITTEN.to_owned(), json!(3)),
+        (REQUEST_REJECTED.to_owned(), json!(5)),
+        (REQUEST_REJECTED.to_owned(), json!(3)),
+        (CAPTURE_WRITTEN.to_owned(), json!(4)),
+    ]);
+}
+
+#[test]
+fn hd_16_each_requester_gets_its_own_answer() {
+    // Two clients and a Reactor between them capture on one recorder: each answer names
+    // its own Action and artifact, so the Reactor's capture shifts neither client's.
+    let mut rig = Rig::new("requesters", BTreeMap::new());
+    rig.env.actions.push(request(Value::from(3), None));
+    rig.env.actions.push(request(Value::from(2), None));
+    rig.env.actions.push(request(Value::from(4), None));
+    rig.push_ramp(0, 9);
+    rig.step().expect("the requests are served");
+    let answers: Vec<(serde_json::Value, serde_json::Value, serde_json::Value)> = rig.env.events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter()
+        .filter(|event| event.kind.as_str() == CAPTURE_WRITTEN)
+        .map(|event| (event.payload["action"].clone(), event.payload["artifact"]["id"].clone(), event.payload["artifact"]["continuity"][0]["first"]["ticks"].clone()))
+        .collect();
+    assert_eq!(answers, vec![
+        (json!(1), json!("capture_1"), json!(0)),
+        (json!(2), json!("capture_2"), json!(3)),
+        (json!(3), json!("capture_3"), json!(5)),
     ]);
 }
 
 #[test]
 fn hd_16_a_discarded_request_is_answered() {
     // A Stop for the Sink discards the requests that have not started; each is answered
-    // with its number, so a client does not wait out its timeout (Review I, P2-1).
+    // with its ActionId, so a client does not wait out its timeout (Review I, P2-1).
     let mut rig = Rig::new("discarded", BTreeMap::new());
     rig.env.actions.push(request(Value::from(8), None));
     rig.env.actions.push(request(Value::from(3), None));
@@ -1370,8 +1393,8 @@ fn hd_16_a_discarded_request_is_answered() {
     rig.step().expect("the first request starts");
     rig.env.actions.push(Action::Stop { target: own() });
     rig.step().expect("the Stop");
-    let answers: Vec<(String, serde_json::Value)> = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().map(|event| (event.kind.as_str().to_owned(), event.payload["request"].clone())).collect();
-    assert_eq!(answers, vec![(CAPTURE_WRITTEN.to_owned(), json!(0)), (REQUEST_REJECTED.to_owned(), json!(1))]);
+    let answers: Vec<(String, serde_json::Value)> = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().map(|event| (event.kind.as_str().to_owned(), event.payload["action"].clone())).collect();
+    assert_eq!(answers, vec![(CAPTURE_WRITTEN.to_owned(), json!(1)), (REQUEST_REJECTED.to_owned(), json!(2))]);
 }
 
 #[test]
@@ -1380,10 +1403,10 @@ fn hd_10_a_colliding_request_preserves_the_completed_recording() {
     let mut other = CaptureSink::from_binding(&binding(rig._temp.path(), false, None)).unwrap();
     let other_link = Arc::new(TestLink::new(BackPressure::DropOldest, 8));
     let mut own = fragment(sample_count(2));
-    own.id = ident("rec_0");
-    own.content["id"] = json!("rec_0");
+    own.id = ident("rec_capture_1");
+    own.content["id"] = json!("rec_capture_1");
     other.prepare(&own, rig.env.context(vec![attached(
-        "rec_0", "in", Endpoint::StreamIn(other_link.clone()),
+        "rec_capture_1", "in", Endpoint::StreamIn(other_link.clone()),
     )])).unwrap();
     other_link.publish(ramp_block(&mut rig.pool, rig.env.sample_clock,
         0, 0.0, 2, BlockFlags::NONE, None));

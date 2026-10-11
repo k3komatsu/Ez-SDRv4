@@ -1692,6 +1692,7 @@ fn termination_fixture(reason: Termination) -> TerminationSection {
         host_utc_nanos: 1_700_000_000_000_000_000,
         cleanup_failures: Vec::new(),
         also: Vec::new(),
+        undelivered: Vec::new(),
     }
 }
 
@@ -1736,7 +1737,7 @@ fn manifest_fixture(reason: Termination) -> Manifest {
         lease: Lease::attached().record(),
         action_log: Vec::new(),
         termination: termination_fixture(reason),
-        artifacts: Vec::new(),
+        artifacts: BTreeMap::new(),
         sections: Vec::new(),
         hash: None,
     }
@@ -2014,15 +2015,14 @@ fn sb_04_a_manifest_refuses_a_nested_value() {
     // one level is the type there too (SB-4), so a stored Manifest with a nested value
     // is refused rather than read.
     let mut m = manifest_fixture(Termination::Completed {});
-    m.prepare.reports.push(ezsdr_kernel::plan::PrepareReport {
-        fragment: Ident::parse("radio").unwrap(),
+    m.prepare.reports.insert(Ident::parse("radio").unwrap(), ezsdr_kernel::plan::PrepareReport {
         effective: BTreeMap::from([(Key::parse("test.count").unwrap(), Value::from(1))]),
         coercions: Vec::new(),
         warnings: Vec::new(),
     });
     let doc = serde_json::to_value(&m).expect("serialises");
     Manifest::from_json(&doc).expect("a flat value reads");
-    let slot = "/prepare/reports/0/effective/test.count";
+    let slot = "/prepare/reports/radio/effective/test.count";
     for nested in [serde_json::json!([[1]]), serde_json::json!({ "a": { "b": 1 } })] {
         let mut bad = doc.clone();
         *bad.pointer_mut(slot).expect("the slot") = nested.clone();

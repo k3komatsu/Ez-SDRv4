@@ -96,7 +96,7 @@ fn pn(n: usize) -> Vec<(f32, f32)> {
 }
 
 fn capture_artifact(manifest: &Manifest) -> &ArtifactRef {
-    manifest.artifacts.iter().find(|a| a.id.as_str().starts_with("rec")).unwrap_or_else(|| panic!("no capture: {:?}", manifest.artifacts))
+    manifest.artifacts.iter().find(|(output, _)| output.as_str() == "rec").and_then(|(_, list)| list.first()).unwrap_or_else(|| panic!("no capture: {:?}", manifest.artifacts))
 }
 
 fn samples(artifact: &ArtifactRef) -> Vec<(f32, f32)> {
@@ -120,7 +120,7 @@ fn uhd_59_one_spec_mock_and_uhd_profiles() {
     assert!(modules(&uhd).contains(&"ezsdr.radio.uhd"));
     assert_eq!(uhd.run.execution_class, Some(ezsdr_kernel::module_api::ExecutionClass::HardwareInLoop));
     for manifest in [&mock, &uhd] {
-        assert_eq!(artifact(manifest, "rec").size_bytes, 80_000, "10 000 cf32 samples");
+        assert_eq!(artifact(manifest, "rec", 0).size_bytes, 80_000, "10 000 cf32 samples");
     }
 }
 

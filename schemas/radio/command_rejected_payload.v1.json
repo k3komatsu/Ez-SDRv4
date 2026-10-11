@@ -1,9 +1,28 @@
 {
+  "$defs": {
+    "ActionId": {
+      "description": "Identifies one dispatched Action inside a Run (RS-15).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Data for an admitted Action the Provider could not perform (RM-22).",
   "properties": {
     "action": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ActionId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The id of the Action refused, when the Provider refuses it as it takes it\nfrom its queue; absent when it refuses later what it booked (RM-22, MA-14)."
+    },
+    "kind": {
       "description": "The Action's kind tag (RM-22).",
       "type": "string"
     },
@@ -13,7 +32,7 @@
     }
   },
   "required": [
-    "action",
+    "kind",
     "reason"
   ],
   "title": "CommandRejectedPayload",

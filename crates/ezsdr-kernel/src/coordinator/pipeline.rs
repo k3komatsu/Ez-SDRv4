@@ -240,7 +240,8 @@ pub(super) fn assemble(
         marks: Mutex::new(Vec::new()),
         end: Mutex::new(None),
         also: Mutex::new(Vec::new()),
-        artifacts: Mutex::new(Vec::new()),
+        undelivered: Mutex::new(Vec::new()),
+        artifacts: Mutex::new(BTreeMap::new()),
         links: Mutex::new(Vec::new()),
         link_drops: Mutex::new(Vec::new()),
         counters: Mutex::new(None),
@@ -751,7 +752,6 @@ impl RunHandle {
         ))
         .expect("positive host budget");
         let mut reports = Vec::new();
-        let mut report_fragments = Vec::new();
         for fragment in &fragments {
             if fragment.role == crate::module_api::Role::Authority {
                 continue;
@@ -762,10 +762,10 @@ impl RunHandle {
                 .and_then(|r| r.fragment_of.get(&fragment.id))
                 .copied()
             else {
-                reports.push(Err(ModuleError::rejected(format!(
+                reports.push((fragment.id.clone(), Err(ModuleError::rejected(format!(
                     "KC-12: no instance owns fragment {}",
                     fragment.id
-                ))));
+                )))));
                 break;
             };
             let island = if fragment.role == crate::module_api::Role::Executor {
@@ -774,9 +774,9 @@ impl RunHandle {
                 ) {
                     Ok(island) => Some(island),
                     Err(error) => {
-                        reports.push(Err(ModuleError::rejected(format!(
+                        reports.push((fragment.id.clone(), Err(ModuleError::rejected(format!(
                             "KC-12: invalid Island: {error}"
-                        ))));
+                        )))));
                         break;
                     }
                 }
@@ -814,7 +814,6 @@ impl RunHandle {
                 host_budget: budget,
             };
             lock(&self.shared.prepared).insert(fragment.id.clone());
-            report_fragments.push(fragment.id.clone());
             let slot = SlotRef::of(&self.shared, instance);
             let report = if self.shared.device_paced() {
                 // KC-12a: a call that does not return in time is abandoned holding its
@@ -837,18 +836,8 @@ impl RunHandle {
             } else {
                 contain(|| slot.prepare(fragment, island.as_ref(), context))
             };
-            let report = report.and_then(|report| {
-                if report.fragment == fragment.id {
-                    Ok(report)
-                } else {
-                    Err(ModuleError::rejected(format!(
-                        "SB-41: prepare of {} returned a report for {}",
-                        fragment.id, report.fragment
-                    )))
-                }
-            });
             let failed = report.is_err();
-            reports.push(report);
+            reports.push((fragment.id.clone(), report));
             if failed {
                 break;
             }
@@ -875,15 +864,10 @@ impl RunHandle {
                 );
                 return false;
             }
-            Ok(Err(crate::plan::PrepareError::Fragment { index, error })) => {
-                let id = report_fragments.get(index).cloned();
+            Ok(Err(crate::plan::PrepareError::Fragment { fragment, error })) => {
                 self.fail(
                     Stage::Prepare,
-                    format!(
-                        "KC-12: fragment {}: {}",
-                        id.map_or_else(|| "unknown".to_owned(), |id| id.to_string()),
-                        error.message
-                    ),
+                    format!("KC-12: fragment {fragment}: {}", error.message),
                 );
                 return false;
             }
@@ -895,7 +879,7 @@ impl RunHandle {
         };
         let configuration = reports
             .iter()
-            .map(|r| (r.fragment.clone(), r.effective.clone()))
+            .map(|(fragment, r)| (fragment.clone(), r.effective.clone()))
             .collect();
         *lock(&self.shared.configuration) = configuration;
         self.reports = Some(reports);
@@ -1756,12 +1740,16 @@ impl ActionSubmitter for Submitter {
             }]);
         };
         if let Action::Abort { cause } = action {
+            // KC-24: not admitted, not logged, but an id of its own from the Run's
+            // counter; the end is requested whatever the Run's state, so an Abort in
+            // cleanup still escalates it (KC-32).
+            let id = ActionId(shared.next_action.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
             super::ending::request(
                 &shared,
                 crate::run::Termination::Stopped { cause },
                 crate::run::CleanupMode::Abort,
             );
-            return Ok(ActionId(0));
+            return Ok(id);
         }
         // KC-24a; no KC-21a wait: the submitting step is still running (MA-14a).
         let _admission = lock(&shared.admission);

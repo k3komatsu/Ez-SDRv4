@@ -30,10 +30,10 @@ fn v58_01_one_spec_two_mock_profiles() {
     assert_eq!(right.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
     assert_eq!(left.artifacts.len(), 1);
     assert_eq!(right.artifacts.len(), 1);
-    assert_eq!(artifact(&left, "rec").size_bytes, 80_000);
-    assert_eq!(artifact(&right, "rec").size_bytes, 80_000);
-    assert!(!artifact(&left, "rec").partial);
-    assert!(!artifact(&right, "rec").partial);
+    assert_eq!(artifact(&left, "rec", 0).size_bytes, 80_000);
+    assert_eq!(artifact(&right, "rec", 0).size_bytes, 80_000);
+    assert!(!artifact(&left, "rec", 0).partial);
+    assert!(!artifact(&right, "rec", 0).partial);
     assert_eq!(left.spec.body, right.spec.body);
 }
 
@@ -135,7 +135,7 @@ fn v58_03_the_seed_changes_block_boundaries_not_data() {
     };
     let seven = run_seed(7);
     let eight = run_seed(8);
-    assert_eq!(artifact(&seven, "rec").hash, artifact(&eight, "rec").hash);
+    assert_eq!(artifact(&seven, "rec", 0).hash, artifact(&eight, "rec", 0).hash);
     assert_eq!(section(&seven, "mock", "ezsdr.radio.mock.stats")["rx_blocks"], 12);
     assert_eq!(section(&eight, "mock", "ezsdr.radio.mock.stats")["rx_blocks"], 10);
 }
@@ -153,8 +153,8 @@ fn v58_04_mock_events_reach_counters_policy_and_manifest() {
     // Manifest holds RM-24's bytes, which the radio Vocabulary decodes (RS-32a withdrawn).
     assert!(events[0].payload.is_array(), "{}", events[0].payload);
     assert_eq!(RxOverflowPayload::from_payload(&events[0].payload).unwrap().cause, RxOverflowCause::Overrun);
-    assert_eq!(artifact(&manifest, "rec").marks.len(), 1);
-    assert_eq!(artifact(&manifest, "rec").marks[0].kind.as_str(), ezsdr_radio::kinds::RX_OVERFLOW);
+    assert_eq!(artifact(&manifest, "rec", 0).marks.len(), 1);
+    assert_eq!(artifact(&manifest, "rec", 0).marks[0].kind.as_str(), ezsdr_radio::kinds::RX_OVERFLOW);
 
     let mut stopped = spec.clone();
     stopped["policies"]["failure"] = json!({ "radio.RX_OVERFLOW": "stop" });
@@ -175,9 +175,9 @@ fn v58_05_device_lost_aborts_with_full_cleanup() {
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: EventKind::parse(EventKind::DEVICE_LOST).unwrap() } });
     assert!(manifest.run.transitions.iter().any(|entry| entry.state == RunState::Stopping { mode: CleanupMode::Abort }));
     assert!(manifest.termination.cleanup_failures.is_empty());
-    assert!(artifact(&manifest, "rec").partial);
+    assert!(artifact(&manifest, "rec", 0).partial);
     // MR-20 (spec 20, VF-3): the loss at 5 ms publishes the block in progress up to it.
-    assert_eq!(artifact(&manifest, "rec").size_bytes, 40_000);
+    assert_eq!(artifact(&manifest, "rec", 0).size_bytes, 40_000);
     assert!(manifest.hash.is_some());
 }
 
@@ -186,7 +186,7 @@ fn v58_06_injected_overflow_is_a_uhd_overflow() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
     let faults = json!({ "sim.faults": [{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }] });
     let manifest = complete(&spec, "x310-like", json!({ "id": "mock" }), faults, "v58-06-overflow", 160_000_000);
-    let capture = artifact(&manifest, "rec");
+    let capture = artifact(&manifest, "rec", 0);
     assert_eq!(capture.size_bytes, 800_000);
     assert_eq!(capture.continuity[0].gaps.len(), 1);
     let gap = &capture.continuity[0].gaps[0];
@@ -214,7 +214,7 @@ fn v51_an_overflowed_capture_is_a_sigmf_recording() {
     let run = spec_run(&temp, &spec, &profile, BTreeMap::new());
     let clock = root(&run);
     let manifest = finish_at(run, clock, T0 + 160_000_000);
-    let capture = artifact(&manifest, "rec");
+    let capture = artifact(&manifest, "rec", 0);
     let data = capture.uri.strip_prefix("file://").unwrap();
     assert!(data.ends_with(".sigmf-data"), "{data}");
     let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(std::path::Path::new(data).with_extension("sigmf-meta")).unwrap()).unwrap();
@@ -236,7 +236,7 @@ fn v58_06_sequence_error_is_seq_discontinuity() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
     let faults = json!({ "sim.faults": [{ "at_ns": 1_000_000, "fault": "rx_sequence_error", "target": "radio" }] });
     let manifest = complete(&spec, "x310-like", json!({ "id": "mock" }), faults, "v58-06-seq", 160_000_000);
-    let gaps = &artifact(&manifest, "rec").continuity[0].gaps;
+    let gaps = &artifact(&manifest, "rec", 0).continuity[0].gaps;
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].cause, ezsdr_kernel::stream::GapCause::SequenceError {});
     assert_eq!(gaps[0].start.ticks_in(gaps[0].start.domain()).unwrap(), 1_000);
@@ -252,7 +252,7 @@ fn v58_06_overflows_inside_a_gap_extend_the_recorded_loss() {
         { "at_ns": 10_000_000, "fault": "rx_overflow", "target": "radio" }
     ] });
     let manifest = complete(&spec, "x310-like", json!({ "id": "mock" }), faults, "v58-06-overlap", 160_000_000);
-    let gap = &artifact(&manifest, "rec").continuity[0].gaps[0];
+    let gap = &artifact(&manifest, "rec", 0).continuity[0].gaps[0];
     assert_eq!(gap.cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
     assert_eq!(gap.start.ticks_in(gap.start.domain()).unwrap(), 1_000);
     assert_eq!(gap.len, 59_000);
@@ -326,7 +326,7 @@ fn v58_11_19_5_msps_is_coerced_to_20() {
     let preview = manifest.admission.coercions_preview.iter().find(|item| item.coercion.key.as_str() == "radio.rx.sample_rate_hz").unwrap();
     assert_eq!(preview.coercion.requested, Value::num(19.5e6).unwrap());
     assert_eq!(preview.coercion.applied, Value::num(20.0e6).unwrap());
-    assert_eq!(manifest.prepare.reports[0].effective[&Key::parse("radio.rx.sample_rate_hz").unwrap()], Value::num(20.0e6).unwrap());
+    assert_eq!(manifest.prepare.reports[&ezsdr_kernel::spec::Ident::parse("radio").unwrap()].effective[&Key::parse("radio.rx.sample_rate_hz").unwrap()], Value::num(20.0e6).unwrap());
     let rx = manifest.clocks.sample_clocks.iter().find(|clock| clock.stream.path() == "mock/rx").unwrap();
     assert_eq!((rx.nominal_rate.num(), rx.nominal_rate.den()), (20_000_000, 1));
 
@@ -354,8 +354,8 @@ fn v58_12_jitter_leaves_the_capture_unchanged() {
     let selector = |jitter| json!({ "id": "mock", "block_len_jitter": jitter, "rx_test_pattern": "ramp" });
     let plain = complete(&spec, "x310-like", selector(false), json!({ "sim.seed": 7 }), "v58-12-plain", 20_000_000);
     let jitter = complete(&spec, "x310-like", selector(true), json!({ "sim.seed": 7 }), "v58-12-jitter", 20_000_000);
-    assert_eq!(artifact(&plain, "rec").hash, artifact(&jitter, "rec").hash);
-    assert_eq!(artifact(&plain, "rec").continuity, artifact(&jitter, "rec").continuity);
+    assert_eq!(artifact(&plain, "rec", 0).hash, artifact(&jitter, "rec", 0).hash);
+    assert_eq!(artifact(&plain, "rec", 0).continuity, artifact(&jitter, "rec", 0).continuity);
     assert_ne!(section(&plain, "mock", "ezsdr.radio.mock.stats")["rx_blocks"], section(&jitter, "mock", "ezsdr.radio.mock.stats")["rx_blocks"]);
 }
 
@@ -376,7 +376,7 @@ fn v58_13_session_manifest_has_log_waveform_and_capture() {
     let manifest = end_session(run, clock, T0 + 60_000_000);
     assert_eq!(manifest.action_log.len(), 3);
     assert_eq!(manifest.inputs.len(), 1);
-    assert_eq!(artifact(&manifest, "rec_0").size_bytes, 40_000);
+    assert_eq!(artifact(&manifest, "rec", 0).size_bytes, 40_000);
     let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "mock", "ezsdr.radio.mock.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1);
     assert_eq!(bursts[0].end, ezsdr_kernel::stream::BurstEnd::Stop);
@@ -411,8 +411,8 @@ fn v58_13_a_session_stop_of_the_recorder_keeps_a_partial_capture() {
     run.advance_to(TimePoint::new(clock, T0 + 11_000_000)).unwrap();
     assert!(matches!(capture(&mut run, 1_000).outcome, Outcome::Admitted { .. }));
     let manifest = end_session(run, clock, T0 + 20_000_000);
-    let stopped = artifact(&manifest, "rec_0");
-    let later = artifact(&manifest, "rec_1");
+    let stopped = artifact(&manifest, "rec", 0);
+    let later = artifact(&manifest, "rec", 1);
     // The Stop finished the recording capture with what it held — samples 1 000 to
     // 9 999, delivered before T0 + 10 ms — and the Sink went on to serve the next one.
     assert!(stopped.partial);
@@ -524,7 +524,7 @@ fn link_run(temp: &rig::TempDir, tx: &str, rx: &str, profile: &str, rx_jitter: b
     let run = spec_run(temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
     let clock = root(&run);
     let manifest = finish_at(run, clock, T0 + 25_000_000);
-    let capture = rig::read_capture(artifact(&manifest, "rec"), 1).remove(0);
+    let capture = rig::read_capture(artifact(&manifest, "rec", 0), 1).remove(0);
     (manifest, capture)
 }
 
@@ -652,7 +652,7 @@ fn kg_07_a_burst_at_t0_plus_n_samples_is_exact() {
         let t0 = run.start_instant().unwrap().ticks_in(run.start_instant().unwrap().domain()).unwrap();
         let clock = root(&run);
         let manifest = finish_at(run, clock, T0 + 25_000_000);
-        let capture = rig::read_capture(artifact(&manifest, "rec"), 1).remove(0);
+        let capture = rig::read_capture(artifact(&manifest, "rec", 0), 1).remove(0);
         let first = capture.iter().position(|sample| *sample != (0.0, 0.0)).unwrap();
         let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "dev_tx", "ezsdr.radio.mock.bursts").clone()).unwrap();
         let burst = &bursts[0];
@@ -686,7 +686,7 @@ fn v58_03_channel_noise_reproduces_with_its_seed() {
     let (second, _) = noisy(7);
     let (other, other_capture) = noisy(8);
     assert_eq!(rig::determinism_projection(&first), rig::determinism_projection(&second));
-    assert_ne!(artifact(&first, "rec").hash, artifact(&other, "rec").hash);
+    assert_ne!(artifact(&first, "rec", 0).hash, artifact(&other, "rec", 0).hash);
     let power = |capture: &[(f32, f32)]| capture[..10_000].iter().map(|(re, im)| f64::from(*re).powi(2) + f64::from(*im).powi(2)).sum::<f64>() / 10_000.0;
     for capture in [&first_capture, &other_capture] {
         assert!((power(capture) - 0.001).abs() < 0.0001, "noise power {}", power(capture));
@@ -702,7 +702,7 @@ fn v58_12_the_channel_output_does_not_depend_on_block_lengths() {
     let (jitter, _) = link_run(&temp, "a", "b", "x310-like", true, environment, &samples);
     // §58 #12: the channel's output does not depend on the block lengths. Two things have
     // to hold, and the first is what makes the second mean anything.
-    assert_eq!(artifact(&plain, "rec").hash, artifact(&jitter, "rec").hash, "the capture must not depend on the block lengths");
+    assert_eq!(artifact(&plain, "rec", 0).hash, artifact(&jitter, "rec", 0).hash, "the capture must not depend on the block lengths");
     // MR-27: the Run holds two Mocks, so the counts have to be read from the *receiver's*
     // own section. The unqualified name used to compare the transmitter's, whose
     // `rx_blocks` is 0 in both runs, so the assertion passed whatever the receiver did.
@@ -743,7 +743,7 @@ fn v58_08_a_session_hears_a_burst_from_its_first_sample_in_either_instance_order
         let stop = run.submit(SessionAction::Stop { target: Some(resource(&format!("{tx}/tx"))) }, None).unwrap();
         assert!(entries.iter().chain([&burst, &stop]).all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
         let manifest = end_session(run, clock, T0 + 8_000_000);
-        let capture = artifact(&manifest, "rec_0");
+        let capture = artifact(&manifest, "rec", 0);
         (capture.continuity[0].first.ticks_in(capture.continuity[0].first.domain()).unwrap(), rig::read_capture(capture, 1).remove(0))
     };
     let (first_a, capture_a) = run("a");
@@ -775,7 +775,7 @@ fn v57_a_software_loopback_session_captures_what_it_transmits() {
     ];
     assert!(entries.iter().all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
     let manifest = end_session(run, clock, T0 + 20_000_000);
-    let capture = artifact(&manifest, "rec_0");
+    let capture = artifact(&manifest, "rec", 0);
     let first = capture.continuity[0].first.ticks_in(capture.continuity[0].first.domain()).unwrap();
     let received = rig::read_capture(capture, 1).remove(0);
     assert_eq!(received.len(), 5_000);

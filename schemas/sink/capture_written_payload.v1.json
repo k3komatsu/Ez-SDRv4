@@ -1,5 +1,11 @@
 {
   "$defs": {
+    "ActionId": {
+      "description": "Identifies one dispatched Action inside a Run (RS-15).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
     "ArtifactMark": {
       "additionalProperties": false,
       "description": "One `mark_artifact` reaction recorded against an artifact (RS-30).",
@@ -405,18 +411,20 @@
   "additionalProperties": false,
   "description": "Payload of `sink.CAPTURE_WRITTEN`: the artifact the Sink just recorded (HD-16).",
   "properties": {
+    "action": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ActionId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The id of the capture request it served; absent for the output's own capture\n(HD-16, MA-14)."
+    },
     "artifact": {
       "$ref": "#/$defs/ArtifactRef",
       "description": "The recorded capture, as the Sink's `stop` will return it (HD-16)."
-    },
-    "request": {
-      "description": "The number of the capture request it served, counting from 0 every capture request\nthe Sink received, accepted or not; null for the output's own capture (HD-16).\nA client that submitted the `k`-th request waits for `request: k` (Phase 6, Review\nH, P0-2).",
-      "format": "uint64",
-      "minimum": 0,
-      "type": [
-        "integer",
-        "null"
-      ]
     }
   },
   "required": [

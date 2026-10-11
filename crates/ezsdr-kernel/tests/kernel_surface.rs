@@ -493,7 +493,8 @@ fn ov_23b_kernel_growth_is_the_new_count() {
     // 113 of 293: pre-freeze item 2a typed targets and sources: `event::Target` (Action
     // set), `event::EventSource` (Event envelope) and `manifest::ModuleSection`
     // (Manifest envelope) were added, and `coordinator::KERNEL_SOURCE` (NEW:) removed.
-    assert_eq!((new.len(), total), (113, 293), "OV-23b, GZ-2: the Kernel's public surface changed");
+    // 114 of 294: pre-freeze item 2b added `module_api::Dispatched` (MA-14), NEW:.
+    assert_eq!((new.len(), total), (114, 294), "OV-23b, GZ-2: the Kernel's public surface changed");
 }
 
 #[test]
@@ -1144,6 +1145,7 @@ ma6_documents! {
     module_api::ExecutorDescriptor, module_api::IslandDecl, module_api::SinkDescriptor,
     module_api::LinkDescriptor, module_api::AuthorityDescriptor, plan::Fragment,
     plan::PrepareReport, time::TimePoint, manifest::ArtifactRef, stream::DataLinkDecl,
+    module_api::Dispatched,
     // KG-11: `Authority::relations` carries it (MA-46 as KG-11 amends it).
     time::ClockRelation,
 }

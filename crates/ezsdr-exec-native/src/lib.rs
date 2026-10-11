@@ -176,8 +176,6 @@ impl Executor for NativeExecutor {
                 detail: serde_json::Value::Null,
             });
         }
-        let fragment = Ident::parse(&format!("island_{}", island.id.local))
-            .map_err(|_| ModuleError::rejected("NX-4: the Island id makes no fragment name"))?;
         let source = ctx.source.clone();
         for link in &ctx.links {
             if !island.components.iter().any(|entry| entry.component == link.component) {
@@ -214,7 +212,6 @@ impl Executor for NativeExecutor {
         self.actions = Some(ctx.actions.clone());
         self.actions_out = Some(ctx.actions_out.clone());
         Ok(PrepareReport {
-            fragment,
             effective: BTreeMap::new(),
             coercions: Vec::new(),
             warnings: Vec::new(),
@@ -231,10 +228,11 @@ impl Executor for NativeExecutor {
 
     fn step(&mut self, until: TimePoint) -> Result<StepOutcome, ModuleError> {
         if let Some(actions) = &self.actions {
-            if let Some((action, _)) = actions.recv() {
+            if let Some(dispatched) = actions.recv() {
+                let action = &dispatched.action;
                 return Err(ModuleError::rejected(format!(
                     "NX-7: ezsdr.exec.native 1.0.0 applies no Action, and {} for {} reached it",
-                    action_name(&action),
+                    action_name(action),
                     action.target().map_or_else(|| "the Run".to_owned(), ToString::to_string),
                 )));
             }

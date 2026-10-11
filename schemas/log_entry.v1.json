@@ -88,7 +88,7 @@
       "oneOf": [
         {
           "additionalProperties": false,
-          "description": "It passed every check and was dispatched (RS-16).",
+          "description": "It passed every check and was dispatched (RS-16); one the end discarded before\nits Module received it is also in the termination's `undelivered`.",
           "properties": {
             "coercions": {
               "default": [],

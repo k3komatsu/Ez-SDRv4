@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use ezsdr_kernel::event::{Event, EventHandle, EventKind, EventSink, EventSource, Severity};
+use ezsdr_kernel::event::{ActionId, Event, EventHandle, EventKind, EventSink, EventSource, Severity};
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::module_api::{InputStore, StopMode};
 use ezsdr_kernel::spec::{Key, Scalar, Value};
@@ -97,7 +97,7 @@ impl Streams {
             item.delivered = item.delivered.or(delivered.filter(|(origin, config, _)| cuts(*origin, *config)).map(|(_, _, k)| k));
         }
         if let Err(error) = line.book(item) {
-            core.command_rejected("update_parameter", &format!("RM-26: {error}"));
+            core.command_rejected(None, "update_parameter", &format!("RM-26: {error}"));
             return false;
         }
         self.changed(core, dir);
@@ -115,7 +115,7 @@ impl Streams {
                 refused
             }
             Err(error) => {
-                core.command_rejected("update_parameter", &format!("RM-26: {error}"));
+                core.command_rejected(None, "update_parameter", &format!("RM-26: {error}"));
                 false
             }
         }
@@ -163,7 +163,7 @@ impl Streams {
         self.version += 1;
         if dir == Dir::Tx {
             if let Err(error) = self.reconcile(core) {
-                core.command_rejected("update_parameter", &format!("UR-25: {error}"));
+                core.command_rejected(None, "update_parameter", &format!("UR-25: {error}"));
             }
         }
     }
@@ -363,10 +363,11 @@ impl Core {
         self.emit_at(source, kind, severity, payload, self.at(self.now()));
     }
 
-    /// `radio.COMMAND_REJECTED` from the device, and its reason recorded (UR-21, UR-30).
-    pub fn command_rejected(&self, action: &str, reason: &str) {
+    /// `radio.COMMAND_REJECTED` from the device, naming the Action by `id` when uhd-control
+    /// refuses it as it takes it, and its reason recorded (UR-21, UR-30, RM-22).
+    pub fn command_rejected(&self, id: Option<ActionId>, action: &str, reason: &str) {
         self.reject_note(json!({ "action": action, "reason": reason, "at": self.at(self.now()) }));
-        let payload = serde_json::to_value(CommandRejectedPayload { action: action.to_owned(), reason: reason.to_owned() })
+        let payload = serde_json::to_value(CommandRejectedPayload { action: id, kind: action.to_owned(), reason: reason.to_owned() })
             .expect("a payload");
         self.emit(&self.id, kinds::COMMAND_REJECTED, Severity::Error, payload);
     }
@@ -394,11 +395,11 @@ impl Core {
     }
 
     /// A device failure: `DEVICE_LOST` when the device is gone, else the reason.
-    pub fn device_failed(&self, action: &str, error: &DeviceError) {
+    pub fn device_failed(&self, id: Option<ActionId>, action: &str, error: &DeviceError) {
         if error.lost {
             self.device_lost(&error.message);
         } else {
-            self.command_rejected(action, &error.message);
+            self.command_rejected(id, action, &error.message);
         }
     }
 

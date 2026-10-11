@@ -91,7 +91,8 @@ pub enum SessionAction {
 #[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Outcome {
-    /// It passed every check and was dispatched (RS-16).
+    /// It passed every check and was dispatched (RS-16); one the end discarded before
+    /// its Module received it is also in the termination's `undelivered`.
     Admitted {
         /// What was coerced, including RS-19's "as soon as possible" (SB-44).
         #[serde(default)]

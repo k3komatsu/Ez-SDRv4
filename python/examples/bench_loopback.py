@@ -40,7 +40,7 @@ with ezsdr.connect() as sdr:
         print(f"the transmit retune outside the RF envelope was refused: {rejected}")
 
 manifest = sdr.manifest
-captures = [a for a in manifest["artifacts"] if a["continuity"]]
+captures = [a for listed in manifest["artifacts"].values() for a in listed if a["continuity"]]
 print(f"y: correlation peak at sample {found(y)}; z: at sample {found(z)}")
 for artifact in captures[:2]:
     print(f"{artifact['id']}: first sample {artifact['continuity'][0]['first']}")

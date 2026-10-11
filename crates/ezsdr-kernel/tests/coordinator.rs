@@ -405,9 +405,9 @@ fn kc_12_a_prepare_failure_stops_the_loop_and_cleans_up_what_was_prepared() {
     assert!(matches!(
         run.state(),
         RunState::CleanedUp {
-            termination: Termination::Failed { stage: Stage::Prepare, .. }
-        }
-    ));
+            termination: Termination::Failed { stage: Stage::Prepare, ref reason }
+        } if reason.starts_with("KC-12: fragment b: ")
+    ), "{:?}", run.state());
     let _ = run.finish();
     let lines = probe.lines();
     assert!(!lines.iter().any(|line| line.starts_with("c:prepare:")));
@@ -424,9 +424,9 @@ fn kc_12_a_prepare_failure_stops_the_loop_and_cleans_up_what_was_prepared() {
 
 #[test]
 fn sb_41_the_reports_follow_plan_order() {
-    // SB-41, KC-12 (spec 20, KH-1): the Manifest lists the reports in the order the
-    // fragments were prepared, which is dependency order — `b` before `a` here,
-    // against Ident order.
+    // SB-41, KC-12 (spec 20, KH-1): the fragments are prepared in dependency order — `b`
+    // before `a` here, against Ident order — which the plan records; the reports are
+    // filed under the fragment invoked (spec 27 §3).
     let (spec, mut profile) = distinct_resource_docs(&["a", "b"]);
     profile["environment"] =
         serde_json::json!({ "ezsdr.arm_order": [{ "before": "b", "after": "a" }] });
@@ -437,13 +437,13 @@ fn sb_41_the_reports_follow_plan_order() {
     let manifest = start_spec_run(&spec, &profile, assembly)
         .expect("entry creates a Run")
         .finish();
-    let order: Vec<_> = manifest
-        .prepare
-        .reports
-        .iter()
-        .map(|report| report.fragment.as_str())
+    let order: Vec<_> = manifest.plan.as_ref().expect("planned").fragments.iter()
+        .map(|fragment| fragment.id.as_str())
+        .filter(|id| ["a", "b"].contains(id))
         .collect();
     assert_eq!(order, ["b", "a"]);
+    let keys: Vec<_> = manifest.prepare.reports.keys().map(Ident::as_str).collect();
+    assert_eq!(keys, ["a", "b"]);
 }
 
 #[test]
@@ -1628,17 +1628,60 @@ fn kc_24_a_module_abort_ends_the_run() {
     );
     assembly.executors.insert(
         Ident::parse("exec").unwrap(),
-        Box::new(ProbeExecutor::new("x", &probe).submitting(Action::Abort {
-            cause: StopCause::Abort {
-                message: "test".to_owned(),
-            },
-        })),
+        Box::new(
+            ProbeExecutor::new("x", &probe)
+                .submitting(Action::Abort {
+                    cause: StopCause::Abort {
+                        message: "test".to_owned(),
+                    },
+                })
+                // Admitted before the coordinator freezes dispatch, so it takes an id too.
+                .then_submitting(Action::UpdateParameter {
+                    target: support::target("radio"),
+                    key: Key::parse("test.gain").unwrap(),
+                    value: Value::num(3.0).unwrap(),
+                    class: ezsdr_kernel::module_api::UpdateClass::HardwareTimed,
+                    at: None,
+                }),
+        ),
     );
     let run = start_spec_run(&spec, &profile, assembly).expect("entry creates a Run");
     assert!(matches!(run.state(), RunState::CleanedUp {
         termination: Termination::Stopped { cause: StopCause::Abort { message: cause } }
     } if cause == "test"));
-    assert!(run.finish().termination.cleanup_failures.is_empty());
+    let termination = run.finish().termination;
+    assert!(termination.cleanup_failures.is_empty());
+    // KC-24: the Abort takes an id of its own from the Run's counter, which the
+    // Action dispatched after it does not reuse.
+    let returned: Vec<u64> = probe.lines().into_iter().filter_map(|line| line.strip_prefix("x:submit:ok:").map(|id| id.parse().unwrap())).collect();
+    assert!(matches!(returned[..], [abort, update] if abort > 0 && abort != update), "{:?}", probe.lines());
+}
+
+#[test]
+fn rs_16_an_executor_action_the_freeze_discards_is_undelivered() {
+    // F24's window for an Executor: a Command to a component, queued for an Executor
+    // that never takes it, then an Abort; RS-6 step 1 discards the Command from the
+    // Executor's queue and names it in `undelivered` (RS-16).
+    let (spec, profile) = executor_docs();
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)));
+    assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(
+        ProbeExecutor::new("x", &probe)
+            .deaf()
+            .submitting(Action::Command {
+                target: Target::Component { component: Ident::parse("c1").unwrap() },
+                verb: Ident::parse("probe").unwrap(), params: BTreeMap::new(), at: None,
+            })
+            .then_submitting(Action::Abort { cause: StopCause::Abort { message: "test".to_owned() } }),
+    ));
+    let run = start_spec_run(&spec, &profile, assembly).expect("entry creates a Run");
+    let termination = run.finish().termination;
+    let returned: Vec<u64> = probe.lines().into_iter().filter_map(|line| line.strip_prefix("x:submit:ok:").map(|id| id.parse().unwrap())).collect();
+    assert_eq!(returned.len(), 2, "{:?}", probe.lines());
+    assert_eq!(termination.undelivered.iter().map(|id| id.0).collect::<Vec<_>>(), returned[..1]);
+    assert!(!probe.lines().iter().any(|line| line.starts_with("x:action:")));
 }
 
 #[test]
@@ -2288,12 +2331,13 @@ fn kc_31_mark_artifact_marks_only_artifacts_open_then() {
         .unwrap();
     let manifest = run.finish();
     let kind = ezsdr_kernel::event::EventKind::parse("test.custom").unwrap();
-    assert_eq!(manifest.artifacts[0].id, Ident::parse("rec_0").unwrap());
-    assert_eq!(manifest.artifacts[0].marks.len(), 1);
-    assert_eq!(manifest.artifacts[0].marks[0].kind, kind);
-    let t = manifest.artifacts[0].marks[0].time;
+    let rec_artifacts = &manifest.artifacts[&Ident::parse("rec").unwrap()];
+    assert_eq!(rec_artifacts[0].id, Ident::parse("rec_0").unwrap());
+    assert_eq!(rec_artifacts[0].marks.len(), 1);
+    assert_eq!(rec_artifacts[0].marks[0].kind, kind);
+    let t = rec_artifacts[0].marks[0].time;
     assert_eq!(t.ticks_in(t.domain()).unwrap(), 150);
-    assert!(manifest.artifacts[1].marks.is_empty());
+    assert!(rec_artifacts[1].marks.is_empty());
 }
 
 #[test]
@@ -2473,11 +2517,12 @@ fn mark_emitted_while_stopping(abort: bool) -> ezsdr_kernel::manifest::Manifest 
 
 fn assert_marked_at(manifest: &ezsdr_kernel::manifest::Manifest, ticks: i64) {
     let kind = ezsdr_kernel::event::EventKind::parse("test.custom").unwrap();
-    assert_eq!(manifest.artifacts[0].marks.len(), 1, "{:?}", manifest.artifacts);
-    assert_eq!(manifest.artifacts[0].marks[0].kind, kind);
-    let t = manifest.artifacts[0].marks[0].time;
+    let rec_artifacts = &manifest.artifacts[&Ident::parse("rec").unwrap()];
+    assert_eq!(rec_artifacts[0].marks.len(), 1, "{:?}", manifest.artifacts);
+    assert_eq!(rec_artifacts[0].marks[0].kind, kind);
+    let t = rec_artifacts[0].marks[0].time;
     assert_eq!(t.ticks_in(t.domain()).unwrap(), ticks);
-    assert!(manifest.artifacts[1].marks.is_empty());
+    assert!(rec_artifacts[1].marks.is_empty());
 }
 
 #[test]
@@ -2664,7 +2709,8 @@ fn kc_39_every_instance_is_stopped_before_it_is_cleaned_up() {
     assert!(
         manifest
             .artifacts
-            .iter()
+            .values()
+            .flatten()
             .any(|artifact| artifact.id == Ident::parse("rec_0").unwrap())
     );
 }
@@ -2774,7 +2820,8 @@ fn kc_44_a_wedged_provider_stop_does_not_block_other_cleanup() {
     assert!(
         manifest
             .artifacts
-            .iter()
+            .values()
+            .flatten()
             .any(|artifact| artifact.id == Ident::parse("rec_0").unwrap())
     );
     assert!(
@@ -3650,7 +3697,6 @@ impl ezsdr_kernel::module_api::Sink for ForeverSink {
         _c: ezsdr_kernel::module_api::PrepareContext,
     ) -> Result<ezsdr_kernel::plan::PrepareReport, ezsdr_kernel::module_api::ModuleError> {
         Ok(ezsdr_kernel::plan::PrepareReport {
-            fragment: ezsdr_kernel::spec::Ident::parse("rec").expect("id"),
             effective: BTreeMap::new(),
             coercions: Vec::new(),
             warnings: Vec::new(),
@@ -4318,14 +4364,14 @@ fn kf_03_the_parents_checks_judge_the_child() {
     let _ = run.finish();
 }
 
-struct MisnamedPrepareSink(RecordingSink, Ident);
-impl ezsdr_kernel::module_api::Sink for MisnamedPrepareSink {
+/// A Sink whose report carries `test.count` = its number, so that two reports differ.
+struct CountingPrepareSink(RecordingSink, i64);
+impl ezsdr_kernel::module_api::Sink for CountingPrepareSink {
     fn descriptor(&self) -> &ezsdr_kernel::module_api::SinkDescriptor { self.0.descriptor() }
     fn prepare(&mut self, f: &ezsdr_kernel::plan::Fragment, ctx: ezsdr_kernel::module_api::PrepareContext)
         -> Result<ezsdr_kernel::plan::PrepareReport, ezsdr_kernel::module_api::ModuleError> {
         let mut report = self.0.prepare(f, ctx)?;
-        report.fragment = self.1.clone();
-        report.effective.insert(Key::parse("test.count").unwrap(), Value::from(99));
+        report.effective.insert(Key::parse("test.count").unwrap(), Value::from(self.1));
         Ok(report)
     }
     fn arm(&mut self) -> Result<(), ezsdr_kernel::module_api::ModuleError> { self.0.arm() }
@@ -4334,25 +4380,11 @@ impl ezsdr_kernel::module_api::Sink for MisnamedPrepareSink {
     fn stop(&mut self, m: ezsdr_kernel::module_api::StopMode) -> Result<Vec<ezsdr_kernel::manifest::ArtifactRef>, ezsdr_kernel::module_api::ModuleError> { self.0.stop(m) }
     fn cleanup(&mut self) { self.0.cleanup(); }
 }
-#[test]
-fn kc_12_a_misnamed_prepare_report_is_refused_before_start() {
-    let (spec, profile) = output_docs();
-    let probe = Probe::new();
-    let mut assembly = output_assembly(&probe, None, None);
-    assembly.sinks.insert(Ident::parse("rec").unwrap(), Box::new(MisnamedPrepareSink(RecordingSink::new("rec", &probe), Ident::parse("radio").unwrap())));
-    let run = start_spec_run(&spec, &profile, assembly).unwrap();
-    assert!(matches!(run.state(), RunState::CleanedUp {
-        termination: Termination::Failed { stage: Stage::Prepare, .. }
-    }));
-    assert!(!probe.lines().iter().any(|line| line.contains(":start")));
-    let manifest = run.finish();
-    assert!(manifest.termination.cleanup_failures.is_empty());
-}
 
 #[test]
-fn kc_12_prepare_report_ownership_is_checked_before_collecting() {
-    // Swapped Sink IDs would produce unique, complete reports. Set membership
-    // alone cannot establish that a report belongs to the fragment just called.
+fn sb_41_a_report_is_filed_under_the_fragment_invoked() {
+    // A report names no fragment: the Kernel files it under the one it invoked, so two
+    // Sinks' reports cannot be swapped or claimed (spec 27 §3; #17).
     let (mut spec, mut profile) = output_docs();
     let mut second_output = spec["outputs"][0].clone();
     second_output["id"] = serde_json::json!("rec2");
@@ -4363,18 +4395,23 @@ fn kc_12_prepare_report_ownership_is_checked_before_collecting() {
     profile["placements"]["links"].as_array_mut().unwrap().push(second_link);
     let probe = Probe::new();
     let mut assembly = output_assembly(&probe, None, None);
-    for (name, returned) in [("rec", "rec2"), ("rec2", "rec")] {
-        assembly.sinks.insert(Ident::parse(name).unwrap(), Box::new(MisnamedPrepareSink(
-            RecordingSink::new(name, &probe), Ident::parse(returned).unwrap())));
+    for (name, count, spans) in [("rec", 1, &[(100, 200)][..]), ("rec2", 2, &[(100, 200), (300, 400)][..])] {
+        assembly.sinks.insert(Ident::parse(name).unwrap(), Box::new(CountingPrepareSink(
+            RecordingSink::new(name, &probe).returning_spans(spans), count)));
     }
-    let run = start_spec_run(&spec, &profile, assembly).unwrap();
-    assert!(matches!(run.state(), RunState::CleanedUp {
-        termination: Termination::Failed { stage: Stage::Prepare, .. }
-    }));
-    let lines = probe.lines();
-    assert!(!lines.iter().any(|line| line.contains("rec2:prepare") || line.contains(":start")));
-    assert!(lines.iter().any(|line| line == "rec:cleanup"));
-    assert!(run.finish().termination.cleanup_failures.is_empty());
+    let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
+    let count = |fragment: &str| manifest.prepare.reports[&Ident::parse(fragment).unwrap()]
+        .effective.get(&Key::parse("test.count").unwrap()).cloned();
+    assert_eq!(count("rec"), Some(Value::from(1)));
+    assert_eq!(count("rec2"), Some(Value::from(2)));
+    // RS-38: each artifact is listed under the output whose Sink returned it.
+    let listed: Vec<(String, Vec<String>)> = manifest.artifacts.iter()
+        .map(|(output, refs)| (output.to_string(), refs.iter().map(|a| a.id.to_string()).collect()))
+        .collect();
+    assert_eq!(listed, [
+        ("rec".to_owned(), vec!["rec_0".to_owned()]),
+        ("rec2".to_owned(), vec!["rec2_0".to_owned(), "rec2_1".to_owned()]),
+    ]);
 }
 
 fn component_class_docs() -> (serde_json::Value, serde_json::Value) {

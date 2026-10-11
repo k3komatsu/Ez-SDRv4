@@ -5,11 +5,11 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, TryLockError};
 
 use crate::binding::{AdmissionCheckRegistry, BindingProfile};
 use crate::contract::ContractRegistry;
-use crate::event::{Action, Event, EventCollector, EventKind, EventSource, Target};
+use crate::event::{ActionId, Event, EventCollector, EventKind, EventSource, Target};
 use crate::id::{ClockDomainId, IslandId, ResourceId, RunId};
 use crate::manifest::{ArtifactRef, BindingSection, RunKind, SpecSection};
 use crate::module_api::{
-    ActionReceiver, Authority, Executor, ExecutorDescriptor, ModuleError, ModuleErrorKind,
+    ActionReceiver, Authority, Dispatched, Executor, ExecutorDescriptor, ModuleError, ModuleErrorKind,
     ModuleRef, ModuleRegistry, Provider, Sink,
 };
 use crate::plan::ExecutionPlan;
@@ -37,7 +37,7 @@ pub(super) struct Queue {
 
 #[derive(Default)]
 struct QueueState {
-    actions: VecDeque<(Action, Option<ResourceId>)>,
+    actions: VecDeque<Dispatched>,
     pushed: u64,
     taken: u64,
     finished: u64,
@@ -53,21 +53,22 @@ impl Queue {
 
     /// Queues one Action and returns how many have been pushed, which is what the
     /// instance must have finished for this one to be done (KC-21a).
-    pub(super) fn push(&self, action: Action, node: Option<ResourceId>) -> u64 {
+    pub(super) fn push(&self, dispatched: Dispatched) -> u64 {
         let mut state = lock(&self.state);
-        state.actions.push_back((action, node));
+        state.actions.push_back(dispatched);
         state.pushed += 1;
         self.changed.notify_all();
         state.pushed
     }
 
-    /// RS-6 step 1: the undelivered Actions leave the queue and the count.
-    pub(super) fn clear(&self) {
+    /// RS-6 step 1: the undelivered Actions leave the queue and the count; their ids
+    /// are returned for the termination section (RS-16).
+    pub(super) fn clear(&self) -> Vec<ActionId> {
         let mut state = lock(&self.state);
-        let undelivered = state.actions.len() as u64;
-        state.actions.clear();
-        state.pushed -= undelivered;
+        let undelivered: Vec<ActionId> = state.actions.drain(..).map(|d| d.id).collect();
+        state.pushed -= undelivered.len() as u64;
         self.changed.notify_all();
+        undelivered
     }
 
     /// Waits at most `timeout` for `finished` to reach `target` (KC-21a).
@@ -83,7 +84,7 @@ impl Queue {
 
 impl ActionReceiver for Queue {
     /// MA-14b: calling `recv` again is what says the Actions taken so far are done.
-    fn recv(&self) -> Option<(Action, Option<ResourceId>)> {
+    fn recv(&self) -> Option<Dispatched> {
         let mut state = lock(&self.state);
         state.finished = state.taken;
         let action = state.actions.pop_front();
@@ -205,7 +206,10 @@ pub(super) struct Shared {
     pub(super) marks: Mutex<Vec<(EventKind, TimePoint)>>,
     pub(super) end: Mutex<Option<EndRequest>>,
     pub(super) also: Mutex<Vec<Termination>>,
-    pub(super) artifacts: Mutex<Vec<ArtifactRef>>,
+    /// The ids RS-6 step 1 discarded from the queues (RS-16).
+    pub(super) undelivered: Mutex<Vec<ActionId>>,
+    /// Each Sink's artifacts, under its output (RS-38).
+    pub(super) artifacts: Mutex<BTreeMap<Ident, Vec<ArtifactRef>>>,
     pub(super) links: Mutex<Vec<(DataLinkDecl, Arc<dyn crate::stream::DataLink>)>>,
     pub(super) link_drops: Mutex<Vec<u64>>,
     pub(super) counters: Mutex<Option<Vec<crate::event::CounterRow>>>,

@@ -1,30 +1,10 @@
 [
  {
-  "id": "H01",
-  "name": "collect_prepare sorts the reports into Ident order",
-  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
-  "old": "    if violations.is_empty() {\n        Ok(ok)",
-  "new": "    if violations.is_empty() {\n        ok.sort_by(|a, b| a.fragment.cmp(&b.fragment));\n        Ok(ok)",
-  "crate": "ezsdr-kernel",
-  "test_bin": "coordinator",
-  "filter": "sb_41_the_reports_follow_plan_order"
- },
- {
-  "id": "H02",
-  "name": "the Manifest lists the reports in Ident order",
-  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
-  "old": "reports: self.reports.clone().unwrap_or_default(),",
-  "new": "reports: { let mut r = self.reports.clone().unwrap_or_default(); r.sort_by(|a, b| a.fragment.cmp(&b.fragment)); r },",
-  "crate": "ezsdr-kernel",
-  "test_bin": "coordinator",
-  "filter": "sb_41_the_reports_follow_plan_order"
- },
- {
   "id": "H03",
   "name": "the prepare checks receive every report's effective, merged, under each fragment's id",
   "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
-  "old": ".map(|r| (r.fragment.clone(), r.effective.clone()))",
-  "new": ".map(|r| (r.fragment.clone(), ok.iter().flat_map(|o| o.effective.clone()).collect()))",
+  "old": ".map(|(fragment, r)| (fragment.clone(), r.effective.clone()))",
+  "new": ".map(|(fragment, _)| (fragment.clone(), ok.values().flat_map(|o| o.effective.clone()).collect()))",
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
   "filter": "sb_30_the_check_sees_each_fragment_s_own_value"
@@ -1739,8 +1719,8 @@
   "id": "J141",
   "name": "item 7 (UR-26): the UHD Provider refuses a Command it does not serve under its old action name `peripheral_command`",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "self.core.command_rejected(\"command\", \"UR-26: not supported by this Provider\")",
-  "new": "self.core.command_rejected(\"peripheral_command\", \"UR-26: not supported by this Provider\")",
+  "old": "self.core.command_rejected(Some(id), \"command\", \"UR-26: not supported by this Provider\")",
+  "new": "self.core.command_rejected(Some(id), \"peripheral_command\", \"UR-26: not supported by this Provider\")",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_26_stop_actions"
@@ -2097,15 +2077,6 @@
   "filter": "mr_10_events_carry_the_source_the_context_gave"
  },
  {
-  "id": "J176",
-  "name": "EA-17 (#54; was phase 6's P19): a capture naming a resource is counted for the recorder",
-  "file": "python/ezsdr/session.py",
-  "old": "        if entry[\"outcome\"][\"kind\"] == \"admitted\" and capture and target.get(\"kind\") == \"output\":\n            # One admitted capture request is one request its recorder numbers (HD-16).\n            recorder = target[\"output\"]",
-  "new": "        if entry[\"outcome\"][\"kind\"] == \"admitted\" and capture:\n            # One admitted capture request is one request its recorder numbers (HD-16).\n            recorder = target.get(\"output\", \"rec\")",
-  "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples",
-  "equivalent": "#54: a capture naming a resource compiles to that resource, and no radio declares sink.capture_samples (RS-17 refuses it, as test_ea_17_each_capture_gets_its_own_samples asserts), so no admitted capture reaches the client with a target other than an output; the guard only keeps a Provider or component that did declare the key from being counted for a recorder."
- },
- {
   "id": "J177",
   "name": "SB-16 (spec 27 §2): a schedule entry naming an undeclared output validates",
   "file": "crates/ezsdr-kernel/src/plan/validation.rs",
@@ -2144,5 +2115,181 @@
   "crate": "ezsdr-sink-capture",
   "test_bin": "sink_capture",
   "filter": "hd_11_stop_for_another_target_is_rejected"
+ },
+ {
+  "id": "J181",
+  "name": "MA-14 (spec 27 §3): the queue carries another id than the one dispatch assigned",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "    let pushed = shared.queue(admitted.inst).push(crate::module_api::Dispatched {\n        id,\n",
+  "new": "    let pushed = shared.queue(admitted.inst).push(crate::module_api::Dispatched {\n        id: ActionId(id.0 + 1),\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "rs_16_an_action_the_freeze_discards_is_undelivered"
+ },
+ {
+  "id": "J182",
+  "name": "HD-16 (spec 27 §3): a capture request records a fixed id, not its own",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": ".push_back(Capture::new(None, n as u64, at, Some(id)));",
+  "new": ".push_back(Capture::new(None, n as u64, at, Some(ActionId(1))));",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_16_each_requester_gets_its_own_answer"
+ },
+ {
+  "id": "J183",
+  "name": "HD-14 (spec 27 §3): a refused capture value is answered under no Action's id",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "                    _ => self.event_for_rejection(\n                        id,",
+  "new": "                    _ => self.event_for_rejection(\n                        ActionId(0),",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_16_every_answer_names_its_action"
+ },
+ {
+  "id": "J184",
+  "name": "RM-22 (spec 27 §3): MockRadio's COMMAND_REJECTED names no Action",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "CommandRejectedPayload { action: id, kind: action.to_owned()",
+  "new": "CommandRejectedPayload { action: None, kind: action.to_owned()",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_29_other_actions_are_command_rejected"
+ },
+ {
+  "id": "J185",
+  "name": "RM-22 (spec 27 §3): the UHD Provider's COMMAND_REJECTED names no Action",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "CommandRejectedPayload { action: id, kind: action.to_owned()",
+  "new": "CommandRejectedPayload { action: None, kind: action.to_owned()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_cold_change_the_envelope_refuses_changes_nothing"
+ },
+ {
+  "id": "J186",
+  "name": "EA-17 (spec 27 §3): a capture takes the first answer, whichever Action it answers",
+  "file": "python/ezsdr/session.py",
+  "old": "            if event[\"payload\"].get(\"action\") not in dispatched:",
+  "new": "            if False:",
+  "python": "test_easy_api.EasyApi.test_ea_17_requests_made_ahead_capture_contiguous_samples"
+ },
+ {
+  "id": "J187",
+  "name": "RS-16 (spec 27 §3): Queue::clear returns no ids, so the freeze records nothing undelivered",
+  "file": "crates/ezsdr-kernel/src/coordinator/state.rs",
+  "old": "        self.changed.notify_all();\n        undelivered\n    }",
+  "new": "        self.changed.notify_all();\n        drop(undelivered);\n        Vec::new()\n    }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "rs_16_an_action_the_freeze_discards_is_undelivered"
+ },
+ {
+  "id": "J188",
+  "name": "RS-38 (spec 27 §3): every Sink's artifacts are filed under the first output",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": ".entry(shared.sinks[i].output.clone())",
+  "new": ".entry(shared.sinks[0].output.clone())",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "sb_41_a_report_is_filed_under_the_fragment_invoked"
+ },
+ {
+  "id": "J189",
+  "name": "SB-41 (spec 27 §3): a report is filed under the fragment prepared before it",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "            reports.push((fragment.id.clone(), report));",
+  "new": "            reports.push((reports.last().map_or(fragment.id.clone(), |(f, _)| f.clone()), report));",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "sb_41_a_report_is_filed_under_the_fragment_invoked"
+ },
+ {
+  "id": "J190",
+  "name": "SB-42 (spec 27 §3): a prepare error names the first fragment, not its own",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "            Err(error) => return Err(PrepareError::Fragment { fragment, error }),",
+  "new": "            Err(error) => return Err(PrepareError::Fragment { fragment: ok.keys().next().cloned().unwrap_or(fragment), error }),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_12_a_prepare_failure_stops_the_loop_and_cleans_up_what_was_prepared"
+ },
+ {
+  "id": "J191",
+  "name": "KC-24 (spec 27 §3): a Module's Abort returns the ActionId(0) sentinel",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "            return Ok(id);",
+  "new": "            return Ok(ActionId(0));",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_a_module_abort_ends_the_run"
+ },
+ {
+  "id": "J193",
+  "name": "RS-16 (spec 27 §3): the freeze clears the Sinks' queues but records none of their ids in undelivered",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                let mut undelivered: Vec<_> = self.shared.providers.iter().map(|slot| &slot.queue)\n                    .chain(self.shared.sinks.iter().map(|slot| &slot.queue))\n",
+  "new": "                self.shared.sinks.iter().for_each(|slot| drop(slot.queue.clear()));\n                let mut undelivered: Vec<_> = self.shared.providers.iter().map(|slot| &slot.queue)\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "rs_16_a_sink_action_the_freeze_discards_is_undelivered"
+ },
+ {
+  "id": "J194",
+  "name": "UR-14 (spec 27 §3): a device error while booking a from-none enable names no Action",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "return self.core.device_failed(Some(id), \"update_parameter\", &error);",
+  "new": "return self.core.device_failed(None, \"update_parameter\", &error);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_14_a_device_error_while_booking_names_its_action"
+ },
+ {
+  "id": "J195",
+  "name": "KC-24 (spec 27 §3): a Module's Abort consumes its id from the Run's counter, so no later Action shares it",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "let id = ActionId(shared.next_action.fetch_add(1, std::sync::atomic::Ordering::SeqCst));",
+  "new": "let id = ActionId(shared.next_action.load(std::sync::atomic::Ordering::SeqCst));",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_a_module_abort_ends_the_run"
+ },
+ {
+  "id": "J196",
+  "name": "MR-16/MR-29 (spec 27 §3): a burst refused at receipt names the Action it answers",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "self.reject_action_at(Some(id), \"tx_burst\", \"MR-16: target, clock, waveform size, channel count or metadata is invalid\", now)?;",
+  "new": "self.reject_action_at(None, \"tx_burst\", \"MR-16: target, clock, waveform size, channel count or metadata is invalid\", now)?;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_16_burst_refusals"
+ },
+ {
+  "id": "J197",
+  "name": "UR-21 (spec 27 §3): a burst refused at booking names the Action it answers",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "let reject = |reason: &str| self.core.command_rejected(Some(id), \"tx_burst\", reason);",
+  "new": "let reject = |reason: &str| self.core.command_rejected(None, \"tx_burst\", reason);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_21_txburst_refusals"
+ },
+ {
+  "id": "J198",
+  "name": "RS-16 (spec 27 §3): the freeze records none of the Executors' queued ids in undelivered",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                    .chain(self.shared.executors.iter().map(|slot| &slot.queue))\n",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "rs_16_an_executor_action_the_freeze_discards_is_undelivered"
+ },
+ {
+  "id": "J199",
+  "name": "HD-10 (spec 27 §3): RunResult.capture returns any artifact under the output, not its own capture",
+  "file": "python/ezsdr/session.py",
+  "old": "            if artifact[\"id\"] == output:\n                return samples(",
+  "new": "            if True:\n                return samples(",
+  "python": "test_easy_api.ChildCapture.test_run_result_capture_is_the_output_s_own_capture"
  }
 ]

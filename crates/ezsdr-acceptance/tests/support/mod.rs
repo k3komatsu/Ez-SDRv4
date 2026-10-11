@@ -62,8 +62,9 @@ pub fn output(name: &str) -> Target {
     Target::Output { output: ezsdr_kernel::spec::Ident::parse(name).unwrap() }
 }
 
-pub fn artifact<'a>(manifest: &'a Manifest, id: &str) -> &'a ezsdr_kernel::manifest::ArtifactRef {
-    manifest.artifacts.iter().find(|artifact| artifact.id.as_str() == id).expect("artifact exists")
+/// The `n`-th artifact the Sink of `output` returned (RS-38).
+pub fn artifact<'a>(manifest: &'a Manifest, output: &str, n: usize) -> &'a ezsdr_kernel::manifest::ArtifactRef {
+    manifest.artifacts.iter().find(|(o, _)| o.as_str() == output).and_then(|(_, list)| list.get(n)).expect("artifact exists")
 }
 
 pub fn modules(manifest: &Manifest) -> Vec<&str> {

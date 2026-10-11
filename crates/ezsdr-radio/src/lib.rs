@@ -800,8 +800,12 @@ pub mod payloads {
     #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct CommandRejectedPayload {
+        /// The id of the Action refused, when the Provider refuses it as it takes it
+        /// from its queue; absent when it refuses later what it booked (RM-22, MA-14).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub action: Option<ezsdr_kernel::event::ActionId>,
         /// The Action's kind tag (RM-22).
-        pub action: String,
+        pub kind: String,
         /// Why the Provider refused the Action (RM-22).
         pub reason: String,
     }

@@ -281,12 +281,12 @@ fn one_provider<'a>(name: &str, p: &'a dyn Provider) -> BTreeMap<Ident, &'a dyn 
 /// `collect_prepare` with the documents and inputs it now takes, for a test that
 /// only cares about the reports (SB-41).
 fn prepared(
-    reports: Vec<Result<PrepareReport, ezsdr_kernel::module_api::ModuleError>>,
+    reports: Vec<(Ident, Result<PrepareReport, ezsdr_kernel::module_api::ModuleError>)>,
     fx: &Fixture<'_>,
     spec: &ExperimentSpec,
     profile: &ezsdr_kernel::binding::BindingProfile,
     providers: &BTreeMap<Ident, &dyn Provider>,
-) -> Result<Vec<PrepareReport>, ezsdr_kernel::plan::PrepareError> {
+) -> Result<BTreeMap<Ident, PrepareReport>, ezsdr_kernel::plan::PrepareError> {
     // The caller's own Spec, and the admission `validate` produced for it. Hard-coding
     // `minimal_spec()` here meant every caller had MA-12 and the Spec's constraints
     // checked against a Spec it had not written, which is how a P0 on the crate's
@@ -992,7 +992,6 @@ fn sb_39_the_guard_covers_every_matched_entry() {
     )
     .expect("this Run's");
     let report = || PrepareReport {
-        fragment: id("peripheral"),
         effective: BTreeMap::new(),
         coercions: Vec::new(),
         warnings: Vec::new(),
@@ -1046,7 +1045,7 @@ fn sb_39_the_guard_covers_every_matched_entry() {
             "{reason}"
         );
         let err = collect_prepare(
-            vec![Ok(report())],
+            vec![(id("peripheral"), Ok(report()))],
             &spec,
             &profile,
             &fx.inputs(&providers),
@@ -1062,22 +1061,21 @@ fn sb_39_the_guard_covers_every_matched_entry() {
 
 #[test]
 fn sb_41_a_resource_with_no_report_is_refused() {
-    // One report per fragment (SB-41). A resource with none — not prepared, or its
-    // report under another fragment's name — had every per-resource check of
-    // `collect_prepare` skipped in silence (D105).
+    // One report per fragment (SB-41). A resource with none — not prepared, or a report
+    // for another fragment only — had every per-resource check of `collect_prepare`
+    // skipped in silence (D105).
     let spec = minimal_spec();
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("admitted");
-    let report = |fragment: &str| PrepareReport {
-        fragment: id(fragment),
+    let report = || PrepareReport {
         effective: BTreeMap::new(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
-    for reports in [vec![], vec![Ok(report("other"))]] {
+    for reports in [vec![], vec![(id("other"), Ok(report()))]] {
         let err = collect_prepare(reports, &spec, &profile, &fx.inputs(&providers), &admission)
             .expect_err("refused");
         let ezsdr_kernel::plan::PrepareError::Violations(v) = err else {
@@ -1090,7 +1088,7 @@ fn sb_41_a_resource_with_no_report_is_refused() {
         );
     }
     collect_prepare(
-        vec![Ok(report("radio"))],
+        vec![(id("radio"), Ok(report()))],
         &spec,
         &profile,
         &fx.inputs(&providers),
@@ -1100,29 +1098,7 @@ fn sb_41_a_resource_with_no_report_is_refused() {
 }
 
 #[test]
-fn sb_41_duplicate_prepare_reports_are_refused() {
-    let spec = minimal_spec();
-    let profile = profile_binding(&["radio"]);
-    let fx = Fixture::new();
-    let p = TestProvider::new("radio", 2);
-    let providers = one_provider("radio", &p);
-    let admission = validate(&spec, &profile, &fx.inputs(&providers)).unwrap();
-    let report = |count| Ok(PrepareReport {
-        fragment: id("radio"),
-        effective: [(key("test.count"), Value::from(count))].into_iter().collect(),
-        coercions: Vec::new(),
-        warnings: Vec::new(),
-    });
-    for (first, last) in [(2, 99), (99, 2), (2, 2)] {
-        let err = collect_prepare(vec![report(first), report(last)], &spec, &profile,
-            &fx.inputs(&providers), &admission).expect_err("duplicate fragment report");
-        assert!(matches!(err, ezsdr_kernel::plan::PrepareError::Violations(v)
-            if v.iter().any(|x| x.reason == "SB-41: duplicate PrepareReport for fragment radio")));
-    }
-}
-
-#[test]
-fn sb_41_sink_reports_are_required_and_unknown_reports_are_refused() {
+fn sb_41_sink_reports_are_required() {
     let mut spec = minimal_spec();
     spec.outputs.push(output("rec"));
     let mut profile = profile_binding(&["radio"]);
@@ -1133,20 +1109,14 @@ fn sb_41_sink_reports_are_required_and_unknown_reports_are_refused() {
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).unwrap();
-    let report = |name: &str| Ok(PrepareReport {
-        fragment: id(name), effective: BTreeMap::new(),
+    let report = |name: &str| (id(name), Ok(PrepareReport {
+        effective: BTreeMap::new(),
         coercions: Vec::new(), warnings: Vec::new(),
-    });
-    for (reports, reason) in [
-        (vec![report("radio")], "SB-41: no PrepareReport for fragment rec"),
-        (vec![report("radio"), report("rec"), report("other")],
-            "SB-41: unexpected PrepareReport for fragment other"),
-    ] {
-        let err = collect_prepare(reports, &spec, &profile, &fx.inputs(&providers), &admission)
-            .expect_err("exactly one report per lifecycle fragment");
-        assert!(matches!(err, ezsdr_kernel::plan::PrepareError::Violations(v)
-            if v.iter().any(|x| x.reason == reason)));
-    }
+    }));
+    let err = collect_prepare(vec![report("radio")], &spec, &profile, &fx.inputs(&providers), &admission)
+        .expect_err("one report per lifecycle fragment");
+    assert!(matches!(err, ezsdr_kernel::plan::PrepareError::Violations(v)
+        if v.iter().any(|x| x.reason == "SB-41: no PrepareReport for fragment rec")));
     collect_prepare(vec![report("radio"), report("rec")], &spec, &profile,
         &fx.inputs(&providers), &admission).expect("complete reports are accepted");
 }
@@ -1355,7 +1325,6 @@ fn sb_30_admission_check_runs_at_three_points() {
         "the requested value is inside the ceiling"
     );
     let report = PrepareReport {
-        fragment: id("radio"),
         effective: [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect(),
         coercions: vec![ezsdr_kernel::spec::Coercion {
             key: key("test.grid"),
@@ -1366,7 +1335,7 @@ fn sb_30_admission_check_runs_at_three_points() {
         warnings: Vec::new(),
     };
     let err = collect_prepare(
-        vec![Ok(report)],
+        vec![(id("radio"), Ok(report))],
         &spec,
         &tight,
         &fx.inputs(&providers),
@@ -1650,10 +1619,10 @@ fn sb_40_the_plan_carries_no_transfer_costs() {
 
 #[test]
 fn sb_41_prepare_reports_one_per_fragment() {
-    // SB-41 (spec 20, KH-1): the reports are `prepare`'s one result, listed in the
-    // order they were handed in, which the coordinator makes plan order. Handed in as
-    // c, a, b — not Ident order — they come back so, and the three values of the one
-    // key all three name are all kept: no merged map exists to lose two of them.
+    // SB-41 (spec 20, KH-1; spec 27 §3): the reports are `prepare`'s one result, each
+    // filed under the fragment it was handed in with. Handed in as c, a, b, each comes
+    // back under its own fragment, and the three values of the one key all three name
+    // are all kept: no merged map exists to lose two of them.
     let names = ["a", "b", "c"];
     let spec = spec_with(
         names
@@ -1672,28 +1641,26 @@ fn sb_41_prepare_reports_one_per_fragment() {
         .zip(&devices)
         .map(|(n, p)| (id(n), p as &dyn Provider))
         .collect();
-    let report = |name: &str, count: i64| PrepareReport {
-        fragment: id(name),
+    let report = |count: i64| PrepareReport {
         effective: [(key("test.count"), Value::from(count))].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
-    let handed = vec![report("c", 3), report("a", 1), report("b", 2)];
+    let handed = vec![(id("c"), report(3)), (id("a"), report(1)), (id("b"), report(2))];
     let reports = prepared(
-        handed.iter().cloned().map(Ok).collect(),
+        handed.iter().cloned().map(|(f, r)| (f, Ok(r))).collect(),
         &Fixture::new(),
         &spec,
         &profile,
         &providers,
     )
     .expect("one report per fragment");
-    assert_eq!(reports, handed);
+    assert_eq!(reports, handed.into_iter().collect::<BTreeMap<_, _>>());
 }
 
 #[test]
 fn sb_42_fragment_failure_fails_the_transaction() {
-    let ok = |name: &str| PrepareReport {
-        fragment: id(name),
+    let ok = || PrepareReport {
         effective: BTreeMap::new(),
         coercions: Vec::new(),
         warnings: Vec::new(),
@@ -1702,7 +1669,7 @@ fn sb_42_fragment_failure_fails_the_transaction() {
     let provider = TestProvider::new("c", 2).failing_at(FailAt::Prepare);
     assert_eq!(provider.fail_at, FailAt::Prepare);
     let err = ezsdr_kernel::module_api::ModuleError::rejected("injected failure at Prepare");
-    let reports = vec![Ok(ok("a")), Ok(ok("b")), Err(err)];
+    let reports = vec![(id("a"), Ok(ok())), (id("b"), Ok(ok())), (id("c"), Err(err))];
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
@@ -1718,9 +1685,9 @@ fn sb_42_fragment_failure_fails_the_transaction() {
     assert!(
         matches!(
             failed,
-            ezsdr_kernel::plan::PrepareError::Fragment { index: 2, .. }
+            ezsdr_kernel::plan::PrepareError::Fragment { ref fragment, .. } if *fragment == id("c")
         ),
-        "the third fragment failed, and its failure is what fails the transaction: {failed:?}"
+        "the third fragment failed, and the error names it: {failed:?}"
     );
     // Cleanup then releases in reverse dependency order (RS-8).
     let order = arm_order(
@@ -2992,7 +2959,6 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
         spec
     };
     let coerced = |requested: f64, applied: f64| PrepareReport {
-        fragment: id("radio"),
         effective: [(key("test.grid"), Value::num(applied).unwrap())]
             .into_iter()
             .collect(),
@@ -3007,7 +2973,7 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
     let spec = spec_for(19.5);
     assert!(
         prepared(
-            vec![Ok(coerced(19.5, 20.0))],
+            vec![(id("radio"), Ok(coerced(19.5, 20.0)))],
             &fx,
             &spec,
             &profile,
@@ -3017,7 +2983,7 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
     );
     let spec = spec_for(30.0);
     let failed = prepared(
-        vec![Ok(coerced(30.0, 40.0))],
+        vec![(id("radio"), Ok(coerced(30.0, 40.0)))],
         &fx,
         &spec,
         &profile,
@@ -3029,7 +2995,6 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
     // SB-46 names "the stage", not "the validate stage": a coercion on a `reject`
     // key reported by `prepare` is refused here too.
     let coercing = PrepareReport {
-        fragment: id("radio"),
         effective: BTreeMap::new(),
         coercions: vec![ezsdr_kernel::spec::Coercion {
             key: key("test.grid"),
@@ -3063,7 +3028,7 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
             },
         );
     let failed = prepared(
-        vec![Ok(coercing.clone())],
+        vec![(id("radio"), Ok(coercing.clone()))],
         &fx,
         &defaulted,
         &bare,
@@ -3082,7 +3047,7 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
     let mut as_session = Fixture::new();
     as_session.is_session = true;
     let reports = prepared(
-        vec![Ok(coercing)],
+        vec![(id("radio"), Ok(coercing))],
         &as_session,
         &defaulted,
         &bare,
@@ -3090,12 +3055,12 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
     )
     .expect("a Session warns rather than refusing");
     assert_eq!(
-        reports[0].warnings.len(),
+        reports[&id("radio")].warnings.len(),
         1,
         "SB-46's warning is on the report"
     );
     assert_eq!(
-        reports[0].coercions.len(),
+        reports[&id("radio")].coercions.len(),
         1,
         "and the coercion is still recorded"
     );
@@ -3461,13 +3426,12 @@ fn ma_12_a_widening_effective_is_refused_at_prepare() {
 
     // The node declares `test.count` as exactly 2; a report claiming 7 widens it.
     let widened = PrepareReport {
-        fragment: id("radio"),
         effective: [(key("test.count"), Value::from(7))].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
     let failed = collect_prepare(
-        vec![Ok(widened)],
+        vec![(id("radio"), Ok(widened))],
         &spec,
         &profile,
         &fx.inputs(&providers),
@@ -3489,7 +3453,6 @@ fn ma_12_a_widening_effective_is_refused_at_prepare() {
     // A list is no capability value at all: both halves refuse it, rather than reading
     // its element (spec 26 §3).
     let listed = PrepareReport {
-        fragment: id("radio"),
         effective: [(key("test.count"), Value::List(vec![Scalar::from(2)]))]
             .into_iter()
             .collect(),
@@ -3497,7 +3460,7 @@ fn ma_12_a_widening_effective_is_refused_at_prepare() {
         warnings: Vec::new(),
     };
     let failed = collect_prepare(
-        vec![Ok(listed)],
+        vec![(id("radio"), Ok(listed))],
         &spec,
         &profile,
         &fx.inputs(&providers),
@@ -3512,14 +3475,13 @@ fn ma_12_a_widening_effective_is_refused_at_prepare() {
 
     // The declared value itself passes both.
     let exact = PrepareReport {
-        fragment: id("radio"),
         effective: [(key("test.count"), Value::from(2))].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
     assert!(
         collect_prepare(
-            vec![Ok(exact)],
+            vec![(id("radio"), Ok(exact))],
             &spec,
             &profile,
             &fx.inputs(&providers),
@@ -3563,15 +3525,14 @@ fn ma_12_two_resources_naming_one_key_do_not_refuse_each_other() {
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
     assert!(admission.is_admitted());
 
-    let report = |name: &str, n: i64| PrepareReport {
-        fragment: id(name),
+    let report = |n: i64| PrepareReport {
         effective: [(key("test.count"), Value::from(n))].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
     // Each report states exactly what its own node declares.
     let reports = collect_prepare(
-        vec![Ok(report("a", 2)), Ok(report("b", 4))],
+        vec![(id("a"), Ok(report(2))), (id("b"), Ok(report(4)))],
         &spec,
         &profile,
         &fx.inputs(&providers),
@@ -3581,13 +3542,13 @@ fn ma_12_two_resources_naming_one_key_do_not_refuse_each_other() {
     // Both values of the one key are kept, each in its own fragment's report.
     let counts: Vec<_> = reports
         .iter()
-        .map(|r| (r.fragment.clone(), r.effective[&key("test.count")].clone()))
+        .map(|(f, r)| (f.clone(), r.effective[&key("test.count")].clone()))
         .collect();
     assert_eq!(counts, [(id("a"), Value::from(2)), (id("b"), Value::from(4))]);
 
     // A widening in one report is still refused, and named against that resource.
     let failed = collect_prepare(
-        vec![Ok(report("a", 9)), Ok(report("b", 4))],
+        vec![(id("a"), Ok(report(9))), (id("b"), Ok(report(4)))],
         &spec,
         &profile,
         &fx.inputs(&providers),
@@ -3719,7 +3680,6 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
 
     // The Provider replays `coerce`, which SB-44 and MA-12 oblige it to do.
     let report = PrepareReport {
-        fragment: id("radio"),
         effective: [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect(),
         coercions: vec![ezsdr_kernel::spec::Coercion {
             key: key("test.grid"),
@@ -3730,16 +3690,16 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
         warnings: Vec::new(),
     };
     let reports = collect_prepare(
-        vec![Ok(report)],
+        vec![(id("radio"), Ok(report))],
         &spec,
         &profile,
         &fx.inputs(&providers),
         &admission,
     )
     .expect("an accepted coercion is applied and recorded, not refused");
-    assert_eq!(reports[0].effective[&key("test.grid")], Value::num(20.0).unwrap());
+    assert_eq!(reports[&id("radio")].effective[&key("test.grid")], Value::num(20.0).unwrap());
     assert_eq!(
-        reports[0].coercions.len(),
+        reports[&id("radio")].coercions.len(),
         1,
         "and it is in the PrepareReport"
     );
@@ -3748,7 +3708,6 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
     // the report declares a coercion — the exclusion is keyed on the Kernel's own
     // preview, so naming a key in `coercions` is not a self-issued exemption.
     let disagreeing = PrepareReport {
-        fragment: id("radio"),
         effective: [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect(),
         coercions: vec![ezsdr_kernel::spec::Coercion {
             key: key("test.grid"),
@@ -3759,7 +3718,7 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
         warnings: Vec::new(),
     };
     let failed = collect_prepare(
-        vec![Ok(disagreeing)],
+        vec![(id("radio"), Ok(disagreeing))],
         &spec,
         &profile,
         &fx.inputs(&providers),
@@ -3788,13 +3747,12 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
         "satisfied directly (SB-6)"
     );
     let undeclared = PrepareReport {
-        fragment: id("radio"),
         effective: [(key("test.count"), Value::from(9))].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
     let failed = collect_prepare(
-        vec![Ok(undeclared)],
+        vec![(id("radio"), Ok(undeclared))],
         &count_spec,
         &profile,
         &fx.inputs(&providers),
@@ -3896,7 +3854,6 @@ fn sb_44_a_provider_may_not_exempt_a_key_by_declaring_a_coercion() {
         "the Kernel's own record"
     );
     let lying = PrepareReport {
-        fragment: id("radio"),
         effective: [(key("test.grid"), Value::num(100.0).unwrap())]
             .into_iter()
             .collect(),
@@ -3909,7 +3866,7 @@ fn sb_44_a_provider_may_not_exempt_a_key_by_declaring_a_coercion() {
         warnings: Vec::new(),
     };
     let failed = collect_prepare(
-        vec![Ok(lying)],
+        vec![(id("radio"), Ok(lying))],
         &spec,
         &profile,
         &fx.inputs(&providers),
@@ -3941,7 +3898,6 @@ fn sb_44_a_provider_may_not_exempt_a_key_by_declaring_a_coercion() {
         "satisfied directly, so no coercion"
     );
     let invented = PrepareReport {
-        fragment: id("radio"),
         effective: [(key("test.grid"), Value::num(100.0).unwrap())]
             .into_iter()
             .collect(),
@@ -3954,7 +3910,7 @@ fn sb_44_a_provider_may_not_exempt_a_key_by_declaring_a_coercion() {
         warnings: Vec::new(),
     };
     let failed = collect_prepare(
-        vec![Ok(invented)],
+        vec![(id("radio"), Ok(invented))],
         &spec,
         &profile,
         &fx.inputs(&providers),
@@ -4442,8 +4398,7 @@ fn sb_44_a_coercion_is_charged_only_to_the_resource_it_was_computed_for() {
     );
 
     let reports = vec![
-        Ok(PrepareReport {
-            fragment: id("a"),
+        (id("a"), Ok(PrepareReport {
             effective: [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect(),
             coercions: vec![ezsdr_kernel::spec::Coercion {
                 key: key("test.grid"),
@@ -4452,13 +4407,12 @@ fn sb_44_a_coercion_is_charged_only_to_the_resource_it_was_computed_for() {
                 reason: "snapped to a multiple of 20".to_owned(),
             }],
             warnings: Vec::new(),
-        }),
-        Ok(PrepareReport {
-            fragment: id("b"),
+        })),
+        (id("b"), Ok(PrepareReport {
             effective: [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect(),
             coercions: Vec::new(),
             warnings: Vec::new(),
-        }),
+        })),
     ];
     let reports = collect_prepare(reports, &spec, &profile, &fx.inputs(&providers), &admission)
         .expect("`b` applied what it asked for and is not charged with `a`'s coercion");
@@ -4467,8 +4421,7 @@ fn sb_44_a_coercion_is_charged_only_to_the_resource_it_was_computed_for() {
     // The check is still live for the resource the preview *is* about: `a` applying
     // something other than the 20.0 `coerce` returned is SB-44's own refusal.
     let disagreeing = vec![
-        Ok(PrepareReport {
-            fragment: id("a"),
+        (id("a"), Ok(PrepareReport {
             effective: [(key("test.grid"), Value::num(100.0).unwrap())]
                 .into_iter()
                 .collect(),
@@ -4479,13 +4432,12 @@ fn sb_44_a_coercion_is_charged_only_to_the_resource_it_was_computed_for() {
                 reason: "claims 20 and applies 100".to_owned(),
             }],
             warnings: Vec::new(),
-        }),
-        Ok(PrepareReport {
-            fragment: id("b"),
+        })),
+        (id("b"), Ok(PrepareReport {
             effective: [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect(),
             coercions: Vec::new(),
             warnings: Vec::new(),
-        }),
+        })),
     ];
     let err = collect_prepare(
         disagreeing,
@@ -4831,7 +4783,6 @@ fn sb_30_prepare_refuses_an_admission_result_from_another_spec() {
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let report = || PrepareReport {
-        fragment: id("radio"),
         // A value the Spec never asked for and the node does not declare.
         effective: [(key("test.grid"), Value::num(999.0).unwrap())]
             .into_iter()
@@ -4841,7 +4792,7 @@ fn sb_30_prepare_refuses_an_admission_result_from_another_spec() {
     };
     let real = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
     collect_prepare(
-        vec![Ok(report())],
+        vec![(id("radio"), Ok(report()))],
         &spec,
         &profile,
         &fx.inputs(&providers),
@@ -4855,7 +4806,7 @@ fn sb_30_prepare_refuses_an_admission_result_from_another_spec() {
         "an empty result is `admitted`, which is the hole"
     );
     let err = collect_prepare(
-        vec![Ok(report())],
+        vec![(id("radio"), Ok(report()))],
         &spec,
         &profile,
         &fx.inputs(&providers),
@@ -6363,13 +6314,12 @@ fn sb_39_plan_reruns_the_structural_checks_and_refuses_a_stale_admission() {
     // `collect_prepare` applies the same guard, rather than skipping MA-12 and SB-44 for
     // a node it cannot find.
     let report = PrepareReport {
-        fragment: id("radio"),
         effective: BTreeMap::new(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
     let err = collect_prepare(
-        vec![Ok(report)],
+        vec![(id("radio"), Ok(report))],
         &spec,
         &clean,
         &fx.inputs(&moved),
@@ -6485,8 +6435,7 @@ fn sb_30_the_check_sees_each_fragment_s_own_value() {
     );
     let admission = validate(&admitted_spec, &profile, &fx.inputs(&providers)).expect("runs");
     assert!(admission.is_admitted(), "{admission:?}");
-    let report = |f: &str, v: f64| PrepareReport {
-        fragment: id(f),
+    let report = |v: f64| PrepareReport {
         effective: [(key("test.grid"), Value::num(v).unwrap())].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
@@ -6494,7 +6443,7 @@ fn sb_30_the_check_sees_each_fragment_s_own_value() {
     // The reports disagree with the requests on purpose: the check must judge what
     // each fragment applied, so the coercion check is the only other refusal.
     let err = collect_prepare(
-        vec![Ok(report("a", 40.0)), Ok(report("b", 20.0))],
+        vec![(id("a"), Ok(report(40.0))), (id("b"), Ok(report(20.0)))],
         &admitted_spec,
         &profile,
         &fx.inputs(&providers),

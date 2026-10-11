@@ -470,7 +470,6 @@ fn ma_12_prepare_matches_coerce() {
     // agree, so the report's coercions ARE what `coerce` returned.
     assert_eq!(report.coercions, from_coerce.coercions);
     assert_eq!(report.effective, from_coerce.applied);
-    assert_eq!(report.fragment, id("radio"));
 }
 
 #[test]

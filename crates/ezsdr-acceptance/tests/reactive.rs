@@ -122,7 +122,7 @@ fn ping_pong(temp: &rig::TempDir, ping: Ping<'_>) -> (Manifest, Vec<(f32, f32)>)
         }
         None => finish_at(run, clock, T0 + 25_000_000),
     };
-    let capture = rig::read_capture(artifact(&manifest, "rec"), 1).remove(0);
+    let capture = rig::read_capture(artifact(&manifest, "rec", 0), 1).remove(0);
     (manifest, capture)
 }
 
@@ -372,7 +372,7 @@ fn v58_09_a_reactor_runs_in_a_child_run_of_a_session() {
     // The same decision as `v58_09_a_reactor_answers_a_ping_with_a_timed_pong`'s.
     let answered = bursts(&child, "dev_b");
     assert_eq!(answered.iter().map(decision).collect::<Vec<_>>(), vec![(TX_AT_T0 + 15_046, None, None, 500, 1)]);
-    let capture = rig::read_capture(artifact(&child, "rec"), 1).remove(0);
+    let capture = rig::read_capture(artifact(&child, "rec", 0), 1).remove(0);
     assert_eq!(heard(&capture), Some(15_092));
     let Response::Finished { manifest, .. } = result(server.handle(Request::Finish {}, Vec::new())) else { panic!() };
     assert_eq!(manifest.run.children.len(), 1);

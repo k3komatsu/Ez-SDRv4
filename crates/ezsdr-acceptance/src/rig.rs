@@ -237,8 +237,9 @@ pub fn determinism_projection(manifest: &Manifest) -> JsonValue {
     let mut value = serde_json::to_value(manifest).expect("Manifest serializes");
     if let Some(object) = value.as_object_mut() { object.remove("hash"); }
     if let Some(run) = value.get_mut("run").and_then(JsonValue::as_object_mut) { run.remove("id"); }
-    if let Some(artifacts) = value.get_mut("artifacts").and_then(JsonValue::as_array_mut) {
-        for artifact in artifacts {
+    // `artifacts` is `{output: [ArtifactRef]}` (RS-38).
+    if let Some(outputs) = value.get_mut("artifacts").and_then(JsonValue::as_object_mut) {
+        for artifact in outputs.values_mut().filter_map(JsonValue::as_array_mut).flatten() {
             if let Some(object) = artifact.as_object_mut() { object.remove("uri"); }
         }
     }

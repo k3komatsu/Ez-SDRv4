@@ -72,12 +72,11 @@ pub struct ExecutionPlan {
     pub class: ExecutionClass,
 }
 
-/// What one fragment's `prepare` returned (SB-41, MA-12).
+/// What one fragment's `prepare` returned (SB-41, MA-12). It names no fragment: the
+/// Kernel files it under the fragment it invoked (SB-41).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareReport {
-    /// Which fragment (SB-41).
-    pub fragment: Ident,
     /// The applied configuration. `effective` may narrow a declared capability and
     /// must not widen one (MA-12).
     #[serde(default)]
@@ -333,8 +332,8 @@ pub fn plan(
 pub enum PrepareError {
     /// A fragment failed, which fails the whole transaction (SB-42).
     Fragment {
-        /// Its index in dependency order.
-        index: usize,
+        /// Which fragment (SB-42).
+        fragment: Ident,
         /// What the Module said (MA-9).
         error: ModuleError,
     },
@@ -345,10 +344,10 @@ pub enum PrepareError {
 }
 
 /// `prepare(plan, ctx)` calls each fragment in plan order and collects one
-/// `PrepareReport` per fragment; this returns them in the order received, which is
-/// that order, and builds no merged configuration from them. It runs every registered
-/// admission check against the per-fragment configuration
-/// `{ report.fragment: report.effective }` — SB-30's second point, which exists
+/// `PrepareReport` per fragment, paired with the fragment it invoked; this returns them
+/// keyed by that fragment, and builds no merged configuration from them. It runs every
+/// registered admission check against the per-fragment configuration
+/// `{ fragment: report.effective }` — SB-30's second point, which exists
 /// because a coercion can move an applied value outside a limit the requested value
 /// respected. Any fragment's failure fails the whole transaction, and the Run moves
 /// to cleanup.
@@ -358,11 +357,11 @@ pub enum PrepareError {
 ///
 /// Rule: SB-30, SB-41, SB-42 (spec 20, KH-1).
 pub fn collect_prepare(
-    reports: Vec<Result<PrepareReport, ModuleError>>,
+    reports: Vec<(Ident, Result<PrepareReport, ModuleError>)>,
     spec: &ExperimentSpec,
     profile: &BindingProfile,
     inputs: &CompileInputs<'_>,
     admission: &AdmissionResult,
-) -> Result<Vec<PrepareReport>, PrepareError> {
+) -> Result<BTreeMap<Ident, PrepareReport>, PrepareError> {
     prepare::collect_prepare(reports, spec, profile, inputs, admission)
 }

@@ -249,6 +249,7 @@ event::Target = Action set
 event::ActionId = NEW: RS-15 records which Kernel Actions an entry dispatched.
 event::ActionTemplate = NEW: RS-49a's Action without its time field, because a Spec cannot name a ClockDomainId.
 module_api::ActionReceiver = NEW: MA-14's inbound handle; MA-46 fixes it so a Plugin host needs no Kernel change.
+module_api::Dispatched = NEW: MA-14: what `recv` hands a Module, carrying the ActionId an answering event names (spec 27 §3).
 module_api::ActionSubmitter = NEW: MA-14a's outbound handle, without which a Reactor has no way to emit an Action.
 
 # --- manifest (audit §13 `spec/binding`) -------------------------------------

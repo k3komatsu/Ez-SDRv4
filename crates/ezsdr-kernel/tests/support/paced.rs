@@ -9,7 +9,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use ezsdr_kernel::event::{Action, Event, EventKind, EventSink, EventSource, Severity};
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::module_api::{
-    ActionReceiver, Authority, AuthorityDescriptor, CoerceReport, Endpoint, ModuleError,
+    ActionReceiver, Dispatched, Authority, AuthorityDescriptor, CoerceReport, Endpoint, ModuleError,
     ModuleRef, Pacing, PrepareContext, Provider, ProviderInstance, StopMode,
 };
 use ezsdr_kernel::plan::{Fragment, PrepareReport};
@@ -376,6 +376,7 @@ pub struct ThreadedProvider {
     arm_delay: Option<std::time::Duration>,
     stop_tail: u32,
     never_finishing: bool,
+    deaf: bool,
     drain_after_stop: Option<std::time::Duration>,
     ctx: Option<Arc<ThreadedCtx>>,
     rx_clock: Option<SampleClockHandle>,
@@ -399,6 +400,7 @@ impl ThreadedProvider {
             arm_delay: None,
             stop_tail: 0,
             never_finishing: false,
+            deaf: false,
             drain_after_stop: None,
             ctx: None,
             rx_clock: None,
@@ -458,6 +460,13 @@ impl ThreadedProvider {
     /// Stops calling `recv()` after it has taken one Action.
     pub fn never_finishing(mut self) -> Self {
         self.never_finishing = true;
+        self
+    }
+
+    /// Never calls `recv()` while it runs.
+    pub fn deaf(mut self) -> Self {
+        self.never_finishing = true;
+        self.deaf = true;
         self
     }
 
@@ -559,15 +568,16 @@ impl Provider for ThreadedProvider {
         let lost_after = self.lost_after;
         let loss = self.loss.clone();
         let next = self.next_index.clone();
+        let deaf = self.deaf;
         let worker = std::thread::spawn(move || {
             let begun = std::time::Instant::now();
             let mut next_publish = publish.map(|((_, period), _)| begun + period);
             let mut marked = vec![false; marks.len()];
             let mut lost = false;
-            let mut took_one = false;
+            let mut took_one = deaf;
             while !flag.load(Ordering::Acquire) {
                 if !(ctx.never_finishing && took_one) {
-                    while let Some((action, _)) = ctx.actions.recv() {
+                    while let Some(Dispatched { action, .. }) = ctx.actions.recv() {
                         ctx.handle(action);
                         took_one = true;
                         if ctx.never_finishing {
@@ -619,7 +629,7 @@ impl Provider for ThreadedProvider {
         if let Some(d) = self.drain_after_stop {
             let until = std::time::Instant::now() + d;
             while std::time::Instant::now() < until {
-                while let Some((action, _)) = ctx.actions.recv() {
+                while let Some(Dispatched { action, .. }) = ctx.actions.recv() {
                     ctx.handle(action);
                 }
                 // A spin, not a sleep: a push after the freeze is cleared again by the

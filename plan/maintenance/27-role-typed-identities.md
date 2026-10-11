@@ -2,10 +2,10 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** by the owner on 2026-10-09, with judgments 1–4 below. Written by the orchestrator (Claude Opus) on 2026-10-09. It implements the owner's decision on audit item 2 ([24-prefreeze-audit.md](24-prefreeze-audit.md), Owner decisions, "item 2"; findings F13, F14, F15, F16, F17 (#54), F18, F24, F25 f, F39's source half) and opens with the design note AGENTS.md §6 asks for. Stage 2a implemented on 2026-10-10 (`recv` returns `(Action, Option<ResourceId>)` until 2b's `Dispatched`; `PrepareReport.fragment`'s `island_<n>` label goes with 2b). Item 3 builds on the typed targets. |
+| Status | **Accepted** by the owner on 2026-10-09, with judgments 1–4 below. Written by the orchestrator (Claude Opus) on 2026-10-09. It implements the owner's decision on audit item 2 ([24-prefreeze-audit.md](24-prefreeze-audit.md), Owner decisions, "item 2"; findings F13, F14, F15, F16, F17 (#54), F18, F24, F25 f, F39's source half) and opens with the design note AGENTS.md §6 asks for. Stage 2a implemented on 2026-10-10 (`recv` returns `(Action, Option<ResourceId>)` until 2b's `Dispatched`; `PrepareReport.fragment`'s `island_<n>` label goes with 2b). Stage 2b implemented on 2026-10-11 (its record closes §3). Item 3 builds on the typed targets. |
 | Mechanisms | **`string-composed-identity`**, four bugs: #1, #15, #16, #26. **`correlation-by-partial-key`**, four bugs: #12, #17, #30, #31. See [failure-mechanisms.md](failure-mechanisms.md). |
 | Stages | **2a** addresses (one per mechanism), then **2b** correlation. Each stage goes through implementation, independent review, the mutation gate and a commit, and leaves the tree green. |
-| Owner decisions | 2026-10-09, judgment 1 ("判断1はOKです"): a Provider receives the resolved node path as `Dispatched.node` beside the authored target (§2, What a Module receives). Judgment 2 ("判断2もOKです"): a Module's Abort is admitted and logged with a real ActionId (§3). Judgment 3 ("これも判断として妥当です"): a string target is always a resource; other roles through `Target.output(...)` and `Target.component(...)` (§2, Python), the class name chosen because `output` alone is too generic (owner's concern); a `/` operator was considered and rejected, since an output or a component has no sub-path. Judgment 4 ("これも推奨を採用します"): the check that a Module's event source lies within its root goes to item 3 (§5). |
+| Owner decisions | 2026-10-09, judgment 1 ("判断1はOKです"): a Provider receives the resolved node path as `Dispatched.node` beside the authored target (§2, What a Module receives). Judgment 2 ("判断2もOKです"): a Module's Abort is admitted and logged with a real ActionId (§3). Revised by the owner 2026-10-11 ("推奨でOKです"): the Abort is not admitted, because `check_running` would refuse it in cleanup and break KC-32's escalation, and not logged, because the action log records Session Actions only; it takes a real id that `submit` returns, and no Manifest field records it (§3). Judgment 3 ("これも判断として妥当です"): a string target is always a resource; other roles through `Target.output(...)` and `Target.component(...)` (§2, Python), the class name chosen because `output` alone is too generic (owner's concern); a `/` operator was considered and rejected, since an output or a component has no sub-path. Judgment 4 ("これも推奨を採用します"): the check that a Module's event source lies within its root goes to item 3 (§5). |
 | Added 2026-10-10 | From the forward audit ([28-forward-audit.md](28-forward-audit.md)), owner-accepted: **into 2a**, decision 2 (`Manifest.sections` as a list of `{source, name, content}` with `source` the writing instance's source root, deleting the Modules' `{id}` in section names) and decision 5 (`#[non_exhaustive]` on `PrepareContext`, `Assembly` and `AttachedPort`, with a `testing` constructor and `Assembly::new`); **into 2b**, `Dispatched` is `#[non_exhaustive]` from the start. |
 | Versions | None are bumped and no SCHEMA_CHANGELOG entry is written (AGENTS.md §6). Both stages regenerate schemas. |
 
@@ -118,7 +118,11 @@ The same habit appears in two more places:
 - `collect_prepare` takes `(fragment, Result)` pairs, so an error names its fragment.
 - Deleted: the duplicate, unexpected and label checks, and `report_fragments`.
 
-**`submit(Abort)` gets a real id.** A Module's Abort is logged with a real ActionId like every other Action (RS-15). The `ActionId(0)` sentinel is deleted.
+**`submit(Abort)` gets a real id.** A Module's Abort takes the next id from the Run's counter, which `submit` returns, so no other Action shares it (KC-24). The `ActionId(0)` sentinel is deleted. Nothing else records the id (owner's revised judgment 2, 2026-10-11), and the Abort is neither admitted nor logged, for two reasons:
+- Admission includes `check_running` (KC-24 step 2), so an Abort sent through admission would be refused in prepare and cleanup, where KC-32 needs it to escalate the end.
+- The action log records Session Actions only (RS-15); no Module Action is in it, and a Spec Run has none.
+
+A stage 2b draft recorded the id in a new `termination.aborts`; it was deleted with its row J192.
 
 **Spec text and schemas.**
 - design/05: MA-6, MA-14, MA-14a, MA-46.
@@ -132,7 +136,7 @@ The same habit appears in two more places:
 - two clients capture on one recorder, and each receives its own `CAPTURE_WRITTEN`;
 - a Reactor's capture does not shift the client's;
 - the F24 window records `undelivered`;
-- a Module's Abort appears in the log with its id;
+- a Module's Abort gets a real id no other Action shares;
 - a prepare error names its fragment;
 - artifacts are listed under the output that produced them.
 
@@ -140,6 +144,8 @@ The same habit appears in two more places:
 - the id carried into `Dispatched` and into an answering payload;
 - `Queue::clear`'s returned ids;
 - the output an artifact is filed under.
+
+**Stage 2b's record** (2026-10-11). New rows J181–J192 cover the id carried into `Dispatched` (J181) and into the answering payloads of the capture Sink (J182, J183), MockRadio (J184) and the UHD Provider (J185); the Python client's wait (J186); `Queue::clear`'s returned ids (J187); the output an artifact is filed under (J188); the keying of a PrepareReport (J189) and of a prepare error (J190); and the Abort id (J191; J192 pinned the deleted `termination.aborts`). After review round 1, J193 pins the ids of a Sink's discarded Actions and J194 pins the id of a device error at booking (UR-14). After round 2, J195 pins that a Module's Abort consumes its id, so an Action dispatched after it gets another, and J196 (MockRadio) and J197 (UHD) pin the id a burst refused at receipt carries. After the owner's revised judgment 2, J192 is deleted with `termination.aborts`, J198 pins that RS-6 step 1 records an Executor's discarded Actions in `undelivered`, and J199 pins that the Python `RunResult.capture` returns the output's own capture (HD-10), not the first artifact filed under the output. Eleven rows whose code moved are re-spelled, each still disabling its rule: H03 and J141, M42, D18 and D19, E16, G19 (phase 6), and U13, R07, B20 and B31. Nine rows are retired because what they mutate no longer exists. H01 and H02 sorted the reports, which are now a map whose plan order lives in the plan's `fragments`. G10 numbered the Sink's requests, and J176, P09, P15, P16, P17 and P20 were the client's counting. All six lists ran on sim02 and sim03 (4 shards each) at the end of the step. Every row was killed except the recorded equivalents J58, J156 and G03 (maintenance), and U15 and G09 (phase 7), which spec 22's step 2 already records as surviving at its HEAD.
 
 ## 4. Size and risk
 

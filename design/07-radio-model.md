@@ -127,7 +127,7 @@ envelope (capabilities of <device>; matchable, never read by the Kernel except m
   | `radio.TIME_ERROR` | `{ "cause": "late" \| "unclosed_burst", "outcome": "send_asap" \| "drop" \| "plan_violation" \| "refused" \| "late_at_device", "late_by_ns": int, "target": TimePoint }` |
   | `radio.LATE_COMMAND` | `{ "key": string \| null, "requested": TimePoint, "applied": TimePoint }` |
   | `radio.COMMAND_QUEUE_FULL` | `{ "key": string, "depth": int }` |
-  | `radio.COMMAND_REJECTED` | `{ "action": string, "reason": string }` (`action` is the Action's `kind` tag) |
+  | `radio.COMMAND_REJECTED` | `{ "action"?: ActionId, "kind": string, "reason": string }` (`kind` is the Action's `kind` tag; `action` is the id it was dispatched with (`Dispatched.id`, MA-14) when the Provider refuses it on receipt, and is absent when something it booked earlier is refused as it applies, when that id is no longer at hand) |
   | `radio.TX_UNDERFLOW` | `{ "cause": "starved" \| "lost" }`: `starved`, the device ran out of samples inside a burst because the host was late; `lost`, samples of a burst were lost between host and device |
   | `radio.ALIGNMENT_ERROR` | `{ "lost": int }`: the samples, on every channel of the stream, that the misalignment removed, which is the next block's time jump |
   | `radio.CLOCK_LOST` | `{ "reference": "frequency" }`: the frequency reference (10 MHz) was lost; no Phase 7 Provider monitors its time reference (PPS), so no other value is declared (Review J, P2-11) |
@@ -186,7 +186,7 @@ envelope (capabilities of <device>; matchable, never read by the Kernel except m
   pub enum   TimeErrorOutcome      { SendAsap, Drop, PlanViolation, Refused, LateAtDevice } // snake_case: late_at_device (Phase 7)
   pub struct LateCommandPayload    { pub key: Option<Key>, pub requested: TimePoint, pub applied: TimePoint }
   pub struct CommandQueueFullPayload { pub key: Key, pub depth: i64 }
-  pub struct CommandRejectedPayload  { pub action: String, pub reason: String }
+  pub struct CommandRejectedPayload  { pub action: Option<ActionId>, pub kind: String, pub reason: String } // action skipped when None
   // Phase 7, VE-3:
   pub struct TxUnderflowPayload    { pub cause: TxUnderflowCause }
   pub enum   TxUnderflowCause      { Starved, Lost }                                   // snake_case
@@ -316,3 +316,4 @@ A transmit port and link-fed transmission (Phase 10). Per-channel configuration.
 | 2026-10-09 | RM-25 | A stream halted by a refusal keeps the refused value as its configuration of record and has no channel for a `hardware_timed` update until it starts again (#64); only the UHD Module exercises the rule for now, since MockRadio cannot refuse yet (#59) | owner decision, 2026-10-09 |
 | 2026-10-10 | RM-25 | a receive segment whose device misses its timed start keeps its origin, its first block carrying `GAP_BEFORE` with `lost` its index (moved from TM-13b) | [audit item 6](../plan/maintenance/24-prefreeze-audit.md), owner decision 2026-10-09 |
 | 2026-10-10 | RM-12 | `CompileRule::PeripheralCommand` is `CompileRule::Command` (#55); no change of rule | [audit item 7](../plan/maintenance/24-prefreeze-audit.md), owner decision 2026-10-09 |
+| 2026-10-11 | RM-11, RM-22 | `radio.COMMAND_REJECTED` names the refused Action's id as `action` when it is refused on receipt, and its kind tag as `kind`; MockRadio and UHD alike | [spec 27](../plan/maintenance/27-role-typed-identities.md) §3 |

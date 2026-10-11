@@ -173,8 +173,8 @@
   "id": "D18",
   "name": "HD-15 the Dataset keeps the raw extension",
   "file": "crates/ezsdr-sink-capture/src/lib.rs",
-  "old": "        let file_name = format!(\"{safe_run}_{id}.sigmf-data\");",
-  "new": "        let file_name = format!(\"{safe_run}_{id}.cf32\");",
+  "old": "        let file_name = format!(\"{safe_run}_{stem}.sigmf-data\");",
+  "new": "        let file_name = format!(\"{safe_run}_{stem}.cf32\");",
   "crate": "ezsdr-sink-capture",
   "test_bin": "sink_capture",
   "filter": "hd_15_a_capture_is_a_sigmf_recording"
@@ -183,8 +183,8 @@
   "id": "D19",
   "name": "HD-15 the Dataset keeps the raw extension, end to end",
   "file": "crates/ezsdr-sink-capture/src/lib.rs",
-  "old": "        let file_name = format!(\"{safe_run}_{id}.sigmf-data\");",
-  "new": "        let file_name = format!(\"{safe_run}_{id}.cf32\");",
+  "old": "        let file_name = format!(\"{safe_run}_{stem}.sigmf-data\");",
+  "new": "        let file_name = format!(\"{safe_run}_{stem}.cf32\");",
   "crate": "ezsdr-acceptance",
   "test_bin": "v58",
   "filter": "v51_an_overflowed_capture_is_a_sigmf_recording"

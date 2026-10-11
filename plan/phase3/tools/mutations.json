@@ -413,7 +413,7 @@
   "id": "M42",
   "name": "MR-32 missing bytes accepted",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "            Some(None) => {\n                self.reject_action_at(\"tx_burst\", \"MR-32: the waveform's bytes are not an input of this Run\", now)?;\n                return Ok(());\n            }",
+  "old": "            Some(None) => {\n                self.reject_action_at(Some(id), \"tx_burst\", \"MR-32: the waveform's bytes are not an input of this Run\", now)?;\n                return Ok(());\n            }",
   "new": "            Some(None) => None,",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",

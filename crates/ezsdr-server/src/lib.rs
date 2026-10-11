@@ -331,7 +331,7 @@ impl Server {
         };
         let path = match &manifest {
             Some(manifest) => {
-                self.readable.extend(manifest.artifacts.iter().map(|artifact| artifact.uri.clone()));
+                self.readable.extend(manifest.artifacts.values().flatten().map(|artifact| artifact.uri.clone()));
                 // The child has run and the log holds it: a Manifest that cannot be written
                 // is still returned, with no path (EA-14, as EA-15).
                 self.write_manifest(&format!("child-{}.manifest.json", entry.seq), manifest).ok()

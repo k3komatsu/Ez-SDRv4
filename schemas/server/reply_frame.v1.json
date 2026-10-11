@@ -1638,12 +1638,15 @@
           "description": "What `validate()` matched, rejected and refused (SB-38)."
         },
         "artifacts": {
-          "default": [],
-          "description": "The artifacts it produced (RS-44).",
-          "items": {
-            "$ref": "#/$defs/ArtifactRef"
+          "additionalProperties": {
+            "items": {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            "type": "array"
           },
-          "type": "array"
+          "default": {},
+          "description": "The artifacts it produced, under the output whose Sink returned them (RS-38).",
+          "type": "object"
         },
         "binding": {
           "$ref": "#/$defs/BindingSection",
@@ -1738,9 +1741,9 @@
         "prepare": {
           "$ref": "#/$defs/PrepareSection",
           "default": {
-            "reports": []
+            "reports": {}
           },
-          "description": "The prepare reports, one per fragment, in plan order (SB-41)."
+          "description": "The prepare reports, one per fragment, under the fragment invoked (SB-41)."
         },
         "run": {
           "$ref": "#/$defs/RunSection",
@@ -1884,7 +1887,7 @@
       "oneOf": [
         {
           "additionalProperties": false,
-          "description": "It passed every check and was dispatched (RS-16).",
+          "description": "It passed every check and was dispatched (RS-16); one the end discarded before\nits Module received it is also in the termination's `undelivered`.",
           "properties": {
             "coercions": {
               "default": [],
@@ -1990,7 +1993,7 @@
     },
     "PrepareReport": {
       "additionalProperties": false,
-      "description": "What one fragment's `prepare` returned (SB-41, MA-12).",
+      "description": "What one fragment's `prepare` returned (SB-41, MA-12). It names no fragment: the\nKernel files it under the fragment it invoked (SB-41).",
       "properties": {
         "coercions": {
           "default": [],
@@ -2008,10 +2011,6 @@
           "description": "The applied configuration. `effective` may narrow a declared capability and\nmust not widen one (MA-12).",
           "type": "object"
         },
-        "fragment": {
-          "$ref": "#/$defs/Ident",
-          "description": "Which fragment (SB-41)."
-        },
         "warnings": {
           "default": [],
           "description": "Non-fatal notes (SB-41).",
@@ -2021,9 +2020,6 @@
           "type": "array"
         }
       },
-      "required": [
-        "fragment"
-      ],
       "type": "object"
     },
     "PrepareSection": {
@@ -2031,12 +2027,12 @@
       "description": "The `prepare` section (RS-38, SB-41).",
       "properties": {
         "reports": {
-          "default": [],
-          "description": "One report per fragment, in plan order (SB-41).",
-          "items": {
+          "additionalProperties": {
             "$ref": "#/$defs/PrepareReport"
           },
-          "type": "array"
+          "default": {},
+          "description": "One report per fragment, under the fragment the Kernel invoked (SB-41).",
+          "type": "object"
         }
       },
       "type": "object"
@@ -3498,6 +3494,14 @@
         "reason": {
           "$ref": "#/$defs/Termination",
           "description": "How it ended (RS-3)."
+        },
+        "undelivered": {
+          "default": [],
+          "description": "The Actions admitted and dispatched to a queue that RS-6 step 1 emptied before\ntheir Module took them, by id (RS-16).",
+          "items": {
+            "$ref": "#/$defs/ActionId"
+          },
+          "type": "array"
         }
       },
       "required": [

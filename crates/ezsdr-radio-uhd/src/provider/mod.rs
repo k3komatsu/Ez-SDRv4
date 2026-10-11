@@ -372,7 +372,7 @@ impl Provider for UhdRadio {
         }
         let [rx, tx] = handles;
         self.prepared = Some(Prepared { core, actions: ctx.actions, config: config.clone(), rx, tx, tx_clock: None });
-        Ok(PrepareReport { fragment: f.id.clone(), effective: config, coercions: report.coercions, warnings: Vec::new() })
+        Ok(PrepareReport { effective: config, coercions: report.coercions, warnings: Vec::new() })
     }
 
     fn arm(&mut self) -> Result<(), ModuleError> {

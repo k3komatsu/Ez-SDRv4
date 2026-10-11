@@ -65,7 +65,7 @@ fn v61_02_capture_starts_at_the_requested_sample_index() {
         .unwrap();
     assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
     let manifest = support::end_session(run, clock, T0 + 50_000_000);
-    let samples = rig::read_capture(artifact(&manifest, "rec_0"), 1);
+    let samples = rig::read_capture(artifact(&manifest, "rec", 0), 1);
     assert_eq!(samples[0][0].0, 12_345.0 / 65_536.0);
     assert_eq!(samples[0][99].0, 12_444.0 / 65_536.0);
 }
@@ -88,7 +88,7 @@ fn v61_03_timed_start_of_tx_and_capture() {
         serde_json::from_value(section(&manifest, "mock", "ezsdr.radio.mock.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1);
     assert_eq!(bursts[0].target.ticks_in(bursts[0].target.domain()).unwrap(), 2_005_000);
-    let capture = artifact(&manifest, "rec_0");
+    let capture = artifact(&manifest, "rec", 0);
     assert_eq!(capture.continuity[0].valid[0][0].start.ticks_in(capture.continuity[0].valid[0][0].start.domain()).unwrap(), 5_000);
 }
 

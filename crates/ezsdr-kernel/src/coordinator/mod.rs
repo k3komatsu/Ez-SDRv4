@@ -133,7 +133,7 @@ pub struct RunHandle {
     agenda: Vec<(i64, usize, crate::event::Action)>,
     t0: Option<TimePoint>,
     admission: crate::binding::AdmissionResult,
-    reports: Option<Vec<PrepareReport>>,
+    reports: Option<BTreeMap<Ident, PrepareReport>>,
     links_by_ref: BTreeMap<ModuleRef, Box<dyn Link>>,
     attached_links: BTreeMap<Ident, Vec<crate::module_api::AttachedPort>>,
     entry_failure: Option<String>,

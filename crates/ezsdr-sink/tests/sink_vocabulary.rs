@@ -128,12 +128,12 @@ fn hd_14_schema_freeze() {
     assert!(stale.is_empty(), "HD-14: schema freeze failed:\n{}", stale.join("\n"));
 
     let payload = RequestRejectedPayload {
-        action: "capture".to_owned(),
+        action: ezsdr_kernel::event::ActionId(3),
+        kind: "update_parameter".to_owned(),
         reason: "HD-14: N must be positive".to_owned(),
-        request: None,
     };
     assert_eq!(
         serde_json::to_value(payload).unwrap(),
-        json!({"action": "capture", "reason": "HD-14: N must be positive"})
+        json!({"action": 3, "kind": "update_parameter", "reason": "HD-14: N must be positive"})
     );
 }

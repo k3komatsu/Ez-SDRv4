@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::binding::{AdmissionResult, BindingProfile};
-use crate::event::{CounterRow, Event, EventKind};
+use crate::event::{ActionId, CounterRow, Event, EventKind};
 use crate::hash::{ContentHash, HashError};
 use crate::id::{DataLinkId, RunId};
 use crate::module_api::{ExecutionClass, Fidelity, ModuleRef, ProfileRef, Version};
@@ -221,15 +221,19 @@ pub struct TerminationSection {
     /// reaction, in request order, beside the first (RS-10, KC-32).
     #[serde(default)]
     pub also: Vec<Termination>,
+    /// The Actions admitted and dispatched to a queue that RS-6 step 1 emptied before
+    /// their Module took them, by id (RS-16).
+    #[serde(default)]
+    pub undelivered: Vec<ActionId>,
 }
 
 /// The `prepare` section (RS-38, SB-41).
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareSection {
-    /// One report per fragment, in plan order (SB-41).
+    /// One report per fragment, under the fragment the Kernel invoked (SB-41).
     #[serde(default)]
-    pub reports: Vec<PrepareReport>,
+    pub reports: BTreeMap<Ident, PrepareReport>,
 }
 
 /// A Kernel envelope with namespaced Module sections. The Kernel writes the
@@ -263,7 +267,7 @@ pub struct Manifest {
     pub binding: BindingSection,
     /// The plan as bound (RS-38).
     pub plan: Option<ExecutionPlan>,
-    /// The prepare reports, one per fragment, in plan order (SB-41).
+    /// The prepare reports, one per fragment, under the fragment invoked (SB-41).
     #[serde(default)]
     pub prepare: PrepareSection,
     /// What `validate()` matched, rejected and refused (SB-38).
@@ -298,9 +302,9 @@ pub struct Manifest {
     pub action_log: Vec<crate::session::LogEntry>,
     /// How it ended (RS-3).
     pub termination: TerminationSection,
-    /// The artifacts it produced (RS-44).
+    /// The artifacts it produced, under the output whose Sink returned them (RS-38).
     #[serde(default)]
-    pub artifacts: Vec<ArtifactRef>,
+    pub artifacts: BTreeMap<Ident, Vec<ArtifactRef>>,
     /// Namespaced Module sections, each filed under the source root of the instance
     /// that wrote it, including `ezsdr.capture` when the profile asks (RS-38, RS-39,
     /// RS-43).

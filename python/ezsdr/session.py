@@ -222,11 +222,11 @@ class _Side:
 
 class CaptureRequest:
     """A capture request the recorder has been sent and not yet answered (EA-17):
-    ``Rx.request`` makes one, ``Rx.result`` waits for its samples."""
+    ``Rx.request`` makes one, ``Rx.result`` waits for its samples. The recorder's answer
+    names the Action it answers, one of the entry's ``dispatched`` ids (HD-16)."""
 
-    def __init__(self, recorder: str, number: int, n: int, start: int, entry: dict):
+    def __init__(self, recorder: str, n: int, start: int, entry: dict):
         self.recorder = recorder
-        self.number = number
         self.n = n
         self.entry = entry
         self._start = start
@@ -296,8 +296,6 @@ class Rx(_Side):
         requests made before the earlier ones are answered capture contiguous samples."""
         recorder = self._session._recorder(self._radio)
         start = self._session._status()["events"]
-        # The Sink numbers the capture requests it receives (HD-16); this one is the next.
-        number = self._session._captures.get(recorder, 0)
         action = {
             "kind": "vocabulary",
             "ns": "sink",
@@ -307,15 +305,15 @@ class Rx(_Side):
             "params": {"sink.capture_samples": int(n)},
         }
         entry = _admitted(self._session.submit(action))
-        return CaptureRequest(recorder, number, int(n), start, entry)
+        return CaptureRequest(recorder, int(n), start, entry)
 
     def result(self, handle: CaptureRequest, timeout: Optional[float] = None) -> np.ndarray:
         """Waits, in Run time, for ``handle``'s capture and returns its samples (EA-17);
         ``timeout`` defaults to ``n / rate + 1`` seconds."""
-        n, number, entry, start = handle.n, handle.number, handle.entry, handle._start
+        n, entry, start = handle.n, handle.entry, handle._start
         if timeout is None:
             timeout = n / float(self.sample_rate) + 1.0
-        source = {"kind": "output", "output": handle.recorder}
+        dispatched = entry["outcome"]["dispatched"]
         wait = {"within": self._session._duration(timeout)}
         while True:
             request = {"op": "wait_for", "kinds": [CAPTURE_WRITTEN, REQUEST_REJECTED], "from": start}
@@ -326,7 +324,8 @@ class Rx(_Side):
             wait = {"until": result["horizon"]}
             start = result["index"] + 1
             event = result["event"]
-            if event["source"] != source or event["payload"].get("request") != number:
+            # The answer names the Action it answers (HD-16).
+            if event["payload"].get("action") not in dispatched:
                 continue
             if event["kind"] == REQUEST_REJECTED:
                 raise Rejected(entry, event)
@@ -380,8 +379,9 @@ class RunResult:
         return self.manifest["termination"]["reason"]
 
     def capture(self, output: str) -> np.ndarray:
-        """The artifact the child's output ``output`` wrote, as ``Rx.capture`` returns one."""
-        for artifact in self.manifest["artifacts"]:
+        """The artifact the child's output ``output`` wrote, as ``Rx.capture`` returns one:
+        the output's own capture, whose id is the output's (HD-10)."""
+        for artifact in self.manifest["artifacts"].get(output, []):
             if artifact["id"] == output:
                 return samples(self._session.read(artifact), artifact)
         raise Error(f"the child Run wrote no artifact {output}")
@@ -404,8 +404,6 @@ class Session:
         # What the primary root's tick zero is, the Kernel's EpochRef (TM-3, EA-10).
         self._epoch: Optional[dict] = connected.get("root_epoch")
         self._waited = 0
-        # Capture requests admitted per recorder: the Sink's next request number (HD-16).
-        self._captures: Dict[str, int] = {}
         # The instant `aligned` gives the timed calls in its block (EA-16).
         self._aligned: Optional[dict] = None
         self.manifest: Optional[dict] = None
@@ -509,16 +507,7 @@ class Session:
 
     def submit(self, action: dict, waveform: Optional[bytes] = None) -> dict:
         """Submits any ``SessionAction`` document and returns its log entry, admitted or rejected."""
-        entry = self._call({"op": "submit", "action": action}, waveform or b"")[0]["entry"]
-        target = action.get("target") or {}
-        capture = (action.get("kind"), action.get("ns"), action.get("verb")) == ("vocabulary", "sink", "capture") or (
-            action.get("kind") == "set_parameter" and action.get("key") == "sink.capture_samples"
-        )
-        if entry["outcome"]["kind"] == "admitted" and capture and target.get("kind") == "output":
-            # One admitted capture request is one request its recorder numbers (HD-16).
-            recorder = target["output"]
-            self._captures[recorder] = self._captures.get(recorder, 0) + 1
-        return entry
+        return self._call({"op": "submit", "action": action}, waveform or b"")[0]["entry"]
 
     def set(self, target: Any, key: str, value: Any) -> dict:
         """``SetParameter`` of ``target``, a ``Target`` or a resource string; raises

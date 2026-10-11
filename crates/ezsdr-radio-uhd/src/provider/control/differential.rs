@@ -167,7 +167,7 @@ fn side(direction: Direction) -> &'static str {
 
 struct NoActions;
 impl ActionReceiver for NoActions {
-    fn recv(&self) -> Option<(Action, Option<ezsdr_kernel::id::ResourceId>)> {
+    fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> {
         None
     }
 }
@@ -232,7 +232,7 @@ fn run(sequence: &Sequence) -> Record {
                             target: target_of(&core.id), key: key(&format!("radio.{}.gain_db", side(direction))), value: Value::num(gain_db).unwrap(), class: UpdateClass::HardwareTimed, at: at(at_ns),
                         }, core.id.clone()),
                     };
-                    control.book(action, Some(node));
+                    control.book(ezsdr_kernel::module_api::Dispatched::new(ezsdr_kernel::event::ActionId(1), action, Some(node)));
                 }
                 control.release();
             }

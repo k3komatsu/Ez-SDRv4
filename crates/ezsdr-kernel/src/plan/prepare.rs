@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::binding::{AdmissionResult, BindingProfile, CheckStage, Violation, satisfies};
 use crate::module_api::ModuleError;
-use crate::spec::{CapabilityValue, Constraint, ExperimentSpec, Namespace, Scalar, Value};
+use crate::spec::{CapabilityValue, Constraint, ExperimentSpec, Ident, Namespace, Scalar, Value};
 
 use super::{CompileInputs, PrepareError, PrepareReport};
 
@@ -49,12 +49,12 @@ pub(super) fn check_effective_narrows(
 }
 
 pub(super) fn collect_prepare(
-    reports: Vec<Result<PrepareReport, ModuleError>>,
+    reports: Vec<(Ident, Result<PrepareReport, ModuleError>)>,
     spec: &ExperimentSpec,
     profile: &BindingProfile,
     inputs: &CompileInputs<'_>,
     admission: &AdmissionResult,
-) -> Result<Vec<PrepareReport>, PrepareError> {
+) -> Result<BTreeMap<Ident, PrepareReport>, PrepareError> {
     let checks = inputs.checks;
     let environment = &profile.environment;
     let spec_coercion = &spec.policies.coercion;
@@ -79,43 +79,37 @@ pub(super) fn collect_prepare(
             reason: format!("SB-39: {reason}"),
         }]));
     }
-    let mut ok = Vec::with_capacity(reports.len());
-    for (index, r) in reports.into_iter().enumerate() {
+    let mut ok = BTreeMap::new();
+    for (fragment, r) in reports {
         match r {
-            Ok(report) => ok.push(report),
-            Err(error) => return Err(PrepareError::Fragment { index, error }),
+            Ok(report) => {
+                ok.insert(fragment, report);
+            }
+            Err(error) => return Err(PrepareError::Fragment { fragment, error }),
         }
     }
-    let mut violations = Vec::new();
-    // Authority fragments have no lifecycle (MA-2); every other fragment reports
-    // exactly once. Check identities before any first/last-wins map can lose them.
+    // Authority fragments have no lifecycle (MA-2); every other fragment reports.
     let expected: BTreeSet<_> = spec.resources.keys().cloned()
         .chain(spec.outputs.iter().map(|output| output.id.clone()))
         .chain(profile.placements.islands.iter().map(|island| {
-            crate::spec::Ident::parse(&format!("island_{}", island.id.local))
+            Ident::parse(&format!("island_{}", island.id.local))
                 .expect("an Island's numeric local id forms an Ident")
         }))
         .collect();
-    let mut seen = BTreeSet::new();
-    let identity_violation = |reason| Violation {
-        check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
-        key: None, requested: None, reason,
-    };
-    for report in &ok {
-        if !seen.insert(report.fragment.clone()) {
-            violations.push(identity_violation(format!(
-                "SB-41: duplicate PrepareReport for fragment {}", report.fragment)));
-        } else if !expected.contains(&report.fragment) {
-            violations.push(identity_violation(format!(
-                "SB-41: unexpected PrepareReport for fragment {}", report.fragment)));
-        }
-    }
-    for missing in expected.difference(&seen) {
-        violations.push(identity_violation(format!("SB-41: no PrepareReport for fragment {missing}")));
-    }
+    let violations: Vec<Violation> = expected
+        .iter()
+        .filter(|fragment| !ok.contains_key(*fragment))
+        .map(|missing| Violation {
+            check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
+            key: None,
+            requested: None,
+            reason: format!("SB-41: no PrepareReport for fragment {missing}"),
+        })
+        .collect();
     if !violations.is_empty() {
         return Err(PrepareError::Violations(violations));
     }
+    let mut violations = Vec::new();
     // SB-46 names "the stage", not "the validate stage": a Provider whose `prepare`
     // reports a coercion on a `reject` key must be refused here as well. SB-44 makes
     // the two agree only as a producer obligation, so the gap is reachable.
@@ -125,14 +119,14 @@ pub(super) fn collect_prepare(
     // every key on the Session path (SB-45) — recorded the coercion and warned about
     // nothing. The warning goes on the fragment's own report, which already carries a
     // `warnings` field and is already in the schema.
-    for r in &mut ok {
+    for (fragment, r) in &mut ok {
         // SB-44: a `Coercion` whose key the fragment never requested is a **malformed
         // report** — nothing was requested, so nothing was coerced, and a Provider
         // choosing its own default is MA-12's narrowing case, which belongs in
         // `effective` alone. Left to the policy loop, the key's default fired for a
         // key nobody named, and the Manifest recorded a "coercion" of a value nobody
         // asked for (SB-42, SB-46).
-        if let Some(req) = spec.resources.get(&r.fragment) {
+        if let Some(req) = spec.resources.get(fragment) {
             if let Some(stray) = r
                 .coercions
                 .iter()
@@ -144,7 +138,7 @@ pub(super) fn collect_prepare(
                     requested: Some(stray.requested.clone()),
                     reason: format!(
                         "SB-44: {} reports a coercion of {}, which its request does not name",
-                        r.fragment, stray.key
+                        fragment, stray.key
                     ),
                 });
             }
@@ -170,9 +164,9 @@ pub(super) fn collect_prepare(
         r.warnings.extend(warned);
     }
     // SB-30's second point, per fragment (KA-4): each report's own `effective`.
-    let per_fragment: BTreeMap<crate::spec::Ident, BTreeMap<crate::spec::Key, Value>> = ok
+    let per_fragment: BTreeMap<Ident, BTreeMap<crate::spec::Key, Value>> = ok
         .iter()
-        .map(|r| (r.fragment.clone(), r.effective.clone()))
+        .map(|(fragment, r)| (fragment.clone(), r.effective.clone()))
         .collect();
     violations.extend(checks.run(
         environment,
@@ -201,7 +195,7 @@ pub(super) fn collect_prepare(
         // configuration, so a key two fragments name keeps both values, and two
         // channels asking their own line's declared rate do not refuse each other
         // (spec 20, KH-1). A Provider fragment's id is the resource name.
-        let report = ok.iter().find(|r| r.fragment == *name)
+        let report = ok.get(name)
             .expect("SB-41 checked every lifecycle fragment's report");
         for (key, declared) in &node.capabilities {
             let Some(applied) = report.effective.get(key) else {

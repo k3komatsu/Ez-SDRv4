@@ -10,11 +10,11 @@ mod device;
 use std::collections::BTreeMap;
 
 use ezsdr_kernel::binding::Binding;
-use ezsdr_kernel::event::{Action, Event, EventHandle, EventKind, EventSink, EventSource, Severity};
+use ezsdr_kernel::event::{Action, ActionId, Event, EventHandle, EventKind, EventSink, EventSource, Severity};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::module_api::{
-    ActionReceiver, CoerceReport, Driving, Endpoint, ExecutionClass, KERNEL_API, ModuleDescriptor,
+    ActionReceiver, CoerceReport, Dispatched, Driving, Endpoint, ExecutionClass, KERNEL_API, ModuleDescriptor,
     ModuleError, ModuleRef, PrepareContext, Provider, ProviderInstance, Role, StepOutcome,
     Requested, StopMode, Version, VersionReq, VocabularyRequirement,
 };
@@ -648,8 +648,8 @@ impl MockRadio {
     /// with the loss's reason and emitting no event: the step's `DeviceLost` reports it.
     fn refuse_actions(&mut self, at: i64) {
         let Some(actions) = self.actions.clone() else { return };
-        while let Some((action, _)) = actions.recv() {
-            self.record_rejected_action(Self::action_name(&action), DEVICE_LOST, at);
+        while let Some(dispatched) = actions.recv() {
+            self.record_rejected_action(Self::action_name(&dispatched.action), DEVICE_LOST, at);
         }
     }
 
@@ -662,10 +662,11 @@ impl MockRadio {
         }
     }
 
-    fn reject_action_at(&mut self, action: &str, reason: &str, at: i64) -> Result<(), ModuleError> {
+    /// RM-22: `COMMAND_REJECTED`, naming the Action by `id` when it is refused at receipt.
+    fn reject_action_at(&mut self, id: Option<ActionId>, action: &str, reason: &str, at: i64) -> Result<(), ModuleError> {
         self.record_rejected_action(action, reason, at);
         let time = TimePoint::new(self.root.expect("prepared root"), at);
-        let payload = serde_json::to_value(ezsdr_radio::payloads::CommandRejectedPayload { action: action.to_owned(), reason: reason.to_owned() }).expect("command rejection payload");
+        let payload = serde_json::to_value(ezsdr_radio::payloads::CommandRejectedPayload { action: id, kind: action.to_owned(), reason: reason.to_owned() }).expect("command rejection payload");
         self.emit_event("", ezsdr_radio::kinds::COMMAND_REJECTED, Severity::Error, payload, time)
     }
 
@@ -759,14 +760,14 @@ impl MockRadio {
         if let Some(record) = tracked { self.record_burst(record); }
         self.tx_device.close();
         if open_burst_without_record {
-            if emit_command_rejected { self.reject_action_at("tx_burst", reason, now)?; }
+            if emit_command_rejected { self.reject_action_at(None, "tx_burst", reason, now)?; }
             else { self.record_rejected_action("tx_burst", reason, now); }
         }
         self.open_tx = None;
         let held: Vec<i64> = self.held.keys().copied().collect();
         for start in held {
             self.held.remove(&start);
-            if emit_command_rejected { self.reject_action_at("tx_burst", reason, now)?; }
+            if emit_command_rejected { self.reject_action_at(None, "tx_burst", reason, now)?; }
             else { self.record_rejected_action("tx_burst", reason, now); }
         }
         Ok(())
@@ -939,7 +940,7 @@ impl MockRadio {
                 self.held.insert(held.start, held);
             } else if index < passed {
                 self.forget_later(index, held.start);
-                self.reject_action_at("tx_burst", "MR-18: cancelled by a cold change", now)?;
+                self.reject_action_at(None, "tx_burst", "MR-18: cancelled by a cold change", now)?;
             } else {
                 self.tx_later.push((index, held));
             }
@@ -952,7 +953,7 @@ impl MockRadio {
         let now = self.root.zip(self.time.as_ref()).and_then(|(root, time)| time.now(root).and_then(|t| t.ticks_in(root)).ok()).unwrap_or(0);
         for (index, held) in std::mem::take(&mut self.tx_later) {
             self.forget_later(index, held.start);
-            if emit { self.reject_action_at("tx_burst", reason, now)?; } else { self.record_rejected_action("tx_burst", reason, now); }
+            if emit { self.reject_action_at(None, "tx_burst", reason, now)?; } else { self.record_rejected_action("tx_burst", reason, now); }
         }
         Ok(())
     }
@@ -1008,18 +1009,19 @@ impl MockRadio {
 
     /// `node` is what the Kernel resolved the target to (KC-23), which is what a
     /// Provider matches on.
-    fn handle_action(&mut self, action: Action, node: Option<ResourceId>, now: i64) -> Result<(), ModuleError> {
+    fn handle_action(&mut self, dispatched: Dispatched, now: i64) -> Result<(), ModuleError> {
         let (rx, tx) = (self.instance.id.child("rx").expect("rx id"), self.instance.id.child("tx").expect("tx id"));
-        let node = node.as_ref();
-        match action {
-            action @ Action::TxBurst { .. } => self.handle_tx_burst(action, node, now),
-            Action::UpdateParameter { key, value, class, at, .. } => self.handle_update(node, key, value, class, at, now),
+        let id = dispatched.id;
+        let node = dispatched.node.as_ref();
+        match dispatched.action {
+            action @ Action::TxBurst { .. } => self.handle_tx_burst(id, action, node, now),
+            Action::UpdateParameter { key, value, class, at, .. } => self.handle_update(id, node, key, value, class, at, now),
             // RM-16, MR-25: a `Stop` of the device or of a stream cancels no update; on
             // receive it is a cut at its instant, on transmit it ends the bursts.
             Action::Stop { target } => {
                 let device = target.is_none() || node == Some(&self.instance.id);
                 if !device && node != Some(&rx) && node != Some(&tx) {
-                    return self.reject_action_at("stop", "MR-25: Stop target is not this device or its stream", now);
+                    return self.reject_action_at(Some(id), "stop", "MR-25: Stop target is not this device or its stream", now);
                 }
                 if device || node == Some(&tx) {
                     self.stop_tx(now, "MR-25: cancelled by stop", false)?;
@@ -1036,7 +1038,7 @@ impl MockRadio {
             Action::Command { verb, params, at, .. } if verb.as_str() == ezsdr_radio::START_RX && node == Some(&rx) && params.is_empty() => {
                 let requested = match at.map(|at| time::to_v(self.clocks.as_ref().expect("prepared clocks"), self.root.expect("prepared root"), at.time_point)).transpose() {
                     Ok(requested) => requested,
-                    Err(error) => return self.reject_action_at("command", &format!("MR-29: start_rx's instant cannot be converted: {error}"), now),
+                    Err(error) => return self.reject_action_at(Some(id), "command", &format!("MR-29: start_rx's instant cannot be converted: {error}"), now),
                 };
                 let seq = self.arrival();
                 let (e, _) = timeline::command_instant(self.rx_line.as_ref(), requested, now, seq, false);
@@ -1045,7 +1047,7 @@ impl MockRadio {
             }
             other => {
                 let name = Self::action_name(&other);
-                self.reject_action_at(name, &format!("MR-29: Action `{name}` is not supported by MockRadio"), now)?;
+                self.reject_action_at(Some(id), name, &format!("MR-29: Action `{name}` is not supported by MockRadio"), now)?;
                 Ok(())
             }
         }
@@ -1058,7 +1060,7 @@ impl MockRadio {
         order
     }
 
-    fn handle_tx_burst(&mut self, action: Action, node: Option<&ResourceId>, now: i64) -> Result<(), ModuleError> {
+    fn handle_tx_burst(&mut self, id: ActionId, action: Action, node: Option<&ResourceId>, now: i64) -> Result<(), ModuleError> {
         let Action::TxBurst { waveform, repeat, at, requested_at, late_policy, metadata, .. } = action else {
             unreachable!("only TxBurst is dispatched to handle_tx_burst")
         };
@@ -1072,7 +1074,7 @@ impl MockRadio {
             .filter(|index| Some(*index) == self.tx_cur || self.tx_line.as_ref().and_then(|line| line.plan.get(*index)).is_some_and(|segment| segment.cut.is_none_or(|cut| cut > 0)));
         let Some(index) = clock else {
             let reason = if self.tx_cur.is_none() && self.tx_later_clock().is_none() { "MR-16: no transmit channel is configured" } else { "MR-16: target, clock, waveform size, channel count or metadata is invalid" };
-            self.reject_action_at("tx_burst", reason, now)?;
+            self.reject_action_at(Some(id), "tx_burst", reason, now)?;
             return Ok(());
         };
         let current = Some(index) == self.tx_cur;
@@ -1083,28 +1085,28 @@ impl MockRadio {
         };
         let unit = channels.max(0) as u64 * 8;
         if node != Some(&tx_id) || channels <= 0 || size_bytes == 0 || unit == 0 || size_bytes % unit != 0 || !metadata_empty {
-            self.reject_action_at("tx_burst", "MR-16: target, clock, waveform size, channel count or metadata is invalid", now)?;
+            self.reject_action_at(Some(id), "tx_burst", "MR-16: target, clock, waveform size, channel count or metadata is invalid", now)?;
             return Ok(());
         }
         let length = i64::try_from(size_bytes / unit).map_err(|_| ModuleError::rejected("MR-16: waveform is too large"))?;
         if repeat && (length as u64 > self.profile.repeat_max_samples() || length as u64 % self.profile.repeat_align_samples() != 0) {
-            self.reject_action_at("tx_burst", "MR-16: repeated waveform violates RM-13's length or alignment limits", now)?;
+            self.reject_action_at(Some(id), "tx_burst", "MR-16: repeated waveform violates RM-13's length or alignment limits", now)?;
             return Ok(());
         }
         let decoded = match self.channel.as_ref().map(|mode| mode.inputs.get(&waveform.hash)) {
             None => None,
             Some(None) => {
-                self.reject_action_at("tx_burst", "MR-32: the waveform's bytes are not an input of this Run", now)?;
+                self.reject_action_at(Some(id), "tx_burst", "MR-32: the waveform's bytes are not an input of this Run", now)?;
                 return Ok(());
             }
             Some(Some(bytes)) if bytes.len() as u64 != size_bytes => {
-                self.reject_action_at("tx_burst", "MR-32: the waveform's bytes do not have its size_bytes", now)?;
+                self.reject_action_at(Some(id), "tx_burst", "MR-32: the waveform's bytes do not have its size_bytes", now)?;
                 return Ok(());
             }
             Some(Some(bytes)) => match channel::decode_waveform(&bytes) {
                 Ok(decoded) => Some(decoded),
                 Err(reason) => {
-                    self.reject_action_at("tx_burst", reason, now)?;
+                    self.reject_action_at(Some(id), "tx_burst", reason, now)?;
                     return Ok(());
                 }
             },
@@ -1164,7 +1166,7 @@ impl MockRadio {
             if let Some(late_by) = send_asap_late_by {
                 self.emit_late_burst(late_by, at.time_point, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::Refused)?;
             }
-            self.reject_action_at("tx_burst", reason, now)?;
+            self.reject_action_at(Some(id), "tx_burst", reason, now)?;
             return Ok(());
         }
         if let Some(late_by) = send_asap_late_by {
@@ -1245,11 +1247,11 @@ impl MockRadio {
                 Ok(BurstStep::Discontinuity { closed, then_ended, .. }) => {
                     self.record_burst(closed);
                     if let Some(record) = then_ended { self.record_burst(record); }
-                    self.reject_action_at("tx_burst", "MR-15: the burst's blocks were not contiguous", until)?;
+                    self.reject_action_at(None, "tx_burst", "MR-15: the burst's blocks were not contiguous", until)?;
                 }
                 Ok(BurstStep::Started | BurstStep::Continued) => {}
                 Err(error) => {
-                    self.reject_action_at("tx_burst", &format!("MR-15: {error}"), until)?;
+                    self.reject_action_at(None, "tx_burst", &format!("MR-15: {error}"), until)?;
                     self.end_open_segment(next);
                     if let Some(record) = self.tx_tracker.as_mut().and_then(BurstTracker::stop) { self.record_burst(record); }
                     self.tx_device.close();
@@ -1286,14 +1288,15 @@ impl MockRadio {
         Ok(progressed)
     }
 
-    fn handle_update(&mut self, node: Option<&ResourceId>, key: ezsdr_kernel::spec::Key, value: Value, class: UpdateClass, at: Option<AbsoluteDeadline>, now: i64) -> Result<(), ModuleError> {
+    #[allow(clippy::too_many_arguments)]
+    fn handle_update(&mut self, id: ActionId, node: Option<&ResourceId>, key: ezsdr_kernel::spec::Key, value: Value, class: UpdateClass, at: Option<AbsoluteDeadline>, now: i64) -> Result<(), ModuleError> {
         if node != Some(&self.instance.id) || !ezsdr_radio::keys::CONFIGURATION.contains(&key.as_str()) || key.as_str().ends_with(".antenna") {
-            self.reject_action_at("update_parameter", "MR-18: target or configuration key is not updateable", now)?;
+            self.reject_action_at(Some(id), "update_parameter", "MR-18: target or configuration key is not updateable", now)?;
             return Ok(());
         }
         let expected = if is_hardware_key(key.as_str()) { UpdateClass::HardwareTimed } else { UpdateClass::Cold };
         if class != expected {
-            self.reject_action_at("update_parameter", "MR-18: update class does not match the Radio Model key", now)?;
+            self.reject_action_at(Some(id), "update_parameter", "MR-18: update class does not match the Radio Model key", now)?;
             return Ok(());
         }
         let root = self.root.expect("root");
@@ -1302,7 +1305,7 @@ impl MockRadio {
             Some(deadline) => match time::to_v(clocks, root, deadline.time_point) {
                 Ok(tick) => Some(tick),
                 Err(error) => {
-                    self.reject_action_at("update_parameter", &format!("MR-18: timed instant cannot be converted: {error}"), now)?;
+                    self.reject_action_at(Some(id), "update_parameter", &format!("MR-18: timed instant cannot be converted: {error}"), now)?;
                     return Ok(());
                 }
             },
@@ -1342,7 +1345,7 @@ impl MockRadio {
         let requested = Requested { resource: self.instance.id.clone(), constraints };
         let report = self.profile.description().coerce(&self.instance.id, &requested).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
         if let Some(rejected) = report.rejected.first() {
-            self.reject_action_at("update_parameter", &format!("MR-18: {}", rejected.reason), now)?;
+            self.reject_action_at(Some(id), "update_parameter", &format!("MR-18: {}", rejected.reason), now)?;
             return Ok(());
         }
         let applied = report.applied.get(&key).cloned().unwrap_or(value);
@@ -1650,7 +1653,7 @@ impl Provider for MockRadio {
         self.next_order = self.faults.len() as u64;
         self.config = config.clone();
         self.prepared = true;
-        Ok(PrepareReport { fragment: f.id.clone(), effective: config, coercions: report.coercions, warnings: Vec::new() })
+        Ok(PrepareReport { effective: config, coercions: report.coercions, warnings: Vec::new() })
     }
 
     fn arm(&mut self) -> Result<(), ModuleError> {
@@ -1801,8 +1804,8 @@ impl Provider for MockRadio {
         if loss_due {
             self.refuse_actions(u);
         } else if let Some(actions) = self.actions.clone() {
-            while let Some((action, node)) = actions.recv() {
-                self.handle_action(action, node, u)?;
+            while let Some(dispatched) = actions.recv() {
+                self.handle_action(dispatched, u)?;
                 progressed = true;
             }
         }

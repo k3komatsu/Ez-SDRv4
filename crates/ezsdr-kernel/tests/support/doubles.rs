@@ -15,7 +15,7 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, MemoryDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
-    ActionReceiver, ActionSubmitter, CoerceReport, CompileRule, ComponentDescriptor, ComponentImpl,
+    ActionReceiver, Dispatched, ActionSubmitter, CoerceReport, CompileRule, ComponentDescriptor, ComponentImpl,
     ComponentKind, ComponentRequires, ComponentTiming, Driving, Executor,
     ExecutorDescriptor, Fidelity, IslandDecl, LinkDescriptor, ModuleDescriptor, ModuleError,
     ModuleErrorKind, ModuleRef, ParamDecl, PrepareContext, Provider, ProviderInstance,
@@ -690,7 +690,6 @@ impl Provider for TestProvider {
         let mut effective = report.applied;
         effective.extend(self.effective.iter().map(|(k, v)| (k.clone(), v.clone())));
         Ok(PrepareReport {
-            fragment: f.id.clone(),
             effective,
             coercions,
             warnings: Vec::<Warning>::new(),
@@ -781,7 +780,7 @@ impl Executor for TestExecutor {
 
     fn prepare(
         &mut self,
-        island: &IslandDecl,
+        _island: &IslandDecl,
         ctx: PrepareContext,
     ) -> Result<PrepareReport, ModuleError> {
         self.prepared_components
@@ -789,7 +788,6 @@ impl Executor for TestExecutor {
             .expect("lock")
             .push(ctx.components);
         Ok(PrepareReport {
-            fragment: island.executor.clone(),
             effective: BTreeMap::new(),
             coercions: Vec::new(),
             warnings: Vec::new(),
@@ -882,11 +880,10 @@ impl Sink for TestSink {
 
     fn prepare(
         &mut self,
-        f: &Fragment,
+        _f: &Fragment,
         _ctx: PrepareContext,
     ) -> Result<PrepareReport, ModuleError> {
         Ok(PrepareReport {
-            fragment: f.id.clone(),
             effective: BTreeMap::new(),
             coercions: Vec::new(),
             warnings: Vec::new(),
@@ -1055,6 +1052,7 @@ impl HostClock for FakeHostClock {
 #[derive(Default)]
 pub struct QueueReceiver {
     queue: Mutex<Vec<Action>>,
+    next: AtomicU64,
 }
 
 impl QueueReceiver {
@@ -1075,12 +1073,13 @@ impl QueueReceiver {
 }
 
 impl ActionReceiver for QueueReceiver {
-    fn recv(&self) -> Option<(Action, Option<ResourceId>)> {
+    fn recv(&self) -> Option<Dispatched> {
         let mut q = self.queue.lock().expect("lock");
         if q.is_empty() {
             None
         } else {
-            Some((q.remove(0), None))
+            let id = ActionId(self.next.fetch_add(1, Ordering::SeqCst) + 1);
+            Some(Dispatched::new(id, q.remove(0), None))
         }
     }
 }

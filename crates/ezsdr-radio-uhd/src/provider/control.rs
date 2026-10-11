@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use std::time::{Duration as Wall, Instant};
 
-use ezsdr_kernel::event::{Action, Severity};
+use ezsdr_kernel::event::{Action, ActionId, Severity};
 use ezsdr_kernel::id::ClockDomainId;
-use ezsdr_kernel::module_api::{ActionReceiver, Requested, UpdateClass};
+use ezsdr_kernel::module_api::{ActionReceiver, Dispatched, Requested, UpdateClass};
 use ezsdr_kernel::spec::{Constraint, Key, Scalar, Value};
 use ezsdr_kernel::stream::{BurstOpen, Direction, LateOutcome};
 use ezsdr_kernel::time::{AbsoluteDeadline, Duration, Rational, TimePoint, TimeError};
@@ -227,9 +227,9 @@ impl Control {
                 return self.finish();
             }
             // MA-14b: each Action is booked before the next `recv()`.
-            while let Some((action, node)) = self.actions.recv() {
+            while let Some(dispatched) = self.actions.recv() {
                 if !self.core.is_lost() {
-                    self.book(action, node);
+                    self.book(dispatched);
                 }
                 self.release();
             }
@@ -252,26 +252,27 @@ impl Control {
 
     /// `node` is what the Kernel resolved the target to (KC-23), which is what a
     /// Provider matches on.
-    pub(super) fn book(&mut self, action: Action, node: Option<ezsdr_kernel::id::ResourceId>) {
-        let node = node.as_ref();
-        match action {
+    pub(super) fn book(&mut self, dispatched: Dispatched) {
+        let id = dispatched.id;
+        let node = dispatched.node.as_ref();
+        match dispatched.action {
             Action::TxBurst { waveform, repeat, at, requested_at, late_policy, metadata, .. } => {
-                self.book_burst(node, waveform, repeat, at, requested_at, late_policy, metadata.is_empty());
+                self.book_burst(id, node, waveform, repeat, at, requested_at, late_policy, metadata.is_empty());
             }
             Action::UpdateParameter { key, value, class, at, .. } => {
                 let name = key.as_str();
                 if node != Some(&self.core.id) {
-                    self.core.command_rejected("update_parameter", "UR-26: the target is not this device");
+                    self.core.command_rejected(Some(id), "update_parameter", "UR-26: the target is not this device");
                 } else if class == UpdateClass::HardwareTimed
                     && matches!(name, keys::RX_FREQUENCY_HZ | keys::TX_FREQUENCY_HZ | keys::RX_GAIN_DB | keys::TX_GAIN_DB)
                 {
-                    self.book_timed(key, value, at);
+                    self.book_timed(id, key, value, at);
                 } else if class == UpdateClass::Cold
                     && matches!(name, keys::RX_CHANNELS | keys::TX_CHANNELS | keys::RX_SAMPLE_RATE_HZ | keys::TX_SAMPLE_RATE_HZ)
                 {
-                    self.book_cold(key, value, at);
+                    self.book_cold(id, key, value, at);
                 } else {
-                    self.core.command_rejected("update_parameter", &format!("UR-26: {name} is not updated at runtime by this Provider"));
+                    self.core.command_rejected(Some(id), "update_parameter", &format!("UR-26: {name} is not updated at runtime by this Provider"));
                 }
             }
             // RM-16, UR-26: a `Stop` cancels no update; on receive it cuts at its booking, on
@@ -279,7 +280,7 @@ impl Control {
             Action::Stop { target: Some(_) } => {
                 let device = node == Some(&self.core.id);
                 if !device && node != Some(&self.core.tx_id) && node != Some(&self.core.rx_id) {
-                    return self.core.command_rejected("stop", "UR-26: the Stop target is not this device or its streams");
+                    return self.core.command_rejected(Some(id), "stop", "UR-26: the Stop target is not this device or its streams");
                 }
                 if device || node == Some(&self.core.tx_id) {
                     let _ = self.to_tx.send(TxCmd::Stop);
@@ -291,7 +292,7 @@ impl Control {
                 }
             }
             Action::Stop { target: None } | Action::Abort { .. } => {}
-            Action::SetTimer { .. } => self.core.command_rejected("set_timer", "UR-26: not supported by this Provider"),
+            Action::SetTimer { .. } => self.core.command_rejected(Some(id), "set_timer", "UR-26: not supported by this Provider"),
             // RM-12, RM-21: `start_rx` turns the receive stream on at its `at`, or at its booking
             // if that is later; it is never late.
             Action::Command { verb, params, at, .. }
@@ -299,7 +300,7 @@ impl Control {
             {
                 let requested = match self.ceil_root(at) {
                     Ok(requested) => requested,
-                    Err(error) => return self.core.command_rejected("command", &format!("UR-26: start_rx's instant cannot be converted: {error}")),
+                    Err(error) => return self.core.command_rejected(Some(id), "command", &format!("UR-26: start_rx's instant cannot be converted: {error}")),
                 };
                 let config = self.segment_config(Dir::Rx);
                 let mut streams = lock(&self.core.streams);
@@ -309,9 +310,9 @@ impl Control {
                 streams.book(&self.core, Dir::Rx, Item { e, seq, ready: now, delivered: None, refused: false, kind: Kind::Start });
             }
             Action::Command { .. } => {
-                self.core.command_rejected("command", "UR-26: not supported by this Provider")
+                self.core.command_rejected(Some(id), "command", "UR-26: not supported by this Provider")
             }
-            Action::Emit { .. } => self.core.command_rejected("emit", "UR-26: not supported by this Provider"),
+            Action::Emit { .. } => self.core.command_rejected(Some(id), "emit", "UR-26: not supported by this Provider"),
         }
     }
 
@@ -373,18 +374,18 @@ impl Control {
 
     // ------------------------------------------------------------ UR-24
 
-    fn book_timed(&mut self, key: Key, value: Value, at: Option<AbsoluteDeadline>) {
+    fn book_timed(&mut self, id: ActionId, key: Key, value: Value, at: Option<AbsoluteDeadline>) {
         let Some(v) = number(&value) else {
-            return self.core.command_rejected("update_parameter", "UR-24: the value is not a number");
+            return self.core.command_rejected(Some(id), "update_parameter", "UR-24: the value is not a number");
         };
         let dir = if key.as_str().starts_with("radio.rx.") { Dir::Rx } else { Dir::Tx };
         let now = self.core.now();
         let requested = match self.ceil_root(at) {
             Ok(requested) => requested,
-            Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-24: explicit deadline cannot be converted: {error}")),
+            Err(error) => return self.core.command_rejected(Some(id), "update_parameter", &format!("UR-24: explicit deadline cannot be converted: {error}")),
         };
         let Some(earliest) = now.checked_add(self.core.ticks(DEVICE_LEAD_NS)) else {
-            return self.core.command_rejected("update_parameter", "UR-24: time arithmetic overflow");
+            return self.core.command_rejected(Some(id), "update_parameter", "UR-24: time arithmetic overflow");
         };
         let e = match requested {
             Some(requested) if requested < earliest => {
@@ -449,7 +450,7 @@ impl Control {
             let mut updates: Vec<_> = projections.iter().map(|cold| lock(&cold.updates)).collect();
             for chan in 0..channels {
                 if let Err(error) = self.core.device.apply(timed.dir, chan, &settings, Some(effective)) {
-                    self.core.device_failed("update_parameter", &error);
+                    self.core.device_failed(None, "update_parameter", &error);
                     return;
                 }
                 self.released.push(effective);
@@ -484,11 +485,11 @@ impl Control {
     /// UR-25: a `cold` update is booked when uhd-control takes it: its effective instant,
     /// `coerce` over the configuration projected there, and the stream's plan from the
     /// timeline, which its owner reads.
-    fn book_cold(&mut self, key: Key, value: Value, at: Option<AbsoluteDeadline>) {
+    fn book_cold(&mut self, id: ActionId, key: Key, value: Value, at: Option<AbsoluteDeadline>) {
         let dir = if key.as_str().starts_with("radio.rx.") { Dir::Rx } else { Dir::Tx };
         let requested = match self.ceil_root(at) {
             Ok(requested) => requested,
-            Err(error) => return self.core.command_rejected("update_parameter", &format!("UR-25: explicit deadline cannot be converted: {error}")),
+            Err(error) => return self.core.command_rejected(Some(id), "update_parameter", &format!("UR-25: explicit deadline cannot be converted: {error}")),
         };
         let segment_config = self.segment_config(dir);
         // The instant is taken under the lock that books it, so that nothing pruned meanwhile
@@ -504,10 +505,10 @@ impl Control {
         };
         let report = match self.core.description.coerce(&self.core.id, &request) {
             Ok(report) => report,
-            Err(error) => return self.core.command_rejected("update_parameter", &error.message),
+            Err(error) => return self.core.command_rejected(Some(id), "update_parameter", &error.message),
         };
         if let Some(rejected) = report.rejected.first() {
-            return self.core.command_rejected("update_parameter", &rejected.reason);
+            return self.core.command_rejected(Some(id), "update_parameter", &rejected.reason);
         }
         let value = report.applied.get(&key).cloned().unwrap_or(value);
         candidate.insert(key.clone(), value.clone());
@@ -516,7 +517,7 @@ impl Control {
         let n = match decimation(self.core.mcr, rate) {
             Some(n) => n as i64,
             None if channels == 0 => 0,
-            None => return self.core.command_rejected("update_parameter", &format!("UR-12: {rate} S/s is no decimation 1…512 of {} Hz", self.core.mcr)),
+            None => return self.core.command_rejected(Some(id), "update_parameter", &format!("UR-12: {rate} S/s is no decimation 1…512 of {} Hz", self.core.mcr)),
         };
         if late {
             self.late_command(Some(key.clone()), requested.unwrap_or(now), e);
@@ -547,7 +548,7 @@ impl Control {
                 settings.gain = update.gain.or(settings.gain);
             }
             if let Err(error) = opened.and_then(|()| self.core.configure(dir, channels, &settings)) {
-                return self.core.device_failed("update_parameter", &error);
+                return self.core.device_failed(Some(id), "update_parameter", &error);
             }
             ready = self.core.now();
             streams = lock(&self.core.streams);
@@ -567,6 +568,7 @@ impl Control {
     #[allow(clippy::too_many_arguments)]
     fn book_burst(
         &mut self,
+        id: ActionId,
         node: Option<&ezsdr_kernel::id::ResourceId>,
         waveform: ezsdr_kernel::manifest::ArtifactRef,
         repeat: bool,
@@ -575,7 +577,7 @@ impl Control {
         late_policy: ezsdr_kernel::stream::LatePolicy,
         metadata_empty: bool,
     ) {
-        let reject = |reason: &str| self.core.command_rejected("tx_burst", reason);
+        let reject = |reason: &str| self.core.command_rejected(Some(id), "tx_burst", reason);
         // KC-21a: the last transmit clock registered, while its segment has not ended.
         let current = {
             let streams = lock(&self.core.streams);
@@ -736,7 +738,7 @@ mod tests {
 
     struct NoActions;
     impl ActionReceiver for NoActions {
-        fn recv(&self) -> Option<(Action, Option<ezsdr_kernel::id::ResourceId>)> { None }
+        fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> { None }
     }
 
     /// A receive link that takes nothing, so that the receive side has a stream.
@@ -783,8 +785,8 @@ mod tests {
         let (done, finished) = channel();
         let at = core.at(core.ticks(1_000_000_000));
         let booking = std::thread::spawn(move || {
-            control.book_cold(key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(at)));
-            control.book_timed(key("radio.rx.gain_db"), Value::num(3.0).unwrap(), None);
+            control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(at)));
+            control.book_timed(ActionId(1), key("radio.rx.gain_db"), Value::num(3.0).unwrap(), None);
             control.release();
             let _ = done.send(());
         });
@@ -808,8 +810,8 @@ mod tests {
         let (core, _, time) = rig();
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
-        control.book_cold(key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(100)))));
-        control.book_cold(key("radio.rx.sample_rate_hz"), Value::num(1e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(300)))));
+        control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(100)))));
+        control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(1e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(300)))));
         let refused = plan_of(&core, Dir::Rx)[1].segment.by.unwrap();
         assert!(lock(&core.streams).refuse(&core, Dir::Rx, refused));
         time.advance_to(core.at(ms(500))).unwrap();
@@ -829,8 +831,8 @@ mod tests {
         let (core, _, _, events) = crate::provider::test_support::rig_with_links(vec![Arc::new(NoLink)]);
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
-        control.book_cold(key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(300)))));
-        control.book_cold(key("radio.rx.sample_rate_hz"), Value::num(1e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(100)))));
+        control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(300)))));
+        control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(1e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(100)))));
         let late: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).collect();
         assert_eq!(late.len(), 1);
         assert_eq!((late[0].payload["requested"]["ticks"].as_i64(), late[0].payload["applied"]["ticks"].as_i64()), (Some(ms(100)), Some(ms(300))));
@@ -862,7 +864,7 @@ mod tests {
         let (core, _, time) = rig();
         let (mut control, _tx) = control(&core, &[Dir::Tx]);
         time.advance_to(core.at(core.ticks(10_000_000))).unwrap();
-        control.book_cold(key("radio.tx.sample_rate_hz"), Value::num(2e6).unwrap(), None);
+        control.book_cold(ActionId(1), key("radio.tx.sample_rate_hz"), Value::num(2e6).unwrap(), None);
         lock(&core.streams).end(&core, core.ticks(5_000_000), false, false);
         let clocks: Vec<_> = core.clocks.sample_clock_records().iter().map(|r| (r.origin.ticks_in(r.root).unwrap(), r.ended_at.map(|end| end.ticks_in(r.root).unwrap()))).collect();
         assert_eq!(clocks.len(), 2, "{clocks:?}");
@@ -878,10 +880,10 @@ mod tests {
             let (core, device, _) = rig();
             match dir { Dir::Rx => device.rx_open(1).unwrap(), Dir::Tx => device.tx_open(1).unwrap() }
             let (mut control, _tx) = control(&core, &[dir]);
-            control.book_cold(key(&format!("radio.{}.sample_rate_hz", dir.name())), Value::num(2e6).unwrap(),
+            control.book_cold(ActionId(1), key(&format!("radio.{}.sample_rate_hz", dir.name())), Value::num(2e6).unwrap(),
                 Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
             let gain = key(&format!("radio.{}.gain_db", dir.name()));
-            control.book_timed(gain.clone(), Value::num(3.0).unwrap(), None);
+            control.book_timed(ActionId(1), gain.clone(), Value::num(3.0).unwrap(), None);
             control.release();
             assert_eq!(control.config[&gain], Value::num(3.0).unwrap());
             assert!(lock(&core.rec).rejected.is_empty());
@@ -919,10 +921,10 @@ mod tests {
             device.tx_open(1).unwrap();
             let (mut control, _tx) = control(&core, &[Dir::Rx, Dir::Tx]);
             let gain = key("radio.tx.gain_db");
-            control.book_timed(gain.clone(), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(1_040_000_000)))));
+            control.book_timed(ActionId(1), gain.clone(), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(1_040_000_000)))));
             let node = ezsdr_kernel::id::ResourceId::parse(target).unwrap();
-            control.book(Action::Stop { target: Some(super::super::test_support::target_of(&node)) }, Some(node));
-            control.book_cold(key("radio.tx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
+            control.book(Dispatched::new(ActionId(1), Action::Stop { target: Some(super::super::test_support::target_of(&node)) }, Some(node)));
+            control.book_cold(ActionId(1), key("radio.tx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
             assert_eq!(control.held.len(), 1, "{target}");
             assert!(!lock(&core.rec).applied.iter().any(|r| r.get("cancelled").is_some()), "{target}");
             let plan = plan_of(&core, Dir::Tx);
@@ -948,7 +950,7 @@ mod tests {
                 let config = control.config_at(i64::MAX);
                 let records = core.clocks.sample_clock_records();
                 let version = lock(&core.streams).version;
-                control.book_cold(key(&format!("radio.{}.sample_rate_hz", dir.name())), Value::num(2e6).unwrap(),
+                control.book_cold(ActionId(1), key(&format!("radio.{}.sample_rate_hz", dir.name())), Value::num(2e6).unwrap(),
                     Some(AbsoluteDeadline::new(core.at(at))));
                 assert_eq!(control.config_at(i64::MAX), config);
                 assert_eq!(core.clocks.sample_clock_records(), records);
@@ -964,7 +966,7 @@ mod tests {
         // A cold disable needs its cut only, so the largest aligned instant remains valid.
         let (core, _, _) = rig();
         let (mut control, _tx) = control(&core, &[Dir::Tx]);
-        control.book_cold(key("radio.tx.channels"), Value::from(0), Some(AbsoluteDeadline::new(core.at(aligned_max))));
+        control.book_cold(ActionId(1), key("radio.tx.channels"), Value::from(0), Some(AbsoluteDeadline::new(core.at(aligned_max))));
         assert_eq!(core.clocks.sample_clock_records()[0].ended_at, Some(core.at(aligned_max)));
         let plan = plan_of(&core, Dir::Tx);
         assert_eq!(plan.len(), 1);
@@ -989,8 +991,8 @@ mod tests {
                         let config = control.config_at(i64::MAX);
                         let version = lock(&core.streams).version;
                         let name = format!("radio.{}.{}", dir.name(), if cold { "sample_rate_hz" } else { "gain_db" });
-                        if cold { control.book_cold(key(&name), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(at))); }
-                        else { control.book_timed(key(&name), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(at))); }
+                        if cold { control.book_cold(ActionId(1), key(&name), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(at))); }
+                        else { control.book_timed(ActionId(1), key(&name), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(at))); }
                         assert!(control.held.is_empty()); assert_eq!(control.config_at(i64::MAX), config);
                         assert_eq!(lock(&core.streams).version, version, "the plan is unchanged");
                         assert_eq!(core.clocks.sample_clock_records(), records);
@@ -1015,7 +1017,7 @@ mod tests {
                 1 => (Some(AbsoluteDeadline::new(core.at(600_000))), 600_000),
                 _ => (Some(AbsoluteDeadline::new(TimePoint::new(derived, 900_001))), 600_001),
             };
-            control.book_timed(key("radio.tx.gain_db"), Value::num(3.0).unwrap(), at);
+            control.book_timed(ActionId(1), key("radio.tx.gain_db"), Value::num(3.0).unwrap(), at);
             assert_eq!(control.held.keys().map(|order| order.0).collect::<Vec<_>>(), vec![expected]);
             assert!(lock(&core.rec).rejected.is_empty());
         }
@@ -1029,9 +1031,9 @@ mod tests {
         let (core, device, time) = rig();
         device.tx_open(1).unwrap();
         let (mut control, _tx) = control(&core, &[Dir::Tx]);
-        control.book_cold(key("radio.tx.channels"), Value::from(0), Some(AbsoluteDeadline::new(core.at(core.ticks(100_000_000)))));
+        control.book_cold(ActionId(1), key("radio.tx.channels"), Value::from(0), Some(AbsoluteDeadline::new(core.at(core.ticks(100_000_000)))));
         for (ms, gain) in [(50, 1.0), (50, 2.0), (150, 4.0)] {
-            control.book_timed(key("radio.tx.gain_db"), Value::num(gain).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(ms * 1_000_000)))));
+            control.book_timed(ActionId(1), key("radio.tx.gain_db"), Value::num(gain).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(ms * 1_000_000)))));
         }
         time.advance_to(core.at(core.ticks(60_000_000))).unwrap();
         control.release();
@@ -1059,21 +1061,21 @@ mod tests {
             let rate = key(&format!("radio.{}.sample_rate_hz", dir.name()));
             let gain = key(&format!("radio.{}.gain_db", dir.name()));
             if halt {
-                control.book_cold(rate.clone(), Value::num(2e6).unwrap(), at(100));
+                control.book_cold(ActionId(1), rate.clone(), Value::num(2e6).unwrap(), at(100));
                 let refused = plan_of(&core, dir)[1].segment.by.unwrap();
                 assert!(lock(&core.streams).refuse(&core, dir, refused), "{case}");
             } else {
-                control.book(Action::Stop { target: Some(super::super::test_support::target_of(&core.rx_id)) }, Some(core.rx_id.clone()));
+                control.book(Dispatched::new(ActionId(1), Action::Stop { target: Some(super::super::test_support::target_of(&core.rx_id)) }, Some(core.rx_id.clone())));
             }
-            control.book_timed(gain.clone(), Value::num(3.0).unwrap(), at(200));
+            control.book_timed(ActionId(1), gain.clone(), Value::num(3.0).unwrap(), at(200));
             match enable {
-                "cold" => control.book_cold(rate.clone(), Value::num(1e6).unwrap(), at(300)),
-                _ => control.book(Action::Command {
+                "cold" => control.book_cold(ActionId(1), rate.clone(), Value::num(1e6).unwrap(), at(300)),
+                _ => control.book(Dispatched::new(ActionId(1), Action::Command {
                     target: super::super::test_support::target_of(&core.rx_id),
                     verb: ezsdr_kernel::spec::Ident::parse(ezsdr_radio::START_RX).unwrap(),
                     params: BTreeMap::new(),
                     at: at(300),
-                }, Some(core.rx_id.clone())),
+                }, Some(core.rx_id.clone()))),
             }
             time.advance_to(core.at(ms(199))).unwrap();
             control.release();
@@ -1101,14 +1103,14 @@ mod tests {
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let gain = key("radio.rx.gain_db");
-        control.book_cold(key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(100)))));
+        control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(100)))));
         let refused = plan_of(&core, Dir::Rx)[1].segment.by.unwrap();
         assert!(lock(&core.streams).refuse(&core, Dir::Rx, refused));
         for i in 0..core.description.timing.command_queue_depth {
-            control.book_timed(gain.clone(), Value::num(1.0).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(50) + i))));
+            control.book_timed(ActionId(1), gain.clone(), Value::num(1.0).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(50) + i))));
         }
         for t in [ms(100), ms(200)] {
-            control.book_timed(gain.clone(), Value::num(2.0).unwrap(), Some(AbsoluteDeadline::new(core.at(t))));
+            control.book_timed(ActionId(1), gain.clone(), Value::num(2.0).unwrap(), Some(AbsoluteDeadline::new(core.at(t))));
         }
         assert!(lock(&core.rec).rejected.is_empty(), "{:?}", lock(&core.rec).rejected);
         assert_eq!(control.held.len(), core.description.timing.command_queue_depth as usize + 2);
@@ -1124,13 +1126,13 @@ mod tests {
         let us = |n: i64| core.ticks(n * 1_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(us(n))));
         let gain = key("radio.rx.gain_db");
-        control.book_cold(key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), at(300_000));
+        control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), at(300_000));
         let refused = plan_of(&core, Dir::Rx)[1].segment.by.unwrap();
-        control.book_timed(gain.clone(), Value::num(1.0).unwrap(), at(300_000));
+        control.book_timed(ActionId(1), gain.clone(), Value::num(1.0).unwrap(), at(300_000));
         time.advance_to(core.at(us(297_500))).unwrap();
         control.release();
         assert!(lock(&core.streams).refuse(&core, Dir::Rx, refused));
-        control.book_timed(gain.clone(), Value::num(2.0).unwrap(), at(299_600));
+        control.book_timed(ActionId(1), gain.clone(), Value::num(2.0).unwrap(), at(299_600));
         control.release();
         let rows: Vec<_> = lock(&core.rec).applied.iter().filter(|r| r["key"] == "radio.rx.gain_db")
             .map(|r| (r["claimed"].as_f64().unwrap(), r["issued"] == true, r["note"] == "no channel")).collect();

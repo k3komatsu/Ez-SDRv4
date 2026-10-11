@@ -98,7 +98,7 @@ The values of MR-3 come from these sources, each marked in the table:
   7. Every `ctx.links` entry must be `{ component: fragment.id, port: rx, StreamOut }`; any other is `Rejected`. A link whose `policy()` is `Block` must be the only `rx` link ("MR-7: a Block link must be the Mock's only rx link"): a `Full` on one of several links could not be an overrun of all of them (MR-19).
   8. The fault entries of `ezsdr_sim::faults(&ctx.environment)` whose `target` is `fragment.id` are kept (SE-4); a reader error is `Rejected`. The jitter generator is `SimRng::new(ezsdr_sim::seed(&ctx.environment)?, "<device>/rx")`.
   9. The handles of `ctx` are kept (MA-5a).
-  10. It returns `PrepareReport { fragment: fragment.id, effective: the ten configuration keys (RM-5), coercions: the report's, warnings: [] }`.
+  10. It returns `PrepareReport { effective: the ten configuration keys (RM-5), coercions: the report's, warnings: [] }`.
 
   `prepare` does not block (MA-8). *Checked by `mr_07_prepare_cases` and `mr_08_effective_holds_exactly_the_ten_configuration_keys`, and MA-12's agreement by `mr_07_prepare_reports_the_coercions_coerce_reported`.*
 - **MR-8** The coercions `prepare` reports are those `coerce` returned for the fragment's `requested`, because `prepare` calls `coerce` on it (MA-12, SB-44).
@@ -234,7 +234,7 @@ In `crates/ezsdr-mock-radio/tests/mock_radio.rs`, with a harness built from `Man
 | `mr_13_ramp_values` | the bytes of sample `k` on channel `c` are MR-13's | MR-13 |
 | `mr_14_blocks_appear_when_their_last_sample_has_occurred` | at 1 Msps with 1 GHz root, block 0 appears at `T0 + 1 999 001`, not at `T0 + 1 999 000`, the instant of its last sample; the next wakeup is at `T0 + 3 999 001` | MR-14 |
 | `mr_14_a_block_is_published_strictly_after_its_last_sample` (unit test in `src/time.rs`) | `v_after` is `⌊o + k · q⌋ + 1`: 16 at ratio 5, and 344 and 1 011 at ratio 1000/3 | MR-14 |
-| `mr_16_burst_refusals` | each MR-16 refusal as `COMMAND_REJECTED` with its reason | MR-16, RM-13 |
+| `mr_16_burst_refusals` | each MR-16 refusal as `COMMAND_REJECTED` with its reason; the first three name the ids they were dispatched with in `action` | MR-16, RM-13, MR-29 |
 | `mr_16_repeat_is_contiguous_across_wraps` | MR-16's statement | MR-16, MR-23, SC-26 |
 | `mr_17_late_policy_outcomes` | MR-17's statement | MR-17, RM-14 |
 | `mr_17_a_burst_before_its_clock_s_origin_is_late` | `x310-like`: a `send_asap` burst for 1 ms after a transmit enable from 0 channels, and after a rate change, before the new clock's origin | one `TIME_ERROR { send_asap }` late by the origin less the target; the burst starts at sample 0 | MR-17, RM-15 |
@@ -261,7 +261,7 @@ In `crates/ezsdr-mock-radio/tests/mock_radio.rs`, with a harness built from `Man
 | `mr_25_a_stop_cuts_at_its_instant` | a `Stop` of `mock/rx`, a `Stop` of `mock` and `stop(Orderly)` at T0 + 7.777 777 ms, on `ideal` at 1 MS/s and on `x310-like` at 390.625 kS/s: the last block ends at the first sample at or after the instant, and the clock ends at that sample's instant | MR-25, RM-16 |
 | `mr_25_a_stopped_stream_keeps_its_end` | `ideal` (T0 = 0) and `x310-like` (T0 = 2 s), 1 MS/s: a `Stop` of `mock/rx` at T0 + 1 ms; then, each in a fresh harness, at T0 + 5 ms: `stop(Orderly)`; a second `Stop` of `mock/rx`; a `Stop` of `mock`; stepped to T0 + 10 ms: the last block ends at sample 1 000 and the receive clock at T0 + 1 ms, each time. Then on `x310-like` the same `Stop`, and `stop(Abort)` at T0 + 1.5 ms: the block `[0, 1 000)` only | MR-25, RM-16 |
 | `mr_26_cleanup_is_idempotent` | `cleanup()` twice after `stop`; no panic; `step` afterwards publishes nothing and returns `progressed: false` | MR-26, MA-7 |
-| `mr_29_other_actions_are_command_rejected` | a `SetTimer` and a `Command` delivered: two `radio.COMMAND_REJECTED` events with `action` `set_timer` and `command` and source `<device>`; two `rejected` section records | MR-29, MR-27, MR-28 |
+| `mr_29_other_actions_are_command_rejected` | a `SetTimer` and a `Command` delivered: two `radio.COMMAND_REJECTED` events with source `<device>` and `action` 1 and 2, the ids they were dispatched with; two `rejected` section records | MR-29, MR-27, MR-28 |
 | `mr_29_start_rx_is_the_one_command` | `ideal`, after a `Stop` of `mock/rx` at 1 ms: `start_rx` on `mock/tx`, on `mock` and on `mock/rx` with a param; then on `mock/rx` at 3 ms and again at 4 ms | three `rejected` rows `command` and three `radio.COMMAND_REJECTED`; the clocks `[(0, 1 ms), (3 ms, running)]`, the new clock's first block at tick 0 with no flags | MR-29, RM-12, RM-21 |
 | `mr_18_a_cold_change_that_arrives_after_a_later_one_follows_it`, `mr_18_a_disable_that_arrives_after_a_later_change_follows_it` | a `cold` change for 1.000 5 ms and one received after it for 1.000 001 ms (or 1.000 5 ms), each direction | the second at the first's instant, after it, with `LATE_COMMAND` when its own was earlier; the clocks as RM-25 plans them | MR-18, RM-25 |
 | `mr_18_a_burst_on_a_later_clock_survives_an_earlier_switch` | `ideal`: transmit rate changes booked for 1 ms and 2 ms, then a burst on the second's clock | the burst plays on its clock; nothing rejected | MR-16, MR-18 |
@@ -315,3 +315,4 @@ A transmit port and `TX_UNDERFLOW` (Phase 10); `ALIGNMENT` injection (Phase 7, w
 | 2026-10-10 | MR-11 | no longer says a receive block never carries `LATE`: the constructor refuses it (SC-16a) | [audit item 6](../plan/maintenance/24-prefreeze-audit.md), owner decision 2026-10-09 |
 | 2026-10-10 | MR-29 | the Action `PeripheralCommand` is `Command`, so a refused one is recorded as `command` (#55); no change of rule | [audit item 7](../plan/maintenance/24-prefreeze-audit.md), owner decision 2026-10-09 |
 | 2026-10-10 | MR-2, MR-23, MR-27, MR-28 | section names lose the instance id (`ezsdr.radio.mock.<suffix>`): the Kernel files each under the writer's source root, so `id` is any one `ResourceId` segment; events carry the context's source root | [spec 27](../plan/maintenance/27-role-typed-identities.md) §2, [audit 28](../plan/maintenance/28-forward-audit.md) decision 2 |
+| 2026-10-11 | MR-29 | a refusal on receipt names the refused Action's id (RM-22); the Mock receives `Dispatched` and reports `PrepareReport` without a fragment | [spec 27](../plan/maintenance/27-role-typed-identities.md) §3 |

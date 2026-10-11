@@ -489,7 +489,7 @@ fn ea_14_a_child_manifest_that_cannot_be_written_is_still_returned() {
     std::fs::create_dir(dir.join("child-0.manifest.json")).unwrap();
     let Response::Ran { entry, manifest: Some(child), path: None } = ok(run_child(&mut server, receive_spec(1_000), None, Some(10_000_000))) else { panic!() };
     assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
-    let artifact = child.artifacts.iter().find(|artifact| artifact.id.as_str() == "rec").unwrap();
+    let artifact = child.artifacts.values().flatten().find(|artifact| artifact.id.as_str() == "rec").unwrap();
     assert_eq!(read(&mut server, &artifact.uri).len(), 8_000, "its artifacts are still readable");
     let (parent, _) = finish(&mut server);
     assert_eq!(parent.action_log.len(), 1);
@@ -503,7 +503,7 @@ fn ea_14_run_child() {
     let Response::Ran { entry, manifest: Some(child), .. } = ok(run_child(&mut server, receive_spec(1_000), None, Some(10_000_000))) else { panic!() };
     assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
     assert_eq!(child.termination.reason, Termination::Stopped { cause: StopCause::Client {} }, "{:?}", child.termination.reason);
-    let artifact = child.artifacts.iter().find(|artifact| artifact.id.as_str() == "rec").unwrap();
+    let artifact = child.artifacts.values().flatten().find(|artifact| artifact.id.as_str() == "rec").unwrap();
     assert_eq!(artifact.size_bytes, 8_000);
     assert_eq!(read(&mut server, &artifact.uri).len(), 8_000, "a child's artifact is readable");
     let Response::Status { now: after, .. } = ok(server.handle(Request::Status {}, Vec::new())) else { panic!() };

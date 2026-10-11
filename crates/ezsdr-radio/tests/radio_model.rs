@@ -468,10 +468,19 @@ fn rm_22_payloads_round_trip() {
     );
     assert_payload_round_trip(
         CommandRejectedPayload {
-            action: "tx_burst".to_owned(),
+            action: Some(ezsdr_kernel::event::ActionId(7)),
+            kind: "tx_burst".to_owned(),
             reason: "bad waveform".to_owned(),
         },
-        json!({"action": "tx_burst", "reason": "bad waveform"}),
+        json!({"action": 7, "kind": "tx_burst", "reason": "bad waveform"}),
+    );
+    assert_payload_round_trip(
+        CommandRejectedPayload {
+            action: None,
+            kind: "tx_burst".to_owned(),
+            reason: "cancelled".to_owned(),
+        },
+        json!({"kind": "tx_burst", "reason": "cancelled"}),
     );
     // VE-3 (radio 1.3.0).
     assert_payload_round_trip(

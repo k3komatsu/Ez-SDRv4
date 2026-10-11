@@ -329,8 +329,9 @@ pub fn section<'a>(manifest: &'a Manifest, suffix: &str) -> &'a Json {
     manifest.section(&usrp(), &format!("ezsdr.radio.uhd.{suffix}")).unwrap_or_else(|| panic!("no section {suffix}"))
 }
 
-pub fn capture_of(manifest: &Manifest, id: &str) -> ArtifactRef {
-    manifest.artifacts.iter().find(|a| a.id.as_str() == id || a.id.as_str().starts_with(&format!("{id}_"))).unwrap_or_else(|| panic!("no artifact {id}: {:?}", manifest.artifacts)).clone()
+/// The first artifact the Sink of `output` returned (RS-44).
+pub fn capture_of(manifest: &Manifest, output: &str) -> ArtifactRef {
+    manifest.artifacts.iter().find(|(o, _)| o.as_str() == output).and_then(|(_, list)| list.first()).unwrap_or_else(|| panic!("no artifact of {output}: {:?}", manifest.artifacts)).clone()
 }
 
 pub fn read_capture(artifact: &ArtifactRef, channels: usize) -> Vec<Vec<(f32, f32)>> {

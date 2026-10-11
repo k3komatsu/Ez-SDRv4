@@ -422,16 +422,6 @@
   "filter": "kf_03_the_parents_checks_judge_the_child"
  },
  {
-  "id": "G10",
-  "name": "HD-16 every request numbered alike",
-  "file": "crates/ezsdr-sink-capture/src/lib.rs",
-  "old": "                let request = self.received;\n                self.received += 1;",
-  "new": "                let request = self.received;",
-  "crate": "ezsdr-sink-capture",
-  "test_bin": "sink_capture",
-  "filter": "hd_16_every_capture_request_is_numbered"
- },
- {
   "id": "G11",
   "name": "EA-14 input sizes not checked",
   "file": "crates/ezsdr-server/src/lib.rs",
@@ -502,14 +492,6 @@
   "filter": "ea_12_time_and_events"
  },
  {
-  "id": "P09",
-  "name": "EA-17 capture ignores the request number",
-  "file": "python/ezsdr/session.py",
-  "old": "            if event[\"source\"] != source or event[\"payload\"].get(\"request\") != number:",
-  "new": "            if event[\"source\"] != source:",
-  "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples"
- },
- {
   "id": "P10",
   "name": "EA-17 a refused capture does not raise",
   "file": "python/ezsdr/session.py",
@@ -550,22 +532,6 @@
   "python": "test_easy_api.EasyApi.test_ea_16_close_after_the_server_exited"
  },
  {
-  "id": "P15",
-  "name": "EA-16 submit does not count captures",
-  "file": "python/ezsdr/session.py",
-  "old": "            self._captures[recorder] = self._captures.get(recorder, 0) + 1",
-  "new": "            pass",
-  "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples"
- },
- {
-  "id": "P16",
-  "name": "EA-16 request hands back the wrong number",
-  "file": "python/ezsdr/session.py",
-  "old": "        return CaptureRequest(recorder, number, int(n), start, entry)",
-  "new": "        return CaptureRequest(recorder, number + 1, int(n), start, entry)",
-  "python": "test_easy_api.EasyApi.test_ea_17_requests_made_ahead_capture_contiguous_samples"
- },
- {
   "id": "G18",
   "name": "EA-3 an undecodable first frame does not end the handshake",
   "file": "crates/ezsdr-server/src/transport.rs",
@@ -579,8 +545,8 @@
   "id": "G19",
   "name": "HD-11 a discarded request is not answered",
   "file": "crates/ezsdr-sink-capture/src/lib.rs",
-  "old": "                    if discarded.request.is_some() {",
-  "new": "                    if discarded.request.is_some() && false {",
+  "old": "                    if let Some(request) = discarded.request {",
+  "new": "                    if let Some(request) = discarded.request.filter(|_| false) {",
   "crate": "ezsdr-sink-capture",
   "test_bin": "sink_capture",
   "filter": "hd_16_a_discarded_request_is_answered"
@@ -616,28 +582,12 @@
   "filter": "kf_03_rs_25a_refusals"
  },
  {
-  "id": "P17",
-  "name": "EA-17 a rejected capture is counted",
-  "file": "python/ezsdr/session.py",
-  "old": "        if entry[\"outcome\"][\"kind\"] == \"admitted\" and capture and target.get(\"kind\") == \"output\":",
-  "new": "        if capture and target.get(\"kind\") == \"output\":",
-  "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples"
- },
- {
   "id": "P18",
   "name": "EA-17 the deadline restarts per skipped event",
   "file": "python/ezsdr/session.py",
   "old": "            wait = {\"until\": result[\"horizon\"]}\n",
   "new": "",
   "python": "test_easy_api.EasyApi.test_ea_17_a_capture_keeps_its_first_deadline"
- },
- {
-  "id": "P20",
-  "name": "EA-17 a SetParameter request not counted",
-  "file": "python/ezsdr/session.py",
-  "old": " or (\n            action.get(\"kind\") == \"set_parameter\" and action.get(\"key\") == \"sink.capture_samples\"\n        )",
-  "new": "",
-  "python": "test_easy_api.EasyApi.test_ea_17_each_capture_gets_its_own_samples"
  },
  {
   "id": "P21",

@@ -12,7 +12,7 @@ use ezsdr_kernel::binding::Violation;
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection};
 use ezsdr_kernel::event::{Action, ActionId, Event, EventHandle, EventKind, EventSink, EventSource, Severity, Target};
 use ezsdr_kernel::hash::ContentHash;
-use ezsdr_kernel::id::{ClockDomainId, IslandId, MemoryDomainId, ResourceId};
+use ezsdr_kernel::id::{ClockDomainId, IslandId, MemoryDomainId};
 use ezsdr_kernel::module_api::{
     ActionReceiver, ActionSubmitter, AttachedPort, ComponentDescriptor, ComponentImpl,
     ComponentKind, ComponentPlacement, ComponentRequires, ComponentTiming, Endpoint, ExecutionClass, Executor,
@@ -112,8 +112,8 @@ fn scripted() -> Implementation {
 struct Queue(Mutex<VecDeque<Action>>);
 
 impl ActionReceiver for Queue {
-    fn recv(&self) -> Option<(Action, Option<ResourceId>)> {
-        self.0.lock().unwrap().pop_front().map(|action| (action, None))
+    fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> {
+        self.0.lock().unwrap().pop_front().map(|action| ezsdr_kernel::module_api::Dispatched::new(ActionId(1), action, None))
     }
 }
 
@@ -318,16 +318,14 @@ fn nx_04_prepare_cases() {
     assert!(log().is_empty());
 
     // Two Islands on one Executor: each component sees only its own link ends and its
-    // own Island's source, and each Island reports its own fragment.
+    // own Island's source; the Kernel files each report under the Island it invoked.
     let mut executor = NativeExecutor::new(vec![scripted()]).unwrap();
     let first = executor
         .prepare(&island(3, &["a", "b"]), h.ctx(3, ExecutionClass::Simulation, vec![link_end("a"), link_end("b"), link_end("b")], &[component("a"), component("b")]))
         .unwrap();
-    let second = executor
+    executor
         .prepare(&island(4, &["c"]), h.ctx(4, ExecutionClass::Simulation, vec![link_end("c")], &[component("c")]))
         .unwrap();
-    assert_eq!(first.fragment.as_str(), "island_3");
-    assert_eq!(second.fragment.as_str(), "island_4");
     assert!(first.effective.is_empty() && first.coercions.is_empty() && first.warnings.is_empty());
     assert_eq!(log(), vec![
         "prepare:a:links=a.rx:source=island 103",

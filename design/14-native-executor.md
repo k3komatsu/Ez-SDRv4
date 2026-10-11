@@ -86,7 +86,7 @@ A `ComponentContext` carries no `ActionSubmitter`: a component's Actions go thro
   2. Every `ctx.links` entry must name the `component` of an entry of `island.components` (spec 20, KH-2; issue #39); one that does not is `Rejected`.
   3. For the `component` of each entry of `island.components` (spec 20, KH-2; issue #39), in the Island's order: a component this Executor already holds (from another Island) is `Rejected`; its descriptor is `ctx.components[id]`, and a missing one is `Rejected`; it is loaded (NX-3); `(implementation.make)()` builds it, and the Executor keeps it **before** calling its `prepare`, so that `stop` and `cleanup` reach a component whose `prepare` failed, as MA-7 has them reach every instance that reached `prepare`; its `prepare` receives a `ComponentContext` whose `descriptor` is the Spec's, whose `links` are exactly the `ctx.links` entries naming it, whose `source` is `ctx.source` (the Kernel gives an Executor `{island}`, KC-8), and whose other handles are `ctx`'s. A component's error is `prepare`'s error.
   4. The Executor keeps `ctx.actions` and `ctx.actions_out` (MA-5a).
-  5. It returns `PrepareReport { fragment: island_<island.id.local>, effective: {}, coercions: [], warnings: [] }`.
+  5. It returns `PrepareReport { effective: {}, coercions: [], warnings: [] }`, which the Kernel files under the Island's fragment (SB-41).
 
   One Executor may run several Islands (SB-22a); `prepare` is then called once per Island (MA-7), and each call adds that Island's components. *Checked by `nx_04_prepare_cases` (a non-Simulation class `Unsupported`; a link end for a component outside the Island refused; a component placed on two Islands refused; each component receives only its own link ends and its Island's source; two Islands on one Executor; a component whose `prepare` fails fails the Island's and is still cleaned up).*
 
@@ -151,3 +151,4 @@ Applying Actions to components, including updates of component parameters under 
 | date | rules | change | record |
 |---|---|---|---|
 | 2026-10-10 | NX-4, §4 | `ComponentContext.source` is the `EventSource` the Kernel hands the Executor (`{island}`), not a `ResourceId` formatted from the Island id; the fragment id `island_<n>` is unchanged | [spec 27](../plan/maintenance/27-role-typed-identities.md) §2 |
+| 2026-10-11 | NX-3 | the report names no fragment, so the Executor derives no `island_<n>` label; the Kernel files it under the fragment it invoked | [spec 27](../plan/maintenance/27-role-typed-identities.md) §3 |

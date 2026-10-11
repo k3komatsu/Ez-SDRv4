@@ -14,12 +14,12 @@ use std::sync::Arc;
 use ezsdr_hostmem::interleave;
 use ezsdr_kernel::binding::Binding;
 use ezsdr_kernel::contract::DataContractId;
-use ezsdr_kernel::event::{Action, Event, EventKind, EventSink, EventSource, Severity, Target};
+use ezsdr_kernel::event::{Action, ActionId, Event, EventKind, EventSink, EventSource, Severity, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, RunId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
-    ActionReceiver, Endpoint, KERNEL_API, ModuleDescriptor, ModuleError, ModuleRef,
+    ActionReceiver, Dispatched, Endpoint, KERNEL_API, ModuleDescriptor, ModuleError, ModuleRef,
     Role, Sink, SinkDescriptor, StepOutcome, StopMode, Version, VersionReq,
     VocabularyRequirement,
 };
@@ -87,12 +87,12 @@ struct Capture {
     builders: Vec<ContinuityMap>,
     builder: Option<(ContinuityBuilder, ClockDomainId, u16)>,
     started: bool,
-    /// The request's number (HD-16); null for the output's own capture.
-    request: Option<u64>,
+    /// The request's ActionId (HD-16); none for the output's own capture.
+    request: Option<ActionId>,
 }
 
 impl Capture {
-    fn new(id: Option<Ident>, n: u64, at: Option<AbsoluteDeadline>, request: Option<u64>) -> Capture {
+    fn new(id: Option<Ident>, n: u64, at: Option<AbsoluteDeadline>, request: Option<ActionId>) -> Capture {
         Capture {
             request,
             id,
@@ -124,9 +124,6 @@ pub struct CaptureSink {
     link: Option<Arc<dyn DataLink>>,
     queue: VecDeque<Capture>,
     done: Vec<ArtifactRef>,
-    requests: u32,
-    /// Capture requests received so far, accepted or not: the next one's number (HD-16).
-    received: u64,
 }
 
 impl CaptureSink {
@@ -168,8 +165,6 @@ impl CaptureSink {
             link: None,
             queue: VecDeque::new(),
             done: Vec::new(),
-            requests: 0,
-            received: 0,
         })
     }
 
@@ -177,7 +172,7 @@ impl CaptureSink {
         ModuleError::rejected(message)
     }
 
-    fn event_for_rejection(&self, action: &str, reason: String, request: Option<u64>) {
+    fn event_for_rejection(&self, action: ActionId, kind: &str, reason: String) {
         let (Some(events), Some(time), Some(source)) = (&self.events, &self.time, &self.source) else {
             return;
         };
@@ -191,31 +186,30 @@ impl CaptureSink {
             severity: Severity::Warning,
             kind: EventKind::parse(REQUEST_REJECTED).expect("a valid Sink event kind"),
             payload: serde_json::to_value(RequestRejectedPayload {
-                action: action.to_owned(),
+                action,
+                kind: kind.to_owned(),
                 reason,
-                request,
             })
             .expect("a rejection payload is JSON"),
         };
         let _ = events.emit_control(event);
     }
 
-    fn handle_action(&mut self, action: Action) -> Result<(), ModuleError> {
-        match action {
+    fn handle_action(&mut self, dispatched: Dispatched) -> Result<(), ModuleError> {
+        let id = dispatched.id;
+        match dispatched.action {
             Action::UpdateParameter { key, value, at, .. }
                 if key.as_str() == CAPTURE_SAMPLES =>
             {
-                let request = self.received;
-                self.received += 1;
                 match value {
                     Value::Scalar(Scalar::Int(n)) if n >= 1 => {
                         self.queue
-                            .push_back(Capture::new(None, n as u64, at, Some(request)));
+                            .push_back(Capture::new(None, n as u64, at, Some(id)));
                     }
                     _ => self.event_for_rejection(
+                        id,
                         "update_parameter",
                         "HD-14: sink.capture_samples must be a positive Int".to_owned(),
-                        Some(request),
                     ),
                 }
             }
@@ -230,11 +224,11 @@ impl CaptureSink {
                 // A discarded request is answered, so its client does not wait out its
                 // timeout (HD-11; Review I, P2-1).
                 for discarded in std::mem::take(&mut self.queue) {
-                    if discarded.request.is_some() {
+                    if let Some(request) = discarded.request {
                         self.event_for_rejection(
+                            request,
                             "update_parameter",
                             "HD-11: discarded by a Stop for the Sink".to_owned(),
-                            discarded.request,
                         );
                     }
                 }
@@ -242,9 +236,9 @@ impl CaptureSink {
             other => {
                 let kind = action_kind(&other);
                 self.event_for_rejection(
+                    id,
                     kind,
                     format!("HD-14: Action kind `{kind}` is not supported by the capture Sink"),
-                    None,
                 );
             }
         }
@@ -287,12 +281,13 @@ impl CaptureSink {
                 let lower = match lower_tick(&header, at, &clocks) {
                     Ok(lower) => lower,
                     Err(error) => {
-                        let request = self.queue.pop_front().and_then(|capture| capture.request);
-                        self.event_for_rejection(
-                            "update_parameter",
-                            format!("HD-14: capture start time cannot be converted: {error}"),
-                            request,
-                        );
+                        if let Some(request) = self.queue.pop_front().and_then(|capture| capture.request) {
+                            self.event_for_rejection(
+                                request,
+                                "update_parameter",
+                                format!("HD-14: capture start time cannot be converted: {error}"),
+                            );
+                        }
                         continue;
                     }
                 };
@@ -374,20 +369,22 @@ impl CaptureSink {
     }
 
     fn start_front(&mut self, bps: usize, contract: DataContractId) -> Result<(), ModuleError> {
-        let id = if let Some(id) = self.queue.front().and_then(|capture| capture.id.clone()) {
-            id
-        } else {
-            let output = self
-                .output
-                .as_ref()
-                .ok_or_else(|| ModuleError::rejected("HD-10: output id is missing"))?;
-            let id = Ident::parse(&format!("{output}_{}", self.requests))
-                .map_err(|error| ModuleError::rejected(format!("HD-10: {error}")))?;
-            self.requests = self
-                .requests
-                .checked_add(1)
-                .ok_or_else(|| ModuleError::rejected("HD-10: capture request counter overflow"))?;
-            id
+        let output = self
+            .output
+            .as_ref()
+            .ok_or_else(|| ModuleError::rejected("HD-10: output id is missing"))?;
+        // HD-16: a requested capture is named by its request's ActionId, the output's own
+        // by the output; the Kernel files both under the output (RS-38).
+        let front = self.queue.front().expect("a capture is queued");
+        let (id, stem) = match (front.request, front.id.clone()) {
+            (Some(request), _) => {
+                let id = Ident::parse(&format!("capture_{}", request.0))
+                    .map_err(|error| ModuleError::rejected(format!("HD-10: {error}")))?;
+                let stem = format!("{output}_{id}");
+                (id, stem)
+            }
+            (None, Some(id)) => (id, output.to_string()),
+            (None, None) => return Err(ModuleError::rejected("HD-10: a capture has neither a request nor an id")),
         };
         let run = self
             .run
@@ -405,7 +402,7 @@ impl CaptureSink {
             })
             .collect();
         // HD-15: the capture's file is a SigMF Dataset, whatever its contract.
-        let file_name = format!("{safe_run}_{id}.sigmf-data");
+        let file_name = format!("{safe_run}_{stem}.sigmf-data");
         let absolute = std::path::absolute(self.dir.join(file_name))
             .map_err(|error| ModuleError::rejected(format!("HD-10: cannot resolve capture path: {error}")))?;
         let file = File::create_new(&absolute).map_err(|error| {
@@ -476,8 +473,8 @@ impl CaptureSink {
         Ok(())
     }
 
-    /// HD-16: `sink.CAPTURE_WRITTEN` with the artifact just recorded and its request's number.
-    fn announce(&self, artifact: ArtifactRef, request: Option<u64>) {
+    /// HD-16: `sink.CAPTURE_WRITTEN` with the artifact just recorded and its request's id.
+    fn announce(&self, artifact: ArtifactRef, action: Option<ActionId>) {
         let (Some(events), Some(time), Some(source)) = (&self.events, &self.time, &self.source) else {
             return;
         };
@@ -489,7 +486,7 @@ impl CaptureSink {
             time: now,
             severity: Severity::Info,
             kind: EventKind::parse(CAPTURE_WRITTEN).expect("a valid Sink event kind"),
-            payload: serde_json::to_value(CaptureWrittenPayload { artifact, request }).expect("an ArtifactRef is JSON"),
+            payload: serde_json::to_value(CaptureWrittenPayload { artifact, action }).expect("an ArtifactRef is JSON"),
         });
     }
 }
@@ -557,14 +554,11 @@ impl Sink for CaptureSink {
         self.link = Some(link.clone());
         self.queue.clear();
         self.done.clear();
-        self.requests = 0;
-        self.received = 0;
         if let Some(n) = capture_samples {
             self.queue.push_back(Capture::new(Some(request.id), n, None, None));
         }
 
         Ok(PrepareReport {
-            fragment: fragment.id.clone(),
             effective: BTreeMap::new(),
             coercions: Vec::new(),
             warnings: Vec::new(),
@@ -582,9 +576,9 @@ impl Sink for CaptureSink {
     fn step(&mut self, _until: TimePoint) -> Result<StepOutcome, ModuleError> {
         let mut progressed = false;
         if let Some(actions) = self.actions.clone() {
-            while let Some((action, _)) = actions.recv() {
+            while let Some(dispatched) = actions.recv() {
                 progressed = true;
-                self.handle_action(action)?;
+                self.handle_action(dispatched)?;
             }
         }
         if let Some(link) = self.link.clone() {

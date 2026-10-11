@@ -468,14 +468,14 @@ fn ur_11_coerce_is_the_descriptions() {
 
 struct NoActions;
 impl ActionReceiver for NoActions {
-    fn recv(&self) -> Option<(Action, Option<ResourceId>)> {
+    fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> {
         None
     }
 }
 struct NoSubmit;
 impl ActionSubmitter for NoSubmit {
     fn submit(&self, _: Action) -> Result<ActionId, Vec<ezsdr_kernel::binding::Violation>> {
-        Ok(ActionId(0))
+        Ok(ActionId(1))
     }
 }
 
@@ -530,11 +530,13 @@ fn attached(policy: ezsdr_kernel::stream::BackPressure) -> AttachedPort {
 
 /// A queue the test pushes Actions into, as the coordinator dispatches them.
 #[derive(Default)]
-struct Pushed(Mutex<std::collections::VecDeque<Action>>);
+struct Pushed(Mutex<std::collections::VecDeque<Action>>, std::sync::atomic::AtomicU64);
 impl ActionReceiver for Pushed {
-    // The coordinator's resolution (KC-23): every test Action is the device's.
-    fn recv(&self) -> Option<(Action, Option<ResourceId>)> {
-        self.0.lock().unwrap().pop_front().map(|action| (action, Some(ResourceId::parse("usrp").unwrap())))
+    // The coordinator's resolution (KC-23): every test Action is the device's; ids count
+    // from 1, as the Kernel's do (KC-24).
+    fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> {
+        let id = || ActionId(self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1);
+        self.0.lock().unwrap().pop_front().map(|action| ezsdr_kernel::module_api::Dispatched::new(id(), action, Some(ResourceId::parse("usrp").unwrap())))
     }
 }
 
@@ -964,7 +966,10 @@ fn ur_21_txburst_refusals() {
     for want in ["UR-21: the waveform size", "UR-21: a waveform sample is not finite", "UR-21: a held burst already has this start"] {
         assert!(reasons.iter().any(|r| r.starts_with(want)), "{want}: {reasons:?}");
     }
-    assert!(events_of(&manifest, "radio.COMMAND_REJECTED").len() >= 3);
+    let rejected = events_of(&manifest, "radio.COMMAND_REJECTED");
+    assert!(rejected.len() >= 3);
+    // MA-14: a burst refused at receipt names the Action it answers.
+    assert!(rejected.iter().all(|e| e.payload["action"].is_u64()), "{rejected:?}");
 }
 
 #[test]
@@ -1458,7 +1463,26 @@ fn ur_25_a_cold_change_the_envelope_refuses_changes_nothing() {
     let rejected = direct.of("radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1);
     assert!(rejected[0].payload["reason"].as_str().unwrap().starts_with("RM-7: "), "{rejected:?}");
+    // MA-14: the refusal names the Action it answers.
+    assert_eq!(rejected[0].payload["action"], 1, "{rejected:?}");
     assert!(direct.device.calls()[before..].iter().all(|c| !c.starts_with("apply") && !c.starts_with("rx_stop")));
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_14_a_device_error_while_booking_names_its_action() {
+    // UR-14, RM-22 (spec 27 §3): a receive enable from no stream whose configuration
+    // fails without the device being lost (the device applying another rate, UR-12) is
+    // refused at booking, and the refusal names the Action.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let config = FakeConfig { faults: vec![FakeFault::WrongRate { claimed: 1e6, applied: 0.5e6, nth: 0 }], ..FakeConfig::default() };
+    let mut direct = Direct::with_links(config, &[("radio.rx.channels", Scalar::from(0))], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)]);
+    direct.update("radio.rx.channels", Value::from(1), Cold, None);
+    direct.settle(Wall::from_millis(100));
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?} {:?}", direct.device.calls());
+    assert!(rejected[0].payload["reason"].as_str().unwrap().starts_with("UR-12: the device applied"), "{rejected:?}");
+    assert_eq!(rejected[0].payload["action"], 1, "{rejected:?}");
     let _ = direct.finish();
 }
 
@@ -2275,7 +2299,7 @@ fn captures_across_cold_changes(config: FakeConfig, selector: Json, rates: [f64;
     if device.min_recv_timeout() < Wall::from_millis(1) {
         problems.push(format!("a receive wait of {:?}", device.min_recv_timeout()));
     }
-    for artifact in manifest.artifacts.iter().filter(|a| a.id.as_str().starts_with("rec")) {
+    for artifact in manifest.artifacts.iter().filter(|(output, _)| output.as_str() == "rec").flat_map(|(_, list)| list) {
         // Each capture begins before its change, so it holds both clocks' samples.
         if artifact.continuity.len() < 2 {
             problems.push(format!("{}: the samples of one clock only: {:?}", artifact.id, artifact.continuity));

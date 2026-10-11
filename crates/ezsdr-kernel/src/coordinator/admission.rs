@@ -279,7 +279,11 @@ pub(super) fn dispatch(shared: &Shared, admitted: AdmittedAction) -> (ActionId, 
             .or_default()
             .insert(key.clone(), value.clone());
     }
-    let pushed = shared.queue(admitted.inst).push(admitted.action, admitted.node);
+    let pushed = shared.queue(admitted.inst).push(crate::module_api::Dispatched {
+        id,
+        action: admitted.action,
+        node: admitted.node,
+    });
     (id, (admitted.inst, pushed))
 }
 

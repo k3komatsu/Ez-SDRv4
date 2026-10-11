@@ -53,7 +53,7 @@ fn module_ref() -> ModuleRef {
 #[derive(Default)]
 struct Queue(Mutex<VecDeque<Action>>);
 impl ActionReceiver for Queue {
-    fn recv(&self) -> Option<(Action, Option<ResourceId>)> { self.0.lock().unwrap().pop_front().map(|action| { let node = node_of(&action); (action, node) }) }
+    fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> { self.0.lock().unwrap().pop_front().map(|action| { let node = node_of(&action); ezsdr_kernel::module_api::Dispatched::new(ActionId(1), action, node) }) }
 }
 
 struct Accepting;

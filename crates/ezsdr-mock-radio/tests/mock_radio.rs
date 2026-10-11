@@ -117,6 +117,8 @@ fn eq(value: Scalar) -> Constraint { Constraint::Eq { value } }
 #[derive(Default)]
 struct Queue {
     actions: Mutex<VecDeque<Action>>,
+    /// The ids handed out so far, as the Kernel's counter does (KC-24).
+    given: std::sync::atomic::AtomicU64,
 }
 
 impl Queue {
@@ -124,7 +126,7 @@ impl Queue {
 }
 
 impl ActionReceiver for Queue {
-    fn recv(&self) -> Option<(Action, Option<ResourceId>)> { self.actions.lock().unwrap().pop_front().map(|action| { let node = node_of(&action); (action, node) }) }
+    fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> { self.actions.lock().unwrap().pop_front().map(|action| { let node = node_of(&action); let id = ActionId(self.given.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1); ezsdr_kernel::module_api::Dispatched::new(id, action, node) }) }
 }
 
 struct RefusingSubmitter;
@@ -784,6 +786,10 @@ fn mr_16_burst_refusals() {
     assert!(reasons[3].contains("repeat"));
     assert!(reasons[5].contains("repeat"));
     assert!(reasons[4].contains("metadata"));
+    // MR-29: each refusal at receipt names the Action it answers (ids 1.. in push order).
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+    let answered: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).map(|event| event.payload["action"].clone()).collect();
+    assert_eq!(answered[..3], [1, 2, 3], "{answered:?}");
 
     let mut no_tx = Harness::new("ideal", &[], &[], &[], None);
     no_tx.arm_start(0).unwrap();
@@ -1958,6 +1964,9 @@ fn mr_29_other_actions_are_command_rejected() {
     let rejected_events: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
     assert_eq!(rejected_events.len(), 2);
     assert!(rejected_events.iter().all(|event| event.source == node_src("mock") && event.time == TimePoint::new(ROOT, 1)));
+    // MA-14: each refusal names the Action it answers, by the id it was dispatched with.
+    let answered: Vec<_> = rejected_events.iter().map(|event| event.payload["action"].clone()).collect();
+    assert_eq!(answered, [serde_json::json!(1), serde_json::json!(2)]);
 }
 
 #[test]

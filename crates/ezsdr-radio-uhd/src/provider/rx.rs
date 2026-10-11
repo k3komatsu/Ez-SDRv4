@@ -279,13 +279,13 @@ impl Rx {
                 self.from = origin.saturating_add(1);
             }
             self.opened = 0;
-            self.core.device_failed("update_parameter", &error);
+            self.core.device_failed(None, "update_parameter", &error);
             return true;
         }
         self.from = origin.saturating_add(1);
         self.opened = channels;
         if let Err(error) = self.core.device.rx_start(origin) {
-            self.core.device_failed("update_parameter", &error);
+            self.core.device_failed(None, "update_parameter", &error);
             return true;
         }
         let declared = self.core.id.child(Dir::Rx.name()).map_err(|e| e.to_string())
@@ -299,7 +299,7 @@ impl Rx {
                 self.last_samples = Instant::now();
                 self.follow();
             }
-            Err(error) => self.core.command_rejected("update_parameter", &format!("UR-25: {error}")),
+            Err(error) => self.core.command_rejected(None, "update_parameter", &format!("UR-25: {error}")),
         }
         self.core.timing(json!({ "what": "rx_segment", "origin": origin, "channels": channels, "at": self.core.now() }));
         true
@@ -397,7 +397,7 @@ impl Rx {
                 // waits the profile's start lead from now (spec 20, VF-6).
                 let restart = match ezsdr_radio::timeline::lattice(now.saturating_add(self.core.ticks(self.core.description.timing.start_lead_ns)), stream.config.ratio) {
                     Ok(restart) => restart,
-                    Err(error) => return self.core.command_rejected("start", &format!("UR-17: {error}")),
+                    Err(error) => return self.core.command_rejected(None, "start", &format!("UR-17: {error}")),
                 };
                 let payload = serde_json::to_value(LateCommandPayload {
                     key: None,
@@ -409,7 +409,7 @@ impl Rx {
                 self.core.emit(&self.core.rx_id, kinds::LATE_COMMAND, Severity::Warning, payload);
                 self.core.timing(json!({ "what": "rx_restart", "requested": stream.start, "at": restart }));
                 if let Err(error) = self.core.device.rx_start(restart) {
-                    self.core.device_failed("start", &error);
+                    self.core.device_failed(None, "start", &error);
                 }
             }
             RxRecv::Failed(error) if error.lost => self.core.device_lost(&error.message),
@@ -592,7 +592,7 @@ fn stop_at_cut(core: &Core, cut: i64) -> Option<i64> {
             Some(core.now() + core.ticks(DEVICE_LEAD_NS))
         }
         Err(error) => {
-            core.device_failed("update_parameter", &error);
+            core.device_failed(None, "update_parameter", &error);
             None
         }
     }

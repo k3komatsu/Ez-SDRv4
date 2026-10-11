@@ -10,7 +10,7 @@ use std::time::{Duration as Wall, Instant};
 
 use ezsdr_kernel::binding::{AdmissionCheck, AdmissionCheckRegistry, CheckStage, Violation};
 use ezsdr_kernel::coordinator::{Assembly, RunHandle, RunHandleError, connect, start_spec_run};
-use ezsdr_kernel::event::{Action, EventKind};
+use ezsdr_kernel::event::{Action, EventKind, Target};
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::module_api::{ExecutionClass, ModuleErrorKind, Pacing, Provider, UpdateClass};
@@ -1000,6 +1000,59 @@ fn kc_21a_an_end_requested_during_the_wait_ends_it() {
         manifest.termination.reason,
         Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } }
     );
+}
+
+#[test]
+fn rs_16_an_action_the_freeze_discards_is_undelivered() {
+    // F24's window: the Provider never takes the Action, KC-21a's wait returns as the
+    // device loss requests the end, the Session logs the Action admitted, and RS-6
+    // step 1 discards it from the queue. The termination section names it (RS-16).
+    let probe = Probe::new();
+    let assembly = provider(
+        paced().assembly,
+        "radio",
+        ThreadedProvider::new("radio", "radio", &probe)
+            .deaf()
+            .losing_device(Wall::from_millis(100)),
+    );
+    let mut run = session(assembly, &profile_one());
+    let entry = run.submit(gain(1.0), None).unwrap();
+    let Outcome::Admitted { dispatched, .. } = entry.outcome else { panic!("{entry:?}") };
+    assert_eq!(dispatched.len(), 1, "{dispatched:?}");
+    let manifest = manifest_of(run);
+    assert_eq!(manifest.termination.undelivered, dispatched);
+    assert!(!probe.lines().iter().any(|line| line.starts_with("radio:took:")));
+}
+
+#[test]
+fn rs_16_a_sink_action_the_freeze_discards_is_undelivered() {
+    // F24's window for a Sink: a recorder's verb queued for a recorder that never
+    // takes it is discarded by RS-6 step 1 and named in `undelivered` (RS-16).
+    let probe = Probe::new();
+    let assembly = provider(
+        paced().assembly,
+        "radio",
+        ThreadedProvider::new("radio", "radio", &probe).losing_device(Wall::from_millis(100)),
+    );
+    let assembly = sink(assembly, RecordingSink::new("rec", &probe).deaf(), &probe);
+    let mut run = session(assembly, &session_sink_profile());
+    let entry = run
+        .submit(
+            SessionAction::Vocabulary {
+                ns: ns("test"),
+                verb: Ident::parse("sweep").unwrap(),
+                target: Target::Output { output: Ident::parse("rec").unwrap() },
+                at: None,
+                params: BTreeMap::new(),
+            },
+            None,
+        )
+        .unwrap();
+    let Outcome::Admitted { dispatched, .. } = entry.outcome else { panic!("{entry:?}") };
+    assert_eq!(dispatched.len(), 1, "{dispatched:?}");
+    let manifest = manifest_of(run);
+    assert_eq!(manifest.termination.undelivered, dispatched);
+    assert!(!probe.lines().iter().any(|line| line.starts_with("rec:action:")));
 }
 
 #[test]

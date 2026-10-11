@@ -1,28 +1,32 @@
 {
+  "$defs": {
+    "ActionId": {
+      "description": "Identifies one dispatched Action inside a Run (RS-15).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Payload for a rejected capture request or unsupported Action (HD-14).",
   "properties": {
     "action": {
-      "description": "The Action's kind tag for a rejected Action (HD-14).",
+      "$ref": "#/$defs/ActionId",
+      "description": "The id of the Action it refuses, which the Kernel gave it at dispatch (HD-16,\nMA-14)."
+    },
+    "kind": {
+      "description": "That Action's kind tag (HD-14).",
       "type": "string"
     },
     "reason": {
       "description": "The reason the Sink could not carry out the request (HD-14).",
       "type": "string"
-    },
-    "request": {
-      "description": "The capture request's number when the rejected Action was one (HD-16; Phase 6,\nReview H, P0-2).",
-      "format": "uint64",
-      "minimum": 0,
-      "type": [
-        "integer",
-        "null"
-      ]
     }
   },
   "required": [
     "action",
+    "kind",
     "reason"
   ],
   "title": "RequestRejectedPayload",
