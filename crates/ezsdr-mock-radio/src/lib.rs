@@ -282,7 +282,7 @@ impl MockRadio {
             id: id.clone(),
             module: module_ref(),
             profile: binding.profile.clone(),
-            tree: profile.description().tree(&id),
+            tree: profile.description().tree(&id, HOST_MEMORY),
             fidelity: profile.fidelity(),
             driving: Driving { stepped: true },
             arm_after,

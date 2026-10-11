@@ -1986,6 +1986,172 @@ fn sb_15_a_bound_resource_port_is_a_link_endpoint() {
 }
 
 #[test]
+fn ma_10_memory_domains_are_validated_for_every_provider_tree_node() {
+    let spec = minimal_spec();
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+
+    let no_root_domain = TestProvider::new("radio", 2).with_root_memory_domains(Vec::new());
+    let providers = one_provider("radio", &no_root_domain);
+    let err = validate(&spec, &profile, &fx.inputs(&providers)).expect_err("root has a port");
+    assert!(matches!(&err, SpecError::Structural { reason }
+        if reason.contains("MA-10") && reason.contains("radio")), "{err:?}");
+
+    // The bound Spec resource is the root; the malformed line remains unbound.
+    let malformed_unbound = TestProvider::new("radio", 2).with_line_memory_domains(1, Vec::new());
+    let providers = one_provider("radio", &malformed_unbound);
+    let err = validate(&spec, &profile, &fx.inputs(&providers))
+        .expect_err("an unbound node in the Provider tree still has a port");
+    assert!(matches!(&err, SpecError::Structural { reason }
+        if reason.contains("MA-10") && reason.contains("radio/1")), "{err:?}");
+
+    let portless = TestProvider::new("radio", 2).with_portless_child();
+    let providers = one_provider("radio", &portless);
+    validate(&spec, &profile, &fx.inputs(&providers))
+        .expect("an empty declaration is valid on a portless structural node");
+}
+
+#[test]
+fn ma_39_resource_domains_follow_bound_nodes_and_cover_resource_endpoints() {
+    let sc16 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.sc16").expect("id");
+
+    // The requested line binds radio/1 (count 2), not its sibling radio/0 (count 1).
+    // Only the bound node's domain 2 matches the Island's singleton domain.
+    let mut resource_to_component = minimal_spec();
+    resource_to_component.resources.insert(
+        id("line0"),
+        resource("test.line", &[("test.count", Constraint::Eq { value: Scalar::from(2) })]),
+    );
+    resource_to_component.graph.components.insert(id("recorder"), support::recorder_component(sc16.clone()));
+    resource_to_component.graph.links.push(ezsdr_kernel::spec::LinkReq {
+        from: PortRef { component: id("line0"), port: id("rx") },
+        to: PortRef { component: id("recorder"), port: id("in") },
+        policy: BackPressure::DropOldest,
+        capacity: 4,
+    });
+    let mut profile = profile_binding(&["radio", "line0"]);
+    bind_exec(&mut profile);
+    let mut recorder = member("recorder");
+    recorder.memory_domain = MemoryDomainId::local(2);
+    profile.placements.islands.push(IslandDecl {
+        id: IslandId::local(0),
+        executor: id("exec"),
+        components: vec![recorder],
+        affinity: None,
+        rt_policy: None,
+    });
+    select_test_links(&resource_to_component, &mut profile);
+    let provider = TestProvider::new("radio", 2)
+        .with_asymmetric_lines(1, 2)
+        .with_line_memory_domains(0, vec![MemoryDomainId::local(1)])
+        .with_line_memory_domains(1, vec![MemoryDomainId::local(2)]);
+    let providers: BTreeMap<Ident, &dyn Provider> = [
+        (id("radio"), &provider as &dyn Provider),
+        (id("line0"), &provider as &dyn Provider),
+    ].into_iter().collect();
+    let mut fx = Fixture::new();
+    fx.executors.get_mut(&id("exec")).expect("exec").memory_domains = vec![MemoryDomainId::local(0), MemoryDomainId::local(2)];
+    let admission = validate(&resource_to_component, &profile, &fx.inputs(&providers)).expect("validates");
+    assert_eq!(admission.matched[&id("line0")], rid("radio/1"));
+    plan(&resource_to_component, &profile, &admission, &fx.inputs(&providers))
+        .expect("the bound node's domain 2 reaches the component");
+
+    // Component -> Resource uses the test Provider's In port (`tx`); domain 2 is
+    // not connected to the component's domain 0.
+    let mut component_to_resource = minimal_spec();
+    component_to_resource.resources.insert(id("line0"), resource("test.line", &[]));
+    component_to_resource.graph.components.insert(id("source"), support::source_component(sc16.clone()));
+    component_to_resource.graph.links.push(ezsdr_kernel::spec::LinkReq {
+        from: PortRef { component: id("source"), port: id("out") },
+        to: PortRef { component: id("line0"), port: id("tx") },
+        policy: BackPressure::DropOldest,
+        capacity: 4,
+    });
+    let mut profile = profile_binding(&["radio", "line0"]);
+    bind_exec(&mut profile);
+    profile.placements.islands.push(IslandDecl {
+        id: IslandId::local(0),
+        executor: id("exec"),
+        components: vec![member("source")],
+        affinity: None,
+        rt_policy: None,
+    });
+    select_test_links(&component_to_resource, &mut profile);
+    let provider = TestProvider::new("radio", 2).with_line_memory_domains(0, vec![MemoryDomainId::local(2)]);
+    let providers: BTreeMap<Ident, &dyn Provider> = [
+        (id("radio"), &provider as &dyn Provider),
+        (id("line0"), &provider as &dyn Provider),
+    ].into_iter().collect();
+    let refused = validate_then_plan(&component_to_resource, &profile, &fx.inputs(&providers))
+        .expect_err("an In port in an unreachable memory domain is refused");
+    assert!(matches!(&refused, SpecError::Structural { reason }
+        if reason.contains("MA-39") && reason.contains("every producer domain")), "{refused:?}");
+
+    // Resource -> Resource also ends at the test Provider's In port. Capabilities
+    // bind distinct children; the selected Link bridges 1 <-> 0.
+    let mut resource_to_resource = minimal_spec();
+    resource_to_resource.resources.insert(
+        id("line0"),
+        resource("test.line", &[("test.count", Constraint::Eq { value: Scalar::from(1) })]),
+    );
+    resource_to_resource.resources.insert(
+        id("line1"),
+        resource("test.line", &[("test.count", Constraint::Eq { value: Scalar::from(2) })]),
+    );
+    resource_to_resource.graph.links.push(ezsdr_kernel::spec::LinkReq {
+        from: PortRef { component: id("line0"), port: id("rx") },
+        to: PortRef { component: id("line1"), port: id("tx") },
+        policy: BackPressure::DropOldest,
+        capacity: 4,
+    });
+    let mut profile = profile_binding(&["radio", "line0", "line1"]);
+    select_test_links(&resource_to_resource, &mut profile);
+    let provider = TestProvider::new("radio", 2)
+        .with_asymmetric_lines(1, 2)
+        .with_line_memory_domains(0, vec![MemoryDomainId::local(1)])
+        .with_line_memory_domains(1, vec![MemoryDomainId::local(0)]);
+    let providers: BTreeMap<Ident, &dyn Provider> = [
+        (id("radio"), &provider as &dyn Provider),
+        (id("line0"), &provider as &dyn Provider),
+        (id("line1"), &provider as &dyn Provider),
+    ].into_iter().collect();
+    validate_then_plan(&resource_to_resource, &profile, &fx.inputs(&providers))
+        .expect("the selected Link connects the bound producer and consumer");
+
+    let provider = TestProvider::new("radio", 2)
+        .with_asymmetric_lines(1, 2)
+        .with_line_memory_domains(0, vec![MemoryDomainId::local(2)])
+        .with_line_memory_domains(1, vec![MemoryDomainId::local(0)]);
+    let providers: BTreeMap<Ident, &dyn Provider> = [
+        (id("radio"), &provider as &dyn Provider),
+        (id("line0"), &provider as &dyn Provider),
+        (id("line1"), &provider as &dyn Provider),
+    ].into_iter().collect();
+    let refused = validate_then_plan(&resource_to_resource, &profile, &fx.inputs(&providers))
+        .expect_err("the selected Link cannot connect domain 2 to domain 0");
+    assert!(matches!(&refused, SpecError::Structural { reason } if reason.contains("MA-39")), "{refused:?}");
+}
+
+#[test]
+fn ma_39_sink_feed_rejects_a_resource_domain_set_only_partly_reached() {
+    let mut spec = minimal_spec();
+    spec.outputs.push(output("capture0"));
+    let mut profile = profile_binding(&["radio"]);
+    profile.bindings.insert(id("capture0"), bind("ezsdr.test.sink"));
+    select_test_links(&spec, &mut profile);
+    let provider = TestProvider::new("radio", 2).with_root_memory_domains(vec![MemoryDomainId::local(0), MemoryDomainId::local(2)]);
+    let providers = one_provider("radio", &provider);
+    let sink = TestSink::new(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"))
+        .reading(vec![MemoryDomainId::local(1)]);
+    let mut fx = Fixture::new();
+    fx.sinks.insert(id("capture0"), &sink);
+    let refused = validate_then_plan(&spec, &profile, &fx.inputs(&providers))
+        .expect_err("domain 0 converts but domain 2 does not");
+    assert!(matches!(&refused, SpecError::Structural { reason }
+        if reason.contains("MA-39") && reason.contains("every producer domain")), "{refused:?}");
+}
+
+#[test]
 fn sb_17_capture_without_a_sink_refused() {
     let mut spec = minimal_spec();
     spec.outputs.push(ezsdr_kernel::spec::OutputReq {
@@ -2693,9 +2859,8 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
         }
     }
 
-    // D86: a Sink or an Executor that reaches no memory domain is refused. The Sink
-    // case matters because this feed comes from a resource, which skips the domain
-    // check (D31): without the refusal a Sink that reads nowhere would be fed.
+    // D86: a Sink or an Executor that reaches no memory domain is refused. A Sink's
+    // declaration is checked here before the shared feed reachability rule.
     let nowhere = TestSink::new(
         ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
     )
@@ -4530,6 +4695,24 @@ fn sb_3_two_bindings_with_one_description_may_be_two_objects() {
     .collect();
     validate(&spec, &profile, &fx.inputs(&providers))
         .expect("one description and one declared id is one instance, however many objects");
+
+    // The second slot may carry a distinct Provider object even though SB-3 deduplicates
+    // its binding description. Check both child paths in turn: one is matched for this
+    // Spec and one remains unbound, but MA-10 covers both nodes in the second tree.
+    for malformed_line in [0, 1] {
+        let malformed_second = TestProvider::new("shared", 2)
+            .with_line_memory_domains(malformed_line, Vec::new());
+        let providers: BTreeMap<Ident, &dyn Provider> = [
+            (id("a"), &first as &dyn Provider),
+            (id("b"), &malformed_second as &dyn Provider),
+        ]
+        .into_iter()
+        .collect();
+        let err = validate(&spec, &profile, &fx.inputs(&providers))
+            .expect_err("MA-10 checks every node of each bound Provider object");
+        assert!(matches!(&err, SpecError::Structural { reason }
+            if reason.contains("MA-10")), "line {malformed_line}: {err:?}");
+    }
 
     // And the refusal the rule is for: one description, two declared ids.
     let other = TestProvider::new("other", 2);

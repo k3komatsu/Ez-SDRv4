@@ -340,6 +340,7 @@ impl TestProvider {
             .into_iter()
             .collect(),
             children: Vec::new(),
+            memory_domains: vec![MemoryDomainId::local(0)],
             // A line is one physical channel: exclusive, like SB-34's default.
             shareable: false,
             // A stream endpoint declares its Ports, so a Spec can link this node to
@@ -408,6 +409,7 @@ impl TestProvider {
                         contract: DataContractId::parse("ezsdr.stream.cf32")
                             .expect("a valid literal"),
                     }],
+                    memory_domains: vec![MemoryDomainId::local(0)],
                 },
                 fidelity: Fidelity::NONE,
                 driving: Driving { stepped: false },
@@ -437,6 +439,30 @@ impl TestProvider {
         for line in &mut self.instance.tree.children {
             line.shareable = true;
         }
+        self
+    }
+
+    pub fn with_root_memory_domains(mut self, domains: Vec<MemoryDomainId>) -> TestProvider {
+        self.instance.tree.memory_domains = domains;
+        self
+    }
+
+    pub fn with_line_memory_domains(mut self, index: usize, domains: Vec<MemoryDomainId>) -> TestProvider {
+        self.instance.tree.children[index].memory_domains = domains;
+        self
+    }
+
+    pub fn with_portless_child(mut self) -> TestProvider {
+        let id = self.instance.tree.id.child("structural").expect("a valid child id");
+        self.instance.tree.children.push(Resource {
+            id,
+            kind: ns("test.structural"),
+            capabilities: BTreeMap::new(),
+            children: Vec::new(),
+            ports: Vec::new(),
+            memory_domains: Vec::new(),
+            shareable: false,
+        });
         self
     }
 

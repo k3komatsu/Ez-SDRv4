@@ -12,12 +12,13 @@ mod validation;
 
 pub(crate) use validation::{binding_description, not_registered, require_role};
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::binding::LinkPlacement;
 use crate::contract::PortRef;
+use crate::id::MemoryDomainId;
 use crate::module_api::{
     ComponentDescriptor, ExecutionClass, ExecutorDescriptor, IslandDecl, LinkDescriptor,
     ModuleError, ModuleRef, Role, SinkDescriptor,
@@ -162,12 +163,9 @@ pub struct IslandContext<'a> {
     /// The bound Sink's descriptor per output id, for the feed half of the
     /// memory-domain check (MA-25, MA-39, D81).
     pub sinks: &'a BTreeMap<Ident, SinkDescriptor>,
-    /// The Spec resource names a link may name as an endpoint. A resource endpoint
-    /// is a node of the graph but is placed in no Island — it lives on its bound
-    /// Provider, not inside an Executor — so MA-39 asks for no placement and
-    /// MA-22's cycle graph counts it as a node rather than an unknown (SB-15,
-    /// MA-10; finding D31).
-    pub resource_endpoints: &'a BTreeSet<Ident>,
+    /// The memory domains of each Spec resource's actually matched Provider node
+    /// (MA-10, MA-39). Resource endpoints are graph nodes but are placed in no Island.
+    pub resource_domains: &'a BTreeMap<Ident, Vec<MemoryDomainId>>,
 }
 
 /// Island admission.
@@ -176,10 +174,9 @@ pub struct IslandContext<'a> {
 /// or the Executor's kind, `impl.kind` is among its `impl_kinds`, and the memory
 /// domain its Island states for it is among its `memory_domains`; every data link —
 /// graph link or output feed — has exactly one `LinkPlacement` naming its ends, whose
-/// selected descriptor supports its policy and, when the two ends are placed in
-/// different memory domains, in one Island or in two, connects the pair; MA-22's
-/// cycle rule; and an Island with an `rt_policy` requires a declared budget on every
-/// component.
+/// selected descriptor supports its policy and each producer domain reaches at least
+/// one consumer domain directly or through its selected Link; MA-22's cycle rule; and
+/// an Island with an `rt_policy` requires a declared budget on every component.
 ///
 /// Admission **rejects**; it never creates, merges or moves an Island, and a
 /// rejection names the rule it failed.

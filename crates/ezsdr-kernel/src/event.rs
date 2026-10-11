@@ -278,6 +278,8 @@ static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
 /// minted for each Run's collector and each view of it, so a handle names exactly one
 /// sink for the life of the process. `fetch_update` never wraps — at the counter's end
 /// it panics rather than repeats an id — and 2^64 sinks is unreachable.
+// `fetch_update` is deprecated as `try_update` from Rust 1.99, which is above the MSRV.
+#[allow(deprecated)]
 fn next_scope() -> u64 {
     NEXT_SCOPE
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))

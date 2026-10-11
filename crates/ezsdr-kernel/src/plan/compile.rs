@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::binding::{AdmissionResult, Binding, BindingProfile};
 use crate::contract::{DataContractId, PortRef};
-use crate::id::{DataLinkId, ResourceId};
+use crate::id::{DataLinkId, MemoryDomainId, ResourceId};
 use crate::module_api::{
     ExecutionClass, ExecutorDescriptor, ModuleRef, Pacing, Requested, RfPath, Role, SinkDescriptor,
 };
@@ -183,6 +183,15 @@ pub(super) fn plan(
         .iter()
         .map(|d| (d.from.clone(), d.to.clone(), d.policy))
         .collect();
+    let resource_domains: BTreeMap<Ident, Vec<MemoryDomainId>> = spec
+        .resources
+        .keys()
+        .map(|name| {
+            let node = super::links::bound_resource(name, inputs, &admission.matched)
+                .expect("admission_is_this_runs guarantees a matched node for every Spec resource");
+            (name.clone(), node.memory_domains.clone())
+        })
+        .collect();
     super::islands::admit_islands(&IslandContext {
         islands: &profile.placements.islands,
         components: &spec.graph.components,
@@ -192,7 +201,7 @@ pub(super) fn plan(
         graph_links: &graph_links,
         feed_links: &feed_links,
         sinks: &sinks,
-        resource_endpoints: &spec.resources.keys().cloned().collect(),
+        resource_domains: &resource_domains,
     })
     .map_err(|e| SpecError::Structural { reason: e.message })?;
 

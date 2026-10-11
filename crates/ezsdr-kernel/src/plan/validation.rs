@@ -253,8 +253,8 @@ pub(super) fn check_bindings(
         require_role(registry, name, &binding.module, Role::Sink)?;
         let d = super::supplied(inputs.sinks, name, "Sink instance")?.descriptor();
         version(name, "Sink instance", &binding.module, &d.module)?;
-        // MA-25 / D86: a Sink that reads from no memory domain cannot be fed, yet a
-        // resource feed skips the domain check (D31) and would admit it.
+        // MA-25 / D86: a Sink that reads from no memory domain cannot satisfy the
+        // shared feed reachability rule (MA-39).
         if d.memory_domains.is_empty() {
             return Err(SpecError::Structural {
                 reason: format!(
@@ -333,7 +333,9 @@ pub(super) fn check_bindings(
     {
         let instance = super::supplied(inputs.providers, name, "Provider instance")?.instance();
         let description = binding_description(binding)?;
-        if let Some((first, first_id)) = by_description.insert(description, (name, &instance.id)) {
+        let duplicate_description = if let Some((first, first_id)) =
+            by_description.insert(description, (name, &instance.id))
+        {
             if *first_id != instance.id {
                 return Err(SpecError::Structural {
                     reason: format!(
@@ -343,18 +345,30 @@ pub(super) fn check_bindings(
                     ),
                 });
             }
-            continue; // one instance bound twice is SB-34's case, not this
-        }
+            true
+        } else {
+            false
+        };
         for node in instance.tree.walk_iter() {
-            if let Some(first) = paths.insert(node.id.clone(), name) {
-                if first != name {
-                    return Err(SpecError::Structural {
-                        reason: format!(
-                            "SB-3: the instances bound to {first} and {name} both declare node \
-                             {}, and a ResourceId carries no instance qualification",
-                            node.id
-                        ),
-                    });
+            if !node.ports.is_empty() && node.memory_domains.is_empty() {
+                return Err(SpecError::Structural {
+                    reason: format!(
+                        "MA-10: Provider node {} has ports but declares no memory domain",
+                        node.id
+                    ),
+                });
+            }
+            if !duplicate_description {
+                if let Some(first) = paths.insert(node.id.clone(), name) {
+                    if first != name {
+                        return Err(SpecError::Structural {
+                            reason: format!(
+                                "SB-3: the instances bound to {first} and {name} both declare node \
+                                 {}, and a ResourceId carries no instance qualification",
+                                node.id
+                            ),
+                        });
+                    }
                 }
             }
         }

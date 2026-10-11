@@ -2843,5 +2843,185 @@
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kc_24_a_module_emit_with_a_non_ascii_payload_is_refused_before_dispatch"
+ },
+ {
+  "id": "J260",
+  "name": "an omitted Resource.memory_domains defaults to an empty list (MA-10)",
+  "file": "crates/ezsdr-kernel/src/module_api.rs",
+  "old": "    #[serde(default)]\n    pub memory_domains: Vec<MemoryDomainId>,",
+  "new": "    pub memory_domains: Vec<MemoryDomainId>,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_10_resource_memory_domains_default_to_empty"
+ },
+ {
+  "id": "J261",
+  "name": "a port-bearing Provider node with no memory domain is admitted (MA-10)",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "            if !node.ports.is_empty() && node.memory_domains.is_empty() {",
+  "new": "            if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "ma_10_memory_domains_are_validated_for_every_provider_tree_node"
+ },
+ {
+  "id": "J262",
+  "name": "a portless structural node may omit its memory domain (MA-10)",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "            if !node.ports.is_empty() && node.memory_domains.is_empty() {",
+  "new": "            if node.memory_domains.is_empty() {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "ma_10_memory_domains_are_validated_for_every_provider_tree_node"
+ },
+ {
+  "id": "J263",
+  "name": "an unbound Provider-tree node with ports and no domain is not checked (MA-10)",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "        for node in instance.tree.walk_iter() {",
+  "new": "        for node in instance.tree.walk_iter().take(1) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "ma_10_memory_domains_are_validated_for_every_provider_tree_node"
+ },
+ {
+  "id": "J264",
+  "name": "MA-39 reads the Provider root instead of the actually matched Resource node",
+  "file": "crates/ezsdr-kernel/src/plan/compile.rs",
+  "old": "            (name.clone(), node.memory_domains.clone())",
+  "new": "            (name.clone(), inputs.providers[name].instance().tree.memory_domains.clone())",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "ma_39_resource_domains_follow_bound_nodes_and_cover_resource_endpoints"
+ },
+ {
+  "id": "J265",
+  "name": "only one producer domain needs to reach a consumer (MA-39)",
+  "file": "crates/ezsdr-kernel/src/plan/islands.rs",
+  "old": "    producers.iter().all(|producer| {",
+  "new": "    producers.iter().any(|producer| {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_39_resource_endpoint_domain_sets_use_one_rule"
+ },
+ {
+  "id": "J266",
+  "name": "equal producer and consumer domains are not directly reachable (MA-39)",
+  "file": "crates/ezsdr-kernel/src/plan/islands.rs",
+  "old": "            producer == consumer\n",
+  "new": "            false\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_39_resource_endpoint_domain_sets_use_one_rule"
+ },
+ {
+  "id": "J267",
+  "name": "Link.connects pairs are treated as directional (MA-39)",
+  "file": "crates/ezsdr-kernel/src/plan/islands.rs",
+  "old": "                || connects.iter().any(|(a, b)| (a == producer && b == consumer) || (a == consumer && b == producer))",
+  "new": "                || connects.iter().any(|(a, b)| a == producer && b == consumer)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_39_resource_endpoint_domain_sets_use_one_rule"
+ },
+ {
+  "id": "J268",
+  "name": "graph links touching a Resource endpoint skip MA-39 domain reachability (D31)",
+  "file": "crates/ezsdr-kernel/src/plan/islands.rs",
+  "old": "    for ((from, to, _), is_feed) in ctx\n        .graph_links\n        .iter()\n        .map(|link| (link, false))\n        .chain(ctx.feed_links.iter().map(|link| (link, true)))\n    {",
+  "new": "    for ((from, to, _), is_feed) in ctx\n        .graph_links\n        .iter()\n        .filter(|link| !ctx.resource_domains.contains_key(&link.0.component) && !ctx.resource_domains.contains_key(&link.1.component))\n        .map(|link| (link, false))\n        .chain(ctx.feed_links.iter().map(|link| (link, true)))\n    {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_39_resource_endpoint_domain_sets_use_one_rule"
+ },
+ {
+  "id": "J269",
+  "name": "a Sink feed from a Resource endpoint skips MA-39 domain reachability (D31)",
+  "file": "crates/ezsdr-kernel/src/plan/islands.rs",
+  "old": "    for ((from, to, _), is_feed) in ctx\n        .graph_links\n        .iter()\n        .map(|link| (link, false))\n        .chain(ctx.feed_links.iter().map(|link| (link, true)))\n    {",
+  "new": "    for ((from, to, _), is_feed) in ctx\n        .graph_links\n        .iter()\n        .map(|link| (link, false))\n        .chain(ctx.feed_links.iter().filter(|link| !ctx.resource_domains.contains_key(&link.0.component)).map(|link| (link, true)))\n    {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_39_resource_endpoint_domain_sets_use_one_rule"
+ },
+ {
+  "id": "J270",
+  "name": "the radio tree ignores the memory domain passed by its caller (MA-10)",
+  "file": "crates/ezsdr-radio/src/device.rs",
+  "old": "            memory_domains: vec![memory_domain],",
+  "new": "            memory_domains: vec![MemoryDomainId::local(0)],",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_26_the_description_builds_the_tree_mockradio_built"
+ },
+ {
+  "id": "J271",
+  "name": "portless radio stream children inherit the device memory domain (MA-10)",
+  "file": "crates/ezsdr-radio/src/device.rs",
+  "old": "            memory_domains: Vec::new(),",
+  "new": "            memory_domains: vec![memory_domain],",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_26_the_description_builds_the_tree_mockradio_built"
+ },
+ {
+  "id": "J272",
+  "name": "a repeated binding description skips the second Provider object's MA-10 walk",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "            if !node.ports.is_empty() && node.memory_domains.is_empty() {",
+  "new": "            if !duplicate_description && !node.ports.is_empty() && node.memory_domains.is_empty() {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_3_two_bindings_with_one_description_may_be_two_objects"
+ },
+ {
+  "id": "J273",
+  "name": "all consumer domains must be reachable instead of at least one (MA-39)",
+  "file": "crates/ezsdr-kernel/src/plan/islands.rs",
+  "old": "        consumers.iter().any(|consumer| {",
+  "new": "        consumers.iter().all(|consumer| {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_39_resource_endpoint_domain_sets_use_one_rule"
+ },
+ {
+  "id": "J274",
+  "name": "only the first consumer domain is considered reachable (MA-39)",
+  "file": "crates/ezsdr-kernel/src/plan/islands.rs",
+  "old": "        consumers.iter().any(|consumer| {",
+  "new": "        consumers.first().is_some_and(|consumer| {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_39_resource_endpoint_domain_sets_use_one_rule"
+ },
+ {
+  "id": "J275",
+  "name": "a feed consumer may resolve to a component instead of a Sink (SB-22f)",
+  "file": "crates/ezsdr-kernel/src/plan/islands.rs",
+  "old": "                .map(|sink| sink.memory_domains.clone())\n                .ok_or_else(|| {",
+  "new": "                .map(|sink| sink.memory_domains.clone())\n                .or_else(|| endpoint_domains(to))\n                .ok_or_else(|| {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_39_island_admission"
+ },
+ {
+  "id": "J276",
+  "name": "MockRadio declares a non-host domain on its Provider root (MA-10)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "tree: profile.description().tree(&id, HOST_MEMORY),",
+  "new": "tree: profile.description().tree(&id, ezsdr_kernel::id::MemoryDomainId::local(1)),",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_02_the_tree_has_the_radio_model_shape"
+ },
+ {
+  "id": "J277",
+  "name": "UHD declares a non-host domain on its Provider root (MA-10)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "tree: description.tree(&resource, HOST_MEMORY),",
+  "new": "tree: description.tree(&resource, ezsdr_kernel::id::MemoryDomainId::local(1)),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_10_instance"
  }
 ]

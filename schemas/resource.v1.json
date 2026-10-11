@@ -83,6 +83,27 @@
       "description": "A name inside one document, matching `^[a-z][a-z0-9_]*$`.\n\nNames are compared as bytes; there is no case folding and no Unicode\nnormalisation, so the canonical form of OV-15 stays byte-comparable.\n\nRule: SB-1.",
       "type": "string"
     },
+    "MemoryDomainId": {
+      "additionalProperties": false,
+      "description": "Identifies a memory domain a sample block lives in.\n\nRule: SC-6 (`02-stream-contract.md`), X7.",
+      "properties": {
+        "local": {
+          "description": "Node-local ordinal, allocated by the owning registry.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeId",
+          "description": "Owning node; `0`, the local node, throughout v4.0 (X7)."
+        }
+      },
+      "required": [
+        "node",
+        "local"
+      ],
+      "type": "object"
+    },
     "Namespace": {
       "description": "A dotted sequence of `Ident`s owned by a Vocabulary or a Module,\nmatching `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$`.\n\nRule: SB-1.",
       "type": "string"
@@ -201,6 +222,14 @@
     "kind": {
       "$ref": "#/$defs/Namespace",
       "description": "What kind of node it is; a Spec resource's `kind` must match (SB-34)."
+    },
+    "memory_domains": {
+      "default": [],
+      "description": "The memory domains this node can produce or consume on its ports (MA-10,\nMA-39). A node with ports declares at least one; a portless node may omit it.",
+      "items": {
+        "$ref": "#/$defs/MemoryDomainId"
+      },
+      "type": "array"
     },
     "ports": {
       "default": [],

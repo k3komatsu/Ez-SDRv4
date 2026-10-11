@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use ezsdr_kernel::binding::satisfies;
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection};
-use ezsdr_kernel::id::ResourceId;
+use ezsdr_kernel::id::{MemoryDomainId, ResourceId};
 use ezsdr_kernel::module_api::{
     CoerceReport, ModuleError, ProfileRef, RejectedRequest, Requested, Resource,
 };
@@ -238,7 +238,35 @@ impl DeviceDescription {
     }
 
     /// RM-2's tree for the device at `device`, with the capabilities in MR-4's form.
-    pub fn tree(&self, device: &ResourceId) -> Resource {
+    pub fn tree(&self, device: &ResourceId, memory_domain: MemoryDomainId) -> Resource {
+        let stream = |direction: &str, kind: &str| Resource {
+            id: device.child(direction).expect("a valid stream id"),
+            kind: Namespace::parse(kind).expect("a radio stream kind"),
+            capabilities: BTreeMap::new(),
+            children: Vec::new(),
+            ports: Vec::new(),
+            memory_domains: Vec::new(),
+            shareable: false,
+        };
+        Resource {
+            id: device.clone(),
+            kind: Namespace::parse(crate::DEVICE_KIND).expect("the radio device kind"),
+            capabilities: self.capabilities(),
+            children: vec![
+                stream("rx", crate::RX_STREAM_KIND),
+                stream("tx", crate::TX_STREAM_KIND),
+            ],
+            ports: vec![Port {
+                name: Ident::parse("rx").expect("the rx port name"),
+                direction: PortDirection::Out,
+                contract: DataContractId::parse("ezsdr.stream.cf32").expect("cf32"),
+            }],
+            memory_domains: vec![memory_domain],
+            shareable: false,
+        }
+    }
+
+    fn capabilities(&self) -> BTreeMap<Key, CapabilityValue> {
         use keys::*;
         let mut capabilities = BTreeMap::new();
         let range = |min, max| CapabilityValue::Range { min, max };
@@ -302,29 +330,7 @@ impl DeviceDescription {
         ] {
             capabilities.insert(key(name), one(value));
         }
-        let stream = |direction: &str, kind: &str| Resource {
-            id: device.child(direction).expect("a valid stream id"),
-            kind: Namespace::parse(kind).expect("a radio stream kind"),
-            capabilities: BTreeMap::new(),
-            children: Vec::new(),
-            ports: Vec::new(),
-            shareable: false,
-        };
-        Resource {
-            id: device.clone(),
-            kind: Namespace::parse(crate::DEVICE_KIND).expect("the radio device kind"),
-            capabilities,
-            children: vec![
-                stream("rx", crate::RX_STREAM_KIND),
-                stream("tx", crate::TX_STREAM_KIND),
-            ],
-            ports: vec![Port {
-                name: Ident::parse("rx").expect("the rx port name"),
-                direction: PortDirection::Out,
-                contract: DataContractId::parse("ezsdr.stream.cf32").expect("cf32"),
-            }],
-            shareable: false,
-        }
+        capabilities
     }
 
     /// RM-5's defaults, RM-7's refusal and RM-8's coercion; pure (MA-11).
@@ -339,13 +345,13 @@ impl DeviceDescription {
                 request.resource
             )));
         }
-        let tree = self.tree(device);
+        let capabilities = self.capabilities();
         let configuration_keys = keys::CONFIGURATION;
         let defaults = &self.defaults;
         let mut report = CoerceReport::default();
 
         for (key, constraint) in &request.constraints {
-            let Some(capability) = tree.capabilities.get(key) else {
+            let Some(capability) = capabilities.get(key) else {
                 report
                     .rejected
                     .push(rejected(key, constraint, "RM-4: not a radio key".to_owned()));

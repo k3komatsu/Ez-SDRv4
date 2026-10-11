@@ -359,6 +359,7 @@ fn mr_02_the_tree_has_the_radio_model_shape() {
     assert_eq!(instance.tree.ports[0].name.as_str(), "rx");
     assert_eq!(instance.tree.ports[0].direction, ezsdr_kernel::contract::PortDirection::Out);
     assert_eq!(instance.tree.ports[0].contract.as_str(), "ezsdr.stream.cf32");
+    assert_eq!(instance.tree.memory_domains, [ezsdr_hostmem::HOST_MEMORY]);
     assert!(!instance.tree.shareable);
     assert_eq!(instance.tree.capabilities[&key("radio.rx.channels")], ezsdr_kernel::spec::CapabilityValue::Range { min: Scalar::from(0), max: Scalar::from(4) });
     assert_eq!(instance.tree.capabilities[&key("radio.perf.rx_bytes_per_s")], ezsdr_kernel::spec::CapabilityValue::One { value: Scalar::from(2_000_000_000) });
