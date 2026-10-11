@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::contract::{DataContractId, PortDirection, PortRef};
 use crate::id::{DataLinkId, ResourceId};
+use crate::module_api::Resource;
 use crate::spec::{ExperimentSpec, Ident, SpecError};
 use crate::stream::DataLinkDecl;
 
@@ -215,20 +216,25 @@ pub(super) fn endpoint_port(
             .find(|p| p.name == r.port)
             .map(|p| (p.direction, p.contract.clone()));
     }
-    // SB-15: "a resource port is one the **bound node** declares". Searching the
-    // whole instance would accept a port some other sub-resource declares and would
-    // check SC-3 against that node's contract — a link the Kernel calls compatible
-    // and the hardware will not honour. `matched` holds resources only, so only a
-    // resource slot's Provider is read (SB-22).
-    let bound = matched.get(name)?;
-    let provider = inputs.providers.get(name)?;
-    provider
-        .instance()
-        .tree
-        .walk_iter()
-        .find(|n| n.id == *bound)?
+    bound_resource(name, inputs, matched)?
         .ports
         .iter()
         .find(|p| p.name == r.port)
         .map(|p| (p.direction, p.contract.clone()))
+}
+
+/// The node selected for a resource endpoint; shared by port and memory-domain
+/// resolution so both checks read the same bound node (SB-15, MA-39).
+pub(super) fn bound_resource<'a>(
+    name: &Ident,
+    inputs: &CompileInputs<'a>,
+    matched: &BTreeMap<Ident, ResourceId>,
+) -> Option<&'a Resource> {
+    let bound = matched.get(name)?;
+    let provider = *inputs.providers.get(name)?;
+    provider
+        .instance()
+        .tree
+        .walk_iter()
+        .find(|node| node.id == *bound)
 }

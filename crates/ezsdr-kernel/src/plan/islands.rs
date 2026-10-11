@@ -149,7 +149,7 @@ pub(super) fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> 
     let nodes: Vec<Ident> = ctx
         .components
         .keys()
-        .chain(ctx.resource_endpoints.iter())
+        .chain(ctx.resource_domains.keys())
         .cloned()
         .collect();
     let edges: Vec<GraphEdge> = ctx
@@ -165,97 +165,93 @@ pub(super) fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> 
         .collect();
     super::graph::check_cycles(&nodes, &edges)?;
 
-    // A link whose two ends share a memory domain needs nothing more; otherwise its
-    // selected Link (SB-25) `connects` the pair, whether the ends are in one Island
-    // or in two (D77).
-    let is_resource = |r: &PortRef| ctx.resource_endpoints.contains(&r.component);
-    // Each component's memory domain is the one its Island's entry states (SB-25).
+    // Every producer domain must reach at least one consumer domain, directly or
+    // through the selected Link (MA-39); component domains come from their Islands.
     let domains: BTreeMap<&Ident, MemoryDomainId> = ctx
         .islands
         .iter()
         .flat_map(|island| &island.components)
         .map(|entry| (&entry.component, entry.memory_domain))
         .collect();
-    let domain_of = |r: &PortRef| domains.get(&r.component).copied();
-    // D81: a feed's consumer is the bound Sink, whose readable domains its descriptor
-    // declares. A resource producer is skipped as for a graph link (D31).
-    for (from, to, _policy) in ctx.feed_links {
-        if is_resource(from) {
-            continue;
-        }
-        let fd = domain_of(from).ok_or_else(|| {
+    let endpoint_domains = |r: &PortRef| {
+        ctx.resource_domains
+            .get(&r.component)
+            .cloned()
+            .or_else(|| domains.get(&r.component).map(|domain| vec![*domain]))
+    };
+    // One reachability rule for graph links and Sink feeds (MA-39, D31/D81).
+    for ((from, to, _), is_feed) in ctx
+        .graph_links
+        .iter()
+        .map(|link| (link, false))
+        .chain(ctx.feed_links.iter().map(|link| (link, true)))
+    {
+        let producer = endpoint_domains(from).ok_or_else(|| {
             ModuleError::rejected(format!(
-                "MA-39: feed {}:{} -> {} leaves an unplaced component",
-                from.component, from.port, to.component
+                "MA-39: link {}:{} -> {}:{} has no producer memory-domain declaration",
+                from.component, from.port, to.component, to.port
             ))
         })?;
-        let sink = ctx.sinks.get(&to.component).ok_or_else(|| {
-            ModuleError::rejected(format!(
-                "SB-22f: no Sink instance for output {}",
-                to.component
-            ))
-        })?;
-        if sink.memory_domains.contains(&fd) {
-            continue;
-        }
-        let placement = selected[&(from, to)];
-        let joined = ctx.links[&placement.link].connects.iter().any(|(a, b)| {
-            (*a == fd && sink.memory_domains.contains(b))
-                || (*b == fd && sink.memory_domains.contains(a))
-        });
-        if !joined {
-            return Err(ModuleError::rejected(format!(
-                "MA-39: {} is in memory domain {} and output {}'s Sink reads [{}]; selected Link Module {} {} does not connect them",
-                from.component,
-                fd,
-                to.component,
-                sink.memory_domains
-                    .iter()
-                    .map(|d| d.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                placement.link.id,
-                placement.link.version
-            )));
-        }
-    }
-    for (from, to, _policy) in ctx.graph_links {
+        let consumer = if is_feed {
+            ctx.sinks
+                .get(&to.component)
+                .map(|sink| sink.memory_domains.clone())
+                .ok_or_else(|| {
+                    ModuleError::rejected(format!(
+                        "SB-22f: no Sink instance for output {}",
+                        to.component
+                    ))
+                })?
+        } else {
+            endpoint_domains(to).ok_or_else(|| {
+                ModuleError::rejected(format!(
+                    "MA-39: link {}:{} -> {}:{} has no consumer memory-domain declaration",
+                    from.component, from.port, to.component, to.port
+                ))
+            })?
+        };
         let placement = selected[&(from, to)];
         let descriptor = &ctx.links[&placement.link];
-        // A resource endpoint is not placed, so a link that touches one has nothing
-        // to compare Islands or memory domains against here. Its producer-side
-        // memory domain is Vocabulary content and a Phase 2 value (finding D31).
-        if is_resource(from) || is_resource(to) {
-            continue;
-        }
-        let (fi, ti) = (
-            island_by_component.get(&from.component),
-            island_by_component.get(&to.component),
-        );
-        let (Some(fi), Some(ti)) = (fi, ti) else {
-            return Err(ModuleError::rejected(format!(
-                "MA-39: link {}:{} -> {}:{} touches an unplaced component",
-                from.component, from.port, to.component, to.port
-            )));
-        };
-        let (fd, td) = (domain_of(from), domain_of(to));
-        if let (Some(fd), Some(td)) = (fd, td) {
-            if fd == td {
-                continue;
-            }
-            let joined = descriptor.connects.iter().any(|pair| pair == &(fd, td) || pair == &(td, fd));
-            if !joined {
-                return Err(ModuleError::rejected(format!(
-                    "MA-39: {} (island {}) and {} (island {}) are in different memory domains and selected Link Module {} {} does not connect them",
-                    from.component,
-                    fi,
+        if !domains_connect(&producer, &consumer, &descriptor.connects) {
+            let producer_label = format!(
+                "{}:{} has producer domains [{}]",
+                from.component,
+                from.port,
+                producer.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+            );
+            let consumer_label = if is_feed {
+                let sink = &ctx.sinks[&to.component];
+                format!(
+                    "output {}'s Sink reads [{}]",
                     to.component,
-                    ti,
-                    placement.link.id,
-                    placement.link.version
-                )));
-            }
+                    sink.memory_domains.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                )
+            } else {
+                format!(
+                    "{}:{} has consumer domains [{}]",
+                    to.component,
+                    to.port,
+                    consumer.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                )
+            };
+            return Err(ModuleError::rejected(format!(
+                "MA-39: {producer_label} and {consumer_label}; selected Link Module {} {} does not connect them for every producer domain",
+                placement.link.id, placement.link.version
+            )));
         }
     }
     Ok(())
+}
+
+fn domains_connect(
+    producers: &[MemoryDomainId],
+    consumers: &[MemoryDomainId],
+    connects: &[(MemoryDomainId, MemoryDomainId)],
+) -> bool {
+    producers.iter().all(|producer| {
+        consumers.iter().any(|consumer| {
+            producer == consumer
+                || connects.iter().any(|(a, b)| (a == producer && b == consumer) || (a == consumer && b == producer))
+        })
+    })
 }

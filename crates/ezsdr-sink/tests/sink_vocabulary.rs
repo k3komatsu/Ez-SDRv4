@@ -232,6 +232,7 @@ impl NullProvider {
                         direction: ezsdr_kernel::contract::PortDirection::Out,
                         contract,
                     }],
+                    memory_domains: vec![ezsdr_kernel::id::MemoryDomainId::local(0)],
                     shareable: false,
                 },
                 fidelity: ezsdr_kernel::module_api::Fidelity::NONE,

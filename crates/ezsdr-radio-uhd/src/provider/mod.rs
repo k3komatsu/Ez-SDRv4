@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration as Wall, Instant};
 
+use ezsdr_hostmem::HOST_MEMORY;
 use ezsdr_kernel::binding::Binding;
 use ezsdr_kernel::event::{EventSource, Severity};
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
@@ -177,7 +178,7 @@ impl UhdRadio {
             id: resource.clone(),
             module: crate::module_ref(),
             profile: binding.profile.clone(),
-            tree: description.tree(&resource),
+            tree: description.tree(&resource, HOST_MEMORY),
             fidelity: device.fidelity(),
             driving: Driving { stepped: false },
             arm_after: Vec::new(),

@@ -102,7 +102,8 @@ fn mockradio_1_2_capabilities() -> BTreeMap<Key, CapabilityValue> {
 #[test]
 fn rm_26_the_description_builds_the_tree_mockradio_built() {
     let id = ResourceId::parse("dev").unwrap();
-    let tree = x310_like().tree(&id);
+    let domain = ezsdr_kernel::id::MemoryDomainId::local(37);
+    let tree = x310_like().tree(&id, domain);
     assert_eq!(tree.id, id);
     assert_eq!(tree.kind.as_str(), "radio.device");
     assert_eq!(tree.capabilities, mockradio_1_2_capabilities());
@@ -121,6 +122,8 @@ fn rm_26_the_description_builds_the_tree_mockradio_built() {
     assert!(tree.children.iter().all(|child| child.capabilities.is_empty() && child.ports.is_empty() && !child.shareable));
     assert_eq!(tree.ports.len(), 1);
     assert_eq!((tree.ports[0].name.as_str(), tree.ports[0].contract.as_str()), ("rx", "ezsdr.stream.cf32"));
+    assert_eq!(tree.memory_domains, [domain]);
+    assert!(tree.children.iter().all(|child| child.memory_domains.is_empty()));
     assert!(!tree.shareable);
 }
 

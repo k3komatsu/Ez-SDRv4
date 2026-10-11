@@ -572,6 +572,10 @@ pub struct Resource {
     /// could be checked against it (MA-10, SB-15, SC-1, SC-3).
     #[serde(default)]
     pub ports: Vec<crate::contract::Port>,
+    /// The memory domains this node can produce or consume on its ports (MA-10,
+    /// MA-39). A node with ports declares at least one; a portless node may omit it.
+    #[serde(default)]
+    pub memory_domains: Vec<MemoryDomainId>,
     /// Whether more than one Spec resource may bind to this node. Default `false`:
     /// a channel or a stream is exclusive, while Vision §8's GPIO banks "may share
     /// the timekeeper" of §39, so which is which is the Provider's declaration and

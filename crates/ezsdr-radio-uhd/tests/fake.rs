@@ -445,6 +445,7 @@ fn ur_10_instance() {
     assert!(instance.arm_after.is_empty());
     assert_eq!(instance.profile.as_ref().unwrap().name, "x310-ubx");
     assert_eq!(instance.id, ResourceId::parse("usrp").unwrap());
+    assert_eq!(instance.tree.memory_domains, [ezsdr_hostmem::HOST_MEMORY]);
 }
 
 fn request(pairs: &[(&str, Scalar)]) -> ezsdr_kernel::module_api::Requested {

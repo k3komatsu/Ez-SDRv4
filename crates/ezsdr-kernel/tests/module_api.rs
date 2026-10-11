@@ -3,7 +3,7 @@
 mod support;
 
 use ezsdr_kernel::spec::Scalar;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use ezsdr_kernel::binding::{LinkPlacement, Placements};
@@ -647,6 +647,7 @@ fn ma_10_resource_walk_is_depth_first_preorder() {
         capabilities: BTreeMap::new(),
         children,
         ports: Vec::new(),
+        memory_domains: Vec::new(),
         shareable: false,
     };
     let tree = resource(
@@ -663,6 +664,14 @@ fn ma_10_resource_walk_is_depth_first_preorder() {
             .collect::<Vec<_>>(),
         ["root", "root/a", "root/a/x", "root/b"]
     );
+}
+
+#[test]
+fn ma_10_resource_memory_domains_default_to_empty() {
+    let mut document = serde_json::to_value(TestProvider::new("root", 1).instance().tree.clone()).expect("serializable");
+    document.as_object_mut().expect("Resource is an object").remove("memory_domains");
+    let resource: Resource = serde_json::from_value(document).expect("memory_domains is optional");
+    assert!(resource.memory_domains.is_empty());
 }
 
 #[test]
@@ -881,7 +890,7 @@ fn ma_39_island_admission() {
         BackPressure::Block,
     )];
     let islands = vec![island(&["a", "b"], "exec")];
-    let no_resources = BTreeSet::new();
+    let no_resources: BTreeMap<Ident, Vec<MemoryDomainId>> = BTreeMap::new();
     let rec_sink: BTreeMap<Ident, SinkDescriptor> = [(id("rec"), sink_in(0))].into_iter().collect();
     let ctx = IslandContext {
         islands: &islands,
@@ -892,7 +901,7 @@ fn ma_39_island_admission() {
         graph_links: &graph_links,
         feed_links: &[],
         sinks: &rec_sink,
-        resource_endpoints: &no_resources,
+        resource_domains: &no_resources,
     };
     assert!(admit_islands(&ctx).is_ok());
 
@@ -968,6 +977,26 @@ fn ma_39_island_admission() {
         ..ctx_clone(&ctx)
     })
     .expect("a placed feed is admitted");
+
+    // A feed's consumer role is a bound Sink, not a placed component. This direct
+    // caller has a valid component/domain at `a` but no Sink instance for output `a`.
+    let component_feed = vec![(
+        PortRef { component: id("b"), port: id("out") },
+        PortRef { component: id("a"), port: id("in") },
+        BackPressure::Block,
+    )];
+    let component_feed_placements = vec![
+        place(&link_id, ("a", "out"), ("b", "in")),
+        place(&link_id, ("b", "out"), ("a", "in")),
+    ];
+    let err = admit_islands(&IslandContext {
+        feed_links: &component_feed,
+        link_placements: &component_feed_placements,
+        ..ctx_clone(&ctx)
+    })
+    .expect_err("a feed consumer without a bound Sink is refused");
+    assert!(err.message.contains("SB-22f") && err.message.contains("output a"), "{err}");
+
     // A feed whose ends coincide with a graph link — an output named like a graph
     // component, fed from the same port — is two data links no placement can tell
     // apart, so admission refuses it rather than letting one placement serve both.
@@ -1093,7 +1122,7 @@ fn ctx_clone<'a>(ctx: &IslandContext<'a>) -> IslandContext<'a> {
         graph_links: ctx.graph_links,
         feed_links: ctx.feed_links,
         sinks: ctx.sinks,
-        resource_endpoints: ctx.resource_endpoints,
+        resource_domains: ctx.resource_domains,
     }
 }
 
@@ -1105,6 +1134,104 @@ fn sink_in(domain: u32) -> SinkDescriptor {
         memory_domains: vec![MemoryDomainId::local(domain)],
         contracts: Vec::new(),
         artifact_kinds: Vec::new(),
+    }
+}
+
+fn sink_reads(domains: &[u32]) -> SinkDescriptor {
+    SinkDescriptor {
+        memory_domains: domains.iter().copied().map(MemoryDomainId::local).collect(),
+        ..sink_in(0)
+    }
+}
+
+fn resource_link_result(case: &str, producer_domains: &[u32], consumer_domains: &[u32], connects: &[(u32, u32)]) -> Result<(), ModuleError> {
+    let names = match case {
+        "resource_component" => ("radio", "a"),
+        "component_resource" => ("a", "radio"),
+        "resource_resource" => ("radio", "radio2"),
+        "resource_sink" => ("radio", "rec"),
+        _ => unreachable!(),
+    };
+    let component_domain = match case {
+        "resource_component" => consumer_domains[0],
+        "component_resource" => producer_domains[0],
+        _ => 0,
+    };
+    let components = [(id("a"), component("a"))].into_iter().collect();
+    let executor = ExecutorDescriptor {
+        module: mref("ezsdr.test.executor"),
+        kind: ns("test.executor"),
+        memory_domains: (0..=3).map(MemoryDomainId::local).collect(),
+        impl_kinds: vec![ns("test.impl")],
+        capabilities: BTreeMap::new(),
+    };
+    let executors = [(id("exec"), executor)].into_iter().collect();
+    let mut island = island(&["a"], "exec");
+    island.components[0].memory_domain = MemoryDomainId::local(component_domain);
+    let islands = vec![island];
+    let mut resource_domains = BTreeMap::new();
+    match case {
+        "resource_component" => { resource_domains.insert(id("radio"), producer_domains.iter().copied().map(MemoryDomainId::local).collect()); }
+        "component_resource" => { resource_domains.insert(id("radio"), consumer_domains.iter().copied().map(MemoryDomainId::local).collect()); }
+        "resource_resource" => {
+            resource_domains.insert(id("radio"), producer_domains.iter().copied().map(MemoryDomainId::local).collect());
+            resource_domains.insert(id("radio2"), consumer_domains.iter().copied().map(MemoryDomainId::local).collect());
+        }
+        "resource_sink" => { resource_domains.insert(id("radio"), producer_domains.iter().copied().map(MemoryDomainId::local).collect()); }
+        _ => unreachable!(),
+    }
+    let sinks = if case == "resource_sink" {
+        [(id("rec"), sink_reads(consumer_domains))].into_iter().collect()
+    } else {
+        BTreeMap::new()
+    };
+    let from = PortRef { component: id(names.0), port: id("out") };
+    let to = PortRef { component: id(names.1), port: id("in") };
+    let is_feed = case == "resource_sink";
+    let graph_links = if is_feed { Vec::new() } else { vec![(from.clone(), to.clone(), BackPressure::Block)] };
+    let feed_links = if is_feed { vec![(from.clone(), to.clone(), BackPressure::DropOldest)] } else { Vec::new() };
+    let link_id = mref("ezsdr.test.link");
+    let links = [(
+        link_id.clone(),
+        LinkDescriptor {
+            module: link_id.clone(),
+            kind: ns("test.link"),
+            connects: connects.iter().map(|(a, b)| (MemoryDomainId::local(*a), MemoryDomainId::local(*b))).collect(),
+            policies: vec![BackPressure::Block, BackPressure::DropOldest],
+            cross_process: false,
+        },
+    )].into_iter().collect();
+    let placements = vec![place(&link_id, (names.0, "out"), (names.1, "in"))];
+    admit_islands(&IslandContext {
+        islands: &islands,
+        components: &components,
+        executors: &executors,
+        links: &links,
+        link_placements: &placements,
+        graph_links: &graph_links,
+        feed_links: &feed_links,
+        sinks: &sinks,
+        resource_domains: &resource_domains,
+    })
+}
+
+#[test]
+fn ma_39_resource_endpoint_domain_sets_use_one_rule() {
+    for case in ["resource_component", "component_resource", "resource_resource", "resource_sink"] {
+        assert!(resource_link_result(case, &[1], &[1], &[]).is_ok(), "{case}: same domain");
+        assert!(resource_link_result(case, &[1], &[2], &[(1, 2)]).is_ok(), "{case}: selected Link");
+        assert!(resource_link_result(case, &[1], &[2], &[(2, 1)]).is_ok(), "{case}: symmetric Link");
+        assert!(resource_link_result(case, &[1], &[2], &[]).is_err(), "{case}: impossible");
+        if matches!(case, "component_resource" | "resource_resource" | "resource_sink") {
+            assert!(resource_link_result(case, &[1], &[2, 3], &[(1, 3)]).is_ok(), "{case}: a later consumer is reachable");
+            assert!(resource_link_result(case, &[1], &[1, 2], &[]).is_ok(), "{case}: an equal consumer satisfies the producer");
+        }
+        if case != "component_resource" {
+            assert!(resource_link_result(case, &[0, 1], &[2], &[(0, 2)]).is_err(), "{case}: every producer domain must connect");
+            let consumers = if case == "resource_component" { &[2][..] } else { &[2, 3][..] };
+            let connects = if case == "resource_component" { &[(0, 2), (1, 2)][..] } else { &[(0, 2), (1, 3)][..] };
+            assert!(resource_link_result(case, &[0, 1], consumers, connects).is_ok(), "{case}: every producer reaches some consumer");
+        }
     }
 }
 
@@ -1674,7 +1801,7 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
         components: vec![on("a", 0), on("b", 1)],
         ..island(&[], "exec")
     }];
-    let no_resources = BTreeSet::new();
+    let no_resources: BTreeMap<Ident, Vec<MemoryDomainId>> = BTreeMap::new();
 
     let selected = ModuleRef {
         id: mid("ezsdr.test.link"),
@@ -1704,7 +1831,7 @@ fn ma_39_a_cross_domain_link_inside_one_island_needs_a_registered_link() {
         graph_links: &graph_links,
         feed_links: &[],
         sinks: &no_sinks,
-        resource_endpoints: &no_resources,
+        resource_domains: &no_resources,
     };
     let err = admit_islands(&ctx).expect_err("two domains, no Link");
     assert!(
