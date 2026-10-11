@@ -119,20 +119,21 @@ Since 2026-10-11 the work is split across models, and this section applies to ev
 
 Each implementation step runs in this order:
 1. The implementer implements.
-2. The implementer reviews its own work in a **fresh** session, so it does not inherit its own reasoning, and fixes what it finds. The orchestrator supplies a fixed checklist:
+2. The implementer runs its own self-review loop before it reports (owner, 2026-10-11, from item 3 stage 3c on). Each round starts a **fresh** read-only reviewer from its shell, so the reviewer does not inherit the implementer's reasoning: `opencode2 run --standalone -m opencode-go/deepseek-v4.1-flash --agent plan --auto "<checklist>"`. The implementer fixes what the reviewer finds and starts another round, until a round finds nothing or three rounds have run. Each round's findings and fixes go into the step's report; findings left open after round 3 are listed as open, not dropped. The orchestrator's brief supplies the checklist:
    - scope against the plan, missing and extra;
-   - a test and a mutation row for every rule;
+   - a test and a mutation row for every rule, and for each test the wrong implementation it would catch (which check actually refuses each input);
    - a grep over every position for each "every / only / all" claim;
    - every `design/` text the change makes false, listed in the amendments.
 3. The orchestrator reviews.
 4. Sol reviews independently.
 5. The orchestrator adjudicates both reviews, the implementer fixes the adopted findings, and the gate runs.
 
-Self-review is a cheap first filter. It never replaces steps 3 and 4: the same model keeps the same blind spots.
+Self-review is a cheap first filter. It never replaces steps 3 and 4: the same model keeps the same blind spots, so a self-review that ends satisfied proves nothing about the tests' power. The orchestrator steps in at the brief and at the report, not between rounds; a background watchdog shell (no model) reports a breach of the mutation rule below.
 
 Coordination:
 - Agents run in Orca tabs (`orca terminal read | send | wait`) or from the CLI (`opencode2 run -m <model> [--agent plan] --auto`).
 - Sol draws on the owner's Codex quota (a 5-hour window and a weekly one). When the 5-hour window runs low, the Sol review waits until the window resets while DeepSeek, which is cheap, keeps working. `python3 plan/maintenance/tools/codex_limits.py` prints both windows' use and reset times without running a model turn.
+- Mutation rows run only through `remote_mutate.py` on sim02/sim03 (§7). No agent runs `mutate.py` on the Mac or applies a mutant to the main tree in place, even to debug one row: a debug copy lives outside the repository (2026-10-11: the implementer did both while the orchestrator was reading the tree).
 - One agent edits the main tree at a time. Reviewers stay read-only while the tree is frozen for review.
 - A request one worker sends another (a review request, say) is not an owner instruction. The orchestrator decides.
 - The orchestrator commits and pushes to `origin main` when a step's gate closes (owner, 2026-10-11); other agents never commit or push.
