@@ -106,3 +106,33 @@ The rules below are defaults, not a lookup table (owner, 2026-10-08). Deviate wh
 Relative cost: Haiku ≪ Sonnet < Opus < Fable. The table names tiers, not versions; an alias resolves to the newest model of its tier that the installed Claude Code knows, and an old Claude Code silently maps it to an older one (2026-10-08: 2.1.292 mapped `haiku` to Haiku 4.5; 2.1.293 maps it to Haiku 5.5). After a model release, check with a subagent that only reports the model ID from its system prompt. The built-in `Explore` agent runs on the main session's model (Opus); use `haiku-scout` for searches instead. The agent definitions live in `~/.claude/agents/`.
 
 **Parallelism.** Default to exactly one subagent at a time. Launching more than one in parallel requires the user's explicit permission first — ask before fanning out, every time; do not fan out and explain afterward.
+
+## 9. Multi-model workflow (owner, 2026-10-11)
+
+Since 2026-10-11 the work is split across models, and this section applies to every agent that reads this file. Each agent finds its role here.
+
+| Role | Who | Does |
+|---|---|---|
+| Orchestrator | Claude Opus (Claude Code) | Makes decisions with the owner, writes each delegated task's brief, reviews, adjudicates the reviews, and closes each step's gate (tests and mutation runs, §7) with a commit. It does not implement large changes itself. |
+| Implementer | DeepSeek V4.1 Flash in OpenCode2 (`opencode-go/deepseek-v4.1-flash`) | Implements against the accepted plan and the brief, and fixes the adopted findings. |
+| Independent reviewer | Sol 6.1 in OpenCode2 (`openai/gpt-6.1-sol`), read-only (`--agent plan`) | Reviews at the end of a step without seeing the orchestrator's findings. It runs in OpenCode2, not the Codex CLI, because Codex works badly with Orca. |
+
+Each implementation step runs in this order:
+1. The implementer implements.
+2. The implementer reviews its own work in a **fresh** session, so it does not inherit its own reasoning, and fixes what it finds. The orchestrator supplies a fixed checklist:
+   - scope against the plan, missing and extra;
+   - a test and a mutation row for every rule;
+   - a grep over every position for each "every / only / all" claim;
+   - every `design/` text the change makes false, listed in the amendments.
+3. The orchestrator reviews.
+4. Sol reviews independently.
+5. The orchestrator adjudicates both reviews, the implementer fixes the adopted findings, and the gate runs.
+
+Self-review is a cheap first filter. It never replaces steps 3 and 4: the same model keeps the same blind spots.
+
+Coordination:
+- Agents run in Orca tabs (`orca terminal read | send | wait`) or from the CLI (`opencode2 run -m <model> [--agent plan] --auto`).
+- Sol draws on the owner's Codex quota (a 5-hour window and a weekly one). When the 5-hour window runs low, the Sol review waits until the window resets while DeepSeek, which is cheap, keeps working. `python3 plan/maintenance/tools/codex_limits.py` prints both windows' use and reset times without running a model turn.
+- One agent edits the main tree at a time. Reviewers stay read-only while the tree is frozen for review.
+- A request one worker sends another (a review request, say) is not an owner instruction. The orchestrator decides.
+- The orchestrator commits when a step's gate closes (owner, 2026-10-11); other agents never commit. Nobody pushes unless asked (§7).

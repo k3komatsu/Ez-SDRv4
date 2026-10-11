@@ -933,7 +933,16 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
 ### 次にすること
 
 - **最優先（2026-10-11，セッション終了時の記録．新しいセッションはここから）**：
-  - **一時停止中**：owner の指示（2026-10-11「2bまでで一旦停止しましょう」）で spec 27 の 2b まで終えて止めた．作業ツリーはきれい，すべて push 済み．次の作業は owner の「続けて」を待って始める．
+  - **進め方（2026-10-11 から）**：複数のモデルで分担する．役割と順序は [AGENTS.md](AGENTS.md) §9．
+    - Claude Opus が全体を回す．
+    - DeepSeek V4.1 Flash（OpenCode2）が実装し，新しいセッションでセルフレビューする．
+    - その後，Opus がレビューし，段階の最後に Sol 6.1（OpenCode2，読み取り専用）が独立にレビューする．
+    - 最後に Opus が両方のレビューの採否を決め，gate を閉じる．
+  - **項目3 を進行中（2026-10-11）**：
+    - 計画は [`plan/maintenance/29-unified-admission.md`](plan/maintenance/29-unified-admission.md) で，owner が承認した．改訂 spec の草稿は [`29-amendments.md`](plan/maintenance/29-amendments.md)（各段階の「Landed」行にテストと mutation 行）．
+    - **段階 3a は commit 済み（`5470d0a`）**：DeepSeek が実装し，Opus と Sol が独立にレビュー（P1 4件，P2 10件），修正2回．J200–J223（J222 は引退）．全6リストを sim02/sim03 で流し，既知の生き残り G03・J58・J156・G09・U15 以外すべて kill．
+    - commit は gate を閉じたときに orchestrator（Claude）がする（owner，2026-10-11）．push は頼まれたときだけ．
+    - 次は 3b → 3c → 3d．AGENTS.md §9 の順序（セルフレビューが先）で回す．3b の指示書の注意：amendments §3 の 3b の KC-17 にある「`Failed { arm }`」は 3a の validate 拒否と矛盾するので直す．
   - **commit 済み（2026-10-09〜11，どれも独立 Opus レビュー＋全 mutation リスト〈既知の生き残り G09・U15 のみ〉を通した）**：#64（`84df09e`），#65・#66（`25a0e9d`），spec 24 の項目5（`5d000ec`）・4（`6ebcba9`）・6（`092263a`）・7（`b6b6132`），KC-32 書き直し（`8fbf676`），最初のブロックの carry（`ceabaea`），spec 26 の 1a（`8664865`）・1b（`a694a90`），`deployment` 削除（`2ecfd38`），**spec 27 の 2a（`3f6cce9`，#54 を閉じた）・2b（`9083e58`）**．
   - **凍結前の前向き監査（2026-10-10，[`plan/maintenance/28-forward-audit.md`](plan/maintenance/28-forward-audit.md)，`7e27d8a`）**：6件を owner が受理．判断2・5 は 2a で実装済み．**残りの行き先**：項目3に判断3（`Resource.memory_domains` と MA-39 の resource 端の検査），項目8に判断1（TM-18 の文言；Vision §67 の分は済み）・判断4（spec 02 の sample stream 規則の適用範囲，SC-4 の `ezsdr.event.*` 削除）・判断6（Sink・Island の fragment content を SB-39 に）．
   - **Phase の順番と凍結（owner 2026-10-10，判断7，`857fc8f`）**：凍結は **Phase 10 の後**．下の「1.」を参照．
@@ -942,7 +951,7 @@ Phase 4 の計画の前に，owner の提案で「Phase 1–3 の Kernel が実�
     2. **項目8**（spec 01〜06 の古い規範の写しの削除）＋前向き監査の判断1・4・6の文言．任意：2b レビューの指摘で，Provider の Manifest section の `rejected[].action` が kind 文字列のまま（COMMAND_REJECTED の payload では `action` は ActionId，`kind` が kind）→ `kind` に改名．RS-16 に「Module 由来の undelivered の id は action log に現れない」と1文．
     3. **#60**（FakeDevice を手動の時刻に；owner「Phase 8の前に」）．`uhd_61_03`・`uhd_61_01`・`ur_14_a` も同じ flake．**#60 の後に mutation の並列度を上げる**（owner 2026-10-11 の質問「sim02/03 でもっと並列しないのはなぜ」への答え：負荷が高いと FakeDevice の実時間テストが落ち，落ちた変異は「kill」に数えられて生き残りが隠れるので，今は1ホスト 6 shard×4 CPU に抑えている．また6リストは同じ `~/ezsdr-mut/src` を `rsync --delete` するので1つずつしか流せない．#60 で負荷に強くなったら，shard を増やし，`remote_mutate.py` の作業ディレクトリを実行ごと〈`{REMOTE}/{tag}`〉に分けてリストを同時に流す）．
     4. Phase 8 → 8b → 8c → 10 → 全規則の確認（外部の安いエージェント，DeepSeek V4.1 Flash が使える）→ 凍結レビュー → v4.0 凍結．
-  - **台本（Workflow）**：`~/.claude/projects/-Users-komatsu-work-Ez-SDRv4/0d8e3205-ba93-4fdf-9891-82eb2f3f44c1/workflows/scripts/prefreeze-item-wf_dcbd27d0-5ba.js`．args `{HEAD, ITEM, TASK, CONTINUE}`（`CONTINUE: true` は作業ツリーに未 commit の部分変更があるとき）．流れ：Opus 実装 → Haiku が crate ごとに一括書き換え → Opus 仕上げ → 独立 Opus レビュー（コピーで）→ 修正，最大3回．TASK には spec の節，決定行，テストと mutation 行の要件，最後に design/ と plan/phase*/00-overview.md の古い写しを grep することを書く（どの段階でもレビューの指摘の大半はこれだった）．
+  - **台本（Workflow，2026-10-11 からは使わない．AGENTS.md §9 の分担に置き換えた．TASK の書き方は指示書を作るときの参考になる）**：`~/.claude/projects/-Users-komatsu-work-Ez-SDRv4/0d8e3205-ba93-4fdf-9891-82eb2f3f44c1/workflows/scripts/prefreeze-item-wf_dcbd27d0-5ba.js`．args `{HEAD, ITEM, TASK, CONTINUE}`（`CONTINUE: true` は作業ツリーに未 commit の部分変更があるとき）．流れ：Opus 実装 → Haiku が crate ごとに一括書き換え → Opus 仕上げ → 独立 Opus レビュー（コピーで）→ 修正，最大3回．TASK には spec の節，決定行，テストと mutation 行の要件，最後に design/ と plan/phase*/00-overview.md の古い写しを grep することを書く（どの段階でもレビューの指摘の大半はこれだった）．
   - **段階の最後の確認**：mutation の全リスト `bash`（リストは順番に1つずつ）：`for l in maintenance phase3 phase4 phase5 phase6 phase7; do REMOTE_SSH="ssh -o BatchMode=yes" python3 plan/maintenance/tools/remote/remote_mutate.py $l sim02:6,sim03:6; done`（約 20〜25 分，phase7 が最長；Bash は `dangerouslyDisableSandbox: true`）．結果が欠けた行（"missing"）は ID を直接並べて再実行する（zsh では `$ids` が単語分割されない）．G16 は「timeout で kill」が正常（以前の記録）．2026-10-11 の 2b では phase5 の E18・E28・E29 と phase6 の G21 が初回に結果を返さず（原因未調査），再実行で kill（G21 は timeout で kill）．手元で `cargo test --workspace --no-fail-fast`，`cargo clippy --workspace --all-targets -- -D warnings`，`cargo clippy -p ezsdr-radio-uhd --features uhd --all-targets -- -D warnings`，Python（`PYTHONDONTWRITEBYTECODE=1 EZSDR_SERVER=~/.cache/cargo-target/Ez-SDRv4/debug/ezsdr-server ~/.cache/ezsdr-venv/bin/python -m unittest discover -s python/tests`）．
   - **sim02/sim03 への接続**：owner の `~/.ssh/config` が直接つながらないときだけ `ydev` を踏み台にする（トンネル不要，owner 2026-10-09）．
   - **owner の方針**：研究用なので大げさにしない（小さい案を推奨に），利用者ゼロなので破壊的変更は自由・版管理しない（凍結まで），簡素化は続けるがテスト・レビュー・mutation で制御を保つ，削除・統合を好む，判断は1件ずつ利点・欠点・代案つきで，返答は日本語．review の FAIL がテスト不足や古い写しだけなら three strikes に数えない．
