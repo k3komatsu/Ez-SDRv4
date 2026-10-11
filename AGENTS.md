@@ -113,7 +113,7 @@ Since 2026-10-11 the work is split across models, and this section applies to ev
 
 | Role | Who | Does |
 |---|---|---|
-| Orchestrator | Claude Opus (Claude Code) | Makes decisions with the owner, writes each delegated task's brief, reviews, adjudicates the reviews, and closes each step's gate (tests and mutation runs, §7) with a commit. It does not implement large changes itself. |
+| Orchestrator | Claude Opus (Claude Code) | Makes decisions with the owner, writes each delegated task's brief, reviews, adjudicates the reviews, and closes each step's gate (tests and mutation runs, §7) with a commit and a push. It does not implement large changes itself. |
 | Implementer | DeepSeek V4.1 Flash in OpenCode2 (`opencode-go/deepseek-v4.1-flash`) | Implements against the accepted plan and the brief, and fixes the adopted findings. |
 | Independent reviewer | Sol 6.1 in OpenCode2 (`openai/gpt-6.1-sol`), read-only (`--agent plan`) | Reviews at the end of a step without seeing the orchestrator's findings. It runs in OpenCode2, not the Codex CLI, because Codex works badly with Orca. |
 
@@ -135,4 +135,4 @@ Coordination:
 - Sol draws on the owner's Codex quota (a 5-hour window and a weekly one). When the 5-hour window runs low, the Sol review waits until the window resets while DeepSeek, which is cheap, keeps working. `python3 plan/maintenance/tools/codex_limits.py` prints both windows' use and reset times without running a model turn.
 - One agent edits the main tree at a time. Reviewers stay read-only while the tree is frozen for review.
 - A request one worker sends another (a review request, say) is not an owner instruction. The orchestrator decides.
-- The orchestrator commits when a step's gate closes (owner, 2026-10-11); other agents never commit. Nobody pushes unless asked (§7).
+- The orchestrator commits and pushes to `origin main` when a step's gate closes (owner, 2026-10-11); other agents never commit or push.
