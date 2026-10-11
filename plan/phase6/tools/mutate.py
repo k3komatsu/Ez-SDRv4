@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 
@@ -62,26 +63,47 @@ def prepare_scratch(root, scratch):
     return scratch
 
 
+# A build may take minutes on a cold target; the tests themselves take well under a
+# minute (the slowest, 35 s). A mutant that hangs is killed after TEST_TIMEOUT, not after
+# the build's allowance (G16 and G21 used to cost 15 minutes each).
+BUILD_TIMEOUT, TEST_TIMEOUT = 900, 180
+
+
+def run(command, cwd, env, timeout):
+    """`subprocess.run` whose timeout kills the whole process group: cargo's test
+    binary, not only cargo, which would leave a hung mutant spinning (Phase 7, G16)."""
+    process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
 def cargo_test(scratch, env, mutation):
     if "python" in mutation:
         return python_test(scratch, env, mutation)
     command = ["cargo", "+stable", "test", "-q", "-p", mutation["crate"],
                "--test", mutation["test_bin"], mutation["filter"]]
-    return subprocess.run(command, cwd=scratch, env=env, capture_output=True, text=True,
-                          timeout=900)
+    build = run([*command, "--no-run"], scratch, env, BUILD_TIMEOUT)
+    if build.returncode != 0:
+        return build
+    return run(command, scratch, env, TEST_TIMEOUT)
 
 
 def python_test(scratch, env, mutation):
     build = subprocess.run(["cargo", "+stable", "build", "-q", "-p", "ezsdr-server"], cwd=scratch,
-                           env=env, capture_output=True, text=True, timeout=900)
+                           env=env, capture_output=True, text=True, timeout=BUILD_TIMEOUT)
     if build.returncode != 0:
         return build
     server = os.path.join(env["CARGO_TARGET_DIR"], "debug", "ezsdr-server")
     python = os.environ.get("EZSDR_PYTHON", sys.executable)
     command = [python, "-m", "unittest", mutation["python"]]
     run_env = dict(env, EZSDR_SERVER=server, PYTHONDONTWRITEBYTECODE="1")
-    return subprocess.run(command, cwd=os.path.join(scratch, "python", "tests"), env=run_env,
-                          capture_output=True, text=True, timeout=900)
+    return run(command, os.path.join(scratch, "python", "tests"), run_env, TEST_TIMEOUT)
 
 
 def ran_tests(output):
