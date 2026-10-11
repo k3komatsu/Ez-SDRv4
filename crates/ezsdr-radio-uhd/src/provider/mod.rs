@@ -352,7 +352,7 @@ impl Provider for UhdRadio {
             ctx.inputs.clone(),
             links,
             self.description.clone(),
-        ));
+        )?);
         if let Some(error) = &self.reopened {
             core.timing(json!({ "what": "reopened_on_unlock", "first_error": error }));
         }

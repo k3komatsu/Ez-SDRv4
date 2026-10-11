@@ -7,10 +7,11 @@ mod support;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ezsdr_kernel::event::{
-    EventCollector, EventKind, EventRecord, EventSink, HOT_PAYLOAD_BYTES, Severity,
+    EventCollector, EventKind, EventRecord, HOT_PAYLOAD_BYTES, Severity,
 };
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::policy::{EventKindRegistry, Reaction};
@@ -52,20 +53,25 @@ fn rs_32_emit_allocates_nothing() {
     let source = support::node_source("radio");
     let kind = EventKind::parse(EventKind::LINK_BACKPRESSURE).expect("parses");
     // A ring deep enough that the drop path is not the only one exercised.
-    let c = EventCollector::new(
+    let collector = Arc::new(EventCollector::new(
         &[(source.clone(), kind.clone())],
         &policy.table.keys().cloned().collect::<Vec<_>>(),
         1_024,
         &policy,
-    );
-    let handle = c.resolve(&source, &kind);
+    ));
+    // What a Module emits through: the root-bound view `prepare` hands it (item 3),
+    // whose `emit` adds the scope and index check on the hot path.
+    let view = collector.view(source.clone());
+    let handle = view
+        .resolve(&source, &kind)
+        .expect("the view's root covers its own node");
     let payload = [7u8; 16];
     let at = TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0);
 
     ALLOCS.store(0, Ordering::Relaxed);
     COUNTING.store(true, Ordering::Relaxed);
     for _ in 0..100_000 {
-        c.emit(handle, at, Severity::Warning, &payload).expect("emits");
+        view.emit(handle, at, Severity::Warning, &payload).expect("emits");
     }
     COUNTING.store(false, Ordering::Relaxed);
     assert_eq!(ALLOCS.load(Ordering::Relaxed), 0, "the hot path allocates nothing");
@@ -79,7 +85,7 @@ fn rs_32_emit_allocates_nothing() {
     );
     // A larger payload is produced on the control path only.
     assert_eq!(
-        c.emit(handle, at, Severity::Warning, &[0u8; HOT_PAYLOAD_BYTES + 1]),
+        view.emit(handle, at, Severity::Warning, &[0u8; HOT_PAYLOAD_BYTES + 1]),
         Err(RunError::PayloadTooLarge)
     );
     assert_eq!(policy.reaction_for(&kind), Reaction::MarkArtifact);

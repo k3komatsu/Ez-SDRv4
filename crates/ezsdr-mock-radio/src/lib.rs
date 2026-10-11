@@ -1635,13 +1635,16 @@ impl Provider for MockRadio {
         self.root = Some(root);
         self.clocks = Some(ctx.clocks);
         self.time = Some(ctx.time);
-        // MR-37: `resolve` is control-path only (RS-33), so the handle is taken here.
+        // MR-37: `resolve` is control-path only (RS-33), so the handle is taken here;
+        // the view refuses a source outside this instance's root (item 3).
         let EventSource::Node { node: source_root } = ctx.source else {
             return Err(self.reject("KC-8: a Provider's event source root is a node"));
         };
         let rx_node = source_root.child("rx").map_err(|error| self.reject(format!("MR-37: {error}")))?;
         let overflow = EventKind::parse(ezsdr_radio::kinds::RX_OVERFLOW).expect("declared radio event kind");
-        self.overflow_handle = Some(ctx.events.resolve(&EventSource::Node { node: rx_node }, &overflow));
+        self.overflow_handle = Some(ctx.events
+            .resolve(&EventSource::Node { node: rx_node }, &overflow)
+            .map_err(|error| self.reject(format!("MR-37: {error}")))?);
         self.source_root = Some(source_root);
         self.events = Some(ctx.events);
         self.actions = Some(ctx.actions);

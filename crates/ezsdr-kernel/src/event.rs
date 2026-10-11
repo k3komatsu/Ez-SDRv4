@@ -3,6 +3,7 @@
 
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::fmt;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
@@ -256,23 +257,63 @@ pub struct CounterRow {
 }
 
 /// A pre-resolved `(source, kind)` pair, so that the hot path resolves no strings
-/// and allocates nothing (RS-32, RS-33).
+/// and allocates nothing (RS-32, RS-33). Its fields are private: a Module gets one
+/// from [`EventSink::resolve`] and never mints or reads one. `scope` names the sink or
+/// the view that minted it, so a handle from another Run or another view is refused
+/// rather than counted (RS-32, MA-9; pre-freeze item 3).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct EventHandle {
+    /// The process-unique scope of the sink that minted it (item 3).
+    scope: u64,
     /// Counter-table row.
-    pub row: u32,
+    row: u32,
     /// Kind-table index.
-    pub kind: u32,
+    kind: u32,
+}
+
+/// The next scope to mint; starts at 1, so no scope is 0 (item 3).
+static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
+
+/// One process-unique scope per sink and per Module view (pre-freeze item 3): one is
+/// minted for each Run's collector and each view of it, so a handle names exactly one
+/// sink for the life of the process. `fetch_update` never wraps — at the counter's end
+/// it panics rather than repeats an id — and 2^64 sinks is unreachable.
+fn next_scope() -> u64 {
+    NEXT_SCOPE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+        .expect("a process cannot exhaust 2^64 event-sink scopes")
+}
+
+impl EventSource {
+    /// Whether this source root (KC-8) admits `source`: for a Provider's node, the
+    /// node itself or a descendant on a segment boundary (SB-33); for a Sink's output
+    /// or an Executor's Island, exactly itself. `kernel` and `unforeseen` are inside
+    /// no root, so a Module naming one is refused (RS-32, RS-33; item 3).
+    fn covers(&self, source: &EventSource) -> bool {
+        match (self, source) {
+            // `radio/rx` covers `radio/rx/0` and not `radio/rxx` or `radio2` (SB-33).
+            (EventSource::Node { node: root }, EventSource::Node { node }) => node.is_within(root),
+            (EventSource::Output { output: root }, EventSource::Output { output }) => root == output,
+            (EventSource::Island { island: root }, EventSource::Island { island }) => root == island,
+            _ => false,
+        }
+    }
 }
 
 /// Where a Module emits events. A Plugin host later maps it to an event stream
-/// without a Kernel change (MA-6, MA-46).
+/// without a Kernel change (MA-6, MA-46). The Kernel hands each instance a root-bound
+/// **view** of the Run's collector, and keeps the collector itself as its own sink
+/// (pre-freeze item 3).
 pub trait EventSink: Send + Sync {
-    /// Pre-resolves a `(source, kind)` pair. Control path only (RS-33).
-    fn resolve(&self, source: &EventSource, kind: &EventKind) -> EventHandle;
+    /// Pre-resolves a `(source, kind)` pair. Control path only (RS-33). A source
+    /// outside the view's root is refused before RS-33's fallback can fold it in, so
+    /// the fallback stays what it is: an unforeseen pair **inside** the instance's own
+    /// tree (MA-5, item 3).
+    fn resolve(&self, source: &EventSource, kind: &EventKind) -> Result<EventHandle, RunError>;
     /// Emits on the hot path: counts, then queues the body if the ring has room.
     /// Allocates nothing. A payload above [`HOT_PAYLOAD_BYTES`] is
-    /// `PayloadTooLarge` (RS-32, RS-33, RS-34).
+    /// `PayloadTooLarge`, and a handle this sink did not mint is refused
+    /// (RS-32, RS-33, RS-34; item 3).
     fn emit(
         &self,
         handle: EventHandle,
@@ -280,7 +321,9 @@ pub trait EventSink: Send + Sync {
         severity: Severity,
         payload: &[u8],
     ) -> Result<(), RunError>;
-    /// Emits a full-bodied event on the control path (RS-32).
+    /// Emits a full-bodied event on the control path (RS-32). A map key that is not
+    /// ASCII anywhere in the payload is refused, before the event is counted or
+    /// delivered (SB-9a; item 3).
     fn emit_control(&self, event: Event) -> Result<(), RunError>;
 }
 
@@ -296,10 +339,13 @@ struct Ring {
 }
 
 /// The event collector: the counter table, the bounded ring, the per-kind drop
-/// counts and the escalation flags.
+/// counts and the escalation flags. It is also the Kernel's own sink, with its own
+/// scope, distinct from every Module view's (item 3).
 ///
 /// Rule: RS-32…RS-36.
 pub struct EventCollector {
+    /// The Kernel sink's scope, distinct from every view's (item 3).
+    scope: u64,
     sources: Vec<EventSource>,
     source_index: BTreeMap<EventSource, usize>,
     kinds: Vec<EventKind>,
@@ -407,6 +453,7 @@ impl EventCollector {
             payload: [0; HOT_PAYLOAD_BYTES],
         };
         let collector = EventCollector {
+            scope: next_scope(),
             sources,
             source_index,
             kinds: kind_list,
@@ -532,7 +579,7 @@ impl EventCollector {
                 // RS-35's invariant is stated "for every kind", so the meta-event is
                 // counted like any other body it is delivered beside (RS-33, RS-38).
                 let source = EventSource::Kernel;
-                let handle = self.resolve(&source, &dropped_kind);
+                let handle = self.mint(self.scope, &source, &dropped_kind);
                 self.counts[handle.row as usize].fetch_add(1, Ordering::Relaxed);
                 out.push(Event {
                     source,
@@ -549,49 +596,49 @@ impl EventCollector {
         out
     }
 
-    /// Both fields of a handle, checked where one enters. `EventHandle`'s fields are
-    /// public, so a Module can fabricate one, and RS-32's infallible hot path is a
-    /// promise about the **Kernel's** handles. Checking only `row` moved the panic
-    /// out of the offending Module's call and into the coordinator's `drain`, which
-    /// indexes `kinds` with the stored `kind` — away from the code that caused it
-    /// (RS-32, MA-9).
-    fn check_handle(&self, handle: EventHandle) -> Result<&AtomicU64, RunError> {
-        if self.kinds.len() <= handle.kind as usize {
-            return Err(RunError::BadEventHandle { row: handle.row });
+    /// Whether `handle` names this sink's counter table and was minted for `scope`,
+    /// in constant time. A handle's fields are private and [`mint`](Self::mint) is
+    /// their only constructor, so what a Module can still do is hold one another Run
+    /// or another view minted; that is refused here, where it enters, rather than
+    /// counted or panicked on (RS-32, MA-9; pre-freeze item 3).
+    fn check_handle(&self, scope: u64, handle: EventHandle) -> Result<&AtomicU64, RunError> {
+        if handle.scope != scope
+            || handle.kind as usize >= self.kinds.len()
+            || handle.row as usize >= self.counts.len()
+        {
+            return Err(RunError::ForeignEventHandle);
         }
-        self.counts
-            .get(handle.row as usize)
-            .ok_or(RunError::BadEventHandle { row: handle.row })
+        Ok(&self.counts[handle.row as usize])
     }
-}
 
-impl EventSink for EventCollector {
-    fn resolve(&self, source: &EventSource, kind: &EventKind) -> EventHandle {
+    /// Mints a handle for `(source, kind)` under `scope`. Control path only, so the hot
+    /// path resolves no strings (RS-32, RS-33). An unforeseen pair merges into the
+    /// fallback row, which is reported as such.
+    fn mint(&self, scope: u64, source: &EventSource, kind: &EventKind) -> EventHandle {
         let si = self.source_index.get(source).copied();
         let ki = self.kind_index.get(kind).copied();
         let fallback_row = (self.pairs.len() - 1) as u32;
         match (si, ki) {
             (Some(s), Some(k)) => match self.index.get(&(s, k)) {
-                Some(row) => EventHandle { row: *row as u32, kind: k as u32,
-                },
+                Some(row) => EventHandle { scope, row: *row as u32, kind: k as u32 },
                 // RS-33: an unforeseen pair merges into the fallback row, which is
                 // reported as such.
-                None => EventHandle { row: fallback_row, kind: k as u32,
-                },
+                None => EventHandle { scope, row: fallback_row, kind: k as u32 },
             },
             // An unforeseen *source* must not cost the kind: RS-36's abort on
             // `DEVICE_LOST` and RS-31's delivered kind both hang off it, and a
             // second or hot-plugged device is an ordinary reason for a source the
             // plan did not foresee.
-            (None, Some(k)) => EventHandle { row: fallback_row, kind: k as u32,
-            },
-            _ => EventHandle { row: fallback_row, kind: (self.kinds.len() - 1) as u32,
-            },
+            (None, Some(k)) => EventHandle { scope, row: fallback_row, kind: k as u32 },
+            _ => EventHandle { scope, row: fallback_row, kind: (self.kinds.len() - 1) as u32 },
         }
     }
 
-    fn emit(
+    /// The hot-path body for `scope`: counts, then queues the body if the ring has
+    /// room. Allocates nothing (RS-32, RS-34).
+    fn emit_scoped(
         &self,
+        scope: u64,
         handle: EventHandle,
         time: TimePoint,
         severity: Severity,
@@ -601,11 +648,9 @@ impl EventSink for EventCollector {
             return Err(RunError::PayloadTooLarge);
         }
         // RS-33: counted before the body is queued, so a count is never lost even
-        // when the body is.
-        // `EventHandle`'s fields are public, so a Module can fabricate one. An
-        // out-of-range row must return an error, not panic the Kernel: RS-32's hot
-        // path is infallible for the *Kernel's* handles only (MA-9).
-        let row = self.check_handle(handle)?;
+        // when the body is. A handle from another Run or another view is refused
+        // before it counts anything here (item 3).
+        let row = self.check_handle(scope, handle)?;
         row.fetch_add(1, Ordering::Relaxed);
         let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
         if ring.len == ring.slots.len() {
@@ -633,10 +678,94 @@ impl EventSink for EventCollector {
         Ok(())
     }
 
+    /// Refuses a non-ASCII map key anywhere in a control event's payload (SB-9a;
+    /// item 3): the event is neither counted nor delivered. The refusal names the
+    /// position only, never the offending key, exactly as KC-24 step 4 refuses one,
+    /// so a key that OV-15 cannot canonicalise cannot reach the log or the sealed
+    /// Manifest through this path.
+    fn check_payload_keys(payload: &serde_json::Value) -> Result<(), RunError> {
+        crate::spec::check_ascii_keys(payload)
+            .map_err(|_| RunError::PayloadKeyNotAscii { position: "payload".to_owned() })
+    }
+
+    /// A root-bound view for one Module's `prepare` (RS-32, RS-33, MA-6; item 3):
+    /// the counters, ring and queues stay here, and the view adds this instance's
+    /// source root and one scope id of its own.
+    pub fn view(self: &Arc<Self>, root: EventSource) -> Arc<dyn EventSink> {
+        Arc::new(SinkView {
+            collector: Arc::clone(self),
+            scope: next_scope(),
+            root,
+        })
+    }
+}
+
+/// One Module's view of the Run's collector (pre-freeze item 3). `resolve` refuses a
+/// source outside `root` **before** RS-33's fallback can fold it in: the fallback stays
+/// the collector's answer to an unforeseen pair inside the instance's own tree, while
+/// another instance's source — or `kernel`/`unforeseen` — is a Module error.
+struct SinkView {
+    collector: Arc<EventCollector>,
+    scope: u64,
+    root: EventSource,
+}
+
+impl EventSink for SinkView {
+    fn resolve(&self, source: &EventSource, kind: &EventKind) -> Result<EventHandle, RunError> {
+        if !self.root.covers(source) {
+            return Err(RunError::EventSourceOutsideRoot {
+                root: self.root.clone(),
+                source: source.clone(),
+            });
+        }
+        Ok(self.collector.mint(self.scope, source, kind))
+    }
+
+    fn emit(
+        &self,
+        handle: EventHandle,
+        time: TimePoint,
+        severity: Severity,
+        payload: &[u8],
+    ) -> Result<(), RunError> {
+        self.collector.emit_scoped(self.scope, handle, time, severity, payload)
+    }
 
     fn emit_control(&self, event: Event) -> Result<(), RunError> {
-        let handle = self.resolve(&event.source, &event.kind);
-        let row = self.check_handle(handle)?;
+        // Root-bound like `resolve` (MA-5, MA-9a): a Module's control event carries its
+        // own root or, for a Provider, a node below it; `kernel` and `unforeseen` are
+        // no Module's to name. The ASCII check stays the collector's (item 4).
+        if !self.root.covers(&event.source) {
+            return Err(RunError::EventSourceOutsideRoot {
+                root: self.root.clone(),
+                source: event.source.clone(),
+            });
+        }
+        self.collector.emit_control(event)
+    }
+}
+
+impl EventSink for EventCollector {
+    fn resolve(&self, source: &EventSource, kind: &EventKind) -> Result<EventHandle, RunError> {
+        // The Kernel's own sink is bound to no root: the Kernel emits from `kernel` and
+        // files `DEVICE_LOST` under an instance's root (KC-30, KC-31).
+        Ok(self.mint(self.scope, source, kind))
+    }
+
+    fn emit(
+        &self,
+        handle: EventHandle,
+        time: TimePoint,
+        severity: Severity,
+        payload: &[u8],
+    ) -> Result<(), RunError> {
+        self.emit_scoped(self.scope, handle, time, severity, payload)
+    }
+
+    fn emit_control(&self, event: Event) -> Result<(), RunError> {
+        Self::check_payload_keys(&event.payload)?;
+        let handle = self.mint(self.scope, &event.source, &event.kind);
+        let row = self.check_handle(self.scope, handle)?;
         row.fetch_add(1, Ordering::Relaxed);
         // The control path never drops a body, so it raises no escalation flag (RS-36).
         self.control.lock().unwrap_or_else(|e| e.into_inner()).push(event);
@@ -966,6 +1095,41 @@ mod tests {
             resource: Ident::parse("radio").expect("a well-formed Ident"),
             path: String::new(),
         }
+    }
+
+    #[test]
+    fn rs_33_duplicate_declared_kinds_resolve_to_the_first_index() {
+        // Two declarations of one kind keep the first index. In-crate, because the
+        // handle's index is private now (item 3) and no public behaviour distinguishes
+        // the second index; the planned pair still shares the one counter row.
+        let policy = crate::policy::EventKindRegistry::with_kernel_kinds()
+            .compile(&BTreeMap::new())
+            .expect("compiles");
+        let source = EventSource::Node {
+            node: crate::id::ResourceId::parse("radio").expect("a node"),
+        };
+        let kind = EventKind::parse("test.custom").expect("parses");
+        let declared_kinds = [kind.clone(), kind.clone()];
+        let collector = EventCollector::new(
+            &[(source.clone(), kind.clone())],
+            &declared_kinds,
+            8,
+            &policy,
+        );
+        let handle = collector
+            .resolve(&source, &kind)
+            .expect("the Kernel's own sink resolves any source");
+        assert_eq!(
+            handle.kind, 0,
+            "duplicate kinds use the first declared index"
+        );
+        collector.emit(handle, t(0), Severity::Info, &[]).expect("emits");
+        let row = collector
+            .counters()
+            .into_iter()
+            .find(|row| row.source == source && row.kind == kind)
+            .expect("the planned pair exists");
+        assert_eq!(row.count, 1);
     }
 
     #[test]

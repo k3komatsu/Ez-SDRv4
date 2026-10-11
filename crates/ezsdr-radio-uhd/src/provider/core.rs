@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use ezsdr_kernel::event::{ActionId, Event, EventHandle, EventKind, EventSink, EventSource, Severity};
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
-use ezsdr_kernel::module_api::{InputStore, StopMode};
+use ezsdr_kernel::module_api::{InputStore, ModuleError, StopMode};
 use ezsdr_kernel::spec::{Key, Scalar, Value};
 use ezsdr_kernel::stream::DataLink;
 use ezsdr_kernel::time::{ClockRegistry, Rational, TimeAuthority, TimePoint};
@@ -283,11 +283,16 @@ impl Core {
         inputs: Arc<dyn InputStore>,
         links: Vec<Arc<dyn DataLink>>,
         description: DeviceDescription,
-    ) -> Core {
+    ) -> Result<Core, ModuleError> {
         let rx_id = id.child("rx").expect("a valid stream id");
         let tx_id = id.child("tx").expect("a valid stream id");
-        let overflow = events.resolve(&EventSource::Node { node: rx_id.clone() }, &EventKind::parse(kinds::RX_OVERFLOW).expect("a radio kind"));
-        Core {
+        // UR-12: the rx node is below the instance root the Kernel handed this
+        // instance, so the bound view resolves it; a refusal is a Module error, not a
+        // Kernel event (item 3).
+        let overflow = events
+            .resolve(&EventSource::Node { node: rx_id.clone() }, &EventKind::parse(kinds::RX_OVERFLOW).expect("a radio kind"))
+            .map_err(|error| ModuleError::rejected(format!("UR-12: the rx stream's event handle: {error}")))?;
+        Ok(Core {
             mcr: device.master_clock_rate(),
             block_len: description.block_len as usize,
             device,
@@ -307,7 +312,7 @@ impl Core {
             held: Mutex::new(BTreeSet::new()),
             start_up: AtomicI64::new(i64::MIN),
             lost: AtomicBool::new(false),
-        }
+        })
     }
 
     /// The current instant on the primary root.

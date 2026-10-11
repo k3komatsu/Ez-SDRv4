@@ -87,7 +87,7 @@ pub(super) fn admit_with(
     // log and the sealed Manifest will hold, and the offending key's own spelling is
     // exactly what must not be transcribed (KC-24; SB-9a). The `key` field is the
     // update's own key where there is one — never the offending map key, which need
-    // not even parse as a `Key`; a `TxBurst`/`Command` payload sits under no key.
+    // not even parse as a `Key`; a `TxBurst`/`Command`/`Emit` payload sits under no key.
     let ascii = |key: Option<&Key>, position: &str| {
         vec![Violation {
             check: crate::spec::Namespace::parse("ezsdr.value").expect("valid admission check"),
@@ -121,6 +121,15 @@ pub(super) fn admit_with(
                 .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())
             {
                 return Err(ascii(None, "params"));
+            }
+        }
+        // Item 3: an `Emit`'s payload is a `Value` tree, so the check is recursive.
+        // The refusal is still admission's, before dispatch: the Action still reaches
+        // its target Module (which may not support it), and no collector receives it
+        // directly.
+        PendingAction::Action(Action::Emit { event, .. }) => {
+            if crate::spec::check_ascii_keys(&event.payload).is_err() {
+                return Err(ascii(None, "payload"));
             }
         }
         PendingAction::Action(_) => {}

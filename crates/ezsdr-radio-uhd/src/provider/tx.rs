@@ -1112,7 +1112,8 @@ mod tests {
             inputs,
             Vec::new(),
             crate::profile::Profile::X310Ubx.description(2_000),
-        ));
+        )
+        .expect("the rx node is inside the instance root"));
         let origin = (core.now() / 200 + 1) * 200;
         let clock = core.register(Dir::Tx, 200, origin).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();

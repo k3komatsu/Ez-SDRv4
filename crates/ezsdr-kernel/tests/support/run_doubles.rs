@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use ezsdr_kernel::binding::AdmissionCheckRegistry;
-use ezsdr_kernel::event::{Action, Event, EventKind, EventSink, EventSource, Severity};
+use ezsdr_kernel::binding::{AdmissionCheckRegistry, Violation};
+use ezsdr_kernel::event::{Action, Event, EventHandle, EventKind, EventSink, EventSource, Severity};
 use ezsdr_kernel::hash::ContentHash;
-use ezsdr_kernel::id::{ClockDomainId, MemoryDomainId, ModuleId, ResourceId};
+use ezsdr_kernel::id::{ClockDomainId, IslandId, MemoryDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
     ActionReceiver, Dispatched, ActionSubmitter, Authority, AuthorityDescriptor, CoerceReport, Endpoint,
@@ -19,6 +19,7 @@ use ezsdr_kernel::module_api::{
 use ezsdr_kernel::plan::{Fragment, PrepareReport};
 use ezsdr_kernel::policy::EventKindRegistry;
 use ezsdr_kernel::run::StopCause;
+use ezsdr_kernel::spec::Ident;
 use ezsdr_kernel::stream::{
     BackPressure, BlockRef, ContinuityMap, DataLink, DataLinkDecl, DropCarry, PublishOutcome,
 };
@@ -329,6 +330,44 @@ impl TimeAuthority for FaultingTime {
     }
 }
 
+/// What every role's `ctx.events` must do when the coordinator's own wiring hands it
+/// (KC-8, MA-5; item 3): the view is bound to `ctx.source`, so that root resolves,
+/// while another instance's source, `kernel` and `unforeseen` are refused, and a
+/// handle for the instance's own root is minted. Records one line under the
+/// instance's name and returns that handle. Opt-in, so no other test's exact line
+/// sequences change; a double that opts in calls this from `prepare`.
+pub fn check_event_view(probe: &Probe, name: &str, ctx: &PrepareContext) -> Option<EventHandle> {
+    let kind = EventKind::parse("test.custom").expect("a test kind");
+    let own = ctx.events.resolve(&ctx.source, &kind);
+    let other = other_source(&ctx.source)
+        .is_none_or(|source| ctx.events.resolve(&source, &kind).is_err());
+    let kernel = ctx.events.resolve(&EventSource::Kernel, &kind).is_err();
+    let unforeseen = ctx.events.resolve(&EventSource::Unforeseen, &kind).is_err();
+    probe.record(format!(
+        "events:{name}:own={}:other={other}:kernel={kernel}:unforeseen={unforeseen}",
+        own.is_ok()
+    ));
+    own.ok()
+}
+
+/// A source outside any root that [`check_event_view`] may be handed: a node's
+/// sibling, another output, another Island.
+fn other_source(root: &EventSource) -> Option<EventSource> {
+    match root {
+        EventSource::Node { node } => ResourceId::parse(&format!("{}-other", node.path()))
+            .ok()
+            .map(|node| EventSource::Node { node }),
+        EventSource::Output { output } => Ident::parse(&format!("{output}other"))
+            .ok()
+            .map(|output| EventSource::Output { output }),
+        EventSource::Island { island } => island
+            .local
+            .checked_add(100)
+            .map(|local| EventSource::Island { island: IslandId::local(local) }),
+        _ => None,
+    }
+}
+
 /// A stepped Provider with injectable time, events, links and failures.
 pub struct SteppedProvider {
     pub name: String,
@@ -371,6 +410,9 @@ pub struct SteppedProvider {
     pub settle_fidelity: Option<ezsdr_kernel::module_api::Fidelity>,
     /// How far after `arm`'s instant the clocks registered there begin.
     pub arm_origin_after: i64,
+    /// Opt-in: `prepare` also records what the Kernel's `ctx.events` view does with
+    /// this instance's root and with sources outside it (item 3; [`check_event_view`]).
+    pub view_checks: bool,
 }
 
 impl SteppedProvider {
@@ -412,6 +454,7 @@ impl SteppedProvider {
             inputs: None,
             settle_fidelity: None,
             arm_origin_after: 0,
+            view_checks: false,
         }
     }
 
@@ -541,6 +584,13 @@ impl SteppedProvider {
         self
     }
 
+    /// Also checks, in `prepare`, that the Kernel handed this instance a root-bound
+    /// `ctx.events` view (item 3; [`check_event_view`]).
+    pub fn checking_event_view(mut self) -> SteppedProvider {
+        self.view_checks = true;
+        self
+    }
+
     fn record(&self, event: impl AsRef<str>) {
         self.probe
             .record(format!("{}:{}", self.name, event.as_ref()));
@@ -657,6 +707,9 @@ impl Provider for SteppedProvider {
         // `source:<name>:<source>`, outside the `<name>:` lines exact sequences read.
         self.probe.record(format!("source:{}:{}", self.name, ctx.source));
         self.source = Some(ctx.source.clone());
+        if self.view_checks {
+            check_event_view(&self.probe, &self.name, &ctx);
+        }
         self.actions = Some(ctx.actions.clone());
         self.inputs = Some(ctx.inputs.clone());
         if let Some(fidelity) = self.settle_fidelity {
@@ -820,12 +873,14 @@ impl Provider for SteppedProvider {
                         let noise = sink.resolve(
                             &event.source,
                             &EventKind::parse("test.custom").expect("a valid kind"),
-                        );
+                        )
+                        .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
                         for _ in 0..n {
                             sink.emit(noise, until, Severity::Info, &[])
                                 .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
                         }
-                        let handle = sink.resolve(&event.source, &event.kind);
+                        let handle = sink.resolve(&event.source, &event.kind)
+                            .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
                         sink.emit(handle, until, event.severity, &[])
                             .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
                     } else {
@@ -943,6 +998,9 @@ pub struct RecordingSink {
     pub panic_step: Option<i64>,
     /// Never calls `recv()` (RS-16's discarded Sink Action).
     pub deaf: bool,
+    /// Opt-in: `prepare` also checks what `ctx.events` does with this Sink's root
+    /// (item 3; [`check_event_view`]).
+    pub view_checks: bool,
     actions: Option<Arc<dyn ActionReceiver>>,
 }
 
@@ -972,6 +1030,7 @@ impl RecordingSink {
             fail_step: None,
             panic_step: None,
             deaf: false,
+            view_checks: false,
             actions: None,
         }
     }
@@ -979,6 +1038,13 @@ impl RecordingSink {
     /// Never calls `recv()`, so whatever is dispatched to it stays queued.
     pub fn deaf(mut self) -> RecordingSink {
         self.deaf = true;
+        self
+    }
+
+    /// Also checks, in `prepare`, that the Kernel handed this Sink a root-bound
+    /// `ctx.events` view (item 3; [`check_event_view`]).
+    pub fn checking_event_view(mut self) -> RecordingSink {
+        self.view_checks = true;
         self
     }
 
@@ -1033,6 +1099,9 @@ impl Sink for RecordingSink {
         self.record(format!("prepare:{}", f.id));
         self.primary = Some(ctx.time.primary_root());
         self.probe.record(format!("source:{}:{}", self.name, ctx.source));
+        if self.view_checks {
+            check_event_view(&self.probe, &self.name, &ctx);
+        }
         self.actions = (!self.deaf).then(|| ctx.actions.clone());
         self.ins.clear();
         for attached in &ctx.links {
@@ -1168,6 +1237,14 @@ pub struct ProbeExecutor {
     coercion_counter_snapshot: Option<(Arc<AtomicU64>, Arc<AtomicU64>)>,
     /// Never calls `recv()` (RS-16's discarded Executor Action).
     deaf: bool,
+    /// Opt-in: `prepare` also checks `ctx.events` and, for a second fragment, that this
+    /// fragment's view and the previous one refuse each other's handle (item 3).
+    view_checks: bool,
+    /// The handle the previous fragment's view minted, for the cross-view check.
+    prev_handle: Option<EventHandle>,
+    /// Where a test reads the `Violation`s the Run returned to this Executor's
+    /// submissions, so it can assert fields the probe's line form drops (KC-24).
+    pub refusals: Option<Arc<Mutex<Vec<Violation>>>>,
 }
 
 impl ProbeExecutor {
@@ -1191,12 +1268,31 @@ impl ProbeExecutor {
             event_emitted: false,
             coercion_counter_snapshot: None,
             deaf: false,
+            view_checks: false,
+            prev_handle: None,
+            refusals: None,
         }
     }
 
     /// Never calls `recv()`, so whatever is dispatched to it stays queued.
     pub fn deaf(mut self) -> ProbeExecutor {
         self.deaf = true;
+        self
+    }
+
+    /// Also checks, in `prepare`, that the Kernel handed this Executor a root-bound
+    /// `ctx.events` view, and that two fragments' views refuse each other's handle
+    /// (item 3; [`check_event_view`]).
+    pub fn checking_event_views(mut self) -> ProbeExecutor {
+        self.view_checks = true;
+        self
+    }
+
+    /// Keeps every `Violation` the Run returned to this Executor's submissions, for a
+    /// test that asserts fields the probe's line form drops (KC-24's `requested` and
+    /// `key`).
+    pub fn capturing_refusals(mut self, into: Arc<Mutex<Vec<Violation>>>) -> ProbeExecutor {
+        self.refusals = Some(into);
         self
     }
 
@@ -1270,9 +1366,30 @@ impl Executor for ProbeExecutor {
             .join(",");
         self.record(format!("prepare:island_{}:{names}", island.id.local));
         self.out = Some(ctx.actions_out.clone());
-        self.events = Some(ctx.events.clone());
         self.actions = Some(ctx.actions.clone());
         self.probe.record(format!("source:{}:{}", self.name, ctx.source));
+        if self.view_checks {
+            let handle = check_event_view(&self.probe, &self.name, &ctx);
+            if let (Some(previous), Some(previous_handle)) = (self.events.as_ref(), self.prev_handle) {
+                let at = TimePoint::new(ctx.time.primary_root(), 0);
+                let own = previous
+                    .emit(previous_handle, at, Severity::Info, &[])
+                    .is_ok();
+                let current_refuses_previous = ctx
+                    .events
+                    .emit(previous_handle, at, Severity::Info, &[])
+                    .is_err();
+                let previous_refuses_current = handle.is_some_and(|current| {
+                    previous.emit(current, at, Severity::Info, &[]).is_err()
+                });
+                self.probe.record(format!(
+                    "events_cross:{}:own={own}:previous_refuses_current={previous_refuses_current}:current_refuses_previous={current_refuses_previous}",
+                    self.name
+                ));
+            }
+            self.prev_handle = handle;
+        }
+        self.events = Some(ctx.events.clone());
         Ok(PrepareReport {
             effective: BTreeMap::new(),
             coercions: Vec::new(),
@@ -1326,6 +1443,11 @@ impl Executor for ProbeExecutor {
                 match out.submit(action) {
                     Ok(id) => self.record(format!("submit:ok:{}", id.0)),
                     Err(violations) => {
+                        if let Some(into) = &self.refusals {
+                            into.lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .extend(violations.iter().cloned());
+                        }
                         if let Some(first) = violations.first() {
                             self.record(format!("submit:err:{}:{}", first.check, first.reason));
                         } else {
