@@ -1103,8 +1103,9 @@ pub struct PrepareContext {
     /// Which Run (RS-1).
     pub run: RunId,
     /// This instance's event source root: a Provider's root node, a Sink's output,
-    /// an Executor's Island. A Provider names its sub-nodes below it; no Module
-    /// formats a source of its own (RS-31, KC-8).
+    /// an Executor's Island — the Island of the fragment `prepare` was called for.
+    /// A Provider names its sub-nodes below it; no Module formats a source of its own,
+    /// and `events` refuses one outside it (RS-31, KC-8; pre-freeze item 3).
     pub source: EventSource,
     /// Which class, derived and cross-checked (MA-41).
     pub class: ExecutionClass,
@@ -1113,7 +1114,9 @@ pub struct PrepareContext {
     /// The node's clock registry, through which a Provider declares and registers its
     /// SampleClocks (TM-13a, KA-2).
     pub clocks: Arc<crate::time::ClockRegistry>,
-    /// Where to emit events (RS-31).
+    /// Where to emit events: a view of the Run's collector bound to `source`, so
+    /// `resolve` refuses a source outside this instance's root (RS-31, RS-33;
+    /// pre-freeze item 3).
     pub events: Arc<dyn EventSink>,
     /// Where admitted Actions arrive (MA-14).
     pub actions: Arc<dyn ActionReceiver>,

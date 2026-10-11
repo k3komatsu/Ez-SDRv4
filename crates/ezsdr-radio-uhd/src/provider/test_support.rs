@@ -43,7 +43,8 @@ pub(super) fn rig_on(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::s
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
     let core = Arc::new(Core::new(device, ResourceId::parse("usrp").unwrap(),
         root, time.clone(), clocks, events.clone(), Arc::new(BTreeMap::new()), links,
-        crate::profile::Profile::X310Ubx.description(block_len)));
+        crate::profile::Profile::X310Ubx.description(block_len))
+        .expect("the rx node is inside the instance root"));
     (core, time, events)
 }
 

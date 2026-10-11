@@ -10,7 +10,7 @@ use ezsdr_exec_native::{
 };
 use ezsdr_kernel::binding::Violation;
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection};
-use ezsdr_kernel::event::{Action, ActionId, Event, EventHandle, EventKind, EventSink, EventSource, Severity, Target};
+use ezsdr_kernel::event::{Action, ActionId, EventCollector, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, IslandId, MemoryDomainId};
 use ezsdr_kernel::module_api::{
@@ -19,7 +19,8 @@ use ezsdr_kernel::module_api::{
     Factories, IslandDecl, ModuleError, ModuleRegistry, Pacing, PrepareContext, StepOutcome,
     StopMode, UpdateClass,
 };
-use ezsdr_kernel::run::{RunError, StopCause};
+use ezsdr_kernel::policy::Policy;
+use ezsdr_kernel::run::StopCause;
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::{BackPressure, BlockRef, DataLink, DropCarry, PublishOutcome};
 use ezsdr_kernel::time::{
@@ -133,20 +134,6 @@ impl ActionSubmitter for Submitter {
     }
 }
 
-struct NullEvents;
-
-impl EventSink for NullEvents {
-    fn resolve(&self, _source: &EventSource, _kind: &EventKind) -> EventHandle {
-        EventHandle { row: 0, kind: 0 }
-    }
-    fn emit(&self, _handle: EventHandle, _time: TimePoint, _severity: Severity, _payload: &[u8]) -> Result<(), RunError> {
-        Ok(())
-    }
-    fn emit_control(&self, _event: Event) -> Result<(), RunError> {
-        Ok(())
-    }
-}
-
 struct NullLink;
 
 impl DataLink for NullLink {
@@ -170,6 +157,7 @@ impl DataLink for NullLink {
 struct Harness {
     clocks: Arc<ClockRegistry>,
     time: Arc<ManualTimeAuthority>,
+    events: Arc<EventCollector>,
     actions: Arc<Queue>,
     out: Arc<Submitter>,
 }
@@ -180,14 +168,17 @@ impl Harness {
         let clocks = Arc::new(ClockRegistry::new());
         clocks.register(ClockDomain::root(ROOT, Rational::new(1_000_000_000, 1).unwrap(), EpochRef::Arbitrary { set_by: "test".to_owned() })).unwrap();
         let time = Arc::new(ManualTimeAuthority::new(clocks.clone(), ROOT, &[], Pacing::FreeRunning).unwrap());
-        Harness { clocks, time, actions: Arc::new(Queue::default()), out: Arc::new(Submitter::default()) }
+        // A real collector: `resolve` mints handles and refuses nothing the Kernel
+        // itself resolves; a hand-written sink cannot mint one (item 3).
+        let events = Arc::new(EventCollector::new(&[], &[], 16, &Policy::default()));
+        Harness { clocks, time, events, actions: Arc::new(Queue::default()), out: Arc::new(Submitter::default()) }
     }
 
     /// A context for Island `island`, whose source is deliberately not that Island's:
     /// an Executor uses the source it is given and formats none (KC-8).
     fn ctx(&self, island: u32, class: ExecutionClass, links: Vec<AttachedPort>, components: &[ComponentDescriptor]) -> PrepareContext {
         let source = EventSource::Island { island: IslandId::local(island + 100) };
-        let mut ctx = PrepareContext::testing(source, self.time.clone(), self.clocks.clone(), Arc::new(NullEvents), self.actions.clone(), self.out.clone());
+        let mut ctx = PrepareContext::testing(source, self.time.clone(), self.clocks.clone(), self.events.clone(), self.actions.clone(), self.out.clone());
         ctx.class = class;
         ctx.links = links;
         ctx.components = components.iter().map(|c| (c.id.clone(), c.clone())).collect();

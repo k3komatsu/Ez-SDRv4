@@ -7,7 +7,7 @@ use std::sync::mpsc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::event::EventKind;
+use crate::event::{EventKind, EventSource};
 use crate::module_api::ModuleError;
 use crate::spec::Ident;
 use crate::time::TimePoint;
@@ -177,12 +177,24 @@ pub enum RunError {
         /// The offending key.
         key: String,
     },
-    /// An `EventHandle` names a counter row the table does not have. Its fields are
-    /// public, so a Module can fabricate one; the Kernel returns this rather than
-    /// panicking (RS-32, MA-9).
-    BadEventHandle {
-        /// The row named.
-        row: u32,
+    /// A Module named an event source outside the source root its instance was given
+    /// (KC-8, MA-5), or the Kernel's own source or RS-33's fallback from a Module,
+    /// which no Module emits (RS-32, RS-33; pre-freeze item 3).
+    EventSourceOutsideRoot {
+        /// The source root the instance was given (KC-8).
+        root: EventSource,
+        /// The source that was named.
+        source: EventSource,
+    },
+    /// A hot-path handle was not minted by this sink: another Run's or another view's
+    /// handle, refused rather than counted (RS-32, MA-9; pre-freeze item 3).
+    ForeignEventHandle,
+    /// A control event's payload carries a map key that is not ASCII (SB-9a; pre-freeze
+    /// item 3). The refusal names only the position: the offending key, which OV-15
+    /// cannot canonicalise, is never transcribed into a record.
+    PayloadKeyNotAscii {
+        /// The map position, for example `payload`.
+        position: String,
     },
     /// A Module wrote under another Module's namespace (RS-39).
     SectionNamespaceForbidden {
@@ -226,8 +238,14 @@ impl fmt::Display for RunError {
             RunError::SectionKeyNotAscii { key } => {
                 write!(f, "section key {key:?} is not ASCII, which OV-15 cannot canonicalise")
             }
-            RunError::BadEventHandle { row } => {
-                write!(f, "event handle names row {row}, which the counter table does not have")
+            RunError::EventSourceOutsideRoot { root, source } => {
+                write!(f, "event source {source} is outside this instance's root {root}")
+            }
+            RunError::ForeignEventHandle => {
+                f.write_str("the event handle was minted by another Run or another event sink")
+            }
+            RunError::PayloadKeyNotAscii { position } => {
+                write!(f, "SB-9a: a map key under {position} is not ASCII")
             }
             RunError::SectionNamespaceForbidden { ns } => {
                 write!(f, "a Module may write only under {ns:?}")

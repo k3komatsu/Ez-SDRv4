@@ -419,15 +419,19 @@ impl Shared {
 
     /// The event source root the Kernel hands an instance for `fragment` and files its
     /// Manifest sections under: a Provider's root node, a Sink's output, an
-    /// Executor's Island (KC-8, RS-39).
+    /// Executor's Island (KC-8, RS-39). An Executor's fragment names an Island the
+    /// plan parsed from that same `IslandDecl`, so a miss here is a broken Kernel
+    /// invariant, not an `unforeseen` source (pre-freeze item 3).
     pub(super) fn source_root(&self, i: Inst, fragment: &Ident) -> EventSource {
         match i {
             Inst::Provider(n) => EventSource::Node { node: self.providers[n].id.clone() },
             Inst::Sink(n) => EventSource::Output { output: self.sinks[n].output.clone() },
-            Inst::Executor(_) => self
-                .routing()
-                .and_then(|routing| routing.islands.get(fragment))
-                .map_or(EventSource::Unforeseen, |island| EventSource::Island { island: *island }),
+            Inst::Executor(_) => EventSource::Island {
+                island: self
+                    .routing()
+                    .and_then(|routing| routing.islands.get(fragment).copied())
+                    .expect("KC-8: an Executor fragment names its parsed Island"),
+            },
         }
     }
 

@@ -3239,7 +3239,7 @@ fn kc_08_an_executor_event_from_a_second_island_has_its_own_counter() {
             island_1.clone(),
             "test.custom",
             ezsdr_kernel::event::Severity::Info,
-        )),
+        ).checking_event_views()),
     );
     let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
     assert!(
@@ -3262,6 +3262,15 @@ fn kc_08_an_executor_event_from_a_second_island_has_its_own_counter() {
             .any(|row| row.source == EventSource::Unforeseen
                 && row.kind.as_str() == "test.custom"
                 && row.count > 0)
+    );
+    // Item 3 (Sol review P1-1): the two fragments of one Executor were prepared with
+    // one view each, and those views refuse each other's handle — the previous view
+    // takes its own, neither takes the other's.
+    let lines = probe.lines();
+    assert!(
+        lines.iter().any(|line| line
+            == "events_cross:x:own=true:previous_refuses_current=true:current_refuses_previous=true"),
+        "{lines:?}"
     );
 }
 
@@ -4772,6 +4781,47 @@ fn kc_08_each_instance_is_given_its_source_root() {
 }
 
 #[test]
+fn kc_08_each_instance_s_event_view_is_rooted_through_the_coordinator() {
+    // KC-8, MA-5 (item 3; Sol review P1-1): every role's `ctx.events` is a root-bound
+    // **view**, not the collector. Through a real Run each instance's view accepts its
+    // own root and refuses another instance's source, `kernel` and `unforeseen`;
+    // reverting `pipeline.rs`'s `collector.view(source)` to the collector turns every
+    // one of these lines false, so the coordinator's own wiring is what is pinned.
+    let (spec, profile) = role_docs();
+    let probe = Probe::new();
+    let mut assembly = output_assembly(&probe, None, None);
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(
+            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
+                .checking_event_view(),
+        ),
+    );
+    assembly.sinks.insert(
+        Ident::parse("rec").unwrap(),
+        Box::new(RecordingSink::new("rec", &probe).checking_event_view()),
+    );
+    assembly.sinks.insert(
+        Ident::parse("rec2").unwrap(),
+        Box::new(RecordingSink::new("rec2", &probe).checking_event_view()),
+    );
+    assembly.executors.insert(
+        Ident::parse("exec").unwrap(),
+        Box::new(ProbeExecutor::new("x", &probe).checking_event_views()),
+    );
+    let run = start_spec_run(&spec, &profile, assembly).unwrap();
+    assert!(run.finish().termination.cleanup_failures.is_empty());
+    let lines = probe.lines();
+    for name in ["p", "rec", "rec2", "x"] {
+        let line = format!("events:{name}:own=true:other=true:kernel=true:unforeseen=true");
+        assert!(
+            lines.iter().any(|observed| observed == &line),
+            "{name}'s view is not rooted through the coordinator: {lines:?}"
+        );
+    }
+}
+
+#[test]
 fn kc_45_two_instances_writing_one_section_name_both_keep_it() {
     // Decision 2: a section is filed under its writer's source, so one name written by
     // two instances of one Module is two sections, not an overwrite.
@@ -4861,6 +4911,101 @@ fn kc_24_the_target_is_resolved_before_the_payload_is_read() {
     );
     assert!(!lines.iter().any(|line| line.starts_with("p:action:")), "{lines:?}");
     assert!(manifest.termination.cleanup_failures.is_empty());
+}
+
+/// An `Emit` as a Module submits one (KC-24 step 4; item 3).
+fn emit_action(payload: serde_json::Value) -> Action {
+    Action::Emit {
+        target: support::target("radio"),
+        event: ezsdr_kernel::event::Event {
+            source: support::node_source("radio"),
+            time: TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0),
+            severity: ezsdr_kernel::event::Severity::Info,
+            kind: ezsdr_kernel::event::EventKind::parse("test.custom").expect("a test kind"),
+            payload,
+        },
+    }
+}
+
+#[test]
+fn kc_24_a_module_emit_with_a_non_ascii_payload_is_refused_before_dispatch() {
+    // KC-24 step 4 as item 3 extends it: an `Emit`'s payload keys are checked
+    // recursively in admission, before dispatch, and the refusal names the position
+    // only — the offending key must not be transcribed into a rejection record, and
+    // the refusal carries no `requested` payload either.
+    let (spec, profile) = executor_docs();
+    let probe = Probe::new();
+    let refusals: Arc<std::sync::Mutex<Vec<ezsdr_kernel::binding::Violation>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)),
+    );
+    assembly.executors.insert(
+        Ident::parse("exec").unwrap(),
+        Box::new(
+            ProbeExecutor::new("x", &probe)
+                .submitting(emit_action(
+                    serde_json::json!({ "fine": 1, "nested": { "\u{3c1}": 2 } }),
+                ))
+                .capturing_refusals(refusals.clone()),
+        ),
+    );
+    let run = start_spec_run(&spec, &profile, assembly).unwrap();
+    let lines = probe.lines();
+    assert!(
+        lines.iter().any(|line| line
+            .starts_with("x:submit:err:ezsdr.value:SB-9a: a map key under payload is not ASCII")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains('\u{3c1}')),
+        "the offending key is never transcribed: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("p:action:")),
+        "the refusal is admission's, before dispatch: {lines:?}"
+    );
+    let manifest = run.finish();
+    assert!(manifest.termination.cleanup_failures.is_empty());
+    // The `Violation` itself, not the probe's line form (Sol review P2-2): the refusal
+    // names no key and transcribes no `requested` payload, per KC-24 step 4.
+    let kept = refusals.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(kept.len(), 1, "one refusal: {kept:?}");
+    assert_eq!(kept[0].check.as_str(), "ezsdr.value");
+    assert!(kept[0].key.is_none(), "the Emit's refusal names no key: {kept:?}");
+    assert!(
+        kept[0].requested.is_none(),
+        "an ASCII refusal transcribes no payload: {kept:?}"
+    );
+}
+
+#[test]
+fn kc_24_a_module_emit_is_dispatched_to_its_target() {
+    // Item 3 does not change `Emit`'s route: admission, then dispatch to the target
+    // Module — never a direct collector emission, and no delivered path of its own.
+    // The target here is the Provider double, which takes the Action and records it.
+    let (spec, profile) = executor_docs();
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)),
+    );
+    assembly.executors.insert(
+        Ident::parse("exec").unwrap(),
+        Box::new(ProbeExecutor::new("x", &probe).submitting(emit_action(
+            serde_json::json!({ "name": "\u{65e5}\u{672c}\u{8a9e}" }),
+        ))),
+    );
+    let run = start_spec_run(&spec, &profile, assembly).unwrap();
+    let lines = probe.lines();
+    assert!(
+        lines.iter().any(|line| line.starts_with("p:action:Emit:radio@")),
+        "{lines:?}"
+    );
+    assert!(run.finish().termination.cleanup_failures.is_empty());
 }
 
 #[test]

@@ -790,13 +790,20 @@ impl RunHandle {
                     })
                     .collect()
             });
+            // KC-8: a Provider's or a Sink's root is its instance's; an Executor's is the
+            // IslandDecl prepare parsed here, one per prepared fragment. The view is
+            // bound to it and handed as `events` (pre-freeze item 3).
+            let source = match &island {
+                Some(island) => EventSource::Island { island: island.id },
+                None => self.shared.source_root(instance, &fragment.id),
+            };
             let context = PrepareContext {
                 run: self.shared.ctx.id.clone(),
-                source: self.shared.source_root(instance, &fragment.id),
+                source: source.clone(),
                 class: plan_class,
                 time: self.shared.time.clone(),
                 clocks: self.shared.ctx.clocks.clone(),
-                events: collector.clone(),
+                events: collector.view(source),
                 actions: self.shared.queue(instance).clone(),
                 actions_out: submitter.clone(),
                 environment: self.shared.ctx.environment.clone(),

@@ -505,14 +505,14 @@ fn rs_36_an_unforeseen_source_does_not_silence_the_abort() {
     let fatal = EventKind::parse(EventKind::DEVICE_LOST).expect("parses");
     // Delivered, the body keeps its kind, and the Policy aborts on it (KC-31).
     let c = collector(8, &policy, &[(support::node_source("radio"), fatal.clone())]);
-    let h = c.resolve(&support::node_source("radio2"), &fatal);
+    let h = c.resolve(&support::node_source("radio2"), &fatal).expect("the Kernel's own sink resolves any source");
     c.emit(h, t(0), Severity::Fatal, &[]).expect("emits");
     let drained = c.drain(t(9));
     assert!(drained.iter().any(|e| e.kind == fatal), "the delivered body keeps its kind");
     assert_eq!(policy.reaction_for_event(&fatal, Severity::Fatal), Reaction::Abort);
     // Dropped (the ring full), the escalation flag keeps the kind (RS-36).
     let c = collector(1, &policy, &[(support::node_source("radio"), fatal.clone())]);
-    let h = c.resolve(&support::node_source("radio2"), &fatal);
+    let h = c.resolve(&support::node_source("radio2"), &fatal).expect("the Kernel's own sink resolves any source");
     c.emit(h, t(0), Severity::Fatal, &[]).expect("emits");
     c.emit(h, t(1), Severity::Fatal, &[]).expect("emits");
     assert_eq!(
@@ -531,7 +531,7 @@ fn rs_36_a_delivered_body_raises_no_escalation_flag() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
     let fatal = EventKind::parse(EventKind::DEVICE_LOST).expect("parses");
     let c = collector(8, &policy, &[(support::node_source("radio"), fatal.clone())]);
-    let h = c.resolve(&support::node_source("radio"), &fatal);
+    let h = c.resolve(&support::node_source("radio"), &fatal).expect("the Kernel's own sink resolves any source");
     c.emit(h, t(0), Severity::Fatal, &[]).expect("emits");
     assert!(c.escalation().is_none(), "a queued hot-path body raises no flag");
     c.emit_control(ezsdr_kernel::event::Event {
@@ -557,7 +557,7 @@ fn rs_29_an_unregistered_fatal_kind_escalates() {
         &policy,
         &[(support::node_source("radio"), EventKind::parse("test.custom").expect("k"))],
     );
-    let h = c.resolve(&support::node_source("radio"), &unknown);
+    let h = c.resolve(&support::node_source("radio"), &unknown).expect("the Kernel's own sink resolves any source");
     assert_eq!(policy.reaction_for_event(&unknown, Severity::Fatal), Reaction::Abort);
     // A dropped body of it escalates (RS-36; a ring of 8, filled first).
     for _ in 0..9 {
@@ -571,7 +571,7 @@ fn rs_29_an_unregistered_fatal_kind_escalates() {
         &policy,
         &[(support::node_source("radio"), EventKind::parse("test.custom").expect("k"))],
     );
-    let h = c.resolve(&support::node_source("radio"), &unknown);
+    let h = c.resolve(&support::node_source("radio"), &unknown).expect("the Kernel's own sink resolves any source");
     c.emit(h, t(0), Severity::Info, &[]).expect("emits");
     assert!(c.escalation().is_none());
 }
@@ -716,7 +716,7 @@ fn rs_33_counters_exact_under_drop() {
     let source = support::node_source("radio");
     let kind = EventKind::parse("test.custom").expect("parses");
     let c = collector(8, &policy, &[(source.clone(), kind.clone())]);
-    let h = c.resolve(&source, &kind);
+    let h = c.resolve(&source, &kind).expect("the Kernel's own sink resolves any source");
     for _ in 0..30_000 {
         c.emit(h, t(0), Severity::Info, &[]).expect("emits");
     }
@@ -748,7 +748,7 @@ fn rs_35_dropped_counts_are_deltas() {
     let source = support::node_source("radio");
     let kind = EventKind::parse("test.custom").expect("parses");
     let c = collector(1, &policy, &[(source.clone(), kind.clone())]);
-    let h = c.resolve(&source, &kind);
+    let h = c.resolve(&source, &kind).expect("the Kernel's own sink resolves any source");
     for _ in 0..11 {
         c.emit(h, t(0), Severity::Info, &[]).expect("emits");
     }
@@ -774,7 +774,7 @@ fn rs_35_dropped_events_never_enter_the_ring() {
     let source = support::node_source("radio");
     let kind = EventKind::parse("test.custom").expect("parses");
     let c = collector(4, &policy, &[(source.clone(), kind.clone())]);
-    let h = c.resolve(&source, &kind);
+    let h = c.resolve(&source, &kind).expect("the Kernel's own sink resolves any source");
     for round in 0..3 {
         for _ in 0..100 {
             c.emit(h, t(round), Severity::Info, &[]).expect("emits");
@@ -803,7 +803,7 @@ fn rs_35_the_dropped_events_meta_event_is_itself_counted() {
     let source = support::node_source("radio");
     let kind = EventKind::parse("test.custom").expect("parses");
     let c = collector(1, &policy, &[(source.clone(), kind.clone())]);
-    let h = c.resolve(&source, &kind);
+    let h = c.resolve(&source, &kind).expect("the Kernel's own sink resolves any source");
     for _ in 0..5 {
         c.emit(h, t(0), Severity::Info, &[]).expect("emits");
     }
@@ -831,7 +831,7 @@ fn rs_33_unforeseen_pair_uses_the_fallback_row() {
     let known = support::node_source("radio");
     let kind = EventKind::parse("test.custom").expect("parses");
     let c = collector(8, &policy, &[(known.clone(), kind.clone())]);
-    let h = c.resolve(&support::node_source("nowhere"), &kind);
+    let h = c.resolve(&support::node_source("nowhere"), &kind).expect("the Kernel's own sink resolves any source");
     c.emit(h, t(0), Severity::Info, &[]).expect("emits");
     let counters: Vec<CounterRow> = c.counters();
     let fallback = counters.last().expect("the fallback row is last");
@@ -841,6 +841,260 @@ fn rs_33_unforeseen_pair_uses_the_fallback_row() {
         fallback.source, EventSource::Unforeseen,
         "one fallback row, not one per source"
     );
+}
+
+#[test]
+fn rs_32_a_view_refuses_a_source_outside_its_root() {
+    // MA-5, MA-6 (item 3): each instance's view admits exactly its root — a Provider's
+    // node and its descendants, a Sink's output, an Executor's Island — and nothing
+    // else, and the refusal is a `RunError` before RS-33's fallback can fold the pair
+    // in. The node comparison is on segment boundaries (SB-33), so `radio/rx` covers
+    // `radio/rx/0` and not `radio/rxx`.
+    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
+    let root = support::node_source("radio/rx");
+    let kind = EventKind::parse("test.custom").expect("parses");
+    let collector = Arc::new(collector(8, &policy, &[(root.clone(), kind.clone())]));
+    let view = collector.view(root.clone());
+    assert!(view.resolve(&root, &kind).is_ok(), "its own node");
+    assert!(
+        view.resolve(&support::node_source("radio/rx/0"), &kind).is_ok(),
+        "a node below it"
+    );
+    for outside in ["radio", "radio2", "radio/rxx", "tx"] {
+        let source = support::node_source(outside);
+        assert_eq!(
+            view.resolve(&source, &kind),
+            Err(RunError::EventSourceOutsideRoot {
+                root: root.clone(),
+                source: source.clone(),
+            }),
+            "{outside} is not below {}",
+            root
+        );
+    }
+}
+
+#[test]
+fn rs_32_a_view_refuses_another_instance_s_source() {
+    // MA-5, MA-6 (item 3): a Sink's root is exactly its output and an Executor's
+    // exactly its Island — not another output's, another Island's, or another role's.
+    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
+    let kind = EventKind::parse("test.custom").expect("parses");
+    let output = EventSource::Output {
+        output: Ident::parse("rec").expect("an output"),
+    };
+    let island = EventSource::Island {
+        island: ezsdr_kernel::id::IslandId::local(0),
+    };
+    let collector = Arc::new(collector(
+        8,
+        &policy,
+        &[(output.clone(), kind.clone()), (island.clone(), kind.clone())],
+    ));
+    let sink = collector.view(output.clone());
+    assert!(sink.resolve(&output, &kind).is_ok());
+    for outside in [
+        EventSource::Output {
+            output: Ident::parse("rec2").expect("an output"),
+        },
+        EventSource::Output {
+            output: Ident::parse("recording").expect("an output"),
+        },
+        island.clone(),
+    ] {
+        assert_eq!(
+            sink.resolve(&outside, &kind),
+            Err(RunError::EventSourceOutsideRoot {
+                root: output.clone(),
+                source: outside.clone(),
+            })
+        );
+    }
+    let executor = collector.view(island.clone());
+    assert!(executor.resolve(&island, &kind).is_ok());
+    assert_eq!(
+        executor.resolve(
+            &EventSource::Island {
+                island: ezsdr_kernel::id::IslandId::local(1),
+            },
+            &kind
+        ),
+        Err(RunError::EventSourceOutsideRoot {
+            root: island.clone(),
+            source: EventSource::Island {
+                island: ezsdr_kernel::id::IslandId::local(1),
+            },
+        })
+    );
+}
+
+#[test]
+fn rs_33_a_view_refuses_kernel_and_unforeseen() {
+    // RS-32, RS-33 (item 3): a Module never names the Kernel's own source or RS-33's
+    // fallback source. That is distinct from the collector folding an unknown
+    // **in-root** source into the fallback row: the pair is refused here, before the
+    // fallback can see it, and the fallback row is reported as such.
+    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
+    let root = support::node_source("radio");
+    let kind = EventKind::parse("test.custom").expect("parses");
+    let collector = Arc::new(collector(8, &policy, &[(root.clone(), kind.clone())]));
+    let view = collector.view(root.clone());
+    for source in [EventSource::Kernel, EventSource::Unforeseen] {
+        assert_eq!(
+            view.resolve(&source, &kind),
+            Err(RunError::EventSourceOutsideRoot {
+                root: root.clone(),
+                source: source.clone(),
+            }),
+            "{source} is no Module's to name"
+        );
+    }
+    // The Kernel's own sink still resolves its own source (KC-31).
+    assert!(collector.resolve(&EventSource::Kernel, &kind).is_ok());
+}
+
+#[test]
+fn rs_33_an_unforeseen_pair_inside_the_root_uses_the_fallback_row() {
+    // RS-33 (item 3): the fallback row is the collector's answer to a pair the plan
+    // did not foresee **inside the instance's own tree**; a view admits such a pair,
+    // and the planned pair still reaches its own row through the same view.
+    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
+    let node = support::node_source("radio");
+    let kind = EventKind::parse("test.custom").expect("parses");
+    let collector = Arc::new(collector(8, &policy, &[(node.clone(), kind.clone())]));
+    let view = collector.view(node.clone());
+    // A node below the root the plan did not list, with a registered kind.
+    let handle = view
+        .resolve(&support::node_source("radio/rx"), &kind)
+        .expect("inside the root");
+    view.emit(handle, t(0), Severity::Info, &[]).expect("emits");
+    // An unregistered kind on the root itself.
+    let unknown_kind = EventKind::parse("vendor.other").expect("parses");
+    let handle = view.resolve(&node, &unknown_kind).expect("inside the root");
+    view.emit(handle, t(1), Severity::Info, &[]).expect("emits");
+    let fallback = collector
+        .counters()
+        .pop()
+        .expect("the fallback row is last");
+    assert_eq!(fallback.kind.as_str(), "ezsdr.unforeseen");
+    assert_eq!(fallback.source, EventSource::Unforeseen);
+    assert_eq!(fallback.count, 2, "both unforeseen pairs share the one fallback row");
+    let planned = view.resolve(&node, &kind).expect("inside the root");
+    view.emit(planned, t(2), Severity::Info, &[]).expect("emits");
+    let row = collector
+        .counters()
+        .into_iter()
+        .find(|row| row.source == node && row.kind == kind)
+        .expect("the planned row exists");
+    assert_eq!(row.count, 1);
+    assert_eq!(collector.drain(t(9)).len(), 3, "every body was delivered");
+}
+
+#[test]
+fn rs_32_a_control_event_from_outside_the_root_is_refused() {
+    // MA-5, MA-9a (item 3): `emit_control` is root-bound like `resolve` — a Provider's
+    // control event carries its node or a node below it, a Sink's exactly its output —
+    // and the refusal comes before the collector counts or delivers it. The ASCII
+    // check stays the collector's (item 4).
+    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
+    let node = support::node_source("radio");
+    let output = EventSource::Output {
+        output: Ident::parse("rec").expect("an output"),
+    };
+    let kind = EventKind::parse("test.custom").expect("parses");
+    let collector = Arc::new(collector(
+        8,
+        &policy,
+        &[(node.clone(), kind.clone()), (output.clone(), kind.clone())],
+    ));
+    let event = |source: &EventSource| Event {
+        source: source.clone(),
+        time: t(0),
+        severity: Severity::Info,
+        kind: kind.clone(),
+        payload: serde_json::json!({}),
+    };
+    let provider = collector.view(node.clone());
+    assert!(provider.emit_control(event(&node)).is_ok(), "its own root");
+    assert!(
+        provider.emit_control(event(&support::node_source("radio/rx"))).is_ok(),
+        "a node below it"
+    );
+    for outside in [
+        support::node_source("radio2"),
+        EventSource::Kernel,
+        EventSource::Unforeseen,
+    ] {
+        assert_eq!(
+            provider.emit_control(event(&outside)),
+            Err(RunError::EventSourceOutsideRoot {
+                root: node.clone(),
+                source: outside.clone(),
+            }),
+            "{outside} is no event source of this Provider"
+        );
+    }
+    let sink = collector.view(output.clone());
+    assert!(sink.emit_control(event(&output)).is_ok());
+    let other = EventSource::Output {
+        output: Ident::parse("rec2").expect("an output"),
+    };
+    assert_eq!(
+        sink.emit_control(event(&other)),
+        Err(RunError::EventSourceOutsideRoot {
+            root: output.clone(),
+            source: other.clone(),
+        })
+    );
+    assert_eq!(
+        collector.counters().iter().map(|row| row.count).sum::<u64>(),
+        3,
+        "only the in-root control events were counted"
+    );
+    assert_eq!(collector.drain(t(9)).len(), 3, "and only they were delivered");
+}
+
+#[test]
+fn rs_32_a_control_event_with_a_non_ascii_key_is_refused() {
+    // SB-9a (item 3): `emit_control` checks every map key in the payload, nested keys
+    // included, before the event is counted or delivered; the refusal names the
+    // position only, never the offending key, which OV-15 cannot canonicalise. A
+    // non-ASCII **value** is not a key and stays allowed.
+    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
+    let source = support::node_source("radio");
+    let kind = EventKind::parse("test.custom").expect("parses");
+    let collector = Arc::new(collector(8, &policy, &[(source.clone(), kind.clone())]));
+    let view = collector.view(source.clone());
+    let event = |payload: serde_json::Value| Event {
+        source: source.clone(),
+        time: t(0),
+        severity: Severity::Info,
+        kind: kind.clone(),
+        payload,
+    };
+    let error = view
+        .emit_control(event(
+            serde_json::json!({ "fine": 1, "nested": [{ "\u{3c1}": 2 }] }),
+        ))
+        .expect_err("a non-ASCII key anywhere in the payload is refused");
+    assert_eq!(
+        error,
+        RunError::PayloadKeyNotAscii {
+            position: "payload".to_owned()
+        }
+    );
+    assert!(
+        !format!("{error} {error:?}").contains('\u{3c1}'),
+        "the refusal never transcribes the offending key: {error}"
+    );
+    view.emit_control(event(serde_json::json!({ "name": "\u{65e5}\u{672c}\u{8a9e}" })))
+        .expect("a non-ASCII value is not a key (SB-9a)");
+    assert_eq!(
+        collector.counters().iter().map(|row| row.count).sum::<u64>(),
+        1,
+        "the refused event was not counted"
+    );
+    assert_eq!(collector.drain(t(9)).len(), 1, "and it was not delivered");
 }
 
 #[test]
@@ -861,7 +1115,7 @@ fn rs_33_duplicate_pairs_share_one_counter_row() {
     };
     assert_eq!(matching_rows(&c.counters()), 1);
 
-    let handle = c.resolve(&source, &kind);
+    let handle = c.resolve(&source, &kind).expect("the Kernel's own sink resolves any source");
     c.emit(handle, t(0), Severity::Info, &[]).expect("emits");
     let row = c
         .counters()
@@ -894,7 +1148,7 @@ fn rs_33_drain_uses_the_planned_kernel_source_for_meta_events() {
     let source = EventSource::Kernel;
     let kind = EventKind::parse("test.custom").expect("parses");
     let c = collector(1, &policy, &[(source.clone(), kind.clone())]);
-    let handle = c.resolve(&source, &kind);
+    let handle = c.resolve(&source, &kind).expect("the Kernel's own sink resolves any source");
     for _ in 0..2 {
         c.emit(handle, t(0), Severity::Info, &[]).expect("emits");
     }
@@ -917,32 +1171,6 @@ fn rs_33_drain_uses_the_planned_kernel_source_for_meta_events() {
 }
 
 #[test]
-fn rs_33_duplicate_declared_kinds_resolve_to_the_first_index() {
-    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = support::node_source("radio");
-    let kind = EventKind::parse("test.custom").expect("parses");
-    let declared_kinds = [kind.clone(), kind.clone()];
-    let c = EventCollector::new(
-        &[(source.clone(), kind.clone())],
-        &declared_kinds,
-        8,
-        &policy,
-    );
-    let handle = c.resolve(&source, &kind);
-    assert_eq!(
-        handle.kind, 0,
-        "duplicate kinds use the first declared index"
-    );
-    c.emit(handle, t(0), Severity::Info, &[]).expect("emits");
-    let row = c
-        .counters()
-        .into_iter()
-        .find(|row| row.source == source && row.kind == kind)
-        .expect("the planned pair exists");
-    assert_eq!(row.count, 1);
-}
-
-#[test]
 fn rs_36_abort_survives_a_drop() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
     let source = support::node_source("radio");
@@ -956,12 +1184,12 @@ fn rs_36_abort_survives_a_drop() {
             (source.clone(), fatal.clone()),
         ],
     );
-    let hn = c.resolve(&source, &noise);
+    let hn = c.resolve(&source, &noise).expect("the Kernel's own sink resolves any source");
     for _ in 0..10 {
         c.emit(hn, t(0), Severity::Info, &[]).expect("emits");
     }
     assert!(c.escalation().is_none());
-    let hf = c.resolve(&source, &fatal);
+    let hf = c.resolve(&source, &fatal).expect("the Kernel's own sink resolves any source");
     c.emit(hf, t(1), Severity::Fatal, &[]).expect("emits");
     let (kind, reaction) = c
         .escalation()
@@ -1484,42 +1712,68 @@ fn rs_38_environment_recorded_verbatim() {
 }
 
 #[test]
-fn rs_32_a_fabricated_event_handle_does_not_panic_the_kernel() {
-    // `EventHandle`'s fields are public, so a Module can build one. Indexing the
-    // counter table with it directly panicked the Kernel instead of returning an
-    // error — and RS-32's infallible hot path is a promise about the Kernel's own
-    // handles, not about any `u32` a Module writes (MA-9).
+fn rs_32_another_view_s_event_handle_is_refused() {
+    // `EventHandle`'s fields are private and a sink's `resolve` is its only
+    // constructor, so a Module can no longer fabricate one. What it can still do is
+    // hold a handle **another scope** minted — another view of the same collector, or
+    // the Kernel's own sink — and that is refused, in constant time, rather than
+    // counted or panicked on (RS-32, MA-9; pre-freeze item 3).
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
+    let source = support::node_source("radio");
     let kind = EventKind::parse("test.custom").expect("parses");
-    let c = collector(8, &policy, &[(support::node_source("radio"), kind.clone())]);
-    // Both `u32`s, not one: checking only `row` let the fabricated `kind` into the
-    // ring and moved the panic into the coordinator's `drain`, which indexes `kinds`
-    // with it — away from the Module that caused it.
-    for bad in [
-        ezsdr_kernel::event::EventHandle {
-            row: u32::MAX,
-            kind: 0,
-        },
-        ezsdr_kernel::event::EventHandle {
-            row: 0,
-            kind: u32::MAX,
-        },
-    ] {
-        assert!(
-            matches!(
-                c.emit(bad, t(1), Severity::Info, &[]),
-                Err(ezsdr_kernel::run::RunError::BadEventHandle { .. })
-            ),
-            "row {} kind {} must be refused",
-            bad.row,
-            bad.kind
-        );
-    }
-    // A real handle still works, so the guard did not break the hot path, and the
-    // drain the fabricated kind would have panicked in completes.
-    let good = c.resolve(&support::node_source("radio"), &kind);
-    assert!(c.emit(good, t(2), Severity::Info, &[]).is_ok());
-    assert_eq!(c.drain(t(9)).len(), 1, "one delivered body, and no panic");
+    let collector = Arc::new(collector(8, &policy, &[(source.clone(), kind.clone())]));
+    let first = collector.view(source.clone());
+    let second = collector.view(source.clone());
+    let handle = first
+        .resolve(&source, &kind)
+        .expect("the view's own root");
+    // Its own view takes it; another view of the same collector and the Kernel's own
+    // sink have other scopes and refuse it.
+    assert!(first.emit(handle, t(0), Severity::Info, &[]).is_ok());
+    assert_eq!(
+        second.emit(handle, t(1), Severity::Info, &[]),
+        Err(RunError::ForeignEventHandle)
+    );
+    assert_eq!(
+        collector.emit(handle, t(2), Severity::Info, &[]),
+        Err(RunError::ForeignEventHandle)
+    );
+    // The Kernel's sink resolves any source for itself; a view refuses its handle the
+    // same way, and a planned pair still reaches the table through the view that owns
+    // it.
+    let kernel = collector
+        .resolve(&source, &kind)
+        .expect("the Kernel's own sink resolves any source");
+    assert!(collector.emit(kernel, t(3), Severity::Info, &[]).is_ok());
+    assert_eq!(
+        first.emit(kernel, t(4), Severity::Info, &[]),
+        Err(RunError::ForeignEventHandle)
+    );
+    let delivered = collector.drain(t(9));
+    assert_eq!(delivered.len(), 2, "only the two owned bodies are delivered");
+    assert_eq!(collector.counters().iter().map(|r| r.count).sum::<u64>(), 2);
+}
+
+#[test]
+fn rs_32_another_run_s_event_handle_is_refused() {
+    // Scopes are process-unique, not per collector, so a handle minted in another Run
+    // — another collector in the same process — is refused by this Run's sink too
+    // (RS-32, MA-9; pre-freeze item 3).
+    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
+    let source = support::node_source("radio");
+    let kind = EventKind::parse("test.custom").expect("parses");
+    let one = Arc::new(collector(8, &policy, &[(source.clone(), kind.clone())]));
+    let two = Arc::new(collector(8, &policy, &[(source.clone(), kind.clone())]));
+    let handle = one
+        .resolve(&source, &kind)
+        .expect("the Kernel's own sink resolves any source");
+    assert_eq!(
+        two.emit(handle, t(0), Severity::Info, &[]),
+        Err(RunError::ForeignEventHandle)
+    );
+    assert_eq!(two.counters().iter().map(|r| r.count).sum::<u64>(), 0);
+    assert!(one.emit(handle, t(1), Severity::Info, &[]).is_ok());
+    assert_eq!(one.drain(t(9)).len(), 1);
 }
 
 #[test]

@@ -1257,8 +1257,8 @@
   "id": "J92",
   "name": "RS-35: EVENTS_DROPPED sourced unforeseen, not kernel",
   "file": "crates/ezsdr-kernel/src/event.rs",
-  "old": "                let source = EventSource::Kernel;\n                let handle = self.resolve(&source, &dropped_kind);",
-  "new": "                let source = EventSource::Unforeseen;\n                let handle = self.resolve(&source, &dropped_kind);",
+  "old": "                let source = EventSource::Kernel;\n                let handle = self.mint(self.scope, &source, &dropped_kind);",
+  "new": "                let source = EventSource::Unforeseen;\n                let handle = self.mint(self.scope, &source, &dropped_kind);",
   "crate": "ezsdr-kernel",
   "test_bin": "run_session",
   "filter": "rs_33_counters_exact_under_drop"
@@ -1979,9 +1979,9 @@
  {
   "id": "J166",
   "name": "KC-8 (spec 27 §2): an Executor is given the kernel source, not its Island",
-  "file": "crates/ezsdr-kernel/src/coordinator/state.rs",
-  "old": "                .map_or(EventSource::Unforeseen, |island| EventSource::Island { island: *island }),",
-  "new": "                .map_or(EventSource::Unforeseen, |_| EventSource::Kernel),",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "                Some(island) => EventSource::Island { island: island.id },",
+  "new": "                Some(_island) => EventSource::Kernel,",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kc_08_each_instance_is_given_its_source_root"
@@ -1990,7 +1990,7 @@
   "id": "J167",
   "name": "MA-5 (spec 27 §2): prepare hands every instance the kernel source",
   "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
-  "old": "                source: self.shared.source_root(instance, &fragment.id),",
+  "old": "                source: source.clone(),",
   "new": "                source: crate::event::EventSource::Kernel,",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
@@ -2618,8 +2618,8 @@
   "id": "J237",
   "name": "the payload's ASCII check runs before the target is resolved (item 3's KC-24 order)",
   "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
-  "old": "    // 3. the target resolves in its own role (KC-23), and a Module's `Stop { target:\n    // None }` is refused here. Before the payload is read, so a refusal can never\n    // transcribe a payload this step never looked at. A class-pending request states\n    // its own target, so it is resolved exactly like a finished Action's.\n    if origin == Origin::Module\n        && matches!(\n            input,\n            PendingAction::Action(Action::Stop { target: None })\n        )\n    {\n        return Err(vec![violation(\n            \"ezsdr.target\",\n            \"KC-24: a Module ends a Run only with Abort\",\n        )]);\n    }\n    // 3. the target resolved in its own role (KC-23). An Action with no target\n    // (`Stop {}`, `Abort`) is not resolved.\n    let (node, inst, fragment) = match input.target() {\n        Some(target) => {\n            let (node, inst, fragment) = super::pipeline::resolve_target(shared, target)\n                .map_err(|reason| vec![violation(\"ezsdr.target\", reason)])?;\n            (node, Some(inst), Some(fragment))\n        }\n        None => (None, None, None),\n    };\n    // 4. SB-9a: every origin crosses this boundary before coercion or dispatch. The\n    // refusal carries `requested: None` and a reason naming only the position and the\n    // violation: a Map key that is not ASCII must never enter a rejection record the\n    // log and the sealed Manifest will hold, and the offending key's own spelling is\n    // exactly what must not be transcribed (KC-24; SB-9a). The `key` field is the\n    // update's own key where there is one — never the offending map key, which need\n    // not even parse as a `Key`; a `TxBurst`/`Command` payload sits under no key.\n    let ascii = |key: Option<&Key>, position: &str| {\n        vec![Violation {\n            check: crate::spec::Namespace::parse(\"ezsdr.value\").expect(\"valid admission check\"),\n            key: key.cloned(),\n            requested: None,\n            reason: format!(\"SB-9a: a map key under {position} is not ASCII\"),\n        }]\n    };\n    match &input {\n        PendingAction::Update(pending) => {\n            if pending.value.check_ascii_keys(pending.key.as_str()).is_err() {\n                return Err(ascii(Some(&pending.key), pending.key.as_str()));\n            }\n        }\n        PendingAction::Action(Action::UpdateParameter { key, value, .. }) => {\n            if value.check_ascii_keys(key.as_str()).is_err() {\n                return Err(ascii(Some(key), key.as_str()));\n            }\n        }\n        PendingAction::Action(Action::TxBurst { metadata: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"metadata\"));\n            }\n        }\n        PendingAction::Action(Action::Command { params: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"params\"));\n            }\n        }\n        PendingAction::Action(_) => {}\n    }",
-  "new": "    // 4. SB-9a: every origin crosses this boundary before coercion or dispatch. The\n    // refusal carries `requested: None` and a reason naming only the position and the\n    // violation: a Map key that is not ASCII must never enter a rejection record the\n    // log and the sealed Manifest will hold, and the offending key's own spelling is\n    // exactly what must not be transcribed (KC-24; SB-9a). The `key` field is the\n    // update's own key where there is one — never the offending map key, which need\n    // not even parse as a `Key`; a `TxBurst`/`Command` payload sits under no key.\n    let ascii = |key: Option<&Key>, position: &str| {\n        vec![Violation {\n            check: crate::spec::Namespace::parse(\"ezsdr.value\").expect(\"valid admission check\"),\n            key: key.cloned(),\n            requested: None,\n            reason: format!(\"SB-9a: a map key under {position} is not ASCII\"),\n        }]\n    };\n    match &input {\n        PendingAction::Update(pending) => {\n            if pending.value.check_ascii_keys(pending.key.as_str()).is_err() {\n                return Err(ascii(Some(&pending.key), pending.key.as_str()));\n            }\n        }\n        PendingAction::Action(Action::UpdateParameter { key, value, .. }) => {\n            if value.check_ascii_keys(key.as_str()).is_err() {\n                return Err(ascii(Some(key), key.as_str()));\n            }\n        }\n        PendingAction::Action(Action::TxBurst { metadata: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"metadata\"));\n            }\n        }\n        PendingAction::Action(Action::Command { params: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"params\"));\n            }\n        }\n        PendingAction::Action(_) => {}\n    }    // 3. the target resolves in its own role (KC-23), and a Module's `Stop { target:\n    // None }` is refused here. Before the payload is read, so a refusal can never\n    // transcribe a payload this step never looked at. A class-pending request states\n    // its own target, so it is resolved exactly like a finished Action's.\n    if origin == Origin::Module\n        && matches!(\n            input,\n            PendingAction::Action(Action::Stop { target: None })\n        )\n    {\n        return Err(vec![violation(\n            \"ezsdr.target\",\n            \"KC-24: a Module ends a Run only with Abort\",\n        )]);\n    }\n    // 3. the target resolved in its own role (KC-23). An Action with no target\n    // (`Stop {}`, `Abort`) is not resolved.\n    let (node, inst, fragment) = match input.target() {\n        Some(target) => {\n            let (node, inst, fragment) = super::pipeline::resolve_target(shared, target)\n                .map_err(|reason| vec![violation(\"ezsdr.target\", reason)])?;\n            (node, Some(inst), Some(fragment))\n        }\n        None => (None, None, None),\n    };\n",
+  "old": "    // 3. the target resolves in its own role (KC-23), and a Module's `Stop { target:\n    // None }` is refused here. Before the payload is read, so a refusal can never\n    // transcribe a payload this step never looked at. A class-pending request states\n    // its own target, so it is resolved exactly like a finished Action's.\n    if origin == Origin::Module\n        && matches!(\n            input,\n            PendingAction::Action(Action::Stop { target: None })\n        )\n    {\n        return Err(vec![violation(\n            \"ezsdr.target\",\n            \"KC-24: a Module ends a Run only with Abort\",\n        )]);\n    }\n    // 3. the target resolved in its own role (KC-23). An Action with no target\n    // (`Stop {}`, `Abort`) is not resolved.\n    let (node, inst, fragment) = match input.target() {\n        Some(target) => {\n            let (node, inst, fragment) = super::pipeline::resolve_target(shared, target)\n                .map_err(|reason| vec![violation(\"ezsdr.target\", reason)])?;\n            (node, Some(inst), Some(fragment))\n        }\n        None => (None, None, None),\n    };\n    // 4. SB-9a: every origin crosses this boundary before coercion or dispatch. The\n    // refusal carries `requested: None` and a reason naming only the position and the\n    // violation: a Map key that is not ASCII must never enter a rejection record the\n    // log and the sealed Manifest will hold, and the offending key's own spelling is\n    // exactly what must not be transcribed (KC-24; SB-9a). The `key` field is the\n    // update's own key where there is one — never the offending map key, which need\n    // not even parse as a `Key`; a `TxBurst`/`Command`/`Emit` payload sits under no key.\n    let ascii = |key: Option<&Key>, position: &str| {\n        vec![Violation {\n            check: crate::spec::Namespace::parse(\"ezsdr.value\").expect(\"valid admission check\"),\n            key: key.cloned(),\n            requested: None,\n            reason: format!(\"SB-9a: a map key under {position} is not ASCII\"),\n        }]\n    };\n    match &input {\n        PendingAction::Update(pending) => {\n            if pending.value.check_ascii_keys(pending.key.as_str()).is_err() {\n                return Err(ascii(Some(&pending.key), pending.key.as_str()));\n            }\n        }\n        PendingAction::Action(Action::UpdateParameter { key, value, .. }) => {\n            if value.check_ascii_keys(key.as_str()).is_err() {\n                return Err(ascii(Some(key), key.as_str()));\n            }\n        }\n        PendingAction::Action(Action::TxBurst { metadata: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"metadata\"));\n            }\n        }\n        PendingAction::Action(Action::Command { params: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"params\"));\n            }\n        }\n        // Item 3: an `Emit`'s payload is a `Value` tree, so the check is recursive.\n        // The refusal is still admission's, before dispatch: the Action still reaches\n        // its target Module (which may not support it), and no collector receives it\n        // directly.\n        PendingAction::Action(Action::Emit { event, .. }) => {\n            if crate::spec::check_ascii_keys(&event.payload).is_err() {\n                return Err(ascii(None, \"payload\"));\n            }\n        }\n        PendingAction::Action(_) => {}\n    }",
+  "new": "    // 4. SB-9a: every origin crosses this boundary before coercion or dispatch. The\n    // refusal carries `requested: None` and a reason naming only the position and the\n    // violation: a Map key that is not ASCII must never enter a rejection record the\n    // log and the sealed Manifest will hold, and the offending key's own spelling is\n    // exactly what must not be transcribed (KC-24; SB-9a). The `key` field is the\n    // update's own key where there is one — never the offending map key, which need\n    // not even parse as a `Key`; a `TxBurst`/`Command`/`Emit` payload sits under no key.\n    let ascii = |key: Option<&Key>, position: &str| {\n        vec![Violation {\n            check: crate::spec::Namespace::parse(\"ezsdr.value\").expect(\"valid admission check\"),\n            key: key.cloned(),\n            requested: None,\n            reason: format!(\"SB-9a: a map key under {position} is not ASCII\"),\n        }]\n    };\n    match &input {\n        PendingAction::Update(pending) => {\n            if pending.value.check_ascii_keys(pending.key.as_str()).is_err() {\n                return Err(ascii(Some(&pending.key), pending.key.as_str()));\n            }\n        }\n        PendingAction::Action(Action::UpdateParameter { key, value, .. }) => {\n            if value.check_ascii_keys(key.as_str()).is_err() {\n                return Err(ascii(Some(key), key.as_str()));\n            }\n        }\n        PendingAction::Action(Action::TxBurst { metadata: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"metadata\"));\n            }\n        }\n        PendingAction::Action(Action::Command { params: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"params\"));\n            }\n        }\n        // Item 3: an `Emit`'s payload is a `Value` tree, so the check is recursive.\n        // The refusal is still admission's, before dispatch: the Action still reaches\n        // its target Module (which may not support it), and no collector receives it\n        // directly.\n        PendingAction::Action(Action::Emit { event, .. }) => {\n            if crate::spec::check_ascii_keys(&event.payload).is_err() {\n                return Err(ascii(None, \"payload\"));\n            }\n        }\n        PendingAction::Action(_) => {}\n    }    // 3. the target resolves in its own role (KC-23), and a Module's `Stop { target:\n    // None }` is refused here. Before the payload is read, so a refusal can never\n    // transcribe a payload this step never looked at. A class-pending request states\n    // its own target, so it is resolved exactly like a finished Action's.\n    if origin == Origin::Module\n        && matches!(\n            input,\n            PendingAction::Action(Action::Stop { target: None })\n        )\n    {\n        return Err(vec![violation(\n            \"ezsdr.target\",\n            \"KC-24: a Module ends a Run only with Abort\",\n        )]);\n    }\n    // 3. the target resolved in its own role (KC-23). An Action with no target\n    // (`Stop {}`, `Abort`) is not resolved.\n    let (node, inst, fragment) = match input.target() {\n        Some(target) => {\n            let (node, inst, fragment) = super::pipeline::resolve_target(shared, target)\n                .map_err(|reason| vec![violation(\"ezsdr.target\", reason)])?;\n            (node, Some(inst), Some(fragment))\n        }\n        None => (None, None, None),\n    };\n",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kc_24_the_target_is_resolved_before_the_payload_is_read"
@@ -2693,5 +2693,155 @@
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "rs_17_a_kind_only_coercion_is_recorded"
+ },
+ {
+  "id": "J245",
+  "name": "MA-5/MA-6 (item 3): a view resolves a source outside its root",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "        if !self.root.covers(source) {",
+  "new": "        if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_32_a_view_refuses_a_source_outside_its_root"
+ },
+ {
+  "id": "J246",
+  "name": "SB-33 (item 3): the Provider root check is a byte prefix, not a segment boundary",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "            (EventSource::Node { node: root }, EventSource::Node { node }) => node.is_within(root),",
+  "new": "            (EventSource::Node { node: root }, EventSource::Node { node }) => node.path().starts_with(root.path()),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_32_a_view_refuses_a_source_outside_its_root"
+ },
+ {
+  "id": "J247",
+  "name": "MA-5 (item 3): an Output view admits any output",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "            (EventSource::Output { output: root }, EventSource::Output { output }) => root == output,",
+  "new": "            (EventSource::Output { output: _root }, EventSource::Output { output: _output }) => true,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_32_a_view_refuses_another_instance_s_source"
+ },
+ {
+  "id": "J248",
+  "name": "RS-33 (item 3): a view refuses a source the plan did not list, so an unforeseen in-root pair cannot use the fallback row",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "        if !self.root.covers(source) {",
+  "new": "        if !self.root.covers(source) || self.collector.source_index.get(source).is_none() {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_33_an_unforeseen_pair_inside_the_root_uses_the_fallback_row"
+ },
+ {
+  "id": "J249",
+  "name": "RS-32/MA-9 (item 3): a handle from another Run or another view is counted",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "        if handle.scope != scope\n            || handle.kind as usize >= self.kinds.len()\n            || handle.row as usize >= self.counts.len()\n        {",
+  "new": "        if handle.kind as usize >= self.kinds.len()\n            || handle.row as usize >= self.counts.len()\n        {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_32_another_view_s_event_handle_is_refused"
+ },
+ {
+  "id": "J250",
+  "name": "SB-9a (item 3): a control event's non-ASCII key is checked only one level deep",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "        crate::spec::check_ascii_keys(payload)\n            .map_err(|_| RunError::PayloadKeyNotAscii { position: \"payload\".to_owned() })",
+  "new": "        match payload.as_object() {\n            Some(map) if map.keys().any(|key| !key.is_ascii()) => {\n                Err(RunError::PayloadKeyNotAscii { position: \"payload\".to_owned() })\n            }\n            _ => Ok(()),\n        }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_32_a_control_event_with_a_non_ascii_key_is_refused"
+ },
+ {
+  "id": "J251",
+  "name": "SB-9a (item 3): an Emit's payload keys are checked only one level deep",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "            if crate::spec::check_ascii_keys(&event.payload).is_err() {\n                return Err(ascii(None, \"payload\"));\n            }",
+  "new": "            if event.payload.as_object().is_some_and(|map| map.keys().any(|key| !key.is_ascii())) {\n                return Err(ascii(None, \"payload\"));\n            }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_a_module_emit_with_a_non_ascii_payload_is_refused_before_dispatch"
+ },
+ {
+  "id": "J252",
+  "name": "MA-9 (item 3): a view shares the Kernel sink's scope instead of minting its own",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "        Arc::new(SinkView {\n            collector: Arc::clone(self),\n            scope: next_scope(),\n            root,\n        })",
+  "new": "        Arc::new(SinkView {\n            collector: Arc::clone(self),\n            scope: self.scope,\n            root,\n        })",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_32_another_view_s_event_handle_is_refused"
+ },
+ {
+  "id": "J253",
+  "name": "MA-9 (item 3): every Run's collector shares one scope, so another Run's handle is counted",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "        let collector = EventCollector {\n            scope: next_scope(),",
+  "new": "        let collector = EventCollector {\n            scope: 0,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_32_another_run_s_event_handle_is_refused"
+ },
+ {
+  "id": "J254",
+  "name": "MA-5 (item 3): a view emits a control event from outside its root",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "        if !self.root.covers(&event.source) {",
+  "new": "        if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_32_a_control_event_from_outside_the_root_is_refused"
+ },
+ {
+  "id": "J255",
+  "name": "RS-32/RS-33 (item 3): a view special-cases kernel and unforeseen as inside its root",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "            (EventSource::Island { island: root }, EventSource::Island { island }) => root == island,\n            _ => false,",
+  "new": "            (EventSource::Island { island: root }, EventSource::Island { island }) => root == island,\n            (_, EventSource::Kernel | EventSource::Unforeseen) => true,\n            _ => false,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_33_a_view_refuses_kernel_and_unforeseen"
+ },
+ {
+  "id": "J256",
+  "name": "item 3: an Emit is refused in admission instead of dispatched to its target",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "        PendingAction::Action(Action::Emit { event, .. }) => {\n            if crate::spec::check_ascii_keys(&event.payload).is_err() {\n                return Err(ascii(None, \"payload\"));\n            }\n        }",
+  "new": "        PendingAction::Action(Action::Emit { .. }) => {\n            return Err(ascii(None, \"payload\"));\n        }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_a_module_emit_is_dispatched_to_its_target"
+ },
+ {
+  "id": "J257",
+  "name": "KC-8/MA-5 (item 3): the coordinator hands every instance the collector, not its view",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "                events: collector.view(source),",
+  "new": "                events: collector.clone(),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_08_each_instance_s_event_view_is_rooted_through_the_coordinator"
+ },
+ {
+  "id": "J258",
+  "name": "MA-5 (item 3): an Island view admits any Island",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "            (EventSource::Island { island: root }, EventSource::Island { island }) => root == island,",
+  "new": "            (EventSource::Island { island: _root }, EventSource::Island { island: _island }) => true,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_32_a_view_refuses_another_instance_s_source"
+ },
+ {
+  "id": "J259",
+  "name": "SB-9a (item 3): the Emit ASCII refusal transcribes a requested payload",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "            if crate::spec::check_ascii_keys(&event.payload).is_err() {\n                return Err(ascii(None, \"payload\"));\n            }",
+  "new": "            if crate::spec::check_ascii_keys(&event.payload).is_err() {\n                let mut violation = ascii(None, \"payload\");\n                violation[0].requested = Some(crate::spec::Value::from(1_i64));\n                return Err(violation);\n            }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_a_module_emit_with_a_non_ascii_payload_is_refused_before_dispatch"
  }
 ]
