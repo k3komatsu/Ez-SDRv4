@@ -951,7 +951,7 @@ fn kc_23_targets_are_rewritten_through_matched() {
     spec["schedule"] = serde_json::json!([{
         "at": { "clock": "radio", "offset_ticks": 0 },
         "action": { "kind": "update_parameter", "target": serde_json::to_value(support::target("radio/x")).unwrap(),
-            "key": "test.gain", "value": 3.0, "class": "hardware_timed" }
+            "key": "test.gain", "value": 3.0, }
     }]);
     let probe = Probe::new();
     let rig = rig(ezsdr_kernel::module_api::Pacing::FreeRunning);
@@ -1359,13 +1359,13 @@ fn kc_17_scheduled_updates_are_admitted_cumulatively() {
         serde_json::to_value(support::target("radio")).unwrap();
     let first = serde_json::json!({
         "at": { "clock": "radio", "offset_ticks": 10 }, "action": {
-            "kind": "update_parameter", "target": radio, "key": "test.grid", "value": 40.0, "class": "cold"
+            "kind": "update_parameter", "target": radio, "key": "test.grid", "value": 40.0,
         }
     });
     spec["schedule"] = serde_json::json!([
         first,
         { "at": { "clock": "radio", "offset_ticks": 20 }, "action": {
-            "kind": "update_parameter", "target": radio, "key": "test.flag", "value": true, "class": "cold"
+            "kind": "update_parameter", "target": radio, "key": "test.flag", "value": true,
         } }
     ]);
     let mut profile = profile_one();
@@ -1703,6 +1703,55 @@ fn kc_23_an_unknown_target_is_refused() {
 }
 
 #[test]
+fn kc_24_the_target_is_resolved_before_the_update_class() {
+    // KC-24 (review P1-1): a class-pending request keeps its Pending form through
+    // steps 1–4 and is completed at step 5, so a step-3 refusal stands even when the
+    // request also has a declaration gap. Two Session inputs:
+    // (a) an undeclared `{component: nothing}` target: refused as `ezsdr.target`, and
+    //     the declaration the target cannot give is not even looked for — an
+    //     implementation that completed the request first would refuse
+    //     `ezsdr.update_class` instead;
+    // (b) the resolvable `radio` target with `test.count`, a declared key with no
+    //     `update_class`: refused as step 5's `ezsdr.update_class` — completing it
+    //     before the earlier steps is only observable where `declared_class` gives
+    //     nothing, which is this gap.
+    let mut run = session_with_provider(Box::new(TestProvider::new("radio", 2)));
+    let entry = run
+        .submit(
+            SessionAction::SetParameter {
+                target: Target::Component { component: Ident::parse("nothing").unwrap() },
+                key: Key::parse("test.count").unwrap(),
+                value: Value::from(1),
+            },
+            None,
+        )
+        .unwrap();
+    assert!(
+        matches!(entry.outcome, Outcome::Rejected { ref violations }
+            if violations.iter().any(|v| v.check == ns("ezsdr.target"))
+                && violations.iter().all(|v| v.check != ns("ezsdr.update_class"))),
+        "an undeclared target is refused by step 3: {entry:?}"
+    );
+    let gap = run
+        .submit(
+            SessionAction::SetParameter {
+                target: support::target("radio"),
+                key: Key::parse("test.count").unwrap(),
+                value: Value::from(1),
+            },
+            None,
+        )
+        .unwrap();
+    assert!(
+        matches!(gap.outcome, Outcome::Rejected { ref violations }
+            if violations.iter().any(|v| v.check == ns("ezsdr.update_class")
+                && v.reason.contains("declares no update class"))),
+        "the declaration gap is refused at step 5: {gap:?}"
+    );
+    let _ = run.finish();
+}
+
+#[test]
 fn kc_21_an_action_is_seen_at_its_admission_instant() {
     let probe = Probe::new();
     let mut run = session_with_provider(Box::new(SteppedProvider::new(
@@ -1750,6 +1799,8 @@ fn kc_25_an_admitted_update_changes_the_configuration() {
             None,
         )
         .unwrap();
+    // Item 3: one `SetParameter` compiles to exactly one request, so the entry
+    // dispatches once; a compile that produced two requests would make this two.
     assert!(matches!(entry.outcome, Outcome::Admitted { dispatched, .. } if dispatched.len() == 1));
     assert_eq!(
         run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("test.gain").unwrap()],
@@ -1802,13 +1853,52 @@ fn rs_17_a_session_rate_change_is_coerced_by_its_provider() {
 }
 
 #[test]
+fn rs_17_a_kind_only_coercion_is_recorded() {
+    // KC-24 steps 10–11 (review P2-2): `Scalar`'s `PartialEq` is numeric, so
+    // `Int(3) == Num(3.0)`. The double's grid makes `coerce` apply `Num(3.0)` for the
+    // requested `Int(3)` — the same number in another kind — and the comparison must
+    // notice it by kind. With equality alone the coercion is invisible: nothing is
+    // recorded and the configuration keeps the requested `Int(3)`.
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.registry = run_registry_classed();
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(TestProvider::new("radio", 2).with_grid(0.001)),
+    );
+    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let entry = run
+        .submit(
+            SessionAction::SetParameter {
+                target: support::target("radio"),
+                key: Key::parse("test.grid").unwrap(),
+                value: Value::from(3),
+            },
+            None,
+        )
+        .unwrap();
+    assert!(
+        matches!(entry.outcome, Outcome::Admitted { ref coercions, .. }
+        if coercions.iter().any(|c| c.key == Key::parse("test.grid").unwrap()
+            && c.requested == Value::from(3)
+            && c.applied == Value::num(3.0).unwrap())),
+        "the kind-only coercion is recorded: {entry:?}"
+    );
+    assert_eq!(
+        run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("test.grid").unwrap()],
+        Value::num(3.0).unwrap(),
+        "the coerced value is what the configuration holds"
+    );
+    let _ = run.finish();
+}
+
+#[test]
 fn rs_17_a_scheduled_rate_change_under_reject_is_refused() {
     let mut spec = spec_one();
     let radio =
         serde_json::to_value(support::target("radio")).unwrap();
     spec["schedule"] = serde_json::json!([{
         "at": { "clock": "radio", "offset_ticks": 0 }, "action": {
-            "kind": "update_parameter", "target": radio, "key": "test.grid", "value": 19.5, "class": "cold"
+            "kind": "update_parameter", "target": radio, "key": "test.grid", "value": 19.5,
         }
     }]);
     let probe = Probe::new();
@@ -1879,7 +1969,10 @@ fn kc_26_a_provider_that_applies_nothing_is_refused() {
         )
         .unwrap();
     assert!(matches!(entry.outcome, Outcome::Rejected { ref violations }
-        if violations.iter().any(|v| v.check == ns("ezsdr.coercion") && v.reason.contains("applied no value for test.gain"))));
+        if violations.iter().any(|v| v.check == ns("ezsdr.coercion")
+            && v.key == Some(Key::parse("test.gain").unwrap())
+            && v.requested == Some(Value::num(1.0).unwrap())
+            && v.reason.contains("applied no value for test.gain"))));
     let _ = run.finish();
 }
 
@@ -1887,20 +1980,24 @@ fn kc_26_a_provider_that_applies_nothing_is_refused() {
 fn sb_05_a_provider_parameter_update_is_a_scalar() {
     // A Provider parameter's change is offered to `coerce` as an `Eq` constraint,
     // whose value is a scalar (SB-5): a list is refused before `coerce`, never
-    // dropped or coerced into one.
+    // dropped or coerced into one. The key is `test.list`, whose `KeyDecl` is a
+    // `List`, so KC-24's step 6 passes it and step 8 is the refusal the test names:
+    // for a key whose declaration is scalar, step 6 refuses it first.
     let mut run = session_with_provider(Box::new(TestProvider::new("radio", 2)));
     let entry = run
         .submit(
             SessionAction::SetParameter {
                 target: support::target("radio"),
-                key: Key::parse("test.gain").unwrap(),
+                key: Key::parse("test.list").unwrap(),
                 value: Value::List(vec![Scalar::from(1)]),
             },
             None,
         )
         .unwrap();
     assert!(matches!(entry.outcome, Outcome::Rejected { ref violations }
-        if violations.iter().any(|v| v.check == ns("ezsdr.value") && v.reason.contains("SB-5"))),
+        if violations.iter().any(|v| v.check == ns("ezsdr.value")
+            && v.key == Some(Key::parse("test.list").unwrap())
+            && v.reason.contains("SB-5"))),
         "{:?}", entry.outcome);
     let _ = run.finish();
 }
@@ -3087,7 +3184,9 @@ fn kc_24_a_module_update_must_state_its_providers_declared_class() {
         assembly.executors.insert(Ident::parse("exec").unwrap(),
             Box::new(ProbeExecutor::new("x", &probe).submitting(action)));
         let manifest = start_spec_run(&spec, &profile, assembly).unwrap().finish();
-        assert!(probe.lines().iter().any(|line| line.starts_with("x:submit:err:ezsdr.update_class:RS-52")));
+        assert!(probe.lines().iter().any(|line| line
+            .starts_with("x:submit:err:ezsdr.update_class:RS-52: update states")
+            && line.contains("which declares")));
         assert!(!probe.lines().iter().any(|line| line.starts_with("p:action:UpdateParameter:")));
         assert!(manifest.termination.cleanup_failures.is_empty());
     }
@@ -4482,15 +4581,15 @@ fn kc_24_component_update_classes_belong_to_the_target() {
 #[test]
 fn kc_17_a_scheduled_update_to_a_component_reaches_its_executor() {
     // P2-3 (review): a timed schedule update to a placed component passes validate's
-    // declaration check, KC-24's class check and arm's dispatch, and reaches the
-    // Executor that owns the component.
+    // target classification, KC-24's class check and arm's dispatch, and reaches the
+    // Executor that owns the component. The entry states no class (item 3): the
+    // component's own `ParamDecl` is read at admission.
     let (mut spec, profile) = component_class_docs();
     add_schedule(&mut spec, "radio", 10, serde_json::json!({
         "kind": "update_parameter",
         "target": { "kind": "component", "component": "c1" },
         "key": "test.gain",
-        "value": 3.0,
-        "class": "cold"
+        "value": 3.0
     }));
     let probe = Probe::new();
     let mut assembly = rig(Pacing::FreeRunning).assembly;
@@ -4509,6 +4608,70 @@ fn kc_17_a_scheduled_update_to_a_component_reaches_its_executor() {
         "{lines:?}"
     );
     assert!(run.finish().termination.cleanup_failures.is_empty());
+}
+
+#[test]
+fn kc_24_a_component_value_takes_no_vocabulary_kind_check() {
+    // KC-24 step 6 (review P1-2): a component parameter has an opaque schema, so a
+    // value whose kind differs from the same-named Vocabulary key's is still the
+    // component's to judge. `c1` declares `test.gain` (`cold`) and the Vocabulary
+    // declares that key `Num`; a `Bool` update reaches the Executor through a Module
+    // submission and through a scheduled entry, and is refused in neither.
+    let (spec, profile) = component_class_docs();
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.registry = run_registry_classed();
+    assembly.providers.insert(Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)));
+    assembly.executors.insert(
+        Ident::parse("exec").unwrap(),
+        Box::new(ProbeExecutor::new("x", &probe).submitting(Action::UpdateParameter {
+            target: Target::Component { component: Ident::parse("c1").unwrap() },
+            key: Key::parse("test.gain").unwrap(),
+            value: Value::from(true),
+            class: ezsdr_kernel::module_api::UpdateClass::Cold,
+            at: None,
+        })),
+    );
+    let run = start_spec_run(&spec, &profile, assembly).unwrap();
+    let lines = probe.lines();
+    assert!(lines.iter().any(|line| line.starts_with("x:submit:ok:")), "{lines:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("ezsdr.value")),
+        "no Vocabulary kind check applies to a component value: {lines:?}"
+    );
+    let _ = run.finish();
+
+    // The scheduled origin: the same value, its class from the component's ParamDecl.
+    let (mut spec, profile) = component_class_docs();
+    add_schedule(&mut spec, "radio", 10, serde_json::json!({
+        "kind": "update_parameter",
+        "target": { "kind": "component", "component": "c1" },
+        "key": "test.gain",
+        "value": true
+    }));
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.registry = run_registry_classed();
+    assembly.providers.insert(Ident::parse("radio").unwrap(),
+        Box::new(
+            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
+                .declaring("radio/rx", 1, 1),
+        ));
+    assembly.executors.insert(Ident::parse("exec").unwrap(),
+        Box::new(ProbeExecutor::new("x", &probe)));
+    let run = start_spec_run(&spec, &profile, assembly).unwrap();
+    assert!(matches!(run.state(), RunState::Running {}));
+    let lines = probe.lines();
+    assert!(
+        lines.iter().any(|line| line.starts_with("x:action:component c1")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("ezsdr.value")),
+        "no Vocabulary kind check applies to a scheduled component value: {lines:?}"
+    );
+    let _ = run.finish();
 }
 
 #[test]
@@ -4661,6 +4824,465 @@ fn rs_14_a_capture_reaches_the_output_it_names_with_two_sinks_bound() {
 }
 
 #[test]
+fn kc_24_the_target_is_resolved_before_the_payload_is_read() {
+    // KC-24 (item 3): step 3 (the target) precedes step 4 (the payload's ASCII keys),
+    // so one Module Action that breaks both is refused as a target, and the refusal
+    // never transcribes the payload. The same ordering is what keeps a non-ASCII Map
+    // key out of a rejection record.
+    let (spec, profile) = executor_docs();
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)),
+    );
+    assembly.executors.insert(
+        Ident::parse("exec").unwrap(),
+        Box::new(ProbeExecutor::new("x", &probe).submitting(Action::UpdateParameter {
+            target: support::target("nothing"),
+            key: Key::parse("test.gain").unwrap(),
+            value: Value::Map(BTreeMap::from([("日本語".to_owned(), Scalar::from(1))])),
+            class: ezsdr_kernel::module_api::UpdateClass::HardwareTimed,
+            at: None,
+        })),
+    );
+    let run = start_spec_run(&spec, &profile, assembly).unwrap();
+    assert!(!run.effective()[&Ident::parse("radio").unwrap()]
+        .contains_key(&Key::parse("test.gain").unwrap()));
+    let manifest = run.finish();
+    let lines = probe.lines();
+    assert!(
+        lines.iter().any(|line| line.starts_with("x:submit:err:ezsdr.target:KC-23:")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("ezsdr.value")),
+        "step 4 is never reached: {lines:?}"
+    );
+    assert!(!lines.iter().any(|line| line.starts_with("p:action:")), "{lines:?}");
+    assert!(manifest.termination.cleanup_failures.is_empty());
+}
+
+#[test]
+fn kc_24_a_module_update_is_checked_with_its_proposed_value() {
+    // KC-24 step 12 (review P0-1): every `UpdateParameter` reaches the registered
+    // checks with `proposed = { fragment: { key: value } }` — a Module's update
+    // included, which step 10 does not coerce. `test.limits` judges `test.grid` only
+    // where `test.flag` is true, and the update below is refused exactly because the
+    // check sees the proposed 25 through the gate the configuration holds. With
+    // `proposed` empty the check has nothing to judge and the update is admitted,
+    // which is the safety regression this test pins.
+    let (spec, mut profile) = executor_docs();
+    profile["environment"] =
+        serde_json::json!({ "test.limits": { "max_grid": 20.0, "gate": "test.flag" } });
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.registry = run_registry_classed();
+    assembly.checks = run_checks(true);
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new(
+            "p",
+            TestProvider::new("radio", 2).with_effective("test.flag", Value::from(true)),
+            &probe,
+        )),
+    );
+    assembly.executors.insert(
+        Ident::parse("exec").unwrap(),
+        Box::new(ProbeExecutor::new("x", &probe).submitting(Action::UpdateParameter {
+            target: support::target("radio"),
+            key: Key::parse("test.grid").unwrap(),
+            value: Value::num(25.0).unwrap(),
+            class: ezsdr_kernel::module_api::UpdateClass::Cold,
+            at: None,
+        })),
+    );
+    let run = start_spec_run(&spec, &profile, assembly).unwrap();
+    let lines = probe.lines();
+    assert!(
+        lines.iter().any(|line| line.starts_with("x:submit:err:test.limits:")),
+        "the check sees the proposed value: {lines:?}"
+    );
+    assert!(!lines.iter().any(|line| line.starts_with("p:action:")), "{lines:?}");
+    let manifest = run.finish();
+    assert!(manifest.termination.cleanup_failures.is_empty());
+}
+
+/// A check that refuses the proposed `test.grid = 25.0` and nothing else. It is the
+/// direct witness of KC-24 step 12's `proposed` (review P0-1): a value no
+/// configuration holds, so only an update that carries it can reach its refusal.
+struct RefuseProposedGrid(ezsdr_kernel::spec::Namespace);
+
+impl RefuseProposedGrid {
+    fn new() -> RefuseProposedGrid {
+        RefuseProposedGrid(ns("test.proposed"))
+    }
+}
+
+impl ezsdr_kernel::binding::AdmissionCheck for RefuseProposedGrid {
+    fn section(&self) -> &ezsdr_kernel::spec::Namespace {
+        &self.0
+    }
+    fn stages(&self) -> &[ezsdr_kernel::binding::CheckStage] {
+        &[ezsdr_kernel::binding::CheckStage::Runtime]
+    }
+    fn check(
+        &self,
+        _section: &serde_json::Value,
+        _effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+        proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+        _stage: ezsdr_kernel::binding::CheckStage,
+    ) -> Vec<ezsdr_kernel::binding::Violation> {
+        proposed
+            .iter()
+            .filter_map(|(fragment, values)| {
+                let grid = values.get(&Key::parse("test.grid").unwrap())?;
+                (*grid == Value::num(25.0).unwrap()).then(|| ezsdr_kernel::binding::Violation {
+                    check: ns("test.proposed"),
+                    key: Some(Key::parse("test.grid").unwrap()),
+                    requested: Some(grid.clone()),
+                    reason: format!("{fragment}: test.grid 25.0 is refused"),
+                })
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn kc_24_a_check_refuses_a_non_provider_update_with_its_proposed_value() {
+    // The same step 12 for a non-Provider fragment (review P0-1): an update to a
+    // component reaches the registered checks with its proposed value too. The value
+    // is one no configuration holds, so only a check that receives `proposed` can
+    // refuse it, and the component declares `test.grid` so the class check passes.
+    let (mut spec, mut profile) = executor_docs();
+    spec["graph"]["components"]["c1"]["params"] = serde_json::json!([
+        { "key": "test.grid", "schema": {"type": "number"}, "update_class": "cold", "default": 2.0 }
+    ]);
+    profile["environment"] = serde_json::json!({ "test.proposed": {} });
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.registry = run_registry_classed();
+    assembly.checks.register(std::sync::Arc::new(RefuseProposedGrid::new()));
+    assembly.providers.insert(Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)));
+    assembly.executors.insert(
+        Ident::parse("exec").unwrap(),
+        Box::new(ProbeExecutor::new("x", &probe).submitting(Action::UpdateParameter {
+            target: Target::Component { component: Ident::parse("c1").unwrap() },
+            key: Key::parse("test.grid").unwrap(),
+            value: Value::num(25.0).unwrap(),
+            class: ezsdr_kernel::module_api::UpdateClass::Cold,
+            at: None,
+        })),
+    );
+    let run = start_spec_run(&spec, &profile, assembly).unwrap();
+    let lines = probe.lines();
+    assert!(
+        lines.iter().any(|line| line.starts_with("x:submit:err:test.proposed:")),
+        "the check sees the proposed value on a component fragment: {lines:?}"
+    );
+    assert!(!lines.iter().any(|line| line.starts_with("x:action:")), "{lines:?}");
+    let manifest = run.finish();
+    assert!(manifest.termination.cleanup_failures.is_empty());
+}
+
+/// A Provider double whose `coerce` applies `test.gain` as a `List` — a value outside
+/// that `Num` declaration — and every other request as itself. It is how a test
+/// reaches KC-24's step 11, the one refusal a conforming Provider would not produce,
+/// and step 11 applies to the Session and schedule origins only: a Module's Action is
+/// not coerced at all (KC-24 step 8's guard,
+/// `kc_24_a_module_update_is_not_coerced_by_the_kernel`). Its instance is stepped, so
+/// the coordinator holds no slot for it and no thread is involved.
+struct KindWrongProvider {
+    inner: TestProvider,
+    /// The stream whose SampleClock this Provider declares at `prepare`, so a
+    /// schedule entry can resolve its `SpecTime` against this instance (SB-16).
+    declare_clock: Option<String>,
+}
+
+impl KindWrongProvider {
+    fn new(inner: TestProvider) -> KindWrongProvider {
+        KindWrongProvider {
+            inner,
+            declare_clock: None,
+        }
+    }
+
+    fn declaring(mut self, stream: &str) -> KindWrongProvider {
+        self.declare_clock = Some(stream.to_owned());
+        self
+    }
+}
+
+impl ezsdr_kernel::module_api::Provider for KindWrongProvider {
+    fn instance(&self) -> &ezsdr_kernel::module_api::ProviderInstance {
+        self.inner.instance()
+    }
+
+    fn coerce(
+        &self,
+        request: &ezsdr_kernel::module_api::Requested,
+    ) -> Result<ezsdr_kernel::module_api::CoerceReport, ezsdr_kernel::module_api::ModuleError> {
+        use ezsdr_kernel::spec::{Coercion, Constraint, Scalar};
+        let mut report = ezsdr_kernel::module_api::CoerceReport::default();
+        for (key, constraint) in &request.constraints {
+            let Constraint::Eq { value } = constraint else {
+                continue;
+            };
+            let value = Value::Scalar(value.clone());
+            if key.as_str() == "test.gain" || key.as_str() == "test.capture" {
+                // A `List` where the declaration is a `Num`: step 11's refusal.
+                let applied = Value::List(vec![Scalar::from(3)]);
+                report.applied.insert(key.clone(), applied.clone());
+                report.coercions.push(Coercion {
+                    key: key.clone(),
+                    requested: value,
+                    applied,
+                    reason: "wrapped the number in a list".to_owned(),
+                });
+            } else {
+                report.applied.insert(key.clone(), value);
+            }
+        }
+        Ok(report)
+    }
+
+    fn prepare(
+        &mut self,
+        f: &ezsdr_kernel::plan::Fragment,
+        ctx: ezsdr_kernel::module_api::PrepareContext,
+    ) -> Result<ezsdr_kernel::plan::PrepareReport, ezsdr_kernel::module_api::ModuleError> {
+        if let Some(stream) = &self.declare_clock {
+            let stream_id = ezsdr_kernel::id::ResourceId::parse(stream)
+                .map_err(|e| ezsdr_kernel::module_api::ModuleError::rejected(format!("test: {e}")))?;
+            let ratio = ezsdr_kernel::time::Rational::new(1_000_000_000, 1)
+                .map_err(|e| ezsdr_kernel::module_api::ModuleError::rejected(format!("test: {e}")))?;
+            ctx.clocks
+                .declare_sample_clock(stream_id, ctx.time.primary_root(), ratio)
+                .map_err(|e| ezsdr_kernel::module_api::ModuleError::rejected(format!("test: {e}")))?;
+        }
+        ezsdr_kernel::module_api::Provider::prepare(&mut self.inner, f, ctx)
+    }
+
+    fn arm(&mut self) -> Result<(), ezsdr_kernel::module_api::ModuleError> {
+        Ok(())
+    }
+
+    fn start(&mut self, _at: Option<TimePoint>) -> Result<(), ezsdr_kernel::module_api::ModuleError> {
+        Ok(())
+    }
+
+    fn stop(
+        &mut self,
+        _mode: ezsdr_kernel::module_api::StopMode,
+    ) -> Result<(), ezsdr_kernel::module_api::ModuleError> {
+        Ok(())
+    }
+
+    fn cleanup(&mut self) {}
+}
+
+#[test]
+fn kc_24_an_admission_refusal_leaves_no_configuration_and_no_action_id() {
+    // Pre-freeze item 3: a coerced value that fails step 11 is refused; the refused
+    // update never reaches the configuration (KC-25), and a refused Action consumes no
+    // id, so the ActionIds an admitted neighbour receives (KC-24's dispatch paragraph)
+    // are the ones the refusals did not take.
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.registry = run_registry_classed();
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(KindWrongProvider::new(TestProvider::new("radio", 2).stepped())),
+    );
+    let mut run =
+        connect(&profile_one(), assembly, Lease::attached()).expect("valid Session entry");
+    let set = |key_name: &str, value: Value| SessionAction::SetParameter {
+        target: support::target("radio"),
+        key: Key::parse(key_name).unwrap(),
+        value,
+    };
+
+    let refused = run
+        .submit(set("test.gain", Value::num(3.0).unwrap()), None)
+        .unwrap();
+    assert!(
+        matches!(refused.outcome, Outcome::Rejected { ref violations }
+            if violations.iter().any(|v| v.check == ns("ezsdr.value")
+                && v.key == Some(Key::parse("test.gain").unwrap())
+                && v.requested == Some(Value::num(3.0).unwrap())
+                && v.reason.contains("SB-2"))),
+        "step 11 refusals name the key and transcribe the request: {refused:?}"
+    );
+    assert_eq!(refused.seq, 0, "a refused Action is still logged (RS-15)");
+
+    // A key whose declaration fixes it — `test.count`'s `KeyDecl` states no class — is
+    // step 5's declaration gap, refused at admission too and consuming no ActionId.
+    let fixed = run.submit(set("test.count", Value::from(1)), None).unwrap();
+    assert!(
+        matches!(fixed.outcome, Outcome::Rejected { ref violations }
+            if violations.iter().any(|v| v.check == ns("ezsdr.update_class")
+                && v.key == Some(Key::parse("test.count").unwrap())
+                && v.reason.contains("declares no update class"))),
+        "step 5 refuses a fixed declaration: {fixed:?}"
+    );
+    assert_eq!(fixed.seq, 1);
+
+    // A value of the wrong kind for its declaration is step 6, before the Provider's
+    // `coerce`: a `Bool` into `test.gain`'s `Num` is refused as `ezsdr.value` with the
+    // declaration's own words, not as whatever a coercion would have made of it.
+    let wrong_kind = run
+        .submit(set("test.gain", Value::from(true)), None)
+        .unwrap();
+    assert!(
+        matches!(wrong_kind.outcome, Outcome::Rejected { ref violations }
+            if violations.iter().any(|v| v.check == ns("ezsdr.value")
+                && v.key == Some(Key::parse("test.gain").unwrap())
+                && v.reason.contains("wanted Num")
+                && v.reason.contains("found Bool"))),
+        "step 6 checks the requested value against its KeyDecl: {wrong_kind:?}"
+    );
+    assert_eq!(wrong_kind.seq, 2);
+
+    // A valid neighbour is admitted, and its ActionId is 1: the refusals before it
+    // consumed none.
+    let admitted = run
+        .submit(set("test.flag", Value::from(true)), None)
+        .unwrap();
+    assert!(
+        matches!(admitted.outcome, Outcome::Admitted { ref dispatched, .. }
+            if dispatched == &[ezsdr_kernel::event::ActionId(1)]),
+        "the refusals consumed no ActionId: {admitted:?}"
+    );
+    assert_eq!(
+        run.effective()[&Ident::parse("radio").unwrap()]
+            .get(&Key::parse("test.flag").unwrap()),
+        Some(&Value::from(true)),
+        "the admitted update is recorded (KC-25)"
+    );
+
+    // And the refused key once more: the configuration holds no value for it, so the
+    // refusal did not write one on its way out.
+    let refused_again = run
+        .submit(set("test.gain", Value::num(3.0).unwrap()), None)
+        .unwrap();
+    assert!(matches!(refused_again.outcome, Outcome::Rejected { .. }), "{refused_again:?}");
+    assert_eq!(
+        run.effective()[&Ident::parse("radio").unwrap()]
+            .get(&Key::parse("test.gain").unwrap()),
+        None,
+        "KC-25: the refused update is not applied"
+    );
+    let manifest = run.finish();
+    assert_eq!(manifest.action_log.len(), 5);
+    assert!(manifest.termination.cleanup_failures.is_empty());
+}
+
+#[test]
+fn kc_24_a_update_is_refused_by_the_same_check_at_a_session_and_at_arm() {
+    // Pre-freeze item 3: the same invalid update is refused by the same KC-24 check
+    // whatever its origin. KC-28's front matter and KC-17's schedule resolution stand
+    // outside the order, so the Session reports a `Rejected` entry and the schedule
+    // reports `Failed { arm }` — but the refusal itself, the key it names and the
+    // value it transcribes are one rule's.
+    let set = |key_name: &str, value: Value| SessionAction::SetParameter {
+        target: support::target("radio"),
+        key: Key::parse(key_name).unwrap(),
+        value,
+    };
+    let submitted = {
+        let mut assembly = rig(Pacing::FreeRunning).assembly;
+        assembly.registry = run_registry_classed();
+        assembly.providers.insert(
+            Ident::parse("radio").unwrap(),
+            Box::new(KindWrongProvider::new(TestProvider::new("radio", 2).stepped())),
+        );
+        let mut run =
+            connect(&profile_one(), assembly, Lease::attached()).expect("valid Session entry");
+        // A valid value first, so the refusal below has a configuration to leave
+        // alone rather than an absent key to agree with (KC-25).
+        let good = run.submit(set("test.flag", Value::from(true)), None).unwrap();
+        assert!(matches!(good.outcome, Outcome::Admitted { .. }), "{good:?}");
+        let entry = run
+            .submit(set("test.gain", Value::num(3.0).unwrap()), None)
+            .unwrap();
+        assert_eq!(entry.seq, 1);
+        // The same rule through a Vocabulary verb: `capture` sets `test.capture`, whose
+        // declaration the classed fixture states (`Bool`, `BlockBoundary`), and the
+        // Provider's coercion moves it outside that declaration's kind. The verb states
+        // no class of its own (RS-14, item 3).
+        let verb = run
+            .submit(
+                SessionAction::Vocabulary {
+                    ns: ns("test"),
+                    verb: Ident::parse("capture").unwrap(),
+                    target: support::target("radio"),
+                    at: None,
+                    params: [(Key::parse("test.capture").unwrap(), Value::from(true))]
+                        .into_iter()
+                        .collect(),
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(verb.seq, 2);
+        assert!(
+            matches!(verb.outcome, Outcome::Rejected { ref violations }
+                if violations.iter().any(|v| v.check == ns("ezsdr.value")
+                    && v.key == Some(Key::parse("test.capture").unwrap())
+                    && v.reason.contains("SB-2"))),
+            "the same check refuses a Vocabulary verb's update: {verb:?}"
+        );
+        assert_eq!(
+            run.effective()[&Ident::parse("radio").unwrap()]
+                .get(&Key::parse("test.gain").unwrap()),
+            None,
+            "the refused update did not write the configuration (KC-25)"
+        );
+        let _ = run.finish();
+        match entry.outcome {
+            Outcome::Rejected { violations } => violations,
+            other => panic!("a coerced value outside its declaration is refused: {other:?}"),
+        }
+    };
+
+    let mut spec = spec_one();
+    spec["schedule"] = serde_json::json!([{
+        "at": { "clock": "radio", "offset_ticks": 0 },
+        "action": {
+            "kind": "update_parameter",
+            "target": serde_json::to_value(support::target("radio")).unwrap(),
+            "key": "test.gain",
+            "value": 3.0
+        }
+    }]);
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.registry = run_registry_classed();
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(
+            KindWrongProvider::new(TestProvider::new("radio", 2).stepped()).declaring("radio"),
+        ),
+    );
+    let run = start_spec_run(&spec, &profile_one(), assembly).expect("entry creates a Run");
+    assert_eq!(
+        run.effective()[&Ident::parse("radio").unwrap()]
+            .get(&Key::parse("test.gain").unwrap()),
+        None,
+        "a refused scheduled update is not recorded (KC-25)"
+    );
+    let reason = failure(&run.finish()).to_owned();
+    assert!(reason.starts_with("KC-17: entry 0"), "{reason}");
+    assert!(reason.contains("ezsdr.value"), "{reason}");
+    assert!(reason.contains("SB-2"), "{reason}");
+
+    let submitted = &submitted[0];
+    assert_eq!(submitted.check, ns("ezsdr.value"), "{submitted:?}");
+    assert_eq!(submitted.key, Some(Key::parse("test.gain").unwrap()));
+    assert_eq!(submitted.requested, Some(Value::num(3.0).unwrap()));
+    assert!(submitted.reason.contains("SB-2"), "{submitted:?}");
+}
+
+#[test]
 fn kc_23_a_target_reaches_the_instance_of_its_role() {
     let resource = |name: &str| Target::Resource { resource: Ident::parse(name).unwrap(), path: String::new() };
     let output = |name: &str| Target::Output { output: Ident::parse(name).unwrap() };
@@ -4710,7 +5332,11 @@ fn sb_09a_module_action_rejects_a_non_ascii_map_key_before_dispatch() {
                 requested_at: None, late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
                 metadata: BTreeMap::from([(key, value.clone())]) },
         ];
-        for action in actions {
+        for (action, position) in actions.into_iter().zip([
+            "test.gain", // the update's own key
+            "params",    // a Command's payload has no key of its own
+            "metadata",  // nor has a TxBurst's
+        ]) {
             let (spec, profile) = executor_docs();
             let probe = Probe::new();
             let mut assembly = rig(Pacing::FreeRunning).assembly;
@@ -4719,8 +5345,22 @@ fn sb_09a_module_action_rejects_a_non_ascii_map_key_before_dispatch() {
             assembly.executors.insert(Ident::parse("exec").unwrap(),
                 Box::new(ProbeExecutor::new("x", &probe).submitting(action)));
             let run = start_spec_run(&spec, &profile, assembly).unwrap();
-            assert!(probe.lines().iter().any(|line| line.starts_with("x:submit:err:ezsdr.value:")),
-                "{value:?}: {:?}", probe.lines());
+            // KC-24 step 4, item 3's P1-4: the refusal names the position and the
+            // violation, and transcribes neither the offending map key nor any other
+            // payload text — the log and the sealed Manifest hold this reason.
+            let refusal = probe
+                .lines()
+                .into_iter()
+                .find(|line| line.starts_with("x:submit:err:ezsdr.value:"))
+                .unwrap_or_else(|| panic!("{value:?}: no ASCII refusal: {:?}", probe.lines()));
+            assert!(
+                refusal.contains("SB-9a: a map key under")
+                    && refusal.contains(position)
+                    && refusal.contains("is not ASCII"),
+                "{position}: {refusal}"
+            );
+            assert!(!refusal.contains('日') && !refusal.contains('本') && !refusal.contains('語'),
+                "the offending key is not transcribed: {refusal}");
             assert!(!probe.lines().iter().any(|line| line.starts_with("p:action:")));
             assert!(!run.effective()[&Ident::parse("radio").unwrap()].contains_key(&Key::parse("test.gain").unwrap()));
             let manifest = run.finish();

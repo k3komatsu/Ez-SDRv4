@@ -907,7 +907,7 @@ fn kg_04_every_action_of_one_call_is_finished() {
     let radio = serde_json::to_value(support::target("radio")).unwrap();
     let entry = |value: f64| serde_json::json!({
         "at": { "clock": "radio", "offset_ticks": 0 },
-        "action": { "kind": "update_parameter", "target": radio, "key": "test.gain", "value": value, "class": "hardware_timed" }
+        "action": { "kind": "update_parameter", "target": radio, "key": "test.gain", "value": value, }
     });
     spec["schedule"] = serde_json::json!([entry(1.0), entry(2.0)]);
     let assembly = provider(

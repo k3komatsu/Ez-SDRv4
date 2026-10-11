@@ -63,9 +63,10 @@ pub fn vocabulary() -> VocabularyDescriptor {
         event_kinds: event_kinds(),
         verbs: vec![VerbDecl {
             verb: Ident::parse("capture").expect("a valid Session verb"),
+            // RS-14, RS-52 (pre-freeze item 3): the rule names the key only; the
+            // update class comes from that key's own declaration at admission.
             compiles_to: CompileRule::UpdateParameter {
                 key: Key::parse(CAPTURE_SAMPLES).expect("a valid Sink key"),
-                class: UpdateClass::BlockBoundary,
             },
         }],
         checks: Vec::new(),

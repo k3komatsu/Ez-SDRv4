@@ -1083,7 +1083,7 @@ fn ur_22_repeat_is_continuous_across_the_wrap() {
         spec["schedule"].as_array_mut().unwrap().push(json!({
             "at": { "clock": "radio", "offset_ticks": 1_000 },
             "action": { "kind": "update_parameter", "target": serde_json::to_value(output("rec")).unwrap(),
-                        "key": "sink.capture_samples", "value": 4_000, "class": "block_boundary" }
+                        "key": "sink.capture_samples", "value": 4_000 }
         }));
         spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(waveform.hash.clone(), bytes)]))
     });
@@ -1308,7 +1308,7 @@ fn ur_24_a_released_command_is_not_recalled_by_stop() {
     let mut spec = receive_spec(1, 1e6, 1e9, None);
     spec["schedule"] = json!([{
         "at": { "clock": "radio", "offset_ticks": 20_000 },
-        "action": { "kind": "update_parameter", "target": radio, "key": "radio.rx.frequency_hz", "value": 2.3e9, "class": "hardware_timed" }
+        "action": { "kind": "update_parameter", "target": radio, "key": "radio.rx.frequency_hz", "value": 2.3e9 }
     }, {
         "at": { "clock": "radio", "offset_ticks": 19_500 },
         "action": { "kind": "stop", "target": radio }
@@ -1335,7 +1335,7 @@ fn ur_24_stop_cancels_held_commands() {
     let update = |offset: i64, value: f64| json!({
         "at": { "clock": "radio", "offset_ticks": offset },
         "action": { "kind": "update_parameter", "target": serde_json::to_value(resource("radio")).unwrap(),
-                    "key": "radio.rx.frequency_hz", "value": value, "class": "hardware_timed" }
+                    "key": "radio.rx.frequency_hz", "value": value }
     });
     spec["schedule"] = json!([update(1_000_000, 2.3e9), update(10_000_000_000, 2.2e9), {
         "at": { "clock": "radio", "offset_ticks": 10_000 },
@@ -2608,7 +2608,7 @@ fn ur_23_two_bursts_back_to_back_loop_back_whole() {
         { "at": { "clock": "radio", "offset_ticks": 10_000 }, "action": { "kind": "tx_burst", "target": target, "waveform": a, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } },
         { "at": { "clock": "radio", "offset_ticks": 11_000 }, "action": { "kind": "tx_burst", "target": target, "waveform": b, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } },
         { "at": { "clock": "radio", "offset_ticks": 10_000 }, "action": { "kind": "update_parameter", "target": serde_json::to_value(output("rec")).unwrap(),
-                    "key": "sink.capture_samples", "value": 1_500, "class": "block_boundary" } }
+                    "key": "sink.capture_samples", "value": 1_500 } }
     ]);
     let inputs = BTreeMap::from([(a.hash.clone(), one), (b.hash.clone(), two)]);
     let manifest = captured(spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), inputs));

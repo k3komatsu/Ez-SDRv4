@@ -970,7 +970,7 @@ impl RunHandle {
         true
     }
 
-    fn resolve_schedule(&mut self) -> Option<Vec<(usize, Inst, Ident, Action)>> {
+    fn resolve_schedule(&mut self) -> Option<Vec<(usize, Inst, Ident, crate::event::PendingAction)>> {
         let t0 = self
             .t0
             .expect("T0 calculated after arm")
@@ -1073,7 +1073,10 @@ impl RunHandle {
         for (instant, index, template, rewritten) in resolved {
             let timed = template.is_timed();
             let deadline = AbsoluteDeadline::new(TimePoint::new(self.shared.primary, instant));
-            let action = template.resolve(deadline);
+            // KC-17, RS-49a: a timed template resolves to its Action, except a
+            // parameter change, which reaches admission as a class-pending request
+            // and gets its class there (KC-24 step 5; pre-freeze item 3).
+            let input = crate::event::resolve_template(template, deadline);
             if timed {
                 let (instance, fragment) = match rewritten {
                     Some((_, instance, fragment)) => (instance, fragment),
@@ -1085,7 +1088,10 @@ impl RunHandle {
                         return None;
                     }
                 };
-                if let Action::TxBurst { late_policy, .. } = &action {
+                if let crate::event::PendingAction::Action(Action::TxBurst {
+                    late_policy, ..
+                }) = &input
+                {
                     if *late_policy == crate::stream::LatePolicy::RejectAtPlan {
                         if let Inst::Provider(provider) = instance {
                             let lead = self.shared.providers[provider]
@@ -1114,8 +1120,13 @@ impl RunHandle {
                         }
                     }
                 }
-                batch.push((index, instance, fragment, action));
+                batch.push((index, instance, fragment, input));
             } else {
+                // The untimed template is `Stop`, whose Action the agenda holds and
+                // admits when the loop reaches it (KC-20).
+                let crate::event::PendingAction::Action(action) = input else {
+                    unreachable!("an untimed template resolves to an Action");
+                };
                 self.agenda.push((instant, index, action));
                 match self.shared.schedule(
                     TimePoint::new(self.shared.primary, instant),
@@ -1141,14 +1152,14 @@ impl RunHandle {
 
     fn admit_schedule(
         &mut self,
-        batch: Vec<(usize, Inst, Ident, Action)>,
+        batch: Vec<(usize, Inst, Ident, crate::event::PendingAction)>,
     ) -> Option<Vec<super::admission::AdmittedAction>> {
         let mut configuration = lock(&self.shared.configuration).clone();
         let mut admitted = Vec::with_capacity(batch.len());
-        for (index, _instance, _fragment, action) in batch {
+        for (index, _instance, _fragment, input) in batch {
             match super::admission::admit_with(
                 &self.shared,
-                action,
+                input,
                 super::state::Origin::Schedule,
                 &[],
                 &configuration,
@@ -1363,13 +1374,7 @@ pub(super) fn submit(
         Ok(earliest) => earliest,
         Err(violation) => return rejected(run, now, action, vec![violation]),
     };
-    let mut compiled = match crate::session::compile(
-        &action,
-        &run.shared.ctx.registry,
-        &run.shared.ctx.spec,
-        earliest,
-        waveform,
-    ) {
+    let mut compiled = match crate::session::compile(&action, &run.shared.ctx.registry, earliest, waveform) {
         Ok(compiled) => compiled,
         Err(violations) => return rejected(run, now, action, violations),
     };
@@ -1434,11 +1439,11 @@ pub(super) fn submit(
     let admission_lock = run.shared.clone();
     let admission_guard = lock(&admission_lock.admission);
     let mut configuration = lock(&run.shared.configuration).clone();
-    let mut admitted = Vec::with_capacity(compiled.actions.len());
+    let mut admitted = Vec::with_capacity(compiled.items.len());
     let mut violations = Vec::new();
     let mut all_coercions = compiled.coercions.clone();
     let mut all_warnings = Vec::new();
-    for (index, action) in compiled.actions.into_iter().enumerate() {
+    for (index, item) in compiled.items.into_iter().enumerate() {
         let incoming = if index == 0 {
             compiled.coercions.as_slice()
         } else {
@@ -1446,7 +1451,7 @@ pub(super) fn submit(
         };
         match super::admission::admit_with(
             &run.shared,
-            action,
+            item,
             super::state::Origin::Session,
             incoming,
             &configuration,

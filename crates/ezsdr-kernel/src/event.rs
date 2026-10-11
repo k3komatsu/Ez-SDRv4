@@ -765,13 +765,16 @@ impl Action {
     }
 }
 
-/// An Action as a Spec schedules it: the Action without its time field.
+/// An Action as a Spec schedules it: the Action without its time field, and without
+/// a class for an `UpdateParameter` (RS-49a, RS-52).
 ///
 /// A Spec cannot name a `ClockDomainId`, because domains are allocated at `prepare`
 /// (SB-16, TM-13a), and every timed Action names one through its
 /// `AbsoluteDeadline`. `arm` resolves the entry's `SpecTime` and substitutes it.
-/// Without the split, `ExperimentSpec.schedule` could hold no timed Action at all,
-/// which is the one thing it exists for.
+/// A parameter change's class is not a time and is not stated here: the target's
+/// own declaration holds it, and admission reads it there (KC-24 step 5; pre-freeze
+/// item 3). Without the split, `ExperimentSpec.schedule` could hold no timed Action
+/// at all, which is the one thing it exists for.
 ///
 /// Rule: RS-49a.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -801,7 +804,9 @@ pub enum ActionTemplate {
     },
     /// The `update_parameter` Action without `at`; `arm` substitutes the resolved
     /// deadline, so a scheduled parameter change takes effect at the instant the
-    /// Spec named (RS-49a).
+    /// Spec named (RS-49a). It states no class: the parameter's declared update
+    /// class is read at admission, from the target's own declaration (KC-24 step 5,
+    /// RS-52; pre-freeze item 3).
     UpdateParameter {
         /// Whose parameter.
         target: Target,
@@ -809,8 +814,6 @@ pub enum ActionTemplate {
         key: Key,
         /// Its new value.
         value: Value,
-        /// The declared update class.
-        class: UpdateClass,
     },
     /// The `command` Action without `at` (RS-49a).
     Command {
@@ -830,30 +833,6 @@ pub enum ActionTemplate {
 }
 
 impl ActionTemplate {
-    /// Substitutes the deadline `arm` resolved, producing the Action (RS-49a, SB-43).
-    pub fn resolve(self, at: AbsoluteDeadline) -> Action {
-        match self {
-            ActionTemplate::TxBurst { target, waveform, repeat, late_policy, metadata,
-            } => Action::TxBurst {
-                    target,
-                    waveform,
-                    repeat,
-                    at,
-                    requested_at: None,
-                    late_policy,
-                    metadata,
-                },
-            ActionTemplate::SetTimer { target, token } => Action::SetTimer { target, at, token },
-            ActionTemplate::UpdateParameter { target, key, value, class,
-            } => Action::UpdateParameter { target, key, value, class, at: Some(at),
-            },
-            ActionTemplate::Command { target, verb, params,
-            } => Action::Command { target, verb, params, at: Some(at),
-            },
-            ActionTemplate::Stop { target } => Action::Stop { target },
-        }
-    }
-
     /// What a scheduled Action addresses, which SB-16 requires to be declared by
     /// the Spec itself in its role (RS-49a, SB-16).
     pub fn target(&self) -> Option<&Target> {
@@ -875,5 +854,185 @@ impl ActionTemplate {
                 | ActionTemplate::UpdateParameter { .. }
                 | ActionTemplate::Command { .. }
         )
+    }
+}
+
+/// A parameter change whose update class the Spec's declaration has not been read
+/// for yet: the internal form `session::compile` and the timed schedule hand to
+/// admission, which fills step 5's class from it and turns it into a finished
+/// Action (KC-24 step 5, KC-17, KC-28 step 3). Crate-internal, and in no schema:
+/// the Action a Module reads states its class mandatorily (RS-49a, RS-52).
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct PendingUpdate {
+    /// Whose parameter (SB-2).
+    pub(crate) target: Target,
+    /// Which parameter (SB-2).
+    pub(crate) key: Key,
+    /// Its new value (SB-4).
+    pub(crate) value: Value,
+    /// When, once `arm` resolved the Spec's time; `None` for a bare Session
+    /// `SetParameter`, which carries no time (RS-19, RS-49).
+    pub(crate) at: Option<AbsoluteDeadline>,
+}
+
+/// What one kernel input is at admission's door: a finished Action, or a
+/// class-pending parameter change (KC-24 step 5). The one internal form
+/// `session::compile`, `resolve_template` and admission share (KC-28 step 3,
+/// KC-17; pre-freeze item 3). Crate-internal: no document names it and no schema
+/// carries it.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) enum PendingAction {
+    /// A finished Action. Timed when `at` is present; a `Stop` never is (RS-49a).
+    Action(Action),
+    /// A class-pending parameter change, which step 5 completes.
+    Update(PendingUpdate),
+}
+
+impl PendingAction {
+    /// What admission resolves to a target in its own role (KC-23): the
+    /// `ActionTemplate`'s rule for a finished Action, and the request's own target.
+    pub(crate) fn target(&self) -> Option<&Target> {
+        match self {
+            PendingAction::Action(action) => action.target(),
+            PendingAction::Update(pending) => Some(&pending.target),
+        }
+    }
+}
+
+/// Substitutes the deadline `arm` resolved, producing what admission takes
+/// (RS-49a, SB-43). Private: the class-pending form never leaves the Kernel, and
+/// `ActionTemplate` is the only public spelling of a scheduled Action (RS-49a).
+pub(crate) fn resolve_template(template: ActionTemplate, at: AbsoluteDeadline) -> PendingAction {
+    match template {
+        ActionTemplate::TxBurst {
+            target,
+            waveform,
+            repeat,
+            late_policy,
+            metadata,
+        } => PendingAction::Action(Action::TxBurst {
+            target,
+            waveform,
+            repeat,
+            at,
+            requested_at: None,
+            late_policy,
+            metadata,
+        }),
+        ActionTemplate::SetTimer { target, token } => {
+            PendingAction::Action(Action::SetTimer { target, at, token })
+        }
+        // RS-49a, KC-17: a scheduled parameter change is timed, and its class comes
+        // from the Spec's declaration at admission; `Action::UpdateParameter.class`
+        // has no value to state here (pre-freeze item 3).
+        ActionTemplate::UpdateParameter { target, key, value } => {
+            PendingAction::Update(PendingUpdate {
+                target,
+                key,
+                value,
+                at: Some(at),
+            })
+        }
+        ActionTemplate::Command {
+            target,
+            verb,
+            params,
+        } => PendingAction::Action(Action::Command {
+            target,
+            verb,
+            params,
+            at: Some(at),
+        }),
+        ActionTemplate::Stop { target } => PendingAction::Action(Action::Stop { target }),
+    }
+}
+
+// ---------------------------------------------------------------- tests
+
+/// Unit tests of the template's resolution, which `pre-freeze item 3` moved in-crate:
+/// `ActionTemplate::resolve` is no longer public, so an integration test can only read
+/// the template's document shape (KC-17, RS-49a).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stream::LatePolicy;
+
+    fn t(ticks: i64) -> TimePoint {
+        TimePoint::new(crate::id::ClockDomainId::HOST_MONOTONIC, ticks)
+    }
+
+    fn target() -> Target {
+        Target::Resource {
+            resource: Ident::parse("radio").expect("a well-formed Ident"),
+            path: String::new(),
+        }
+    }
+
+    #[test]
+    fn rs_49a_a_scheduled_update_resolves_to_a_class_pending_request() {
+        // RS-49a, RS-52 (item 3): a scheduled `UpdateParameter` states no class — the
+        // template has no field for one — and `arm` resolves it to the class-pending
+        // request that admission completes. `resolve_template` therefore cannot
+        // produce a finished `Action::UpdateParameter` for it.
+        let template = ActionTemplate::UpdateParameter {
+            target: target(),
+            key: Key::parse("test.gain").expect("a well-formed Key"),
+            value: Value::from(true),
+        };
+        assert!(template.is_timed());
+        let deadline = AbsoluteDeadline::new(t(555));
+        match resolve_template(template, deadline) {
+            PendingAction::Update(pending) => {
+                assert_eq!(pending.target, target());
+                assert_eq!(pending.value, Value::from(true));
+                assert_eq!(pending.at, Some(deadline));
+            }
+            PendingAction::Action(other) => {
+                panic!("an UpdateParameter resolves to a class-pending request: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn rs_49a_a_timed_template_resolves_with_its_deadline() {
+        let deadline = AbsoluteDeadline::new(t(555));
+        let template = ActionTemplate::TxBurst {
+            target: target(),
+            waveform: ArtifactRef {
+                id: Ident::parse("wave").expect("a well-formed Ident"),
+                kind: crate::spec::Namespace::parse("test.waveform").expect("a Namespace"),
+                uri: "memory://wave".to_owned(),
+                hash: crate::hash::ContentHash::of_bytes(b"wave"),
+                size_bytes: 4,
+                partial: false,
+                marks: Vec::new(),
+                continuity: Vec::new(),
+            },
+            repeat: false,
+            late_policy: LatePolicy::SendAsapAndFlag,
+            metadata: BTreeMap::new(),
+        };
+        match resolve_template(template, deadline) {
+            PendingAction::Action(Action::TxBurst {
+                at,
+                requested_at,
+                repeat,
+                ..
+            }) => {
+                assert_eq!(at, deadline, "the resolved deadline is substituted");
+                assert_eq!(
+                    requested_at, None,
+                    "a Spec's schedule states the instant; nothing is coerced"
+                );
+                assert!(!repeat, "every other field survives the substitution");
+            }
+            other => panic!("a TxBurst template resolves to a TxBurst: {other:?}"),
+        }
+        let untimed = ActionTemplate::Stop { target: None };
+        assert!(!untimed.is_timed());
+        match resolve_template(untimed, deadline) {
+            PendingAction::Action(Action::Stop { target: None }) => {}
+            other => panic!("an untimed Stop keeps its shape: {other:?}"),
+        }
     }
 }

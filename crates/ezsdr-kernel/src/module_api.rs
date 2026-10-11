@@ -831,11 +831,11 @@ pub struct VerbDecl {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CompileRule {
     /// To an `UpdateParameter` on the named key, as `sink.capture` does (RS-14).
+    /// It states no class: the parameter's declared update class comes from its
+    /// own declaration at admission (KC-24 step 5, RS-52; pre-freeze item 3).
     UpdateParameter {
         /// Which parameter to set.
         key: Key,
-        /// Under which update class (RS-52).
-        class: UpdateClass,
     },
     /// To a `TxBurst`, as `radio.start_repeat` does (RS-14, SC-26).
     TxBurst {

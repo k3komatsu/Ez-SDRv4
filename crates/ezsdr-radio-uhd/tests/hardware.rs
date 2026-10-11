@@ -867,7 +867,7 @@ fn hw_b6_delay_by_rate() {
         spec["schedule"].as_array_mut().unwrap().push(serde_json::json!({
             "at": { "clock": "radio", "offset_ticks": 10_000 },
             "action": { "kind": "update_parameter", "target": serde_json::to_value(output("rec")).unwrap(),
-                        "key": "sink.capture_samples", "value": 5_000, "class": "block_boundary" }
+                        "key": "sink.capture_samples", "value": 5_000 }
         }));
         let inputs = std::collections::BTreeMap::from([(waveform.hash.clone(), bytes.clone())]);
         let doc = bench_profile(&*device, &dir, serde_json::json!({}), bench_envelope(&*device), false);

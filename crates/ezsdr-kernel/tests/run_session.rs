@@ -8,13 +8,13 @@ use std::sync::Arc;
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, BindingProfile, CheckStage, Placements};
 use ezsdr_kernel::event::{
     Action, ActionTemplate, CounterRow, Event, EventCollector, EventKind, EventSink, EventSource,
-    Severity, Target,
+    Severity,
 };
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, RunId};
 use ezsdr_kernel::manifest::{
     ArtifactRef, BindingSection, ClocksSection, EventsSection, Manifest, PrepareSection, RunKind,
-    RunSection, SpecSection, TerminationSection, ingest_input, mark_open_artifacts,
+    RunSection, SpecSection, TerminationSection, mark_open_artifacts,
 };
 use ezsdr_kernel::module_api::{
     CoercionFidelity, EnvelopeFidelity, ExecutionClass, Factories, Fidelity, ModuleRegistry,
@@ -25,9 +25,7 @@ use ezsdr_kernel::run::{
     CleanupMode, CleanupStep, Lease, LeaseMode, RunError, RunState, RunStateMachine, Stage,
     StopCause, Termination, run_cleanup,
 };
-use ezsdr_kernel::session::{
-    Admitter, Compiled, ControlOp, Outcome, SessionAction, SessionLog, compile, implicit_spec,
-};
+use ezsdr_kernel::session::{Admitter, Outcome, SessionAction, SessionLog, implicit_spec};
 use ezsdr_kernel::spec::{ExperimentSpec, Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::{BlockFlags, ContinuityBuilder, DropCarry, LatePolicy};
 use ezsdr_kernel::time::{AbsoluteDeadline, TimePoint};
@@ -1101,292 +1099,10 @@ fn rs_12_session_implicit_spec_hashed() {
     assert!(hash.as_str().starts_with("sha256:"));
 }
 
-#[test]
-fn rs_12_bare_connect_then_capture_succeeds() {
-    let reg = registry();
-    let profile = session_profile();
-    let provider = TestProvider::new("radio", 2);
-    let spec =
-        implicit_spec(&profile, &reg, &bound(&provider), &sinks(&test_sink())).expect("builds");
-    assert_eq!(
-        spec.outputs.len(),
-        1,
-        "the recorder is a bound Sink, carried as an output"
-    );
-    // The output carries the link that feeds it, which is what makes the capture
-    // actually record something (SC-19, finding N6).
-    assert_eq!(spec.outputs[0].feed.port.port.as_str(), "rx");
 
-    let action = SessionAction::Vocabulary {
-        ns: ns("test"),
-        verb: id("capture"),
-        target: support::target("radio"),
-        at: Some(t(100)),
-        params: [(key("test.capture"), Value::from(true))]
-            .into_iter()
-            .collect(),
-    };
-    let compiled =
-        compile(&action, &reg, &ExperimentSpec::default(), t(0), None).expect("compiles");
-    assert_eq!(compiled.actions.len(), 1);
-    assert!(matches!(
-        compiled.actions[0],
-        Action::UpdateParameter { .. }
-    ));
-}
 
-#[test]
-fn rs_14_capture_compiles_to_update_parameter() {
-    let reg = registry();
-    let recorder = Target::Output { output: id("recorder") };
-    let action = SessionAction::Vocabulary {
-        ns: ns("test"),
-        verb: id("capture"),
-        target: recorder.clone(),
-        at: Some(t(100)),
-        params: [(key("test.capture"), Value::from(true))]
-            .into_iter()
-            .collect(),
-    };
-    let compiled =
-        compile(&action, &reg, &ExperimentSpec::default(), t(0), None).expect("compiles");
-    match &compiled.actions[0] {
-        Action::UpdateParameter {
-            target,
-            key: k,
-            class,
-            at,
-            ..
-        } => {
-            // RS-14 (#54): the update goes to the target the verb names, a recorder's
-            // output; the Kernel chooses no recorder of its own.
-            assert_eq!(*target, recorder);
-            assert_eq!(*k, key("test.capture"));
-            assert_eq!(*class, UpdateClass::BlockBoundary);
-            // RS-14, RS-19: a capture compiles to a *timed* UpdateParameter. This
-            // is what Vision §61's `capture(n, at:)` rests on; the instant used to
-            // be computed and then dropped (finding OQ2).
-            assert_eq!(*at, Some(AbsoluteDeadline::new(t(100))));
-        }
-        other => panic!("expected an UpdateParameter, got {other:?}"),
-    }
-    // A verb naming a resource compiles to that resource: no implicit recorder.
-    let named_radio = SessionAction::Vocabulary {
-        ns: ns("test"),
-        verb: id("capture"),
-        target: Target::Resource { resource: id("radio"), path: String::new() },
-        at: Some(t(100)),
-        params: [(key("test.capture"), Value::from(true))].into_iter().collect(),
-    };
-    let compiled = compile(&named_radio, &reg, &ExperimentSpec::default(), t(0), None).expect("compiles");
-    assert!(matches!(&compiled.actions[0], Action::UpdateParameter { target: Target::Resource { .. }, .. }));
-}
 
-#[test]
-fn rs_13a_unknown_vocabulary_verb_rejected() {
-    let reg = registry();
-    let action = SessionAction::Vocabulary {
-        ns: ns("radio"),
-        verb: id("start_repeat"),
-        target: support::target("radio"),
-        at: None,
-        params: BTreeMap::new(),
-    };
-    let violations = compile(&action, &reg, &ExperimentSpec::default(), t(0), None)
-        .expect_err("no loaded Vocabulary claims it");
-    assert!(violations[0].reason.contains("radio.start_repeat"));
-}
 
-#[test]
-fn rs_17_provider_parameter_class_comes_from_its_key_decl() {
-    // Vision §3's `sdr.rx.gain = 20` targets a Provider, whose parameters are
-    // Vocabulary keys and never a component's `params`. Before SB-2 carried an
-    // update class there was nowhere for such a key's class to be declared, so the
-    // Easy API's first parameter change was rejected as undeclared (finding D33).
-    let reg = registry();
-    let gain = SessionAction::SetParameter {
-        target: support::target("radio"),
-        key: key("test.gain"),
-        value: Value::num(20.0).unwrap(),
-    };
-    // The class comes from the KeyDecl alone: a `{resource}` target reads no map and
-    // no component declaration (item 3). The runtime refusals are pinned where they
-    // live: KC-24 step 5 through `kc_24_component_update_classes_belong_to_the_target`
-    // and `rs_17_a_component_class_comes_from_its_own_declaration`.
-    let compiled = compile(&gain, &reg, &ExperimentSpec::default(), t(0), None).expect("compiles");
-    assert!(matches!(
-        &compiled.actions[0],
-        Action::UpdateParameter {
-            class: UpdateClass::HardwareTimed,
-            at: None,
-            ..
-        }
-    ));
-
-    // A key whose KeyDecl declares no class is still not changeable during a Run,
-    // so the absent value means "not changeable" and not "any class" (RS-17).
-    let flag = SessionAction::SetParameter {
-        target: support::target("radio"),
-        key: key("test.flag"),
-        value: Value::from(true),
-    };
-    assert!(compile(&flag, &reg, &ExperimentSpec::default(), t(0), None).is_err());
-}
-
-#[test]
-fn rs_17_a_component_class_comes_from_its_own_declaration() {
-    // P1-4 (review): the Session compile path reads `ExperimentSpec::declared_class`,
-    // so a component's own `ParamDecl` is the only source — a fixed (missing class)
-    // or absent declaration is refused even when the key has a Vocabulary `KeyDecl`
-    // with a class (`test.gain` is `hardware_timed`).
-    let reg = registry();
-    let cf32 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
-    let component = |class: Option<UpdateClass>| {
-        let mut c = support::recorder_component(cf32.clone());
-        c.params[0].key = key("test.gain");
-        c.params[0].update_class = class;
-        c.params[0].default = Value::num(0.0).unwrap();
-        c.params[0].schema = serde_json::json!({ "type": "number" });
-        c
-    };
-    let spec_with = |class: Option<UpdateClass>| {
-        let mut spec = ExperimentSpec::default();
-        spec.graph.components.insert(id("proc"), component(class));
-        spec
-    };
-    let action = SessionAction::SetParameter {
-        target: Target::Component {
-            component: id("proc"),
-        },
-        key: key("test.gain"),
-        value: Value::num(3.0).unwrap(),
-    };
-    // The component's declaration is the class, not the Vocabulary's.
-    let compiled = compile(&action, &reg, &spec_with(Some(UpdateClass::Cold)), t(0), None)
-        .expect("the component declares cold");
-    assert!(matches!(
-        &compiled.actions[0],
-        Action::UpdateParameter {
-            class: UpdateClass::Cold,
-            ..
-        }
-    ));
-    // A fixed declaration is refused, and does not fall back to `test.gain`'s
-    // `KeyDecl` (`hardware_timed`), which would admit it.
-    let violations = compile(&action, &reg, &spec_with(None), t(0), None)
-        .expect_err("the component declares it fixed");
-    assert_eq!(violations[0].check, ns("ezsdr.update_class"));
-}
-
-#[test]
-fn rs_19_capture_asap_records_applied_time() {
-    let reg = registry();
-    let action = SessionAction::Vocabulary {
-        ns: ns("test"),
-        verb: id("capture"),
-        target: support::target("radio"),
-        at: None,
-        // RS-14: the value is the action's own; the Kernel supplies no default (D46).
-        params: [(key("test.capture"), Value::from(true))]
-            .into_iter()
-            .collect(),
-    };
-    let compiled = compile(
-        &action,
-        &reg,
-        &ExperimentSpec::default(),
-        t(4_242),
-        None,
-    )
-    .expect("compiles");
-    assert_eq!(compiled.coercions.len(), 1);
-    assert_eq!(
-        compiled.coercions[0].requested,
-        Value::from("asap".to_owned())
-    );
-    assert_eq!(compiled.coercions[0].applied, Value::from(4_242));
-}
-
-#[test]
-fn rs_49_update_parameter_carries_its_instant() {
-    let reg = registry();
-    // The `asap` path: RS-19 resolves `earliest`, records it as a coercion, and the
-    // resolved instant reaches the Action's own `at`.
-    let asap = SessionAction::Vocabulary {
-        ns: ns("test"),
-        verb: id("capture"),
-        target: support::target("radio"),
-        at: None,
-        params: [(key("test.capture"), Value::from(true))]
-            .into_iter()
-            .collect(),
-    };
-    let compiled =
-        compile(&asap, &reg, &ExperimentSpec::default(), t(4_242), None).expect("compiles");
-    assert!(matches!(
-        &compiled.actions[0],
-        Action::UpdateParameter { at: Some(at), .. } if *at == AbsoluteDeadline::new(t(4_242))
-    ));
-
-    // A bare SetParameter has no time field to leave empty, so it compiles to an
-    // Action with none and records no coercion — and is *not* refused, which a
-    // mandatory `at` would have done to Vision §3's `sdr.rx.gain = 20`. `test.gain`
-    // is a Provider key whose `KeyDecl` declares `hardware_timed` (item 3: the class
-    // comes from the target's own declaration).
-    let bare = SessionAction::SetParameter {
-        target: support::target("radio"),
-        key: key("test.gain"),
-        value: Value::num(20.0).unwrap(),
-    };
-    let compiled =
-        compile(&bare, &reg, &ExperimentSpec::default(), t(7), None).expect("compiles");
-    assert!(matches!(
-        &compiled.actions[0],
-        Action::UpdateParameter { at: None, .. }
-    ));
-    assert!(
-        compiled.coercions.is_empty(),
-        "nothing was requested to coerce"
-    );
-
-    // RS-49a: a scheduled parameter change is timed, so `arm` substitutes the
-    // instant the Spec named rather than applying it at `arm`.
-    let template = ActionTemplate::UpdateParameter {
-        target: support::target("radio"),
-        key: key("test.flag"),
-        value: Value::from(true),
-        class: UpdateClass::BlockBoundary,
-    };
-    assert!(template.is_timed());
-    assert!(matches!(
-        template.resolve(AbsoluteDeadline::new(t(555))),
-        Action::UpdateParameter { at: Some(at), .. } if at == AbsoluteDeadline::new(t(555))
-    ));
-}
-
-#[test]
-fn rs_19_vocabulary_action_carries_a_time() {
-    let reg = registry();
-    let timed = SessionAction::Vocabulary {
-        ns: ns("test"),
-        verb: id("sweep"),
-        target: support::target("radio"),
-        at: Some(t(900)),
-        params: BTreeMap::new(),
-    };
-    let compiled =
-        compile(&timed, &reg, &ExperimentSpec::default(), t(0), None).expect("compiles");
-    match &compiled.actions[0] {
-        Action::Command { at: Some(at), .. } => {
-            assert_eq!(*at, AbsoluteDeadline::new(t(900)));
-        }
-        other => panic!("expected a timed Command, got {other:?}"),
-    }
-    assert!(
-        compiled.coercions.is_empty(),
-        "an explicit time is not a coercion"
-    );
-}
 
 #[test]
 fn rs_15_log_sequence_is_dense() {
@@ -1426,34 +1142,6 @@ fn rs_20_replay_divergence() {
             field: "binding.hash".to_owned()
         })
     );
-}
-
-#[test]
-fn rs_50_stop_with_and_without_a_target() {
-    let reg = registry();
-    let with = compile(
-        &SessionAction::Stop {
-            target: Some(support::target("radio")),
-        },
-        &reg,
-        &ExperimentSpec::default(),
-        t(0),
-        None,
-    )
-    .expect("compiles");
-    assert!(matches!(with.actions[0], Action::Stop { target: Some(_) }));
-    assert!(with.control.is_none(), "the Run keeps Running");
-
-    let without = compile(
-        &SessionAction::Stop { target: None },
-        &reg,
-        &ExperimentSpec::default(),
-        t(0),
-        None,
-    )
-    .expect("compiles");
-    assert!(without.actions.is_empty());
-    assert_eq!(without.control, Some(ControlOp::StopRun));
 }
 
 #[test]
@@ -1504,23 +1192,6 @@ fn rs_16_rejected_action_not_dispatched() {
     assert!(matches!(log.entries()[0].outcome, Outcome::Rejected { .. }));
 }
 
-#[test]
-fn rs_17_undeclared_update_class_rejected() {
-    // RS-17, RS-52 (item 3): a class comes from the target's own declaration, and
-    // `test.flag`'s `KeyDecl` declares none, so the update is refused. The runtime
-    // carrier is KC-24's step 5, which the coordinator tests drive end to end; the
-    // `Admitter` no longer checks a class at all.
-    let reg = registry();
-    let action = SessionAction::SetParameter {
-        target: support::target("radio"),
-        key: key("test.flag"),
-        value: Value::from(true),
-    };
-    let violations = compile(&action, &reg, &ExperimentSpec::default(), t(0), None)
-        .expect_err("no declared class");
-    assert_eq!(violations[0].check, ns("ezsdr.update_class"));
-    assert!(violations[0].reason.contains("no declared update class"));
-}
 
 #[test]
 fn rs_18_action_before_running_rejected() {
@@ -1548,44 +1219,6 @@ fn rs_18_action_before_running_rejected() {
     run.move_to(RunState::Running {}, None, &clock)
         .expect("forward");
     assert!(run.check_running().is_ok());
-}
-
-#[test]
-fn rs_44a_waveform_ingested_before_admission() {
-    let reg = registry();
-    let bytes: Vec<u8> = (0..64u8).collect();
-    let waveform = ingest_input(id("wave"), ns("test.waveform"), "memory://wave", &bytes);
-    assert_eq!(waveform.size_bytes, 64);
-    assert_eq!(waveform.hash, ContentHash::of_bytes(&bytes));
-
-    let action = SessionAction::Vocabulary {
-        ns: ns("test"),
-        verb: id("start_repeat"),
-        target: support::target("radio"),
-        at: Some(t(10)),
-        params: BTreeMap::new(),
-    };
-    let compiled: Compiled = compile(
-        &action,
-        &reg,
-        &ExperimentSpec::default(),
-        t(0),
-        Some(waveform.clone()),
-    )
-    .expect("compiles with a resolved waveform");
-    match &compiled.actions[0] {
-        Action::TxBurst {
-            waveform: w,
-            repeat,
-            ..
-        } => {
-            assert_eq!(w.hash, waveform.hash);
-            assert!(*repeat);
-        }
-        other => panic!("expected a TxBurst, got {other:?}"),
-    }
-    // An Action whose ArtifactRef resolves to nothing is rejected.
-    assert!(compile(&action, &reg, &ExperimentSpec::default(), t(0), None).is_err());
 }
 
 // ---------------------------------------------------------------- the Kernel Action set
@@ -1649,17 +1282,14 @@ fn rs_48_action_set_is_closed_and_schematised() {
         let back: Action = serde_json::from_value(json).expect("round-trips");
         assert_eq!(back, *a);
     }
-    // A Spec's scheduled Action is a template, with no time field (RS-49a).
+    // A Spec's scheduled Action is a template, with no time field (RS-49a); `arm`
+    // resolves it and no public method does (item 3).
     let template = ActionTemplate::SetTimer {
         target: support::target("radio"),
         token: 7,
     };
     let json = serde_json::to_value(&template).expect("serialises");
     assert!(json.get("at").is_none());
-    assert!(matches!(
-        template.resolve(AbsoluteDeadline::new(t(20))),
-        Action::SetTimer { at, .. } if at == AbsoluteDeadline::new(t(20))
-    ));
 }
 
 // ---------------------------------------------------------------- the Manifest
@@ -1918,38 +1548,6 @@ fn rs_39_a_module_section_with_a_non_ascii_key_is_refused() {
 }
 
 #[test]
-fn rs_13a_a_session_value_with_a_non_ascii_key_is_refused_at_compile() {
-    // A `Value` reaches the sealed Manifest through the action log and an Action's
-    // `params`, neither of which passes a `from_json`, so the check belongs where the
-    // value enters the Kernel (SB-9a, RS-11).
-    let reg = registry();
-    let bad: Value =
-        serde_json::from_value(serde_json::json!({ "\u{3c1}": 1 })).expect("deserialises");
-    let action = SessionAction::SetParameter {
-        target: support::target("radio"),
-        key: key("test.flag"),
-        value: bad.clone(),
-    };
-    let violations = compile(&action, &reg, &ExperimentSpec::default(), t(0), None)
-        .expect_err("refused before it can be logged");
-    assert!(
-        violations[0].reason.contains("non-ASCII"),
-        "{:?}",
-        violations[0]
-    );
-
-    // And through a Vocabulary action's params.
-    let vocab = SessionAction::Vocabulary {
-        ns: ns("test"),
-        verb: id("capture"),
-        target: support::target("radio"),
-        at: Some(t(1)),
-        params: [(key("test.capture"), bad)].into_iter().collect(),
-    };
-    assert!(compile(&vocab, &reg, &ExperimentSpec::default(), t(0), None).is_err());
-}
-
-#[test]
 fn rs_23_a_huge_lease_ttl_does_not_wrap() {
     // `Lease` is a document type (OV-10), so `ttl_ms` is whatever a profile wrote.
     // An unchecked add panicked in debug and, in release, wrapped to a small instant
@@ -2122,109 +1720,11 @@ fn rs_40_capture_across_a_rate_change() {
 }
 
 #[test]
-fn rs_49a_scheduled_action_is_a_template() {
-    // RS-49a: "An Action that a Spec schedules is written as an **ActionTemplate**:
-    // the Action without its time field." A Spec cannot name a `ClockDomainId`,
-    // because domains are allocated at `prepare` (SB-16, TM-13a), and every timed
-    // Action names one through its `AbsoluteDeadline` — so the template carries no
-    // time at all and `arm` substitutes the deadline it resolved from the `SpecTime`.
-    let template = ActionTemplate::TxBurst {
-        target: support::target("radio/tx/0"),
-        waveform: artifact("wave"),
-        repeat: false,
-        late_policy: LatePolicy::SendAsapAndFlag,
-        metadata: BTreeMap::new(),
-    };
-    // The Spec-side shape: a mandatory `SpecTime`, and no domain anywhere in it.
-    let entry = ezsdr_kernel::spec::ScheduleEntry {
-        at: ezsdr_kernel::spec::SpecTime {
-            clock: Ident::parse("radio").expect("id"),
-            offset_ticks: 0,
-        },
-        action: template.clone(),
-    };
-    let written = serde_json::to_value(&entry).expect("serialises");
-    assert!(
-        !written.to_string().contains("domain"),
-        "a Spec names no ClockDomainId: {written}"
-    );
-    assert_eq!(
-        template.target().map(|r| r.to_string()),
-        Some("resource radio/tx/0".to_owned())
-    );
-
-    // And what `arm` does with it: substitute the resolved deadline, producing the
-    // Action. The deadline is the only thing the template was missing.
-    let at = AbsoluteDeadline::new(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 4_000));
-    match entry.action.resolve(at) {
-        Action::TxBurst {
-            at: resolved,
-            requested_at,
-            repeat,
-            ..
-        } => {
-            assert_eq!(resolved, at, "`arm` substitutes the instant it resolved");
-            assert_eq!(
-                requested_at, None,
-                "a Spec's schedule states the instant; nothing is coerced"
-            );
-            assert!(!repeat, "every other field survives the substitution");
-        }
-        other => panic!("a TxBurst template resolves to a TxBurst: {other:?}"),
-    }
-}
-
-#[test]
-fn rs_14_the_kernel_supplies_no_vocabulary_value_or_late_policy() {
-    // RS-14 with OV-21: the Kernel learns no Vocabulary word, and `compile` was
-    // supplying two — the value a `capture` verb sets and the late policy of every
-    // Session-compiled burst. The value is worse than a tier violation: RS-20
-    // reproduces a Run from the logged `SessionAction`, so a value the Kernel
-    // invented is a value the log does not carry (finding D46).
-    let reg = registry();
-    let without = SessionAction::Vocabulary {
-        ns: ns("test"),
-        verb: id("capture"),
-        target: support::target("radio"),
-        at: Some(t(100)),
-        params: BTreeMap::new(),
-    };
-    let violations = compile(&without, &reg, &ExperimentSpec::default(), t(0), None)
-        .expect_err("no value, and the Kernel invents none");
-    assert!(
-        violations
-            .iter()
-            .any(|v| v.reason.contains("RS-14") && v.reason.contains("carries no value")),
-        "{violations:?}"
-    );
-
-    // The late policy is the Vocabulary's declaration, not a constant in `compile`.
-    let burst = SessionAction::Vocabulary {
-        ns: ns("test"),
-        verb: id("start_repeat"),
-        target: support::target("radio"),
-        at: Some(t(100)),
-        params: BTreeMap::new(),
-    };
-    let compiled = compile(
-        &burst,
-        &reg,
-        &ExperimentSpec::default(),
-        t(0),
-        Some(artifact("wave")),
-    )
-    .expect("compiles");
-    match &compiled.actions[0] {
-        Action::TxBurst { late_policy, .. } => {
-            assert_eq!(
-                *late_policy,
-                LatePolicy::SendAsapAndFlag,
-                "what the verb declares"
-            );
-        }
-        other => panic!("expected a TxBurst: {other:?}"),
-    }
-
+fn rs_14_a_reject_at_plan_session_verb_is_refused_at_registration() {
+    // RS-14: the Kernel learns no Vocabulary word, so the late policy is the
+    // Vocabulary's own declaration, not a constant in `compile`
+    // (`rs_14_the_kernel_supplies_no_vocabulary_value_or_late_policy`, in-crate
+    // since pre-freeze item 3).
     // And a Vocabulary declaring `RejectAtPlan` for a Session verb is refused at
     // registration: a Session burst's target is resolved at `compile`, so the verb
     // would name a stage the Action never reaches (SC-27, RS-51).
@@ -2247,71 +1747,3 @@ fn rs_14_the_kernel_supplies_no_vocabulary_value_or_late_policy() {
     assert!(err.message.contains("RS-14"), "{err}");
 }
 
-#[test]
-fn rs_13_every_session_action_compiles_to_its_kernel_form() {
-    // RS-13 names "the compilation table of RS-14 and its tests" as its checker, and
-    // those tests exercised only `SetParameter`, `Vocabulary` and `Stop`. The four
-    // that produce a **control operation** rather than an Action — the half RS-14
-    // states as "`Release`, `Adopt` and `Renew` to Lease operations; `RunChild` to the
-    // creation of a child Run" — had no carrier anywhere in the crate, so the rule's
-    // own annotation named a checker that did not check it (exit-review SPEC-DEFECT).
-    //
-    // Each of these compiles to a control op and to **no** Action: a Lease operation
-    // is the Kernel's own business and nothing is dispatched to a Module for it.
-    let reg = registry();
-    let hash = some_hash("child-spec");
-    // Two different hashes, so the compilation cannot swap the Spec and the profile
-    // (RS-25a, D103).
-    let profile_hash = some_hash("child-profile");
-    let cases: Vec<(SessionAction, ControlOp)> = vec![
-        (SessionAction::Release {}, ControlOp::Release),
-        (
-            SessionAction::Adopt {
-                token: "tok".to_owned(),
-            },
-            ControlOp::Adopt {
-                token: "tok".to_owned(),
-            },
-        ),
-        (SessionAction::Renew {}, ControlOp::Renew),
-        (
-            SessionAction::RunChild {
-                spec_hash: hash.clone(),
-                binding_hash: profile_hash.clone(),
-            },
-            ControlOp::RunChild {
-                spec_hash: hash.clone(),
-                binding_hash: profile_hash,
-            },
-        ),
-        (SessionAction::Stop { target: None }, ControlOp::StopRun),
-    ];
-    for (action, want) in cases {
-        let compiled = compile(&action, &reg, &ExperimentSpec::default(), t(0), None)
-            .unwrap_or_else(|v| panic!("{action:?} compiles: {v:?}"));
-        assert_eq!(compiled.control.as_ref(), Some(&want), "{action:?}");
-        assert!(
-            compiled.actions.is_empty(),
-            "{action:?} dispatches no Action"
-        );
-        assert!(compiled.coercions.is_empty(), "{action:?} coerces nothing");
-    }
-
-    // And the contrast RS-13 draws: `Stop { target }` addresses a resource, so it is
-    // an Action and not a control op.
-    let compiled = compile(
-        &SessionAction::Stop {
-            target: Some(support::target("radio")),
-        },
-        &reg,
-        &ExperimentSpec::default(),
-        t(0),
-        None,
-    )
-    .expect("compiles");
-    assert!(compiled.control.is_none());
-    assert!(matches!(
-        compiled.actions[0],
-        Action::Stop { target: Some(_) }
-    ));
-}

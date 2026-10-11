@@ -13,8 +13,8 @@ use ezsdr_kernel::event::{ActionTemplate, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, DataLinkId, IslandId, MemoryDomainId};
 use ezsdr_kernel::module_api::{
-    AuthorityDescriptor, ComponentPlacement, ExecutorDescriptor, Factories, IslandDecl, ModuleRef,
-    ModuleRegistry, Pacing, Provider, Role, UpdateClass,
+    AuthorityDescriptor, CompileRule, ComponentPlacement, ExecutorDescriptor, Factories, IslandDecl,
+    ModuleRef, ModuleRegistry, Pacing, Provider, Role, UpdateClass,
 };
 use ezsdr_kernel::plan::{
     CompileInputs, PrepareReport, arm_order, coercion_policy,
@@ -27,7 +27,6 @@ use ezsdr_kernel::spec::{
     SubResourceReq, Value, ValueKind,
 };
 use ezsdr_kernel::stream::{BackPressure, LatePolicy};
-use ezsdr_kernel::time::{AbsoluteDeadline, TimePoint};
 use support::{
     FailAt, TestLimitsCheck, TestProvider, TestSink, id, key, mid, mref, ns, rid, some_hash,
     test_provider_descriptor, test_sink_descriptor, test_vocabulary,
@@ -418,6 +417,57 @@ fn sb_09_an_unknown_nested_field_is_refused() {
     assert_eq!(
         serde_json::to_value(ezsdr_kernel::run::Termination::Completed {}).expect("writes"),
         plain
+    );
+}
+
+#[test]
+fn sb_49a_an_old_class_carrying_template_or_rule_is_refused() {
+    // Pre-freeze item 3 (review P2-2, invariant 39): a parameter change states no
+    // class in the template or the rule — the target's declaration is the only source
+    // — so a document that still carries one is refused, never reinterpreted.
+    let template = serde_json::json!({
+        "kind": "update_parameter",
+        "target": { "kind": "resource", "resource": "radio", "path": "" },
+        "key": "test.gain",
+        "value": 1.0,
+        "class": "hardware_timed"
+    });
+    let refused = serde_json::from_value::<ActionTemplate>(template);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("unknown field `class`")),
+        "an old class-carrying template is refused: {refused:?}"
+    );
+    let current = serde_json::json!({
+        "kind": "update_parameter",
+        "target": { "kind": "resource", "resource": "radio", "path": "" },
+        "key": "test.gain",
+        "value": 1.0
+    });
+    assert!(
+        serde_json::from_value::<ActionTemplate>(current).is_ok(),
+        "the class-less template parses"
+    );
+
+    let refused = serde_json::from_value::<CompileRule>(serde_json::json!({
+        "kind": "update_parameter",
+        "key": "test.capture",
+        "class": "block_boundary"
+    }));
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("unknown field `class`")),
+        "an old class-carrying rule is refused: {refused:?}"
+    );
+    assert!(
+        serde_json::from_value::<CompileRule>(serde_json::json!({
+            "kind": "update_parameter",
+            "key": "test.capture"
+        }))
+        .is_ok(),
+        "the class-less rule parses"
     );
 }
 
@@ -1791,21 +1841,6 @@ fn sb_16_spec_time_resolves_at_arm() {
             matches!(&err, SpecError::Structural { reason } if reason.contains("SB-16")),
             "{target}: {err:?}"
         );
-    }
-
-    // RS-49a: `resolve` substitutes a deadline into the template. Computing that
-    // deadline from the `SpecTime` is `arm`'s job, and there is no Kernel `arm` in
-    // Phase 1 — SB-43 marks that half a forward obligation, so this asserts only the
-    // substitution, with the deadline supplied.
-    let sample_clock = ClockDomainId::local(7);
-    let deadline = AbsoluteDeadline::new(TimePoint::new(sample_clock, 1000));
-    let action = template.resolve(deadline);
-    match action {
-        ezsdr_kernel::event::Action::TxBurst { at, .. } => {
-            assert_eq!(at, deadline);
-            assert_eq!(at.time_point.domain(), sample_clock);
-        }
-        other => panic!("expected a TxBurst, got {other:?}"),
     }
 }
 
@@ -4248,7 +4283,6 @@ fn sb_04_a_nested_value_is_refused_by_every_deserialiser() {
             target: support::target("radio"),
             key: key("test.gain"),
             value: Value::from(1),
-            class: UpdateClass::HardwareTimed,
         },
     });
     let spec = serde_json::to_value(&spec).unwrap();
@@ -4963,17 +4997,17 @@ fn sb_11_the_declared_vocabulary_major_is_checked() {
 }
 
 #[test]
-fn rs_52_a_scheduled_update_states_the_declared_class() {
-    // RS-52: "`UpdateParameter.class` is the parameter's declared update class", and
-    // "an Action whose class was not declared is rejected at admission (RS-17)". For a
-    // Spec the admission stage is `validate`. Nothing compared the two, so a schedule
-    // entry could state `hardware_timed` for a key that declares no class at all and
-    // the Action reached `arm` carrying a class nobody declared.
+fn rs_52_a_scheduled_update_states_no_class() {
+    // RS-52 (item 3): `ActionTemplate::UpdateParameter` has no `class` field, so a
+    // scheduled update states none and `validate` has no equality to check. The
+    // declaration is read at KC-24's step 5, where the entry is admitted at `arm`
+    // (KC-17); a class this test used to write into the entry no longer exists to
+    // disagree with. What `validate` still holds is SB-16's target and SB-2's key.
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
-    let scheduled = |key_name: &str, class| {
+    let scheduled = |key_name: &str, value: Value| {
         let mut spec = minimal_spec();
         spec.schedule.push(ScheduleEntry {
             at: SpecTime {
@@ -4983,106 +5017,58 @@ fn rs_52_a_scheduled_update_states_the_declared_class() {
             action: ActionTemplate::UpdateParameter {
                 target: support::target("radio"),
                 key: key(key_name),
-                value: Value::from(1),
-                class,
+                value,
             },
         });
         spec
     };
-    // `test.gain` is the fixture's changeable Provider parameter (D33), declared
-    // `HardwareTimed`.
-    let declared = fx
-        .registry
-        .key_decl(&key("test.gain"))
-        .expect("the fixture declares it")
-        .update_class
-        .expect("with a class");
+    // `test.gain` is the fixture's num-typed Provider parameter and declares a class, so
+    // the entry validates. `test.count` is a declared key with no `update_class`: a
+    // fixed declaration is a declaration gap, refused here (plan §5's
+    // `Failed { validate }`), because the entry states no class for `arm` to compare
+    // (KC-24 step 5 reads it when the entry is admitted).
     validate(
-        &scheduled("test.gain", declared),
+        &scheduled("test.gain", Value::from(1)),
         &profile,
         &fx.inputs(&providers),
     )
-    .expect("the entry states the class the key declares");
-
-    let other = UpdateClass::BlockBoundary;
-    assert_ne!(other, declared);
+    .expect("the entry states no class, and the declaration it names gives one");
     let err = validate(
-        &scheduled("test.gain", other),
+        &scheduled("test.count", Value::from(1)),
         &profile,
         &fx.inputs(&providers),
     )
-    .expect_err("a class other than the declared one is rejected");
-    assert!(
-        matches!(&err, SpecError::Structural { reason } if reason.contains("RS-52")),
-        "{err:?}"
-    );
-
-    // SB-2 (item 3): a schedule entry's class comes from its target's own
-    // declaration. A `{resource}` target's key is a Vocabulary key, and a component's
-    // parameter list never decides it, even when the component declares the same key.
-    let with_component = |key_name: &str, param: Option<UpdateClass>, stated: UpdateClass| {
-        let mut spec = scheduled(key_name, stated);
-        let mut c = support::recorder_component(
-            ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
-        );
-        c.params[0].key = key(key_name);
-        c.params[0].update_class = param;
-        c.params[0].default = Value::num(0.0).unwrap();
-        c.params[0].schema = serde_json::json!({ "type": "number" });
-        spec.graph.components.insert(id("proc"), c);
-        spec
-    };
-    // A component cannot lend a class to a key whose Vocabulary declares none.
-    let err = validate(
-        &with_component(
-            "test.grid",
-            Some(UpdateClass::BlockBoundary),
-            UpdateClass::BlockBoundary,
-        ),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect_err("a component's params do not declare a Provider key's class");
+    .expect_err("a fixed declaration is a gap validate refuses");
     assert!(
         matches!(&err, SpecError::Structural { reason }
             if reason.contains("RS-52") && reason.contains("declares no update class")),
         "{err:?}"
     );
-    // Nor can it shadow the class a key does declare.
-    validate(
-        &with_component("test.gain", Some(UpdateClass::BlockBoundary), declared),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect("the Vocabulary's declaration is the one that counts");
 
-    // `test.count` is a declared key with no `update_class`, which RS-52 calls "not
-    // declared" — the case that must not reach a Module.
+    // SB-2: the entry's value is still checked against its `KeyDecl`'s kind, which is
+    // `validate`'s reader of the declaration.
     let err = validate(
-        &scheduled("test.count", declared),
+        &scheduled("test.gain", Value::from(true)),
         &profile,
         &fx.inputs(&providers),
     )
-    .expect_err("a key with no declared class cannot be updated");
-    assert!(
-        matches!(&err, SpecError::Structural { reason }
-            if reason.contains("RS-52") && reason.contains("declares no update class")),
-        "{err:?}"
-    );
+    .expect_err("Bool does not fill a Num declaration");
+    assert!(matches!(&err, SpecError::KeyShape { .. }), "{err:?}");
 }
-
 #[test]
 fn sb_16_a_schedule_entry_may_target_a_component() {
     // SB-16, RS-52 (item 3): a schedule entry names a resource, an output or a graph
     // component, and a component's key is declared by that component's own
-    // `ParamDecl`. A fixed or missing component declaration is never resolved through
-    // a Vocabulary `KeyDecl`.
+    // `ParamDecl` — never by a Vocabulary `KeyDecl`, so a `proc.`-prefixed key needs
+    // no Vocabulary at all. A fixed or missing declaration is a declaration gap and is
+    // refused by `validate` (plan §5's `Failed { validate }`); the class itself is
+    // read at KC-24's step 5 when `arm` admits the entry.
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
     let cf32 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
-    let scheduled = |declared_key: &str, entry_key: &str, param: Option<UpdateClass>, stated: UpdateClass| {
+    let scheduled = |declared_key: &str, entry_key: &str, param: Option<UpdateClass>| {
         let mut spec = minimal_spec();
         let mut c = support::recorder_component(cf32.clone());
         c.params[0].key = key(declared_key);
@@ -5096,57 +5082,15 @@ fn sb_16_a_schedule_entry_may_target_a_component() {
                 offset_ticks: 0,
             },
             action: ActionTemplate::UpdateParameter {
-                target: Target::Component { component: id("proc") },
+                target: Target::Component {
+                    component: id("proc"),
+                },
                 key: key(entry_key),
                 value: Value::from(true),
-                class: stated,
             },
         });
         spec
     };
-    // `test.flag` declares no class in the Vocabulary, and for this target the
-    // component's declaration is the one that counts.
-    validate(
-        &scheduled("test.flag", "test.flag", Some(UpdateClass::BlockBoundary), UpdateClass::BlockBoundary),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect("the component declares the class");
-    // A fixed declaration is not updatable, whatever a Vocabulary says. The key here
-    // is `test.gain`, whose `KeyDecl` declares `hardware_timed`: a fallback would
-    // admit it, and the component's own declaration must not be overridden.
-    let err = validate(
-        &scheduled("test.gain", "test.gain", None, UpdateClass::HardwareTimed),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect_err("the component declares it fixed");
-    assert!(
-        matches!(&err, SpecError::Structural { reason } if reason.contains("RS-52")),
-        "{err:?}"
-    );
-    // Nor is a key no `ParamDecl` declares.
-    let err = validate(
-        &scheduled("test.flag", "test.missing", Some(UpdateClass::BlockBoundary), UpdateClass::BlockBoundary),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect_err("no ParamDecl declares it");
-    assert!(
-        matches!(&err, SpecError::Structural { reason } if reason.contains("RS-52")),
-        "{err:?}"
-    );
-    // The class the entry states is compared against the component's declaration.
-    let err = validate(
-        &scheduled("test.flag", "test.flag", Some(UpdateClass::Cold), UpdateClass::BlockBoundary),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect_err("the entry states another class");
-    assert!(
-        matches!(&err, SpecError::Structural { reason } if reason.contains("RS-52")),
-        "{err:?}"
-    );
     // A component's parameter key needs no Vocabulary prefix at all (P1-2, item 3):
     // `proc` is declared by no Vocabulary.
     validate(
@@ -5154,12 +5098,69 @@ fn sb_16_a_schedule_entry_may_target_a_component() {
             "proc.threshold",
             "proc.threshold",
             Some(UpdateClass::BlockBoundary),
-            UpdateClass::BlockBoundary,
         ),
         &profile,
         &fx.inputs(&providers),
     )
     .expect("a component key is owned by its component");
+    // A key the component declares fixed, and one whose `ParamDecl` is missing, are
+    // both declaration gaps: `validate` refuses each with RS-52, at the schedule
+    // entry that names them.
+    let err = validate(
+        &scheduled("test.flag", "test.flag", None),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect_err("a fixed declaration is a gap validate refuses");
+    assert!(
+        matches!(&err, SpecError::Structural { reason }
+            if reason.contains("RS-52") && reason.contains("declares no update class")),
+        "{err:?}"
+    );
+    let err = validate(
+        &scheduled("test.flag", "test.missing", Some(UpdateClass::BlockBoundary)),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect_err("a missing declaration is a gap validate refuses");
+    assert!(
+        matches!(&err, SpecError::Structural { reason }
+            if reason.contains("RS-52") && reason.contains("declares no update class")),
+        "{err:?}"
+    );
+    // The no-fallback rule (item 3): `test.gain`'s `KeyDecl` declares `hardware_timed`,
+    // so a fallback would resolve a class where the component's own declaration gives
+    // none — and each of these must still be refused as a gap, not admitted.
+    let err = validate(
+        &scheduled("test.gain", "test.gain", None),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect_err("a fixed `test.gain` does not fall back to its Vocabulary class");
+    assert!(
+        matches!(&err, SpecError::Structural { reason }
+            if reason.contains("RS-52") && reason.contains("declares no update class")),
+        "{err:?}"
+    );
+    let err = validate(
+        &scheduled("test.flag", "test.gain", Some(UpdateClass::Cold)),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect_err("a missing `test.gain` declaration does not fall back either");
+    assert!(
+        matches!(&err, SpecError::Structural { reason }
+            if reason.contains("RS-52") && reason.contains("declares no update class")),
+        "{err:?}"
+    );
+    // A component's value is judged by its own declaration and not by the Vocabulary:
+    // the entry sets `test.gain`, whose `KeyDecl` is a `Num`, with a `Bool`.
+    validate(
+        &scheduled("test.gain", "test.gain", Some(UpdateClass::HardwareTimed)),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect("no Vocabulary kind applies to a component value");
     // The same key on a `{resource}` target is refused: a Provider key is a
     // Vocabulary key (SB-2).
     let mut resource_key = minimal_spec();
@@ -5175,7 +5176,6 @@ fn sb_16_a_schedule_entry_may_target_a_component() {
             },
             key: key("proc.threshold"),
             value: Value::from(true),
-            class: UpdateClass::BlockBoundary,
         },
     });
     let err = validate(&resource_key, &profile, &fx.inputs(&providers))
@@ -5184,22 +5184,52 @@ fn sb_16_a_schedule_entry_may_target_a_component() {
         matches!(&err, SpecError::UnknownKeyPrefix { key } if key.starts_with("proc.threshold")),
         "{err:?}"
     );
-    // A missing `ParamDecl` is not an invitation to fall back to the key's
-    // `KeyDecl` (P1-3, item 3): the component declares `test.flag` only, and
-    // `test.gain`'s `KeyDecl` declares `hardware_timed`, which a fallback would
-    // admit.
+    // A component's params neither lend a class to a Provider key nor shadow the one
+    // its `KeyDecl` declares: for a `{resource}` target the Vocabulary is the only
+    // source (SB-2, plan §5). `test.grid`'s `KeyDecl` in this fixture states no class,
+    // and the component's `BlockBoundary` does not supply one.
+    let with_component = |key_name: &str, param: Option<UpdateClass>| {
+        let mut spec = minimal_spec();
+        let mut c = support::recorder_component(cf32.clone());
+        c.params[0].key = key(key_name);
+        c.params[0].update_class = param;
+        c.params[0].default = Value::num(0.0).unwrap();
+        c.params[0].schema = serde_json::json!({ "type": "number" });
+        spec.graph.components.insert(id("proc"), c);
+        spec.schedule.push(ScheduleEntry {
+            at: SpecTime {
+                clock: id("radio"),
+                offset_ticks: 0,
+            },
+            action: ActionTemplate::UpdateParameter {
+                target: Target::Resource {
+                    resource: id("radio"),
+                    path: String::new(),
+                },
+                key: key(key_name),
+                value: Value::num(1.0).unwrap(),
+            },
+        });
+        spec
+    };
     let err = validate(
-        &scheduled("test.flag", "test.gain", Some(UpdateClass::BlockBoundary), UpdateClass::HardwareTimed),
+        &with_component("test.grid", Some(UpdateClass::BlockBoundary)),
         &profile,
         &fx.inputs(&providers),
     )
-    .expect_err("the component declares no class for test.gain");
+    .expect_err("a component's params do not declare a Provider key's class");
     assert!(
-        matches!(&err, SpecError::Structural { reason } if reason.contains("RS-52")),
+        matches!(&err, SpecError::Structural { reason }
+            if reason.contains("RS-52") && reason.contains("declares no update class")),
         "{err:?}"
     );
+    validate(
+        &with_component("test.gain", Some(UpdateClass::BlockBoundary)),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect("the Vocabulary's declaration is the one that counts");
 }
-
 #[test]
 fn sb_02_a_component_value_is_not_checked_against_the_vocabulary_kind() {
     // P1-3 (review, item 3): a component's `schema` is opaque, so the key's
@@ -5227,7 +5257,6 @@ fn sb_02_a_component_value_is_not_checked_against_the_vocabulary_kind() {
             },
             key: key("test.gain"),
             value: Value::from(true),
-            class: UpdateClass::HardwareTimed,
         },
     });
     validate(&spec, &profile, &fx.inputs(&providers))
@@ -5236,29 +5265,30 @@ fn sb_02_a_component_value_is_not_checked_against_the_vocabulary_kind() {
 
 #[test]
 fn sb_02_one_key_declared_differently_by_two_components() {
-    // Item 3 (#5's per-component rule): the class is judged by the target, so two
-    // components may declare one key under different classes and a schedule entry to
-    // each is judged by its own.
+    // Item 3 (#5's per-component rule): a component's key is owned by the component
+    // that declares it, so two components may declare one key under different classes
+    // and a schedule entry to each is admissible (the class it gets is admission's,
+    // KC-24 step 5). Different components are a different owner, not a conflict.
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
     let cf32 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
-    let component = |name: &str, class: UpdateClass| {
+    let component = |name: &str, class: Option<UpdateClass>| {
         let mut c = support::recorder_component(cf32.clone());
         c.id = id(name);
         c.params[0].key = key("test.flag");
-        c.params[0].update_class = Some(class);
+        c.params[0].update_class = class;
         c.params[0].default = Value::from(false);
         c.params[0].schema = serde_json::json!({ "type": "boolean" });
         c
     };
-    let scheduled_to = |name: &str, stated: UpdateClass| {
+    let scheduled_to = |name: &str| {
         let mut spec = minimal_spec();
-        spec.graph.components.insert(id("cold"), component("cold", UpdateClass::Cold));
+        spec.graph.components.insert(id("cold"), component("cold", Some(UpdateClass::Cold)));
         spec.graph
             .components
-            .insert(id("hot"), component("hot", UpdateClass::HardwareTimed));
+            .insert(id("hot"), component("hot", Some(UpdateClass::HardwareTimed)));
         spec.schedule.push(ScheduleEntry {
             at: SpecTime {
                 clock: id("radio"),
@@ -5270,32 +5300,15 @@ fn sb_02_one_key_declared_differently_by_two_components() {
                 },
                 key: key("test.flag"),
                 value: Value::from(true),
-                class: stated,
             },
         });
         spec
     };
-    validate(&scheduled_to("cold", UpdateClass::Cold), &profile, &fx.inputs(&providers))
-        .expect("the cold declaration admits its own class");
-    validate(
-        &scheduled_to("hot", UpdateClass::HardwareTimed),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect("the hardware_timed declaration admits its own class");
-    // One component's declaration cannot stand for the other's.
-    let err = validate(
-        &scheduled_to("cold", UpdateClass::HardwareTimed),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect_err("cold is not hot's declaration");
-    assert!(
-        matches!(&err, SpecError::Structural { reason } if reason.contains("RS-52")),
-        "{err:?}"
-    );
+    validate(&scheduled_to("cold"), &profile, &fx.inputs(&providers))
+        .expect("cold's declaration is its own");
+    validate(&scheduled_to("hot"), &profile, &fx.inputs(&providers))
+        .expect("hot's declaration is its own");
 }
-
 #[test]
 fn sb_02_values_are_checked_against_their_key_decl() {
     // The one scan (item 3) covers an output's `params` and a schedule entry's value,
@@ -5347,7 +5360,6 @@ fn sb_02_values_are_checked_against_their_key_decl() {
                 },
                 key: key("test.gain"),
                 value,
-                class: UpdateClass::HardwareTimed,
             },
         });
         spec
@@ -5382,7 +5394,6 @@ fn sb_02_a_list_value_matches_only_a_list_declaration() {
                 },
                 key: key(key_name),
                 value,
-                class: UpdateClass::HardwareTimed,
             },
         });
         spec
@@ -5468,7 +5479,6 @@ fn sb_02_the_ext_owner_is_checked_at_every_key_position() {
             },
             key: key("ext.nobody.mod.x"),
             value: Value::from(1),
-            class: UpdateClass::HardwareTimed,
         },
     });
     let err = validate(&scheduled, &profile, &fx.inputs(&providers))
@@ -5537,19 +5547,22 @@ fn ma_37_a_component_declares_each_parameter_key_once() {
     // MA-37 also says a descriptor is validated **before anything reads** it (review
     // P2-5): the schedule entry here names the duplicated key, and the refusal must
     // still be MA-37's, not `declared_class`'s RS-52.
+    //
+    // The **first** declaration is fixed for the Run and `declared_class` finds the
+    // first, so a schedule loop running above the descriptor check would read `None`
+    // there and refuse RS-52's declaration gap. Only the descriptor-validated-first
+    // order reaches MA-37's duplicate-key refusal (review round 2).
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
     let cf32 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
     let mut c = support::recorder_component(cf32);
+    c.params[0].update_class = None;
     let duplicate = c.params[0].clone();
     c.params.push(duplicate);
     let mut spec = minimal_spec();
     spec.graph.components.insert(id("proc"), c);
-    // The entry states a class the duplicated declaration does not declare: run
-    // before the descriptor check it would be refused by RS-52, so only the loop's
-    // order makes the refusal MA-37's.
     spec.schedule.push(ScheduleEntry {
         at: SpecTime {
             clock: id("radio"),
@@ -5561,7 +5574,6 @@ fn ma_37_a_component_declares_each_parameter_key_once() {
             },
             key: key("test.capture"),
             value: Value::from(true),
-            class: UpdateClass::Cold,
         },
     });
     let err = validate(&spec, &profile, &fx.inputs(&providers))

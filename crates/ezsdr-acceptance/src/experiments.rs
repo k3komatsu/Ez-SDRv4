@@ -84,8 +84,7 @@ pub fn with_timed_capture(spec: Value, samples: i64, offset_ticks: i64) -> Value
                 "kind": "update_parameter",
                 "target": { "kind": "output", "output": "rec" },
                 "key": "sink.capture_samples",
-                "value": samples,
-                "class": "block_boundary"
+                "value": samples
             }
         }));
     spec

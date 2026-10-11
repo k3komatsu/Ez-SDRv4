@@ -494,7 +494,10 @@ fn ov_23b_kernel_growth_is_the_new_count() {
     // set), `event::EventSource` (Event envelope) and `manifest::ModuleSection`
     // (Manifest envelope) were added, and `coordinator::KERNEL_SOURCE` (NEW:) removed.
     // 114 of 294: pre-freeze item 2b added `module_api::Dispatched` (MA-14), NEW:.
-    assert_eq!((new.len(), total), (114, 294), "OV-23b, GZ-2: the Kernel's public surface changed");
+    // 112 of 291: pre-freeze item 3 made `session::compile`, `session::Compiled` and
+    // `session::ControlOp` crate-internal (KC-28 step 3, RS-14): two NEW: items and
+    // one audit §13 item (Run state machine) leave the public surface.
+    assert_eq!((new.len(), total), (112, 291), "OV-23b, GZ-2: the Kernel's public surface changed");
 }
 
 #[test]

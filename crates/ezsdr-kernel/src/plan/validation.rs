@@ -444,12 +444,6 @@ pub(super) fn check_structure(
                 ),
             });
         }
-        // RS-52: "`UpdateParameter.class` is the parameter's declared update class",
-        // and "an Action whose class was not declared is rejected at admission". For a
-        // Spec the admission stage is `validate`, and nothing compared the two: a
-        // schedule entry could state `hardware_timed` for a key that declares no class
-        // at all, and the Action reached `arm` with a class nobody declared.
-        //
         // SB-16, KC-23 (item 3): the target is classified first, so a target the Spec
         // does not declare in its role is refused before anything reads a class.
         // `validate` is the one classifier; the runtime routing is built from this
@@ -459,30 +453,21 @@ pub(super) fn check_structure(
                 reason: format!("SB-16: schedule entry's target {reason}"),
             })?;
         }
-        if let crate::event::ActionTemplate::UpdateParameter { target, key, class, .. } =
-            &entry.action
-        {
-            // The class comes from the target's own declaration and from nowhere else
-            // (SB-2, RS-52, item 3): a `{resource}`/`{output}` target's key from its
-            // `KeyDecl`, a `{component}` target's key from that component's
-            // `ParamDecl`, and a fixed or missing component declaration is never
-            // resolved through a Vocabulary declaration.
-            match spec.declared_class(target, key, inputs.registry) {
-                None => {
-                    return Err(SpecError::Structural {
-                        reason: format!(
-                            "RS-52: schedule entry updates {key}, which declares no update class"
-                        ),
-                    });
-                }
-                Some(d) if d != *class => {
-                    return Err(SpecError::Structural {
-                        reason: format!(
-                            "RS-52: schedule entry states {class:?} for {key}, which declares {d:?}"
-                        ),
-                    });
-                }
-                Some(_) => {}
+        // RS-52 (item 3): a scheduled `UpdateParameter` states no class — the
+        // ActionTemplate has no `class` field — so there is no equality for
+        // `validate` to check. A fixed or missing declaration is still a gap: the
+        // entry names a parameter whose class no declaration gives, and it is
+        // refused here (plan §5's `Failed { validate }`). The class itself is read
+        // at KC-24's step 5, where `arm` admits the entry; a declaration cannot
+        // change between `validate` and `arm`, so a Spec that validates cannot hit
+        // the same gap there.
+        if let crate::event::ActionTemplate::UpdateParameter { target, key, .. } = &entry.action {
+            if spec.declared_class(target, key, inputs.registry).is_none() {
+                return Err(SpecError::Structural {
+                    reason: format!(
+                        "RS-52: schedule entry updates {key}, which declares no update class"
+                    ),
+                });
             }
         }
     }

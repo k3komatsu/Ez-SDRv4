@@ -371,6 +371,19 @@ impl Shared {
         self.routing.get()
     }
 
+    /// The Run's one `Admitter`, built at the point of use: KC-24's steps 12–13
+    /// (SB-30, SB-45) read the Run's registered checks, environment, coercion
+    /// overrides and registry (pre-freeze item 3).
+    pub(super) fn admitter(&self) -> crate::session::Admitter<'_> {
+        crate::session::Admitter {
+            checks: &self.ctx.checks,
+            environment: &self.ctx.profile.environment,
+            spec_coercion: &self.ctx.spec.policies.coercion,
+            registry: &self.ctx.registry,
+            is_session: self.ctx.kind == crate::manifest::RunKind::Session,
+        }
+    }
+
     /// The stream's latest registered clock that has not ended: the one a burst
     /// admitted next targets (SC-23, KC-21a, RS-19).
     pub(super) fn running_clock(

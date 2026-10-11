@@ -224,9 +224,6 @@ session::SessionLog = Run state machine
 session::Outcome = NEW: RS-15's per-entry verdict, without which a log cannot be audited.
 session::Admitter = NEW: RS-17's runtime admission point (SB-30's third point), for MA-14a's submitter and the Phase 2 dispatcher.
 session::Admitted = NEW: what RS-17 returns when it passes.
-session::Compiled = NEW: RS-14's compilation result: Kernel Actions, or a Lease or Run operation.
-session::ControlOp = NEW: RS-13's control-path acts, which the Kernel Action set deliberately excludes.
-session::compile = Run state machine
 session::implicit_spec = Run state machine
 
 # --- events and actions (audit §13 `events/actions`) -------------------------

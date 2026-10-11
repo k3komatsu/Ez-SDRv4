@@ -2363,16 +2363,6 @@
   "filter": "sb_02_values_are_checked_against_their_key_decl"
  },
  {
-  "id": "J207",
-  "name": "the schedule's class check reads only a Vocabulary KeyDecl (item 3: per-target)",
-  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
-  "old": "            match spec.declared_class(target, key, inputs.registry) {",
-  "new": "            match inputs.registry.key_decl(key).and_then(|d| d.update_class) {",
-  "crate": "ezsdr-kernel",
-  "test_bin": "spec_binding",
-  "filter": "sb_16_a_schedule_entry_may_target_a_component"
- },
- {
   "id": "J208",
   "name": "the ext. owner check is skipped (item 3 scans every key position)",
   "file": "crates/ezsdr-kernel/src/plan/validation.rs",
@@ -2453,21 +2443,11 @@
   "filter": "kc_24_component_update_classes_belong_to_the_target"
  },
  {
-  "id": "J216",
-  "name": "Session compile reads a component class from the Vocabulary KeyDecl (review P1-4)",
-  "file": "crates/ezsdr-kernel/src/session.rs",
-  "old": "            let class = spec.declared_class(target, key, registry).ok_or_else(|| {",
-  "new": "            let class = registry.key_decl(key).and_then(|d| d.update_class).ok_or_else(|| {",
-  "crate": "ezsdr-kernel",
-  "test_bin": "run_session",
-  "filter": "rs_17_a_component_class_comes_from_its_own_declaration"
- },
- {
   "id": "J217",
   "name": "admission admits a component update whose class is undeclared or fixed (review P1-4)",
   "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
-  "old": "            None => return Err(vec![violation(\n                \"ezsdr.update_class\",\n                format!(\"RS-52: {key} declares no update class\"),\n            )]),",
-  "new": "            None => {}",
+  "old": "                    None => {\n                        return Err(vec![violation_with(\n                            \"ezsdr.update_class\",\n                            key,\n                            value,\n                            format!(\"RS-52: {key} declares no update class\"),\n                        )])\n                    }",
+  "new": "                    None => {}",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kc_24_component_update_classes_belong_to_the_target"
@@ -2523,5 +2503,195 @@
   "filter": "ma_37_a_component_declares_each_parameter_key_once",
   "old2": "    // MA-37's descriptor validation already ran, above the schedule loop (review\n    // P2-5), so nothing here reads a `ParamDecl` a malformed descriptor owns.\n",
   "new2": "    let contract_ids = inputs.contracts.ids();\n    for c in spec.graph.components.values() {\n        c.validate(&contract_ids)\n            .map_err(|e| SpecError::Structural { reason: e.message })?;\n    }\n"
+ },
+ {
+  "id": "J224",
+  "name": "admission assumes a class-pending request always has a declaration (item 3)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "            ) else {\n                return Err(vec![violation_with(\n                    \"ezsdr.update_class\",\n                    &pending.key,\n                    &pending.value,\n                    format!(\"RS-52: {} declares no update class\", pending.key),\n                )]);\n            };",
+  "new": "            ) else {\n                unreachable!(\"item 3: a class-pending request with no declaration\");\n            };",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_an_admission_refusal_leaves_no_configuration_and_no_action_id"
+ },
+ {
+  "id": "J226",
+  "name": "the requested value's kind is not checked against its KeyDecl at admission (item 3)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "    if let Action::UpdateParameter { target, key, value, .. } = &action {\n        if !matches!(target, crate::event::Target::Component { .. }) {\n            if let Some(decl) = shared.ctx.registry.key_decl(key) {\n                crate::binding::check_value_kind(decl, value)\n                    .map_err(|error| vec![violation_with(\"ezsdr.value\", key, value, error.to_string())])?;\n            }\n        }\n    }",
+  "new": "    if let Action::UpdateParameter { key, value, .. } = &action {\n        if let Some(decl) = shared.ctx.registry.key_decl(key) {\n            let _ = decl;\n        }\n    }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_an_admission_refusal_leaves_no_configuration_and_no_action_id"
+ },
+ {
+  "id": "J227",
+  "name": "a coerced value outside its declaration is recorded anyway (item 3)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "        if !crate::spec::kind_accepts(decl.kind, value.kind()) {",
+  "new": "        if !crate::spec::kind_accepts(decl.kind, requested_value.kind()) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_an_admission_refusal_leaves_no_configuration_and_no_action_id"
+ },
+ {
+  "id": "J228",
+  "name": "a coercion that changes the value within one kind is not recorded (item 3)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "    if applied != requested_value || applied.kind() != requested_value.kind() {",
+  "new": "    if applied.kind() != requested_value.kind() && false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "rs_17_a_session_rate_change_is_coerced_by_its_provider"
+ },
+ {
+  "id": "J229",
+  "name": "admission never transcribes the requested value into a coercion refusal (item 3)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "    violation_with(\n        \"ezsdr.coercion\",\n        key,\n        requested,\n        format!(\"RS-17: {fragment}: {reason}\"),\n    )",
+  "new": "    violation_with(\n        \"ezsdr.coercion\",\n        key,\n        &Value::from(\"\"),\n        format!(\"RS-17: {fragment}: {reason}\"),\n    )",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_26_a_provider_that_applies_nothing_is_refused"
+ },
+ {
+  "id": "J230",
+  "name": "admission skips the ASCII check of an UpdateParameter's value (item 3)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "        PendingAction::Action(Action::UpdateParameter { key, value, .. }) => {\n            if value.check_ascii_keys(key.as_str()).is_err() {\n                return Err(ascii(Some(key), key.as_str()));\n            }",
+  "new": "        PendingAction::Action(Action::UpdateParameter { key, value, .. }) => {\n            let _ = (key, value);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "sb_09a_module_action_rejects_a_non_ascii_map_key_before_dispatch"
+ },
+ {
+  "id": "J231",
+  "name": "admission skips the ASCII check of a TxBurst's or Command's payload (item 3)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "        PendingAction::Action(Action::TxBurst { metadata: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"metadata\"));\n            }\n        }\n        PendingAction::Action(Action::Command { params: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"params\"));\n            }\n        }",
+  "new": "        PendingAction::Action(Action::TxBurst { metadata: values, .. })\n        | PendingAction::Action(Action::Command { params: values, .. }) => {\n            let _ = values;\n        }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "sb_09a_module_action_rejects_a_non_ascii_map_key_before_dispatch"
+ },
+ {
+  "id": "J233",
+  "name": "a schedule entry's Provider update is not coerced (item 3's KC-24 step 8 guard)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "        if origin != Origin::Module {",
+  "new": "        if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_a_update_is_refused_by_the_same_check_at_a_session_and_at_arm"
+ },
+ {
+  "id": "J234",
+  "name": "a class-pending schedule entry is not admitted at arm (item 3)",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "            let input = crate::event::resolve_template(template, deadline);",
+  "new": "            if matches!(template, crate::event::ActionTemplate::UpdateParameter { .. }) {\n                continue;\n            }\n            let input = crate::event::resolve_template(template, deadline);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_17_a_scheduled_update_to_a_component_reaches_its_executor"
+ },
+ {
+  "id": "J235",
+  "name": "one SetParameter compiles to two update requests, so one entry is dispatched twice (item 3)",
+  "file": "crates/ezsdr-kernel/src/session.rs",
+  "old": "            out.items.push(crate::event::PendingAction::Update(crate::event::PendingUpdate {\n                target: target.clone(),\n                key: key.clone(),\n                value: value.clone(),\n                at: None,\n            }));",
+  "new": "            out.items.push(crate::event::PendingAction::Update(crate::event::PendingUpdate {\n                target: target.clone(),\n                key: key.clone(),\n                value: value.clone(),\n                at: None,\n            }));\n            out.items.push(crate::event::PendingAction::Update(crate::event::PendingUpdate {\n                target: target.clone(),\n                key: key.clone(),\n                value: value.clone(),\n                at: Some(AbsoluteDeadline::new(earliest)),\n            }));",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_25_an_admitted_update_changes_the_configuration"
+ },
+ {
+  "id": "J236",
+  "name": "an untimed Vocabulary action records no applied time (RS-19)",
+  "file": "crates/ezsdr-kernel/src/session.rs",
+  "old": "                    out.coercions.push(Coercion {\n                        key: Key::parse(\"ezsdr.action.at\").expect(\"a valid literal\"),\n                        requested: Value::from(\"asap\"),\n                        applied: Value::from(ticks),\n                        reason: \"RS-19: admitted at the earliest instant the envelope allows\"\n                            .to_owned(),\n                    });",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "lib",
+  "filter": "session::tests::rs_19_capture_asap_records_applied_time"
+ },
+ {
+  "id": "J237",
+  "name": "the payload's ASCII check runs before the target is resolved (item 3's KC-24 order)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "    // 3. the target resolves in its own role (KC-23), and a Module's `Stop { target:\n    // None }` is refused here. Before the payload is read, so a refusal can never\n    // transcribe a payload this step never looked at. A class-pending request states\n    // its own target, so it is resolved exactly like a finished Action's.\n    if origin == Origin::Module\n        && matches!(\n            input,\n            PendingAction::Action(Action::Stop { target: None })\n        )\n    {\n        return Err(vec![violation(\n            \"ezsdr.target\",\n            \"KC-24: a Module ends a Run only with Abort\",\n        )]);\n    }\n    // 3. the target resolved in its own role (KC-23). An Action with no target\n    // (`Stop {}`, `Abort`) is not resolved.\n    let (node, inst, fragment) = match input.target() {\n        Some(target) => {\n            let (node, inst, fragment) = super::pipeline::resolve_target(shared, target)\n                .map_err(|reason| vec![violation(\"ezsdr.target\", reason)])?;\n            (node, Some(inst), Some(fragment))\n        }\n        None => (None, None, None),\n    };\n    // 4. SB-9a: every origin crosses this boundary before coercion or dispatch. The\n    // refusal carries `requested: None` and a reason naming only the position and the\n    // violation: a Map key that is not ASCII must never enter a rejection record the\n    // log and the sealed Manifest will hold, and the offending key's own spelling is\n    // exactly what must not be transcribed (KC-24; SB-9a). The `key` field is the\n    // update's own key where there is one — never the offending map key, which need\n    // not even parse as a `Key`; a `TxBurst`/`Command` payload sits under no key.\n    let ascii = |key: Option<&Key>, position: &str| {\n        vec![Violation {\n            check: crate::spec::Namespace::parse(\"ezsdr.value\").expect(\"valid admission check\"),\n            key: key.cloned(),\n            requested: None,\n            reason: format!(\"SB-9a: a map key under {position} is not ASCII\"),\n        }]\n    };\n    match &input {\n        PendingAction::Update(pending) => {\n            if pending.value.check_ascii_keys(pending.key.as_str()).is_err() {\n                return Err(ascii(Some(&pending.key), pending.key.as_str()));\n            }\n        }\n        PendingAction::Action(Action::UpdateParameter { key, value, .. }) => {\n            if value.check_ascii_keys(key.as_str()).is_err() {\n                return Err(ascii(Some(key), key.as_str()));\n            }\n        }\n        PendingAction::Action(Action::TxBurst { metadata: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"metadata\"));\n            }\n        }\n        PendingAction::Action(Action::Command { params: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"params\"));\n            }\n        }\n        PendingAction::Action(_) => {}\n    }",
+  "new": "    // 4. SB-9a: every origin crosses this boundary before coercion or dispatch. The\n    // refusal carries `requested: None` and a reason naming only the position and the\n    // violation: a Map key that is not ASCII must never enter a rejection record the\n    // log and the sealed Manifest will hold, and the offending key's own spelling is\n    // exactly what must not be transcribed (KC-24; SB-9a). The `key` field is the\n    // update's own key where there is one — never the offending map key, which need\n    // not even parse as a `Key`; a `TxBurst`/`Command` payload sits under no key.\n    let ascii = |key: Option<&Key>, position: &str| {\n        vec![Violation {\n            check: crate::spec::Namespace::parse(\"ezsdr.value\").expect(\"valid admission check\"),\n            key: key.cloned(),\n            requested: None,\n            reason: format!(\"SB-9a: a map key under {position} is not ASCII\"),\n        }]\n    };\n    match &input {\n        PendingAction::Update(pending) => {\n            if pending.value.check_ascii_keys(pending.key.as_str()).is_err() {\n                return Err(ascii(Some(&pending.key), pending.key.as_str()));\n            }\n        }\n        PendingAction::Action(Action::UpdateParameter { key, value, .. }) => {\n            if value.check_ascii_keys(key.as_str()).is_err() {\n                return Err(ascii(Some(key), key.as_str()));\n            }\n        }\n        PendingAction::Action(Action::TxBurst { metadata: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"metadata\"));\n            }\n        }\n        PendingAction::Action(Action::Command { params: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"params\"));\n            }\n        }\n        PendingAction::Action(_) => {}\n    }    // 3. the target resolves in its own role (KC-23), and a Module's `Stop { target:\n    // None }` is refused here. Before the payload is read, so a refusal can never\n    // transcribe a payload this step never looked at. A class-pending request states\n    // its own target, so it is resolved exactly like a finished Action's.\n    if origin == Origin::Module\n        && matches!(\n            input,\n            PendingAction::Action(Action::Stop { target: None })\n        )\n    {\n        return Err(vec![violation(\n            \"ezsdr.target\",\n            \"KC-24: a Module ends a Run only with Abort\",\n        )]);\n    }\n    // 3. the target resolved in its own role (KC-23). An Action with no target\n    // (`Stop {}`, `Abort`) is not resolved.\n    let (node, inst, fragment) = match input.target() {\n        Some(target) => {\n            let (node, inst, fragment) = super::pipeline::resolve_target(shared, target)\n                .map_err(|reason| vec![violation(\"ezsdr.target\", reason)])?;\n            (node, Some(inst), Some(fragment))\n        }\n        None => (None, None, None),\n    };\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_the_target_is_resolved_before_the_payload_is_read"
+ },
+ {
+  "id": "J238",
+  "name": "a scheduled class-pending request loses its resolved time (item 3)",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "            PendingAction::Update(PendingUpdate {\n                target,\n                key,\n                value,\n                at: Some(at),\n            })",
+  "new": "            PendingAction::Update(PendingUpdate {\n                target,\n                key,\n                value,\n                at: None,\n            })",
+  "crate": "ezsdr-kernel",
+  "test_bin": "lib",
+  "filter": "event::tests::rs_49a_a_scheduled_update_resolves_to_a_class_pending_request"
+ },
+ {
+  "id": "J239",
+  "name": "a scheduled update's fixed or missing declaration is not refused at validate (item 3)",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "            if spec.declared_class(target, key, inputs.registry).is_none() {",
+  "new": "            if false && spec.declared_class(target, key, inputs.registry).is_none() {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "rs_52_a_scheduled_update_states_no_class"
+ },
+ {
+  "id": "J240",
+  "name": "a class-pending request is completed before KC-24's steps 1-4 (review P1-1)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "    let mut action = match input {\n        PendingAction::Action(action) => {",
+  "new": "    // MUTANT: complete the request before step 1 again.\n    let input = match input {\n        PendingAction::Update(pending) => {\n            let class = shared\n                .ctx\n                .spec\n                .declared_class(&pending.target, &pending.key, &shared.ctx.registry)\n                .expect(\"item 3: a class-pending request with no declaration\");\n            PendingAction::Action(Action::UpdateParameter {\n                target: pending.target,\n                key: pending.key,\n                value: pending.value,\n                class,\n                at: pending.at,\n            })\n        }\n        action => action,\n    };\n    let mut action = match input {\n        PendingAction::Action(action) => {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_the_target_is_resolved_before_the_update_class"
+ },
+ {
+  "id": "J241",
+  "name": "the registered checks get a proposed value only for a Provider fragment (review P0-1)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "    let mut proposed = BTreeMap::new();\n    if let Action::UpdateParameter { key, value, .. } = &action {\n        proposed.insert(\n            fragment.clone(),\n            BTreeMap::from([(key.clone(), value.clone())]),\n        );\n    }",
+  "new": "    let mut proposed = BTreeMap::new();\n    if let Action::UpdateParameter { key, value, .. } = &action {\n        if matches!(inst, Inst::Provider(_)) {\n            proposed.insert(\n                fragment.clone(),\n                BTreeMap::from([(key.clone(), value.clone())]),\n            );\n        }\n    }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_a_check_refuses_a_non_provider_update_with_its_proposed_value"
+ },
+ {
+  "id": "J242",
+  "name": "the requested value's kind is checked against a Vocabulary KeyDecl for a component target (review P1-2)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "    if let Action::UpdateParameter { target, key, value, .. } = &action {\n        if !matches!(target, crate::event::Target::Component { .. }) {\n            if let Some(decl) = shared.ctx.registry.key_decl(key) {\n                crate::binding::check_value_kind(decl, value)\n                    .map_err(|error| vec![violation_with(\"ezsdr.value\", key, value, error.to_string())])?;\n            }\n        }\n    }",
+  "new": "    if let Action::UpdateParameter { key, value, .. } = &action {\n        if let Some(decl) = shared.ctx.registry.key_decl(key) {\n            crate::binding::check_value_kind(decl, value)\n                .map_err(|error| vec![violation_with(\"ezsdr.value\", key, value, error.to_string())])?;\n        }\n    }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_a_component_value_takes_no_vocabulary_kind_check"
+ },
+ {
+  "id": "J243",
+  "name": "the step-4 reason transcribes the offending non-ASCII map key (review P1-4)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "        PendingAction::Update(pending) => {\n            if pending.value.check_ascii_keys(pending.key.as_str()).is_err() {\n                return Err(ascii(Some(&pending.key), pending.key.as_str()));\n            }\n        }\n        PendingAction::Action(Action::UpdateParameter { key, value, .. }) => {\n            if value.check_ascii_keys(key.as_str()).is_err() {\n                return Err(ascii(Some(key), key.as_str()));\n            }\n        }\n        PendingAction::Action(Action::TxBurst { metadata: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"metadata\"));\n            }\n        }\n        PendingAction::Action(Action::Command { params: values, .. }) => {\n            if values\n                .iter()\n                .any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err())\n            {\n                return Err(ascii(None, \"params\"));\n            }\n        }",
+  "new": "        PendingAction::Update(pending) => {\n            if let Err(error) = pending.value.check_ascii_keys(pending.key.as_str()) {\n                return Err(ascii(Some(&pending.key), error.to_string().as_str()));\n            }\n        }\n        PendingAction::Action(Action::UpdateParameter { key, value, .. }) => {\n            if let Err(error) = value.check_ascii_keys(key.as_str()) {\n                return Err(ascii(Some(key), error.to_string().as_str()));\n            }\n        }\n        PendingAction::Action(Action::TxBurst { metadata: values, .. }) => {\n            if let Some(error) = values\n                .iter()\n                .find_map(|(key, value)| value.check_ascii_keys(key.as_str()).err())\n            {\n                return Err(ascii(None, error.to_string().as_str()));\n            }\n        }\n        PendingAction::Action(Action::Command { params: values, .. }) => {\n            if let Some(error) = values\n                .iter()\n                .find_map(|(key, value)| value.check_ascii_keys(key.as_str()).err())\n            {\n                return Err(ascii(None, error.to_string().as_str()));\n            }\n        }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "sb_09a_module_action_rejects_a_non_ascii_map_key_before_dispatch"
+ },
+ {
+  "id": "J244",
+  "name": "step 11's comparison ignores the coercion's kind (review P2-2)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "    if applied != requested_value || applied.kind() != requested_value.kind() {",
+  "new": "    if applied != requested_value {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "rs_17_a_kind_only_coercion_is_recorded"
  }
 ]

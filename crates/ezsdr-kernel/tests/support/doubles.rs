@@ -161,7 +161,6 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
                 verb: id("capture"),
                 compiles_to: CompileRule::UpdateParameter {
                     key: key("test.capture"),
-                    class: UpdateClass::BlockBoundary,
                 },
             },
             VerbDecl {
@@ -525,7 +524,9 @@ impl TestProvider {
         self
     }
 
-    /// Makes `test.grid` snap to a multiple of `step` (MA-44, SB-7).
+    /// Makes `test.grid` snap to a multiple of `step` (MA-44, SB-7). An `Int` request
+    /// snaps too, to a `Num`: the same number in another kind, which is how a test
+    /// reaches a **kind-only** coercion (review P2-2).
     pub fn with_grid(mut self, step: f64) -> TestProvider {
         self.grid = Some(step);
         self
@@ -629,19 +630,30 @@ impl Provider for TestProvider {
             let Constraint::Eq { value: v } = c else {
                 continue;
             };
-            if let (true, Some(step), Scalar::Num(x)) = (k.as_str() == "test.grid", self.grid, v) {
-                let x = x.get();
-                let snapped = (x / step).round() * step;
-                report.applied.insert(k.clone(), Value::num(snapped).unwrap());
-                if (snapped - x).abs() > f64::EPSILON {
-                    report.coercions.push(Coercion {
-                        key: k.clone(),
-                        requested: v.clone().into(),
-                        applied: Value::num(snapped).unwrap(),
-                        reason: format!("snapped to a multiple of {step}"),
-                    });
+            if k.as_str() == "test.grid" {
+                if let Some(step) = self.grid {
+                    // An `Int` snaps as the `Num` that names the same number, which the
+                    // double records as a coercion: another kind is another value (SB-6).
+                    let (x, kind_only) = match v {
+                        Scalar::Num(x) => (x.get(), false),
+                        Scalar::Int(i) => (*i as f64, true),
+                        _ => {
+                            report.applied.insert(k.clone(), v.clone().into());
+                            continue;
+                        }
+                    };
+                    let snapped = (x / step).round() * step;
+                    report.applied.insert(k.clone(), Value::num(snapped).unwrap());
+                    if kind_only || (snapped - x).abs() > f64::EPSILON {
+                        report.coercions.push(Coercion {
+                            key: k.clone(),
+                            requested: v.clone().into(),
+                            applied: Value::num(snapped).unwrap(),
+                            reason: format!("snapped to a multiple of {step}"),
+                        });
+                    }
+                    continue;
                 }
-                continue;
             }
             report.applied.insert(k.clone(), v.clone().into());
         }

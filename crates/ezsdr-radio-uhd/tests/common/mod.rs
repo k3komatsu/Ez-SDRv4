@@ -525,7 +525,7 @@ pub fn rehearse_capture_at_a_sample_index(device: Arc<dyn Device>) -> Manifest {
     spec["schedule"] = json!([{
         "at": { "clock": "radio", "offset_ticks": 50_000 },
         "action": { "kind": "update_parameter", "target": serde_json::to_value(output("rec")).unwrap(),
-                    "key": "sink.capture_samples", "value": 10_000, "class": "block_boundary" }
+                    "key": "sink.capture_samples", "value": 10_000 }
     }]);
     let manifest = captured(spec_run(&spec, &bench_profile(&*device, &dir, json!({}), json!({}), false), device, BTreeMap::new()));
     require_stream_timing(&manifest, "B4 capture at an index", false);
@@ -564,7 +564,7 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
         spec["schedule"].as_array_mut().unwrap().push(json!({
             "at": { "clock": "radio", "offset_ticks": offset },
             "action": { "kind": "update_parameter", "target": serde_json::to_value(output("rec")).unwrap(),
-                        "key": "sink.capture_samples", "value": n, "class": "block_boundary" }
+                        "key": "sink.capture_samples", "value": n }
         }));
     };
     let dir = TempDir::new();

@@ -1,7 +1,7 @@
 {
   "$defs": {
     "ActionTemplate": {
-      "description": "An Action as a Spec schedules it: the Action without its time field.\n\nA Spec cannot name a `ClockDomainId`, because domains are allocated at `prepare`\n(SB-16, TM-13a), and every timed Action names one through its\n`AbsoluteDeadline`. `arm` resolves the entry's `SpecTime` and substitutes it.\nWithout the split, `ExperimentSpec.schedule` could hold no timed Action at all,\nwhich is the one thing it exists for.\n\nRule: RS-49a.",
+      "description": "An Action as a Spec schedules it: the Action without its time field, and without\na class for an `UpdateParameter` (RS-49a, RS-52).\n\nA Spec cannot name a `ClockDomainId`, because domains are allocated at `prepare`\n(SB-16, TM-13a), and every timed Action names one through its\n`AbsoluteDeadline`. `arm` resolves the entry's `SpecTime` and substitutes it.\nA parameter change's class is not a time and is not stated here: the target's\nown declaration holds it, and admission reads it there (KC-24 step 5; pre-freeze\nitem 3). Without the split, `ExperimentSpec.schedule` could hold no timed Action\nat all, which is the one thing it exists for.\n\nRule: RS-49a.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -73,12 +73,8 @@
         },
         {
           "additionalProperties": false,
-          "description": "The `update_parameter` Action without `at`; `arm` substitutes the resolved\ndeadline, so a scheduled parameter change takes effect at the instant the\nSpec named (RS-49a).",
+          "description": "The `update_parameter` Action without `at`; `arm` substitutes the resolved\ndeadline, so a scheduled parameter change takes effect at the instant the\nSpec named (RS-49a). It states no class: the parameter's declared update\nclass is read at admission, from the target's own declaration (KC-24 step 5,\nRS-52; pre-freeze item 3).",
           "properties": {
-            "class": {
-              "$ref": "#/$defs/UpdateClass",
-              "description": "The declared update class."
-            },
             "key": {
               "$ref": "#/$defs/Key",
               "description": "Which parameter."
@@ -100,8 +96,7 @@
             "kind",
             "target",
             "key",
-            "value",
-            "class"
+            "value"
           ],
           "type": "object"
         },

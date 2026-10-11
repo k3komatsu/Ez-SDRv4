@@ -25,12 +25,8 @@
       "oneOf": [
         {
           "additionalProperties": false,
-          "description": "To an `UpdateParameter` on the named key, as `sink.capture` does (RS-14).",
+          "description": "To an `UpdateParameter` on the named key, as `sink.capture` does (RS-14).\nIt states no class: the parameter's declared update class comes from its\nown declaration at admission (KC-24 step 5, RS-52; pre-freeze item 3).",
           "properties": {
-            "class": {
-              "$ref": "#/$defs/UpdateClass",
-              "description": "Under which update class (RS-52)."
-            },
             "key": {
               "$ref": "#/$defs/Key",
               "description": "Which parameter to set."
@@ -42,8 +38,7 @@
           },
           "required": [
             "kind",
-            "key",
-            "class"
+            "key"
           ],
           "type": "object"
         },
