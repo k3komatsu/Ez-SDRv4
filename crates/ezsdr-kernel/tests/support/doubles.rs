@@ -132,6 +132,16 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
                 coercion_default: CoercionPolicy::Reject,
                 update_class: Some(ezsdr_kernel::module_api::UpdateClass::Cold),
             },
+            // A `List` declaration, so `kind_accepts`' outer-kind rule for List/Map
+            // has a carrier (item 3; review P2-2). Changeable, so a schedule entry can
+            // carry a value for it.
+            KeyDecl {
+                key: key("test.list"),
+                kind: ValueKind::List,
+                coercible: false,
+                coercion_default: CoercionPolicy::Reject,
+                update_class: Some(ezsdr_kernel::module_api::UpdateClass::HardwareTimed),
+            },
         ],
         event_kinds: vec![
             EventKindDecl {
@@ -987,7 +997,7 @@ pub fn recorder_component(contract: DataContractId) -> ComponentDescriptor {
         params: vec![ParamDecl {
             key: key("test.capture"),
             schema: serde_json::json!({ "type": "boolean" }),
-            update_class: UpdateClass::BlockBoundary,
+            update_class: Some(UpdateClass::BlockBoundary),
             default: Value::from(false),
         }],
         timing: ComponentTiming::default(),

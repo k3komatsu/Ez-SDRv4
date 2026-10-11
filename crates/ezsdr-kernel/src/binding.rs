@@ -11,7 +11,7 @@ use crate::id::ResourceId;
 use crate::module_api::{IslandDecl, ModuleRef, ProfileRef};
 use crate::spec::{
     CapabilityValue, Coercion, Constraint, Ident, Key, KeyDecl, Namespace, RejectedConstraint,
-    Scalar, SpecError, Value, ValueKind, Warning, check_top_level, check_version,
+    Scalar, SpecError, Value, Warning, check_top_level, check_version,
 };
 
 /// Tests every candidate so a later kind mismatch is not hidden by an earlier hit (SB-6).
@@ -298,14 +298,7 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
 /// Refuses a constraint whose scalars are not of the `KeyDecl`'s kind (SB-6).
 pub fn check_constraint_kind(decl: &KeyDecl, c: &Constraint) -> Result<(), SpecError> {
     for v in c.values() {
-        let ok = matches!(
-            (decl.kind, v.kind()),
-            (ValueKind::Int, ValueKind::Int)
-                | (ValueKind::Num, ValueKind::Num | ValueKind::Int)
-                | (ValueKind::Str, ValueKind::Str)
-                | (ValueKind::Bool, ValueKind::Bool)
-        );
-        if !ok {
+        if !crate::spec::kind_accepts(decl.kind, v.kind()) {
             return Err(SpecError::KeyShape {
                 key: decl.key.to_string(),
                 expected: format!("{:?}", decl.kind),
@@ -314,6 +307,21 @@ pub fn check_constraint_kind(decl: &KeyDecl, c: &Constraint) -> Result<(), SpecE
         }
     }
     Ok(())
+}
+
+/// Refuses a `Value` that is not of the `KeyDecl`'s kind (SB-2, SB-6). One rule,
+/// shared by the positions a `Value` meets a declaration at `validate()` — an
+/// output's `params` and a schedule update; admission joins in 3b, with KC-24's
+/// requested and coerced values (pre-freeze item 3).
+pub(crate) fn check_value_kind(decl: &KeyDecl, value: &Value) -> Result<(), SpecError> {
+    if crate::spec::kind_accepts(decl.kind, value.kind()) {
+        return Ok(());
+    }
+    Err(SpecError::KeyShape {
+        key: decl.key.to_string(),
+        expected: format!("{:?}", decl.kind),
+        found: format!("{:?}", value.kind()),
+    })
 }
 
 // ---------------------------------------------------------------- admission checks

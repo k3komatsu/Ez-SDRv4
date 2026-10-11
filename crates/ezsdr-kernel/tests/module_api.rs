@@ -281,14 +281,10 @@ fn ma_33_caret_table() {
 fn ma_34_key_prefix_refused() {
     let mut reg = ModuleRegistry::new();
     reg.register_vocabulary(test_vocabulary()).expect("fresh");
-    assert!(reg.key_decl(&key("test.count")).is_ok());
-    let err = reg
-        .key_decl(&key("radio.rx.channels"))
-        .expect_err("no Vocabulary owns `radio`");
-    assert!(
-        err.message.contains("radio.rx.channels"),
-        "the refusal names the prefix: {err}"
-    );
+    assert!(reg.key_decl(&key("test.count")).is_some());
+    // The refusal is the caller's now (item 3): the registry answers `None`, and
+    // `validate()` names it as `UnknownKeyPrefix` with the key.
+    assert!(reg.key_decl(&key("radio.rx.channels")).is_none());
 }
 
 #[test]
@@ -768,7 +764,7 @@ fn component(name: &str) -> ComponentDescriptor {
         params: vec![ParamDecl {
             key: key("test.flag"),
             schema: serde_json::json!({ "type": "boolean" }),
-            update_class: UpdateClass::BlockBoundary,
+            update_class: Some(UpdateClass::BlockBoundary),
             default: Value::from(false),
         }],
         timing: ComponentTiming::default(),

@@ -1,5 +1,4 @@
 use ezsdr_kernel::spec::Scalar;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use ezsdr_kernel::binding::AdmissionCheckRegistry;
@@ -73,7 +72,7 @@ fn hd_06_vocabulary() {
     let compiled = ezsdr_kernel::session::compile(
         &action,
         &registry,
-        &BTreeMap::new(),
+        &ezsdr_kernel::spec::ExperimentSpec::default(),
         TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0),
         None,
     )

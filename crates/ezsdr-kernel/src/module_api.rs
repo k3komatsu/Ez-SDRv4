@@ -424,8 +424,13 @@ pub struct ParamDecl {
     pub key: Key,
     /// Its schema, opaque to the Kernel (MA-36).
     pub schema: serde_json::Value,
-    /// How it may be changed (MA-24, RS-52).
-    pub update_class: UpdateClass,
+    /// How it may be changed (MA-24, RS-52). `None` means **fixed for the Run**: no
+    /// update is admitted for this key; a component's parameters are declared by the
+    /// component that owns them (RS-52, MA-36).
+    // Pre-freeze item 3 (owner, 2026-10-11): `None` is fixed for the Run, and the
+    // absence is not a reason to consult a Vocabulary `KeyDecl` instead.
+    #[serde(default)]
+    pub update_class: Option<UpdateClass>,
     /// Its default value (MA-36).
     pub default: Value,
 }
@@ -517,6 +522,18 @@ impl ComponentDescriptor {
                 return Err(reject(format!(
                     "MA-37: contract {} is not registered",
                     p.contract
+                )));
+            }
+        }
+        // A parameter key declared twice in one component would leave whichever
+        // `ParamDecl` a reader happens to find: the update class and the default would
+        // silently be one of two (item 3). Two components may declare one key.
+        let mut seen_params = BTreeSet::new();
+        for p in &self.params {
+            if !seen_params.insert(&p.key) {
+                return Err(reject(format!(
+                    "MA-37: duplicate parameter key {:?}",
+                    p.key
                 )));
             }
         }

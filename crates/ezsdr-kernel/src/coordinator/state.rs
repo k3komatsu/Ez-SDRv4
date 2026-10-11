@@ -5,7 +5,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, TryLockError};
 
 use crate::binding::{AdmissionCheckRegistry, BindingProfile};
 use crate::contract::ContractRegistry;
-use crate::event::{ActionId, Event, EventCollector, EventKind, EventSource, Target};
+use crate::event::{ActionId, Event, EventCollector, EventKind, EventSource};
 use crate::id::{ClockDomainId, IslandId, ResourceId, RunId};
 use crate::manifest::{ArtifactRef, BindingSection, RunKind, SpecSection};
 use crate::module_api::{
@@ -156,20 +156,7 @@ pub(super) struct Context {
     pub(super) contracts: ContractRegistry,
     pub(super) clocks: Arc<ClockRegistry>,
     pub(super) host_clock: Arc<dyn HostClock>,
-    pub(super) component_classes: BTreeMap<Ident, BTreeMap<Key, crate::module_api::UpdateClass>>,
     pub(super) outputs: BTreeSet<Ident>,
-}
-
-impl Context {
-    pub(super) fn component_classes_for(
-        &self,
-        target: &Target,
-    ) -> Option<&BTreeMap<Key, crate::module_api::UpdateClass>> {
-        match target {
-            Target::Component { component } => self.component_classes.get(component),
-            _ => None,
-        }
-    }
 }
 
 /// Set once, right after `plan()` succeeds (KC-13, KC-23).

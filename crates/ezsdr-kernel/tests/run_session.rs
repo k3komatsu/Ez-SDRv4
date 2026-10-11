@@ -1077,15 +1077,6 @@ fn test_sink() -> TestSink {
     )
 }
 
-fn declared_classes() -> BTreeMap<Key, UpdateClass> {
-    [
-        (key("test.capture"), UpdateClass::BlockBoundary),
-        (key("test.flag"), UpdateClass::BlockBoundary),
-    ]
-    .into_iter()
-    .collect()
-}
-
 #[test]
 fn rs_12_session_implicit_spec_hashed() {
     let reg = registry();
@@ -1136,7 +1127,7 @@ fn rs_12_bare_connect_then_capture_succeeds() {
             .collect(),
     };
     let compiled =
-        compile(&action, &reg, &declared_classes(), t(0), None).expect("compiles");
+        compile(&action, &reg, &ExperimentSpec::default(), t(0), None).expect("compiles");
     assert_eq!(compiled.actions.len(), 1);
     assert!(matches!(
         compiled.actions[0],
@@ -1158,7 +1149,7 @@ fn rs_14_capture_compiles_to_update_parameter() {
             .collect(),
     };
     let compiled =
-        compile(&action, &reg, &declared_classes(), t(0), None).expect("compiles");
+        compile(&action, &reg, &ExperimentSpec::default(), t(0), None).expect("compiles");
     match &compiled.actions[0] {
         Action::UpdateParameter {
             target,
@@ -1187,7 +1178,7 @@ fn rs_14_capture_compiles_to_update_parameter() {
         at: Some(t(100)),
         params: [(key("test.capture"), Value::from(true))].into_iter().collect(),
     };
-    let compiled = compile(&named_radio, &reg, &declared_classes(), t(0), None).expect("compiles");
+    let compiled = compile(&named_radio, &reg, &ExperimentSpec::default(), t(0), None).expect("compiles");
     assert!(matches!(&compiled.actions[0], Action::UpdateParameter { target: Target::Resource { .. }, .. }));
 }
 
@@ -1201,7 +1192,7 @@ fn rs_13a_unknown_vocabulary_verb_rejected() {
         at: None,
         params: BTreeMap::new(),
     };
-    let violations = compile(&action, &reg, &declared_classes(), t(0), None)
+    let violations = compile(&action, &reg, &ExperimentSpec::default(), t(0), None)
         .expect_err("no loaded Vocabulary claims it");
     assert!(violations[0].reason.contains("radio.start_repeat"));
 }
@@ -1218,8 +1209,11 @@ fn rs_17_provider_parameter_class_comes_from_its_key_decl() {
         key: key("test.gain"),
         value: Value::num(20.0).unwrap(),
     };
-    // Nothing in the caller's map: the class comes from the KeyDecl alone.
-    let compiled = compile(&gain, &reg, &BTreeMap::new(), t(0), None).expect("compiles");
+    // The class comes from the KeyDecl alone: a `{resource}` target reads no map and
+    // no component declaration (item 3). The runtime refusals are pinned where they
+    // live: KC-24 step 5 through `kc_24_component_update_classes_belong_to_the_target`
+    // and `rs_17_a_component_class_comes_from_its_own_declaration`.
+    let compiled = compile(&gain, &reg, &ExperimentSpec::default(), t(0), None).expect("compiles");
     assert!(matches!(
         &compiled.actions[0],
         Action::UpdateParameter {
@@ -1229,32 +1223,6 @@ fn rs_17_provider_parameter_class_comes_from_its_key_decl() {
         }
     ));
 
-    // And the Admitter agrees, so the two paths cannot disagree about one key.
-    let checks = AdmissionCheckRegistry::new();
-    let environment = BTreeMap::new();
-    let classes = BTreeMap::new();
-    let spec_coercion = BTreeMap::new();
-    let admitter = Admitter {
-        checks: &checks,
-        environment: &environment,
-        declared_classes: &classes,
-        spec_coercion: &spec_coercion,
-        registry: &reg,
-        is_session: true,
-    };
-    let proposed: BTreeMap<Key, Value> =
-        [(key("test.gain"), Value::num(20.0).unwrap())].into_iter().collect();
-    assert!(
-        admitter
-            .admit(
-                &BTreeMap::new(),
-                &[(id("radio"), proposed.clone())].into_iter().collect(),
-                &[],
-                CheckStage::Runtime
-            )
-            .is_ok()
-    );
-
     // A key whose KeyDecl declares no class is still not changeable during a Run,
     // so the absent value means "not changeable" and not "any class" (RS-17).
     let flag = SessionAction::SetParameter {
@@ -1262,7 +1230,52 @@ fn rs_17_provider_parameter_class_comes_from_its_key_decl() {
         key: key("test.flag"),
         value: Value::from(true),
     };
-    assert!(compile(&flag, &reg, &BTreeMap::new(), t(0), None).is_err());
+    assert!(compile(&flag, &reg, &ExperimentSpec::default(), t(0), None).is_err());
+}
+
+#[test]
+fn rs_17_a_component_class_comes_from_its_own_declaration() {
+    // P1-4 (review): the Session compile path reads `ExperimentSpec::declared_class`,
+    // so a component's own `ParamDecl` is the only source — a fixed (missing class)
+    // or absent declaration is refused even when the key has a Vocabulary `KeyDecl`
+    // with a class (`test.gain` is `hardware_timed`).
+    let reg = registry();
+    let cf32 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
+    let component = |class: Option<UpdateClass>| {
+        let mut c = support::recorder_component(cf32.clone());
+        c.params[0].key = key("test.gain");
+        c.params[0].update_class = class;
+        c.params[0].default = Value::num(0.0).unwrap();
+        c.params[0].schema = serde_json::json!({ "type": "number" });
+        c
+    };
+    let spec_with = |class: Option<UpdateClass>| {
+        let mut spec = ExperimentSpec::default();
+        spec.graph.components.insert(id("proc"), component(class));
+        spec
+    };
+    let action = SessionAction::SetParameter {
+        target: Target::Component {
+            component: id("proc"),
+        },
+        key: key("test.gain"),
+        value: Value::num(3.0).unwrap(),
+    };
+    // The component's declaration is the class, not the Vocabulary's.
+    let compiled = compile(&action, &reg, &spec_with(Some(UpdateClass::Cold)), t(0), None)
+        .expect("the component declares cold");
+    assert!(matches!(
+        &compiled.actions[0],
+        Action::UpdateParameter {
+            class: UpdateClass::Cold,
+            ..
+        }
+    ));
+    // A fixed declaration is refused, and does not fall back to `test.gain`'s
+    // `KeyDecl` (`hardware_timed`), which would admit it.
+    let violations = compile(&action, &reg, &spec_with(None), t(0), None)
+        .expect_err("the component declares it fixed");
+    assert_eq!(violations[0].check, ns("ezsdr.update_class"));
 }
 
 #[test]
@@ -1281,7 +1294,7 @@ fn rs_19_capture_asap_records_applied_time() {
     let compiled = compile(
         &action,
         &reg,
-        &declared_classes(),
+        &ExperimentSpec::default(),
         t(4_242),
         None,
     )
@@ -1309,7 +1322,7 @@ fn rs_49_update_parameter_carries_its_instant() {
             .collect(),
     };
     let compiled =
-        compile(&asap, &reg, &declared_classes(), t(4_242), None).expect("compiles");
+        compile(&asap, &reg, &ExperimentSpec::default(), t(4_242), None).expect("compiles");
     assert!(matches!(
         &compiled.actions[0],
         Action::UpdateParameter { at: Some(at), .. } if *at == AbsoluteDeadline::new(t(4_242))
@@ -1317,14 +1330,16 @@ fn rs_49_update_parameter_carries_its_instant() {
 
     // A bare SetParameter has no time field to leave empty, so it compiles to an
     // Action with none and records no coercion — and is *not* refused, which a
-    // mandatory `at` would have done to Vision §3's `sdr.rx.gain = 20`.
+    // mandatory `at` would have done to Vision §3's `sdr.rx.gain = 20`. `test.gain`
+    // is a Provider key whose `KeyDecl` declares `hardware_timed` (item 3: the class
+    // comes from the target's own declaration).
     let bare = SessionAction::SetParameter {
         target: support::target("radio"),
-        key: key("test.flag"),
-        value: Value::from(true),
+        key: key("test.gain"),
+        value: Value::num(20.0).unwrap(),
     };
     let compiled =
-        compile(&bare, &reg, &declared_classes(), t(7), None).expect("compiles");
+        compile(&bare, &reg, &ExperimentSpec::default(), t(7), None).expect("compiles");
     assert!(matches!(
         &compiled.actions[0],
         Action::UpdateParameter { at: None, .. }
@@ -1360,7 +1375,7 @@ fn rs_19_vocabulary_action_carries_a_time() {
         params: BTreeMap::new(),
     };
     let compiled =
-        compile(&timed, &reg, &declared_classes(), t(0), None).expect("compiles");
+        compile(&timed, &reg, &ExperimentSpec::default(), t(0), None).expect("compiles");
     match &compiled.actions[0] {
         Action::Command { at: Some(at), .. } => {
             assert_eq!(*at, AbsoluteDeadline::new(t(900)));
@@ -1421,7 +1436,7 @@ fn rs_50_stop_with_and_without_a_target() {
             target: Some(support::target("radio")),
         },
         &reg,
-        &declared_classes(),
+        &ExperimentSpec::default(),
         t(0),
         None,
     )
@@ -1432,7 +1447,7 @@ fn rs_50_stop_with_and_without_a_target() {
     let without = compile(
         &SessionAction::Stop { target: None },
         &reg,
-        &declared_classes(),
+        &ExperimentSpec::default(),
         t(0),
         None,
     )
@@ -1450,14 +1465,10 @@ fn rs_16_rejected_action_not_dispatched() {
             .into_iter()
             .collect();
     let reg = registry();
-    let classes: BTreeMap<Key, UpdateClass> = [(key("test.grid"), UpdateClass::BlockBoundary)]
-        .into_iter()
-        .collect();
     let spec_coercion = BTreeMap::new();
     let admitter = Admitter {
         checks: &checks,
         environment: &environment,
-        declared_classes: &classes,
         spec_coercion: &spec_coercion,
         registry: &reg,
         is_session: true,
@@ -1495,39 +1506,20 @@ fn rs_16_rejected_action_not_dispatched() {
 
 #[test]
 fn rs_17_undeclared_update_class_rejected() {
-    let checks = AdmissionCheckRegistry::new();
-    let environment = BTreeMap::new();
+    // RS-17, RS-52 (item 3): a class comes from the target's own declaration, and
+    // `test.flag`'s `KeyDecl` declares none, so the update is refused. The runtime
+    // carrier is KC-24's step 5, which the coordinator tests drive end to end; the
+    // `Admitter` no longer checks a class at all.
     let reg = registry();
-    let classes = BTreeMap::new();
-    let spec_coercion = BTreeMap::new();
-    let admitter = Admitter {
-        checks: &checks,
-        environment: &environment,
-        declared_classes: &classes,
-        spec_coercion: &spec_coercion,
-        registry: &reg,
-        is_session: true,
-    };
-    let proposed: BTreeMap<Key, Value> = [(key("test.flag"), Value::from(true))]
-        .into_iter()
-        .collect();
-    let violations = admitter
-        .admit(
-            &BTreeMap::new(),
-            &[(id("radio"), proposed.clone())].into_iter().collect(),
-            &[],
-            CheckStage::Runtime,
-        )
-        .expect_err("no declared class");
-    assert!(violations[0].reason.contains("update class"));
-
-    // Compilation refuses it too, so an Executor never receives one.
     let action = SessionAction::SetParameter {
         target: support::target("radio"),
         key: key("test.flag"),
         value: Value::from(true),
     };
-    assert!(compile(&action, &reg, &BTreeMap::new(), t(0), None).is_err());
+    let violations = compile(&action, &reg, &ExperimentSpec::default(), t(0), None)
+        .expect_err("no declared class");
+    assert_eq!(violations[0].check, ns("ezsdr.update_class"));
+    assert!(violations[0].reason.contains("no declared update class"));
 }
 
 #[test]
@@ -1576,7 +1568,7 @@ fn rs_44a_waveform_ingested_before_admission() {
     let compiled: Compiled = compile(
         &action,
         &reg,
-        &declared_classes(),
+        &ExperimentSpec::default(),
         t(0),
         Some(waveform.clone()),
     )
@@ -1593,7 +1585,7 @@ fn rs_44a_waveform_ingested_before_admission() {
         other => panic!("expected a TxBurst, got {other:?}"),
     }
     // An Action whose ArtifactRef resolves to nothing is rejected.
-    assert!(compile(&action, &reg, &declared_classes(), t(0), None).is_err());
+    assert!(compile(&action, &reg, &ExperimentSpec::default(), t(0), None).is_err());
 }
 
 // ---------------------------------------------------------------- the Kernel Action set
@@ -1938,7 +1930,7 @@ fn rs_13a_a_session_value_with_a_non_ascii_key_is_refused_at_compile() {
         key: key("test.flag"),
         value: bad.clone(),
     };
-    let violations = compile(&action, &reg, &declared_classes(), t(0), None)
+    let violations = compile(&action, &reg, &ExperimentSpec::default(), t(0), None)
         .expect_err("refused before it can be logged");
     assert!(
         violations[0].reason.contains("non-ASCII"),
@@ -1954,7 +1946,7 @@ fn rs_13a_a_session_value_with_a_non_ascii_key_is_refused_at_compile() {
         at: Some(t(1)),
         params: [(key("test.capture"), bad)].into_iter().collect(),
     };
-    assert!(compile(&vocab, &reg, &declared_classes(), t(0), None).is_err());
+    assert!(compile(&vocab, &reg, &ExperimentSpec::default(), t(0), None).is_err());
 }
 
 #[test]
@@ -2197,7 +2189,7 @@ fn rs_14_the_kernel_supplies_no_vocabulary_value_or_late_policy() {
         at: Some(t(100)),
         params: BTreeMap::new(),
     };
-    let violations = compile(&without, &reg, &declared_classes(), t(0), None)
+    let violations = compile(&without, &reg, &ExperimentSpec::default(), t(0), None)
         .expect_err("no value, and the Kernel invents none");
     assert!(
         violations
@@ -2217,7 +2209,7 @@ fn rs_14_the_kernel_supplies_no_vocabulary_value_or_late_policy() {
     let compiled = compile(
         &burst,
         &reg,
-        &declared_classes(),
+        &ExperimentSpec::default(),
         t(0),
         Some(artifact("wave")),
     )
@@ -2295,7 +2287,7 @@ fn rs_13_every_session_action_compiles_to_its_kernel_form() {
         (SessionAction::Stop { target: None }, ControlOp::StopRun),
     ];
     for (action, want) in cases {
-        let compiled = compile(&action, &reg, &declared_classes(), t(0), None)
+        let compiled = compile(&action, &reg, &ExperimentSpec::default(), t(0), None)
             .unwrap_or_else(|v| panic!("{action:?} compiles: {v:?}"));
         assert_eq!(compiled.control.as_ref(), Some(&want), "{action:?}");
         assert!(
@@ -2312,7 +2304,7 @@ fn rs_13_every_session_action_compiles_to_its_kernel_form() {
             target: Some(support::target("radio")),
         },
         &reg,
-        &declared_classes(),
+        &ExperimentSpec::default(),
         t(0),
         None,
     )

@@ -196,13 +196,6 @@ pub(super) fn assemble(
     };
     let machine = RunStateMachine::new(&*assembly.host_clock);
     let id = RunId::generate();
-    let component_classes = spec
-        .graph
-        .components
-        .iter()
-        .map(|(name, component)| (name.clone(), component.params.iter()
-            .map(|param| (param.key.clone(), param.update_class)).collect()))
-        .collect();
     let context = Context {
         kind,
         id,
@@ -217,7 +210,6 @@ pub(super) fn assemble(
         contracts: assembly.contracts,
         clocks: assembly.clocks,
         host_clock: assembly.host_clock,
-        component_classes,
         outputs,
     };
     let shared = Arc::new(Shared {
@@ -1371,15 +1363,10 @@ pub(super) fn submit(
         Ok(earliest) => earliest,
         Err(violation) => return rejected(run, now, action, vec![violation]),
     };
-    let empty_classes = BTreeMap::new();
-    let declared_classes = match &action {
-        SessionAction::SetParameter { target, .. } => run.shared.ctx.component_classes_for(target),
-        _ => None,
-    }.unwrap_or(&empty_classes);
     let mut compiled = match crate::session::compile(
         &action,
         &run.shared.ctx.registry,
-        declared_classes,
+        &run.shared.ctx.spec,
         earliest,
         waveform,
     ) {
@@ -1803,6 +1790,10 @@ pub(super) fn resolve_target(
 ) -> Result<(Option<ResourceId>, Inst, Ident), String> {
     let routing = shared.routing().expect("plan was installed");
     let refused = || format!("KC-23: {target} is not declared by this Spec");
+    // No declaration check stands here: `validate` classified the target, and the
+    // routing this reads was built from that validated plan, so it cannot name a
+    // role the Spec does not declare (review P2-4: a call to `classify_target` here
+    // was unkillable, because every wrong role is already refused below).
     match target {
         Target::Resource { resource, path } => {
             let (Some(node), Some(instance @ Inst::Provider(_))) = (

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::binding::{AdmissionCheckRegistry, BindingProfile, CheckStage, Violation};
 use crate::event::{Action, ActionId, Target};
 use crate::hash::ContentHash;
-use crate::module_api::{CompileRule, ModuleRegistry, Role, UpdateClass};
+use crate::module_api::{CompileRule, ModuleRegistry, Role};
 use crate::plan::{apply_coercion, coercion_policy};
 use crate::run::RunError;
 use crate::spec::{
@@ -229,15 +229,14 @@ pub struct Admitted {
     pub warnings: Vec<Warning>,
 }
 
-/// The one admission path, shared by `validate()`, `prepare()` and every Session
-/// Action.
+/// The admission stages' shared check set: the registered admission checks of
+/// SB-30's points and the coercion policy of SB-45, in that order.
 ///
-/// `admit(proposed, stage)` applies the same checks in the same order at every
-/// stage: the registered admission checks of SB-30, the coercion policy of SB-45,
-/// and the parameter's declared update class. `validate()` calls it with a Spec's
-/// requested configuration, `prepare()` with the applied one, and a Session with
-/// one Action's key and value. What is shared is the check set and its order; the
-/// call sites differ only in what they propose.
+/// `validate()` calls it with a Spec's requested configuration, `prepare()` with the
+/// applied one, and admission with one Action's key and value. The parameter's
+/// declared update class is **not** here: it is `ExperimentSpec::declared_class`, and
+/// the runtime refusal that reads it is KC-24's step 5, which runs before this check
+/// set (pre-freeze item 3).
 ///
 /// Rule: RS-16, RS-17.
 pub struct Admitter<'a> {
@@ -245,10 +244,6 @@ pub struct Admitter<'a> {
     pub checks: &'a AdmissionCheckRegistry,
     /// The profile's `environment`, whose sections the checks read (SB-26).
     pub environment: &'a BTreeMap<Namespace, serde_json::Value>,
-    /// The declared update class per component parameter. A key absent here is
-    /// looked up in its Vocabulary's `KeyDecl`, which is where a Provider parameter
-    /// declares its class; a key declared in neither is rejected (RS-52, SB-2).
-    pub declared_classes: &'a BTreeMap<Key, UpdateClass>,
     /// The Spec's `policies.coercion` overrides (SB-19).
     pub spec_coercion: &'a BTreeMap<Key, CoercionPolicy>,
     /// The registry, for each key's `KeyDecl` default (SB-45, MA-34).
@@ -287,7 +282,7 @@ impl Admitter<'_> {
             let policy = coercion_policy(
                 self.spec_coercion.get(&c.key).copied(),
                 self.is_session,
-                self.registry.key_decl(&c.key).ok(),
+                self.registry.key_decl(&c.key),
             );
             match apply_coercion(policy, c) {
                 Ok(None) => {}
@@ -306,20 +301,6 @@ impl Admitter<'_> {
                         key: Some(c.key.clone()),
                         requested: Some(c.requested.clone()),
                         reason: e.to_string(),
-                    }]);
-                }
-            }
-        }
-        // 3. the parameter's declared update class. An update through an undeclared
-        //    class is rejected here, so an Executor never receives one (RS-17, RS-52).
-        if stage == CheckStage::Runtime {
-            for (key, value) in proposed.values().flatten() {
-                if declared_class(key, self.declared_classes, self.registry).is_none() {
-                    return Err(vec![Violation {
-                        check: Namespace::parse("ezsdr.update_class").expect("a valid literal"),
-                        key: Some(key.clone()),
-                        requested: Some(value.clone()),
-                        reason: format!("RS-17: {key} has no declared update class"),
                     }]);
                 }
             }
@@ -374,21 +355,11 @@ pub enum ControlOp {
 /// Run. A `Vocabulary` action compiles as its registering Vocabulary declares. A
 /// verb whose namespace no loaded Vocabulary claims is rejected and logged.
 ///
-/// The update class declared for a key: from the caller's map, which carries a
-/// component's `params`, or else from the key's `KeyDecl` in a registered
-/// Vocabulary, which is where a Provider parameter declares it. `None` means no
-/// declaration exists and RS-17 rejects the change (RS-17, RS-52, SB-2, MA-35).
-fn declared_class(
-    key: &Key,
-    declared: &BTreeMap<Key, UpdateClass>,
-    registry: &ModuleRegistry,
-) -> Option<UpdateClass> {
-    declared
-        .get(key)
-        .copied()
-        .or_else(|| registry.key_decl(key).ok().and_then(|d| d.update_class))
-}
-
+/// The update class declared for a key is `ExperimentSpec::declared_class`: the
+/// target's own declaration, with no caller-supplied map (pre-freeze item 3). A
+/// `None` means the declaration is fixed or missing, and RS-17 rejects the change
+/// (RS-17, RS-52, SB-2, MA-35).
+///
 /// `earliest` is the instant an untimed `Vocabulary` action is admitted at: the
 /// applied time is recorded as a coercion of the requested "as soon as possible"
 /// (RS-19).
@@ -397,7 +368,7 @@ fn declared_class(
 pub fn compile(
     action: &SessionAction,
     registry: &ModuleRegistry,
-    declared_classes: &BTreeMap<Key, UpdateClass>,
+    spec: &ExperimentSpec,
     earliest: TimePoint,
     waveform: Option<crate::manifest::ArtifactRef>,
 ) -> Result<Compiled, Vec<Violation>> {
@@ -419,7 +390,7 @@ pub fn compile(
     }
     match action {
         SessionAction::SetParameter { target, key, value } => {
-            let class = declared_class(key, declared_classes, registry).ok_or_else(|| {
+            let class = spec.declared_class(target, key, registry).ok_or_else(|| {
                 reject(
                     "ezsdr.update_class",
                     format!("RS-17: {key} has no declared update class"),

@@ -148,7 +148,7 @@ pub(super) fn collect_prepare(
             let policy = super::coercion::coercion_policy(
                 spec_coercion.get(&c.key).copied(),
                 is_session,
-                registry.key_decl(&c.key).ok(),
+                registry.key_decl(&c.key),
             );
             match super::coercion::apply_coercion(policy, c) {
                 Ok(None) => {}

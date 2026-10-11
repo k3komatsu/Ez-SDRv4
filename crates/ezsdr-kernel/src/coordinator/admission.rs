@@ -72,18 +72,13 @@ pub(super) fn admit_with(
         }
         None => (None, None, None),
     };
-    let empty_classes = BTreeMap::new();
-    let declared_classes = match (&action, inst) {
-        (Action::UpdateParameter { target, .. }, Some(Inst::Executor(_))) => {
-            shared.ctx.component_classes_for(target)
-        }
-        _ => None,
-    }.unwrap_or(&empty_classes);
-    if let Action::UpdateParameter { key, class, .. } = &action {
-        // SB-2: a component declaration cannot override a Provider/Sink key.
-        let declared = declared_classes.get(key).copied()
-        .or_else(|| shared.ctx.registry.key_decl(key).ok().and_then(|d| d.update_class));
-        match declared {
+    if let Action::UpdateParameter { target, key, class, .. } = &action {
+        // RS-52 (item 3): the declared class comes from the target's own declaration
+        // — a `{resource}`/`{output}` key from its `KeyDecl`, a `{component}` key from
+        // that component's `ParamDecl` — through the one shared lookup, and a fixed or
+        // missing component declaration is not resolved through a Vocabulary
+        // declaration.
+        match shared.ctx.spec.declared_class(target, key, &shared.ctx.registry) {
             Some(declared) if declared == *class => {}
             Some(declared) => return Err(vec![violation(
                 "ezsdr.update_class",
@@ -247,7 +242,6 @@ pub(super) fn admit_with(
     let result = Admitter {
         checks: &shared.ctx.checks,
         environment: &shared.ctx.profile.environment,
-        declared_classes,
         spec_coercion: &shared.ctx.spec.policies.coercion,
         registry: &shared.ctx.registry,
         is_session: shared.ctx.kind == crate::manifest::RunKind::Session,

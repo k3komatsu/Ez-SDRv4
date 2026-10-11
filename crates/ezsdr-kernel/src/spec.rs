@@ -7,8 +7,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::contract::PortRef;
-use crate::event::EventKind;
-use crate::module_api::ComponentDescriptor;
+use crate::event::{EventKind, Target};
+use crate::id::ResourceId;
+use crate::module_api::{ComponentDescriptor, ModuleRegistry, UpdateClass};
 use crate::policy::Reaction;
 use crate::stream::BackPressure;
 
@@ -255,6 +256,15 @@ impl Scalar {
             Scalar::Str(_) => ValueKind::Str,
         }
     }
+}
+
+/// Whether a declaration of `declared` accepts a found `found` (SB-2, SB-6): a `Num`
+/// declaration accepts an `Int` scalar too, and every other pair is the same kind.
+/// The two places a shape meets a declaration — a constraint's scalars at
+/// `validate()`, and a `Value` at `validate()` or admission — share this one rule
+/// (pre-freeze item 3).
+pub(crate) fn kind_accepts(declared: ValueKind, found: ValueKind) -> bool {
+    declared == found || (declared == ValueKind::Num && found == ValueKind::Int)
 }
 
 impl Value {
@@ -1064,30 +1074,162 @@ impl ExperimentSpec {
     }
 
     /// Refuses a key whose prefix belongs to no Vocabulary this Spec declares in
-    /// `requirements`, with `UnknownKeyPrefix` (SB-2, MA-34).
+    /// `requirements`, with `UnknownKeyPrefix` (SB-2, MA-34). One scan
+    /// ([`keyed_entries`](Self::keyed_entries)) covers every key position, so this
+    /// check and `validate`'s declaration check cannot see different positions
+    /// (pre-freeze item 3).
     pub fn check_key_prefixes(&self) -> Result<(), SpecError> {
         let declared: Vec<&Namespace> =
             self.requirements.vocabularies.iter().map(|v| &v.id).collect();
-        let ok = |k: &Key| k.is_extension() || declared.iter().any(|ns| k.has_prefix(ns));
-        for r in self.resources.values() {
-            for k in r.requires.keys().chain(r.needs.values().flat_map(|n| n.requires.keys())) {
-                if !ok(k) {
-                    return Err(SpecError::UnknownKeyPrefix { key: k.to_string() });
+        for entry in self.keyed_entries() {
+            let key = match &entry {
+                KeyedEntry::Constraint { key, .. }
+                | KeyedEntry::Output { key, .. }
+                | KeyedEntry::Coercion { key } => *key,
+                // A component's parameter key is owned by the component that declares
+                // it: no Vocabulary prefix is required (pre-freeze item 3).
+                KeyedEntry::ScheduledUpdate { target, key, .. } => {
+                    if matches!(target, Target::Component { .. }) {
+                        continue;
+                    }
+                    key
                 }
-            }
-        }
-        for o in &self.outputs {
-            for k in o.params.keys() {
-                if !ok(k) {
-                    return Err(SpecError::UnknownKeyPrefix { key: k.to_string() });
-                }
-            }
-        }
-        for k in self.policies.coercion.keys() {
-            if !ok(k) {
-                return Err(SpecError::UnknownKeyPrefix { key: k.to_string() });
+            };
+            if !key.is_extension() && !declared.iter().any(|ns| key.has_prefix(ns)) {
+                return Err(SpecError::UnknownKeyPrefix { key: key.to_string() });
             }
         }
         Ok(())
     }
+
+    /// Refuses a target the Spec does not declare in its own role (SB-16, KC-23): a
+    /// `{resource}` name, whose sub-path also keeps SB-1's grammar; an `{output}`
+    /// name; a `{component}` in the graph. `validate()` is the one caller: KC-23's
+    /// runtime resolution reads the routing built from that validated plan, so it
+    /// cannot name another role (review P2-4).
+    pub(crate) fn classify_target(&self, target: &Target) -> Result<(), String> {
+        match target {
+            Target::Resource { resource, path } => {
+                if !self.resources.contains_key(resource) {
+                    return Err(format!("{target} is not declared by this Spec"));
+                }
+                if !path.is_empty() {
+                    ResourceId::parse(path)
+                        .map_err(|error| format!("{target}: {error}"))?;
+                }
+                Ok(())
+            }
+            Target::Output { output } => {
+                if self.outputs.iter().any(|o| &o.id == output) {
+                    Ok(())
+                } else {
+                    Err(format!("{target} is not declared by this Spec"))
+                }
+            }
+            Target::Component { component } => {
+                if self.graph.components.contains_key(component) {
+                    Ok(())
+                } else {
+                    Err(format!("{target} is not declared by this Spec"))
+                }
+            }
+        }
+    }
+
+    /// The update class a key is declared under for `target` (RS-52, SB-2): a
+    /// `{resource}` or `{output}` target's key comes from its Vocabulary `KeyDecl`;
+    /// a `{component}` target's key from that component's own `ParamDecl`, with **no**
+    /// fallback to a `KeyDecl` when the declaration is missing or fixed. `None` means
+    /// no class is declared, and every caller refuses it. This is the one reference
+    /// to a declared update class, shared by `validate()` and admission (pre-freeze
+    /// item 3).
+    pub(crate) fn declared_class(
+        &self,
+        target: &Target,
+        key: &Key,
+        registry: &ModuleRegistry,
+    ) -> Option<UpdateClass> {
+        match target {
+            Target::Component { component } => self
+                .graph
+                .components
+                .get(component)?
+                .params
+                .iter()
+                .find(|p| &p.key == key)?
+                .update_class,
+            Target::Resource { .. } | Target::Output { .. } => {
+                registry.key_decl(key)?.update_class
+            }
+        }
+    }
+
+    /// Every key position of this Spec, with the context its checks read (SB-2,
+    /// SB-6, SB-16, RS-52). One iterator feeds the prefix check and `validate`'s
+    /// declaration check, so a position the one looks at the other cannot miss
+    /// (pre-freeze item 3).
+    pub(crate) fn keyed_entries(&self) -> impl Iterator<Item = KeyedEntry<'_>> {
+        let resources = self.resources.values().flat_map(|req| {
+            req.requires
+                .iter()
+                .map(|(key, constraint)| KeyedEntry::Constraint { key, constraint })
+                .chain(req.needs.values().flat_map(|sub| {
+                    sub.requires
+                        .iter()
+                        .map(|(key, constraint)| KeyedEntry::Constraint { key, constraint })
+                }))
+        });
+        let outputs = self.outputs.iter().flat_map(|output| {
+            output
+                .params
+                .iter()
+                .map(|(key, value)| KeyedEntry::Output { key, value })
+        });
+        let coercion = self
+            .policies
+            .coercion
+            .keys()
+            .map(|key| KeyedEntry::Coercion { key });
+        let schedule = self.schedule.iter().filter_map(|entry| match &entry.action {
+            crate::event::ActionTemplate::UpdateParameter { target, key, value, .. } => {
+                Some(KeyedEntry::ScheduledUpdate { target, key, value })
+            }
+            _ => None,
+        });
+        resources.chain(outputs).chain(coercion).chain(schedule)
+    }
+}
+
+/// One key position of a Spec (pre-freeze item 3).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum KeyedEntry<'a> {
+    /// A resource's `requires`, or one of its `needs`' `requires` (SB-12, SB-36).
+    Constraint {
+        /// The key.
+        key: &'a Key,
+        /// The constraint the key states.
+        constraint: &'a Constraint,
+    },
+    /// An output's `params` (SB-17).
+    Output {
+        /// The key.
+        key: &'a Key,
+        /// The value the output states.
+        value: &'a Value,
+    },
+    /// A `policies.coercion` key (SB-19).
+    Coercion {
+        /// The key.
+        key: &'a Key,
+    },
+    /// A schedule entry's `UpdateParameter`, whose target may be a component
+    /// (SB-16, RS-52).
+    ScheduledUpdate {
+        /// The target it updates.
+        target: &'a Target,
+        /// The key.
+        key: &'a Key,
+        /// The value it sets.
+        value: &'a Value,
+    },
 }

@@ -5,11 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::binding::{
     AdmissionResult, BindingProfile, CheckStage, Violation, check_constraint_kind,
+    check_value_kind,
 };
 use crate::event::Target;
 use crate::id::ResourceId;
 use crate::module_api::{ModuleRef, ModuleRegistry, Role};
-use crate::spec::{Constraint, ExperimentSpec, Ident, Key, Namespace, SpecError, Value};
+use crate::spec::{
+    Constraint, ExperimentSpec, Ident, Key, KeyedEntry, Namespace, SpecError, Value,
+};
 
 use super::CompileInputs;
 
@@ -24,7 +27,10 @@ pub(super) fn requested_violations(
     inputs: &CompileInputs<'_>,
 ) -> Vec<Violation> {
     // SB-30 (KA-4): one entry per fragment, never merged, so that two fragments naming
-    // one key are each judged by their own value.
+    // one key are each judged by their own value. A need's `Eq` values do not join its
+    // resource's entry (item 3): a need is a resolution to a node, not a value this
+    // fragment requests, and joining it let a need's value stand in a check's input
+    // for a fragment that never asked for it.
     let mut requested: BTreeMap<Ident, BTreeMap<Key, Value>> = BTreeMap::new();
     let eq_values = |requires: &BTreeMap<Key, Constraint>| -> Vec<(Key, Value)> {
         requires
@@ -36,14 +42,7 @@ pub(super) fn requested_violations(
             .collect()
     };
     for (name, r) in &spec.resources {
-        // The resource's needs are bound within its fragment (SB-36), so their values
-        // are the fragment's too; the resource's own value wins for a key both name.
-        let mut values: BTreeMap<Key, Value> = BTreeMap::new();
-        for need in r.needs.values() {
-            values.extend(eq_values(&need.requires));
-        }
-        values.extend(eq_values(&r.requires));
-        requested.insert(name.clone(), values);
+        requested.insert(name.clone(), eq_values(&r.requires).into_iter().collect());
     }
     for o in &spec.outputs {
         requested.insert(o.id.clone(), o.params.clone());
@@ -123,7 +122,7 @@ pub(super) fn validate(
         let policy = super::coercion::coercion_policy(
             spec.policies.coercion.get(&c.key).copied(),
             inputs.is_session,
-            inputs.registry.key_decl(&c.key).ok(),
+            inputs.registry.key_decl(&c.key),
         );
         match super::coercion::apply_coercion(policy, c) {
             Ok(None) => {}
@@ -422,6 +421,16 @@ pub(super) fn check_structure(
             })?;
     }
     check_bindings(spec, profile, inputs)?;
+    // MA-37: a descriptor is validated before anything reads its ports or its
+    // `ParamDecl`s, or a duplicate port name silently resolves a link to whichever
+    // came first and a duplicate parameter key reaches `declared_class` as RS-52
+    // rather than MA-37. The schedule loop below reads `ParamDecl`s, so this runs
+    // before it (review P2-5).
+    let contract_ids = inputs.contracts.ids();
+    for c in spec.graph.components.values() {
+        c.validate(&contract_ids)
+            .map_err(|e| SpecError::Structural { reason: e.message })?;
+    }
     // SB-16: a `SpecTime` is "a resource name plus an offset in **that resource's**
     // stream clock", so the name must be one the Spec declares. Nothing read
     // `spec.schedule` at all, so a clock name bound to nothing passed every stage and
@@ -440,19 +449,25 @@ pub(super) fn check_structure(
         // Spec the admission stage is `validate`, and nothing compared the two: a
         // schedule entry could state `hardware_timed` for a key that declares no class
         // at all, and the Action reached `arm` with a class nobody declared.
-        if let crate::event::ActionTemplate::UpdateParameter { key, class, .. } = &entry.action {
-            // The class comes from the key's `KeyDecl` and from nowhere else. SB-2:
-            // "This is where a **Provider** parameter's class is declared, and the
-            // only place it can be … whose parameters are Vocabulary keys and never a
-            // `ComponentDescriptor`'s `params`." A schedule entry's target is a Spec
-            // resource or an output by SB-16, checked just below, so it is never a
-            // component.
-            let declared = inputs
-                .registry
-                .key_decl(key)
-                .ok()
-                .and_then(|d| d.update_class);
-            match declared {
+        //
+        // SB-16, KC-23 (item 3): the target is classified first, so a target the Spec
+        // does not declare in its role is refused before anything reads a class.
+        // `validate` is the one classifier; the runtime routing is built from this
+        // validated plan (review P2-4).
+        if let Some(target) = entry.action.target() {
+            spec.classify_target(target).map_err(|reason| SpecError::Structural {
+                reason: format!("SB-16: schedule entry's target {reason}"),
+            })?;
+        }
+        if let crate::event::ActionTemplate::UpdateParameter { target, key, class, .. } =
+            &entry.action
+        {
+            // The class comes from the target's own declaration and from nowhere else
+            // (SB-2, RS-52, item 3): a `{resource}`/`{output}` target's key from its
+            // `KeyDecl`, a `{component}` target's key from that component's
+            // `ParamDecl`, and a fixed or missing component declaration is never
+            // resolved through a Vocabulary declaration.
+            match spec.declared_class(target, key, inputs.registry) {
                 None => {
                     return Err(SpecError::Structural {
                         reason: format!(
@@ -470,77 +485,75 @@ pub(super) fn check_structure(
                 Some(_) => {}
             }
         }
-        // SB-16: a Spec's target is **Spec-relative** — a resource or an output this
-        // Spec declares, by its role — so that one Spec runs on Mock and on hardware
-        // (§59, §61) without naming a device's own node tree. `arm` resolves it
-        // through `admission.matched`, as it resolves the `SpecTime`.
-        if let Some(target) = entry.action.target() {
-            let known = match target {
-                Target::Resource { resource, path } => {
-                    spec.resources.contains_key(resource)
-                        && (path.is_empty() || ResourceId::parse(path).is_ok())
-                }
-                Target::Output { output } => spec.outputs.iter().any(|o| &o.id == output),
-                Target::Component { .. } => false,
-            };
-            if !known {
-                return Err(SpecError::Structural {
-                    reason: format!(
-                        "SB-16: schedule entry's target {target} names no resource or output \
-                         this Spec declares"
-                    ),
-                });
-            }
-        }
     }
-    // MA-37: a descriptor is validated before anything reads its ports, or a
-    // duplicate port name silently resolves a link to whichever came first.
-    let contract_ids = inputs.contracts.ids();
-    for c in spec.graph.components.values() {
-        c.validate(&contract_ids)
-            .map_err(|e| SpecError::Structural { reason: e.message })?;
-    }
+    // MA-37's descriptor validation already ran, above the schedule loop (review
+    // P2-5), so nothing here reads a `ParamDecl` a malformed descriptor owns.
     Ok(())
 }
 
-/// SB-2 and SB-6 for every constraint a resource states: an `ext.` key's Module id
-/// names a registered Module, any other key has its `KeyDecl`, and the constraint's
-/// scalars are of that declaration's kind. None of it needs an instance, so it is a
-/// structural check, which `plan()` runs again (SB-T4, D99).
+/// SB-2 and SB-6 for every key position of a Spec. One scan
+/// ([`ExperimentSpec::keyed_entries`]) covers the resource and need `requires`, the
+/// output `params`, the coercion policies and the schedule's `UpdateParameter`s, so
+/// the prefix check and this declaration check cannot look at different positions
+/// (pre-freeze item 3). For each position: an `ext.` key's Module id names a
+/// registered Module, any other key has its `KeyDecl`, and the constraint or value is
+/// of that declaration's kind. A component's own parameter skips both — its schema is
+/// opaque and its owner is the component (MA-34). None of it needs an instance, so it
+/// is a structural check, which `plan()` runs again (SB-T4, D99).
 ///
-/// Rule: SB-2, SB-6, MA-34.
+/// Rule: SB-2, SB-6, SB-17, SB-16, MA-34.
 fn check_keys(spec: &ExperimentSpec, inputs: &CompileInputs<'_>) -> Result<(), SpecError> {
-    for req in spec.resources.values() {
-        for (key, constraint) in req.requires.iter().chain(
-            req.needs.values().flat_map(|need| need.requires.iter()),
-        ) {
-            if key.is_extension() {
-                // MA-34 writes `ext.<module-id>.<path>`, so the owner is a **registered**
-                // Module. Accepting any `ext.…` would make the escape hatch unowned: no
-                // declaration, no shape check and nobody accountable for the meaning.
-                // On a segment boundary: `starts_with` alone made
-                // `ext.ezsdr.test.providerx.thing` "owned" by `ezsdr.test.provider`, and a
-                // single-segment id such as `ezsdr` would own every `ext.ezsdr.*` key.
-                let owner = key.as_str().trim_start_matches("ext.");
-                let owned = |id: &str| {
-                    owner
-                        .strip_prefix(id)
-                        .is_some_and(|rest| rest.starts_with('.'))
-                };
-                if !inputs.registry.modules().any(|m| owned(m.id.as_str())) {
-                    return Err(SpecError::UnknownKeyPrefix {
-                        key: format!("{key}: MA-34: no registered Module owns this `ext.` prefix"),
-                    });
+    for entry in spec.keyed_entries() {
+        let key = *match &entry {
+            KeyedEntry::Constraint { key, .. }
+            | KeyedEntry::Output { key, .. }
+            | KeyedEntry::Coercion { key } => key,
+            KeyedEntry::ScheduledUpdate { target, key, .. } => {
+                if matches!(target, Target::Component { .. }) {
+                    // MA-34 (item 3): a component's parameter key is owned by the
+                    // component that declares it; the component's `schema` is opaque,
+                    // so no Vocabulary prefix, `KeyDecl` or kind check applies.
+                    continue;
                 }
-            } else {
-                let d = inputs
-                    .registry
-                    .key_decl(key)
-                    .map_err(|e| SpecError::UnknownKeyPrefix {
-                        key: format!("{key}: {}", e.message),
-                    })?;
+                key
+            }
+        };
+        if key.is_extension() {
+            // MA-34 writes `ext.<module-id>.<path>`, so the owner is a **registered**
+            // Module. Accepting any `ext.…` would make the escape hatch unowned: no
+            // declaration, no shape check and nobody accountable for the meaning.
+            // On a segment boundary: `starts_with` alone made
+            // `ext.ezsdr.test.providerx.thing` "owned" by `ezsdr.test.provider`, and a
+            // single-segment id such as `ezsdr` would own every `ext.ezsdr.*` key.
+            let owner = key
+                .as_str()
+                .strip_prefix("ext.")
+                .expect("is_extension means the key starts with one `ext.`");
+            let owned = |id: &str| {
+                owner
+                    .strip_prefix(id)
+                    .is_some_and(|rest| rest.starts_with('.'))
+            };
+            if !inputs.registry.modules().any(|m| owned(m.id.as_str())) {
+                return Err(SpecError::UnknownKeyPrefix {
+                    key: format!("{key}: MA-34: no registered Module owns this `ext.` prefix"),
+                });
+            }
+            continue;
+        }
+        let Some(d) = inputs.registry.key_decl(key) else {
+            return Err(SpecError::UnknownKeyPrefix {
+                key: format!("{key}: MA-34: no registered Vocabulary declares this key"),
+            });
+        };
+        match &entry {
+            KeyedEntry::Constraint { constraint, .. } => {
                 check_constraint_kind(d, constraint)?;
             }
+            KeyedEntry::Output { value, .. } | KeyedEntry::ScheduledUpdate { value, .. } => {
+                check_value_kind(d, value)?;
+            }
+            KeyedEntry::Coercion { .. } => {}
         }
     }
     Ok(())

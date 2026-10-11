@@ -952,14 +952,21 @@
           "description": "Its schema, opaque to the Kernel (MA-36)."
         },
         "update_class": {
-          "$ref": "#/$defs/UpdateClass",
-          "description": "How it may be changed (MA-24, RS-52)."
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpdateClass"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How it may be changed (MA-24, RS-52). `None` means **fixed for the Run**: no\nupdate is admitted for this key; a component's parameters are declared by the\ncomponent that owns them (RS-52, MA-36)."
         }
       },
       "required": [
         "key",
         "schema",
-        "update_class",
         "default"
       ],
       "type": "object"

@@ -97,7 +97,7 @@ pub(super) fn match_constraints(
         let decl = if key.is_extension() {
             None
         } else {
-            inputs.registry.key_decl(key).ok()
+            inputs.registry.key_decl(key)
         };
         let cap = node.capabilities.get(key);
         let direct = match cap {

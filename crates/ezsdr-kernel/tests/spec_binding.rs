@@ -9,7 +9,7 @@ use ezsdr_kernel::binding::{
     AdmissionCheckRegistry, BindingProfile, CheckStage, LinkPlacement, Placements, satisfies,
 };
 use ezsdr_kernel::contract::{ContractRegistry, PortRef};
-use ezsdr_kernel::event::ActionTemplate;
+use ezsdr_kernel::event::{ActionTemplate, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, DataLinkId, IslandId, MemoryDomainId};
 use ezsdr_kernel::module_api::{
@@ -23,8 +23,8 @@ use ezsdr_kernel::plan::{
 use ezsdr_kernel::policy::{EventKindRegistry, Reaction};
 use ezsdr_kernel::spec::{
     CapabilityValue, CoercionPolicy, Constraint, ExperimentSpec, Ident, Key, KeyDecl,
-    Namespace, ResourceReq, ScheduleEntry, SpecError, SpecTime, SubResourceReq,
-    Value, ValueKind,
+    Namespace, OutputReq, ResourceReq, ScheduleEntry, SinkFeed, SpecError, SpecTime,
+    SubResourceReq, Value, ValueKind,
 };
 use ezsdr_kernel::stream::{BackPressure, LatePolicy};
 use ezsdr_kernel::time::{AbsoluteDeadline, TimePoint};
@@ -1347,19 +1347,15 @@ fn sb_30_admission_check_runs_at_three_points() {
     };
     assert!(v.iter().any(|x| x.check == ns("test.limits")), "{v:?}");
 
-    // 3. A Session Action, through the one admission path (RS-16, RS-17).
-    //    OV-3: `Admitter` is constructed nowhere in `src/` — RS-17's runtime
-    //    dispatcher is Phase 2's — so this point is driven from the test rather than
-    //    from a Kernel call site, unlike the two above. That gap is D45.
+    // 3. A Session Action, through the one admission path (RS-16, RS-17). The
+    //    runtime point's kernel call site is the coordinator's `admit_with`
+    //    (`KC-24`); the class check lives there too, so this test drives the check
+    //    set and the coercion policy alone.
     let env = ceiling(20.0);
-    let classes: BTreeMap<Key, UpdateClass> = [(key("test.grid"), UpdateClass::BlockBoundary)]
-        .into_iter()
-        .collect();
     let spec_coercion = BTreeMap::new();
     let admitter = ezsdr_kernel::session::Admitter {
         checks: &fx.checks,
         environment: &env,
-        declared_classes: &classes,
         spec_coercion: &spec_coercion,
         registry: &fx.registry,
         is_session: true,
@@ -1763,14 +1759,16 @@ fn sb_16_spec_time_resolves_at_arm() {
         "{err:?}"
     );
 
-    // SB-16: the target names something the Spec declares **in its role**: an
-    // undeclared output, any component, and a resource path outside the grammar are
-    // each refused.
+    // SB-16 (item 3): the target names something the Spec declares **in its role**:
+    // an undeclared output, an undeclared component, and a resource path outside the
+    // grammar are each refused; a component the Spec declares in its graph is a
+    // target the schedule may name (KC-23).
     use ezsdr_kernel::event::Target;
-    for target in [
-        Target::Output { output: id("missing") },
-        Target::Component { component: id("proc") },
-        Target::Resource { resource: id("radio"), path: "a//b".to_owned() },
+    for (target, declared) in [
+        (Target::Output { output: id("missing") }, false),
+        (Target::Component { component: id("proc") }, true),
+        (Target::Component { component: id("missing") }, false),
+        (Target::Resource { resource: id("radio"), path: "a//b".to_owned() }, false),
     ] {
         let mut bad = minimal_spec();
         bad.graph.components.insert(
@@ -1783,11 +1781,14 @@ fn sb_16_spec_time_resolves_at_arm() {
             at: SpecTime { clock: id("radio"), offset_ticks: 0 },
             action: ActionTemplate::Stop { target: Some(target.clone()) },
         });
-        let err = validate(&bad, &profile_binding(&["radio"]), &fx.inputs(&providers))
-            .expect_err("the target names nothing in its role");
+        let result = validate(&bad, &profile_binding(&["radio"]), &fx.inputs(&providers));
+        if declared {
+            result.expect("the graph declares this component");
+            continue;
+        }
+        let err = result.expect_err("the target names nothing in its role");
         assert!(
-            matches!(&err, SpecError::Structural { reason }
-                if reason.contains("SB-16") && reason.contains("names no resource or output")),
+            matches!(&err, SpecError::Structural { reason } if reason.contains("SB-16")),
             "{target}: {err:?}"
         );
     }
@@ -2039,10 +2040,18 @@ fn sb_08_the_test_vocabulary_names_no_radio_word() {
         .iter()
         .map(|k| k.key.to_string())
         .collect();
-    // `test.tx_clock` is spec 19 §0's (Phase 7, KG-4's tests).
-    let want: BTreeSet<String> = ["test.count", "test.grid", "test.flag", "test.gain", "test.tx_clock"]
-        .map(str::to_owned)
-        .into();
+    // `test.tx_clock` is spec 19 §0's (Phase 7, KG-4's tests); `test.list` is item 3's
+    // List-kind carrier (review P2-2).
+    let want: BTreeSet<String> = [
+        "test.count",
+        "test.grid",
+        "test.flag",
+        "test.gain",
+        "test.tx_clock",
+        "test.list",
+    ]
+    .map(str::to_owned)
+    .into();
     assert_eq!(keys, want);
 }
 
@@ -4257,7 +4266,7 @@ fn sb_04_a_nested_value_is_refused_by_every_deserialiser() {
     let param = serde_json::to_value(ezsdr_kernel::module_api::ParamDecl {
         key: key("test.gain"),
         schema: json!({}),
-        update_class: UpdateClass::Cold,
+        update_class: Some(UpdateClass::Cold),
         default: Value::from(1),
     })
     .unwrap();
@@ -5008,12 +5017,10 @@ fn rs_52_a_scheduled_update_states_the_declared_class() {
         "{err:?}"
     );
 
-    // SB-2: the `KeyDecl` is "the only place it can be", because a schedule entry's
-    // target is a Spec resource by SB-16 and "a Provider's parameters are Vocabulary
-    // keys and never a `ComponentDescriptor`'s `params`". Consulting `graph.components`
-    // first made an unrelated component's parameter list decide a Provider key's class
-    // — in both directions.
-    let with_component = |key_name: &str, param: UpdateClass, stated: UpdateClass| {
+    // SB-2 (item 3): a schedule entry's class comes from its target's own
+    // declaration. A `{resource}` target's key is a Vocabulary key, and a component's
+    // parameter list never decides it, even when the component declares the same key.
+    let with_component = |key_name: &str, param: Option<UpdateClass>, stated: UpdateClass| {
         let mut spec = scheduled(key_name, stated);
         let mut c = support::recorder_component(
             ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
@@ -5029,7 +5036,7 @@ fn rs_52_a_scheduled_update_states_the_declared_class() {
     let err = validate(
         &with_component(
             "test.grid",
-            UpdateClass::BlockBoundary,
+            Some(UpdateClass::BlockBoundary),
             UpdateClass::BlockBoundary,
         ),
         &profile,
@@ -5043,7 +5050,7 @@ fn rs_52_a_scheduled_update_states_the_declared_class() {
     );
     // Nor can it shadow the class a key does declare.
     validate(
-        &with_component("test.gain", UpdateClass::BlockBoundary, declared),
+        &with_component("test.gain", Some(UpdateClass::BlockBoundary), declared),
         &profile,
         &fx.inputs(&providers),
     )
@@ -5060,6 +5067,508 @@ fn rs_52_a_scheduled_update_states_the_declared_class() {
     assert!(
         matches!(&err, SpecError::Structural { reason }
             if reason.contains("RS-52") && reason.contains("declares no update class")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn sb_16_a_schedule_entry_may_target_a_component() {
+    // SB-16, RS-52 (item 3): a schedule entry names a resource, an output or a graph
+    // component, and a component's key is declared by that component's own
+    // `ParamDecl`. A fixed or missing component declaration is never resolved through
+    // a Vocabulary `KeyDecl`.
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let cf32 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
+    let scheduled = |declared_key: &str, entry_key: &str, param: Option<UpdateClass>, stated: UpdateClass| {
+        let mut spec = minimal_spec();
+        let mut c = support::recorder_component(cf32.clone());
+        c.params[0].key = key(declared_key);
+        c.params[0].update_class = param;
+        c.params[0].default = Value::from(false);
+        c.params[0].schema = serde_json::json!({ "type": "boolean" });
+        spec.graph.components.insert(id("proc"), c);
+        spec.schedule.push(ScheduleEntry {
+            at: SpecTime {
+                clock: id("radio"),
+                offset_ticks: 0,
+            },
+            action: ActionTemplate::UpdateParameter {
+                target: Target::Component { component: id("proc") },
+                key: key(entry_key),
+                value: Value::from(true),
+                class: stated,
+            },
+        });
+        spec
+    };
+    // `test.flag` declares no class in the Vocabulary, and for this target the
+    // component's declaration is the one that counts.
+    validate(
+        &scheduled("test.flag", "test.flag", Some(UpdateClass::BlockBoundary), UpdateClass::BlockBoundary),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect("the component declares the class");
+    // A fixed declaration is not updatable, whatever a Vocabulary says. The key here
+    // is `test.gain`, whose `KeyDecl` declares `hardware_timed`: a fallback would
+    // admit it, and the component's own declaration must not be overridden.
+    let err = validate(
+        &scheduled("test.gain", "test.gain", None, UpdateClass::HardwareTimed),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect_err("the component declares it fixed");
+    assert!(
+        matches!(&err, SpecError::Structural { reason } if reason.contains("RS-52")),
+        "{err:?}"
+    );
+    // Nor is a key no `ParamDecl` declares.
+    let err = validate(
+        &scheduled("test.flag", "test.missing", Some(UpdateClass::BlockBoundary), UpdateClass::BlockBoundary),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect_err("no ParamDecl declares it");
+    assert!(
+        matches!(&err, SpecError::Structural { reason } if reason.contains("RS-52")),
+        "{err:?}"
+    );
+    // The class the entry states is compared against the component's declaration.
+    let err = validate(
+        &scheduled("test.flag", "test.flag", Some(UpdateClass::Cold), UpdateClass::BlockBoundary),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect_err("the entry states another class");
+    assert!(
+        matches!(&err, SpecError::Structural { reason } if reason.contains("RS-52")),
+        "{err:?}"
+    );
+    // A component's parameter key needs no Vocabulary prefix at all (P1-2, item 3):
+    // `proc` is declared by no Vocabulary.
+    validate(
+        &scheduled(
+            "proc.threshold",
+            "proc.threshold",
+            Some(UpdateClass::BlockBoundary),
+            UpdateClass::BlockBoundary,
+        ),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect("a component key is owned by its component");
+    // The same key on a `{resource}` target is refused: a Provider key is a
+    // Vocabulary key (SB-2).
+    let mut resource_key = minimal_spec();
+    resource_key.schedule.push(ScheduleEntry {
+        at: SpecTime {
+            clock: id("radio"),
+            offset_ticks: 0,
+        },
+        action: ActionTemplate::UpdateParameter {
+            target: Target::Resource {
+                resource: id("radio"),
+                path: String::new(),
+            },
+            key: key("proc.threshold"),
+            value: Value::from(true),
+            class: UpdateClass::BlockBoundary,
+        },
+    });
+    let err = validate(&resource_key, &profile, &fx.inputs(&providers))
+        .expect_err("no Vocabulary owns `proc`");
+    assert!(
+        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.starts_with("proc.threshold")),
+        "{err:?}"
+    );
+    // A missing `ParamDecl` is not an invitation to fall back to the key's
+    // `KeyDecl` (P1-3, item 3): the component declares `test.flag` only, and
+    // `test.gain`'s `KeyDecl` declares `hardware_timed`, which a fallback would
+    // admit.
+    let err = validate(
+        &scheduled("test.flag", "test.gain", Some(UpdateClass::BlockBoundary), UpdateClass::HardwareTimed),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect_err("the component declares no class for test.gain");
+    assert!(
+        matches!(&err, SpecError::Structural { reason } if reason.contains("RS-52")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn sb_02_a_component_value_is_not_checked_against_the_vocabulary_kind() {
+    // P1-3 (review, item 3): a component's `schema` is opaque, so the key's
+    // Vocabulary kind does not apply to a value it is updated with. `test.gain` is a
+    // `Num` key, and the component accepts a `Bool`.
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let cf32 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
+    let mut component = support::recorder_component(cf32);
+    component.params[0].key = key("test.gain");
+    component.params[0].update_class = Some(UpdateClass::HardwareTimed);
+    component.params[0].default = Value::from(false);
+    let mut spec = minimal_spec();
+    spec.graph.components.insert(id("proc"), component);
+    spec.schedule.push(ScheduleEntry {
+        at: SpecTime {
+            clock: id("radio"),
+            offset_ticks: 0,
+        },
+        action: ActionTemplate::UpdateParameter {
+            target: Target::Component {
+                component: id("proc"),
+            },
+            key: key("test.gain"),
+            value: Value::from(true),
+            class: UpdateClass::HardwareTimed,
+        },
+    });
+    validate(&spec, &profile, &fx.inputs(&providers))
+        .expect("a component value is judged by its schema, which the Kernel does not read");
+}
+
+#[test]
+fn sb_02_one_key_declared_differently_by_two_components() {
+    // Item 3 (#5's per-component rule): the class is judged by the target, so two
+    // components may declare one key under different classes and a schedule entry to
+    // each is judged by its own.
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let cf32 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
+    let component = |name: &str, class: UpdateClass| {
+        let mut c = support::recorder_component(cf32.clone());
+        c.id = id(name);
+        c.params[0].key = key("test.flag");
+        c.params[0].update_class = Some(class);
+        c.params[0].default = Value::from(false);
+        c.params[0].schema = serde_json::json!({ "type": "boolean" });
+        c
+    };
+    let scheduled_to = |name: &str, stated: UpdateClass| {
+        let mut spec = minimal_spec();
+        spec.graph.components.insert(id("cold"), component("cold", UpdateClass::Cold));
+        spec.graph
+            .components
+            .insert(id("hot"), component("hot", UpdateClass::HardwareTimed));
+        spec.schedule.push(ScheduleEntry {
+            at: SpecTime {
+                clock: id("radio"),
+                offset_ticks: 0,
+            },
+            action: ActionTemplate::UpdateParameter {
+                target: Target::Component {
+                    component: id(name),
+                },
+                key: key("test.flag"),
+                value: Value::from(true),
+                class: stated,
+            },
+        });
+        spec
+    };
+    validate(&scheduled_to("cold", UpdateClass::Cold), &profile, &fx.inputs(&providers))
+        .expect("the cold declaration admits its own class");
+    validate(
+        &scheduled_to("hot", UpdateClass::HardwareTimed),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect("the hardware_timed declaration admits its own class");
+    // One component's declaration cannot stand for the other's.
+    let err = validate(
+        &scheduled_to("cold", UpdateClass::HardwareTimed),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect_err("cold is not hot's declaration");
+    assert!(
+        matches!(&err, SpecError::Structural { reason } if reason.contains("RS-52")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn sb_02_values_are_checked_against_their_key_decl() {
+    // The one scan (item 3) covers an output's `params` and a schedule entry's value,
+    // and the shared compatibility rule is `Num` accepts an `Int` scalar and every
+    // other pair is same-kind.
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let output_with = |key_name: &str, value: Value| {
+        let mut spec = minimal_spec();
+        spec.outputs.push(OutputReq {
+            id: id("rec"),
+            kind: ns("test.capture"),
+            feed: SinkFeed {
+                port: PortRef {
+                    component: id("radio"),
+                    port: id("rx"),
+                },
+                policy: BackPressure::DropOldest,
+                capacity: 1,
+            },
+            params: [(key(key_name), value)].into_iter().collect(),
+        });
+        spec
+    };
+    let err = validate(&output_with("test.grid", Value::from(true)), &profile, &fx.inputs(&providers))
+        .expect_err("Bool is not a Num");
+    assert!(matches!(&err, SpecError::KeyShape { .. }), "{err:?}");
+    let err = validate(
+        &output_with("test.count", Value::num(1.0).expect("finite")),
+        &profile,
+        &fx.inputs(&providers),
+    )
+    .expect_err("Num is not an Int");
+    assert!(matches!(&err, SpecError::KeyShape { .. }), "{err:?}");
+    // The schedule path: `test.gain` is a `Num` key declared `hardware_timed`.
+    let scheduled = |value: Value| {
+        let mut spec = minimal_spec();
+        spec.schedule.push(ScheduleEntry {
+            at: SpecTime {
+                clock: id("radio"),
+                offset_ticks: 0,
+            },
+            action: ActionTemplate::UpdateParameter {
+                target: Target::Resource {
+                    resource: id("radio"),
+                    path: String::new(),
+                },
+                key: key("test.gain"),
+                value,
+                class: UpdateClass::HardwareTimed,
+            },
+        });
+        spec
+    };
+    validate(&scheduled(Value::from(1)), &profile, &fx.inputs(&providers))
+        .expect("an Int fills a Num declaration");
+    let err = validate(&scheduled(Value::from(true)), &profile, &fx.inputs(&providers))
+        .expect_err("Bool does not fill a Num declaration");
+    assert!(matches!(&err, SpecError::KeyShape { .. }), "{err:?}");
+}
+
+#[test]
+fn sb_02_a_list_value_matches_only_a_list_declaration() {
+    // P2-2 (review): `kind_accepts` judges a `List` or `Map` by its outer kind, so a
+    // `List` fills a `List` declaration and not an `Int` one.
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let list = || Value::List(vec![Scalar::Int(1)]);
+    let scheduled = |key_name: &str, value: Value| {
+        let mut spec = minimal_spec();
+        spec.schedule.push(ScheduleEntry {
+            at: SpecTime {
+                clock: id("radio"),
+                offset_ticks: 0,
+            },
+            action: ActionTemplate::UpdateParameter {
+                target: Target::Resource {
+                    resource: id("radio"),
+                    path: String::new(),
+                },
+                key: key(key_name),
+                value,
+                class: UpdateClass::HardwareTimed,
+            },
+        });
+        spec
+    };
+    validate(&scheduled("test.list", list()), &profile, &fx.inputs(&providers))
+        .expect("a List fills a List declaration");
+    let err = validate(&scheduled("test.count", list()), &profile, &fx.inputs(&providers))
+        .expect_err("a List does not fill an Int declaration");
+    assert!(matches!(&err, SpecError::KeyShape { .. }), "{err:?}");
+}
+
+#[test]
+fn sb_02_the_ext_owner_is_checked_at_every_key_position() {
+    // MA-34 (item 3): an `ext.` key's Module id must name a registered Module at
+    // every position the one scan covers, not only at a resource's `requires`.
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let mut coercion = minimal_spec();
+    coercion
+        .policies
+        .coercion
+        .insert(key("ext.nobody.mod.x"), CoercionPolicy::Warn);
+    let err = validate(&coercion, &profile, &fx.inputs(&providers))
+        .expect_err("no Module owns the prefix");
+    assert!(
+        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")),
+        "{err:?}"
+    );
+    let mut output = minimal_spec();
+    output.outputs.push(OutputReq {
+        id: id("rec"),
+        kind: ns("test.capture"),
+        feed: SinkFeed {
+            port: PortRef {
+                component: id("radio"),
+                port: id("rx"),
+            },
+            policy: BackPressure::DropOldest,
+            capacity: 1,
+        },
+        params: [(key("ext.nobody.mod.x"), Value::from(1))].into_iter().collect(),
+    });
+    let err = validate(&output, &profile, &fx.inputs(&providers))
+        .expect_err("no Module owns the prefix");
+    assert!(
+        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")),
+        "{err:?}"
+    );
+    // P2-1: the `needs[].requires` position.
+    let mut need = minimal_spec();
+    need.resources
+        .get_mut(&id("radio"))
+        .expect("radio")
+        .needs
+        .insert(
+            id("line"),
+            SubResourceReq {
+                kind: ns("test.line"),
+                requires: [(key("ext.nobody.mod.x"), Constraint::Present {})]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+    let err = validate(&need, &profile, &fx.inputs(&providers))
+        .expect_err("no Module owns the prefix");
+    assert!(
+        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")),
+        "{err:?}"
+    );
+    // P2-1: the schedule `{resource}` position.
+    let mut scheduled = minimal_spec();
+    scheduled.schedule.push(ScheduleEntry {
+        at: SpecTime {
+            clock: id("radio"),
+            offset_ticks: 0,
+        },
+        action: ActionTemplate::UpdateParameter {
+            target: Target::Resource {
+                resource: id("radio"),
+                path: String::new(),
+            },
+            key: key("ext.nobody.mod.x"),
+            value: Value::from(1),
+            class: UpdateClass::HardwareTimed,
+        },
+    });
+    let err = validate(&scheduled, &profile, &fx.inputs(&providers))
+        .expect_err("no Module owns the prefix");
+    assert!(
+        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")),
+        "{err:?}"
+    );
+    // P1-1 (review): `ext.` is stripped once. `ext.ext.ezsdr.test.provider.x` is a
+    // legal key whose real owner would be a Module id beginning `ext.ezsdr…`, which
+    // no registry holds; stripping every leading `ext.` made `ezsdr.test.provider`
+    // "own" it.
+    let mut doubled = minimal_spec();
+    doubled
+        .policies
+        .coercion
+        .insert(key("ext.ext.ezsdr.test.provider.x"), CoercionPolicy::Warn);
+    let err = validate(&doubled, &profile, &fx.inputs(&providers))
+        .expect_err("the doubled ext. is not ezsdr.test.provider's");
+    assert!(
+        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")),
+        "{err:?}"
+    );
+    // P2-1: a non-`ext.` key whose prefix is declared but that has no `KeyDecl` is
+    // refused at the coercion and output positions (item 3; before 3a only a
+    // resource's `requires` was checked).
+    let mut undeclared = minimal_spec();
+    undeclared
+        .policies
+        .coercion
+        .insert(key("test.undeclared"), CoercionPolicy::Warn);
+    let err = validate(&undeclared, &profile, &fx.inputs(&providers))
+        .expect_err("no KeyDecl declares test.undeclared");
+    assert!(
+        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Vocabulary")),
+        "{err:?}"
+    );
+    let mut undeclared_output = minimal_spec();
+    undeclared_output.outputs.push(OutputReq {
+        id: id("rec"),
+        kind: ns("test.capture"),
+        feed: SinkFeed {
+            port: PortRef {
+                component: id("radio"),
+                port: id("rx"),
+            },
+            policy: BackPressure::DropOldest,
+            capacity: 1,
+        },
+        params: [(key("test.undeclared"), Value::from(1))].into_iter().collect(),
+    });
+    let err = validate(&undeclared_output, &profile, &fx.inputs(&providers))
+        .expect_err("no KeyDecl declares test.undeclared");
+    assert!(
+        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Vocabulary")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn ma_37_a_component_declares_each_parameter_key_once() {
+    // One `ParamDecl` per key inside one component: two would leave the update class
+    // and the default to whichever a reader happened to find (item 3). Two components
+    // may still declare one key (sb_02_one_key_declared_differently_by_two_components).
+    //
+    // MA-37 also says a descriptor is validated **before anything reads** it (review
+    // P2-5): the schedule entry here names the duplicated key, and the refusal must
+    // still be MA-37's, not `declared_class`'s RS-52.
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let cf32 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
+    let mut c = support::recorder_component(cf32);
+    let duplicate = c.params[0].clone();
+    c.params.push(duplicate);
+    let mut spec = minimal_spec();
+    spec.graph.components.insert(id("proc"), c);
+    // The entry states a class the duplicated declaration does not declare: run
+    // before the descriptor check it would be refused by RS-52, so only the loop's
+    // order makes the refusal MA-37's.
+    spec.schedule.push(ScheduleEntry {
+        at: SpecTime {
+            clock: id("radio"),
+            offset_ticks: 0,
+        },
+        action: ActionTemplate::UpdateParameter {
+            target: Target::Component {
+                component: id("proc"),
+            },
+            key: key("test.capture"),
+            value: Value::from(true),
+            class: UpdateClass::Cold,
+        },
+    });
+    let err = validate(&spec, &profile, &fx.inputs(&providers))
+        .expect_err("the same key is declared twice");
+    assert!(
+        matches!(&err, SpecError::Structural { reason }
+            if reason.contains("MA-37") && reason.contains("duplicate parameter key")),
         "{err:?}"
     );
 }
@@ -6417,14 +6926,23 @@ fn sb_30_the_check_sees_each_fragment_s_own_value() {
     ]
     .into_iter()
     .collect();
+    // A need's `Eq` values are **not** joined to its resource's entry (item 3,
+    // owner 2026-10-11): a need is a resolution to a node, and a check judges the
+    // fragment's own request. The 40.0 lives in the need's `requires` and not in
+    // `a`'s own (which is empty), so nothing is refused; the need still resolves.
     let admission = validate(&with_need, &profile, &fx.inputs(&need_providers)).expect("runs");
     assert!(
-        admission
+        !admission
             .violations
             .iter()
             .any(|v| v.check == ns("test.limits") && v.reason.starts_with("a: ")),
-        "the need's value is judged under its resource: {:?}",
+        "the need's value is not its resource's requested configuration: {:?}",
         admission.violations
+    );
+    assert!(
+        admission.needs.contains_key(&id("a")),
+        "the need still resolves: {:?}",
+        admission.needs
     );
 
     // 2. prepare: one entry per report.
@@ -6461,12 +6979,10 @@ fn sb_30_the_check_sees_each_fragment_s_own_value() {
 
     // 3. runtime: the current per-fragment configuration, with only the target's
     //    proposed key.
-    let classes = BTreeMap::new();
     let spec_coercion = BTreeMap::new();
     let admitter = ezsdr_kernel::session::Admitter {
         checks: &fx.checks,
         environment: &env,
-        declared_classes: &classes,
         spec_coercion: &spec_coercion,
         registry: &fx.registry,
         is_session: true,

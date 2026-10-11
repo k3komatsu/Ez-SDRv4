@@ -2078,30 +2078,30 @@
  },
  {
   "id": "J177",
-  "name": "SB-16 (spec 27 §2): a schedule entry naming an undeclared output validates",
-  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
-  "old": "                Target::Output { output } => spec.outputs.iter().any(|o| &o.id == output),",
-  "new": "                Target::Output { .. } => true,",
+  "name": "SB-16 (item 3): a schedule entry naming an undeclared output validates",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "                if self.outputs.iter().any(|o| &o.id == output) {\n                    Ok(())\n                } else {\n                    Err(format!(\"{target} is not declared by this Spec\"))\n                }",
+  "new": "                if true {\n                    Ok(())\n                } else {\n                    Err(format!(\"{target} is not declared by this Spec\"))\n                }",
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
   "filter": "sb_16_spec_time_resolves_at_arm"
  },
  {
   "id": "J178",
-  "name": "SB-16 (spec 27 §2): a schedule entry naming a component validates",
-  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
-  "old": "                Target::Component { .. } => false,",
-  "new": "                Target::Component { .. } => true,",
+  "name": "SB-16 (item 3): a schedule entry naming an undeclared component validates",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "                if self.graph.components.contains_key(component) {\n                    Ok(())\n                } else {\n                    Err(format!(\"{target} is not declared by this Spec\"))\n                }",
+  "new": "                if true {\n                    Ok(())\n                } else {\n                    Err(format!(\"{target} is not declared by this Spec\"))\n                }",
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
   "filter": "sb_16_spec_time_resolves_at_arm"
  },
  {
   "id": "J179",
-  "name": "SB-16 (spec 27 §2): a schedule target's resource path is not held to the ResourceId grammar",
-  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
-  "old": "                        && (path.is_empty() || ResourceId::parse(path).is_ok())",
-  "new": "                        && (path.is_empty() || !path.is_empty())",
+  "name": "SB-16 (item 3): a schedule target's resource path is not held to the ResourceId grammar",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "                if !path.is_empty() {\n                    ResourceId::parse(path)\n                        .map_err(|error| format!(\"{target}: {error}\"))?;\n                }",
+  "new": "                if false {\n                    ResourceId::parse(path)\n                        .map_err(|error| format!(\"{target}: {error}\"))?;\n                }",
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
   "filter": "sb_16_spec_time_resolves_at_arm"
@@ -2291,5 +2291,237 @@
   "old": "            if artifact[\"id\"] == output:\n                return samples(",
   "new": "            if True:\n                return samples(",
   "python": "test_easy_api.ChildCapture.test_run_result_capture_is_the_output_s_own_capture"
+ },
+ {
+  "id": "J200",
+  "name": "declared_class falls back to a Vocabulary KeyDecl for a fixed component parameter (item 3)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "                .find(|p| &p.key == key)?\n                .update_class,",
+  "new": "                .find(|p| &p.key == key)?\n                .update_class\n                .or_else(|| registry.key_decl(key)?.update_class),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_16_a_schedule_entry_may_target_a_component"
+ },
+ {
+  "id": "J201",
+  "name": "classify_target refuses a declared component target (item 3 widens SB-16)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "                if self.graph.components.contains_key(component) {",
+  "new": "                if false && self.graph.components.contains_key(component) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_16_a_schedule_entry_may_target_a_component"
+ },
+ {
+  "id": "J202",
+  "name": "a Value is not checked against its KeyDecl's kind (item 3)",
+  "file": "crates/ezsdr-kernel/src/binding.rs",
+  "old": "    if crate::spec::kind_accepts(decl.kind, value.kind()) {\n        return Ok(());\n    }",
+  "new": "    if true {\n        return Ok(());\n    }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_02_values_are_checked_against_their_key_decl"
+ },
+ {
+  "id": "J203",
+  "name": "Num no longer accepts an Int scalar (item 3)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "    declared == found || (declared == ValueKind::Num && found == ValueKind::Int)",
+  "new": "    declared == found",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_02_values_are_checked_against_their_key_decl"
+ },
+ {
+  "id": "J204",
+  "name": "a component may declare one parameter key twice (item 3)",
+  "file": "crates/ezsdr-kernel/src/module_api.rs",
+  "old": "            if !seen_params.insert(&p.key) {",
+  "new": "            if false && !seen_params.insert(&p.key) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "ma_37_a_component_declares_each_parameter_key_once"
+ },
+ {
+  "id": "J205",
+  "name": "SB-30 joins a need's Eq values to its resource's requested configuration (item 3 removes it)",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "        requested.insert(name.clone(), eq_values(&r.requires).into_iter().collect());",
+  "new": "        let mut values: BTreeMap<Key, Value> = BTreeMap::new();\n        for need in r.needs.values() {\n            values.extend(eq_values(&need.requires));\n        }\n        values.extend(eq_values(&r.requires));\n        requested.insert(name.clone(), values);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_30_the_check_sees_each_fragment_s_own_value"
+ },
+ {
+  "id": "J206",
+  "name": "an output's params value skips its KeyDecl kind check (item 3)",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "            KeyedEntry::Output { value, .. } | KeyedEntry::ScheduledUpdate { value, .. } => {\n                check_value_kind(d, value)?;\n            }",
+  "new": "            KeyedEntry::Output { .. } => {}\n            KeyedEntry::ScheduledUpdate { value, .. } => {\n                check_value_kind(d, value)?;\n            }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_02_values_are_checked_against_their_key_decl"
+ },
+ {
+  "id": "J207",
+  "name": "the schedule's class check reads only a Vocabulary KeyDecl (item 3: per-target)",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "            match spec.declared_class(target, key, inputs.registry) {",
+  "new": "            match inputs.registry.key_decl(key).and_then(|d| d.update_class) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_16_a_schedule_entry_may_target_a_component"
+ },
+ {
+  "id": "J208",
+  "name": "the ext. owner check is skipped (item 3 scans every key position)",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "            if !inputs.registry.modules().any(|m| owned(m.id.as_str())) {",
+  "new": "            if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_02_the_ext_owner_is_checked_at_every_key_position"
+ },
+ {
+  "id": "J209",
+  "name": "admission accepts a class that differs from the target's declaration (item 3)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "            Some(declared) if declared == *class => {}",
+  "new": "            Some(declared) if declared != *class => {}",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_component_update_classes_belong_to_the_target"
+ },
+ {
+  "id": "J210",
+  "name": "the ext. owner check strips every leading `ext.` (review P1-1)",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "            let owner = key\n                .as_str()\n                .strip_prefix(\"ext.\")\n                .expect(\"is_extension means the key starts with one `ext.`\");",
+  "new": "            let owner = key.as_str().trim_start_matches(\"ext.\");",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_02_the_ext_owner_is_checked_at_every_key_position"
+ },
+ {
+  "id": "J211",
+  "name": "a component-keyed schedule entry must still carry a Vocabulary prefix (review P1-2)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "                KeyedEntry::ScheduledUpdate { target, key, .. } => {\n                    if matches!(target, Target::Component { .. }) {\n                        continue;\n                    }\n                    key\n                }",
+  "new": "                KeyedEntry::ScheduledUpdate { target, key, .. } => {\n                    let _ = target;\n                    key\n                }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_16_a_schedule_entry_may_target_a_component"
+ },
+ {
+  "id": "J212",
+  "name": "check_keys reads a component's parameter key against a Vocabulary KeyDecl (review P1-2)",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "            KeyedEntry::ScheduledUpdate { target, key, .. } => {\n                if matches!(target, Target::Component { .. }) {\n                    // MA-34 (item 3): a component's parameter key is owned by the\n                    // component that declares it; the component's `schema` is opaque,\n                    // so no Vocabulary prefix, `KeyDecl` or kind check applies.\n                    continue;\n                }\n                key\n            }",
+  "new": "            KeyedEntry::ScheduledUpdate { target, key, .. } => {\n                let _ = target;\n                key\n            }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_16_a_schedule_entry_may_target_a_component"
+ },
+ {
+  "id": "J213",
+  "name": "declared_class falls back to a KeyDecl only when the component's ParamDecl is missing (review P1-3)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "                .find(|p| &p.key == key)?\n                .update_class,",
+  "new": "                .find(|p| &p.key == key)\n                .map(|p| p.update_class)\n                .unwrap_or_else(|| registry.key_decl(key)?.update_class),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_16_a_schedule_entry_may_target_a_component"
+ },
+ {
+  "id": "J214",
+  "name": "a component value is checked against its Vocabulary KeyDecl kind (review P1-3)",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "                    // so no Vocabulary prefix, `KeyDecl` or kind check applies.\n                    continue;",
+  "new": "                    // so no Vocabulary prefix, `KeyDecl` or kind check applies.",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_02_a_component_value_is_not_checked_against_the_vocabulary_kind"
+ },
+ {
+  "id": "J215",
+  "name": "admission reads a component class from the Vocabulary KeyDecl (review P1-4)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "        match shared.ctx.spec.declared_class(target, key, &shared.ctx.registry) {",
+  "new": "        match shared.ctx.registry.key_decl(key).and_then(|d| d.update_class) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_component_update_classes_belong_to_the_target"
+ },
+ {
+  "id": "J216",
+  "name": "Session compile reads a component class from the Vocabulary KeyDecl (review P1-4)",
+  "file": "crates/ezsdr-kernel/src/session.rs",
+  "old": "            let class = spec.declared_class(target, key, registry).ok_or_else(|| {",
+  "new": "            let class = registry.key_decl(key).and_then(|d| d.update_class).ok_or_else(|| {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "rs_17_a_component_class_comes_from_its_own_declaration"
+ },
+ {
+  "id": "J217",
+  "name": "admission admits a component update whose class is undeclared or fixed (review P1-4)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "            None => return Err(vec![violation(\n                \"ezsdr.update_class\",\n                format!(\"RS-52: {key} declares no update class\"),\n            )]),",
+  "new": "            None => {}",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_component_update_classes_belong_to_the_target"
+ },
+ {
+  "id": "J218",
+  "name": "keyed_entries drops the needs[].requires position (review P2-1)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "                .chain(req.needs.values().flat_map(|sub| {\n                    sub.requires\n                        .iter()\n                        .map(|(key, constraint)| KeyedEntry::Constraint { key, constraint })\n                }))",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_02_the_ext_owner_is_checked_at_every_key_position"
+ },
+ {
+  "id": "J219",
+  "name": "keyed_entries drops the coercion position (review P2-1)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "        let coercion = self\n            .policies\n            .coercion\n            .keys()\n            .map(|key| KeyedEntry::Coercion { key });",
+  "new": "        let coercion = self\n            .policies\n            .coercion\n            .keys()\n            .take(0)\n            .map(|key| KeyedEntry::Coercion { key });",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_02_the_ext_owner_is_checked_at_every_key_position"
+ },
+ {
+  "id": "J220",
+  "name": "keyed_entries drops the schedule UpdateParameter position (review P2-1)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "        let schedule = self.schedule.iter().filter_map(|entry| match &entry.action {\n            crate::event::ActionTemplate::UpdateParameter { target, key, value, .. } => {\n                Some(KeyedEntry::ScheduledUpdate { target, key, value })\n            }\n            _ => None,\n        });",
+  "new": "        let schedule = self.schedule.iter().filter_map(|_| None::<KeyedEntry>);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_02_values_are_checked_against_their_key_decl"
+ },
+ {
+  "id": "J221",
+  "name": "check_value_kind accepts any List or Map (review P2-2)",
+  "file": "crates/ezsdr-kernel/src/binding.rs",
+  "old": "    if crate::spec::kind_accepts(decl.kind, value.kind()) {\n        return Ok(());\n    }",
+  "new": "    if crate::spec::kind_accepts(decl.kind, value.kind())\n        || matches!(value.kind(), crate::spec::ValueKind::List | crate::spec::ValueKind::Map)\n    {\n        return Ok(());\n    }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_02_a_list_value_matches_only_a_list_declaration"
+ },
+ {
+  "id": "J223",
+  "name": "the component descriptors are validated after the schedule reads their ParamDecls (review P2-5)",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "    let contract_ids = inputs.contracts.ids();\n    for c in spec.graph.components.values() {\n        c.validate(&contract_ids)\n            .map_err(|e| SpecError::Structural { reason: e.message })?;\n    }",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "ma_37_a_component_declares_each_parameter_key_once",
+  "old2": "    // MA-37's descriptor validation already ran, above the schedule loop (review\n    // P2-5), so nothing here reads a `ParamDecl` a malformed descriptor owns.\n",
+  "new2": "    let contract_ids = inputs.contracts.ids();\n    for c in spec.graph.components.values() {\n        c.validate(&contract_ids)\n            .map_err(|e| SpecError::Structural { reason: e.message })?;\n    }\n"
  }
 ]

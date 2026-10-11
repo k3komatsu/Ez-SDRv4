@@ -4423,12 +4423,25 @@ fn component_class_docs() -> (serde_json::Value, serde_json::Value) {
     c2["id"] = serde_json::json!("c2");
     c2["params"][0]["update_class"] = serde_json::json!("hardware_timed");
     spec["graph"]["components"]["c2"] = c2;
-    let mut c2_entry = profile["placements"]["islands"][0]["components"][0].clone();
-    c2_entry["component"] = serde_json::json!("c2");
-    profile["placements"]["islands"][0]["components"]
-        .as_array_mut()
-        .unwrap()
-        .push(c2_entry);
+    // P1-4 (review): a component that declares `test.gain` fixed for the Run
+    // (`update_class` null), and one that does not declare the key at all.
+    let mut fixed = spec["graph"]["components"]["c1"].clone();
+    fixed["id"] = serde_json::json!("fixed");
+    fixed["params"][0]["update_class"] = serde_json::Value::Null;
+    spec["graph"]["components"]["fixed"] = fixed;
+    let mut undeclared = spec["graph"]["components"]["c1"].clone();
+    undeclared["id"] = serde_json::json!("undeclared");
+    undeclared["params"] = serde_json::json!([]);
+    spec["graph"]["components"]["undeclared"] = undeclared;
+    let entries: Vec<serde_json::Value> = ["c1", "c2", "fixed", "undeclared"]
+        .into_iter()
+        .map(|name| {
+            let mut entry = profile["placements"]["islands"][0]["components"][0].clone();
+            entry["component"] = serde_json::json!(name);
+            entry
+        })
+        .collect();
+    profile["placements"]["islands"][0]["components"] = serde_json::Value::Array(entries);
     (spec, profile)
 }
 
@@ -4438,6 +4451,10 @@ fn kc_24_component_update_classes_belong_to_the_target() {
     for (target, class, accepted) in [
         ("c1", HardwareTimed, false), ("c1", Cold, true),
         ("c2", Cold, false), ("c2", HardwareTimed, true),
+        // P1-4 (review): a fixed declaration and a missing one are both refused, and
+        // neither falls back to `test.gain`'s `KeyDecl` (`hardware_timed`), which
+        // would admit a `hardware_timed` update.
+        ("fixed", HardwareTimed, false), ("undeclared", HardwareTimed, false),
     ] {
         let (spec, profile) = component_class_docs();
         let probe = Probe::new();
@@ -4455,9 +4472,43 @@ fn kc_24_component_update_classes_belong_to_the_target() {
         assert_eq!(lines.iter().any(|line| line.starts_with("x:submit:ok:")), accepted, "{lines:?}");
         if !accepted {
             assert!(lines.iter().any(|line| line.starts_with("x:submit:err:ezsdr.update_class:RS-52")));
+            // The refused Action is not dispatched to anyone.
+            assert!(!lines.iter().any(|line| line.starts_with("x:action:")), "{lines:?}");
         }
         assert!(run.finish().termination.cleanup_failures.is_empty());
     }
+}
+
+#[test]
+fn kc_17_a_scheduled_update_to_a_component_reaches_its_executor() {
+    // P2-3 (review): a timed schedule update to a placed component passes validate's
+    // declaration check, KC-24's class check and arm's dispatch, and reaches the
+    // Executor that owns the component.
+    let (mut spec, profile) = component_class_docs();
+    add_schedule(&mut spec, "radio", 10, serde_json::json!({
+        "kind": "update_parameter",
+        "target": { "kind": "component", "component": "c1" },
+        "key": "test.gain",
+        "value": 3.0,
+        "class": "cold"
+    }));
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.providers.insert(Ident::parse("radio").unwrap(),
+        Box::new(
+            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
+                .declaring("radio/rx", 1, 1),
+        ));
+    assembly.executors.insert(Ident::parse("exec").unwrap(),
+        Box::new(ProbeExecutor::new("x", &probe)));
+    let run = start_spec_run(&spec, &profile, assembly).unwrap();
+    assert!(matches!(run.state(), RunState::Running {}));
+    let lines = probe.lines();
+    assert!(
+        lines.iter().any(|line| line.starts_with("x:action:component c1")),
+        "{lines:?}"
+    );
+    assert!(run.finish().termination.cleanup_failures.is_empty());
 }
 
 #[test]

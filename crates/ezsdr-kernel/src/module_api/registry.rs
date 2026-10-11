@@ -184,21 +184,18 @@ impl ModuleRegistry {
     }
 
     /// The `KeyDecl` for a key, resolved through the Vocabulary that owns its
-    /// prefix. The Kernel refuses a key whose prefix belongs to no Vocabulary the
-    /// declaring Module declares, naming the prefix, and validates the value's
-    /// shape against the `KeyDecl`. It never interprets the meaning.
+    /// prefix, or `None` when no registered Vocabulary declares it. The refusal is
+    /// the caller's, because its context names it differently: `validate()` refuses
+    /// an unknown prefix (`SB-2`, `UnknownKeyPrefix`), while admission refuses an
+    /// undeclared update class or kind after its target resolution (pre-freeze item
+    /// 3). The Kernel never interprets the key's meaning.
     ///
     /// Rule: MA-34, SB-2.
-    pub fn key_decl(&self, key: &Key) -> Result<&KeyDecl, ModuleError> {
+    pub fn key_decl(&self, key: &Key) -> Option<&KeyDecl> {
         self.vocabularies
             .values()
             .filter(|v| key.has_prefix(&v.prefix))
             .find_map(|v| v.keys.iter().find(|d| d.key == *key))
-            .ok_or_else(|| {
-                ModuleError::rejected(format!(
-                    "MA-34: key {key} has a prefix no registered Vocabulary owns"
-                ))
-            })
     }
 
     /// The compilation a Vocabulary declares for one of its verbs (RS-13a, RS-14).
