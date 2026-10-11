@@ -134,6 +134,7 @@ Coordination:
 - Agents run in Orca tabs (`orca terminal read | send | wait`) or from the CLI (`opencode2 run -m <model> [--agent plan] --auto`).
 - Sol draws on the owner's Codex quota (a 5-hour window and a weekly one). When the 5-hour window runs low, the Sol review waits until the window resets while DeepSeek, which is cheap, keeps working. `python3 plan/maintenance/tools/codex_limits.py` prints both windows' use and reset times without running a model turn.
 - Mutation rows run only through `remote_mutate.py` on sim02/sim03 (§7). No agent runs `mutate.py` on the Mac or applies a mutant to the main tree in place, even to debug one row: a debug copy lives outside the repository (2026-10-11: the implementer did both while the orchestrator was reading the tree).
+- No agent runs `cargo fmt` or `rustfmt`, on any file: the tree is deliberately not rustfmt-formatted (long lines are kept), and every mutation row matches exact source text, so a reformat breaks hundreds of rows (2026-10-11: an implementer reformatted 111 files). New code follows the surrounding style by hand.
 - One agent edits the main tree at a time. Reviewers stay read-only while the tree is frozen for review.
 - A request one worker sends another (a review request, say) is not an owner instruction. The orchestrator decides.
 - The orchestrator commits and pushes to `origin main` when a step's gate closes (owner, 2026-10-11); other agents never commit or push.
