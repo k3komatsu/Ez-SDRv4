@@ -114,12 +114,12 @@ Since 2026-10-11 the work is split across models, and this section applies to ev
 | Role | Who | Does |
 |---|---|---|
 | Orchestrator | Claude Opus (Claude Code) | Makes decisions with the owner, writes each delegated task's brief, reviews, adjudicates the reviews, and closes each step's gate (tests and mutation runs, §7) with a commit and a push. It does not implement large changes itself. |
-| Implementer | DeepSeek V4.1 Flash in OpenCode2 (`opencode-go/deepseek-v4.1-flash`) | Implements against the accepted plan and the brief, and fixes the adopted findings. |
+| Implementer | DeepSeek V4.1 Flash in OpenCode2 (`opencode-go/deepseek-v4.1-flash`) by default; GPT-6 Luna in OpenCode2 (`openai/gpt-6-luna`) only when the owner asks for it, since it draws on the owner's OpenAI subscription, which is used when it has room (owner, 2026-10-11) | Implements against the accepted plan and the brief, and fixes the adopted findings. Its self-review reviewer (step 2) runs on the same model. |
 | Independent reviewer | Sol 6.1 in OpenCode2 (`openai/gpt-6.1-sol`), read-only (`--agent plan`) | Reviews at the end of a step without seeing the orchestrator's findings. It runs in OpenCode2, not the Codex CLI, because Codex works badly with Orca. |
 
 Each implementation step runs in this order:
 1. The implementer implements.
-2. The implementer runs its own self-review loop before it reports (owner, 2026-10-11, from item 3 stage 3c on). Each round starts a **fresh** read-only reviewer from its shell, so the reviewer does not inherit the implementer's reasoning: `opencode2 run --standalone -m opencode-go/deepseek-v4.1-flash --agent plan --auto "<checklist>"`. The implementer fixes what the reviewer finds and starts another round, until a round finds nothing or three rounds have run. Each round's findings and fixes go into the step's report; findings left open after round 3 are listed as open, not dropped. The orchestrator's brief supplies the checklist:
+2. The implementer runs its own self-review loop before it reports (owner, 2026-10-11, from item 3 stage 3c on). Each round starts a **fresh** read-only reviewer from its shell, so the reviewer does not inherit the implementer's reasoning: `opencode2 run --standalone -m <the implementer's model> --agent plan --auto "<checklist>"`. The implementer fixes what the reviewer finds and starts another round, until a round finds nothing or three rounds have run. Each round's findings and fixes go into the step's report; findings left open after round 3 are listed as open, not dropped. The orchestrator's brief supplies the checklist:
    - scope against the plan, missing and extra;
    - a test and a mutation row for every rule, and for each test the wrong implementation it would catch (which check actually refuses each input);
    - a grep over every position for each "every / only / all" claim;
