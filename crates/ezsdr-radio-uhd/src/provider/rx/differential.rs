@@ -547,6 +547,9 @@ struct Scripted {
 impl Device for Scripted {
     fn describe(&self) -> serde_json::Value { self.inner.describe() }
     fn fidelity(&self) -> Fidelity { self.inner.fidelity() }
+    /// Sol R07 (plan 30 §4.2): a test wrapper forwards the inner device's host clock, or it
+    /// would inherit the real one and the Authority's and the fake's clocks would disagree.
+    fn host(&self) -> crate::HostClock { self.inner.host() }
     fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
     fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
     fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { self.inner.front_end(dir, chan) }

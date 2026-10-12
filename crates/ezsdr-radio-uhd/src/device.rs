@@ -6,9 +6,11 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ezsdr_kernel::module_api::Fidelity;
+
+use crate::host::{ClockMode, HostClock};
 
 /// One complex `fc32` sample, UHD's `std::complex<float>` (UR-2).
 pub type Iq = [f32; 2];
@@ -186,10 +188,23 @@ pub trait Device: Send + Sync {
     fn tx_async(&self, timeout: Duration) -> Result<Option<TxReport>, DeviceError>;
     /// Frees both streamers; called only when no thread holds one (UR-16).
     fn close_streams(&self);
+    /// Everything else the Provider and the Authority read the host's time with (UR-2;
+    /// spec 18 UR-33): the real clock, or a manual one a `FakeDevice` may be built with.
+    fn host(&self) -> HostClock {
+        real_host()
+    }
     /// The Provider has found the device gone (UR-29): from now on neither the device
     /// nor its streamers are freed, since UHD's teardown of an unreachable X300 ends the
     /// process (design-notes §17, F4).
     fn mark_lost(&self);
+}
+
+/// The one real host clock per process: `Device::host`'s default and a `ClockMode::Real`
+/// `FakeDevice` share an origin, instead of measuring from their own creation — so a wrapper
+/// that forgets to forward `host()` still reads the same axis (UR-2, UR-33).
+pub(crate) fn real_host() -> HostClock {
+    static REAL: std::sync::OnceLock<HostClock> = std::sync::OnceLock::new();
+    REAL.get_or_init(HostClock::real).clone()
 }
 
 /// A tick as UHD's `(full_secs, frac_secs)` (UR-3, TM-20).
@@ -327,6 +342,8 @@ pub struct FakeConfig {
     /// The samples of one receive packet (UHD's samples per packet; 1 996 on the bench's
     /// X300 at MTU 9000); `None` makes a whole request one packet.
     pub rx_packet: Option<usize>,
+    /// Whether its host clock is the real one or a manual one (spec 18 UR-33, plan 30 §4.4).
+    pub clock: ClockMode,
 }
 
 impl Default for FakeConfig {
@@ -341,6 +358,7 @@ impl Default for FakeConfig {
             front_ends: vec!["UBX", "UBX"],
             rx_latency: Duration::ZERO,
             rx_packet: None,
+            clock: ClockMode::Real,
         }
     }
 }
@@ -354,7 +372,7 @@ struct Channel {
 }
 
 struct Fake {
-    zero: Instant,
+    zero: Duration,
     offset: i64,
     settings: [[Channel; 2]; 2],
     commands: VecDeque<(i64, Dir, usize, Settings)>,
@@ -395,9 +413,14 @@ struct Fake {
 /// A wall-clock double of a USRP, faithful in the ways the tests depend on (UR-33).
 pub struct FakeDevice {
     config: FakeConfig,
+    host: HostClock,
     state: Mutex<Fake>,
     #[cfg(test)]
     pub(crate) eob_error: Mutex<Option<DeviceError>>,
+    /// The next `time_now` first sleeps this long on the host clock, once, as
+    /// `FakeFault::SlowTimeRead` does from its instant on: a test's one wide bracket (UR-7).
+    #[cfg(test)]
+    pub(crate) slow_next_read: Mutex<Option<Duration>>,
 }
 
 const OVERRUN_BEHIND: Duration = Duration::from_millis(100);
@@ -414,9 +437,17 @@ impl FakeDevice {
             antenna: antenna.to_owned(),
         };
         let fired = vec![false; config.faults.len()];
+        let host = match config.clock {
+            ClockMode::Manual => HostClock::manual(),
+            ClockMode::Real => real_host(),
+        };
+        // The device's own zero (item 7): a real clock's origin is the process's, so a device
+        // built later would otherwise start with time already past its creation and a
+        // `Lost(d)`-style fault deadline already met. Count from this creation instead.
+        let zero = host.now();
         FakeDevice {
             state: Mutex::new(Fake {
-                zero: Instant::now(),
+                zero,
                 offset: 0,
                 settings: [
                     [channel("RX2"), channel("RX2")],
@@ -448,8 +479,11 @@ impl FakeDevice {
                 calls: Vec::new(),
             }),
             config,
+            host,
             #[cfg(test)]
             eob_error: Mutex::new(None),
+            #[cfg(test)]
+            slow_next_read: Mutex::new(None),
         }
     }
 
@@ -504,9 +538,15 @@ impl FakeDevice {
     }
 
     fn now(&self, st: &Fake) -> i64 {
-        let ns = st.zero.elapsed().as_nanos() as f64;
-        let ticks = ns * self.config.master_clock_rate as f64 / 1e9 * (1.0 + self.config.drift_ppm * 1e-6);
-        ticks as i64 + st.offset
+        let ns = self.host.now().saturating_sub(st.zero).as_nanos() as i128;
+        // Exact integer arithmetic at the nominal rate, so that the device's count and the
+        // Authority's extrapolation are the same floor of the same product, tick for tick (a
+        // `f64` product truncated to `i64` can land one tick low, which the Authority's
+        // integer arithmetic then sees as a one-tick offset it cannot account for). The drift
+        // is a separate, small term: exactly zero at the default `drift_ppm`.
+        let base = ns * self.config.master_clock_rate as i128 / 1_000_000_000;
+        let drift = (base as f64 * self.config.drift_ppm * 1e-6) as i128;
+        (base + drift) as i64 + st.offset
     }
 
     /// Applies the timed commands now in effect (UR-33's in-order command queue).
@@ -538,7 +578,7 @@ impl FakeDevice {
 
     /// A control call on a dead link: it waits and fails, not lost.
     fn timed_out(&self) -> DeviceError {
-        std::thread::sleep(Duration::from_millis(100));
+        self.host.sleep(Duration::from_millis(100));
         DeviceError::failed("fake: control operation timed out waiting for ACK (UHD error 47)")
     }
 
@@ -554,7 +594,7 @@ impl FakeDevice {
 
     fn sleep_ticks(&self, ticks: i64) {
         if ticks > 0 {
-            std::thread::sleep(Duration::from_nanos((ticks as i128 * 1_000_000_000 / self.config.master_clock_rate as i128) as u64));
+            self.host.sleep(Duration::from_nanos((ticks as i128 * 1_000_000_000 / self.config.master_clock_rate as i128) as u64));
         }
     }
 
@@ -598,6 +638,10 @@ impl Device for FakeDevice {
         Fidelity::NONE
     }
 
+    fn host(&self) -> HostClock {
+        self.host.clone()
+    }
+
     fn master_clock_rate(&self) -> u64 {
         self.config.master_clock_rate
     }
@@ -633,7 +677,7 @@ impl Device for FakeDevice {
         self.sleep_ticks(wait);
         let mut st = self.lock();
         st.calls.push(format!("set_time_zero {}", if at_next_pps { "pps" } else { "now" }));
-        st.zero = Instant::now();
+        st.zero = self.host.now();
         st.offset = 0;
         // A new timeline: nothing queued on the old one survives (a device's queues are
         // in its own time).
@@ -659,7 +703,14 @@ impl Device for FakeDevice {
             self.config.faults.iter().any(|f| matches!(f, FakeFault::SlowTimeRead(at) if self.now(&st) >= self.ticks_of(*at)))
         };
         if slow {
-            std::thread::sleep(Duration::from_millis(5));
+            self.host.sleep(Duration::from_millis(5));
+        }
+        #[cfg(test)]
+        {
+            let once = self.slow_next_read.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(d) = once {
+                self.host.sleep(d);
+            }
         }
         let mut st = self.lock();
         self.lost(&st)?;
@@ -729,10 +780,10 @@ impl Device for FakeDevice {
                     return Ok(Applied { rate: c.rate, freq: c.freq, gain: c.gain });
                 }
                 drop(st);
-                std::thread::sleep(Duration::from_millis(1));
+                self.host.sleep(Duration::from_millis(1));
             }
         }
-        std::thread::sleep(self.config.apply_delay);
+        self.host.sleep(self.config.apply_delay);
         let mut st = self.lock();
         self.lost(&st)?;
         st.calls.push(format!("apply {} {chan} {} at=-", dir.name(), describe(s)));
@@ -825,13 +876,13 @@ impl Device for FakeDevice {
 
     fn rx_recv(&self, n: usize, timeout: Duration) -> RxRecv {
         if self.unreachable() {
-            std::thread::sleep(timeout);
+            self.host.sleep(timeout);
             return RxRecv::Timeout;
         }
         let mut st = self.lock();
         if let Err(error) = self.lost(&st) {
             drop(st);
-            std::thread::sleep(timeout.min(Duration::from_millis(10)));
+            self.host.sleep(timeout.min(Duration::from_millis(10)));
             return RxRecv::Failed(error);
         }
         st.rx_min_timeout = st.rx_min_timeout.min(timeout);
@@ -860,7 +911,7 @@ impl Device for FakeDevice {
                 // UHD's `recv` on a stopped stream waits its whole timeout.
                 st.rx_next = None;
                 drop(st);
-                std::thread::sleep(timeout);
+                self.host.sleep(timeout);
                 return RxRecv::Timeout;
             }
         };
@@ -908,7 +959,7 @@ impl Device for FakeDevice {
                 FakeFault::RxPanic(_) => panic!("fake: rx_recv panics"),
                 FakeFault::Silence(_) => {
                     drop(st);
-                    std::thread::sleep(timeout);
+                    self.host.sleep(timeout);
                     return RxRecv::Timeout;
                 }
                 _ => unreachable!(),
@@ -953,7 +1004,7 @@ impl Device for FakeDevice {
                 // Stopped meanwhile: nothing produced after the stop ever comes.
                 take = take.min(((stop - next + ratio - 1) / ratio - got).max(0));
                 if take == 0 {
-                    std::thread::sleep(timeout);
+                    self.host.sleep(timeout);
                     if got == 0 {
                         return RxRecv::Timeout;
                     }
@@ -964,7 +1015,7 @@ impl Device for FakeDevice {
             let ready = stop.map_or(packet_end, |stop| packet_end.min(stop.max(next + (got + take) * ratio))) + latency;
             if ready - waiting > patience {
                 if got == 0 {
-                    std::thread::sleep(timeout);
+                    self.host.sleep(timeout);
                     return RxRecv::Timeout;
                 }
                 break;
@@ -1025,17 +1076,19 @@ impl Device for FakeDevice {
             if let Some(error) = self.eob_error.lock().unwrap().clone() { return Err(error); }
         }
         if self.unreachable() {
-            std::thread::sleep(timeout.min(Duration::from_millis(100)));
+            self.host.sleep(timeout.min(Duration::from_millis(100)));
             return Ok(0);
         }
         if self.config.faults.contains(&FakeFault::TxBlocks) {
             loop {
+                // A permanent host stop, not a clock wait: the participant stays busy and
+                // the manual clock stays frozen (the wedged test keeps the real clock).
                 std::thread::sleep(Duration::from_secs(1));
             }
         }
         for fault in &self.config.faults {
             if let FakeFault::SlowSend(delay) = fault {
-                std::thread::sleep(*delay);
+                self.host.sleep(*delay);
             }
         }
         // UHD sends an empty end-of-burst as one zero sample: a CHDR packet carries at
@@ -1137,14 +1190,14 @@ impl Device for FakeDevice {
             st.tx_cursor
         };
         // Flow control: at most 50 ms ahead of the device's time (UR-33).
-        let deadline = Instant::now() + timeout;
+        let deadline = self.host.now() + timeout;
         loop {
             let now = {
                 let st = self.lock();
                 self.now(&st)
             };
             let ahead = cursor - now - self.ticks_of(TX_AHEAD);
-            if ahead <= 0 || Instant::now() >= deadline {
+            if ahead <= 0 || self.host.now() >= deadline {
                 break;
             }
             self.sleep_ticks(ahead.min(self.ticks_of(Duration::from_millis(5))));
@@ -1196,7 +1249,7 @@ impl Device for FakeDevice {
             }
         }
         if !timeout.is_zero() {
-            std::thread::sleep(timeout);
+            self.host.sleep(timeout);
         }
         Ok(None)
     }
@@ -1207,5 +1260,182 @@ impl Device for FakeDevice {
 
     fn mark_lost(&self) {
         self.lock().calls.push("mark_lost".to_owned());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::mpsc::channel;
+
+    #[test]
+    fn ur_33_a_real_fake_s_time_counts_from_its_own_creation() {
+        // R07: a real-clock fake's zero — the origin of its time and of its faults' deadlines
+        // — is the process-wide real clock's reading at its creation, bracketed by readings
+        // just before and after it, not that clock's origin. A bracket, not a bound: it holds
+        // however long this thread is descheduled (R12).
+        let host = real_host();
+        std::thread::sleep(Duration::from_millis(2));
+        let before = host.now();
+        let fake = FakeDevice::new(FakeConfig::default());
+        let after = host.now();
+        let zero = fake.lock().zero;
+        assert!(before <= zero && zero <= after, "zero {zero:?} is not its creation, within [{before:?}, {after:?}]");
+    }
+
+    // The fake's receive strictness (UR-33; Review N, T2), each scenario run on participants of
+    // the fake's manual clock (M1): the device's time moves only while they wait on it, so its
+    // instants do not depend on the host's scheduling, and the wall clock is only the guard
+    // (plan 30 D2: these were integration tests whose plain test threads a loaded host delayed).
+
+    /// Root ticks of `n` milliseconds on the fake's 200 MHz master clock.
+    fn ms(n: i64) -> i64 {
+        n * 200_000
+    }
+
+    /// A fake on a manual host clock.
+    fn manual(config: FakeConfig) -> Arc<FakeDevice> {
+        Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..config }))
+    }
+
+    /// The receive link as the bench measured it (INFERRED from its stops: 2–4 ms), with the
+    /// X300's 1 996-sample packets.
+    fn bench_link(latency_ms: u64) -> FakeConfig {
+        FakeConfig { rx_latency: Duration::from_millis(latency_ms), rx_packet: Some(1_996), ..FakeConfig::default() }
+    }
+
+    /// Runs `f` on a participant of `device`'s clock and returns what it returns, failing after a
+    /// wall bound instead of hanging on a clock that freezes.
+    fn participant<T: Send + 'static>(device: &Arc<FakeDevice>, f: impl FnOnce(Arc<FakeDevice>) -> T + Send + 'static) -> T {
+        const BOUND: Duration = Duration::from_secs(10);
+        let (done, result) = channel();
+        let receiver = device.clone();
+        device.host().spawn("receiver", move || {
+            let _ = done.send(f(receiver));
+        }).unwrap();
+        result.recv_timeout(BOUND).unwrap_or_else(|e| panic!("the receiver's result within {BOUND:?}: {e}"))
+    }
+
+    /// Opens channel 0 at 1 MS/s and starts it 5 000 samples ahead; returns the start.
+    fn start_rx(device: &FakeDevice) -> i64 {
+        device.set_time_zero(false).unwrap();
+        device.apply(Dir::Rx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.rx_open(1).unwrap();
+        let start = (device.time_now().unwrap() / 200 + 5_000) * 200;
+        device.rx_start(start).unwrap();
+        start
+    }
+
+    /// Every block's (first tick, length) until `until` or two timeouts in a row.
+    fn blocks_until(device: &FakeDevice, until: impl Fn(&[(i64, usize)]) -> bool) -> Vec<(i64, usize)> {
+        let mut blocks = Vec::new();
+        let mut timeouts = 0;
+        while timeouts < 2 && !until(&blocks) {
+            match device.rx_recv(2_000, Duration::from_millis(50)) {
+                RxRecv::Samples { first_tick, samples } => {
+                    timeouts = 0;
+                    blocks.push((first_tick, samples[0].len()));
+                }
+                RxRecv::Timeout => timeouts += 1,
+                other => panic!("{other:?}"),
+            }
+        }
+        blocks
+    }
+
+    /// The tick after the last sample of `blocks` (at 1 MS/s), 0 when there are none.
+    fn end_of(blocks: &[(i64, usize)]) -> i64 {
+        blocks.last().map_or(0, |(t, n)| t + *n as i64 * 200)
+    }
+
+    #[test]
+    fn ur_33_a_timed_receive_stop_stops_the_stream_at_once() {
+        // design-notes §11 F1: the X3x0 ignores the stop's time. What was produced before the
+        // stop is still delivered; nothing after it. The receiver falls 5 ms of the device's time
+        // behind before it issues a stop timed 100 ms ahead, so the stream holds samples produced
+        // before the stop.
+        let device = manual(FakeConfig::default());
+        let (behind, issued, tail) = participant(&device, |device| {
+            let start = start_rx(&device);
+            let blocks = blocks_until(&device, |b| end_of(b) >= start + ms(20));
+            device.host().sleep(Duration::from_millis(5));
+            let issued = device.time_now().unwrap();
+            device.rx_stop(Some(issued + ms(100))).unwrap();
+            (end_of(&blocks), issued, blocks_until(&device, |_| false))
+        });
+        assert_eq!(tail.first().map(|(t, _)| *t), Some(behind), "the tail begins where the stream was: {tail:?}");
+        assert_eq!(end_of(&tail), issued, "the tail ends at the stop's issue, not at its time: {tail:?}");
+    }
+
+    #[test]
+    fn ur_33_a_stopped_stream_s_tail_comes_before_the_next_stream() {
+        // The bench: 1–2 blocks after an untimed stop. The stop's tail, then the next stream from
+        // its start. On the bench's 3 ms link the receiver is behind the device when it stops.
+        let device = manual(bench_link(3));
+        let (stopped, next, blocks) = participant(&device, |device| {
+            let start = start_rx(&device);
+            let _ = blocks_until(&device, |b| end_of(b) >= start + ms(20));
+            let stopped = device.time_now().unwrap();
+            device.rx_stop(None).unwrap();
+            let next = (stopped / 200 + 30_000) * 200;
+            device.rx_start(next).unwrap();
+            (stopped, next, blocks_until(&device, |b| b.iter().any(|(t, _)| *t >= next)))
+        });
+        let tail: Vec<_> = blocks.iter().filter(|(t, _)| *t < stopped).collect();
+        assert!(!tail.is_empty(), "no tail: {blocks:?}");
+        let first_new = blocks.iter().position(|(t, _)| *t >= next).expect("the next stream");
+        assert!(blocks[..first_new].iter().all(|(t, _)| *t < stopped), "{blocks:?}");
+        assert_eq!(blocks[first_new].0, next);
+    }
+
+    #[test]
+    fn ur_33_a_stopped_stream_s_recv_waits_its_whole_timeout() {
+        // design-notes §11 F2: UHD's `recv` on a stopped stream waits its whole timeout, here on
+        // the device's own clock.
+        let device = manual(FakeConfig::default());
+        let (got, waited) = participant(&device, |device| {
+            let _ = start_rx(&device);
+            device.rx_stop(None).unwrap();
+            let _ = blocks_until(&device, |_| false);
+            let begun = device.host().now();
+            let got = device.rx_recv(2_000, Duration::from_millis(60));
+            (got, device.host().now() - begun)
+        });
+        assert_eq!(got, RxRecv::Timeout);
+        assert!(waited >= Duration::from_millis(60), "the stopped stream's call waited {waited:?} of the device's clock");
+    }
+
+    #[test]
+    fn ur_33_a_recv_cut_short_by_a_packet_s_timeout_returns_what_it_has() {
+        // UHD's `recv` waits for each packet up to its timeout and returns what it has; it caches
+        // no timeout, so the next call waits as usual (`rx_streamer_impl.hpp:25–47`; Review O,
+        // N-1). A stream on the bench's link stopped 8 ms into a 20 ms request, by a second
+        // participant: the stop lands 8 ms of device time after the request began, inside it —
+        // a plain thread's stopper let a loaded host finish the request first (plan 30 D2).
+        let device = manual(bench_link(1));
+        let (from, stop, cut, next, waited) = participant(&device, |device| {
+            let start = start_rx(&device);
+            let from = end_of(&blocks_until(&device, |b| end_of(b) >= start + ms(10)));
+            // This participant is busy, so the clock stands still until both the stopper's sleep
+            // and the request's first packet wait have begun: the stop is 8 ms after this read.
+            let stop = device.time_now().unwrap() + ms(8);
+            let (stopper, clock) = (device.clone(), device.host());
+            let stopping = device.host().spawn("stopper", move || {
+                clock.sleep(Duration::from_millis(8));
+                stopper.rx_stop(None).unwrap();
+            }).unwrap();
+            let cut = device.rx_recv(20_000, Duration::from_millis(5));
+            stopping.join().unwrap();
+            let begun = device.host().now();
+            let next = device.rx_recv(2_000, Duration::from_millis(50));
+            (from, stop, cut, next, device.host().now() - begun)
+        });
+        let RxRecv::Samples { first_tick, samples } = cut else { panic!("the request cut short returned {cut:?}") };
+        let end = first_tick + samples[0].len() as i64 * 200;
+        // Every sample produced before the stop, from where the stream was, and none after it.
+        assert!(first_tick == from && end >= stop && end - 200 < stop, "the request cut short returned [{first_tick}, {end}) of the stream at {from} stopped at {stop}");
+        assert_eq!(next, RxRecv::Timeout, "the call after it");
+        assert!(waited >= Duration::from_millis(50), "the call after it waited {waited:?} of the device's clock, not its whole timeout");
     }
 }

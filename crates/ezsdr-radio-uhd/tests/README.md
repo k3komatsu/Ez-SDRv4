@@ -16,11 +16,46 @@ carrying out of a plan with `ezsdr_radio::timeline` on 1 000 seeded sequences
 each, on the same controlled clock.
 
 `fake.rs` is a smoke set: it exercises the complete coordinator and the bench
-rehearsals with a wall-clock FakeDevice. Its clock advances while the host is descheduled, as a
-device's does. Exact capture indices and uninterrupted loopback require on-time
-stream starts and no overflow/underflow. A loaded host may miss the 3 ms delivery
-allowance, 2 ms device lead or held-tail deadline. The fake's clock and hardware
-envelope must not be slowed or relaxed to make these tests pass.
+rehearsals through the real coordinator. Its `FakeDevice`s run on the **manual**
+host clock (plan 30 §4.4): the device's time stops while one of the Provider's
+threads — `uhd-rx`, `uhd-tx`, `uhd-control`, `uhd-clock` — is busy, and advances at
+real speed only while every one of them is idle (M1–M7). Host descheduling therefore
+cannot move the device's time past a deadline, and the smoke set no longer proves that
+the Provider catches up with real time: that is Phase 8's bench work. The fake's clock
+and the hardware envelope are still not slowed or relaxed to make a test pass.
+
+The clock rules are pinned by the unit tests in `src/host.rs` (one per rule M1–M7 and
+§4.7, each with a wall-clock bound), and the Authority's manual-clock behaviour by the
+tests in `src/authority.rs` (the first anchor exact, a read wider than 1 ms discarded, a
+`host.monotonic` wait and schedule judged on real host time, the root and host timelines
+kept apart). Every manual-clock test arms one shared
+wall watchdog (`common/watchdog.rs`, plan 30 §7): a clock a mutant freezes aborts the
+process with the test's name once `EZSDR_TEST_WATCHDOG_SECS` (default 120 s) passes,
+instead of hanging the suite; a watchdog that cannot start fails its test at once. The
+real clock stays where a real host deadline is the point: the Authority's own
+diagnostics, `ur_07_now_is_monotonic_across_a_reanchor` (a diagnostic, since the guard is
+pinned by a unit test in `src/authority.rs`; the re-anchor's bracket error is real
+time's), the device's own time against the process's clock
+(`ur_33_a_real_fake_s_time_starts_at_its_own_creation`), and the intentionally
+wedged thread (`FakeFault::TxBlocks`). `ur_21_late_policies_on_the_device_lead` now runs
+on the manual clock and asserts the booking's verdicts only; the repeat's re-decision at
+uhd-tx's first hand-over — a real interval — is pinned deterministically by the unit test
+`ur_21_first_dispatch_rechecks_all_late_policies` (plan 30 stage A). The tests a loaded host
+could fail went the same way (plan 30 D2). The fake's raw receive cases — a timed stop, a
+stopped stream's tail and its whole timeout, a request cut short by a stop — are unit tests
+in `src/device.rs` whose setup, receives and stops all run as participants of the fake's
+clock. `ur_07_no_device_read_follows_the_authority_s_drop` asserts only that no device read
+follows the Authority's drop, with no 50 ms bound: the drop's promptness is pinned by
+`ur_07_dropping_the_authority_ends_uhd_clock_while_the_manual_clock_is_stopped` in
+`src/authority.rs`. No short wall interval decides a functional property: where one needs the
+device's clock to stand still — the Authority's wakes, its drop, its `host.monotonic` waits —
+a participant holds the clock until the test releases it after its checks, and
+`ur_24_the_device_queue_order_is_the_effective_order` builds its late command on the
+controlled clock of `src/provider/control.rs`. The only short wall verdicts left are the
+medians of the real-clock latency diagnostics `ur_07_schedule_wakes_a_waiting_next_wakeup` and
+`ur_07_cancel_wakes_a_waiting_next_wakeup`, whose wakes are pinned on a held clock by unit
+tests; the remaining wall bounds, of seconds, only guard that something ends (a stop past an
+intentionally wedged thread, a shutdown, a Run).
 
 Before the B3/B4/B6/B7 waveform/index assertions and the single-burst assertion,
 `require_stream_timing` checks measured stream events and expired-timeline
@@ -33,9 +68,14 @@ original strict assertions. No test is ignored or retried by this diagnostic.
 An intentional stress probe is:
 
 ```sh
-CARGO_TARGET_DIR="$HOME/.cache/cargo-target/Ez-SDRv4" \
+CARGO_TARGET_DIR="$HOME/.cache/cargo-target/Ez-SDRv4" EZSDR_TEST_WATCHDOG_SECS=900 \
   cargo test -p ezsdr-radio-uhd --test fake -- --test-threads=128
 ```
+
+The stress probe raises the watchdog's bound on purpose: under heavy
+oversubscription a single smoke test legitimately takes far longer than its
+normal ~50 s, and the probe is measuring load failures, not hangs. The default
+(120 s) is the mutation shards' bound, below `mutate.py`'s 180 s timeout.
 
 This is a host timing/load probe, not a portable requirement that every developer
 machine service 128 concurrent radios within the UHD deadlines. Keep its complete

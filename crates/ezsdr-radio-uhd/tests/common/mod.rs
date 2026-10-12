@@ -32,6 +32,11 @@ use ezsdr_radio_uhd::profile::Profile;
 use ezsdr_radio_uhd::{Device, DeviceAuthority, FakeConfig, FakeDevice, FakeFault, TxCode, UhdRadio};
 use serde_json::{Value as Json, json};
 
+// ------------------------------------------------ the per-test wall watchdog (R05)
+
+mod watchdog;
+pub use watchdog::watch;
+
 // ---------------------------------------------------------------- fixtures
 
 pub const MCR: i64 = 200_000_000;
@@ -208,6 +213,12 @@ pub fn tone(n: usize) -> Vec<(f32, f32)> {
 /// A Run's Assembly as the server's catalogue builds one (EA-7): the radio, the
 /// Authority on the same device, the capture Sink and the host Link.
 pub fn assembly(profile_doc: &Json, device: Arc<dyn Device>, inputs: BTreeMap<ContentHash, Vec<u8>>, adjust: impl FnOnce(UhdRadio) -> UhdRadio) -> Assembly {
+    // A Run on the manual clock is the one a frozen clock can hang (R05); a real-clock device
+    // is its own wall bound. The Assembly is built before the Run starts, so the watchdog is
+    // armed before any wait a mutant could freeze.
+    if device.host().is_manual() {
+        watch();
+    }
     let profile = BindingProfile::from_json(profile_doc).unwrap();
     let mut registry = ModuleRegistry::new();
     let mut checks = AdmissionCheckRegistry::new();
@@ -257,6 +268,15 @@ pub fn assembly(profile_doc: &Json, device: Arc<dyn Device>, inputs: BTreeMap<Co
 }
 
 pub fn fake(config: FakeConfig) -> Arc<FakeDevice> {
+    // The smoke set runs on the manual clock (plan 30 §4.4): the device's time stops while
+    // a Provider thread is busy, so host load cannot miss a device deadline.
+    watch();
+    Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..config }))
+}
+
+/// A fake on the real host clock (plan 30 §4.4): the Authority's own diagnostics and the
+/// tests that must keep a real host deadline (the wedged-thread set).
+pub fn fake_real(config: FakeConfig) -> Arc<FakeDevice> {
     Arc::new(FakeDevice::new(config))
 }
 

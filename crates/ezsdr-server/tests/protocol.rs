@@ -1,5 +1,11 @@
 //! Spec 16's server tests (design/16-easy-api.md §5).
 
+// The shared per-test wall watchdog (plan 30 §7, R05): a manual clock a mutant freezes would
+// hang the test until the harness's timeout; this aborts instead. One implementation, shared
+// with `ezsdr-radio-uhd`'s `tests/common` and `ezsdr-acceptance`'s `tests/uhd.rs`.
+#[path = "../../ezsdr-radio-uhd/tests/common/watchdog.rs"]
+mod watchdog;
+
 use ezsdr_kernel::spec::Scalar;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
@@ -23,6 +29,9 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(name: &str) -> TempDir {
+        // Every test of this file builds its server with `FakeDevice` (the manual clock,
+        // plan 30 §4.4) and starts with a `TempDir`: arm the shared watchdog here (R05).
+        watchdog::watch();
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!("ezsdr-server-{}-{name}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         std::fs::create_dir_all(&path).unwrap();
@@ -734,7 +743,7 @@ fn fake_server(dir: &Path) -> (Server, Arc<AtomicU64>) {
     let count = opened.clone();
     let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| {
         count.fetch_add(1, Ordering::SeqCst);
-        Ok(Arc::new(FakeDevice::new(FakeConfig::default())) as Arc<dyn Device>)
+        Ok(Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..FakeConfig::default() })) as Arc<dyn Device>)
     });
     let mut server = Server::new(Config { open_device: Some(open), ..config(dir) });
     ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
@@ -842,7 +851,7 @@ fn ea_07_the_uhd_authority_takes_the_binding_s_sources() {
     let set_by = "ezsdr.radio.uhd.set_time_unknown_pps:addr=192.0.2.1".to_owned();
     for (clock_source, epoch) in [("external", EpochRef::Pps { set_by: set_by.clone() }), ("internal", EpochRef::Arbitrary { set_by: set_by.clone() })] {
         let temp = TempDir::new("uhd-sources");
-        let device = Arc::new(FakeDevice::new(FakeConfig::default()));
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..FakeConfig::default() }));
         let held = device.clone();
         let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| Ok(held.clone() as Arc<dyn Device>));
         let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
@@ -871,7 +880,7 @@ fn ea_07_the_device_is_released_when_the_session_ends() {
     let made = Arc::new(std::sync::Mutex::new(std::sync::Weak::<FakeDevice>::new()));
     let keep = made.clone();
     let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| {
-        let device = Arc::new(FakeDevice::new(FakeConfig::default()));
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..FakeConfig::default() }));
         *keep.lock().unwrap() = Arc::downgrade(&device);
         Ok(device as Arc<dyn Device>)
     });
@@ -892,7 +901,7 @@ fn unlocking_server(dir: &Path, unlocked: &'static [u64]) -> (Server, Arc<Atomic
     let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| {
         let n = count.fetch_add(1, Ordering::SeqCst);
         let faults = if unlocked.contains(&n) { vec![ezsdr_radio_uhd::FakeFault::ReferenceDoesNotLock] } else { Vec::new() };
-        Ok(Arc::new(FakeDevice::new(FakeConfig { faults, ..FakeConfig::default() })) as Arc<dyn Device>)
+        Ok(Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, faults, ..FakeConfig::default() })) as Arc<dyn Device>)
     });
     let mut server = Server::new(Config { open_device: Some(open), ..config(dir) });
     ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
@@ -946,7 +955,7 @@ fn ea_07_a_lost_device_ends_the_session_with_its_manifest() {
     // Review S, TG-S3 (F4): a device lost during a Session stops the Run by Policy; Finish
     // still returns the Manifest and writes it, and the device was marked lost first.
     let temp = TempDir::new("uhd-lost");
-    let device = Arc::new(FakeDevice::new(FakeConfig { faults: vec![ezsdr_radio_uhd::FakeFault::Lost(std::time::Duration::from_millis(3_000))], ..FakeConfig::default() }));
+    let device = Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, faults: vec![ezsdr_radio_uhd::FakeFault::Lost(std::time::Duration::from_millis(3_000))], ..FakeConfig::default() }));
     let held = device.clone();
     let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| Ok(held.clone() as Arc<dyn Device>));
     let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });

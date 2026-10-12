@@ -4,6 +4,12 @@
 
 mod support;
 
+// The shared per-test wall watchdog (plan 30 §7, R05): a manual clock a mutant freezes would
+// hang the test until the harness's timeout; this aborts instead. One implementation, shared
+// with `ezsdr-radio-uhd`'s `tests/common` and `ezsdr-server`'s `tests/protocol.rs`.
+#[path = "../../ezsdr-radio-uhd/tests/common/watchdog.rs"]
+mod watchdog;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -26,7 +32,10 @@ use support::{artifact, finish_at, modules, root, section, spec_run, T0, output,
 const MS: i64 = 200_000;
 
 fn fake() -> Arc<dyn Device> {
-    Arc::new(FakeDevice::new(FakeConfig::default()))
+    // The smoke set runs on the manual clock (plan 30 §4.4), which is what the watchdog
+    // bounds (R05): every Run of this file builds its device here, before it starts.
+    watchdog::watch();
+    Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..FakeConfig::default() }))
 }
 
 fn envelope() -> Json {

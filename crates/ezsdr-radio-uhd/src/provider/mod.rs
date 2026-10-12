@@ -222,9 +222,10 @@ impl UhdRadio {
 
     fn spawn(&mut self, core: &Arc<Core>, name: &'static str, body: impl FnOnce() + Send + 'static) -> Result<(), ModuleError> {
         let core_ = core.clone();
-        let handle = std::thread::Builder::new()
-            .name(name.to_owned())
-            .spawn(move || {
+        // §4.2, M1: the host clock registers the participant before the thread runs.
+        let host = core.device.host();
+        let handle = host
+            .spawn(name, move || {
                 if catch_unwind(AssertUnwindSafe(body)).is_err() {
                     // UR-16: a panic is recorded; the stream the thread served is gone.
                     core_.reject_note(json!({ "thread": name, "reason": "panicked" }));

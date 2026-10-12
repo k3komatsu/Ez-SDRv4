@@ -23,6 +23,7 @@ use serde_json::json;
 use super::control::Planned;
 use super::core::{Clock, Core, lock};
 use crate::device::{Dir, Iq, TxCode, TxReport};
+use crate::host::HostClock;
 use crate::profile::{DEVICE_LEAD_NS, IN_FLIGHT_WINDOW_NS};
 
 /// A burst uhd-control booked (UR-21).
@@ -65,6 +66,8 @@ struct PendingReport {
 pub(crate) struct Tx {
     core: Arc<Core>,
     cmds: Receiver<TxCmd>,
+    /// The device's host clock (plan 30 §4.3): the idle wait and the shutdown's ACK window.
+    host: HostClock,
     clock: Option<Clock>,
     channels: usize,
     held: BTreeMap<i64, Held>,
@@ -95,9 +98,11 @@ const SEND_TIMEOUT: Wall = Wall::from_secs(1);
 
 impl Tx {
     pub fn new(core: Arc<Core>, cmds: Receiver<TxCmd>, clock: Option<Clock>, channels: usize) -> Tx {
+        let host = core.device.host();
         Tx {
             core,
             cmds,
+            host,
             tracker: clock.map(|c| BurstTracker::new(c.domain)),
             clock,
             channels,
@@ -124,13 +129,13 @@ impl Tx {
                 }
             }
             if self.core.is_lost() {
-                std::thread::sleep(Wall::from_millis(1));
+                self.host.sleep(Wall::from_millis(1));
                 continue;
             }
             self.read(None);
             self.reports(Wall::ZERO);
             if !self.step() {
-                std::thread::sleep(IDLE);
+                self.host.sleep(IDLE);
             }
         }
     }
@@ -692,6 +697,11 @@ impl Tx {
                     if first {
                         self.core.reject_note(json!({ "call": "tx_async", "error": error.message }));
                     }
+                    // UR-33: a read that failed at once costs the timeout it would have
+                    // waited. A caller measuring clock time across a loop (shutdown's ACK
+                    // window) then cannot spin without the clock ever advancing, which on
+                    // the manual clock would stop the very time it measures and never end.
+                    self.host.sleep(timeout);
                     break;
                 }
             }
@@ -750,12 +760,14 @@ impl Tx {
 
     fn shutdown(mut self) {
         self.stop_now("UR-26: cancelled by Provider::stop", false);
-        if !self.core.is_lost() {
-            // 100 ms for the last BURST_ACK (UR-26).
-            let until = std::time::Instant::now() + Wall::from_millis(100);
-            while std::time::Instant::now() < until {
-                self.reports(Wall::from_millis(10));
-            }
+        // 100 ms of the device's host clock for the last BURST_ACK (UR-26; plan 30 §4.3: it
+        // waits for the device's acknowledgement, so it is measured in clock time). A loss —
+        // found by a read here or recorded by another thread — ends the window: `reports` no
+        // longer reads, so it no longer waits on the clock either, and the manual clock this
+        // busy thread holds still would never reach `until` (UR-33).
+        let until = self.host.now() + Wall::from_millis(100);
+        while !self.core.is_lost() && self.host.now() < until {
+            self.reports(Wall::from_millis(10));
         }
     }
 }

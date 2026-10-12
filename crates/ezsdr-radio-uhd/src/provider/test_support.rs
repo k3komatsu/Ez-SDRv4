@@ -2,6 +2,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use ezsdr_kernel::event::{EventCollector, EventSource, Target};
+use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ResourceId;
 use ezsdr_kernel::module_api::{ModuleRegistry, Pacing};
 use ezsdr_kernel::policy::{EventKindRegistry, Policy};
@@ -27,8 +28,23 @@ pub(super) fn rig_with(config: FakeConfig, links: Vec<Arc<dyn ezsdr_kernel::stre
     (core, device, time, events)
 }
 
+/// `rig` with the Run's Command inputs, for a test that books a waveform (UR-21: a burst's
+/// bytes must be an input of its Run).
+pub(super) fn rig_with_inputs(inputs: BTreeMap<ContentHash, Arc<[u8]>>)
+    -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+    let device = Arc::new(FakeDevice::new(FakeConfig::default()));
+    let (core, time, events) = rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
+    (core, device, time, events)
+}
+
 /// The rig on any device, with `block_len`.
 pub(super) fn rig_on(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, block_len: u32)
+    -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+    rig_on_inputs(device, links, block_len, BTreeMap::new())
+}
+
+/// `rig_on` with the Run's Command inputs.
+pub(super) fn rig_on_inputs(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, block_len: u32, inputs: BTreeMap<ContentHash, Arc<[u8]>>)
     -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let clocks = Arc::new(ClockRegistry::new());
     let root = clocks.allocate_id().unwrap();
@@ -42,7 +58,7 @@ pub(super) fn rig_on(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::s
         kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
     let core = Arc::new(Core::new(device, ResourceId::parse("usrp").unwrap(),
-        root, time.clone(), clocks, events.clone(), Arc::new(BTreeMap::new()), links,
+        root, time.clone(), clocks, events.clone(), Arc::new(inputs), links,
         crate::profile::Profile::X310Ubx.description(block_len))
         .expect("the rx node is inside the instance root"));
     (core, time, events)

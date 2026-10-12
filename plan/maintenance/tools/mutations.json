@@ -3023,5 +3023,509 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_10_instance"
+ },
+ {
+  "id": "J278",
+  "name": "the participant guard does not unregister (M1)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "        self.clock.unregister(self.id);",
+  "new": "        let _ = self.id;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_a_participant_registers_before_it_runs_and_unregisters_on_a_panic"
+ },
+ {
+  "id": "J279",
+  "name": "the manual clock advances while a participant is busy (M3)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "    if !st.busy.is_empty() {\n        return st.vnow;\n    }",
+  "new": "    if false {\n        return st.vnow;\n    }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m2_m3_a_busy_participant_stops_the_clock"
+ },
+ {
+  "id": "J280",
+  "name": "a sleeping participant's deadline does not cap the clock (M4)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "        Some(d) if t > d => d,",
+  "new": "        Some(d) if false => d,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m4_a_deadline_stops_the_clock_until_the_waiter_runs"
+ },
+ {
+  "id": "J281",
+  "name": "the manual clock runs faster than real time (M5)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "    let t = st.vnow + real.saturating_duration_since(st.last);",
+  "new": "    let t = st.vnow + 2 * real.saturating_duration_since(st.last);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m5_the_clock_runs_at_real_speed_from_its_last_commit"
+ },
+ {
+  "id": "J282",
+  "name": "sleep ignores its duration (M7)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "        let deadline = now_locked(&st, now) + d;",
+  "new": "        let deadline = now_locked(&st, now);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m7_a_notify_does_not_end_a_sleep_early"
+ },
+ {
+  "id": "J283",
+  "name": "a non-participant's wait stops the clock as a participant's does (M6)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "    let me = PARTICIPANT.with(Cell::get);",
+  "new": "    let me = PARTICIPANT.with(Cell::get).or(Some(u64::MAX));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m6_a_non_participant_wait_stops_nothing"
+ },
+ {
+  "id": "J284",
+  "name": "a waiter for the clock lock is busy, not idle (4.7)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "        if let Some(id) = participant {\n            go_idle(&mut st, now, id);\n        }",
+  "new": "        let _ = (participant, now);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "lock_a_waiter_waits_while_the_holder_sleeps_on_the_clock"
+ },
+ {
+  "id": "J285",
+  "name": "a notify does not wake a plain clock wait, so one stalled on a stopped clock is not ended by it (plan 30 §7)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "                go_busy(&mut st, now, id);\n            }\n            cond.notify_one();",
+  "new": "                go_busy(&mut st, now, id);\n            }\n            let _ = cond;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "wait_a_notify_ends_a_plain_wait_while_a_participant_is_busy"
+ },
+ {
+  "id": "J286",
+  "name": "the host.monotonic wait's timeout is a clock wait, so it cannot end while the clock is stopped (U02)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "                std::thread::sleep(wait.min(NAP));",
+  "new": "                self.host.sleep(wait.min(NAP));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_07_a_host_monotonic_wait_returns_while_a_participant_is_busy"
+ },
+ {
+  "id": "J287",
+  "name": "next_wakeup judges a host.monotonic instant on the device's clock, not real host time (plan 30 §4.6)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "            let now_host = self.time.host_ns();",
+  "new": "            let now_host = self.time.extrapolate();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_07_a_host_deadline_reaches_a_waiting_next_wakeup_while_a_participant_is_busy"
+ },
+ {
+  "id": "J288",
+  "name": "one check with both timelines due: host.monotonic fires before the root",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "            if let Some(tick) = root_next.filter(|tick| *tick <= self.time.extrapolate()) {\n                if let Some(fired) = self.time.fire_root(tick) {\n                    return Some(fired);\n                }\n                continue; // the entry went away under us: read the queue again\n            }\n            let now_host = self.time.host_ns();\n            if let Some(ns) = host_next.filter(|ns| *ns <= now_host) {\n                if let Some(fired) = self.time.fire_host(ns) {\n                    return Some(fired);\n                }\n                continue;\n            }\n",
+  "new": "            let now_host = self.time.host_ns();\n            if let Some(ns) = host_next.filter(|ns| *ns <= now_host) {\n                if let Some(fired) = self.time.fire_host(ns) {\n                    return Some(fired);\n                }\n                continue;\n            }\n            if let Some(tick) = root_next.filter(|tick| *tick <= self.time.extrapolate()) {\n                if let Some(fired) = self.time.fire_root(tick) {\n                    return Some(fired);\n                }\n                continue; // the entry went away under us: read the queue again\n            }\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_07_the_root_fires_first_when_both_are_due"
+ },
+ {
+  "id": "J289",
+  "name": "one last_fired for both timelines, not one per root timeline (KG-9 as plan 30 §4.6 amends it)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "            if let Some(fired) = s.host.last_fired.filter(|fired| ns < *fired) {",
+  "new": "            if let Some(fired) = s.root.last_fired.filter(|fired| ns < *fired) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_07_in_past_is_judged_per_root_timeline"
+ },
+ {
+  "id": "J290",
+  "name": "the manual clock's UR-8 relations are unbounded, as the real clock's are",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "        let validity = if host.is_manual() { Validity { from: measured, to: Some(measured) } } else { Validity { from: measured, to: None } };",
+  "new": "        let validity = if false { Validity { from: measured, to: Some(measured) } } else { Validity { from: measured, to: None } };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_08_the_manual_clock_s_relations_hold_only_at_the_instant_measured"
+ },
+ {
+  "id": "J291",
+  "name": "now(host.monotonic) is the device's clock instead of real host time",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "            return Ok(TimePoint::new(domain, self.host_ns()));",
+  "new": "            return Ok(TimePoint::new(domain, self.extrapolate()));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_08_the_host_domain_follows_real_time_across_a_busy_interval"
+ },
+ {
+  "id": "J292",
+  "name": "the receive stall's origin and interval are the first block's wall time, not the device's host clock (S02, UR-34)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                self.stall_at = Some(self.host.now());",
+  "new": "                self.stall_at = Some(self.started.elapsed());",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_34_the_receive_stall_fires_after_its_device_clock_interval",
+  "old2": "            if self.stall_at.is_some_and(|at| self.host.now().saturating_sub(at) >= after) {",
+  "new2": "            if self.stall_at.is_some_and(|at| self.started.elapsed().saturating_sub(at) >= after) {"
+ },
+ {
+  "id": "J293",
+  "name": "the shutdown's 100 ms window for the last BURST_ACK is wall time, not the device's host clock (R02)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        let until = self.host.now() + Wall::from_millis(100);\n        while !self.core.is_lost() && self.host.now() < until {",
+  "new": "        let until = std::time::Instant::now() + Wall::from_millis(100);\n        while !self.core.is_lost() && std::time::Instant::now() < until {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_the_shutdown_s_last_burst_ack_waits_on_the_device_s_clock"
+ },
+ {
+  "id": "J294",
+  "name": "a waiter for the projection's clock lock is busy, so an overlapped configure stalls (4.7, end to end)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "        if let Some(id) = participant {\n            go_idle(&mut st, now, id);\n        }",
+  "new": "        let _ = (participant, now);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_configure_overlapped_with_a_timed_update_to_the_same_projection_finishes"
+ },
+ {
+  "id": "J295",
+  "name": "the manual clock advances while a participant is busy and at a deadline, so a descheduled timed send goes late (M3+M4)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "    if !st.busy.is_empty() {\n        return st.vnow;\n    }",
+  "new": "    if false {\n        return st.vnow;\n    }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_21_a_descheduled_timed_send_is_on_time_on_the_manual_clock_and_late_on_the_real_one",
+  "old2": "        Some(d) if t > d => d,",
+  "new2": "        Some(d) if false => d,"
+ },
+ {
+  "id": "J296",
+  "name": "cancel does not remove a root timeline's callback (MA-29 as KG-3 amends it)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "            lock(&self.schedule).root.pending.remove(&(h.ticks, h.seq)).is_some()",
+  "new": "            lock(&self.schedule).host.pending.remove(&(h.ticks, h.seq)).is_some()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_07_a_manual_cancel_wakes_a_waiting_next_wakeup"
+ },
+ {
+  "id": "J297",
+  "name": "the Authority's drop never sets uhd-clock's stop flag, so the nap is re-entered (UR-7's D-1)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "        *lock(&stop) = true;\n        self.time.host.notify_all();",
+  "new": "        self.time.host.notify_all();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_07_dropping_the_authority_ends_uhd_clock_while_the_manual_clock_is_stopped"
+ },
+ {
+  "id": "J298",
+  "name": "a root schedule is queued on the host.monotonic timeline instead",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "        s.root.pending.insert((ticks, seq), f);",
+  "new": "        s.host.pending.insert((ticks, seq), f);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_07_a_manual_schedule_wakes_a_waiting_next_wakeup"
+ },
+ {
+  "id": "J299",
+  "name": "fire_host returns a root instant instead of the host.monotonic instant",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "        Some(TimePoint::new(ClockDomainId::HOST_MONOTONIC, ns))",
+  "new": "        Some(TimePoint::new(self.root, ns))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_07_the_host_timeline_is_judged_on_real_time_on_the_real_clock"
+ },
+ {
+  "id": "J300",
+  "name": "the cached earliest deadline is the latest one, so the clock stops at it (M4)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "fn set_deadline(st: &mut State, id: u64, deadline: Duration) {\n    st.deadlines.insert(id, deadline);\n    st.earliest = st.deadlines.values().min().copied();\n}",
+  "new": "fn set_deadline(st: &mut State, id: u64, deadline: Duration) {\n    st.deadlines.insert(id, deadline);\n    st.earliest = st.deadlines.values().max().copied();\n}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m4_two_sleepers_stop_the_clock_at_the_earlier_deadline_and_go_on_to_the_later"
+ },
+ {
+  "id": "J301",
+  "name": "a sleep ends on any notify instead of only at its deadline (M7)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "        park(m, st, now, Some(deadline), None, None);",
+  "new": "        let seen = st.notified;\n        park(m, st, now, Some(deadline), None, Some(seen));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m7_a_notify_does_not_end_a_sleep_early"
+ },
+ {
+  "id": "J302",
+  "name": "a wait that finds the clock stopped polls the frozen remainder in real time instead of blocking (item 1)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "        let remaining = manual.filter(|_| running).map(|d| d - now_locked(&st, now));",
+  "new": "        let remaining = manual.map(|d| d.saturating_sub(now_locked(&st, now)));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "cpu_a_stopped_clock_costs_a_near_wait_no_wakes"
+ },
+ {
+  "id": "J303",
+  "name": "the clock running on wakes every wait, not only those stalled on it: a wake storm (item 1)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "            for wait in st.waits.values_mut().filter(|wait| wait.stalled) {",
+  "new": "            for wait in st.waits.values_mut() {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "cpu_a_far_wait_sleeps_through_other_participants_cycles"
+ },
+ {
+  "id": "J304",
+  "name": "the clock running on does not wake the waits stalled on it, so they block for ever (item 1)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "                wait.stalled = false;\n                wait.cond.notify_one();",
+  "new": "                wait.stalled = false;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "cpu_a_stopped_clock_costs_a_near_wait_no_wakes"
+ },
+ {
+  "id": "J305",
+  "name": "next_wakeup waits for a root entry in real time, so a stopped clock makes it poll (item 1, O2)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "        (Some(self.host.now() + wait), real)",
+  "new": "        (None, Some(real.map_or(Instant::now() + wait, |r| r.min(Instant::now() + wait))))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "cpu_a_stopped_clock_with_a_near_root_entry_does_not_poll"
+ },
+ {
+  "id": "J306",
+  "name": "a notify does not make the participant it wakes busy, so the clock runs before it does (M4, R01)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "            if let Some(id) = participant {\n                go_busy(&mut st, now, id);\n            }\n            cond.notify_one();",
+  "new": "            let _ = (participant, now);\n            cond.notify_one();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "notify_a_notified_participant_is_busy_until_it_runs"
+ },
+ {
+  "id": "J307",
+  "name": "a transition reads its real instant before taking the state mutex, so the clock wins back a delay (M5, R02)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "    let st = lock_state(m);\n    (st, Instant::now())",
+  "new": "    let real = Instant::now();\n    let st = lock_state(m);\n    (st, real)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m5_a_transition_delayed_before_the_state_mutex_does_not_make_the_clock_jump"
+ },
+ {
+  "id": "J308",
+  "name": "the clock lock's hand-off does not make the waiter busy, so the clock runs after it (4.7, M4)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "                if let Some(id) = participant {\n                    go_busy(&mut st, now, id);\n                }\n                cond.notify_one();",
+  "new": "                let _ = (participant, now);\n                cond.notify_one();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "hand_off_the_clock_does_not_advance_after_the_lock_hand_off"
+ },
+ {
+  "id": "J309",
+  "name": "a waiter that runs clears every deadline equal to its own, lifting a second waiter's stop (M4)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "fn clear_deadline(st: &mut State, id: u64) {\n    st.deadlines.remove(&id);",
+  "new": "fn clear_deadline(st: &mut State, id: u64) {\n    if let Some(d) = st.deadlines.remove(&id) {\n        st.deadlines.retain(|_, other| *other != d);\n    }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m4_two_sleepers_with_one_deadline_stop_the_clock_there_until_both_run"
+ },
+ {
+  "id": "J310",
+  "name": "a commit ignores the waiting participants' deadlines, so a notify racing one moves the clock past it (M4)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "    st.vnow = now_locked(st, real);",
+  "new": "    st.vnow = st.vnow + real.saturating_duration_since(st.last);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m4_a_notify_racing_the_deadline_does_not_move_the_clock_past_it"
+ },
+ {
+  "id": "J311",
+  "name": "a plain wait's deadline does not stop the clock, only a sleep's (M4)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "        if let Some(deadline) = manual {\n            set_deadline(&mut st, id, deadline);\n        }",
+  "new": "        if let Some(deadline) = manual.filter(|_| seen.is_none()) {\n            set_deadline(&mut st, id, deadline);\n        }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m4_a_notify_racing_the_deadline_does_not_move_the_clock_past_it"
+ },
+ {
+  "id": "J312",
+  "name": "the clock running on after a busy interval counts that interval (M5)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "    if st.busy.remove(&id) && st.busy.is_empty() {\n        st.last = real;",
+  "new": "    if st.busy.remove(&id) && st.busy.is_empty() {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m5_a_participant_going_idle_restarts_the_clock_from_that_instant"
+ },
+ {
+  "id": "J313",
+  "name": "a start that never runs keeps its participant registered, so the clock stays stopped (M1, R08)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "        if let Some(id) = self.id.take() {\n            self.clock.unregister(id);\n        }",
+  "new": "        if let Some(id) = self.id.take() {\n            let _ = id;\n        }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_a_thread_that_never_starts_leaves_no_registration"
+ },
+ {
+  "id": "J314",
+  "name": "next_wakeup reads the host.monotonic timeline latest first (plan 30 §7, R06)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "                    s.host.pending.first_key_value().map(|(&(t, _), _)| t),",
+  "new": "                    s.host.pending.last_key_value().map(|(&(t, _), _)| t),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_07_the_host_queue_keeps_its_order_across_a_reanchor"
+ },
+ {
+  "id": "J315",
+  "name": "the receipt site's SendAsap move is dropped, so the requested start is reserved instead of the moved one (UR-21)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                start = clock.at_or_after(clock.instant(now_k) + lead);\n",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_the_receipt_site_reserves_the_moved_start_before_any_hand_over"
+ },
+ {
+  "id": "J316",
+  "name": "a FakeDevice's time counts from the process-wide host origin, not its own creation (R07)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "        let zero = host.now();",
+  "new": "        let zero = Duration::ZERO;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_real_fake_s_time_counts_from_its_own_creation"
+ },
+ {
+  "id": "J317",
+  "name": "a failed tx_async read does not wait its timeout, so the shutdown's ACK loop freezes the clock it measures (UR-33)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "                    self.host.sleep(timeout);\n",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_33_a_shutdown_with_a_report_read_that_fails_at_once_still_joins_uhd_tx"
+ },
+ {
+  "id": "J318",
+  "name": "a device loss does not end the shutdown's ACK window, so its reads stop waiting and the clock it measures freezes (R11, UR-26, UR-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        while !self.core.is_lost() && self.host.now() < until {",
+  "new": "        while self.host.now() < until {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_29_a_loss_found_by_the_shutdown_s_report_read_ends_its_ack_window"
+ },
+ {
+  "id": "J319",
+  "name": "a test's watchdog that cannot start is ignored, so the test runs unguarded (R15)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/watchdog.rs",
+  "old": "        thread.expect(\"the test's watchdog thread did not start (plan 30 §7)\");",
+  "new": "        let _ = thread;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_watchdog_that_cannot_start_fails_its_test"
+ },
+ {
+  "id": "J320",
+  "name": "a receive call cut short by a packet that does not come returns Timeout instead of the samples it has (UR-33)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "                    if got == 0 {\n                        return RxRecv::Timeout;\n                    }\n                    break;",
+  "new": "                    return RxRecv::Timeout;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_recv_cut_short_by_a_packet_s_timeout_returns_what_it_has"
+ },
+ {
+  "id": "J321",
+  "name": "a stop during a receive call does not trim what the call took past it, so samples produced after the stop are returned (UR-33)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "            got = got.min(((stop - next + ratio - 1) / ratio).max(0));",
+  "new": "            let _ = stop;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_recv_cut_short_by_a_packet_s_timeout_returns_what_it_has"
+ },
+ {
+  "id": "J322",
+  "name": "the Authority's drop does not wake uhd-clock, so it waits out the nap, on a stopped manual clock until CLOCK_JOIN (UR-7's D-1, Review R's R-1)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "        self.time.host.notify_all();",
+  "new": "        let _ = &self.time.host;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_07_dropping_the_authority_ends_uhd_clock_while_the_manual_clock_is_stopped"
+ },
+ {
+  "id": "J323",
+  "name": "a receive call on a stopped stream returns Timeout at once, as if UHD cached the cut-short call's timeout (UR-33; Review O, N-1)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "                st.rx_next = None;\n                drop(st);\n                self.host.sleep(timeout);",
+  "new": "                st.rx_next = None;\n                drop(st);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_recv_cut_short_by_a_packet_s_timeout_returns_what_it_has"
+ },
+ {
+  "id": "J324",
+  "name": "uhd-clock takes no first read on a manual clock, so new returns with its own read's inexact anchor (UR-7)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "                    let _ = report.send(clock.upgrade().is_some_and(|time| time.reanchor()));",
+  "new": "                    let _ = report.send(true);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_07_the_first_anchor_is_exact_on_the_manual_clock"
+ },
+ {
+  "id": "J325",
+  "name": "new accepts a first read that was not exact on a manual clock, keeping its own read's anchor (UR-7)",
+  "file": "crates/ezsdr-radio-uhd/src/authority.rs",
+  "old": "                Ok(false) => return Err(\"UR-7: the device's first time read was not exact on the manual host clock: it failed, or the clock moved while it ran\".to_owned()),",
+  "new": "                Ok(false) => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_07_a_first_read_that_is_not_exact_refuses_the_authority"
+ },
+ {
+  "id": "J326",
+  "name": "the fake honours a timed receive stop, delivering up to its time, where the X3x0 stops at once (UR-33; design-notes §11 F1)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "        let now = self.now(&st);\n        st.rx_then = None;",
+  "new": "        let now = at.unwrap_or_else(|| self.now(&st));\n        st.rx_then = None;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_timed_receive_stop_stops_the_stream_at_once"
+ },
+ {
+  "id": "J327",
+  "name": "a receive start issued during a stopped stream's tail is not held behind it, so the tail and the next stream are lost (UR-33)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "        } else if st.rx_end.is_some() {",
+  "new": "        } else if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_stopped_stream_s_tail_comes_before_the_next_stream"
  }
 ]
