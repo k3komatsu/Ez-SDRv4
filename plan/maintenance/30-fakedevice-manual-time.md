@@ -2,7 +2,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| 状態 | **第5版。owner は §10 の判断を推奨どおり承認（2026-10-12）。Sol の第4回のレビューは APPROVE_WITH_CHANGES（P2 2件。§13 で反映済み）。段階0から始められる。実装は未着手。** |
+| 状態 | **第5版。owner は §10 の判断を推奨どおり承認（2026-10-12）。Sol の第4回のレビューは APPROVE_WITH_CHANGES（P2 2件。§13 で反映済み）。段階0は完了（§14）。段階Aは未着手。** |
 | 作成日 | 2026-10-12 |
 | owner の判断 | 2026-10-12「私が決めることはあなたの推奨でOKです」：D1 は受け入れる。手動の時計にするのは smoke set だけで、既定は実時間。D2 は段階Aの実測のあとに決める。同日「所要時間が変わらなくても並列化できるのと決定的になるだけでよいです」：短縮は目標にしない |
 | 独立レビュー | Sol 6.1、第1回 REJECT（P0 1・P1 8・P2 1）、第2回 REJECT（P0 は解消、P1 2・P2 1）、第3回 REJECT（P1 1）、第4回 APPROVE_WITH_CHANGES（P2 2）。全件採用。反映先は §11〜§13 |
@@ -210,7 +210,7 @@ uhd crate に1ファイルを足す（`src/host.rs`）。
    - 落ちたテストを、`TIMING_PRECONDITION_UNMET` と Manifest のイベントを根拠に、(a) uhd のスレッドの期限切れ、(b)、(c)、(d)、その他に分類する。結果はこのファイルに記録する。
 2. **段階A（本体）:**
    - 範囲：§4 のすべてと、§7 のテスト、§8 の文書。
-   - 終わりに gate を通す（全6リストの mutation を sim02/sim03 で流す）。そのあと、段階0と同じ負荷試験を3回流す。
+   - 終わりに gate を通す（全6リストの mutation を sim02/sim03 で流す）。そのあと、段階0と同じ負荷試験を、§14 の4条件（CPU と `--test-threads` の組み合わせ）でそれぞれ3周流す。
    - **#60 を閉じる条件:** (a) の失敗が 0 件で、通常の実行が全部通る。(b)〜(d) の件数を報告する。
    - **mutation の並列度を上げる条件:** 負荷試験の失敗が全部で 0 件。(b)〜(d) が残ると、変異のせいではない失敗で mutant を誤って kill した扱いになるので、並列度は D2 の対策が済むまで上げない（Sol R08）。
 3. **段階B（D2 次第。§5）。**
@@ -319,4 +319,35 @@ Sol は、S02 と S03 を解消と判定した。S01 も、予約された domai
 |---|---|---|
 | U01 P2 | 本番の経路で変わることの記述が足りない。「domain ごと」は「root の時間軸ごと」と書くべき。§4.3 の表に `root_tick` が残っていた | §4.3 の表、§4.6、§8 |
 | U02 P2 | これから来る HOST の期限を待っている間のテストがない | §4.6、§7 |
+
+## 14. 段階0の記録（2026-10-12、HEAD `27e3c27`）
+
+**実行環境:** sim03（32 コア、負荷なし）。mutation と同じ Docker image（`plan/maintenance/tools/remote/Dockerfile`）を使い、CPU を `--cpus` で制限した。suite は3つ（`-p ezsdr-radio-uhd --test fake`、`-p ezsdr-acceptance --test uhd`、`-p ezsdr-server --test protocol`）で、各条件を3周した。ログは sim03 の `~/ezsdr-stress/out/`。
+
+| CPU | `--test-threads` | fake（128件）の失敗数（1周目・2周目・3周目） | uhd（8件） | protocol（41件） |
+|---|---|---|---|---|
+| 16 | 128 | 0・0・0 | 全件通過 | 全件通過 |
+| 4 | 32（mutation の shard と同じ条件。`REMOTE_CPUS` = 4、スレッド数はコンテナの中で見える CPU 数） | 3・3・3 | 全件通過 | 全件通過 |
+| 4 | 128 | 19・19・19 | 全件通過 | 全件通過 |
+| 2 | 128 | 28・30・27 | 全件通過 | 全件通過 |
+
+**分かったこと:**
+
+- **mutation の gate は今も影響を受けている。** mutation の shard と同じ条件（4 CPU、スレッド 32）で、毎周 3件が落ちた。落ちるテストは周ごとに違った（`ur_21_late_policies_on_the_device_lead`、`ur_23_…` の6件ほど）。そのため、その時たまたま落ちたテストに mutant の kill を誤って数えることがありうる。
+- **16 CPU なら落ちない。** 過去の記録（34〜37件の失敗）は、CPU の少ない環境での結果と考えられる（**INFERRED**）。
+- **失敗するのは fake suite だけ。** acceptance の uhd と server の protocol は、どの条件でも落ちなかった。
+
+**分類**（9回の fake のログを `---- … stdout ----` ごとに読んだ）:
+
+| 区分 | 根拠 | 件数（ログで症状が出たファイル数 / 9） |
+|---|---|---|
+| (a) uhd のスレッドの期限切れ：送信の途切れ | `radio.TX_UNDERFLOW`（`starved`）、`TIMING_PRECONDITION_UNMET` に記録 | 6 |
+| (a) uhd のスレッドの期限切れ：受信の溢れ | `radio.RX_OVERFLOW` | 6 |
+| (a) か (c)：booking の遅れ | `radio.TIME_ERROR`（`late`、`late_by` が 5〜195 ms）。late policy の結果が期待と違う（`ur_21_…`、`ur_23_…`） | 7 |
+| (b) Kernel の非参加者の遅れ | `LINK_BACKPRESSURE`、`EVENTS_DROPPED` はどちらも 0 件 | 0 |
+| (d) 実時間の上限 | `KC-21a`、`KC-12a` の失敗は 0 件 | 0 |
+
+- **booking の遅れを (a) と (c) に分けられない理由:** smoke のテストは `tx_at(run, lead)` で `run.now()` から送信時刻を計算し、すぐに `submit` する（`tests/fake.rs:928-942`）。だから、試験のスレッドの遅れ (c) と、uhd-control・uhd-tx の遅れ (a) のどちらでも、同じ症状になる。
+- **段階Aの判定:** 段階Aのあとに同じ4条件を流し直す。残った失敗が全部「Session の burst の booking の遅れ」なら (c) と判定し、D2 に回す。
+- **(b) と (d) について:** 今の測定では出ていない。段階Aのあとにも出なければ、D2 の対象は (c) だけになる。
 
