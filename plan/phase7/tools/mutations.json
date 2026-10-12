@@ -305,7 +305,7 @@
   "id": "G33",
   "name": "the paced schedule refuses an instant before now (UR-7)",
   "file": "crates/ezsdr-radio-uhd/src/authority.rs",
-  "old": "schedule.last_fired.filter(|fired| ticks < *fired)",
+  "old": "s.root.last_fired.filter(|fired| ticks < *fired)",
   "new": "Some(self.extrapolate()).filter(|fired| ticks < *fired)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
@@ -493,8 +493,8 @@
   "id": "U04",
   "name": "next_wakeup returns before the device reaches the instant",
   "file": "crates/ezsdr-radio-uhd/src/authority.rs",
-  "old": "if time.extrapolate() >= tick {",
-  "new": "if tick >= 0 || time.extrapolate() >= tick {",
+  "old": "            if let Some(tick) = root_next.filter(|tick| *tick <= self.time.extrapolate()) {",
+  "new": "            if let Some(tick) = root_next {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_07_the_authority_paces_to_the_device"
@@ -503,11 +503,11 @@
   "id": "U05",
   "name": "schedule does not wake a waiting next_wakeup",
   "file": "crates/ezsdr-radio-uhd/src/authority.rs",
-  "old": "        drop(schedule);\n        self.changed.notify_all();\n        Ok(ScheduleHandle",
-  "new": "        drop(schedule);\n        Ok(ScheduleHandle",
+  "old": "        drop(s);\n        self.host.notify_all();\n        Ok(ScheduleHandle { root: self.root, ticks, seq })",
+  "new": "        drop(s);\n        Ok(ScheduleHandle { root: self.root, ticks, seq })",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_07_schedule_wakes_a_waiting_next_wakeup"
+  "test_bin": "lib",
+  "filter": "ur_07_a_manual_schedule_wakes_a_waiting_next_wakeup"
  },
  {
   "id": "U06",
@@ -516,8 +516,8 @@
   "old": "self.last.fetch_max(t, Ordering::AcqRel).max(t)",
   "new": "t",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_07_now_is_monotonic_across_a_reanchor"
+  "test_bin": "lib",
+  "filter": "ur_07_now_does_not_follow_an_anchor_that_lands_behind_it"
  },
  {
   "id": "U07",
@@ -604,12 +604,12 @@
  {
   "id": "U15",
   "name": "SendAsap does not move the start",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                start = clock.at_or_after(clock.instant(now_k) + lead);",
-  "new": "                start += 0;",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "                let start = clock.at_or_after(clock.instant(now) + lead);",
+  "new": "                let start = held.k;",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_21_late_policies_on_the_device_lead"
+  "test_bin": "lib",
+  "filter": "ur_21_first_dispatch_rechecks_all_late_policies"
  },
  {
   "id": "U16",
@@ -787,7 +787,7 @@
   "id": "U33",
   "name": "schedule refuses an instant before now",
   "file": "crates/ezsdr-radio-uhd/src/authority.rs",
-  "old": "schedule.last_fired.filter(|fired| ticks < *fired)",
+  "old": "s.root.last_fired.filter(|fired| ticks < *fired)",
   "new": "Some(self.extrapolate()).filter(|fired| ticks < *fired)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
@@ -797,11 +797,11 @@
   "id": "U34",
   "name": "cancel does not wake a waiting next_wakeup",
   "file": "crates/ezsdr-radio-uhd/src/authority.rs",
-  "old": "        self.changed.notify_all();\n        removed",
+  "old": "        self.host.notify_all();\n        removed",
   "new": "        removed",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_07_cancel_wakes_a_waiting_next_wakeup"
+  "test_bin": "lib",
+  "filter": "ur_07_a_manual_cancel_wakes_a_waiting_next_wakeup"
  },
  {
   "id": "U35",
@@ -887,7 +887,7 @@
   "id": "U43",
   "name": "the idle device time read removed",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "        let begun = Instant::now();\n        match self.core.device.time_now() {\n            Ok(_) => self.failing_since = None,\n            Err(error) if error.lost => self.core.device_lost(&error.message),\n            Err(error) => {\n                self.core.timing(json!({ \"what\": \"time_read_failed\", \"error\": error.message }));\n                let since = *self.failing_since.get_or_insert(begun);\n                if since.elapsed() >= FAILING_FOR {\n                    self.core.device_lost(&format!(\"UR-29: the device time reads have failed for 1 s: {}\", error.message));\n                }\n            }\n        }\n",
+  "old": "        let begun = self.host.now();\n        match self.core.device.time_now() {\n            Ok(_) => self.failing_since = None,\n            Err(error) if error.lost => self.core.device_lost(&error.message),\n            Err(error) => {\n                self.core.timing(json!({ \"what\": \"time_read_failed\", \"error\": error.message }));\n                let since = *self.failing_since.get_or_insert(begun);\n                if self.host.now().saturating_sub(since) >= FAILING_FOR {\n                    self.core.device_lost(&format!(\"UR-29: the device time reads have failed for 1 s: {}\", error.message));\n                }\n            }\n        }\n",
   "new": "",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
@@ -927,10 +927,10 @@
   "id": "R02",
   "name": "UR-7's 1 ms bracket rule disabled (L05)",
   "file": "crates/ezsdr-radio-uhd/src/authority.rs",
-  "old": "if width <= WIDEST_BRACKET {",
-  "new": "if width <= WIDEST_BRACKET || width > WIDEST_BRACKET {",
+  "old": "if width > WIDEST_BRACKET {",
+  "new": "if false && width > WIDEST_BRACKET {",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_07_a_read_bracketed_wider_than_1_ms_is_discarded"
  },
  {
@@ -940,7 +940,7 @@
   "old": "let effective = latest.map_or(e, |latest| latest.max(e));",
   "new": "let effective = latest.map_or(e, |_| e);",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_24_the_device_queue_order_is_the_effective_order"
  },
  {
@@ -1007,8 +1007,8 @@
   "id": "R10",
   "name": "UR-29's silence bound 3 s instead of 1 s (L14)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "&& self.last_samples.elapsed() > Wall::from_secs(1)",
-  "new": "&& self.last_samples.elapsed() > Wall::from_secs(3)",
+  "old": "&& self.host.now().saturating_sub(self.last_samples) > Wall::from_secs(1)",
+  "new": "&& self.host.now().saturating_sub(self.last_samples) > Wall::from_secs(3)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_29_a_silent_stream_is_a_lost_device"
@@ -1377,10 +1377,10 @@
  },
  {
   "id": "B24",
-  "name": "uhd-clock reads the device without checking its stop flag (D-1)",
+  "name": "uhd-clock never sees the Authority's stop flag (D-1)",
   "file": "crates/ezsdr-radio-uhd/src/authority.rs",
-  "old": "                    if *stopped.unwrap_or_else(|e| e.into_inner()).0 {\n                        return;\n                    }",
-  "new": "                    let _ = stopped;",
+  "old": "        *lock(&stop) = true;",
+  "new": "        let _ = &stop;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_07_no_device_read_follows_the_authority_s_drop"
@@ -1621,8 +1621,8 @@
   "id": "C01",
   "name": "the Authority's callbacks run holding the schedule lock (the exit review's UR-7 clause)",
   "file": "crates/ezsdr-radio-uhd/src/authority.rs",
-  "old": "            drop(schedule);\n            callback(TimePoint::new(time.root, tick));\n            schedule = lock(&time.schedule);",
-  "new": "            callback(TimePoint::new(time.root, tick));",
+  "old": "            drop(s);\n            callback(TimePoint::new(self.root, tick));\n            s = lock(&self.schedule);",
+  "new": "            callback(TimePoint::new(self.root, tick));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_07_callbacks_run_outside_the_schedule_lock"

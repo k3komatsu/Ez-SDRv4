@@ -1,8 +1,9 @@
 //! Spec 18 §6: every UR rule through the real coordinator on `FakeDevice`, with an
 //! Assembly built as the server's catalogue builds it (the capture Sink, the host
 //! Link, `DeviceAuthority` and `UhdRadio` on one device), unless a test says "unit".
-//! Timings are wall-clock. Stream-integrity trials require the host to meet the
-//! device's deadlines; see tests/README.md for timing-precondition diagnostics.
+//! The device's clock is the manual one (plan 30 §4.4), so a test's waits and its
+//! timing assertions are that clock's; see tests/README.md for the rules and for
+//! timing-precondition diagnostics.
 
 mod common;
 
@@ -29,7 +30,7 @@ use ezsdr_kernel::spec::{Constraint, Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::{BurstEnd, DataLinkDecl};
 use ezsdr_kernel::time::{ClockRegistry, Duration, EpochRef, RelativeBudget, TimePoint};
 use ezsdr_radio::payloads::{TimeErrorOutcome, TimeErrorPayload};
-use ezsdr_radio_uhd::{Device, DeviceAuthority, FakeConfig, FakeDevice, FakeFault, TxCode, UhdRadio};
+use ezsdr_radio_uhd::{ClockMode, Device, DeviceAuthority, FakeConfig, FakeDevice, FakeFault, TxCode, UhdRadio};
 use serde_json::{Value as Json, json};
 
 use common::*;
@@ -196,23 +197,38 @@ fn ur_06_the_provider_refuses_another_root() {
 
 // ---------------------------------------------------------------- the Authority (UR-7, UR-8)
 
-fn authority(config: FakeConfig, time_source: &str) -> (DeviceAuthority, Arc<FakeDevice>, ClockDomainId) {
-    let device = fake(config);
+fn authority_on(device: Arc<FakeDevice>, time_source: &str) -> (DeviceAuthority, Arc<FakeDevice>, ClockDomainId) {
     let clocks = Arc::new(ClockRegistry::new());
     let authority = DeviceAuthority::new(device.clone(), clocks, "internal", time_source, ARGS).unwrap();
     let root = authority.root();
     (authority, device, root)
 }
 
+/// The Authority's own tests on the smoke set's manual clock (plan 30 §4.4): their point is
+/// device/virtual time, so the device's clock is what they wait on and measure.
+fn authority(config: FakeConfig, time_source: &str) -> (DeviceAuthority, Arc<FakeDevice>, ClockDomainId) {
+    authority_on(fake(config), time_source)
+}
+
+/// The Authority's own tests whose point is a real host latency (plan 30 §4.4): the wake of a
+/// waiting `next_wakeup` and a callback that must not hold the schedule lock.
+fn authority_real(config: FakeConfig, time_source: &str) -> (DeviceAuthority, Arc<FakeDevice>, ClockDomainId) {
+    authority_on(fake_real(config), time_source)
+}
+
 #[test]
 fn ur_07_the_authority_paces_to_the_device() {
-    let (authority, _, root) = authority(FakeConfig::default(), "internal");
+    let (authority, device, root) = authority(FakeConfig::default(), "internal");
     let time = authority.time();
-    let begun = Instant::now();
+    // The device's own clock, which is what pacing means (plan 30 §4.4); the wall bound is a
+    // watchdog only.
+    let begun = device.host().now();
+    let wall = Instant::now();
     let at = TimePoint::new(root, time.now(root).unwrap().ticks_in(root).unwrap() + ms(30));
     time.schedule(at, Box::new(|_| {})).unwrap();
     assert_eq!(authority.next_wakeup(), Some(at));
-    assert!(begun.elapsed() >= Wall::from_millis(29), "{:?}", begun.elapsed());
+    assert!(device.host().now() - begun >= Wall::from_millis(29), "the device's clock advanced only {:?}", device.host().now() - begun);
+    assert!(wall.elapsed() < Wall::from_secs(10), "{:?}", wall.elapsed());
     assert!(time.now(root).unwrap().ticks_in(root).unwrap() >= at.ticks_in(root).unwrap());
 }
 
@@ -221,7 +237,8 @@ fn ur_07_schedule_wakes_a_waiting_next_wakeup() {
     // Every nap is at most 20 ms (UR-7), so a missed wake only makes the waiter late by
     // up to one nap: the instant is 1 ms ahead, and the median lateness of 20 tries
     // tells a woken waiter (well under 1 ms) from one that sleeps out its nap (~10 ms).
-    let (authority, _, root) = authority(FakeConfig::default(), "internal");
+    // A real host latency is the point, so this one keeps the real clock (plan 30 §4.4).
+    let (authority, _, root) = authority_real(FakeConfig::default(), "internal");
     let authority = Arc::new(authority);
     let time = authority.time();
     let mut late = Vec::new();
@@ -243,27 +260,29 @@ fn ur_07_schedule_wakes_a_waiting_next_wakeup() {
 
 #[test]
 fn ur_07_now_is_monotonic_across_a_reanchor() {
-    let (authority, _, root) = authority(FakeConfig { faults: vec![FakeFault::StepBack(Wall::from_millis(50), 200)], ..FakeConfig::default() }, "internal");
+    // The real clock (plan 30 §4.4): the monotonic guard is `now`'s against the real clock's
+    // bracket error. A re-anchor's read is bracketed in real time, so its midpoint can land
+    // behind the last `now` returned. The fake steps its clock back 50 ms, more than the 1 ms
+    // between two reads below, so a `now` that followed the anchor back shows if a re-anchor
+    // lands in the window. A diagnostic of the integration: the guard itself, row U06, is
+    // pinned without a window by `src/authority.rs`'s
+    // `ur_07_now_does_not_follow_an_anchor_that_lands_behind_it` (R13).
+    let (authority, device, root) = authority_real(FakeConfig { faults: vec![FakeFault::StepBack(Wall::from_millis(50), ms(50))], ..FakeConfig::default() }, "internal");
     let time = authority.time();
     let mut last = time.now(root).unwrap().ticks_in(root).unwrap();
-    let until = Instant::now() + Wall::from_millis(400);
-    while Instant::now() < until {
+    // The window is the real clock: a re-anchor runs every 100 ms of it.
+    let until = device.host().now() + Wall::from_millis(400);
+    while device.host().now() < until {
         let now = time.now(root).unwrap().ticks_in(root).unwrap();
         assert!(now >= last, "{now} < {last}");
         last = now;
+        device.host().sleep(Wall::from_millis(1));
     }
 }
 
-#[test]
-fn ur_07_a_read_bracketed_wider_than_1_ms_is_discarded() {
-    // UR-7: a device read that took 5 ms is not an anchor (Review L, L05).
-    let (slow, _, _) = authority(FakeConfig { faults: vec![FakeFault::SlowTimeRead(Wall::ZERO)], ..FakeConfig::default() }, "internal");
-    std::thread::sleep(Wall::from_millis(350));
-    assert!(slow.discarded_reads() >= 2, "{}", slow.discarded_reads());
-    let (quick, _, _) = authority(FakeConfig::default(), "internal");
-    std::thread::sleep(Wall::from_millis(350));
-    assert_eq!(quick.discarded_reads(), 0);
-}
+// `ur_07_a_read_bracketed_wider_than_1_ms_is_discarded` and the first anchor's rule are unit
+// tests in `src/authority.rs`, where a participant can hold the clock while the Authority is
+// built (UR-7, plan 30).
 
 #[test]
 fn ur_07_the_time_is_set_at_the_next_pps_with_an_external_source() {
@@ -296,17 +315,16 @@ fn ur_07_the_root_s_epoch_is_the_pps_edge_with_external_sources() {
 
 #[test]
 fn ur_07_schedule_accepts_an_instant_already_passed() {
-    let (authority, _, root) = authority(FakeConfig::default(), "internal");
+    let (authority, device, root) = authority(FakeConfig::default(), "internal");
     let time = authority.time();
     let fired = time.now(root).unwrap();
     time.schedule(fired, Box::new(|_| {})).unwrap();
     assert_eq!(authority.next_wakeup(), Some(fired));
-    std::thread::sleep(Wall::from_millis(6));
+    device.host().sleep(Wall::from_millis(6));
     let passed = TimePoint::new(root, time.now(root).unwrap().ticks_in(root).unwrap() - ms(1));
     time.schedule(passed, Box::new(|_| {})).unwrap();
-    let begun = Instant::now();
+    // The instant it returns is the property; how fast is no verdict here (R21).
     assert_eq!(authority.next_wakeup(), Some(passed));
-    assert!(begun.elapsed() < Wall::from_millis(10));
     assert!(matches!(
         time.schedule(TimePoint::new(root, fired.ticks_in(root).unwrap() - 1), Box::new(|_| {})),
         Err(ezsdr_kernel::time::TimeError::InPast { .. })
@@ -318,27 +336,34 @@ fn ur_07_callbacks_run_outside_the_schedule_lock() {
     // MA-29 as KG-3 amends it (the exit review's UR-7 clause): a callback may schedule at
     // its own instant, fired in the same wakeup, and another thread may schedule while a
     // callback runs. `next_wakeup` runs on a thread so that a callback holding the lock
-    // fails the test in seconds instead of hanging it.
+    // fails the test in seconds instead of hanging it. The callback runs on until another
+    // thread's `schedule` has returned, so that schedule cannot have waited for it: a handshake,
+    // not a wall interval, decides it (R21), so the smoke set's manual clock serves.
     let (authority, _device, root) = authority(FakeConfig::default(), "internal");
     let time = authority.time();
     let t = TimePoint::new(root, time.now(root).unwrap().ticks_in(root).unwrap() + ms(20));
     let fired = Arc::new(Mutex::new(Vec::new()));
     let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (proceed, proceed_rx) = std::sync::mpsc::channel::<()>();
     let (inner, log) = (time.clone(), fired.clone());
     time.schedule(t, Box::new(move |at| {
         log.lock().unwrap().push("first");
         let log2 = log.clone();
         inner.schedule(at, Box::new(move |_| log2.lock().unwrap().push("second"))).unwrap();
         started_tx.send(()).unwrap();
-        std::thread::sleep(Wall::from_millis(200));
+        let _ = proceed_rx.recv();
         log.lock().unwrap().push("first ends");
     })).unwrap();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || done_tx.send(authority.next_wakeup()).unwrap());
     started_rx.recv_timeout(Wall::from_secs(3)).expect("the first callback ran");
-    let begun = Instant::now();
-    time.schedule(TimePoint::new(root, t.ticks_in(root).unwrap() + ms(1_000)), Box::new(|_| {})).unwrap();
-    assert!(begun.elapsed() < Wall::from_millis(100), "schedule waited {:?} for the running callback", begun.elapsed());
+    let (scheduled_tx, scheduled_rx) = std::sync::mpsc::channel();
+    let other = time.clone();
+    std::thread::spawn(move || {
+        let _ = scheduled_tx.send(other.schedule(TimePoint::new(root, t.ticks_in(root).unwrap() + ms(1_000)), Box::new(|_| {})).is_ok());
+    });
+    assert_eq!(scheduled_rx.recv_timeout(Wall::from_secs(3)).ok(), Some(true), "another thread's schedule waited for the running callback");
+    let _ = proceed.send(());
     let woke = done_rx.recv_timeout(Wall::from_secs(3)).expect("next_wakeup returned");
     assert_eq!(woke, Some(t));
     assert_eq!(*fired.lock().unwrap(), vec!["first", "first ends", "second"]);
@@ -367,8 +392,9 @@ fn ur_07_cancel_does_not_remove_another_roots_callback() {
 
 #[test]
 fn ur_07_cancel_wakes_a_waiting_next_wakeup() {
-    // As above: without the wake, the waiter returns only when its nap ends.
-    let (authority, _, root) = authority(FakeConfig::default(), "internal");
+    // As above: without the wake, the waiter returns only when its nap ends. A real host
+    // latency is the point, so this one keeps the real clock (plan 30 §4.4).
+    let (authority, _, root) = authority_real(FakeConfig::default(), "internal");
     let authority = Arc::new(authority);
     let time = authority.time();
     let mut late = Vec::new();
@@ -390,7 +416,8 @@ fn ur_07_cancel_wakes_a_waiting_next_wakeup() {
 fn ur_07_now_tracks_the_device_while_no_call_runs() {
     let (authority, device, root) = authority(FakeConfig { drift_ppm: 100.0, ..FakeConfig::default() }, "internal");
     let time = authority.time();
-    std::thread::sleep(Wall::from_secs(2));
+    // The device's own clock, so that `uhd-clock` re-anchors over the same 2 s of it (plan 30 §4.5).
+    device.host().sleep(Wall::from_secs(2));
     let ours = time.now(root).unwrap().ticks_in(root).unwrap();
     let theirs = device.time_now().unwrap();
     assert!((ours - theirs).abs() < 20_000, "{} ticks apart", ours - theirs);
@@ -630,7 +657,9 @@ impl Direct {
     }
 
     fn settle(&mut self, wall: Wall) -> Vec<Event> {
-        std::thread::sleep(wall);
+        // The test thread is a non-participant; it waits on the device's host clock so that
+        // the device's time advances while its threads are idle (plan 30 §4.5).
+        self.device.host().sleep(wall);
         self.delivered.extend(self.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)));
         self.delivered.clone()
     }
@@ -816,7 +845,8 @@ fn ur_16_a_panicking_thread_is_a_lost_device() {
 }
 
 fn wedged(dir: &TempDir) -> (Manifest, Arc<FakeDevice>, Wall) {
-    let device = fake(FakeConfig { faults: vec![FakeFault::TxBlocks], ..FakeConfig::default() });
+    // TxBlocks is an intentional permanent host stop: it keeps the real clock (plan 30 §4.4).
+    let device = fake_real(FakeConfig { faults: vec![FakeFault::TxBlocks], ..FakeConfig::default() });
     let (bytes, waveform) = waveform_of(&tone(1_000));
     let spec = with_burst(with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &waveform, true, "send_asap_and_flag", 1_000);
     let mut run = spec_run(&spec, &profile(dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(waveform.hash.clone(), bytes)]));
@@ -914,6 +944,24 @@ fn ur_17_blocks_reach_every_link() {
 // ---------------------------------------------------------------- transmit (UR-21…UR-23)
 
 /// A Session with one transmit channel enabled and T0 passed.
+/// Runs `f` on its own thread and returns its value, failing the test if it does not finish
+/// within `bound`: a mutant that freezes or deadlocks the Provider must fail the test, not
+/// hang the suite (plan 30 §7's guard).
+fn bounded<T: Send + 'static>(what: &str, bound: Wall, f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = std::thread::spawn(move || {
+        // A failure inside `f` fails the test at once; only a frozen or deadlocked Run pays
+        // the bound.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| ());
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(bound) {
+        Ok(Ok(value)) => value,
+        Ok(Err(())) => panic!("{what} failed"),
+        Err(_) => panic!("{what} did not finish within {bound:?}"),
+    }
+}
+
 fn tx_session(config: FakeConfig) -> (RunHandle, Arc<FakeDevice>, TempDir) {
     let dir = TempDir::new();
     let device = fake(config);
@@ -922,6 +970,16 @@ fn tx_session(config: FakeConfig) -> (RunHandle, Arc<FakeDevice>, TempDir) {
     assert!(admitted(&run.submit(set("radio.tx.channels", Value::from(1)), None).unwrap()));
     past_tx_origin(&mut run);
     (run, device, dir)
+}
+
+/// The same transmit Session on any `Device` (a test wrapper, plan 30 §7).
+fn tx_session_on(device: Arc<dyn Device>) -> (RunHandle, TempDir) {
+    let dir = TempDir::new();
+    let mut run = session(&profile(&dir, json!({}), json!({}), true), device);
+    past_t0(&mut run, ms(1));
+    assert!(admitted(&run.submit(set("radio.tx.channels", Value::from(1)), None).unwrap()));
+    past_tx_origin(&mut run);
+    (run, dir)
 }
 
 /// The transmit sample `lead` root ticks from now, on the running transmit clock.
@@ -987,7 +1045,16 @@ fn ur_21_a_burst_before_start_up_is_refused() {
 
 #[test]
 fn ur_21_late_policies_on_the_device_lead() {
-    let (mut run, _, _dir) = tx_session(FakeConfig::default());
+    // The manual clock (plan 30 §4.4): the booking's verdicts are deterministic device-time
+    // facts — the 1 ms `send` (`drop_and_flag`) is dropped and the 0.5 ms `start_repeat`
+    // (`send_asap_and_flag`) is moved, both at the receipt site (`control.rs`'s `book_burst`
+    // applies the 2 ms device lead). Whether the moved repeat is moved *again* at uhd-tx's
+    // first hand-over depends on real time passing between the booking and the hand-over
+    // (see the unit test below), which the manual clock does not promise — on a busy
+    // Provider it is frozen away, so the verdict can be absent. That re-decision is pinned
+    // deterministically by `ur_21_first_dispatch_rechecks_all_late_policies` (the re-spelled
+    // row U15) and is not asserted here.
+    let (mut run, _device, _dir) = tx_session(FakeConfig::default());
     let _ = send(&mut run, "send", Some(ms(1)), &tone(10));
     let _ = send(&mut run, "start_repeat", Some(ms(1) / 2), &tone(10));
     wait(&mut run, ms(50));
@@ -998,11 +1065,13 @@ fn ur_21_late_policies_on_the_device_lead() {
     let _ = send(&mut run, "send", Some(ms(20)), &tone(10));
     wait(&mut run, ms(60));
     let manifest = run.finish();
-    let outcomes: Vec<_> = time_errors(&manifest).iter().map(|p| p.outcome).collect();
-    // Booking moved the repeat to receipt + 2 ms; ownership transfer consumes
-    // some of that lead, so first dispatch moves it again instead of lying OnTime.
-    assert_eq!(outcomes, [TimeErrorOutcome::Drop, TimeErrorOutcome::SendAsap,
-        TimeErrorOutcome::SendAsap], "{outcomes:?}");
+    let errors = time_errors(&manifest);
+    let outcomes: Vec<_> = errors.iter().map(|p| p.outcome).collect();
+    // The booking's own verdicts: Drop for the 1 ms burst, SendAsap for the moved repeat.
+    assert_eq!(&outcomes[..2], [TimeErrorOutcome::Drop, TimeErrorOutcome::SendAsap], "{errors:#?}");
+    // Only the repeat's optional hand-over re-decision may follow, and the 20 ms burst is on
+    // time: `send` is `drop_and_flag`, so a late third burst would show here as a `Drop`.
+    assert!(outcomes[2..].iter().all(|o| *o == TimeErrorOutcome::SendAsap), "{errors:#?}");
 }
 
 #[test]
@@ -1253,35 +1322,9 @@ fn ur_24_a_far_future_update_does_not_delay_a_nearer_one() {
     let _ = direct.finish();
 }
 
-#[test]
-fn ur_24_the_device_queue_order_is_the_effective_order() {
-    // UC-2 for the device's in-order queue: a command whose instant precedes one already
-    // released is applied at the released one's, with LATE_COMMAND, so the instants the
-    // device is handed never decrease (Review L, L07). Three commands inside the release
-    // window, latest first.
-    use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
-    let mut late = 0;
-    for _ in 0..10 {
-        let mut direct = Direct::new(FakeConfig::default(), &[]);
-        let now = direct.now();
-        for (i, us) in [2_900i64, 2_600, 2_300].into_iter().enumerate() {
-            direct.update("radio.rx.frequency_hz", Value::num(2.0e9 + i as f64 * 1e6).unwrap(), HardwareTimed, Some(now + us * 200));
-        }
-        direct.settle(Wall::from_millis(30));
-        let ats: Vec<i64> = direct
-            .device
-            .calls()
-            .iter()
-            .filter(|c| c.starts_with("apply rx 0 rate=- freq=") && !c.contains("at=-"))
-            .map(|c| c.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap())
-            .collect();
-        assert_eq!(ats.len(), 3, "{ats:?}");
-        assert!(ats.windows(2).all(|w| w[0] <= w[1]), "handed to the device out of order: {ats:?}");
-        late += direct.of("radio.LATE_COMMAND").len();
-        let _ = direct.finish();
-    }
-    assert!(late > 0, "the late case was never reached");
-}
+// `ur_24_the_device_queue_order_is_the_effective_order` is a unit test in
+// `src/provider/control.rs`, on the controlled clock: its case, a command earlier than one
+// already released, was left to host timing here, which the manual clock no longer provides.
 
 #[test]
 fn ur_25_the_switch_applies_the_configuration_in_effect_at_e2() {
@@ -1762,10 +1805,15 @@ fn ur_29_a_silent_stream_is_a_lost_device() {
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::Silence(Wall::from_millis(2_100))], ..FakeConfig::default() });
     let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
-    let begun = Instant::now();
+    // The property is about device time: the Run must end long before its 8 s horizon, not
+    // after 7 s of wall time, which a lagging manual clock would break (plan 30 §4.4). The
+    // device's own clock measures it; the wall bound is only a watchdog.
+    let begun = device.host().now();
+    let wall = Instant::now();
     let result = run.run_until_end(after(&run, ms(8_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
-    assert!(begun.elapsed() < Wall::from_secs(7), "{:?}", begun.elapsed());
+    assert!(device.host().now() - begun < Wall::from_secs(7), "the Run used {:?} of device time", device.host().now() - begun);
+    assert!(wall.elapsed() < Wall::from_secs(30), "the Run took {:?} of wall time", wall.elapsed());
     let manifest = run.finish();
     let lost = &events_of(&manifest, EventKind::DEVICE_LOST)[0];
     assert!(lost.payload["message"].as_str().unwrap().contains("UR-29"));
@@ -1904,9 +1952,9 @@ fn ur_33_scripted_faults_fire() {
     while !saw_overflow {
         saw_overflow = matches!(device.rx_recv(1_000, Wall::from_millis(100)), ezsdr_radio_uhd::RxRecv::Overflow { out_of_sequence: false });
     }
-    std::thread::sleep(Wall::from_millis(10));
+    device.host().sleep(Wall::from_millis(10));
     assert_eq!(device.tx_async(Wall::ZERO).unwrap().map(|r| r.code), Some(TxCode::Underflow));
-    std::thread::sleep(Wall::from_millis(200));
+    device.host().sleep(Wall::from_millis(200));
     assert!(device.time_now().unwrap_err().lost);
 }
 
@@ -1954,6 +2002,34 @@ fn ur_33_the_fake_device_keeps_the_devices_queues() {
     });
     assert!(done.recv_timeout(Wall::from_millis(200)).is_err(), "the 17th apply blocks");
     let _ = Mutex::new(());
+}
+
+#[test]
+fn ur_33_a_real_fake_s_time_starts_at_its_own_creation() {
+    // R07 (plan 30 stage A): a real-clock FakeDevice counts its time from its own creation,
+    // not from the process-wide host origin, so one built later has not already spent time
+    // and a `Lost(d)` deadline is `d` after its own creation, not after the process's.
+    // Each age is bracketed by the process-wide real clock's readings around the creation and
+    // around the read, so nothing here depends on how promptly this thread runs (R12); the
+    // zero itself is pinned by `device.rs`'s `ur_33_a_real_fake_s_time_counts_from_its_own_creation`.
+    let first = fake_real(FakeConfig::default());
+    first.host().sleep(Wall::from_millis(100));
+    let host = first.host();
+    let before = host.now();
+    let second = fake_real(FakeConfig { faults: vec![FakeFault::Lost(Wall::from_millis(200))], ..FakeConfig::default() });
+    let read = second.time_now();
+    let since = host.now() - before;
+    match read {
+        Ok(ticks) => {
+            let age = Wall::from_nanos(ticks as u64 * 1_000_000_000 / MCR as u64);
+            assert!(age <= since, "the later fake's time {age:?} is older than the {since:?} since its creation: the process's clock");
+        }
+        Err(_) => assert!(since >= Wall::from_millis(200), "the later fake was lost {since:?} after its own creation, before its 200 ms"),
+    }
+    second.host().sleep(Wall::from_millis(250));
+    assert!(second.time_now().is_err(), "the Lost deadline did not count from the later fake's own creation");
+    // The first's own clock is untouched by the second's (its own origin, its own time).
+    assert!(first.time_now().unwrap() >= ms(100), "the first fake lost its own time");
 }
 
 // ---------------------------------------------------------------- the rehearsal (UR-34)
@@ -2070,105 +2146,16 @@ fn back_to_back_sees_a_slip_in_a_cabled_repeat() {
 }
 
 // ---------------------------------------------------------------- Review N
-// The fake's ways of being as strict as the X300 (UR-33), each pinned on the device
-// itself (Review N, T2), and the bench link the receive tests of B1 and B2 use.
+// The fake's ways of being as strict as the X300 (UR-33), each pinned on the device itself
+// (Review N, T2), and the bench link the receive tests of B1 and B2 use. The raw receive
+// cases — a timed stop, a stopped stream's tail and its whole timeout, a request cut short by
+// a stop — are unit tests in `src/device.rs`, where every thread of a scenario is a
+// participant of the fake's clock (plan 30 D2).
 
 /// The receive link as the bench measured it (INFERRED from its stops: 2–4 ms), with the
 /// X300's 1 996-sample packets.
 fn bench_link(latency_ms: u64) -> FakeConfig {
     FakeConfig { rx_latency: Wall::from_millis(latency_ms), rx_packet: Some(1_996), ..FakeConfig::default() }
-}
-
-fn raw_rx(config: FakeConfig, rate: f64) -> (Arc<FakeDevice>, i64) {
-    let device = fake(config);
-    device.set_time_zero(false).unwrap();
-    let settings = ezsdr_radio_uhd::Settings { rate: Some(rate), ..Default::default() };
-    device.apply(ezsdr_radio_uhd::Dir::Rx, 0, &settings, None).unwrap();
-    device.rx_open(1).unwrap();
-    let start = (device.time_now().unwrap() / 200 + 5_000) * 200;
-    device.rx_start(start).unwrap();
-    (device, start)
-}
-
-/// Every block's (first tick, length) until `until` or two timeouts in a row.
-fn blocks_until(device: &FakeDevice, until: impl Fn(&[(i64, usize)]) -> bool) -> Vec<(i64, usize)> {
-    let mut blocks = Vec::new();
-    let mut timeouts = 0;
-    let deadline = Instant::now() + Wall::from_secs(5);
-    while timeouts < 2 && !until(&blocks) {
-        assert!(Instant::now() < deadline, "no end in 5 s: {} blocks, the last {:?}", blocks.len(), blocks.last());
-        match device.rx_recv(2_000, Wall::from_millis(50)) {
-            ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
-                timeouts = 0;
-                blocks.push((first_tick, samples[0].len()));
-            }
-            ezsdr_radio_uhd::RxRecv::Timeout => timeouts += 1,
-            other => panic!("{other:?}"),
-        }
-    }
-    blocks
-}
-
-#[test]
-fn ur_33_a_timed_receive_stop_stops_the_stream_at_once() {
-    // design-notes §11 F1: the X3x0 ignores the stop's time. What was produced before
-    // the stop is still delivered; nothing after it.
-    let (device, start) = raw_rx(FakeConfig::default(), 1e6);
-    let _ = blocks_until(&device, |b| b.last().is_some_and(|(t, n)| t + *n as i64 * 200 >= start + ms(20)));
-    let issued = device.time_now().unwrap();
-    device.rx_stop(Some(issued + ms(100))).unwrap();
-    let tail = blocks_until(&device, |_| false);
-    let end = tail.last().map_or(issued, |(t, n)| t + *n as i64 * 200);
-    assert!(end <= issued + ms(1), "samples after the stop's issue: up to {end}, issued at {issued}");
-}
-
-#[test]
-fn ur_33_a_stopped_stream_s_tail_comes_before_the_next_stream() {
-    // The bench: 1–2 blocks after an untimed stop. The stop's tail, then the next
-    // stream from its start.
-    let (device, start) = raw_rx(bench_link(3), 1e6);
-    let _ = blocks_until(&device, |b| b.last().is_some_and(|(t, n)| t + *n as i64 * 200 >= start + ms(20)));
-    let stopped = device.time_now().unwrap();
-    device.rx_stop(None).unwrap();
-    let next = (stopped / 200 + 30_000) * 200;
-    device.rx_start(next).unwrap();
-    let blocks = blocks_until(&device, |b| b.iter().any(|(t, _)| *t >= next));
-    let tail: Vec<_> = blocks.iter().filter(|(t, _)| *t < stopped).collect();
-    assert!(!tail.is_empty(), "no tail: {blocks:?}");
-    let first_new = blocks.iter().position(|(t, _)| *t >= next).expect("the next stream");
-    assert!(blocks[..first_new].iter().all(|(t, _)| *t < stopped), "{blocks:?}");
-    assert_eq!(blocks[first_new].0, next);
-}
-
-#[test]
-fn ur_33_a_stopped_stream_s_recv_waits_its_whole_timeout() {
-    let (device, _) = raw_rx(FakeConfig::default(), 1e6);
-    device.rx_stop(None).unwrap();
-    let _ = blocks_until(&device, |_| false);
-    let begun = Instant::now();
-    assert_eq!(device.rx_recv(2_000, Wall::from_millis(60)), ezsdr_radio_uhd::RxRecv::Timeout);
-    assert!(begun.elapsed() >= Wall::from_millis(55), "{:?}", begun.elapsed());
-}
-
-#[test]
-fn ur_33_a_recv_cut_short_by_a_packet_s_timeout_returns_what_it_has() {
-    // UHD's `recv` waits for each packet up to its timeout and returns what it has; it
-    // caches no timeout, so the next call waits as usual (`rx_streamer_impl.hpp:25–47`;
-    // Review O, N-1). A stream stopped in the middle of a 20 ms request.
-    let (device, start) = raw_rx(bench_link(1), 1e6);
-    let _ = blocks_until(&device, |b| b.last().is_some_and(|(t, n)| t + *n as i64 * 200 >= start + ms(10)));
-    let stopper = device.clone();
-    let stop = std::thread::spawn(move || {
-        std::thread::sleep(Wall::from_millis(8));
-        stopper.rx_stop(None).unwrap();
-    });
-    let got = device.rx_recv(20_000, Wall::from_millis(5));
-    stop.join().unwrap();
-    let ezsdr_radio_uhd::RxRecv::Samples { samples, .. } = got else { panic!("{got:?}") };
-    assert!(samples[0].len() < 20_000, "{}", samples[0].len());
-    let begun = Instant::now();
-    assert_eq!(device.rx_recv(2_000, Wall::from_millis(50)), ezsdr_radio_uhd::RxRecv::Timeout);
-    assert!(begun.elapsed() >= Wall::from_millis(45), "the next call waited only {:?}", begun.elapsed());
 }
 
 /// The device's transmit reports until its time passes `tick` (a burst's acknowledgement
@@ -2235,7 +2222,7 @@ fn ur_33_a_burst_that_runs_dry_underflows() {
     let wave = vec![[0.1f32, 0.0]; 1_000];
     let t0 = (device.time_now().unwrap() / 200 + 5_000) * 200;
     device.tx_send(&[&wave], Some(t0), true, false, Wall::from_secs(1)).unwrap();
-    std::thread::sleep(Wall::from_millis(30));
+    device.host().sleep(Wall::from_millis(30));
     let mut codes = Vec::new();
     while let Some(report) = device.tx_async(Wall::ZERO).unwrap() {
         codes.push(report.code);
@@ -2259,7 +2246,7 @@ fn ur_33_a_burst_resumed_after_an_underflow_plays_late() {
     let dry = t0 + 1_000 * 200;
     device.tx_send(&[&wave], Some(t0), true, false, Wall::from_secs(1)).unwrap();
     while device.time_now().unwrap() < dry + ms(5) {
-        std::thread::sleep(Wall::from_millis(1));
+        device.host().sleep(Wall::from_millis(1));
     }
     device.tx_send(&[&rest], None, false, true, Wall::from_secs(1)).unwrap();
     let resumed = device.time_now().unwrap();
@@ -2492,8 +2479,9 @@ fn ur_23_a_burst_one_sample_after_a_burst_is_played() {
             assert!(admitted(&entry), "{entry:?}");
             wait(&mut run, ms(80));
             // A host that fell behind may not have handed B over yet: `finish` would cancel it.
-            let horizon = Instant::now() + Wall::from_secs(2);
-            while tx_sends(&device).iter().filter(|s| s.eob).count() < 2 && Instant::now() < horizon {
+            // The watch is the device's own clock (plan 30 §4.5).
+            let horizon = device.host().now() + Wall::from_secs(2);
+            while tx_sends(&device).iter().filter(|s| s.eob).count() < 2 && device.host().now() < horizon {
                 wait(&mut run, ms(1));
             }
             let manifest = run.finish();
@@ -2801,6 +2789,7 @@ impl Drop for Watched {
 impl Device for Watched {
     fn describe(&self) -> Json { self.inner.describe() }
     fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity { self.inner.fidelity() }
+    fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
     fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
     fn channels(&self, dir: ezsdr_radio_uhd::Dir) -> usize { self.inner.channels(dir) }
     fn front_end(&self, dir: ezsdr_radio_uhd::Dir, chan: usize) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.front_end(dir, chan) }
@@ -2876,17 +2865,375 @@ fn ur_07_the_last_device_handle_is_not_dropped_on_uhd_clock() {
 #[test]
 fn ur_07_no_device_read_follows_the_authority_s_drop() {
     // D-1: with a TimeAuthority handle outliving the Authority (the Kernel's, a
-    // Provider's), uhd-clock makes no device read once `drop` has returned.
+    // Provider's), uhd-clock makes no device read once `drop` has returned. That `drop`
+    // returns is the shared watchdog's to bound, not a wall interval's here (a loaded host
+    // stretched it past 50 ms; plan 30 D2); that it wakes uhd-clock at once instead of
+    // waiting out its nap is pinned deterministically by the unit test
+    // `authority::tests::ur_07_dropping_the_authority_ends_uhd_clock_while_the_manual_clock_is_stopped`.
     use std::sync::atomic::Ordering::SeqCst;
+    watch();
     let (device, _) = watched();
     let authority = DeviceAuthority::new(device.clone(), Arc::new(ClockRegistry::new()), "internal", "internal", "fake").unwrap();
     let time = authority.time();
     std::thread::sleep(Wall::from_millis(50));
-    let begun = Instant::now();
     drop(authority);
-    assert!(begun.elapsed() < Wall::from_millis(50), "drop waited {:?}", begun.elapsed());
     device.after.store(true, SeqCst);
     std::thread::sleep(Wall::from_millis(350));
     assert_eq!(device.reads_after.load(SeqCst), 0);
     drop(time);
+}
+
+// ------------------------------------------------- the descheduled participant (plan 30 §7)
+//
+// The tests below need a Provider thread to be *busy* while the host deschedules it, so that
+// the manual clock stops (M3): the "the host fell behind" a loaded machine produces, made
+// deterministic. A test-local Device wrapper does it (plan 30 §7 forbids a new `FakeFault`).
+
+/// Which call of a [`Descheduled`] wrapper the plan holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Step {
+    TxSend,
+    RxRecv,
+    TxAsync,
+}
+
+/// What a [`Descheduled`] wrapper does when its step is reached (§7).
+enum Deschedule {
+    /// Hold the `skip`th `tx_send` carrying samples busy (0-based), then send.
+    TxSend(usize, Wall),
+    /// Hold the first `rx_recv` after a block (the stall's own position) busy.
+    RxRecvAfterBlock(Wall),
+    /// Hold the first `tx_async` with a non-zero timeout — the shutdown's ACK window — busy.
+    ShutdownAck(Wall),
+}
+
+impl Deschedule {
+    fn step(&self) -> Step {
+        match self {
+            Deschedule::TxSend(..) => Step::TxSend,
+            Deschedule::RxRecvAfterBlock(_) => Step::RxRecv,
+            Deschedule::ShutdownAck(_) => Step::TxAsync,
+        }
+    }
+
+    fn busy(&self) -> Wall {
+        match self {
+            Deschedule::TxSend(_, d) | Deschedule::RxRecvAfterBlock(d) | Deschedule::ShutdownAck(d) => *d,
+        }
+    }
+}
+
+/// A `FakeDevice` whose chosen call is held in a busy `std::thread::sleep` once (§7).
+struct Descheduled {
+    inner: FakeDevice,
+    plan: Mutex<Option<Deschedule>>,
+    entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    /// Every `apply`, in order: `(timed, the device clock at entry, at return)` (§4.7's test).
+    applies: Mutex<Vec<(bool, Wall, Wall)>>,
+    /// The last `rx_recv` returned samples, so the next one is the stall's own position.
+    after_block: std::sync::atomic::AtomicBool,
+}
+
+impl Descheduled {
+    fn new(inner: FakeDevice) -> Descheduled {
+        Descheduled { inner, plan: Mutex::new(None), entered: Mutex::new(None), applies: Mutex::new(Vec::new()), after_block: Default::default() }
+    }
+
+    /// Arms the planned hold; the receiver fires when the hold begins.
+    fn arm(&self, plan: Deschedule) -> std::sync::mpsc::Receiver<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        *self.entered.lock().unwrap() = Some(tx);
+        *self.plan.lock().unwrap() = Some(plan);
+        rx
+    }
+
+    fn applies(&self) -> Vec<(bool, Wall, Wall)> {
+        self.applies.lock().unwrap().clone()
+    }
+
+    /// The inner fake's transmit sends, as `common::calls` reads them (UR-33).
+    fn sends(&self) -> Vec<String> {
+        self.inner.calls().into_iter().filter(|c| c.starts_with("tx_send")).collect()
+    }
+
+    /// Runs the planned busy hold when `step` is the armed one, signalling first. `condition`
+    /// carries what a plan keyed on more than the call itself needs: the shutdown's non-zero
+    /// report timeout, or that the last `rx_recv` returned a block.
+    fn hold(&self, step: Step, condition: bool) {
+        let busy = {
+            let mut plan = self.plan.lock().unwrap();
+            let armed = match plan.as_mut() {
+                Some(p) if p.step() == step => match p {
+                    Deschedule::ShutdownAck(_) | Deschedule::RxRecvAfterBlock(_) => condition,
+                    Deschedule::TxSend(n, _) => {
+                        if *n == 0 {
+                            true
+                        } else {
+                            *n -= 1;
+                            false
+                        }
+                    }
+                },
+                _ => false,
+            };
+            if !armed {
+                return;
+            }
+            plan.take().expect("armed above").busy()
+        };
+        if let Some(tx) = self.entered.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        std::thread::sleep(busy);
+    }
+}
+
+impl Device for Descheduled {
+    fn describe(&self) -> Json { self.inner.describe() }
+    fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity { self.inner.fidelity() }
+    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+    fn channels(&self, dir: ezsdr_radio_uhd::Dir) -> usize { self.inner.channels(dir) }
+    fn front_end(&self, dir: ezsdr_radio_uhd::Dir, chan: usize) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.front_end(dir, chan) }
+    fn set_sources(&self, c: &str, t: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_sources(c, t) }
+    fn set_time_zero(&self, p: bool) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_time_zero(p) }
+    fn time_now(&self) -> Result<i64, ezsdr_radio_uhd::DeviceError> { self.inner.time_now() }
+    fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> { self.inner.ref_locked() }
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+        let begun = self.inner.host().now();
+        let applied = self.inner.apply(d, c, s, at);
+        self.applies.lock().unwrap().push((at.is_some(), begun, self.inner.host().now()));
+        applied
+    }
+    fn rx_open(&self, c: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(c) }
+    fn rx_start(&self, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(at) }
+    fn rx_packet_samples(&self) -> usize { self.inner.rx_packet_samples() }
+    fn rx_stop(&self, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(at) }
+    fn rx_recv(&self, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv {
+        use std::sync::atomic::Ordering::SeqCst;
+        let after_block = self.after_block.swap(false, SeqCst);
+        self.hold(Step::RxRecv, after_block);
+        let got = self.inner.rx_recv(n, t);
+        if matches!(got, ezsdr_radio_uhd::RxRecv::Samples { .. }) {
+            self.after_block.store(true, SeqCst);
+        }
+        got
+    }
+    fn tx_open(&self, c: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(c) }
+    fn tx_send(&self, s: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> {
+        self.hold(Step::TxSend, false);
+        self.inner.tx_send(s, at, sob, eob, t)
+    }
+    fn tx_async(&self, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> {
+        self.hold(Step::TxAsync, !t.is_zero());
+        self.inner.tx_async(t)
+    }
+    fn close_streams(&self) { self.inner.close_streams() }
+    fn mark_lost(&self) { self.inner.mark_lost() }
+    fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
+}
+
+/// §7's deterministic reproduction: a busy 200 ms inside uhd-tx's `tx_send` with a near start
+/// already fixed. The manual clock stops while uhd-tx is busy (M3), so the burst stays on
+/// time; the real clock runs, so the device reports it late (the fake's own late rule).
+#[test]
+fn ur_21_a_descheduled_timed_send_is_on_time_on_the_manual_clock_and_late_on_the_real_one() {
+    for (mode, late) in [(ClockMode::Manual, false), (ClockMode::Real, true)] {
+        let device = Arc::new(Descheduled::new(FakeDevice::new(FakeConfig { clock: mode, ..FakeConfig::default() })));
+        let entered = device.arm(Deschedule::TxSend(0, Wall::from_millis(200)));
+        let (mut run, _dir) = tx_session_on(device.clone());
+        let at = tx_at(&run, ms(30));
+        let entry = send_at(&mut run, "send", Some(at), &tone(10_000));
+        assert!(admitted(&entry), "{mode:?}: {entry:?}");
+        entered.recv_timeout(Wall::from_secs(5)).unwrap_or_else(|_| panic!("{mode:?}: uhd-tx was not descheduled inside tx_send"));
+        let what = format!("{mode:?}: the descheduled send's Run");
+        let manifest = bounded(&what, Wall::from_secs(30), move || {
+            wait(&mut run, ms(150));
+            run.finish()
+        });
+        let errors = time_errors(&manifest);
+        assert_eq!(errors.iter().any(|p| p.outcome == TimeErrorOutcome::LateAtDevice), late, "{mode:?}: {errors:?}");
+        if !late {
+            assert_eq!(bursts(&manifest).len(), 1, "{mode:?}: {:?}", device.sends());
+        }
+    }
+}
+
+/// R02: the 100 ms window for the last BURST_ACK is the device's host clock (UR-26). A
+/// participant held busy inside the shutdown freezes that clock, so a window measured on real
+/// time would expire before the burst's end has played and the acknowledgement would be lost.
+#[test]
+fn ur_26_the_shutdown_s_last_burst_ack_waits_on_the_device_s_clock() {
+    let device = Arc::new(Descheduled::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() })));
+    let (mut run, _dir) = tx_session_on(device.clone());
+    let at = tx_at(&run, ms(20));
+    let entry = send_at(&mut run, "send", Some(at), &tone(30_000));
+    assert!(admitted(&entry), "{entry:?}");
+    let runner = device.clone();
+    let manifest = bounded("the transmit shutdown", Wall::from_secs(30), move || {
+        wait(&mut run, ms(15));
+        // Armed only now: the run loop's own report reads use a zero timeout and must not consume it.
+        let _entered = runner.arm(Deschedule::ShutdownAck(Wall::from_millis(200)));
+        run.finish()
+    });
+    let codes: Vec<String> = section(&manifest, "async").as_array().unwrap().iter().map(|r| r["code"].as_str().unwrap().to_owned()).collect();
+    assert!(codes.contains(&"BurstAck".to_owned()), "the last BURST_ACK was lost: {codes:?} {:?}", device.sends());
+}
+
+/// UR-33 (plan 30 stage A): a participant that measures clock time across a loop waits on the
+/// clock in every pass. `Tx::shutdown`'s 100 ms ACK window polls `tx_async`; a read that fails
+/// at once (`TxAsyncFails`, not lost) would leave uhd-tx busy with no clock wait, so the
+/// manual clock it measures stays stopped (M3), the loop never ends, and `Provider::stop`
+/// detaches uhd-tx after `JOIN_BOUND` to burn a CPU for the rest of the process. With the
+/// failed read waiting its timeout the window closes and uhd-tx joins (no "did not join").
+#[test]
+fn ur_33_a_shutdown_with_a_report_read_that_fails_at_once_still_joins_uhd_tx() {
+    let (mut run, _device, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::TxAsyncFails(Wall::ZERO, false)], ..FakeConfig::default() });
+    let at = tx_at(&run, ms(20));
+    let entry = send_at(&mut run, "send", Some(at), &tone(30_000));
+    assert!(admitted(&entry), "{entry:?}");
+    let begun = Instant::now();
+    let manifest = bounded("the transmit shutdown", Wall::from_secs(30), move || {
+        wait(&mut run, ms(15));
+        run.finish()
+    });
+    assert!(begun.elapsed() < Wall::from_secs(10), "the shutdown did not finish in 10 s: {:?}", begun.elapsed());
+    let rejections = rejections(&manifest);
+    assert!(!rejections.iter().any(|r| r.contains("did not join") || r.contains("timed out")), "{rejections:?}");
+    // The failing read is still counted, with its first text (UR-28).
+    assert!(section(&manifest, "stats")["tx_errors"].as_i64().unwrap() > 1, "{:?}", section(&manifest, "stats"));
+}
+
+/// R11's device: a manual-clock `FakeDevice` whose first `tx_async` with a timeout — the
+/// shutdown's first ACK read; uhd-tx's own loop reads with none — reports the device lost.
+/// Every Provider call after that is recorded (`mark_lost`, the loss's own step, aside); the
+/// Authority's `uhd-clock` goes on re-anchoring until the Authority is dropped (UR-7).
+struct LostAtShutdown {
+    inner: FakeDevice,
+    lost: std::sync::atomic::AtomicBool,
+    after: Mutex<Vec<&'static str>>,
+}
+
+impl LostAtShutdown {
+    fn call(&self, name: &'static str) {
+        if self.lost.load(std::sync::atomic::Ordering::SeqCst) && std::thread::current().name() != Some("uhd-clock") {
+            self.after.lock().unwrap().push(name);
+        }
+    }
+}
+
+impl Device for LostAtShutdown {
+    fn describe(&self) -> Json { self.inner.describe() }
+    fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity { self.inner.fidelity() }
+    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+    fn channels(&self, dir: ezsdr_radio_uhd::Dir) -> usize { self.inner.channels(dir) }
+    fn front_end(&self, dir: ezsdr_radio_uhd::Dir, chan: usize) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.call("front_end"); self.inner.front_end(dir, chan) }
+    fn set_sources(&self, c: &str, t: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.call("set_sources"); self.inner.set_sources(c, t) }
+    fn set_time_zero(&self, p: bool) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.call("set_time_zero"); self.inner.set_time_zero(p) }
+    fn time_now(&self) -> Result<i64, ezsdr_radio_uhd::DeviceError> { self.call("time_now"); self.inner.time_now() }
+    fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> { self.call("ref_locked"); self.inner.ref_locked() }
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> { self.call("apply"); self.inner.apply(d, c, s, at) }
+    fn rx_open(&self, c: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.call("rx_open"); self.inner.rx_open(c) }
+    fn rx_start(&self, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.call("rx_start"); self.inner.rx_start(at) }
+    fn rx_packet_samples(&self) -> usize { self.inner.rx_packet_samples() }
+    fn rx_stop(&self, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.call("rx_stop"); self.inner.rx_stop(at) }
+    fn rx_recv(&self, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.call("rx_recv"); self.inner.rx_recv(n, t) }
+    fn tx_open(&self, c: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.call("tx_open"); self.inner.tx_open(c) }
+    fn tx_send(&self, s: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.call("tx_send"); self.inner.tx_send(s, at, sob, eob, t) }
+    fn tx_async(&self, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> {
+        self.call("tx_async");
+        if !t.is_zero() && !self.lost.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Err(ezsdr_radio_uhd::DeviceError { lost: true, message: "fake: the link went down during the shutdown".to_owned() });
+        }
+        self.inner.tx_async(t)
+    }
+    fn close_streams(&self) { self.call("close_streams"); self.inner.close_streams() }
+    fn mark_lost(&self) { self.inner.mark_lost() }
+    fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
+}
+
+/// R11 (UR-26, UR-29, UR-33): a loss found by the shutdown's own first report read ends its
+/// 100 ms ACK window. After it `reports` returns at once without reading, so without a clock
+/// wait; a window that ran on until `until` would keep uhd-tx busy and the manual clock it
+/// measures stopped (M3) for ever, and `Provider::stop` would detach it after `JOIN_BOUND`.
+#[test]
+fn ur_29_a_loss_found_by_the_shutdown_s_report_read_ends_its_ack_window() {
+    let device = Arc::new(LostAtShutdown {
+        inner: FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }),
+        lost: Default::default(),
+        after: Mutex::new(Vec::new()),
+    });
+    let (run, _dir) = tx_session_on(device.clone());
+    let manifest = bounded("the transmit shutdown", Wall::from_secs(30), move || run.finish());
+    assert!(device.lost.load(std::sync::atomic::Ordering::SeqCst), "the shutdown never read a report with a timeout");
+    let rejections = rejections(&manifest);
+    assert!(!rejections.iter().any(|r| r.contains("did not join")), "uhd-tx did not end after the loss: {rejections:?}");
+    assert_eq!(*device.after.lock().unwrap(), Vec::<&str>::new(), "device calls after the loss");
+}
+
+/// R01, §4.7: a cold change whose configuration holds the projection's clock lock across its
+/// device call (a 300 ms `apply_delay`) is overlapped with a `hardware_timed` update to the
+/// same projection, released by uhd-control, which takes the same lock. On the manual clock
+/// the waiter is idle, so the clock advances and both finish; a plain mutex would leave the
+/// waiter busy, freeze the clock behind it, and stall the Run.
+#[test]
+fn ur_25_a_configure_overlapped_with_a_timed_update_to_the_same_projection_finishes() {
+    let dir = TempDir::new();
+    let device = Arc::new(Descheduled::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, apply_delay: Wall::from_millis(300), ..FakeConfig::default() })));
+    let mut spec = receive_spec(1, 1e6, bench_hz(&*device), None);
+    let target = serde_json::to_value(resource("radio")).unwrap();
+    // `offset_ticks` counts the stream clock's samples at 1 MS/s (KC-16), so these are 50 ms
+    // and 150 ms after T0: the cold change's configuration runs for 300 ms while uhd-control
+    // releases the timed update (UR-24).
+    spec["schedule"] = json!([
+        { "at": { "clock": "radio", "offset_ticks": 50_000 }, "action": { "kind": "update_parameter", "target": target, "key": "radio.rx.sample_rate_hz", "value": 2e6 } },
+        { "at": { "clock": "radio", "offset_ticks": 150_000 }, "action": { "kind": "update_parameter", "target": target, "key": "radio.rx.gain_db", "value": 3.0 } }
+    ]);
+    let doc = profile(&dir, json!({}), json!({}), false);
+    let runner = device.clone();
+    let begun = Instant::now();
+    let manifest = bounded("the overlapped configuration", Wall::from_secs(30), move || {
+        let mut run = spec_run(&spec, &doc, runner, BTreeMap::new());
+        // Past the Run's 2 s start-up and its scheduled instants (plan 30 §7's two bars).
+        let _ = run.advance_to(after(&run, ms(2_000) + ms(800)));
+        run.finish()
+    });
+    assert!(begun.elapsed() < Wall::from_secs(10), "the overlapped configuration did not finish in 10 s: {:?}", begun.elapsed());
+    let rejections = rejections(&manifest);
+    assert!(!rejections.iter().any(|r| r.contains("did not join") || r.contains("timed out")), "{rejections:?}");
+    // The timed update waited for the cold configuration's lock: its device call began only
+    // after that configuration's call returned (a plain mutex would leave no timed call).
+    let applies = device.applies();
+    let cold = applies.iter().rfind(|(timed, _, _)| !timed).unwrap_or_else(|| panic!("no untimed apply: {applies:?}"));
+    let timed = applies.iter().find(|(timed, begun, _)| *timed && *begun >= cold.2).unwrap_or_else(|| panic!("the timed update did not wait for the configuration: {applies:?}"));
+    assert!(timed.1 <= cold.2 + Wall::from_millis(200), "the hand-off took {:?}: {applies:?}", timed.1 - cold.2);
+}
+
+/// S02: the receive stall's origin is the first block in the device's host clock (UR-34). A
+/// participant descheduled for a real second inside its receive call freezes that clock, so a
+/// stall measured from the wall clock would fire early and overflow the stream at the wrong
+/// device instant — the overflow must come only once `after` and `duration` have elapsed there.
+#[test]
+fn ur_34_the_receive_stall_fires_after_its_device_clock_interval() {
+    let dir = TempDir::new();
+    let device = Arc::new(Descheduled::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() })));
+    device.arm(Deschedule::RxRecvAfterBlock(Wall::from_millis(1_000)));
+    let doc = bench_profile(&*device, &dir, json!({}), json!({}), false);
+    let spec = receive_spec(1, 1e6, bench_hz(&*device), Some(30_000_000));
+    let runner = device.clone();
+    let manifest = bounded("the stalled receive", Wall::from_secs(60), move || {
+        let mut run = start_spec_run(&spec, &doc, assembly(&doc, runner, BTreeMap::new(), |r| r.with_rx_stall(Wall::from_millis(500), Wall::from_millis(300)))).unwrap();
+        let _ = run.advance_to(after_ticks(&run, ms(2_000) + ms(1_800)));
+        run.finish()
+    });
+    let clock = manifest.clocks.sample_clocks.iter().find(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).expect("the receive clock");
+    let n = clock.root_ticks_per_tick.num() as i64;
+    let origin = clock.origin.ticks_in(clock.root).unwrap();
+    let first = section(&manifest, "timing").as_array().unwrap().iter().find(|r| r["what"] == "first_rx_block").expect("the first block").clone();
+    let first = origin + first["index"].as_i64().unwrap() * n;
+    let overflow = events_of(&manifest, "radio.RX_OVERFLOW").into_iter().next().expect("the stall provoked an overflow");
+    // The overflow's time is where the reader left off, the stall's own firing: the gap begins
+    // there and the resume is a `duration` later. A stall measured from the wall clock would
+    // fire right after the 1 s busy interval, when almost no device time has passed.
+    let at = origin + overflow.time.ticks_in(overflow.time.domain()).unwrap() * n;
+    assert!(at - first >= ms(500) - ms(50), "the stall fired {} ms after the first block, before its device-clock interval had elapsed", (at - first) / ms(1));
 }

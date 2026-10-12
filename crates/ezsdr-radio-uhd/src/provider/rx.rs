@@ -22,6 +22,7 @@ use serde_json::json;
 use super::control::Planned;
 use super::core::{Clock, Core, Streams, lock};
 use crate::device::{Dir, Iq, RxRecv};
+use crate::host::HostClock;
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
 
 pub(crate) enum RxCmd {
@@ -124,11 +125,15 @@ pub(crate) struct Rx {
     /// The channel count the streamer is open for.
     opened: usize,
     pool: HostPool,
+    /// The device's host clock (plan 30 §4.3): the UR-29 silence monitor, the idle wait and
+    /// the stall run on it; `started` is real, for the `host_delay_ms` diagnostic only.
+    host: HostClock,
     started: Instant,
-    last_samples: Instant,
+    last_samples: Wall,
     stall: Option<(Wall, Wall)>,
     first: bool,
-    first_block: Option<Instant>,
+    /// The host-clock instant of the first block, the stall's origin (plan 30 §4.3).
+    stall_at: Option<Wall>,
     exit: bool,
     /// When the last untimed stop was issued: the next stream drops what precedes it.
     last_stop: Option<i64>,
@@ -146,6 +151,8 @@ impl Rx {
             Stream::new(clock, handle, channels, None)
         });
         lock(&core.streams).delivered = stream.as_ref().map(|stream| (stream.clock.origin, stream.config, 0));
+        let host = core.device.host();
+        let now = host.now();
         Rx {
             from: stream.as_ref().map_or(i64::MIN, |stream| stream.clock.origin + 1),
             opened: channels,
@@ -153,11 +160,12 @@ impl Rx {
             core,
             cmds,
             pool,
+            host,
             started: Instant::now(),
-            last_samples: Instant::now(),
+            last_samples: now,
             stall,
             first: true,
-            first_block: None,
+            stall_at: None,
             exit: false,
             last_stop: None,
         }
@@ -198,7 +206,7 @@ impl Rx {
         loop {
             match self.turn() {
                 Turn::Exit => return,
-                Turn::Idle => std::thread::sleep(Wall::from_millis(1)),
+                Turn::Idle => self.host.sleep(Wall::from_millis(1)),
                 Turn::Busy => {}
             }
         }
@@ -220,12 +228,13 @@ impl Rx {
             return if self.begin() { Turn::Busy } else { Turn::Idle };
         }
         if let Some((after, duration)) = self.stall {
-            // Counted from the first block, so that `after` is into the stream.
-            if self.first_block.is_some_and(|at| at.elapsed() >= after) {
+            // Counted from the first block, in the host clock's time (plan 30 §4.3), so that
+            // `after` is into the stream and a busy thread does not fire the stall early.
+            if self.stall_at.is_some_and(|at| self.host.now().saturating_sub(at) >= after) {
                 // UR-34's B5 builder: stop reading once, to provoke a real overflow.
                 self.stall = None;
                 self.core.timing(json!({ "what": "rx_stall", "ms": duration.as_millis() as u64 }));
-                std::thread::sleep(duration);
+                self.host.sleep(duration);
             }
         }
         // A cut booked during the wait cuts this block too: `samples` reads the plan (RM-16).
@@ -296,7 +305,7 @@ impl Rx {
                 self.pool = HostPool::new(self.core.block_len * channels.max(1) * 8);
                 self.stream = Some(Stream::new(clock, handle, channels, self.last_stop.take()));
                 lock(&self.core.streams).delivered = Some((origin, next.segment.config, 0));
-                self.last_samples = Instant::now();
+                self.last_samples = self.host.now();
                 self.follow();
             }
             Err(error) => self.core.command_rejected(None, "update_parameter", &format!("UR-25: {error}")),
@@ -351,14 +360,18 @@ impl Rx {
         let Some(stream) = self.stream.as_mut() else { return };
         match result {
             RxRecv::Samples { first_tick, samples } => {
-                self.last_samples = Instant::now();
+                self.last_samples = self.host.now();
                 self.samples(first_tick, samples);
             }
             RxRecv::Timeout => {
                 // Past the cut and its allowance, and silent for as long: a stream still
                 // delivering, however late, is waited for (Review N, B2).
                 let span = quiet_span(&self.core, stream);
-                let quiet = self.last_samples.elapsed() >= Wall::from_nanos(self.core.ns(span) as u64);
+                // The two unit tests that exercise this wait a 10 ms silence of the device's
+                // host clock — about 3× the ≈ 4 ms `quiet_span` at 1 MS/s (a 2 000-sample
+                // block plus the 3 ms delivery allowance). UR-29's lost-device monitor below
+                // is the 1 s one; this quiet test is not.
+                let quiet = self.host.now().saturating_sub(self.last_samples) >= Wall::from_nanos(self.core.ns(span).max(0) as u64);
                 if let Some(cut) = stream.cut.filter(|cut| quiet && i128::from(now) >= i128::from(*cut) + i128::from(span)) {
                     // Silent past its cut: stopped all the same, never left streaming.
                     if !stream.stopped {
@@ -367,7 +380,7 @@ impl Rx {
                     self.finish();
                 } else if stream.cut.is_none_or(|cut| now < cut)
                     && i128::from(now) > i128::from(stream.start) + i128::from(self.core.mcr)
-                    && self.last_samples.elapsed() > Wall::from_secs(1)
+                    && self.host.now().saturating_sub(self.last_samples) > Wall::from_secs(1)
                 {
                     self.core.device_lost("UR-29: the receive stream yielded nothing for 1 s");
                 }
@@ -555,7 +568,9 @@ impl Rx {
             }
             if self.first {
                 self.first = false;
-                self.first_block = Some(Instant::now());
+                // The stall's origin is the host clock's time; `host_delay_ms` is real
+                // (plan 30 §4.3: the diagnostic stays wall time).
+                self.stall_at = Some(self.host.now());
                 self.core.timing(json!({
                     "what": "first_rx_block", "index": k, "host_delay_ms": self.started.elapsed().as_millis() as u64,
                 }));
@@ -937,7 +952,8 @@ mod tests {
                 streams.end(&core, ms(5), false, false);
             }
             time.advance_to(core.at(ms(50))).unwrap();
-            rx.last_samples = Instant::now() - Wall::from_secs(1);
+            rx.last_samples = rx.host.now();
+            rx.host.sleep(Wall::from_millis(10));
             rx.receive(RxRecv::Timeout);
             assert!(rx.stream.is_none(), "lost: {lost}");
             let cut = lock(&core.streams).planned(Dir::Rx)[0].segment.cut;
@@ -1168,7 +1184,8 @@ mod tests {
             assert_eq!(device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count(), 1, "only the first stream's stop yet");
             time.advance_to(core.at(ms(80))).unwrap();
             if silent {
-                rx.last_samples = Instant::now() - Wall::from_secs(1);
+                rx.last_samples = rx.host.now();
+                rx.host.sleep(Wall::from_millis(10));
                 rx.receive(RxRecv::Timeout);
             } else {
                 rx.receive(samples(ms(65), 2_000));

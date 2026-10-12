@@ -6,9 +6,9 @@
 use std::collections::BTreeMap;
 use std::sync::mpsc::Sender;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use std::time::{Duration as Wall, Instant};
+use std::time::Duration as Wall;
 
 use ezsdr_kernel::event::{Action, ActionId, Severity};
 use ezsdr_kernel::id::ClockDomainId;
@@ -27,6 +27,7 @@ use serde_json::json;
 use super::core::{Clock, Core, lock};
 use super::tx::{Held, TxCmd};
 use crate::device::{DeviceError, Dir, Iq, Settings, decimation};
+use crate::host::{ClockMutex, HostClock};
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS, RELEASE_WINDOW_NS};
 
 const POLL: Wall = Wall::from_millis(1);
@@ -54,16 +55,24 @@ impl Timed {
 /// segment's. Updates are projected in effective order, even when admitted after booking.
 pub(crate) struct ColdConfig {
     base: Settings,
-    updates: Mutex<BTreeMap<(i64, u64), Settings>>,
+    /// §4.7: the clock lock — a shared lock held across the device call in `configure`, so a
+    /// waiting participant is idle and the manual clock advances while the holder waits.
+    updates: ClockMutex<BTreeMap<(i64, u64), Settings>>,
 }
 
 impl ColdConfig {
+    #[cfg(test)]
     pub fn new(base: Settings) -> Self {
-        Self { base, updates: Mutex::new(BTreeMap::new()) }
+        Self::with_clock(HostClock::real(), base)
+    }
+
+    /// With the device's host clock (§4.7): the lock becomes the clock lock on a manual clock.
+    pub(crate) fn with_clock(clock: HostClock, base: Settings) -> Self {
+        Self { base, updates: clock.clock_mutex(BTreeMap::new()) }
     }
 
     fn book(&self, order: (i64, u64), settings: Settings) {
-        lock(&self.updates).insert(order, settings);
+        self.updates.lock().insert(order, settings);
     }
 
     fn issued(&self, updates: &mut BTreeMap<(i64, u64), Settings>, order: (i64, u64), effective: i64, settings: Settings) {
@@ -84,8 +93,8 @@ impl ColdConfig {
     /// Configures the direction for `segment` (UR-12).
     pub fn configure(&self, core: &Core, dir: Dir, segment: &Segment) -> Result<i64, DeviceError> {
         // Hold the snapshot lock across the call: an update cannot change the
-        // projection while an owner is configuring from it.
-        let updates = lock(&self.updates);
+        // projection while an owner is configuring from it (§4.7: the clock lock).
+        let updates = self.updates.lock();
         let ratio = segment.config.ratio;
         let rate = core.mcr as f64 * ratio.den() as f64 / ratio.num() as f64;
         let settings = Settings { rate: Some(rate), ..self.settings(&updates, segment.origin) };
@@ -140,8 +149,11 @@ pub(crate) struct Control {
     held: BTreeMap<(i64, u64), Timed>,
     released: Vec<i64>,
     clock_lost: bool,
-    /// When the device reads began failing without a lost-device error (Review S, S-B1).
-    failing_since: Option<Instant>,
+    /// When the device reads began failing without a lost-device error (Review S, S-B1);
+    /// in the host clock's time (plan 30 §4.3).
+    failing_since: Option<Wall>,
+    /// The device's host clock (plan 30 §4.3): the control poll and its checks run on it.
+    host: HostClock,
 }
 
 /// How long the device reads may fail, whatever the error, before the device is lost: a
@@ -175,6 +187,7 @@ impl Control {
         reference_monitored: bool,
         start: Start,
     ) -> Control {
+        let host = core.device.host();
         // RM-25, VH-4: this Module's terms — the start lead, and, for a receive segment after
         // a cut, the receive call in progress there and the delivery allowance (UR-25).
         let lead = core.ticks(core.description.timing.start_lead_ns);
@@ -217,11 +230,12 @@ impl Control {
             released: Vec::new(),
             clock_lost: false,
             failing_since: None,
+            host,
         }
     }
 
     pub fn run(mut self) {
-        let mut last_check = Instant::now();
+        let mut last_check = self.host.now();
         loop {
             if lock(&self.core.streams).stop.is_some() {
                 return self.finish();
@@ -234,11 +248,11 @@ impl Control {
                 self.release();
             }
             self.release();
-            if last_check.elapsed() >= CHECK && !self.core.is_lost() {
-                last_check = Instant::now();
+            if self.host.now().saturating_sub(last_check) >= CHECK && !self.core.is_lost() {
+                last_check = self.host.now();
                 self.check_device();
             }
-            std::thread::sleep(POLL);
+            self.host.sleep(POLL);
         }
     }
 
@@ -319,7 +333,7 @@ impl Control {
     /// The configuration a segment a command begins in `dir` starts from: the one in force,
     /// with the timed commands held for that direction (UC-2, UR-17).
     fn segment_config(&self, dir: Dir) -> Arc<ColdConfig> {
-        let config = Arc::new(ColdConfig::new(Core::settings(&self.config, dir)));
+        let config = Arc::new(ColdConfig::with_clock(self.core.device.host(), Core::settings(&self.config, dir)));
         for (&order, timed) in self.held.iter().filter(|(_, timed)| timed.dir == dir) {
             config.book(order, timed.settings());
         }
@@ -447,7 +461,7 @@ impl Control {
             let settings = timed.settings();
             let projections = self.projections(timed.dir);
             // Order a timed issuance and its projections atomically against configure.
-            let mut updates: Vec<_> = projections.iter().map(|cold| lock(&cold.updates)).collect();
+            let mut updates: Vec<_> = projections.iter().map(|cold| cold.updates.lock()).collect();
             for chan in 0..channels {
                 if let Err(error) = self.core.device.apply(timed.dir, chan, &settings, Some(effective)) {
                     self.core.device_failed(None, "update_parameter", &error);
@@ -470,7 +484,7 @@ impl Control {
         let at = self.core.at(self.core.now());
         for ((e, seq), timed) in std::mem::take(&mut self.held) {
             let projections = self.projections(timed.dir);
-            let mut updates: Vec<_> = projections.iter().map(|cold| lock(&cold.updates)).collect();
+            let mut updates: Vec<_> = projections.iter().map(|cold| cold.updates.lock()).collect();
             for updates in &mut updates { updates.remove(&(e, seq)); }
             // Keep the projections locked until the cancellation is recorded, so an owner can
             // never apply this held value after that record.
@@ -709,14 +723,14 @@ impl Control {
         // Time reads failing for 1 s from the start of the first that failed: the device is
         // gone, however UHD classified the error (one read on a dead link waits out UHD's
         // timeouts); a read that succeeds starts the count again.
-        let begun = Instant::now();
+        let begun = self.host.now();
         match self.core.device.time_now() {
             Ok(_) => self.failing_since = None,
             Err(error) if error.lost => self.core.device_lost(&error.message),
             Err(error) => {
                 self.core.timing(json!({ "what": "time_read_failed", "error": error.message }));
                 let since = *self.failing_since.get_or_insert(begun);
-                if since.elapsed() >= FAILING_FOR {
+                if self.host.now().saturating_sub(since) >= FAILING_FOR {
                     self.core.device_lost(&format!("UR-29: the device time reads have failed for 1 s: {}", error.message));
                 }
             }
@@ -801,6 +815,47 @@ mod tests {
         assert!(lock(&core.rec).applied.iter().any(|r|
             r["key"] == "radio.rx.gain_db" && r["issued"] == true && r["at"]["ticks"] == core.ticks(2_000_000)));
         assert!(lock(&core.rec).rejected.is_empty());
+    }
+
+    #[test]
+    fn ur_21_the_receipt_site_reserves_the_moved_start_before_any_hand_over() {
+        // UR-21 (plan 30 stage A): the receipt site's `SendAsap` move reserves the moved start
+        // before uhd-tx decides again at its first hand-over — that reservation is what the
+        // moved start's collision, its start-up refusal and the handed-over start observe.
+        // Removing the move leaves the requested start reserved instead (row J315).
+        let samples: Vec<(f32, f32)> = vec![(0.25, 0.0), (0.5, 0.0), (0.75, 0.0), (1.0, 0.0)];
+        let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
+        let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
+        let waveform = ezsdr_kernel::manifest::ingest_input(
+            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
+            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
+            format!("mem:{hash}"),
+            &bytes,
+        );
+        let (core, _device, time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
+        let (mut control, to_tx) = control(&core, &[Dir::Tx]);
+        let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+        // Booking 10 ms in: the requested start (sample 0) is far behind the 2 ms device lead.
+        time.advance_to(core.at(core.ticks(10_000_000))).unwrap();
+        let requested = TimePoint::new(clock.domain, 0);
+        control.book(Dispatched::new(ActionId(1), Action::TxBurst {
+            target: super::super::test_support::target_of(&core.tx_id),
+            waveform,
+            repeat: false,
+            at: AbsoluteDeadline::new(requested),
+            requested_at: None,
+            late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+            metadata: BTreeMap::new(),
+        }, Some(core.tx_id.clone())));
+        let verdict = events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().find(|e| e.kind.as_str() == kinds::TIME_ERROR).expect("the SendAsap verdict at booking");
+        assert_eq!(verdict.payload["outcome"], "send_asap", "{verdict:?}");
+        // Still between the booking and uhd-tx's first hand-over: what uhd-control hands over
+        // is the moved start, and the moved start is what its reservation holds.
+        let TxCmd::Burst(held) = to_tx.try_recv().expect("the receipt site handed the burst to uhd-tx") else { panic!("not a burst") };
+        let moved = held.k;
+        assert_ne!(moved, requested.ticks_in(clock.domain).unwrap(), "the receipt move was not applied");
+        assert!(clock.instant(moved) >= core.ticks(10_000_000) + core.ticks(DEVICE_LEAD_NS), "the moved start is not the device lead past the booking instant: {}", clock.instant(moved));
+        assert_eq!(lock(&core.held).iter().copied().collect::<Vec<_>>(), vec![(clock.domain, moved)], "the moved start is reserved before the hand-over");
     }
 
     #[test]
@@ -890,7 +945,7 @@ mod tests {
             let plan = plan_of(&core, dir);
             plan[1].configure(&core, dir).unwrap();
             let settings = plan[1].settings.clone().unwrap();
-            observed.push((dir.name(), settings.settings(&lock(&settings.updates), plan[1].segment.origin).gain));
+            observed.push((dir.name(), settings.settings(&settings.updates.lock(), plan[1].segment.origin).gain));
         }
         assert_eq!(observed, vec![("rx", Some(3.0)), ("tx", Some(3.0))], "both cold switches must preserve the later update due before the new origin");
     }
@@ -902,13 +957,13 @@ mod tests {
         cold.book((50, 2), Settings { gain: Some(5.0), ..Settings::default() });
         cold.book((101, 3), Settings { gain: Some(9.0), freq: Some(2e9), ..Settings::default() });
         cold.book((100, 4), Settings { freq: Some(1.1e9), ..Settings::default() });
-        assert_eq!(cold.settings(&lock(&cold.updates), 100).gain, Some(7.0));
-        assert_eq!(cold.settings(&lock(&cold.updates), 100).freq, Some(1.1e9));
+        assert_eq!(cold.settings(&cold.updates.lock(), 100).gain, Some(7.0));
+        assert_eq!(cold.settings(&cold.updates.lock(), 100).freq, Some(1.1e9));
         // A command delayed by the device queue takes its actual effective order.
-        cold.issued(&mut lock(&cold.updates), (50, 2), 80, Settings { gain: Some(5.0), ..Settings::default() });
-        assert_eq!(cold.settings(&lock(&cold.updates), 100).gain, Some(5.0));
-        cold.issued(&mut lock(&cold.updates), (100, 4), 101, Settings { freq: Some(1.1e9), ..Settings::default() });
-        assert_eq!(cold.settings(&lock(&cold.updates), 100).freq, Some(1e9));
+        cold.issued(&mut cold.updates.lock(), (50, 2), 80, Settings { gain: Some(5.0), ..Settings::default() });
+        assert_eq!(cold.settings(&cold.updates.lock(), 100).gain, Some(5.0));
+        cold.issued(&mut cold.updates.lock(), (100, 4), 101, Settings { freq: Some(1.1e9), ..Settings::default() });
+        assert_eq!(cold.settings(&cold.updates.lock(), 100).freq, Some(1e9));
     }
 
     #[test]
@@ -929,7 +984,7 @@ mod tests {
             assert!(!lock(&core.rec).applied.iter().any(|r| r.get("cancelled").is_some()), "{target}");
             let plan = plan_of(&core, Dir::Tx);
             let settings = plan[1].settings.clone().unwrap();
-            assert_eq!(settings.settings(&lock(&settings.updates), plan[1].segment.origin).gain, Some(3.0), "{target}");
+            assert_eq!(settings.settings(&settings.updates.lock(), plan[1].segment.origin).gain, Some(3.0), "{target}");
             control.cancel_held("Provider::stop");
             assert!(control.held.is_empty());
             assert_eq!(lock(&core.rec).applied.iter().filter(|r| r["cancelled"] == "Provider::stop").count(), 1, "{target}");
@@ -1089,7 +1144,7 @@ mod tests {
             let planned = plan_of(&core, dir).pop().unwrap();
             assert!(planned.segment.origin >= ms(300), "{case}");
             let settings = planned.settings.unwrap();
-            assert_eq!(settings.settings(&lock(&settings.updates), planned.segment.origin).gain, Some(3.0), "{case}");
+            assert_eq!(settings.settings(&settings.updates.lock(), planned.segment.origin).gain, Some(3.0), "{case}");
         }
     }
 
@@ -1114,6 +1169,32 @@ mod tests {
         }
         assert!(lock(&core.rec).rejected.is_empty(), "{:?}", lock(&core.rec).rejected);
         assert_eq!(control.held.len(), core.description.timing.command_queue_depth as usize + 2);
+    }
+
+    #[test]
+    fn ur_24_the_device_queue_order_is_the_effective_order() {
+        // UC-2 for the device's in-order queue: a command whose instant precedes one already
+        // released is applied at the released one's, with LATE_COMMAND, so the instants the
+        // device is handed never decrease (Review L, L07). The case is built on the controlled
+        // clock: the later command released inside the 3 ms window, then an earlier one booked
+        // (still a device lead ahead, so not late at receipt) and released behind it.
+        let (core, device, time, events) = crate::provider::test_support::rig_with_links(vec![Arc::new(NoLink)]);
+        device.rx_open(1).unwrap();
+        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        let us = |n: i64| core.ticks(n * 1_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(us(n))));
+        let gain = key("radio.rx.gain_db");
+        control.book_timed(ActionId(1), gain.clone(), Value::num(1.0).unwrap(), at(10_000));
+        time.advance_to(core.at(us(7_500))).unwrap();
+        control.release();
+        control.book_timed(ActionId(2), gain.clone(), Value::num(2.0).unwrap(), at(9_700));
+        control.release();
+        let ats: Vec<i64> = device.calls().iter().filter(|c| c.starts_with("apply rx 0") && !c.contains("at=-"))
+            .map(|c| c.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap()).collect();
+        assert_eq!(ats, [us(10_000), us(10_000)], "the earlier command handed to the device out of order: {:?}", device.calls());
+        let late: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).collect();
+        assert_eq!(late.len(), 1, "{late:?}");
+        assert_eq!((late[0].payload["requested"]["ticks"].as_i64(), late[0].payload["applied"]["ticks"].as_i64()), (Some(us(9_700)), Some(us(10_000))));
     }
 
     #[test]

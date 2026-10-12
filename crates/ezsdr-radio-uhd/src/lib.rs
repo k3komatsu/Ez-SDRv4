@@ -6,6 +6,7 @@
 
 mod authority;
 pub mod device;
+pub mod host;
 pub mod profile;
 mod provider;
 #[cfg(feature = "uhd")]
@@ -26,6 +27,7 @@ pub use device::{
     Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, FakeFault, Iq, RxRecv, Settings, TxCode, TxReport,
     decimation, from_time_spec, to_time_spec,
 };
+pub use host::{ClockMode, HostClock};
 pub use provider::UhdRadio;
 /// UHD's own calls for the C API tests and the bench (feature `uhd`, UR-3).
 #[cfg(feature = "uhd")]
