@@ -215,14 +215,14 @@ run::LeaseMode = Lease{Attached|Detached}
 run::LeaseRecord = Manifest envelope
 run::HostClock = NEW: RS-22 runs the TTL on an injectable host clock, because a Lease is a wall-clock fact.
 run::SystemHostClock = NEW: the real clock behind RS-22's injectable one.
-run::RunError = NEW: the closed refusal set of RS-4, RS-18, RS-20, RS-21, RS-24, RS-32 and RS-39.
+run::RunError = NEW: the closed refusal set of RS-4, RS-18, RS-20, RS-21, RS-24, RS-27, RS-32, RS-33 and RS-39.
 
 # --- session (audit §13 `lifecycle`) -----------------------------------------
 session::SessionAction = Run state machine
 session::LogEntry = Run state machine
 session::SessionLog = Run state machine
 session::Outcome = NEW: RS-15's per-entry verdict, without which a log cannot be audited.
-session::Admitter = NEW: RS-17's runtime admission point (SB-30's third point), for MA-14a's submitter and the Phase 2 dispatcher.
+session::Admitter = NEW: RS-17's check set at admission, SB-30's third point and SB-45's coercion policy, run at KC-24 steps 12 and 13.
 session::Admitted = NEW: what RS-17 returns when it passes.
 session::implicit_spec = Run state machine
 
@@ -244,7 +244,7 @@ policy::Reaction = Policy table
 event::Action = Action set
 event::Target = Action set
 event::ActionId = NEW: RS-15 records which Kernel Actions an entry dispatched.
-event::ActionTemplate = NEW: RS-49a's Action without its time field, because a Spec cannot name a ClockDomainId.
+event::ActionTemplate = NEW: RS-49a's Action without its time field, because a Spec cannot name a ClockDomainId, and without a parameter change's class (RS-52).
 module_api::ActionReceiver = NEW: MA-14's inbound handle; MA-46 fixes it so a Plugin host needs no Kernel change.
 module_api::Dispatched = NEW: MA-14: what `recv` hands a Module, carrying the ActionId an answering event names (spec 27 §3).
 module_api::ActionSubmitter = NEW: MA-14a's outbound handle, without which a Reactor has no way to emit an Action.
