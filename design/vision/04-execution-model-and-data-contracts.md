@@ -97,7 +97,7 @@ Normative: [design/14-native-executor.md](../14-native-executor.md) (the first, 
 
 The Kernel owns the **descriptor** of a component and the **vocabulary** it speaks, not the way it is called:
 
-A ComponentDescriptor declares its kind (Processor or Reactor), its ports (§21), its params each with an update class (§27), its timing (a processing budget), its requirements — never a placement — and the identity and hash of its implementation ([design/05-module-api.md](../05-module-api.md) §4, rules MA-36, MA-37).
+A ComponentDescriptor declares its kind (Processor or Reactor), its ports (§21), its params, each with the update class under which it may change or none when it is fixed for the Run (§27), its timing (a processing budget), its requirements — never a placement — and the identity and hash of its implementation ([design/05-module-api.md](../05-module-api.md) §4, rules MA-36, MA-37).
 
 The execution ABI — how a native, WASM or GPU component is invoked, how buffers are handed to it — belongs to each Executor (§20). Executors interoperate through DataLinks carrying `SampleBlock`s and through Event/Action queues, never through a shared call signature. This keeps the Kernel out of the block-API business that GNU Radio carries in its core and lets a GPU batch executor and a WASM block executor coexist without a lowest common denominator.
 

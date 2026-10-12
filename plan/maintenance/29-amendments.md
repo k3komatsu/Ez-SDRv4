@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Draft amended text, not yet in `design/`.** The plan is [`29-unified-admission.md`](29-unified-admission.md) (owner-approved 2026-10-11). This file is the revised spec the plan's §8 requires before implementation: KC-24's rows with their `reason`/`key`/`requested` settings, KC-28's front matter, and the per-rule amendments. It is reconciled with the code at the end of each stage and moved into `design/` by the acceptance step. |
+| Status | **Moved into `design/` on 2026-10-12** (the acceptance step of plan §8): design/03, 04, 05, 06, 07, 10, Vision §3 and the `kernel_surface` allow-list, each with a `Changes` row. This file stays as the decision record; where its wording and `design/` differ, `design/` is normative. Before that: draft amended text. The plan is [`29-unified-admission.md`](29-unified-admission.md) (owner-approved 2026-10-11). This file is the revised spec the plan's §8 requires before implementation: KC-24's rows with their `reason`/`key`/`requested` settings, KC-28's front matter, and the per-rule amendments. It is reconciled with the code at the end of each stage and moved into `design/` by the acceptance step. |
 | Basis | HEAD `a788875`, `main`, clean tree; [24-prefreeze-audit.md](24-prefreeze-audit.md) item 3, [28-forward-audit.md](28-forward-audit.md) decision 3, [27-role-typed-identities.md](27-role-typed-identities.md) judgment 4. |
 | Stages | 3a declarations/targets/Spec checks, 3b class generation and runtime admission, 3c event source and ASCII, 3d memory domains. |
 
