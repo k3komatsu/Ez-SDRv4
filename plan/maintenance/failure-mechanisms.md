@@ -25,3 +25,14 @@ Bugs since: #65 (`failure-collapsed-into-value`) and #66 (`pending-provenance-co
 Review findings in #60 stage A (2026-10-12 to 13; not issues): the manual-clock anchor rule had an exception (the Authority's first anchor, read while the clock ran), which failed a test twice; the exception was removed rather than patched (plan 30 §15).
 
 Unclassified: #4 and #13 (one-off bugs); #40, #42 and #48 (spec gaps); #54, #55, #56, #59, #60 and #62 (not defects, or decisions).
+
+## handoff からの記録（2026-10-14 に移動）
+
+handoff.md に 2026-10-14 まであった記録を，そのまま移した（AGENTS.md §9：記録は作業の置き場に1か所）．当時の文なので，今の規則は accepted specs と照合すること．
+
+**失敗機構の分類（2026-10-07）** — 一覧は [`plan/maintenance/failure-mechanisms.md`](failure-mechanisms.md)
+
+AGENTS.md §6 の three strikes は，症状や領域ではなく設計上の失敗機構で数える．#1–#62 を本文と修正 commit から 11 機構に分類した（Opus，修正 commit 3件で照合）．`mech:` ラベルと理由のコメントを各 issue に付け，題名から誤って付けた `area:` ラベル8件を外した．
+- **3件以上で未修正の bug を抱える機構**：`planned-state-read-as-actual`（12件），`radio-rule-implemented-twice`（9件），`stream-lifecycle-scattered`（7件）．設計メモは spec 22（VH-1〜VH-5，VH-7）が兼ねるので step 2 を進めてよい．**ただし #51 は保留**：イベントの報告規則（cancel 時に何を emit するか）も「1か所で実装」に含めるかを決めてから直す．
+- **閉じた issue だけで3件以上の機構**：`invariant-outside-type`，`failure-collapsed-into-value`，`fact-stated-twice-in-spec`，`string-composed-identity`，`correlation-by-partial-key`，`pending-provenance-collapsed`，`admission-per-origin`．次の bug が1件出たら修正の前に設計メモが要る．修正の多くは見張りを足しただけで機構は残っている．
+- **次の手**：spec 22 step 2 の後，v4.0 の Kernel 凍結前に `invariant-outside-type` と `admission-per-origin` を先回りで設計メモにするかを owner に諮る（推奨：する．凍結後は直せない）．

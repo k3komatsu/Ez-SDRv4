@@ -406,3 +406,8 @@ Sol は、S02 と S03 を解消と判定した。S01 も、予約された domai
 - **セルフレビューの扱い:** DeepSeek は、セルフレビューをバックグラウンドで起動したままセッションを終えることが3回あった。
 - **見張り自身の誤動作:** 指示書の文面に照合の文字列そのものが含まれていて、見張りが実装役のプロセスを止めた。見張りは、シェルのプロセスだけを対象にするよう直した。
 
+## handoff からの記録（2026-10-14 に移動）
+
+handoff.md に 2026-10-14 まであった記録を，そのまま移した（AGENTS.md §9：記録は作業の置き場に1か所）．当時の文なので，今の規則は accepted specs と照合すること．
+
+2. ~~**#60**~~ → **完了（2026-10-13，[plan 30](30-fakedevice-manual-time.md) §15）**：smoke set の FakeDevice は手動の時計（`crates/ezsdr-radio-uhd/src/host.rs`，規則 M1〜M7 と時計の lock）で動き，uhd のスレッドが busy の間は時刻が止まる．§14 の負荷試験（sim03，16/4/4/2 CPU × 128/32/128/128 スレッド，各3周）で fake・uhd・protocol とも**失敗 0**（段階0は 0/3/19/28）．gate は全6リストで既知の G09 以外 kill．所要時間は fake suite 35 s → 45〜49 s（M4 で 1 ms の polling ごとに時計が止まるため，短縮は目標外）．分担：DeepSeek が実装→Opus と Sol のレビュー→時計の中心は Opus サブエージェントが書き直し→残りを DeepSeek→Sol の再レビュー3回と R03 を Opus．owner の判断：D2 の2件，Authority の最初の anchor の例外を削除（本番の変更），参加者でないスレッドの FakeDevice 直接テスト4本を単体テストへ．実装の報告は `~/.cache/ezsdr-fixes/2026-10-12-60/`（`stage-a-report.md`，`opus-core-report.md`；判定スクリプト `check.py`，送り返し `drive.sh`，見張り `watchdog.sh`）．**mutation の並列度も上げた（2026-10-13）**：`remote_mutate.py` が複数リスト（`all`）を1回で流し，実行ごとの作業ディレクトリ〈`~/ezsdr-mut/<tag>`〉を使う．`all sim02:8,sim03:8` で全リスト約8分（以前は約17分），結果は従来の gate と同じ（G09 以外 kill）．**実装役への指示書に毎回書くこと**（今回の違反から）：作業ツリーに mutant や実験を当てない（リポジトリの外のコピーで），Mac で負荷をかけない，セルフレビューはフォアグラウンドで終わるまで待つ．

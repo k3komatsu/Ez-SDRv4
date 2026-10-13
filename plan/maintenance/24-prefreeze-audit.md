@@ -527,3 +527,9 @@ A malformed relation can therefore be built in Rust (the UHD Authority builds on
   *Problem:* The one envelope number the Kernel reads has two definitions. The committed schema description says the lead runs from receiving the Action. That description is the language-neutral contract a Plugin or a non-Rust reader sees (OV-10). MA-10, as KG-8 amended it, says the lead runs from dispatching, delivery allowance included, and UC-6 and RS-19 depend on that difference. The stale text rests only on GZ-2's 'frozen schema' assumption, but v4.0 has not frozen (OV-12). Other v1 schemas have been regenerated since GZ-2: clock_domain and action in 87bb265 and 0c3015a. Spec 05's §4 shape for ProviderInstance does not list the field at all.  
   *Freeze impact:* At the freeze the stale description becomes the permanent v1 contract text for a field that RS-19's earliest instant and KC-19's plan-time check read. A reimplementation from the schema would count the lead from receipt and come out stricter or looser than the Kernel. After the freeze, even a description fix is a v2 question under OV-12's immutability.  
   *Fix:* Move the KG-8 wording into the rustdoc, regenerate provider_instance.v1.json, and log it in SCHEMA_CHANGELOG as a pre-freeze description change. Delete the `//` workaround comment and the GZ-2 remark at the end of MA-10. Add `min_command_lead: optional Duration (host.monotonic)` to spec 05 §4's ProviderInstance shape.
+
+## handoff からの記録（2026-10-14 に移動）
+
+handoff.md に 2026-10-14 まであった記録を，そのまま移した（AGENTS.md §9：記録は作業の置き場に1か所）．当時の文なので，今の規則は accepted specs と照合すること．
+
+  - **commit 済み（2026-10-09〜11，どれも独立 Opus レビュー＋全 mutation リスト〈既知の生き残り G09・U15 のみ〉を通した）**：#64（`84df09e`），#65・#66（`25a0e9d`），spec 24 の項目5（`5d000ec`）・4（`6ebcba9`）・6（`092263a`）・7（`b6b6132`），KC-32 書き直し（`8fbf676`），最初のブロックの carry（`ceabaea`），spec 26 の 1a（`8664865`）・1b（`a694a90`），`deployment` 削除（`2ecfd38`），**spec 27 の 2a（`3f6cce9`，#54 を閉じた）・2b（`9083e58`）**．

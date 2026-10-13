@@ -1,13 +1,13 @@
 # Ez-SDR v4 — Handoff (2026-10-14)
 
-次のセッション（人間・AI どちらでも）が最初に読む現状メモ．**今のことだけ**を書く：どこに何があるか，何が未解決か，owner の判断待ち，次に何をするか．終わった作業の記録はその置き場（`plan/phaseN/00-overview.md` か各計画ファイル）に書き，ここには1行の参照だけ残す（AGENTS.md §9．`rules.py` が 300 行・40 000 byte を超えると落ちる）．2026-10-14 までの全文は [plan/handoff-archive.md](plan/handoff-archive.md)（凍結）．
+次のセッション（人間・AI どちらでも）が最初に読む現状メモ．**今のことだけ**を書く：どこに何があるか，何が未解決か，owner の判断待ち，次に何をするか．終わった作業の記録はその置き場（`plan/phaseN/00-overview.md` か各計画ファイル）に書き，ここには1行の参照だけ残す（AGENTS.md §9．`rules.py` が 300 行・40 000 byte を超えると落ちる）．2026-10-14 までここにあった記録も同じ日に各置き場へ移した．
 
 開発の恒常的なルールは [AGENTS.md](AGENTS.md)．
 
 ## 1. 今の状態
 
 - **Phase 1〜7 は Gate X 受理済み**．Phase 7（UHD Provider `ezsdr.radio.uhd`）は 2026-10-01 に X300＋OBX で bench B0–B9 を通してクローズ（[plan/phase7/00-overview.md](plan/phase7/00-overview.md) §11，[bench-results.md](plan/phase7/bench-results.md)）．accepted specs の一覧は AGENTS.md §1・§2．
-- **凍結前の改修（項目1〜8）は完了**（[plan/maintenance/24-prefreeze-audit.md](plan/maintenance/24-prefreeze-audit.md)）．最後の項目8（spec 01〜06 を DA-1 形式に）は 2026-10-14 に完了（[計画31](plan/maintenance/31-item8-kernel-specs.md) §10）．その前の保守（spec 20〜30，#1〜#66）の記録は各計画ファイルと archive．
+- **凍結前の改修（項目1〜8）は完了**（[plan/maintenance/24-prefreeze-audit.md](plan/maintenance/24-prefreeze-audit.md)）．最後の項目8（spec 01〜06 を DA-1 形式に）は 2026-10-14 に完了（[計画31](plan/maintenance/31-item8-kernel-specs.md) §10）．その前の保守の記録は各計画ファイル（Phase 7 クローズから spec 20 までは [audits-2026-10.md](plan/maintenance/audits-2026-10.md)）．
 - 実装：13 crate（`crates/`），schema（`schemas/`），Python package（`python/ezsdr`）．確認の手順は §5．
 - open issue は4件：#51，#56，#59，#62（§3）．
 
@@ -36,7 +36,7 @@
 | H1〜H5 | H1：開始が遅れた複数 packet の burst．H2：burst 途中の Underflow（再開時刻，ずれ）．H3：TX の `max_num_samps`．H4：負荷下の uhd-tx・uhd-control の起床遅延．H5：保持した最後のサンプルの 2 ms 期限 | Phase 8 の bench |
 | 方向別の start lead | owner 決定（2026-10-08）：`radio.timing.start_lead_ns` を TimingEnvelope の方向別の値にし，送信側は Phase 8 で測る（それまで 50 ms）．**未実装**：今は単一値（`design/07-radio-model.md:85`，`crates/ezsdr-radio/src/lib.rs:576`） | Phase 8 の計画 |
 | 測って決め直す値 | 送信と受信の start lead（今は 50 ms，INFERRED），cold change・再開で受信が途切れる時間（約55 ms〜221 ms），UR-17 の受信要求長の上限（残すと決定済み，実測で見直す） | Phase 8 の bench |
-| 保守表の 3・4 | 3：fake は TimeError で burst 全体を捨てるが FPGA の既定は packet 単位（H1 の後に UR-33 と fake を直すか）．4：保持した最後のサンプルの 2 ms 期限（設計の代償として受け入れるか見直すか）．表は archive §4「Phase 7 後の保守」（1・2・5 は解決済み） | Phase 8（owner） |
+| 保守表の 3・4 | 3：fake は TimeError で burst 全体を捨てるが FPGA の既定は packet 単位（H1 の後に UR-33 と fake を直すか）．4：保持した最後のサンプルの 2 ms 期限（設計の代償として受け入れるか見直すか）．表は [audits-2026-10.md](plan/maintenance/audits-2026-10.md) の「Phase 7 後の保守」（1・2・5 は解決済み） | Phase 8（owner） |
 | Provider の id を名乗る写し | 受け取り時の拒否で id を名乗る処理が MockRadio・UHD に約15か所ずつ（MR-18・UR-26 の一部は未固定）．1か所で id を渡す形にまとめると減る | 任意 |
 | 規則ごとの確認への記録 | TM-21 の budget/block period 比較は未実装．TM-16c の既存テストは ManualTimeAuthority で paced Authority の規則を固定しない．SC-29 の SOB なし time jump の `requested_target` 不在と SOB 付き time jump の組合せは未固定．Authority の `now/schedule/cancel` の panic の扱いは規則との対応を要確認 | 凍結前の全規則の確認（§4） |
 | 負荷に弱いテスト | maintenance/J293 の無変異テスト `ur_26_the_shutdown_s_last_burst_ack_waits_on_the_device_s_clock` が16 shard の負荷下で1回失敗（2026-10-14）．再発したら #60 の続きとして調べる．Python の `test_v54_sleep_is_run_time` が Mac で 10 s の上限をわずかに超える記録（2026-10-07，その後は未確認） | 再発時 |
@@ -110,4 +110,5 @@ docker run --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(i
   - 保守：`plan/maintenance/20-*.md` 〜 `31-*.md`（spec 20〜22 の修正，設計メモ 23・25，凍結前監査 24，spec 26・27，前向き監査 28，項目3 の 29，#60 の 30，項目8 の 31）．失敗機構の一覧は [failure-mechanisms.md](plan/maintenance/failure-mechanisms.md)．
   - UHD spike（branch `spike/uhd`，merge しない）：[plan/spikes/2026-09-26-uhd.md](plan/spikes/2026-09-26-uhd.md)．
   - 実装役の報告・レビュー・gate のログ：`~/.cache/ezsdr-fixes/<日付>-<作業>/`（リポジトリ外，消えうる）．
-  - 2026-10-14 までの handoff の全文：[plan/handoff-archive.md](plan/handoff-archive.md)（凍結）．
+  - Phase 7 クローズ（2026-10-01）から spec 20 までの保守と監査（#1〜#38）：[audits-2026-10.md](plan/maintenance/audits-2026-10.md)．
+  - 2026-10-14 までの handoff の全文は git の履歴（`git show 60c7494:plan/handoff-archive.md`）．

@@ -186,3 +186,35 @@ OV-1…OV-23b, PO-1…PO-12, GV-1…GV-6 and GW-1…GW-5 bind Phase 5. The rules
 | A component parameter that no Action may change (Vision §27's "a key with no class cannot change during a Run"): `ParamDecl.update_class` is mandatory, so every component parameter is admitted at run time and then refused by an Executor that applies none (Review G, P2-9) | X | **optional before the freeze** | owner, 2026-09-26, as recommended ("すべて推奨で受理します"): make the class optional before v4.0 freezes, with Phase 10's first Executor that applies parameters; until then the refusal (NX-7) keeps it loud |
 | R1–R11, N1–N6, specs 14 and 15 (exit criterion 1) | X | **accepted** | owner, 2026-09-26, as recommended ("すべて推奨で受理します") |
 | Step X: spec 14 moved to `design/14-native-executor.md`; the three Vision issues | X | **done** | 2026-09-26: §§9, 19, 22 and a revision-history row ([vision-issues.md](vision-issues.md)) |
+
+## handoff からの記録（2026-10-14 に移動）
+
+handoff.md に 2026-10-14 まであった記録を，そのまま移した（AGENTS.md §9：記録は作業の置き場に1か所）．当時の文なので，今の規則は accepted specs と照合すること．
+
+Phase 5（2026-09-26，Review F/G の修正込み）：1.85.0 / stable とも 644 passed（`ezsdr-kernel` 456，新 crate `ezsdr-exec-native` 8，`ezsdr-acceptance` 47，ほかは Phase 4 と同じ）．Kernel の public item は増えていない（116 NEW / 292）．Kernel schema の変更は `experiment_spec` の `inputs` と，`ComponentKind` の `reactor` の説明文だけ．workspace member は 11 個になった．
+
+### Phase 5 — Gate X受理・Step X完了
+
+2026-09-26，owner の委任（「Phase4と同様に計画を立てて実装まで．実装後に Opus 5.5 でレビューし，修正して再レビュー．修正が小規模で低リスクなら再レビュー不要．これをループ」）で，Phase 4 と同じく計画と実装を 1 セッションで行った．Gate P は置いていない．正本は [plan/phase5/00-overview.md](00-overview.md)（範囲・決定 R1–R11・§11 の決定ログ）．新しい Module の spec 14 は Step X で [design/14-native-executor.md](../../design/14-native-executor.md) へ移した．Kernel 修正の spec 15 は [plan/phase5/15-amendments.md](15-amendments.md)，記録は [implementation-notes.md](implementation-notes.md)．
+
+| 項目 | 内容 |
+|---|---|
+| 進め方 | まず試作（Executor + responder + 2 台の MockRadio を実 coordinator で走らせる）で Kernel の穴を 3 つ実測し，その証拠から計画した |
+| 範囲 | §58 の「minimal reactive test」そのもの：A が PING，B の Reactor が受信 sample から PING の先頭 sample を検出し，その時刻 + turnaround に timed PONG を返す．radio が lead を実機と同じ envelope で判定する |
+| Kernel | KE-1（Spec の `inputs`：schedule に載らない入力を宣言でき，KC-9 が検証して store に入れる．これがないと Reactor は自分の波形を送れなかった），KE-2（Module の TxBurst の波形が Run の入力か admission で確かめる，RS-44a），KE-3（drain 中の `ezsdr.dispatch` / `ezsdr.run_state` 拒否は Module の失敗ではない．MA-14a），KE-4（RS-17 の reactive coerce は「しない」で確定，MA-30 の Action latency は Phase 10 へ），KE-5（MA-24・UC-1・UC-2：Action を適用しない Executor は拒否する）．public item の増減なし |
+| 新 Module | `ezsdr.exec.native` 1.0.0（`crates/ezsdr-exec-native`）：compiled-in component を `impl` の kind・id・hash で読み込み（MA-19b を carry），component id 順に step，component が積んだ Action を submit．Action は適用しない（NX-7），Simulation のみ |
+| Reactor | `crates/ezsdr-acceptance/src/responder.rs`（application logic．Kernel と Executor の ABI だけを使う，§58 #10） |
+| carriers | `tests/reactive.rs`：§58 #9（PONG が 15 092 sample に届く），#11（turnaround 不足は drop / send_asap で TIME_ERROR．境界は 14 000 sample ちょうど），#3（seed で再現，radio の名前に依存しない），#12（block 長に依存しない，block 境界をまたぐ PING も 1 回だけ応答），KE-3（drain 中の判断は abort にならない） |
+| 発見 | block-length jitter 下では block が最大 4 000 sample になり，5 ms の turnaround は late になりうる（デバイスの配送遅延を lead に含めるから．実機と同じ挙動で欠陥ではない）．jitter を使う carrier は 7 ms |
+| レビュー | Review F（Opus）CHANGES_REQUIRED：P0 2（仕様文の矛盾：KC-9 の旧文，NX-7 と MA-24/UC-2）・P1 4・P2 11 → 全件修正．Review G（Opus，修正の再レビュー）CHANGES_REQUIRED：P0 0・P1 4・P2 9 → 全件修正．残りは文面と 2 テストだけなので，owner の規則どおり再レビューせず終了．記録は [reviews/](reviews) |
+| 検証 | 1.85.0 / stable とも 644 passed，Clippy clean，mutation 29/29 killed，link 全解決 |
+| ビルド衛生 | 共有 target dir（`Ez-SDRv4-review`）では，mtime を保ったコピーや他コピーの後のビルドが古い（改変済みの）成果物を再利用する．AGENTS.md §7 に対策を書いた（`rsync -a --no-times --exclude .cargo`，ビルド前に touch，ビルドを交互に走らせない） |
+
+**Gate X の判断**（2026-09-26，owner「すべて推奨で受理します」，[00-overview.md](00-overview.md) §11）：
+
+1. **Event edge**（Detector などから Reactor へイベントを渡す経路）は **Phase 10**，Reactor にイベントを渡す最初の Processor と一緒に作る．Kernel の `Endpoint::EventIn` / `EventOut` は handle を持たない未完成の variant なので，形は v4.0 凍結までに決める．
+2. **Vision §22** は文言を修正した（Vision issue 2，Step X で適用）：Simulation はデバイスに渡った時点からの lead を判定し，component 自身の処理時間は数えない．budget を仮想時間で課す案は Phase 10 の budget / `PROCESSOR_DEADLINE_MISS` と一緒に．
+3. **Action で変更できない component parameter**（Vision §27）：`ParamDecl.update_class` を **v4.0 凍結前に optional にする**（Phase 10 の最初の parameter 適用 Executor と一緒に）．それまでは NX-7 の拒否で表に出る．
+4. R1–R11，N1–N6，spec 14・15 を受理．
+
+**Step X**：spec 14 を [design/14-native-executor.md](../../design/14-native-executor.md) へ移し，`design/05` と crate の参照を書き換えた．Vision issue 3 件（§9 の Spec の形に `inputs`，§19 に spec 14 の Normative 行，§22 の文言）を適用し，索引に改訂履歴の行を加えた（[vision-issues.md](vision-issues.md)）．
