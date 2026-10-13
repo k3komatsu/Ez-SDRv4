@@ -274,7 +274,7 @@ Each section keeps its §N, and the index gains a revision row.
 
 **Binding text for AGENTS.md §2.** It goes after "Normative schemas…", in the same commit as `rules.py` (DA-3's pass 1) and not before:
 
-> **Format of accepted specs.** A rule in `design/` is normative text only: one topic in a few lines, ending in an indented `*Test:*` line, with no rationale, history or issue numbers. Those go in the spec's closing *Changes* table and the decision record it links. A topic is written once: a Provider spec cites the Vocabulary's rule and adds its mechanism. Rule IDs are never renumbered or reused, and a withdrawn rule keeps a one-line stub. An amendment in `plan/` is a decision record, and its `design/` text is reviewed as the implementing diff. `plan/maintenance/tools/rules.py` must pass.
+> **Format of accepted specs.** A rule in `design/` is normative text only: one topic in a few lines, ending in an indented `*Test:*` line (or `*Producer obligation*`; added by plan 31), with no rationale, history or issue numbers. Those go in the spec's closing *Changes* table and the decision record it links. A topic is written once: a Provider spec cites the Vocabulary's rule and adds its mechanism. Rule IDs are never renumbered or reused, and a withdrawn rule keeps a one-line stub. An amendment in `plan/` is a decision record, and its `design/` text is reviewed as the implementing diff. `plan/maintenance/tools/rules.py` must pass.
 
 **Rejected.**
 - *Trim the inline markers but keep them.* The markers are where the drift starts.
@@ -316,7 +316,7 @@ Appendix B covers RM-16, RM-17, RM-18, RM-21, RM-25 and one sentence of RM-26; M
 
 **Checks.**
 - **Mechanical: `plan/maintenance/tools/rules.py`**, about 60 lines, comparing base and head. It requires that:
-  - every rule ID (`^- \*\*[A-Z]{2,3}-\d+[a-z]?\*\*`) survives or is listed as withdrawn;
+  - every rule ID (`^- \*\*[A-Z]{2,3}-\d+[a-z]?\*\*`) survives or is listed as withdrawn (plan 31 widens this to ids such as `TM-16a1` and to `### KA-n` headings, and tells a definition from a citation; `rules.py` is the reference);
   - every cited test name survives or is listed as renamed, and exists as a `fn` or `def`;
   - history markers and long lines only fall;
   - every relative link resolves.
