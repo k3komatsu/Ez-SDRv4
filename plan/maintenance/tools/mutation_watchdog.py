@@ -41,13 +41,16 @@ def processes():
 
 def process_violations():
     for pid, ppid, secs, cmd in processes():
-        if "mutate.py" in cmd and "remote_mutate.py" not in cmd and "mutation_watchdog" not in cmd:
-            yield f"local mutate.py (pid {pid}): {cmd[:200]}"
         argv = cmd.split()
         exe = argv[0].rsplit("/", 1)[-1] if argv else ""
+        # The script a Python process runs, not a word anywhere in the command line: an
+        # agent's prompt that mentions mutate.py is not a mutation run.
+        script = next((a.rsplit("/", 1)[-1] for a in argv[1:] if not a.startswith("-")), "") if exe.lower().startswith("python") else ""
+        if script == "mutate.py":
+            yield f"local mutate.py (pid {pid}): {cmd[:200]}"
         if exe in ("rustfmt", "cargo-fmt") or (exe == "cargo" and "fmt" in argv[1:3]):
             yield f"rustfmt / cargo fmt (pid {pid}): the tree is not rustfmt-formatted: {cmd[:200]}"
-        is_test = ("cargo test" in cmd or "/debug/deps/" in cmd) and "ssh " not in cmd
+        is_test = (exe == "cargo" and "test" in argv[1:3]) or "/debug/deps/" in (argv[0] if argv else "")
         if is_test and ppid == 1:
             yield f"orphaned test process (pid {pid}, {secs}s): {cmd[:200]}"
         elif is_test and secs > 1200:

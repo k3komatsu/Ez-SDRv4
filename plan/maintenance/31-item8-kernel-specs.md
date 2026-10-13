@@ -2,7 +2,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| 状態 | **承認済み（owner 2026-10-13「推奨で進めてください」：D2 は Opus のサブエージェント、D3 は入れる）。段階8a〜8f完了（06・01・02・03・04と小さな残り），判断1・4・6は反映済み。次は8g（05，§8 E3必須）→8h。全体は未完了。計画の独立レビュー反映は§7，8eの決定と検証は§8，8fの記録は§9。** |
+| 状態 | **承認済み（owner 2026-10-13「推奨で進めてください」：D2 は Opus のサブエージェント、D3 は入れる）。**完了（2026-10-14）**：段階8a〜8h（06・01・02・03・04・05と小さな残り），判断1・4・6と§8 E3は反映済み。計画の独立レビュー反映は§7，8eの決定と検証は§8，8fの記録は§9，8gと8hの記録は§10。** |
 | 作成日 | 2026-10-13 |
 | 調査時の基準 | `main`、HEAD `05b3c56`、作業ツリー clean |
 | 対象 | 凍結前の改修の項目8（[24-prefreeze-audit.md](24-prefreeze-audit.md) §8、F44）。これは spec 22 の DA-3 の手順4（owner 承認 2026-10-07）にあたる。前向き監査の判断1・4・6（[28-forward-audit.md](28-forward-audit.md)、owner 承認 2026-10-10）も入れる |
@@ -146,3 +146,12 @@ ownerは2026-10-13、独立レビューのE1/E2/E3に対するquestionへ「推�
 - **分担:** owner の指示（2026-10-13）で、8f の書き手は §4.3 の Opus サブエージェントではなく DeepSeek V4.1 Flash にした（AGENTS.md §9 の既定）。指示書は `~/.cache/ezsdr-fixes/2026-10-13-item8/04-brief.md`、修正ラウンドは `04-fix-brief.md`。機械チェック `check04.py` と差し戻しの `drive04.sh` を使った（handoff「実装役の機械チェックと見張り」）。
 - **レビュー:** Opus（`opus-04-review.md`）と Sol 6.1（`sol-04-findings.md`）がともに CHANGES_REQUIRED。主な採用：RS-49 の「channel の対応は `metadata` に載る」は暫定規則（until Phase 2 settles it）を言い切りにした誤りで、spec 07 RM-13（burst は全 channel、radio の burst の `metadata` は空）への参照に直し、`Action::TxBurst` の doc と schema 2本も同じにした。RS-43 の「Kernel は乱数生成器を持たない」を復元。RS-38 の図を `manifest.rs` に合わせた（`policy`、`admission` の全欄）。spec 02 §11 の延期を `LINK_BACKPRESSURE` だけにした。Test 行を独立した行にした。採らなかったもの：改名を戻す mutation 行（各 Provider のテストが実経路で `kind` を確かめる）、§9 の番号の付け替え、`plan/` の旧表記。Sol の再照合は PASS_WITH_NITS（台帳の引用1件、修正済み）。
 - **検証:** `check04.py` 0件（workspace test/clippy、UHD feature clippy、Python 44）、`rules.py --base 7396bb0` 0件、全 mutation gate 734/735（唯一の生き残りは従来の phase7/G09、runner exit 1。既知例外以外に生き残り・実行漏れなし）。改名で触った J184・J185・B20 は kill。
+
+## 10. 段階8gと8hの記録
+
+- **8g の分担と流れ:** 8f と同じく DeepSeek V4.1 Flash が実装した（指示書 `05-brief.md`、修正ラウンド `05-fix-brief.md`、機械チェック `check05.py`、差し戻し `drive05.sh`）。指示書には 8f で起きた7つの誤り（暫定規則の言い切り、規範の否定文を経緯扱い、量化を理由へ、Test 行の同一行、Changes 行の誤った根拠、他 spec の規則の写し、規則を固定しないテスト）を禁止として書き、セルフレビューにも当てさせた。セルフレビューは MA-2 と MA-29 の否定文の削除を見つけて戻した。
+- **§8 E3（MA-12）:** report の自己申告を根拠にした例外の文を削り、「The re-match skips exactly the keys SB-46 exempts.」とした。実装（`plan/prepare.rs` は Kernel 自身の preview だけで除外）、SB-46、テストは不変。Test 行に5本を挙げ、`sb_44_a_provider_may_not_exempt_a_key_by_declaring_a_coercion`（report だけが申告した key は再照合で拒否）と `sb_46_an_accepted_coercion_survives_prepare`（preview が記録した key は再照合しない）の中身を DeepSeek・Opus・Sol が確認した。
+- **レビュー:** Opus（`opus-05-review.md`）と Sol 6.1（`sol-05-findings.md`、CHANGES_REQUIRED）。主な採用：UC-5 の「Phase 2 の key」を「Vocabulary の key」に広げた文を削除、MA-30 の期限付きの拒否を一般化せず spec 06 KC-2a への参照に（Opus は当初一般化を受け入れたが Sol の指摘で改めた）、MA-39 は今の検査（budget の有無）と延期した検査（和の計算）を分けた、Test 行と §7 の表を実際の assert の範囲に合わせた（MA-2・MA-9・MA-10・MA-17・MA-20・MA-34・MA-37・MA-45）、§9 の解決済みの Vision の項目は番号を保った「Resolved」の跡に、§10 は延期中のものだけに。Sol の再照合（CHANGES_REQUIRED、P1 1件・P2 3件、いずれも Test 行の言い過ぎと台帳・§7 の追随漏れ）は orchestrator が直接直した（小さく局所的なので再々照合はしていない）。
+- **8h（締め）:** 監査24の項目8の行を完了にし、handoff の凍結前チェックリストの項目8に印を付けた。
+- **検証:** `check05.py` 0件（cargo test を含む）、`rules.py --base c347fbb` 0件、全 mutation gate 733/735：phase7/G09 は従来の生き残り、maintenance/J293 は無変異のテスト `ur_26_the_shutdown_s_last_burst_ack_waits_on_the_device_s_clock` が負荷下で1回失敗（BASELINE FAILED）し、単独の再実行で kill（8g はコード不変。負荷に弱いテストの観測として handoff に記録）。
+- **見張りの修正:** `mutation_watchdog.py` がコマンド行の文字列で判定していたため、「mutate.py を使わない」と書いたレビュー役の起動文を違反と誤検出した。Python が実行するスクリプト名と cargo test の本体だけを見るように直した（macOS の `Python` 実行ファイル名も扱う）。
