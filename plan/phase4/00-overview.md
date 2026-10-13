@@ -184,3 +184,23 @@ OV-1…OV-23b, PO-1…PO-12 and Phase 3's lessons bind Phase 4. The rules below 
 | P2-3 left with the first transmit-header consumer (Phase 10), although `handoff.md` listed it for Phase 4 | X | **Phase 10** | owner, 2026-09-26, as recommended |
 | Q1–Q8, spec 13 (exit criterion 1) | X | **accepted** | owner, 2026-09-26, as recommended ("すべて推奨で受理します") |
 | Step X: the two Vision issues | X | **done** | 2026-09-26: §§28, 29, 51 and a revision-history row ([vision-issues.md](vision-issues.md)) |
+
+## handoff からの記録（2026-10-14 に移動）
+
+handoff.md に 2026-10-14 まであった記録を，そのまま移した（AGENTS.md §9：記録は作業の置き場に1か所）．当時の文なので，今の規則は accepted specs と照合すること．
+
+Phase 4（2026-09-26，Review D/E の修正込み）：1.85.0 / stable とも 626 passed（`ezsdr-kernel` 452，`ezsdr-radio` 12，`ezsdr-sink-capture` 24，`ezsdr-mock-radio` 66，`ezsdr-acceptance` 41，ほかは Phase 3 と同じ）．Kernel の public item は増えていない．
+
+### Phase 4 — Gate X受理・Step X完了
+
+2026-09-26，owner の委任（「計画を立てて，実装したほうが速いなら実装まで」）で，計画と実装を 1 セッションで行った．Gate P は置かず，同日の Gate X で owner がすべて推奨どおり受理し（「すべて推奨で受理します」），Step X（Vision issue 2 件）も済んだ．正本は [plan/phase4/00-overview.md](00-overview.md)（範囲・決定 Q1–Q8・§11 の owner 判断待ち），spec 13 は [plan/phase4/13-amendments.md](13-amendments.md)，記録は [implementation-notes.md](implementation-notes.md)．
+
+| 項目 | 内容 |
+|---|---|
+| 範囲 | Phase 1–3 でほぼ済んでいたので，証拠のある穴 4 つだけ：KD-1（Module error で round が途中で切れる，Phase 3 P2-1），VC-1/VC-2（hot path を使う Module が一つもなかった．`radio` 1.2.0 RM-24 が `RX_OVERFLOW` の 17 byte 形式と decoder を持ち，MockRadio 1.2.0 MR-37 が hot path で出す．D51 どおり Kernel は decode しない），VC-3（SigMF：capture Sink 1.1.0 HD-15 が全 capture を `.sigmf-data` + `.sigmf-meta` にする，SC-32），Session `Stop(sink/rec)` の Kernel 経由 test |
+| 範囲外 | 新しい fault kind（それぞれ機構を持つ Phase へ），CalibrationArtifact，artifact store（Phase 6），drift，MA-8 の Kernel 側強制（Phase 7），spike の K2/K5/K6/K8/K11（Phase 7），P2-3（Phase 10） |
+| Kernel | `step_until_quiescent` と coordinator の `round` だけ．public item の増減なし（116 NEW / 292），Kernel schema 変更なし |
+| レビュー | Review D（Claude Opus）と Review E（OpenCode の SpaceBunny，owner の依頼で Orca orchestration から並列に起動）の 2 本．どちらも CHANGES_REQUIRED．P0 1・P1 5（重複あり）を含む全指摘をテスト付きで修正し，owner 判断が要るものは §11 に残した．SpaceBunny の報告は `tmp/review-spacebunny/REPORT.md`（git 管理外） |
+| 検証 | 1.85.0 / stable とも workspace 626 passed，Clippy clean，mutation は Appendix A の全件 killed，link 全解決 |
+| Gate X の判断（§11） | **K3**（TX clock が arm 起点のため，`start_lead_ns` が sample 周期の倍数でないと burst が 1 sample 遅れる．Simulation でも再現し，ceiling test `k3_an_off_grid_start_lead_moves_a_burst_to_the_next_transmit_sample` で固定）は **Phase 7** で TX model と一緒に直す．drain 順（ring が control より先）と drop した hot body の mark は **ceiling**．P2-3 は **Phase 10**．Q1–Q8 と spec 13 は受理 |
+| Step X | Vision issue 2 件を適用（§28/§51 の Normative 行，§29 の hot path の bytes の持ち主），索引に改訂履歴の行．[vision-issues.md](vision-issues.md) |

@@ -201,3 +201,34 @@ OV-1…OV-23b, PO-1…PO-12, GV-1…GV-6, GW-1…GW-5 and GX-1…GX-6 bind Phase
 | Review I (re-review): Review H's P0-2 was not closed (a capture routed by another path took a number the client did not count); it and every P1 and P2 fixed with tests and mutations (`implementation-notes.md`, "Review I"); no further review, the fixes being small, each tested and mutation-guarded | — | **closed** | 2026-09-26, the owner's rule for small, low-risk fixes |
 | S1–S11, A1–A8, specs 16 and 17 (exit criterion 1) | X | **accepted** | owner, 2026-09-27, as recommended ("すべて推奨で受理します") |
 | Step X: spec 16 moved to `design/16-easy-api.md`; three Vision issues applied (the fourth not needed) | X | **done** | 2026-09-27: §§3, 15, 62 and a revision-history row ([vision-issues.md](vision-issues.md)) |
+
+## handoff からの記録（2026-10-14 に移動）
+
+handoff.md に 2026-10-14 まであった記録を，そのまま移した（AGENTS.md §9：記録は作業の置き場に1か所）．当時の文なので，今の規則は accepted specs と照合すること．
+
+Phase 6（2026-09-27，Review H/I の修正込み）：1.85.0 / stable とも 684 passed，Python 21 passed（3.9.6 / 3.13.15）．Kernel の public item は増えていない（`RunHandle` に 3 メソッド，116 NEW / 292）．Kernel schema の変更なし．
+
+### Phase 6 — Gate X受理・Step X完了
+
+2026-09-26〜27，owner の委任（「それではPhase4/5と同じ用にPhase6も設計と実装をしてください」）で，Phase 5 と同じく試作から計画し，実装し，Opus のレビューを回した．正本は [plan/phase6/00-overview.md](00-overview.md)（範囲・決定 S1–S11・§11 の決定ログ），spec 16 は Step X で [design/16-easy-api.md](../../design/16-easy-api.md) へ移した（server・protocol・Python，EA-1…EA-19，決定 A1–A8），spec 17 は [plan/phase6/17-amendments.md](17-amendments.md)（KF-1…KF-4，VD-1），記録は [implementation-notes.md](implementation-notes.md)．
+
+| 項目 | 内容 |
+|---|---|
+| 形 | **Python は別プロセス**（S1）：Rust の `ezsdr-server` が Module を組み込み，1 プロセス 1 Session を stdio 上の `ezsdr.protocol` 1（JSON のヘッダ行＋生のボディ）で動かす．プロトコルは Kernel の文書と `RunHandle` の呼び出しをそのまま運ぶ．Python パッケージ `ezsdr` は名前付け（`rx.frequency` → `radio.rx.frequency_hz`）と `capture` の組み立てだけで，Run の意味は持たない |
+| Kernel | KF-1 `RunHandle::events`（配信済みイベントを Run 中に読む），KF-2 `wait_for`（Run の時間でイベントを待つ，Vision §15），KF-3 `run_child`（child Run を同期で実行，親の Lease・host clock・check を引き継ぐ，`ezsdr.children`，RS-25a に「runtime check が読む環境セクションは親と同じ」を追加），KF-4（SB-14 が存在しない Manifest フィールドを参照していた → forward に）．public item の増減なし |
+| Vocabulary / Module | `sink` 1.1.0 の `sink.CAPTURE_WRITTEN`，capture Sink 1.2.0 が capture を書き終えるたびに出す．要求に番号を振り，`REQUEST_REJECTED` にも付ける（Review H/I） |
+| Python | `connect()`（既定はサーバ側の x310-like ループバック），`tx.repeat`，`rx.capture`，`rx.request` / `rx.result`（先に要求を出すと連続して取れる，owner の依頼），`sleep`・`wait_until`・`wait_for`，`run(spec)`（child Run）．Vision §3・§54・§57 の例がそのまま動く |
+| carriers | Python：§57，§58 #1/#3/#13/#16，§3 の 2 つ目の例，§54 ほか 21 件．Rust：Session の child Run として Phase 5 の Reactor が動く（`v58_09_a_reactor_runs_in_a_child_run_of_a_session`） |
+| レビュー | Review H（Opus）CHANGES_REQUIRED：P0 5・P1 6・P2 12 → 全件修正．Review I（再レビュー）CHANGES_REQUIRED：P0 1（H の P0-2 が別経路で残っていた）・P1 3・P2 7 → 全件修正．修正は小規模で，すべてテストと mutation 付きなので owner の規則どおり再レビューせず終了．記録は [reviews/](reviews) |
+| 検証 | 1.85.0 / stable とも 684 passed，Python 21（3.9 / 3.13），Clippy clean，mutation 70/70 killed，link 全解決 |
+| 注意 | Phase 6 の commit のうち `79c7655` は，会話から派生した別エージェントが作業途中のツリーをそのまま commit したもの（中身は Review H の修正の途中）．失われたものはない |
+
+**Gate X の判断**（2026-09-27，owner「すべて推奨で受理します」，[00-overview.md](00-overview.md) §11）：
+
+1. **Session replay と artifact store** は Phase 7 のあと，frontend で一緒に作る（Kernel の型は変わらない）．
+2. **KF-4**：Spec builder のソースハッシュは，v4.0 凍結前に Manifest の `spec` へ optional の `source` として足す（最初の Spec builder と一緒に）．Vision §9 はそのまま（Vision issue 4 は不要）．
+3. S1–S11，A1–A8，spec 16・17 を受理．
+
+**Step X**：spec 16 を [design/16-easy-api.md](../../design/16-easy-api.md) へ移し，参照を書き換えた．Vision issue 3 件（§3 の Normative 行に spec 16 と KC-37a，§15 に KC-29・KC-29b，§62 のプロセス境界の表にクライアント）を適用し，索引に改訂履歴の行を加えた（[vision-issues.md](vision-issues.md)）．
+
+**Phase 7 へ持ち越すもの**（Phase 6）：実機（wall-paced）での `sleep` と `capture` の間の往復遅延と「今から d 秒後」を返す補助（`00-overview.md` §3），`run_child` 中に親のデバイスを止めるか（S5 の ceiling），remote listener と server 所有のプロファイル・認証（S9），`body_bytes` の上限．

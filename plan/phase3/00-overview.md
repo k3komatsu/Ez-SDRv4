@@ -207,3 +207,53 @@ Filled in at Gate P and after each review. One row per decision the owner confir
 | Review C P2-1 … P2-9 | X | **accepted** | owner, 2026-09-26, as recommended in [reviews/review-c.md](reviews/review-c.md) §3: ceilings for P2-1, P2-3, P2-5; P2-2 fixed in the Kernel (KB-1's KC-9 amendment, `kb_01_b_…`); P2-4, P2-7 amended (spec 12 VB-10, `mr_25_a_stream_stop_…`); P2-8 package descriptions; P2-6 and P2-9 no action. 604 tests |
 | Specs 11 and 12, Z1–Z11, C1–C11, M11–M15 (exit criterion 1) | X | **accepted** | owner, 2026-09-26, as recommended; Review C found them supported, M13 after P2-7's correction |
 | Step X: spec 11 to `design/`, the eight Vision issues | X | **done** | 2026-09-26: [`design/11-simulation-channel.md`](../../design/11-simulation-channel.md); Vision §§8, 13, 15, 16, 23, 25, 26, 57 and a revision-history row ([vision-issues.md](vision-issues.md)) |
+
+## handoff からの記録（2026-10-14 に移動）
+
+handoff.md に 2026-10-14 まであった記録を，そのまま移した（AGENTS.md §9：記録は作業の置き場に1か所）．当時の文なので，今の規則は accepted specs と照合すること．
+
+Phase 3 の workspace tests（2026-09-26，Review C と Gate X の修正込みで Rust 1.85.0 / stable の両方で 604 passed）：
+
+| crate | tests |
+|---|---:|
+| `ezsdr-kernel` | 447 |
+| `ezsdr-radio` | 10 |
+| `ezsdr-sim` | 17 |
+| `ezsdr-sim-engine` | 7 |
+| `ezsdr-hostmem` | 2 |
+| `ezsdr-link-host` | 2 |
+| `ezsdr-sink` | 2 |
+| `ezsdr-sink-capture` | 15 |
+| `ezsdr-mock-radio` | 65 |
+| `ezsdr-acceptance` | 37 |
+| **合計** | **604** |
+
+Phase 3 の時点：`kernel_surface` は `116 NEW / 292 public items`（KB-1 の `module_api::InputStore` の 1 つだけ増えた）．mutation は Appendix C 83/83 + Review C の fix-check 15/15 + Gate X の fix-check 4/4 killed．
+
+### Phase 3 — Gate X受理・Step X完了
+
+Vision §67 の Phase 3（SimulationChannel + deterministic Runs）．計画は [plan/phase3/](.) にあり，2026-09-26 に owner が Gate P を推奨どおり受理した（Z1–Z11，C1–C11，KB/VB，M11–M15，パッチ，計画レビューの判定；[00-overview.md](00-overview.md) §11）．Phase 2 の教訓から，実装担当はコードを書き写さず，**検証済みのパッチ 5 枚を順に当てて検査するだけ**にした（[00-overview.md](00-overview.md) Z4）．
+
+**Steps 0–7，Review C，Gate X（2026-09-26，推奨どおり受理），Step X（spec 11 を [design/11-simulation-channel.md](../../design/11-simulation-channel.md) へ移動，Vision issue 8件を適用）まで完了．Review C の P2-1〜P2-9 は spec 12 VB-10 と KB-1 の KC-9 改正として反映済み．**
+
+| 文書 | 中身 |
+|---|---|
+| [00-overview.md](00-overview.md) | 範囲，Phase 2 に見つかった欠陥（KB-1，KB-2，VB-4–VB-6，VB-8），横断決定 Z1–Z11，運用規則 GV-1–GV-6，Vision §58 との対応，gate，exit criteria，決定ログ（§11，Gate P で記入） |
+| [design/11-simulation-channel.md](../../design/11-simulation-channel.md) | spec 11（新規，Step X で `design/` へ移動）：`sim.channel`，medium，field，finality（CH-9），決定性．CH-1–CH-11，決定 C1–C11 |
+| [12-amendments.md](12-amendments.md) | spec 12：受理済み spec 04–09 への修正 KB-1，KB-2，**VB-1–VB-10**，新規則 RM-23，MR-31–MR-36，決定 M11–M15，Vision issue 4件 |
+| [20-implementation-plan.md](20-implementation-plan.md) | 手順 0–7 と X．付録 A（パッチごとの変更ファイル），B（全規則→テストの草稿），C（mutation 83 件） |
+| [patches/](patches) | 01-kernel，02-vocabularies，03-mock-radio，04-acceptance，05-design-text．**Gate P の記録として不変**（Review C の修正はここではなく repository に適用した） |
+| [implementation-notes.md](implementation-notes.md) | 実装担当の確認記録（Step 0–6 ごと）＋ `## Fixes after Review C`（11 条項の未固定を塞いだ詳細と P2-1 の実測） |
+| [exit-review/](exit-review) | 54 規則の OV-3 disposition（[README.md](exit-review/README.md)，[11.md](exit-review/11.md)，[12.md](exit-review/12.md)）．Appendix B から 3 行をsupersede した．Step 7 後に 12.md のラベル誤り 4 行を直し，欠けていた 11 規則を追加 |
+| [vision-issues.md](vision-issues.md) | Vision issue 8件（spec 11 §7 の 4 件，spec 12 §3 の 4 件）．Step X で適用済み（Vision §§8, 13, 15, 16, 23, 25, 26, 57） |
+| [reviews/planning-reviews.md](reviews/planning-reviews.md) | Gate P 前の Opus 敵対的レビューと各指摘の判定（pass 1：P0 2・P1 6・P2 14，pass 2：P0 0・P1 3・P2 8，pass 3（範囲限定）：P0 1・P1 1・P2 6，pass 4（範囲限定）：P0 2・P1 2・P2 7，pass 5（範囲限定）：P0 0・P1 1・P2 4），P2 1件を理由付きで不採用とし他は全件反映済み |
+| [reviews/review-c.md](reviews/review-c.md) | Review C の記録（4 pass の判定，閉じた指摘，P2-1〜P2-9 の原文・検証・推奨と Gate X での受理）．原本は gitignore された `tmp/luna-primary-engineer/reviews/20260926-review-c-phase3-state/` |
+
+**Review C（Opus，4 pass）**：`PASS_WITH_RISK`（初回）→ 11 件の test 修正後に `CHANGES_REQUIRED`（新規 **P0 = B1**）→ B1 修正後に `PASS_WITH_RISK` → 文本修正と P2-1 実測後に `PASS_WITH_RISK`（blockers なし）．B1 は「1 Run に 2 Mock があると `Manifest::write_section` の `insert` で片方の `ezsdr.radio.mock.*` section を黙って上書きする」．**MR-27 を per-instance 命名に改正**（owner 承認），Kernel は無変更．_closed_: B1，P1 2 件，未固定の規則条項 11 件，test gap 6 件，P2 nit 7 件．
+
+**Gate X の判断（2026-09-26）**（`00-overview.md` §11）：
+
+1. **P2-1〜P2-9：推奨どおり受理・反映済み**．P2-1・P2-3・P2-5 は ceiling（CH-9 / MR-30 / Z10，MR-18，MR-32 の exit 行），P2-2 は Kernel 修正（KC-9 が検証済み entry だけを store に残す，`kb_01_b_the_store_keeps_no_unverified_entry`），P2-4・P2-7 は文面修正（RM-16 / MR-25 の pending command，M13；`mr_25_a_stream_stop_keeps_the_pending_commands`），P2-8 は crate description，P2-6・P2-9 は対応なし．詳細は [review-c.md](reviews/review-c.md) §3 と spec 12 VB-10
+2. **spec 11・12 と Z1–Z11 / C1–C11 / M11–M15：推奨どおり受理**（exit criteria 1）．Review C の評価は Z・C・M11/12/14/15 とも「支持」，M13 は P2-7 の修正で解消
+
+**Phase 4 へ持ち越すもの**：Module error で短絡した round の意味（P2-1 の ceiling，`step_until_quiescent`），TX block header の最初の消費者が直すべき cold change 順序（P2-3 の ceiling）．

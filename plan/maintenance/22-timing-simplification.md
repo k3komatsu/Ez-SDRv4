@@ -628,3 +628,49 @@ pub fn plan(t0: i64, channels: u16, period: i64, lead: i64, items: &[Item]) -> V
 - **E16.** `provider/test_support.rs` builds a `Core` on a `ManualTimeAuthority`. FakeDevice reads `Instant::now()` (`device.rs:419, 506, 1140`).
 - **E17.** Issue #49 links `blob/main/plan/maintenance/21-amendments.md`. The phase tools read `plan/phase*/tools/mutations.json` by path. Code comments and mutation rows cite review names (Review M, VB-6) that resolve in `plan/`.
 - **E18.** `diff` shows UC-1…UC-6 identical in 05 §5 and 06 §10. The headers of 08 and 11 both name `sim` 1.1.0 and the crate `ezsdr-sim`, and 08's own scope defers the `sim.channel` content to 11.
+
+## handoff からの記録（2026-10-14 に移動）
+
+handoff.md に 2026-10-14 まであった記録を，そのまま移した（AGENTS.md §9：記録は作業の置き場に1か所）．当時の文なので，今の規則は accepted specs と照合すること．
+
+**Specs 21 and 22, 2026-10-07〜08 (#46; the timing simplification) — step 1・2・3 完了**
+
+- **Spec 21**（[`plan/maintenance/21-amendments.md`](21-amendments.md)，#46）．Opus の作成と4回の反論レビュー（最終 PASS）のあと owner が受理（`fbbfa62`）．
+  - **VG-1 は実装済み**：受信の終わりは早める方向にしか動かない．commit は `029f48a`，`f2b9c7d`（uhd-rx の abort は保持中の stream にだけ cut と行を書く），`7b6f376`（落ちた stream への abort のテスト）．`radio` 1.5.0，`ezsdr.radio.mock` 1.5.0，`ezsdr.radio.uhd` 0.3.0．mutation G01–G04，G58–G61 はすべて kill．
+  - **VG-2 と KI-1 は未実装のまま spec 22 に置き換えられた**．そのため #46 はまだ open（spec 22 の step 2 で閉じる）．
+- **作業中に見つかった問題を issue にした**：#49–#58（spec 21 の follow-up 9 件と，VG-1 のレビューの NB-5）と，spec 22 の follow-up 2 件（#59，#60）．
+- **方針転換（owner，2026-10-07）**：タイミングの問題の多くは，MockRadio と UHD Module が同じ文章の規則を別々に実装していることから来ている．そこで，**長期的に有益なら短期的に大変でもよい**として，タイミングの model を破壊的に簡潔化する．同時に，ドキュメント自体の量と複雑さも減らす．
+- **Spec 22**（[`plan/maintenance/22-timing-simplification.md`](22-timing-simplification.md)）．Opus の作成と3回の反論レビュー（最終 PASS）のあと，owner が13項目すべてを推奨どおり受理（`ca11344`，issue のリンクは `4ec1df5`）．**まだ何も実装していない．**
+  - Part A（timing）：
+    - VH-1：受信は on/off の2状態．`Stop` で区間と SampleClock を閉じる．
+    - VH-2：受け取った時点で計画し，起きた時点で記録する．拒否されたら halt．
+    - VH-3：stop tail を廃止する．
+    - VH-4：開始の規則を1つ，lead を1つにする（`restart_lead_ns` は削除）．
+    - VH-5：fault の行は発生時点で確定する（MR-20a は廃止）．
+    - VH-6：`start_rx` は spec 21 から引き継ぐ．`Stop` は予約済みの更新を取り消さない．
+    - VH-7：共通の純粋関数 `ezsdr_radio::timeline` を作る．
+    - VH-8：決定的な differential harness を作る．
+    - KJ-1：UC-3 と TM-13c の文言を直す．
+  - Part B（文書）：
+    - DA-1：`design/` には短い規範だけを書き，経緯は末尾の Changes 表へ移す．修正案は決定記録にする．
+    - DA-2：時刻の規則の試行版（5 150 語 → 2 427 語）．
+    - DA-3：spec ごとに書き直し，`rules.py` と文単位のレビューで抜けを確かめる．
+    - DA-4：`plan/` はそのまま記録として残す．
+    - DA-5：UC は spec 05 だけに置く．11 は 08 に統合する．監査と再レビューは `design/archive/` へ移す．
+- **Step 1 完了（`8699baf`，Opus レビュー3回で PASS）**：`ezsdr_radio::timeline::plan`（cut と delivered はその区間のサンプル番号，ほかは root tick）と VH-8 の第1・2層（各1 000系列）．今の挙動と一致する class/field だけ assert し，残りは表示する（`DIVERGENT`，`FRACTIONAL_TX`．step 2 で空にする）．mutation J01–J06b（spec の H01–H06b．H は spec 20 が使用済み．step 2 の H07–H11 は J07–J11）．レビューで出た owner 判断：先に届いた `cold` 変更より前には効かせない（両方向，spec 22 VH-2 に追記）．レビューで見つかった issue：#61（UHD：0 チャネルへの変更の予約で，その前の timed 更新が適用されないまま issued と記録される），#62（MockRadio が UHD の装置キューの順番どおりの release を模擬しない）．
+- **Step 2 完了（`87bb265`，2026-10-08，owner 不在中に自律で実施．Opus レビュー2回で PASS）**：MockRadio と UHD Module が `ezsdr_radio::timeline` で計画する．`radio` 2.0.0（`stop_tail_ns`，`restart_lead_ns` 削除，`start_rx` 追加），mock 2.0.0，uhd 0.4.0，Python `ezsdr` 0.4.0（`Rx.start()`）．Appendix B と VH-2 の追加規則を `design/` に反映し，古い tail・restart lead・e₁/e₂ の記述を規範文から削除．harness は2層とも全 gate（#62 の `timed` 25系列だけ除外）．#46–#50，#52，#53，#57，#58，#61 を close．mutation：57行を書き直し，10行を引退，J07–J20 を追加．全6リストで G09，U15（HEAD でも生き残る）と R16（HEAD でもタイミング次第）以外すべて kill．
+  - 1回目のレビューで見つかり直したもの：拒否後に uhd-rx が古い計画で開始して stream が黙って止まる，後の clock の burst を手前の切り替えで捨てる，MockRadio が clock の origin より前に送信する（Mock が実機より緩い），VH-2 の追加規則が `design/` にない．
+  - **owner の判断待ち（2件）**：(1) VH-4 で送信の有効化も start lead を待つので，Session の最初の `tx.repeat` が約50 ms 遅れ，両 Provider で `TIME_ERROR send_asap` が出る（`examples/minimal.py` の平均電力が約0.25→0.125）．レビュー担当の推奨は RS-19 の asap の解決先を「now + lead と対象 clock の origin の遅い方」にすること（1か所で直り，偽の late event が消える）．(2) UR-17 の受信要求長の上限は削除と決定（設計メモ 23 と一緒に実施）．
+  - **owner 決定（2026-10-08）**：(1) RS-19 の asap 解決を対象の時間軸に合わせる（`max(今 + device lead, 送信先 clock の origin)`．origin より前の tick を作らない）．step 3 の後に実装．(2) VH-4 の規則は1つのまま，`start_lead_ns` を TimingEnvelope の方向別の値にし，送信側の値は Phase 8 で測る（それまで 50 ms）．Phase 8 では受信の start lead の実測と，cold change・再開で受信が途切れる時間（既定で約55 ms，65 536 ブロック×390.6 kS/s で約221 ms）も測り，lead を決め直す．受信1回分の項が問題になれば，受信要求の時間上限（例：5 ms 分）を検討する．(3) PPS に合わせた時刻の補助（`Session.next_pps(k)`）を root の epoch から作り，PPS で設定されていない epoch では refuse する．epoch は Kernel の `EpochRef` に `Pps { set_by }`（tick 0 が set_by の PPS エッジ）を足して表す（owner 承認，2026-10-08．`clock_domain.v1.json` を v1 のまま再生成，UR-6 の判定も更新，既存の `Arbitrary` は読み替えない）．(1) と一緒に step 3 の後に実装．`Tx.repeat(x, at=None)` は `4c16cdc` で追加済み（ezsdr 0.5.0）．
+  - **owner 決定（2026-10-08，「簡素化しましょう」）**：設計メモ 23（[`plan/maintenance/23-one-line-per-stream.md`](23-one-line-per-stream.md)）の A を受理：UHD Module は方向ごとに1つの `Line` をロックで共有し，出来事を知ったスレッドが自分で予約する（Plan/Cut メッセージ，拒否リスト，待機，ポーリングを削除）．#63 の刈り込みも一緒に．受信 clock の登録は両 Provider とも最初に publish したブロックで行う．UR-17 の受信要求長の上限（`recv_len`）も削除（owner，2026-10-08）．step 3 の commit と，asap・`EpochRef::Pps`・`next_pps()` の実装の後に実施．
+  - **step 3 の後にすること（owner 了承，2026-10-08）**：UHD 側の「装置の拒否がスレッドをまたいで戻る往復」で bug が4件（step 2 の B1，step 3 の修正2・3，step 3 の B1）出た．three strikes に当たるので，局所修正を止めて設計メモを書く（例：受信のレート変更の確定と再計画を uhd-rx 自身に持たせて往復をなくす）．比較して owner に推奨を出す．
+  - 追加 issue：#63（timeline の items と uhd-control の plan が Run の間ずっと増え，予約ごとに全体を計画し直す）．
+- **Step 3 完了（`1a85a11`，Opus レビュー2回で PASS）**：VH-8 の第3層（uhd-rx を手動時刻の rig で1ターンずつ動かし，scripted X3x0 を相手に1 000系列．計画遅延0〜2 ms，ブロック2 000/65 536）．uhd-rx の bug 5件を発見・修正（空の計画で切らない，拒否待ちが古い計画で終わる，拒否された区間を開始済みと数える，orderly stop が計画到着まで切らない，loss が古い cut で終わる）．FakeDevice テスト138→125．mutation J23–J31 追加，J22 引退．全リスト：maintenance 82/82，phase3–6 全 kill，phase7 168/170（既知の G09，U15）．全リストの最終実行は sim02/sim03 の docker で（AGENTS.md §7）．
+- **asap と PPS 完了（`0c3015a`，Opus レビュー2回で PASS）**：RS-19 の asap は対象 stream の最新の未終了 SampleClock の origin より前にならない（最初の `tx.repeat` の偽の TIME_ERROR が消えた）．Kernel の `EpochRef::Pps`，server の `root_epoch`（0.5.0），`Session.next_pps(k)`（ezsdr 0.8.0），U12 を Phase 8b に．mutation 全リスト（sim02/sim03）：maintenance 95/95，phase3–6 全 kill，phase7 168/170（既知）．**owner の判断待ち**：`time_source` external で `clock_source` internal のとき，tick 0 は PPS エッジだがその後の秒は内部発振器でずれる．推奨は `clock_source` も external/gpsdo のときだけ `Pps` で登録すること．
+- **設計メモ 23 完了（`7f68017`，Opus レビュー2回で PASS）**：UHD Module は方向ごとに1つの `Line` をロックで共有し，出来事を知ったスレッドが予約する（計画メッセージ・拒否リスト・待機・ポーリング削除）．受信 clock は両 Provider とも最初の publish ブロックで登録．#63 の刈り込み（刈り込み前後の計画一致の性質テスト）．RM-25 で `Provider::stop` は到着順，loss は fault と同じ扱い．**UR-17 の上限は残した**（外すと第3層 seed 718 で時刻指定の開始が遅れる：cut 直前の fault で受信呼び出しが ready term を超える）．非テストコードの行数はほぼ不変．#64 を起票．全リスト pass（既知の G09，U15 を除く）．
+- **owner の判断待ち（3件）**：(1) ~~UR-17 の上限~~ → 残すと決定（owner，2026-10-09．Phase 8 で受信呼び出しの実測を見て見直す），(2) ~~#64~~ → 決定（owner，2026-10-09）：拒否された値は記録上の設定として残す（KC-27，VH-2 と一致）が，止まっている方向は timed 更新の解放ではチャネル0とみなし，値を記録して有効化時に適用（UR-24 の no-channel 規則）．未実装，(3) `clock_source` internal のとき `Pps` で登録するか（推奨：external/gpsdo のときだけ）．
+- **次にすること**：owner の判断を受けて (1)–(3)．そのあと Phase 8 の計画，または失敗機構の先回り設計メモ（`invariant-outside-type`，`admission-per-origin`）．#51 は報告規則の設計メモまで保留．
+- **既知の問題**：Python の `test_v54_sleep_is_run_time` が，この host では毎回 10 秒の上限をわずかに超えて落ちる（10.1〜12.9 秒）．HEAD から build した server でも同じなので，変更が原因ではない（VG-1 のレビューで VERIFIED）．FakeDevice の負荷に弱いテスト（`rehearsal_b6_…`，`uhd_61_03_…`，`ur_21_…`，`ur_2x_…`）も今までどおり．#60 で対処する予定．
+- **ログ**：`~/.cache/ezsdr-fixes/2026-10-07-spec21/`（`vg1-*`，`vg1b-*`，`vg1c-*`）．
+
+- 決定済み（owner，2026-10-07）：**長期的に有益なら，短期的に大変でもかまわない．** タイミングの model を破壊的に簡潔化し，ドキュメントの量と複雑さも減らす（spec 22）．計画を手間のために縮めない．段階に分けるのはリスクを抑えるためだけにする．

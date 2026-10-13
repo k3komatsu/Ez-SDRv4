@@ -1191,3 +1191,48 @@ Raised, not applied — Phase 2 obligations the Vision states and no Phase 1 rul
 |---|---|---|---|
 | 2026-10-09 | OV-12, OV-16, OV-17 | immutability covers a schema's shape, without `description` and `title`; a later major refuses an older document; a document is hashed as parsed (RS-45) | [audit item 5](../maintenance/24-prefreeze-audit.md), owner decision 2026-10-09 |
 | 2026-10-10 | X7, D91 | `NodeId`'s field is private, so X7 holds by construction; the checks of ids handed in as Rust values are deleted and D91's rejected alternative is adopted | [spec 26](../maintenance/26-invariants-in-types.md) §2, audit item 1 |
+
+## handoff からの記録（2026-10-14 に移動）
+
+handoff.md に 2026-10-14 まであった記録を，そのまま移した（AGENTS.md §9：記録は作業の置き場に1か所）．当時の文なので，今の規則は accepted specs と照合すること．
+
+### Phase 1 — specs 受理・Kernel 実装済み
+
+Vision §67 の Phase 1．**受理済み**（2026-09-23，Step 5 完了）．5つの spec は `design/0N-*.md` に移り，横断決定・OV 規則・決定ログは [plan/phase1/00-overview.md](00-overview.md) に残る．
+
+| spec | rule ID | 状態 |
+|---|---|---|
+| [00-overview.md](00-overview.md) | OV-1..23b（副番含め27） | criterion 2 の per-rule 表を含め更新済み |
+| [01-time-model.md](../../design/01-time-model.md) | TM-1..21（副番含め31） | 受理済み，実装済み |
+| [02-stream-contract.md](../../design/02-stream-contract.md) | SC-1..32（副番含め47） | 受理済み，実装済み |
+| [03-spec-and-binding.md](../../design/03-spec-and-binding.md) | SB-1..49（副番含め60） | 受理済み，実装済み．SB-22 を SB-22a〜h と表 SB-T0〜T4 に分割（D95・D96） |
+| [04-run-and-session.md](../../design/04-run-and-session.md) | RS-1..52（副番含め60） | 受理済み，実装済み．RS-25a を追加（D103） |
+| [05-module-api.md](../../design/05-module-api.md) | MA-1..46（副番含め52） | 受理済み，実装済み．MA-16a を追加（D100） |
+
+6文書で277ルール，欠番と未解決参照なし．撤回7件（SB-25a, SB-28, SB-32, RS-32a, RS-37, MA-4, MA-43 — OV-1 に従い番号は保持）．
+
+受理までの経緯（gate ごとの敵対的レビュー，crate へのレビュー25巡，D51〜D109 の適用）と，Step 4 前後に決めたことの理由は [plan/phase1/history.md](history.md) に移した．決定そのものの正本は [00-overview.md](00-overview.md) §11．
+
+exit criteria（§13）の達成状況（2026-09-23 時点）：
+
+| # | 条件 | 状態 |
+|---|---|---|
+| 1 | 6文書の受理と §11 の全 verdict | **達成**．verdict は D1–D109．6文書を受理し，spec を `design/` へ移した（D109） |
+| 2 | 全 rule に ID と OV-3 disposition | **277ルールに277行を用意し，GAP と未割当を解消**．内訳は default 207・process 22・producer 13・forward 11・withdrawn 7・consumer 1・分割 16（default+forward 12，default+producer 3，forward+producer 1）．`UNCERTAIN:` は D108 でゼロ **（達成）** |
+| 3 | MSRV と stable で `cargo test` 通過，`#[ignore]` なし，pipeline が端から端まで動く | **達成**（Step 5 受理時点の記録：2026-09-23，1.85.0 / stable 1.98.1 ともに345 passed，`#[ignore]` なし）．end-to-end pipeline ケースも通過 |
+| 4 | `schemas/`，`schema_freeze`，`SCHEMA_CHANGELOG.md` | **達成**．D51–D68・D95–D103・D104 の schema 変更を反映済み（`pattern` は無し） |
+| 5 | `kernel_surface` 通過，`NEW:` 件数の記録 | **達成**．`109 NEW / 281 public items`（2026-09-23，`plan::check_sink_links` を D99 で削除） |
+| 6 | 直接依存が §8 の4 crate ちょうど | **達成** |
+| 7 | §12 の移動後に `design/` と `plan/phase1/` の全リンクが解決 | **達成**（238リンク，切れ0．`v3/` パス21件も全て存在） |
+
+
+### Phase 1 から持ち越す教訓
+
+レビューで繰り返し出た欠陥型．詳細は [history.md](history.md) §1．
+
+- **正しい関数を誰も呼んでいない**．pipeline の段は関数ではなく段として繋ぎ，呼び忘れを構造的に不可能にする．
+- **ルールを初めて生かすと，意図しないものを拒否する**．判定を書く前に，そのデータが判定に必要な情報を持っているかを確かめる（`collect_prepare` で4回）．
+- **判定を適用する作業そのものが欠陥を入れる**．修正を書いたら，その修正が参照する条文をもう一度読む．
+- **置換せず追加してしまう**．判定を適用したら，置換対象が消えたことを grep で確かめる．
+- **新しい拒否は1件ずつ無効化して，テストが落ちることを確かめる**（mutation）．落ちないものはテストを足すか，死にコードとして消す．
+- **gate は列挙では閉じない**．`kernel_surface` は構文の新しい形で何度も抜けられた．仕組み（`use … as` や一覧外の `macro_rules!`）を禁止し，残りは process obligation として名指す（D100）．

@@ -435,3 +435,47 @@ Gate X owner acceptance (2026-09-25):
 | Decision | Gate | Verdict | Note |
 |---|---|---|---|
 | Phase 2 exit artifacts, Phase 1 markers, and the Phase 2 Vision issues | X | **accepted with named risks** | Owner accepted Opus 5.5's `PASS_WITH_RISK` recommendation (no blockers). Named risks: MA-8 timeout enforcement is untested; there is no Kernel-routed Session test for `Stop(sink/rec)`; the review was static and relied on reported verification. Step X is complete; remaining test ceilings are in `implementation-notes.md` and the exit-review tables. |
+
+## handoff からの記録（2026-10-14 に移動）
+
+handoff.md に 2026-10-14 まであった記録を，そのまま移した（AGENTS.md §9：記録は作業の置き場に1か所）．当時の文なので，今の規則は accepted specs と照合すること．
+
+Phase 2 の workspace tests（2026-09-25，動的レビュー後の追加テスト込みでRust 1.85.0 / stable の両方で各550 passed）：
+
+| crate | tests |
+|---|---:|
+| `ezsdr-kernel` | 443 |
+| `ezsdr-radio` | 10 |
+| `ezsdr-sim` | 6 |
+| `ezsdr-sim-engine` | 7 |
+| `ezsdr-hostmem` | 2 |
+| `ezsdr-link-host` | 2 |
+| `ezsdr-sink` | 2 |
+| `ezsdr-sink-capture` | 15 |
+| `ezsdr-mock-radio` | 34 |
+| `ezsdr-acceptance` | 29 |
+| **合計** | **550** |
+
+Python client と wire protocol は未着手．Phase 2 はGate X受理・Step X完了まで済み（2026-09-25）．実装・review・exit artifacts・受理処理は `bf3b1bf` までに commit 済み．
+
+### Phase 2 — Gate X受理・Step X完了
+
+Vision §67 の Phase 2（Radio Model + Simulation Engine + MockRadio）．2026-09-24に Gate P，2026-09-25に Gate X を受理済み（[00-overview.md](00-overview.md) §9，§11）．accepted specs 06–10 は [design/](../../design) に移し，Phase 2 の決定・手順・exit evidence は [plan/phase2/](.) に残した．Steps 1–15 は commit `6bf67fb` までに実装済み（[implementation-notes.md](implementation-notes.md)）．Review K/M と Gate X の Opus review は完了．Gate X は `PASS_WITH_RISK`（blockerなし）を受けて owner が受理した．named risks は MA-8 timeout enforcement 未試験，Kernel 経由 Session `Stop(sink/rec)` test なし，reviewer は静的レビューのみ（2026-09-25 の動的レビューで exit criteria 8項目を実測確認し，Session 経由 `Stop(sink/rec)` も動作確認した）．Phase 2 の Vision issue 15件を適用し，stable/MSRV の workspace 547 tests と stable Clippy は適用前の最終コードで通過済み．残る test ceilings は [implementation-notes.md](implementation-notes.md) と exit tables に記録した．
+
+| 文書 | 中身 |
+|---|---|
+| [00-overview.md](00-overview.md) | 範囲，横断決定 Y1–Y14，10 crate の構成と許される依存，運用規則 PO-1–PO-12，Vision §58/§61 と Phase 1 marker の対応表，gate，exit criteria，決定ログ（§11，Gate P で記入） |
+| [06-kernel-coordinator.md](../../design/06-kernel-coordinator.md) | Phase 1 spec への修正 KA-1–KA-22，Run coordinator KC-1–KC-45，update class UC-1–UC-6 |
+| [07-radio-model.md](../../design/07-radio-model.md) / [08-simulation.md](../../design/08-simulation.md) / [09-mock-radio.md](../../design/09-mock-radio.md) / [10-host-data-path.md](../../design/10-host-data-path.md) | `radio` Vocabulary（RM），`sim` Vocabulary と Simulation Engine（SE），MockRadio（MR），host メモリ・Link・`sink` Vocabulary・capture Sink（HD） |
+| [20-implementation-plan.md](20-implementation-plan.md) | 実装者（安価なモデルを想定）向けの 16 手順．各手順にファイル・シグネチャ・疑似コード・テスト表・mutation check・完了条件．付録 A = patch 適用後の Kernel API，付録 B = 全規則→手順→テストの対応（テストの無い規則 0） |
+| [patches/01-kernel-amendments.patch](patches/01-kernel-amendments.patch) | KA のうち coordinator 以外のコード（28 ファイル）．実装手順 1 で `96976c5` に適用済み．同パッチの新テスト 8 件は各規則を無効化すると落ちることを確認済み |
+| [reviews/planning-reviews.md](reviews/planning-reviews.md) | Gate P 前の Opus 敵対的レビュー 3 巡（指摘 56 → 34 → 18）と各指摘の判定．全件反映済み |
+
+Phase 1 の Kernel には，最初の本物の Module が必ず踏む穴があった（例：`PrepareContext` のハンドルが借用で，Module が `prepare` 後にイベントも時刻も扱えない）．KA-1–KA-22 がそれを埋める．
+
+**Gate P の判定**：00-overview.md §11 の決定ログに，Y1–Y14 と各 spec の決定表（K1–K12，R1–R9，S1–S7，M1–M10，H1–H8）の verdict を記入済み．2026-09-24 に owner が**全件を推奨どおり受理**した（§11 に記録）．特に確認が要った次の 4 点は，それに先立って個別に受理している：
+
+1. **故障注入 3 種を Phase 2 に入れる**（KA-22 で受理済み spec 04 の「fault injection は Phase 4」を改める）．覆すなら SE-3–SE-5，MR-20–MR-22，`v58_04`–`v58_06` を外し，SC-18 などの marker は forward のまま．
+2. **x310-like の転送上限 1.0 GB/s/方向**（MR-3，INFERRED）．10 GbE の line rate 1.25 GB/s から Y13 で厳しい側に丸めた．Phase 8 の実測で置き換える前提．
+3. **capture Sink に「全サンプル記録」モードを設けない**（HD-10，H8）．記録は `N` サンプル指定のみ．
+4. **x310-like では `ezsdr.time.start_lead_ns ≥ 2 s` が必須**（MR-11）．足りない開始は拒否（遅れて開始して `LATE` を付ける案は Y13 で不採用）．
