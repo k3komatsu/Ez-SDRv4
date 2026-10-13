@@ -864,7 +864,7 @@
   "oneOf": [
     {
       "additionalProperties": false,
-      "description": "One transmit burst. Carries no channel list: mapping a burst's channels onto\na stream's channels is the Radio Model's, and deciding it here would put a\nradio field in a frozen Kernel document. It travels in `metadata` until\nPhase 2 settles it (RS-49).",
+      "description": "One transmit burst. Carries no channel list: which channels a burst uses is\nthe Radio Model's (RS-49, RM-13), and deciding it here would put a radio\nfield in a frozen Kernel document. A radio burst's `metadata` is empty\n(RM-13).",
       "properties": {
         "at": {
           "$ref": "#/$defs/AbsoluteDeadline",
@@ -883,7 +883,7 @@
             "$ref": "#/$defs/Value"
           },
           "default": {},
-          "description": "Namespaced content the Kernel does not interpret (RS-49).",
+          "description": "Namespaced content the Kernel does not interpret (RS-49); a radio\nburst carries none (RM-13).",
           "type": "object"
         },
         "repeat": {

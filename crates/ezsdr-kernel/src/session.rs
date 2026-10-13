@@ -229,14 +229,16 @@ pub struct Admitted {
     pub warnings: Vec<Warning>,
 }
 
-/// The admission stages' shared check set: the registered admission checks of
-/// SB-30's points and the coercion policy of SB-45, in that order.
+/// The check set of RS-17 as admission uses it: the registered admission checks of
+/// SB-30's third point and the coercion policy of SB-45, in that order.
 ///
-/// `validate()` calls it with a Spec's requested configuration, `prepare()` with the
-/// applied one, and admission with one Action's key and value. The parameter's
-/// declared update class is **not** here: it is `ExperimentSpec::declared_class`, and
-/// the runtime refusal that reads it is KC-24's step 5, which runs before this check
-/// set (pre-freeze item 3).
+/// Admission is its only caller outside tests, over one Action's key and value
+/// (RS-16, RS-17): the coordinator builds the Run's one `Admitter` at the point of
+/// admission. `validate()` and `prepare()` run the same registered checks and
+/// coercion policy inside their own stage functions (SB-30) and construct no
+/// `Admitter`. The parameter's declared update class is **not** here: it is
+/// `ExperimentSpec::declared_class`, and the runtime refusal that reads it is KC-24's
+/// step 5, which runs before this check set (pre-freeze item 3).
 ///
 /// Rule: RS-16, RS-17.
 pub struct Admitter<'a> {

@@ -1525,11 +1525,11 @@ fn mr_20a_the_overflow_comes_with_the_block_that_carries_it() {
     assert!(headers[1..].iter().all(|header| header.lost.is_none()));
 }
 
-/// The `rejected` rows, as `(action, reason, at)`, in the order written (MR-27).
+/// The `rejected` rows, as `(kind, reason, at)`, in the order written (MR-27).
 fn rejected_rows(harness: &Harness) -> Vec<(String, String, i64)> {
     let rows = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.rejected").unwrap()];
     rows.as_array().unwrap().iter()
-        .map(|row| (row["action"].as_str().unwrap().to_owned(), row["reason"].as_str().unwrap().to_owned(), row["at"]["ticks"].as_i64().unwrap()))
+        .map(|row| (row["kind"].as_str().unwrap().to_owned(), row["reason"].as_str().unwrap().to_owned(), row["at"]["ticks"].as_i64().unwrap()))
         .collect()
 }
 
@@ -1959,8 +1959,8 @@ fn mr_29_other_actions_are_command_rejected() {
     harness.step(1).unwrap();
     let rejected = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.rejected").unwrap()];
     assert_eq!(rejected.as_array().unwrap().len(), 2);
-    assert_eq!(rejected[0]["action"], "set_timer");
-    assert_eq!(rejected[1]["action"], "command");
+    assert_eq!(rejected[0]["kind"], "set_timer");
+    assert_eq!(rejected[1]["kind"], "command");
     let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     let rejected_events: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
     assert_eq!(rejected_events.len(), 2);

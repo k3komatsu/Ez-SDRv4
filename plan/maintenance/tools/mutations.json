@@ -2150,8 +2150,8 @@
   "id": "J184",
   "name": "RM-22 (spec 27 §3): MockRadio's COMMAND_REJECTED names no Action",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "CommandRejectedPayload { action: id, kind: action.to_owned()",
-  "new": "CommandRejectedPayload { action: None, kind: action.to_owned()",
+  "old": "CommandRejectedPayload { action: id, kind: kind.to_owned()",
+  "new": "CommandRejectedPayload { action: None, kind: kind.to_owned()",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_29_other_actions_are_command_rejected"
@@ -2160,8 +2160,8 @@
   "id": "J185",
   "name": "RM-22 (spec 27 §3): the UHD Provider's COMMAND_REJECTED names no Action",
   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "CommandRejectedPayload { action: id, kind: action.to_owned()",
-  "new": "CommandRejectedPayload { action: None, kind: action.to_owned()",
+  "old": "CommandRejectedPayload { action: id, kind: kind.to_owned()",
+  "new": "CommandRejectedPayload { action: None, kind: kind.to_owned()",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_cold_change_the_envelope_refuses_changes_nothing"

@@ -416,7 +416,7 @@ impl Control {
         if pending + self.channels_at(dir, e) > depth {
             let payload = serde_json::to_value(CommandQueueFullPayload { key: key.clone(), depth: depth as i64 }).expect("a payload");
             self.core.emit(&self.core.id, kinds::COMMAND_QUEUE_FULL, Severity::Error, payload);
-            self.core.reject_note(json!({ "action": "update_parameter", "reason": "UR-24: the command queue is full", "key": key }));
+            self.core.reject_note(json!({ "kind": "update_parameter", "reason": "UR-24: the command queue is full", "key": key }));
             return;
         }
         let seq = lock(&self.core.streams).next_seq();
@@ -675,11 +675,11 @@ impl Control {
             }
             LateOutcome::Drop { late_by } => {
                 time_error(TimeErrorOutcome::Drop, late_by);
-                return self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-21: the late policy dropped the burst" }));
+                return self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-21: the late policy dropped the burst" }));
             }
             LateOutcome::PlanViolation { late_by } => {
                 time_error(TimeErrorOutcome::PlanViolation, late_by);
-                return self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-21: the planned burst arrived late" }));
+                return self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-21: the planned burst arrived late" }));
             }
         }
         if clock.instant(start) < self.core.start_up.load(Ordering::Acquire) {

@@ -795,10 +795,10 @@ pub struct ActionId(pub u64);
 #[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
-    /// One transmit burst. Carries no channel list: mapping a burst's channels onto
-    /// a stream's channels is the Radio Model's, and deciding it here would put a
-    /// radio field in a frozen Kernel document. It travels in `metadata` until
-    /// Phase 2 settles it (RS-49).
+    /// One transmit burst. Carries no channel list: which channels a burst uses is
+    /// the Radio Model's (RS-49, RM-13), and deciding it here would put a radio
+    /// field in a frozen Kernel document. A radio burst's `metadata` is empty
+    /// (RM-13).
     TxBurst {
         /// The transmit stream (RS-49).
         target: Target,
@@ -812,7 +812,8 @@ pub enum Action {
         requested_at: Option<AbsoluteDeadline>,
         /// What to do if the lead is short (SC-27).
         late_policy: LatePolicy,
-        /// Namespaced content the Kernel does not interpret (RS-49).
+        /// Namespaced content the Kernel does not interpret (RS-49); a radio
+        /// burst carries none (RM-13).
         #[serde(default)]
         metadata: BTreeMap<Key, Value>,
     },

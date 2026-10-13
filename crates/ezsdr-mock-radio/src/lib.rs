@@ -653,20 +653,20 @@ impl MockRadio {
         }
     }
 
-    fn record_rejected_action(&mut self, action: &str, reason: &str, at: i64) {
+    fn record_rejected_action(&mut self, kind: &str, reason: &str, at: i64) {
         #[derive(serde::Serialize)]
-        struct Rejected { action: String, reason: String, at: TimePoint }
+        struct Rejected { kind: String, reason: String, at: TimePoint }
         let time = TimePoint::new(self.root.expect("prepared root"), at);
         if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("rejected")) {
-            rows.push(serde_json::to_value(Rejected { action: action.to_owned(), reason: reason.to_owned(), at: time }).expect("rejection section row"));
+            rows.push(serde_json::to_value(Rejected { kind: kind.to_owned(), reason: reason.to_owned(), at: time }).expect("rejection section row"));
         }
     }
 
     /// RM-22: `COMMAND_REJECTED`, naming the Action by `id` when it is refused at receipt.
-    fn reject_action_at(&mut self, id: Option<ActionId>, action: &str, reason: &str, at: i64) -> Result<(), ModuleError> {
-        self.record_rejected_action(action, reason, at);
+    fn reject_action_at(&mut self, id: Option<ActionId>, kind: &str, reason: &str, at: i64) -> Result<(), ModuleError> {
+        self.record_rejected_action(kind, reason, at);
         let time = TimePoint::new(self.root.expect("prepared root"), at);
-        let payload = serde_json::to_value(ezsdr_radio::payloads::CommandRejectedPayload { action: id, kind: action.to_owned(), reason: reason.to_owned() }).expect("command rejection payload");
+        let payload = serde_json::to_value(ezsdr_radio::payloads::CommandRejectedPayload { action: id, kind: kind.to_owned(), reason: reason.to_owned() }).expect("command rejection payload");
         self.emit_event("", ezsdr_radio::kinds::COMMAND_REJECTED, Severity::Error, payload, time)
     }
 
