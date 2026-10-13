@@ -70,7 +70,7 @@ pub struct DataContract {
     /// stores these and never interprets them, which is what keeps it from becoming
     /// a type system (SC-2, SC-4).
     pub attributes: BTreeMap<String, Scalar>,
-    /// Producer contracts this one accepts unconverted; empty at v4.0 (SC-3, SC-8).
+    /// Producer contracts this one accepts unconverted; empty at v4.0 (SC-3, SC-4).
     pub compatible_from: BTreeSet<DataContractId>,
 }
 

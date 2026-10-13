@@ -845,7 +845,7 @@
     },
     "DataLinkId": {
       "additionalProperties": false,
-      "description": "Identifies a data link instance (`DataLinkDecl`).\n\nRule: SC-18 (`02-stream-contract.md`), X7.",
+      "description": "Identifies a data link instance (`DataLinkDecl`).\n\nRule: SC-19 (`02-stream-contract.md`), X7.",
       "properties": {
         "local": {
           "description": "Node-local ordinal, allocated by the owning registry.",
@@ -1516,7 +1516,7 @@
     },
     "LinkRecord": {
       "additionalProperties": false,
-      "description": "One DataLink the Run created, with what it dropped; its endpoints are its entry\nin `plan.links` (RS-38, SC-20a).",
+      "description": "One DataLink the Run created, with what it dropped; its endpoints are its entry\nin `plan.links` (RS-38, SC-20).",
       "properties": {
         "drops": {
           "description": "How many blocks it dropped; absent when cleanup never read it (RS-6).",

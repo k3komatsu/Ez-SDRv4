@@ -153,9 +153,9 @@ The graph model must not assume every edge carries raw IQ.
 
 Ports do not carry a closed enum of data kinds. A Port names a **DataContract**, and DataContracts live in an **open registry**:
 
-A Port is a name, a direction and a DataContract id, and nothing more. DataContracts live in an open registry under namespaced ids, each with fixed attributes and a declared `compatible_from` set, and the Kernel's only contract check is directional: a link is admissible when the producer's contract equals the consumer's or is in its `compatible_from`. The contracts available at v4.0 belong to the contracts Vocabulary — `ezsdr.stream.cf32` and `ezsdr.stream.sc16`, planar, each with its full-scale convention; `ezsdr.control`; `ezsdr.event.<schema-id>` — and `pdu.*` and `tensor.*` contracts are added later without changing Port. The host-to-device wire format is never a Port contract.
+A Port is a name, a direction and a DataContract id, and nothing more. DataContracts live in an open registry under namespaced ids, each with fixed attributes and a declared `compatible_from` set, and the Kernel's only contract check is directional: a link is admissible when the producer's contract equals the consumer's or is in its `compatible_from`. The contracts available at v4.0 belong to the contracts Vocabulary — `ezsdr.stream.cf32` and `ezsdr.stream.sc16`, planar, each with its full-scale convention; `ezsdr.control` — and `pdu.*` and `tensor.*` contracts are added later without changing Port. The host-to-device wire format is never a Port contract.
 
-Normative: [design/02-stream-contract.md](../02-stream-contract.md), rules SC-1…SC-5.
+Normative: [design/02-stream-contract.md](../02-stream-contract.md), rules SC-1…SC-5, SC-33.
 
 Tensor shape algebra, PDU framing rules and similar checks belong to the Executor or to a validation plugin of the Vocabulary that defines the contract. The Kernel does not become a type system.
 

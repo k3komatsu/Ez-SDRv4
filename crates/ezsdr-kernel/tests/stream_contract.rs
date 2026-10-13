@@ -905,8 +905,8 @@ fn sc_24_a_discontinuity_that_also_ends_reports_both_records() {
 
 #[test]
 fn sc_29a_set_late_carries_a_discontinuity_opened_burst() {
-    // SC-24a requires the late policy to be evaluated for the burst a discontinuity
-    // opened, and that burst carries no START_OF_BURST and so no BurstOpen. Without
+    // SC-24a requires the late policy to be evaluated for the burst opened by a time
+    // jump in a block without START_OF_BURST, and that burst has no BurstOpen. Without
     // `set_late` its `late_by` would be permanently None — the one case SC-24a is
     // about (finding D8).
     let mut tr = BurstTracker::new(dom());
@@ -1684,7 +1684,7 @@ fn sc_13_tm_13c_rate_change_is_a_new_domain_not_a_gap() {
 #[test]
 fn sc_30b_a_carry_on_a_contiguous_block_is_not_discarded() {
     // SC-30b's obligation is that the builder "records the dropped block count in the
-    // gap's `link_dropped`", and the rule says in its own words why the counts merge:
+    // gap's `link_dropped`", and its text at `398fd66` said why the counts merge:
     // a rule that dropped the count would "discard exactly the number it was written
     // to preserve". Under `DropNewest` the refused block is newer than everything
     // queued, so the block delivered after the drop is **contiguous** — the consumer

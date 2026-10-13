@@ -130,7 +130,7 @@ pub struct IslandId {
 
 /// Identifies a data link instance (`DataLinkDecl`).
 ///
-/// Rule: SC-18 (`02-stream-contract.md`), X7.
+/// Rule: SC-19 (`02-stream-contract.md`), X7.
 #[derive(
     Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
     Serialize, Deserialize, schemars::JsonSchema,
