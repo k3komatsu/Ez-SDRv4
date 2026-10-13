@@ -129,7 +129,7 @@ Each implementation step runs in this order:
 4. Sol reviews independently.
 5. The orchestrator adjudicates both reviews, the implementer fixes the adopted findings, and the gate runs.
 
-Self-review is a cheap first filter. It never replaces steps 3 and 4: the same model keeps the same blind spots, so a self-review that ends satisfied proves nothing about the tests' power. The orchestrator steps in at the brief and at the report, not between rounds; a background watchdog shell (no model) reports a breach of the mutation rule below.
+Self-review is a cheap first filter. It never replaces steps 3 and 4: the same model keeps the same blind spots, so a self-review that ends satisfied proves nothing about the tests' power. The orchestrator steps in at the brief and at the report, not between rounds; a background watchdog shell (no model, `plan/maintenance/tools/mutation_watchdog.py`) reports a breach of the mutation rule below.
 
 Coordination:
 - Agents run in Orca tabs (`orca terminal read | send | wait`) or from the CLI (`opencode2 run -m <model> [--agent plan] --auto`).

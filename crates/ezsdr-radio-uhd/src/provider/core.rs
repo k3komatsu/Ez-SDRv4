@@ -370,9 +370,9 @@ impl Core {
 
     /// `radio.COMMAND_REJECTED` from the device, naming the Action by `id` when uhd-control
     /// refuses it as it takes it, and its reason recorded (UR-21, UR-30, RM-22).
-    pub fn command_rejected(&self, id: Option<ActionId>, action: &str, reason: &str) {
-        self.reject_note(json!({ "action": action, "reason": reason, "at": self.at(self.now()) }));
-        let payload = serde_json::to_value(CommandRejectedPayload { action: id, kind: action.to_owned(), reason: reason.to_owned() })
+    pub fn command_rejected(&self, id: Option<ActionId>, kind: &str, reason: &str) {
+        self.reject_note(json!({ "kind": kind, "reason": reason, "at": self.at(self.now()) }));
+        let payload = serde_json::to_value(CommandRejectedPayload { action: id, kind: kind.to_owned(), reason: reason.to_owned() })
             .expect("a payload");
         self.emit(&self.id, kinds::COMMAND_REJECTED, Severity::Error, payload);
     }

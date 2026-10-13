@@ -240,7 +240,7 @@ impl Tx {
         }
         if let Some(next) = self.open.as_ref().map(|o| o.next) {
             if clock.instant(next) < now {
-                self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-22: the transmit timeline expired; burst not resumed" }));
+                self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: the transmit timeline expired; burst not resumed" }));
                 self.abandon(true);
                 return true;
             }
@@ -263,7 +263,7 @@ impl Tx {
         }
         if let Some(c) = self.continues_at {
             if clock.instant(c) < now {
-                self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-22: the transmit timeline expired; burst not resumed" }));
+                self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: the transmit timeline expired; burst not resumed" }));
                 self.abandon(true);
                 return true;
             }
@@ -359,7 +359,7 @@ impl Tx {
                 match self.core.device.tx_send(&tail, None, false, false, SEND_TIMEOUT) {
                     Ok(1) => {}
                     Ok(_) => {
-                        self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
+                        self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
                         return self.abandon(true);
                     }
                     Err(error) => {
@@ -381,7 +381,7 @@ impl Tx {
         match result {
             Ok(sent) if sent == sending => {}
             Ok(sent) => {
-                self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
+                self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
                 if device_sob && sent > 0 {
                     self.remember_burst(TimePoint::new(clock.domain, start));
                 }
@@ -545,13 +545,13 @@ impl Tx {
             Ok(LateOutcome::Drop { late_by }) => {
                 self.forget(&held);
                 self.time_error(TimeErrorOutcome::Drop, late_by, held.target);
-                self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-21: the late policy dropped the burst" }));
+                self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-21: the late policy dropped the burst" }));
                 None
             }
             Ok(LateOutcome::PlanViolation { late_by }) => {
                 self.forget(&held);
                 self.time_error(TimeErrorOutcome::PlanViolation, late_by, held.target);
-                self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-21: the planned burst arrived late" }));
+                self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-21: the planned burst arrived late" }));
                 None
             }
             Err(error) => {
@@ -595,12 +595,12 @@ impl Tx {
                 Ok(LateOutcome::Drop { late_by }) => {
                     self.forget(&held);
                     self.time_error(TimeErrorOutcome::Drop, late_by, held.target);
-                    return self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-21: the late policy dropped the burst" }));
+                    return self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-21: the late policy dropped the burst" }));
                 }
                 Ok(LateOutcome::PlanViolation { late_by }) => {
                     self.forget(&held);
                     self.time_error(TimeErrorOutcome::PlanViolation, late_by, held.target);
-                    return self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-21: the planned burst arrived late" }));
+                    return self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-21: the planned burst arrived late" }));
                 }
                 Err(error) => {
                     self.forget(&held);
@@ -630,7 +630,7 @@ impl Tx {
             if emit {
                 self.core.command_rejected(None, "tx_burst", reason);
             } else {
-                self.core.reject_note(json!({ "action": "tx_burst", "reason": reason }));
+                self.core.reject_note(json!({ "kind": "tx_burst", "reason": reason }));
             }
         }
     }
@@ -732,7 +732,7 @@ impl Tx {
                 // Its nominal next sample no longer bounds actual playback. Do not
                 // resume untimed payload on the shifted device timeline (UR-22).
                 if self.open.is_some() || self.continues_at.is_some() {
-                    self.core.reject_note(json!({ "action": "tx_burst", "reason": "UR-22: the device burst underflowed; burst not resumed" }));
+                    self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: the device burst underflowed; burst not resumed" }));
                     self.abandon(true);
                 }
             }
@@ -1026,7 +1026,7 @@ mod tests {
             assert_eq!(tx.clock, (!refused).then_some(c1), "{case}");
             assert_eq!(tx.later.iter().map(|h| h.domain).collect::<Vec<_>>(), [c2.domain], "{case}");
             assert_eq!(tx.held.len(), usize::from(!refused), "{case}");
-            assert_eq!(lock(&core.rec).rejected.iter().filter(|r| r["action"] == "tx_burst").count(), usize::from(refused), "{case}");
+            assert_eq!(lock(&core.rec).rejected.iter().filter(|r| r["kind"] == "tx_burst").count(), usize::from(refused), "{case}");
             let booked = lock(&core.streams).lines[Dir::Tx as usize].as_ref().unwrap().items.iter().filter(|item| item.refused).map(|item| item.seq).collect::<Vec<_>>();
             assert_eq!(booked, if refused { vec![1] } else { Vec::new() }, "{case}");
             tx.held.clear();

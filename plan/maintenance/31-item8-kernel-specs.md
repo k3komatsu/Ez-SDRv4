@@ -2,7 +2,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| 状態 | **承認済み（owner 2026-10-13「推奨で進めてください」：D2 は Opus のサブエージェント、D3 は入れる）。段階8a〜8e完了（06・01・02・03），判断1・4・6は反映済み。次は8f（04と小さな残り）→8g（05，§8 E3必須）→8h。全体は未完了。計画の独立レビュー反映は§7，8eの決定と検証は§8。** |
+| 状態 | **承認済み（owner 2026-10-13「推奨で進めてください」：D2 は Opus のサブエージェント、D3 は入れる）。段階8a〜8f完了（06・01・02・03・04と小さな残り），判断1・4・6は反映済み。次は8g（05，§8 E3必須）→8h。全体は未完了。計画の独立レビュー反映は§7，8eの決定と検証は§8，8fの記録は§9。** |
 | 作成日 | 2026-10-13 |
 | 調査時の基準 | `main`、HEAD `05b3c56`、作業ツリー clean |
 | 対象 | 凍結前の改修の項目8（[24-prefreeze-audit.md](24-prefreeze-audit.md) §8、F44）。これは spec 22 の DA-3 の手順4（owner 承認 2026-10-07）にあたる。前向き監査の判断1・4・6（[28-forward-audit.md](28-forward-audit.md)、owner 承認 2026-10-10）も入れる |
@@ -140,3 +140,9 @@ ownerは2026-10-13、独立レビューのE1/E2/E3に対するquestionへ「推�
 - **E3（8g必須）:** `design/05-module-api.md` MA-12のreport自己申告を根拠にするcoercion例外を、SB-46の例外条件への参照に縮約する。安全なSB-46と実装を維持し、既存bypass拒否テスト`sb_44_a_provider_may_not_exempt_a_key_by_declaring_a_coercion`（および`sb_46_an_accepted_coercion_survives_prepare`）の拒否・許可条件を確認する。8gのbriefに必ず入れ、凍結前に閉じる。8eではspec05を編集しない。
 
 **段階8eの検証記録:** 独立レビューのR1（Islandの非既定contentを固定するテスト）とR2（規則内の理由文）を修正し、再レビューは`PASS_WITH_RISK`（残るE3は上記8gへの承認済み持越し）。`cargo test --workspace`、workspace clippy（all-targets、`-D warnings`）、kernel/serverのschema freeze、`rules.py --base 55cbb2d`とself-test、diff checkは成功。全mutation gate（`all sim02:8,sim03:8`）は734/735、追加J328・J329・J330はすべてkilled。唯一のSURVIVEDは従来のphase7/G09（handoff §4、plan 30 §15に記録済み）で、remote runnerの終了コードは1。全行成功とは扱わず、既知例外以外に生き残り・実行漏れなしと記録する。ログとレビューは`~/.cache/ezsdr-fixes/2026-10-13-item8/03-gate-*.log`および`sol-03-review.md`・`sol-03-recheck.md`。ownerの指示でhandoffとともにcommit・pushする。
+
+## 9. 段階8fの記録
+
+- **分担:** owner の指示（2026-10-13）で、8f の書き手は §4.3 の Opus サブエージェントではなく DeepSeek V4.1 Flash にした（AGENTS.md §9 の既定）。指示書は `~/.cache/ezsdr-fixes/2026-10-13-item8/04-brief.md`、修正ラウンドは `04-fix-brief.md`。機械チェック `check04.py` と差し戻しの `drive04.sh` を使った（handoff「実装役の機械チェックと見張り」）。
+- **レビュー:** Opus（`opus-04-review.md`）と Sol 6.1（`sol-04-findings.md`）がともに CHANGES_REQUIRED。主な採用：RS-49 の「channel の対応は `metadata` に載る」は暫定規則（until Phase 2 settles it）を言い切りにした誤りで、spec 07 RM-13（burst は全 channel、radio の burst の `metadata` は空）への参照に直し、`Action::TxBurst` の doc と schema 2本も同じにした。RS-43 の「Kernel は乱数生成器を持たない」を復元。RS-38 の図を `manifest.rs` に合わせた（`policy`、`admission` の全欄）。spec 02 §11 の延期を `LINK_BACKPRESSURE` だけにした。Test 行を独立した行にした。採らなかったもの：改名を戻す mutation 行（各 Provider のテストが実経路で `kind` を確かめる）、§9 の番号の付け替え、`plan/` の旧表記。Sol の再照合は PASS_WITH_NITS（台帳の引用1件、修正済み）。
+- **検証:** `check04.py` 0件（workspace test/clippy、UHD feature clippy、Python 44）、`rules.py --base 7396bb0` 0件、全 mutation gate 734/735（唯一の生き残りは従来の phase7/G09、runner exit 1。既知例外以外に生き残り・実行漏れなし）。改名で触った J184・J185・B20 は kill。
