@@ -13,7 +13,9 @@ Compares the accepted texts at a base revision with the working tree and fails w
 - a mutation row's `old`, or its `old2` after `old` is replaced as `mutate.py` does it,
   does not occur exactly once (a string check; `mutate.py` is not run);
 - a file's history markers or lines over 1 500 characters grow outside its closing
-  Changes table (the table under a `## Changes` heading; text after the table counts).
+  Changes table (the table under a `## Changes` heading; text after the table counts);
+- handoff.md is missing or exceeds 300 lines or 40 000 bytes, or plan/handoff-archive.md
+  differs from the base's (AGENTS.md §9: handoff holds only the present, the archive is frozen).
 A file deleted since the base is compared as empty, so its rules and citations count.
 
 Usage (from the repository root):
@@ -40,6 +42,7 @@ LINK = re.compile(r"\]\(([^)#\s]+)(?:#[^)]*)?\)")
 MARKER = re.compile(r"\((?:Phase \d+|K[A-Z]-\d+|Review [A-Z]\b|review [A-Z0-9-]+|issue #\d+|owner, 20\d\d)[^)]*\)"
                     r"|\*(?:Settled in|Forward|Superseded)|Amended in Phase|(?<![\w/])#\d{2,3}\b")
 LONG = 1500
+HANDOFF_LINES, HANDOFF_BYTES = 300, 40000
 LISTS = ["maintenance", "phase3", "phase4", "phase5", "phase6", "phase7"]
 # Names the accepted specs cited, as history, before plan 31 while no test had them; no
 # other name may be cited without existing.
@@ -112,6 +115,20 @@ def check(base, head, tests, renames, exists=os.path.exists, known_missing=KNOWN
                             ("lines over 1 500 characters", lambda t: sum(len(l) > LONG for l in body(t).split("\n")))):
             if count(text) > count(base.get(path, "")):
                 problems.append(f"{path}: {what} grew from {count(base.get(path, ''))} to {count(text)}")
+    return problems
+
+
+def handoff_problems(handoff, archive, base_archive):
+    """handoff.md's size limit and the frozen archive (AGENTS.md §9); a missing file is None."""
+    if handoff is None:
+        return ["handoff.md is missing"]
+    problems = []
+    lines = handoff.count("\n") + (not handoff.endswith("\n") and handoff != "")
+    if lines > HANDOFF_LINES or len(handoff.encode("utf-8")) > HANDOFF_BYTES:
+        problems.append(f"handoff.md has {lines} lines and {len(handoff.encode('utf-8'))} bytes, over {HANDOFF_LINES} or "
+                        f"{HANDOFF_BYTES}: move finished records to their plan files, do not raise the limit")
+    if base_archive is not None and archive != base_archive:
+        problems.append("plan/handoff-archive.md changed: it is frozen")
     return problems
 
 
@@ -231,6 +248,14 @@ def self_test():
             "mutation row maintenance/Z3 old occurs 0 times in a.rs",
             "mutation row maintenance/Z5 old2 occurs 0 times in a.rs after old is replaced"]
     assert got == want, got  # Z6's old2 is made by its new: accepted, as mutate.py would
+    ok = "x\n" * 300
+    assert handoff_problems(ok, None, None) == [], "self-test: 300 lines"
+    assert handoff_problems(ok + "x", None, None), "self-test: 301 lines, the last without a newline"
+    assert handoff_problems("あ" * 13333 + "\n", None, None) == [], "self-test: 40 000 bytes"
+    assert handoff_problems("あ" * 13334, None, None), "self-test: one long line over 40 000 bytes"
+    assert handoff_problems(None, None, None) == ["handoff.md is missing"], "self-test: missing handoff"
+    assert handoff_problems("x\n", "a", "a") == [] and handoff_problems("x\n", "a\nb", "a"), "self-test: frozen archive"
+    assert handoff_problems("x\n", None, "a"), "self-test: archive deleted"
     print("rules.py self-test: ok")
 
 
@@ -255,6 +280,9 @@ def main():
     problems = check(base, head, test_names(), renames, base_tests=test_names_at(base_rev))
     problems += rows_exact_once(lambda n: json.load(open(f"plan/{n}/tools/mutations.json", encoding="utf-8")),
                                 lambda f: open(f, encoding="utf-8").read() if os.path.exists(f) else "")
+    read = lambda f: open(f, encoding="utf-8").read() if os.path.exists(f) else None
+    problems += handoff_problems(read("handoff.md"), read("plan/handoff-archive.md"),
+                                 at(base_rev, "plan/handoff-archive.md") or None)
     if "--sentences" in args:
         sentences(base, head)
     for p in problems:
