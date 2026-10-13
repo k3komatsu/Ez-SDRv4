@@ -67,7 +67,7 @@
     },
     "DataLinkId": {
       "additionalProperties": false,
-      "description": "Identifies a data link instance (`DataLinkDecl`).\n\nRule: SC-18 (`02-stream-contract.md`), X7.",
+      "description": "Identifies a data link instance (`DataLinkDecl`).\n\nRule: SC-19 (`02-stream-contract.md`), X7.",
       "properties": {
         "local": {
           "description": "Node-local ordinal, allocated by the owning registry.",

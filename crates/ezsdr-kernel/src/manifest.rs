@@ -91,7 +91,7 @@ pub struct ChildRecord {
 }
 
 /// One DataLink the Run created, with what it dropped; its endpoints are its entry
-/// in `plan.links` (RS-38, SC-20a).
+/// in `plan.links` (RS-38, SC-20).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LinkRecord {

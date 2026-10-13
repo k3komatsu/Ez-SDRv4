@@ -777,7 +777,7 @@
       "oneOf": [
         {
           "const": "reject_at_plan",
-          "description": "Legal only for a burst whose target is statically known; `validate()`\nrejects it on a runtime-decided burst (SC-27).",
+          "description": "Legal only for a burst whose target is statically known: KC-24 step 7 refuses\na Module's burst carrying it, RS-14 a Session verb declaring it, and KC-19 a\nscheduled burst whose lead is shorter than its target's `min_command_lead`\n(SC-27).",
           "type": "string"
         },
         {

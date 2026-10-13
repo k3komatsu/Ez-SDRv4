@@ -332,11 +332,8 @@ impl ContinuityBuilder {
         if !carry.is_empty() {
             self.gaps.push(Gap {
                 // SC-30c: **zero-extent**, and `end` does not move, because no
-                // sample after the last delivered one is accounted for. §6's
-                // pseudocode writes `carry.lost or 0` for this length, which would
-                // claim `lost` samples beyond the map's own end and contradict the
-                // rule's own justification; the rule carries the ID, so it wins.
-                // Raised for the owner as finding D15.
+                // sample after the last delivered one is accounted for; §6's
+                // pseudocode writes the same `0` (finding D15).
                 start: self.expected_next.unwrap_or(end),
                 len: 0,
                 lost: carry.lost,

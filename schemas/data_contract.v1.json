@@ -44,7 +44,7 @@
       "type": "object"
     },
     "compatible_from": {
-      "description": "Producer contracts this one accepts unconverted; empty at v4.0 (SC-3, SC-8).",
+      "description": "Producer contracts this one accepts unconverted; empty at v4.0 (SC-3, SC-4).",
       "items": {
         "$ref": "#/$defs/DataContractId"
       },

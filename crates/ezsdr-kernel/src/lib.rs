@@ -52,7 +52,7 @@ pub mod schema;
 pub mod session;
 /// Identifiers, values, constraints and the ExperimentSpec envelope (SB-1…SB-20).
 pub mod spec;
-/// The Stream Contract: blocks, links, bursts and continuity (SC-1…SC-32).
+/// The Stream Contract: blocks, links, bursts and continuity (SC-1…SC-33).
 pub mod stream;
 /// The Kernel time model: ticks, domains, deadlines and the Authority (TM-1…TM-21).
 pub mod time;

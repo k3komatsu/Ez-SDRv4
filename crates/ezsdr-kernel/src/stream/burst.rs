@@ -21,12 +21,8 @@ pub struct AdmittedTarget {
 ///
 /// A target expressed in another **exactly related** domain is converted with
 /// `apply` (TM-4); an `Inexact` result is advanced to the next transmit sample
-/// instant, `floor + 1`, and both times are recorded. Refusal would be wrong, not
-/// strict: TM-13b makes each stream's origin its own first sample, so a Reactor
-/// computing `target = rx_time + turnaround` in the receive domain — the natural
-/// computation, and the one Vision §56 and §58 #9 require — would otherwise be
-/// refused on almost every burst. Advancing is the physically correct answer,
-/// because a radio cannot transmit between samples.
+/// instant, `floor + 1`, and both times are recorded. Advancing is the physically
+/// correct answer, because a radio cannot transmit between samples.
 ///
 /// A target in an **unrelated** domain is refused: TM-5 makes such a conversion
 /// uncertain, and an uncertain transmit instant is not a transmit instant.
@@ -58,8 +54,10 @@ pub fn admit_burst_target(
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum LatePolicy {
-    /// Legal only for a burst whose target is statically known; `validate()`
-    /// rejects it on a runtime-decided burst (SC-27).
+    /// Legal only for a burst whose target is statically known: KC-24 step 7 refuses
+    /// a Module's burst carrying it, RS-14 a Session verb declaring it, and KC-19 a
+    /// scheduled burst whose lead is shorter than its target's `min_command_lead`
+    /// (SC-27).
     RejectAtPlan,
     /// Transmit as soon as possible and flag it (SC-27).
     SendAsapAndFlag,
@@ -314,9 +312,9 @@ impl BurstTracker {
     ///
     /// `open` must be `Some` exactly when the block carries `START_OF_BURST`: that
     /// is the block on which the Provider supplies `waveform_len` and the late
-    /// outcome (SC-29a). A burst opened by a *discontinuity* carries neither, so
-    /// its `wraps` is 0 — a discontinuity is an error path the Provider did not
-    /// plan for.
+    /// outcome (SC-29a). A burst opened by a time jump in a block without
+    /// `START_OF_BURST` carries neither, so its `wraps` is 0 — a discontinuity is
+    /// an error path the Provider did not plan for.
     ///
     /// Rule: SC-24, SC-25, SC-26, SC-29, SC-29a.
     pub fn on_block(
@@ -408,8 +406,8 @@ impl BurstTracker {
         });
     }
 
-    /// The late outcome of the open burst, for a burst a **discontinuity** opened.
-    /// Such a burst carries no `START_OF_BURST` and so no [`BurstOpen`], but SC-24a
+    /// The late outcome of the open burst, for a burst opened by a time jump in a
+    /// block without `START_OF_BURST`. Such a burst has no [`BurstOpen`], but SC-24a
     /// still requires the Provider to evaluate SC-27's policy for it; this is the
     /// second path SC-29a names for that one field (SC-24a, SC-27, SC-29a).
     pub fn set_late(&mut self, late: LateOutcome) {

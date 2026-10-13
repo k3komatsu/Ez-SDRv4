@@ -138,10 +138,12 @@ impl fmt::Display for BlockFlags {
 /// Rule: SC-10.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BlockHeader {
-    /// Time of the first sample, in the stream's SampleClock (TM-10, SC-12).
+    /// Time of the first sample, in the stream's SampleClock for a sample-stream
+    /// contract; another contract's Vocabulary sets its domain (TM-10, SC-12, SC-33).
     pub first_sample_time: TimePoint,
-    /// Samples per channel; at least 1, because zero-length blocks are never
-    /// published (SC-10, decision S14).
+    /// Samples per channel for a sample-stream contract; another contract's
+    /// Vocabulary sets the unit (SC-33). At least 1, because zero-length blocks are
+    /// never published (SC-10, decision S14).
     pub len: u32,
     /// Channel count, 1..=64 (SC-10, decision S1).
     pub channels: u16,
