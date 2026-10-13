@@ -95,7 +95,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "A measured relation between two roots: the only path between domains that are\nnot exactly related, and the record every Run carries from its root to `utc`.\n\n`drift` and `drift_uncertainty` are the only floating-point quantities in the\ntime model, and neither reaches a stored `TimePoint` unrounded (TM-14, X9).\n\nRule: TM-5, TM-14, TM-18. Vision §24, §50.",
+  "description": "A measured relation between two roots: the only path between domains that are\nnot exactly related, and the record of a Run's root to `utc`, which every Run's\nManifest carries except in the Simulation class, whose virtual root has none (TM-18).\n\n`drift` and `drift_uncertainty` are the only floating-point quantities in the\ntime model, and neither reaches a stored `TimePoint` unrounded (TM-14, X9).\n\nRule: TM-5, TM-14, TM-18. Vision §24, §50.",
   "properties": {
     "drift": {
       "description": "Dimensionless: target seconds per source second, minus 1. Refused when\nnon-finite, because `serde_json` would otherwise write it as `null` and a\nNaN drift would share a Manifest hash with one that was never measured\n(OV-15, X9).",

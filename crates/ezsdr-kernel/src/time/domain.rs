@@ -150,8 +150,10 @@ pub struct SampleClockRecord {
 
 /// A SampleClock whose id and ratio are fixed but whose origin is not yet known.
 ///
-/// TM-13a allocates both at `prepare`, from the effective post-coercion rate;
-/// TM-13b and TM-13e fix the origin later, at the first sample or at `arm`.
+/// TM-13a allocates both from the effective post-coercion rate: at `prepare` for the
+/// first clock of a stream that exists then, and for a later one when its Provider
+/// declares it. TM-13b fixes a receive clock's origin at its first sample, TM-13e a
+/// transmit clock's, at `arm` for the first one.
 /// Only [`ClockRegistry::declare_sample_clock`] produces one.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SampleClockHandle {
@@ -348,7 +350,8 @@ impl ClockRegistry {
     }
 
     /// Allocates a SampleClock's id and ratio from the effective post-coercion rate.
-    /// The origin is not known yet: TM-13b fixes it at the first sample, TM-13e at `arm`.
+    /// The origin is not known yet: TM-13b fixes it at the first sample, TM-13e at `arm` for a
+    /// stream's first transmit clock; a later clock's origin is the one its Vocabulary places.
     ///
     /// Rule: TM-13a.
     pub fn declare_sample_clock(
