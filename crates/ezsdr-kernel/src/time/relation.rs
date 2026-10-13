@@ -16,7 +16,8 @@ pub struct Validity {
 }
 
 /// A measured relation between two roots: the only path between domains that are
-/// not exactly related, and the record every Run carries from its root to `utc`.
+/// not exactly related, and the record of a Run's root to `utc`, which every Run's
+/// Manifest carries except in the Simulation class, whose virtual root has none (TM-18).
 ///
 /// `drift` and `drift_uncertainty` are the only floating-point quantities in the
 /// time model, and neither reaches a stored `TimePoint` unrounded (TM-14, X9).

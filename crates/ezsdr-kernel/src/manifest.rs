@@ -182,7 +182,9 @@ pub struct ClocksSection {
     /// Every registered domain (TM-12).
     #[serde(default)]
     pub domains: Vec<ClockDomain>,
-    /// Every relation, including the Run's root to UTC with its uncertainty (TM-18).
+    /// In v4.0 the Run's Authority's relations only: its primary root's to `host.monotonic`
+    /// and to `utc`, each with its uncertainty, and none in the Simulation class. A Provider
+    /// with its own timekeeper writes that timekeeper's relation in its own section (TM-18, RS-39).
     #[serde(default)]
     pub relations: Vec<ClockRelation>,
     /// One record per SampleClock, in order, per stream (TM-13d).

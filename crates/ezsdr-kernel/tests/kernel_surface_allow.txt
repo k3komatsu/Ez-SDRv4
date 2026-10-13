@@ -79,7 +79,7 @@ time::TimeError = NEW: the closed failure set that makes TM-2 and TM-8 "nothing 
 time::authority::TimeAuthority = TimeAuthority
 time::authority::ScheduleHandle = TimeAuthority
 time::domain::SampleClockRecord = ClockDomain
-time::domain::SampleClockHandle = NEW: TM-13a's id-and-ratio allocated at prepare, before TM-13b or TM-13e fixes the origin.
+time::domain::SampleClockHandle = NEW: TM-13a's id-and-ratio, allocated at prepare for the first clock of a stream that exists then and later when its Provider declares one, before TM-13b or TM-13e fixes the origin.
 
 # --- data / Stream Contract (audit §13 `data`) -------------------------------
 stream::buffer::BufferRef = BufferRef
