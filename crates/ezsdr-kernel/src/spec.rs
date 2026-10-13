@@ -798,9 +798,9 @@ pub const SPEC_TOP_LEVEL: &[&str] = &[
     "extensions",
 ];
 
-/// Field names a Spec may not carry at any depth outside `extensions`. A Spec
-/// naming an Executor cannot be promoted to a host that lacks one, which is the
-/// regression re-review R21 caught (SB-13, decision B3).
+/// Field names a Spec may not carry at any depth outside `extensions` and any
+/// `schema` (D19, D30). A Spec naming an Executor cannot be promoted to a host that
+/// lacks one, which is the regression re-review R21 caught (SB-13, decision B3).
 pub const PLACEMENT_FIELDS: &[&str] =
     &["placements", "placement", "executor", "memory_domain", "island",
 ];
@@ -1018,9 +1018,9 @@ pub fn check_top_level(doc: &serde_json::Value, allowed: &[&str]) -> Result<(), 
 }
 
 /// Scans a Spec for placement and environment field names at any depth outside
-/// `extensions`. A field-name scan rather than a schema check: a Spec could
-/// otherwise carry placement inside a Vocabulary section and still validate
-/// (SB-13, decision B3).
+/// `extensions` and any `schema`. A field-name scan rather than a schema check: a
+/// Spec could otherwise carry placement inside a Vocabulary section and still
+/// validate (SB-13, decision B3).
 pub fn check_no_placement(doc: &serde_json::Value) -> Result<(), SpecError> {
     fn walk(v: &serde_json::Value, path: &str) -> Result<(), SpecError> {
         match v {

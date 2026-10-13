@@ -101,7 +101,7 @@
       "type": "array"
     },
     "content": {
-      "description": "What to do; namespaced content the Kernel does not interpret (SB-39)."
+      "description": "What to do, by role (SB-39): a Provider fragment's `{ selector, requested }`, a\nSink fragment's `OutputReq`, an Island fragment's `IslandDecl`, and an Authority\nfragment's `null` (SB-24)."
     },
     "id": {
       "$ref": "#/$defs/Ident",

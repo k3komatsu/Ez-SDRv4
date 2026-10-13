@@ -48,7 +48,9 @@ pub struct Fragment {
     pub instance: ModuleRef,
     /// In which role (MA-1).
     pub role: Role,
-    /// What to do; namespaced content the Kernel does not interpret (SB-39).
+    /// What to do, by role (SB-39): a Provider fragment's `{ selector, requested }`, a
+    /// Sink fragment's `OutputReq`, an Island fragment's `IslandDecl`, and an Authority
+    /// fragment's `null` (SB-24).
     pub content: serde_json::Value,
     /// Fragments that must be prepared and armed first (SB-39).
     #[serde(default)]
@@ -277,11 +279,8 @@ pub struct CompileInputs<'a> {
     pub is_session: bool,
 }
 
-/// The stages run in this order, which is re-review R4's correction: schema
-/// validation, semantic validation, resource resolution, binding resolution,
-/// capability matching against the **bound** instances, plan construction,
-/// admission checks, `prepare`, `arm`. Matching cannot precede binding, because the
-/// capabilities being matched are those of the instance that binding chose.
+/// Capability matching uses the **bound** instances and follows binding resolution
+/// (SB-37). The checks and refusals at each stage are table SB-T4's.
 ///
 /// `validate` returns the matched resources, the rejected constraints, the envelope
 /// violations, a preview of the coercions and the warnings. It touches no hardware.

@@ -1648,6 +1648,83 @@ fn sb_39_a_provider_fragment_carries_the_matched_request() {
 }
 
 #[test]
+fn sb_39_a_sink_and_an_island_fragment_carry_their_declarations() {
+    // SB-39 (forward audit 28, decision 6): a Sink fragment's content is its `OutputReq`,
+    // a Session's implicit one included (SB-22c), and an Island fragment's its
+    // `IslandDecl` — what the capture Sink (HD-9) and the coordinator parse.
+    let sink = cf32_sink();
+    let mut fx = Fixture::new();
+    fx.sinks = [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)]
+        .into_iter()
+        .collect();
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let content = |plan: &ezsdr_kernel::plan::ExecutionPlan, name: &str| {
+        plan.fragments
+            .iter()
+            .find(|f| f.id == id(name))
+            .expect("a fragment")
+            .content
+            .clone()
+    };
+
+    let mut spec = minimal_spec();
+    let mut rec = output("rec");
+    rec.params.insert(key("test.count"), Value::from(3));
+    spec.outputs.push(rec.clone());
+    let mut component = support::source_component(support::cf32());
+    component.timing.budget = Some(
+        ezsdr_kernel::time::RelativeBudget::new(ezsdr_kernel::time::Duration::new(
+            ClockDomainId::HOST_MONOTONIC, 1_000_000,
+        )).expect("a positive budget"),
+    );
+    spec.graph.components.insert(id("source"), component);
+    let mut profile = profile_binding(&["radio"]);
+    profile.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
+    bind_exec(&mut profile);
+    let placed = IslandDecl {
+        components: vec![member("source")],
+        affinity: Some(vec![1, 3]),
+        rt_policy: Some(ezsdr_kernel::module_api::RtPolicy {
+            sched: "fifo".to_owned(), priority: 50,
+        }),
+        ..island(3, "exec")
+    };
+    profile.placements.islands = vec![placed.clone()];
+    select_test_links(&spec, &mut profile);
+    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
+    assert_eq!(
+        serde_json::from_value::<OutputReq>(content(&built, "rec")).expect("an OutputReq"),
+        rec
+    );
+    assert_eq!(
+        serde_json::from_value::<IslandDecl>(content(&built, "island_3")).expect("an IslandDecl"),
+        placed
+    );
+
+    // A Session's Sink fragment carries the implicit Spec's output (SB-T2 row 2).
+    fx.is_session = true;
+    let mut session = profile_binding(&["radio"]);
+    session.bindings.insert(
+        id("rec"),
+        ezsdr_kernel::binding::Binding {
+            feed: Some(radio_feed(4)),
+            ..bind("ezsdr.test.sink")
+        },
+    );
+    let implicit =
+        ezsdr_kernel::session::implicit_spec(&session, &fx.registry, &providers, &fx.sinks)
+            .expect("derives");
+    select_test_links(&implicit, &mut session);
+    let built = validate_then_plan(&implicit, &session, &fx.inputs(&providers))
+        .expect("the Session plans");
+    assert_eq!(
+        serde_json::from_value::<OutputReq>(content(&built, "rec")).expect("an OutputReq"),
+        output("rec")
+    );
+}
+
+#[test]
 fn sb_40_the_plan_carries_no_transfer_costs() {
     // The Core neither measures nor uses transfer costs, so the plan has no field for
     // one: a plan document naming `transfer_costs` does not parse.

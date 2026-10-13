@@ -188,7 +188,7 @@ The pressure to add expressions is real: v3 grew `CONSTANTS` and `!COMPUTE(...)`
 
 The real-time path must never parse or interpret ExperimentSpec.
 
-Compilation runs in a fixed order: schema validation, semantic validation, resource resolution, binding resolution, capability matching against the bound instances, plan construction, admission checks, `prepare`, `arm`. Matching follows binding, because the capabilities matched are those of the instance the binding chose. `validate()` reports what it finds; `plan()` runs the same structural and endpoint checks again through the same functions rather than presuming `validate()` ran, and refuses anything not admitted. `prepare` returns a PrepareReport per fragment, and `arm` fixes what only it can: each transmit SampleClock's origin and each scheduled time. Everything after `arm` is the real-time side, which receives an ExecutionPlan and never a Spec.
+Matching follows binding, because the capabilities matched are those of the instance the binding chose (SB-37). Table SB-T4 defines the checks and refusals at each stage. `validate()` reports what it finds; `plan()` runs the same structural and endpoint checks again through the same functions rather than presuming `validate()` ran, and refuses anything not admitted. `prepare` returns a PrepareReport per fragment, and `arm` fixes what only it can: each transmit SampleClock's origin and each scheduled time. Everything after `arm` is the real-time side, which receives an ExecutionPlan and never a Spec.
 
 Normative: [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-37…SB-43 (which stage checks what: table SB-T4).
 

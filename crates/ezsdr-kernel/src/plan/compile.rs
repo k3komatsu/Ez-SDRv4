@@ -139,7 +139,9 @@ pub(super) fn plan(
             id: output.id.clone(),
             instance: bound(&output.id)?,
             role: Role::Sink,
-            content: serde_json::to_value(output).unwrap_or(serde_json::Value::Null),
+            content: serde_json::to_value(output).map_err(|e| SpecError::Structural {
+                reason: format!("SB-39: {}'s fragment: {e}", output.id),
+            })?,
             after: Vec::new(),
         });
     }
@@ -155,7 +157,9 @@ pub(super) fn plan(
             })?,
             instance: bound(&island.executor)?,
             role: Role::Executor,
-            content: serde_json::to_value(island).unwrap_or(serde_json::Value::Null),
+            content: serde_json::to_value(island).map_err(|e| SpecError::Structural {
+                reason: format!("SB-39: island_{}'s fragment: {e}", island.id.local),
+            })?,
             after: Vec::new(),
         });
     }
