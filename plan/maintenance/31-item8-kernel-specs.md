@@ -2,7 +2,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| 状態 | **承認済み（owner 2026-10-13「推奨で進めてください」：D2 は Opus のサブエージェント、D3 は入れる）。第2版。Sol 6.1 の独立レビューを全件反映済み（§7）。段階8a から着手。** |
+| 状態 | **承認済み（owner 2026-10-13「推奨で進めてください」：D2 は Opus のサブエージェント、D3 は入れる）。段階8a〜8e完了（06・01・02・03），判断1・4・6は反映済み。次は8f（04と小さな残り）→8g（05，§8 E3必須）→8h。全体は未完了。計画の独立レビュー反映は§7，8eの決定と検証は§8。** |
 | 作成日 | 2026-10-13 |
 | 調査時の基準 | `main`、HEAD `05b3c56`、作業ツリー clean |
 | 対象 | 凍結前の改修の項目8（[24-prefreeze-audit.md](24-prefreeze-audit.md) §8、F44）。これは spec 22 の DA-3 の手順4（owner 承認 2026-10-07）にあたる。前向き監査の判断1・4・6（[28-forward-audit.md](28-forward-audit.md)、owner 承認 2026-10-10）も入れる |
@@ -130,3 +130,13 @@ D1（全 spec を DA-1 の書式にすること）と D4（Vision §21 の修正
 | R6 P2 | 対象の一覧を HEAD に合わせ、未修正・注記済み・修正済みを分ける。spec 06 の冒頭の範囲の表を加える。経緯の印の数え方を明記する | §2 E1・E2、§4.2 |
 | R7 P2 | 判断6のコードは、単純な `?` ではなく既存のエラーの変換に合わせる。Sink と Island の両方を検査する | §4.2 |
 | 総括 | D1・D4 は承認済みの内容の確認で、決め直しは不要。D3 の「凍結前にしか直せない」は言い過ぎ | §5 |
+
+## 8. 段階8eの決定と8gへの必須持越し
+
+ownerは2026-10-13、独立レビューのE1/E2/E3に対するquestionへ「推奨どおり進める」を承認した。これは書式だけでなく、次の意味の明確化の承認である。
+
+- **E1（8e）:** SB-37はbinding→matching（bound instanceのcapabilityを比較する）の関係だけを定め、各段階の検査・拒否は既存SB-T4を正本として参照する。`plan.rs`のpipeline docとVision §10の写しも同期する。本番制御フローは並べ替えない。
+- **E2（8e）:** SB-15aの「only」の範囲はportのdirection/contract検査に限る。placementとendpoint memory-domain reachabilityはMA-39を参照する。既存reachability検査は削除・弱化しない。
+- **E3（8g必須）:** `design/05-module-api.md` MA-12のreport自己申告を根拠にするcoercion例外を、SB-46の例外条件への参照に縮約する。安全なSB-46と実装を維持し、既存bypass拒否テスト`sb_44_a_provider_may_not_exempt_a_key_by_declaring_a_coercion`（および`sb_46_an_accepted_coercion_survives_prepare`）の拒否・許可条件を確認する。8gのbriefに必ず入れ、凍結前に閉じる。8eではspec05を編集しない。
+
+**段階8eの検証記録:** 独立レビューのR1（Islandの非既定contentを固定するテスト）とR2（規則内の理由文）を修正し、再レビューは`PASS_WITH_RISK`（残るE3は上記8gへの承認済み持越し）。`cargo test --workspace`、workspace clippy（all-targets、`-D warnings`）、kernel/serverのschema freeze、`rules.py --base 55cbb2d`とself-test、diff checkは成功。全mutation gate（`all sim02:8,sim03:8`）は734/735、追加J328・J329・J330はすべてkilled。唯一のSURVIVEDは従来のphase7/G09（handoff §4、plan 30 §15に記録済み）で、remote runnerの終了コードは1。全行成功とは扱わず、既知例外以外に生き残り・実行漏れなしと記録する。ログとレビューは`~/.cache/ezsdr-fixes/2026-10-13-item8/03-gate-*.log`および`sol-03-review.md`・`sol-03-recheck.md`。ownerの指示でhandoffとともにcommit・pushする。

@@ -3527,5 +3527,35 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_33_a_stopped_stream_s_tail_comes_before_the_next_stream"
+ },
+ {
+  "id": "J328",
+  "name": "SB-39: a Sink fragment's content is null instead of its OutputReq (decision 6)",
+  "file": "crates/ezsdr-kernel/src/plan/compile.rs",
+  "old": "            content: serde_json::to_value(output).map_err(|e| SpecError::Structural {\n                reason: format!(\"SB-39: {}'s fragment: {e}\", output.id),\n            })?,",
+  "new": "            content: serde_json::Value::Null,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_39_a_sink_and_an_island_fragment_carry_their_declarations"
+ },
+ {
+  "id": "J329",
+  "name": "SB-39: an Island fragment's content is null instead of its IslandDecl (decision 6)",
+  "file": "crates/ezsdr-kernel/src/plan/compile.rs",
+  "old": "            content: serde_json::to_value(island).map_err(|e| SpecError::Structural {\n                reason: format!(\"SB-39: island_{}'s fragment: {e}\", island.id.local),\n            })?,",
+  "new": "            content: serde_json::Value::Null,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_39_a_sink_and_an_island_fragment_carry_their_declarations"
+ },
+ {
+  "id": "J330",
+  "name": "SB-39: an Island fragment drops affinity and rt_policy from its IslandDecl (R1)",
+  "file": "crates/ezsdr-kernel/src/plan/compile.rs",
+  "old": "            content: serde_json::to_value(island).map_err(|e| SpecError::Structural {\n                reason: format!(\"SB-39: island_{}'s fragment: {e}\", island.id.local),\n            })?,",
+  "new": "            content: serde_json::json!({ \"id\": island.id, \"executor\": island.executor, \"components\": island.components }),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_39_a_sink_and_an_island_fragment_carry_their_declarations"
  }
 ]
