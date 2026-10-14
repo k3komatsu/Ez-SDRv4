@@ -1,6 +1,6 @@
 # Ez-SDR v4 — Architecture Vision · Part 08: Future Workloads and Targets
 
-> Sections §42–§49 of the Ez-SDR v4 Architecture Vision. Section numbers are stable across all parts and are the reference unit used by `design/v4-vision-audit.md` and `design/v4-vision-rereview.md`. Status, reading guide and revision history: [Ez-SDR_v4_ARCHITECTURE_VISION.md](../../Ez-SDR_v4_ARCHITECTURE_VISION.md).  
+> Sections §42–§49 of the Ez-SDR v4 Architecture Vision. Section numbers are stable across all parts and are the reference unit used by `design/archive/v4-vision-audit.md` and `design/archive/v4-vision-rereview.md`. Status, reading guide and revision history: [Ez-SDR_v4_ARCHITECTURE_VISION.md](../../Ez-SDR_v4_ARCHITECTURE_VISION.md).  
 > ← [Part 07: Peripherals and Host I/O](07-peripherals-and-host-io.md) · [Index](../../Ez-SDR_v4_ARCHITECTURE_VISION.md) · [Part 09: Provenance, Validation and Ownership](09-provenance-validation-and-ownership.md) →
 
 ---

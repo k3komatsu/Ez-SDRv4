@@ -1,6 +1,6 @@
 # Ez-SDR v4 — Architecture Vision · Part 03: Simulation, Mock and Time
 
-> Sections §12–§17 of the Ez-SDR v4 Architecture Vision. Section numbers are stable across all parts and are the reference unit used by `design/v4-vision-audit.md` and `design/v4-vision-rereview.md`. Status, reading guide and revision history: [Ez-SDR_v4_ARCHITECTURE_VISION.md](../../Ez-SDR_v4_ARCHITECTURE_VISION.md).  
+> Sections §12–§17 of the Ez-SDR v4 Architecture Vision. Section numbers are stable across all parts and are the reference unit used by `design/archive/v4-vision-audit.md` and `design/archive/v4-vision-rereview.md`. Status, reading guide and revision history: [Ez-SDR_v4_ARCHITECTURE_VISION.md](../../Ez-SDR_v4_ARCHITECTURE_VISION.md).  
 > ← [Part 02: ExperimentSpec, BindingProfile and Compilation](02-spec-binding-and-compilation.md) · [Index](../../Ez-SDR_v4_ARCHITECTURE_VISION.md) · [Part 04: Execution Model and Data Contracts](04-execution-model-and-data-contracts.md) →
 
 ---
@@ -62,34 +62,25 @@ An AI agent should be able to:
 
 ## The Timing Envelope, and why Mock must enforce it
 
-"Change only the BindingProfile" holds only if the constraints of the hardware are (a) visible at `validate()` time and (b) enforced by the Mock. The constraints are concrete: a minimum lead time for timed commands, a start-up latency (PPS synchronisation takes up to two seconds), a tail of buffered samples after stop, coercion of sample rate / gain / frequency to a device grid, a restart gap after an RX overflow (UHD restarts a continuous stream about 50 ms later), a bounded timed-command queue, and alignment constraints for repeat waveforms held in device memory.
+"Change only the BindingProfile" holds only if the constraints of the hardware are (a) visible at `validate()` time and (b) enforced by the Mock. The constraints are concrete: a minimum lead time for timed commands, a start-up latency (PPS synchronisation takes up to two seconds), the time a device needs before a stream can start again, coercion of sample rate / gain / frequency to a device grid, a restart gap after an RX overflow (UHD restarts a continuous stream about 50 ms later), a bounded timed-command queue, and alignment constraints for repeat waveforms held in device memory.
 
 A software radio that accepts everything is the OpenAirInterface `rfsimulator` pattern: it implements the same device interface as real hardware but never emulates late, underflow or overflow, so experiments pass in software and fail on the bench.
 
-Therefore the Radio Model requires every Provider to publish, next to its PerformanceEnvelope (§34), timing values as capabilities:
+The Radio Model requires every Provider to publish its timing values as capabilities next to its PerformanceEnvelope (§34).
 
-```text
-TimingEnvelope capabilities (RM-6)
-├── radio.timing.min_timed_command_lead_ns
-├── radio.timing.startup_latency_ns
-├── radio.timing.stop_tail_ns
-├── radio.timing.command_queue_depth
-├── radio.timing.overflow_restart_gap_ns
-├── radio.timing.restart_lead_ns
-└── radio.timing.start_lead_ns
-```
-
-The Radio Model Vocabulary defines coercion rules; supported grids, such as the values in `radio.rx.sample_rate_hz` and `radio.tx.sample_rate_hz`, are declared as capabilities. A Provider also exposes its command lead through the generic `ProviderInstance.min_command_lead`. The Kernel uses that field for Action admission and the pre-start `RejectAtPlan` check; it does not read `radio.timing.*` by name (KA-7).
+The Radio Model Vocabulary defines coercion rules; supported grids, such as the values in `radio.rx.sample_rate_hz` and `radio.tx.sample_rate_hz`, are declared as capabilities. A Provider also exposes its command lead through the generic `ProviderInstance.min_command_lead`. The Kernel uses that field for Action admission and the pre-start `RejectAtPlan` check; it does not read `radio.timing.*` by name (MA-10; RS-19, KC-19).
 
 and the following are rules, not options:
 
-1. **MockRadio enforces the envelope of the profile it emulates** (`x310-like`): it refuses `start(T0)` before synchronization ends, rather than starting late (MR-11); a timed command issued with insufficient lead produces the same typed `LATE_COMMAND` / `TIME_ERROR` event as the hardware; requested rates are coerced on the same grid and reported in each fragment's PrepareReport (§11); `stop` delivers the same tail; an injected overflow reproduces the RM-17/MR-21 restart gap and block flags (§23); and a request that exceeds the profile's PerformanceEnvelope (§34), channel count × rate × format beyond the emulated transport, is rejected at `validate()` / `prepare()`, so a four-channel 200 Msps request fails on a 1GbE-like profile in simulation as it would on the bench.
+1. **MockRadio enforces the envelope of the profile it emulates** (`x310-like`): it refuses `start(T0)` before synchronization ends, rather than starting late (MR-11); a timed command issued with insufficient lead produces the same typed `LATE_COMMAND` / `TIME_ERROR` event as the hardware; requested rates are coerced on the same grid and reported in each fragment's PrepareReport (§11); `stop` ends where the device's does; an injected overflow reproduces the RM-17/MR-21 restart gap and block flags (§23); and a request that exceeds the profile's PerformanceEnvelope (§34), channel count × rate × format beyond the emulated transport, is rejected at `validate()` / `prepare()`, so a four-channel 200 Msps request fails on a 1GbE-like profile in simulation as it would on the bench.
 2. **Timing requirements are checked at the layer that owns them.** The generic matcher compares requested timing constraints with the bound Provider's declared TimingEnvelope capabilities at `validate()`; for Actions, the Kernel uses only `ProviderInstance.min_command_lead`, and the target Provider enforces its own timed commands. Mock and hardware follow the same checks.
 3. **RF behaviour is not part of the envelope.** Propagation stays in the SimulationChannel (§16); the device's own RF behaviour — gain, LO phase, clipping, path delay — belongs to the radio model (MR-32…MR-36). RF behaviour no bound model covers is reported as unmodelled (§14).
 
-Profiles are versioned. An `x310-like` profile carries a version that the Manifest records in its `mock.*` section, and its envelope values come from measurement on the hardware, not from data sheets (§59). An `ideal` profile without constraints may exist for algorithm work; a Run on it is recorded with `timing: none` and `coercion: none` and is not evidence for promotion.
+Profiles are versioned. An `x310-like` profile carries a version that the Manifest records in its `ezsdr.radio.mock.envelope` section, and its envelope values come from measurement on the hardware, not from data sheets (§59). An `ideal` profile without constraints may exist for algorithm work; a Run on it is recorded with `timing: none` and `coercion: none` and is not evidence for promotion.
 
 The first MockRadio implementation must enforce the envelope. It is a few timestamp comparisons, and it is the difference between a validation tool and a source of false confidence.
+
+Normative: [design/07-radio-model.md](../07-radio-model.md), rules RM-4, RM-6, RM-20; [design/09-mock-radio.md](../09-mock-radio.md), rules MR-3, MR-11.
 
 ---
 
@@ -97,7 +88,7 @@ The first MockRadio implementation must enforce the envelope. It is a few timest
 
 Every Run must record what kind of evidence it represents.
 
-The ExecutionClass is one of Simulation, RealtimeEmulation, HardwareInLoop and Hardware. It is derived at binding resolution from two axes — whether the Time Authority is the Simulation Engine (free-running or wall-paced) or a device timekeeper (§15), and whether the RF path is simulated, cabled or over the air — and cross-checked against any `ezsdr.time` class the environment declares; a simulated Authority on a real RF path is refused. The class never changes during a Run. Determinism is a property of the Simulation class only, and only with a recorded seed: RealtimeEmulation trades it for real deadlines, and HardwareInLoop and Hardware are never deterministic. A single label cannot express "timing is modelled, RF is not", so every Run records a **fidelity vector** over five aspects — timing (lead times, start-up, stop tail, queue depth), continuity (overflow gaps, restarts, sequence errors), coercion (rate, gain and frequency grids), rf (SimulationChannel models, §16) and transport (packetisation, NIC behaviour) — each the weakest value any bound Provider declares, with `real` at the top of every aspect so that a Hardware Run has something to record. A Simulation Run's virtual root need not have a relation to UTC; transition `host_utc_nanos` values place its lifecycle transitions on the wall clock.
+The ExecutionClass is one of Simulation, RealtimeEmulation, HardwareInLoop and Hardware. It is derived at binding resolution from two axes — whether the Time Authority is the Simulation Engine (free-running or wall-paced) or a device timekeeper (§15), and whether the RF path is simulated, cabled or over the air — and cross-checked against any `ezsdr.time` class the environment declares; a simulated Authority on a real RF path is refused. The class never changes during a Run. Determinism is a property of the Simulation class only, and only with a recorded seed: RealtimeEmulation trades it for real deadlines, and HardwareInLoop and Hardware are never deterministic. A single label cannot express "timing is modelled, RF is not", so every Run records a **fidelity vector** over five aspects — timing (lead times, start-up, restart readiness, queue depth), continuity (overflow gaps, restarts, sequence errors), coercion (rate, gain and frequency grids), rf (SimulationChannel models, §16) and transport (packetisation, NIC behaviour) — each the weakest value any bound Provider declares, with `real` at the top of every aspect so that a Hardware Run has something to record. A Simulation Run's virtual root need not have a relation to UTC; transition `host_utc_nanos` values place its lifecycle transitions on the wall clock.
 
 Normative: [design/05-module-api.md](../05-module-api.md), rules MA-41, MA-42; [design/04-run-and-session.md](../04-run-and-session.md), rules RS-41, RS-42.
 

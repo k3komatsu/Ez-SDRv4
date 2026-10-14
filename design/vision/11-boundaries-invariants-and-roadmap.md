@@ -1,6 +1,6 @@
 # Ez-SDR v4 — Architecture Vision · Part 11: Boundaries, Invariants and Roadmap
 
-> Sections §62–§68 of the Ez-SDR v4 Architecture Vision. Section numbers are stable across all parts and are the reference unit used by `design/v4-vision-audit.md` and `design/v4-vision-rereview.md`. Status, reading guide and revision history: [Ez-SDR_v4_ARCHITECTURE_VISION.md](../../Ez-SDR_v4_ARCHITECTURE_VISION.md).  
+> Sections §62–§68 of the Ez-SDR v4 Architecture Vision. Section numbers are stable across all parts and are the reference unit used by `design/archive/v4-vision-audit.md` and `design/archive/v4-vision-rereview.md`. Status, reading guide and revision history: [Ez-SDR_v4_ARCHITECTURE_VISION.md](../../Ez-SDR_v4_ARCHITECTURE_VISION.md).  
 > ← [Part 10: Implementation Path and Testing](10-implementation-path-and-testing.md) · [Index](../../Ez-SDR_v4_ARCHITECTURE_VISION.md)
 
 ---

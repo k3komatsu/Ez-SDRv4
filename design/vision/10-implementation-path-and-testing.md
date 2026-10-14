@@ -1,6 +1,6 @@
 # Ez-SDR v4 — Architecture Vision · Part 10: Implementation Path and Testing
 
-> Sections §57–§61 of the Ez-SDR v4 Architecture Vision. Section numbers are stable across all parts and are the reference unit used by `design/v4-vision-audit.md` and `design/v4-vision-rereview.md`. Status, reading guide and revision history: [Ez-SDR_v4_ARCHITECTURE_VISION.md](../../Ez-SDR_v4_ARCHITECTURE_VISION.md).  
+> Sections §57–§61 of the Ez-SDR v4 Architecture Vision. Section numbers are stable across all parts and are the reference unit used by `design/archive/v4-vision-audit.md` and `design/archive/v4-vision-rereview.md`. Status, reading guide and revision history: [Ez-SDR_v4_ARCHITECTURE_VISION.md](../../Ez-SDR_v4_ARCHITECTURE_VISION.md).  
 > ← [Part 09: Provenance, Validation and Ownership](09-provenance-validation-and-ownership.md) · [Index](../../Ez-SDR_v4_ARCHITECTURE_VISION.md) · [Part 11: Boundaries, Invariants and Roadmap](11-boundaries-invariants-and-roadmap.md) →
 
 ---
@@ -102,7 +102,7 @@ Hardware-specific extensions are allowed.
 
 Hardware-specific rewrites of experiment logic should not be the normal path.
 
-The parity test also measures the hardware's envelope — minimum timed-command lead, coercion grid, stop tail, restart gap, sustainable throughput — and **fails if the Mock profile is more permissive than the measurement**. Profile values are updated from that measurement and the profile version is bumped. A Mock that is stricter than the hardware is acceptable; one that is looser is a defect.
+The parity test also measures the hardware's envelope — minimum timed-command lead, coercion grid, start lead and restart readiness, restart gap, sustainable throughput — and **fails if the Mock profile is more permissive than the measurement**. Profile values are updated from that measurement; versions follow AGENTS.md §6 (no version changes before the v4.0 freeze). A Mock that is stricter than the hardware is acceptable; one that is looser is a defect.
 
 ---
 
