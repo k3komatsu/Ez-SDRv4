@@ -220,7 +220,7 @@ pub fn command_instant(line: Option<&Line>, at: Option<i64>, now: i64, seq: u64,
     (e, asked < now || e > base)
 }
 
-/// RM-15: the instant a burst on a transmit clock with origin `origin` is decided at: `now`,
+/// RM-14, RM-15: the instant a burst on a transmit clock with origin `origin` is decided at: `now`,
 /// or, before that clock begins, `lead` before its origin, so that a burst decided on time
 /// never starts before the origin and one that would is late.
 pub fn decided_at(now: i64, origin: i64, lead: i64) -> i64 {
