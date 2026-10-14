@@ -9,7 +9,8 @@ Compares the accepted texts at a base revision with the working tree and fails w
 - a test name the base cites is no longer cited and not listed in `--renames`, a renamed
   test is not cited or not a test, or a newly cited name is no test (`#[test] fn` or
   `def test_`) — only the names in KNOWN_MISSING may be cited without existing;
-- a relative link does not resolve;
+- a relative link does not resolve, in the accepted texts or in any other tracked Markdown file
+  (links inside code spans and fenced blocks are text, not links);
 - a mutation row's `old`, or its `old2` after `old` is replaced as `mutate.py` does it,
   does not occur exactly once (a string check; `mutate.py` is not run);
 - a file's history markers or lines over 1 500 characters grow outside its closing
@@ -39,7 +40,8 @@ DEFINITION = re.compile(rf"^(?:- \*\*({RID})\*\* |#{{2,4}} ({RID})(?: |$))", re.
 TICKED = re.compile(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`")
 TEST_LIKE = re.compile(r"^(?:[a-z]+\d*_\d{2}[a-z0-9]*_|test_)")  # ur_07_…, v58_16_…, sb_49a_…, test_…
 LINK = re.compile(r"\]\(([^)#\s]+)(?:#[^)]*)?\)")
-MARKER = re.compile(r"\((?:Phase \d+|K[A-Z]-\d+|Review [A-Z]\b|review [A-Z0-9-]+|issue #\d+|owner, 20\d\d)[^)]*\)"
+CODE = re.compile(r"```.*?```|`[^`\n]*`", re.S)
+MARKER = re.compile(r"\((?:Phase \d+|K[ABD-Z]-\d+|Review [A-Z]\b|review [A-Z0-9-]+|issue #\d+|owner, 20\d\d)[^)]*\)"
                     r"|\*(?:Settled in|Forward|Superseded)|Amended in Phase|(?<![\w/])#\d{2,3}\b")
 LONG = 1500
 HANDOFF_LINES, HANDOFF_BYTES = 300, 40000
@@ -108,9 +110,7 @@ def check(base, head, tests, renames, exists=os.path.exists, known_missing=KNOWN
     for name in sorted(h_cited - tests - known_missing):
         problems.append(f"cited test {name} is no #[test] fn or def test_ in the tree")
     for path, text in head.items():
-        for target in LINK.findall(text):
-            if not target.startswith(("http:", "https:", "mailto:")) and not exists(os.path.normpath(os.path.join(os.path.dirname(path), target))):
-                problems.append(f"{path}: link {target} does not resolve")
+        problems += broken_links(path, text, exists)
         for what, count in (("history markers", lambda t: len(MARKER.findall(body(t)))),
                             ("lines over 1 500 characters", lambda t: sum(len(l) > LONG for l in body(t).split("\n")))):
             if count(text) > count(base.get(path, "")):
@@ -128,6 +128,13 @@ def handoff_problems(handoff):
         problems.append(f"handoff.md has {lines} lines and {len(handoff.encode('utf-8'))} bytes, over {HANDOFF_LINES} or "
                         f"{HANDOFF_BYTES}: move finished records to their plan files, do not raise the limit")
     return problems
+
+
+def broken_links(path, text, exists=os.path.exists):
+    """The relative links of one Markdown file that do not resolve; code is not searched."""
+    return [f"{path}: link {target} does not resolve" for target in LINK.findall(CODE.sub("", text))
+            if not target.startswith(("http:", "https:", "mailto:"))
+            and not exists(os.path.normpath(os.path.join(os.path.dirname(path), target)))]
 
 
 def rows_exact_once(rows_of, read):
@@ -246,6 +253,9 @@ def self_test():
             "mutation row maintenance/Z3 old occurs 0 times in a.rs",
             "mutation row maintenance/Z5 old2 occurs 0 times in a.rs after old is replaced"]
     assert got == want, got  # Z6's old2 is made by its new: accepted, as mutate.py would
+    assert not run({**base, "design/02-y.md": two.replace("SC-1** d", "SC-1** d (KC-24)")}), "self-test: a KC citation is no marker"
+    assert broken_links("plan/x.md", "[a](gone.md) `[b](gone.md)`\n```\n[c](gone.md)\n```\n", lambda p: False) == \
+        ["plan/x.md: link gone.md does not resolve"], "self-test: links in code are text"
     ok = "x\n" * 300
     assert handoff_problems(ok) == [], "self-test: 300 lines"
     assert handoff_problems(ok + "x"), "self-test: 301 lines, the last without a newline"
@@ -278,6 +288,9 @@ def main():
                                 lambda f: open(f, encoding="utf-8").read() if os.path.exists(f) else "")
     read = lambda f: open(f, encoding="utf-8").read() if os.path.exists(f) else None
     problems += handoff_problems(read("handoff.md"))
+    tracked = subprocess.run(["git", "ls-files", "*.md"], capture_output=True, text=True, check=True).stdout.split()
+    for path in sorted(set(tracked) - set(paths)):
+        problems += broken_links(path, read(path) or "")
     if "--sentences" in args:
         sentences(base, head)
     for p in problems:
