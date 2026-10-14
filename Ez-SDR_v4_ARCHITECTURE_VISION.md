@@ -1,11 +1,11 @@
 # Ez-SDR v4 — Architecture Vision
 
-> **Status:** Architecture vision / design contract. Phase 1 and Phase 2's normative specifications are accepted and live in `design/01-*.md` through `design/10-*.md`; where a section here says `Normative:`, the spec it names is the contract and the section keeps the reasons.
+> **Status:** Architecture vision / design contract. The accepted specifications live in `design/01-time-model.md` through `design/11-simulation-channel.md`, `design/14-native-executor.md`, `design/16-easy-api.md` and `design/18-uhd-radio.md`; cross-cutting decisions remain in `plan/phase1/00-overview.md` … `plan/phase7/00-overview.md`, with the maintenance specs under `plan/maintenance/`. Where a section here says `Normative:`, the spec it names is the contract and the section keeps the reasons.
 >
 > **Audience:** Ez-SDR developers, Codex/AI coding agents, reviewers, future contributors  
 > **Purpose:** Define what Ez-SDR v4 is trying to become, what its Core must and must not own, and which architectural properties must remain true before implementation begins.  
 > **Non-purpose:** This is not the final Rust API, wire protocol, JSON Schema, WASM ABI, scheduler implementation, or UHD adapter specification.  
-> **Structure:** The Vision is split into eleven part files under `design/vision/`. Section numbers §1–§68 are stable across all parts and are the reference unit used by `design/v4-vision-audit.md` and `design/v4-vision-rereview.md`. This file is the index, the reading guide and the revision history.  
+> **Structure:** The Vision is split into eleven part files under `design/vision/`. Section numbers §1–§68 are stable across all parts and are the reference unit used by `design/archive/v4-vision-audit.md` and `design/archive/v4-vision-rereview.md`. This file is the index, the reading guide and the revision history.  
 > **Shapes are illustrative:** the `{ ... }` and tree blocks in the parts show concept shapes, not final schemas. Normative schemas (Stream Contract, time model, Session, BindingProfile, PrepareReport, Manifest) live in the `design/` specifications and in the committed JSON Schemas under `schemas/`.
 
 ---
@@ -20,10 +20,10 @@ Design principle: **Simple by default, powerful when needed.** Development princ
 
 ## How to read
 
-- New readers: Part 01 (why, the three Core tiers, what must not be in Core), then Part 11 §65 (the 42 invariants), then Part 03 (why simulation is a peer of hardware).
-- Implementers: normative text is in `design/01-time-model.md` through `design/10-host-data-path.md`; cross-cutting decisions remain in `plan/phase1/00-overview.md` and `plan/phase2/00-overview.md`. Parts 02, 04 and 05 keep the reasons behind them — §8 (composite resources, BindingProfile), §10–§11 (compilation, PrepareReport), §15 (time), §19–§23 (descriptors, DataContracts, TxBurst, Stream Contract), §25–§29 (coherence, calibration, mutation, continuity, events). Part 10 lists the acceptance tests (§58).
+- The order: this index's "How to read", then Part 01 (why, the three Core tiers, what must not be in Core), then Part 11 §65 (the 42 invariants), then the applicable accepted specs and the phase overview, then Part 10 §58 (the acceptance tests).
+- Implementers: normative text is in `design/01-time-model.md` through `design/11-simulation-channel.md`, `design/14-native-executor.md`, `design/16-easy-api.md` and `design/18-uhd-radio.md`; each phase's decisions and governance log is `plan/phase1/00-overview.md` … `plan/phase7/00-overview.md`, with the maintenance specs under `plan/maintenance/`. Parts 02, 04 and 05 keep the reasons behind them — §8 (composite resources, BindingProfile), §10–§11 (compilation, PrepareReport), §15 (time), §19–§23 (descriptors, DataContracts, TxBurst, Stream Contract), §25–§29 (coherence, calibration, mutation, continuity, events). Part 10 lists the acceptance tests (§58).
 - Provider and Executor authors: Parts 06–08.
-- Reviewers: the audit (`design/v4-vision-audit.md`) and re-review (`design/v4-vision-rereview.md`) cite sections as §N; use the section index below to find the file.
+- Reviewers: the audit (`design/archive/v4-vision-audit.md`) and re-review (`design/archive/v4-vision-rereview.md`) cite sections as §N; use the section index below to find the file.
 - The whole Vision as one stream: `cat design/vision/*.md`.
 
 ---
@@ -124,8 +124,8 @@ Design principle: **Simple by default, powerful when needed.** Development princ
 ## Related documents
 
 - `design/archive/Ez-SDR_v4_core_module_architecture.md` — the former Core / Module Architecture Principles document, **retired 2026-09-21**. Kept only for the `CMA §N` citations in the audit documents; its content is covered by the Vision (section map at the top of the archived file).
-- `design/v4-vision-audit.md` — Phase 0 adversarial architecture audit (Findings 1–34).
-- `design/v4-vision-rereview.md` — re-review of the revised Vision (Findings R1–R22).
+- `design/archive/v4-vision-audit.md` — Phase 0 adversarial architecture audit (Findings 1–34).
+- `design/archive/v4-vision-rereview.md` — re-review of the revised Vision (Findings R1–R22).
 - `v3/` — the previous implementation, a source of behavioural requirements only (§1, §61).
 
 ---
@@ -158,3 +158,4 @@ Design principle: **Simple by default, powerful when needed.** Development princ
 | 2026-10-12, audit item 3 | Pre-freeze audit item 3 (`plan/maintenance/29-amendments.md`, owner-approved plan 2026-10-11): §3's admission sentence checks the parameter's declared update class before the registered checks and the coercion policy, as spec 06's KC-24 orders them, and the `Normative:` line names KC-24; §19's ComponentDescriptor params may declare no update class, meaning fixed for the Run. Section numbers and part navigation unchanged. |
 | 2026-10-13, item 8 | Pre-freeze item 8 (`plan/maintenance/31-item8-kernel-specs.md`) with the forward audit's decision 4 (`plan/maintenance/28-forward-audit.md`, owner decision 2026-10-10): §21's list of the contracts available at v4.0 drops `ezsdr.event.<schema-id>`, which no code registers; spec 02's SC-33 leaves the time domain, length unit and direction of another contract's blocks to its Vocabulary, and §21's `Normative:` line names it. Section numbers and part navigation unchanged. |
 | 2026-10-13, item 8e | Owner-approved clarification (`plan/maintenance/31-item8-kernel-specs.md` §8): §10 keeps binding before capability matching (SB-37) and refers each stage's checks and refusals to SB-T4, removing the old total stage-order list. No implementation ordering change; section numbers and part navigation unchanged. |
+| 2026-10-14, documentation fixes | Applies spec 22's Vision issues and the documentation fixes D1, D7, D8 and D9: §13 no longer copies RM-6's key tree — the Radio Model publishes its timing values as capabilities (RM-4, RM-6) — rule 1 says `stop` ends where the device's does, the Manifest section is named (`ezsdr.radio.mock.envelope`) and the withdrawn `KA-7` citation is MA-10's; §14's fidelity vector says restart readiness; §59 says start lead and restart readiness, and that versions follow AGENTS.md §6; the accepted-spec set is 01–11, 14, 16 and 18 and the audit's paths are current — the audit and re-review moved to `design/archive/` with stubs at the old paths. Section numbers and part navigation unchanged. |
