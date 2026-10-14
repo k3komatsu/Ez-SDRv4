@@ -1,4 +1,4 @@
-# Ez-SDR v4 — Handoff (2026-10-14)
+# Ez-SDR v4 — Handoff (2026-10-15)
 
 次のセッション（人間・AI どちらでも）が最初に読む現状メモ．**今のことだけ**を書く：どこに何があるか，何が未解決か，owner の判断待ち，次に何をするか．終わった作業の記録はその置き場（`plan/phaseN/00-overview.md` か各計画ファイル）に書き，ここには1行の参照だけ残す（AGENTS.md §9．`rules.py` が 300 行・40 000 byte を超えると落ちる）．2026-10-14 までここにあった記録も同じ日に各置き場へ移した．
 
@@ -8,20 +8,22 @@
 
 - **Phase 1〜7 は Gate X 受理済み**．Phase 7（UHD Provider `ezsdr.radio.uhd`）は 2026-10-01 に X300＋OBX で bench B0–B9 を通してクローズ（[plan/phase7/00-overview.md](plan/phase7/00-overview.md) §11，[bench-results.md](plan/phase7/bench-results.md)）．accepted specs の一覧は AGENTS.md §1・§2．
 - **凍結前の改修（項目1〜8）は完了**（[plan/maintenance/24-prefreeze-audit.md](plan/maintenance/24-prefreeze-audit.md)）．最後の項目8（spec 01〜06 を DA-1 形式に）は 2026-10-14 に完了（[計画31](plan/maintenance/31-item8-kernel-specs.md) §10）．その前の保守の記録は各計画ファイル（Phase 7 クローズから spec 20 までは [audits-2026-10.md](plan/maintenance/audits-2026-10.md)）．
+- **spec 22 の DA-3 手順2（spec 07・09・18 を DA-1 形式に）は 2026-10-15 に完了**（spec 22 の Status 行）．残る手順3・5 と文書監査の残りは §3．
 - 実装：13 crate（`crates/`），schema（`schemas/`），Python package（`python/ezsdr`）．確認の手順は §5．
 - open issue は4件：#51，#56，#59，#62（§3）．
 
 ## 2. 次にすること
 
-1. **Phase 8（Mock ↔ X310 parity）の計画（実機なしで Gate P まで進める）**．`plan/phase8/` はまだない．
+1. **文書監査の残り D12〜D14**（§3．小さい．Phase 8 の計画の前に）．
+2. **Phase 8（Mock ↔ X310 parity）の計画（実機なしで Gate P まで進める）**．`plan/phase8/` はまだない．
    - Vision §59 の parity test：測った envelope と Mock profile を比べ，Mock の方が緩ければ失敗．入力は [plan/phase7/00-overview.md](plan/phase7/00-overview.md) §3「Phase 8 inputs」（当時の値．旧 restart model を含むので現行の accepted specs と照合する），NB-5，UR-32，spec 18 の lead の値，§3 の H1〜H5 と B8 の未測定項目．
    - 測定テストと比較の道具を先に書き，FakeDevice でリハーサルしておく（実機の時間は流すだけにする）．`hardware.rs` には `hw_b8_*` が約20本ある．H1〜H5 は未実装．
    - 計画で最初に owner に諮ること：Mock の比較相手（§3 の1行目）．続いて #62・#59・#51 を実機の前に直すか Phase 8 の中でやるか．判断は1件ずつ利点・欠点・代案つきで．
-2. **実機は owner が準備中**（2026-10-14：「全部準備できます」．時間がかかる）．owner が揃ったと言うまで実機は動かさない．各段階で要るもの（根拠：Vision §67〈`design/vision/11-boundaries-invariants-and-roadmap.md:317-337`〉，`plan/phase7/00-overview.md:103`「One device is enough for §59's claim」）：
+3. **実機は owner が準備中**（2026-10-14：「全部準備できます」．時間がかかる）．owner が揃ったと言うまで実機は動かさない．各段階で要るもの（根拠：Vision §67〈`design/vision/11-boundaries-invariants-and-roadmap.md:317-337`〉，`plan/phase7/00-overview.md:103`「One device is enough for §59's claim」）：
    - **8**：1台．Phase 7 と同じ X300（X310 の代わりで可）＋OBX 1枚のループバック（TX/RX → 30 dB 以上の減衰器 → RX2），10 GbE の Linux PC．外部 10 MHz/PPS 不要．X300 は 2026-10-01 から未接続なので，つなぎ直して `uhd_usrp_probe` で確認する（§6）．
    - **8b**：USRP 2台（2台目は X310/X300 なら同じ driver と profile．USRP2 は不要〈owner〉），10 MHz/PPS の分配器（OctoClock など．X3xx の背面から配れるかは未確認），2台の時刻差を測る RF 配線（1つの信号を分配して両方の RX へ，減衰器付き．推測）．2台目の 10 GbE はサーバーの X710 port 1（`enp2s0f1np1`，今は未使用）が使えそう（未確認）．
    - **8c**：8 と同じ1台．FPGA image に Replay・DDC/DUC（・FFT）の block があるかを `uhd_usrp_probe` の block 一覧で確認．
-3. **その後の順番**（owner 2026-10-10，Vision §67，[28-forward-audit.md](plan/maintenance/28-forward-audit.md) 判断7）：8 → 8b（複数台：1 instance・1 root，判断1．`Session.aligned(at)`・`next_pps(k)`・`EpochRef::Pps` は実装済み，U12 は 8b）→ 8c（RFNoC：Replay，DDC/DUC．device FFT は FPGA image に block があるときだけ．UHD の RFNoC API は C++ のみなので UHD Module に薄い C++ 層が要る）→ 10（Processor/Reactor の実行エンジン，最小の PDU 経路）→ 全規則の確認 → 凍結レビュー → **v4.0 凍結** → 11+（Packet/PDU + TUN/TAP＝旧 Phase 9，WASM，GPU…）．
+4. **その後の順番**（owner 2026-10-10，Vision §67，[28-forward-audit.md](plan/maintenance/28-forward-audit.md) 判断7）：8 → 8b（複数台：1 instance・1 root，判断1．`Session.aligned(at)`・`next_pps(k)`・`EpochRef::Pps` は実装済み，U12 は 8b）→ 8c（RFNoC：Replay，DDC/DUC．device FFT は FPGA image に block があるときだけ．UHD の RFNoC API は C++ のみなので UHD Module に薄い C++ 層が要る）→ 10（Processor/Reactor の実行エンジン，最小の PDU 経路）→ 全規則の確認 → 凍結レビュー → **v4.0 凍結** → 11+（Packet/PDU + TUN/TAP＝旧 Phase 9，WASM，GPU…）．
 
 ## 3. 未解決と owner の判断待ち（一覧はここだけ）
 
@@ -37,8 +39,8 @@
 | 方向別の start lead | owner 決定（2026-10-08）：`radio.timing.start_lead_ns` を TimingEnvelope の方向別の値にし，送信側は Phase 8 で測る（それまで 50 ms）．**未実装**：今は単一値（`design/07-radio-model.md:85`，`crates/ezsdr-radio/src/lib.rs:576`） | Phase 8 の計画 |
 | 測って決め直す値 | 送信と受信の start lead（今は 50 ms，INFERRED），cold change・再開で受信が途切れる時間（約55 ms〜221 ms），UR-17 の受信要求長の上限（残すと決定済み，実測で見直す） | Phase 8 の bench |
 | 保守表の 3・4 | 3：fake は TimeError で burst 全体を捨てるが FPGA の既定は packet 単位（H1 の後に UR-33 と fake を直すか）．4：保持した最後のサンプルの 2 ms 期限（設計の代償として受け入れるか見直すか）．表は [audits-2026-10.md](plan/maintenance/audits-2026-10.md) の「Phase 7 後の保守」（1・2・5 は解決済み） | Phase 8（owner） |
-| spec 22 の残り | DA-3 の手順2（spec 18 の UR-17〜UR-35 と §5〜§10 を DA-1 形式に〈18b〉．07・09・18 の前半は 2026-10-14 に済み，18b では §6 の `ur_09_…` 行の過大主張も直す，記録は spec 22 の Status 行と各 spec の Changes 行．18 では UR-21 と §6 の写しを RM-13/RM-14 への参照に縮め，Provider ごとに違う拒否〈開いている burst の次のサンプル以前，予約後の旧 clock，波形のバイトを読むか〉は残す），手順3（DA-5 (b)：spec 11 を 08 へ統合），手順5（spec 10・14・16）．受理済み（2026-10-07）で未実施．状態は spec 22 の Status 行．手順2は Phase 8 の Gate P までに（2026-10-14 の文書監査 D4，中で D5〈TxBurst の拒否規則を RM-13/15 の1か所に〉・D3 の spec 側・D11 を直す），手順3・5は Phase 8 の後（手順3は取りやめも owner に確認） | 手順2の時期（owner） |
-| 文書監査の残り（2026-10-14） | D2（RX_OVERFLOW の `restart_gap_ns`・`lost`・件数が Mock と UHD で違う，#51 と同じ機構）・D3（X310 の値を2つの Provider で照合するテスト）・D10（値ごとの「緩い向き」）は Phase 8 の計画で．D12（`rules.py`：リンク検査を全 .md へ，`(KC-n)` を経緯の印と数えない，OV/PO の ID 保護）・D13（OV/PO 規則は `plan/` にあり検査の外，凍結チェックリストに PO を）・D14（AGENTS.md と handoff の重複）は手順2の前に | owner |
+| spec 22 の残り | 手順3（DA-5 (b)：spec 11 を 08 へ統合）と手順5（spec 10・14・16）．受理済み（2026-10-07）で未実施，Phase 8 の後（手順3は取りやめも owner に確認）．手順2（spec 07・09・18 を DA-1 形式に．文書監査の D4・D5・D3 の spec 側・D11 を含む）は 2026-10-14〜15 に済み，記録は spec 22 の Status 行と各 spec の Changes 行 | 手順3の取りやめ（owner） |
+| 文書監査の残り（2026-10-14） | D2（RX_OVERFLOW の `restart_gap_ns`・`lost`・件数が Mock と UHD で違う，#51 と同じ機構）・D3（X310 の値を2つの Provider で照合するテスト）・D10（値ごとの「緩い向き」）は Phase 8 の計画で．D12 の残り（`rules.py` で OV/PO の ID を保護．リンク検査と `(KC-n)` は 2026-10-14 に済み）・D13（OV/PO 規則は `plan/` にあり検査の外，凍結チェックリストに PO を）・D14（AGENTS.md と handoff の重複）は次に | owner |
 | Provider の id を名乗る写し | 受け取り時の拒否で id を名乗る処理が MockRadio・UHD に約15か所ずつ（MR-18・UR-26 の一部は未固定）．1か所で id を渡す形にまとめると減る | 任意 |
 | 規則ごとの確認への記録 | TM-21 の budget/block period 比較は未実装．TM-16c の既存テストは ManualTimeAuthority で paced Authority の規則を固定しない．SC-29 の SOB なし time jump の `requested_target` 不在と SOB 付き time jump の組合せは未固定．Authority の `now/schedule/cancel` の panic の扱いは規則との対応を要確認 | 凍結前の全規則の確認（§4） |
 | 負荷に弱いテスト | maintenance/J293 の無変異テスト `ur_26_the_shutdown_s_last_burst_ack_waits_on_the_device_s_clock` が16 shard の負荷下で1回失敗（2026-10-14）．再発したら #60 の続きとして調べる．同じく phase7/U17（`tx.rs` の repeat の終わり）が 2026-10-14 の gate で負荷下に1回生き残り，単独の再実行で kill（変異を見逃すテストは本当の生き残りを隠しうる）．Python の `test_v54_sleep_is_run_time` が Mac で 10 s の上限をわずかに超える記録（2026-10-07，その後は未確認） | 再発時 |
