@@ -9,17 +9,15 @@
 - **Phase 1〜7 は Gate X 受理済み**．Phase 7（UHD Provider `ezsdr.radio.uhd`）は 2026-10-01 に X300＋OBX で bench B0–B9 を通してクローズ（[plan/phase7/00-overview.md](plan/phase7/00-overview.md) §11，[bench-results.md](plan/phase7/bench-results.md)）．accepted specs の一覧は AGENTS.md §1・§2．
 - **凍結前の改修（項目1〜8）は完了**（[plan/maintenance/24-prefreeze-audit.md](plan/maintenance/24-prefreeze-audit.md)）．最後の項目8（spec 01〜06 を DA-1 形式に）は 2026-10-14 に完了（[計画31](plan/maintenance/31-item8-kernel-specs.md) §10）．その前の保守の記録は各計画ファイル（Phase 7 クローズから spec 20 までは [audits-2026-10.md](plan/maintenance/audits-2026-10.md)）．
 - **spec 22 の DA-3 手順2（spec 07・09・18 を DA-1 形式に）は 2026-10-15 に完了**（spec 22 の Status 行）．残る手順3・5 と文書監査の残りは §3．
+- **Phase 8（Mock ↔ X310 parity）は Gate P 受理**（owner 2026-10-17）：計画 [plan/phase8/00-overview.md](plan/phase8/00-overview.md)（判断 P1〜P6，段階，bench BP0〜BP5，出口条件），設計 [33-channels-and-streams.md](plan/phase8/33-channels-and-streams.md)（channel と stream，混在 board，`x3xx`，Kernel の変更は `KeyDecl` の番号付き segment だけ）．レビューと調査は `plan/phase8/reviews/`・`research/`．
 - 実装：13 crate（`crates/`），schema（`schemas/`），Python package（`python/ezsdr`）．確認の手順は §5．
 - open issue は4件：#51，#56，#59，#62（§3）．
 
 ## 2. 次にすること
 
 1. **開発 PC の移行の残り**（§6.1）：X300 の接続確認と，ホストの NIC・sysctl 設定（owner が sudo で）．
-2. **Phase 8（Mock ↔ X310 parity）の計画（実機なしで Gate P まで進める）**．`plan/phase8/` はまだない．
-   - Vision §59 の parity test：測った envelope と Mock profile を比べ，Mock の方が緩ければ失敗．入力は [plan/phase7/00-overview.md](plan/phase7/00-overview.md) §3「Phase 8 inputs」（当時の値．旧 restart model を含むので現行の accepted specs と照合する），NB-5，UR-32，spec 18 の lead の値，§3 の H1〜H5 と B8 の未測定項目．
-   - 測定テストと比較の道具を先に書き，FakeDevice でリハーサルしておく（実機の時間は流すだけにする）．`hardware.rs` には `hw_b8_*` が約20本ある．H1〜H5 は未実装．
-   - 計画で最初に owner に諮ること：Mock の比較相手（§3 の1行目）．続いて #62・#59・#51 を実機の前に直すか Phase 8 の中でやるか．判断は1件ずつ利点・欠点・代案つきで．
-3. **実機は owner が準備中**（2026-10-14：「全部準備できます」．時間がかかる）．owner が揃ったと言うまで実機は動かさない．各段階で要るもの（根拠：Vision §67〈`design/vision/11-boundaries-invariants-and-roadmap.md:317-337`〉，`plan/phase7/00-overview.md:103`「One device is enough for §59's claim」）：
+2. **Phase 8 の段階 1a**（[計画](plan/phase8/00-overview.md) §5，[設計 33](plan/phase8/33-channels-and-streams.md) §5）：description を `radio` 語彙に1か所（motherboard `x3xx` と front end の表），`x310-like`・`x310-*` を `x3xx` に改名（既定 profile・fixture・Python・Vision を同時に），rate の格子を DDC の decimation の集合に，CBX の phase `random` と MR-34，方向別の start lead．実装は DeepSeek（AGENTS.md §9），指示書は orchestrator．続いて 1b-1（Kernel）〜1b-5（切り替え），2（#51 の設計メモ→#51・D2，#62，#59，A2 のテスト），3（測定記録・比較テスト・測定スイート・ホスト設定の script）．
+3. **実機は owner が準備中**（2026-10-14：「全部準備できます」．時間がかかる）．owner が揃ったと言うまで実機は動かさない．用意できる機材（2026-10-16）：X300 × 2，OBX，UBX（壊れているかも），CBX，LFTX・LFRX・BasicTX・BasicRX（どれも2枚ずつ可，ただし他の実験から借りるので手間）．揃ったら最初に BP0（probe，UBX が動くか，2台目の FPGA image の版と HG/XG）．各段階で要るもの（根拠：Vision §67〈`design/vision/11-boundaries-invariants-and-roadmap.md:317-337`〉，`plan/phase7/00-overview.md:103`「One device is enough for §59's claim」）：
    - **8**：1台．Phase 7 と同じ X300（X310 の代わりで可）＋OBX 1枚のループバック（TX/RX → 30 dB 以上の減衰器 → RX2），10 GbE の Linux PC．外部 10 MHz/PPS 不要．X300 は 2026-10-01 から未接続なので，つなぎ直して `uhd_usrp_probe` で確認する（§6）．
    - **8b**：USRP 2台（2台目は X310/X300 なら同じ driver と profile．USRP2 は不要〈owner〉），10 MHz/PPS の分配器（OctoClock など．X3xx の背面から配れるかは未確認），2台の時刻差を測る RF 配線（1つの信号を分配して両方の RX へ，減衰器付き．推測）．2台目の 10 GbE は usrp-lnx03 の X710 の空きポート（§6.2）が使える．
    - **8c**：8 と同じ1台．FPGA image に Replay・DDC/DUC（・FFT）の block があるかを `uhd_usrp_probe` の block 一覧で確認．
@@ -29,19 +27,17 @@
 
 | 項目 | 中身 | いつ・どこで |
 |---|---|---|
-| Mock の比較相手 | MockRadio の `x310-like` は UBX の値．OBX 用の Mock profile を作る（機材と1対1，profile が増える）か，UBX を1枚用意して `x310-like` と比べる（profile は増えない，OBX の Phase 7 の結果は流用できない） | Phase 8 の計画の最初（owner） |
-| `radio` 語彙の phase `random` | `x310-cbx` の制約（[design-notes](plan/phase7/design-notes.md) §10）．OBX を使う限り不要 | Phase 8（owner） |
-| #62 | MockRadio が UHD の device queue の順番どおりの release を模擬しない（Mock が実機より緩い）．VH-8 harness は `timed` の25系列を除外中 | Phase 8 の計画で |
-| #59 | MockRadio に「cold change の read-back 拒否」の fault がない | Phase 8 の計画で |
-| #51 | 送信 Stop で held burst を捨てるとき UHD は `COMMAND_REJECTED` を出し MockRadio は黙る．先に「イベントの報告規則も1か所で実装するか」を決める（`mech:radio-rule-implemented-twice`） | Phase 8 の計画で（owner） |
+| #62 | MockRadio が UHD の device queue の順番どおりの release を模擬しない（Mock が実機より緩い）．VH-8 harness は `timed` の25系列を除外中 | Phase 8 段階2（P4） |
+| #59 | MockRadio に「cold change の read-back 拒否」の fault がない | Phase 8 段階2（P4） |
+| #51 | 送信 Stop で held burst を捨てるとき UHD は `COMMAND_REJECTED` を出し MockRadio は黙る．先に「イベントの報告規則も1か所で実装するか」を決める（`mech:radio-rule-implemented-twice`） | Phase 8 段階2（P4．先に設計メモ） |
 | #56 | X310 で start の e₁〜e₂ 間の Stop と Stop の処理遅れを測る | Phase 8 の bench |
 | H1〜H5 | H1：開始が遅れた複数 packet の burst．H2：burst 途中の Underflow（再開時刻，ずれ）．H3：TX の `max_num_samps`．H4：負荷下の uhd-tx・uhd-control の起床遅延．H5：保持した最後のサンプルの 2 ms 期限 | Phase 8 の bench |
-| 方向別の start lead | owner 決定（2026-10-08）：`radio.timing.start_lead_ns` を TimingEnvelope の方向別の値にし，送信側は Phase 8 で測る（それまで 50 ms）．**未実装**：今は単一値（`design/07-radio-model.md:85`，`crates/ezsdr-radio/src/lib.rs:576`） | Phase 8 の計画 |
+| 方向別の start lead | owner 決定（2026-10-08）：`radio.timing.start_lead_ns` を TimingEnvelope の方向別の値にし，送信側は Phase 8 で測る（それまで 50 ms）．**未実装**：今は単一値（`design/07-radio-model.md:85`，`crates/ezsdr-radio/src/lib.rs:576`） | Phase 8 段階1a |
 | 測って決め直す値 | 送信と受信の start lead（今は 50 ms，INFERRED），cold change・再開で受信が途切れる時間（約55 ms〜221 ms），UR-17 の受信要求長の上限（残すと決定済み，実測で見直す） | Phase 8 の bench |
 | 保守表の 3・4 | 3：fake は TimeError で burst 全体を捨てるが FPGA の既定は packet 単位（H1 の後に UR-33 と fake を直すか）．4：保持した最後のサンプルの 2 ms 期限（設計の代償として受け入れるか見直すか）．表は [audits-2026-10.md](plan/maintenance/audits-2026-10.md) の「Phase 7 後の保守」（1・2・5 は解決済み） | Phase 8（owner） |
 | spec 22 の残り | 手順3（DA-5 (b)：spec 11 を 08 へ統合）と手順5（spec 10・14・16）．受理済み（2026-10-07）で未実施，Phase 8 の後（手順3は取りやめも owner に確認）．手順2（spec 07・09・18 を DA-1 形式に．文書監査の D4・D5・D3 の spec 側・D11 を含む）は 2026-10-14〜15 に済み，記録は spec 22 の Status 行と各 spec の Changes 行 | 手順3の取りやめ（owner） |
-| 文書監査の残り（2026-10-14） | D2（RX_OVERFLOW の `restart_gap_ns`・`lost`・件数が Mock と UHD で違う，#51 と同じ機構）・D3（X310 の値を2つの Provider で照合するテスト）・D10（値ごとの「緩い向き」）は Phase 8 の計画で（D12〜D14 は 2026-10-16 に済み：`rules.py` が OV/PO の ID を守る，AGENTS.md §2 に OV/PO の扱い，凍結チェックリストに PO，AGENTS.md と handoff の重複を削った） | owner |
-| テストのない条件（2026-10-16） | Test 行の網羅調査（[計画32](plan/maintenance/32-test-line-sweep.md)）が `none named` に書いた 130 条件を仕分けた．A1（30 件，Kernel・Sink など）はテストを足し済み（2026-10-16，T01〜T33）．A2（14 件，RM/MR/UR の overflow・再開まわり．D2・#51 と同じ所）と B（4 件，実機が要る）は Phase 8 の計画に入れる．C（82 件）は `none named` のまま | Phase 8 の計画 |
+| 文書監査の残り（2026-10-14） | D2（RX_OVERFLOW の `restart_gap_ns`・`lost`・件数が Mock と UHD で違う，#51 と同じ機構）・D3（X310 の値を2つの Provider で照合するテスト）・D10（値ごとの「緩い向き」）は Phase 8 の計画で（D12〜D14 は 2026-10-16 に済み：`rules.py` が OV/PO の ID を守る，AGENTS.md §2 に OV/PO の扱い，凍結チェックリストに PO，AGENTS.md と handoff の重複を削った） | Phase 8（D2 は段階2，D3 は段階1a，D10 は P2 の比較テスト） |
+| テストのない条件（2026-10-16） | Test 行の網羅調査（[計画32](plan/maintenance/32-test-line-sweep.md)）が `none named` に書いた 130 条件を仕分けた．A1（30 件，Kernel・Sink など）はテストを足し済み（2026-10-16，T01〜T33）．A2（14 件，RM/MR/UR の overflow・再開まわり．D2・#51 と同じ所）と B（4 件，実機が要る）は Phase 8 の計画に入れる．C（82 件）は `none named` のまま | Phase 8（A2 は段階2，B は段階4） |
 | Provider の id を名乗る写し | 受け取り時の拒否で id を名乗る処理が MockRadio・UHD に約15か所ずつ（MR-18・UR-26 の一部は未固定）．1か所で id を渡す形にまとめると減る | 任意 |
 | 規則ごとの確認への記録 | TM-21 の budget/block period 比較は未実装．TM-16c の既存テストは ManualTimeAuthority で paced Authority の規則を固定しない．SC-29 の SOB なし time jump の `requested_target` 不在と SOB 付き time jump の組合せは未固定．Authority の `now/schedule/cancel` の panic の扱いは規則との対応を要確認 | 凍結前の全規則の確認（§4） |
 | 負荷に弱いテスト | maintenance/J293 の無変異テスト `ur_26_the_shutdown_s_last_burst_ack_waits_on_the_device_s_clock` が16 shard の負荷下で1回失敗（2026-10-14）．再発したら #60 の続きとして調べる．同じく phase7/U17（`tx.rs` の repeat の終わり）が 2026-10-14 の gate で負荷下に1回生き残り，単独の再実行で kill（変異を見逃すテストは本当の生き残りを隠しうる）．Python の `test_v54_sleep_is_run_time` が Mac で 10 s の上限をわずかに超える記録（2026-10-07，その後は未確認） | 再発時 |
