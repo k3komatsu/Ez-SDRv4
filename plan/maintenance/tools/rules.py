@@ -45,6 +45,9 @@ MARKER = re.compile(r"\((?:Phase \d+|K[ABD-Z]-\d+|Review [A-Z]\b|review [A-Z0-9-
                     r"|\*(?:Settled in|Forward|Superseded)|Amended in Phase|(?<![\w/])#\d{2,3}\b")
 LONG = 1500
 HANDOFF_LINES, HANDOFF_BYTES = 300, 40000
+# The OV and PO rules still bind (the accepted specs cite them) although they live in plan/,
+# among history: only their ids are protected there.
+LIVE_PLAN = ["plan/phase1/00-overview.md", "plan/phase2/00-overview.md"]
 LISTS = ["maintenance", "phase3", "phase4", "phase5", "phase6", "phase7"]
 # Names the accepted specs cited, as history, before plan 31 while no test had them; no
 # other name may be cited without existing.
@@ -57,7 +60,7 @@ def doc_paths(rev):
     here = glob.glob("design/*.md") + glob.glob("design/vision/*.md")
     there = subprocess.run(["git", "ls-tree", "--name-only", rev, "design/", "design/vision/"],
                            capture_output=True, text=True, check=True).stdout.split()
-    return sorted({p for p in here + there if keep(p)}) + ["Ez-SDR_v4_ARCHITECTURE_VISION.md"]
+    return sorted({p for p in here + there if keep(p)}) + ["Ez-SDR_v4_ARCHITECTURE_VISION.md"] + LIVE_PLAN
 
 
 def body(text):
@@ -87,11 +90,7 @@ def cited(docs, tests):
     return {n for text in docs.values() for n in TICKED.findall(text) if n in tests or TEST_LIKE.match(n)}
 
 
-def check(base, head, tests, renames, exists=os.path.exists, known_missing=KNOWN_MISSING, base_tests=frozenset()):
-    """Every problem, as text. `base`/`head` map a path to its text (a deleted file is "");
-    `tests` is the set of test names in the tree, `base_tests` those at the base (so a test
-    deleted with its citation is still seen as cited at the base); `renames` maps an old
-    cited name to its new one or to "-"."""
+def id_problems(base, head):
     problems = []
     b_ids, h_ids = ids(base), ids(head)
     for rid in sorted(set(b_ids) - set(h_ids)):
@@ -99,6 +98,16 @@ def check(base, head, tests, renames, exists=os.path.exists, known_missing=KNOWN
     for rid, where in sorted(h_ids.items()):
         if len(where) > len(b_ids.get(rid, [1])):
             problems.append(f"rule id {rid} is defined {len(where)} times ({', '.join(where)})")
+    return problems
+
+
+def check(base, head, tests, renames, exists=os.path.exists, known_missing=KNOWN_MISSING, base_tests=frozenset()):
+    """Every problem, as text. `base`/`head` map a path to its text (a deleted file is "");
+    `tests` is the set of test names in the tree, `base_tests` those at the base (so a test
+    deleted with its citation is still seen as cited at the base); `renames` maps an old
+    cited name to its new one or to "-"."""
+    problems = id_problems(base, head)
+    base, head = ({p: t for p, t in d.items() if p not in LIVE_PLAN} for d in (base, head))  # ids only there
     known = set(tests) | set(base_tests)
     b_cited, h_cited = cited(base, known), cited(head, known)
     for name in sorted(b_cited - h_cited):
@@ -254,6 +263,10 @@ def self_test():
             "mutation row maintenance/Z5 old2 occurs 0 times in a.rs after old is replaced"]
     assert got == want, got  # Z6's old2 is made by its new: accepted, as mutate.py would
     assert not run({**base, "design/02-y.md": two.replace("SC-1** d", "SC-1** d (KC-24)")}), "self-test: a KC citation is no marker"
+    live = {**base, LIVE_PLAN[0]: "- **OV-1** a rule.\n"}
+    assert any("rule id OV-1 " in p for p in check(live, {**live, LIVE_PLAN[0]: "- OV-1 a rule.\n"}, tests, {})), "self-test: a live plan id"
+    assert not check(live, {**live, LIVE_PLAN[0]: "- **OV-1** a rule (Phase 3) `xx_01_gone`.\n"}, tests, {}), "self-test: ids only in a live plan file"
+    assert LIVE_PLAN[0] in doc_paths("HEAD"), "self-test: the live plan files are read"
     assert broken_links("plan/x.md", "[a](gone.md) `[b](gone.md)`\n```\n[c](gone.md)\n```\n", lambda p: False) == \
         ["plan/x.md: link gone.md does not resolve"], "self-test: links in code are text"
     ok = "x\n" * 300

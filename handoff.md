@@ -1,4 +1,4 @@
-# Ez-SDR v4 — Handoff (2026-10-15)
+# Ez-SDR v4 — Handoff (2026-10-16)
 
 次のセッション（人間・AI どちらでも）が最初に読む現状メモ．**今のことだけ**を書く：どこに何があるか，何が未解決か，owner の判断待ち，次に何をするか．終わった作業の記録はその置き場（`plan/phaseN/00-overview.md` か各計画ファイル）に書き，ここには1行の参照だけ残す（AGENTS.md §9．`rules.py` が 300 行・40 000 byte を超えると落ちる）．2026-10-14 までここにあった記録も同じ日に各置き場へ移した．
 
@@ -14,7 +14,7 @@
 
 ## 2. 次にすること
 
-1. **文書監査の残り D12〜D14**（§3．小さい．Phase 8 の計画の前に）．
+1. **テストのない条件 112 件の仕分け**（§3．Phase 8 の計画の前に）：拒否・安全（テストを足す候補）／Mock と実機の比較に関わる（Phase 8 の計画の材料）／形式的で残す，の3つに分け，足すかどうかを owner に1回で諮る．
 2. **Phase 8（Mock ↔ X310 parity）の計画（実機なしで Gate P まで進める）**．`plan/phase8/` はまだない．
    - Vision §59 の parity test：測った envelope と Mock profile を比べ，Mock の方が緩ければ失敗．入力は [plan/phase7/00-overview.md](plan/phase7/00-overview.md) §3「Phase 8 inputs」（当時の値．旧 restart model を含むので現行の accepted specs と照合する），NB-5，UR-32，spec 18 の lead の値，§3 の H1〜H5 と B8 の未測定項目．
    - 測定テストと比較の道具を先に書き，FakeDevice でリハーサルしておく（実機の時間は流すだけにする）．`hardware.rs` には `hw_b8_*` が約20本ある．H1〜H5 は未実装．
@@ -40,7 +40,7 @@
 | 測って決め直す値 | 送信と受信の start lead（今は 50 ms，INFERRED），cold change・再開で受信が途切れる時間（約55 ms〜221 ms），UR-17 の受信要求長の上限（残すと決定済み，実測で見直す） | Phase 8 の bench |
 | 保守表の 3・4 | 3：fake は TimeError で burst 全体を捨てるが FPGA の既定は packet 単位（H1 の後に UR-33 と fake を直すか）．4：保持した最後のサンプルの 2 ms 期限（設計の代償として受け入れるか見直すか）．表は [audits-2026-10.md](plan/maintenance/audits-2026-10.md) の「Phase 7 後の保守」（1・2・5 は解決済み） | Phase 8（owner） |
 | spec 22 の残り | 手順3（DA-5 (b)：spec 11 を 08 へ統合）と手順5（spec 10・14・16）．受理済み（2026-10-07）で未実施，Phase 8 の後（手順3は取りやめも owner に確認）．手順2（spec 07・09・18 を DA-1 形式に．文書監査の D4・D5・D3 の spec 側・D11 を含む）は 2026-10-14〜15 に済み，記録は spec 22 の Status 行と各 spec の Changes 行 | 手順3の取りやめ（owner） |
-| 文書監査の残り（2026-10-14） | D2（RX_OVERFLOW の `restart_gap_ns`・`lost`・件数が Mock と UHD で違う，#51 と同じ機構）・D3（X310 の値を2つの Provider で照合するテスト）・D10（値ごとの「緩い向き」）は Phase 8 の計画で．D12 の残り（`rules.py` で OV/PO の ID を保護．リンク検査と `(KC-n)` は 2026-10-14 に済み）・D13（OV/PO 規則は `plan/` にあり検査の外，凍結チェックリストに PO を）・D14（AGENTS.md と handoff の重複）は次に | owner |
+| 文書監査の残り（2026-10-14） | D2（RX_OVERFLOW の `restart_gap_ns`・`lost`・件数が Mock と UHD で違う，#51 と同じ機構）・D3（X310 の値を2つの Provider で照合するテスト）・D10（値ごとの「緩い向き」）は Phase 8 の計画で（D12〜D14 は 2026-10-16 に済み：`rules.py` が OV/PO の ID を守る，AGENTS.md §2 に OV/PO の扱い，凍結チェックリストに PO，AGENTS.md と handoff の重複を削った） | owner |
 | テストのない条件（2026-10-16） | Test 行の網羅調査（[計画32](plan/maintenance/32-test-line-sweep.md)）で全 spec の Test 行と §6 を直し，どのテストも確かめない条件を各 Test 行の `none named` に 112 件書いた（例：KC-36 の `Release`，spec 14 の descriptor のない component の拒否，UR-12 の node でない source）．どれにテストを足すか | owner（1件ずつ） |
 | Provider の id を名乗る写し | 受け取り時の拒否で id を名乗る処理が MockRadio・UHD に約15か所ずつ（MR-18・UR-26 の一部は未固定）．1か所で id を渡す形にまとめると減る | 任意 |
 | 規則ごとの確認への記録 | TM-21 の budget/block period 比較は未実装．TM-16c の既存テストは ManualTimeAuthority で paced Authority の規則を固定しない．SC-29 の SOB なし time jump の `requested_target` 不在と SOB 付き time jump の組合せは未固定．Authority の `now/schedule/cancel` の panic の扱いは規則との対応を要確認 | 凍結前の全規則の確認（§4） |
@@ -54,7 +54,8 @@
 
 済んだ項目（項目1〜8，F19・F21）と根拠は [24-prefreeze-audit.md](plan/maintenance/24-prefreeze-audit.md)．凍結レビューは次の全項目が済んでから：
 
-- [ ] spec 01〜06 の全規則（314）と OV 規則を外部の安いエージェント（DeepSeek V4.1 Flash）で1つずつ確認：3つの決まった問い，JSON，根拠必須．Claude は印の付いた行を検証し，残りを抜き取り．機械で確かめられる分はスクリプトで先に（[28-forward-audit.md](plan/maintenance/28-forward-audit.md) 末尾）．§3 の「規則ごとの確認への記録」もここで．
+- [ ] 全 accepted spec の規則と OV・PO 規則を DeepSeek で1つずつ確認：3つの決まった問い，JSON，根拠必須．Claude は印の付いた行を検証し，残りを抜き取り（[28-forward-audit.md](plan/maintenance/28-forward-audit.md) 末尾）．Test 行の確認は [計画32](plan/maintenance/32-test-line-sweep.md) の `tools/sweep/` で流し直す．§3 の「規則ごとの確認への記録」もここで．
+- [ ] OV・PO 規則の置き場：今は `plan/phase1/00-overview.md`・`plan/phase2/00-overview.md` の経緯の中にあり，`rules.py` は ID だけを守る．`design/` へ移すかを凍結レビューで決める．
 - [ ] MA-16a の公開 API 許可リスト（`kernel_surface_allow.txt`）の見直し．
 - [ ] 文書の種類ごとに受け付ける版を設定する（今は共通の `SUPPORTED_VERSIONS`．項目5で凍結時に延期，[24-prefreeze-audit.md](plan/maintenance/24-prefreeze-audit.md) の 2026-10-09 item 5 の行）．
 - [ ] Kernel API を 4.0.0 に，`SCHEMA_CHANGELOG.md` の見出しを凍結後の形式に．凍結までは版を上げず changelog も書かない（AGENTS.md §6）．
@@ -62,7 +63,7 @@
 
 ## 5. 進め方と道具
 
-- **分担**（AGENTS.md §9）：Claude Opus が回す → 実装役（DeepSeek V4.1 Flash，OpenCode2．GPT-6 Luna は owner の指定時だけ）が実装し，自分でセルフレビューを最大3巡 → Opus がレビュー → Sol 6.1（OpenCode2，読み取り専用）が独立にレビュー → Opus が採否を決め，実装役が直し，gate → Opus が commit・push．Sol は owner の Codex 枠を使う：`python3 plan/maintenance/tools/codex_limits.py` で残りを見る．
+- **分担と方針**は AGENTS.md §9（分担・順番）と §6（owner の方針）．Sol の残り枠は `python3 plan/maintenance/tools/codex_limits.py`．
 - **実装役への指示書に毎回書くこと**：mutation は `remote_mutate.py` だけ（Mac の `mutate.py` も作業ツリーへの mutant も禁止，実験はリポジトリ外のコピーで）．`cargo fmt`/`rustfmt` 禁止．Mac で負荷をかけない．セルフレビューはフォアグラウンドで終わるまで待つ．DeepSeek のツールは1コマンド120秒で打ち切るので，長い処理（`rules.py --sentences` 約5分など）は時間を延ばすよう書く．前の段階で出た誤りの型は禁止として列挙する（8g で効いた）．
 - **gate**（段階の最後）：
   - mutation 全リスト：`REMOTE_SSH="ssh -o BatchMode=yes" python3 plan/maintenance/tools/remote/remote_mutate.py all sim02:8,sim03:8`（約8分）．既知の生き残りは phase7/G09．結果が欠けた行は ID を並べて再実行（zsh では `$ids` が分割されない）．phase7 G16 と phase6 G21 は timeout で kill が正常．shard × 4 CPU は1ホスト32コア以内．
@@ -73,7 +74,7 @@
   - 段階ごとの道具（`~/.cache/ezsdr-fixes/2026-10-13-item8/` の `check05.py`・`drive04.sh`・`watchdog-04.sh` が雛形）：指示書の機械で確かめられる項目を検査し，未達を新しい実装役セッションへ最大3回差し戻す．**起動前に `--calibrate` などで誤検出がないことを確かめる**（8f では誤検出3件で差し戻しが空回りした）．
   - セルフレビューのレビュー役が API 待ちで固まることがある（8g で約20分，CPU 0%，ログが進まない）：ログの更新時刻を見て，レビュー役だけを止める．
 - **sim02/sim03**：`ssh sim02`．直接つながらないときは owner の `~/.ssh/config` が `ydev` を踏み台にする（トンネル不要）．
-- **owner の方針**（AGENTS.md §6）：研究用なので大げさにしない，凍結まで破壊的変更は自由で版管理しない，簡素化はテスト・レビュー・mutation で制御を保つ，削除・統合を好む，判断は1件ずつ利点・欠点・代案つき，返答は日本語．同じ失敗機構の3件目では設計を疑う（[failure-mechanisms.md](plan/maintenance/failure-mechanisms.md)）．
+- **外部モデルの運用で分かったこと**：DeepSeek は有料の `opencode-go/deepseek-v4.1-flash`（無料版は並行で数分のうちに 429）．Sol は同時に起動すると全部 0 byte で固まる：1本ずつ，前のものが書き始めてから起動する．出力が約4分 0 byte なら止めてやり直す．DeepSeek は `Session interrupted: inactivity` で途中終了し古い報告の STATUS を残すことがある：報告だけでなくログを見る．
 
 ## 6. 実機環境（Phase 8 で使う．2026-10-01 時点）
 
