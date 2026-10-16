@@ -1,0 +1,1680 @@
+[
+ {
+  "spec": "design/01-time-model.md",
+  "rule": "TM-15",
+  "condition": "admission compares a budget with a block period",
+  "class": "C",
+  "why": "この比較を行うコードが存在しない（MA-39 が宣言された port rate を持つ最初の Processor まで算術を明示的に先送りしており、islands.rs は budget の有無しか見ない）ので、pin すべき振る舞いがまだ無い。",
+  "code": [
+   "crates/ezsdr-kernel/src/plan/islands.rs:126",
+   "design/05-module-api.md:309"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/01-time-model.md",
+  "rule": "TM-16c",
+  "condition": "callbacks at one instant fire in insertion order (the tie order)",
+  "class": "A",
+  "why": "ManualTimeAuthority は (ticks, seq) の BTreeMap で tie を seq 順にしているが、既存テストの 2 つの tie は同一ペアを記録するため区別できず、逆順/seq 欠落の実装でも全テストが通る（Engine 側の se_11 は別 Authority を pin する）。",
+  "code": [
+   "crates/ezsdr-kernel/src/time/authority.rs:109",
+   "crates/ezsdr-kernel/src/time/authority.rs:252"
+  ],
+  "test_sketch": "crates/ezsdr-kernel/tests/time_model.rs の `tm_16_authority_order_and_now` を拡張: 同一 instant に挿入順で識別可能な marker（\"first\", \"second\"）を記録する 2 つの callback を schedule し、log が挿入順になることを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/01-time-model.md",
+  "rule": "TM-16d",
+  "condition": "wait_until must not be called by a step-driven component",
+  "class": "C",
+  "why": "「step-driven かどうか」を Kernel が知る手段が無く、拒否する機構が存在しない（trait の doc 上の契約であり、時間 Authority の呼び出し元の性質に依存する）のでテストで pin できない。",
+  "code": [
+   "crates/ezsdr-kernel/src/time/authority.rs:47",
+   "crates/ezsdr-kernel/src/time/authority.rs:348"
+  ],
+  "test_sketch": "",
+  "effort": "L"
+ },
+ {
+  "spec": "design/01-time-model.md",
+  "rule": "TM-17a",
+  "condition": "advance_to wakes every wait_until waiter (the plural)",
+  "class": "A",
+  "why": "notify_all を notify_one に落とす等の実装で 2 人目以降の waiter が永久に起きず、待っている Provider のスレッドは以後サンプルを出さないまま Run が完走し得る（切り詰められた記録が静かに残る）のに、既存テストは waiter を 1 つしか使わない。",
+  "code": [
+   "crates/ezsdr-kernel/src/time/authority.rs:278"
+  ],
+  "test_sketch": "crates/ezsdr-kernel/tests/time_model.rs に `tm_17a_every_waiter_wakes` を追加: 2 つの thread を `wait_until(50)` で block させ、main が `advance_to(50)` し、両方が timeout 内に return することを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/01-time-model.md",
+  "rule": "TM-17b",
+  "condition": "the default callback cap is 1 000",
+  "class": "A",
+  "why": "既存テストは `with_callback_cap(8)` を設定するので既定値が pin されず、既定を桁違いに変える実装は自己再 schedule を「fail ではなく hang」させてエラーを隠す（規則自身がそのために cap を置いている）。",
+  "code": [
+   "crates/ezsdr-kernel/src/time/authority.rs:136",
+   "crates/ezsdr-kernel/src/time/authority.rs:273"
+  ],
+  "test_sketch": "crates/ezsdr-kernel/tests/time_model.rs に `tm_17b_the_default_cap_is_one_thousand` を追加: `with_callback_cap` を呼ばず自分の fire 時刻で自分を再 schedule する callback を 1 つの instant で回し、1 000 回は Ok、1 001 回目が `LimitExceeded` になることを assert する（`DEFAULT_CALLBACK_CAP` の値も併せて pin）。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/02-stream-contract.md",
+  "rule": "SC-10",
+  "condition": "SEQ_DISCONTINUITY implies GAP_BEFORE",
+  "class": "A",
+  "why": "RESTARTED/ALIGNMENT は既存テストが pin するが SEQ は抜けており、mask から SEQ を落とす実装では GAP_BEFORE なしの Rx block が受理され、drop-class 経路では device の sequence 損失が `LinkDrop` に誤分類される（他に拒否する検査が無い）。",
+  "code": [
+   "crates/ezsdr-kernel/src/stream/block.rs:258",
+   "crates/ezsdr-kernel/src/stream/continuity.rs:141"
+  ],
+  "test_sketch": "crates/ezsdr-kernel/tests/stream_contract.rs の `sc_10_block_flag_implications` を拡張: Rx block に `SEQ_DISCONTINUITY` のみ（GAP_BEFORE なし）を載せ `Err(InvalidBlock)` を assert する（RESTARTED の既存ケースと対称に）。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/02-stream-contract.md",
+  "rule": "SC-10",
+  "condition": "an END_OF_BURST block with GAP_BEFORE, RESTARTED or SEQ_DISCONTINUITY",
+  "class": "C",
+  "why": "SC-10 の burst 節は同じ block の SC-16 方向規則（Rx は burst flag を、Tx は GAP_BEFORE/RESTARTED/SEQ を拒否）と完全に重複するため、この節が壊れても拒否は変わらずエラー文言だけが変わる。",
+  "code": [
+   "crates/ezsdr-kernel/src/stream/block.rs:263",
+   "crates/ezsdr-kernel/src/stream/block.rs:273"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/02-stream-contract.md",
+  "rule": "SC-16",
+  "condition": "a receive block carrying END_OF_BURST",
+  "class": "C",
+  "why": "Rx の方向節は START_OF_BURST で pin 済みの 1 つの mask であり、かつ Rx 側で burst flag を読む consumer が無い（MockDevice::on_tx_block は Tx 専用）ので、bit が抜けても下流の結果は変わらない。",
+  "code": [
+   "crates/ezsdr-kernel/src/stream/block.rs:273",
+   "crates/ezsdr-mock-radio/src/device.rs:22"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/02-stream-contract.md",
+  "rule": "SC-16",
+  "condition": "a transmit block carrying RESTARTED or SEQ_DISCONTINUITY",
+  "class": "C",
+  "why": "Tx の方向節は GAP_BEFORE のケースで pin 済みの同一式で、Tx block の RESTARTED/SEQ を読む consumer が存在しない（BurstTracker は header の時刻と START/END のみ、MockDevice も同じ）ため、bit が抜けても振る舞いは不変。",
+  "code": [
+   "crates/ezsdr-kernel/src/stream/block.rs:285",
+   "crates/ezsdr-kernel/src/stream/burst.rs:332"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/02-stream-contract.md",
+  "rule": "SC-20",
+  "condition": "a Run whose Plan has more than one link",
+  "class": "A",
+  "why": "Manifest の `links` は `shared.links` と step 6 の `link_drops` を index で並べた射影なので（drops.get(0) のような 1 リンクだけのテストでは死なない誤りが起きうる）、複数リンクの Run で drops が取り違えられると記録が静かに壊れるのに、既存テストは 1 リンクのみ。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:585",
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:200"
+  ],
+  "test_sketch": "crates/ezsdr-kernel/tests/coordinator.rs の `ka_18_nonzero_link_drops_reach_the_manifest` を拡張: graph link（2 component の Island）と output feed の 2 リンクを持つ Spec を作り、片方のリンクにだけ drop を seed して `manifest.links.len() == 2` と各 record が `plan.links[i]` と自分の drops（Some(1)/Some(0)）に対応することを assert する。",
+  "effort": "M"
+ },
+ {
+  "spec": "design/02-stream-contract.md",
+  "rule": "SC-22",
+  "condition": "the absence of a Kernel Probe",
+  "class": "C",
+  "why": "存在しないことを主張する否定的規則であり、Kernel 型が増えていないことは allow-list ゲート（新しい public item に正当化を強制する OV-23）とレビューが担うため、テストで pin する対象がない。",
+  "code": [
+   "crates/ezsdr-kernel/tests/kernel_surface_allow.txt:1",
+   "crates/ezsdr-kernel/src/stream/link.rs:1"
+  ],
+  "test_sketch": "",
+  "effort": "L"
+ },
+ {
+  "spec": "design/02-stream-contract.md",
+  "rule": "SC-25",
+  "condition": "the underflow event carries the time at which it occurred",
+  "class": "A",
+  "why": "tx.rs は report の tick を送信 SampleClock に写して event の時刻にしており、tick を無視して now を使う実装でも ur_28 の cause 検査と ur_22 の無捏造検査は通るため、Manifest に記録される event 時刻だけが静かに誤る。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/provider/tx.rs:715",
+   "crates/ezsdr-radio-uhd/src/provider/tx.rs:721"
+  ],
+  "test_sketch": "crates/ezsdr-radio-uhd/tests/fake.rs に one ケース追加: `FakeFault::TxReport`（Underflow, tick 付き）を script し、`radio.TX_UNDERFLOW` event の `time` が送信 clock での tick の floor であること、tick なしの report では `now` になることを assert する。",
+  "effort": "M"
+ },
+ {
+  "spec": "design/02-stream-contract.md",
+  "rule": "SC-25",
+  "condition": "the Manifest records what the hardware radiated during the gap",
+  "class": "B",
+  "why": "ギャップ中に実機が何を放射したかは device 側の事実（UR-23 の held sample、UR-30 の section も host が渡したものしか記録しない）で、真偽は X310 での Phase 8 のパリティ測定で決まる。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/provider/tx.rs:734",
+   "design/18-uhd-radio.md:266"
+  ],
+  "test_sketch": "",
+  "effort": "L"
+ },
+ {
+  "spec": "design/02-stream-contract.md",
+  "rule": "SC-31",
+  "condition": "RESTARTED together with SEQ_DISCONTINUITY (the precedence)",
+  "class": "A",
+  "why": "carry の flags は block の flags と OR される（continuity.rs:196）ので RESTARTED|SEQ は実際に生じ、RESTARTED と SEQ の分岐を入れ替えても既存の ALIGNMENT 系テストは殺さず、cause が OverflowRestart から SequenceError へ静かに化ける。",
+  "code": [
+   "crates/ezsdr-kernel/src/stream/continuity.rs:141",
+   "crates/ezsdr-kernel/src/stream/continuity.rs:196"
+  ],
+  "test_sketch": "crates/ezsdr-kernel/tests/stream_contract.rs の `sc_31_continuity_causes` に 1 ケース追加: `GAP_BEFORE|RESTARTED|SEQ_DISCONTINUITY`, lost 200 → `GapCause::OverflowRestart` を assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/02-stream-contract.md",
+  "rule": "SC-32",
+  "condition": "a capture with more than one ContinuityMap",
+  "class": "C",
+  "why": "該当の条件は spec 10 の `hd_15_a_capture_across_a_clock_change_has_no_metadata` が既に pin しており（continuity.len()==2 と metadata 無しの 2 経路）、SC-32 の Test 行に引用が無いだけである。",
+  "code": [
+   "crates/ezsdr-sink-capture/tests/sink_capture.rs:1096",
+   "crates/ezsdr-sink-capture/src/lib.rs:457"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/03-spec-and-binding.md",
+  "rule": "SB-10",
+  "condition": "version: 0 or an absent version is refused by the envelope",
+  "class": "C",
+  "why": "version 0 は pin 済みの version 2 と同じ `!SUPPORTED_VERSIONS.contains` で拒否され（`found == 0` の項は冗長）、version 欠落は check_version と必須フィールドの逆直列化の二重で拒否されるため、型と既存テストが既に強制している。",
+  "code": [
+   "crates/ezsdr-kernel/src/spec.rs:994",
+   "crates/ezsdr-kernel/src/spec.rs:752"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/03-spec-and-binding.md",
+  "rule": "SB-13",
+  "condition": "a Spec carrying a `placements` or `executor` field",
+  "class": "A",
+  "why": "scan は 5 名のうち placement/memory_domain/environment の 3 名しか pin されておらず、`executor`/`placements` を落とす実装では serde が unknown field を無視する位置（内部タグ付き enum の object など）で Spec が Executor を名乗ったまま検証を通り、文書が静かに再解釈される（R21/D73 の再発）。",
+  "code": [
+   "crates/ezsdr-kernel/src/spec.rs:804",
+   "crates/ezsdr-kernel/src/spec.rs:1041"
+  ],
+  "test_sketch": "crates/ezsdr-kernel/tests/spec_binding.rs の `sb_13_placement_in_spec_refused` に 2 ケース追加: serde が受理する入れ子位置（action template 等の object）に `executor` と `placements` を置き、`Err(PlacementInSpec{path})` を assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/03-spec-and-binding.md",
+  "rule": "SB-16",
+  "condition": "a `{resource}` target naming an undeclared resource",
+  "class": "C",
+  "why": "validate の分類が落ちても実行時の `resolve_target` が同じ「not declared by this Spec」で拒否する（pipeline.rs:1811-1816）ので、受理されて誤配送になることはなく、変わるのは報告される段だけである。",
+  "code": [
+   "crates/ezsdr-kernel/src/spec.rs:1112",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1810"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/03-spec-and-binding.md",
+  "rule": "SB-21",
+  "condition": "the `SB-21:` prefix of a profile's structural refusal",
+  "class": "C",
+  "why": "入れ子フィールドの拒否自体は `sb_09_an_unknown_nested_field_is_refused` が profile について pin 済みで、prefix はどの文書種別の誤りかを示す診断文字列にすぎず、誤っても Run の結果は変わらない。",
+  "code": [
+   "crates/ezsdr-kernel/src/binding.rs:145"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/03-spec-and-binding.md",
+  "rule": "SB-21",
+  "condition": "an unknown top-level field of a profile",
+  "class": "C",
+  "why": "check_top_level が無くても BindingProfile の `deny_unknown_fields` が同じ文書を拒否するので（エラー variant が変わるだけ）、静かに受理される経路がない。",
+  "code": [
+   "crates/ezsdr-kernel/src/binding.rs:143",
+   "crates/ezsdr-kernel/src/binding.rs:100"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/03-spec-and-binding.md",
+  "rule": "SB-25",
+  "condition": "reordering `graph.links` cannot rebind a Link Module",
+  "class": "C",
+  "why": "LinkPlacement は (from,to) の pair をキーに解決され（islands.rs:24-43）、位置でリンクを指す手段が型に存在しないため、順序変更で rebind する実装が構造上あり得ない。",
+  "code": [
+   "crates/ezsdr-kernel/src/plan/islands.rs:24",
+   "crates/ezsdr-kernel/src/binding.rs:61"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/03-spec-and-binding.md",
+  "rule": "SB-30",
+  "condition": "rejections and violations are recorded in the Manifest",
+  "class": "C",
+  "why": "admission 節は Manifest に構造として必ず載り、実際に `kc_45_a_rejected_admission_is_kept_in_the_manifest` が reject の記録を pin しているため、SB-30 の Test 行に引用が無いだけである。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:226",
+   "crates/ezsdr-kernel/src/manifest.rs:275"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/03-spec-and-binding.md",
+  "rule": "SB-30",
+  "condition": "an output's `params` as its own entry at validate",
+  "class": "A",
+  "why": "Sink の prepare は `effective` を空で返す（sink-capture lib.rs:562）ので validate の requested 構成が output の `params` を checks が見る唯一の点であり、validation.rs:47-49 が落ちると output の params に対する violation は決して発火せず Run が受理される。",
+  "code": [
+   "crates/ezsdr-kernel/src/plan/validation.rs:47",
+   "crates/ezsdr-sink-capture/src/lib.rs:562"
+  ],
+  "test_sketch": "crates/ezsdr-kernel/tests/spec_binding.rs に `sb_30_an_output_s_params_are_checked_at_validate` を追加: `outputs[0].params` に `test.grid` を ceiling 超過で入れ、`validate` が `!is_admitted()` で output の fragment を名指す violation を返すことを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/03-spec-and-binding.md",
+  "rule": "SB-30",
+  "condition": "a Sink-output target's `proposed`",
+  "class": "C",
+  "why": "admission.rs:296-302 は target の role を問わず同じ fragment に `proposed` を入れる 1 経路で、component 版が `kc_24_a_check_refuses_a_non_provider_update_with_its_proposed_value` で pin 済みのため、output だけが誤る実装は考えにくい。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/admission.rs:296"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/03-spec-and-binding.md",
+  "rule": "SB-44",
+  "condition": "the prepare-stage refusal of a coercion of a key the request does not name",
+  "class": "A",
+  "why": "prepare.rs:129-145 は validate 側とは別のコードで、stray coercion の double は validate 経由でしか使われていないので、この節が落ちると要求に無い key の「coercion」が Manifest の prepare 記録に載り、その key の policy 既定も発火する（修正理由そのもの）。",
+  "code": [
+   "crates/ezsdr-kernel/src/plan/prepare.rs:129"
+  ],
+  "test_sketch": "crates/ezsdr-kernel/tests/spec_binding.rs で `with_stray_coercion()` の provider を `collect_prepare` に通し、`PrepareError::Violations` が SB-44 と `test.flag` を名指し、stray が report の coercions にも Manifest にも残らないことを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/03-spec-and-binding.md",
+  "rule": "SB-46",
+  "condition": "the `CoercionRejected` error itself",
+  "class": "C",
+  "why": "`CoercionRejected` は validate/prepare/session の 3 呼び出し元すべてが即座に `Violation`（理由 \"SB-46: coercion to … rejected\"）へ変換する内部シグナルで、variant が違っても拒否は起きる（違うのは文言だけ）ので、拒否自体は既存テストが pin している。",
+  "code": [
+   "crates/ezsdr-kernel/src/plan/coercion.rs:25",
+   "crates/ezsdr-kernel/src/session.rs:292"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/04-run-and-session.md",
+  "rule": "RS-8a",
+  "condition": "none named for a real Provider declaring a deadline",
+  "class": "C",
+  "why": "実在の Provider が cleanup 期限を宣言する経路が存在しない（`ProviderInstance` に期限フィールドがなく coordinator の `Ops` は既定値を返すだけ）。唯一の実機 Provider は spec 18 UR-16 が「5 秒既定内に収まる」よう設計されているため、書けるテストは存在しない API を対象にすることになる。",
+  "code": [
+   "crates/ezsdr-kernel/src/run.rs:566",
+   "crates/ezsdr-kernel/src/run.rs:623",
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:376"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/04-run-and-session.md",
+  "rule": "RS-24",
+  "condition": "none named for the two outcomes being logged",
+  "class": "A",
+  "why": "誤トークンの `Adopt` と再更新不可 Lease への `Renew` を Session 経由で試すテストがなく、拒否を握り潰して `Admitted` として記録する実装（client は lease を奪回したと誤認し、TTL 満了で Run が予期せず終わる）をどのテストも捕まえないため。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1420",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1430",
+   "crates/ezsdr-kernel/src/run.rs:454"
+  ],
+  "test_sketch": "`crates/ezsdr-kernel/tests/coordinator.rs`（`connect` と `rig` がある）: `Lease::detached(5000, true, \"tok\", &rig.host)` の Session に `submit(SessionAction::Adopt { token: \"wrong\" })` し、返る entry の outcome が `Rejected` で violation の check が `ezsdr.lease` であること、`Lease::detached(5000, false, …)` の Session に `submit(SessionAction::Renew {})` して同じく `Rejected`（`ezsdr.lease`）であること、両 entry が `manifest.action_log` に載ることを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/04-run-and-session.md",
+  "rule": "RS-28",
+  "condition": "none named for the declared `fatal` severity of `DEVICE_LOST` and `STEP_LIVELOCK`",
+  "class": "C",
+  "why": "`Policy.severities` は Manifest に記録されるだけで、登録済み kind は必ず反応表に載るため `Policy::reaction_for` の severity フォールバックは到達せず、挙動を決めない。テストはリテラルの表明（`get(&DEVICE_LOST).severity == Fatal`）にしかならないため。",
+  "code": [
+   "crates/ezsdr-kernel/src/policy.rs:82",
+   "crates/ezsdr-kernel/src/policy.rs:151",
+   "crates/ezsdr-kernel/src/policy.rs:175"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/04-run-and-session.md",
+  "rule": "RS-36",
+  "condition": "none named for the escalation flag of a `stop`-reacting kind",
+  "class": "A",
+  "why": "既存の `rs_36_a_dropped_stop_must_not_mask_a_dropped_abort` は stop と abort を同時に落として abort が勝つことしか見ないため、stop の flag が立たない実装や `Orderly` 終了に写像されない実装は、本文が落ちた stop が黙って Run を続かせてもどのテストにも捕まらない（stop 反応は RS-26 の四つの反応の一つで、Spec の `policies.failure` 上書きで到達する）。",
+  "code": [
+   "crates/ezsdr-kernel/src/event.rs:525",
+   "crates/ezsdr-kernel/src/event.rs:504",
+   "crates/ezsdr-kernel/src/coordinator/stepping.rs:256"
+  ],
+  "test_sketch": "`crates/ezsdr-kernel/tests/coordinator.rs`: `rs_36_a_dropped_stop_must_not_mask_a_dropped_abort` と同じ rig で Provider を `ezsdr.LINK_BACKPRESSURE`（`policies.failure` で `stop` に上書き）だけ落とすよう `.emitting(\"ezsdr.LINK_BACKPRESSURE\", Warning, 150).flooding(EVENT_RING_DEPTH).with_wakeups(&[150])` にし、`termination.reason` が `Stopped { Policy { LINK_BACKPRESSURE } }`、遷移に `Stopping { mode: Orderly }`、delivered に `EVENTS_DROPPED`（`kind` が `ezsdr.LINK_BACKPRESSURE`、count 1、source `kernel`）があることを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/04-run-and-session.md",
+  "rule": "RS-39",
+  "condition": "none named for such an instance handing in a section (refused, and recorded as a step-7 cleanup failure)",
+  "class": "A",
+  "why": "空 `sections` 側だけが `ka_13_an_invalid_provider_namespace_without_sections_is_not_a_failure` で押さえられており、section を黙って捨てて `termination.cleanup_failures` に何も残さない実装がどのテストにも捕まらない（Module の section が Manifest から消えたことに読者が気づけない）。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:116",
+   "crates/ezsdr-kernel/src/manifest.rs:434"
+  ],
+  "test_sketch": "`crates/ezsdr-kernel/tests/coordinator.rs`: `ka_13_…` と同じ `run_registry_non_namespace_provider()` で `TestProvider::new(\"radio\", 2).with_module(mref(\"TestProvider\")).with_section(\"TestProvider.details\", json!({\"samples\": 1}))` を bind し、`manifest.termination.cleanup_failures` に reason が `Module id TestProvider is not a Namespace` を含む項目があること、`manifest.sections` が空であることを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/04-run-and-session.md",
+  "rule": "RS-42",
+  "condition": "none named for the recorded seed the Simulation class's determinism claim requires",
+  "class": "C",
+  "why": "Kernel は `sim.seed`（Vocabulary の section）を読めず（OV-21, SB-26）、spec 08 SE-2 が「absent は 0 として再現される」「seed は環境がそのまま記録する」と定めるので、class による主張は `rs_42_determinism_only_in_simulation`、環境の記録は `rs_43_no_seeds_field_in_the_envelope` が押さえている。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:139",
+   "crates/ezsdr-kernel/src/manifest.rs:412"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/04-run-and-session.md",
+  "rule": "RS-43",
+  "condition": "none named for the environment capture (`sections` under `ezsdr.capture`)",
+  "class": "C",
+  "why": "`ezsdr.capture` を書く Module も読む経路も存在せず（`KERNEL_SECTIONS` に名前があるだけで coordinator も Module も触らない）、規則の後半は未実装。section の枠組み自体は `rs_39_*` が押さえているため、テストにできる対象がない。",
+  "code": [
+   "crates/ezsdr-kernel/src/binding.rs:133",
+   "crates/ezsdr-kernel/src/manifest.rs:451"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/05-module-api.md",
+  "rule": "MA-15",
+  "condition": "none named for the coordinator never stepping a Provider whose `driving.stepped` is false",
+  "class": "C",
+  "why": "非 stepped Provider（UHD）は `Provider::step` を上書きせず既定は no-op で、step を上書きする MockRadio は stepped なので、`slot.stepped` の filter を外しても観測できる差がなく（既定 no-op は `ma_15_provider_step_default_is_idle` が固定）、テストには step を記録する非 stepped の double を新設する必要がある。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/stepping.rs:142",
+   "crates/ezsdr-kernel/src/module_api.rs:195"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/05-module-api.md",
+  "rule": "MA-22",
+  "condition": "none named for an Action edge",
+  "class": "C",
+  "why": "plan は `EdgeKind::Stream` の辺しか作らず（`islands.rs:161`）、Action の辺は現時点でどの実装からも生まれないため到達不能。壊れた場合の向きは「合法なグラフの拒否」という可視のエラーで、MA-30 の Ceiling が Action を適用する最初の Executor に再指定している。",
+  "code": [
+   "crates/ezsdr-kernel/src/plan/graph.rs:84",
+   "crates/ezsdr-kernel/src/plan/islands.rs:161"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/05-module-api.md",
+  "rule": "MA-24",
+  "condition": "none named for an Executor that applies an Action under the declared class",
+  "class": "C",
+  "why": "唯一の Executor `ezsdr.exec.native` 1.0.0 は Action を適用せず拒否し（NX-7 が `nx_07_an_action_addressed_to_the_executor_fails_the_step` で押さえる）、適用する Executor はまだ存在しない（MA-30 の Ceiling が最初のその Executor に再指定）。update class 自体は KC-25・UC-3・UC-6 が Provider 側で押さえている。",
+  "code": [
+   "crates/ezsdr-exec-native/src/lib.rs:230"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/05-module-api.md",
+  "rule": "MA-44",
+  "condition": "none named for its `fidelity` vector",
+  "class": "C",
+  "why": "double（`tests/support/doubles.rs`）自身の性質であり製品の保証ではない。他の Run テストは `settle_fidelity`／`with_fidelity` で必要な値を明示するため、基準値の表明は新しい故障を捕まえない。",
+  "code": [
+   "crates/ezsdr-kernel/tests/support/doubles.rs:414"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/05-module-api.md",
+  "rule": "MA-44",
+  "condition": "none named for its action-queue drain",
+  "class": "C",
+  "why": "`TestProvider::drain_actions` は `SteppedProvider::step`（`run_doubles.rs:842`）が毎 step 呼ぶため既に間接的に行使され、届いた Action を見る各テスト（KC-25 など）が実質的に押さえている。単体の表明は test-support の自己言及になる。",
+  "code": [
+   "crates/ezsdr-kernel/tests/support/doubles.rs:625",
+   "crates/ezsdr-kernel/tests/support/run_doubles.rs:842"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/05-module-api.md",
+  "rule": "MA-44",
+  "condition": "none named for its generating no Events",
+  "class": "C",
+  "why": "double が Event を出さないことは `impl Provider for TestProvider` に emitter を持たない構造（`emit` を持たない）で自明であり、表明しても製品側の規則を一つも捕まえない。",
+  "code": [
+   "crates/ezsdr-kernel/tests/support/doubles.rs:635"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/05-module-api.md",
+  "rule": "MA-46",
+  "condition": "none named for a compile-time document bound (`Serialize`, `DeserializeOwned`, `JsonSchema`) naming `ModuleDescriptor` and `VocabularyDescriptor`",
+  "class": "C",
+  "why": "両者の committed schema は `ov_22_schema_freeze` が描画比較で押さえ（`Serialize` と `JsonSchema`）、`DeserializeOwned` は `module_api.rs:146` の `serde_json::from_value::<ModuleDescriptor>`（`ma_32_registry_refusals` 内）が押さえているため、bound を足しても既に強制されている性質を言い直すだけになる。",
+  "code": [
+   "crates/ezsdr-kernel/tests/module_api.rs:62",
+   "crates/ezsdr-kernel/src/module_api.rs:795",
+   "crates/ezsdr-kernel/src/module_api.rs:868"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-2a",
+  "condition": "naming the first offending instance in plan order",
+  "class": "C",
+  "why": "どの違反者を名指ししても Run は同じ `Failed { plan }` で失敗し、メッセージが2番目の offender を指すだけなので結果も可視性も変わらない（診断文言のみの問題）。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:279"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-3",
+  "condition": "the single `authority.time()` call and the one handle shared by every `PrepareContext`",
+  "class": "C",
+  "why": "どの Authority の `time()` も同じ時計状態を指すハンドルを返すので、fragment ごとに呼び直しても Module から見た挙動は変わらない。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:181",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:802"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-11",
+  "condition": "`host_budget` = `DEFAULT_HOST_BUDGET_NS` in `host.monotonic`",
+  "class": "C",
+  "why": "今日どの Module も `ctx.host_budget` を読まず（MockRadio/UHD/exec-native はいずれも自分で設定するだけ）、coordinator 自身の prepare/arm 待ちは定数 `DEFAULT_HOST_BUDGET_NS` を直接使うので、渡す値が違っても Run に影響しない。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:741",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:813",
+   "crates/ezsdr-kernel/src/coordinator/paced.rs:24"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-11",
+  "condition": "an empty components map for a non-Island fragment",
+  "class": "C",
+  "why": "`ctx.components` を読むのは Executor だけで（Island 以外の役割は `island.as_ref()` が `None` なので常に空）、Provider/Sink に渡しても誰も見ない。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:778",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:813",
+   "crates/ezsdr-exec-native/src/lib.rs:194"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-13",
+  "condition": "`start`'s instance order",
+  "class": "C",
+  "why": "全 instance の `start` は `Running` 到達（＝data thread 開始）と start dispatch より前に終わるため、順序が入れ替わっても流れるデータや Manifest に現れない（順序に結合がある arm の方は `kc_13_...` が pin 済み）。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1192"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-13",
+  "condition": "`stop`'s instance order (RS-6 step 2 in the reverse passes)",
+  "class": "C",
+  "why": "Provider の `stop` は互いに独立で tail は次の step の drain が拾うため、reverse pass 内の入れ替えは結果に現れない。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:50",
+   "crates/ezsdr-kernel/src/run.rs:617",
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:514"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-14",
+  "condition": "no later instance after an arm failure",
+  "class": "C",
+  "why": "失敗時の early return 自体は `kc_14_an_arm_failure_is_failed_arm` が実行しており、仮に後続を arm しても Run はすでに `Failed { arm }` で、cleanup が prepare に達した全 instance を stop/cleanup する。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:916"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-17",
+  "condition": "an agenda item that admission refuses (Failed { run } in abort mode, reason `KC-17: agenda entry <index>: <violations>`)",
+  "class": "C",
+  "why": "untimed template は `Stop` だけで、その target は `validate()` が分類済み（KC-23）／`Stop { target: None }` は admission の前に Run を終えるので決定的なテストでは到達せず、到達経路は device-paced の data thread と freeze が競合する場合に限られる。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/stepping.rs:454",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1131"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-24",
+  "condition": "step 2's `ezsdr.run_state` refusal",
+  "class": "C",
+  "why": "spec 自身が「Phase 2 exit review の test ceiling」として、`submit` の `Ended` か step 1 の freeze が必ず先に立つと記しており、Session/Module 起点では到達不能。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/admission.rs:52"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-27",
+  "condition": "a Provider that refuses an admitted update at runtime leaves the configuration holding the refused value",
+  "class": "C",
+  "why": "構成は dispatch で書かれる（admission.rs:442）以外に書き換える経路が無く、runtime の拒否 event を構成へ戻すコードが存在しない（Ceiling が将来作業と明記）ので、現状は構造的に強制されている。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/admission.rs:440",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:879"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-28",
+  "condition": "`NotSession` on a Spec Run (`submit`)",
+  "class": "A",
+  "why": "kind 検査が欠けると Spec Run に Session Action がそのまま admit・dispatch され action_log まで得て Run が沈黙のうちに壊れるのに、`submit` 側のこの分岐を実行するテストが無い（`run_child` 側だけが kf_03 で検査済み）。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/mod.rs:273"
+  ],
+  "test_sketch": "crates/ezsdr-kernel/tests/coordinator.rs に `kc_28_submit_on_a_spec_run_is_not_session` を追加。`start_spec_run(&spec_one(), &profile_one(), rig(...).assembly)` の handle に `submit(SessionAction::Stop { target: None }, None)` を呼び、`Err(RunHandleError::NotSession)` を assert（`kf_03_run_child_is_a_session_verb` の NotSession 検査の隣に置く）。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-30",
+  "condition": "a panic in `next_wakeup` in KC-20's loop",
+  "class": "A",
+  "why": "この Err 分岐はどのテストも実行しておらず（既存の panicking authority テストは drain 経路だけでループに入らない）、`contain_all` を外す／panic を「None」と読む実装だと panic が API の外へ抜けるか Run が `Completed` として成功扱いになり失敗が隠れる。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/stepping.rs:366"
+  ],
+  "test_sketch": "coordinator.rs に 1 テスト追加。`rig_with_faulting_time(SimAuthority::panicking_next_wakeup)`（既存 2559 行と同じ rig）で Run を作り、`run.advance_to(TimePoint::new(domain, 10))`（または `run_until_end`）を呼んで `termination.reason == Termination::Failed { stage: Stage::Run, reason: \"KC-30: authority panicked during next_wakeup\" }` と abort mode を assert。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-30",
+  "condition": "a panic in `cleanup` (that step's `CleanupFailure` with the reason \"a Module panicked\")",
+  "class": "A",
+  "why": "`cleanup` を包む `contain` の Err 分岐を実行するテストが一つも無く、外せば Module の panic が cleanup step のスレッドを抜けて Manifest が失われるか失敗が記録されない。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:505",
+   "crates/ezsdr-kernel/src/run.rs:626"
+  ],
+  "test_sketch": "coordinator.rs に 1 テスト追加。`TestProvider` に `panicking_cleanup()`（`panicking_in_coerce` と同型のフラグ＋`panic!`）を足し、それを載せた Spec Run を `finish()` して、`termination.cleanup_failures` に該当 fragment と reason `\"a Module panicked\"` を持つ step 4 の記録があり、Manifest が sealed で返ることを assert。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-36",
+  "condition": "`Release`'s update of the deadline the data thread checks",
+  "class": "C",
+  "why": "spec が「not observable」と明記するとおり、`Release` は同じ submit で Run を `Stopped { client }` に終えるので、mirror した deadline を data thread が読む機会が無い。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1411",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1444"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-40",
+  "condition": "the order of `also` when KC-32 records more than one Termination",
+  "class": "C",
+  "why": "要素はすべて揃い順序だけが変わる診断用リストで、消費者が順序違いを検出できず、2 件以上を記録させる手順自体が作為的（orderly の後に abort と failure を重ねる）。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:343",
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:251"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-42",
+  "condition": "the span's floor/ceil conversion",
+  "class": "A",
+  "why": "既存の artifact テスト（kc_31, kc_42_*）は `domain: primary` の span しか作らない（run_doubles.rs:1192）ので、実際の capture が持つ SampleClock domain からの floor/ceil 変換が一度も実行されておらず、ここが誤ると全 capture の mark が誤帰属する。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:397",
+   "crates/ezsdr-kernel/tests/support/run_doubles.rs:1190"
+  ],
+  "test_sketch": "coordinator.rs に KC-42 の境界テストを追加。`RecordingSink` に「宣言した SampleClock domain の span を返す」設定を足し、割り切れない ratio の clock（例 3:1）で capture を返して、primary root 上の mark が floor/ceil 後の `[first, end)` に正しく入ることを assert（下の 3 条件もこの 1 テストで覆う）。",
+  "effort": "M"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-42",
+  "condition": "its `[first, end)` boundary",
+  "class": "A",
+  "why": "境界は `is_ge`/`is_lt`（ending.rs:424）で決まるが、ちょうど `first`／`end` に落ちる mark はどのテストにも無く（既存は 150 と 100–200/300–400）、`is_lt` を `is_le` にしても通る。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:420"
+  ],
+  "test_sketch": "同テストで mark を区間のちょうど `first`（含む）と `end`（含まない）に置き、前者だけが付くことを assert。",
+  "effort": "M"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-42",
+  "condition": "several `ContinuityMap`s [in one artifact]",
+  "class": "A",
+  "why": "コードは `continuity.first()` と `.last()` だけを見る（ending.rs:398）が、1 artifact が 2 枚以上の map を持つ場合を作る double が無く（`returning_spans` は 1 span = 1 artifact = 1 map）、区間の取り方の誤りが誰にも見えない。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:398",
+   "crates/ezsdr-kernel/tests/support/run_doubles.rs:1185"
+  ],
+  "test_sketch": "同テストで 1 artifact に 2 枚の `ContinuityMap` を持たせ、最初の `first` から最後の `end` の間の mark が付きその外は付かないことを assert。",
+  "effort": "M"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-42",
+  "condition": "the no-map or failed-conversion fallback (every mark applies)",
+  "class": "A",
+  "why": "map が無い artifact で全 mark を付ける分岐（ending.rs:417,427）が未実行で、capture が `continuity` を返さない場合の保守的挙動がどのテストにも pin されていない。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:416"
+  ],
+  "test_sketch": "同テストで `continuity` が空の artifact を混ぜ、mark が付くこと（変換に失敗する時刻の mark でも付くこと）を assert。",
+  "effort": "M"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-43",
+  "condition": "`host_utc_nanos` being the host clock's UTC time",
+  "class": "C",
+  "why": "既存 assert は `> 0` のみ（coordinator.rs:1143）で由来は pin されていないが、コードは注入された host clock の 1 回の呼び出しで分岐が無く、誤っても Manifest の診断値が変わるだけで Run のデータは変わらない。",
+  "code": [
+   "crates/ezsdr-kernel/src/run.rs:697",
+   "crates/ezsdr-kernel/src/run.rs:726"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-44",
+  "condition": "a `seal()` failure at cleanup step 7 (its `CleanupFailure` with `fragment: None` and the unsealed Manifest)",
+  "class": "C",
+  "why": "`Value` の数値は `Finite` 包みで（spec.rs:206）`serde_json::Value` は非有限数を持てず、`write_section` が ASCII key を検査する（manifest.rs:450）ので、spec の言う「どの検査も守らない経路」が現状存在せず到達不能。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:268",
+   "crates/ezsdr-kernel/src/manifest.rs:408"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-46",
+  "condition": "the park when no instance progressed (`DATA_IDLE_PARK`)",
+  "class": "C",
+  "why": "進捗が無いときの park は CPU 効率のための分岐で、外しても正しさは変わらず、park の有無は 200 µs を測る timing 依存のテストでしか見えない。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/paced.rs:89"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-46c",
+  "condition": "the termination a dropped handle produces (`Stopped { client }`, orderly mode)",
+  "class": "C",
+  "why": "Drop は `ending::finish` をそのまま呼び（mod.rs:363）、その orderly な `Stopped { client }` は `finish` 経路のテスト（kc_30_a_next_wakeup_panic_in_the_cleanup_drain_is_recorded 等）がすでに pin しており、drop が別の終了を要求するには共有関数の変更が要る。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/mod.rs:361",
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:310"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/06-kernel-coordinator.md",
+  "rule": "KC-46c",
+  "condition": "a Simulation class handle drop",
+  "class": "C",
+  "why": "`self.shared.device_paced()` の guard で何もしない分岐（mod.rs:363）なので、テストは「何も起きない」ことの確認にしかならず、vacuously true。",
+  "code": [
+   "crates/ezsdr-kernel/src/coordinator/mod.rs:361"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/07-radio-model.md",
+  "rule": "RM-8",
+  "condition": "`Max`/`Range` の適用値（境界以下の最大・範囲内の最小）",
+  "class": "C",
+  "why": "適用値が要求を満たすかは Kernel の prepare の再照合（MA-12 (re-match)）が必ず検査して満たさなければ Run を Failed にするので静かな破損にならず、`Min` 側は mr_06_coerce_cases が既に固定している。",
+  "code": [
+   "crates/ezsdr-radio/src/device.rs:497",
+   "crates/ezsdr-radio/src/device.rs:503",
+   "crates/ezsdr-kernel/src/plan/prepare.rs:266"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/07-radio-model.md",
+  "rule": "RM-8",
+  "condition": "`Min`/`Max`/`Range`/`Set` が格子値を見つけないときの拒否",
+  "class": "C",
+  "why": "格子値が無いときの拒否が消えても、Kernel の coerce preview と prepare の再照合がその値を通さないので Run は prepare で落ち、coercion を記録しないことも mr_06_coerce_cases の coercions.len()==1 が固定している。",
+  "code": [
+   "crates/ezsdr-radio/src/device.rs:493",
+   "crates/ezsdr-radio/src/device.rs:505",
+   "crates/ezsdr-radio/src/device.rs:511"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/07-radio-model.md",
+  "rule": "RM-11",
+  "condition": "`radio.TX_UNDERFLOW` の source 節点 (`<device>/tx`)",
+  "class": "A",
+  "why": "source は Manifest の delivered/counters 行の帰属そのもので、誤ると利用者の (source, kind) による参照・計数からそのエラーが外れるのに、どのテストも kind と payload しか見ていない。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/provider/tx.rs:721"
+  ],
+  "test_sketch": "crates/ezsdr-radio-uhd/src/provider/tx.rs の unit テスト（events を drain している行 855 付近）で、TX_UNDERFLOW の `event.source` が `EventSource::Node { node: tx_id }` であることを assert する（Run も FakeDevice も不要）。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/07-radio-model.md",
+  "rule": "RM-11",
+  "condition": "`radio.CLOCK_LOST` の source 節点 (device node)",
+  "class": "A",
+  "why": "同じく event の帰属で、CLOCK_LOST は fatal/abort の原因になるため誤帰属は Run の停止理由の読み方を変えるのに、ur_27_a_lost_reference_is_clock_lost は payload と termination しか見ていない。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/provider/control.rs:715"
+  ],
+  "test_sketch": "crates/ezsdr-radio-uhd/tests/fake.rs:1729 の ur_27_a_lost_reference_is_clock_lost に、`events_of(&manifest, \"radio.CLOCK_LOST\")[0].source == EventSource::Node { node: ResourceId::parse(\"usrp\") }` を足す。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/07-radio-model.md",
+  "rule": "RM-11",
+  "condition": "`radio.TX_DISCONTINUITY` の source 節点",
+  "class": "C",
+  "why": "TX 側に link 給電の送信ポートがまだ無く、MockRadio も UHD もこの種を発行しない（SC-24a の Producer obligation が Phase 10 の最初の当該 Provider）。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:173",
+   "crates/ezsdr-radio-uhd/src/provider/tx.rs:721"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/07-radio-model.md",
+  "rule": "RM-14",
+  "condition": "admission が既に target を進めたとき `requested_target` が引き継ぐ SC-23a の `requested_at`",
+  "class": "A",
+  "why": "Kernel の admission が `requested_at` を入れる唯一の経路で、Provider がそれを使い損ねると burst record の `requested_target` が `target` と一致し、S13 の「1 サンプル進めた事実」が Manifest から消える（他テストは `requested_at: None` しか通さない）。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:1134",
+   "crates/ezsdr-mock-radio/src/lib.rs:1196",
+   "crates/ezsdr-radio-uhd/src/provider/control.rs:653",
+   "crates/ezsdr-kernel/src/coordinator/admission.rs:238"
+  ],
+  "test_sketch": "crates/ezsdr-mock-radio/tests/mock_radio.rs の `tx_action` ヘルパ（行 46-56、`requested_at: None` 固定）に `requested_at` を渡せるようにし、`at` より前の `requested_at` を持つ TxBurst を 1 つ投げて、`ezsdr.radio.mock.bursts[0].requested_target` が `requested_at` の時刻（`at` ではない）であることを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/07-radio-model.md",
+  "rule": "RM-18",
+  "condition": "sequence error が発行する `radio.RX_OVERFLOW` の `cause: sequence` と `restart_gap_ns: 0`",
+  "class": "A",
+  "why": "この payload は失われたサンプルの診断そのもので、overrun として出れば 50 ms のギャップと誤読させるのに、mr_22_sequence_error_shape はブロックの形しか見ず v58_06 は gap の cause（フラグ由来）しか見ない。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:554",
+   "crates/ezsdr-mock-radio/src/lib.rs:567",
+   "crates/ezsdr-mock-radio/src/lib.rs:377"
+  ],
+  "test_sketch": "mr_22_sequence_error_shape に、mr_19_backpressure_is_an_overrun と同じ形で hot-path の RX_OVERFLOW を drain し `RxOverflowPayload::from_payload(...)` が `{ cause: Sequence, lost: 2000, restart_gap_ns: 0 }` であることを assert する行を足す。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/07-radio-model.md",
+  "rule": "RM-23",
+  "condition": "受信側の path delay（両プロファイルが `radio.rx.path_delay_samples` 0）",
+  "class": "B",
+  "why": "x310-like も ideal も 0 を宣言し MR-35 も受信サンプルのアンテナ時刻を自身の時刻とするので、Mock 上では値の差が原理的に観測できず、M13 の上限どおり Phase 8 の X300 測定が両方向の遅延を測る。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/profile.rs:106",
+   "crates/ezsdr-radio/src/device.rs:329"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-7",
+  "condition": "step 10 の空の `warnings`",
+  "class": "C",
+  "why": "Mock が警告を生む経路を持たない構造的事実（`Vec::new()`）で、誤っても Run の結果は変わらず Kernel 側で warnings 行が 1 つ増えるだけなので、無を assert する価値が小さい。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:1659",
+   "crates/ezsdr-kernel/src/plan/prepare.rs:164"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-11",
+  "condition": "`LATE_COMMAND` payload の `key`/`requested`/`applied`",
+  "class": "C",
+  "why": "同じ `T0` と `S` が拒否理由の文字列にそのまま載り mr_11_start_cases がそれを assert しているので、payload だけが誤っても何も隠れない（同じ payload 型の中身は UHD 側で ur_17_a_missed_start_restarts_with_a_gap が固定）。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:1702",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:632"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-11",
+  "condition": "拒否された start がストリームを開始しないこと",
+  "class": "C",
+  "why": "mr_11_start_cases が拒否の直後から rx の SampleClock 出現までを assert しており、拒否がストリームを起こしていれば `mock/rx` の clock 記録が現れて失敗する。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:1701",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:639"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-11",
+  "condition": "`None` を `now(V)` と見ること",
+  "class": "C",
+  "why": "coordinator は常に `Some` を渡すと RM-11 自身が述べており設計上到達しない。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:1699"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-13",
+  "condition": "受信ブロックの `direction: rx`",
+  "class": "C",
+  "why": "SampleBlock の構築子が Tx に gap/burst フラグを許さない（SC-16）ため、GAP_BEFORE 付きブロックを出す mr_19/mr_21/mr_22 は方向を取り違える実装を必ず失敗させ、フラグ無しブロックだけを取り違える実装は非現実的。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:500",
+   "crates/ezsdr-kernel/src/stream/block.rs:285"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-14",
+  "condition": "複数の `rx` link が同じ `BlockRef` を受け取ること",
+  "class": "C",
+  "why": "link ごとに `block.clone()`（Arc clone）しており内容は ur_17_blocks_reach_every_link が等値で固定していて、残るのは参照同一性（ゼロコピー）の保証だけなので、link を保持するようハーネスを変える費用に見合わない。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:509",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:208"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-15",
+  "condition": "`BurstRecord.actual_start` が無いこと",
+  "class": "C",
+  "why": "Mock は `set_actual_start` を呼ぶ経路を持たず（呼び出しは Kernel の tracker unit テストだけ）、装置フィードバックが無いという構造的事実なので、無を assert しても破れようがない。",
+  "code": [
+   "crates/ezsdr-kernel/src/stream/burst.rs:426",
+   "crates/ezsdr-kernel/tests/stream_contract.rs:849"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-18",
+  "condition": "device と class の拒否（target が device でない／configuration key でない／class が合わない）",
+  "class": "C",
+  "why": "Kernel の KC-24 step 3 が target を宣言済み node に解決し step 5 が「宣言された class と一致」を先に拒否し（RS-52 の Violation）、antenna key は class を持たないので Session/Module いずれでも Provider の拒否は多層防御になる。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:1293",
+   "crates/ezsdr-mock-radio/src/lib.rs:1298"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-19",
+  "condition": "`overflow_restart_gap_ns` が 0 のとき（`ideal`）も落ちたブロックが失われること",
+  "class": "A",
+  "why": "gap 0 では `k_g = b` という下限だけで「少なくとも落ちたブロックは失う」が成立し、ここを `a + gap` と書く実装はブロックを重複・逆戻りさせて capture のサンプル列を静かに壊すが、既存の mr_19 は x310-like（gap 50 ms）だけを試す。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:426",
+   "crates/ezsdr-mock-radio/src/lib.rs:430"
+  ],
+  "test_sketch": "crates/ezsdr-mock-radio/tests/mock_radio.rs の mr_19_backpressure_is_an_overrun の隣に `ideal`＋`BackPressure::Block` capacity 1 の harness を足し、block 0 の後 block 1 を Full にしたうえで、次のブロックが index 4 000 から始まり flags に GAP_BEFORE|RESTARTED・`lost == 2 000`（= block_len、時間跳躍に等しい）を持つことを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-25",
+  "condition": "`stop(mode)` が pending の command について `rejected` へ記録するもの",
+  "class": "A",
+  "why": "`Provider::stop` は pending の update を理由付きで `rejected` に残すのが RM-16 の義務で、記録が静かに消えると利用者は自分の更新が取り消された事実と理由を Manifest から読めない（`Stop` 側だけが mr_25_a_stream_stop_keeps_the_pending_commands で固定されている）。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:782"
+  ],
+  "test_sketch": "mr_25_a_stream_stop_keeps_the_pending_commands の隣に、5 ms 先の `hardware_timed` update を投げた後 `mock.stop(StopMode::Orderly)` を呼び、`ezsdr.radio.mock.rejected` に kind `update_parameter`・reason \"MR-25: cancelled by stop\" の行が 1 つ入り、`ezsdr.radio.mock.applied` が空のままであることを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-37",
+  "condition": "hot-path `emit` が返すエラーの `ModuleError { kind: Internal }` 化",
+  "class": "C",
+  "why": "prepare で解決済みの handle・RM-24 の 17 byte・自分の root から呼ぶので PayloadTooLarge/ForeignEventHandle/EventSourceOutsideRoot は通常到達せず、テストには失敗する専用 sink が要る。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:379",
+   "crates/ezsdr-kernel/src/event.rs:611"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-29",
+  "condition": "`start_rx` が `at`（受領より後ならそれ）で効くこと",
+  "class": "A",
+  "why": "既存テストは `at: None`（受領時刻）しか通さないので、`at` を無視して受領時に再開する実装はストリームの再開時刻を静かに早め、Run の時間軸と clock origin を狂わせる。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:1039",
+   "crates/ezsdr-radio/src/timeline.rs:213"
+  ],
+  "test_sketch": "mr_29_start_rx_is_the_one_command に `at: Some(...)` の場合を足す: `ideal` で `at` = 受領 + 10 ms の `start_rx` を投げ、新しい receive clock の origin がその格子瞬間（10 ms 後）であり LATE_COMMAND が 0 件であることを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-29",
+  "condition": "receive link があるとき T0 より前に始まらないこと",
+  "class": "A",
+  "why": "T0 未満の `at` をそのまま採ると Run 開始前のセグメントを作ってしまい、既存テストは cold change の T0 下限（mr_18_a_cold_receive_change_before_t0_applies_at_t0）しか見ていない。",
+  "code": [
+   "crates/ezsdr-radio/src/timeline.rs:214",
+   "crates/ezsdr-radio/src/timeline.rs:215"
+  ],
+  "test_sketch": "同じテストで `at` を T0 より前（例: T0 - 1 ms）にし、新しい receive clock の origin が T0 であり T0 以前のブロックが出ないことを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-29",
+  "condition": "`start_rx` が決して late でないこと（過去の `at` でも LATE_COMMAND を出さない）",
+  "class": "A",
+  "why": "過去の `at` で LATE_COMMAND を出して lead 分だけ遅らせる実装は再開時刻を装置の lead だけずらすのに、mr_29_start_rx_is_the_one_command は drain したイベントから LATE_COMMAND の不在を assert していない。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:1044",
+   "crates/ezsdr-radio/src/timeline.rs:220"
+  ],
+  "test_sketch": "同じテストで、`Stop` の後 `at` = 過去の `start_rx` を投げ、drain したイベントに `radio.LATE_COMMAND` が 1 件も無く、再開が受領時（`now`）であることを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-30",
+  "condition": "Module error が中断するラウンドで受信したサンプルの内容",
+  "class": "C",
+  "why": "内容の順序非依存は ch_09_the_receive_output_does_not_depend_on_the_stepping_order が一般の場合で固定し、故障ラウンドは publish_rx がブロックを作った後にループが止まるだけなので、kd_01 に内容まで足す価値は小さい。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:462",
+   "crates/ezsdr-acceptance/tests/v58.rs:591"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/09-mock-radio.md",
+  "rule": "MR-36",
+  "condition": "飽和がイベントを発行しないこと",
+  "class": "C",
+  "why": "現実装に飽和イベントの発行経路が無く（M14 が CLIPPED 種を却下した設計）、破れるのは誰かが追加したときだけなので、無を assert するテストは文書化の役にしか立たない。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:461",
+   "crates/ezsdr-mock-radio/src/channel.rs:117"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-3",
+  "condition": "宣言する関数の一覧（extern 宣言そのもの）",
+  "class": "C",
+  "why": "UHD 4.10 のヘッダに対応する extern 宣言の一覧はドキュメント的な宣言で、照合は build 時・bench 時の作業（feature `uhd` の uhd_api_* が一部を担う）なのでテストの対象にならない。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/uhd.rs:106"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-3",
+  "condition": "handle ごとの last-error の選択（`uhd_usrp_last_error`／streamer の mutex 下、`uhd_get_last_error` は handle 無しのときだけ）",
+  "class": "B",
+  "why": "真偽は実 libuhd がハンドル別に残すエラーテキストに依存し、失敗した呼び出しを実機（bench の hw_b9 等）で観測して初めて確かめられる。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/uhd.rs:203",
+   "crates/ezsdr-radio-uhd/src/uhd.rs:395"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-3",
+  "condition": "mutex と control call の規則（1 つの control mutex、streamer ごとの排他、host bracket）",
+  "class": "C",
+  "why": "streamer ごとの直列化は uhd_safe_shared_device_serializes_send と uhd_safe_shared_device_serializes_receive_and_reports が固定し、control call の bracketing と 1 ms の bracket 規則は UR-7 側で固定されている。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/uhd.rs:376",
+   "crates/ezsdr-radio-uhd/src/uhd.rs:108"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-3",
+  "condition": "wire format（host は `fc32`、wire は `sc16`）",
+  "class": "B",
+  "why": "sc16 が wire であることは実機がそのストリームを受理して初めて真になり、Mock 側で固定できるのは UR-9 の `wire_bytes_per_sample` 4 だけ。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/uhd.rs:429",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:457"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-3",
+  "condition": "master clock が正整数 Hz でない装置の拒否",
+  "class": "C",
+  "why": "非整数の master clock を報告する装置が無く（X300 は 200 MHz）、`FakeDevice` は `open` を通らないので、この拒否はどの経路からも到達できない多層防御。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/uhd.rs:412"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-12",
+  "condition": "`Requested` が無い／parse できない fragment と他インスタンスの fragment の拒否",
+  "class": "C",
+  "why": "`requested` が欠けるのは Spec 資源を名指さない binding だけで SB-22 が Provider に作らず、他インスタンスの fragment は Kernel が渡さないのでいずれも設計上到達しない。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/provider/mod.rs:298",
+   "crates/ezsdr-radio-uhd/src/provider/mod.rs:300",
+   "crates/ezsdr-kernel/src/plan/compile.rs:17"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-12",
+  "condition": "`rx` port 上の `StreamOut` でない link の拒否",
+  "class": "C",
+  "why": "Kernel が plan 時に出力 port の存在と方向を照合してから KC-10 で attach する（SB-15a）ので、Provider 側の拒否は多層防御になる。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/provider/mod.rs:334",
+   "crates/ezsdr-kernel/src/plan/links.rs:166"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-12",
+  "condition": "`source` が node でないときの拒否",
+  "class": "C",
+  "why": "KC-8 が Provider の source root を必ず node として渡すと決めており、渡らない source は Kernel 側の欠陥になるので到達しない。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/provider/mod.rs:344"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-13",
+  "condition": "`arm` が何も放射しないこと",
+  "class": "A",
+  "why": "T0 前に RF を出さないことは安全側の保証で、arm が空の end-of-burst や最初のバッファを送る実装は Run 開始前の送信を黙って起こすのに、arm 直後に送信が無いことを見るテストが無い。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/provider/mod.rs:380",
+   "crates/ezsdr-radio-uhd/src/provider/mod.rs:396"
+  ],
+  "test_sketch": "ur_13_arm_cases に 1 行足す（または `with_tx` の Run で `past_t0` まで進めず）：`arm` の直後に `calls(&device, \"tx_send\")` が空で、streamer の open（`tx_open`）だけが記録されていることを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-16",
+  "condition": "join の 1 秒/スレッド上限",
+  "class": "C",
+  "why": "既存の ur_16_a_wedged_thread_does_not_wedge_stop が stop 全体を 3 秒で bound しており、より厳しい判定は実時計の壁時計判定になる（plan 30 §4.4 が避ける方針）。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/provider/mod.rs:56",
+   "crates/ezsdr-radio-uhd/src/provider/mod.rs:244"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-17",
+  "condition": "受信ブロックの planar cf32 バイト配置（複数チャンネル）",
+  "class": "A",
+  "why": "`write_cf32(buffer, n, c, i, ...)` の channel/index 取り違えはチャンネルを丸ごと入れ替えるのに、UHD 側の受信テストは全て 1 チャンネル読みで（fake の受信は全チャンネル同値で判別不能）、2 チャンネル以上の配置を誰も検証していない。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:539",
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:542"
+  ],
+  "test_sketch": "crates/ezsdr-radio-uhd/src/provider/rx.rs の unit テスト（ur_19_reports_before_one_block_keep_each_kind の隣、行 700 付近）で、`RxRecv::Samples { samples: vec![ch0, ch1] }` にチャンネルごとに異なる値を与えて公開し、ブロックのバイトを `ezsdr_hostmem::read_cf32(bytes, n, c, i)` で読んで各チャンネルの値がそのチャンネルのもの（交換されていない）であることを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-17",
+  "condition": "すべての link が共有する 1 つの参照",
+  "class": "C",
+  "why": "link ごとに `block.clone()`（Arc clone）しており内容は ur_17_blocks_reach_every_link が等値で固定していて、残るのは参照同一性（ゼロコピー）の保証だけなので、リンク別に新しいブロックを作る非現実的な実装以外にリスクがない。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:559",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:916"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-17",
+  "condition": "再開の lead を決定時の `now` から測ること",
+  "class": "A",
+  "why": "ur_17_a_missed_start_restarts_with_a_gap は `applied − T0 ≥ 50 ms` しか見ないので、lead を T0 から測る実装が通り、再開を決定時刻ではなく Run 開始から 50 ms に置いてストリームの時間軸をずらす。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:408",
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:411"
+  ],
+  "test_sketch": "同じテストで、`FakeFault::LateStart` の遅れを既知にしたうえで `applied` が「late を決定した瞬間 + start_lead_ns の最初の格子瞬間」に等しく、`T0 + 50 ms` より厳密に後であること（および `applied % 200 == 0`）を assert する。",
+  "effort": "M"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-17",
+  "condition": "missed start の後、最初のブロックの `GAP_BEFORE` と `lost`",
+  "class": "A",
+  "why": "capture の continuity はフラグが無くても「最初のサンプルの index」が同じに見えるため、フラグと `lost` を落とす実装はキャプチャを連続に見せてサンプルの欠落を隠すのに、どのテストも最初のブロックのフラグを読んでいない。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:497",
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:546",
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:553"
+  ],
+  "test_sketch": "rx.rs の unit テストで `RxRecv::LateCommand` を 1 度受けてからサンプルを 1 つ届け、次に出る最初のブロックが GAP_BEFORE だけを持ち（RESTARTED と SEQ_DISCONTINUITY を持たず）、`lost == Some(そのブロックの最初の index)` であることを assert する。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-18",
+  "condition": "overrun の `restart_gap_ns` と sequence error の `cause`",
+  "class": "A",
+  "why": "`lost · N · 10⁹ / mcr` の変換と cause は失われたサンプルの量と性質の診断そのもので、既存テスト（ur_19_reports_before_one_block_keep_each_kind）は payload を decode しながら `lost` しか見ていないので取り違えが残る。",
+  "code": [
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:521",
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:524"
+  ],
+  "test_sketch": "ur_19_reports_before_one_block_keep_each_kind（rx.rs:700）が `RxOverflowPayload::from_payload` した値を、overrun では `cause: Overrun` かつ `restart_gap_ns == lost · N · 10⁹ / mcr`、sequence では `cause: Sequence` かつ `restart_gap_ns == 0` まで assert する形に強める。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/18-uhd-radio.md",
+  "rule": "UR-35",
+  "condition": "link そのもの（`UHD_LIB_DIR`／pkg-config 探索、両方を名指す失敗メッセージ、rpath を足さないこと）",
+  "class": "C",
+  "why": "build.rs の環境依存の挙動で、feature `uhd` 有効ビルドと libuhd の無いホストを意図的に用意するテストは risk に見合わず、既定ビルドのテストは `CARGO_FEATURE_UHD` 無しで何もしないことだけを固定する。",
+  "code": [
+   "crates/ezsdr-radio-uhd/build.rs:7",
+   "crates/ezsdr-radio-uhd/build.rs:14",
+   "crates/ezsdr-radio-uhd/build.rs:22"
+  ],
+  "test_sketch": "",
+  "effort": "L"
+ },
+ {
+  "spec": "design/08-simulation.md",
+  "rule": "SE-4",
+  "condition": "a Provider that does not implement `sim` does not read the section",
+  "class": "C",
+  "why": "読む側のコードが MockRadio にしか無く（UHD Provider は `ctx.environment` を全く読まない）ので壊れる実装が存在せず、テストは grep 相当にしかならない。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:1588",
+   "crates/ezsdr-radio-uhd/src/lib.rs:52"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/08-simulation.md",
+  "rule": "SE-5",
+  "condition": "the two checks run at `validate` only",
+  "class": "C",
+  "why": "`stages()` に Validate が欠ける方向は se_01/se_05 が落とし、余分な stage を足しても有効な environment では再評価が空になるだけなので、`stages()` の assert はほぼ恒真。",
+  "code": [
+   "crates/ezsdr-sim/src/lib.rs:62",
+   "crates/ezsdr-sim/src/lib.rs:146",
+   "crates/ezsdr-sim/src/lib.rs:169",
+   "crates/ezsdr-kernel/src/binding.rs:424"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/08-simulation.md",
+  "rule": "SE-7",
+  "condition": "a model reads the virtual root's rate from the registry",
+  "class": "C",
+  "why": "Simulation の root は常に 1 GHz 固定で別レートが存在しないため、定数を仮定しても観測差が出ず、レートを読む実装（MockRadio）を固定しても意味が無い。",
+  "code": [
+   "crates/ezsdr-mock-radio/src/lib.rs:1553",
+   "crates/ezsdr-sim-engine/src/lib.rs:174"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/08-simulation.md",
+  "rule": "SE-10",
+  "condition": "`TimeAuthority::pacing()`",
+  "class": "C",
+  "why": "実行時の class 判定は `AuthorityDescriptor.pacing` を読み（compile.rs:77）、この trait メソッドに本番呼び出しが無いので誤値でも Run の結果が変わらない。",
+  "code": [
+   "crates/ezsdr-sim-engine/src/lib.rs:72",
+   "crates/ezsdr-kernel/src/plan/compile.rs:77"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/08-simulation.md",
+  "rule": "SE-11",
+  "condition": "waking a blocked `wait_until` waiter",
+  "class": "C",
+  "why": "spec 自身が「no Phase 2 Module calls it」と書くとおり木内に呼び手が無く、壊れても当該 Run の結果は変わらない一方、thread と待ち合わせを使うテストは費用対効果が悪い。",
+  "code": [
+   "crates/ezsdr-sim-engine/src/lib.rs:99",
+   "crates/ezsdr-sim-engine/src/lib.rs:252"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/10-host-data-path.md",
+  "rule": "HD-8",
+  "condition": "a `module` other than HD-7's (a version the Sink is not)",
+  "class": "A",
+  "why": "素通しすると profile が名指しした version と違う Module が黙って走り（§3 の refused, never silently reinterpreted に反する）、MockRadio の同種拒否は mr_02 が網羅しているのに Sink 側だけ無テスト。",
+  "code": [
+   "crates/ezsdr-sink-capture/src/lib.rs:132"
+  ],
+  "test_sketch": "crates/ezsdr-sink-capture/tests/sink_capture.rs の `hd_09_prepare_cases` に、`binding(...)` の `module.version` を 1.1.0 にした場合を足し、`CaptureSink::from_binding` が `HD-8: ` で始まる Err を返すと assert。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/10-host-data-path.md",
+  "rule": "HD-8",
+  "condition": "a `profile`",
+  "class": "A",
+  "why": "profile を黙って無視すると利用者が書いた設定が反映されないまま Run が走り、同じく mr_02 の対応ケースだけが Sink で欠けている。",
+  "code": [
+   "crates/ezsdr-sink-capture/src/lib.rs:137"
+  ],
+  "test_sketch": "同テストで `binding(dir, false, Some(ProfileRef{...}))` を作り、`from_binding` が `HD-8: ` の Err を返すと assert（mr_02_from_binding_refusals と同型）。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/10-host-data-path.md",
+  "rule": "HD-8",
+  "condition": "a `dir` that is not a string",
+  "class": "A",
+  "why": "非文字列 selector を素通しすると書き出し先が既定値に落ちる（成果物が別の場所に出来る）か panic になり、テストは 1 行で固定できる。",
+  "code": [
+   "crates/ezsdr-sink-capture/src/lib.rs:147"
+  ],
+  "test_sketch": "同テストで `selector` を `dir: Value::from(1)` にした binding を作り、`from_binding` が `HD-8: ` の Err を返すと assert。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/10-host-data-path.md",
+  "rule": "HD-10",
+  "condition": "a carry received while no capture was recording, including for a block in which a capture starts",
+  "class": "A",
+  "why": "取り違えると capture 開始前の drop が capture の continuity に `lost`/`link_dropped` として載り、記録された SigMF metadata が嘘になるのに、既存テストは recording 中の carry しか見ていない。",
+  "code": [
+   "crates/ezsdr-sink-capture/src/lib.rs:248",
+   "crates/ezsdr-sink-capture/src/lib.rs:333"
+  ],
+  "test_sketch": "crates/ezsdr-sink-capture/tests/sink_capture.rs に、`Rig::with_link(..., DropOldest, 1)` で (1) at 付き request を積み (2) GAP_BEFORE|RESTARTED のブロックを publish し (3) それを押し出すブロック（capture が始まるブロック）を publish して step し、artifact の continuity に gap が 1 つも無い（carry が捨てられた）と assert。",
+  "effort": "M"
+ },
+ {
+  "spec": "design/10-host-data-path.md",
+  "rule": "HD-14",
+  "condition": "the event's time (the current instant in the primary root)",
+  "class": "C",
+  "why": "Kernel の emit_control は時刻を検証せず、クライアントは action id で対応付けるため、時刻が誤っても Run の結果は変わらず診断情報の誤りに留まる。",
+  "code": [
+   "crates/ezsdr-sink-capture/src/lib.rs:179",
+   "crates/ezsdr-kernel/src/event.rs:767"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/10-host-data-path.md",
+  "rule": "HD-16",
+  "condition": "the announcement of a capture finished by `stop(mode)` (HD-13)",
+  "class": "C",
+  "why": "クライアントは finish が返す artifact を使い（spec 自身が so a client never needs it と書く）、欠けても Manifest の event が 1 件減るだけで結果もエラーも変わらない。",
+  "code": [
+   "crates/ezsdr-sink-capture/src/lib.rs:593",
+   "crates/ezsdr-sink-capture/src/lib.rs:472"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/10-host-data-path.md",
+  "rule": "HD-16",
+  "condition": "a capture whose metadata write fails (no announcement, `Err` from `step`, KC-30)",
+  "class": "A",
+  "why": "告知と metadata 書き込みの順序が崩れると metadata 無しの capture が告知され、ユーザは Err を一切受け取らない（エラーの隠蔽）ので、順序を固定する小テストが要る。",
+  "code": [
+   "crates/ezsdr-sink-capture/src/lib.rs:466",
+   "crates/ezsdr-sink-capture/src/lib.rs:472"
+  ],
+  "test_sketch": "crates/ezsdr-sink-capture/tests/sink_capture.rs で capture を 1 ブロックで開始した後 `fs::set_permissions(dir, 0o500)` にして完了ブロックを push し、`step` が `HD-15: cannot write` の Err を返し、events に CAPTURE_WRITTEN が 1 つも無いと assert（最後に権限を戻す）。",
+  "effort": "M"
+ },
+ {
+  "spec": "design/10-host-data-path.md",
+  "rule": "HD-16",
+  "condition": "the reason text HD-11: discarded by a Stop for the Sink",
+  "class": "C",
+  "why": "診断文字列であり、誤っても REQUEST_REJECTED 自体と action id は届くため、クライアントの待ち合わせも Run の結果も変わらない。",
+  "code": [
+   "crates/ezsdr-sink-capture/src/lib.rs:231"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/10-host-data-path.md",
+  "rule": "HD-16",
+  "condition": "the own capture's absent `action` member",
+  "class": "C",
+  "why": "committed schema が `action` の null を許し（anyOf に null）、クライアントの `payload.action in dispatched` 判定も absent と null で同一になるため観測差が出ない。",
+  "code": [
+   "crates/ezsdr-sink/src/lib.rs:107",
+   "schemas/sink/capture_written_payload.v1.json"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/11-simulation-channel.md",
+  "rule": "CH-2",
+  "condition": "`requested: None` on a channel violation",
+  "class": "C",
+  "why": "section check には「要求された値」が存在せず `requested` は生成関数の定数なので assert はほぼ恒真、誤っても表示上のノイズにしかならない。",
+  "code": [
+   "crates/ezsdr-sim/src/channel.rs:112"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/11-simulation-channel.md",
+  "rule": "CH-9",
+  "condition": "the faulted round's received sample contents",
+  "class": "A",
+  "why": "順序依存が残ると device_lost のラウンドで受信サンプルが fragment 名のソート順で変わり得るのに、kd_01 はブロック数とサンプル数しか見ないため静かに通ってしまう。",
+  "code": [
+   "crates/ezsdr-kernel/src/module_api.rs:1366",
+   "crates/ezsdr-kernel/src/coordinator/stepping.rs:189"
+  ],
+  "test_sketch": "crates/ezsdr-acceptance/tests/v58.rs の `kd_01_a_faulted_round_does_not_depend_on_fragment_names` で、各 run の manifest から `rig::read_capture(artifact(&manifest, \"rec\", 0), 1)` を読み、2 つの run の受信サンプル列が一致すると assert（coupling の noise_dbfs は None なので正当）。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/14-native-executor.md",
+  "rule": "NX-3",
+  "condition": "the components loaded before a refused one, kept so `stop` and `cleanup` reach them",
+  "class": "A",
+  "why": "拒否より前に載った component を保持しない実装でも既存テストは通り、その場合 stop/cleanup が届かず handle が漏れる（MA-7）— prepare 失敗の同型ケースは nx_04 が既に固定している。",
+  "code": [
+   "crates/ezsdr-exec-native/src/lib.rs:197",
+   "crates/ezsdr-exec-native/src/lib.rs:200"
+  ],
+  "test_sketch": "crates/ezsdr-exec-native/tests/native_executor.rs の `nx_03_a_component_is_loaded_by_its_impl_identity` に、island `[\"c\", \"d\"]`（d の impl.id は未知）で prepare が Err になる場合を足し、その後の `cleanup()` で log が prepare:c と cleanup:c を含むと assert。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/14-native-executor.md",
+  "rule": "NX-4",
+  "condition": "a component of the Island with no descriptor in `ctx.components`",
+  "class": "C",
+  "why": "KC-11 が Island の全 descriptor を渡すことを保証しており、欠落はカーネル不変条件が破れた時だけなので、拒否を既定値に変える変異は等価変異（観測差なし）になる。",
+  "code": [
+   "crates/ezsdr-exec-native/src/lib.rs:194"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/16-easy-api.md",
+  "rule": "EA-5",
+  "condition": "the `io` kind (a Session directory or a reported artifact that cannot be read or written)",
+  "class": "C",
+  "why": "kind の取り違えは診断ラベルの誤りで、エラー自体は OS のメッセージ付きで必ず報告されるため結果を壊さずエラーも隠さない。",
+  "code": [
+   "crates/ezsdr-server/src/lib.rs:201",
+   "crates/ezsdr-server/src/lib.rs:262"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/16-easy-api.md",
+  "rule": "EA-12",
+  "condition": "`until` on another domain",
+  "class": "C",
+  "why": "`until` は `wait_for`→`advance_to_with`→`ceil_convert` の同一経路（`to` は ea_05_errors が確認済み）を通り、他ドメインは必ず NotOnPrimaryRoot になるので設計上強制されている。",
+  "code": [
+   "crates/ezsdr-server/src/lib.rs:475",
+   "crates/ezsdr-kernel/src/coordinator/stepping.rs:487"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ },
+ {
+  "spec": "design/16-easy-api.md",
+  "rule": "EA-17",
+  "condition": "a channel gap (a channel with no valid stretch included)",
+  "class": "A",
+  "why": "`samples()` が channel gap を隠して 1 本の配列を返すと、ユーザは欠落混じりのデータを正しいサンプルとして受け取り（spec が one array would hide it と言う）、既存の SampleValidity テストは手組み artifact で同型分岐を確認している。",
+  "code": [
+   "python/ezsdr/session.py:158",
+   "python/ezsdr/session.py:160"
+  ],
+  "test_sketch": "python/tests/test_easy_api.py の `SampleValidity.test_samples_requires_full_validity_on_every_channel` に、2 チャネルのうち 1 つの `valid` が空リストの artifact を足し、`ezsdr.samples(data, artifact)` が Error を上げると assert。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/16-easy-api.md",
+  "rule": "EA-17",
+  "condition": "more than one valid stretch on a channel",
+  "class": "A",
+  "why": "同じく複数 stretch を畳んで返すと欠落が消えた配列になり、正しい長さの配列としてユーザに渡る（無テスト）。",
+  "code": [
+   "python/ezsdr/session.py:163"
+  ],
+  "test_sketch": "同テストに、1 チャネルの `valid` が 2 セグメントの artifact を足し、`ezsdr.samples` が Error を上げると assert。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/16-easy-api.md",
+  "rule": "EA-17",
+  "condition": "a continuity whose channel count changes",
+  "class": "A",
+  "why": "チャネル数変化を畳むと形状の解釈が誤り（読み手が別の並びとして復元する）になり、既存テストはレート変化の 2 map だけを見ている。",
+  "code": [
+   "python/ezsdr/session.py:149",
+   "python/ezsdr/session.py:150"
+  ],
+  "test_sketch": "同テストに、`channels` が 1 と 2 の 2 つの map を持つ artifact を足し、`ezsdr.samples` が Error を上げると assert。",
+  "effort": "S"
+ },
+ {
+  "spec": "design/16-easy-api.md",
+  "rule": "EA-18",
+  "condition": "the closed list of names the package may use",
+  "class": "C",
+  "why": "名前の閉じたリストは規律の記述であり、禁止名（Module id・device profile・sim section）は既に v58_10 が抑止していて、許可リスト側のテストは語彙追加ごとの保守に見合わない。",
+  "code": [
+   "crates/ezsdr-acceptance/tests/v58.rs:88",
+   "python/ezsdr/session.py:24"
+  ],
+  "test_sketch": "",
+  "effort": "L"
+ },
+ {
+  "spec": "design/16-easy-api.md",
+  "rule": "EA-19",
+  "condition": "the correspondence with §3's first snippet and §54's loop",
+  "class": "C",
+  "why": "Vision の snippet との対応は文章上の主張で、example が exit 0 であること以外に機械的に確かめる術が無い。",
+  "code": [
+   "python/examples/minimal.py:1",
+   "python/examples/sweep.py:1",
+   "python/tests/test_easy_api.py:511"
+  ],
+  "test_sketch": "",
+  "effort": "M"
+ },
+ {
+  "spec": "design/16-easy-api.md",
+  "rule": "EA-19",
+  "condition": "the profile they run against",
+  "class": "C",
+  "why": "example は `ezsdr.connect()` を引数なしで呼び、既定 profile が使われることは ea_09_the_default_profile_loops_back が既に固定しているので、二重に確かめても新しい情報がない。",
+  "code": [
+   "python/examples/minimal.py:9",
+   "python/examples/sweep.py:30"
+  ],
+  "test_sketch": "",
+  "effort": "S"
+ }
+]
