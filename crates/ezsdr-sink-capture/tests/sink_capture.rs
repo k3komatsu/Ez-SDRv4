@@ -13,8 +13,8 @@ use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
     ActionReceiver, ActionSubmitter, AttachedPort, Endpoint,
-    ModuleError, ModuleRef, Pacing, Sink, StopMode, UpdateClass, Version, VersionReq,
-    VocabularyRequirement, KERNEL_API,
+    ModuleError, ModuleErrorKind, ModuleRef, Pacing, ProfileRef, Sink, StopMode, UpdateClass,
+    Version, VersionReq, VocabularyRequirement, KERNEL_API,
 };
 use ezsdr_kernel::plan::Fragment;
 use ezsdr_kernel::policy::Policy;
@@ -335,6 +335,15 @@ fn binding(dir: &Path, extra_selector: bool, profile: Option<ezsdr_kernel::modul
     }
 }
 
+/// The refusal `CaptureSink::from_binding` gives for `binding` (HD-8); a Sink is not
+/// `Debug`, so `expect_err` cannot be used.
+fn refused_binding(binding: &Binding) -> ModuleError {
+    match CaptureSink::from_binding(binding) {
+        Ok(_) => panic!("the binding must be refused"),
+        Err(error) => error,
+    }
+}
+
 fn fragment(params: BTreeMap<Key, Value>) -> Fragment {
     let descriptor = descriptor();
     let request = OutputReq {
@@ -524,6 +533,26 @@ fn hd_09_prepare_cases() {
 
     assert!(CaptureSink::from_binding(&binding(temp.path(), true, None)).is_err());
 
+    // HD-8: the Module version the binding names must be this Sink's own.
+    let mut other_module = binding(temp.path(), false, None);
+    other_module.module = ModuleRef { id: descriptor().id, version: Version::new(1, 1, 0) };
+    let error = refused_binding(&other_module);
+    assert_eq!(error.kind, ModuleErrorKind::Rejected);
+    assert!(error.message.starts_with("HD-8: binding names a different Module version"), "{}", error.message);
+
+    // HD-8: the capture Sink has no profiles, so a binding must name none.
+    let profiled = binding(temp.path(), false, Some(ProfileRef { name: "x310-like".to_owned(), version: Version::new(1, 0, 0) }));
+    let error = refused_binding(&profiled);
+    assert_eq!(error.kind, ModuleErrorKind::Rejected);
+    assert!(error.message.starts_with("HD-8: the capture Sink has no profiles"), "{}", error.message);
+
+    // HD-8: the selector must hold exactly the `dir` string.
+    let mut not_a_string = binding(temp.path(), false, None);
+    not_a_string.selector = BTreeMap::from([(ident("dir"), Value::from(1))]);
+    let error = refused_binding(&not_a_string);
+    assert_eq!(error.kind, ModuleErrorKind::Rejected);
+    assert_eq!(error.message, "HD-8: selector must contain exactly the `dir` string");
+
     let mut zero = CaptureSink::from_binding(&binding(temp.path(), false, None))
         .expect("valid binding");
     assert!(zero
@@ -703,6 +732,34 @@ fn hd_10_the_carry_attributes_a_dropped_overflow() {
     assert_eq!(gaps[0].cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
     assert_eq!(gaps[0].lost, Some(50));
     assert_eq!(gaps[0].link_dropped, 1);
+}
+
+#[test]
+fn hd_10_a_carry_before_a_capture_is_discarded() {
+    // HD-10: the Sink passes a block's DropCarry only to a capture that was already
+    // recording before that block; the drops a carry counts that precede the capture's
+    // start are dropped with it, so the recording holds no gap of theirs.
+    let mut rig = Rig::with_link("carry-before-capture", BTreeMap::new(), BackPressure::DropOldest, 1);
+    rig.env.actions.push(request(
+        Value::from(4),
+        Some(AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 54))),
+    ));
+    let overflow = ramp_block(&mut rig.pool, rig.env.sample_clock, 54, 54.0, 4,
+        BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(50));
+    assert_eq!(rig.link.publish(overflow), PublishOutcome::Accepted);
+    // The block in which the capture starts evicts the one that carried the overflow.
+    let starts = ramp_block(&mut rig.pool, rig.env.sample_clock, 58, 58.0, 4, BlockFlags::NONE, None);
+    assert_eq!(rig.link.publish(starts), PublishOutcome::DroppedOldest);
+    rig.step().expect("the capture starts and completes in the delivered block");
+    let artifacts = rig.stop(StopMode::Orderly);
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].id, ident("capture_1"));
+    assert!(!artifacts[0].partial);
+    assert_ramp(&artifacts[0], 58, 4);
+    assert_eq!(artifacts[0].continuity.len(), 1, "one map: the carry's gap is not recorded");
+    let map = &artifacts[0].continuity[0];
+    assert_eq!(map.first.ticks_in(rig.env.sample_clock).unwrap(), 58);
+    assert!(map.gaps.is_empty(), "the overflow precedes the capture: {:?}", map.gaps);
 }
 
 #[test]
@@ -1334,6 +1391,42 @@ fn hd_16_a_written_capture_is_announced() {
 
     let artifacts = rig.stop(StopMode::Orderly);
     assert_eq!(artifacts, vec![announced.artifact, partial.artifact], "each announcement is the artifact stop returns");
+}
+
+#[test]
+fn hd_16_a_capture_whose_metadata_write_fails_is_not_announced() {
+    // HD-16: the announcement follows the metadata write (HD-15), so a capture whose
+    // metadata cannot be written is never announced; the Sink's `Err` comes back from
+    // `step` and the capture is still recorded.
+    let mut rig = Rig::new("metadata-write-fails", BTreeMap::new());
+    rig.env.actions.push(request(Value::from(4), None));
+    rig.push_ramp(0, 2);
+    rig.step().expect("the capture starts with its data file open");
+    let _ = rig.env.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+
+    let dir = rig._temp.path().to_path_buf();
+    // HD-15 writes the metadata through `<data>.sigmf-meta.partial` and renames it into
+    // place. A directory at that staging path makes the write fail for any user, root
+    // included; a read-only directory would not, since root writes anyway.
+    let staged = fs::read_dir(&dir)
+        .expect("the capture directory")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "sigmf-data"))
+        .expect("the capture's data file")
+        .with_extension("sigmf-meta.partial");
+    fs::create_dir(&staged).expect("a directory where the metadata is staged");
+    rig.push_ramp(2, 2);
+    let error = rig.step().expect_err("the metadata write fails and fails the step");
+    assert!(error.message.starts_with("HD-15: cannot write"), "{}", error.message);
+
+    let announced: Vec<_> = rig.env.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
+        .filter(|event| event.kind.as_str() == CAPTURE_WRITTEN).collect();
+    assert!(announced.is_empty(), "a capture whose metadata write failed is not announced");
+    let artifacts = rig.stop(StopMode::Orderly);
+    assert_eq!(artifacts.len(), 1, "a failed metadata write does not cost the capture");
+    assert!(!artifacts[0].partial);
+    assert_eq!(artifacts[0].size_bytes, 4 * 8);
 }
 
 #[test]

@@ -1070,15 +1070,20 @@ fn sim_authority() -> (Arc<ClockRegistry>, ClockDomainId, Arc<ManualTimeAuthorit
 #[test]
 fn tm_16_authority_order_and_now() {
     let (_reg, root, auth) = sim_authority();
-    let log: Arc<Mutex<Vec<(i64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
-    for at in [30i64, 10, 10] {
+    type Log = Arc<Mutex<Vec<(&'static str, i64, i64)>>>;
+    let log: Log = Arc::new(Mutex::new(Vec::new()));
+    // Distinct markers: the two callbacks tied at 10 are otherwise indistinguishable, so
+    // a tie order that is reversed (or drops the insertion ordinal) would pass unseen.
+    for (marker, at) in [("late", 30i64), ("first", 10), ("second", 10)] {
         let log = log.clone();
         let auth2 = auth.clone();
         auth.schedule(
             TimePoint::new(root, at),
             Box::new(move |fired| {
                 let now = auth2.now(root).expect("governed").ticks_in(root).unwrap();
-                log.lock().expect("lock").push((fired.ticks_in(root).unwrap(), now));
+                log.lock()
+                    .expect("lock")
+                    .push((marker, fired.ticks_in(root).unwrap(), now));
             }),
         )
         .expect("scheduled at or after now");
@@ -1087,7 +1092,7 @@ fn tm_16_authority_order_and_now() {
     // Ascending time, ties in insertion order; now() inside each equals its fire time.
     assert_eq!(
         *log.lock().expect("lock"),
-        vec![(10, 10), (10, 10), (30, 30)]
+        vec![("first", 10, 10), ("second", 10, 10), ("late", 30, 30)]
     );
     assert_eq!(auth.now(root), Ok(TimePoint::new(root, 30)));
 }
@@ -1170,6 +1175,40 @@ fn tm_17b_advance_to_zero_delay_cap() {
         auth.advance_to(TimePoint::new(root, 20)),
         Err(TimeError::LimitExceeded)
     );
+}
+
+#[test]
+fn tm_17b_the_default_cap_is_one_thousand() {
+    // TM-17b's cap exists so that a self-rescheduling callback fails rather than hangs;
+    // a default far from 1 000 would hide the error instead of reporting it. The test
+    // above sets the cap itself, so the default is only pinned here.
+    assert_eq!(ManualTimeAuthority::DEFAULT_CALLBACK_CAP, 1_000);
+    let (reg, root) = registry_with_device_root();
+    let auth = Arc::new(ManualTimeAuthority::new(reg, root, &[], Pacing::FreeRunning).expect("auth"));
+    let fired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    fn respawn(
+        auth: Arc<ManualTimeAuthority>,
+        root: ClockDomainId,
+        at: i64,
+        fired: Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let again = auth.clone();
+        let count = fired.clone();
+        let _ = auth.schedule(
+            TimePoint::new(root, at),
+            Box::new(move |t| {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                respawn(again, root, t.ticks_in(root).unwrap(), count);
+            }),
+        );
+    }
+    respawn(auth.clone(), root, 10, fired.clone());
+    assert_eq!(
+        auth.advance_to(TimePoint::new(root, 20)),
+        Err(TimeError::LimitExceeded)
+    );
+    // Exactly the default: 1 001 callbacks are due at one instant, the last is refused.
+    assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1_000);
 }
 
 #[test]

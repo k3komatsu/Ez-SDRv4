@@ -335,6 +335,15 @@ fn sc_10_block_flag_implications() {
         Err(StreamError::InvalidBlock { .. })
     ));
 
+    // SEQ_DISCONTINUITY implies GAP_BEFORE like RESTARTED and ALIGNMENT: without the
+    // flag a lossy path would read the device's sequence loss as a link drop (SC-31).
+    let mut h = header(t(0), 10, 1);
+    h.flags = BlockFlags::SEQ_DISCONTINUITY;
+    assert!(matches!(
+        SampleBlock::new(h, buf, CF32_BPS),
+        Err(StreamError::InvalidBlock { .. })
+    ));
+
     // ALIGNMENT qualifies a gap, so it implies GAP_BEFORE.
     let mut h = header(t(0), 10, 1);
     h.flags = BlockFlags::ALIGNMENT;
@@ -1277,6 +1286,15 @@ fn sc_31_continuity_causes() {
             Some(200)
         ),
         GapCause::SequenceError {}
+    );
+    // The one precedence pair with no test of its own: RESTARTED wins over
+    // SEQ_DISCONTINUITY, which a carry may OR together on the delivered block.
+    assert_eq!(
+        case(
+            BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY,
+            Some(200)
+        ),
+        GapCause::OverflowRestart {}
     );
     assert_eq!(case(BlockFlags::GAP_BEFORE, None), GapCause::Unknown {});
 }

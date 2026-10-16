@@ -377,6 +377,9 @@ pub struct SteppedProvider {
     pub declare: Vec<(String, u64, u64)>,
     pub register_at_arm: Vec<String>,
     pub emit: Option<(EventKind, Severity, i64)>,
+    /// The domain the `emit` event's time is in; `None` is the round's primary-root
+    /// instant (KC-42).
+    pub emit_domain: Option<ClockDomainId>,
     /// One control-path event emitted from `stop`, at the stop instant (#66).
     pub stop_emit: Option<(EventKind, Severity)>,
     pub panic_in_step: bool,
@@ -426,6 +429,7 @@ impl SteppedProvider {
             declare: Vec::new(),
             register_at_arm: Vec::new(),
             emit: None,
+            emit_domain: None,
             stop_emit: None,
             panic_in_step: false,
             device_lost_at: None,
@@ -508,6 +512,25 @@ impl SteppedProvider {
             severity,
             at,
         ));
+        self
+    }
+
+    /// Emits one event whose time is a point of `domain` rather than the round's
+    /// primary-root instant (KC-42): a domain the primary root cannot be converted to
+    /// makes the mark's own conversion fail.
+    pub fn emitting_in_domain(
+        mut self,
+        kind: &str,
+        severity: Severity,
+        at: i64,
+        domain: ClockDomainId,
+    ) -> SteppedProvider {
+        self.emit = Some((
+            EventKind::parse(kind).expect("the test event kind is valid"),
+            severity,
+            at,
+        ));
+        self.emit_domain = Some(domain);
         self
     }
 
@@ -860,7 +883,7 @@ impl Provider for SteppedProvider {
                 if u >= *at {
                     let event = Event {
                         source: self.source.clone().expect("prepared"),
-                        time: until,
+                        time: self.emit_domain.map_or(until, |domain| TimePoint::new(domain, *at)),
                         severity: *severity,
                         kind: kind.clone(),
                         payload: serde_json::json!({}),
@@ -978,6 +1001,11 @@ impl Provider for SteppedProvider {
     }
 }
 
+/// `stop`'s artifacts when [`RecordingSink::returning_clock_spans`] sets them: each
+/// names the `index`-th declared SampleClock of the Run's registry and carries that
+/// artifact's spans (KC-42).
+pub type ClockSpans = Vec<(usize, Vec<(i64, i64)>)>;
+
 /// A Sink that records received blocks and returns declared artifact spans.
 pub struct RecordingSink {
     pub name: String,
@@ -1001,6 +1029,14 @@ pub struct RecordingSink {
     /// Opt-in: `prepare` also checks what `ctx.events` does with this Sink's root
     /// (item 3; [`check_event_view`]).
     pub view_checks: bool,
+    /// The artifacts `stop` returns when set, instead of `spans`: one per entry,
+    /// each dated by the `index`-th declared SampleClock of the Run's registry and
+    /// carrying one `ContinuityMap` per span (KC-42). A clock the registry never
+    /// registered makes the span's conversion fail, as an artifact with no span
+    /// does.
+    pub clock_spans: Option<ClockSpans>,
+    /// The registry `prepare` saw, for `clock_spans`' SampleClock lookup.
+    pub clocks: Option<Arc<ezsdr_kernel::time::ClockRegistry>>,
     actions: Option<Arc<dyn ActionReceiver>>,
 }
 
@@ -1031,6 +1067,8 @@ impl RecordingSink {
             panic_step: None,
             deaf: false,
             view_checks: false,
+            clock_spans: None,
+            clocks: None,
             actions: None,
         }
     }
@@ -1078,6 +1116,20 @@ impl RecordingSink {
         self
     }
 
+    /// Sets the artifacts `stop` returns, each dated by the `index`-th declared
+    /// SampleClock of the Run's registry and carrying one `ContinuityMap` per span
+    /// (KC-42). An index with no clock, or one the registry has not registered, makes
+    /// the span's conversion fail, as an artifact with no span does.
+    pub fn returning_clock_spans(mut self, artifacts: &[(usize, &[(i64, i64)])]) -> RecordingSink {
+        self.clock_spans = Some(
+            artifacts
+                .iter()
+                .map(|(clock, spans)| (*clock, spans.to_vec()))
+                .collect(),
+        );
+        self
+    }
+
     /// Makes `stop` fail.
     pub fn failing_stop(mut self) -> RecordingSink {
         self.fail_stop = true;
@@ -1098,6 +1150,7 @@ impl Sink for RecordingSink {
     fn prepare(&mut self, f: &Fragment, ctx: PrepareContext) -> Result<PrepareReport, ModuleError> {
         self.record(format!("prepare:{}", f.id));
         self.primary = Some(ctx.time.primary_root());
+        self.clocks = Some(ctx.clocks.clone());
         self.probe.record(format!("source:{}:{}", self.name, ctx.source));
         if self.view_checks {
             check_event_view(&self.probe, &self.name, &ctx);
@@ -1177,28 +1230,29 @@ impl Sink for RecordingSink {
         let primary = self
             .primary
             .ok_or_else(|| ModuleError::rejected("test: no primary root"))?;
-        let spans = if self.spans.is_empty() {
-            vec![None]
-        } else {
-            self.spans.iter().copied().map(Some).collect()
+        // KC-42: one artifact per group, each with one `ContinuityMap` per span in
+        // its own domain; a group with no span is an artifact with no map.
+        let declared = self
+            .clocks
+            .as_ref()
+            .map(|clocks| clocks.declared_sample_clocks())
+            .unwrap_or_default();
+        let groups: Vec<(ClockDomainId, Vec<(i64, i64)>)> = match &self.clock_spans {
+            Some(groups) => groups
+                .iter()
+                .map(|(clock, spans)| {
+                    let domain = declared.get(*clock).map_or(primary, |handle| handle.id());
+                    (domain, spans.clone())
+                })
+                .collect(),
+            None if self.spans.is_empty() => vec![(primary, Vec::new())],
+            None => self.spans.iter().map(|span| (primary, vec![*span])).collect(),
         };
-        Ok(spans
+        Ok(groups
             .into_iter()
             .enumerate()
-            .map(|(index, span)| {
+            .map(|(index, (domain, spans))| {
                 let artifact_id = format!("{}_{}", self.name, index);
-                let continuity = span
-                    .map(|(first, end)| ContinuityMap {
-                        domain: primary,
-                        channels: 1,
-                        valid: vec![vec![]],
-                        gaps: vec![],
-                        channel_gaps: vec![],
-                        first: TimePoint::new(primary, first),
-                        end: TimePoint::new(primary, end),
-                    })
-                    .into_iter()
-                    .collect();
                 ArtifactRef {
                     id: id(&artifact_id),
                     kind: ns("test.capture"),
@@ -1207,7 +1261,18 @@ impl Sink for RecordingSink {
                     size_bytes: 0,
                     partial: mode == StopMode::Abort,
                     marks: Vec::new(),
-                    continuity,
+                    continuity: spans
+                        .into_iter()
+                        .map(|(first, end)| ContinuityMap {
+                            domain,
+                            channels: 1,
+                            valid: vec![vec![]],
+                            gaps: vec![],
+                            channel_gaps: vec![],
+                            first: TimePoint::new(domain, first),
+                            end: TimePoint::new(domain, end),
+                        })
+                        .collect(),
                 }
             })
             .collect())
@@ -1499,6 +1564,8 @@ pub struct TestLinkModule {
     pub panic_descriptor: bool,
     pub panic_drops: bool,
     pub seed_drop: bool,
+    /// Narrow `seed_drop` to the link whose consumer is this component (SC-20).
+    pub seed_drop_into: Option<Ident>,
 }
 
 impl TestLinkModule {
@@ -1510,6 +1577,7 @@ impl TestLinkModule {
             panic_descriptor: false,
             panic_drops: false,
             seed_drop: false,
+            seed_drop_into: None,
         }
     }
 
@@ -1536,6 +1604,14 @@ impl TestLinkModule {
         self.seed_drop = true;
         self
     }
+
+    /// Seeds that eviction for the link whose consumer is `component` only, leaving the
+    /// Run's other links at zero drops (SC-20).
+    pub fn seeding_one_drop_into(mut self, component: &str) -> TestLinkModule {
+        self.seed_drop = true;
+        self.seed_drop_into = Some(Ident::parse(component).expect("a valid component name"));
+        self
+    }
 }
 
 impl Link for TestLinkModule {
@@ -1552,7 +1628,12 @@ impl Link for TestLinkModule {
             decl.from.component, decl.from.port, decl.to.component, decl.to.port
         ));
         let link = MemLink::new(decl.policy, decl.capacity);
-        if self.seed_drop {
+        if self.seed_drop
+            && self
+                .seed_drop_into
+                .as_ref()
+                .is_none_or(|only| *only == decl.to.component)
+        {
             let root = ClockDomainId::local(0);
             assert_eq!(link.publish(block(header(TimePoint::new(root, 0), 10, 1))), PublishOutcome::Accepted);
             assert_eq!(link.publish(block(header(TimePoint::new(root, 10), 10, 1))), PublishOutcome::DroppedOldest);

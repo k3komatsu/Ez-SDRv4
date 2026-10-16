@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Done for every accepted spec (01–11, 14, 16, 18) at base `023eaa7`; the fixes are one commit. **Open:** which untested conditions get a test (the triage below proposes A1 now, A2 and B in Phase 8), an owner decision. |
+| Status | Done for every accepted spec (01–11, 14, 16, 18) at base `023eaa7`; the fixes are one commit. A1's tests landed on 2026-10-16 (rows T01–T33); A2 and B go to Phase 8's plan (owner, 2026-10-16). |
 | Why | Every Sol review of DA-3 step 2 (specs 07, 09, 18) found Test lines or §6 rows that claimed more than their tests assert. No one had checked that across all specs. |
 | Tool | [`tools/sweep/`](tools/sweep/sweep.py): `sweep.py` and its two briefs. Run it again before the freeze review ("全規則の確認", handoff §2). |
 
@@ -38,8 +38,8 @@ Which ones get a test, and when, is the owner's decision, item by item. The cand
 DeepSeek read the code behind every `none named` condition the sweep added: 91 rules, 130 conditions. It sorted each into three classes. The full table, with each condition's reason, code location and test sketch, is [`32-triage.json`](32-triage.json).
 
 - **A — needs a test (44).** A wrong implementation could break the condition without any other test noticing, and a small test without hardware can pin it.
-  - **A1, Kernel, Sink, channel, Executor and Python (30):** TM-16c, TM-17a, TM-17b, SC-10, SC-20, SC-25, SC-31, SB-13, SB-30, SB-44, RS-24, RS-36, RS-39, KC-28, KC-30, KC-42, HD-8, HD-10, HD-16, CH-9, NX-3, EA-17. Proposed: one implementation step before Phase 8's plan.
-  - **A2, the radio Providers (14):** RM-11, RM-14, RM-18, MR-19, MR-25, MR-29, UR-13, UR-17, UR-18. Proposed: Phase 8. Most of them concern overflow and restart reporting, which audit D2 and #51 will change.
+  - **A1, Kernel, Sink, channel, Executor and Python (30):** TM-16c, TM-17a, TM-17b, SC-10, SC-20, SC-25, SC-31, SB-13, SB-30, SB-44, RS-24, RS-36, RS-39, KC-28, KC-30, KC-42, HD-8, HD-10, HD-16, CH-9, NX-3, EA-17. Done on 2026-10-16 (owner's decision): one test per condition, mutation rows T01–T33 (T31–T33 added after review), reviewed by Sol twice, and RS-36 now states that `abort` wins over `stop` (implemented and tested before, stated nowhere).
+  - **A2, the radio Providers (14):** RM-11, RM-14, RM-18, MR-19, MR-25, MR-29, UR-13, UR-17, UR-18. Phase 8 (owner's decision). Most of them concern overflow and restart reporting, which audit D2 and #51 will change.
 - **B — Phase 8, needs the device (4):**
   - SC-25: what the hardware radiated during a gap.
   - RM-23: the receive path delay.

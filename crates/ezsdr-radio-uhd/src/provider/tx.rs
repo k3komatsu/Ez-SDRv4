@@ -857,6 +857,46 @@ mod tests {
     }
 
     #[test]
+    fn sc_25_the_underflow_event_carries_its_own_instant() {
+        // SC-25: the event carries the time at which the underflow occurred. The
+        // Authority's now is elsewhere — 11 ms of root time, and in the root domain —
+        // and the sending clock's origin is not zero, its report tick one past sample
+        // 22 000's, so neither "now when the report was read" nor a tick read without
+        // that origin, nor a rounding up, can pass for the tick's floor.
+        let (core, device, time, events) = super::super::test_support::rig();
+        device.tx_open(1).unwrap();
+        let clock = core.register(Dir::Tx, 200, 1_000_003).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        time.advance_to(core.at(core.ticks(11_000_000))).unwrap();
+        let underflow = |events: &Arc<EventCollector>| {
+            events
+                .drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0))
+                .into_iter()
+                .find(|e| e.kind.as_str() == ezsdr_radio::kinds::TX_UNDERFLOW)
+                .expect("TX_UNDERFLOW")
+        };
+        tx.report(crate::device::TxReport {
+            code: crate::device::TxCode::Underflow,
+            tick: Some(clock.instant(22_000) + 1),
+            channel: 0,
+        });
+        assert_eq!(
+            underflow(&events).time,
+            TimePoint::new(clock.domain, 22_000),
+            "the report's tick in the sending SampleClock, floored, not the Authority's now"
+        );
+        // A report with no tick is still timed: at the Authority's now.
+        let now = core.now();
+        tx.report(crate::device::TxReport {
+            code: crate::device::TxCode::Underflow,
+            tick: None,
+            channel: 0,
+        });
+        assert_eq!(underflow(&events).time, core.at(now));
+    }
+
+    #[test]
     fn ur_22_an_expired_timeline_is_not_resumed_before_its_report() {
         let (core, device, time, _) = super::super::test_support::rig();
         device.tx_open(1).unwrap();

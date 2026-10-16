@@ -769,6 +769,49 @@ class SampleValidity(unittest.TestCase):
                     with self.assertRaises(ezsdr.Error):
                         ezsdr.samples(data, artifact)
 
+    def test_ea_17_a_channel_with_no_valid_stretch_is_refused(self) -> None:
+        # EA-17, §23: a channel with no valid stretch is a channel gap; one array
+        # would hide it.
+        domain = {"node": 0, "local": 7}
+        def t(k): return {"domain": domain, "ticks": k}
+        data = np.arange(8, dtype=np.complex64).tobytes()
+        artifact = {"id": "rec", "continuity": [{
+            "domain": domain, "channels": 2, "first": t(0), "end": t(4),
+            "valid": [[{"start": t(0), "len": 4}], []],
+            "gaps": [], "channel_gaps": [],
+        }]}
+        with self.assertRaises(ezsdr.Error):
+            ezsdr.samples(data, artifact)
+
+    def test_ea_17_two_valid_stretches_on_a_channel_are_refused(self) -> None:
+        # EA-17: a channel with more than one valid stretch holds a break between
+        # them; one array would hide it.
+        domain = {"node": 0, "local": 7}
+        def t(k): return {"domain": domain, "ticks": k}
+        data = np.arange(4, dtype=np.complex64).tobytes()
+        artifact = {"id": "rec", "continuity": [{
+            "domain": domain, "channels": 1, "first": t(0), "end": t(4),
+            "valid": [[{"start": t(0), "len": 2}, {"start": t(2), "len": 2}]],
+            "gaps": [], "channel_gaps": [],
+        }]}
+        with self.assertRaises(ezsdr.Error):
+            ezsdr.samples(data, artifact)
+
+    def test_ea_17_a_channel_count_change_is_refused(self) -> None:
+        # EA-17, SC-30a: a capture whose continuity spans two channel counts would
+        # read as one shape; the channel count of its maps must be one.
+        domain = {"node": 0, "local": 7}
+        def t(k): return {"domain": domain, "ticks": k}
+        data = np.arange(6, dtype=np.complex64).tobytes()
+        one = {"domain": domain, "channels": 1, "first": t(0), "end": t(2),
+               "valid": [[{"start": t(0), "len": 2}]], "gaps": [], "channel_gaps": []}
+        two = {"domain": domain, "channels": 2, "first": t(0), "end": t(2),
+               "valid": [[{"start": t(0), "len": 2}], [{"start": t(0), "len": 2}]],
+               "gaps": [], "channel_gaps": []}
+        artifact = {"id": "rec", "continuity": [one, two]}
+        with self.assertRaises(ezsdr.Error):
+            ezsdr.samples(data, artifact)
+
 
 if __name__ == "__main__":
     unittest.main()

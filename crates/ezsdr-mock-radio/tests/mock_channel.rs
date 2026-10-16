@@ -981,6 +981,55 @@ fn mr_25_a_stop_at_a_held_burst_s_start_silences_the_transmitter() {
 }
 
 #[test]
+fn ch_09_a_faulted_round_does_not_depend_on_the_stepping_order() {
+    // CH-9, MR-20: a `device_lost` in the round in which the receiver publishes its
+    // first block must not change what that block holds, whichever radio the loop
+    // steps first — the loss cuts the transmitter at the round's instant, never into
+    // the samples before it.
+    let run = |a_first: bool| {
+        let world = World::new(json!({ "sim.seed": 5,
+            "sim.channel": { "couplings": [{ "tx": "a", "tx_channel": 0, "rx": "b", "rx_channel": 0, "gain_db": 0.0 }] },
+            "sim.faults": [{ "at_ns": 1_999_001, "fault": "device_lost", "target": "a" }] }));
+        let mut a = prepare(&world, Options { fragment: "a", id: "dev_a", ..Options::default() }).unwrap();
+        let mut b = prepare(&world, Options { fragment: "b", id: "dev_b", ..Options::default() }).unwrap();
+        for radio in [&mut a, &mut b] {
+            radio.mock.arm().unwrap();
+            radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
+        }
+        let samples = vec![(0.5f32, 0.25f32); 2_000];
+        let waveform = world.waveform(&samples);
+        // MR-20: the step that applies the loss fails (KC-30); MA-30's round goes on
+        // over the other radios, and the harness does the same.
+        let mut lost = false;
+        let mut lossy = |world: &World, a: &mut Radio, b: &mut Radio, tick: i64| {
+            world.auth.advance_to(TimePoint::new(ROOT, tick)).unwrap();
+            for radio in if a_first { [a, b] } else { [b, a] } {
+                if let Err(error) = radio.mock.step(TimePoint::new(ROOT, tick)) {
+                    assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost, "{}", error.message);
+                    lost = true;
+                }
+            }
+        };
+        ordered(&world, &mut a, &mut b, 0, a_first);
+        a.push(burst(&a, &world, waveform, 1_999, false));
+        ordered(&world, &mut a, &mut b, 1_999_000, a_first);
+        while let Some(due) = world.auth.next_due() {
+            if due.ticks_in(ROOT).unwrap() > 1_999_001 { break; }
+            lossy(&world, &mut a, &mut b, due.ticks_in(ROOT).unwrap());
+        }
+        assert!(lost, "a lost device was stepped in the faulted round");
+        (b.received(0), samples)
+    };
+    let (first, samples) = run(true);
+    let (second, _) = run(false);
+    assert_eq!(first, second, "CH-9: the faulted round's received samples do not depend on the stepping order");
+    let at = |k: i64| first.iter().find(|(index, _, _)| *index == k).map(|(_, re, im)| (*re, *im)).unwrap();
+    let near = |(re, im): (f32, f32), (want_re, want_im): (f32, f32)| (re - want_re).abs() < 0.01 && (im - want_im).abs() < 0.01;
+    assert!(near(at(1_998), (0.0, 0.0)), "the burst's first sample is at 1 999: {:?}", at(1_998));
+    assert!(near(at(1_999), samples[0]), "the block published in the faulted round still hears the burst: {:?}", at(1_999));
+}
+
+#[test]
 fn ch_09_a_burst_starting_between_rounds_survives_a_stop_in_either_order() {
     let run = |a_first: bool| {
         let (world, mut a, mut b) = two(a_into_b(), 3_000_000.0, 3_000_000.0);
