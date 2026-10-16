@@ -541,7 +541,7 @@ fn hd_09_prepare_cases() {
     assert!(error.message.starts_with("HD-8: binding names a different Module version"), "{}", error.message);
 
     // HD-8: the capture Sink has no profiles, so a binding must name none.
-    let profiled = binding(temp.path(), false, Some(ProfileRef { name: "x310-like".to_owned(), version: Version::new(1, 0, 0) }));
+    let profiled = binding(temp.path(), false, Some(ProfileRef { name: "x3xx".to_owned(), version: Version::new(1, 0, 0) }));
     let error = refused_binding(&profiled);
     assert_eq!(error.kind, ModuleErrorKind::Rejected);
     assert!(error.message.starts_with("HD-8: the capture Sink has no profiles"), "{}", error.message);

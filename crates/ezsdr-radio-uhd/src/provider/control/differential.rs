@@ -67,7 +67,7 @@ impl Record {
     }
 }
 
-/// This Module's timeline terms on `x310-ubx` (UR-25, VH-4): the start lead, one receive
+/// This Module's timeline terms on `x3xx` (UR-25, VH-4): the start lead, one receive
 /// call of `block_len` samples (the FakeDevice's packet is the whole request), the delivery
 /// allowance, and the device lead of a `hardware_timed` update.
 fn terms(direction: Direction) -> Terms {

@@ -3,7 +3,7 @@
 //! Modules — two MockRadios on a SimulationChannel with a coupling each way, the responder
 //! on an Island of the native Executor, and the recorder on the pinging radio.
 //!
-//! The timing every test relies on (00-overview.md §7): at 1 Msps on `x310-like` a PING at
+//! The timing every test relies on (00-overview.md §7): at 1 Msps on `x3xx` a PING at
 //! transmit sample 10 000 is radiated 45 samples late (MR-3) and crosses a 1 µs path, so its
 //! first sample reaches the responder at receive sample 10 046; a 5 ms turnaround targets
 //! 15 046, which reaches the pinger at 15 092. The block holding 10 046 is published at
@@ -107,7 +107,7 @@ fn ping_pong(temp: &rig::TempDir, ping: Ping<'_>) -> (Manifest, Vec<(f32, f32)>)
         spec["schedule"].as_array_mut().unwrap().push(entry);
     }
     let environment = couplings(ping.pinger, ping.responder, ping.noise_dbfs, ping.seed);
-    let profile = rig::ping_pong_profile("x310-like", ping.pinger, ping.responder, ping.jitter, &temp.0, environment);
+    let profile = rig::ping_pong_profile("x3xx", ping.pinger, ping.responder, ping.jitter, &temp.0, environment);
     let inputs = BTreeMap::from([(ping_ref.hash.clone(), ping_bytes), (pong_ref.hash.clone(), pong_bytes)]);
     let mut assembly = rig::assemble(&profile, inputs);
     if let Some(implementation) = ping.implementation {
@@ -165,7 +165,7 @@ fn v58_09_a_reactor_answers_a_ping_with_a_timed_pong() {
     assert_eq!(answered[0].samples, 500);
     assert!(time_errors(&manifest).is_empty());
 
-    // The pinger hears the PONG from sample 15 092 for 500 samples, at −6 dB; x310-like
+    // The pinger hears the PONG from sample 15 092 for 500 samples, at −6 dB; x3xx
     // rotates it by the two radios' LO phases (MR-34), so its magnitude is what is exact.
     assert_eq!(heard(&capture), Some(15_092));
     let expected = 0.5 * 10f64.powf(-6.0 / 20.0);
@@ -348,7 +348,7 @@ fn v58_09_a_reactor_runs_in_a_child_run_of_a_session() {
     let ((ping_bytes, ping_ref), (pong_bytes, pong_ref)) = waveforms();
     let hash = responder::impl_hash();
     let spec = experiments::ping_pong("a", "b", 1.0e6, &ping_ref, &pong_ref, 10_000, TURNAROUND_NS, "drop_and_flag", 20_000, (responder::IMPL_ID, &hash));
-    let child_profile = rig::ping_pong_profile("x310-like", "a", "b", false, &temp.0, couplings("a", "b", None, 0));
+    let child_profile = rig::ping_pong_profile("x3xx", "a", "b", false, &temp.0, couplings("a", "b", None, 0));
     // The Session's own profile: the same radios and Authority, the recorder fed from `a`,
     // and no Executor, which only the child places.
     let mut session_profile = child_profile.clone();

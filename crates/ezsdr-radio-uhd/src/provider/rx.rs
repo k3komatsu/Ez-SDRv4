@@ -408,7 +408,7 @@ impl Rx {
             RxRecv::LateCommand => {
                 // UR-17: the device missed the timed start; the origin stays. The new start
                 // waits the profile's start lead from now (spec 20, VF-6).
-                let restart = match ezsdr_radio::timeline::lattice(now.saturating_add(self.core.ticks(self.core.description.timing.start_lead_ns)), stream.config.ratio) {
+                let restart = match ezsdr_radio::timeline::lattice(now.saturating_add(self.core.ticks(ezsdr_radio::timeline::start_lead_ns(&self.core.description.timing, Direction::Rx))), stream.config.ratio) {
                     Ok(restart) => restart,
                     Err(error) => return self.core.command_rejected(None, "start", &format!("UR-17: {error}")),
                 };
@@ -647,7 +647,7 @@ mod tests {
             direction: Direction::Rx,
             origin: 0,
             config,
-            lead: core.ticks(core.description.timing.start_lead_ns),
+            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Rx)),
             call: core.block_len as i64,
             allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
         }));

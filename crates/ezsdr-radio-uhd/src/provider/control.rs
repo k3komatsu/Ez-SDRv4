@@ -188,16 +188,16 @@ impl Control {
         start: Start,
     ) -> Control {
         let host = core.device.host();
-        // RM-25, VH-4: this Module's terms — the start lead, and, for a receive segment after
-        // a cut, the receive call in progress there and the delivery allowance (UR-25).
-        let lead = core.ticks(core.description.timing.start_lead_ns);
+        // RM-25, VH-4: this Module's terms — each direction's start lead, and, for a receive
+        // segment after a cut, the receive call in progress there and the delivery
+        // allowance (UR-25).
         let call = core.block_len.max(core.device.rx_packet_samples()) as i64;
         let allowance = core.ticks(DELIVERY_ALLOWANCE_NS);
         let line = |direction: Direction, origin: i64, channels: usize, n: i64| Line::new(timeline::Stream {
             direction,
             origin,
             config: Config { channels: channels as u16, ratio: Rational::new(n.max(1) as u64, 1).expect("a positive ratio") },
-            lead,
+            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, direction)),
             call,
             allowance,
         });
@@ -531,7 +531,7 @@ impl Control {
         let n = match decimation(self.core.mcr, rate) {
             Some(n) => n as i64,
             None if channels == 0 => 0,
-            None => return self.core.command_rejected(Some(id), "update_parameter", &format!("UR-12: {rate} S/s is no decimation 1…512 of {} Hz", self.core.mcr)),
+            None => return self.core.command_rejected(Some(id), "update_parameter", &format!("UR-12: {rate} S/s is no decimation of {} Hz", self.core.mcr)),
         };
         if late {
             self.late_command(Some(key.clone()), requested.unwrap_or(now), e);

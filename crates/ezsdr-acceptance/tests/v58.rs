@@ -24,7 +24,7 @@ fn complete(spec: &serde_json::Value, profile_name: &str, selector: serde_json::
 #[test]
 fn v58_01_one_spec_two_mock_profiles() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(10_000));
-    let left = complete(&spec, "x310-like", json!({ "id": "mock" }), json!({}), "v58-01-x310", 20_000_000);
+    let left = complete(&spec, "x3xx", json!({ "id": "mock" }), json!({}), "v58-01-x310", 20_000_000);
     let right = complete(&spec, "ideal", json!({ "id": "mock" }), json!({}), "v58-01-ideal", 20_000_000);
     assert_eq!(left.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
     assert_eq!(right.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
@@ -41,7 +41,7 @@ fn v58_01_one_spec_two_mock_profiles() {
 fn v58_02_ten_virtual_seconds_run_faster_than_wall_clock() {
     let temp = rig::TempDir::new("v58-02");
     let spec = experiments::receive(1, 1.0e6, 1.0e9, None);
-    let profile = rig::spec_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let mut run = spec_run(&temp, &spec, &profile, Default::default());
     let clock = root(&run);
     let began = std::time::Instant::now();
@@ -108,12 +108,12 @@ fn v58_03_same_seed_same_manifest_projection() {
     let temp = rig::TempDir::new("v58-03-same");
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(20_000));
     let selector = json!({ "id": "mock", "block_len_jitter": true, "rx_test_pattern": "ramp" });
-    let first_profile = rig::spec_profile("x310-like", selector.clone(), &temp.0, json!({ "sim.seed": 7 }));
+    let first_profile = rig::spec_profile("x3xx", selector.clone(), &temp.0, json!({ "sim.seed": 7 }));
     let mut first = spec_run(&temp, &spec, &first_profile, BTreeMap::new());
     let clock = root(&first);
     first.advance_to(TimePoint::new(clock, T0 + 25_000_000)).unwrap();
     let first = first.finish();
-    let second_profile = rig::spec_profile("x310-like", selector, &temp.0, json!({ "sim.seed": 7 }));
+    let second_profile = rig::spec_profile("x3xx", selector, &temp.0, json!({ "sim.seed": 7 }));
     let mut second = spec_run(&temp, &spec, &second_profile, BTreeMap::new());
     let clock = root(&second);
     second.advance_to(TimePoint::new(clock, T0 + 25_000_000)).unwrap();
@@ -127,7 +127,7 @@ fn v58_03_the_seed_changes_block_boundaries_not_data() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(20_000));
     let selector = json!({ "id": "mock", "block_len_jitter": true, "rx_test_pattern": "ramp" });
     let run_seed = |seed| {
-        let profile = rig::spec_profile("x310-like", selector.clone(), &temp.0, json!({ "sim.seed": seed }));
+        let profile = rig::spec_profile("x3xx", selector.clone(), &temp.0, json!({ "sim.seed": seed }));
         let mut run = spec_run(&temp, &spec, &profile, BTreeMap::new());
         let clock = root(&run);
         run.advance_to(TimePoint::new(clock, T0 + 25_000_000)).unwrap();
@@ -144,7 +144,7 @@ fn v58_03_the_seed_changes_block_boundaries_not_data() {
 fn v58_04_mock_events_reach_counters_policy_and_manifest() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
     let faults = json!({ "sim.faults": [{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }] });
-    let manifest = complete(&spec, "x310-like", json!({ "id": "mock" }), faults.clone(), "v58-04", 160_000_000);
+    let manifest = complete(&spec, "x3xx", json!({ "id": "mock" }), faults.clone(), "v58-04", 160_000_000);
     let rows = &manifest.events.counters;
     assert_eq!(rows.iter().find(|row| row.source == source("mock/rx") && row.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).unwrap().count, 1);
     let events: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
@@ -159,7 +159,7 @@ fn v58_04_mock_events_reach_counters_policy_and_manifest() {
     let mut stopped = spec.clone();
     stopped["policies"]["failure"] = json!({ "radio.RX_OVERFLOW": "stop" });
     let temp = rig::TempDir::new("v58-04-stop");
-    let profile = rig::spec_profile("x310-like", json!({ "id": "mock" }), &temp.0, faults);
+    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, faults);
     let run = spec_run(&temp, &stopped, &profile, BTreeMap::new());
     let clock = root(&run);
     let manifest = finish_at(run, clock, T0 + 160_000_000);
@@ -171,7 +171,7 @@ fn v58_04_mock_events_reach_counters_policy_and_manifest() {
 fn v58_05_device_lost_aborts_with_full_cleanup() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
     let faults = json!({ "sim.faults": [{ "at_ns": 5_000_000, "fault": "device_lost", "target": "radio" }] });
-    let manifest = complete(&spec, "x310-like", json!({ "id": "mock" }), faults, "v58-05", 10_000_000);
+    let manifest = complete(&spec, "x3xx", json!({ "id": "mock" }), faults, "v58-05", 10_000_000);
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: EventKind::parse(EventKind::DEVICE_LOST).unwrap() } });
     assert!(manifest.run.transitions.iter().any(|entry| entry.state == RunState::Stopping { mode: CleanupMode::Abort }));
     assert!(manifest.termination.cleanup_failures.is_empty());
@@ -185,7 +185,7 @@ fn v58_05_device_lost_aborts_with_full_cleanup() {
 fn v58_06_injected_overflow_is_a_uhd_overflow() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
     let faults = json!({ "sim.faults": [{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }] });
-    let manifest = complete(&spec, "x310-like", json!({ "id": "mock" }), faults, "v58-06-overflow", 160_000_000);
+    let manifest = complete(&spec, "x3xx", json!({ "id": "mock" }), faults, "v58-06-overflow", 160_000_000);
     let capture = artifact(&manifest, "rec", 0);
     assert_eq!(capture.size_bytes, 800_000);
     assert_eq!(capture.continuity[0].gaps.len(), 1);
@@ -210,7 +210,7 @@ fn v51_an_overflowed_capture_is_a_sigmf_recording() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
     let faults = json!({ "sim.faults": [{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }] });
     let temp = rig::TempDir::new("v51-sigmf");
-    let profile = rig::spec_profile("x310-like", json!({ "id": "mock" }), &temp.0, faults);
+    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, faults);
     let run = spec_run(&temp, &spec, &profile, BTreeMap::new());
     let clock = root(&run);
     let manifest = finish_at(run, clock, T0 + 160_000_000);
@@ -235,7 +235,7 @@ fn v51_an_overflowed_capture_is_a_sigmf_recording() {
 fn v58_06_sequence_error_is_seq_discontinuity() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
     let faults = json!({ "sim.faults": [{ "at_ns": 1_000_000, "fault": "rx_sequence_error", "target": "radio" }] });
-    let manifest = complete(&spec, "x310-like", json!({ "id": "mock" }), faults, "v58-06-seq", 160_000_000);
+    let manifest = complete(&spec, "x3xx", json!({ "id": "mock" }), faults, "v58-06-seq", 160_000_000);
     let gaps = &artifact(&manifest, "rec", 0).continuity[0].gaps;
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].cause, ezsdr_kernel::stream::GapCause::SequenceError {});
@@ -251,7 +251,7 @@ fn v58_06_overflows_inside_a_gap_extend_the_recorded_loss() {
         { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
         { "at_ns": 10_000_000, "fault": "rx_overflow", "target": "radio" }
     ] });
-    let manifest = complete(&spec, "x310-like", json!({ "id": "mock" }), faults, "v58-06-overlap", 160_000_000);
+    let manifest = complete(&spec, "x3xx", json!({ "id": "mock" }), faults, "v58-06-overlap", 160_000_000);
     let gap = &artifact(&manifest, "rec", 0).continuity[0].gaps[0];
     assert_eq!(gap.cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
     assert_eq!(gap.start.ticks_in(gap.start.domain()).unwrap(), 1_000);
@@ -264,7 +264,7 @@ fn v58_07_manifest_records_every_input_and_output() {
     let temp = rig::TempDir::new("v58-07");
     let (bytes, waveform) = experiments::waveform(1_000);
     let spec = experiments::transmit(1.0e6, &waveform, true, "send_asap_and_flag", 10_000, Some(10_000));
-    let profile = rig::spec_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
     let clock = root(&run);
     let manifest = finish_at(run, clock, T0 + 20_000_000);
@@ -292,7 +292,7 @@ fn v58_07_manifest_records_every_input_and_output() {
 #[test]
 fn v58_11_short_lead_burst_is_a_time_error() {
     let temp = rig::TempDir::new("v58-11-short");
-    let profile = rig::session_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let mut run = session_run(&temp, &profile);
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
@@ -300,7 +300,7 @@ fn v58_11_short_lead_burst_is_a_time_error() {
     run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.channels").unwrap(), value: Value::from(1) }, None).unwrap();
     run.submit(SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx"), at: Some(TimePoint::new(clock, T0 + 2_000_000)), params: Default::default() }, Some(&bytes)).unwrap();
     let manifest = end_session(run, clock, T0 + 60_000_000);
-    // The new transmit clock starts x310-like's start lead after the change, at T0 + 51 ms
+    // The new transmit clock starts x3xx's start lead after the change, at T0 + 51 ms
     // (RM-25); the burst for T0 + 2 ms is its sample −49 000, before that origin, so it is
     // late by 49 ms and starts at the origin (RM-15).
     let events: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
@@ -319,7 +319,7 @@ fn v58_11_19_5_msps_is_coerced_to_20() {
     let mut spec = experiments::receive(1, 19.5e6, 1.0e9, Some(1_000));
     spec["policies"]["coercion"] = json!({ "radio.rx.sample_rate_hz": "warn" });
     let temp = rig::TempDir::new("v58-11-coerce");
-    let profile = rig::spec_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let run = spec_run(&temp, &spec, &profile, BTreeMap::new());
     let clock = root(&run);
     let manifest = finish_at(run, clock, T0 + 1_000_000);
@@ -340,7 +340,7 @@ fn v58_11_19_5_msps_is_coerced_to_20() {
 fn v58_11_beyond_the_performance_envelope_is_rejected_at_validate() {
     let spec = experiments::receive(2, 200.0e6, 1.0e9, None);
     let temp = rig::TempDir::new("v58-11-envelope");
-    let profile = rig::spec_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let run = spec_run(&temp, &spec, &profile, BTreeMap::new());
     let manifest = run.finish();
     assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Validate, .. }));
@@ -352,8 +352,8 @@ fn v58_11_beyond_the_performance_envelope_is_rejected_at_validate() {
 fn v58_12_jitter_leaves_the_capture_unchanged() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(12_345));
     let selector = |jitter| json!({ "id": "mock", "block_len_jitter": jitter, "rx_test_pattern": "ramp" });
-    let plain = complete(&spec, "x310-like", selector(false), json!({ "sim.seed": 7 }), "v58-12-plain", 20_000_000);
-    let jitter = complete(&spec, "x310-like", selector(true), json!({ "sim.seed": 7 }), "v58-12-jitter", 20_000_000);
+    let plain = complete(&spec, "x3xx", selector(false), json!({ "sim.seed": 7 }), "v58-12-plain", 20_000_000);
+    let jitter = complete(&spec, "x3xx", selector(true), json!({ "sim.seed": 7 }), "v58-12-jitter", 20_000_000);
     assert_eq!(artifact(&plain, "rec", 0).hash, artifact(&jitter, "rec", 0).hash);
     assert_eq!(artifact(&plain, "rec", 0).continuity, artifact(&jitter, "rec", 0).continuity);
     assert_ne!(section(&plain, "mock", "ezsdr.radio.mock.stats")["rx_blocks"], section(&jitter, "mock", "ezsdr.radio.mock.stats")["rx_blocks"]);
@@ -362,7 +362,7 @@ fn v58_12_jitter_leaves_the_capture_unchanged() {
 #[test]
 fn v58_13_session_manifest_has_log_waveform_and_capture() {
     let temp = rig::TempDir::new("v58-13");
-    let profile = rig::session_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let mut run = session_run(&temp, &profile);
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
@@ -391,7 +391,7 @@ fn v58_13_a_session_stop_of_the_recorder_keeps_a_partial_capture() {
     // Phase 2's named Gate X risk: a `Stop` for the recorder routed through the Kernel's
     // admission and dispatch, not handed to the Sink directly (HD-11, HD-13).
     let temp = rig::TempDir::new("v58-13-stop");
-    let profile = rig::session_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let mut run = session_run(&temp, &profile);
     let clock = root(&run);
     let capture = |run: &mut ezsdr_kernel::coordinator::RunHandle, samples: i64| {
@@ -430,8 +430,8 @@ fn v58_13_a_session_stop_of_the_recorder_keeps_a_partial_capture() {
 #[test]
 fn v58_14_profiles_differing_only_in_environment_both_run() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(10_000));
-    let base = complete(&spec, "x310-like", json!({ "id": "mock" }), json!({ "sim.seed": 1 }), "v58-14-a", 20_000_000);
-    let other = complete(&spec, "x310-like", json!({ "id": "mock" }), json!({ "sim.seed": 2, "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 0.0, "hi_hz": 7.0e9 }] } }), "v58-14-b", 20_000_000);
+    let base = complete(&spec, "x3xx", json!({ "id": "mock" }), json!({ "sim.seed": 1 }), "v58-14-a", 20_000_000);
+    let other = complete(&spec, "x3xx", json!({ "id": "mock" }), json!({ "sim.seed": 2, "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 0.0, "hi_hz": 7.0e9 }] } }), "v58-14-b", 20_000_000);
     assert_eq!(base.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
     assert_eq!(other.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
     assert_eq!(base.spec.body, other.spec.body);
@@ -444,7 +444,7 @@ fn v58_15_repeat_wraps_without_a_gap() {
     let (bytes, waveform) = experiments::waveform(1_000);
     let spec = experiments::transmit(1.0e6, &waveform, true, "send_asap_and_flag", 10_000, None);
     let temp = rig::TempDir::new("v58-15");
-    let profile = rig::spec_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash, bytes)]));
     let clock = root(&run);
     let manifest = finish_at(run, clock, T0 + 15_000_000);
@@ -459,7 +459,7 @@ fn v58_15_repeat_wraps_without_a_gap() {
 #[test]
 fn v58_16_runtime_retune_outside_the_rf_envelope_is_rejected() {
     let temp = rig::TempDir::new("v58-16-rf");
-    let profile = rig::session_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 2.4e9, "hi_hz": 2.5e9 }] } }));
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 2.4e9, "hi_hz": 2.5e9 }] } }));
     let mut run = session_run(&temp, &profile);
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
@@ -478,7 +478,7 @@ fn v58_16_runtime_retune_outside_the_rf_envelope_is_rejected() {
 #[test]
 fn kc_24_a_burst_after_the_transmit_clock_ends_is_refused_at_admission() {
     let temp = rig::TempDir::new("kc-24-ended-tx");
-    let profile = rig::session_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let mut run = session_run(&temp, &profile);
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
@@ -497,7 +497,7 @@ fn kc_24_a_burst_after_the_transmit_clock_ends_is_refused_at_admission() {
 #[test]
 fn v58_16_runtime_rate_beyond_the_envelope_is_rejected() {
     let temp = rig::TempDir::new("v58-16-rate");
-    let profile = rig::session_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let mut run = session_run(&temp, &profile);
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
@@ -564,7 +564,7 @@ fn v58_08_b_two_mocks_in_one_run_keep_both_sets_of_sections() {
     // the last instance written won and the other's records were silently gone.
     let temp = rig::TempDir::new("v58-08-sections");
     let (manifest, _) = link_run(
-        &temp, "a", "b", "x310-like", false,
+        &temp, "a", "b", "x3xx", false,
         coupling("a", "b", -6.0, 1_000, Some(-30.0), 0), &ramp(3_000),
     );
     for suffix in ["applied", "bursts", "envelope", "faults", "rejected", "stats"] {
@@ -580,7 +580,7 @@ fn v58_08_b_two_mocks_in_one_run_keep_both_sets_of_sections() {
 
     // and the winner does not depend on the selector: the other jitter value, same ids
     let (jitter, _) = link_run(
-        &temp, "a", "b", "x310-like", true,
+        &temp, "a", "b", "x3xx", true,
         coupling("a", "b", -6.0, 1_000, Some(-30.0), 0), &ramp(3_000),
     );
     assert_eq!(section(&jitter, "dev_tx", "ezsdr.radio.mock.bursts").as_array().unwrap().len(), 1);
@@ -598,7 +598,7 @@ fn kd_01_a_faulted_round_does_not_depend_on_fragment_names() {
         let spec = experiments::link(tx, rx, 1.0e6, &waveform, 10_000, 20_000);
         let mut environment = coupling(tx, rx, -6.0, 1_000, None, 0);
         environment["sim.faults"] = json!([{ "at_ns": 1_999_001, "fault": "device_lost", "target": tx }]);
-        let profile = rig::link_profile("x310-like", tx, rx, false, &temp.0, environment);
+        let profile = rig::link_profile("x3xx", tx, rx, false, &temp.0, environment);
         let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
         let clock = root(&run);
         let manifest = finish_at(run, clock, T0 + 25_000_000);
@@ -622,7 +622,7 @@ fn kd_01_a_faulted_round_does_not_depend_on_fragment_names() {
             { "at_ns": 1_999_001, "fault": "device_lost", "target": tx },
             { "at_ns": 1_999_001, "fault": "device_lost", "target": rx }
         ]);
-        let profile = rig::link_profile("x310-like", tx, rx, false, &temp.0, environment);
+        let profile = rig::link_profile("x3xx", tx, rx, false, &temp.0, environment);
         let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
         let clock = root(&run);
         let manifest = finish_at(run, clock, T0 + 25_000_000);
@@ -681,7 +681,7 @@ fn v58_08_without_a_channel_the_same_spec_hears_nothing() {
 fn v58_03_channel_noise_reproduces_with_its_seed() {
     let samples = ramp(3_000);
     let temp = rig::TempDir::new("v58-03-noise");
-    let noisy = |seed| link_run(&temp, "a", "b", "x310-like", false, coupling("a", "b", -6.0, 1_000, Some(-30.0), seed), &samples);
+    let noisy = |seed| link_run(&temp, "a", "b", "x3xx", false, coupling("a", "b", -6.0, 1_000, Some(-30.0), seed), &samples);
     let (first, first_capture) = noisy(7);
     let (second, _) = noisy(7);
     let (other, other_capture) = noisy(8);
@@ -698,8 +698,8 @@ fn v58_12_the_channel_output_does_not_depend_on_block_lengths() {
     let samples = ramp(3_000);
     let environment = coupling("a", "b", -6.0, 1_000, Some(-30.0), 7);
     let temp = rig::TempDir::new("v58-12-channel");
-    let (plain, _) = link_run(&temp, "a", "b", "x310-like", false, environment.clone(), &samples);
-    let (jitter, _) = link_run(&temp, "a", "b", "x310-like", true, environment, &samples);
+    let (plain, _) = link_run(&temp, "a", "b", "x3xx", false, environment.clone(), &samples);
+    let (jitter, _) = link_run(&temp, "a", "b", "x3xx", true, environment, &samples);
     // §58 #12: the channel's output does not depend on the block lengths. Two things have
     // to hold, and the first is what makes the second mean anything.
     assert_eq!(artifact(&plain, "rec", 0).hash, artifact(&jitter, "rec", 0).hash, "the capture must not depend on the block lengths");
@@ -789,7 +789,7 @@ fn v57_a_software_loopback_session_captures_what_it_transmits() {
 fn v58_03_a_run_reproduces_from_its_own_manifest() {
     let temp = rig::TempDir::new("v58-03-reproduce");
     let samples = ramp(3_000);
-    let (first, _) = link_run(&temp, "a", "b", "x310-like", true, coupling("a", "b", -6.0, 1_000, Some(-30.0), 11), &samples);
+    let (first, _) = link_run(&temp, "a", "b", "x3xx", true, coupling("a", "b", -6.0, 1_000, Some(-30.0), 11), &samples);
     let (bytes, waveform) = experiments::waveform_of(&samples);
     assert_eq!(first.inputs, vec![waveform.clone()]);
     let rerun = spec_run(&temp, &first.spec.body, &first.binding.body, BTreeMap::from([(waveform.hash.clone(), bytes)]));

@@ -28,7 +28,6 @@ use ezsdr_kernel::spec::{Constraint, Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::{BurstEnd, BurstRecord, DataLinkDecl, GapCause};
 use ezsdr_kernel::time::{ClockRegistry, Duration, RelativeBudget, TimePoint};
 use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload, TimeErrorOutcome, TimeErrorPayload};
-use ezsdr_radio_uhd::profile::Profile;
 use ezsdr_radio_uhd::{Device, DeviceAuthority, FakeConfig, FakeDevice, FakeFault, TxCode, UhdRadio};
 use serde_json::{Value as Json, json};
 
@@ -71,36 +70,57 @@ pub fn uhd_module() -> Json {
     json!({ "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } })
 }
 
-pub fn x310_ubx() -> Json {
-    json!({ "name": "x310-ubx", "version": { "major": 0, "minor": 3, "patch": 0 } })
+pub fn x3xx() -> Json {
+    json!({ "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } })
 }
 
-/// The profile of the device's front ends: `x310-obx` on an OBX (the bench, bench.md),
-/// `x310-cbx` on a CBX, else `x310-ubx` (the fake's default).
-pub fn profile_of(device: &dyn Device) -> Profile {
+/// The board of the device's first receive front end, which decides the bench's frequency
+/// and the profile's front ends (UR-5, UR-9).
+pub fn board_of(device: &dyn Device) -> ezsdr_radio::x3xx::Board {
     let name = device.front_end(ezsdr_radio_uhd::Dir::Rx, 0).unwrap_or_default();
-    [Profile::X310Obx, Profile::X310Cbx].into_iter().find(|p| name.starts_with(p.front_end())).unwrap_or(Profile::X310Ubx)
+    ezsdr_radio::x3xx::Board::of_front_end(&name).expect("the board of the device's first rx front end")
 }
 
-/// A fake of `x310-obx`'s device, the bench's: an OBX in slot A and slot B empty, which
+/// The `x3xx` layout of the device's front ends: each receive and transmit channel whose
+/// front end names a board this stage describes, in slot order (design 33 D5).
+pub fn layout_of(device: &dyn Device) -> (Json, Json) {
+    let elements = |dir: ezsdr_radio_uhd::Dir| -> Json {
+        let boards: Vec<&'static str> = (0..device.channels(dir))
+            .filter_map(|chan| {
+                let name = device.front_end(dir, chan).ok()?;
+                ezsdr_radio::x3xx::Board::of_front_end(&name).map(|board| board.name())
+            })
+            .collect();
+        Json::Array(
+            boards
+                .iter()
+                .enumerate()
+                .map(|(index, board)| {
+                    let slot = if index == 0 { "A" } else { "B" };
+                    json!(format!("0:{slot}:{board}:0"))
+                })
+                .collect(),
+        )
+    };
+    (elements(ezsdr_radio_uhd::Dir::Rx), elements(ezsdr_radio_uhd::Dir::Tx))
+}
+
+/// A fake of `x3xx`'s device, the bench's: an OBX in slot A and slot B empty, which
 /// UHD reports as a second channel on its unknown board (`db_unknown.cpp`).
 pub fn one_obx() -> FakeConfig {
     FakeConfig { front_ends: vec!["OBX", "Unknown (0xffff) - 0"], ..FakeConfig::default() }
 }
 
-/// A fake of `x310-cbx`'s device: a CBX-120 in slot A and slot B empty, which UHD
+/// A fake of `x3xx`'s device: a CBX-120 in slot A and slot B empty, which UHD
 /// reports as a second channel on its unknown board (`db_unknown.cpp`).
 pub fn one_cbx() -> FakeConfig {
     FakeConfig { front_ends: vec!["CBX-120", "Unknown (0xffff) - 0"], ..FakeConfig::default() }
 }
 
-/// The frequency the steps receive and transmit at: the default of the device's
-/// profile, so a Session that sets none (B7) stays inside the RF envelope around it.
+/// The frequency the steps receive and transmit at: the default of the device's board
+/// (UR-9), so a Session that sets none (B7) stays inside the RF envelope around it.
 pub fn bench_hz(device: &dyn Device) -> f64 {
-    match profile_of(device).description(2_000).defaults[&Key::parse(ezsdr_radio::keys::RX_FREQUENCY_HZ).unwrap()] {
-        Value::Scalar(ezsdr_kernel::spec::Scalar::Num(hz)) => hz.get(),
-        ref other => panic!("a default frequency, not {other:?}"),
-    }
+    board_of(device).default_frequency_hz()
 }
 
 /// bench.md's RF envelope around the bench frequency: every step that transmits carries
@@ -110,17 +130,25 @@ pub fn bench_envelope(device: &dyn Device) -> Json {
     json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": hz - 1e6, "hi_hz": hz + 1e6 }], "max_gain_db": 0.0, "tx_enabled": [true] } })
 }
 
-/// `profile` with the radio binding's profile the device's (UR-5).
+/// `profile` with the radio binding's profile the `x3xx` one and its layout the device's
+/// front ends (UR-5, design 33 D5).
 pub fn bench_profile(device: &dyn Device, dir: &TempDir, selector: Json, environment: Json, session: bool) -> Json {
     let mut doc = profile(dir, selector, environment, session);
-    doc["bindings"]["radio"]["profile"] = serde_json::to_value(profile_of(device).profile_ref()).unwrap();
+    doc["bindings"]["radio"]["profile"] = x3xx();
+    let (rx, tx) = layout_of(device);
+    doc["bindings"]["radio"]["selector"]["rx"] = rx;
+    doc["bindings"]["radio"]["selector"]["tx"] = tx;
     doc
 }
 
 /// The bench profile of `bench.md` with the fake's args (Vision §59: only the radio
 /// binding, the Authority and `ezsdr.rf_path` differ from the Mock profile).
 pub fn profile(dir: &TempDir, selector: Json, environment: Json, session: bool) -> Json {
-    let mut radio_selector = json!({ "args": ARGS, "id": "usrp" });
+    let mut radio_selector = json!({
+        "args": ARGS, "id": "usrp",
+        "rx": ["0:A:ubx:0", "0:B:ubx:0"],
+        "tx": ["0:A:ubx:0", "0:B:ubx:0"]
+    });
     radio_selector.as_object_mut().unwrap().extend(selector.as_object().cloned().unwrap_or_default());
     let mut rec = json!({
         "module": { "id": "ezsdr.sink.capture", "version": { "major": 1, "minor": 2, "patch": 0 } },
@@ -137,7 +165,7 @@ pub fn profile(dir: &TempDir, selector: Json, environment: Json, session: bool) 
     json!({
         "version": 1,
         "bindings": {
-            "radio": { "module": uhd_module(), "profile": x310_ubx(), "selector": radio_selector },
+            "radio": { "module": uhd_module(), "profile": x3xx(), "selector": radio_selector },
             "rec": rec
         },
         "authority": "radio",

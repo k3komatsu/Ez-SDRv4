@@ -988,7 +988,7 @@ mod tests {
         {
             let mut streams = lock(&core.streams);
             streams.tx_clocks = vec![(c0, false)];
-            let lead = core.ticks(core.description.timing.start_lead_ns);
+            let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
             streams.lines[Dir::Tx as usize] = Some(Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
         }
         let (_to_tx, cmds) = std::sync::mpsc::channel();
@@ -1019,7 +1019,7 @@ mod tests {
         let config = |n: u64| Config { channels: 1, ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
         let mut streams = lock(&core.streams);
         streams.tx_clocks = vec![(c0, false)];
-        let lead = core.ticks(core.description.timing.start_lead_ns);
+        let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
         streams.lines[Dir::Tx as usize] = Some(Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
         streams.configs[Dir::Tx as usize].insert(1, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
         assert!(streams.book(&core, Dir::Tx, Item { e: core.ticks(1_000_000_000), seq: 1, ready: 0, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
@@ -1046,7 +1046,7 @@ mod tests {
             {
                 let mut streams = lock(&core.streams);
                 streams.tx_clocks = vec![(c0, false)];
-                let lead = core.ticks(core.description.timing.start_lead_ns);
+                let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
                 streams.lines[Dir::Tx as usize] = Some(Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
                 for (seq, e, n) in [(1, s(1), 100), (2, s(2), 200), (3, s(3), 100)] {
                     streams.configs[Dir::Tx as usize].insert(seq, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
@@ -1163,7 +1163,7 @@ mod tests {
             events.clone(),
             inputs,
             Vec::new(),
-            crate::profile::Profile::X310Ubx.description(2_000),
+            crate::profile::ubx_description(2_000),
         )
         .expect("the rx node is inside the instance root"));
         let origin = (core.now() / 200 + 1) * 200;

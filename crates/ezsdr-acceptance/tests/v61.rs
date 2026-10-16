@@ -16,7 +16,7 @@ fn v61_01_repeat_is_continuous_across_the_wrap() {
     let (bytes, waveform) = experiments::waveform(1_000);
     let spec = experiments::transmit(1.0e6, &waveform, true, "send_asap_and_flag", 10_000, None);
     let temp = rig::TempDir::new("v61-01");
-    let profile = rig::spec_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash, bytes)]));
     let clock = root(&run);
     let manifest = finish_at(run, clock, T0 + 15_000_000);
@@ -34,7 +34,7 @@ fn v61_01_repeat_is_continuous_across_the_wrap() {
 fn v61_02_capture_starts_at_the_requested_sample_index() {
     let temp = rig::TempDir::new("v61-02");
     let profile = rig::session_profile(
-        "x310-like",
+        "x3xx",
         json!({ "id": "mock", "rx_test_pattern": "ramp" }),
         &temp.0,
         json!({}),
@@ -79,7 +79,7 @@ fn v61_03_timed_start_of_tx_and_capture() {
         5_000,
     );
     let temp = rig::TempDir::new("v61-03");
-    let profile = rig::spec_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash, bytes)]));
     let clock = root(&run);
     let manifest = finish_at(run, clock, T0 + 10_000_000);
@@ -95,13 +95,14 @@ fn v61_03_timed_start_of_tx_and_capture() {
 #[test]
 fn v61_04_pps_source_is_armed_first_and_streams_align() {
     let temp = rig::TempDir::new("v61-04");
-    let mut profile = rig::spec_profile("x310-like", json!({ "id": "unused" }), &temp.0, json!({}));
+    let mut profile = rig::spec_profile("x3xx", json!({ "id": "unused" }), &temp.0, json!({}));
     let radio = profile["bindings"]["radio"].clone();
     let recorder = profile["bindings"]["rec"].clone();
     let mut pps = radio.clone();
-    pps["selector"] = json!({ "id": "pps" });
+    pps["selector"]["id"] = json!("pps");
     let mut follow = radio;
-    follow["selector"] = json!({ "id": "follow", "arm_after": ["pps"] });
+    follow["selector"]["id"] = json!("follow");
+    follow["selector"]["arm_after"] = json!(["pps"]);
     let mut rec_pps = recorder.clone();
     rec_pps["selector"]["dir"] = json!(temp.0.join("rec-pps").to_string_lossy().to_string());
     let mut rec_follow = recorder;

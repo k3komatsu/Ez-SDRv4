@@ -28,6 +28,7 @@ use ezsdr_sim::{FaultEntry, FaultKind, SimRng};
 use ezsdr_sim::channel::{Medium, RootInstant};
 use ezsdr_kernel::module_api::InputStore;
 use ezsdr_radio::timeline::{self, Item, Kind, Line, Segment};
+use ezsdr_radio::x3xx;
 
 pub use device::{DeviceModel, DeviceTimeError};
 pub use profile::{Profile, ProfileKind};
@@ -120,6 +121,10 @@ struct ChannelMode {
     inputs: std::sync::Arc<dyn InputStore>,
     tx: std::sync::Arc<channel::TxShared>,
     rx: channel::RxModel,
+    /// MR-34's fresh phases for a `random` board (design 33 D13), drawn in the order the
+    /// applied frequency updates reach the Mock, so its output stays a function of its seed
+    /// (MR-30).
+    lo_retune: SimRng,
 }
 
 #[derive(Clone)]
@@ -211,21 +216,20 @@ impl MockRadio {
         if binding.module != module_ref() {
             return Err(reject("binding names a different Module version"));
         }
-        let profile = match binding.profile.as_ref() {
-            Some(p) if p.version == Version::new(2, 0, 0) && p.name == "x310-like" => Profile {
-                kind: ProfileKind::X310Like,
-                n: 1,
-            },
-            Some(p) if p.version == Version::new(2, 0, 0) && p.name == "ideal" => Profile {
-                kind: ProfileKind::Ideal,
-                n: 1,
-            },
-            _ => return Err(reject("profile must be x310-like or ideal 2.0.0")),
+        let kind = match binding.profile.as_ref() {
+            Some(p) if p == &x3xx::profile_ref() => ProfileKind::X3xx,
+            Some(p) if p.version == Version::new(2, 0, 0) && p.name == "ideal" => ProfileKind::Ideal,
+            _ => return Err(reject("profile must be x3xx 0.1.0 or ideal 2.0.0")),
         };
         if binding.feed.is_some() {
             return Err(reject("Provider binding cannot carry a feed"));
         }
-        let allowed = ["id", "instances", "block_len_jitter", "rx_test_pattern", "arm_after"];
+        // The shared keys of design 33 D5 are the `x3xx` layout and its companions; `ideal`
+        // has no layout at this stage, so its binding may not carry them (design 33 D5).
+        let allowed: Vec<&str> = ["id", "block_len_jitter", "rx_test_pattern", "arm_after"]
+            .into_iter()
+            .chain(x3xx::SELECTOR_KEYS.into_iter().filter(|_| kind == ProfileKind::X3xx))
+            .collect();
         if let Some(name) = binding
             .selector
             .keys()
@@ -241,11 +245,6 @@ impl MockRadio {
                 .filter(|id| id.segments().count() == 1)
                 .ok_or_else(|| reject("selector `id` must be one resource path segment"))?,
             Some(_) => return Err(reject("selector `id` must be a string")),
-        };
-        let n = match selector_value("instances") {
-            None => 1,
-            Some(Value::Scalar(Scalar::Int(n))) if (1..=4).contains(n) => *n as u32,
-            _ => return Err(reject("selector `instances` must be an Int in 1..=4")),
         };
         let block_len_jitter = match selector_value("block_len_jitter") {
             None => false,
@@ -269,7 +268,11 @@ impl MockRadio {
                 .collect::<Result<Vec<_>, _>>()?,
             _ => return Err(reject("selector `arm_after` must be a list")),
         };
-        let profile = Profile { kind: profile.kind, n };
+        let selection = match kind {
+            ProfileKind::X3xx => Some(x3xx::from_selector(&binding.selector).map_err(|why| reject(&why))?),
+            ProfileKind::Ideal => None,
+        };
+        let profile = Profile::new(kind, selection);
         let timing = profile.timing();
         let mut sections = BTreeMap::new();
         sections.insert(section("envelope"), serde_json::to_value(profile.envelope()).expect("serializable envelope"));
@@ -291,11 +294,12 @@ impl MockRadio {
             }),
             sections,
         };
+        let defaults = profile.description().defaults.clone();
         Ok(MockRadio {
             instance,
             source_root: None,
             profile,
-            config: ezsdr_radio::device::DeviceDescription::x310_defaults(),
+            config: defaults,
             prepare_called: false,
             prepared: false,
             armed: false,
@@ -981,12 +985,17 @@ impl MockRadio {
         let clocks = self.clocks.as_ref().expect("clocks");
         let root_rate = clocks.nominal_rate(root).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
         match self.profile.kind {
-            ProfileKind::X310Like => {
-                let n = self.profile.decimation(rate).ok_or_else(|| ModuleError::rejected("MR-18: rate is not an X310-like decimation"))?;
-                Rational::new(root_rate.num().checked_mul(n).ok_or_else(|| ModuleError::rejected("MR-18: ratio overflow"))?, 200_000_000)
+            ProfileKind::X3xx => {
+                let n = self.profile.decimation(rate).ok_or_else(|| ModuleError::rejected("MR-18: rate is not an X3xx decimation"))?;
+                Rational::new(root_rate.num().checked_mul(n).ok_or_else(|| ModuleError::rejected("MR-18: ratio overflow"))?, x3xx::MASTER_CLOCK_HZ)
             }
             ProfileKind::Ideal => Rational::new(root_rate.num(), rate as u64),
         }.map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))
+    }
+
+    /// RM-26: this instance's description, from its profile (design 33 D5).
+    fn description(&self) -> &ezsdr_radio::device::DeviceDescription {
+        self.profile.description()
     }
 
     /// A stream's timeline terms on this profile (RM-25, MR-18).
@@ -1001,7 +1010,7 @@ impl MockRadio {
             direction,
             origin,
             config: timeline::Config { channels, ratio },
-            lead: ticks(self.profile.timing().start_lead_ns)?,
+            lead: ticks(timeline::start_lead_ns(&self.profile.timing(), direction))?,
             call: self.profile.rx_call_samples(),
             allowance: ticks(self.profile.delivery_allowance_ns())?,
         }))
@@ -1389,13 +1398,26 @@ impl MockRadio {
                 ezsdr_radio::keys::TX_FREQUENCY_HZ => {
                     let mut plan = mode.tx.plan();
                     plan.frequency_hz.set(tick, value);
-                    let timed = plan.timed_phase.clone();
-                    for (phase, value) in plan.phase.iter_mut().zip(timed) { phase.set(tick, value); }
+                    if self.profile.timed_tune_fixes_phase() {
+                        let timed = plan.timed_phase.clone();
+                        for (phase, value) in plan.phase.iter_mut().zip(timed) { phase.set(tick, value); }
+                    } else {
+                        // MR-34: a `random` channel redraws its phase at every applied tune,
+                        // every channel of the direction in draw order (design 33 D13).
+                        let count = plan.phase.len();
+                        let values: Vec<f64> = (0..count).map(|_| channel::lo_phase(&mut mode.lo_retune)).collect();
+                        for (phase, value) in plan.phase.iter_mut().zip(values) { phase.set(tick, value); }
+                    }
                 }
                 ezsdr_radio::keys::RX_GAIN_DB => mode.rx.gain_db.set(tick, value),
                 ezsdr_radio::keys::RX_FREQUENCY_HZ => {
                     mode.rx.frequency_hz.set(tick, value);
-                    for (phase, value) in mode.rx.phase.iter_mut().zip(mode.rx.timed_phase.iter()) { phase.set(tick, *value); }
+                    if self.profile.timed_tune_fixes_phase() {
+                        for (phase, value) in mode.rx.phase.iter_mut().zip(mode.rx.timed_phase.iter()) { phase.set(tick, *value); }
+                    } else {
+                        let values: Vec<f64> = (0..mode.rx.phase.len()).map(|_| channel::lo_phase(&mut mode.lo_retune)).collect();
+                        for (phase, value) in mode.rx.phase.iter_mut().zip(values) { phase.set(tick, value); }
+                    }
                 }
                 _ => {}
             }
@@ -1540,7 +1562,7 @@ impl Provider for MockRadio {
         if !report.rejected.is_empty() {
             return Err(self.reject(format!("MR-7: rejected requests: {:?}", report.rejected)));
         }
-        let mut config = ezsdr_radio::device::DeviceDescription::x310_defaults();
+        let mut config = self.description().defaults.clone();
         for (key, value) in report.applied {
             if ezsdr_radio::keys::CONFIGURATION.contains(&key.as_str()) {
                 config.insert(key, value);
@@ -1561,9 +1583,9 @@ impl Provider for MockRadio {
             if channels <= 0 { continue; }
             let rate = num_config(&config, &format!("radio.{direction}.sample_rate_hz"));
             let ratio = match self.profile.kind {
-                ProfileKind::X310Like => {
-                    let n = self.profile.decimation(rate).ok_or_else(|| self.reject(format!("MR-7: rate {rate} is not an X310-like decimation")))?;
-                    Rational::new(root_rate.num().checked_mul(n).ok_or_else(|| self.reject("MR-7: clock ratio overflow"))?, 200_000_000)
+                ProfileKind::X3xx => {
+                    let n = self.profile.decimation(rate).ok_or_else(|| self.reject(format!("MR-7: rate {rate} is not an X3xx decimation")))?;
+                    Rational::new(root_rate.num().checked_mul(n).ok_or_else(|| self.reject("MR-7: clock ratio overflow"))?, x3xx::MASTER_CLOCK_HZ)
                 }
                 ProfileKind::Ideal => Rational::new(root_rate.num(), rate as u64),
             }.map_err(|error| self.reject(format!("MR-7: {error}")))?;
@@ -1599,24 +1621,32 @@ impl Provider for MockRadio {
                 if self.selector.rx_test_pattern != "zero" {
                     return Err(self.reject("MR-31: a channel-coupled Mock takes no receive test pattern"));
                 }
-                let max = self.profile.max_channels();
-                if let Some(coupling) = spec.couplings.iter().find(|c| (c.tx == f.id && i64::from(c.tx_channel) >= max) || (c.rx == f.id && i64::from(c.rx_channel) >= max)) {
+                let (rx_max, tx_max) = (self.description().rx_max_channels, self.description().tx_max_channels);
+                if let Some(coupling) = spec.couplings.iter().find(|c| {
+                    (c.tx == f.id && i64::from(c.tx_channel) >= tx_max)
+                        || (c.rx == f.id && i64::from(c.rx_channel) >= rx_max)
+                }) {
+                    let max = if coupling.rx == f.id { rx_max } else { tx_max };
                     return Err(self.reject(format!("MR-31: a coupling {} -> {} names a channel beyond this profile's {max}", coupling.tx, coupling.rx)));
                 }
                 let random = self.profile.random_phase_on_untimed_tune();
                 let mut lo = SimRng::new(seed, &format!("{}/lo", self.selector_id()));
-                let mut phases = || (0..max).map(|_| if random { channel::lo_phase(&mut lo) } else { 0.0 }).collect::<Vec<f64>>();
-                let rx_phase: Vec<channel::Timeline> = phases().into_iter().map(channel::Timeline::new).collect();
-                let tx_phase: Vec<channel::Timeline> = phases().into_iter().map(channel::Timeline::new).collect();
-                let rx_timed = phases();
-                let tx_timed = phases();
+                // MR-34: the initial phases, and the timed-tune constants of a profile whose
+                // timed tunes fix them; a `random` board redraws instead (design 33 D13).
+                let fixes = random && self.profile.timed_tune_fixes_phase();
+                let draw = |count: i64, rng: &mut SimRng, live: bool| (0..count).map(|_| if live { channel::lo_phase(rng) } else { 0.0 }).collect::<Vec<f64>>();
+                let rx_phase: Vec<channel::Timeline> = draw(rx_max, &mut lo, random).into_iter().map(channel::Timeline::new).collect();
+                let tx_phase: Vec<channel::Timeline> = draw(tx_max, &mut lo, random).into_iter().map(channel::Timeline::new).collect();
+                let rx_timed = draw(rx_max, &mut lo, fixes);
+                let tx_timed = draw(tx_max, &mut lo, fixes);
+                let lo_retune = SimRng::new(seed, &format!("{}/lo/retune", self.selector_id()));
                 let tx = channel::TxShared::new(channel::TxPlan {
                     segments: BTreeMap::new(),
                     gain_db: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::TX_GAIN_DB)),
                     frequency_hz: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::TX_FREQUENCY_HZ)),
                     phase: tx_phase,
                     timed_phase: tx_timed,
-                    path_delay: self.profile.tx_path_delay_samples(),
+                    path_delay: self.description().tx_path_delay_samples,
                 });
                 let rx = channel::RxModel {
                     gain_db: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::RX_GAIN_DB)),
@@ -1625,7 +1655,7 @@ impl Provider for MockRadio {
                     timed_phase: rx_timed,
                 };
                 medium.join(&ctx.run, &f.id, &spec, seed, root_rate.num(), tx.clone()).map_err(|error| self.reject(format!("MR-31: {error}")))?;
-                Some(ChannelMode { medium, fragment: f.id.clone(), inputs: ctx.inputs.clone(), tx, rx })
+                Some(ChannelMode { medium, fragment: f.id.clone(), inputs: ctx.inputs.clone(), tx, rx, lo_retune })
             }
         };
         if channel_mode.is_some() {

@@ -1,4 +1,4 @@
-//! RM-26: `ezsdr_radio::device` against the `x310-like` values (Phase 7, VE-1).
+//! RM-26: `ezsdr_radio::device` against the `x3xx` values (Phase 7, VE-1; design 33 D5).
 
 use ezsdr_kernel::spec::Scalar;
 use std::collections::BTreeMap;
@@ -7,50 +7,39 @@ use ezsdr_kernel::id::ResourceId;
 use ezsdr_kernel::module_api::{ProfileRef, Requested, Version};
 use ezsdr_kernel::spec::{CapabilityValue, Constraint, Key, Value};
 use ezsdr_radio::device::{DeviceDescription, Grid};
-use ezsdr_radio::{PerformanceEnvelope, TimingEnvelope, keys};
+use ezsdr_radio::x3xx::{self, Board, ProviderTerms, Selection, Slot};
+use ezsdr_radio::keys;
 
 fn key(name: &str) -> Key {
     Key::parse(name).unwrap()
 }
 
-fn x310_like() -> DeviceDescription {
-    DeviceDescription {
-        profile: ProfileRef { name: "x310-like".to_owned(), version: Version::new(1, 2, 0) },
-        rates: Grid::Values((1..=512).rev().map(|n| 200_000_000.0 / f64::from(n)).collect()),
-        whole_hertz_rates: false,
-        frequency: Grid::Step { lo: 10_000_000.0, hi: 6_000_000_000.0, step: 1.0 },
-        gain: Grid::Step { lo: 0.0, hi: 31.5, step: 0.5 },
-        max_channels: 2,
-        rx_antennas: vec!["RX2".to_owned(), "TX/RX".to_owned()],
-        tx_antennas: vec!["TX/RX".to_owned()],
-        coherent: true,
-        full_duplex: true,
-        hardware_time: true,
-        phase_behavior_on_retune: "random_unless_timed_tune".to_owned(),
-        repeat_max_samples: 268_435_456,
-        repeat_align_samples: 2,
-        block_len: 2_000,
-        tx_path_delay_samples: 45,
-        rx_path_delay_samples: 0,
-        timing: TimingEnvelope {
-            min_timed_command_lead_ns: 2_000_000,
-            startup_latency_ns: 2_000_000_000,
-            command_queue_depth: 16,
-            overflow_restart_gap_ns: 50_000_000,
-            start_lead_ns: 50_000_000,
-        },
-        performance: PerformanceEnvelope {
-            rx_bytes_per_s: 1_000_000_000,
-            tx_bytes_per_s: 1_000_000_000,
-            wire_bytes_per_sample: 4,
-        },
-        defaults: DeviceDescription::x310_defaults(),
+/// The `x3xx` decimations, written out here from the design's rule rather than read from
+/// the crate under test (design 33 D5).
+fn decimations() -> Vec<u64> {
+    let mut set = vec![1u64];
+    for h in 0..=3u64 {
+        for c in 1..=255u64 {
+            set.push((1 << h) * c);
+        }
     }
+    set.sort_unstable();
+    set.dedup();
+    set
 }
 
-/// The capabilities MockRadio 1.2.0's `Profile::tree` built for `x310-like`, written
-/// out here independently of the code under test (MR-4).
-fn mockradio_1_2_capabilities() -> BTreeMap<Key, CapabilityValue> {
+/// The `x3xx` description of two UBX, both directions, with the Mock's own terms.
+fn x3xx_description() -> DeviceDescription {
+    let terms = ProviderTerms {
+        min_timed_command_lead_ns: 2_000_000,
+        repeat_max_samples: 268_435_456,
+        repeat_align_samples: 2,
+    };
+    x3xx::description(&Selection::of(Board::Ubx, &[Slot::A, Slot::B], &[Slot::A, Slot::B]), 2_000, &terms)
+}
+
+/// The same values, written out here independently of the crate under test (RM-4).
+fn capabilities() -> BTreeMap<Key, CapabilityValue> {
     let range = |min, max| CapabilityValue::Range { min, max };
     let one = |value| CapabilityValue::One { value };
     let mut expected = BTreeMap::new();
@@ -59,7 +48,7 @@ fn mockradio_1_2_capabilities() -> BTreeMap<Key, CapabilityValue> {
         expected.insert(
             key(&format!("radio.{direction}.sample_rate_hz")),
             CapabilityValue::AnyOf {
-                values: (1..=512).map(|n| Scalar::try_from(200_000_000.0 / f64::from(n)).unwrap()).collect(),
+                values: decimations().iter().map(|n| Scalar::try_from(200_000_000.0 / *n as f64).unwrap()).collect(),
             },
         );
         expected.insert(
@@ -87,7 +76,8 @@ fn mockradio_1_2_capabilities() -> BTreeMap<Key, CapabilityValue> {
         (keys::STARTUP_LATENCY_NS, Scalar::from(2_000_000_000)),
         (keys::COMMAND_QUEUE_DEPTH, Scalar::from(16)),
         (keys::OVERFLOW_RESTART_GAP_NS, Scalar::from(50_000_000)),
-        (keys::START_LEAD_NS, Scalar::from(50_000_000)),
+        (keys::RX_START_LEAD_NS, Scalar::from(50_000_000)),
+        (keys::TX_START_LEAD_NS, Scalar::from(50_000_000)),
         (keys::RX_BYTES_PER_S, Scalar::from(1_000_000_000)),
         (keys::TX_BYTES_PER_S, Scalar::from(1_000_000_000)),
         (keys::WIRE_BYTES_PER_SAMPLE, Scalar::from(4)),
@@ -100,13 +90,13 @@ fn mockradio_1_2_capabilities() -> BTreeMap<Key, CapabilityValue> {
 }
 
 #[test]
-fn rm_26_the_description_builds_the_tree_mockradio_built() {
+fn rm_26_the_description_builds_the_tree() {
     let id = ResourceId::parse("dev").unwrap();
     let domain = ezsdr_kernel::id::MemoryDomainId::local(37);
-    let tree = x310_like().tree(&id, domain);
+    let tree = x3xx_description().tree(&id, domain);
     assert_eq!(tree.id, id);
     assert_eq!(tree.kind.as_str(), "radio.device");
-    assert_eq!(tree.capabilities, mockradio_1_2_capabilities());
+    assert_eq!(tree.capabilities, capabilities());
     let children: Vec<(ResourceId, String)> = tree
         .children
         .iter()
@@ -127,6 +117,101 @@ fn rm_26_the_description_builds_the_tree_mockradio_built() {
     assert!(!tree.shareable);
 }
 
+#[test]
+fn rm_26_the_description_is_the_one_profile_both_providers_name() {
+    // Design 33 D5: the profile is `x3xx` 0.1.0, and a `ProviderTerms` value reaches the
+    // description, so a description says whose value each Module sharing it contributed.
+    let description = x3xx_description();
+    assert_eq!(description.profile, ProfileRef { name: "x3xx".to_owned(), version: Version::new(0, 1, 0) });
+    assert_eq!(x3xx::profile_ref(), description.profile);
+    assert_eq!(description.rx_max_channels, 2);
+    assert_eq!(description.tx_max_channels, 2);
+    let terms = ProviderTerms {
+        min_timed_command_lead_ns: 5_000_000,
+        repeat_max_samples: u64::from(u32::MAX),
+        repeat_align_samples: 1,
+    };
+    let uhd = x3xx::description(&Selection::of(Board::Ubx, &[Slot::A], &[]), 2_000, &terms);
+    assert_eq!(uhd.timing.min_timed_command_lead_ns, 5_000_000);
+    assert_eq!(uhd.repeat_max_samples, u64::from(u32::MAX));
+    assert_eq!((uhd.rx_max_channels, uhd.tx_max_channels), (1, 0));
+    // The boards' own values: a CBX has no timed phase sync, so its channels are aligned
+    // but not coherent, and its default is 2.45 GHz (RM-9, design 33 D13).
+    let cbx = x3xx::description(&Selection::of(Board::Cbx, &[Slot::A], &[Slot::A]), 2_000, &terms);
+    assert_eq!(cbx.phase_behavior_on_retune, "random");
+    assert!(!cbx.coherent);
+    assert_eq!(cbx.frequency.min(), 1_200_000_000.0);
+    assert_eq!(cbx.defaults[&key(keys::RX_FREQUENCY_HZ)], Value::num(2_450_000_000.0).unwrap());
+    // A layout with no receive front end defaults to no receive channel (RM-5, design 33 D5).
+    let tx_only = x3xx::description(&Selection::of(Board::Cbx, &[], &[Slot::A]), 2_000, &terms);
+    assert_eq!((tx_only.rx_max_channels, tx_only.defaults[&key(keys::RX_CHANNELS)].clone()), (0, Value::from(0)));
+    // The link's speed decides the transport: 1 GbE is a tenth of 10 GbE.
+    let mut slow = Selection::of(Board::Ubx, &[Slot::A], &[Slot::A]);
+    slow.link_gbps = 1;
+    let slow = x3xx::description(&slow, 2_000, &terms);
+    assert_eq!((slow.performance.rx_bytes_per_s, slow.performance.tx_bytes_per_s), (100_000_000, 100_000_000));
+}
+
+#[test]
+fn rm_26_the_decimation_set_is_the_ddc_s() {
+    // 639 values; `{1}` is in it, the CIC's 255 and three halfbands' 2040 are, and one
+    // past the halfbands (4080) and an odd CIC value above 255 (257) are not (design 33 D5).
+    let set = x3xx::decimations();
+    assert_eq!(set.len(), 639);
+    assert_eq!(set[0], 1);
+    assert!(x3xx::is_decimation(1) && x3xx::is_decimation(255) && x3xx::is_decimation(256) && x3xx::is_decimation(2040));
+    assert!(!x3xx::is_decimation(257) && !x3xx::is_decimation(2041) && !x3xx::is_decimation(4080));
+    // The rate grid is ascending and exactly `200e6 / N` (RM-8's `Values`).
+    let rates = x3xx::rates(200_000_000);
+    assert_eq!(rates.len(), 639);
+    assert_eq!(rates[0], 200_000_000.0 / 2040.0);
+    assert_eq!(*rates.last().unwrap(), 200_000_000.0);
+    assert!(rates.windows(2).all(|pair| pair[0] < pair[1]));
+    // `decimation` is exact and refuses what the DDC cannot make; `clip_decimation` is
+    // UHD's `coerce_decim` (UR-12, UR-33).
+    assert_eq!(x3xx::decimation(200_000_000, 200e6 / 3.0), Some(3));
+    assert_eq!(x3xx::decimation(200_000_000, 19.5e6), None);
+    assert_eq!(x3xx::decimation(200_000_000, 200e6 / 257.0), None);
+    assert_eq!(x3xx::decimation(200_000_000, 200e6 / 2040.0), Some(2040));
+    assert_eq!(x3xx::clip_decimation(200_000_000, 200e6 / 257.0), 256);
+    assert_eq!(x3xx::clip_decimation(200_000_000, 200e6 / 257.4), 258);
+    assert_eq!(x3xx::clip_decimation(200_000_000, 200e6 / 4080.0), 2040);
+}
+
+#[test]
+fn rm_26_the_layout_parser_checks_the_shared_selector() {
+    use std::collections::BTreeMap as Map;
+    let selector = |rx: &[&str], tx: &[&str]| -> Map<ezsdr_kernel::spec::Ident, Value> {
+        Map::from([
+            (ezsdr_kernel::spec::Ident::parse("rx").unwrap(), Value::List(rx.iter().map(|e| Scalar::from(*e)).collect())),
+            (ezsdr_kernel::spec::Ident::parse("tx").unwrap(), Value::List(tx.iter().map(|e| Scalar::from(*e)).collect())),
+        ])
+    };
+    let ok = x3xx::from_selector(&selector(&["0:A:ubx:0", "0:B:ubx:0"], &["0:A:ubx:0"])).unwrap();
+    assert_eq!((ok.board, ok.master_clock_hz, ok.image.name(), ok.links, ok.link_gbps), (Board::Ubx, 200_000_000, "hg", 1, 10));
+    assert_eq!(ok.rx.len(), 2);
+    assert_eq!(ok.tx.len(), 1);
+    for bad in [
+        selector(&["0:A:ubx"], &["0:A:ubx:0"]),
+        selector(&["1:A:ubx:0"], &["0:A:ubx:0"]),
+        selector(&["0:A:sbx:0"], &["0:A:ubx:0"]),
+        selector(&["0:C:ubx:0"], &["0:A:ubx:0"]),
+        selector(&["0:A:ubx:1"], &["0:A:ubx:0"]),
+        selector(&["0:A:ubx:0", "0:A:ubx:0"], &["0:A:ubx:0"]),
+        selector(&["0:B:ubx:0", "0:A:ubx:0"], &["0:A:ubx:0"]),
+        selector(&["0:B:ubx:0"], &["0:A:ubx:0"]),
+        selector(&["0:A:ubx:0"], &["0:B:ubx:0"]),
+        selector(&["0:A:ubx:0", "0:B:ubx:0", "0:A:ubx:0"], &["0:A:ubx:0"]),
+        selector(&["0:A:ubx:0"], &["0:A:obx:0"]),
+        selector(&[], &[]),
+    ] {
+        assert!(x3xx::from_selector(&bad).is_err(), "{bad:?}");
+    }
+    // The refusal names the slot and the position (design 33 D5).
+    let reason = x3xx::from_selector(&selector(&["0:A:ubx:0"], &["0:B:ubx:0"])).unwrap_err();
+    assert!(reason.contains("position 0") && reason.contains("slot B"), "{reason}");
+}
+
 fn request(pairs: &[(&str, Constraint)]) -> Requested {
     Requested {
         resource: ResourceId::parse("dev").unwrap(),
@@ -140,7 +225,7 @@ fn eq(value: Scalar) -> Constraint {
 
 #[test]
 fn rm_26_coerce_cases() {
-    let description = x310_like();
+    let description = x3xx_description();
     let dev = ResourceId::parse("dev").unwrap();
     let coerce = |pairs: &[(&str, Constraint)]| description.coerce(&dev, &request(pairs)).unwrap();
 
@@ -175,9 +260,11 @@ fn rm_26_coerce_cases() {
         assert_eq!(refusal.key, key(&rate), "{direction}");
     }
 
-    // Four channels exceed the device's two (RM-8).
-    let report = coerce(&[(keys::RX_CHANNELS, eq(Scalar::from(4)))]);
-    assert!(report.rejected[0].reason.starts_with("RM-8: "), "{:?}", report.rejected);
+    // Four channels exceed the device's two (RM-8), in each direction.
+    for direction in ["rx", "tx"] {
+        let report = coerce(&[(format!("radio.{direction}.channels").as_str(), eq(Scalar::from(4)))]);
+        assert!(report.rejected[0].reason.starts_with("RM-8: "), "{:?}", report.rejected);
+    }
 
     // A Set of antennas picks the first available one.
     let report = coerce(&[(
@@ -197,7 +284,19 @@ fn rm_26_coerce_cases() {
     assert_eq!(report.rejected[0].reason, "RM-4: not a radio key");
 
     // Whole hertz, when the description says so.
-    let whole = DeviceDescription { whole_hertz_rates: true, rates: Grid::Integer { lo: 1, hi: 1_000_000_000 }, ..x310_like() };
+    let whole = DeviceDescription { whole_hertz_rates: true, rates: Grid::Integer { lo: 1, hi: 1_000_000_000 }, ..x3xx_description() };
     let report = whole.coerce(&dev, &request(&[(keys::RX_SAMPLE_RATE_HZ, eq(Scalar::try_from(1.5).unwrap()))])).unwrap();
     assert_eq!(report.rejected[0].reason, "RM-8: this device represents a rate as whole hertz");
+}
+
+#[test]
+fn rm_26_the_envelope_carries_each_directions_start_lead() {
+    // RM-20: the Manifest's envelope holds both leads (design 33 D5).
+    let envelope = x3xx_description().envelope();
+    assert_eq!(envelope.timing.rx_start_lead_ns, 50_000_000);
+    assert_eq!(envelope.timing.tx_start_lead_ns, 50_000_000);
+    let value = serde_json::to_value(&envelope).unwrap();
+    let timing = value["timing"].as_object().unwrap();
+    assert!(timing.contains_key("rx_start_lead_ns") && timing.contains_key("tx_start_lead_ns"));
+    assert!(!timing.contains_key("start_lead_ns"));
 }

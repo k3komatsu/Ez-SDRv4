@@ -59,7 +59,7 @@ pub(super) fn rig_on_inputs(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_ke
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
     let core = Arc::new(Core::new(device, ResourceId::parse("usrp").unwrap(),
         root, time.clone(), clocks, events.clone(), Arc::new(inputs), links,
-        crate::profile::Profile::X310Ubx.description(block_len))
+        crate::profile::ubx_description(block_len))
         .expect("the rx node is inside the instance root"));
     (core, time, events)
 }

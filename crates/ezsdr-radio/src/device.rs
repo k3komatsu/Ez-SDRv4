@@ -173,8 +173,10 @@ pub struct DeviceDescription {
     pub frequency: Grid,
     /// The gain range, a `Step` grid.
     pub gain: Grid,
-    /// Channels per direction.
-    pub max_channels: i64,
+    /// Receive channels, the length of the binding's `rx` layout (design 33 D5).
+    pub rx_max_channels: i64,
+    /// Transmit channels, the length of the binding's `tx` layout (design 33 D5).
+    pub tx_max_channels: i64,
     /// Receive antenna names.
     pub rx_antennas: Vec<String>,
     /// Transmit antenna names.
@@ -210,7 +212,7 @@ fn key(name: &str) -> Key {
 }
 
 impl DeviceDescription {
-    /// RM-5's defaults for MockRadio 1.2.0 and the X310 profiles that keep its values:
+    /// RM-5's defaults for the `x3xx` profile and for `ideal` over them:
     /// 1 receive channel, no transmit channel, 1 Msps, 1 GHz, 0 dB, `RX2` and `TX/RX`.
     pub fn x310_defaults() -> BTreeMap<Key, Value> {
         use keys::*;
@@ -275,9 +277,10 @@ impl DeviceDescription {
             values: names.iter().map(|name| Scalar::from(name.as_str())).collect(),
         };
         for direction in ["rx", "tx"] {
+            let max_channels = if direction == "rx" { self.rx_max_channels } else { self.tx_max_channels };
             capabilities.insert(
                 key(&format!("radio.{direction}.channels")),
-                range(Scalar::Int(0), Scalar::Int(self.max_channels)),
+                range(Scalar::Int(0), Scalar::Int(max_channels)),
             );
             let rates = match &self.rates {
                 Grid::Values(values) => CapabilityValue::AnyOf {
@@ -321,7 +324,8 @@ impl DeviceDescription {
             (STARTUP_LATENCY_NS, int(self.timing.startup_latency_ns)),
             (COMMAND_QUEUE_DEPTH, int(self.timing.command_queue_depth)),
             (OVERFLOW_RESTART_GAP_NS, int(self.timing.overflow_restart_gap_ns)),
-            (START_LEAD_NS, int(self.timing.start_lead_ns)),
+            (RX_START_LEAD_NS, int(self.timing.rx_start_lead_ns)),
+            (TX_START_LEAD_NS, int(self.timing.tx_start_lead_ns)),
             (RX_BYTES_PER_S, int(self.performance.rx_bytes_per_s)),
             (TX_BYTES_PER_S, int(self.performance.tx_bytes_per_s)),
             (WIRE_BYTES_PER_SAMPLE, int(self.performance.wire_bytes_per_sample)),
@@ -375,7 +379,8 @@ impl DeviceDescription {
 
             let result = if key.as_str() == keys::RX_CHANNELS || key.as_str() == keys::TX_CHANNELS
             {
-                coerce_channels(constraint, self.max_channels, defaults.get(key))
+                let max = if key.as_str() == keys::RX_CHANNELS { self.rx_max_channels } else { self.tx_max_channels };
+                coerce_channels(constraint, max, defaults.get(key))
             } else if key.as_str() == keys::RX_ANTENNA {
                 coerce_antenna(constraint, &self.rx_antennas, defaults.get(key))
             } else if key.as_str() == keys::TX_ANTENNA {

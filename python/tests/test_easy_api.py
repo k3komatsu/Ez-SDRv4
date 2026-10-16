@@ -40,7 +40,7 @@ def ramp(n: int = 1000, channel: int = 0) -> np.ndarray:
 
 def rotation(y: np.ndarray, x: np.ndarray) -> tuple:
     """The offset at which the repeated ``x`` appears in ``y``, and the unit phasor that
-    takes it there (the LO phases of an ``x310-like`` loopback, MR-34), checked on every sample."""
+    takes it there (the LO phases of an ``x3xx`` loopback, MR-34), checked on every sample."""
     offset = int(np.argmin(np.abs(np.abs(x) - np.abs(y[0]))))
     shifted = np.resize(np.roll(x, -offset), y.shape)
     phasor = y[0] / shifted[0]
@@ -129,7 +129,7 @@ class EasyApi(unittest.TestCase):
             sdr.rx.gain = 20
             self.assertEqual((sdr.rx.frequency, sdr.rx.sample_rate, sdr.rx.gain), (2.45e9, 20e6, 20.0))
             entry = sdr.set("radio", "radio.rx.sample_rate_hz", 19.5e6)
-            self.assertEqual(sdr.rx.sample_rate, 20e6, "19.5 Msps is coerced to the x310-like grid")
+            self.assertEqual(sdr.rx.sample_rate, 20e6, "19.5 Msps is coerced to the x3xx grid")
             coercion = entry["outcome"]["coercions"][0]
             self.assertEqual((coercion["key"], coercion["requested"], coercion["applied"]), ("radio.rx.sample_rate_hz", 19.5e6, 20e6))
 
@@ -213,7 +213,9 @@ class EasyApi(unittest.TestCase):
         with self.connect() as sdr:
             rotated = script(sdr)
         ideal = self.default_profile()
-        ideal["bindings"]["radio"]["profile"]["name"] = "ideal"
+        ideal["bindings"]["radio"]["profile"] = {"name": "ideal", "version": {"major": 2, "minor": 0, "patch": 0}}
+        # An `ideal` binding carries no layout at this stage (design 33 D5).
+        ideal["bindings"]["radio"]["selector"] = {"id": "radio"}
         with self.connect(ideal) as sdr:
             exact = script(sdr)
         rotation(rotated, ramp())
@@ -352,7 +354,7 @@ class EasyApi(unittest.TestCase):
             y = sdr.rx.capture(3000, at=dict(at, ticks=at["ticks"] - 1_000_000))
         self.assertEqual(entry["action"]["at"], at)
         # Silence until `at`, then the waveform from its first sample (1 Msps on a 1 GHz root),
-        # after `x310-like`'s 45-sample transmit path delay (MR-3, RM-23); on time, so no TIME_ERROR.
+        # after the `x3xx` 45-sample transmit path delay (MR-3, RM-23); on time, so no TIME_ERROR.
         start = 1000 + 45
         np.testing.assert_allclose(y[:start], 0, atol=1e-6)
         offset, _ = rotation(y[start:], x)

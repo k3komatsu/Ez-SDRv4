@@ -371,7 +371,7 @@
   "new": "",
   "crate": "ezsdr-radio",
   "test_bin": "device",
-  "filter": "rm_26_the_description_builds_the_tree_mockradio_built"
+  "filter": "rm_26_the_description_builds_the_tree"
  },
  {
   "id": "V04",
@@ -461,10 +461,10 @@
  },
  {
   "id": "U01",
-  "name": "from_binding accepts x310-like",
+  "name": "UR-5 accepts any profile (the `x3xx` check removed)",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "let Some(profile) = binding.profile.as_ref().and_then(Profile::from_ref) else {",
-  "new": "let Some(profile) = binding.profile.as_ref().map(|_| Profile::X310Ubx) else {",
+  "old": "        if profile_ref != &profile::profile_ref() {",
+  "new": "        if false {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_05_from_binding_refusals"
@@ -1016,9 +1016,9 @@
  {
   "id": "R11",
   "name": "UR-12 refuses a rate that is not an exact f64 quotient again (P0-2)",
-  "file": "crates/ezsdr-radio-uhd/src/device.rs",
-  "old": "if !(1.0..=512.0).contains(&n) || mcr as f64 / n != rate {",
-  "new": "if !(1.0..=512.0).contains(&n) || mcr as f64 / n != rate || (mcr as f64 / rate).fract() != 0.0 {",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "    (is_decimation(n) && master_clock_hz as f64 / n as f64 == rate).then_some(n)",
+  "new": "    (is_decimation(n) && master_clock_hz as f64 / n as f64 == rate && (master_clock_hz as f64 / rate).fract() == 0.0).then_some(n)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_12_every_advertised_rate_is_accepted"
@@ -1077,8 +1077,8 @@
   "id": "R22",
   "name": "UR-5's front-end check removed (the one-CBX bench, 2026-09-30)",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "if !front_end.starts_with(profile.front_end()) {",
-  "new": "if false && !front_end.starts_with(profile.front_end()) {",
+  "old": "                if !front_end.starts_with(element.board.uhd_name()) {",
+  "new": "                if false && !front_end.starts_with(element.board.uhd_name()) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
@@ -1095,30 +1095,30 @@
  },
  {
   "id": "R24",
-  "name": "x310-cbx keeps RM-5's 1 GHz default (the one-CBX bench)",
-  "file": "crates/ezsdr-radio-uhd/src/profile.rs",
-  "old": "Value::num(CBX_DEFAULT_FREQUENCY_HZ).expect(\"a finite default\"));",
-  "new": "Value::num(1e9).expect(\"a finite default\"));",
+  "name": "the CBX keeps RM-5's 1 GHz default (the one-CBX bench)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "        let value = Scalar::try_from(board.default_frequency_hz()).expect(\"a finite default\");",
+  "new": "        let value = Scalar::try_from(1.0e9).expect(\"a finite default\");",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_09_x310_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz"
+  "filter": "ur_09_the_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz"
  },
  {
   "id": "R25",
-  "name": "x310-cbx's range from 10 MHz, UBX's (the one-CBX bench)",
-  "file": "crates/ezsdr-radio-uhd/src/profile.rs",
-  "old": "x310(self, 1_200_000_000.0, 6_000_000_000.0, 1, block_len)",
-  "new": "x310(self, 10_000_000.0, 6_000_000_000.0, 1, block_len)",
+  "name": "the CBX's range from 10 MHz, the UBX's (the one-CBX bench)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "            Board::Cbx => (1_200_000_000.0, 6_000_000_000.0),",
+  "new": "            Board::Cbx => (10_000_000.0, 6_000_000_000.0),",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_09_x310_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz"
+  "filter": "ur_09_the_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz"
  },
  {
   "id": "R26",
   "name": "UR-5 checks every device channel, slot B's unknown board too (Review of 09f11b4, P2-2)",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "for chan in 0..need {",
-  "new": "for chan in 0..have {",
+  "old": "            for (chan, element) in elements.iter().enumerate() {",
+  "new": "            for chan in 0..have {\n                let element = elements.get(chan).unwrap_or(&elements[0]);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
@@ -1127,28 +1127,28 @@
   "id": "R27",
   "name": "UR-5 checks channel 0 only (Review of 09f11b4, P2-2)",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "for chan in 0..need {",
-  "new": "for chan in 0..need.min(1) {",
+  "old": "            for (chan, element) in elements.iter().enumerate() {",
+  "new": "            for (chan, element) in elements.iter().enumerate().take(elements.len().min(1)) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
  },
  {
   "id": "R28",
-  "name": "x310-obx's range capped at 6 GHz, UBX's (the one-OBX bench)",
-  "file": "crates/ezsdr-radio-uhd/src/profile.rs",
-  "old": "x310(self, 10_000_000.0, 8_400_000_000.0, 1, block_len)",
-  "new": "x310(self, 10_000_000.0, 6_000_000_000.0, 1, block_len)",
+  "name": "the OBX's range capped at 6 GHz, the UBX's (the one-OBX bench)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "            Board::Obx => (10_000_000.0, 8_400_000_000.0),",
+  "new": "            Board::Obx => (10_000_000.0, 6_000_000_000.0),",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_09_x310_obx_is_one_channel_from_10_mhz_to_8_4_ghz_defaulting_to_1_ghz"
+  "filter": "ur_09_the_obx_is_one_channel_from_10_mhz_to_8_4_ghz_defaulting_to_1_ghz"
  },
  {
   "id": "R29",
-  "name": "x310-obx names UBX front ends (the one-OBX bench)",
-  "file": "crates/ezsdr-radio-uhd/src/profile.rs",
-  "old": "Profile::X310Obx => \"OBX\",",
-  "new": "Profile::X310Obx => \"UBX\",",
+  "name": "the OBX names UBX front ends (the one-OBX bench)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "            Board::Obx => \"OBX\",",
+  "new": "            Board::Obx => \"UBX\",",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"

@@ -85,7 +85,7 @@ version: 1
 bindings:
   radio:
     module: { id: ezsdr.radio.mock, version: { major: 1, minor: 0, patch: 0 } }
-    profile: { name: x310-like, version: { major: 1, minor: 0, patch: 0 } }
+    profile: { name: x3xx, version: { major: 0, minor: 1, patch: 0 } }
     selector: { instances: 2 }           # selector content: one Mock instance emulating two motherboards
   sim:
     module: { id: ezsdr.sim-engine, version: { major: 1, minor: 0, patch: 0 } }

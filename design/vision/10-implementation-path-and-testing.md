@@ -18,7 +18,7 @@ Radio Model (including the TimingEnvelope)
 +
 Simulation Engine (discrete-event Time Authority)
 +
-MockRadio (enforcing the x310-like envelope)
+MockRadio (enforcing the x3xx envelope)
 +
 SimulationChannel (coupling matrix; gain / delay / AWGN; a loopback is a coupling)
 +
@@ -65,7 +65,7 @@ Before UHD is implemented, the Core + Mock system should prove:
 8. **Two MockRadios can communicate through a SimulationChannel** declared in the BindingProfile environment, with an ExperimentSpec that contains no channel configuration (§8).
 9. **Reactive execution can receive an event and generate a dynamic TxBurst.**
 10. **Application logic does not depend on Mock-specific APIs.**
-11. **Mock enforces the envelope.** A timed TX issued with less than `min_timed_command_lead` on an `x310-like` Mock produces the same typed `TIME_ERROR` as hardware; a request for 19.5 Msps is coerced to 20 Msps and reported as requested-versus-applied (§13). A request beyond the profile's PerformanceEnvelope is rejected at `validate()`.
+11. **Mock enforces the envelope.** A timed TX issued with less than `min_timed_command_lead` on an `x3xx` Mock produces the same typed `TIME_ERROR` as hardware; a request for 19.5 Msps is coerced to 20 Msps and reported as requested-versus-applied (§13). A request beyond the profile's PerformanceEnvelope is rejected at `validate()`.
 12. **Block-size independence.** A Processor keeps working when the Mock's block-length jitter option is enabled (§23).
 13. **Sessions leave provenance.** Using only the Easy API produces a Manifest with the action log, waveform hash and effective configuration (§3).
 14. **Environment portability.** Re-running with the same Spec and a BindingProfile that differs only in `environment` (channel model, fault schedule) is possible without editing the Spec (§8).

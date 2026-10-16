@@ -36,6 +36,30 @@ impl Drop for TempDir {
     }
 }
 
+/// The `x3xx` layout every Mock binding of the rig declares: a UBX in slot A and slot B,
+/// both directions (design 33 D5). An `ideal` binding carries no layout.
+fn layout(profile: &str, selector: JsonValue) -> JsonValue {
+    let mut selector = selector;
+    if profile != "x3xx" {
+        return selector;
+    }
+    if let Some(object) = selector.as_object_mut() {
+        object.entry("rx").or_insert(json!(["0:A:ubx:0", "0:B:ubx:0"]));
+        object.entry("tx").or_insert(json!(["0:A:ubx:0", "0:B:ubx:0"]));
+    }
+    selector
+}
+
+/// A profile document: `x3xx` 0.1.0, or `ideal` 2.0.0 (design 33 D5).
+fn profile_json(name: &str) -> JsonValue {
+    let version = if name == "x3xx" {
+        json!({ "major": 0, "minor": 1, "patch": 0 })
+    } else {
+        json!({ "major": 2, "minor": 0, "patch": 0 })
+    };
+    json!({ "name": name, "version": version })
+}
+
 /// Builds the portable BindingProfile used by Spec Runs.
 pub fn spec_profile(profile: &str, selector: JsonValue, dir: &Path, environment: JsonValue) -> JsonValue {
     profile_document(profile, selector, dir, environment, false)
@@ -47,7 +71,7 @@ pub fn session_profile(profile: &str, selector: JsonValue, dir: &Path, environme
 }
 
 /// The `ezsdr.time` section every acceptance profile carries, under the caller's own
-/// sections. A 2 s start lead is MR-11's floor for an x310-like profile.
+/// sections. A 2 s start lead is MR-11's floor for an `x3xx` profile.
 fn env_section(extra: JsonValue) -> serde_json::Map<String, JsonValue> {
     let mut env = serde_json::Map::new();
     env.insert("ezsdr.time".to_owned(), json!({ "class": "simulation", "start_lead_ns": 2_000_000_000u64 }));
@@ -80,8 +104,8 @@ fn profile_document(profile: &str, selector: JsonValue, dir: &Path, environment:
         "bindings": {
             "radio": {
                 "module": { "id": "ezsdr.radio.mock", "version": { "major": 2, "minor": 0, "patch": 0 } },
-                "selector": selector,
-                "profile": { "name": profile, "version": { "major": 2, "minor": 0, "patch": 0 } }
+                "selector": layout(profile, selector),
+                "profile": profile_json(profile)
             },
             "rec": recorder(dir, session.then_some("radio")),
             "sim": {
@@ -117,8 +141,8 @@ pub fn link_session_profile(profile: &str, tx: &str, rx: &str, dir: &Path, envir
 fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path, environment: JsonValue, session: bool) -> JsonValue {
     let radio = |id: String, jitter: bool| json!({
         "module": { "id": "ezsdr.radio.mock", "version": { "major": 2, "minor": 0, "patch": 0 } },
-        "selector": { "id": id, "block_len_jitter": jitter },
-        "profile": { "name": profile, "version": { "major": 2, "minor": 0, "patch": 0 } }
+        "selector": layout(profile, json!({ "id": id, "block_len_jitter": jitter })),
+        "profile": profile_json(profile)
     });
     let mut bindings = serde_json::Map::new();
     bindings.insert(tx.to_owned(), radio("dev_tx".to_owned(), false));
@@ -146,8 +170,8 @@ fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path,
 pub fn ping_pong_profile(profile: &str, pinger: &str, responder_radio: &str, jitter: bool, dir: &Path, environment: JsonValue) -> JsonValue {
     let radio = |id: String, jitter: bool| json!({
         "module": { "id": "ezsdr.radio.mock", "version": { "major": 2, "minor": 0, "patch": 0 } },
-        "selector": { "id": id, "block_len_jitter": jitter },
-        "profile": { "name": profile, "version": { "major": 2, "minor": 0, "patch": 0 } }
+        "selector": layout(profile, json!({ "id": id, "block_len_jitter": jitter })),
+        "profile": profile_json(profile)
     });
     let mut bindings = serde_json::Map::new();
     bindings.insert(pinger.to_owned(), radio(format!("dev_{pinger}"), false));
@@ -183,7 +207,7 @@ pub fn assemble(profile_doc: &JsonValue, inputs: BTreeMap<ContentHash, Vec<u8>>)
     ezsdr_server::assemble(profile_doc, inputs, vec![crate::responder::implementation()], None).expect("valid acceptance BindingProfile")
 }
 
-/// Builds the BindingProfile of one USRP (`ezsdr.radio.uhd`, profile `x310-ubx`, device
+/// Builds the BindingProfile of one USRP (`ezsdr.radio.uhd`, profile `x3xx`, device
 /// id `usrp`) that is also the Authority, cabled (HardwareInLoop), with the recorder on its
 /// receive port and `environment` beside the time section (Phase 7, VE-5).
 pub fn uhd_profile(dir: &Path, session: bool, environment: JsonValue) -> JsonValue {
@@ -198,8 +222,12 @@ pub fn uhd_profile(dir: &Path, session: bool, environment: JsonValue) -> JsonVal
         "bindings": {
             "radio": {
                 "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
-                "profile": { "name": "x310-ubx", "version": { "major": 0, "minor": 3, "patch": 0 } },
-                "selector": { "args": "addr=192.0.2.1", "id": "usrp" }
+                "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+                "selector": {
+                    "args": "addr=192.0.2.1", "id": "usrp",
+                    "rx": ["0:A:ubx:0", "0:B:ubx:0"],
+                    "tx": ["0:A:ubx:0", "0:B:ubx:0"]
+                }
             },
             "rec": recorder(dir, session.then_some("radio"))
         },

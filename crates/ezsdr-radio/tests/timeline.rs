@@ -37,6 +37,39 @@ fn segments(stream: &Stream, items: &[Item]) -> Vec<(i64, Option<i64>)> {
 }
 
 #[test]
+fn rm_26_each_stream_takes_its_own_directions_start_lead() {
+    // RM-4, RM-25: the TimingEnvelope has one start lead per direction, and a stream's new
+    // segment uses its own (design 33 D5).
+    let timing = ezsdr_radio::TimingEnvelope {
+        min_timed_command_lead_ns: 0,
+        startup_latency_ns: 0,
+        command_queue_depth: 0,
+        overflow_restart_gap_ns: 0,
+        rx_start_lead_ns: 50 * MS,
+        tx_start_lead_ns: 20 * MS,
+    };
+    assert_eq!(ezsdr_radio::timeline::start_lead_ns(&timing, Direction::Rx), 50 * MS);
+    assert_eq!(ezsdr_radio::timeline::start_lead_ns(&timing, Direction::Tx), 20 * MS);
+
+    // A restart after a cut starts its own direction's lead after that cut, at 1 MS/s.
+    for (direction, lead) in [(Direction::Rx, 50 * MS), (Direction::Tx, 20 * MS)] {
+        let stream = Stream {
+            direction,
+            origin: 0,
+            config: config(1, 1_000_000),
+            lead: ezsdr_radio::timeline::start_lead_ns(&timing, direction),
+            call: 0,
+            allowance: 0,
+        };
+        assert_eq!(
+            segments(&stream, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Cold(config(1, 1_000_000)))]),
+            [(0, Some(1_000 * MS)), (1_000 * MS + lead, None)],
+            "{direction:?}",
+        );
+    }
+}
+
+#[test]
 fn rm_26_the_timeline_cases() {
     let rx = stream(Direction::Rx, 1);
     let tx = stream(Direction::Tx, 1);

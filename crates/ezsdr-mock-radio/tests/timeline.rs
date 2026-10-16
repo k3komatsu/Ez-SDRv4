@@ -100,7 +100,7 @@ impl Record {
     }
 }
 
-/// A profile's timeline terms; `x310-like` with VH-4's ready term (one receive call of
+/// A profile's timeline terms; `x3xx` with VH-4's ready term (one receive call of
 /// 2 000 samples, 3 ms) and the timed lead of MR-3.
 fn terms(profile: &str, direction: Direction) -> Terms {
     let (lead, call, allowance, timed_lead) = if profile == "ideal" { (0, 0, 0, 0) } else { (50 * MS, 2_000, 3 * MS, 2 * MS) };
@@ -121,7 +121,7 @@ fn rm_26_the_timeline_against_mockradio() {
     let mut failed = Vec::new();
     for seed in 0..1_000 {
         // 3 MS/s, 1 000/3 ticks a sample, is an `ideal` rate only.
-        let (profile, rates) = if seed % 2 == 0 { ("ideal", &generator::FRACTIONAL_RATES[..]) } else { ("x310-like", &generator::RATES[..]) };
+        let (profile, rates) = if seed % 2 == 0 { ("ideal", &generator::FRACTIONAL_RATES[..]) } else { ("x3xx", &generator::RATES[..]) };
         let sequence = generator::sequence(seed, rates);
         let expected = expect(profile, &sequence);
         let observed = run(profile, &sequence);
@@ -341,10 +341,20 @@ fn node_src(path: &str) -> EventSource {
 /// then the Run is stepped to the horizon.
 fn run(profile: &str, sequence: &Sequence) -> Record {
     let module = ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(2, 0, 0) };
+    // The `x3xx` binding carries the layout the Mock reads its channels from (design 33 D5).
+    let (version, selector) = if profile == "x3xx" {
+        (Version::new(0, 1, 0), BTreeMap::from([
+            (Ident::parse("id").unwrap(), Value::from("mock".to_owned())),
+            (Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")])),
+            (Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")])),
+        ]))
+    } else {
+        (Version::new(2, 0, 0), BTreeMap::from([(Ident::parse("id").unwrap(), Value::from("mock".to_owned()))]))
+    };
     let binding = Binding {
         module: module.clone(),
-        selector: BTreeMap::from([(Ident::parse("id").unwrap(), Value::from("mock".to_owned()))]),
-        profile: Some(ProfileRef { name: profile.to_owned(), version: Version::new(2, 0, 0) }),
+        selector,
+        profile: Some(ProfileRef { name: profile.to_owned(), version }),
         feed: None,
     };
     let mut mock = MockRadio::from_binding(&binding).unwrap();
