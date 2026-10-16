@@ -227,19 +227,13 @@ pub fn from_time_spec(full: i64, frac: f64, mcr: u64) -> Result<i64, DeviceError
 }
 
 /// UR-12 as Review L (P0-2) corrected it: the integer decimation `N = round(mcr /
-/// rate)`, 1 ≤ `N` ≤ 512, whose rate is `mcr / N` computed in `f64` — MockRadio's rule
+/// rate)` that is one of UHD's decimations (`ezsdr_radio::x3xx::decimations`, design 33
+/// D5), whose rate is `mcr / N` computed in `f64` — MockRadio's rule
 /// (`Profile::decimation`), so every rate the profile advertises is one the Provider
 /// accepts. `N` itself is exact whatever the `f64` rate's last bit: a SampleClock's
 /// ratio is `N / 1` (K13's hazard was computing `N` by float division, not the rate).
 pub fn decimation(mcr: u64, rate: f64) -> Option<u64> {
-    if !rate.is_finite() || rate <= 0.0 {
-        return None;
-    }
-    let n = (mcr as f64 / rate).round();
-    if !(1.0..=512.0).contains(&n) || mcr as f64 / n != rate {
-        return None;
-    }
-    Some(n as u64)
+    ezsdr_radio::x3xx::decimation(mcr, rate)
 }
 
 // ---------------------------------------------------------------- the fake
@@ -794,8 +788,8 @@ impl Device for FakeDevice {
                 FakeFault::WrongRate { claimed, applied, nth } if *claimed == rate && *nth == seen => Some(*applied),
                 _ => None,
             });
-            let n = (self.mcr() as f64 / rate).round().max(1.0);
-            st.settings[dir as usize][chan].rate = wrong.unwrap_or(self.mcr() as f64 / n);
+            let n = ezsdr_radio::x3xx::clip_decimation(self.mcr() as u64, rate);
+            st.settings[dir as usize][chan].rate = wrong.unwrap_or(self.mcr() as f64 / n as f64);
         }
         let channel = &mut st.settings[dir as usize][chan];
         if let Some(freq) = s.freq {

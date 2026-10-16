@@ -323,8 +323,8 @@
   "id": "M33",
   "name": "MR-34 no random phase",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "let mut phases = || (0..max).map(|_| if random { channel::lo_phase(&mut lo) } else { 0.0 })",
-  "new": "let mut phases = || (0..max).map(|_| if false && random { channel::lo_phase(&mut lo) } else { 0.0 })",
+  "old": "                let draw = |count: i64, rng: &mut SimRng, live: bool| (0..count).map(|_| if live { channel::lo_phase(rng) } else { 0.0 }).collect::<Vec<f64>>();",
+  "new": "                let draw = |count: i64, rng: &mut SimRng, live: bool| (0..count).map(|_| if false && live { channel::lo_phase(rng) } else { 0.0 }).collect::<Vec<f64>>();",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_34_a_timed_tune"
@@ -383,8 +383,8 @@
   "id": "M39",
   "name": "MR-31 channel bound",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "if let Some(coupling) = spec.couplings.iter().find(|c| (c.tx == f.id",
-  "new": "if let Some(coupling) = spec.couplings.iter().find(|c| false && (c.tx == f.id",
+  "old": "                if let Some(coupling) = spec.couplings.iter().find(|c| {\n                    (c.tx == f.id && i64::from(c.tx_channel) >= tx_max)",
+  "new": "                if let Some(coupling) = spec.couplings.iter().find(|c| {\n                    false && (c.tx == f.id && i64::from(c.tx_channel) >= tx_max)",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_31"
@@ -453,8 +453,8 @@
   "id": "M46",
   "name": "MR-34 timed constant equals the untimed phase",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                let rx_timed = phases();\n                let tx_timed = phases();",
-  "new": "                let rx_timed: Vec<f64> = rx_phase.iter().map(|p| p.at(RootInstant::tick(0))).collect();\n                let tx_timed: Vec<f64> = tx_phase.iter().map(|p| p.at(RootInstant::tick(0))).collect();",
+  "old": "                let rx_timed = draw(rx_max, &mut lo, fixes);\n                let tx_timed = draw(tx_max, &mut lo, fixes);",
+  "new": "                let _ = draw(rx_max, &mut lo, fixes);\n                let _ = draw(tx_max, &mut lo, fixes);\n                let rx_timed: Vec<f64> = rx_phase.iter().map(|p| p.at(RootInstant::tick(0))).collect();\n                let tx_timed: Vec<f64> = tx_phase.iter().map(|p| p.at(RootInstant::tick(0))).collect();",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_34_a_timed_tune"
@@ -552,7 +552,7 @@
  {
   "name": "MR-31 rx_channel bound not checked",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": " || (c.rx == f.id && i64::from(c.rx_channel) >= max)",
+  "old": " || (c.rx == f.id && i64::from(c.rx_channel) >= rx_max)",
   "new": "",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",

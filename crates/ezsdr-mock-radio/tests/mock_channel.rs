@@ -126,10 +126,18 @@ impl Default for Options<'_> {
 
 fn prepare(world: &World, options: Options<'_>) -> Result<Radio, ModuleError> {
     let mut selector = BTreeMap::from([(Ident::parse("id").unwrap(), Value::from(options.id.to_owned()))]);
+    // The `x3xx` binding carries the layout the Mock reads its channels from (design 33 D5).
+    let version = if options.profile == "x3xx" {
+        selector.insert(Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")]));
+        selector.insert(Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")]));
+        Version::new(0, 1, 0)
+    } else {
+        Version::new(2, 0, 0)
+    };
     for (name, value) in options.selector {
         selector.insert(Ident::parse(name).unwrap(), value.clone());
     }
-    let binding = Binding { module: module_ref(), selector, profile: Some(ProfileRef { name: options.profile.to_owned(), version: Version::new(2, 0, 0) }), feed: None };
+    let binding = Binding { module: module_ref(), selector, profile: Some(ProfileRef { name: options.profile.to_owned(), version }), feed: None };
     let mut mock = MockRadio::from_binding(&binding).unwrap();
     if options.medium {
         mock = mock.with_medium(world.medium.clone());
@@ -287,9 +295,9 @@ fn mr_31_channel_mode_needs_a_medium_a_zero_pattern_and_valid_channels() {
     assert!(refusal(prepare(&world, Options { selector: &ramp_pattern, ..Options::default() })).starts_with("MR-31: a channel-coupled Mock takes no receive test pattern"));
 
     let wide = World::new(json!({ "sim.channel": { "couplings": [{ "tx": "radio", "tx_channel": 2, "rx": "radio", "rx_channel": 0, "gain_db": 0 }] } }));
-    assert!(refusal(prepare(&wide, Options { profile: "x310-like", ..Options::default() })).contains("names a channel beyond this profile's 2"));
+    assert!(refusal(prepare(&wide, Options { profile: "x3xx", ..Options::default() })).contains("names a channel beyond this profile's 2"));
     let deep = World::new(json!({ "sim.channel": { "couplings": [{ "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 2, "gain_db": 0 }] } }));
-    assert!(refusal(prepare(&deep, Options { profile: "x310-like", ..Options::default() })).contains("names a channel beyond this profile's 2"));
+    assert!(refusal(prepare(&deep, Options { profile: "x3xx", ..Options::default() })).contains("names a channel beyond this profile's 2"));
 
     let first = prepare(&world, Options::default()).unwrap();
     assert_eq!(first.mock.instance().fidelity.rf, RfFidelity::ImpairmentModel);
@@ -392,11 +400,11 @@ fn mr_32_a_the_waveform_refusals_hold_their_place_in_handle_tx_burst() {
     }
 
     {
-        // `x310-like` aligns a repeated waveform to two samples, so eleven samples
+        // `x3xx` aligns a repeated waveform to two samples, so eleven samples
         // break the repeat constraint. `ideal` aligns to one and would not.
         let t0 = 2_000_000_000;
         let world = World::new(loopback(None));
-        let mut radio = prepare(&world, Options { profile: "x310-like", ..Options::default() }).unwrap();
+        let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
         radio.mock.arm().unwrap();
         radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
         step(&world, &mut [&mut radio], t0);
@@ -419,7 +427,7 @@ fn mr_32_a_the_waveform_refusals_hold_their_place_in_handle_tx_burst() {
 #[test]
 fn mr_32_b_the_transmitted_timelines_are_read_at_the_samples_own_instant() {
     // MR-32 and MR-33: the gain, the phase and the frequency are the ones in force at the
-    // sample's own instant, not at the antenna instant. `x310-like` advances the transmit
+    // sample's own instant, not at the antenna instant. `x3xx` advances the transmit
     // side by 45 samples, so the two instants differ by 45 000 root ticks at 1 Msps. A
     // timed tune inside that window would move the transmitted value 45 samples early if
     // the timelines were read at the antenna instant, leaving a 45-sample window in which
@@ -428,14 +436,14 @@ fn mr_32_b_the_transmitted_timelines_are_read_at_the_samples_own_instant() {
     // early, because the receiver asks at the very instant the transmitter read.
     let t0 = 2_000_000_000;
     let world = World::new(loopback(None));
-    let mut radio = prepare(&world, Options { profile: "x310-like", ..Options::default() }).unwrap();
+    let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
     radio.mock.arm().unwrap();
     radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
-    // two samples, because `x310-like` aligns a repeated waveform to two and a
+    // two samples, because `x3xx` aligns a repeated waveform to two and a
     // one-sample waveform would be refused by MR-16's repeat constraints
     let waveform = world.waveform(&[(0.5, 0.0), (0.5, 0.0)]);
     // MR-9 registers the transmit clock at the arm instant, so transmit sample 2 002 000
-    // is the first at or after `x310-like`'s synchronisation end. Receive sample `k` is
+    // is the first at or after `x3xx`'s synchronisation end. Receive sample `k` is
     // at t0 + 1000k and the loopback path has no delay, so it hears transmit sample
     // 2 000 000 + k, less the profile's 45-sample advance: heard from k = 2 045.
     radio.push(burst(&radio, &world, waveform, 2_002_000, true));
@@ -490,7 +498,7 @@ fn mr_32_c_the_transmitted_frequency_is_read_at_the_samples_own_instant() {
     // argued for. Reading the transmit frequency at the antenna instant would close it.
     let t0 = 2_000_000_000;
     let world = World::new(loopback(None));
-    let mut radio = prepare(&world, Options { profile: "x310-like", ..Options::default() }).unwrap();
+    let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
     radio.mock.arm().unwrap();
     radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
     let waveform = world.waveform(&[(0.5, 0.0), (0.5, 0.0)]);
@@ -526,11 +534,11 @@ fn mr_34_a_a_timed_tune_reaches_every_transmit_channel() {
     });
     let world = World::new(environment);
     let constraints = [("radio.tx.channels", eq(Scalar::from(2))), ("radio.rx.channels", eq(Scalar::from(2)))];
-    let mut radio = prepare(&world, Options { profile: "x310-like", constraints: &constraints, ..Options::default() }).unwrap();
+    let mut radio = prepare(&world, Options { profile: "x3xx", constraints: &constraints, ..Options::default() }).unwrap();
     radio.mock.arm().unwrap();
     radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
     // Two samples on each of the two transmit channels: 32 bytes, which is a length of 2
-    // samples per channel and satisfies `x310-like`'s alignment of 2. One sample per
+    // samples per channel and satisfies `x3xx`'s alignment of 2. One sample per
     // channel would be a length of 1 and refused by MR-16's repeat constraints.
     let waveform = world.waveform(&[(0.5, 0.0), (0.25, 0.0), (0.5, 0.0), (0.25, 0.0)]);
     radio.push(burst(&radio, &world, waveform, 2_002_000, true));
@@ -671,7 +679,7 @@ fn mr_33_a_receiver_hears_only_its_own_frequency() {
     }
 }
 
-/// The draws of MR-34 for a two-channel `x310-like` device: the receive and transmit
+/// The draws of MR-34 for a two-channel `x3xx` device: the receive and transmit
 /// phases after the untimed tune, then after every timed tune.
 struct Phases { rx: Vec<f64>, tx: Vec<f64>, rx_timed: Vec<f64>, tx_timed: Vec<f64> }
 
@@ -694,7 +702,7 @@ fn mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant() {
     });
     let world = World::new(environment);
     let constraints = [("radio.tx.channels", eq(Scalar::from(1))), ("radio.rx.channels", eq(Scalar::from(2)))];
-    let mut radio = prepare(&world, Options { profile: "x310-like", constraints: &constraints, ..Options::default() }).unwrap();
+    let mut radio = prepare(&world, Options { profile: "x3xx", constraints: &constraints, ..Options::default() }).unwrap();
     radio.mock.arm().unwrap();
     radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
     step(&world, &mut [&mut radio], t0);
@@ -726,6 +734,102 @@ fn mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant() {
     assert!((rx[0] - rx_timed[0]).abs() > 1e-3, "a timed tune moves the phase to its own constant");
 }
 
+/// The CBX's LO phases of MR-34: the two receive channels' and the transmit channel's, as
+/// `prepare` draws them and as each timed tune redraws them (design 33 D13).
+struct CbxPhases {
+    /// The receive phases of channels 0 and 1 and the transmit phase, drawn at `prepare`.
+    initial: [f64; 3],
+    /// The same three after the first receive retune and the transmit retune that follows it.
+    first: [f64; 3],
+    /// The same three after the second pair of retunes.
+    second: [f64; 3],
+}
+
+fn cbx_phases(seed: u64, device: &str) -> CbxPhases {
+    fn phase(rng: &mut SimRng) -> f64 {
+        2.0 * std::f64::consts::PI * ((rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64)
+    }
+    let mut lo = SimRng::new(seed, &format!("{device}/lo"));
+    // The receive phases of channels 0 … rx_max − 1, then the transmit phases (MR-34); a
+    // `random` board's timed-tune constants are never drawn (design 33 D13).
+    let initial = [phase(&mut lo), phase(&mut lo), phase(&mut lo)];
+    // Every applied frequency update redraws its own direction's channels, in application
+    // order: the receive retune, then the transmit one, twice.
+    let mut retune = SimRng::new(seed, &format!("{device}/lo/retune"));
+    let first = [phase(&mut retune), phase(&mut retune), phase(&mut retune)];
+    let second = [phase(&mut retune), phase(&mut retune), phase(&mut retune)];
+    CbxPhases { initial, first, second }
+}
+
+#[test]
+fn mr_34_a_random_phase_is_redrawn_by_every_tune() {
+    // A CBX's phase value is `random`: every applied frequency update gives each channel of
+    // that direction a fresh phase from the device's retune stream, from its effective
+    // instant on (design 33 D13, MR-34), so neither the rotation a loopback sees nor the
+    // two receive channels' offset survives a tune. The retunes move the frequency, so each
+    // measurement sits in an interval where the loopback's frequency gate is open (MR-33).
+    let t0 = 2_000_000_000;
+    let environment = json!({
+        "sim.seed": 1,
+        "sim.channel": { "couplings": [
+            { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 },
+            { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 1, "gain_db": 0.0 }
+        ] }
+    });
+    let world = World::new(environment);
+    let cbx = Value::List(vec![Scalar::from("0:A:cbx:0"), Scalar::from("0:B:cbx:0")]);
+    let cbx_one = Value::List(vec![Scalar::from("0:A:cbx:0")]);
+    let constraints = [("radio.tx.channels", eq(Scalar::from(1))), ("radio.rx.channels", eq(Scalar::from(2)))];
+    let selector = [("rx", cbx), ("tx", cbx_one)];
+    let mut radio = prepare(&world, Options { profile: "x3xx", constraints: &constraints, selector: &selector, ..Options::default() }).unwrap();
+    radio.mock.arm().unwrap();
+    radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
+    step(&world, &mut [&mut radio], t0);
+    let waveform = world.waveform(&[(0.5, 0.0), (0.5, 0.0)]);
+    radio.push(burst(&radio, &world, waveform, 2_002_000, true));
+    for (key, hz, at) in [
+        ("radio.rx.frequency_hz", 2.4e9, t0 + 4_000_000),
+        ("radio.tx.frequency_hz", 2.4e9, t0 + 4_500_000),
+        ("radio.rx.frequency_hz", 2.3e9, t0 + 6_000_000),
+        ("radio.tx.frequency_hz", 2.3e9, t0 + 6_500_000),
+    ] {
+        radio.push(update(&radio, key, Value::num(hz).unwrap(), at));
+    }
+    step(&world, &mut [&mut radio], t0);
+    step(&world, &mut [&mut radio], t0 + 8_000_001);
+    let CbxPhases { initial, first, second } = cbx_phases(1, "mock");
+    let blocks: Vec<_> = std::iter::from_fn(|| radio.link.receive().map(|(b, _)| b)).collect();
+    let check = |k: i64, channel: usize, expected: f64| {
+        let block = blocks.iter().find(|b| b.header().first_sample_time.ticks_in(b.header().first_sample_time.domain()).unwrap() <= k && k < b.header().first_sample_time.ticks_in(b.header().first_sample_time.domain()).unwrap() + i64::from(b.header().len)).unwrap();
+        let index = (k - block.header().first_sample_time.ticks_in(block.header().first_sample_time.domain()).unwrap()) as usize;
+        let (re, im) = ezsdr_hostmem::read_cf32(block.host_bytes().unwrap(), block.header().len as usize, channel, index);
+        let (want_re, want_im) = (0.5 * expected.cos(), 0.5 * expected.sin());
+        assert!((f64::from(re) - want_re).abs() < 1e-6 && (f64::from(im) - want_im).abs() < 1e-6, "k {k} channel {channel}: ({re}, {im}) vs ({want_re}, {want_im})");
+    };
+    let rotation = |phases: &[f64; 3], channel: usize| phases[2] - phases[channel];
+    // Each interval holds the phases its own tunes drew: the loopback rotation is the
+    // transmit phase minus the receive one (MR-32, MR-34), the transmit one read 45
+    // samples earlier (MR-32's path delay), before both retunes, between them, and after.
+    check(3_000, 0, rotation(&initial, 0));
+    check(3_000, 1, rotation(&initial, 1));
+    check(5_000, 0, rotation(&first, 0));
+    check(5_000, 1, rotation(&first, 1));
+    check(7_000, 0, rotation(&second, 0));
+    check(7_000, 1, rotation(&second, 1));
+    for channel in 0..2 {
+        assert!((rotation(&initial, channel) - rotation(&first, channel)).abs() > 1e-3, "the first pair redraws channel {channel}: {}", rotation(&initial, channel));
+        assert!((rotation(&first, channel) - rotation(&second, channel)).abs() > 1e-3, "the second pair redraws channel {channel}");
+    }
+    assert!(((initial[0] - initial[1]) - (first[0] - first[1])).abs() > 1e-3, "the two receive channels' own offset changes with the first pair");
+    assert!(((first[0] - first[1]) - (second[0] - second[1])).abs() > 1e-3, "and with the second");
+    // The four retunes applied: a refused one would leave the phases where they are, and
+    // the values above would prove nothing (MR-18, RM-9).
+    let section = |suffix: &str| radio.mock.instance().sections[&Namespace::parse(&format!("ezsdr.radio.mock.{suffix}")).unwrap()].clone();
+    let applied: Vec<_> = section("applied").as_array().unwrap().iter().filter(|row| row["key"].as_str().is_some_and(|key| key.ends_with("frequency_hz"))).cloned().collect();
+    assert_eq!(applied.len(), 4, "the four retunes applied: {applied:?}");
+    assert!(section("rejected").as_array().unwrap().is_empty(), "no retune was refused: {}", section("rejected"));
+}
+
 #[test]
 fn mr_34_the_deterministic_profile_keeps_every_phase_zero() {
     let environment = json!({ "sim.seed": 1, "sim.channel": { "couplings": [
@@ -749,7 +853,7 @@ fn mr_32_the_transmit_path_delay_shifts_a_loopback() {
     let world = World::new(json!({ "sim.seed": 3, "sim.channel": { "couplings": [
         { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 }
     ] } }));
-    let mut radio = prepare(&world, Options { profile: "x310-like", ..Options::default() }).unwrap();
+    let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
     radio.mock.arm().unwrap();
     radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
     step(&world, &mut [&mut radio], t0);

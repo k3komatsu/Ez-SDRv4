@@ -65,13 +65,18 @@
           "format": "int64",
           "type": "integer"
         },
-        "start_lead_ns": {
-          "description": "From a stream's previous cut, and from the instant its Provider is ready for it, to a\nnew segment's first sample (RM-20, RM-25).",
+        "rx_start_lead_ns": {
+          "description": "From a receive stream's previous cut, and from the instant its Provider is ready for\nit, to a new segment's first sample (RM-20, RM-25).",
           "format": "int64",
           "type": "integer"
         },
         "startup_latency_ns": {
           "description": "Time from arm to stream start (RM-20).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "tx_start_lead_ns": {
+          "description": "The same for a transmit stream (RM-20, RM-25).",
           "format": "int64",
           "type": "integer"
         }
@@ -81,7 +86,8 @@
         "startup_latency_ns",
         "command_queue_depth",
         "overflow_restart_gap_ns",
-        "start_lead_ns"
+        "rx_start_lead_ns",
+        "tx_start_lead_ns"
       ],
       "type": "object"
     },

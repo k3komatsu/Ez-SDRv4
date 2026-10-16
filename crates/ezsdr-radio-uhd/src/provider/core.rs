@@ -466,7 +466,7 @@ impl Core {
         }
         decimation(self.mcr, claim)
             .map(|n| n as i64)
-            .ok_or_else(|| DeviceError::failed(format!("UR-12: {claim} S/s is no decimation 1…512 of {} Hz", self.mcr)))
+            .ok_or_else(|| DeviceError::failed(format!("UR-12: {claim} S/s is no decimation of {} Hz", self.mcr)))
     }
 
     /// Declares and registers a stream clock with origin `origin` (UR-12, RM-25).

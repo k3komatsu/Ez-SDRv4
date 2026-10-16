@@ -342,7 +342,7 @@ fn ea_09_the_default_profile_loops_back() {
     let waveform = ramp(1_000);
     assert!(matches!(submit(&mut server, set("radio.tx.channels", Value::Scalar(Scalar::Int(1))), Vec::new()).outcome, Outcome::Admitted { .. }));
     assert!(matches!(submit(&mut server, repeat(), waveform.clone()).outcome, Outcome::Admitted { .. }));
-    // The transmit clock the enable starts begins `x310-like`'s 50 ms start lead later, and
+    // The transmit clock the enable starts begins the `x3xx` 50 ms start lead later, and
     // the untimed repeat there, on time (RS-19, RM-25).
     let (now, _, _) = status(&mut server);
     server.handle(Request::Advance { to: None, by: Some(Duration::new(now.domain(), 60_000_000)) }, Vec::new());
@@ -350,7 +350,7 @@ fn ea_09_the_default_profile_loops_back() {
     let bytes = read(&mut server, &uri);
     assert_eq!(bytes.len(), 3_000 * 8);
     // The repeat is continuous, so the capture is the waveform at some offset, rotated by
-    // the two LOs' phases (`x310-like` draws them, MR-34): one unit phasor for every sample.
+    // the two LOs' phases (the `x3xx` profile draws them, MR-34): one unit phasor per sample.
     let complex = |b: &[u8]| (f32::from_le_bytes(b[..4].try_into().unwrap()) as f64, f32::from_le_bytes(b[4..8].try_into().unwrap()) as f64);
     let captured: Vec<_> = bytes.chunks_exact(8).map(complex).collect();
     let sent: Vec<_> = waveform.chunks_exact(8).map(complex).collect();
@@ -376,7 +376,7 @@ fn ea_10_connect_stands_at_t0() {
     let mut server = greeted(&temp.0);
     let Response::Connected { now, start_instant, dir, profile, root_epoch, .. } = ok(server.handle(Request::Connect { profile: None, lease: None }, Vec::new())) else { panic!() };
     assert_eq!(now, start_instant);
-    assert_eq!(now.ticks_in(now.domain()).unwrap(), 2_000_000_000, "x310-like's 2 s start lead on a nanosecond root");
+    assert_eq!(now.ticks_in(now.domain()).unwrap(), 2_000_000_000, "the 2 s start lead on a nanosecond root");
     // The simulated root's epoch is no PPS edge (EA-10).
     assert!(matches!(root_epoch, ezsdr_kernel::time::EpochRef::Arbitrary { .. }), "{root_epoch:?}");
     assert_eq!(profile, ezsdr_server::default_profile(&dir));
@@ -530,7 +530,7 @@ fn ea_14_run_child() {
     assert!(refused.message.starts_with("EA-14: a child Run needs duration_ns or a scheduled Stop"));
 
     let mut elsewhere = ezsdr_server::without_feeds(&ezsdr_server::default_profile(&server.dir().unwrap().to_string_lossy()));
-    elsewhere["bindings"]["radio"]["selector"] = json!({ "id": "another" });
+    elsewhere["bindings"]["radio"]["selector"]["id"] = json!("another");
     let Response::Ran { entry, manifest: None, path: None } = ok(run_child(&mut server, receive_spec(1_000), Some(elsewhere), Some(10_000_000))) else { panic!() };
     let Outcome::Rejected { violations } = entry.outcome else { panic!() };
     assert_eq!(violations[0].check, Namespace::parse("ezsdr.run_child").unwrap());
@@ -714,8 +714,12 @@ fn uhd_profile(dir: &Path) -> serde_json::Value {
         "bindings": {
             "radio": {
                 "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
-                "profile": { "name": "x310-ubx", "version": { "major": 0, "minor": 3, "patch": 0 } },
-                "selector": { "args": "addr=192.0.2.1" }
+                "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+                "selector": {
+                    "args": "addr=192.0.2.1",
+                    "rx": ["0:A:ubx:0", "0:B:ubx:0"],
+                    "tx": ["0:A:ubx:0", "0:B:ubx:0"]
+                }
             },
             "rec": {
                 "module": { "id": "ezsdr.sink.capture", "version": { "major": 1, "minor": 2, "patch": 0 } },

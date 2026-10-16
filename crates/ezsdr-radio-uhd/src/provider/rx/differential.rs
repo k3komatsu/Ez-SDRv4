@@ -36,7 +36,7 @@ use super::super::generator;
 const T0: i64 = 400_000_000;
 /// Root ticks per millisecond.
 const MS: i64 = 200_000;
-/// What an overrun loses, as MockRadio's `x310-like` (layer 1).
+/// What an overrun loses, as MockRadio's `x3xx` (layer 1).
 const GAP: i64 = 50 * MS;
 /// The arrival order of `Provider::stop`, after every command of a sequence.
 const STOP_SEQ: u64 = 1_000;
@@ -90,10 +90,10 @@ fn extra(seed: u64, sequence: &Sequence) -> Extra {
 /// receive call of `block_len` (the scripted device's packet is the request), the delivery
 /// allowance (UR-25, VH-4).
 fn terms(block: i64) -> Terms {
-    let description = crate::profile::Profile::X310Ubx.description(block as u32);
+    let description = crate::profile::ubx_description(block as u32);
     let ticks = |ns: i64| (ns + 4) / 5;
     let config = Config { channels: 1, ratio: Rational::new(200, 1).unwrap() };
-    let lead = ticks(description.timing.start_lead_ns);
+    let lead = ticks(ezsdr_radio::timeline::start_lead_ns(&description.timing, Direction::Rx));
     let stream = Stream { direction: Direction::Rx, origin: T0, config, lead, call: block, allowance: ticks(DELIVERY_ALLOWANCE_NS) };
     Terms { t0: T0, root_hz: 200_000_000, timed_lead: 0, stream }
 }
@@ -366,7 +366,7 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
 
 /// One segment's blocks: a packet of `block_len` samples a request, the last before the cut
 /// ending there, one cut short at a fault's sample, and after it the gap MockRadio's
-/// `x310-like` has (layer 1); up to the horizon.
+/// `x3xx` has (layer 1); up to the horizon.
 fn blocks(segment: &Segment, hits: &[(i64, Fault)], extra: &Extra) -> Vec<Block> {
     let k = |t: i64| segment.sample_at_or_after(t).unwrap();
     let end = segment.cut.unwrap_or(i64::MAX);

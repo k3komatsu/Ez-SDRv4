@@ -26,7 +26,8 @@ pub struct Stream {
     pub origin: i64,
     /// The configuration from the Run's start.
     pub config: Config,
-    /// `radio.timing.start_lead_ns`, in root ticks.
+    /// The stream's own direction's `radio.timing.rx_start_lead_ns` or
+    /// `radio.timing.tx_start_lead_ns`, in root ticks.
     pub lead: i64,
     /// One receive call, in samples: the longer of `block_len` and the device's packet; 0
     /// for a Provider whose ready instant is the receipt alone (VH-4).
@@ -225,6 +226,15 @@ pub fn command_instant(line: Option<&Line>, at: Option<i64>, now: i64, seq: u64,
 /// never starts before the origin and one that would is late.
 pub fn decided_at(now: i64, origin: i64, lead: i64) -> i64 {
     now.max(origin.saturating_sub(lead))
+}
+
+/// RM-4, RM-25: a stream's start lead in nanoseconds, from the TimingEnvelope of its own
+/// direction. The one place the two directions' leads are told apart.
+pub fn start_lead_ns(timing: &crate::TimingEnvelope, direction: Direction) -> i64 {
+    match direction {
+        Direction::Rx => timing.rx_start_lead_ns,
+        Direction::Tx => timing.tx_start_lead_ns,
+    }
 }
 
 /// RM-25: the first lattice instant of `ratio` at or after `t`, a whole multiple of its

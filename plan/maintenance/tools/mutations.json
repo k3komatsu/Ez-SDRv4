@@ -163,8 +163,8 @@
   "id": "F36",
   "name": "MockRadio ignores the profile's start lead",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "            lead: ticks(self.profile.timing().start_lead_ns)?,\n",
-  "new": "            lead: 0,\n",
+  "old": "            lead: ticks(timeline::start_lead_ns(&self.profile.timing(), direction))?,",
+  "new": "            lead: 0,",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_18_a_receive_enable_from_zero_waits_the_start_lead"
@@ -193,8 +193,8 @@
   "id": "F40",
   "name": "no receive start lead",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "        let lead = core.ticks(core.description.timing.start_lead_ns);\n",
-  "new": "        let lead = 0;\n",
+  "old": "            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, direction)),",
+  "new": "            lead: 0,",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuration"
@@ -2952,7 +2952,7 @@
   "new": "            memory_domains: vec![MemoryDomainId::local(0)],",
   "crate": "ezsdr-radio",
   "test_bin": "device",
-  "filter": "rm_26_the_description_builds_the_tree_mockradio_built"
+  "filter": "rm_26_the_description_builds_the_tree"
  },
  {
   "id": "J271",
@@ -2962,7 +2962,7 @@
   "new": "            memory_domains: vec![memory_domain],",
   "crate": "ezsdr-radio",
   "test_bin": "device",
-  "filter": "rm_26_the_description_builds_the_tree_mockradio_built"
+  "filter": "rm_26_the_description_builds_the_tree"
  },
  {
   "id": "J272",
@@ -3885,5 +3885,187 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "sc_25_the_underflow_event_carries_its_own_instant"
+ },
+ {
+  "id": "P01",
+  "name": "the decimation set gains a fourth halfband (design 33 D5)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "        for h in 0..=3u32 {",
+  "new": "        for h in 0..=4u32 {",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_26_the_decimation_set_is_the_ddc_s"
+ },
+ {
+  "id": "P02",
+  "name": "the CIC's decimation goes past its 255 (design 33 D5)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "            for c in 1..=255u64 {",
+  "new": "            for c in 1..=256u64 {",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_26_the_decimation_set_is_the_ddc_s"
+ },
+ {
+  "id": "P03",
+  "name": "the decimation set loses `{1}`, so the master clock rate is not on the grid (design 33 D5)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "        let mut set = vec![1u64];",
+  "new": "        let mut set = Vec::new();",
+  "old2": "            for c in 1..=255u64 {",
+  "new2": "            for c in 2..=255u64 {",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_26_the_decimation_set_is_the_ddc_s"
+ },
+ {
+  "id": "P04",
+  "name": "the layout accepts a timekeeper other than 0 (design 33 D5)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "    if timekeeper != 0 {",
+  "new": "    if false {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_02_from_binding_refusals"
+ },
+ {
+  "id": "P05",
+  "name": "the layout accepts two board kinds in one device (design 33 D5)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "    if let Some(other) = rx.iter().chain(&tx).find(|element| element.board != board) {",
+  "new": "    if let Some(other) = rx.iter().chain(&tx).find(|_element| false) {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_02_from_binding_refusals"
+ },
+ {
+  "id": "P06",
+  "name": "the layout accepts a slot other than A or B (design 33 D5)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "    let slot = Slot::parse(slot)\n        .ok_or_else(|| format!(\"the layout element `{raw}` names slot `{slot}`, not A or B\"))?;",
+  "new": "    let slot = Slot::parse(slot).unwrap_or(Slot::A);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_02_from_binding_refusals"
+ },
+ {
+  "id": "P07",
+  "name": "the layout accepts a front end other than 0 (design 33 D5)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "    if frontend != 0 {",
+  "new": "    if false {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_02_from_binding_refusals"
+ },
+ {
+  "id": "P08",
+  "name": "the layout's positions are not checked against UHD's default order, so a direction may name slot B alone (design 33 D5)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "            if ORDER.get(position) != Some(&element.slot) {",
+  "new": "            if false {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_02_from_binding_refusals"
+ },
+ {
+  "id": "P09",
+  "name": "only a direction's first position is checked, so a later element may repeat its slot (design 33 D5)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "            if ORDER.get(position) != Some(&element.slot) {",
+  "new": "            if position == 0 && element.slot != Slot::A {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_02_from_binding_refusals"
+ },
+ {
+  "id": "P10",
+  "name": "a CBX's `random` phase is fixed by a timed tune rather than redrawn (MR-34, design 33 D13)",
+  "file": "crates/ezsdr-mock-radio/src/profile.rs",
+  "old": "        self.description.phase_behavior_on_retune != \"random\"",
+  "new": "        true",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "mr_34_a_random_phase_is_redrawn_by_every_tune"
+ },
+ {
+  "id": "P11",
+  "name": "the two directions' start leads are swapped (RM-4, RM-25, design 33 D5)",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        Direction::Rx => timing.rx_start_lead_ns,\n        Direction::Tx => timing.tx_start_lead_ns,",
+  "new": "        Direction::Rx => timing.tx_start_lead_ns,\n        Direction::Tx => timing.rx_start_lead_ns,",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_each_stream_takes_its_own_directions_start_lead"
+ },
+ {
+  "id": "P12",
+  "name": "MockRadio describes a gain range of its own, not the Vocabulary's (documentation audit D3)",
+  "file": "crates/ezsdr-mock-radio/src/profile.rs",
+  "old": "        let description = match kind {\n            ProfileKind::X3xx => x3xx::description(\n                selection.as_ref().expect(\"an x3xx layout\"),\n                BLOCK_LEN,\n                &Profile::terms(),\n            ),",
+  "new": "        let description = match kind {\n            ProfileKind::X3xx => {\n                let mut description = x3xx::description(\n                    selection.as_ref().expect(\"an x3xx layout\"),\n                    BLOCK_LEN,\n                    &Profile::terms(),\n                );\n                description.gain = Grid::Step { lo: 0.0, hi: 37.5, step: 0.5 };\n                description\n            },",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "x3xx",
+  "filter": "d3_the_two_providers_describe_one_layout_alike"
+ },
+ {
+  "id": "P13",
+  "name": "UR-5 does not compare the layout's boards with the device's front ends (UR-5, design 33 D5)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "                if !front_end.starts_with(element.board.uhd_name()) {",
+  "new": "                if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
+ },
+ {
+  "id": "P14",
+  "name": "the fake rounds a rate to any integer decimation, as before the DDC's set (UR-33)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "            let n = ezsdr_radio::x3xx::clip_decimation(self.mcr() as u64, rate);",
+  "new": "            let n = ((self.mcr() as f64 / rate).round().max(1.0)) as u64;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_12_every_advertised_rate_is_accepted"
+ },
+ {
+  "id": "P15",
+  "name": "the Mock's configuration starts from RM-5's 1 GHz defaults, not from the description's (the CBX's 2.45 GHz default)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        let mut config = self.description().defaults.clone();",
+  "new": "        let mut config = ezsdr_radio::device::DeviceDescription::x310_defaults();",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_03_a_cbx_layer_starts_at_its_board_s_default_frequency"
+ },
+ {
+  "id": "P16",
+  "name": "an `ideal` binding may carry the shared layout keys (design 33 D5)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            .chain(x3xx::SELECTOR_KEYS.into_iter().filter(|_| kind == ProfileKind::X3xx))",
+  "new": "            .chain(x3xx::SELECTOR_KEYS.into_iter())",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_02_from_binding_refusals"
+ },
+ {
+  "id": "P17",
+  "name": "the receive channel default does not follow the layout, so an `rx`-less layer opens one (RM-5, design 33 D5)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "    let rx_default = i64::from(!selection.rx.is_empty());",
+  "new": "    let rx_default = 1;",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "x3xx",
+  "filter": "d3_a_layout_without_receive_channels_requests_none_on_both_providers"
+ },
+ {
+  "id": "P18",
+  "name": "every board is coherent, so a CBX may claim `radio.rx.coherent` (RM-9, design 33 D13)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "        coherent: board.coherent(),",
+  "new": "        coherent: true,",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "x3xx",
+  "filter": "d3_a_cbx_layout_is_not_coherent_on_either_provider"
  }
 ]

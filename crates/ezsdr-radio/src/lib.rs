@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod device;
 pub mod timeline;
+pub mod x3xx;
 
 /// The Radio Model Vocabulary id and key prefix (RM-1).
 pub const VOCABULARY: &str = "radio";
@@ -89,9 +90,11 @@ pub mod keys {
     pub const COMMAND_QUEUE_DEPTH: &str = "radio.timing.command_queue_depth";
     /// Receive restart gap after overrun in nanoseconds (RM-4).
     pub const OVERFLOW_RESTART_GAP_NS: &str = "radio.timing.overflow_restart_gap_ns";
-    /// Lead from a stream's previous cut, and from the instant its Provider is ready for it,
-    /// to a new segment's first sample, in nanoseconds (RM-4, RM-25).
-    pub const START_LEAD_NS: &str = "radio.timing.start_lead_ns";
+    /// Lead from a receive stream's previous cut, and from the instant its Provider is ready
+    /// for it, to a new segment's first sample, in nanoseconds (RM-4, RM-25).
+    pub const RX_START_LEAD_NS: &str = "radio.timing.rx_start_lead_ns";
+    /// The same for a transmit stream (RM-4, RM-25).
+    pub const TX_START_LEAD_NS: &str = "radio.timing.tx_start_lead_ns";
     /// Receive throughput limit in bytes per second (RM-4).
     pub const RX_BYTES_PER_S: &str = "radio.perf.rx_bytes_per_s";
     /// Transmit throughput limit in bytes per second (RM-4).
@@ -204,7 +207,8 @@ fn radio_keys() -> Vec<KeyDecl> {
         key_decl(keys::STARTUP_LATENCY_NS, Int, false, Reject, None),
         key_decl(keys::COMMAND_QUEUE_DEPTH, Int, false, Reject, None),
         key_decl(keys::OVERFLOW_RESTART_GAP_NS, Int, false, Reject, None),
-        key_decl(keys::START_LEAD_NS, Int, false, Reject, None),
+        key_decl(keys::RX_START_LEAD_NS, Int, false, Reject, None),
+        key_decl(keys::TX_START_LEAD_NS, Int, false, Reject, None),
         key_decl(keys::RX_BYTES_PER_S, Int, false, Reject, None),
         key_decl(keys::TX_BYTES_PER_S, Int, false, Reject, None),
         key_decl(keys::WIRE_BYTES_PER_SAMPLE, Int, false, Reject, None),
@@ -571,9 +575,11 @@ pub struct TimingEnvelope {
     pub command_queue_depth: i64,
     /// Receive restart gap after overrun (RM-20).
     pub overflow_restart_gap_ns: i64,
-    /// From a stream's previous cut, and from the instant its Provider is ready for it, to a
-    /// new segment's first sample (RM-20, RM-25).
-    pub start_lead_ns: i64,
+    /// From a receive stream's previous cut, and from the instant its Provider is ready for
+    /// it, to a new segment's first sample (RM-20, RM-25).
+    pub rx_start_lead_ns: i64,
+    /// The same for a transmit stream (RM-20, RM-25).
+    pub tx_start_lead_ns: i64,
 }
 
 /// Throughput values recorded in a radio Provider's Manifest (RM-20).

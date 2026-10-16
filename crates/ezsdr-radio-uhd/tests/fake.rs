@@ -80,6 +80,11 @@ fn ur_04_open_without_the_feature_refuses() {
 }
 
 fn binding(selector: Json, profile: Option<Json>) -> Binding {
+    let mut selector = selector;
+    if let Some(object) = selector.as_object_mut() {
+        object.entry("rx").or_insert(json!(["0:A:ubx:0", "0:B:ubx:0"]));
+        object.entry("tx").or_insert(json!(["0:A:ubx:0", "0:B:ubx:0"]));
+    }
     let mut doc = json!({ "module": uhd_module(), "selector": selector });
     if let Some(profile) = profile {
         doc["profile"] = profile;
@@ -92,39 +97,48 @@ fn ur_05_from_binding_refusals() {
     let device = fake(FakeConfig::default());
     let refuse = |b: Binding, device: Arc<FakeDevice>| UhdRadio::from_binding(&b, device).err().unwrap().message;
     let ok = json!({ "args": ARGS });
-    assert!(UhdRadio::from_binding(&binding(ok.clone(), Some(x310_ubx())), device.clone()).is_ok());
-    let mut other = binding(ok.clone(), Some(x310_ubx()));
+    assert!(UhdRadio::from_binding(&binding(ok.clone(), Some(x3xx())), device.clone()).is_ok());
+    let mut other = binding(ok.clone(), Some(x3xx()));
     other.module.id = ezsdr_kernel::id::ModuleId::parse("ezsdr.radio.mock").unwrap();
     assert!(refuse(other, device.clone()).starts_with("UR-5:"));
     assert!(refuse(binding(ok.clone(), None), device.clone()).starts_with("UR-5:"));
-    let x310_like = json!({ "name": "x310-like", "version": { "major": 2, "minor": 0, "patch": 0 } });
-    assert!(refuse(binding(ok.clone(), Some(x310_like)), device.clone()).starts_with("UR-5:"));
-    let mut fed = binding(ok.clone(), Some(x310_ubx()));
+    let foreign = json!({ "name": "ideal", "version": { "major": 2, "minor": 0, "patch": 0 } });
+    assert!(refuse(binding(ok.clone(), Some(foreign)), device.clone()).starts_with("UR-5:"));
+    let mut fed = binding(ok.clone(), Some(x3xx()));
     fed.feed = serde_json::from_value(json!({ "port": { "component": "radio", "port": "rx" }, "policy": "drop_oldest", "capacity": 4 })).unwrap();
     assert!(refuse(fed, device.clone()).starts_with("UR-5:"));
-    for selector in [json!({ "args": ARGS, "fake": true }), json!({ "args": ARGS, "block_len": 0 }), json!({ "args": ARGS, "clock_source": "atomic" }), json!({ "args": ARGS, "id": "a/b" }), json!({ "args": ARGS, "id": "" }), json!({})] {
-        assert!(refuse(binding(selector.clone(), Some(x310_ubx())), device.clone()).starts_with("UR-5:"), "{selector}");
+    for selector in [
+        json!({ "args": ARGS, "fake": true }),
+        json!({ "args": ARGS, "block_len": 0 }),
+        json!({ "args": ARGS, "clock_source": "atomic" }),
+        json!({ "args": ARGS, "id": "a/b" }),
+        json!({ "args": ARGS, "id": "" }),
+        json!({ "id": "usrp" }),
+        json!({ "args": ARGS, "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"], "image": ["xx"] }),
+        json!({ "args": ARGS, "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"], "link_gbps": [2] }),
+        json!({ "args": ARGS, "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"], "master_clock_hz": [184_320_000] }),
+        json!({ "args": ARGS, "rx": [], "tx": [] }),
+    ] {
+        assert!(refuse(binding(selector.clone(), Some(x3xx())), device.clone()).starts_with("UR-5:"), "{selector}");
     }
     // The id is only a node path now (sections are filed by source, RS-39): any one segment.
-    assert!(UhdRadio::from_binding(&binding(json!({ "args": ARGS, "id": "Dev-1.a" }), Some(x310_ubx())), device.clone()).is_ok());
+    assert!(UhdRadio::from_binding(&binding(json!({ "args": ARGS, "id": "Dev-1.a" }), Some(x3xx())), device.clone()).is_ok());
     let slow = fake(FakeConfig { master_clock_rate: 184_320_000, ..FakeConfig::default() });
     assert_eq!(
-        refuse(binding(ok, Some(x310_ubx())), slow),
-        "UR-5: profile x310-ubx needs a 200 MHz master clock; the device runs at 184320000 Hz"
+        refuse(binding(ok, Some(x3xx())), slow),
+        "UR-5: profile x3xx needs a 200 MHz master clock; the device runs at 184320000 Hz"
     );
 }
 
-fn x310_cbx() -> Json {
-    json!({ "name": "x310-cbx", "version": { "major": 0, "minor": 3, "patch": 0 } })
-}
-
-fn x310_obx() -> Json {
-    json!({ "name": "x310-obx", "version": { "major": 0, "minor": 3, "patch": 0 } })
+/// The selector of a device with one board in slot A (UR-5, design 33 D5).
+fn one_board(board: &str) -> Json {
+    json!({ "args": ARGS, "rx": [format!("0:A:{board}:0")], "tx": [format!("0:A:{board}:0")] })
 }
 
 #[test]
-fn ur_09_x310_obx_is_one_channel_from_10_mhz_to_8_4_ghz_defaulting_to_1_ghz() {
-    let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x310_obx())), fake(one_obx())).unwrap();
+fn ur_09_the_obx_is_one_channel_from_10_mhz_to_8_4_ghz_defaulting_to_1_ghz() {
+    let selector = one_board("obx");
+    let radio = UhdRadio::from_binding(&binding(selector.clone(), Some(x3xx())), fake(one_obx())).unwrap();
     let capability = |name: &str| radio.instance().tree.capabilities[&Key::parse(name).unwrap()].clone();
     let range = |min, max| ezsdr_kernel::spec::CapabilityValue::Range { min, max };
     for dir in ["rx", "tx"] {
@@ -132,10 +146,11 @@ fn ur_09_x310_obx_is_one_channel_from_10_mhz_to_8_4_ghz_defaulting_to_1_ghz() {
         assert_eq!(capability(&format!("radio.{dir}.channels")), range(Scalar::from(0), Scalar::from(1)));
     }
     assert_eq!(capability("radio.phase_behavior_on_retune"), ezsdr_kernel::spec::CapabilityValue::One { value: Scalar::from("random_unless_timed_tune".to_owned()) });
-    assert_eq!(radio.instance().profile.as_ref().unwrap().name, "x310-obx");
+    assert_eq!(capability("radio.rx.coherent"), ezsdr_kernel::spec::CapabilityValue::One { value: Scalar::Bool(true) });
+    assert_eq!(radio.instance().profile.as_ref().unwrap().name, "x3xx");
     let dir = TempDir::new();
-    let mut doc = profile(&dir, json!({}), json!({}), true);
-    doc["bindings"]["radio"]["profile"] = x310_obx();
+    let mut doc = profile(&dir, selector, json!({}), true);
+    doc["bindings"]["radio"]["profile"] = x3xx();
     let mut run = session(&doc, fake(one_obx()));
     past_t0(&mut run, ms(1));
     let manifest = run.finish();
@@ -145,35 +160,44 @@ fn ur_09_x310_obx_is_one_channel_from_10_mhz_to_8_4_ghz_defaulting_to_1_ghz() {
 
 #[test]
 fn ur_05_the_profile_must_be_the_device_s_front_ends() {
-    let ok = json!({ "args": ARGS });
-    let refuse = |profile: Json, config: FakeConfig| UhdRadio::from_binding(&binding(ok.clone(), Some(profile)), fake(config)).err().unwrap().message;
-    assert!(UhdRadio::from_binding(&binding(ok.clone(), Some(x310_cbx())), fake(one_cbx())).is_ok());
+    let refuse = |selector: Json, config: FakeConfig| UhdRadio::from_binding(&binding(selector, Some(x3xx())), fake(config)).err().unwrap().message;
+    assert!(UhdRadio::from_binding(&binding(one_board("cbx"), Some(x3xx())), fake(one_cbx())).is_ok());
     let boards = |front_ends: Vec<&'static str>| FakeConfig { front_ends, ..FakeConfig::default() };
-    assert_eq!(refuse(x310_ubx(), one_cbx()), "UR-5: profile x310-ubx needs UBX front ends; rx channel 0 is `CBX-120 RX`");
-    assert_eq!(refuse(x310_ubx(), boards(vec!["UBX", "CBX"])), "UR-5: profile x310-ubx needs UBX front ends; rx channel 1 is `CBX RX`");
-    assert_eq!(refuse(x310_ubx(), boards(vec!["UBX"])), "UR-5: profile x310-ubx needs 2 rx channels; the device has 1");
-    assert_eq!(refuse(x310_cbx(), FakeConfig::default()), "UR-5: profile x310-cbx needs CBX front ends; rx channel 0 is `UBX RX`");
-    assert_eq!(refuse(x310_cbx(), boards(vec![])), "UR-5: profile x310-cbx needs 1 rx channels; the device has 0");
-    assert!(UhdRadio::from_binding(&binding(ok.clone(), Some(x310_obx())), fake(one_obx())).is_ok());
-    assert!(UhdRadio::from_binding(&binding(ok.clone(), Some(x310_obx())), fake(boards(vec!["OBX", "OBX"]))).is_ok());
-    assert_eq!(refuse(x310_ubx(), one_obx()), "UR-5: profile x310-ubx needs UBX front ends; rx channel 0 is `OBX RX`");
-    assert_eq!(refuse(x310_obx(), FakeConfig::default()), "UR-5: profile x310-obx needs OBX front ends; rx channel 0 is `UBX RX`");
-    assert_eq!(refuse(x310_obx(), one_cbx()), "UR-5: profile x310-obx needs OBX front ends; rx channel 0 is `CBX-120 RX`");
+    let two = |board: &str| json!({ "args": ARGS, "rx": [format!("0:A:{board}:0"), format!("0:B:{board}:0")], "tx": [format!("0:A:{board}:0"), format!("0:B:{board}:0")] });
+    assert_eq!(refuse(one_board("ubx"), one_cbx()), "UR-5: profile x3xx needs UBX front ends; rx channel 0 is `CBX-120 RX`");
+    assert_eq!(refuse(two("ubx"), boards(vec!["UBX", "CBX"])), "UR-5: profile x3xx needs UBX front ends; rx channel 1 is `CBX RX`");
+    assert_eq!(refuse(two("ubx"), boards(vec!["UBX"])), "UR-5: profile x3xx needs 2 rx channels; the device has 1");
+    assert_eq!(refuse(one_board("cbx"), FakeConfig::default()), "UR-5: profile x3xx needs CBX front ends; rx channel 0 is `UBX RX`");
+    assert_eq!(refuse(one_board("cbx"), boards(vec![])), "UR-5: profile x3xx needs 1 rx channels; the device has 0");
+    // The transmit side is checked the same way, and so is a device whose two directions
+    // name boards of different kinds.
+    assert!(UhdRadio::from_binding(&binding(one_board("obx"), Some(x3xx())), fake(one_obx())).is_ok());
+    assert!(UhdRadio::from_binding(&binding(two("ubx"), Some(x3xx())), fake(boards(vec!["UBX", "UBX"]))).is_ok());
+    assert_eq!(refuse(one_board("ubx"), one_obx()), "UR-5: profile x3xx needs UBX front ends; rx channel 0 is `OBX RX`");
+    assert_eq!(refuse(one_board("obx"), FakeConfig::default()), "UR-5: profile x3xx needs OBX front ends; rx channel 0 is `UBX RX`");
+    assert_eq!(refuse(one_board("obx"), one_cbx()), "UR-5: profile x3xx needs OBX front ends; rx channel 0 is `CBX-120 RX`");
+    let mixed = json!({ "args": ARGS, "rx": ["0:A:ubx:0"], "tx": ["0:A:obx:0"] });
+    assert!(refuse(mixed, FakeConfig::default()).contains("one device carries one kind"));
 }
 
 #[test]
-fn ur_09_x310_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz() {
-    let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x310_cbx())), fake(one_cbx())).unwrap();
+fn ur_09_the_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz() {
+    let selector = one_board("cbx");
+    let radio = UhdRadio::from_binding(&binding(selector.clone(), Some(x3xx())), fake(one_cbx())).unwrap();
     let capability = |name: &str| radio.instance().tree.capabilities[&Key::parse(name).unwrap()].clone();
     let range = |min, max| ezsdr_kernel::spec::CapabilityValue::Range { min, max };
     for dir in ["rx", "tx"] {
         assert_eq!(capability(&format!("radio.{dir}.frequency_hz")), range(Scalar::try_from(1.2e9).unwrap(), Scalar::try_from(6e9).unwrap()));
         assert_eq!(capability(&format!("radio.{dir}.channels")), range(Scalar::from(0), Scalar::from(1)));
     }
+    // A CBX has no timed LO phase synchronisation: its phase value says so, and its
+    // channels are aligned but not coherent (UR-9, RM-9, design 33 D13).
+    assert_eq!(capability("radio.phase_behavior_on_retune"), ezsdr_kernel::spec::CapabilityValue::One { value: Scalar::from("random".to_owned()) });
+    assert_eq!(capability("radio.rx.coherent"), ezsdr_kernel::spec::CapabilityValue::One { value: Scalar::Bool(false) });
     // A Session that sets no frequency tunes to the default, inside the CBX's range.
     let dir = TempDir::new();
-    let mut doc = profile(&dir, json!({}), json!({}), true);
-    doc["bindings"]["radio"]["profile"] = x310_cbx();
+    let mut doc = profile(&dir, selector, json!({}), true);
+    doc["bindings"]["radio"]["profile"] = x3xx();
     let mut run = session(&doc, fake(one_cbx()));
     past_t0(&mut run, ms(1));
     let manifest = run.finish();
@@ -439,7 +463,7 @@ fn ur_08_the_relations_bracket_a_device_read() {
 // ---------------------------------------------------------------- the profile and the instance (UR-9…UR-11)
 
 fn provider() -> UhdRadio {
-    UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x310_ubx())), fake(FakeConfig::default())).unwrap()
+    UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), fake(FakeConfig::default())).unwrap()
 }
 
 #[test]
@@ -457,7 +481,7 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(capability("radio.perf.wire_bytes_per_sample"), one(Scalar::from(4)));
     assert_eq!(capability("radio.tx.path_delay_samples"), one(Scalar::from(45)));
     let envelope = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.envelope").unwrap()];
-    assert_eq!(envelope["profile"]["name"], "x310-ubx");
+    assert_eq!(envelope["profile"]["name"], "x3xx");
     assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], 5_000_000);
     assert_eq!(envelope["performance"]["rx_bytes_per_s"], 1_000_000_000);
     assert_eq!(instance.sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()]["fake"], true);
@@ -470,7 +494,7 @@ fn ur_10_instance() {
     assert!(!instance.driving.stepped);
     assert_eq!(instance.min_command_lead, Some(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000)));
     assert!(instance.arm_after.is_empty());
-    assert_eq!(instance.profile.as_ref().unwrap().name, "x310-ubx");
+    assert_eq!(instance.profile.as_ref().unwrap().name, "x3xx");
     assert_eq!(instance.id, ResourceId::parse("usrp").unwrap());
     assert_eq!(instance.tree.memory_domains, [ezsdr_hostmem::HOST_MEMORY]);
 }
@@ -629,7 +653,7 @@ impl Direct {
         };
         let mut keys = json!({ "args": ARGS });
         keys.as_object_mut().unwrap().extend(selector.as_object().cloned().unwrap_or_default());
-        let mut radio = UhdRadio::from_binding(&binding(keys, Some(x310_ubx())), device.clone()).unwrap();
+        let mut radio = UhdRadio::from_binding(&binding(keys, Some(x3xx())), device.clone()).unwrap();
         radio.prepare(&fragment, ctx).unwrap();
         radio.arm().unwrap();
         let t0 = time.now(root).unwrap().ticks_in(root).unwrap() + ms(2_000) + ms(1);
@@ -696,6 +720,20 @@ fn ur_12_prepare_refusals() {
 }
 
 #[test]
+fn ur_12_a_tx_only_layout_declares_no_receive_clock() {
+    // UR-12, design 33 D5: the Module configures a direction, and declares its stream's
+    // SampleClock, only when its channel count is > 0. A `tx`-only layout leaves RM-5's
+    // receive channel default 0 (the description's), so no receive channel is configured and
+    // `usrp/rx` is never declared.
+    let direct = Direct::build(FakeConfig::default(), &[("radio.tx.channels", Scalar::from(1))], Vec::new(), json!({ "rx": [], "tx": ["0:A:ubx:0"] }));
+    let clocks: Vec<String> = direct.clocks.sample_clock_records().iter().map(|record| record.stream.path().to_owned()).collect();
+    assert_eq!(clocks, ["usrp/tx"], "a layout with no receive front end declares no receive clock");
+    let instance = direct.finish();
+    let applied = instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()].clone();
+    assert!(applied.as_array().unwrap().iter().all(|row| !row["key"].as_str().unwrap_or("").starts_with("radio.rx")), "no receive channel is configured: {applied}");
+}
+
+#[test]
 fn ur_12_the_applied_values_are_recorded() {
     let dir = TempDir::new();
     let mut spec = receive_spec(1, 1e6, 2.4e9, Some(2_000));
@@ -721,16 +759,37 @@ fn ur_12_a_rate_the_device_does_not_apply_is_refused() {
 
 #[test]
 fn ur_12_every_advertised_rate_is_accepted() {
-    // UR-9 advertises 200 MHz / N for N in 1…512; UR-12 accepts each (Review L, P0-2).
-    let ezsdr_radio::device::Grid::Values(rates) = ezsdr_radio_uhd::profile::Profile::X310Ubx.description(2_000).rates else { panic!("a Values grid") };
-    assert_eq!(rates.len(), 512);
+    // UR-9 advertises 200 MHz / N for UHD's decimations N (design 33 D5); UR-12 accepts
+    // each (Review L, P0-2).
+    let selection = ezsdr_radio::x3xx::Selection::of(
+        ezsdr_radio::x3xx::Board::Ubx,
+        &[ezsdr_radio::x3xx::Slot::A, ezsdr_radio::x3xx::Slot::B],
+        &[ezsdr_radio::x3xx::Slot::A, ezsdr_radio::x3xx::Slot::B],
+    );
+    let description = ezsdr_radio_uhd::profile::description(&selection, 2_000);
+    let ezsdr_radio::device::Grid::Values(rates) = description.rates else { panic!("a Values grid") };
+    assert_eq!(rates.len(), 639);
     for rate in &rates {
         let n = ezsdr_radio_uhd::decimation(200_000_000, *rate).unwrap_or_else(|| panic!("{rate} refused"));
         assert_eq!(200_000_000.0 / n as f64, *rate);
     }
-    // One that is not on the grid, and one past it.
+    // 200 MHz / 257 is not a decimation the DDC can make (design 33 D5), and 513 is past
+    // every one; 19.5 Msps is off the grid.
+    assert_eq!(ezsdr_radio_uhd::decimation(200_000_000, 200e6 / 257.0), None);
+    assert_eq!(ezsdr_radio_uhd::decimation(200_000_000, 200e6 / 258.0), Some(258));
+    assert_eq!(ezsdr_radio_uhd::decimation(200_000_000, 200e6 / 2040.0), Some(2040));
     assert_eq!(ezsdr_radio_uhd::decimation(200_000_000, 19.5e6), None);
     assert_eq!(ezsdr_radio_uhd::decimation(200_000_000, 200e6 / 513.0), None);
+    // The fake clips a rate onto the grid as UHD's `coerce_decim` does (UR-33): 200e6/257
+    // lies between 256 and 258, and the nearer decimation wins, ties to the smaller.
+    assert_eq!(ezsdr_radio::x3xx::clip_decimation(200_000_000, 200e6 / 257.0), 256);
+    assert_eq!(ezsdr_radio::x3xx::clip_decimation(200_000_000, 200e6 / 257.4), 258);
+    assert_eq!(ezsdr_radio::x3xx::clip_decimation(200_000_000, 200e6 / 2041.0), 2040);
+    let fake_device = FakeDevice::new(FakeConfig::default());
+    let applied = fake_device.apply(ezsdr_radio_uhd::Dir::Rx, 0, &ezsdr_radio_uhd::Settings { rate: Some(200e6 / 257.0), ..ezsdr_radio_uhd::Settings::default() }, None).unwrap();
+    assert_eq!(applied.rate, 200e6 / 256.0, "the fake clips like the device");
+    let applied = fake_device.apply(ezsdr_radio_uhd::Dir::Rx, 0, &ezsdr_radio_uhd::Settings { rate: Some(200e6 / 2041.0), ..ezsdr_radio_uhd::Settings::default() }, None).unwrap();
+    assert_eq!(applied.rate, 200e6 / 2040.0, "and to the top of the grid");
     // 200 MHz / 3 prepares, captures, and is reached by a cold switch as well.
     let dir = TempDir::new();
     let manifest = captured(spec_run(&receive_spec(1, 200e6 / 3.0, 1e9, Some(1_000)), &profile(&dir, json!({}), json!({}), false), fake(FakeConfig::default()), BTreeMap::new()));
@@ -1485,7 +1544,7 @@ fn ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuratio
     direct.settle(Wall::from_millis(300));
     let instance = direct.finish();
     let envelope = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.envelope").unwrap()];
-    let lead = envelope["timing"]["start_lead_ns"].as_i64().unwrap() * MCR / 1_000_000_000;
+    let lead = envelope["timing"]["rx_start_lead_ns"].as_i64().unwrap() * MCR / 1_000_000_000;
     let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
     let row = timing.as_array().unwrap().iter().find(|r| r["what"] == "cold_change").cloned().unwrap_or_else(|| panic!("{timing}"));
     let segment = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_segment").cloned().unwrap_or_else(|| panic!("{timing}"));
@@ -1963,7 +2022,7 @@ fn ur_33_no_document_selects_the_fake_device() {
     for args in ["fake", "type=fake"] {
         assert!(ezsdr_radio_uhd::open(args).is_err(), "{args}");
     }
-    let refused = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "fake": true }), Some(x310_ubx())), fake(FakeConfig::default()));
+    let refused = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "fake": true }), Some(x3xx())), fake(FakeConfig::default()));
     assert!(refused.err().unwrap().message.contains("unsupported selector key `fake`"));
 }
 
@@ -2033,7 +2092,7 @@ fn ur_33_a_real_fake_s_time_starts_at_its_own_creation() {
 }
 
 // ---------------------------------------------------------------- the rehearsal (UR-34)
-// Each step on the fake's two UBX and on the bench's one OBX (`x310-obx`); B3 on one CBX.
+// Each step on the fake's two UBX and on the bench's one OBX (`x3xx`, an OBX layout); B3 on one CBX.
 
 #[test]
 fn rehearsal_b3_receive_at_t0() {
@@ -2064,13 +2123,13 @@ fn rehearsal_b7_session_loopback() {
 fn rehearsal_b3_receive_at_t0_on_one_cbx() {
     let manifest = rehearse_receive_at_t0(fake(one_cbx()));
     let frequency = section(&manifest, "applied").as_array().unwrap().iter().find(|r| r["key"] == "radio.rx.frequency_hz").cloned().unwrap();
-    assert_eq!(frequency["claimed"], 2.45e9, "the bench frequency is x310-cbx's default");
+    assert_eq!(frequency["claimed"], 2.45e9, "the bench frequency is the CBX board's default");
 }
 
 #[test]
 fn rehearsal_b3_receive_at_t0_on_one_obx() {
     let manifest = rehearse_receive_at_t0(fake(one_obx()));
-    assert_eq!(section(&manifest, "envelope")["profile"]["name"], "x310-obx");
+    assert_eq!(section(&manifest, "envelope")["profile"]["name"], "x3xx");
 }
 
 #[test]

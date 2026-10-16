@@ -186,8 +186,16 @@ pub fn default_profile(dir: &str) -> serde_json::Value {
         "bindings": {
             "radio": {
                 "module": { "id": RADIO, "version": { "major": 2, "minor": 0, "patch": 0 } },
-                "selector": { "id": "radio" },
-                "profile": { "name": "x310-like", "version": { "major": 2, "minor": 0, "patch": 0 } }
+                "selector": {
+                    "id": "radio",
+                    "master_clock_hz": [200_000_000],
+                    "image": ["hg"],
+                    "links": [1],
+                    "link_gbps": [10],
+                    "rx": ["0:A:ubx:0", "0:B:ubx:0"],
+                    "tx": ["0:A:ubx:0", "0:B:ubx:0"]
+                },
+                "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } }
             },
             "rec": {
                 "module": { "id": SINK, "version": { "major": 1, "minor": 2, "patch": 0 } },

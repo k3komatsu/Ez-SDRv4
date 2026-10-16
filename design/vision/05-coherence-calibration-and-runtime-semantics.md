@@ -34,7 +34,7 @@ Rules:
 
 - **The Core never infers coherence.** Across Provider instances it composes only `ClockRelation`s (§24); a cross-provider set is called coherent only if a CalibrationArtifact (§26) asserts it, with provenance.
 - Aligned multi-channel samples come from **one stream of one Provider instance**. A vector of independently started streams is a DeviceGroup, whatever its clock wiring.
-- Coherence has a basis and a validity. A daughterboard whose LO phase is random after each retune is coherent only under timed tuning and only until the next untimed retune; the Provider declares this behaviour and MockRadio emulates it (MR-34).
+- Coherence has a basis and a validity. A daughterboard whose LO phase is random after every untimed retune is coherent only under timed tuning and only until the next untimed retune; one whose phase a timed tune does not fix either, such as a CBX, is never coherent (§26, RM-9). The Provider declares this behaviour and MockRadio emulates it (MR-34).
 
 This is important for:
 
@@ -111,13 +111,13 @@ Every radio has a fixed TX→RX delay through its digital and analog chain. Any 
 
 ## Retune phase behaviour is a declared capability
 
-Daughterboards such as UBX/CBX/SBX have a random inter-frontend phase after every untimed retune; timed tuning keeps the offset constant. The Radio Model declares this behavior as a device capability:
+Daughterboards such as UBX/CBX/SBX have a random inter-frontend phase after every untimed retune; timed tuning keeps the offset constant on a UBX or an OBX. A CBX has no timed LO phase synchronisation at all, so its offset is random after every retune, timed or not. The Radio Model declares this behavior as a device capability:
 
 ```text
-phase_behavior_on_retune:  deterministic | random_unless_timed_tune
+phase_behavior_on_retune:  deterministic | random_unless_timed_tune | random
 ```
 
-declared per device profile as `radio.phase_behavior_on_retune`. Phase 2 records the capability; MockRadio emulates it from Phase 3 (MR-34).
+declared per device profile as `radio.phase_behavior_on_retune`. Phase 2 records the capability; MockRadio emulates it from Phase 3 (MR-34). A CBX's channels are aligned but not coherent, which its device description declares (RM-9, design 33 D13).
 
 ---
 

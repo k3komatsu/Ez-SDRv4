@@ -1,5 +1,5 @@
 //! The bench steps of `plan/phase7/bench.md` (UR-34), on a USRP X310 with one OBX
-//! (`x310-obx`), the profile the one its front ends name.
+//! (the `x3xx` profile, an OBX layout), the layout the one its front ends name.
 //! Compiled only with the feature `uhd`, every test ignored, the device from
 //! `EZSDR_UHD_ARGS` (GZ-8). Run each as `bench.md` says;
 //! each prints what `bench-results.md` records.
@@ -29,18 +29,21 @@ fn hw_b1_probe() {
     let device = usrp();
     println!("B1 describe: {}", serde_json::to_string_pretty(&device.describe()).unwrap());
     assert_eq!(device.master_clock_rate(), 200_000_000, "B0.3: add master_clock_rate=200e6");
-    // The profile's channels and front ends, as UR-5 checks them.
-    let profile = profile_of(&*device);
-    println!("B1 profile: {}", profile.name());
-    assert_eq!(profile, ezsdr_radio_uhd::profile::Profile::X310Obx, "bench.md: the bench is one OBX in slot A");
-    let need = profile.description(2_000).max_channels as usize;
-    for dir in [Dir::Rx, Dir::Tx] {
+    // The layout's channels and front ends, as UR-5 checks them.
+    let board = board_of(&*device);
+    println!("B1 board: {}", board.name());
+    assert_eq!(board, ezsdr_radio::x3xx::Board::Obx, "bench.md: the bench is one OBX in slot A");
+    let (rx, tx) = layout_of(&*device);
+    for (dir, elements) in [(Dir::Rx, &rx), (Dir::Tx, &tx)] {
         let have = device.channels(dir);
+        let need = elements.as_array().map_or(0, Vec::len);
         let names: Vec<_> = (0..have).map(|chan| device.front_end(dir, chan)).collect();
         println!("B1 {dir:?}: {have} channels, front ends {names:?}");
-        assert!(have >= need, "{} needs {need} {dir:?} channels", profile.name());
-        for name in &names[..need] {
-            assert!(name.as_ref().unwrap().starts_with(profile.front_end()), "{name:?} is not a {} front end", profile.front_end());
+        assert!(have >= need, "the layout needs {need} {dir:?} channels, the device has {have}");
+        // UR-5's comparison on real hardware: the channels the layout names must be the
+        // board the layout is of, not merely whatever `layout_of` read off the device.
+        for name in names.iter().take(need) {
+            assert!(name.as_ref().unwrap().starts_with(board.uhd_name()), "{name:?} is not a {} front end", board.uhd_name());
         }
     }
     println!("B1 ref_locked: {:?}", device.ref_locked());
@@ -285,13 +288,15 @@ fn until_not_running(run: &mut ezsdr_kernel::coordinator::RunHandle, limit_s: u6
 fn hw_b9_usrp2_probe() {
     let device = usrp();
     println!("B9 USRP2 describe: {}", serde_json::to_string_pretty(&device.describe()).unwrap());
+    // A USRP2 is not an X3xx at all: its front ends name no board of this stage, so the
+    // binding carries a UBX layout and UR-5 must refuse it for the master clock.
     let binding = serde_json::from_value(serde_json::json!({
         "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
-        "profile": profile_of(&*device).profile_ref(),
-        "selector": { "args": args() }
+        "profile": x3xx(),
+        "selector": { "args": args(), "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
     }))
     .unwrap();
-    let name = profile_of(&*device).name();
+    let name = ezsdr_radio::x3xx::PROFILE;
     let refused = UhdRadio::from_binding(&binding, device).err().expect("UR-5 refuses a USRP2");
     println!("B9 UR-5: {}", refused.message);
     assert!(refused.message.starts_with(&format!("UR-5: profile {name} needs a 200 MHz master clock")));
@@ -642,8 +647,8 @@ fn hw_b8_cold_change_capture() {
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_b8_cold_change_capture_low_rate() {
-    // Review N, B1 and B2 on the bench: the lowest rate, 200 MHz / 512, with the default
-    // block and with the largest (65 536 samples, 168 ms).
+    // Review N, B1 and B2 on the bench: a low rate the grid holds, 200 MHz / 512, with the
+    // default block and with the largest (65 536 samples, 168 ms).
     cold_change_capture(390_625.0, 400_000.0, None);
     cold_change_capture(390_625.0, 2e6, Some(65_536));
 }

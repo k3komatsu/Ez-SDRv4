@@ -1,155 +1,163 @@
-//! The two resource and timing envelopes the Mock exposes (MR-3, MR-4).
+//! The `x3xx` and `ideal` profiles the Mock presents (MR-3, design 33 D5). The `x3xx`
+//! values are `ezsdr_radio::x3xx`'s; only the Mock's own values live here.
 
 use ezsdr_kernel::module_api::{
     CoercionFidelity, EnvelopeFidelity, Fidelity, ProfileRef, RfFidelity, TransportFidelity,
     Version,
 };
 use ezsdr_radio::device::{DeviceDescription, Grid};
-use ezsdr_radio::{PerformanceEnvelope, RadioEnvelope, TimingEnvelope};
+use ezsdr_radio::x3xx::{self, ProviderTerms, Selection};
+use ezsdr_radio::{PerformanceEnvelope, TimingEnvelope};
 
-/// Which Phase 2 radio envelope the Mock presents (MR-3).
+/// The samples in one receive block, both profiles (MR-3).
+pub(crate) const BLOCK_LEN: u32 = 2_000;
+
+/// Which profile the Mock presents (MR-3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ProfileKind {
-    /// The measured-envelope target for an X310 (MR-3).
-    X310Like,
+    /// The measured-envelope target for an X3xx (MR-3, design 33 D5).
+    X3xx,
     /// A wide-range, no-latency test profile (MR-3).
     Ideal,
 }
 
-/// One profile and its emulated motherboard count (MR-3).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// One profile (MR-3).
+#[derive(Clone, PartialEq, Debug)]
 pub struct Profile {
     /// The selected profile (MR-3).
     pub kind: ProfileKind,
-    /// Number of emulated motherboards, from one through four (MR-2).
-    pub n: u32,
+    /// The layout the selector declared, for `x3xx`; none for `ideal` (design 33 D5).
+    pub selection: Option<Selection>,
+    /// The description this profile presents, built once when the binding is read (RM-26,
+    /// design 33 D5); every query reads it rather than rebuilding it.
+    description: DeviceDescription,
 }
 
 impl Profile {
-    pub(crate) fn profile_ref(self) -> ProfileRef {
-        ProfileRef {
-            name: match self.kind {
-                ProfileKind::X310Like => "x310-like",
-                ProfileKind::Ideal => "ideal",
-            }
-            .to_owned(),
-            version: Version::new(2, 0, 0),
+    /// The profile of a binding: its description built once, from the layout on `x3xx`
+    /// (RM-26, design 33 D5).
+    pub(crate) fn new(kind: ProfileKind, selection: Option<Selection>) -> Profile {
+        let description = match kind {
+            ProfileKind::X3xx => x3xx::description(
+                selection.as_ref().expect("an x3xx layout"),
+                BLOCK_LEN,
+                &Profile::terms(),
+            ),
+            ProfileKind::Ideal => DeviceDescription {
+                profile: ProfileRef { name: "ideal".to_owned(), version: Version::new(2, 0, 0) },
+                rates: Grid::Integer { lo: 1, hi: 1_000_000_000 },
+                whole_hertz_rates: true,
+                frequency: Grid::Step { lo: 0.0, hi: 1_000_000_000_000.0, step: 0.0 },
+                gain: Grid::Step { lo: -200.0, hi: 200.0, step: 0.0 },
+                rx_max_channels: 64,
+                tx_max_channels: 64,
+                rx_antennas: vec!["RX2".to_owned(), "TX/RX".to_owned()],
+                tx_antennas: vec!["TX/RX".to_owned()],
+                coherent: true,
+                full_duplex: true,
+                hardware_time: true,
+                phase_behavior_on_retune: "deterministic".to_owned(),
+                repeat_max_samples: u64::from(u32::MAX),
+                repeat_align_samples: 1,
+                block_len: BLOCK_LEN,
+                tx_path_delay_samples: 0,
+                rx_path_delay_samples: 0,
+                timing: TimingEnvelope {
+                    min_timed_command_lead_ns: 0,
+                    startup_latency_ns: 0,
+                    command_queue_depth: i64::from(u32::MAX),
+                    overflow_restart_gap_ns: 0,
+                    rx_start_lead_ns: 0,
+                    tx_start_lead_ns: 0,
+                },
+                performance: PerformanceEnvelope {
+                    rx_bytes_per_s: 1_i64 << 62,
+                    tx_bytes_per_s: 1_i64 << 62,
+                    wire_bytes_per_sample: 8,
+                },
+                defaults: DeviceDescription::x310_defaults(),
+            },
+        };
+        Profile { kind, selection, description }
+    }
+
+    /// The values only the Mock contributes to the `x3xx` description (design 33 D5): its
+    /// 2 ms lead (INFERRED, measured by Phase 8) and its Replay-like repeat constraints.
+    pub(crate) fn terms() -> ProviderTerms {
+        ProviderTerms {
+            min_timed_command_lead_ns: 2_000_000,
+            repeat_max_samples: 268_435_456,
+            repeat_align_samples: 2,
         }
     }
 
-    pub(crate) fn decimation(self, rate: f64) -> Option<u64> {
-        if self.kind != ProfileKind::X310Like || !rate.is_finite() || rate <= 0.0 {
-            return None;
-        }
-        let n = (200_000_000.0 / rate).round();
-        if !(1.0..=512.0).contains(&n) || 200_000_000.0 / n != rate {
-            return None;
-        }
-        Some(n as u64)
+    pub(crate) fn profile_ref(&self) -> ProfileRef {
+        self.description.profile.clone()
     }
 
-    pub(crate) fn max_channels(self) -> i64 {
+    /// The decimation of `rate` on `x3xx` (MR-7); `ideal` has an arbitrary integer rate.
+    pub(crate) fn decimation(&self, rate: f64) -> Option<u64> {
         match self.kind {
-            ProfileKind::X310Like => i64::from(2 * self.n),
-            ProfileKind::Ideal => 64,
+            ProfileKind::X3xx => x3xx::decimation(x3xx::MASTER_CLOCK_HZ, rate),
+            ProfileKind::Ideal => None,
         }
     }
 
-    pub(crate) fn repeat_max_samples(self) -> u64 {
-        match self.kind {
-            ProfileKind::X310Like => 268_435_456,
-            ProfileKind::Ideal => u64::from(u32::MAX),
-        }
+    pub(crate) fn repeat_max_samples(&self) -> u64 {
+        self.description.repeat_max_samples
     }
 
-    pub(crate) fn repeat_align_samples(self) -> u64 {
-        match self.kind {
-            ProfileKind::X310Like => 2,
-            ProfileKind::Ideal => 1,
-        }
+    pub(crate) fn repeat_align_samples(&self) -> u64 {
+        self.description.repeat_align_samples
     }
 
-    pub(crate) fn block_len(self) -> u32 {
-        2_000
+    pub(crate) fn block_len(&self) -> u32 {
+        BLOCK_LEN
     }
 
-    /// One receive call, in samples, for RM-25's ready instant after a cut: on `x310-like`
-    /// the longer of `block_len` and the X300's packet of 1 996 samples (UHD's
+    /// One receive call, in samples, for RM-25's ready instant after a cut: on `x3xx` the
+    /// longer of `block_len` and the X300's packet of 1 996 samples (UHD's
     /// `max_num_samps` at MTU 9000), as the UHD Module's; none on `ideal`, ready at receipt
     /// (MR-3, MR-18; spec 22, VH-4).
-    pub(crate) fn rx_call_samples(self) -> i64 {
+    pub(crate) fn rx_call_samples(&self) -> i64 {
         match self.kind {
-            ProfileKind::X310Like => i64::from(self.block_len()).max(1_996),
+            ProfileKind::X3xx => i64::from(self.block_len()).max(1_996),
             ProfileKind::Ideal => 0,
         }
     }
 
     /// The delivery allowance after that call, in nanoseconds (MR-3).
-    pub(crate) fn delivery_allowance_ns(self) -> i64 {
+    pub(crate) fn delivery_allowance_ns(&self) -> i64 {
         match self.kind {
-            ProfileKind::X310Like => 3_000_000,
+            ProfileKind::X3xx => 3_000_000,
             ProfileKind::Ideal => 0,
         }
     }
 
-    /// The transmit path delay in transmit samples: srsRAN's X300 time advance for
-    /// `x310-like` (INFERRED), none for `ideal` (MR-3, RM-23).
-    pub(crate) fn tx_path_delay_samples(self) -> i64 {
+    /// Whether the initial untimed tune leaves each channel's LO at a random phase, from
+    /// the profile's `radio.phase_behavior_on_retune` (MR-34).
+    pub(crate) fn random_phase_on_untimed_tune(&self) -> bool {
+        self.description.phase_behavior_on_retune != "deterministic"
+    }
+
+    /// Whether a timed tune replaces each channel's phase with its timed-tune constant
+    /// (MR-34): false for the `random` phase value, whose every tune redraws the phase
+    /// instead (design 33 D13).
+    pub(crate) fn timed_tune_fixes_phase(&self) -> bool {
+        self.description.phase_behavior_on_retune != "random"
+    }
+
+    pub(crate) fn timing(&self) -> TimingEnvelope {
+        self.description.timing
+    }
+
+    pub(crate) fn performance(&self) -> PerformanceEnvelope {
+        self.description.performance
+    }
+
+    pub(crate) fn fidelity(&self) -> Fidelity {
         match self.kind {
-            ProfileKind::X310Like => 45,
-            ProfileKind::Ideal => 0,
-        }
-    }
-
-    /// The receive path delay in receive samples: 0, because `x310-like` carries the
-    /// whole loopback delay on its transmit side (MR-3, RM-23).
-    pub(crate) fn rx_path_delay_samples(self) -> i64 {
-        0
-    }
-
-    /// Whether an untimed tune leaves each channel's LO at a random phase (MR-34).
-    pub(crate) fn random_phase_on_untimed_tune(self) -> bool {
-        self.kind == ProfileKind::X310Like
-    }
-
-    pub(crate) fn timing(self) -> TimingEnvelope {
-        match self.kind {
-            ProfileKind::X310Like => TimingEnvelope {
-                min_timed_command_lead_ns: 2_000_000,
-                startup_latency_ns: 2_000_000_000,
-                command_queue_depth: 16,
-                overflow_restart_gap_ns: 50_000_000,
-                // INFERRED, as spec 18 §3's UHD Module waits it; Phase 8 measures it.
-                start_lead_ns: 50_000_000,
-            },
-            ProfileKind::Ideal => TimingEnvelope {
-                min_timed_command_lead_ns: 0,
-                startup_latency_ns: 0,
-                command_queue_depth: i64::from(u32::MAX),
-                overflow_restart_gap_ns: 0,
-                start_lead_ns: 0,
-            },
-        }
-    }
-
-    pub(crate) fn performance(self) -> PerformanceEnvelope {
-        match self.kind {
-            ProfileKind::X310Like => PerformanceEnvelope {
-                rx_bytes_per_s: 1_000_000_000 * i64::from(self.n),
-                tx_bytes_per_s: 1_000_000_000 * i64::from(self.n),
-                wire_bytes_per_sample: 4,
-            },
-            ProfileKind::Ideal => PerformanceEnvelope {
-                rx_bytes_per_s: 1_i64 << 62,
-                tx_bytes_per_s: 1_i64 << 62,
-                wire_bytes_per_sample: 8,
-            },
-        }
-    }
-
-    pub(crate) fn fidelity(self) -> Fidelity {
-        match self.kind {
-            ProfileKind::X310Like => Fidelity {
+            ProfileKind::X3xx => Fidelity {
                 timing: EnvelopeFidelity::Envelope,
                 continuity: EnvelopeFidelity::Envelope,
                 coercion: CoercionFidelity::Grid,
@@ -160,8 +168,8 @@ impl Profile {
         }
     }
 
-    pub(crate) fn envelope(self) -> RadioEnvelope {
-        RadioEnvelope {
+    pub(crate) fn envelope(&self) -> ezsdr_radio::RadioEnvelope {
+        ezsdr_radio::RadioEnvelope {
             profile: self.profile_ref(),
             timing: self.timing(),
             performance: self.performance(),
@@ -169,45 +177,9 @@ impl Profile {
     }
 
     /// MR-3's values as RM-26's description, whose `tree` and `coerce` are MR-4's and
-    /// MR-6's (Phase 7, VE-1, VE-4).
-    pub(crate) fn description(self) -> DeviceDescription {
-        let (rates, whole_hertz_rates, frequency, gain, phase) = match self.kind {
-            ProfileKind::X310Like => (
-                Grid::Values((1..=512).rev().map(|n| 200_000_000.0 / f64::from(n)).collect()),
-                false,
-                Grid::Step { lo: 10_000_000.0, hi: 6_000_000_000.0, step: 1.0 },
-                Grid::Step { lo: 0.0, hi: 31.5, step: 0.5 },
-                "random_unless_timed_tune",
-            ),
-            ProfileKind::Ideal => (
-                Grid::Integer { lo: 1, hi: 1_000_000_000 },
-                true,
-                Grid::Step { lo: 0.0, hi: 1_000_000_000_000.0, step: 0.0 },
-                Grid::Step { lo: -200.0, hi: 200.0, step: 0.0 },
-                "deterministic",
-            ),
-        };
-        DeviceDescription {
-            profile: self.profile_ref(),
-            rates,
-            whole_hertz_rates,
-            frequency,
-            gain,
-            max_channels: self.max_channels(),
-            rx_antennas: vec!["RX2".to_owned(), "TX/RX".to_owned()],
-            tx_antennas: vec!["TX/RX".to_owned()],
-            coherent: true,
-            full_duplex: true,
-            hardware_time: true,
-            phase_behavior_on_retune: phase.to_owned(),
-            repeat_max_samples: self.repeat_max_samples(),
-            repeat_align_samples: self.repeat_align_samples(),
-            block_len: self.block_len(),
-            tx_path_delay_samples: self.tx_path_delay_samples(),
-            rx_path_delay_samples: self.rx_path_delay_samples(),
-            timing: self.timing(),
-            performance: self.performance(),
-            defaults: DeviceDescription::x310_defaults(),
-        }
+    /// MR-6's. The `x3xx` values are `ezsdr_radio::x3xx`'s, one place for both Providers
+    /// (design 33 D5).
+    pub(crate) fn description(&self) -> &DeviceDescription {
+        &self.description
     }
 }

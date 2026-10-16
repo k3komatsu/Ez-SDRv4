@@ -116,7 +116,7 @@ fn samples(artifact: &ArtifactRef) -> Vec<(f32, f32)> {
 fn uhd_59_one_spec_mock_and_uhd_profiles() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(10_000));
     let temp = rig::TempDir::new("uhd-59-mock");
-    let mock_profile = rig::spec_profile("x310-like", json!({ "id": "mock" }), &temp.0, json!({}));
+    let mock_profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let run = spec_run(&temp, &spec, &mock_profile, BTreeMap::new());
     let clock = root(&run);
     let mock = finish_at(run, clock, T0 + 20_000_000);

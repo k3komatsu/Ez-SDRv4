@@ -34,6 +34,7 @@ use ezsdr_kernel::stream::BackPressure;
 use ezsdr_kernel::time::{Duration, SampleClockHandle, TimePoint};
 use ezsdr_radio::device::DeviceDescription;
 use ezsdr_radio::payloads::LateCommandPayload;
+use ezsdr_radio::x3xx;
 use ezsdr_radio::{keys, kinds};
 use serde_json::{Value as Json, json};
 
@@ -42,7 +43,7 @@ use self::control::Control;
 use self::rx::{Rx, RxCmd};
 use self::tx::{Tx, TxCmd};
 use crate::device::{Device, Dir};
-use crate::profile::{self, MASTER_CLOCK_HZ, Profile};
+use crate::profile::{self, MASTER_CLOCK_HZ};
 
 fn rejected(message: impl Into<String>) -> ModuleError {
     ModuleError::rejected(message)
@@ -96,13 +97,19 @@ impl UhdRadio {
         if binding.module != crate::module_ref() {
             return Err(rejected("UR-5: the binding names another Module"));
         }
-        let Some(profile) = binding.profile.as_ref().and_then(Profile::from_ref) else {
-            return Err(rejected("UR-5: the profile must be x310-ubx, x310-obx or x310-cbx 0.3.0"));
+        let Some(profile_ref) = binding.profile.as_ref() else {
+            return Err(rejected("UR-5: the profile must be x3xx 0.1.0"));
         };
+        if profile_ref != &profile::profile_ref() {
+            return Err(rejected("UR-5: the profile must be x3xx 0.1.0"));
+        }
         if binding.feed.is_some() {
             return Err(rejected("UR-5: a Provider binding carries no feed"));
         }
-        let allowed = ["args", "id", "clock_source", "time_source", "block_len", "reopen_on_unlock"];
+        let allowed: Vec<&str> = x3xx::SELECTOR_KEYS
+            .into_iter()
+            .chain(["args", "id", "clock_source", "time_source", "block_len", "reopen_on_unlock"])
+            .collect();
         if let Some(name) = binding.selector.keys().find(|k| !allowed.contains(&k.as_str())) {
             return Err(rejected(format!("UR-5: unsupported selector key `{name}`")));
         }
@@ -136,32 +143,34 @@ impl UhdRadio {
             Some(Value::Scalar(Scalar::Int(n))) if (1..=65_536).contains(n) => *n as u32,
             Some(_) => return Err(rejected("UR-5: selector `block_len` must be an Int in 1..=65536")),
         };
+        let selection = x3xx::from_selector(&binding.selector).map_err(|why| rejected(format!("UR-5: {why}")))?;
         let mcr = device.master_clock_rate();
         if mcr != MASTER_CLOCK_HZ {
             return Err(rejected(format!(
                 "UR-5: profile {} needs a 200 MHz master clock; the device runs at {mcr} Hz",
-                profile.name()
+                x3xx::PROFILE
             )));
         }
-        let description = profile.description(block_len);
-        // The profile's range must be the device's: UHD clips a tune outside its front
-        // end's range without a warning, past the RF envelope's check. Only the profile's
+        let description = profile::description(&selection, block_len);
+        // The layout's front ends must be the device's: UHD clips a tune outside its front
+        // end's range without a warning, past the RF envelope's check. Only the layout's
         // channels: slot B empty is a channel on UHD's unknown board.
-        for (dir, name) in [(Dir::Rx, "rx"), (Dir::Tx, "tx")] {
-            let (need, have) = (description.max_channels as usize, device.channels(dir));
+        for (dir, name, elements) in [(Dir::Rx, "rx", &selection.rx), (Dir::Tx, "tx", &selection.tx)] {
+            let need = elements.len();
+            let have = device.channels(dir);
             if have < need {
                 return Err(rejected(format!(
                     "UR-5: profile {} needs {need} {name} channels; the device has {have}",
-                    profile.name()
+                    x3xx::PROFILE
                 )));
             }
-            for chan in 0..need {
+            for (chan, element) in elements.iter().enumerate() {
                 let front_end = device.front_end(dir, chan).map_err(|e| rejected(format!("UR-5: {}", e.message)))?;
-                if !front_end.starts_with(profile.front_end()) {
+                if !front_end.starts_with(element.board.uhd_name()) {
                     return Err(rejected(format!(
                         "UR-5: profile {} needs {} front ends; {name} channel {chan} is `{front_end}`",
-                        profile.name(),
-                        profile.front_end()
+                        x3xx::PROFILE,
+                        element.board.uhd_name()
                     )));
                 }
             }
