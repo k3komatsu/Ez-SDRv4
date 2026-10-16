@@ -552,6 +552,32 @@ fn sb_13_placement_in_spec_refused() {
             path: "resources.radio.memory_domain".to_owned()
         })
     );
+    // `placements` and `executor` are two of SB-13's five names, and the scan runs over
+    // the raw document **before** the shapes: a Spec that names an Executor inside a
+    // scheduled Action's object is refused here, not after the types have had a chance
+    // to drop the field. Both are refused by the scan, which names the path.
+    let doc = serde_json::json!({
+        "version": 1,
+        "schedule": [{ "at": { "clock": "radio", "offset_ticks": 0 },
+                       "action": { "kind": "stop", "executor": "fpga" } }]
+    });
+    assert_eq!(
+        ExperimentSpec::from_json(&doc),
+        Err(SpecError::PlacementInSpec {
+            path: "schedule[0].action.executor".to_owned()
+        })
+    );
+    let doc = serde_json::json!({
+        "version": 1,
+        "schedule": [{ "at": { "clock": "radio", "offset_ticks": 0 },
+                       "action": { "kind": "stop", "placements": { "islands": [] } } }]
+    });
+    assert_eq!(
+        ExperimentSpec::from_json(&doc),
+        Err(SpecError::PlacementInSpec {
+            path: "schedule[0].action.placements".to_owned()
+        })
+    );
 }
 
 #[test]
@@ -5065,6 +5091,54 @@ fn sb_44_a_coercion_of_an_unrequested_key_is_refused_at_validate() {
 }
 
 #[test]
+fn sb_44_a_coercion_of_an_unrequested_key_is_refused_at_prepare() {
+    // The refusal above is `validate`'s; D42's is a **second implementation** at
+    // `prepare`, and `prepare` is the point whose reports the Manifest records. A
+    // report whose `coercions` name a key the request does not is malformed (SB-44),
+    // so the fragment fails the transaction (SB-42): left to the policy loop, the
+    // stray reached the Manifest as a substitution of a value nobody requested, and
+    // that key's own policy default fired for a key nobody named.
+    let spec = minimal_spec();
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("runs");
+    assert!(admission.is_admitted(), "{admission:?}");
+    // What the double's `with_stray_coercion` reports for the same request
+    // (`coercions` is replayed at `prepare`, MA-12), and `minimal_spec`'s resource
+    // never names `test.flag`.
+    let stray = PrepareReport {
+        effective: BTreeMap::new(),
+        coercions: vec![ezsdr_kernel::spec::Coercion {
+            key: key("test.flag"),
+            requested: Value::from(false),
+            applied: Value::from(true),
+            reason: "a key the request does not name".to_owned(),
+        }],
+        warnings: Vec::new(),
+    };
+    let err = collect_prepare(
+        vec![(id("radio"), Ok(stray))],
+        &spec,
+        &profile,
+        &fx.inputs(&providers),
+        &admission,
+    )
+    .expect_err("a coercion of a key the request does not name");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else {
+        panic!("violations")
+    };
+    assert!(
+        v.iter().any(|x| x.check == ns("ezsdr.coercion")
+            && x.reason.contains("SB-44")
+            && x.reason.contains("test.flag")
+            && x.reason.contains("does not name")),
+        "{v:?}"
+    );
+}
+
+#[test]
 fn sb_30_prepare_refuses_an_admission_result_from_another_spec() {
     // SB-30 makes `prepare` a gate in its own right, and `collect_prepare` does not
     // require `plan`'s output — which is why it checks the admission itself. But
@@ -7281,6 +7355,41 @@ fn sb_30_the_check_sees_each_fragment_s_own_value() {
         .admit(&current, &proposed, &[], CheckStage::Runtime)
         .expect_err("a's proposed value is over the ceiling");
     assert!(names_a(&v), "{v:?}");
+}
+
+#[test]
+fn sb_30_an_output_s_params_are_checked_at_validate() {
+    // SB-30's first point is per fragment: one entry per Spec resource, and one per
+    // output holding its `params`. A recorder's `prepare` reports an empty `effective`
+    // (spec 16's Sink), so `validate` is the only point at which a check ever sees an
+    // output's `params`: with the entry gone, a capture whose requested parameters
+    // exceed the envelope was admitted and every check ran over the resources alone.
+    let mut fx = Fixture::new();
+    fx.checks
+        .register(std::sync::Arc::new(TestLimitsCheck::new()));
+    let sink = cf32_sink();
+    fx.sinks.insert(id("rec"), &sink);
+    let mut spec = minimal_spec();
+    let mut rec = output("rec");
+    rec.params.insert(key("test.grid"), Value::num(40.0).unwrap());
+    spec.outputs.push(rec);
+    let mut profile = profile_binding(&["radio"]);
+    profile.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
+    profile.environment = [(ns("test.limits"), serde_json::json!({ "max_grid": 30.0 }))]
+        .into_iter()
+        .collect();
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+
+    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("runs");
+    assert!(!admission.is_admitted(), "{admission:?}");
+    assert!(
+        admission.violations.iter().any(|v| v.check == ns("test.limits")
+            && v.reason.starts_with("rec: ")
+            && v.requested == Some(Value::num(40.0).unwrap())),
+        "{:?}",
+        admission.violations
+    );
 }
 
 #[test]

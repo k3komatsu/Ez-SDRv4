@@ -290,6 +290,24 @@ fn nx_03_a_component_is_loaded_by_its_impl_identity() {
 
     let _ = prepared(&h, &["c"]);
     assert_eq!(log(), vec!["prepare:c:links=c.rx:source=island 100"]);
+
+    // NX-3: the components loaded before a refused one are kept, so `stop` and
+    // `cleanup` reach them (NX-4, MA-7).
+    let h = Harness::new();
+    let mut executor = NativeExecutor::new(vec![scripted()]).unwrap();
+    let mut unknown_d = component("d");
+    unknown_d.implementation.id = "test.other".to_owned();
+    let error = executor
+        .prepare(&island(0, &["c", "d"]), h.ctx(0, ExecutionClass::Simulation, Vec::new(), &[component("c"), unknown_d]))
+        .unwrap_err();
+    assert!(error.message.starts_with("NX-3: component d "), "{}", error.message);
+    executor.stop(StopMode::Orderly).expect("the kept component stops");
+    executor.cleanup();
+    assert_eq!(log(), vec![
+        "prepare:c:links=:source=island 100",
+        "stop:c:Orderly",
+        "cleanup:c",
+    ]);
 }
 
 #[test]

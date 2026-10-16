@@ -317,6 +317,8 @@ pub struct TestProvider {
     pub stray_rejection: bool,
     /// Makes `coerce` panic for the coordinator's containment test (KC-30).
     pub panic_in_coerce: bool,
+    /// Makes `cleanup` panic for the coordinator's containment test (KC-30).
+    pub panic_in_cleanup: bool,
     /// Removes this key from `coerce`'s applied map without rejecting it (KC-26).
     pub omit_applied: Option<Key>,
     /// Additional values inserted into `prepare`'s effective report (KC-27).
@@ -428,6 +430,7 @@ impl TestProvider {
             joint_limit: None,
             stray_rejection: false,
             panic_in_coerce: false,
+            panic_in_cleanup: false,
             omit_applied: None,
             effective: BTreeMap::new(),
         }
@@ -535,6 +538,13 @@ impl TestProvider {
     /// Makes `coerce` panic so the coordinator can prove it contains Module faults (KC-30).
     pub fn panicking_in_coerce(mut self) -> TestProvider {
         self.panic_in_coerce = true;
+        self
+    }
+
+    /// Makes `cleanup` panic so the coordinator can prove it contains Module faults
+    /// (KC-30).
+    pub fn panicking_cleanup(mut self) -> TestProvider {
+        self.panic_in_cleanup = true;
         self
     }
 
@@ -761,6 +771,9 @@ impl Provider for TestProvider {
 
     fn cleanup(&mut self) {
         self.record("cleanup");
+        if self.panic_in_cleanup {
+            panic!("test: panic in cleanup");
+        }
     }
 }
 

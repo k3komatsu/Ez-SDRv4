@@ -14,7 +14,7 @@
 
 ## 2. 次にすること
 
-1. **テストのない条件 112 件の仕分け**（§3．Phase 8 の計画の前に）：拒否・安全（テストを足す候補）／Mock と実機の比較に関わる（Phase 8 の計画の材料）／形式的で残す，の3つに分け，足すかどうかを owner に1回で諮る．
+1. **開発 PC の移行**（§6.1）：Mac から usrp-lnx03 へ．owner が tar を移して clone したら，Claude が §6.1 のチェックリストを進める．
 2. **Phase 8（Mock ↔ X310 parity）の計画（実機なしで Gate P まで進める）**．`plan/phase8/` はまだない．
    - Vision §59 の parity test：測った envelope と Mock profile を比べ，Mock の方が緩ければ失敗．入力は [plan/phase7/00-overview.md](plan/phase7/00-overview.md) §3「Phase 8 inputs」（当時の値．旧 restart model を含むので現行の accepted specs と照合する），NB-5，UR-32，spec 18 の lead の値，§3 の H1〜H5 と B8 の未測定項目．
    - 測定テストと比較の道具を先に書き，FakeDevice でリハーサルしておく（実機の時間は流すだけにする）．`hardware.rs` には `hw_b8_*` が約20本ある．H1〜H5 は未実装．
@@ -41,7 +41,7 @@
 | 保守表の 3・4 | 3：fake は TimeError で burst 全体を捨てるが FPGA の既定は packet 単位（H1 の後に UR-33 と fake を直すか）．4：保持した最後のサンプルの 2 ms 期限（設計の代償として受け入れるか見直すか）．表は [audits-2026-10.md](plan/maintenance/audits-2026-10.md) の「Phase 7 後の保守」（1・2・5 は解決済み） | Phase 8（owner） |
 | spec 22 の残り | 手順3（DA-5 (b)：spec 11 を 08 へ統合）と手順5（spec 10・14・16）．受理済み（2026-10-07）で未実施，Phase 8 の後（手順3は取りやめも owner に確認）．手順2（spec 07・09・18 を DA-1 形式に．文書監査の D4・D5・D3 の spec 側・D11 を含む）は 2026-10-14〜15 に済み，記録は spec 22 の Status 行と各 spec の Changes 行 | 手順3の取りやめ（owner） |
 | 文書監査の残り（2026-10-14） | D2（RX_OVERFLOW の `restart_gap_ns`・`lost`・件数が Mock と UHD で違う，#51 と同じ機構）・D3（X310 の値を2つの Provider で照合するテスト）・D10（値ごとの「緩い向き」）は Phase 8 の計画で（D12〜D14 は 2026-10-16 に済み：`rules.py` が OV/PO の ID を守る，AGENTS.md §2 に OV/PO の扱い，凍結チェックリストに PO，AGENTS.md と handoff の重複を削った） | owner |
-| テストのない条件（2026-10-16） | Test 行の網羅調査（[計画32](plan/maintenance/32-test-line-sweep.md)）で全 spec の Test 行と §6 を直し，どのテストも確かめない条件を各 Test 行の `none named` に 112 件書いた（例：KC-36 の `Release`，spec 14 の descriptor のない component の拒否，UR-12 の node でない source）．どれにテストを足すか | owner（1件ずつ） |
+| テストのない条件（2026-10-16） | Test 行の網羅調査（[計画32](plan/maintenance/32-test-line-sweep.md)）が `none named` に書いた 130 条件を仕分けた．A1（30 件，Kernel・Sink など）はテストを足し済み（2026-10-16，T01〜T33）．A2（14 件，RM/MR/UR の overflow・再開まわり．D2・#51 と同じ所）と B（4 件，実機が要る）は Phase 8 の計画に入れる．C（82 件）は `none named` のまま | Phase 8 の計画 |
 | Provider の id を名乗る写し | 受け取り時の拒否で id を名乗る処理が MockRadio・UHD に約15か所ずつ（MR-18・UR-26 の一部は未固定）．1か所で id を渡す形にまとめると減る | 任意 |
 | 規則ごとの確認への記録 | TM-21 の budget/block period 比較は未実装．TM-16c の既存テストは ManualTimeAuthority で paced Authority の規則を固定しない．SC-29 の SOB なし time jump の `requested_target` 不在と SOB 付き time jump の組合せは未固定．Authority の `now/schedule/cancel` の panic の扱いは規則との対応を要確認 | 凍結前の全規則の確認（§4） |
 | 負荷に弱いテスト | maintenance/J293 の無変異テスト `ur_26_the_shutdown_s_last_burst_ack_waits_on_the_device_s_clock` が16 shard の負荷下で1回失敗（2026-10-14）．再発したら #60 の続きとして調べる．同じく phase7/U17（`tx.rs` の repeat の終わり）が 2026-10-14 の gate で負荷下に1回生き残り，単独の再実行で kill（変異を見逃すテストは本当の生き残りを隠しうる）．Python の `test_v54_sleep_is_run_time` が Mac で 10 s の上限をわずかに超える記録（2026-10-07，その後は未確認） | 再発時 |
@@ -76,23 +76,50 @@
 - **sim02/sim03**：`ssh sim02`．直接つながらないときは owner の `~/.ssh/config` が `ydev` を踏み台にする（トンネル不要）．
 - **外部モデルの運用で分かったこと**：DeepSeek は有料の `opencode-go/deepseek-v4.1-flash`（無料版は並行で数分のうちに 429）．Sol は同時に起動すると全部 0 byte で固まる：1本ずつ，前のものが書き始めてから起動する．出力が約4分 0 byte なら止めてやり直す．DeepSeek は `Session interrupted: inactivity` で途中終了し古い報告の STATUS を残すことがある：報告だけでなくログを見る．
 
-## 6. 実機環境（Phase 8 で使う．2026-10-01 時点）
+## 6. 実機環境と開発 PC（Phase 8 から．2026-10-16 に移行を決定）
 
-手順の本体は [plan/phase7/bench.md](plan/phase7/bench.md)（B0–B9，RF 安全，合格条件），結果は [bench-results.md](plan/phase7/bench-results.md)．
+手順の本体は [plan/phase7/bench.md](plan/phase7/bench.md)（B0–B9，RF 安全，合格条件）．結果は [bench-results.md](plan/phase7/bench-results.md)．
+
+### 6.1 Mac からの移行（2026-10-16，途中の場合はここから）
+
+開発は Mac から Linux PC `usrp-lnx03` に移る．Mac にしかないものは `~/ezsdr-migration-20261016.tar.gz` にまとめた．owner がこれを usrp-lnx03 へコピーし，リポジトリを clone して，Claude Code を起動する．
+
+- [ ] `tar -xzf ezsdr-migration-*.tar.gz && bash ezsdr-migration/restore.sh <clone>` を実行する．中身は次の4つ．
+  - Claude のメモリ
+  - `.cargo/config.toml`
+  - post-commit hook
+  - `v3/` worktree（新しい clone には `master` が無いので `k3komatsu/Ez-SDR` から取る．origin には push しない）
+
+  あわせて venv（`~/.cache/ezsdr-venv`）を作り，Rust・UHD・opencode2・Codex・sim02/sim03 への ssh・docker を確かめる．結果に TODO が出たら片付ける．
+- [ ] `docker build -t ezsdr-v4-dev:uhd4.10 docker/uhd4.10` でイメージを作る．続いて `uhd_usrp_probe` で X300 が見えることを確かめる．
+- [ ] ホスト側の NIC と sysctl の設定（下の 6.3）を済ませる．
+- [ ] `cargo test --workspace` と Python の suite を流し，mutation の gate（`remote_mutate.py all`）が usrp-lnx03 から動くことを確かめる．
+- [ ] 済んだら，この 6.1 を消して1行の記録にする．
+
+### 6.2 usrp-lnx03
 
 | 項目 | 値 |
 |---|---|
-| サーバー | `usrp-lnx02`（Ubuntu 24.04，x86_64，20 core）．`ssh usrp-lnx02`（port 10022，user `komatsu`）．sudo はパスワードが要るので owner に頼む．clone は `~/works/Ez-SDRv4`（作業前に `git switch main && git pull --ff-only`．Phase 7 の頃は `worktree-phase7-impl` だった） |
-| Rust / UHD | ホストには Rust がなく UHD は apt の 4.6（OBX を知らない）．すべて Docker image `ezsdr-v4-dev:uhd4.10`（`docker/uhd4.10/Dockerfile`，UHD 4.10，Rust stable と 1.85.0）の中で．build 出力は volume `ezsdr-v4-cargo-target` |
-| 装置 | USRP X300（serial 347D545），FPGA は UHD 4.10 の HG image（もう書き換えない）．slot A に OBX，slot B は空（2 + 2 channel と出るのが正常）．profile は自動で `x310-obx` |
+| サーバー | `usrp-lnx03`（学内に常設．`ssh sim02`・`ssh sim03`・`ssh ydev` は直接つながる．踏み台の設定は要らない） |
+| Rust / UHD | ホストの Rust で普段の開発をする．標準の build は libuhd を使わない（UR-35）．ホストの UHD は 4.9 で，X300 の FPGA は UHD 4.10 の image（書き換えない）．互換番号が合わず，ホストの `uhd_usrp_probe` は弾かれる（別プロジェクトで確認済み）．そのため `--features uhd` の build・clippy と実機テストは，すべて Docker image `ezsdr-v4-dev:uhd4.10`（`docker/uhd4.10/Dockerfile`）の中で行う．build 出力は volume `ezsdr-v4-cargo-target` |
+| NIC | 10 GbE × 4：`enp1s0f0np0`〜`enp1s0f0np3`．X300 との対応は配線で決まり，NIC 名からは分からない．ホスト側の IP は `ip` で X300 の subnet に合わせる |
+| 装置 | USRP X300（serial 347D545）．FPGA は UHD 4.10 の HG image．slot A に OBX，slot B は空．`ARGS=addr=192.168.40.36`（Phase 7 の値．つなぎ直したら確かめる）．8b では2台目以降が加わる（§2） |
 | RF | OBX の TX/RX → 30 dB 減衰器 → RX2．利得 0 dB，振幅 ≤ 0.5，1 GHz（envelope 999–1001 MHz） |
-| ネットワーク | X300 の 10 GbE ↔ X710 port 0 `enp2s0f0np0`（`192.168.40.10/24`，MTU 9000）．**`ARGS=addr=192.168.40.36`**．2026-10-01 のクローズ時は carrier 0（未接続） |
-| 既知の癖 | ref PLL の lock 失敗が open の約4%（UR-7 の1回の開き直しで救える）．X300 は受信の timed stop を無視する（F1，対処済み）．抜線で UHD が static teardown で abort（UR-29） |
+| 既知の癖 | ref PLL の lock 失敗が open の約4%（UR-7 の1回の開き直しで救える）．X300 は受信の timed stop を無視する（F1，対処済み）．抜線すると UHD が static teardown で abort する（UR-29） |
+
+### 6.3 200 Msps を落とさないホスト設定
+
+ホスト側の設定はコンテナからは変えられない．別プロジェクト（v3 で X300 3台を 200 Msps）の `ibfd_sefdm/set_addr.sh` が実測で決めた．このスクリプトは Phase 8 の計画でこのリポジトリに移す（X300 のアドレスは `EZSDR_UHD_ARGS` か引数から読む）．どの設定も再起動で戻る．
+
+- **NIC の PCIe ASPM を切る**．同じ物理リンクの全ファンクションで切る．これが受信の取りこぼしの本当の原因だった．2026-10-13 にパケット損失率が 4.0 % から 0.00 % に下がった．深い C-state ではなかった．
+- **MTU 9000**．X300 の ICMP には FPGA の ZPU が答えるので，大きい ping は返らなくて正常．ジャンボが効いているかは UHD のログ `[X300] Maximum frame size: NNNN bytes.` で見る．8000 前後なら効いている．
+- **sysctl**：`net.core.wmem_max` を 32 MiB，`rmem_max` を 50 MB，`netdev_max_backlog` を 30000 にする．恒久化は `/etc/sysctl.d/`．
+- **NIC のリング**を上限まで上げる（`ethtool -G`）．
+- **NetworkManager の管理から外す**．外さないと DHCP のつなぎ直しが手で付けた IP を消す．
 
 実行の形（`-w /work` を忘れない）：
 
 ```sh
-cd ~/works/Ez-SDRv4
 docker run --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(id -u):$(id -g)" \
   -v "$PWD:/work" -v "$HOME/ezsdr-bench:/bench" -v ezsdr-v4-cargo-target:/cargo-target -w /work \
   -e EZSDR_UHD_ARGS=addr=192.168.40.36 ezsdr-v4-dev:uhd4.10 \
@@ -100,7 +127,11 @@ docker run --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(i
   > ~/ezsdr-bench/<test>.log 2>&1
 ```
 
-装置の確認：`docker run --rm --network=host ezsdr-v4-dev:uhd4.10 uhd_usrp_probe --args addr=192.168.40.36`．長い出力はファイルに書いてから読む．リンクが上がった直後の `uhd_find_devices` は空振りすることがある．実機で失敗したらその場でコードを直さず，記録 → FakeDevice で再現するテスト → 修正の順．
+装置の確認は `docker run --rm --network=host ezsdr-v4-dev:uhd4.10 uhd_usrp_probe --args addr=192.168.40.36` で行う．
+
+- 長い出力はファイルに書いてから読む．
+- リンクが上がった直後の `uhd_find_devices` は空振りすることがある．
+- 実機で失敗したら，その場でコードを直さない．記録する → FakeDevice で再現するテストを書く → 修正する，の順にする．
 
 ## 7. リポジトリと記録の索引
 

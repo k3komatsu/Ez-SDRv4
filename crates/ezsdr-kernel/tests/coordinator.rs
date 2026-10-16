@@ -2576,6 +2576,68 @@ fn kc_30_a_next_wakeup_panic_in_the_cleanup_drain_is_recorded() {
     assert!(lines.iter().any(|line| line == "rec:stop:Abort"), "{lines:?}");
 }
 
+#[test]
+fn kc_30_a_next_wakeup_panic_in_the_run_loop_fails_the_run() {
+    // KC-30: a panic in the Authority's `next_wakeup` in KC-20's loop ends the Run
+    // `Failed { run }` in abort mode — it neither escapes `advance_to` nor reads as
+    // "no wakeup" and completes the Run. The cleanup drain's own panic is
+    // `kc_30_a_next_wakeup_panic_in_the_cleanup_drain_is_recorded`.
+    let (spec, profile) = output_docs();
+    let probe = Probe::new();
+    let mut assembly = rig_with_faulting_time(SimAuthority::panicking_next_wakeup).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)),
+    );
+    assembly.sinks.insert(Ident::parse("rec").unwrap(), Box::new(RecordingSink::new("rec", &probe)));
+    assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe)));
+    let mut run = start_spec_run(&spec, &profile, assembly).unwrap();
+    let domain = run.now().domain();
+    let error = run
+        .advance_to(TimePoint::new(domain, 10))
+        .expect_err("the loop must end the Run");
+    let ezsdr_kernel::coordinator::RunHandleError::Ended { termination } = error else {
+        panic!("advance_to must report Ended: {error:?}");
+    };
+    assert_eq!(
+        termination,
+        Termination::Failed {
+            stage: Stage::Run,
+            reason: "KC-30: authority panicked during next_wakeup".to_owned(),
+        }
+    );
+    let lines = probe.lines();
+    assert!(lines.iter().any(|line| line == "rec:stop:Abort"), "{lines:?}");
+    let manifest = run.finish();
+    assert!(manifest.hash.is_some());
+}
+
+#[test]
+fn kc_30_a_panic_in_cleanup_is_a_cleanup_failure() {
+    // KC-30: a panic in a Module's `cleanup` (which returns nothing) is that step's
+    // `CleanupFailure` with the reason "a Module panicked", and the Manifest is still
+    // sealed.
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(TestProvider::new("radio", 2).panicking_cleanup()),
+    );
+    let manifest = start_spec_run(&spec_one(), &profile_one(), assembly)
+        .unwrap()
+        .finish();
+    assert!(
+        manifest.termination.cleanup_failures.iter().any(|failure| {
+            failure.step == ezsdr_kernel::run::CleanupStep::RestoreBaseline
+                && failure.fragment.as_ref() == Some(&Ident::parse("radio").unwrap())
+                && failure.reason == "a Module panicked"
+                && !failure.timed_out
+        }),
+        "{:?}",
+        manifest.termination.cleanup_failures
+    );
+    assert!(manifest.hash.is_some());
+}
+
 /// #66 (note 25): a warning a Provider emits from `stop` is still queued when cleanup
 /// reaches step 5 — no round drains after it — and must still mark the artifact open
 /// at its instant (RS-30, KC-42).
@@ -2630,6 +2692,97 @@ fn kc_42_a_mark_delivered_during_an_orderly_cleanup_reaches_the_artifact() {
 #[test]
 fn kc_42_a_mark_delivered_during_an_abort_cleanup_reaches_the_artifact() {
     assert_marked_at(&mark_emitted_while_stopping(true), 150);
+}
+
+#[test]
+fn kc_42_a_span_in_its_own_clock_bounds_the_marks() {
+    // KC-42: an artifact's span is its first `ContinuityMap`'s `first` converted to
+    // the primary root and floored, to its last map's `end` converted and rounded up,
+    // and a mark applies in `[first, end)`; with no map, or a span or a mark whose own
+    // conversion fails, every mark applies. The clock `radio/rx` declares divides the
+    // root at 1 root tick per 3 sample ticks, so sample 91 floors to root 30, sample 88
+    // rounds up to root 30 and sample 91 rounds up to root 31.
+    let (mut spec, mut profile) = output_docs();
+    spec["policies"] = serde_json::json!({ "failure": { "test.custom": "mark_artifact" } });
+    // A second stepped Provider, whose mark is timed in another root: its own
+    // conversion to the primary root fails (KC-42).
+    spec["resources"]["aux"] = spec["resources"]["radio"].clone();
+    profile["bindings"]["aux"] = profile["bindings"]["radio"].clone();
+    profile["bindings"]["radio"]["selector"] = serde_json::json!({ "instance": "radio" });
+    profile["bindings"]["aux"]["selector"] = serde_json::json!({ "instance": "aux" });
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(
+            SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)
+                .declaring("radio/rx", 1, 3)
+                .declaring("radio/tx", 2, 1)
+                .registering_at_arm("radio/rx")
+                .emitting("test.custom", ezsdr_kernel::event::Severity::Warning, 30)
+                .with_wakeups(&[30]),
+        ),
+    );
+    assembly.providers.insert(
+        Ident::parse("aux").unwrap(),
+        Box::new(
+            SteppedProvider::new("aux", TestProvider::new("aux", 2), &probe)
+                .emitting_in_domain(
+                    "test.custom",
+                    ezsdr_kernel::event::Severity::Warning,
+                    29,
+                    ClockDomainId::UTC,
+                )
+                .with_wakeups(&[29]),
+        ),
+    );
+    assembly.sinks.insert(
+        Ident::parse("rec").unwrap(),
+        Box::new(RecordingSink::new("rec", &probe).returning_clock_spans(&[
+            // `first` is sample 91, floored to root 30: the root mark at 30 is inside.
+            (0, &[(91, 120)]),
+            // `end` is sample 88, rounded up to root 30, which is exclusive.
+            (0, &[(60, 88)]),
+            // `end` is sample 91, rounded up to root 31: the root mark at 30 is inside.
+            (0, &[(60, 91)]),
+            // Two maps: the span runs from the first's `first` (root 15) to the last's
+            // `end` (root 54).
+            (0, &[(45, 50), (150, 160)]),
+            // Sample clock 1, which the registry never registered: the span's
+            // conversion fails, so every mark applies.
+            (1, &[(0, 0)]),
+            // No map at all: every mark applies.
+            (0, &[]),
+        ])),
+    );
+    assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe)));
+    let mut run = start_spec_run(&spec, &profile, assembly).unwrap();
+    let domain = run.now().domain();
+    let _ = run.advance_to(TimePoint::new(domain, 30));
+    let manifest = run.finish();
+    let kind = ezsdr_kernel::event::EventKind::parse("test.custom").unwrap();
+    let artifacts = &manifest.artifacts[&Ident::parse("rec").unwrap()];
+    assert_eq!(artifacts.len(), 6, "{artifacts:?}");
+    let marks_of = |index: usize| {
+        let mut marks: Vec<(ClockDomainId, i64)> = artifacts[index]
+            .marks
+            .iter()
+            .map(|mark| {
+                assert_eq!(mark.kind, kind);
+                let domain = mark.time.domain();
+                (domain, mark.time.ticks_in(domain).unwrap())
+            })
+            .collect();
+        marks.sort();
+        marks
+    };
+    let utc = (ClockDomainId::UTC, 29);
+    let mut both = vec![utc, (domain, 30)];
+    both.sort();
+    for index in [0, 2, 3, 4, 5] {
+        assert_eq!(marks_of(index), both, "artifact {index}");
+    }
+    assert_eq!(marks_of(1), vec![utc], "artifact 1: the span's end is exclusive");
 }
 
 #[test]
@@ -3043,19 +3196,60 @@ fn kc_45_manifest_fields() {
 
 #[test]
 fn ka_18_nonzero_link_drops_reach_the_manifest() {
-    let (mut spec, profile) = output_docs();
-    spec["outputs"][0]["feed"]["capacity"] = serde_json::json!(1);
+    // SC-20: the Manifest's `links` is `shared.links` and step 6's `link_drops` zipped by
+    // index, so a record must carry **its own** link's count. One link cannot tell that
+    // apart from a record that always reads the first: the Plan here has two, and only
+    // the Island's drops.
+    // The feed keeps `output_docs`'s capacity of 4, so only the Island's link drops.
+    let (mut spec, mut profile) = output_docs();
+    let mut component = support::recorder_component(support::cf32());
+    component.id = Ident::parse("c1").unwrap();
+    component.implementation.id = "c1".to_owned();
+    spec["graph"] = serde_json::json!({
+        "components": { "c1": component },
+        "links": [{
+            "from": { "component": "radio", "port": "rx" },
+            "to": { "component": "c1", "port": "in" },
+            "policy": "drop_oldest", "capacity": 1
+        }]
+    });
+    profile["bindings"]["exec"] = serde_json::json!({
+        "module": { "id": "ezsdr.test.executor", "version": { "major": 1, "minor": 0, "patch": 0 } }
+    });
+    profile["placements"]["islands"] = serde_json::json!([
+        { "id": { "node": 0, "local": 0 }, "executor": "exec",
+          "components": [{ "component": "c1", "memory_domain": { "node": 0, "local": 0 } }] }
+    ]);
+    // `create_links` finds a placement by its two ends, so the graph link needs its own
+    // ahead of the feed's.
+    profile["placements"]["links"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, serde_json::json!({
+            "link": { "id": "ezsdr.test.link", "version": { "major": 1, "minor": 0, "patch": 0 } },
+            "from": { "component": "radio", "port": "rx" },
+            "to": { "component": "c1", "port": "in" }
+        }));
     let probe = Probe::new();
     let mut assembly = output_assembly(&probe, None, None);
+    assembly.executors.insert(
+        Ident::parse("exec").unwrap(),
+        Box::new(ProbeExecutor::new("x", &probe)),
+    );
     assembly.links.insert(
         mref("ezsdr.test.link"),
-        Box::new(TestLinkModule::new(&probe).seeding_one_drop()),
+        Box::new(TestLinkModule::new(&probe).seeding_one_drop_into("c1")),
     );
     let run = start_spec_run(&spec, &profile, assembly).expect("entry creates a Run");
     let manifest = run.finish();
-    assert_eq!(manifest.links.len(), 1);
-    assert_eq!(manifest.links[0].link, manifest.plan.as_ref().unwrap().links[0].id);
+    let plan = manifest.plan.as_ref().expect("the plan reached the Manifest").links.clone();
+    assert_eq!(plan.len(), 2);
+    assert_eq!(manifest.links.len(), 2);
+    for (i, record) in manifest.links.iter().enumerate() {
+        assert_eq!(record.link, plan[i].id, "record {i} names its own plan link");
+    }
     assert_eq!(manifest.links[0].drops, Some(1));
+    assert_eq!(manifest.links[1].drops, Some(0));
 }
 
 #[test]
@@ -3338,6 +3532,41 @@ fn ka_13_an_invalid_provider_namespace_without_sections_is_not_a_failure() {
 }
 
 #[test]
+fn rs_39_a_section_from_an_instance_whose_id_is_not_a_namespace_is_a_cleanup_failure() {
+    // The other branch of RS-39 for such an instance: no sections is no failure
+    // (`ka_13_…`), but a section it hands in is refused — the writer has no namespace to
+    // be under — and recorded as a cleanup failure, so a reader of the Manifest sees
+    // that the Module's section is missing rather than assuming it wrote nothing.
+    let mut profile = profile_one();
+    profile["bindings"]["radio"]["module"]["id"] = serde_json::json!("TestProvider");
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.registry = run_registry_non_namespace_provider();
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(
+            TestProvider::new("radio", 2)
+                .with_module(mref("TestProvider"))
+                .with_section("test.provider.details", serde_json::json!({ "samples": 1 })),
+        ),
+    );
+    let manifest = start_spec_run(&spec_one(), &profile, assembly)
+        .unwrap()
+        .finish();
+    assert!(manifest.sections.is_empty(), "{:?}", manifest.sections);
+    assert!(
+        manifest
+            .termination
+            .cleanup_failures
+            .iter()
+            .any(|failure| failure
+                .reason
+                .contains("Module id TestProvider is not a Namespace")),
+        "{:?}",
+        manifest.termination.cleanup_failures
+    );
+}
+
+#[test]
 fn kc_36_finish_checks_an_expired_detached_lease() {
     let mut rig = rig(Pacing::FreeRunning);
     let lease = Lease::detached(5000, false, "tok", &*rig.host).unwrap();
@@ -3355,6 +3584,73 @@ fn kc_36_finish_checks_an_expired_detached_lease() {
             cause: StopCause::LeaseExpiry {}
         }
     ));
+}
+
+#[test]
+fn rs_24_both_refused_lease_outcomes_are_logged() {
+    // RS-24's two refusals, through a Session: a wrong token is `AdoptRejected` and a
+    // `Renew` on a non-renewable Lease is `LeaseNotRenewable`, and **both outcomes are
+    // logged**, because the client acts on the log. Swallowing the refusal recorded
+    // `Admitted`, so the client read that it had reclaimed a Lease it never held and
+    // the Run then ended at the TTL it believed it had pushed out.
+    let mut first = rig(Pacing::FreeRunning);
+    let lease = Lease::detached(5000, true, "tok", &*first.host).unwrap();
+    first.assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(TestProvider::new("radio", 2)),
+    );
+    let mut run = connect(&profile_one(), first.assembly, lease).unwrap();
+    let wrong = SessionAction::Adopt {
+        token: "wrong".to_owned(),
+    };
+    let entry = run.submit(wrong.clone(), None).unwrap();
+    let Outcome::Rejected { violations } = entry.outcome else {
+        panic!("a wrong token is refused, not admitted: {:?}", entry.outcome)
+    };
+    assert_eq!(violations[0].check, ns("ezsdr.lease"));
+    assert!(
+        violations[0].reason.contains("RS-24")
+            && violations[0].reason.contains("adoption token does not match"),
+        "{violations:?}"
+    );
+    let manifest = run.finish();
+    assert!(
+        manifest
+            .action_log
+            .iter()
+            .any(|e| e.action == wrong && matches!(e.outcome, Outcome::Rejected { .. })),
+        "{:?}",
+        manifest.action_log
+    );
+
+    // The other outcome: the Lease is Detached and not renewable (RS-24).
+    let mut fixed = rig(Pacing::FreeRunning);
+    let lease = Lease::detached(5000, false, "tok", &*fixed.host).unwrap();
+    fixed.assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(TestProvider::new("radio", 2)),
+    );
+    let mut run = connect(&profile_one(), fixed.assembly, lease).unwrap();
+    let renew = SessionAction::Renew {};
+    let entry = run.submit(renew.clone(), None).unwrap();
+    let Outcome::Rejected { violations } = entry.outcome else {
+        panic!("a non-renewable Lease is refused, not admitted: {:?}", entry.outcome)
+    };
+    assert_eq!(violations[0].check, ns("ezsdr.lease"));
+    assert!(
+        violations[0].reason.contains("RS-24")
+            && violations[0].reason.contains("not renewable"),
+        "{violations:?}"
+    );
+    let manifest = run.finish();
+    assert!(
+        manifest
+            .action_log
+            .iter()
+            .any(|e| e.action == renew && matches!(e.outcome, Outcome::Rejected { .. })),
+        "{:?}",
+        manifest.action_log
+    );
 }
 
 #[test]
@@ -4325,6 +4621,26 @@ fn kf_03_run_child_is_a_session_verb() {
     let _ = run.finish();
 }
 
+#[test]
+fn kc_28_submit_on_a_spec_run_is_not_session() {
+    // KC-28's kind check, on the `submit` side: a Spec Run takes no Session Action.
+    // Without it the Action was admitted, dispatched and logged like any other and the
+    // Run was silently disturbed — the client's Session verbs are `connect`'s, and
+    // `run_child` refuses a Spec Run the same way (kf_03).
+    let mut spec_run = start_spec_run(&spec_one(), &profile_one(), child_assembly()).unwrap();
+    assert_eq!(spec_run.kind(), RunKind::Spec);
+    assert!(matches!(
+        spec_run.submit(SessionAction::Stop { target: None }, None),
+        Err(ezsdr_kernel::coordinator::RunHandleError::NotSession)
+    ));
+    let manifest = spec_run.finish();
+    assert!(
+        manifest.action_log.is_empty(),
+        "the Action took no sequence number and reached no Module: {:?}",
+        manifest.action_log
+    );
+}
+
 /// A check that runs at one stage before the runtime, like the `sim` Vocabulary's.
 struct PlanOnlyCheck(ezsdr_kernel::spec::Namespace, ezsdr_kernel::binding::CheckStage);
 
@@ -4735,6 +5051,57 @@ fn rs_36_a_dropped_stop_must_not_mask_a_dropped_abort() {
             }
         )),
         "a fatal STEP_LIVELOCK dropped behind a Stop must still abort"
+    );
+}
+
+#[test]
+fn rs_36_a_dropped_stop_body_stops_the_run_orderly() {
+    // RS-36's `stop` half, on its own: `ezsdr.LINK_BACKPRESSURE` overridden to `stop`,
+    // its body dropped by the full ring, and no other kind. Only the escalation flag
+    // can end this Run, and it must end it **orderly** — the sibling test above keeps
+    // the fatal kind, whose flag is the one that wins (KC-31, RS-26).
+    let probe = Probe::new();
+    let (mut spec, profile) = distinct_resource_docs(&["left"]);
+    spec["policies"] = serde_json::json!({ "failure": { "ezsdr.LINK_BACKPRESSURE": "stop" } });
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("left").unwrap(),
+        Box::new(
+            SteppedProvider::new("left", TestProvider::new("left", 2), &probe)
+                .emitting("ezsdr.LINK_BACKPRESSURE", ezsdr_kernel::event::Severity::Warning, 150)
+                .flooding(ezsdr_kernel::coordinator::EVENT_RING_DEPTH)
+                .with_wakeups(&[150]),
+        ),
+    );
+    let mut run = start_spec_run(&spec, &profile, assembly).unwrap();
+    let root = run.now().domain();
+    let _ = run.advance_to(TimePoint::new(root, 160));
+    let manifest = run.finish();
+    let kind = ezsdr_kernel::event::EventKind::parse("ezsdr.LINK_BACKPRESSURE").unwrap();
+    assert!(
+        !manifest.events.delivered.iter().any(|event| event.kind == kind),
+        "the body was dropped, so no test can react to it: {:?}",
+        manifest.events.delivered
+    );
+    assert!(
+        manifest.events.delivered.iter().any(|event| event.kind.as_str() == "ezsdr.EVENTS_DROPPED"
+            && event.payload == serde_json::json!({ "kind": "ezsdr.LINK_BACKPRESSURE", "count": 1 })
+            && event.source == EventSource::Kernel),
+        "{:?}",
+        manifest.events.delivered
+    );
+    assert!(matches!(manifest.termination.reason, Termination::Stopped {
+        cause: StopCause::Policy { event: event_kind }
+    } if event_kind == kind));
+    assert!(
+        manifest.run.transitions.iter().any(|row| matches!(
+            row.state,
+            RunState::Stopping {
+                mode: ezsdr_kernel::run::CleanupMode::Orderly
+            }
+        )),
+        "a dropped body of a stop-reacting kind ends the Run orderly: {:?}",
+        manifest.run.transitions
     );
 }
 

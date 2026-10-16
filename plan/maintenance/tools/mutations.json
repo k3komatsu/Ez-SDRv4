@@ -3557,5 +3557,333 @@
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
   "filter": "sb_39_a_sink_and_an_island_fragment_carry_their_declarations"
+ },
+ {
+  "id": "T01",
+  "name": "TM-16c: callbacks tied at one instant fire in reverse insertion order",
+  "file": "crates/ezsdr-kernel/src/time/authority.rs",
+  "old": "            let seq = state.next_seq;",
+  "new": "            let seq = u64::MAX - state.next_seq;",
+  "crate": "ezsdr-kernel",
+  "test_bin": "time_model",
+  "filter": "tm_16_authority_order_and_now"
+ },
+ {
+  "id": "T02",
+  "name": "TM-17a: advance_to wakes one wait_until waiter instead of every one",
+  "file": "crates/ezsdr-kernel/src/time/authority.rs",
+  "old": "            }\n            self.woken.notify_all();\n            Ok(fired)",
+  "new": "            }\n            self.woken.notify_one();\n            Ok(fired)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "lib",
+  "filter": "tm_17a_every_waiter_wakes"
+ },
+ {
+  "id": "T03",
+  "name": "TM-17b: the default callback cap is a million, hiding a runaway behind a hang",
+  "file": "crates/ezsdr-kernel/src/time/authority.rs",
+  "old": "        pub const DEFAULT_CALLBACK_CAP: usize = 1_000;",
+  "new": "        pub const DEFAULT_CALLBACK_CAP: usize = 1_000_000;",
+  "crate": "ezsdr-kernel",
+  "test_bin": "time_model",
+  "filter": "tm_17b_the_default_cap_is_one_thousand"
+ },
+ {
+  "id": "T04",
+  "name": "SC-10: SEQ_DISCONTINUITY no longer implies GAP_BEFORE",
+  "file": "crates/ezsdr-kernel/src/stream/block.rs",
+  "old": "        if f.intersects(BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY | BlockFlags::ALIGNMENT)",
+  "new": "        if f.intersects(BlockFlags::RESTARTED | BlockFlags::ALIGNMENT)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_10_block_flag_implications"
+ },
+ {
+  "id": "T05",
+  "name": "SC-20: every Manifest link record carries the first link's drop count",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                    drops: drops.get(i).copied(),",
+  "new": "                    drops: drops.get(0).copied(),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "ka_18_nonzero_link_drops_reach_the_manifest"
+ },
+ {
+  "id": "T06",
+  "name": "SC-25: the underflow event is timed at now, not at the report's tick",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        let time = match (self.clock, report.tick) {\n            (Some(clock), Some(tick)) => TimePoint::new(clock.domain, (tick - clock.origin).div_euclid(clock.n)),\n            _ => self.core.at(self.core.now()),\n        };",
+  "new": "        let time = self.core.at(self.core.now());",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "sc_25_the_underflow_event_carries_its_own_instant"
+ },
+ {
+  "id": "T07",
+  "name": "SC-31: SEQ_DISCONTINUITY takes precedence over RESTARTED",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "    } else if flags.contains(BlockFlags::RESTARTED) {\n        GapCause::OverflowRestart {}\n    } else if flags.contains(BlockFlags::SEQ_DISCONTINUITY) {\n        GapCause::SequenceError {}",
+  "new": "    } else if flags.contains(BlockFlags::SEQ_DISCONTINUITY) {\n        GapCause::SequenceError {}\n    } else if flags.contains(BlockFlags::RESTARTED) {\n        GapCause::OverflowRestart {}",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_31_continuity_causes"
+ },
+ {
+  "id": "T08",
+  "name": "SB-13: `placements` and `executor` are not scanned in a Spec",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "    &[\"placements\", \"placement\", \"executor\", \"memory_domain\", \"island\",",
+  "new": "    &[\"placement\", \"memory_domain\", \"island\",",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_13_placement_in_spec_refused"
+ },
+ {
+  "id": "T09",
+  "name": "SB-30: an output's `params` are not a fragment entry at validate",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "    for o in &spec.outputs {\n        requested.insert(o.id.clone(), o.params.clone());\n    }",
+  "new": "    for o in &spec.outputs {\n        requested.insert(o.id.clone(), BTreeMap::new());\n    }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_30_an_output_s_params_are_checked_at_validate"
+ },
+ {
+  "id": "T10",
+  "name": "SB-44: a report's coercion of a key the request does not name is not refused at prepare",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "        if let Some(req) = spec.resources.get(fragment) {\n            if let Some(stray) = r\n                .coercions\n                .iter()\n                .find(|c| !req.requires.contains_key(&c.key))\n            {\n                violations.push(Violation {\n                    check: Namespace::parse(\"ezsdr.coercion\").expect(\"a valid literal\"),\n                    key: Some(stray.key.clone()),\n                    requested: Some(stray.requested.clone()),\n                    reason: format!(\n                        \"SB-44: {} reports a coercion of {}, which its request does not name\",\n                        fragment, stray.key\n                    ),\n                });\n            }\n        }\n",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_of_an_unrequested_key_is_refused_at_prepare"
+ },
+ {
+  "id": "T11",
+  "name": "RS-24: a refused Adopt and Renew are swallowed and logged as admitted",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "        Some(ControlOp::Adopt { token }) => {\n            if let Err(error) = run.lease.adopt(&token, \"client\") {\n                return rejected(\n                    run,\n                    now,\n                    action,\n                    vec![violation(\"ezsdr.lease\", format!(\"RS-24: {error}\"))],\n                );\n            }\n        }",
+  "new": "        Some(ControlOp::Adopt { token }) => {\n            let _ = run.lease.adopt(&token, \"client\");\n        }",
+  "old2": "        Some(ControlOp::Renew) => {\n            if let Err(error) = run.lease.renew(&*run.shared.ctx.host_clock) {\n                return rejected(\n                    run,\n                    now,\n                    action,\n                    vec![violation(\"ezsdr.lease\", format!(\"RS-24: {error}\"))],\n                );\n            }\n        }",
+  "new2": "        Some(ControlOp::Renew) => {\n            let _ = run.lease.renew(&*run.shared.ctx.host_clock);\n        }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "rs_24_both_refused_lease_outcomes_are_logged"
+ },
+ {
+  "id": "T12",
+  "name": "RS-36: a dropped body of a stop-reacting kind raises no escalation flag",
+  "file": "crates/ezsdr-kernel/src/event.rs",
+  "old": "        let code = match self.reaction(kind, severity) {\n            Reaction::Stop => 1,\n            Reaction::Abort => 2,\n            _ => return,\n        };",
+  "new": "        let code = match self.reaction(kind, severity) {\n            Reaction::Abort => 2,\n            _ => return,\n        };",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "rs_36_a_dropped_stop_body_stops_the_run_orderly"
+ },
+ {
+  "id": "T13",
+  "name": "RS-39: a section from an instance whose id is not a Namespace is dropped without a record",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                        let Some(owner) = Namespace::parse(slot.module.id.as_str()).ok() else {\n                            if !sections.is_empty() {\n                                manifest_failures.push(manifest_failure(\n                                    Some(first),\n                                    format!(\"KC-44: Module id {} is not a Namespace\", slot.module.id),\n                                ));\n                            }\n                            continue;\n                        };",
+  "new": "                        let Some(owner) = Namespace::parse(slot.module.id.as_str()).ok() else {\n                            continue;\n                        };",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "rs_39_a_section_from_an_instance_whose_id_is_not_a_namespace_is_a_cleanup_failure"
+ },
+ {
+  "id": "T14",
+  "name": "KC-28: a Spec Run admits a Session Action through `submit`",
+  "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
+  "old": "        if self.kind() == RunKind::Spec {\n            return Err(RunHandleError::NotSession);\n        }\n        pipeline::submit(self, action, waveform)",
+  "new": "        pipeline::submit(self, action, waveform)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_28_submit_on_a_spec_run_is_not_session"
+ },
+ {
+  "id": "T15",
+  "name": "KC-30: a next_wakeup panic in KC-20's loop reads as no wakeup and completes the Run",
+  "file": "crates/ezsdr-kernel/src/coordinator/stepping.rs",
+  "old": "            let wakeup = match contain_all(|| self.shared.authority.next_wakeup()) {\n                Ok(wakeup) => wakeup,\n                Err(()) => {\n                    super::ending::request(\n                        &self.shared,\n                        Termination::Failed { stage: Stage::Run, reason: \"KC-30: authority panicked during next_wakeup\".to_owned() },\n                        CleanupMode::Abort,\n                    );\n                    return;\n                }\n            };",
+  "new": "            let wakeup = match contain_all(|| self.shared.authority.next_wakeup()) {\n                Ok(wakeup) => wakeup,\n                Err(()) => None,\n            };",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_30_a_next_wakeup_panic_in_the_run_loop_fails_the_run"
+ },
+ {
+  "id": "T16",
+  "name": "KC-30: a panic in a Module's cleanup escapes the step instead of being contained",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                let cleanup = contain(|| {\n                    guard.cleanup();\n                    Ok(())\n                });",
+  "new": "                guard.cleanup();\n                let cleanup: Result<(), crate::module_api::ModuleError> = Ok(());",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_30_a_panic_in_cleanup_is_a_cleanup_failure"
+ },
+ {
+  "id": "T17",
+  "name": "KC-42: the span is read in the artifact's own clock instead of the primary root",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                            let start = self\n                                .shared\n                                .ctx\n                                .clocks\n                                .convert(first.first, self.shared.primary)\n                                .map(|point| point.floor());\n                            let end = super::state::ceil_convert(\n                                &self.shared.ctx.clocks,\n                                last.end,\n                                self.shared.primary,\n                            );",
+  "new": "                            let start = Ok::<_, crate::time::TimeError>(first.first);\n                            let end = Ok::<_, crate::time::TimeError>(last.end);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_42_a_span_in_its_own_clock_bounds_the_marks"
+ },
+ {
+  "id": "T18",
+  "name": "KC-42: the span's end is inclusive",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                                        at.try_cmp(*start).is_ok_and(|o| o.is_ge())\n                                            && at.try_cmp(*end).is_ok_and(|o| o.is_lt())",
+  "new": "                                        at.try_cmp(*start).is_ok_and(|o| o.is_ge())\n                                            && at.try_cmp(*end).is_ok_and(|o| o.is_le())",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_42_a_span_in_its_own_clock_bounds_the_marks"
+ },
+ {
+  "id": "T19",
+  "name": "KC-42: the span ends at the first ContinuityMap's end, not the last one's",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                        .zip(artifact.continuity.last())",
+  "new": "                        .zip(artifact.continuity.first())",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_42_a_span_in_its_own_clock_bounds_the_marks"
+ },
+ {
+  "id": "T20",
+  "name": "KC-42: an artifact with no map, or a mark whose own conversion fails, takes no mark",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                        let applies = match &span {\n                            None => true,\n                            Some(Err(_)) => true,",
+  "new": "                        let applies = match &span {\n                            None => false,\n                            Some(Err(_)) => true,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_42_a_span_in_its_own_clock_bounds_the_marks",
+  "old2": "                                    Err(_) => true,",
+  "new2": "                                    Err(_) => false,"
+ },
+ {
+  "id": "T21",
+  "name": "HD-8: a binding's Module version is not checked",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "        if binding.module != module_ref() {",
+  "new": "        if binding.module.id != module_ref().id {",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_09_prepare_cases"
+ },
+ {
+  "id": "T22",
+  "name": "HD-8: a binding's profile is accepted, not refused",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "        if binding.profile.is_some() {\n            return Err(ModuleError::rejected(\n                \"HD-8: the capture Sink has no profiles\",\n            ));\n        }\n",
+  "new": "",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_09_prepare_cases"
+ },
+ {
+  "id": "T23",
+  "name": "HD-8: a selector's `dir` that is not a string falls back to a default",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "        let dir = match binding.selector.get(&Ident::parse(\"dir\").expect(\"a valid selector key\")) {\n            Some(Value::Scalar(Scalar::Str(dir))) => PathBuf::from(dir),\n            _ => {\n                return Err(ModuleError::rejected(\n                    \"HD-8: selector must contain exactly the `dir` string\",\n                ));\n            }\n        };",
+  "new": "        let dir = match binding.selector.get(&Ident::parse(\"dir\").expect(\"a valid selector key\")) {\n            Some(Value::Scalar(Scalar::Str(dir))) => PathBuf::from(dir),\n            _ => PathBuf::from(\"dir\"),\n        };",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_09_prepare_cases"
+ },
+ {
+  "id": "T24",
+  "name": "HD-10: a carry received before a capture is attributed to the capture that starts",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "        let recording_before_block = self.queue.front().is_some_and(|capture| capture.started);",
+  "new": "        let recording_before_block = true;",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_10_a_carry_before_a_capture_is_discarded"
+ },
+ {
+  "id": "T25",
+  "name": "HD-16: a capture whose metadata write fails is announced anyway",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "                .map_err(|error| {\n                    ModuleError::rejected(format!(\"HD-15: cannot write {}: {error}\", meta_path.display()))\n                })?;",
+  "new": "                .map_err(|error| {\n                    ModuleError::rejected(format!(\"HD-15: cannot write {}: {error}\", meta_path.display()))\n                }).ok();",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_16_a_capture_whose_metadata_write_fails_is_not_announced"
+ },
+ {
+  "id": "T26",
+  "name": "CH-9: a loss cuts the transmitter one sample before the round's instant",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                self.cut_segments(cut);",
+  "new": "                self.cut_segments(cut - 1);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "ch_09_a_faulted_round_does_not_depend_on_the_stepping_order"
+ },
+ {
+  "id": "T27",
+  "name": "NX-3: every identity is checked before any component of the Island is kept",
+  "file": "crates/ezsdr-exec-native/src/lib.rs",
+  "old": "        let source = ctx.source.clone();\n        for link in &ctx.links {",
+  "new": "        let source = ctx.source.clone();\n        for entry in &island.components {\n            let descriptor = ctx.components.get(&entry.component).cloned().ok_or_else(|| {\n                ModuleError::rejected(format!(\"NX-4: no descriptor for component {}\", entry.component))\n            })?;\n            self.load(&descriptor)?;\n        }\n        for link in &ctx.links {",
+  "crate": "ezsdr-exec-native",
+  "test_bin": "native_executor",
+  "filter": "nx_03_a_component_is_loaded_by_its_impl_identity"
+ },
+ {
+  "id": "T28",
+  "name": "EA-17: a channel with no valid stretch is returned as one array",
+  "file": "python/ezsdr/session.py",
+  "old": "            len(segments) != 1\n            or segments[0][\"start\"] != m[\"first\"]\n            or segments[0][\"len\"] != m[\"end\"][\"ticks\"] - m[\"first\"][\"ticks\"]",
+  "new": "            segments and (len(segments) > 1 or segments[0][\"start\"] != m[\"first\"] or segments[0][\"len\"] != m[\"end\"][\"ticks\"] - m[\"first\"][\"ticks\"])",
+  "python": "test_easy_api.SampleValidity.test_ea_17_a_channel_with_no_valid_stretch_is_refused"
+ },
+ {
+  "id": "T29",
+  "name": "EA-17: a channel's several valid stretches are checked by their total length",
+  "file": "python/ezsdr/session.py",
+  "old": "            len(segments) != 1\n            or segments[0][\"start\"] != m[\"first\"]\n            or segments[0][\"len\"] != m[\"end\"][\"ticks\"] - m[\"first\"][\"ticks\"]",
+  "new": "            sum(segment[\"len\"] for segment in segments) != m[\"end\"][\"ticks\"] - m[\"first\"][\"ticks\"]",
+  "python": "test_easy_api.SampleValidity.test_ea_17_two_valid_stretches_on_a_channel_are_refused"
+ },
+ {
+  "id": "T30",
+  "name": "EA-17: a continuity whose channel count changes takes its first map's count",
+  "file": "python/ezsdr/session.py",
+  "old": "    counts = {int(m[\"channels\"]) for m in maps}",
+  "new": "    counts = {int(maps[0][\"channels\"])}",
+  "python": "test_easy_api.SampleValidity.test_ea_17_a_channel_count_change_is_refused"
+ },
+ {
+  "id": "T31",
+  "name": "KC-42: an artifact whose span does not convert to the primary root takes no mark",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "                            Some(Err(_)) => true,",
+  "new": "                            Some(Err(_)) => false,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_42_a_span_in_its_own_clock_bounds_the_marks"
+ },
+ {
+  "id": "T32",
+  "name": "SC-25: the report's tick is converted without subtracting the sending clock's origin",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "            (Some(clock), Some(tick)) => TimePoint::new(clock.domain, (tick - clock.origin).div_euclid(clock.n)),",
+  "new": "            (Some(clock), Some(tick)) => TimePoint::new(clock.domain, tick.div_euclid(clock.n)),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "sc_25_the_underflow_event_carries_its_own_instant"
+ },
+ {
+  "id": "T33",
+  "name": "SC-25: the report's tick is rounded up to the next sample instead of floored",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "(tick - clock.origin).div_euclid(clock.n)",
+  "new": "(tick - clock.origin + clock.n - 1).div_euclid(clock.n)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "sc_25_the_underflow_event_carries_its_own_instant"
  }
 ]

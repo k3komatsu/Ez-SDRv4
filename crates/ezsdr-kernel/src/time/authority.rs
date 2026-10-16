@@ -127,6 +127,11 @@ mod manual {
         woken: Condvar,
         host_base: std::time::Instant,
         callback_cap: usize,
+        /// TM-17a's plural test: the channel a `wait_until` caller announces on, under
+        /// the state mutex, that it is about to block. The field and the send exist
+        /// only under `cfg(test)`, so a production build carries no hook.
+        #[cfg(test)]
+        ready: Option<std::sync::mpsc::Sender<()>>,
     }
 
     impl ManualTimeAuthority {
@@ -171,6 +176,8 @@ mod manual {
                 woken: Condvar::new(),
                 host_base: std::time::Instant::now(),
                 callback_cap: Self::DEFAULT_CALLBACK_CAP,
+                #[cfg(test)]
+                ready: None,
             })
         }
 
@@ -357,6 +364,8 @@ mod manual {
                 return Ok(());
             }
             let mut state = self.lock();
+            #[cfg(test)]
+            let mut announced = false;
             loop {
                 let now = state
                     .roots
@@ -365,6 +374,16 @@ mod manual {
                     .now;
                 if now >= target {
                     return Ok(());
+                }
+                // TM-17a's plural test: say, under the state mutex and on a channel of
+                // its own, that this caller is about to block — never through `woken`,
+                // whose notify is the behaviour that test varies.
+                #[cfg(test)]
+                if !announced {
+                    announced = true;
+                    if let Some(ready) = &self.ready {
+                        let _ = ready.send(());
+                    }
                 }
                 state = self.woken.wait(state).unwrap_or_else(|e| e.into_inner());
             }
@@ -403,6 +422,87 @@ mod manual {
                 .roots
                 .get_mut(&h.root)
                 .is_some_and(|rs| rs.pending.remove(&(h.ticks, h.seq)).is_some())
+        }
+    }
+
+    /// TM-17a's plural test sits beside the Authority, not in `tests/`: it drives the
+    /// Authority's own `wait_until` and reads the test-only `ready` channel, which
+    /// announces a caller's wait from under the state mutex so that every waiter is
+    /// blocked before the one advance.
+    #[cfg(test)]
+    mod tests {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        use super::*;
+        use crate::time::{ClockDomain, EpochRef, Rational};
+
+        fn sim_authority() -> (ClockDomainId, ManualTimeAuthority) {
+            let reg = Arc::new(ClockRegistry::new());
+            let root = reg.allocate_id().expect("a free id");
+            reg.register(ClockDomain::root(
+                root,
+                Rational::new(200_000_000, 1).expect("a valid rate"),
+                EpochRef::Arbitrary {
+                    set_by: "sim.manual_authority_test".to_owned(),
+                },
+            ))
+            .expect("the root registers");
+            let auth = ManualTimeAuthority::new(reg, root, &[], Pacing::FreeRunning)
+                .expect("an authority over a registered root");
+            (root, auth)
+        }
+
+        #[test]
+        fn tm_17a_every_waiter_wakes() {
+            // TM-17a wakes **every** `wait_until` waiter, so with one waiter a
+            // `notify_one` implementation is indistinguishable. Eight threads call
+            // `wait_until(50)` itself, and the one advance that reaches 50 must
+            // release all eight.
+            //
+            // The parking is synchronized, never slept on: just before a caller blocks
+            // on the Authority's condvar it announces, under the state mutex, that it
+            // is about to wait. Once all eight announcements have arrived, taking that
+            // same mutex once proves each caller has gone on to `wait` — a caller still
+            // holding it between its send and its wait would delay that hold — so the
+            // advance below cannot overtake a waiter and pass on a `notify_one`
+            // implementation.
+            let (root, mut auth) = sim_authority();
+            const WAITERS: usize = 8;
+            let (ready_tx, ready_rx) = mpsc::channel();
+            auth.ready = Some(ready_tx);
+            let auth = Arc::new(auth);
+            let (done_tx, done_rx) = mpsc::channel();
+            for i in 0..WAITERS {
+                let (auth, done) = (auth.clone(), done_tx.clone());
+                std::thread::spawn(move || {
+                    auth.wait_until(TimePoint::new(root, 50))
+                        .expect("the instant is reached");
+                    done.send(i).expect("the channel lives");
+                });
+            }
+            drop(done_tx);
+            for _ in 0..WAITERS {
+                ready_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("every waiter announces its wait");
+            }
+            drop(auth.lock());
+            assert_eq!(auth.advance_to(TimePoint::new(root, 50)), Ok(0));
+            // Every waiter was blocked when the advance ran, so the notify has already
+            // gone out: this bound only bounds a failure — under a `notify_one`, one
+            // waiter is released and the rest are left blocked.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut done = Vec::new();
+            while done.len() < WAITERS {
+                let left = deadline.saturating_duration_since(Instant::now());
+                match done_rx.recv_timeout(left) {
+                    Ok(i) => done.push(i),
+                    Err(_) => panic!("every waiter wakes ({} of {WAITERS})", done.len()),
+                }
+            }
+            done.sort_unstable();
+            assert_eq!(done, (0..WAITERS).collect::<Vec<_>>());
         }
     }
 }
