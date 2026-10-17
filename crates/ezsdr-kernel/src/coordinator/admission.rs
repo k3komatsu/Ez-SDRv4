@@ -200,7 +200,7 @@ pub(super) fn admit_with(
     if let Action::UpdateParameter { target, key, value, .. } = &action {
         if !matches!(target, crate::event::Target::Component { .. }) {
             if let Some(decl) = shared.ctx.registry.key_decl(key) {
-                crate::binding::check_value_kind(decl, value)
+                crate::binding::check_value_kind(decl, key, value)
                     .map_err(|error| vec![violation_with("ezsdr.value", key, value, error.to_string())])?;
             }
         }

@@ -1723,6 +1723,7 @@ pub fn run_registry_classed() -> ezsdr_kernel::module_api::ModuleRegistry {
     }
     vocabulary.keys.push(ezsdr_kernel::spec::KeyDecl {
         key: ezsdr_kernel::spec::Key::parse("test.capture").expect("a valid key"),
+        indexed: None,
         kind: ezsdr_kernel::spec::ValueKind::Bool,
         coercible: false,
         coercion_default: ezsdr_kernel::spec::CoercionPolicy::Reject,

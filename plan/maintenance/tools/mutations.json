@@ -2356,8 +2356,8 @@
   "id": "J206",
   "name": "an output's params value skips its KeyDecl kind check (item 3)",
   "file": "crates/ezsdr-kernel/src/plan/validation.rs",
-  "old": "            KeyedEntry::Output { value, .. } | KeyedEntry::ScheduledUpdate { value, .. } => {\n                check_value_kind(d, value)?;\n            }",
-  "new": "            KeyedEntry::Output { .. } => {}\n            KeyedEntry::ScheduledUpdate { value, .. } => {\n                check_value_kind(d, value)?;\n            }",
+  "old": "            KeyedEntry::Output { value, .. } | KeyedEntry::ScheduledUpdate { value, .. } => {\n                check_value_kind(d, key, value)?;\n            }",
+  "new": "            KeyedEntry::Output { .. } => {}\n            KeyedEntry::ScheduledUpdate { value, .. } => {\n                check_value_kind(d, key, value)?;\n            }",
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
   "filter": "sb_02_values_are_checked_against_their_key_decl"
@@ -2518,7 +2518,7 @@
   "id": "J226",
   "name": "the requested value's kind is not checked against its KeyDecl at admission (item 3)",
   "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
-  "old": "    if let Action::UpdateParameter { target, key, value, .. } = &action {\n        if !matches!(target, crate::event::Target::Component { .. }) {\n            if let Some(decl) = shared.ctx.registry.key_decl(key) {\n                crate::binding::check_value_kind(decl, value)\n                    .map_err(|error| vec![violation_with(\"ezsdr.value\", key, value, error.to_string())])?;\n            }\n        }\n    }",
+  "old": "    if let Action::UpdateParameter { target, key, value, .. } = &action {\n        if !matches!(target, crate::event::Target::Component { .. }) {\n            if let Some(decl) = shared.ctx.registry.key_decl(key) {\n                crate::binding::check_value_kind(decl, key, value)\n                    .map_err(|error| vec![violation_with(\"ezsdr.value\", key, value, error.to_string())])?;\n            }\n        }\n    }",
   "new": "    if let Action::UpdateParameter { key, value, .. } = &action {\n        if let Some(decl) = shared.ctx.registry.key_decl(key) {\n            let _ = decl;\n        }\n    }",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
@@ -2668,8 +2668,8 @@
   "id": "J242",
   "name": "the requested value's kind is checked against a Vocabulary KeyDecl for a component target (review P1-2)",
   "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
-  "old": "    if let Action::UpdateParameter { target, key, value, .. } = &action {\n        if !matches!(target, crate::event::Target::Component { .. }) {\n            if let Some(decl) = shared.ctx.registry.key_decl(key) {\n                crate::binding::check_value_kind(decl, value)\n                    .map_err(|error| vec![violation_with(\"ezsdr.value\", key, value, error.to_string())])?;\n            }\n        }\n    }",
-  "new": "    if let Action::UpdateParameter { key, value, .. } = &action {\n        if let Some(decl) = shared.ctx.registry.key_decl(key) {\n            crate::binding::check_value_kind(decl, value)\n                .map_err(|error| vec![violation_with(\"ezsdr.value\", key, value, error.to_string())])?;\n        }\n    }",
+  "old": "    if let Action::UpdateParameter { target, key, value, .. } = &action {\n        if !matches!(target, crate::event::Target::Component { .. }) {\n            if let Some(decl) = shared.ctx.registry.key_decl(key) {\n                crate::binding::check_value_kind(decl, key, value)\n                    .map_err(|error| vec![violation_with(\"ezsdr.value\", key, value, error.to_string())])?;\n            }\n        }\n    }",
+  "new": "    if let Action::UpdateParameter { key, value, .. } = &action {\n        if let Some(decl) = shared.ctx.registry.key_decl(key) {\n            crate::binding::check_value_kind(decl, key, value)\n                .map_err(|error| vec![violation_with(\"ezsdr.value\", key, value, error.to_string())])?;\n        }\n    }",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kc_24_a_component_value_takes_no_vocabulary_kind_check"
@@ -4067,5 +4067,195 @@
   "crate": "ezsdr-acceptance",
   "test_bin": "x3xx",
   "filter": "d3_a_cbx_layout_is_not_coherent_on_either_provider"
+ },
+ {
+  "id": "P19",
+  "name": "a numbered segment's index may carry a leading zero (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "        && (s.len() == 1 || !s.starts_with('0'))",
+  "new": "        && true",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "sb_02a_a_numbered_declaration_declares_the_indexed_keys"
+ },
+ {
+  "id": "P20",
+  "name": "a numbered segment's index may have ten digits (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "        && s.len() <= 9",
+  "new": "        && s.len() <= 10",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "sb_02a_a_numbered_declaration_declares_the_indexed_keys"
+ },
+ {
+  "id": "P21",
+  "name": "a numbered declaration's own spelling counts as a key (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "                    is_index_of(s, decl[j])",
+  "new": "                    s.strip_prefix(decl[j]).is_some()",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "sb_02a_a_numbered_declaration_declares_the_indexed_keys"
+ },
+ {
+  "id": "P22",
+  "name": "a numbered declaration is never consulted (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/module_api/registry.rs",
+  "old": "            .find_map(|v| v.keys.iter().find(|d| d.declares(key)))",
+  "new": "            .find_map(|v| v.keys.iter().find(|d| d.indexed.is_none() && d.declares(key)))",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "sb_02a_a_numbered_declaration_declares_the_indexed_keys"
+ },
+ {
+  "id": "P24",
+  "name": "an exact declaration beside the numbered one it covers is not refused (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "                (true, false) => is_index_of(b[j], a[j]),",
+  "new": "                (true, false) => false,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "sb_02a_registration_refuses_two_declarations_that_cover_one_key"
+ },
+ {
+  "id": "P25",
+  "name": "two numbered declarations of one word are not refused (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "                (true, false) => is_index_of(b[j], a[j]),\n                (false, true) => is_index_of(a[j], b[j]),\n                _ => a[j] == b[j],",
+  "new": "                (true, true) => false,\n                (true, false) => is_index_of(b[j], a[j]),\n                (false, true) => is_index_of(a[j], b[j]),\n                _ => a[j] == b[j],",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "sb_02a_registration_refuses_two_declarations_that_cover_one_key"
+ },
+ {
+  "id": "P26",
+  "name": "two declarations of one Vocabulary may cover one key (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/module_api/registry.rs",
+  "old": "            for other in v.keys.iter().skip(i + 1) {\n                if decl.overlaps(other) {\n                    return Err(overlap_error(&v.id, decl, &v.id, other));\n                }\n            }",
+  "new": "            let _ = i;",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "sb_02a_registration_refuses_two_declarations_that_cover_one_key"
+ },
+ {
+  "id": "P27",
+  "name": "a registered Vocabulary's declarations are not scanned for an overlap (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/module_api/registry.rs",
+  "old": "            for (id, registered) in &self.vocabularies {\n                for other in &registered.keys {\n                    if decl.overlaps(other) {\n                        return Err(overlap_error(&v.id, decl, id, other));\n                    }\n                }\n            }",
+  "new": "            let _ = &self.vocabularies;",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "sb_02a_registration_refuses_two_declarations_that_cover_one_key"
+ },
+ {
+  "id": "P28",
+  "name": "a numbered segment may lie past the key's last segment (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/module_api/registry.rs",
+  "old": "            if position >= segments.len() {",
+  "new": "            if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "sb_02a_registration_refuses_a_numbered_segment_out_of_range_or_outside_the_path"
+ },
+ {
+  "id": "P29",
+  "name": "a numbered segment may point at a Vocabulary prefix segment (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/module_api/registry.rs",
+  "old": "            if position < prefix_segments {",
+  "new": "            if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "sb_02a_registration_refuses_a_numbered_segment_out_of_range_or_outside_the_path"
+ },
+ {
+  "id": "P30",
+  "name": "a numbered segment need not be a word of [a-z]+ (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/module_api/registry.rs",
+  "old": "            if !segments[position].bytes().all(|b| b.is_ascii_lowercase()) {",
+  "new": "            if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "sb_02a_registration_refuses_a_numbered_segment_out_of_range_or_outside_the_path"
+ },
+ {
+  "id": "P31",
+  "name": "a constraint's kind refusal names the declaration's spelling (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/binding.rs",
+  "old": "                key: key.to_string(),\n                expected: format!(\"{:?}\", decl.kind),\n                found: format!(\"{:?}\", v.kind()),",
+  "new": "                key: decl.key.to_string(),\n                expected: format!(\"{:?}\", decl.kind),\n                found: format!(\"{:?}\", v.kind()),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_02a_a_kind_refusal_names_the_concrete_key"
+ },
+ {
+  "id": "P32",
+  "name": "a value's kind refusal names the declaration's spelling (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/binding.rs",
+  "old": "    Err(SpecError::KeyShape {\n        key: key.to_string(),\n        expected: format!(\"{:?}\", decl.kind),\n        found: format!(\"{:?}\", value.kind()),\n    })",
+  "new": "    Err(SpecError::KeyShape {\n        key: decl.key.to_string(),\n        expected: format!(\"{:?}\", decl.kind),\n        found: format!(\"{:?}\", value.kind()),\n    })",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_02a_a_kind_refusal_names_the_concrete_key"
+ },
+ {
+  "id": "P33",
+  "name": "the admission kind check names the declaration's key (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "                crate::binding::check_value_kind(decl, key, value)",
+  "new": "                crate::binding::check_value_kind(decl, &decl.key, value)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "sb_02a_a_session_update_reads_a_numbered_declaration_s_class"
+ },
+ {
+  "id": "P34",
+  "name": "the coercion policy is looked up by the declaration and not the concrete key (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "            spec.policies.coercion.get(&c.key).copied(),",
+  "new": "            spec.policies.coercion.iter().find(|(k, _)| inputs.registry.key_decl(k).map(|d| &d.key) == inputs.registry.key_decl(&c.key).map(|d| &d.key)).map(|(_, policy)| *policy),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_02a_a_numbered_key_resolves_its_policy_by_the_concrete_key"
+ },
+ {
+  "id": "P35",
+  "name": "two equal exact declarations are not refused (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "        a.len() == b.len()\n            && (0..a.len()).all(|j| match (pa == Some(j), pb == Some(j)) {",
+  "new": "        a.len() == b.len()\n            && (pa.is_some() || pb.is_some())\n            && (0..a.len()).all(|j| match (pa == Some(j), pb == Some(j)) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "sb_02a_registration_refuses_two_declarations_that_cover_one_key"
+ },
+ {
+  "id": "P36",
+  "name": "an exact declaration beside the numbered one that covers it is not refused (self exact, other numbered) (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "                (false, true) => is_index_of(a[j], b[j]),",
+  "new": "                (false, true) => false,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "sb_02a_registration_refuses_two_declarations_that_cover_one_key"
+ },
+ {
+  "id": "P37",
+  "name": "a numbered declaration matches any fixed segment (SB-2a)",
+  "file": "crates/ezsdr-kernel/src/spec.rs",
+  "old": "                    *s == decl[j]",
+  "new": "                    true",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "sb_02a_a_numbered_declaration_matches_only_its_own_fixed_segments"
+ },
+ {
+  "id": "P38",
+  "name": "a declaration outside its Vocabulary's prefix is registered (MA-34)",
+  "file": "crates/ezsdr-kernel/src/module_api/registry.rs",
+  "old": "            if !decl.key.has_prefix(&v.prefix) {",
+  "new": "            if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "module_api",
+  "filter": "ma_34_registration_refuses_a_declaration_outside_its_prefix"
  }
 ]

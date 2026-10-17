@@ -5595,6 +5595,52 @@ impl ezsdr_kernel::module_api::Provider for KindWrongProvider {
 }
 
 #[test]
+fn sb_02a_a_session_update_reads_a_numbered_declaration_s_class() {
+    // SB-2a at KC-24: a Session's `SetParameter` names a concrete key, so step 5 reads
+    // its update class from the numbered declaration that covers it, and step 6's
+    // kind refusal names that same concrete key. The declaration's own spelling is no
+    // key at all, exactly as another undeclared key is none.
+    let mut run = session_with_provider(Box::new(TestProvider::new("radio", 2)));
+    let set = |key_name: &str, value: Value| SessionAction::SetParameter {
+        target: support::target("radio"),
+        key: Key::parse(key_name).unwrap(),
+        value,
+    };
+    // `test.item` declares `hardware_timed` (SB-2a's numbered declaration), so an Int
+    // value is admitted and recorded under the concrete key (KC-25).
+    let admitted = run.submit(set("test.item0", Value::from(3)), None).unwrap();
+    assert!(
+        matches!(admitted.outcome, Outcome::Admitted { .. }),
+        "{admitted:?}"
+    );
+    assert_eq!(
+        run.effective()[&Ident::parse("radio").unwrap()].get(&Key::parse("test.item0").unwrap()),
+        Some(&Value::from(3)),
+        "the admitted update is recorded under the concrete key"
+    );
+    // The spelling `test.item` has no declaration to give a class.
+    let spelled = run.submit(set("test.item", Value::from(3)), None).unwrap();
+    assert!(
+        matches!(spelled.outcome, Outcome::Rejected { ref violations }
+            if violations.iter().any(|v| v.check == ns("ezsdr.update_class")
+                && v.reason.contains("declares no update class"))),
+        "the declaration's own spelling names no declaration: {spelled:?}"
+    );
+    // A `Bool` into the numbered `Int` declaration is step 6's refusal, and the words
+    // it hands back name the key the caller wrote.
+    let wrong_kind = run.submit(set("test.item1", Value::from(true)), None).unwrap();
+    assert!(
+        matches!(wrong_kind.outcome, Outcome::Rejected { ref violations }
+            if violations.iter().any(|v| v.check == ns("ezsdr.value")
+                && v.key == Some(Key::parse("test.item1").unwrap())
+                && v.reason.contains("test.item1")
+                && v.reason.contains("wanted Int"))),
+        "step 6 names the concrete key: {wrong_kind:?}"
+    );
+    let _ = run.finish();
+}
+
+#[test]
 fn kc_24_an_admission_refusal_leaves_no_configuration_and_no_action_id() {
     // Pre-freeze item 3: a coerced value that fails step 11 is refused; the refused
     // update never reaches the configuration (KC-25), and a refused Action consumes no

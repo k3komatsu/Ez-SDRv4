@@ -502,12 +502,20 @@ pub enum CapabilityValue {
 
 /// What a Vocabulary declares about one key (spec 05, MA-35).
 ///
-/// Rule: SB-2, SB-7, SB-45.
+/// Rule: SB-2, SB-2a, SB-7, SB-45.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct KeyDecl {
     /// The key this declares (SB-2).
     pub key: Key,
+    /// The zero-based position of the declaration's one numbered segment, when it has
+    /// one: the declaration then stands for every key of the same length whose
+    /// segments equal `key`'s except there, where `key`'s segment — a word of
+    /// `[a-z]+` — is followed by a decimal index. Absent declares `key` alone, and
+    /// then that spelling **is** a key; with a numbered segment the declaration does
+    /// not cover its own spelling (SB-2a).
+    #[serde(default)]
+    pub indexed: Option<u8>,
     /// The shape its value takes (SB-2).
     pub kind: ValueKind,
     /// Whether a constraint the capability does not satisfy directly may be
@@ -523,6 +531,64 @@ pub struct KeyDecl {
     /// without this RS-17 has nothing to consult for them (SB-2, RS-17, MA-35).
     #[serde(default)]
     pub update_class: Option<crate::module_api::UpdateClass>,
+}
+
+/// Whether `s` is the decimal index a numbered segment carries (SB-2a): one to nine
+/// ASCII digits, and no leading zero (`0` itself is an index).
+fn is_index(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 9
+        && s.bytes().all(|b| b.is_ascii_digit())
+        && (s.len() == 1 || !s.starts_with('0'))
+}
+
+/// Whether `word` followed by an index spells `concrete` (SB-2a).
+fn is_index_of(concrete: &str, word: &str) -> bool {
+    concrete.strip_prefix(word).is_some_and(is_index)
+}
+
+impl KeyDecl {
+    /// The declaration's segments (SB-2a).
+    fn segments(&self) -> Vec<&str> {
+        self.key.as_str().split('.').collect()
+    }
+
+    /// The declaration's segment that carries the index, when it has one (SB-2a).
+    fn numbered(&self) -> Option<usize> {
+        self.indexed.map(usize::from)
+    }
+
+    /// Whether this declaration declares `key` (SB-2a): the same number of segments,
+    /// each equal to the declaration's except at the numbered segment, where it is
+    /// the declaration's segment followed by an index.
+    pub(crate) fn declares(&self, key: &Key) -> bool {
+        let decl = self.segments();
+        let segments: Vec<&str> = key.as_str().split('.').collect();
+        let numbered = self.numbered();
+        decl.len() == segments.len()
+            && segments.iter().enumerate().all(|(j, s)| {
+                if numbered == Some(j) {
+                    is_index_of(s, decl[j])
+                } else {
+                    *s == decl[j]
+                }
+            })
+    }
+
+    /// Whether two declarations cover one concrete key (SB-2a): the same number of
+    /// segments, and at every position, where neither is numbered, the two segments
+    /// equal, where exactly one is numbered, the other's segment is its word followed
+    /// by an index, and where both are numbered, the two words equal.
+    pub(crate) fn overlaps(&self, other: &KeyDecl) -> bool {
+        let (a, b) = (self.segments(), other.segments());
+        let (pa, pb) = (self.numbered(), other.numbered());
+        a.len() == b.len()
+            && (0..a.len()).all(|j| match (pa == Some(j), pb == Some(j)) {
+                (true, false) => is_index_of(b[j], a[j]),
+                (false, true) => is_index_of(a[j], b[j]),
+                _ => a[j] == b[j],
+            })
+    }
 }
 
 /// What to do when a Provider coerces a requested value (SB-45, SB-46).

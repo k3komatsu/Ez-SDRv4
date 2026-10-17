@@ -36,6 +36,29 @@ impl Factories {
     }
 }
 
+/// How a declaration is named in a refusal (SB-2a): its spelling, and the segment it
+/// numbers, so that two declarations of one spelling are told apart.
+fn decl_name(d: &KeyDecl) -> String {
+    match d.indexed {
+        Some(position) => format!("{} (numbered segment {position})", d.key),
+        None => d.key.to_string(),
+    }
+}
+
+/// The refusal of two declarations that cover one concrete key (SB-2a), naming both.
+fn overlap_error(
+    a_owner: &Namespace,
+    a: &KeyDecl,
+    b_owner: &Namespace,
+    b: &KeyDecl,
+) -> ModuleError {
+    ModuleError::rejected(format!(
+        "SB-2a: {} of vocabulary {a_owner} and {} of vocabulary {b_owner} cover one concrete key",
+        decl_name(a),
+        decl_name(b)
+    ))
+}
+
 impl ModuleRegistry {
     /// An empty registry (MA-32).
     pub fn new() -> ModuleRegistry {
@@ -44,6 +67,8 @@ impl ModuleRegistry {
 
     /// Registers a Vocabulary, whose keys, event kinds, verbs and checks the Kernel
     /// then enforces without interpreting them (MA-35).
+    ///
+    /// Rule: MA-32, MA-34, MA-35, SB-2a.
     pub fn register_vocabulary(&mut self, v: VocabularyDescriptor) -> Result<(), ModuleError> {
         if self.vocabularies.contains_key(&v.id) {
             return Err(ModuleError::rejected(format!(
@@ -51,6 +76,7 @@ impl ModuleRegistry {
                 v.id
             )));
         }
+        self.check_key_declarations(&v)?;
         // RS-14: a Session burst's target is resolved at `compile`, so `RejectAtPlan`
         // names a stage this Action never passes through and the verb would be
         // undispatchable (SC-27, RS-51).
@@ -163,6 +189,72 @@ impl ModuleRegistry {
         Ok(())
     }
 
+    /// Refuses `v`'s declarations the Kernel cannot resolve (MA-34, SB-2a): a
+    /// declaration whose key is not under `v`'s own prefix, which no lookup would
+    /// ever reach; a numbered declaration whose position is out of range or points at
+    /// one of the Vocabulary prefix's segments, or whose numbered segment is not a
+    /// word of `[a-z]+`; and any two declarations that cover one concrete key — one of
+    /// `v`'s beside another of `v`'s, or beside a registered Vocabulary's — a
+    /// duplicate exact spelling as much as an overlap with a numbered one.
+    fn check_key_declarations(&self, v: &VocabularyDescriptor) -> Result<(), ModuleError> {
+        // The prefix first, whatever the declaration's form: a key another prefix owns
+        // would never be resolved, and the position check below reads the prefix's
+        // own segments.
+        for decl in &v.keys {
+            if !decl.key.has_prefix(&v.prefix) {
+                return Err(ModuleError::rejected(format!(
+                    "MA-34: {} of vocabulary {} is not under its prefix {}",
+                    decl.key, v.id, v.prefix
+                )));
+            }
+        }
+        let prefix_segments = v.prefix.as_str().split('.').count();
+        // The position and the grammar first, so that two declarations the overlap
+        // scan sees are both well formed and their refusal names that alone.
+        for decl in &v.keys {
+            let Some(position) = decl.indexed else {
+                continue;
+            };
+            let segments: Vec<&str> = decl.key.as_str().split('.').collect();
+            let position = usize::from(position);
+            if position >= segments.len() {
+                return Err(ModuleError::rejected(format!(
+                    "SB-2a: {} numbers segment {position}, and the key has {} segments",
+                    decl.key,
+                    segments.len()
+                )));
+            }
+            if position < prefix_segments {
+                return Err(ModuleError::rejected(format!(
+                    "SB-2a: {} numbers segment {position}, which is the Vocabulary prefix \
+                     {}'s",
+                    decl.key, v.prefix
+                )));
+            }
+            if !segments[position].bytes().all(|b| b.is_ascii_lowercase()) {
+                return Err(ModuleError::rejected(format!(
+                    "SB-2a: {} numbers `{}`, which is not a word of [a-z]+",
+                    decl.key, segments[position]
+                )));
+            }
+        }
+        for (i, decl) in v.keys.iter().enumerate() {
+            for other in v.keys.iter().skip(i + 1) {
+                if decl.overlaps(other) {
+                    return Err(overlap_error(&v.id, decl, &v.id, other));
+                }
+            }
+            for (id, registered) in &self.vocabularies {
+                for other in &registered.keys {
+                    if decl.overlaps(other) {
+                        return Err(overlap_error(&v.id, decl, id, other));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The registered Vocabulary, if any (MA-34).
     pub fn vocabulary(&self, id: &Namespace) -> Option<&VocabularyDescriptor> {
         self.vocabularies.get(id)
@@ -184,18 +276,20 @@ impl ModuleRegistry {
     }
 
     /// The `KeyDecl` for a key, resolved through the Vocabulary that owns its
-    /// prefix, or `None` when no registered Vocabulary declares it. The refusal is
-    /// the caller's, because its context names it differently: `validate()` refuses
-    /// an unknown prefix (`SB-2`, `UnknownKeyPrefix`), while admission refuses an
-    /// undeclared update class or kind after its target resolution (pre-freeze item
-    /// 3). The Kernel never interprets the key's meaning.
+    /// prefix, or `None` when no registered Vocabulary declares it. A declaration
+    /// whose `indexed` is set declares the concrete keys SB-2a describes, and
+    /// registration keeps the declaration that covers a key unique, so one pass finds
+    /// it. The refusal is the caller's, because its context names it differently:
+    /// `validate()` refuses an unknown prefix (`SB-2`, `UnknownKeyPrefix`), while
+    /// admission refuses an undeclared update class or kind after its target
+    /// resolution (pre-freeze item 3). The Kernel never interprets the key's meaning.
     ///
-    /// Rule: MA-34, SB-2.
+    /// Rule: MA-34, SB-2, SB-2a.
     pub fn key_decl(&self, key: &Key) -> Option<&KeyDecl> {
         self.vocabularies
             .values()
             .filter(|v| key.has_prefix(&v.prefix))
-            .find_map(|v| v.keys.iter().find(|d| d.key == *key))
+            .find_map(|v| v.keys.iter().find(|d| d.declares(key)))
     }
 
     /// The compilation a Vocabulary declares for one of its verbs (RS-13a, RS-14).
