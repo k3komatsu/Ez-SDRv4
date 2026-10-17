@@ -12,7 +12,7 @@ use ezsdr_kernel::module_api::{ActionReceiver, UpdateClass};
 use ezsdr_kernel::spec::{Ident, Value};
 use ezsdr_kernel::stream::{BackPressure, BlockRef, DataLink, Direction, DropCarry, PublishOutcome};
 use ezsdr_kernel::time::{AbsoluteDeadline, Rational};
-use ezsdr_radio::timeline::{Config, Stream, plan};
+use ezsdr_radio::timeline::{Channels, Config, Stream, plan};
 use super::super::test_support::target_of;
 use generator::{Change, Class, Entry, Event, Fault, Op, Sequence, Terms};
 
@@ -73,7 +73,7 @@ impl Record {
 fn terms(direction: Direction) -> Terms {
     let ticks = |ns: i64| ns / 5;
     let origin = if direction == Direction::Rx { T0 } else { 0 };
-    let config = Config { channels: 1, ratio: Rational::new(200, 1).unwrap() };
+    let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
     let stream = Stream { direction, origin, config, lead: 50 * MS, call: 2_000, allowance: ticks(DELIVERY_ALLOWANCE_NS) };
     Terms { t0: T0, root_hz: 200_000_000, timed_lead: ticks(DEVICE_LEAD_NS), stream }
 }

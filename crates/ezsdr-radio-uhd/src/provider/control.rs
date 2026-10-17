@@ -20,7 +20,7 @@ use ezsdr_radio::payloads::{
     ClockLostPayload, ClockReference, CommandQueueFullPayload, LateCommandPayload, TimeErrorCause,
     TimeErrorOutcome, TimeErrorPayload,
 };
-use ezsdr_radio::timeline::{self, Config, Item, Kind, Line, Segment};
+use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, Segment, NO_RELEASE};
 use ezsdr_radio::{keys, kinds};
 use serde_json::json;
 
@@ -98,7 +98,7 @@ impl ColdConfig {
         let ratio = segment.config.ratio;
         let rate = core.mcr as f64 * ratio.den() as f64 / ratio.num() as f64;
         let settings = Settings { rate: Some(rate), ..self.settings(&updates, segment.origin) };
-        core.configure(dir, usize::from(segment.config.channels), &settings)
+        core.configure(dir, segment.config.channels.count() as usize, &settings)
     }
 }
 
@@ -119,7 +119,7 @@ pub(crate) struct Planned {
 
 impl Planned {
     pub fn channels(&self) -> usize {
-        usize::from(self.segment.config.channels)
+        self.segment.config.channels.count() as usize
     }
 
     /// Root ticks per sample.
@@ -196,7 +196,7 @@ impl Control {
         let line = |direction: Direction, origin: i64, channels: usize, n: i64| Line::new(timeline::Stream {
             direction,
             origin,
-            config: Config { channels: channels as u16, ratio: Rational::new(n.max(1) as u64, 1).expect("a positive ratio") },
+            config: Config { channels: Channels::first(channels as u32), ratio: Rational::new(n.max(1) as u64, 1).expect("a positive ratio") },
             lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, direction)),
             call,
             allowance,
@@ -302,7 +302,7 @@ impl Control {
                 if device || node == Some(&self.core.rx_id) {
                     let mut streams = lock(&self.core.streams);
                     let (seq, now) = (streams.next_seq(), self.core.now());
-                    streams.book(&self.core, Dir::Rx, Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop });
+                    streams.book(&self.core, Dir::Rx, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop });
                 }
             }
             Action::Stop { target: None } | Action::Abort { .. } => {}
@@ -321,7 +321,7 @@ impl Control {
                 let (seq, now) = (streams.next_seq(), self.core.now());
                 let (e, _) = timeline::command_instant(streams.lines[Dir::Rx as usize].as_ref(), requested, now, seq, false);
                 streams.configs[Dir::Rx as usize].insert(seq, (config, false));
-                streams.book(&self.core, Dir::Rx, Item { e, seq, ready: now, delivered: None, refused: false, kind: Kind::Start });
+                streams.book(&self.core, Dir::Rx, Item { e, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Start });
             }
             Action::Command { .. } => {
                 self.core.command_rejected(Some(id), "command", "UR-26: not supported by this Provider")
@@ -567,9 +567,9 @@ impl Control {
             ready = self.core.now();
             streams = lock(&self.core.streams);
         }
-        let config = Config { channels: channels as u16, ratio };
+        let config = Config { channels: Channels::first(channels as u32), ratio };
         streams.configs[dir as usize].insert(seq, (segment_config, from_none));
-        if streams.book(&self.core, dir, Item { e, seq, ready, delivered: None, refused: false, kind: Kind::Cold(config) }) {
+        if streams.book(&self.core, dir, Item { e, seq, ready, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config) }) {
             self.colds.insert((e, seq), (key.clone(), value));
             self.core.timing(json!({ "what": "cold_change", "key": key, "e": e, "booked_at": now, "ready": ready }));
         } else {
@@ -596,7 +596,7 @@ impl Control {
         let current = {
             let streams = lock(&self.core.streams);
             let last = streams.lines[Dir::Tx as usize].as_ref().and_then(|line| line.plan.last()).filter(|segment| segment.cut.is_none());
-            streams.tx_clocks.last().map(|(clock, _)| *clock).zip(last.map(|segment| usize::from(segment.config.channels)))
+            streams.tx_clocks.last().map(|(clock, _)| *clock).zip(last.map(|segment| segment.config.channels.count() as usize))
         };
         let Some((clock, channels)) = current else {
             return reject("UR-21: no transmit channel is configured");

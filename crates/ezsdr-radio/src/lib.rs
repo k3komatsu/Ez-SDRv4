@@ -16,7 +16,7 @@ use ezsdr_kernel::policy::{EventKindDecl, EventKindRegistry, Reaction};
 use ezsdr_kernel::spec::{
     CoercionPolicy, Ident, Key, KeyDecl, Namespace, Scalar, Value, ValueKind,
 };
-use ezsdr_kernel::stream::LatePolicy;
+use ezsdr_kernel::stream::{Direction, LatePolicy};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -625,6 +625,26 @@ pub(crate) fn numbered_index(segment: &str, word: &str) -> Option<u32> {
         return None;
     }
     digits.parse().ok()
+}
+
+/// RM-12, RM-13, RM-16: with a layout description (RM-29) an Action may name a stream's
+/// node instead of the device: `target` is `<device>/rx/s<k>` or `<device>/tx/s<k>`, its
+/// `k` written as SB-2a's index. Returns that stream's direction and number, or `None` for
+/// another node. The one place such a target is read.
+pub fn stream_target(
+    device: &ezsdr_kernel::id::ResourceId,
+    target: &ezsdr_kernel::id::ResourceId,
+) -> Option<(Direction, u32)> {
+    let stream = target.parent()?;
+    if stream.parent().as_ref() != Some(device) {
+        return None;
+    }
+    let direction = match stream.segments().last()? {
+        "rx" => Direction::Rx,
+        "tx" => Direction::Tx,
+        _ => return None,
+    };
+    Some((direction, numbered_index(target.segments().last()?, keys::STREAM)?))
 }
 
 /// RM-33's per-channel judgement of a configuration that holds RM-27 channel keys.

@@ -21,7 +21,7 @@ use ezsdr_kernel::module_api::{Fidelity, StopMode};
 use ezsdr_kernel::stream::{BackPressure, BlockFlags, BlockHeader, BlockRef, DataLink, Direction, DropCarry, PublishOutcome};
 use ezsdr_kernel::time::{ManualTimeAuthority, Rational, TimePoint};
 use ezsdr_radio::kinds;
-use ezsdr_radio::timeline::{Config, Item, Kind, Line, Segment, Stream, plan};
+use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Segment, Stream, NO_RELEASE, plan};
 use generator::{Change, Fault, Op, Sequence, Terms};
 
 use super::{Rx, RxCmd, Turn};
@@ -92,7 +92,7 @@ fn extra(seed: u64, sequence: &Sequence) -> Extra {
 fn terms(block: i64) -> Terms {
     let description = crate::profile::ubx_description(block as u32);
     let ticks = |ns: i64| (ns + 4) / 5;
-    let config = Config { channels: 1, ratio: Rational::new(200, 1).unwrap() };
+    let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
     let lead = ticks(ezsdr_radio::timeline::start_lead_ns(&description.timing, Direction::Rx));
     let stream = Stream { direction: Direction::Rx, origin: T0, config, lead, call: block, allowance: ticks(DELIVERY_ALLOWANCE_NS) };
     Terms { t0: T0, root_hz: 200_000_000, timed_lead: 0, stream }
@@ -186,7 +186,7 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
         .map(|item| Item { refused: observed.refused.contains(&item.seq), ..*item })
         .collect();
     if let Some((at, mode)) = stop {
-        booked.push(Item { e: at, seq: STOP_SEQ, ready: at, delivered: None, refused: false, kind: Kind::End { abort: mode == StopMode::Abort } });
+        booked.push(Item { e: at, seq: STOP_SEQ, ready: at, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::End { abort: mode == StopMode::Abort } });
     }
     booked.sort_by_key(|item| (item.ready, item.seq));
     // Every segment any plan had, in the order of their origins, as the device would run it

@@ -27,7 +27,7 @@ use ezsdr_hostmem::{HostPool, HOST_MEMORY, write_cf32};
 use ezsdr_sim::{FaultEntry, FaultKind, SimRng};
 use ezsdr_sim::channel::{Medium, RootInstant};
 use ezsdr_kernel::module_api::InputStore;
-use ezsdr_radio::timeline::{self, Item, Kind, Line, Segment};
+use ezsdr_radio::timeline::{self, Item, Kind, Line, Segment, NO_RELEASE};
 use ezsdr_radio::x3xx;
 
 pub use device::{DeviceModel, DeviceTimeError};
@@ -153,7 +153,7 @@ struct Rx {
 
 impl Rx {
     fn config(&self) -> timeline::Config {
-        timeline::Config { channels: self.channels, ratio: self.ratio }
+        timeline::Config { channels: timeline::Channels::first(u32::from(self.channels)), ratio: self.ratio }
     }
 }
 
@@ -792,9 +792,9 @@ impl MockRadio {
         // cuts at its instant, having delivered the block in progress (MR-20).
         let abort = mode == StopMode::Abort && !lost;
         let delivered = self.rx.as_ref().filter(|_| abort).map(|rx| rx.next);
-        self.book_rx(Item { e: now, seq, ready: now, delivered, refused: false, kind: Kind::End { abort } })?;
+        self.book_rx(Item { e: now, seq, ready: now, release: NO_RELEASE, delivered, refused: false, kind: Kind::End { abort } })?;
         if let Some(line) = self.tx_line.as_mut() {
-            line.book(Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::End { abort } }).map_err(rm26)?;
+            line.book(Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::End { abort } }).map_err(rm26)?;
             self.tx_reconcile()?;
         }
         // An orderly stop delivers the block in progress up to its cut; a loss has (MR-20).
@@ -876,7 +876,7 @@ impl MockRadio {
                     .map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?
             }
         };
-        let channels = segment.config.channels;
+        let channels = segment.config.channels.count() as u16;
         self.rx = Some(Rx { handle, domain: None, origin: segment.origin, ratio: segment.config.ratio, channels, next: 0, planned: None, flags: BlockFlags::NONE, lost: None, overflows: Vec::new(), ended: false });
         self.pool = Some(HostPool::new(self.profile.block_len() as usize * 2 * channels as usize * 8));
         self.rx_from = segment.origin.saturating_add(1);
@@ -1001,7 +1001,7 @@ impl MockRadio {
     /// A stream's timeline terms on this profile (RM-25, MR-18).
     fn line(&self, direction: Direction, origin: i64, config: &BTreeMap<ezsdr_kernel::spec::Key, Value>) -> Result<Line, ModuleError> {
         let side = if direction == Direction::Rx { "rx" } else { "tx" };
-        let channels = int_config(config, &format!("radio.{side}.channels")).max(0) as u16;
+        let channels = timeline::Channels::first(int_config(config, &format!("radio.{side}.channels")).max(0) as u32);
         let ratio = self.ratio(num_config(config, &format!("radio.{side}.sample_rate_hz")))?;
         let clocks = self.clocks.as_ref().expect("prepared clocks");
         let root = self.root.expect("prepared root");
@@ -1038,7 +1038,7 @@ impl MockRadio {
                 }
                 if device || node == Some(&rx) {
                     let seq = self.arrival();
-                    self.book_rx(Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop })?;
+                    self.book_rx(Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop })?;
                 }
                 Ok(())
             }
@@ -1051,7 +1051,7 @@ impl MockRadio {
                 };
                 let seq = self.arrival();
                 let (e, _) = timeline::command_instant(self.rx_line.as_ref(), requested, now, seq, false);
-                self.book_rx(Item { e, seq, ready: now, delivered: None, refused: false, kind: Kind::Start })?;
+                self.book_rx(Item { e, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Start })?;
                 Ok(())
             }
             other => {
@@ -1090,7 +1090,7 @@ impl MockRadio {
         let channels = if current {
             self.effective_channels(ezsdr_radio::keys::TX_CHANNELS)
         } else {
-            self.tx_line.as_ref().map_or(0, |line| i64::from(line.plan[index].config.channels))
+            self.tx_line.as_ref().map_or(0, |line| i64::from(line.plan[index].config.channels.count()))
         };
         let unit = channels.max(0) as u64 * 8;
         if node != Some(&tx_id) || channels <= 0 || size_bytes == 0 || unit == 0 || size_bytes % unit != 0 || !metadata_empty {
@@ -1371,7 +1371,7 @@ impl MockRadio {
             let line = if direction == Direction::Rx { self.rx_line.as_ref() } else { self.tx_line.as_ref() };
             if let Some(old) = line.map(|line| line.stream.config) {
                 let ratio = if channels > 0 { self.ratio(rate)? } else { self.ratio(rate).unwrap_or(old.ratio) };
-                let item = Item { e: tick, seq: order, ready: now, delivered: None, refused: false, kind: Kind::Cold(timeline::Config { channels, ratio }) };
+                let item = Item { e: tick, seq: order, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(timeline::Config { channels: timeline::Channels::first(u32::from(channels)), ratio }) };
                 if direction == Direction::Rx {
                     self.book_rx(item)?;
                 } else if let Some(line) = self.tx_line.as_mut() {

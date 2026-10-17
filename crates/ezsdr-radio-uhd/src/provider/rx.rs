@@ -16,7 +16,7 @@ use ezsdr_kernel::stream::{BlockFlags, BlockHeader, ChannelMask, Direction, Publ
 use ezsdr_kernel::time::{Rational, SampleClockHandle, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::{AlignmentErrorPayload, LateCommandPayload, RxOverflowCause, RxOverflowPayload};
-use ezsdr_radio::timeline::Config;
+use ezsdr_radio::timeline::{Channels, Config};
 use serde_json::json;
 
 use super::control::Planned;
@@ -76,7 +76,7 @@ impl Stream {
         Stream {
             clock,
             handle: Some(handle),
-            config: Config { channels: channels as u16, ratio: Rational::new(clock.n as u64, 1).expect("a positive ratio") },
+            config: Config { channels: Channels::first(channels as u32), ratio: Rational::new(clock.n as u64, 1).expect("a positive ratio") },
             channels,
             expected: 0,
             pending: Vec::new(),
@@ -622,7 +622,7 @@ mod tests {
     use super::super::control::ColdConfig;
     use ezsdr_kernel::module_api::Link;
     use ezsdr_kernel::stream::BackPressure;
-    use ezsdr_radio::timeline::{Item, Kind, Line, Segment};
+    use ezsdr_radio::timeline::{Item, Kind, Line, Segment, NO_RELEASE};
 
     fn link() -> Arc<dyn ezsdr_kernel::stream::DataLink> {
         let decl = ezsdr_kernel::stream::DataLinkDecl {
@@ -642,7 +642,7 @@ mod tests {
         let stream = core.id.child("rx").unwrap();
         let handle = core.clocks.declare_sample_clock(stream, core.root, Rational::new(200, 1).unwrap()).unwrap();
         let clock = Clock { domain: handle.id(), origin: 0, n: 200 };
-        let config = Config { channels: channels as u16, ratio: Rational::new(200, 1).unwrap() };
+        let config = Config { channels: Channels::first(channels as u32), ratio: Rational::new(200, 1).unwrap() };
         lock(&core.streams).lines[Dir::Rx as usize] = Some(Line::new(ezsdr_radio::timeline::Stream {
             direction: Direction::Rx,
             origin: 0,
@@ -661,7 +661,7 @@ mod tests {
     /// The receive plan set to segments at 1 MS/s, one channel, each `(origin, cut, by)`,
     /// as bookings would have left it.
     fn plan(core: &Core, segments: &[(i64, Option<i64>, Option<u64>)]) {
-        let config = Config { channels: 1, ratio: Rational::new(200, 1).unwrap() };
+        let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
         let mut streams = lock(&core.streams);
         for by in segments.iter().filter_map(|(_, _, by)| *by) {
             streams.configs[Dir::Rx as usize].insert(by, (Arc::new(ColdConfig::new(crate::device::Settings::default())), false));
@@ -673,11 +673,11 @@ mod tests {
     fn book(core: &Core, e: i64, seq: u64, kind: Kind) {
         let mut streams = lock(&core.streams);
         streams.configs[Dir::Rx as usize].insert(seq, (Arc::new(ColdConfig::new(crate::device::Settings::default())), false));
-        assert!(streams.book(core, Dir::Rx, Item { e, seq, ready: 0, delivered: None, refused: false, kind }));
+        assert!(streams.book(core, Dir::Rx, Item { e, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind }));
     }
 
     fn rate(rate: u64) -> Kind {
-        Kind::Cold(Config { channels: 1, ratio: Rational::new(200_000_000 / rate, 1).unwrap() })
+        Kind::Cold(Config { channels: Channels::first(1), ratio: Rational::new(200_000_000 / rate, 1).unwrap() })
     }
 
     fn samples(first_tick: i64, n: usize) -> RxRecv {

@@ -56,7 +56,7 @@ A retired row names the timeline test that replaces it.
 **The model.** Appendix B is the full rule text.
 - **On or off.** A receive stream is on from the Run's start until a `Stop`, and again after `start_rx`. It runs while it is on, has a channel and a link, and is not halted.
 - **Cuts.** Each run is a segment with its own SampleClock. A segment ends at its cut: the first sample at or after the instant of what ends it, never before its origin or the first sample not yet delivered. There is no tail.
-- **One start rule.** A new segment starts at the first lattice instant at or after three instants: its effective instant, the previous cut plus the start lead, and the Provider's ready instant plus the start lead.
+- **One start rule.** A new segment starts at the first lattice instant at or after three instants: its effective instant, the previous cut plus the start lead, and the Provider's ready instant plus the start lead. RM-34 adds a fourth for a move: the source's release plus the lead.
 - **Order.** Events take effect by effective instant and, at one instant, by arrival.
 - **Plan on receipt, record at the instant.** A receive clock is registered when its segment begins. A transmit clock is registered at booking. After a failure, what is recorded stands, the events that follow are recomputed, and a refusal halts the stream.
 - **Faults.** A fault is recorded when it fires.
@@ -125,7 +125,7 @@ This replaces spec 21's stopped state and VG-1's separate sentence. It costs KJ-
 
 **Problem.** A restart and an enable from 0 channels follow two rules with two leads of equal value, and the UHD Module refuses a change back from 0 while the old stream drains (#41, #49, #58).
 
-**Decision.** Every later segment starts at the first lattice instant at or after three instants: its effective instant, the previous cut plus `start_lead_ns`, and the Provider's ready instant plus `start_lead_ns`. `restart_lead_ns` is removed, and the UHD Module's `Enable` and `Switch` become one path. A change to 0 channels and straight back is no longer refused: it waits for the previous cut plus the lead.
+**Decision.** Every later segment starts at the first lattice instant at or after three instants: its effective instant, the previous cut plus `start_lead_ns`, and the Provider's ready instant plus `start_lead_ns` (RM-34 later adds a fourth for a move: the source's release plus the lead). `restart_lead_ns` is removed, and the UHD Module's `Enable` and `Switch` become one path. A change to 0 channels and straight back is no longer refused: it waits for the previous cut plus the lead.
 
 The ready instant for a receive segment:
 
@@ -187,7 +187,7 @@ A transmit segment's ready instant is the booking. VERIFIED, by arithmetic over 
 **Problem.** The rules are implemented twice, and that duplication is the defect class.
 
 **Decision.** A pure, deterministic function in the `radio` Vocabulary crate.
-- **Input:** a stream's initial state, the lead, the Provider's ready-term parameters, and its commands and faults. Each carries an effective instant, an arrival order and a ready instant, and may be marked refused or pre-empted.
+- **Input:** a stream's initial state, the lead, the Provider's ready-term parameters, and its commands and faults. Each carries an effective instant, an arrival order and a ready instant, and, where a move floors it, a release (RM-34), and may be marked refused or pre-empted.
 - **Output:** segments, each with an origin, a cut and a configuration.
 
 MockRadio calls it in its step loop, and uhd-control calls it when booking, handing the plans to uhd-rx and uhd-tx. This follows RM-26's precedent. No Module depends on another (Vision §7), and the Kernel gains nothing.

@@ -153,8 +153,8 @@
   "id": "F29",
   "name": "the loss's stop leaves the receive stream open",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        self.book_rx(Item { e: now, seq, ready: now, delivered, refused: false, kind: Kind::End { abort } })?;\n",
-  "new": "        if !lost { self.book_rx(Item { e: now, seq, ready: now, delivered, refused: false, kind: Kind::End { abort } })?; }\n",
+  "old": "        self.book_rx(Item { e: now, seq, ready: now, release: NO_RELEASE, delivered, refused: false, kind: Kind::End { abort } })?;\n",
+  "new": "        if !lost { self.book_rx(Item { e: now, seq, ready: now, release: NO_RELEASE, delivered, refused: false, kind: Kind::End { abort } })?; }\n",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_20_a_loss_ends_its_receive_stream_at_its_instant"
@@ -173,8 +173,8 @@
   "id": "F37",
   "name": "MockRadio counts a receive enable's start lead from e instead of its receipt",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "let item = Item { e: tick, seq: order, ready: now, delivered: None, refused: false, kind: Kind::Cold(timeline::Config { channels, ratio }) };",
-  "new": "let item = Item { e: tick, seq: order, ready: tick, delivered: None, refused: false, kind: Kind::Cold(timeline::Config { channels, ratio }) };",
+  "old": "let item = Item { e: tick, seq: order, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(timeline::Config { channels: timeline::Channels::first(u32::from(channels)), ratio }) };",
+  "new": "let item = Item { e: tick, seq: order, ready: tick, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(timeline::Config { channels: timeline::Channels::first(u32::from(channels)), ratio }) };",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_18_a_receive_enable_from_zero_waits_the_start_lead"
@@ -4667,5 +4667,425 @@
   "crate": "ezsdr-radio",
   "test_bin": "channels",
   "filter": "rm_32_throughput_cases"
+ },
+ {
+  "id": "P80",
+  "name": "RM-21, RM-34: two channel sets of one size are the same configuration",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        self.0 == other.0",
+  "new": "        self.count() == other.count()",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_21_a_cold_change_to_another_set_of_the_same_size_starts_a_segment"
+ },
+ {
+  "id": "P81",
+  "name": "RM-34: the move's instant is floored at one line's cold changes only",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        let e = base.max(floor(next.line_mut(from))).max(floor(next.line_mut(to)));",
+  "new": "        let e = base.max(floor(next.line_mut(to)));",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_is_floored_at_a_cold_change_of_either_line"
+ },
+ {
+  "id": "P82",
+  "name": "RM-34: the destination does not wait the source's cut",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                        release = release.max(cut);\n",
+  "new": "                        release = release;\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_later_booking_moves_the_destination_with_the_source"
+ },
+ {
+  "id": "P83",
+  "name": "RM-34: a refused move is refused on one line only",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        if !(next.line_mut(moved.from).refuse(seq)? && next.line_mut(moved.to).refuse(seq)?) {",
+  "new": "        if !next.line_mut(moved.from).refuse(seq)? {",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_refused_move_halts_both_lines_until_a_change_or_a_start"
+ },
+ {
+  "id": "P84",
+  "name": "RM-34: a failed move booking leaves the source booked",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        next.line_mut(from).book(from_item).map_err(MoveError::Time)?;\n        next.line_mut(to).book(to_item).map_err(MoveError::Time)?;\n",
+  "new": "        self.line_mut(from).book(from_item).map_err(MoveError::Time)?;\n        next.line_mut(to).book(to_item).map_err(MoveError::Time)?;\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_whose_booking_fails_leaves_both_lines"
+ },
+ {
+  "id": "P85",
+  "name": "RM-12: a stream node's number may have a leading zero",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "    Some((direction, numbered_index(target.segments().last()?, keys::STREAM)?))",
+  "new": "    Some((direction, target.segments().last()?.strip_prefix(keys::STREAM)?.parse().ok()?))",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_12_a_stream_node_names_its_direction_and_number"
+ },
+ {
+  "id": "P86",
+  "name": "RM-34: a move starts a receive stream that is off",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                    if self.on && !next.channels.is_empty() {",
+  "new": "                    if !next.channels.is_empty() {",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_into_a_stopped_stream_does_not_start_it"
+ },
+ {
+  "id": "P87",
+  "name": "RM-34: the destination does not gain the moved channel",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "            kind: Kind::Cold(Config { channels: to_config.channels.with(channel), ratio: to_config.ratio }),",
+  "new": "            kind: Kind::Cold(Config { channels: to_config.channels, ratio: to_config.ratio }),",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_books_both_lines_at_one_instant"
+ },
+ {
+  "id": "P88",
+  "name": "RM-34: the source keeps the channel it moves",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "            kind: Kind::Cold(Config { channels: from_config.channels.without(channel), ratio: from_config.ratio }),",
+  "new": "            kind: Kind::Cold(Config { channels: from_config.channels.with(channel), ratio: from_config.ratio }),",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_books_both_lines_at_one_instant"
+ },
+ {
+  "id": "P89",
+  "name": "RM-34: a stream with no channel starts no segment when the first channel enters",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                    if self.on && !next.channels.is_empty() {",
+  "new": "                    if self.on && !next.channels.is_empty() && self.previous.is_some() {",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_into_a_stream_with_no_channel_starts_it"
+ },
+ {
+  "id": "P90",
+  "name": "RM-34: a successful move does not clear a halt",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                    self.config = next;\n                    self.halted = item.refused;",
+  "new": "                    self.config = next;\n                    self.halted = self.halted || item.refused;",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_refused_move_halts_both_lines_until_a_change_or_a_start"
+ },
+ {
+  "id": "P91",
+  "name": "RM-34: a move on a pruned line reads the Run's configuration, not the line's",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "    chosen.map_or(line.start.config, |(_, _, config)| config)",
+  "new": "    chosen.map_or(line.stream.config, |(_, _, config)| config)",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_reads_the_configuration_a_pruned_line_keeps"
+ },
+ {
+  "id": "P92",
+  "name": "RM-34: the move's instant is not floored at a receive line's start",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        let base = asked.max(now).max(origin(next.line_mut(from))).max(origin(next.line_mut(to)));",
+  "new": "        let base = asked.max(now);",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_is_floored_at_a_receive_line_s_start"
+ },
+ {
+  "id": "P93",
+  "name": "RM-25: a stream whose set is empty begins a segment",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                    if self.on && !next.channels.is_empty() {",
+  "new": "                    if self.on {",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_21_a_stream_that_loses_its_last_channel_starts_again_when_one_enters"
+ },
+ {
+  "id": "P94",
+  "name": "RM-34: a later booking leaves the destination's release as the move booked it",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        let e = next.line_mut(stream).book(item)?;\n        next.settle()?;\n        *self = next;\n        Ok(e)\n",
+  "new": "        let e = next.line_mut(stream).book(item)?;\n        *self = next;\n        Ok(e)\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_later_booking_moves_the_destination_with_the_source"
+ },
+ {
+  "id": "P95",
+  "name": "RM-34: a segment RM-25 leaves out of the plan releases nothing",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "            self.omitted.push(Omitted { by: segment.by, config: segment.config, end: instant });\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_waits_a_segment_the_plan_leaves_out"
+ },
+ {
+  "id": "P96",
+  "name": "RM-34: the moves' dependence settles in one round",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        while self.settle_once()? {\n",
+  "new": "        if self.settle_once()? {\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_moves_dependence_propagates_along_a_chain"
+ },
+ {
+  "id": "P97",
+  "name": "RM-34: the settle settles only the first move",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                for moved in &self.moves {\n",
+  "new": "                for moved in self.moves.iter().take(1) {\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_moves_dependence_propagates_along_a_chain"
+ },
+ {
+  "id": "P98",
+  "name": "RM-34: a move into the channel's own stream is booked",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        if from == to {\n            return Err(MoveError::SameStream);\n        }\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_an_impossible_move_is_refused_without_a_booking"
+ },
+ {
+  "id": "P99",
+  "name": "RM-34: a number that is no channel is booked as one",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        if channel >= CHANNEL_LIMIT {\n            return Err(MoveError::NoSuchChannel);\n        }\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_an_impossible_move_is_refused_without_a_booking"
+ },
+ {
+  "id": "P100",
+  "name": "RM-34: a move of a channel the source does not hold is booked",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        if !from_config.channels.contains(channel) {\n            return Err(MoveError::NotInSource);\n        }\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_an_impossible_move_is_refused_without_a_booking"
+ },
+ {
+  "id": "P101",
+  "name": "RM-34: a move of a channel the destination already holds is booked",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        if to_config.channels.contains(channel) {\n            return Err(MoveError::AlreadyInDestination);\n        }\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_an_impossible_move_is_refused_without_a_booking"
+ },
+ {
+  "id": "P102",
+  "name": "RM-34: a later refusal leaves the destination's release as the move booked it",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        if !next.line_mut(stream).refuse(seq)? {\n            return Ok(false);\n        }\n        next.settle()?;\n",
+  "new": "        if !next.line_mut(stream).refuse(seq)? {\n            return Ok(false);\n        }\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_refused_source_change_moves_the_destination"
+ },
+ {
+  "id": "P103",
+  "name": "RM-34: a pruned move's record is kept",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        next.moves.retain(|moved| holds(moved.from, moved.seq) && holds(moved.to, moved.seq));\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_pruned_move_keeps_its_release_floor"
+ },
+ {
+  "id": "P104",
+  "name": "RM-25: a cold change is not floored at an earlier one received before it",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "    items.iter().filter(|earlier| cold(earlier) && earlier.seq < item.seq).fold(item.e, |e, earlier| e.max(earlier.e))\n",
+  "new": "    items.iter().filter(|earlier| cold(earlier) && earlier.seq < item.seq).fold(item.e, |e, _| e)\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_later_cold_change_is_floored_at_the_move"
+ },
+ {
+  "id": "P105",
+  "name": "RM-34: the release floors the move's own item alone",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                    if moved.to != to || (at, item.seq) < (moved.e, moved.seq) {\n",
+  "new": "                    if moved.to != to || item.seq != moved.seq {\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_floors_a_later_start_of_the_destination"
+ },
+ {
+  "id": "P106",
+  "name": "RM-34: the release is written to the ready",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        item.release = release;\n",
+  "new": "        item.ready = release;\n        item.release = release;\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_keeps_a_transmit_clock_booked_before_an_end"
+ },
+ {
+  "id": "P107",
+  "name": "RM-34: a segment ignores the release its item carries",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        if item.release != NO_RELEASE {\n            earliest = earliest.max(i128::from(item.release) + lead);\n        }\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_keeps_a_transmit_clock_booked_before_an_end"
+ },
+ {
+  "id": "P108",
+  "name": "RM-34: a pruning keeps no release floor",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        for (to, cut) in dropped {\n            next.raise_floor(to, cut);\n        }\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_pruned_move_keeps_its_release_floor"
+ },
+ {
+  "id": "P109",
+  "name": "RM-34: a move between two directions is booked",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        if from.0 != to.0 {\n            return Err(MoveError::DifferentDirections);\n        }\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_an_impossible_move_is_refused_without_a_booking"
+ },
+ {
+  "id": "P110",
+  "name": "RM-34: the last move into a line sets the release, not the greatest cut",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                        release = release.max(cut);\n",
+  "new": "                        release = cut;\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_takes_the_greatest_cut_of_the_moves_into_a_line"
+ },
+ {
+  "id": "P111",
+  "name": "RM-34: refusing a move's seq on one line refuses that line alone",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        if let Some(moved) = self.moves.iter().find(|moved| moved.seq == seq && (moved.from == stream || moved.to == stream)).copied() {\n            return self.refuse_move(moved.seq);\n        }\n",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_is_refused_on_both_lines_whichever_line_names_it"
+ },
+ {
+  "id": "P112",
+  "name": "RM-34: an item at the move's instant is floored whatever its arrival order",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                    if moved.to != to || (at, item.seq) < (moved.e, moved.seq) {\n",
+  "new": "                    if moved.to != to || at < moved.e {\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_does_not_floor_an_item_received_before_it_at_its_instant"
+ },
+ {
+  "id": "P113",
+  "name": "RM-34: a pruning keeps the last move's floor, not the greatest of its line",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "            Some((_, floor)) => *floor = (*floor).max(cut),\n",
+  "new": "            Some((_, floor)) => *floor = cut,\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_pruned_move_takes_the_greatest_floor_of_its_line"
+ },
+ {
+  "id": "P114",
+  "name": "RM-34: a move without an instant takes effect at the instant it asked for",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        let base = asked.max(now).max(origin(next.line_mut(from))).max(origin(next.line_mut(to)));\n",
+  "new": "        let base = asked.max(origin(next.line_mut(from))).max(origin(next.line_mut(to)));\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_without_a_timed_instant_takes_effect_at_its_receipt"
+ },
+ {
+  "id": "P115",
+  "name": "RM-34: a move asked for before its receipt is not late",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "        let late = asked < now || e > base;\n",
+  "new": "        let late = e > base;\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_without_a_timed_instant_takes_effect_at_its_receipt"
+ },
+ {
+  "id": "P116",
+  "name": "RM-34: the release is the segment the move begins alone, not the one it cuts",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "            if !config.channels.contains(channel) || !self.began_before(by, before) {\n                continue;\n            }\n",
+  "new": "            if by != Some(seq) {\n                continue;\n            }\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_the_destination_waits_a_stopped_source_s_cut"
+ },
+ {
+  "id": "P117",
+  "name": "RM-34: the release counts a segment that holds another channel alone",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "            if !config.channels.contains(channel) || !self.began_before(by, before) {\n",
+  "new": "            if !self.began_before(by, before) {\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_does_not_wait_a_segment_of_another_channel"
+ },
+ {
+  "id": "P118",
+  "name": "RM-34: the release counts a segment that began after the move",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "            if !config.channels.contains(channel) || !self.began_before(by, before) {\n",
+  "new": "            if !config.channels.contains(channel) {\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_does_not_wait_a_channel_the_source_gains_after_it"
+ },
+ {
+  "id": "P119",
+  "name": "RM-34: the release counts a segment by its item s arrival order alone",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                Some(item) => (effective(&self.items, item), item.seq) < before,\n",
+  "new": "                Some(item) => item.seq < before.1,\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_reads_the_source_s_plan_not_its_arrival_order"
+ },
+ {
+  "id": "P120",
+  "name": "RM-34: a segment a loss left running releases nothing",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "            let end = end.unwrap_or_else(|| self.ended.expect(\"RM-34: a segment of the source that the move does not cut still runs\"));\n",
+  "new": "            let Some(end) = end else { continue };\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_reads_a_transmit_clock_the_loss_left_running"
+ },
+ {
+  "id": "P121",
+  "name": "RM-34: the release is the last end read, not the greatest",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "            released = Some(released.map_or(end, |was| was.max(end)));\n",
+  "new": "            released = Some(end);\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_34_a_move_waits_the_greatest_end_not_the_last_one_read"
  }
 ]

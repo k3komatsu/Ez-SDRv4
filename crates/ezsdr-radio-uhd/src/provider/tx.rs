@@ -816,7 +816,7 @@ mod tests {
             segment: ezsdr_radio::timeline::Segment {
                 origin: clock.origin,
                 cut: None,
-                config: ezsdr_radio::timeline::Config { channels: channels as u16, ratio: ezsdr_kernel::time::Rational::new(clock.n as u64, 1).unwrap() },
+                config: ezsdr_radio::timeline::Config { channels: ezsdr_radio::timeline::Channels::first(channels as u32), ratio: ezsdr_kernel::time::Rational::new(clock.n as u64, 1).unwrap() },
                 by: Some(1),
             },
             settings: Some(Arc::new(super::super::control::ColdConfig::new(settings))),
@@ -980,11 +980,11 @@ mod tests {
     fn ur_25_uhd_tx_reads_the_plan_again_when_it_changes() {
         // UR-25: a transmit change booked after uhd-tx read the plan reaches it at its next
         // read: the switch at the plan's cut, to the clock the booking registered.
-        use ezsdr_radio::timeline::{Config, Item, Kind, Line, Stream};
+        use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Stream, NO_RELEASE};
         let (core, device, _, _) = super::super::test_support::rig();
         device.tx_open(1).unwrap();
         let c0 = core.register(Dir::Tx, 200, 0).unwrap();
-        let config = |n: u64| Config { channels: 1, ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
+        let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
         {
             let mut streams = lock(&core.streams);
             streams.tx_clocks = vec![(c0, false)];
@@ -999,7 +999,7 @@ mod tests {
         {
             let mut streams = lock(&core.streams);
             streams.configs[Dir::Tx as usize].insert(1, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
-            assert!(streams.book(&core, Dir::Tx, Item { e, seq: 1, ready: 0, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
+            assert!(streams.book(&core, Dir::Tx, Item { e, seq: 1, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
         }
         let c1 = lock(&core.streams).tx_clocks[1].0;
         tx.read(None);
@@ -1012,17 +1012,17 @@ mod tests {
     fn ur_23_a_refused_transmit_change_ends_its_clock_at_its_origin() {
         // UR-23, VH-2: when the owner books a transmit change as refused, the clock its booking
         // registered ends at its origin at once, with no later booking needed.
-        use ezsdr_radio::timeline::{Config, Item, Kind, Line, Stream};
+        use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Stream, NO_RELEASE};
         let (core, device, _, _) = super::super::test_support::rig();
         device.tx_open(1).unwrap();
         let c0 = core.register(Dir::Tx, 200, 0).unwrap();
-        let config = |n: u64| Config { channels: 1, ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
+        let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
         let mut streams = lock(&core.streams);
         streams.tx_clocks = vec![(c0, false)];
         let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
         streams.lines[Dir::Tx as usize] = Some(Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
         streams.configs[Dir::Tx as usize].insert(1, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
-        assert!(streams.book(&core, Dir::Tx, Item { e: core.ticks(1_000_000_000), seq: 1, ready: 0, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
+        assert!(streams.book(&core, Dir::Tx, Item { e: core.ticks(1_000_000_000), seq: 1, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
         let c1 = streams.tx_clocks[1].0;
         assert!(streams.refuse(&core, Dir::Tx, 1));
         drop(streams);
@@ -1035,14 +1035,14 @@ mod tests {
         // UR-25 (KC-21a): at a switch, a burst booked on a clock the plan starts later stays
         // booked, and is held once its clock is current; a refused switch, which uhd-tx books
         // itself, cancels only its own clock's bursts.
-        use ezsdr_radio::timeline::{Config, Item, Kind, Line, Stream};
+        use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Stream, NO_RELEASE};
         for refused in [false, true] {
             let faults = if refused { vec![crate::device::FakeFault::WrongRate { claimed: 2e6, applied: 2e6 - 1_000.0, nth: 0 }] } else { Vec::new() };
             let (core, device, _, _) = super::super::test_support::rig_with(FakeConfig { faults, ..FakeConfig::default() }, Vec::new());
             device.tx_open(1).unwrap();
             let s = |n: i64| core.ticks(n * 1_000_000_000);
             let c0 = core.register(Dir::Tx, 200, 0).unwrap();
-            let config = |n: u64| Config { channels: 1, ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
+            let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
             {
                 let mut streams = lock(&core.streams);
                 streams.tx_clocks = vec![(c0, false)];
@@ -1050,7 +1050,7 @@ mod tests {
                 streams.lines[Dir::Tx as usize] = Some(Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
                 for (seq, e, n) in [(1, s(1), 100), (2, s(2), 200), (3, s(3), 100)] {
                     streams.configs[Dir::Tx as usize].insert(seq, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
-                    assert!(streams.book(&core, Dir::Tx, Item { e, seq, ready: 0, delivered: None, refused: false, kind: Kind::Cold(config(n)) }));
+                    assert!(streams.book(&core, Dir::Tx, Item { e, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(n)) }));
                 }
             }
             let (c1, c2) = { let streams = lock(&core.streams); (streams.tx_clocks[1].0, streams.tx_clocks[2].0) };
