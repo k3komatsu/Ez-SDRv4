@@ -3125,7 +3125,9 @@ fn ur_26_the_shutdown_s_last_burst_ack_waits_on_the_device_s_clock() {
     let device = Arc::new(Descheduled::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() })));
     let (mut run, _dir) = tx_session_on(device.clone());
     let at = tx_at(&run, ms(20));
-    let entry = send_at(&mut run, "send", Some(at), &tone(30_000));
+    // SendAsapAndFlag: a booking the test thread's own delay made late is moved, not dropped
+    // (plan 30 §5(c)).
+    let entry = send_at(&mut run, "start_repeat", Some(at), &tone(30_000));
     assert!(admitted(&entry), "{entry:?}");
     let runner = device.clone();
     let manifest = bounded("the transmit shutdown", Wall::from_secs(30), move || {
