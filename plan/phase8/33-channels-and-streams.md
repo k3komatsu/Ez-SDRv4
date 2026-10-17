@@ -261,7 +261,7 @@ CBX は board の種類の表に入る（D5）が，計画は `radio` 語彙の 
 |---|---|
 | 1a | description を `radio` 語彙に1か所（motherboard と front end の表），profile 名 `x3xx`（EA-9 の既定 profile，fixture，Python，Vision の記述を**同時に**改名），rate の格子の修正と CBX の `random` と MR-34 の広げ（計画の「値は段階4まで変えない」の例外：誤りと分かっている値を測定まで残さない），方向別の start lead．key はまだ方向ごとのまま（layout は1台・方向ごとに stream 1本・同じ種類の board に限る．各方向の slot は UHD の既定の channel の順の prefix，`[]`・`[A]`・`[A,B]` だけ：subdev spec を作るのは 1b-4）．実装（2026-10-17）：CBX は `random` で retune のたびに位相を引き直し，`coherent` は false（D13） |
 | 1b-1 | Kernel：`KeyDecl` の番号の付く segment（D2）と schema |
-| 1b-2 | 語彙：channel と stream の key・stream の node・port，D3 の移動を含む timeline，D7〜D9，D14 の判定．**新しい tree は別の builder で作り，今の builder と `rm_26_the_description_builds_the_tree` は残す** |
+| 1b-2 | 語彙：channel と stream の key・stream の node・port，D3 の移動を含む timeline，D7〜D9，D14 の判定．**新しい tree は別の builder で作り，今の builder と `rm_26_the_description_builds_the_tree` は残す**．レビューの量を抑えるため2つに分けた（2026-10-17）：**1b-2a** は key・layout・新しい description と tree・`coerce`・設定全体の判定 `violations`（D8 の全二重，D9 の throughput）・channel ごとの RM-19（実装：2026-10-17）；**1b-2b** は timeline の channel の集合，D3 の移動，D14．D9 の DDC/DUC への timed command の release の規則は段階 2（#62 と同じ queue の話） |
 | 1b-3 | MockRadio：selector の一時的な key（例：`keys: "channel"`．layout は 1a で入るので，layout の有無では切り分けられない．1b-5 で消す）があれば新しい key だけ，なければ今の key だけで動く（**1つの instance が新旧両方の key を受けることはない**：同じ設定が2つの key で `effective` に載るのを避ける）．複数 stream，channel ごとの設定，SimulationChannel の channel 番号 |
 | 1b-4 | UHD Module：同じ切り分けで，layout から subdev spec（1a の prefix の制限を外す），stream ごとの streamer と thread（D15），channel ごとの `apply`，開くときの照合（D5） |
 | 1b-5 | **切り替え**：server（EA-9，port `rx0`），Python（EA-16，EA-17），fixture を新しい key に移し，古い key・port `rx`・今の builder と一時的な key を同じ段階で削る |
@@ -269,7 +269,7 @@ CBX は board の種類の表に入る（D5）が，計画は `radio` 語彙の 
 ## 6. テストの方針
 
 - Kernel（D2）：番号付きの宣言の登録と引き方（`c0`，`c12` は可，`c`，`cx`，`c01`，10桁は不可，重なる宣言は登録で拒否），SB-2 の5つの位置と各段階を通る要求，`policies.coercion` の完全一致．
-- 語彙：layout の解析と拒否（未知の board，slot の重複，Basic/LF の送信の frontend "1"，両立しない board の clock），rate の格子（N=257 を拒否，N=258 と N=2040 を受理），存在しない channel 番号の拒否，ADC の利得の拘束，throughput（XG でも1本分），RM-19 の channel ごとの判定（受信 antenna を含む），D3 の移動（両 stream の区切り，新しい SampleClock，片方の拒否で両方 halt，held burst の取り消し）．
+- 語彙：layout の解析と拒否（未知の board，slot の重複，Basic/LF の送信の frontend "1"，両立しない board の clock），rate の格子（N=257 は格子の値への coercion で，Spec Run の既定の policy `reject` では拒否，N=258 と N=2040 は coercion なしで受理），存在しない channel 番号の拒否，ADC の利得の拘束，throughput（XG でも1本分），RM-19 の channel ごとの判定（受信 antenna を含む），D3 の移動（両 stream の区切り，新しい SampleClock，片方の拒否で両方 halt，held burst の取り消し）．
 - MockRadio と UHD Module（FakeDevice）：同じ selector と Spec で，同じ `effective`，同じ stream の SampleClock，同じ拒否（VH-8 の harness を複数 stream へ広げる）．
 - 混在構成の end-to-end（FakeDevice）：UBX の受信と BasicRX の受信を1本の stream で受け，block の channel の順と timestamp を確かめる．rate の違う2本の stream．channel の移動．
 - 実機：bench の BP4b（[00-overview.md](00-overview.md) §6）と，D8 の未確認の拘束．

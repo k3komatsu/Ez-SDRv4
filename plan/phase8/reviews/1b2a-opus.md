@@ -1,0 +1,14 @@
+# Orchestrator review: Phase 8 stage 1b-2a (Opus)
+
+## O1 (major): the cross-channel constraints exist only inside `coerce`, judged against defaults
+`crates/ezsdr-radio/src/channels.rs:561-576, 679-772`. `coerce` merges the request into `defaults()` and judges RM-31 (full duplex) and RM-32 (throughput) on that. At runtime the Kernel's coerce (KC-26) passes one key: a Session `set radio.rx.c0.antenna = "TX/RX"` while `radio.tx.c0.stream` is already 0 is judged against the default `tx.c0.stream = -1` and passes; the same for a rate change that overloads the link with channels added earlier. Design 33 D9 ("runtime": the re-judgement on the configuration projected to the instant is written once in `ezsdr_radio` and both Providers use it; today's MR-18 does this for RM-7). Also, when the request names neither key of a violation, `full_duplex`/`throughput` `continue` and drop it.
+Fix: a public `Description::violations(&self, configuration: &BTreeMap<Key, Value>) -> Vec<(Key, String)>` that judges RM-31 and RM-32 on a whole configuration and always reports (naming a key of the violation: the receive antenna for RM-31, the first overloaded stream's rate for RM-32, documented). `coerce` calls it on defaults + applied and maps each violation to a requested key as now (a violation with no requested key cannot arise from defaults; assert that in a test). RM-31/RM-32 say that a Provider re-judges the configuration in effect at an update's instant with this one function (MR-18's role; the wiring is the Providers' stage). Tests: `violations` on a configuration where `tx.c0.stream = 0` and `rx.c0.antenna = TX/RX` reports RM-31 with no request at all; an overloaded configuration reports RM-32. Mutation rows for both.
+
+## O2 (minor): two parsers of a concrete channel key
+`channels.rs:853` (`concrete`) and `lib.rs` (`numbered_channel`) both parse `radio.d.c<n>.<leaf>`. Keep one (in `lib.rs` or `keys`), used by `coerce`, `is_configuration` and `RfEnvelopeCheck`.
+
+## O3 (minor): the clock-compatibility table is not consulted where D8 puts it
+`channels.rs:316-317`: `boards_compatible` runs only for a duplex slot and only after `rx != tx` already refused, so it is never decisive. D5/D8: a daughterboard's clock is shared per direction across both slots, so the table is consulted for every pair of distinct board kinds on one timekeeper. Call it there (it still admits every pair); RM-28's sentence says so.
+
+## Sound
+Layout refusals; `Grid::Values([0])` refuses 10 dB on Basic/LF (nearest returns None outside); `stream` Eq outside −1…n−1 refused; nonexistent `c<n>`/`s<k>`; Basic 0…mcr/2, LF 0…32 MHz, phase weak; full-duplex scoped to one duplex board; throughput one link; HG default 1 GbE (stricter, sound); N=257 coerces with a recorded coercion and the default `reject` policy refuses it (as RM-8 today); per-channel RM-19 by logical number, only channels in a stream; the old builder, Mock and UHD untouched.

@@ -449,7 +449,7 @@ impl DeviceDescription {
     }
 }
 
-fn rejected(key: &Key, requested: &Constraint, reason: String) -> RejectedRequest {
+pub(crate) fn rejected(key: &Key, requested: &Constraint, reason: String) -> RejectedRequest {
     RejectedRequest {
         key: key.clone(),
         requested: requested.clone(),
@@ -466,11 +466,11 @@ fn number(value: &Scalar) -> Option<f64> {
 }
 
 /// A profile's number, which a JSON document cannot make non-finite.
-fn num(x: f64) -> Scalar {
+pub(crate) fn num(x: f64) -> Scalar {
     Scalar::try_from(x).expect("a profile number is finite")
 }
 
-fn coerce_numeric(
+pub(crate) fn coerce_numeric(
     key: &Key,
     constraint: &Constraint,
     grid: &Grid,
@@ -581,7 +581,7 @@ fn int_value(value: &Scalar) -> Result<i64, String> {
     }
 }
 
-fn coerce_antenna(
+pub(crate) fn coerce_antenna(
     constraint: &Constraint,
     allowed: &[String],
     default: Option<&Value>,

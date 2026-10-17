@@ -20,6 +20,7 @@ use ezsdr_kernel::stream::LatePolicy;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod channels;
 pub mod device;
 pub mod timeline;
 pub mod x3xx;
@@ -118,6 +119,33 @@ pub mod keys {
         RX_ANTENNA,
         TX_ANTENNA,
     ];
+    /// The segment a channel key numbers: `c` followed by the channel number (RM-27).
+    pub const CHANNEL: &str = "c";
+    /// The segment a stream key numbers: `s` followed by the stream number (RM-27).
+    pub const STREAM: &str = "s";
+    /// The leaves of the channel keys (RM-27).
+    pub const CHANNEL_LEAVES: [&str; 8] = [
+        "frequency_hz",
+        "gain_db",
+        "antenna",
+        "stream",
+        "frequency_step_hz",
+        "gain_step_db",
+        "phase_behavior_on_retune",
+        "path_delay_samples",
+    ];
+    /// The leaf of the stream keys (RM-27).
+    pub const STREAM_LEAF: &str = "sample_rate_hz";
+
+    /// The concrete channel key `radio.<direction>.c<n>.<leaf>` (RM-27).
+    pub fn channel(direction: &str, n: u32, leaf: &str) -> String {
+        format!("radio.{direction}.{CHANNEL}{n}.{leaf}")
+    }
+
+    /// The concrete stream key `radio.<direction>.s<k>.sample_rate_hz` (RM-27).
+    pub fn stream(direction: &str, k: u32) -> String {
+        format!("radio.{direction}.{STREAM}{k}.{STREAM_LEAF}")
+    }
 }
 
 /// Radio Model event kinds declared by RM-10.
@@ -177,12 +205,34 @@ fn key_decl(
     }
 }
 
+/// A declaration whose segment at `NUMBERED_SEGMENT` is followed by a number (RM-27,
+/// SB-2a).
+fn indexed_key_decl(
+    name: &str,
+    kind: ValueKind,
+    coercible: bool,
+    coercion_default: CoercionPolicy,
+    update_class: Option<UpdateClass>,
+) -> KeyDecl {
+    KeyDecl {
+        key: Key::parse(name).expect("a declared Radio Model key is valid"),
+        indexed: Some(NUMBERED_SEGMENT),
+        kind,
+        coercible,
+        coercion_default,
+        update_class,
+    }
+}
+
+/// The position of the numbered segment in every RM-27 channel and stream key.
+const NUMBERED_SEGMENT: u8 = 2;
+
 fn radio_keys() -> Vec<KeyDecl> {
     use CoercionPolicy::{Reject, Warn};
     use UpdateClass::{Cold, HardwareTimed};
     use ValueKind::{Bool, Int, Num, Str};
 
-    vec![
+    let mut declarations = vec![
         key_decl(keys::RX_CHANNELS, Int, false, Reject, Some(Cold)),
         key_decl(keys::TX_CHANNELS, Int, false, Reject, Some(Cold)),
         key_decl(keys::RX_SAMPLE_RATE_HZ, Num, true, Reject, Some(Cold)),
@@ -215,7 +265,20 @@ fn radio_keys() -> Vec<KeyDecl> {
         key_decl(keys::WIRE_BYTES_PER_SAMPLE, Int, false, Reject, None),
         key_decl(keys::TX_PATH_DELAY_SAMPLES, Int, false, Reject, None),
         key_decl(keys::RX_PATH_DELAY_SAMPLES, Int, false, Reject, None),
-    ]
+    ];
+    for direction in ["rx", "tx"] {
+        let declaration = |word: &str, leaf: &str| format!("radio.{direction}.{word}.{leaf}");
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "frequency_hz"), Num, true, Reject, Some(HardwareTimed)));
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "gain_db"), Num, true, Warn, Some(HardwareTimed)));
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "antenna"), Str, false, Reject, Some(Cold)));
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "stream"), Int, false, Reject, Some(Cold)));
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "frequency_step_hz"), Num, false, Reject, None));
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "gain_step_db"), Num, false, Reject, None));
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "phase_behavior_on_retune"), Str, false, Reject, None));
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "path_delay_samples"), Int, false, Reject, None));
+        declarations.push(indexed_key_decl(&declaration(keys::STREAM, keys::STREAM_LEAF), Num, true, Reject, Some(Cold)));
+    }
+    declarations
 }
 
 fn radio_event_kinds() -> Vec<EventKindDecl> {
@@ -376,6 +439,13 @@ impl AdmissionCheck for RfEnvelopeCheck {
             if let Some(updates) = proposed.get(&fragment) {
                 configuration.extend(updates.clone());
             }
+            if configuration
+                .keys()
+                .any(|key| matches!(concrete(key), Some(Concrete::Channel { .. })))
+            {
+                check_numbered_configuration(&configuration, &envelope, &fragment, self, &mut violations);
+                continue;
+            }
             let tx_channels = number(&configuration, keys::TX_CHANNELS, &fragment, self, &mut violations)
                 .unwrap_or(0.0) as i64;
             if tx_channels > 0 {
@@ -493,6 +563,257 @@ impl AdmissionCheck for RfEnvelopeCheck {
             }
         }
         violations
+    }
+}
+
+/// The concrete RM-27 key `key` spells: a channel's leaf or a stream's rate (RM-27).
+/// `rx` is `true` for a receive channel or stream.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Concrete<'a> {
+    /// `radio.<direction>.c<n>.<leaf>`.
+    Channel {
+        /// Whether it is a receive key.
+        rx: bool,
+        /// The channel number, without a leading zero (RM-27).
+        number: u32,
+        /// The key's leaf, one of [`keys::CHANNEL_LEAVES`].
+        leaf: &'a str,
+    },
+    /// `radio.<direction>.s<k>.sample_rate_hz`.
+    Stream {
+        /// Whether it is a receive key.
+        rx: bool,
+        /// The stream number, without a leading zero (RM-27).
+        number: u32,
+    },
+}
+
+/// The one place the numbered spellings `c<n>` and `s<k>` are read (RM-27): the key `key`
+/// names, if it names one. `coerce`, `is_configuration` and `RfEnvelopeCheck` all use it.
+pub(crate) fn concrete(key: &Key) -> Option<Concrete<'_>> {
+    let segments: Vec<&str> = key.as_str().split('.').collect();
+    let [prefix, direction, segment, leaf] = <[&str; 4]>::try_from(segments.as_slice()).ok()?;
+    if prefix != crate::VOCABULARY {
+        return None;
+    }
+    let rx = match direction {
+        "rx" => true,
+        "tx" => false,
+        _ => return None,
+    };
+    if let Some(number) = numbered_index(segment, keys::CHANNEL) {
+        return keys::CHANNEL_LEAVES
+            .contains(&leaf)
+            .then_some(Concrete::Channel { rx, number, leaf });
+    }
+    if leaf == keys::STREAM_LEAF {
+        let number = numbered_index(segment, keys::STREAM)?;
+        return Some(Concrete::Stream { rx, number });
+    }
+    None
+}
+
+/// The number `segment` spells after `word` (SB-2a's own spelling of an index): one to
+/// nine ASCII digits, and no leading zero.
+pub(crate) fn numbered_index(segment: &str, word: &str) -> Option<u32> {
+    let digits = segment.strip_prefix(word)?;
+    if digits.is_empty()
+        || digits.len() > 9
+        || (digits.len() > 1 && digits.starts_with('0'))
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// RM-33's per-channel judgement of a configuration that holds RM-27 channel keys.
+fn check_numbered_configuration(
+    configuration: &BTreeMap<Key, Value>,
+    envelope: &RfEnvelope,
+    fragment: &Ident,
+    check: &RfEnvelopeCheck,
+    violations: &mut Vec<Violation>,
+) {
+    let mut channels: BTreeMap<(bool, i64), BTreeMap<&str, &Value>> = BTreeMap::new();
+    for (key, value) in configuration {
+        if let Some(Concrete::Channel { rx: is_rx, number, leaf }) = concrete(key) {
+            channels.entry((is_rx, i64::from(number))).or_default().insert(leaf, value);
+        }
+    }
+    for ((is_rx, number), values) in &channels {
+        let Some(stream) = values.get("stream").and_then(|value| value.as_scalar()).and_then(integer)
+        else {
+            continue;
+        };
+        if stream < 0 {
+            continue;
+        }
+        if !*is_rx {
+            if let Some(value) = values.get("frequency_hz") {
+                let key = channel_key(false, *number, "frequency_hz");
+                match numeric(value) {
+                    Some(frequency) => {
+                        if !envelope
+                            .allowed_bands
+                            .iter()
+                            .any(|band| band.lo_hz <= frequency && frequency <= band.hi_hz)
+                        {
+                            push_numbered_violation(
+                                violations,
+                                check,
+                                fragment,
+                                &key,
+                                Some((*value).clone()),
+                                format!("{frequency} Hz is in no allowed band"),
+                            );
+                        }
+                    }
+                    None => push_numbered_violation(
+                        violations,
+                        check,
+                        fragment,
+                        &key,
+                        Some((*value).clone()),
+                        format!("radio.tx.c{number}.frequency_hz is not a number"),
+                    ),
+                }
+            }
+            if let Some(value) = values.get("gain_db") {
+                let key = channel_key(false, *number, "gain_db");
+                match numeric(value) {
+                    Some(gain) => {
+                        if let Some(maximum) = envelope.max_gain_db.filter(|maximum| gain > *maximum) {
+                            push_numbered_violation(
+                                violations,
+                                check,
+                                fragment,
+                                &key,
+                                Some((*value).clone()),
+                                format!("gain {gain} dB exceeds {maximum}"),
+                            );
+                        }
+                    }
+                    None => push_numbered_violation(
+                        violations,
+                        check,
+                        fragment,
+                        &key,
+                        Some((*value).clone()),
+                        format!("radio.tx.c{number}.gain_db is not a number"),
+                    ),
+                }
+            }
+            let enabled = match &envelope.tx_enabled {
+                None => true,
+                Some(TxEnabled::All(enabled)) => *enabled,
+                Some(TxEnabled::PerChannel(list)) => usize::try_from(*number)
+                    .ok()
+                    .and_then(|index| list.get(index))
+                    .copied()
+                    .unwrap_or(false),
+            };
+            if !enabled {
+                push_numbered_violation(
+                    violations,
+                    check,
+                    fragment,
+                    &channel_key(false, *number, "stream"),
+                    values.get("stream").map(|value| (*value).clone()),
+                    format!("transmit channel c{number} is not enabled"),
+                );
+            }
+        }
+        check_channel_antenna(values, envelope, fragment, check, *is_rx, *number, violations);
+    }
+}
+
+fn check_channel_antenna(
+    values: &BTreeMap<&str, &Value>,
+    envelope: &RfEnvelope,
+    fragment: &Ident,
+    check: &RfEnvelopeCheck,
+    is_rx: bool,
+    number: i64,
+    violations: &mut Vec<Violation>,
+) {
+    let Some(value) = values.get("antenna") else {
+        return;
+    };
+    let key = channel_key(is_rx, number, "antenna");
+    let Some(antenna) = value.as_scalar().and_then(text) else {
+        push_numbered_violation(
+            violations,
+            check,
+            fragment,
+            &key,
+            Some((*value).clone()),
+            format!("radio.{} antenna is not a string", if is_rx { "rx" } else { "tx" }),
+        );
+        return;
+    };
+    if envelope
+        .antenna_ports
+        .as_ref()
+        .is_some_and(|ports| !ports.iter().any(|port| port == antenna))
+    {
+        push_numbered_violation(
+            violations,
+            check,
+            fragment,
+            &key,
+            Some((*value).clone()),
+            format!("antenna {antenna} is not allowed"),
+        );
+    }
+}
+
+/// The concrete key of a numbered channel (RM-33).
+fn channel_key(is_rx: bool, number: i64, leaf: &str) -> Key {
+    let direction = if is_rx { "rx" } else { "tx" };
+    Key::parse(&keys::channel(
+        direction,
+        u32::try_from(number).expect("a parsed channel number"),
+        leaf,
+    ))
+    .expect("a declared Radio Model key is valid")
+}
+
+fn push_numbered_violation(
+    violations: &mut Vec<Violation>,
+    check: &RfEnvelopeCheck,
+    fragment: &Ident,
+    key: &Key,
+    requested: Option<Value>,
+    detail: String,
+) {
+    violations.push(Violation {
+        check: check.section().clone(),
+        requested,
+        key: Some(key.clone()),
+        reason: format!("RM-19: {fragment}: {detail}"),
+    });
+}
+
+fn numeric(value: &Value) -> Option<f64> {
+    value.as_scalar().and_then(|scalar| match scalar {
+        Scalar::Int(value) => Some(*value as f64),
+        Scalar::Num(value) => Some(value.get()),
+        _ => None,
+    })
+}
+
+fn integer(scalar: &Scalar) -> Option<i64> {
+    match scalar {
+        Scalar::Int(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn text(scalar: &Scalar) -> Option<&str> {
+    match scalar {
+        Scalar::Str(value) => Some(value),
+        _ => None,
     }
 }
 

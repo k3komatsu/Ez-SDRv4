@@ -185,6 +185,170 @@ impl Board {
     }
 }
 
+/// The path delay from a transmit sample's timestamp to the antenna, in samples (RM-23):
+/// the value every board of this stage declares.
+pub const TX_PATH_DELAY: i64 = 45;
+/// The receive path delay, in samples (RM-23).
+pub const RX_PATH_DELAY: i64 = 0;
+
+/// A daughterboard kind a layout may name (RM-28): the three boards that transmit and
+/// receive, and the four Basic/LF boards, which carry one direction each.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FrontEnd {
+    /// A UBX-160.
+    Ubx,
+    /// An OBX.
+    Obx,
+    /// A CBX or CBX-120.
+    Cbx,
+    /// A BasicRX.
+    BasicRx,
+    /// An LFRX.
+    LfRx,
+    /// A BasicTX.
+    BasicTx,
+    /// An LFTX.
+    LfTx,
+}
+
+impl FrontEnd {
+    /// The name the selector writes it with (RM-28).
+    pub fn name(self) -> &'static str {
+        match self {
+            FrontEnd::Ubx => "ubx",
+            FrontEnd::Obx => "obx",
+            FrontEnd::Cbx => "cbx",
+            FrontEnd::BasicRx => "basic_rx",
+            FrontEnd::LfRx => "lf_rx",
+            FrontEnd::BasicTx => "basic_tx",
+            FrontEnd::LfTx => "lf_tx",
+        }
+    }
+
+    /// The front end the selector name `name` names (RM-28).
+    pub fn parse(name: &str) -> Option<FrontEnd> {
+        [
+            FrontEnd::Ubx,
+            FrontEnd::Obx,
+            FrontEnd::Cbx,
+            FrontEnd::BasicRx,
+            FrontEnd::LfRx,
+            FrontEnd::BasicTx,
+            FrontEnd::LfTx,
+        ]
+        .into_iter()
+        .find(|front_end| front_end.name() == name)
+    }
+
+    /// The duplex board of the three, when this is one (RM-28).
+    pub fn board(self) -> Option<Board> {
+        match self {
+            FrontEnd::Ubx => Some(Board::Ubx),
+            FrontEnd::Obx => Some(Board::Obx),
+            FrontEnd::Cbx => Some(Board::Cbx),
+            FrontEnd::BasicRx | FrontEnd::LfRx | FrontEnd::BasicTx | FrontEnd::LfTx => None,
+        }
+    }
+
+    /// Whether the board carries receive channels (RM-28).
+    pub fn receives(self) -> bool {
+        matches!(self, FrontEnd::Ubx | FrontEnd::Obx | FrontEnd::Cbx | FrontEnd::BasicRx | FrontEnd::LfRx)
+    }
+
+    /// Whether the board carries transmit channels (RM-28).
+    pub fn transmits(self) -> bool {
+        matches!(self, FrontEnd::Ubx | FrontEnd::Obx | FrontEnd::Cbx | FrontEnd::BasicTx | FrontEnd::LfTx)
+    }
+
+    /// UHD's front end numbers the board has (RM-28): the receive-only Basic/LF boards
+    /// have `0` and `1`, every other board `0`.
+    pub fn frontends(self) -> &'static [u32] {
+        match self {
+            FrontEnd::BasicRx | FrontEnd::LfRx => &[0, 1],
+            _ => &[0],
+        }
+    }
+
+    /// The tuning range as a `Step` grid of 1 Hz (RM-29). A board with an LO keeps the
+    /// values of [`Board`]; a Basic/LF board tunes its DDC or DUC, within the master
+    /// clock's half rate (Basic) or the board's 32 MHz (LF).
+    pub fn frequency(self, master_clock_hz: u64) -> Grid {
+        match self.board() {
+            Some(board) => board.frequency(),
+            None => {
+                let hi = match self {
+                    FrontEnd::BasicRx | FrontEnd::BasicTx => master_clock_hz as f64 / 2.0,
+                    _ => 32_000_000.0,
+                };
+                Grid::Step { lo: 0.0, hi, step: 1.0 }
+            }
+        }
+    }
+
+    /// The gain range as a `Step` grid (RM-29): the board's RF stage, and `{0}` for a
+    /// Basic/LF board, which has no gain stage of its own.
+    pub fn gain(self) -> Grid {
+        match self.board() {
+            Some(board) => board.gain(),
+            None => Grid::Values(vec![0.0]),
+        }
+    }
+
+    /// The receive and transmit antenna names (RM-29).
+    pub fn antennas(self) -> (Vec<String>, Vec<String>) {
+        match self.board() {
+            Some(board) => board.antennas(),
+            None => {
+                let names = vec!["A".to_owned(), "B".to_owned(), "AB".to_owned(), "BA".to_owned()];
+                (names.clone(), names)
+            }
+        }
+    }
+
+    /// RM-30's default antenna for one direction (RM-29): a board's first antenna name
+    /// in that direction, and `AB` for a Basic/LF board.
+    pub fn default_antenna(self, receive: bool) -> String {
+        match self.board() {
+            Some(board) => {
+                let (rx, tx) = board.antennas();
+                let names = if receive { rx } else { tx };
+                names.into_iter().next().expect("a board has an antenna in each direction")
+            }
+            None => "AB".to_owned(),
+        }
+    }
+
+    /// `radio.{rx,tx}.c<n>.phase_behavior_on_retune` (RM-9, RM-29): the board's value, and
+    /// the weaker of the two phase guarantees for Basic/LF until a measurement confirms
+    /// the stronger one.
+    pub fn phase_behavior_on_retune(self) -> &'static str {
+        match self.board() {
+            Some(board) => board.phase_behavior_on_retune(),
+            None => "random_unless_timed_tune",
+        }
+    }
+
+    /// RM-5's default frequency for the board (RM-29).
+    pub fn default_frequency_hz(self) -> f64 {
+        match self.board() {
+            Some(board) => board.default_frequency_hz(),
+            None => 0.0,
+        }
+    }
+
+    /// The path delay of one direction, in samples (RM-23).
+    pub fn path_delay_samples(self, receive: bool) -> i64 {
+        if receive { RX_PATH_DELAY } else { TX_PATH_DELAY }
+    }
+}
+
+/// Whether two boards of one timekeeper can meet their clock requirements together
+/// (RM-28): the compatibility table, which the layout analysis consults for every pair of
+/// different board kinds and which admits every pair of boards this stage describes.
+pub fn boards_compatible(_first: FrontEnd, _second: FrontEnd) -> bool {
+    true
+}
+
 /// A slot a daughterboard sits in (design 33 D5).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Slot {
@@ -287,6 +451,28 @@ impl Selection {
             rx: elements(rx),
             tx: elements(tx),
         }
+    }
+}
+
+/// The TimingEnvelope every `x3xx` description declares (RM-6, RM-20).
+pub fn timing(terms: &ProviderTerms) -> TimingEnvelope {
+    TimingEnvelope {
+        min_timed_command_lead_ns: terms.min_timed_command_lead_ns,
+        startup_latency_ns: 2_000_000_000,
+        command_queue_depth: 16,
+        overflow_restart_gap_ns: 50_000_000,
+        rx_start_lead_ns: 50_000_000,
+        tx_start_lead_ns: 50_000_000,
+    }
+}
+
+/// The PerformanceEnvelope of an `x3xx` with one `link_gbps` GbE link (RM-7, RM-20).
+pub fn performance(link_gbps: u8) -> PerformanceEnvelope {
+    let bytes_per_s = i64::from(link_gbps) * 100_000_000;
+    PerformanceEnvelope {
+        rx_bytes_per_s: bytes_per_s,
+        tx_bytes_per_s: bytes_per_s,
+        wire_bytes_per_sample: 4,
     }
 }
 
@@ -447,7 +633,6 @@ pub fn description(selection: &Selection, block_len: u32, terms: &ProviderTerms)
         Value::from(rx_default),
     );
     let (rx_antennas, tx_antennas) = board.antennas();
-    let bytes_per_s = i64::from(selection.link_gbps) * 100_000_000;
     DeviceDescription {
         profile: profile_ref(),
         rates: Grid::Values(rates(selection.master_clock_hz)),
@@ -465,21 +650,10 @@ pub fn description(selection: &Selection, block_len: u32, terms: &ProviderTerms)
         repeat_max_samples: terms.repeat_max_samples,
         repeat_align_samples: terms.repeat_align_samples,
         block_len,
-        tx_path_delay_samples: 45,
-        rx_path_delay_samples: 0,
-        timing: TimingEnvelope {
-            min_timed_command_lead_ns: terms.min_timed_command_lead_ns,
-            startup_latency_ns: 2_000_000_000,
-            command_queue_depth: 16,
-            overflow_restart_gap_ns: 50_000_000,
-            rx_start_lead_ns: 50_000_000,
-            tx_start_lead_ns: 50_000_000,
-        },
-        performance: PerformanceEnvelope {
-            rx_bytes_per_s: bytes_per_s,
-            tx_bytes_per_s: bytes_per_s,
-            wire_bytes_per_sample: 4,
-        },
+        tx_path_delay_samples: TX_PATH_DELAY,
+        rx_path_delay_samples: RX_PATH_DELAY,
+        timing: timing(terms),
+        performance: performance(selection.link_gbps),
         defaults,
     }
 }

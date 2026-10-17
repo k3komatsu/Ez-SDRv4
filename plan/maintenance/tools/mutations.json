@@ -4257,5 +4257,415 @@
   "crate": "ezsdr-kernel",
   "test_bin": "module_api",
   "filter": "ma_34_registration_refuses_a_declaration_outside_its_prefix"
+ },
+ {
+  "id": "P39",
+  "name": "RM-28: a board in a direction it does not carry is admitted",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "    let direction_ok = if direction == \"rx\" { front_end.receives() } else { front_end.transmits() };",
+  "new": "    let direction_ok = true;",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_28_the_layout_analysis_cases"
+ },
+ {
+  "id": "P40",
+  "name": "RM-28: a front end number the board does not have is admitted",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "    if !front_end.frontends().contains(&frontend) {",
+  "new": "    if false {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_28_the_layout_analysis_cases"
+ },
+ {
+  "id": "P41",
+  "name": "RM-28: one slot and direction admits two board kinds",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "                if other != element.front_end {",
+  "new": "                if false {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_28_the_layout_analysis_cases"
+ },
+ {
+  "id": "P42",
+  "name": "RM-28: a duplex board's slot admits another kind in the other direction",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "        if rx_element.front_end != tx_element.front_end {",
+  "new": "        if false {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_28_the_layout_analysis_cases"
+ },
+ {
+  "id": "P43",
+  "name": "RM-28: a repeated front end in one direction is admitted",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "            if seen.contains(&(element.slot, element.front_end, element.frontend)) {",
+  "new": "            if false {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_28_the_layout_analysis_cases"
+ },
+ {
+  "id": "P44",
+  "name": "RM-28: a timekeeper other than 0 is admitted",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "    if timekeeper != 0 {",
+  "new": "    if false {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_28_the_layout_analysis_cases"
+ },
+ {
+  "id": "P45",
+  "name": "RM-28: a shared list of two entries is admitted",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "            _ => Err(format!(\n                \"the layout's `{name}` must be a one-element list, one entry per timekeeper\"\n            )),",
+  "new": "            _ => Ok(default),",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_28_the_layout_analysis_cases"
+ },
+ {
+  "id": "P46",
+  "name": "RM-28: an unknown board name falls back to the UBX",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "    let front_end = FrontEnd::parse(board).ok_or_else(|| {",
+  "new": "    let front_end = FrontEnd::parse(board).or(Some(FrontEnd::Ubx)).ok_or_else(|| {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_28_the_layout_analysis_cases"
+ },
+ {
+  "id": "P47",
+  "name": "RM-30: a request for a channel the layout lacks is applied to c0",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "        let Some(channel) = channels.get(number as usize) else {\n            report.rejected.push(rejected(\n                key,\n                constraint,\n                format!(\"RM-4: no such channel c{number}\"),\n            ));\n            return;\n        };",
+  "new": "        let Some(channel) = channels.first() else {\n            report.rejected.push(rejected(\n                key,\n                constraint,\n                format!(\"RM-4: no such channel c{number}\"),\n            ));\n            return;\n        };",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_30_coerce_cases"
+ },
+ {
+  "id": "P48",
+  "name": "RM-30: a request for a stream the layout lacks is admitted",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "        if number as usize >= direction.channels(self).len() {",
+  "new": "        if false {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_30_coerce_cases"
+ },
+ {
+  "id": "P49",
+  "name": "RM-30: no channel is in stream 0 by default",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "    if direction == Direction::Rx && number == 0 { 0 } else { -1 }",
+  "new": "    -1",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_30_coerce_cases"
+ },
+ {
+  "id": "P50",
+  "name": "RM-29: a Basic/LF board has a gain grid, so 10 dB is applied",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "            None => Grid::Values(vec![0.0]),",
+  "new": "            None => Grid::Step { lo: 0.0, hi: 31.5, step: 0.5 },",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_30_coerce_cases"
+ },
+ {
+  "id": "P51",
+  "name": "RM-29: BasicRX tunes to 350 MHz instead of the DDC's half clock",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "                    FrontEnd::BasicRx | FrontEnd::BasicTx => master_clock_hz as f64 / 2.0,",
+  "new": "                    FrontEnd::BasicRx | FrontEnd::BasicTx => 350_000_000.0,",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_30_coerce_cases"
+ },
+ {
+  "id": "P52",
+  "name": "RM-27/RM-30: an old builder key is not refused",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "                None => match capabilities.get(key) {\n                    Some(capability) => coerce_capability(key, constraint, capability, &mut report),\n                    None => report\n                        .rejected\n                        .push(rejected(key, constraint, \"RM-4: not a radio key\".to_owned())),\n                },",
+  "new": "                None => {}",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_30_coerce_cases"
+ },
+ {
+  "id": "P53",
+  "name": "RM-31: the full-duplex antenna constraint is never applied",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "                if antenna == \"RX2\" {",
+  "new": "                if true {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_31_full_duplex_cases"
+ },
+ {
+  "id": "P54",
+  "name": "RM-31: the receive antenna is constrained while no transmit channel is in a stream",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "            if stream_of(configuration, Direction::Tx, tx_number as u32) < 0 {",
+  "new": "            if false {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_31_full_duplex_cases"
+ },
+ {
+  "id": "P55",
+  "name": "RM-31: a board in another slot constrains the receive antenna",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "                if rx_element.timekeeper != tx_element.timekeeper\n                    || rx_element.slot != tx_element.slot\n                    || rx_element.front_end != tx_element.front_end\n                {",
+  "new": "                if rx_element.timekeeper != tx_element.timekeeper\n                    || rx_element.front_end != tx_element.front_end\n                {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_31_full_duplex_cases"
+ },
+ {
+  "id": "P56",
+  "name": "RM-32: the throughput limit is two links' bytes per second",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "            if need <= cap {",
+  "new": "            if need <= cap * 2.0 {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_32_throughput_cases"
+ },
+ {
+  "id": "P57",
+  "name": "RM-32: every channel counts in every stream",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "                let members = (0..count)\n                    .filter(|number| stream_of(configuration, direction, *number as u32) == k as i64)\n                    .count();",
+  "new": "                let members = count;",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_32_throughput_cases"
+ },
+ {
+  "id": "P58",
+  "name": "RM-32: the membership key of a direction is charged before its streams' rate keys",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "        (0..count)\n            .map(|k| stream_setting(direction, k as u32))\n            .chain((0..count).map(|number| channel_setting(direction, number as u32, \"stream\")))",
+  "new": "        (0..count)\n            .map(|number| channel_setting(direction, number as u32, \"stream\"))\n            .chain((0..count).map(|k| stream_setting(direction, k as u32)))",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_32_throughput_cases"
+ },
+ {
+  "id": "P59",
+  "name": "RM-33: tx_enabled is read by the channel's position in its stream, not its logical number",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "                Some(TxEnabled::PerChannel(list)) => usize::try_from(*number)\n                    .ok()\n                    .and_then(|index| list.get(index))\n                    .copied()\n                    .unwrap_or(false),",
+  "new": "                Some(TxEnabled::PerChannel(list)) => list.first().copied().unwrap_or(false),",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_33_rm_19_per_channel_cases"
+ },
+ {
+  "id": "P60",
+  "name": "RM-33: a channel in no stream is judged",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "        if stream < 0 {",
+  "new": "        if false {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_33_rm_19_per_channel_cases"
+ },
+ {
+  "id": "P61",
+  "name": "RM-33: receive antennas are not judged per channel",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "    if envelope\n        .antenna_ports\n        .as_ref()\n        .is_some_and(|ports| !ports.iter().any(|port| port == antenna))\n    {",
+  "new": "    if !is_rx\n        && envelope\n            .antenna_ports\n            .as_ref()\n            .is_some_and(|ports| !ports.iter().any(|port| port == antenna))\n    {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_33_rm_19_per_channel_cases"
+ },
+ {
+  "id": "P62",
+  "name": "RM-33: every configuration is judged by the channel keys, so RM-19's old cases are skipped",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "            if configuration\n                .keys()\n                .any(|key| matches!(concrete(key), Some(Concrete::Channel { .. })))\n            {",
+  "new": "            if true {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_33_rm_19_per_channel_cases"
+ },
+ {
+  "id": "P63",
+  "name": "RM-29: one stream node per direction, not per channel",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "            children: (0..self.rx.len())\n                .map(|k| stream(\"rx\", k, RX_STREAM_KIND))",
+  "new": "            children: (0..1)\n                .map(|k| stream(\"rx\", k, RX_STREAM_KIND))",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_29_the_layout_description_builds_the_stream_tree"
+ },
+ {
+  "id": "P64",
+  "name": "RM-29: every receive port is named rx",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "                    name: Ident::parse(&format!(\"rx{k}\")).expect(\"a receive port name\"),",
+  "new": "                    name: Ident::parse(\"rx\").expect(\"a receive port name\"),",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_29_the_layout_description_builds_the_stream_tree"
+ },
+ {
+  "id": "P65",
+  "name": "RM-27: a stream's rate is not a cold key",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "        declarations.push(indexed_key_decl(&declaration(keys::STREAM, keys::STREAM_LEAF), Num, true, Reject, Some(Cold)));",
+  "new": "        declarations.push(indexed_key_decl(&declaration(keys::STREAM, keys::STREAM_LEAF), Num, true, Reject, Some(HardwareTimed)));",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_27_the_layout_builder_keys_are_declared"
+ },
+ {
+  "id": "P66",
+  "name": "RM-28: an ideal channel count above 64 is admitted",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "            Some(Value::Scalar(Scalar::Int(value))) if (0..=64).contains(value) => Ok(*value as u32),",
+  "new": "            Some(Value::Scalar(Scalar::Int(value))) => Ok(*value as u32),",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_28_the_layout_analysis_cases"
+ },
+ {
+  "id": "P67",
+  "name": "RM-28: the ideal layout defaults to no receive channel",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "    Ok(Layout::Ideal { rx: count(\"rx\", 1)?, tx: count(\"tx\", 0)? })",
+  "new": "    Ok(Layout::Ideal { rx: count(\"rx\", 0)?, tx: count(\"tx\", 0)? })",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_28_the_layout_analysis_cases"
+ },
+ {
+  "id": "P68",
+  "name": "RM-29: the ideal description's command queue is empty",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "                    command_queue_depth: i64::from(u32::MAX),",
+  "new": "                    command_queue_depth: 0,",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_29_the_ideal_layout_builds_its_tree_and_defaults"
+ },
+ {
+  "id": "P69",
+  "name": "RM-28: an HG image's default link is 10 GbE",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "    let link_gbps = one_int(selector, \"link_gbps\", &[1, 10], if image == Image::Hg { 1 } else { 10 })? as u8;",
+  "new": "    let link_gbps = one_int(selector, \"link_gbps\", &[1, 10], 10)? as u8;",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_28_the_layout_analysis_cases"
+ },
+ {
+  "id": "P70",
+  "name": "RM-29: the CBX's values are the UBX's",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "            FrontEnd::Cbx => Some(Board::Cbx),",
+  "new": "            FrontEnd::Cbx => Some(Board::Ubx),",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_29_the_layout_description_builds_the_stream_tree"
+ },
+ {
+  "id": "P71",
+  "name": "RM-29: the OBX's values are the UBX's",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "            FrontEnd::Obx => Some(Board::Obx),",
+  "new": "            FrontEnd::Obx => Some(Board::Ubx),",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_29_the_layout_description_builds_the_stream_tree"
+ },
+ {
+  "id": "P72",
+  "name": "RM-28: the clock-compatibility table refuses a UBX beside a BasicRX",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "pub fn boards_compatible(_first: FrontEnd, _second: FrontEnd) -> bool {\n    true\n}",
+  "new": "pub fn boards_compatible(first: FrontEnd, second: FrontEnd) -> bool {\n    !matches!((first, second), (FrontEnd::Ubx, FrontEnd::BasicRx))\n}",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_28_the_layout_analysis_cases"
+ },
+ {
+  "id": "P73",
+  "name": "RM-31: the violation names the transmit channel's stream key, not the receive antenna",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "                let key = channel_setting(Direction::Rx, rx_number as u32, \"antenna\");",
+  "new": "                let key = channel_setting(Direction::Tx, tx_number as u32, \"stream\");",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_31_full_duplex_cases"
+ },
+ {
+  "id": "P74",
+  "name": "RM-32: the violation names the last stream with a channel, not the first",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "                if members > 0 && first.is_none() {",
+  "new": "                if members > 0 {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_32_throughput_cases"
+ },
+ {
+  "id": "P75",
+  "name": "RM-30: an instance-wide violation no requested key carries is dropped",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "            let key = self.attributed(&violation, request).unwrap_or(violation);",
+  "new": "            let Some(key) = self.attributed(&violation, request) else { continue };",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_32_throughput_cases"
+ },
+ {
+  "id": "P76",
+  "name": "RM-32: a stream violation is charged to no membership key of the request",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "            Concrete::Stream { rx, .. } => self\n                .direction_keys(Direction::of(rx))\n                .into_iter()\n                .find(|key| request.constraints.contains_key(key)),",
+  "new": "            Concrete::Stream { .. } => None,",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_32_throughput_cases"
+ },
+ {
+  "id": "P77",
+  "name": "RM-32: only stream 0's channels count",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "            for k in 0..count {\n                let members = (0..count)",
+  "new": "            for k in 0..1 {\n                let members = (0..count)",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_32_throughput_cases"
+ },
+ {
+  "id": "P78",
+  "name": "RM-32: each stream is judged on its own instead of summed",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "                need += members as f64 * rate;",
+  "new": "                need = f64::max(need, members as f64 * rate);",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_32_throughput_cases"
+ },
+ {
+  "id": "P79",
+  "name": "RM-32: the transmit direction is not judged",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "        for direction in [Direction::Rx, Direction::Tx] {\n            let count = direction.channels(self).len();",
+  "new": "        for direction in [Direction::Rx] {\n            let count = direction.channels(self).len();",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_32_throughput_cases"
  }
 ]

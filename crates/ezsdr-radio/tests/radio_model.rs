@@ -111,7 +111,7 @@ fn rm_01_register_twice_is_refused() {
     ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
     assert!(ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).is_err());
 
-    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 32);
+    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 50);
     assert_eq!(kinds.kinds().len(), 9);
     assert_eq!(
         checks
@@ -170,6 +170,24 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
         ("radio.perf.wire_bytes_per_sample", int, false, reject, none),
         ("radio.tx.path_delay_samples", int, false, reject, none),
         ("radio.rx.path_delay_samples", int, false, reject, none),
+        ("radio.rx.c.frequency_hz", num, true, reject, timed),
+        ("radio.rx.c.gain_db", num, true, warn, timed),
+        ("radio.rx.c.antenna", str_, false, reject, cold),
+        ("radio.rx.c.stream", int, false, reject, cold),
+        ("radio.rx.c.frequency_step_hz", num, false, reject, none),
+        ("radio.rx.c.gain_step_db", num, false, reject, none),
+        ("radio.rx.c.phase_behavior_on_retune", str_, false, reject, none),
+        ("radio.rx.c.path_delay_samples", int, false, reject, none),
+        ("radio.rx.s.sample_rate_hz", num, true, reject, cold),
+        ("radio.tx.c.frequency_hz", num, true, reject, timed),
+        ("radio.tx.c.gain_db", num, true, warn, timed),
+        ("radio.tx.c.antenna", str_, false, reject, cold),
+        ("radio.tx.c.stream", int, false, reject, cold),
+        ("radio.tx.c.frequency_step_hz", num, false, reject, none),
+        ("radio.tx.c.gain_step_db", num, false, reject, none),
+        ("radio.tx.c.phase_behavior_on_retune", str_, false, reject, none),
+        ("radio.tx.c.path_delay_samples", int, false, reject, none),
+        ("radio.tx.s.sample_rate_hz", num, true, reject, cold),
     ];
     let declarations = ezsdr_radio::vocabulary().keys;
     assert_eq!(declarations.len(), expected.len());
