@@ -54,7 +54,7 @@
   "name": "a receive fault emits its RX_OVERFLOW at once, not with the block that carries its loss",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
   "old": "        self.faults[index].applied = true;\n        self.record_fault(index, lost as u64);\n",
-  "new": "        let domain = self.rx_register()?;\n        for (kf, payload) in self.rx.as_mut().map(|rx| std::mem::take(&mut rx.overflows)).unwrap_or_default() { self.emit_overflow(payload, TimePoint::new(domain, kf))?; }\n        self.faults[index].applied = true;\n        self.record_fault(index, lost as u64);\n",
+  "new": "        let domain = self.rx_register(k)?;\n        for (kf, payload) in self.rx[k].running.as_mut().map(|rx| std::mem::take(&mut rx.overflows)).unwrap_or_default() { self.emit_overflow(k, payload, TimePoint::new(domain, kf))?; }\n        self.faults[index].applied = true;\n        self.record_fault(index, lost as u64);\n",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_20a_the_overflow_comes_with_the_block_that_carries_it"
@@ -63,8 +63,8 @@
   "id": "F32",
   "name": "a stream that ends before the block carrying a loss still emits its RX_OVERFLOW",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        self.rx_settle(t)?;\n        if self.rx.as_ref().is_some_and(|rx| rx.ended) { self.rx = None; }\n",
-  "new": "        self.rx_settle(t)?;\n        if let Some(domain) = self.rx.as_ref().and_then(|rx| rx.domain) { for (kf, payload) in self.rx.as_mut().map(|rx| std::mem::take(&mut rx.overflows)).unwrap_or_default() { self.emit_overflow(payload, TimePoint::new(domain, kf))?; } }\n        if self.rx.as_ref().is_some_and(|rx| rx.ended) { self.rx = None; }\n",
+  "old": "        self.rx_settle(k, t)?;\n        if self.rx[k].running.as_ref().is_some_and(|rx| rx.ended) { self.rx[k].running = None; }\n",
+  "new": "        self.rx_settle(k, t)?;\n        if let Some(domain) = self.rx[k].running.as_ref().and_then(|rx| rx.domain) { for (kf, payload) in self.rx[k].running.as_mut().map(|rx| std::mem::take(&mut rx.overflows)).unwrap_or_default() { self.emit_overflow(k, payload, TimePoint::new(domain, kf))?; } }\n        if self.rx[k].running.as_ref().is_some_and(|rx| rx.ended) { self.rx[k].running = None; }\n",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_20_a_fault_at_a_loss_s_instant_removes_nothing"
@@ -133,8 +133,8 @@
   "id": "F27",
   "name": "the loss leaves the transmit side running",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        self.stop_tx(now, reason, false)?;",
-  "new": "        if reason != DEVICE_LOST { self.stop_tx(now, reason, false)?; }",
+  "old": "            self.stop_tx(k, now, reason, false)?;",
+  "new": "            if reason != DEVICE_LOST { self.stop_tx(k, now, reason, false)?; }",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_20_a_lost_device_transmits_nothing_after_the_loss"
@@ -153,8 +153,8 @@
   "id": "F29",
   "name": "the loss's stop leaves the receive stream open",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        self.book_rx(Item { e: now, seq, ready: now, release: NO_RELEASE, delivered, refused: false, kind: Kind::End { abort } })?;\n",
-  "new": "        if !lost { self.book_rx(Item { e: now, seq, ready: now, release: NO_RELEASE, delivered, refused: false, kind: Kind::End { abort } })?; }\n",
+  "old": "            self.book_rx(k, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered, refused: false, kind: Kind::End { abort } })?;\n",
+  "new": "            if !lost { self.book_rx(k, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered, refused: false, kind: Kind::End { abort } })?; }\n",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_20_a_loss_ends_its_receive_stream_at_its_instant"
@@ -519,7 +519,7 @@
   "name": "VH-5 (spec 22, H08): the fault row records only what the stream lost by its end",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
   "old": "        let lost = kg - kf;\n",
-  "new": "        let lost = kg.min(self.rx_cut().unwrap_or(kg)) - kf;\n",
+  "new": "        let lost = kg.min(self.rx_cut(k).unwrap_or(kg)) - kf;\n",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_21_overrun_shape"
@@ -3816,8 +3816,8 @@
   "id": "T26",
   "name": "CH-9: a loss cuts the transmitter one sample before the round's instant",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                self.cut_segments(cut);",
-  "new": "                self.cut_segments(cut - 1);",
+  "old": "                self.cut_segments(k, cut);",
+  "new": "                self.cut_segments(k, cut - 1);",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "ch_09_a_faulted_round_does_not_depend_on_the_stepping_order"
