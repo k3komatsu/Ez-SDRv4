@@ -7,7 +7,7 @@
 
 use ezsdr_kernel::stream::Direction;
 use ezsdr_kernel::time::Rational;
-use ezsdr_radio::timeline::{Item, Kind, Stream};
+use ezsdr_radio::timeline::{Channels, Item, Kind, Stream, NO_RELEASE};
 
 /// The most a sequence exercises: a sequence holds its own class's operation or fault and
 /// may hold any earlier class's. The order is how far today's Providers stray from the
@@ -200,7 +200,7 @@ impl Sequence {
                     Op::StartRx if receive => Kind::Start,
                     Op::Cold { direction, change, .. } if direction == terms.stream.direction => {
                         match change {
-                            Change::Channels(channels) => config.channels = channels,
+                            Change::Channels(channels) => config.channels = Channels::first(u32::from(channels)),
                             Change::Rate(rate) => config.ratio = terms.ratio(rate),
                         }
                         Kind::Cold(config)
@@ -208,7 +208,7 @@ impl Sequence {
                     _ => continue,
                 },
             };
-            items.push(Item { e: entry.e, seq: entry.seq, ready: entry.receipt, delivered: None, refused: false, kind });
+            items.push(Item { e: entry.e, seq: entry.seq, ready: entry.receipt, release: NO_RELEASE, delivered: None, refused: false, kind });
         }
         items
     }

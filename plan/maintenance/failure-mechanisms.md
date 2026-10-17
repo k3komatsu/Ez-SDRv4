@@ -24,6 +24,8 @@ Bugs since: #65 (`failure-collapsed-into-value`) and #66 (`pending-provenance-co
 
 Review findings in #60 stage A (2026-10-12 to 13; not issues): the manual-clock anchor rule had an exception (the Authority's first anchor, read while the clock ran), which failed a test twice; the exception was removed rather than patched (plan 30 §15).
 
+Review findings in Phase 8 stage 1b-2b (2026-10-17; not issues): five Sol 6.1 findings on one point, when the destination of a channel move may start (the source's release), all `planned-state-read-as-actual` — the source's cut computed at booking and kept in the destination's item went stale when the source's plan changed (a pending segment, a later `start_rx`), reached only the move's own item, was written into `ready` (which also orders bookings against an `End`), and read only the cut the move itself made (a `Stop`-cut segment ending later). The rule was not patched a fifth time: release became its own field, written only by `timeline::Lines`, which re-reads it from the source's current plan after every operation with one general definition (the latest end of the source's segments that hold the channel and began before the move; spec 07 RM-34). Sol's third re-review found nothing further and recommended keeping the structure ([plan/phase8/00-overview.md](../phase8/00-overview.md) §8).
+
 Unclassified: #4 and #13 (one-off bugs); #40, #42 and #48 (spec gaps); #54, #55, #56, #59, #60 and #62 (not defects, or decisions).
 
 ## handoff からの記録（2026-10-14 に移動）

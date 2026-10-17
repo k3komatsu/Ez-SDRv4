@@ -94,7 +94,7 @@ channel を stream から stream へ移す（`c1.stream` を 0 から 1 へ）�
 6. 各 segment の channel の並び（論理番号の列）は segment ごとに固定し，Provider の Manifest section に残す（Kernel の `SampleClockRecord` には足さない：足すと2つ目の Kernel の変更になる）．
 7. **区切りと準備の時刻**：共通の effective instant から，各 stream の cut をそれぞれの古い clock の sample に丸める（RM-16）．移動先の ready instant には，移動元の streamer の停止と解放，必要な設定の完了を含める（RM-25 の ready の項を2本に広げる．Mock も同じ項を使う）．
 8. **止まっている stream（Sol の v3 P1-1）**：3つを分ける．**off**（`Stop` 済み）は membership の更新では再開せず，`start_rx`（受信）か次の burst（送信）を待つ（RM-21）．**on で channel がない**stream に最初の channel が入るのは，channel 数 0 からの enable と同じで，RM-25 のとおり次の segment を始める．**halt**（拒否で止まった）stream は，成功した `cold` 変更（membership の更新を含む）で RM-25 のとおり解除され，on で channel があれば始まる（今の timeline と同じ，`timeline.rs:320-335`）．拒否のときは，両方の stream の記録上の membership，後の計画，再開の条件を揃える．
-9. **1か所で実装する**：「同じ床の instant で2本の line に記帳し，拒否なら両方 halt する」は `ezsdr_radio::timeline` の1つの関数にし，両 Provider がそれを呼ぶ（`mech:radio-rule-implemented-twice` が9件，AGENTS.md §6）．
+9. **1か所で実装する**：「同じ床の instant で2本の line に記帳し，拒否なら両方 halt する」は `ezsdr_radio::timeline` の1つの関数にし，両 Provider がそれを呼ぶ（`mech:radio-rule-implemented-twice` が9件，AGENTS.md §6）．実装（段階 1b-2b，2026-10-17）では，移動先の開始が移動元の今の計画に依存し続けるので，関数ではなく instance の全 line を持つ型 `timeline::Lines` にした．移動先の item の `release`（`ready` とは別の field）を `Lines` だけが，移動元の今の計画から（channel を持ち移動より前に始まった segment の終わりの最大）どの操作の後でも計算し直す（spec 07 RM-34）．
 
 `ezsdr_radio::timeline` は stream ごとの channel の集合を持つように広げる（今は channel の数と rate だけ）．
 
@@ -261,7 +261,7 @@ CBX は board の種類の表に入る（D5）が，計画は `radio` 語彙の 
 |---|---|
 | 1a | description を `radio` 語彙に1か所（motherboard と front end の表），profile 名 `x3xx`（EA-9 の既定 profile，fixture，Python，Vision の記述を**同時に**改名），rate の格子の修正と CBX の `random` と MR-34 の広げ（計画の「値は段階4まで変えない」の例外：誤りと分かっている値を測定まで残さない），方向別の start lead．key はまだ方向ごとのまま（layout は1台・方向ごとに stream 1本・同じ種類の board に限る．各方向の slot は UHD の既定の channel の順の prefix，`[]`・`[A]`・`[A,B]` だけ：subdev spec を作るのは 1b-4）．実装（2026-10-17）：CBX は `random` で retune のたびに位相を引き直し，`coherent` は false（D13） |
 | 1b-1 | Kernel：`KeyDecl` の番号の付く segment（D2）と schema |
-| 1b-2 | 語彙：channel と stream の key・stream の node・port，D3 の移動を含む timeline，D7〜D9，D14 の判定．**新しい tree は別の builder で作り，今の builder と `rm_26_the_description_builds_the_tree` は残す**．レビューの量を抑えるため2つに分けた（2026-10-17）：**1b-2a** は key・layout・新しい description と tree・`coerce`・設定全体の判定 `violations`（D8 の全二重，D9 の throughput）・channel ごとの RM-19（実装：2026-10-17）；**1b-2b** は timeline の channel の集合，D3 の移動，D14．D9 の DDC/DUC への timed command の release の規則は段階 2（#62 と同じ queue の話） |
+| 1b-2 | 語彙：channel と stream の key・stream の node・port，D3 の移動を含む timeline，D7〜D9，D14 の判定．**新しい tree は別の builder で作り，今の builder と `rm_26_the_description_builds_the_tree` は残す**．レビューの量を抑えるため2つに分けた（2026-10-17）：**1b-2a** は key・layout・新しい description と tree・`coerce`・設定全体の判定 `violations`（D8 の全二重，D9 の throughput）・channel ごとの RM-19（実装：2026-10-17）；**1b-2b** は timeline の channel の集合，D3 の移動（`timeline::Lines`），D14（実装：2026-10-17）．D9 の DDC/DUC への timed command の release の規則は段階 2（#62 と同じ queue の話） |
 | 1b-3 | MockRadio：selector の一時的な key（例：`keys: "channel"`．layout は 1a で入るので，layout の有無では切り分けられない．1b-5 で消す）があれば新しい key だけ，なければ今の key だけで動く（**1つの instance が新旧両方の key を受けることはない**：同じ設定が2つの key で `effective` に載るのを避ける）．複数 stream，channel ごとの設定，SimulationChannel の channel 番号 |
 | 1b-4 | UHD Module：同じ切り分けで，layout から subdev spec（1a の prefix の制限を外す），stream ごとの streamer と thread（D15），channel ごとの `apply`，開くときの照合（D5） |
 | 1b-5 | **切り替え**：server（EA-9，port `rx0`），Python（EA-16，EA-17），fixture を新しい key に移し，古い key・port `rx`・今の builder と一時的な key を同じ段階で削る |

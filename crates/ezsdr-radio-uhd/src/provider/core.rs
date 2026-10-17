@@ -12,7 +12,7 @@ use ezsdr_kernel::stream::DataLink;
 use ezsdr_kernel::time::{ClockRegistry, Rational, TimeAuthority, TimePoint};
 use ezsdr_radio::device::DeviceDescription;
 use ezsdr_radio::payloads::CommandRejectedPayload;
-use ezsdr_radio::timeline::{self, Config, Item, Kind, Line};
+use ezsdr_radio::timeline::{self, Config, Item, Kind, Line, NO_RELEASE};
 use ezsdr_radio::{keys, kinds};
 use serde_json::{Value as Json, json};
 
@@ -129,7 +129,7 @@ impl Streams {
         }
         let seq = if lost { 0 } else { self.next_seq() };
         for dir in [Dir::Rx, Dir::Tx] {
-            self.book(core, dir, Item { e: at, seq, ready: at, delivered: None, refused: false, kind: Kind::End { abort } });
+            self.book(core, dir, Item { e: at, seq, ready: at, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::End { abort } });
         }
     }
 
@@ -199,7 +199,7 @@ impl Streams {
             self.lines[dir as usize].iter().flat_map(|line| &line.plan).map(|segment| json!({
                 "origin": segment.origin,
                 "end": segment.cut.and_then(|cut| segment.instant(cut).ok()),
-                "channels": segment.config.channels,
+                "channels": segment.config.channels.count(),
                 "ticks_per_sample": [segment.config.ratio.num(), segment.config.ratio.den()],
             })).collect()
         };

@@ -21,7 +21,7 @@ use ezsdr_kernel::spec::{Constraint, Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::{BackPressure, BlockFlags, BlockHeader, BlockRef, DataLink, Direction, DropCarry, PublishOutcome};
 use ezsdr_kernel::time::{AbsoluteDeadline, ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority, Rational, RelativeBudget, TimePoint};
 use ezsdr_mock_radio::MockRadio;
-use ezsdr_radio::timeline::{Config, Segment, Stream, plan};
+use ezsdr_radio::timeline::{Channels, Config, Segment, Stream, plan};
 use generator::{Change, Class, Entry, Event, Fault, Op, Sequence, Terms};
 
 #[path = "../../ezsdr-radio/tests/generator/mod.rs"]
@@ -106,7 +106,7 @@ fn terms(profile: &str, direction: Direction) -> Terms {
     let (lead, call, allowance, timed_lead) = if profile == "ideal" { (0, 0, 0, 0) } else { (50 * MS, 2_000, 3 * MS, 2 * MS) };
     // The transmit clock starts at `arm`, at 0 (RM-25); the receive clock at T0.
     let origin = if direction == Direction::Rx { T0 } else { 0 };
-    let config = Config { channels: 1, ratio: Rational::new(1_000_000_000, 1_000_000).unwrap() };
+    let config = Config { channels: Channels::first(1), ratio: Rational::new(1_000_000_000, 1_000_000).unwrap() };
     Terms { t0: T0, root_hz: 1_000_000_000, timed_lead, stream: Stream { direction, origin, config, lead, call, allowance } }
 }
 

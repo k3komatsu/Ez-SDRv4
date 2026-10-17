@@ -947,8 +947,8 @@
   "id": "R04",
   "name": "a cold change takes effect at its booking, ignoring its instant (P0-3, L08)",
   "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "    let asked = at.unwrap_or(now);",
-  "new": "    let asked = now;",
+  "old": "    let asked = at.unwrap_or(now);\n    let floor = line.filter(|line| line.stream.direction == Direction::Rx).map_or(i64::MIN, |line| line.stream.origin);",
+  "new": "    let asked = now;\n    let floor = line.filter(|line| line.stream.direction == Direction::Rx).map_or(i64::MIN, |line| line.stream.origin);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_rx_channels_from_zero_starts_at_its_instant"
