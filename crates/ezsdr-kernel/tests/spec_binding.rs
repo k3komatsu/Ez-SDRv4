@@ -756,6 +756,7 @@ fn sb_06_constraint_match_table() {
 fn sb_06_key_shape_mismatch() {
     let decl = KeyDecl {
         key: key("test.flag"),
+        indexed: None,
         kind: ValueKind::Bool,
         coercible: false,
         coercion_default: CoercionPolicy::Warn,
@@ -764,6 +765,7 @@ fn sb_06_key_shape_mismatch() {
     assert!(matches!(
         ezsdr_kernel::binding::check_constraint_kind(
             &decl,
+            &key("test.flag"),
             &Constraint::Eq {
                 value: Scalar::Int(1)
             }
@@ -773,6 +775,7 @@ fn sb_06_key_shape_mismatch() {
     assert!(
         ezsdr_kernel::binding::check_constraint_kind(
             &decl,
+            &key("test.flag"),
             &Constraint::Eq {
                 value: Scalar::from(true)
             }
@@ -853,6 +856,7 @@ fn sb_07_non_coercible_key_fails_directly() {
 fn sb_45_coercion_policy_chain() {
     let decl = KeyDecl {
         key: key("test.grid"),
+        indexed: None,
         kind: ValueKind::Num,
         coercible: true,
         coercion_default: CoercionPolicy::Reject,
@@ -2345,7 +2349,7 @@ fn sb_08_the_test_vocabulary_names_no_radio_word() {
         .map(|k| k.key.to_string())
         .collect();
     // `test.tx_clock` is spec 19 §0's (Phase 7, KG-4's tests); `test.list` is item 3's
-    // List-kind carrier (review P2-2).
+    // List-kind carrier (review P2-2); `test.item` is SB-2a's numbered declaration.
     let want: BTreeSet<String> = [
         "test.count",
         "test.grid",
@@ -2353,6 +2357,7 @@ fn sb_08_the_test_vocabulary_names_no_radio_word() {
         "test.gain",
         "test.tx_clock",
         "test.list",
+        "test.item",
     ]
     .map(str::to_owned)
     .into();
@@ -7599,4 +7604,303 @@ fn sb_02_needs_constraints_are_checked_against_key_decl() {
     });
     let admission = validate(&valid, &profile, &inputs).unwrap();
     plan(&valid, &profile, &admission, &inputs).unwrap();
+}
+
+// ------------------------------------------------- SB-2a, the numbered key
+
+/// A Spec with the numbered key `test.item0` at the four key positions that need no
+/// schedule entry: a resource's `requires`, a `needs[].requires`, an output's
+/// `params` and a `policies.coercion` key (SB-2a).
+fn numbered_key_spec() -> ExperimentSpec {
+    let mut spec = minimal_spec();
+    let radio = spec.resources.get_mut(&id("radio")).expect("radio");
+    radio.requires.insert(
+        key("test.item0"),
+        Constraint::Eq {
+            value: Scalar::from(3),
+        },
+    );
+    radio.needs.insert(
+        id("line"),
+        SubResourceReq {
+            kind: ns("test.line"),
+            requires: [(key("test.item0"), Constraint::Eq { value: Scalar::from(3) })]
+                .into_iter()
+                .collect(),
+        },
+    );
+    spec.outputs.push(OutputReq {
+        params: [(key("test.item0"), Value::from(3))].into_iter().collect(),
+        ..output("rec")
+    });
+    spec.policies
+        .coercion
+        .insert(key("test.item0"), CoercionPolicy::Reject);
+    spec
+}
+
+/// The documents of [`numbered_key_spec`]: the profile binding the recorder, and the
+/// Fixture holding its Sink.
+fn numbered_key_documents<'a>(
+    spec: &ExperimentSpec,
+    sink: &'a TestSink,
+) -> (BindingProfile, Fixture<'a>) {
+    let mut profile = profile_binding(&["radio"]);
+    profile.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
+    select_test_links(spec, &mut profile);
+    let mut fx = Fixture::new();
+    fx.sinks = [(id("rec"), sink as &dyn ezsdr_kernel::module_api::Sink)]
+        .into_iter()
+        .collect();
+    (profile, fx)
+}
+
+#[test]
+fn sb_02a_a_numbered_key_reaches_every_key_position() {
+    // SB-2a at SB-2's key positions: the concrete key a numbered declaration covers is
+    // a declared key, and its value is judged by that declaration's kind, through
+    // `validate()`, `plan()` and `prepare`.
+    let spec = numbered_key_spec();
+    let p = TestProvider::new("radio", 2).with_capability("test.item0", 3);
+    let providers = one_provider("radio", &p);
+    let sink = cf32_sink();
+    let (profile, fx) = numbered_key_documents(&spec, &sink);
+    let admission = validate(&spec, &profile, &fx.inputs(&providers))
+        .expect("every position names a declared key");
+    assert!(admission.is_admitted());
+    assert_eq!(
+        admission.rejected.len(),
+        0,
+        "the capability satisfies the key directly: {:?}",
+        admission.rejected
+    );
+    plan(&spec, &profile, &admission, &fx.inputs(&providers))
+        .expect("plan runs the structural checks again");
+    // The schedule position (SB-2's fifth) is `rs_52`'s reader: a scheduled update
+    // states no class, so `validate` refuses a declaration that gives none and accepts
+    // a numbered declaration that gives one (HardwareTimed here).
+    let mut scheduled = minimal_spec();
+    scheduled.schedule.push(ScheduleEntry {
+        at: SpecTime {
+            clock: id("radio"),
+            offset_ticks: 0,
+        },
+        action: ActionTemplate::UpdateParameter {
+            target: support::target("radio"),
+            key: key("test.item0"),
+            value: Value::from(3),
+        },
+    });
+    validate(&scheduled, &profile_binding(&["radio"]), &fx.inputs(&providers))
+        .expect("the numbered declaration carries an update class");
+    // `prepare` over the same Spec: the numbered key's value is the one the matcher
+    // applied, and `effective` carries the concrete key.
+    let report = PrepareReport {
+        effective: [(key("test.item0"), Value::from(3))].into_iter().collect(),
+        coercions: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let empty = PrepareReport {
+        effective: BTreeMap::new(),
+        coercions: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let reports = prepared(
+        vec![(id("radio"), Ok(report)), (id("rec"), Ok(empty))],
+        &fx,
+        &spec,
+        &profile,
+        &providers,
+    )
+    .expect("prepare accepts the report");
+    assert_eq!(
+        reports[&id("radio")].effective[&key("test.item0")],
+        Value::from(3)
+    );
+}
+
+#[test]
+fn sb_02a_the_declaration_s_own_spelling_is_no_key() {
+    // SB-2a: a numbered declaration's own spelling is how it is written, not a key
+    // that declaration covers, so — the test Vocabulary declaring only the numbered
+    // `test.item`, with no exact declaration of the spelling — a request for it is
+    // refused exactly as an undeclared key is. The forms that carry no index of the
+    // right shape are refused with it too.
+    let p = TestProvider::new("radio", 2).with_capability("test.item0", 3);
+    let providers = one_provider("radio", &p);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let required = |name: &str| {
+        let mut spec = minimal_spec();
+        spec.resources.get_mut(&id("radio")).unwrap().requires.insert(
+            key(name),
+            Constraint::Eq {
+                value: Scalar::from(3),
+            },
+        );
+        spec
+    };
+    for name in [
+        "test.item",           // the declaration's own spelling
+        "test.itemx",          // no index
+        "test.item01",         // a leading zero
+        "test.item1234567890", // ten digits
+    ] {
+        let refused = validate(&required(name), &profile, &fx.inputs(&providers))
+            .expect_err("{name} is no key");
+        assert!(
+            matches!(&refused, SpecError::UnknownKeyPrefix { key } if key.starts_with(name)),
+            "{name}: {refused:?}"
+        );
+    }
+    // The spelling is no key at the other four positions either: SB-2's structural
+    // check runs them through one iterator (item 3), so a numbered declaration is
+    // resolved at every one of them or at none.
+    let mut needs = minimal_spec();
+    needs.resources.get_mut(&id("radio")).unwrap().needs.insert(
+        id("line"),
+        SubResourceReq {
+            kind: ns("test.line"),
+            requires: [(key("test.item"), Constraint::Present {})]
+                .into_iter()
+                .collect(),
+        },
+    );
+    let mut params = minimal_spec();
+    params.outputs.push(OutputReq {
+        params: [(key("test.item"), Value::from(3))].into_iter().collect(),
+        ..output("rec")
+    });
+    let mut coercion = minimal_spec();
+    coercion
+        .policies
+        .coercion
+        .insert(key("test.item"), CoercionPolicy::Reject);
+    let mut schedule = minimal_spec();
+    schedule.schedule.push(ScheduleEntry {
+        at: SpecTime {
+            clock: id("radio"),
+            offset_ticks: 0,
+        },
+        action: ActionTemplate::UpdateParameter {
+            target: support::target("radio"),
+            key: key("test.item"),
+            value: Value::from(3),
+        },
+    });
+    for (position, spec) in [
+        ("a resource's `requires`", required("test.item")),
+        ("a `needs[].requires`", needs),
+        ("an output's `params`", params),
+        ("a `policies.coercion` key", coercion),
+        ("a schedule entry's update", schedule),
+    ] {
+        let refused = validate(&spec, &profile, &fx.inputs(&providers))
+            .expect_err("the spelling is no key");
+        assert!(
+            matches!(&refused, SpecError::UnknownKeyPrefix { key } if key.starts_with("test.item")),
+            "{position}: {refused:?}"
+        );
+    }
+}
+
+#[test]
+fn sb_02a_a_kind_refusal_names_the_concrete_key() {
+    // SB-2a: a refusal that names a key names the concrete one. A numbered
+    // declaration's spelling would leave a reader with no key to look at, and at a
+    // constraint it is `check_constraint_kind` that reports it (SB-6).
+    let p = TestProvider::new("radio", 2).with_capability("test.item0", 3);
+    let providers = one_provider("radio", &p);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let mut spec = minimal_spec();
+    spec.resources.get_mut(&id("radio")).unwrap().requires.insert(
+        key("test.item0"),
+        Constraint::Eq {
+            value: Scalar::from(true),
+        },
+    );
+    let refused = validate(&spec, &profile, &fx.inputs(&providers)).expect_err("Bool is not an Int");
+    assert!(
+        matches!(&refused, SpecError::KeyShape { key, .. } if key == "test.item0"),
+        "the refusal names the concrete key: {refused:?}"
+    );
+    // A `Value` at an output's `params` is the same refusal through
+    // `check_value_kind`.
+    let mut output_with = minimal_spec();
+    output_with.outputs.push(OutputReq {
+        params: [(key("test.item0"), Value::from(true))].into_iter().collect(),
+        ..output("rec")
+    });
+    let refused = validate(&output_with, &profile, &fx.inputs(&providers)).expect_err("Bool is not an Int");
+    assert!(
+        matches!(&refused, SpecError::KeyShape { key, .. } if key == "test.item0"),
+        "the refusal names the concrete key: {refused:?}"
+    );
+}
+
+#[test]
+fn sb_02a_a_numbered_key_resolves_its_policy_by_the_concrete_key() {
+    // SB-2a: `policies.coercion` keeps its exact key, so a policy for `test.item0`
+    // governs that key's coercion and a policy for another index does not — the
+    // declaration they share is not the map's key.
+    let p = TestProvider::new("radio", 2)
+        .coercing("test.item0", 2.0)
+        .coercing("test.item1", 2.0);
+    let providers = one_provider("radio", &p);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let asked = |name: &str| {
+        let mut spec = minimal_spec();
+        // No capability is declared for either key, so the coercible declaration sends
+        // the request to `coerce` (SB-7), which reports a coercion to a `Num`.
+        spec.resources.get_mut(&id("radio")).unwrap().requires.insert(
+            key(name),
+            Constraint::Eq {
+                value: Scalar::from(3),
+            },
+        );
+        spec
+    };
+    let mut exact = asked("test.item0");
+    exact
+        .policies
+        .coercion
+        .insert(key("test.item0"), CoercionPolicy::Reject);
+    let refused = validate(&exact, &profile, &fx.inputs(&providers)).expect("validates");
+    assert!(!refused.is_admitted(), "the concrete key's policy rejects");
+    assert!(
+        refused
+            .violations
+            .iter()
+            .any(|v| v.key == Some(key("test.item0")) && v.reason.contains("SB-46")),
+        "{:?}",
+        refused.violations
+    );
+    // Another index's policy leaves this key to its declaration's own default, which
+    // is `warn`: the run is admitted and the coercion is recorded as a warning.
+    let mut other = asked("test.item0");
+    other
+        .policies
+        .coercion
+        .insert(key("test.item1"), CoercionPolicy::Reject);
+    let admitted = validate(&other, &profile, &fx.inputs(&providers)).expect("validates");
+    assert!(admitted.is_admitted(), "{:?}", admitted.violations);
+    assert_eq!(admitted.warnings.len(), 1, "{:?}", admitted.warnings);
+    // And the same policy governs `test.item1`, whose own coercion is the one it names.
+    let mut on_item1 = asked("test.item1");
+    on_item1
+        .policies
+        .coercion
+        .insert(key("test.item1"), CoercionPolicy::Reject);
+    let refused = validate(&on_item1, &profile, &fx.inputs(&providers)).expect("validates");
+    assert!(!refused.is_admitted());
+    assert!(
+        refused
+            .violations
+            .iter()
+            .any(|v| v.key == Some(key("test.item1"))),
+        "{:?}",
+        refused.violations
+    );
 }

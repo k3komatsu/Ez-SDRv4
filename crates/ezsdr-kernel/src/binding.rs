@@ -295,12 +295,15 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
     })
 }
 
-/// Refuses a constraint whose scalars are not of the `KeyDecl`'s kind (SB-6).
-pub fn check_constraint_kind(decl: &KeyDecl, c: &Constraint) -> Result<(), SpecError> {
+/// Refuses a constraint whose scalars are not of the `KeyDecl`'s kind (SB-6). The
+/// refusal names `key`, the concrete key the document wrote; for a numbered
+/// declaration, which does not cover its own spelling, that is the only key a reader
+/// could act on (SB-2a).
+pub fn check_constraint_kind(decl: &KeyDecl, key: &Key, c: &Constraint) -> Result<(), SpecError> {
     for v in c.values() {
         if !crate::spec::kind_accepts(decl.kind, v.kind()) {
             return Err(SpecError::KeyShape {
-                key: decl.key.to_string(),
+                key: key.to_string(),
                 expected: format!("{:?}", decl.kind),
                 found: format!("{:?}", v.kind()),
             });
@@ -312,13 +315,14 @@ pub fn check_constraint_kind(decl: &KeyDecl, c: &Constraint) -> Result<(), SpecE
 /// Refuses a `Value` that is not of the `KeyDecl`'s kind (SB-2, SB-6). One rule,
 /// shared by the positions a `Value` meets a declaration at `validate()` — an
 /// output's `params` and a schedule update; admission joins in 3b, with KC-24's
-/// requested and coerced values (pre-freeze item 3).
-pub(crate) fn check_value_kind(decl: &KeyDecl, value: &Value) -> Result<(), SpecError> {
+/// requested and coerced values (pre-freeze item 3). The refusal names `key`, the
+/// concrete key the document wrote (SB-2a).
+pub(crate) fn check_value_kind(decl: &KeyDecl, key: &Key, value: &Value) -> Result<(), SpecError> {
     if crate::spec::kind_accepts(decl.kind, value.kind()) {
         return Ok(());
     }
     Err(SpecError::KeyShape {
-        key: decl.key.to_string(),
+        key: key.to_string(),
         expected: format!("{:?}", decl.kind),
         found: format!("{:?}", value.kind()),
     })

@@ -661,6 +661,7 @@ mod tests {
             keys: vec![
                 crate::spec::KeyDecl {
                     key: key("test.count"),
+                    indexed: None,
                     kind: crate::spec::ValueKind::Int,
                     coercible: false,
                     coercion_default: crate::spec::CoercionPolicy::Reject,
@@ -668,6 +669,7 @@ mod tests {
                 },
                 crate::spec::KeyDecl {
                     key: key("test.grid"),
+                    indexed: None,
                     kind: crate::spec::ValueKind::Num,
                     coercible: true,
                     coercion_default: crate::spec::CoercionPolicy::Reject,
@@ -675,6 +677,7 @@ mod tests {
                 },
                 crate::spec::KeyDecl {
                     key: key("test.flag"),
+                    indexed: None,
                     kind: crate::spec::ValueKind::Bool,
                     coercible: false,
                     coercion_default: crate::spec::CoercionPolicy::Warn,
@@ -682,6 +685,7 @@ mod tests {
                 },
                 crate::spec::KeyDecl {
                     key: key("test.gain"),
+                    indexed: None,
                     kind: crate::spec::ValueKind::Num,
                     coercible: false,
                     coercion_default: crate::spec::CoercionPolicy::Reject,
@@ -689,6 +693,7 @@ mod tests {
                 },
                 crate::spec::KeyDecl {
                     key: key("test.list"),
+                    indexed: None,
                     kind: crate::spec::ValueKind::List,
                     coercible: false,
                     coercion_default: crate::spec::CoercionPolicy::Reject,

@@ -24,7 +24,7 @@ use ezsdr_kernel::plan::{
     check_effective_narrows,
 };
 use ezsdr_kernel::policy::EventKindRegistry;
-use ezsdr_kernel::spec::{CapabilityValue, Constraint, Ident, Value};
+use ezsdr_kernel::spec::{CapabilityValue, CoercionPolicy, Constraint, Ident, KeyDecl, Value, ValueKind};
 use ezsdr_kernel::stream::{BackPressure, DataLinkDecl, LatePolicy};
 use ezsdr_kernel::time::{
     AbsoluteDeadline, ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority,
@@ -285,6 +285,324 @@ fn ma_34_key_prefix_refused() {
     // The refusal is the caller's now (item 3): the registry answers `None`, and
     // `validate()` names it as `UnknownKeyPrefix` with the key.
     assert!(reg.key_decl(&key("radio.rx.channels")).is_none());
+}
+
+#[test]
+fn ma_34_registration_refuses_a_declaration_outside_its_prefix() {
+    // MA-34: every key a Vocabulary declares is under its own prefix, so a
+    // declaration another prefix owns is refused at registration rather than
+    // registered and then never resolved by `key_decl`'s prefix filter. The exact
+    // and the numbered form alike, and the key's own owner can then declare it.
+    let refused = |v| {
+        ModuleRegistry::new()
+            .register_vocabulary(v)
+            .expect_err("a declaration outside the prefix")
+            .message
+    };
+    let exact = refused(vocabulary_of("test", "test", vec![declaration("other.item", None)]));
+    assert!(
+        exact.starts_with("MA-34:") && exact.contains("other.item") && exact.contains("prefix test"),
+        "{exact}"
+    );
+    let numbered = refused(vocabulary_of("test", "test", vec![declaration("other.item", Some(1))]));
+    assert!(
+        numbered.starts_with("MA-34:")
+            && numbered.contains("other.item")
+            && numbered.contains("prefix test"),
+        "{numbered}"
+    );
+    // The refused declaration leaves nothing behind in the registry that refused it,
+    // so the Vocabulary that owns `other.item0` still registers it there.
+    let mut reg = ModuleRegistry::new();
+    reg.register_vocabulary(vocabulary_of("test", "test", vec![declaration("other.item", Some(1))]))
+        .expect_err("a declaration outside the prefix");
+    reg.register_vocabulary(vocabulary_of("other", "other", vec![declaration("other.item0", None)]))
+        .expect("the prefix owns the key");
+    assert_eq!(
+        reg.key_decl(&key("other.item0")).expect("declared").indexed,
+        None
+    );
+}
+
+// ------------------------------------------------- SB-2a, the numbered declaration
+
+/// One declaration, numbered at `indexed` (SB-2a).
+fn declaration(name: &str, indexed: Option<u8>) -> KeyDecl {
+    KeyDecl {
+        key: key(name),
+        indexed,
+        kind: ValueKind::Int,
+        coercible: false,
+        coercion_default: CoercionPolicy::Reject,
+        update_class: None,
+    }
+}
+
+/// A Vocabulary carrying exactly `keys`, under `prefix` (MA-35). The rest is the
+/// shared double's, so a case here differs from `test_vocabulary()` in its keys alone.
+fn vocabulary_of(
+    id: &str,
+    prefix: &str,
+    keys: Vec<KeyDecl>,
+) -> ezsdr_kernel::module_api::VocabularyDescriptor {
+    let mut v = test_vocabulary();
+    v.id = ns(id);
+    v.prefix = ns(prefix);
+    v.keys = keys;
+    v
+}
+
+#[test]
+fn sb_02a_a_numbered_declaration_declares_the_indexed_keys() {
+    // SB-2a: `test.item` with a numbered second segment declares every `test.itemN`
+    // with `N` a decimal index, and not the declaration's own spelling, which the
+    // declaration does not cover.
+    let mut reg = ModuleRegistry::new();
+    reg.register_vocabulary(test_vocabulary()).expect("fresh");
+    for name in ["test.item0", "test.item12", "test.item999999999"] {
+        let found = reg
+            .key_decl(&key(name))
+            .unwrap_or_else(|| panic!("{name} is declared"));
+        assert_eq!(found.key, key("test.item"), "{name}");
+        assert_eq!(found.indexed, Some(1), "{name}");
+    }
+    for name in [
+        "test.item",           // the declaration's own spelling
+        "test.itemx",          // no index at all
+        "test.item01",         // a leading zero
+        "test.item1234567890", // ten digits
+        "test.item1x",         // an index and then a letter
+        "test.items",          // another word
+    ] {
+        assert!(reg.key_decl(&key(name)).is_none(), "{name} is no declared key");
+    }
+    // An exact declaration is unchanged beside a numbered one; one Vocabulary may hold
+    // both.
+    assert_eq!(
+        reg.key_decl(&key("test.count")).expect("declared").indexed,
+        None
+    );
+}
+
+#[test]
+fn sb_02a_a_numbered_declaration_matches_only_its_own_fixed_segments() {
+    // SB-2a: a numbered declaration fixes every segment but its numbered one, so a
+    // key whose fixed segment differs, or whose segment count differs, is no key it
+    // covers. The numbered segment is in the middle, where both other positions are
+    // fixed.
+    let mut reg = ModuleRegistry::new();
+    reg.register_vocabulary(vocabulary_of(
+        "test",
+        "test",
+        vec![declaration("test.c.frequency", Some(1))],
+    ))
+    .expect("one declaration");
+    assert!(reg.key_decl(&key("test.c0.frequency")).is_some());
+    assert!(reg.key_decl(&key("test.c12.frequency")).is_some());
+    for name in [
+        "test.c0.gain",        // the last fixed segment differs
+        "test.c0",             // fewer segments
+        "test.c0.frequency.x", // more segments
+    ] {
+        assert!(reg.key_decl(&key(name)).is_none(), "{name} is no key it covers");
+    }
+}
+
+#[test]
+fn sb_02a_a_numbered_and_an_exact_declaration_of_one_spelling_coexist() {
+    // SB-2a: a numbered declaration covers the keys its numbered segment indexes and
+    // never its own spelling, so an exact declaration of that spelling beside it
+    // covers no common key and both register. The kinds tell them apart, and each
+    // lookup returns its own declaration.
+    let mut numbered = declaration("test.c.x", Some(1));
+    numbered.kind = ValueKind::Bool;
+    let mut reg = ModuleRegistry::new();
+    reg.register_vocabulary(vocabulary_of(
+        "test",
+        "test",
+        vec![declaration("test.c.x", None), numbered],
+    ))
+    .expect("the spelling itself is no key the numbered declaration covers");
+    let exact = reg.key_decl(&key("test.c.x")).expect("the exact spelling");
+    assert_eq!(exact.indexed, None, "the exact declaration answers for it");
+    assert_eq!(exact.kind, ValueKind::Int);
+    let indexed = reg.key_decl(&key("test.c0.x")).expect("test.cN.x");
+    assert_eq!(indexed.indexed, Some(1));
+    assert_eq!(indexed.kind, ValueKind::Bool, "the numbered one answers");
+}
+
+#[test]
+fn sb_02a_a_declaration_without_index_is_an_exact_key() {
+    // SB-2a: `indexed` is optional, and a document that leaves it out declares its
+    // spelling alone — which is how every Vocabulary accepted before the numbered form
+    // reads, so its absence must mean "exact", not a refusal.
+    let document = serde_json::json!({
+        "key": "test.count", "kind": "int", "coercible": false, "coercion_default": "reject",
+    });
+    let decl: KeyDecl = serde_json::from_value(document).expect("indexed is optional");
+    assert_eq!(decl.indexed, None);
+    assert_eq!(decl.key, key("test.count"));
+    // And it behaves as an exact declaration: its spelling is declared, an indexed
+    // form of it is not.
+    let mut reg = ModuleRegistry::new();
+    reg.register_vocabulary(vocabulary_of("test", "test", vec![decl]))
+        .expect("fresh");
+    assert!(reg.key_decl(&key("test.count")).is_some());
+    assert!(reg.key_decl(&key("test.count0")).is_none());
+}
+
+#[test]
+fn sb_02a_registration_refuses_a_numbered_segment_out_of_range_or_outside_the_path() {
+    // SB-2a: the numbered position lies within the key's own segments, past the
+    // Vocabulary prefix's, and the segment it numbers is a word of `[a-z]+`. Each
+    // refusal names the declaration.
+    let refused = |v| {
+        ModuleRegistry::new()
+            .register_vocabulary(v)
+            .expect_err("refused")
+            .message
+    };
+    // Past the last segment: `test.item` has two, so 2 is off the end.
+    let past = refused(vocabulary_of("test", "test", vec![declaration("test.item", Some(2))]));
+    assert!(past.contains("SB-2a") && past.contains("test.item"), "{past}");
+    // On the prefix's own segment: prefix `test` owns segment 0, prefix `ezsdr.test`
+    // owns 0 and 1.
+    let on_prefix = refused(vocabulary_of("test", "test", vec![declaration("test.item", Some(0))]));
+    assert!(on_prefix.contains("SB-2a") && on_prefix.contains("prefix"), "{on_prefix}");
+    let deep_prefix = refused(vocabulary_of(
+        "a.vendor",
+        "ezsdr.test",
+        vec![declaration("ezsdr.test.item", Some(1))],
+    ));
+    assert!(deep_prefix.contains("SB-2a") && deep_prefix.contains("prefix"), "{deep_prefix}");
+    // A numbered segment that is not a word of `[a-z]+`.
+    let not_a_word = refused(vocabulary_of("test", "test", vec![declaration("test.item0", Some(1))]));
+    assert!(not_a_word.contains("SB-2a") && not_a_word.contains("[a-z]+"), "{not_a_word}");
+    // The position and the grammar are checked before the overlap scan, so a
+    // declaration that is both ill-positioned and would overlap another is refused
+    // for its own position, whatever order the two are written in: the pair below
+    // covers `test.item1` twice, and the third declaration would `test.item0` name.
+    let both = refused(vocabulary_of(
+        "test",
+        "test",
+        vec![
+            declaration("test.item", Some(1)),
+            declaration("test.item", Some(1)),
+            declaration("test.item0", Some(1)),
+        ],
+    ));
+    assert!(
+        both.contains("[a-z]+") && !both.contains("cover one concrete key"),
+        "the declaration's own position is refused first: {both}"
+    );
+}
+
+#[test]
+fn sb_02a_registration_refuses_two_declarations_that_cover_one_key() {
+    // SB-2a: one concrete key has exactly one declaration — within one Vocabulary or
+    // across two — and a refusal names both declarations.
+    let message = |keys: Vec<KeyDecl>| {
+        ModuleRegistry::new()
+            .register_vocabulary(vocabulary_of("test", "test", keys))
+            .expect_err("refused")
+            .message
+    };
+    // Two identical exact declarations are one key declared twice.
+    let twice = message(vec![declaration("test.count", None), declaration("test.count", None)]);
+    assert!(twice.contains("SB-2a") && twice.contains("test.count"), "{twice}");
+    // An exact declaration of a key a numbered one covers, in one Vocabulary.
+    let spelled = message(vec![
+        declaration("test.item0", None),
+        declaration("test.item", Some(1)),
+    ]);
+    assert!(
+        spelled.contains("test.item0") && spelled.contains("numbered segment 1"),
+        "{spelled}"
+    );
+    // Two numbered declarations of one word and position.
+    let both = message(vec![
+        declaration("test.item", Some(1)),
+        declaration("test.item", Some(1)),
+    ]);
+    assert!(
+        both.contains("test.item") && both.contains("numbered segment 1"),
+        "{both}"
+    );
+    // Numbered positions that differ still cover one key when each segment the other
+    // numbers is an index of its word: `test.c.x5` numbered at 1 declares
+    // `test.c1.x5`, which `test.c1.x` numbered at 2 declares too.
+    let crossed = message(vec![
+        declaration("test.c.x5", Some(1)),
+        declaration("test.c1.x", Some(2)),
+    ]);
+    assert!(
+        crossed.contains("SB-2a") && crossed.contains("test.c.x5") && crossed.contains("test.c1.x"),
+        "{crossed}"
+    );
+    // Across two Vocabularies, in either registration order and for both a numbered
+    // and an exact overlap.
+    for (first, second) in [
+        (declaration("test.item", Some(1)), declaration("test.item0", None)),
+        (declaration("test.item0", None), declaration("test.item", Some(1))),
+        (declaration("test.item", Some(1)), declaration("test.item", Some(1))),
+    ] {
+        let mut reg = ModuleRegistry::new();
+        reg.register_vocabulary(vocabulary_of("test", "test", vec![first]))
+            .expect("fresh");
+        let across = reg
+            .register_vocabulary(vocabulary_of("second", "test", vec![second]))
+            .expect_err("the registered Vocabulary already covers the key")
+            .message;
+        assert!(
+            across.contains("SB-2a") && across.contains("second") && across.contains("test"),
+            "{across}"
+        );
+    }
+}
+
+#[test]
+fn sb_02a_registration_accepts_declarations_that_cover_no_common_key() {
+    // SB-2a: two declarations of one length overlap only where every position agrees,
+    // so another word, another length, or a numbered position whose word the other
+    // segment does not follow an index with are all admitted.
+    let mut reg = ModuleRegistry::new();
+    reg.register_vocabulary(vocabulary_of(
+        "test",
+        "test",
+        vec![
+            declaration("test.item", Some(1)),   // test.itemN
+            declaration("test.row", Some(1)),    // test.rowN
+            declaration("test.item.x", Some(2)), // test.item.xN, three segments
+            declaration("test.other", None),     // one exact key
+        ],
+    ))
+    .expect("no two of these cover one key");
+    assert!(reg.key_decl(&key("test.item0")).is_some());
+    assert!(reg.key_decl(&key("test.row7")).is_some());
+    assert!(reg.key_decl(&key("test.item.x0")).is_some());
+    assert!(reg.key_decl(&key("test.other")).is_some());
+    reg.register_vocabulary(vocabulary_of(
+        "second",
+        "test",
+        vec![declaration("test.deep.row", Some(2))],
+    ))
+    .expect("test.deep.rowN is no key the first Vocabulary covers");
+    // One spelling numbered at two positions: `test.item.c` at 1 declares
+    // `test.itemN.c` and at 2 declares `test.item.cN`, and no key is both.
+    let mut split = ModuleRegistry::new();
+    split
+        .register_vocabulary(vocabulary_of(
+            "split",
+            "test",
+            vec![
+                declaration("test.item.c", Some(1)),
+                declaration("test.item.c", Some(2)),
+            ],
+        ))
+        .expect("the numbered positions differ, so no key is covered twice");
+    assert!(split.key_decl(&key("test.item0.c")).is_some());
+    assert!(split.key_decl(&key("test.item.c0")).is_some());
+    assert!(split.key_decl(&key("test.item.c")).is_none());
 }
 
 #[test]

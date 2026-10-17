@@ -134,7 +134,7 @@
     },
     "KeyDecl": {
       "additionalProperties": false,
-      "description": "What a Vocabulary declares about one key (spec 05, MA-35).\n\nRule: SB-2, SB-7, SB-45.",
+      "description": "What a Vocabulary declares about one key (spec 05, MA-35).\n\nRule: SB-2, SB-2a, SB-7, SB-45.",
       "properties": {
         "coercible": {
           "description": "Whether a constraint the capability does not satisfy directly may be\noffered to the Provider's `coerce` (SB-7).",
@@ -143,6 +143,17 @@
         "coercion_default": {
           "$ref": "#/$defs/CoercionPolicy",
           "description": "The Vocabulary's default coercion policy for this key (SB-45)."
+        },
+        "indexed": {
+          "default": null,
+          "description": "The zero-based position of the declaration's one numbered segment, when it has\none: the declaration then stands for every key of the same length whose\nsegments equal `key`'s except there, where `key`'s segment — a word of\n`[a-z]+` — is followed by a decimal index. Absent declares `key` alone, and\nthen that spelling **is** a key; with a numbered segment the declaration does\nnot cover its own spelling (SB-2a).",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "key": {
           "$ref": "#/$defs/Key",

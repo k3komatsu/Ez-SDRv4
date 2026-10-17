@@ -93,6 +93,7 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
         keys: vec![
             KeyDecl {
                 key: key("test.count"),
+                indexed: None,
                 kind: ValueKind::Int,
                 coercible: false,
                 coercion_default: CoercionPolicy::Reject,
@@ -100,6 +101,7 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
             },
             KeyDecl {
                 key: key("test.grid"),
+                indexed: None,
                 kind: ValueKind::Num,
                 coercible: true,
                 coercion_default: CoercionPolicy::Reject,
@@ -107,6 +109,7 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
             },
             KeyDecl {
                 key: key("test.flag"),
+                indexed: None,
                 kind: ValueKind::Bool,
                 coercible: false,
                 coercion_default: CoercionPolicy::Warn,
@@ -118,6 +121,7 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
             // component's `params` (Vision §27's TX gain; finding D33).
             KeyDecl {
                 key: key("test.gain"),
+                indexed: None,
                 kind: ValueKind::Num,
                 coercible: false,
                 coercion_default: CoercionPolicy::Reject,
@@ -127,16 +131,30 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
             // time, as a radio Provider does on a `cold` change (spec 19 §0, KG-4).
             KeyDecl {
                 key: key("test.tx_clock"),
+                indexed: None,
                 kind: ValueKind::Int,
                 coercible: false,
                 coercion_default: CoercionPolicy::Reject,
                 update_class: Some(ezsdr_kernel::module_api::UpdateClass::Cold),
+            },
+            // A key with a numbered segment: `test.item` declares `test.item0`,
+            // `test.item12` and so on, and not the spelling itself (SB-2a; design 33
+            // D2). Coercible, with a non-default policy, so a coercion of a concrete
+            // key shows which policy a lookup by the concrete key resolves.
+            KeyDecl {
+                key: key("test.item"),
+                indexed: Some(1),
+                kind: ValueKind::Int,
+                coercible: true,
+                coercion_default: CoercionPolicy::Warn,
+                update_class: Some(ezsdr_kernel::module_api::UpdateClass::HardwareTimed),
             },
             // A `List` declaration, so `kind_accepts`' outer-kind rule for List/Map
             // has a carrier (item 3; review P2-2). Changeable, so a schedule entry can
             // carry a value for it.
             KeyDecl {
                 key: key("test.list"),
+                indexed: None,
                 kind: ValueKind::List,
                 coercible: false,
                 coercion_default: CoercionPolicy::Reject,
@@ -321,6 +339,9 @@ pub struct TestProvider {
     pub panic_in_cleanup: bool,
     /// Removes this key from `coerce`'s applied map without rejecting it (KC-26).
     pub omit_applied: Option<Key>,
+    /// Keys whose `Eq` value `coerce` snaps to a multiple of the given step, as
+    /// `grid` does for `test.grid` (SB-7, SB-44).
+    pub snaps: Vec<(Key, f64)>,
     /// Additional values inserted into `prepare`'s effective report (KC-27).
     pub effective: BTreeMap<Key, Value>,
 }
@@ -432,6 +453,7 @@ impl TestProvider {
             panic_in_coerce: false,
             panic_in_cleanup: false,
             omit_applied: None,
+            snaps: Vec::new(),
             effective: BTreeMap::new(),
         }
     }
@@ -466,6 +488,31 @@ impl TestProvider {
             memory_domains: Vec::new(),
             shareable: false,
         });
+        self
+    }
+
+    /// Declares one more integer capability under `name`, on the device root and both
+    /// `test.line` sub-resources, so a key a fixture named — a numbered one such as
+    /// `test.item0` (SB-2a) — is matched at either level.
+    pub fn with_capability(mut self, name: &str, value: i64) -> TestProvider {
+        let capability = CapabilityValue::One {
+            value: Scalar::from(value),
+        };
+        self.instance
+            .tree
+            .capabilities
+            .insert(key(name), capability.clone());
+        for line in &mut self.instance.tree.children {
+            line.capabilities.insert(key(name), capability.clone());
+        }
+        self
+    }
+
+    /// Makes `coerce` report a coercion of `key_name`, snapping an `Int` to the same
+    /// number as a `Num` (SB-7, SB-44): another kind is another value (SB-6). The
+    /// reason names the step, so a test can tell two coercions apart.
+    pub fn coercing(mut self, key_name: &str, step: f64) -> TestProvider {
+        self.snaps.push((key(key_name), step));
         self
     }
 
@@ -666,30 +713,36 @@ impl Provider for TestProvider {
             let Constraint::Eq { value: v } = c else {
                 continue;
             };
-            if k.as_str() == "test.grid" {
-                if let Some(step) = self.grid {
-                    // An `Int` snaps as the `Num` that names the same number, which the
-                    // double records as a coercion: another kind is another value (SB-6).
-                    let (x, kind_only) = match v {
-                        Scalar::Num(x) => (x.get(), false),
-                        Scalar::Int(i) => (*i as f64, true),
-                        _ => {
-                            report.applied.insert(k.clone(), v.clone().into());
-                            continue;
-                        }
-                    };
-                    let snapped = (x / step).round() * step;
-                    report.applied.insert(k.clone(), Value::num(snapped).unwrap());
-                    if kind_only || (snapped - x).abs() > f64::EPSILON {
-                        report.coercions.push(Coercion {
-                            key: k.clone(),
-                            requested: v.clone().into(),
-                            applied: Value::num(snapped).unwrap(),
-                            reason: format!("snapped to a multiple of {step}"),
-                        });
+            let step = if k.as_str() == "test.grid" {
+                self.grid
+            } else {
+                self.snaps
+                    .iter()
+                    .find(|(name, _)| name == k)
+                    .map(|(_, step)| *step)
+            };
+            if let Some(step) = step {
+                // An `Int` snaps as the `Num` that names the same number, which the
+                // double records as a coercion: another kind is another value (SB-6).
+                let (x, kind_only) = match v {
+                    Scalar::Num(x) => (x.get(), false),
+                    Scalar::Int(i) => (*i as f64, true),
+                    _ => {
+                        report.applied.insert(k.clone(), v.clone().into());
+                        continue;
                     }
-                    continue;
+                };
+                let snapped = (x / step).round() * step;
+                report.applied.insert(k.clone(), Value::num(snapped).unwrap());
+                if kind_only || (snapped - x).abs() > f64::EPSILON {
+                    report.coercions.push(Coercion {
+                        key: k.clone(),
+                        requested: v.clone().into(),
+                        applied: Value::num(snapped).unwrap(),
+                        reason: format!("snapped to a multiple of {step}"),
+                    });
                 }
+                continue;
             }
             report.applied.insert(k.clone(), v.clone().into());
         }

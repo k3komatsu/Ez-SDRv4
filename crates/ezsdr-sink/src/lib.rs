@@ -55,6 +55,7 @@ pub fn vocabulary() -> VocabularyDescriptor {
         prefix: namespace,
         keys: vec![KeyDecl {
             key: Key::parse(CAPTURE_SAMPLES).expect("a valid Sink key"),
+            indexed: None,
             kind: ValueKind::Int,
             coercible: false,
             coercion_default: CoercionPolicy::Reject,

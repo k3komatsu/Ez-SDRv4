@@ -169,6 +169,7 @@ fn key_decl(
 ) -> KeyDecl {
     KeyDecl {
         key: Key::parse(name).expect("a declared Radio Model key is valid"),
+        indexed: None,
         kind,
         coercible,
         coercion_default,

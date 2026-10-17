@@ -547,10 +547,10 @@ fn check_keys(spec: &ExperimentSpec, inputs: &CompileInputs<'_>) -> Result<(), S
         };
         match &entry {
             KeyedEntry::Constraint { constraint, .. } => {
-                check_constraint_kind(d, constraint)?;
+                check_constraint_kind(d, key, constraint)?;
             }
             KeyedEntry::Output { value, .. } | KeyedEntry::ScheduledUpdate { value, .. } => {
-                check_value_kind(d, value)?;
+                check_value_kind(d, key, value)?;
             }
             KeyedEntry::Coercion { .. } => {}
         }
