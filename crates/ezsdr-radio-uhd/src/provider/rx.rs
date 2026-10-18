@@ -16,11 +16,11 @@ use ezsdr_kernel::stream::{BlockFlags, BlockHeader, ChannelMask, Direction, Publ
 use ezsdr_kernel::time::{Rational, SampleClockHandle, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::{AlignmentErrorPayload, LateCommandPayload, RxOverflowCause, RxOverflowPayload};
-use ezsdr_radio::timeline::{Channels, Config};
+use ezsdr_radio::timeline::{Channels, Config, StreamKey};
 use serde_json::json;
 
 use super::control::Planned;
-use super::core::{Clock, Core, Streams, lock};
+use super::core::{stream_key, Clock, Core, Streams, lock};
 use crate::device::{Dir, Iq, RxRecv};
 use crate::host::HostClock;
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
@@ -105,8 +105,8 @@ impl Stream {
     /// origin, what arrives discarded (UR-17; #56). Once `Provider::stop(abort)` has begun,
     /// the stream ends at the first sample not yet delivered, a segment still being delivered
     /// up to an earlier cut included (RM-16).
-    fn follow(&mut self, streams: &Streams) {
-        let planned = streams.lines[Dir::Rx as usize].as_ref().and_then(|line| line.segment(self.clock.origin, self.config));
+    fn follow(&mut self, streams: &Streams, stream: StreamKey) {
+        let planned = streams.line(stream).and_then(|line| line.segment(self.clock.origin, self.config));
         if let Some(cut) = planned.map_or(Some(0), |segment| segment.cut) {
             self.cut_at(self.clock.instant(cut.max(self.expected)));
         }
@@ -118,6 +118,8 @@ impl Stream {
 
 pub(crate) struct Rx {
     core: Arc<Core>,
+    /// The stream's number, `k` (RM-29): every device call and line reference names it.
+    k: usize,
     cmds: Receiver<RxCmd>,
     stream: Option<Stream>,
     /// The earliest origin of a planned segment not yet begun.
@@ -142,15 +144,16 @@ pub(crate) struct Rx {
 const RECV_TIMEOUT: Wall = Wall::from_millis(100);
 
 impl Rx {
-    /// uhd-rx with the stream `start` started at T0, its clock declared (UR-15).
-    pub fn new(core: Arc<Core>, cmds: Receiver<RxCmd>, first: Option<(SampleClockHandle, usize, i64)>, stall: Option<(Wall, Wall)>) -> Rx {
+    /// uhd-rx for stream `k`, with the stream `start` started at T0, its clock declared
+    /// (UR-15).
+    pub fn new(core: Arc<Core>, k: usize, cmds: Receiver<RxCmd>, first: Option<(SampleClockHandle, usize, i64)>, stall: Option<(Wall, Wall)>) -> Rx {
         let channels = first.as_ref().map_or(0, |(_, channels, _)| *channels);
         let pool = HostPool::new(core.block_len * channels.max(1) * 8);
         let stream = first.map(|(handle, channels, t0)| {
             let clock = Clock { domain: handle.id(), origin: t0, n: handle.root_ticks_per_tick().num() as i64 };
             Stream::new(clock, handle, channels, None)
         });
-        lock(&core.streams).delivered = stream.as_ref().map(|stream| (stream.clock.origin, stream.config, 0));
+        lock(&core.streams).stream_mut(stream_key(Dir::Rx, k)).delivered = stream.as_ref().map(|stream| (stream.clock.origin, stream.config, 0));
         let host = core.device.host();
         let now = host.now();
         Rx {
@@ -158,6 +161,7 @@ impl Rx {
             opened: channels,
             stream,
             core,
+            k,
             cmds,
             pool,
             host,
@@ -191,12 +195,12 @@ impl Rx {
     /// is stopped and ended now — an abort's, or a `Stop` of a stream delivered past it.
     fn follow(&mut self) {
         let Some(stream) = self.stream.as_mut() else { return };
-        stream.follow(&lock(&self.core.streams));
+        stream.follow(&lock(&self.core.streams), stream_key(Dir::Rx, self.k));
         let done = stream.cut.is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;
         if done {
             if !stream.stopped {
                 stream.stopped = true;
-                self.last_stop = stop_at_cut(&self.core, stream.cut.expect("a cut")).or(self.last_stop);
+                self.last_stop = stop_at_cut(&self.core, self.k, stream.cut.expect("a cut")).or(self.last_stop);
             }
             self.finish();
         }
@@ -238,7 +242,7 @@ impl Rx {
             }
         }
         // A cut booked during the wait cuts this block too: `samples` reads the plan (RM-16).
-        let result = self.core.device.rx_recv(0, self.recv_len(), self.recv_timeout());
+        let result = self.core.device.rx_recv(self.k, self.recv_len(), self.recv_timeout());
         self.receive(result);
         Turn::Busy
     }
@@ -254,7 +258,7 @@ impl Rx {
                 stream.cut_at(stream.clock.instant(stream.expected));
                 if !stream.stopped {
                     stream.stopped = true;
-                    self.last_stop = stop_at_cut(&self.core, stream.cut.expect("set above")).or(self.last_stop);
+                    self.last_stop = stop_at_cut(&self.core, self.k, stream.cut.expect("set above")).or(self.last_stop);
                 }
             }
             self.finish();
@@ -267,10 +271,11 @@ impl Rx {
     /// issued there. A configuration the device refuses halts the stream: uhd-rx books the
     /// refusal, and the plan it then reads may begin the next segment earlier (RM-25).
     fn begin(&mut self) -> bool {
+        let key = stream_key(Dir::Rx, self.k);
         let next: Option<Planned> = {
             let mut streams = lock(&self.core.streams);
-            let next = streams.planned(Dir::Rx).into_iter().find(|planned| planned.segment.origin >= self.from);
-            streams.idle[Dir::Rx as usize] = next.is_none();
+            let next = streams.planned(key).into_iter().find(|planned| planned.segment.origin >= self.from);
+            streams.stream_mut(key).idle = next.is_none();
             next
         };
         let Some(next) = next else { return false };
@@ -278,12 +283,12 @@ impl Rx {
         let configured = if next.configured {
             Ok(())
         } else {
-            let reopened = if channels != self.opened { self.core.device.rx_open(0, &(0..channels).collect::<Vec<usize>>()) } else { Ok(()) };
+            let reopened = if channels != self.opened { self.core.device.rx_open(self.k, &(0..channels).collect::<Vec<usize>>()) } else { Ok(()) };
             reopened.and_then(|()| next.configure(&self.core, Dir::Rx).map(|_| ()))
         };
         if let Err(error) = configured {
             // Not begun. A refusal the plan cannot take — its command pruned — skips the segment.
-            let refused = next.segment.by.is_some_and(|by| lock(&self.core.streams).refuse(&self.core, Dir::Rx, by));
+            let refused = next.segment.by.is_some_and(|by| lock(&self.core.streams).refuse(&self.core, key, by));
             if !refused {
                 self.from = origin.saturating_add(1);
             }
@@ -293,7 +298,7 @@ impl Rx {
         }
         self.from = origin.saturating_add(1);
         self.opened = channels;
-        if let Err(error) = self.core.device.rx_start(0, origin) {
+        if let Err(error) = self.core.device.rx_start(self.k, origin) {
             self.core.device_failed(None, "update_parameter", &error);
             return true;
         }
@@ -304,7 +309,7 @@ impl Rx {
                 let clock = Clock { domain: handle.id(), origin, n: next.n() };
                 self.pool = HostPool::new(self.core.block_len * channels.max(1) * 8);
                 self.stream = Some(Stream::new(clock, handle, channels, self.last_stop.take()));
-                lock(&self.core.streams).delivered = Some((origin, next.segment.config, 0));
+                lock(&self.core.streams).stream_mut(key).delivered = Some((origin, next.segment.config, 0));
                 self.last_samples = self.host.now();
                 self.follow();
             }
@@ -320,16 +325,17 @@ impl Rx {
     /// `Provider::stop`'s end — after this turn read it, while a receive call waited.
     fn finish(&mut self) {
         let Some(mut stream) = self.stream.take() else { return };
+        let key = stream_key(Dir::Rx, self.k);
         let mut streams = lock(&self.core.streams);
-        stream.follow(&streams);
+        stream.follow(&streams, key);
         if let (None, Some(cut)) = (&stream.handle, stream.cut) {
             if let Err(error) = self.core.clocks.end(stream.clock.domain, self.core.at(cut)) {
                 self.core.reject_note(json!({ "clock_not_ended": error.to_string() }));
             }
         }
-        streams.delivered = None;
-        let by = streams.lines[Dir::Rx as usize].as_ref().and_then(|line| line.segment(stream.clock.origin, stream.config)).and_then(|segment| segment.by);
-        streams.prune(Dir::Rx, by);
+        streams.stream_mut(key).delivered = None;
+        let by = streams.line(key).and_then(|line| line.segment(stream.clock.origin, stream.config)).and_then(|segment| segment.by);
+        streams.prune(key, by);
     }
 
     /// How many samples to ask `rx_recv` for: while a cut is pending, no more than up to
@@ -375,7 +381,7 @@ impl Rx {
                 if let Some(cut) = stream.cut.filter(|cut| quiet && i128::from(now) >= i128::from(*cut) + i128::from(span)) {
                     // Silent past its cut: stopped all the same, never left streaming.
                     if !stream.stopped {
-                        self.last_stop = stop_at_cut(&self.core, cut).or(self.last_stop);
+                        self.last_stop = stop_at_cut(&self.core, self.k, cut).or(self.last_stop);
                     }
                     self.finish();
                 } else if stream.cut.is_none_or(|cut| now < cut)
@@ -399,7 +405,7 @@ impl Rx {
                 // it (Review M, P1-A).
                 self.core.timing(json!({ "what": "rx_stop_late", "cut": stream.cut, "at": now }));
                 if !stream.stopped {
-                    if let Some(issued) = stop_at_cut(&self.core, stream.cut.expect("a cut")) {
+                    if let Some(issued) = stop_at_cut(&self.core, self.k, stream.cut.expect("a cut")) {
                         stream.stopped = true;
                         self.last_stop = Some(issued);
                     }
@@ -421,7 +427,7 @@ impl Rx {
                 stream.report(Pending::MissedStart);
                 self.core.emit(&self.core.rx_id, kinds::LATE_COMMAND, Severity::Warning, payload);
                 self.core.timing(json!({ "what": "rx_restart", "requested": stream.start, "at": restart }));
-                if let Err(error) = self.core.device.rx_start(0, restart) {
+                if let Err(error) = self.core.device.rx_start(self.k, restart) {
                     self.core.device_failed(None, "start", &error);
                 }
             }
@@ -453,19 +459,19 @@ impl Rx {
             // The cut and what this block delivers are read and written together, so that a
             // `Stop` booked after them cuts after the block (RM-16's floor, `Item.delivered`).
             let mut streams = lock(&self.core.streams);
-            stream.follow(&streams);
+            stream.follow(&streams, stream_key(Dir::Rx, self.k));
             if let Some(cut_k) = stream.cut.map(|cut| clock.at_or_after(cut)).filter(|cut_k| k + len >= *cut_k) {
                 len = (cut_k - k).max(0);
                 ended = true;
             }
             if k + len > stream.expected {
-                streams.delivered = Some((clock.origin, stream.config, k + len));
+                streams.stream_mut(stream_key(Dir::Rx, self.k)).delivered = Some((clock.origin, stream.config, k + len));
             }
         }
         if let Some(cut) = stream.cut.filter(|_| ended && !stream.stopped) {
             // UR-25: the samples reached the cut, so the stream is stopped untimed now.
             stream.stopped = true;
-            self.last_stop = stop_at_cut(&self.core, cut).or(self.last_stop);
+            self.last_stop = stop_at_cut(&self.core, self.k, cut).or(self.last_stop);
         }
         if k < stream.expected {
             let trim = stream.expected - k;
@@ -592,13 +598,13 @@ fn quiet_span(core: &Core, stream: &Stream) -> i64 {
 /// Stops the stream untimed once its samples reached the cut (or at an abort's), and
 /// records it (UR-25, UR-30): the X3x0 carries out a timed stop at once, before its time
 /// (§11 F1). Returns the instant it was issued.
-fn stop_at_cut(core: &Core, cut: i64) -> Option<i64> {
+fn stop_at_cut(core: &Core, k: usize, cut: i64) -> Option<i64> {
     if core.is_lost() {
         return None;
     }
     let now = core.now();
     core.timing(json!({ "what": "rx_stop_untimed", "cut": cut, "at": now }));
-    match core.device.rx_stop(0, None) {
+    match core.device.rx_stop(k, None) {
         Ok(()) => {
             lock(&core.rec).applied.push(json!({ "key": "rx_stop", "at": core.at(cut), "issued": core.at(now) }));
             // The device produces samples until the stop reaches it (the bench: ~0.4 ms
@@ -643,7 +649,7 @@ mod tests {
         let handle = core.clocks.declare_sample_clock(stream, core.root, Rational::new(200, 1).unwrap()).unwrap();
         let clock = Clock { domain: handle.id(), origin: 0, n: 200 };
         let config = Config { channels: Channels::first(channels as u32), ratio: Rational::new(200, 1).unwrap() };
-        lock(&core.streams).lines[Dir::Rx as usize] = Some(Line::new(ezsdr_radio::timeline::Stream {
+        lock(&core.streams).lines.insert(stream_key(Dir::Rx, 0), Line::new(ezsdr_radio::timeline::Stream {
             direction: Direction::Rx,
             origin: 0,
             config,
@@ -655,7 +661,7 @@ mod tests {
         // No `Provider::stop` comes unless a test sends it.
         std::mem::forget(to_rx);
         core.device.rx_open(0, &(0..channels).collect::<Vec<usize>>()).unwrap();
-        (Rx::new(core.clone(), cmds, Some((handle, channels, 0)), None), clock)
+        (Rx::new(core.clone(), 0, cmds, Some((handle, channels, 0)), None), clock)
     }
 
     /// The receive plan set to segments at 1 MS/s, one channel, each `(origin, cut, by)`,
@@ -663,17 +669,21 @@ mod tests {
     fn plan(core: &Core, segments: &[(i64, Option<i64>, Option<u64>)]) {
         let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
         let mut streams = lock(&core.streams);
+        let key = stream_key(Dir::Rx, 0);
         for by in segments.iter().filter_map(|(_, _, by)| *by) {
-            streams.configs[Dir::Rx as usize].insert(by, (Arc::new(ColdConfig::new(crate::device::Settings::default())), false));
+            streams.stream_mut(key).configs.insert(by, (Arc::new(ColdConfig::new(crate::device::Settings::default())), false));
         }
-        streams.lines[Dir::Rx as usize].as_mut().unwrap().plan = segments.iter().map(|&(origin, cut, by)| Segment { origin, cut, config, by }).collect();
+        let mut line = streams.line(key).expect("the receive line").clone();
+        line.plan = segments.iter().map(|&(origin, cut, by)| Segment { origin, cut, config, by }).collect();
+        streams.lines.insert(key, line);
     }
 
     /// Books a receive command as uhd-control does, its segment's configuration with it.
     fn book(core: &Core, e: i64, seq: u64, kind: Kind) {
+        let key = stream_key(Dir::Rx, 0);
         let mut streams = lock(&core.streams);
-        streams.configs[Dir::Rx as usize].insert(seq, (Arc::new(ColdConfig::new(crate::device::Settings::default())), false));
-        assert!(streams.book(core, Dir::Rx, Item { e, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind }));
+        streams.stream_mut(key).configs.insert(seq, (Arc::new(ColdConfig::new(crate::device::Settings::default())), false));
+        assert!(streams.book(core, key, Item { e, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind }));
     }
 
     fn rate(rate: u64) -> Kind {
@@ -905,7 +915,7 @@ mod tests {
             assert_eq!(rx.turn(), Turn::Idle);
             assert!(rx.stream.is_none());
             assert_eq!(clocks(&core), [(0, Some(clock.instant(expected)))], "lost at {lost}");
-            assert_eq!(lock(&core.streams).planned(Dir::Rx)[0].segment.cut, Some(expected), "the plan's cut, lost at {lost}");
+            assert_eq!(lock(&core.streams).planned(stream_key(Dir::Rx, 0))[0].segment.cut, Some(expected), "the plan's cut, lost at {lost}");
         }
     }
 
@@ -956,7 +966,7 @@ mod tests {
             rx.host.sleep(Wall::from_millis(10));
             rx.receive(RxRecv::Timeout);
             assert!(rx.stream.is_none(), "lost: {lost}");
-            let cut = lock(&core.streams).planned(Dir::Rx)[0].segment.cut;
+            let cut = lock(&core.streams).planned(stream_key(Dir::Rx, 0))[0].segment.cut;
             assert_eq!(cut, Some(5_000), "lost: {lost}");
             assert_eq!(clocks(&core), [(0, Some(clock.instant(5_000)))], "lost: {lost}");
         }
@@ -975,7 +985,7 @@ mod tests {
         book(&core, ms(10), 1, rate(2_000_000));
         time.advance_to(core.at(ms(10))).unwrap();
         core.device_lost("test");
-        let planned: Vec<_> = lock(&core.streams).planned(Dir::Rx).iter().map(|p| (p.segment.origin, p.segment.cut)).collect();
+        let planned: Vec<_> = lock(&core.streams).planned(stream_key(Dir::Rx, 0)).iter().map(|p| (p.segment.origin, p.segment.cut)).collect();
         assert_eq!(planned, [(0, Some(12_000))]);
     }
 
@@ -993,7 +1003,7 @@ mod tests {
         rx.receive(samples(clock.instant(0), 9_000));
         time.advance_to(core.at(ms(12))).unwrap();
         lock(&core.streams).end(&core, ms(12), true, false);
-        let planned: Vec<_> = lock(&core.streams).planned(Dir::Rx).iter().map(|p| (p.segment.origin, p.segment.cut)).collect();
+        let planned: Vec<_> = lock(&core.streams).planned(stream_key(Dir::Rx, 0)).iter().map(|p| (p.segment.origin, p.segment.cut)).collect();
         assert_eq!(planned, [(0, Some(10_000))]);
     }
 
@@ -1108,12 +1118,12 @@ mod tests {
         let ms = |n: i64| core.ticks(n * 1_000_000);
         book(&core, ms(10), 1, rate(2_000_000));
         book(&core, ms(20), 2, Kind::Start);
-        assert_eq!(lock(&core.streams).planned(Dir::Rx).iter().map(|p| (p.segment.origin, p.segment.by)).collect::<Vec<_>>(), [(0, None), (ms(65), Some(1))]);
+        assert_eq!(lock(&core.streams).planned(stream_key(Dir::Rx, 0)).iter().map(|p| (p.segment.origin, p.segment.by)).collect::<Vec<_>>(), [(0, None), (ms(65), Some(1))]);
         rx.poll();
         rx.receive(samples(0, 10_000));
         assert!(rx.stream.is_none());
         assert!(rx.begin());
-        assert!(lock(&core.streams).lines[Dir::Rx as usize].as_ref().unwrap().items.iter().any(|item| item.seq == 1 && item.refused));
+        assert!(lock(&core.streams).line(stream_key(Dir::Rx, 0)).unwrap().items.iter().any(|item| item.seq == 1 && item.refused));
         assert!(rx.begin());
         let starts: Vec<_> = device.calls().into_iter().filter(|c| c.starts_with("rx_start ")).collect();
         assert_eq!(starts, [format!("rx_start 0 {}", ms(65))]);
@@ -1139,10 +1149,10 @@ mod tests {
             assert!(rx.stream.is_none(), "the segment from {origin} ends at its cut");
         }
         let streams = lock(&core.streams);
-        let items: Vec<u64> = streams.lines[Dir::Rx as usize].as_ref().unwrap().items.iter().map(|item| item.seq).collect();
+        let items: Vec<u64> = streams.line(stream_key(Dir::Rx, 0)).unwrap().items.iter().map(|item| item.seq).collect();
         assert_eq!(items, [2, 3]);
-        assert_eq!(streams.configs[Dir::Rx as usize].keys().copied().collect::<Vec<_>>(), [2, 3]);
-        assert_eq!(streams.planned(Dir::Rx).len(), 3, "every segment stays in the plan");
+        assert_eq!(streams.stream(stream_key(Dir::Rx, 0)).configs.keys().copied().collect::<Vec<_>>(), [2, 3]);
+        assert_eq!(streams.planned(stream_key(Dir::Rx, 0)).len(), 3, "every segment stays in the plan");
     }
 
     #[test]
@@ -1198,4 +1208,129 @@ mod tests {
             assert_eq!(core.clocks.sample_clock_records().len(), 1, "silent {silent}");
         }
     }
+
+    /// What a stream's line holds, for comparing it across another stream's change: its
+    /// items (`e`, `seq`, `refused`), its plan (`origin`, `cut`) and its clocks (`origin`,
+    /// `ended`).
+    type Held = (Vec<(i64, u64, bool)>, Vec<(i64, Option<i64>)>, Vec<(i64, bool)>);
+
+    /// The transmit stream's line, as `Control::new` makes it for a transmit stream with one
+    /// channel at 1 MS/s.
+    fn tx_line(core: &Core) -> Line {
+        Line::new(ezsdr_radio::timeline::Stream {
+            direction: Direction::Tx,
+            origin: 0,
+            config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
+            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Tx)),
+            call: core.block_len as i64,
+            allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
+        })
+    }
+
+    #[test]
+    fn ur_29_a_loss_ends_every_stream_once() {
+        // RM-16, UR-29 (design 33 D15): the thread that finds the device lost books the loss
+        // on every stream's line, once, each with the loss's instant and arrival order 0; a
+        // `Provider::stop` booked after it books nothing more, and the receive stream's end
+        // stays the loss's floor.
+        let link = link();
+        let (core, _, time, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let (rx_key, tx_key) = (stream_key(Dir::Rx, 0), stream_key(Dir::Tx, 0));
+        lock(&core.streams).lines.insert(tx_key, tx_line(&core));
+        rx.receive(samples(clock.instant(0), 3_000));
+        time.advance_to(core.at(core.ticks(2_000_000))).unwrap();
+        core.device_lost("test");
+        let ends = |stream: StreamKey| -> Vec<(i64, u64, bool)> {
+            let streams = lock(&core.streams);
+            streams.line(stream).expect("the line").items.iter().filter_map(|item| match item.kind {
+                Kind::End { abort } => Some((item.e, item.seq, abort)),
+                _ => None,
+            }).collect()
+        };
+        let loss = core.ticks(2_000_000);
+        assert_eq!(ends(rx_key), [(loss, 0, false)], "the receive line");
+        assert_eq!(ends(tx_key), [(loss, 0, false)], "the transmit line");
+        assert_eq!(lock(&core.streams).planned(rx_key)[0].segment.cut, Some(3_000), "the loss's floor");
+        // `Provider::stop` after the loss books nothing more: `ended` is the instance's.
+        {
+            let mut streams = lock(&core.streams);
+            streams.stop = Some((core.ticks(5_000_000), StopMode::Abort));
+            streams.end(&core, core.ticks(5_000_000), true, false);
+        }
+        assert_eq!(ends(rx_key), [(loss, 0, false)], "the receive line after the stop");
+        assert_eq!(ends(tx_key), [(loss, 0, false)], "the transmit line after the stop");
+        assert_eq!(lock(&core.streams).planned(rx_key)[0].segment.cut, Some(3_000), "the end moved");
+    }
+
+    #[test]
+    fn ur_25_a_refusal_leaves_the_transmit_stream_alone() {
+        // RM-25 (design 33 D15): a configuration uhd-rx's device refuses halts the receive
+        // stream alone: the transmit stream's items, plan and clocks are untouched.
+        let refuse = crate::device::FakeFault::WrongRate { claimed: 2e6, applied: 2e6 - 1_000.0, nth: 0 };
+        let (core, device, _, _) = super::super::test_support::rig_with(crate::device::FakeConfig { faults: vec![refuse], ..Default::default() }, vec![link()]);
+        let (mut rx, _) = rx(&core, 1);
+        let (rx_key, tx_key) = (stream_key(Dir::Rx, 0), stream_key(Dir::Tx, 0));
+        lock(&core.streams).lines.insert(tx_key, tx_line(&core));
+        let snapshot = |key: StreamKey| -> Held {
+            let streams = lock(&core.streams);
+            (streams.line(key).expect("a line").items.iter().map(|item| (item.e, item.seq, item.refused)).collect(),
+             streams.planned(key).into_iter().map(|planned| (planned.segment.origin, planned.segment.cut)).collect(),
+             streams.stream(key).clocks.iter().map(|(clock, ended)| (clock.origin, *ended)).collect())
+        };
+        let before = snapshot(tx_key);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        book(&core, ms(10), 1, rate(2_000_000));
+        rx.poll();
+        rx.receive(samples(0, 10_000));
+        assert!(rx.stream.is_none());
+        assert!(rx.begin());
+        assert!(lock(&core.streams).line(rx_key).unwrap().items.iter().any(|item| item.seq == 1 && item.refused), "the receive refusal was not booked");
+        assert_eq!(snapshot(tx_key), before, "the receive refusal changed the transmit stream");
+        assert!(device.calls().iter().any(|call| call.starts_with("apply rx 0 rate=2000000")), "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_25_the_line_lock_is_free_inside_every_receive_device_call() {
+        // UR-25 (design 33 D15): uhd-rx holds no line lock across its device calls — the
+        // streamer's reopen, the direction's configuration, the start, the receive call and
+        // the untimed stop — and the spy proves the sequence passed each one.
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
+        let (core, _, _) = super::super::test_support::rig_on(spy.clone(), vec![link()], 2_000);
+        spy.watch(&core);
+        let (mut rx, clock) = rx(&core, 1);
+        // The running stream's receive call.
+        assert_eq!(rx.turn(), Turn::Busy);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let key = stream_key(Dir::Rx, 0);
+        let configs = [
+            Config { channels: Channels::first(1), ratio: Rational::new(100, 1).unwrap() },
+            Config { channels: Channels::first(2), ratio: Rational::new(200, 1).unwrap() },
+        ];
+        {
+            let mut streams = lock(&core.streams);
+            let mut line = streams.line(key).expect("the receive line").clone();
+            line.plan = vec![
+                Segment { origin: 0, cut: Some(1_000), config: line.stream.config, by: None },
+                Segment { origin: ms(65), cut: None, config: configs[0], by: Some(1) },
+                Segment { origin: ms(200), cut: None, config: configs[1], by: Some(2) },
+            ];
+            streams.lines.insert(key, line);
+            streams.stream_mut(key).configs.insert(1, (Arc::new(ColdConfig::new(crate::device::Settings::default())), false));
+            streams.stream_mut(key).configs.insert(2, (Arc::new(ColdConfig::new(crate::device::Settings::default())), false));
+        }
+        // The cut ends the stream at the untimed stop; the next segment configures alone, the
+        // one after it reopens the streamer for its channel count.
+        rx.poll();
+        rx.receive(samples(clock.instant(0), 1_000));
+        assert!(rx.stream.is_none());
+        assert!(rx.begin());
+        rx.finish();
+        assert!(rx.begin());
+        for name in ["rx_open", "rx_start", "rx_recv", "rx_stop", "apply"] {
+            assert!(spy.seen(name) > 0, "the spy never saw {name}");
+        }
+        assert_eq!(spy.seen("rx_open"), 2, "the reopen of the two-channel segment");
+    }
+
 }

@@ -3660,3 +3660,274 @@ fn ur_34_the_receive_stall_fires_after_its_device_clock_interval() {
     let at = origin + overflow.time.ticks_in(overflow.time.domain()).unwrap() * n;
     assert!(at - first >= ms(500) - ms(50), "the stall fired {} ms after the first block, before its device-clock interval had elapsed", (at - first) / ms(1));
 }
+
+// ------------------------------------------------ 1b-4b: per-stream state, threads and locks
+
+#[test]
+fn ur_16_a_panicking_thread_ends_a_two_stream_run_with_its_message() {
+    // UR-16, RM-16 (design 33 D15): a panicking owner is recorded with its reason, and the
+    // device loss it reports ends the whole instance — a Run with both directions' streams
+    // included — with UR-16's message, once, before the device is marked lost.
+    let dir = TempDir::new();
+    let device = fake(FakeConfig { faults: vec![FakeFault::RxPanic(Wall::from_millis(2_200))], ..FakeConfig::default() });
+    let spec = with_tx(receive_spec(1, 1e6, 1e9, None), 1e6);
+    let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
+    let result = run.run_until_end(after(&run, ms(5_000)));
+    assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
+    let manifest = run.finish();
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
+    let lost = events_of(&manifest, "ezsdr.DEVICE_LOST");
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert_eq!(lost[0].payload["message"], "a Provider thread panicked");
+    let rejected = section(&manifest, "rejected").as_array().unwrap();
+    assert!(rejected.iter().any(|r| r["thread"] == "uhd-rx" && r["reason"] == "panicked"), "{rejected:?}");
+    assert_marked_lost_before_closed(&device);
+}
+
+#[test]
+fn ur_26_a_second_stop_does_nothing() {
+    // UR-26 (design 33 D15): a second `Provider::stop` does nothing — no second stop row,
+    // no second untimed stop of the receive stream.
+    let mut direct = Direct::with_links(FakeConfig::default(), &[], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)]);
+    direct.settle(Wall::from_millis(30));
+    direct.radio.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
+    direct.radio.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
+    let calls = direct.device.calls();
+    assert_eq!(calls.iter().filter(|c| c.starts_with("rx_stop")).count(), 1, "{calls:?}");
+    let instance = direct.finish();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let stops: Vec<_> = timing.as_array().unwrap().iter().filter(|r| r["what"] == "stop").collect();
+    assert_eq!(stops.len(), 1, "{timing}");
+    let rejected = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()];
+    assert!(!rejected.as_array().unwrap().iter().any(|r| r["reason"].as_str().is_some_and(|reason| reason.contains("did not join"))), "{rejected}");
+}
+
+/// A `FakeDevice` whose receive and transmit calls wait on a gate the test opens: both
+/// Provider threads are held inside a device call, so neither joins within `JOIN_BOUND`, and
+/// the order of the `rejected` rows is the order `Provider::stop` joins them in (UR-16, D15).
+struct Gated {
+    inner: FakeDevice,
+    held: Mutex<bool>,
+    open: std::sync::Condvar,
+    entered: Mutex<Option<std::sync::mpsc::Sender<&'static str>>>,
+    arrivals: Mutex<std::sync::mpsc::Receiver<&'static str>>,
+}
+
+impl Gated {
+    fn new(config: FakeConfig) -> Gated {
+        let (entered, arrivals) = std::sync::mpsc::channel();
+        Gated { inner: FakeDevice::new(config), held: Mutex::new(false), open: std::sync::Condvar::new(), entered: Mutex::new(Some(entered)), arrivals: Mutex::new(arrivals) }
+    }
+
+    /// Holds every device call from now on.
+    fn hold(&self) {
+        *self.held.lock().unwrap() = true;
+    }
+
+    /// Releases every held call.
+    fn release(&self) {
+        *self.held.lock().unwrap() = false;
+        self.open.notify_all();
+    }
+
+    /// Waits until one held call of each of `names` has begun.
+    fn entered(&self, names: &[&str]) {
+        let mut seen = Vec::new();
+        while !names.iter().all(|name| seen.contains(name)) {
+            let arrivals = self.arrivals.lock().unwrap();
+            let name = arrivals.recv_timeout(Wall::from_secs(10)).unwrap_or_else(|_| panic!("no held call arrived: {seen:?}"));
+            drop(arrivals);
+            seen.push(name);
+        }
+    }
+
+    fn hold_call(&self, name: &'static str) {
+        let mut held = self.held.lock().unwrap();
+        if !*held {
+            return;
+        }
+        if let Some(entered) = self.entered.lock().unwrap().as_ref() {
+            let _ = entered.send(name);
+        }
+        while *held {
+            held = self.open.wait(held).unwrap();
+        }
+    }
+}
+
+impl Device for Gated {
+    fn describe(&self) -> Json { self.inner.describe() }
+    fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity { self.inner.fidelity() }
+    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+    fn channels(&self, dir: ezsdr_radio_uhd::Dir) -> usize { self.inner.channels(dir) }
+    fn front_end(&self, dir: ezsdr_radio_uhd::Dir, chan: usize) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.front_end(dir, chan) }
+    fn serial(&self) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.serial() }
+    fn set_subdev_spec(&self, d: ezsdr_radio_uhd::Dir, m: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_subdev_spec(d, m) }
+    fn rates(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> { self.inner.rates(d, c) }
+    fn set_sources(&self, c: &str, t: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_sources(c, t) }
+    fn set_time_zero(&self, p: bool) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_time_zero(p) }
+    fn time_now(&self) -> Result<i64, ezsdr_radio_uhd::DeviceError> { self.inner.time_now() }
+    fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> { self.inner.ref_locked() }
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> { self.inner.apply(d, c, s, at) }
+    fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
+    fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+    fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
+    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv {
+        self.hold_call("rx_recv");
+        self.inner.rx_recv(s, n, t)
+    }
+    fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
+    fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> {
+        self.hold_call("tx_send");
+        self.inner.tx_send(s, b, at, sob, eob, t)
+    }
+    fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
+    fn close_streams(&self) { self.inner.close_streams() }
+    fn mark_lost(&self) { self.inner.mark_lost() }
+    fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
+}
+
+#[test]
+fn ur_26_the_sending_threads_join_before_the_receiving_ones() {
+    // RM-16, UR-16 (design 33 D15): `Provider::stop` joins the transmit streams' threads
+    // before the receive streams' — a `stop` with both held inside a device call records the
+    // transmit thread first. The real clock keeps uhd-control running while the two held
+    // threads would otherwise freeze the manual one (UR-2, plan 30 §4.4).
+    let device = Arc::new(Gated::new(FakeConfig::default()));
+    let (mut run, _dir) = tx_session_on(device.clone());
+    let entry = send(&mut run, "start_repeat", None, &tone(500));
+    assert!(admitted(&entry), "{entry:?}");
+    wait(&mut run, ms(40));
+    device.hold();
+    device.entered(&["rx_recv", "tx_send"]);
+    let runner = device.clone();
+    let manifest = bounded("the transmit join order", Wall::from_secs(30), move || run.finish());
+    device.release();
+    let threads: Vec<String> = section(&manifest, "rejected").as_array().unwrap().iter()
+        .filter(|r| r["reason"].as_str().is_some_and(|reason| reason.contains("did not join")))
+        .map(|r| r["thread"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(threads, ["uhd-tx", "uhd-rx"], "{:?}", section(&manifest, "rejected"));
+    assert!(!runner.inner.calls().iter().any(|c| c == "close_streams"), "a detached thread's streamer was closed (UR-16)");
+}
+
+#[test]
+fn ur_25_tx_channels_to_zero_ends_the_clock_and_a_re_enable_starts_a_new_one() {
+    // RM-25, UR-26 (design 33 D15): a transmit `cold` change to 0 channels cuts the running
+    // segment and ends its clock without opening an empty streamer; a later enable starts a
+    // new segment on a new clock, a start lead later, and its bursts go out on it.
+    let (mut run, device, _dir) = tx_session(FakeConfig::default());
+    let entry = send(&mut run, "start_repeat", None, &tone(500));
+    assert!(admitted(&entry), "{entry:?}");
+    wait(&mut run, ms(40));
+    assert!(admitted(&run.submit(set("radio.tx.channels", Value::from(0)), None).unwrap()));
+    wait(&mut run, ms(20));
+    // A burst on the ended clock is refused at admission (SC-23, UR-26).
+    let refused = send(&mut run, "start_repeat", None, &tone(100));
+    assert!(!admitted(&refused), "{refused:?}");
+    assert!(matches!(&refused.outcome, ezsdr_kernel::session::Outcome::Rejected { violations }
+        if violations.iter().any(|v| v.reason.starts_with("SC-23: ") && v.reason.ends_with("has no running transmit SampleClock"))), "{refused:?}");
+    assert!(admitted(&run.submit(set("radio.tx.channels", Value::from(1)), None).unwrap()));
+    wait(&mut run, ms(60));
+    let entry = send(&mut run, "start_repeat", None, &tone(100));
+    assert!(admitted(&entry), "{entry:?}");
+    wait(&mut run, ms(40));
+    let calls = device.calls();
+    let manifest = run.finish();
+    let clocks: Vec<(i64, Option<i64>, ezsdr_kernel::id::ClockDomainId)> = manifest.clocks.sample_clocks.iter()
+        .filter(|r| r.stream == ResourceId::parse("usrp/tx").unwrap())
+        .map(|r| (r.origin.ticks_in(r.root).unwrap(), r.ended_at.map(|t| t.ticks_in(r.root).unwrap()), r.domain)).collect();
+    assert_eq!(clocks.len(), 2, "the disable ends one clock and the enable registers one: {clocks:?} {calls:?}");
+    let end = clocks[0].1.unwrap_or_else(|| panic!("the first transmit clock was not ended: {clocks:?}"));
+    let timing = section(&manifest, "timing").as_array().unwrap().clone();
+    let plan = timing.iter().find(|r| r["what"] == "plan").expect("the plan");
+    let segments: Vec<(i64, Option<i64>)> = plan["tx"].as_array().unwrap().iter().map(|s| (s["origin"].as_i64().unwrap(), s["end"].as_i64())).collect();
+    assert_eq!(segments.first().and_then(|(_, end)| *end), Some(end), "the clock's end is not its segment's: {segments:?}");
+    let envelope = section(&manifest, "envelope");
+    let lead = envelope["timing"]["tx_start_lead_ns"].as_i64().unwrap() * MCR / 1_000_000_000;
+    assert!(clocks[1].0 >= end + lead, "the new segment is not a start lead past the cut: {clocks:?}");
+    assert!(bursts(&manifest).iter().any(|b| b.target.domain() == clocks[1].2), "{:?}", bursts(&manifest));
+    assert!(!calls.iter().any(|c| c.starts_with("tx_open 0 []")), "an empty streamer was opened: {calls:?}");
+    assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
+    assert!(events_of(&manifest, "radio.COMMAND_REJECTED").is_empty(), "{:?}", events_of(&manifest, "radio.COMMAND_REJECTED"));
+}
+
+#[test]
+fn ur_25_an_enable_from_no_stream_configures_once() {
+    // UR-25, UR-12 (design 33 D15): an enable from no stream is configured by uhd-control
+    // itself — one open and one untimed configuration — and the segment's owner does not
+    // configure it again at its switch.
+    let (mut run, device, _dir) = tx_session(FakeConfig::default());
+    let entry = send(&mut run, "start_repeat", None, &tone(500));
+    assert!(admitted(&entry), "{entry:?}");
+    wait(&mut run, ms(40));
+    let manifest = run.finish();
+    let calls = device.calls();
+    assert_eq!(calls.iter().filter(|c| c.starts_with("tx_open 0 [0]")).count(), 1, "{calls:?}");
+    assert_eq!(calls.iter().filter(|c| c.starts_with("apply tx 0 rate=1000000")).count(), 1, "{calls:?}");
+    assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
+    assert!(!bursts(&manifest).is_empty(), "{:?}", calls);
+}
+
+#[test]
+fn ur_25_a_timed_update_at_the_cold_change_s_instant_reaches_the_switch() {
+    // UC-2, RM-25 (design 33 D15): a timed update at a `cold` change's own instant is in the
+    // configuration its switch applies, whatever the arrival order, and is released at its
+    // own instant; neither floors the other.
+    use ezsdr_kernel::module_api::UpdateClass::{Cold, HardwareTimed};
+    for timed_first in [true, false] {
+        let case = format!("timed first: {timed_first}");
+        let mut direct = Direct::with_links(FakeConfig::default(), &[], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)]);
+        let at = direct.now() + ms(300);
+        if timed_first {
+            direct.update("radio.rx.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(at));
+        }
+        direct.update("radio.rx.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(at));
+        if !timed_first {
+            direct.update("radio.rx.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(at));
+        }
+        // Past the change's instant, its switch and the release window of the timed update.
+        direct.settle(Wall::from_millis(500));
+        let calls = direct.device.calls().clone();
+        let switched = calls.iter().filter(|c| c.starts_with("apply rx 0") && c.contains("rate=2000000") && c.contains("freq=2100000000") && c.ends_with("at=-")).count();
+        assert_eq!(switched, 1, "{case}: the switch's configuration: {calls:?}");
+        let timed = calls.iter().filter(|c| c.starts_with("apply rx 0") && c.contains("freq=2100000000") && c.contains(&format!("at={at} effective="))).count();
+        assert_eq!(timed, 1, "{case}: the timed release: {calls:?}");
+        assert!(direct.of("radio.LATE_COMMAND").is_empty(), "{case}");
+        let instance = direct.finish();
+        let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+        assert_eq!(applied.as_array().unwrap().iter().filter(|r| r["key"] == "radio.rx.frequency_hz" && r["issued"] == true && r["at"]["ticks"] == at).count(), 1, "{case}: {applied}");
+    }
+}
+
+#[test]
+fn ur_25_an_enable_at_a_timed_update_s_instant_applies_it() {
+    // UC-2, UR-25 (design 33 D15): an enable from no stream whose `cold` change is booked
+    // after a timed update at the same instant carries that update in its configuration; the
+    // change booked first does not, and the release delivers it (the order is the one
+    // UR-24/UR-25 already distinguish).
+    use ezsdr_kernel::module_api::UpdateClass::{Cold, HardwareTimed};
+    for timed_first in [true, false] {
+        let case = format!("timed first: {timed_first}");
+        let mut direct = Direct::with_links(FakeConfig::default(), &[("radio.rx.channels", Scalar::from(0))], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)]);
+        let at = direct.now() + ms(300);
+        if timed_first {
+            direct.update("radio.rx.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(at));
+        }
+        direct.update("radio.rx.channels", Value::from(1), Cold, Some(at));
+        if !timed_first {
+            direct.update("radio.rx.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(at));
+        }
+        // Past the enable's instant and the release window of the timed update.
+        direct.settle(Wall::from_millis(500));
+        let calls = direct.device.calls().clone();
+        let configured = calls.iter().filter(|c| c.starts_with("apply rx 0") && c.contains("freq=2100000000") && c.ends_with("at=-")).count();
+        assert_eq!(configured, usize::from(timed_first), "{case}: the enable's configuration: {calls:?}");
+        let timed = calls.iter().filter(|c| c.starts_with("apply rx 0") && c.contains("freq=2100000000") && c.contains(&format!("at={at} effective="))).count();
+        assert_eq!(timed, 1, "{case}: the timed release: {calls:?}");
+        assert!(direct.of("radio.LATE_COMMAND").is_empty(), "{case}");
+        let instance = direct.finish();
+        let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+        assert_eq!(applied.as_array().unwrap().iter().filter(|r| r["key"] == "radio.rx.frequency_hz" && r["issued"] == true && r["at"]["ticks"] == at).count(), 1, "{case}: {applied}");
+    }
+}

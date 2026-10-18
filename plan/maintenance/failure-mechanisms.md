@@ -40,3 +40,7 @@ AGENTS.md §6 の three strikes は，症状や領域ではなく設計上の失
 - **3件以上で未修正の bug を抱える機構**：`planned-state-read-as-actual`（12件），`radio-rule-implemented-twice`（9件），`stream-lifecycle-scattered`（7件）．設計メモは spec 22（VH-1〜VH-5，VH-7）が兼ねるので step 2 を進めてよい．**ただし #51 は保留**：イベントの報告規則（cancel 時に何を emit するか）も「1か所で実装」に含めるかを決めてから直す．
 - **閉じた issue だけで3件以上の機構**：`invariant-outside-type`，`failure-collapsed-into-value`，`fact-stated-twice-in-spec`，`string-composed-identity`，`correlation-by-partial-key`，`pending-provenance-collapsed`，`admission-per-origin`．次の bug が1件出たら修正の前に設計メモが要る．修正の多くは見張りを足しただけで機構は残っている．
 - **次の手**：spec 22 step 2 の後，v4.0 の Kernel 凍結前に `invariant-outside-type` と `admission-per-origin` を先回りで設計メモにするかを owner に諮る（推奨：する．凍結後は直せない）．
+
+Review findings in Phase 8 stage 1b-4b (2026-10-19; not issues):
+- No finding counts toward a mechanism. Sol's test-plan review, the first under the revised AGENTS.md §9, found 4 majors before any code. Each was a test without power or a missing test: an expectation the correct behaviour cannot meet, mutation rows that do not break what they name, no per-stream prune test, and a lock spy blind to `apply`.
+- The code reviews found 3 minors (Opus 1, Sol 2) and no major. Record: [plan/phase8/reviews/1b4b-opus.md](../phase8/reviews/1b4b-opus.md).

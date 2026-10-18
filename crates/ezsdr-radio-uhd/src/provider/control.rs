@@ -14,17 +14,17 @@ use ezsdr_kernel::event::{Action, ActionId, Severity};
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::module_api::{ActionReceiver, Dispatched, Requested, UpdateClass};
 use ezsdr_kernel::spec::{Constraint, Key, Scalar, Value};
-use ezsdr_kernel::stream::{BurstOpen, Direction, LateOutcome};
+use ezsdr_kernel::stream::{BurstOpen, LateOutcome};
 use ezsdr_kernel::time::{AbsoluteDeadline, Duration, Rational, TimePoint, TimeError};
 use ezsdr_radio::payloads::{
     ClockLostPayload, ClockReference, CommandQueueFullPayload, LateCommandPayload, TimeErrorCause,
     TimeErrorOutcome, TimeErrorPayload,
 };
-use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, Segment, NO_RELEASE};
+use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, Segment, StreamKey, NO_RELEASE};
 use ezsdr_radio::{keys, kinds};
 use serde_json::json;
 
-use super::core::{Clock, Core, lock};
+use super::core::{booked_stream, Clock, Core, lock};
 use super::tx::{Held, TxCmd};
 use crate::device::{DeviceError, Dir, Iq, Settings, decimation};
 use crate::host::{ClockMutex, HostClock};
@@ -190,14 +190,15 @@ impl Control {
         let host = core.device.host();
         // RM-25, VH-4: this Module's terms — each direction's start lead, and, for a receive
         // segment after a cut, the receive call in progress there and the delivery
-        // allowance (UR-25).
+        // allowance (UR-25). The call term is the receive line's, stream 0's, the one line
+        // the current keys have; 1b-4c reads each stream's own packet size.
         let call = core.block_len.max(core.device.rx_packet_samples(0)) as i64;
         let allowance = core.ticks(DELIVERY_ALLOWANCE_NS);
-        let line = |direction: Direction, origin: i64, channels: usize, n: i64| Line::new(timeline::Stream {
-            direction,
+        let line = |key: StreamKey, origin: i64, channels: usize, n: i64| Line::new(timeline::Stream {
+            direction: key.0,
             origin,
             config: Config { channels: Channels::first(channels as u32), ratio: Rational::new(n.max(1) as u64, 1).expect("a positive ratio") },
-            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, direction)),
+            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, key.0)),
             call,
             allowance,
         });
@@ -207,17 +208,21 @@ impl Control {
         };
         let rx = (!core.links.is_empty()).then(|| {
             let (channels, n) = start.rx.unwrap_or((0, n(Dir::Rx)));
-            line(Direction::Rx, start.t0, channels, n)
+            line(booked_stream(Dir::Rx), start.t0, channels, n)
         });
         let tx = match start.tx {
-            Some((clock, channels)) => line(Direction::Tx, clock.origin, channels, clock.n),
-            None => line(Direction::Tx, 0, 0, n(Dir::Tx)),
+            Some((clock, channels)) => line(booked_stream(Dir::Tx), clock.origin, channels, clock.n),
+            None => line(booked_stream(Dir::Tx), 0, 0, n(Dir::Tx)),
         };
         {
             let mut streams = lock(&core.streams);
-            streams.tx_clocks = start.tx.map(|(clock, _)| (clock, false)).into_iter().collect();
-            streams.lines = [rx, Some(tx)];
-            streams.idle = [start.rx.is_none(), start.tx.is_none()];
+            streams.stream_mut(booked_stream(Dir::Tx)).clocks = start.tx.map(|(clock, _)| (clock, false)).into_iter().collect();
+            if let Some(rx) = rx {
+                streams.lines.insert(booked_stream(Dir::Rx), rx);
+            }
+            streams.lines.insert(booked_stream(Dir::Tx), tx);
+            streams.stream_mut(booked_stream(Dir::Rx)).idle = start.rx.is_none();
+            streams.stream_mut(booked_stream(Dir::Tx)).idle = start.tx.is_none();
         }
         Control {
             core,
@@ -301,8 +306,9 @@ impl Control {
                 }
                 if device || node == Some(&self.core.rx_id) {
                     let mut streams = lock(&self.core.streams);
+                    let stream = booked_stream(Dir::Rx);
                     let (seq, now) = (streams.next_seq(), self.core.now());
-                    streams.book(&self.core, Dir::Rx, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop });
+                    streams.book(&self.core, stream, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop });
                 }
             }
             Action::Stop { target: None } | Action::Abort { .. } => {}
@@ -318,10 +324,11 @@ impl Control {
                 };
                 let config = self.segment_config(Dir::Rx);
                 let mut streams = lock(&self.core.streams);
+                let stream = booked_stream(Dir::Rx);
                 let (seq, now) = (streams.next_seq(), self.core.now());
-                let (e, _) = timeline::command_instant(streams.lines[Dir::Rx as usize].as_ref(), requested, now, seq, false);
-                streams.configs[Dir::Rx as usize].insert(seq, (config, false));
-                streams.book(&self.core, Dir::Rx, Item { e, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Start });
+                let (e, _) = timeline::command_instant(streams.line(stream), requested, now, seq, false);
+                streams.stream_mut(stream).configs.insert(seq, (config, false));
+                streams.book(&self.core, stream, Item { e, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Start });
             }
             Action::Command { .. } => {
                 self.core.command_rejected(Some(id), "command", "UR-26: not supported by this Provider")
@@ -342,7 +349,7 @@ impl Control {
 
     /// The segment configurations of `dir`, shared with its owner.
     fn projections(&self, dir: Dir) -> Vec<Arc<ColdConfig>> {
-        lock(&self.core.streams).configs[dir as usize].values().map(|(config, _)| config.clone()).collect()
+        lock(&self.core.streams).stream(booked_stream(dir)).configs.values().map(|(config, _)| config.clone()).collect()
     }
 
     fn ceil_root(&self, at: Option<AbsoluteDeadline>) -> Result<Option<i64>, TimeError> {
@@ -380,7 +387,7 @@ impl Control {
 
     /// The channel count of `dir` in force at `t`: none while a refusal halts it (RM-25, #64).
     fn channels_at(&self, dir: Dir, t: i64) -> usize {
-        if lock(&self.core.streams).lines[dir as usize].as_ref().is_some_and(|line| line.halted(t)) {
+        if lock(&self.core.streams).line(booked_stream(dir)).is_some_and(|line| line.halted(t)) {
             return 0;
         }
         Core::channels(&self.config_at(t), dir)
@@ -509,8 +516,10 @@ impl Control {
         // The instant is taken under the lock that books it, so that nothing pruned meanwhile
         // takes effect after it (#63).
         let mut streams = lock(&self.core.streams);
+        let stream = booked_stream(dir);
+        let k = stream.1 as usize;
         let (seq, now) = (streams.next_seq(), self.core.now());
-        let (e, late) = timeline::command_instant(streams.lines[dir as usize].as_ref(), requested, now, seq, true);
+        let (e, late) = timeline::command_instant(streams.line(stream), requested, now, seq, true);
         let mut candidate = self.config_at(e);
         candidate.insert(key.clone(), value.clone());
         let request = Requested {
@@ -536,7 +545,7 @@ impl Control {
         if late {
             self.late_command(Some(key.clone()), requested.unwrap_or(now), e);
         }
-        let Some(old) = streams.lines[dir as usize].as_ref().map(|line| line.stream.config) else {
+        let Some(old) = streams.line(stream).map(|line| line.stream.config) else {
             // A receive side with no link has no stream: the change only takes its value.
             self.colds.insert((e, seq), (key, value));
             return;
@@ -545,15 +554,15 @@ impl Control {
         // RM-25, VH-4: an enable from no stream — its owner idle, nothing planned to run —
         // is configured by uhd-control itself, which opens the streamer, and is ready when
         // that configuration ends; any other change by the owner at the cut (UR-17, UR-23).
-        let from_none = channels > 0 && streams.idle[dir as usize] && streams.lines[dir as usize].as_ref().is_some_and(|line| line.plan.iter().all(|segment| segment.cut.is_some()));
+        let from_none = channels > 0 && streams.stream(stream).idle && streams.line(stream).is_some_and(|line| line.plan.iter().all(|segment| segment.cut.is_some()));
         let mut ready = now;
         if from_none {
             // Its owner is idle: nothing it could prune comes meanwhile.
             drop(streams);
             let list: Vec<usize> = (0..channels).collect();
             let opened = match dir {
-                Dir::Rx => self.core.device.rx_open(0, &list),
-                Dir::Tx => self.core.device.tx_open(0, &list),
+                Dir::Rx => self.core.device.rx_open(k, &list),
+                Dir::Tx => self.core.device.tx_open(k, &list),
             };
             // The configuration in effect at `e`, the timed updates held for it included (UC-2).
             let mut settings = Core::settings(&candidate, dir);
@@ -569,12 +578,12 @@ impl Control {
             streams = lock(&self.core.streams);
         }
         let config = Config { channels: Channels::first(channels as u32), ratio };
-        streams.configs[dir as usize].insert(seq, (segment_config, from_none));
-        if streams.book(&self.core, dir, Item { e, seq, ready, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config) }) {
+        streams.stream_mut(stream).configs.insert(seq, (segment_config, from_none));
+        if streams.book(&self.core, stream, Item { e, seq, ready, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config) }) {
             self.colds.insert((e, seq), (key.clone(), value));
             self.core.timing(json!({ "what": "cold_change", "key": key, "e": e, "booked_at": now, "ready": ready }));
         } else {
-            streams.configs[dir as usize].remove(&seq);
+            streams.stream_mut(stream).configs.remove(&seq);
         }
     }
 
@@ -596,8 +605,9 @@ impl Control {
         // KC-21a: the last transmit clock registered, while its segment has not ended.
         let current = {
             let streams = lock(&self.core.streams);
-            let last = streams.lines[Dir::Tx as usize].as_ref().and_then(|line| line.plan.last()).filter(|segment| segment.cut.is_none());
-            streams.tx_clocks.last().map(|(clock, _)| *clock).zip(last.map(|segment| segment.config.channels.count() as usize))
+            let stream = booked_stream(Dir::Tx);
+            let last = streams.line(stream).and_then(|line| line.plan.last()).filter(|segment| segment.cut.is_none());
+            streams.stream(stream).clocks.last().map(|(clock, _)| *clock).zip(last.map(|segment| segment.config.channels.count() as usize))
         };
         let Some((clock, channels)) = current else {
             return reject("UR-21: no transmit channel is configured");
@@ -786,10 +796,15 @@ mod tests {
         (Control::new(core.clone(), Arc::new(NoActions), to_tx, config, false, start), tx)
     }
 
-    /// The plan of `dir` as its owner reads it.
+    /// The plan of `dir`'s stream as its owner reads it.
     fn plan_of(core: &Core, dir: Dir) -> Vec<Planned> {
-        lock(&core.streams).planned(dir)
+        lock(&core.streams).planned(booked_stream(dir))
     }
+
+    /// What a stream's line holds, for comparing it across another stream's change: its
+    /// items (`e`, `seq`, `refused`), its clocks (`origin`, `ended`) and its plan
+    /// (`origin`, `cut`).
+    type Held = (Vec<(i64, u64, bool)>, Vec<(i64, bool)>, Vec<(i64, i64)>);
 
     #[test]
     fn ur_14_booking_does_not_wait_for_a_future_cold_switch() {
@@ -869,7 +884,7 @@ mod tests {
         control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(100)))));
         control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(1e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(300)))));
         let refused = plan_of(&core, Dir::Rx)[1].segment.by.unwrap();
-        assert!(lock(&core.streams).refuse(&core, Dir::Rx, refused));
+        assert!(lock(&core.streams).refuse(&core, booked_stream(Dir::Rx), refused));
         time.advance_to(core.at(ms(500))).unwrap();
         lock(&core.streams).end(&core, ms(500), false, false);
         control.finish();
@@ -906,7 +921,7 @@ mod tests {
             let (_control, _tx) = control(&core, &[Dir::Rx]);
             time.advance_to(core.at(core.ticks(8_000_000))).unwrap();
             let config = plan_of(&core, Dir::Rx)[0].segment.config;
-            lock(&core.streams).delivered = delivered.map(|k| (0, config, k));
+            lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).delivered = delivered.map(|k| (0, config, k));
             lock(&core.streams).end(&core, core.ticks(5_000_000), false, false);
             assert_eq!(plan_of(&core, Dir::Rx)[0].segment.cut, Some(cut));
         }
@@ -1119,7 +1134,7 @@ mod tests {
             if halt {
                 control.book_cold(ActionId(1), rate.clone(), Value::num(2e6).unwrap(), at(100));
                 let refused = plan_of(&core, dir)[1].segment.by.unwrap();
-                assert!(lock(&core.streams).refuse(&core, dir, refused), "{case}");
+                assert!(lock(&core.streams).refuse(&core, booked_stream(dir), refused), "{case}");
             } else {
                 control.book(Dispatched::new(ActionId(1), Action::Stop { target: Some(super::super::test_support::target_of(&core.rx_id)) }, Some(core.rx_id.clone())));
             }
@@ -1161,7 +1176,7 @@ mod tests {
         let gain = key("radio.rx.gain_db");
         control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(100)))));
         let refused = plan_of(&core, Dir::Rx)[1].segment.by.unwrap();
-        assert!(lock(&core.streams).refuse(&core, Dir::Rx, refused));
+        assert!(lock(&core.streams).refuse(&core, booked_stream(Dir::Rx), refused));
         for i in 0..core.description.timing.command_queue_depth {
             control.book_timed(ActionId(1), gain.clone(), Value::num(1.0).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(50) + i))));
         }
@@ -1213,12 +1228,201 @@ mod tests {
         control.book_timed(ActionId(1), gain.clone(), Value::num(1.0).unwrap(), at(300_000));
         time.advance_to(core.at(us(297_500))).unwrap();
         control.release();
-        assert!(lock(&core.streams).refuse(&core, Dir::Rx, refused));
+        assert!(lock(&core.streams).refuse(&core, booked_stream(Dir::Rx), refused));
         control.book_timed(ActionId(1), gain.clone(), Value::num(2.0).unwrap(), at(299_600));
         control.release();
         let rows: Vec<_> = lock(&core.rec).applied.iter().filter(|r| r["key"] == "radio.rx.gain_db")
             .map(|r| (r["claimed"].as_f64().unwrap(), r["issued"] == true, r["note"] == "no channel")).collect();
         assert_eq!(rows, [(1.0, true, false), (2.0, false, true)]);
         assert!(!device.calls().iter().any(|call| call.starts_with("apply rx") && call.contains("gain=2")), "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_25_a_receive_enable_without_a_link_is_only_recorded() {
+        // UR-25 (design 33 D15): a receive side with no link has no stream, so a `cold`
+        // enable of it takes its value and nothing else — no line to book on, no plan, no
+        // streamer and no configuration. The link is what makes the receive stream (UR-15).
+        let (core, device, _, _) = crate::provider::test_support::rig();
+        let (mut control, _tx) = control(&core, &[Dir::Tx]);
+        control.book_cold(ActionId(1), key("radio.rx.channels"), Value::from(1), None);
+        assert!(plan_of(&core, Dir::Rx).is_empty(), "an enable without a link planned a segment");
+        assert_eq!(control.config_at(i64::MAX)[&key("radio.rx.channels")], Value::from(1), "the value is not of record");
+        assert!(!lock(&core.rec).timing.iter().any(|r| r["what"] == "cold_change"), "{:?}", lock(&core.rec).timing);
+        assert!(lock(&core.rec).rejected.is_empty(), "{:?}", lock(&core.rec).rejected);
+        assert!(device.calls().is_empty(), "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_26_a_stop_ends_every_line_once() {
+        // RM-16, UR-26 (design 33 D15): a loss or `Provider::stop` books one `End` on every
+        // stream's line, each with the same instant and arrival order, and a second end
+        // books nothing: `ended` is the instance's, not a stream's.
+        let (core, _, _) = rig();
+        let (_control, _tx) = control(&core, &[Dir::Rx, Dir::Tx]);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let (rx, tx) = (booked_stream(Dir::Rx), booked_stream(Dir::Tx));
+        lock(&core.streams).end(&core, ms(5), false, false);
+        let seq = lock(&core.streams).seq;
+        lock(&core.streams).end(&core, ms(7), true, false);
+        let ends = |stream: StreamKey| -> Vec<(i64, u64, bool)> {
+            let streams = lock(&core.streams);
+            streams.line(stream).expect("the line").items.iter().filter_map(|item| match item.kind {
+                Kind::End { abort } => Some((item.e, item.seq, abort)),
+                _ => None,
+            }).collect()
+        };
+        assert_eq!(ends(rx), [(ms(5), seq, false)], "the receive line");
+        assert_eq!(ends(tx), [(ms(5), seq, false)], "the transmit line");
+        assert_eq!(lock(&core.streams).seq, seq, "the second end took a new arrival order");
+    }
+
+    #[test]
+    fn ur_24_a_refusal_halts_only_its_own_stream() {
+        // RM-25, UR-24, UR-25 (design 33 D15): a refused change halts its own stream alone —
+        // the instance's other stream keeps its plan, its items and its clocks, and its timed
+        // update is issued there; the halted direction's is recorded with no channel.
+        for refused in [Dir::Rx, Dir::Tx] {
+            let other = if refused == Dir::Rx { Dir::Tx } else { Dir::Rx };
+            let case = format!("{} refused", refused.name());
+            let (core, device, time) = rig();
+            device.rx_open(0, &[0]).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let (mut control, _tx) = control(&core, &[Dir::Rx, Dir::Tx]);
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+            let rate = key(&format!("radio.{}.sample_rate_hz", refused.name()));
+            let gain = |dir: Dir| key(&format!("radio.{}.gain_db", dir.name()));
+            control.book_cold(ActionId(1), rate.clone(), Value::num(2e6).unwrap(), at(100));
+            let seq = plan_of(&core, refused)[1].segment.by.unwrap();
+            assert!(lock(&core.streams).refuse(&core, booked_stream(refused), seq), "{case}");
+            // What the other stream holds the refusal shows nothing of.
+            let snapshot = |dir: Dir| -> Held {
+                let streams = lock(&core.streams);
+                let key = booked_stream(dir);
+                let items = streams.line(key).expect("a line").items.iter().map(|item| (item.e, item.seq, item.refused)).collect();
+                let planned = streams.planned(key).into_iter().map(|planned| (planned.segment.origin, planned.segment.cut.unwrap_or(i64::MIN))).collect();
+                (items, streams.stream(key).clocks.iter().map(|(clock, ended)| (clock.origin, *ended)).collect(), planned)
+            };
+            let before = snapshot(other);
+            control.book_timed(ActionId(1), gain(Dir::Rx), Value::num(3.0).unwrap(), at(200));
+            control.book_timed(ActionId(1), gain(Dir::Tx), Value::num(4.0).unwrap(), at(200));
+            time.advance_to(core.at(ms(199))).unwrap();
+            control.release();
+            let calls = device.calls();
+            let applied = |dir: Dir, gain: f64| calls.iter().filter(|c| c.starts_with(&format!("apply {} ", dir.name())) && c.contains(&format!("gain={gain}"))).count();
+            let (refused_gain, other_gain) = if refused == Dir::Rx { (3.0, 4.0) } else { (4.0, 3.0) };
+            assert_eq!(applied(refused, refused_gain), 0, "{case}: the halted direction applied its update: {calls:?}");
+            assert_eq!(applied(other, other_gain), 1, "{case}: {:?}", calls);
+            assert!(lock(&core.rec).applied.iter().any(|r| r["key"] == gain(refused).as_str() && r["note"] == "no channel"), "{case}");
+            assert!(lock(&core.rec).applied.iter().any(|r| r["key"] == gain(other).as_str() && r["issued"] == true && r["at"]["ticks"] == ms(200)), "{case}");
+            assert_eq!(snapshot(other), before, "{case}: the refusal changed the other stream");
+        }
+    }
+
+    #[test]
+    fn ur_25_a_cold_change_and_a_timed_update_at_one_instant_keep_their_own_instants() {
+        // UC-2, RM-25 (design 33 D15): the arrival order is the instance's one counter, a
+        // `cold` change and a timed update at one instant keep their own instants — neither
+        // floors the other — and the update at the change's own instant is in its segment's
+        // configuration. A timed update before the change stays where it was booked.
+        for cold_first in [true, false] {
+            let case = format!("cold first: {cold_first}");
+            let (core, _, _) = rig();
+            let (mut control, _tx) = control(&core, &[Dir::Rx, Dir::Tx]);
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+            let (rate, rx_gain, tx_gain) = (key("radio.rx.sample_rate_hz"), key("radio.rx.gain_db"), key("radio.tx.gain_db"));
+            if cold_first {
+                control.book_cold(ActionId(1), rate.clone(), Value::num(2e6).unwrap(), at(300));
+            }
+            control.book_timed(ActionId(1), rx_gain.clone(), Value::num(3.0).unwrap(), at(300));
+            if !cold_first {
+                control.book_cold(ActionId(1), rate.clone(), Value::num(2e6).unwrap(), at(300));
+            }
+            control.book_timed(ActionId(1), tx_gain.clone(), Value::num(4.0).unwrap(), at(300));
+            control.book_timed(ActionId(1), rx_gain.clone(), Value::num(2.0).unwrap(), at(100));
+            assert_eq!(lock(&core.streams).seq, 4, "{case}");
+            // The receive update's arrival order is 2 after the change, 1 before it.
+            let rx_seq = if cold_first { 2 } else { 1 };
+            let held: Vec<(i64, u64)> = control.held.keys().copied().collect();
+            assert_eq!(held, [(ms(100), 4), (ms(300), rx_seq), (ms(300), 3)], "{case}");
+            let planned = plan_of(&core, Dir::Rx);
+            let settings = planned[1].settings.clone().unwrap();
+            assert_eq!(settings.settings(&settings.updates.lock(), planned[1].segment.origin).gain, Some(3.0), "{case}");
+            assert!(lock(&core.rec).rejected.is_empty(), "{case}");
+        }
+    }
+
+    #[test]
+    fn ur_24_the_device_queue_is_one_across_the_directions() {
+        // UC-2, UR-24 (design 33 D15): the device's queue is the instance's one, so a command
+        // handed over later but due earlier waits for the instant already handed over, with
+        // `LATE_COMMAND`, across the directions too (UR-24's one queue).
+        let (core, device, time, events) = crate::provider::test_support::rig_with_links(vec![Arc::new(NoLink)]);
+        device.rx_open(0, &[0]).unwrap();
+        device.tx_open(0, &[0]).unwrap();
+        let (mut control, _tx) = control(&core, &[Dir::Rx, Dir::Tx]);
+        let us = |n: i64| core.ticks(n * 1_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(us(n))));
+        control.book_timed(ActionId(1), key("radio.tx.gain_db"), Value::num(1.0).unwrap(), at(10_000));
+        time.advance_to(core.at(us(7_500))).unwrap();
+        control.release();
+        control.book_timed(ActionId(2), key("radio.rx.gain_db"), Value::num(2.0).unwrap(), at(9_700));
+        control.release();
+        let ats: Vec<i64> = device.calls().iter().filter(|c| c.starts_with("apply rx 0") && !c.contains("at=-") && c.contains("gain=2"))
+            .map(|c| c.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap()).collect();
+        assert_eq!(ats, [us(10_000)], "the receive command was handed over out of the queue's order: {:?}", device.calls());
+        let late: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).collect();
+        assert_eq!(late.len(), 1, "{late:?}");
+        assert_eq!((late[0].payload["requested"]["ticks"].as_i64(), late[0].payload["applied"]["ticks"].as_i64()), (Some(us(9_700)), Some(us(10_000))));
+    }
+
+    #[test]
+    fn ur_25_the_line_lock_is_free_inside_every_control_device_call() {
+        // UR-25 (design 33 D15): uhd-control holds no line lock across its device calls —
+        // a stream enabled from no stream opens and configures it, and a released timed
+        // command applies it — and the spy proves the sequence passed each call.
+        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
+        let (core, time, _) = crate::provider::test_support::rig_on_inputs(spy.clone(), vec![Arc::new(NoLink)], 2_000, BTreeMap::new());
+        spy.watch(&core);
+        let (mut control, _tx) = control(&core, &[]);
+        control.book_cold(ActionId(1), key("radio.rx.channels"), Value::from(1), None);
+        control.book_cold(ActionId(1), key("radio.tx.channels"), Value::from(1), None);
+        control.book_timed(ActionId(1), key("radio.rx.gain_db"), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(200_000_000)))));
+        time.advance_to(core.at(core.ticks(199_000_000))).unwrap();
+        control.release();
+        for name in ["rx_open", "tx_open", "apply"] {
+            assert!(spy.seen(name) > 0, "the spy never saw {name}");
+        }
+        assert!(spy.seen("apply") >= 3, "the enable and the release did not apply: {}", spy.seen("apply"));
+    }
+
+    #[test]
+    fn ur_17_a_stream_s_prune_leaves_the_other_stream_alone() {
+        // UR-17, RM-26, RM-34 (design 33 D15): pruning one stream's ended segment folds that
+        // stream's items and configurations and nothing of the instance's other stream: the
+        // transmit stream keeps its item and its configuration, and its command can still be
+        // refused.
+        let (core, _, _) = rig();
+        let (mut control, _tx) = control(&core, &[Dir::Rx, Dir::Tx]);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), at(100));
+        control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(1e6).unwrap(), at(200));
+        control.book_cold(ActionId(1), key("radio.tx.sample_rate_hz"), Value::num(2e6).unwrap(), at(100));
+        let (rx, tx) = (booked_stream(Dir::Rx), booked_stream(Dir::Tx));
+        let first = plan_of(&core, Dir::Rx)[1].segment.by.unwrap();
+        let second = plan_of(&core, Dir::Rx)[2].segment.by.unwrap();
+        let tx_seq = plan_of(&core, Dir::Tx)[1].segment.by.unwrap();
+        // The receive segment the second change began has ended: the items before it fold.
+        lock(&core.streams).prune(rx, Some(second));
+        {
+            let streams = lock(&core.streams);
+            assert!(streams.line(rx).unwrap().items.iter().all(|item| item.seq != first), "the receive change was not pruned");
+            assert!(!streams.stream(rx).configs.contains_key(&first), "the pruned receive configuration stays");
+            assert!(streams.line(tx).unwrap().items.iter().any(|item| item.seq == tx_seq), "the transmit change was pruned with the receive stream");
+            assert!(streams.stream(tx).configs.contains_key(&tx_seq), "the transmit configuration was pruned with the receive stream");
+        }
+        assert!(lock(&core.streams).refuse(&core, tx, tx_seq), "the transmit stream's command can no longer be refused");
     }
 }

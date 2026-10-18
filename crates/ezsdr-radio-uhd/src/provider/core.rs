@@ -8,11 +8,11 @@ use ezsdr_kernel::event::{ActionId, Event, EventHandle, EventKind, EventSink, Ev
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::module_api::{InputStore, ModuleError, StopMode};
 use ezsdr_kernel::spec::{Key, Scalar, Value};
-use ezsdr_kernel::stream::DataLink;
+use ezsdr_kernel::stream::{DataLink, Direction};
 use ezsdr_kernel::time::{ClockRegistry, Rational, TimeAuthority, TimePoint};
 use ezsdr_radio::device::DeviceDescription;
 use ezsdr_radio::payloads::CommandRejectedPayload;
-use ezsdr_radio::timeline::{self, Config, Item, Kind, Line, NO_RELEASE};
+use ezsdr_radio::timeline::{self, Config, Item, Kind, Line, StreamKey, NO_RELEASE};
 use ezsdr_radio::{keys, kinds};
 use serde_json::{Value as Json, json};
 
@@ -52,18 +52,18 @@ impl Clock {
 /// Each stream's planned state, once, shared by uhd-control, uhd-rx and uhd-tx and booked by
 /// whichever learns an event (maintenance note 23): uhd-control the commands, uhd-rx and
 /// uhd-tx a configuration their device refused, the thread that finds the device lost the
-/// loss, and `Provider::stop` the streams' end. Lock order: a segment configuration's
-/// `updates`, then this, then `rec`; never held across a device call.
-#[derive(Default)]
+/// loss, and `Provider::stop` the streams' end. What belongs to the instance stays on
+/// [`Streams`] (`seq`, `ended`, `stop`, `version`); what belongs to a stream is in its
+/// [`StreamState`] (RM-29, design 33 D15). Lock order: a segment configuration's `updates`,
+/// then this, then `rec`; never held across a device call.
 pub(crate) struct Streams {
-    /// Per direction, the stream's timeline (RM-26); none for a receive side with no link.
-    pub lines: [Option<Line>; 2],
-    /// Per direction, the configuration each segment begins with, by the command that began
-    /// it, and whether uhd-control configured it itself, for an enable from no stream (UR-25).
-    pub configs: [BTreeMap<u64, (Arc<ColdConfig>, bool)>; 2],
-    /// The transmit clocks registered, in the order of the transmit plan's segments, and
-    /// whether each has ended (RM-25).
-    pub tx_clocks: Vec<(Clock, bool)>,
+    /// The instance's lines, one per stream, keyed by `(direction, k)` (RM-26, RM-29,
+    /// RM-34); none for a receive side with no link.
+    pub lines: timeline::Lines,
+    /// The instance's receive streams; `k` is a stream's number (RM-29).
+    pub rx: Vec<StreamState>,
+    /// The instance's transmit streams; `k` is a stream's number (RM-29).
+    pub tx: Vec<StreamState>,
     /// The arrival order of the last command booked (RM-25).
     pub seq: u64,
     /// The streams' end — a loss or `Provider::stop` — has been booked, once; a command booked
@@ -71,47 +71,128 @@ pub(crate) struct Streams {
     pub ended: bool,
     /// `Provider::stop`'s instant and mode, once it has begun (UR-26).
     pub stop: Option<(i64, StopMode)>,
-    /// uhd-rx's segment, as its origin and configuration, and the first sample of it not yet
-    /// delivered: RM-16's floor, which reaches the plan as `Item.delivered`.
-    pub delivered: Option<(i64, Config, i64)>,
-    /// Per direction, the owner has no stream and nothing planned to begin (UR-25).
-    pub idle: [bool; 2],
     /// Counts the changes of the plans, for uhd-tx to read its own again.
     pub version: u64,
 }
 
+impl Default for Streams {
+    /// One stream per direction: the layout has one stream, `k = 0`, in each under the
+    /// current keys (design 33 D4; 1b-4c adds the layout's others).
+    fn default() -> Streams {
+        Streams {
+            lines: timeline::Lines::new(),
+            rx: vec![StreamState::default()],
+            tx: vec![StreamState::default()],
+            seq: 0,
+            ended: false,
+            stop: None,
+            version: 0,
+        }
+    }
+}
+
+/// One stream's own state (RM-29, design 33 D15): stream `k` of its direction, and not the
+/// instance's other streams.
+#[derive(Default)]
+pub(crate) struct StreamState {
+    /// The configuration each segment begins with, by the command that began it, and whether
+    /// uhd-control configured it itself, for an enable from no stream (UR-25).
+    pub configs: BTreeMap<u64, (Arc<ColdConfig>, bool)>,
+    /// uhd-rx's segment, as its origin and configuration, and the first sample of it not yet
+    /// delivered: RM-16's floor, which reaches the plan as `Item.delivered` (UR-17).
+    pub delivered: Option<(i64, Config, i64)>,
+    /// The owner has no stream and nothing planned to begin (UR-25).
+    pub idle: bool,
+    /// The transmit clocks registered, in the order of the transmit plan's segments, and
+    /// whether each has ended (RM-25).
+    pub clocks: Vec<(Clock, bool)>,
+}
+
+/// The key the instance's lines hold `dir`'s stream `k` under (RM-29).
+pub(crate) fn stream_key(dir: Dir, k: usize) -> StreamKey {
+    match dir {
+        Dir::Rx => (Direction::Rx, k as u32),
+        Dir::Tx => (Direction::Tx, k as u32),
+    }
+}
+
+/// The direction a stream's key names (RM-29).
+pub(crate) fn dir_of(stream: StreamKey) -> Dir {
+    match stream.0 {
+        Direction::Rx => Dir::Rx,
+        Direction::Tx => Dir::Tx,
+    }
+}
+
+/// The stream a command under the current keys names (RM-29): stream 0 of its direction;
+/// design 33 D14's stream targets choose `k` in 1b-4c.
+pub(crate) fn booked_stream(dir: Dir) -> StreamKey {
+    stream_key(dir, 0)
+}
+
 impl Streams {
+    /// A stream's state, by its key (RM-29).
+    pub fn stream(&self, stream: StreamKey) -> &StreamState {
+        match stream.0 {
+            Direction::Rx => &self.rx[stream.1 as usize],
+            Direction::Tx => &self.tx[stream.1 as usize],
+        }
+    }
+
+    /// A stream's state, to change (RM-29).
+    pub fn stream_mut(&mut self, stream: StreamKey) -> &mut StreamState {
+        match stream.0 {
+            Direction::Rx => &mut self.rx[stream.1 as usize],
+            Direction::Tx => &mut self.tx[stream.1 as usize],
+        }
+    }
+
+    /// How many streams of `dir` the instance holds (RM-29).
+    pub fn count(&self, dir: Dir) -> usize {
+        match dir {
+            Dir::Rx => self.rx.len(),
+            Dir::Tx => self.tx.len(),
+        }
+    }
+
+    /// The line of `stream`, if it has one.
+    pub fn line(&self, stream: StreamKey) -> Option<&Line> {
+        self.lines.line(stream)
+    }
+
     pub fn next_seq(&mut self) -> u64 {
         self.seq += 1;
         self.seq
     }
 
-    /// Books a command or fault on a stream's timeline; the end of the receive stream with the
-    /// first sample uhd-rx has not delivered of the segment it cuts (RM-16). False when there is
-    /// no stream, or when its plan cannot be represented, which refuses it.
-    pub fn book(&mut self, core: &Core, dir: Dir, mut item: Item) -> bool {
-        let delivered = self.delivered;
-        let Some(line) = self.lines[dir as usize].as_mut() else { return false };
-        if dir == Dir::Rx && matches!(item.kind, Kind::End { .. }) {
+    /// Books a command or fault on `stream`'s timeline; the end of a receive stream with the
+    /// first sample uhd-rx has not delivered of the segment it cuts (RM-16). False when the
+    /// stream has no line, or when its plan cannot be represented, which refuses it.
+    pub fn book(&mut self, core: &Core, stream: StreamKey, mut item: Item) -> bool {
+        let delivered = self.stream(stream).delivered;
+        let Some(line) = self.lines.line(stream) else { return false };
+        if stream.0 == Direction::Rx && matches!(item.kind, Kind::End { .. }) {
             let cuts = |origin, config| line.made(origin, config, item.e, item.seq).ok().flatten().is_some_and(|s| s.cut.is_none());
             item.delivered = item.delivered.or(delivered.filter(|(origin, config, _)| cuts(*origin, *config)).map(|(_, _, k)| k));
         }
-        if let Err(error) = line.book(item) {
+        if let Err(error) = self.lines.book(stream, item) {
             core.command_rejected(None, "update_parameter", &format!("RM-26: {error}"));
             return false;
         }
-        self.changed(core, dir);
+        self.changed(core, stream);
         true
     }
 
     /// RM-25, VH-2: the device refused the configuration of the segment command `seq` began;
     /// the command is booked as refused, which halts the stream. False when it is no longer
-    /// booked.
-    pub fn refuse(&mut self, core: &Core, dir: Dir, seq: u64) -> bool {
-        let Some(line) = self.lines[dir as usize].as_mut() else { return false };
-        match line.refuse(seq) {
+    /// booked, or when the stream has no line.
+    pub fn refuse(&mut self, core: &Core, stream: StreamKey, seq: u64) -> bool {
+        if self.lines.line(stream).is_none() {
+            return false;
+        }
+        match self.lines.refuse(stream, seq) {
             Ok(refused) => {
-                self.changed(core, dir);
+                self.changed(core, stream);
                 refused
             }
             Err(error) => {
@@ -121,48 +202,51 @@ impl Streams {
         }
     }
 
-    /// RM-16, VH-2: a loss or `Provider::stop` at `at` ends both streams, once; a loss counts
-    /// as received with the faults, at the Run's start (RM-25).
+    /// RM-16, VH-2: a loss or `Provider::stop` at `at` ends every stream, once, each line with
+    /// the same instant and arrival order; a loss counts as received with the faults, at the
+    /// Run's start (RM-25).
     pub fn end(&mut self, core: &Core, at: i64, abort: bool, lost: bool) {
         if std::mem::replace(&mut self.ended, true) {
             return;
         }
         let seq = if lost { 0 } else { self.next_seq() };
         for dir in [Dir::Rx, Dir::Tx] {
-            self.book(core, dir, Item { e: at, seq, ready: at, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::End { abort } });
+            for k in 0..self.count(dir) {
+                self.book(core, stream_key(dir, k), Item { e: at, seq, ready: at, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::End { abort } });
+            }
         }
     }
 
     /// #63: once its owner has ended the segment command `by` began, the items before that
     /// command are pruned: nothing booked later takes effect before it, and no command before
     /// it can be refused any more.
-    pub fn prune(&mut self, dir: Dir, by: Option<u64>) {
-        let Some(line) = self.lines[dir as usize].as_mut() else { return };
-        let Some(e) = by.and_then(|by| line.items.iter().find(|item| item.seq == by)).map(|item| timeline::effective(&line.items, item)) else { return };
-        line.prune(e);
-        let kept: Vec<u64> = line.items.iter().map(|item| item.seq).collect();
-        self.configs[dir as usize].retain(|seq, _| kept.contains(seq));
+    pub fn prune(&mut self, stream: StreamKey, by: Option<u64>) {
+        let Some(e) = by.and_then(|by| self.lines.line(stream).and_then(|held| held.items.iter().find(|item| item.seq == by).map(|item| timeline::effective(&held.items, item)))) else { return };
+        self.lines.prune_stream(stream, e);
+        let kept: Vec<u64> = self.lines.line(stream).map(|line| line.items.iter().map(|item| item.seq).collect()).unwrap_or_default();
+        self.stream_mut(stream).configs.retain(|seq, _| kept.contains(seq));
     }
 
-    /// The plan of `dir`, each segment with its configuration and its transmit clock.
-    pub fn planned(&self, dir: Dir) -> Vec<Planned> {
-        let Some(line) = self.lines[dir as usize].as_ref() else { return Vec::new() };
+    /// The plan of `stream`, each segment with its configuration and its transmit clock.
+    pub fn planned(&self, stream: StreamKey) -> Vec<Planned> {
+        let Some(line) = self.lines.line(stream) else { return Vec::new() };
+        let state = self.stream(stream);
         line.plan.iter().enumerate().map(|(index, segment)| {
-            let config = segment.by.and_then(|by| self.configs[dir as usize].get(&by));
+            let config = segment.by.and_then(|by| state.configs.get(&by));
             Planned {
                 segment: *segment,
                 settings: config.map(|(settings, _)| settings.clone()),
                 configured: config.is_some_and(|(_, configured)| *configured),
-                clock: (dir == Dir::Tx).then(|| self.tx_clocks.get(index).map(|(clock, _)| *clock)).flatten(),
+                clock: (stream.0 == Direction::Tx).then(|| state.clocks.get(index).map(|(clock, _)| *clock)).flatten(),
             }
         }).collect()
     }
 
     /// A plan changed: the transmit clocks follow it (RM-25, VH-2).
-    fn changed(&mut self, core: &Core, dir: Dir) {
+    fn changed(&mut self, core: &Core, stream: StreamKey) {
         self.version += 1;
-        if dir == Dir::Tx {
-            if let Err(error) = self.reconcile(core) {
+        if stream.0 == Direction::Tx {
+            if let Err(error) = self.reconcile(core, stream) {
                 core.command_rejected(None, "update_parameter", &format!("UR-25: {error}"));
             }
         }
@@ -171,20 +255,21 @@ impl Streams {
     /// Each transmit segment's clock, registered when its change is booked and ended at its
     /// cut once the plan has one; a clock registered for a change the plan no longer has — one
     /// booked after `Provider::stop`'s instant — ends at its origin (KC-21a, VH-2).
-    fn reconcile(&mut self, core: &Core) -> Result<(), String> {
-        let plan = self.lines[Dir::Tx as usize].as_ref().map_or_else(Vec::new, |line| line.plan.clone());
+    fn reconcile(&mut self, core: &Core, stream: StreamKey) -> Result<(), String> {
+        let plan = self.lines.line(stream).map_or_else(Vec::new, |line| line.plan.clone());
         for (index, segment) in plan.iter().enumerate() {
-            if index == self.tx_clocks.len() {
-                let clock = core.register(Dir::Tx, segment.config.ratio.num() as i64, segment.origin)?;
-                self.tx_clocks.push((clock, false));
+            if self.stream(stream).clocks.len() == index {
+                let clock = core.register(dir_of(stream), segment.config.ratio.num() as i64, segment.origin)?;
+                self.stream_mut(stream).clocks.push((clock, false));
             }
-            let (clock, ended) = &mut self.tx_clocks[index];
+            let (clock, ended) = &mut self.stream_mut(stream).clocks[index];
             if let Some(cut) = segment.cut.filter(|_| !*ended) {
                 core.clocks.end(clock.domain, core.at(clock.instant(cut))).map_err(|e| e.to_string())?;
                 *ended = true;
             }
         }
-        for (clock, ended) in self.tx_clocks.iter_mut().skip(plan.len()).filter(|(_, ended)| !*ended) {
+        let state = self.stream_mut(stream);
+        for (clock, ended) in state.clocks.iter_mut().skip(plan.len()).filter(|(_, ended)| !*ended) {
             if let Err(error) = core.clocks.end(clock.domain, core.at(clock.origin)) {
                 core.reject_note(json!({ "clock_not_ended": error.to_string() }));
             }
@@ -196,12 +281,17 @@ impl Streams {
     /// UR-30: the plans the streams were carried out by, each segment's origin and end.
     pub fn record(&self) -> Json {
         let plan = |dir: Dir| -> Vec<Json> {
-            self.lines[dir as usize].iter().flat_map(|line| &line.plan).map(|segment| json!({
-                "origin": segment.origin,
-                "end": segment.cut.and_then(|cut| segment.instant(cut).ok()),
-                "channels": segment.config.channels.count(),
-                "ticks_per_sample": [segment.config.ratio.num(), segment.config.ratio.den()],
-            })).collect()
+            let mut rows = Vec::new();
+            for k in 0..self.count(dir) {
+                let Some(line) = self.lines.line(stream_key(dir, k)) else { continue };
+                rows.extend(line.plan.iter().map(|segment| json!({
+                    "origin": segment.origin,
+                    "end": segment.cut.and_then(|cut| segment.instant(cut).ok()),
+                    "channels": segment.config.channels.count(),
+                    "ticks_per_sample": [segment.config.ratio.num(), segment.config.ratio.den()],
+                })));
+            }
+            rows
         };
         json!({ "what": "plan", "rx": plan(Dir::Rx), "tx": plan(Dir::Tx) })
     }

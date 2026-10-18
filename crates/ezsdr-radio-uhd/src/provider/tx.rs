@@ -21,7 +21,7 @@ use ezsdr_radio::payloads::{TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, 
 use serde_json::json;
 
 use super::control::Planned;
-use super::core::{Clock, Core, lock};
+use super::core::{stream_key, Clock, Core, lock};
 use crate::device::{Dir, Iq, TxCode, TxReport};
 use crate::host::HostClock;
 use crate::profile::{DEVICE_LEAD_NS, IN_FLIGHT_WINDOW_NS};
@@ -65,6 +65,8 @@ struct PendingReport {
 
 pub(crate) struct Tx {
     core: Arc<Core>,
+    /// The stream's number, `k` (RM-29): every device call and line reference names it.
+    k: usize,
     cmds: Receiver<TxCmd>,
     /// The device's host clock (plan 30 §4.3): the idle wait and the shutdown's ACK window.
     host: HostClock,
@@ -97,10 +99,11 @@ const IDLE: Wall = Wall::from_micros(200);
 const SEND_TIMEOUT: Wall = Wall::from_secs(1);
 
 impl Tx {
-    pub fn new(core: Arc<Core>, cmds: Receiver<TxCmd>, clock: Option<Clock>, channels: usize) -> Tx {
+    pub fn new(core: Arc<Core>, k: usize, cmds: Receiver<TxCmd>, clock: Option<Clock>, channels: usize) -> Tx {
         let host = core.device.host();
         Tx {
             core,
+            k,
             cmds,
             host,
             tracker: clock.map(|c| BurstTracker::new(c.domain)),
@@ -159,16 +162,17 @@ impl Tx {
     /// pruning first the items before the command that began the segment `passed` (#63).
     fn read(&mut self, passed: Option<Option<u64>>) {
         let core = self.core.clone();
+        let key = stream_key(Dir::Tx, self.k);
         let mut streams = lock(&core.streams);
         if let Some(by) = passed {
-            streams.prune(Dir::Tx, by);
+            streams.prune(key, by);
         } else if self.version == Some(streams.version) {
             return;
         }
         self.version = Some(streams.version);
-        self.plan = streams.planned(Dir::Tx);
+        self.plan = streams.planned(key);
         self.retarget();
-        streams.idle[Dir::Tx as usize] = self.clock.is_none() && self.switch.is_none();
+        streams.stream_mut(key).idle = self.clock.is_none() && self.switch.is_none();
     }
 
     /// UR-25: the plan's cut of the current clock, and the segment after it; with no clock,
@@ -356,7 +360,7 @@ impl Tx {
                 // without it this one would play a sample early, so its failure abandons this
                 // burst, the device burst ended (Review Q, NB-Q2).
                 let tail: Vec<&[Iq]> = tail.iter().map(Vec::as_slice).collect();
-                match self.core.device.tx_send(0, &tail, None, false, false, SEND_TIMEOUT) {
+                match self.core.device.tx_send(self.k, &tail, None, false, false, SEND_TIMEOUT) {
                     Ok(1) => {}
                     Ok(_) => {
                         self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
@@ -370,7 +374,7 @@ impl Tx {
             }
         }
         let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();
-        let result = if sending > 0 { self.core.device.tx_send(0, &sent, at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };
+        let result = if sending > 0 { self.core.device.tx_send(self.k, &sent, at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };
         // Held only once the samples before it went out: after a send that failed or came
         // up short it would play straight after what the device took (Review P, NB-1).
         let tail: Option<Vec<Vec<Iq>>> = hold.then(|| slices.iter().map(|ch| ch[sending..].to_vec()).collect());
@@ -484,7 +488,7 @@ impl Tx {
             Some(tail) => tail.iter().map(Vec::as_slice).collect(),
             None => vec![&empty; self.channels.max(1)],
         };
-        if let Err(error) = self.core.device.tx_send(0, &buffers, None, false, true, SEND_TIMEOUT) {
+        if let Err(error) = self.core.device.tx_send(self.k, &buffers, None, false, true, SEND_TIMEOUT) {
             self.core.device_failed(None, "tx_burst", &error);
         }
     }
@@ -654,7 +658,7 @@ impl Tx {
         self.tracker = None;
         if let Some(to) = switch.to.filter(|_| !self.core.is_lost()) {
             let reopened = if to.configured || to.channels() != self.channels {
-                let opened = if to.configured { Ok(()) } else { self.core.device.tx_open(0, &(0..to.channels()).collect::<Vec<usize>>()) };
+                let opened = if to.configured { Ok(()) } else { self.core.device.tx_open(self.k, &(0..to.channels()).collect::<Vec<usize>>()) };
                 opened.map(|()| self.unacked.clear())
             } else {
                 Ok(())
@@ -669,7 +673,7 @@ impl Tx {
                 Err(error) => {
                     // RM-25: the refusal halts the stream, booked by uhd-tx itself.
                     if let Some(by) = to.segment.by {
-                        lock(&self.core.streams).refuse(&self.core, Dir::Tx, by);
+                        lock(&self.core.streams).refuse(&self.core, stream_key(Dir::Tx, self.k), by);
                     }
                     self.at += 1;
                     self.core.device_failed(None, "update_parameter", &error);
@@ -685,7 +689,7 @@ impl Tx {
     /// UR-28: every report recorded; underflows and late bursts become events.
     fn reports(&mut self, timeout: Wall) {
         while !self.core.is_lost() {
-            match self.core.device.tx_async(0, timeout) {
+            match self.core.device.tx_async(self.k, timeout) {
                 Ok(Some(report)) => self.report(report),
                 Ok(None) => break,
                 // UR-28: a failed read is the device's loss or a recorded error, never "no report".
@@ -794,7 +798,7 @@ mod tests {
 
     use super::{Held, Tx, TxCmd};
     use crate::device::{Device, Dir, FakeConfig, FakeDevice, Settings};
-    use crate::provider::core::{Core, lock};
+    use crate::provider::core::{stream_key, Core, lock};
     use crate::DeviceAuthority;
 
     fn held(clock: &super::Clock, k: i64, len: usize, policy: LatePolicy) -> Held {
@@ -834,7 +838,7 @@ mod tests {
             device.tx_open(0, &[0]).unwrap();
             let clock = core.register(Dir::Tx, 200, 0).unwrap();
             let (_to_tx, cmds) = std::sync::mpsc::channel();
-            let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+            let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), 1);
             let mut burst = held(&clock, 20_000, 10_000, LatePolicy::DropAndFlag);
             burst.repeat = true;
             lock(&core.held).insert((clock.domain, 20_000));
@@ -867,7 +871,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         let clock = core.register(Dir::Tx, 200, 1_000_003).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), 1);
         time.advance_to(core.at(core.ticks(11_000_000))).unwrap();
         let underflow = |events: &Arc<EventCollector>| {
             events
@@ -902,7 +906,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), 1);
         tx.command(TxCmd::Burst(held(&clock, 20_000, 10_000, LatePolicy::DropAndFlag)));
         time.advance_to(core.at(core.ticks(11_000_000))).unwrap();
         assert!(tx.step());
@@ -922,7 +926,7 @@ mod tests {
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), 1);
         let mut burst = held(&clock, 0, 100_000, LatePolicy::SendAsapAndFlag);
         burst.repeat = true;
         // Prime an untimed device burst to make starvation independent of a
@@ -955,7 +959,7 @@ mod tests {
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
             let clock = core.register(Dir::Tx, 200, 0).unwrap();
             let (_to_tx, cmds) = std::sync::mpsc::channel();
-            let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+            let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), 1);
             lock(&core.held).insert((clock.domain, 20_000));
             tx.command(TxCmd::Burst(held(&clock, 20_000, 10_000, policy)));
             assert!(!tx.step(), "still outside the in-flight window");
@@ -987,21 +991,21 @@ mod tests {
         let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
         {
             let mut streams = lock(&core.streams);
-            streams.tx_clocks = vec![(c0, false)];
+            streams.stream_mut(stream_key(Dir::Tx, 0)).clocks = vec![(c0, false)];
             let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-            streams.lines[Dir::Tx as usize] = Some(Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
+            streams.lines.insert(stream_key(Dir::Tx, 0), Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
         }
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), cmds, Some(c0), 1);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), 1);
         tx.read(None);
         assert!(tx.switch.is_none());
         let e = core.ticks(1_000_000_000);
         {
             let mut streams = lock(&core.streams);
-            streams.configs[Dir::Tx as usize].insert(1, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
-            assert!(streams.book(&core, Dir::Tx, Item { e, seq: 1, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
+            streams.stream_mut(stream_key(Dir::Tx, 0)).configs.insert(1, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
+            assert!(streams.book(&core, stream_key(Dir::Tx, 0), Item { e, seq: 1, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
         }
-        let c1 = lock(&core.streams).tx_clocks[1].0;
+        let c1 = lock(&core.streams).stream(stream_key(Dir::Tx, 0)).clocks[1].0;
         tx.read(None);
         let switch = tx.switch.as_ref().expect("a switch");
         assert_eq!(switch.cut, e);
@@ -1018,13 +1022,14 @@ mod tests {
         let c0 = core.register(Dir::Tx, 200, 0).unwrap();
         let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
         let mut streams = lock(&core.streams);
-        streams.tx_clocks = vec![(c0, false)];
+        let key = stream_key(Dir::Tx, 0);
+        streams.stream_mut(key).clocks = vec![(c0, false)];
         let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-        streams.lines[Dir::Tx as usize] = Some(Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
-        streams.configs[Dir::Tx as usize].insert(1, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
-        assert!(streams.book(&core, Dir::Tx, Item { e: core.ticks(1_000_000_000), seq: 1, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
-        let c1 = streams.tx_clocks[1].0;
-        assert!(streams.refuse(&core, Dir::Tx, 1));
+        streams.lines.insert(key, Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
+        streams.stream_mut(key).configs.insert(1, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
+        assert!(streams.book(&core, key, Item { e: core.ticks(1_000_000_000), seq: 1, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
+        let c1 = streams.stream(key).clocks[1].0;
+        assert!(streams.refuse(&core, key, 1));
         drop(streams);
         let ended = core.clocks.sample_clock_records().into_iter().find(|r| r.domain == c1.domain).and_then(|r| r.ended_at.map(|t| t.ticks_in(r.root).unwrap()));
         assert_eq!(ended, Some(c1.origin));
@@ -1045,17 +1050,18 @@ mod tests {
             let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
             {
                 let mut streams = lock(&core.streams);
-                streams.tx_clocks = vec![(c0, false)];
+                let key = stream_key(Dir::Tx, 0);
+                streams.stream_mut(key).clocks = vec![(c0, false)];
                 let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-                streams.lines[Dir::Tx as usize] = Some(Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
+                streams.lines.insert(key, Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
                 for (seq, e, n) in [(1, s(1), 100), (2, s(2), 200), (3, s(3), 100)] {
-                    streams.configs[Dir::Tx as usize].insert(seq, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
-                    assert!(streams.book(&core, Dir::Tx, Item { e, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(n)) }));
+                    streams.stream_mut(key).configs.insert(seq, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
+                    assert!(streams.book(&core, key, Item { e, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(n)) }));
                 }
             }
-            let (c1, c2) = { let streams = lock(&core.streams); (streams.tx_clocks[1].0, streams.tx_clocks[2].0) };
+            let (c1, c2) = { let streams = lock(&core.streams); let key = stream_key(Dir::Tx, 0); (streams.stream(key).clocks[1].0, streams.stream(key).clocks[2].0) };
             let (_to_tx, cmds) = std::sync::mpsc::channel();
-            let mut tx = Tx::new(core.clone(), cmds, Some(c0), 1);
+            let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), 1);
             tx.read(None);
             for clock in [c1, c2] {
                 lock(&core.held).insert((clock.domain, 100));
@@ -1067,7 +1073,7 @@ mod tests {
             assert_eq!(tx.later.iter().map(|h| h.domain).collect::<Vec<_>>(), [c2.domain], "{case}");
             assert_eq!(tx.held.len(), usize::from(!refused), "{case}");
             assert_eq!(lock(&core.rec).rejected.iter().filter(|r| r["kind"] == "tx_burst").count(), usize::from(refused), "{case}");
-            let booked = lock(&core.streams).lines[Dir::Tx as usize].as_ref().unwrap().items.iter().filter(|item| item.refused).map(|item| item.seq).collect::<Vec<_>>();
+            let booked = lock(&core.streams).line(stream_key(Dir::Tx, 0)).unwrap().items.iter().filter(|item| item.refused).map(|item| item.seq).collect::<Vec<_>>();
             assert_eq!(booked, if refused { vec![1] } else { Vec::new() }, "{case}");
             tx.held.clear();
             tx.do_switch();
@@ -1077,7 +1083,7 @@ mod tests {
             // #63: switching from the second change's clock prunes the first change.
             tx.held.clear();
             tx.do_switch();
-            let items: Vec<u64> = lock(&core.streams).lines[Dir::Tx as usize].as_ref().unwrap().items.iter().map(|item| item.seq).collect();
+            let items: Vec<u64> = lock(&core.streams).line(stream_key(Dir::Tx, 0)).unwrap().items.iter().map(|item| item.seq).collect();
             assert_eq!(items, [2, 3], "{case}");
         }
     }
@@ -1088,7 +1094,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), 1);
         lock(&core.held).insert((clock.domain, 17_000));
         tx.command(TxCmd::Burst(held(&clock, 17_000, 10_000, LatePolicy::SendAsapAndFlag)));
         tx.switch = Some(switch(core.ticks(20_000_000), None, 0, Settings::default()));
@@ -1108,7 +1114,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), 1);
         lock(&core.held).insert((clock.domain, 20_000));
         tx.command(TxCmd::Burst(held(&clock, 20_000, 10_000, LatePolicy::DropAndFlag)));
         time.advance_to(core.at(core.ticks(18_000_000))).unwrap();
@@ -1125,7 +1131,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), 1);
         for k in [20_000, 42_000] {
             lock(&core.held).insert((clock.domain, k));
             tx.command(TxCmd::Burst(held(&clock, k, 1_000, LatePolicy::SendAsapAndFlag)));
@@ -1169,7 +1175,7 @@ mod tests {
         let origin = (core.now() / 200 + 1) * 200;
         let clock = core.register(Dir::Tx, 200, origin).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), 1);
         // A, 30 ms, 20 ms ahead; stepped until it has handed over a few buffers.
         let a = clock.at_or_after(core.now() + core.ticks(20_000_000));
         tx.command(TxCmd::Burst(held(&clock, a, 30_000, LatePolicy::DropAndFlag)));
@@ -1204,7 +1210,7 @@ mod tests {
                 device.tx_open(0, &[0]).unwrap();
                 let clock = core.register(Dir::Tx, 200, 0).unwrap();
                 let (_to_tx, cmds) = std::sync::mpsc::channel();
-                let tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+                let tx = Tx::new(core.clone(), 0, cmds, Some(clock), 1);
                 *device.eob_error.lock().unwrap() = Some(crate::device::DeviceError {
                     lost, message: "controlled EOB failure".to_owned(),
                 });
@@ -1230,7 +1236,7 @@ mod tests {
         core.clocks.end(old.domain, core.at(20_000_000)).unwrap();
         let new = core.register(Dir::Tx, 100, 30_000_000).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), cmds, Some(old), 1);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(old), 1);
         tx.continues_at = Some(100);
         tx.tail = Some(vec![vec![[0.25, 0.0]]]);
         tx.switch = Some(switch(20_000_000, Some(new), 2, Settings { rate: Some(2e6), ..Settings::default() }));
@@ -1251,7 +1257,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), 1);
         tx.continues_at = Some(100);
         tx.held.insert(3000, held(&clock, 3000, 10, LatePolicy::DropAndFlag));
         *device.eob_error.lock().unwrap() = Some(crate::device::DeviceError {
@@ -1272,7 +1278,7 @@ mod tests {
         let cut = i64::MAX.div_euclid(old.n) * old.n;
         assert_eq!(old.at_or_after(cut), cut / old.n);
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core, cmds, Some(old), 1);
+        let mut tx = Tx::new(core, 0, cmds, Some(old), 1);
         tx.switch = Some(switch(cut, None, 0, Settings::default()));
         assert!(!tx.step());
         assert!(tx.switch.is_some());
@@ -1283,7 +1289,7 @@ mod tests {
         let (core, _, _, events) = super::super::test_support::rig();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core, cmds, Some(clock), 2);
+        let mut tx = Tx::new(core, 0, cmds, Some(clock), 2);
         let a = TimePoint::new(clock.domain, 10_000);
         let b = TimePoint::new(clock.domain, 20_000);
         tx.remember_burst(a); tx.remember_burst(b);
@@ -1303,7 +1309,7 @@ mod tests {
             let (core, _, _, events) = super::super::test_support::rig();
             let clock = core.register(Dir::Tx, 200, 0).unwrap();
             let (_to_tx, cmds) = std::sync::mpsc::channel();
-            let mut tx = Tx::new(core, cmds, Some(clock), channels);
+            let mut tx = Tx::new(core, 0, cmds, Some(clock), channels);
             let a = TimePoint::new(clock.domain, 10_000);
             let b = TimePoint::new(clock.domain, 20_000);
             tx.remember_burst(a); tx.remember_burst(b);
@@ -1333,7 +1339,7 @@ mod tests {
         core.clocks.end(old.domain, core.at(20_000_000)).unwrap();
         let new = core.register(Dir::Tx, 100, 30_000_000).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core, cmds, Some(old), 1);
+        let mut tx = Tx::new(core, 0, cmds, Some(old), 1);
         tx.remember_burst(TimePoint::new(old.domain, 100));
         tx.switch = Some(switch(20_000_000, Some(new), 2, Settings { rate: Some(2e6), ..Settings::default() }));
         tx.do_switch();
@@ -1358,7 +1364,7 @@ mod tests {
             core.clocks.end(old.domain, core.at(20_000_000)).unwrap();
             let new = next_n.map(|n| core.register(Dir::Tx, n, 30_000_000).unwrap());
             let (_to_tx, cmds) = std::sync::mpsc::channel();
-            let mut tx = Tx::new(core.clone(), cmds, Some(old), 2);
+            let mut tx = Tx::new(core.clone(), 0, cmds, Some(old), 2);
             tx.remember_burst(target);
             tx.switch = Some(switch(20_000_000, new, if new.is_some() { 2 } else { 0 },
                 Settings { rate: Some(if next_n == Some(100) { 2e6 } else { 1e6 }), ..Settings::default() }));
@@ -1387,4 +1393,85 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ur_25_a_refusal_leaves_the_receive_stream_alone() {
+        // RM-25 (design 33 D15): a transmit configuration uhd-tx's device refuses halts the
+        // transmit stream alone: the receive stream's items, plan and clocks are untouched.
+        use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Stream, NO_RELEASE};
+        for refused in [false, true] {
+            let faults = if refused { vec![crate::device::FakeFault::WrongRate { claimed: 2e6, applied: 2e6 - 1_000.0, nth: 0 }] } else { Vec::new() };
+            let (core, device, _, _) = super::super::test_support::rig_with(FakeConfig { faults, ..FakeConfig::default() }, Vec::new());
+            device.tx_open(0, &[0]).unwrap();
+            let s = |n: i64| core.ticks(n * 1_000_000_000);
+            let c0 = core.register(Dir::Tx, 200, 0).unwrap();
+            let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
+            let (tx_key, rx_key) = (stream_key(Dir::Tx, 0), stream_key(Dir::Rx, 0));
+            {
+                let mut streams = lock(&core.streams);
+                streams.stream_mut(tx_key).clocks = vec![(c0, false)];
+                // The transmit change, and the same shapes on the receive stream's line, so
+                // that a refusal booked on the wrong one would show.
+                for key in [tx_key, rx_key] {
+                    let direction = key.0;
+                    let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, direction));
+                    streams.lines.insert(key, Line::new(Stream { direction, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
+                    streams.stream_mut(key).configs.insert(1, (Arc::new(super::super::control::ColdConfig::new(Settings::default())), false));
+                    let item = Item { e: s(1), seq: 1, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(100)) };
+                    assert!(streams.book(&core, key, item), "{key:?}");
+                }
+            }
+            let snapshot = || {
+                let streams = lock(&core.streams);
+                let items: Vec<(i64, u64, bool)> = streams.line(rx_key).unwrap().items.iter().map(|item| (item.e, item.seq, item.refused)).collect();
+                let planned: Vec<(i64, Option<i64>)> = streams.planned(rx_key).into_iter().map(|planned| (planned.segment.origin, planned.segment.cut)).collect();
+                (items, planned)
+            };
+            let before = snapshot();
+            let (_to_tx, cmds) = std::sync::mpsc::channel();
+            let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), 1);
+            tx.read(None);
+            tx.do_switch();
+            let case = format!("refused {refused}");
+            let booked = lock(&core.streams).line(tx_key).unwrap().items.iter().filter(|item| item.refused).map(|item| item.seq).collect::<Vec<_>>();
+            assert_eq!(booked, if refused { vec![1] } else { Vec::new() }, "{case}");
+            assert_eq!(tx.clock.is_some(), !refused, "{case}");
+            assert_eq!(snapshot(), before, "{case}: the transmit refusal changed the receive stream");
+        }
+    }
+
+    #[test]
+    fn ur_25_the_line_lock_is_free_inside_every_transmit_device_call() {
+        // UR-25 (design 33 D15): uhd-tx holds no line lock across its device calls — a
+        // continuation's held sample, its own payload, the end of burst that closes the
+        // device burst, a switched streamer's reopen, its configuration and the
+        // asynchronous report read — and the spy proves the sequence passed each one.
+        let spy = Arc::new(crate::provider::test_support::LockSpy::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
+        let (core, time, _) = crate::provider::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
+        spy.watch(&core);
+        spy.tx_open(0, &[0]).unwrap();
+        let c0 = core.register(Dir::Tx, 200, 0).unwrap();
+        let c1 = core.register(Dir::Tx, 100, 1_000_000).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), 1);
+        // A burst continuing the device burst of the one before: its held sample goes first,
+        // then its own payload; its last sample is held for the end of burst.
+        tx.continues_at = Some(20_020);
+        tx.tail = Some(vec![vec![[0.25, 0.0]]]);
+        tx.command(TxCmd::Burst(held(&c0, 20_020, 10, LatePolicy::DropAndFlag)));
+        time.advance_to(core.at(3_600_000)).unwrap();
+        assert!(tx.step());
+        // A switch to two channels at another clock: ends the open device burst (with its held
+        // sample), reopens the streamer and configures the direction. The reports are read
+        // after it, so that the held sample's end of burst is the switch's.
+        tx.command(TxCmd::Burst(held(&c0, 20_100, 10, LatePolicy::DropAndFlag)));
+        tx.switch = Some(switch(20_000_000, Some(c1), 2, Settings { rate: Some(2e6), ..Settings::default() }));
+        tx.do_switch();
+        tx.reports(std::time::Duration::ZERO);
+        // The test's own `tx_open` is one of the two: the switch reopens the streamer for
+        // its two channels, and configures both.
+        assert_eq!(spy.seen("tx_open"), 2, "the streamer's open and its reopen");
+        assert_eq!(spy.seen("apply"), 2, "the switch configured two channels");
+        assert!(spy.seen("tx_send") >= 3, "the tail, the payload and the end of burst: {}", spy.seen("tx_send"));
+        assert!(spy.seen("tx_async") > 0, "the spy never saw tx_async");
+    }
 }

@@ -518,6 +518,17 @@ impl Lines {
         *self = next;
     }
 
+    /// RM-26: prunes `stream`'s line before `before`, and nothing of the instance's other
+    /// lines (UR-17's per-stream prune; the UHD Module prunes the stream whose segment
+    /// ended).
+    ///
+    /// RM-34's moves are the instance's, and this prunes one of a move's two lines: a
+    /// Provider that books moves prunes both with [`Lines::prune`], whose release floors
+    /// hold. One that books none — the UHD Module until 1b-4d — prunes its own streams here.
+    pub fn prune_stream(&mut self, stream: StreamKey, before: i64) {
+        self.line_mut(stream).prune(before);
+    }
+
     /// RM-34: books `channel` leaving `from`'s line for `to`'s, as one `Cold` item on both
     /// lines at one effective instant (design 33 D3's1). Returns that instant and whether it
     /// is later than `at` asked (UC-2). `now` is the receipt, `seq` the move's arrival order

@@ -26,7 +26,7 @@ use generator::{Change, Fault, Op, Sequence, Terms};
 
 use super::{Rx, RxCmd, Turn};
 use super::super::control::ColdConfig;
-use super::super::core::{Core, lock};
+use super::super::core::{booked_stream, Core, lock};
 use crate::device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, FakeFault, Iq, RxRecv, Settings, TxReport};
 use crate::profile::DELIVERY_ALLOWANCE_NS;
 
@@ -503,10 +503,11 @@ impl World {
             // A loss stops time, so nothing is booked after it.
             Ev::Book(item) if self.stopped.is_none_or(|at| item.ready <= at) => {
                 let mut streams = lock(&core.streams);
+                let stream = booked_stream(Dir::Rx);
                 if matches!(item.kind, Kind::Cold(_) | Kind::Start) {
-                    streams.configs[Dir::Rx as usize].insert(item.seq, (Arc::new(ColdConfig::new(Settings::default())), false));
+                    streams.stream_mut(stream).configs.insert(item.seq, (Arc::new(ColdConfig::new(Settings::default())), false));
                 }
-                assert!(streams.book(&core, Dir::Rx, item), "booked");
+                assert!(streams.book(&core, stream, item), "booked");
                 self.booked += 1;
             }
             Ev::Loss => self.lost = true,
@@ -593,7 +594,7 @@ impl Device for Scripted {
         world.call(format!("rx_start {at}"));
         let now = world.now;
         let core = world.core.clone().expect("the rig's core");
-        let planned = lock(&core.streams).lines[Dir::Rx as usize].as_ref().and_then(|line| line.plan.iter().find(|segment| segment.origin == at).copied());
+        let planned = lock(&core.streams).line(booked_stream(Dir::Rx)).and_then(|line| line.plan.iter().find(|segment| segment.origin == at).copied());
         let mut problems = Vec::new();
         if at <= now {
             problems.push(format!("rx_start {at} at {now}: not ahead of its origin"));
@@ -753,7 +754,7 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
     let items = sequence.items(&terms);
     let loss = items.iter().find(|item| matches!(item.kind, Kind::End { .. })).copied();
     // `start` shares the stream's timeline from T0 (UR-15).
-    lock(&core.streams).lines[Dir::Rx as usize] = Some(Line::new(terms.stream));
+    lock(&core.streams).lines.insert(booked_stream(Dir::Rx), Line::new(terms.stream));
     {
         let mut w = lock(&world);
         w.time = Some(time);
@@ -779,7 +780,7 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
     device.rx_open(0, &[0]).unwrap();
     device.rx_start(0, T0).unwrap();
     let handle = core.clocks.declare_sample_clock(core.id.child("rx").unwrap(), core.root, Rational::new(200, 1).unwrap()).unwrap();
-    let mut rx = Rx::new(core.clone(), cmds, Some((handle, 1, T0)), None);
+    let mut rx = Rx::new(core.clone(), 0, cmds, Some((handle, 1, T0)), None);
     for turn in 0.. {
         assert!(turn < 1_000_000, "uhd-rx makes no progress");
         let next = rx.turn();
@@ -792,7 +793,7 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
         }
         {
             let streams = lock(&core.streams);
-            let line = streams.lines[Dir::Rx as usize].as_ref().expect("the receive timeline");
+            let line = streams.line(booked_stream(Dir::Rx)).expect("the receive timeline");
             let refused: Vec<u64> = line.items.iter().filter(|item| item.refused && !w.refused.contains(&item.seq)).map(|item| item.seq).collect();
             w.refused.extend(refused);
         }
@@ -818,7 +819,7 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
     let rx_clocks: Vec<_> = records.iter().filter(|r| r.stream == core.rx_id).collect();
     let headers = lock(&link.0);
     let rec = lock(&core.rec);
-    let final_plan = lock(&core.streams).lines[Dir::Rx as usize].as_ref().map(|line| line.plan.clone()).unwrap_or_default();
+    let final_plan = lock(&core.streams).line(booked_stream(Dir::Rx)).map(|line| line.plan.clone()).unwrap_or_default();
     let lost_at = rec.timing.iter().find(|row| row["what"] == "device_lost").and_then(|row| row["at"].as_i64());
     let mut violations = w.violations.clone();
     if lost_at != loss.filter(|_| core.is_lost()).map(|loss| loss.e) {
@@ -840,7 +841,7 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
         streaming: !w.lost && w.runs.iter().any(|run| run.end.is_none()),
         dropped: w.calls.iter().filter_map(|(_, call)| call.strip_prefix("rx_start ")).filter(|at| !final_plan.iter().any(|s| s.origin.to_string() == *at)).count(),
         straddled: w.straddled,
-        pruned: lock(&core.streams).lines[Dir::Rx as usize].as_ref().is_some_and(|line| line.items.len() < w.booked),
+        pruned: lock(&core.streams).line(booked_stream(Dir::Rx)).is_some_and(|line| line.items.len() < w.booked),
         calls: w.calls.clone(),
         violations,
     }

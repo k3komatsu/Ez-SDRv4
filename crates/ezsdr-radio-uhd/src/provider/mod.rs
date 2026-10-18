@@ -56,18 +56,33 @@ fn section(suffix: &str) -> Namespace {
 
 const JOIN_BOUND: Wall = Wall::from_secs(1);
 
+/// A stream the layout has, as `prepare` declared it (RM-29, UR-12): its number, the
+/// SampleClock handle when it has channels, its channel count, and the transmit clock `arm`
+/// registered at its origin (UR-13).
+#[derive(Clone)]
+struct PreparedStream {
+    k: usize,
+    handle: Option<SampleClockHandle>,
+    channels: usize,
+    clock: Option<Clock>,
+}
+
 struct Prepared {
     core: Arc<Core>,
     actions: Arc<dyn ActionReceiver>,
     config: BTreeMap<Key, Value>,
-    rx: Option<(SampleClockHandle, usize)>,
-    tx: Option<(SampleClockHandle, usize)>,
-    tx_clock: Option<Clock>,
+    /// One entry per receive stream of the layout (RM-29): the current keys have one, `k = 0`.
+    rx: Vec<PreparedStream>,
+    /// One entry per transmit stream of the layout.
+    tx: Vec<PreparedStream>,
 }
 
 struct Running {
-    to_tx: Sender<TxCmd>,
-    to_rx: Sender<RxCmd>,
+    /// One sender per transmit stream: `Provider::stop` shuts every transmit stream down
+    /// before the first receive one (RM-16, design 33 D15).
+    to_tx: Vec<Sender<TxCmd>>,
+    /// One sender per receive stream.
+    to_rx: Vec<Sender<RxCmd>>,
     threads: Vec<(&'static str, JoinHandle<()>)>,
 }
 
@@ -367,22 +382,25 @@ impl Provider for UhdRadio {
         if let Some(error) = &self.reopened {
             core.timing(json!({ "what": "reopened_on_unlock", "first_error": error }));
         }
-        let mut handles = [None, None];
-        for (slot, dir) in [Dir::Rx, Dir::Tx].into_iter().enumerate() {
+        // One entry per stream of the layout (RM-29): the current keys have one in each
+        // direction, `k = 0`, and a stream with no channel declares no SampleClock (UR-12).
+        let mut rx = PreparedStream { k: 0, handle: None, channels: 0, clock: None };
+        let mut tx = PreparedStream { k: 0, handle: None, channels: 0, clock: None };
+        for (stream, dir) in [(&mut rx, Dir::Rx), (&mut tx, Dir::Tx)] {
             let channels = Core::channels(&config, dir);
+            stream.channels = channels;
             if channels == 0 {
                 continue;
             }
             let n = core
                 .configure(dir, channels, &Core::settings(&config, dir))
                 .map_err(|e| rejected(e.message))?;
-            let stream = self.instance.id.child(dir.name()).map_err(|e| rejected(format!("UR-12: {e}")))?;
+            let node = self.instance.id.child(dir.name()).map_err(|e| rejected(format!("UR-12: {e}")))?;
             let ratio = ezsdr_kernel::time::Rational::new(n as u64, 1).map_err(|e| rejected(format!("UR-12: {e}")))?;
-            let handle = ctx.clocks.declare_sample_clock(stream, root, ratio).map_err(|e| rejected(format!("UR-12: {e}")))?;
-            handles[slot] = Some((handle, channels));
+            let handle = ctx.clocks.declare_sample_clock(node, root, ratio).map_err(|e| rejected(format!("UR-12: {e}")))?;
+            stream.handle = Some(handle);
         }
-        let [rx, tx] = handles;
-        self.prepared = Some(Prepared { core, actions: ctx.actions, config: config.clone(), rx, tx, tx_clock: None });
+        self.prepared = Some(Prepared { core, actions: ctx.actions, config: config.clone(), rx: vec![rx], tx: vec![tx] });
         Ok(PrepareReport { effective: config, coercions: report.coercions, warnings: Vec::new() })
     }
 
@@ -400,34 +418,39 @@ impl Provider for UhdRadio {
                 Err(error) => return Err(rejected(format!("UR-13: {error}"))),
             }
         }
-        if let Some((_, channels)) = &prepared.rx {
-            if !core.links.is_empty() {
-                self.device.rx_open(0, &(0..*channels).collect::<Vec<usize>>()).map_err(|e| rejected(format!("UR-13: {e}")))?;
+        // UR-13: the receive streamer of every stream with channels, when a link is attached;
+        // a receive side with no link has no stream.
+        for stream in &mut prepared.rx {
+            if stream.channels == 0 || core.links.is_empty() {
+                continue;
             }
+            self.device.rx_open(stream.k, &(0..stream.channels).collect::<Vec<usize>>()).map_err(|e| rejected(format!("UR-13: {e}")))?;
         }
-        if let Some((handle, channels)) = &prepared.tx {
-            self.device.tx_open(0, &(0..*channels).collect::<Vec<usize>>()).map_err(|e| rejected(format!("UR-13: {e}")))?;
+        for stream in &mut prepared.tx {
+            if stream.channels == 0 {
+                continue;
+            }
+            self.device.tx_open(stream.k, &(0..stream.channels).collect::<Vec<usize>>()).map_err(|e| rejected(format!("UR-13: {e}")))?;
             // RM-25: the first lattice instant at or after the arm instant.
+            let handle = stream.handle.clone().expect("a stream with channels declared its clock");
             let n = handle.root_ticks_per_tick().num() as i64;
             let origin = ezsdr_radio::timeline::lattice(a, handle.root_ticks_per_tick()).map_err(|e| rejected(format!("UR-13: {e}")))?;
-            let domain = core.clocks.register_sample_clock(handle, origin).map_err(|e| rejected(format!("UR-13: {e}")))?;
-            let clock = Clock { domain, origin, n };
-            prepared.tx_clock = Some(clock);
+            let domain = core.clocks.register_sample_clock(&handle, origin).map_err(|e| rejected(format!("UR-13: {e}")))?;
+            stream.clock = Some(Clock { domain, origin, n });
         }
         core.timing(json!({ "what": "arm", "at": a, "start_up_until": s }));
         Ok(())
     }
 
     fn start(&mut self, at: Option<TimePoint>) -> Result<(), ModuleError> {
-        let (core, actions, config, rx, tx_clock, tx_channels) = {
+        let (core, actions, config, rx_streams, tx_streams) = {
             let prepared = self.prepared()?;
             (
                 prepared.core.clone(),
                 prepared.actions.clone(),
                 prepared.config.clone(),
                 prepared.rx.clone(),
-                prepared.tx_clock,
-                prepared.tx.as_ref().map_or(0, |(_, n)| *n),
+                prepared.tx.clone(),
             )
         };
         let now = core.now();
@@ -452,27 +475,33 @@ impl Provider for UhdRadio {
                 core.description.timing.startup_latency_ns
             )));
         }
-        // RM-25, UR-15: the receive stream's first segment starts at T0, its clock registered
-        // by uhd-rx at its first block.
-        let first = rx.filter(|_| !core.links.is_empty());
-        if first.is_some() {
-            self.device.rx_start(0, t0).map_err(|e| rejected(format!("UR-15: {e}")))?;
+        // The current keys give each direction one stream, so one command channel and one
+        // thread each; 1b-4c gives every stream its own (design 33 D15). A column of another
+        // length is a layout this stage does not start, refused rather than half started.
+        let [rx_stream] = <[PreparedStream; 1]>::try_from(rx_streams).map_err(|_| rejected("UR-15: this stage starts one receive stream"))?;
+        let [tx_stream] = <[PreparedStream; 1]>::try_from(tx_streams).map_err(|_| rejected("UR-15: this stage starts one transmit stream"))?;
+        // RM-25, UR-15: the receive stream's first segment starts at T0 when its streamer is
+        // open — it has channels and a link —, its clock registered by uhd-rx at its first
+        // block.
+        let rx_first = rx_stream.handle.as_ref().filter(|_| !core.links.is_empty()).map(|handle| (handle.clone(), rx_stream.channels, t0));
+        if rx_first.is_some() {
+            self.device.rx_start(rx_stream.k, t0).map_err(|e| rejected(format!("UR-15: {e}")))?;
         }
         let start = control::Start {
             t0,
-            rx: first.as_ref().map(|(handle, channels)| (*channels, handle.root_ticks_per_tick().num() as i64)),
-            tx: tx_clock.map(|clock| (clock, tx_channels)),
+            rx: rx_first.as_ref().map(|(handle, channels, _)| (*channels, handle.root_ticks_per_tick().num() as i64)),
+            tx: tx_stream.clock.map(|clock| (clock, tx_stream.channels)),
         };
         core.timing(json!({ "what": "start", "t0": t0, "lead_ns": core.ns(t0 - now) }));
         let (to_tx, from_control_tx) = mpsc::channel();
         let (to_rx, from_control_rx) = mpsc::channel();
-        self.running = Some(Running { to_tx: to_tx.clone(), to_rx, threads: Vec::new() });
+        self.running = Some(Running { to_tx: vec![to_tx.clone()], to_rx: vec![to_rx], threads: Vec::new() });
         // The streams' timelines first, which uhd-rx and uhd-tx read from their first turn.
         let control = Control::new(core.clone(), actions, to_tx, config, self.clock_source != "internal", start);
         // uhd-rx and uhd-tx start whether or not their direction has a stream (UR-15).
-        let rx = Rx::new(core.clone(), from_control_rx, first.map(|(handle, channels)| (handle, channels, t0)), self.rx_stall);
+        let rx = Rx::new(core.clone(), rx_stream.k, from_control_rx, rx_first, self.rx_stall);
         self.spawn(&core, "uhd-rx", move || rx.run())?;
-        let tx = Tx::new(core.clone(), from_control_tx, tx_clock, tx_channels);
+        let tx = Tx::new(core.clone(), tx_stream.k, from_control_tx, tx_stream.clock, tx_stream.channels);
         self.spawn(&core, "uhd-tx", move || tx.run())?;
         self.spawn(&core, "uhd-control", move || control.run())?;
         Ok(())
@@ -499,10 +528,14 @@ impl Provider for UhdRadio {
             at
         };
         self.join(&core, "uhd-control");
-        // Transmit before receive (RM-16).
-        let _ = to_tx.send(TxCmd::Shutdown);
+        // Transmit before receive (RM-16): every transmit stream's thread first.
+        for to_tx in &to_tx {
+            let _ = to_tx.send(TxCmd::Shutdown);
+        }
         self.join(&core, "uhd-tx");
-        let _ = to_rx.send(RxCmd::Shutdown(mode));
+        for to_rx in &to_rx {
+            let _ = to_rx.send(RxCmd::Shutdown(mode));
+        }
         self.join(&core, "uhd-rx");
         core.timing(json!({ "what": "stop", "mode": format!("{mode:?}"), "at": at, "done": core.now() }));
         Ok(())
@@ -525,5 +558,54 @@ impl Provider for UhdRadio {
         }
         self.write_sections(&core);
         self.running = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::{FakeConfig, FakeDevice};
+    use crate::ClockMode;
+
+    struct NoActions;
+    impl ActionReceiver for NoActions {
+        fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> { None }
+    }
+
+    /// A Provider bound to a fake device, whose `prepare` context is replaced by a `Prepared`
+    /// of `rx` and `tx` streams with no channels, for `start`'s guard alone.
+    fn prepared_with(rx: usize, tx: usize) -> UhdRadio {
+        let binding: Binding = serde_json::from_value(json!({
+            "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
+            "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+            "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
+        })).unwrap();
+        let device: Arc<dyn Device> = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        let mut radio = UhdRadio::from_binding(&binding, device).unwrap();
+        let (core, _, _, _) = test_support::rig();
+        let stream = PreparedStream { k: 0, handle: None, channels: 0, clock: None };
+        radio.prepared = Some(Prepared {
+            core,
+            actions: Arc::new(NoActions),
+            config: BTreeMap::new(),
+            rx: (0..rx).map(|k| PreparedStream { k, ..stream.clone() }).collect(),
+            tx: (0..tx).map(|k| PreparedStream { k, ..stream.clone() }).collect(),
+        });
+        radio
+    }
+
+    #[test]
+    fn ur_15_a_second_stream_is_refused_rather_than_half_started() {
+        // UR-15 (design 33 D15): the current keys give each direction one stream. A column of
+        // another length is refused before anything starts, not started with its rest
+        // silently dropped.
+        for (rx, tx, says) in [(2, 1, "one receive stream"), (1, 2, "one transmit stream"), (0, 1, "one receive stream"), (1, 0, "one transmit stream")] {
+            let mut radio = prepared_with(rx, tx);
+            let error = radio.start(None).unwrap_err();
+            let case = format!("{rx} receive, {tx} transmit");
+            assert_eq!(error.kind, ModuleErrorKind::Rejected, "{case}");
+            assert!(error.message.contains(says), "{case}: {}", error.message);
+            assert!(radio.running.is_none(), "{case}: threads were started");
+        }
     }
 }

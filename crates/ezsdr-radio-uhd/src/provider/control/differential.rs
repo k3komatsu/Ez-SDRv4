@@ -19,7 +19,7 @@ use generator::{Change, Class, Entry, Event, Fault, Op, Sequence, Terms};
 use ezsdr_kernel::id::ClockDomainId;
 
 use super::Control;
-use super::super::core::{key, lock};
+use super::super::core::{booked_stream, key, lock};
 use crate::device::{Device, Dir, FakeConfig};
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS, RELEASE_WINDOW_NS};
 
@@ -239,7 +239,7 @@ fn run(sequence: &Sequence) -> Record {
         }
         control.release();
         while from_tx.try_recv().is_ok() {}
-        let plan = lock(&core.streams).lines[Dir::Rx as usize].as_ref().map(|line| line.plan.clone()).unwrap_or_default();
+        let plan = lock(&core.streams).line(booked_stream(Dir::Rx)).map(|line| line.plan.clone()).unwrap_or_default();
         for segment in plan.into_iter().filter(|segment| segment.origin < now) {
             let index = match receive.iter().position(|(origin, config, _, _)| *origin == segment.origin && *config == segment.config) {
                 Some(index) => index,
