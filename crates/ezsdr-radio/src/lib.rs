@@ -227,7 +227,10 @@ fn indexed_key_decl(
 /// The position of the numbered segment in every RM-27 channel and stream key.
 const NUMBERED_SEGMENT: u8 = 2;
 
-fn radio_keys() -> Vec<KeyDecl> {
+/// RM-4's and RM-27's key declarations together, in RM-1's order: the one table the
+/// Vocabulary advertises and, through [`channels::update_class`], a Provider's reading of a
+/// layout configuration key's class comes from.
+pub(crate) fn radio_keys() -> Vec<KeyDecl> {
     use CoercionPolicy::{Reject, Warn};
     use UpdateClass::{Cold, HardwareTimed};
     use ValueKind::{Bool, Int, Num, Str};
@@ -569,7 +572,7 @@ impl AdmissionCheck for RfEnvelopeCheck {
 /// The concrete RM-27 key `key` spells: a channel's leaf or a stream's rate (RM-27).
 /// `rx` is `true` for a receive channel or stream.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Concrete<'a> {
+pub enum Concrete<'a> {
     /// `radio.<direction>.c<n>.<leaf>`.
     Channel {
         /// Whether it is a receive key.
@@ -590,7 +593,7 @@ pub(crate) enum Concrete<'a> {
 
 /// The one place the numbered spellings `c<n>` and `s<k>` are read (RM-27): the key `key`
 /// names, if it names one. `coerce`, `is_configuration` and `RfEnvelopeCheck` all use it.
-pub(crate) fn concrete(key: &Key) -> Option<Concrete<'_>> {
+pub fn concrete(key: &Key) -> Option<Concrete<'_>> {
     let segments: Vec<&str> = key.as_str().split('.').collect();
     let [prefix, direction, segment, leaf] = <[&str; 4]>::try_from(segments.as_slice()).ok()?;
     if prefix != crate::VOCABULARY {

@@ -173,8 +173,8 @@
   "id": "F37",
   "name": "MockRadio counts a receive enable's start lead from e instead of its receipt",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "let item = Item { e: tick, seq: order, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(timeline::Config { channels: timeline::Channels::first(u32::from(channels)), ratio }) };",
-  "new": "let item = Item { e: tick, seq: order, ready: tick, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(timeline::Config { channels: timeline::Channels::first(u32::from(channels)), ratio }) };",
+  "old": "            let item = Item { e: tick, seq: order, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(timeline::Config { channels, ratio }) };",
+  "new": "            let item = Item { e: tick, seq: order, ready: tick, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(timeline::Config { channels, ratio }) };",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_18_a_receive_enable_from_zero_waits_the_start_lead"
@@ -2258,8 +2258,8 @@
   "id": "J196",
   "name": "MR-16/MR-29 (spec 27 §3): a burst refused at receipt names the Action it answers",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "self.reject_action_at(Some(id), \"tx_burst\", \"MR-16: target, clock, waveform size, channel count or metadata is invalid\", now)?;",
-  "new": "self.reject_action_at(None, \"tx_burst\", \"MR-16: target, clock, waveform size, channel count or metadata is invalid\", now)?;",
+  "old": "        self.reject_action_at(Some(id), \"tx_burst\", \"MR-16: target, clock, waveform size, channel count or metadata is invalid\", now)",
+  "new": "        self.reject_action_at(None, \"tx_burst\", \"MR-16: target, clock, waveform size, channel count or metadata is invalid\", now)",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_16_burst_refusals"
@@ -3008,8 +3008,8 @@
   "id": "J276",
   "name": "MockRadio declares a non-host domain on its Provider root (MA-10)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "tree: profile.description().tree(&id, HOST_MEMORY),",
-  "new": "tree: profile.description().tree(&id, ezsdr_kernel::id::MemoryDomainId::local(1)),",
+  "old": "            tree: profile.tree(&id, HOST_MEMORY),",
+  "new": "            tree: profile.tree(&id, ezsdr_kernel::id::MemoryDomainId::local(1)),",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_02_the_tree_has_the_radio_model_shape"
@@ -3982,8 +3982,8 @@
   "id": "P10",
   "name": "a CBX's `random` phase is fixed by a timed tune rather than redrawn (MR-34, design 33 D13)",
   "file": "crates/ezsdr-mock-radio/src/profile.rs",
-  "old": "        self.description.phase_behavior_on_retune != \"random\"",
-  "new": "        true",
+  "old": "            Mode::Current(description) => description.phase_behavior_on_retune != \"random\",",
+  "new": "            Mode::Current(_) => true,",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_34_a_random_phase_is_redrawn_by_every_tune"
@@ -4002,8 +4002,8 @@
   "id": "P12",
   "name": "MockRadio describes a gain range of its own, not the Vocabulary's (documentation audit D3)",
   "file": "crates/ezsdr-mock-radio/src/profile.rs",
-  "old": "        let description = match kind {\n            ProfileKind::X3xx => x3xx::description(\n                selection.as_ref().expect(\"an x3xx layout\"),\n                BLOCK_LEN,\n                &Profile::terms(),\n            ),",
-  "new": "        let description = match kind {\n            ProfileKind::X3xx => {\n                let mut description = x3xx::description(\n                    selection.as_ref().expect(\"an x3xx layout\"),\n                    BLOCK_LEN,\n                    &Profile::terms(),\n                );\n                description.gain = Grid::Step { lo: 0.0, hi: 37.5, step: 0.5 };\n                description\n            },",
+  "old": "            None => Mode::Current(Box::new(match kind {\n                ProfileKind::X3xx => x3xx::description(\n                    selection.as_ref().expect(\"an x3xx layout\"),\n                    BLOCK_LEN,\n                    &Profile::terms(),\n                ),",
+  "new": "            None => Mode::Current(Box::new(match kind {\n                ProfileKind::X3xx => {\n                    let mut description = x3xx::description(\n                        selection.as_ref().expect(\"an x3xx layout\"),\n                        BLOCK_LEN,\n                        &Profile::terms(),\n                    );\n                    description.gain = Grid::Step { lo: 0.0, hi: 37.5, step: 0.5 };\n                    description\n                },",
   "crate": "ezsdr-acceptance",
   "test_bin": "x3xx",
   "filter": "d3_the_two_providers_describe_one_layout_alike"
@@ -4032,7 +4032,7 @@
   "id": "P15",
   "name": "the Mock's configuration starts from RM-5's 1 GHz defaults, not from the description's (the CBX's 2.45 GHz default)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        let mut config = self.description().defaults.clone();",
+  "old": "        let mut config = self.profile.defaults().clone();",
   "new": "        let mut config = ezsdr_radio::device::DeviceDescription::x310_defaults();",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
@@ -5087,5 +5087,275 @@
   "crate": "ezsdr-radio",
   "test_bin": "timeline",
   "filter": "rm_34_a_move_waits_the_greatest_end_not_the_last_one_read"
+ },
+ {
+  "id": "P122",
+  "name": "the `keys` selector accepts any value, so a current-key instance can be asked for the layout keys",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            Some(Value::Scalar(Scalar::Str(value))) if value == \"channel\" => true,",
+  "new": "            _ => true,",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_38_a_layout_instance_uses_one_key_set"
+ },
+ {
+  "id": "P123",
+  "name": "an `ideal` instance under `keys` presents the current description, not the layout's",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            (ProfileKind::Ideal, true) => Some(channels::ideal_from_selector(&binding.selector).map_err(|why| reject(&why))?),",
+  "new": "            (ProfileKind::Ideal, true) => None,",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_38_the_tree_and_capabilities_are_the_layout_s"
+ },
+ {
+  "id": "P124",
+  "name": "a layout description declares one receive port named `rx` for every stream",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "                    name: Ident::parse(&format!(\"rx{k}\")).expect(\"a receive port name\"),",
+  "new": "                    name: Ident::parse(\"rx\").expect(\"a receive port name\"),",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_38_the_tree_and_capabilities_are_the_layout_s"
+ },
+ {
+  "id": "P125",
+  "name": "every receive stream starts on stream 0's set and rate",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            let line = self.line(Direction::Rx, k, target, &self.config)?;",
+  "new": "            let line = self.line(Direction::Rx, 0, target, &self.config)?;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_39_each_receive_stream_declares_and_runs_its_own_clock"
+ },
+ {
+  "id": "P126",
+  "name": "a receive block reports one channel whatever its stream holds",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            channels,\n            direction: Direction::Rx,",
+  "new": "            channels: 1,\n            direction: Direction::Rx,",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_13_a_stream_s_block_channels_follow_its_channel_set"
+ },
+ {
+  "id": "P127",
+  "name": "every layout stream draws its block lengths from one generator stream",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            self.rx[k].rng = Some(SimRng::new(seed, &format!(\"{}/{path}\", self.selector_id())));",
+  "new": "            self.rx[k].rng = Some(SimRng::new(seed, &format!(\"{}/rx\", self.selector_id())));",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_30_two_layout_mocks_one_seed_identical_output"
+ },
+ {
+  "id": "P128",
+  "name": "a channel moving from one stream to another is booked, not refused",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                    Err(format!(\"RM-34: moving channel c{number} from stream s{was} to stream s{is} is not carried out\"))",
+  "new": "                    Ok(vec![(direction, was as usize)])",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_18_a_layout_instance_s_changes_belong_to_their_own_stream"
+ },
+ {
+  "id": "P129",
+  "name": "MR-41's refusal lacks its rule prefix",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                return Err(self.reject(\"MR-41: a Mock that uses the layout keys takes no sim.channel\"));",
+  "new": "                return Err(self.reject(\"a Mock that uses the layout keys takes no sim.channel\"));",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_41_a_layout_instance_takes_no_simulation_channel"
+ },
+ {
+  "id": "P130",
+  "name": "every layout configuration key is declared `cold`, whatever RM-27's table says",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "    crate::radio_keys().into_iter().find(|decl| decl.key == declaration)?.update_class",
+  "new": "    Some(UpdateClass::Cold)",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_12_d14_the_actions_of_a_layout_instance_name_a_stream"
+ },
+ {
+  "id": "P131",
+  "name": "a channel's antenna change is booked on stream 0, not on the stream that holds the channel",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                let k = self.channel_stream(candidate, direction, number);",
+  "new": "                let k = 0;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_18_a_layout_instance_s_changes_belong_to_their_own_stream"
+ },
+ {
+  "id": "P132",
+  "name": "a late burst's TIME_ERROR names the instance, not its transmit stream",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        self.emit_event(&self.tx[k].path, ezsdr_radio::kinds::TIME_ERROR, Severity::Error, payload, now_tx)",
+  "new": "        self.emit_event(\"\", ezsdr_radio::kinds::TIME_ERROR, Severity::Error, payload, now_tx)",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_28_a_layout_instance_s_events_name_their_stream_node"
+ },
+ {
+  "id": "P133",
+  "name": "a fault cuts the highest-numbered receive stream running, not the lowest",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        for k in 0..self.rx.len() {\n            if self.rx_runs(k, f, seq)? { return Ok(Some(k)); }",
+  "new": "        for k in (0..self.rx.len()).rev() {\n            if self.rx_runs(k, f, seq)? { return Ok(Some(k)); }",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_21_a_fault_cuts_the_lowest_running_receive_stream"
+ },
+ {
+  "id": "P134",
+  "name": "a `Stop` of one stream stops every stream of the instance",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                let streams: Vec<(Direction, usize)> = if device {",
+  "new": "                let streams: Vec<(Direction, usize)> = if true {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_12_d14_the_actions_of_a_layout_instance_name_a_stream"
+ },
+ {
+  "id": "P135",
+  "name": "a layout configuration is never judged on RM-31 and RM-32",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "        for (violation, reason) in self.violations(&effective) {",
+  "new": "        for (violation, reason) in Vec::<(Key, String)>::new() {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "rm_31_rm_32_a_layout_instance_s_violations_are_judged_at_runtime"
+ },
+ {
+  "id": "P136",
+  "name": "every transmit stream registers its clock from stream 0's set and rate",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            let line = self.line(Direction::Tx, k, origin, &self.config)?;",
+  "new": "            let line = self.line(Direction::Tx, 0, origin, &self.config)?;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_09_each_transmit_stream_has_its_own_clock_and_line"
+ },
+ {
+  "id": "P137",
+  "name": "every layout channel starts in no stream, so the default membership is lost",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "fn default_stream(direction: Direction, number: u32) -> i64 {\n    if direction == Direction::Rx && number == 0 { 0 } else { -1 }\n}",
+  "new": "fn default_stream(direction: Direction, number: u32) -> i64 {\n    let _ = (direction, number);\n    -1\n}",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_38_the_tree_and_capabilities_are_the_layout_s"
+ },
+ {
+  "id": "P138",
+  "name": "a channel number the layout does not have is coerced against its first channel",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "        let Some(channel) = channels.get(number as usize) else {",
+  "new": "        let Some(channel) = channels.get(number as usize).or(channels.first()) else {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_38_a_layout_instance_uses_one_key_set"
+ },
+ {
+  "id": "P139",
+  "name": "a layout instance's effective holds no requested channel key",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "        Some(Concrete::Channel { leaf, .. }) => {\n            matches!(leaf, \"frequency_hz\" | \"gain_db\" | \"antenna\" | \"stream\")\n        }",
+  "new": "        Some(Concrete::Channel { leaf, .. }) => {\n            let _ = leaf;\n            false\n        }",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_39_each_receive_stream_declares_and_runs_its_own_clock"
+ },
+ {
+  "id": "P140",
+  "name": "every receive stream resolves its RX_OVERFLOW handle on stream 0's node",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            let path = self.rx[k].path.clone();\n            let rx_node = source_root.child(&path)",
+  "new": "            let path = self.rx[k].path.clone();\n            let rx_node = source_root.child(&self.rx[0].path)",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_21_a_fault_cuts_the_lowest_running_receive_stream"
+ },
+ {
+  "id": "P141",
+  "name": "a layout instance's `cold` change is not floored at an earlier one, so a later reservation overtakes it",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            let floor = self.updates.iter().filter(|(_, update)| update.class == UpdateClass::Cold).map(|((effective, _), _)| *effective).max();",
+  "new": "            let floor: Option<i64> = None;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_18_a_layout_cold_change_is_floored_at_every_earlier_cold_change"
+ },
+ {
+  "id": "P142",
+  "name": "a layout instance's `cold` floor holds only within the key's own direction",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            let floor = self.updates.iter().filter(|(_, update)| update.class == UpdateClass::Cold).map(|((effective, _), _)| *effective).max();",
+  "new": "            let floor = self.updates.iter().filter(|(_, update)| update.class == UpdateClass::Cold && key_direction(&update.key) == direction).map(|((effective, _), _)| *effective).max();",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_18_a_layout_cold_floor_crosses_directions"
+ },
+ {
+  "id": "P143",
+  "name": "a layout instance's `cold` change is booked on the streams the configuration names when it is asked for, not when it takes effect",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            let mut with = projected.clone();\n            with.insert(key.clone(), value.clone());\n            match self.cold_streams(&key, &projected, &with) {",
+  "new": "            let asked = self.projected(requested_tick.unwrap_or(now), order);\n            let mut with = asked.clone();\n            with.insert(key.clone(), value.clone());\n            match self.cold_streams(&key, &asked, &with) {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_18_a_layout_reservations_cannot_invalidate_an_earlier_one"
+ },
+ {
+  "id": "P144",
+  "name": "a `Stop` of `<device>` stops one stream, not every stream of the instance",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                let streams: Vec<(Direction, usize)> = if device {\n                    (0..self.tx.len()).map(|k| (Direction::Tx, k)).chain((0..self.rx.len()).map(|k| (Direction::Rx, k))).collect()",
+  "new": "                let streams: Vec<(Direction, usize)> = if device {\n                    vec![(Direction::Rx, 0)]",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_25_a_device_stop_stops_every_layout_stream"
+ },
+ {
+  "id": "P145",
+  "name": "a device loss ends only the first receive stream, not every stream of the instance",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        for (k, delivered) in delivered.into_iter().enumerate() {",
+  "new": "        for (k, delivered) in delivered.into_iter().enumerate().take(1) {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_20_a_lost_device_stops_every_layout_stream"
+ },
+ {
+  "id": "P146",
+  "name": "every transmit burst is judged by stream 0's channel count",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        let channels = if current {\n            self.effective_stream_channels(Direction::Tx, k)\n        } else {",
+  "new": "        let channels = if current {\n            self.effective_stream_channels(Direction::Tx, 0)\n        } else {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_16_each_transmit_stream_is_judged_by_its_own_channel_count"
+ },
+ {
+  "id": "P147",
+  "name": "every transmit burst is judged by stream 1's channel count",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        let channels = if current {\n            self.effective_stream_channels(Direction::Tx, k)\n        } else {",
+  "new": "        let channels = if current {\n            self.effective_stream_channels(Direction::Tx, 1)\n        } else {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_16_each_transmit_stream_is_judged_by_its_own_channel_count"
+ },
+ {
+  "id": "P148",
+  "name": "a layout instance's `hardware_timed` update is floored at an earlier `cold` change too",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            let requested = requested_tick.unwrap_or(earliest);\n            let depth = self.profile.timing().command_queue_depth as usize;",
+  "new": "            let floor = self.updates.iter().filter(|(_, update)| update.class == UpdateClass::Cold).map(|((effective, _), _)| *effective).max().unwrap_or(i64::MIN);\n            let requested = requested_tick.unwrap_or(earliest).max(floor);\n            let depth = self.profile.timing().command_queue_depth as usize;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_18_a_layout_hardware_timed_change_keeps_its_own_instant"
  }
 ]

@@ -592,8 +592,8 @@
  {
   "name": "MR-17 TIME_ERROR time rounded up",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "emit_late_burst(late_by, at.time_point, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::Drop)",
-  "new": "emit_late_burst(late_by, at.time_point, decided_tx, ezsdr_radio::payloads::TimeErrorOutcome::Drop)",
+  "old": "                self.emit_late_burst(k, late_by, at.time_point, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::Drop)?;",
+  "new": "                self.emit_late_burst(k, late_by, at.time_point, decided_tx, ezsdr_radio::payloads::TimeErrorOutcome::Drop)?;",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "",

@@ -13,11 +13,12 @@ use ezsdr_kernel::binding::satisfies;
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection};
 use ezsdr_kernel::id::{MemoryDomainId, ResourceId};
 use ezsdr_kernel::module_api::{
-    CoerceReport, ModuleError, ProfileRef, RejectedRequest, Requested, Resource, Version,
+    CoerceReport, ModuleError, ProfileRef, RejectedRequest, Requested, Resource, UpdateClass, Version,
 };
 use ezsdr_kernel::spec::{CapabilityValue, Constraint, Coercion, Ident, Key, Namespace, Scalar, Value};
 
 use crate::device::{coerce_antenna, coerce_numeric, num, rejected, Grid};
+use crate::timeline::Channels;
 use crate::x3xx::{self, FrontEnd, Image, ProviderTerms, Slot};
 use crate::{
     keys, Concrete, PerformanceEnvelope, RadioEnvelope, TimingEnvelope, RX_STREAM_KIND,
@@ -550,6 +551,27 @@ impl Description {
         defaults
     }
 
+    /// RM-3, RM-30: the set of channels `configuration` puts in stream `k` of one
+    /// direction — the numbered channels whose `radio.d.c<n>.stream` is `k`, smallest
+    /// number first, which is the order a block's channels come in.
+    pub fn stream_channels(&self, configuration: &BTreeMap<Key, Value>, rx: bool, k: u32) -> Channels {
+        let direction = Direction::of(rx);
+        let mut channels = Channels::first(0);
+        for number in 0..direction.channels(self).len() as u32 {
+            if stream_of(configuration, direction, number) == i64::from(k) {
+                channels = channels.with(number);
+            }
+        }
+        channels
+    }
+
+    /// RM-30: the stream `configuration` puts channel `number` of one direction in, or −1
+    /// when it is in none — the membership [`Description::stream_channels`] reads, read
+    /// backwards, so the two cannot drift apart.
+    pub fn stream_of(&self, configuration: &BTreeMap<Key, Value>, rx: bool, number: u32) -> i64 {
+        stream_of(configuration, Direction::of(rx), number)
+    }
+
     /// RM-30's, RM-31's and RM-32's coercion; pure (MA-11).
     pub fn coerce(
         &self,
@@ -909,7 +931,7 @@ impl Direction {
 }
 
 /// Whether `key` is one of RM-30's configuration keys, which `effective` holds.
-fn is_configuration(key: &Key) -> bool {
+pub fn is_configuration(key: &Key) -> bool {
     match crate::concrete(key) {
         Some(Concrete::Channel { leaf, .. }) => {
             matches!(leaf, "frequency_hz" | "gain_db" | "antenna" | "stream")
@@ -917,6 +939,19 @@ fn is_configuration(key: &Key) -> bool {
         Some(Concrete::Stream { .. }) => true,
         None => false,
     }
+}
+
+/// RM-27's update class of the layout configuration key `key`, read from the one
+/// `KeyDecl` table ([`crate::radio_keys`]) through the declaration the concrete spelling
+/// stands for; `None` when `key` is no layout key or its declaration states no class. A
+/// Provider refuses an update of such a key, and one whose stated class differs.
+pub fn update_class(key: &Key) -> Option<UpdateClass> {
+    let (direction, word, leaf) = match crate::concrete(key)? {
+        Concrete::Channel { rx, leaf, .. } => (Direction::of(rx).name(), keys::CHANNEL, leaf),
+        Concrete::Stream { rx, .. } => (Direction::of(rx).name(), keys::STREAM, keys::STREAM_LEAF),
+    };
+    let declaration = Key::parse(&format!("radio.{direction}.{word}.{leaf}")).expect("a declared radio key");
+    crate::radio_keys().into_iter().find(|decl| decl.key == declaration)?.update_class
 }
 
 fn channel_setting(direction: Direction, number: u32, leaf: &str) -> Key {
