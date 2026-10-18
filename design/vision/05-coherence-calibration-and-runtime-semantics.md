@@ -107,7 +107,7 @@ A calibration procedure — transmit a known signal, receive, estimate — is an
 
 ## Delay calibration is not optional, even for SISO
 
-Every radio has a fixed TX→RX delay through its digital and analog chain. Any timing claim — a packet arrival time, a radar range, an IBFD reference alignment — needs it. srsRAN carries it as a per-device `time_alignment_calibration` in samples; OpenAirInterface as `tx_sample_advance`. Ez-SDR carries a default per device profile in the Radio Model, as two capabilities in samples, `radio.tx.path_delay_samples` and `radio.rx.path_delay_samples` (RM-23), and allows a per-Run override by a CalibrationArtifact of kind `delay`.
+Every radio has a fixed TX→RX delay through its digital and analog chain. Any timing claim — a packet arrival time, a radar range, an IBFD reference alignment — needs it. srsRAN carries it as a per-device `time_alignment_calibration` in samples; OpenAirInterface as `tx_sample_advance`. Ez-SDR carries a default per device profile in the Radio Model as `radio.tx.path_delay_samples` and `radio.rx.path_delay_samples` (RM-23), or per logical channel as `radio.d.c<n>.path_delay_samples` with a layout (RM-29), and allows a per-Run override by a CalibrationArtifact of kind `delay`.
 
 ## Retune phase behaviour is a declared capability
 
@@ -117,7 +117,7 @@ Daughterboards such as UBX/CBX/SBX have a random inter-frontend phase after ever
 phase_behavior_on_retune:  deterministic | random_unless_timed_tune | random
 ```
 
-declared per device profile as `radio.phase_behavior_on_retune`. Phase 2 records the capability; MockRadio emulates it from Phase 3 (MR-34). A CBX's channels are aligned but not coherent, which its device description declares (RM-9, design 33 D13).
+declared as `radio.phase_behavior_on_retune` for the current description, or per logical channel as `radio.d.c<n>.phase_behavior_on_retune` with a layout (RM-9, RM-29). Phase 2 records the capability; MockRadio emulates it from Phase 3 (MR-34). A CBX's channels are aligned but not coherent, which its device description declares (RM-9, design 33 D13).
 
 ---
 

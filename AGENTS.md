@@ -115,12 +115,12 @@ Since 2026-10-11 the work is split across models, and this section applies to ev
 | Role | Who | Does |
 |---|---|---|
 | Orchestrator | Claude Opus (Claude Code) | Makes decisions with the owner, writes each delegated task's brief, reviews, adjudicates the reviews, and closes each step's gate (tests and mutation runs, §7) with a commit and a push. It does not implement large changes itself. |
-| Implementer | DeepSeek V4.1 Flash in OpenCode2 (`opencode-go/deepseek-v4.1-flash`) by default; GPT-6 Luna in OpenCode2 (`openai/gpt-6-luna`) only when the owner asks for it, since it draws on the owner's OpenAI subscription, which is used when it has room (owner, 2026-10-11) | Implements against the accepted plan and the brief, and fixes the adopted findings. Its self-review reviewer (step 2) runs on the same model. |
+| Implementer | DeepSeek V4.1 Flash in OpenCode2 (`opencode-go/deepseek-v4.1-flash`) by default; GPT-6 Luna in OpenCode2 (`openai/gpt-6-luna`) only when the owner asks for it, since it draws on the owner's OpenAI subscription, which is used when it has room (owner, 2026-10-11) | Implements against the accepted plan and the brief, and fixes the adopted findings. Its self-review reviewer (step 2) runs on the model the brief names: the implementer's own by default, or another one the owner chooses (owner, 2026-10-18: a DeepSeek implementer's reviewer may be Haiku 5.5 in OpenCode2, `anthropic/claude-haiku-5-5#high`). |
 | Independent reviewer | Sol 6.1 in OpenCode2 (`openai/gpt-6.1-sol`), read-only (`--agent plan`) | Reviews at the end of a step without seeing the orchestrator's findings. It runs in OpenCode2, not the Codex CLI, because Codex works badly with Orca. |
 
 Each implementation step runs in this order:
 1. The implementer implements.
-2. The implementer runs its own self-review loop before it reports (owner, 2026-10-11, from item 3 stage 3c on). Each round starts a **fresh** read-only reviewer from its shell, so the reviewer does not inherit the implementer's reasoning: `opencode2 run --standalone -m <the implementer's model> --agent plan --auto "<checklist>"`. The implementer fixes what the reviewer finds and starts another round, until a round finds nothing or three rounds have run. Each round's findings and fixes go into the step's report; findings left open after round 3 are listed as open, not dropped. The orchestrator's brief supplies the checklist:
+2. The implementer runs its own self-review loop before it reports (owner, 2026-10-11, from item 3 stage 3c on). Each round starts a **fresh** read-only reviewer from its shell, so the reviewer does not inherit the implementer's reasoning: `opencode2 run --standalone -m <the reviewer model the brief names> --agent plan --auto "<checklist>"`. The implementer fixes what the reviewer finds and starts another round, until a round finds nothing or three rounds have run. Each round's findings and fixes go into the step's report; findings left open after round 3 are listed as open, not dropped. The orchestrator's brief supplies the checklist:
    - scope against the plan, missing and extra;
    - a test and a mutation row for every rule, and for each test the wrong implementation it would catch (which check actually refuses each input);
    - a grep over every position for each "every / only / all" claim;
@@ -129,7 +129,7 @@ Each implementation step runs in this order:
 4. Sol reviews independently.
 5. The orchestrator adjudicates both reviews, the implementer fixes the adopted findings, and the gate runs.
 
-Self-review is a cheap first filter. It never replaces steps 3 and 4: the same model keeps the same blind spots, so a self-review that ends satisfied proves nothing about the tests' power. The orchestrator steps in at the brief and at the report, not between rounds; a background watchdog shell (no model, `plan/maintenance/tools/mutation_watchdog.py`) reports a breach of the mutation rule below.
+Self-review is a cheap first filter. It never replaces steps 3 and 4: the same model keeps the same blind spots, and a cheaper reviewer misses more, so a self-review that ends satisfied proves nothing about the tests' power. The orchestrator steps in at the brief and at the report, not between rounds; a background watchdog shell (no model, `plan/maintenance/tools/mutation_watchdog.py`) reports a breach of the mutation rule below.
 
 Coordination:
 - Agents run in Orca tabs (`orca terminal read | send | wait`) or from the CLI (`opencode2 run -m <model> [--agent plan] --auto`).

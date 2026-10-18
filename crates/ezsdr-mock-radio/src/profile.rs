@@ -134,13 +134,37 @@ impl Profile {
         }
     }
 
-    /// The current keys' description (RM-26). Only the paths a layout instance never takes
-    /// read it: a layout instance builds no SimulationChannel model (MR-41), and every
-    /// caller is behind `channel.is_some()`.
-    pub(crate) fn description(&self) -> &DeviceDescription {
+    /// The number of logical channels in this profile's direction (MR-3, RM-29).
+    pub(crate) fn channel_count(&self, direction: Direction) -> usize {
         match &self.mode {
-            Mode::Current(description) => description,
-            Mode::Layout(_) => panic!("MR-27: a layout instance has no current description"),
+            Mode::Current(description) => match direction {
+                Direction::Rx => description.rx_max_channels as usize,
+                Direction::Tx => description.tx_max_channels as usize,
+            },
+            Mode::Layout(description) => match direction {
+                Direction::Rx => description.rx.len(),
+                Direction::Tx => description.tx.len(),
+            },
+        }
+    }
+
+    /// A channel's LO behaviour and fixed path delay (RM-29, RM-23).
+    pub(crate) fn channel_model_terms(&self, direction: Direction, channel: usize) -> (&str, i64) {
+        match &self.mode {
+            Mode::Current(description) => (
+                &description.phase_behavior_on_retune,
+                match direction {
+                    Direction::Rx => description.rx_path_delay_samples,
+                    Direction::Tx => description.tx_path_delay_samples,
+                },
+            ),
+            Mode::Layout(description) => {
+                let channel = match direction {
+                    Direction::Rx => &description.rx[channel],
+                    Direction::Tx => &description.tx[channel],
+                };
+                (&channel.phase_behavior_on_retune, channel.path_delay_samples)
+            }
         }
     }
 
@@ -255,10 +279,8 @@ impl Profile {
         }
     }
 
-    /// Whether the initial untimed tune leaves each channel's LO at a random phase, from
-    /// the description's `radio.phase_behavior_on_retune` (MR-34). A layout description
-    /// states the phase behaviour per channel (RM-29); its SimulationChannel model is not
-    /// built at this stage, so nothing draws from this.
+    /// Whether the current-key profile's initial untimed tune draws phases (MR-34). A layout
+    /// reads each channel's behaviour through [`Profile::channel_model_terms`].
     pub(crate) fn random_phase_on_untimed_tune(&self) -> bool {
         match &self.mode {
             Mode::Current(description) => description.phase_behavior_on_retune != "deterministic",
@@ -266,9 +288,8 @@ impl Profile {
         }
     }
 
-    /// Whether a timed tune replaces each channel's phase with its timed-tune constant
-    /// (MR-34): false for the `random` phase value, whose every tune redraws the phase
-    /// instead (design 33 D13). As [`Profile::random_phase_on_untimed_tune`].
+    /// Whether the current-key profile's timed tune uses its constant (MR-34); a layout
+    /// applies each channel's own behaviour through [`Profile::channel_model_terms`].
     pub(crate) fn timed_tune_fixes_phase(&self) -> bool {
         match &self.mode {
             Mode::Current(description) => description.phase_behavior_on_retune != "random",

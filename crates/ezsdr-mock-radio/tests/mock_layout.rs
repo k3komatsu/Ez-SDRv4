@@ -74,6 +74,25 @@ fn waveform(samples: usize, channels: usize) -> ArtifactRef {
     }
 }
 
+fn waveform_values(samples: &[(f32, f32)]) -> (ArtifactRef, Arc<[u8]>) {
+    let mut bytes = Vec::with_capacity(samples.len() * 8);
+    for (re, im) in samples {
+        bytes.extend_from_slice(&re.to_le_bytes());
+        bytes.extend_from_slice(&im.to_le_bytes());
+    }
+    let hash = ContentHash::of_bytes(&bytes);
+    (ArtifactRef {
+        id: Ident::parse("waveform").unwrap(),
+        kind: Namespace::parse("ezsdr.input").unwrap(),
+        uri: format!("mem:{hash}"),
+        hash,
+        size_bytes: bytes.len() as u64,
+        partial: false,
+        marks: Vec::new(),
+        continuity: Vec::new(),
+    }, bytes.into())
+}
+
 #[derive(Default)]
 struct Queue {
     actions: Mutex<VecDeque<Action>>,
@@ -174,6 +193,10 @@ fn harness(options: Layout<'_>) -> Result<Harness, ModuleError> {
 /// As [`harness`], with further links attached (several of them to one port when the test
 /// asks for it, MR-7 step 7).
 fn harness_links(options: Layout<'_>, extra: &[(&str, BackPressure, usize)]) -> Result<Harness, ModuleError> {
+    harness_links_with_inputs(options, extra, BTreeMap::new())
+}
+
+fn harness_links_with_inputs(options: Layout<'_>, extra: &[(&str, BackPressure, usize)], inputs: BTreeMap<ContentHash, Arc<[u8]>>) -> Result<Harness, ModuleError> {
     let version = if options.profile == "x3xx" { Version::new(0, 1, 0) } else { Version::new(2, 0, 0) };
     let mut selector = BTreeMap::from([
         (Ident::parse("id").unwrap(), Value::from(options.id.to_owned())),
@@ -225,7 +248,7 @@ fn harness_links(options: Layout<'_>, extra: &[(&str, BackPressure, usize)]) -> 
         ctx.run = RunId::from_string("mock-layout".to_owned());
         ctx.class = ExecutionClass::Simulation;
         ctx.environment = environment;
-        ctx.inputs = Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new());
+         ctx.inputs = Arc::new(inputs);
         ctx.links = attached;
         ctx.host_budget = RelativeBudget::new(Duration::new(HOST, 5_000_000_000)).unwrap();
         ctx
@@ -247,6 +270,13 @@ fn harness_links(options: Layout<'_>, extra: &[(&str, BackPressure, usize)]) -> 
 
 fn built(options: Layout<'_>) -> Harness {
     match harness(options) {
+        Ok(harness) => harness,
+        Err(error) => panic!("prepare the layout Mock: {error}"),
+    }
+}
+
+fn built_with_inputs(options: Layout<'_>, inputs: BTreeMap<ContentHash, Arc<[u8]>>) -> Harness {
+    match harness_links_with_inputs(options, &[], inputs) {
         Ok(harness) => harness,
         Err(error) => panic!("prepare the layout Mock: {error}"),
     }
@@ -313,6 +343,23 @@ impl Harness {
     }
 }
 
+fn block_sample(block: &BlockRef, channel: usize, sample: usize) -> (f32, f32) {
+    let bytes = block.host_bytes().unwrap();
+    let index = (channel * block.header().len as usize + sample) * 8;
+    (
+        f32::from_le_bytes(bytes[index..index + 4].try_into().unwrap()),
+        f32::from_le_bytes(bytes[index + 4..index + 8].try_into().unwrap()),
+    )
+}
+
+fn phase(rng: &mut ezsdr_sim::SimRng) -> f64 {
+    2.0 * std::f64::consts::PI * ((rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64)
+}
+
+fn rotated(amplitude: f64, phase: f64) -> (f32, f32) {
+    ((amplitude * phase.cos()) as f32, (amplitude * phase.sin()) as f32)
+}
+
 fn update(name: &str, value: Value, class: UpdateClass, at: Option<i64>) -> Action {
     Action::UpdateParameter {
         target: tgt("mock"),
@@ -354,6 +401,24 @@ fn burst(target: &str, domain: ClockDomainId, sample: i64, samples: usize) -> Ac
         late_policy: LatePolicy::SendAsapAndFlag,
         metadata: BTreeMap::new(),
     }
+}
+
+fn burst_with_waveform(target: &str, domain: ClockDomainId, sample: i64, waveform: ArtifactRef) -> Action {
+    Action::TxBurst {
+        target: tgt(target),
+        waveform,
+        repeat: false,
+        at: AbsoluteDeadline::new(TimePoint::new(domain, sample)),
+        requested_at: None,
+        late_policy: LatePolicy::SendAsapAndFlag,
+        metadata: BTreeMap::new(),
+    }
+}
+
+/// The waveform of a two-channel transmit burst of `frames` samples, both channels at `value`:
+/// interleaved by frame, so a stream of two channels reads it two values to a frame (MR-32).
+fn two_channel_waveform(frames: usize, value: (f32, f32)) -> (ArtifactRef, Arc<[u8]>) {
+    waveform_values(&vec![value; 2 * frames])
 }
 
 /// The mixed layout the owner uses: a UBX in slot A and a BasicRX in slot B, the BasicRX's
@@ -643,20 +708,24 @@ fn mr_18_a_layout_instance_s_changes_belong_to_their_own_stream() {
     let clocks = harness.clocks_of("mock/rx/s1");
     assert_eq!(clocks.len(), 2);
     assert!(clocks[1].ended_at.is_some());
-    // A channel moving from one stream to another is refused, and nothing changes (RM-34).
+    // A channel moving between streams is one `book_move`; the instance's configuration and
+    // both stream plans now change together (RM-34, MR-40).
     harness.push(update("radio.rx.c0.stream", Value::from(1), UpdateClass::Cold, None));
     harness.step(T0 + 130_000_001).unwrap();
     let reasons = harness.rejected();
-    assert_eq!(reasons.len(), 3, "{reasons:?}");
-    assert!(reasons[2].starts_with("RM-34: moving channel c0 from stream s0 to stream s1"), "{reasons:?}");
-    assert_eq!(harness.applied().len(), 3);
+    assert_eq!(reasons.len(), 2, "{reasons:?}");
+    assert_eq!(harness.applied().len(), 4);
     // The rate key belongs to its own stream: only that stream's clock changes (RM-27).
     harness.push(update("radio.rx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, None));
     harness.step(T0 + 130_000_001).unwrap();
     harness.step(T0 + 300_000_000).unwrap();
-    assert_eq!(harness.applied().len(), 4);
-    assert_eq!(harness.clocks_of("mock/rx/s0").len(), 2);
-    assert_eq!(harness.clocks_of("mock/rx/s1").len(), 2);
+    assert_eq!(harness.applied().len(), 5);
+    let source = harness.clocks_of("mock/rx/s0");
+    let destination = harness.clocks_of("mock/rx/s1");
+    assert_eq!(source.len(), 1);
+    assert!(source[0].ended_at.is_some());
+    assert_eq!(destination.len(), 3);
+    assert_eq!(destination[2].origin.ticks_in(ROOT).unwrap(), T0 + 185_000_000);
 }
 
 
@@ -742,10 +811,21 @@ fn mr_7_each_receive_port_takes_its_own_links() {
 }
 
 #[test]
-fn mr_41_a_layout_instance_takes_no_simulation_channel() {
-    let env = [("sim.channel", serde_json::json!({ "couplings": [] }))];
-    let why = refusal(Layout { profile: "x3xx", id: "mock", rx: mixed(), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &[], env: &env, ports: &["rx0"] });
-    assert!(why.starts_with("MR-41: "), "{why}");
+fn mr_31_a_layout_instance_joins_simulation_channel() {
+    let env = [("sim.channel", serde_json::json!({ "couplings": [{ "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 }] }))];
+    let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 100]);
+    let mut harness = built_with_inputs(Layout { profile: "ideal", id: "mock", rx: count(1), tx: count(1), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"] }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(0).unwrap();
+    assert_eq!(harness.mock.instance().fidelity.rf, ezsdr_kernel::module_api::RfFidelity::ImpairmentModel);
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    harness.push(burst_with_waveform("mock/tx/s0", tx, 1_000, waveform));
+    harness.step(0).unwrap();
+    harness.step(10_000_000).unwrap();
+    let heard: usize = harness.blocks("rx0").iter()
+        .map(|block| (0..block.header().len as usize).filter(|&sample| block_sample(block, 0, sample) != (0.0, 0.0)).count())
+        .sum();
+    assert_eq!(heard, 100);
 }
 
 #[test]
@@ -979,9 +1059,8 @@ fn mr_18_a_layout_cold_floor_crosses_directions() {
 
 #[test]
 fn mr_18_a_layout_reservations_cannot_invalidate_an_earlier_one() {
-    // RM-25, RM-40: an update received after a reservation cannot overtake it, so the stream
-    // a channel is in at the later instant decides what the change does. Membership: the
-    // channel is in stream 1 then, so putting it in stream 0 is a move and is refused.
+    // RM-25, RM-34: an update received after a reservation cannot overtake it, so a second
+    // membership update is a move at the first update's effective instant.
     let constraints = [
         ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(4_000_000.0).unwrap())),
         ("radio.rx.s1.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap())),
@@ -993,13 +1072,16 @@ fn mr_18_a_layout_reservations_cannot_invalidate_an_earlier_one() {
     harness.push(update("radio.rx.c1.stream", Value::from(0), UpdateClass::Cold, Some(now + 10_000_000)));
     harness.step(now).unwrap();
     harness.step(now + 20_000_000).unwrap();
-    let reasons = harness.rejected();
-    assert_eq!(reasons.len(), 1, "{reasons:?}");
-    assert!(reasons[0].starts_with("RM-34: moving channel c1 from stream s1 to stream s0"), "{reasons:?}");
-    assert_eq!(harness.applied_of("radio.rx.c1.stream"), [(serde_json::json!(1), now + 20_000_000)]);
+    assert!(harness.rejected().is_empty());
+    assert_eq!(harness.applied_of("radio.rx.c1.stream"), [
+        (serde_json::json!(1), now + 20_000_000),
+        (serde_json::json!(0), now + 20_000_000),
+    ]);
     harness.step(now + 200_000_000).unwrap();
-    assert_eq!(harness.clocks_of("mock/rx/s1").len(), 1);
-    assert_eq!(harness.clocks_of("mock/rx/s0").len(), 1);
+    assert!(harness.clocks_of("mock/rx/s1").is_empty());
+    let s0 = harness.clocks_of("mock/rx/s0");
+    assert_eq!(s0.len(), 2);
+    assert_eq!(s0[1].origin.ticks_in(ROOT).unwrap(), now + 100_000_000);
     // Throughput: at the later instant the second channel is in stream 1 and takes the 1 GbE
     // link's 100 MB/s over, so the rate change is refused there though it would fit before it
     // (RM-32).
@@ -1158,3 +1240,1307 @@ fn mr_16_each_transmit_stream_is_judged_by_its_own_channel_count() {
     assert_eq!(samples, [25, 50, 3]);
 }
 
+#[test]
+fn mr_40_a_receive_move_waits_for_release_and_lead_and_records_channel_order() {
+    let constraints = [
+        ("radio.rx.c1.stream", eq(Scalar::from(1))),
+        ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(4_000_000.0).unwrap())),
+        ("radio.rx.s1.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap())),
+    ];
+    let selector = [("rx_test_pattern", Value::from("ramp".to_owned()))];
+    let mut harness = built(Layout { profile: "x3xx", id: "mock", rx: two(), tx: elements(&[]), selector: &selector, constraints: &constraints, env: &[], ports: &["rx0", "rx1"] });
+    harness.arm_start(T0).unwrap();
+    harness.step(T0 + 2_100_001).unwrap();
+    let now = T0 + 10_000_000;
+    harness.push(update("radio.rx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(now)));
+    harness.push(update("radio.rx.c0.stream", Value::from(1), UpdateClass::Cold, Some(now)));
+    harness.step(now).unwrap();
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+    assert_eq!(harness.applied(), [
+        ("radio.rx.s0.sample_rate_hz".to_owned(), now),
+        ("radio.rx.c0.stream".to_owned(), now),
+    ]);
+    harness.step(now + 110_000_001).unwrap();
+    let source = harness.clocks_of("mock/rx/s0");
+    let destination = harness.clocks_of("mock/rx/s1");
+    assert_eq!(source.len(), 1);
+    assert_eq!(source[0].ended_at.unwrap().ticks_in(ROOT).unwrap(), now);
+    assert_eq!(destination.len(), 2);
+    assert_eq!(destination[0].ended_at.unwrap().ticks_in(ROOT).unwrap(), now);
+    assert_eq!(destination[1].origin.ticks_in(ROOT).unwrap(), now + 103_500_000);
+    let block = harness.blocks("rx1").into_iter()
+        .find(|block| block.header().first_sample_time.domain() == destination[1].domain)
+        .expect("the moved receive segment publishes on its new clock");
+    assert_eq!(block.header().channels, 2);
+    assert_eq!(block_sample(&block, 0, 1), (1.0 / 65_536.0, 0.0));
+    assert_eq!(block_sample(&block, 1, 1), (1.0 / 65_536.0, 1.0 / 64.0));
+    let segments = harness.section("segments");
+    let source_segment = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 0 && row["origin"]["ticks"] == T0 && row["channels"] == serde_json::json!([0])).unwrap();
+    assert_eq!(source_segment["ended_at"]["ticks"], now);
+    assert!(segments.iter().any(|row| row["direction"] == "rx" && row["stream"] == 0 && row["channels"] == serde_json::json!([0])));
+    assert!(segments.iter().any(|row| row["direction"] == "rx" && row["stream"] == 1 && row["channels"] == serde_json::json!([1])));
+    assert!(segments.iter().any(|row| row["direction"] == "rx" && row["stream"] == 1 && row["channels"] == serde_json::json!([0, 1])));
+}
+
+#[test]
+fn mr_40_a_transmit_move_cuts_both_clocks_and_cancels_both_held_bursts() {
+    let constraints = [
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c1.stream", eq(Scalar::from(1))),
+    ];
+    let mut harness = built(Layout { profile: "ideal", id: "mock", rx: count(0), tx: count(2), selector: &[], constraints: &constraints, env: &[], ports: &[] });
+    harness.arm_start(0).unwrap();
+    let (s0, s1) = (harness.clocks_of("mock/tx/s0")[0].domain, harness.clocks_of("mock/tx/s1")[0].domain);
+    harness.push(burst("mock/tx/s0", s0, 5_000, 100));
+    harness.push(burst("mock/tx/s1", s1, 5_000, 100));
+    harness.push(update("radio.tx.c0.stream", Value::from(1), UpdateClass::Cold, Some(1_000)));
+    harness.step(0).unwrap();
+    harness.step(1_000).unwrap();
+    let reasons = harness.rejected();
+    assert_eq!(reasons.len(), 2, "{reasons:?}");
+    assert!(reasons.iter().all(|reason| reason.starts_with("MR-18: cancelled by a cold change")), "{reasons:?}");
+    let s0 = harness.clocks_of("mock/tx/s0");
+    let s1 = harness.clocks_of("mock/tx/s1");
+    assert_eq!(s0.len(), 1);
+    assert_eq!(s0[0].ended_at.unwrap().ticks_in(ROOT).unwrap(), 1_000);
+    assert_eq!(s1.len(), 2);
+    assert_eq!(s1[0].ended_at.unwrap().ticks_in(ROOT).unwrap(), 1_000);
+    assert_eq!(s1[1].origin.ticks_in(ROOT).unwrap(), 1_000);
+    let segments = harness.section("segments");
+    assert!(segments.iter().any(|row| row["direction"] == "tx" && row["stream"] == 0 && row["channels"] == serde_json::json!([0])));
+    assert!(segments.iter().any(|row| row["direction"] == "tx" && row["stream"] == 1 && row["channels"] == serde_json::json!([1])));
+    assert!(segments.iter().any(|row| row["direction"] == "tx" && row["stream"] == 1 && row["channels"] == serde_json::json!([0, 1])));
+}
+
+#[test]
+fn mr_40_a_move_uses_the_instance_floor_across_streams_directions_and_missing_links() {
+    let constraints = [
+        ("radio.rx.c1.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+    ];
+    let mut harness = built(Layout {
+        profile: "x3xx", id: "mock", rx: mixed(), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &[], ports: &["rx0", "rx1"],
+    });
+    harness.arm_start(T0).unwrap();
+    let now = T0 + 10_000_000;
+    harness.push(update("radio.rx.s2.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(now + 30_000_000)));
+    harness.push(update("radio.rx.c0.stream", Value::from(1), UpdateClass::Cold, Some(now + 10_000_000)));
+    harness.push(update("radio.tx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(now + 40_000_000)));
+    harness.push(update("radio.rx.c1.stream", Value::from(1), UpdateClass::Cold, Some(now + 35_000_000)));
+    harness.step(now).unwrap();
+    harness.step(now + 40_000_000).unwrap();
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+    assert_eq!(harness.applied_of("radio.rx.c0.stream"), [(serde_json::json!(1), now + 30_000_000)]);
+    assert_eq!(harness.applied_of("radio.rx.c1.stream"), [(serde_json::json!(1), now + 40_000_000)]);
+    assert_eq!(harness.applied_of("radio.rx.s2.sample_rate_hz"), [(serde_json::json!(2_000_000.0), now + 30_000_000)]);
+    assert_eq!(harness.applied_of("radio.tx.s0.sample_rate_hz"), [(serde_json::json!(2_000_000.0), now + 40_000_000)]);
+    harness.step(now + 160_000_001).unwrap();
+    assert_eq!(harness.clocks_of("mock/rx/s0")[0].ended_at.unwrap().ticks_in(ROOT).unwrap(), now + 30_000_000);
+    let moved = harness.clocks_of("mock/rx/s1");
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].origin.ticks_in(ROOT).unwrap(), now + 135_000_000);
+    let late: Vec<i64> = harness.events().into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND)
+        .map(|event| event.payload["applied"]["ticks"].as_i64().unwrap()).collect();
+    assert_eq!(late, [now + 30_000_000, now + 40_000_000]);
+    assert!(harness.clocks_of("mock/rx/s2").is_empty());
+}
+
+#[test]
+fn mr_40_a_refused_move_applies_no_update_and_changes_no_manifest_or_clock() {
+    let constraints = [("radio.rx.c1.stream", eq(Scalar::from(1)))];
+    let mut harness = built(Layout { profile: "x3xx", id: "mock", rx: two(), tx: elements(&[]), selector: &[], constraints: &constraints, env: &[], ports: &["rx0", "rx1"] });
+    harness.arm_start(T0).unwrap();
+    let now = T0 + 2_100_001;
+    harness.step(now).unwrap();
+    let before_segments = harness.section("segments");
+    harness.push(update("radio.rx.c0.stream", Value::from(1), UpdateClass::Cold, Some(i64::MAX)));
+    harness.step(now + 1).unwrap();
+    let reasons = harness.rejected();
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert!(reasons[0].starts_with("RM-34: move of channel c0 from stream s0 to stream s1 was refused (Time("), "{reasons:?}");
+    assert!(harness.applied().is_empty());
+    assert_eq!(harness.section("segments"), before_segments);
+    let command_rejected: Vec<_> = harness.events().into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
+    assert_eq!(command_rejected.len(), 1);
+    let s0 = harness.clocks_of("mock/rx/s0");
+    let s1 = harness.clocks_of("mock/rx/s1");
+    assert_eq!(s0.len(), 1);
+    assert_eq!(s1.len(), 1);
+    assert!(s0[0].ended_at.is_none() && s1[0].ended_at.is_none());
+    let later = now + 10_000_000;
+    harness.push(update("radio.rx.c0.stream", Value::from(-1), UpdateClass::Cold, Some(later)));
+    harness.step(later).unwrap();
+    assert_eq!(harness.clocks_of("mock/rx/s0")[0].ended_at.unwrap().ticks_in(ROOT).unwrap(), later + 999);
+    assert!(harness.clocks_of("mock/rx/s1")[0].ended_at.is_none());
+}
+
+#[test]
+fn mr_40_a_move_to_and_from_a_linkless_receive_stream_never_publishes_there() {
+    let mut harness = built(Layout { profile: "ideal", id: "mock", rx: count(2), tx: count(0), selector: &[], constraints: &[], env: &[], ports: &["rx0"] });
+    harness.arm_start(0).unwrap();
+    harness.step(2_000_001).unwrap();
+    let move_out = 3_000_000;
+    harness.push(update("radio.rx.c0.stream", Value::from(1), UpdateClass::Cold, Some(move_out)));
+    harness.step(move_out).unwrap();
+    harness.step(move_out + 2_000_001).unwrap();
+    assert!(harness.clocks_of("mock/rx/s1").is_empty());
+    assert!(harness.clocks_of("mock/rx/s0")[0].ended_at.is_some());
+    harness.push(start_rx("mock/rx/s1", Some(move_out + 10_000_000)));
+    harness.step(move_out + 10_000_000).unwrap();
+    harness.step(move_out + 12_000_001).unwrap();
+    assert!(harness.clocks_of("mock/rx/s1").is_empty());
+    let move_back = 20_000_000;
+    harness.push(update("radio.rx.c0.stream", Value::from(0), UpdateClass::Cold, Some(move_back)));
+    harness.step(move_back).unwrap();
+    harness.step(move_back + 2_000_001).unwrap();
+    let source = harness.clocks_of("mock/rx/s0");
+    assert_eq!(source.len(), 2);
+    assert_eq!(source[1].origin.ticks_in(ROOT).unwrap(), move_back);
+    assert!(harness.clocks_of("mock/rx/s1").is_empty());
+    assert!(harness.section("segments").iter().all(|row| !(row["direction"] == "rx" && row["stream"] == 1)));
+    assert!(!harness.blocks("rx0").is_empty());
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_32_a_logical_transmit_channel_follows_its_move_to_another_stream() {
+    let constraints = [
+        ("radio.rx.c2.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c2.stream", eq(Scalar::from(1))),
+        ("radio.tx.c3.stream", eq(Scalar::from(0))),
+    ];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":2,"rx":"radio","rx_channel":2,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let (old_waveform, old_bytes) = waveform_values(&vec![(0.5, 0.0); 100]);
+    let new_values: Vec<(f32, f32)> = (0..100).flat_map(|_| [(0.0, 0.0), (0.25, 0.0), (0.0, 0.0)]).collect();
+    let (new_waveform, new_bytes) = waveform_values(&new_values);
+    let inputs = BTreeMap::from([(old_waveform.hash.clone(), old_bytes), (new_waveform.hash.clone(), new_bytes)]);
+    let mut harness = built_with_inputs(Layout { profile: "ideal", id: "mock", rx: count(3), tx: count(4), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"] }, inputs);
+    harness.arm_start(0).unwrap();
+    let old_domain = harness.clocks_of("mock/tx/s1")[0].domain;
+    harness.push(burst_with_waveform("mock/tx/s1", old_domain, 0, old_waveform));
+    harness.push(update("radio.tx.c2.stream", Value::from(0), UpdateClass::Cold, Some(1_000_000)));
+    harness.step(0).unwrap();
+    let new_domain = harness.clocks_of("mock/tx/s0").last().unwrap().domain;
+    harness.push(burst_with_waveform("mock/tx/s0", new_domain, 0, new_waveform));
+    harness.step(1).unwrap();
+    harness.step(2_000_001).unwrap();
+    let block = harness.blocks("rx0").into_iter().next().unwrap();
+    assert_eq!(block.header().channels, 2);
+    assert_eq!(block_sample(&block, 1, 0), (0.5, 0.0));
+    assert_eq!(block_sample(&block, 1, 1_000), (0.25, 0.0));
+    let segments = harness.section("segments");
+    assert!(segments.iter().any(|row| row["direction"] == "tx" && row["stream"] == 0 && row["channels"] == serde_json::json!([0, 3])));
+    assert!(segments.iter().any(|row| row["direction"] == "tx" && row["stream"] == 0 && row["channels"] == serde_json::json!([0, 2, 3])));
+    assert!(harness.rejected().is_empty());
+}
+
+#[test]
+fn mr_32_a_layout_transmit_path_delay_silences_samples_before_the_antenna() {
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(2_000_000.0).unwrap())),
+    ];
+    let env = [
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 100]);
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]),
+        selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    assert_eq!(harness.mock.instance().tree.capabilities[&key("radio.tx.c0.path_delay_samples")], ezsdr_kernel::spec::CapabilityValue::One { value: Scalar::from(45) });
+    harness.arm_start(T0).unwrap();
+    harness.step(T0 + 2_100_001).unwrap();
+    let now = T0 + 10_000_000;
+    harness.push(update("radio.tx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(now)));
+    harness.step(now).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0").last().unwrap().domain;
+    let origin = harness.clocks_of("mock/tx/s0").last().unwrap().origin.ticks_in(ROOT).unwrap();
+    harness.push(burst_with_waveform("mock/tx/s0", tx, 0, waveform));
+    harness.step(now).unwrap();
+    harness.step(origin + 1_000_001).unwrap();
+    assert_eq!(harness.section("bursts")[0]["target"]["ticks"], 0);
+    let rx = harness.clocks_of("mock/rx/s0").into_iter().next().unwrap();
+    let first = match harness.clocks.convert(TimePoint::new(ROOT, origin), rx.domain).unwrap() {
+        ezsdr_kernel::time::Converted::Exact { point } => point.ticks_in(rx.domain).unwrap(),
+        ezsdr_kernel::time::Converted::Inexact { .. } => panic!("the RX clock shares the TX segment's lattice"),
+    };
+    let block = harness.blocks("rx0").into_iter().find(|block| {
+        block.header().first_sample_time.domain() == rx.domain
+            && block.header().first_sample_time.ticks_in(rx.domain).unwrap() == first
+    }).expect("the RX stream publishes at the aligned TX origin");
+    assert_eq!(match harness.clocks.convert(block.header().first_sample_time, ROOT).unwrap() {
+        ezsdr_kernel::time::Converted::Exact { point } => point.ticks_in(ROOT).unwrap(),
+        ezsdr_kernel::time::Converted::Inexact { .. } => panic!("the RX sample is on the TX origin"),
+    }, origin);
+    for sample in 0..45 {
+        assert_eq!(block_sample(&block, 0, sample), (0.0, 0.0), "sample {sample} precedes the antenna arrival");
+    }
+    let (re, im) = block_sample(&block, 0, 45);
+    assert!((f64::from(re).hypot(f64::from(im)) - 0.5).abs() < 1e-6, "sample 45 is TX sample 0 at the antenna: {re}+{im}i");
+}
+
+#[test]
+fn mr_33_layout_gain_and_frequency_timelines_are_per_logical_channel() {
+    let constraints = [
+        ("radio.rx.c1.stream", eq(Scalar::from(1))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c1.stream", eq(Scalar::from(1))),
+    ];
+    let env = [("sim.channel", serde_json::json!({"couplings":[
+        {"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0},
+        {"tx":"radio","tx_channel":1,"rx":"radio","rx_channel":1,"gain_db":0.0,"delay_ns":0}
+    ]}))];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 100]);
+    let mut harness = built_with_inputs(Layout { profile: "ideal", id: "mock", rx: count(2), tx: count(2), selector: &[], constraints: &constraints, env: &env, ports: &["rx0", "rx1"] }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(0).unwrap();
+    let (tx0, tx1) = (harness.clocks_of("mock/tx/s0")[0].domain, harness.clocks_of("mock/tx/s1")[0].domain);
+    for (name, value) in [
+        ("radio.tx.c0.gain_db", 6.0), ("radio.rx.c0.gain_db", -6.0),
+        ("radio.tx.c0.frequency_hz", 100.0), ("radio.rx.c0.frequency_hz", 100.0),
+        ("radio.tx.c1.gain_db", 0.0), ("radio.rx.c1.gain_db", 6.0),
+        ("radio.tx.c1.frequency_hz", 200.0), ("radio.rx.c1.frequency_hz", 200.0),
+    ] {
+        harness.push(update(name, Value::num(value).unwrap(), UpdateClass::HardwareTimed, None));
+    }
+    harness.push(burst_with_waveform("mock/tx/s0", tx0, 0, waveform.clone()));
+    harness.push(burst_with_waveform("mock/tx/s1", tx1, 0, waveform));
+    harness.step(0).unwrap();
+    harness.step(2_000_001).unwrap();
+    let rx0 = harness.blocks("rx0").into_iter().next().unwrap();
+    let rx1 = harness.blocks("rx1").into_iter().next().unwrap();
+    let (r0, i0) = block_sample(&rx0, 0, 0);
+    let (r1, i1) = block_sample(&rx1, 0, 0);
+    assert!((f64::from(r0) - 0.5).abs() < 1e-6 && i0.abs() < 1e-6, "{r0}+{i0}i");
+    assert!((f64::from(r1) - 10f64.powf(6.0 / 20.0) * 0.5).abs() < 1e-6 && i1.abs() < 1e-6, "{r1}+{i1}i");
+    assert!(harness.rejected().is_empty());
+}
+
+#[test]
+fn mr_34_layout_mixed_boards_have_per_channel_timed_phase_behavior() {
+    let constraints = [
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c1.stream", eq(Scalar::from(1))),
+        ("radio.rx.c1.stream", eq(Scalar::from(0))),
+        ("radio.rx.c0.frequency_hz", eq(Scalar::try_from(1.0e9).unwrap())),
+        ("radio.tx.c0.frequency_hz", eq(Scalar::try_from(1.0e9).unwrap())),
+    ];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[
+            {"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0},
+            {"tx":"radio","tx_channel":1,"rx":"radio","rx_channel":1,"gain_db":0.0,"delay_ns":0}
+        ]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 10_000]);
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0", "0:B:basic_rx:0"]),
+        tx: elements(&["0:A:ubx:0", "0:B:basic_tx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    let (tx0, tx1) = (harness.clocks_of("mock/tx/s0")[0].domain, harness.clocks_of("mock/tx/s1")[0].domain);
+    harness.push(burst_with_waveform("mock/tx/s0", tx0, 2_000_000, waveform.clone()));
+    harness.push(burst_with_waveform("mock/tx/s1", tx1, 2_000_000, waveform));
+    harness.step(0).unwrap();
+    harness.step(T0 + 2_100_001).unwrap();
+    let mut rng = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let rx_ubx = phase(&mut rng);
+    let rx_basic = phase(&mut rng);
+    let tx_ubx = phase(&mut rng);
+    let tx_basic = phase(&mut rng);
+    let rx_ubx_timed = phase(&mut rng);
+    let rx_basic_timed = phase(&mut rng);
+    let tx_ubx_timed = phase(&mut rng);
+    let tx_basic_timed = phase(&mut rng);
+    let first = harness.blocks("rx0").into_iter().next().unwrap();
+    for (actual, expected) in [
+        (block_sample(&first, 0, 100), rotated(0.5, tx_ubx - rx_ubx)),
+        (block_sample(&first, 1, 100), rotated(0.5, tx_basic - rx_basic)),
+    ] {
+        assert!((actual.0 - expected.0).abs() < 1e-5 && (actual.1 - expected.1).abs() < 1e-5, "{actual:?} != {expected:?}");
+    }
+    let now = T0 + 3_000_000;
+    let timed = T0 + 5_000_000;
+    for (name, frequency) in [
+        ("radio.tx.c0.frequency_hz", 1.1e9), ("radio.rx.c0.frequency_hz", 1.1e9),
+        ("radio.tx.c1.frequency_hz", 10.0e6), ("radio.rx.c1.frequency_hz", 10.0e6),
+    ] {
+        harness.push(update(name, Value::num(frequency).unwrap(), UpdateClass::HardwareTimed, Some(timed)));
+    }
+    harness.step(now).unwrap();
+    harness.step(T0 + 8_000_001).unwrap();
+    let updated = harness.blocks("rx0").into_iter().find(|block| block.header().first_sample_time.ticks_in(block.header().first_sample_time.domain()).unwrap() == 6_000).unwrap();
+    for (actual, expected) in [
+        (block_sample(&updated, 0, 0), rotated(0.5, tx_ubx_timed - rx_ubx_timed)),
+        (block_sample(&updated, 1, 0), rotated(0.5, tx_basic_timed - rx_basic_timed)),
+    ] {
+        assert!((actual.0 - expected.0).abs() < 1e-5 && (actual.1 - expected.1).abs() < 1e-5, "{actual:?} != {expected:?}");
+    }
+    let segment = harness.section("segments").into_iter().find(|row| row["direction"] == "rx" && row["stream"] == 0 && row["channels"] == serde_json::json!([0, 1])).unwrap();
+    let coherence = segment["coherence"].as_array().unwrap();
+    assert_eq!(coherence.first().unwrap()["basis"], "none");
+    assert_eq!(coherence.first().unwrap()["valid"], false);
+    assert_eq!(coherence.last().unwrap()["at"]["ticks"], timed);
+    assert_eq!(coherence.last().unwrap()["basis"], "timed_tune");
+    assert_eq!(coherence.last().unwrap()["valid"], true);
+    assert!(harness.rejected().is_empty());
+}
+
+#[test]
+fn mr_34_a_cbx_layout_redraws_only_the_retuned_channel() {
+    let constraints = [
+        ("radio.rx.c1.stream", eq(Scalar::from(1))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c1.stream", eq(Scalar::from(1))),
+    ];
+    let env = [
+        ("sim.seed", serde_json::json!(19)),
+        ("sim.channel", serde_json::json!({"couplings":[
+            {"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0},
+            {"tx":"radio","tx_channel":1,"rx":"radio","rx_channel":1,"gain_db":0.0,"delay_ns":0}
+        ]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 10_000]);
+    let build = || built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:cbx:0", "0:B:cbx:0"]),
+        tx: elements(&["0:A:cbx:0", "0:B:cbx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0", "rx1"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes.clone())]));
+    let run = || {
+        let mut harness = build();
+        harness.arm_start(T0).unwrap();
+        let (tx0, tx1) = (harness.clocks_of("mock/tx/s0")[0].domain, harness.clocks_of("mock/tx/s1")[0].domain);
+        harness.push(burst_with_waveform("mock/tx/s0", tx0, 2_000_000, waveform.clone()));
+        harness.push(burst_with_waveform("mock/tx/s1", tx1, 2_000_000, waveform.clone()));
+        harness.step(0).unwrap();
+        harness.step(T0 + 2_100_001).unwrap();
+        let first0 = harness.blocks("rx0").into_iter().next().unwrap();
+        let first1 = harness.blocks("rx1").into_iter().next().unwrap();
+        let before = [block_sample(&first0, 0, 100), block_sample(&first1, 0, 100)];
+        let now = T0 + 3_000_000;
+        let timed = T0 + 5_000_000;
+        harness.push(update("radio.tx.c1.frequency_hz", Value::num(2.46e9).unwrap(), UpdateClass::HardwareTimed, Some(timed)));
+        harness.push(update("radio.rx.c1.frequency_hz", Value::num(2.46e9).unwrap(), UpdateClass::HardwareTimed, Some(timed)));
+        harness.step(now).unwrap();
+        harness.step(T0 + 8_000_001).unwrap();
+        let updated0 = harness.blocks("rx0").into_iter().find(|block| block.header().first_sample_time.ticks_in(block.header().first_sample_time.domain()).unwrap() == 6_000).unwrap();
+        let updated1 = harness.blocks("rx1").into_iter().find(|block| block.header().first_sample_time.ticks_in(block.header().first_sample_time.domain()).unwrap() == 6_000).unwrap();
+        let after = [block_sample(&updated0, 0, 0), block_sample(&updated1, 0, 0)];
+        (before, after, harness.mock.instance().sections.clone(), harness.section("segments"), harness.events())
+    };
+    let (before, after, sections, segments, events) = run();
+    assert_eq!(run(), (before, after, sections.clone(), segments.clone(), events.clone()));
+    let mut lo = ezsdr_sim::SimRng::new(19, "mock/lo");
+    let rx0_initial = phase(&mut lo);
+    let rx1_initial = phase(&mut lo);
+    let tx0_initial = phase(&mut lo);
+    let tx1_initial = phase(&mut lo);
+    for (actual, expected) in [
+        (before[0], rotated(0.5, tx0_initial - rx0_initial)),
+        (before[1], rotated(0.5, tx1_initial - rx1_initial)),
+    ] {
+        assert!((actual.0 - expected.0).abs() < 1e-5 && (actual.1 - expected.1).abs() < 1e-5, "{actual:?} != {expected:?}");
+    }
+    let mut retune = ezsdr_sim::SimRng::new(19, "mock/lo/retune");
+    let tx1_tuned = phase(&mut retune);
+    let rx1_tuned = phase(&mut retune);
+    for (actual, expected) in [
+        (after[0], rotated(0.5, tx0_initial - rx0_initial)),
+        (after[1], rotated(0.5, tx1_tuned - rx1_tuned)),
+    ] {
+        assert!((actual.0 - expected.0).abs() < 1e-5 && (actual.1 - expected.1).abs() < 1e-5, "{actual:?} != {expected:?}");
+    }
+    let rx1 = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 1 && row["channels"] == serde_json::json!([1])).unwrap();
+    assert_eq!(rx1["phase_behavior"], serde_json::json!(["random"]));
+    let coherence = rx1["coherence"].as_array().unwrap();
+    assert_eq!(coherence.last().unwrap()["basis"], "none");
+    assert_eq!(coherence.last().unwrap()["valid"], false);
+}
+
+#[test]
+fn mr_34_ideal_layout_channels_are_deterministic_and_reproduce_with_the_seed() {
+    let constraints = [("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(42)),
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.25, 0.0); 100]);
+    let build = || built_with_inputs(Layout { profile: "ideal", id: "mock", rx: count(1), tx: count(1), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"] }, BTreeMap::from([(waveform.hash.clone(), bytes.clone())]));
+    let run = |mut harness: Harness| {
+        harness.arm_start(0).unwrap();
+        let domain = harness.clocks_of("mock/tx/s0")[0].domain;
+        harness.push(burst_with_waveform("mock/tx/s0", domain, 0, waveform.clone()));
+        harness.step(0).unwrap();
+        harness.step(1_999_001).unwrap();
+        let block = harness.blocks("rx0").into_iter().next().unwrap();
+        (block.header().clone(), block.host_bytes().unwrap().to_vec(), harness.mock.instance().sections.clone(), harness.events())
+    };
+    let left = run(build());
+    let right = run(build());
+    assert_eq!(left, right);
+    assert_eq!((f32::from_le_bytes(left.1[0..4].try_into().unwrap()), f32::from_le_bytes(left.1[4..8].try_into().unwrap())), (0.25, 0.0));
+}
+
+/// The sample index of `clock` at root instant `tick`.
+fn sample_of(clock: &SampleClockRecord, tick: i64) -> i64 {
+    let ratio = clock.root_ticks_per_tick;
+    i64::try_from(i128::from(tick - clock.origin.ticks_in(ROOT).unwrap()) * i128::from(ratio.den()) / i128::from(ratio.num())).unwrap()
+}
+
+/// The channel-0 sample a block of `clock` carries at root instant `tick`.
+fn heard(blocks: &[BlockRef], clock: &SampleClockRecord, tick: i64) -> (f32, f32) {
+    heard_channel(blocks, clock, tick, 0)
+}
+
+/// The sample of block channel `channel` a block of `clock` carries at root instant `tick`.
+fn heard_channel(blocks: &[BlockRef], clock: &SampleClockRecord, tick: i64, channel: usize) -> (f32, f32) {
+    let index = sample_of(clock, tick);
+    let block = blocks.iter().find(|block| {
+        let header = block.header();
+        header.first_sample_time.domain() == clock.domain && {
+            let first = header.first_sample_time.ticks_in(clock.domain).unwrap();
+            (first..first + header.len as i64).contains(&index)
+        }
+    }).expect("a block holds the instant");
+    let first = block.header().first_sample_time.ticks_in(clock.domain).unwrap();
+    block_sample(block, channel, (index - first) as usize)
+}
+
+#[track_caller]
+fn assert_near(actual: (f32, f32), expected: (f32, f32)) {
+    assert!((actual.0 - expected.0).abs() < 1e-5 && (actual.1 - expected.1).abs() < 1e-5, "{actual:?} != {expected:?}");
+}
+
+#[test]
+fn mr_34_a_layout_receive_entry_is_an_untimed_tune() {
+    // A UBX receive channel is timed-tuned, leaves its stream and comes back: its new segment
+    // is an untimed tune (`none`), coherent again only after the next timed tune.
+    let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 150_000]);
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    harness.push(burst_with_waveform("mock/tx/s0", tx, 2_000_000, waveform));
+    harness.step(0).unwrap();
+    harness.step(T0 + 2_100_001).unwrap();
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let (rx_phase, tx_phase, rx_timed) = (phase(&mut lo), phase(&mut lo), phase(&mut lo));
+    let mut retune = ezsdr_sim::SimRng::new(7, "mock/lo/retune");
+    let rx_entry = phase(&mut retune);
+    assert_ne!(rx_entry, rx_timed);
+    let first = harness.clocks_of("mock/rx/s0")[0].clone();
+    harness.push(update("radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+    harness.step(T0 + 3_000_000).unwrap();
+    harness.push(update("radio.rx.c0.stream", Value::from(-1), UpdateClass::Cold, Some(T0 + 6_000_000)));
+    harness.step(T0 + 5_000_000).unwrap();
+    harness.step(T0 + 6_000_001).unwrap();
+    harness.push(update("radio.rx.c0.stream", Value::from(0), UpdateClass::Cold, Some(T0 + 8_000_000)));
+    harness.step(T0 + 7_000_000).unwrap();
+    harness.step(T0 + 8_000_001).unwrap();
+    harness.push(update("radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 104_000_000)));
+    harness.step(T0 + 100_000_000).unwrap();
+    let entered = harness.clocks_of("mock/rx/s0").last().unwrap().clone();
+    let origin = entered.origin.ticks_in(ROOT).unwrap();
+    harness.step(T0 + 104_000_001).unwrap();
+    harness.step(T0 + 108_000_001).unwrap();
+    let blocks = harness.blocks("rx0");
+    assert_near(heard(&blocks, &first, T0 + 100_000), rotated(0.5, tx_phase - rx_phase));
+    assert_near(heard(&blocks, &first, T0 + 5_500_000), rotated(0.5, tx_phase - rx_timed));
+    assert_near(heard(&blocks, &entered, origin + 100_000), rotated(0.5, tx_phase - rx_entry));
+    assert_near(heard(&blocks, &entered, T0 + 106_000_000), rotated(0.5, tx_phase - rx_timed));
+    let segments = harness.section("segments");
+    let entry_row = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 0 && row["origin"]["ticks"] == origin).unwrap();
+    let coherence = entry_row["coherence"].as_array().unwrap();
+    assert_eq!(coherence.first().unwrap()["basis"], "none");
+    assert_eq!(coherence.first().unwrap()["valid"], false);
+    assert_eq!(coherence.last().unwrap()["at"]["ticks"], T0 + 104_000_000);
+    assert_eq!(coherence.last().unwrap()["basis"], "timed_tune");
+    assert_eq!(coherence.last().unwrap()["valid"], true);
+    let first_row = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 0 && row["origin"]["ticks"] == T0).unwrap();
+    let first_coherence = first_row["coherence"].as_array().unwrap();
+    assert_eq!(first_coherence.last().unwrap()["at"]["ticks"], T0 + 5_000_000);
+    assert_eq!(first_coherence.last().unwrap()["basis"], "timed_tune");
+    assert_eq!(first_coherence.last().unwrap()["valid"], true);
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_untimed_tune_follows_a_timed_tune_at_its_instant() {
+    // The receive entry above, with a timed frequency update at the re-entry's origin: the
+    // untimed tune is taken after that update, so the channel carries the untimed phase and is
+    // not coherent there (MR-34). A stream's origin is known only once it has begun, so the
+    // scenario runs twice: once to read the origin, once with the update at it.
+    let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let run = |at_origin: Option<i64>| {
+        let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 150_000]);
+        let mut harness = built_with_inputs(Layout {
+            profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+        }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+        harness.arm_start(T0).unwrap();
+        let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+        harness.push(burst_with_waveform("mock/tx/s0", tx, 2_000_000, waveform));
+        harness.step(0).unwrap();
+        harness.step(T0 + 2_100_001).unwrap();
+        harness.push(update("radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+        harness.step(T0 + 3_000_000).unwrap();
+        harness.push(update("radio.rx.c0.stream", Value::from(-1), UpdateClass::Cold, Some(T0 + 6_000_000)));
+        harness.step(T0 + 5_000_000).unwrap();
+        harness.step(T0 + 6_000_001).unwrap();
+        harness.push(update("radio.rx.c0.stream", Value::from(0), UpdateClass::Cold, Some(T0 + 8_000_000)));
+        harness.step(T0 + 7_000_000).unwrap();
+        harness.step(T0 + 8_000_001).unwrap();
+        if let Some(origin) = at_origin {
+            harness.push(update("radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(origin)));
+        }
+        harness.step(T0 + 20_000_000).unwrap();
+        harness.push(update("radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 104_000_000)));
+        harness.step(T0 + 100_000_000).unwrap();
+        harness.step(T0 + 104_000_001).unwrap();
+        harness.step(T0 + 108_000_001).unwrap();
+        let entered = harness.clocks_of("mock/rx/s0").last().unwrap().clone();
+        (entered.origin.ticks_in(ROOT).unwrap(), harness, entered)
+    };
+    let (origin, _, _) = run(None);
+    let (rerun, harness, entered) = run(Some(origin));
+    assert_eq!(rerun, origin);
+    assert!(harness.applied().iter().any(|(key, at)| key == "radio.rx.c0.frequency_hz" && *at == origin));
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let _rx_phase = phase(&mut lo);
+    let tx_phase = phase(&mut lo);
+    let rx_timed = phase(&mut lo);
+    let rx_entry = phase(&mut ezsdr_sim::SimRng::new(7, "mock/lo/retune"));
+    assert_ne!(rx_entry, rx_timed);
+    let blocks = harness.blocks("rx0");
+    assert_near(heard(&blocks, &entered, origin + 100_000), rotated(0.5, tx_phase - rx_entry));
+    assert_near(heard(&blocks, &entered, T0 + 106_000_000), rotated(0.5, tx_phase - rx_timed));
+    let segments = harness.section("segments");
+    let entry_row = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 0 && row["origin"]["ticks"] == origin).unwrap();
+    let coherence = entry_row["coherence"].as_array().unwrap();
+    let at_origin = coherence.iter().rfind(|entry| entry["at"]["ticks"] == origin).unwrap();
+    assert_eq!(at_origin["basis"], "none");
+    assert_eq!(at_origin["valid"], false);
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_transmit_entry_is_an_untimed_tune() {
+    // The transmit side of the entry above: the channel leaves transmit stream 0 and comes
+    // back on a new clock, and its first burst there radiates the untimed phase.
+    let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 150_000]);
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    harness.push(burst_with_waveform("mock/tx/s0", tx, 2_000_000, waveform.clone()));
+    harness.step(0).unwrap();
+    harness.step(T0 + 2_100_001).unwrap();
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let (rx_phase, tx_phase, _, tx_timed) = (phase(&mut lo), phase(&mut lo), phase(&mut lo), phase(&mut lo));
+    let mut retune = ezsdr_sim::SimRng::new(7, "mock/lo/retune");
+    let tx_entry = phase(&mut retune);
+    assert_ne!(tx_entry, tx_timed);
+    let first = harness.clocks_of("mock/rx/s0")[0].clone();
+    harness.push(update("radio.tx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+    harness.step(T0 + 3_000_000).unwrap();
+    harness.push(update("radio.tx.c0.stream", Value::from(-1), UpdateClass::Cold, Some(T0 + 6_000_000)));
+    harness.step(T0 + 5_000_000).unwrap();
+    harness.step(T0 + 6_000_001).unwrap();
+    harness.push(update("radio.tx.c0.stream", Value::from(0), UpdateClass::Cold, Some(T0 + 8_000_000)));
+    harness.step(T0 + 7_000_000).unwrap();
+    let entered = harness.clocks_of("mock/tx/s0").last().unwrap().clone();
+    let origin = entered.origin.ticks_in(ROOT).unwrap();
+    harness.push(burst_with_waveform("mock/tx/s0", entered.domain, sample_of(&entered, T0 + 80_000_000), waveform));
+    harness.step(T0 + 8_000_001).unwrap();
+    harness.push(update("radio.tx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 104_000_000)));
+    harness.step(T0 + 100_000_000).unwrap();
+    harness.step(T0 + 104_000_001).unwrap();
+    harness.step(T0 + 108_000_001).unwrap();
+    let blocks = harness.blocks("rx0");
+    assert_near(heard(&blocks, &first, T0 + 100_000), rotated(0.5, tx_phase - rx_phase));
+    assert_near(heard(&blocks, &first, T0 + 5_500_000), rotated(0.5, tx_timed - rx_phase));
+    assert_near(heard(&blocks, &first, T0 + 80_500_000), rotated(0.5, tx_entry - rx_phase));
+    assert_near(heard(&blocks, &first, T0 + 106_000_000), rotated(0.5, tx_timed - rx_phase));
+    let segments = harness.section("segments");
+    let entry_row = segments.iter().find(|row| row["direction"] == "tx" && row["stream"] == 0 && row["origin"]["ticks"] == origin).unwrap();
+    let coherence = entry_row["coherence"].as_array().unwrap();
+    assert_eq!(coherence.first().unwrap()["basis"], "none");
+    assert_eq!(coherence.first().unwrap()["valid"], false);
+    assert_eq!(coherence.last().unwrap()["at"]["ticks"], T0 + 104_000_000);
+    assert_eq!(coherence.last().unwrap()["basis"], "timed_tune");
+    assert_eq!(coherence.last().unwrap()["valid"], true);
+    let first_row = segments.iter().find(|row| row["direction"] == "tx" && row["stream"] == 0 && row["origin"]["ticks"] == 0).unwrap();
+    let first_coherence = first_row["coherence"].as_array().unwrap();
+    assert_eq!(first_coherence.last().unwrap()["at"]["ticks"], T0 + 5_000_000);
+    assert_eq!(first_coherence.last().unwrap()["basis"], "timed_tune");
+    assert_eq!(first_coherence.last().unwrap()["valid"], true);
+}
+
+#[test]
+fn mr_34_a_layout_receive_move_is_an_untimed_tune_of_the_moved_channel() {
+    // Channel 0 moves from receive stream 0 to stream 1, which holds channel 1: the origin of
+    // stream 1's new segment is an untimed tune of both its channels, channel 0 first (MR-34).
+    let constraints = [("radio.rx.c1.stream", eq(Scalar::from(1))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[
+            {"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0},
+            {"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":1,"gain_db":0.0,"delay_ns":0}
+        ]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 150_000]);
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: two(), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0", "rx1"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    harness.push(burst_with_waveform("mock/tx/s0", tx, 2_000_000, waveform));
+    harness.step(0).unwrap();
+    harness.step(T0 + 2_100_001).unwrap();
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let (_, _, tx_phase, rx0_timed, _, _) = (phase(&mut lo), phase(&mut lo), phase(&mut lo), phase(&mut lo), phase(&mut lo), phase(&mut lo));
+    let mut retune = ezsdr_sim::SimRng::new(7, "mock/lo/retune");
+    let (rx0_moved, rx1_moved) = (phase(&mut retune), phase(&mut retune));
+    assert_ne!(rx0_moved, rx0_timed);
+    let source = harness.clocks_of("mock/rx/s0")[0].clone();
+    harness.push(update("radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+    harness.step(T0 + 3_000_000).unwrap();
+    harness.push(update("radio.rx.c0.stream", Value::from(1), UpdateClass::Cold, Some(T0 + 6_000_000)));
+    harness.step(T0 + 5_000_000).unwrap();
+    harness.step(T0 + 6_000_001).unwrap();
+    harness.push(update("radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 104_000_000)));
+    harness.push(update("radio.rx.c1.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 104_000_000)));
+    harness.step(T0 + 100_000_000).unwrap();
+    assert_eq!(harness.clocks_of("mock/rx/s1").len(), 2);
+    let moved = harness.clocks_of("mock/rx/s1").last().unwrap().clone();
+    let origin = moved.origin.ticks_in(ROOT).unwrap();
+    harness.step(T0 + 104_000_001).unwrap();
+    harness.step(T0 + 108_000_001).unwrap();
+    let blocks0 = harness.blocks("rx0");
+    let blocks1 = harness.blocks("rx1");
+    assert_near(heard(&blocks0, &source, T0 + 5_500_000), rotated(0.5, tx_phase - rx0_timed));
+    assert_near(heard(&blocks1, &moved, origin + 100_000), rotated(0.5, tx_phase - rx0_moved));
+    assert_near(heard_channel(&blocks1, &moved, origin + 100_000, 1), rotated(0.5, tx_phase - rx1_moved));
+    assert_near(heard(&blocks1, &moved, T0 + 106_000_000), rotated(0.5, tx_phase - rx0_timed));
+    let segments = harness.section("segments");
+    let source_row = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 0 && row["origin"]["ticks"] == T0).unwrap();
+    assert_eq!(source_row["ended_at"]["ticks"], T0 + 6_000_000);
+    assert!(source_row["coherence"].as_array().unwrap().iter().all(|entry| entry["at"]["ticks"].as_i64().unwrap() <= T0 + 6_000_000));
+    assert_eq!(source_row["coherence"].as_array().unwrap().last().unwrap()["basis"], "timed_tune");
+    let moved_row = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 1 && row["origin"]["ticks"] == origin).unwrap();
+    assert_eq!(moved_row["channels"], serde_json::json!([0, 1]));
+    let coherence = moved_row["coherence"].as_array().unwrap();
+    assert_eq!(coherence.first().unwrap()["basis"], "none");
+    assert_eq!(coherence.first().unwrap()["valid"], false);
+    assert_eq!(coherence.last().unwrap()["basis"], "timed_tune");
+    assert_eq!(coherence.last().unwrap()["valid"], true);
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_stream_enable_is_an_untimed_tune_of_its_channels() {
+    // A receive stream stopped and started again (`start_rx`) is enabled: its channel is
+    // retuned untimed, as a channel entering the stream is.
+    let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 150_000]);
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    harness.push(burst_with_waveform("mock/tx/s0", tx, 2_000_000, waveform));
+    harness.step(0).unwrap();
+    harness.step(T0 + 2_100_001).unwrap();
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let (_, tx_phase, rx_timed) = (phase(&mut lo), phase(&mut lo), phase(&mut lo));
+    let mut retune = ezsdr_sim::SimRng::new(7, "mock/lo/retune");
+    let rx_enabled = phase(&mut retune);
+    let first = harness.clocks_of("mock/rx/s0")[0].clone();
+    harness.push(update("radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+    harness.step(T0 + 3_000_000).unwrap();
+    harness.push(stop("mock/rx/s0"));
+    harness.step(T0 + 6_000_000).unwrap();
+    harness.push(start_rx("mock/rx/s0", Some(T0 + 8_000_000)));
+    harness.step(T0 + 7_000_000).unwrap();
+    harness.step(T0 + 8_000_001).unwrap();
+    harness.push(update("radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 104_000_000)));
+    harness.step(T0 + 100_000_000).unwrap();
+    assert_eq!(harness.clocks_of("mock/rx/s0").len(), 2);
+    let enabled = harness.clocks_of("mock/rx/s0").last().unwrap().clone();
+    let origin = enabled.origin.ticks_in(ROOT).unwrap();
+    harness.step(T0 + 104_000_001).unwrap();
+    harness.step(T0 + 108_000_001).unwrap();
+    let blocks = harness.blocks("rx0");
+    assert_near(heard(&blocks, &first, T0 + 5_500_000), rotated(0.5, tx_phase - rx_timed));
+    assert_near(heard(&blocks, &enabled, origin + 100_000), rotated(0.5, tx_phase - rx_enabled));
+    assert_near(heard(&blocks, &enabled, T0 + 106_000_000), rotated(0.5, tx_phase - rx_timed));
+    let segments = harness.section("segments");
+    let row = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 0 && row["origin"]["ticks"] == origin).unwrap();
+    let coherence = row["coherence"].as_array().unwrap();
+    assert_eq!(coherence.first().unwrap()["basis"], "none");
+    assert_eq!(coherence.first().unwrap()["valid"], false);
+    assert_eq!(coherence.last().unwrap()["at"]["ticks"], T0 + 104_000_000);
+    assert_eq!(coherence.last().unwrap()["basis"], "timed_tune");
+    assert_eq!(coherence.last().unwrap()["valid"], true);
+}
+
+#[test]
+fn mr_34_a_layout_deterministic_channel_keeps_its_phase_and_coherence_through_entry() {
+    // An `ideal` channel is deterministic: an entry takes no untimed phase and stays coherent.
+    let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.25, 0.0); 100_000]);
+    let mut harness = built_with_inputs(Layout { profile: "ideal", id: "mock", rx: count(1), tx: count(1), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"] }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(0).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    harness.push(burst_with_waveform("mock/tx/s0", tx, 0, waveform));
+    harness.step(0).unwrap();
+    harness.step(2_000_001).unwrap();
+    let first = harness.clocks_of("mock/rx/s0")[0].clone();
+    harness.push(update("radio.rx.c0.stream", Value::from(-1), UpdateClass::Cold, Some(6_000_000)));
+    harness.step(5_000_000).unwrap();
+    harness.step(6_000_001).unwrap();
+    harness.push(update("radio.rx.c0.stream", Value::from(0), UpdateClass::Cold, Some(8_000_000)));
+    harness.step(7_000_000).unwrap();
+    harness.step(8_000_001).unwrap();
+    harness.step(30_000_000).unwrap();
+    let entered = harness.clocks_of("mock/rx/s0").last().unwrap().clone();
+    let origin = entered.origin.ticks_in(ROOT).unwrap();
+    let blocks = harness.blocks("rx0");
+    assert_eq!(heard(&blocks, &first, 100_000), (0.25, 0.0));
+    assert_eq!(heard(&blocks, &entered, origin + 100_000), (0.25, 0.0));
+    let segments = harness.section("segments");
+    let row = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 0 && row["origin"]["ticks"] == origin).unwrap();
+    let coherence = row["coherence"].as_array().unwrap();
+    assert_eq!(coherence.first().unwrap()["basis"], "deterministic");
+    assert_eq!(coherence.first().unwrap()["valid"], true);
+}
+
+#[test]
+fn mr_34_a_layout_rate_change_is_an_untimed_tune() {
+    // A stream's rate change begins a new segment, and its origin is an untimed tune of the channel
+    // it keeps, though that channel was in the stream all along (MR-34).
+    let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 150_000]);
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    harness.push(burst_with_waveform("mock/tx/s0", tx, 2_000_000, waveform));
+    harness.step(0).unwrap();
+    harness.step(T0 + 2_100_001).unwrap();
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let (rx_phase, tx_phase, rx_timed) = (phase(&mut lo), phase(&mut lo), phase(&mut lo));
+    let changed_phase = phase(&mut ezsdr_sim::SimRng::new(7, "mock/lo/retune"));
+    assert_ne!(changed_phase, rx_timed);
+    let first = harness.clocks_of("mock/rx/s0")[0].clone();
+    harness.push(update("radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+    harness.step(T0 + 3_000_000).unwrap();
+    harness.push(update("radio.rx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(T0 + 7_000_000)));
+    harness.step(T0 + 5_000_000).unwrap();
+    harness.step(T0 + 7_000_001).unwrap();
+    harness.step(T0 + 100_000_000).unwrap();
+    assert_eq!(harness.clocks_of("mock/rx/s0").len(), 2);
+    let changed = harness.clocks_of("mock/rx/s0").last().unwrap().clone();
+    let origin = changed.origin.ticks_in(ROOT).unwrap();
+    harness.step(T0 + 106_000_000).unwrap();
+    let blocks = harness.blocks("rx0");
+    assert_near(heard(&blocks, &first, T0 + 100_000), rotated(0.5, tx_phase - rx_phase));
+    assert_near(heard(&blocks, &first, T0 + 5_500_000), rotated(0.5, tx_phase - rx_timed));
+    assert_near(heard(&blocks, &changed, origin + 100_000), rotated(0.5, tx_phase - changed_phase));
+    let segments = harness.section("segments");
+    let row = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 0 && row["origin"]["ticks"] == origin).unwrap();
+    let coherence = row["coherence"].as_array().unwrap();
+    assert_eq!(coherence.first().unwrap()["basis"], "none");
+    assert_eq!(coherence.first().unwrap()["valid"], false);
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_move_out_is_an_untimed_tune_of_the_channels_left_behind() {
+    // Channel 0 leaves receive stream 0, which keeps channel 2. Both streams' new segments begin
+    // at one origin: stream 0's is an untimed tune of channel 2, drawn first, and stream 1's, which
+    // takes channel 0, draws after it (MR-34: streams in number order at one origin).
+    let ten_mhz = eq(Scalar::try_from(10.0e6).unwrap());
+    let constraints = [
+        ("radio.rx.c0.frequency_hz", ten_mhz.clone()), ("radio.rx.c1.stream", eq(Scalar::from(1))), ("radio.rx.c2.frequency_hz", ten_mhz.clone()),
+        ("radio.rx.c2.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.frequency_hz", ten_mhz),
+    ];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[
+            {"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0},
+            {"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":2,"gain_db":0.0,"delay_ns":0}
+        ]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 150_000]);
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: mixed(), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0", "rx1"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    harness.push(burst_with_waveform("mock/tx/s0", tx, 2_000_000, waveform));
+    harness.step(0).unwrap();
+    harness.step(T0 + 2_100_001).unwrap();
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let initial: Vec<f64> = (0..4).map(|_| phase(&mut lo)).collect();
+    let timed: Vec<f64> = (0..4).map(|_| phase(&mut lo)).collect();
+    let tx_phase = initial[3];
+    let mut retune = ezsdr_sim::SimRng::new(7, "mock/lo/retune");
+    let (left_phase, moved_phase) = (phase(&mut retune), phase(&mut retune));
+    assert_ne!(left_phase, timed[2]);
+    let source = harness.clocks_of("mock/rx/s0")[0].clone();
+    harness.push(update("radio.rx.c2.frequency_hz", Value::num(10.0e6).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+    harness.step(T0 + 3_000_000).unwrap();
+    harness.push(update("radio.rx.c0.stream", Value::from(1), UpdateClass::Cold, Some(T0 + 6_000_000)));
+    harness.step(T0 + 5_000_000).unwrap();
+    harness.step(T0 + 6_000_001).unwrap();
+    harness.step(T0 + 100_000_000).unwrap();
+    assert_eq!(harness.clocks_of("mock/rx/s0").len(), 2);
+    let left = harness.clocks_of("mock/rx/s0").last().unwrap().clone();
+    let origin = left.origin.ticks_in(ROOT).unwrap();
+    let moved = harness.clocks_of("mock/rx/s1").last().unwrap().clone();
+    assert_eq!(moved.origin.ticks_in(ROOT).unwrap(), origin);
+    harness.step(T0 + 106_000_000).unwrap();
+    let blocks0 = harness.blocks("rx0");
+    let blocks1 = harness.blocks("rx1");
+    assert_near(heard(&blocks0, &left, origin + 100_000), rotated(0.5, tx_phase - left_phase));
+    assert_near(heard(&blocks1, &moved, origin + 100_000), rotated(0.5, tx_phase - moved_phase));
+    assert_near(heard(&blocks0, &source, T0 + 5_500_000), rotated(0.5, tx_phase - initial[0]));
+    let segments = harness.section("segments");
+    let row = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 0 && row["origin"]["ticks"] == origin).unwrap();
+    assert_eq!(row["channels"], serde_json::json!([2]));
+    let coherence = row["coherence"].as_array().unwrap();
+    assert_eq!(coherence.first().unwrap()["basis"], "none");
+    assert_eq!(coherence.first().unwrap()["valid"], false);
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_cbx_layout_entry_draws_a_fresh_phase() {
+    // A `random` channel is never coherent: its entry draws a phase of its own, not the one its
+    // last frequency tune drew.
+    let two_ghz = eq(Scalar::try_from(2.0e9).unwrap());
+    let constraints = [
+        ("radio.rx.c0.frequency_hz", two_ghz.clone()), ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.frequency_hz", two_ghz), ("radio.tx.c0.stream", eq(Scalar::from(0))),
+    ];
+    let env = [
+        ("sim.seed", serde_json::json!(19)),
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 150_000]);
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:cbx:0"]), tx: elements(&["0:A:cbx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    harness.push(burst_with_waveform("mock/tx/s0", tx, 2_000_000, waveform));
+    harness.step(0).unwrap();
+    harness.step(T0 + 2_100_001).unwrap();
+    let mut lo = ezsdr_sim::SimRng::new(19, "mock/lo");
+    let (rx_initial, tx_phase) = (phase(&mut lo), phase(&mut lo));
+    let mut retune = ezsdr_sim::SimRng::new(19, "mock/lo/retune");
+    let (tuned, entered_phase) = (phase(&mut retune), phase(&mut retune));
+    assert_ne!(tuned, entered_phase);
+    let first = harness.clocks_of("mock/rx/s0")[0].clone();
+    harness.push(update("radio.rx.c0.frequency_hz", Value::num(2.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+    harness.step(T0 + 3_000_000).unwrap();
+    harness.push(update("radio.rx.c0.stream", Value::from(-1), UpdateClass::Cold, Some(T0 + 6_000_000)));
+    harness.step(T0 + 5_000_000).unwrap();
+    harness.step(T0 + 6_000_001).unwrap();
+    harness.push(update("radio.rx.c0.stream", Value::from(0), UpdateClass::Cold, Some(T0 + 8_000_000)));
+    harness.step(T0 + 7_000_000).unwrap();
+    harness.step(T0 + 8_000_001).unwrap();
+    harness.step(T0 + 100_000_000).unwrap();
+    let entered = harness.clocks_of("mock/rx/s0").last().unwrap().clone();
+    let origin = entered.origin.ticks_in(ROOT).unwrap();
+    harness.step(T0 + 106_000_000).unwrap();
+    let blocks = harness.blocks("rx0");
+    assert_near(heard(&blocks, &first, T0 + 100_000), rotated(0.5, tx_phase - rx_initial));
+    assert_near(heard(&blocks, &first, T0 + 5_500_000), rotated(0.5, tx_phase - tuned));
+    assert_near(heard(&blocks, &entered, origin + 100_000), rotated(0.5, tx_phase - entered_phase));
+    let segments = harness.section("segments");
+    let row = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 0 && row["origin"]["ticks"] == origin).unwrap();
+    let coherence = row["coherence"].as_array().unwrap();
+    assert_eq!(coherence.first().unwrap()["basis"], "none");
+    assert_eq!(coherence.first().unwrap()["valid"], false);
+}
+
+#[test]
+fn mr_34_a_layout_unlinked_receive_stream_takes_no_untimed_tune() {
+    // Receive stream 1 has no link and holds channel 1. Its enable takes no untimed tune, so
+    // the enable of stream 0 after it, which retunes channel 0 untimed, is the first draw of
+    // the retune stream.
+    let constraints = [("radio.rx.c1.stream", eq(Scalar::from(1))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 150_000]);
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: two(), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    harness.push(burst_with_waveform("mock/tx/s0", tx, 2_000_000, waveform));
+    harness.step(0).unwrap();
+    harness.step(T0 + 2_100_001).unwrap();
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let (_, _, tx_phase) = (phase(&mut lo), phase(&mut lo), phase(&mut lo));
+    let mut retune = ezsdr_sim::SimRng::new(7, "mock/lo/retune");
+    let enabled = phase(&mut retune);
+    harness.push(start_rx("mock/rx/s1", Some(T0 + 3_000_000)));
+    harness.step(T0 + 3_000_000).unwrap();
+    harness.push(stop("mock/rx/s0"));
+    harness.step(T0 + 6_000_000).unwrap();
+    harness.push(start_rx("mock/rx/s0", Some(T0 + 8_000_000)));
+    harness.step(T0 + 7_000_000).unwrap();
+    harness.step(T0 + 8_000_001).unwrap();
+    harness.step(T0 + 100_000_000).unwrap();
+    assert_eq!(harness.clocks_of("mock/rx/s0").len(), 2);
+    let restarted = harness.clocks_of("mock/rx/s0").last().unwrap().clone();
+    let origin = restarted.origin.ticks_in(ROOT).unwrap();
+    harness.step(T0 + 106_000_000).unwrap();
+    let blocks = harness.blocks("rx0");
+    assert_near(heard(&blocks, &restarted, origin + 100_000), rotated(0.5, tx_phase - enabled));
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_deterministic_transmit_entry_keeps_phase_zero() {
+    // The transmit side of the `ideal` entry: a deterministic transmit channel that leaves its
+    // stream and comes back radiates with zero phase.
+    let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.25, 0.0); 100_000]);
+    let mut harness = built_with_inputs(Layout { profile: "ideal", id: "mock", rx: count(1), tx: count(1), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"] }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(0).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    harness.push(burst_with_waveform("mock/tx/s0", tx, 0, waveform.clone()));
+    harness.step(0).unwrap();
+    harness.step(2_000_001).unwrap();
+    let first = harness.clocks_of("mock/rx/s0")[0].clone();
+    harness.push(update("radio.tx.c0.stream", Value::from(-1), UpdateClass::Cold, Some(6_000_000)));
+    harness.step(5_000_000).unwrap();
+    harness.step(6_000_001).unwrap();
+    harness.push(update("radio.tx.c0.stream", Value::from(0), UpdateClass::Cold, Some(8_000_000)));
+    harness.step(7_000_000).unwrap();
+    let entered = harness.clocks_of("mock/tx/s0").last().unwrap().clone();
+    let origin = entered.origin.ticks_in(ROOT).unwrap();
+    harness.push(burst_with_waveform("mock/tx/s0", entered.domain, sample_of(&entered, 30_000_000), waveform));
+    harness.step(8_000_001).unwrap();
+    harness.step(40_000_000).unwrap();
+    let blocks = harness.blocks("rx0");
+    assert_eq!(heard(&blocks, &first, 100_000), (0.25, 0.0));
+    assert_eq!(heard(&blocks, &first, 36_000_000), (0.25, 0.0));
+    let segments = harness.section("segments");
+    let row = segments.iter().find(|row| row["direction"] == "tx" && row["stream"] == 0 && row["origin"]["ticks"] == origin).unwrap();
+    let coherence = row["coherence"].as_array().unwrap();
+    assert_eq!(coherence.first().unwrap()["basis"], "deterministic");
+    assert_eq!(coherence.first().unwrap()["valid"], true);
+}
+
+#[test]
+fn mr_34_a_layout_transmit_move_is_an_untimed_tune_of_the_moved_channel() {
+    // Transmit channels 0 and 1 share stream 0, both timed tuned. Channel 1 moves into stream 1,
+    // which holds no channel: it radiates the untimed phase there, and its segment is not
+    // coherent. Channel 0 stays on stream 0, whose new clock begins at the move with an untimed
+    // tune of it too, drawn first (MR-34: streams in number order at one origin).
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.rx.c1.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c1.stream", eq(Scalar::from(0))),
+        ("radio.rx.c1.frequency_hz", eq(Scalar::try_from(10.0e6).unwrap())),
+    ];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[
+            {"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0},
+            {"tx":"radio","tx_channel":1,"rx":"radio","rx_channel":1,"gain_db":0.0,"delay_ns":0}
+        ]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 150_000]);
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0", "0:B:basic_rx:0"]), tx: elements(&["0:A:ubx:0", "0:B:basic_tx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    harness.push(update("radio.tx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+    harness.push(update("radio.tx.c1.frequency_hz", Value::num(10.0e6).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+    harness.step(T0 + 3_000_000).unwrap();
+    harness.push(update("radio.tx.c1.stream", Value::from(1), UpdateClass::Cold, Some(T0 + 10_000_000)));
+    harness.step(T0 + 10_000_001).unwrap();
+    harness.step(T0 + 30_000_000).unwrap();
+    let s0 = harness.clocks_of("mock/tx/s0").last().unwrap().clone();
+    let s1 = harness.clocks_of("mock/tx/s1").last().unwrap().clone();
+    let (origin0, origin1) = (s0.origin.ticks_in(ROOT).unwrap(), s1.origin.ticks_in(ROOT).unwrap());
+    assert!(origin0 > T0 + 10_000_000 && origin1 > T0 + 10_000_000);
+    harness.push(burst_with_waveform("mock/tx/s0", s0.domain, sample_of(&s0, T0 + 150_000_000), waveform.clone()));
+    harness.push(burst_with_waveform("mock/tx/s1", s1.domain, sample_of(&s1, T0 + 150_000_000), waveform));
+    let blocks = collect_blocks(&mut harness, T0 + 40_000_000, T0 + 300_000_000);
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let rx = [phase(&mut lo), phase(&mut lo)];
+    let _tx_initial = [phase(&mut lo), phase(&mut lo)];
+    let _rx_timed = [phase(&mut lo), phase(&mut lo)];
+    let tx_timed = [phase(&mut lo), phase(&mut lo)];
+    let mut retune = ezsdr_sim::SimRng::new(7, "mock/lo/retune");
+    let (stay, moved) = (phase(&mut retune), phase(&mut retune));
+    assert_ne!(moved, tx_timed[1]);
+    assert_ne!(stay, tx_timed[0]);
+    assert_eq!(origin0, origin1);
+    let rx_clock = harness.clocks_of("mock/rx/s0")[0].clone();
+    let at = T0 + 160_000_000;
+    assert_near(heard_channel(&blocks, &rx_clock, at, 0), rotated(0.5, stay - rx[0]));
+    assert_near(heard_channel(&blocks, &rx_clock, at, 1), rotated(0.5, moved - rx[1]));
+    let segments = harness.section("segments");
+    let moved_row = segments.iter().find(|row| row["direction"] == "tx" && row["stream"] == 1 && row["origin"]["ticks"] == origin1).unwrap();
+    assert_eq!(moved_row["channels"], serde_json::json!([1]));
+    let coherence = moved_row["coherence"].as_array().unwrap();
+    assert_eq!(coherence.last().unwrap()["basis"], "none");
+    assert_eq!(coherence.last().unwrap()["valid"], false);
+    let stay_row = segments.iter().find(|row| row["direction"] == "tx" && row["stream"] == 0 && row["origin"]["ticks"] == origin0).unwrap();
+    assert_eq!(stay_row["channels"], serde_json::json!([0]));
+    let coherence = stay_row["coherence"].as_array().unwrap();
+    assert_eq!(coherence.last().unwrap()["basis"], "none");
+    assert_eq!(coherence.last().unwrap()["valid"], false);
+}
+
+/// Steps `harness` from `from` to `to` in steps of 20 ms and collects the receive blocks of
+/// `rx0` as they come: the link keeps only 64 blocks at a time.
+fn collect_blocks(harness: &mut Harness, from: i64, to: i64) -> Vec<BlockRef> {
+    let mut blocks = Vec::new();
+    for tick in (from..=to).step_by(20_000_000) {
+        harness.step(tick).unwrap();
+        blocks.extend(harness.blocks("rx0"));
+    }
+    blocks
+}
+
+#[test]
+fn mr_34_a_layout_transmit_rate_change_is_an_untimed_tune() {
+    // Transmit channels 0 and 1 share stream 0, both timed tuned. A `cold` rate change replaces
+    // the stream's clock, and the origin of the new clock is an untimed tune of both channels,
+    // channel 0 first (MR-34).
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.rx.c1.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c1.stream", eq(Scalar::from(0))),
+        ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(2_000_000.0).unwrap())),
+        ("radio.rx.c1.frequency_hz", eq(Scalar::try_from(10.0e6).unwrap())),
+    ];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[
+            {"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0},
+            {"tx":"radio","tx_channel":1,"rx":"radio","rx_channel":1,"gain_db":0.0,"delay_ns":0}
+        ]})),
+    ];
+    let (waveform, bytes) = two_channel_waveform(150_000, (0.5, 0.0));
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0", "0:B:basic_rx:0"]), tx: elements(&["0:A:ubx:0", "0:B:basic_tx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    harness.push(update("radio.tx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+    harness.push(update("radio.tx.c1.frequency_hz", Value::num(10.0e6).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+    harness.step(T0 + 3_000_000).unwrap();
+    harness.push(update_at("mock/tx/s0", "radio.tx.s0.sample_rate_hz", Value::num(1.0e6).unwrap(), UpdateClass::Cold, Some(T0 + 10_000_000)));
+    harness.step(T0 + 10_000_001).unwrap();
+    harness.step(T0 + 30_000_000).unwrap();
+    let s0 = harness.clocks_of("mock/tx/s0").last().unwrap().clone();
+    let origin = s0.origin.ticks_in(ROOT).unwrap();
+    assert!(origin > T0 + 10_000_000);
+    assert_eq!(s0.root_ticks_per_tick, Rational::new(1000, 1).unwrap());
+    harness.push(burst_with_waveform("mock/tx/s0", s0.domain, sample_of(&s0, T0 + 150_000_000), waveform));
+    let blocks = collect_blocks(&mut harness, T0 + 40_000_000, T0 + 300_000_000);
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let rx = [phase(&mut lo), phase(&mut lo)];
+    let _tx_initial = [phase(&mut lo), phase(&mut lo)];
+    let _rx_timed = [phase(&mut lo), phase(&mut lo)];
+    let tx_timed = [phase(&mut lo), phase(&mut lo)];
+    let mut retune = ezsdr_sim::SimRng::new(7, "mock/lo/retune");
+    let tx_retuned = [phase(&mut retune), phase(&mut retune)];
+    assert_ne!(tx_retuned[0], tx_timed[0]);
+    assert_ne!(tx_retuned[1], tx_timed[1]);
+    let rx_clock = harness.clocks_of("mock/rx/s0")[0].clone();
+    let at = T0 + 160_000_000;
+    assert_near(heard_channel(&blocks, &rx_clock, at, 0), rotated(0.5, tx_retuned[0] - rx[0]));
+    assert_near(heard_channel(&blocks, &rx_clock, at, 1), rotated(0.5, tx_retuned[1] - rx[1]));
+    let segment = harness.section("segments").into_iter().find(|row| row["direction"] == "tx" && row["stream"] == 0 && row["origin"]["ticks"] == origin).unwrap();
+    assert_eq!(segment["channels"], serde_json::json!([0, 1]));
+    let coherence = segment["coherence"].as_array().unwrap();
+    assert_eq!(coherence.first().unwrap()["basis"], "none");
+    assert_eq!(coherence.first().unwrap()["valid"], false);
+}
+
+#[test]
+fn mr_34_a_layout_reentry_cut_before_its_start_leaves_the_rate_change_untimed() {
+    // Channel 0 is timed tuned, leaves receive stream 0, and at one instant re-enters it and
+    // changes its rate. The re-entry's segment is cut before it starts, so it never begins; the
+    // rate change's segment keeps the channel, and its origin is an untimed tune of it (MR-34).
+    let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 150_000]);
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    harness.push(burst_with_waveform("mock/tx/s0", tx, 2_000_000, waveform));
+    harness.step(0).unwrap();
+    harness.step(T0 + 2_100_001).unwrap();
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let (_, tx_phase, rx_timed) = (phase(&mut lo), phase(&mut lo), phase(&mut lo));
+    let changed_phase = phase(&mut ezsdr_sim::SimRng::new(7, "mock/lo/retune"));
+    assert_ne!(changed_phase, rx_timed);
+    let first = harness.clocks_of("mock/rx/s0")[0].clone();
+    harness.push(update("radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+    harness.step(T0 + 3_000_000).unwrap();
+    harness.push(update("radio.rx.c0.stream", Value::from(-1), UpdateClass::Cold, Some(T0 + 6_000_000)));
+    harness.step(T0 + 5_000_000).unwrap();
+    harness.step(T0 + 6_000_001).unwrap();
+    harness.push(update("radio.rx.c0.stream", Value::from(0), UpdateClass::Cold, Some(T0 + 8_000_000)));
+    harness.push(update("radio.rx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(T0 + 8_000_000)));
+    harness.step(T0 + 7_000_000).unwrap();
+    harness.step(T0 + 8_000_001).unwrap();
+    harness.step(T0 + 130_000_000).unwrap();
+    assert_eq!(harness.clocks_of("mock/rx/s0").len(), 2);
+    let changed = harness.clocks_of("mock/rx/s0").last().unwrap().clone();
+    let origin = changed.origin.ticks_in(ROOT).unwrap();
+    harness.step(T0 + 140_000_000).unwrap();
+    let blocks = harness.blocks("rx0");
+    assert_near(heard(&blocks, &first, T0 + 5_500_000), rotated(0.5, tx_phase - rx_timed));
+    assert_near(heard(&blocks, &changed, origin + 100_000), rotated(0.5, tx_phase - changed_phase));
+    let segments = harness.section("segments");
+    let row = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 0 && row["origin"]["ticks"] == origin).unwrap();
+    assert_eq!(row["channels"], serde_json::json!([0]));
+    let coherence = row["coherence"].as_array().unwrap();
+    assert_eq!(coherence.first().unwrap()["basis"], "none");
+    assert_eq!(coherence.first().unwrap()["valid"], false);
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_transmit_clock_cut_at_its_origin_takes_no_untimed_tune() {
+    // Two transmit rate changes at one instant: the first clock is cut at its own origin, so it
+    // never runs and takes no untimed tune. The second clock's origin is an untimed tune of both
+    // channels of stream 0, which draw the first two phases of the retune stream (MR-34).
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.rx.c1.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c1.stream", eq(Scalar::from(0))),
+        ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(2_000_000.0).unwrap())),
+        ("radio.rx.c1.frequency_hz", eq(Scalar::try_from(10.0e6).unwrap())),
+    ];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[
+            {"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0},
+            {"tx":"radio","tx_channel":1,"rx":"radio","rx_channel":1,"gain_db":0.0,"delay_ns":0}
+        ]})),
+    ];
+    let (waveform, bytes) = two_channel_waveform(150_000, (0.5, 0.0));
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0", "0:B:basic_rx:0"]), tx: elements(&["0:A:ubx:0", "0:B:basic_tx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    harness.push(update("radio.tx.c0.frequency_hz", Value::num(1.0e9).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+    harness.push(update("radio.tx.c1.frequency_hz", Value::num(10.0e6).unwrap(), UpdateClass::HardwareTimed, Some(T0 + 5_000_000)));
+    harness.step(T0 + 3_000_000).unwrap();
+    harness.push(update_at("mock/tx/s0", "radio.tx.s0.sample_rate_hz", Value::num(1.0e6).unwrap(), UpdateClass::Cold, Some(T0 + 10_000_000)));
+    harness.push(update_at("mock/tx/s0", "radio.tx.s0.sample_rate_hz", Value::num(1.0e6).unwrap(), UpdateClass::Cold, Some(T0 + 10_000_000)));
+    harness.step(T0 + 10_000_001).unwrap();
+    harness.step(T0 + 30_000_000).unwrap();
+    let clocks = harness.clocks_of("mock/tx/s0");
+    let s0 = clocks.last().unwrap().clone();
+    let origin = s0.origin.ticks_in(ROOT).unwrap();
+    assert!(origin > T0 + 10_000_000);
+    assert_eq!(s0.root_ticks_per_tick, Rational::new(1000, 1).unwrap());
+    harness.push(burst_with_waveform("mock/tx/s0", s0.domain, sample_of(&s0, T0 + 150_000_000), waveform));
+    let blocks = collect_blocks(&mut harness, T0 + 40_000_000, T0 + 300_000_000);
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let rx = [phase(&mut lo), phase(&mut lo)];
+    let _tx_initial = [phase(&mut lo), phase(&mut lo)];
+    let _rx_timed = [phase(&mut lo), phase(&mut lo)];
+    let _tx_timed = [phase(&mut lo), phase(&mut lo)];
+    let mut retune = ezsdr_sim::SimRng::new(7, "mock/lo/retune");
+    let tx_retuned = [phase(&mut retune), phase(&mut retune)];
+    let rx_clock = harness.clocks_of("mock/rx/s0")[0].clone();
+    let at = T0 + 160_000_000;
+    assert_near(heard_channel(&blocks, &rx_clock, at, 0), rotated(0.5, tx_retuned[0] - rx[0]));
+    assert_near(heard_channel(&blocks, &rx_clock, at, 1), rotated(0.5, tx_retuned[1] - rx[1]));
+    let segments = harness.section("segments");
+    let row = segments.iter().find(|row| row["direction"] == "tx" && row["stream"] == 0 && row["origin"]["ticks"] == origin).unwrap();
+    assert_eq!(row["channels"], serde_json::json!([0, 1]));
+    let coherence = row["coherence"].as_array().unwrap();
+    assert_eq!(coherence.first().unwrap()["basis"], "none");
+    assert_eq!(coherence.first().unwrap()["valid"], false);
+}
+
+#[test]
+fn mr_18_a_layout_receive_floor_at_t0_emits_late_command() {
+    let mut harness = built(Layout { profile: "ideal", id: "mock", rx: count(1), tx: count(0), selector: &[], constraints: &[], env: &[], ports: &["rx0"] });
+    harness.arm_start(T0).unwrap();
+    harness.push(update("radio.rx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(T0 - 1)));
+    harness.step(1).unwrap();
+    let late: Vec<_> = harness.events().into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).collect();
+    assert_eq!(late.len(), 1);
+    assert_eq!(late[0].payload["requested"]["ticks"], T0 - 1);
+    assert_eq!(late[0].payload["applied"]["ticks"], T0);
+}
+
+#[test]
+fn mr_18_a_layout_rejects_an_out_of_range_stream_before_booking_a_move() {
+    let mut harness = built(Layout { profile: "ideal", id: "mock", rx: count(2), tx: count(0), selector: &[], constraints: &[], env: &[], ports: &["rx0", "rx1"] });
+    harness.arm_start(0).unwrap();
+    harness.push(update("radio.rx.c0.stream", Value::from(2), UpdateClass::Cold, Some(1_000_000)));
+    harness.step(1).unwrap();
+    let reasons = harness.rejected();
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert!(reasons[0].starts_with("MR-18: RM-8:"), "{reasons:?}");
+    assert!(harness.applied().is_empty());
+    assert!(harness.clocks_of("mock/rx/s0").is_empty() && harness.clocks_of("mock/rx/s1").is_empty());
+}

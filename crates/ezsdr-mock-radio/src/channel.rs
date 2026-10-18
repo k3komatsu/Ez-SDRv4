@@ -42,6 +42,7 @@ pub(crate) struct Segment {
     pub len: i64,
     pub repeat: bool,
     pub channels: u16,
+    pub channel_numbers: Vec<u16>,
     /// `(n · channels + c) · 2` is sample `n`'s real part on channel `c`, `+ 1` its
     /// imaginary part, each already clipped to the contract's full scale.
     pub samples: Arc<[f32]>,
@@ -49,16 +50,28 @@ pub(crate) struct Segment {
     pub end: Option<i64>,
 }
 
-/// The transmit side's plan: every admitted burst keyed by `(clock generation, start)`,
+/// The transmit side's plan: every admitted burst keyed by its origin, arrival, stream, clock and start,
 /// and the parameters that shape what it radiates (MR-32, MR-33, MR-34).
 pub(crate) struct TxPlan {
-    pub segments: BTreeMap<(u32, i64), Segment>,
+    pub segments: BTreeMap<(i64, Option<u64>, usize, u32, i64), Segment>,
     pub gain_db: Timeline,
     pub frequency_hz: Timeline,
     pub phase: Vec<Timeline>,
     /// The phase each channel's LO takes after every timed tune (MR-34).
     pub timed_phase: Vec<f64>,
     pub path_delay: i64,
+    pub channel_models: Option<Vec<ChannelModel>>,
+}
+
+/// One layout channel's parameters and phase history (RM-29, MR-33, MR-34).
+pub(crate) struct ChannelModel {
+    pub gain_db: Timeline,
+    pub frequency_hz: Timeline,
+    pub phase: Timeline,
+    pub phase_fixed: Timeline,
+    pub timed_phase: f64,
+    pub phase_behavior: String,
+    pub path_delay_samples: i64,
 }
 
 /// The shared handle the medium reads the transmit side through (MR-32, CH-8).
@@ -78,24 +91,31 @@ impl Transmitter for TxShared {
     fn radiated(&self, channel: u16, at: RootInstant) -> Option<Radiated> {
         let plan = self.plan();
         for segment in plan.segments.values().rev() {
-            let j = at.sample_at_or_before(segment.origin, segment.ratio).saturating_sub(plan.path_delay);
+            let Some(position) = segment.channel_numbers.iter().position(|number| *number == channel) else { continue; };
+            let model = plan.channel_models.as_ref().and_then(|models| models.get(usize::from(channel)));
+            if plan.channel_models.is_some() && model.is_none() { continue; }
+            let delay = model.map_or(plan.path_delay, |model| model.path_delay_samples);
+            let j = at.sample_at_or_before(segment.origin, segment.ratio).saturating_sub(delay);
             if j < segment.start {
                 continue;
             }
             let natural_end = if segment.repeat { i64::MAX } else { segment.start.saturating_add(segment.len) };
-            if j >= segment.end.unwrap_or(i64::MAX).min(natural_end) || channel >= segment.channels {
+            if j >= segment.end.unwrap_or(i64::MAX).min(natural_end) {
                 return None;
             }
             let n = usize::try_from((j - segment.start) % segment.len).ok()?;
-            let index = (n * usize::from(segment.channels) + usize::from(channel)) * 2;
+            let index = (n * usize::from(segment.channels) + position) * 2;
             let (re, im) = (f64::from(segment.samples[index]), f64::from(segment.samples[index + 1]));
             let stamp = RootInstant::of_sample(segment.origin, segment.ratio, j);
-            let amplitude = 10f64.powf(plan.gain_db.at(stamp) / 20.0);
-            let (sin, cos) = plan.phase.get(usize::from(channel)).map_or(0.0, |phase| phase.at(stamp)).sin_cos();
+            let gain = model.map_or_else(|| plan.gain_db.at(stamp), |model| model.gain_db.at(stamp));
+            let amplitude = 10f64.powf(gain / 20.0);
+            let phase = model.map_or_else(|| plan.phase.get(position).map_or(0.0, |phase| phase.at(stamp)), |model| model.phase.at(stamp));
+            let (sin, cos) = phase.sin_cos();
+            let frequency = model.map_or_else(|| plan.frequency_hz.at(stamp), |model| model.frequency_hz.at(stamp));
             return Some(Radiated {
                 re: amplitude * (re * cos - im * sin),
                 im: amplitude * (re * sin + im * cos),
-                frequency_hz: plan.frequency_hz.at(stamp),
+                frequency_hz: frequency,
             });
         }
         None
@@ -110,6 +130,17 @@ pub(crate) struct RxModel {
     pub phase: Vec<Timeline>,
     /// The phase each channel's LO takes after every timed tune (MR-34).
     pub timed_phase: Vec<f64>,
+}
+
+/// One layout receive channel's parameters and phase history (RM-29, MR-33…MR-35).
+pub(crate) struct RxChannelModel {
+    pub gain_db: Timeline,
+    pub frequency_hz: Timeline,
+    pub phase: Timeline,
+    pub phase_fixed: Timeline,
+    pub timed_phase: f64,
+    pub phase_behavior: String,
+    pub path_delay_samples: i64,
 }
 
 /// Decodes a `cf32` waveform, refusing a non-finite component and clipping each

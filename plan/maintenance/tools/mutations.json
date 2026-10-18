@@ -5122,8 +5122,8 @@
   "id": "P125",
   "name": "every receive stream starts on stream 0's set and rate",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "            let line = self.line(Direction::Rx, k, target, &self.config)?;",
-  "new": "            let line = self.line(Direction::Rx, 0, target, &self.config)?;",
+  "old": "            let line = self.line(Direction::Rx, k, target, &self.config)?;\n            let first = line.plan.first().copied();",
+  "new": "            let line = self.line(Direction::Rx, 0, target, &self.config)?;\n            let first = line.plan.first().copied();",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_layout",
   "filter": "mr_39_each_receive_stream_declares_and_runs_its_own_clock"
@@ -5152,21 +5152,11 @@
   "id": "P128",
   "name": "a channel moving from one stream to another is booked, not refused",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                    Err(format!(\"RM-34: moving channel c{number} from stream s{was} to stream s{is} is not carried out\"))",
-  "new": "                    Ok(vec![(direction, was as usize)])",
+  "old": "                    ColdChange::Move { direction, from: was as usize, to: is as usize, channel: number }",
+  "new": "                    ColdChange::Streams(vec![(direction, was as usize)])",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_layout",
   "filter": "mr_18_a_layout_instance_s_changes_belong_to_their_own_stream"
- },
- {
-  "id": "P129",
-  "name": "MR-41's refusal lacks its rule prefix",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                return Err(self.reject(\"MR-41: a Mock that uses the layout keys takes no sim.channel\"));",
-  "new": "                return Err(self.reject(\"a Mock that uses the layout keys takes no sim.channel\"));",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_layout",
-  "filter": "mr_41_a_layout_instance_takes_no_simulation_channel"
  },
  {
   "id": "P130",
@@ -5302,8 +5292,8 @@
   "id": "P143",
   "name": "a layout instance's `cold` change is booked on the streams the configuration names when it is asked for, not when it takes effect",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "            let mut with = projected.clone();\n            with.insert(key.clone(), value.clone());\n            match self.cold_streams(&key, &projected, &with) {",
-  "new": "            let asked = self.projected(requested_tick.unwrap_or(now), order);\n            let mut with = asked.clone();\n            with.insert(key.clone(), value.clone());\n            match self.cold_streams(&key, &asked, &with) {",
+  "old": "        let cold = if expected == UpdateClass::Cold {\n            Some(self.cold_streams(&key, &projected, &candidate))\n        } else {\n            None\n        };",
+  "new": "        let cold = if expected == UpdateClass::Cold {\n            let asked = self.projected(requested_tick.unwrap_or(now), order);\n            let mut with = asked.clone();\n            with.insert(key.clone(), value.clone());\n            Some(self.cold_streams(&key, &asked, &with))\n        } else {\n            None\n        };",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_layout",
   "filter": "mr_18_a_layout_reservations_cannot_invalidate_an_earlier_one"
@@ -5357,5 +5347,435 @@
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_layout",
   "filter": "mr_18_a_layout_hardware_timed_change_keeps_its_own_instant"
- }
-]
+ },
+  {
+   "id": "P149",
+   "name": "a layout move is floored only by cold updates of its two lines",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "            let floor = self.updates.iter().filter(|(_, update)| update.class == UpdateClass::Cold).map(|((effective, _), _)| *effective).max();",
+   "new": "            let floor: Option<i64> = None;",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_40_a_move_uses_the_instance_floor_across_streams_directions_and_missing_links"
+  },
+  {
+   "id": "P150",
+   "name": "a MoveError changes the configuration despite refusing the move",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                    Err(error) => {\n                        self.reject_action_at(Some(id), \"update_parameter\", &format!(\"RM-34: move of channel c{channel} from stream s{from} to stream s{to} was refused ({error:?})\"), now)?;\n                        return Ok(());\n                    }",
+   "new": "                    Err(error) => {\n                        self.config.insert(key.clone(), applied.clone());\n                        self.reject_action_at(Some(id), \"update_parameter\", &format!(\"RM-34: move of channel c{channel} from stream s{from} to stream s{to} was refused ({error:?})\"), now)?;\n                        return Ok(());\n                    }",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_40_a_refused_move_applies_no_update_and_changes_no_manifest_or_clock"
+  },
+  {
+   "id": "P151",
+   "name": "a layout move lets Lines choose its own instant instead of the Provider's",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "lines.book_move(from_key, to_key, channel, Some(tick), now, order, now)",
+   "new": "lines.book_move(from_key, to_key, channel, None, now, order, now)",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_40_a_move_uses_the_instance_floor_across_streams_directions_and_missing_links"
+  },
+  {
+   "id": "P152",
+   "name": "a transmit move switches only its source stream",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                    for k in [from, to] {",
+   "new": "                    for k in [from] {",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_40_a_transmit_move_cuts_both_clocks_and_cancels_both_held_bursts"
+  },
+  {
+   "id": "P153",
+   "name": "a receive stream without a link still publishes a block after start_rx",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "        if self.rx[k].links.is_empty() { return None; }",
+   "new": "        // linkless streams have no receive output",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_40_a_move_to_and_from_a_linkless_receive_stream_never_publishes_there"
+  },
+  {
+   "id": "P154",
+   "name": "a layout segment records its logical channels in reverse block order",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "        let channel_numbers: Vec<u32> = channels.iter().collect();",
+   "new": "        let channel_numbers: Vec<u32> = channels.iter().collect::<Vec<_>>().into_iter().rev().collect();",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_40_a_receive_move_waits_for_release_and_lead_and_records_channel_order"
+  },
+  {
+   "id": "P155",
+   "name": "a radiated logical channel is read from its logical number rather than its block position",
+   "file": "crates/ezsdr-mock-radio/src/channel.rs",
+   "old": "            let Some(position) = segment.channel_numbers.iter().position(|number| *number == channel) else { continue; };",
+   "new": "            let position = usize::from(channel);",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_32_a_logical_transmit_channel_follows_its_move_to_another_stream"
+  },
+  {
+   "id": "P156",
+   "name": "the receive field is queried by block position instead of logical channel",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "mode.medium.field(&mode.fragment, logical as u16, model.frequency_hz.at(stamp), antenna)",
+   "new": "mode.medium.field(&mode.fragment, position as u16, model.frequency_hz.at(stamp), antenna)",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_32_a_logical_transmit_channel_follows_its_move_to_another_stream"
+  },
+  {
+   "id": "P157",
+   "name": "a transmit gain update changes channel 0's timeline instead of the named channel",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "if let Some(model) = shared.plan().channel_models.as_mut().and_then(|models| models.get_mut(number as usize)) {\n                    model.gain_db.set(tick, value);\n                }",
+   "new": "if let Some(model) = shared.plan().channel_models.as_mut().and_then(|models| models.get_mut(0)) {\n                    model.gain_db.set(tick, value);\n                }",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_33_layout_gain_and_frequency_timelines_are_per_logical_channel"
+  },
+  {
+   "id": "P158",
+   "name": "layout LO initialization draws transmit phases before receive phases",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                    let rx_phase = phases(Direction::Rx, rx_max as usize, false);\n                    let tx_phase = phases(Direction::Tx, tx_max as usize, false);",
+   "new": "                    let tx_phase = phases(Direction::Tx, tx_max as usize, false);\n                    let rx_phase = phases(Direction::Rx, rx_max as usize, false);",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_layout_mixed_boards_have_per_channel_timed_phase_behavior"
+  },
+  {
+   "id": "P159",
+   "name": "a random layout channel takes its timed constant instead of redrawing on tune",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "plan.channel_models.as_ref().and_then(|models| models.get(number as usize)).map(|model| match model.phase_behavior.as_str() {\n                        \"random_unless_timed_tune\" => model.timed_phase,\n                        \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                        _ => 0.0,\n                    })",
+   "new": "plan.channel_models.as_ref().and_then(|models| models.get(number as usize)).map(|model| match model.phase_behavior.as_str() {\n                        \"random_unless_timed_tune\" => model.timed_phase,\n                        \"random\" => model.timed_phase,\n                        _ => 0.0,\n                    })",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_cbx_layout_redraws_only_the_retuned_channel"
+  },
+  {
+   "id": "P160",
+   "name": "a deterministic layout channel draws a random initial phase",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                            let draw = if timed { behavior == \"random_unless_timed_tune\" } else { behavior != \"deterministic\" };",
+   "new": "                            let draw = true;",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_ideal_layout_channels_are_deterministic_and_reproduce_with_the_seed"
+  },
+  {
+   "id": "P161",
+   "name": "a layout's shared transmitter plan is assigned only to stream 0",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                for stream in &mut self.tx { stream.plan = Some(tx.clone()); }",
+   "new": "                if let Some(stream) = self.tx.first_mut() { stream.plan = Some(tx.clone()); }",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_32_a_logical_transmit_channel_follows_its_move_to_another_stream"
+  },
+  {
+   "id": "P162",
+   "name": "a layout instance is refused in channel mode with the withdrawn MR-41 error",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "            None => None,\n            Some(spec) => {",
+   "new": "            None => None,\n            Some(_) if self.profile.is_layout() => { return Err(self.reject(\"MR-41: a Mock that uses the layout keys takes no sim.channel\")); }\n            Some(spec) => {",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_31_a_layout_instance_joins_simulation_channel"
+  },
+  {
+   "id": "P163",
+   "name": "a receive-start floor does not emit LATE_COMMAND when it moves e",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "            if asked < now || e > asked {",
+   "new": "            if asked < now || e > base {",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_18_a_layout_receive_floor_at_t0_emits_late_command"
+  },
+  {
+   "id": "P164",
+   "name": "a SimulationChannel joins the fragment once per transmit stream",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                medium.join(&ctx.run, &f.id, &spec, seed, root_rate.num(), tx.clone()).map_err(|error| self.reject(format!(\"MR-31: {error}\")))?;",
+   "new": "                for _ in 0..self.tx.len() { medium.join(&ctx.run, &f.id, &spec, seed, root_rate.num(), tx.clone()).map_err(|error| self.reject(format!(\"MR-31: {error}\")))?; }",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_32_a_logical_transmit_channel_follows_its_move_to_another_stream"
+  },
+  {
+   "id": "P165",
+   "name": "an out-of-range membership move is booked before coercion refuses it",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "if let Some(rejected) = report.rejected.first() {",
+   "new": "if let Some(rejected) = report.rejected.first().filter(|_| key.as_str() != \"radio.rx.c0.stream\") {",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_18_a_layout_rejects_an_out_of_range_stream_before_booking_a_move"
+  },
+  {
+   "id": "P166",
+   "name": "a transmit frequency update changes channel 0's timeline instead of the named channel",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                if let Some(model) = plan.channel_models.as_mut().and_then(|models| models.get_mut(number as usize)) {\n                    model.frequency_hz.set(tick, value);\n                    model.phase.set(tick, phase.unwrap_or(0.0));\n                    model.phase_fixed.set(tick, if model.phase_behavior != \"random\" { 1.0 } else { 0.0 });\n                }",
+   "new": "                if let Some(model) = plan.channel_models.as_mut().and_then(|models| models.get_mut(0)) {\n                    model.frequency_hz.set(tick, value);\n                    model.phase.set(tick, phase.unwrap_or(0.0));\n                    model.phase_fixed.set(tick, if model.phase_behavior != \"random\" { 1.0 } else { 0.0 });\n                }",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_33_layout_gain_and_frequency_timelines_are_per_logical_channel"
+  },
+  {
+   "id": "P167",
+   "name": "a receive gain update changes channel 0's timeline instead of the named channel",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "if let Some(model) = self.channel.as_mut().and_then(|mode| mode.rx_channels.as_mut()).and_then(|models| models.get_mut(number as usize)) {\n                    model.gain_db.set(tick, value);\n                }",
+   "new": "if let Some(model) = self.channel.as_mut().and_then(|mode| mode.rx_channels.as_mut()).and_then(|models| models.get_mut(0)) {\n                    model.gain_db.set(tick, value);\n                }",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_33_layout_gain_and_frequency_timelines_are_per_logical_channel"
+  },
+  {
+   "id": "P168",
+   "name": "a receive frequency update changes channel 0's timeline instead of the named channel",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "mode.rx_channels.as_mut().and_then(|models| models.get_mut(number as usize))",
+   "new": "mode.rx_channels.as_mut().and_then(|models| models.get_mut(0))",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_33_layout_gain_and_frequency_timelines_are_per_logical_channel"
+  },
+  {
+   "id": "P169",
+   "name": "a moved transmit channel gives precedence to the lower-numbered stream",
+   "file": "crates/ezsdr-mock-radio/src/channel.rs",
+   "old": "        for segment in plan.segments.values().rev() {",
+   "new": "        for segment in plan.segments.values() {",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_32_a_logical_transmit_channel_follows_its_move_to_another_stream"
+  },
+  {
+   "id": "P170",
+   "name": "a timed tune does not update the layout segment coherence Manifest",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "            let (basis, valid) = self.layout_phase_basis(direction, &channels, at);",
+   "new": "            let (basis, valid) = (\"none\".to_owned(), false);",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_layout_mixed_boards_have_per_channel_timed_phase_behavior"
+  },
+  {
+   "id": "P171",
+   "name": "a layout transmitter ignores its declared channel path delay",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                        let (behavior, delay) = self.profile.channel_model_terms(Direction::Tx, number);",
+   "new": "                        let (behavior, _delay) = self.profile.channel_model_terms(Direction::Tx, number);\n                        let delay = 0;",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_32_a_layout_transmit_path_delay_silences_samples_before_the_antenna"
+  },
+  {
+   "id": "P172",
+   "name": "a layout segment end is not written to the Manifest",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                row[\"ended_at\"] = serde_json::to_value(TimePoint::new(self.root.expect(\"prepared root\"), at)).expect(\"segment end time\");",
+   "new": "                let _ = at;",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_40_a_receive_move_waits_for_release_and_lead_and_records_channel_order"
+  },
+  {
+   "id": "P173",
+   "name": "a refused move does not emit COMMAND_REJECTED",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "self.reject_action_at(Some(id), \"update_parameter\", &format!(\"RM-34: move of channel c{channel} from stream s{from} to stream s{to} was refused ({error:?})\"), now)?;",
+   "new": "self.record_rejected_action(\"update_parameter\", &format!(\"RM-34: move of channel c{channel} from stream s{from} to stream s{to} was refused ({error:?})\"), now);",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_40_a_refused_move_applies_no_update_and_changes_no_manifest_or_clock"
+  },
+  {
+   "id": "P174",
+   "name": "a channel-mode instance never joins its medium",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "medium.join(&ctx.run, &f.id, &spec, seed, root_rate.num(), tx.clone()).map_err(|error| self.reject(format!(\"MR-31: {error}\")))?;",
+   "new": "let _ = (&ctx.run, &f.id, &spec, seed, root_rate.num(), &tx);",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_31_a_layout_instance_joins_simulation_channel"
+  },
+  {
+   "id": "P175",
+   "name": "a channel entering a receive stream keeps its timed tune's coherence (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                                model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));\n                                model.phase_fixed.set(tick, 0.0);\n                            }\n                        }\n                    }\n                }\n                Direction::Tx => {",
+   "new": "                                model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));\n                            }\n                        }\n                    }\n                }\n                Direction::Tx => {",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_receive_entry_is_an_untimed_tune"
+  },
+  {
+   "id": "P176",
+   "name": "a transmit channel entering a stream keeps its timed tune's coherence (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                                model.phase_fixed.set(tick, 0.0);\n                            }\n                        }\n                    }\n                }\n            }\n            self.update_layout_segment_coherence(direction, *number, tick);",
+   "new": "                            }\n                        }\n                    }\n                }\n            }\n            self.update_layout_segment_coherence(direction, *number, tick);",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_transmit_entry_is_an_untimed_tune"
+  },
+  {
+   "id": "P177",
+   "name": "a receive channel entering a stream takes its timed-tune constant instead of drawing a fresh phase (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                                model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));\n                                model.phase_fixed.set(tick, 0.0);\n                            }\n                        }\n                    }\n                }\n                Direction::Tx => {",
+   "new": "                                model.phase.set(tick, model.timed_phase);\n                                model.phase_fixed.set(tick, 0.0);\n                            }\n                        }\n                    }\n                }\n                Direction::Tx => {",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_receive_entry_is_an_untimed_tune"
+  },
+  {
+   "id": "P178",
+   "name": "a deterministic receive channel takes an untimed phase (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                            if model.phase_behavior != \"deterministic\" {\n                                model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));\n                                model.phase_fixed.set(tick, 0.0);\n                            }\n                        }\n                    }\n                }\n                Direction::Tx => {",
+   "new": "                            if true {\n                                model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));\n                                model.phase_fixed.set(tick, 0.0);\n                            }\n                        }\n                    }\n                }\n                Direction::Tx => {",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_deterministic_channel_keeps_its_phase_and_coherence_through_entry"
+  },
+  {
+   "id": "P181",
+   "name": "a transmit channel entering a stream takes its timed-tune constant instead of drawing a fresh phase (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));\n                                model.phase_fixed.set(tick, 0.0);\n                            }\n                        }\n                    }\n                }\n            }\n            self.update_layout_segment_coherence(direction, *number, tick);",
+   "new": "model.phase.set(tick, model.timed_phase);\n                                model.phase_fixed.set(tick, 0.0);\n                            }\n                        }\n                    }\n                }\n            }\n            self.update_layout_segment_coherence(direction, *number, tick);",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_transmit_entry_is_an_untimed_tune"
+  },
+  {
+   "id": "P182",
+   "name": "a deterministic transmit channel takes an untimed phase (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "if model.phase_behavior != \"deterministic\" {\n                                model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));\n                                model.phase_fixed.set(tick, 0.0);\n                            }\n                        }\n                    }\n                }\n            }\n            self.update_layout_segment_coherence(direction, *number, tick);",
+   "new": "if true {\n                                model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));\n                                model.phase_fixed.set(tick, 0.0);\n                            }\n                        }\n                    }\n                }\n            }\n            self.update_layout_segment_coherence(direction, *number, tick);",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_deterministic_transmit_entry_keeps_phase_zero"
+  },
+  {
+   "id": "P183",
+   "name": "a random receive channel entering a stream keeps its phase instead of drawing a fresh one (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "if model.phase_behavior != \"deterministic\" {\n                                model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));\n                                model.phase_fixed.set(tick, 0.0);\n                            }\n                        }\n                    }\n                }\n                Direction::Tx => {",
+   "new": "if model.phase_behavior == \"random_unless_timed_tune\" {\n                                model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));\n                                model.phase_fixed.set(tick, 0.0);\n                            }\n                        }\n                    }\n                }\n                Direction::Tx => {",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_cbx_layout_entry_draws_a_fresh_phase"
+  },
+  {
+   "id": "P186",
+   "name": "a receive stream with no link takes an untimed tune on its enable (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "        if direction == Direction::Rx && self.rx[k].links.is_empty() { return; }",
+   "new": "        let _ = self.rx[k].links.is_empty();",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_unlinked_receive_stream_takes_no_untimed_tune"
+  },
+  {
+   "id": "P187",
+   "name": "an untimed tune is taken before the instant's timed tune, so the channel keeps the timed constant (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "candidates.push((key.0, 2, tune_order(Direction::Rx, k), WorkKind::Tune { direction: Direction::Rx, stream: k, key }));\n                    }\n                }\n                for k in 0..self.tx.len() {\n                    if let Some(key) = self.tune_next(Direction::Tx, k) {\n                        candidates.push((key.0, 2, tune_order(Direction::Tx, k), WorkKind::Tune",
+   "new": "candidates.push((key.0, 0, tune_order(Direction::Rx, k), WorkKind::Tune { direction: Direction::Rx, stream: k, key }));\n                    }\n                }\n                for k in 0..self.tx.len() {\n                    if let Some(key) = self.tune_next(Direction::Tx, k) {\n                        candidates.push((key.0, 0, tune_order(Direction::Tx, k), WorkKind::Tune",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_untimed_tune_follows_a_timed_tune_at_its_instant"
+  },
+  {
+   "id": "P190",
+   "name": "an untimed tune takes a segment's channels in reverse order, so the phases of two channels swap (MR-30, MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "        let channels: Vec<u32> = segment.config.channels.iter().collect();",
+   "new": "        let mut channels: Vec<u32> = segment.config.channels.iter().collect();\n        channels.reverse();",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_receive_move_is_an_untimed_tune_of_the_moved_channel"
+  },
+  {
+   "id": "P191",
+   "name": "the untimed tunes of one origin take the streams in reverse number order (MR-30, MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "    (u64::from(direction == Direction::Tx) << 32) + k as u64 + 1",
+   "new": "    (u64::from(direction == Direction::Tx) << 32) + (1 << 31) - k as u64",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_transmit_move_is_an_untimed_tune_of_the_moved_channel"
+  },
+  {
+   "id": "P193",
+   "name": "a transmit clock cut at its own origin takes the untimed tunes of its channels (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "        if segment.by.is_none() || (direction == Direction::Tx && segment.cut == Some(0)) { return; }",
+   "new": "        if segment.by.is_none() { return; }",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_transmit_clock_cut_at_its_origin_takes_no_untimed_tune"
+  },
+  {
+   "id": "P194",
+   "name": "an origin's untimed tune skips the channels the stream's previous segment held, the membership rule MR-34 replaced (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "        let channels: Vec<u32> = segment.config.channels.iter().collect();",
+   "new": "        let previous = index.checked_sub(1).map(|before| line.plan[before].config.channels);\n        let channels: Vec<u32> = segment.config.channels.iter().filter(|number| !previous.is_some_and(|held| held.contains(*number))).collect();",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_reentry_cut_before_its_start_leaves_the_rate_change_untimed"
+  },
+  {
+   "id": "P195",
+   "name": "a transmit segment takes no untimed tune, so a transmit rate change keeps its channels' timed tunes (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "        if direction == Direction::Rx && self.rx[k].links.is_empty() { return; }",
+   "new": "        if direction == Direction::Tx || (direction == Direction::Rx && self.rx[k].links.is_empty()) { return; }",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_transmit_rate_change_is_an_untimed_tune"
+  },
+  {
+   "id": "P196",
+   "name": "a stream's first segment takes the untimed tunes of its channels at T0 (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "        if segment.by.is_none() || (direction == Direction::Tx && segment.cut == Some(0)) { return; }",
+   "new": "        if direction == Direction::Tx && segment.cut == Some(0) { return; }",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_receive_entry_is_an_untimed_tune"
+  },
+  {
+   "id": "P197",
+   "name": "a stream enabled again by start_rx skips the channels its earlier segment held (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "        let channels: Vec<u32> = segment.config.channels.iter().collect();",
+   "new": "        let previous = index.checked_sub(1).map(|before| line.plan[before].config.channels);\n        let channels: Vec<u32> = segment.config.channels.iter().filter(|number| !previous.is_some_and(|held| held.contains(*number))).collect();",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_stream_enable_is_an_untimed_tune_of_its_channels"
+  },
+  {
+   "id": "P198",
+   "name": "the stream a channel moves out of does not retune the channels left behind (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "        let channels: Vec<u32> = segment.config.channels.iter().collect();",
+   "new": "        let previous = index.checked_sub(1).map(|before| line.plan[before].config.channels);\n        let channels: Vec<u32> = segment.config.channels.iter().filter(|number| !previous.is_some_and(|held| held.contains(*number))).collect();",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_move_out_is_an_untimed_tune_of_the_channels_left_behind"
+  }
+ ]
