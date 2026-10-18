@@ -191,7 +191,7 @@ impl Control {
         // RM-25, VH-4: this Module's terms — each direction's start lead, and, for a receive
         // segment after a cut, the receive call in progress there and the delivery
         // allowance (UR-25).
-        let call = core.block_len.max(core.device.rx_packet_samples()) as i64;
+        let call = core.block_len.max(core.device.rx_packet_samples(0)) as i64;
         let allowance = core.ticks(DELIVERY_ALLOWANCE_NS);
         let line = |direction: Direction, origin: i64, channels: usize, n: i64| Line::new(timeline::Stream {
             direction,
@@ -550,9 +550,10 @@ impl Control {
         if from_none {
             // Its owner is idle: nothing it could prune comes meanwhile.
             drop(streams);
+            let list: Vec<usize> = (0..channels).collect();
             let opened = match dir {
-                Dir::Rx => self.core.device.rx_open(channels),
-                Dir::Tx => self.core.device.tx_open(channels),
+                Dir::Rx => self.core.device.rx_open(0, &list),
+                Dir::Tx => self.core.device.tx_open(0, &list),
             };
             // The configuration in effect at `e`, the timed updates held for it included (UC-2).
             let mut settings = Core::settings(&candidate, dir);
@@ -933,7 +934,7 @@ mod tests {
         let mut observed = Vec::new();
         for dir in [Dir::Rx, Dir::Tx] {
             let (core, device, _) = rig();
-            match dir { Dir::Rx => device.rx_open(1).unwrap(), Dir::Tx => device.tx_open(1).unwrap() }
+            match dir { Dir::Rx => device.rx_open(0, &[0]).unwrap(), Dir::Tx => device.tx_open(0, &[0]).unwrap() }
             let (mut control, _tx) = control(&core, &[dir]);
             control.book_cold(ActionId(1), key(&format!("radio.{}.sample_rate_hz", dir.name())), Value::num(2e6).unwrap(),
                 Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
@@ -973,7 +974,7 @@ mod tests {
         // `Provider::stop` drops what is held.
         for target in ["usrp/rx", "usrp/tx", "usrp"] {
             let (core, device, _) = rig();
-            device.tx_open(1).unwrap();
+            device.tx_open(0, &[0]).unwrap();
             let (mut control, _tx) = control(&core, &[Dir::Rx, Dir::Tx]);
             let gain = key("radio.tx.gain_db");
             control.book_timed(ActionId(1), gain.clone(), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(1_040_000_000)))));
@@ -1084,7 +1085,7 @@ mod tests {
         // channel in force at its own instant, and one due after it is recorded, at its
         // instant, as having no channel; same-instant updates keep their arrival order (UC-2).
         let (core, device, time) = rig();
-        device.tx_open(1).unwrap();
+        device.tx_open(0, &[0]).unwrap();
         let (mut control, _tx) = control(&core, &[Dir::Tx]);
         control.book_cold(ActionId(1), key("radio.tx.channels"), Value::from(0), Some(AbsoluteDeadline::new(core.at(core.ticks(100_000_000)))));
         for (ms, gain) in [(50, 1.0), (50, 2.0), (150, 4.0)] {
@@ -1109,7 +1110,7 @@ mod tests {
         for (dir, halt, enable) in [(Dir::Rx, true, "cold"), (Dir::Rx, true, "start_rx"), (Dir::Tx, true, "cold"), (Dir::Rx, false, "start_rx")] {
             let case = format!("{} halt={halt} {enable}", dir.name());
             let (core, device, time) = rig();
-            match dir { Dir::Rx => device.rx_open(1).unwrap(), Dir::Tx => device.tx_open(1).unwrap() }
+            match dir { Dir::Rx => device.rx_open(0, &[0]).unwrap(), Dir::Tx => device.tx_open(0, &[0]).unwrap() }
             let (mut control, _tx) = control(&core, &[dir]);
             let ms = |n: i64| core.ticks(n * 1_000_000);
             let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
@@ -1154,7 +1155,7 @@ mod tests {
         // instant on — counts no channel against the queue depth, neither as the new command
         // nor while held, so a full queue still takes it.
         let (core, device, _time) = rig();
-        device.rx_open(1).unwrap();
+        device.rx_open(0, &[0]).unwrap();
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let gain = key("radio.rx.gain_db");
@@ -1179,7 +1180,7 @@ mod tests {
         // clock: the later command released inside the 3 ms window, then an earlier one booked
         // (still a device lead ahead, so not late at receipt) and released behind it.
         let (core, device, time, events) = crate::provider::test_support::rig_with_links(vec![Arc::new(NoLink)]);
-        device.rx_open(1).unwrap();
+        device.rx_open(0, &[0]).unwrap();
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
         let us = |n: i64| core.ticks(n * 1_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(us(n))));
@@ -1202,7 +1203,7 @@ mod tests {
         // #64, UR-24: an update late behind a released one acts at that one's instant; a refusal
         // between its own instant and then leaves it no channel, so it is recorded, not issued.
         let (core, device, time) = rig();
-        device.rx_open(1).unwrap();
+        device.rx_open(0, &[0]).unwrap();
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
         let us = |n: i64| core.ticks(n * 1_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(us(n))));

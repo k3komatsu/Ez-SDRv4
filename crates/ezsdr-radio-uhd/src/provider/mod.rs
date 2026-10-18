@@ -402,11 +402,11 @@ impl Provider for UhdRadio {
         }
         if let Some((_, channels)) = &prepared.rx {
             if !core.links.is_empty() {
-                self.device.rx_open(*channels).map_err(|e| rejected(format!("UR-13: {e}")))?;
+                self.device.rx_open(0, &(0..*channels).collect::<Vec<usize>>()).map_err(|e| rejected(format!("UR-13: {e}")))?;
             }
         }
         if let Some((handle, channels)) = &prepared.tx {
-            self.device.tx_open(*channels).map_err(|e| rejected(format!("UR-13: {e}")))?;
+            self.device.tx_open(0, &(0..*channels).collect::<Vec<usize>>()).map_err(|e| rejected(format!("UR-13: {e}")))?;
             // RM-25: the first lattice instant at or after the arm instant.
             let n = handle.root_ticks_per_tick().num() as i64;
             let origin = ezsdr_radio::timeline::lattice(a, handle.root_ticks_per_tick()).map_err(|e| rejected(format!("UR-13: {e}")))?;
@@ -456,7 +456,7 @@ impl Provider for UhdRadio {
         // by uhd-rx at its first block.
         let first = rx.filter(|_| !core.links.is_empty());
         if first.is_some() {
-            self.device.rx_start(t0).map_err(|e| rejected(format!("UR-15: {e}")))?;
+            self.device.rx_start(0, t0).map_err(|e| rejected(format!("UR-15: {e}")))?;
         }
         let start = control::Start {
             t0,

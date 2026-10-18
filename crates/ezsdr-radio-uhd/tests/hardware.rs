@@ -326,7 +326,7 @@ fn raw() -> Arc<dyn Device> {
 fn raw_rx(device: &dyn Device, rate: f64, freq: f64) {
     let settings = Settings { rate: Some(rate), freq: Some(freq), gain: Some(0.0), antenna: Some("RX2".to_owned()) };
     device.apply(Dir::Rx, 0, &settings, None).unwrap();
-    device.rx_open(1).unwrap();
+    device.rx_open(0, &[0]).unwrap();
 }
 
 /// The transmitter inside bench.md's RF conditions, or a panic before anything is sent.
@@ -335,7 +335,7 @@ fn raw_tx(device: &dyn Device, rate: f64, freq: f64) {
     let settings = Settings { rate: Some(rate), freq: Some(freq), gain: Some(0.0), antenna: Some("TX/RX".to_owned()) };
     let applied = device.apply(Dir::Tx, 0, &settings, None).unwrap();
     assert!(applied.gain == 0.0 && SAFE_TX_HZ.contains(&applied.freq), "{applied:?}");
-    device.tx_open(1).unwrap();
+    device.tx_open(0, &[0]).unwrap();
 }
 
 fn iq(samples: &[(f32, f32)]) -> Vec<ezsdr_radio_uhd::Iq> {
@@ -363,7 +363,7 @@ fn read(device: &dyn Device, limit: Wall, keep: Option<i64>, until: impl Fn(&Rea
     let mut out = Read::default();
     let begun = Instant::now();
     while begun.elapsed() < limit && !until(&out) {
-        match device.rx_recv(2_000, Wall::from_millis(100)) {
+        match device.rx_recv(0, 2_000, Wall::from_millis(100)) {
             ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
                 out.blocks.push((first_tick, samples[0].len()));
                 if let Some(per) = keep {
@@ -390,11 +390,11 @@ fn hw_b8_raw_rx_timed_stop() {
     raw_rx(&*device, 1e6, 1e9);
     for lead_ms in [0, 1, 5, 20, 100, 500] {
         let start = (device.time_now().unwrap() / 200 + 20_000) * 200;
-        device.rx_start(start).unwrap();
+        device.rx_start(0, start).unwrap();
         let before = read(&*device, Wall::from_secs(2), None, |r| r.end(200).is_some_and(|e| e >= start + 200 * TICKS_PER_MS));
         let issued_before = device.time_now().unwrap();
         let at = issued_before + lead_ms * TICKS_PER_MS;
-        device.rx_stop(if lead_ms == 0 { None } else { Some(at) }).unwrap();
+        device.rx_stop(0, if lead_ms == 0 { None } else { Some(at) }).unwrap();
         let issued = device.time_now().unwrap();
         let after = drain(&*device);
         let end = after.end(200).or(before.end(200)).unwrap();
@@ -417,7 +417,7 @@ fn hw_b8_raw_device_lead() {
     // and not reported late (below UR-21's 2 ms, which the Module never probes).
     let device = raw();
     raw_tx(&*device, 1e6, 1e9);
-    while device.tx_async(Wall::from_millis(10)).unwrap().is_some() {}
+    while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
     let wave = iq(&pn(100));
     for lead_us in [3_000i64, 2_000, 1_500, 1_000, 700, 500, 300, 200, 100, 50, 0] {
         let mut outcomes = Vec::new();
@@ -426,12 +426,12 @@ fn hw_b8_raw_device_lead() {
             let now = device.time_now().unwrap();
             let at = now + lead_us * 200;
             let begun = Instant::now();
-            device.tx_send(&[&wave], Some(at), true, true, Wall::from_millis(100)).unwrap();
+            device.tx_send(0, &[&wave], Some(at), true, true, Wall::from_millis(100)).unwrap();
             send_us.push(begun.elapsed().as_micros());
             let mut codes = Vec::new();
             let waited = Instant::now();
             while waited.elapsed() < Wall::from_millis(100) {
-                match device.tx_async(Wall::from_millis(20)).unwrap() {
+                match device.tx_async(0, Wall::from_millis(20)).unwrap() {
                     Some(report) => {
                         codes.push(format!("{:?}", report.code));
                         if matches!(report.code, ezsdr_radio_uhd::TxCode::BurstAck) {
@@ -458,14 +458,14 @@ fn hw_b8_raw_restart_lead() {
     let device = raw();
     raw_rx(&*device, 1e6, 1e9);
     let start = (device.time_now().unwrap() / 200 + 50_000) * 200;
-    device.rx_start(start).unwrap();
+    device.rx_start(0, start).unwrap();
     let _ = read(&*device, Wall::from_secs(2), None, |r| r.end(200).is_some_and(|e| e >= start + 100 * TICKS_PER_MS));
     let mut rate = 1e6;
     // `reopen` also makes a new receive streamer, as uhd-rx's `cold` switch does (UR-25).
     for (cold, reopen) in [(false, false), (true, false), (true, true)] {
         for lead_ms in [100i64, 50, 25, 10, 5, 2, 1] {
             let stopped = device.time_now().unwrap();
-            device.rx_stop(None).unwrap();
+            device.rx_stop(0, None).unwrap();
             let mut apply_ms = 0.0;
             if cold {
                 rate = if rate == 1e6 { 2e6 } else { 1e6 };
@@ -476,13 +476,13 @@ fn hw_b8_raw_restart_lead() {
             if reopen {
                 let _ = drain(&*device);
                 let begun = Instant::now();
-                device.rx_open(1).unwrap();
+                device.rx_open(0, &[0]).unwrap();
                 println!("B8 restart: rx_open took {:.3} ms", begun.elapsed().as_secs_f64() * 1e3);
             }
             let per = (200e6 / rate) as i64;
             let now = device.time_now().unwrap();
             let at = (now + lead_ms * TICKS_PER_MS) / per * per;
-            device.rx_start(at).unwrap();
+            device.rx_start(0, at).unwrap();
             // Blocks from before `now` are the old stream's tail (the stop takes ~0.4 ms).
             let got = read(&*device, Wall::from_secs(2), None, |r| r.blocks.iter().any(|(t, _)| *t >= now) || r.other.iter().any(|(_, o)| o.starts_with("LateCommand")));
             let first_new = got.blocks.iter().find(|(t, _)| *t >= now).map(|(t, _)| *t);
@@ -497,7 +497,7 @@ fn hw_b8_raw_restart_lead() {
             let _ = read(&*device, Wall::from_millis(200), None, |_| false);
         }
     }
-    device.rx_stop(None).unwrap();
+    device.rx_stop(0, None).unwrap();
     let _ = drain(&*device);
 }
 
@@ -555,14 +555,14 @@ fn hw_b8_raw_timed_tune_phase() {
                 device.apply(dir, 0, &Settings { freq: Some(f0), ..Settings::default() }, timed.then_some(tune)).unwrap();
             }
             let start = tune + 100 * TICKS_PER_MS;
-            device.rx_start(start).unwrap();
+            device.rx_start(0, start).unwrap();
             let burst: Vec<_> = (0..20_000).map(|i| tone_at(start + i * 200)).collect();
-            let sent = device.tx_send(&[&burst], Some(start), true, true, Wall::from_millis(500)).unwrap();
+            let sent = device.tx_send(0, &[&burst], Some(start), true, true, Wall::from_millis(500)).unwrap();
             let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|e| e >= start + 25 * TICKS_PER_MS));
-            device.rx_stop(None).unwrap();
+            device.rx_stop(0, None).unwrap();
             let _ = drain(&*device);
             let mut reports = Vec::new();
-            while let Some(report) = device.tx_async(Wall::from_millis(10)).unwrap() {
+            while let Some(report) = device.tx_async(0, Wall::from_millis(10)).unwrap() {
                 reports.push(format!("{:?}", report.code));
             }
             let rms = (got.samples.iter().map(|(_, s)| f64::from(s[0] * s[0] + s[1] * s[1])).sum::<f64>() / got.samples.len().max(1) as f64).sqrt();
@@ -592,7 +592,7 @@ fn hw_b8_raw_in_flight_window() {
     // at most `window` of samples ahead of the device's time; does the device underflow?
     let device = raw();
     raw_tx(&*device, 2e6, 1e9);
-    while device.tx_async(Wall::from_millis(10)).unwrap().is_some() {}
+    while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
     let wave = iq(&pn(1_000));
     for window_us in [10_000u64, 5_000, 3_000, 2_000, 1_000, 500, 250] {
         let now = device.time_now().unwrap();
@@ -610,14 +610,14 @@ fn hw_b8_raw_in_flight_window() {
                 std::hint::spin_loop();
             }
             let at = (k == 0).then_some(start);
-            device.tx_send(&[&wave], at, k == 0, k + 1 == buffers, Wall::from_millis(100)).unwrap();
-            while let Some(report) = device.tx_async(Wall::ZERO).unwrap() {
+            device.tx_send(0, &[&wave], at, k == 0, k + 1 == buffers, Wall::from_millis(100)).unwrap();
+            while let Some(report) = device.tx_async(0, Wall::ZERO).unwrap() {
                 reports.push(report);
             }
         }
         let waited = Instant::now();
         while waited.elapsed() < Wall::from_millis(200) {
-            if let Some(report) = device.tx_async(Wall::from_millis(20)).unwrap() {
+            if let Some(report) = device.tx_async(0, Wall::from_millis(20)).unwrap() {
                 reports.push(report);
             }
         }
@@ -798,8 +798,8 @@ fn hw_b8_raw_timed_retune() {
     for lead_us in [10_000i64, 5_000, 2_000, 1_000, 500, 200, 0] {
         device.apply(Dir::Rx, 0, &Settings { freq: Some(1e9), ..Settings::default() }, None).unwrap();
         let start = (device.time_now().unwrap() / 200 + 100_000) * 200;
-        device.rx_start(start).unwrap();
-        device.tx_send(&[&tone], Some(start), true, true, Wall::from_millis(500)).unwrap();
+        device.rx_start(0, start).unwrap();
+        device.tx_send(0, &[&tone], Some(start), true, true, Wall::from_millis(500)).unwrap();
         while device.time_now().unwrap() < start + 20 * TICKS_PER_MS {
             std::thread::sleep(Wall::from_micros(200));
         }
@@ -809,9 +809,9 @@ fn hw_b8_raw_timed_retune() {
         device.apply(Dir::Rx, 0, &Settings { freq: Some(1_000_050_000.0), ..Settings::default() }, (lead_us > 0).then_some(at)).unwrap();
         let apply_us = begun.elapsed().as_micros();
         let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|e| e >= start + 55 * TICKS_PER_MS));
-        device.rx_stop(None).unwrap();
+        device.rx_stop(0, None).unwrap();
         let _ = drain(&*device);
-        while device.tx_async(Wall::from_millis(10)).unwrap().is_some() {}
+        while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
         // The tone's frequency over windows of 25 samples.
         let windows: Vec<(i64, f64)> = got.samples.chunks_exact(25).map(|w| {
             let (mut re, mut im) = (0.0f64, 0.0f64);
@@ -943,18 +943,18 @@ fn hw_b8_raw_burst_gap() {
     // without a late report (hw_b8_preemption saw late_at_device at gap 0)?
     let device = raw();
     raw_tx(&*device, 1e6, 1e9);
-    while device.tx_async(Wall::from_millis(10)).unwrap().is_some() {}
+    while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
     let (a, b) = (iq(&pn(1_000)), iq(&pn(100)));
     for gap in [0i64, 1, 2, 3, 5, 10, 20, 50, 100, 1_000] {
         let mut outcomes = Vec::new();
         for _ in 0..4 {
             let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
-            device.tx_send(&[&a], Some(t0), true, true, Wall::from_millis(100)).unwrap();
-            device.tx_send(&[&b], Some(t0 + (1_000 + gap) * 200), true, true, Wall::from_millis(100)).unwrap();
+            device.tx_send(0, &[&a], Some(t0), true, true, Wall::from_millis(100)).unwrap();
+            device.tx_send(0, &[&b], Some(t0 + (1_000 + gap) * 200), true, true, Wall::from_millis(100)).unwrap();
             let mut codes = Vec::new();
             let waited = Instant::now();
             while waited.elapsed() < Wall::from_millis(150) {
-                if let Some(report) = device.tx_async(Wall::from_millis(20)).unwrap() {
+                if let Some(report) = device.tx_async(0, Wall::from_millis(20)).unwrap() {
                     codes.push(format!("{:?}", report.code));
                 }
             }
@@ -1006,7 +1006,7 @@ fn hw_b8_raw_empty_eob_gap() {
     // last data buffer, as at bc0db98.
     let device = raw();
     raw_tx(&*device, 1e6, 1e9);
-    while device.tx_async(Wall::from_millis(10)).unwrap().is_some() {}
+    while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
     let (a, b) = (iq(&pn(1_000)), iq(&pn(100)));
     for empty_eob in [true, false] {
         for gap in [0i64, 1, 2, 3, 5] {
@@ -1015,21 +1015,21 @@ fn hw_b8_raw_empty_eob_gap() {
                 let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
                 let end = t0 + 1_000 * 200;
                 if empty_eob {
-                    device.tx_send(&[&a], Some(t0), true, false, Wall::from_millis(100)).unwrap();
+                    device.tx_send(0, &[&a], Some(t0), true, false, Wall::from_millis(100)).unwrap();
                     // As uhd-tx: the end-of-burst a device lead (2 ms) before the end.
                     while device.time_now().unwrap() < end - 2 * TICKS_PER_MS {
                         std::thread::sleep(Wall::from_micros(100));
                     }
                     let empty: Vec<ezsdr_radio_uhd::Iq> = Vec::new();
-                    device.tx_send(&[&empty], None, false, true, Wall::from_millis(100)).unwrap();
+                    device.tx_send(0, &[&empty], None, false, true, Wall::from_millis(100)).unwrap();
                 } else {
-                    device.tx_send(&[&a], Some(t0), true, true, Wall::from_millis(100)).unwrap();
+                    device.tx_send(0, &[&a], Some(t0), true, true, Wall::from_millis(100)).unwrap();
                 }
-                device.tx_send(&[&b], Some(end + gap * 200), true, true, Wall::from_millis(100)).unwrap();
+                device.tx_send(0, &[&b], Some(end + gap * 200), true, true, Wall::from_millis(100)).unwrap();
                 let mut codes = Vec::new();
                 let waited = Instant::now();
                 while waited.elapsed() < Wall::from_millis(150) {
-                    if let Some(report) = device.tx_async(Wall::from_millis(20)).unwrap() {
+                    if let Some(report) = device.tx_async(0, Wall::from_millis(20)).unwrap() {
                         codes.push(format!("{:?}", report.code));
                     }
                 }
@@ -1055,7 +1055,7 @@ fn hw_b8_cold_change_timing_at_the_extremes() {
         for phase in 0..4i64 {
             let dir = TempDir::new();
             let device = usrp();
-            let spp = |d: &dyn Device| d.rx_packet_samples();
+            let spp = |d: &dyn Device| d.rx_packet_samples(0);
             let selector = block_len.map_or(serde_json::json!({}), |n| serde_json::json!({ "block_len": n }));
             let mut run = session(&bench_profile(&*device, &dir, selector, serde_json::json!({}), true), device.clone());
             past_t0(&mut run, ms(100));

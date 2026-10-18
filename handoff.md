@@ -10,14 +10,31 @@
 - **凍結前の改修（項目1〜8）は完了**（[plan/maintenance/24-prefreeze-audit.md](plan/maintenance/24-prefreeze-audit.md)）．最後の項目8（spec 01〜06 を DA-1 形式に）は 2026-10-14 に完了（[計画31](plan/maintenance/31-item8-kernel-specs.md) §10）．その前の保守の記録は各計画ファイル（Phase 7 クローズから spec 20 までは [audits-2026-10.md](plan/maintenance/audits-2026-10.md)）．
 - **spec 22 の DA-3 手順2（spec 07・09・18 を DA-1 形式に）は 2026-10-15 に完了**（spec 22 の Status 行）．残る手順3・5 と文書監査の残りは §3．
 - **Phase 8（Mock ↔ X310 parity）は Gate P 受理**（owner 2026-10-17）：計画 [plan/phase8/00-overview.md](plan/phase8/00-overview.md)（判断 P1〜P6，段階，bench BP0〜BP5，出口条件），設計 [33-channels-and-streams.md](plan/phase8/33-channels-and-streams.md)（channel と stream，混在 board，`x3xx`，Kernel の変更は `KeyDecl` の番号付き segment だけ）．レビューと調査は `plan/phase8/reviews/`・`research/`．
-- **Phase 8 段階1a，1b-1，1b-2a，1b-2b，1b-3a，1b-3b，1b-3c は完了**（2026-10-17〜18）：1a は X3xx の description を `ezsdr_radio::x3xx` に1か所（profile `x3xx` 0.1.0，rate の格子，CBX の `random`，方向別の start lead），1b-1 は `KeyDecl` の番号の付く segment（SB-2a），1b-2a は `radio` 語彙の channel・stream の key と layout の builder（`ezsdr_radio::channels`，spec 07 RM-27〜RM-33），1b-2b は timeline の channel の集合と D3 の移動（`timeline::Lines`，RM-34）と D14，1b-3a は MockRadio の内部を stream ごとの状態と `Lines` に組み直し（挙動は不変），1b-3b は MockRadio が selector の `keys: "channel"` で新しい key を使う，1b-3c はその instance に channel の移動（RM-34）と SimulationChannel の論理 channel 番号・channel ごとの gain/frequency/phase を足した（始まった segment は全 channel の untimed tune，MR-34）．UHD Module はまだ新しい key を使わない．記録は [計画](plan/phase8/00-overview.md) §8．
+- **Phase 8 段階1a，1b-1，1b-2a，1b-2b，1b-3a，1b-3b，1b-3c，1b-4a は完了**（2026-10-17〜18）：1a は X3xx の description を `ezsdr_radio::x3xx` に1か所（profile `x3xx` 0.1.0，rate の格子，CBX の `random`，方向別の start lead），1b-1 は `KeyDecl` の番号の付く segment（SB-2a），1b-2a は `radio` 語彙の channel・stream の key と layout の builder（`ezsdr_radio::channels`，spec 07 RM-27〜RM-33），1b-2b は timeline の channel の集合と D3 の移動（`timeline::Lines`，RM-34）と D14，1b-3a は MockRadio の内部を stream ごとの状態と `Lines` に組み直し（挙動は不変），1b-3b は MockRadio が selector の `keys: "channel"` で新しい key を使う，1b-3c はその instance に channel の移動（RM-34）と SimulationChannel の論理 channel 番号・channel ごとの gain/frequency/phase を足した（始まった segment は全 channel の untimed tune，MR-34），1b-4a は UHD Module の device 境界を stream の番号・subdev spec・rate の集合・serial・antenna の read-back に広げた（`UhdRadio` の挙動は不変）．UHD Module はまだ新しい key を使わない．記録は [計画](plan/phase8/00-overview.md) §8．
 - 実装：13 crate（`crates/`），schema（`schemas/`），Python package（`python/ezsdr`）．確認の手順は §5．
 - open issue は4件：#51，#56，#59，#62（§3）．
 
 ## 2. 次にすること
 
 1. **開発 PC の移行の残り**（§6.1）：X300 の接続確認と，ホストの NIC・sysctl 設定（owner が sudo で）．
-2. **Phase 8 の段階 1b-4**（UHD Module が layout の key を使う：layout からの subdev spec，stream ごとの streamer と thread〈D15〉，channel ごとの設定と antenna の read-back〈D16〉，open 時の検査〈D5〉，同じ serial の拒否，複数 stream の VH-8 harness．UHD が chain の接続前に rate の集合 `{1.0}` を返しうる点〈INFERRED〉は FakeDevice で扱い，BP0 で実機確認．MockRadio の MR-34 の新しい規則〈始まった segment は全 channel の untimed tune〉は UR-25 の「segment ごとに direction を untimed で設定し直す」に依っているので，1b-4 の UHD Module がそれと一致すること．持ち越し：[1b-3c の報告](plan/phase8/reviews/1b3c-report.md) §10，[修正の報告](plan/phase8/reviews/1b3c-fix-reports.md) の未解決，[裁定](plan/phase8/reviews/1b3c-opus.md) の minor 1〈RX と TX の同じ origin の引き順のテスト，1b-5〉．[設計 33](plan/phase8/33-channels-and-streams.md) §5）．続いて 1b-5（切り替え），2（#51 の設計メモ→#51・D2，#62 と D9 の DDC/DUC の release の規則，#59，A2 のテスト），3（測定記録・比較テスト・測定スイート・ホスト設定の script）．実装役は 1b-4 から DeepSeek V4.1 Flash（`opencode-go/deepseek-v4.1-flash#max`．owner 2026-10-18：OpenCode-Go のサブスクを先に使う），1b-3c の修正の回は Haiku 5.5（`anthropic/claude-haiku-5-5#high`），指示書は orchestrator．
+2. **Phase 8 の段階 1b-4b〜4d**（[設計 33](plan/phase8/33-channels-and-streams.md) §5）．
+   - **4b**：`UhdRadio` の内部を stream ごとの状態・thread（D15）・`timeline::Lines` に組み直す．挙動は不変．thread の名前 `uhd-rx`・`uhd-tx` は Manifest に出るので変えない．
+   - **4c**：selector の `keys: "channel"` のモード．
+     - 中身：layout からの subdev spec，open 時の検査（D5．rate の集合は spec の後），同じ serial の拒否，channel ごとの設定と antenna の記録（D16），D14 の宛先，instance 全体の床．
+     - MockRadio の MR-34（始まった segment は全 channel の untimed tune）が依る UR-25 と一致すること．
+   - **4d**：channel の移動と，複数 stream の VH-8 harness．
+   - **手順**：改めた AGENTS.md §9 で進める．リスクのある段階は，指示書に操作の順序を書き，実装役がテスト計画を先に書き，Sol が先に見る．
+     - 4b の指示書：`~/.cache/ezsdr-fixes/2026-10-18-phase8-1b4b/brief.md`
+     - 4b のテスト計画：順序ごとに DeepSeek を 1 本，4 本ずつ流す（`run-plan.sh`）．
+   - **持ち越し**：
+     - [1b-4a の修正の報告](plan/phase8/reviews/1b4a-fix-reports.md) の §9（修正の回 1・2）．
+     - [1b-3c の報告](plan/phase8/reviews/1b3c-report.md) §10．
+     - [1b-3c の裁定](plan/phase8/reviews/1b3c-opus.md) の minor 1（RX と TX の同じ origin の引き順のテスト，1b-5）．
+   - **その後**：
+     - 1b-5（切り替え）．
+     - 2（#51 の設計メモ→#51・D2，#62 と D9 の DDC/DUC の release の規則，#59，A2 のテスト）．
+     - 3（測定記録・比較テスト・測定スイート・ホスト設定の script）．
+   - **実装役**：DeepSeek V4.1 Flash（`opencode-go/deepseek-v4.1-flash#max`．owner 2026-10-18：OpenCode-Go のサブスクを先に使う）．セルフレビューは Haiku 5.5（`anthropic/claude-haiku-5-5#high`）．
 3. **実機は owner が準備中**（2026-10-14：「全部準備できます」．時間がかかる）．owner が揃ったと言うまで実機は動かさない．用意できる機材（2026-10-16）：X300 × 2，OBX，UBX（壊れているかも），CBX，LFTX・LFRX・BasicTX・BasicRX（どれも2枚ずつ可，ただし他の実験から借りるので手間）．揃ったら最初に BP0（probe，UBX が動くか，2台目の FPGA image の版と HG/XG）．各段階で要るもの（根拠：Vision §67〈`design/vision/11-boundaries-invariants-and-roadmap.md:317-337`〉，`plan/phase7/00-overview.md:103`「One device is enough for §59's claim」）：
    - **8**：1台．Phase 7 と同じ X300（X310 の代わりで可）＋OBX 1枚のループバック（TX/RX → 30 dB 以上の減衰器 → RX2），10 GbE の Linux PC．外部 10 MHz/PPS 不要．X300 は 2026-10-01 から未接続なので，つなぎ直して `uhd_usrp_probe` で確認する（§6）．
    - **8b**：USRP 2台（2台目は X310/X300 なら同じ driver と profile．USRP2 は不要〈owner〉），10 MHz/PPS の分配器（OctoClock など．X3xx の背面から配れるかは未確認），2台の時刻差を測る RF 配線（1つの信号を分配して両方の RX へ，減衰器付き．推測）．2台目の 10 GbE は usrp-lnx03 の X710 の空きポート（§6.2）が使える．
@@ -41,6 +58,7 @@
 | テストのない条件（2026-10-16） | Test 行の網羅調査（[計画32](plan/maintenance/32-test-line-sweep.md)）が `none named` に書いた 130 条件を仕分けた．A1（30 件，Kernel・Sink など）はテストを足し済み（2026-10-16，T01〜T33）．A2（14 件，RM/MR/UR の overflow・再開まわり．D2・#51 と同じ所）と B（4 件，実機が要る）は Phase 8 の計画に入れる．C（82 件）は `none named` のまま | Phase 8（A2 は段階2，B は段階4） |
 | Provider の id を名乗る写し | 受け取り時の拒否で id を名乗る処理が MockRadio・UHD に約15か所ずつ（MR-18・UR-26 の一部は未固定）．1か所で id を渡す形にまとめると減る | 任意 |
 | 規則ごとの確認への記録 | TM-21 の budget/block period 比較は未実装．TM-16c の既存テストは ManualTimeAuthority で paced Authority の規則を固定しない．SC-29 の SOB なし time jump の `requested_target` 不在と SOB 付き time jump の組合せは未固定．Authority の `now/schedule/cancel` の panic の扱いは規則との対応を要確認 | 凍結前の全規則の確認（§4） |
+| feature `uhd` の mutation | `uhd.rs` の規則は mutation の gate の外にある．対象は handle の寿命，streamer の map，空の列の channel 0，`serial`・`rates`・antenna の read-back．mutation の image（`plan/maintenance/tools/remote/Dockerfile`）に libuhd と header がなく，行に feature を渡せないため．今は docker の `--features uhd --lib`・`--test uhd_api` だけで確かめている．image と行に feature を足すか（1b-4a の Sol の再レビュー 2） | Phase 8 の中（1b-4c までに判断） |
 | 負荷に弱いテスト | maintenance/J293 の無変異テスト `ur_26_the_shutdown_s_last_burst_ack_waits_on_the_device_s_clock` が16 shard の負荷下で1回失敗（2026-10-14）．2026-10-17 に手元の `cargo test --workspace` で4回再発（1b-2a で1回，1b-2b の修正中に3回．単独では毎回通る．どの差分も UHD の挙動を変えていない）．原因（2026-10-17）：テストの thread が `now` を読んでから送るまでに負荷で約 18 ms を超えて遅れ，`send`（DropAndFlag）が burst を遅れとして落としていた（plan 30 §5(c)）．テストの verb を `start_repeat`（SendAsapAndFlag）に替えた（J293 は kill のまま）．同じ形の遅れは `ur_21_a_descheduled_timed_send_…` の manual の分岐にもある（再発したら同じ直し）．この類が続くなら plan 30 の段階 B は owner の判断．同じく phase7/U17（`tx.rs` の repeat の終わり）が 2026-10-14 の gate で負荷下に1回生き残り，単独の再実行で kill（変異を見逃すテストは本当の生き残りを隠しうる）．Python の `test_v54_sleep_is_run_time` が Mac で 10 s の上限をわずかに超える記録（2026-10-07，その後は未確認） | 再発時 |
 | server の小さな文言 | `Ran.path` の doc と schema の説明に「書けなかったときは無い」を足せる（第6監査） | 任意 |
 | 後の phase へ | Session replay と artifact store（frontend）．Phase 10 へ（Phase 5 から）：event edge，component parameter を適用する Executor（UC-2〜UC-6，MA-24），component の budget を仮想時間で課す，MA-30 の Action latency．Phase 2 の test ceilings は [implementation-notes.md](plan/phase2/implementation-notes.md) | 各 phase |

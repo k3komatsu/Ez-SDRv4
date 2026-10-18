@@ -356,7 +356,7 @@ impl Tx {
                 // without it this one would play a sample early, so its failure abandons this
                 // burst, the device burst ended (Review Q, NB-Q2).
                 let tail: Vec<&[Iq]> = tail.iter().map(Vec::as_slice).collect();
-                match self.core.device.tx_send(&tail, None, false, false, SEND_TIMEOUT) {
+                match self.core.device.tx_send(0, &tail, None, false, false, SEND_TIMEOUT) {
                     Ok(1) => {}
                     Ok(_) => {
                         self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
@@ -370,7 +370,7 @@ impl Tx {
             }
         }
         let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();
-        let result = if sending > 0 { self.core.device.tx_send(&sent, at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };
+        let result = if sending > 0 { self.core.device.tx_send(0, &sent, at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };
         // Held only once the samples before it went out: after a send that failed or came
         // up short it would play straight after what the device took (Review P, NB-1).
         let tail: Option<Vec<Vec<Iq>>> = hold.then(|| slices.iter().map(|ch| ch[sending..].to_vec()).collect());
@@ -484,7 +484,7 @@ impl Tx {
             Some(tail) => tail.iter().map(Vec::as_slice).collect(),
             None => vec![&empty; self.channels.max(1)],
         };
-        if let Err(error) = self.core.device.tx_send(&buffers, None, false, true, SEND_TIMEOUT) {
+        if let Err(error) = self.core.device.tx_send(0, &buffers, None, false, true, SEND_TIMEOUT) {
             self.core.device_failed(None, "tx_burst", &error);
         }
     }
@@ -654,7 +654,7 @@ impl Tx {
         self.tracker = None;
         if let Some(to) = switch.to.filter(|_| !self.core.is_lost()) {
             let reopened = if to.configured || to.channels() != self.channels {
-                let opened = if to.configured { Ok(()) } else { self.core.device.tx_open(to.channels()) };
+                let opened = if to.configured { Ok(()) } else { self.core.device.tx_open(0, &(0..to.channels()).collect::<Vec<usize>>()) };
                 opened.map(|()| self.unacked.clear())
             } else {
                 Ok(())
@@ -685,7 +685,7 @@ impl Tx {
     /// UR-28: every report recorded; underflows and late bursts become events.
     fn reports(&mut self, timeout: Wall) {
         while !self.core.is_lost() {
-            match self.core.device.tx_async(timeout) {
+            match self.core.device.tx_async(0, timeout) {
                 Ok(Some(report)) => self.report(report),
                 Ok(None) => break,
                 // UR-28: a failed read is the device's loss or a recorded error, never "no report".
@@ -831,7 +831,7 @@ mod tests {
         for code in [crate::device::TxCode::Underflow, crate::device::TxCode::UnderflowInPacket,
             crate::device::TxCode::SeqError, crate::device::TxCode::SeqErrorInBurst] {
             let (core, device, time, events) = super::super::test_support::rig();
-            device.tx_open(1).unwrap();
+            device.tx_open(0, &[0]).unwrap();
             let clock = core.register(Dir::Tx, 200, 0).unwrap();
             let (_to_tx, cmds) = std::sync::mpsc::channel();
             let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
@@ -864,7 +864,7 @@ mod tests {
         // 22 000's, so neither "now when the report was read" nor a tick read without
         // that origin, nor a rounding up, can pass for the tick's floor.
         let (core, device, time, events) = super::super::test_support::rig();
-        device.tx_open(1).unwrap();
+        device.tx_open(0, &[0]).unwrap();
         let clock = core.register(Dir::Tx, 200, 1_000_003).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
@@ -899,7 +899,7 @@ mod tests {
     #[test]
     fn ur_22_an_expired_timeline_is_not_resumed_before_its_report() {
         let (core, device, time, _) = super::super::test_support::rig();
-        device.tx_open(1).unwrap();
+        device.tx_open(0, &[0]).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
@@ -918,7 +918,7 @@ mod tests {
         // Intentionally starve the fake; the test does not require a millisecond
         // host wake-up. Synchronize the manual decision clock to the fake afterward.
         let (core, device, time, _) = super::super::test_support::rig();
-        device.tx_open(1).unwrap();
+        device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
@@ -927,7 +927,7 @@ mod tests {
         burst.repeat = true;
         // Prime an untimed device burst to make starvation independent of a
         // host deadline for the initial timed SOB (covered by UR-21 tests).
-        device.tx_send(&[&burst.samples[0][..2_000]], None, true, false, std::time::Duration::from_secs(1)).unwrap();
+        device.tx_send(0, &[&burst.samples[0][..2_000]], None, true, false, std::time::Duration::from_secs(1)).unwrap();
         tx.open = Some(super::Open { held: burst, next: 2_000, first: false });
         tx.remember_burst(TimePoint::new(clock.domain, 0));
         std::thread::sleep(std::time::Duration::from_millis(60));
@@ -951,7 +951,7 @@ mod tests {
             (LatePolicy::RejectAtPlan, "plan_violation"),
             (LatePolicy::SendAsapAndFlag, "send_asap")] {
             let (core, device, time, events) = super::super::test_support::rig();
-            device.tx_open(1).unwrap();
+            device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
             let clock = core.register(Dir::Tx, 200, 0).unwrap();
             let (_to_tx, cmds) = std::sync::mpsc::channel();
@@ -982,7 +982,7 @@ mod tests {
         // read: the switch at the plan's cut, to the clock the booking registered.
         use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Stream, NO_RELEASE};
         let (core, device, _, _) = super::super::test_support::rig();
-        device.tx_open(1).unwrap();
+        device.tx_open(0, &[0]).unwrap();
         let c0 = core.register(Dir::Tx, 200, 0).unwrap();
         let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
         {
@@ -1014,7 +1014,7 @@ mod tests {
         // registered ends at its origin at once, with no later booking needed.
         use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Stream, NO_RELEASE};
         let (core, device, _, _) = super::super::test_support::rig();
-        device.tx_open(1).unwrap();
+        device.tx_open(0, &[0]).unwrap();
         let c0 = core.register(Dir::Tx, 200, 0).unwrap();
         let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
         let mut streams = lock(&core.streams);
@@ -1039,7 +1039,7 @@ mod tests {
         for refused in [false, true] {
             let faults = if refused { vec![crate::device::FakeFault::WrongRate { claimed: 2e6, applied: 2e6 - 1_000.0, nth: 0 }] } else { Vec::new() };
             let (core, device, _, _) = super::super::test_support::rig_with(FakeConfig { faults, ..FakeConfig::default() }, Vec::new());
-            device.tx_open(1).unwrap();
+            device.tx_open(0, &[0]).unwrap();
             let s = |n: i64| core.ticks(n * 1_000_000_000);
             let c0 = core.register(Dir::Tx, 200, 0).unwrap();
             let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
@@ -1085,7 +1085,7 @@ mod tests {
     #[test]
     fn ur_21_first_dispatch_cannot_move_past_a_cold_switch() {
         let (core, device, time, _) = super::super::test_support::rig();
-        device.tx_open(1).unwrap();
+        device.tx_open(0, &[0]).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
@@ -1105,7 +1105,7 @@ mod tests {
     #[test]
     fn ur_21_first_dispatch_preserves_an_on_time_start() {
         let (core, device, time, events) = super::super::test_support::rig();
-        device.tx_open(1).unwrap();
+        device.tx_open(0, &[0]).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
@@ -1122,7 +1122,7 @@ mod tests {
     #[test]
     fn ur_21_first_dispatch_refuses_a_moved_start_collision() {
         let (core, device, time, events) = super::super::test_support::rig();
-        device.tx_open(1).unwrap();
+        device.tx_open(0, &[0]).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
@@ -1146,7 +1146,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(FakeConfig::default()));
         let clocks = Arc::new(ClockRegistry::new());
         let authority = DeviceAuthority::new(device.clone(), clocks.clone(), "internal", "internal", "fake").unwrap();
-        device.tx_open(1).unwrap();
+        device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let mut kinds = EventKindRegistry::with_kernel_kinds();
         ezsdr_radio::register(&mut ezsdr_kernel::module_api::ModuleRegistry::new(), &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
@@ -1201,7 +1201,7 @@ mod tests {
         for lost in [true, false] {
             for tail in [None, Some(vec![vec![[0.25, 0.0]]])] {
                 let (core, device, _, events) = super::super::test_support::rig();
-                device.tx_open(1).unwrap();
+                device.tx_open(0, &[0]).unwrap();
                 let clock = core.register(Dir::Tx, 200, 0).unwrap();
                 let (_to_tx, cmds) = std::sync::mpsc::channel();
                 let tx = Tx::new(core.clone(), cmds, Some(clock), 1);
@@ -1225,7 +1225,7 @@ mod tests {
     #[test]
     fn ur_29_eob_loss_during_switch_stops_device_calls() {
         let (core, device, _, _) = super::super::test_support::rig();
-        device.tx_open(1).unwrap();
+        device.tx_open(0, &[0]).unwrap();
         let old = core.register(Dir::Tx, 200, 0).unwrap();
         core.clocks.end(old.domain, core.at(20_000_000)).unwrap();
         let new = core.register(Dir::Tx, 100, 30_000_000).unwrap();
@@ -1248,7 +1248,7 @@ mod tests {
     #[test]
     fn ur_29_eob_loss_from_report_prevents_next_burst_send() {
         let (core, device, _, _) = super::super::test_support::rig();
-        device.tx_open(1).unwrap();
+        device.tx_open(0, &[0]).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), cmds, Some(clock), 1);
@@ -1328,7 +1328,7 @@ mod tests {
     #[test]
     fn ur_28_reopened_streamer_drops_previous_correlations() {
         let (core, device, _, _) = super::super::test_support::rig();
-        device.tx_open(1).unwrap();
+        device.tx_open(0, &[0]).unwrap();
         let old = core.register(Dir::Tx, 200, 0).unwrap();
         core.clocks.end(old.domain, core.at(20_000_000)).unwrap();
         let new = core.register(Dir::Tx, 100, 30_000_000).unwrap();
@@ -1352,7 +1352,7 @@ mod tests {
     fn ur_28_delayed_time_error_uses_its_original_clock() {
         for next_n in [Some(100), Some(200), None] {
             let (core, device, _, events) = super::super::test_support::rig();
-            device.tx_open(2).unwrap();
+            device.tx_open(0, &[0, 1]).unwrap();
             let old = core.register(Dir::Tx, 200, 0).unwrap();
             let target = TimePoint::new(old.domain, 10_000);
             core.clocks.end(old.domain, core.at(20_000_000)).unwrap();

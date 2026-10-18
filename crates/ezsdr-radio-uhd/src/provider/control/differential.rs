@@ -192,8 +192,8 @@ fn run(sequence: &Sequence) -> Record {
     let fake = FakeConfig { command_queue: usize::MAX, ..FakeConfig::default() };
     let (core, device, time, _) = super::super::test_support::rig_with(fake, vec![Arc::new(NoLink)]);
     let tx = core.register(Dir::Tx, 200, 0).unwrap();
-    device.rx_open(1).unwrap();
-    device.tx_open(1).unwrap();
+    device.rx_open(0, &[0]).unwrap();
+    device.tx_open(0, &[0]).unwrap();
     let (to_tx, from_tx) = channel();
     let mut config = core.description.defaults.clone();
     config.insert(key("radio.tx.channels"), Value::from(1));

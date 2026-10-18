@@ -553,6 +553,9 @@ impl Device for Scripted {
     fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
     fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
     fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { self.inner.front_end(dir, chan) }
+    fn serial(&self) -> Result<String, DeviceError> { self.inner.serial() }
+    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> { self.inner.set_subdev_spec(dir, markup) }
+    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> { self.inner.rates(dir, chan) }
     fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> { self.inner.set_sources(clock, time) }
     fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
     fn time_now(&self) -> Result<i64, DeviceError> { Ok(lock(&self.world).now) }
@@ -572,15 +575,17 @@ impl Device for Scripted {
         Ok(applied)
     }
 
-    fn rx_open(&self, channels: usize) -> Result<(), DeviceError> {
+    /// The stream number is not modelled: this rig runs the single stream uhd-rx opens
+    /// today (UR-2, design 33 D5's streams arrive in 1b-4b).
+    fn rx_open(&self, _stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         let mut world = lock(&self.world);
-        world.call(format!("rx_open {channels}"));
+        world.call(format!("rx_open {}", channels.len()));
         // A new streamer: nothing the old one had in flight is delivered.
         world.runs.retain(|run| run.end.is_none());
         Ok(())
     }
 
-    fn rx_start(&self, at: i64) -> Result<(), DeviceError> {
+    fn rx_start(&self, _stream: usize, at: i64) -> Result<(), DeviceError> {
         let mut world = lock(&self.world);
         if world.lost {
             return Err(DeviceError { lost: true, message: "scripted: the device is gone".to_owned() });
@@ -604,13 +609,13 @@ impl Device for Scripted {
         Ok(())
     }
 
-    fn rx_packet_samples(&self) -> usize {
+    fn rx_packet_samples(&self, _stream: usize) -> usize {
         0
     }
 
     /// The X3x0 stops a running stream at once, whatever the stop's time (design-notes §11
     /// F1); a start still queued is not cancelled (#56).
-    fn rx_stop(&self, at: Option<i64>) -> Result<(), DeviceError> {
+    fn rx_stop(&self, _stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
         let mut world = lock(&self.world);
         if world.lost {
             return Err(DeviceError { lost: true, message: "scripted: the device is gone".to_owned() });
@@ -623,7 +628,7 @@ impl Device for Scripted {
         Ok(())
     }
 
-    fn rx_recv(&self, n: usize, timeout: Wall) -> RxRecv {
+    fn rx_recv(&self, _stream: usize, n: usize, timeout: Wall) -> RxRecv {
         let mut world = lock(&self.world);
         let gone = || RxRecv::Failed(DeviceError { lost: true, message: "scripted: the device is gone".to_owned() });
         if world.lost {
@@ -700,11 +705,11 @@ impl Device for Scripted {
         RxRecv::Samples { first_tick: origin + k * step, samples }
     }
 
-    fn tx_open(&self, channels: usize) -> Result<(), DeviceError> { self.inner.tx_open(channels) }
-    fn tx_send(&self, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: Wall) -> Result<usize, DeviceError> {
-        self.inner.tx_send(samples, at, sob, eob, timeout)
+    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.tx_open(stream, channels) }
+    fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: Wall) -> Result<usize, DeviceError> {
+        self.inner.tx_send(stream, samples, at, sob, eob, timeout)
     }
-    fn tx_async(&self, timeout: Wall) -> Result<Option<TxReport>, DeviceError> { self.inner.tx_async(timeout) }
+    fn tx_async(&self, stream: usize, timeout: Wall) -> Result<Option<TxReport>, DeviceError> { self.inner.tx_async(stream, timeout) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
 }
@@ -771,8 +776,8 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
         }
     }
     // `prepare` opened the streamer for one channel, `start` started it at T0 (UR-15).
-    device.rx_open(1).unwrap();
-    device.rx_start(T0).unwrap();
+    device.rx_open(0, &[0]).unwrap();
+    device.rx_start(0, T0).unwrap();
     let handle = core.clocks.declare_sample_clock(core.id.child("rx").unwrap(), core.root, Rational::new(200, 1).unwrap()).unwrap();
     let mut rx = Rx::new(core.clone(), cmds, Some((handle, 1, T0)), None);
     for turn in 0.. {

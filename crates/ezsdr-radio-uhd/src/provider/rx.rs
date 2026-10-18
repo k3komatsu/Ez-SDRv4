@@ -238,7 +238,7 @@ impl Rx {
             }
         }
         // A cut booked during the wait cuts this block too: `samples` reads the plan (RM-16).
-        let result = self.core.device.rx_recv(self.recv_len(), self.recv_timeout());
+        let result = self.core.device.rx_recv(0, self.recv_len(), self.recv_timeout());
         self.receive(result);
         Turn::Busy
     }
@@ -278,7 +278,7 @@ impl Rx {
         let configured = if next.configured {
             Ok(())
         } else {
-            let reopened = if channels != self.opened { self.core.device.rx_open(channels) } else { Ok(()) };
+            let reopened = if channels != self.opened { self.core.device.rx_open(0, &(0..channels).collect::<Vec<usize>>()) } else { Ok(()) };
             reopened.and_then(|()| next.configure(&self.core, Dir::Rx).map(|_| ()))
         };
         if let Err(error) = configured {
@@ -293,7 +293,7 @@ impl Rx {
         }
         self.from = origin.saturating_add(1);
         self.opened = channels;
-        if let Err(error) = self.core.device.rx_start(origin) {
+        if let Err(error) = self.core.device.rx_start(0, origin) {
             self.core.device_failed(None, "update_parameter", &error);
             return true;
         }
@@ -421,7 +421,7 @@ impl Rx {
                 stream.report(Pending::MissedStart);
                 self.core.emit(&self.core.rx_id, kinds::LATE_COMMAND, Severity::Warning, payload);
                 self.core.timing(json!({ "what": "rx_restart", "requested": stream.start, "at": restart }));
-                if let Err(error) = self.core.device.rx_start(restart) {
+                if let Err(error) = self.core.device.rx_start(0, restart) {
                     self.core.device_failed(None, "start", &error);
                 }
             }
@@ -598,7 +598,7 @@ fn stop_at_cut(core: &Core, cut: i64) -> Option<i64> {
     }
     let now = core.now();
     core.timing(json!({ "what": "rx_stop_untimed", "cut": cut, "at": now }));
-    match core.device.rx_stop(None) {
+    match core.device.rx_stop(0, None) {
         Ok(()) => {
             lock(&core.rec).applied.push(json!({ "key": "rx_stop", "at": core.at(cut), "issued": core.at(now) }));
             // The device produces samples until the stop reaches it (the bench: ~0.4 ms
@@ -654,7 +654,7 @@ mod tests {
         let (to_rx, cmds) = std::sync::mpsc::channel();
         // No `Provider::stop` comes unless a test sends it.
         std::mem::forget(to_rx);
-        core.device.rx_open(channels).unwrap();
+        core.device.rx_open(0, &(0..channels).collect::<Vec<usize>>()).unwrap();
         (Rx::new(core.clone(), cmds, Some((handle, channels, 0)), None), clock)
     }
 
@@ -1116,7 +1116,7 @@ mod tests {
         assert!(lock(&core.streams).lines[Dir::Rx as usize].as_ref().unwrap().items.iter().any(|item| item.seq == 1 && item.refused));
         assert!(rx.begin());
         let starts: Vec<_> = device.calls().into_iter().filter(|c| c.starts_with("rx_start ")).collect();
-        assert_eq!(starts, [format!("rx_start {}", ms(65))]);
+        assert_eq!(starts, [format!("rx_start 0 {}", ms(65))]);
         assert_eq!(rx.stream.as_ref().map(|stream| stream.config.ratio.num()), Some(100), "the refused rate is the stream's (KC-27)");
     }
 
@@ -1176,7 +1176,7 @@ mod tests {
             rx.poll();
             rx.receive(samples(0, 10_000));
             assert!(rx.begin());
-            assert!(device.calls().contains(&format!("rx_start {}", ms(65))));
+            assert!(device.calls().contains(&format!("rx_start 0 {}", ms(65))));
             // The `Stop` at 20 ms cuts the planned segment at its origin: the plan drops it.
             time.advance_to(core.at(ms(20))).unwrap();
             plan(&core, &[(0, Some(10_000), None)]);
