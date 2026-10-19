@@ -10,16 +10,18 @@ use ezsdr_kernel::module_api::{InputStore, ModuleError, StopMode};
 use ezsdr_kernel::spec::{Key, Scalar, Value};
 use ezsdr_kernel::stream::{DataLink, Direction};
 use ezsdr_kernel::time::{ClockRegistry, Rational, TimeAuthority, TimePoint};
-use ezsdr_radio::device::DeviceDescription;
 use ezsdr_radio::payloads::CommandRejectedPayload;
 use ezsdr_radio::timeline::{self, Config, Item, Kind, Line, StreamKey, NO_RELEASE};
 use ezsdr_radio::{keys, kinds};
 use serde_json::{Value as Json, json};
 
 use super::control::{ColdConfig, Planned};
+use super::mode::Mode;
 use crate::device::{Device, DeviceError, Dir, Settings, decimation};
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    #[cfg(test)]
+    super::test_support::note_lock(std::ptr::from_ref(m) as usize);
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -103,6 +105,12 @@ pub(crate) struct StreamState {
     pub delivered: Option<(i64, Config, i64)>,
     /// The owner has no stream and nothing planned to begin (UR-25).
     pub idle: bool,
+    /// uhd-control's enable from no stream tried to open the receive streamer, so the owner's
+    /// record of the open set may be wrong whatever that open and its configuration gave: uhd-rx
+    /// distrusts the record at its next begin and opens the streamer again, unless that segment
+    /// is one uhd-control configured, whose set it then records; the stored rate-check outcome
+    /// is re-enforced (UR-13).
+    pub stale: bool,
     /// The transmit clocks registered, in the order of the transmit plan's segments, and
     /// whether each has ended (RM-25).
     pub clocks: Vec<(Clock, bool)>,
@@ -235,8 +243,10 @@ impl Streams {
             let config = segment.by.and_then(|by| state.configs.get(&by));
             Planned {
                 segment: *segment,
+                k: stream.1 as usize,
                 settings: config.map(|(settings, _)| settings.clone()),
                 configured: config.is_some_and(|(_, configured)| *configured),
+                refused: segment.by.is_some_and(|by| line.items.iter().any(|item| item.seq == by && item.refused)),
                 clock: (stream.0 == Direction::Tx).then(|| state.clocks.get(index).map(|(clock, _)| *clock)).flatten(),
             }
         }).collect()
@@ -340,6 +350,8 @@ impl Default for Records {
 pub(crate) struct Core {
     pub device: Arc<dyn Device>,
     pub id: ResourceId,
+    /// Stream 0's node of each direction (RM-29): `<id>/rx` and `<id>/tx` under the
+    /// current keys, `<id>/rx/s0` and `<id>/tx/s0` under the layout.
     pub rx_id: ResourceId,
     pub tx_id: ResourceId,
     pub mcr: u64,
@@ -350,12 +362,16 @@ pub(crate) struct Core {
     pub overflow: EventHandle,
     pub inputs: Arc<dyn InputStore>,
     pub links: Vec<Arc<dyn DataLink>>,
-    pub description: DeviceDescription,
+    /// The key set this instance presents (RM-26, RM-27).
+    pub mode: Mode,
     pub block_len: usize,
     pub rec: Mutex<Records>,
     pub streams: Mutex<Streams>,
     /// Held burst starts per transmit clock, for UR-21's duplicate refusal.
     pub held: Mutex<BTreeSet<(ClockDomainId, i64)>>,
+    /// UR-13's rate-set comparison, once per direction: `None` until the direction's
+    /// first streamer opened, then the check's outcome (design 33 D5).
+    rates: Mutex<[Option<Result<(), String>>; 2]>,
     /// `S`, the end of the device's start-up (UR-13).
     pub start_up: AtomicI64,
     lost: AtomicBool,
@@ -372,10 +388,10 @@ impl Core {
         events: Arc<dyn EventSink>,
         inputs: Arc<dyn InputStore>,
         links: Vec<Arc<dyn DataLink>>,
-        description: DeviceDescription,
+        mode: Mode,
     ) -> Result<Core, ModuleError> {
-        let rx_id = id.child("rx").expect("a valid stream id");
-        let tx_id = id.child("tx").expect("a valid stream id");
+        let rx_id = mode.stream_node(&id, Dir::Rx, 0);
+        let tx_id = mode.stream_node(&id, Dir::Tx, 0);
         // UR-12: the rx node is below the instance root the Kernel handed this
         // instance, so the bound view resolves it; a refusal is a Module error, not a
         // Kernel event (item 3).
@@ -384,7 +400,7 @@ impl Core {
             .map_err(|error| ModuleError::rejected(format!("UR-12: the rx stream's event handle: {error}")))?;
         Ok(Core {
             mcr: device.master_clock_rate(),
-            block_len: description.block_len as usize,
+            block_len: mode.block_len() as usize,
             device,
             id,
             rx_id,
@@ -396,10 +412,11 @@ impl Core {
             overflow,
             inputs,
             links,
-            description,
+            mode,
             rec: Mutex::new(Records::default()),
             streams: Mutex::new(Streams::default()),
             held: Mutex::new(BTreeSet::new()),
+            rates: Mutex::new([None, None]),
             start_up: AtomicI64::new(i64::MIN),
             lost: AtomicBool::new(false),
         })
@@ -500,11 +517,7 @@ impl Core {
 
     /// A direction's full configuration from a configuration map (UR-12).
     pub fn settings(config: &BTreeMap<Key, Value>, dir: Dir) -> Settings {
-        let number = |name: &str| match config.get(&key(&format!("radio.{}.{name}", dir.name()))) {
-            Some(Value::Scalar(Scalar::Num(v))) => Some(v.get()),
-            Some(Value::Scalar(Scalar::Int(v))) => Some(*v as f64),
-            _ => None,
-        };
+        let number = |name: &str| config.get(&key(&format!("radio.{}.{name}", dir.name()))).and_then(Value::as_scalar).and_then(super::mode::scalar_number);
         Settings {
             rate: number("sample_rate_hz"),
             freq: number("frequency_hz"),
@@ -514,6 +527,13 @@ impl Core {
                 _ => None,
             },
         }
+    }
+
+    /// The node stream `k` of `dir` reports from (RM-29, UR-17, UR-20): `<id>/rx` and
+    /// `<id>/tx` under the current keys, `<id>/rx/s<k>` and `<id>/tx/s<k>` under the layout.
+    /// The one place a Provider reads a stream's event source from.
+    pub fn stream_node(&self, dir: Dir, k: usize) -> ResourceId {
+        self.mode.stream_node(&self.id, dir, k)
     }
 
     pub fn channels(config: &BTreeMap<Key, Value>, dir: Dir) -> usize {
@@ -527,41 +547,90 @@ impl Core {
         }
     }
 
-    /// **Configuring a direction** (UR-12): the whole configuration on every channel,
-    /// untimed, read back; the rate must be exactly the claim, a decimation of the
-    /// master clock ([`crate::device::decimation`]). Returns that decimation `N`.
-    pub fn configure(&self, dir: Dir, channels: usize, settings: &Settings) -> Result<i64, DeviceError> {
-        let claim = settings.rate.unwrap_or(0.0);
-        for chan in 0..channels {
-            let applied = self.device.apply(dir, chan, settings, None)?;
+    /// UR-13, design 33 D5: the rate set the device reports for one channel of `dir` is the
+    /// profile's, compared by set once — after the direction's first streamer opens — and
+    /// the outcome held for every later open. A mismatch is the refusal `UR-13:`.
+    pub fn check_rates(&self, dir: Dir, chan: usize) -> Result<(), DeviceError> {
+        {
+            let checks = lock(&self.rates);
+            if let Some(outcome) = &checks[dir as usize] {
+                return outcome.clone().map_err(DeviceError::failed);
+            }
+        }
+        // The device is read outside the lock: no device call is made under one (UR-25).
+        // Two directions never share a slot and a repeated read of one answers the same
+        // set, so the first outcome stored is the one every later open sees.
+        let outcome = match self.device.rates(dir, chan) {
+            Ok(ranges) if ezsdr_radio::device::rate_set_matches(self.mode.rates(), &ranges) => Ok(()),
+            Ok(_) => Err(format!("UR-13: the {} rates the device reports are not the profile's rate set", dir.name())),
+            Err(error) => Err(format!("UR-13: {}", error.message)),
+        };
+        lock(&self.rates)[dir as usize] = Some(outcome.clone());
+        outcome.map_err(DeviceError::failed)
+    }
+
+    /// UR-13, UR-30: whether a direction's rate set has been compared yet; the Manifest's
+    /// `device` section records it.
+    pub fn rates_checked(&self, dir: Dir) -> bool {
+        lock(&self.rates)[dir as usize].is_some()
+    }
+
+    /// **Configuring a direction** (UR-12): each given channel's own settings, untimed,
+    /// read back, the applied rows under the mode's keys — the rate's is stream `k`'s key,
+    /// a channel's setting its own —; the stream's rate must be exactly
+    /// the claim on every channel, a decimation of the master clock
+    /// ([`crate::device::decimation`]). Returns that decimation `N`.
+    pub fn configure(&self, dir: Dir, channels: &[(usize, Settings)], rate: f64, k: usize) -> Result<i64, DeviceError> {
+        for (chan, settings) in channels {
+            let applied = self.device.apply(dir, *chan, settings, None)?;
             let at = self.at(self.now());
             let mut rec = lock(&self.rec);
             for (name, claimed, read) in [
-                ("sample_rate_hz", settings.rate, applied.rate),
+                ("sample_rate_hz", Some(rate), applied.rate),
                 ("frequency_hz", settings.freq, applied.freq),
                 ("gain_db", settings.gain, applied.gain),
             ] {
                 rec.applied.push(json!({
-                    "key": format!("radio.{}.{name}", dir.name()), "channel": chan,
+                    "key": self.mode.applied_key(dir, *chan, k, name), "channel": chan,
                     "claimed": claimed, "read_back": read, "difference": claimed.map(|c| read - c), "at": at,
                 }));
             }
             if let Some(antenna) = &settings.antenna {
-                rec.applied.push(json!({ "key": format!("radio.{}.antenna", dir.name()), "channel": chan, "claimed": antenna, "at": at }));
+                if self.mode.is_layout() {
+                    // design 33 D16: the read-back is recorded and compared; a front end
+                    // whose getter disagrees with the claimed antenna is refused.
+                    rec.applied.push(json!({
+                        "key": self.mode.applied_key(dir, *chan, k, "antenna"), "channel": chan,
+                        "claimed": antenna, "read_back": applied.antenna, "at": at,
+                    }));
+                } else {
+                    rec.applied.push(json!({ "key": self.mode.applied_key(dir, *chan, k, "antenna"), "channel": chan, "claimed": antenna, "at": at }));
+                }
             }
             drop(rec);
-            if applied.rate != claim {
-                return Err(DeviceError::failed(format!("UR-12: the device applied {} S/s for the claimed {claim}", applied.rate)));
+            if applied.rate != rate {
+                return Err(DeviceError::failed(format!("UR-12: the device applied {} S/s for the claimed {rate}", applied.rate)));
+            }
+            if self.mode.is_layout() {
+                if let (Some(antenna), read) = (settings.antenna.as_ref(), applied.antenna.as_deref()) {
+                    if read != Some(antenna.as_str()) {
+                        return Err(DeviceError::failed(format!(
+                            "UR-12: the device reads back {} for the claimed {antenna} antenna of {}",
+                            read.unwrap_or("no antenna"),
+                            self.mode.applied_key(dir, *chan, k, "antenna")
+                        )));
+                    }
+                }
             }
         }
-        decimation(self.mcr, claim)
+        decimation(self.mcr, rate)
             .map(|n| n as i64)
-            .ok_or_else(|| DeviceError::failed(format!("UR-12: {claim} S/s is no decimation of {} Hz", self.mcr)))
+            .ok_or_else(|| DeviceError::failed(format!("UR-12: {rate} S/s is no decimation of {} Hz", self.mcr)))
     }
 
     /// Declares and registers a stream clock with origin `origin` (UR-12, RM-25).
     pub fn register(&self, dir: Dir, n: i64, origin: i64) -> Result<Clock, String> {
-        let stream = self.id.child(dir.name()).map_err(|e| e.to_string())?;
+        let stream = self.mode.stream_node(&self.id, dir, 0);
         let ratio = Rational::new(n as u64, 1).map_err(|e| e.to_string())?;
         let handle = self.clocks.declare_sample_clock(stream, self.root, ratio).map_err(|e| e.to_string())?;
         let domain = self.clocks.register_sample_clock(&handle, origin).map_err(|e| e.to_string())?;

@@ -555,8 +555,8 @@
   "id": "U10",
   "name": "a read-back rate difference accepted",
   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "if applied.rate != claim {",
-  "new": "if false && applied.rate != claim {",
+  "old": "if applied.rate != rate {",
+  "new": "if false && applied.rate != rate {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_12_a_rate_the_device_does_not_apply_is_refused"
@@ -655,8 +655,8 @@
   "id": "U20",
   "name": "the command queue not counted",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "if pending + self.channels_at(dir, e) > depth {",
-  "new": "if false && pending + self.channels_at(dir, e) > depth {",
+  "old": "        if pending + cost > depth {",
+  "new": "        if false && pending + cost > depth {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_24_hardware_timed_updates"
@@ -847,8 +847,8 @@
   "id": "U39",
   "name": "enabling a direction opens the streamer without configuring it",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "if let Err(error) = opened.and_then(|()| self.core.configure(dir, channels, &settings)) {",
-  "new": "if let Err(error) = { let _ = &settings; opened } {",
+  "old": "            if let Err(error) = opened.and_then(|()| self.core.configure(dir, &entries, rate, k)) {",
+  "new": "            if let Err(error) = { let _ = &entries; opened } {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_enabling_tx_applies_the_configuration"
@@ -957,8 +957,8 @@
   "id": "R05",
   "name": "the switch ignores held commands due by e2 (L09)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "        for (&order, timed) in self.held.iter().filter(|(_, timed)| timed.dir == dir) {\n            config.book(order, timed.settings());",
-  "new": "        for (&order, timed) in self.held.iter().filter(|(_, timed)| false && timed.dir == dir) {\n            config.book(order, timed.settings());",
+  "old": "            .filter(|(_, timed)| timed.dir == dir)",
+  "new": "            .filter(|(_, timed)| false && timed.dir == dir)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_the_switch_applies_the_configuration_in_effect_at_e2"
@@ -1047,8 +1047,8 @@
   "id": "R14",
   "name": "the receive streamer reopened at every segment (P1-3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "let reopened = if channels != self.opened {",
-  "new": "let reopened = if channels == channels {",
+  "old": "            let reopened = if channels != self.opened {",
+  "new": "            let reopened = if channels == channels {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"
@@ -1067,8 +1067,8 @@
   "id": "R21",
   "name": "UR-24's depth counted one per update again (Review M, N-7)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "if pending + self.channels_at(dir, e) > depth {",
-  "new": "if self.held.len() + self.released.len() + 1 > depth + 0 * pending {",
+  "old": "        if pending + cost > depth {",
+  "new": "        if self.held.len() + self.released.len() + 1 > depth + 0 * pending {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_24_the_queue_counts_a_command_per_channel"
@@ -1079,16 +1079,6 @@
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
   "old": "                if !front_end.starts_with(element.board.uhd_name()) {",
   "new": "                if false && !front_end.starts_with(element.board.uhd_name()) {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
- },
- {
-  "id": "R23",
-  "name": "UR-5's channel-count check removed (the one-CBX bench)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "if have < need {",
-  "new": "if false && have < need {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
@@ -1115,20 +1105,20 @@
  },
  {
   "id": "R26",
-  "name": "UR-5 checks every device channel, slot B's unknown board too (Review of 09f11b4, P2-2)",
+  "name": "UR-5's element lookup falls back to element 0, which panics on a direction with no elements (Review of 09f11b4, P2-2)",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "            for (chan, element) in elements.iter().enumerate() {",
-  "new": "            for chan in 0..have {\n                let element = elements.get(chan).unwrap_or(&elements[0]);",
+  "old": "                    for (chan, element) in elements.iter().enumerate() {\n                        let front_end = device.front_end(dir, chan).map_err(|e| rejected(format!(\"UR-5: {}\", e.message)))?;\n                        if !front_end.starts_with(element.board.uhd_name()) {",
+  "new": "                    for chan in 0..device.channels(dir) {\n                        let element = elements.get(chan).unwrap_or(&elements[0]);\n                        let front_end = device.front_end(dir, chan).map_err(|e| rejected(format!(\"UR-5: {}\", e.message)))?;\n                        if !front_end.starts_with(element.board.uhd_name()) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
+  "filter": "ur_05_a_direction_without_elements_sets_no_spec"
  },
  {
   "id": "R27",
   "name": "UR-5 checks channel 0 only (Review of 09f11b4, P2-2)",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "            for (chan, element) in elements.iter().enumerate() {",
-  "new": "            for (chan, element) in elements.iter().enumerate().take(elements.len().min(1)) {",
+  "old": "                    for (chan, element) in elements.iter().enumerate() {\n                        let front_end = device.front_end(dir, chan).map_err(|e| rejected(format!(\"UR-5: {}\", e.message)))?;\n                        if !front_end.starts_with(element.board.uhd_name()) {",
+  "new": "                    for (chan, element) in elements.iter().enumerate().take(elements.len().min(1)) {\n                        let front_end = device.front_end(dir, chan).map_err(|e| rejected(format!(\"UR-5: {}\", e.message)))?;\n                        if !front_end.starts_with(element.board.uhd_name()) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
@@ -1277,8 +1267,8 @@
   "id": "B14",
   "name": "an empty end-of-burst instead of the held sample (Review O, O-B1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "            Some(tail) => tail.iter().map(Vec::as_slice).collect(),\n            None => vec![&empty; self.channels.max(1)],",
-  "new": "            Some(_) | None => vec![&empty; self.channels.max(1)],",
+  "old": "        let buffers: Vec<&[Iq]> = match &tail {\n            Some(tail) => tail.iter().map(Vec::as_slice).collect(),\n            None => vec![&empty; self.channels.count().max(1) as usize],\n        };",
+  "new": "        let _ = &tail;\n        let buffers: Vec<&[Iq]> = vec![&empty; self.channels.count().max(1) as usize];",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "rehearsal_b6_txrx_and_repeat"

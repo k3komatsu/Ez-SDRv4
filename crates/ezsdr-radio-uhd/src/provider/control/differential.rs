@@ -195,9 +195,9 @@ fn run(sequence: &Sequence) -> Record {
     device.rx_open(0, &[0]).unwrap();
     device.tx_open(0, &[0]).unwrap();
     let (to_tx, from_tx) = channel();
-    let mut config = core.description.defaults.clone();
+    let mut config = core.mode.defaults();
     config.insert(key("radio.tx.channels"), Value::from(1));
-    let start = super::Start { t0: T0, rx: Some((1, 200)), tx: Some((tx, 1)) };
+    let start = super::Start { t0: T0, rx: Some((ezsdr_radio::timeline::Channels::first(1), 200)), tx: Some((tx, ezsdr_radio::timeline::Channels::first(1))) };
     let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, config, false, start);
     let ticks = |ns: i64| ns / 5;
     let at = |ns: Option<i64>| ns.map(|ns| AbsoluteDeadline::new(core.at(T0 + ticks(ns))));

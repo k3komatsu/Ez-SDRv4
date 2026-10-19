@@ -650,6 +650,72 @@ pub fn stream_target(
     Some((direction, numbered_index(target.segments().last()?, keys::STREAM)?))
 }
 
+/// What an Action's resolved node names (KC-23, RM-12, RM-29): the instance's own node, one
+/// of its streams, or something else. The current keys give a stream the node `<device>/rx`
+/// or `<device>/tx`; a layout description gives it `<device>/rx/s<k>` and `<device>/tx/s<k>`
+/// (RM-29, RM-34).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Addressed {
+    /// The instance's own node, `<device>`.
+    Instance,
+    /// One of the instance's streams.
+    Stream {
+        /// Its direction.
+        direction: Direction,
+        /// Its number.
+        k: usize,
+    },
+    /// A node that is neither.
+    Other,
+}
+
+/// RM-12, RM-29: what the resolved node `node` of an Action names for the instance
+/// `device` — its own node, one of its streams, or another node. `layout` says which key
+/// set the instance presents, `rx` and `tx` are the current keys' stream nodes, and
+/// `streams` is how many streams a direction has, so that a number the instance does not
+/// have is another node. The one place MockRadio and the UHD Module read a destination.
+pub fn addressed(
+    device: &ezsdr_kernel::id::ResourceId,
+    node: Option<&ezsdr_kernel::id::ResourceId>,
+    layout: bool,
+    rx: Option<&ezsdr_kernel::id::ResourceId>,
+    tx: Option<&ezsdr_kernel::id::ResourceId>,
+    streams: impl Fn(Direction) -> usize,
+) -> Addressed {
+    let Some(node) = node else { return Addressed::Other };
+    if node == device {
+        return Addressed::Instance;
+    }
+    if layout {
+        if let Some((direction, number)) = stream_target(device, node) {
+            let k = number as usize;
+            if k < streams(direction) {
+                return Addressed::Stream { direction, k };
+            }
+        }
+        return Addressed::Other;
+    }
+    if Some(node) == rx {
+        return Addressed::Stream { direction: Direction::Rx, k: 0 };
+    }
+    if Some(node) == tx {
+        return Addressed::Stream { direction: Direction::Tx, k: 0 };
+    }
+    Addressed::Other
+}
+
+/// RM-38 (design 33 D5) and UR-5: whether a binding's selector picks the layout builder's
+/// channel keys — `keys` present and the string `channel` — or keeps the current keys
+/// (absent); another value, or one that is not a string, is refused. The one place
+/// MockRadio and the UHD Module read the selector's `keys`.
+pub fn channel_keys(selector: &BTreeMap<Ident, Value>) -> Result<bool, String> {
+    match selector.get(&Ident::parse("keys").expect("a selector key")) {
+        None => Ok(false),
+        Some(Value::Scalar(Scalar::Str(value))) if value == "channel" => Ok(true),
+        _ => Err("selector `keys` must be the string `channel`".to_owned()),
+    }
+}
+
 /// RM-33's per-channel judgement of a configuration that holds RM-27 channel keys.
 fn check_numbered_configuration(
     configuration: &BTreeMap<Key, Value>,

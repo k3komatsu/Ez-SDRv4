@@ -780,7 +780,7 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
     device.rx_open(0, &[0]).unwrap();
     device.rx_start(0, T0).unwrap();
     let handle = core.clocks.declare_sample_clock(core.id.child("rx").unwrap(), core.root, Rational::new(200, 1).unwrap()).unwrap();
-    let mut rx = Rx::new(core.clone(), 0, cmds, Some((handle, 1, T0)), None);
+    let mut rx = Rx::new(core.clone(), 0, cmds, Some((handle, Channels::first(1), T0)), None);
     for turn in 0.. {
         assert!(turn < 1_000_000, "uhd-rx makes no progress");
         let next = rx.turn();

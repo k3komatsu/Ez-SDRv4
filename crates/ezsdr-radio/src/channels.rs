@@ -284,7 +284,7 @@ fn check_layout(layout: &Layout) -> Result<(), String> {
     }
     for (direction, elements) in [("rx", rx), ("tx", tx)] {
         let mut kinds: BTreeMap<Slot, FrontEnd> = BTreeMap::new();
-        let mut seen: Vec<(Slot, FrontEnd, u32)> = Vec::new();
+        let mut seen: Vec<(Slot, u32)> = Vec::new();
         for (position, element) in elements.iter().enumerate() {
             if let Some(other) = kinds.insert(element.slot, element.front_end) {
                 if other != element.front_end {
@@ -297,15 +297,8 @@ fn check_layout(layout: &Layout) -> Result<(), String> {
                     ));
                 }
             }
-            if seen.contains(&(element.slot, element.front_end, element.frontend)) {
-                return Err(format!(
-                    "the layout's `{direction}` element at position {position} repeats `{}` front end {} in slot {:?}",
-                    element.front_end.name(),
-                    element.frontend,
-                    element.slot
-                ));
-            }
-            seen.push((element.slot, element.front_end, element.frontend));
+            x3xx::check_repeat(direction, position, element.slot, element.frontend, element.front_end.name(), &seen)?;
+            seen.push((element.slot, element.frontend));
         }
     }
     for (position, rx_element) in rx.iter().enumerate() {

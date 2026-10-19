@@ -942,6 +942,29 @@ fn ea_07_a_reference_that_locks_on_the_reopen_connects() {
 }
 
 #[test]
+fn ea_07_the_reopen_of_one_device_is_not_a_second_binding() {
+    // UR-7, UR-5: the reopen is a new handle of the same physical device — the same serial
+    // — taken after the first `UhdRadio` was dropped, so the one-live-instance rule does
+    // not refuse it; an instance whose registration outlived it would.
+    let temp = TempDir::new("uhd-reopen-serial");
+    let opened = Arc::new(AtomicU64::new(0));
+    let count = opened.clone();
+    let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| {
+        let n = count.fetch_add(1, Ordering::SeqCst);
+        let faults = if n == 0 { vec![ezsdr_radio_uhd::FakeFault::ReferenceDoesNotLock] } else { Vec::new() };
+        Ok(Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, serial: "REOPEN5".to_owned(), faults, ..FakeConfig::default() })) as Arc<dyn Device>)
+    });
+    let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
+    ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
+    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new())) else { panic!("connect") };
+    assert_eq!(opened.load(Ordering::SeqCst), 2);
+    let (manifest, _) = finish(&mut server);
+    let usrp = EventSource::Node { node: ResourceId::parse("usrp").unwrap() };
+    let timing = manifest.section(&usrp, "ezsdr.radio.uhd.timing").expect("the UHD timing section");
+    assert!(timing.as_array().unwrap().iter().any(|r| r["what"] == "reopened_on_unlock"), "{timing}");
+}
+
+#[test]
 fn ea_07_the_reopen_can_be_switched_off() {
     // UR-7's reopen is the binding's to refuse: `reopen_on_unlock: false` refuses at the
     // first open's failure.

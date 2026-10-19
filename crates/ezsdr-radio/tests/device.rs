@@ -198,18 +198,22 @@ fn rm_26_the_layout_parser_checks_the_shared_selector() {
         selector(&["0:C:ubx:0"], &["0:A:ubx:0"]),
         selector(&["0:A:ubx:1"], &["0:A:ubx:0"]),
         selector(&["0:A:ubx:0", "0:A:ubx:0"], &["0:A:ubx:0"]),
-        selector(&["0:B:ubx:0", "0:A:ubx:0"], &["0:A:ubx:0"]),
-        selector(&["0:B:ubx:0"], &["0:A:ubx:0"]),
-        selector(&["0:A:ubx:0"], &["0:B:ubx:0"]),
         selector(&["0:A:ubx:0", "0:B:ubx:0", "0:A:ubx:0"], &["0:A:ubx:0"]),
         selector(&["0:A:ubx:0"], &["0:A:obx:0"]),
         selector(&[], &[]),
     ] {
         assert!(x3xx::from_selector(&bad).is_err(), "{bad:?}");
     }
-    // The refusal names the slot and the position (design 33 D5).
-    let reason = x3xx::from_selector(&selector(&["0:A:ubx:0"], &["0:B:ubx:0"])).unwrap_err();
-    assert!(reason.contains("position 0") && reason.contains("slot B"), "{reason}");
+    // RM-28, design 33 D5: any slot order is the channel order — the layout need not be a
+    // prefix of UHD's default order —, and the order is what the element list says.
+    let reversed = x3xx::from_selector(&selector(&["0:B:ubx:0", "0:A:ubx:0"], &["0:B:ubx:0"])).unwrap();
+    assert_eq!((reversed.rx[0].slot, reversed.rx[1].slot), (Slot::B, Slot::A));
+    assert_eq!(reversed.tx[0].slot, Slot::B);
+    let one = x3xx::from_selector(&selector(&["0:B:ubx:0"], &["0:A:ubx:0"])).unwrap();
+    assert_eq!(one.rx[0].slot, Slot::B);
+    // The refusal names the position and the repeated pair (design 33 D5).
+    let reason = x3xx::from_selector(&selector(&["0:A:ubx:0", "0:A:ubx:0"], &["0:A:ubx:0"])).unwrap_err();
+    assert!(reason.contains("position 1") && reason.contains("repeats"), "{reason}");
 }
 
 fn request(pairs: &[(&str, Constraint)]) -> Requested {
@@ -299,4 +303,49 @@ fn rm_26_the_envelope_carries_each_directions_start_lead() {
     let timing = value["timing"].as_object().unwrap();
     assert!(timing.contains_key("rx_start_lead_ns") && timing.contains_key("tx_start_lead_ns"));
     assert!(!timing.contains_key("start_lead_ns"));
+}
+
+#[test]
+fn ur_13_the_rate_set_comparison_expands_ranges_and_ignores_order() {
+    // UR-13, design 33 D5: the device's `(start, stop, step)` ranges are expanded and
+    // compared as a set, in any order; a range is the values UHD would enumerate, and an
+    // interval that is not one value ('step' 0, or start == stop as one) is handled.
+    use ezsdr_radio::device::{Grid, rate_set_matches};
+    let values = Grid::Values(vec![1.0, 2.5, 4.0]);
+    assert!(rate_set_matches(&values, &[(1.0, 1.0, 0.0), (2.5, 2.5, 0.0), (4.0, 4.0, 0.0)]));
+    assert!(rate_set_matches(&values, &[(4.0, 4.0, 0.0), (1.0, 2.5, 1.5)]), "a range expands");
+    assert!(rate_set_matches(&values, &[(4.0, 4.0, 0.0), (2.5, 2.5, 0.0), (1.0, 1.0, 0.0)]), "the order does not matter");
+    assert!(!rate_set_matches(&values, &[(1.0, 1.0, 0.0), (2.5, 2.5, 0.0)]), "a missing value");
+    assert!(!rate_set_matches(&values, &[(1.0, 2.5, 1.5), (4.0, 4.0, 0.0), (9.0, 9.0, 0.0)]), "an extra value");
+    assert!(!rate_set_matches(&values, &[(1.0, 4.0, 1.0)]), "a different set");
+    assert!(rate_set_matches(&Grid::Step { lo: 1.0, hi: 4.0, step: 1.5 }, &[(1.0, 2.5, 1.5), (4.0, 4.0, 0.0)]));
+    assert!(!rate_set_matches(&Grid::Step { lo: 0.0, hi: 1.0, step: 0.0 }, &[(1.0, 1.0, 0.0)]), "an interval is not a finite set");
+}
+
+#[test]
+fn rm_38_the_keys_selector_is_read_once_for_both_providers() {
+    // RM-38 (design 33 D5) and UR-5: `keys` is absent (the current keys), the string
+    // `channel` (the layout's), or refused — the one judgement both Providers read.
+    use std::collections::BTreeMap;
+    use ezsdr_kernel::spec::Ident;
+    let selector = |value: Option<Value>| -> BTreeMap<Ident, Value> {
+        let mut selector = BTreeMap::new();
+        if let Some(value) = value {
+            selector.insert(Ident::parse("keys").unwrap(), value);
+        }
+        selector
+    };
+    assert_eq!(ezsdr_radio::channel_keys(&selector(None)), Ok(false));
+    assert_eq!(ezsdr_radio::channel_keys(&selector(Some(Value::from("channel")))), Ok(true));
+    for value in [
+        Value::from("layout"),
+        Value::from("Channel"),
+        Value::from("channel "),
+        Value::from(""),
+        Value::from(1),
+        Value::from(true),
+        Value::List(vec![Scalar::from("channel")]),
+    ] {
+        assert_eq!(ezsdr_radio::channel_keys(&selector(Some(value.clone()))), Err("selector `keys` must be the string `channel`".to_owned()), "{value:?}");
+    }
 }

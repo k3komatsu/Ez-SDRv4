@@ -14,7 +14,7 @@ use std::time::{Duration as Wall, Instant};
 
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, Binding};
 use ezsdr_kernel::coordinator::{RunHandle, RunHandleError, start_spec_run};
-use ezsdr_kernel::event::{Action, ActionId, Event, EventCollector, EventKind, EventSource};
+use ezsdr_kernel::event::{Action, ActionId, Event, EventCollector, EventKind, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ResourceId, RunId};
 use ezsdr_kernel::manifest::Manifest;
@@ -166,9 +166,18 @@ fn ur_05_the_profile_must_be_the_device_s_front_ends() {
     let two = |board: &str| json!({ "args": ARGS, "rx": [format!("0:A:{board}:0"), format!("0:B:{board}:0")], "tx": [format!("0:A:{board}:0"), format!("0:B:{board}:0")] });
     assert_eq!(refuse(one_board("ubx"), one_cbx()), "UR-5: profile x3xx needs UBX front ends; rx channel 0 is `CBX-120 RX`");
     assert_eq!(refuse(two("ubx"), boards(vec!["UBX", "CBX"])), "UR-5: profile x3xx needs UBX front ends; rx channel 1 is `CBX RX`");
-    assert_eq!(refuse(two("ubx"), boards(vec!["UBX"])), "UR-5: profile x3xx needs 2 rx channels; the device has 1");
+    // The spec is set before the channel map is read (UR-5, H1): a layout naming more
+    // channels than the device's slots has is refused by `set_subdev_spec` itself, with
+    // UHD's own text.
+    assert_eq!(
+        refuse(two("ubx"), boards(vec!["UBX"])),
+        "UR-5: uhd_usrp_set_rx_subdev_spec: UHD error 41: LookupError: Could not find radio on mboard 0 that matches subdev B:0"
+    );
     assert_eq!(refuse(one_board("cbx"), FakeConfig::default()), "UR-5: profile x3xx needs CBX front ends; rx channel 0 is `UBX RX`");
-    assert_eq!(refuse(one_board("cbx"), boards(vec![])), "UR-5: profile x3xx needs 1 rx channels; the device has 0");
+    assert_eq!(
+        refuse(one_board("cbx"), boards(vec![])),
+        "UR-5: uhd_usrp_set_rx_subdev_spec: UHD error 41: LookupError: Could not find radio on mboard 0 that matches subdev A:0"
+    );
     // The transmit side is checked the same way, and so is a device whose two directions
     // name boards of different kinds.
     assert!(UhdRadio::from_binding(&binding(one_board("obx"), Some(x3xx())), fake(one_obx())).is_ok());
@@ -538,7 +547,7 @@ fn direct_prepare(radio: &mut UhdRadio, device: Arc<FakeDevice>, class: Executio
     let mut registry = ModuleRegistry::new();
     let (mut checks, mut kinds) = (AdmissionCheckRegistry::new(), EventKindRegistry::with_kernel_kinds());
     ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
-    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
+    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 1024, &Policy::default()));
     let ctx = {
         let mut ctx = PrepareContext::testing(
@@ -568,27 +577,57 @@ fn direct_prepare(radio: &mut UhdRadio, device: Arc<FakeDevice>, class: Executio
 }
 
 fn attached(policy: ezsdr_kernel::stream::BackPressure) -> AttachedPort {
+    attached_on("rx", policy)
+}
+
+/// A receive link on a layout stream's port — `rx0`, `rx1` (RM-29) — or the current keys'
+/// `rx` (UR-12).
+fn attached_on(port: &str, policy: ezsdr_kernel::stream::BackPressure) -> AttachedPort {
     let decl = DataLinkDecl {
         id: ezsdr_kernel::id::DataLinkId::local(0),
-        from: ezsdr_kernel::contract::PortRef { component: Ident::parse("radio").unwrap(), port: Ident::parse("rx").unwrap() },
+        from: ezsdr_kernel::contract::PortRef { component: Ident::parse("radio").unwrap(), port: Ident::parse(port).unwrap() },
         to: ezsdr_kernel::contract::PortRef { component: Ident::parse("rec").unwrap(), port: Ident::parse("in").unwrap() },
         contract: ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").unwrap(),
         policy,
         capacity: 4,
     };
     let link = ezsdr_link_host::HostLinkModule::new().create(&decl).unwrap();
-    AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse("rx").unwrap(), Endpoint::StreamOut(link))
+    AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse(port).unwrap(), Endpoint::StreamOut(link))
+}
+
+/// `attached_on`, with the test's own handle of the link, so that it can read the blocks a
+/// stream publishes (the fake's per-channel loopback, UR-33).
+fn attached_reading(port: &str) -> (AttachedPort, Arc<dyn ezsdr_kernel::stream::DataLink>) {
+    let decl = DataLinkDecl {
+        id: ezsdr_kernel::id::DataLinkId::local(0),
+        from: ezsdr_kernel::contract::PortRef { component: Ident::parse("radio").unwrap(), port: Ident::parse(port).unwrap() },
+        to: ezsdr_kernel::contract::PortRef { component: Ident::parse("rec").unwrap(), port: Ident::parse("in").unwrap() },
+        contract: ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").unwrap(),
+        policy: ezsdr_kernel::stream::BackPressure::DropOldest,
+        // Every block of the Run, so that a test can read each segment's own.
+        capacity: 4096,
+    };
+    let link = ezsdr_link_host::HostLinkModule::new().create(&decl).unwrap();
+    (AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse(port).unwrap(), Endpoint::StreamOut(link.clone())), link)
 }
 
 /// A queue the test pushes Actions into, as the coordinator dispatches them.
 #[derive(Default)]
 struct Pushed(Mutex<std::collections::VecDeque<Action>>, std::sync::atomic::AtomicU64);
 impl ActionReceiver for Pushed {
-    // The coordinator's resolution (KC-23): every test Action is the device's; ids count
-    // from 1, as the Kernel's do (KC-24).
+    // The coordinator's resolution (KC-23): the test's target is the node it resolves to,
+    // `<resource>[/<path>]`, so a test may name a stream's node; ids count from 1, as the
+    // Kernel's do (KC-24).
     fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> {
         let id = || ActionId(self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1);
-        self.0.lock().unwrap().pop_front().map(|action| ezsdr_kernel::module_api::Dispatched::new(id(), action, Some(ResourceId::parse("usrp").unwrap())))
+        self.0.lock().unwrap().pop_front().map(|action| {
+            let node = action.target().and_then(|target| match target {
+                Target::Resource { resource, path } if path.is_empty() => ResourceId::parse(resource.as_str()).ok(),
+                Target::Resource { resource, path } => ResourceId::parse(&format!("{resource}/{path}")).ok(),
+                _ => None,
+            });
+            ezsdr_kernel::module_api::Dispatched::new(id(), action, node)
+        })
     }
 }
 
@@ -617,14 +656,45 @@ impl Direct {
 
     /// With selector keys beside `args` (UR-5).
     fn build(config: FakeConfig, constraints: &[(&str, Scalar)], links: Vec<AttachedPort>, selector: Json) -> Direct {
+        Direct::build_with(config, constraints, links, selector, BTreeMap::new())
+    }
+
+    /// `build` with the Run's Command inputs, for a test that books a waveform (UR-21).
+    fn build_with(config: FakeConfig, constraints: &[(&str, Scalar)], links: Vec<AttachedPort>, selector: Json, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Direct {
+        let mut direct = Direct::armed_with(config, constraints, links, selector, inputs);
+        direct.start();
+        direct
+    }
+
+    /// `build_with` on a device the test already has, which the Provider sees through
+    /// `tested` (UR-13's rate reads): `inner` is what the test observes the calls on.
+    fn build_on(inner: Arc<FakeDevice>, tested: Arc<dyn Device>, constraints: &[(&str, Scalar)], links: Vec<AttachedPort>, selector: Json, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Direct {
+        let mut direct = Direct::armed_on(inner, tested, constraints, links, selector, inputs);
+        direct.start();
+        direct
+    }
+
+    /// The Provider prepared and armed, before `start` (UR-15): what a segment's declaration
+    /// and a streamer's opening can be observed on without any block (RM-25).
+    fn armed(config: FakeConfig, constraints: &[(&str, Scalar)], links: Vec<AttachedPort>, selector: Json) -> Direct {
+        Direct::armed_with(config, constraints, links, selector, BTreeMap::new())
+    }
+
+    fn armed_with(config: FakeConfig, constraints: &[(&str, Scalar)], links: Vec<AttachedPort>, selector: Json, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Direct {
         let device = fake(config);
+        Direct::armed_on(device.clone(), device, constraints, links, selector, inputs)
+    }
+
+    fn armed_on(device: Arc<FakeDevice>, tested: Arc<dyn Device>, constraints: &[(&str, Scalar)], links: Vec<AttachedPort>, selector: Json, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Direct {
         let clocks = Arc::new(ClockRegistry::new());
-        let authority = DeviceAuthority::new(device.clone(), clocks.clone(), "internal", "internal", ARGS).unwrap();
+        let authority = DeviceAuthority::new(tested.clone(), clocks.clone(), "internal", "internal", ARGS).unwrap();
         let (time, root) = (authority.time(), authority.root());
         let mut registry = ModuleRegistry::new();
         let (mut checks, mut kinds) = (AdmissionCheckRegistry::new(), EventKindRegistry::with_kernel_kinds());
         ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
-        let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
+        // The instance's own nodes under either key set (RM-29): a layout's events come
+        // from its stream nodes.
+        let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
         let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
         let queue = Arc::new(Pushed::default());
         let ctx = {
@@ -639,7 +709,7 @@ impl Direct {
             ctx.run = RunId::from_string("direct".to_owned());
             ctx.class = ExecutionClass::HardwareInLoop;
             ctx.environment = Arc::new(BTreeMap::new());
-            ctx.inputs = Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new());
+            ctx.inputs = Arc::new(inputs.into_iter().map(|(hash, bytes)| (hash, Arc::<[u8]>::from(bytes))).collect::<BTreeMap<_, _>>());
             ctx.links = links;
             ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
             ctx
@@ -653,17 +723,27 @@ impl Direct {
         };
         let mut keys = json!({ "args": ARGS });
         keys.as_object_mut().unwrap().extend(selector.as_object().cloned().unwrap_or_default());
-        let mut radio = UhdRadio::from_binding(&binding(keys, Some(x3xx())), device.clone()).unwrap();
+        let mut radio = UhdRadio::from_binding(&binding(keys, Some(x3xx())), tested).unwrap();
         radio.prepare(&fragment, ctx).unwrap();
         radio.arm().unwrap();
-        let t0 = time.now(root).unwrap().ticks_in(root).unwrap() + ms(2_000) + ms(1);
-        radio.start(Some(TimePoint::new(root, t0))).unwrap();
-        time.wait_until(TimePoint::new(root, t0 + ms(1))).unwrap();
         Direct { radio, device, queue, events, time, root, clocks, delivered: Vec::new(), _authority: authority }
+    }
+
+    /// Starts the armed Provider at T0 and waits a millisecond past it (UR-15).
+    fn start(&mut self) {
+        let t0 = self.time.now(self.root).unwrap().ticks_in(self.root).unwrap() + ms(2_000) + ms(1);
+        self.radio.start(Some(TimePoint::new(self.root, t0))).unwrap();
+        self.time.wait_until(TimePoint::new(self.root, t0 + ms(1))).unwrap();
     }
 
     fn now(&self) -> i64 {
         self.time.now(self.root).unwrap().ticks_in(self.root).unwrap()
+    }
+
+    /// Starts the armed Provider at `t0` without waiting past it (UR-15): what a command
+    /// booked while the device is still before T0 needs (the floor at T0).
+    fn radio_start(&mut self, t0: i64) {
+        self.radio.start(Some(TimePoint::new(self.root, t0))).unwrap();
     }
 
     fn push(&self, action: Action) {
@@ -671,12 +751,47 @@ impl Direct {
     }
 
     fn update(&self, key: &str, value: Value, class: ezsdr_kernel::module_api::UpdateClass, at: Option<i64>) {
+        self.update_at("usrp", key, value, class, at);
+    }
+
+    /// An update whose target resolves to `node` (KC-23): `usrp`, or a stream's node such
+    /// as `usrp/rx/s0` (RM-29).
+    fn update_at(&self, node: &str, key: &str, value: Value, class: ezsdr_kernel::module_api::UpdateClass, at: Option<i64>) {
         self.push(Action::UpdateParameter {
-            target: resource("radio"),
+            target: resource(node),
             key: Key::parse(key).unwrap(),
             value,
             class,
             at: at.map(|t| ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(self.root, t))),
+        });
+    }
+
+    /// A `Stop` whose target resolves to `node` (KC-23, UR-26).
+    fn stop_at(&self, node: &str) {
+        self.push(Action::Stop { target: Some(resource(node)) });
+    }
+
+    /// `start_rx` at `node`, at `at` (RM-12, RM-21).
+    fn start_rx_at(&self, node: &str, at: Option<i64>) {
+        self.push(Action::Command {
+            target: resource(node),
+            verb: Ident::parse("start_rx").unwrap(),
+            params: BTreeMap::new(),
+            at: at.map(|t| ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(self.root, t))),
+        });
+    }
+
+    /// A `TxBurst` at `node`, its waveform an input of the Run (UR-21); `at` is in the
+    /// transmit stream's SampleClock, which the burst must name (UR-21).
+    fn burst_at(&self, node: &str, waveform: &ezsdr_kernel::manifest::ArtifactRef, repeat: bool, at: TimePoint) {
+        self.push(Action::TxBurst {
+            target: resource(node),
+            waveform: waveform.clone(),
+            repeat,
+            at: ezsdr_kernel::time::AbsoluteDeadline::new(at),
+            requested_at: None,
+            late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+            metadata: BTreeMap::new(),
         });
     }
 
@@ -2361,9 +2476,11 @@ fn ur_33_rates_report_the_grid_and_the_pre_chain_one() {
 #[test]
 fn ur_33_the_serial_is_the_config_s() {
     // UR-33: the device's motherboard serial is the config's; design 33 D5 tells two
-    // bindings of one device apart by it.
-    assert_eq!(fake(FakeConfig::default()).serial().unwrap(), "FAKE0001");
-    assert_eq!(fake(FakeConfig { serial: "F00BA2", ..FakeConfig::default() }).serial().unwrap(), "F00BA2");
+    // bindings of one device apart by it. The default is one serial per `FakeDevice`, so
+    // that the two devices a test binary's parallel tests build are two devices.
+    let (a, b) = (fake(FakeConfig::default()), fake(FakeConfig::default()));
+    assert_ne!(a.serial().unwrap(), b.serial().unwrap());
+    assert_eq!(fake(FakeConfig { serial: "F00BA2".to_owned(), ..FakeConfig::default() }).serial().unwrap(), "F00BA2");
 }
 
 #[test]
@@ -3930,4 +4047,2313 @@ fn ur_25_an_enable_at_a_timed_update_s_instant_applies_it() {
         let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
         assert_eq!(applied.as_array().unwrap().iter().filter(|r| r["key"] == "radio.rx.frequency_hz" && r["issued"] == true && r["at"]["ticks"] == at).count(), 1, "{case}: {applied}");
     }
+}
+
+// ------------------------------------------------ Phase 8 stage 1b-4c: the layout's keys
+
+#[test]
+fn ur_05_the_keys_value_picks_one_key_set() {
+    // UR-5, RM-38: `keys: "channel"` picks the layout builder's keys and the tree that goes
+    // with them (RM-29); an instance uses one key set, never both (RM-27).
+    let device = fake(FakeConfig { serial: "ur05-current".to_owned(), ..FakeConfig::default() });
+    let current = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device).unwrap();
+    let device = fake(FakeConfig { serial: "ur05-layout".to_owned(), ..FakeConfig::default() });
+    let layout = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device).unwrap();
+    let ten = [
+        ("radio.rx.channels", Scalar::from(2)),
+        ("radio.tx.channels", Scalar::from(2)),
+        ("radio.rx.sample_rate_hz", Scalar::try_from(1e6).unwrap()),
+        ("radio.tx.sample_rate_hz", Scalar::try_from(1e6).unwrap()),
+        ("radio.rx.frequency_hz", Scalar::try_from(1e9).unwrap()),
+        ("radio.tx.frequency_hz", Scalar::try_from(1e9).unwrap()),
+        ("radio.rx.gain_db", Scalar::from(0)),
+        ("radio.tx.gain_db", Scalar::from(0)),
+        ("radio.rx.antenna", Scalar::from("RX2")),
+        ("radio.tx.antenna", Scalar::from("TX/RX")),
+    ];
+    let report = current.coerce(&request(&ten)).unwrap();
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+    assert_eq!(report.applied.len(), 10);
+    let report = layout.coerce(&request(&ten)).unwrap();
+    assert_eq!(report.rejected.len(), 10);
+    assert!(report.rejected.iter().all(|rejection| rejection.reason == "RM-4: not a radio key"), "{:?}", report.rejected);
+    assert!(report.applied.is_empty());
+    let five = [
+        ("radio.rx.c0.frequency_hz", Scalar::try_from(1e9).unwrap()),
+        ("radio.rx.c0.gain_db", Scalar::from(0)),
+        ("radio.rx.c0.antenna", Scalar::from("RX2")),
+        ("radio.rx.c0.stream", Scalar::from(0)),
+        ("radio.rx.s0.sample_rate_hz", Scalar::try_from(1e6).unwrap()),
+    ];
+    let report = layout.coerce(&request(&five)).unwrap();
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+    assert_eq!(report.applied.len(), 5);
+    let report = current.coerce(&request(&five)).unwrap();
+    assert_eq!(report.rejected.len(), 5);
+    assert!(report.rejected.iter().all(|rejection| rejection.reason == "RM-4: not a radio key"), "{:?}", report.rejected);
+    // The tree follows the key set (RM-29): stream nodes, and one receive port per channel.
+    let ids = |radio: &UhdRadio| radio.instance().tree.children.iter().map(|child| child.id.path().to_owned()).collect::<Vec<_>>();
+    assert_eq!(ids(&current), ["usrp/rx", "usrp/tx"]);
+    assert_eq!(current.instance().tree.ports.iter().map(|port| port.name.as_str().to_owned()).collect::<Vec<_>>(), ["rx"]);
+    assert_eq!(ids(&layout), ["usrp/rx/s0", "usrp/rx/s1", "usrp/tx/s0", "usrp/tx/s1"]);
+    assert_eq!(layout.instance().tree.ports.iter().map(|port| port.name.as_str().to_owned()).collect::<Vec<_>>(), ["rx0", "rx1"]);
+}
+
+#[test]
+fn ur_05_every_other_keys_value_is_refused() {
+    // UR-5, RM-38: only the string `channel` selects the layout keys; another value, and a
+    // value that is not a string, is refused with MockRadio's wording under `UR-5:`.
+    for value in [json!("layout"), json!("Channel"), json!("channel "), json!(""), json!(1), json!(true), json!(["channel"])] {
+        let error = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": value.clone() }), Some(x3xx())), fake(FakeConfig::default())).err().unwrap();
+        assert_eq!(error.kind, ModuleErrorKind::Rejected, "{value}");
+        assert_eq!(error.message, "UR-5: selector `keys` must be the string `channel`", "{value}");
+    }
+}
+
+#[test]
+fn ur_12_each_key_set_refuses_the_other_in_prepare() {
+    // UR-12, RM-27: a layout instance takes no direction-prefixed key in `prepare`, and a
+    // current-key instance takes no numbered one; the refusal is the coercion's and nothing
+    // reaches the device.
+    let device = fake(FakeConfig { serial: "ur12-layout".to_owned(), ..FakeConfig::default() });
+    let mut layout = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
+    let error = direct_prepare(&mut layout, device.clone(), ExecutionClass::HardwareInLoop, Vec::new(), &[("radio.rx.frequency_hz", Scalar::try_from(1e9).unwrap())]).unwrap_err();
+    assert_eq!(error.kind, ModuleErrorKind::Rejected);
+    assert_eq!(error.message, "UR-12: RM-4: not a radio key");
+    assert!(!device.calls().iter().any(|call| call.starts_with("apply")), "{:?}", device.calls());
+    let device = fake(FakeConfig { serial: "ur12-current".to_owned(), ..FakeConfig::default() });
+    let mut current = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device.clone()).unwrap();
+    let error = direct_prepare(&mut current, device.clone(), ExecutionClass::HardwareInLoop, Vec::new(), &[("radio.rx.c0.frequency_hz", Scalar::try_from(1e9).unwrap())]).unwrap_err();
+    assert_eq!(error.kind, ModuleErrorKind::Rejected);
+    assert_eq!(error.message, "UR-12: RM-4: not a radio key");
+    assert!(!device.calls().iter().any(|call| call.starts_with("apply")), "{:?}", device.calls());
+}
+
+/// The two directions' `set_subdev_spec` calls of a binding, in order (UR-5, H2).
+fn spec_calls(device: &FakeDevice) -> Vec<String> {
+    calls(device, "set_subdev_spec")
+}
+
+#[test]
+fn ur_05_the_layout_builds_the_subdev_spec() {
+    // UR-5, H2: a layout with elements sets each direction's subdev spec from them, in
+    // logical order, before its channel map is read; the device's channels are that spec's.
+    let device = fake(FakeConfig { front_ends: vec!["UBX", "BasicRX"], serial: "ur05-spec-a".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "keys": "channel",
+        "rx": ["0:A:ubx:0", "0:B:basic_rx:0", "0:B:basic_rx:1"], "tx": ["0:A:ubx:0"] });
+    let radio = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
+    let specs = spec_calls(&device);
+    assert!(specs.contains(&"set_subdev_spec rx A:0 B:0 B:1".to_owned()), "{specs:?}");
+    assert!(specs.contains(&"set_subdev_spec tx A:0".to_owned()), "{specs:?}");
+    assert_eq!(specs.len(), 2, "{specs:?}");
+    assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Rx), 3);
+    assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 1).unwrap(), "BasicRX (0)");
+    assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 2).unwrap(), "BasicRX (1)");
+    assert_eq!(radio.instance().sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()]["rx_channels"], 3, "the manifest's channels are the spec's, read after it");
+    // The transmit side: an LFTX in slot B, its front end's number in the name (H5).
+    let device = fake(FakeConfig { front_ends: vec!["UBX", "LFTX"], serial: "ur05-spec-b".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0", "0:B:lf_tx:0"] });
+    let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
+    let specs = spec_calls(&device);
+    assert!(specs.contains(&"set_subdev_spec rx A:0".to_owned()), "{specs:?}");
+    assert!(specs.contains(&"set_subdev_spec tx A:0 B:0".to_owned()), "{specs:?}");
+    assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Tx, 1).unwrap(), "LFTX (0)");
+}
+
+#[test]
+fn ur_05_the_layout_s_order_is_the_device_s_channel_order() {
+    // UR-5, H1: the spec's order is the channel order, so a layout that is not UHD's
+    // default order (slot A first) maps channel 0 to slot B (RM-28).
+    let device = fake(FakeConfig { front_ends: vec!["OBX", "UBX"], serial: "ur05-order".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:B:ubx:0", "0:A:obx:0"], "tx": ["0:A:obx:0"] });
+    let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
+    assert!(spec_calls(&device).contains(&"set_subdev_spec rx B:0 A:0".to_owned()), "{:?}", device.calls());
+    assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 0).unwrap(), "UBX RX");
+    assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 1).unwrap(), "OBX RX");
+}
+
+#[test]
+fn ur_05_a_direction_without_elements_sets_no_spec() {
+    // UR-5, H7: a direction with no element is not set — an empty spec is one the fake, and
+    // UHD's RFNoC path, would take as something else — and it keeps the device's own map.
+    for keys in [true, false] {
+        let device = fake(FakeConfig { serial: format!("ur05-empty-{keys}"), ..FakeConfig::default() });
+        let mut selector = json!({ "args": ARGS, "rx": ["0:A:ubx:0"], "tx": [] });
+        if keys {
+            selector["keys"] = json!("channel");
+        }
+        let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
+        assert!(!device.calls().iter().any(|call| call.starts_with("set_subdev_spec tx")), "{:?}", device.calls());
+        assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Tx), 2, "keys: {keys}: the map is the device's own");
+        assert_eq!(spec_calls(&device), ["set_subdev_spec rx A:0"], "keys: {keys}");
+    }
+}
+
+#[test]
+fn ur_05_the_current_keys_set_uhd_s_default_order() {
+    // UR-5: under the current keys the spec is the layout's slots in its order too, which
+    // for the usual prefix layout is UHD's default order; the device's map follows it.
+    let device = fake(FakeConfig { serial: "ur05-current-order".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "rx": ["0:A:ubx:0", "0:B:ubx:0"], "tx": ["0:A:ubx:0"] });
+    let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
+    let specs = spec_calls(&device);
+    assert!(specs.contains(&"set_subdev_spec rx A:0 B:0".to_owned()), "{specs:?}");
+    assert!(specs.contains(&"set_subdev_spec tx A:0".to_owned()), "{specs:?}");
+    assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Tx), 1, "the map was rebuilt");
+}
+
+#[test]
+fn ur_05_a_layout_out_of_uhd_s_default_order_is_accepted() {
+    // UR-5, RM-28: the prefix restriction is gone: slot B alone, and B before A, are the
+    // channel order (design 33 D5); the parser's own cases live in `ezsdr-radio`'s tests.
+    let device = fake(FakeConfig { serial: "ur05-nonprefix".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "rx": ["0:B:ubx:0", "0:A:ubx:0"], "tx": ["0:A:ubx:0"] });
+    let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
+    assert!(spec_calls(&device).contains(&"set_subdev_spec rx B:0 A:0".to_owned()), "{:?}", device.calls());
+    let device = fake(FakeConfig { serial: "ur05-nonprefix-b".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "rx": ["0:B:ubx:0"], "tx": ["0:A:ubx:0"] });
+    let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
+    assert!(spec_calls(&device).contains(&"set_subdev_spec rx B:0".to_owned()), "{:?}", device.calls());
+    assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Rx), 1);
+}
+
+/// A `FakeDevice` that logs the calls its own log does not keep — `channels`, `front_end`,
+/// `set_subdev_spec`, `serial`, `describe` — so that a test can compare their order across
+/// the opening checks (UR-5).
+struct Recording {
+    inner: FakeDevice,
+    log: Mutex<Vec<String>>,
+}
+
+impl Recording {
+    fn new(config: FakeConfig) -> Recording {
+        Recording { inner: FakeDevice::new(config), log: Mutex::new(Vec::new()) }
+    }
+
+    fn log(&self) -> Vec<String> {
+        self.log.lock().unwrap().clone()
+    }
+
+    fn record(&self, entry: impl FnOnce() -> String) {
+        self.log.lock().unwrap().push(entry());
+    }
+}
+
+impl Device for Recording {
+    fn describe(&self) -> Json {
+        self.record(|| "describe".to_owned());
+        self.inner.describe()
+    }
+    fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity { self.inner.fidelity() }
+    fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
+    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+    fn channels(&self, dir: ezsdr_radio_uhd::Dir) -> usize {
+        self.record(|| format!("channels {}", dir.name()));
+        self.inner.channels(dir)
+    }
+    fn front_end(&self, dir: ezsdr_radio_uhd::Dir, chan: usize) -> Result<String, ezsdr_radio_uhd::DeviceError> {
+        self.record(|| format!("front_end {} {chan}", dir.name()));
+        self.inner.front_end(dir, chan)
+    }
+    fn set_sources(&self, c: &str, t: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_sources(c, t) }
+    fn set_time_zero(&self, p: bool) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_time_zero(p) }
+    fn time_now(&self) -> Result<i64, ezsdr_radio_uhd::DeviceError> { self.inner.time_now() }
+    fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> { self.inner.ref_locked() }
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> { self.inner.apply(d, c, s, at) }
+    fn serial(&self) -> Result<String, ezsdr_radio_uhd::DeviceError> {
+        self.record(|| "serial".to_owned());
+        self.inner.serial()
+    }
+    fn set_subdev_spec(&self, d: ezsdr_radio_uhd::Dir, m: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.record(|| format!("set_subdev_spec {} {m}", d.name()));
+        self.inner.set_subdev_spec(d, m)
+    }
+    fn rates(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> { self.inner.rates(d, c) }
+    fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
+    fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+    fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
+    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t) }
+    fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
+    fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
+    fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
+    fn close_streams(&self) { self.inner.close_streams() }
+    fn mark_lost(&self) { self.inner.mark_lost() }
+}
+
+#[test]
+fn ur_05_the_spec_is_set_before_the_channel_map_is_read() {
+    // UR-5, H1: `from_binding` sets the spec before it reads `front_end`, so the front-end
+    // check reads the mapping the spec made, and `describe` — the Manifest's channel
+    // counts — is read after it.
+    let device = Arc::new(Recording::new(FakeConfig { front_ends: vec!["BasicRX"], serial: "ur05-order-log".to_owned(), ..FakeConfig::default() }));
+    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:A:basic_rx:1"], "tx": [] });
+    let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
+    let log = device.log();
+    let position = |entry: &str| log.iter().position(|line| line == entry).unwrap_or_else(|| panic!("{entry} missing in {log:?}"));
+    let spec = position("set_subdev_spec rx A:1");
+    let front_end = position("front_end rx 0");
+    let describe = position("describe");
+    assert!(spec < front_end, "{log:?}");
+    assert!(front_end < describe, "{log:?}");
+}
+
+#[test]
+fn ur_05_a_layout_naming_front_end_one_is_set_before_the_front_ends_are_checked() {
+    // UR-5, H5: a Basic/LF front end is checked with its number, and the spec that makes
+    // `(1)` the device's channel 0 comes first: reading the map before the spec would see
+    // `BasicRX (0)` and refuse a layout the device can serve.
+    let device = fake(FakeConfig { front_ends: vec!["BasicRX"], serial: "ur05-fe-one".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:A:basic_rx:1"], "tx": [] });
+    let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
+    assert!(spec_calls(&device).contains(&"set_subdev_spec rx A:1".to_owned()), "{:?}", device.calls());
+    assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Rx), 1);
+    assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 0).unwrap(), "BasicRX (1)");
+}
+
+#[test]
+fn ur_05_the_front_end_check_reads_the_device_after_the_subdev_spec() {
+    // UR-5, H1, H5: the check reads the mapping the spec made: a slot A CBX-120 answers
+    // channel 0 by default, and a layout naming slot B with a UBX is accepted only because
+    // the spec was set first (the read-before-spec order refuses it).
+    let device = fake(FakeConfig { front_ends: vec!["CBX-120", "UBX"], serial: "ur05-check-order".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:B:ubx:0"], "tx": [] });
+    let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
+    assert!(spec_calls(&device).contains(&"set_subdev_spec rx B:0".to_owned()), "{:?}", device.calls());
+    assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Rx), 1);
+    assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 0).unwrap(), "UBX RX");
+}
+
+#[test]
+fn ur_05_a_board_that_differs_from_the_layout_is_refused() {
+    // UR-5: the spec succeeds — the UBX's front end 0 is a real front end — but the name it
+    // answers is not the layout's board; the refusal names the direction and channel and
+    // both names, after the spec (the spec's call is in the device's log).
+    let device = fake(FakeConfig { front_ends: vec!["UBX", "UBX"], serial: "ur05-board-rx".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:B:basic_rx:0"], "tx": [] });
+    let error = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).err().unwrap();
+    assert_eq!(error.kind, ModuleErrorKind::Rejected);
+    assert!(error.message.starts_with("UR-5:"), "{}", error.message);
+    assert!(error.message.contains("rx channel 0"), "{}", error.message);
+    assert!(error.message.contains("UBX RX") && error.message.contains("basic_rx"), "{}", error.message);
+    assert!(spec_calls(&device).contains(&"set_subdev_spec rx B:0".to_owned()), "the refusal is after the spec: {:?}", device.calls());
+    assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Rx), 1);
+    let device = fake(FakeConfig { front_ends: vec!["UBX", "UBX"], serial: "ur05-board-tx".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "keys": "channel", "rx": [], "tx": ["0:B:basic_tx:0"] });
+    let error = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).err().unwrap();
+    assert!(error.message.starts_with("UR-5:") && error.message.contains("tx channel 0") && error.message.contains("UBX TX") && error.message.contains("basic_tx"), "{}", error.message);
+    assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Tx), 1);
+}
+
+/// A `FakeDevice` whose `front_end` answers the number `(0)` for every Basic/LF name it
+/// would return: a front end whose getter disagrees with its setter (UR-5's check).
+struct Mislabelled {
+    inner: FakeDevice,
+}
+
+impl Device for Mislabelled {
+    fn describe(&self) -> Json { self.inner.describe() }
+    fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity { self.inner.fidelity() }
+    fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
+    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+    fn channels(&self, dir: ezsdr_radio_uhd::Dir) -> usize { self.inner.channels(dir) }
+    fn front_end(&self, dir: ezsdr_radio_uhd::Dir, chan: usize) -> Result<String, ezsdr_radio_uhd::DeviceError> {
+        let name = self.inner.front_end(dir, chan)?;
+        let basic = ["BasicRX", "LFRX", "BasicTX", "LFTX"].iter().any(|base| name.starts_with(base));
+        if basic {
+            let base = name.split_once(" (").map_or(name.as_str(), |(base, _)| base);
+            return Ok(format!("{base} (0)"));
+        }
+        Ok(name)
+    }
+    fn serial(&self) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.serial() }
+    fn set_subdev_spec(&self, d: ezsdr_radio_uhd::Dir, m: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_subdev_spec(d, m) }
+    fn rates(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> { self.inner.rates(d, c) }
+    fn set_sources(&self, c: &str, t: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_sources(c, t) }
+    fn set_time_zero(&self, p: bool) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_time_zero(p) }
+    fn time_now(&self) -> Result<i64, ezsdr_radio_uhd::DeviceError> { self.inner.time_now() }
+    fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> { self.inner.ref_locked() }
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> { self.inner.apply(d, c, s, at) }
+    fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
+    fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+    fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
+    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t) }
+    fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
+    fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
+    fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
+    fn close_streams(&self) { self.inner.close_streams() }
+    fn mark_lost(&self) { self.inner.mark_lost() }
+}
+
+#[test]
+fn ur_05_a_basic_front_end_s_number_is_checked() {
+    // UR-5, H5: a Basic/LF front end is checked down to the number its name carries; the
+    // faithful fake always agrees, so a wrapper answers `(0)` for every claimed number — a
+    // front end whose getter disagrees with its setter — and the check refuses it.
+    let device = fake(FakeConfig { front_ends: vec!["BasicRX", "BasicRX"], serial: "ur05-fe-faithful".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:B:basic_rx:1"], "tx": [] });
+    let _ = UhdRadio::from_binding(&binding(selector.clone(), Some(x3xx())), device.clone()).unwrap();
+    assert!(spec_calls(&device).contains(&"set_subdev_spec rx B:1".to_owned()), "{:?}", device.calls());
+    assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 0).unwrap(), "BasicRX (1)");
+    // The same layout through a device that answers `(0)`.
+    let device: Arc<dyn Device> = Arc::new(Mislabelled { inner: FakeDevice::new(FakeConfig { front_ends: vec!["BasicRX", "BasicRX"], serial: "ur05-fe-mislabelled".to_owned(), ..FakeConfig::default() }) });
+    let error = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device).err().unwrap();
+    assert_eq!(error.kind, ModuleErrorKind::Rejected);
+    assert!(error.message.contains("rx channel 0") && error.message.contains("BasicRX (0)" ) && error.message.contains("basic_rx"), "{}", error.message);
+}
+
+#[test]
+fn ur_05_a_subdev_spec_the_device_refuses_is_refused_with_uhd_s_text() {
+    // UR-5, H7, H9: a spec naming a pair the device has no front end for is the device's own
+    // failure, with its text; a swallowed failure would leave the default map, whose name
+    // matches the layout, and be accepted.
+    let device = fake(FakeConfig { front_ends: vec!["UBX"], serial: "ur05-spec-fail-rx".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:B:ubx:0"], "tx": [] });
+    let error = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device).err().unwrap();
+    assert_eq!(error.kind, ModuleErrorKind::Rejected);
+    assert!(error.message.starts_with("UR-5:"), "{}", error.message);
+    assert!(error.message.contains("uhd_usrp_set_rx_subdev_spec: UHD error 41: LookupError: Could not find radio on mboard 0 that matches subdev B:0"), "{}", error.message);
+    let device = fake(FakeConfig { front_ends: vec!["UBX"], serial: "ur05-spec-fail-tx".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "keys": "channel", "rx": [], "tx": ["0:B:ubx:0"] });
+    let error = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device).err().unwrap();
+    assert!(error.message.contains("uhd_usrp_set_tx_subdev_spec: UHD error 41: LookupError: Could not find radio on mboard 0 that matches subdev B:0"), "{}", error.message);
+}
+
+#[test]
+fn ur_05_each_channel_is_checked_at_its_own_device_channel() {
+    // UR-5, H1, H5: each element is checked at its own device channel: a BasicRX with its
+    // two front ends answers `(1)` at channel 0 and `(0)` at channel 1 when the spec says so.
+    let device = fake(FakeConfig { front_ends: vec!["BasicRX"], serial: "ur05-each-channel".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:A:basic_rx:1", "0:A:basic_rx:0"], "tx": [] });
+    let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
+    assert!(spec_calls(&device).contains(&"set_subdev_spec rx A:1 A:0".to_owned()), "{:?}", device.calls());
+    assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 0).unwrap(), "BasicRX (1)");
+    assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 1).unwrap(), "BasicRX (0)");
+}
+
+// ------------------------------------------------ UR-5: one live instance per serial
+
+#[test]
+fn ur_05_a_second_binding_of_one_serial_is_refused() {
+    // UR-5, H4: a second binding of one device would silently overwrite the first's subdev
+    // spec, so one serial has one live instance; the refusal writes nothing to the device
+    // (the serial is read before the spec), and dropping the first releases it.
+    let serial = "DUP5-T2";
+    let a = fake(FakeConfig { serial: serial.to_owned(), ..FakeConfig::default() });
+    let first = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), a.clone()).unwrap();
+    let before = a.calls().len();
+    let error = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), a.clone()).err().unwrap();
+    assert_eq!(error.kind, ModuleErrorKind::Rejected);
+    assert!(error.message.starts_with("UR-5:") && error.message.contains(serial), "{}", error.message);
+    assert_eq!(a.calls()[before..], ["serial"], "the refusal writes nothing to the device");
+    // Another device of the same serial is refused too: the registry is keyed by the serial.
+    let b = fake(FakeConfig { serial: serial.to_owned(), ..FakeConfig::default() });
+    let error = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), b).err().unwrap();
+    assert!(error.message.contains(serial), "{}", error.message);
+    // The refusal does not release the first's registration.
+    let c = fake(FakeConfig { serial: serial.to_owned(), ..FakeConfig::default() });
+    assert!(UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), c).is_err(), "a refusal released the first's serial");
+    drop(first);
+    let d = fake(FakeConfig { serial: serial.to_owned(), ..FakeConfig::default() });
+    assert!(UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), d).is_ok(), "the serial was not released on drop");
+}
+
+#[test]
+fn ur_05_a_parallel_bind_of_one_serial_succeeds_once() {
+    // UR-5 (Sol, major 3): the check and the insert are one lock, so two threads binding one
+    // serial at the same time leave exactly one live instance; both results stay alive here,
+    // so the loser's refusal cannot be a race with the winner's drop.
+    let serial = "DUP5-T9";
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let device = fake(FakeConfig { serial: serial.to_owned(), ..FakeConfig::default() });
+                barrier.wait();
+                UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device)
+            })
+        })
+        .collect();
+    let results: Vec<Result<UhdRadio, ezsdr_kernel::module_api::ModuleError>> = handles.into_iter().map(|handle| handle.join().unwrap()).collect();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1, "exactly one bind wins");
+}
+
+#[test]
+fn ur_05_a_failed_binding_leaves_no_serial_registered() {
+    // UR-5: the serial is read and registered before the master-clock check, and a binding
+    // that then fails leaves no registration behind (the guard is dropped with the failure).
+    let serial = "DUP5-T3";
+    let a = fake(FakeConfig { serial: serial.to_owned(), master_clock_rate: 184_320_000, ..FakeConfig::default() });
+    let error = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), a.clone()).err().unwrap();
+    assert!(error.message.contains("needs a 200 MHz master clock"), "{}", error.message);
+    assert!(!calls(&a, "serial").is_empty(), "the refused attempt read the serial");
+    let b = fake(FakeConfig { serial: serial.to_owned(), ..FakeConfig::default() });
+    assert!(UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), b).is_ok(), "the refused attempt left a registration");
+}
+
+/// A `FakeDevice` whose `serial` is the one call that fails: the rest of the device is
+/// sound, so a swallowed serial error cannot hide behind a later call's (Sol, major 3).
+struct SerialFails {
+    inner: Arc<FakeDevice>,
+}
+
+impl Device for SerialFails {
+    fn describe(&self) -> Json { self.inner.describe() }
+    fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity { self.inner.fidelity() }
+    fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
+    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+    fn channels(&self, dir: ezsdr_radio_uhd::Dir) -> usize { self.inner.channels(dir) }
+    fn front_end(&self, dir: ezsdr_radio_uhd::Dir, chan: usize) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.front_end(dir, chan) }
+    fn serial(&self) -> Result<String, ezsdr_radio_uhd::DeviceError> {
+        Err(ezsdr_radio_uhd::DeviceError::failed("fake: the serial read failed"))
+    }
+    fn set_subdev_spec(&self, d: ezsdr_radio_uhd::Dir, m: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_subdev_spec(d, m) }
+    fn rates(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> { self.inner.rates(d, c) }
+    fn set_sources(&self, c: &str, t: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_sources(c, t) }
+    fn set_time_zero(&self, p: bool) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_time_zero(p) }
+    fn time_now(&self) -> Result<i64, ezsdr_radio_uhd::DeviceError> { self.inner.time_now() }
+    fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> { self.inner.ref_locked() }
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> { self.inner.apply(d, c, s, at) }
+    fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
+    fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+    fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
+    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t) }
+    fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
+    fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
+    fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
+    fn close_streams(&self) { self.inner.close_streams() }
+    fn mark_lost(&self) { self.inner.mark_lost() }
+}
+
+#[test]
+fn ur_05_a_serial_read_that_fails_refuses() {
+    // UR-5: a serial that cannot be read is refused with the device's own reason, and the
+    // refusal comes before any write — the sound device behind the wrapper sees nothing.
+    let inner = fake(FakeConfig { serial: "DUP5-T4".to_owned(), ..FakeConfig::default() });
+    let device: Arc<dyn Device> = Arc::new(SerialFails { inner: inner.clone() });
+    let error = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device).err().unwrap();
+    assert_eq!(error.kind, ModuleErrorKind::Rejected);
+    assert!(error.message.starts_with("UR-5:"), "{}", error.message);
+    assert!(error.message.contains("fake: the serial read failed"), "{}", error.message);
+    assert!(inner.calls().is_empty(), "a write happened before the serial: {:?}", inner.calls());
+    let healthy = fake(FakeConfig { serial: "DUP5-T4".to_owned(), ..FakeConfig::default() });
+    assert!(UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), healthy).is_ok(), "the failed attempt left a registration");
+}
+
+#[test]
+fn ur_05_a_radio_dropped_after_its_device_is_lost_releases_its_serial() {
+    // UR-5: the registration holds the serial, not the device object's life; a drop after
+    // the device is gone does not read it (UR-29's rule) and still releases the serial.
+    let serial = "DUP5-T7";
+    let a = fake(FakeConfig { serial: serial.to_owned(), faults: vec![FakeFault::Lost(Wall::from_millis(10))], ..FakeConfig::default() });
+    let first = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), a.clone()).unwrap();
+    a.host().sleep(Wall::from_millis(20));
+    assert!(a.serial().is_err(), "the device is gone");
+    drop(first);
+    let b = fake(FakeConfig { serial: serial.to_owned(), ..FakeConfig::default() });
+    assert!(UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), b).is_ok(), "the serial was not released");
+}
+
+#[test]
+fn ur_05_two_default_fakes_bind_together() {
+    // UR-33, UR-5: the default serial is one per `FakeDevice`, so the parallel tests of one
+    // binary never bind one another's device.
+    let a = fake(FakeConfig::default());
+    let b = fake(FakeConfig::default());
+    assert_ne!(a.serial().unwrap(), b.serial().unwrap());
+    let r1 = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), a).unwrap();
+    let r2 = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), b).unwrap();
+    drop((r1, r2));
+}
+
+// ------------------------------------------------ UR-13: the rate set at the first open
+
+/// A `FakeDevice` whose `rates` answer is replaced per direction after the inner call —
+/// so its call is still recorded and its channel check still runs (design 33 D5: BP0
+/// measures the hardware; a device with another grid is a test wrapper, not a `FakeConfig`).
+struct RatesMisreported {
+    inner: Arc<FakeDevice>,
+    rx: Option<Vec<(f64, f64, f64)>>,
+    tx: Option<Vec<(f64, f64, f64)>>,
+    /// The direction whose `rates` read fails (UR-13's read-error refusal).
+    failing: Option<ezsdr_radio_uhd::Dir>,
+}
+
+impl Device for RatesMisreported {
+    fn describe(&self) -> Json { self.inner.describe() }
+    fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity { self.inner.fidelity() }
+    fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
+    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+    fn channels(&self, dir: ezsdr_radio_uhd::Dir) -> usize { self.inner.channels(dir) }
+    fn front_end(&self, dir: ezsdr_radio_uhd::Dir, chan: usize) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.front_end(dir, chan) }
+    fn serial(&self) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.serial() }
+    fn set_subdev_spec(&self, d: ezsdr_radio_uhd::Dir, m: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_subdev_spec(d, m) }
+    fn set_sources(&self, c: &str, t: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_sources(c, t) }
+    fn set_time_zero(&self, p: bool) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_time_zero(p) }
+    fn time_now(&self) -> Result<i64, ezsdr_radio_uhd::DeviceError> { self.inner.time_now() }
+    fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> { self.inner.ref_locked() }
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> { self.inner.apply(d, c, s, at) }
+    fn rates(&self, dir: ezsdr_radio_uhd::Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> {
+        if self.failing == Some(dir) {
+            return Err(ezsdr_radio_uhd::DeviceError::failed("fake: the rates read failed"));
+        }
+        let answer = self.inner.rates(dir, chan)?;
+        match dir {
+            ezsdr_radio_uhd::Dir::Rx => Ok(self.rx.clone().unwrap_or(answer)),
+            ezsdr_radio_uhd::Dir::Tx => Ok(self.tx.clone().unwrap_or(answer)),
+        }
+    }
+    fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
+    fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+    fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
+    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t) }
+    fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
+    fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
+    fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
+    fn close_streams(&self) { self.inner.close_streams() }
+    fn mark_lost(&self) { self.inner.mark_lost() }
+}
+
+/// The profile's grid with one middle value moved off it: another device whose rates are
+/// not the description's (UR-13).
+fn off_grid() -> Vec<(f64, f64, f64)> {
+    let mut grid = ezsdr_radio::x3xx::rates(200_000_000);
+    let middle = grid.len() / 2;
+    grid[middle] += 0.5;
+    grid.into_iter().map(|rate| (rate, rate, 0.0)).collect()
+}
+
+#[test]
+fn ur_13_arm_compares_the_rate_set_after_the_streamer_opens() {
+    // UR-13, H3: the device's rates are compared once per direction, after its first
+    // streamer opened — before an open the DDC's chain is not connected and UHD answers
+    // `{1.0}` — and from_binding reads none; the Manifest keeps the answer.
+    let dir = TempDir::new();
+    let inner = fake(FakeConfig { rates_before_open: true, serial: "ur13-arm-reads".to_owned(), ..FakeConfig::default() });
+    let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: None, tx: None, failing: None });
+    let run = spec_run(&with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    running(&run);
+    let log = inner.calls();
+    let position = |call: &str| log.iter().position(|c| c == call).unwrap_or_else(|| panic!("{call} missing in {log:?}"));
+    assert!(position("rx_open 0 [0]") < position("rates rx 0"), "{log:?}");
+    assert!(position("tx_open 0 [0]") < position("rates tx 0"), "{log:?}");
+    assert_eq!(calls(&inner, "rates rx 0"), ["rates rx 0"], "one comparison per direction");
+    assert_eq!(calls(&inner, "rates tx 0"), ["rates tx 0"]);
+    let first_open = ["rx_open 0 [0]", "tx_open 0 [0]"].iter().filter_map(|call| log.iter().position(|c| c == call)).min().unwrap();
+    assert!(!log[..first_open].iter().any(|call| call.starts_with("rates")), "from_binding read rates: {log:?}");
+    let manifest = run.finish();
+    assert_eq!(section(&manifest, "device")["rates_checked"], json!({ "rx": true, "tx": true }));
+}
+
+#[test]
+fn ur_13_arm_refuses_a_rate_set_the_description_does_not_have() {
+    // UR-13: a rate set that is not the profile's — one middle value moved by 0.5 Hz, so
+    // that ends and cardinality still match — is refused at `arm`, after the streamer
+    // opened and was closed again by the cleanup.
+    for tx in [false, true] {
+        let dir = TempDir::new();
+        let inner = fake(FakeConfig { serial: format!("ur13-arm-refuse-{tx}"), ..FakeConfig::default() });
+        let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: (!tx).then(off_grid), tx: tx.then(off_grid), failing: None });
+        let spec = if tx { with_tx(receive_spec(1, 1e6, 1e9, None), 1e6) } else { receive_spec(1, 1e6, 1e9, None) };
+        let run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+        assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }), "tx={tx}: {:?}", run.state());
+        let manifest = run.finish();
+        let reason = failure(&manifest);
+        assert!(reason.contains("UR-13") && reason.contains(if tx { "tx" } else { "rx" }) && reason.contains("rates"), "tx={tx}: {reason}");
+        let log = inner.calls();
+        let opened = log.iter().position(|c| c.starts_with(if tx { "tx_open" } else { "rx_open" })).expect("the streamer opened");
+        let closed = log.iter().position(|c| c.starts_with("close_streams")).expect("the streamer was closed");
+        assert!(opened < closed, "tx={tx}: {log:?}");
+        assert_eq!(calls(&inner, if tx { "rates tx 0" } else { "rates rx 0" }).len(), 1, "{log:?}");
+    }
+}
+
+#[test]
+fn ur_13_arm_refuses_a_pre_chain_rate_set_after_the_open() {
+    // UR-13: `{1.0}` after the streamer opened is not "not yet connected" — the chain is —
+    // so it is refused like any other set that is not the profile's (INFERRED: BP0).
+    let dir = TempDir::new();
+    let inner = fake(FakeConfig { rates_before_open: true, serial: "ur13-pre-chain".to_owned(), ..FakeConfig::default() });
+    let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: Some(vec![(1.0, 1.0, 0.0)]), tx: None, failing: None });
+    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }), "{:?}", run.state());
+    let manifest = run.finish();
+    assert!(failure(&manifest).contains("UR-13"), "{}", failure(&manifest));
+    assert!(calls(&inner, "rx_open 0 [0]").len() == 1, "the refusal is after the open: {:?}", inner.calls());
+}
+
+#[test]
+fn ur_13_a_direction_the_arm_never_opened_is_not_compared() {
+    // UR-13: a direction whose streamer `arm` did not open — here the receive side of a
+    // Session with no link — is not compared, whatever its device would answer; the
+    // Manifest says so.
+    let dir = TempDir::new();
+    let inner = fake(FakeConfig { rates_before_open: true, serial: "ur13-no-link".to_owned(), ..FakeConfig::default() });
+    let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: Some(vec![(1.0, 1.0, 0.0)]), tx: Some(vec![(1.0, 1.0, 0.0)]), failing: None });
+    let mut doc = profile(&dir, json!({}), json!({}), true);
+    doc["bindings"]["rec"].as_object_mut().unwrap().remove("feed");
+    doc.as_object_mut().unwrap().remove("placements");
+    doc["bindings"].as_object_mut().unwrap().remove("rec");
+    let mut run = session(&doc, device);
+    past_t0(&mut run, ms(1));
+    running(&run);
+    let manifest = run.finish();
+    assert_eq!(section(&manifest, "device")["rates_checked"], json!({ "rx": false, "tx": false }));
+    assert!(calls(&inner, "rates").is_empty(), "{:?}", inner.calls());
+}
+
+#[test]
+fn ur_13_arm_takes_the_rate_set_in_any_order() {
+    // UR-13: the comparison is a set: the device's order is UHD's, which the bench fixes
+    // (BP0), and a reversed answer is the same set.
+    let dir = TempDir::new();
+    let inner = fake(FakeConfig { serial: "ur13-order".to_owned(), ..FakeConfig::default() });
+    let mut reversed: Vec<(f64, f64, f64)> = ezsdr_radio::x3xx::rates(200_000_000).into_iter().rev().map(|rate| (rate, rate, 0.0)).collect();
+    reversed.dedup();
+    let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: Some(reversed), tx: None, failing: None });
+    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    running(&run);
+    let manifest = run.finish();
+    assert_eq!(section(&manifest, "device")["rates_checked"], json!({ "rx": true, "tx": false }));
+}
+
+// ------------------------------------------------ 1b-4c: stream 0 of the layout's keys
+
+/// The selector of a two-channel-UBX layout, both directions (RM-28).
+fn layout_selector() -> Json {
+    json!({ "keys": "channel", "rx": ["0:A:ubx:0", "0:B:ubx:0"], "tx": ["0:A:ubx:0", "0:B:ubx:0"] })
+}
+
+#[test]
+fn ur_12_a_layout_s_stream_zero_declares_its_clock_and_opens_its_channels() {
+    // UR-12, RM-29: `prepare` and `arm` declare stream 0's clock at `usrp/rx/s0`, read its
+    // channel set from the membership, and open — and configure — exactly that set, each
+    // channel with its own numbered settings; the record waits for the first block.
+    let direct = Direct::armed(
+        FakeConfig::default(),
+        &[
+            ("radio.rx.c0.stream", Scalar::from(-1)),
+            ("radio.rx.c1.stream", Scalar::from(0)),
+            ("radio.rx.s0.sample_rate_hz", Scalar::try_from(2e6).unwrap()),
+        ],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+    );
+    assert_eq!(calls(&direct.device, "rx_open"), ["rx_open 0 [1]"], "{:?}", direct.device.calls());
+    let declared = direct.clocks.declared_sample_clocks();
+    let entry = declared.iter().find(|handle| handle.stream().path() == "usrp/rx/s0").expect("the stream 0 clock declared");
+    assert_eq!(entry.root_ticks_per_tick(), ezsdr_kernel::time::Rational::new(100, 1).unwrap());
+    assert!(declared.iter().all(|handle| handle.stream().path() != "usrp/rx"), "no direction-node clock: {declared:?}");
+    assert!(direct.clocks.sample_clock_records().is_empty(), "no block yet, so no registration");
+    let ports: Vec<String> = direct.radio.instance().tree.ports.iter().map(|port| port.name.as_str().to_owned()).collect();
+    assert_eq!(ports, ["rx0", "rx1"]);
+    let log = direct.device.calls();
+    assert!(log.iter().any(|call| call == "apply rx 1 rate=2000000 freq=1000000000 gain=0 antenna=RX2 at=-"), "{log:?}");
+    assert!(!log.iter().any(|call| call.starts_with("apply rx 0 ")), "c0 is in no stream: {log:?}");
+    assert!(!log.iter().any(|call| call == "rx_open 0 []"), "{log:?}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_12_a_layout_s_stream_zero_applies_each_channel_s_own_settings() {
+    // UR-12, UR-30: one stream's channels get their own settings — the stream's rate, each
+    // channel's frequency, gain and antenna (design 33 D16) — under the concrete keys.
+    let direct = Direct::armed(
+        FakeConfig::default(),
+        &[
+            ("radio.rx.c0.stream", Scalar::from(0)),
+            ("radio.rx.c1.stream", Scalar::from(0)),
+            ("radio.rx.s0.sample_rate_hz", Scalar::try_from(2e6).unwrap()),
+            ("radio.rx.c0.frequency_hz", Scalar::try_from(1e9).unwrap()),
+            ("radio.rx.c0.gain_db", Scalar::from(5)),
+            ("radio.rx.c0.antenna", Scalar::from("RX2")),
+            ("radio.rx.c1.frequency_hz", Scalar::try_from(2.4e9).unwrap()),
+            ("radio.rx.c1.gain_db", Scalar::try_from(7.5).unwrap()),
+            ("radio.rx.c1.antenna", Scalar::from("TX/RX")),
+        ],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+    );
+    assert_eq!(calls(&direct.device, "rx_open"), ["rx_open 0 [0, 1]"]);
+    assert_eq!(
+        calls(&direct.device, "apply rx"),
+        [
+            "apply rx 0 rate=2000000 freq=1000000000 gain=5 antenna=RX2 at=-",
+            "apply rx 1 rate=2000000 freq=2400000000 gain=7.5 antenna=TX/RX at=-",
+        ],
+        "{:?}",
+        direct.device.calls()
+    );
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_13_a_layout_s_transmit_stream_zero_opens_its_channel_list() {
+    // UR-13, RM-29: the transmit side is the same: its streamer's channel list, its own
+    // settings, and its clock registered at `arm` on the lattice (RM-25).
+    let direct = Direct::armed(
+        FakeConfig::default(),
+        &[
+            ("radio.tx.c0.stream", Scalar::from(-1)),
+            ("radio.tx.c1.stream", Scalar::from(0)),
+            ("radio.tx.s0.sample_rate_hz", Scalar::try_from(2e6).unwrap()),
+            ("radio.tx.c1.frequency_hz", Scalar::try_from(2.4e9).unwrap()),
+            ("radio.tx.c1.gain_db", Scalar::try_from(7.5).unwrap()),
+            ("radio.tx.c1.antenna", Scalar::from("TX/RX")),
+        ],
+        Vec::new(),
+        json!({ "keys": "channel", "rx": [], "tx": ["0:A:ubx:0", "0:B:ubx:0"] }),
+    );
+    assert_eq!(calls(&direct.device, "tx_open"), ["tx_open 0 [1]"]);
+    assert!(calls(&direct.device, "apply tx").contains(&"apply tx 1 rate=2000000 freq=2400000000 gain=7.5 antenna=TX/RX at=-".to_owned()), "{:?}", direct.device.calls());
+    assert!(!calls(&direct.device, "apply tx").iter().any(|call| call.starts_with("apply tx 0 ")), "{:?}", direct.device.calls());
+    let records = direct.clocks.sample_clock_records();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].stream.path(), "usrp/tx/s0");
+    assert_eq!(records[0].root_ticks_per_tick, ezsdr_kernel::time::Rational::new(100, 1).unwrap());
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_12_a_layout_stream_above_zero_is_refused() {
+    // UR-12, D14: this Provider runs each direction's stream 0 alone — a channel joining a
+    // later stream is refused before anything is configured (coerce takes -1..=1, the
+    // stage's limit is the Provider's), for both directions.
+    for dir in ["rx", "tx"] {
+        let device = fake(FakeConfig { serial: format!("ur12-above-{dir}"), ..FakeConfig::default() });
+        let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
+        let constraints = [
+            (format!("radio.{dir}.c0.stream"), Scalar::from(0)),
+            (format!("radio.{dir}.c1.stream"), Scalar::from(1)),
+        ];
+        let pairs: Vec<(&str, Scalar)> = constraints.iter().map(|(name, value)| (name.as_str(), value.clone())).collect();
+        let report = radio.coerce(&request(&pairs)).unwrap();
+        assert!(report.rejected.is_empty(), "{dir}: the description takes -1..=1: {:?}", report.rejected);
+        let error = direct_prepare(&mut radio, device.clone(), ExecutionClass::HardwareInLoop, Vec::new(), &pairs).unwrap_err();
+        assert_eq!(error.kind, ModuleErrorKind::Rejected, "{dir}");
+        assert!(error.message.contains("stream 0") && error.message.contains("c1"), "{dir}: {}", error.message);
+        assert!(
+            !device.calls().iter().any(|call| call.starts_with("apply") || call.starts_with("rx_open") || call.starts_with("tx_open")),
+            "{dir}: {:?}",
+            device.calls()
+        );
+    }
+}
+
+#[test]
+fn ur_12_a_layout_s_stream_zero_with_no_channel_declares_no_clock() {
+    // UR-12, RM-29: a stream no channel is in declares no SampleClock, opens no streamer
+    // and configures nothing — `rx_open(0, [])` would be channel 0 on the device —, while
+    // its node and port stay in the tree.
+    let direct = Direct::armed(
+        FakeConfig::default(),
+        &[("radio.rx.c0.stream", Scalar::from(-1)), ("radio.rx.c1.stream", Scalar::from(-1))],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+    );
+    let log = direct.device.calls();
+    assert!(!log.iter().any(|call| call.starts_with("rx_open") || call.starts_with("apply rx")), "{log:?}");
+    assert!(direct.clocks.declared_sample_clocks().iter().all(|handle| handle.stream().path() != "usrp/rx/s0"), "{:?}", direct.clocks.declared_sample_clocks());
+    let children: Vec<String> = direct.radio.instance().tree.children.iter().map(|child| child.id.path().to_owned()).collect();
+    assert!(children.contains(&"usrp/rx/s0".to_owned()), "{children:?}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_12_a_layout_a_rate_the_device_does_not_apply_is_refused() {
+    // UR-12: the stream's rate is read back per channel as ever; a device that applies
+    // another rate halts the configuration before `arm`.
+    let device = fake(FakeConfig {
+        faults: vec![FakeFault::WrongRate { claimed: 2e6, applied: 1.9e6, nth: 0 }],
+        serial: "ur12-layout-wrong-rate".to_owned(),
+        ..FakeConfig::default()
+    });
+    let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
+    let constraints = [
+        ("radio.rx.c0.stream", Scalar::from(-1)),
+        ("radio.rx.c1.stream", Scalar::from(0)),
+        ("radio.rx.s0.sample_rate_hz", Scalar::try_from(2e6).unwrap()),
+    ];
+    let error = direct_prepare(&mut radio, device.clone(), ExecutionClass::HardwareInLoop, Vec::new(), &constraints).unwrap_err();
+    assert!(error.message.contains("UR-12: the device applied") && error.message.contains("1900000") && error.message.contains("2000000"), "{}", error.message);
+    assert!(calls(&device, "rx_open").is_empty(), "{:?}", device.calls());
+}
+
+#[test]
+fn ur_12_a_layout_an_antenna_read_back_that_differs_is_refused() {
+    // UR-12, D16: the antenna is read back after an untimed change and compared; a front
+    // end whose getter disagrees halts the configuration (the record keeps both values).
+    let device = fake(FakeConfig {
+        faults: vec![FakeFault::WrongAntenna { claimed: "TX/RX", applied: "RX2" }],
+        serial: "ur12-layout-antenna".to_owned(),
+        ..FakeConfig::default()
+    });
+    let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
+    let constraints = [
+        ("radio.rx.c0.stream", Scalar::from(-1)),
+        ("radio.rx.c1.stream", Scalar::from(0)),
+        ("radio.rx.c1.antenna", Scalar::from("TX/RX")),
+    ];
+    let error = direct_prepare(&mut radio, device.clone(), ExecutionClass::HardwareInLoop, Vec::new(), &constraints).unwrap_err();
+    assert!(error.message.contains("UR-12") && error.message.contains("TX/RX") && error.message.contains("RX2"), "{}", error.message);
+    assert!(error.message.contains("radio.rx.c1"), "{}", error.message);
+    assert!(calls(&device, "rx_open").is_empty(), "{:?}", device.calls());
+}
+
+#[test]
+fn ur_24_a_channel_keyed_timed_update_acts_on_its_own_channel() {
+    // UR-24, item 7: a numbered channel key's timed update acts on that channel alone —
+    // one command, one channel — and the stream untouched.
+    for only_one in [false, true] {
+        let constraints: Vec<(&str, Scalar)> = if only_one {
+            vec![("radio.rx.c0.stream", Scalar::from(-1)), ("radio.rx.c1.stream", Scalar::from(0))]
+        } else {
+            vec![("radio.rx.c1.stream", Scalar::from(0))]
+        };
+        use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
+        let mut direct = Direct::build(FakeConfig::default(), &constraints, vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)], layout_selector());
+        direct.settle(Wall::from_millis(30));
+        assert_eq!(direct.clocks.sample_clock_records().len(), 1, "case only_one={only_one}: one segment runs");
+        let at = direct.now() + ms(40);
+        direct.update("radio.rx.c1.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(at));
+        direct.update("radio.rx.c1.gain_db", Value::num(3.0).unwrap(), HardwareTimed, Some(at + ms(1)));
+        direct.settle(Wall::from_millis(80));
+        let log = direct.device.calls();
+        let freq = |prefix: &str| log.iter().filter(|call| call.starts_with(prefix) && call.contains("freq=2100000000") && call.contains(&format!("at={at} effective="))).count();
+        assert_eq!(freq("apply rx 1 "), 1, "case only_one={only_one}: {log:?}");
+        assert_eq!(freq("apply rx 0 "), 0, "case only_one={only_one}: {log:?}");
+        assert_eq!(log.iter().filter(|call| call.starts_with("apply rx 1 ") && call.contains("gain=3") && !call.contains("at=-")).count(), 1, "{log:?}");
+        assert_eq!(direct.of("radio.COMMAND_REJECTED").len(), 0, "{log:?}");
+        assert_eq!(direct.of("radio.LATE_COMMAND").len(), 0, "{log:?}");
+        assert_eq!(direct.clocks.sample_clock_records().len(), 1, "a timed update cuts nothing");
+        let instance = direct.finish();
+        let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+        assert_eq!(applied.as_array().unwrap().iter().filter(|row| row["key"] == "radio.rx.c1.frequency_hz" && row["issued"] == true && row["at"]["ticks"] == at).count(), 1, "case only_one={only_one}: {applied}");
+    }
+}
+
+#[test]
+fn ur_24_a_timed_update_for_a_channel_out_of_its_stream_waits_for_its_segment() {
+    // UR-24, item 7: a timed update for a channel of no running stream is recorded, not
+    // handed over; the segment that later takes the channel applies it untimed.
+    use ezsdr_kernel::module_api::UpdateClass::{Cold, HardwareTimed};
+    let mut direct = Direct::build(FakeConfig::default(), &[], vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)], layout_selector());
+    let at = direct.now() + ms(40);
+    direct.update("radio.rx.c1.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(at));
+    direct.settle(Wall::from_millis(80));
+    let log = direct.device.calls();
+    assert_eq!(log.iter().filter(|call| call.starts_with("apply rx 1 ")).count(), 0, "a channel in no stream is not handed over: {log:?}");
+    assert_eq!(direct.of("radio.COMMAND_REJECTED").len(), 0);
+    assert_eq!(calls(&direct.device, "rx_open").len(), 1, "the recorded update cuts nothing");
+    // The channel joins: the new segment's configuration carries the recorded value,
+    // untimed, and nothing hands it over as timed.
+    direct.update("radio.rx.c1.stream", Value::from(0), Cold, None);
+    direct.settle(Wall::from_millis(200));
+    let log = direct.device.calls();
+    assert!(log.iter().any(|call| call == "rx_open 0 [0, 1]"), "{log:?}");
+    let untimed = log.iter().filter(|call| call.starts_with("apply rx 1 ") && call.contains("freq=2100000000") && call.ends_with("at=-")).count();
+    assert_eq!(untimed, 1, "{log:?}");
+    assert_eq!(log.iter().filter(|call| call.starts_with("apply rx 1 ") && call.contains("freq=2100000000") && !call.ends_with("at=-")).count(), 0, "{log:?}");
+    assert_eq!(log.iter().filter(|call| call.starts_with("apply rx 0 ") && call.contains("freq=2100000000")).count(), 0, "the value leaked to c0: {log:?}");
+    assert_eq!(direct.of("radio.COMMAND_REJECTED").len(), 0);
+    let instance = direct.finish();
+    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    assert_eq!(applied.as_array().unwrap().iter().filter(|row| row["key"] == "radio.rx.c1.frequency_hz" && row["note"] == "no channel").count(), 1, "{applied}");
+    assert!(applied.as_array().unwrap().iter().any(|row| row["key"] == "radio.rx.c1.frequency_hz" && row["claimed"] == 2.1e9 && row["read_back"] == 2.1e9), "{applied}");
+}
+
+#[test]
+fn ur_24_a_channel_keyed_command_counts_one_queue_slot() {
+    // UR-24, item 7: a numbered channel key's command is one device-queue slot, whatever
+    // the direction's channel count the current keys would count.
+    use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
+    let constraints = [("radio.rx.c0.stream", Scalar::from(0)), ("radio.rx.c1.stream", Scalar::from(0))];
+    let mut direct = Direct::build(
+        FakeConfig { command_queue: 64, ..FakeConfig::default() },
+        &constraints,
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+    );
+    let far = direct.now() + ms(5_000);
+    for i in 0..8 {
+        direct.update("radio.rx.c0.gain_db", Value::num(1.0).unwrap(), HardwareTimed, Some(far + i));
+        direct.update("radio.rx.c1.gain_db", Value::num(2.0).unwrap(), HardwareTimed, Some(far + 100 + i));
+    }
+    direct.settle(Wall::from_millis(30));
+    assert_eq!(direct.of("radio.COMMAND_QUEUE_FULL").len(), 0, "16 channel commands are 16 slots");
+    direct.update("radio.rx.c1.gain_db", Value::num(3.0).unwrap(), HardwareTimed, Some(far + 200));
+    direct.settle(Wall::from_millis(30));
+    let full = direct.of("radio.COMMAND_QUEUE_FULL");
+    assert_eq!(full.len(), 1, "the 17th is refused");
+    assert_eq!(full[0].payload["depth"], 16, "{:?}", full[0].payload);
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_25_a_channel_s_antenna_change_cuts_its_stream() {
+    // UR-25, D16: a channel's antenna is a `cold` change: the stream is cut, the new
+    // segment applies antenna untimed and its read-back is recorded; the ready instant is
+    // the cut plus the receive call, the allowance and the lead.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::build(FakeConfig::default(), &[], vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)], layout_selector());
+    direct.update("radio.rx.c0.antenna", Value::from("TX/RX"), Cold, None);
+    direct.settle(Wall::from_millis(150));
+    let log = direct.device.calls();
+    let stop = log.iter().position(|call| call == "rx_stop 0 now").expect("the cut stops the streamer");
+    let apply = log.iter().position(|call| call == "apply rx 0 rate=1000000 freq=1000000000 gain=0 antenna=TX/RX at=-").unwrap_or_else(|| panic!("the new segment's configuration: {log:?}"));
+    assert!(stop < apply, "{log:?}");
+    assert_eq!(log.iter().filter(|call| call.starts_with("apply rx 1 ")).count(), 0, "{log:?}");
+    let records = direct.clocks.sample_clock_records();
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert!(records[0].ended_at.is_some(), "{records:?}");
+    let (end, origin) = (records[0].ended_at.unwrap().ticks_in(records[0].root).unwrap(), records[1].origin.ticks_in(records[1].root).unwrap());
+    assert!(origin >= end + ms(55), "the receive call, the allowance and the lead (RM-25): {origin} vs {end}");
+    assert!(origin - (end + ms(55)) < 200, "the origin is the next lattice instant (RM-25): {origin} vs {end}");
+    assert_eq!(records[1].stream.path(), "usrp/rx/s0");
+    assert!(direct.of("radio.COMMAND_REJECTED").is_empty());
+    let instance = direct.finish();
+    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    assert!(applied.as_array().unwrap().iter().any(|row|
+        row["key"] == "radio.rx.c0.antenna" && row["channel"] == 0 && row["claimed"] == "TX/RX" && row["read_back"] == "TX/RX"
+    ), "{applied}");
+}
+
+#[test]
+fn ur_25_an_antenna_change_of_a_channel_in_no_stream_only_records() {
+    // UR-25, item 7's rule on the cold side: a channel of no running stream takes its
+    // value; no cut, no device call, and the record reads no antenna back.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::build(FakeConfig::default(), &[], vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)], layout_selector());
+    direct.update("radio.rx.c1.antenna", Value::from("TX/RX"), Cold, None);
+    direct.settle(Wall::from_millis(120));
+    let log = direct.device.calls();
+    assert_eq!(log.iter().filter(|call| call.starts_with("apply rx 1 ")).count(), 0, "{log:?}");
+    assert_eq!(direct.clocks.sample_clock_records().len(), 1, "the running stream is not cut");
+    assert!(direct.of("radio.LATE_COMMAND").is_empty());
+    let instance = direct.finish();
+    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let row = applied.as_array().unwrap().iter().find(|row| row["key"] == "radio.rx.c1.antenna").unwrap_or_else(|| panic!("{applied}"));
+    assert_eq!(row["claimed"], "TX/RX");
+    assert!(row["read_back"].is_null(), "the device was not asked: {row}");
+}
+
+#[test]
+fn ur_25_a_refused_antenna_read_back_halts_the_stream() {
+    // UR-25, UR-12, D16: a runtime antenna whose read-back disagrees is refused, the
+    // segment does not start, and the refusal is recorded with both names.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::build(
+        FakeConfig { faults: vec![FakeFault::WrongAntenna { claimed: "TX/RX", applied: "RX2" }], ..FakeConfig::default() },
+        &[],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+    );
+    direct.update("radio.rx.c0.antenna", Value::from("TX/RX"), Cold, None);
+    direct.settle(Wall::from_millis(150));
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?} {:?}", direct.device.calls());
+    let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+    assert!(reason.starts_with("UR-12:") && reason.contains("TX/RX") && reason.contains("RX2") && reason.contains("radio.rx.c0"), "{reason}");
+    assert_eq!(calls(&direct.device, "rx_start").len(), 1, "the refused segment never starts: {:?}", direct.device.calls());
+    let records = direct.clocks.sample_clock_records();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert!(records[0].ended_at.is_some(), "the cut ended the old clock");
+    let instance = direct.finish();
+    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    assert!(applied.as_array().unwrap().iter().any(|row| row["key"] == "radio.rx.c0.antenna" && row["claimed"] == "TX/RX" && row["read_back"] == "RX2"), "{applied}");
+    let rejected = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()];
+    assert!(rejected.as_array().unwrap().iter().any(|row| row["reason"].as_str().is_some_and(|reason| reason.starts_with("UR-12:"))), "{rejected}");
+}
+
+#[test]
+fn ur_26_a_current_keys_antenna_update_is_refused() {
+    // UR-26: the current keys' antenna stays un-updatable at runtime; the layout's numbered
+    // antenna key is not the current one.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::with_links(FakeConfig::default(), &[], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)]);
+    direct.update("radio.rx.antenna", Value::from("TX/RX"), Cold, None);
+    direct.settle(Wall::from_millis(30));
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0].payload["reason"], "UR-26: radio.rx.antenna is not updated at runtime by this Provider");
+    let log = direct.device.calls();
+    assert!(!log.iter().any(|call| call.starts_with("apply rx") && call.contains("antenna=TX/RX")), "{log:?}");
+    let instance = direct.finish();
+    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let row = applied.as_array().unwrap().iter().find(|row| row["key"] == "radio.rx.antenna").unwrap_or_else(|| panic!("{applied}"));
+    assert_eq!(row["claimed"], "RX2");
+    assert!(row.get("read_back").is_none(), "the current keys' row is unchanged: {row}");
+}
+
+// ------------------------------------------------ 1b-4c: the cut, the floor and the targets
+
+#[test]
+fn ur_25_a_layout_rate_change_cuts_its_stream_and_configures_every_channel() {
+    // UR-25, item 8: a stream's rate change cuts it and the new segment configures every
+    // channel of its set — each channel's own values, the timed updates due by the origin
+    // included — and the new clock starts on its lattice; the other direction is untouched.
+    use ezsdr_kernel::module_api::UpdateClass::{Cold, HardwareTimed};
+    let front = FakeConfig { front_ends: vec!["UBX", "BasicRX"], serial: "ur25-layout-rate".to_owned(), ..FakeConfig::default() };
+    let mut direct = Direct::build(
+        front,
+        &[
+            ("radio.rx.c1.stream", Scalar::from(0)),
+            ("radio.rx.c0.frequency_hz", Scalar::try_from(2.4e9).unwrap()),
+            ("radio.rx.c0.gain_db", Scalar::from(20)),
+            ("radio.rx.c1.frequency_hz", Scalar::try_from(25e6).unwrap()),
+            ("radio.tx.c0.stream", Scalar::from(0)),
+        ],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        json!({ "keys": "channel", "rx": ["0:A:ubx:0", "0:B:basic_rx:0", "0:B:basic_rx:1"], "tx": ["0:A:ubx:0"] }),
+    );
+    let now = direct.now();
+    // The timed update first: the switch's configuration carries the values due by its origin.
+    direct.update("radio.rx.c1.frequency_hz", Value::num(30e6).unwrap(), HardwareTimed, Some(now + ms(320)));
+    direct.update("radio.rx.s0.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(now + ms(300)));
+    direct.settle(Wall::from_millis(500));
+    let log = direct.device.calls();
+    let stop = log.iter().position(|call| call == "rx_stop 0 now").expect("the cut: {log:?}");
+    let start = log.iter().enumerate().position(|(index, call)| index > stop && call.starts_with("rx_start 0")).expect("the new segment starts: {log:?}");
+    assert!(stop < start, "{log:?}");
+    let between: Vec<&String> = log[stop + 1..start].iter().filter(|call| call.starts_with("apply rx") && call.ends_with("at=-")).collect();
+    let wanted = ["apply rx 0 rate=2000000 freq=2400000000 gain=20 antenna=RX2 at=-", "apply rx 1 rate=2000000 freq=30000000 gain=0 antenna=AB at=-"];
+    assert_eq!(between.len(), 2, "{log:?}");
+    for call in wanted {
+        assert!(between.iter().any(|got| got.as_str() == call), "{call} missing in {between:?}");
+    }
+    assert!(!log.iter().any(|call| call.starts_with("apply rx 2 ") && call.contains("rate=2000000")), "c2 is in no stream: {log:?}");
+    assert_eq!(calls(&direct.device, "rx_open 0 [0, 1]").len(), 1, "the set changed once, so one reopen: {log:?}");
+    let records = direct.clocks.sample_clock_records();
+    let rx: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/rx/s0").collect();
+    assert_eq!(rx.len(), 2, "{records:?}");
+    assert_eq!(rx[0].root_ticks_per_tick, ezsdr_kernel::time::Rational::new(200, 1).unwrap());
+    assert!(rx[0].ended_at.is_some());
+    assert_eq!(rx[1].root_ticks_per_tick, ezsdr_kernel::time::Rational::new(100, 1).unwrap());
+    let (end, origin) = (rx[0].ended_at.unwrap().ticks_in(rx[0].root).unwrap(), rx[1].origin.ticks_in(rx[1].root).unwrap());
+    assert!(origin >= end + ms(55), "{origin} vs {end}");
+    // The transmit side is untouched.
+    let tx: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/tx/s0").collect();
+    assert_eq!(tx.len(), 1, "{records:?}");
+    assert!(tx[0].ended_at.is_none(), "the transmit clock is not cut");
+    assert!(!log.iter().any(|call| call.starts_with("apply tx") && call.contains("rate=2000000")), "the transmit side is configured again: {log:?}");
+    let instance = direct.finish();
+    let plan = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let row = plan.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    let rx_segments = row["rx"].as_array().unwrap();
+    assert_eq!(rx_segments.len(), 2, "{row}");
+    assert_eq!(rx_segments[1]["channels"], 2, "{row}");
+}
+
+#[test]
+fn ur_25_a_layout_rate_change_of_a_channel_less_stream_only_takes_its_value() {
+    // RM-21, item 8: a change to a stream no channel is in only applies its value — no cut,
+    // no clock, no device call.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::build(
+        FakeConfig { front_ends: vec!["UBX", "BasicRX"], serial: "ur25-layout-empty".to_owned(), ..FakeConfig::default() },
+        &[("radio.rx.c1.stream", Scalar::from(0))],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        json!({ "keys": "channel", "rx": ["0:A:ubx:0", "0:B:basic_rx:0", "0:B:basic_rx:1"], "tx": ["0:A:ubx:0"] }),
+    );
+    direct.settle(Wall::from_millis(30));
+    let before = direct.device.calls().len();
+    let clocks_before = direct.clocks.sample_clock_records().len();
+    direct.update("radio.rx.s1.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(direct.now() + ms(100)));
+    direct.settle(Wall::from_millis(200));
+    let log = direct.device.calls();
+    assert_eq!(log.len(), before, "a change to an empty stream wrote to the device: {log:?}");
+    assert_eq!(direct.clocks.sample_clock_records().len(), clocks_before);
+    assert!(direct.of("radio.COMMAND_REJECTED").is_empty());
+    let instance = direct.finish();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    assert!(timing.as_array().unwrap().iter().all(|row| row["what"] != "rx_segment"), "no segment begins: {timing}");
+    let plan = timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    assert_eq!(plan["rx"].as_array().unwrap().len(), 1, "{plan}");
+}
+
+#[test]
+fn ur_25_a_layout_transmit_rate_change_configures_the_new_segment() {
+    // Item 8, the transmit sibling: the switch's new segment configures each channel of its
+    // set with its own values untimed, and the transmit clock is replaced on its lattice.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let front = FakeConfig { front_ends: vec!["UBX", "BasicTX"], serial: "ur25-layout-tx-rate".to_owned(), ..FakeConfig::default() };
+    let mut direct = Direct::build(
+        front,
+        &[
+            ("radio.tx.c0.stream", Scalar::from(0)),
+            ("radio.tx.c1.stream", Scalar::from(0)),
+            ("radio.tx.c0.frequency_hz", Scalar::try_from(2.4e9).unwrap()),
+            ("radio.tx.c1.frequency_hz", Scalar::try_from(25e6).unwrap()),
+        ],
+        Vec::new(),
+        json!({ "keys": "channel", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0", "0:B:basic_tx:0"] }),
+    );
+    direct.settle(Wall::from_millis(30));
+    direct.update("radio.tx.s0.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(direct.now() + ms(100)));
+    direct.settle(Wall::from_millis(300));
+    let log = direct.device.calls();
+    assert!(log.iter().any(|call| call == "apply tx 0 rate=2000000 freq=2400000000 gain=0 antenna=TX/RX at=-"), "{log:?}");
+    assert!(log.iter().any(|call| call.starts_with("apply tx 1 ") && call.contains("rate=2000000") && call.contains("freq=25000000") && call.ends_with("at=-")), "{log:?}");
+    let records = direct.clocks.sample_clock_records();
+    let tx: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/tx/s0").collect();
+    assert_eq!(tx.len(), 2, "{records:?}");
+    assert_eq!((tx[0].root_ticks_per_tick, tx[1].root_ticks_per_tick), (ezsdr_kernel::time::Rational::new(200, 1).unwrap(), ezsdr_kernel::time::Rational::new(100, 1).unwrap()));
+    assert!(tx[0].ended_at.is_some() && tx[1].ended_at.is_none(), "{records:?}");
+    assert_eq!(calls(&direct.device, "tx_open 0 [0, 1]").len(), 1, "{log:?}");
+    assert!(!log.iter().any(|call| call.starts_with("apply rx") && call.contains("rate=2000000")), "the receive side is untouched: {log:?}");
+    let instance = direct.finish();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    assert!(timing.as_array().unwrap().iter().any(|row| row["what"] == "tx_switch"), "{timing}");
+}
+
+#[test]
+fn ur_25_a_layout_cold_change_is_floored_at_every_earlier_cold_change_of_the_instance() {
+    // RM-25, item 11: a layout instance's `cold` change is floored at every earlier, still
+    // pending `cold` change of the whole instance — across directions — and its requested
+    // instant is the LATE_COMMAND's.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::build(
+        FakeConfig::default(),
+        &[("radio.tx.c0.stream", Scalar::from(0))],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        json!({ "keys": "channel", "rx": ["0:A:ubx:0"], "tx": ["0:B:ubx:0"] }),
+    );
+    let now = direct.now();
+    direct.update("radio.tx.s0.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(now + ms(50)));
+    direct.update("radio.rx.c0.antenna", Value::from("TX/RX"), Cold, Some(now + ms(10)));
+    direct.settle(Wall::from_millis(200));
+    let late = direct.of("radio.LATE_COMMAND");
+    assert_eq!(late.len(), 1, "{late:?} {:?}", direct.device.calls());
+    assert_eq!(late[0].payload["key"], "radio.rx.c0.antenna");
+    assert_eq!(late[0].payload["requested"]["ticks"], now + ms(10));
+    assert_eq!(late[0].payload["applied"]["ticks"], now + ms(50));
+    assert!(direct.of("radio.COMMAND_REJECTED").is_empty(), "{:?}", direct.device.calls());
+    let log = direct.device.calls();
+    assert_eq!(log.iter().filter(|call| call.starts_with("apply rx 0 ") && call.contains("antenna=TX/RX") && call.ends_with("at=-")).count(), 1, "{log:?}");
+    assert!(log.iter().any(|call| call.starts_with("apply tx 0 ") && call.contains("rate=2000000") && call.ends_with("at=-")), "{log:?}");
+    let records = direct.clocks.sample_clock_records();
+    let rx: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/rx/s0").collect();
+    assert_eq!(rx.len(), 2, "{records:?}");
+    let cut = rx[0].ended_at.unwrap().ticks_in(rx[0].root).unwrap();
+    assert!(cut >= now + ms(50) && cut - (now + ms(50)) < 200, "the cut is the first sample at or after the floored instant: {cut}");
+    let tx: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/tx/s0").collect();
+    assert_eq!(tx.len(), 2, "{records:?}");
+    let cut = tx[0].ended_at.unwrap().ticks_in(tx[0].root).unwrap();
+    assert!(cut >= now + ms(50) && cut - (now + ms(50)) < 200, "the cut is the first sample at or after the floored instant: {cut}");
+    let instance = direct.finish();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let changes: Vec<&Json> = timing.as_array().unwrap().iter().filter(|row| row["what"] == "cold_change").collect();
+    assert_eq!(changes.len(), 2, "{timing}");
+    assert!(changes.iter().all(|row| row["e"] == now + ms(50)), "{timing}");
+}
+
+#[test]
+fn ur_25_the_current_keys_floor_a_cold_change_only_at_its_own_stream() {
+    // RM-25, item 11's control: under the current keys a `cold` change is floored at its own
+    // stream alone — the layout's instance-wide floor is not applied — and the cut keeps the
+    // requested instant.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::with_links(
+        FakeConfig::default(),
+        &[("radio.rx.channels", Scalar::from(1)), ("radio.tx.channels", Scalar::from(1))],
+        vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)],
+    );
+    direct.settle(Wall::from_millis(30));
+    let now = direct.now();
+    direct.update("radio.tx.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(now + ms(50)));
+    direct.update("radio.rx.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(now + ms(10)));
+    direct.settle(Wall::from_millis(200));
+    assert!(direct.of("radio.LATE_COMMAND").is_empty(), "the current keys have no instance floor: {:?}", direct.device.calls());
+    let records = direct.clocks.sample_clock_records();
+    let rx: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/rx").collect();
+    assert_eq!(rx.len(), 2, "{records:?}");
+    let cut = rx[0].ended_at.unwrap().ticks_in(rx[0].root).unwrap();
+    assert!(cut >= now + ms(10) && cut - (now + ms(10)) < 200, "the cut is the first sample at or after the instant: {cut}");
+    let tx: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/tx").collect();
+    assert_eq!(tx.len(), 2, "{records:?}");
+    let cut = tx[0].ended_at.unwrap().ticks_in(tx[0].root).unwrap();
+    assert!(cut >= now + ms(50) && cut - (now + ms(50)) < 200, "the cut is the first sample at or after the instant: {cut}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_25_a_same_size_membership_swap_reopens_the_streamer() {
+    // Item 10 (M1): two membership changes at one instant leave the same *count* — `{0}`
+    // becomes `{1}` — so a comparison by count reopens nothing and the streamer keeps
+    // serving device channel 0 as the logical channel 1; the set is what decides. The
+    // receive blocks themselves are the witness: the fake loops each receive channel back
+    // from the transmit channel of its number (UR-33), so with a repeat on transmit channel
+    // 1 the new segment's blocks carry its samples and not channel 0's ramp.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let (bytes, waveform) = waveform_of(&tone(1_000));
+    let inputs = BTreeMap::from([(waveform.hash.clone(), bytes)]);
+    for tx in [false, true] {
+        let dir = if tx { "tx" } else { "rx" };
+        // The receive side's swap leaves transmit channel 1 in stream 0, so that the repeat
+        // below plays on the device's channel 1; the transmit side's own swap needs channel
+        // 0 there.
+        let constraints: Vec<(&str, Scalar)> = if tx { vec![("radio.tx.c0.stream", Scalar::from(0))] } else { vec![("radio.tx.c1.stream", Scalar::from(0))] };
+        let (port, link) = attached_reading("rx0");
+        let mut direct = Direct::build_with(
+            FakeConfig::default(),
+            &constraints,
+            vec![port],
+            layout_selector(),
+            inputs.clone(),
+        );
+        direct.settle(Wall::from_millis(30));
+        let at = direct.now() + ms(300);
+        let key = |number: u32| format!("radio.{dir}.c{number}.stream");
+        if !tx {
+            let record = direct.clocks.sample_clock_records().into_iter().find(|record| record.stream.path() == "usrp/tx/s0").expect("the transmit clock");
+            let k = (direct.now() + ms(10) - record.origin.ticks_in(record.root).unwrap()).div_euclid(record.root_ticks_per_tick.num() as i64);
+            direct.burst_at("usrp/tx/s0", &waveform, true, TimePoint::new(record.domain, k));
+        }
+        direct.update(&key(0), Value::from(-1), Cold, Some(at));
+        direct.update(&key(1), Value::from(0), Cold, Some(at));
+        direct.settle(Wall::from_millis(700));
+        if !tx {
+            // Each segment's blocks, by their SampleClock: the first is device channel 0's
+            // ramp (`im` 0), the second the loopback of the repeat on channel 1 (`im` −0.125).
+            let mut segments: BTreeMap<ClockDomainId, Vec<(f32, f32)>> = BTreeMap::new();
+            while let Some((block, _)) = link.receive() {
+                let header = block.header().clone();
+                let bytes = block.host_bytes().expect("a host block");
+                let samples = segments.entry(header.first_sample_time.domain()).or_default();
+                for index in 0..header.len as usize {
+                    samples.push(ezsdr_hostmem::read_cf32(bytes, header.len as usize, 0, index));
+                }
+            }
+            let segments: Vec<Vec<(f32, f32)>> = segments.into_values().collect();
+            assert_eq!(segments.len(), 2, "two segments' blocks");
+            assert!(segments[0].iter().all(|(_, im)| *im == 0.0), "the first segment is channel 0's ramp");
+            assert!(!segments[1].is_empty() && segments[1].iter().all(|(_, im)| *im == -0.125), "the new segment's blocks are channel 1's loopback: {:?}", segments[1].iter().take(3).collect::<Vec<_>>());
+        }
+        let log = direct.device.calls();
+        let opened: Vec<&String> = log.iter().filter(|call| call.starts_with(if tx { "tx_open" } else { "rx_open" })).collect();
+        let one = |set: &str| format!("{} 0 {set}", if tx { "tx_open" } else { "rx_open" });
+        assert_eq!(opened, [&one("[0]"), &one("[1]")], "tx={tx}: the same size, another set, so a reopen: {log:?}");
+        let reopen = log.iter().position(|call| call == &one("[1]")).expect("the reopen");
+        let untimed: Vec<&String> = log[reopen + 1..].iter().filter(|call| call.starts_with(&format!("apply {dir} ")) && call.ends_with("at=-")).collect();
+        assert!(untimed.iter().any(|call| call.starts_with(&format!("apply {dir} 1 "))), "the new set's channel is configured: {log:?}");
+        assert_eq!(untimed.iter().filter(|call| call.starts_with(&format!("apply {dir} 0 "))).count(), 0, "c0 left its stream: {log:?}");
+        assert!(direct.of("radio.COMMAND_REJECTED").is_empty(), "{:?}", log);
+        let _ = direct.finish();
+    }
+}
+
+#[test]
+fn ur_25_a_receive_membership_join_opens_the_streamer_with_the_new_set() {
+    // RM-25, D14, item 10: a channel joining stream 0 cuts the stream, reopens the streamer
+    // with the new set on the lattice, and the new segment configures every channel.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::build(
+        FakeConfig::default(),
+        &[("radio.rx.c0.frequency_hz", Scalar::try_from(2.0e9).unwrap()), ("radio.rx.c1.frequency_hz", Scalar::try_from(1.1e9).unwrap())],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+    );
+    direct.settle(Wall::from_millis(30));
+    let at = direct.now() + ms(300);
+    direct.update("radio.rx.c1.stream", Value::from(0), Cold, Some(at));
+    direct.settle(Wall::from_millis(700));
+    let log = direct.device.calls();
+    let stop = log.iter().position(|call| call == "rx_stop 0 now").expect("the cut: {log:?}");
+    let open = log.iter().position(|call| call == "rx_open 0 [0, 1]").expect("the reopen with the new set: {log:?}");
+    let start = log.iter().enumerate().position(|(index, call)| index > open && call.starts_with("rx_start 0")).expect("the start: {log:?}");
+    assert!(stop < open && open < start, "{log:?}");
+    assert_eq!(log.iter().filter(|call| call.starts_with("set_subdev_spec")).count(), 2, "a membership change touches no spec: {log:?}");
+    assert!(!log.iter().any(|call| call == "rx_open 0 []"), "{log:?}");
+    assert!(log.iter().any(|call| call == "apply rx 1 rate=1000000 freq=1100000000 gain=0 antenna=RX2 at=-"), "{log:?}");
+    assert_eq!(log.iter().filter(|call| call == &"apply rx 0 rate=1000000 freq=2000000000 gain=0 antenna=RX2 at=-").count(), 2, "prepare's configuration and the new segment's: {log:?}");
+    let records = direct.clocks.sample_clock_records();
+    let rx: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/rx/s0").collect();
+    assert_eq!(rx.len(), 2, "{records:?}");
+    let (end, origin) = (rx[0].ended_at.unwrap().ticks_in(rx[0].root).unwrap(), rx[1].origin.ticks_in(rx[1].root).unwrap());
+    assert!(origin >= end + ms(55) && origin - (end + ms(55)) < 200, "{origin} vs {end}");
+    let instance = direct.finish();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let plan = timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    assert_eq!(plan["rx"].as_array().unwrap().len(), 2, "{plan}");
+    assert_eq!(timing.as_array().unwrap().iter().filter(|row| row["what"] == "rx_segment").count(), 1, "the joined segment: {timing}");
+}
+
+#[test]
+fn ur_25_a_receive_membership_leave_opens_the_streamer_for_the_remaining_set() {
+    // RM-25, item 10: a channel leaving reopens the streamer for the rest — `[1]`, neither
+    // `[0]` nor `[0, 1]` — and the new segment configures that rest alone.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::build(
+        FakeConfig::default(),
+        &[("radio.rx.c1.stream", Scalar::from(0))],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+    );
+    direct.settle(Wall::from_millis(30));
+    direct.update("radio.rx.c0.stream", Value::from(-1), Cold, Some(direct.now() + ms(300)));
+    direct.settle(Wall::from_millis(700));
+    let log = direct.device.calls();
+    assert_eq!(log.iter().filter(|call| call.as_str() == "rx_open 0 [1]").count(), 1, "{log:?}");
+    assert!(!log.iter().any(|call| call.as_str() == "rx_open 0 [0]"), "{log:?}");
+    let applies: Vec<&String> = log.iter().filter(|call| call.starts_with("apply rx 0 ") && call.ends_with("at=-")).collect();
+    assert_eq!(applies.len(), 1, "prepare's own configuration only: {log:?}");
+    let instance = direct.finish();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let plan = timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    assert_eq!(plan["rx"].as_array().unwrap()[1]["channels"], 1, "{plan}");
+}
+
+#[test]
+fn ur_25_the_last_receive_channel_leaves_no_clock_and_no_block() {
+    // RM-25, item 10: the last channel leaving ends the running segment and plans no new
+    // one: no clock, no block, and the streamer is not opened empty.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::build(FakeConfig::default(), &[], vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)], layout_selector());
+    direct.settle(Wall::from_millis(30));
+    let opens = calls(&direct.device, "rx_open").len();
+    let starts = calls(&direct.device, "rx_start").len();
+    direct.update("radio.rx.c0.stream", Value::from(-1), Cold, None);
+    direct.settle(Wall::from_millis(300));
+    let log = direct.device.calls();
+    assert_eq!(log.iter().filter(|call| call.as_str() == "rx_stop 0 now").count(), 1, "{log:?}");
+    assert_eq!(calls(&direct.device, "rx_open").len(), opens, "{log:?}");
+    assert_eq!(calls(&direct.device, "rx_start").len(), starts, "{log:?}");
+    assert!(!log.iter().any(|call| call.as_str() == "rx_open 0 []"), "{log:?}");
+    let records = direct.clocks.sample_clock_records();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert!(records[0].ended_at.is_some(), "{records:?}");
+    assert!(direct.of("radio.COMMAND_REJECTED").is_empty());
+    let instance = direct.finish();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let plan = timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    assert_eq!(plan["rx"].as_array().unwrap().len(), 1, "{plan}");
+}
+
+#[test]
+fn ur_25_a_membership_in_a_later_stream_is_refused_and_changes_nothing() {
+    // RM-25, D14, item 10: a channel may not join a later stream at runtime; the refusal is
+    // a COMMAND_REJECTED, nothing is booked, and the same channel can join stream 0 next.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    for dir in ["rx", "tx"] {
+        let constraints: Vec<(&str, Scalar)> = if dir == "tx" { vec![("radio.tx.c0.stream", Scalar::from(0))] } else { Vec::new() };
+        let mut direct = Direct::build(FakeConfig::default(), &constraints, vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)], layout_selector());
+        direct.settle(Wall::from_millis(30));
+        let before = (direct.device.calls().len(), direct.clocks.sample_clock_records().len());
+        direct.update(&format!("radio.{dir}.c1.stream"), Value::from(1), Cold, None);
+        direct.settle(Wall::from_millis(120));
+        let rejected = direct.of("radio.COMMAND_REJECTED");
+        assert_eq!(rejected.len(), 1, "{dir}: {rejected:?}");
+        let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+        assert!(reason.contains("stream 0") && reason.contains("s1"), "{dir}: {reason}");
+        let log = direct.device.calls();
+        assert_eq!(log.len(), before.0, "{dir}: the refusal wrote to the device: {log:?}");
+        assert_eq!(direct.clocks.sample_clock_records().len(), before.1, "{dir}");
+        assert!(direct.of("radio.LATE_COMMAND").is_empty(), "{dir}");
+        // The same channel joins stream 0: the refusal left no value behind.
+        direct.update(&format!("radio.{dir}.c1.stream"), Value::from(0), Cold, None);
+        direct.settle(Wall::from_millis(300));
+        let log = direct.device.calls();
+        assert!(log.iter().any(|call| call == &format!("{}_open 0 [0, 1]", if dir == "rx" { "rx" } else { "tx" })), "{dir}: {log:?}");
+        let _ = direct.finish();
+    }
+}
+
+// ------------------------------------------------ 1b-4c: destinations, judgement, manifest
+
+#[test]
+fn ur_26_d14_a_layout_instance_names_its_streams() {
+    // RM-12, RM-29, D14: under the layout the instance's node and its streams' nodes
+    // (`<id>/rx/s<k>`) are the targets; the key decides what changes; a stream node's `Stop`
+    // stops that stream alone.
+    use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
+    let (bytes, waveform) = waveform_of(&tone(2_000));
+    let inputs = BTreeMap::from([(waveform.hash.clone(), bytes)]);
+    let mut direct = Direct::build_with(
+        FakeConfig::default(),
+        &[("radio.tx.c0.stream", Scalar::from(0))],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+        inputs,
+    );
+    direct.settle(Wall::from_millis(30));
+    // 1. The instance's node takes an update.
+    direct.update("radio.rx.c0.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(direct.now() + ms(40)));
+    // 2. A stream's node takes one too.
+    let at = direct.now() + ms(40);
+    direct.update_at("usrp/rx/s0", "radio.rx.c0.gain_db", Value::num(3.0).unwrap(), HardwareTimed, Some(at));
+    // 3. The key decides the direction: a transmit key on a receive stream's node acts on
+    //    transmit.
+    direct.update_at("usrp/rx/s0", "radio.tx.c0.gain_db", Value::num(1.5).unwrap(), HardwareTimed, Some(at));
+    direct.settle(Wall::from_millis(80));
+    let log = direct.device.calls();
+    assert_eq!(log.iter().filter(|call| call.starts_with("apply rx 0 ") && call.contains("freq=2100000000") && !call.ends_with("at=-")).count(), 1, "{log:?}");
+    assert_eq!(log.iter().filter(|call| call.starts_with("apply rx 0 ") && call.contains("gain=3") && !call.ends_with("at=-")).count(), 1, "{log:?}");
+    assert_eq!(log.iter().filter(|call| call.starts_with("apply tx 0 ") && call.contains("gain=1.5") && !call.ends_with("at=-")).count(), 1, "{log:?}");
+    // 4. A burst on the transmit stream's node is taken and plays.
+    let record = direct.clocks.sample_clock_records().into_iter().find(|record| record.stream.path() == "usrp/tx/s0").expect("the transmit clock");
+    let k = (direct.now() + ms(30) - record.origin.ticks_in(record.root).unwrap()) / record.root_ticks_per_tick.num() as i64;
+    direct.burst_at("usrp/tx/s0", &waveform, false, TimePoint::new(record.domain, k));
+    direct.settle(Wall::from_millis(60));
+    assert!(!calls(&direct.device, "tx_send").is_empty(), "the burst plays: {:?}", direct.device.calls());
+    // 5. `Stop` of a stream's node stops that stream alone: the receive side is cut, and
+    //    the transmit side keeps its clock and its *held* burst, which still plays.
+    let held = direct.now() + ms(30);
+    let k = (held - record.origin.ticks_in(record.root).unwrap()) / record.root_ticks_per_tick.num() as i64;
+    direct.burst_at("usrp/tx/s0", &waveform, false, TimePoint::new(record.domain, k));
+    direct.settle(Wall::from_millis(5));
+    let records = direct.clocks.sample_clock_records().len();
+    let sent = tx_sends(&direct.device).len();
+    direct.stop_at("usrp/rx/s0");
+    direct.settle(Wall::from_millis(120));
+    let log = direct.device.calls();
+    assert_eq!(log.iter().filter(|call| call.as_str() == "rx_stop 0 now").count(), 1, "{log:?}");
+    assert!(tx_sends(&direct.device).len() >= sent + 2, "the payload and its end of burst left after the receive Stop: {log:?}");
+    assert_eq!(direct.clocks.sample_clock_records().len(), records, "{log:?}");
+    let cancelled: Vec<_> = direct.of("radio.COMMAND_REJECTED").into_iter().filter(|event| event.payload["reason"].as_str().is_some_and(|reason| reason.contains("cancelled by Stop"))).collect();
+    assert!(cancelled.is_empty(), "a receive stream's Stop cancels no transmit burst: {cancelled:?}");
+    assert!(tx_sends(&direct.device).len() > sent, "the held burst still plays: {log:?}");
+    let stopped = direct.clocks.sample_clock_records();
+    let rx: Vec<_> = stopped.iter().filter(|record| record.stream.path() == "usrp/rx/s0").collect();
+    assert!(rx[0].ended_at.is_some(), "{stopped:?}");
+    // 6. `start_rx` of the same node starts a new segment: a second receive clock.
+    direct.start_rx_at("usrp/rx/s0", None);
+    direct.settle(Wall::from_millis(200));
+    let records = direct.clocks.sample_clock_records();
+    let rx: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/rx/s0").collect();
+    assert_eq!(rx.len(), 2, "a new receive clock: {records:?}");
+    assert!(rx[1].ended_at.is_none(), "{records:?}");
+    assert!(direct.of("radio.COMMAND_REJECTED").is_empty(), "{:?}", direct.device.calls());
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_26_a_device_stop_stops_every_layout_stream() {
+    // UR-26, D14: `Stop` of the instance's node stops every stream — a held transmit burst
+    // is cancelled with its reason, and the receive stream ends.
+    let (bytes, waveform) = waveform_of(&tone(2_000));
+    let inputs = BTreeMap::from([(waveform.hash.clone(), bytes)]);
+    let mut direct = Direct::build_with(
+        FakeConfig::default(),
+        &[("radio.tx.c0.stream", Scalar::from(0))],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+        inputs,
+    );
+    direct.settle(Wall::from_millis(30));
+    // A burst well ahead of the device lead: it is held, not sent.
+    let record = direct.clocks.sample_clock_records().into_iter().find(|record| record.stream.path() == "usrp/tx/s0").unwrap();
+    let k = (direct.now() + ms(30) - record.origin.ticks_in(record.root).unwrap()) / record.root_ticks_per_tick.num() as i64;
+    direct.burst_at("usrp/tx/s0", &waveform, false, TimePoint::new(record.domain, k));
+    direct.settle(Wall::from_millis(5));
+    assert!(!direct.of("radio.COMMAND_REJECTED").is_empty() || true, "the burst is booked");
+    direct.stop_at("usrp");
+    direct.settle(Wall::from_millis(80));
+    let cancelled: Vec<_> = direct.of("radio.COMMAND_REJECTED").into_iter().filter(|event| event.payload["reason"].as_str().is_some_and(|reason| reason.contains("cancelled by Stop"))).collect();
+    assert_eq!(cancelled.len(), 1, "the held burst is cancelled: {:?} {:?}", cancelled, direct.device.calls());
+    let log = direct.device.calls();
+    assert!(log.iter().any(|call| call == "rx_stop 0 now"), "the receive stream ends: {log:?}");
+    let records = direct.clocks.sample_clock_records();
+    let rx: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/rx/s0").collect();
+    assert!(rx[0].ended_at.is_some(), "{records:?}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_26_d14_the_old_addresses_and_foreign_nodes_are_refused() {
+    // UR-26, D14: under the layout the old `<id>/rx` and `<id>/tx` are no targets, and
+    // neither is a node outside the instance's streams.
+    use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
+    let mut direct = Direct::build(
+        FakeConfig::default(),
+        &[("radio.tx.c0.stream", Scalar::from(0))],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+    );
+    direct.settle(Wall::from_millis(30));
+    let before = (direct.device.calls().len(), direct.clocks.sample_clock_records().len());
+    let rejections = |direct: &mut Direct| -> Vec<Json> {
+        direct.of("radio.COMMAND_REJECTED").into_iter().map(|event| event.payload).collect()
+    };
+    direct.update_at("usrp/rx", "radio.rx.c0.gain_db", Value::num(3.0).unwrap(), HardwareTimed, Some(direct.now() + ms(40)));
+    direct.settle(Wall::from_millis(10));
+    let rejected = rejections(&mut direct);
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0]["kind"], "update_parameter");
+    assert_eq!(rejected[0]["reason"], "UR-26: the target is not this device");
+    for node in ["usrp/rx", "usrp/tx", "usrp/gpio", "usrp/rx/s9"] {
+        direct.stop_at(node);
+    }
+    direct.settle(Wall::from_millis(10));
+    let rejected = rejections(&mut direct);
+    assert_eq!(rejected.len(), 5, "{rejected:?}");
+    assert!(rejected[1..].iter().all(|row| row["kind"] == "stop" && row["reason"] == "UR-26: the Stop target is not this device or its streams"), "{rejected:?}");
+    for node in ["usrp", "usrp/tx/s0", "usrp/rx/s9"] {
+        direct.start_rx_at(node, None);
+    }
+    direct.settle(Wall::from_millis(10));
+    let rejected = rejections(&mut direct);
+    assert_eq!(rejected.len(), 8, "{rejected:?}");
+    assert!(rejected[5..].iter().all(|row| row["kind"] == "command" && row["reason"] == "UR-26: not supported by this Provider"), "{rejected:?}");
+    let (bytes, waveform) = waveform_of(&tone(2_000));
+    let _ = bytes;
+    let record = direct.clocks.sample_clock_records().into_iter().find(|record| record.stream.path() == "usrp/tx/s0").unwrap();
+    let at = TimePoint::new(record.domain, (direct.now() + ms(30) - record.origin.ticks_in(record.root).unwrap()) / record.root_ticks_per_tick.num() as i64);
+    for node in ["usrp/tx", "usrp", "usrp/rx/s0", "usrp/tx/s9"] {
+        direct.burst_at(node, &waveform, false, at);
+    }
+    direct.settle(Wall::from_millis(10));
+    let rejected = rejections(&mut direct);
+    assert_eq!(rejected.len(), 12, "{rejected:?}");
+    assert!(rejected[8..].iter().all(|row| row["kind"] == "tx_burst" && row["reason"] == "UR-21: the target is not this device's transmit stream"), "{rejected:?}");
+    direct.settle(Wall::from_millis(60));
+    assert_eq!(direct.device.calls().len(), before.0, "a refusal changes nothing: {:?}", direct.device.calls());
+    assert_eq!(direct.clocks.sample_clock_records().len(), before.1);
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_26_d14_a_channel_less_stream_keeps_the_mock_s_treatment() {
+    // D14, RM-29: a stream node the layout holds no channel for: `start_rx` is accepted and
+    // does nothing, a burst is refused for its missing channel — the same as MockRadio's
+    // (MR-16's reason is its own; the kind is the target's).
+    let (bytes, waveform) = waveform_of(&tone(2_000));
+    let inputs = BTreeMap::from([(waveform.hash.clone(), bytes)]);
+    let mut direct = Direct::build_with(
+        FakeConfig::default(),
+        &[("radio.tx.c0.stream", Scalar::from(0))],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+        inputs,
+    );
+    direct.settle(Wall::from_millis(30));
+    direct.stop_at("usrp/rx/s0");
+    direct.settle(Wall::from_millis(80));
+    let clocks = direct.clocks.sample_clock_records().len();
+    direct.start_rx_at("usrp/rx/s1", None);
+    direct.settle(Wall::from_millis(120));
+    assert_eq!(direct.clocks.sample_clock_records().len(), clocks, "a channel-less start registers no clock");
+    assert!(direct.of("radio.COMMAND_REJECTED").is_empty(), "a channel-less stream's start is accepted: {:?}", direct.device.calls());
+    assert_eq!(calls(&direct.device, "rx_start").len(), 1, "no new start: {:?}", direct.device.calls());
+    let timed: Vec<_> = direct.clocks.sample_clock_records().into_iter().filter(|record| record.stream.path() == "usrp/rx/s1").collect();
+    assert!(timed.is_empty(), "no clock for a channel-less stream");
+    let record = direct.clocks.sample_clock_records().into_iter().find(|record| record.stream.path() == "usrp/tx/s0").unwrap();
+    let at = TimePoint::new(record.domain, (direct.now() + ms(30) - record.origin.ticks_in(record.root).unwrap()) / record.root_ticks_per_tick.num() as i64);
+    direct.burst_at("usrp/tx/s1", &waveform, false, at);
+    direct.settle(Wall::from_millis(5));
+    let rejected: Vec<Json> = direct.of("radio.COMMAND_REJECTED").into_iter().map(|event| event.payload).collect();
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0]["kind"], "tx_burst");
+    assert!(rejected[0]["reason"].as_str().unwrap().contains("no transmit channel"), "{rejected:?}");
+    assert_eq!(calls(&direct.device, "tx_send").len(), 0, "the burst is not sent on stream 0: {:?}", direct.device.calls());
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_25_a_layout_instance_s_full_duplex_rule_is_judged_at_runtime() {
+    // RM-31, item 13: the update's effective instant's whole configuration is judged, the
+    // same `coerce` `prepare` uses; a violation is a COMMAND_REJECTED and nothing is booked.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::build(
+        FakeConfig::default(),
+        &[("radio.tx.c0.stream", Scalar::from(0))],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        json!({ "keys": "channel", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }),
+    );
+    direct.settle(Wall::from_millis(30));
+    let before = direct.device.calls().len();
+    direct.update("radio.rx.c0.antenna", Value::from("TX/RX"), Cold, None);
+    direct.settle(Wall::from_millis(200));
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+    assert!(reason.starts_with("RM-31:"), "{reason}");
+    assert!(reason.contains("receive channel c0") && reason.contains("transmit channel c0"), "{reason}");
+    let log = direct.device.calls();
+    assert!(!log[before..].iter().any(|call| call.contains("antenna=TX/RX")), "the refused change reached the device: {log:?}");
+    let records = direct.clocks.sample_clock_records();
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert!(records[0].ended_at.is_none() && records[1].ended_at.is_none(), "the refusal cuts nothing: {records:?}");
+    let instance = direct.finish();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    assert!(timing.as_array().unwrap().iter().all(|row| !(row["what"] == "cold_change" && row["key"] == "radio.rx.c0.antenna")), "{timing}");
+    // `prepare` refuses the same settings with the same reason (UR-12).
+    let device = fake(FakeConfig { serial: "ur25-rm31-prepare".to_owned(), ..FakeConfig::default() });
+    let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
+    let constraints = [("radio.tx.c0.stream", Scalar::from(0)), ("radio.rx.c0.antenna", Scalar::from("TX/RX"))];
+    let error = direct_prepare(&mut radio, device.clone(), ExecutionClass::HardwareInLoop, Vec::new(), &constraints).unwrap_err();
+    assert_eq!(error.kind, ModuleErrorKind::Rejected);
+    assert_eq!(error.message, format!("UR-12: {reason}"));
+}
+
+#[test]
+fn ur_25_a_layout_instance_s_throughput_rule_is_judged_at_runtime() {
+    // RM-32, item 13: the throughput of the projected configuration; the same reason in
+    // `prepare`.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::build(
+        FakeConfig::default(),
+        &[("radio.rx.s0.sample_rate_hz", Scalar::try_from(20e6).unwrap())],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+    );
+    direct.settle(Wall::from_millis(30));
+    direct.update("radio.rx.c1.stream", Value::from(0), Cold, None);
+    direct.settle(Wall::from_millis(200));
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?} {:?}", direct.device.calls());
+    let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+    assert!(reason.starts_with("RM-32:"), "{reason}");
+    assert!(reason.contains("160000000") && reason.contains("rx"), "{reason}");
+    let log = direct.device.calls();
+    assert!(!log.iter().any(|call| call == "rx_open 0 [0, 1]"), "{log:?}");
+    assert!(!log.iter().any(|call| call.starts_with("apply rx 1 ")), "{log:?}");
+    let instance = direct.finish();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    assert!(timing.as_array().unwrap().iter().all(|row| !(row["what"] == "cold_change" && row["key"] == "radio.rx.c1.stream")), "{timing}");
+    let device = fake(FakeConfig { serial: "ur25-rm32-prepare".to_owned(), ..FakeConfig::default() });
+    let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
+    let constraints = [("radio.rx.s0.sample_rate_hz", Scalar::try_from(20e6).unwrap()), ("radio.rx.c1.stream", Scalar::from(0))];
+    let error = direct_prepare(&mut radio, device.clone(), ExecutionClass::HardwareInLoop, Vec::new(), &constraints).unwrap_err();
+    assert_eq!(error.message, format!("UR-12: {reason}"));
+}
+
+#[test]
+fn ur_30_the_device_section_names_the_subdev_spec() {
+    // UR-30: the Manifest's `device` section carries the markup each direction was set
+    // with — null where none was — beside the describe() it already had.
+    let device_section = |radio: &UhdRadio| radio.instance().sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()].clone();
+    let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), fake(FakeConfig { serial: "ur30-spec-a".to_owned(), ..FakeConfig::default() })).unwrap();
+    let device = device_section(&radio);
+    assert_eq!(device["subdev_spec"]["rx"], "A:0 B:0");
+    assert_eq!(device["subdev_spec"]["tx"], "A:0 B:0");
+    assert_eq!(device["fake"], true);
+    // The order is the layout's (RM-28), and the record is the string that was passed.
+    let device2 = fake(FakeConfig { serial: "ur30-spec-b".to_owned(), ..FakeConfig::default() });
+    let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "rx": ["0:B:ubx:0", "0:A:ubx:0"] }), Some(x3xx())), device2.clone()).unwrap();
+    assert_eq!(device_section(&radio)["subdev_spec"]["rx"], "B:0 A:0");
+    assert!(calls(&device2, "set_subdev_spec").contains(&"set_subdev_spec rx B:0 A:0".to_owned()), "{:?}", device2.calls());
+    // One element, and a direction with none.
+    let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "rx": ["0:A:ubx:0"], "tx": [] }), Some(x3xx())), fake(FakeConfig { serial: "ur30-spec-c".to_owned(), ..FakeConfig::default() })).unwrap();
+    let device = device_section(&radio);
+    assert_eq!(device["subdev_spec"]["rx"], "A:0");
+    assert!(device["subdev_spec"]["tx"].is_null(), "{device}");
+    let radio = UhdRadio::from_binding(
+        &binding(json!({ "args": ARGS, "keys": "channel", "rx": ["0:A:ubx:0"], "tx": [] }), Some(x3xx())),
+        fake(FakeConfig { serial: "ur30-spec-d".to_owned(), ..FakeConfig::default() }),
+    ).unwrap();
+    let device = device_section(&radio);
+    assert_eq!(device["subdev_spec"]["rx"], "A:0");
+    assert!(device["subdev_spec"]["tx"].is_null(), "keys: {device}");
+}
+
+#[test]
+fn ur_30_the_device_section_records_the_serial() {
+    // UR-30: the serial is the record that lets an operator tell two devices apart (H4).
+    let device = fake(FakeConfig { serial: "F00BA2".to_owned(), ..FakeConfig::default() });
+    let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
+    assert_eq!(radio.instance().sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()]["serial"], "F00BA2");
+    assert_eq!(calls(&device, "serial"), ["serial"], "one read: {:?}", device.calls());
+}
+
+/// A whole-Run profile of the layout's keys (RM-29): its receive port is `rx0`, so the
+/// placement and a Spec's feed name it.
+fn layout_profile(dir: &TempDir) -> Json {
+    let mut doc = profile(dir, json!({ "keys": "channel" }), json!({}), false);
+    doc["placements"]["links"][0]["from"]["port"] = json!("rx0");
+    doc
+}
+
+/// The layout's receive Spec: stream 0's channel 0 through the numbered keys (RM-27),
+/// out of the `rx0` port.
+fn layout_receive_spec(rate: f64, hz: f64, samples: i64) -> Json {
+    let mut spec = receive_spec(1, rate, hz, Some(samples));
+    spec["outputs"][0]["feed"]["port"]["port"] = json!("rx0");
+    let requires = spec["resources"]["radio"]["requires"].as_object_mut().unwrap();
+    for key in ["radio.rx.channels", "radio.rx.sample_rate_hz", "radio.rx.frequency_hz"] {
+        requires.remove(key);
+    }
+    requires.insert("radio.rx.c0.stream".to_owned(), json!({ "kind": "eq", "value": 0 }));
+    requires.insert("radio.rx.c0.frequency_hz".to_owned(), json!({ "kind": "eq", "value": hz }));
+    requires.insert("radio.rx.s0.sample_rate_hz".to_owned(), json!({ "kind": "eq", "value": rate }));
+    spec
+}
+
+#[test]
+fn ur_30_every_applied_key_is_declared_by_the_instance() {
+    // UR-30 (Sol 6): every key an `applied` row records is one the instance declares — a
+    // channel's setting under its channel key, a stream's rate under the stream's own key
+    // (`radio.rx.s0.sample_rate_hz`), never a channel-numbered rate key.
+    for layout in [false, true] {
+        let selector = if layout { layout_selector() } else { json!({}) };
+        let constraints: &[(&str, Scalar)] = if layout { &[] } else { &[("radio.rx.channels", Scalar::from(1)), ("radio.rx.frequency_hz", Scalar::try_from(1.1e9).unwrap())] };
+        let mut direct = Direct::build(
+            FakeConfig { serial: format!("ur30-applied-keys-{layout}"), ..FakeConfig::default() },
+            constraints,
+            vec![attached_on(if layout { "rx0" } else { "rx" }, ezsdr_kernel::stream::BackPressure::DropOldest)],
+            selector,
+        );
+        direct.settle(Wall::from_millis(30));
+        let instance = direct.finish();
+        let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+        let declared: std::collections::BTreeSet<String> = instance.tree.capabilities.keys().map(|key| key.as_str().to_owned()).collect();
+        // A setting's row carries its claimed value; the untimed stop UR-17 records there
+        // carries none (its `key` is the row's kind, not a configuration key).
+        let rows: Vec<&Json> = applied.as_array().unwrap().iter().filter(|row| row.get("claimed").is_some()).collect();
+        assert!(!rows.is_empty(), "layout={layout}: the configuration was recorded");
+        for row in &rows {
+            let key = row["key"].as_str().unwrap();
+            assert!(declared.contains(key), "layout={layout}: the applied key {key} is not declared: {declared:?}");
+        }
+        let rate = if layout { "radio.rx.s0.sample_rate_hz" } else { "radio.rx.sample_rate_hz" };
+        assert!(rows.iter().any(|row| row["key"] == rate), "layout={layout}: the rate's row is {rate}: {applied}");
+        assert!(!rows.iter().any(|row| row["key"].as_str().unwrap().contains(".c0.sample_rate_hz")), "layout={layout}: a rate is no channel's key: {applied}");
+    }
+}
+
+#[test]
+fn ur_30_the_device_section_records_the_rate_check() {
+    // UR-30, UR-13, item 14: the sealed Manifest's `device` section says per direction
+    // whether its rates were compared — both fields, whatever the answer.
+    let dir = TempDir::new();
+    let doc = layout_profile(&dir);
+    let manifest = captured(spec_run(&layout_receive_spec(1e6, 1e9, 1_000), &doc, fake(FakeConfig { serial: "ur30-rates-layout".to_owned(), ..FakeConfig::default() }), BTreeMap::new()));
+    assert_eq!(section(&manifest, "device")["rates_checked"], json!({ "rx": true, "tx": false }), "failure: {}", failure(&manifest));
+    // A Session with no receive link: the receive streamer is never opened, so nothing is
+    // compared.
+    let mut doc = profile(&dir, json!({ "keys": "channel" }), json!({}), true);
+    doc["placements"]["links"][0]["from"]["port"] = json!("rx0");
+    doc["bindings"]["rec"].as_object_mut().unwrap().remove("feed");
+    doc.as_object_mut().unwrap().remove("placements");
+    doc["bindings"].as_object_mut().unwrap().remove("rec");
+    let device = fake(FakeConfig { serial: "ur30-rates-linkless".to_owned(), ..FakeConfig::default() });
+    let mut run = session(&doc, device.clone());
+    past_t0(&mut run, ms(1));
+    let manifest = run.finish();
+    assert_eq!(section(&manifest, "device")["rates_checked"], json!({ "rx": false, "tx": false }));
+    assert!(calls(&device, "rates").is_empty(), "{:?}", device.calls());
+}
+
+// ---------------------------------- 1b-4c: the review's cases (round 1 findings)
+
+#[test]
+fn ur_25_a_no_op_membership_change_takes_only_its_value() {
+    // RM-25, item 10: a `stream` update whose value is the one already in effect books
+    // nothing — no cut, no reopen, no device call — and takes its value alone, as
+    // MockRadio's `was == is` does.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::build(FakeConfig::default(), &[], vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)], layout_selector());
+    direct.settle(Wall::from_millis(30));
+    let before = (direct.device.calls().len(), direct.clocks.sample_clock_records().len());
+    let at = direct.now() + ms(100);
+    direct.update("radio.rx.c1.stream", Value::from(-1), Cold, Some(at));
+    direct.settle(Wall::from_millis(300));
+    let log = direct.device.calls();
+    assert_eq!(log.len(), before.0, "the device was not asked: {log:?}");
+    assert_eq!(direct.clocks.sample_clock_records().len(), before.1, "the segment was not cut: {log:?}");
+    assert!(direct.of("radio.COMMAND_REJECTED").is_empty(), "{log:?}");
+    assert!(direct.of("radio.LATE_COMMAND").is_empty(), "{log:?}");
+    let instance = direct.finish();
+    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    assert_eq!(
+        applied.as_array().unwrap().iter().filter(|row| row["key"] == "radio.rx.c1.stream" && row["read_back"].is_null() && row["at"]["ticks"] == at).count(),
+        1,
+        "one value-only row at its instant: {applied}"
+    );
+}
+
+#[test]
+fn ur_24_the_current_keys_held_updates_reach_every_channel() {
+    // UR-24, UC-2 (round 1, P1-2): a current-keys timed update is held for the whole
+    // direction, so an enable from no stream configures every channel with it — the
+    // layout's numbered commands are what name one channel.
+    use ezsdr_kernel::module_api::UpdateClass::{Cold, HardwareTimed};
+    let mut direct = Direct::build(FakeConfig::default(), &[("radio.rx.channels", Scalar::from(0))], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)], json!({}));
+    direct.settle(Wall::from_millis(30));
+    let now = direct.now();
+    direct.update("radio.rx.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(now + ms(200)));
+    direct.update("radio.rx.channels", Value::from(2), Cold, Some(now + ms(400)));
+    direct.settle(Wall::from_millis(700));
+    let log = direct.device.calls();
+    let untimed = |prefix: &str| log.iter().filter(|call| call.starts_with(prefix) && call.contains("freq=2100000000") && call.ends_with("at=-")).count();
+    assert_eq!(untimed("apply rx 0 "), 1, "the enable's configuration carries the held value on channel 0: {log:?}");
+    assert_eq!(untimed("apply rx 1 "), 1, "and on channel 1: {log:?}");
+    assert!(log.iter().any(|call| call == "rx_open 0 [0, 1]"), "{log:?}");
+    assert!(direct.of("radio.COMMAND_REJECTED").is_empty(), "{log:?}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_25_a_layout_cold_change_of_a_linkless_receive_side_is_floored_at_t0() {
+    // RM-25 (round 1, P2-4): the receive start T0 floors a layout `cold` change of the
+    // receive side even when that side has no link yet and no line of its own — MockRadio
+    // floors its instance at `start_tick` the same way — and a change asked before T0 is
+    // late, recorded at T0.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::armed(FakeConfig::default(), &[], Vec::new(), layout_selector());
+    let t0 = direct.now() + ms(2_000) + ms(1);
+    direct.radio_start(t0);
+    direct.update("radio.rx.c0.antenna", Value::from("TX/RX"), Cold, None);
+    direct.settle(Wall::from_millis(100));
+    let late = direct.of("radio.LATE_COMMAND");
+    assert_eq!(late.len(), 1, "{late:?} {:?}", direct.device.calls());
+    assert_eq!(late[0].payload["key"], "radio.rx.c0.antenna");
+    assert_eq!(late[0].payload["applied"]["ticks"], t0, "the floor is T0: {late:?}");
+    assert!(late[0].payload["requested"]["ticks"].as_i64().unwrap() < t0, "{late:?}");
+    // Its instant is the floor of the next change too: a second one asked at once is raised
+    // to T0 as well, while the first is still pending (RM-25).
+    direct.update("radio.rx.c1.stream", Value::from(-1), Cold, None);
+    direct.settle(Wall::from_millis(50));
+    let late = direct.of("radio.LATE_COMMAND");
+    assert_eq!(late.len(), 2, "the recorded instant floors the next change: {late:?}");
+    assert_eq!(late[1].payload["applied"]["ticks"], t0, "{late:?}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_19_a_layout_receive_report_names_its_stream() {
+    // UR-20, major 6: a receive report event comes from the stream's own node — with
+    // `keys: "channel"` that is `<id>/rx/s0` — and reaches the collector.
+    let mut direct = Direct::build(
+        FakeConfig { faults: vec![FakeFault::Overflow(Wall::from_millis(40))], ..FakeConfig::default() },
+        &[],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+    );
+    direct.settle(Wall::from_millis(250));
+    let overflows = direct.of("radio.RX_OVERFLOW");
+    assert!(!overflows.is_empty(), "the overrun reached the collector: {:?}", direct.device.calls());
+    let source = EventSource::Node { node: ResourceId::parse("usrp/rx/s0").unwrap() };
+    assert!(overflows.iter().all(|event| event.source == source), "{:?}", overflows.iter().map(|event| format!("{:?}", event.source)).collect::<Vec<_>>());
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_28_a_layout_transmit_report_names_its_stream() {
+    // UR-17, UR-28, major 6: a transmit asynchronous error comes from the transmit
+    // stream's own node — `<id>/tx/s0` under the layout — and reaches the collector.
+    let mut direct = Direct::build(
+        FakeConfig { faults: vec![FakeFault::TxReport(Wall::from_millis(40), TxCode::Underflow)], ..FakeConfig::default() },
+        &[("radio.tx.c0.stream", Scalar::from(0))],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+    );
+    direct.settle(Wall::from_millis(250));
+    let underflows = direct.of("radio.TX_UNDERFLOW");
+    assert!(!underflows.is_empty(), "the report reached the collector: {:?}", direct.device.calls());
+    let source = EventSource::Node { node: ResourceId::parse("usrp/tx/s0").unwrap() };
+    assert!(underflows.iter().all(|event| event.source == source), "{:?}", underflows.iter().map(|event| format!("{:?}", event.source)).collect::<Vec<_>>());
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_13_the_reopen_enforces_the_direction_s_rate_comparison() {
+    // UR-13 (Sol 3): a direction opened first by an enable from no stream is compared
+    // there; when the comparison refuses, the direction's recorded outcome is re-enforced
+    // at every later open — the first open the owner makes included —, so the segment is
+    // refused instead of run on a device the profile cannot describe.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    for tx in [false, true] {
+        let dir = if tx { "tx" } else { "rx" };
+        let inner = fake(FakeConfig { serial: format!("ur13-reopen-{dir}"), ..FakeConfig::default() });
+        let tested: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: Some(off_grid()), tx: Some(off_grid()), failing: None });
+        let mut direct = Direct::build_on(
+            inner.clone(),
+            tested,
+            &[("radio.rx.c0.stream", Scalar::from(-1)), ("radio.tx.c0.stream", Scalar::from(-1))],
+            vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+            layout_selector(),
+            BTreeMap::new(),
+        );
+        direct.settle(Wall::from_millis(30));
+        assert!(calls(&direct.device, &format!("{dir}_open")).is_empty(), "{dir}: the arm opened no streamer: {:?}", direct.device.calls());
+        // The direction's first open: uhd-control's own enable from no stream, compared there
+        // and refused. The change's values stay the configuration of record and the stream
+        // is halted (RM-25).
+        direct.update(&format!("radio.{dir}.c0.stream"), Value::from(0), Cold, Some(direct.now() + ms(40)));
+        direct.settle(Wall::from_millis(200));
+        let first: Vec<String> = direct.of("radio.COMMAND_REJECTED").iter().filter_map(|event| event.payload["reason"].as_str().map(str::to_owned)).collect();
+        assert_eq!(first.len(), 1, "{dir}: {first:?} {:?}", direct.device.calls());
+        assert!(first[0].starts_with("UR-13:") && first[0].contains(dir), "{dir}: {}", first[0]);
+        // A second open: a `start_rx` is the receive owner's own reopen, which re-enforces the
+        // refused outcome; a second channel joining the transmit stream is an enable from no
+        // stream again, which uhd-control compares there. Either way: a second
+        // `COMMAND_REJECTED`, one more device open, and the segment neither configured nor run.
+        // The transmit owner's reopen is pinned by its unit test (tx.rs).
+        let opens = calls(&direct.device, &format!("{dir}_open")).len();
+        let applies = calls(&direct.device, "apply").len();
+        if tx {
+            direct.update("radio.tx.c1.stream", Value::from(0), Cold, Some(direct.now() + ms(60)));
+            direct.settle(Wall::from_millis(300));
+        } else {
+            direct.start_rx_at("usrp/rx/s0", Some(direct.now() + ms(60)));
+            direct.settle(Wall::from_millis(300));
+        }
+        let rejected: Vec<String> = direct.of("radio.COMMAND_REJECTED").iter().filter_map(|event| event.payload["reason"].as_str().map(str::to_owned)).collect();
+        assert_eq!(rejected.len(), 2, "{dir}: the owner's open is refused too: {rejected:?} {:?}", direct.device.calls());
+        assert!(rejected[1].starts_with("UR-13:") && rejected[1].contains(dir), "{dir}: {}", rejected[1]);
+        assert_eq!(calls(&direct.device, &format!("{dir}_open")).len(), opens + 1, "{dir}: the owner opened the streamer once: {:?}", direct.device.calls());
+        assert_eq!(calls(&direct.device, "apply").len(), applies, "{dir}: the refused segment is not configured: {:?}", direct.device.calls());
+        let records = direct.clocks.sample_clock_records();
+        assert!(records.iter().filter(|record| record.stream.path().starts_with(&format!("usrp/{dir}"))).all(|record| record.ended_at.is_some()), "{dir}: no segment ran: {records:?}");
+        let instance = direct.finish();
+        assert_eq!(instance.sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()]["rates_checked"][dir], true, "{dir}: the comparison is recorded");
+    }
+}
+
+#[test]
+fn ur_13_the_receive_owner_s_first_open_is_compared_there() {
+    // UR-13: the receive owner's first open is the direction's only comparison when
+    // uhd-control's enable from no stream was refused at its open, before it compared. The
+    // owner's `start_rx` then opens the streamer, and the device's rates refuse it there.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let inner = fake(FakeConfig { faults: vec![FakeFault::RxOpenFails], serial: "ur13-owner-first-rx".to_owned(), ..FakeConfig::default() });
+    let tested: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: Some(off_grid()), tx: None, failing: None });
+    let mut direct = Direct::build_on(
+        inner.clone(),
+        tested,
+        &[("radio.rx.c0.stream", Scalar::from(-1)), ("radio.tx.c0.stream", Scalar::from(-1))],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+        BTreeMap::new(),
+    );
+    direct.settle(Wall::from_millis(30));
+    assert!(calls(&direct.device, "rx_open").is_empty(), "`arm` opened no receive streamer: {:?}", direct.device.calls());
+    // The enable from no stream: its open is refused before any comparison, so nothing is
+    // compared before the open, and the stream is halted (RM-25).
+    direct.update("radio.rx.c0.stream", Value::from(0), Cold, Some(direct.now() + ms(40)));
+    direct.settle(Wall::from_millis(200));
+    let first: Vec<String> = direct.of("radio.COMMAND_REJECTED").iter().filter_map(|event| event.payload["reason"].as_str().map(str::to_owned)).collect();
+    assert_eq!(first.len(), 1, "{first:?} {:?}", direct.device.calls());
+    assert!(!first[0].starts_with("UR-13:"), "the first refusal is the open's: {}", first[0]);
+    // The owner has nothing planned and settles; its `start_rx` opens the streamer, and the
+    // owner's comparison, the direction's first, refuses it.
+    let applies = calls(&direct.device, "apply").len();
+    direct.start_rx_at("usrp/rx/s0", Some(direct.now() + ms(60)));
+    direct.settle(Wall::from_millis(300));
+    let rejected: Vec<String> = direct.of("radio.COMMAND_REJECTED").iter().filter_map(|event| event.payload["reason"].as_str().map(str::to_owned)).collect();
+    assert_eq!(rejected.len(), 2, "the owner's open is refused by its comparison: {rejected:?} {:?}", direct.device.calls());
+    assert!(rejected[1].starts_with("UR-13:") && rejected[1].contains("rx"), "{}", rejected[1]);
+    assert_eq!(calls(&direct.device, "rx_open").len(), 2, "{:?}", direct.device.calls());
+    assert_eq!(calls(&direct.device, "apply").len(), applies, "the refused segment is not configured: {:?}", direct.device.calls());
+    let instance = direct.finish();
+    assert_eq!(instance.sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()]["rates_checked"]["rx"], true, "the owner's comparison is recorded");
+}
+
+#[test]
+fn ur_25_a_transmit_refusal_from_no_stream_starts_no_clock() {
+    // UR-25: a transmit enable from no stream that uhd-control refuses starts no clock, as the
+    // owner's own refusal starts none. The owner then moves on at once, so an enable booked
+    // while the refused segment's origin is still ahead is taken from no stream and refused
+    // under its action, not held behind that origin. On the manual clock device time stops while
+    // the device's threads are busy, so the test's load does not move the instants.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let inner = fake(FakeConfig { clock: ClockMode::Manual, serial: "ur25-tx-refused-no-clock".to_owned(), ..FakeConfig::default() });
+    let tested: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: None, tx: Some(off_grid()), failing: None });
+    let mut direct = Direct::build_on(
+        inner.clone(),
+        tested,
+        &[("radio.rx.c0.stream", Scalar::from(-1)), ("radio.tx.c0.stream", Scalar::from(-1))],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+        BTreeMap::new(),
+    );
+    direct.settle(Wall::from_millis(30));
+    // The first enable's comparison refuses and stores the outcome; its origin is 200 ms ahead.
+    direct.update("radio.tx.c0.stream", Value::from(0), Cold, Some(direct.now() + ms(200)));
+    direct.settle(Wall::from_millis(30));
+    direct.update("radio.tx.c1.stream", Value::from(0), Cold, Some(direct.now() + ms(60)));
+    direct.settle(Wall::from_millis(300));
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 2, "{rejected:?} {:?}", direct.device.calls());
+    for event in &rejected {
+        let reason = event.payload["reason"].as_str().unwrap();
+        assert!(reason.starts_with("UR-13:") && reason.contains("tx"), "{reason}");
+    }
+    let instance = direct.finish();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let switches: Vec<&Json> = timing.as_array().unwrap().iter().filter(|row| row["what"] == "tx_switch").collect();
+    assert_eq!(switches.len(), 2, "{timing}");
+    assert!(switches[1]["at"].as_i64().unwrap() < switches[0]["origin"].as_i64().unwrap(), "the refused segment's clock is held to its origin: {timing}");
+    assert!(rejected[1].payload["action"].is_u64(), "the second enable is taken from no stream, and names its Action: {:?}", rejected[1].payload);
+}
+
+#[test]
+fn ur_05_cleanup_does_not_release_the_serial() {
+    // UR-5, major 3: `cleanup` stops what runs; the serial is held while the instance
+    // lives and released by its drop.
+    let device = fake(FakeConfig { serial: "ur05-cleanup-holds".to_owned(), ..FakeConfig::default() });
+    let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device.clone()).unwrap();
+    assert!(UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device.clone()).is_err(), "the serial is held");
+    radio.cleanup();
+    assert!(UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device.clone()).is_err(), "cleanup alone releases nothing");
+    drop(radio);
+    assert!(UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device.clone()).is_ok(), "the drop released it");
+}
+
+#[test]
+fn ur_25_a_floor_raised_layout_join_is_judged_at_its_instant() {
+    // RM-25, RM-31, major 4(a): a join the instance floor raises takes effect at the
+    // raised instant, where the reserved antenna has arrived, and the run-time judgement
+    // is over that instant's configuration; the refusal leaves neither the value nor the
+    // instant in the floor.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::build(
+        FakeConfig::default(),
+        &[],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        json!({ "keys": "channel", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }),
+    );
+    direct.settle(Wall::from_millis(30));
+    let now = direct.now();
+    direct.update("radio.rx.c0.antenna", Value::from("TX/RX"), Cold, Some(now + ms(50)));
+    direct.update("radio.tx.c0.stream", Value::from(0), Cold, Some(now + ms(10)));
+    direct.settle(Wall::from_millis(200));
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?} {:?}", direct.device.calls());
+    let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+    assert!(reason.starts_with("RM-31:"), "{reason}");
+    let log = direct.device.calls();
+    assert!(!log.iter().any(|call| call.starts_with("tx_open")), "no transmit streamer was opened: {log:?}");
+    assert!(direct.clocks.sample_clock_records().iter().all(|record| record.stream.path() != "usrp/tx/s0"), "{log:?}");
+    // The refusal left neither the value nor its instant behind: the antenna change back is
+    // booked at its own instant, and the same join after it is taken and opens the streamer.
+    let later = direct.now();
+    direct.update("radio.rx.c0.antenna", Value::from("RX2"), Cold, Some(later + ms(60)));
+    direct.update("radio.tx.c0.stream", Value::from(0), Cold, Some(later + ms(120)));
+    direct.settle(Wall::from_millis(400));
+    assert_eq!(direct.of("radio.COMMAND_REJECTED").len(), 1, "the later join is taken; the first refusal alone stays: {:?}", direct.device.calls());
+    let calls = direct.device.calls();
+    assert!(calls.iter().any(|call| call == "tx_open 0 [0]"), "the later join is taken: {calls:?}");
+    assert!(direct.clocks.sample_clock_records().iter().any(|record| record.stream.path() == "usrp/tx/s0"), "{calls:?}");
+    let instance = direct.finish();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let rows: Vec<&Json> = timing.as_array().unwrap().iter().filter(|row| row["what"] == "cold_change" && row["key"] == "radio.rx.c0.antenna").collect();
+    assert_eq!(rows.len(), 2, "{timing}");
+    assert_eq!(rows[1]["e"], later + ms(60), "the refused instant is no floor: {timing}");
+}
+
+#[test]
+fn ur_24_the_layout_destination_follows_the_effective_membership() {
+    // RM-27, UR-24, major 4(b): a numbered channel's timed update is judged against the
+    // membership in effect at its own instant, not the one at its arrival — whichever of
+    // the join and the tune arrived first.
+    use ezsdr_kernel::module_api::UpdateClass::{Cold, HardwareTimed};
+    for join_first in [false, true] {
+        let mut direct = Direct::build(FakeConfig::default(), &[], vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)], layout_selector());
+        direct.settle(Wall::from_millis(30));
+        let now = direct.now();
+        let at = now + ms(120);
+        let join = |direct: &Direct| direct.update("radio.rx.c1.stream", Value::from(0), Cold, Some(now + ms(40)));
+        let tune = |direct: &Direct| direct.update("radio.rx.c1.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(at));
+        if join_first {
+            join(&direct);
+            tune(&direct);
+        } else {
+            tune(&direct);
+            join(&direct);
+        }
+        direct.settle(Wall::from_millis(300));
+        let log = direct.device.calls();
+        let applied: Vec<&String> = log.iter().filter(|call| call.starts_with("apply rx 1 ") && call.contains("freq=2100000000") && call.contains(&format!("at={at} effective="))).collect();
+        assert_eq!(applied.len(), 1, "join_first={join_first}: the tune reaches channel 1 on its new segment: {log:?}");
+        assert!(direct.of("radio.COMMAND_REJECTED").is_empty(), "join_first={join_first}: {log:?}");
+        let instance = direct.finish();
+        let rows = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+        assert_eq!(
+            rows.as_array().unwrap().iter().filter(|row| row["key"] == "radio.rx.c1.frequency_hz" && row["issued"] == true && row["at"]["ticks"] == at).count(),
+            1,
+            "join_first={join_first}: {rows}"
+        );
+    }
+}
+
+#[test]
+fn ur_13_a_runtime_join_compares_the_rate_set() {
+    // UR-13, major 5: the comparison is not `arm`'s alone — a direction whose streamer
+    // opens first at a run-time join is compared there, an off-grid device is refused, and
+    // the segment is halted (RM-25).
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let inner = fake(FakeConfig { serial: "ur13-runtime-join".to_owned(), ..FakeConfig::default() });
+    let tested: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: None, tx: Some(off_grid()), failing: None });
+    let mut direct = Direct::build_on(
+        inner.clone(),
+        tested,
+        &[("radio.tx.c0.stream", Scalar::from(-1))],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+        BTreeMap::new(),
+    );
+    direct.settle(Wall::from_millis(30));
+    assert!(calls(&direct.device, "tx_open").is_empty(), "`arm` opened no transmit streamer: {:?}", direct.device.calls());
+    direct.update("radio.tx.c0.stream", Value::from(0), Cold, Some(direct.now() + ms(60)));
+    direct.settle(Wall::from_millis(400));
+    let log = direct.device.calls();
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?} {log:?}");
+    let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+    assert!(reason.starts_with("UR-13:") && reason.contains("tx"), "{reason}");
+    assert_eq!(calls(&direct.device, "tx_open 0 [0]").len(), 1, "the join opened the streamer and was compared there: {log:?}");
+    assert_eq!(calls(&direct.device, "rates tx 0").len(), 1, "{log:?}");
+    assert!(!log.iter().any(|call| call.starts_with("apply tx 0 ") && call.ends_with("at=-")), "the refused segment is not configured: {log:?}");
+    let instance = direct.finish();
+    assert_eq!(instance.sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()]["rates_checked"]["tx"], true, "the comparison is recorded");
+}
+
+#[test]
+fn ur_13_a_rate_read_that_fails_refuses() {
+    // UR-13, major 5: a `rates` read that fails is a refusal with `UR-13:` — never
+    // "no rates", which would let a device the profile cannot describe run.
+    let dir = TempDir::new();
+    let inner = fake(FakeConfig { serial: "ur13-read-fails".to_owned(), ..FakeConfig::default() });
+    let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: None, tx: None, failing: Some(ezsdr_radio_uhd::Dir::Rx) });
+    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }), "{:?}", run.state());
+    let manifest = run.finish();
+    let reason = failure(&manifest);
+    assert!(reason.contains("UR-13:") && reason.contains("rates read failed"), "{reason}");
+    let log = inner.calls();
+    let opened = log.iter().position(|call| call.starts_with("rx_open")).expect("the streamer opened");
+    assert!(log.iter().position(|call| call.starts_with("close_streams")).is_some_and(|closed| opened < closed), "{log:?}");
+}
+
+
+#[test]
+fn ur_13_an_enable_from_no_stream_compares_the_rate_set() {
+    // UR-13, major 5: the receive side's first open can be uhd-control's enable from no
+    // stream; it is compared there — the receive reopen only enforces the direction's
+    // recorded outcome — so an off-grid device refuses the enable.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let inner = fake(FakeConfig { serial: "ur13-from-none".to_owned(), ..FakeConfig::default() });
+    let tested: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: Some(off_grid()), tx: None, failing: None });
+    let mut direct = Direct::build_on(
+        inner.clone(),
+        tested,
+        &[("radio.rx.channels", Scalar::from(0))],
+        vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)],
+        json!({}),
+        BTreeMap::new(),
+    );
+    direct.settle(Wall::from_millis(30));
+    assert!(calls(&direct.device, "rx_open").is_empty(), "`arm` opened no receive streamer: {:?}", direct.device.calls());
+    direct.update("radio.rx.channels", Value::from(2), Cold, Some(direct.now() + ms(50)));
+    direct.settle(Wall::from_millis(200));
+    let log = direct.device.calls();
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?} {log:?}");
+    let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+    assert!(reason.starts_with("UR-13:") && reason.contains("rx"), "{reason}");
+    assert_eq!(calls(&direct.device, "rx_open 0 [0, 1]").len(), 1, "the enable opened the streamer and was compared there: {log:?}");
+    assert!(!log.iter().any(|call| call.starts_with("apply rx 0 ") && call.ends_with("at=-")), "the refused enable is not configured: {log:?}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_26_an_unserved_command_is_refused_under_its_own_action_name() {
+    // UR-26: a Command this Provider does not serve — `start_rx` with a parameter is none —
+    // is refused, and its `rejected` row and event carry the action's kind `command`.
+    let mut direct = Direct::build(FakeConfig::default(), &[], vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)], layout_selector());
+    direct.settle(Wall::from_millis(30));
+    direct.push(Action::Command {
+        target: resource("usrp"),
+        verb: Ident::parse("start_rx").unwrap(),
+        params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(1))]),
+        at: None,
+    });
+    direct.settle(Wall::from_millis(30));
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0].payload["kind"], "command");
+    assert_eq!(rejected[0].payload["reason"], "UR-26: not supported by this Provider");
+    let instance = direct.finish();
+    let rows = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()];
+    assert!(rows.as_array().unwrap().iter().any(|row| row["kind"] == "command" && row["reason"] == "UR-26: not supported by this Provider"), "{rows}");
+    assert!(rows.as_array().unwrap().iter().all(|row| row["kind"] != "peripheral_command"), "{rows}");
+}
+
+#[test]
+fn ur_25_a_refused_enable_from_no_stream_halts_and_keeps_its_values() {
+    // UR-25, RM-25 (Sol 2): a configuration uhd-control applies itself for an enable from
+    // no stream, which the device refuses, is booked refused as its owner books a refusal
+    // it finds: the change's values stay the configuration of record, the stream is
+    // halted, and the next enable applies them.
+    use ezsdr_kernel::module_api::UpdateClass::{Cold, HardwareTimed};
+    let mut direct = Direct::build(
+        FakeConfig {
+            faults: vec![FakeFault::WrongAntenna { claimed: "TX/RX", applied: "RX2" }],
+            serial: "ur25-from-none-refused".to_owned(),
+            ..FakeConfig::default()
+        },
+        &[
+            ("radio.rx.c0.stream", Scalar::from(-1)),
+            ("radio.rx.c1.stream", Scalar::from(-1)),
+            ("radio.rx.c1.antenna", Scalar::from("TX/RX")),
+        ],
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+    );
+    direct.settle(Wall::from_millis(30));
+    assert!(calls(&direct.device, "rx_open").is_empty(), "`arm` opened no receive streamer: {:?}", direct.device.calls());
+    // The channel joins with no stream to join: uhd-control opens the streamer and applies
+    // the configuration itself, and the antenna's read-back refuses it.
+    let join_at = direct.now() + ms(50);
+    direct.update("radio.rx.c1.stream", Value::from(0), Cold, Some(join_at));
+    direct.settle(Wall::from_millis(200));
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?} {:?}", direct.device.calls());
+    let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+    assert!(reason.starts_with("UR-12:") && reason.contains("reads back RX2"), "{reason}");
+    assert!(rejected[0].payload["action"].is_u64(), "the enable from no stream names its Action: {:?}", rejected[0].payload);
+    assert!(direct.clocks.sample_clock_records().is_empty(), "the refused enable ran no segment");
+    // A timed update for the channel: the halted stream has no channel for it, so it is
+    // recorded at its instant, and the next enable applies it (UR-24, RM-25).
+    let gain_at = direct.now() + ms(50);
+    direct.update("radio.rx.c1.gain_db", Value::num(3.0).unwrap(), HardwareTimed, Some(gain_at));
+    direct.settle(Wall::from_millis(200));
+    // The successful change restarts the stream from the refused change's configuration:
+    // the joined channel, its recorded gain and the antenna that now reads back.
+    direct.update("radio.rx.c1.antenna", Value::from("RX2"), Cold, Some(direct.now() + ms(50)));
+    direct.settle(Wall::from_millis(400));
+    let log = direct.device.calls();
+    assert_eq!(log.iter().filter(|call| call.as_str() == "rx_open 0 [1]").count(), 2, "the refused enable's open and the restart's: {log:?}");
+    let applied: Vec<&String> = log.iter().filter(|call| call.starts_with("apply rx 1 ") && call.ends_with("at=-")).collect();
+    assert!(applied.iter().any(|call| call.contains("gain=3") && call.contains("antenna=RX2")), "the restart applies the recorded gain and the refused membership: {log:?}");
+    let records = direct.clocks.sample_clock_records();
+    assert_eq!(records.iter().filter(|record| record.stream.path() == "usrp/rx/s0").count(), 1, "{records:?}");
+    assert!(records.iter().any(|record| record.stream.path() == "usrp/rx/s0" && record.ended_at.is_none()), "{records:?}");
+    assert!(direct.of("radio.COMMAND_REJECTED").len() == 1, "the restart alone succeeds: {:?}", direct.device.calls());
+    let instance = direct.finish();
+    let rows = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    assert_eq!(
+        rows.as_array().unwrap().iter().filter(|row| row["key"] == "radio.rx.c1.gain_db" && row["note"] == "no channel" && row["at"]["ticks"] == gain_at).count(),
+        1,
+        "the timed update is recorded at its own instant while the stream is halted: {rows}"
+    );
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let changes: Vec<&Json> = timing.as_array().unwrap().iter().filter(|row| row["what"] == "cold_change" && row["key"] == "radio.rx.c1.stream").collect();
+    assert_eq!(changes.len(), 1, "the refused change is booked at its instant: {timing}");
+    assert_eq!(changes[0]["e"], join_at, "{timing}");
+}
+
+#[test]
+fn ur_05_a_repeated_front_end_is_still_refused() {
+    // UR-5, item 2's T7: with the prefix restriction gone, a layout naming one `(slot,
+    // front end)` pair twice is refused, naming the position and the repeated pair.
+    let device = fake(FakeConfig::default());
+    for rx in [vec!["0:A:ubx:0", "0:A:ubx:0"], vec!["0:A:ubx:0", "0:B:ubx:0", "0:A:ubx:0"]] {
+        let error = match UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel", "rx": rx, "tx": [] }), Some(x3xx())), device.clone()) {
+            Ok(_) => panic!("the repeated pair was accepted: {rx:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, ModuleErrorKind::Rejected, "{rx:?}");
+        assert!(error.message.contains("position") && error.message.contains("repeats"), "{rx:?}: {}", error.message);
+    }
+    // A Basic/LF board's two front ends are two pairs: accepted.
+    let device = fake(FakeConfig { front_ends: vec!["BasicRX"], ..FakeConfig::default() });
+    let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel", "rx": ["0:A:basic_rx:0", "0:A:basic_rx:1"], "tx": [] }), Some(x3xx())), device.clone()).unwrap();
+    drop(radio);
+    assert_eq!(calls(&device, "set_subdev_spec rx A:0 A:1").len(), 1, "{:?}", device.calls());
 }

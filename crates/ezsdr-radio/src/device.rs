@@ -607,6 +607,47 @@ pub(crate) fn coerce_antenna(
     }
 }
 
+/// UR-13 (design 33 D5): whether a device's `rates` — UHD's `(start, stop, step)` ranges at
+/// one channel — are the `grid`'s rates, as a *set*: every value in exactly one of them,
+/// whatever order the device reports. A `Step` grid expands like a range; a grid this
+/// cannot enumerate (`Integer`, or a `Step` with step 0, an interval) is never equal to a
+/// device's finite answer. The one place the comparison is read (BP0 measures the real
+/// ranges; the fake reports singletons).
+pub fn rate_set_matches(grid: &Grid, ranges: &[(f64, f64, f64)]) -> bool {
+    let expand = |first: f64, last: f64, step: f64| -> Vec<f64> {
+        let mut values = Vec::new();
+        if !first.is_finite() || !last.is_finite() {
+            return values;
+        }
+        if !step.is_finite() || step <= 0.0 || first >= last {
+            values.push(first);
+            return values;
+        }
+        let count = ((last - first) / step).floor();
+        if count > 10_000.0 {
+            return values;
+        }
+        for i in 0..=count as i64 {
+            values.push(first + i as f64 * step);
+        }
+        values
+    };
+    let mut expected = match grid {
+        Grid::Values(values) => values.clone(),
+        Grid::Step { lo, hi, step } if *step > 0.0 => expand(*lo, *hi, *step),
+        _ => return false,
+    };
+    let mut reported: Vec<f64> = ranges.iter().flat_map(|(start, stop, step)| expand(*start, *stop, *step)).collect();
+    expected.retain(|value| value.is_finite());
+    reported.retain(|value| value.is_finite());
+    let order = |a: &f64, b: &f64| a.total_cmp(b);
+    expected.sort_by(order);
+    reported.sort_by(order);
+    expected.dedup();
+    reported.dedup();
+    expected == reported
+}
+
 fn bound(value: Option<&Scalar>, default: f64) -> Result<f64, String> {
     match value {
         None => Ok(default),

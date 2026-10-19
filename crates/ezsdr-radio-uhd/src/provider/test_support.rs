@@ -1,12 +1,14 @@
 //! A controlled Provider clock for command-order tests without host deadlines.
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
-use ezsdr_kernel::event::{EventCollector, EventSource, Target};
+use ezsdr_kernel::event::{Event, EventCollector, EventHandle, EventKind, EventSink, EventSource, Severity, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ResourceId;
 use ezsdr_kernel::module_api::{Fidelity, ModuleRegistry, Pacing};
 use ezsdr_kernel::policy::{EventKindRegistry, Policy};
-use ezsdr_kernel::time::{ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational};
+use ezsdr_kernel::time::{ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational, TimeAuthority, TimePoint};
+use ezsdr_kernel::run::RunError;
 use crate::device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, Iq, RxRecv, Settings, TxReport};
 use crate::host::HostClock;
 use super::core::Core;
@@ -47,6 +49,13 @@ pub(super) fn rig_on(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::s
 /// `rig_on` with the Run's Command inputs.
 pub(super) fn rig_on_inputs(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, block_len: u32, inputs: BTreeMap<ContentHash, Arc<[u8]>>)
     -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+    rig_on_mode(device, links, inputs, super::mode::Mode::Current(Box::new(crate::profile::ubx_description(block_len))))
+}
+
+/// `rig_on_inputs` with the key set the instance presents (RM-27): the current keys, or
+/// the layout builder's, whose stream nodes are `<id>/rx/s<k>` and `<id>/tx/s<k>`.
+pub(super) fn rig_on_mode(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, mode: super::mode::Mode)
+    -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let clocks = Arc::new(ClockRegistry::new());
     let root = clocks.allocate_id().unwrap();
     clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(),
@@ -55,14 +64,41 @@ pub(super) fn rig_on_inputs(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_ke
     let mut kinds = EventKindRegistry::with_kernel_kinds();
     ezsdr_radio::register(&mut ModuleRegistry::new(),
         &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
-    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx"].iter().flat_map(|s|
+    // The instance's own nodes, under either key set (RM-29): a layout's events come from
+    // its stream nodes.
+    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1"].iter().flat_map(|s|
         kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
-    let core = Arc::new(Core::new(device, ResourceId::parse("usrp").unwrap(),
-        root, time.clone(), clocks, events.clone(), Arc::new(inputs), links,
-        crate::profile::ubx_description(block_len))
-        .expect("the rx node is inside the instance root"));
+    let core = core_on(device, clocks, time.clone(), events.clone(), inputs, links, mode);
     (core, time, events)
+}
+
+/// `rig_on_mode` through a sink that witnesses which events are emitted while the line lock
+/// is held (UR-25): the test keeps the witness and reads it.
+pub(super) fn rig_on_mode_witness(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, mode: super::mode::Mode)
+    -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<SectionWitness>) {
+    let clocks = Arc::new(ClockRegistry::new());
+    let root = clocks.allocate_id().unwrap();
+    clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(),
+        EpochRef::Arbitrary { set_by: "uhd.test".to_owned() })).unwrap();
+    let time = Arc::new(ManualTimeAuthority::new(clocks.clone(), root, &[], Pacing::FreeRunning).unwrap());
+    let mut kinds = EventKindRegistry::with_kernel_kinds();
+    ezsdr_radio::register(&mut ModuleRegistry::new(),
+        &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
+    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1"].iter().flat_map(|s|
+        kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
+    let witness = Arc::new(SectionWitness::new(Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()))));
+    let core = core_on(device, clocks, time.clone(), witness.clone(), inputs, links, mode);
+    witness.watch(&core);
+    (core, time, witness)
+}
+
+/// The rig's `Core` on `sink`.
+fn core_on(device: Arc<dyn Device>, clocks: Arc<ClockRegistry>, time: Arc<ManualTimeAuthority>, events: Arc<dyn EventSink>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, mode: super::mode::Mode) -> Arc<Core> {
+    let root = time.primary_root();
+    Arc::new(Core::new(device, ResourceId::parse("usrp").unwrap(),
+        root, time, clocks, events, Arc::new(inputs), links, mode)
+        .expect("the rx node is inside the instance root"))
 }
 
 /// A target the Kernel would resolve to `node` (KC-23): its first segment as the resource
@@ -72,6 +108,29 @@ pub(super) fn target_of(node: &ResourceId) -> Target {
     Target::Resource { resource: ezsdr_kernel::spec::Ident::parse(resource).unwrap(), path: path.to_owned() }
 }
 
+thread_local! {
+    static LOCKS: RefCell<Option<Vec<usize>>> = const { RefCell::new(None) };
+}
+
+/// Starts recording the addresses of the line locks this thread takes (UR-25).
+pub(super) fn record_locks() {
+    LOCKS.with(|locks| *locks.borrow_mut() = Some(Vec::new()));
+}
+
+/// The addresses of the locks taken since `record_locks`, in order, and stops recording.
+pub(super) fn taken_locks() -> Vec<usize> {
+    LOCKS.with(|locks| locks.borrow_mut().take().unwrap_or_default())
+}
+
+/// `core::lock`'s record of one acquisition, by the mutex's address (UR-25, #63).
+pub(super) fn note_lock(address: usize) {
+    LOCKS.with(|locks| {
+        if let Some(taken) = locks.borrow_mut().as_mut() {
+            taken.push(address);
+        }
+    });
+}
+
 /// A `FakeDevice` that fails its test when a device call is made under the Provider's line
 /// lock (UR-25, design 33 D15): the rigs are single-threaded, so a lock the spy cannot take
 /// is its own caller's. It counts each call, so a test can prove its sequence passed one.
@@ -79,11 +138,12 @@ pub(super) struct LockSpy {
     inner: FakeDevice,
     core: Mutex<Weak<Core>>,
     calls: Mutex<BTreeMap<&'static str, usize>>,
+    hosts: Mutex<Vec<bool>>,
 }
 
 impl LockSpy {
     pub fn new(config: FakeConfig) -> LockSpy {
-        LockSpy { inner: FakeDevice::new(config), core: Mutex::new(Weak::new()), calls: Mutex::new(BTreeMap::new()) }
+        LockSpy { inner: FakeDevice::new(config), core: Mutex::new(Weak::new()), calls: Mutex::new(BTreeMap::new()), hosts: Mutex::new(Vec::new()) }
     }
 
     /// The Core this device serves, taken once the rig has built it.
@@ -94,6 +154,11 @@ impl LockSpy {
     /// How many calls of `name` the spy saw.
     pub fn seen(&self, name: &str) -> usize {
         self.calls.lock().unwrap().get(name).copied().unwrap_or(0)
+    }
+
+    /// Whether the line lock was held at each host clock read since `watch`, in order (UR-25).
+    pub fn host_held(&self) -> Vec<bool> {
+        self.hosts.lock().unwrap().clone()
     }
 
     /// Records the call and fails when its caller holds the streams' lock.
@@ -132,5 +197,57 @@ impl Device for LockSpy {
     fn tx_async(&self, stream: usize, timeout: std::time::Duration) -> Result<Option<TxReport>, DeviceError> { self.enter("tx_async"); self.inner.tx_async(stream, timeout) }
     fn close_streams(&self) { self.enter("close_streams"); self.inner.close_streams() }
     fn mark_lost(&self) { self.enter("mark_lost"); self.inner.mark_lost() }
-    fn host(&self) -> HostClock { self.inner.host() }
+    fn host(&self) -> HostClock {
+        if let Some(core) = self.core.lock().unwrap().upgrade() {
+            self.hosts.lock().unwrap().push(core.streams.try_lock().is_err());
+        }
+        self.inner.host()
+    }
+}
+
+/// An event sink that records whether each control-path event was emitted while the
+/// instance's line lock was held (UR-25): the witness for a command whose instant and
+/// booking are one critical section — no other section of the Provider emits inside it, and
+/// the rigs are single-threaded, so the lock it meets is its own caller's.
+pub(super) struct SectionWitness {
+    inner: Arc<EventCollector>,
+    core: Mutex<Weak<Core>>,
+    seen: Mutex<Vec<(String, bool)>>,
+}
+
+impl SectionWitness {
+    pub fn new(inner: Arc<EventCollector>) -> SectionWitness {
+        SectionWitness { inner, core: Mutex::new(Weak::new()), seen: Mutex::new(Vec::new()) }
+    }
+
+    /// The Core this sink serves, taken once the rig has built it.
+    pub fn watch(&self, core: &Arc<Core>) {
+        *self.core.lock().unwrap() = Arc::downgrade(core);
+    }
+
+    /// The events emitted since the last call, each with whether the line lock was held.
+    pub fn events(&self) -> Vec<(String, bool)> {
+        std::mem::take(&mut *self.seen.lock().unwrap())
+    }
+
+    /// Records the event's kind and whether the line lock is held now.
+    fn observe(&self, kind: &EventKind) {
+        let held = self.core.lock().unwrap().upgrade().is_some_and(|core| core.streams.try_lock().is_err());
+        self.seen.lock().unwrap().push((kind.as_str().to_owned(), held));
+    }
+}
+
+impl EventSink for SectionWitness {
+    fn resolve(&self, source: &EventSource, kind: &EventKind) -> Result<EventHandle, RunError> {
+        self.inner.resolve(source, kind)
+    }
+
+    fn emit(&self, handle: EventHandle, time: TimePoint, severity: Severity, payload: &[u8]) -> Result<(), RunError> {
+        self.inner.emit(handle, time, severity, payload)
+    }
+
+    fn emit_control(&self, event: Event) -> Result<(), RunError> {
+        self.observe(&event.kind);
+        self.inner.emit_control(event)
+    }
 }

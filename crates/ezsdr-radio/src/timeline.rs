@@ -388,6 +388,20 @@ pub fn command_instant(line: Option<&Line>, at: Option<i64>, now: i64, seq: u64,
     (e, asked < now || e > base)
 }
 
+/// RM-25 (design 33 D5): when a layout instance's `cold` change received at `now` with the
+/// requested instant `at` takes effect: `at`, or `now` when it is absent or past; never
+/// before the receive start `start`; and never before a still-pending `cold` change of the
+/// instance, whichever direction, stream or line — `earlier` is those changes' effective
+/// instants, and the greatest of them is the floor. The flag says whether that is later
+/// than `at` asked, which makes the change late (UC-2). The one place MockRadio's layout
+/// instance and the UHD Module compute this floor.
+pub fn layout_instant(at: Option<i64>, now: i64, start: Option<i64>, earlier: impl IntoIterator<Item = i64>) -> (i64, bool) {
+    let asked = at.unwrap_or(now);
+    let base = asked.max(now).max(start.unwrap_or(i64::MIN));
+    let e = earlier.into_iter().fold(base, |e, floor| e.max(floor));
+    (e, asked < now || e > asked)
+}
+
 /// RM-34: why a move cannot be booked; every variant leaves every line as it was.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MoveError {

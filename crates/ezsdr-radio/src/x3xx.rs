@@ -566,19 +566,28 @@ pub fn from_selector(selector: &BTreeMap<Ident, Value>) -> Result<Selection, Str
         ));
     }
     for (direction, elements) in [("rx", &rx), ("tx", &tx)] {
-        // This stage's layout is a prefix of UHD's default channel order: element `i` is
-        // slot A at position 0, slot B at position 1, and there is no third (design 33 D5).
-        const ORDER: [Slot; 2] = [Slot::A, Slot::B];
+        // RM-28, design 33 D5: the layout follows any order (a non-prefix one too — the
+        // order is the channel order), but no `(slot, front end)` pair twice, which is
+        // the same judgement `channels::check_layout` reads (one place).
+        let mut seen: Vec<(Slot, u32)> = Vec::new();
         for (position, element) in elements.iter().enumerate() {
-            if ORDER.get(position) != Some(&element.slot) {
-                return Err(format!(
-                    "the layout's `{direction}` element at position {position} names slot {:?}; this stage's layout follows UHD's default channel order, slot A at position 0 and slot B at position 1",
-                    element.slot
-                ));
-            }
+            check_repeat(direction, position, element.slot, element.frontend, element.board.name(), &seen)?;
+            seen.push((element.slot, element.frontend));
         }
     }
     Ok(Selection { master_clock_hz, image, links, link_gbps, board, rx, tx })
+}
+
+/// RM-28 (design 33 D5): no `(slot, front end)` pair named twice in one direction's
+/// layout; the one place the judgement and its wording live, read by
+/// [`from_selector`] and `channels::check_layout`.
+pub(crate) fn check_repeat(direction: &str, position: usize, slot: Slot, frontend: u32, name: &str, seen: &[(Slot, u32)]) -> Result<(), String> {
+    if seen.contains(&(slot, frontend)) {
+        return Err(format!(
+            "the layout's `{direction}` element at position {position} repeats `{name}` front end {frontend} in slot {slot:?}"
+        ));
+    }
+    Ok(())
 }
 
 /// Parses one `"<timekeeper>:<slot>:<board>:<frontend>"` element (design 33 D5).

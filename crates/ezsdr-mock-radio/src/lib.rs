@@ -28,7 +28,7 @@ use ezsdr_sim::{FaultEntry, FaultKind, SimRng};
 use ezsdr_sim::channel::{Medium, RootInstant};
 use ezsdr_kernel::module_api::InputStore;
 use ezsdr_radio::timeline::{self, Item, Kind, Line, Segment, StreamKey, NO_RELEASE};
-use ezsdr_radio::{channels, x3xx, Concrete};
+use ezsdr_radio::{channels, x3xx, Addressed, Concrete};
 
 pub use device::{DeviceModel, DeviceTimeError};
 pub use profile::{Profile, ProfileKind};
@@ -38,11 +38,6 @@ const DEVICE_LOST: &str = "MR-20: device lost";
 
 /// The selector key that picks the layout builder's channel and stream keys (MR-38).
 const KEYS: &str = "keys";
-
-/// The value of the selector key `name` (SB-4).
-fn selector_value<'a>(selector: &'a BTreeMap<Ident, Value>, name: &str) -> Option<&'a Value> {
-    selector.get(&Ident::parse(name).expect("a selector key"))
-}
 
 fn module_ref() -> ModuleRef {
     ModuleRef {
@@ -307,22 +302,6 @@ struct PendingUpdate {
     tx: Vec<(usize, Option<usize>, usize)>,
 }
 
-/// What an Action's resolved node names (KC-23, RM-12, RM-15, RM-21): this instance, one
-/// of its streams, or a node it is not.
-enum Addressed {
-    /// The instance's own node, `<device>`.
-    Instance,
-    /// One of the instance's streams.
-    Stream {
-        /// Its direction.
-        direction: Direction,
-        /// Its number.
-        k: usize,
-    },
-    /// A node that is neither.
-    Other,
-}
-
 enum ColdChange {
     Streams(Vec<(Direction, usize)>),
     Move { direction: Direction, from: usize, to: usize, channel: u32 },
@@ -386,12 +365,9 @@ impl MockRadio {
             return Err(reject("Provider binding cannot carry a feed"));
         }
         // MR-38: `keys: "channel"` picks the layout builder's channel and stream keys; an
-        // instance uses one key set, never both (RM-27).
-        let channel_keys = match selector_value(&binding.selector, KEYS) {
-            None => false,
-            Some(Value::Scalar(Scalar::Str(value))) if value == "channel" => true,
-            _ => return Err(reject("selector `keys` must be the string `channel`")),
-        };
+        // instance uses one key set, never both (RM-27). The judgement is `ezsdr_radio`'s,
+        // so that the UHD Module reads the same one (UR-5).
+        let channel_keys = ezsdr_radio::channel_keys(&binding.selector).map_err(|why| reject(&why))?;
         // The shared keys of design 33 D5 are the `x3xx` layout and its companions; `ideal`
         // has no layout at this stage, so its binding may not carry them (design 33 D5).
         // A layout instance reads its channel counts from `rx` and `tx` in either profile
@@ -519,34 +495,20 @@ impl MockRadio {
     }
 
     /// What an Action's resolved node names (KC-23, RM-12, RM-15, RM-21): this instance,
-    /// one of its streams, or something else. The current keys give a stream the node
-    /// `<device>/rx` or `<device>/tx`; a layout description gives it `<device>/rx/s<k>`
-    /// and `<device>/tx/s<k>` (RM-29, RM-34).
-    fn addressed(&self, node: Option<&ResourceId>) -> Addressed {
-        let Some(node) = node else { return Addressed::Other };
-        if *node == self.instance.id {
-            return Addressed::Instance;
-        }
-        if self.profile.is_layout() {
-            if let Some((direction, number)) = ezsdr_radio::stream_target(&self.instance.id, node) {
-                let k = number as usize;
-                let known = match direction {
-                    Direction::Rx => k < self.rx.len(),
-                    Direction::Tx => k < self.tx.len(),
-                };
-                if known {
-                    return Addressed::Stream { direction, k };
-                }
-            }
-            return Addressed::Other;
-        }
-        if node == &self.rx[0].node {
-            return Addressed::Stream { direction: Direction::Rx, k: 0 };
-        }
-        if node == &self.tx[0].node {
-            return Addressed::Stream { direction: Direction::Tx, k: 0 };
-        }
-        Addressed::Other
+    /// one of its streams, or something else. The judgement is `ezsdr_radio::addressed`'s
+    /// one function, shared with the UHD Module.
+    fn addressed(&self, node: Option<&ResourceId>) -> ezsdr_radio::Addressed {
+        ezsdr_radio::addressed(
+            &self.instance.id,
+            node,
+            self.profile.is_layout(),
+            self.rx.first().map(|stream| &stream.node),
+            self.tx.first().map(|stream| &stream.node),
+            |direction| match direction {
+                Direction::Rx => self.rx.len(),
+                Direction::Tx => self.tx.len(),
+            },
+        )
     }
 
     /// Whether `key` is a configuration key of this instance's key set (RM-5, RM-27).
@@ -1892,15 +1854,15 @@ impl MockRadio {
         } else if self.profile.is_layout() {
             // RM-25, RM-27: a layout instance's `cold` change never takes effect before a
             // `cold` change the instance received earlier, of whatever direction, stream or
-            // line, nor before a receive stream's start; one so floored is late (UC-2).
-            let asked = requested_tick.unwrap_or(now);
+            // line, nor before a receive stream's start; one so floored is late (UC-2). The
+            // judgement is `ezsdr_radio::timeline`'s one function, shared with the UHD
+            // Module (item 11).
             let direction = key_direction(&key);
-            let start = if direction == Some(Direction::Rx) && self.started { self.start_tick.unwrap_or(i64::MIN) } else { i64::MIN };
-            let floor = self.updates.iter().filter(|(_, update)| update.class == UpdateClass::Cold).map(|((effective, _), _)| *effective).max();
-            let base = asked.max(now).max(start);
-            let e = floor.map_or(base, |floor| base.max(floor));
-            if asked < now || e > asked {
-                self.emit_event("", ezsdr_radio::kinds::LATE_COMMAND, Severity::Warning, late(asked, e), TimePoint::new(root, now))?;
+            let start = (direction == Some(Direction::Rx) && self.started).then_some(self.start_tick).flatten();
+            let floor = self.updates.iter().filter(|(_, update)| update.class == UpdateClass::Cold).map(|((effective, _), _)| *effective);
+            let (e, is_late) = timeline::layout_instant(requested_tick, now, start, floor);
+            if is_late {
+                self.emit_event("", ezsdr_radio::kinds::LATE_COMMAND, Severity::Warning, late(requested_tick.unwrap_or(now), e), TimePoint::new(root, now))?;
             }
             e
         } else {

@@ -212,6 +212,8 @@ The comparison covers clock lists, blocks `(domain, first, len, flags, lost)`, `
 - *More FakeDevice end-to-end tests.* They are wall-clock bound and fail under load (E15).
 - *A model checker.* It is out of proportion for a 40-line function.
 
+**Record (2026-10-19, stage 1b-4c).** The floor of a layout instance is `ezsdr_radio::timeline::layout_instant`, one function MockRadio and the UHD Module both call (item 11); the third layer's stream dimension and the layout's stream 0 are covered there by `crates/ezsdr-acceptance/tests/parity.rs`. The stream dimension of this harness — per-stream threads, nodes and targets, and RM-34's move — is stage 1b-4d's and 1b-4e's.
+
 ## KJ-1 — UC-3 and TM-13c
 
 UC-3 restarts a function only if it was running, and the Vocabulary places the end and the new origin. TM-13c starts a new clock only for a running stream. The `UpdateClass::Cold` doc comment and five schema descriptions follow. This replaces KI-1, and no Kernel behaviour changes. The text is in Appendix B.

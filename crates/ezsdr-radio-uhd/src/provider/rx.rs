@@ -21,6 +21,7 @@ use serde_json::json;
 
 use super::control::Planned;
 use super::core::{stream_key, Clock, Core, Streams, lock};
+use super::mode::channel_list;
 use crate::device::{Dir, Iq, RxRecv};
 use crate::host::HostClock;
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
@@ -54,7 +55,7 @@ struct Stream {
     /// Its clock's handle until the clock is registered, at its first block (RM-25).
     handle: Option<SampleClockHandle>,
     config: Config,
-    channels: usize,
+    channels: Channels,
     expected: i64,
     /// The distinct reports since the last block, in arrival order (UR-17…UR-19).
     pending: Vec<Pending>,
@@ -72,11 +73,11 @@ struct Stream {
 }
 
 impl Stream {
-    fn new(clock: Clock, handle: SampleClockHandle, channels: usize, not_before: Option<i64>) -> Stream {
+    fn new(clock: Clock, handle: SampleClockHandle, channels: Channels, not_before: Option<i64>) -> Stream {
         Stream {
             clock,
             handle: Some(handle),
-            config: Config { channels: Channels::first(channels as u32), ratio: Rational::new(clock.n as u64, 1).expect("a positive ratio") },
+            config: Config { channels, ratio: Rational::new(clock.n as u64, 1).expect("a positive ratio") },
             channels,
             expected: 0,
             pending: Vec::new(),
@@ -124,8 +125,9 @@ pub(crate) struct Rx {
     stream: Option<Stream>,
     /// The earliest origin of a planned segment not yet begun.
     from: i64,
-    /// The channel count the streamer is open for.
-    opened: usize,
+    /// The channel set the streamer is open for (RM-29): a segment whose set differs is
+    /// opened again.
+    opened: Channels,
     pool: HostPool,
     /// The device's host clock (plan 30 §4.3): the UR-29 silence monitor, the idle wait and
     /// the stall run on it; `started` is real, for the `host_delay_ms` diagnostic only.
@@ -146,9 +148,9 @@ const RECV_TIMEOUT: Wall = Wall::from_millis(100);
 impl Rx {
     /// uhd-rx for stream `k`, with the stream `start` started at T0, its clock declared
     /// (UR-15).
-    pub fn new(core: Arc<Core>, k: usize, cmds: Receiver<RxCmd>, first: Option<(SampleClockHandle, usize, i64)>, stall: Option<(Wall, Wall)>) -> Rx {
-        let channels = first.as_ref().map_or(0, |(_, channels, _)| *channels);
-        let pool = HostPool::new(core.block_len * channels.max(1) * 8);
+    pub fn new(core: Arc<Core>, k: usize, cmds: Receiver<RxCmd>, first: Option<(SampleClockHandle, Channels, i64)>, stall: Option<(Wall, Wall)>) -> Rx {
+        let channels = first.as_ref().map_or(Channels::first(0), |(_, channels, _)| *channels);
+        let pool = HostPool::new(core.block_len * channels.count().max(1) as usize * 8);
         let stream = first.map(|(handle, channels, t0)| {
             let clock = Clock { domain: handle.id(), origin: t0, n: handle.root_ticks_per_tick().num() as i64 };
             Stream::new(clock, handle, channels, None)
@@ -265,8 +267,8 @@ impl Rx {
         }
     }
 
-    /// RM-25, UR-17: the next planned segment begins: the streamer reopened if its channel
-    /// count changed, the direction configured with the configuration in effect at its
+    /// RM-25, UR-17: the next planned segment begins: the streamer reopened when its
+    /// channel set changed, the direction configured with the configuration in effect at its
     /// origin — unless uhd-control did both for an enable from no stream — and a timed start
     /// issued there. A configuration the device refuses halts the stream: uhd-rx books the
     /// refusal, and the plan it then reads may begin the next segment earlier (RM-25).
@@ -276,14 +278,25 @@ impl Rx {
             let mut streams = lock(&self.core.streams);
             let next = streams.planned(key).into_iter().find(|planned| planned.segment.origin >= self.from);
             streams.stream_mut(key).idle = next.is_none();
+            // uhd-control's enable from no stream tried to open the streamer (UR-13): the owner's
+            // record of its set may be wrong, so this segment opens it again unless uhd-control
+            // configured it.
+            if std::mem::take(&mut streams.stream_mut(key).stale) {
+                self.opened = Channels::first(0);
+            }
             next
         };
         let Some(next) = next else { return false };
-        let (origin, channels) = (next.segment.origin, next.channels());
+        let (origin, channels) = (next.segment.origin, next.set());
         let configured = if next.configured {
             Ok(())
         } else {
-            let reopened = if channels != self.opened { self.core.device.rx_open(self.k, &(0..channels).collect::<Vec<usize>>()) } else { Ok(()) };
+            let reopened = if channels != self.opened {
+                let list = channel_list(channels);
+                self.core.device.rx_open(self.k, &list).and_then(|()| self.core.check_rates(Dir::Rx, list[0]))
+            } else {
+                Ok(())
+            };
             reopened.and_then(|()| next.configure(&self.core, Dir::Rx).map(|_| ()))
         };
         if let Err(error) = configured {
@@ -292,7 +305,7 @@ impl Rx {
             if !refused {
                 self.from = origin.saturating_add(1);
             }
-            self.opened = 0;
+            self.opened = Channels::first(0);
             self.core.device_failed(None, "update_parameter", &error);
             return true;
         }
@@ -302,12 +315,12 @@ impl Rx {
             self.core.device_failed(None, "update_parameter", &error);
             return true;
         }
-        let declared = self.core.id.child(Dir::Rx.name()).map_err(|e| e.to_string())
-            .and_then(|stream| self.core.clocks.declare_sample_clock(stream, self.core.root, next.segment.config.ratio).map_err(|e| e.to_string()));
+        let stream = self.core.mode.stream_node(&self.core.id, Dir::Rx, self.k);
+        let declared = self.core.clocks.declare_sample_clock(stream, self.core.root, next.segment.config.ratio).map_err(|e| e.to_string());
         match declared {
             Ok(handle) => {
                 let clock = Clock { domain: handle.id(), origin, n: next.n() };
-                self.pool = HostPool::new(self.core.block_len * channels.max(1) * 8);
+                self.pool = HostPool::new(self.core.block_len * channels.count().max(1) as usize * 8);
                 self.stream = Some(Stream::new(clock, handle, channels, self.last_stop.take()));
                 lock(&self.core.streams).stream_mut(key).delivered = Some((origin, next.segment.config, 0));
                 self.last_samples = self.host.now();
@@ -315,7 +328,7 @@ impl Rx {
             }
             Err(error) => self.core.command_rejected(None, "update_parameter", &format!("UR-25: {error}")),
         }
-        self.core.timing(json!({ "what": "rx_segment", "origin": origin, "channels": channels, "at": self.core.now() }));
+        self.core.timing(json!({ "what": "rx_segment", "origin": origin, "channels": channels.count(), "at": self.core.now() }));
         true
     }
 
@@ -414,7 +427,7 @@ impl Rx {
             RxRecv::LateCommand => {
                 // UR-17: the device missed the timed start; the origin stays. The new start
                 // waits the profile's start lead from now (spec 20, VF-6).
-                let restart = match ezsdr_radio::timeline::lattice(now.saturating_add(self.core.ticks(ezsdr_radio::timeline::start_lead_ns(&self.core.description.timing, Direction::Rx))), stream.config.ratio) {
+                let restart = match ezsdr_radio::timeline::lattice(now.saturating_add(self.core.ticks(ezsdr_radio::timeline::start_lead_ns(&self.core.mode.timing(), Direction::Rx))), stream.config.ratio) {
                     Ok(restart) => restart,
                     Err(error) => return self.core.command_rejected(None, "start", &format!("UR-17: {error}")),
                 };
@@ -425,7 +438,7 @@ impl Rx {
                 })
                 .expect("a payload");
                 stream.report(Pending::MissedStart);
-                self.core.emit(&self.core.rx_id, kinds::LATE_COMMAND, Severity::Warning, payload);
+                self.core.emit(&self.core.stream_node(Dir::Rx, self.k), kinds::LATE_COMMAND, Severity::Warning, payload);
                 self.core.timing(json!({ "what": "rx_restart", "requested": stream.start, "at": restart }));
                 if let Err(error) = self.core.device.rx_start(self.k, restart) {
                     self.core.device_failed(None, "start", &error);
@@ -517,7 +530,7 @@ impl Rx {
                         };
                 }
             }
-            let channels = stream.channels.max(1);
+            let channels = stream.channels.count().max(1) as usize;
             stream.expected = k + len;
             let at = TimePoint::new(clock.domain, expected);
             let lost_n = lost.unwrap_or(0);
@@ -536,7 +549,7 @@ impl Rx {
                     }
                     Pending::Alignment => {
                         let payload = serde_json::to_value(AlignmentErrorPayload { lost: lost_n }).expect("a payload");
-                        self.core.emit_at(&self.core.rx_id, kinds::ALIGNMENT_ERROR, Severity::Error, payload, at);
+                        self.core.emit_at(&self.core.stream_node(Dir::Rx, self.k), kinds::ALIGNMENT_ERROR, Severity::Error, payload, at);
                     }
                     Pending::MissedStart => {}
                 }
@@ -653,7 +666,7 @@ mod tests {
             direction: Direction::Rx,
             origin: 0,
             config,
-            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Rx)),
+            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.mode.timing(), Direction::Rx)),
             call: core.block_len as i64,
             allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
         }));
@@ -661,7 +674,7 @@ mod tests {
         // No `Provider::stop` comes unless a test sends it.
         std::mem::forget(to_rx);
         core.device.rx_open(0, &(0..channels).collect::<Vec<usize>>()).unwrap();
-        (Rx::new(core.clone(), 0, cmds, Some((handle, channels, 0)), None), clock)
+        (Rx::new(core.clone(), 0, cmds, Some((handle, Channels::first(channels as u32), 0)), None), clock)
     }
 
     /// The receive plan set to segments at 1 MS/s, one channel, each `(origin, cut, by)`,
@@ -1107,6 +1120,26 @@ mod tests {
     }
 
     #[test]
+    fn ur_13_a_stale_receive_streamer_is_opened_again() {
+        // UR-13 (Sol re-review 1, 2): uhd-control's enable from no stream tried to open the
+        // streamer, so it marks the stream stale, and the next segment opens the streamer again
+        // even though the owner records the same set as open. The rate comparison of that open is
+        // covered by the `ur_13_*` tests of uhd-rx. The mark is set directly here, as uhd-control
+        // sets it (`control.rs`).
+        let (core, device, _, _) = super::super::test_support::rig();
+        let (mut rx, _) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        // The helper opened the set and records it: `begin` reopens it only because of the mark.
+        let opens = || device.calls().iter().filter(|c| c.starts_with("rx_open ")).count();
+        let before = opens();
+        lock(&core.streams).stream_mut(stream_key(Dir::Rx, 0)).stale = true;
+        book(&core, ms(20), 2, rate(1_000_000));
+        assert!(rx.begin());
+        assert_eq!(opens() - before, 1, "{:?}", device.calls());
+        assert!(!lock(&core.streams).stream(stream_key(Dir::Rx, 0)).stale, "the mark is taken");
+    }
+
+    #[test]
     fn ur_25_a_refused_segment_is_booked_by_uhd_rx() {
         // RM-25: when the device refuses a segment's configuration, uhd-rx books the change as
         // refused itself, which halts the stream, and reads the plan made so at once: a
@@ -1221,7 +1254,7 @@ mod tests {
             direction: Direction::Tx,
             origin: 0,
             config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
-            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Tx)),
+            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.mode.timing(), Direction::Tx)),
             call: core.block_len as i64,
             allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
         })

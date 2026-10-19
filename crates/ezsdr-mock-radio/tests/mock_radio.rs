@@ -330,16 +330,14 @@ fn mr_02_from_binding_refusals() {
     assert!(MockRadio::from_binding(&b).err().unwrap().message.starts_with("MR-2: "));
     // The layout's own refusals: an element that is not four fields, a timekeeper other
     // than 0, an unknown board, a slot other than A or B, a front end other than 0, a
-    // layout that is not a prefix of UHD's default channel order (slot A at position 0,
-    // slot B at position 1), and two board kinds (design 33 D5).
+    // repeated `(slot, front end)` pair, and two board kinds (design 33 D5). Any slot
+    // order is the channel order (RM-28): a non-prefix layout is accepted.
     for (name, element) in [
         ("rx", "0:A:ubx"),
         ("rx", "1:A:ubx:0"),
         ("rx", "0:A:sbx:0"),
         ("rx", "0:C:ubx:0"),
         ("rx", "0:A:ubx:1"),
-        ("rx", "0:B:ubx:0"),
-        ("tx", "0:B:ubx:0"),
     ] {
         b = binding("x3xx");
         b.selector.insert(Ident::parse(name).unwrap(), Value::List(vec![Scalar::from(element)]));
@@ -347,20 +345,19 @@ fn mr_02_from_binding_refusals() {
     }
     b = binding("x3xx");
     b.selector.insert(Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:A:ubx:0")]));
-    assert!(MockRadio::from_binding(&b).err().unwrap().message.contains("position 1 names slot A"));
+    assert!(MockRadio::from_binding(&b).err().unwrap().message.contains("position 1 repeats"), "the repeated pair is refused");
     b = binding("x3xx");
     b.selector.insert(Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:B:ubx:0")]));
-    assert!(MockRadio::from_binding(&b).err().unwrap().message.contains("position 0 names slot B"));
+    assert!(MockRadio::from_binding(&b).is_ok(), "slot B at position 0 is the channel order");
     b = binding("x3xx");
     b.selector.insert(Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:B:ubx:0")]));
-    assert!(MockRadio::from_binding(&b).err().unwrap().message.contains("position 0 names slot B"));
+    assert!(MockRadio::from_binding(&b).is_ok(), "slot B at position 0 is the channel order");
     b = binding("x3xx");
     b.selector.insert(Ident::parse("rx").unwrap(), Value::List(vec![
-        Scalar::from("0:A:ubx:0"),
         Scalar::from("0:B:ubx:0"),
         Scalar::from("0:A:ubx:0"),
     ]));
-    assert!(MockRadio::from_binding(&b).err().unwrap().message.contains("position 2 names slot A"));
+    assert!(MockRadio::from_binding(&b).is_ok(), "a non-prefix layout is the channel order");
     b = binding("x3xx");
     b.selector.insert(Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:obx:0")]));
     assert!(MockRadio::from_binding(&b).err().unwrap().message.contains("one device carries one kind"));

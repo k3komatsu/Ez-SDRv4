@@ -10,31 +10,29 @@
 - **凍結前の改修（項目1〜8）は完了**（[plan/maintenance/24-prefreeze-audit.md](plan/maintenance/24-prefreeze-audit.md)）．最後の項目8（spec 01〜06 を DA-1 形式に）は 2026-10-14 に完了（[計画31](plan/maintenance/31-item8-kernel-specs.md) §10）．その前の保守の記録は各計画ファイル（Phase 7 クローズから spec 20 までは [audits-2026-10.md](plan/maintenance/audits-2026-10.md)）．
 - **spec 22 の DA-3 手順2（spec 07・09・18 を DA-1 形式に）は 2026-10-15 に完了**（spec 22 の Status 行）．残る手順3・5 と文書監査の残りは §3．
 - **Phase 8（Mock ↔ X310 parity）は Gate P 受理**（owner 2026-10-17）：計画 [plan/phase8/00-overview.md](plan/phase8/00-overview.md)（判断 P1〜P6，段階，bench BP0〜BP5，出口条件），設計 [33-channels-and-streams.md](plan/phase8/33-channels-and-streams.md)（channel と stream，混在 board，`x3xx`，Kernel の変更は `KeyDecl` の番号付き segment だけ）．レビューと調査は `plan/phase8/reviews/`・`research/`．
-- **Phase 8 段階1a，1b-1，1b-2a，1b-2b，1b-3a，1b-3b，1b-3c，1b-4a，1b-4b は完了**（2026-10-17〜19）：1a は X3xx の description を `ezsdr_radio::x3xx` に1か所（profile `x3xx` 0.1.0，rate の格子，CBX の `random`，方向別の start lead），1b-1 は `KeyDecl` の番号の付く segment（SB-2a），1b-2a は `radio` 語彙の channel・stream の key と layout の builder（`ezsdr_radio::channels`，spec 07 RM-27〜RM-33），1b-2b は timeline の channel の集合と D3 の移動（`timeline::Lines`，RM-34）と D14，1b-3a は MockRadio の内部を stream ごとの状態と `Lines` に組み直し（挙動は不変），1b-3b は MockRadio が selector の `keys: "channel"` で新しい key を使う，1b-3c はその instance に channel の移動（RM-34）と SimulationChannel の論理 channel 番号・channel ごとの gain/frequency/phase を足した（始まった segment は全 channel の untimed tune，MR-34），1b-4a は UHD Module の device 境界を stream の番号・subdev spec・rate の集合・serial・antenna の read-back に広げた（`UhdRadio` の挙動は不変），1b-4b は `UhdRadio` の内部を stream ごとの状態・`timeline::Lines`・stream の列に組み直した（挙動は不変）．UHD Module はまだ新しい key を使わない．記録は [計画](plan/phase8/00-overview.md) §8．
+- **Phase 8 段階1a，1b-1，1b-2a，1b-2b，1b-3a，1b-3b，1b-3c，1b-4a，1b-4b，1b-4c は完了**（2026-10-17〜19）：1a は X3xx の description を `ezsdr_radio::x3xx` に1か所（profile `x3xx` 0.1.0，rate の格子，CBX の `random`，方向別の start lead），1b-1 は `KeyDecl` の番号の付く segment（SB-2a），1b-2a は `radio` 語彙の channel・stream の key と layout の builder（`ezsdr_radio::channels`，spec 07 RM-27〜RM-33），1b-2b は timeline の channel の集合と D3 の移動（`timeline::Lines`，RM-34）と D14，1b-3a は MockRadio の内部を stream ごとの状態と `Lines` に組み直し（挙動は不変），1b-3b は MockRadio が selector の `keys: "channel"` で新しい key を使う，1b-3c はその instance に channel の移動（RM-34）と SimulationChannel の論理 channel 番号・channel ごとの gain/frequency/phase を足した（始まった segment は全 channel の untimed tune，MR-34），1b-4a は UHD Module の device 境界を stream の番号・subdev spec・rate の集合・serial・antenna の read-back に広げた（`UhdRadio` の挙動は不変），1b-4b は `UhdRadio` の内部を stream ごとの状態・`timeline::Lines`・stream の列に組み直した（挙動は不変），1b-4c は UHD Module の `keys: "channel"` のモード（方向ごとに stream 0）と open のときの検査（subdev spec，front end，serial，rate の集合）を入れた．記録は [計画](plan/phase8/00-overview.md) §8．
 - 実装：13 crate（`crates/`），schema（`schemas/`），Python package（`python/ezsdr`）．確認の手順は §5．
 - open issue は4件：#51，#56，#59，#62（§3）．
 
 ## 2. 次にすること
 
 1. **開発 PC の移行の残り**（§6.1）：X300 の接続確認と，ホストの NIC・sysctl 設定（owner が sudo で）．
-2. **Phase 8 の段階 1b-4c〜4d**（[設計 33](plan/phase8/33-channels-and-streams.md) §5）．
-   - **4c**：selector の `keys: "channel"` のモード．
-     - 中身：layout からの subdev spec，open 時の検査（D5．rate の集合は spec の後），同じ serial の拒否，channel ごとの設定と antenna の記録（D16），D14 の宛先，instance 全体の床．
-     - MockRadio の MR-34（始まった segment は全 channel の untimed tune）が依る UR-25 と一致すること．
-   - **4d**：channel の移動と，複数 stream の VH-8 harness．
-   - **手順**：改めた AGENTS.md §9 で進める．リスクのある段階は，指示書に操作の順序を書き，実装役がテスト計画を先に書き，Sol が先に見る．
-     - 4b での最初の適用の数え方：[reviews/1b4b-opus.md](plan/phase8/reviews/1b4b-opus.md)．割に合うかは 4c・4d と合わせて判断する．
-     - 4b の形をひな形にする：テスト計画は順序ごとに DeepSeek を 1 本，4 本ずつ流す（`~/.cache/ezsdr-fixes/2026-10-18-phase8-1b4b/run-plan.sh`）．
+2. **Phase 8 の段階 1b-4d-1・1b-4d-2・1b-4e**（[設計 33](plan/phase8/33-channels-and-streams.md) §5 の 1b-4 行「1b-4c で 1b-4d へ送るもの」(1)〜(12) と「分け方」）．
+   - **4d-1**：最初に (11)（three strikes）：stream ごとに device が実際に持つもの（開いている集合と最後に当てた設定の版）を 1 記録にし，device を操作する thread を lock の中で押さえる．骨子と最初の回帰テストは [reviews/1b4c-opus.md](plan/phase8/reviews/1b4c-opus.md)．その後に stream ごとの thread・node．
+   - **4d-2**：event と Manifest の plan の stream 番号．**4e**：moves（RM-34）と複数 stream の VH-8 harness．
+   - **大きさ**（owner 2026-10-19）：1 段階は本体とテストで約 1,500 行．指示書でテストの繰り返し（Manifest の section を引く式，拒否の理由，device の準備）を helper にさせ，テスト計画は順序ごとに assert を 1〜2 個に絞る．
+   - **手順**：AGENTS.md §9．計画を先に書く手順の評価は 4b・4c の記録（[1b4b-opus](plan/phase8/reviews/1b4b-opus.md)，[1b4c-opus](plan/phase8/reviews/1b4c-opus.md)）に続けて 4d で判断する．
    - **持ち越し**：
-     - [設計 33](plan/phase8/33-channels-and-streams.md) §5 の 1b-4 行「1b-4c へ送るもの」(1)〜(11)．
      - [1b-4a の修正の報告](plan/phase8/reviews/1b4a-fix-reports.md) の §9（修正の回 1・2）．
      - [1b-3c の報告](plan/phase8/reviews/1b3c-report.md) §10．
      - [1b-3c の裁定](plan/phase8/reviews/1b3c-opus.md) の minor 1（RX と TX の同じ origin の引き順のテスト，1b-5）．
+     - 1b-4c の O5：front end の照合が 2 つのモードの腕に分かれている（1b-5 で畳む）．
    - **その後**：
-     - 1b-5（切り替え）．
+     - 1b-5（切り替え．今の key のモードを消して畳む）．
      - 2（#51 の設計メモ→#51・D2，#62 と D9 の DDC/DUC の release の規則，#59，A2 のテスト）．
      - 3（測定記録・比較テスト・測定スイート・ホスト設定の script）．
-   - **実装役**：DeepSeek V4.1 Flash（`opencode-go/deepseek-v4.1-flash#max`．owner 2026-10-18：OpenCode-Go のサブスクを先に使う）．セルフレビューは Haiku 5.5（`anthropic/claude-haiku-5-5#high`）．
+     - 段階 1 が終わったら，crate ごとの冗長の棚卸しを 1 回（ponytail の audit と Opus のレビュー，owner 2026-10-19）．
+   - **実装役**（owner 2026-10-19）：Claude Code のサブエージェント（Haiku 5.5，`model: haiku`）．枠の消費を回ごとに owner に報告する．セルフレビューは DeepSeek（`opencode-go/deepseek-v4.1-flash#max`）．OpenCode2・Claude Code・Codex には ponytail が入っている．
 3. **実機は owner が準備中**（2026-10-14：「全部準備できます」．時間がかかる）．owner が揃ったと言うまで実機は動かさない．用意できる機材（2026-10-16）：X300 × 2，OBX，UBX（壊れているかも），CBX，LFTX・LFRX・BasicTX・BasicRX（どれも2枚ずつ可，ただし他の実験から借りるので手間）．揃ったら最初に BP0（probe，UBX が動くか，2台目の FPGA image の版と HG/XG）．各段階で要るもの（根拠：Vision §67〈`design/vision/11-boundaries-invariants-and-roadmap.md:317-337`〉，`plan/phase7/00-overview.md:103`「One device is enough for §59's claim」）：
    - **8**：1台．Phase 7 と同じ X300（X310 の代わりで可）＋OBX 1枚のループバック（TX/RX → 30 dB 以上の減衰器 → RX2），10 GbE の Linux PC．外部 10 MHz/PPS 不要．X300 は 2026-10-01 から未接続なので，つなぎ直して `uhd_usrp_probe` で確認する（§6）．
    - **8b**：USRP 2台（2台目は X310/X300 なら同じ driver と profile．USRP2 は不要〈owner〉），10 MHz/PPS の分配器（OctoClock など．X3xx の背面から配れるかは未確認），2台の時刻差を測る RF 配線（1つの信号を分配して両方の RX へ，減衰器付き．推測）．2台目の 10 GbE は usrp-lnx03 の X710 の空きポート（§6.2）が使える．

@@ -34,6 +34,16 @@ impl Dir {
     }
 }
 
+impl From<ezsdr_kernel::stream::Direction> for Dir {
+    /// The device direction of a Stream Contract direction (RM-29).
+    fn from(direction: ezsdr_kernel::stream::Direction) -> Dir {
+        match direction {
+            ezsdr_kernel::stream::Direction::Rx => Dir::Rx,
+            ezsdr_kernel::stream::Direction::Tx => Dir::Tx,
+        }
+    }
+}
+
 /// What to change on one channel; `None` leaves a setting alone (UR-2).
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Settings {
@@ -318,6 +328,15 @@ pub enum FakeFault {
     /// `set_sources` fails as the X300 does when its reference PLL does not lock within
     /// UHD's 30 s (`x300_mb_controller.cpp:243–255`), with UHD's own text.
     ReferenceDoesNotLock,
+    /// The `nth` untimed `apply` that names the antenna `claimed` (0-based) makes the
+    /// channel read that back as `applied` — a front end whose getter disagrees with its
+    /// setter (UR-33; design 33 D16's read-back check).
+    WrongAntenna {
+        /// The antenna asked for.
+        claimed: &'static str,
+        /// The antenna the read-back reports instead.
+        applied: &'static str,
+    },
     /// From this device time on the link is dead but no call says the device is lost:
     /// control calls wait 100 ms and fail as UHD's `op_timeout` does (`UHD_ERROR_EXCEPT`,
     /// not lost), receives time out, sends take nothing (Review S, TG-S1).
@@ -328,6 +347,12 @@ pub enum FakeFault {
     /// From this device time on, every `ref_locked` fails, not lost, while the time reads
     /// succeed (Review T, NB-T1).
     RefLockedFails(Duration),
+    /// The first `rx_open` is refused, once: uhd-control's enable from no stream fails at its
+    /// open, before any rate comparison (UR-25).
+    RxOpenFails,
+    /// The first receive `apply` is refused, once: uhd-control's configuration of an enable
+    /// from no stream fails after its open (UR-13).
+    RxApplyFails,
 }
 
 /// How [`FakeDevice`] behaves (UR-33).
@@ -348,8 +373,10 @@ pub struct FakeConfig {
     /// One board per slot, each direction (at most two slots), the name without ` RX` or
     /// ` TX`, such as `UBX` or `CBX-120`; a Basic/LF board has its own front ends (UR-33).
     pub front_ends: Vec<&'static str>,
-    /// The motherboard's serial (UR-33; design 33 D5 tells two bindings of one apart).
-    pub serial: &'static str,
+    /// The motherboard's serial (UR-33; design 33 D5 tells two bindings of one apart). The
+    /// default is one value per `FakeDevice`, so two devices of a test binary never look
+    /// like one device (UR-33).
+    pub serial: String,
     /// Whether `rates` reports UHD's pre-chain answer `[(1.0, 1.0, 0.0)]` for a channel no
     /// streamer has opened yet (INFERRED, design 33 D5; BP0 measures the hardware), instead
     /// of the profile's rate grid.
@@ -366,6 +393,11 @@ pub struct FakeConfig {
 
 impl Default for FakeConfig {
     fn default() -> Self {
+        // UR-33: one serial per instance, so that two default `FakeDevice`s of one test
+        // binary are two devices (a test binary's tests run in parallel; design 33 D5
+        // refuses a second binding of one live serial).
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let serial = format!("FAKE{:07}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         FakeConfig {
             master_clock_rate: 200_000_000,
             drift_ppm: 0.0,
@@ -374,7 +406,7 @@ impl Default for FakeConfig {
             loopback_delay_samples: 0,
             faults: Vec::new(),
             front_ends: vec!["UBX", "UBX"],
-            serial: "FAKE0001",
+            serial,
             rates_before_open: false,
             rx_latency: Duration::ZERO,
             rx_packet: None,
@@ -1019,6 +1051,12 @@ impl Device for FakeDevice {
             return Err(DeviceError::failed(format!("fake: no {} channel {chan}", dir.name())));
         }
         st.calls.push(format!("apply {} {chan} {} at=-", dir.name(), describe(s)));
+        if dir == Dir::Rx {
+            if let Some(index) = self.config.faults.iter().position(|f| *f == FakeFault::RxApplyFails).filter(|i| !st.fired[*i]) {
+                st.fired[index] = true;
+                return Err(DeviceError::failed("fake: scripted refusal of the first receive apply"));
+            }
+        }
         if let Some(rate) = s.rate {
             let seen = st.rates_seen.iter().filter(|seen| **seen == rate).count();
             st.rates_seen.push(rate);
@@ -1038,6 +1076,14 @@ impl Device for FakeDevice {
         }
         if let Some(antenna) = &s.antenna {
             channel.antenna = antenna.clone();
+            // UR-33 (design 33 D16's read-back): a scripted front end whose getter answers
+            // another name than the one it was set to.
+            if let Some(wrong) = self.config.faults.iter().find_map(|f| match f {
+                FakeFault::WrongAntenna { claimed, applied } if *claimed == antenna.as_str() => Some(*applied),
+                _ => None,
+            }) {
+                channel.antenna = wrong.to_owned();
+            }
         }
         // The antenna read back after an untimed change that named one (UR-2, design 33 D16).
         let antenna = s.antenna.as_ref().map(|_| channel.antenna.clone());
@@ -1054,6 +1100,10 @@ impl Device for FakeDevice {
         // UR-25, as `UhdDevice` does: this stream's old streamer goes before the new one is
         // made, so a refused reopen leaves the stream with none.
         st.rx.remove(&stream);
+        if let Some(index) = self.config.faults.iter().position(|f| *f == FakeFault::RxOpenFails).filter(|i| !st.fired[*i]) {
+            st.fired[index] = true;
+            return Err(DeviceError::failed("fake: uhd_usrp_get_rx_stream: scripted refusal of the first open"));
+        }
         // UHD's graph refuses a second streamer on one front end — the radio block's output
         // port is already connected (`graph.cpp:179-184`, "Attempting to reconnect output
         // port!"; UR-33) —, the channel twice in one streamer included.

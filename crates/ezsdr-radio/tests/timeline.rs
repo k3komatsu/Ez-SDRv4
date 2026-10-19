@@ -1334,3 +1334,29 @@ fn check(stream: &Stream, planned: &[Segment], seed: u64) {
         }
     }
 }
+
+#[test]
+fn rm_25_the_layout_instant_is_floored_at_every_earlier_cold_change() {
+    // RM-25 (design 33 D5, item 11): the one place the layout instance's floor lives. The
+    // `e` is what the change takes effect at, and `late` says whether the requested instant
+    // held; `earlier` is the effective instants of the instance's still-pending `cold`
+    // changes, whichever direction, stream or line.
+    type Case = (Option<i64>, i64, Option<i64>, &'static [i64], i64, bool);
+    let cases: [Case; 8] = [
+        (Some(10), 0, None, &[], 10, false),
+        (Some(10), 0, None, &[50], 50, true),
+        (None, 5, None, &[50], 50, true),
+        (Some(10), 20, None, &[], 20, true),
+        (Some(10), 0, Some(30), &[], 30, true),
+        (Some(30), 0, Some(30), &[], 30, false),
+        (Some(10), 0, None, &[50, 20], 50, true),
+        (Some(50), 0, None, &[10], 50, false),
+    ];
+    for (at, now, start, earlier, e, late) in cases {
+        assert_eq!(
+            ezsdr_radio::timeline::layout_instant(at, now, start, earlier.iter().copied()),
+            (e, late),
+            "at={at:?} now={now} start={start:?} earlier={earlier:?}"
+        );
+    }
+}
