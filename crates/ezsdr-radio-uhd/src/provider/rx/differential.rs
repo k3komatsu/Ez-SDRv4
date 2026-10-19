@@ -331,9 +331,6 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
             if value != "now" {
                 problems.push(format!("a timed stop: {call}"));
             }
-        } else if call.starts_with("apply_refused ") {
-            // UR-12's refusal: uhd-rx reopens the streamer for the next segment.
-            opened = 0;
         } else if call.starts_with("rx_open ") {
             let channels: usize = value.parse().unwrap();
             if channels == opened {
@@ -505,7 +502,7 @@ impl World {
                 let mut streams = lock(&core.streams);
                 let stream = booked_stream(Dir::Rx);
                 if matches!(item.kind, Kind::Cold(_) | Kind::Start) {
-                    streams.stream_mut(stream).configs.insert(item.seq, (Arc::new(ColdConfig::new(Settings::default())), false));
+                    streams.stream_mut(stream).configs.insert(item.seq, Arc::new(ColdConfig::new(Settings::default())));
                 }
                 assert!(streams.book(&core, stream, item), "booked");
                 self.booked += 1;
@@ -778,6 +775,7 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
     }
     // `prepare` opened the streamer for one channel, `start` started it at T0 (UR-15).
     device.rx_open(0, &[0]).unwrap();
+    lock(&core.streams).record_open(crate::provider::core::stream_key(Dir::Rx, 0), Some(Channels::first(1)));
     device.rx_start(0, T0).unwrap();
     let handle = core.clocks.declare_sample_clock(core.id.child("rx").unwrap(), core.root, Rational::new(200, 1).unwrap()).unwrap();
     let mut rx = Rx::new(core.clone(), 0, cmds, Some((handle, Channels::first(1), T0)), None);

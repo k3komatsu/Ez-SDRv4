@@ -21,7 +21,6 @@ use serde_json::json;
 
 use super::control::Planned;
 use super::core::{stream_key, Clock, Core, Streams, lock};
-use super::mode::channel_list;
 use crate::device::{Dir, Iq, RxRecv};
 use crate::host::HostClock;
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
@@ -125,9 +124,6 @@ pub(crate) struct Rx {
     stream: Option<Stream>,
     /// The earliest origin of a planned segment not yet begun.
     from: i64,
-    /// The channel set the streamer is open for (RM-29): a segment whose set differs is
-    /// opened again.
-    opened: Channels,
     pool: HostPool,
     /// The device's host clock (plan 30 §4.3): the UR-29 silence monitor, the idle wait and
     /// the stall run on it; `started` is real, for the `host_delay_ms` diagnostic only.
@@ -160,7 +156,6 @@ impl Rx {
         let now = host.now();
         Rx {
             from: stream.as_ref().map_or(i64::MIN, |stream| stream.clock.origin + 1),
-            opened: channels,
             stream,
             core,
             k,
@@ -272,45 +267,28 @@ impl Rx {
     /// origin — unless uhd-control did both for an enable from no stream — and a timed start
     /// issued there. A configuration the device refuses halts the stream: uhd-rx books the
     /// refusal, and the plan it then reads may begin the next segment earlier (RM-25).
-    fn begin(&mut self) -> bool {
+    pub(super) fn begin(&mut self) -> bool {
         let key = stream_key(Dir::Rx, self.k);
         let next: Option<Planned> = {
             let mut streams = lock(&self.core.streams);
             let next = streams.planned(key).into_iter().find(|planned| planned.segment.origin >= self.from);
             streams.stream_mut(key).idle = next.is_none();
-            // uhd-control's enable from no stream tried to open the streamer (UR-13): the owner's
-            // record of its set may be wrong, so this segment opens it again unless uhd-control
-            // configured it.
-            if std::mem::take(&mut streams.stream_mut(key).stale) {
-                self.opened = Channels::first(0);
-            }
             next
         };
         let Some(next) = next else { return false };
-        let (origin, channels) = (next.segment.origin, next.set());
-        let configured = if next.configured {
-            Ok(())
-        } else {
-            let reopened = if channels != self.opened {
-                let list = channel_list(channels);
-                self.core.device.rx_open(self.k, &list).and_then(|()| self.core.check_rates(Dir::Rx, list[0]))
-            } else {
-                Ok(())
-            };
-            reopened.and_then(|()| next.configure(&self.core, Dir::Rx).map(|_| ()))
-        };
-        if let Err(error) = configured {
+        let origin = next.segment.origin;
+        // The record decides what is opened and configured (UR-13, UR-36).
+        if let Err(error) = self.core.owner_configure(Dir::Rx, self.k, &next) {
             // Not begun. A refusal the plan cannot take — its command pruned — skips the segment.
             let refused = next.segment.by.is_some_and(|by| lock(&self.core.streams).refuse(&self.core, key, by));
             if !refused {
                 self.from = origin.saturating_add(1);
             }
-            self.opened = Channels::first(0);
             self.core.device_failed(None, "update_parameter", &error);
             return true;
         }
         self.from = origin.saturating_add(1);
-        self.opened = channels;
+        let channels = next.set();
         if let Err(error) = self.core.device.rx_start(self.k, origin) {
             self.core.device_failed(None, "update_parameter", &error);
             return true;
@@ -658,6 +636,15 @@ mod tests {
     /// uhd-rx with the stream T0 started at 0, `channels` at 1 MS/s on the 200 MHz root, and
     /// its timeline with this Module's terms.
     fn rx(core: &Arc<Core>, channels: usize) -> (Rx, Clock) {
+        let (rx, clock) = rx_unopened(core, channels);
+        core.device.rx_open(0, &(0..channels).collect::<Vec<usize>>()).unwrap();
+        // The record of an open that arm made (UR-13).
+        lock(&core.streams).record_open(stream_key(Dir::Rx, 0), Some(Channels::first(channels as u32)));
+        (rx, clock)
+    }
+
+    /// The receive side of `rx`, its streamer not opened yet.
+    fn rx_unopened(core: &Arc<Core>, channels: usize) -> (Rx, Clock) {
         let stream = core.id.child("rx").unwrap();
         let handle = core.clocks.declare_sample_clock(stream, core.root, Rational::new(200, 1).unwrap()).unwrap();
         let clock = Clock { domain: handle.id(), origin: 0, n: 200 };
@@ -673,7 +660,6 @@ mod tests {
         let (to_rx, cmds) = std::sync::mpsc::channel();
         // No `Provider::stop` comes unless a test sends it.
         std::mem::forget(to_rx);
-        core.device.rx_open(0, &(0..channels).collect::<Vec<usize>>()).unwrap();
         (Rx::new(core.clone(), 0, cmds, Some((handle, Channels::first(channels as u32), 0)), None), clock)
     }
 
@@ -684,7 +670,7 @@ mod tests {
         let mut streams = lock(&core.streams);
         let key = stream_key(Dir::Rx, 0);
         for by in segments.iter().filter_map(|(_, _, by)| *by) {
-            streams.stream_mut(key).configs.insert(by, (Arc::new(ColdConfig::new(crate::device::Settings::default())), false));
+            streams.stream_mut(key).configs.insert(by, Arc::new(ColdConfig::new(crate::device::Settings::default())));
         }
         let mut line = streams.line(key).expect("the receive line").clone();
         line.plan = segments.iter().map(|&(origin, cut, by)| Segment { origin, cut, config, by }).collect();
@@ -695,7 +681,7 @@ mod tests {
     fn book(core: &Core, e: i64, seq: u64, kind: Kind) {
         let key = stream_key(Dir::Rx, 0);
         let mut streams = lock(&core.streams);
-        streams.stream_mut(key).configs.insert(seq, (Arc::new(ColdConfig::new(crate::device::Settings::default())), false));
+        streams.stream_mut(key).configs.insert(seq, Arc::new(ColdConfig::new(crate::device::Settings::default())));
         assert!(streams.book(core, key, Item { e, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind }));
     }
 
@@ -1120,23 +1106,70 @@ mod tests {
     }
 
     #[test]
-    fn ur_13_a_stale_receive_streamer_is_opened_again() {
-        // UR-13 (Sol re-review 1, 2): uhd-control's enable from no stream tried to open the
-        // streamer, so it marks the stream stale, and the next segment opens the streamer again
-        // even though the owner records the same set as open. The rate comparison of that open is
-        // covered by the `ur_13_*` tests of uhd-rx. The mark is set directly here, as uhd-control
-        // sets it (`control.rs`).
-        let (core, device, _, _) = super::super::test_support::rig();
-        let (mut rx, _) = rx(&core, 1);
+    fn ur_13_a_failed_open_by_the_owner_is_opened_again() {
+        // UR-13 (S7): an open by uhd-rx that fails leaves the stream's set unknown, so the next
+        // segment opens the streamer again, though the owner recorded the same set before.
+        let config = crate::device::FakeConfig { faults: vec![crate::device::FakeFault::RxOpenFails], ..Default::default() };
+        let (core, device, _, _) = super::super::test_support::rig_with(config, vec![link()]);
+        let (mut rx, _) = rx_unopened(&core, 1);
+        rx.stream = None;
         let ms = |n: i64| core.ticks(n * 1_000_000);
-        // The helper opened the set and records it: `begin` reopens it only because of the mark.
         let opens = || device.calls().iter().filter(|c| c.starts_with("rx_open ")).count();
-        let before = opens();
-        lock(&core.streams).stream_mut(stream_key(Dir::Rx, 0)).stale = true;
         book(&core, ms(20), 2, rate(1_000_000));
+        book(&core, ms(40), 3, Kind::Start);
         assert!(rx.begin());
-        assert_eq!(opens() - before, 1, "{:?}", device.calls());
-        assert!(!lock(&core.streams).stream(stream_key(Dir::Rx, 0)).stale, "the mark is taken");
+        assert!(rx.stream.is_none(), "the failed open begins no stream");
+        assert_eq!(opens(), 1, "{:?}", device.calls());
+        assert!(matches!(lock(&core.streams).stream(stream_key(Dir::Rx, 0)).set, crate::provider::core::DeviceSet::Unknown));
+        assert!(rx.begin());
+        assert_eq!(opens(), 2, "the next segment opens the streamer again: {:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_13_a_partly_applied_set_is_configured_whole_without_reopen() {
+        // UR-13 (S25): channel 1 of {0,1} is refused after channel 0 applied. The record keeps
+        // the set open and not configured, so the next segment configures both channels, and no
+        // streamer is opened again.
+        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        let device: Arc<dyn crate::device::Device> = Arc::new(super::super::test_support::ApplyFails::new(inner.clone(), Dir::Rx, Some(1)));
+        let (core, _, _) = super::super::test_support::rig_on(device, vec![link()], 2_000);
+        let (mut rx, _) = rx(&core, 2);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        {
+            let key = stream_key(Dir::Rx, 0);
+            let mut streams = lock(&core.streams);
+            streams.stream_mut(key).configs.insert(2, Arc::new(ColdConfig::new(crate::device::Settings::default())));
+            let kind = Kind::Cold(Config { channels: Channels::first(2), ratio: Rational::new(200, 1).unwrap() });
+            assert!(streams.book(&core, key, Item { e: ms(20), seq: 2, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind }));
+        }
+        book(&core, ms(40), 3, Kind::Start);
+        assert!(rx.begin(), "the partly applied configure is reported");
+        assert!(lock(&core.streams).stream(stream_key(Dir::Rx, 0)).configured.is_none());
+        assert!(rx.begin());
+        let calls = inner.calls();
+        assert_eq!(calls.iter().filter(|call| call.starts_with("rx_open")).count(), 1, "{calls:?}");
+        assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 0")).count(), 2, "the next segment configures the first channel again: {calls:?}");
+        assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 1")).count(), 1, "and the channel the device refused: {calls:?}");
+        assert!(lock(&core.streams).stream(stream_key(Dir::Rx, 0)).configured.is_some_and(|(by, _)| by == 3), "{calls:?}");
+    }
+
+    #[test]
+    fn ur_13_a_failed_configure_is_configured_again_without_reopen() {
+        // UR-13 (S6, the owner's side): a configure that fails leaves the streamer open; the
+        // next segment configures it without a second open.
+        let config = crate::device::FakeConfig { faults: vec![crate::device::FakeFault::RxApplyFails], ..Default::default() };
+        let (core, device, _, _) = super::super::test_support::rig_with(config, vec![link()]);
+        let (mut rx, _) = rx_unopened(&core, 1);
+        rx.stream = None;
+        lock(&core.streams).record_open(stream_key(Dir::Rx, 0), Some(Channels::first(1)));
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        book(&core, ms(20), 2, rate(1_000_000));
+        book(&core, ms(40), 3, Kind::Start);
+        assert!(rx.begin(), "the failed configure is reported");
+        assert!(rx.begin());
+        let calls = device.calls();
+        assert_eq!(calls.iter().filter(|call| call.starts_with("rx_open")).count(), 0, "{calls:?}");
+        assert_eq!(calls.iter().filter(|call| call.starts_with("apply")).count(), 2, "{calls:?}");
     }
 
     #[test]
@@ -1349,8 +1382,8 @@ mod tests {
                 Segment { origin: ms(200), cut: None, config: configs[1], by: Some(2) },
             ];
             streams.lines.insert(key, line);
-            streams.stream_mut(key).configs.insert(1, (Arc::new(ColdConfig::new(crate::device::Settings::default())), false));
-            streams.stream_mut(key).configs.insert(2, (Arc::new(ColdConfig::new(crate::device::Settings::default())), false));
+            streams.stream_mut(key).configs.insert(1, Arc::new(ColdConfig::new(crate::device::Settings::default())));
+            streams.stream_mut(key).configs.insert(2, Arc::new(ColdConfig::new(crate::device::Settings::default())));
         }
         // The cut ends the stream at the untimed stop; the next segment configures alone, the
         // one after it reopens the streamer for its channel count.

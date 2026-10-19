@@ -6354,8 +6354,8 @@
    "id": "P256",
    "name": "an enable from no stream's segment is configured by its owner too (UR-25)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "        streams.stream_mut(stream).configs.insert(seq, (segment_config, from_none));",
-   "new": "        streams.stream_mut(stream).configs.insert(seq, (segment_config, false));",
+   "old": "            streams.record_configured(stream, failure.is_none().then_some((seq, version)));",
+   "new": "            streams.record_configured(stream, None);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_25_an_enable_from_no_stream_configures_once"
@@ -6753,9 +6753,9 @@
   {
    "id": "P296",
    "name": "the rates are read before the receive streamer opens (UR-13, H3)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "            let list = channel_list(stream.channels);\n            self.device.rx_open(stream.k, &list).map_err(|e| rejected(format!(\"UR-13: {e}\")))?;\n            core.check_rates(Dir::Rx, list[0]).map_err(|e| rejected(e.message))?;",
-   "new": "            let list = channel_list(stream.channels);\n            core.check_rates(Dir::Rx, list[0]).map_err(|e| rejected(e.message))?;\n            self.device.rx_open(stream.k, &list).map_err(|e| rejected(format!(\"UR-13: {e}\")))?;",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "        let opened = self.open_device(dir, k, set);\n        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };",
+   "new": "        let checked = self.check_opened(dir, set);\n        let opened = self.open_device(dir, k, set);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_13_arm_compares_the_rate_set_after_the_streamer_opens"
@@ -6964,9 +6964,9 @@
   {
    "id": "P317",
    "name": "the receive streamer is reopened only when the channel count changes (RM-25, M1)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-   "old": "            let reopened = if channels != self.opened {",
-   "new": "            let reopened = if channels.count() != self.opened.count() {",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "            DeviceSet::Open(open) if open == set => {",
+   "new": "            DeviceSet::Open(open) if open.count() == set.count() => {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_25_a_same_size_membership_swap_reopens_the_streamer"
@@ -6974,12 +6974,12 @@
   {
    "id": "P318",
    "name": "the transmit streamer is reopened only when the channel count changes (RM-25, M1)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "            let reopened = if to.configured || !self.verified || to.set() != self.channels {",
-   "new": "            let reopened = if to.configured || !self.verified || to.set().count() != self.channels.count() {",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "                if state.configured.is_some() && state.configured == by.zip(version) {",
+   "new": "                if state.configured.is_some() && by.zip(version).is_some() {",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "ur_25_a_same_size_membership_swap_reopens_the_streamer"
+   "test_bin": "lib",
+   "filter": "ur_24_a_cancelled_projected_update_makes_the_owner_configure_again"
   },
   {
    "id": "P319",
@@ -7133,10 +7133,10 @@
   },
   {
    "id": "P334",
-   "name": "`arm` never compares the rate set of a direction it opened (UR-13)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "            core.check_rates(Dir::Rx, list[0]).map_err(|e| rejected(e.message))?;",
-   "new": "            let _ = core.check_rates(Dir::Rx, list[0]);",
+   "name": "an open never compares the rate set, so a refused set is held as accepted (UR-13)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "        self.check_rates(dir, channel_list(set)[0])",
+   "new": "        { let _ = self.check_rates(dir, channel_list(set)[0]); Ok(()) }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_13_arm_refuses_a_rate_set_the_description_does_not_have"
@@ -7225,8 +7225,8 @@
    "id": "P343",
    "name": "an enable from no stream does not compare the rate set (UR-13, major 5)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            let opened = opened.and_then(|()| self.core.check_rates(dir, list[0]));",
-   "new": "            let opened = opened.and_then(|()| Ok::<(), crate::device::DeviceError>(()));",
+   "old": "            let checked = if opened.is_ok() { self.core.check_opened(dir, channels) } else { Ok(()) };",
+   "new": "            let checked = if opened.is_ok() { Ok::<(), DeviceError>(()) } else { Ok(()) };",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_13_an_enable_from_no_stream_compares_the_rate_set"
@@ -7234,9 +7234,9 @@
   {
    "id": "P344",
    "name": "the receive owner's open does not compare the rate set (UR-13)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-   "old": "                self.core.device.rx_open(self.k, &list).and_then(|()| self.core.check_rates(Dir::Rx, list[0]))",
-   "new": "                self.core.device.rx_open(self.k, &list)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "        self.check_rates(dir, channel_list(set)[0])",
+   "new": "        if dir == Dir::Rx { Ok(()) } else { self.check_rates(dir, channel_list(set)[0]) }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_13_the_receive_owner_s_first_open_is_compared_there"
@@ -7244,9 +7244,9 @@
   {
    "id": "P345",
    "name": "the transmit reopen does not compare the rate set (UR-13, major 5)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "                    self.core.device.tx_open(self.k, &list).and_then(|()| self.core.check_rates(Dir::Tx, list[0]))",
-   "new": "                    self.core.device.tx_open(self.k, &list)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "        self.check_rates(dir, channel_list(set)[0])",
+   "new": "        if dir == Dir::Tx { Ok(()) } else { self.check_rates(dir, channel_list(set)[0]) }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_13_a_transmit_switch_is_compared_with_the_stored_outcome"
@@ -7305,8 +7305,8 @@
    "id": "P351",
    "name": "a configuration an enable from no stream cannot apply is not booked refused (UR-25, RM-25)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            if let Err(error) = opened.and_then(|()| self.core.configure(dir, &entries, rate, k)) {\n                failure = Some(error);\n            }",
-   "new": "            if let Err(error) = opened.and_then(|()| self.core.configure(dir, &entries, rate, k)) {\n                return self.core.device_failed(Some(id), \"update_parameter\", &error);\n            }",
+   "old": "            if let Err(error) = configured {\n                failure = Some(error);\n            }",
+   "new": "            if let Err(error) = configured {\n                let _ = error;\n            }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_25_a_refused_enable_from_no_stream_halts_and_keeps_its_values"
@@ -7402,73 +7402,143 @@
    "filter": "ur_13_the_receive_owner_s_first_open_is_compared_there"
   },
  {
-   "id": "P361",
-   "name": "the transmit reuse ignores the verified flag, so a refused switch's unopened set counts as open (UR-13)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "            let reopened = if to.configured || !self.verified || to.set() != self.channels {",
-   "new": "            let reopened = if to.configured || to.set() != self.channels {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_25_a_refused_enable_leaves_its_set_unopened_for_the_next_switch"
+    "id": "P368",
+    "name": "the owner configures a segment again although its record holds the same configuration (UR-13)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "                    Owner::Nothing\n                } else {",
+    "new": "                    Owner::Configure\n                } else {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "ur_25_an_enable_from_no_stream_configures_once"
  },
  {
-   "id": "P362",
-   "name": "the transmit switch does not clear the verified flag before its outcome is known (UR-13)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "            self.verified = false;\n            match configured {",
-   "new": "            match configured {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_13_a_refused_switch_to_another_set_leaves_the_old_set_unverified"
- },
+    "id": "P369",
+    "name": "a receive owner that finds its record unknown or another set does not open the streamer (UR-13, S1)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "            _ => Owner::Open,",
+    "new": "            _ => Owner::Nothing,",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_13_a_from_none_segment_the_owner_never_started_is_opened_again"
+  },
  {
-   "id": "P363",
-   "name": "a successful transmit switch does not mark its set verified (UR-13)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "                    self.verified = true;\n",
-   "new": "",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_13_a_switch_to_the_verified_set_opens_nothing"
- },
+    "id": "P370",
+    "name": "a transmit owner that finds its record unknown or another set does not open the streamer (UR-13, S2)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "            _ => Owner::Open,",
+    "new": "            _ => Owner::Nothing,",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_13_a_transmit_from_none_segment_the_owner_never_started_is_opened_again"
+  },
  {
-   "id": "P364",
-   "name": "an enable from no stream does not mark the receive stream stale (UR-13)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            stale = dir == Dir::Rx;",
-   "new": "            stale = false;",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_13_an_enable_from_no_stream_marks_the_receive_streamer_stale_whatever_it_gives"
- },
+    "id": "P371",
+    "name": "the transmit owner adopts a refused change's clock and configures it (UR-25, S14)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "            let configured = if to.refused { Ok(()) } else { self.core.owner_configure(Dir::Tx, self.k, &to) };",
+    "new": "            let configured = self.core.owner_configure(Dir::Tx, self.k, &to);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_25_a_refused_transmit_clock_is_not_adopted"
+  },
  {
-   "id": "P365",
-   "name": "the receive stream is not stored as stale after an enable from no stream (UR-13)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "        if stale {\n            streams.stream_mut(stream).stale = true;\n        }",
-   "new": "        if false {\n            streams.stream_mut(stream).stale = true;\n        }",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_13_an_enable_from_no_stream_marks_the_receive_streamer_stale_whatever_it_gives"
- },
+    "id": "P372",
+    "name": "arm leaves the receive streamer's record unknown, so the first segment opens it again (UR-25, S12)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+    "old": "            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;",
+    "new": "            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;\n            lock(&core.streams).record_open(self::core::stream_key(Dir::Rx, stream.k), None);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "ur_25_the_first_segment_after_arm_does_not_reopen_the_streamer"
+  },
  {
-   "id": "P366",
-   "name": "uhd-rx does not reopen its streamer when the stream is marked stale (UR-13)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-   "old": "            if std::mem::take(&mut streams.stream_mut(key).stale) {",
-   "new": "            if std::mem::take(&mut streams.stream_mut(key).stale) && false {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_13_a_stale_receive_streamer_is_opened_again"
- },
+    "id": "P373",
+    "name": "a transmit owner never drops the correlations of a streamer another thread replaced (UR-28, S3)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "        if streamer != self.streamer {",
+    "new": "        if false {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_28_a_from_none_open_replaces_the_report_queue"
+  },
  {
-   "id": "P367",
-   "name": "an enable from no stream marks the receive stream stale only when its open fails (the original UR-13 condition) (UR-13)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            stale = dir == Dir::Rx;",
-   "new": "            stale = opened.is_err() && dir == Dir::Rx;",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_13_an_enable_from_no_stream_marks_the_receive_streamer_stale_whatever_it_gives"
- }
+    "id": "P374",
+    "name": "a release recorded with no channel moves no version on, so the owner keeps its record (UR-36, S11b)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "                for cold in self.changed_projections(timed.dir, e, timed.chan) {\n                    cold.changed();\n                }",
+    "new": "                let _ = self.changed_projections(timed.dir, e, timed.chan);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_24_a_record_only_release_after_a_from_none_configure_makes_the_owner_configure_again"
+  },
+ {
+    "id": "P375",
+    "name": "a version moves on for a cancelled command every segment holds, whatever its origin or channel (UR-36, S11c)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "            (e <= segment.origin && chan.is_none_or(|chan| segment.config.channels.contains(chan as u32))).then(|| config.clone())",
+    "new": "            let _ = (e, chan, segment);\n            Some(config.clone())",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_24_a_cancelled_projected_update_makes_the_owner_configure_again"
+  },
+ {
+    "id": "P376",
+    "name": "a failed open still records the set the streamer was asked for (UR-36, S7)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "            (Err(_), _) => self.record_open(stream, None),",
+    "new": "            (Err(_), _) => self.record_open(stream, Some(set)),",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_13_a_failed_open_by_the_owner_is_opened_again"
+  },
+ {
+    "id": "P377",
+    "name": "arm leaves the transmit streamer's record unknown, so the first segment opens it again (UR-36, S12)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+    "old": "            core.open_streamer(Dir::Tx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;",
+    "new": "            core.open_streamer(Dir::Tx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;\n            lock(&core.streams).record_open(self::core::stream_key(Dir::Tx, stream.k), None);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "ur_25_the_first_segment_after_arm_does_not_reopen_the_streamer"
+  },
+ {
+    "id": "P378",
+    "name": "a refused rate comparison after a successful open keeps the set known (UR-36, S20)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "            (Ok(()), Err(_)) => {\n                self.record_open(stream, Some(set));\n                self.record_refused(stream);\n            }",
+    "new": "            (Ok(()), Err(_)) => {\n                self.record_open(stream, Some(set));\n            }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_25_a_refused_check_at_arm_leaves_the_set_unknown"
+  },
+ {
+    "id": "P379",
+    "name": "a report read after a from-none open correlates with the replaced streamer's queue: reports() does not compare generations (UR-28, poll)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "                    self.sync_streamer();\n                    self.report(report)",
+    "new": "                    self.report(report)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_28_a_poll_after_a_from_none_open_names_no_burst_of_the_replaced_queue"
+  },
+ {
+    "id": "P380",
+    "name": "a refused rate comparison after a successful open counts as a failed open: the generation does not move (UR-36, S7)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "                self.record_open(stream, Some(set));\n                self.record_refused(stream);",
+    "new": "                self.record_open(stream, None);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_36_a_successful_open_moves_the_generation_on_even_when_its_check_refuses"
+  },
+ {
+    "id": "P381",
+    "name": "a held update of another layout channel projects into a segment that does not run it: the channel condition is dropped (UR-24, S11c)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "(e <= segment.origin && chan.is_none_or(|chan| segment.config.channels.contains(chan as u32))).then(|| config.clone())",
+    "new": "(e <= segment.origin && chan.is_none_or(|_| true)).then(|| config.clone())",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_24_a_cancelled_update_of_another_layout_channel_leaves_the_version"
+  }
 ]

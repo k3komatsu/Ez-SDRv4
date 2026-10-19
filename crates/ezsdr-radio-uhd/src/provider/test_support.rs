@@ -1,6 +1,7 @@
 //! A controlled Provider clock for command-order tests without host deadlines.
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use ezsdr_kernel::event::{Event, EventCollector, EventHandle, EventKind, EventSink, EventSource, Severity, Target};
 use ezsdr_kernel::hash::ContentHash;
@@ -203,6 +204,112 @@ impl Device for LockSpy {
         }
         self.inner.host()
     }
+}
+
+/// A `FakeDevice` with one scripted refusal `FakeConfig::faults` does not carry (UR-33's
+/// vocabulary keeps to what a device does): the first untimed `apply` of `dir` — of the
+/// device channel `chan`, when one is named — fails before anything is applied, which a set
+/// whose channels are applied one by one and a configuration of a streamer already open need
+/// (UR-13). The fake behind it is unchanged by the refused call.
+pub(super) struct ApplyFails {
+    inner: Arc<FakeDevice>,
+    dir: Dir,
+    chan: Option<usize>,
+    fired: AtomicBool,
+}
+
+impl ApplyFails {
+    pub fn new(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>) -> ApplyFails {
+        ApplyFails { inner, dir, chan, fired: AtomicBool::new(false) }
+    }
+}
+
+impl Device for ApplyFails {
+    fn describe(&self) -> serde_json::Value { self.inner.describe() }
+    fn fidelity(&self) -> Fidelity { self.inner.fidelity() }
+    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+    fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { self.inner.front_end(dir, chan) }
+    fn serial(&self) -> Result<String, DeviceError> { self.inner.serial() }
+    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> { self.inner.set_subdev_spec(dir, markup) }
+    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> { self.inner.rates(dir, chan) }
+    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> { self.inner.set_sources(clock, time) }
+    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
+    fn time_now(&self) -> Result<i64, DeviceError> { self.inner.time_now() }
+    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
+        if dir == self.dir && at.is_none() && self.chan.is_none_or(|want| want == chan) && !self.fired.swap(true, Ordering::SeqCst) {
+            return Err(DeviceError::failed("test: scripted refusal of an apply"));
+        }
+        self.inner.apply(dir, chan, s, at)
+    }
+    fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.rx_open(stream, channels) }
+    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.inner.rx_start(stream, at) }
+    fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
+    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.inner.rx_stop(stream, at) }
+    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration) -> RxRecv { self.inner.rx_recv(stream, n, timeout) }
+    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.tx_open(stream, channels) }
+    fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: std::time::Duration) -> Result<usize, DeviceError> {
+        self.inner.tx_send(stream, samples, at, sob, eob, timeout)
+    }
+    fn tx_async(&self, stream: usize, timeout: std::time::Duration) -> Result<Option<TxReport>, DeviceError> { self.inner.tx_async(stream, timeout) }
+    fn close_streams(&self) { self.inner.close_streams() }
+    fn mark_lost(&self) { self.inner.mark_lost() }
+    fn host(&self) -> HostClock { self.inner.host() }
+}
+
+/// A `FakeDevice` whose asynchronous reports the test writes: `tx_async` returns the reports
+/// given to it before any the fake holds, so a test puts a report on a streamer's queue at the
+/// point its owner reads it (UR-28). Everything else is the fake's.
+pub(super) struct ReportFeed {
+    inner: Arc<FakeDevice>,
+    given: Mutex<VecDeque<TxReport>>,
+}
+
+impl ReportFeed {
+    pub fn new(inner: Arc<FakeDevice>) -> ReportFeed {
+        ReportFeed { inner, given: Mutex::new(VecDeque::new()) }
+    }
+
+    /// Queues `report` for the next `tx_async`.
+    pub fn give(&self, report: TxReport) {
+        self.given.lock().unwrap().push_back(report);
+    }
+}
+
+impl Device for ReportFeed {
+    fn describe(&self) -> serde_json::Value { self.inner.describe() }
+    fn fidelity(&self) -> Fidelity { self.inner.fidelity() }
+    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+    fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { self.inner.front_end(dir, chan) }
+    fn serial(&self) -> Result<String, DeviceError> { self.inner.serial() }
+    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> { self.inner.set_subdev_spec(dir, markup) }
+    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> { self.inner.rates(dir, chan) }
+    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> { self.inner.set_sources(clock, time) }
+    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
+    fn time_now(&self) -> Result<i64, DeviceError> { self.inner.time_now() }
+    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> { self.inner.apply(dir, chan, s, at) }
+    fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.rx_open(stream, channels) }
+    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.inner.rx_start(stream, at) }
+    fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
+    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.inner.rx_stop(stream, at) }
+    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration) -> RxRecv { self.inner.rx_recv(stream, n, timeout) }
+    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.tx_open(stream, channels) }
+    fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: std::time::Duration) -> Result<usize, DeviceError> {
+        self.inner.tx_send(stream, samples, at, sob, eob, timeout)
+    }
+    fn tx_async(&self, stream: usize, timeout: std::time::Duration) -> Result<Option<TxReport>, DeviceError> {
+        let given = self.given.lock().unwrap().pop_front();
+        match given {
+            Some(report) => Ok(Some(report)),
+            None => self.inner.tx_async(stream, timeout),
+        }
+    }
+    fn close_streams(&self) { self.inner.close_streams() }
+    fn mark_lost(&self) { self.inner.mark_lost() }
+    fn host(&self) -> HostClock { self.inner.host() }
 }
 
 /// An event sink that records whether each control-path event was emitted while the

@@ -42,7 +42,7 @@ use serde_json::{Value as Json, json};
 
 use self::core::{Clock, Core, lock};
 use self::control::Control;
-use self::mode::{Mode, channel_list};
+use self::mode::Mode;
 use self::rx::{Rx, RxCmd};
 use self::tx::{Tx, TxCmd};
 use crate::device::{Device, Dir, Settings};
@@ -50,6 +50,12 @@ use crate::profile::{self, MASTER_CLOCK_HZ};
 
 fn rejected(message: impl Into<String>) -> ModuleError {
     ModuleError::rejected(message)
+}
+
+/// The refusal `arm` gives a failed open (UR-13). A rate refusal from `check_rates` already
+/// carries its `UR-13:` label, so only an open's device error gets one here.
+fn open_refusal(error: crate::device::DeviceError) -> String {
+    if error.message.starts_with("UR-13:") { error.message } else { format!("UR-13: {}", error.message) }
 }
 
 /// `ezsdr.radio.uhd.<suffix>`; the Kernel files it under the instance's source root (RS-39).
@@ -582,17 +588,14 @@ impl Provider for UhdRadio {
             if stream.channels.is_empty() || core.links.is_empty() {
                 continue;
             }
-            let list = channel_list(stream.channels);
-            self.device.rx_open(stream.k, &list).map_err(|e| rejected(format!("UR-13: {e}")))?;
-            core.check_rates(Dir::Rx, list[0]).map_err(|e| rejected(e.message))?;
+            // UR-13: the record says what the streamer now holds; a failed open or rate check holds none.
+            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;
         }
         for stream in &mut prepared.tx {
             if stream.channels.is_empty() {
                 continue;
             }
-            let list = channel_list(stream.channels);
-            self.device.tx_open(stream.k, &list).map_err(|e| rejected(format!("UR-13: {e}")))?;
-            core.check_rates(Dir::Tx, list[0]).map_err(|e| rejected(e.message))?;
+            core.open_streamer(Dir::Tx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;
             // RM-25: the first lattice instant at or after the arm instant.
             let handle = stream.handle.clone().expect("a stream with channels declared its clock");
             let n = handle.root_ticks_per_tick().num() as i64;
@@ -728,10 +731,21 @@ mod tests {
     use super::*;
     use crate::device::{FakeConfig, FakeDevice};
     use crate::ClockMode;
+    use super::core::stream_key;
 
     struct NoActions;
     impl ActionReceiver for NoActions {
         fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> { None }
+    }
+
+    /// A receive link that takes nothing, so that the receive side has a stream.
+    struct NoLink;
+    impl ezsdr_kernel::stream::DataLink for NoLink {
+        fn publish(&self, _block: ezsdr_kernel::stream::BlockRef) -> ezsdr_kernel::stream::PublishOutcome { ezsdr_kernel::stream::PublishOutcome::Accepted }
+        fn receive(&self) -> Option<(ezsdr_kernel::stream::BlockRef, ezsdr_kernel::stream::DropCarry)> { None }
+        fn drops(&self) -> u64 { 0 }
+        fn take_drop_carry(&self) -> ezsdr_kernel::stream::DropCarry { ezsdr_kernel::stream::DropCarry::default() }
+        fn policy(&self) -> BackPressure { BackPressure::DropOldest }
     }
 
     #[test]
@@ -763,6 +777,66 @@ mod tests {
             tx: (0..tx).map(|k| PreparedStream { k, ..stream.clone() }).collect(),
         });
         radio
+    }
+
+    #[test]
+    fn ur_25_a_refused_check_at_arm_leaves_the_set_unknown() {
+        // UR-25 (S20): `arm` opens the receive streamer and the direction's rate comparison
+        // refuses; the record holds no set and no configuration, so the owner opens the
+        // streamer again for the next segment, where the direction's stored refusal is
+        // re-enforced (UR-13, UR-36).
+        let binding: Binding = serde_json::from_value(json!({
+            "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
+            "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+            "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
+        })).unwrap();
+        let device: Arc<dyn Device> = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        let mut radio = UhdRadio::from_binding(&binding, device).unwrap();
+        let (core, _device, _time, _events) = test_support::rig_with_links(vec![Arc::new(NoLink)]);
+        // The direction's first comparison, refused: `arm`'s own comparison re-enforces it.
+        assert!(core.check_rates(Dir::Rx, 99).is_err());
+        radio.prepared = Some(Prepared {
+            core: core.clone(),
+            actions: Arc::new(NoActions),
+            config: BTreeMap::new(),
+            rx: vec![PreparedStream { k: 0, handle: None, channels: Channels::first(1), clock: None }],
+            tx: vec![PreparedStream { k: 0, handle: None, channels: Channels::first(0), clock: None }],
+        });
+        let error = radio.arm().unwrap_err();
+        assert!(error.message.starts_with("UR-13:"), "{}", error.message);
+        let streams = lock(&core.streams);
+        let rx = streams.stream(stream_key(Dir::Rx, 0));
+        assert!(matches!(rx.set, core::DeviceSet::Unknown), "the refused comparison records no set: {:?}", rx.set);
+        assert_eq!(rx.configured, None, "and no configuration");
+    }
+
+    #[test]
+    fn ur_36_a_successful_open_moves_the_generation_on_even_when_its_check_refuses() {
+        // UR-36: every successful open is a new streamer, so the generation moves on; the rate
+        // comparison that follows is refused by the direction's stored outcome, and then the set
+        // and the configuration are unknown.
+        let (core, _device, _time, _events) = test_support::rig_with_links(vec![Arc::new(NoLink)]);
+        assert!(core.check_rates(Dir::Tx, 99).is_err());
+        let before = lock(&core.streams).stream(stream_key(Dir::Tx, 0)).generation;
+        assert!(core.open_streamer(Dir::Tx, 0, Channels::first(1)).is_err());
+        let streams = lock(&core.streams);
+        let tx = streams.stream(stream_key(Dir::Tx, 0));
+        assert_eq!(tx.generation, before + 1, "the open succeeded: a new streamer");
+        assert!(matches!(tx.set, core::DeviceSet::Unknown), "the refused comparison keeps no set: {:?}", tx.set);
+        assert_eq!(tx.configured, None);
+    }
+
+    #[test]
+    fn ur_36_a_failed_open_moves_no_generation() {
+        // UR-36: a failed open is no new streamer, so the generation stands; the set is unknown.
+        let config = FakeConfig { faults: vec![crate::device::FakeFault::RxOpenFails], ..FakeConfig::default() };
+        let (core, _device, _time, _events) = test_support::rig_with(config, vec![Arc::new(NoLink)]);
+        let before = lock(&core.streams).stream(stream_key(Dir::Rx, 0)).generation;
+        assert!(core.open_streamer(Dir::Rx, 0, Channels::first(1)).is_err());
+        let streams = lock(&core.streams);
+        let rx = streams.stream(stream_key(Dir::Rx, 0));
+        assert_eq!(rx.generation, before, "the open failed: no new streamer");
+        assert!(matches!(rx.set, core::DeviceSet::Unknown), "{:?}", rx.set);
     }
 
     #[test]

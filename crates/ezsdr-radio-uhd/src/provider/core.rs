@@ -11,12 +11,12 @@ use ezsdr_kernel::spec::{Key, Scalar, Value};
 use ezsdr_kernel::stream::{DataLink, Direction};
 use ezsdr_kernel::time::{ClockRegistry, Rational, TimeAuthority, TimePoint};
 use ezsdr_radio::payloads::CommandRejectedPayload;
-use ezsdr_radio::timeline::{self, Config, Item, Kind, Line, StreamKey, NO_RELEASE};
+use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, StreamKey, NO_RELEASE};
 use ezsdr_radio::{keys, kinds};
 use serde_json::{Value as Json, json};
 
 use super::control::{ColdConfig, Planned};
-use super::mode::Mode;
+use super::mode::{channel_list, Mode};
 use crate::device::{Device, DeviceError, Dir, Settings, decimation};
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -93,24 +93,47 @@ impl Default for Streams {
     }
 }
 
+/// What the device holds open for a stream, as the Provider recorded it (UR-13): the channel
+/// set of its streamer, or nothing known. Written after each device call, under `streams`.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub(crate) enum DeviceSet {
+    /// Unknown: a failed open or a refused rate comparison, or no open yet.
+    #[default]
+    Unknown,
+    /// The streamer is open on this set, and its rates compared.
+    Open(Channels),
+}
+
+/// What a segment's owner does before it begins, from the record (UR-25): nothing, configure
+/// the open streamer, or open it again and configure.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Owner {
+    Nothing,
+    Configure,
+    Open,
+}
+
 /// One stream's own state (RM-29, design 33 D15): stream `k` of its direction, and not the
 /// instance's other streams.
 #[derive(Default)]
 pub(crate) struct StreamState {
-    /// The configuration each segment begins with, by the command that began it, and whether
-    /// uhd-control configured it itself, for an enable from no stream (UR-25).
-    pub configs: BTreeMap<u64, (Arc<ColdConfig>, bool)>,
+    /// The configuration each segment begins with, by the command that began it (UR-25).
+    pub configs: BTreeMap<u64, Arc<ColdConfig>>,
+    /// The device's record of the stream's streamer (UR-13, UR-36): its channel set.
+    pub set: DeviceSet,
+    /// The streamer's open generation: every successful open of the stream — whoever opened it,
+    /// uhd-control's enable from no stream included — is a new streamer with a new report queue,
+    /// which the correlations of the bursts in flight are told from (UR-36, UR-28).
+    pub generation: u64,
+    /// The segment command and the configuration version its last successful configure read,
+    /// `(seq, version)`; none after a failed configure or open. The owner configures again
+    /// unless this matches its segment's command and the configuration's current version (UR-36).
+    pub configured: Option<(u64, u64)>,
     /// uhd-rx's segment, as its origin and configuration, and the first sample of it not yet
     /// delivered: RM-16's floor, which reaches the plan as `Item.delivered` (UR-17).
     pub delivered: Option<(i64, Config, i64)>,
     /// The owner has no stream and nothing planned to begin (UR-25).
     pub idle: bool,
-    /// uhd-control's enable from no stream tried to open the receive streamer, so the owner's
-    /// record of the open set may be wrong whatever that open and its configuration gave: uhd-rx
-    /// distrusts the record at its next begin and opens the streamer again, unless that segment
-    /// is one uhd-control configured, whose set it then records; the stored rate-check outcome
-    /// is re-enforced (UR-13).
-    pub stale: bool,
     /// The transmit clocks registered, in the order of the transmit plan's segments, and
     /// whether each has ended (RM-25).
     pub clocks: Vec<(Clock, bool)>,
@@ -240,16 +263,71 @@ impl Streams {
         let Some(line) = self.lines.line(stream) else { return Vec::new() };
         let state = self.stream(stream);
         line.plan.iter().enumerate().map(|(index, segment)| {
-            let config = segment.by.and_then(|by| state.configs.get(&by));
             Planned {
                 segment: *segment,
                 k: stream.1 as usize,
-                settings: config.map(|(settings, _)| settings.clone()),
-                configured: config.is_some_and(|(_, configured)| *configured),
+                settings: segment.by.and_then(|by| state.configs.get(&by)).cloned(),
                 refused: segment.by.is_some_and(|by| line.items.iter().any(|item| item.seq == by && item.refused)),
                 clock: (stream.0 == Direction::Tx).then(|| state.clocks.get(index).map(|(clock, _)| *clock)).flatten(),
             }
         }).collect()
+    }
+
+    /// What the owner of `stream` does before it begins a segment that holds `set`, begun by
+    /// the command `by` under the configuration at version `version` (UR-36): nothing when the
+    /// record has that set open and configured for that command at that version; a configure
+    /// when only the configuration differs; an open otherwise.
+    pub fn owner_step(&self, stream: StreamKey, set: Channels, by: Option<u64>, version: Option<u64>) -> Owner {
+        let state = self.stream(stream);
+        match state.set {
+            DeviceSet::Open(open) if open == set => {
+                if state.configured.is_some() && state.configured == by.zip(version) {
+                    Owner::Nothing
+                } else {
+                    Owner::Configure
+                }
+            }
+            _ => Owner::Open,
+        }
+    }
+
+    /// The record of an open of `stream`'s streamer: the set it is open on, or unknown after a
+    /// failed open; the generation moves on for each successful open, so that a correlation
+    /// against the replaced streamer's reports is told from the new one's (UR-28, UR-36). Any
+    /// configuration it had is no longer known (UR-13).
+    pub fn record_open(&mut self, stream: StreamKey, set: Option<Channels>) {
+        let state = self.stream_mut(stream);
+        state.generation += u64::from(set.is_some());
+        state.set = set.map_or(DeviceSet::Unknown, DeviceSet::Open);
+        state.configured = None;
+    }
+
+    /// The record of one open and its rate comparison: a device refusal leaves the set
+    /// unknown with the generation as it was; a successful open moves it on, and a refused
+    /// comparison after it leaves the set and the configuration unknown (UR-13, UR-36).
+    pub fn record_opened(&mut self, stream: StreamKey, set: Channels, opened: &Result<(), DeviceError>, checked: &Result<(), DeviceError>) {
+        match (opened, checked) {
+            (Err(_), _) => self.record_open(stream, None),
+            (Ok(()), Ok(())) => self.record_open(stream, Some(set)),
+            (Ok(()), Err(_)) => {
+                self.record_open(stream, Some(set));
+                self.record_refused(stream);
+            }
+        }
+    }
+
+    /// A rate comparison refused after a successful open: the streamer is the new one all the
+    /// same, so the generation stands, and its set and configuration are unknown (UR-13, UR-36).
+    pub fn record_refused(&mut self, stream: StreamKey) {
+        let state = self.stream_mut(stream);
+        state.set = DeviceSet::Unknown;
+        state.configured = None;
+    }
+
+    /// The record of a configure of `stream`: `(seq, version)` once it succeeded, none when it
+    /// failed (UR-36).
+    pub fn record_configured(&mut self, stream: StreamKey, mark: Option<(u64, u64)>) {
+        self.stream_mut(stream).configured = mark;
     }
 
     /// A plan changed: the transmit clocks follow it (RM-25, VH-2).
@@ -626,6 +704,60 @@ impl Core {
         decimation(self.mcr, rate)
             .map(|n| n as i64)
             .ok_or_else(|| DeviceError::failed(format!("UR-12: {rate} S/s is no decimation of {} Hz", self.mcr)))
+    }
+
+    /// UR-13, UR-36: the device's open of `k`'s streamer of `dir` on `set`; the record is the
+    /// caller's (see `record_opened`), so that an enable from no stream records its open in the
+    /// line-lock section it already takes (UR-25).
+    pub fn open_device(&self, dir: Dir, k: usize, set: Channels) -> Result<(), DeviceError> {
+        let list = channel_list(set);
+        match dir {
+            Dir::Rx => self.device.rx_open(k, &list),
+            Dir::Tx => self.device.tx_open(k, &list),
+        }
+    }
+
+    /// UR-13, UR-36: the rate comparison after an open on `set`, the direction's first one or
+    /// a later one's stored outcome (`check_rates`).
+    pub fn check_opened(&self, dir: Dir, set: Channels) -> Result<(), DeviceError> {
+        self.check_rates(dir, channel_list(set)[0])
+    }
+
+    /// UR-13, UR-36: opens `k`'s streamer of `dir` on `set` and compares its rates. The owner
+    /// and `arm` call this with `streams` released (UR-25); uhd-control's enable from no stream
+    /// uses `open_device` and `check_opened` itself, and records the outcome in its own section.
+    pub fn open_streamer(&self, dir: Dir, k: usize, set: Channels) -> Result<(), DeviceError> {
+        let stream = stream_key(dir, k);
+        let opened = self.open_device(dir, k, set);
+        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };
+        lock(&self.streams).record_opened(stream, set, &opened, &checked);
+        opened.and(checked)
+    }
+
+    /// The owner's device calls for a segment it begins (UR-13, UR-36): the record decides what
+    /// is opened and configured. Each device call is made with `streams` released, and its
+    /// outcome is recorded after it; a successful open moves the record's generation on, which
+    /// is how a thread holding correlations against the replaced streamer learns of it (UR-28).
+    pub fn owner_configure(&self, dir: Dir, k: usize, next: &Planned) -> Result<(), DeviceError> {
+        let stream = stream_key(dir, k);
+        let set = next.set();
+        let step = lock(&self.streams).owner_step(stream, set, next.segment.by, next.version());
+        if step == Owner::Nothing {
+            return Ok(());
+        }
+        if step == Owner::Open {
+            self.open_streamer(dir, k, set)?;
+        }
+        match next.configure(self, dir) {
+            Ok((_, version)) => {
+                lock(&self.streams).record_configured(stream, next.segment.by.map(|by| (by, version)));
+                Ok(())
+            }
+            Err(error) => {
+                lock(&self.streams).record_configured(stream, None);
+                Err(error)
+            }
+        }
     }
 
     /// Declares and registers a stream clock with origin `origin` (UR-12, RM-25).

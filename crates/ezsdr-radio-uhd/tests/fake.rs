@@ -4687,6 +4687,31 @@ fn ur_13_arm_refuses_a_pre_chain_rate_set_after_the_open() {
 }
 
 #[test]
+fn ur_25_the_first_segment_after_arm_does_not_reopen_the_streamer() {
+    // UR-25 (S12): the streamers `arm` opened and checked are the ones the first segments run
+    // on, and the next segment of the same channel set is configured on them too: each
+    // direction's streamer is opened once, and the owner adopts the segment without opening.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut direct = Direct::with_links(
+        FakeConfig::default(),
+        &[("radio.rx.channels", Scalar::from(1)), ("radio.tx.channels", Scalar::from(1))],
+        vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)],
+    );
+    let now = direct.now();
+    direct.update("radio.rx.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(now + ms(50)));
+    direct.update("radio.tx.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(now + ms(50)));
+    direct.settle(Wall::from_millis(300));
+    let log = direct.device.calls();
+    assert_eq!(calls(&direct.device, "rx_open 0 [0]").len(), 1, "{log:?}");
+    assert_eq!(calls(&direct.device, "tx_open 0 [0]").len(), 1, "{log:?}");
+    assert!(log.iter().any(|c| c.starts_with("rx_start")), "the first segment starts: {log:?}");
+    assert!(log.iter().any(|c| c.starts_with("apply rx 0 ") && c.contains("rate=2000000") && c.ends_with("at=-")),
+        "the next segment configures without a reopen: {log:?}");
+    assert!(log.iter().any(|c| c.starts_with("apply tx 0 ") && c.contains("rate=2000000") && c.ends_with("at=-")),
+        "the next segment configures without a reopen: {log:?}");
+}
+
+#[test]
 fn ur_13_a_direction_the_arm_never_opened_is_not_compared() {
     // UR-13: a direction whose streamer `arm` did not open — here the receive side of a
     // Session with no link — is not compared, whatever its device would answer; the

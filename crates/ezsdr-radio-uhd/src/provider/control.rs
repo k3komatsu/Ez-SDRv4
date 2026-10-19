@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::Sender;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use std::time::Duration as Wall;
@@ -25,7 +25,7 @@ use ezsdr_radio::kinds;
 use serde_json::json;
 
 use super::core::{booked_stream, stream_key, Clock, Core, lock};
-use super::mode::{channel_list, current_key_direction, scalar_number};
+use super::mode::{current_key_direction, scalar_number};
 use ezsdr_radio::Addressed;
 use super::tx::{Held, TxCmd};
 use crate::device::{DeviceError, Dir, Iq, Settings, decimation};
@@ -62,6 +62,10 @@ pub(crate) struct ColdConfig {
     /// §4.7: the clock lock — a shared lock held across the device call in `configure`, so a
     /// waiting participant is idle and the manual clock advances while the holder waits.
     updates: ClockMutex<BTreeMap<(i64, u64), (usize, Settings)>>,
+    /// Counts the changes to the projection a device never received as a timed command: a
+    /// record-only release, a cancelled update (UR-36). A configure records the version it read
+    /// under `updates`, so an owner configures again when the version has moved on.
+    version: AtomicU64,
 }
 
 /// What a segment's configuration begins from (UR-12): the current keys' one `Settings`
@@ -82,17 +86,30 @@ impl ColdConfig {
     /// built inside the instance's line lock reads no held command and takes no lock of theirs
     /// (§4.7's order).
     pub(crate) fn with_clock(clock: HostClock, base: Settings, updates: BTreeMap<(i64, u64), (usize, Settings)>) -> Self {
-        Self { base: Base::Current(base), updates: clock.clock_mutex(updates) }
+        Self { base: Base::Current(base), updates: clock.clock_mutex(updates), version: AtomicU64::new(0) }
     }
 
     /// The layout's numbered configuration at the segment's origin (RM-30, UR-12), with
     /// the held timed commands projected into it the same way.
     pub(crate) fn layout_with_clock(clock: HostClock, base: BTreeMap<Key, Value>, updates: BTreeMap<(i64, u64), (usize, Settings)>) -> Self {
-        Self { base: Base::Layout(base), updates: clock.clock_mutex(updates) }
+        Self { base: Base::Layout(base), updates: clock.clock_mutex(updates), version: AtomicU64::new(0) }
     }
 
     fn book(&self, order: (i64, u64), chan: usize, settings: Settings) {
         self.updates.lock().insert(order, (chan, settings));
+    }
+
+    /// The configuration's version now (UR-36).
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Acquire)
+    }
+
+    /// The projection changed in a way the device was not told: the version moves on, under
+    /// `updates`, so that an owner's configure that read the old one is not taken for this one.
+    /// The caller decides which segments the change reaches (UR-36).
+    fn changed(&self) {
+        let _updates = self.updates.lock();
+        self.version.fetch_add(1, Ordering::AcqRel);
     }
 
     fn issued(&self, updates: &mut BTreeMap<(i64, u64), (usize, Settings)>, order: (i64, u64), effective: i64, chan: usize, settings: Settings) {
@@ -127,11 +144,13 @@ impl ColdConfig {
         settings
     }
 
-    /// Configures the direction for `segment` (UR-12), each of its channels' own settings.
-    pub fn configure(&self, core: &Core, dir: Dir, segment: &Segment, k: usize) -> Result<i64, DeviceError> {
+    /// Configures the direction for `segment` (UR-12), each of its channels' own settings;
+    /// returns the decimation and the version the configuration was read at (UR-36).
+    pub fn configure(&self, core: &Core, dir: Dir, segment: &Segment, k: usize) -> Result<(i64, u64), DeviceError> {
         // Hold the snapshot lock across the call: an update cannot change the
         // projection while an owner is configuring from it (§4.7: the clock lock).
         let updates = self.updates.lock();
+        let version = self.version();
         let ratio = segment.config.ratio;
         let rate = core.mcr as f64 * ratio.den() as f64 / ratio.num() as f64;
         let channels: Vec<(usize, Settings)> = segment
@@ -144,7 +163,7 @@ impl ColdConfig {
                 (chan as usize, settings)
             })
             .collect();
-        core.configure(dir, &channels, rate, k)
+        core.configure(dir, &channels, rate, k).map(|n| (n, version))
     }
 }
 
@@ -158,9 +177,6 @@ pub(crate) struct Planned {
     /// The configuration in effect at its origin; none for the stream's first segment, or one
     /// whose command is pruned, which the owner has begun already.
     pub settings: Option<Arc<ColdConfig>>,
-    /// uhd-control opened the streamer and configured the direction for it: an enable from no
-    /// stream (UR-25).
-    pub configured: bool,
     /// The command that began it was refused at its instant, by uhd-control or by the stream's
     /// owner; a refused segment halts its stream (UR-25).
     pub refused: bool,
@@ -175,13 +191,18 @@ impl Planned {
         self.segment.config.channels
     }
 
+    /// The version of the segment's configuration now, if it has one (UR-36).
+    pub fn version(&self) -> Option<u64> {
+        self.settings.as_ref().map(|settings| settings.version())
+    }
+
     /// Root ticks per sample.
     pub fn n(&self) -> i64 {
         self.segment.config.ratio.num() as i64
     }
 
-    /// Configures the direction for the segment (UR-12).
-    pub fn configure(&self, core: &Core, dir: Dir) -> Result<i64, DeviceError> {
+    /// Configures the direction for the segment (UR-12), as [`ColdConfig::configure`].
+    pub fn configure(&self, core: &Core, dir: Dir) -> Result<(i64, u64), DeviceError> {
         match &self.settings {
             Some(settings) => settings.configure(core, dir, &self.segment, self.k),
             None => Err(DeviceError::failed("UR-25: the segment has no configuration")),
@@ -414,7 +435,7 @@ impl Control {
                     Some(config) => config,
                     None => Arc::new(ColdConfig::layout_with_clock(self.core.device.host(), self.config_at(e), self.held_updates(Dir::Rx))),
                 };
-                streams.stream_mut(stream).configs.insert(seq, (config, false));
+                streams.stream_mut(stream).configs.insert(seq, config);
                 streams.book(&self.core, stream, Item { e, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Start });
             }
             Action::Command { .. } => {
@@ -453,7 +474,23 @@ impl Control {
 
     /// The segment configurations of `dir`, shared with its owner.
     fn projections(&self, dir: Dir) -> Vec<Arc<ColdConfig>> {
-        lock(&self.core.streams).stream(booked_stream(dir)).configs.values().map(|(config, _)| config.clone()).collect()
+        lock(&self.core.streams).stream(booked_stream(dir)).configs.values().cloned().collect()
+    }
+
+    /// UR-36: the segment configurations of `dir` the timed command of instant `e` reaches —
+    /// the ones whose version moves on when the device is not told of it (a release recorded
+    /// with no channel, a cancellation). `chan` names the command's channel under the layout;
+    /// `None` is every channel of its direction, which is the current keys' command. A segment
+    /// whose origin precedes `e`, or which does not run the named channel, holds nothing of the
+    /// command, so its configuration and its version stand.
+    fn changed_projections(&self, dir: Dir, e: i64, chan: Option<usize>) -> Vec<Arc<ColdConfig>> {
+        let streams = lock(&self.core.streams);
+        let stream = booked_stream(dir);
+        let Some(line) = streams.line(stream) else { return Vec::new() };
+        streams.stream(stream).configs.iter().filter_map(|(seq, config)| {
+            let segment = line.plan.iter().find(|segment| segment.by == Some(*seq))?;
+            (e <= segment.origin && chan.is_none_or(|chan| segment.config.channels.contains(chan as u32))).then(|| config.clone())
+        }).collect()
     }
 
     fn ceil_root(&self, at: Option<AbsoluteDeadline>) -> Result<Option<i64>, TimeError> {
@@ -600,6 +637,12 @@ impl Control {
                 (0..self.channels_at(timed.dir, effective)).collect()
             };
             if chans.is_empty() {
+                // Nothing is issued to the device: the projection of every segment whose origin
+                // this update reaches changed under a configuration its owner may have made, so
+                // that one's version moves on (UR-36).
+                for cold in self.changed_projections(timed.dir, e, timed.chan) {
+                    cold.changed();
+                }
                 self.config.insert(timed.key.clone(), Value::num(timed.value).expect("UR-24: read from a Value"));
                 lock(&self.core.rec).applied.push(json!({ "key": timed.key, "claimed": timed.value, "read_back": null, "at": self.core.at(e), "note": "no channel" }));
                 continue;
@@ -633,9 +676,18 @@ impl Control {
     fn cancel_held(&mut self, why: &str) {
         let at = self.core.at(self.core.now());
         for ((e, seq), timed) in std::mem::take(&mut self.held) {
+            // UR-36: a configuration whose projection at its segment's origin held the
+            // cancelled command is configured again; one the command never reached keeps its
+            // version, and with it its owner's trust in its record.
+            let changed = self.changed_projections(timed.dir, e, timed.chan);
             let projections = self.projections(timed.dir);
             let mut updates: Vec<_> = projections.iter().map(|cold| cold.updates.lock()).collect();
-            for updates in &mut updates { updates.remove(&(e, seq)); }
+            for (cold, updates) in projections.iter().zip(updates.iter_mut()) {
+                updates.remove(&(e, seq));
+                if changed.iter().any(|one| Arc::ptr_eq(one, cold)) {
+                    cold.version.fetch_add(1, Ordering::AcqRel);
+                }
+            }
             // Keep the projections locked until the cancellation is recorded, so an owner can
             // never apply this held value after that record.
             lock(&self.core.rec).applied.push(json!({
@@ -793,21 +845,14 @@ impl Control {
         let from_none = !channels.is_empty() && idle && planned;
         let mut ready = now;
         let mut failure: Option<DeviceError> = None;
-        let mut stale = false;
+        let version = segment_config.version();
         if from_none {
             // Its owner is idle: nothing it could prune comes meanwhile, so the lock is
             // released for the device calls alone and taken again for the book. `k` is 0
             // here: a stream the layout holds a channel for is stream 0 (D14).
             drop(streams);
-            let list = channel_list(channels);
-            let opened = match dir {
-                Dir::Rx => self.core.device.rx_open(k, &list),
-                Dir::Tx => self.core.device.tx_open(k, &list),
-            };
-            let opened = opened.and_then(|()| self.core.check_rates(dir, list[0]));
-            // UR-13: the streamer may now hold another set than the receive owner records, so
-            // uhd-rx distrusts its record at its next begin, whatever this open and its checks gave.
-            stale = dir == Dir::Rx;
+            let opened = self.core.open_device(dir, k, channels);
+            let checked = if opened.is_ok() { self.core.check_opened(dir, channels) } else { Ok(()) };
             // The configuration in effect at `e`, the timed updates held for it included (UC-2).
             let entries: Vec<(usize, Settings)> = channels
                 .iter()
@@ -824,16 +869,20 @@ impl Control {
                     (chan as usize, settings)
                 })
                 .collect();
-            if let Err(error) = opened.and_then(|()| self.core.configure(dir, &entries, rate, k)) {
-                failure = Some(error);
-            }
+            let configured = opened.clone().and(checked.clone()).and_then(|()| self.core.configure(dir, &entries, rate, k));
             ready = self.core.now();
             streams = lock(&self.core.streams);
+            // UR-13, UR-25: the record of the open and of the configuration is only what their own
+            // outcomes made known.
+            streams.record_opened(stream, channels, &opened, &checked);
+            if let Err(error) = configured {
+                failure = Some(error);
+            }
         }
-        streams.stream_mut(stream).configs.insert(seq, (segment_config, from_none));
-        if stale {
-            streams.stream_mut(stream).stale = true;
+        if from_none {
+            streams.record_configured(stream, failure.is_none().then_some((seq, version)));
         }
+        streams.stream_mut(stream).configs.insert(seq, segment_config);
         // RM-25: the configuration uhd-control's own enable applied was refused. The change is
         // booked refused in this section, as its owner books a refusal it finds — the values
         // stay the configuration of record, the stream is halted, and the next enable applies
@@ -1092,24 +1141,260 @@ mod tests {
     type Held = (Vec<(i64, u64, bool)>, Vec<(i64, bool)>, Vec<(i64, i64)>);
 
     #[test]
-    fn ur_13_an_enable_from_no_stream_marks_the_receive_streamer_stale_whatever_it_gives() {
-        // UR-13: uhd-control's enable from no stream tries to open the receive streamer, and marks
-        // the stream stale whatever the open and the configuration give, so that uhd-rx distrusts
-        // its record at its next begin (`rx.rs`).
+    fn ur_13_a_failed_open_from_no_stream_is_opened_again_by_the_owner() {
+        // UR-13 (S4): an enable from no stream whose open fails records the stream's set as
+        // unknown, so the next enable from no stream opens the streamer again.
         use crate::device::{FakeConfig, FakeFault};
-        let outcomes = [None, Some(FakeFault::RxOpenFails), Some(FakeFault::RxApplyFails), Some(FakeFault::WrongRate { claimed: 2e6, applied: 1e6, nth: 0 })];
-        for fault in outcomes {
-            let config = FakeConfig { faults: fault.iter().cloned().collect(), ..Default::default() };
-            let (core, device, _, _) = crate::provider::test_support::rig_with(config, vec![Arc::new(NoLink)]);
-            let (mut control, _tx) = control(&core, &[Dir::Rx]);
-            let ms = |n: i64| core.ticks(n * 1_000_000);
-            // The receive stream is stopped and its owner idle: an enable from no stream.
-            control.book(Dispatched::new(ActionId(1), Action::Stop { target: Some(super::super::test_support::target_of(&core.rx_id)) }, Some(core.rx_id.clone())));
-            lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = true;
-            control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(100)))));
-            assert!(device.calls().iter().any(|call| call.starts_with("rx_open")), "{fault:?}: the enable opened the streamer: {:?}", device.calls());
-            assert!(lock(&core.streams).stream(booked_stream(Dir::Rx)).stale, "{fault:?}");
+        let config = FakeConfig { faults: vec![FakeFault::RxOpenFails], ..Default::default() };
+        let (core, device, _, _) = crate::provider::test_support::rig_with(config, vec![Arc::new(NoLink)]);
+        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        // The receive stream is stopped and its owner idle: an enable from no stream.
+        control.book(Dispatched::new(ActionId(1), Action::Stop { target: Some(super::super::test_support::target_of(&core.rx_id)) }, Some(core.rx_id.clone())));
+        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = true;
+        control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(100)))));
+        assert!(matches!(lock(&core.streams).stream(booked_stream(Dir::Rx)).set, super::super::core::DeviceSet::Unknown));
+        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = true;
+        control.book_cold(ActionId(2), key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(200)))));
+        assert_eq!(device.calls().iter().filter(|call| call.starts_with("rx_open")).count(), 2, "{:?}", device.calls());
+    }
+
+    /// Books an enable of the receive stream at `ms` from no stream, the owner idle (UR-13).
+    fn enable_from_none(control: &mut Control, core: &Core, id: u64, ms: i64, rate: f64) {
+        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = true;
+        control.book_cold(ActionId(id), key("radio.rx.sample_rate_hz"), Value::num(rate).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(ms * 1_000_000)))));
+    }
+
+    #[test]
+    fn ur_13_a_rate_refusal_from_no_stream_is_reapplied_and_starts_nothing() {
+        // UR-13 (S5): the rate comparison of an enable's open refuses, and the open is redone
+        // at the next enable from no stream: the stored refusal returns, so nothing is applied.
+        let (core, device, _, _) = crate::provider::test_support::rig_with(crate::device::FakeConfig::default(), vec![Arc::new(NoLink)]);
+        // The first comparison refuses (a rate read of a channel the device does not have).
+        assert!(core.check_rates(Dir::Rx, 99).is_err());
+        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        control.book(Dispatched::new(ActionId(1), Action::Stop { target: Some(super::super::test_support::target_of(&core.rx_id)) }, Some(core.rx_id.clone())));
+        enable_from_none(&mut control, &core, 2, 100, 2e6);
+        enable_from_none(&mut control, &core, 3, 200, 2e6);
+        let calls = device.calls();
+        assert_eq!(calls.iter().filter(|call| call.starts_with("rx_open")).count(), 2, "{calls:?}");
+        assert!(calls.iter().all(|call| !call.starts_with("apply")), "{calls:?}");
+    }
+
+    #[test]
+    fn ur_24_a_timed_update_after_a_from_none_configure_is_sent_without_configuring_again() {
+        // UR-24 (S11a): an update the enable's segment holds at its origin and the device
+        // receives as its own timed command leaves the configuration's version standing, so the
+        // owner, whose record holds the segment's command and version, starts it without
+        // configuring the direction again.
+        let (core, device, time) = rig();
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.rx.channels"), Value::from(0));
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        channels_from_none(&mut control, &core, 2, 100, 1);
+        let planned = plan_of(&core, Dir::Rx);
+        let (by, version) = (planned[0].segment.by.expect("the enable"), planned[0].version().expect("its settings"));
+        // Due at the segment's own origin, where the channel is in force: a timed command.
+        control.book_timed(ActionId(3), key("radio.rx.gain_db"), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(100)))));
+        time.advance_to(core.at(ms(98))).unwrap();
+        control.release();
+        let timed: Vec<String> = device.calls().into_iter().filter(|call| call.starts_with("apply") && !call.ends_with("at=-")).collect();
+        assert_eq!(timed.len(), 1, "{:?}", device.calls());
+        assert!(timed[0].contains("gain=3"), "{timed:?}");
+        let before = device.calls().len();
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin(), "the owner begins the enable's segment");
+        let owner = device.calls()[before..].to_vec();
+        assert!(owner.iter().all(|call| call.starts_with("rx_start")), "the segment is not configured again: {owner:?}");
+        assert_eq!(plan_of(&core, Dir::Rx)[0].version(), Some(version), "the device received the update: no new version");
+        assert_eq!(lock(&core.streams).stream(booked_stream(Dir::Rx)).configured, Some((by, version)));
+    }
+
+    #[test]
+    fn ur_24_a_record_only_release_after_a_from_none_configure_makes_the_owner_configure_again() {
+        // UR-24 (S11b): the enable from no stream at 100 ms is configured by uhd-control; a
+        // timed gain due at 50 ms, before that segment's origin, is released while no channel
+        // holds it and is only recorded. The version moves on, so the owner configures the
+        // segment again rather than trusting its record, and the gain reaches the device then.
+        let (core, device, time) = rig();
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.rx.channels"), Value::from(0));
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        channels_from_none(&mut control, &core, 2, 100, 1);
+        let version = plan_of(&core, Dir::Rx)[0].version().expect("the enable's settings");
+        control.book_timed(ActionId(3), key("radio.rx.gain_db"), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(50)))));
+        let before = device.calls().len();
+        time.advance_to(core.at(ms(48))).unwrap();
+        control.release();
+        assert_eq!(device.calls().len(), before, "a recorded release reaches no device: {:?}", device.calls());
+        assert_eq!(plan_of(&core, Dir::Rx)[0].version(), Some(version + 1), "the recorded release did not move the version");
+        let mark = device.calls().len();
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin(), "the owner begins the enable's segment");
+        let owner = device.calls()[mark..].to_vec();
+        assert!(owner.iter().all(|call| !call.starts_with("rx_open")), "the record holds the set: {owner:?}");
+        assert_eq!(owner.iter().filter(|call| call.starts_with("apply")).count(), 1, "the segment is configured again: {owner:?}");
+        assert!(owner.iter().any(|call| call.contains("gain=3")), "the recorded gain reaches the device: {owner:?}");
+    }
+
+    #[test]
+    fn ur_24_a_cancelled_projected_update_makes_the_owner_configure_again() {
+        // UR-24 (S11c): cancelling a held update the segment's projection at its origin holds
+        // moves the version on, so the owner configures the segment again rather than trusting
+        // its record; cancelling one the origin never held leaves the version and that trust
+        // standing.
+        let (core, _, _) = rig();
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.rx.channels"), Value::from(0));
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        channels_from_none(&mut control, &core, 2, 1000, 1);
+        let planned = plan_of(&core, Dir::Rx);
+        let (by, version) = (planned[0].segment.by.expect("the enable"), planned[0].version().expect("its settings"));
+        // Due after the origin: the projection at the origin never held it, so cancelling it
+        // leaves the segment — and the record the enable wrote — standing.
+        control.book_timed(ActionId(3), key("radio.rx.gain_db"), Value::num(4.0).unwrap(), at(1500));
+        control.cancel_held("Provider::stop");
+        let after = plan_of(&core, Dir::Rx)[0].version().expect("the settings");
+        assert_eq!(after, version, "an update past the origin moved the version");
+        assert_eq!(lock(&core.streams).owner_step(booked_stream(Dir::Rx), Channels::first(1), Some(by), Some(after)), super::super::core::Owner::Nothing);
+        // Due before the origin: its cancellation moves the version on, and the owner configures
+        // the segment again rather than trusting its record.
+        control.book_timed(ActionId(4), key("radio.rx.gain_db"), Value::num(3.0).unwrap(), at(500));
+        control.cancel_held("Provider::stop");
+        let after = plan_of(&core, Dir::Rx)[0].version().expect("the settings");
+        assert_eq!(after, version + 1, "the cancellation did not move the version");
+        assert_eq!(lock(&core.streams).owner_step(booked_stream(Dir::Rx), Channels::first(1), Some(by), Some(after)), super::super::core::Owner::Configure);
+    }
+
+    #[test]
+    fn ur_24_a_cancelled_update_of_another_layout_channel_leaves_the_version() {
+        // UR-24 (S11c, layout): a held update of channel 1, due before the origin of channel 0's
+        // segment, is cancelled; the segment runs channel 0 alone, so the update never reached
+        // it, and its version and the owner's trust in its record stand.
+        let selector = BTreeMap::from([
+            (ezsdr_kernel::spec::Ident::parse("keys").unwrap(), Value::from("channel".to_owned())),
+            (ezsdr_kernel::spec::Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")])),
+            (ezsdr_kernel::spec::Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])),
+        ]);
+        let layout = ezsdr_radio::channels::from_selector(&selector).unwrap();
+        let mode = super::super::mode::Mode::Layout(Box::new(ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms())));
+        let (core, _time, _) = crate::provider::test_support::rig_on_mode(Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default())), vec![Arc::new(NoLink)], BTreeMap::new(), mode);
+        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = true;
+        control.book_cold(ActionId(1), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), at(1000));
+        let by = plan_of(&core, Dir::Rx).iter().find(|p| p.segment.by.is_some() && p.segment.config.channels.contains(0)).and_then(|p| p.segment.by).expect("channel 0's segment");
+        let version = plan_of(&core, Dir::Rx).iter().find(|p| p.segment.by == Some(by)).and_then(|p| p.version()).expect("its settings");
+        // The owner's record: channel 0's streamer is open, and configured for the segment.
+        lock(&core.streams).record_open(booked_stream(Dir::Rx), Some(Channels::first(1)));
+        lock(&core.streams).record_configured(booked_stream(Dir::Rx), Some((by, version)));
+        control.book_timed(ActionId(3), key("radio.rx.c1.gain_db"), Value::num(4.0).unwrap(), at(100));
+        assert_eq!(control.held.len(), 1, "the channel 1 update is held");
+        control.cancel_held("Provider::stop");
+        let after = plan_of(&core, Dir::Rx).iter().find(|p| p.segment.by == Some(by)).and_then(|p| p.version()).expect("the settings");
+        assert_eq!(after, version, "a cancelled update of another channel moved the version");
+        assert_eq!(lock(&core.streams).owner_step(booked_stream(Dir::Rx), Channels::first(1), Some(by), Some(after)), super::super::core::Owner::Nothing);
+    }
+
+    #[test]
+    fn ur_17_a_prune_keeps_the_device_record_and_the_configure_mark() {
+        // UR-17 (S16): pruning an ended segment leaves the stream's device record alone: its set
+        // and its configure mark stay, so the next segment is not configured again for nothing.
+        let (core, _, _) = rig();
+        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), at(100));
+        control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(1e6).unwrap(), at(200));
+        let rx = booked_stream(Dir::Rx);
+        let second = plan_of(&core, Dir::Rx)[2].segment.by.unwrap();
+        lock(&core.streams).record_open(rx, Some(Channels::first(1)));
+        lock(&core.streams).record_configured(rx, Some((second, 7)));
+        lock(&core.streams).prune(rx, Some(second));
+        let streams = lock(&core.streams);
+        assert_eq!(streams.stream(rx).set, super::super::core::DeviceSet::Open(Channels::first(1)));
+        assert_eq!(streams.stream(rx).configured, Some((second, 7)));
+    }
+
+    /// Books a change of the receive stream's channel count at `ms` from no stream (UR-13): the
+    /// owner is idle, as its `read` leaves it.
+    fn channels_from_none(control: &mut Control, core: &Core, id: u64, ms: i64, channels: i64) {
+        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = true;
+        control.book_cold(ActionId(id), key("radio.rx.channels"), Value::from(channels), Some(AbsoluteDeadline::new(core.at(core.ticks(ms * 1_000_000)))));
+    }
+
+    /// The device calls `rx_open` and `rx_start` of a receive owner's begins, in order.
+    fn owner_rx_calls(calls: &[String]) -> Vec<String> {
+        calls.iter().filter(|c| c.starts_with("rx_open") || c.starts_with("rx_start")).cloned().collect()
+    }
+
+    /// A receive owner that begins its planned segments from no stream, its commands unread.
+    fn owner_rx(core: &Arc<Core>) -> super::super::rx::Rx {
+        let (to_rx, cmds) = channel();
+        std::mem::forget(to_rx);
+        super::super::rx::Rx::new(core.clone(), 0, cmds, None, None)
+    }
+
+    #[test]
+    fn ur_13_a_from_none_segment_the_owner_never_started_is_opened_again() {
+        // UR-13 (S1): uhd-control opens and configures B = {0,1} from no stream, the owner has not
+        // begun it, and a later enable from no stream opens C = {0}. The owner opens B again
+        // before it begins B, and C again before it begins C: the record of the last open does not
+        // stand for the set of B.
+        let (core, device, _) = rig();
+        let (mut control, _tx) = control(&core, &[]);
+        channels_from_none(&mut control, &core, 2, 100, 2);
+        channels_from_none(&mut control, &core, 3, 200, 0);
+        channels_from_none(&mut control, &core, 4, 300, 1);
+        assert_eq!(owner_rx_calls(&device.calls()), ["rx_open 0 [0, 1]", "rx_open 0 [0]"], "{:?}", device.calls());
+        let mut rx = owner_rx(&core);
+        let mark = device.calls().len();
+        for _ in 0..4 {
+            rx.begin();
         }
+        let owner = owner_rx_calls(&device.calls()[mark..]);
+        assert_eq!(owner.first().map(String::as_str), Some("rx_open 0 [0, 1]"), "B opened again before it begins: {owner:?}");
+        assert!(owner.iter().any(|c| c == "rx_open 0 [0]"), "C opened again before it begins: {owner:?}");
+    }
+
+    #[test]
+    fn ur_25_an_owner_begins_a_from_none_enable_without_a_second_open() {
+        // UR-25 (S3, receive): an enable from no stream is opened and configured by uhd-control, and
+        // the owner, which finds the record holds its set and configuration, only starts the segment.
+        let (core, device, _) = rig();
+        let (mut control, _tx) = control(&core, &[]);
+        channels_from_none(&mut control, &core, 2, 100, 1);
+        let mark = device.calls().len();
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin(), "the owner begins the enable's segment");
+        let owner = device.calls()[mark..].to_vec();
+        assert!(owner.iter().all(|c| !c.starts_with("rx_open") && !c.starts_with("apply")), "no second open or configure: {owner:?}");
+        assert_eq!(owner.iter().filter(|c| c.starts_with("rx_start")).count(), 1, "{owner:?}");
+    }
+
+    #[test]
+    fn ur_25_a_refused_receive_enable_is_booked_and_the_next_enable_starts() {
+        // UR-25 (S21): an enable from no stream whose configure is refused is booked refused, and
+        // the next enable from no stream opens and configures its own set: nothing of the refused
+        // one is taken for it.
+        let config = crate::device::FakeConfig { faults: vec![crate::device::FakeFault::RxApplyFails], ..Default::default() };
+        let (core, device, _, _) = crate::provider::test_support::rig_with(config, vec![Arc::new(NoLink)]);
+        let (mut control, _tx) = control(&core, &[]);
+        channels_from_none(&mut control, &core, 2, 100, 1);
+        assert!(lock(&core.streams).line(booked_stream(Dir::Rx)).is_some_and(|line| line.items.iter().any(|item| item.refused)), "the refused enable is booked refused");
+        channels_from_none(&mut control, &core, 3, 150, 0);
+        channels_from_none(&mut control, &core, 4, 200, 1);
+        let calls = device.calls();
+        assert_eq!(calls.iter().filter(|c| c.starts_with("rx_open")).count(), 2, "{calls:?}");
+        assert!(calls.iter().filter(|c| c.starts_with("apply rx 0")).count() >= 1, "the next enable configures: {calls:?}");
+        // The owner begins the next enable's segment, on the record the enable left (UR-13).
+        let mut rx = owner_rx(&core);
+        let mark = device.calls().len();
+        assert!(rx.begin(), "the owner begins the next enable's segment");
+        let owner = device.calls()[mark..].to_vec();
+        assert!(owner.iter().all(|c| c.starts_with("rx_start")), "the record holds the enable: {owner:?}");
     }
 
     #[test]

@@ -847,8 +847,8 @@
   "id": "U39",
   "name": "enabling a direction opens the streamer without configuring it",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "            if let Err(error) = opened.and_then(|()| self.core.configure(dir, &entries, rate, k)) {",
-  "new": "            if let Err(error) = { let _ = &entries; opened } {",
+  "old": "            let configured = opened.clone().and(checked.clone()).and_then(|()| self.core.configure(dir, &entries, rate, k));",
+  "new": "            let configured = { let _ = &entries; opened.clone().and(checked.clone()) };",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_enabling_tx_applies_the_configuration"
@@ -857,8 +857,8 @@
   "id": "U40",
   "name": "a rate mismatch at the switch accepted",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "reopened.and_then(|()| next.configure(&self.core, Dir::Rx).map(|_| ()))",
-  "new": "reopened.and_then(|()| next.configure(&self.core, Dir::Rx).map(|_| ()).or(Ok(())))",
+  "old": "        if let Err(error) = self.core.owner_configure(Dir::Rx, self.k, &next) {",
+  "new": "        if let Err(error) = self.core.owner_configure(Dir::Rx, self.k, &next).or(Ok(())) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"
@@ -1046,9 +1046,9 @@
  {
   "id": "R14",
   "name": "the receive streamer reopened at every segment (P1-3)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "            let reopened = if channels != self.opened {",
-  "new": "            let reopened = if channels == channels {",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "            DeviceSet::Open(open) if open == set => {",
+  "new": "            DeviceSet::Open(open) if open == set && false => {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"
