@@ -21,11 +21,11 @@ use ezsdr_radio::payloads::{TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, 
 use serde_json::json;
 
 use super::control::Planned;
-use super::core::{stream_key, Clock, Core, lock};
+use super::core::{stream_key, Clock, Core, Streams, lock};
 use crate::device::{Dir, Iq, TxCode, TxReport};
 use crate::host::HostClock;
 use crate::profile::{DEVICE_LEAD_NS, IN_FLIGHT_WINDOW_NS};
-use ezsdr_radio::timeline::Channels;
+use ezsdr_radio::timeline::{Channels, StreamKey};
 
 /// A burst uhd-control booked (UR-21).
 pub(crate) struct Held {
@@ -146,12 +146,34 @@ impl Tx {
                 self.host.sleep(Wall::from_millis(1));
                 continue;
             }
-            self.read(None);
-            self.reports(Wall::ZERO);
-            if !self.step() {
+            if !self.pass() {
                 self.host.sleep(IDLE);
             }
         }
+    }
+
+    /// One turn of the run loop (UR-23, UR-25): the plan, read again when uhd-control has
+    /// changed it, and the report read's ownership are one section of the instance's line
+    /// state — so a turn cannot pass between them, and the enable can never find the plan read
+    /// without the read in flight too —; then the report read, then one step. A turn
+    /// uhd-control's enable from no stream owns the streamer for makes no device call at all —
+    /// `reports` and `step` included — and nothing of the owner's state moves. False when the
+    /// turn had nothing to do, which the run loop's idle wait follows.
+    pub(super) fn pass(&mut self) -> bool {
+        let core = self.core.clone();
+        let key = stream_key(Dir::Tx, self.k);
+        let mut streams = lock(&core.streams);
+        if streams.stream(key).busy {
+            return false;
+        }
+        if !self.plan_section(&mut streams, key, None) {
+            return false;
+        }
+        streams.stream_mut(key).reading = true;
+        drop(streams);
+        self.reports(Wall::ZERO);
+        self.end_reading();
+        self.step()
     }
 
     fn command(&mut self, cmd: TxCmd) {
@@ -171,19 +193,36 @@ impl Tx {
 
     /// Reads the transmit plan it shares with uhd-control again, when it has changed (UR-25),
     /// pruning first the items before the command that began the segment `passed` (#63).
-    pub(super) fn read(&mut self, passed: Option<Option<u64>>) {
+    /// False when uhd-control's enable from no stream owns the streamer this turn: the plan is
+    /// read again at the next, and the version, the switch and the idle mark stand.
+    pub(super) fn read(&mut self, passed: Option<Option<u64>>) -> bool {
         let core = self.core.clone();
         let key = stream_key(Dir::Tx, self.k);
         let mut streams = lock(&core.streams);
-        if let Some(by) = passed {
-            streams.prune(key, by);
-        } else if self.version == Some(streams.version) {
-            return;
+        if streams.stream(key).busy {
+            return false;
+        }
+        self.plan_section(&mut streams, key, passed)
+    }
+
+    /// The plan inside the caller's section of the instance's line state (UR-25, #63): read
+    /// again when uhd-control has changed it, pruning first the items before `passed`. False
+    /// only when the section may not read at all, which the caller has already checked.
+    fn plan_section(&mut self, streams: &mut Streams, key: StreamKey, passed: Option<Option<u64>>) -> bool {
+        match passed {
+            Some(by) => streams.prune(key, by),
+            None if self.version == Some(streams.version) => return true,
+            None => {}
         }
         self.version = Some(streams.version);
         self.plan = streams.planned(key);
         self.retarget();
         streams.stream_mut(key).idle = self.clock.is_none() && self.switch.is_none();
+        true
+    }
+
+    fn end_reading(&mut self) {
+        lock(&self.core.streams).stream_mut(stream_key(Dir::Tx, self.k)).reading = false;
     }
 
     /// UR-25: the plan's cut of the current clock, and the segment after it; with no clock,
@@ -803,7 +842,12 @@ impl Tx {
         // busy thread holds still would never reach `until` (UR-33).
         let until = self.host.now() + Wall::from_millis(100);
         while !self.core.is_lost() && self.host.now() < until {
+            // UR-25: the shutdown's read is a report read all the same, but it takes no busy
+            // check: a uhd-control the join bound left detached (UR-16) may never clear its
+            // mark, and must not hold this window open.
+            lock(&self.core.streams).stream_mut(stream_key(Dir::Tx, self.k)).reading = true;
             self.reports(Wall::from_millis(10));
+            self.end_reading();
         }
     }
 }
@@ -1871,5 +1915,260 @@ mod tests {
         assert_eq!(late.len(), 1, "{late:?}");
         assert_eq!(late[0].payload["target"], serde_json::to_value(second).unwrap(), "the report names the second burst");
         assert_eq!(late[0].payload["outcome"], "late_at_device");
+    }
+
+    // ------------------------------------------------------------ 1b-4d-1b: ownership, reading, stop
+
+    use crate::provider::test_support::LockSpy;
+    use crate::ClockMode;
+
+    /// The manual-clock `LockSpy` rig the ownership series runs on (UR-25).
+    fn spy_rig() -> (Arc<Core>, Arc<LockSpy>) {
+        let spy = Arc::new(LockSpy::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        let (core, _time, _) = crate::provider::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
+        (core, spy)
+    }
+
+    /// Books an enable of the transmit stream's `channels` at `ms` from no stream, its owner
+    /// idle, through the Action path.
+    fn tx_enable_from_none(control: &mut super::super::control::Control, core: &Core, id: u64, ms: i64, channels: i64) {
+        lock(&core.streams).stream_mut(stream_key(Dir::Tx, 0)).idle = true;
+        control.book(Dispatched::new(ActionId(id), Action::UpdateParameter {
+            target: super::super::test_support::target_of(&core.id),
+            key: crate::provider::core::key("radio.tx.channels"),
+            value: Value::from(channels),
+            class: UpdateClass::Cold,
+            at: Some(AbsoluteDeadline::new(core.at(core.ticks(ms * 1_000_000)))),
+        }, Some(core.id.clone())));
+    }
+
+    /// How many `cold` changes the transmit line holds (RM-25): an enable that books nothing
+    /// leaves none, whatever the plan shows once an end has taken effect.
+    fn tx_colds(core: &Core) -> usize {
+        lock(&core.streams).line(stream_key(Dir::Tx, 0)).map_or(0, |line| line.items.iter().filter(|item| matches!(item.kind, ezsdr_radio::timeline::Kind::Cold(_))).count())
+    }
+
+    /// The transmit record, as the ownership tests read it.
+    fn tx_record(core: &Core) -> (bool, bool, Option<(u64, u64)>) {
+        let streams = lock(&core.streams);
+        let state = streams.stream(stream_key(Dir::Tx, 0));
+        (state.busy, state.reading, state.configured)
+    }
+
+    #[test]
+    fn ur_25_a_transmit_owner_waiting_behind_a_from_none_open_starts_nothing() {
+        // UR-25 (S9, transmit): while uhd-control's enable from no stream owns the streamer,
+        // uhd-tx reads no plan, moves no cursor and begins no switch; the first turn after the
+        // booking opens B's set again: the record holds C's.
+        let (core, spy) = spy_rig();
+        let mut control = control_of(&core);
+        tx_channels_from_none(&mut control, &core, 2, 100, 2);
+        tx_channels_from_none(&mut control, &core, 3, 200, 0);
+        let gate = spy.stop_before("tx_open");
+        let host = core.device.host();
+        let core_ = core.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        let control_thread = host.spawn("control", move || {
+            let mut control = control;
+            tx_enable_from_none(&mut control, &core_, 4, 300, 1);
+            let _ = done.send(());
+        }).expect("a participant thread");
+        gate.wait();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
+        let mark = spy.log().len();
+        let idle = || lock(&core.streams).stream(stream_key(Dir::Tx, 0)).idle;
+        let before = idle();
+        assert!(!tx.read(None), "uhd-tx read the plan while uhd-control owns the streamer");
+        assert_eq!((tx.at, tx.switch.is_some(), idle()), (0, false, before), "the owner's cursor, switch or idle mark moved");
+        assert!(!tx.step(), "uhd-tx began a switch while uhd-control owns the streamer");
+        assert_eq!(spy.log().len(), mark, "uhd-tx called the device: {:?}", spy.log());
+        gate.release();
+        assert!(finished.recv_timeout(std::time::Duration::from_secs(10)).is_ok(), "the enable did not book");
+        control_thread.join().expect("the control thread");
+        let mark = spy.log().len();
+        assert!(tx.read(None));
+        assert!(tx.step(), "B's switch");
+        let opens: Vec<String> = spy.log()[mark..].iter().filter(|call| call.starts_with("tx_open")).cloned().collect();
+        assert_eq!(opens.first().map(String::as_str), Some("tx_open 0 [0, 1]"), "the record's set is not C's: {opens:?}");
+        assert!(tx.clock.is_some(), "the owner adopted no clock");
+    }
+
+    #[test]
+    fn ur_25_a_transmit_poll_during_a_control_open_starts_no_streamer_call() {
+        // UR-25, UR-22 (S22): a turn of the run loop while uhd-control's enable from no
+        // stream owns the streamer — the plan, the report read and the step alike — makes no
+        // device call and takes no report read.
+        let (core, spy) = spy_rig();
+        let control = control_of(&core);
+        let gate = spy.stop_before("tx_open");
+        let host = core.device.host();
+        let core_ = core.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        let control_thread = host.spawn("control", move || {
+            let mut control = control;
+            tx_enable_from_none(&mut control, &core_, 2, 100, 1);
+            let _ = done.send(());
+        }).expect("a participant thread");
+        gate.wait();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
+        let mark = spy.log().len();
+        assert!(!tx.read(None));
+        tx.pass();
+        assert_eq!(spy.seen("tx_async"), 0, "the poll read reports during a control open");
+        assert_eq!(spy.log().len(), mark, "the poll called the device: {:?}", spy.log());
+        assert!(!tx_record(&core).1, "the poll took a report read");
+        gate.release();
+        assert!(finished.recv_timeout(std::time::Duration::from_secs(10)).is_ok(), "the enable did not book");
+        control_thread.join().expect("the control thread");
+        assert_eq!(spy.seen("tx_open"), 1, "the enable's open: {:?}", spy.log());
+        assert!(spy.seen("apply") >= 1, "the enable configured nothing: {:?}", spy.log());
+        assert!(!tx_record(&core).0, "the stream stayed uhd-control's");
+    }
+
+    #[test]
+    fn ur_25_a_from_none_enable_waits_for_a_transmit_report_read() {
+        // UR-25 (S23): a report read in flight is uhd-tx's until it ends. An enable from no
+        // stream that finds it set waits — without a device call — and never falls back to a
+        // change the owner books.
+        let (core, spy) = spy_rig();
+        let (to_tx, cmds) = std::sync::mpsc::channel();
+        let tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
+        let gate = spy.stop_before("tx_async");
+        let host = core.device.host();
+        let tx_thread = host.spawn("tx", move || tx.run()).expect("a participant thread");
+        gate.wait();
+        assert!(tx_record(&core).1, "the report read is not owned");
+        let (entered, entered_rx) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let released = std::sync::Mutex::new(released);
+        crate::provider::test_support::probe(&core, "wait_reading", move |_| {
+            let _ = entered.send(());
+            let _ = released.lock().unwrap().recv();
+        });
+        let control = control_of(&core);
+        let core_ = core.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        let control_thread = host.spawn("control", move || {
+            let mut control = control;
+            tx_enable_from_none(&mut control, &core_, 2, 100, 1);
+            let _ = done.send(());
+        }).expect("a participant thread");
+        entered_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the enable entered the wait");
+        assert_eq!(spy.seen("tx_open"), 0, "the enable opened the streamer while a report read is in flight: {:?}", spy.log());
+        assert!(tx_record(&core).0, "the enable did not take the streamer");
+        release.send(()).unwrap();
+        gate.release();
+        // The read is over; the enable goes on while the owner keeps polling, before any
+        // stop of its own, so that only the run loop's own read can end the wait (UR-25).
+        assert!(finished.recv_timeout(std::time::Duration::from_secs(30)).is_ok(), "the enable did not book after the read");
+        control_thread.join().expect("the control thread");
+        let _ = to_tx.send(TxCmd::Shutdown);
+        tx_thread.join().expect("the transmit thread");
+        assert_eq!(spy.seen("tx_open"), 1, "the enable's open: {:?}", spy.log());
+        assert!(spy.seen("apply") >= 1, "the enable configured nothing: {:?}", spy.log());
+        let (busy, reading, configured) = tx_record(&core);
+        assert!(!busy && !reading, "the ownership did not go back");
+        let planned = plan_of(&core, Dir::Tx);
+        assert_eq!(configured, planned[0].segment.by.zip(planned[0].version()), "the enable fell back to a change the owner books");
+    }
+
+    #[test]
+    fn ur_25_a_from_none_enable_ends_its_wait_at_the_provider_stop() {
+        // UR-25, UR-26 (S27's stop): the Provider's stop, read from its mark, ends an enable's
+        // wait for a report read: no device call, and the streamer goes back.
+        let (core, spy) = spy_rig();
+        let (to_tx, cmds) = std::sync::mpsc::channel();
+        let tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
+        let gate = spy.stop_before("tx_async");
+        let host = core.device.host();
+        let tx_thread = host.spawn("tx", move || tx.run()).expect("a participant thread");
+        gate.wait();
+        let (entered, entered_rx) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let released = std::sync::Mutex::new(released);
+        crate::provider::test_support::probe(&core, "wait_reading", move |_| {
+            let _ = entered.send(());
+            let _ = released.lock().unwrap().recv();
+        });
+        let control = control_of(&core);
+        let core_ = core.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        let control_thread = host.spawn("control", move || {
+            let mut control = control;
+            tx_enable_from_none(&mut control, &core_, 2, 100, 1);
+            let _ = done.send(());
+        }).expect("a participant thread");
+        entered_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the enable entered the wait");
+        {
+            // As `Provider::stop` books it before its joins.
+            let mut streams = lock(&core.streams);
+            let at = core.now();
+            streams.stop = Some((at, ezsdr_kernel::module_api::StopMode::Orderly));
+            streams.end(&core, at, false, false);
+        }
+        release.send(()).unwrap();
+        assert!(finished.recv_timeout(std::time::Duration::from_secs(10)).is_ok(), "the stop did not end the wait");
+        control_thread.join().expect("the control thread");
+        assert_eq!((spy.seen("tx_open"), spy.seen("apply")), (0, 0), "a stopped enable called the device: {:?}", spy.log());
+        assert_eq!(tx_colds(&core), 0, "a stopped enable booked a change");
+        assert!(!tx_record(&core).0, "the stream stayed uhd-control's");
+        gate.release();
+        let _ = to_tx.send(TxCmd::Shutdown);
+        tx_thread.join().expect("the transmit thread");
+    }
+
+    #[test]
+    fn ur_29_a_lost_device_ends_a_from_none_enable_s_wait_for_a_report_read() {
+        // UR-29, UR-25: a device loss recorded while an enable from no stream waits for a
+        // report read ends the wait: no device call, and the streamer goes back. The read is
+        // held open until after the control thread has ended, so only the loss can end it.
+        let (core, spy) = spy_rig();
+        let (to_tx, cmds) = std::sync::mpsc::channel();
+        let tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
+        let gate = spy.stop_before("tx_async");
+        let host = core.device.host();
+        let tx_thread = host.spawn("tx", move || tx.run()).expect("a participant thread");
+        gate.wait();
+        let (entered, entered_rx) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let released = std::sync::Mutex::new(released);
+        crate::provider::test_support::probe(&core, "wait_reading", move |_| {
+            let _ = entered.send(());
+            let _ = released.lock().unwrap().recv();
+        });
+        let control = control_of(&core);
+        let core_ = core.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        let control_thread = host.spawn("control", move || {
+            let mut control = control;
+            tx_enable_from_none(&mut control, &core_, 2, 100, 1);
+            let _ = done.send(());
+        }).expect("a participant thread");
+        entered_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the enable entered the wait");
+        core.device_lost("test");
+        release.send(()).unwrap();
+        assert!(finished.recv_timeout(std::time::Duration::from_secs(10)).is_ok(), "the loss did not end the wait");
+        control_thread.join().expect("the control thread");
+        assert_eq!((spy.seen("tx_open"), spy.seen("apply")), (0, 0), "a lost enable called the device: {:?}", spy.log());
+        assert_eq!(tx_colds(&core), 0, "a lost enable booked a change");
+        assert!(!tx_record(&core).0, "the stream stayed uhd-control's");
+        gate.release();
+        let _ = to_tx.send(TxCmd::Shutdown);
+        tx_thread.join().expect("the transmit thread");
+    }
+
+    #[test]
+    fn ur_25_a_detached_control_does_not_hold_the_shutdown_s_read() {
+        // UR-25, UR-16: a uhd-control the join bound left detached may never clear its mark;
+        // the shutdown's ACK window still reads the reports.
+        let (core, spy) = spy_rig();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
+        lock(&core.streams).stream_mut(stream_key(Dir::Tx, 0)).busy = true;
+        tx.shutdown();
+        assert!(spy.seen("tx_async") >= 1, "the shutdown's read waited for a detached control");
+        assert!(!tx_record(&core).1, "the shutdown's read was not taken back");
     }
 }

@@ -847,8 +847,8 @@
   "id": "U39",
   "name": "enabling a direction opens the streamer without configuring it",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "            let configured = opened.clone().and(checked.clone()).and_then(|()| self.core.configure(dir, &entries, rate, k));",
-  "new": "            let configured = { let _ = &entries; opened.clone().and(checked.clone()) };",
+  "old": "                    Some(self.core.configure(dir, &entries, rate, k))",
+  "new": "                    { let _ = &entries; Some(Ok(0)) }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_enabling_tx_applies_the_configuration"

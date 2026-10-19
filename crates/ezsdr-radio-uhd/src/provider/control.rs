@@ -24,7 +24,7 @@ use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, Segment, S
 use ezsdr_radio::kinds;
 use serde_json::json;
 
-use super::core::{booked_stream, stream_key, Clock, Core, lock};
+use super::core::{assert_line_free, booked_stream, stream_key, Clock, Core, lock};
 use super::mode::{current_key_direction, scalar_number};
 use ezsdr_radio::Addressed;
 use super::tx::{Held, TxCmd};
@@ -96,6 +96,7 @@ impl ColdConfig {
     }
 
     fn book(&self, order: (i64, u64), chan: usize, settings: Settings) {
+        assert_line_free("a configuration's updates");
         self.updates.lock().insert(order, (chan, settings));
     }
 
@@ -108,6 +109,7 @@ impl ColdConfig {
     /// `updates`, so that an owner's configure that read the old one is not taken for this one.
     /// The caller decides which segments the change reaches (UR-36).
     fn changed(&self) {
+        assert_line_free("a configuration's updates");
         let _updates = self.updates.lock();
         self.version.fetch_add(1, Ordering::AcqRel);
     }
@@ -149,6 +151,7 @@ impl ColdConfig {
     pub fn configure(&self, core: &Core, dir: Dir, segment: &Segment, k: usize) -> Result<(i64, u64), DeviceError> {
         // Hold the snapshot lock across the call: an update cannot change the
         // projection while an owner is configuring from it (§4.7: the clock lock).
+        assert_line_free("a configuration's updates");
         let updates = self.updates.lock();
         let version = self.version();
         let ratio = segment.config.ratio;
@@ -654,6 +657,7 @@ impl Control {
             let settings = timed.settings();
             let projections = self.projections(timed.dir);
             // Order a timed issuance and its projections atomically against configure.
+            assert_line_free("a timed command's release");
             let mut updates: Vec<_> = projections.iter().map(|cold| cold.updates.lock()).collect();
             for chan in &chans {
                 if let Err(error) = self.core.device.apply(timed.dir, *chan, &settings, Some(effective)) {
@@ -681,6 +685,7 @@ impl Control {
             // version, and with it its owner's trust in its record.
             let changed = self.changed_projections(timed.dir, e, timed.chan);
             let projections = self.projections(timed.dir);
+            assert_line_free("a cancelled command's updates");
             let mut updates: Vec<_> = projections.iter().map(|cold| cold.updates.lock()).collect();
             for (cold, updates) in projections.iter().zip(updates.iter_mut()) {
                 updates.remove(&(e, seq));
@@ -697,6 +702,27 @@ impl Control {
     }
 
     // ------------------------------------------------------------ UR-25
+
+    /// UR-25: an enable from no stream whose owner is reading reports waits for the read to
+    /// end before its first device call. The wait is the host clock's (UR-33), so uhd-control
+    /// is idle and the device's time runs; `Provider::stop`'s mark and a loss end it too, and
+    /// then no device call is made.
+    fn await_reading(&self, stream: StreamKey) -> bool {
+        self.core.probe("wait_reading", None);
+        loop {
+            let (reading, stop) = {
+                let streams = lock(&self.core.streams);
+                (streams.stream(stream).reading, streams.stop.is_some())
+            };
+            if stop || self.core.is_lost() {
+                return false;
+            }
+            if !reading {
+                return true;
+            }
+            self.host.sleep(POLL);
+        }
+    }
 
     /// UR-25: a `cold` update is booked when uhd-control takes it: its effective instant,
     /// `coerce` over the configuration projected there, and the stream's plan from the
@@ -846,38 +872,77 @@ impl Control {
         let mut ready = now;
         let mut failure: Option<DeviceError> = None;
         let version = segment_config.version();
+        let mut reading = false;
+        let mut stopped = false;
+        if from_none {
+            // UR-25: the streamer is uhd-control's from this section — the one that read the
+            // owner's idle mark and the plan — until the section that books the change, on
+            // every path. An owner that finds it set makes no device call.
+            let state = streams.stream_mut(stream);
+            state.busy = true;
+            reading = state.reading;
+            stopped = streams.stop.is_some();
+        }
         if from_none {
             // Its owner is idle: nothing it could prune comes meanwhile, so the lock is
             // released for the device calls alone and taken again for the book. `k` is 0
             // here: a stream the layout holds a channel for is stream 0 (D14).
             drop(streams);
-            let opened = self.core.open_device(dir, k, channels);
-            let checked = if opened.is_ok() { self.core.check_opened(dir, channels) } else { Ok(()) };
-            // The configuration in effect at `e`, the timed updates held for it included (UC-2).
-            let entries: Vec<(usize, Settings)> = channels
-                .iter()
-                .map(|chan| {
-                    let mut settings = self.core.mode.settings(&candidate, dir, chan as usize);
-                    settings.rate = Some(rate);
-                    // A layout command names its channel; a current-keys one belongs to every
-                    // channel of its direction, as the projection applies it (UC-2).
-                    for timed in self.held.range(..=(e, u64::MAX)).map(|(_, timed)| timed).filter(|timed| timed.dir == dir && timed.chan.is_none_or(|timed_chan| timed_chan == chan as usize)) {
-                        let update = timed.settings();
-                        settings.freq = update.freq.or(settings.freq);
-                        settings.gain = update.gain.or(settings.gain);
-                    }
-                    (chan as usize, settings)
-                })
-                .collect();
-            let configured = opened.clone().and(checked.clone()).and_then(|()| self.core.configure(dir, &entries, rate, k));
+            // UR-29, UR-25: a loss, or `Provider::stop` read from its mark before any call,
+            // ends the enable with no device call; the stop's own path books the end.
+            let may_call = if reading { self.await_reading(stream) } else { !self.core.is_lost() && !stopped };
+            let mut opened: Option<Result<(), DeviceError>> = None;
+            let mut checked: Option<Result<(), DeviceError>> = None;
+            let mut configured: Option<Result<i64, DeviceError>> = None;
+            if may_call {
+                let open = self.core.open_device(dir, k, channels);
+                let check = if open.is_ok() && !self.core.is_lost() { self.core.check_opened(dir, channels) } else { Ok(()) };
+                // The configuration in effect at `e`, the timed updates held for it included (UC-2).
+                let entries: Vec<(usize, Settings)> = channels
+                    .iter()
+                    .map(|chan| {
+                        let mut settings = self.core.mode.settings(&candidate, dir, chan as usize);
+                        settings.rate = Some(rate);
+                        // A layout command names its channel; a current-keys one belongs to every
+                        // channel of its direction, as the projection applies it (UC-2).
+                        for timed in self.held.range(..=(e, u64::MAX)).map(|(_, timed)| timed).filter(|timed| timed.dir == dir && timed.chan.is_none_or(|timed_chan| timed_chan == chan as usize)) {
+                            let update = timed.settings();
+                            settings.freq = update.freq.or(settings.freq);
+                            settings.gain = update.gain.or(settings.gain);
+                        }
+                        (chan as usize, settings)
+                    })
+                    .collect();
+                // UR-29: a loss between two channels stops the rest; `Core::configure` looks
+                // before each one's apply.
+                let config = if open.is_ok() && check.is_ok() && !self.core.is_lost() {
+                    Some(self.core.configure(dir, &entries, rate, k))
+                } else {
+                    None
+                };
+                opened = Some(open);
+                checked = Some(check);
+                configured = config;
+            }
             ready = self.core.now();
             streams = lock(&self.core.streams);
             // UR-13, UR-25: the record of the open and of the configuration is only what their own
             // outcomes made known.
-            streams.record_opened(stream, channels, &opened, &checked);
-            if let Err(error) = configured {
-                failure = Some(error);
+            if let (Some(opened), Some(checked)) = (&opened, &checked) {
+                streams.record_opened(stream, channels, opened, checked);
             }
+            if !may_call || self.core.is_lost() || streams.stop.is_some() {
+                // UR-25: the ownership goes back, and nothing of the enable is booked.
+                streams.stream_mut(stream).busy = false;
+                drop(streams);
+                return;
+            }
+            failure = match (opened, checked) {
+                (Some(Err(error)), _) => Some(error),
+                (Some(Ok(())), Some(Err(error))) => Some(error),
+                (Some(Ok(())), Some(Ok(()))) => configured.and_then(Result::err),
+                _ => None,
+            };
         }
         if from_none {
             streams.record_configured(stream, failure.is_none().then_some((seq, version)));
@@ -887,11 +952,15 @@ impl Control {
         // booked refused in this section, as its owner books a refusal it finds — the values
         // stay the configuration of record, the stream is halted, and the next enable applies
         // them —, and then the refusal is reported.
+        self.core.probe("cold_booking", if from_none { Some(&*streams) } else { None });
         if streams.book(&self.core, stream, Item { e, seq, ready, release: NO_RELEASE, delivered: None, refused: failure.is_some(), kind: Kind::Cold(config) }) {
             self.colds.insert((e, seq), (key.clone(), value));
             self.core.timing(json!({ "what": "cold_change", "key": key, "e": e, "booked_at": now, "ready": ready }));
         } else {
             streams.stream_mut(stream).configs.remove(&seq);
+        }
+        if from_none {
+            streams.stream_mut(stream).busy = false;
         }
         drop(streams);
         if let Some(error) = failure {
@@ -2165,5 +2234,388 @@ mod tests {
             assert!(streams.stream(tx).configs.contains_key(&tx_seq), "the transmit configuration was pruned with the receive stream");
         }
         assert!(lock(&core.streams).refuse(&core, tx, tx_seq), "the transmit stream's command can no longer be refused");
+    }
+
+    // ------------------------------------------------------------ 1b-4d-1b: ownership, loss and stop
+
+    /// The manual-clock `LockSpy` rig the ownership series runs on: the device's calls are
+    /// gated and counted, and `links` gives the receive side a stream.
+    fn spy_rig(links: bool) -> (Arc<Core>, Arc<crate::provider::test_support::LockSpy>, Arc<ezsdr_kernel::time::ManualTimeAuthority>) {
+        use crate::ClockMode;
+        use crate::device::FakeConfig;
+        let spy = Arc::new(crate::provider::test_support::LockSpy::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        let links: Vec<Arc<dyn DataLink>> = if links { vec![Arc::new(NoLink)] } else { Vec::new() };
+        let (core, time, _) = crate::provider::test_support::rig_on(spy.clone(), links, 2_000);
+        (core, spy, time)
+    }
+
+    /// Books an enable of the receive stream's `channels` at `ms` from no stream, its owner
+    /// idle, through the Action path (uhi-control's own booking).
+    fn rx_enable_from_none(control: &mut Control, core: &Core, id: u64, ms: i64, channels: i64) {
+        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = true;
+        control.book(Dispatched::new(ActionId(id), Action::UpdateParameter {
+            target: super::super::test_support::target_of(&core.id),
+            key: key("radio.rx.channels"),
+            value: Value::from(channels),
+            class: UpdateClass::Cold,
+            at: Some(AbsoluteDeadline::new(core.at(core.ticks(ms * 1_000_000)))),
+        }, Some(core.id.clone())));
+    }
+
+    /// How many `cold` changes the receive line holds (RM-25): an enable that books nothing
+    /// leaves none, whatever the plan shows once an end has taken effect.
+    fn rx_colds(core: &Core) -> usize {
+        lock(&core.streams).line(booked_stream(Dir::Rx)).map_or(0, |line| line.items.iter().filter(|item| matches!(item.kind, Kind::Cold(_))).count())
+    }
+
+    /// The receive record, as the ownership tests read it.
+    fn rx_record(core: &Core) -> (bool, bool, super::super::core::DeviceSet, Option<(u64, u64)>) {
+        let streams = lock(&core.streams);
+        let state = streams.stream(booked_stream(Dir::Rx));
+        (state.busy, state.reading, state.set, state.configured)
+    }
+
+    #[test]
+    fn ur_25_an_owner_waiting_behind_a_from_none_open_starts_nothing() {
+        // UR-25 (S9, receive): while uhd-control's enable from no stream owns the streamer,
+        // uhd-rx's turn makes no device call and moves neither its idle mark nor its cursor.
+        // The first turn after the booking opens B's set again: the record holds C's.
+        let (core, spy, _time) = spy_rig(true);
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.rx.channels"), Value::from(0));
+        channels_from_none(&mut control, &core, 2, 100, 2);
+        channels_from_none(&mut control, &core, 3, 200, 0);
+        let gate = spy.stop_before("rx_open");
+        let host = core.device.host();
+        let core_ = core.clone();
+        let (done, finished) = channel();
+        let control_thread = host.spawn("control", move || {
+            let mut control = control;
+            rx_enable_from_none(&mut control, &core_, 4, 300, 1);
+            let _ = done.send(());
+        }).expect("a participant thread");
+        gate.wait();
+        let mut rx = owner_rx(&core);
+        let cursor = rx.cursor();
+        let mark = spy.log().len();
+        assert!(!rx.begin(), "the owner began a segment while uhd-control owns the streamer");
+        assert_eq!(rx.cursor(), cursor, "the owner moved its cursor");
+        assert!(lock(&core.streams).stream(booked_stream(Dir::Rx)).idle, "the owner moved its idle mark");
+        assert_eq!(spy.log().len(), mark, "the owner called the device: {:?}", spy.log());
+        gate.release();
+        assert!(finished.recv_timeout(Wall::from_secs(10)).is_ok(), "the enable did not book");
+        control_thread.join().expect("the control thread");
+        let mark = spy.log().len();
+        assert!(rx.begin(), "the owner begins B's segment");
+        let opens: Vec<String> = spy.log()[mark..].iter().filter(|call| call.starts_with("rx_open")).cloned().collect();
+        assert_eq!(opens.first().map(String::as_str), Some("rx_open 0 [0, 1]"), "the record's set is not C's: {opens:?}");
+    }
+
+    #[test]
+    fn ur_25_a_device_call_passes_while_another_thread_holds_the_line() {
+        // UR-25 (S13's control): the line's check is the caller's own guard, not a lock the
+        // spy cannot take — another thread holding the line while this one calls the device
+        // is no violation.
+        let (core, spy, _time) = spy_rig(false);
+        let (ready, held) = channel();
+        let (release, done) = channel();
+        let core_ = core.clone();
+        let holder = std::thread::spawn(move || {
+            let _line = lock(&core_.streams);
+            let _ = ready.send(());
+            let _ = done.recv();
+        });
+        held.recv_timeout(Wall::from_secs(10)).expect("the other thread holds the line");
+        core.device.rx_open(0, &[0]).expect("a device call while another thread holds the line");
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(spy.seen("rx_open"), 1);
+    }
+
+    #[test]
+    fn ur_25_an_open_is_recorded_only_after_the_device_returns() {
+        // UR-25 (S13b): an open writes the stream's record only after the device returned, so
+        // the call itself never sees the set it is opening.
+        let (core, spy, _time) = spy_rig(true);
+        let during = Arc::new(std::sync::Mutex::new(Vec::new()));
+        {
+            let during = during.clone();
+            let weak = Arc::downgrade(&core);
+            crate::provider::test_support::probe(&core, "open", move |_| {
+                if let Some(core) = weak.upgrade() {
+                    during.lock().unwrap().push(lock(&core.streams).stream(booked_stream(Dir::Rx)).set);
+                }
+            });
+        }
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.rx.channels"), Value::from(0));
+        channels_from_none(&mut control, &core, 2, 100, 1);
+        lock(&core.streams).record_open(booked_stream(Dir::Rx), None);
+        core.open_streamer(Dir::Rx, 0, Channels::first(1)).expect("the owner's open");
+        let seen = during.lock().unwrap().clone();
+        assert_eq!(seen, [super::super::core::DeviceSet::Unknown, super::super::core::DeviceSet::Unknown], "an open saw the set it was opening");
+        assert_eq!(rx_record(&core).2, super::super::core::DeviceSet::Open(Channels::first(1)), "the open is recorded after its return");
+        assert!(spy.seen("rx_open") >= 2, "the spy saw no open");
+    }
+
+    #[test]
+    fn ur_25_a_from_none_holds_the_streamer_from_its_decision_to_its_booking() {
+        // UR-25 (S24): an enable from no stream is uhd-control's from the section that decides
+        // it through every device call to the booking itself.
+        let (core, _spy, _time) = spy_rig(true);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for name in ["open", "rates", "apply"] {
+            let seen = seen.clone();
+            let weak = Arc::downgrade(&core);
+            crate::provider::test_support::probe(&core, name, move |_| {
+                if let Some(core) = weak.upgrade() {
+                    seen.lock().unwrap().push(lock(&core.streams).stream(booked_stream(Dir::Rx)).busy);
+                }
+            });
+        }
+        {
+            let seen = seen.clone();
+            crate::provider::test_support::probe(&core, "cold_booking", move |streams| {
+                seen.lock().unwrap().push(streams.expect("the booking's line").stream(booked_stream(Dir::Rx)).busy);
+            });
+        }
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.rx.channels"), Value::from(0));
+        channels_from_none(&mut control, &core, 2, 100, 1);
+        let observed = seen.lock().unwrap().clone();
+        assert_eq!(observed, [true, true, true, true], "an enable's section was not the streamer's: {observed:?}");
+        let (busy, reading, _set, configured) = rx_record(&core);
+        assert!(!busy && !reading, "the stream stayed uhd-control's");
+        let planned = plan_of(&core, Dir::Rx);
+        assert_eq!(configured, planned[0].segment.by.zip(planned[0].version()), "the configuration's own mark is not recorded");
+    }
+
+    #[test]
+    fn ur_25_an_enable_behind_an_owner_s_open_is_a_cold_change() {
+        // UR-25 (S24's reverse, the brief's): the owner has begun a segment — its idle mark is
+        // false and its open is out — when uhd-control takes an enable of the same stream. It
+        // opens and configures nothing, and books the change as any other cold change.
+        let (core, spy, _time) = spy_rig(true);
+        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        let gate = spy.stop_before("rx_open");
+        let host = core.device.host();
+        let core_ = core.clone();
+        let owner = host.spawn("rx", move || {
+            let (to_rx, cmds) = channel();
+            std::mem::forget(to_rx);
+            let mut rx = super::super::rx::Rx::new(core_.clone(), 0, cmds, None, None);
+            rx.begin();
+        }).expect("a participant thread");
+        gate.wait();
+        assert!(!lock(&core.streams).stream(booked_stream(Dir::Rx)).idle, "the owner has not begun");
+        let mark = spy.log().len();
+        let planned = plan_of(&core, Dir::Rx).len();
+        control.book_cold(ActionId(1), key("radio.rx.channels"), Value::from(1), Some(AbsoluteDeadline::new(core.at(core.ticks(100_000_000)))));
+        assert_eq!(spy.log().len(), mark, "uhd-control called the device while the owner owns the streamer: {:?}", spy.log());
+        let after_book = lock(&core.streams).stream(booked_stream(Dir::Rx)).idle;
+        assert!(!after_book, "the enable's booking left the owner idle");
+        assert_eq!(plan_of(&core, Dir::Rx).len(), planned + 1, "the enable was not booked as a cold change");
+        gate.release();
+        owner.join().expect("the owner thread");
+        let after: Vec<String> = spy.log()[mark..].to_vec();
+        assert!(after.iter().any(|call| call == "rx_open 0 [0]"), "the owner's own open did not happen: {after:?}");
+        assert_eq!(rx_record(&core).2, super::super::core::DeviceSet::Open(Channels::first(1)), "the owner's open is not recorded: {after:?}");
+    }
+
+    #[test]
+    fn ur_25_a_lost_stream_starts_no_rate_check_apply_or_booking_after_the_call() {
+        // UR-25, UR-29 (S26): the open returned Ok and the device was recorded lost before
+        // uhd-control's next look. The enable does no rate check, applies nothing and books
+        // nothing; the open is recorded, and the ownership goes back.
+        let (core, spy, _time) = spy_rig(true);
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.rx.channels"), Value::from(0));
+        let gate = spy.stop_after("rx_open");
+        let host = core.device.host();
+        let core_ = core.clone();
+        let (done, finished) = channel();
+        let control_thread = host.spawn("control", move || {
+            let mut control = control;
+            rx_enable_from_none(&mut control, &core_, 2, 100, 1);
+            let _ = done.send(());
+        }).expect("a participant thread");
+        gate.wait();
+        core.device_lost("test");
+        gate.release();
+        assert!(finished.recv_timeout(Wall::from_secs(10)).is_ok(), "the enable did not end");
+        control_thread.join().expect("the control thread");
+        assert_eq!((spy.seen("rates"), spy.seen("apply")), (0, 0), "a lost enable went on: {:?}", spy.log());
+        assert_eq!(rx_colds(&core), 0, "a lost enable booked a change");
+        let (busy, _reading, set, configured) = rx_record(&core);
+        assert!(!busy, "the stream stayed uhd-control's");
+        assert_eq!((set, configured), (super::super::core::DeviceSet::Open(Channels::first(1)), None), "the open is not recorded as the device returned it");
+    }
+
+    #[test]
+    fn ur_25_a_from_none_leaves_the_stream_unbusy_on_every_path() {
+        // UR-25 (S27 a–d): an enable from no stream gives the streamer back on its success, a
+        // failed open, a refused rate comparison and a failed configure alike.
+        use crate::ClockMode;
+        use crate::device::{FakeConfig, FakeFault};
+        for case in ["ok", "open fails", "rate refused", "configure fails"] {
+            let config = FakeConfig {
+                clock: ClockMode::Manual,
+                faults: match case {
+                    "open fails" => vec![FakeFault::RxOpenFails],
+                    "configure fails" => vec![FakeFault::RxApplyFails],
+                    _ => Vec::new(),
+                },
+                ..FakeConfig::default()
+            };
+            let (core, _device, _, _) = crate::provider::test_support::rig_with(config, vec![Arc::new(NoLink)]);
+            if case == "rate refused" {
+                assert!(core.check_rates(Dir::Rx, 99).is_err());
+            }
+            let (mut control, _tx) = control(&core, &[]);
+            control.config.insert(key("radio.rx.channels"), Value::from(0));
+            channels_from_none(&mut control, &core, 2, 100, 1);
+            let (busy, reading, set, configured) = rx_record(&core);
+            assert!(!busy && !reading, "{case}: the stream stayed uhd-control's");
+            let open = super::super::core::DeviceSet::Open(Channels::first(1));
+            let expected = if case == "ok" {
+                (open, true)
+            } else if case == "configure fails" {
+                (open, false)
+            } else {
+                (super::super::core::DeviceSet::Unknown, false)
+            };
+            assert_eq!((set, configured.is_some()), expected, "{case}: the record is not its path's");
+        }
+    }
+
+    #[test]
+    fn ur_29_a_lost_device_stops_a_from_none_enable_between_channels() {
+        // UR-29, UR-25 (S27 e): the device is lost while a two-channel configuration applies
+        // its first channel. The second is not applied, the enable books nothing, and the
+        // ownership goes back.
+        let (core, spy, _time) = spy_rig(true);
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.rx.channels"), Value::from(0));
+        let gate = spy.stop_after("apply");
+        let host = core.device.host();
+        let core_ = core.clone();
+        let (done, finished) = channel();
+        let control_thread = host.spawn("control", move || {
+            let mut control = control;
+            rx_enable_from_none(&mut control, &core_, 2, 100, 2);
+            let _ = done.send(());
+        }).expect("a participant thread");
+        gate.wait();
+        core.device_lost("test");
+        gate.release();
+        assert!(finished.recv_timeout(Wall::from_secs(10)).is_ok(), "the enable did not end");
+        control_thread.join().expect("the control thread");
+        assert_eq!(spy.seen("apply"), 1, "the lost device applied another channel: {:?}", spy.log());
+        assert_eq!(rx_colds(&core), 0, "a lost enable booked a change");
+        let (busy, _reading, set, configured) = rx_record(&core);
+        assert!(!busy, "the stream stayed uhd-control's");
+        assert_eq!((set, configured), (super::super::core::DeviceSet::Open(Channels::first(2)), None), "the record is not what the calls made known");
+    }
+
+    #[test]
+    fn ur_26_an_enable_from_no_stream_a_stop_recorded_after_its_open_books_nothing() {
+        // UR-26, UR-25: the Provider's stop is recorded while the enable's open is out. The
+        // enable goes on to no rate check and no configure, books nothing, and gives the
+        // streamer back.
+        let (core, spy, _time) = spy_rig(true);
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.rx.channels"), Value::from(0));
+        let gate = spy.stop_after("rx_open");
+        let host = core.device.host();
+        let core_ = core.clone();
+        let (done, finished) = channel();
+        let control_thread = host.spawn("control", move || {
+            let mut control = control;
+            rx_enable_from_none(&mut control, &core_, 2, 100, 1);
+            let _ = done.send(());
+        }).expect("a participant thread");
+        gate.wait();
+        {
+            // As `Provider::stop` books it before its joins.
+            let mut streams = lock(&core.streams);
+            let at = core.now();
+            streams.stop = Some((at, ezsdr_kernel::module_api::StopMode::Orderly));
+            streams.end(&core, at, false, false);
+        }
+        gate.release();
+        assert!(finished.recv_timeout(Wall::from_secs(10)).is_ok(), "the enable did not end");
+        control_thread.join().expect("the control thread");
+        // The calls already out are not recalled (UR-25 reads the stop at the region that
+        // would book): nothing of the enable is recorded, and the streamer goes back.
+        assert_eq!(rx_colds(&core), 0, "a stopped enable booked a change");
+        let (busy, _reading, set, configured) = rx_record(&core);
+        assert!(!busy && set == super::super::core::DeviceSet::Open(Channels::first(1)) && configured.is_none(), "the record is not what the open made known");
+    }
+
+    #[test]
+    fn ur_25_an_enable_from_no_stream_after_the_provider_s_stop_calls_no_device() {
+        // UR-25, UR-26 (S27's stop before the calls): the Provider's stop is recorded before
+        // the enable is taken; no device call is made and nothing is booked.
+        let (core, spy, _time) = spy_rig(true);
+        let before = spy.log().len();
+        {
+            // As `Provider::stop` books it before its joins.
+            let mut streams = lock(&core.streams);
+            let at = core.now();
+            streams.stop = Some((at, ezsdr_kernel::module_api::StopMode::Orderly));
+            streams.end(&core, at, false, false);
+        }
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.rx.channels"), Value::from(0));
+        channels_from_none(&mut control, &core, 2, 100, 1);
+        assert_eq!(spy.log().len(), before, "a stopped Provider's enable called the device: {:?}", spy.log());
+        assert_eq!(rx_colds(&core), 0, "a stopped Provider's enable booked a change");
+        let (busy, reading, _set, _configured) = rx_record(&core);
+        assert!(!busy && !reading, "the stream stayed uhd-control's");
+    }
+
+    #[test]
+    fn ur_29_a_lost_stream_between_the_rate_check_and_the_configure_applies_nothing() {
+        // UR-29, UR-25: the device is lost while the rate comparison runs; the enable enters no
+        // configuration, books nothing, and gives the streamer back.
+        let (core, spy, _time) = spy_rig(true);
+        let applies = Arc::new(std::sync::Mutex::new(0usize));
+        {
+            let applies = applies.clone();
+            crate::provider::test_support::probe(&core, "apply", move |_| *applies.lock().unwrap() += 1);
+        }
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.rx.channels"), Value::from(0));
+        let gate = spy.stop_after("rates");
+        let host = core.device.host();
+        let core_ = core.clone();
+        let (done, finished) = channel();
+        let control_thread = host.spawn("control", move || {
+            let mut control = control;
+            rx_enable_from_none(&mut control, &core_, 2, 100, 1);
+            let _ = done.send(());
+        }).expect("a participant thread");
+        gate.wait();
+        core.device_lost("test");
+        gate.release();
+        assert!(finished.recv_timeout(Wall::from_secs(10)).is_ok(), "the enable did not end");
+        control_thread.join().expect("the control thread");
+        assert_eq!(*applies.lock().unwrap(), 0, "a lost enable entered a configuration: {:?}", spy.log());
+        assert_eq!(rx_colds(&core), 0, "a lost enable booked a change");
+        let (busy, _reading, set, configured) = rx_record(&core);
+        assert!(!busy && set == super::super::core::DeviceSet::Open(Channels::first(1)) && configured.is_none(), "the record is not what the open made known");
+    }
+
+    #[test]
+    #[should_panic(expected = "under the line lock")]
+    fn ur_25_a_configuration_taken_under_the_line_lock_is_refused() {
+        // UR-25 (S28, B5): the order is the configuration's `updates`, then the line; a
+        // configure that holds the line already is refused by the test build's check.
+        let (core, _device, _time) = rig();
+        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        control.book_cold(ActionId(1), key("radio.rx.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(100_000_000)))));
+        let planned = plan_of(&core, Dir::Rx)[1].clone();
+        let _line = lock(&core.streams);
+        let _ = planned.configure(&core, Dir::Rx);
     }
 }

@@ -32,6 +32,8 @@ Review findings in Phase 8 stage 1b-4c (2026-10-19; not issues): Sol 6.1's three
 
 Review findings in Phase 8 stage 1b-4d-1a (2026-10-19; not issues): the answer to 1b-4c's third strike moved the owner threads' copies of the device's state into one per-stream record. Sol's code review and first re-review then found three more of `planned-state-read-as-actual` on the one copy not yet moved — uhd-tx's report correlations (`unacked`) kept across a streamer uhd-control had replaced, on the switch path, then on the report-read paths, and a successful open followed by a refused rate check that did not mark the queue replaced. They were closed by putting the streamer's generation in the same record and comparing it in one function on every path ([plan/phase8/reviews/1b4d1-opus.md](../phase8/reviews/1b4d1-opus.md)); no new note.
 
+Review findings in Phase 8 stage 1b-4d-1b (2026-10-19; not issues): none of a counted mechanism after the code. Sol's plan review found three majors on the record-only release reaching a segment already begun, the window between a configure and the publication of its record, and the device queue's accounting; they are carried to stage 1c with D1 option A, and are counted there if the code shows them ([plan/phase8/reviews/1b4d1b-opus.md](../phase8/reviews/1b4d1b-opus.md)). The code review's findings were missing test assertions and a restated rule.
+
 Unclassified: #4 and #13 (one-off bugs); #40, #42 and #48 (spec gaps); #54, #55, #56, #59, #60 and #62 (not defects, or decisions).
 
 ## handoff からの記録（2026-10-14 に移動）

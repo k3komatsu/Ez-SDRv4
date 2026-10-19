@@ -262,6 +262,13 @@ impl Rx {
         }
     }
 
+    /// The earliest origin of a planned segment not yet begun, as a test reads it (UR-25): an
+    /// owner held behind an enable from no stream does not move it.
+    #[cfg(test)]
+    pub(super) fn cursor(&self) -> i64 {
+        self.from
+    }
+
     /// RM-25, UR-17: the next planned segment begins: the streamer reopened when its
     /// channel set changed, the direction configured with the configuration in effect at its
     /// origin — unless uhd-control did both for an enable from no stream — and a timed start
@@ -271,6 +278,11 @@ impl Rx {
         let key = stream_key(Dir::Rx, self.k);
         let next: Option<Planned> = {
             let mut streams = lock(&self.core.streams);
+            if streams.stream(key).busy {
+                // UR-25: uhd-control's enable from no stream owns the streamer this turn; the
+                // plan is read again at the next, and the idle mark and the cursor stand.
+                return false;
+            }
             let next = streams.planned(key).into_iter().find(|planned| planned.segment.origin >= self.from);
             streams.stream_mut(key).idle = next.is_none();
             next

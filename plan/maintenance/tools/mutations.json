@@ -828,8 +828,8 @@
   "id": "J50",
   "name": "#63 (note 23): uhd-tx does not prune at a switch",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "            streams.prune(key, by);",
-  "new": "            let _ = by;",
+  "old": "            Some(by) => streams.prune(key, by),",
+  "new": "            Some(by) => { let _ = by; },",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_25_a_burst_on_a_later_clock_survives_an_earlier_switch"
@@ -919,8 +919,8 @@
   "id": "J59",
   "name": "note 23 round 3: uhd-tx never reads the shared transmit plan again after its first read",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        } else if self.version == Some(streams.version) {\n",
-  "new": "        } else if self.version.is_some() {\n",
+  "old": "            None if self.version == Some(streams.version) => return true,",
+  "new": "            None if self.version.is_some() => return true,",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_25_uhd_tx_reads_the_plan_again_when_it_changes"
@@ -6504,8 +6504,8 @@
    "id": "P271",
    "name": "uhd-control releases the line lock across an enable from no stream and takes it again before the device calls (UR-25, D15)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            drop(streams);",
-   "new": "            drop(streams);\n            streams = lock(&self.core.streams);",
+   "old": "            drop(streams);\n            // UR-29, UR-25: a loss",
+   "new": "            drop(streams);\n            streams = lock(&self.core.streams);\n            // UR-29, UR-25: a loss",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_the_line_lock_is_free_inside_every_control_device_call"
@@ -7225,8 +7225,8 @@
    "id": "P343",
    "name": "an enable from no stream does not compare the rate set (UR-13, major 5)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            let checked = if opened.is_ok() { self.core.check_opened(dir, channels) } else { Ok(()) };",
-   "new": "            let checked = if opened.is_ok() { Ok::<(), DeviceError>(()) } else { Ok(()) };",
+   "old": "                let check = if open.is_ok() && !self.core.is_lost() { self.core.check_opened(dir, channels) } else { Ok(()) };",
+   "new": "                let check = if open.is_ok() && !self.core.is_lost() { Ok::<(), DeviceError>(()) } else { Ok(()) };",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_13_an_enable_from_no_stream_compares_the_rate_set"
@@ -7305,8 +7305,8 @@
    "id": "P351",
    "name": "a configuration an enable from no stream cannot apply is not booked refused (UR-25, RM-25)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            if let Err(error) = configured {\n                failure = Some(error);\n            }",
-   "new": "            if let Err(error) = configured {\n                let _ = error;\n            }",
+   "old": "                (Some(Ok(())), Some(Ok(()))) => configured.and_then(Result::err),",
+   "new": "                (Some(Ok(())), Some(Ok(()))) => { let _ = configured; None },",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_25_a_refused_enable_from_no_stream_halts_and_keeps_its_values"
@@ -7540,5 +7540,235 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_24_a_cancelled_update_of_another_layout_channel_leaves_the_version"
-  }
+  },
+ {
+   "id": "P382",
+   "name": "the receive owner begins behind an enable from no stream (UR-25, S9)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+   "old": "            if streams.stream(key).busy {\n                // UR-25: uhd-control's enable from no stream owns the streamer this turn; the\n                // plan is read again at the next, and the idle mark and the cursor stand.\n                return false;\n            }",
+   "new": "            if false {\n                return false;\n            }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_an_owner_waiting_behind_a_from_none_open_starts_nothing"
+ },
+ {
+   "id": "P383",
+   "name": "the transmit owner reads the plan behind an enable from no stream (UR-25, S9, S22)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        let mut streams = lock(&core.streams);\n        if streams.stream(key).busy {\n            return false;\n        }\n        self.plan_section(&mut streams, key, passed)",
+   "new": "        let mut streams = lock(&core.streams);\n        self.plan_section(&mut streams, key, passed)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_transmit_owner_waiting_behind_a_from_none_open_starts_nothing"
+ },
+ {
+   "id": "P384",
+   "name": "an enable from no stream keeps no ownership of the streamer (UR-25, S9, S23, S24)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            let state = streams.stream_mut(stream);\n            state.busy = true;\n            reading = state.reading;",
+   "new": "            let state = streams.stream_mut(stream);\n            reading = state.reading;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_from_none_holds_the_streamer_from_its_decision_to_its_booking"
+ },
+ {
+   "id": "P385",
+   "name": "an enable from no stream gives the streamer back before its booking (UR-25, S24)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        self.core.probe(\"cold_booking\", if from_none { Some(&*streams) } else { None });",
+   "new": "        if from_none { streams.stream_mut(stream).busy = false; }\n        self.core.probe(\"cold_booking\", if from_none { Some(&*streams) } else { None });",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_from_none_holds_the_streamer_from_its_decision_to_its_booking"
+ },
+ {
+   "id": "P386",
+   "name": "an enable from no stream gives the streamer back after its success (UR-25, S24)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        if from_none {\n            streams.stream_mut(stream).busy = false;\n        }\n        drop(streams);",
+   "new": "        drop(streams);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_from_none_holds_the_streamer_from_its_decision_to_its_booking"
+ },
+ {
+   "id": "P387",
+   "name": "an enable from no stream does not wait for a report read (UR-25, S23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            let may_call = if reading { self.await_reading(stream) } else { !self.core.is_lost() && !stopped };",
+   "new": "            let may_call = { let _ = reading; !self.core.is_lost() && !stopped };",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_from_none_enable_waits_for_a_transmit_report_read"
+ },
+ {
+   "id": "P388",
+   "name": "uhd-tx never takes back a report read (UR-25, S23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        self.end_reading();\n        self.step()",
+   "new": "        self.step()",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_from_none_enable_waits_for_a_transmit_report_read"
+ },
+ {
+   "id": "P389",
+   "name": "an enable from no stream keeps its ownership on an early return (UR-25, S26, S27)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                // UR-25: the ownership goes back, and nothing of the enable is booked.\n                streams.stream_mut(stream).busy = false;\n                drop(streams);",
+   "new": "                // UR-25: the ownership goes back, and nothing of the enable is booked.\n                drop(streams);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_lost_stream_starts_no_rate_check_apply_or_booking_after_the_call"
+ },
+ {
+   "id": "P390",
+   "name": "an enable from no stream compares its rates after the device was lost (UR-25, S26)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                let check = if open.is_ok() && !self.core.is_lost() { self.core.check_opened(dir, channels) } else { Ok(()) };",
+   "new": "                let check = if open.is_ok() { self.core.check_opened(dir, channels) } else { Ok(()) };",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_lost_stream_starts_no_rate_check_apply_or_booking_after_the_call"
+ },
+ {
+   "id": "P391",
+   "name": "a configuration applies its next channel after the device was lost (UR-29, UR-25, S27)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "            if self.is_lost() {\n                return Err(DeviceError { lost: true, message: \"UR-29: the device is lost before the next channel's apply\".to_owned() });\n            }",
+   "new": "            if false {\n                return Err(DeviceError { lost: true, message: \"UR-29: the device is lost before the next channel's apply\".to_owned() });\n            }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_29_a_lost_device_stops_a_from_none_enable_between_channels"
+ },
+ {
+   "id": "P392",
+   "name": "the shutdown's report read waits for a detached enable's ownership (UR-25, UR-16)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "            self.reports(Wall::from_millis(10));",
+   "new": "            if !lock(&self.core.streams).stream(stream_key(Dir::Tx, self.k)).busy { self.reports(Wall::from_millis(10)); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_detached_control_does_not_hold_the_shutdown_s_read"
+ },
+ {
+   "id": "P393",
+   "name": "the owner configures with the line held (UR-25, B5)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "        let step = lock(&self.streams).owner_step(stream, set, next.segment.by, next.version());",
+   "new": "        let held = lock(&self.streams);\n        let step = held.owner_step(stream, set, next.segment.by, next.version());",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_record_only_release_after_a_from_none_configure_makes_the_owner_configure_again"
+ },
+ {
+   "id": "P394",
+   "name": "a configuration takes its updates under the line lock (UR-25, S28)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        assert_line_free(\"a configuration's updates\");\n        let updates = self.updates.lock();",
+   "new": "        let updates = self.updates.lock();",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_configuration_taken_under_the_line_lock_is_refused"
+ },
+ {
+   "id": "P395",
+   "name": "an enable from no stream keeps waiting for a report read after the device was lost (UR-29, UR-25)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            if stop || self.core.is_lost() {\n                return false;\n            }",
+   "new": "            if stop {\n                return false;\n            }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_29_a_lost_device_ends_a_from_none_enable_s_wait_for_a_report_read"
+ },
+ {
+   "id": "P396",
+   "name": "an enable from no stream makes its device calls after the Provider's stop was recorded (UR-25, UR-26)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            let may_call = if reading { self.await_reading(stream) } else { !self.core.is_lost() && !stopped };",
+   "new": "            let may_call = if reading { self.await_reading(stream) } else { !self.core.is_lost() };",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_an_enable_from_no_stream_after_the_provider_s_stop_calls_no_device"
+ },
+ {
+   "id": "P397",
+   "name": "an enable from no stream enters a configuration after the device was lost (UR-29, UR-25)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                let config = if open.is_ok() && check.is_ok() && !self.core.is_lost() {",
+   "new": "                let config = if open.is_ok() && check.is_ok() {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_29_a_lost_stream_between_the_rate_check_and_the_configure_applies_nothing"
+ },
+ {
+   "id": "P398",
+   "name": "a transmit turn during the enable's open still reads reports (UR-25, B2)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        let mut streams = lock(&core.streams);\n        if streams.stream(key).busy {\n            return false;\n        }\n        if !self.plan_section(&mut streams, key, None) {",
+   "new": "        let mut streams = lock(&core.streams);\n        if !self.plan_section(&mut streams, key, None) {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_transmit_poll_during_a_control_open_starts_no_streamer_call"
+ },
+ {
+   "id": "P399",
+   "name": "an enable from no stream books its change after a loss or stop instead of ending (UR-25, UR-29)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            if !may_call || self.core.is_lost() || streams.stop.is_some() {\n                // UR-25: the ownership goes back, and nothing of the enable is booked.\n                streams.stream_mut(stream).busy = false;\n                drop(streams);\n                return;\n            }",
+   "new": "            if false {\n                streams.stream_mut(stream).busy = false;\n                drop(streams);\n                return;\n            }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_lost_stream_starts_no_rate_check_apply_or_booking_after_the_call"
+ },
+ {
+   "id": "P400",
+   "name": "an enable from no stream books its change after the Provider's stop was recorded (UR-26, UR-25)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            if !may_call || self.core.is_lost() || streams.stop.is_some() {",
+   "new": "            if !may_call || self.core.is_lost() {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_26_an_enable_from_no_stream_a_stop_recorded_after_its_open_books_nothing"
+ },
+ {
+   "id": "P401",
+   "name": "an enable from no stream keeps waiting for a report read after the Provider's stop was recorded (UR-26, UR-25)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            if stop || self.core.is_lost() {\n                return false;\n            }",
+   "new": "            if self.core.is_lost() {\n                return false;\n            }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_from_none_enable_ends_its_wait_at_the_provider_stop"
+ },
+ {
+   "id": "P402",
+   "name": "the shutdown's report read leaves its mark set (UR-25, UR-16)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "            self.reports(Wall::from_millis(10));\n            self.end_reading();",
+   "new": "            self.reports(Wall::from_millis(10));",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_detached_control_does_not_hold_the_shutdown_s_read"
+ },
+ {
+   "id": "P403",
+   "name": "the owner's open is recorded before the device call (UR-25, S13b)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "        let opened = self.open_device(dir, k, set);\n        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        lock(&self.streams).record_opened(stream, set, &opened, &checked);",
+   "new": "        lock(&self.streams).record_opened(stream, set, &Ok(()), &Ok(()));\n        let opened = self.open_device(dir, k, set);\n        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        lock(&self.streams).record_opened(stream, set, &opened, &checked);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_an_open_is_recorded_only_after_the_device_returns"
+ },
+ {
+   "id": "P404",
+   "name": "a transmit owner held behind an enable from no stream clears its idle mark (UR-25, S9)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        if streams.stream(key).busy {\n            return false;\n        }\n        self.plan_section(&mut streams, key, passed)",
+   "new": "        if streams.stream(key).busy {\n            streams.stream_mut(key).idle = false;\n            return false;\n        }\n        self.plan_section(&mut streams, key, passed)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_transmit_owner_waiting_behind_a_from_none_open_starts_nothing"
+ }
 ]

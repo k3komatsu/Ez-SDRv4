@@ -19,11 +19,52 @@ use super::control::{ColdConfig, Planned};
 use super::mode::{channel_list, Mode};
 use crate::device::{Device, DeviceError, Dir, Settings, decimation};
 
-pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    #[cfg(test)]
-    super::test_support::note_lock(std::ptr::from_ref(m) as usize);
-    m.lock().unwrap_or_else(|e| e.into_inner())
+/// A guard of the instance's state (UR-25): a `MutexGuard`, except that the test build counts
+/// how many `core::lock` guards this thread holds — `streams`, `rec`, `held` and `rates` all
+/// count — so that [`assert_line_free`] sees a lock order a `try_lock` cannot: another
+/// thread's line is not this caller's.
+pub(crate) struct Locked<'a, T> {
+    guard: MutexGuard<'a, T>,
 }
+
+impl<T> std::ops::Deref for Locked<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T { &self.guard }
+}
+
+impl<T> std::ops::DerefMut for Locked<'_, T> {
+    fn deref_mut(&mut self) -> &mut T { &mut self.guard }
+}
+
+impl<T> Drop for Locked<'_, T> {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        super::test_support::left_lock();
+    }
+}
+
+pub(crate) fn lock<T>(m: &Mutex<T>) -> Locked<'_, T> {
+    #[cfg(test)]
+    {
+        super::test_support::note_lock(std::ptr::from_ref(m) as usize);
+        super::test_support::entered_lock();
+    }
+    Locked { guard: m.lock().unwrap_or_else(|e| e.into_inner()) }
+}
+
+/// UR-25: the caller holds no guard of the instance's state — `streams`, `rec`, `held` or
+/// `rates` —, so the configuration's `updates` may be taken. The whole of the check: the
+/// other order (`rec` taken before `streams`) is not detected.
+pub(crate) fn assert_line_free(what: &str) {
+    #[cfg(test)]
+    super::test_support::assert_line_free(what);
+    #[cfg(not(test))]
+    let _ = what;
+}
+
+/// A test's probe of a section (no effect outside the test build), by name.
+#[cfg(test)]
+pub(crate) type Probe = Arc<dyn Fn(Option<&Streams>) + Send + Sync>;
 
 pub(crate) fn key(name: &str) -> Key {
     Key::parse(name).expect("a declared radio key")
@@ -129,6 +170,14 @@ pub(crate) struct StreamState {
     /// `(seq, version)`; none after a failed configure or open. The owner configures again
     /// unless this matches its segment's command and the configuration's current version (UR-36).
     pub configured: Option<(u64, u64)>,
+    /// uhd-control's enable from no stream owns the stream's streamer from the section that
+    /// decides it until the section that books the change or ends the enable without one: an
+    /// owner that finds it set makes no device call and moves neither its cursor nor its idle
+    /// mark (UR-25).
+    pub busy: bool,
+    /// uhd-tx's report read is in flight: an enable from no stream waits for it before its
+    /// first device call (UR-25).
+    pub reading: bool,
     /// uhd-rx's segment, as its origin and configuration, and the first sample of it not yet
     /// delivered: RM-16's floor, which reaches the plan as `Item.delivered` (UR-17).
     pub delivered: Option<(i64, Config, i64)>,
@@ -453,6 +502,9 @@ pub(crate) struct Core {
     /// `S`, the end of the device's start-up (UR-13).
     pub start_up: AtomicI64,
     lost: AtomicBool,
+    /// The test build's probes, by section name (UR-25, UR-29).
+    #[cfg(test)]
+    pub probes: Mutex<BTreeMap<&'static str, Probe>>,
 }
 
 impl Core {
@@ -497,7 +549,23 @@ impl Core {
             rates: Mutex::new([None, None]),
             start_up: AtomicI64::new(i64::MIN),
             lost: AtomicBool::new(false),
+            #[cfg(test)]
+            probes: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// A test's synchronisation point, by section name: what a wrong ownership or lock order
+    /// would pass through unseen. Nothing outside the test build.
+    pub(crate) fn probe(&self, name: &'static str, streams: Option<&Streams>) {
+        #[cfg(test)]
+        {
+            let probe = self.probes.lock().unwrap().get(name).cloned();
+            if let Some(probe) = probe {
+                probe(streams);
+            }
+        }
+        #[cfg(not(test))]
+        let _ = (name, streams);
     }
 
     /// The current instant on the primary root.
@@ -629,6 +697,7 @@ impl Core {
     /// profile's, compared by set once — after the direction's first streamer opens — and
     /// the outcome held for every later open. A mismatch is the refusal `UR-13:`.
     pub fn check_rates(&self, dir: Dir, chan: usize) -> Result<(), DeviceError> {
+        self.probe("rates", None);
         {
             let checks = lock(&self.rates);
             if let Some(outcome) = &checks[dir as usize] {
@@ -660,6 +729,12 @@ impl Core {
     /// ([`crate::device::decimation`]). Returns that decimation `N`.
     pub fn configure(&self, dir: Dir, channels: &[(usize, Settings)], rate: f64, k: usize) -> Result<i64, DeviceError> {
         for (chan, settings) in channels {
+            self.probe("apply", None);
+            // UR-29: the device was lost between two channels of one configuration; the rest
+            // is not applied (the owner's configure comes through here too).
+            if self.is_lost() {
+                return Err(DeviceError { lost: true, message: "UR-29: the device is lost before the next channel's apply".to_owned() });
+            }
             let applied = self.device.apply(dir, *chan, settings, None)?;
             let at = self.at(self.now());
             let mut rec = lock(&self.rec);
@@ -710,6 +785,7 @@ impl Core {
     /// caller's (see `record_opened`), so that an enable from no stream records its open in the
     /// line-lock section it already takes (UR-25).
     pub fn open_device(&self, dir: Dir, k: usize, set: Channels) -> Result<(), DeviceError> {
+        self.probe("open", None);
         let list = channel_list(set);
         match dir {
             Dir::Rx => self.device.rx_open(k, &list),
