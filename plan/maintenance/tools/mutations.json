@@ -1006,16 +1006,6 @@
   "filter": "ur_07_the_root_s_epoch_is_the_pps_edge_with_external_sources"
  },
  {
-  "id": "J68",
-  "name": "#64 (review round 1, 2026-10-09): a held command for a halted direction counts its channels against the queue depth",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "self.held.iter().map(|((e, _), t)| self.channels_at(t.dir, *e))",
-  "new": "self.held.iter().map(|((e, _), t)| Core::channels(&self.config_at(*e), t.dir))",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_24_a_halted_direction_fills_no_queue_slot"
- },
- {
   "id": "J69",
   "name": "#64 (review round 1, 2026-10-09): a new command for a halted direction counts its channels against the queue depth",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
@@ -1034,16 +1024,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_24_a_halted_direction_fills_no_queue_slot"
- },
- {
-  "id": "J71",
-  "name": "#64 (review round 2, 2026-10-09): a late update is judged at its own instant, not where it acts",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                (0..self.channels_at(timed.dir, effective)).collect()",
-  "new": "                (0..self.channels_at(timed.dir, e)).collect()",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_24_a_late_update_halted_before_it_can_act_has_no_channel"
  },
  {
   "id": "J72",
@@ -6351,16 +6331,6 @@
    "filter": "ur_25_tx_channels_to_zero_ends_the_clock_and_a_re_enable_starts_a_new_one"
   },
   {
-   "id": "P256",
-   "name": "an enable from no stream's segment is configured by its owner too (UR-25)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            streams.record_configured(stream, failure.is_none().then_some((seq, version)));",
-   "new": "            streams.record_configured(stream, None);",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "ur_25_an_enable_from_no_stream_configures_once"
-  },
-  {
    "id": "P257",
    "name": "the end's floor reads the standing plan, not the plan the item makes (RM-16, RM-25)",
    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
@@ -6472,10 +6442,10 @@
   },
   {
    "id": "P268",
-   "name": "the device queue's order is kept per direction (UC-2, UR-24)",
+   "name": "the device queue's order is the instance's one, across the directions (UC-2, UR-24)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            let latest = self.released.iter().copied().max();",
-   "new": "            let latest = if timed.dir == Dir::Rx { None } else { self.released.iter().copied().max() };",
+   "old": "        let floor = self.released.iter().copied().max().map_or(earliest, |latest| latest.max(earliest));",
+   "new": "        let floor = self.released.iter().copied().max().filter(|_| dir == Dir::Tx).map_or(earliest, |latest| latest.max(earliest));",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_the_device_queue_is_one_across_the_directions"
@@ -6891,34 +6861,14 @@
    "filter": "ur_25_a_membership_in_a_later_stream_is_refused_and_changes_nothing"
   },
   {
-   "id": "P310",
-   "name": "a channel-keyed timed update is handed over on every channel of its direction (UR-24)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                self.channel_live(timed.dir, chan, effective).then_some(chan).into_iter().collect()",
-   "new": "                (0..self.core.mode.channel_count(timed.dir)).collect()",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "ur_24_a_channel_keyed_timed_update_acts_on_its_own_channel"
-  },
-  {
-   "id": "P311",
-   "name": "a channel-keyed command counts its direction's channels in the queue (UR-24)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "        let cost = if self.core.mode.is_layout() { 1 } else { self.channels_at(dir, e) };",
-   "new": "        let cost = if self.core.mode.is_layout() { self.core.mode.channel_count(dir) } else { self.channels_at(dir, e) };",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "ur_24_a_channel_keyed_command_counts_one_queue_slot"
-  },
-  {
    "id": "P312",
    "name": "a timed update for a channel of no running stream is handed over anyway (UR-24)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
    "old": "            if chans.is_empty() {",
    "new": "            if false {",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "ur_24_a_timed_update_for_a_channel_out_of_its_stream_waits_for_its_segment"
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_without_a_live_channel_or_a_later_segment_applies_nothing"
   },
   {
    "id": "P313",
@@ -6970,16 +6920,6 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_25_a_same_size_membership_swap_reopens_the_streamer"
-  },
-  {
-   "id": "P318",
-   "name": "the transmit streamer is reopened only when the channel count changes (RM-25, M1)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-   "old": "                if state.configured.is_some() && state.configured == by.zip(version) {",
-   "new": "                if state.configured.is_some() && by.zip(version).is_some() {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_24_a_cancelled_projected_update_makes_the_owner_configure_again"
   },
   {
    "id": "P319",
@@ -7462,26 +7402,6 @@
     "filter": "ur_28_a_from_none_open_replaces_the_report_queue"
   },
  {
-    "id": "P374",
-    "name": "a release recorded with no channel moves no version on, so the owner keeps its record (UR-36, S11b)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "                for cold in self.changed_projections(timed.dir, e, timed.chan) {\n                    cold.changed();\n                }",
-    "new": "                let _ = self.changed_projections(timed.dir, e, timed.chan);",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_24_a_record_only_release_after_a_from_none_configure_makes_the_owner_configure_again"
-  },
- {
-    "id": "P375",
-    "name": "a version moves on for a cancelled command every segment holds, whatever its origin or channel (UR-36, S11c)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "            (e <= segment.origin && chan.is_none_or(|chan| segment.config.channels.contains(chan as u32))).then(|| config.clone())",
-    "new": "            let _ = (e, chan, segment);\n            Some(config.clone())",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_24_a_cancelled_projected_update_makes_the_owner_configure_again"
-  },
- {
     "id": "P376",
     "name": "a failed open still records the set the streamer was asked for (UR-36, S7)",
     "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
@@ -7530,16 +7450,6 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_36_a_successful_open_moves_the_generation_on_even_when_its_check_refuses"
-  },
- {
-    "id": "P381",
-    "name": "a held update of another layout channel projects into a segment that does not run it: the channel condition is dropped (UR-24, S11c)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "(e <= segment.origin && chan.is_none_or(|chan| segment.config.channels.contains(chan as u32))).then(|| config.clone())",
-    "new": "(e <= segment.origin && chan.is_none_or(|_| true)).then(|| config.clone())",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_24_a_cancelled_update_of_another_layout_channel_leaves_the_version"
   },
  {
    "id": "P382",
@@ -7652,16 +7562,6 @@
    "filter": "ur_25_a_detached_control_does_not_hold_the_shutdown_s_read"
  },
  {
-   "id": "P393",
-   "name": "the owner configures with the line held (UR-25, B5)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-   "old": "        let step = lock(&self.streams).owner_step(stream, set, next.segment.by, next.version());",
-   "new": "        let held = lock(&self.streams);\n        let step = held.owner_step(stream, set, next.segment.by, next.version());",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_24_a_record_only_release_after_a_from_none_configure_makes_the_owner_configure_again"
- },
- {
    "id": "P394",
    "name": "a configuration takes its updates under the line lock (UR-25, S28)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
@@ -7770,5 +7670,245 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_a_transmit_owner_waiting_behind_a_from_none_open_starts_nothing"
+ },
+ {
+   "id": "P405",
+   "name": "a release with no channel in force is given to the later segments' channels (UR-24, S1)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        let later = planned.iter().filter(|planned| !planned.refused && planned.segment.origin >= t);",
+   "new": "        let later = planned.iter().filter(|planned| false && !planned.refused && planned.segment.origin >= t);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_without_a_live_channel_reaches_the_pending_segment"
+ },
+ {
+   "id": "P406",
+   "name": "the later segments are searched for the command's channel, not just the first (UR-24, S7)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        let later = planned.iter().filter(|planned| !planned.refused && planned.segment.origin >= t);",
+   "new": "        let later = planned.iter().filter(|planned| !planned.refused && planned.segment.origin >= t).take(1);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_layout_release_reaches_the_later_segment_s_channel"
+ },
+ {
+   "id": "P407",
+   "name": "a refused segment is no candidate for a release (UR-24, S8)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        let later = planned.iter().filter(|planned| !planned.refused && planned.segment.origin >= t);",
+   "new": "        let later = planned.iter().filter(|planned| planned.segment.origin >= t);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_for_a_refused_transmit_segment_applies_nothing"
+ },
+ {
+   "id": "P408",
+   "name": "under the layout a release acts on the command's own channel alone (UR-24, S7, S18)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            Some(chan) => later.filter(|planned| planned.segment.config.channels.contains(chan as u32)).map(|_| chan).collect(),",
+   "new": "            Some(_) => later.flat_map(|planned| planned.segment.config.channels.iter().map(|chan| chan as usize)).collect(),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_layout_release_reaches_the_later_segment_s_channel"
+ },
+ {
+   "id": "P409",
+   "name": "a release is a timed command (UR-24, S1, S12, S16)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            if let Err(error) = self.core.device.apply(timed.dir, *chan, &settings, Some(e)) {",
+   "new": "                if let Err(error) = self.core.device.apply(timed.dir, *chan, &settings, None) {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_without_a_live_channel_reaches_the_pending_segment"
+ },
+ {
+   "id": "P410",
+   "name": "a release counts one queue slot per channel it is given on (UR-24, S4, S12)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            self.released.push(e);",
+   "new": "            let _ = e;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_without_a_live_channel_takes_the_command_queue_slots"
+ },
+ {
+   "id": "P414",
+   "name": "a release is recorded issued (UR-24, S1, S12)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            \"key\": timed.key, \"claimed\": timed.value, \"read_back\": null, \"at\": self.core.at(e), \"issued\": true,",
+   "new": "            \"key\": timed.key, \"claimed\": timed.value, \"read_back\": null, \"at\": self.core.at(e),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_without_a_live_channel_reaches_the_pending_segment"
+ },
+ {
+   "id": "P415",
+   "name": "a release on the channels in force carries no note (UR-24, S5, S12)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        if !live {",
+   "new": "        if true {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_after_its_instant_applies_on_arrival"
+ },
+ {
+   "id": "P416",
+   "name": "a release with no channel at all is not issued (UR-24, S6)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                lock(&self.core.rec).applied.push(json!({ \"key\": timed.key, \"claimed\": timed.value, \"read_back\": null, \"at\": self.core.at(e), \"note\": \"no channel\" }));",
+   "new": "                lock(&self.core.rec).applied.push(json!({ \"key\": timed.key, \"claimed\": timed.value, \"read_back\": null, \"at\": self.core.at(e), \"note\": \"no channel\", \"issued\": true }));",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_without_a_live_channel_or_a_later_segment_applies_nothing"
+ },
+ {
+   "id": "P418",
+   "name": "a failed release is reported as a refusal (UR-24, S9 b)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                self.core.device_failed(None, \"update_parameter\", &error);",
+   "new": "                let _ = &error;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_29_a_failed_released_update_is_a_device_failure"
+ },
+ {
+   "id": "P419",
+   "name": "a failed release applies no later channel (UR-24, S9 c, S9 d)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                drop(updates);\n                self.core.device_failed(None, \"update_parameter\", &error);\n                return false;",
+   "new": "                self.core.device_failed(None, \"update_parameter\", &error);\n                continue;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_29_a_partly_applied_release_keeps_the_projection"
+ },
+ {
+   "id": "P420",
+   "name": "the record's mark is its segment's command alone (UR-36, S14)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "                if state.configured.is_some() && state.configured == by {",
+   "new": "                if state.configured.is_some() {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_an_owner_configures_a_segment_the_record_s_command_is_not_for"
+ },
+ {
+   "id": "P421",
+   "name": "a booking counts the channels the release would give the command (UR-24, S4)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        let cost = if self.core.mode.is_layout() { 1 } else { self.targets(dir, chan, e).0.len() };",
+   "new": "        let cost = if self.core.mode.is_layout() { 1 } else { 0 };",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_without_a_live_channel_takes_the_command_queue_slots"
+ },
+ {
+   "id": "P422",
+   "name": "the held commands' cost is the channels their release would give them (UR-24, S4)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            self.held.iter().map(|((e, _), t)| self.targets(t.dir, t.chan, *e).0.len()).sum::<usize>() + self.released.len()",
+   "new": "            self.released.len()",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_without_a_live_channel_takes_the_command_queue_slots"
+ },
+ {
+   "id": "P424",
+   "name": "a release counts one queue slot per command, not per channel (UR-24, S12)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            self.released.push(e);\n        }",
+   "new": "        }\n        self.released.push(e);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_behind_a_released_command_keeps_the_device_queue_order"
+ },
+ {
+   "id": "P426",
+   "name": "a booking is floored at the last command released (UR-24, S12)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        let floor = self.released.iter().copied().max().map_or(earliest, |latest| latest.max(earliest));",
+   "new": "        let floor = earliest;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_behind_a_released_command_keeps_the_device_queue_order"
+ },
+ {
+   "id": "P427",
+   "name": "a command the booking's floor moves is late at its booking (UR-24, S12, S12c)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        if let Some(requested) = requested.filter(|requested| *requested < floor) {\n            self.late_command(Some(key.clone()), requested, e);",
+   "new": "        if let Some(requested) = requested.filter(|_| false) {\n            self.late_command(Some(key.clone()), requested, e);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_behind_a_released_command_keeps_the_device_queue_order"
+ },
+ {
+   "id": "P428",
+   "name": "the booking's floor is the entry a projection holds (UR-24, S12, S12c)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            config.book((e, seq), timed.chan.unwrap_or(0), timed.settings());",
+   "new": "            config.book((requested.unwrap_or(e), seq), timed.chan.unwrap_or(0), timed.settings());",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_segment_begun_before_a_late_command_s_instant_configures_the_old_value"
+ },
+ {
+   "id": "P430",
+   "name": "a command whose instant has passed is the configuration of record (UR-24, S6)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        self.config.insert(timed.key, Value::num(timed.value).expect(\"UR-24: read from a Value\"));",
+   "new": "        let _ = timed;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_without_a_live_channel_or_a_later_segment_applies_nothing"
+ },
+ {
+   "id": "P431",
+   "name": "a command waiting for a channel stops the release (UR-24)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                if e > now {\n                    // It waits for a channel a segment booked since may bring: it stays held,",
+   "new": "                if false {\n                    // It waits for a channel a segment booked since may bring: it stays held,",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_command_waiting_for_a_channel_holds_back_the_one_behind_it"
+ },
+ {
+   "id": "P432",
+   "name": "a command whose instant passed with no channel is the configuration of record (UR-24, S6)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                self.released_at.insert((e, seq), timed);",
+   "new": "                let _ = timed;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_without_a_live_channel_or_a_later_segment_applies_nothing"
+ },
+ {
+   "id": "P433",
+   "name": "a command whose instant passed with no channel settles in instant order with the released ones (UR-24, S19)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                self.released_at.insert((e, seq), timed);",
+   "new": "                self.of_record(timed);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_released_command_and_one_without_a_channel_settle_in_instant_order"
+ },
+ {
+   "id": "P434",
+   "name": "a release sees a loss another thread published before its next channel (UR-29, S9 f)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            if self.core.is_lost() {\n                return false;\n            }",
+   "new": "            if false {\n                return false;\n            }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_29_a_loss_published_between_a_release_s_channels_stops_the_rest"
+ },
+ {
+   "id": "P435",
+   "name": "a release sees a loss another thread published before its next command (UR-29, S9 g)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            if self.core.is_lost() {\n                return;\n            }",
+   "new": "            if false {\n                return;\n            }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_29_a_loss_after_a_release_s_command_stops_the_one_behind_it"
  }
 ]

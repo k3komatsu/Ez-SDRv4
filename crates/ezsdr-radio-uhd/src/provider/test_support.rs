@@ -111,6 +111,44 @@ pub(super) fn target_of(node: &ResourceId) -> Target {
     Target::Resource { resource: ezsdr_kernel::spec::Ident::parse(resource).unwrap(), path: path.to_owned() }
 }
 
+/// A device's host clock held still while this lives (M3): a participant of its own that stays
+/// busy, so that a test reads the device's settings at an instant of its own and no real time
+/// moves them. On a manual clock alone; the drop gives the clock back.
+pub(super) struct Frozen {
+    release: Option<Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Frozen {
+    pub fn of(device: &FakeDevice) -> Frozen {
+        let clock = device.host();
+        assert!(clock.is_manual(), "a clock is frozen on a manual clock alone");
+        let (release, wait) = channel();
+        let thread = clock.spawn("frozen", move || { let _ = wait.recv(); }).expect("a participant thread");
+        Frozen { release: Some(release), thread: Some(thread) }
+    }
+}
+
+impl Drop for Frozen {
+    fn drop(&mut self) {
+        let _ = self.release.take().expect("a held clock").send(());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The device's clock moved to `ticks`, with its queue's commands due by then applied, and
+/// asserted to be there: the two clocks a test reads are the Core's, which it advances, and
+/// the device's, which it fixes.
+pub(super) fn device_at(core: &Core, time: &ManualTimeAuthority, device: &FakeDevice, ticks: i64) {
+    if core.now() < ticks {
+        time.advance_to(core.at(ticks)).expect("the Core's clock reaches the device's instant");
+    }
+    device.set_time(ticks);
+    assert_eq!((core.now(), device.time_now().unwrap()), (ticks, ticks), "the Core's clock and the device's are not at the same instant");
+}
+
 thread_local! {
     static LOCKS: RefCell<Option<Vec<usize>>> = const { RefCell::new(None) };
     /// The line guards this thread holds (UR-25): what `LockSpy` and `assert_line_free` see,
@@ -334,20 +372,46 @@ impl Device for LockSpy {
 }
 
 /// A `FakeDevice` with one scripted refusal `FakeConfig::faults` does not carry (UR-33's
-/// vocabulary keeps to what a device does): the first untimed `apply` of `dir` — of the
-/// device channel `chan`, when one is named — fails before anything is applied, which a set
+/// vocabulary keeps to what a device does): the first `apply` of `dir` of the class named — of
+/// the device channel `chan`, when one is named — fails before anything is applied, which a set
 /// whose channels are applied one by one and a configuration of a streamer already open need
-/// (UR-13). The fake behind it is unchanged by the refused call.
+/// (UR-13). The fake behind it is unchanged by the refused call. Every `apply` it was given is
+/// kept, in order, so a test sees an attempt a refusal cut short.
 pub(super) struct ApplyFails {
     inner: Arc<FakeDevice>,
     dir: Dir,
     chan: Option<usize>,
+    /// The class it refuses: `Some(true)` a timed `apply`, `Some(false)` an untimed one.
+    timed: Option<bool>,
+    /// Whether the refusal is a lost device (`DeviceError::lost`).
+    lost: bool,
     fired: AtomicBool,
+    attempts: Mutex<Vec<(Dir, usize, Option<i64>)>>,
 }
 
 impl ApplyFails {
     pub fn new(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>) -> ApplyFails {
-        ApplyFails { inner, dir, chan, fired: AtomicBool::new(false) }
+        ApplyFails::of(inner, dir, chan, false, false)
+    }
+
+    /// The first timed `apply` of `dir` — of `chan`, when one is named — fails.
+    pub fn timed(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>) -> ApplyFails {
+        ApplyFails::of(inner, dir, chan, true, false)
+    }
+
+    /// The first timed `apply` of `dir` — of `chan`, when one is named — fails as a lost device.
+    pub fn timed_lost(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>) -> ApplyFails {
+        ApplyFails::of(inner, dir, chan, true, true)
+    }
+
+    fn of(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>, timed: bool, lost: bool) -> ApplyFails {
+        ApplyFails { inner, dir, chan, timed: Some(timed), lost, fired: AtomicBool::new(false), attempts: Mutex::new(Vec::new()) }
+    }
+
+    /// Every `apply` the wrapper was given, in order, as the test sees an attempt: a refusal
+    /// and an apply the device never took alike.
+    pub fn attempts(&self) -> Vec<(Dir, usize, Option<i64>)> {
+        self.attempts.lock().unwrap().clone()
     }
 }
 
@@ -365,8 +429,13 @@ impl Device for ApplyFails {
     fn time_now(&self) -> Result<i64, DeviceError> { self.inner.time_now() }
     fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
     fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
-        if dir == self.dir && at.is_none() && self.chan.is_none_or(|want| want == chan) && !self.fired.swap(true, Ordering::SeqCst) {
-            return Err(DeviceError::failed("test: scripted refusal of an apply"));
+        self.attempts.lock().unwrap().push((dir, chan, at));
+        if dir == self.dir && Some(at.is_some()) == self.timed && self.chan.is_none_or(|want| want == chan) && !self.fired.swap(true, Ordering::SeqCst) {
+            return if self.lost {
+                Err(DeviceError { lost: true, message: "test: scripted loss on an apply".to_owned() })
+            } else {
+                Err(DeviceError::failed("test: scripted refusal of an apply"))
+            };
         }
         self.inner.apply(dir, chan, s, at)
     }

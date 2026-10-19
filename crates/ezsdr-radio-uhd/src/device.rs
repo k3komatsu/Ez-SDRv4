@@ -729,6 +729,12 @@ impl FakeDevice {
     }
 
     fn now(&self, st: &Fake) -> i64 {
+        self.base(st) + st.offset
+    }
+
+    /// The device's clock without its offset: the host clock's count since `zero`, at the
+    /// nominal rate, and the drift.
+    fn base(&self, st: &Fake) -> i64 {
         let ns = self.host.now().saturating_sub(st.zero).as_nanos() as i128;
         // Exact integer arithmetic at the nominal rate, so that the device's count and the
         // Authority's extrapolation are the same floor of the same product, tick for tick (a
@@ -737,7 +743,29 @@ impl FakeDevice {
         // is a separate, small term: exactly zero at the default `drift_ppm`.
         let base = ns * self.config.master_clock_rate as i128 / 1_000_000_000;
         let drift = (base as f64 * self.config.drift_ppm * 1e-6) as i128;
-        (base + drift) as i64 + st.offset
+        (base + drift) as i64
+    }
+
+    /// The device's clock set to root tick `at`, for a test that reads what the device holds at
+    /// an instant of its own (UR-33): its queue's commands due by then apply, as a device's
+    /// would. Forward only — the clock is never taken back — and on a manual clock whose
+    /// participants stop it (`test_support::Frozen`), so the test's assertion holds.
+    #[cfg(test)]
+    pub fn set_time(&self, at: i64) {
+        let mut st = self.lock();
+        let base = self.base(&st);
+        st.offset = at - base;
+        self.settle(&mut st);
+    }
+
+    /// What the device holds on `dir`'s channel `chan` now, its timed commands due by now
+    /// applied (UR-33's read-back; a test's view of the setting, not of a stream's samples).
+    #[cfg(test)]
+    pub fn read_back(&self, dir: Dir, chan: usize) -> Settings {
+        let mut st = self.lock();
+        self.settle(&mut st);
+        let channel = &st.settings[dir as usize][chan];
+        Settings { rate: Some(channel.rate), freq: Some(channel.freq), gain: Some(channel.gain), antenna: Some(channel.antenna.clone()) }
     }
 
     /// Applies the timed commands now in effect (UR-33's in-order command queue): each to the

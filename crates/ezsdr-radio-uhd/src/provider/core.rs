@@ -166,10 +166,10 @@ pub(crate) struct StreamState {
     /// uhd-control's enable from no stream included — is a new streamer with a new report queue,
     /// which the correlations of the bursts in flight are told from (UR-36, UR-28).
     pub generation: u64,
-    /// The segment command and the configuration version its last successful configure read,
-    /// `(seq, version)`; none after a failed configure or open. The owner configures again
-    /// unless this matches its segment's command and the configuration's current version (UR-36).
-    pub configured: Option<(u64, u64)>,
+    /// The command of the segment whose configuration the device was last given, `seq`; none
+    /// after a failed configure or open. The owner configures again unless this is its own
+    /// segment's command and the record holds its set open (UR-36).
+    pub configured: Option<u64>,
     /// uhd-control's enable from no stream owns the stream's streamer from the section that
     /// decides it until the section that books the change or ends the enable without one: an
     /// owner that finds it set makes no device call and moves neither its cursor nor its idle
@@ -323,14 +323,13 @@ impl Streams {
     }
 
     /// What the owner of `stream` does before it begins a segment that holds `set`, begun by
-    /// the command `by` under the configuration at version `version` (UR-36): nothing when the
-    /// record has that set open and configured for that command at that version; a configure
-    /// when only the configuration differs; an open otherwise.
-    pub fn owner_step(&self, stream: StreamKey, set: Channels, by: Option<u64>, version: Option<u64>) -> Owner {
+    /// the command `by` (UR-36): nothing when the record has that set open and configured for
+    /// that command; a configure when only the command differs; an open otherwise.
+    pub fn owner_step(&self, stream: StreamKey, set: Channels, by: Option<u64>) -> Owner {
         let state = self.stream(stream);
         match state.set {
             DeviceSet::Open(open) if open == set => {
-                if state.configured.is_some() && state.configured == by.zip(version) {
+                if state.configured.is_some() && state.configured == by {
                     Owner::Nothing
                 } else {
                     Owner::Configure
@@ -373,9 +372,9 @@ impl Streams {
         state.configured = None;
     }
 
-    /// The record of a configure of `stream`: `(seq, version)` once it succeeded, none when it
-    /// failed (UR-36).
-    pub fn record_configured(&mut self, stream: StreamKey, mark: Option<(u64, u64)>) {
+    /// The record of a configure of `stream`: its segment's command once it succeeded, none
+    /// when it failed (UR-36).
+    pub fn record_configured(&mut self, stream: StreamKey, mark: Option<u64>) {
         self.stream_mut(stream).configured = mark;
     }
 
@@ -817,7 +816,7 @@ impl Core {
     pub fn owner_configure(&self, dir: Dir, k: usize, next: &Planned) -> Result<(), DeviceError> {
         let stream = stream_key(dir, k);
         let set = next.set();
-        let step = lock(&self.streams).owner_step(stream, set, next.segment.by, next.version());
+        let step = lock(&self.streams).owner_step(stream, set, next.segment.by);
         if step == Owner::Nothing {
             return Ok(());
         }
@@ -825,8 +824,10 @@ impl Core {
             self.open_streamer(dir, k, set)?;
         }
         match next.configure(self, dir) {
-            Ok((_, version)) => {
-                lock(&self.streams).record_configured(stream, next.segment.by.map(|by| (by, version)));
+            Ok(_) => {
+                // UR-36: the record's mark is published only once the configuration returned.
+                self.probe("configured", None);
+                lock(&self.streams).record_configured(stream, next.segment.by);
                 Ok(())
             }
             Err(error) => {

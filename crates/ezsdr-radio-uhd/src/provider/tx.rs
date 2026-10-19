@@ -877,6 +877,7 @@ mod tests {
     use crate::device::{Device, Dir, FakeConfig, FakeDevice, Settings, TxCode, TxReport};
     use super::super::test_support::ReportFeed;
     use crate::provider::core::{stream_key, Clock, Core, lock};
+    use crate::provider::test_support::device_at;
     use ezsdr_radio::timeline::Channels;
     use crate::DeviceAuthority;
 
@@ -1948,8 +1949,52 @@ mod tests {
         lock(&core.streams).line(stream_key(Dir::Tx, 0)).map_or(0, |line| line.items.iter().filter(|item| matches!(item.kind, ezsdr_radio::timeline::Kind::Cold(_))).count())
     }
 
+    /// The manual-clock rig a test that reads the device's own settings runs on.
+    fn manual_rig() -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>) {
+        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let (core, device, time, _) = crate::provider::test_support::rig_with(config, Vec::new());
+        (core, device, time)
+    }
+
+    #[test]
+    fn ur_24_a_transmit_release_without_a_live_channel_reaches_the_pending_segment() {
+        // UR-24 (S1, transmit): a gain due before the enable's segment is given to the device as
+        // its own timed command on that segment's channel, and the owner's switch configures
+        // nothing; the device holds the gain from its instant.
+        let (core, device, time) = manual_rig();
+        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        device_at(&core, &time, &device, 0);
+        let mut control = control_of(&core);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        tx_channels_from_none(&mut control, &core, 2, 100, 1);
+        let origin = plan_of(&core, Dir::Tx)[0].segment.origin;
+        let (to_tx, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(to_tx);
+        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
+        assert!(tx.read(None), "the owner reads the plan");
+        let switched = device.calls().len();
+        assert!(tx.step(), "the owner begins the enable's segment");
+        assert!(!device.calls()[switched..].iter().any(|call| call.starts_with("apply") || call.starts_with("tx_open")), "the owner configured a segment the enable did: {:?}", device.calls());
+        let gain = crate::provider::core::key("radio.tx.gain_db");
+        let mark = device.calls().len();
+        control.book(Dispatched::new(ActionId(3), Action::UpdateParameter {
+            target: super::super::test_support::target_of(&core.id),
+            key: gain.clone(),
+            value: Value::num(3.0).unwrap(),
+            class: UpdateClass::HardwareTimed,
+            at: Some(AbsoluteDeadline::new(core.at(ms(50)))),
+        }, Some(core.id.clone())));
+        time.advance_to(core.at(ms(47))).unwrap();
+        control.release();
+        let timed: Vec<String> = device.calls()[mark..].iter().filter(|call| call.starts_with("apply tx 0") && !call.ends_with("at=-")).cloned().collect();
+        assert_eq!(timed.len(), 1, "{:?}", device.calls());
+        assert!(timed[0].contains("gain=3") && timed[0].contains(&format!("at={} effective={}", ms(50), ms(50))), "{timed:?}");
+        device_at(&core, &time, &device, origin + core.ticks(1_000_000));
+        assert_eq!(device.read_back(Dir::Tx, 0).gain, Some(3.0));
+    }
+
     /// The transmit record, as the ownership tests read it.
-    fn tx_record(core: &Core) -> (bool, bool, Option<(u64, u64)>) {
+    fn tx_record(core: &Core) -> (bool, bool, Option<u64>) {
         let streams = lock(&core.streams);
         let state = streams.stream(stream_key(Dir::Tx, 0));
         (state.busy, state.reading, state.configured)
@@ -2071,7 +2116,7 @@ mod tests {
         let (busy, reading, configured) = tx_record(&core);
         assert!(!busy && !reading, "the ownership did not go back");
         let planned = plan_of(&core, Dir::Tx);
-        assert_eq!(configured, planned[0].segment.by.zip(planned[0].version()), "the enable fell back to a change the owner books");
+        assert_eq!(configured, planned[0].segment.by, "the enable fell back to a change the owner books");
     }
 
     #[test]

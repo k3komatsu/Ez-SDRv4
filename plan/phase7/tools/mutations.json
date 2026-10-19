@@ -663,10 +663,10 @@
  },
  {
   "id": "U21",
-  "name": "a late timed update applied at its at",
+  "name": "a late timed update applied where LATE_COMMAND says (UR-24, S12)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                self.late_command(Some(key.clone()), requested, earliest);\n                earliest",
-  "new": "                self.late_command(Some(key.clone()), requested, earliest);\n                requested",
+  "old": "        let e = requested.map_or(floor, |requested| requested.max(floor));",
+  "new": "        let e = requested.map_or(floor, |requested| requested);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_24_hardware_timed_updates"
@@ -932,16 +932,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_07_a_read_bracketed_wider_than_1_ms_is_discarded"
- },
- {
-  "id": "R03",
-  "name": "a command before one already released is not moved behind it (L07)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "let effective = latest.map_or(e, |latest| latest.max(e));",
-  "new": "let effective = latest.map_or(e, |_| e);",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_24_the_device_queue_order_is_the_effective_order"
  },
  {
   "id": "R04",

@@ -1162,7 +1162,7 @@ mod tests {
         assert_eq!(calls.iter().filter(|call| call.starts_with("rx_open")).count(), 1, "{calls:?}");
         assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 0")).count(), 2, "the next segment configures the first channel again: {calls:?}");
         assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 1")).count(), 1, "and the channel the device refused: {calls:?}");
-        assert!(lock(&core.streams).stream(stream_key(Dir::Rx, 0)).configured.is_some_and(|(by, _)| by == 3), "{calls:?}");
+        assert!(lock(&core.streams).stream(stream_key(Dir::Rx, 0)).configured.is_some_and(|by| by == 3), "{calls:?}");
     }
 
     #[test]
