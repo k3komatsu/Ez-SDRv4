@@ -16,7 +16,7 @@
 
 ## 2. 次にすること
 
-1. **実機の接続**（§6.1）：X300 #2（347D541，UBX＋CBX）は 2026-10-20 に接続・設定済み．X300 #1（347D545，OBX）は電源待ち．
+1. **実機**：2026-10-20 に BP0 と BP5 を 2 台で済ませた（[bench-results.md](plan/phase8/bench-results.md)：Phase 7 の hardware テスト 29 本が #1＋OBX・#2＋UBX とも通り，悪くなった数値は無い）．今つながっているのは #1＋OBX．組み換えは owner に頼む（2026-10-20 夜は翌朝まで不可）．
 2. **Phase 8 の段階 1b-4e**（[設計 33](plan/phase8/33-channels-and-streams.md) §5 の 1b-4 行「1b-4c で 1b-4d へ送るもの」と「分け方」）．1b-4d-3（Manifest と event の stream 番号）は 2026-10-20 に完了（[00-overview](plan/phase8/00-overview.md) §8，[reviews/1b4d3-opus.md](plan/phase8/reviews/1b4d3-opus.md)）．
    - **#67**：遠い origin の timed start が queue されたまま `Provider::stop` が来ると，uhd-rx は join の 1 s で detach され，cleanup は `close_streams` を呼ばない（1b-4d-2 の Sol の計画レビュー．#56 の bench を待つ）．
    - bench 行き：idle の DDC/DUC の timed frequency と fake の FIFO（1b-4d-1c），2 本の rx streamer と block ごとの queue（1b-4d-2）．今の key の queue の会計は 1b-5 で消える．
@@ -34,7 +34,7 @@
      - 3（測定記録・比較テスト・測定スイート・ホスト設定の script）．
      - 段階 1 が終わったら，crate ごとの冗長の棚卸しを 1 回（ponytail の audit と Opus のレビュー，owner 2026-10-19）．
    - **実装役**（owner 2026-10-19）：判断の多い段階（設計の作り替え，テスト計画，並行処理）は DeepSeek（`opencode-go/deepseek-v4.1-flash#max`），指示の決まった小さな修正の回は Claude Code の Haiku のサブエージェント（`model: haiku`）．回ごとに枠の消費を owner に報告する．セルフレビューは DeepSeek．1b-4d-1a では 5 回とも判定を出さずに終わったが，1b-4d-1b でチェックリストを 4 項目にし，`timeout 2400`，mutation を流さないと明記したら 3 回とも判定が出た．OpenCode2・Claude Code・Codex には ponytail が入っている．
-3. **実機**（owner 2026-10-20：X300 #2 は使ってよい）．BP0 は #2 の分が済んだ：probe，FPGA を UHD 4.10 の HG に書き換え（owner の許可，元は 4.9 の image），UBX のループバック（1 GHz，送信なしより 85 dB 上の音）．記録は `~/ezsdr-bench/NOTES.md`（次の gate で §6 へ）．#1 の probe と CBX は未．用意できる機材（2026-10-16）：X300 × 2，OBX，UBX（壊れているかも），CBX，LFTX・LFRX・BasicTX・BasicRX（どれも2枚ずつ可，ただし他の実験から借りるので手間）．揃ったら最初に BP0（probe，UBX が動くか，2台目の FPGA image の版と HG/XG）．各段階で要るもの（根拠：Vision §67〈`design/vision/11-boundaries-invariants-and-roadmap.md:317-337`〉，`plan/phase7/00-overview.md:103`「One device is enough for §59's claim」）：
+3. **実機の残り**：複数 stream の layout（H1，1b-4e と段階 3 の後），CBX，混在構成（BP4b），XG（BP4c）．`DeviceAuthority` の UR-7 のやり直しはまだ一度も働いていない．用意できる機材（2026-10-16）：X300 × 2，OBX，UBX（壊れているかも），CBX，LFTX・LFRX・BasicTX・BasicRX（どれも2枚ずつ可，ただし他の実験から借りるので手間）．揃ったら最初に BP0（probe，UBX が動くか，2台目の FPGA image の版と HG/XG）．各段階で要るもの（根拠：Vision §67〈`design/vision/11-boundaries-invariants-and-roadmap.md:317-337`〉，`plan/phase7/00-overview.md:103`「One device is enough for §59's claim」）：
    - **8**：1台．Phase 7 と同じ X300（X310 の代わりで可）＋OBX 1枚のループバック（TX/RX → 30 dB 以上の減衰器 → RX2），10 GbE の Linux PC．外部 10 MHz/PPS 不要．X300 は 2026-10-01 から未接続なので，つなぎ直して `uhd_usrp_probe` で確認する（§6）．
    - **8b**：USRP 2台（2台目は X310/X300 なら同じ driver と profile．USRP2 は不要〈owner〉），10 MHz/PPS の分配器（OctoClock など．X3xx の背面から配れるかは未確認），2台の時刻差を測る RF 配線（1つの信号を分配して両方の RX へ，減衰器付き．推測）．2台目の 10 GbE は usrp-lnx03 の X710 の空きポート（§6.2）が使える．
    - **8c**：8 と同じ1台．FPGA image に Replay・DDC/DUC（・FFT）の block があるかを `uhd_usrp_probe` の block 一覧で確認．
@@ -99,7 +99,7 @@
 
 済み（2026-10-16）：`restore.sh`（メモリ・`.cargo/config.toml`・post-commit hook・`v3/` worktree．`v3/` の引用はすべて解決），venv（Python 3.14 + numpy），opencode2 の3モデル（Sol は応答も確認），`codex_limits.py`，ssh sim02/sim03，image `ezsdr-v4-dev:uhd4.10` の再 build．usrp-lnx03 で gate が通った：`cargo test --workspace`（1139 passed），clippy（host と image 内の `--features uhd`），Python suite（3.14 と 3.9 で 47 passed），`remote_mutate.py all` は 767/768（生き残りは既知の phase7/G09）．ホストの UHD に pkg-config が無いのは問題ない（`--features uhd` は image の中だけ）．
 
-- [ ] X300 をつなぎ，`uhd_usrp_probe` で見えることを確かめる．#2（347D541）は 2026-10-20 に済み（`enp1s0f1np1`）．#1（347D545）が残り．
+- [x] X300 をつなぎ，`uhd_usrp_probe` で見えることを確かめる（2026-10-20，2 台とも．[bench-results.md](plan/phase8/bench-results.md)）．
 - [ ] ホスト側の NIC と sysctl の設定（下の 6.3）．`sudo` にパスワードが要るので owner が流す．2026-10-20 は tree の外の `~/ezsdr-bench/usrp-net.sh`（`set_addr.sh` を縮めたもの）で当てた．再起動で戻る．段階 3 でこのリポジトリの script にする．
 - [ ] 2つとも済んだら，この 6.1 を消して1行の記録にする．
 
@@ -110,7 +110,7 @@
 | サーバー | `usrp-lnx03`（学内に常設．`ssh sim02`・`ssh sim03`・`ssh ydev` は直接つながる．踏み台の設定は要らない） |
 | Rust / UHD | ホストの Rust で普段の開発をする．標準の build は libuhd を使わない（UR-35）．ホストの UHD は 4.9 で，X300 の FPGA は UHD 4.10 の image（書き換えない）．互換番号が合わず，ホストの `uhd_usrp_probe` は弾かれる（別プロジェクトで確認済み）．そのため `--features uhd` の build・clippy と実機テストは，すべて Docker image `ezsdr-v4-dev:uhd4.10`（`docker/uhd4.10/Dockerfile`）の中で行う．build 出力は volume `ezsdr-v4-cargo-target` |
 | NIC | 10 GbE × 4（X710，driver i40e）：`enp1s0f0np0`・`enp1s0f1np1`・`enp1s0f2np2`・`enp1s0f3np3`．X300 との対応は配線で決まり，NIC 名からは分からない．ホスト側の IP は `ip` で X300 の subnet に合わせる |
-| 装置 | #1：USRP X300（serial 347D545）．FPGA は UHD 4.10 の HG image．slot A に OBX，slot B は空．`ARGS=addr=192.168.40.36`（Phase 7 の値．つなぎ直したら確かめる）．#2：USRP X300（serial 347D541），`addr=192.168.40.37`，UHD 4.10 の HG image（2026-10-20 に書き換え），slot A に UBX-160 v2，slot B に CBX，UBX の TX/RX → 30 dB → RX2．2台とも 192.168.40.x なので，同時につなぐときはホストに `/32` の経路を足す |
+| 装置 | #1：USRP X300（serial 347D545）．FPGA は UHD 4.10 の HG image．slot A に OBX，slot B は空．`ARGS=addr=192.168.40.36`，`enp1s0f0np0`．#2：USRP X300（serial 347D541），`addr=192.168.40.37`，`enp1s0f1np1`，UHD 4.10 の HG image（2026-10-20 に書き換え），slot A に UBX-160 v2，slot B に CBX，UBX の TX/RX → 30 dB → RX2．2台とも 192.168.40.x なので，同時につなぐときはホストに `/32` の経路を足す |
 | RF | OBX の TX/RX → 30 dB 減衰器 → RX2．利得 0 dB，振幅 ≤ 0.5，1 GHz（envelope 999–1001 MHz） |
 | 既知の癖 | ref PLL の lock 失敗が open の約4%（UR-7 の1回の開き直しで救える）．X300 は受信の timed stop を無視する（F1，対処済み）．抜線すると UHD が static teardown で abort する（UR-29） |
 
