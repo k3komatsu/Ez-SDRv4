@@ -17,11 +17,12 @@
 ## 2. 次にすること
 
 1. **開発 PC の移行の残り**（§6.1）：X300 の接続確認と，ホストの NIC・sysctl 設定（owner が sudo で）．
-2. **Phase 8 の段階 1b-4d-2 → 1b-4d-3 → 1b-4e**（[設計 33](plan/phase8/33-channels-and-streams.md) §5 の 1b-4 行「1b-4c で 1b-4d へ送るもの」と「分け方」）．
-   - **次は 1b-4d-2**：stream ごとの thread・node（plan 33 の「分け方」）．1b-4d-1c からの持ち越し（[reviews/1b4d1c-opus.md](plan/phase8/reviews/1b4d1c-opus.md) §5）：owner が `Planned` を取った後に `Provider::stop` が来る窓に gate のテストを置く．bench 行きは idle の DDC/DUC の timed frequency と fake の FIFO．今の key の queue の会計は 1b-5 で消える．
-   - **4d-3**：event と Manifest の plan の stream 番号．**4e**：moves（RM-34）と複数 stream の VH-8 harness．
+2. **Phase 8 の段階 1b-4d-3 → 1b-4e**（[設計 33](plan/phase8/33-channels-and-streams.md) §5 の 1b-4 行「1b-4c で 1b-4d へ送るもの」と「分け方」）．1b-4d-2（stream ごとの thread・node）は 2026-10-20 に完了（[00-overview](plan/phase8/00-overview.md) §8，[reviews/1b4d2-opus.md](plan/phase8/reviews/1b4d2-opus.md)）．
+   - **起票待ち**（この PC の `gh` は未ログイン．owner の `gh auth login` の後）：遠い origin の timed start が queue されたまま `Provider::stop` が来ると，uhd-rx は origin まで待つので join の 1 s で detach され，cleanup は `close_streams` を呼ばない（[1b4d2-opus](plan/phase8/reviews/1b4d2-opus.md) §3．`area:uhd`，`mech:stream-lifecycle-scattered`，#56 の bench に足す）．
+   - bench 行き：idle の DDC/DUC の timed frequency と fake の FIFO（1b-4d-1c），2 本の rx streamer と block ごとの queue（1b-4d-2）．今の key の queue の会計は 1b-5 で消える．
+   - **次は 4d-3**：event と Manifest の plan の stream 番号（plan 33 の (4)，(8)，(9)）．**4e**：moves（RM-34）と複数 stream の VH-8 harness．
    - **大きさ**（owner 2026-10-19）：1 段階は本体とテストで約 1,500 行．指示書でテストの繰り返し（Manifest の section を引く式，拒否の理由，device の準備）を helper にさせ，テスト計画は順序ごとに assert を 1〜2 個に絞る．
-   - **手順**：AGENTS.md §9．計画を先に書く手順の評価は 4b・4c の記録（[1b4b-opus](plan/phase8/reviews/1b4b-opus.md)，[1b4c-opus](plan/phase8/reviews/1b4c-opus.md)）に続けて 4d で判断する．
+   - **手順**：AGENTS.md §9．計画を先に書く手順の評価は 4b・4c・4d-1c・4d-2 の記録（[1b4d2-opus](plan/phase8/reviews/1b4d2-opus.md) §4 など）．
    - **持ち越し**：
      - [1b-4a の修正の報告](plan/phase8/reviews/1b4a-fix-reports.md) の §9（修正の回 1・2）．
      - [1b-3c の報告](plan/phase8/reviews/1b3c-report.md) §10．

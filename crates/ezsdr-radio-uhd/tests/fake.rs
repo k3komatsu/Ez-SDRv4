@@ -8,6 +8,7 @@
 mod common;
 
 use ezsdr_kernel::spec::Scalar;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as Wall, Instant};
@@ -547,7 +548,7 @@ fn direct_prepare(radio: &mut UhdRadio, device: Arc<FakeDevice>, class: Executio
     let mut registry = ModuleRegistry::new();
     let (mut checks, mut kinds) = (AdmissionCheckRegistry::new(), EventKindRegistry::with_kernel_kinds());
     ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
-    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
+    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1", "usrp/rx/s2", "usrp/tx/s2", "usrp/rx/s3", "usrp/tx/s3"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 1024, &Policy::default()));
     let ctx = {
         let mut ctx = PrepareContext::testing(
@@ -694,7 +695,7 @@ impl Direct {
         ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
         // The instance's own nodes under either key set (RM-29): a layout's events come
         // from its stream nodes.
-        let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
+        let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1", "usrp/rx/s2", "usrp/tx/s2", "usrp/rx/s3", "usrp/tx/s3"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
         let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
         let queue = Arc::new(Pushed::default());
         let ctx = {
@@ -1014,7 +1015,7 @@ fn ur_16_a_panicking_thread_is_a_lost_device() {
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
     let manifest = run.finish();
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
-    assert!(section(&manifest, "rejected").as_array().unwrap().iter().any(|r| r["thread"] == "uhd-rx"));
+    assert!(section(&manifest, "rejected").as_array().unwrap().iter().any(|r| r["thread"] == "uhd-rx-s0"));
     assert_marked_lost_before_closed(&device);
 }
 
@@ -1036,7 +1037,7 @@ fn ur_16_a_wedged_thread_does_not_wedge_stop() {
     let dir = TempDir::new();
     let (manifest, _, took) = wedged(&dir);
     assert!(took < Wall::from_secs(3), "{took:?}");
-    assert!(section(&manifest, "rejected").as_array().unwrap().iter().any(|r| r["thread"] == "uhd-tx"), "{:?}", section(&manifest, "rejected"));
+    assert!(section(&manifest, "rejected").as_array().unwrap().iter().any(|r| r["thread"] == "uhd-tx-s0"), "{:?}", section(&manifest, "rejected"));
 }
 
 #[test]
@@ -3797,7 +3798,7 @@ fn ur_16_a_panicking_thread_ends_a_two_stream_run_with_its_message() {
     assert_eq!(lost.len(), 1, "{lost:?}");
     assert_eq!(lost[0].payload["message"], "a Provider thread panicked");
     let rejected = section(&manifest, "rejected").as_array().unwrap();
-    assert!(rejected.iter().any(|r| r["thread"] == "uhd-rx" && r["reason"] == "panicked"), "{rejected:?}");
+    assert!(rejected.iter().any(|r| r["thread"] == "uhd-rx-s0" && r["reason"] == "panicked"), "{rejected:?}");
     assert_marked_lost_before_closed(&device);
 }
 
@@ -3823,17 +3824,54 @@ fn ur_26_a_second_stop_does_nothing() {
 /// Provider threads are held inside a device call, so neither joins within `JOIN_BOUND`, and
 /// the order of the `rejected` rows is the order `Provider::stop` joins them in (UR-16, D15).
 struct Gated {
-    inner: FakeDevice,
+    inner: Arc<FakeDevice>,
     held: Mutex<bool>,
     open: std::sync::Condvar,
     entered: Mutex<Option<std::sync::mpsc::Sender<&'static str>>>,
     arrivals: Mutex<std::sync::mpsc::Receiver<&'static str>>,
+    /// The stream whose calls are held, when only one is (`None`: every stream).
+    only: Option<usize>,
+    /// Where each Provider thread that makes a gated call reports its end (S13, S14).
+    ends: Mutex<Option<std::sync::mpsc::Sender<String>>>,
+}
+
+thread_local! {
+    /// A test's end notification, installed on a Provider thread by its first gated call:
+    /// the thread's TLS destructor sends its name when the thread ends.
+    static END: RefCell<Option<End>> = const { RefCell::new(None) };
+}
+
+struct End {
+    name: String,
+    ended: std::sync::mpsc::Sender<String>,
+}
+
+impl Drop for End {
+    fn drop(&mut self) {
+        let _ = self.ended.send(self.name.clone());
+    }
 }
 
 impl Gated {
     fn new(config: FakeConfig) -> Gated {
         let (entered, arrivals) = std::sync::mpsc::channel();
-        Gated { inner: FakeDevice::new(config), held: Mutex::new(false), open: std::sync::Condvar::new(), entered: Mutex::new(Some(entered)), arrivals: Mutex::new(arrivals) }
+        Gated { inner: Arc::new(FakeDevice::new(config)), held: Mutex::new(false), open: std::sync::Condvar::new(), entered: Mutex::new(Some(entered)), arrivals: Mutex::new(arrivals), only: None, ends: Mutex::new(None) }
+    }
+
+    /// The device the test observes the calls on.
+    fn inner(&self) -> Arc<FakeDevice> { self.inner.clone() }
+
+    /// A `Gated` that holds only stream `k`'s calls (S14).
+    fn only(config: FakeConfig, k: usize) -> Gated {
+        Gated { only: Some(k), ..Gated::new(config) }
+    }
+
+    /// Reports on the returned channel the end of each Provider thread that makes a gated
+    /// call after this, by its name: a test waits for a detached worker's end (S13, S14).
+    fn ends(&self) -> std::sync::mpsc::Receiver<String> {
+        let (ended, ends) = std::sync::mpsc::channel();
+        *self.ends.lock().unwrap() = Some(ended);
+        ends
     }
 
     /// Holds every device call from now on.
@@ -3858,7 +3896,33 @@ impl Gated {
         }
     }
 
-    fn hold_call(&self, name: &'static str) {
+    /// Waits until `wanted` held calls of each name have begun (S13).
+    fn entered_n(&self, wanted: &[(&str, usize)]) {
+        let mut seen: Vec<&'static str> = Vec::new();
+        while wanted.iter().any(|(name, n)| seen.iter().filter(|seen| *seen == name).count() < *n) {
+            let arrivals = self.arrivals.lock().unwrap();
+            let name = arrivals.recv_timeout(Wall::from_secs(20)).unwrap_or_else(|_| panic!("no held call arrived: {seen:?}"));
+            drop(arrivals);
+            seen.push(name);
+        }
+    }
+
+    /// Installs the end notification on this, a Provider thread's, first gated call.
+    fn watch_end(&self) {
+        let Some(ended) = self.ends.lock().unwrap().clone() else { return };
+        END.with(|end| {
+            let mut end = end.borrow_mut();
+            if end.is_none() {
+                *end = Some(End { name: std::thread::current().name().unwrap_or("a Provider thread").to_owned(), ended });
+            }
+        });
+    }
+
+    fn hold_call(&self, stream: usize, name: &'static str) {
+        self.watch_end();
+        if self.only.is_some_and(|only| only != stream) {
+            return;
+        }
         let mut held = self.held.lock().unwrap();
         if !*held {
             return;
@@ -3869,6 +3933,15 @@ impl Gated {
         while *held {
             held = self.open.wait(held).unwrap();
         }
+    }
+}
+
+/// Waits on `ends` until every thread of `names` has ended (S13, S14).
+fn ended(ends: &std::sync::mpsc::Receiver<String>, names: &[&str]) {
+    let mut seen: Vec<String> = Vec::new();
+    while !names.iter().all(|name| seen.iter().any(|seen| seen == name)) {
+        let name = ends.recv_timeout(Wall::from_secs(20)).unwrap_or_else(|_| panic!("no worker ended: {seen:?}"));
+        seen.push(name);
     }
 }
 
@@ -3891,12 +3964,12 @@ impl Device for Gated {
     fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
     fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
     fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv {
-        self.hold_call("rx_recv");
+        self.hold_call(s, "rx_recv");
         self.inner.rx_recv(s, n, t)
     }
     fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
     fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> {
-        self.hold_call("tx_send");
+        self.hold_call(s, "tx_send");
         self.inner.tx_send(s, b, at, sob, eob, t)
     }
     fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
@@ -3924,7 +3997,7 @@ fn ur_26_the_sending_threads_join_before_the_receiving_ones() {
     let threads: Vec<String> = section(&manifest, "rejected").as_array().unwrap().iter()
         .filter(|r| r["reason"].as_str().is_some_and(|reason| reason.contains("did not join")))
         .map(|r| r["thread"].as_str().unwrap().to_owned()).collect();
-    assert_eq!(threads, ["uhd-tx", "uhd-rx"], "{:?}", section(&manifest, "rejected"));
+    assert_eq!(threads, ["uhd-tx-s0", "uhd-rx-s0"], "{:?}", section(&manifest, "rejected"));
     assert!(!runner.inner.calls().iter().any(|c| c == "close_streams"), "a detached thread's streamer was closed (UR-16)");
 }
 
@@ -4844,29 +4917,49 @@ fn ur_13_a_layout_s_transmit_stream_zero_opens_its_channel_list() {
 }
 
 #[test]
-fn ur_12_a_layout_stream_above_zero_is_refused() {
-    // UR-12, D14: this Provider runs each direction's stream 0 alone — a channel joining a
-    // later stream is refused before anything is configured (coerce takes -1..=1, the
-    // stage's limit is the Provider's), for both directions.
-    for dir in ["rx", "tx"] {
-        let device = fake(FakeConfig { serial: format!("ur12-above-{dir}"), ..FakeConfig::default() });
-        let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
-        let constraints = [
-            (format!("radio.{dir}.c0.stream"), Scalar::from(0)),
-            (format!("radio.{dir}.c1.stream"), Scalar::from(1)),
-        ];
-        let pairs: Vec<(&str, Scalar)> = constraints.iter().map(|(name, value)| (name.as_str(), value.clone())).collect();
-        let report = radio.coerce(&request(&pairs)).unwrap();
-        assert!(report.rejected.is_empty(), "{dir}: the description takes -1..=1: {:?}", report.rejected);
-        let error = direct_prepare(&mut radio, device.clone(), ExecutionClass::HardwareInLoop, Vec::new(), &pairs).unwrap_err();
-        assert_eq!(error.kind, ModuleErrorKind::Rejected, "{dir}");
-        assert!(error.message.contains("stream 0") && error.message.contains("c1"), "{dir}: {}", error.message);
-        assert!(
-            !device.calls().iter().any(|call| call.starts_with("apply") || call.starts_with("rx_open") || call.starts_with("tx_open")),
-            "{dir}: {:?}",
-            device.calls()
-        );
+fn ur_12_a_layout_declares_and_starts_every_stream() {
+    // UR-12, UR-13, UR-15, RM-29 (design 33 D4, D15): every declared stream declares its
+    // clock, opens its own streamer on its own port's links, is started at T0 and publishes
+    // its own channels on its own clock — stream 1 as stream 0.
+    let (rx0, link0) = attached_reading("rx0");
+    let (rx1, link1) = attached_reading("rx1");
+    let mut direct = Direct::build(
+        FakeConfig::default(),
+        &[
+            ("radio.rx.c0.stream", Scalar::from(0)),
+            ("radio.rx.c1.stream", Scalar::from(1)),
+            ("radio.rx.s0.sample_rate_hz", Scalar::try_from(2e6).unwrap()),
+            ("radio.rx.s1.sample_rate_hz", Scalar::try_from(1e6).unwrap()),
+            ("radio.tx.c0.stream", Scalar::from(0)),
+            ("radio.tx.c1.stream", Scalar::from(1)),
+            ("radio.tx.s0.sample_rate_hz", Scalar::try_from(2e6).unwrap()),
+            ("radio.tx.s1.sample_rate_hz", Scalar::try_from(1e6).unwrap()),
+        ],
+        vec![rx0, rx1],
+        layout_selector(),
+    );
+    direct.settle(Wall::from_millis(100));
+    let log = direct.device.calls();
+    for call in ["rx_open 0 [0]", "rx_open 1 [1]", "tx_open 0 [0]", "tx_open 1 [1]"] {
+        assert_eq!(log.iter().filter(|c| c.as_str() == call).count(), 1, "{call}: {log:?}");
     }
+    let starts: Vec<&String> = log.iter().filter(|c| c.starts_with("rx_start")).collect();
+    let at = |call: &str| call.rsplit(' ').next().unwrap().to_owned();
+    let zero = starts.iter().find(|c| c.starts_with("rx_start 0 ")).expect("stream 0's start");
+    let one = starts.iter().find(|c| c.starts_with("rx_start 1 ")).expect("stream 1's start");
+    assert_eq!(at(zero), at(one), "both streams start at T0: {log:?}");
+    let records = direct.clocks.sample_clock_records();
+    let record = |path: &str| records.iter().find(|record| record.stream.path() == path).unwrap_or_else(|| panic!("{path}: {records:?}"));
+    assert_eq!(record("usrp/rx/s0").root_ticks_per_tick, ezsdr_kernel::time::Rational::new(100, 1).unwrap());
+    assert_eq!(record("usrp/rx/s1").root_ticks_per_tick, ezsdr_kernel::time::Rational::new(200, 1).unwrap());
+    let block = |link: &Arc<dyn ezsdr_kernel::stream::DataLink>, path: &str| {
+        let block = link.receive().unwrap_or_else(|| panic!("a block on {path}")).0;
+        assert_eq!(block.header().channels, 1, "{path}");
+        assert_eq!(block.header().first_sample_time.domain(), record(path).domain, "{path}");
+    };
+    block(&link0, "usrp/rx/s0");
+    block(&link1, "usrp/rx/s1");
+    let _ = direct.finish();
 }
 
 #[test]
@@ -5459,31 +5552,48 @@ fn ur_25_the_last_receive_channel_leaves_no_clock_and_no_block() {
 }
 
 #[test]
-fn ur_25_a_membership_in_a_later_stream_is_refused_and_changes_nothing() {
-    // RM-25, D14, item 10: a channel may not join a later stream at runtime; the refusal is
-    // a COMMAND_REJECTED, nothing is booked, and the same channel can join stream 0 next.
+fn ur_25_a_move_between_streams_is_refused_and_changes_nothing() {
+    // UR-25, RM-34: a channel moving from one stream to another is refused for now; the
+    // refusal is a COMMAND_REJECTED beginning `UR-25:`, nothing is booked, and no stream is
+    // cut. A join from no stream is not a move (S3). Both directions of the move are tried,
+    // each from a fresh instance.
     use ezsdr_kernel::module_api::UpdateClass::Cold;
     for dir in ["rx", "tx"] {
-        let constraints: Vec<(&str, Scalar)> = if dir == "tx" { vec![("radio.tx.c0.stream", Scalar::from(0))] } else { Vec::new() };
-        let mut direct = Direct::build(FakeConfig::default(), &constraints, vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)], layout_selector());
-        direct.settle(Wall::from_millis(30));
-        let before = (direct.device.calls().len(), direct.clocks.sample_clock_records().len());
-        direct.update(&format!("radio.{dir}.c1.stream"), Value::from(1), Cold, None);
-        direct.settle(Wall::from_millis(120));
-        let rejected = direct.of("radio.COMMAND_REJECTED");
-        assert_eq!(rejected.len(), 1, "{dir}: {rejected:?}");
-        let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
-        assert!(reason.contains("stream 0") && reason.contains("s1"), "{dir}: {reason}");
-        let log = direct.device.calls();
-        assert_eq!(log.len(), before.0, "{dir}: the refusal wrote to the device: {log:?}");
-        assert_eq!(direct.clocks.sample_clock_records().len(), before.1, "{dir}");
-        assert!(direct.of("radio.LATE_COMMAND").is_empty(), "{dir}");
-        // The same channel joins stream 0: the refusal left no value behind.
-        direct.update(&format!("radio.{dir}.c1.stream"), Value::from(0), Cold, None);
-        direct.settle(Wall::from_millis(300));
-        let log = direct.device.calls();
-        assert!(log.iter().any(|call| call == &format!("{}_open 0 [0, 1]", if dir == "rx" { "rx" } else { "tx" })), "{dir}: {log:?}");
-        let _ = direct.finish();
+        for (from, to) in [(1, 0), (0, 1)] {
+            let constraints: Vec<(&str, Scalar)> = if dir == "tx" {
+                vec![
+                    ("radio.rx.c0.stream", Scalar::from(0)),
+                    ("radio.rx.c1.stream", Scalar::from(-1)),
+                    ("radio.tx.c0.stream", Scalar::from(0)),
+                    ("radio.tx.c1.stream", Scalar::from(from)),
+                ]
+            } else {
+                vec![
+                    ("radio.rx.c0.stream", Scalar::from(0)),
+                    ("radio.rx.c1.stream", Scalar::from(from)),
+                    ("radio.tx.c0.stream", Scalar::from(-1)),
+                    ("radio.tx.c1.stream", Scalar::from(-1)),
+                ]
+            };
+            let (r0, _l0) = attached_reading("rx0");
+            let (r1, _l1) = attached_reading("rx1");
+            let links = if dir == "rx" { vec![r0, r1] } else { vec![r0] };
+            let mut direct = Direct::build(FakeConfig::default(), &constraints, links, layout_selector());
+            direct.settle(Wall::from_millis(30));
+            let before = (direct.device.calls().len(), direct.clocks.sample_clock_records().len());
+            let at = direct.now() + ms(40);
+            direct.update(&format!("radio.{dir}.c1.stream"), Value::from(to), Cold, Some(at));
+            direct.settle(Wall::from_millis(120));
+            let rejected = direct.of("radio.COMMAND_REJECTED");
+            assert_eq!(rejected.len(), 1, "{dir} {from}->{to}: {rejected:?}");
+            let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+            assert!(reason.starts_with("UR-25:") && reason.contains("c1") && reason.contains("s0") && reason.contains("s1"), "{dir} {from}->{to}: {reason}");
+            let log = direct.device.calls();
+            assert_eq!(log.len(), before.0, "{dir} {from}->{to}: the refusal wrote to the device: {log:?}");
+            assert_eq!(direct.clocks.sample_clock_records().len(), before.1, "{dir} {from}->{to}");
+            assert!(direct.of("radio.LATE_COMMAND").is_empty(), "{dir} {from}->{to}");
+            let _ = direct.finish();
+        }
     }
 }
 
@@ -6381,4 +6491,830 @@ fn ur_05_a_repeated_front_end_is_still_refused() {
     let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel", "rx": ["0:A:basic_rx:0", "0:A:basic_rx:1"], "tx": [] }), Some(x3xx())), device.clone()).unwrap();
     drop(radio);
     assert_eq!(calls(&device, "set_subdev_spec rx A:0 A:1").len(), 1, "{:?}", device.calls());
+}
+
+// ------------------------------------------------ 1b-4d-2: every declared stream
+
+/// The constraints of two receive streams: c0 to s0 at 2 MS/s, c1 to s1 at 1 MS/s (S1).
+fn rx_two() -> Vec<(&'static str, Scalar)> {
+    vec![
+        ("radio.rx.c0.stream", Scalar::from(0)),
+        ("radio.rx.c1.stream", Scalar::from(1)),
+        ("radio.rx.s0.sample_rate_hz", Scalar::try_from(2e6).unwrap()),
+        ("radio.rx.s1.sample_rate_hz", Scalar::try_from(1e6).unwrap()),
+    ]
+}
+
+/// The same for two transmit streams.
+fn tx_two() -> Vec<(&'static str, Scalar)> {
+    vec![
+        ("radio.tx.c0.stream", Scalar::from(0)),
+        ("radio.tx.c1.stream", Scalar::from(1)),
+        ("radio.tx.s0.sample_rate_hz", Scalar::try_from(2e6).unwrap()),
+        ("radio.tx.s1.sample_rate_hz", Scalar::try_from(1e6).unwrap()),
+    ]
+}
+
+#[test]
+fn ur_13_a_linkless_receive_stream_has_no_streamer() {
+    // UR-13, RM-29 (S2): a receive stream whose port has no link opens no streamer, starts
+    // nothing and declares no registered clock; stream 0 with its link is untouched.
+    let mut direct = Direct::build(FakeConfig::default(), &rx_two(), vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)], layout_selector());
+    direct.settle(Wall::from_millis(100));
+    let log = direct.device.calls();
+    assert_eq!(calls(&direct.device, "rx_open 1").len(), 0, "{log:?}");
+    assert_eq!(calls(&direct.device, "rx_start 1").len(), 0, "{log:?}");
+    assert!(direct.clocks.sample_clock_records().iter().all(|record| record.stream.path() != "usrp/rx/s1"), "{:?}", direct.clocks.sample_clock_records());
+    assert_eq!(calls(&direct.device, "rx_open 0 [0]"), ["rx_open 0 [0]"], "{log:?}");
+    assert_eq!(calls(&direct.device, "rx_start 0").len(), 1, "{log:?}");
+    assert!(direct.of("radio.COMMAND_REJECTED").is_empty());
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_25_a_channel_enabled_from_no_stream_in_a_later_stream_opens_and_starts_it() {
+    // UR-25, RM-29 (S3): a channel joining stream 1 from no stream opens that stream's
+    // streamer, configures it and starts it; stream 0 is not cut.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut constraints = rx_two();
+    constraints[1] = ("radio.rx.c1.stream", Scalar::from(-1));
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::build(FakeConfig::default(), &constraints, vec![r0, r1], layout_selector());
+    direct.settle(Wall::from_millis(30));
+    let join = direct.now() + ms(40);
+    direct.update("radio.rx.c1.stream", Value::from(1), Cold, Some(join));
+    direct.settle(Wall::from_millis(300));
+    let log = direct.device.calls();
+    let open = log.iter().position(|call| call == "rx_open 1 [1]").expect("the open: {log:?}");
+    let apply = log.iter().position(|call| call.starts_with("apply rx 1 ") && call.ends_with("at=-")).expect("the configure: {log:?}");
+    let start = log.iter().enumerate().position(|(index, call)| index > apply && call.starts_with("rx_start 1 ")).expect("the start: {log:?}");
+    assert!(open < apply && apply < start, "{log:?}");
+    assert_eq!((calls(&direct.device, "rx_open 1 [1]").len(), log.iter().filter(|call| call.starts_with("apply rx 1 ") && call.ends_with("at=-")).count(), calls(&direct.device, "rx_start 1").len()), (1, 1, 1), "{log:?}");
+    assert_eq!(calls(&direct.device, "rx_stop 0").len(), 0, "{log:?}");
+    let first_start = log.iter().position(|call| call.starts_with("rx_start 0 ")).unwrap();
+    assert!(!log[first_start..].iter().any(|call| call.starts_with("apply rx 0 ")), "stream 0 is not configured for the join: {log:?}");
+    let records = direct.clocks.sample_clock_records();
+    let s0 = records.iter().find(|record| record.stream.path() == "usrp/rx/s0").expect("stream 0's clock");
+    assert!(s0.ended_at.is_none(), "{records:?}");
+    let origin = log.iter().find(|call| call.starts_with("rx_start 1 ")).unwrap().rsplit(' ').next().unwrap().parse::<i64>().unwrap();
+    assert!(origin >= join, "the segment begins at or after the change: {origin} vs {join}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_25_a_channel_leaving_a_later_stream_cuts_its_stream_alone() {
+    // UR-25, RM-29 (S5): a channel leaving stream 1 cuts that stream alone; stream 0 goes
+    // on. Joining it again starts a new segment without reopening the streamer or touching
+    // stream 0.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::build(FakeConfig::default(), &rx_two(), vec![r0, r1], layout_selector());
+    direct.settle(Wall::from_millis(30));
+    direct.update("radio.rx.c1.stream", Value::from(-1), Cold, Some(direct.now() + ms(40)));
+    direct.settle(Wall::from_millis(300));
+    let log = direct.device.calls();
+    assert_eq!(calls(&direct.device, "rx_stop 1 now").len(), 1, "{log:?}");
+    assert_eq!(calls(&direct.device, "rx_stop 0").len(), 0, "{log:?}");
+    let records = direct.clocks.sample_clock_records();
+    assert!(records.iter().find(|record| record.stream.path() == "usrp/rx/s1").unwrap().ended_at.is_some(), "{records:?}");
+    assert!(records.iter().find(|record| record.stream.path() == "usrp/rx/s0").unwrap().ended_at.is_none(), "{records:?}");
+    let starts = calls(&direct.device, "rx_start 1").len();
+    direct.settle(Wall::from_millis(100));
+    assert_eq!(calls(&direct.device, "rx_start 1").len(), starts, "a cut starts no segment: {:?}", direct.device.calls());
+    direct.update("radio.rx.c1.stream", Value::from(1), Cold, None);
+    direct.settle(Wall::from_millis(300));
+    let log = direct.device.calls();
+    assert_eq!(calls(&direct.device, "rx_start 1").len(), starts + 1, "{log:?}");
+    assert_eq!(calls(&direct.device, "rx_open 1 [1]").len(), 2, "the enable from no stream opens the streamer: {log:?}");
+    assert_eq!(calls(&direct.device, "rx_open 0").len(), 1, "stream 0 is not reopened: {log:?}");
+    let records = direct.clocks.sample_clock_records();
+    assert_eq!(records.iter().filter(|record| record.stream.path() == "usrp/rx/s1").count(), 2, "{records:?}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_25_a_rate_change_of_a_later_stream_cuts_that_stream_alone() {
+    // UR-25, RM-29 (S6): stream 1's rate change cuts and configures stream 1 alone; stream
+    // 0's segment and clock stand.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::build(FakeConfig::default(), &rx_two(), vec![r0, r1], layout_selector());
+    direct.settle(Wall::from_millis(30));
+    direct.update("radio.rx.s1.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(direct.now() + ms(40)));
+    direct.settle(Wall::from_millis(300));
+    let log = direct.device.calls();
+    assert_eq!(calls(&direct.device, "rx_stop 1 now").len(), 1, "{log:?}");
+    assert_eq!(log.iter().filter(|call| call.starts_with("apply rx 1 ") && call.contains("rate=2000000") && call.ends_with("at=-")).count(), 1, "{log:?}");
+    assert_eq!(calls(&direct.device, "rx_open 1").len(), 1, "the same set is not reopened: {log:?}");
+    assert_eq!(calls(&direct.device, "rx_stop 0").len(), 0, "{log:?}");
+    let first_start = log.iter().position(|call| call.starts_with("rx_start 0 ")).unwrap();
+    assert!(!log[first_start..].iter().any(|call| call.starts_with("apply rx 0 ")), "{log:?}");
+    let records = direct.clocks.sample_clock_records();
+    assert!(records.iter().find(|record| record.stream.path() == "usrp/rx/s0").unwrap().ended_at.is_none(), "{records:?}");
+    let s1: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/rx/s1").collect();
+    assert_eq!(s1.len(), 2, "{records:?}");
+    assert!(s1[0].ended_at.is_some() && s1[1].ended_at.is_none(), "{records:?}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_26_a_stop_of_a_later_stream_stops_that_stream_alone() {
+    // UR-26, RM-29 (S7): `Stop` of a stream's node stops that stream alone, `start_rx`
+    // starts it again, and `<id>` stops both.
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::build(FakeConfig::default(), &rx_two(), vec![r0, r1], layout_selector());
+    direct.settle(Wall::from_millis(30));
+    direct.stop_at("usrp/rx/s1");
+    direct.settle(Wall::from_millis(120));
+    let log = direct.device.calls();
+    assert_eq!(calls(&direct.device, "rx_stop 1 now").len(), 1, "{log:?}");
+    assert_eq!(calls(&direct.device, "rx_stop 0").len(), 0, "{log:?}");
+    let records = direct.clocks.sample_clock_records();
+    assert!(records.iter().filter(|record| record.stream.path() == "usrp/rx/s1").all(|record| record.ended_at.is_some()), "{records:?}");
+    assert!(records.iter().find(|record| record.stream.path() == "usrp/rx/s0").unwrap().ended_at.is_none(), "{records:?}");
+    let starts = calls(&direct.device, "rx_start 1").len();
+    direct.start_rx_at("usrp/rx/s1", None);
+    direct.settle(Wall::from_millis(200));
+    assert_eq!(calls(&direct.device, "rx_start 1").len(), starts + 1, "`start_rx` starts the stream: {:?}", direct.device.calls());
+    let records = direct.clocks.sample_clock_records();
+    assert_eq!(records.iter().filter(|record| record.stream.path() == "usrp/rx/s1").count(), 2, "{records:?}");
+    direct.stop_at("usrp");
+    direct.settle(Wall::from_millis(120));
+    let log = direct.device.calls();
+    assert_eq!(calls(&direct.device, "rx_stop 0 now").len(), 1, "the instance's stop reaches stream 0: {log:?}");
+    assert_eq!(calls(&direct.device, "rx_stop 1 now").len(), 2, "and stream 1: {log:?}");
+    let records = direct.clocks.sample_clock_records();
+    assert!(records.iter().all(|record| record.ended_at.is_some()), "{records:?}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_25_a_refused_change_of_a_later_stream_halts_that_stream_alone() {
+    // UR-25 (S8): a configure the device refuses halts its own stream; the other stream
+    // keeps delivering.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let (r0, link0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::build(
+        FakeConfig { faults: vec![FakeFault::WrongRate { claimed: 4e6, applied: 3.8e6, nth: 0 }], ..FakeConfig::default() },
+        &rx_two(),
+        vec![r0, r1],
+        layout_selector(),
+    );
+    direct.settle(Wall::from_millis(30));
+    let drain = |link: &Arc<dyn ezsdr_kernel::stream::DataLink>| { while link.receive().is_some() {} };
+    drain(&link0);
+    direct.update("radio.rx.s1.sample_rate_hz", Value::num(4e6).unwrap(), Cold, Some(direct.now() + ms(40)));
+    direct.settle(Wall::from_millis(300));
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert!(rejected[0].payload["reason"].as_str().unwrap().contains("UR-12: the device applied 3800000 S/s"), "{rejected:?}");
+    let log = direct.device.calls();
+    assert_eq!(calls(&direct.device, "rx_stop 1 now").len(), 1, "{log:?}");
+    let records = direct.clocks.sample_clock_records();
+    let s1: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/rx/s1").collect();
+    assert_eq!(s1.len(), 1, "the refused segment starts nothing: {records:?}");
+    assert!(s1[0].ended_at.is_some(), "{records:?}");
+    assert_eq!(calls(&direct.device, "rx_start 1").len(), 1, "{log:?}");
+    assert!(records.iter().find(|record| record.stream.path() == "usrp/rx/s0").unwrap().ended_at.is_none(), "{records:?}");
+    assert!(link0.receive().is_some(), "stream 0 still delivers after stream 1's refusal");
+    let instance = direct.finish();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let plan = timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    assert!(!plan["rx"].as_array().unwrap().iter().any(|row| row["ticks_per_sample"][0] == 50), "the refused 4 MS/s segment is not planned: {plan}");
+}
+
+#[test]
+fn ur_24_a_timed_update_acts_on_the_stream_that_holds_its_channel() {
+    // UR-24, RM-29 (S9): a timed update's decision line is the stream that holds its
+    // channel at the instant; a halt of stream 0 does not stop channel 1's update.
+    use ezsdr_kernel::module_api::UpdateClass::{Cold, HardwareTimed};
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::build(
+        FakeConfig { faults: vec![FakeFault::WrongRate { claimed: 4e6, applied: 3.8e6, nth: 0 }], ..FakeConfig::default() },
+        &rx_two(),
+        vec![r0, r1],
+        layout_selector(),
+    );
+    direct.settle(Wall::from_millis(30));
+    direct.update("radio.rx.s0.sample_rate_hz", Value::num(4e6).unwrap(), Cold, Some(direct.now() + ms(40)));
+    direct.settle(Wall::from_millis(200));
+    let at = direct.now() + ms(20);
+    direct.update_at("usrp/rx/s0", "radio.rx.c1.gain_db", Value::num(3.0).unwrap(), HardwareTimed, Some(at));
+    direct.settle(Wall::from_millis(100));
+    let log = direct.device.calls();
+    assert_eq!(log.iter().filter(|call| call.starts_with("apply rx 1 ") && call.contains("gain=3") && !call.ends_with("at=-")).count(), 1, "{log:?}");
+    assert!(!log.iter().any(|call| call.starts_with("apply rx 0 ") && call.contains("gain=3")), "{log:?}");
+    assert!(direct.of("radio.COMMAND_QUEUE_FULL").is_empty(), "{log:?}");
+    assert!(direct.of("radio.LATE_COMMAND").is_empty(), "{log:?}");
+    let instance = direct.finish();
+    let rows = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let row = rows.as_array().unwrap().iter().find(|row| row["key"] == "radio.rx.c1.gain_db" && row["issued"] == true).expect("the update's issued row");
+    assert_eq!(row["issued"], true, "{rows}");
+    assert!(row.get("note").is_none(), "{rows}");
+}
+
+/// A burst at `lead` root ticks past now, on `record`'s clock (UR-21).
+fn burst_in(direct: &Direct, node: &str, record: &ezsdr_kernel::time::SampleClockRecord, waveform: &ezsdr_kernel::manifest::ArtifactRef, repeat: bool, lead: i64) {
+    let origin = record.origin.ticks_in(record.root).unwrap();
+    let k = (direct.now() + lead - origin) / record.root_ticks_per_tick.num() as i64;
+    direct.burst_at(node, waveform, repeat, TimePoint::new(record.domain, k));
+}
+
+fn clock_of(direct: &Direct, path: &str) -> ezsdr_kernel::time::SampleClockRecord {
+    direct.clocks.sample_clock_records().into_iter().find(|record| record.stream.path() == path).unwrap_or_else(|| panic!("no clock {path}"))
+}
+
+#[test]
+fn ur_21_a_burst_targets_its_own_transmit_stream() {
+    // UR-21, RM-29 (S11): a burst is booked on its target stream's clock and sent by that
+    // stream's owner alone; a stream with no channel is refused.
+    let (bytes, waveform) = waveform_of(&tone(1_000));
+    let inputs = BTreeMap::from([(waveform.hash.clone(), bytes)]);
+    let mut constraints = tx_two();
+    constraints.extend([("radio.rx.c0.stream", Scalar::from(0))]);
+    let (r0, _l0) = attached_reading("rx0");
+    let mut direct = Direct::build_with(FakeConfig::default(), &constraints, vec![r0], layout_selector(), inputs);
+    direct.settle(Wall::from_millis(50));
+    let s0 = clock_of(&direct, "usrp/tx/s0");
+    let s1 = clock_of(&direct, "usrp/tx/s1");
+    assert_ne!(s0.domain, s1.domain, "two transmit streams, two clocks");
+    burst_in(&direct, "usrp/tx/s0", &s0, &waveform, false, ms(40));
+    direct.settle(Wall::from_millis(80));
+    let first = calls(&direct.device, "tx_send 0").len();
+    let none = calls(&direct.device, "tx_send 1").len();
+    assert!(first > 0 && none == 0, "only stream 0 sends: {:?}", direct.device.calls());
+    burst_in(&direct, "usrp/tx/s1", &s1, &waveform, false, ms(40));
+    direct.settle(Wall::from_millis(80));
+    assert_eq!(calls(&direct.device, "tx_send 0").len(), first, "stream 0 is not sent stream 1's burst: {:?}", direct.device.calls());
+    assert!(calls(&direct.device, "tx_send 1").len() > none, "stream 1 sends its own: {:?}", direct.device.calls());
+    // A late burst's TIME_ERROR comes from stream 1's node.
+    let k = (direct.now() - ms(20) - s1.origin.ticks_in(s1.root).unwrap()) / s1.root_ticks_per_tick.num() as i64;
+    let past = TimePoint::new(s1.domain, k);
+    direct.burst_at("usrp/tx/s1", &waveform, false, past);
+    direct.settle(Wall::from_millis(60));
+    let errors = direct.of("radio.TIME_ERROR");
+    assert!(!errors.is_empty(), "{:?}", direct.device.calls());
+    assert!(errors.iter().all(|event| event.source == EventSource::Node { node: ResourceId::parse("usrp/tx/s1").unwrap() }), "{errors:?}");
+    let _ = direct.finish();
+
+    // (b) a stream with no channel has no burst.
+    let (bytes, waveform) = waveform_of(&tone(1_000));
+    let inputs = BTreeMap::from([(waveform.hash.clone(), bytes)]);
+    let mut constraints = tx_two();
+    constraints[0] = ("radio.tx.c0.stream", Scalar::from(-1));
+    constraints.extend([("radio.rx.c0.stream", Scalar::from(0))]);
+    let (r0, _l0) = attached_reading("rx0");
+    let mut direct = Direct::build_with(FakeConfig::default(), &constraints, vec![r0], layout_selector(), inputs);
+    direct.settle(Wall::from_millis(50));
+    let s1 = clock_of(&direct, "usrp/tx/s1");
+    burst_in(&direct, "usrp/tx/s0", &s1, &waveform, false, ms(40));
+    direct.settle(Wall::from_millis(60));
+    let rejected: Vec<Json> = direct.of("radio.COMMAND_REJECTED").into_iter().map(|event| event.payload).collect();
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0]["kind"], "tx_burst");
+    assert!(rejected[0]["reason"].as_str().unwrap().starts_with("UR-21:") && rejected[0]["reason"].as_str().unwrap().contains("no transmit channel"), "{rejected:?}");
+    assert_eq!(calls(&direct.device, "tx_send").len(), 0, "{:?}", direct.device.calls());
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_26_two_receive_streams_end_at_their_own_stops() {
+    // UR-26, RM-16 (S12a): a Stop of one receive stream ends it at its own stop, and the
+    // other still runs to the Orderly stop later; the per-stream delivered floor is S12b/c's.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut constraints = rx_two();
+    constraints[1] = ("radio.rx.c1.stream", Scalar::from(-1));
+    let (r0, link0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::build(FakeConfig { rx_latency: Wall::from_millis(50), ..FakeConfig::default() }, &constraints, vec![r0, r1], layout_selector());
+    direct.settle(Wall::from_millis(30));
+    direct.update("radio.rx.c1.stream", Value::from(1), Cold, Some(direct.now() + ms(50)));
+    direct.settle(Wall::from_millis(400));
+    let stopped_at = direct.now();
+    direct.stop_at("usrp/rx/s1");
+    // Wait for stream 1's owner to finish, but not for stream 0's next (50 ms late)
+    // packet: the abort must see the delivered floor stream 1's finish did or did not clear.
+    for _ in 0..200 {
+        if direct.clocks.sample_clock_records().iter().any(|record| record.stream.path() == "usrp/rx/s1" && record.ended_at.is_some()) {
+            break;
+        }
+        direct.device.host().sleep(Wall::from_millis(1));
+    }
+    direct.radio.stop(ezsdr_kernel::module_api::StopMode::Abort).unwrap();
+    direct.radio.cleanup();
+    let instance = direct.radio.instance();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let plan = timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    let rx = plan["rx"].as_array().unwrap();
+    assert_eq!(rx.len(), 2, "{plan}");
+    let (s0, s1) = (rx[0]["end"].as_i64().unwrap(), rx[1]["end"].as_i64().unwrap());
+    let delivered: i64 = std::iter::from_fn(|| link0.receive().map(|(block, _)| block.header().len as i64)).sum();
+    let origin = rx[0]["origin"].as_i64().unwrap();
+    let n = rx[0]["ticks_per_sample"][0].as_i64().unwrap();
+    assert_eq!(s0, origin + delivered * n, "the abort cuts stream 0 at its own delivered samples: {delivered} vs {s0} in {plan}");
+    assert!(s1 >= stopped_at && s1 - stopped_at < ms(50), "stream 1's own Stop cuts it at its booking: {s1} vs {stopped_at} in {plan}");
+    let records = direct.clocks.sample_clock_records();
+    let ended = |path: &str| records.iter().filter(|record| record.stream.path() == path)
+        .filter_map(|record| record.ended_at.map(|at| at.ticks_in(record.root).unwrap())).max();
+    let (end0, end1) = (ended("usrp/rx/s0").expect("stream 0's clock ends"), ended("usrp/rx/s1").expect("stream 1's clock ends"));
+    assert_eq!((end0, end1), (s0, s1), "each clock ends at its own plan's cut");
+    assert!(end1 >= stopped_at, "stream 1's clock ends at its Stop: {end1} vs {stopped_at}");
+}
+
+#[test]
+fn ur_26_every_stream_s_threads_are_joined_in_order() {
+    // UR-26, UR-16 (S13): `Provider::stop` joins every transmit stream before every
+    // receive stream, in stream order, and one that is left detached keeps the device's
+    // streams open.
+    let (bytes, waveform) = waveform_of(&tone(1_000));
+    let inputs = BTreeMap::from([(waveform.hash.clone(), bytes)]);
+    let gated = Arc::new(Gated::new(FakeConfig::default()));
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut constraints = rx_two();
+    constraints.extend(tx_two());
+    let mut direct = Direct::armed_on(gated.inner(), gated.clone(), &constraints, vec![r0, r1], layout_selector(), inputs);
+    direct.start();
+    direct.settle(Wall::from_millis(50));
+    let ends = gated.ends();
+    let s0 = clock_of(&direct, "usrp/tx/s0");
+    let s1 = clock_of(&direct, "usrp/tx/s1");
+    burst_in(&direct, "usrp/tx/s0", &s0, &waveform, true, ms(30));
+    burst_in(&direct, "usrp/tx/s1", &s1, &waveform, true, ms(30));
+    direct.settle(Wall::from_millis(100));
+    struct Release<'a>(&'a Gated);
+    impl Drop for Release<'_> { fn drop(&mut self) { self.0.release(); } }
+    gated.hold();
+    let release = Release(&gated);
+    gated.entered_n(&[("rx_recv", 2), ("tx_send", 2)]);
+    direct.radio.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
+    drop(release);
+    ended(&ends, &["uhd-tx-s0", "uhd-tx-s1", "uhd-rx-s0", "uhd-rx-s1"]);
+    direct.radio.cleanup();
+    let rejected = &direct.radio.instance().sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()];
+    let threads: Vec<String> = rejected.as_array().unwrap().iter()
+        .filter(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("did not join")))
+        .map(|row| row["thread"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(threads, ["uhd-tx-s0", "uhd-tx-s1", "uhd-rx-s0", "uhd-rx-s1"], "{rejected}");
+    assert_eq!(calls(&gated.inner, "close_streams").len(), 0, "a detached thread keeps the streams open: {:?}", gated.inner.calls());
+}
+
+#[test]
+fn ur_16_a_wedged_later_stream_leaves_the_others_joined() {
+    // UR-16, RM-29 (S14): only the wedged stream is recorded detached; the other threads
+    // join, and `close_streams` (the whole device's) is not called.
+    let gated = Arc::new(Gated::only(FakeConfig::default(), 1));
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut constraints = rx_two();
+    constraints.extend([("radio.tx.c0.stream", Scalar::from(0))]);
+    let mut direct = Direct::armed_on(gated.inner(), gated.clone(), &constraints, vec![r0, r1], layout_selector(), BTreeMap::new());
+    direct.start();
+    direct.settle(Wall::from_millis(50));
+    let ends = gated.ends();
+    struct Release<'a>(&'a Gated);
+    impl Drop for Release<'_> { fn drop(&mut self) { self.0.release(); } }
+    gated.hold();
+    let release = Release(&gated);
+    gated.entered(&["rx_recv"]);
+    direct.radio.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
+    drop(release);
+    ended(&ends, &["uhd-rx-s1"]);
+    direct.radio.cleanup();
+    let rejected = &direct.radio.instance().sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()];
+    let threads: Vec<String> = rejected.as_array().unwrap().iter()
+        .filter(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("did not join")))
+        .map(|row| row["thread"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(threads, ["uhd-rx-s1"], "{rejected}");
+    assert_eq!(calls(&gated.inner, "close_streams").len(), 0, "{:?}", gated.inner.calls());
+    assert_eq!(rejected.as_array().unwrap().iter().filter(|row| row["leaked"] == "streamers").count(), 1, "{rejected}");
+}
+
+#[test]
+fn ur_16_a_panicking_later_stream_ends_the_run() {
+    // UR-16, RM-29 (S15): a panic in stream 1's owner is that thread's, once a
+    // DEVICE_LOST, and the other stream ends at the loss.
+    struct PanicOnOne { inner: Arc<FakeDevice> }
+    impl ezsdr_radio_uhd::Device for PanicOnOne {
+        fn describe(&self) -> Json { self.inner.describe() }
+        fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity { self.inner.fidelity() }
+        fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+        fn channels(&self, d: ezsdr_radio_uhd::Dir) -> usize { self.inner.channels(d) }
+        fn front_end(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.front_end(d, c) }
+        fn serial(&self) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.serial() }
+        fn set_subdev_spec(&self, d: ezsdr_radio_uhd::Dir, m: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_subdev_spec(d, m) }
+        fn rates(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> { self.inner.rates(d, c) }
+        fn set_sources(&self, c: &str, t: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_sources(c, t) }
+        fn set_time_zero(&self, p: bool) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_time_zero(p) }
+        fn time_now(&self) -> Result<i64, ezsdr_radio_uhd::DeviceError> { self.inner.time_now() }
+        fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> { self.inner.ref_locked() }
+        fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> { self.inner.apply(d, c, s, at) }
+        fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
+        fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+        fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
+        fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
+        fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv {
+            assert_ne!(s, 1, "fake: rx_recv panics");
+            self.inner.rx_recv(s, n, t)
+        }
+        fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
+        fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
+        fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
+        fn close_streams(&self) { self.inner.close_streams() }
+        fn mark_lost(&self) { self.inner.mark_lost() }
+        fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
+    }
+    let inner = fake(FakeConfig::default());
+    let tested: Arc<dyn ezsdr_radio_uhd::Device> = Arc::new(PanicOnOne { inner: inner.clone() });
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::armed_on(inner.clone(), tested, &rx_two(), vec![r0, r1], layout_selector(), BTreeMap::new());
+    direct.start();
+    direct.settle(Wall::from_millis(500));
+    let lost = direct.of("ezsdr.DEVICE_LOST");
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert_eq!(lost[0].payload["message"], "a Provider thread panicked");
+    direct.radio.cleanup();
+    let rejected = &direct.radio.instance().sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()];
+    assert!(rejected.as_array().unwrap().iter().any(|row| row["thread"] == "uhd-rx-s1" && row["reason"] == "panicked"), "{rejected}");
+    assert_marked_lost_before_closed(&inner);
+}
+
+/// A `FakeDevice` whose untimed `apply` of one receive channel is held after it returns
+/// (S16a): the owner is stopped between its configuration and its timed start.
+struct HoldAfterApply {
+    inner: Arc<FakeDevice>,
+    pending: Mutex<Option<usize>>,
+    reached: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl HoldAfterApply {
+    fn new(inner: Arc<FakeDevice>) -> HoldAfterApply {
+        HoldAfterApply { inner, pending: Mutex::new(None), reached: Mutex::new(None), release: Mutex::new(None) }
+    }
+
+    fn hold_channel(&self, chan: usize) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (reached, reached_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        *self.pending.lock().unwrap() = Some(chan);
+        *self.reached.lock().unwrap() = Some(reached);
+        *self.release.lock().unwrap() = Some(release_rx);
+        (reached_rx, release)
+    }
+}
+
+impl ezsdr_radio_uhd::Device for HoldAfterApply {
+    fn describe(&self) -> Json { self.inner.describe() }
+    fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity { self.inner.fidelity() }
+    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+    fn channels(&self, d: ezsdr_radio_uhd::Dir) -> usize { self.inner.channels(d) }
+    fn front_end(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.front_end(d, c) }
+    fn serial(&self) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.serial() }
+    fn set_subdev_spec(&self, d: ezsdr_radio_uhd::Dir, m: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_subdev_spec(d, m) }
+    fn rates(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> { self.inner.rates(d, c) }
+    fn set_sources(&self, c: &str, t: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_sources(c, t) }
+    fn set_time_zero(&self, p: bool) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_time_zero(p) }
+    fn time_now(&self) -> Result<i64, ezsdr_radio_uhd::DeviceError> { self.inner.time_now() }
+    fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> { self.inner.ref_locked() }
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+        let applied = self.inner.apply(d, c, s, at)?;
+        let hold = at.is_none() && d == ezsdr_radio_uhd::Dir::Rx && *self.pending.lock().unwrap() == Some(c);
+        if hold {
+            *self.pending.lock().unwrap() = None;
+            if let Some(reached) = self.reached.lock().unwrap().take() {
+                let _ = reached.send(());
+            }
+            if let Some(release) = self.release.lock().unwrap().take() {
+                let _ = release.recv_timeout(Wall::from_secs(10));
+            }
+        }
+        Ok(applied)
+    }
+    fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
+    fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+    fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
+    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t) }
+    fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
+    fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
+    fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
+    fn close_streams(&self) { self.inner.close_streams() }
+    fn mark_lost(&self) { self.inner.mark_lost() }
+    fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
+}
+
+#[test]
+fn ur_26_a_receive_start_queued_by_the_stop_is_issued_and_ends_at_its_origin() {
+    // UR-26 (S16a): the owner does not re-read `Provider::stop` after its configuration;
+    // the start it queued is issued, and the plan's end cuts the segment at its origin: no
+    // block, and an untimed stop after the origin (VH-6).
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let inner = fake(FakeConfig::default());
+    let spy = Arc::new(HoldAfterApply::new(inner.clone()));
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, link1) = attached_reading("rx1");
+    let mut direct = Direct::armed_on(inner.clone(), spy.clone(), &rx_two(), vec![r0, r1], layout_selector(), BTreeMap::new());
+    direct.start();
+    direct.settle(Wall::from_millis(50));
+    while link1.receive().is_some() {}
+    let (hold, release) = spy.hold_channel(1);
+    direct.update("radio.rx.s1.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(direct.now() + ms(50)));
+    hold.recv_timeout(Wall::from_secs(10)).expect("the owner's configure");
+    direct.radio.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
+    while link1.receive().is_some() {}
+    let _ = release.send(());
+    direct.settle(Wall::from_millis(300));
+    let log = direct.device.calls();
+    assert_eq!(calls(&direct.device, "rx_start 1").len(), 2, "the owner still issues its timed start: {log:?}");
+    assert!(link1.receive().is_none(), "the end at the origin publishes nothing: {log:?}");
+    assert_eq!(calls(&direct.device, "rx_stop 1 now").len(), 2, "the old segment's cut and the queued start's origin: {log:?}");
+    let records = direct.clocks.sample_clock_records();
+    assert_eq!(records.iter().filter(|record| record.stream.path() == "usrp/rx/s1").count(), 1, "no clock is registered without a block: {records:?}");
+    assert!(log.iter().any(|call| call.starts_with("apply rx 1 ") && call.contains("rate=2000000") && call.ends_with("at=-")), "{log:?}");
+    direct.radio.cleanup();
+}
+
+#[test]
+fn ur_25_a_receive_cut_counts_its_own_stream_s_packet_size() {
+    // UR-25 (S18): the ready gap after a cut counts the cut's stream's packet size, not
+    // stream 0's (which has no streamer and answers 0).
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut constraints = rx_two();
+    constraints[2] = ("radio.rx.s0.sample_rate_hz", Scalar::try_from(1e6).unwrap());
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::build(FakeConfig { rx_packet: Some(4_000), ..FakeConfig::default() }, &constraints, vec![r1], layout_selector());
+    direct.settle(Wall::from_millis(100));
+    assert_eq!((direct.device.rx_packet_samples(0), direct.device.rx_packet_samples(1)), (0, 4_000), "stream 0 has no streamer, stream 1's packet is 4000");
+    direct.update("radio.rx.s1.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(direct.now() + ms(300)));
+    direct.settle(Wall::from_millis(700));
+    let instance = direct.finish();
+    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let plan = timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    let rx = plan["rx"].as_array().unwrap();
+    assert_eq!(rx.len(), 2, "{plan}");
+    let gap = rx[1]["origin"].as_i64().unwrap() - rx[0]["end"].as_i64().unwrap();
+    assert!((11_400_000..11_400_400).contains(&gap), "4000 samples at 200 ticks + 3 ms + 50 ms, rounded to the lattice: {gap} in {plan}");
+    let rows = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    assert_eq!(rows.as_array().unwrap().iter().filter(|row| row["key"] == "radio.rx.s1.sample_rate_hz").count(), 2, "{rows}");
+}
+
+#[test]
+fn ur_26_a_start_rx_of_a_channel_less_linked_stream_starts_nothing() {
+    // UR-26 (R21): `start_rx` of a linked stream that holds no channel is accepted and
+    // carries out nothing; the channel joining later starts it.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut constraints = rx_two();
+    constraints[1] = ("radio.rx.c1.stream", Scalar::from(-1));
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::build(FakeConfig::default(), &constraints, vec![r0, r1], layout_selector());
+    direct.settle(Wall::from_millis(30));
+    direct.start_rx_at("usrp/rx/s1", None);
+    direct.settle(Wall::from_millis(120));
+    assert_eq!(calls(&direct.device, "rx_start 1").len(), 0, "{:?}", direct.device.calls());
+    assert!(direct.clocks.sample_clock_records().iter().all(|record| record.stream.path() != "usrp/rx/s1"), "{:?}", direct.clocks.sample_clock_records());
+    assert!(direct.of("radio.COMMAND_REJECTED").is_empty());
+    direct.update("radio.rx.c1.stream", Value::from(1), Cold, None);
+    direct.settle(Wall::from_millis(300));
+    let log = direct.device.calls();
+    assert_eq!(calls(&direct.device, "rx_open 1 [1]").len(), 1, "{log:?}");
+    assert_eq!(calls(&direct.device, "rx_start 1").len(), 1, "{log:?}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_25_a_transmit_rate_change_of_a_later_stream_cuts_that_stream_alone() {
+    // UR-25 (T1): a cold change of stream 1's transmit rate cuts and re-clocks stream 1
+    // alone; stream 0's burst and clock go on.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let (bytes, waveform) = waveform_of(&tone(1_000));
+    let inputs = BTreeMap::from([(waveform.hash.clone(), bytes)]);
+    let mut constraints = tx_two();
+    constraints.extend([("radio.rx.c0.stream", Scalar::from(0))]);
+    let (r0, _l0) = attached_reading("rx0");
+    let mut direct = Direct::build_with(FakeConfig::default(), &constraints, vec![r0], layout_selector(), inputs);
+    direct.settle(Wall::from_millis(50));
+    let s0 = clock_of(&direct, "usrp/tx/s0");
+    let s1 = clock_of(&direct, "usrp/tx/s1");
+    burst_in(&direct, "usrp/tx/s0", &s0, &waveform, true, ms(30));
+    burst_in(&direct, "usrp/tx/s1", &s1, &waveform, true, ms(30));
+    direct.settle(Wall::from_millis(80));
+    let sent0 = calls(&direct.device, "tx_send 0").len();
+    let opens0 = calls(&direct.device, "tx_open 0").len();
+    direct.update("radio.tx.s1.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(direct.now() + ms(50)));
+    direct.settle(Wall::from_millis(300));
+    let records = direct.clocks.sample_clock_records();
+    let s0_now: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/tx/s0").collect();
+    assert_eq!(s0_now.len(), 1, "stream 0 keeps its one clock: {records:?}");
+    assert!(s0_now[0].ended_at.is_none(), "{records:?}");
+    let s1_now: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/tx/s1").collect();
+    assert_eq!(s1_now.len(), 2, "stream 1's clock is replaced: {records:?}");
+    assert!(s1_now[0].ended_at.is_some() && s1_now[1].ended_at.is_none(), "{records:?}");
+    assert!(calls(&direct.device, "tx_send 0").len() > sent0, "stream 0's repeat goes on: {:?}", direct.device.calls());
+    assert_eq!(calls(&direct.device, "tx_open 0").len(), opens0, "stream 0's streamer is untouched: {:?}", direct.device.calls());
+    assert_eq!(calls(&direct.device, "tx_open 1").len(), 1, "the same set is configured without a reopen: {:?}", direct.device.calls());
+    assert!(direct.device.calls().iter().any(|call| call.starts_with("apply tx 1 ") && call.contains("rate=2000000") && call.ends_with("at=-")), "{:?}", direct.device.calls());
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_26_a_stop_of_a_later_transmit_stream_ends_only_its_burst() {
+    // UR-26 (T2): `Stop` of a transmit stream ends that stream's burst, keeps its clock,
+    // and leaves the other stream's burst alone; a later burst on the stopped stream plays.
+    let (bytes, waveform) = waveform_of(&tone(1_000));
+    let inputs = BTreeMap::from([(waveform.hash.clone(), bytes)]);
+    let mut constraints = tx_two();
+    constraints.extend([("radio.rx.c0.stream", Scalar::from(0))]);
+    let (r0, _l0) = attached_reading("rx0");
+    let mut direct = Direct::build_with(FakeConfig::default(), &constraints, vec![r0], layout_selector(), inputs);
+    direct.settle(Wall::from_millis(50));
+    let s0 = clock_of(&direct, "usrp/tx/s0");
+    let s1 = clock_of(&direct, "usrp/tx/s1");
+    burst_in(&direct, "usrp/tx/s0", &s0, &waveform, true, ms(30));
+    burst_in(&direct, "usrp/tx/s1", &s1, &waveform, true, ms(30));
+    direct.settle(Wall::from_millis(80));
+    direct.stop_at("usrp/tx/s1");
+    direct.settle(Wall::from_millis(120));
+    let stopped = calls(&direct.device, "tx_send 1").len();
+    let sent0 = calls(&direct.device, "tx_send 0").len();
+    direct.settle(Wall::from_millis(100));
+    assert_eq!(calls(&direct.device, "tx_send 1").len(), stopped, "stream 1's burst ended: {:?}", direct.device.calls());
+    assert!(calls(&direct.device, "tx_send 0").len() > sent0, "stream 0's burst goes on: {:?}", direct.device.calls());
+    let s1_now = clock_of(&direct, "usrp/tx/s1");
+    assert!(s1_now.ended_at.is_none(), "the clock stays: {s1_now:?}");
+    burst_in(&direct, "usrp/tx/s1", &s1_now, &waveform, false, ms(40));
+    direct.settle(Wall::from_millis(100));
+    assert!(calls(&direct.device, "tx_send 1").len() > stopped, "a later burst plays on the kept clock: {:?}", direct.device.calls());
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_26_a_stopped_later_stream_waits_for_start_rx() {
+    // UR-26 (O1): a `Stop`ped stream is off: a membership change does not start it; only
+    // `start_rx` does.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::build(FakeConfig::default(), &rx_two(), vec![r0, r1], layout_selector());
+    direct.settle(Wall::from_millis(30));
+    direct.stop_at("usrp/rx/s1");
+    direct.settle(Wall::from_millis(120));
+    let starts = calls(&direct.device, "rx_start 1").len();
+    direct.update("radio.rx.s1.sample_rate_hz", Value::num(2e6).unwrap(), Cold, None);
+    direct.settle(Wall::from_millis(300));
+    assert_eq!(calls(&direct.device, "rx_start 1").len(), starts, "an off stream is not started by a cold change: {:?}", direct.device.calls());
+    direct.start_rx_at("usrp/rx/s1", None);
+    direct.settle(Wall::from_millis(200));
+    assert_eq!(calls(&direct.device, "rx_start 1").len(), starts + 1, "`start_rx` starts it: {:?}", direct.device.calls());
+    let records = direct.clocks.sample_clock_records();
+    assert_eq!(records.iter().filter(|record| record.stream.path() == "usrp/rx/s1").count(), 2, "{records:?}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_25_a_successful_change_clears_a_later_stream_s_halt() {
+    // UR-25 (O2): a refusal halts stream 1 alone; a later change that succeeds starts it
+    // again, as the timeline's halted mark says.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::build(
+        FakeConfig { faults: vec![FakeFault::WrongRate { claimed: 4e6, applied: 3.8e6, nth: 0 }], ..FakeConfig::default() },
+        &rx_two(),
+        vec![r0, r1],
+        layout_selector(),
+    );
+    direct.settle(Wall::from_millis(30));
+    direct.update("radio.rx.s1.sample_rate_hz", Value::num(4e6).unwrap(), Cold, None);
+    direct.settle(Wall::from_millis(300));
+    assert_eq!(direct.of("radio.COMMAND_REJECTED").len(), 1, "{:?}", direct.device.calls());
+    let starts = calls(&direct.device, "rx_start 1").len();
+    direct.update("radio.rx.s1.sample_rate_hz", Value::num(1e6).unwrap(), Cold, None);
+    direct.settle(Wall::from_millis(300));
+    let log = direct.device.calls();
+    assert_eq!(calls(&direct.device, "rx_start 1").len(), starts + 1, "the halt is cleared: {log:?}");
+    let records = direct.clocks.sample_clock_records();
+    let s1: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/rx/s1").collect();
+    assert_eq!(s1.len(), 2, "{records:?}");
+    assert!(s1.iter().any(|record| record.ended_at.is_some()) && s1.iter().any(|record| record.ended_at.is_none()), "{records:?}");
+    use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
+    direct.update("radio.rx.c1.gain_db", Value::num(3.0).unwrap(), HardwareTimed, Some(direct.now() + ms(20)));
+    direct.settle(Wall::from_millis(60));
+    let instance = direct.finish();
+    let rows = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    assert!(rows.as_array().unwrap().iter().any(|row| row["key"] == "radio.rx.c1.gain_db" && row["issued"] == true && row["note"].is_null()), "the cleared stream is live again: {rows}");
+}
+
+/// A `FakeDevice` whose `rx_start` of stream 1 fails once, after stream 0's owner has made
+/// its first receive call (P1): `start` refuses, and cleanup joins that owner first. With
+/// `lost`, that failure is a lost device (P1a).
+struct OnceFails {
+    inner: Arc<FakeDevice>,
+    recv0: std::sync::atomic::AtomicBool,
+    recv0_calls: std::sync::atomic::AtomicUsize,
+    lost: bool,
+}
+
+impl ezsdr_radio_uhd::Device for OnceFails {
+    fn describe(&self) -> Json { self.inner.describe() }
+    fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity { self.inner.fidelity() }
+    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+    fn channels(&self, d: ezsdr_radio_uhd::Dir) -> usize { self.inner.channels(d) }
+    fn front_end(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.front_end(d, c) }
+    fn serial(&self) -> Result<String, ezsdr_radio_uhd::DeviceError> { self.inner.serial() }
+    fn set_subdev_spec(&self, d: ezsdr_radio_uhd::Dir, m: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_subdev_spec(d, m) }
+    fn rates(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> { self.inner.rates(d, c) }
+    fn set_sources(&self, c: &str, t: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_sources(c, t) }
+    fn set_time_zero(&self, p: bool) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.set_time_zero(p) }
+    fn time_now(&self) -> Result<i64, ezsdr_radio_uhd::DeviceError> { self.inner.time_now() }
+    fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> { self.inner.ref_locked() }
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> { self.inner.apply(d, c, s, at) }
+    fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
+    fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        if s == 1 {
+            let mut waits = 0;
+            while !self.recv0.load(std::sync::atomic::Ordering::SeqCst) && waits < 2_000 {
+                self.inner.host().sleep(Wall::from_millis(1));
+                waits += 1;
+            }
+            assert!(self.recv0.load(std::sync::atomic::Ordering::SeqCst), "stream 0's owner began before stream 1's start");
+            return Err(ezsdr_radio_uhd::DeviceError { lost: self.lost, message: "test: stream 1's start fails".to_owned() });
+        }
+        self.inner.rx_start(s, at)
+    }
+    fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
+    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv {
+        if s == 0 {
+            self.recv0.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.recv0_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.rx_recv(s, n, t)
+    }
+    fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
+    fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
+    fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
+    fn close_streams(&self) { self.inner.close_streams() }
+    fn mark_lost(&self) { self.inner.mark_lost() }
+    fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
+}
+
+#[test]
+fn ur_15_a_failed_later_start_closes_after_the_owners_joined() {
+    // UR-15 (P1): stream 1's `rx_start` fails after stream 0's owner began. `start` is
+    // refused, and cleanup joins that owner before it closes the device's streams.
+    let inner = fake(FakeConfig::default());
+    let once = Arc::new(OnceFails { inner: inner.clone(), recv0: std::sync::atomic::AtomicBool::new(false), recv0_calls: std::sync::atomic::AtomicUsize::new(0), lost: false });
+    let tested: Arc<dyn ezsdr_radio_uhd::Device> = once.clone();
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::armed_on(inner.clone(), tested, &rx_two(), vec![r0, r1], layout_selector(), BTreeMap::new());
+    let t0 = direct.now() + ms(2_000) + 1;
+    let error = direct.radio.start(Some(TimePoint::new(direct.root, t0))).unwrap_err();
+    assert_eq!(error.kind, ModuleErrorKind::Rejected, "{error:?}");
+    assert!(error.message.starts_with("UR-15:"), "{}", error.message);
+    let before = inner.calls();
+    assert!(!calls(&inner, "rx_stop 0 now").is_empty(), "`start` stopped the owner it began: {before:?}");
+    assert!(!before.iter().any(|call| call == "close_streams"), "`start` closed nothing: {before:?}");
+    direct.radio.cleanup();
+    let log = inner.calls();
+    assert!(once.recv0_calls.load(std::sync::atomic::Ordering::SeqCst) >= 1, "stream 0's owner ran: {log:?}");
+    let close = log.iter().position(|call| call == "close_streams").expect("the close");
+    assert!(!calls(&inner, "rx_stop 0 now").is_empty(), "stream 0's owner was stopped: {log:?}");
+    let stop = log.iter().rposition(|call| call == "rx_stop 0 now").unwrap();
+    assert!(stop < close, "the owner is joined before the streams close: {log:?}");
+    let rejected = &direct.radio.instance().sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()];
+    assert!(!rejected.as_array().unwrap().iter().any(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("did not join"))), "{rejected}");
+}
+
+#[test]
+fn ur_29_a_lost_later_start_is_published_before_the_owners_are_stopped() {
+    // UR-29, UR-15 (P1a): stream 1's `rx_start` fails as a lost device after stream 0's
+    // owner began. `start` publishes the loss once and refuses; the owner already begun is
+    // stopped without a device call after the loss, and cleanup closes nothing.
+    let inner = fake(FakeConfig::default());
+    let once = Arc::new(OnceFails { inner: inner.clone(), recv0: std::sync::atomic::AtomicBool::new(false), recv0_calls: std::sync::atomic::AtomicUsize::new(0), lost: true });
+    let tested: Arc<dyn ezsdr_radio_uhd::Device> = once.clone();
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::armed_on(inner.clone(), tested, &rx_two(), vec![r0, r1], layout_selector(), BTreeMap::new());
+    let t0 = direct.now() + ms(2_000) + 1;
+    let error = direct.radio.start(Some(TimePoint::new(direct.root, t0))).unwrap_err();
+    assert_eq!(error.kind, ModuleErrorKind::Rejected, "{error:?}");
+    let lost = direct.of("ezsdr.DEVICE_LOST");
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert_eq!(lost[0].payload["message"], "test: stream 1's start fails", "{lost:?}");
+    direct.radio.cleanup();
+    let log = inner.calls();
+    assert_marked_lost_before_closed(&inner);
+    let marked = log.iter().position(|call| call == "mark_lost").expect("the loss is marked");
+    assert!(!log[marked..].iter().any(|call| call.starts_with("rx_stop")), "no device call follows the loss: {log:?}");
+    assert!(!log.iter().any(|call| call == "close_streams"), "a lost device's streamers are not closed: {log:?}");
 }

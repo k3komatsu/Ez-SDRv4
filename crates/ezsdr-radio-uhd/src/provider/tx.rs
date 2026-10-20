@@ -718,6 +718,9 @@ impl Tx {
             let configured = if to.refused { Ok(()) } else { self.core.owner_configure(Dir::Tx, self.k, &to) };
             self.sync_streamer();
             match configured {
+                // UR-29: another thread found the device lost while the configuration ran;
+                // the clock is not adopted and no segment begins.
+                Ok(()) if self.core.is_lost() => self.at += 1,
                 // UR-25: a refused enable from no stream starts no clock, as the refusal below
                 // does; uhd-control reported it.
                 Ok(()) if to.refused => self.at += 1,
@@ -867,7 +870,7 @@ mod tests {
     use ezsdr_kernel::event::{Action, ActionId, EventCollector, EventKind};
     use ezsdr_kernel::hash::ContentHash;
     use ezsdr_kernel::id::ResourceId;
-    use ezsdr_kernel::module_api::{ActionReceiver, Authority, Dispatched, UpdateClass};
+    use ezsdr_kernel::module_api::{ActionReceiver, Authority, Dispatched, StopMode, UpdateClass};
     use ezsdr_kernel::policy::{EventKindRegistry, Policy};
     use ezsdr_kernel::spec::Value;
     use ezsdr_kernel::stream::{BurstOpen, LatePolicy};
@@ -875,11 +878,12 @@ mod tests {
 
     use super::{Held, Tx, TxCmd};
     use crate::device::{Device, Dir, FakeConfig, FakeDevice, Settings, TxCode, TxReport};
-    use super::super::test_support::ReportFeed;
+    use super::super::test_support::{HoldApply, ReportFeed};
     use crate::provider::core::{stream_key, Clock, Core, lock};
     use crate::provider::test_support::device_at;
     use ezsdr_radio::timeline::Channels;
     use crate::DeviceAuthority;
+    use super::super::control::Control;
 
     fn held(clock: &super::Clock, k: i64, len: usize, policy: LatePolicy) -> Held {
         Held {
@@ -920,8 +924,8 @@ mod tests {
     /// owner for an enable from no stream (UR-13).
     fn control_of(core: &Arc<Core>) -> super::super::control::Control {
         let (to_tx, _cmds) = std::sync::mpsc::channel();
-        super::super::control::Control::new(core.clone(), Arc::new(NoActions), to_tx, core.mode.defaults(), false,
-            super::super::control::Start { t0: 0, rx: None, tx: None })
+        super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], core.mode.defaults(), false,
+            super::super::control::Start { t0: 0, rx: vec![None; core.mode.stream_count(Dir::Rx)], tx: vec![None; core.mode.stream_count(Dir::Tx)] })
     }
 
     /// uhd-control books a change of the transmit stream's channel count at `ms` from no stream
@@ -2202,6 +2206,165 @@ mod tests {
         gate.release();
         let _ = to_tx.send(TxCmd::Shutdown);
         tx_thread.join().expect("the transmit thread");
+    }
+
+    /// The layout's key set with two transmit streams and no receive channel (RM-29).
+    fn two_tx_mode() -> super::super::mode::Mode {
+        use ezsdr_kernel::spec::{Ident, Scalar, Value};
+        let selector = std::collections::BTreeMap::from([
+            (Ident::parse("keys").unwrap(), Value::from("channel".to_owned())),
+            (Ident::parse("rx").unwrap(), Value::List(Vec::new())),
+            (Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")])),
+        ]);
+        let layout = ezsdr_radio::channels::from_selector(&selector).unwrap();
+        super::super::mode::Mode::Layout(Box::new(ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms())))
+    }
+
+    #[test]
+    fn ur_28_a_later_stream_s_reopen_discards_only_its_correlations() {
+        // UR-28, UR-36 (T3): the streamer's generation is per stream; an open of stream 1
+        // discards stream 1's pending correlations alone.
+        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        let feed = Arc::new(ReportFeed::new(inner.clone()));
+        let (core, _, _) = super::super::test_support::rig_on_mode(feed.clone(), Vec::new(), BTreeMap::new(), two_tx_mode());
+        let (_to0, cmds0) = std::sync::mpsc::channel();
+        let (_to1, cmds1) = std::sync::mpsc::channel();
+        let mut s0 = Tx::new(core.clone(), 0, cmds0, None, Channels::first(1));
+        let mut s1 = Tx::new(core.clone(), 1, cmds1, None, Channels::first(1));
+        s0.remember_burst(TimePoint::new(core.root, 0));
+        s1.remember_burst(TimePoint::new(core.root, 0));
+        core.open_streamer(Dir::Tx, 1, Channels::first(1)).unwrap();
+        feed.give(TxReport { code: TxCode::Other(0x40), tick: Some(0), channel: 0 });
+        s1.reports(std::time::Duration::ZERO);
+        assert_eq!(feed.reads(0), 0, "stream 0's streamer was not read");
+        assert!(feed.reads(1) >= 1, "stream 1's streamer was read");
+        assert!(s1.unacked.is_empty(), "stream 1's old correlations are dropped");
+        assert_eq!(s0.unacked.len(), 1, "stream 0's correlation stands");
+        assert!(!inner.calls().iter().any(|call| call.starts_with("tx_send")), "{:?}", inner.calls());
+    }
+
+    #[test]
+    fn ur_25_a_transmit_report_read_of_a_later_stream_does_not_hold_the_earlier_owner() {
+        // UR-25 (T4): an enable from no stream of stream 1 waits on stream 1's report read
+        // alone; stream 0's owner keeps making device calls meanwhile.
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        device.tx_open(0, &[0]).unwrap();
+        device.tx_open(1, &[1]).unwrap();
+        let (core, _, _) = super::super::test_support::rig_on_mode(device.clone(), Vec::new(), BTreeMap::new(), two_tx_mode());
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to0, cmds0) = std::sync::mpsc::channel();
+        let mut s0 = Tx::new(core.clone(), 0, cmds0, Some(clock), Channels::first(1));
+        let at = clock.at_or_after(core.now() + core.ticks(1_000_000));
+        s0.command(TxCmd::Burst(held(&clock, at, 1_000, LatePolicy::SendAsapAndFlag)));
+        lock(&core.streams).stream_mut(stream_key(Dir::Tx, 1)).reading = true;
+        // Clears stream 1's `reading` even when an assert below fails (T4).
+        struct Reading<'a>(&'a Arc<Core>);
+        impl Drop for Reading<'_> {
+            fn drop(&mut self) {
+                lock(&self.0.streams).stream_mut(stream_key(Dir::Tx, 1)).reading = false;
+            }
+        }
+        let reading = Reading(&core);
+        let (to_tx, _cmds1) = std::sync::mpsc::channel();
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx.clone(), to_tx], core.mode.defaults(), false,
+            super::super::control::Start { t0: 0, rx: vec![None], tx: vec![None, None] });
+        let (entered, arrived) = std::sync::mpsc::channel();
+        super::super::test_support::probe(&core, "wait_reading", move |_| { let _ = entered.send(()); });
+        let worker = core.clone();
+        let inside = core.clone();
+        let control_thread = worker.device.host().spawn("test-control", move || {
+            control.book(Dispatched::new(ActionId(2), Action::UpdateParameter {
+                target: super::super::test_support::target_of(&inside.id),
+                key: crate::provider::core::key("radio.tx.c1.stream"),
+                value: Value::from(1),
+                class: UpdateClass::Cold,
+                at: None,
+            }, Some(inside.id.clone())));
+        }).expect("a participant thread");
+        arrived.recv_timeout(std::time::Duration::from_secs(10)).expect("the enable waits for stream 1's read");
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        super::super::test_support::probe(&core, "reading_done", move |_| { flag.store(true, std::sync::atomic::Ordering::SeqCst); });
+        device.host().sleep(std::time::Duration::from_millis(20));
+        assert!(!done.load(std::sync::atomic::Ordering::SeqCst), "the enable waits for stream 1: {:?}", device.calls());
+        assert!(s0.pass(), "stream 0's owner works");
+        assert!(device.calls().iter().any(|call| call.starts_with("tx_send 0")), "stream 0's owner made its device call: {:?}", device.calls());
+        assert!(lock(&core.streams).stream(stream_key(Dir::Tx, 1)).reading, "stream 1's read is still in flight");
+        drop(reading);
+        control_thread.join().expect("the control thread");
+        assert!(done.load(std::sync::atomic::Ordering::SeqCst), "the enable goes on once the read ends");
+    }
+
+    #[test]
+    fn ur_29_a_loss_after_a_configure_adopts_no_transmit_clock() {
+        // UR-29 (L2): the device is found lost while the switch's configuration is in
+        // flight; the owner adopts no clock and sends nothing.
+        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        let holder = Arc::new(HoldApply::new(inner.clone(), Dir::Tx, Some(0)));
+        let (core, _time, _events) = super::super::test_support::rig_on(holder.clone(), Vec::new(), 2_000);
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
+        let clock = core.register(Dir::Tx, 200, 1_000).unwrap();
+        tx.switch = Some(switch(0, Some(clock), 1, Settings::default()));
+        let (reached, release) = holder.arm();
+        let worker = core.clone();
+        let switching = std::thread::spawn(move || { tx.do_switch(); tx.clock });
+        reached.recv_timeout(std::time::Duration::from_secs(10)).expect("the switch's configure");
+        worker.device_lost("test: lost during the configure");
+        release.send(()).unwrap();
+        assert!(switching.join().unwrap().is_none(), "the lost configure adopts no clock");
+        assert!(!inner.calls().iter().any(|call| call.starts_with("tx_send")), "{:?}", inner.calls());
+    }
+
+    #[test]
+    fn ur_26_a_transmit_switch_at_a_stop_keeps_its_clock_and_sends_nothing() {
+        // UR-26 (S16b): on stream 1, the owner does not re-read `Provider::stop` after its
+        // switch's configuration; it takes the clock, and the plan ends that segment at its
+        // origin, so nothing is sent.
+        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        let holder = Arc::new(HoldApply::new(inner.clone(), Dir::Tx, Some(0)));
+        let (core, _, _) = super::super::test_support::rig_on_mode(holder.clone(), Vec::new(), BTreeMap::new(), two_tx_mode());
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 1, cmds, None, Channels::first(1));
+        let key = stream_key(Dir::Tx, 1);
+        let config = ezsdr_radio::timeline::Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(200, 1).unwrap() };
+        let clock = {
+            let mut streams = lock(&core.streams);
+            streams.lines.insert(key, ezsdr_radio::timeline::Line::new(ezsdr_radio::timeline::Stream {
+                direction: ezsdr_kernel::stream::Direction::Tx,
+                origin: 0,
+                config: ezsdr_radio::timeline::Config { channels: Channels::first(0), ratio: ezsdr_kernel::time::Rational::new(200, 1).unwrap() },
+                lead: 0,
+                call: 2_000,
+                allowance: 0,
+            }));
+            streams.stream_mut(key).configs.insert(1, Arc::new(super::super::control::ColdConfig::new(Settings::default())));
+            assert!(streams.book(&core, key, ezsdr_radio::timeline::Item { e: 2_000, seq: 1, ready: 0, release: ezsdr_radio::timeline::NO_RELEASE, delivered: None, refused: false, kind: ezsdr_radio::timeline::Kind::Cold(config) }));
+            streams.planned(key)[0].clock.expect("the booked segment's clock")
+        };
+        tx.switch = Some(switch(0, Some(clock), 1, Settings::default()));
+        let (reached, release) = holder.arm();
+        let worker = core.clone();
+        let switching = std::thread::spawn(move || { tx.do_switch(); tx });
+        reached.recv_timeout(std::time::Duration::from_secs(10)).expect("the switch's configure");
+        {
+            let mut streams = lock(&worker.streams);
+            streams.stop = Some((500, StopMode::Orderly));
+            streams.end(&worker, 500, false, false);
+        }
+        release.send(()).unwrap();
+        let mut tx = switching.join().expect("the switch's thread");
+        let clock = tx.clock.expect("the owner takes the clock");
+        let record = worker.clocks.sample_clock_records().into_iter().find(|record| record.domain == clock.domain).expect("the clock's record");
+        assert_eq!(record.ended_at.and_then(|at| at.ticks_in(record.root).ok()), Some(clock.origin), "the segment ends at its origin: {record:?}");
+        // A burst on the clock whose segment ended at its origin, 2 ms of that clock past the
+        // origin so that its lateness policy is not what keeps it back: only the ended
+        // segment can. The owner's ordinary turn after the switch has nothing to send on it.
+        let k = 2_001;
+        tx.command(TxCmd::Burst(held(&clock, k, 1_000, LatePolicy::DropAndFlag)));
+        assert!(!tx.pass(), "the ended segment leaves nothing to send");
+        assert!(lock(&worker.rec).rejected.is_empty(), "the switch is no refusal: {:?}", lock(&worker.rec).rejected);
+        assert!(!inner.calls().iter().any(|call| call.starts_with("tx_send 1")), "{:?}", inner.calls());
     }
 
     #[test]

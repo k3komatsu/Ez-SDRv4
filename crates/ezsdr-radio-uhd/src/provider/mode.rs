@@ -224,13 +224,13 @@ impl Mode {
     }
 
     /// One logical channel's full settings in `configuration` (UR-12): the direction's
-    /// values under the current keys, the channel's own numbered and the stream's rate
+    /// values under the current keys, the channel's own numbered and stream `k`'s rate
     /// keys under the layout.
-    pub fn settings(&self, configuration: &BTreeMap<Key, Value>, dir: Dir, chan: usize) -> Settings {
+    pub fn settings(&self, configuration: &BTreeMap<Key, Value>, dir: Dir, k: usize, chan: usize) -> Settings {
         match self {
             Mode::Current(_) => Core::settings(configuration, dir),
             Mode::Layout(_) => Settings {
-                rate: Some(self.stream_rate(configuration, dir, 0)),
+                rate: Some(self.stream_rate(configuration, dir, k)),
                 freq: number(configuration, &keys::channel(dir.name(), chan as u32, "frequency_hz")),
                 gain: number(configuration, &keys::channel(dir.name(), chan as u32, "gain_db")),
                 antenna: text(configuration, &keys::channel(dir.name(), chan as u32, "antenna")),
@@ -248,22 +248,6 @@ impl Mode {
             Mode::Layout(_) if leaf == keys::STREAM_LEAF => keys::stream(dir.name(), k as u32),
             Mode::Layout(_) => keys::channel(dir.name(), chan as u32, leaf),
         }
-    }
-
-    /// RM-30, this stage: the first channel of `configuration` a stream above 0 holds,
-    /// with that stream's number — `None` when no channel names one. Only the layout
-    /// builder has stream keys a channel may leave 0 for.
-    pub fn channel_in_later_stream(&self, configuration: &BTreeMap<Key, Value>) -> Option<(Dir, usize, i64)> {
-        let Mode::Layout(description) = self else { return None };
-        for (dir, channels) in [(Dir::Rx, &description.rx), (Dir::Tx, &description.tx)] {
-            for (number, _) in channels.iter().enumerate() {
-                let stream = description.stream_of(configuration, dir == Dir::Rx, number as u32);
-                if stream > 0 {
-                    return Some((dir, number, stream));
-                }
-            }
-        }
-        None
     }
 }
 

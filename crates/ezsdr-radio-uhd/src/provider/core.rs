@@ -119,13 +119,19 @@ pub(crate) struct Streams {
 }
 
 impl Default for Streams {
-    /// One stream per direction: the layout has one stream, `k = 0`, in each under the
-    /// current keys (design 33 D4; 1b-4c adds the layout's others).
+    /// One stream per direction: the current keys' shape (design 33 D4).
     fn default() -> Streams {
+        Streams::with_streams(1, 1)
+    }
+}
+
+impl Streams {
+    /// One state and one line slot per declared stream of each direction (RM-29).
+    pub fn with_streams(rx: usize, tx: usize) -> Streams {
         Streams {
             lines: timeline::Lines::new(),
-            rx: vec![StreamState::default()],
-            tx: vec![StreamState::default()],
+            rx: (0..rx.max(1)).map(|_| StreamState::default()).collect(),
+            tx: (0..tx.max(1)).map(|_| StreamState::default()).collect(),
             seq: 0,
             ended: false,
             stop: None,
@@ -204,8 +210,8 @@ pub(crate) fn dir_of(stream: StreamKey) -> Dir {
     }
 }
 
-/// The stream a command under the current keys names (RM-29): stream 0 of its direction;
-/// design 33 D14's stream targets choose `k` in 1b-4c.
+/// The stream a command under the current keys names (RM-29): stream 0 of its direction.
+/// Under the layout the code names its stream with [`stream_key`].
 pub(crate) fn booked_stream(dir: Dir) -> StreamKey {
     stream_key(dir, 0)
 }
@@ -395,7 +401,7 @@ impl Streams {
         let plan = self.lines.line(stream).map_or_else(Vec::new, |line| line.plan.clone());
         for (index, segment) in plan.iter().enumerate() {
             if self.stream(stream).clocks.len() == index {
-                let clock = core.register(dir_of(stream), segment.config.ratio.num() as i64, segment.origin)?;
+                let clock = core.register_in(dir_of(stream), stream.1 as usize, segment.config.ratio.num() as i64, segment.origin)?;
                 self.stream_mut(stream).clocks.push((clock, false));
             }
             let (clock, ended) = &mut self.stream_mut(stream).clocks[index];
@@ -477,7 +483,8 @@ pub(crate) struct Core {
     pub device: Arc<dyn Device>,
     pub id: ResourceId,
     /// Stream 0's node of each direction (RM-29): `<id>/rx` and `<id>/tx` under the
-    /// current keys, `<id>/rx/s0` and `<id>/tx/s0` under the layout.
+    /// current keys, `<id>/rx/s0` and `<id>/tx/s0` under the layout. Every other stream
+    /// names its own with [`Core::stream_node`].
     pub rx_id: ResourceId,
     pub tx_id: ResourceId,
     pub mcr: u64,
@@ -485,9 +492,11 @@ pub(crate) struct Core {
     pub time: Arc<dyn TimeAuthority>,
     pub clocks: Arc<ClockRegistry>,
     pub events: Arc<dyn EventSink>,
-    pub overflow: EventHandle,
+    /// One hot-path handle per receive stream (UR-20, RM-29).
+    pub overflow: Vec<EventHandle>,
     pub inputs: Arc<dyn InputStore>,
-    pub links: Vec<Arc<dyn DataLink>>,
+    /// Each receive stream's links, by its number (RM-29): the port `rx<k>`'s.
+    pub links: Vec<Vec<Arc<dyn DataLink>>>,
     /// The key set this instance presents (RM-26, RM-27).
     pub mode: Mode,
     pub block_len: usize,
@@ -516,17 +525,26 @@ impl Core {
         clocks: Arc<ClockRegistry>,
         events: Arc<dyn EventSink>,
         inputs: Arc<dyn InputStore>,
-        links: Vec<Arc<dyn DataLink>>,
+        mut links: Vec<Vec<Arc<dyn DataLink>>>,
         mode: Mode,
     ) -> Result<Core, ModuleError> {
         let rx_id = mode.stream_node(&id, Dir::Rx, 0);
         let tx_id = mode.stream_node(&id, Dir::Tx, 0);
-        // UR-12: the rx node is below the instance root the Kernel handed this
-        // instance, so the bound view resolves it; a refusal is a Module error, not a
-        // Kernel event (item 3).
-        let overflow = events
-            .resolve(&EventSource::Node { node: rx_id.clone() }, &EventKind::parse(kinds::RX_OVERFLOW).expect("a radio kind"))
-            .map_err(|error| ModuleError::rejected(format!("UR-12: the rx stream's event handle: {error}")))?;
+        let rx_count = mode.stream_count(Dir::Rx);
+        let tx_count = mode.stream_count(Dir::Tx);
+        links.resize_with(rx_count, Vec::new);
+        // UR-12, UR-20: every receive stream's node is below the instance root the Kernel
+        // handed this instance, so the bound view resolves it; a refusal is a Module error,
+        // not a Kernel event (item 3).
+        let mut overflow = Vec::with_capacity(rx_count);
+        for k in 0..rx_count {
+            let node = mode.stream_node(&id, Dir::Rx, k);
+            overflow.push(
+                events
+                    .resolve(&EventSource::Node { node }, &EventKind::parse(kinds::RX_OVERFLOW).expect("a radio kind"))
+                    .map_err(|error| ModuleError::rejected(format!("UR-12: the rx stream's event handle: {error}")))?,
+            );
+        }
         Ok(Core {
             mcr: device.master_clock_rate(),
             block_len: mode.block_len() as usize,
@@ -543,7 +561,7 @@ impl Core {
             links,
             mode,
             rec: Mutex::new(Records::default()),
-            streams: Mutex::new(Streams::default()),
+            streams: Mutex::new(Streams::with_streams(rx_count, tx_count)),
             held: Mutex::new(BTreeSet::new()),
             rates: Mutex::new([None, None]),
             start_up: AtomicI64::new(i64::MIN),
@@ -551,6 +569,16 @@ impl Core {
             #[cfg(test)]
             probes: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// Receive stream `k`'s links (RM-29): the port `rx<k>`'s.
+    pub fn links(&self, k: usize) -> &[Arc<dyn DataLink>] {
+        self.links.get(k).map_or(&[], Vec::as_slice)
+    }
+
+    /// Receive stream `k`'s RX_OVERFLOW handle (UR-20).
+    pub fn overflow(&self, k: usize) -> EventHandle {
+        self.overflow[k]
     }
 
     /// A test's synchronisation point, by section name: what a wrong ownership or lock order
@@ -837,12 +865,98 @@ impl Core {
         }
     }
 
-    /// Declares and registers a stream clock with origin `origin` (UR-12, RM-25).
+    /// Declares and registers stream 0's clock with origin `origin` (UR-12, RM-25), for the
+    /// unit rigs.
+    #[cfg(test)]
     pub fn register(&self, dir: Dir, n: i64, origin: i64) -> Result<Clock, String> {
-        let stream = self.mode.stream_node(&self.id, dir, 0);
+        self.register_in(dir, 0, n, origin)
+    }
+
+    /// Declares and registers stream `k`'s clock with origin `origin` (UR-12, RM-25).
+    pub fn register_in(&self, dir: Dir, k: usize, n: i64, origin: i64) -> Result<Clock, String> {
+        let stream = self.mode.stream_node(&self.id, dir, k);
         let ratio = Rational::new(n as u64, 1).map_err(|e| e.to_string())?;
         let handle = self.clocks.declare_sample_clock(stream, self.root, ratio).map_err(|e| e.to_string())?;
         let domain = self.clocks.register_sample_clock(&handle, origin).map_err(|e| e.to_string())?;
         Ok(Clock { domain, origin, n })
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ezsdr_kernel::time::Rational;
+
+    fn cfg(channels: u32) -> Config {
+        Config { channels: Channels::first(channels), ratio: Rational::new(200, 1).unwrap() }
+    }
+
+    fn line(direction: Direction) -> Line {
+        Line::new(timeline::Stream {
+            direction,
+            origin: 0,
+            config: cfg(1),
+            lead: 0,
+            call: 2_000,
+            allowance: 0,
+        })
+    }
+
+    fn two_by_two() -> Arc<Core> {
+        let (core, _, _, _) = super::super::test_support::rig();
+        {
+            let mut streams = lock(&core.streams);
+            *streams = Streams::with_streams(2, 2);
+            for dir in [Direction::Rx, Direction::Tx] {
+                for k in 0..2 {
+                    streams.lines.insert((dir, k), line(dir));
+                }
+            }
+        }
+        core
+    }
+
+    #[test]
+    fn ur_26_an_end_takes_delivered_from_each_segment_s_own_stream() {
+        // UR-26, RM-16 (S12b): an end cuts each receive line at its own first sample not
+        // delivered; an Orderly end floors it at its own instant, per line.
+        let core = two_by_two();
+        {
+            let mut streams = lock(&core.streams);
+            streams.stream_mut(stream_key(Dir::Rx, 0)).delivered = Some((0, cfg(1), 1_000));
+            streams.stream_mut(stream_key(Dir::Rx, 1)).delivered = Some((0, cfg(1), 500));
+            streams.end(&core, 5_000, true, false);
+        }
+        let streams = lock(&core.streams);
+        assert_eq!(streams.planned(stream_key(Dir::Rx, 0))[0].segment.cut, Some(1_000));
+        assert_eq!(streams.planned(stream_key(Dir::Rx, 1))[0].segment.cut, Some(500));
+
+        let core = two_by_two();
+        {
+            let mut streams = lock(&core.streams);
+            streams.stream_mut(stream_key(Dir::Rx, 0)).delivered = Some((0, cfg(1), 3_000));
+            streams.stream_mut(stream_key(Dir::Rx, 1)).delivered = Some((0, cfg(1), 500));
+            streams.end(&core, 400_000, false, false);
+        }
+        let streams = lock(&core.streams);
+        assert_eq!(streams.planned(stream_key(Dir::Rx, 0))[0].segment.cut, Some(3_000), "its own floor");
+        assert_eq!(streams.planned(stream_key(Dir::Rx, 1))[0].segment.cut, Some(2_000), "its own instant, its own floor");
+
+        // One end, one item per line, the same instant and arrival order.
+        let core = two_by_two();
+        {
+            let mut streams = lock(&core.streams);
+            streams.end(&core, 5_000, false, false);
+            streams.end(&core, 6_000, false, false);
+        }
+        let streams = lock(&core.streams);
+        for dir in [Direction::Rx, Direction::Tx] {
+            for k in 0..2 {
+                let ends: Vec<_> = streams.line((dir, k)).unwrap().items.iter().filter(|item| matches!(item.kind, Kind::End { .. })).collect();
+                assert_eq!(ends.len(), 1, "{dir:?} {k}");
+                assert_eq!((ends[0].e, ends[0].seq), (5_000, 1), "{dir:?} {k}");
+            }
+        }
+    }
+
 }

@@ -300,6 +300,11 @@ impl Rx {
             return true;
         }
         self.from = origin.saturating_add(1);
+        // UR-29: another thread found the device lost while the configuration ran; no start
+        // is issued and no segment begins.
+        if self.core.is_lost() {
+            return true;
+        }
         let channels = next.set();
         if let Err(error) = self.core.device.rx_start(self.k, origin) {
             self.core.device_failed(None, "update_parameter", &error);
@@ -533,7 +538,7 @@ impl Rx {
                             restart_gap_ns: if pending == Pending::Overrun { self.core.ns(lost_n as i64 * clock.n) } else { 0 },
                         };
                         // UR-20: the hot path, with RM-24's bytes.
-                        if let Err(error) = self.core.events.emit(self.core.overflow, at, Severity::Warning, &payload.to_hot()) {
+                        if let Err(error) = self.core.events.emit(self.core.overflow(self.k), at, Severity::Warning, &payload.to_hot()) {
                             self.core.reject_note(json!({ "event_not_emitted": kinds::RX_OVERFLOW, "error": error.to_string() }));
                         }
                     }
@@ -565,7 +570,7 @@ impl Rx {
             match SampleBlock::new_host(header, HOST_MEMORY, bytes, 8) {
                 Ok(block) => {
                     let block = Arc::new(block);
-                    for link in &self.core.links {
+                    for link in self.core.links(self.k) {
                         if link.publish(block.clone()) != PublishOutcome::Accepted {
                             self.core.stat("link_drops_seen", 1);
                         }
@@ -718,6 +723,50 @@ mod tests {
         core.clocks.sample_clock_records().iter().map(|record| (record.origin.ticks_in(record.root).unwrap(), record.ended_at.map(|end| end.ticks_in(record.root).unwrap()))).collect()
     }
 
+    /// The layout's key set: two receive front ends, so that stream 1 exists (RM-29).
+    fn layout_mode() -> super::super::mode::Mode {
+        use ezsdr_kernel::spec::{Ident, Scalar, Value};
+        let selector = std::collections::BTreeMap::from([
+            (Ident::parse("keys").unwrap(), Value::from("channel".to_owned())),
+            (Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")])),
+            (Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])),
+        ]);
+        let layout = ezsdr_radio::channels::from_selector(&selector).unwrap();
+        super::super::mode::Mode::Layout(Box::new(ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms())))
+    }
+
+    #[test]
+    fn ur_19_a_later_receive_stream_s_overflow_names_its_node() {
+        // UR-20, RM-29 (R19): stream 1's RX_OVERFLOW goes by stream 1's handle, from
+        // `usrp/rx/s1`, with RM-24's bytes; stream 0's stay its own (the existing test).
+        let link = link();
+        let (core, _device, _time, events) = super::super::test_support::rig_with_links_on(1, vec![link.clone()], layout_mode());
+        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 1), core.root, Rational::new(200, 1).unwrap()).unwrap();
+        lock(&core.streams).lines.insert(stream_key(Dir::Rx, 1), Line::new(ezsdr_radio::timeline::Stream {
+            direction: Direction::Rx,
+            origin: 0,
+            config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
+            lead: 0,
+            call: 2_000,
+            allowance: 0,
+        }));
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(to_rx);
+        let mut rx = Rx::new(core.clone(), 1, cmds, Some((handle, Channels::first(1), 0)), None);
+        let clock = rx.stream.as_ref().unwrap().clock;
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        rx.receive(samples(clock.instant(2), 2));
+        let block = link.receive().expect("the block after the overflow").0;
+        assert_eq!(block.header().flags, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED);
+        let got: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
+            .filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW)
+            .collect();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].source, ezsdr_kernel::event::EventSource::Node { node: ezsdr_kernel::id::ResourceId::parse("usrp/rx/s1").unwrap() });
+        assert_eq!(got[0].payload.as_array().map(Vec::len), Some(17), "RM-24's bytes: {}", got[0].payload);
+        assert_eq!(RxOverflowPayload::from_payload(&got[0].payload).unwrap().lost, 2);
+    }
+
     #[test]
     fn ur_19_reports_before_one_block_keep_each_kind() {
         // Reports of different kinds before the next block: that block carries each one's flag,
@@ -766,6 +815,102 @@ mod tests {
             expected.sort();
             assert_eq!(got, expected);
         }
+    }
+
+    #[test]
+    fn ur_29_a_loss_after_a_configure_starts_no_receive_segment() {
+        // UR-29 (L1): the device is found lost while the owner's configuration is in
+        // flight; the owner issues no timed start and registers no clock.
+        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        let holder = Arc::new(super::super::test_support::HoldApply::new(inner.clone(), Dir::Rx, Some(0)));
+        let (core, _time, _events) = super::super::test_support::rig_on(holder.clone(), vec![link()], 2_000);
+        let (mut rx, _clock) = rx_unopened(&core, 1);
+        book(&core, core.ticks(50_000_000), 1, rate(1_000_000));
+        let (reached, release) = holder.arm();
+        let worker = core.clone();
+        let running = std::thread::spawn(move || rx.begin());
+        reached.recv_timeout(Wall::from_secs(10)).expect("the owner's configure");
+        worker.device_lost("test: lost during the configure");
+        release.send(()).unwrap();
+        assert!(running.join().unwrap(), "the owner found its segment");
+        assert!(!inner.calls().iter().any(|call| call.starts_with("rx_start")), "{:?}", inner.calls());
+        assert!(core.clocks.sample_clock_records().is_empty(), "{:?}", core.clocks.sample_clock_records());
+    }
+
+    #[test]
+    fn ur_26_a_receive_start_queued_by_the_stop_ends_its_owner_without_detaching() {
+        // UR-26 (S16a): the owner does not re-read `Provider::stop` after its configuration;
+        // the start it queued at its origin is issued, the plan cuts the segment there — no
+        // block, and an untimed stop once the origin has passed —, and the owner leaves
+        // through its own turn, so a stop joins it inside the 1 s bound instead of leaving it
+        // detached.
+        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        let holder = Arc::new(super::super::test_support::HoldApply::new(inner.clone(), Dir::Rx, Some(0)));
+        let link = link();
+        let (core, time, _events) = super::super::test_support::rig_on(holder.clone(), vec![link.clone()], 2_000);
+        let origin = core.ticks(10_000_000);
+        // A stream with no channel before the change, so that the plan's one segment is the
+        // change's, at `origin`.
+        lock(&core.streams).lines.insert(stream_key(Dir::Rx, 0), Line::new(ezsdr_radio::timeline::Stream {
+            direction: Direction::Rx,
+            origin: 0,
+            config: Config { channels: Channels::first(0), ratio: Rational::new(200, 1).unwrap() },
+            lead: 0,
+            call: 2_000,
+            allowance: 0,
+        }));
+        book(&core, origin, 1, rate(1_000_000));
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        let mut rx = Rx::new(core.clone(), 0, cmds, None, None);
+        let (reached, release) = holder.arm();
+        let (done, finished) = std::sync::mpsc::channel();
+        let running = std::thread::spawn(move || {
+            let began = rx.begin();
+            let _ = done.send((began, rx));
+        });
+        reached.recv_timeout(Wall::from_secs(10)).expect("the owner's configure");
+        {
+            // As `Provider::stop(orderly)` books it, before the segment's origin.
+            let mut streams = lock(&core.streams);
+            let at = core.now();
+            streams.stop = Some((at, StopMode::Orderly));
+            streams.end(&core, at, false, false);
+        }
+        time.advance_to(core.at(origin)).unwrap();
+        release.send(()).unwrap();
+        let (began, mut rx) = finished.recv_timeout(Wall::from_secs(1)).expect("the owner's begin returned within the join bound");
+        assert!(began, "the owner found its segment");
+        assert!(inner.calls().iter().any(|call| call.starts_with("rx_start 0 ")), "the queued start is issued: {:?}", inner.calls());
+        assert!(link.receive().is_none(), "nothing is delivered at the origin: {:?}", inner.calls());
+        let stop = lock(&core.rec).timing.iter().find(|row| row["what"] == "rx_stop_untimed").cloned().expect("the untimed stop at the origin");
+        assert_eq!((stop["cut"].as_i64().unwrap(), stop["at"].as_i64().unwrap()), (origin, origin), "{stop}");
+        to_rx.send(RxCmd::Shutdown(StopMode::Orderly)).unwrap();
+        assert_eq!(rx.turn(), Turn::Exit, "the owner ends through its own loop");
+        running.join().expect("the owner's begin thread");
+    }
+
+    #[test]
+    fn ur_26_a_stream_s_delivered_is_cleared_alone() {
+        // RM-16 (S12c): a stream's `finish` clears its own delivered floor; the other
+        // stream's stands for the end that comes later.
+        let (core, _device, _time, _events) = super::super::test_support::rig_with_links_on(1, vec![link()], layout_mode());
+        lock(&core.streams).stream_mut(stream_key(Dir::Rx, 0)).delivered = Some((0, Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() }, 700));
+        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 1), core.root, Rational::new(200, 1).unwrap()).unwrap();
+        lock(&core.streams).lines.insert(stream_key(Dir::Rx, 1), Line::new(ezsdr_radio::timeline::Stream {
+            direction: Direction::Rx,
+            origin: 0,
+            config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
+            lead: 0,
+            call: 2_000,
+            allowance: 0,
+        }));
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(to_rx);
+        let mut rx = Rx::new(core.clone(), 1, cmds, Some((handle, Channels::first(1), 0)), None);
+        rx.finish();
+        let streams = lock(&core.streams);
+        assert_eq!(streams.stream(stream_key(Dir::Rx, 0)).delivered, Some((0, Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() }, 700)), "stream 0's floor stands");
+        assert_eq!(streams.stream(stream_key(Dir::Rx, 1)).delivered, None, "stream 1's floor is cleared");
     }
 
     #[test]

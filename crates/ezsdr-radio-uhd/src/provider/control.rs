@@ -113,9 +113,9 @@ impl ColdConfig {
 
     /// The configuration in effect at `origin` on logical channel `chan` (UR-12, RM-30):
     /// the layout's own channel values, with the updates due by then that name it.
-    fn settings_on(&self, core: &Core, updates: &BTreeMap<(i64, u64), (usize, Settings)>, dir: Dir, origin: i64, chan: usize) -> Settings {
+    fn settings_on(&self, core: &Core, updates: &BTreeMap<(i64, u64), (usize, Settings)>, dir: Dir, k: usize, origin: i64, chan: usize) -> Settings {
         let Base::Layout(base) = &self.base else { return self.settings(updates, origin) };
-        let mut settings = core.mode.settings(base, dir, chan);
+        let mut settings = core.mode.settings(base, dir, k, chan);
         for (update_chan, update) in updates.range(..=(origin, u64::MAX)).map(|(_, update)| update) {
             if *update_chan != chan { continue; }
             if let Some(freq) = update.freq { settings.freq = Some(freq); }
@@ -138,7 +138,7 @@ impl ColdConfig {
             .channels
             .iter()
             .map(|chan| {
-                let mut settings = self.settings_on(core, &updates, dir, segment.origin, chan as usize);
+                let mut settings = self.settings_on(core, &updates, dir, k, segment.origin, chan as usize);
                 settings.rate = Some(rate);
                 (chan as usize, settings)
             })
@@ -188,7 +188,8 @@ impl Planned {
 pub(crate) struct Control {
     pub core: Arc<Core>,
     pub actions: Arc<dyn ActionReceiver>,
-    pub to_tx: Sender<TxCmd>,
+    /// One sender per transmit stream (RM-29).
+    pub to_tx: Vec<Sender<TxCmd>>,
     /// The configuration at the Run's start, with every `hardware_timed` value whose instant has
     /// passed since, released or without a channel to give it on (UR-24): what a segment
     /// beginning now starts from.
@@ -219,12 +220,14 @@ pub(crate) struct Control {
 /// `UHD_ERROR_EXCEPT`, not counted lost (UR-29; Review S, S-B1).
 const FAILING_FOR: Wall = Wall::from_secs(1);
 
-/// The streams at the Run's start (UR-15): the receive stream's first segment at T0, when
-/// it has a channel and a link, and the transmit clock registered at `arm`.
+/// The streams at the Run's start (UR-15): each receive stream's first segment at T0, when
+/// it has a channel and a link, and each transmit stream's clock registered at `arm`.
 pub(crate) struct Start {
     pub t0: i64,
-    pub rx: Option<(Channels, i64)>,
-    pub tx: Option<(Clock, Channels)>,
+    /// Per receive stream `k`: its channel set and root ticks per sample, when it starts.
+    pub rx: Vec<Option<(Channels, i64)>>,
+    /// Per transmit stream `k`: its clock and channel set, when it has channels.
+    pub tx: Vec<Option<(Clock, Channels)>>,
 }
 
 impl Control {
@@ -232,7 +235,7 @@ impl Control {
     pub fn new(
         core: Arc<Core>,
         actions: Arc<dyn ActionReceiver>,
-        to_tx: Sender<TxCmd>,
+        to_tx: Vec<Sender<TxCmd>>,
         config: BTreeMap<Key, Value>,
         reference_monitored: bool,
         start: Start,
@@ -240,11 +243,9 @@ impl Control {
         let host = core.device.host();
         // RM-25, VH-4: this Module's terms — each direction's start lead, and, for a receive
         // segment after a cut, the receive call in progress there and the delivery
-        // allowance (UR-25). The call term is the receive line's, stream 0's, the one line
-        // the current keys have; 1b-4d reads each stream's own packet size.
-        let call = core.block_len.max(core.device.rx_packet_samples(0)) as i64;
+        // allowance (UR-25). The call term is each receive stream's own packet size.
         let allowance = core.ticks(DELIVERY_ALLOWANCE_NS);
-        let line = |key: StreamKey, origin: i64, channels: Channels, n: i64| Line::new(timeline::Stream {
+        let line = |key: StreamKey, origin: i64, channels: Channels, n: i64, call: i64| Line::new(timeline::Stream {
             direction: key.0,
             origin,
             config: Config { channels, ratio: Rational::new(n.max(1) as u64, 1).expect("a positive ratio") },
@@ -252,27 +253,42 @@ impl Control {
             call,
             allowance,
         });
-        let n = |dir: Dir| {
-            let rate = core.mode.stream_rate(&config, dir, 0);
+        let n = |dir: Dir, k: usize| {
+            let rate = core.mode.stream_rate(&config, dir, k);
             decimation(core.mcr, rate).map_or(1, |n| n as i64)
         };
-        let rx = (!core.links.is_empty()).then(|| {
-            let (channels, n) = start.rx.unwrap_or((Channels::first(0), n(Dir::Rx)));
-            line(booked_stream(Dir::Rx), start.t0, channels, n)
-        });
-        let tx = match start.tx {
-            Some((clock, channels)) => line(booked_stream(Dir::Tx), clock.origin, channels, clock.n),
-            None => line(booked_stream(Dir::Tx), 0, Channels::first(0), n(Dir::Tx)),
-        };
+        let rx_count = core.mode.stream_count(Dir::Rx);
+        let tx_count = core.mode.stream_count(Dir::Tx);
+        let mut rx = Vec::new();
+        for k in 0..rx_count {
+            if core.links(k).is_empty() {
+                rx.push(None);
+                continue;
+            }
+            let call = core.block_len.max(core.device.rx_packet_samples(k)) as i64;
+            let (channels, n) = start.rx.get(k).copied().flatten().unwrap_or((Channels::first(0), n(Dir::Rx, k)));
+            rx.push(Some(line(stream_key(Dir::Rx, k), start.t0, channels, n, call)));
+        }
+        let mut tx = Vec::new();
+        for k in 0..tx_count {
+            tx.push(match start.tx.get(k).copied().flatten() {
+                Some((clock, channels)) => line(stream_key(Dir::Tx, k), clock.origin, channels, clock.n, core.block_len as i64),
+                None => line(stream_key(Dir::Tx, k), 0, Channels::first(0), n(Dir::Tx, k), core.block_len as i64),
+            });
+        }
         {
             let mut streams = lock(&core.streams);
-            streams.stream_mut(booked_stream(Dir::Tx)).clocks = start.tx.map(|(clock, _)| (clock, false)).into_iter().collect();
-            if let Some(rx) = rx {
-                streams.lines.insert(booked_stream(Dir::Rx), rx);
+            for (k, line) in rx.iter().enumerate() {
+                if let Some(line) = line.clone() {
+                    streams.lines.insert(stream_key(Dir::Rx, k), line);
+                }
+                streams.stream_mut(stream_key(Dir::Rx, k)).idle = start.rx.get(k).copied().flatten().is_none();
             }
-            streams.lines.insert(booked_stream(Dir::Tx), tx);
-            streams.stream_mut(booked_stream(Dir::Rx)).idle = start.rx.is_none();
-            streams.stream_mut(booked_stream(Dir::Tx)).idle = start.tx.is_none();
+            for (k, line) in tx.iter().enumerate() {
+                streams.stream_mut(stream_key(Dir::Tx, k)).clocks = start.tx.get(k).copied().flatten().map(|(clock, _)| (clock, false)).into_iter().collect();
+                streams.lines.insert(stream_key(Dir::Tx, k), line.clone());
+                streams.stream_mut(stream_key(Dir::Tx, k)).idle = start.tx.get(k).copied().flatten().is_none();
+            }
         }
         Control {
             core,
@@ -360,28 +376,33 @@ impl Control {
             // stream node stops that stream alone (RM-12, D14); under the layout the old
             // `<id>/rx` and `<id>/tx` are no targets.
             Action::Stop { target: Some(_) } => {
-                let (rx, tx) = match addressed {
-                    Addressed::Instance => (true, true),
+                let (rx, tx): (Vec<usize>, Vec<usize>) = match addressed {
+                    Addressed::Instance => ((0..self.core.mode.stream_count(Dir::Rx)).collect(), (0..self.core.mode.stream_count(Dir::Tx)).collect()),
                     Addressed::Stream { direction, k } => {
                         let dir = Dir::from(direction);
                         match (self.core.mode.is_layout(), dir) {
-                            (true, _) => (k == 0 && dir == Dir::Rx, k == 0 && dir == Dir::Tx),
-                            (false, Dir::Rx) => (true, false),
-                            (false, Dir::Tx) => (false, true),
+                            (true, _) => ((dir == Dir::Rx).then_some(k).into_iter().collect(), (dir == Dir::Tx).then_some(k).into_iter().collect()),
+                            (false, Dir::Rx) => (vec![0], Vec::new()),
+                            (false, Dir::Tx) => (Vec::new(), vec![0]),
                         }
                     }
                     Addressed::Other => {
                         return self.core.command_rejected(Some(id), "stop", "UR-26: the Stop target is not this device or its streams");
                     }
                 };
-                if tx {
-                    let _ = self.to_tx.send(TxCmd::Stop);
+                for k in tx {
+                    if let Some(to_tx) = self.to_tx.get(k) {
+                        let _ = to_tx.send(TxCmd::Stop);
+                    }
                 }
-                if rx {
+                if !rx.is_empty() {
                     let mut streams = lock(&self.core.streams);
-                    let stream = booked_stream(Dir::Rx);
-                    let (seq, now) = (streams.next_seq(), self.core.now());
-                    streams.book(&self.core, stream, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop });
+                    let now = self.core.now();
+                    for k in rx {
+                        let stream = stream_key(Dir::Rx, k);
+                        let seq = streams.next_seq();
+                        streams.book(&self.core, stream, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop });
+                    }
                 }
             }
             Action::Stop { target: None } | Action::Abort { .. } => {}
@@ -395,9 +416,6 @@ impl Control {
                 let Addressed::Stream { direction: Direction::Rx, k } = addressed else {
                     return self.core.command_rejected(Some(id), "command", "UR-26: not supported by this Provider");
                 };
-                if k != 0 {
-                    return;
-                }
                 let requested = match self.ceil_root(at) {
                     Ok(requested) => requested,
                     Err(error) => return self.core.command_rejected(Some(id), "command", &format!("UR-26: start_rx's instant cannot be converted: {error}")),
@@ -409,7 +427,7 @@ impl Control {
                 // One critical section takes the instant and the arrival order and books the
                 // start, so that nothing pruned meanwhile takes effect after them (#63).
                 let mut streams = lock(&self.core.streams);
-                let stream = booked_stream(Dir::Rx);
+                let stream = stream_key(Dir::Rx, k);
                 let (seq, now) = (streams.next_seq(), self.core.now());
                 let (e, _) = timeline::command_instant(streams.line(stream), requested, now, seq, false);
                 let config = match current {
@@ -455,9 +473,10 @@ impl Control {
             .collect()
     }
 
-    /// The segment configurations of `dir`, shared with its owner.
+    /// The segment configurations of `dir`, shared with its owners (every stream's).
     fn projections(&self, dir: Dir) -> Vec<Arc<ColdConfig>> {
-        lock(&self.core.streams).stream(booked_stream(dir)).configs.values().cloned().collect()
+        let streams = lock(&self.core.streams);
+        (0..streams.count(dir)).flat_map(|k| streams.stream(stream_key(dir, k)).configs.values().cloned()).collect()
     }
 
     fn ceil_root(&self, at: Option<AbsoluteDeadline>) -> Result<Option<i64>, TimeError> {
@@ -496,7 +515,8 @@ impl Control {
         config
     }
 
-    /// The channel count of `dir` in force at `t`: none while a refusal halts it (RM-25, #64).
+    /// The channel count of `dir` in force at `t` under the current keys: none while a
+    /// refusal halts its stream (RM-25, #64).
     fn channels_at(&self, dir: Dir, t: i64) -> usize {
         if lock(&self.core.streams).line(booked_stream(dir)).is_some_and(|line| line.halted(t)) {
             return 0;
@@ -505,20 +525,25 @@ impl Control {
     }
 
     /// RM-27, UR-24: whether logical channel `chan` of `dir` is in a running stream at `t`
-    /// — its `stream` is 0 in the configuration in force there and no refusal halts the
-    /// stream. A timed update acts on the channel then; otherwise it is given to the later
-    /// segments that run the channel, or held for one where none does (`targets`).
+    /// — the stream that holds it is not halted and no refusal stops it. A timed update acts
+    /// on the channel then; otherwise it is given to the later segments that run the channel,
+    /// or held for one where none does (`targets`).
     fn channel_live(&self, dir: Dir, chan: usize, t: i64) -> bool {
-        if lock(&self.core.streams).line(booked_stream(dir)).is_some_and(|line| line.halted(t)) {
+        if !self.core.mode.is_layout() {
+            return chan < self.channels_at(dir, t);
+        }
+        let stream = self.core.mode.stream_of(&self.config_at(t), dir, chan);
+        if stream < 0 {
             return false;
         }
-        self.core.mode.stream_of(&self.config_at(t), dir, chan) == 0
+        let key = stream_key(dir, stream as usize);
+        !lock(&self.core.streams).line(key).is_some_and(|line| line.halted(t))
     }
 
     /// UR-24: the channels a timed command of `chan` (`None`: every channel of `dir`) is given
-    /// on at `t` — those in force there, or, with none in force, those of the segments planned
-    /// to begin at or after `t` that are not refused. The flag: the direction's own channels
-    /// were in force (a live stream), which decides the `applied` row's shape.
+    /// on at `t` — those in force there, or, with none in force, those of the segments of any
+    /// stream planned to begin at or after `t` that are not refused. The flag: the direction's
+    /// own channels were in force (a live stream), which decides the `applied` row's shape.
     fn targets(&self, dir: Dir, chan: Option<usize>, t: i64) -> (Vec<usize>, bool) {
         let live: Vec<usize> = if self.core.mode.is_layout() {
             let chan = chan.expect("a layout command names its channel");
@@ -529,9 +554,12 @@ impl Control {
         if !live.is_empty() {
             return (live, true);
         }
-        // With none in force, the later segments' channels: `planned` takes the line's lock
-        // once, after the two above let it go (UR-25's order).
-        let planned = lock(&self.core.streams).planned(booked_stream(dir));
+        // With none in force, the later segments' channels of every stream of the direction:
+        // `planned` takes the line's lock once, after the two above let it go (UR-25's order).
+        let planned: Vec<Planned> = {
+            let streams = lock(&self.core.streams);
+            (0..streams.count(dir)).flat_map(|k| streams.planned(stream_key(dir, k))).collect()
+        };
         let later = planned.iter().filter(|planned| !planned.refused && planned.segment.origin >= t);
         let chans: BTreeSet<usize> = match chan {
             Some(chan) => later.filter(|planned| planned.segment.config.channels.contains(chan as u32)).map(|_| chan).collect(),
@@ -746,6 +774,7 @@ impl Control {
                 return false;
             }
             if !reading {
+                self.core.probe("reading_done", None);
                 return true;
             }
             self.host.sleep(POLL);
@@ -755,8 +784,7 @@ impl Control {
     /// UR-25: a `cold` update is booked when uhd-control takes it: its effective instant,
     /// `coerce` over the configuration projected there, and the stream's plan from the
     /// timeline, which its owner reads. Under the layout the key names its channel or its
-    /// stream (RM-27), the floor is the instance's (RM-25), and only stream 0 runs
-    /// (design 33 D14).
+    /// stream (RM-27) and the floor is the instance's (RM-25).
     fn book_cold(&mut self, id: ActionId, key: Key, value: Value, at: Option<AbsoluteDeadline>) {
         let layout = self.core.mode.is_layout();
         let dir = if layout {
@@ -803,10 +831,6 @@ impl Control {
         let before = self.config_at(e);
         let mut candidate = before.clone();
         candidate.insert(key.clone(), value.clone());
-        // D14: a channel may not leave the one stream this Provider runs per direction.
-        if let Some((dir, number, stream)) = self.core.mode.channel_in_later_stream(&candidate) {
-            return self.core.command_rejected(Some(id), "update_parameter", &format!("UR-25: radio.{}.c{number}.stream names stream s{stream}; this Provider runs each direction's stream 0 alone", dir.name()));
-        }
         let request = Requested {
             resource: self.core.id.clone(),
             constraints: candidate.iter().filter_map(|(k, v)| Some((k.clone(), Constraint::Eq { value: v.as_scalar()?.clone() }))).collect(),
@@ -820,7 +844,26 @@ impl Control {
         }
         let value = report.applied.get(&key).cloned().unwrap_or(value);
         candidate.insert(key.clone(), value.clone());
-        // RM-12, RM-27, D14: the key names the stream the change belongs to — a channel's
+        // RM-34: a channel moving from one stream to another is refused until the move is
+        // carried out (1b-4e); nothing changes.
+        if layout {
+            if let Some(ezsdr_radio::Concrete::Channel { rx, number, leaf: "stream" }) = ezsdr_radio::concrete(&key) {
+                let dir = if rx { Dir::Rx } else { Dir::Tx };
+                let was = self.core.mode.stream_of(&before, dir, number as usize);
+                let is = self.core.mode.stream_of(&candidate, dir, number as usize);
+                if was >= 0 && is >= 0 && was != is {
+                    return self.core.command_rejected(
+                        Some(id),
+                        "update_parameter",
+                        &format!(
+                            "UR-25: radio.{}.c{number}.stream moves the channel from stream s{was} to stream s{is}; this Provider does not move a channel between streams yet",
+                            dir.name()
+                        ),
+                    );
+                }
+            }
+        }
+        // RM-12, RM-27, RM-29: the key names the stream the change belongs to — a channel's
         // own stream at its effective instant — and that stream's channel set and rate.
         let target: Option<(Dir, usize)> = if layout {
             match ezsdr_radio::concrete(&key) {
@@ -867,8 +910,8 @@ impl Control {
         let empty_layout = layout && channels.is_empty() && !leaves;
         let (old, idle, planned) = {
             let line = streams.line(stream);
-            // The stream's own state is read only for a stream a channel enters — stream 0
-            // in this stage (D14) —: one with no channel and no line has none (RM-29).
+            // The stream's own state is read only for a stream a channel enters (RM-29):
+            // one with no channel and no line has none.
             if !channels.is_empty() && line.is_some() {
                 (line.map(|line| line.stream.config), streams.stream(stream).idle, line.is_some_and(|line| line.plan.iter().all(|segment| segment.cut.is_some())))
             } else {
@@ -912,8 +955,8 @@ impl Control {
         }
         if from_none {
             // Its owner is idle: nothing it could prune comes meanwhile, so the lock is
-            // released for the device calls alone and taken again for the book. `k` is 0
-            // here: a stream the layout holds a channel for is stream 0 (D14).
+            // released for the device calls alone and taken again for the book. The stream
+            // is the one the change names (`k`).
             drop(streams);
             // UR-29, UR-25: a loss, or `Provider::stop` read from its mark before any call,
             // ends the enable with no device call; the stop's own path books the end.
@@ -928,7 +971,7 @@ impl Control {
                 let entries: Vec<(usize, Settings)> = channels
                     .iter()
                     .map(|chan| {
-                        let mut settings = self.core.mode.settings(&candidate, dir, chan as usize);
+                        let mut settings = self.core.mode.settings(&candidate, dir, k, chan as usize);
                         settings.rate = Some(rate);
                         // A layout command names its channel; a current-keys one belongs to every
                         // channel of its direction, as the projection applies it (UC-2).
@@ -1011,32 +1054,28 @@ impl Control {
         metadata_empty: bool,
     ) {
         let reject = |reason: &str| self.core.command_rejected(Some(id), "tx_burst", reason);
+        // RM-12, RM-29: under the layout the target must be a transmit stream's node; the
+        // current keys keep HEAD's order, the clock first.
+        let k = if self.core.mode.is_layout() {
+            match addressed {
+                Addressed::Stream { direction: Direction::Tx, k } => k,
+                _ => return reject("UR-21: the target is not this device's transmit stream"),
+            }
+        } else {
+            0
+        };
         // KC-21a: the last transmit clock registered, while its segment has not ended.
         let current = {
             let streams = lock(&self.core.streams);
-            let stream = booked_stream(Dir::Tx);
+            let stream = stream_key(Dir::Tx, k);
             let last = streams.line(stream).and_then(|line| line.plan.last()).filter(|segment| segment.cut.is_none());
             streams.stream(stream).clocks.last().map(|(clock, _)| *clock).zip(last.map(|segment| segment.config.channels.count() as usize))
         };
-        // RM-12, D14: under the layout the target must be a transmit stream's node — a
-        // stream without a channel is the same refusal as a silent one (UR-21); the
-        // current keys keep their order, the clock first.
-        if self.core.mode.is_layout() {
-            match addressed {
-                Addressed::Stream { direction: Direction::Tx, k: 0 } => {}
-                Addressed::Stream { direction: Direction::Tx, .. } => return reject("UR-21: no transmit channel is configured"),
-                _ => return reject("UR-21: the target is not this device's transmit stream"),
-            }
-            if current.is_none() {
-                return reject("UR-21: no transmit channel is configured");
-            }
-        } else {
-            if current.is_none() {
-                return reject("UR-21: no transmit channel is configured");
-            }
-            if node != Some(&self.core.tx_id) {
-                return reject("UR-21: the target is not this device's transmit stream");
-            }
+        if current.is_none() {
+            return reject("UR-21: no transmit channel is configured");
+        }
+        if !self.core.mode.is_layout() && node != Some(&self.core.tx_id) {
+            return reject("UR-21: the target is not this device's transmit stream");
         }
         let Some((clock, channels)) = current else {
             return reject("UR-21: no transmit channel is configured");
@@ -1096,8 +1135,8 @@ impl Control {
                 target: at.time_point,
             })
             .expect("a payload");
-            // The burst's stream is 0 in this stage (D14): another is refused before here.
-            self.core.emit(&self.core.stream_node(Dir::Tx, 0), kinds::TIME_ERROR, Severity::Error, payload);
+            // The burst's own stream (RM-29).
+            self.core.emit(&self.core.stream_node(Dir::Tx, k), kinds::TIME_ERROR, Severity::Error, payload);
         };
         match outcome {
             LateOutcome::OnTime {} => {}
@@ -1131,7 +1170,7 @@ impl Control {
             late: (!matches!(outcome, LateOutcome::OnTime {})).then_some(outcome),
             requested_target: requested,
         };
-        let _ = self.to_tx.send(TxCmd::Burst(Held {
+        let _ = self.to_tx.get(k).map(|to_tx| to_tx.send(TxCmd::Burst(Held {
             k: start,
             domain: clock.domain,
             samples: Arc::new(samples),
@@ -1139,7 +1178,7 @@ impl Control {
             open,
             policy: late_policy,
             target: at.time_point,
-        }));
+        })));
     }
 
     // ------------------------------------------------------------ UR-27, UR-29
@@ -1214,17 +1253,17 @@ mod tests {
     fn control(core: &Arc<Core>, on: &[Dir]) -> (Control, Receiver<TxCmd>) {
         let (to_tx, tx) = channel();
         let mut config = core.mode.defaults();
-        let mut start = Start { t0: 0, rx: None, tx: None };
+        let mut start = Start { t0: 0, rx: vec![None; core.mode.stream_count(Dir::Rx)], tx: vec![None; core.mode.stream_count(Dir::Tx)] };
         for dir in on {
             if !core.mode.is_layout() {
                 config.insert(key(&format!("radio.{}.channels", dir.name())), Value::from(1));
             }
             match dir {
-                Dir::Rx => start.rx = Some((Channels::first(1), 200)),
-                Dir::Tx => start.tx = Some((core.register(Dir::Tx, 200, 0).unwrap(), Channels::first(1))),
+                Dir::Rx => start.rx[0] = Some((Channels::first(1), 200)),
+                Dir::Tx => start.tx[0] = Some((core.register(Dir::Tx, 200, 0).unwrap(), Channels::first(1))),
             }
         }
-        (Control::new(core.clone(), Arc::new(NoActions), to_tx, config, false, start), tx)
+        (Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, start), tx)
     }
 
     /// The plan of `dir`'s stream as its owner reads it.
@@ -1339,6 +1378,72 @@ mod tests {
         let device = Arc::new(crate::device::FakeDevice::new(config));
         let (core, time, _) = crate::provider::test_support::rig_on_mode(device.clone(), vec![Arc::new(NoLink)], BTreeMap::new(), layout_mode());
         (core, device, time)
+    }
+
+    /// The layout's rig with two receive streams' links, so that a join names stream 1.
+    fn two_stream_rig() -> (Arc<Core>, Arc<crate::device::FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<ezsdr_kernel::event::EventCollector>) {
+        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() };
+        let device = Arc::new(crate::device::FakeDevice::new(config));
+        let (core, time, events) = crate::provider::test_support::rig_on_mode_links(device.clone(), vec![vec![Arc::new(NoLink)], vec![Arc::new(NoLink)]], BTreeMap::new(), layout_mode());
+        (core, device, time, events)
+    }
+
+    #[test]
+    fn ur_24_the_command_queue_is_counted_per_instance_across_streams() {
+        // UR-24 (S10): the queue depth is the instance's, whatever streams the commands name;
+        // a released command still takes its slot, and the seventeenth is refused.
+        let (core, device, time, events) = two_stream_rig();
+        let _frozen = hold(&core, &time, &device);
+        let (to_tx, _tx) = channel();
+        let start = Start { t0: 0, rx: vec![Some((Channels::first(1), 200)), Some((Channels::first(1), 200))], tx: vec![None] };
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], core.mode.defaults(), false, start);
+        control.config.insert(key("radio.rx.c0.stream"), Value::from(0));
+        control.config.insert(key("radio.rx.c1.stream"), Value::from(1));
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        for i in 0..16 {
+            let (key, channel) = if i % 2 == 0 { (key("radio.rx.c0.gain_db"), ActionId(i as u64 + 1)) } else { (key("radio.rx.c1.gain_db"), ActionId(i as u64 + 1)) };
+            let value = Value::num(i as f64 + 1.0).unwrap();
+            control.book_timed(channel, key, value, at(5_000 + i));
+        }
+        assert_eq!(control.held.len(), 16, "{:?}", control.held.keys().collect::<Vec<_>>());
+        assert!(device.calls().iter().all(|call| !call.starts_with("apply")), "{:?}", device.calls());
+        let _ = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        control.book_timed(ActionId(20), key("radio.rx.c0.gain_db"), Value::num(9.0).unwrap(), at(5_500));
+        let full = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        assert_eq!(full.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_QUEUE_FULL).count(), 1, "{:?}", full.iter().map(|event| event.kind.as_str()).collect::<Vec<_>>());
+        assert_eq!(full.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_QUEUE_FULL).unwrap().payload["depth"], 16, "{full:?}");
+        assert_eq!(control.held.len(), 16, "the refused command took no slot");
+        // Release the first: its slot is still counted (UR-24: held plus released).
+        time.advance_to(core.at(ms(4_997))).unwrap();
+        control.release();
+        assert_eq!((control.held.len(), control.released.len()), (15, 1), "{:?}", control.held.keys().collect::<Vec<_>>());
+        control.book_timed(ActionId(21), key("radio.rx.c1.gain_db"), Value::num(7.0).unwrap(), at(7_000));
+        assert_eq!(control.held.len(), 15, "the released one still fills its slot");
+    }
+
+    #[test]
+    fn ur_24_a_timed_update_reaches_a_later_stream_s_pending_segment() {
+        // UR-24 (R20): with no channel in force, a timed command reaches the later segment
+        // that brings its channel — stream 1's, and not stream 0's.
+        let (core, device, time, _events) = two_stream_rig();
+        let _frozen = hold(&core, &time, &device);
+        let (to_tx, _tx) = channel();
+        let start = Start { t0: 0, rx: vec![Some((Channels::first(1), 200)), None], tx: vec![None] };
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], core.mode.defaults(), false, start);
+        control.config.insert(key("radio.rx.c0.stream"), Value::from(0));
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        control.book_cold(ActionId(1), key("radio.rx.c1.stream"), Value::from(1), at(300));
+        control.book_timed(ActionId(2), key("radio.rx.c1.frequency_hz"), Value::num(2.1e9).unwrap(), at(200));
+        time.advance_to(core.at(ms(197))).unwrap();
+        control.release();
+        let timed: Vec<String> = device.calls().into_iter().filter(|call| call.starts_with("apply rx 1") && call.contains("freq=2100000000")).collect();
+        assert_eq!(timed.len(), 1, "{:?}", device.calls());
+        assert!(timed[0].contains(&format!("at={}", ms(200))), "{timed:?}");
+        assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000")), "{:?}", device.calls());
+        let row = lock(&core.rec).applied.iter().find(|row| row["key"] == "radio.rx.c1.frequency_hz" && row["issued"] == true).cloned().expect("the issued row");
+        assert_eq!(row["note"], "no channel", "{row}");
     }
 
     #[test]
@@ -3553,7 +3658,7 @@ mod tests {
         let (core, device, time) = layout_rig();
         let _frozen = hold(&core, &time, &device);
         let (to_tx, _tx) = channel();
-        let mut control = Control::new(core.clone(), Arc::new(NoActions), to_tx, core.mode.defaults(), false, Start { t0: 0, rx: Some((Channels::first(2), 200)), tx: None });
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], core.mode.defaults(), false, Start { t0: 0, rx: vec![Some((Channels::first(2), 200)), None], tx: vec![None, None] });
         control.config.insert(key("radio.rx.c1.stream"), Value::from(0));
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));

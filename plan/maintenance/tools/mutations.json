@@ -538,8 +538,8 @@
   "id": "J11",
   "name": "VH-6 (spec 22, H11): a device Stop cancels held timed updates",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                if tx {\n                    let _ = self.to_tx.send(TxCmd::Stop);\n",
-  "new": "                if tx {\n                    self.cancel_held(\"Stop\");\n                    let _ = self.to_tx.send(TxCmd::Stop);\n",
+  "old": "                for k in tx {\n                    if let Some(to_tx) = self.to_tx.get(k) {\n                        let _ = to_tx.send(TxCmd::Stop);\n                    }\n                }",
+  "new": "                self.cancel_held(\"Stop\");\n                for k in tx {\n                    if let Some(to_tx) = self.to_tx.get(k) {\n                        let _ = to_tx.send(TxCmd::Stop);\n                    }\n                }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_stop_cancels_no_update"
@@ -6194,8 +6194,8 @@
    "id": "P242",
    "name": "a receive enable with no link books a stream and configures it (UR-25, D15)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "        let rx = (!core.links.is_empty()).then(|| {",
-   "new": "        let rx = true.then(|| {",
+   "old": "            if core.links(k).is_empty() {\n                rx.push(None);\n                continue;\n            }",
+   "new": "            if core.links(k).is_empty() {\n                rx.push(Some(line(stream_key(Dir::Rx, k), start.t0, Channels::first(0), n(Dir::Rx, k), core.block_len as i64)));\n                continue;\n            }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_a_receive_enable_without_a_link_is_only_recorded"
@@ -6224,11 +6224,11 @@
    "id": "P245",
    "name": "Provider::stop joins the receive streams before the transmit ones (RM-16, D15)",
    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "        for to_tx in &to_tx {\n            let _ = to_tx.send(TxCmd::Shutdown);\n        }\n        self.join(&core, \"uhd-tx\");\n        for to_rx in &to_rx {\n            let _ = to_rx.send(RxCmd::Shutdown(mode));\n        }\n        self.join(&core, \"uhd-rx\");",
-   "new": "        for to_rx in &to_rx {\n            let _ = to_rx.send(RxCmd::Shutdown(mode));\n        }\n        self.join(&core, \"uhd-rx\");\n        for to_tx in &to_tx {\n            let _ = to_tx.send(TxCmd::Shutdown);\n        }\n        self.join(&core, \"uhd-tx\");",
+   "old": "        for k in 0..to_tx.len() {\n            self.join(&core, &tx_name(k));\n        }",
+   "new": "        self.join(&core, &tx_name(0));",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "ur_26_the_sending_threads_join_before_the_receiving_ones"
+   "filter": "ur_26_every_stream_s_threads_are_joined_in_order"
   },
   {
    "id": "P246",
@@ -6394,8 +6394,8 @@
    "id": "P263",
    "name": "the transmit clock registered at arm is not seeded into the stream (UR-15, KC-21a)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            streams.stream_mut(booked_stream(Dir::Tx)).clocks = start.tx.map(|(clock, _)| (clock, false)).into_iter().collect();",
-   "new": "            streams.stream_mut(booked_stream(Dir::Tx)).clocks = Vec::new();",
+   "old": "                streams.stream_mut(stream_key(Dir::Tx, k)).clocks = start.tx.get(k).copied().flatten().map(|(clock, _)| (clock, false)).into_iter().collect();",
+   "new": "                streams.stream_mut(stream_key(Dir::Tx, k)).clocks = Vec::new();",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_22_repeat_is_continuous_across_the_wrap"
@@ -6404,8 +6404,8 @@
    "id": "P264",
    "name": "a segment's configuration is the direction's base, not its projection at the origin (UC-2, UR-25)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                let mut settings = self.settings_on(core, &updates, dir, segment.origin, chan as usize);",
-   "new": "                let mut settings = self.settings_on(core, &updates, dir, i64::MIN, chan as usize);",
+   "old": "                let mut settings = self.settings_on(core, &updates, dir, k, segment.origin, chan as usize);",
+   "new": "                let mut settings = self.settings_on(core, &updates, dir, k, i64::MIN, chan as usize);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_25_a_timed_update_at_the_cold_change_s_instant_reaches_the_switch"
@@ -6494,8 +6494,8 @@
    "id": "P273",
    "name": "the receive thread is spawned under the transmit thread's name (UR-16)",
    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "        self.spawn(&core, \"uhd-rx\", move || rx.run())?;",
-   "new": "        self.spawn(&core, \"uhd-tx\", move || rx.run())?;",
+   "old": "            let name = rx_name(stream.k);",
+   "new": "            let name = tx_name(stream.k);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_16_a_panicking_thread_is_a_lost_device"
@@ -6504,8 +6504,8 @@
    "id": "P274",
    "name": "the transmit thread is spawned under the receive thread's name (UR-16)",
    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "        self.spawn(&core, \"uhd-tx\", move || tx.run())?;",
-   "new": "        self.spawn(&core, \"uhd-rx\", move || tx.run())?;",
+   "old": "                let name = tx_name(stream.k);",
+   "new": "                let name = rx_name(stream.k);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_16_a_wedged_thread_does_not_wedge_stop"
@@ -6514,8 +6514,8 @@
    "id": "P275",
    "name": "the transmit thread is joined under the receive thread's name (UR-16)",
    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "        self.join(&core, \"uhd-tx\");",
-   "new": "        self.join(&core, \"uhd-rx\");",
+   "old": "            self.join(&core, &tx_name(k));",
+   "new": "            self.join(&core, &rx_name(k));",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_16_a_wedged_thread_does_not_wedge_stop"
@@ -6524,7 +6524,7 @@
    "id": "P276",
    "name": "no thread's panic is a lost device (UR-16)",
    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "                    if name != \"uhd-control\" {",
+   "old": "                    if !is_control {",
    "new": "                    if false {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
@@ -6559,16 +6559,6 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_switch_projects_timed_updates_in_effective_order"
-  },
-  {
-   "id": "P280",
-   "name": "a second stream is started with its rest silently dropped (UR-15, D15)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "        let [rx_stream] = <[PreparedStream; 1]>::try_from(rx_streams).map_err(|_| rejected(\"UR-15: this stage starts one receive stream\"))?;",
-   "new": "        let rx_stream = rx_streams.into_iter().next().ok_or_else(|| rejected(\"UR-15: this stage starts one receive stream\"))?;",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_15_a_second_stream_is_refused_rather_than_half_started"
   },
   {
    "id": "P281",
@@ -6794,8 +6784,8 @@
    "id": "P303",
    "name": "stream 0 holds every channel of the layout, not its set (UR-12, RM-29)",
    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "            let channels = self.mode.stream_channels(&config, dir, 0);",
-   "new": "            let channels = Channels::first(self.mode.channel_count(dir) as u32);",
+   "old": "                let channels = self.mode.stream_channels(&config, dir, k);",
+   "new": "                let channels = Channels::first(self.mode.channel_count(dir) as u32);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_12_a_layout_s_stream_zero_declares_its_clock_and_opens_its_channels"
@@ -6804,8 +6794,8 @@
    "id": "P304",
    "name": "the layout's clock is declared on the direction's node, not the stream's (UR-12, RM-29)",
    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "            let node = self.mode.stream_node(&self.instance.id, dir, 0);",
-   "new": "            let node = self.instance.id.child(dir.name()).expect(\"a valid stream id\");",
+   "old": "                    let node = self.mode.stream_node(&self.instance.id, dir, k);",
+   "new": "                    let node = self.instance.id.child(dir.name()).expect(\"a valid stream id\");",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_12_a_layout_s_stream_zero_declares_its_clock_and_opens_its_channels"
@@ -6814,8 +6804,8 @@
    "id": "P305",
    "name": "a layout's stream rate is read from the current key, which the description lacks (UR-12)",
    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "            let rate = self.mode.stream_rate(&config, dir, 0);",
-   "new": "            let rate = Core::settings(&config, dir).rate.unwrap_or(0.0);",
+   "old": "                    let rate = self.mode.stream_rate(&config, dir, k);",
+   "new": "                    let rate = Core::settings(&config, dir).rate.unwrap_or(0.0);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_12_a_layout_s_stream_zero_declares_its_clock_and_opens_its_channels"
@@ -6824,8 +6814,8 @@
    "id": "P306",
    "name": "every channel is configured with channel 0's settings (UR-12, UR-30)",
    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "                    let mut settings = self.mode.settings(&config, dir, chan as usize);",
-   "new": "                    let mut settings = self.mode.settings(&config, dir, 0);",
+   "old": "                            let mut settings = self.mode.settings(&config, dir, k, chan as usize);",
+   "new": "                            let mut settings = self.mode.settings(&config, dir, k, 0);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_12_a_layout_s_stream_zero_applies_each_channel_s_own_settings"
@@ -6839,26 +6829,6 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_12_a_layout_s_stream_zero_declares_its_clock_and_opens_its_channels"
-  },
-  {
-   "id": "P308",
-   "name": "`prepare` admits a channel in a later stream (UR-12, D14)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "        if let Some((dir, number, stream)) = self.mode.channel_in_later_stream(&config) {",
-   "new": "        if let Some((dir, number, stream)) = self.mode.channel_in_later_stream(&config).filter(|_| false) {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "ur_12_a_layout_stream_above_zero_is_refused"
-  },
-  {
-   "id": "P309",
-   "name": "a runtime membership change may join a later stream (UR-25, D14)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "        if let Some((dir, number, stream)) = self.core.mode.channel_in_later_stream(&candidate) {",
-   "new": "        if let Some((dir, number, stream)) = self.core.mode.channel_in_later_stream(&candidate).filter(|_| false) {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "ur_25_a_membership_in_a_later_stream_is_refused_and_changes_nothing"
   },
   {
    "id": "P312",
@@ -6878,15 +6848,14 @@
    "new": "        let channels = target.map_or_else(|| Channels::first(0), |(dir, _)| self.core.mode.stream_channels(&candidate, dir, 0));",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "ur_25_a_layout_rate_change_of_a_channel_less_stream_only_takes_its_value",
-   "equivalent": "a rate key naming a later stream k has no line on the instance (lines are made for stream 0 only, in `Control::new`), so `book_cold` returns at `let Some(old) = old else`. The D14 refusal (`Mode::channel_in_later_stream`, which `book_cold` calls before `coerce`) keeps every later stream's channel set empty: no candidate that passes it holds a channel in a later stream, and `coerce` returns an in-range stream number unchanged, so `Mode::stream_channels(&candidate, dir, k)` is empty for k >= 1 and the mutant reads stream 0's set instead. A later-stream target arises only from a stream's own `sample_rate_hz` key, since D14 refuses a channel key that names a later stream first. The set reaches the `decimation` match (its `None if channels.is_empty()` arm) and `empty_layout`, which is used only after that return; the `(old, idle, planned)` read takes its `else` branch whatever the set. The `None` arm is unreachable with this change, since the rate is the one `coerce` applied: `coerce_numeric` (`crates/ezsdr-radio/src/device.rs`) snaps the value to the grid that `x3xx::rates` (`crates/ezsdr-radio/src/x3xx.rs`) builds, and `x3xx::decimation` accepts every grid value. 1b-4d gives later streams lines and re-checks this row"
+   "filter": "ur_25_a_rate_change_of_a_later_stream_cuts_that_stream_alone"
   },
   {
    "id": "P314",
    "name": "a segment's configuration carries channel 0's settings for every channel (UR-12, UR-25)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                let mut settings = self.settings_on(core, &updates, dir, segment.origin, chan as usize);",
-   "new": "                let mut settings = self.settings_on(core, &updates, dir, segment.origin, 0);",
+   "old": "                let mut settings = self.settings_on(core, &updates, dir, k, segment.origin, chan as usize);",
+   "new": "                let mut settings = self.settings_on(core, &updates, dir, k, segment.origin, 0);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_25_a_layout_rate_change_cuts_its_stream_and_configures_every_channel"
@@ -6965,8 +6934,8 @@
    "id": "P323",
    "name": "a burst on a channel-less transmit stream is booked on stream 0 (UR-21, D14)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                Addressed::Stream { direction: Direction::Tx, .. } => return reject(\"UR-21: no transmit channel is configured\"),",
-   "new": "                Addressed::Stream { direction: Direction::Tx, .. } => {}",
+   "old": "                Addressed::Stream { direction: Direction::Tx, k } => k,\n                _ => return reject(\"UR-21: the target is not this device's transmit stream\"),",
+   "new": "                Addressed::Stream { direction: Direction::Tx, k: _ } => 0,\n                _ => return reject(\"UR-21: the target is not this device's transmit stream\"),",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_26_d14_a_channel_less_stream_keeps_the_mock_s_treatment"
@@ -6976,7 +6945,7 @@
    "name": "a burst on a receive stream's node is taken as a transmit target (UR-21, D14)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
    "old": "                _ => return reject(\"UR-21: the target is not this device's transmit stream\"),",
-   "new": "                _ => {}",
+   "new": "                _ => 0,",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_26_d14_the_old_addresses_and_foreign_nodes_are_refused"
@@ -6985,18 +6954,18 @@
    "id": "P325",
    "name": "a stream node's Stop stops every stream (UR-26, D14)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                        (true, _) => (k == 0 && dir == Dir::Rx, k == 0 && dir == Dir::Tx),",
-   "new": "                        (true, _) => (true, true),",
+   "old": "                            (true, _) => ((dir == Dir::Rx).then_some(k).into_iter().collect(), (dir == Dir::Tx).then_some(k).into_iter().collect()),",
+   "new": "                            (true, _) => ((0..self.core.mode.stream_count(Dir::Rx)).collect(), (0..self.core.mode.stream_count(Dir::Tx)).collect()),",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "ur_26_d14_a_layout_instance_names_its_streams"
+   "filter": "ur_26_a_stop_of_a_later_stream_stops_that_stream_alone"
   },
   {
    "id": "P326",
    "name": "a device Stop stops one direction only (UR-26, D14)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                    Addressed::Instance => (true, true),",
-   "new": "                    Addressed::Instance => (true, false),",
+   "old": "                    Addressed::Instance => ((0..self.core.mode.stream_count(Dir::Rx)).collect(), (0..self.core.mode.stream_count(Dir::Tx)).collect()),",
+   "new": "                    Addressed::Instance => ((0..self.core.mode.stream_count(Dir::Rx)).collect(), Vec::new()),",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_26_a_device_stop_stops_every_layout_stream"
@@ -7095,11 +7064,11 @@
    "id": "P336",
    "name": "the layout's receive port is not `rx0` (UR-12, RM-29)",
    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "Endpoint::StreamOut(link) if attached.component == f.id && attached.port.as_str() == self.mode.rx_port(0) =>",
-   "new": "Endpoint::StreamOut(link) if attached.component == f.id && attached.port.as_str() == \"rx\" =>",
+   "old": "                    let Some(k) = (0..rx_count).find(|k| self.mode.rx_port(*k) == port) else {",
+   "new": "                    let Some(k) = (0..rx_count).find(|_| port == \"rx0\").map(|_| 0) else {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "ur_12_a_layout_s_stream_zero_declares_its_clock_and_opens_its_channels"
+   "filter": "ur_12_a_layout_declares_and_starts_every_stream"
   },
   {
    "id": "P337",
@@ -7155,8 +7124,8 @@
    "id": "P342",
    "name": "the layout's overflow handle resolves for the old receive node (UR-20)",
    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-   "old": "        let rx_id = mode.stream_node(&id, Dir::Rx, 0);",
-   "new": "        let rx_id = id.child(\"rx\").expect(\"a valid stream id\");",
+   "old": "            let node = mode.stream_node(&id, Dir::Rx, k);",
+   "new": "            let node = id.child(\"rx\").expect(\"a valid stream id\");",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_19_a_layout_receive_report_names_its_stream"
@@ -7910,5 +7879,445 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_29_a_loss_after_a_release_s_command_stops_the_one_behind_it"
+ },
+ {
+  "id": "P436",
+  "name": "`prepare` declares no later stream (UR-12, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "            for k in 0..self.mode.stream_count(dir) {",
+  "new": "            for k in 0..1usize.min(self.mode.stream_count(dir)) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_12_a_layout_declares_and_starts_every_stream"
+ },
+ {
+  "id": "P437",
+  "name": "a later stream's clock names stream 0's node (UR-12, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "                    let node = self.mode.stream_node(&self.instance.id, dir, k);",
+  "new": "                    let node = self.mode.stream_node(&self.instance.id, dir, 0);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_12_a_layout_declares_and_starts_every_stream"
+ },
+ {
+  "id": "P438",
+  "name": "every receive link lands on stream 0 (UR-12, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "                    links[k].push(link.clone());",
+  "new": "                    links[0].push(link.clone());",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_12_a_layout_declares_and_starts_every_stream"
+ },
+ {
+  "id": "P439",
+  "name": "`arm` opens only stream 0's receive streamer (UR-13, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "        for stream in &mut prepared.rx {",
+  "new": "        for stream in prepared.rx.iter_mut().take(1) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_12_a_layout_declares_and_starts_every_stream"
+ },
+ {
+  "id": "P440",
+  "name": "`start` issues stream 0's timed start alone (UR-15, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "            if rx_first[stream.k].is_some() {",
+  "new": "            if rx_first[stream.k].is_some() && stream.k == 0 {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_12_a_layout_declares_and_starts_every_stream"
+ },
+ {
+  "id": "P441",
+  "name": "a receive owner's thread lacks its stream's name (UR-15, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "    format!(\"uhd-rx-s{k}\")",
+  "new": "    \"uhd-rx\".to_owned()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_15_every_declared_stream_starts_its_own_thread"
+ },
+ {
+  "id": "P442",
+  "name": "`Provider::stop` joins the receive streams before the transmit ones (UR-16, UR-26)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "        for k in 0..to_tx.len() {\n            self.join(&core, &tx_name(k));\n        }\n        for to_rx in &to_rx {\n            let _ = to_rx.send(RxCmd::Shutdown(mode));\n        }\n        for k in 0..to_rx.len() {\n            self.join(&core, &rx_name(k));\n        }",
+  "new": "        for to_rx in &to_rx {\n            let _ = to_rx.send(RxCmd::Shutdown(mode));\n        }\n        for k in 0..to_rx.len() {\n            self.join(&core, &rx_name(k));\n        }\n        for k in 0..to_tx.len() {\n            self.join(&core, &tx_name(k));\n        }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_every_stream_s_threads_are_joined_in_order"
+ },
+ {
+  "id": "P443",
+  "name": "every receive overflow is stream 0's (UR-20, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "            let node = mode.stream_node(&id, Dir::Rx, k);",
+  "new": "            let node = mode.stream_node(&id, Dir::Rx, 0);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_19_a_later_receive_stream_s_overflow_names_its_node"
+ },
+ {
+  "id": "P444",
+  "name": "a later transmit stream's clock is registered on stream 0's node (UR-12, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "                let clock = core.register_in(dir_of(stream), stream.1 as usize, segment.config.ratio.num() as i64, segment.origin)?;",
+  "new": "                let clock = core.register_in(dir_of(stream), 0, segment.config.ratio.num() as i64, segment.origin)?;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_transmit_rate_change_of_a_later_stream_cuts_that_stream_alone"
+ },
+ {
+  "id": "P445",
+  "name": "an end reads stream 0's delivered for every stream (UR-26, RM-16)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "        let delivered = self.stream(stream).delivered;",
+  "new": "        let delivered = self.stream(booked_stream(dir_of(stream))).delivered;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_an_end_takes_delivered_from_each_segment_s_own_stream"
+ },
+ {
+  "id": "P446",
+  "name": "`start_rx` books stream 0 whatever stream it names (UR-26, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                let mut streams = lock(&self.core.streams);\n                let stream = stream_key(Dir::Rx, k);\n                let (seq, now) = (streams.next_seq(), self.core.now());",
+  "new": "                let mut streams = lock(&self.core.streams);\n                let stream = booked_stream(Dir::Rx);\n                let (seq, now) = (streams.next_seq(), self.core.now());",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_a_stop_of_a_later_stream_stops_that_stream_alone"
+ },
+ {
+  "id": "P447",
+  "name": "the timed update's live check reads stream 0's line (UR-24, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "        let key = stream_key(dir, stream as usize);",
+  "new": "        let key = stream_key(dir, 0);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_24_a_timed_update_acts_on_the_stream_that_holds_its_channel"
+ },
+ {
+  "id": "P448",
+  "name": "the later segments of a direction are only stream 0's (UR-24, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "            (0..streams.count(dir)).flat_map(|k| streams.planned(stream_key(dir, k))).collect()",
+  "new": "            streams.planned(booked_stream(dir))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_a_timed_update_reaches_a_later_stream_s_pending_segment"
+ },
+ {
+  "id": "P449",
+  "name": "a move between streams is not refused (UR-25, RM-34)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                if was >= 0 && is >= 0 && was != is {",
+  "new": "                if was >= 0 && is >= 0 && was == is {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_move_between_streams_is_refused_and_changes_nothing"
+ },
+ {
+  "id": "P450",
+  "name": "a burst reads stream 0's clock and plan whatever stream it names (UR-21, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "            let stream = stream_key(Dir::Tx, k);",
+  "new": "            let stream = booked_stream(Dir::Tx);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_21_a_burst_targets_its_own_transmit_stream"
+ },
+ {
+  "id": "P451",
+  "name": "a burst's TIME_ERROR names stream 0 (UR-21, UR-28)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "            self.core.emit(&self.core.stream_node(Dir::Tx, k), kinds::TIME_ERROR, Severity::Error, payload);",
+  "new": "            self.core.emit(&self.core.stream_node(Dir::Tx, 0), kinds::TIME_ERROR, Severity::Error, payload);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_21_a_burst_targets_its_own_transmit_stream"
+ },
+ {
+  "id": "P452",
+  "name": "a receive cut counts stream 0's packet size (UR-25, S18)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "            let call = core.block_len.max(core.device.rx_packet_samples(k)) as i64;",
+  "new": "            let call = core.block_len.max(core.device.rx_packet_samples(0)) as i64;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_receive_cut_counts_its_own_stream_s_packet_size"
+ },
+ {
+  "id": "P453",
+  "name": "a transmit `Stop` goes to stream 0 (UR-26, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                    if let Some(to_tx) = self.to_tx.get(k) {\n                        let _ = to_tx.send(TxCmd::Stop);\n                    }",
+  "new": "                    if let Some(to_tx) = self.to_tx.first() {\n                        let _ = to_tx.send(TxCmd::Stop);\n                    }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_a_stop_of_a_later_transmit_stream_ends_only_its_burst"
+ },
+ {
+  "id": "P454",
+  "name": "the report read syncs stream 0's generation for every stream (UR-28, UR-36)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        let streamer = lock(&self.core.streams).stream(stream_key(Dir::Tx, self.k)).generation;",
+  "new": "        let streamer = lock(&self.core.streams).stream(stream_key(Dir::Tx, 0)).generation;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_28_a_later_stream_s_reopen_discards_only_its_correlations"
+ },
+ {
+  "id": "P455",
+  "name": "an enable from no stream waits on stream 0's report read for every stream (UR-25, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                (streams.stream(stream).reading, streams.stop.is_some())",
+  "new": "                (streams.stream(booked_stream(Dir::Tx)).reading, streams.stop.is_some())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_25_a_transmit_report_read_of_a_later_stream_does_not_hold_the_earlier_owner"
+ },
+ {
+  "id": "P456",
+  "name": "a receive owner starts after a configure that found the device lost (UR-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "        if self.core.is_lost() {\n            return true;\n        }",
+  "new": "        if false {\n            return true;\n        }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_after_a_configure_starts_no_receive_segment"
+ },
+ {
+  "id": "P457",
+  "name": "a transmit owner adopts its clock after a configure that found the device lost (UR-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "                Ok(()) if self.core.is_lost() => self.at += 1,",
+  "new": "                Ok(()) if false => self.at += 1,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_after_a_configure_adopts_no_transmit_clock"
+ },
+ {
+  "id": "P458",
+  "name": "cleanup closes the device's streams without stopping the owners it began (UR-15, UR-16)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "            let _ = self.stop(StopMode::Abort);\n            return Err(rejected(message));",
+  "new": "            let _ = ();\n            return Err(rejected(message));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_15_a_failed_later_start_closes_after_the_owners_joined"
+ },
+ {
+  "id": "P459",
+  "name": "a cold change starts a stopped stream (UR-26, D3)",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                    if self.on && !next.channels.is_empty() {",
+  "new": "                    if !next.channels.is_empty() {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_a_stopped_later_stream_waits_for_start_rx"
+ },
+ {
+  "id": "P460",
+  "name": "a successful cold change leaves the stream halted (UR-25, D3)",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "                Kind::Cold(next) => {\n                    self.cut(stream, item, false)?;\n                    self.refusal = None;\n                    self.config = next;\n                    self.halted = item.refused;",
+  "new": "                Kind::Cold(next) => {\n                    self.cut(stream, item, false)?;\n                    self.refusal = None;\n                    self.config = next;\n                    self.halted = true;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_successful_change_clears_a_later_stream_s_halt"
+ },
+ {
+  "id": "P461",
+  "name": "`arm` opens a receive stream whose port has no link (UR-13, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "            if stream.channels.is_empty() || core.links(stream.k).is_empty() {",
+  "new": "            if stream.channels.is_empty() {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_13_a_linkless_receive_stream_has_no_streamer"
+ },
+ {
+  "id": "P462",
+  "name": "a channel joining from no stream lands on stream 0 (UR-25, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                    } else if was < 0 {\n                        Some((dir, is.max(0) as usize))",
+  "new": "                    } else if was < 0 {\n                        Some((dir, 0))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_channel_enabled_from_no_stream_in_a_later_stream_opens_and_starts_it"
+ },
+ {
+  "id": "P463",
+  "name": "a channel leaving a later stream cuts stream 0 (UR-25, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                    } else {\n                        Some((dir, was as usize))\n                    }",
+  "new": "                    } else {\n                        Some((dir, 0))\n                    }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_channel_leaving_a_later_stream_cuts_its_stream_alone"
+ },
+ {
+  "id": "P464",
+  "name": "a refusal halts stream 0 whatever stream booked it (UR-25, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "        match self.lines.refuse(stream, seq) {",
+  "new": "        match self.lines.refuse(booked_stream(dir_of(stream)), seq) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_refused_change_of_a_later_stream_halts_that_stream_alone"
+ },
+ {
+  "id": "P465",
+  "name": "a layout command takes no queue slot (UR-24, S10)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "        let cost = if self.core.mode.is_layout() { 1 } else { self.targets(dir, chan, e).0.len() };",
+  "new": "        let cost = if self.core.mode.is_layout() { 0 } else { self.targets(dir, chan, e).0.len() };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_the_command_queue_is_counted_per_instance_across_streams"
+ },
+ {
+  "id": "P466",
+  "name": "`Provider::stop` does not join uhd-control (UR-16, UR-26)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "        self.join(&core, \"uhd-control\");",
+  "new": "        let _ = &core;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_the_control_thread_is_joined_before_every_stream"
+ },
+ {
+  "id": "P467",
+  "name": "a detached thread does not keep the device's streams open (UR-16)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "        if !self.detached.is_empty() {",
+  "new": "        if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_16_a_wedged_later_stream_leaves_the_others_joined"
+ },
+ {
+  "id": "P468",
+  "name": "a panicking stream is not a lost device (UR-16, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "                        core_.device_lost(\"a Provider thread panicked\");",
+  "new": "                        let _ = &core_;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_16_a_panicking_later_stream_ends_the_run"
+ },
+ {
+  "id": "P469",
+  "name": "`start_rx` of a channel-less stream is refused (UR-26, R21)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                let Addressed::Stream { direction: Direction::Rx, k } = addressed else {\n                    return self.core.command_rejected(Some(id), \"command\", \"UR-26: not supported by this Provider\");\n                };\n                let requested = match self.ceil_root(at) {",
+  "new": "                let Addressed::Stream { direction: Direction::Rx, k } = addressed else {\n                    return self.core.command_rejected(Some(id), \"command\", \"UR-26: not supported by this Provider\");\n                };\n                if self.core.mode.stream_channels(&self.config_at(self.core.now()), Dir::Rx, k).is_empty() {\n                    return self.core.command_rejected(Some(id), \"command\", \"UR-26: no receive channel is configured\");\n                }\n                let requested = match self.ceil_root(at) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_a_start_rx_of_a_channel_less_linked_stream_starts_nothing"
+ },
+ {
+  "id": "P470",
+  "name": "a stream's finish clears every receive stream's delivered (UR-26, RM-16)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "        streams.stream_mut(key).delivered = None;",
+  "new": "        for k in 0..streams.count(Dir::Rx) {\n            streams.stream_mut(stream_key(Dir::Rx, k)).delivered = None;\n        }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stream_s_delivered_is_cleared_alone"
+ },
+ {
+  "id": "P471",
+  "name": "a transmit owner's thread lacks its stream's name (UR-15, UR-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "    format!(\"uhd-tx-s{k}\")",
+  "new": "    \"uhd-tx\".to_owned()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_15_the_current_keys_name_their_one_stream_s_threads"
+ },
+ {
+  "id": "P472",
+  "name": "a finished stream clears every receive stream's delivered, seen on the abort cut (UR-26, RM-16)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "        streams.stream_mut(key).delivered = None;",
+  "new": "        for k in 0..streams.count(Dir::Rx) {\n            streams.stream_mut(stream_key(Dir::Rx, k)).delivered = None;\n        }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_two_receive_streams_end_at_their_own_stops"
+ },
+ {
+  "id": "P473",
+  "name": "a receive owner re-reads Provider::stop after its configuration (UR-26, S16a)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "        let channels = next.set();",
+  "new": "        if lock(&self.core.streams).stop.is_some() {\n            return true;\n        }\n        let channels = next.set();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_a_receive_start_queued_by_the_stop_is_issued_and_ends_at_its_origin"
+ },
+ {
+  "id": "P474",
+  "name": "a transmit owner re-reads Provider::stop after its configuration (UR-26, S16b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "                Ok(()) if self.core.is_lost() => self.at += 1,",
+  "new": "                Ok(()) if self.core.is_lost() || lock(&self.core.streams).stop.is_some() => self.at += 1,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_transmit_switch_at_a_stop_keeps_its_clock_and_sends_nothing"
+ },
+ {
+  "id": "P475",
+  "name": "every receive stream publishes to stream 0's links (UR-17, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                    for link in self.core.links(self.k) {",
+  "new": "                    for link in self.core.links(0) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_12_a_layout_declares_and_starts_every_stream"
+ },
+ {
+  "id": "P476",
+  "name": "`start` swallows a lost `rx_start` without publishing it (UR-29, UR-15)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "                    if error.lost {\n                        core.device_lost(&error.message);\n                    }",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_29_a_lost_later_start_is_published_before_the_owners_are_stopped"
+ },
+ {
+  "id": "P477",
+  "name": "`start` begins the next stream after an owner published a loss (UR-29, UR-15)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "            if core.is_lost() {\n                failed = Some(format!(\"UR-15: the device was lost before stream {} was started\", stream.k));\n                break;\n            }",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_15_a_loss_published_by_an_owner_stops_the_next_stream_s_start"
+ },
+ {
+  "id": "P478",
+  "name": "uhd-tx sends a burst on a clock whose segment ended (UR-26, S16b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        let cut_k = self.switch.as_ref().map(|s| clock.at_or_after(s.cut));",
+  "new": "        let cut_k = self.switch.as_ref().map(|_| i64::MAX);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_transmit_switch_at_a_stop_keeps_its_clock_and_sends_nothing"
+ },
+ {
+  "id": "P479",
+  "name": "a receive segment queued by the stop is not cut at its origin (UR-26, S16a)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                self.last_samples = self.host.now();\n                self.follow();",
+  "new": "                self.last_samples = self.host.now();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_receive_start_queued_by_the_stop_ends_its_owner_without_detaching"
  }
 ]

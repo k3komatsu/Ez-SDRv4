@@ -59,6 +59,12 @@ pub(super) fn rig_on_inputs(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_ke
 /// the layout builder's, whose stream nodes are `<id>/rx/s<k>` and `<id>/tx/s<k>`.
 pub(super) fn rig_on_mode(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, mode: super::mode::Mode)
     -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+    rig_on_mode_links(device, vec![links], inputs, mode)
+}
+
+/// `rig_on_mode` with each receive stream's links (RM-29): index `k` is stream `k`'s.
+pub(super) fn rig_on_mode_links(device: Arc<dyn Device>, links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, mode: super::mode::Mode)
+    -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let clocks = Arc::new(ClockRegistry::new());
     let root = clocks.allocate_id().unwrap();
     clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(),
@@ -69,11 +75,22 @@ pub(super) fn rig_on_mode(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kern
         &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
     // The instance's own nodes, under either key set (RM-29): a layout's events come from
     // its stream nodes.
-    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1"].iter().flat_map(|s|
+    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1", "usrp/rx/s2", "usrp/tx/s2", "usrp/rx/s3", "usrp/tx/s3"].iter().flat_map(|s|
         kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
     let core = core_on(device, clocks, time.clone(), events.clone(), inputs, links, mode);
     (core, time, events)
+}
+
+/// A layout rig with `links` on receive stream `k` alone.
+pub(super) fn rig_with_links_on(k: usize, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, mode: super::mode::Mode)
+    -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+    let device = Arc::new(FakeDevice::new(FakeConfig::default()));
+    let mut per_stream: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>> = Vec::new();
+    per_stream.resize_with(k + 1, Vec::new);
+    per_stream[k] = links;
+    let (core, time, events) = rig_on_mode_links(device.clone(), per_stream, BTreeMap::new(), mode);
+    (core, device, time, events)
 }
 
 /// `rig_on_mode` through a sink that witnesses which events are emitted while the line lock
@@ -88,16 +105,16 @@ pub(super) fn rig_on_mode_witness(device: Arc<dyn Device>, links: Vec<Arc<dyn ez
     let mut kinds = EventKindRegistry::with_kernel_kinds();
     ezsdr_radio::register(&mut ModuleRegistry::new(),
         &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
-    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1"].iter().flat_map(|s|
+    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1", "usrp/rx/s2", "usrp/tx/s2", "usrp/rx/s3", "usrp/tx/s3"].iter().flat_map(|s|
         kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
     let witness = Arc::new(SectionWitness::new(Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()))));
-    let core = core_on(device, clocks, time.clone(), witness.clone(), inputs, links, mode);
+    let core = core_on(device, clocks, time.clone(), witness.clone(), inputs, vec![links], mode);
     witness.watch(&core);
     (core, time, witness)
 }
 
 /// The rig's `Core` on `sink`.
-fn core_on(device: Arc<dyn Device>, clocks: Arc<ClockRegistry>, time: Arc<ManualTimeAuthority>, events: Arc<dyn EventSink>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, mode: super::mode::Mode) -> Arc<Core> {
+fn core_on(device: Arc<dyn Device>, clocks: Arc<ClockRegistry>, time: Arc<ManualTimeAuthority>, events: Arc<dyn EventSink>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>, mode: super::mode::Mode) -> Arc<Core> {
     let root = time.primary_root();
     Arc::new(Core::new(device, ResourceId::parse("usrp").unwrap(),
         root, time, clocks, events, Arc::new(inputs), links, mode)
@@ -454,22 +471,97 @@ impl Device for ApplyFails {
     fn host(&self) -> HostClock { self.inner.host() }
 }
 
+/// A `FakeDevice` whose untimed `apply` of one direction and channel is held after the
+/// device returned (L1, L2, S16a in the unit rigs): the test publishes a loss while the
+/// owner is between its configuration and its start.
+pub(super) struct HoldApply {
+    inner: Arc<FakeDevice>,
+    dir: Dir,
+    chan: Option<usize>,
+    reached: Mutex<Option<Sender<()>>>,
+    release: Mutex<Option<Receiver<()>>>,
+    pending: Mutex<bool>,
+}
+
+impl HoldApply {
+    pub fn new(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>) -> HoldApply {
+        HoldApply { inner, dir, chan, reached: Mutex::new(None), release: Mutex::new(None), pending: Mutex::new(false) }
+    }
+
+    /// Arms the gate for the next untimed apply of its direction and channel.
+    pub fn arm(&self) -> (Receiver<()>, Sender<()>) {
+        let (reached, reached_rx) = channel();
+        let (release, release_rx) = channel();
+        *self.reached.lock().unwrap() = Some(reached);
+        *self.release.lock().unwrap() = Some(release_rx);
+        *self.pending.lock().unwrap() = true;
+        (reached_rx, release)
+    }
+}
+
+impl Device for HoldApply {
+    fn describe(&self) -> serde_json::Value { self.inner.describe() }
+    fn fidelity(&self) -> Fidelity { self.inner.fidelity() }
+    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+    fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { self.inner.front_end(dir, chan) }
+    fn serial(&self) -> Result<String, DeviceError> { self.inner.serial() }
+    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> { self.inner.set_subdev_spec(dir, markup) }
+    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> { self.inner.rates(dir, chan) }
+    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> { self.inner.set_sources(clock, time) }
+    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
+    fn time_now(&self) -> Result<i64, DeviceError> { self.inner.time_now() }
+    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
+        let applied = self.inner.apply(dir, chan, s, at)?;
+        let held = at.is_none() && dir == self.dir && self.chan.is_none_or(|want| want == chan) && std::mem::replace(&mut *self.pending.lock().unwrap(), false);
+        if held {
+            if let Some(reached) = self.reached.lock().unwrap().take() {
+                let _ = reached.send(());
+            }
+            if let Some(release) = self.release.lock().unwrap().take() {
+                let _ = release.recv_timeout(Wall::from_secs(10));
+            }
+        }
+        Ok(applied)
+    }
+    fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.rx_open(stream, channels) }
+    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.inner.rx_start(stream, at) }
+    fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
+    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.inner.rx_stop(stream, at) }
+    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration) -> RxRecv { self.inner.rx_recv(stream, n, timeout) }
+    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.tx_open(stream, channels) }
+    fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: std::time::Duration) -> Result<usize, DeviceError> {
+        self.inner.tx_send(stream, samples, at, sob, eob, timeout)
+    }
+    fn tx_async(&self, stream: usize, timeout: std::time::Duration) -> Result<Option<TxReport>, DeviceError> { self.inner.tx_async(stream, timeout) }
+    fn close_streams(&self) { self.inner.close_streams() }
+    fn mark_lost(&self) { self.inner.mark_lost() }
+    fn host(&self) -> HostClock { self.inner.host() }
+}
+
 /// A `FakeDevice` whose asynchronous reports the test writes: `tx_async` returns the reports
 /// given to it before any the fake holds, so a test puts a report on a streamer's queue at the
 /// point its owner reads it (UR-28). Everything else is the fake's.
 pub(super) struct ReportFeed {
     inner: Arc<FakeDevice>,
     given: Mutex<VecDeque<TxReport>>,
+    reads: Mutex<[usize; 2]>,
 }
 
 impl ReportFeed {
     pub fn new(inner: Arc<FakeDevice>) -> ReportFeed {
-        ReportFeed { inner, given: Mutex::new(VecDeque::new()) }
+        ReportFeed { inner, given: Mutex::new(VecDeque::new()), reads: Mutex::new([0, 0]) }
     }
 
     /// Queues `report` for the next `tx_async`.
     pub fn give(&self, report: TxReport) {
         self.given.lock().unwrap().push_back(report);
+    }
+
+    /// How many `tx_async` reads stream `k` was given (T3).
+    pub fn reads(&self, stream: usize) -> usize {
+        self.reads.lock().unwrap().get(stream).copied().unwrap_or(0)
     }
 }
 
@@ -497,6 +589,7 @@ impl Device for ReportFeed {
         self.inner.tx_send(stream, samples, at, sob, eob, timeout)
     }
     fn tx_async(&self, stream: usize, timeout: std::time::Duration) -> Result<Option<TxReport>, DeviceError> {
+        *self.reads.lock().unwrap().get_mut(stream).unwrap_or(&mut 0) += 1;
         let given = self.given.lock().unwrap().pop_front();
         match given {
             Some(report) => Ok(Some(report)),
