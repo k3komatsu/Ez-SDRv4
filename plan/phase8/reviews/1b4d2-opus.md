@@ -26,7 +26,7 @@ layout の stream 1 以上を stream 0 と同じに動かした（plan 33 の「
 
 取り下げた理由：残る状態（cut された segment に timed start が queue されている）は，**owner が origin より前に begin した segment に `Provider::stop` が来れば，窓がなくても起きる**．この状態の扱いは spec 22 VH-6（#56）が決めている（uhd-rx は origin の後で untimed に止め，届いたものを捨てる）．見直しは保証を変えずに仕組みを 1 つ足すだけになる．S16 は今の挙動を固定した（RX は unit で，owner が detach されずに終わること；TX は終わった clock の burst が送られないこと）．
 
-**未修正の穴（issue にする）**：origin が遠い（join の 1 s より先）segment の timed start が queue されたまま `Provider::stop` が来ると，uhd-rx は origin まで待つので join の 1 s を越えて detach され，cleanup は `close_streams` を呼ばない（streamer が漏れる）．HEAD からある挙動で，この段階の窓に限らない．直し方は #56 の bench（queue された timed start を持つ streamer を閉じたとき X310 が何をするか）を待つ．この PC の `gh` は未ログインなので，起票は owner の `gh auth login` の後．
+**未修正の穴（[#67](https://github.com/k3komatsu/Ez-SDRv4/issues/67)）**：origin が遠い（join の 1 s より先）segment の timed start が queue されたまま `Provider::stop` が来ると，uhd-rx は origin まで待つので join の 1 s を越えて detach され，cleanup は `close_streams` を呼ばない（streamer が漏れる）．HEAD からある挙動で，この段階の窓に限らない．直し方は #56 の bench（queue された timed start を持つ streamer を閉じたとき X310 が何をするか）を待つ．
 
 ## 4. 数（AGENTS.md §9 の 8）
 
@@ -43,7 +43,7 @@ layout の stream 1 以上を stream 0 と同じに動かした（plan 33 の「
 
 ## 5. 持ち越し
 
-- **遠い origin の detach**（§3）：issue にする．#56 の bench の系列に足す．
+- **遠い origin の detach**（§3）：#67．#56 の bench の系列に足す．
 - spawn 自体の失敗（thread を作れない）は決定的に作れず，テストが無い．
 - `with_rx_stall` は stream 0 だけ（B5 用，design に明記）．
 - `S16a` の e2e は detach を許す形のまま残した（統合の経路を見るテスト）．joined の経路は unit が固定する．

@@ -12,13 +12,13 @@
 - **Phase 8（Mock ↔ X310 parity）は Gate P 受理**（owner 2026-10-17）：計画 [plan/phase8/00-overview.md](plan/phase8/00-overview.md)（判断 P1〜P6，段階，bench BP0〜BP5，出口条件），設計 [33-channels-and-streams.md](plan/phase8/33-channels-and-streams.md)（channel と stream，混在 board，`x3xx`，Kernel の変更は `KeyDecl` の番号付き segment だけ）．レビューと調査は `plan/phase8/reviews/`・`research/`．
 - **Phase 8 段階1a，1b-1，1b-2a，1b-2b，1b-3a，1b-3b，1b-3c，1b-4a，1b-4b，1b-4c，1b-4d-1a，1b-4d-1b，1b-4d-1c は完了**（2026-10-17〜20）：1a は X3xx の description を `ezsdr_radio::x3xx` に1か所（profile `x3xx` 0.1.0，rate の格子，CBX の `random`，方向別の start lead），1b-1 は `KeyDecl` の番号の付く segment（SB-2a），1b-2a は `radio` 語彙の channel・stream の key と layout の builder（`ezsdr_radio::channels`，spec 07 RM-27〜RM-33），1b-2b は timeline の channel の集合と D3 の移動（`timeline::Lines`，RM-34）と D14，1b-3a は MockRadio の内部を stream ごとの状態と `Lines` に組み直し（挙動は不変），1b-3b は MockRadio が selector の `keys: "channel"` で新しい key を使う，1b-3c はその instance に channel の移動（RM-34）と SimulationChannel の論理 channel 番号・channel ごとの gain/frequency/phase を足した（始まった segment は全 channel の untimed tune，MR-34），1b-4a は UHD Module の device 境界を stream の番号・subdev spec・rate の集合・serial・antenna の read-back に広げた（`UhdRadio` の挙動は不変），1b-4b は `UhdRadio` の内部を stream ごとの状態・`timeline::Lines`・stream の列に組み直した（挙動は不変），1b-4c は UHD Module の `keys: "channel"` のモード（方向ごとに stream 0）と open のときの検査（subdev spec，front end，serial，rate の集合）を入れた，1b-4d-1a は stream ごとに device が実際に持つもの（集合，configure の `(seq, 版)`，streamer の世代）を 1 つの記録にし，owner の写しを消した，1b-4d-1b は stream の device を呼ぶ担当（from-none の間は uhd-control の `busy`，uhd-tx の report の読みの `reading` を from-none が待つ）と loss・stop の出口を入れた，1b-4d-1c は timed command の効く時刻を booking で確定して `e` の順に device へ出し，channel の無い間の更新も pending の segment に届けて，configuration の版を消した．記録は [計画](plan/phase8/00-overview.md) §8．
 - 実装：13 crate（`crates/`），schema（`schemas/`），Python package（`python/ezsdr`）．確認の手順は §5．
-- open issue は4件：#51，#56，#59，#62（§3）．
+- open issue は5件：#51，#56，#59，#62，#67（§3）．
 
 ## 2. 次にすること
 
 1. **開発 PC の移行の残り**（§6.1）：X300 の接続確認と，ホストの NIC・sysctl 設定（owner が sudo で）．
 2. **Phase 8 の段階 1b-4d-3 → 1b-4e**（[設計 33](plan/phase8/33-channels-and-streams.md) §5 の 1b-4 行「1b-4c で 1b-4d へ送るもの」と「分け方」）．1b-4d-2（stream ごとの thread・node）は 2026-10-20 に完了（[00-overview](plan/phase8/00-overview.md) §8，[reviews/1b4d2-opus.md](plan/phase8/reviews/1b4d2-opus.md)）．
-   - **起票待ち**（この PC の `gh` は未ログイン．owner の `gh auth login` の後）：遠い origin の timed start が queue されたまま `Provider::stop` が来ると，uhd-rx は origin まで待つので join の 1 s で detach され，cleanup は `close_streams` を呼ばない（[1b4d2-opus](plan/phase8/reviews/1b4d2-opus.md) §3．`area:uhd`，`mech:stream-lifecycle-scattered`，#56 の bench に足す）．
+   - **#67**：遠い origin の timed start が queue されたまま `Provider::stop` が来ると，uhd-rx は join の 1 s で detach され，cleanup は `close_streams` を呼ばない（1b-4d-2 の Sol の計画レビュー．#56 の bench を待つ）．
    - bench 行き：idle の DDC/DUC の timed frequency と fake の FIFO（1b-4d-1c），2 本の rx streamer と block ごとの queue（1b-4d-2）．今の key の queue の会計は 1b-5 で消える．
    - **次は 4d-3**：event と Manifest の plan の stream 番号（plan 33 の (4)，(8)，(9)）．**4e**：moves（RM-34）と複数 stream の VH-8 harness．
    - **大きさ**（owner 2026-10-19）：1 段階は本体とテストで約 1,500 行．指示書でテストの繰り返し（Manifest の section を引く式，拒否の理由，device の準備）を helper にさせ，テスト計画は順序ごとに assert を 1〜2 個に絞る．
@@ -44,6 +44,7 @@
 
 | 項目 | 中身 | いつ・どこで |
 |---|---|---|
+| #67 | 遠い origin の timed start が queue されたまま `Provider::stop` が来ると uhd-rx が join の 1 s を越えて detach され，streamer が漏れる（HEAD から） | #56 の bench の後 |
 | #62 | MockRadio が UHD の device queue の順番どおりの release を模擬しない（Mock が実機より緩い）．VH-8 harness は `timed` の25系列を除外中 | Phase 8 段階2（P4） |
 | #59 | MockRadio に「cold change の read-back 拒否」の fault がない | Phase 8 段階2（P4） |
 | #51 | 送信 Stop で held burst を捨てるとき UHD は `COMMAND_REJECTED` を出し MockRadio は黙る．先に「イベントの報告規則も1か所で実装するか」を決める（`mech:radio-rule-implemented-twice`） | Phase 8 段階2（P4．先に設計メモ） |
