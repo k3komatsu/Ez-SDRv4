@@ -8369,5 +8369,45 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_25_a_refusal_of_a_layout_stream_leaves_the_other_stream_alone"
+ },
+ {
+  "id": "P485",
+  "name": "the Mock declares stream 1's receive clock on stream 0's node (RM-29, VH-8)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            let node = self.rx[k].node.clone();",
+  "new": "            let node = self.rx[0].node.clone();",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "vh_8_two_streams_each_prepare_alike"
+ },
+ {
+  "id": "P486",
+  "name": "the Mock cuts stream 0 for a stream-1-only change (RM-25, MR-18, VH-8)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            Concrete::Stream { rx, number } => ColdChange::Streams(vec![(direction_of(rx), number as usize)]),",
+  "new": "            Concrete::Stream { rx, number } => ColdChange::Streams(vec![(direction_of(rx), number as usize), (direction_of(rx), 0)]),",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "vh_8_a_stream_one_rate_change_cuts_that_stream_alone"
+ },
+ {
+  "id": "P487",
+  "name": "the UHD's plan row names stream 0 whatever stream it records (UR-30, VH-8)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "                    \"stream\": k,",
+  "new": "                    \"stream\": 0,",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "vh_8_the_same_manifest_plan_rows"
+ },
+ {
+  "id": "P488",
+  "name": "the instance-wide floor ignores its earlier cold changes (RM-25, VH-8)",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "    let e = earlier.into_iter().fold(base, |e, floor| e.max(floor));",
+  "new": "    let e = base;",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "vh_8_the_instance_floor_crosses_streams"
  }
 ]

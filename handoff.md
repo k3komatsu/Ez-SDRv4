@@ -17,10 +17,10 @@
 ## 2. 次にすること
 
 1. **実機**：2026-10-20 に BP0 と BP5 を 2 台で済ませた（[bench-results.md](plan/phase8/bench-results.md)：Phase 7 の hardware テスト 29 本が #1＋OBX・#2＋UBX とも通り，悪くなった数値は無い）．今つながっているのは #1＋OBX．組み換えは owner に頼む（2026-10-20 夜は翌朝まで不可）．
-2. **Phase 8 の段階 1b-4e**（[設計 33](plan/phase8/33-channels-and-streams.md) §5 の 1b-4 行「1b-4c で 1b-4d へ送るもの」と「分け方」）．1b-4d-3（Manifest と event の stream 番号）は 2026-10-20 に完了（[00-overview](plan/phase8/00-overview.md) §8，[reviews/1b4d3-opus.md](plan/phase8/reviews/1b4d3-opus.md)）．
+2. **Phase 8 の段階 1b-4e-2**（UHD の moves，RM-34．[設計 33](plan/phase8/33-channels-and-streams.md) §5 の 1b-4 行「分け方」）．1b-4e-1（VH-8 の harness の stream 次元）は 2026-10-20 に完了（[00-overview](plan/phase8/00-overview.md) §8，[reviews/1b4e1-opus.md](plan/phase8/reviews/1b4e1-opus.md)．§7 が 1b-4e-2 へ送るもの）．
    - **#67**：遠い origin の timed start が queue されたまま `Provider::stop` が来ると，uhd-rx は join の 1 s で detach され，cleanup は `close_streams` を呼ばない（1b-4d-2 の Sol の計画レビュー．#56 の bench を待つ）．
    - bench 行き：idle の DDC/DUC の timed frequency と fake の FIFO（1b-4d-1c），2 本の rx streamer と block ごとの queue（1b-4d-2）．今の key の queue の会計は 1b-5 で消える．
-   - **次は 4e**：moves（RM-34，plan 33 の (6)）と複数 stream の VH-8 harness．4d-3 の持ち越し：`rx_segment` の timing 行の `channels` は数のまま，plan の e2e は Session の Manifest ファイルまで通さない．
+   - **次は 4e-2**：moves（RM-34，plan 33 の (6)）．risky なのでテスト計画から．4d-3 の持ち越し：`rx_segment` の timing 行の `channels` は数のまま，plan の e2e は Session の Manifest ファイルまで通さない．
    - **大きさ**（owner 2026-10-19）：1 段階は本体とテストで約 1,500 行．指示書でテストの繰り返し（Manifest の section を引く式，拒否の理由，device の準備）を helper にさせ，テスト計画は順序ごとに assert を 1〜2 個に絞る．
    - **手順**：AGENTS.md §9．計画を先に書く手順の評価は 4b・4c・4d-1c・4d-2 の記録（[1b4d2-opus](plan/phase8/reviews/1b4d2-opus.md) §4 など）．
    - **持ち越し**：

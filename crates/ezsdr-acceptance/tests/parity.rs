@@ -1,18 +1,20 @@
 //! VH-8 for the layout's keys (RM-27…RM-32, design 33 §6): the same selector and the same
 //! Spec through MockRadio and through `UhdRadio` on a `FakeDevice`, compared directly —
 //! `PrepareReport.effective`, the declared SampleClocks (node and ratio), the same refusals,
-//! and a short run's clock records. PO-8: only this crate may pair two Modules, so the two
-//! rigs are copies of `ezsdr-mock-radio`'s `mock_layout.rs` and `ezsdr-radio-uhd`'s
-//! `fake.rs` harnesses, not shared code.
+//! and a short run's clock records and Manifest plan rows, per stream (0 and 1). PO-8: only
+//! this crate may pair two Modules, so the two rigs are copies of `ezsdr-mock-radio`'s
+//! `mock_layout.rs` and `ezsdr-radio-uhd`'s `fake.rs` harnesses, not shared code.
 //!
 //! What is not compared, by design: the device calls and read-backs (MockRadio has no
 //! device), the UHD-only opening checks (the subdev spec, the serial, the rate set, the
 //! front ends — UR-5, items 2–5) and the UHD-only refusals (UR-12's read-back, UR-21's
-//! target kinds); block contents and physical instants beyond VH-8's own columns; and
-//! anything of the stream dimension beyond stream 0 (1b-4d's and 1b-4e's work). Both
-//! providers share `channels::Description`, so a shared mistake inside it is invisible
-//! here: this file is a net for divergences, and the specs' own tests are the ground
-//! truth.
+//! target kinds); block contents and physical instants beyond VH-8's own columns; and a
+//! channel moving from one stream to another (RM-34: the UHD Module refuses it until
+//! 1b-4e-2). The Manifest's `sequence` is compared as an order, not as numbers: each
+//! Provider counts its own arrivals from its own origin (MockRadio's faults first, uhd-control's
+//! loss as 0). Both providers share `channels::Description`, so a shared mistake inside it
+//! is invisible here: this file is a net for divergences, and the specs' own tests are the
+//! ground truth.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,7 +34,7 @@ use ezsdr_kernel::module_api::{
 };
 use ezsdr_kernel::plan::Fragment;
 use ezsdr_kernel::policy::{EventKindRegistry, Policy};
-use ezsdr_kernel::spec::{Constraint, Ident, Key, Scalar, Value};
+use ezsdr_kernel::spec::{Constraint, Ident, Key, Namespace, Scalar, Value};
 use ezsdr_kernel::stream::{BackPressure, BlockRef, DataLink, DropCarry, PublishOutcome};
 use ezsdr_kernel::time::{
     ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority, Rational, TimePoint,
@@ -136,6 +138,14 @@ impl ActionReceiver for Queue {
     }
 }
 
+impl Queue {
+    /// The Actions the Provider has not taken yet: an empty queue means the control thread
+    /// has taken the last one; its booking follows while the device clock stands still.
+    fn queued(&self) -> usize {
+        self.actions.lock().unwrap().len()
+    }
+}
+
 struct Accepting;
 impl ActionSubmitter for Accepting {
     fn submit(&self, _action: Action) -> Result<ActionId, Vec<Violation>> {
@@ -190,6 +200,12 @@ struct MockRig {
 
 impl MockRig {
     fn new(selector: BTreeMap<Ident, Value>, constraints: &[(&str, Constraint)]) -> MockRig {
+        MockRig::with_ports(selector, constraints, &["rx0"])
+    }
+
+    /// With one link on each named receive port (RM-29: `rx0`, `rx1`, …), so that every
+    /// stream a comparison runs has its own.
+    fn with_ports(selector: BTreeMap<Ident, Value>, constraints: &[(&str, Constraint)], ports: &[&str]) -> MockRig {
         let mut mock = MockRadio::from_binding(&mock_binding(selector)).unwrap();
         mock = mock.with_medium(ezsdr_sim::channel::Medium::new());
         let clocks = Arc::new(ClockRegistry::new());
@@ -205,7 +221,7 @@ impl MockRig {
         let event_kinds = kinds.kinds();
         let pairs: Vec<_> = sources.into_iter().flat_map(|source| event_kinds.iter().cloned().map(move |kind| (source.clone(), kind))).collect();
         let events = Arc::new(EventCollector::new(&pairs, &event_kinds, 4096, &Policy::default()));
-        let links = vec![AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse("rx0").unwrap(), Endpoint::StreamOut(Arc::new(MemLink::new())))];
+        let links = ports.iter().map(|port| AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse(port).unwrap(), Endpoint::StreamOut(Arc::new(MemLink::new())))).collect();
         let ctx = {
             let mut ctx = PrepareContext::testing(EventSource::Node { node: rid("radio") }, time.clone(), clocks.clone(), events.clone(), actions.clone(), Arc::new(Accepting));
             ctx.run = RunId::from_string("vh8-mock".to_owned());
@@ -275,6 +291,13 @@ impl MockRig {
     fn events(&self) -> Vec<ezsdr_kernel::event::Event> {
         self.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0))
     }
+
+    /// `stop` and `cleanup`, as the Manifest's sections are written (MR-27).
+    fn finish(mut self) -> ProviderInstance {
+        self.mock.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
+        self.mock.cleanup();
+        self.mock.instance().clone()
+    }
 }
 
 use ezsdr_kernel::time::RelativeBudget;
@@ -295,6 +318,11 @@ struct UhdRig {
 
 impl UhdRig {
     fn new(selector: BTreeMap<Ident, Value>, constraints: &[(&str, Constraint)], config: FakeConfig) -> Result<UhdRig, ezsdr_kernel::module_api::ModuleError> {
+        UhdRig::with_ports(selector, constraints, config, &["rx0"])
+    }
+
+    /// With one link on each named receive port, as `MockRig::with_ports` (RM-29).
+    fn with_ports(selector: BTreeMap<Ident, Value>, constraints: &[(&str, Constraint)], config: FakeConfig, ports: &[&str]) -> Result<UhdRig, ezsdr_kernel::module_api::ModuleError> {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..config }));
         let clocks = Arc::new(ClockRegistry::new());
         let authority = DeviceAuthority::new(device.clone(), clocks.clone(), "internal", "internal", "type=fake").unwrap();
@@ -311,7 +339,7 @@ impl UhdRig {
             ctx.class = ExecutionClass::HardwareInLoop;
             ctx.environment = Arc::new(BTreeMap::new());
             ctx.inputs = Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new());
-            ctx.links = vec![AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse("rx0").unwrap(), Endpoint::StreamOut(Arc::new(MemLink::new())))];
+            ctx.links = ports.iter().map(|port| AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse(port).unwrap(), Endpoint::StreamOut(Arc::new(MemLink::new())))).collect();
             ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
             ctx
         };
@@ -659,11 +687,8 @@ fn vh_8_a_channel_less_stream_is_the_same_on_both() {
     uhd.actions.actions.lock().unwrap().push_back(burst("tx/s1"));
     uhd.wait_until(uhd_t0 + ms(30));
     uhd.settle(Wall::from_millis(5));
-    let rejected = |events: &[ezsdr_kernel::event::Event]| -> Vec<String> {
-        events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).map(|event| event.payload["reason"].as_str().unwrap().to_owned()).collect()
-    };
-    let mock_rejected = rejected(&mock.events());
-    let uhd_rejected = rejected(&uhd.events());
+    let mock_rejected = rejected_reasons(&mock.events());
+    let uhd_rejected = rejected_reasons(&uhd.events());
     assert_eq!(mock_rejected.len(), 1, "the Mock refuses the burst alone: {mock_rejected:?}");
     assert_eq!(uhd_rejected.len(), 1, "the UHD refuses the burst alone: {uhd_rejected:?}");
     for reason in [&mock_rejected[0], &uhd_rejected[0]] {
@@ -702,6 +727,20 @@ fn updates(applied: &serde_json::Value, t0: i64) -> Vec<(String, serde_json::Val
     rows
 }
 
+/// Every `LATE_COMMAND` as `(requested, applied)` relative to `t0` (RM-25, UC-2).
+fn late_rows(events: &[ezsdr_kernel::event::Event], t0: i64) -> Vec<(i64, i64)> {
+    events
+        .iter()
+        .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND)
+        .map(|event| (event.payload["requested"]["ticks"].as_i64().unwrap() - t0, event.payload["applied"]["ticks"].as_i64().unwrap() - t0))
+        .collect()
+}
+
+/// Every `COMMAND_REJECTED` reason, in order (RM-22).
+fn rejected_reasons(events: &[ezsdr_kernel::event::Event]) -> Vec<String> {
+    events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).map(|event| event.payload["reason"].as_str().unwrap().to_owned()).collect()
+}
+
 #[test]
 fn vh_8_the_same_floor_after_a_transmit_change() {
     // Design 33 §6, item 11's (b-4): a future transmit `cold` change floors a receive `cold`
@@ -735,15 +774,8 @@ fn vh_8_the_same_floor_after_a_transmit_change() {
     uhd.update("radio.rx.s0.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(uhd_t0 + ms(10)));
     uhd.wait_until(uhd_t0 + ms(300));
     uhd.settle(Wall::from_millis(20));
-    let late_of = |events: &[ezsdr_kernel::event::Event], t0: i64| -> Vec<(i64, i64)> {
-        events
-            .iter()
-            .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND)
-            .map(|event| (event.payload["requested"]["ticks"].as_i64().unwrap() - t0, event.payload["applied"]["ticks"].as_i64().unwrap() - t0))
-            .collect()
-    };
-    assert_eq!(late_of(&mock.events(), t0), [(ms(10), ms(50))], "the Mock's floor is the pending transmit change");
-    assert_eq!(late_of(&uhd.events(), uhd_t0), [(ms(10), ms(50))], "the UHD's floor is the instance's");
+    assert_eq!(late_rows(&mock.events(), t0), [(ms(10), ms(50))], "the Mock's floor is the pending transmit change");
+    assert_eq!(late_rows(&uhd.events(), uhd_t0), [(ms(10), ms(50))], "the UHD's floor is the instance's");
     let cut_of = |records: &[ClockRow], node: &str, t0: i64, all: &[ClockRow]| -> i64 {
         records.iter().filter(|record| record.0 == node && record.3.is_some()).min_by_key(|record| record.2).map(|record| record.3.unwrap())
             .unwrap_or_else(|| panic!("the first clock of {node} is cut: {all:?}")) - t0
@@ -860,4 +892,412 @@ fn vh_8_the_same_logical_updates() {
     assert_eq!(mock_updates[0].2, ms(100), "{mock_updates:?}");
     assert_eq!(mock_updates[1].0, "radio.rx.c1.stream", "{mock_updates:?}");
     assert_eq!(mock_updates[1].1, json!(-1), "{mock_updates:?}");
+}
+
+// ---------------------------------------------------------------- the stream dimension
+
+/// The clock rows of both rigs from each one's T0: `(node, ratio, origin, ended)` with the
+/// two instants relative to that rig's own T0 (the two axes never meet).
+type RelativeRow = (String, (u64, u64), i64, Option<i64>);
+
+fn relative(records: &[ClockRow], t0: i64) -> Vec<RelativeRow> {
+    records.iter().map(|(node, ratio, origin, ended)| (node.clone(), *ratio, origin - t0, ended.map(|end| end - t0))).collect()
+}
+
+/// One Manifest segment row as both Providers name it (MR-27, UR-30): direction, stream,
+/// the command that began the segment, its origin from T0, and its logical channels in block
+/// order (design 33 D3's 6).
+type SegmentRow = (String, u64, Option<u64>, i64, Vec<u64>);
+
+/// A row's `sequence`: `null`, or an integer — a missing or other value fails (MR-27, UR-30).
+fn sequence_of(row: &serde_json::Value) -> Option<u64> {
+    let sequence = row.get("sequence").expect("a sequence");
+    (!sequence.is_null()).then(|| sequence.as_u64().expect("an integer sequence"))
+}
+
+/// The Mock's `ezsdr.radio.mock.segments` rows (MR-27).
+fn mock_segments(instance: &ProviderInstance, t0: i64) -> Vec<SegmentRow> {
+    let rows = instance.sections[&Namespace::parse("ezsdr.radio.mock.segments").unwrap()].as_array().expect("the Mock's segments");
+    let mut segments: Vec<SegmentRow> = rows
+        .iter()
+        .map(|row| {
+            (
+                row["direction"].as_str().expect("a direction").to_owned(),
+                row["stream"].as_u64().expect("a stream"),
+                sequence_of(row),
+                row["origin"]["ticks"].as_i64().expect("an origin") - t0,
+                row["channels"].as_array().expect("the channels").iter().map(|channel| channel.as_u64().expect("a channel")).collect(),
+            )
+        })
+        .collect();
+    segments.sort();
+    segments
+}
+
+/// The UHD's `ezsdr.radio.uhd.timing` plan row as the same rows: its `rx` and `tx` arrays
+/// name the direction the Mock's column names (UR-30).
+fn uhd_plan(instance: &ProviderInstance, t0: i64) -> Vec<SegmentRow> {
+    let timing = instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()].as_array().expect("the UHD's timing");
+    let plan = timing.iter().find(|row| row["what"] == "plan").expect("the plan row at the stop");
+    let mut segments = Vec::new();
+    for direction in ["rx", "tx"] {
+        for row in plan[direction].as_array().expect("a direction's rows") {
+            segments.push((
+                direction.to_owned(),
+                row["stream"].as_u64().expect("a stream"),
+                sequence_of(row),
+                row["origin"].as_i64().expect("an origin") - t0,
+                row["channels"].as_array().expect("the channels").iter().map(|channel| channel.as_u64().expect("a channel")).collect(),
+            ));
+        }
+    }
+    segments.sort();
+    segments
+}
+
+/// Two rigs of one stream comparison, armed and started at each one's own T0 — the Mock's
+/// at `t0`, the UHD's at its own now plus the same lead after `arm` — and brought to the
+/// same relative instant. The UHD's T0 is on the lattice every stream of these comparisons
+/// shares (RM-25), so a cut and an origin at a whole number of milliseconds fall on the same
+/// sample of both grids.
+struct Started {
+    mock: MockRig,
+    uhd: UhdRig,
+    t0: i64,
+    uhd_t0: i64,
+}
+
+impl Started {
+    fn new(selector: BTreeMap<Ident, Value>, constraints: &[(&str, Constraint)], ports: &[&str]) -> Started {
+        let t0 = ms(2_000) + ms(1);
+        let mut mock = MockRig::with_ports(selector.clone(), constraints, ports);
+        mock.arm_start(t0);
+        let mut uhd = UhdRig::with_ports(selector, constraints, FakeConfig::default(), ports).unwrap();
+        uhd.arm().unwrap();
+        // The UHD's own T0: the same lead after `arm` as the Mock's T0 is after its own
+        // arm. The 200-tick lattice is the one these comparisons' streams share — their
+        // rates are 1, 2 or 4 Msps, whose ratios divide 200 (RM-25: T0 is a sample instant
+        // of every stream); a comparison with a coarser stream widens this.
+        let now = uhd.time.now(uhd.root).unwrap().ticks_in(uhd.root).unwrap();
+        let uhd_t0 = ezsdr_radio::timeline::lattice(now, Rational::new(200, 1).unwrap()).unwrap() + ms(2_000) + ms(1);
+        uhd.start(uhd_t0).unwrap();
+        uhd.wait_until(uhd_t0 + ms(5));
+        uhd.settle(Wall::from_millis(5));
+        mock.step(t0 + ms(5));
+        Started { mock, uhd, t0, uhd_t0 }
+    }
+
+    fn mock_rows(&self) -> Vec<RelativeRow> {
+        relative(&self.mock.records(), self.t0)
+    }
+
+    fn uhd_rows(&self) -> Vec<RelativeRow> {
+        relative(&self.uhd.records(), self.uhd_t0)
+    }
+
+    /// One `cold` update taken at relative `now` ms with its requested instant at relative
+    /// `at` ms (none: the receipt), both Providers carried to relative `until` ms. The Mock
+    /// takes it in the step at `now`; the UHD is brought to `now` and left there while its
+    /// control thread takes the Action, so the instant it reads for the booking is `now`
+    /// (within that thread's poll).
+    fn cold(&mut self, name: &str, value: Value, now: i64, at: Option<i64>, until: i64) {
+        use ezsdr_kernel::module_api::UpdateClass::Cold;
+        self.mock.update(name, value.clone(), Cold, at.map(|at| self.t0 + ms(at)));
+        self.mock.step(self.t0 + ms(now));
+        self.uhd.wait_until(self.uhd_t0 + ms(now));
+        self.uhd.update(name, value, Cold, at.map(|at| self.uhd_t0 + ms(at)));
+        // The device clock stands at `now` while the control thread takes the Action: wait
+        // for the queue to empty (the poll follows at once), then let that thread run.
+        for _ in 0..1_000 {
+            if self.uhd.actions.queued() == 0 { break; }
+            // On the device's clock, which stops while the control thread runs (UR-33).
+            self.uhd.settle(Wall::from_millis(1));
+        }
+        assert_eq!(self.uhd.actions.queued(), 0, "the UHD's control thread took the Action");
+        self.uhd.settle(Wall::from_millis(2));
+        self.mock.step(self.t0 + ms(until));
+        self.uhd.wait_until(self.uhd_t0 + ms(until));
+        self.uhd.settle(Wall::from_millis(20));
+    }
+
+    /// Both carried to relative `at` ms, then each stopped and cleaned up for the Manifest's
+    /// sections.
+    fn finish(mut self, at: i64) -> (ProviderInstance, ProviderInstance) {
+        self.mock.step(self.t0 + ms(at));
+        self.uhd.wait_until(self.uhd_t0 + ms(at));
+        self.uhd.settle(Wall::from_millis(20));
+        (self.mock.finish(), self.uhd.finish())
+    }
+}
+
+/// The constraints of two receive streams, one channel each: c0 in stream 0 at 2 Msps, c1
+/// in stream 1 at 1 Msps — a 200-tick lattice.
+fn rx_two() -> Vec<(&'static str, Constraint)> {
+    vec![
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.rx.c1.stream", eq(Scalar::from(1))),
+        ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(2e6).unwrap())),
+        ("radio.rx.s1.sample_rate_hz", eq(Scalar::try_from(1e6).unwrap())),
+    ]
+}
+
+/// The same for two transmit streams.
+fn tx_two() -> Vec<(&'static str, Constraint)> {
+    vec![
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c1.stream", eq(Scalar::from(1))),
+        ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(2e6).unwrap())),
+        ("radio.tx.s1.sample_rate_hz", eq(Scalar::try_from(1e6).unwrap())),
+    ]
+}
+
+#[test]
+fn vh_8_two_streams_each_prepare_alike() {
+    // Design 33 §6: with two receive and two transmit streams, one channel in each,
+    // `effective` and every stream's declared clock — node and ratio — are the same on both
+    // Providers, stream 1's included (RM-29, RM-30).
+    let mut constraints = rx_two();
+    constraints.extend(tx_two());
+    let selector = selector(&["0:A:ubx:0", "0:B:ubx:0"], &["0:A:ubx:0", "0:B:ubx:0"]);
+    let mock = MockRig::with_ports(selector.clone(), &constraints, &["rx0", "rx1"]);
+    let uhd = UhdRig::with_ports(selector, &constraints, FakeConfig::default(), &["rx0", "rx1"]).unwrap();
+    assert_eq!(mock.effective, uhd.effective, "the effective configuration");
+    assert_eq!(mock.declared(), uhd.declared(), "the declared SampleClocks");
+    // The expected values themselves: stream 1 is declared on its own node at its own rate.
+    assert_eq!(
+        mock.declared(),
+        [
+            ("radio/rx/s0".to_owned(), (100, 1)),
+            ("radio/rx/s1".to_owned(), (200, 1)),
+            ("radio/tx/s0".to_owned(), (100, 1)),
+            ("radio/tx/s1".to_owned(), (200, 1)),
+        ]
+    );
+}
+
+#[test]
+fn vh_8_a_stream_one_rate_change_cuts_that_stream_alone() {
+    // Design 33 §6: stream 1's `cold` rate change cuts stream 1's clock and starts its next
+    // segment a receive call, the allowance and the lead later; stream 0's clock is not cut.
+    // Both Providers' rows agree, relative to their own T0 (RM-25, UR-25).
+    let mut pair = Started::new(selector(&["0:A:ubx:0", "0:B:ubx:0"], &[]), &rx_two(), &["rx0", "rx1"]);
+    pair.cold("radio.rx.s1.sample_rate_hz", Value::num(4e6).unwrap(), 10, Some(100), 400);
+    let mock = pair.mock_rows();
+    let uhd = pair.uhd_rows();
+    assert_eq!(mock, uhd, "the clock rows of both streams, from each T0");
+    assert_eq!(
+        mock,
+        [
+            ("radio/rx/s0".to_owned(), (100, 1), 0, None),
+            ("radio/rx/s1".to_owned(), (50, 1), ms(155), None),
+            ("radio/rx/s1".to_owned(), (200, 1), 0, Some(ms(100))),
+        ],
+        "stream 0 is not cut; stream 1's new clock begins 55 ms after its cut"
+    );
+}
+
+#[test]
+fn vh_8_a_stream_one_join_leaves_the_same_ready_gap() {
+    // Design 33 §6: a channel entering stream 1 from no stream cuts stream 1 and starts the
+    // next segment after the receive call, the allowance and the lead (RM-25); both
+    // Providers' gaps from the cut to the new origin agree.
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(1))),
+        ("radio.rx.c1.stream", eq(Scalar::from(-1))),
+        ("radio.rx.s1.sample_rate_hz", eq(Scalar::try_from(1e6).unwrap())),
+    ];
+    let mut pair = Started::new(selector(&["0:A:ubx:0", "0:B:ubx:0"], &[]), &constraints, &["rx0", "rx1"]);
+    pair.cold("radio.rx.c1.stream", Value::from(1), 10, Some(100), 400);
+    let mock = pair.mock_rows();
+    let uhd = pair.uhd_rows();
+    assert_eq!(mock, uhd, "the clock rows of both streams, from each T0");
+    assert_eq!(
+        mock,
+        [
+            ("radio/rx/s1".to_owned(), (200, 1), 0, Some(ms(100))),
+            ("radio/rx/s1".to_owned(), (200, 1), ms(155), None),
+        ],
+        "the join's gap is the 2 ms call, the 3 ms allowance and the 50 ms lead"
+    );
+}
+
+#[test]
+fn vh_8_a_channel_less_stream_one_starts_the_same_first_segment() {
+    // Design 33 §6, D4: stream 1 has its node and port and no channel, so no clock; the
+    // first channel to enter it starts its first segment at the effective instant, both
+    // Providers alike (RM-21, MR-39, UR-25).
+    let constraints = [
+        ("radio.rx.c1.stream", eq(Scalar::from(-1))),
+        ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(2e6).unwrap())),
+        ("radio.rx.s1.sample_rate_hz", eq(Scalar::try_from(1e6).unwrap())),
+    ];
+    let mut pair = Started::new(selector(&["0:A:ubx:0", "0:B:ubx:0"], &[]), &constraints, &["rx0", "rx1"]);
+    assert!(pair.mock_rows().iter().all(|row| row.0 != "radio/rx/s1"), "no clock for a channel-less stream");
+    assert!(pair.uhd_rows().iter().all(|row| row.0 != "radio/rx/s1"), "no clock on either");
+    // The effective instant is well past the UHD's opening and configuring of the stream,
+    // so the first segment begins at the instant itself on both.
+    pair.cold("radio.rx.c1.stream", Value::from(1), 10, Some(200), 400);
+    let mock = pair.mock_rows();
+    let uhd = pair.uhd_rows();
+    assert_eq!(mock, uhd, "the first segment's clock, from each T0");
+    assert_eq!(
+        mock,
+        [
+            ("radio/rx/s0".to_owned(), (100, 1), 0, None),
+            ("radio/rx/s1".to_owned(), (200, 1), ms(200), None),
+        ],
+        "the first channel's segment begins at the effective instant"
+    );
+}
+
+#[test]
+fn vh_8_a_transmit_stream_one_has_the_same_clock() {
+    // Design 33 §6, D4: a transmit channel enabled in stream 1 registers that stream's
+    // clock on its own node and ratio, beginning at the change's effective instant — no
+    // previous cut to wait for (RM-21, RM-25); stream 0 has no channel and no clock.
+    let constraints: [(&str, Constraint); 0] = [];
+    let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0", "0:B:ubx:0"]);
+    let mut pair = Started::new(selector, &constraints, &["rx0"]);
+    assert!(pair.mock_rows().iter().all(|row| !row.0.starts_with("radio/tx/")), "no transmit clock before a channel");
+    assert!(pair.uhd_rows().iter().all(|row| !row.0.starts_with("radio/tx/")), "none on either");
+    // Far enough ahead that the stream's opening and configuring ends before the instant.
+    pair.cold("radio.tx.c1.stream", Value::from(1), 10, Some(200), 400);
+    let mock = pair.mock_rows();
+    let uhd = pair.uhd_rows();
+    assert_eq!(mock, uhd, "the clocks, from each T0");
+    assert_eq!(
+        mock,
+        [
+            ("radio/rx/s0".to_owned(), (200, 1), 0, None),
+            ("radio/tx/s1".to_owned(), (200, 1), ms(200), None),
+        ],
+        "stream 1's clock begins at the effective instant"
+    );
+}
+
+#[test]
+fn vh_8_the_instance_floor_crosses_streams() {
+    // Design 33 §6, RM-25: stream 0's pending `cold` change floors stream 1's change into
+    // it — one floor for the instance — and both report the same raised instant as
+    // `LATE_COMMAND`; each stream is cut at that instant.
+    let mut pair = Started::new(selector(&["0:A:ubx:0", "0:B:ubx:0"], &[]), &rx_two(), &["rx0", "rx1"]);
+    pair.cold("radio.rx.s0.sample_rate_hz", Value::num(4e6).unwrap(), 10, Some(150), 20);
+    pair.cold("radio.rx.s1.sample_rate_hz", Value::num(2e6).unwrap(), 20, Some(100), 500);
+    assert_eq!(late_rows(&pair.mock.events(), pair.t0), [(ms(100), ms(150))], "the Mock's floor is stream 0's change");
+    assert_eq!(late_rows(&pair.uhd.events(), pair.uhd_t0), [(ms(100), ms(150))], "the UHD's floor is the instance's");
+    let mock = pair.mock_rows();
+    let uhd = pair.uhd_rows();
+    assert_eq!(mock, uhd, "both streams' rows, from each T0");
+    // Stream 0 (2 Msps: 1 ms call) begins 54 ms after the floor; stream 1 (1 Msps: 2 ms)
+    // 55 ms after it.
+    assert_eq!(
+        mock,
+        [
+            ("radio/rx/s0".to_owned(), (50, 1), ms(204), None),
+            ("radio/rx/s0".to_owned(), (100, 1), 0, Some(ms(150))),
+            ("radio/rx/s1".to_owned(), (100, 1), ms(205), None),
+            ("radio/rx/s1".to_owned(), (200, 1), 0, Some(ms(150))),
+        ]
+    );
+}
+
+#[test]
+fn vh_8_a_stream_one_refusal_leaves_stream_zero_alone() {
+    // Design 33 §6, RM-31: a stream-1-only antenna change the full-duplex rule refuses —
+    // receive c0 and transmit c0 are the same board, and c0 is in stream 1 — is refused by
+    // both with the same key and rule, and cuts neither stream's clock.
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(1))),
+        ("radio.rx.c1.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(1))),
+    ];
+    let selector = selector(&["0:A:ubx:0", "0:B:ubx:0"], &["0:A:ubx:0", "0:B:ubx:0"]);
+    let mut pair = Started::new(selector, &constraints, &["rx0", "rx1"]);
+    let before = pair.mock_rows();
+    let before_uhd = pair.uhd_rows();
+    pair.cold("radio.rx.c0.antenna", Value::from("TX/RX"), 10, Some(100), 400);
+    let mock_rejected = rejected_reasons(&pair.mock.events());
+    let uhd_rejected = rejected_reasons(&pair.uhd.events());
+    assert_eq!(mock_rejected.len(), 1, "{mock_rejected:?}");
+    assert_eq!(uhd_rejected.len(), 1, "{uhd_rejected:?}");
+    // The Mock's update refusal carries MR-18; the shared rule and its text follow it.
+    assert_eq!(mock_rejected[0].trim_start_matches("MR-18: "), uhd_rejected[0], "the same rule and reason");
+    assert!(uhd_rejected[0].starts_with("RM-31:"), "{uhd_rejected:?}");
+    // The refused key itself: each description refuses its own instance's projected
+    // configuration on the same key (the event names the Action alone, RM-22).
+    assert_eq!(pair.mock.effective, pair.uhd.effective, "the same configuration");
+    let request_of = |effective: &BTreeMap<Key, Value>| -> Requested {
+        let mut constraints: BTreeMap<Key, Constraint> = effective
+            .iter()
+            .filter_map(|(key, value)| Some((key.clone(), Constraint::Eq { value: value.as_scalar()?.clone() })))
+            .collect();
+        constraints.insert(key("radio.rx.c0.antenna"), Constraint::Eq { value: Scalar::from("TX/RX") });
+        Requested { resource: rid("radio"), constraints }
+    };
+    let keys_of = |report: &CoerceReport| -> Vec<(Key, String)> { report.rejected.iter().map(|rejection| (rejection.key.clone(), rejection.reason.clone())).collect() };
+    assert_eq!(
+        keys_of(&pair.mock.mock.coerce(&request_of(&pair.mock.effective)).unwrap()),
+        keys_of(&pair.uhd.radio.coerce(&request_of(&pair.uhd.effective)).unwrap()),
+        "the same key and reason"
+    );
+    assert_eq!(pair.mock_rows(), before, "the Mock's clocks are not cut");
+    assert_eq!(pair.uhd_rows(), before_uhd, "the UHD's clocks are not cut");
+}
+
+/// The plan comparison's run: two receive streams, a stream-1 rate change, a transmit
+/// channel entering stream 1 and a transmit rate change, both stopped at 700 ms. The rows
+/// are the Mock's and the UHD's, from each one's T0.
+fn planned() -> (Vec<SegmentRow>, Vec<SegmentRow>) {
+    let constraints = rx_two();
+    let selector = selector(&["0:A:ubx:0", "0:B:ubx:0"], &["0:A:ubx:0", "0:B:ubx:0"]);
+    let mut pair = Started::new(selector, &constraints, &["rx0", "rx1"]);
+    pair.cold("radio.rx.s1.sample_rate_hz", Value::num(4e6).unwrap(), 10, Some(100), 150);
+    // Far enough ahead that the UHD's configuration of stream 1 ends before the instant.
+    pair.cold("radio.tx.c1.stream", Value::from(1), 150, Some(300), 350);
+    pair.cold("radio.tx.s1.sample_rate_hz", Value::num(2e6).unwrap(), 350, Some(500), 650);
+    let (t0, uhd_t0) = (pair.t0, pair.uhd_t0);
+    let (mock, uhd) = pair.finish(700);
+    (mock_segments(&mock, t0), uhd_plan(&uhd, uhd_t0))
+}
+
+#[test]
+fn vh_8_the_same_manifest_plan_rows() {
+    // Design 33 §6, D3's 6: after `stop`, the UHD's `timing` plan and the Mock's `segments`
+    // name each stream's segments alike — the stream, its origin from T0 and its logical
+    // channels (MR-27, UR-30). The command that began each segment is `sequence`'s own
+    // comparison below.
+    let (mock_rows, uhd_rows) = planned();
+    let without_sequence = |rows: Vec<SegmentRow>| -> Vec<(String, u64, i64, Vec<u64>)> {
+        rows.into_iter().map(|(direction, stream, _, origin, channels)| (direction, stream, origin, channels)).collect()
+    };
+    let mock = without_sequence(mock_rows);
+    let uhd = without_sequence(uhd_rows);
+    assert_eq!(mock, uhd, "the segments of every stream, from each T0");
+    assert_eq!(
+        mock,
+        [
+            ("rx".to_owned(), 0, 0, vec![0]),
+            ("rx".to_owned(), 1, 0, vec![1]),
+            ("rx".to_owned(), 1, ms(155), vec![1]),
+            ("tx".to_owned(), 1, ms(300), vec![1]),
+            ("tx".to_owned(), 1, ms(550), vec![1]),
+        ]
+    );
+}
+
+#[test]
+fn vh_8_the_same_manifest_sequence() {
+    // Design 33 §6, D3's 6, MR-27 and UR-30: `sequence` is the arrival order of the command
+    // that began the segment, `null` for a segment no command began. Each Provider numbers
+    // from its own origin (MockRadio's first command follows its faults, uhd-control's
+    // follows the loss's 0), so the comparison is each number's rank among the run's.
+    let (mock_rows, uhd_rows) = planned();
+    let ranks = |rows: &[SegmentRow]| -> Vec<Option<usize>> {
+        let mut numbers: Vec<u64> = rows.iter().filter_map(|row| row.2).collect();
+        numbers.sort();
+        numbers.dedup();
+        rows.iter().map(|row| row.2.map(|n| numbers.binary_search(&n).unwrap())).collect()
+    };
+    assert_eq!(ranks(&mock_rows), ranks(&uhd_rows), "the same arrival order: {mock_rows:?} {uhd_rows:?}");
+    assert_eq!(ranks(&mock_rows), [None, None, Some(0), Some(1), Some(2)], "{mock_rows:?}");
 }
