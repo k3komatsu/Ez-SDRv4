@@ -270,7 +270,10 @@ pub fn assembly(profile_doc: &Json, device: Arc<dyn Device>, inputs: BTreeMap<Co
         Some(Value::Scalar(Scalar::Str(s))) => s.clone(),
         _ => selector("args"),
     };
-    let authority = DeviceAuthority::new(device.clone(), clocks.clone(), &selector("clock_source"), &selector("time_source"), &authority_args).unwrap();
+    // UR-7: the reference PLL misses its lock on about 4% of opens (handoff §6.2); try once more.
+    let authority = DeviceAuthority::new(device.clone(), clocks.clone(), &selector("clock_source"), &selector("time_source"), &authority_args)
+        .or_else(|_| DeviceAuthority::new(device.clone(), clocks.clone(), &selector("clock_source"), &selector("time_source"), &authority_args))
+        .unwrap();
     let mut clean = radio.clone();
     clean.selector.remove(&Ident::parse("authority_args").unwrap());
     let mut providers: BTreeMap<Ident, Box<dyn Provider>> = BTreeMap::new();

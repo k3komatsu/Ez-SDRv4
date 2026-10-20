@@ -175,6 +175,7 @@ fn hw_b8_leads() {
         let mut run = session(&bench_profile(&*device, &dir, serde_json::json!({}), envelope, true), device);
         past_t0(&mut run, ms(1));
         assert!(admitted(&run.submit(set("radio.tx.channels", ezsdr_kernel::spec::Value::from(1)), None).unwrap()));
+        past_tx_origin(&mut run);
         let (bytes, _) = waveform_of(&pn(100));
         let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
         let at = TimePoint::new(clock.domain, (run.now().ticks_in(clock.root).unwrap() + lead_us * 200 - clock.origin.ticks_in(clock.root).unwrap()).div_euclid(200) + 1);
@@ -715,6 +716,7 @@ fn tx_session(device: Arc<dyn Device>, dir: &TempDir) -> ezsdr_kernel::coordinat
     let mut run = session(&bench_profile(&*device, dir, serde_json::json!({}), envelope, true), device);
     past_t0(&mut run, ms(1));
     assert!(admitted(&run.submit(set("radio.tx.channels", ezsdr_kernel::spec::Value::from(1)), None).unwrap()));
+    past_tx_origin(&mut run);
     run
 }
 
