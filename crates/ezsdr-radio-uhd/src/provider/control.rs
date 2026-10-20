@@ -1807,6 +1807,9 @@ mod tests {
         let segments: Vec<(i64, i64)> = row["rx"].as_array().unwrap().iter().map(|s| (s["origin"].as_i64().unwrap(), s["ticks_per_sample"][0].as_i64().unwrap())).collect();
         // The first segment and the second change's, at 1 MS/s; none at the refused 2 MS/s.
         assert_eq!(segments, [(0, 200), (ms(300), 200)], "{row}");
+        // The row names the command that began each: the second change's arrival order is 2.
+        let by: Vec<Option<u64>> = row["rx"].as_array().unwrap().iter().map(|s| s["sequence"].as_u64()).collect();
+        assert_eq!(by, [None, Some(2)], "{row}");
     }
 
     #[test]

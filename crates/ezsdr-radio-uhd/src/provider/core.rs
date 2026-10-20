@@ -420,16 +420,19 @@ impl Streams {
         Ok(())
     }
 
-    /// UR-30: the plans the streams were carried out by, each segment's origin and end.
+    /// UR-30: the plans the streams were carried out by, each segment's stream, the command
+    /// that began it, its origin, end, logical channels and root ticks per sample.
     pub fn record(&self) -> Json {
         let plan = |dir: Dir| -> Vec<Json> {
             let mut rows = Vec::new();
             for k in 0..self.count(dir) {
                 let Some(line) = self.lines.line(stream_key(dir, k)) else { continue };
                 rows.extend(line.plan.iter().map(|segment| json!({
+                    "stream": k,
+                    "sequence": segment.by,
                     "origin": segment.origin,
                     "end": segment.cut.and_then(|cut| segment.instant(cut).ok()),
-                    "channels": segment.config.channels.count(),
+                    "channels": segment.config.channels.iter().collect::<Vec<u32>>(),
                     "ticks_per_sample": [segment.config.ratio.num(), segment.config.ratio.den()],
                 })));
             }

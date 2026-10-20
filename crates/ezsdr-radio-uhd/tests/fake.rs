@@ -490,11 +490,11 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(capability("radio.rx.block_len"), one(Scalar::from(2_000)));
     assert_eq!(capability("radio.perf.wire_bytes_per_sample"), one(Scalar::from(4)));
     assert_eq!(capability("radio.tx.path_delay_samples"), one(Scalar::from(45)));
-    let envelope = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.envelope").unwrap()];
+    let envelope = &section_of(instance, "envelope");
     assert_eq!(envelope["profile"]["name"], "x3xx");
     assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], 5_000_000);
     assert_eq!(envelope["performance"]["rx_bytes_per_s"], 1_000_000_000);
-    assert_eq!(instance.sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()]["fake"], true);
+    assert_eq!(section_of(instance, "device")["fake"], true);
 }
 
 #[test]
@@ -816,6 +816,21 @@ impl Direct {
     }
 }
 
+/// An instance's Manifest section `suffix` (UR-30).
+fn section_of(instance: &ezsdr_kernel::module_api::ProviderInstance, suffix: &str) -> Json {
+    instance.sections[&Namespace::parse(&format!("ezsdr.radio.uhd.{suffix}")).unwrap()].clone()
+}
+
+/// The `timing` section's `plan` row (UR-30), each stream's segments in stream order.
+fn plan_row(timing: &Json) -> Json {
+    timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap_or_else(|| panic!("no plan: {timing}")).clone()
+}
+
+/// The plan's rows of `dir`'s stream `k`, in order (UR-30).
+fn plan_stream(plan: &Json, dir: &str, k: u64) -> Vec<Json> {
+    plan[dir].as_array().unwrap().iter().filter(|row| row["stream"] == k).cloned().collect()
+}
+
 #[test]
 fn ur_12_prepare_refusals() {
     let device = fake(FakeConfig::default());
@@ -845,7 +860,7 @@ fn ur_12_a_tx_only_layout_declares_no_receive_clock() {
     let clocks: Vec<String> = direct.clocks.sample_clock_records().iter().map(|record| record.stream.path().to_owned()).collect();
     assert_eq!(clocks, ["usrp/tx"], "a layout with no receive front end declares no receive clock");
     let instance = direct.finish();
-    let applied = instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()].clone();
+    let applied = section_of(&instance, "applied");
     assert!(applied.as_array().unwrap().iter().all(|row| !row["key"].as_str().unwrap_or("").starts_with("radio.rx")), "no receive channel is configured: {applied}");
 }
 
@@ -1180,6 +1195,17 @@ fn time_errors(manifest: &Manifest) -> Vec<TimeErrorPayload> {
 
 fn rejections(manifest: &Manifest) -> Vec<String> {
     section(manifest, "rejected").as_array().unwrap().iter().filter_map(|r| r["reason"].as_str().map(str::to_owned)).collect()
+}
+
+/// The reason of the first `COMMAND_REJECTED` in `events` (RM-22).
+fn rejection_reason(events: &[Event]) -> String {
+    events.first().and_then(|event| event.payload["reason"].as_str()).unwrap_or_else(|| panic!("no rejection: {events:?}")).to_owned()
+}
+
+/// Every `COMMAND_REJECTED` reason in `events`, in order (RM-22); one per event, so a count
+/// of reasons is a count of refusals.
+fn rejection_reasons(events: &[Event]) -> Vec<String> {
+    events.iter().map(|event| event.payload["reason"].as_str().unwrap_or_else(|| panic!("a rejection without a reason: {event:?}")).to_owned()).collect()
 }
 
 #[test]
@@ -1598,7 +1624,7 @@ fn ur_25_a_stream_silent_before_e1_switches_before_e2() {
     // The bounded wait never goes under 1 ms (UHD truncates the timeout to whole ms).
     assert!(direct.device.min_recv_timeout() >= Wall::from_millis(1), "{:?}", direct.device.min_recv_timeout());
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let timing = &section_of(&instance, "timing");
     let switch = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_segment").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
     let e2 = switch["origin"].as_i64().unwrap();
     assert!(switch["at"].as_i64().unwrap() < e2, "switched after e₂: {switch}");
@@ -1607,7 +1633,7 @@ fn ur_25_a_stream_silent_before_e1_switches_before_e2() {
     let stop = calls.iter().position(|c| c == "rx_stop 0 now").unwrap_or_else(|| panic!("{calls:?}"));
     let start = calls.iter().position(|c| *c == format!("rx_start 0 {e2}")).unwrap_or_else(|| panic!("{calls:?}"));
     assert!(stop < start, "{calls:?}");
-    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let applied = &section_of(&instance, "applied");
     assert!(applied.as_array().unwrap().iter().any(|r| r["key"] == "rx_stop"), "{applied}");
     assert!(late.is_empty(), "{late:?}");
 }
@@ -1659,9 +1685,9 @@ fn ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuratio
     direct.update("radio.rx.channels", Value::from(1), Cold, None);
     direct.settle(Wall::from_millis(300));
     let instance = direct.finish();
-    let envelope = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.envelope").unwrap()];
+    let envelope = &section_of(&instance, "envelope");
     let lead = envelope["timing"]["rx_start_lead_ns"].as_i64().unwrap() * MCR / 1_000_000_000;
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let timing = &section_of(&instance, "timing");
     let row = timing.as_array().unwrap().iter().find(|r| r["what"] == "cold_change").cloned().unwrap_or_else(|| panic!("{timing}"));
     let segment = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_segment").cloned().unwrap_or_else(|| panic!("{timing}"));
     let (e, configured, origin) = (row["e"].as_i64().unwrap(), row["ready"].as_i64().unwrap(), segment["origin"].as_i64().unwrap());
@@ -1681,7 +1707,7 @@ fn ur_25_a_cold_change_the_envelope_refuses_changes_nothing() {
     direct.settle(Wall::from_millis(30));
     let rejected = direct.of("radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1);
-    assert!(rejected[0].payload["reason"].as_str().unwrap().starts_with("RM-7: "), "{rejected:?}");
+    assert!(rejection_reason(&rejected).starts_with("RM-7: "), "{rejected:?}");
     // MA-14: the refusal names the Action it answers.
     assert_eq!(rejected[0].payload["action"], 1, "{rejected:?}");
     assert!(direct.device.calls()[before..].iter().all(|c| !c.starts_with("apply") && !c.starts_with("rx_stop")));
@@ -1700,7 +1726,7 @@ fn ur_14_a_device_error_while_booking_names_its_action() {
     direct.settle(Wall::from_millis(100));
     let rejected = direct.of("radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1, "{rejected:?} {:?}", direct.device.calls());
-    assert!(rejected[0].payload["reason"].as_str().unwrap().starts_with("UR-12: the device applied"), "{rejected:?}");
+    assert!(rejection_reason(&rejected).starts_with("UR-12: the device applied"), "{rejected:?}");
     assert_eq!(rejected[0].payload["action"], 1, "{rejected:?}");
     let _ = direct.finish();
 }
@@ -1758,8 +1784,8 @@ fn ur_25_a_cold_transmit_change_cancels_the_held_bursts() {
     assert!(admitted(&run.submit(set("radio.tx.sample_rate_hz", Value::num(2e6).unwrap()), None).unwrap()));
     wait(&mut run, ms(150));
     let manifest = run.finish();
-    let reasons: Vec<_> = events_of(&manifest, "radio.COMMAND_REJECTED").iter().map(|e| e.payload["reason"].clone()).collect();
-    assert!(reasons.iter().any(|r| r == "cancelled by a cold change"), "{reasons:?}");
+    let reasons = rejection_reasons(&events_of(&manifest, "radio.COMMAND_REJECTED"));
+    assert!(reasons.iter().any(|r| r.as_str() == "cancelled by a cold change"), "{reasons:?}");
 }
 
 
@@ -1810,7 +1836,7 @@ fn ur_26_an_abort_publishes_nothing_after_the_stop_instant() {
     }
     direct.radio.cleanup();
     let instance = direct.radio.instance().clone();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let timing = &section_of(&instance, "timing");
     let stop = timing.as_array().unwrap().iter().find(|r| r["what"] == "stop").unwrap()["at"].as_i64().unwrap();
     let origin = direct.clocks.sample_clock_records().iter().find(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).unwrap().origin.ticks_in(direct.clocks.sample_clock_records().iter().find(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).unwrap().root).unwrap();
     let end = origin + end.expect("blocks were published") * 200;
@@ -1818,7 +1844,7 @@ fn ur_26_an_abort_publishes_nothing_after_the_stop_instant() {
     // One stop, recorded once: not again when the tail reaches the cut (Review N, N4).
     let calls = direct.device.calls();
     assert_eq!(calls.iter().filter(|c| c.starts_with("rx_stop")).count(), 1, "{calls:?}");
-    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let applied = &section_of(&instance, "applied");
     assert_eq!(applied.as_array().unwrap().iter().filter(|r| r["key"] == "rx_stop").count(), 1, "{applied}");
 }
 
@@ -1848,8 +1874,8 @@ fn ur_25_a_receive_session_follows_its_recorded_plan() {
     assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", Value::num(1e6).unwrap()), None).unwrap()));
     wait(&mut run, ms(150));
     let manifest = run.finish();
-    let timing = section(&manifest, "timing").as_array().unwrap().clone();
-    let plan = timing.iter().find(|r| r["what"] == "plan").unwrap_or_else(|| panic!("no plan: {timing:?}"));
+    let timing = section(&manifest, "timing").clone();
+    let plan = plan_row(&timing);
     let segments: Vec<(i64, Option<i64>)> = plan["rx"].as_array().unwrap().iter().map(|s| (s["origin"].as_i64().unwrap(), s["end"].as_i64())).collect();
     assert_eq!(segments.len(), 4, "{plan}");
     for pair in segments.windows(2) {
@@ -3086,7 +3112,7 @@ fn ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time() {
         direct.settle(Wall::from_millis(600));
         let late = direct.of("radio.LATE_COMMAND");
         let instance = direct.finish();
-        let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+        let timing = &section_of(&instance, "timing");
         let switch = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_segment").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
         // UR-25's ready instant (spec 22, VH-4): the new origin is at least the cut, at the
         // booking, plus the longer of a block and a packet at the old rate, 3 ms and the
@@ -3813,10 +3839,10 @@ fn ur_26_a_second_stop_does_nothing() {
     let calls = direct.device.calls();
     assert_eq!(calls.iter().filter(|c| c.starts_with("rx_stop")).count(), 1, "{calls:?}");
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let timing = &section_of(&instance, "timing");
     let stops: Vec<_> = timing.as_array().unwrap().iter().filter(|r| r["what"] == "stop").collect();
     assert_eq!(stops.len(), 1, "{timing}");
-    let rejected = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()];
+    let rejected = &section_of(&instance, "rejected");
     assert!(!rejected.as_array().unwrap().iter().any(|r| r["reason"].as_str().is_some_and(|reason| reason.contains("did not join"))), "{rejected}");
 }
 
@@ -4029,8 +4055,8 @@ fn ur_25_tx_channels_to_zero_ends_the_clock_and_a_re_enable_starts_a_new_one() {
         .map(|r| (r.origin.ticks_in(r.root).unwrap(), r.ended_at.map(|t| t.ticks_in(r.root).unwrap()), r.domain)).collect();
     assert_eq!(clocks.len(), 2, "the disable ends one clock and the enable registers one: {clocks:?} {calls:?}");
     let end = clocks[0].1.unwrap_or_else(|| panic!("the first transmit clock was not ended: {clocks:?}"));
-    let timing = section(&manifest, "timing").as_array().unwrap().clone();
-    let plan = timing.iter().find(|r| r["what"] == "plan").expect("the plan");
+    let timing = section(&manifest, "timing").clone();
+    let plan = plan_row(&timing);
     let segments: Vec<(i64, Option<i64>)> = plan["tx"].as_array().unwrap().iter().map(|s| (s["origin"].as_i64().unwrap(), s["end"].as_i64())).collect();
     assert_eq!(segments.first().and_then(|(_, end)| *end), Some(end), "the clock's end is not its segment's: {segments:?}");
     let envelope = section(&manifest, "envelope");
@@ -4085,7 +4111,7 @@ fn ur_25_a_timed_update_at_the_cold_change_s_instant_reaches_the_switch() {
         assert_eq!(timed, 1, "{case}: the timed release: {calls:?}");
         assert!(direct.of("radio.LATE_COMMAND").is_empty(), "{case}");
         let instance = direct.finish();
-        let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+        let applied = &section_of(&instance, "applied");
         assert_eq!(applied.as_array().unwrap().iter().filter(|r| r["key"] == "radio.rx.frequency_hz" && r["issued"] == true && r["at"]["ticks"] == at).count(), 1, "{case}: {applied}");
     }
 }
@@ -4117,7 +4143,7 @@ fn ur_25_an_enable_at_a_timed_update_s_instant_applies_it() {
         assert_eq!(timed, 1, "{case}: the timed release: {calls:?}");
         assert!(direct.of("radio.LATE_COMMAND").is_empty(), "{case}");
         let instance = direct.finish();
-        let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+        let applied = &section_of(&instance, "applied");
         assert_eq!(applied.as_array().unwrap().iter().filter(|r| r["key"] == "radio.rx.frequency_hz" && r["issued"] == true && r["at"]["ticks"] == at).count(), 1, "{case}: {applied}");
     }
 }
@@ -4222,7 +4248,7 @@ fn ur_05_the_layout_builds_the_subdev_spec() {
     assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Rx), 3);
     assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 1).unwrap(), "BasicRX (0)");
     assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 2).unwrap(), "BasicRX (1)");
-    assert_eq!(radio.instance().sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()]["rx_channels"], 3, "the manifest's channels are the spec's, read after it");
+    assert_eq!(section_of(radio.instance(), "device")["rx_channels"], 3, "the manifest's channels are the spec's, read after it");
     // The transmit side: an LFTX in slot B, its front end's number in the name (H5).
     let device = fake(FakeConfig { front_ends: vec!["UBX", "LFTX"], serial: "ur05-spec-b".to_owned(), ..FakeConfig::default() });
     let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0", "0:B:lf_tx:0"] });
@@ -5049,7 +5075,7 @@ fn ur_24_a_channel_keyed_timed_update_acts_on_its_own_channel() {
         assert_eq!(direct.of("radio.LATE_COMMAND").len(), 0, "{log:?}");
         assert_eq!(direct.clocks.sample_clock_records().len(), 1, "a timed update cuts nothing");
         let instance = direct.finish();
-        let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+        let applied = &section_of(&instance, "applied");
         assert_eq!(applied.as_array().unwrap().iter().filter(|row| row["key"] == "radio.rx.c1.frequency_hz" && row["issued"] == true && row["at"]["ticks"] == at).count(), 1, "case only_one={only_one}: {applied}");
     }
 }
@@ -5079,7 +5105,7 @@ fn ur_24_a_timed_update_for_a_channel_out_of_its_stream_waits_for_its_segment() 
     assert_eq!(log.iter().filter(|call| call.starts_with("apply rx 0 ") && call.contains("freq=2100000000")).count(), 0, "the value leaked to c0: {log:?}");
     assert_eq!(direct.of("radio.COMMAND_REJECTED").len(), 0);
     let instance = direct.finish();
-    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let applied = &section_of(&instance, "applied");
     assert_eq!(applied.as_array().unwrap().iter().filter(|row| row["key"] == "radio.rx.c1.frequency_hz" && row["note"] == "no channel").count(), 1, "{applied}");
     assert!(applied.as_array().unwrap().iter().any(|row| row["key"] == "radio.rx.c1.frequency_hz" && row["claimed"] == 2.1e9 && row["read_back"] == 2.1e9), "{applied}");
 }
@@ -5134,7 +5160,7 @@ fn ur_25_a_channel_s_antenna_change_cuts_its_stream() {
     assert_eq!(records[1].stream.path(), "usrp/rx/s0");
     assert!(direct.of("radio.COMMAND_REJECTED").is_empty());
     let instance = direct.finish();
-    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let applied = &section_of(&instance, "applied");
     assert!(applied.as_array().unwrap().iter().any(|row|
         row["key"] == "radio.rx.c0.antenna" && row["channel"] == 0 && row["claimed"] == "TX/RX" && row["read_back"] == "TX/RX"
     ), "{applied}");
@@ -5153,7 +5179,7 @@ fn ur_25_an_antenna_change_of_a_channel_in_no_stream_only_records() {
     assert_eq!(direct.clocks.sample_clock_records().len(), 1, "the running stream is not cut");
     assert!(direct.of("radio.LATE_COMMAND").is_empty());
     let instance = direct.finish();
-    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let applied = &section_of(&instance, "applied");
     let row = applied.as_array().unwrap().iter().find(|row| row["key"] == "radio.rx.c1.antenna").unwrap_or_else(|| panic!("{applied}"));
     assert_eq!(row["claimed"], "TX/RX");
     assert!(row["read_back"].is_null(), "the device was not asked: {row}");
@@ -5174,16 +5200,16 @@ fn ur_25_a_refused_antenna_read_back_halts_the_stream() {
     direct.settle(Wall::from_millis(150));
     let rejected = direct.of("radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1, "{rejected:?} {:?}", direct.device.calls());
-    let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+    let reason = rejection_reason(&rejected);
     assert!(reason.starts_with("UR-12:") && reason.contains("TX/RX") && reason.contains("RX2") && reason.contains("radio.rx.c0"), "{reason}");
     assert_eq!(calls(&direct.device, "rx_start").len(), 1, "the refused segment never starts: {:?}", direct.device.calls());
     let records = direct.clocks.sample_clock_records();
     assert_eq!(records.len(), 1, "{records:?}");
     assert!(records[0].ended_at.is_some(), "the cut ended the old clock");
     let instance = direct.finish();
-    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let applied = &section_of(&instance, "applied");
     assert!(applied.as_array().unwrap().iter().any(|row| row["key"] == "radio.rx.c0.antenna" && row["claimed"] == "TX/RX" && row["read_back"] == "RX2"), "{applied}");
-    let rejected = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()];
+    let rejected = &section_of(&instance, "rejected");
     assert!(rejected.as_array().unwrap().iter().any(|row| row["reason"].as_str().is_some_and(|reason| reason.starts_with("UR-12:"))), "{rejected}");
 }
 
@@ -5197,11 +5223,11 @@ fn ur_26_a_current_keys_antenna_update_is_refused() {
     direct.settle(Wall::from_millis(30));
     let rejected = direct.of("radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1, "{rejected:?}");
-    assert_eq!(rejected[0].payload["reason"], "UR-26: radio.rx.antenna is not updated at runtime by this Provider");
+    assert_eq!(rejection_reason(&rejected), "UR-26: radio.rx.antenna is not updated at runtime by this Provider");
     let log = direct.device.calls();
     assert!(!log.iter().any(|call| call.starts_with("apply rx") && call.contains("antenna=TX/RX")), "{log:?}");
     let instance = direct.finish();
-    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let applied = &section_of(&instance, "applied");
     let row = applied.as_array().unwrap().iter().find(|row| row["key"] == "radio.rx.antenna").unwrap_or_else(|| panic!("{applied}"));
     assert_eq!(row["claimed"], "RX2");
     assert!(row.get("read_back").is_none(), "the current keys' row is unchanged: {row}");
@@ -5259,11 +5285,13 @@ fn ur_25_a_layout_rate_change_cuts_its_stream_and_configures_every_channel() {
     assert!(tx[0].ended_at.is_none(), "the transmit clock is not cut");
     assert!(!log.iter().any(|call| call.starts_with("apply tx") && call.contains("rate=2000000")), "the transmit side is configured again: {log:?}");
     let instance = direct.finish();
-    let plan = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
-    let row = plan.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    let timing = section_of(&instance, "timing");
+    let row = plan_row(&timing);
     let rx_segments = row["rx"].as_array().unwrap();
     assert_eq!(rx_segments.len(), 2, "{row}");
-    assert_eq!(rx_segments[1]["channels"], 2, "{row}");
+    assert_eq!(rx_segments[1]["stream"], 0, "{row}");
+    assert!(rx_segments[1]["sequence"].is_u64(), "the second segment names the change that began it: {row}");
+    assert_eq!(rx_segments[1]["channels"], json!([0, 1]), "{row}");
 }
 
 #[test]
@@ -5287,9 +5315,9 @@ fn ur_25_a_layout_rate_change_of_a_channel_less_stream_only_takes_its_value() {
     assert_eq!(direct.clocks.sample_clock_records().len(), clocks_before);
     assert!(direct.of("radio.COMMAND_REJECTED").is_empty());
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let timing = section_of(&instance, "timing");
     assert!(timing.as_array().unwrap().iter().all(|row| row["what"] != "rx_segment"), "no segment begins: {timing}");
-    let plan = timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    let plan = plan_row(&timing);
     assert_eq!(plan["rx"].as_array().unwrap().len(), 1, "{plan}");
 }
 
@@ -5324,7 +5352,7 @@ fn ur_25_a_layout_transmit_rate_change_configures_the_new_segment() {
     assert_eq!(calls(&direct.device, "tx_open 0 [0, 1]").len(), 1, "{log:?}");
     assert!(!log.iter().any(|call| call.starts_with("apply rx") && call.contains("rate=2000000")), "the receive side is untouched: {log:?}");
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let timing = &section_of(&instance, "timing");
     assert!(timing.as_array().unwrap().iter().any(|row| row["what"] == "tx_switch"), "{timing}");
 }
 
@@ -5363,7 +5391,7 @@ fn ur_25_a_layout_cold_change_is_floored_at_every_earlier_cold_change_of_the_ins
     let cut = tx[0].ended_at.unwrap().ticks_in(tx[0].root).unwrap();
     assert!(cut >= now + ms(50) && cut - (now + ms(50)) < 200, "the cut is the first sample at or after the floored instant: {cut}");
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let timing = &section_of(&instance, "timing");
     let changes: Vec<&Json> = timing.as_array().unwrap().iter().filter(|row| row["what"] == "cold_change").collect();
     assert_eq!(changes.len(), 2, "{timing}");
     assert!(changes.iter().all(|row| row["e"] == now + ms(50)), "{timing}");
@@ -5494,8 +5522,8 @@ fn ur_25_a_receive_membership_join_opens_the_streamer_with_the_new_set() {
     let (end, origin) = (rx[0].ended_at.unwrap().ticks_in(rx[0].root).unwrap(), rx[1].origin.ticks_in(rx[1].root).unwrap());
     assert!(origin >= end + ms(55) && origin - (end + ms(55)) < 200, "{origin} vs {end}");
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
-    let plan = timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    let timing = section_of(&instance, "timing");
+    let plan = plan_row(&timing);
     assert_eq!(plan["rx"].as_array().unwrap().len(), 2, "{plan}");
     assert_eq!(timing.as_array().unwrap().iter().filter(|row| row["what"] == "rx_segment").count(), 1, "the joined segment: {timing}");
 }
@@ -5520,9 +5548,8 @@ fn ur_25_a_receive_membership_leave_opens_the_streamer_for_the_remaining_set() {
     let applies: Vec<&String> = log.iter().filter(|call| call.starts_with("apply rx 0 ") && call.ends_with("at=-")).collect();
     assert_eq!(applies.len(), 1, "prepare's own configuration only: {log:?}");
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
-    let plan = timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
-    assert_eq!(plan["rx"].as_array().unwrap()[1]["channels"], 1, "{plan}");
+    let plan = plan_row(&section_of(&instance, "timing"));
+    assert_eq!(plan["rx"].as_array().unwrap()[1]["channels"], json!([1]), "{plan}");
 }
 
 #[test]
@@ -5546,8 +5573,7 @@ fn ur_25_the_last_receive_channel_leaves_no_clock_and_no_block() {
     assert!(records[0].ended_at.is_some(), "{records:?}");
     assert!(direct.of("radio.COMMAND_REJECTED").is_empty());
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
-    let plan = timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    let plan = plan_row(&section_of(&instance, "timing"));
     assert_eq!(plan["rx"].as_array().unwrap().len(), 1, "{plan}");
 }
 
@@ -5586,7 +5612,7 @@ fn ur_25_a_move_between_streams_is_refused_and_changes_nothing() {
             direct.settle(Wall::from_millis(120));
             let rejected = direct.of("radio.COMMAND_REJECTED");
             assert_eq!(rejected.len(), 1, "{dir} {from}->{to}: {rejected:?}");
-            let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+            let reason = rejection_reason(&rejected);
             assert!(reason.starts_with("UR-25:") && reason.contains("c1") && reason.contains("s0") && reason.contains("s1"), "{dir} {from}->{to}: {reason}");
             let log = direct.device.calls();
             assert_eq!(log.len(), before.0, "{dir} {from}->{to}: the refusal wrote to the device: {log:?}");
@@ -5648,8 +5674,8 @@ fn ur_26_d14_a_layout_instance_names_its_streams() {
     assert_eq!(log.iter().filter(|call| call.as_str() == "rx_stop 0 now").count(), 1, "{log:?}");
     assert!(tx_sends(&direct.device).len() >= sent + 2, "the payload and its end of burst left after the receive Stop: {log:?}");
     assert_eq!(direct.clocks.sample_clock_records().len(), records, "{log:?}");
-    let cancelled: Vec<_> = direct.of("radio.COMMAND_REJECTED").into_iter().filter(|event| event.payload["reason"].as_str().is_some_and(|reason| reason.contains("cancelled by Stop"))).collect();
-    assert!(cancelled.is_empty(), "a receive stream's Stop cancels no transmit burst: {cancelled:?}");
+    let cancelled = rejection_reasons(&direct.of("radio.COMMAND_REJECTED"));
+    assert!(cancelled.iter().all(|reason| !reason.contains("cancelled by Stop")), "a receive stream's Stop cancels no transmit burst: {cancelled:?}");
     assert!(tx_sends(&direct.device).len() > sent, "the held burst still plays: {log:?}");
     let stopped = direct.clocks.sample_clock_records();
     let rx: Vec<_> = stopped.iter().filter(|record| record.stream.path() == "usrp/rx/s0").collect();
@@ -5687,7 +5713,7 @@ fn ur_26_a_device_stop_stops_every_layout_stream() {
     assert!(!direct.of("radio.COMMAND_REJECTED").is_empty() || true, "the burst is booked");
     direct.stop_at("usrp");
     direct.settle(Wall::from_millis(80));
-    let cancelled: Vec<_> = direct.of("radio.COMMAND_REJECTED").into_iter().filter(|event| event.payload["reason"].as_str().is_some_and(|reason| reason.contains("cancelled by Stop"))).collect();
+    let cancelled: Vec<String> = rejection_reasons(&direct.of("radio.COMMAND_REJECTED")).into_iter().filter(|reason| reason.contains("cancelled by Stop")).collect();
     assert_eq!(cancelled.len(), 1, "the held burst is cancelled: {:?} {:?}", cancelled, direct.device.calls());
     let log = direct.device.calls();
     assert!(log.iter().any(|call| call == "rx_stop 0 now"), "the receive stream ends: {log:?}");
@@ -5804,7 +5830,7 @@ fn ur_25_a_layout_instance_s_full_duplex_rule_is_judged_at_runtime() {
     direct.settle(Wall::from_millis(200));
     let rejected = direct.of("radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1, "{rejected:?}");
-    let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+    let reason = rejection_reason(&rejected);
     assert!(reason.starts_with("RM-31:"), "{reason}");
     assert!(reason.contains("receive channel c0") && reason.contains("transmit channel c0"), "{reason}");
     let log = direct.device.calls();
@@ -5813,7 +5839,7 @@ fn ur_25_a_layout_instance_s_full_duplex_rule_is_judged_at_runtime() {
     assert_eq!(records.len(), 2, "{records:?}");
     assert!(records[0].ended_at.is_none() && records[1].ended_at.is_none(), "the refusal cuts nothing: {records:?}");
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let timing = &section_of(&instance, "timing");
     assert!(timing.as_array().unwrap().iter().all(|row| !(row["what"] == "cold_change" && row["key"] == "radio.rx.c0.antenna")), "{timing}");
     // `prepare` refuses the same settings with the same reason (UR-12).
     let device = fake(FakeConfig { serial: "ur25-rm31-prepare".to_owned(), ..FakeConfig::default() });
@@ -5840,14 +5866,14 @@ fn ur_25_a_layout_instance_s_throughput_rule_is_judged_at_runtime() {
     direct.settle(Wall::from_millis(200));
     let rejected = direct.of("radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1, "{rejected:?} {:?}", direct.device.calls());
-    let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+    let reason = rejection_reason(&rejected);
     assert!(reason.starts_with("RM-32:"), "{reason}");
     assert!(reason.contains("160000000") && reason.contains("rx"), "{reason}");
     let log = direct.device.calls();
     assert!(!log.iter().any(|call| call == "rx_open 0 [0, 1]"), "{log:?}");
     assert!(!log.iter().any(|call| call.starts_with("apply rx 1 ")), "{log:?}");
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let timing = &section_of(&instance, "timing");
     assert!(timing.as_array().unwrap().iter().all(|row| !(row["what"] == "cold_change" && row["key"] == "radio.rx.c1.stream")), "{timing}");
     let device = fake(FakeConfig { serial: "ur25-rm32-prepare".to_owned(), ..FakeConfig::default() });
     let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
@@ -5860,7 +5886,7 @@ fn ur_25_a_layout_instance_s_throughput_rule_is_judged_at_runtime() {
 fn ur_30_the_device_section_names_the_subdev_spec() {
     // UR-30: the Manifest's `device` section carries the markup each direction was set
     // with — null where none was — beside the describe() it already had.
-    let device_section = |radio: &UhdRadio| radio.instance().sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()].clone();
+    let device_section = |radio: &UhdRadio| section_of(radio.instance(), "device");
     let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), fake(FakeConfig { serial: "ur30-spec-a".to_owned(), ..FakeConfig::default() })).unwrap();
     let device = device_section(&radio);
     assert_eq!(device["subdev_spec"]["rx"], "A:0 B:0");
@@ -5890,7 +5916,7 @@ fn ur_30_the_device_section_records_the_serial() {
     // UR-30: the serial is the record that lets an operator tell two devices apart (H4).
     let device = fake(FakeConfig { serial: "F00BA2".to_owned(), ..FakeConfig::default() });
     let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
-    assert_eq!(radio.instance().sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()]["serial"], "F00BA2");
+    assert_eq!(section_of(radio.instance(), "device")["serial"], "F00BA2");
     assert_eq!(calls(&device, "serial"), ["serial"], "one read: {:?}", device.calls());
 }
 
@@ -5933,7 +5959,7 @@ fn ur_30_every_applied_key_is_declared_by_the_instance() {
         );
         direct.settle(Wall::from_millis(30));
         let instance = direct.finish();
-        let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+        let applied = &section_of(&instance, "applied");
         let declared: std::collections::BTreeSet<String> = instance.tree.capabilities.keys().map(|key| key.as_str().to_owned()).collect();
         // A setting's row carries its claimed value; the untimed stop UR-17 records there
         // carries none (its `key` is the row's kind, not a configuration key).
@@ -5992,7 +6018,7 @@ fn ur_25_a_no_op_membership_change_takes_only_its_value() {
     assert!(direct.of("radio.COMMAND_REJECTED").is_empty(), "{log:?}");
     assert!(direct.of("radio.LATE_COMMAND").is_empty(), "{log:?}");
     let instance = direct.finish();
-    let applied = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let applied = &section_of(&instance, "applied");
     assert_eq!(
         applied.as_array().unwrap().iter().filter(|row| row["key"] == "radio.rx.c1.stream" && row["read_back"].is_null() && row["at"]["ticks"] == at).count(),
         1,
@@ -6110,7 +6136,7 @@ fn ur_13_the_reopen_enforces_the_direction_s_rate_comparison() {
         // is halted (RM-25).
         direct.update(&format!("radio.{dir}.c0.stream"), Value::from(0), Cold, Some(direct.now() + ms(40)));
         direct.settle(Wall::from_millis(200));
-        let first: Vec<String> = direct.of("radio.COMMAND_REJECTED").iter().filter_map(|event| event.payload["reason"].as_str().map(str::to_owned)).collect();
+        let first: Vec<String> = rejection_reasons(&direct.of("radio.COMMAND_REJECTED"));
         assert_eq!(first.len(), 1, "{dir}: {first:?} {:?}", direct.device.calls());
         assert!(first[0].starts_with("UR-13:") && first[0].contains(dir), "{dir}: {}", first[0]);
         // A second open: a `start_rx` is the receive owner's own reopen, which re-enforces the
@@ -6127,7 +6153,7 @@ fn ur_13_the_reopen_enforces_the_direction_s_rate_comparison() {
             direct.start_rx_at("usrp/rx/s0", Some(direct.now() + ms(60)));
             direct.settle(Wall::from_millis(300));
         }
-        let rejected: Vec<String> = direct.of("radio.COMMAND_REJECTED").iter().filter_map(|event| event.payload["reason"].as_str().map(str::to_owned)).collect();
+        let rejected: Vec<String> = rejection_reasons(&direct.of("radio.COMMAND_REJECTED"));
         assert_eq!(rejected.len(), 2, "{dir}: the owner's open is refused too: {rejected:?} {:?}", direct.device.calls());
         assert!(rejected[1].starts_with("UR-13:") && rejected[1].contains(dir), "{dir}: {}", rejected[1]);
         assert_eq!(calls(&direct.device, &format!("{dir}_open")).len(), opens + 1, "{dir}: the owner opened the streamer once: {:?}", direct.device.calls());
@@ -6135,7 +6161,7 @@ fn ur_13_the_reopen_enforces_the_direction_s_rate_comparison() {
         let records = direct.clocks.sample_clock_records();
         assert!(records.iter().filter(|record| record.stream.path().starts_with(&format!("usrp/{dir}"))).all(|record| record.ended_at.is_some()), "{dir}: no segment ran: {records:?}");
         let instance = direct.finish();
-        assert_eq!(instance.sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()]["rates_checked"][dir], true, "{dir}: the comparison is recorded");
+        assert_eq!(section_of(&instance, "device")["rates_checked"][dir], true, "{dir}: the comparison is recorded");
     }
 }
 
@@ -6161,7 +6187,7 @@ fn ur_13_the_receive_owner_s_first_open_is_compared_there() {
     // compared before the open, and the stream is halted (RM-25).
     direct.update("radio.rx.c0.stream", Value::from(0), Cold, Some(direct.now() + ms(40)));
     direct.settle(Wall::from_millis(200));
-    let first: Vec<String> = direct.of("radio.COMMAND_REJECTED").iter().filter_map(|event| event.payload["reason"].as_str().map(str::to_owned)).collect();
+    let first: Vec<String> = rejection_reasons(&direct.of("radio.COMMAND_REJECTED"));
     assert_eq!(first.len(), 1, "{first:?} {:?}", direct.device.calls());
     assert!(!first[0].starts_with("UR-13:"), "the first refusal is the open's: {}", first[0]);
     // The owner has nothing planned and settles; its `start_rx` opens the streamer, and the
@@ -6169,13 +6195,13 @@ fn ur_13_the_receive_owner_s_first_open_is_compared_there() {
     let applies = calls(&direct.device, "apply").len();
     direct.start_rx_at("usrp/rx/s0", Some(direct.now() + ms(60)));
     direct.settle(Wall::from_millis(300));
-    let rejected: Vec<String> = direct.of("radio.COMMAND_REJECTED").iter().filter_map(|event| event.payload["reason"].as_str().map(str::to_owned)).collect();
+    let rejected: Vec<String> = rejection_reasons(&direct.of("radio.COMMAND_REJECTED"));
     assert_eq!(rejected.len(), 2, "the owner's open is refused by its comparison: {rejected:?} {:?}", direct.device.calls());
     assert!(rejected[1].starts_with("UR-13:") && rejected[1].contains("rx"), "{}", rejected[1]);
     assert_eq!(calls(&direct.device, "rx_open").len(), 2, "{:?}", direct.device.calls());
     assert_eq!(calls(&direct.device, "apply").len(), applies, "the refused segment is not configured: {:?}", direct.device.calls());
     let instance = direct.finish();
-    assert_eq!(instance.sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()]["rates_checked"]["rx"], true, "the owner's comparison is recorded");
+    assert_eq!(section_of(&instance, "device")["rates_checked"]["rx"], true, "the owner's comparison is recorded");
 }
 
 #[test]
@@ -6202,18 +6228,18 @@ fn ur_25_a_transmit_refusal_from_no_stream_starts_no_clock() {
     direct.settle(Wall::from_millis(30));
     direct.update("radio.tx.c1.stream", Value::from(0), Cold, Some(direct.now() + ms(60)));
     direct.settle(Wall::from_millis(300));
-    let rejected = direct.of("radio.COMMAND_REJECTED");
+    let events = direct.of("radio.COMMAND_REJECTED");
+    let rejected = rejection_reasons(&events);
     assert_eq!(rejected.len(), 2, "{rejected:?} {:?}", direct.device.calls());
-    for event in &rejected {
-        let reason = event.payload["reason"].as_str().unwrap();
+    for reason in &rejected {
         assert!(reason.starts_with("UR-13:") && reason.contains("tx"), "{reason}");
     }
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let timing = &section_of(&instance, "timing");
     let switches: Vec<&Json> = timing.as_array().unwrap().iter().filter(|row| row["what"] == "tx_switch").collect();
     assert_eq!(switches.len(), 2, "{timing}");
     assert!(switches[1]["at"].as_i64().unwrap() < switches[0]["origin"].as_i64().unwrap(), "the refused segment's clock is held to its origin: {timing}");
-    assert!(rejected[1].payload["action"].is_u64(), "the second enable is taken from no stream, and names its Action: {:?}", rejected[1].payload);
+    assert!(events[1].payload["action"].is_u64(), "the second enable is taken from no stream, and names its Action: {:?}", events[1].payload);
 }
 
 #[test]
@@ -6249,7 +6275,7 @@ fn ur_25_a_floor_raised_layout_join_is_judged_at_its_instant() {
     direct.settle(Wall::from_millis(200));
     let rejected = direct.of("radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1, "{rejected:?} {:?}", direct.device.calls());
-    let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+    let reason = rejection_reason(&rejected);
     assert!(reason.starts_with("RM-31:"), "{reason}");
     let log = direct.device.calls();
     assert!(!log.iter().any(|call| call.starts_with("tx_open")), "no transmit streamer was opened: {log:?}");
@@ -6265,7 +6291,7 @@ fn ur_25_a_floor_raised_layout_join_is_judged_at_its_instant() {
     assert!(calls.iter().any(|call| call == "tx_open 0 [0]"), "the later join is taken: {calls:?}");
     assert!(direct.clocks.sample_clock_records().iter().any(|record| record.stream.path() == "usrp/tx/s0"), "{calls:?}");
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let timing = &section_of(&instance, "timing");
     let rows: Vec<&Json> = timing.as_array().unwrap().iter().filter(|row| row["what"] == "cold_change" && row["key"] == "radio.rx.c0.antenna").collect();
     assert_eq!(rows.len(), 2, "{timing}");
     assert_eq!(rows[1]["e"], later + ms(60), "the refused instant is no floor: {timing}");
@@ -6297,7 +6323,7 @@ fn ur_24_the_layout_destination_follows_the_effective_membership() {
         assert_eq!(applied.len(), 1, "join_first={join_first}: the tune reaches channel 1 on its new segment: {log:?}");
         assert!(direct.of("radio.COMMAND_REJECTED").is_empty(), "join_first={join_first}: {log:?}");
         let instance = direct.finish();
-        let rows = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+        let rows = &section_of(&instance, "applied");
         assert_eq!(
             rows.as_array().unwrap().iter().filter(|row| row["key"] == "radio.rx.c1.frequency_hz" && row["issued"] == true && row["at"]["ticks"] == at).count(),
             1,
@@ -6329,13 +6355,13 @@ fn ur_13_a_runtime_join_compares_the_rate_set() {
     let log = direct.device.calls();
     let rejected = direct.of("radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1, "{rejected:?} {log:?}");
-    let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+    let reason = rejection_reason(&rejected);
     assert!(reason.starts_with("UR-13:") && reason.contains("tx"), "{reason}");
     assert_eq!(calls(&direct.device, "tx_open 0 [0]").len(), 1, "the join opened the streamer and was compared there: {log:?}");
     assert_eq!(calls(&direct.device, "rates tx 0").len(), 1, "{log:?}");
     assert!(!log.iter().any(|call| call.starts_with("apply tx 0 ") && call.ends_with("at=-")), "the refused segment is not configured: {log:?}");
     let instance = direct.finish();
-    assert_eq!(instance.sections[&Namespace::parse("ezsdr.radio.uhd.device").unwrap()]["rates_checked"]["tx"], true, "the comparison is recorded");
+    assert_eq!(section_of(&instance, "device")["rates_checked"]["tx"], true, "the comparison is recorded");
 }
 
 #[test]
@@ -6379,7 +6405,7 @@ fn ur_13_an_enable_from_no_stream_compares_the_rate_set() {
     let log = direct.device.calls();
     let rejected = direct.of("radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1, "{rejected:?} {log:?}");
-    let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+    let reason = rejection_reason(&rejected);
     assert!(reason.starts_with("UR-13:") && reason.contains("rx"), "{reason}");
     assert_eq!(calls(&direct.device, "rx_open 0 [0, 1]").len(), 1, "the enable opened the streamer and was compared there: {log:?}");
     assert!(!log.iter().any(|call| call.starts_with("apply rx 0 ") && call.ends_with("at=-")), "the refused enable is not configured: {log:?}");
@@ -6402,9 +6428,9 @@ fn ur_26_an_unserved_command_is_refused_under_its_own_action_name() {
     let rejected = direct.of("radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1, "{rejected:?}");
     assert_eq!(rejected[0].payload["kind"], "command");
-    assert_eq!(rejected[0].payload["reason"], "UR-26: not supported by this Provider");
+    assert_eq!(rejection_reason(&rejected), "UR-26: not supported by this Provider");
     let instance = direct.finish();
-    let rows = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()];
+    let rows = &section_of(&instance, "rejected");
     assert!(rows.as_array().unwrap().iter().any(|row| row["kind"] == "command" && row["reason"] == "UR-26: not supported by this Provider"), "{rows}");
     assert!(rows.as_array().unwrap().iter().all(|row| row["kind"] != "peripheral_command"), "{rows}");
 }
@@ -6439,7 +6465,7 @@ fn ur_25_a_refused_enable_from_no_stream_halts_and_keeps_its_values() {
     direct.settle(Wall::from_millis(200));
     let rejected = direct.of("radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1, "{rejected:?} {:?}", direct.device.calls());
-    let reason = rejected[0].payload["reason"].as_str().unwrap().to_owned();
+    let reason = rejection_reason(&rejected);
     assert!(reason.starts_with("UR-12:") && reason.contains("reads back RX2"), "{reason}");
     assert!(rejected[0].payload["action"].is_u64(), "the enable from no stream names its Action: {:?}", rejected[0].payload);
     assert!(direct.clocks.sample_clock_records().is_empty(), "the refused enable ran no segment");
@@ -6461,13 +6487,13 @@ fn ur_25_a_refused_enable_from_no_stream_halts_and_keeps_its_values() {
     assert!(records.iter().any(|record| record.stream.path() == "usrp/rx/s0" && record.ended_at.is_none()), "{records:?}");
     assert!(direct.of("radio.COMMAND_REJECTED").len() == 1, "the restart alone succeeds: {:?}", direct.device.calls());
     let instance = direct.finish();
-    let rows = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let rows = &section_of(&instance, "applied");
     assert_eq!(
         rows.as_array().unwrap().iter().filter(|row| row["key"] == "radio.rx.c1.gain_db" && row["note"] == "no channel" && row["at"]["ticks"] == gain_at).count(),
         1,
         "the timed update is recorded at its own instant while the stream is halted: {rows}"
     );
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
+    let timing = &section_of(&instance, "timing");
     let changes: Vec<&Json> = timing.as_array().unwrap().iter().filter(|row| row["what"] == "cold_change" && row["key"] == "radio.rx.c1.stream").collect();
     assert_eq!(changes.len(), 1, "the refused change is booked at its instant: {timing}");
     assert_eq!(changes[0]["e"], join_at, "{timing}");
@@ -6672,7 +6698,7 @@ fn ur_25_a_refused_change_of_a_later_stream_halts_that_stream_alone() {
     direct.settle(Wall::from_millis(300));
     let rejected = direct.of("radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1, "{rejected:?}");
-    assert!(rejected[0].payload["reason"].as_str().unwrap().contains("UR-12: the device applied 3800000 S/s"), "{rejected:?}");
+    assert!(rejection_reason(&rejected).contains("UR-12: the device applied 3800000 S/s"), "{rejected:?}");
     let log = direct.device.calls();
     assert_eq!(calls(&direct.device, "rx_stop 1 now").len(), 1, "{log:?}");
     let records = direct.clocks.sample_clock_records();
@@ -6683,8 +6709,7 @@ fn ur_25_a_refused_change_of_a_later_stream_halts_that_stream_alone() {
     assert!(records.iter().find(|record| record.stream.path() == "usrp/rx/s0").unwrap().ended_at.is_none(), "{records:?}");
     assert!(link0.receive().is_some(), "stream 0 still delivers after stream 1's refusal");
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
-    let plan = timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    let plan = plan_row(&section_of(&instance, "timing"));
     assert!(!plan["rx"].as_array().unwrap().iter().any(|row| row["ticks_per_sample"][0] == 50), "the refused 4 MS/s segment is not planned: {plan}");
 }
 
@@ -6713,7 +6738,7 @@ fn ur_24_a_timed_update_acts_on_the_stream_that_holds_its_channel() {
     assert!(direct.of("radio.COMMAND_QUEUE_FULL").is_empty(), "{log:?}");
     assert!(direct.of("radio.LATE_COMMAND").is_empty(), "{log:?}");
     let instance = direct.finish();
-    let rows = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let rows = &section_of(&instance, "applied");
     let row = rows.as_array().unwrap().iter().find(|row| row["key"] == "radio.rx.c1.gain_db" && row["issued"] == true).expect("the update's issued row");
     assert_eq!(row["issued"], true, "{rows}");
     assert!(row.get("note").is_none(), "{rows}");
@@ -6809,8 +6834,7 @@ fn ur_26_two_receive_streams_end_at_their_own_stops() {
     direct.radio.stop(ezsdr_kernel::module_api::StopMode::Abort).unwrap();
     direct.radio.cleanup();
     let instance = direct.radio.instance();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
-    let plan = timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    let plan = plan_row(&section_of(instance, "timing"));
     let rx = plan["rx"].as_array().unwrap();
     assert_eq!(rx.len(), 2, "{plan}");
     let (s0, s1) = (rx[0]["end"].as_i64().unwrap(), rx[1]["end"].as_i64().unwrap());
@@ -6857,7 +6881,7 @@ fn ur_26_every_stream_s_threads_are_joined_in_order() {
     drop(release);
     ended(&ends, &["uhd-tx-s0", "uhd-tx-s1", "uhd-rx-s0", "uhd-rx-s1"]);
     direct.radio.cleanup();
-    let rejected = &direct.radio.instance().sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()];
+    let rejected = &section_of(direct.radio.instance(), "rejected");
     let threads: Vec<String> = rejected.as_array().unwrap().iter()
         .filter(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("did not join")))
         .map(|row| row["thread"].as_str().unwrap().to_owned()).collect();
@@ -6887,7 +6911,7 @@ fn ur_16_a_wedged_later_stream_leaves_the_others_joined() {
     drop(release);
     ended(&ends, &["uhd-rx-s1"]);
     direct.radio.cleanup();
-    let rejected = &direct.radio.instance().sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()];
+    let rejected = &section_of(direct.radio.instance(), "rejected");
     let threads: Vec<String> = rejected.as_array().unwrap().iter()
         .filter(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("did not join")))
         .map(|row| row["thread"].as_str().unwrap().to_owned()).collect();
@@ -6941,7 +6965,7 @@ fn ur_16_a_panicking_later_stream_ends_the_run() {
     assert_eq!(lost.len(), 1, "{lost:?}");
     assert_eq!(lost[0].payload["message"], "a Provider thread panicked");
     direct.radio.cleanup();
-    let rejected = &direct.radio.instance().sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()];
+    let rejected = &section_of(direct.radio.instance(), "rejected");
     assert!(rejected.as_array().unwrap().iter().any(|row| row["thread"] == "uhd-rx-s1" && row["reason"] == "panicked"), "{rejected}");
     assert_marked_lost_before_closed(&inner);
 }
@@ -7055,13 +7079,12 @@ fn ur_25_a_receive_cut_counts_its_own_stream_s_packet_size() {
     direct.update("radio.rx.s1.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(direct.now() + ms(300)));
     direct.settle(Wall::from_millis(700));
     let instance = direct.finish();
-    let timing = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()];
-    let plan = timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap();
+    let plan = plan_row(&section_of(&instance, "timing"));
     let rx = plan["rx"].as_array().unwrap();
     assert_eq!(rx.len(), 2, "{plan}");
     let gap = rx[1]["origin"].as_i64().unwrap() - rx[0]["end"].as_i64().unwrap();
     assert!((11_400_000..11_400_400).contains(&gap), "4000 samples at 200 ticks + 3 ms + 50 ms, rounded to the lattice: {gap} in {plan}");
-    let rows = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let rows = &section_of(&instance, "applied");
     assert_eq!(rows.as_array().unwrap().iter().filter(|row| row["key"] == "radio.rx.s1.sample_rate_hz").count(), 2, "{rows}");
 }
 
@@ -7208,7 +7231,7 @@ fn ur_25_a_successful_change_clears_a_later_stream_s_halt() {
     direct.update("radio.rx.c1.gain_db", Value::num(3.0).unwrap(), HardwareTimed, Some(direct.now() + ms(20)));
     direct.settle(Wall::from_millis(60));
     let instance = direct.finish();
-    let rows = &instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let rows = &section_of(&instance, "applied");
     assert!(rows.as_array().unwrap().iter().any(|row| row["key"] == "radio.rx.c1.gain_db" && row["issued"] == true && row["note"].is_null()), "the cleared stream is live again: {rows}");
 }
 
@@ -7290,7 +7313,7 @@ fn ur_15_a_failed_later_start_closes_after_the_owners_joined() {
     assert!(!calls(&inner, "rx_stop 0 now").is_empty(), "stream 0's owner was stopped: {log:?}");
     let stop = log.iter().rposition(|call| call == "rx_stop 0 now").unwrap();
     assert!(stop < close, "the owner is joined before the streams close: {log:?}");
-    let rejected = &direct.radio.instance().sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()];
+    let rejected = &section_of(direct.radio.instance(), "rejected");
     assert!(!rejected.as_array().unwrap().iter().any(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("did not join"))), "{rejected}");
 }
 
@@ -7317,4 +7340,64 @@ fn ur_29_a_lost_later_start_is_published_before_the_owners_are_stopped() {
     let marked = log.iter().position(|call| call == "mark_lost").expect("the loss is marked");
     assert!(!log[marked..].iter().any(|call| call.starts_with("rx_stop")), "no device call follows the loss: {log:?}");
     assert!(!log.iter().any(|call| call == "close_streams"), "a lost device's streamers are not closed: {log:?}");
+}
+
+// ------------------------------------------------ 1b-4d-3: the plan and the reports name their stream
+
+#[test]
+fn ur_30_the_plan_names_every_stream_at_the_stop() {
+    // UR-30, design 33 D3's6: after `Provider::stop`, a 2×2 layout's plan holds the rows
+    // for every stream, each naming its stream, the command that began the segment (`null`
+    // when no command began it) and its logical channels in block order; every receive
+    // stream's last segment ends at the stop instant's sample, and a transmit one has none —
+    // a stop ends the bursts, not the clock.
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let mut constraints = rx_two();
+    constraints.extend(tx_two());
+    let mut direct = Direct::build(
+        FakeConfig::default(),
+        &constraints,
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest), attached_on("rx1", ezsdr_kernel::stream::BackPressure::DropOldest)],
+        layout_selector(),
+    );
+    direct.settle(Wall::from_millis(50));
+    // Stream 0's second segment in each direction, so that a row's `sequence` is a command's.
+    direct.update_at("usrp/rx/s0", "radio.rx.s0.sample_rate_hz", Value::num(1e6).unwrap(), Cold, Some(direct.now() + ms(20)));
+    direct.update_at("usrp/tx/s0", "radio.tx.s0.sample_rate_hz", Value::num(1e6).unwrap(), Cold, Some(direct.now() + ms(20)));
+    direct.settle(Wall::from_millis(250));
+    let clocks = direct.clocks.clone();
+    let instance = direct.finish();
+    let timing = section_of(&instance, "timing");
+    let plan = plan_row(&timing);
+    let stop = timing.as_array().unwrap().iter().find(|row| row["what"] == "stop").expect("the stop row")["at"].as_i64().unwrap();
+    for k in [0u64, 1] {
+        let rx = plan_stream(&plan, "rx", k);
+        assert!(!rx.is_empty(), "stream {k} has no receive row: {plan}");
+        assert_eq!(rx[0]["sequence"], Json::Null, "a first segment has no command: {plan}");
+        assert_eq!(rx[0]["channels"], json!([k]), "each stream holds its own channel: {plan}");
+        let last = rx.last().unwrap();
+        let (origin, num, den) = (last["origin"].as_i64().unwrap(), last["ticks_per_sample"][0].as_i64().unwrap(), last["ticks_per_sample"][1].as_i64().unwrap());
+        let cut = (stop - origin) * den;
+        let end = origin + ((cut + num - 1) / num * num + den - 1) / den;
+        assert_eq!(last["end"].as_i64(), Some(end), "the stop cuts stream {k} at its sample: {plan}");
+        let tx = plan_stream(&plan, "tx", k);
+        assert_eq!(tx[0]["sequence"], Json::Null, "a first segment has no command: {plan}");
+        assert_eq!(tx[0]["channels"], json!([k]), "each stream holds its own channel: {plan}");
+        let last = tx.last().unwrap();
+        assert_eq!(last["end"], Json::Null, "a stop ends the transmit bursts, not the clock: {plan}");
+        assert_eq!(last["channels"], json!([k]), "each stream holds its own channel: {plan}");
+    }
+    let rx0 = plan_stream(&plan, "rx", 0);
+    assert_eq!(rx0.len(), 2, "the change's segment and the first: {plan}");
+    assert!(rx0[1]["sequence"].is_u64(), "the change's segment names it: {plan}");
+    let tx0 = plan_stream(&plan, "tx", 0);
+    assert_eq!(tx0.len(), 2, "the change's segment and the first: {plan}");
+    assert!(tx0[1]["sequence"].is_u64(), "the change's segment names it: {plan}");
+    let records = clocks.sample_clock_records();
+    for k in [0, 1] {
+        let path = format!("usrp/tx/s{k}");
+        let open: Vec<_> = records.iter().filter(|record| record.stream.path() == path.as_str()).collect();
+        assert_eq!(open.len(), if k == 0 { 2 } else { 1 }, "stream {k}'s clocks: {records:?}");
+        assert!(open.last().unwrap().ended_at.is_none(), "a stop keeps stream {k}'s transmit clock: {records:?}");
+    }
 }

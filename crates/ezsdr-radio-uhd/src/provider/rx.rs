@@ -1433,9 +1433,9 @@ mod tests {
     }
 
     /// What a stream's line holds, for comparing it across another stream's change: its
-    /// items (`e`, `seq`, `refused`), its plan (`origin`, `cut`) and its clocks (`origin`,
-    /// `ended`).
-    type Held = (Vec<(i64, u64, bool)>, Vec<(i64, Option<i64>)>, Vec<(i64, bool)>);
+    /// items (`e`, `seq`, `refused`), its plan (`origin`, `cut`, `channels`, `by`) and its
+    /// clocks (`origin`, `ended`).
+    type Held = (Vec<(i64, u64, bool)>, Vec<(i64, Option<i64>, Vec<u32>, Option<u64>)>, Vec<(i64, bool)>);
 
     /// The transmit stream's line, as `Control::new` makes it for a transmit stream with one
     /// channel at 1 MS/s.
@@ -1494,15 +1494,23 @@ mod tests {
         let (core, device, _, _) = super::super::test_support::rig_with(crate::device::FakeConfig { faults: vec![refuse], ..Default::default() }, vec![link()]);
         let (mut rx, _) = rx(&core, 1);
         let (rx_key, tx_key) = (stream_key(Dir::Rx, 0), stream_key(Dir::Tx, 0));
-        lock(&core.streams).lines.insert(tx_key, tx_line(&core));
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        {
+            // The transmit line holds a booked change, so its items, plan and clocks are
+            // something a refusal could move.
+            let mut streams = lock(&core.streams);
+            streams.lines.insert(tx_key, tx_line(&core));
+            streams.stream_mut(tx_key).configs.insert(1, Arc::new(ColdConfig::new(crate::device::Settings::default())));
+            assert!(streams.book(&core, tx_key, Item { e: ms(20), seq: 1, ready: ms(20), release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(1), ratio: Rational::new(100, 1).unwrap() }) }));
+        }
         let snapshot = |key: StreamKey| -> Held {
             let streams = lock(&core.streams);
             (streams.line(key).expect("a line").items.iter().map(|item| (item.e, item.seq, item.refused)).collect(),
-             streams.planned(key).into_iter().map(|planned| (planned.segment.origin, planned.segment.cut)).collect(),
+             streams.planned(key).into_iter().map(|planned| (planned.segment.origin, planned.segment.cut, planned.segment.config.channels.iter().collect::<Vec<u32>>(), planned.segment.by)).collect(),
              streams.stream(key).clocks.iter().map(|(clock, ended)| (clock.origin, *ended)).collect())
         };
         let before = snapshot(tx_key);
-        let ms = |n: i64| core.ticks(n * 1_000_000);
+        assert_eq!((before.0.len(), before.1.len(), before.2.len()), (1, 2, 2), "the transmit line holds its change, its two segments and its clocks: {before:?}");
         book(&core, ms(10), 1, rate(2_000_000));
         rx.poll();
         rx.receive(samples(0, 10_000));
@@ -1511,6 +1519,47 @@ mod tests {
         assert!(lock(&core.streams).line(rx_key).unwrap().items.iter().any(|item| item.seq == 1 && item.refused), "the receive refusal was not booked");
         assert_eq!(snapshot(tx_key), before, "the receive refusal changed the transmit stream");
         assert!(device.calls().iter().any(|call| call.starts_with("apply rx 0 rate=2000000")), "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_25_a_refusal_of_a_layout_stream_leaves_the_other_stream_alone() {
+        // RM-25, RM-29 (design 33 D15): a configuration stream 0's device refuses is booked
+        // refused on stream 0's line alone; stream 1's line, with a booked change of its
+        // own, keeps its items, plan and clocks.
+        let refuse = crate::device::FakeFault::WrongRate { claimed: 2e6, applied: 2e6 - 1_000.0, nth: 0 };
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { faults: vec![refuse], ..Default::default() }));
+        let (core, _, _) = super::super::test_support::rig_on_mode(device, vec![link()], Default::default(), layout_mode());
+        let (mut rx, _) = rx(&core, 1);
+        let (rx_key, other) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        {
+            let mut streams = lock(&core.streams);
+            streams.lines.insert(other, Line::new(ezsdr_radio::timeline::Stream {
+                direction: Direction::Rx,
+                origin: 0,
+                config: Config { channels: Channels::first(0).with(1), ratio: Rational::new(200, 1).unwrap() },
+                lead: 0,
+                call: 0,
+                allowance: 0,
+            }));
+            streams.stream_mut(other).configs.insert(1, Arc::new(ColdConfig::new(crate::device::Settings::default())));
+            assert!(streams.book(&core, other, Item { e: ms(30), seq: 1, ready: ms(30), release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(0).with(1), ratio: Rational::new(100, 1).unwrap() }) }));
+        }
+        let snapshot = |key: StreamKey| -> Held {
+            let streams = lock(&core.streams);
+            (streams.line(key).expect("a line").items.iter().map(|item| (item.e, item.seq, item.refused)).collect(),
+             streams.planned(key).into_iter().map(|planned| (planned.segment.origin, planned.segment.cut, planned.segment.config.channels.iter().collect::<Vec<u32>>(), planned.segment.by)).collect(),
+             streams.stream(key).clocks.iter().map(|(clock, ended)| (clock.origin, *ended)).collect())
+        };
+        let before = snapshot(other);
+        assert_eq!((before.0.len(), before.1.len()), (1, 2), "stream 1 holds its change and its two segments: {before:?}");
+        book(&core, ms(10), 1, rate(2_000_000));
+        rx.poll();
+        rx.receive(samples(0, 10_000));
+        assert!(rx.stream.is_none());
+        assert!(rx.begin());
+        assert!(lock(&core.streams).line(rx_key).unwrap().items.iter().any(|item| item.seq == 1 && item.refused), "stream 0's refusal was not booked");
+        assert_eq!(snapshot(other), before, "stream 0's refusal changed stream 1");
     }
 
     #[test]

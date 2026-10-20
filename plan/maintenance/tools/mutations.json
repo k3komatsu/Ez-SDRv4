@@ -8319,5 +8319,55 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_receive_start_queued_by_the_stop_ends_its_owner_without_detaching"
+ },
+ {
+  "id": "P480",
+  "name": "a plan row names stream 0 whatever stream it is (UR-30, D3's6)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "                    \"stream\": k,",
+  "new": "                    \"stream\": 0,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_30_the_plan_names_every_stream_at_the_stop"
+ },
+ {
+  "id": "P481",
+  "name": "a plan row carries its channel count in place of the logical channels (UR-30, D3's6)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "                    \"channels\": segment.config.channels.iter().collect::<Vec<u32>>(),",
+  "new": "                    \"channels\": segment.config.channels.count(),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_layout_rate_change_cuts_its_stream_and_configures_every_channel"
+ },
+ {
+  "id": "P482",
+  "name": "a plan row loses the command that began its segment (UR-30, D3's6)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "                    \"sequence\": segment.by,",
+  "new": "                    \"sequence\": null,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_layout_rate_change_cuts_its_stream_and_configures_every_channel"
+ },
+ {
+  "id": "P483",
+  "name": "an asynchronous report names stream 0 whatever stream read it (UR-28)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "            \"code\": format!(\"{:?}\", report.code), \"tick\": report.tick, \"channel\": report.channel, \"stream\": self.k,",
+  "new": "            \"code\": format!(\"{:?}\", report.code), \"tick\": report.tick, \"channel\": report.channel, \"stream\": 0,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_28_a_later_stream_s_reopen_discards_only_its_correlations"
+ },
+ {
+  "id": "P484",
+  "name": "uhd-rx books its refusal on the next receive stream (RM-25, RM-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "            let refused = next.segment.by.is_some_and(|by| lock(&self.core.streams).refuse(&self.core, key, by));",
+  "new": "            let refused = next.segment.by.is_some_and(|by| lock(&self.core.streams).refuse(&self.core, stream_key(Dir::Rx, self.k + 1), by));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_25_a_refusal_of_a_layout_stream_leaves_the_other_stream_alone"
  }
 ]

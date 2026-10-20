@@ -788,7 +788,7 @@ impl Tx {
 
     fn report(&mut self, report: TxReport) {
         lock(&self.core.rec).device_async.push(json!({
-            "code": format!("{:?}", report.code), "tick": report.tick, "channel": report.channel,
+            "code": format!("{:?}", report.code), "tick": report.tick, "channel": report.channel, "stream": self.k,
         }));
         let time = match (self.clock, report.tick) {
             (Some(clock), Some(tick)) => TimePoint::new(clock.domain, (tick - clock.origin).div_euclid(clock.n)),
@@ -2238,8 +2238,13 @@ mod tests {
         s1.reports(std::time::Duration::ZERO);
         assert_eq!(feed.reads(0), 0, "stream 0's streamer was not read");
         assert!(feed.reads(1) >= 1, "stream 1's streamer was read");
+        assert_eq!(lock(&core.rec).device_async.last().map(|row| row["stream"].as_u64()), Some(Some(1)), "the row names the report's stream");
         assert!(s1.unacked.is_empty(), "stream 1's old correlations are dropped");
         assert_eq!(s0.unacked.len(), 1, "stream 0's correlation stands");
+        // The same row from stream 0: its `stream` is the report's, not a constant 1.
+        feed.give(TxReport { code: TxCode::Other(0x40), tick: Some(0), channel: 0 });
+        s0.reports(std::time::Duration::ZERO);
+        assert_eq!(lock(&core.rec).device_async.last().map(|row| row["stream"].as_u64()), Some(Some(0)), "stream 0's row names its stream");
         assert!(!inner.calls().iter().any(|call| call.starts_with("tx_send")), "{:?}", inner.calls());
     }
 
